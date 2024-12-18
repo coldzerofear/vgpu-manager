@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "xlocale": "cpp",
+        "iterator": "cpp",
+        "memory": "cpp",
+        "xutility": "cpp",
+        "hook.h": "c",
+        "string.h": "c"
+    }
+}

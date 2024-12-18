@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteTargetsManager">
+    <targets>
+      <target name="localvm" type="ssh/sftp" uuid="a1a52437-a4d6-4b6d-a831-6dd0a1f455a4">
+        <config>
+          <option name="projectRootOnTarget" value="/root/go/src/vgpu-manager" />
+          <option name="serverName" value="root@192.168.20.10:22 password" />
+        </config>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config>
+            <option name="goPath" value="/root/go" />
+            <option name="goRoot" value="/usr/local/go/bin/go" />
+            <option name="goVersion" value="go1.22.3 linux/amd64" />
+          </config>
+        </ContributedStateBase>
+      </target>
+    </targets>
+  </component>
+</project>
