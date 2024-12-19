@@ -249,6 +249,10 @@ func Test_DeviceFilter(t *testing.T) {
 
 func Test_HeartbeatFilter(t *testing.T) {
 	filterPredicate := gpuFilter{}
+	time, err := metav1.NowMicro().MarshalText()
+	if err != nil {
+		t.Fatal(err)
+	}
 	testCases := []struct {
 		name  string
 		nodes []corev1.Node
@@ -258,6 +262,119 @@ func Test_HeartbeatFilter(t *testing.T) {
 	}{
 		{
 			name: "example1",
+			nodes: []corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+						Annotations: map[string]string{
+							util.NodeHeartbeatAnnotation: "",
+							util.NodeDeviceMemoryFactor:  "1",
+						},
+					},
+				},
+			},
+			filterNodes: []corev1.Node{},
+			failedNodesMap: map[string]string{
+				"testnode": "node has no heartbeat",
+			},
+		},
+		{
+			name: "example2",
+			nodes: []corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+						Annotations: map[string]string{
+							util.NodeHeartbeatAnnotation: "xxxxx",
+							util.NodeDeviceMemoryFactor:  "1",
+						},
+					},
+				},
+			},
+			filterNodes: []corev1.Node{},
+			failedNodesMap: map[string]string{
+				"testnode": "node heartbeat time is not a standard timestamp",
+			},
+		},
+		{
+			name: "example3",
+			nodes: []corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+						Annotations: map[string]string{
+							util.NodeHeartbeatAnnotation: string(time),
+							util.NodeDeviceMemoryFactor:  "",
+						},
+					},
+				},
+			},
+			filterNodes: []corev1.Node{},
+			failedNodesMap: map[string]string{
+				"testnode": "node device memory factor is empty",
+			},
+		},
+		{
+			name: "example4",
+			nodes: []corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+						Annotations: map[string]string{
+							util.NodeHeartbeatAnnotation: string(time),
+							util.NodeDeviceMemoryFactor:  "-1",
+						},
+					},
+				},
+			},
+			filterNodes: []corev1.Node{},
+			failedNodesMap: map[string]string{
+				"testnode": "node device memory factor error",
+			},
+		},
+		{
+			name: "example5",
+			nodes: []corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+						Annotations: map[string]string{
+							util.NodeHeartbeatAnnotation: "2001-01-01T00:00:00.503158522+08:00",
+							util.NodeDeviceMemoryFactor:  "-1",
+						},
+					},
+				},
+			},
+			filterNodes: []corev1.Node{},
+			failedNodesMap: map[string]string{
+				"testnode": "node heartbeat timeout",
+			},
+		},
+		{
+			name: "example6",
+			nodes: []corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+						Annotations: map[string]string{
+							util.NodeHeartbeatAnnotation: string(time),
+							util.NodeDeviceMemoryFactor:  "10",
+						},
+					},
+				},
+			},
+			filterNodes: []corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+						Annotations: map[string]string{
+							util.NodeHeartbeatAnnotation: string(time),
+							util.NodeDeviceMemoryFactor:  "10",
+						},
+					},
+				},
+			},
+			failedNodesMap: map[string]string{},
 		},
 	}
 	for _, testCase := range testCases {

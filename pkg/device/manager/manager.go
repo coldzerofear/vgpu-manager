@@ -199,6 +199,18 @@ func (m *DeviceManager) Start() {
 	go m.registryNode()
 }
 
+func (m *DeviceManager) cleanupRegistry() error {
+	patchData := client.PatchMetadata{
+		Annotations: map[string]string{
+			util.NodeHeartbeatAnnotation:      "",
+			util.NodeDeviceRegisterAnnotation: "",
+		},
+	}
+	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
+		return client.PatchNodeMetadata(m.client, m.config.NodeName(), patchData)
+	})
+}
+
 func (m *DeviceManager) registryNode() {
 	registryNode := func() error {
 		devices := m.GetDevices()
@@ -229,23 +241,10 @@ func (m *DeviceManager) registryNode() {
 			return client.PatchNodeMetadata(m.client, m.config.NodeName(), patchData)
 		})
 	}
-	deleteRegistry := func() error {
-		patchData := client.PatchMetadata{
-			Annotations: map[string]string{
-				util.NodeHeartbeatAnnotation: "",
-			},
-		}
-		return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-			return client.PatchNodeMetadata(m.client, m.config.NodeName(), patchData)
-		})
-	}
 	stopCh := m.stop
 	for {
 		select {
 		case <-stopCh:
-			if err := deleteRegistry(); err != nil {
-				klog.ErrorS(err, "Delete node heartbeat failed")
-			}
 			klog.V(5).Infoln("DeviceManager Node registration has stopped")
 			return
 		default:
@@ -282,8 +281,11 @@ func (m *DeviceManager) handleNotify() {
 
 func (m *DeviceManager) Stop() {
 	close(m.stop)
-	time.Sleep(time.Second)
 	m.stop = make(chan struct{})
+	time.Sleep(time.Second)
+	if err := m.cleanupRegistry(); err != nil {
+		klog.ErrorS(err, "cleanup node registry failed")
+	}
 }
 
 func handlerReturn(r nvml.Return) {

@@ -81,7 +81,7 @@ func checkNodeConfig(nodeConfig *NodeConfig) error {
 		return fmt.Errorf("NodeConfig.DeviceSplitCount must be a positive integer greater than or equal to 0")
 	}
 	if nodeConfig.deviceMemoryScaling < 0 {
-		return fmt.Errorf("NodeConfig.DeviceMemoryScaling must be any number greater than or equal to 0")
+		return fmt.Errorf("NodeConfig.DeviceMemoryScaling must be any number greater than or equal to 0 but less than or equal to 1")
 	}
 	if nodeConfig.deviceMemoryFactor <= 0 {
 		return fmt.Errorf("NodeConfig.DeviceMemoryFactor must be a positive integer greater than 0")

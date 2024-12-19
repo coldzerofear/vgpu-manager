@@ -36,7 +36,7 @@ add_library(vgpu-control SHARED
 target_link_libraries(vgpu-control ${STATIC_C_LIBRARIES})
 target_compile_options(vgpu-control PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-find_package(CUDA 11.2 REQUIRED)
+# find_package(CUDAToolkit REQUIRED)
 add_executable(mem_occupy_tool tools/mem_occupy_tool.c)
 target_include_directories(mem_occupy_tool PUBLIC ${C_INCLUDE_PATH} "/usr/local/cuda/include")
 target_link_libraries(mem_occupy_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
