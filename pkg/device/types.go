@@ -44,16 +44,16 @@ func NewDeviceInfo(gpuInfo GPUInfo) *DeviceInfo {
 }
 
 type GPUInfo struct {
-	Id         int    `json:"id,omitempty"`
-	Uuid       string `json:"uuid,omitempty"`
-	Core       int    `json:"core,omitempty"`
-	Memory     int    `json:"memory,omitempty"`
-	Type       string `json:"type,omitempty"`
-	Mig        bool   `json:"mig,omitempty"`
-	Number     int    `json:"number,omitempty"`
-	Numa       int    `json:"numa,omitempty"`
-	Capability int    `json:"capability,omitempty"`
-	Healthy    bool   `json:"healthy,omitempty"`
+	Id         int    `json:"id"`
+	Uuid       string `json:"uuid"`
+	Core       int    `json:"core"`
+	Memory     int    `json:"memory"`
+	Type       string `json:"type"`
+	Mig        bool   `json:"mig"`
+	Number     int    `json:"number"`
+	Numa       int    `json:"numa"`
+	Capability int    `json:"capability"`
+	Healthy    bool   `json:"healthy"`
 }
 
 type NodeDeviceInfos []GPUInfo
