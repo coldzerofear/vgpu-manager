@@ -36,9 +36,14 @@ extern "C" {
 #include "cuda-subset.h"
 
 /**
+ * vGPU manager base path
+ */
+#define VGPU_MANAGER_PATH "/etc/vgpu-manager"
+
+/**
  * Controller configuration base path
  */
-#define VGPU_CONFIG_PATH "/etc/vgpu-manager"
+#define VGPU_CONFIG_PATH "/etc/vgpu-manager/config"
 
 /**
  * Controller configuration file name
@@ -54,11 +59,11 @@ extern "C" {
 
 #define PID_ONE_MOUNTINFO_PATH "/proc/1/mountinfo"
 
-#define HOST_PROC_PATH (VGPU_CONFIG_PATH "/host_proc")
+#define HOST_PROC_PATH (VGPU_MANAGER_PATH "/host_proc")
 
 #define HOST_CGROUP_PID_PATH "/etc/vgpu-manager/host_proc/%d/cgroup"
 
-#define HOST_CGROUP_PROCS_PATH (VGPU_CONFIG_PATH "/host_cgroup")
+#define HOST_CGROUP_PROCS_PATH (VGPU_MANAGER_PATH "/host_cgroup")
 
 /**
  * Proc file path for driver version

@@ -78,6 +78,8 @@ static const char *cuda_error(CUresult, const char **);
 
 static int delta(int, int, int, int);
 
+static int check_file_exist(const char *);
+
 /** export function definition */
 CUresult cuDriverGetVersion(int *driverVersion);
 CUresult cuInit(unsigned int flag);
@@ -196,9 +198,17 @@ const char *nvml_error(nvmlReturn_t code) {
 
 const char *cuda_error(CUresult code, const char **p) {
   CUDA_ENTRY_CALL(cuda_library_entry, cuGetErrorString, code, p);
-
   return *p;
 }
+
+static int check_file_exist(const char *file_path) {
+  if (access(file_path, F_OK) != -1) {
+      return 0;
+  } else {
+      return 1;
+  }
+}
+
 
 static void change_token(int delta, int device_id) {
   int cuda_cores_before = 0, cuda_cores_after = 0;
@@ -384,8 +394,7 @@ static void initialization() {
   }
 }
 
-int split_str(char *line, char *key, char *value, char d)
-{
+int split_str(char *line, char *key, char *value, char d) {
   int index = 0;
   for (index = 0; index < strlen(line) && line[index] != d; index++){
   }
@@ -427,8 +436,7 @@ int split_str(char *line, char *key, char *value, char d)
 }
 
 
-int read_cgroup(char *pidpath, char *cgroup_key, char *cgroup_value)
-{
+int read_cgroup(char *pidpath, char *cgroup_key, char *cgroup_value) {
   FILE *f = fopen(pidpath, "rb");
   if (f == NULL) {
     LOGGER(VERBOSE, "read file %s failed: %s\n", pidpath, strerror(errno));
@@ -494,7 +502,7 @@ int check_container_pid(unsigned int pid) {
     }
   }
 DONE:
-  LOGGER(VERBOSE, "cgroup mismatch");
+  LOGGER(VERBOSE, "cgroup mismatch: %d", pid);
   return 0;
 }
 
@@ -504,14 +512,21 @@ int check_container_pid_v2(unsigned int pid) {
   }
   char pidpath[128] = "";
   sprintf(pidpath, HOST_CGROUP_PID_PATH, pid);
+  if (check_file_exist(pidpath)) {
+     goto DONE;
+  }
   FILE *f = fopen(pidpath, "rb");
   if (f == NULL) {
     LOGGER(VERBOSE, "read file %s failed: %s\n", pidpath, strerror(errno));
-    return 0;
+    goto DONE;
   }
   char buff[FILENAME_MAX];
   while (fgets(buff, FILENAME_MAX, f)) {
-    if (strstr(buff, container_id) != NULL) {
+    size_t len = strlen(buff);
+    if (len > 0 && buff[len - 1] == '\n') {
+      buff[len - 1] = '\0';
+    }
+    if (strcmp(buff, "0::/") == 0 || strstr(buff, container_id) != NULL) {
       fclose(f);
       LOGGER(VERBOSE, "cgroup match: %s", buff);
       return 1;
@@ -519,7 +534,7 @@ int check_container_pid_v2(unsigned int pid) {
   }
   fclose(f);
 DONE:
-  LOGGER(VERBOSE, "cgroup mismatch");
+  LOGGER(VERBOSE, "cgroup mismatch: %d", pid);
   return 0;
 }
 

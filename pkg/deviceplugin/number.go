@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -231,21 +232,35 @@ func (m *NumberDevicePlugin) GetPreferredAllocation(context.Context, *pluginapi.
 }
 
 const (
-	HostProcPath         = "/proc"
-	ManagerDirectoryPath = "/etc/vgpu-manager"
-	ContainerProcPath    = ManagerDirectoryPath + "/host_proc"
-	ContainerCgroupPath  = ManagerDirectoryPath + "/host_cgroup"
-	LdPreLoadFileName    = "ld.so.preload"
-	ContainerPreloadPath = "/etc/" + LdPreLoadFileName
-	HostPreloadPath      = ManagerDirectoryPath + "/" + LdPreLoadFileName
-	VGPUControlFileName  = "libvgpu-control.so"
-	HostVGPUControlPath  = ManagerDirectoryPath + "/" + VGPUControlFileName
+	HostProcPath             = "/proc"
+	ManagerDirectoryPath     = "/etc/vgpu-manager"
+	ContainerConfigPath      = ManagerDirectoryPath + "/config"
+	ContainerProcPath        = ManagerDirectoryPath + "/host_proc"
+	ContainerCgroupPath      = ManagerDirectoryPath + "/host_cgroup"
+	LdPreLoadFileName        = "ld.so.preload"
+	ContainerPreloadPath     = "/etc/" + LdPreLoadFileName
+	HostPreloadPath          = ManagerDirectoryPath + "/" + LdPreLoadFileName
+	VGPUControlFileName      = "libvgpu-control.so"
+	ContainerVGPUControlPath = ManagerDirectoryPath + "/driver/" + VGPUControlFileName
+	HostVGPUControlPath      = ManagerDirectoryPath + "/" + VGPUControlFileName
+	VGPUConfigFileName       = "vgpu.config"
 
-	VGPUConfigFileName = "vgpu.config"
+	NvidiaDeviceFilePrefix = "/dev/nvidia"
+	NvidiaCTLFilePath      = "/dev/nvidiactl"
+	NvidiaUVMFilePath      = "/dev/nvidia-uvm"
+	NvidiaUVMToolsFilePath = "/dev/nvidia-uvm-tools"
 )
 
 func GetHostManagerDirectoryPath(podUID types.UID, containerName string) string {
 	return fmt.Sprintf("%s/%s_%s", ManagerDirectoryPath, string(podUID), containerName)
+}
+
+func GetDeviceMinorMap(gpus []manager.GPUDevice) map[string]int {
+	minorMap := make(map[string]int)
+	for _, gpuDevice := range gpus {
+		minorMap[gpuDevice.Uuid] = gpuDevice.MinorNumber
+	}
+	return minorMap
 }
 
 // Allocate is called during container creation so that the Device
@@ -282,6 +297,7 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 	var assignDevs *device.ContainerDevices
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	var podCgroupPath string
+	minorMap := GetDeviceMinorMap(m.manager.GetDevices())
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIDs())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -298,12 +314,19 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 			deviceIds []string
 			envMap    = make(map[string]string)
 			mounts    []*pluginapi.Mount
+			devices   []*pluginapi.DeviceSpec
 		)
 		envMap[util.PodNameEnv] = currentPod.Name
 		envMap[util.PodNamespaceEnv] = currentPod.Namespace
 		envMap[util.PodUIDEnv] = string(currentPod.UID)
 		envMap[util.ContNameEnv] = assignDevs.Name
-		for idx, dev := range assignDevs.Devices {
+		claimDevices := assignDevs.Devices
+		sort.Slice(claimDevices, func(i, j int) bool {
+			devA := claimDevices[i]
+			devB := claimDevices[j]
+			return devA.Id < devB.Id
+		})
+		for idx, dev := range claimDevices {
 			memoryLimitEnv := fmt.Sprintf("%s_%d", util.CudaMemoryLimitEnv, idx)
 			envMap[memoryLimitEnv] = fmt.Sprintf("%dm", dev.Memory)
 			if dev.Core > 0 {
@@ -311,10 +334,30 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 				envMap[coreLimitEnv] = strconv.Itoa(dev.Core)
 			}
 			deviceIds = append(deviceIds, dev.Uuid)
+			nvidiaDeviceFile := fmt.Sprintf("%s%d",
+				NvidiaDeviceFilePrefix, minorMap[dev.Uuid])
+			devices = append(devices, &pluginapi.DeviceSpec{
+				ContainerPath: nvidiaDeviceFile,
+				HostPath:      nvidiaDeviceFile,
+				Permissions:   "rw",
+			})
 		}
 		deviceIdStr := strings.Join(deviceIds, ",")
 		envMap[util.GPUDeviceUuidEnv] = deviceIdStr
 		envMap[util.NvidiaVisibleDevicesEnv] = deviceIdStr
+		devices = append(devices, &pluginapi.DeviceSpec{
+			ContainerPath: NvidiaCTLFilePath,
+			HostPath:      NvidiaCTLFilePath,
+			Permissions:   "rw",
+		}, &pluginapi.DeviceSpec{
+			ContainerPath: NvidiaUVMFilePath,
+			HostPath:      NvidiaUVMFilePath,
+			Permissions:   "rw",
+		}, &pluginapi.DeviceSpec{
+			ContainerPath: NvidiaUVMToolsFilePath,
+			HostPath:      NvidiaUVMToolsFilePath,
+			Permissions:   "rw",
+		})
 		mounts = append(mounts, &pluginapi.Mount{ // mount /proc dir
 			ContainerPath: ContainerProcPath,
 			HostPath:      HostProcPath,
@@ -324,7 +367,7 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 			HostPath:      HostPreloadPath,
 			ReadOnly:      true,
 		}, &pluginapi.Mount{ // mount libvgpu-control.so file
-			ContainerPath: HostVGPUControlPath,
+			ContainerPath: ContainerVGPUControlPath,
 			HostPath:      HostVGPUControlPath,
 			ReadOnly:      true,
 		})
@@ -353,7 +396,7 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 		_ = os.MkdirAll(hostManagerDirectory, 0777)
 		_ = os.Chmod(hostManagerDirectory, 0777)
 		mounts = append(mounts, &pluginapi.Mount{ // mount vgpu.config file
-			ContainerPath: ManagerDirectoryPath,
+			ContainerPath: ContainerConfigPath,
 			HostPath:      hostManagerDirectory,
 			ReadOnly:      true,
 		})
@@ -370,8 +413,9 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 		}
 		currentPod.Annotations[util.PodVGPURealAllocAnnotation] = realAllocated
 		responses[i] = &pluginapi.ContainerAllocateResponse{
-			Envs:   envMap,
-			Mounts: mounts,
+			Envs:    envMap,
+			Mounts:  mounts,
+			Devices: devices,
 		}
 	}
 	resp.ContainerResponses = responses

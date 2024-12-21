@@ -25,7 +25,8 @@ import (
 type GPUDevice struct {
 	device.GPUInfo
 	//Paths     []string
-	MigDevice bool
+	MinorNumber int
+	MigDevice   bool
 }
 
 type DeviceManager struct {
@@ -104,7 +105,7 @@ func (m *DeviceManager) initDevices() {
 
 	// TODO Scaling Core
 	totalCore := int(m.config.DeviceCoresScaling() * float64(util.HundredCore))
-
+	var err error
 	for i := 0; i < count; i++ {
 		klog.V(2).Infof("nvmlDeviceGetHandleByIndex <%d>", i)
 
@@ -112,6 +113,9 @@ func (m *DeviceManager) initDevices() {
 		handlerReturn(rt)
 
 		uuid, rt := devHandle.GetUUID()
+		handlerReturn(rt)
+
+		minorNumber, rt := devHandle.GetMinorNumber()
 		handlerReturn(rt)
 
 		migEnabled, rt := DeviceHandleIsMigEnabled(devHandle)
@@ -142,22 +146,28 @@ func (m *DeviceManager) initDevices() {
 		if migDevice {
 			parentDev, rt := devHandle.GetDeviceHandleFromMigDeviceHandle()
 			handlerReturn(rt)
-			numaNode, _ = parentDev.GetNumaNodeId()
+			index, rt := parentDev.GetIndex()
+			handlerReturn(rt)
+
+			numaNode, err = util.GetNumaInformation(index)
+			if err != nil {
+				klog.ErrorS(err, "failed to get numa information", "device", index)
+			}
+			//numaNode, _ = parentDev.GetNumaNodeId()
 			//handlerReturn(rt)
 
 		} else {
-			numaNode, _ = devHandle.GetNumaNodeId()
+			numaNode, err = util.GetNumaInformation(i)
+			if err != nil {
+				klog.ErrorS(err, "failed to get numa information", "device", i)
+			}
+			//numaNode, _ = devHandle.GetNumaNodeId()
 			//handlerReturn(rt)
 			//paths = append(paths, fmt.Sprintf("/dev/nvidia%d", minor))
 		}
 		if numaNode < 0 {
 			numaNode = 0
 		}
-
-		//numa, err := util.GetNumaInformation(i)
-		//if err != nil {
-		//	klog.ErrorS(err, "failed to get numa information", "device", i)
-		//}
 
 		device := &GPUDevice{
 			GPUInfo: device.GPUInfo{
@@ -173,7 +183,8 @@ func (m *DeviceManager) initDevices() {
 				Healthy:    !m.config.ExcludeDevices().Has(i),
 			},
 			//Paths: paths,
-			MigDevice: migDevice,
+			MinorNumber: minorNumber,
+			MigDevice:   migDevice,
 		}
 		m.devices[i] = device
 	}
@@ -364,7 +375,7 @@ func (m *DeviceManager) checkHealth() {
 	for i, d := range m.devices {
 		devHandle, ret := nvml.DeviceGetHandleByUUID(d.Uuid)
 		if ret != nvml.SUCCESS {
-			klog.Infof("unable to get device handle from UUID: %v; marking it as unhealthy", ret)
+			klog.Infof("unable to get device handle from %s: %v; marking it as unhealthy.", d.Uuid, ret)
 			m.modifyDeviceUnHealthy(m.devices[i])
 			continue
 		}
@@ -381,14 +392,14 @@ func (m *DeviceManager) checkHealth() {
 
 		supportedEvents, ret := devHandle.GetSupportedEventTypes()
 		if ret != nvml.SUCCESS {
-			klog.Infof("Unable to determine the supported events for %v: %v; marking it as unhealthy", d.Uuid, ret)
+			klog.Infof("Unable to determine the supported events for %v: %v; marking it as unhealthy.", d.Uuid, ret)
 			m.modifyDeviceUnHealthy(m.devices[i])
 			continue
 		}
 
 		ret = devHandle.RegisterEvents(eventMask&supportedEvents, eventSet)
 		if ret == nvml.ERROR_NOT_SUPPORTED {
-			klog.Warningf("Device %v is too old to support healthchecking.", d.Uuid)
+			klog.Warningf("Device %v is too old to support health checking.", d.Uuid)
 		}
 		if ret != nvml.SUCCESS {
 			klog.Infof("Marking device %v as unhealthy: %v", d.Uuid, ret)
@@ -406,6 +417,7 @@ func (m *DeviceManager) checkHealth() {
 
 		e, ret := eventSet.Wait(5000)
 		if ret == nvml.ERROR_TIMEOUT {
+			klog.V(5).Infoln("waiting for event timeout")
 			continue
 		}
 		if ret != nvml.SUCCESS {

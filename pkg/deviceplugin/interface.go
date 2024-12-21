@@ -79,13 +79,26 @@ func InitDevicePlugins(opt *options.Options, manager *manager.DeviceManager,
 
 // cleanupNodeResources Clean up some resource names published on node
 func cleanupNodeResources(kubeClient *kubernetes.Clientset, nodeName string, resources []string) {
+	node, err := kubeClient.CoreV1().Nodes().Get(context.Background(), nodeName, metav1.GetOptions{
+		ResourceVersion: "0",
+	})
+	if err != nil {
+		klog.Errorf("get node %s failed: %v", nodeName, err)
+		return
+	}
 	var jsonPatches []jsonpatch.Operation
 	for _, resourceName := range resources {
+		_, existAllocatable := node.Status.Allocatable[corev1.ResourceName(resourceName)]
+		_, existCapacity := node.Status.Capacity[corev1.ResourceName(resourceName)]
 		resourceName = strings.ReplaceAll(resourceName, "/", "~1")
-		jsonPatches = append(jsonPatches, jsonpatch.NewOperation("remove",
-			fmt.Sprintf("/status/capacity/%s", resourceName), nil))
-		jsonPatches = append(jsonPatches, jsonpatch.NewOperation("remove",
-			fmt.Sprintf("/status/allocatable/%s", resourceName), nil))
+		if existCapacity {
+			jsonPatches = append(jsonPatches, jsonpatch.NewOperation("remove",
+				fmt.Sprintf("/status/capacity/%s", resourceName), nil))
+		}
+		if existAllocatable {
+			jsonPatches = append(jsonPatches, jsonpatch.NewOperation("remove",
+				fmt.Sprintf("/status/allocatable/%s", resourceName), nil))
+		}
 	}
 	if len(jsonPatches) > 0 {
 		patchDataBytes, _ := json.Marshal(jsonPatches)

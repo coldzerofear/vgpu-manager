@@ -3,8 +3,8 @@ GOOS ?= linux
 # Image URL to use all building/pushing image targets
 TAG ?= latest
 IMG ?= coldzerofear/vgpu-manager:$(TAG)
-APT_MIRROR ?= https://mirrors.aliyun.com
-LIBRARY_IMG ?= coldzerofear/vgpu-controller:$(TAG)
+#APT_MIRROR ?= https://mirrors.aliyun.com
+APT_MIRROR ?= ''
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -87,19 +87,20 @@ build: fmt vet ## Build binary.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	$(CONTAINER_TOOL) build --build-arg APT_MIRROR=$(APT_MIRROR) -t "${LIBRARY_IMG}" -f library/Dockerfile .
-	$(CONTAINER_TOOL) build "${IMG}" -f Dockerfile -t  .
+	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH=$(GIT_BRANCH) --build-arg APT_MIRROR=$(APT_MIRROR) \
+      --build-arg GIT_COMMIT=$(GIT_COMMIT) --build-arg GIT_TREE_STATE=$(GIT_TREE_STATE) \
+      --build-arg BUILD_DATE=$(BUILD_DATE) --build-arg LIBRARY_IMG=$(LIBRARY_IMG) -t "${IMG}" -f Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push docker image.
-	$(CONTAINER_TOOL) push ${IMG_PREFIX}/dcloud-dhcp-controller:$(TAG)
+	$(CONTAINER_TOOL) push ${IMG}
 
 ##@ Release
-.PHONY: publish # Push the image to the remote registry
-publish:
-	docker buildx build \
-		--platform linux/amd64,linux/arm64 \
-		--output "type=image,push=true" \
-		--file ./Dockerfile.cross \
-		--tag $(IMG) \
-		.
+#.PHONY: publish # Push the image to the remote registry
+#publish:
+#	docker buildx build \
+#		--platform linux/amd64,linux/arm64 \
+#		--output "type=image,push=true" \
+#		--file ./Dockerfile.cross \
+#		--tag $(IMG) \
+#		.

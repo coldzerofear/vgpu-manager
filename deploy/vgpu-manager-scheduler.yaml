@@ -4,35 +4,10 @@ metadata:
   name: vgpu-manager-scheduler
   namespace: kube-system
 ---
-#apiVersion: rbac.authorization.k8s.io/v1
-#kind: Role
-#metadata:
-#  name: vgpu-manager-scheduler
-#  namespace: kube-system
-#rules:
-#  - apiGroups: ["coordination.k8s.io"]
-#    resources: ["leases"]
-#    verbs: ["get", "list", "watch", "create", "update", "delete"]
-#---
-#apiVersion: rbac.authorization.k8s.io/v1
-#kind: ClusterRole
-#metadata:
-#  name: vgpu-manager-scheduler
-#rules:
-#  - apiGroups: [""]
-#    resources: ["nodes"]
-#    verbs: ["get","list", "watch","update","patch"]
-#  - apiGroups: [""]
-#    resources: ["nodes/status"]
-#    verbs: ["patch", "update"]
-#  - apiGroups: [""]
-#    resources: ["events"]
-#    verbs: ["create","patch","update"]
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: vgpu-scheduler-as-kube-scheduler
+  name: vgpu-manager-scheduler-as-kube-scheduler
 subjects:
   - kind: ServiceAccount
     name: vgpu-manager-scheduler
@@ -45,7 +20,7 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: vgpu-scheduler-as-volume-scheduler
+  name: vgpu-manager-scheduler-as-volume-scheduler
 subjects:
   - kind: ServiceAccount
     name: vgpu-manager-scheduler
@@ -58,7 +33,7 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: vgpu-scheduler-as-daemon-set-controller
+  name: vgpu-manager-scheduler-as-daemon-set-controller
 subjects:
   - kind: ServiceAccount
     name: vgpu-manager-scheduler
@@ -68,46 +43,57 @@ roleRef:
   name: system:controller:daemon-set-controller
   apiGroup: rbac.authorization.k8s.io
 ---
-#apiVersion: rbac.authorization.k8s.io/v1
-#kind: ClusterRoleBinding
-#metadata:
-#  name: vgpu-scheduler-as-node-role
-#subjects:
-#  - kind: ServiceAccount
-#    name: vgpu-manager-scheduler
-#    namespace: kube-system
-#roleRef:
-#  kind: ClusterRole
-#  name: gpu-scheduler:node-role
-#  apiGroup: rbac.authorization.k8s.io
-#---
-#apiVersion: rbac.authorization.k8s.io/v1
-#kind: RoleBinding
-#metadata:
-#  name: gpu-scheduler-as-leader-election-role
-#  namespace: kube-system
-#subjects:
-#  - kind: ServiceAccount
-#    name: vgpu-manager-scheduler
-#    namespace: kube-system
-#roleRef:
-#  kind: Role
-#  name: gpu-scheduler:leader-election-role
-#  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: v1
-kind: Service
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
 metadata:
-  name: vgpu-manager-scheduler
+  name: vgpu-manager-scheduler:leader-election-role
   namespace: kube-system
-spec:
-  ports:
-    - port: 3456
-      protocol: TCP
-      targetPort: 3456
-  selector:
-    app: vgpu-manager-scheduler
-  type: ClusterIP
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-scheduler:node-role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get","list","watch","update","patch"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-scheduler-as-node-role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-scheduler
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: vgpu-manager-scheduler:node-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vgpu-manager-scheduler-as-leader-election-role
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-scheduler
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: vgpu-manager-scheduler:leader-election-role
+  apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -160,47 +146,64 @@ spec:
       serviceAccountName: vgpu-manager-scheduler
       priorityClassName: system-node-critical
       containers:
-        - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.27.4
+        - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
           imagePullPolicy: IfNotPresent
           name: scheduler
           command:
             - kube-scheduler
             - --config=/config/config.yaml
-            - -v=4
+            - --v=4
           resources:
             requests:
               cpu: 100m
           volumeMounts:
             - name: scheduler-config
               mountPath: /config
-        - image: coldzerofear/gpu-manager:latest
-          name: gpu-scheduler-extender
-          env:
-            - name: LOG_LEVEL
-              value: "4"
-            - name: EXTRA_FLAGS
-              # 根据KubeSchedulerConfiguration配置文件定义是否开启节点缓存
-              value: "--nodeCacheCapable=true"
+        - image: coldzerofear/vgpu-manager:latest
+          imagePullPolicy: IfNotPresent
+          name: scheduler-extender
+          command:
+            - scheduler
+            - --server-bind-port=3456
+            - --v=4
           ports:
             - containerPort: 3456
           resources:
             requests:
-              cpu: "1"
-              memory: 1Gi
+              cpu: 50m
+              memory: 128Mi
             limits:
-              cpu: "2"
-              memory: 2Gi
-      #          livenessProbe:
-      #            failureThreshold: 8
-      #            httpGet:
-      #              host: 127.0.0.1
-      #              path: /version
-      #              port: 3456
-      #              scheme: HTTP
-      #            initialDelaySeconds: 10
-      #            periodSeconds: 10
-      #            timeoutSeconds: 15
+              cpu: 200m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3456
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3456
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
       volumes:
         - name: scheduler-config
           configMap:
             name: vgpu-manager-scheduler-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-scheduler
+  namespace: kube-system
+spec:
+  ports:
+    - port: 3456
+      protocol: TCP
+      targetPort: 3456
+  selector:
+    app: vgpu-manager-scheduler
+  type: ClusterIP

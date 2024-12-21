@@ -22,6 +22,8 @@ import (
 	tlsserverconfig "github.com/grepplabs/cert-source/tls/server/config"
 	"github.com/julienschmidt/httprouter"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -29,6 +31,12 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
+
+var Scheme = runtime.NewScheme()
+
+func init() {
+	utilruntime.Must(scheme.AddToScheme(Scheme))
+}
 
 func main() {
 	klog.InitFlags(flag.CommandLine)
@@ -42,7 +50,8 @@ func main() {
 		klog.Fatalf("Initialization of k8s client configuration failed: %v", err)
 	}
 	mutationContentType := client.MutationContentType(
-		"application/vnd.kubernetes.protobuf,application/json")
+		"application/vnd.kubernetes.protobuf,application/json",
+		"application/json")
 	kubeClient, err := client.GetClientSet(mutationContentType, client.MutationQPS(float32(opt.QPS), opt.Burst))
 	if err != nil {
 		klog.Fatalf("Create k8s kubeClient failed: %v", err)
@@ -69,7 +78,7 @@ func main() {
 
 	broadcaster := record.NewBroadcaster()
 	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
-	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: opt.SchedulerName})
+	recorder := broadcaster.NewRecorder(Scheme, corev1.EventSource{Component: opt.SchedulerName})
 
 	factory := informers.NewSharedInformerFactory(kubeClient, 10*time.Hour)
 

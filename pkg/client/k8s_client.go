@@ -60,9 +60,9 @@ func MutationUser(userAgent string) func(*rest.Config) {
 	}
 }
 
-func MutationContentType(contentType string) func(*rest.Config) {
+func MutationContentType(acceptContentTypes, contentType string) func(*rest.Config) {
 	return func(config *rest.Config) {
-		config.AcceptContentTypes = contentType
+		config.AcceptContentTypes = acceptContentTypes
 		config.ContentType = contentType
 	}
 }

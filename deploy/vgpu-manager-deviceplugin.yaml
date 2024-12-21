@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -22,7 +21,7 @@ metadata:
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: vgpu-manager-device-plugin
+  name: vgpu-manager-device-plugin:role
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
@@ -43,14 +42,14 @@ rules:
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: vgpu-manager-device-plugin
+  name: vgpu-manager-device-plugin-as-role
 subjects:
   - kind: ServiceAccount
     name: vgpu-manager-device-plugin
     namespace: kube-system
 roleRef:
   kind: ClusterRole
-  name: vgpu-manager-device-plugin
+  name: vgpu-manager-device-plugin:role
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
@@ -105,22 +104,33 @@ spec:
       hostPID: true
 #      nodeSelector:
 #        gpu: "true"
-      serviceAccount: volcano-vgpu-device-plugin
+      serviceAccount: vgpu-manager-device-plugin
+      initContainers:
+        - name: install
+          command: ["/bin/bash", "-c", "cp /installed/* /etc/vgpu-manager/"]
+          image: coldzerofear/vgpu-manager:latest
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 10m
+              memory: 15Mi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: manager
+              mountPath: /etc/vgpu-manager
+              mountPropagation: Bidirectional
       containers:
         - name: device-plugin
-          image: coldzerofear/vgpu-namager-device-plugin:latest
+          image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
-            - device-plugin
-          args:
+            - deviceplugin
             - --device-split-count=10
             - --device-cores-scaling=1
             - --device-memory-scaling=1
             - --node-config-path=/config/nodeConfig.json
-#          lifecycle:
-#            postStart:
-#              exec:
-#                command: ["/bin/sh","-c","cp -f /k8s-vgpu/lib/nvidia/* /usr/local/vgpu/"]
+            - --v=4
           env:
             - name: NODE_NAME
               valueFrom:
@@ -140,39 +150,25 @@ spec:
               drop: ["ALL"]
               add: ["SYS_ADMIN"]
           volumeMounts:
-            - name: device-plugin
-              mountPath: /var/lib/kubelet/device-plugins
-            - name: lib
-              mountPath: /usr/local/vgpu
-            - name: hosttmp
-              mountPath: /tmp
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+            - name: manager
+              mountPath: /etc/vgpu-manager
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
             - name: node-config
               mountPath: /config
       volumes:
-        - name: device-plugin
+        - name: kubelet
           hostPath:
-            path: /var/lib/kubelet/device-plugins
-        - name: lib
+            path: /var/lib/kubelet
+        - name: manager
           hostPath:
-            path: /usr/local/vgpu
-        - name: hosttmp
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+        - name: cgroup
           hostPath:
-            path: /tmp
-        - hostPath:
-            path: /tmp/vgpu/containers
-          name: ctrs
-        - hostPath:
-            path: /run/docker
-          name: dockers
-        - hostPath:
-            path: /run/containerd
-          name: containerds
-        - hostPath:
-            path: /sys
-          name: sysinfo
-        - hostPath:
-            path: /var
-          name: hostvar
+            path: /sys/fs/cgroup
         - name: node-config
           configMap:
             name: vgpu-manager-device-plugin-config

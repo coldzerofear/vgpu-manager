@@ -3,6 +3,7 @@ package util
 import (
 	"fmt"
 	"math"
+	"os/exec"
 	"slices"
 	"sort"
 	"strconv"
@@ -244,63 +245,63 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 	return allocatingPods
 }
 
-//func GetNumaInformation(idx int) (int, error) {
-//	cmd := exec.Command("nvidia-smi", "topo", "-m")
-//	out, err := cmd.CombinedOutput()
-//	if err != nil {
-//		return 0, err
-//	}
-//	klog.V(5).InfoS("nvidia-smi topo -m output", "result", string(out))
-//	return parseNvidiaNumaInfo(idx, string(out))
-//}
-//
-//func parseNvidiaNumaInfo(idx int, nvidiaTopoStr string) (int, error) {
-//	result := 0
-//	numaAffinityColumnIndex := 0
-//	for index, val := range strings.Split(nvidiaTopoStr, "\n") {
-//		if !strings.Contains(val, "GPU") {
-//			continue
-//		}
-//		// Example: GPU0	 X 	0-7		N/A		N/A
-//		// Many values are separated by two tabs, but this actually represents 5 values instead of 7
-//		// So add logic to remove multiple tabs
-//		words := strings.Split(strings.ReplaceAll(val, "\t\t", "\t"), "\t")
-//		klog.V(5).InfoS("parseNumaInfo", "words", words)
-//		// get numa affinity column number
-//		if index == 0 {
-//			for columnIndex, headerVal := range words {
-//				// The topology output of a single card is as follows:
-//				// 			GPU0	CPU Affinity	NUMA Affinity	GPU NUMA ID
-//				// GPU0	 X 	0-7		N/A		N/A
-//				//Legend: Other content omitted
-//
-//				// The topology output in the case of multiple cards is as follows:
-//				// 			GPU0	GPU1	CPU Affinity	NUMA Affinity
-//				// GPU0	 X 	PHB	0-31		N/A
-//				// GPU1	PHB	 X 	0-31		N/A
-//				// Legend: Other content omitted
-//
-//				// We need to get the value of the NUMA Affinity column, but their column indexes are inconsistent,
-//				// so we need to get the index first and then get the value.
-//				if strings.Contains(headerVal, "NUMA Affinity") {
-//					// The header is one column less than the actual row.
-//					numaAffinityColumnIndex = columnIndex
-//					continue
-//				}
-//			}
-//			continue
-//		}
-//		klog.V(5).InfoS("nvidia-smi topo -m row output", "row output", words, "length", len(words))
-//		if strings.Contains(words[0], fmt.Sprint(idx)) {
-//			if words[numaAffinityColumnIndex] == "N/A" {
-//				klog.InfoS("current card has not established numa topology", "gpu row info", words, "index", idx)
-//				return 0, nil
-//			}
-//			result, err := strconv.Atoi(words[numaAffinityColumnIndex])
-//			if err != nil {
-//				return result, err
-//			}
-//		}
-//	}
-//	return result, nil
-//}
+func GetNumaInformation(idx int) (int, error) {
+	cmd := exec.Command("nvidia-smi", "topo", "-m")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, err
+	}
+	klog.V(5).InfoS("nvidia-smi topo -m output", "result", string(out))
+	return parseNvidiaNumaInfo(idx, string(out))
+}
+
+func parseNvidiaNumaInfo(idx int, nvidiaTopoStr string) (int, error) {
+	result := 0
+	numaAffinityColumnIndex := 0
+	for index, val := range strings.Split(nvidiaTopoStr, "\n") {
+		if !strings.Contains(val, "GPU") {
+			continue
+		}
+		// Example: GPU0	 X 	0-7		N/A		N/A
+		// Many values are separated by two tabs, but this actually represents 5 values instead of 7
+		// So add logic to remove multiple tabs
+		words := strings.Split(strings.ReplaceAll(val, "\t\t", "\t"), "\t")
+		klog.V(5).InfoS("parseNumaInfo", "words", words)
+		// get numa affinity column number
+		if index == 0 {
+			for columnIndex, headerVal := range words {
+				// The topology output of a single card is as follows:
+				// 			GPU0	CPU Affinity	NUMA Affinity	GPU NUMA ID
+				// GPU0	 X 	0-7		N/A		N/A
+				//Legend: Other content omitted
+
+				// The topology output in the case of multiple cards is as follows:
+				// 			GPU0	GPU1	CPU Affinity	NUMA Affinity
+				// GPU0	 X 	PHB	0-31		N/A
+				// GPU1	PHB	 X 	0-31		N/A
+				// Legend: Other content omitted
+
+				// We need to get the value of the NUMA Affinity column, but their column indexes are inconsistent,
+				// so we need to get the index first and then get the value.
+				if strings.Contains(headerVal, "NUMA Affinity") {
+					// The header is one column less than the actual row.
+					numaAffinityColumnIndex = columnIndex
+					continue
+				}
+			}
+			continue
+		}
+		klog.V(5).InfoS("nvidia-smi topo -m row output", "row output", words, "length", len(words))
+		if strings.Contains(words[0], fmt.Sprint(idx)) {
+			if words[numaAffinityColumnIndex] == "N/A" {
+				klog.InfoS("current card has not established numa topology", "gpu row info", words, "index", idx)
+				return 0, nil
+			}
+			result, err := strconv.Atoi(words[numaAffinityColumnIndex])
+			if err != nil {
+				return result, err
+			}
+		}
+	}
+	return result, nil
+}

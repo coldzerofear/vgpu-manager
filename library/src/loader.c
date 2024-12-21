@@ -1007,7 +1007,10 @@ static void load_nvml_libraries() {
 
   if (real_dlsym == NULL){
     LOGGER(WARNING, "dlsym not found before libraries load");
-    real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+    if (real_dlsym == NULL) {
+      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+    }
     if (real_dlsym == NULL) {
       LOGGER(FATAL, "real dlsym not found");
     }
@@ -1056,11 +1059,15 @@ static void load_cuda_single_library(int idx) {
 
   if (real_dlsym == NULL){
     LOGGER(WARNING, "dlsym not found before libraries load");
-    real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+    if (real_dlsym == NULL) {
+      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+    }
     if (real_dlsym == NULL) {
       LOGGER(FATAL, "real dlsym not found");
     }
   }
+
   if (unlikely(cuda_library_entry[idx].fn_ptr)) {
     return;
   }
@@ -1089,7 +1096,10 @@ static void load_nvml_single_library(int idx) {
 
   if (real_dlsym == NULL){
     LOGGER(WARNING, "dlsym not found before libraries load");
-    real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+    if (real_dlsym == NULL) {
+      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+    }
     if (real_dlsym == NULL) {
       LOGGER(FATAL, "real dlsym not found");
     }
@@ -1124,7 +1134,10 @@ void load_cuda_libraries() {
 
   if (real_dlsym == NULL){
     LOGGER(WARNING, "dlsym not found before libraries load");
-    real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+    if (real_dlsym == NULL) {
+      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+    }
     if (real_dlsym == NULL) {
       LOGGER(FATAL, "real dlsym not found");
     }
@@ -1282,7 +1295,10 @@ int write_file_to_confg_path(resource_data_t* data) {
   int fd = 0;
   int wsize = 0;
   int ret = 0;
-  if (unlikely(check_file_exist(VGPU_CONFIG_PATH))) { 
+  if (unlikely(check_file_exist(VGPU_MANAGER_PATH))) {
+      mkdir(VGPU_MANAGER_PATH, 0777);
+  }
+  if (unlikely(check_file_exist(VGPU_CONFIG_PATH))) {
       mkdir(VGPU_CONFIG_PATH, 0777);
   }
   fd = open(CONTROLLER_CONFIG_PATH, O_CREAT | O_TRUNC | O_WRONLY, 00777);
@@ -1643,10 +1659,10 @@ DONE:
 }
 
 void load_necessary_data() {
-  // 读取驱动版本
-  read_version_from_proc(driver_version);
   // 加载vcuda.config配置文件到全局变量
   load_controller_configuration();
+  // 读取驱动版本
+  read_version_from_proc(driver_version);
   // 加载nvml库
   pthread_once(&g_nvml_lib_init, load_nvml_libraries);
   // 加载cuda库

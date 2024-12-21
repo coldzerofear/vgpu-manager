@@ -156,8 +156,8 @@ func NewResourceDataT(version version.Version, pod *corev1.Pod, assignDevices de
 		deviceCount++
 		dev := DeviceT{
 			UUID:         convert48Bytes(devInfo.Uuid),
-			TotalMemory:  uint64(devInfo.Memory),
-			DeviceMemory: uint64(devInfo.Memory),
+			TotalMemory:  uint64(devInfo.Memory << 20),
+			DeviceMemory: uint64(devInfo.Memory << 20),
 			HardCore:     int32(devInfo.Core),
 			SoftCore:     int32(devInfo.Core),
 		}
@@ -234,9 +234,9 @@ func WriteVGPUConfigFile(filePath string, version version.Version, pod *corev1.P
 				defer C.free(unsafe.Pointer(devUuid))
 				C.strcpy((*C.char)(unsafe.Pointer(&cDevice.uuid[0])), (*C.char)(unsafe.Pointer(devUuid)))
 				//  uint64_t total_memory;
-				cDevice.total_memory = C.uint64_t(devInfo.Memory)
+				cDevice.total_memory = C.uint64_t(devInfo.Memory << 20)
 				//  uint64_t device_memory;
-				cDevice.device_memory = C.uint64_t(devInfo.Memory)
+				cDevice.device_memory = C.uint64_t(devInfo.Memory << 20)
 
 				//  int hard_core;
 				cDevice.hard_core = C.int(devInfo.Core)
