@@ -79,12 +79,9 @@ func InitDevicePlugins(opt *options.Options, manager *manager.DeviceManager,
 
 // cleanupNodeResources Clean up some resource names published on node
 func cleanupNodeResources(kubeClient *kubernetes.Clientset, nodeName string, resources []string) {
-	node, err := kubeClient.CoreV1().Nodes().Get(context.Background(), nodeName, metav1.GetOptions{
-		ResourceVersion: "0",
-	})
+	node, err := kubeClient.CoreV1().Nodes().Get(context.Background(), nodeName, metav1.GetOptions{})
 	if err != nil {
-		klog.Errorf("get node %s failed: %v", nodeName, err)
-		return
+		klog.Fatalf("get node %s failed: %v", nodeName, err)
 	}
 	var jsonPatches []jsonpatch.Operation
 	for _, resourceName := range resources {

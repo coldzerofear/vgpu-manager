@@ -291,9 +291,10 @@ func (m *DeviceManager) handleNotify() {
 }
 
 func (m *DeviceManager) Stop() {
+	klog.Infof("DeviceManager stopping...")
 	close(m.stop)
 	m.stop = make(chan struct{})
-	time.Sleep(time.Second)
+	time.Sleep(2 * time.Second)
 	if err := m.cleanupRegistry(); err != nil {
 		klog.ErrorS(err, "cleanup node registry failed")
 	}

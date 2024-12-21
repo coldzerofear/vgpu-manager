@@ -140,6 +140,8 @@ CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height);
 CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height,
                            CUstream hStream);
 CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z);
+CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
+CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
 
 entry_t cuda_hooks_entry[] = {
     {.name = "cuDriverGetVersion", .fn_ptr = cuDriverGetVersion},
@@ -170,6 +172,8 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuLaunchGrid", .fn_ptr = cuLaunchGrid},
     {.name = "cuLaunchGridAsync", .fn_ptr = cuLaunchGridAsync},
     {.name = "cuFuncSetBlockShape", .fn_ptr = cuFuncSetBlockShape},
+    {.name = "cuMemAllocAsync", .fn_ptr = cuMemAllocAsync},
+    {.name = "cuMemAllocAsync_ptsz", .fn_ptr = cuMemAllocAsync_ptsz},
 };
 
 const int cuda_hook_nums =
@@ -1031,8 +1035,8 @@ CUresult cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes,
                          size_t Height, unsigned int ElementSizeBytes) {
   size_t used = 0;
   size_t request_size = ROUND_UP(WidthInBytes * Height, ElementSizeBytes);
-  CUresult ret;
 
+  CUresult ret;
   CUdevice ordinal;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
@@ -1076,6 +1080,49 @@ FROM_HOST:
   if (ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold) {
     goto FROM_HOST;
   }
+DONE:
+  return ret;
+}
+
+CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
+  size_t used = 0;
+  size_t request_size = bytesize;
+  CUresult ret;
+  CUdevice ordinal;
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  if (ret != CUDA_SUCCESS) {
+    goto DONE;
+  }
+  if (g_vgpu_config.devices[ordinal].memory_limit) {
+    get_used_gpu_memory((void *)&used, ordinal);
+    if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
+      ret = CUDA_ERROR_OUT_OF_MEMORY;
+      goto DONE;
+    }
+  }
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync, dptr, bytesize, hStream);
+DONE:
+  return ret;
+}
+
+CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
+  size_t used = 0;
+  size_t request_size = bytesize;
+  CUresult ret;
+  CUdevice ordinal;
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  if (ret != CUDA_SUCCESS) {
+    goto DONE;
+  }
+  if (g_vgpu_config.devices[ordinal].memory_limit) {
+    get_used_gpu_memory((void *)&used, ordinal);
+    if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
+      ret = CUDA_ERROR_OUT_OF_MEMORY;
+      goto DONE;
+    }
+  }
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync_ptsz, dptr,
+                                 bytesize, hStream);
 DONE:
   return ret;
 }

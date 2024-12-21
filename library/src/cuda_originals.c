@@ -2617,16 +2617,6 @@ CUresult cuIpcOpenMemHandle_v2(CUdeviceptr *pdptr, CUipcMemHandle handle,
                          handle, Flags);
 }
 
-CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync, dptr, bytesize,
-                         hStream);
-}
-
-CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
-                              CUstream hStream) {
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync_ptsz, dptr,
-                         bytesize, hStream);
-}
 CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
                                  CUmemoryPool pool, CUstream hStream) {
   return CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocFromPoolAsync, dptr,
@@ -2652,6 +2642,7 @@ CUresult cuMemMapArrayAsync_ptsz(CUarrayMapInfo *mapInfoList,
   return CUDA_ENTRY_CALL(cuda_library_entry, cuMemMapArrayAsync_ptsz,
                          mapInfoList, count, hStream);
 }
+
 CUresult cuMemPoolCreate(CUmemoryPool *pool, const CUmemPoolProps *poolProps) {
   return CUDA_ENTRY_CALL(cuda_library_entry, cuMemPoolCreate, pool, poolProps);
 }

@@ -130,7 +130,6 @@ func GetK8sPodCGroupPath(pod *corev1.Pod) (string, error) {
 	case SYSTEMD:
 		return cgroupName.ToSystemd(), nil
 	case CGROUPFS:
-		// cgroupfs: "/kubepods/burstable/pod2fc932ce-fdcc-454b-97bd-aadfdeb4c340/9be25294016e2dc0340dd605ce1f57b492039b267a6a618a7ad2a7a58a740f32"
 		return cgroupName.ToCgroupfs(), nil
 	default:
 		return "", fmt.Errorf("unknown CGroup driver: %s", currentCGroupDriver)

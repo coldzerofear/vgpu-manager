@@ -1,4 +1,4 @@
-FROM quay.io/jitesoft/ubuntu:20.04 AS builder
+FROM nvidia/cuda:12.4.1-devel-ubuntu20.04 as builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -6,20 +6,30 @@ ARG APT_MIRROR
 
 ARG GOLANG_VERSION=1.22.3
 
-RUN echo "Asia/Shanghai" > /etc/timezone && ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+RUN echo "Asia/Shanghai" > /etc/timezone && \
+    ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 RUN if [ -n "$APT_MIRROR" ]; then sed -i "s@http://archive.ubuntu.com@${APT_MIRROR}@g" /etc/apt/sources.list ; fi && \
-    apt-get -y update && apt-get install -y --no-install-recommends \
-    g++ ca-certificates wget && rm -rf /var/lib/apt/lists/*
+    apt-get -y update && apt-get -y install --no-install-recommends make cmake g++ ca-certificates wget && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN wget -nv -O - https://golang.google.cn/dl/go${GOLANG_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz \
     | tar -C /usr/local -xz
+
+# Compile vgpu driver library files
+WORKDIR /vgpu-controller
+
+COPY library/ .
+
+RUN chmod +x build.sh && ./build.sh
+
+# Compile the vgpu manager binary file
+WORKDIR /go/src/vgpu-manager
 
 ENV GOPATH /go
 ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
 ENV GO111MODULE on
 ENV GOPROXY https://goproxy.cn,direct
 
-WORKDIR /go/src/vgpu-manager
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
@@ -51,21 +61,6 @@ RUN	CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags=" \
        -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
        -o bin/deviceplugin cmd/device-plugin/*.go
 
-FROM nvidia/cuda:12.4.1-devel-ubuntu20.04 as nvbuilder
-
-ARG APT_MIRROR
-
-RUN echo "Asia/Shanghai" > /etc/timezone && \
-    ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-RUN if [ -n "$APT_MIRROR" ]; then sed -i "s@http://archive.ubuntu.com@${APT_MIRROR}@g" /etc/apt/sources.list ; fi && \
-    apt-get -y update && apt-get -y install make cmake && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /vgpu-controller
-
-COPY library/ .
-
-RUN chmod +x build.sh && ./build.sh
-
 FROM quay.io/jitesoft/ubuntu:20.04
 
 #ENV NVIDIA_VISIBLE_DEVICES=all
@@ -75,6 +70,6 @@ COPY --from=builder /go/src/vgpu-manager/bin/scheduler /usr/bin/scheduler
 COPY --from=builder /go/src/vgpu-manager/bin/deviceplugin /usr/bin/deviceplugin
 
 RUN mkdir -p /installed
-COPY --from=nvbuilder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
-COPY --from=nvbuilder /vgpu-controller/build/mem_occupy_tool /installed/mem_occupy_tool
+COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
+COPY --from=builder /vgpu-controller/build/mem_occupy_tool /installed/mem_occupy_tool
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload
