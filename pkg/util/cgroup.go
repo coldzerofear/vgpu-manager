@@ -5,7 +5,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 
@@ -142,13 +141,11 @@ func GetK8sPodContainerCGroupFullPath(pod *corev1.Pod, containerName string,
 		runtimeName string
 		containerId string
 	)
-	index := slices.IndexFunc(pod.Status.ContainerStatuses, func(status corev1.ContainerStatus) bool {
-		return status.Name == containerName
-	})
-	if index < 0 {
+	containerStatus, ok := GetContainerStatus(pod, containerName)
+	if !ok {
 		return "", fmt.Errorf("failed to obtain container cgroup path")
 	}
-	runtimeName, containerId = parseRuntime(pod.Status.ContainerStatuses[index].ContainerID)
+	runtimeName, containerId = ParseContainerRuntime(containerStatus.ContainerID)
 	cgroupName := NewPodCgroupName(pod)
 	switch currentCGroupDriver {
 	case SYSTEMD:
@@ -213,7 +210,23 @@ func convertSystemdFullPath(runtimeName, containerId string,
 	}
 }
 
-func parseRuntime(podContainerId string) (runtimeName string, containerId string) {
+func GetContainerStatus(pod *corev1.Pod, containerName string) (*corev1.ContainerStatus, bool) {
+	for i, status := range pod.Status.ContainerStatuses {
+		if status.Name == containerName {
+			return &pod.Status.ContainerStatuses[i], true
+		}
+	}
+	return nil, false
+}
+
+func GetContainerRuntime(pod *corev1.Pod, containerName string) (runtimeName string, containerId string) {
+	if status, ok := GetContainerStatus(pod, containerName); ok {
+		runtimeName, containerId = ParseContainerRuntime(status.ContainerID)
+	}
+	return
+}
+
+func ParseContainerRuntime(podContainerId string) (runtimeName string, containerId string) {
 	if splits := strings.Split(podContainerId, "://"); len(splits) == 2 {
 		runtimeName = splits[0]
 		containerId = splits[1]

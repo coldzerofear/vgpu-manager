@@ -20,6 +20,7 @@ const (
 	versionPath = "/version"
 	healthzPath = "/healthz"
 	readyzPath  = "/readyz"
+	merticsPath = "/mertics"
 	apiPrefix   = "/scheduler"
 	// predication router path
 	filterPerfix = apiPrefix + "/filter"
@@ -63,6 +64,13 @@ func AddHealthProbe(router *httprouter.Router) {
 	}
 	router.GET(healthzPath, DebugLogging(handlerFunc, healthzPath))
 	router.GET(readyzPath, DebugLogging(handlerFunc, readyzPath))
+}
+
+func AddMetricsHandle(router *httprouter.Router, metrics http.Handler) {
+	handleFunc := func(writer http.ResponseWriter, request *http.Request, _ httprouter.Params) {
+		metrics.ServeHTTP(writer, request)
+	}
+	router.GET(merticsPath, DebugLogging(handleFunc, merticsPath))
 }
 
 func AddFilterPredicate(router *httprouter.Router, predicate predicate.FilterPredicate) {

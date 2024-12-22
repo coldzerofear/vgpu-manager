@@ -15,9 +15,9 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/bind"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
-	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/route"
 	tlsconfig "github.com/grepplabs/cert-source/config"
 	tlsserverconfig "github.com/grepplabs/cert-source/tls/server/config"
 	"github.com/julienschmidt/httprouter"
@@ -90,11 +90,11 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler FilterPlugin failed: %v", err)
 	}
-	router := httprouter.New()
-	route.AddVersion(router)
-	route.AddHealthProbe(router)
-	route.AddFilterPredicate(router, filterPlugin)
-	route.AddBindPredicate(router, bindPlugin)
+	handler := httprouter.New()
+	route.AddVersion(handler)
+	route.AddHealthProbe(handler)
+	route.AddFilterPredicate(handler, filterPlugin)
+	route.AddBindPredicate(handler, bindPlugin)
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 
@@ -111,7 +111,7 @@ func main() {
 
 	server := http.Server{
 		Addr:      "0.0.0.0:" + strconv.Itoa(opt.ServerBindProt),
-		Handler:   router,
+		Handler:   handler,
 		TLSConfig: tlsConfig,
 	}
 	go func() {

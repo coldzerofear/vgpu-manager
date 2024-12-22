@@ -172,7 +172,8 @@ spec:
             - --server-bind-port=3456
             - --v=4
           ports:
-            - containerPort: 3456
+            - name: http
+              containerPort: 3456
           resources:
             requests:
               cpu: 50m
@@ -206,9 +207,10 @@ metadata:
   namespace: kube-system
 spec:
   ports:
-    - port: 3456
+    - name: http
+      port: 3456
       protocol: TCP
-      targetPort: 3456
+      targetPort: http
   selector:
     app: vgpu-manager-scheduler
   type: ClusterIP

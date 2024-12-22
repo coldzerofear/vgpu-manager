@@ -146,10 +146,66 @@ spec:
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
           securityContext:
+            #privileged: true
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
               add: ["SYS_ADMIN"]
+          resources: {}
+          volumeMounts:
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+            - name: manager
+              mountPath: /etc/vgpu-manager
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+            - name: node-config
+              mountPath: /config
+        - name: device-monitor
+          image: coldzerofear/vgpu-manager:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - monitor
+            - --server-bind-port=3456
+            - --node-config-path=/config/nodeConfig.json
+            - --v=4
+          ports:
+            - name: http
+              containerPort: 3456
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+#            - name: CGROUP_DRIVER
+#              value: systemd
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_MIG_MONITOR_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+          securityContext:
+            #privileged: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
+          resources: {}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3456
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3456
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
           volumeMounts:
             - name: kubelet
               mountPath: /var/lib/kubelet
@@ -173,4 +229,18 @@ spec:
         - name: node-config
           configMap:
             name: vgpu-manager-device-plugin-config
-
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-monitor
+  namespace: kube-system
+spec:
+  ports:
+    - name: http
+      port: 3456
+      protocol: TCP
+      targetPort: http
+  selector:
+    app: vgpu-manager-device-plugin
+  type: ClusterIP

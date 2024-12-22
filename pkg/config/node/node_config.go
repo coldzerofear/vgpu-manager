@@ -7,7 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
+	dpoptions "github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
+	monitoroptions "github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
@@ -31,6 +32,7 @@ type NodeConfig struct {
 	deviceMemoryFactor  int
 	deviceCoresScaling  float64
 	excludeDevices      sets.Int
+	checkFields         bool
 }
 
 func (nc NodeConfig) NodeName() string {
@@ -92,19 +94,36 @@ func checkNodeConfig(nodeConfig *NodeConfig) error {
 	return nil
 }
 
-func NewNodeConfig(opt options.Options) (*NodeConfig, error) {
-	config := &NodeConfig{
-		nodeName:            opt.NodeName,
-		cgroupDriver:        opt.CGroupDriver,
-		deviceSplitCount:    opt.DeviceSplitCount,
-		devicePluginPath:    opt.DevicePluginPath,
-		deviceMemoryScaling: opt.DeviceMemoryScaling,
-		deviceMemoryFactor:  opt.DeviceMemoryFactor,
-		deviceCoresScaling:  opt.DeviceCoresScaling,
-		excludeDevices:      ParseExcludeDevices(opt.ExcludeDevices),
+func MutationDPOptions(opt dpoptions.Options) func(*NodeConfig) {
+	return func(nodeConfig *NodeConfig) {
+		nodeConfig.nodeName = opt.NodeName
+		nodeConfig.cgroupDriver = opt.CGroupDriver
+		nodeConfig.deviceSplitCount = opt.DeviceSplitCount
+		nodeConfig.devicePluginPath = opt.DevicePluginPath
+		nodeConfig.deviceMemoryScaling = opt.DeviceMemoryScaling
+		nodeConfig.deviceMemoryFactor = opt.DeviceMemoryFactor
+		nodeConfig.deviceCoresScaling = opt.DeviceCoresScaling
+		nodeConfig.excludeDevices = ParseExcludeDevices(opt.ExcludeDevices)
+		nodeConfig.checkFields = true
 	}
-	if len(opt.NodeConfigPath) > 0 {
-		bytes, err := os.ReadFile(opt.NodeConfigPath)
+}
+
+func MutationMonitorOptions(opt monitoroptions.Options) func(*NodeConfig) {
+	return func(nodeConfig *NodeConfig) {
+		nodeConfig.nodeName = opt.NodeName
+		nodeConfig.cgroupDriver = opt.CGroupDriver
+		nodeConfig.excludeDevices = sets.NewInt()
+		nodeConfig.checkFields = false
+	}
+}
+
+func NewNodeConfig(nodeConfigPath string, mutations ...func(*NodeConfig)) (*NodeConfig, error) {
+	config := &NodeConfig{}
+	for _, mutation := range mutations {
+		mutation(config)
+	}
+	if len(nodeConfigPath) > 0 {
+		bytes, err := os.ReadFile(nodeConfigPath)
 		if err != nil {
 			return nil, err
 		}
@@ -138,7 +157,11 @@ func NewNodeConfig(opt options.Options) (*NodeConfig, error) {
 			break
 		}
 	}
-	return config, checkNodeConfig(config)
+	var err error
+	if config.checkFields {
+		err = checkNodeConfig(config)
+	}
+	return config, err
 }
 
 func ParseExcludeDevices(excludeDevices string) sets.Int {

@@ -6,44 +6,107 @@ The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager
 
 Will support multi card virtualization allocation
 
-Project objectives:
+## Project objectives:
 
 * Simplify GRPC calls within containers
-* support CUDA12 version drivers
+* support CUDA 12.x version drivers
 * support cgroupv2
 * dual scheduling strategy for nodes and devices
 * Compatible with hot swappable devices and expansion capabilities
 
 The project is currently underway.
 
-// qos mount to /etc/vgpu-manager/cgroup/ ReadOnly
-/sys/fs/cgroup/devices/kubepods.slice/kubepods-pod68bc7fad_794f_4c77_9eae_4120e76b29a4.slice 
+## Prerequisite
 
-// besteffort qos mount to /etc/vgpu-manager/cgroup/ ReadOnly
-/sys/fs/cgroup/devices/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod68bc7fad_794f_4c77_9eae_4120e76b29a4.slice
+* Kubernetes v1.22+ (other version not tested)
+* Docker / Containerd (other version not tested)
+* Cuda driver 12+
 
-// burstable qos mount to /etc/vgpu-manager/cgroup/ ReadOnly
-/sys/fs/cgroup/devices/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod68bc7fad_794f_4c77_9eae_4120e76b29a4.slice
+## Deploy
 
-cgroupv2
-/sys/fs/cgroup/kubepods.slice/kubepods-pod68bc7fad_794f_4c77_9eae_4120e76b29a4.slice
+precondition: `nvidia-container-toolkit` must be installed and the container configured correctly
 
-/sys/fs/cgroup/devices/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pode151a555_a8bc_406f_a249_9ca74724ad79.slice/d288a1e0952727ffbee274066206608e47cf78421eeea6d4b1af66eb35781754
+* deploy
 
-宿主机目录
-/etc/vgpu-manager/{pod-uid}-{container-name}/vgpu.config
-/etc/vgpu-manager/vgpu.sock
-/etc/vgpu-manager/vgpu-control.so
-/etc/vgpu-manager/ld.so.preload
+```bash
+kubectl apply -f deploy/vgpu-manager-scheduler.yaml
+kubectl apply -f deploy/vgpu-manager-deviceplugin.yaml
+```
 
-容器内目录
-/etc/vgpu-manager/vgpu.config
-/etc/vgpu-manager/host_cgroup/
-/etc/vgpu-manager/host_proc/
+* uninstall
 
-动态均衡利用率 
-当只有一个gpu进程，将所有的利用率分配（100%）
-当发现新的gpu进程，调整利用率
+```shell
+kubectl delete -f deploy/vgpu-manager-scheduler.yaml
+kubectl delete -f deploy/vgpu-manager-deviceplugin.yaml
+```
 
+* label nodes with `device-mounter=enable`
 
+```shell
+kubectl label node <nodename> vgpu-manager-enable=enable
+```
+
+Note that the scheduler version needs to be modified according to the cluster version
+```yaml
+      containers:
+        - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
+          imagePullPolicy: IfNotPresent
+          name: scheduler
+```
+
+## Example of use
+
+Submit a VGPU container application with 10% computing power and 1GB of memory
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-pod
+  namespace: default
+spec:    
+  schedulerName: vgpu-scheduler # Specify scheduler
+  terminationGracePeriodSeconds: 0
+  containers:
+  - name: default
+    image: nvidia/cuda:12.4.1-devel-ubuntu20.04
+    command: ["sleep", "9999999"]
+    resources:
+      requests:
+        cpu: 1
+        memory: 2Gi
+      limits:
+        cpu: 2
+        memory: 4Gi
+        nvidia.com/vgpu-number: 1     # one gpu
+        nvidia.com/vgpu-core: 10      # Allocate 10% of computing power
+        nvidia.com/vgpu-memory: 1024  # Allocate memory quantity
+```
+
+Check the container
+
+```bash
+root@gpu-pod1:/# nvidia-smi 
+[vGPU INFO(34|loader.c|1043)]: loaded nvml libraries
+[vGPU INFO(34|loader.c|1171)]: loaded cuda libraries
+Sun Dec 22 19:20:47 2024       
++---------------------------------------------------------------------------------------+
+| NVIDIA-SMI 535.183.01             Driver Version: 535.183.01   CUDA Version: 12.2     |
+|-----------------------------------------+----------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
+|                                         |                      |               MIG M. |
+|=========================================+======================+======================|
+|   0  NVIDIA GeForce GTX 1050 Ti     Off | 00000000:01:00.0 Off |                  N/A |
+| N/A   42C    P8              N/A / ERR! |      0MiB /  1024MiB |      0%      Default |
+|                                         |                      |                  N/A |
++-----------------------------------------+----------------------+----------------------+
+                                                                                         
++---------------------------------------------------------------------------------------+
+| Processes:                                                                            |
+|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
+|        ID   ID                                                             Usage      |
+|=======================================================================================|
++---------------------------------------------------------------------------------------+
+```
 

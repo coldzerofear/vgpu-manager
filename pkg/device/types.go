@@ -390,6 +390,34 @@ type NodeInfo struct {
 	maxCapability int // 最大算力等级单位
 }
 
+func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
+	var (
+		podAssignDevices  PodDevices
+		realAssignDevices = PodDevices{}
+		preAssignDevices  = PodDevices{}
+	)
+	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
+	if len(realAlloc) > 0 {
+		if err := realAssignDevices.UnmarshalText(realAlloc); err != nil {
+			klog.Warningf("Pod <%s/%s> real allocation device annotation parse failed: %v",
+				pod.Namespace, pod.Name, err)
+		}
+	}
+	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
+	if len(preAlloc) > 0 {
+		if err := preAssignDevices.UnmarshalText(preAlloc); err != nil {
+			klog.Warningf("Pod <%s/%s> pre allocation device annotation parse failed: %v",
+				pod.Namespace, pod.Name, err)
+		}
+	}
+	if len(realAssignDevices) >= len(preAssignDevices) {
+		podAssignDevices = realAssignDevices
+	} else {
+		podAssignDevices = preAssignDevices
+	}
+	return podAssignDevices
+}
+
 func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	klog.V(4).Infof("NewNodeInfo creates nodeInfo for %s", node.Name)
 
@@ -415,30 +443,7 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 		if !util.IsVGPUResourcePod(pod) {
 			continue
 		}
-		var (
-			podAssignDevices  PodDevices
-			realAssignDevices = PodDevices{}
-			preAssignDevices  = PodDevices{}
-		)
-		realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
-		if len(realAlloc) > 0 {
-			if err = realAssignDevices.UnmarshalText(realAlloc); err != nil {
-				klog.Warningf("Pod <%s/%s> real allocation device annotation parse failed: %v",
-					pod.Namespace, pod.Name, err)
-			}
-		}
-		preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
-		if len(preAlloc) > 0 {
-			if err = preAssignDevices.UnmarshalText(preAlloc); err != nil {
-				klog.Warningf("Pod <%s/%s> pre allocation device annotation parse failed: %v",
-					pod.Namespace, pod.Name, err)
-			}
-		}
-		if len(realAssignDevices) >= len(preAssignDevices) {
-			podAssignDevices = realAssignDevices
-		} else {
-			podAssignDevices = preAssignDevices
-		}
+		podAssignDevices := GetPodAssignDevices(pod)
 		if len(podAssignDevices) == 0 {
 			klog.Warningf("Discovered that pod <%s/%s> device annotations may be damaged",
 				pod.Namespace, pod.Name)

@@ -36,7 +36,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create k8s kubeClient failed: %v", err)
 	}
-	nodeConfig, err := node.NewNodeConfig(*opt)
+	nodeConfig, err := node.NewNodeConfig(opt.NodeConfigPath, node.MutationDPOptions(*opt))
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}

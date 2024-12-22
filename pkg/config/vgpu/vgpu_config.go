@@ -1,6 +1,7 @@
 package vgpu
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"syscall"
@@ -107,6 +108,13 @@ type ResourceDataT struct {
 	ContainerName [64]byte
 	Devices       [util.MaxDeviceNumber]DeviceT
 	DeviceCount   int32
+}
+
+func (r *ResourceDataT) DeepCopy() *ResourceDataT {
+	jsonBytes, _ := json.Marshal(r)
+	data := &ResourceDataT{}
+	json.Unmarshal(jsonBytes, data)
+	return data
 }
 
 func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
