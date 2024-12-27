@@ -9,18 +9,18 @@ Will support multi card virtualization allocation
 ## Project objectives:
 
 * Simplify GRPC calls within containers
-* support CUDA 12.x version drivers
-* support cgroupv2
-* dual scheduling strategy for nodes and devices
+* Support CUDA 12.x version drivers
+* Support CGroup v2
+* Dual scheduling strategy for nodes and devices
 * Compatible with hot swappable devices and expansion capabilities
 
 The project is currently underway.
 
 ## Prerequisite
 
-* Kubernetes v1.22+ (other version not tested)
-* Docker / Containerd (other version not tested)
-* Cuda driver 12+
+* Kubernetes v1.23+ (other version not tested)
+* Docker/Containerd (other version not tested)
+* CudaDriver 12+
 
 ## Deploy
 
@@ -83,7 +83,7 @@ spec:
         nvidia.com/vgpu-memory: 1024  # Allocate memory quantity
 ```
 
-Check the container
+Check that the container meets expectations
 
 ```bash
 root@gpu-pod1:/# nvidia-smi 
@@ -110,3 +110,49 @@ Sun Dec 22 19:20:47 2024
 +---------------------------------------------------------------------------------------+
 ```
 
+## Scheduling strategy 
+
+Support scheduling strategies for both node and device dimensions
+
+* `binpack`: Choose the busiest nodes or devices to improve resource utilization and reduce fragmentation.
+* `spread`: Select the most idle node or device to distribute tasks and isolate faults.
+
+### Usage
+
+Add annotations on the vGPU pod: `nvidia.com/node-scheduler-policy` or  `nvidia.com/device-scheduler-policy`
+
+```yaml
+metadata:
+  annotations:
+    nvidia.com/node-scheduler-policy: spread
+    nvidia.com/device-scheduler-policy: binpack
+```
+
+## Select devices
+
+Support selecting device type or uuid
+
+Add annotations to vGPU pod to select or exclude device types to be scheduled: 
+`nvidia.com/include-gpu-type` `nvidia.com/exclude-gpu-type`
+
+If there are multiple devices separated by commas
+
+Example: Choose to use A10 and exclude A100
+```yaml
+metadata:
+  annotations:
+    nvidia.com/include-gpu-type: "A10"  
+    nvidia.com/exclude-gpu-type: "A100"
+```
+
+Add annotations to vGPU pod to select or exclude device uuids to be scheduled:
+`nvidia.com/include-gpu-uuid` `nvidia.com/exclude-gpu-uuid`
+
+If there are multiple devices separated by commas
+
+Example: Select a GPU uuid
+```yaml
+metadata:
+  annotations:
+    nvidia.com/include-gpu-uuid: GPU-49aa2e6a-33f3-99dd-e08b-ea4beb0e0d28
+```
