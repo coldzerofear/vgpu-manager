@@ -14,7 +14,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
-	"github.com/coldzerofear/vgpu-manager/pkg/mertics"
+	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -50,10 +50,10 @@ func main() {
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
-	nodeInformer := mertics.GetNodeInformer(factory, nodeConfig.NodeName())
-	podInformer := mertics.GetPodInformer(factory, nodeConfig.NodeName())
-	contLister := mertics.NewContainerLister(podInformer)
-	server := mertics.NewServer(nodeInformer, podInformer, contLister, nodeConfig.NodeName(), opt.ServerBindProt)
+	nodeInformer := metrics.GetNodeInformer(factory, nodeConfig.NodeName())
+	podInformer := metrics.GetPodInformer(factory, nodeConfig.NodeName())
+	contLister := metrics.NewContainerLister(podInformer)
+	server := metrics.NewServer(nodeInformer, podInformer, contLister, nodeConfig.NodeName(), opt.ServerBindProt)
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
 

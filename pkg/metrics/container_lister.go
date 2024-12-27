@@ -1,4 +1,4 @@
-package mertics
+package metrics
 
 import (
 	"fmt"

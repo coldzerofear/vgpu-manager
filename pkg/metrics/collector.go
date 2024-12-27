@@ -1,4 +1,4 @@
-package mertics
+package metrics
 
 import (
 	"fmt"
@@ -308,14 +308,14 @@ skip:
 			}
 
 			klog.V(4).Infoln("Container matching: using resource data", "ContainerName", container.Name)
-			var getfullPath func(string) string
+			var getFullPath func(string) string
 			if cgroups.IsCgroup2UnifiedMode() {
-				getfullPath = util.GetK8sPodCGroupFullPath
+				getFullPath = util.GetK8sPodCGroupFullPath
 			} else {
-				getfullPath = util.GetK8sPodDeviceCGroupFullPath
+				getFullPath = util.GetK8sPodDeviceCGroupFullPath
 			}
 			var containerPids []uint32
-			ContainerPidsFunc(pod, container.Name, getfullPath, func(pid int) {
+			ContainerPidsFunc(pod, container.Name, getFullPath, func(pid int) {
 				containerPids = append(containerPids, uint32(pid))
 			})
 			_, containerId := util.GetContainerRuntime(pod, container.Name)
