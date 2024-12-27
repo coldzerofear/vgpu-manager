@@ -150,6 +150,7 @@ spec:
       # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
       priorityClassName: system-node-critical
       terminationGracePeriodSeconds: 30
+      restartPolicy: Always
       containers:
         - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
           imagePullPolicy: IfNotPresent

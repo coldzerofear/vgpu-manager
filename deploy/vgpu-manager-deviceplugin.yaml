@@ -101,11 +101,11 @@ spec:
       # be rescheduled after a failure.
       # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
       priorityClassName: system-node-critical
-      hostPID: true
       nodeSelector:
         vgpu-manager-enable: enable
       serviceAccount: vgpu-manager-device-plugin
       terminationGracePeriodSeconds: 30
+      restartPolicy: Always
       initContainers:
         - name: install
           command: ["/bin/bash", "-c", "cp /installed/* /etc/vgpu-manager/"]
