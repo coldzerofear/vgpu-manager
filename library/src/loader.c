@@ -1249,7 +1249,7 @@ int check_file_exist(const char *file_path) {
   }
 }
 
-int read_file_to_confg_path(const char* filename, resource_data_t* data) {
+int read_file_to_config_path(const char* filename, resource_data_t* data) {
   if (unlikely(check_file_exist(filename))) {
     return 1;
   }
@@ -1266,7 +1266,7 @@ int read_file_to_confg_path(const char* filename, resource_data_t* data) {
            sizeof(resource_data_t), rsize);
     goto DONE;
   }
-  LOGGER(VERBOSE, "------------------read_file_to_confg_path------------------");
+  LOGGER(VERBOSE, "------------------read_file_to_config_path------------------");
   LOGGER(VERBOSE, "pod name         : %s", g_vgpu_config.pod_name);
   LOGGER(VERBOSE, "pod namespace    : %s", g_vgpu_config.pod_namespace);
   LOGGER(VERBOSE, "pod uid          : %s", g_vgpu_config.pod_uid);
@@ -1290,8 +1290,7 @@ DONE:
   return 0;
 }
 
-// 写配置文件到指定地址
-int write_file_to_confg_path(resource_data_t* data) {
+int write_file_to_config_path(resource_data_t* data) {
   int fd = 0;
   int wsize = 0;
   int ret = 0;
@@ -1377,7 +1376,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     pthread_mutex_unlock(&tid_dlsym_lock);
     return h;
   }
-  // 拦截cuda
+  // hijack cuda
   int i;
   if (symbol[0] == 'c' && symbol[1] == 'u') {
     load_necessary_data();
@@ -1388,7 +1387,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
       }
     }
   }
-  // 拦截nvml
+  // hijack nvml
   if (symbol[0] == 'n' && symbol[1] == 'v' && symbol[2] == 'm' && symbol[3] == 'l' ) {
     load_necessary_data();
     for (i = 0; i < nvml_hook_nums; i++) {
@@ -1400,141 +1399,6 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   }
   return real_dlsym(handle, symbol);
 }
-
-// int merge_pid(unsigned int *prev, unsigned int *current, nvmlProcessInfo_t *sub, nvmlProcessInfo_t *merged) {
-//   int found = 0;
-//   int i, j;
-//   for (i = 0; i < *prev; i++){
-//     found = 0;
-//     for (j = 0; j < *current; j++) {
-//       LOGGER(INFO, "merge pid=%d",sub[i].pid);
-//       if (sub[i].pid == merged[j].pid) {
-//         found = 1;
-//         break;
-//       }
-//     }
-//     if (!found) {
-//       LOGGER(VERBOSE, "merged pid=%d\n",sub[i].pid);
-//       merged[*current].pid = sub[i].pid;
-//       (*current)++;
-//     }
-//   }
-//   return 0;
-// }
-
-// int get_extra_pid(unsigned int prev, unsigned int current, nvmlProcessInfo_t *pre_pids_on_device, nvmlProcessInfo_t *pids_on_device) {
-//   int i, j;
-//   int found = 0;
-//   for (i = 0; i < prev; i++){
-//     LOGGER(INFO, "prev pids[%d]=%d", i, pre_pids_on_device[i].pid);
-//   }
-//   for (i = 0; i< current; i++) {
-//     LOGGER(INFO, "current pids[%d]=%d", i, pids_on_device[i].pid);
-//   }
-//   if (current - prev <= 0) {
-//     return 0;
-//   }
-//   for (i = 0; i < current; i++) {
-//     found = 0;
-//     for (j = 0; j < prev; j++) {
-//       if (pids_on_device[i].pid == pre_pids_on_device[j].pid) {
-//         found = 1;
-//         break;
-//       }
-//     }
-//     if (!found) {
-//       return pids_on_device[i].pid;
-//     }
-//   }
-//   return 0;
-// }
-
-// static void pre_init_library() {
-//   load_nvml_single_library(NVML_ENTRY_ENUM(nvmlInitWithFlags));
-//   load_nvml_single_library(NVML_ENTRY_ENUM(nvmlInit_v2));
-//   load_nvml_single_library(NVML_ENTRY_ENUM(nvmlInit));
-//   load_nvml_single_library(NVML_ENTRY_ENUM(nvmlDeviceGetHandleByIndex));
-//   load_nvml_single_library(NVML_ENTRY_ENUM(nvmlDeviceGetHandleByIndex_v2));
-//   load_nvml_single_library(NVML_ENTRY_ENUM(nvmlDeviceGetComputeRunningProcesses));
-//   load_nvml_single_library(NVML_ENTRY_ENUM(nvmlDeviceGetCount_v2));
-//   load_nvml_single_library(NVML_ENTRY_ENUM(nvmlDeviceGetCount));
-//   load_cuda_single_library(CUDA_ENTRY_ENUM(cuInit));
-//   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDevicePrimaryCtxRetain));
-//   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDevicePrimaryCtxRelease));
-// }
-
-// int get_host_pid() {
-//   pre_init_library();
-//   if (NVML_FIND_ENTRY(nvml_library_entry, nvmlInitWithFlags)) {
-//     NVML_ENTRY_CHECK(nvml_library_entry, nvmlInitWithFlags, 0);
-//   } else if (NVML_FIND_ENTRY(nvml_library_entry, nvmlInit_v2)) {
-//     NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit_v2);
-//   } else {
-//     NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit);
-//   }
-//   unsigned int running_processes = 0, previous = 0, merged_num = 0;
-//   nvmlProcessInfo_t tmp_pids_on_device[MAX_PIDS];
-//   nvmlProcessInfo_t pre_pids_on_device[MAX_PIDS];
-//   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
-
-//   //NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, 0, &device);
-//   CUDA_ENTRY_CHECK(cuda_library_entry, cuInit, 0);
-//   // TODO 定位host pid
-//   unsigned int nvmlCounts;
-//   nvmlDevice_t device;
-//   nvmlReturn_t res;
-//   if (NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetCount_v2)) {
-//     NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCount_v2, &nvmlCounts);
-//   } else {
-//     NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCount, &nvmlCounts); 
-//   }
-
-//   int i;
-//   for (i = 0; i < nvmlCounts; i++) {
-//     NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, i, &device);
-//     do{
-//       res = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses, device, &previous, tmp_pids_on_device);
-//       if (res != NVML_SUCCESS && res != NVML_ERROR_INSUFFICIENT_SIZE) {
-//         LOGGER(WARNING, "device: %d, GetComputeRunningProcesses call failed: %d\n", i, res);
-//         return res;
-//       }
-//     } while (res == NVML_ERROR_INSUFFICIENT_SIZE);
-//     merge_pid(&previous, &merged_num, (nvmlProcessInfo_t *)tmp_pids_on_device, (nvmlProcessInfo_t *)pre_pids_on_device);
-//   }
-
-//   previous = merged_num;
-//   merged_num = 0;
-//   memset(tmp_pids_on_device, 0, sizeof(nvmlProcessInfo_t) * MAX_PIDS);
-
-//   CUcontext pctx;
-//   CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRetain, &pctx, 0);
-
-//   for (i = 0; i < nvmlCounts; i++) {
-//     NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, i, &device);
-//     do{
-//       res = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses, device, &running_processes, tmp_pids_on_device);
-//       if (res != NVML_SUCCESS && res != NVML_ERROR_INSUFFICIENT_SIZE) {
-//         LOGGER(WARNING, "device: %d, GetComputeRunningProcesses call failed: %d\n", i, res);
-//         return res;
-//       }
-//     } while (res == NVML_ERROR_INSUFFICIENT_SIZE);
-//     merge_pid(&running_processes, &merged_num, (nvmlProcessInfo_t *)tmp_pids_on_device, (nvmlProcessInfo_t *)pids_on_device);
-//   } 
-//   running_processes = merged_num;
-//   LOGGER(INFO, "current processes num = %u %u", previous, running_processes);
-//   for (i = 0; i < merged_num; i++){
-//     LOGGER(INFO, "current pid in use is %d %d", i, pids_on_device[i].pid);
-//     //tmp_pids_on_device[i].pid=0;
-//   }
-//   unsigned int hostpid = get_extra_pid(previous, running_processes, pre_pids_on_device, pids_on_device); 
-//   if (hostpid <= 0) {
-//     LOGGER(FATAL, "host pid is error!");
-//   }
-
-//   CUDA_ENTRY_CHECK(cuda_library_entry, cuDevicePrimaryCtxRelease, 0);
-//   return hostpid;
-// }
-
 
 static volatile int init_config_flag = 0;
 
@@ -1549,7 +1413,7 @@ int load_controller_configuration() {
       LOGGER(VERBOSE, "find current container id: %s", container_id);
     }
   }
-  ret = read_file_to_confg_path(CONTROLLER_CONFIG_PATH, &g_vgpu_config);
+  ret = read_file_to_config_path(CONTROLLER_CONFIG_PATH, &g_vgpu_config);
   if (likely(ret==0)) {
     init_config_flag = 1;
     goto DONE;
@@ -1647,7 +1511,7 @@ int load_controller_configuration() {
     LOGGER(VERBOSE, "device memory    : %ld", g_vgpu_config.devices[i].device_memory);
   }
   LOGGER(VERBOSE, "-----------------------------------------------------------");
-  ret = write_file_to_confg_path(&g_vgpu_config);
+  ret = write_file_to_config_path(&g_vgpu_config);
   if (unlikely(ret)) {
     LOGGER(ERROR, "failed to write vgpu config file %s", CONTROLLER_CONFIG_PATH);
     goto DONE;
@@ -1659,14 +1523,9 @@ DONE:
 }
 
 void load_necessary_data() {
-  // 加载vcuda.config配置文件到全局变量
   load_controller_configuration();
-  // 读取驱动版本
   read_version_from_proc(driver_version);
-  // 加载nvml库
   pthread_once(&g_nvml_lib_init, load_nvml_libraries);
-  // 加载cuda库
   pthread_once(&g_cuda_lib_init, load_cuda_libraries);
-  // 加载单一cuda库
   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
 }
