@@ -207,7 +207,7 @@ func (m *MemoryDevicePlugin) GetPreferredAllocation(context.Context, *pluginapi.
 // of the steps to make the Device available in the container
 func (m *MemoryDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateRequest) (*pluginapi.AllocateResponse, error) {
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
-	for i, _ := range req.ContainerRequests {
+	for i := range req.ContainerRequests {
 		responses[i] = &pluginapi.ContainerAllocateResponse{}
 	}
 	return &pluginapi.AllocateResponse{ContainerResponses: responses}, nil

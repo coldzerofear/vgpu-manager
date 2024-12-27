@@ -48,7 +48,7 @@ type NumberDevicePlugin struct {
 
 var _ DevicePlugin = &NumberDevicePlugin{}
 
-// NewCoreDevicePlugin returns an initialized CoreDevicePlugin
+// NewNumberDevicePlugin returns an initialized NumberDevicePlugin
 func NewNumberDevicePlugin(resourceName string, manager *manager.DeviceManager,
 	socket string, kubeClient *kubernetes.Clientset, podInformer cache.SharedIndexInformer) DevicePlugin {
 	return &NumberDevicePlugin{
@@ -266,7 +266,7 @@ func GetDeviceMinorMap(gpus []manager.GPUDevice) map[string]int {
 // Allocate is called during container creation so that the Device
 // Plugin can run device specific operations and instruct Kubelet
 // of the steps to make the Device available in the container
-func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
+func (m *NumberDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
 	klog.V(4).Infoln("Allocate", req.GetContainerRequests())
 	var (
 		activePods []corev1.Pod
