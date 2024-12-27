@@ -894,7 +894,6 @@ CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize) {
       }
     } else if (unlikely(used > g_vgpu_config.devices[ordinal].device_memory)) {
       // 当开启了虚拟内存，当前已使用内存大于设备真实内存时，抛出oom
-      // 计算当前上下文占用的设备内存是否超出限制，上下文一般占用256m左右
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     } else if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].device_memory)) {
@@ -945,7 +944,6 @@ CUresult cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
       }
     } else if (unlikely(used > g_vgpu_config.devices[ordinal].device_memory)) {
       // 当开启了虚拟内存，当前已使用内存大于设备真实内存时，抛出oom
-      // 计算当前上下文占用的设备内存是否超出限制，上下文一般占用256m左右
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     } else if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].device_memory)) {
@@ -999,7 +997,6 @@ CUresult cuMemAllocPitch_v2(CUdeviceptr *dptr, size_t *pPitch,
       }
     } else if (unlikely(used > g_vgpu_config.devices[ordinal].device_memory)) {
       // 当开启了虚拟内存，当前已使用内存大于设备真实内存时，抛出oom
-      // 计算当前上下文占用的设备内存是否超出限制，上下文一般占用256m左右
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     } else if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].device_memory)) {
@@ -1053,7 +1050,6 @@ CUresult cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes,
       }
     } else if (unlikely(used > g_vgpu_config.devices[ordinal].device_memory)) {
       // 当开启了虚拟内存，当前已使用内存大于设备真实内存时，抛出oom
-      // 计算当前上下文占用的设备内存是否超出限制，上下文一般占用256m左右
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     } else if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].device_memory)) {
