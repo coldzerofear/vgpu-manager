@@ -3,6 +3,7 @@ package bind
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
@@ -63,23 +64,23 @@ func (b *nodeBinding) Bind(args extenderv1.ExtenderBindingArgs) *extenderv1.Exte
 			Error: err.Error(),
 		}
 	}
+	assignedPhase := util.AssignPhaseSucceed
+	predicateTime := fmt.Sprintf("%d", uint64(math.MaxUint64))
 	if util.IsVGPUResourcePod(pod) {
-		patchData := client.PatchMetadata{
-			Labels: map[string]string{
-				util.PodAssignedPhaseLabel: string(util.AssignPhaseAllocating),
-			},
-			Annotations: map[string]string{
-				util.PodPredicateTimeAnnotation: fmt.Sprintf("%d", metav1.NowMicro().UnixMicro()),
-			},
-		}
-		err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-			return client.PatchPodMetadata(b.kubeClient, pod, patchData)
-		})
-		if err != nil {
-			klog.Errorf("Patch Pod <%s/%s> metadata failed: %v", args.PodNamespace, args.PodName, err)
-			return &extenderv1.ExtenderBindingResult{
-				Error: fmt.Sprintf("Patch vgpu metadata failed: %v", err),
-			}
+		assignedPhase = util.AssignPhaseAllocating
+		predicateTime = fmt.Sprintf("%d", metav1.NowMicro().UnixMicro())
+	}
+	patchData := client.PatchMetadata{
+		Labels:      map[string]string{util.PodAssignedPhaseLabel: string(assignedPhase)},
+		Annotations: map[string]string{util.PodPredicateTimeAnnotation: predicateTime},
+	}
+	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
+		return client.PatchPodMetadata(b.kubeClient, pod, patchData)
+	})
+	if err != nil {
+		klog.Errorf("Patch Pod <%s/%s> metadata failed: %v", args.PodNamespace, args.PodName, err)
+		return &extenderv1.ExtenderBindingResult{
+			Error: fmt.Sprintf("Patch vgpu metadata failed: %v", err),
 		}
 	}
 	binding := &corev1.Binding{
