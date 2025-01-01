@@ -82,7 +82,7 @@ func Test_BindPredicate(t *testing.T) {
 			},
 		},
 		{
-			name: "example1: bind success",
+			name: "example3: bind success",
 			pod:  nil,
 			args: extenderv1.ExtenderBindingArgs{
 				PodName:      "test1",

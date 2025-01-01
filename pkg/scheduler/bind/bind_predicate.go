@@ -39,17 +39,6 @@ func (b *nodeBinding) Name() string {
 // TODO 在绑定节点前，尝试对节点加锁
 func (b *nodeBinding) Bind(args extenderv1.ExtenderBindingArgs) *extenderv1.ExtenderBindingResult {
 	klog.V(4).InfoS("BindNode", "args", args)
-	binding := &corev1.Binding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      args.PodName,
-			Namespace: args.PodNamespace,
-			UID:       args.PodUID,
-		},
-		Target: corev1.ObjectReference{
-			Kind: "Node",
-			Name: args.Node,
-		},
-	}
 
 	pod, err := b.kubeClient.CoreV1().Pods(args.PodNamespace).Get(context.Background(), args.PodName, metav1.GetOptions{})
 	if err != nil {
@@ -74,22 +63,35 @@ func (b *nodeBinding) Bind(args extenderv1.ExtenderBindingArgs) *extenderv1.Exte
 			Error: err.Error(),
 		}
 	}
-	patchData := client.PatchMetadata{
-		Labels: map[string]string{
-			util.PodAssignedPhaseLabel: string(util.AssignPhaseAllocating),
-		},
-		Annotations: map[string]string{
-			util.PodPredicateTimeAnnotation: fmt.Sprintf("%d", metav1.NowMicro().UnixMicro()),
-		},
-	}
-	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-		return client.PatchPodMetadata(b.kubeClient, pod, patchData)
-	})
-	if err != nil {
-		klog.Errorf("Patch Pod <%s/%s> metadata failed: %v", args.PodNamespace, args.PodName, err)
-		return &extenderv1.ExtenderBindingResult{
-			Error: fmt.Sprintf("Patch vgpu metadata failed: %v", err),
+	if util.IsVGPUResourcePod(pod) {
+		patchData := client.PatchMetadata{
+			Labels: map[string]string{
+				util.PodAssignedPhaseLabel: string(util.AssignPhaseAllocating),
+			},
+			Annotations: map[string]string{
+				util.PodPredicateTimeAnnotation: fmt.Sprintf("%d", metav1.NowMicro().UnixMicro()),
+			},
 		}
+		err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
+			return client.PatchPodMetadata(b.kubeClient, pod, patchData)
+		})
+		if err != nil {
+			klog.Errorf("Patch Pod <%s/%s> metadata failed: %v", args.PodNamespace, args.PodName, err)
+			return &extenderv1.ExtenderBindingResult{
+				Error: fmt.Sprintf("Patch vgpu metadata failed: %v", err),
+			}
+		}
+	}
+	binding := &corev1.Binding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      args.PodName,
+			Namespace: args.PodNamespace,
+			UID:       args.PodUID,
+		},
+		Target: corev1.ObjectReference{
+			Kind: "Node",
+			Name: args.Node,
+		},
 	}
 	err = b.kubeClient.CoreV1().Pods(args.PodNamespace).Bind(context.Background(), binding, metav1.CreateOptions{})
 	if err != nil {
