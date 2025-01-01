@@ -78,7 +78,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		return nil, fmt.Errorf("no enough gpu number on node %s", node.GetName())
 	}
 	if needMemory > 0 {
-		memFactor := node.Annotations[util.NodeDeviceMemoryFactor]
+		memFactor := node.Annotations[util.DeviceMemoryFactorAnnotation]
 		factor, _ := strconv.Atoi(memFactor)
 		needMemory *= factor
 	}

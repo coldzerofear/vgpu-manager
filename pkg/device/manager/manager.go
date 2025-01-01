@@ -213,8 +213,8 @@ func (m *DeviceManager) Start() {
 func (m *DeviceManager) cleanupRegistry() error {
 	patchData := client.PatchMetadata{
 		Annotations: map[string]string{
-			util.NodeHeartbeatAnnotation:      "",
-			util.NodeDeviceRegisterAnnotation: "",
+			util.NodeDeviceHeartbeatAnnotation: "",
+			util.NodeDeviceRegisterAnnotation:  "",
 		},
 	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
@@ -239,9 +239,9 @@ func (m *DeviceManager) registryNode() {
 		}
 		patchData := client.PatchMetadata{
 			Annotations: map[string]string{
-				util.NodeDeviceRegisterAnnotation: registryGPUs,
-				util.NodeHeartbeatAnnotation:      string(heartbeatTime),
-				util.NodeDeviceMemoryFactor:       strconv.Itoa(m.config.DeviceMemoryFactor()),
+				util.NodeDeviceRegisterAnnotation:  registryGPUs,
+				util.NodeDeviceHeartbeatAnnotation: string(heartbeatTime),
+				util.DeviceMemoryFactorAnnotation:  strconv.Itoa(m.config.DeviceMemoryFactor()),
 			},
 			Labels: map[string]string{
 				util.NodeNvidiaDriverVersionLabel: m.version.DriverVersion,

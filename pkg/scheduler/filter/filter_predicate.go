@@ -148,7 +148,7 @@ func (f *gpuFilter) heartbeatFilter(pod *corev1.Pod, nodes []corev1.Node) ([]cor
 		failedNodesMap = make(extenderv1.FailedNodesMap) // Failed nodes
 	)
 	for _, node := range nodes {
-		val, _ := util.HasAnnotation(&node, util.NodeHeartbeatAnnotation)
+		val, _ := util.HasAnnotation(&node, util.NodeDeviceHeartbeatAnnotation)
 		if len(val) == 0 {
 			failedNodesMap[node.Name] = "node has no heartbeat"
 			continue
@@ -163,7 +163,7 @@ func (f *gpuFilter) heartbeatFilter(pod *corev1.Pod, nodes []corev1.Node) ([]cor
 			failedNodesMap[node.Name] = "node heartbeat timeout"
 			continue
 		}
-		memFactor, ok := util.HasAnnotation(&node, util.NodeDeviceMemoryFactor)
+		memFactor, ok := util.HasAnnotation(&node, util.DeviceMemoryFactorAnnotation)
 		if !ok || len(memFactor) == 0 {
 			failedNodesMap[node.Name] = "node device memory factor is empty"
 			continue

@@ -103,9 +103,9 @@ func Test_DeviceFilter(t *testing.T) {
 				Name:   "testnode" + strconv.Itoa(i),
 				Labels: map[string]string{},
 				Annotations: map[string]string{
-					util.NodeHeartbeatAnnotation:      string(heartbateTime),
-					util.NodeDeviceRegisterAnnotation: registerNode,
-					util.NodeDeviceMemoryFactor:       "1",
+					util.NodeDeviceHeartbeatAnnotation: string(heartbateTime),
+					util.NodeDeviceRegisterAnnotation:  registerNode,
+					util.DeviceMemoryFactorAnnotation:  "1",
 				},
 			},
 			Status: corev1.NodeStatus{
@@ -267,8 +267,8 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeHeartbeatAnnotation: "",
-							util.NodeDeviceMemoryFactor:  "1",
+							util.NodeDeviceHeartbeatAnnotation: "",
+							util.DeviceMemoryFactorAnnotation:  "1",
 						},
 					},
 				},
@@ -285,8 +285,8 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeHeartbeatAnnotation: "xxxxx",
-							util.NodeDeviceMemoryFactor:  "1",
+							util.NodeDeviceHeartbeatAnnotation: "xxxxx",
+							util.DeviceMemoryFactorAnnotation:  "1",
 						},
 					},
 				},
@@ -303,8 +303,8 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeHeartbeatAnnotation: string(time),
-							util.NodeDeviceMemoryFactor:  "",
+							util.NodeDeviceHeartbeatAnnotation: string(time),
+							util.DeviceMemoryFactorAnnotation:  "",
 						},
 					},
 				},
@@ -321,8 +321,8 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeHeartbeatAnnotation: string(time),
-							util.NodeDeviceMemoryFactor:  "-1",
+							util.NodeDeviceHeartbeatAnnotation: string(time),
+							util.DeviceMemoryFactorAnnotation:  "-1",
 						},
 					},
 				},
@@ -339,8 +339,8 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeHeartbeatAnnotation: "2001-01-01T00:00:00.503158522+08:00",
-							util.NodeDeviceMemoryFactor:  "-1",
+							util.NodeDeviceHeartbeatAnnotation: "2001-01-01T00:00:00.503158522+08:00",
+							util.DeviceMemoryFactorAnnotation:  "-1",
 						},
 					},
 				},
@@ -357,8 +357,8 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeHeartbeatAnnotation: string(time),
-							util.NodeDeviceMemoryFactor:  "10",
+							util.NodeDeviceHeartbeatAnnotation: string(time),
+							util.DeviceMemoryFactorAnnotation:  "10",
 						},
 					},
 				},
@@ -368,8 +368,8 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeHeartbeatAnnotation: string(time),
-							util.NodeDeviceMemoryFactor:  "10",
+							util.NodeDeviceHeartbeatAnnotation: string(time),
+							util.DeviceMemoryFactorAnnotation:  "10",
 						},
 					},
 				},

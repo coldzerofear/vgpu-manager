@@ -11,10 +11,10 @@ const (
 	VGPUMemoryResourceName = DomainPrefix + "/vgpu-memory"
 	VGPUCoreResourceName   = DomainPrefix + "/vgpu-core"
 
-	// NodeHeartbeatAnnotation Node heartbeat time
-	NodeHeartbeatAnnotation      = DomainPrefix + "/node-gpu-heartbeat"
-	NodeDeviceRegisterAnnotation = DomainPrefix + "/gpu-device-register"
-	NodeDeviceMemoryFactor       = DomainPrefix + "/device-memory-factor"
+	// NodeDeviceHeartbeatAnnotation Node device heartbeat time
+	NodeDeviceHeartbeatAnnotation = DomainPrefix + "/node-device-heartbeat"
+	NodeDeviceRegisterAnnotation  = DomainPrefix + "/node-device-register"
+	DeviceMemoryFactorAnnotation  = DomainPrefix + "/device-memory-factor"
 
 	// PodIncludeGpuTypeAnnotation Specify the GPU type to be used
 	PodIncludeGpuTypeAnnotation = DomainPrefix + "/include-gpu-type"
