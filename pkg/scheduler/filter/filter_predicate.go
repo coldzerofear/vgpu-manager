@@ -135,7 +135,7 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extende
 		if node, err := f.nodeLister.Get(nodeName); err != nil {
 			failedNodesMap[nodeName] = fmt.Sprintf("node %s cache failed: %v", nodeName, err)
 		} else {
-			filteredNodes = append(filteredNodes, *node.DeepCopy())
+			filteredNodes = append(filteredNodes, *node)
 		}
 	}
 	return filteredNodes, failedNodesMap
@@ -227,16 +227,14 @@ func IsScheduled(pod *corev1.Pod) bool {
 
 // deviceFilter will choose one and only one node fullfil the request,
 // so it should always be the last filter of gpuFilter
-func (f *gpuFilter) deviceFilter(
-	pod *corev1.Pod, nodes []corev1.Node,
-) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
+func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
 	var (
 		filteredNodes  = make([]corev1.Node, 0, 1)       // Successful nodes
 		failedNodesMap = make(extenderv1.FailedNodesMap) // Failed nodes
 		nodeInfoList   []*device.NodeInfo
 		success        bool
 	)
-	// TODO 过滤掉已经计划调度过的Pod
+	// Skip pods that have already been scheduled.
 	if IsScheduled(pod) {
 		return filteredNodes, failedNodesMap, fmt.Errorf("pod %s had been predicated", pod.Name)
 	}
@@ -257,11 +255,11 @@ func (f *gpuFilter) deviceFilter(
 		if !ok {
 			klog.V(3).Infof("Current node <%s> has not registered any GPU devices, skipping it", node.Name)
 		}
-		if !ok || !util.IsGPUEnabledNode(node) {
+		if !ok || !util.IsVGPUEnabledNode(node) {
 			failedNodesMap[node.Name] = "no GPU device"
 			continue
 		}
-		// 聚合节点上的Pods
+		// Pods on aggregation nodes.
 		nodePods := CollectPodsOnNode(pods, node)
 		nodeInfo, err := device.NewNodeInfo(node, nodePods)
 		if err != nil {
@@ -271,7 +269,7 @@ func (f *gpuFilter) deviceFilter(
 		}
 		nodeInfoList = append(nodeInfoList, nodeInfo)
 	}
-	// 根据节点调度策略将节点排序
+	// Sort nodes according to node scheduling strategy.
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
 	switch strings.ToLower(nodePolicy) {
 	case string(util.BinpackPolicy):
@@ -291,8 +289,8 @@ func (f *gpuFilter) deviceFilter(
 			continue
 		}
 		// Attempt to allocate devices for pods on this node.
-		alloc := device.NewAllocator(f.kubeClient, nodeInfo)
-		if _, err = alloc.Allocate(pod); err != nil {
+		allocator := device.NewAllocator(f.kubeClient, nodeInfo)
+		if _, err = allocator.Allocate(pod); err != nil {
 			failedNodesMap[node.Name] = err.Error()
 			continue
 		}
@@ -311,7 +309,6 @@ func CollectPodsOnNode(pods []*corev1.Pod, node *corev1.Node) []*corev1.Pod {
 		if pod.Spec.NodeName == "" {
 			predicateNode, _ = util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
 		}
-		// 找到调度到该节点上的pod
 		if (pod.Spec.NodeName == node.Name || predicateNode == node.Name) &&
 			pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
 			ret = append(ret, pod)

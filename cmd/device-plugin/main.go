@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
 func main() {
@@ -56,7 +57,9 @@ func main() {
 	klog.V(3).Info("Starting OS watcher.")
 	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
-	factory := informers.NewSharedInformerFactory(kubeClient, 10*time.Hour)
+	// trim managedFields to reduce cache memory usage.
+	option := informers.WithTransform(cache.TransformStripManagedFields())
+	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
 	plugins := deviceplugin.InitDevicePlugins(opt, deviceManager, factory, kubeClient)
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()

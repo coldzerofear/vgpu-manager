@@ -39,7 +39,6 @@ type NumberDevicePlugin struct {
 	kubeClient   *kubernetes.Clientset
 	podResource  *client.PodResource
 	podInformer  cache.SharedIndexInformer
-	isCGroupV2   func() bool
 
 	server *grpc.Server
 	health chan *pluginapi.Device
@@ -58,7 +57,6 @@ func NewNumberDevicePlugin(resourceName string, manager *manager.DeviceManager,
 		kubeClient:   kubeClient,
 		podResource:  client.NewPodResource(),
 		podInformer:  podInformer,
-		isCGroupV2:   cgroups.IsCgroup2UnifiedMode,
 
 		// These will be reinitialized every
 		// time the plugin server is restarted.
@@ -372,7 +370,7 @@ func (m *NumberDevicePlugin) Allocate(_ context.Context, req *pluginapi.Allocate
 			ReadOnly:      true,
 		})
 		// The cgroup path that requires additional pod mounting in the cgroupv2 container environment.
-		if m.isCGroupV2() {
+		if cgroups.IsCgroup2UnifiedMode() {
 			podCgroupPath, err = util.GetK8sPodCGroupPath(currentPod)
 			if err != nil {
 				klog.Errorf(err.Error())

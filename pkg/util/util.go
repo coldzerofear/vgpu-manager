@@ -15,13 +15,6 @@ import (
 	"k8s.io/klog/v2"
 )
 
-//func InsertAnnotation(obj metav1.Object, key, val string) {
-//	if obj.GetAnnotations() == nil {
-//		obj.SetAnnotations(map[string]string{})
-//	}
-//	obj.GetAnnotations()[key] = val
-//}
-
 func HasAnnotation(obj metav1.Object, anno string) (string, bool) {
 	val, ok := "", false
 	if obj.GetAnnotations() != nil {
@@ -30,7 +23,7 @@ func HasAnnotation(obj metav1.Object, anno string) (string, bool) {
 	return val, ok
 }
 
-// GetCapacityOfNode Return the capacity of node resources
+// GetCapacityOfNode Return the capacity of node resources.
 func GetCapacityOfNode(node *corev1.Node, resourceName string) int {
 	val, ok := node.Status.Capacity[corev1.ResourceName(resourceName)]
 	if !ok {
@@ -39,7 +32,7 @@ func GetCapacityOfNode(node *corev1.Node, resourceName string) int {
 	return int(val.Value())
 }
 
-// GetAllocatableOfNode Return the number of resources that can be allocated to the node
+// GetAllocatableOfNode Return the number of resources that can be allocated to the node.
 func GetAllocatableOfNode(node *corev1.Node, resourceName string) int {
 	val, ok := node.Status.Allocatable[corev1.ResourceName(resourceName)]
 	if !ok {
@@ -48,8 +41,8 @@ func GetAllocatableOfNode(node *corev1.Node, resourceName string) int {
 	return int(val.Value())
 }
 
-// Is the Node has GPU device
-func IsGPUEnabledNode(node *corev1.Node) bool {
+// IsVGPUEnabledNode Determine whether there are VGPU devices on the node.
+func IsVGPUEnabledNode(node *corev1.Node) bool {
 	return GetAllocatableOfNode(node, VGPUNumberResourceName) > 0
 }
 
@@ -60,7 +53,7 @@ func Max(a, b int) int {
 	return b
 }
 
-// GetResourceOfContainer Return the number of resource limit
+// GetResourceOfContainer Return the number of resource limit.
 func GetResourceOfContainer(container *corev1.Container, resourceName corev1.ResourceName) int {
 	var count int
 	if val, ok := container.Resources.Limits[resourceName]; ok {
@@ -69,7 +62,12 @@ func GetResourceOfContainer(container *corev1.Container, resourceName corev1.Res
 	return count
 }
 
-// GetResourceOfPod Return the number of resource limit for all containers of Pod
+// IsVGPURequiredContainer tell if the container is a vGPU request container.
+func IsVGPURequiredContainer(c *corev1.Container) bool {
+	return GetResourceOfContainer(c, VGPUNumberResourceName) > 0
+}
+
+// GetResourceOfPod Return the number of resource limit for all containers of Pod.
 func GetResourceOfPod(pod *corev1.Pod, resourceName corev1.ResourceName) int {
 	var total int
 	for i := range pod.Spec.Containers {
@@ -78,19 +76,12 @@ func GetResourceOfPod(pod *corev1.Pod, resourceName corev1.ResourceName) int {
 	return total
 }
 
-// IsVGPUResourcePod Determine if a pod has vGPU resource request
+// IsVGPUResourcePod Determine if a pod has vGPU resource request.
 func IsVGPUResourcePod(pod *corev1.Pod) bool {
-	vGPUNum := GetResourceOfPod(pod, VGPUNumberResourceName)
-	return vGPUNum > 0
+	return GetResourceOfPod(pod, VGPUNumberResourceName) > 0
 }
 
-// IsVGPURequiredContainer tell if the container is a vGPU request container
-func IsVGPURequiredContainer(c *corev1.Container) bool {
-	//klog.V(4).Infof("Determine if the container %s needs vGPU resource", c.Name)
-	return GetResourceOfContainer(c, VGPUNumberResourceName) > 0
-}
-
-// CheckDeviceType Check if the device type meets expectations
+// CheckDeviceType Check if the device type meets expectations.
 func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 	deviceType = strings.ToUpper(strings.TrimSpace(deviceType))
 	if includes, ok := annotations[PodIncludeGpuTypeAnnotation]; ok {
@@ -112,6 +103,7 @@ func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 	return true
 }
 
+// CheckDeviceUuid Check if the device uuid meets expectations.
 func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
 	deviceUUID = strings.ToUpper(strings.TrimSpace(deviceUUID))
 	if includes, ok := annotations[PodIncludeGPUUUIDAnnotation]; ok {
@@ -132,14 +124,6 @@ func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
 // ShouldRetry Determine whether the error of apiserver is of the type that needs to be retried.
 func ShouldRetry(err error) bool {
 	return errors.IsConflict(err) || errors.IsServerTimeout(err)
-}
-
-func B2S(bs []int8) string {
-	b := make([]byte, len(bs))
-	for i, v := range bs {
-		b[i] = byte(v)
-	}
-	return string(b)
 }
 
 // IsShouldDeletePod Determine whether the pod has been deleted or needs to be deleted.

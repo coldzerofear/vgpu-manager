@@ -27,7 +27,6 @@ func NewAllocator(k kubernetes.Interface, n *NodeInfo) *allocator {
 
 // Allocate tries to find a suitable GPU device for containers
 // and records some data in pod's annotation
-// 试图为容器找到合适的GPU设备，并在pod的注释中记录一些数据
 func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 	klog.V(4).Infof("Attempt to allocate pod <%s/%s> on node <%s>",
 		pod.Namespace, pod.Name, alloc.nodeInfo.GetName())
@@ -35,11 +34,11 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 	var podAssignDevices PodDevices
 	for i := range newPod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
-		// 跳过不需要分配gpu的容器
+		// Skip containers that do not request vGPU.
 		if !util.IsVGPURequiredContainer(container) {
 			continue
 		}
-		assignDevices, err := alloc.allocateOne(container, newPod)
+		assignDevices, err := alloc.allocateOne(newPod, container)
 		if err != nil {
 			klog.V(4).Infof("Container <%s> device allocation failed: %v", container.Name, err)
 			return nil, err
@@ -52,6 +51,7 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 		klog.Errorln(err)
 		return nil, err
 	}
+	// patch vGPU annotations.
 	patchData := client.PatchMetadata{Annotations: map[string]string{}}
 	patchData.Annotations[util.PodPredicateNodeAnnotation] = alloc.nodeInfo.GetName()
 	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = preAlloc
@@ -59,17 +59,16 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 		return client.PatchPodMetadata(alloc.kubeClient, newPod, patchData)
 	})
 	if err != nil {
-		err = fmt.Errorf("update pod annotation failed: %v", err)
+		err = fmt.Errorf("patch pod vgpu metadata failed: %v", err)
 		klog.Errorln(err)
 		return nil, err
 	}
 	return newPod, nil
 }
 
-func (alloc *allocator) allocateOne(container *corev1.Container, pod *corev1.Pod) (*ContainerDevices, error) {
+func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container) (*ContainerDevices, error) {
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>",
 		container.Name, alloc.nodeInfo.GetName())
-
 	node := alloc.nodeInfo.GetNode()
 	needNumber := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
 	needCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
@@ -86,6 +85,7 @@ func (alloc *allocator) allocateOne(container *corev1.Container, pod *corev1.Pod
 	for i, _ := range alloc.nodeInfo.GetDeviceMap() {
 		tmpStore = append(tmpStore, alloc.nodeInfo.GetDeviceMap()[i])
 	}
+	// Sort the devices according to the device scheduling strategy.
 	devPolicy, _ := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation)
 	switch devPolicy {
 	case string(util.BinpackPolicy):

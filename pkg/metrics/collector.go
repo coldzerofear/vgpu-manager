@@ -308,11 +308,9 @@ skip:
 			}
 
 			klog.V(4).Infoln("Container matching: using resource data", "ContainerName", container.Name)
-			var getFullPath func(string) string
+			var getFullPath = util.GetK8sPodDeviceCGroupFullPath
 			if cgroups.IsCgroup2UnifiedMode() {
 				getFullPath = util.GetK8sPodCGroupFullPath
-			} else {
-				getFullPath = util.GetK8sPodDeviceCGroupFullPath
 			}
 			var containerPids []uint32
 			ContainerPidsFunc(pod, container.Name, getFullPath, func(pid int) {

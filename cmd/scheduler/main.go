@@ -30,6 +30,7 @@ import (
 	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
 var Scheme = runtime.NewScheme()
@@ -80,7 +81,9 @@ func main() {
 	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
 	recorder := broadcaster.NewRecorder(Scheme, corev1.EventSource{Component: opt.SchedulerName})
 
-	factory := informers.NewSharedInformerFactory(kubeClient, 10*time.Hour)
+	// trim managedFields to reduce cache memory usage.
+	option := informers.WithTransform(cache.TransformStripManagedFields())
+	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
 
 	bindPlugin, err := bind.New(kubeClient, recorder)
 	if err != nil {
