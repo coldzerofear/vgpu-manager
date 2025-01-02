@@ -6,7 +6,7 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// LessFunc represents funcion to compare two DeviceInfo or NodeInfo
+// LessFunc represents function to compare two DeviceInfo or NodeInfo
 type LessFunc[T any] func(p1, p2 T) bool
 
 var (

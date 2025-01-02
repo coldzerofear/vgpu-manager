@@ -8,6 +8,7 @@ import (
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
@@ -43,17 +44,17 @@ var (
 	physicalGPUTotalMemory = prometheus.NewDesc(
 		"physical_gpu_device_total_memory_in_bytes",
 		"Physical GPU device total memory (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "migenable", "migdevice"}, nil,
 	)
 	physicalGPUMemoryUsage = prometheus.NewDesc(
 		"physical_gpu_device_memory_usage_in_bytes",
 		"Physical GPU device memory usage (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "migenable", "migdevice"}, nil,
 	)
 	physicalGPUCoreUtil = prometheus.NewDesc(
 		"physical_gpu_device_core_utilization",
 		"Physical GPU device core utilization (percentage)",
-		[]string{"nodename", "deviceidx", "deviceuuid"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "migenable", "migdevice"}, nil,
 	)
 	nodeVGPUTotalMemory = prometheus.NewDesc(
 		"node_vgpu_total_memory_in_bytes",
@@ -197,25 +198,38 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			klog.Errorf("nvml DeviceGetUtilizationRates %d error: %s", devIdx, nvml.ErrorString(rt))
 			continue
 		}
+		migEnabled, rt := manager.DeviceHandleIsMigEnabled(hdev)
+		if rt != nvml.SUCCESS {
+			klog.Errorf("nvml DeviceHandleIsMigEnabled %d error: %s", devIdx, nvml.ErrorString(rt))
+			continue
+		}
+		migDevice, rt := hdev.IsMigDeviceHandle()
+		if rt != nvml.SUCCESS {
+			klog.Errorf("nvml DeviceIsMigDeviceHandle %d error: %s", devIdx, nvml.ErrorString(rt))
+			continue
+		}
 
 		deviceIndex := strconv.Itoa(devIdx)
 		ch <- prometheus.MustNewConstMetric(
 			physicalGPUTotalMemory,
 			prometheus.GaugeValue,
 			float64(memoryInfo.Total),
-			c.nodeName, deviceIndex, deviceUUID)
+			c.nodeName, deviceIndex, deviceUUID,
+			fmt.Sprint(migEnabled), fmt.Sprint(migDevice))
 
 		ch <- prometheus.MustNewConstMetric(
 			physicalGPUMemoryUsage,
 			prometheus.GaugeValue,
 			float64(memoryInfo.Used),
-			c.nodeName, deviceIndex, deviceUUID)
+			c.nodeName, deviceIndex, deviceUUID,
+			fmt.Sprint(migEnabled), fmt.Sprint(migDevice))
 
 		ch <- prometheus.MustNewConstMetric(
 			physicalGPUCoreUtil,
 			prometheus.GaugeValue,
 			float64(deviceUtil.Gpu),
-			c.nodeName, deviceIndex, deviceUUID)
+			c.nodeName, deviceIndex, deviceUUID,
+			fmt.Sprint(migEnabled), fmt.Sprint(migDevice))
 
 		// Aggregate GPU processes.
 		var processes []nvml.ProcessInfo
@@ -264,20 +278,24 @@ skip:
 		return
 	}
 
-	nodeTotaMemoryBytes := uint64(0)
+	nodeVGPUTotalMemBytes := uint64(0)
 	registryNode, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 	deviceInfos, _ := device.ParseNodeDeviceInfos(registryNode)
 	for _, info := range deviceInfos {
+		// Skip the statistics of Mig device or Mig's parent device
+		if info.Mig {
+			continue
+		}
 		vGpuHealthMap[info.Uuid] = info.Healthy
 		vGpuAssignedMemMap[info.Uuid] = 0
 		vGpuTotalMemBytes := uint64(info.Memory) << 20
 		vGpuTotalMemMap[info.Uuid] = vGpuTotalMemBytes
-		nodeTotaMemoryBytes += vGpuTotalMemBytes
+		nodeVGPUTotalMemBytes += vGpuTotalMemBytes
 	}
 	ch <- prometheus.MustNewConstMetric(
 		nodeVGPUTotalMemory,
 		prometheus.GaugeValue,
-		float64(nodeTotaMemoryBytes),
+		float64(nodeVGPUTotalMemBytes),
 		c.nodeName,
 	)
 	// get current node.

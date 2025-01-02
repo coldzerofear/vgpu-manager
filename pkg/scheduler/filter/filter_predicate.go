@@ -142,7 +142,7 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extende
 }
 
 // TODO heartbeatFilter filter nodes with heartbeat timeout
-func (f *gpuFilter) heartbeatFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
+func (f *gpuFilter) heartbeatFilter(_ *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
 	var (
 		filteredNodes  = make([]corev1.Node, 0)          // Successful nodes
 		failedNodesMap = make(extenderv1.FailedNodesMap) // Failed nodes
