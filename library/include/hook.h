@@ -55,7 +55,7 @@ extern "C" {
  */
 #define CONTROLLER_CONFIG_PATH (VGPU_CONFIG_PATH "/" CONTROLLER_CONFIG_NAME)
 
-#define PID_ONE_CGROUP_PATH "/proc/1/cgroup"
+#define PID_SELF_CGROUP_PATH "/proc/self/cgroup"
 
 #define PID_ONE_MOUNTINFO_PATH "/proc/1/mountinfo"
 

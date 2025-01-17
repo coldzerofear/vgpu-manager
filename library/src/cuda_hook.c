@@ -497,7 +497,7 @@ int check_container_pid(unsigned int pid) {
   char container_cg[256];
   char process_cg[256];
 
-  if (!read_cgroup(PID_ONE_CGROUP_PATH, "memory", container_cg)
+  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", container_cg)
       && !read_cgroup(pidpath, "memory", process_cg)) {
     LOGGER(DETAIL, "\ncontainer cg: %s\nprocess cg: %s", container_cg, process_cg);
     if (strstr(process_cg, container_cg) != NULL) {

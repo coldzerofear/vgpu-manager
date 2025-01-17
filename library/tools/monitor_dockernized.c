@@ -120,7 +120,7 @@ int check_pod_pid(unsigned int pid) {
   char pod_cg[256];
   char process_cg[256];
 
-  if ((read_cgroup(PID_ONE_CGROUP_PATH, "memory", pod_cg) == 0) 
+  if ((read_cgroup(PID_SELF_CGROUP_PATH, "memory", pod_cg) == 0)
       && (read_cgroup(pidpath, "memory", process_cg) == 0)) {
     LOGGER(VERBOSE, "pod cg: %s\nprocess_cg: %s", pod_cg, process_cg);
     if (strstr(process_cg, pod_cg) != NULL) {

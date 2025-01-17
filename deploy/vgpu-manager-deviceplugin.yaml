@@ -111,6 +111,7 @@ spec:
       terminationGracePeriodSeconds: 30
       restartPolicy: Always
       hostNetwork: true
+      hostPID: true
       initContainers:
         - name: install
           command: ["/bin/bash", "-c", "cp /installed/* /etc/vgpu-manager/"]

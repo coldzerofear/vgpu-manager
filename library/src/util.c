@@ -193,8 +193,8 @@ int extract_container_id_v2(char *path, char *container_id, size_t container_id_
   DIR *dir;
   struct dirent *entry;
   if ((dir = opendir(path)) == NULL) {
-    perror("opendir");
-    LOGGER(ERROR, "Failed to open %s", path);
+//    perror("opendir");
+//    LOGGER(ERROR, "Failed to open %s", path);
     return -1;
   }
 
