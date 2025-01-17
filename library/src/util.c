@@ -178,13 +178,18 @@ int is_current_cgroup(const char *file_path) {
     return 0;
   }
   char buffer[128];
+  char pid_str[32];
+  snprintf(pid_str, sizeof(pid_str), "%d", (int)getpid());
   while (fgets(buffer, sizeof(buffer), file) != NULL) {
-    if (strstr(buffer, "1") != NULL) {
+    size_t len = strlen(buffer);
+    if (len > 0 && buffer[len - 1] == '\n') {
+      buffer[len - 1] = '\0';
+    }
+    if (strcmp(buffer, pid_str) == 0 || strcmp(buffer, "1") == 0) {
       fclose(file);
-      return 1; 
+      return 1;
     }
   }
-
   fclose(file);
   return 0;
 }
