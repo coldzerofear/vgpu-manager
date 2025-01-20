@@ -150,7 +150,6 @@ void extract_container_id(char *container_id, size_t container_id_size) {
       continue;
     }
 
-    // 找到 target 之前的一个斜杠
     const char *start = target_start;
     while (start > buffer && *(start - 1) != '/') {
         start--;
@@ -158,7 +157,6 @@ void extract_container_id(char *container_id, size_t container_id_size) {
     const char *end = target_start;
     size_t len = end - start;
 
-    // 检查长度是否超过 container_id_size
     if (len >= container_id_size) {
       len = container_id_size - 1;
     }
@@ -167,7 +165,7 @@ void extract_container_id(char *container_id, size_t container_id_size) {
     container_id[len] = '\0';
     break;
   }
-  // 关闭文件
+
   fclose(fp);
 }
 
@@ -206,7 +204,7 @@ int extract_container_id_v2(char *path, char *container_id, size_t container_id_
   while ((entry = readdir(dir)) != NULL) {
     if (strcmp(entry->d_name, ".") == 0 ||
         strcmp(entry->d_name, "..") == 0) {
-      continue; // 跳过 . 和 ..
+      continue;
     }
     if (entry->d_type == DT_DIR) {
       char full_path[FILENAME_MAX];
@@ -215,10 +213,10 @@ int extract_container_id_v2(char *path, char *container_id, size_t container_id_
         strncpy(container_id, entry->d_name, container_id_size - 1);
         container_id[container_id_size - 1] = '\0';
         closedir(dir);
-        return 0; // 成功找到，返回
+        return 0;
       }
     }
   }
   closedir(dir);
-  return -1; // 未找到
+  return -1;
 }

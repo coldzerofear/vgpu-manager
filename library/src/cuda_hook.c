@@ -775,11 +775,8 @@ DONE:
 
 CUresult cuInit(unsigned int flag) {
   CUresult ret;
-  // 加载必要数据
   load_necessary_data();
-  // 开启线程 初始化
   pthread_once(&g_init_set, initialization);
-  // 调用官方api初始化驱动
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuInit, flag);
 
   if (unlikely(ret)) {
