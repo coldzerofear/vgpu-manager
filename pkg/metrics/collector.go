@@ -78,17 +78,17 @@ var (
 	)
 	containerVGPUMemoryUsage = prometheus.NewDesc(
 		"container_vgpu_device_memory_usage_in_bytes",
-		"Container vGPU device memory usage (bytes)",
+		"Container virtual GPU device memory usage (bytes)",
 		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename"}, nil,
 	)
 	containerVGPUMemoryLimit = prometheus.NewDesc(
 		"container_vgpu_device_memory_limit_in_bytes",
-		"Container vGPU device memory limit (bytes)",
+		"Container virtual GPU device memory limit (bytes)",
 		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename"}, nil,
 	)
 	containerVGPUUtilRate = prometheus.NewDesc(
 		"container_vgpu_device_utilization_rate",
-		"Container vGPU device utilization rate (percentage)",
+		"Container virtual GPU device utilization rate (percentage)",
 		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename"}, nil,
 	)
 )
