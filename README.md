@@ -56,7 +56,7 @@ kubectl delete -f deploy/vgpu-manager-scheduler.yaml
 kubectl delete -f deploy/vgpu-manager-deviceplugin.yaml
 ```
 
-* label nodes with `device-mounter=enable`
+* label nodes with `vgpu-manager-enable=enable`
 
 ```shell
 kubectl label node <nodename> vgpu-manager-enable=enable
