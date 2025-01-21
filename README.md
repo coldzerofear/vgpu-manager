@@ -2,29 +2,45 @@
 
 A k8s device plugin for managing and allocating vGPU devices.
 
-The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager)
-
-Will support multi card virtualization allocation
+Support multi container and multi GPU virtualization allocation and rich scheduling strategies.
 
 ## Project objectives:
 
-* Simplify GRPC calls within containers
+The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager) and has undergone multiple improvements.
+
+* Efficient scheduling performance
+* Ensure the security of container resource isolation
+* Simplify GRPC within containers
 * Support CUDA 12.x version drivers
-* Support CGroup v2
+* Support CGroup v1 and v2
 * Dual scheduling strategy for nodes and devices
+* Provide GPU monitoring indicators
 * Compatible with hot swappable devices and expansion capabilities
 
-The project is currently underway.
+The project is currently underway...
 
 ## Prerequisite
 
 * Kubernetes v1.23+ (other version not tested)
 * Docker/Containerd (other version not tested)
-* CudaDriver 12+
+* Nvidia Container Toolkit (Configure nvidia container runtime)
+
+## Build
+
+* compile binary
+```shell
+make build
+```
+> Note: After the program compilation is completed, three binary files will be generated in the /bin directory
+
+* build docker image and push it
+```shell
+make docker-build docker-push IMG=<tag>
+```
 
 ## Deploy
 
-precondition: `nvidia-container-toolkit` must be installed and the container configured correctly
+precondition: `nvidia-container-toolkit` must be installed and correctly configure the default container runtime
 
 * deploy
 
