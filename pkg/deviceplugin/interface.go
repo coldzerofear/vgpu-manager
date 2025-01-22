@@ -27,13 +27,13 @@ import (
 
 type DevicePlugin interface {
 	pluginapi.DevicePluginServer
-	// Get the device plugin name
+	// Name return device plugin name.
 	Name() string
-	// Start the plugin
+	// Start the plugin.
 	Start() error
-	// Stop the plugin
+	// Stop the plugin.
 	Stop() error
-	//Register() error
+	// Devices return device list
 	Devices() []*pluginapi.Device
 }
 

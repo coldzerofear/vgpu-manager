@@ -73,7 +73,7 @@ func (m *MemoryDevicePlugin) Start() error {
 
 	if err := m.register(); err != nil {
 		klog.Infof("Could not register device plugin: %v", err)
-		m.Stop()
+		_ = m.Stop()
 		return err
 	}
 
@@ -104,7 +104,7 @@ func (m *MemoryDevicePlugin) Stop() error {
 
 // serve starts the gRPC server of the device plugin.
 func (m *MemoryDevicePlugin) serve() error {
-	os.Remove(m.socket)
+	_ = os.Remove(m.socket)
 	sock, err := net.Listen("unix", m.socket)
 	if err != nil {
 		return err
@@ -146,7 +146,7 @@ func (m *MemoryDevicePlugin) serve() error {
 	if err != nil {
 		return err
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	return nil
 }

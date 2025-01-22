@@ -8,8 +8,8 @@ import (
 	"unsafe"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 )
@@ -143,8 +143,8 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 	return resourceData, data, nil
 }
 
-func NewResourceDataT(version version.Version, pod *corev1.Pod, assignDevices device.ContainerDevices) *ResourceDataT {
-	major, minor := version.CudaVersion.MajorAndMinor()
+func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod, assignDevices device.ContainerDevices) *ResourceDataT {
+	major, minor := devManager.GetVersion().CudaVersion.MajorAndMinor()
 	convert48Bytes := func(val string) [48]byte {
 		var byteArray [48]byte
 		copy(byteArray[:], val)
@@ -156,6 +156,8 @@ func NewResourceDataT(version version.Version, pod *corev1.Pod, assignDevices de
 		return byteArray
 	}
 	deviceCount := 0
+	deviceMap := devManager.GetDeviceMap()
+	nodeConfig := devManager.GetNodeConfig()
 	devices := [util.MaxDeviceNumber]DeviceT{}
 	for i, devInfo := range assignDevices.Devices {
 		if i >= util.MaxDeviceNumber {
@@ -182,7 +184,12 @@ func NewResourceDataT(version version.Version, pod *corev1.Pod, assignDevices de
 			dev.HardLimit = 0
 		}
 		//  int memory_limit;
-		dev.MemoryLimit = 1
+		gpuDevice := deviceMap[devInfo.Uuid]
+		if devInfo.Memory == gpuDevice.Memory && nodeConfig.DeviceMemoryScaling() == float64(1) {
+			dev.MemoryLimit = 0
+		} else {
+			dev.MemoryLimit = 1
+		}
 		//  int memory_oversold
 		dev.MemoryOversold = 0
 		devices[i] = dev
@@ -202,14 +209,14 @@ func NewResourceDataT(version version.Version, pod *corev1.Pod, assignDevices de
 	return data
 }
 
-func WriteVGPUConfigFile(filePath string, version version.Version, pod *corev1.Pod, assignDevices device.ContainerDevices) error {
+func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod *corev1.Pod, assignDevices device.ContainerDevices) error {
 	if _, err := os.Stat(filePath); err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
 		var vgpuConfig C.struct_resource_data_t
 		var driverVersion C.struct_version_t
-		major, minor := version.CudaVersion.MajorAndMinor()
+		major, minor := devManager.GetVersion().CudaVersion.MajorAndMinor()
 		driverVersion.major = C.int(major)
 		driverVersion.minor = C.int(minor)
 		vgpuConfig.driver_version = driverVersion
@@ -231,9 +238,11 @@ func WriteVGPUConfigFile(filePath string, version version.Version, pod *corev1.P
 		C.strcpy(&vgpuConfig.container_name[0], (*C.char)(unsafe.Pointer(containerName)))
 
 		deviceCount := 0
+		deviceMap := devManager.GetDeviceMap()
+		nodeConfig := devManager.GetNodeConfig()
 		for i, devInfo := range assignDevices.Devices {
 			if i >= C.MAX_DEVICE_COUNT {
-				break // 防止溢出
+				break
 			}
 			deviceCount++
 			func() {
@@ -264,7 +273,12 @@ func WriteVGPUConfigFile(filePath string, version version.Version, pod *corev1.P
 				}
 
 				//  int memory_limit;
-				cDevice.memory_limit = 1
+				gpuDevice := deviceMap[devInfo.Uuid]
+				if devInfo.Memory == gpuDevice.Memory && nodeConfig.DeviceMemoryScaling() == float64(1) {
+					cDevice.memory_limit = 0
+				} else {
+					cDevice.memory_limit = 1
+				}
 				//  int memory_oversold
 				cDevice.memory_oversold = 0
 				C.memcpy(

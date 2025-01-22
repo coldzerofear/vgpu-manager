@@ -1281,7 +1281,7 @@ int read_file_to_config_path(const char* filename, resource_data_t* data) {
     LOGGER(VERBOSE, "hard limit       : %d", g_vgpu_config.devices[i].hard_limit);
     LOGGER(VERBOSE, "hard core        : %d", g_vgpu_config.devices[i].hard_core);
     LOGGER(VERBOSE, "soft core        : %d", g_vgpu_config.devices[i].soft_core);
-    LOGGER(VERBOSE, "virt mem switch  : %d", g_vgpu_config.devices[i].memory_oversold);
+    LOGGER(VERBOSE, "memory oversold  : %d", g_vgpu_config.devices[i].memory_oversold);
     LOGGER(VERBOSE, "device memory    : %ld", g_vgpu_config.devices[i].device_memory);
   }
   LOGGER(VERBOSE, "-----------------------------------------------------------");
@@ -1316,7 +1316,6 @@ DONE:
   close(fd);
   return ret;
 }
-
 
 tid_dlsym tid_dlsyms[DLMAP_SIZE];
 static int tid_dlsym_count = 0;
@@ -1388,7 +1387,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     }
   }
   // hijack nvml
-  if (symbol[0] == 'n' && symbol[1] == 'v' && symbol[2] == 'm' && symbol[3] == 'l' ) {
+  if (symbol[0] == 'n' && symbol[1] == 'v' && symbol[2] == 'm' && symbol[3] == 'l') {
     load_necessary_data();
     for (i = 0; i < nvml_hook_nums; i++) {
       if (unlikely(!strcmp(symbol, nvml_hooks_entry[i].name))) {
@@ -1507,7 +1506,7 @@ int load_controller_configuration() {
     LOGGER(VERBOSE, "hard limit       : %d", g_vgpu_config.devices[i].hard_limit);
     LOGGER(VERBOSE, "hard core        : %d", g_vgpu_config.devices[i].hard_core);
     LOGGER(VERBOSE, "soft core        : %d", g_vgpu_config.devices[i].soft_core);
-    LOGGER(VERBOSE, "virt mem switch  : %d", g_vgpu_config.devices[i].memory_oversold);
+    LOGGER(VERBOSE, "memory oversold  : %d", g_vgpu_config.devices[i].memory_oversold);
     LOGGER(VERBOSE, "device memory    : %ld", g_vgpu_config.devices[i].device_memory);
   }
   LOGGER(VERBOSE, "-----------------------------------------------------------");

@@ -800,7 +800,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
   if (ret == CUDA_SUCCESS) {
     for (i = 0; i < cuda_hook_nums; i++) {
       if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
-        LOGGER(DETAIL, "Match hook %s", symbol);
+        LOGGER(DETAIL, "match hook %s", symbol);
         *pfn = cuda_hooks_entry[i].fn_ptr;
         break;
       }
@@ -811,7 +811,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
 }
 
 CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
-                          cuuint64_t flags, void *symbolStatus) {
+                             cuuint64_t flags, void *symbolStatus) {
   CUresult ret;
   int i;
 
@@ -1145,8 +1145,7 @@ static size_t get_array_base_size(int format) {
   return base_size;
 }
 
-static CUresult
-cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
+static CUresult cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
   size_t used = 0;
   size_t base_size = 0;
   size_t request_size = 0;
@@ -1205,8 +1204,7 @@ DONE:
   return ret;
 }
 
-static CUresult
-cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
+static CUresult cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
   size_t used = 0;
   size_t base_size = 0;
   size_t request_size = 0;
@@ -1264,10 +1262,9 @@ DONE:
   return ret;
 }
 
-CUresult
-cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
-                       const CUDA_ARRAY3D_DESCRIPTOR *pMipmappedArrayDesc,
-                       unsigned int numMipmapLevels) {
+CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
+                                const CUDA_ARRAY3D_DESCRIPTOR *pMipmappedArrayDesc,
+                                unsigned int numMipmapLevels) {
   size_t used = 0;
   size_t base_size = 0;
   size_t request_size = 0;
@@ -1300,23 +1297,18 @@ DONE:
 }
 
 CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev) {
-  // 当开启了vgpu，则返回受限制的显存大小
   if (g_vgpu_config.devices[dev].memory_limit) {
     *bytes = g_vgpu_config.devices[dev].total_memory;
-
     return CUDA_SUCCESS;
   }
-  // 否则，直接调用api查询实际大小
   return CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
 }
 
 CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
   if (g_vgpu_config.devices[dev].memory_limit) {
     *bytes = g_vgpu_config.devices[dev].total_memory;
-
     return CUDA_SUCCESS;
   }
-
   return CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceTotalMem, bytes, dev);
 }
 
@@ -1359,7 +1351,7 @@ CUresult cuMemGetInfo(size_t *free, size_t *total) {
     LOGGER(VERBOSE, "[cuMemGetInfo] device %d, used %lu, free %lu, total %lu", ordinal, used, *free, *total);
     return CUDA_SUCCESS;
   }
-  // 当没有开启vcuda，直接调用原生的cuda api
+
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemGetInfo, free, total);
 DONE:
   return ret;

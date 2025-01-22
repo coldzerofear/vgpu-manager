@@ -128,20 +128,17 @@ done:
   return ret;
 }
 
-// TODO 这里提取到的是sandbox网络容器的id，不符合预期
 void extract_container_id(char *container_id, size_t container_id_size) {
   char buffer[FILENAME_MAX];
   FILE *fp;
-  // 打开 /proc/1/mountinfo 文件
   fp = fopen(PID_ONE_MOUNTINFO_PATH, "r");
   if (fp == NULL) {
       container_id[0] = '\0';
       perror("fopen");
       return;
   }
-  // 逐行读取文件内容
   while (fgets(buffer, FILENAME_MAX, fp) != NULL) {
-    // 检查行中是否包含 /etc/hostname 或 /etc/resolv.conf
+    // Check if the line contains /etc/hostname or /etc/resolv.conf
     char *target_start = strstr(buffer, "/hostname /etc/hostname ");
     if (target_start == NULL) {
       target_start = strstr(buffer, "/resolv.conf /etc/resolv.conf ");

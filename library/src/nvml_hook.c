@@ -39,10 +39,7 @@ nvmlReturn_t nvmlInit(void) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlInit);
 }
 
-
-// TODO 再此拦截要显示的设备内存
-nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device,
-                                     nvmlMemory_t *memory) {
+nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) {
   nvmlReturn_t ret;
   int index;
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &index);
@@ -53,21 +50,17 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device,
   if (g_vgpu_config.devices[index].memory_limit) {
     size_t used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
-    // 最大可用显存限制为 vcuda 分配时的大小
     memory->total = g_vgpu_config.devices[index].total_memory;
     memory->used = used;
     memory->free = memory->used > memory->total ? 0 : memory->total - memory->used;
     return NVML_SUCCESS;
   }
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryInfo, device,
-                         memory);
+  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryInfo, device, memory);
 DONE:
   return ret;
 }
 
-// TODO 再此拦截要显示的设备内存
-nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, 
-                                        nvmlMemory_v2_t *memory) {
+nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *memory) {
   nvmlReturn_t ret;
   int index;
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &index);
@@ -76,13 +69,11 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device,
     goto DONE;
   }
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
-  if (g_vgpu_config.devices[index].memory_limit && ret == NVML_SUCCESS) {
+  if (ret == NVML_SUCCESS && g_vgpu_config.devices[index].memory_limit) {
     size_t used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
-    // 最大可用显存限制为 vcuda 分配时的大小
     memory->total = g_vgpu_config.devices[index].total_memory;
     memory->used = used;
-    // v2 版本接口used和reserved是分开计算的
     //memory->free = (used + memory->reserved) > g_vcuda_config.gpu_memory ? 0 : g_vcuda_config.gpu_memory - used - memory->reserved;
     memory->free = used > memory->total ? 0 : memory->total - memory->used;
   }
@@ -90,8 +81,7 @@ DONE:
   return ret;
 }
 
-nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device,
-                                      nvmlComputeMode_t mode) {
+nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device, nvmlComputeMode_t mode) {
   nvmlReturn_t ret;
   int index;
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &index);

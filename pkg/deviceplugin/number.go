@@ -98,7 +98,7 @@ func (m *NumberDevicePlugin) Start() error {
 
 	if err := m.register(); err != nil {
 		klog.Infof("Could not register device plugin: %v", err)
-		m.Stop()
+		_ = m.Stop()
 		return err
 	}
 
@@ -129,7 +129,7 @@ func (m *NumberDevicePlugin) Stop() error {
 
 // serve starts the gRPC server of the device plugin.
 func (m *NumberDevicePlugin) serve() error {
-	os.Remove(m.socket)
+	_ = os.Remove(m.socket)
 	sock, err := net.Listen("unix", m.socket)
 	if err != nil {
 		return err
@@ -171,7 +171,7 @@ func (m *NumberDevicePlugin) serve() error {
 	if err != nil {
 		return err
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	return nil
 }
@@ -184,7 +184,7 @@ func (m *NumberDevicePlugin) register() error {
 	}
 	defer conn.Close()
 
-	client := pluginapi.NewRegistrationClient(conn)
+	cli := pluginapi.NewRegistrationClient(conn)
 	reqt := &pluginapi.RegisterRequest{
 		Version:      pluginapi.Version,
 		Endpoint:     path.Base(m.socket),
@@ -192,7 +192,7 @@ func (m *NumberDevicePlugin) register() error {
 		Options:      &pluginapi.DevicePluginOptions{},
 	}
 
-	_, err = client.Register(context.Background(), reqt)
+	_, err = cli.Register(context.Background(), reqt)
 	return err
 }
 
@@ -295,7 +295,7 @@ func (m *NumberDevicePlugin) Allocate(_ context.Context, req *pluginapi.Allocate
 	var assignDevs *device.ContainerDevices
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	var podCgroupPath string
-	minorMap := GetDeviceMinorMap(m.manager.GetDevices())
+	devMinorMap := GetDeviceMinorMap(m.manager.GetDevices())
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIDs())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -333,7 +333,7 @@ func (m *NumberDevicePlugin) Allocate(_ context.Context, req *pluginapi.Allocate
 			}
 			deviceIds = append(deviceIds, dev.Uuid)
 			nvidiaDeviceFile := fmt.Sprintf("%s%d",
-				NvidiaDeviceFilePrefix, minorMap[dev.Uuid])
+				NvidiaDeviceFilePrefix, devMinorMap[dev.Uuid])
 			devices = append(devices, &pluginapi.DeviceSpec{
 				ContainerPath: nvidiaDeviceFile,
 				HostPath:      nvidiaDeviceFile,
@@ -583,7 +583,7 @@ func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugina
 		return resp, err
 	}
 	containerDevices := realDevices[index]
-	err = vgpu.WriteVGPUConfigFile(vgpuConfigPath, m.manager.GetVersion(), pod, containerDevices)
+	err = vgpu.WriteVGPUConfigFile(vgpuConfigPath, m.manager, pod, containerDevices)
 	if err != nil {
 		klog.Errorf(err.Error())
 	}
@@ -593,7 +593,7 @@ func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugina
 func (m *NumberDevicePlugin) Devices() []*pluginapi.Device {
 	var devices []*pluginapi.Device
 	for _, gpuDevice := range m.manager.GetDevices() {
-		if gpuDevice.Mig { // skip mig device
+		if gpuDevice.Mig { // skip MIG device
 			continue
 		}
 		for i := 0; i < gpuDevice.Number; i++ {

@@ -5,7 +5,10 @@ import (
 	"syscall"
 	"testing"
 
+	dpoptions "github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +21,41 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 		DriverVersion: "",
 		CudaVersion:   version.CudaVersion(12020),
 	}
+	option := node.MutationDPOptions(dpoptions.Options{
+		NodeName:            "testNode",
+		DeviceMemoryScaling: float64(1),
+	})
+	config, _ := node.NewNodeConfig("", option)
+	gpuUUID0 := "GPU-" + string(uuid.NewUUID())
+	gpuUUID1 := "GPU-" + string(uuid.NewUUID())
+	devices := []*manager.GPUDevice{
+		{
+			GPUInfo: device.GPUInfo{
+				Id:      0,
+				Uuid:    gpuUUID0,
+				Core:    100,
+				Memory:  12288,
+				Type:    "Nvidia RTX 3080Ti",
+				Number:  10,
+				Numa:    0,
+				Healthy: true,
+			},
+			MinorNumber: 0,
+		}, {
+			GPUInfo: device.GPUInfo{
+				Id:      1,
+				Uuid:    gpuUUID1,
+				Core:    100,
+				Memory:  12288,
+				Type:    "Nvidia RTX 3080Ti",
+				Number:  10,
+				Numa:    0,
+				Healthy: true,
+			},
+			MinorNumber: 1,
+		},
+	}
+	devManager := manager.NewFakeDeviceManager(config, driverVersion, devices)
 	tests := []struct {
 		name    string
 		path    string
@@ -39,7 +77,7 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 				Devices: []device.ClaimDevice{
 					{
 						Id:     0,
-						Uuid:   "GPU-" + string(uuid.NewUUID()),
+						Uuid:   gpuUUID0,
 						Core:   0,
 						Memory: 1024,
 					},
@@ -61,7 +99,7 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 				Devices: []device.ClaimDevice{
 					{
 						Id:     0,
-						Uuid:   "GPU-" + string(uuid.NewUUID()),
+						Uuid:   gpuUUID0,
 						Core:   20,
 						Memory: 1024,
 					},
@@ -83,13 +121,13 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 				Devices: []device.ClaimDevice{
 					{
 						Id:     0,
-						Uuid:   "GPU-" + string(uuid.NewUUID()),
+						Uuid:   gpuUUID0,
 						Core:   20,
 						Memory: 1024,
 					},
 					{
 						Id:     1,
-						Uuid:   "GPU-" + string(uuid.NewUUID()),
+						Uuid:   gpuUUID1,
 						Core:   30,
 						Memory: 2048,
 					},
@@ -100,7 +138,7 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := WriteVGPUConfigFile(test.path, driverVersion, test.pod, test.devices)
+			err := WriteVGPUConfigFile(test.path, devManager, test.pod, test.devices)
 			if err != nil {
 				t.Error(err)
 			}
@@ -109,10 +147,9 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 				t.Error(err)
 			}
 			defer syscall.Munmap(data)
-			resourceData2 := NewResourceDataT(driverVersion, test.pod, test.devices)
+			resourceData2 := NewResourceDataT(devManager, test.pod, test.devices)
 			assert.Equal(t, *resourceData1, *resourceData2)
-			err = os.RemoveAll(test.path)
-			if err != nil {
+			if err = os.RemoveAll(test.path); err != nil {
 				t.Error(err)
 			}
 		})

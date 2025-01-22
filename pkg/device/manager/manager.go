@@ -17,6 +17,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -31,7 +32,7 @@ type GPUDevice struct {
 
 type DeviceManager struct {
 	mut     sync.Mutex
-	client  *kubernetes.Clientset
+	client  kubernetes.Interface
 	config  *node.NodeConfig
 	version version.Version
 	devices []*GPUDevice
@@ -61,8 +62,20 @@ func (m *DeviceManager) RemoveNotifyChannel(name string) {
 	m.mut.Unlock()
 }
 
+func NewFakeDeviceManager(config *node.NodeConfig, version version.Version, devices []*GPUDevice) *DeviceManager {
+	return &DeviceManager{
+		version:   version,
+		config:    config,
+		devices:   devices,
+		client:    fake.NewSimpleClientset(),
+		stop:      make(chan struct{}),
+		unhealthy: make(chan *GPUDevice),
+		notify:    make(map[string]chan *pluginapi.Device),
+	}
+}
+
 func NewDeviceManager(config *node.NodeConfig, kubeClient *kubernetes.Clientset) *DeviceManager {
-	cache := &DeviceManager{
+	m := &DeviceManager{
 		version:   version.Version{},
 		config:    config,
 		client:    kubeClient,
@@ -70,8 +83,7 @@ func NewDeviceManager(config *node.NodeConfig, kubeClient *kubernetes.Clientset)
 		unhealthy: make(chan *GPUDevice),
 		notify:    make(map[string]chan *pluginapi.Device),
 	}
-	cache.initDevices()
-	return cache
+	return m.initDevices()
 }
 
 // DeviceHandleIsMigEnabled Determine if Mig mode is enabled
@@ -86,7 +98,7 @@ func DeviceHandleIsMigEnabled(dev nvml.Device) (bool, nvml.Return) {
 	return cm == nvml.DEVICE_MIG_ENABLE && cm == pm, rt
 }
 
-func (m *DeviceManager) initDevices() {
+func (m *DeviceManager) initDevices() *DeviceManager {
 	rt := nvml.Init()
 	handlerReturn(rt)
 	defer nvml.Shutdown()
@@ -188,7 +200,17 @@ func (m *DeviceManager) initDevices() {
 		}
 		m.devices[i] = device
 	}
+	return m
+}
 
+func (m *DeviceManager) GetDeviceMap() map[string]GPUDevice {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	deviceMap := make(map[string]GPUDevice)
+	for i, dev := range m.devices {
+		deviceMap[dev.Uuid] = *m.devices[i]
+	}
+	return deviceMap
 }
 
 func (m *DeviceManager) GetDevices() []GPUDevice {

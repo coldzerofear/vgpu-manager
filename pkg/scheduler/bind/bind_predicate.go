@@ -37,7 +37,6 @@ func (b *nodeBinding) Name() string {
 	return Name
 }
 
-// TODO 在绑定节点前，尝试对节点加锁
 func (b *nodeBinding) Bind(args extenderv1.ExtenderBindingArgs) *extenderv1.ExtenderBindingResult {
 	klog.V(4).InfoS("BindNode", "args", args)
 

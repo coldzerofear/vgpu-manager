@@ -39,7 +39,7 @@ extern "C" {
 
 #define CUDA_ENTRY_CALL(table, sym, ...)                                       \
   ({                                                                           \
-    LOGGER(5, "Hooking %s\n", #sym);                                           \
+    LOGGER(5, "hooking %s", #sym);                                             \
     cuda_sym_t _entry = CUDA_FIND_ENTRY(table, sym);                           \
     _entry(__VA_ARGS__);                                                       \
   })
@@ -48,7 +48,7 @@ extern "C" {
   ({                                                                           \
     CUresult rt = CUDA_ENTRY_CALL(table, sym, __VA_ARGS__);                    \
     if (rt != CUDA_SUCCESS) {                                                  \
-      LOGGER(3, "%s call failed: %d\n", #sym, rt);                             \
+      LOGGER(3, "%s call failed: %d", #sym, rt);                               \
     }                                                                          \
   })
 

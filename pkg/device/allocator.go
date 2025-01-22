@@ -77,12 +77,13 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	if needNumber > alloc.nodeInfo.GetDeviceCount() {
 		return nil, fmt.Errorf("no enough gpu number on node %s", node.GetName())
 	}
+	// Calculate the actual requested memory size based on the node memory factor.
 	if needMemory > 0 {
 		memFactor := node.Annotations[util.DeviceMemoryFactorAnnotation]
 		factor, _ := strconv.Atoi(memFactor)
 		needMemory *= factor
 	}
-	for i, _ := range alloc.nodeInfo.GetDeviceMap() {
+	for i := range alloc.nodeInfo.GetDeviceMap() {
 		tmpStore = append(tmpStore, alloc.nodeInfo.GetDeviceMap()[i])
 	}
 	// Sort the devices according to the device scheduling strategy.
@@ -104,23 +105,24 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		if needNumber == 0 {
 			break
 		}
-		// TODO 跳过不健康设备的分配
+		// Skip unhealthy device.
 		if !deviceInfo.Healthy() {
 			klog.V(4).Infof("current gpu device %d it's unhealthy, skip allocation", i)
 			continue
 		}
-		// TODO 过滤掉开启了mig的设备
+		// Filter MIG device.
 		if deviceInfo.Mig() {
 			klog.V(4).Infof("current gpu device %d enabled mig mode, skip allocation", i)
 			continue
 		}
-		// TODO 过滤数量不足的设备
+		// Filter for insufficient number of virtual devices.
 		if deviceInfo.AllocatableNumber() == 0 {
 			klog.V(4).Infof("current gpu device %d insufficient available number, skip allocation", i)
 			continue
 		}
-		// TODO 没有定义memory大小时默认占用GPU所有内存
 		var reqMemory = needMemory
+		// When there is no defined request for memory,
+		// it occupies the entire card memory.
 		if reqMemory == 0 {
 			reqMemory = deviceInfo.GetTotalMemory()
 		}
@@ -136,13 +138,13 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 			klog.V(4).Infof("current gpu device %d insufficient available core, skip allocation", i)
 			continue
 		}
-		// TODO 设备类型过滤
+		// Filter device type.
 		if !util.CheckDeviceType(pod.Annotations, deviceInfo.GetType()) {
 			klog.V(4).Infof("current gpu device <%d> type <%s> non compliant annotation[%s], skip allocation", i,
 				deviceInfo.GetType(), fmt.Sprintf("'%s' or '%s'", util.PodIncludeGpuTypeAnnotation, util.PodExcludeGpuTypeAnnotation))
 			continue
 		}
-		// TODO 设备uuid过滤
+		// Filter device uuid.
 		if !util.CheckDeviceUuid(pod.Annotations, deviceInfo.GetUUID()) {
 			klog.V(4).Infof("current gpu device <%d> type <%s> non compliant annotation[%s], skip allocation", i,
 				deviceInfo.GetType(), fmt.Sprintf("'%s' or '%s'", util.PodIncludeGPUUUIDAnnotation, util.PodExcludeGPUUUIDAnnotation))

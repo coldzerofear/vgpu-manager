@@ -266,14 +266,12 @@ nvmlReturn_t nvmlDeviceGetDetailedEccErrors(nvmlDevice_t device,
 
 nvmlReturn_t nvmlDeviceGetDisplayActive(nvmlDevice_t device,
                                         nvmlEnableState_t *isActive) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetDisplayActive, device,
-                         isActive);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetDisplayActive, device, isActive);
 }
 
 nvmlReturn_t nvmlDeviceGetDisplayMode(nvmlDevice_t device,
                                       nvmlEnableState_t *display) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetDisplayMode, device,
-                         display);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetDisplayMode, device, display);
 }
 
 nvmlReturn_t nvmlDeviceGetDriverModel(nvmlDevice_t device,
@@ -301,9 +299,8 @@ nvmlReturn_t nvmlDeviceGetEncoderCapacity(nvmlDevice_t device,
                          device, encoderQueryType, encoderCapacity);
 }
 
-nvmlReturn_t
-nvmlDeviceGetEncoderSessions(nvmlDevice_t device, unsigned int *sessionCount,
-                             nvmlEncoderSessionInfo_t *sessionInfos) {
+nvmlReturn_t nvmlDeviceGetEncoderSessions(nvmlDevice_t device, unsigned int *sessionCount,
+                                          nvmlEncoderSessionInfo_t *sessionInfos) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetEncoderSessions,
                          device, sessionCount, sessionInfos);
 }
@@ -336,14 +333,12 @@ nvmlReturn_t nvmlDeviceGetFanSpeed(nvmlDevice_t device, unsigned int *speed) {
 
 nvmlReturn_t nvmlDeviceGetFanSpeed_v2(nvmlDevice_t device,
                                       unsigned int *speed) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetFanSpeed_v2, device,
-                         speed);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetFanSpeed_v2, device, speed);
 }
 
 nvmlReturn_t nvmlDeviceGetFieldValues(nvmlDevice_t device, int valuesCount,
                                       nvmlFieldValue_t *values) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetFieldValues, device,
-                         valuesCount, values);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetFieldValues, device, valuesCount, values);
 }
 
 nvmlReturn_t nvmlDeviceGetGpuOperationMode(nvmlDevice_t device,
@@ -361,17 +356,15 @@ nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses(nvmlDevice_t device,
                          infoCount, infos);
 }
 
-nvmlReturn_t nvmlDeviceGetGridLicensableFeatures_v4(
-    nvmlDevice_t device,
-    nvmlGridLicensableFeatures_t *pGridLicensableFeatures) {
+nvmlReturn_t nvmlDeviceGetGridLicensableFeatures_v4(nvmlDevice_t device,
+                         nvmlGridLicensableFeatures_t *pGridLicensableFeatures) {
   return NVML_ENTRY_CALL(nvml_library_entry,
                          nvmlDeviceGetGridLicensableFeatures_v4, device,
                          pGridLicensableFeatures);
 }
 
-nvmlReturn_t nvmlDeviceGetGridLicensableFeatures(
-    nvmlDevice_t device,
-    nvmlGridLicensableFeatures_t *pGridLicensableFeatures) {
+nvmlReturn_t nvmlDeviceGetGridLicensableFeatures(nvmlDevice_t device,
+                         nvmlGridLicensableFeatures_t *pGridLicensableFeatures) {
   return NVML_ENTRY_CALL(nvml_library_entry,
                          nvmlDeviceGetGridLicensableFeatures, device,
                          pGridLicensableFeatures);
@@ -379,25 +372,21 @@ nvmlReturn_t nvmlDeviceGetGridLicensableFeatures(
 
 nvmlReturn_t nvmlDeviceGetHandleByPciBusId_v2(const char *pciBusId,
                                               nvmlDevice_t *device) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByPciBusId_v2,
-                         pciBusId, device);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByPciBusId_v2, pciBusId, device);
 }
 
 nvmlReturn_t nvmlDeviceGetHandleByPciBusId(const char *pciBusId,
                                            nvmlDevice_t *device) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByPciBusId,
-                         pciBusId, device);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByPciBusId, pciBusId, device);
 }
 
 nvmlReturn_t nvmlDeviceGetHandleBySerial(const char *serial,
                                          nvmlDevice_t *device) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleBySerial,
-                         serial, device);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleBySerial, serial, device);
 }
 
 nvmlReturn_t nvmlDeviceGetHandleByUUID(const char *uuid, nvmlDevice_t *device) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByUUID, uuid,
-                         device);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByUUID, uuid, device);
 }
 
 nvmlReturn_t nvmlDeviceGetIndex(nvmlDevice_t device, unsigned int *index) {
@@ -406,14 +395,12 @@ nvmlReturn_t nvmlDeviceGetIndex(nvmlDevice_t device, unsigned int *index) {
 
 nvmlReturn_t nvmlDeviceGetInforomConfigurationChecksum(nvmlDevice_t device,
                                                        unsigned int *checksum) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetInforomConfigurationChecksum, device,
-                         checksum);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetInforomConfigurationChecksum,
+                         device, checksum);
 }
 
 nvmlReturn_t nvmlDeviceGetInforomImageVersion(nvmlDevice_t device,
-                                              char *version,
-                                              unsigned int length) {
+                                              char *version, unsigned int length) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetInforomImageVersion,
                          device, version, length);
 }
@@ -462,37 +449,28 @@ nvmlReturn_t nvmlDeviceGetMemoryErrorCounter(nvmlDevice_t device,
 
 nvmlReturn_t nvmlDeviceGetMinorNumber(nvmlDevice_t device,
                                       unsigned int *minorNumber) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMinorNumber, device,
-                         minorNumber);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMinorNumber, device, minorNumber);
 }
 
 // Guessed function proto type
 nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses_v2(nvmlDevice_t device,
-                                                        unsigned int *infoCount,
-                                                        void *infos) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetMPSComputeRunningProcesses_v2, device,
-                         infoCount, infos);
+                                                        unsigned int *infoCount, void *infos) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMPSComputeRunningProcesses_v2,
+                         device, infoCount, infos);
 }
 
 nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses(nvmlDevice_t device,
-                                                     unsigned int *infoCount,
-                                                     void *infos) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetMPSComputeRunningProcesses, device,
-                         infoCount, infos);
+                                                     unsigned int *infoCount, void *infos) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMPSComputeRunningProcesses,
+                         device, infoCount, infos);
 }
 
-nvmlReturn_t nvmlDeviceGetMultiGpuBoard(nvmlDevice_t device,
-                                        unsigned int *multiGpuBool) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMultiGpuBoard, device,
-                         multiGpuBool);
+nvmlReturn_t nvmlDeviceGetMultiGpuBoard(nvmlDevice_t device, unsigned int *multiGpuBool) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMultiGpuBoard, device, multiGpuBool);
 }
 
-nvmlReturn_t nvmlDeviceGetName(nvmlDevice_t device, char *name,
-                               unsigned int length) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetName, device, name,
-                         length);
+nvmlReturn_t nvmlDeviceGetName(nvmlDevice_t device, char *name, unsigned int length) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetName, device, name, length);
 }
 
 nvmlReturn_t nvmlDeviceGetNvLinkCapability(nvmlDevice_t device,
@@ -514,9 +492,8 @@ nvmlReturn_t nvmlDeviceGetNvLinkErrorCounter(nvmlDevice_t device,
 nvmlReturn_t nvmlDeviceGetNvLinkRemotePciInfo_v2(nvmlDevice_t device,
                                                  unsigned int link,
                                                  nvmlPciInfo_t *pci) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetNvLinkRemotePciInfo_v2, device, link,
-                         pci);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetNvLinkRemotePciInfo_v2,
+                         device, link, pci);
 }
 
 nvmlReturn_t nvmlDeviceGetNvLinkRemotePciInfo(nvmlDevice_t device,
@@ -532,18 +509,16 @@ nvmlReturn_t nvmlDeviceGetNvLinkState(nvmlDevice_t device, unsigned int link,
                          link, isActive);
 }
 
-nvmlReturn_t
-nvmlDeviceGetNvLinkUtilizationControl(nvmlDevice_t device, unsigned int link,
-                                      unsigned int counter,
-                                      nvmlNvLinkUtilizationControl_t *control) {
+nvmlReturn_t nvmlDeviceGetNvLinkUtilizationControl(nvmlDevice_t device, unsigned int link,
+                         unsigned int counter, nvmlNvLinkUtilizationControl_t *control) {
   return NVML_ENTRY_CALL(nvml_library_entry,
                          nvmlDeviceGetNvLinkUtilizationControl, device, link,
                          counter, control);
 }
 
 nvmlReturn_t nvmlDeviceGetNvLinkUtilizationCounter(
-    nvmlDevice_t device, unsigned int link, unsigned int counter,
-    unsigned long long *rxcounter, unsigned long long *txcounter) {
+         nvmlDevice_t device, unsigned int link, unsigned int counter,
+         unsigned long long *rxcounter, unsigned long long *txcounter) {
   return NVML_ENTRY_CALL(nvml_library_entry,
                          nvmlDeviceGetNvLinkUtilizationCounter, device, link,
                          counter, rxcounter, txcounter);
@@ -551,8 +526,8 @@ nvmlReturn_t nvmlDeviceGetNvLinkUtilizationCounter(
 
 nvmlReturn_t nvmlDeviceGetNvLinkVersion(nvmlDevice_t device, unsigned int link,
                                         unsigned int *version) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetNvLinkVersion, device,
-                         link, version);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetNvLinkVersion,
+                         device, link, version);
 }
 
 nvmlReturn_t nvmlDeviceGetP2PStatus(nvmlDevice_t device1, nvmlDevice_t device2,
@@ -587,22 +562,20 @@ nvmlReturn_t nvmlDeviceGetPersistenceMode(nvmlDevice_t device,
                          device, mode);
 }
 
-nvmlReturn_t
-nvmlDeviceGetPowerManagementDefaultLimit(nvmlDevice_t device,
+nvmlReturn_t nvmlDeviceGetPowerManagementDefaultLimit(nvmlDevice_t device,
                                          unsigned int *defaultLimit) {
   return NVML_ENTRY_CALL(nvml_library_entry,
                          nvmlDeviceGetPowerManagementDefaultLimit, device,
                          defaultLimit);
 }
 
-nvmlReturn_t nvmlDeviceGetPowerManagementLimit(nvmlDevice_t device,
-                                               unsigned int *limit) {
+nvmlReturn_t nvmlDeviceGetPowerManagementLimit(nvmlDevice_t device, unsigned int *limit) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetPowerManagementLimit,
                          device, limit);
 }
 
-nvmlReturn_t nvmlDeviceGetPowerManagementLimitConstraints(
-    nvmlDevice_t device, unsigned int *minLimit, unsigned int *maxLimit) {
+nvmlReturn_t nvmlDeviceGetPowerManagementLimitConstraints(nvmlDevice_t device,
+                         unsigned int *minLimit, unsigned int *maxLimit) {
   return NVML_ENTRY_CALL(nvml_library_entry,
                          nvmlDeviceGetPowerManagementLimitConstraints, device,
                          minLimit, maxLimit);
@@ -614,15 +587,12 @@ nvmlReturn_t nvmlDeviceGetPowerManagementMode(nvmlDevice_t device,
                          device, mode);
 }
 
-nvmlReturn_t nvmlDeviceGetPowerState(nvmlDevice_t device,
-                                     nvmlPstates_t *pState) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetPowerState, device,
-                         pState);
+nvmlReturn_t nvmlDeviceGetPowerState(nvmlDevice_t device, nvmlPstates_t *pState) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetPowerState, device, pState);
 }
 
 nvmlReturn_t nvmlDeviceGetPowerUsage(nvmlDevice_t device, unsigned int *power) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetPowerUsage, device,
-                         power);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetPowerUsage, device, power);
 }
 
 nvmlReturn_t nvmlDeviceGetRetiredPages(nvmlDevice_t device,
@@ -633,12 +603,10 @@ nvmlReturn_t nvmlDeviceGetRetiredPages(nvmlDevice_t device,
                          cause, pageCount, addresses);
 }
 
-nvmlReturn_t
-nvmlDeviceGetRetiredPagesPendingStatus(nvmlDevice_t device,
-                                       nvmlEnableState_t *isPending) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetRetiredPagesPendingStatus, device,
-                         isPending);
+nvmlReturn_t nvmlDeviceGetRetiredPagesPendingStatus(nvmlDevice_t device,
+                                                    nvmlEnableState_t *isPending) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetRetiredPagesPendingStatus,
+                         device, isPending);
 }
 
 nvmlReturn_t nvmlDeviceGetSamples(nvmlDevice_t device, nvmlSamplingType_t type,
@@ -647,18 +615,16 @@ nvmlReturn_t nvmlDeviceGetSamples(nvmlDevice_t device, nvmlSamplingType_t type,
                                   unsigned int *sampleCount,
                                   nvmlSample_t *samples) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetSamples, device, type,
-                         lastSeenTimeStamp, sampleValType, sampleCount,
-                         samples);
+                         lastSeenTimeStamp, sampleValType, sampleCount, samples);
 }
 
-nvmlReturn_t nvmlDeviceGetSerial(nvmlDevice_t device, char *serial,
-                                 unsigned int length) {
+nvmlReturn_t nvmlDeviceGetSerial(nvmlDevice_t device, char *serial, unsigned int length) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetSerial, device,
                          serial, length);
 }
 
-nvmlReturn_t nvmlDeviceGetSupportedClocksThrottleReasons(
-    nvmlDevice_t device, unsigned long long *supportedClocksThrottleReasons) {
+nvmlReturn_t nvmlDeviceGetSupportedClocksThrottleReasons(nvmlDevice_t device,
+                         unsigned long long *supportedClocksThrottleReasons) {
   return NVML_ENTRY_CALL(nvml_library_entry,
                          nvmlDeviceGetSupportedClocksThrottleReasons, device,
                          supportedClocksThrottleReasons);
@@ -700,20 +666,17 @@ nvmlReturn_t nvmlDeviceGetTemperature(nvmlDevice_t device,
                          sensorType, temp);
 }
 
-nvmlReturn_t
-nvmlDeviceGetTemperatureThreshold(nvmlDevice_t device,
-                                  nvmlTemperatureThresholds_t thresholdType,
-                                  unsigned int *temp) {
+nvmlReturn_t nvmlDeviceGetTemperatureThreshold(nvmlDevice_t device,
+                                               nvmlTemperatureThresholds_t thresholdType,
+                                               unsigned int *temp) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetTemperatureThreshold,
                          device, thresholdType, temp);
 }
 
-nvmlReturn_t
-nvmlDeviceGetTopologyCommonAncestor(nvmlDevice_t device1, nvmlDevice_t device2,
-                                    nvmlGpuTopologyLevel_t *pathInfo) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetTopologyCommonAncestor, device1, device2,
-                         pathInfo);
+nvmlReturn_t nvmlDeviceGetTopologyCommonAncestor(nvmlDevice_t device1, nvmlDevice_t device2,
+                                                 nvmlGpuTopologyLevel_t *pathInfo) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetTopologyCommonAncestor,
+                         device1, device2, pathInfo);
 }
 
 nvmlReturn_t nvmlDeviceGetTopologyNearestGpus(nvmlDevice_t device,
@@ -744,16 +707,12 @@ nvmlReturn_t nvmlDeviceGetUtilizationRates(nvmlDevice_t device,
                          device, utilization);
 }
 
-nvmlReturn_t nvmlDeviceGetUUID(nvmlDevice_t device, char *uuid,
-                               unsigned int length) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetUUID, device, uuid,
-                         length);
+nvmlReturn_t nvmlDeviceGetUUID(nvmlDevice_t device, char *uuid, unsigned int length) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetUUID, device, uuid, length);
 }
 
-nvmlReturn_t nvmlDeviceGetVbiosVersion(nvmlDevice_t device, char *version,
-                                       unsigned int length) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetVbiosVersion, device,
-                         version, length);
+nvmlReturn_t nvmlDeviceGetVbiosVersion(nvmlDevice_t device, char *version, unsigned int length) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetVbiosVersion, device, version, length);
 }
 
 nvmlReturn_t nvmlDeviceGetVgpuMetadata(nvmlDevice_t device,
@@ -763,19 +722,15 @@ nvmlReturn_t nvmlDeviceGetVgpuMetadata(nvmlDevice_t device,
                          pgpuMetadata, bufferSize);
 }
 
-nvmlReturn_t nvmlDeviceGetVgpuProcessUtilization(
-    nvmlDevice_t device, unsigned long long lastSeenTimeStamp,
-    unsigned int *vgpuProcessSamplesCount,
-    nvmlVgpuProcessUtilizationSample_t *utilizationSamples) {
-  return NVML_ENTRY_CALL(
-      nvml_library_entry, nvmlDeviceGetVgpuProcessUtilization, device,
-      lastSeenTimeStamp, vgpuProcessSamplesCount, utilizationSamples);
+nvmlReturn_t nvmlDeviceGetVgpuProcessUtilization(nvmlDevice_t device, unsigned long long lastSeenTimeStamp,
+                unsigned int *vgpuProcessSamplesCount, nvmlVgpuProcessUtilizationSample_t *utilizationSamples) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetVgpuProcessUtilization, device,
+                         lastSeenTimeStamp, vgpuProcessSamplesCount, utilizationSamples);
 }
 
-nvmlReturn_t nvmlDeviceGetVgpuUtilization(
-    nvmlDevice_t device, unsigned long long lastSeenTimeStamp,
-    nvmlValueType_t *sampleValType, unsigned int *vgpuInstanceSamplesCount,
-    nvmlVgpuInstanceUtilizationSample_t *utilizationSamples) {
+nvmlReturn_t nvmlDeviceGetVgpuUtilization(nvmlDevice_t device, unsigned long long lastSeenTimeStamp,
+                                          nvmlValueType_t *sampleValType, unsigned int *vgpuInstanceSamplesCount,
+                                          nvmlVgpuInstanceUtilizationSample_t *utilizationSamples) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetVgpuUtilization,
                          device, lastSeenTimeStamp, sampleValType,
                          vgpuInstanceSamplesCount, utilizationSamples);
@@ -788,9 +743,8 @@ nvmlReturn_t nvmlDeviceGetViolationStatus(nvmlDevice_t device,
                          device, perfPolicyType, violTime);
 }
 
-nvmlReturn_t
-nvmlDeviceGetVirtualizationMode(nvmlDevice_t device,
-                                nvmlGpuVirtualizationMode_t *pVirtualMode) {
+nvmlReturn_t nvmlDeviceGetVirtualizationMode(nvmlDevice_t device,
+                                             nvmlGpuVirtualizationMode_t *pVirtualMode) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetVirtualizationMode,
                          device, pVirtualMode);
 }
@@ -875,21 +829,18 @@ nvmlReturn_t nvmlDeviceSetApplicationsClocks(nvmlDevice_t device,
 
 nvmlReturn_t nvmlDeviceSetAutoBoostedClocksEnabled(nvmlDevice_t device,
                                                    nvmlEnableState_t enabled) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceSetAutoBoostedClocksEnabled, device,
-                         enabled);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetAutoBoostedClocksEnabled,
+                         device, enabled);
 }
-
 
 nvmlReturn_t nvmlDeviceSetCpuAffinity(nvmlDevice_t device) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetCpuAffinity, device);
 }
 
-nvmlReturn_t nvmlDeviceSetDefaultAutoBoostedClocksEnabled(
-    nvmlDevice_t device, nvmlEnableState_t enabled, unsigned int flags) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceSetDefaultAutoBoostedClocksEnabled, device,
-                         enabled, flags);
+nvmlReturn_t nvmlDeviceSetDefaultAutoBoostedClocksEnabled(nvmlDevice_t device,
+                                                          nvmlEnableState_t enabled, unsigned int flags) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetDefaultAutoBoostedClocksEnabled,
+                         device, enabled, flags);
 }
 
 nvmlReturn_t nvmlDeviceSetDriverModel(nvmlDevice_t device,
@@ -906,28 +857,23 @@ nvmlReturn_t nvmlDeviceSetGpuOperationMode(nvmlDevice_t device,
 }
 
 nvmlReturn_t nvmlDeviceSetNvLinkUtilizationControl(
-    nvmlDevice_t device, unsigned int link, unsigned int counter,
-    nvmlNvLinkUtilizationControl_t *control, unsigned int reset) {
+        nvmlDevice_t device, unsigned int link, unsigned int counter,
+        nvmlNvLinkUtilizationControl_t *control, unsigned int reset) {
   return NVML_ENTRY_CALL(nvml_library_entry,
                          nvmlDeviceSetNvLinkUtilizationControl, device, link,
                          counter, control, reset);
 }
 
-nvmlReturn_t nvmlDeviceSetPersistenceMode(nvmlDevice_t device,
-                                          nvmlEnableState_t mode) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetPersistenceMode,
-                         device, mode);
+nvmlReturn_t nvmlDeviceSetPersistenceMode(nvmlDevice_t device, nvmlEnableState_t mode) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetPersistenceMode, device, mode);
 }
 
-nvmlReturn_t nvmlDeviceSetPowerManagementLimit(nvmlDevice_t device,
-                                               unsigned int limit) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetPowerManagementLimit,
-                         device, limit);
+nvmlReturn_t nvmlDeviceSetPowerManagementLimit(nvmlDevice_t device, unsigned int limit) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetPowerManagementLimit, device, limit);
 }
 
-nvmlReturn_t
-nvmlDeviceSetVirtualizationMode(nvmlDevice_t device,
-                                nvmlGpuVirtualizationMode_t virtualMode) {
+nvmlReturn_t nvmlDeviceSetVirtualizationMode(nvmlDevice_t device,
+                                             nvmlGpuVirtualizationMode_t virtualMode) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetVirtualizationMode,
                          device, virtualMode);
 }
@@ -946,14 +892,12 @@ nvmlReturn_t nvmlEventSetFree(nvmlEventSet_t set) {
 
 nvmlReturn_t nvmlEventSetWait(nvmlEventSet_t set, nvmlEventData_t *data,
                               unsigned int timeoutms) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlEventSetWait, set, data,
-                         timeoutms);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlEventSetWait, set, data, timeoutms);
 }
 
-nvmlReturn_t
-nvmlGetVgpuCompatibility(nvmlVgpuMetadata_t *vgpuMetadata,
-                         nvmlVgpuPgpuMetadata_t *pgpuMetadata,
-                         nvmlVgpuPgpuCompatibility_t *compatibilityInfo) {
+nvmlReturn_t nvmlGetVgpuCompatibility(nvmlVgpuMetadata_t *vgpuMetadata,
+                                      nvmlVgpuPgpuMetadata_t *pgpuMetadata,
+                                      nvmlVgpuPgpuCompatibility_t *compatibilityInfo) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetVgpuCompatibility,
                          vgpuMetadata, pgpuMetadata, compatibilityInfo);
 }
@@ -981,13 +925,11 @@ nvmlReturn_t nvmlSystemGetDriverVersion(char *version, unsigned int length) {
 
 nvmlReturn_t nvmlSystemGetHicVersion(unsigned int *hwbcCount,
                                      nvmlHwbcEntry_t *hwbcEntries) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlSystemGetHicVersion, hwbcCount,
-                         hwbcEntries);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlSystemGetHicVersion, hwbcCount, hwbcEntries);
 }
 
 nvmlReturn_t nvmlSystemGetNVMLVersion(char *version, unsigned int length) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlSystemGetNVMLVersion, version,
-                         length);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlSystemGetNVMLVersion, version, length);
 }
 
 nvmlReturn_t nvmlSystemGetProcessName(unsigned int pid, char *name,
@@ -1052,10 +994,9 @@ nvmlReturn_t nvmlVgpuInstanceGetEncoderCapacity(nvmlVgpuInstance_t vgpuInstance,
                          vgpuInstance, encoderCapacity);
 }
 
-nvmlReturn_t
-nvmlVgpuInstanceGetEncoderSessions(nvmlVgpuInstance_t vgpuInstance,
-                                   unsigned int *sessionCount,
-                                   nvmlEncoderSessionInfo_t *sessionInfo) {
+nvmlReturn_t nvmlVgpuInstanceGetEncoderSessions(nvmlVgpuInstance_t vgpuInstance,
+                                                unsigned int *sessionCount,
+                                                nvmlEncoderSessionInfo_t *sessionInfo) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlVgpuInstanceGetEncoderSessions,
                          vgpuInstance, sessionCount, sessionInfo);
 }
@@ -1191,15 +1132,12 @@ nvmlReturn_t nvmlDeviceGetFBCSessions(nvmlDevice_t device,
                          sessionCount, sessionInfo);
 }
 
-nvmlReturn_t nvmlDeviceGetFBCStats(nvmlDevice_t device,
-                                   nvmlFBCStats_t *fbcStats) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetFBCStats, device,
-                         fbcStats);
+nvmlReturn_t nvmlDeviceGetFBCStats(nvmlDevice_t device, nvmlFBCStats_t *fbcStats) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetFBCStats, device, fbcStats);
 }
 
-nvmlReturn_t nvmlDeviceGetGridLicensableFeatures_v2(
-    nvmlDevice_t device,
-    nvmlGridLicensableFeatures_t *pGridLicensableFeatures) {
+nvmlReturn_t nvmlDeviceGetGridLicensableFeatures_v2(nvmlDevice_t device,
+                         nvmlGridLicensableFeatures_t *pGridLicensableFeatures) {
   return NVML_ENTRY_CALL(nvml_library_entry,
                          nvmlDeviceGetGridLicensableFeatures_v2, device,
                          pGridLicensableFeatures);
@@ -1214,8 +1152,7 @@ nvmlReturn_t nvmlDeviceGetRetiredPages_v2(nvmlDevice_t device,
 }
 
 nvmlReturn_t nvmlDeviceResetGpuLockedClocks(nvmlDevice_t device) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceResetGpuLockedClocks,
-                         device);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceResetGpuLockedClocks, device);
 }
 
 nvmlReturn_t nvmlDeviceSetGpuLockedClocks(nvmlDevice_t device,
@@ -1226,15 +1163,12 @@ nvmlReturn_t nvmlDeviceSetGpuLockedClocks(nvmlDevice_t device,
 }
 
 nvmlReturn_t nvmlGetBlacklistDeviceCount(unsigned int *deviceCount) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetBlacklistDeviceCount,
-                         deviceCount);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetBlacklistDeviceCount, deviceCount);
 }
 
-nvmlReturn_t
-nvmlGetBlacklistDeviceInfoByIndex(unsigned int index,
-                                  nvmlBlacklistDeviceInfo_t *info) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetBlacklistDeviceInfoByIndex,
-                         index, info);
+nvmlReturn_t nvmlGetBlacklistDeviceInfoByIndex(unsigned int index,
+                                               nvmlBlacklistDeviceInfo_t *info) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetBlacklistDeviceInfoByIndex, index, info);
 }
 
 nvmlReturn_t nvmlVgpuInstanceGetAccountingMode(nvmlVgpuInstance_t vgpuInstance,
@@ -1270,9 +1204,8 @@ nvmlReturn_t nvmlVgpuInstanceGetFBCStats(nvmlVgpuInstance_t vgpuInstance,
                          vgpuInstance, fbcStats);
 }
 
-nvmlReturn_t
-nvmlVgpuTypeGetMaxInstancesPerVm(nvmlVgpuTypeId_t vgpuTypeId,
-                                 unsigned int *vgpuInstanceCountPerVm) {
+nvmlReturn_t nvmlVgpuTypeGetMaxInstancesPerVm(nvmlVgpuTypeId_t vgpuTypeId,
+                                              unsigned int *vgpuInstanceCountPerVm) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlVgpuTypeGetMaxInstancesPerVm,
                          vgpuTypeId, vgpuInstanceCountPerVm);
 }
@@ -1325,51 +1258,41 @@ nvmlReturn_t nvmlComputeInstanceGetInfo(nvmlComputeInstance_t computeInstance,
                          computeInstance, info);
 }
 
-nvmlReturn_t nvmlDeviceCreateGpuInstance(nvmlDevice_t device,
-                                         unsigned int profileId,
+nvmlReturn_t nvmlDeviceCreateGpuInstance(nvmlDevice_t device, unsigned int profileId,
                                          nvmlGpuInstance_t *gpuInstance) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceCreateGpuInstance,
                          device, profileId, gpuInstance);
 }
 
-nvmlReturn_t nvmlDeviceGetArchitecture(nvmlDevice_t device,
-                                       nvmlDeviceArchitecture_t *arch) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetArchitecture, device,
-                         arch);
+nvmlReturn_t nvmlDeviceGetArchitecture(nvmlDevice_t device, nvmlDeviceArchitecture_t *arch) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetArchitecture, device, arch);
 }
 
 nvmlReturn_t nvmlDeviceGetAttributes(nvmlDevice_t device,
                                      nvmlDeviceAttributes_t *attributes) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetAttributes, device,
-                         attributes);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetAttributes, device, attributes);
 }
 
 nvmlReturn_t nvmlDeviceGetAttributes_v2(nvmlDevice_t device,
                                         nvmlDeviceAttributes_t *attributes) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetAttributes_v2, device,
-                         attributes);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetAttributes_v2, device, attributes);
 }
 
-nvmlReturn_t nvmlDeviceGetComputeInstanceId(nvmlDevice_t device,
-                                            unsigned int *id) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeInstanceId,
-                         device, id);
+nvmlReturn_t nvmlDeviceGetComputeInstanceId(nvmlDevice_t device, unsigned int *id) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeInstanceId, device, id);
 }
 
 nvmlReturn_t nvmlDeviceGetCpuAffinityWithinScope(nvmlDevice_t device,
                                                  unsigned int cpuSetSize,
                                                  unsigned long *cpuSet,
                                                  nvmlAffinityScope_t scope) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetCpuAffinityWithinScope, device,
-                         cpuSetSize, cpuSet, scope);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetCpuAffinityWithinScope,
+                         device, cpuSetSize, cpuSet, scope);
 }
 
-nvmlReturn_t
-nvmlDeviceGetDeviceHandleFromMigDeviceHandle(nvmlDevice_t migDevice,
-                                             nvmlDevice_t *device) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetDeviceHandleFromMigDeviceHandle,
+nvmlReturn_t nvmlDeviceGetDeviceHandleFromMigDeviceHandle(nvmlDevice_t migDevice,
+                                                          nvmlDevice_t *device) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetDeviceHandleFromMigDeviceHandle,
                          migDevice, device);
 }
 
@@ -1380,40 +1303,32 @@ nvmlReturn_t nvmlDeviceGetGpuInstanceById(nvmlDevice_t device, unsigned int id,
 }
 
 nvmlReturn_t nvmlDeviceGetGpuInstanceId(nvmlDevice_t device, unsigned int *id) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpuInstanceId, device,
-                         id);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpuInstanceId, device, id);
 }
 
-nvmlReturn_t nvmlDeviceGetGpuInstancePossiblePlacements_v2(
-    nvmlDevice_t device, unsigned int profileId,
-    nvmlGpuInstancePlacement_t *placements, unsigned int *count) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetGpuInstancePossiblePlacements_v2, device,
-                         profileId, placements, count);
+nvmlReturn_t nvmlDeviceGetGpuInstancePossiblePlacements_v2(nvmlDevice_t device, unsigned int profileId,
+                                            nvmlGpuInstancePlacement_t *placements, unsigned int *count) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpuInstancePossiblePlacements_v2,
+                         device, profileId, placements, count);
 }
 
-nvmlReturn_t nvmlDeviceGetGpuInstancePossiblePlacements(
-    nvmlDevice_t device, unsigned int profileId,
-    nvmlGpuInstancePlacement_t *placements, unsigned int *count) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetGpuInstancePossiblePlacements, device,
-                         profileId, placements, count);
+nvmlReturn_t nvmlDeviceGetGpuInstancePossiblePlacements(nvmlDevice_t device, unsigned int profileId,
+                                        nvmlGpuInstancePlacement_t *placements, unsigned int *count) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpuInstancePossiblePlacements,
+                         device, profileId, placements, count);
 }
 
-nvmlReturn_t
-nvmlDeviceGetGpuInstanceProfileInfo(nvmlDevice_t device, unsigned int profile,
-                                    nvmlGpuInstanceProfileInfo_t *info) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetGpuInstanceProfileInfo, device, profile,
-                         info);
+nvmlReturn_t nvmlDeviceGetGpuInstanceProfileInfo(nvmlDevice_t device, unsigned int profile,
+                                                 nvmlGpuInstanceProfileInfo_t *info) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpuInstanceProfileInfo,
+                         device, profile, info);
 }
 
 nvmlReturn_t nvmlDeviceGetGpuInstanceRemainingCapacity(nvmlDevice_t device,
                                                        unsigned int profileId,
                                                        unsigned int *count) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetGpuInstanceRemainingCapacity, device,
-                         profileId, count);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpuInstanceRemainingCapacity,
+                         device, profileId, count);
 }
 
 nvmlReturn_t nvmlDeviceGetGpuInstances(nvmlDevice_t device,
@@ -1424,33 +1339,25 @@ nvmlReturn_t nvmlDeviceGetGpuInstances(nvmlDevice_t device,
                          profileId, gpuInstances, count);
 }
 
-nvmlReturn_t nvmlDeviceGetMaxMigDeviceCount(nvmlDevice_t device,
-                                            unsigned int *count) {
+nvmlReturn_t nvmlDeviceGetMaxMigDeviceCount(nvmlDevice_t device, unsigned int *count) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMaxMigDeviceCount,
                          device, count);
 }
 
-nvmlReturn_t nvmlDeviceGetMemoryAffinity(nvmlDevice_t device,
-                                         unsigned int nodeSetSize,
-                                         unsigned long *nodeSet,
-                                         nvmlAffinityScope_t scope) {
+nvmlReturn_t nvmlDeviceGetMemoryAffinity(nvmlDevice_t device, unsigned int nodeSetSize,
+                                         unsigned long *nodeSet, nvmlAffinityScope_t scope) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryAffinity,
                          device, nodeSetSize, nodeSet, scope);
 }
 
-nvmlReturn_t nvmlDeviceGetMigDeviceHandleByIndex(nvmlDevice_t device,
-                                                 unsigned int index,
+nvmlReturn_t nvmlDeviceGetMigDeviceHandleByIndex(nvmlDevice_t device, unsigned int index,
                                                  nvmlDevice_t *migDevice) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetMigDeviceHandleByIndex, device, index,
-                         migDevice);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMigDeviceHandleByIndex,
+                         device, index, migDevice);
 }
 
-nvmlReturn_t nvmlDeviceGetMigMode(nvmlDevice_t device,
-                                  unsigned int *currentMode,
-                                  unsigned int *pendingMode) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMigMode, device,
-                         currentMode, pendingMode);
+nvmlReturn_t nvmlDeviceGetMigMode(nvmlDevice_t device, unsigned int *currentMode, unsigned int *pendingMode) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMigMode, device, currentMode, pendingMode);
 }
 
 nvmlReturn_t nvmlDeviceGetRemappedRows(nvmlDevice_t device,
@@ -1462,87 +1369,64 @@ nvmlReturn_t nvmlDeviceGetRemappedRows(nvmlDevice_t device,
                          corrRows, uncRows, isPending, failureOccurred);
 }
 
-nvmlReturn_t
-nvmlDeviceGetRowRemapperHistogram(nvmlDevice_t device,
-                                  nvmlRowRemapperHistogramValues_t *values) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetRowRemapperHistogram,
-                         device, values);
+nvmlReturn_t nvmlDeviceGetRowRemapperHistogram(nvmlDevice_t device,
+                                               nvmlRowRemapperHistogramValues_t *values) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetRowRemapperHistogram, device, values);
 }
 
-nvmlReturn_t nvmlDeviceIsMigDeviceHandle(nvmlDevice_t device,
-                                         unsigned int *isMigDevice) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceIsMigDeviceHandle,
-                         device, isMigDevice);
+nvmlReturn_t nvmlDeviceIsMigDeviceHandle(nvmlDevice_t device, unsigned int *isMigDevice) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceIsMigDeviceHandle, device, isMigDevice);
 }
 
-nvmlReturn_t nvmlDeviceSetMigMode(nvmlDevice_t device, unsigned int mode,
-                                  nvmlReturn_t *activationStatus) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetMigMode, device, mode,
-                         activationStatus);
+nvmlReturn_t nvmlDeviceSetMigMode(nvmlDevice_t device, unsigned int mode, nvmlReturn_t *activationStatus) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetMigMode, device, mode, activationStatus);
 }
 
-nvmlReturn_t nvmlEventSetWait_v2(nvmlEventSet_t set, nvmlEventData_t *data,
-                                 unsigned int timeoutms) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlEventSetWait_v2, set, data,
-                         timeoutms);
+nvmlReturn_t nvmlEventSetWait_v2(nvmlEventSet_t set, nvmlEventData_t *data, unsigned int timeoutms) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlEventSetWait_v2, set, data, timeoutms);
 }
 
-nvmlReturn_t
-nvmlGpuInstanceCreateComputeInstance(nvmlGpuInstance_t gpuInstance,
-                                     unsigned int profileId,
-                                     nvmlComputeInstance_t *computeInstance) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlGpuInstanceCreateComputeInstance, gpuInstance,
-                         profileId, computeInstance);
+nvmlReturn_t nvmlGpuInstanceCreateComputeInstance(nvmlGpuInstance_t gpuInstance, unsigned int profileId,
+                                                  nvmlComputeInstance_t *computeInstance) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGpuInstanceCreateComputeInstance,
+                         gpuInstance, profileId, computeInstance);
 }
 
 nvmlReturn_t nvmlGpuInstanceDestroy(nvmlGpuInstance_t gpuInstance) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGpuInstanceDestroy,
-                         gpuInstance);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGpuInstanceDestroy, gpuInstance);
 }
 
-nvmlReturn_t
-nvmlGpuInstanceGetComputeInstanceById(nvmlGpuInstance_t gpuInstance,
-                                      unsigned int id,
-                                      nvmlComputeInstance_t *computeInstance) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlGpuInstanceGetComputeInstanceById, gpuInstance, id,
-                         computeInstance);
+nvmlReturn_t nvmlGpuInstanceGetComputeInstanceById(nvmlGpuInstance_t gpuInstance, unsigned int id,
+                                                   nvmlComputeInstance_t *computeInstance) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGpuInstanceGetComputeInstanceById,
+                         gpuInstance, id, computeInstance);
 }
 
-nvmlReturn_t nvmlGpuInstanceGetComputeInstanceProfileInfo(
-    nvmlGpuInstance_t gpuInstance, unsigned int profile,
-    unsigned int engProfile, nvmlComputeInstanceProfileInfo_t *info) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlGpuInstanceGetComputeInstanceProfileInfo,
+nvmlReturn_t nvmlGpuInstanceGetComputeInstanceProfileInfo(nvmlGpuInstance_t gpuInstance, unsigned int profile,
+                                              unsigned int engProfile, nvmlComputeInstanceProfileInfo_t *info) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGpuInstanceGetComputeInstanceProfileInfo,
                          gpuInstance, profile, engProfile, info);
 }
 
-nvmlReturn_t nvmlGpuInstanceGetComputeInstanceRemainingCapacity(
-    nvmlGpuInstance_t gpuInstance, unsigned int profileId,
-    unsigned int *count) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlGpuInstanceGetComputeInstanceRemainingCapacity,
+nvmlReturn_t nvmlGpuInstanceGetComputeInstanceRemainingCapacity(nvmlGpuInstance_t gpuInstance,
+                                                                unsigned int profileId, unsigned int *count) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGpuInstanceGetComputeInstanceRemainingCapacity,
                          gpuInstance, profileId, count);
 }
 
-nvmlReturn_t nvmlGpuInstanceGetComputeInstances(
-    nvmlGpuInstance_t gpuInstance, unsigned int profileId,
-    nvmlComputeInstance_t *computeInstances, unsigned int *count) {
+nvmlReturn_t nvmlGpuInstanceGetComputeInstances(nvmlGpuInstance_t gpuInstance, unsigned int profileId,
+                                                nvmlComputeInstance_t *computeInstances, unsigned int *count) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlGpuInstanceGetComputeInstances,
                          gpuInstance, profileId, computeInstances, count);
 }
 
 nvmlReturn_t nvmlGpuInstanceGetInfo(nvmlGpuInstance_t gpuInstance,
                                     nvmlGpuInstanceInfo_t *info) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGpuInstanceGetInfo,
-                         gpuInstance, info);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGpuInstanceGetInfo, gpuInstance, info);
 }
 
-nvmlReturn_t
-nvmlVgpuInstanceClearAccountingPids(nvmlVgpuInstance_t vgpuInstance) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlVgpuInstanceClearAccountingPids, vgpuInstance);
+nvmlReturn_t nvmlVgpuInstanceClearAccountingPids(nvmlVgpuInstance_t vgpuInstance) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlVgpuInstanceClearAccountingPids, vgpuInstance);
 }
 
 nvmlReturn_t nvmlVgpuInstanceGetMdevUUID(nvmlVgpuInstance_t vgpuInstance,
@@ -1551,9 +1435,8 @@ nvmlReturn_t nvmlVgpuInstanceGetMdevUUID(nvmlVgpuInstance_t vgpuInstance,
                          vgpuInstance, mdevUuid, size);
 }
 
-nvmlReturn_t
-nvmlComputeInstanceGetInfo_v2(nvmlComputeInstance_t computeInstance,
-                              nvmlComputeInstanceInfo_t *info) {
+nvmlReturn_t nvmlComputeInstanceGetInfo_v2(nvmlComputeInstance_t computeInstance,
+                                           nvmlComputeInstanceInfo_t *info) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlComputeInstanceGetInfo_v2,
                          computeInstance, info);
 }
@@ -1565,14 +1448,15 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
                          nvmlDeviceGetComputeRunningProcesses_v2, device,
                          infoCount, infos);
 }
-nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
-    nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetGraphicsRunningProcesses_v2, device,
-                         infoCount, infos);
+
+nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(nvmlDevice_t device,
+                                                      unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2,
+                         device, infoCount, infos);
 }
-nvmlReturn_t nvmlDeviceSetTemperatureThreshold(
-    nvmlDevice_t device, nvmlTemperatureThresholds_t thresholdType, int *temp) {
+
+nvmlReturn_t nvmlDeviceSetTemperatureThreshold(nvmlDevice_t device,
+                                               nvmlTemperatureThresholds_t thresholdType, int *temp) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetTemperatureThreshold,
                          device, thresholdType, temp);
 }
@@ -1586,21 +1470,19 @@ nvmlReturn_t nvmlVgpuInstanceGetGpuInstanceId(nvmlVgpuInstance_t vgpuInstance,
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlVgpuInstanceGetGpuInstanceId,
                          vgpuInstance, gpuInstanceId);
 }
-nvmlReturn_t
-nvmlVgpuTypeGetGpuInstanceProfileId(nvmlVgpuTypeId_t vgpuTypeId,
-                                    unsigned int *gpuInstanceProfileId) {
+
+nvmlReturn_t nvmlVgpuTypeGetGpuInstanceProfileId(nvmlVgpuTypeId_t vgpuTypeId,
+                                                 unsigned int *gpuInstanceProfileId) {
   return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlVgpuTypeGetGpuInstanceProfileId, vgpuTypeId,
-                         gpuInstanceProfileId);
+                         nvmlVgpuTypeGetGpuInstanceProfileId,
+                         vgpuTypeId, gpuInstanceProfileId);
 }
 
-nvmlReturn_t nvmlDeviceCreateGpuInstanceWithPlacement(
-    nvmlDevice_t device, unsigned int profileId,
-    const nvmlGpuInstancePlacement_t *placement,
-    nvmlGpuInstance_t *gpuInstance) {
-  return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceCreateGpuInstanceWithPlacement, device,
-                         profileId, placement, gpuInstance);
+nvmlReturn_t nvmlDeviceCreateGpuInstanceWithPlacement(nvmlDevice_t device, unsigned int profileId,
+                                                      const nvmlGpuInstancePlacement_t *placement,
+                                                      nvmlGpuInstance_t *gpuInstance){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceCreateGpuInstanceWithPlacement,
+                         device, profileId, placement, gpuInstance);
 }
 
 nvmlReturn_t nvmlDeviceGetBusType(nvmlDevice_t device, nvmlBusType_t *type) {
@@ -1608,27 +1490,23 @@ nvmlReturn_t nvmlDeviceGetBusType(nvmlDevice_t device, nvmlBusType_t *type) {
                          type);
 }
 
-nvmlReturn_t nvmlDeviceGetClkMonStatus(nvmlDevice_t device,
-                                       nvmlClkMonStatus_t *status) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetClkMonStatus, device,
-                         status);
+nvmlReturn_t nvmlDeviceGetClkMonStatus(nvmlDevice_t device, nvmlClkMonStatus_t *status){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetClkMonStatus, device, status);
 }
 
-nvmlReturn_t nvmlDeviceGetIrqNum(nvmlDevice_t device, unsigned int *irqNum) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIrqNum);
+nvmlReturn_t nvmlDeviceGetIrqNum(nvmlDevice_t device, unsigned int *irqNum){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIrqNum, device, irqNum);
 }
 
-nvmlReturn_t nvmlDeviceGetNvLinkRemoteDeviceType(
-    nvmlDevice_t device, unsigned int link,
-    nvmlIntNvLinkDeviceType_t *pNvLinkDeviceType) {
+nvmlReturn_t nvmlDeviceGetNvLinkRemoteDeviceType(nvmlDevice_t device, unsigned int link,
+                                                 nvmlIntNvLinkDeviceType_t *pNvLinkDeviceType){
   return NVML_ENTRY_CALL(nvml_library_entry,
-                         nvmlDeviceGetNvLinkRemoteDeviceType, device, link,
-                         pNvLinkDeviceType);
+                         nvmlDeviceGetNvLinkRemoteDeviceType,
+                         device, link, pNvLinkDeviceType);
 }
 
 nvmlReturn_t nvmlDeviceResetMemoryLockedClocks(nvmlDevice_t device) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceResetMemoryLockedClocks,
-                         device);
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceResetMemoryLockedClocks, device);
 }
 
 nvmlReturn_t nvmlDeviceSetMemoryLockedClocks(nvmlDevice_t device,
@@ -1638,46 +1516,43 @@ nvmlReturn_t nvmlDeviceSetMemoryLockedClocks(nvmlDevice_t device,
                          device, minMemClockMHz, maxMemClockMHz);
 }
 
-nvmlReturn_t nvmlGetExcludedDeviceCount(unsigned int *deviceCount) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetExcludedDeviceCount,
-                         deviceCount);
+nvmlReturn_t nvmlGetExcludedDeviceCount(unsigned int *deviceCount){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetExcludedDeviceCount, deviceCount);
 }
 
 nvmlReturn_t nvmlGetExcludedDeviceInfoByIndex(unsigned int index,
-                                              nvmlExcludedDeviceInfo_t *info) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetExcludedDeviceInfoByIndex,
-                         index, info);
+                                              nvmlExcludedDeviceInfo_t *info){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetExcludedDeviceInfoByIndex, index, info);
 }
 
-nvmlReturn_t
-nvmlVgpuInstanceGetLicenseInfo(nvmlVgpuInstance_t vgpuInstance,
-                               nvmlVgpuLicenseInfo_t *licenseInfo) {
+nvmlReturn_t nvmlVgpuInstanceGetLicenseInfo(nvmlVgpuInstance_t vgpuInstance,
+                                            nvmlVgpuLicenseInfo_t *licenseInfo){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlVgpuInstanceGetLicenseInfo, vgpuInstance, licenseInfo);
 }
 
-nvmlReturn_t 
-nvmlDeviceClearFieldValues ( nvmlDevice_t device, int  valuesCount, 
-                              nvmlFieldValue_t* values ){
+nvmlReturn_t nvmlDeviceClearFieldValues(nvmlDevice_t device, int valuesCount,
+                                        nvmlFieldValue_t* values){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceClearFieldValues, device, valuesCount, values);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetAdaptiveClockInfoStatus ( nvmlDevice_t device, unsigned int* adaptiveClockStatus ){
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetAdaptiveClockInfoStatus, device, adaptiveClockStatus);
+nvmlReturn_t nvmlDeviceGetAdaptiveClockInfoStatus(nvmlDevice_t device, unsigned int* adaptiveClockStatus){
+  return NVML_ENTRY_CALL(nvml_library_entry,
+                         nvmlDeviceGetAdaptiveClockInfoStatus,
+                         device, adaptiveClockStatus);
 }
 
-nvmlReturn_t
-nvmlDeviceGetComputeRunningProcesses_v3 ( nvmlDevice_t device, unsigned int* infoCount, nvmlProcessInfo_t* infos ){
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3, device, infoCount, infos);
+nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v3(nvmlDevice_t device,
+                                                     unsigned int* infoCount, nvmlProcessInfo_t* infos){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
+                         device, infoCount, infos);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetDefaultEccMode(nvmlDevice_t device, nvmlEnableState_t* defaultMode ){
+nvmlReturn_t nvmlDeviceGetDefaultEccMode(nvmlDevice_t device, nvmlEnableState_t* defaultMode){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetDefaultEccMode, device, defaultMode);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetDynamicPstatesInfo(nvmlDevice_t device, nvmlGpuDynamicPstatesInfo_t* pDynamicPstatesInfo ){
+nvmlReturn_t nvmlDeviceGetDynamicPstatesInfo(nvmlDevice_t device,
+                                             nvmlGpuDynamicPstatesInfo_t* pDynamicPstatesInfo){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetDynamicPstatesInfo, device, pDynamicPstatesInfo);
 }
 
@@ -1687,204 +1562,184 @@ nvmlDeviceGetDynamicPstatesInfo(nvmlDevice_t device, nvmlGpuDynamicPstatesInfo_t
 //   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetFanControlPolicy, device, fan, policy);                                  
 // }
 
-nvmlReturn_t 
-nvmlDeviceGetFanControlPolicy_v2(nvmlDevice_t device, unsigned int  fan, 
-                                    nvmlFanControlPolicy_t* policy){
+nvmlReturn_t nvmlDeviceGetFanControlPolicy_v2(nvmlDevice_t device, unsigned int fan,
+                                              nvmlFanControlPolicy_t* policy){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetFanControlPolicy_v2, device, fan, policy);                                  
 }
 
-nvmlReturn_t 
-nvmlDeviceGetGpcClkMinMaxVfOffset ( nvmlDevice_t device, int* minOffset, int* maxOffset ){
+nvmlReturn_t nvmlDeviceGetGpcClkMinMaxVfOffset(nvmlDevice_t device, int* minOffset, int* maxOffset){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpcClkMinMaxVfOffset, device, minOffset, maxOffset);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetGpcClkVfOffset ( nvmlDevice_t device, int* offset ){
+nvmlReturn_t nvmlDeviceGetGpcClkVfOffset(nvmlDevice_t device, int* offset){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpcClkVfOffset, device, offset);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetGpuFabricInfo ( nvmlDevice_t device, nvmlGpuFabricInfo_t* gpuFabricInfo ){
+nvmlReturn_t nvmlDeviceGetGpuFabricInfo(nvmlDevice_t device, nvmlGpuFabricInfo_t* gpuFabricInfo){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpuFabricInfo, device, gpuFabricInfo);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetGpuInstanceProfileInfoV ( nvmlDevice_t device, unsigned int  profile, 
-                                        nvmlGpuInstanceProfileInfo_v2_t* info ){
+nvmlReturn_t nvmlDeviceGetGpuInstanceProfileInfoV(nvmlDevice_t device, unsigned int profile,
+                                                  nvmlGpuInstanceProfileInfo_v2_t* info){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpuInstanceProfileInfoV, device, profile, info);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetGpuMaxPcieLinkGeneration ( nvmlDevice_t device, unsigned int* maxLinkGenDevice ){
+nvmlReturn_t nvmlDeviceGetGpuMaxPcieLinkGeneration(nvmlDevice_t device, unsigned int* maxLinkGenDevice){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGpuMaxPcieLinkGeneration, device, maxLinkGenDevice);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetGraphicsRunningProcesses_v3 ( nvmlDevice_t device, unsigned int* infoCount, nvmlProcessInfo_t* infos ){
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3, device, infoCount, infos);
+nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v3(nvmlDevice_t device,
+                                                      unsigned int* infoCount, nvmlProcessInfo_t* infos){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3,
+                         device, infoCount, infos);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetGspFirmwareMode ( nvmlDevice_t device, unsigned int* isEnabled, unsigned int* defaultMode ){
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGspFirmwareMode, device, isEnabled, defaultMode);
+nvmlReturn_t nvmlDeviceGetGspFirmwareMode(nvmlDevice_t device, unsigned int* isEnabled,
+                                          unsigned int* defaultMode){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGspFirmwareMode,
+                         device, isEnabled, defaultMode);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetGspFirmwareVersion ( nvmlDevice_t device, char* version ){
+nvmlReturn_t nvmlDeviceGetGspFirmwareVersion(nvmlDevice_t device, char* version){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGspFirmwareVersion, device, version);
 }
 
-nvmlReturn_t
-nvmlDeviceGetJpgUtilization(nvmlDevice_t device, unsigned int *utilization, unsigned int *samplingPeriodUs){
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetJpgUtilization, device, utilization, samplingPeriodUs);
+nvmlReturn_t nvmlDeviceGetJpgUtilization(nvmlDevice_t device, unsigned int *utilization,
+                                         unsigned int *samplingPeriodUs){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetJpgUtilization, device,
+                         utilization, samplingPeriodUs);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetMemClkMinMaxVfOffset ( nvmlDevice_t device, int* minOffset, int* maxOffset ){
+nvmlReturn_t nvmlDeviceGetMemClkMinMaxVfOffset(nvmlDevice_t device, int* minOffset, int* maxOffset){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemClkMinMaxVfOffset, device, minOffset, maxOffset);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetMemClkVfOffset ( nvmlDevice_t device, int* offset ){
+nvmlReturn_t nvmlDeviceGetMemClkVfOffset(nvmlDevice_t device, int* offset){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemClkVfOffset, device, offset);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetMemoryBusWidth ( nvmlDevice_t device, unsigned int* busWidth ){
+nvmlReturn_t nvmlDeviceGetMemoryBusWidth(nvmlDevice_t device, unsigned int* busWidth){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryBusWidth, device, busWidth);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetMinMaxClockOfPState ( nvmlDevice_t device, nvmlClockType_t type, 
-            nvmlPstates_t pstate, unsigned int* minClockMHz, unsigned int* maxClockMHz ){
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMinMaxClockOfPState, device, type, pstate, minClockMHz, maxClockMHz);
+nvmlReturn_t nvmlDeviceGetMinMaxClockOfPState (nvmlDevice_t device, nvmlClockType_t type,
+                                               nvmlPstates_t pstate, unsigned int* minClockMHz,
+                                               unsigned int* maxClockMHz){
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMinMaxClockOfPState,
+                         device, type, pstate, minClockMHz, maxClockMHz);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetMinMaxFanSpeed ( nvmlDevice_t device, unsigned int* minSpeed, unsigned int* maxSpeed ){
+nvmlReturn_t nvmlDeviceGetMinMaxFanSpeed (nvmlDevice_t device, unsigned int* minSpeed, unsigned int* maxSpeed){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMinMaxFanSpeed, device, minSpeed, maxSpeed);
 }
 
-nvmlReturn_t
-nvmlDeviceGetModuleId(nvmlDevice_t device, unsigned int *moduleId){
+nvmlReturn_t nvmlDeviceGetModuleId(nvmlDevice_t device, unsigned int *moduleId){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetModuleId, device, moduleId);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetMPSComputeRunningProcesses_v3 ( nvmlDevice_t device, unsigned int* infoCount,
-                                             nvmlProcessInfo_t* infos ){
+nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses_v3(nvmlDevice_t device,
+                                                        unsigned int* infoCount, nvmlProcessInfo_t* infos){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMPSComputeRunningProcesses_v3, device, infoCount, infos);
 }
 
-nvmlReturn_t nvmlDeviceGetNumFans ( nvmlDevice_t device, unsigned int* numFans ){
+nvmlReturn_t nvmlDeviceGetNumFans(nvmlDevice_t device, unsigned int* numFans){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetNumFans, device, numFans);
 }
 
-
-nvmlReturn_t nvmlDeviceGetNumGpuCores ( nvmlDevice_t device, unsigned int* numCores ){
+nvmlReturn_t nvmlDeviceGetNumGpuCores(nvmlDevice_t device, unsigned int* numCores){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetNumGpuCores, device, numCores);
 }
 
-nvmlReturn_t
-nvmlDeviceGetOfaUtilization(nvmlDevice_t device, unsigned int *utilization,
-                                           unsigned int *samplingPeriodUs){
+nvmlReturn_t nvmlDeviceGetOfaUtilization(nvmlDevice_t device, unsigned int *utilization,
+                                         unsigned int *samplingPeriodUs){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetOfaUtilization, device, utilization, samplingPeriodUs);
 }
 
-nvmlReturn_t nvmlDeviceGetPcieLinkMaxSpeed ( nvmlDevice_t device, unsigned int* maxSpeed ){
+nvmlReturn_t nvmlDeviceGetPcieLinkMaxSpeed(nvmlDevice_t device, unsigned int* maxSpeed){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetPcieLinkMaxSpeed, device, maxSpeed);
 }
 
-nvmlReturn_t nvmlDeviceGetPcieSpeed ( nvmlDevice_t device, unsigned int* pcieSpeed ){
+nvmlReturn_t nvmlDeviceGetPcieSpeed(nvmlDevice_t device, unsigned int* pcieSpeed){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetPcieSpeed, device, pcieSpeed);
 }
 
-nvmlReturn_t nvmlDeviceGetPowerSource ( nvmlDevice_t device, nvmlPowerSource_t* powerSource ){
+nvmlReturn_t nvmlDeviceGetPowerSource(nvmlDevice_t device, nvmlPowerSource_t* powerSource){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetPowerSource, device, powerSource);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetSupportedClocksEventReasons(nvmlDevice_t device, unsigned long long *supportedClocksEventReasons){
+nvmlReturn_t nvmlDeviceGetSupportedClocksEventReasons(nvmlDevice_t device,
+                                                      unsigned long long *supportedClocksEventReasons){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetSupportedClocksEventReasons, device, supportedClocksEventReasons);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetSupportedPerformanceStates ( nvmlDevice_t device, nvmlPstates_t* pstates, unsigned int  size ){
+nvmlReturn_t nvmlDeviceGetSupportedPerformanceStates(nvmlDevice_t device,
+                                                     nvmlPstates_t* pstates, unsigned int size){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetSupportedPerformanceStates, device, pstates, size);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetTargetFanSpeed ( nvmlDevice_t device, unsigned int  fan, unsigned int* targetSpeed ){
+nvmlReturn_t nvmlDeviceGetTargetFanSpeed(nvmlDevice_t device, unsigned int fan, unsigned int* targetSpeed){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetTargetFanSpeed, device, fan, targetSpeed);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetThermalSettings ( nvmlDevice_t device, unsigned int  sensorIndex,
-                               nvmlGpuThermalSettings_t* pThermalSettings ){
+nvmlReturn_t nvmlDeviceGetThermalSettings (nvmlDevice_t device, unsigned int sensorIndex,
+                                           nvmlGpuThermalSettings_t* pThermalSettings){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetThermalSettings, device, sensorIndex, pThermalSettings);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetVgpuCapabilities ( nvmlDevice_t device, nvmlDeviceVgpuCapability_t capability, unsigned int* capResult ){
+nvmlReturn_t nvmlDeviceGetVgpuCapabilities(nvmlDevice_t device,
+                                           nvmlDeviceVgpuCapability_t capability, unsigned int* capResult){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetVgpuCapabilities, device, capability, capResult);
 }
 
-nvmlReturn_t 
-nvmlGetVgpuDriverCapabilities ( nvmlVgpuDriverCapability_t capability, unsigned int* capResult ){
+nvmlReturn_t nvmlGetVgpuDriverCapabilities(nvmlVgpuDriverCapability_t capability, unsigned int* capResult){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlGetVgpuDriverCapabilities, capability, capResult);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetVgpuSchedulerCapabilities ( nvmlDevice_t device, nvmlVgpuSchedulerCapabilities_t* pCapabilities ){
+nvmlReturn_t nvmlDeviceGetVgpuSchedulerCapabilities(nvmlDevice_t device,
+                                                    nvmlVgpuSchedulerCapabilities_t* pCapabilities){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetVgpuSchedulerCapabilities, device, pCapabilities);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetVgpuSchedulerLog ( nvmlDevice_t device, nvmlVgpuSchedulerLog_t* pSchedulerLog ){
+nvmlReturn_t nvmlDeviceGetVgpuSchedulerLog(nvmlDevice_t device, nvmlVgpuSchedulerLog_t* pSchedulerLog){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetVgpuSchedulerLog, device, pSchedulerLog);
 }
 
-nvmlReturn_t 
-nvmlDeviceGetVgpuSchedulerState ( nvmlDevice_t device, nvmlVgpuSchedulerGetState_t* pSchedulerState){
+nvmlReturn_t nvmlDeviceGetVgpuSchedulerState(nvmlDevice_t device,
+                                             nvmlVgpuSchedulerGetState_t* pSchedulerState){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetVgpuSchedulerState, device, pSchedulerState);
 }
 
-nvmlReturn_t 
-nvmlDeviceSetVgpuSchedulerState ( nvmlDevice_t device, nvmlVgpuSchedulerSetState_t* pSchedulerState ){
+nvmlReturn_t nvmlDeviceSetVgpuSchedulerState(nvmlDevice_t device,
+                                             nvmlVgpuSchedulerSetState_t* pSchedulerState){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetVgpuSchedulerState, device, pSchedulerState);
 }
 
-nvmlReturn_t 
-nvmlDeviceSetConfComputeUnprotectedMemSize(nvmlDevice_t device, unsigned long long sizeKiB){
+nvmlReturn_t nvmlDeviceSetConfComputeUnprotectedMemSize(nvmlDevice_t device, unsigned long long sizeKiB){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetConfComputeUnprotectedMemSize, device, sizeKiB);
 }
 
-nvmlReturn_t nvmlDeviceSetDefaultFanSpeed_v2 ( nvmlDevice_t device, unsigned int  fan){
+nvmlReturn_t nvmlDeviceSetDefaultFanSpeed_v2(nvmlDevice_t device, unsigned int fan){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetDefaultFanSpeed_v2, device, fan);
 }
 
-nvmlReturn_t 
-nvmlDeviceSetFanControlPolicy ( nvmlDevice_t device, unsigned int fan, nvmlFanControlPolicy_t policy ){
+nvmlReturn_t nvmlDeviceSetFanControlPolicy(nvmlDevice_t device, unsigned int fan,
+                                           nvmlFanControlPolicy_t policy){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetFanControlPolicy, device, fan, policy);
 }
 
-nvmlReturn_t 
-nvmlDeviceSetFanSpeed_v2 ( nvmlDevice_t device, unsigned int  fan, unsigned int  speed ){
+nvmlReturn_t nvmlDeviceSetFanSpeed_v2(nvmlDevice_t device, unsigned int fan, unsigned int speed){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetFanSpeed_v2, device, fan, speed);
 }
 
-nvmlReturn_t 
-nvmlDeviceSetGpcClkVfOffset ( nvmlDevice_t device, int  offset ){
+nvmlReturn_t nvmlDeviceSetGpcClkVfOffset(nvmlDevice_t device, int  offset){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetGpcClkVfOffset, device, offset);
 }
 
-nvmlReturn_t 
-nvmlDeviceSetMemClkVfOffset ( nvmlDevice_t device, int  offset ){
+nvmlReturn_t nvmlDeviceSetMemClkVfOffset(nvmlDevice_t device, int  offset){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetMemClkVfOffset, device, offset);
 }
 
-nvmlReturn_t 
-nvmlDeviceSetNvLinkDeviceLowPowerThreshold(nvmlDevice_t device, nvmlNvLinkPowerThres_t *info){
+nvmlReturn_t nvmlDeviceSetNvLinkDeviceLowPowerThreshold(nvmlDevice_t device, nvmlNvLinkPowerThres_t *info){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetNvLinkDeviceLowPowerThreshold, device, info);
 }
 
@@ -1998,7 +1853,6 @@ nvmlReturn_t nvmlDeviceGetConfComputeGpuAttestationReport(nvmlDevice_t device,
                                             nvmlConfComputeGpuAttestationReport_t *gpuAtstReport){
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetConfComputeGpuAttestationReport, device, gpuAtstReport);
 }
-
 
 nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetCount_v2, deviceCount);
