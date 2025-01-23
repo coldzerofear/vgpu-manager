@@ -278,7 +278,7 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 		if err == nil {
 			return
 		}
-		err = fmt.Errorf("Allocate failed: %s", err.Error())
+		err = fmt.Errorf("%s: %s", util.AllocateCheckErrMsg, err.Error())
 		klog.Errorln(err.Error())
 		if currentPod == nil {
 			return
@@ -492,7 +492,7 @@ func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugina
 	resp = &pluginapi.PreStartContainerResponse{}
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("PreStartContainer failed: %s", err.Error())
+			err = fmt.Errorf("%s: %s", util.PreStartContainerCheckErrMsg, err.Error())
 			klog.Errorln(err.Error())
 		}
 	}()

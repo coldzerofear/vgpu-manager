@@ -144,8 +144,8 @@ func IsShouldDeletePod(pod *corev1.Pod) bool {
 	}
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.State.Waiting != nil &&
-			(strings.Contains(status.State.Waiting.Message, "PreStartContainer failed") ||
-				strings.Contains(status.State.Waiting.Message, "Allocate failed")) {
+			(strings.Contains(status.State.Waiting.Message, PreStartContainerCheckErrMsg) ||
+				strings.Contains(status.State.Waiting.Message, AllocateCheckErrMsg)) {
 			return true
 		}
 	}

@@ -46,6 +46,10 @@ const (
 	MaxContainerLimit = 300000
 	// PodAnnotationMaxLength pod annotation max data length 1MB
 	PodAnnotationMaxLength = 1024 * 1024
+
+	AllocateCheckErrMsg           = "Allocate check failed"
+	PreStartContainerCheckErrMsg  = "PreStartContainer check failed"
+	PreStartContainerCheckErrType = "PreStartContainerCheckErr"
 )
 
 // * CUDA_MEM_LIMIT_<index>： 内存限制
