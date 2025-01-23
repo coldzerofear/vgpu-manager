@@ -93,7 +93,7 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 				Error: err.Error(),
 			}
 		} else {
-			extenderFilterResult = predicate.Filter(extenderArgs)
+			extenderFilterResult = predicate.Filter(r.Context(), extenderArgs)
 			klog.V(4).Infof("%s: ExtenderArgs = %+v", predicate.Name(), extenderArgs)
 		}
 
@@ -133,7 +133,7 @@ func BindPredicateRoute(predicate predicate.BindPredicate) httprouter.Handle {
 				Error: err.Error(),
 			}
 		} else {
-			extenderBindingResult = predicate.Bind(extenderBindingArgs)
+			extenderBindingResult = predicate.Bind(r.Context(), extenderBindingArgs)
 			klog.V(4).Infof("%s: ExtenderBindingArgs = %+v", predicate.Name(), extenderBindingArgs)
 		}
 		w.Header().Set("Content-Type", "application/json")

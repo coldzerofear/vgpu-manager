@@ -99,7 +99,7 @@ func Test_BindPredicate(t *testing.T) {
 				_, _ = k8sClient.CoreV1().Pods(testCase.pod.Namespace).
 					Create(context.Background(), testCase.pod, metav1.CreateOptions{})
 			}
-			result := bindPredicate.Bind(testCase.args)
+			result := bindPredicate.Bind(context.Background(), testCase.args)
 			assert.Equal(t, testCase.result, result)
 		})
 	}

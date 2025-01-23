@@ -1,11 +1,13 @@
 package filter
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -53,7 +55,7 @@ func (f *gpuFilter) Name() string {
 
 type filterFunc func(*corev1.Pod, []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error)
 
-func (f *gpuFilter) Filter(args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
+func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
 	klog.V(4).InfoS("FilterNode", "args", args)
 	if args.Pod == nil {
 		return &extenderv1.ExtenderFilterResult{
@@ -88,7 +90,6 @@ func (f *gpuFilter) Filter(args extenderv1.ExtenderArgs) *extenderv1.ExtenderFil
 	}
 
 	filters := []filterFunc{
-		// TODO 节点心跳过滤
 		f.heartbeatFilter,
 		f.deviceFilter,
 	}
@@ -97,11 +98,9 @@ func (f *gpuFilter) Filter(args extenderv1.ExtenderArgs) *extenderv1.ExtenderFil
 		passedNodes, failedNodes, err := filter(args.Pod, filteredNodes)
 		if err != nil {
 			klog.Errorf("Filter %d (%T) call failed: %v", i, filter, err)
-			return &extenderv1.ExtenderFilterResult{
-				Error: err.Error(),
-			}
+			return &extenderv1.ExtenderFilterResult{Error: err.Error()}
 		}
-		// 变更最新的节点过滤列表以进行下一轮过滤
+		// Change the latest node filtering list for the next round of filtering.
 		filteredNodes = passedNodes
 		for name, reason := range failedNodes {
 			failedNodesMap[name] = reason
@@ -289,8 +288,16 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			continue
 		}
 		// Attempt to allocate devices for pods on this node.
-		allocator := device.NewAllocator(f.kubeClient, nodeInfo)
-		if _, err = allocator.Allocate(pod); err != nil {
+		pod, err = device.NewAllocator(nodeInfo).Allocate(pod)
+		if err != nil {
+			klog.Errorln(err)
+			failedNodesMap[node.Name] = err.Error()
+			continue
+		}
+		err = client.PatchPodVGPUAnnotation(f.kubeClient, pod)
+		if err != nil {
+			err = fmt.Errorf("patch pod vgpu metadata failed: %v", err)
+			klog.Errorln(err)
 			failedNodesMap[node.Name] = err.Error()
 			continue
 		}

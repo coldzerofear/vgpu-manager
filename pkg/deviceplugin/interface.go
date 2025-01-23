@@ -33,7 +33,7 @@ type DevicePlugin interface {
 	Start() error
 	// Stop the plugin.
 	Stop() error
-	// Devices return device list
+	// Devices return device list.
 	Devices() []*pluginapi.Device
 }
 

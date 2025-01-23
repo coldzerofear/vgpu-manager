@@ -15,6 +15,13 @@ import (
 	"k8s.io/klog/v2"
 )
 
+func InsertAnnotation(obj metav1.Object, k, v string) {
+	if obj.GetAnnotations() == nil {
+		obj.SetAnnotations(map[string]string{})
+	}
+	obj.GetAnnotations()[k] = v
+}
+
 func HasAnnotation(obj metav1.Object, anno string) (string, bool) {
 	val, ok := "", false
 	if obj.GetAnnotations() != nil {
@@ -123,7 +130,7 @@ func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
 
 // ShouldRetry Determine whether the error of apiserver is of the type that needs to be retried.
 func ShouldRetry(err error) bool {
-	return errors.IsConflict(err) || errors.IsServerTimeout(err)
+	return errors.IsConflict(err) || errors.IsServerTimeout(err) || errors.IsTooManyRequests(err)
 }
 
 // IsShouldDeletePod Determine whether the pod has been deleted or needs to be deleted.
@@ -137,7 +144,8 @@ func IsShouldDeletePod(pod *corev1.Pod) bool {
 	}
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.State.Waiting != nil &&
-			strings.Contains(status.State.Waiting.Message, "PreStartContainer check failed") {
+			(strings.Contains(status.State.Waiting.Message, "PreStartContainer failed") ||
+				strings.Contains(status.State.Waiting.Message, "Allocate failed")) {
 			return true
 		}
 	}

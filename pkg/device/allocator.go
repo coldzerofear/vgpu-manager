@@ -5,23 +5,18 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 )
 
 type allocator struct {
-	kubeClient kubernetes.Interface
-	nodeInfo   *NodeInfo
+	nodeInfo *NodeInfo
 }
 
-func NewAllocator(k kubernetes.Interface, n *NodeInfo) *allocator {
+func NewAllocator(n *NodeInfo) *allocator {
 	return &allocator{
-		kubeClient: k,
-		nodeInfo:   n,
+		nodeInfo: n,
 	}
 }
 
@@ -47,22 +42,10 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 	}
 	preAlloc, err := podAssignDevices.MarshalText()
 	if err != nil {
-		err = fmt.Errorf("pod assign devices encoding failed: %v", err)
-		klog.Errorln(err)
-		return nil, err
+		return nil, fmt.Errorf("pod assign devices encoding failed: %v", err)
 	}
-	// patch vGPU annotations.
-	patchData := client.PatchMetadata{Annotations: map[string]string{}}
-	patchData.Annotations[util.PodPredicateNodeAnnotation] = alloc.nodeInfo.GetName()
-	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = preAlloc
-	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-		return client.PatchPodMetadata(alloc.kubeClient, newPod, patchData)
-	})
-	if err != nil {
-		err = fmt.Errorf("patch pod vgpu metadata failed: %v", err)
-		klog.Errorln(err)
-		return nil, err
-	}
+	util.InsertAnnotation(newPod, util.PodVGPUPreAllocAnnotation, preAlloc)
+	util.InsertAnnotation(newPod, util.PodPredicateNodeAnnotation, alloc.nodeInfo.GetName())
 	return newPod, nil
 }
 

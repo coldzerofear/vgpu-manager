@@ -67,7 +67,7 @@ func MutationContentType(acceptContentTypes, contentType string) func(*rest.Conf
 	}
 }
 
-func GetActivePodsOnNode(kubeClient kubernetes.Interface, nodeName string) ([]corev1.Pod, error) {
+func GetActivePodsOnNode(ctx context.Context, kubeClient kubernetes.Interface, nodeName string) ([]corev1.Pod, error) {
 	fieldSelector, err := fields.ParseSelector("spec.nodeName=" + nodeName + "," +
 		"status.phase!=" + string(corev1.PodSucceeded) + ",status.phase!=" + string(corev1.PodFailed))
 	if err != nil {
@@ -75,15 +75,13 @@ func GetActivePodsOnNode(kubeClient kubernetes.Interface, nodeName string) ([]co
 	}
 	var podList *corev1.PodList
 	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-		podList, err = kubeClient.CoreV1().Pods(corev1.NamespaceAll).List(
-			context.Background(), metav1.ListOptions{
-				FieldSelector: fieldSelector.String(),
-				LabelSelector: labels.FormatLabels(map[string]string{
-					util.PodAssignedPhaseLabel: string(util.AssignPhaseAllocating),
-				}),
-				//ResourceVersion: "0",
-			},
-		)
+		podList, err = kubeClient.CoreV1().Pods(corev1.NamespaceAll).List(ctx, metav1.ListOptions{
+			FieldSelector: fieldSelector.String(),
+			LabelSelector: labels.FormatLabels(map[string]string{
+				util.PodAssignedPhaseLabel: string(util.AssignPhaseAllocating),
+			}),
+			//ResourceVersion: "0",
+		})
 		return err
 	})
 	if err != nil {

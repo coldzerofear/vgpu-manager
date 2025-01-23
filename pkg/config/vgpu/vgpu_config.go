@@ -113,7 +113,7 @@ type ResourceDataT struct {
 func (r *ResourceDataT) DeepCopy() *ResourceDataT {
 	jsonBytes, _ := json.Marshal(r)
 	data := &ResourceDataT{}
-	json.Unmarshal(jsonBytes, data)
+	_ = json.Unmarshal(jsonBytes, data)
 	return data
 }
 
