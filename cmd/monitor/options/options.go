@@ -25,7 +25,7 @@ const (
 	defaultQPS            = 20.0
 	defaultBurst          = 30
 	defaultServerBindProt = 3456
-	defaultPprofBindPort  = 3457
+	defaultPprofBindPort  = 0
 )
 
 func NewOptions() *Options {
@@ -50,7 +50,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	fs.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (example: cgroupfs | systemd)")
 	fs.StringVar(&o.NodeConfigPath, "node-config-path", o.NodeConfigPath, "Specify the node configuration path to apply differentiated configuration to the node.")
 	fs.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens (default: 3456)")
-	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens (default: 3457)")
+	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens (default disable service)")
 	fs.BoolVar(&version, "version", false, "Print version information and quit")
 	flag.Parse()
 }

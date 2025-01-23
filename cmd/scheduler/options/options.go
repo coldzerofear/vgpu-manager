@@ -27,7 +27,7 @@ const (
 	defaultQPS                 = 20.0
 	defaultBurst               = 30
 	defaultServerBindProt      = 3456
-	defaultPprofBindPort       = 3457
+	defaultPprofBindPort       = 0
 	defaultCertRefreshInterval = 5
 )
 
@@ -51,7 +51,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	fs.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver (default: 20.0)")
 	fs.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver (default: 30)")
 	fs.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens (default: 3456)")
-	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens (default: 3457)")
+	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens (default disable service)")
 	fs.BoolVar(&o.EnableTls, "enable-tls", false, "Open TLS encrypted communication for the server (default: false)")
 	fs.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path (need enable tls)")
 	fs.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path (need enable tls)")

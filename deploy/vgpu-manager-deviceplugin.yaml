@@ -25,7 +25,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get","list", "watch","update","patch"]
+    verbs: ["get","list","watch","update","patch"]
   - apiGroups: [""]
     resources: ["nodes/status"]
     verbs: ["patch"]
@@ -34,10 +34,10 @@ rules:
 #    verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list","watch","update","patch"]
+    verbs: ["get","list","watch","update","patch","delete"]
   - apiGroups: [""]
     resources: ["pods/status"]
-    verbs: ["get", "update","patch"]
+    verbs: ["get","update","patch"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

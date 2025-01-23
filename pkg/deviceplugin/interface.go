@@ -16,13 +16,11 @@ import (
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
+	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 type DevicePlugin interface {
@@ -37,28 +35,19 @@ type DevicePlugin interface {
 	Devices() []*pluginapi.Device
 }
 
-func InitDevicePlugins(opt *options.Options, manager *manager.DeviceManager,
-	factory informers.SharedInformerFactory, kubeClient *kubernetes.Clientset) []DevicePlugin {
-	podInformer := factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
-		return cache.NewSharedIndexInformer(
-			cache.NewListWatchFromClient(
-				k.CoreV1().RESTClient(), "pods", metav1.NamespaceAll,
-				fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
-			), &corev1.Pod{}, d, cache.Indexers{
-				cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
-			})
-	})
+func InitDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
+	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) []DevicePlugin {
 	socket := filepath.Join(opt.DevicePluginPath, "vgpu-number.sock")
 	plugins := []DevicePlugin{
 		NewNumberDevicePlugin(util.VGPUNumberResourceName,
-			manager, socket, kubeClient, podInformer),
+			devManager, socket, kubeClient, clusterManager.GetCache()),
 	}
 
 	var deleteResources []string
 	if opt.EnableCorePlugin {
 		socket = filepath.Join(opt.DevicePluginPath, "vgpu-core.sock")
 		corePlugin := NewCoreDevicePlugin(
-			util.VGPUCoreResourceName, manager, socket,
+			util.VGPUCoreResourceName, devManager, socket,
 		)
 		plugins = append(plugins, corePlugin)
 	} else {
@@ -67,7 +56,7 @@ func InitDevicePlugins(opt *options.Options, manager *manager.DeviceManager,
 	if opt.EnableMemoryPlugin {
 		socket = filepath.Join(opt.DevicePluginPath, "vgpu-memory.sock")
 		memoryPlugin := NewMemoryDevicePlugin(
-			util.VGPUMemoryResourceName, manager, socket,
+			util.VGPUMemoryResourceName, devManager, socket,
 		)
 		plugins = append(plugins, memoryPlugin)
 	} else {

@@ -25,7 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -37,7 +38,7 @@ type NumberDevicePlugin struct {
 	socket       string
 	kubeClient   *kubernetes.Clientset
 	podResource  *client.PodResource
-	podInformer  cache.SharedIndexInformer
+	cache        cache.Cache
 
 	server *grpc.Server
 	health chan *pluginapi.Device
@@ -48,14 +49,14 @@ var _ DevicePlugin = &NumberDevicePlugin{}
 
 // NewNumberDevicePlugin returns an initialized NumberDevicePlugin
 func NewNumberDevicePlugin(resourceName string, manager *manager.DeviceManager,
-	socket string, kubeClient *kubernetes.Clientset, podInformer cache.SharedIndexInformer) DevicePlugin {
+	socket string, kubeClient *kubernetes.Clientset, cache cache.Cache) DevicePlugin {
 	return &NumberDevicePlugin{
 		manager:      manager,
 		resourceName: resourceName,
 		socket:       socket,
 		kubeClient:   kubeClient,
 		podResource:  client.NewPodResource(),
-		podInformer:  podInformer,
+		cache:        cache,
 
 		// These will be reinitialized every
 		// time the plugin server is restarted.
@@ -425,18 +426,23 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 	return resp, nil
 }
 
-// GetActiveVGPUPods Get the vgpu pods on the node
-func (m *NumberDevicePlugin) GetActiveVGPUPods() map[string]*corev1.Pod {
+// GetActiveVGPUPodsOnNode Get the vgpu pods on the node
+func (m *NumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
+	podList := corev1.PodList{}
+	err := m.cache.List(context.Background(), &podList)
+	if err != nil {
+		klog.ErrorS(err, "GetActiveVGPUPodsOnNode failed")
+	}
 	activePods := make(map[string]*corev1.Pod)
-	for _, item := range m.podInformer.GetStore().List() {
-		pod, ok := item.(*corev1.Pod)
-		if !ok {
+	nodeName := m.manager.GetNodeConfig().NodeName()
+	for i, pod := range podList.Items {
+		if pod.Spec.NodeName != nodeName {
 			continue
 		}
-		if !util.IsVGPUResourcePod(pod) || util.PodIsTerminated(pod) {
+		if !util.IsVGPUResourcePod(&pod) || util.PodIsTerminated(&pod) {
 			continue
 		}
-		activePods[string(pod.UID)] = pod
+		activePods[string(pod.UID)] = &podList.Items[i]
 	}
 	return activePods
 }
@@ -457,7 +463,7 @@ func (m *NumberDevicePlugin) getCurrentPodInfoByCheckpoint(devicesIDs []string) 
 		if !devSet.HasAll(entry.DeviceIDs...) {
 			continue
 		}
-		if pod, ok := m.GetActiveVGPUPods()[entry.PodUID]; ok {
+		if pod, ok := m.GetActiveVGPUPodsOnNode()[entry.PodUID]; ok {
 			return &client.PodInfo{
 				PodName:       pod.Name,
 				PodNamespace:  pod.Namespace,

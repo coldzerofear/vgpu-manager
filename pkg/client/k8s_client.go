@@ -28,21 +28,22 @@ func InitKubeConfig(masterUrl, kubeconfig string) error {
 	return err
 }
 
-func GetKubeConfig() (*rest.Config, error) {
+func GetKubeConfig(mutations ...func(*rest.Config)) (*rest.Config, error) {
 	err := InitKubeConfig("", "")
 	if err != nil {
 		return nil, err
 	}
-	return rest.CopyConfig(kubeConfig), nil
+	config := rest.CopyConfig(kubeConfig)
+	for _, mutation := range mutations {
+		mutation(config)
+	}
+	return config, nil
 }
 
 func GetClientSet(mutations ...func(*rest.Config)) (*kubernetes.Clientset, error) {
-	config, err := GetKubeConfig()
+	config, err := GetKubeConfig(mutations...)
 	if err != nil {
 		return nil, err
-	}
-	for _, mutation := range mutations {
-		mutation(config)
 	}
 	return kubernetes.NewForConfig(config)
 }

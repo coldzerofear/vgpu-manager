@@ -65,9 +65,11 @@ func main() {
 	go contLister.Start(ctx.Done())
 
 	go func() {
-		addr := "0.0.0.0:" + strconv.Itoa(opt.PprofBindPort)
-		klog.V(4).Infof("Debug Server starting on <%s>", addr)
-		klog.V(4).ErrorS(http.ListenAndServe(addr, nil), "Debug Server error occurred")
+		if opt.PprofBindPort > 0 {
+			addr := "0.0.0.0:" + strconv.Itoa(opt.PprofBindPort)
+			klog.V(4).Infof("Debug Server starting on <%s>", addr)
+			klog.V(4).ErrorS(http.ListenAndServe(addr, nil), "Debug Server error occurred")
+		}
 	}()
 
 	go func() {

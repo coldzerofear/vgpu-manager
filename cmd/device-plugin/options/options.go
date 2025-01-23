@@ -26,6 +26,7 @@ type Options struct {
 	EnableCorePlugin    bool
 	ExcludeDevices      string
 	DevicePluginPath    string
+	PprofBindPort       int
 }
 
 const (
@@ -36,6 +37,7 @@ const (
 	defaultDeviceMemoryFactor  = 1
 	defaultDeviceMemoryScaling = 1.0
 	defaultDeviceCoresScaling  = 1.0
+	defaultPprofBindPort       = 0
 )
 
 func NewOptions() *Options {
@@ -49,6 +51,7 @@ func NewOptions() *Options {
 		DeviceMemoryScaling: defaultDeviceMemoryScaling,
 		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
 		DevicePluginPath:    pluginapi.DevicePluginPath,
+		PprofBindPort:       defaultPprofBindPort,
 	}
 }
 
@@ -70,6 +73,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&o.EnableCorePlugin, "enable-core-plugin", o.EnableCorePlugin, "Enable core plugin will report the virtual cores of the node device to kubelet. (default: false)")
 	fs.StringVar(&o.ExcludeDevices, "exclude-devices", "", "Specify the GPU IDs that need to be excluded. (example: 0,1,2 | 0-2)")
 	fs.StringVar(&o.DevicePluginPath, "device-plugin-path", o.DevicePluginPath, "The path for kubelet receive device plugin registration.")
+	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens (default disable service)")
 
 	fs.BoolVar(&version, "version", false, "Print version information and quit.")
 	flag.Parse()

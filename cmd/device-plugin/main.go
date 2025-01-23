@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"os"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -10,14 +12,19 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/controller"
+	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/fsnotify/fsnotify"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/informers"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"k8s.io/klog/v2/klogr"
+	rtcache "sigs.k8s.io/controller-runtime/pkg/cache"
+	rtclient "sigs.k8s.io/controller-runtime/pkg/client"
+	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 func main() {
@@ -33,6 +40,10 @@ func main() {
 	mutationContentType := client.MutationContentType(
 		"application/vnd.kubernetes.protobuf,application/json",
 		"application/json")
+	kubeConfig, err := client.GetKubeConfig(mutationContentType, client.MutationQPS(float32(opt.QPS), opt.Burst))
+	if err != nil {
+		klog.Fatalf("Init k8s restConfig failed: %v", err)
+	}
 	kubeClient, err := client.GetClientSet(mutationContentType, client.MutationQPS(float32(opt.QPS), opt.Burst))
 	if err != nil {
 		klog.Fatalf("Create k8s kubeClient failed: %v", err)
@@ -45,7 +56,7 @@ func main() {
 	util.InitializeCGroupDriver(nodeConfig)
 
 	klog.V(3).Info("Initialize Device Resource Manager")
-	deviceManager := manager.NewDeviceManager(nodeConfig, kubeClient)
+	deviceManager := devm.NewDeviceManager(nodeConfig, kubeClient)
 
 	klog.V(3).Info("Starting FS watcher.")
 	devicePluginSocket := filepath.Join(opt.DevicePluginPath, "kubelet.sock")
@@ -53,20 +64,51 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Failed to create FS watcher: %v", err)
 	}
-	defer watcher.Close()
+	clusterCtx, cancelFunc := context.WithCancel(context.Background())
+	defer func() {
+		_ = watcher.Close()
+		cancelFunc()
+	}()
 	klog.V(3).Info("Starting OS watcher.")
 	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
-	// trim managedFields to reduce cache memory usage.
-	option := informers.WithTransform(cache.TransformStripManagedFields())
-	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
-	plugins := deviceplugin.InitDevicePlugins(opt, deviceManager, factory, kubeClient)
-	ctx, cancelFunc := context.WithCancel(context.Background())
-	defer cancelFunc()
-	factory.Start(ctx.Done())
-	klog.V(4).Infoln("Waiting for InformerFactory cache synchronization...")
-	factory.WaitForCacheSync(wait.NeverStop)
-	klog.V(4).Infoln("InformerFactory cache synchronization successful")
+	manager, err := ctrm.New(kubeConfig, ctrm.Options{
+		HealthProbeBindAddress: "", // disable health probe
+		PprofBindAddress:       fmt.Sprintf("%d", opt.PprofBindPort),
+		Cache: rtcache.Options{
+			// trim managedFields to reduce cache memory usage.
+			DefaultTransform:         rtcache.TransformStripManagedFields(),
+			DefaultWatchErrorHandler: toolscache.DefaultWatchErrorHandler,
+			ByObject: map[rtclient.Object]rtcache.ByObject{
+				&corev1.Pod{}: {
+					Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
+					Transform: rtcache.TransformStripManagedFields(),
+				},
+			},
+		},
+		Logger: klogr.New(),
+	})
+	if err != nil {
+		klog.Fatalf("Create cluster manager failed: %v", err)
+	}
+	err = controller.RegistryControllerToManager(manager, nodeConfig)
+	if err != nil {
+		klog.Fatalf("Registry controller to manager failed: %v", err)
+	}
+	plugins := deviceplugin.InitDevicePlugins(opt, deviceManager, manager, kubeClient)
+
+	klog.Infoln("Starting cluster manager.")
+	go func() {
+		if err = manager.Start(clusterCtx); err != nil {
+			klog.V(3).ErrorS(err, "failed staring cluster manager")
+			cancelFunc()
+		}
+	}()
+	klog.V(4).Infoln("Waiting for cluster manager cache synchronization...")
+	if ok := manager.GetCache().WaitForCacheSync(clusterCtx); !ok {
+		klog.Fatalf("Cannot wait for cluster manager cache sync")
+	}
+	klog.V(4).Infoln("Cluster manager cache synchronization successful")
 	deviceManager.Start()
 
 restart:
@@ -93,7 +135,7 @@ restart:
 	if started == 0 {
 		klog.Warningln("No devices found. Waiting indefinitely.")
 	}
-
+	exitCode := 0
 	// Start an infinite loop, waiting for several indicators to either log
 	// some messages, trigger a restart of the plugins, or exit the program.
 	for {
@@ -110,7 +152,10 @@ restart:
 		// Watch for any other fs errors and log them.
 		case err := <-watcher.Errors:
 			klog.Infof("inotify: %v", err)
-
+		// When cluster cache stops abnormally, exit the program.
+		case <-clusterCtx.Done():
+			exitCode = 1
+			goto exit
 		// Watch for any signals from the OS. On SIGHUP, restart this loop,
 		// restarting all of the plugins in the process. On all other
 		// signals, exit the loop and exit the program.
@@ -130,4 +175,5 @@ exit:
 	for _, p := range plugins {
 		p.Stop()
 	}
+	os.Exit(exitCode)
 }
