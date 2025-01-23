@@ -50,8 +50,11 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 		// not controlled by another pod, is it eligible for deletion.
 		shouldDeletePod := false
 		for _, reference := range pod.OwnerReferences {
-			shouldDeletePod = reference.Controller != nil &&
-				*reference.Controller && reference.Kind != pod.Kind
+			if reference.Controller != nil &&
+				*reference.Controller && reference.Kind != pod.Kind {
+				shouldDeletePod = true
+				break
+			}
 		}
 		if shouldDeletePod {
 			klog.V(4).Infof("Try to delete pod <%s/%s> uid <%s>", pod.Namespace, pod.Name, pod.UID)
