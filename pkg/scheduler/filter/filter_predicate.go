@@ -288,17 +288,17 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			continue
 		}
 		// Attempt to allocate devices for pods on this node.
-		pod, err = device.NewAllocator(nodeInfo).Allocate(pod)
+		newPod, err := device.NewAllocator(nodeInfo).Allocate(pod)
 		if err != nil {
-			klog.Errorln(err)
+			klog.Errorln(err.Error())
 			failedNodesMap[node.Name] = err.Error()
 			continue
 		}
-		err = client.PatchPodVGPUAnnotation(f.kubeClient, pod)
+		err = client.PatchPodVGPUAnnotation(f.kubeClient, newPod)
 		if err != nil {
-			err = fmt.Errorf("patch pod vgpu metadata failed: %v", err)
-			klog.Errorln(err)
-			failedNodesMap[node.Name] = err.Error()
+			errMsg := fmt.Sprintf("patch pod vgpu metadata failed: %v", err)
+			klog.Errorln(errMsg)
+			failedNodesMap[node.Name] = errMsg
 			continue
 		}
 		filteredNodes = append(filteredNodes, *node)

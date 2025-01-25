@@ -58,7 +58,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	needMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
 	tmpStore := make([]*DeviceInfo, 0, alloc.nodeInfo.GetDeviceCount())
 	if needNumber > alloc.nodeInfo.GetDeviceCount() {
-		return nil, fmt.Errorf("no enough gpu number on node %s", node.GetName())
+		return nil, fmt.Errorf("no enough GPU number on node %s", node.GetName())
 	}
 	// Calculate the actual requested memory size based on the node memory factor.
 	if needMemory > 0 {
@@ -142,7 +142,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		needNumber--
 	}
 	if needNumber > 0 {
-		return nil, fmt.Errorf("insufficient gpu on node %s", node.GetName())
+		return nil, fmt.Errorf("insufficient GPU on node %s", node.GetName())
 	}
 	sort.Slice(assignDevice.Devices, func(i, j int) bool {
 		devA := assignDevice.Devices[i]
