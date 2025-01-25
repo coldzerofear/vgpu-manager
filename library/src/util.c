@@ -128,44 +128,6 @@ done:
   return ret;
 }
 
-void extract_container_id(char *container_id, size_t container_id_size) {
-  char buffer[FILENAME_MAX];
-  FILE *fp;
-  fp = fopen(PID_ONE_MOUNTINFO_PATH, "r");
-  if (fp == NULL) {
-      container_id[0] = '\0';
-      perror("fopen");
-      return;
-  }
-  while (fgets(buffer, FILENAME_MAX, fp) != NULL) {
-    // Check if the line contains /etc/hostname or /etc/resolv.conf
-    char *target_start = strstr(buffer, "/hostname /etc/hostname ");
-    if (target_start == NULL) {
-      target_start = strstr(buffer, "/resolv.conf /etc/resolv.conf ");
-    }
-    if (target_start == NULL) {
-      continue;
-    }
-
-    const char *start = target_start;
-    while (start > buffer && *(start - 1) != '/') {
-        start--;
-    }
-    const char *end = target_start;
-    size_t len = end - start;
-
-    if (len >= container_id_size) {
-      len = container_id_size - 1;
-    }
-
-    strncpy(container_id, start, len);
-    container_id[len] = '\0';
-    break;
-  }
-
-  fclose(fp);
-}
-
 int is_current_cgroup(const char *file_path) {
   FILE *file = fopen(file_path, "r");
   if (file == NULL) {

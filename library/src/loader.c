@@ -1146,7 +1146,6 @@ void load_cuda_libraries() {
   snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s",
                 CUDA_LIBRARY_PREFIX, driver_version);
   cuda_filename[FILENAME_MAX - 1] = '\0';
-  cuda_filename[FILENAME_MAX - 1] = '\0';
 
   table = dlopen(cuda_filename, RTLD_NOW | RTLD_NODELETE);
   if (unlikely(!table)) {

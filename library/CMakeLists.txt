@@ -51,17 +51,3 @@ add_executable(virt_mem_tool tools/virt_mem_tool.c)
 target_include_directories(virt_mem_tool PUBLIC ${C_INCLUDE_PATH} "/usr/local/cuda/include")
 target_link_libraries(virt_mem_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
 target_compile_options(virt_mem_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
-
-add_executable(extract_cont_id include/hook.h tools/extract_container_id.c src/util.c)
-target_include_directories(extract_cont_id PUBLIC ${C_INCLUDE_PATH})
-target_link_libraries(mem_managed_tool PRIVATE ${STATIC_C_LIBRARIES})
-target_compile_options(mem_managed_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
-
-# process monitor
-# add_executable(nvml-monitor
-#             tools/monitor_dockernized.c
-#             src/cuda_hook.c
-#             src/nvml_hook.c
-#             src/loader.c
-#             src/util.c)
-# target_link_libraries(nvml-monitor ${STATIC_C_LIBRARIES} -ldl -lpthread)

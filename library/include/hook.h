@@ -124,25 +124,6 @@ typedef struct {
   int memory_oversold; // 内存超售开关，虚拟显存：0：关 1：开
 } __attribute__((packed, aligned(8))) device_t;
 
-//typedef struct {
-//  char uuid[48];
-//  int enable_memory_limit; // 内存限制开关
-//  int memory_limit_size;   // 内存限制 bytes
-//
-//  int enable_core_limit;   // 算力核心限制开关
-//  int core_hard_limit;     // 硬限制开关
-//  int core_util_rate;      // 核心利用率 百分比
-//
-//  size_t total_memory;
-//  size_t device_memory;
-//  int hard_core;    // 算力硬限制最大值
-//  int soft_core;    // 算力软限制值
-//  int core_limit;   // 算力限制开关，0：关 1：开
-//  int hard_limit;   // 算力硬限制开关，0：关 1：开
-//  int memory_limit; // 内存限制开关，0：关 1：开
-//  int memory_oversold; // 内存超售开关，虚拟显存：0：关 1：开
-//} __attribute__((packed, aligned(8))) device_t;
-
 /**
  * Controller configuration data format
  */
