@@ -1068,7 +1068,7 @@ static void load_cuda_single_library(int idx) {
     }
   }
 
-  if (unlikely(cuda_library_entry[idx].fn_ptr)) {
+  if (likely(cuda_library_entry[idx].fn_ptr)) {
     return;
   }
   snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s",
@@ -1109,7 +1109,7 @@ static void load_nvml_single_library(int idx) {
            driver_version);
   driver_filename[FILENAME_MAX - 1] = '\0';
 
-  if (unlikely(nvml_library_entry[idx].fn_ptr)) {
+  if (likely(nvml_library_entry[idx].fn_ptr)) {
     return;
   }
 
@@ -1520,10 +1520,34 @@ DONE:
   return ret;
 }
 
+void ensure_load_hooks_cuda_library() {
+  for (int i = 0; i < cuda_hook_nums; i++) {
+    for (int j = 0; j < CUDA_ENTRY_END; j++) {
+      if (unlikely(!strcmp(cuda_hooks_entry[i].name, cuda_library_entry[j].name))) {
+        load_cuda_single_library(j);
+        break;
+      }
+    }
+  }
+}
+
+void ensure_load_hooks_nvml_library() {
+  for (int i = 0; i < nvml_hook_nums; i++) {
+    for (int j = 0; j < NVML_ENTRY_END; j++) {
+      if (unlikely(!strcmp(nvml_hooks_entry[i].name, nvml_library_entry[j].name))) {
+        load_nvml_single_library(j);
+        break;
+      }
+    }
+  }
+}
+
 void load_necessary_data() {
   load_controller_configuration();
   read_version_from_proc(driver_version);
   pthread_once(&g_nvml_lib_init, load_nvml_libraries);
   pthread_once(&g_cuda_lib_init, load_cuda_libraries);
   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
+  ensure_load_hooks_cuda_library();
+  ensure_load_hooks_nvml_library();
 }
