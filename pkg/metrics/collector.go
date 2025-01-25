@@ -19,6 +19,11 @@ import (
 	"k8s.io/klog/v2"
 )
 
+type CollectorService interface {
+	prometheus.Collector
+	Registry() *prometheus.Registry
+}
+
 // nodeGPUCollector implements the Collector interface.
 type nodeGPUCollector struct {
 	nodeName   string
@@ -27,16 +32,24 @@ type nodeGPUCollector struct {
 	contLister *ContainerLister
 }
 
-var _ prometheus.Collector = &nodeGPUCollector{}
+var _ CollectorService = &nodeGPUCollector{}
 
 func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister,
-	podLister listerv1.PodLister, contLister *ContainerLister) *nodeGPUCollector {
+	podLister listerv1.PodLister, contLister *ContainerLister) CollectorService {
 	return &nodeGPUCollector{
 		nodeName:   nodeName,
 		nodeLister: nodeLister,
 		podLister:  podLister,
 		contLister: contLister,
 	}
+}
+
+// Registry return to Prometheus registry.
+func (c *nodeGPUCollector) Registry() *prometheus.Registry {
+	registry := prometheus.NewRegistry()
+	labels := prometheus.Labels{"zone": "vGPU"}
+	prometheus.WrapRegistererWith(labels, registry).MustRegister(c)
+	return registry
 }
 
 // Descriptors used by the nodeGPUCollector below.

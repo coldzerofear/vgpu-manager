@@ -18,6 +18,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
+	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
@@ -50,20 +51,26 @@ func main() {
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
+
 	nodeInformer := metrics.GetNodeInformer(factory, nodeConfig.NodeName())
 	podInformer := metrics.GetPodInformer(factory, nodeConfig.NodeName())
-	contLister := metrics.NewContainerLister(podInformer)
-	server := metrics.NewServer(nodeInformer, podInformer, contLister, nodeConfig.NodeName(), opt.ServerBindProt)
+	containerLister := metrics.NewContainerLister(podInformer)
+	nodeCollector := metrics.NewNodeGPUCollector(
+		nodeConfig.NodeName(),
+		listerv1.NewNodeLister(nodeInformer.GetIndexer()),
+		listerv1.NewPodLister(podInformer.GetIndexer()),
+		containerLister,
+	)
+	server := metrics.NewServer(nodeCollector.Registry(), opt.ServerBindProt)
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
-
 	factory.Start(ctx.Done())
 	klog.V(4).Infoln("Waiting for InformerFactory cache synchronization...")
 	factory.WaitForCacheSync(wait.NeverStop)
 	klog.V(4).Infoln("InformerFactory cache synchronization successful")
 
-	go contLister.Start(ctx.Done())
-
+	go containerLister.Start(ctx.Done())
+	// Start pprof debug debugging service.
 	go func() {
 		if opt.PprofBindPort > 0 {
 			addr := "0.0.0.0:" + strconv.Itoa(opt.PprofBindPort)
@@ -71,7 +78,7 @@ func main() {
 			klog.V(4).ErrorS(http.ListenAndServe(addr, nil), "Debug Server error occurred")
 		}
 	}()
-
+	// Start prometheus indicator collection service.
 	go func() {
 		serverErr := server.Start(ctx.Done())
 		if serverErr != nil {

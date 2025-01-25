@@ -15,14 +15,12 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 )
 
 type server struct {
-	collector  prometheus.Collector
-	zone       string
+	registry   *prometheus.Registry
 	port       int
 	httpServer *http.Server
 }
@@ -31,11 +29,8 @@ func (s *server) Start(stopCh <-chan struct{}) error {
 	if s.httpServer != nil {
 		return fmt.Errorf("metrics service has been started and cannot be restarted again")
 	}
-
-	registry := prometheus.NewRegistry()
-	labels := prometheus.Labels{"zone": s.zone}
-	prometheus.WrapRegistererWith(labels, registry).MustRegister(s.collector)
-	handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{Registry: registry})
+	opts := promhttp.HandlerOpts{Registry: s.registry}
+	handler := promhttp.HandlerFor(s.registry, opts)
 
 	routerHandle := httprouter.New()
 	route.AddHealthProbe(routerHandle)
@@ -82,16 +77,9 @@ func GetPodInformer(factory informers.SharedInformerFactory, nodeName string) ca
 	})
 }
 
-func NewServer(nodeInformer, podInformer cache.SharedIndexInformer,
-	contLister *ContainerLister, nodeName string, port int) *server {
+func NewServer(registry *prometheus.Registry, port int) *server {
 	return &server{
-		zone: "vGPU",
-		collector: NewNodeGPUCollector(
-			nodeName,
-			listerv1.NewNodeLister(nodeInformer.GetIndexer()),
-			listerv1.NewPodLister(podInformer.GetIndexer()),
-			contLister,
-		),
-		port: port,
+		registry: registry,
+		port:     port,
 	}
 }
