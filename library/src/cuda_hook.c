@@ -30,6 +30,10 @@
 #include "include/cuda-helper.h"
 #include "include/nvml-helper.h"
 
+#define INCREMENT_SCALE_FACTOR   2560    // 缩放因子
+#define MAX_UTIL_DIFF_THRESHOLD  0.5     // 触发加速调整的利用率差异比例（原硬编码的 1/2）
+#define MIN_INCREMENT            5       // 最小增量
+
 extern resource_data_t g_vgpu_config;
 extern char container_id[FILENAME_MAX];
 extern entry_t cuda_library_entry[];
@@ -37,11 +41,11 @@ extern entry_t nvml_library_entry[];
 
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 
-static volatile int g_cur_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static volatile int g_total_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static volatile int64_t g_cur_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
-static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 static int g_sm_num[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
 static int g_block_x[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 static int g_block_y[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
@@ -70,13 +74,13 @@ static void initialization();
 
 static void rate_limiter(int, int, int);
 
-static void change_token(int, int);
+static void change_token(int64_t, int);
 
 static const char *nvml_error(nvmlReturn_t);
 
 static const char *cuda_error(CUresult, const char **);
 
-static int delta(int, int, int, int);
+static int64_t delta(int, int, int64_t, int);
 
 static int check_file_exist(const char *);
 
@@ -188,6 +192,11 @@ typedef struct {
   int sys_process_num;
 } utilization_t;
 
+dynamic_config_t g_dynamic_config = {
+  .change_limit_interval = 30,
+  .usage_threshold = 5,
+  .error_recovery_step = 10
+};
 
 const char *nvml_error(nvmlReturn_t code) {
   const char *(*err_fn)(nvmlReturn_t) = NULL;
@@ -214,63 +223,75 @@ static int check_file_exist(const char *file_path) {
 }
 
 
-static void change_token(int delta, int device_id) {
-  int cuda_cores_before = 0, cuda_cores_after = 0;
+static void change_token(int64_t delta, int device_id) {
+  int64_t cuda_cores_before = 0, cuda_cores_after = 0;
 
-  LOGGER(DETAIL, "device: %d, delta: %d, curr: %d", device_id, delta, g_cur_cuda_cores[device_id]);
+  LOGGER(DETAIL, "device: %d, delta: %ld, curr: %ld", device_id, delta, g_cur_cuda_cores[device_id]);
   do {
     cuda_cores_before = g_cur_cuda_cores[device_id];
     cuda_cores_after = cuda_cores_before + delta;
 
     if (unlikely(cuda_cores_after > g_total_cuda_cores[device_id])) {
       cuda_cores_after = g_total_cuda_cores[device_id];
+    } else if (unlikely(cuda_cores_after < 0)) {
+      cuda_cores_after = 0;
     }
   } while (!CAS(&g_cur_cuda_cores[device_id], cuda_cores_before, cuda_cores_after));
 }
 
 
 static void rate_limiter(int grids, int blocks, int device_id) {
-  int before_cuda_cores = 0;
-  int after_cuda_cores = 0;
+  int64_t before_cuda_cores = 0;
+  int64_t after_cuda_cores = 0;
   int kernel_size = grids;
 
   LOGGER(VERBOSE, "device: %d, grid: %d, blocks: %d, ", device_id , grids, blocks);
-  LOGGER(VERBOSE, "device: %d, launch kernel: %d, curr core: %d", device_id, kernel_size, g_cur_cuda_cores[device_id]);
+  LOGGER(VERBOSE, "device: %d, launch kernel: %d, curr core: %ld", device_id, kernel_size, g_cur_cuda_cores[device_id]);
   if (g_vgpu_config.devices[device_id].core_limit) {
     do {
     CHECK:
       before_cuda_cores = g_cur_cuda_cores[device_id];
-      LOGGER(DETAIL, "device: %d, current core: %d", device_id, g_cur_cuda_cores[device_id]);
+      LOGGER(DETAIL, "device: %d, current core: %ld", device_id, g_cur_cuda_cores[device_id]);
       if (before_cuda_cores < 0) {
         nanosleep(&g_cycle, NULL);
         goto CHECK;
       }
-      after_cuda_cores = before_cuda_cores - kernel_size;
+      after_cuda_cores = before_cuda_cores - (int64_t)kernel_size;
     } while (!CAS(&g_cur_cuda_cores[device_id], before_cuda_cores, after_cuda_cores));
   }
 }
 
-static int delta(int up_limit, int user_current, int share, int device_index) {
-  int utilization_diff =
-      abs(up_limit - user_current) < 5 ? 5 : abs(up_limit - user_current);
-  int increment =
-      g_sm_num[device_index] * g_sm_num[device_index] * g_max_thread_per_sm[device_index] * utilization_diff / 2560;
+static int64_t delta(int up_limit, int user_current, int64_t share, int device_index) {
+  // 1. 使用更宽的数据类型防止计算溢出
+  int64_t sm_num = (int64_t)g_sm_num[device_index];
+  int64_t max_thread = (int64_t)g_max_thread_per_sm[device_index];
 
-  /* Accelerate cuda cores allocation when utilization vary widely */
-  if (utilization_diff > up_limit / 2) {
+  // 2. 计算利用率差异
+  int utilization_diff = abs(up_limit - user_current);
+  if (utilization_diff < MIN_INCREMENT) {
+    utilization_diff = MIN_INCREMENT;
+  }
+
+  // 3. 计算增量（使用64位运算防止溢出）
+  int64_t increment = sm_num * sm_num * max_thread * (int64_t)(utilization_diff) / INCREMENT_SCALE_FACTOR;
+
+  // 4. 加速调整逻辑（使用浮点阈值代替硬编码）
+  if ((float)utilization_diff / (float)(up_limit) > MAX_UTIL_DIFF_THRESHOLD) {
     increment = increment * utilization_diff * 2 / (up_limit + 1);
   }
 
-  if (unlikely(increment < 0)) {
-    LOGGER(FATAL, "overflow: %d, current sm: %d, thread_per_sm: %d, diff: %d",
-           increment, g_sm_num[device_index], g_max_thread_per_sm[device_index], utilization_diff);
+  // 5. 错误处理优化：负增量时不再终止进程，而是回退到安全值
+  if (unlikely(increment < 0 || increment > INT_MAX)) {
+    LOGGER(ERROR, "device %d, increment overflow: %ld, current sm: %ld, thread_per_sm: %ld, diff: %d",
+           device_index, increment, sm_num, max_thread, utilization_diff);
+    increment = g_dynamic_config.error_recovery_step;  // 使用安全步长
   }
 
   if (user_current <= up_limit) {
-    share = share + increment > g_total_cuda_cores[device_index] ?
-            g_total_cuda_cores[device_index] : share + increment;
+    share = (share + increment) > g_total_cuda_cores[device_index] ?
+            g_total_cuda_cores[device_index] : (share + increment);
   } else {
-    share = share - increment < 0 ? 0 : share - increment;
+    share = (share - increment) < 0 ? 0 : (share - increment);
   }
 
   return share;
@@ -285,7 +306,7 @@ static void *utilization_watcher(void *arg) {
       .sys_process_num = 0,
   };
   int sys_free = 0;
-  int share = 0;
+  int64_t share = 0;
   int i = 0;
   int avg_sys_free = 0;
   int pre_sys_process_num = 1;
@@ -293,6 +314,7 @@ static void *utilization_watcher(void *arg) {
   int up_limit = g_vgpu_config.devices[device_id].hard_core;
   LOGGER(VERBOSE, "current device %d, start %s", device_id, __FUNCTION__);
   LOGGER(VERBOSE, "device: %d, sm: %d, thread per sm: %d", device_id, g_sm_num[device_id], g_max_thread_per_sm[device_id]);
+
   while (1) {
     nanosleep(&g_wait, NULL);
     do {
@@ -310,11 +332,10 @@ static void *utilization_watcher(void *arg) {
       }
       share = delta(g_vgpu_config.devices[device_id].hard_core, top_result.user_current, share, device_id);
     } else {
-      // 设备上的进程数发生变化时，重置初始值
       if (pre_sys_process_num != top_result.sys_process_num) {
         /* When a new process comes, all processes are reset to initial value*/
         if (pre_sys_process_num < top_result.sys_process_num) {
-          share = g_max_thread_per_sm[device_id];
+          share = (int64_t) g_max_thread_per_sm[device_id];
           up_limit = g_vgpu_config.devices[device_id].hard_core;
           i = 0;
           avg_sys_free = 0;
@@ -334,19 +355,19 @@ static void *utilization_watcher(void *arg) {
       } else {
         i++;
         avg_sys_free += sys_free;
-        if (i % CHANGE_LIMIT_INTERVAL == 0) {
-          if (avg_sys_free * 2 / CHANGE_LIMIT_INTERVAL > USAGE_THRESHOLD) {
+        if (i % g_dynamic_config.change_limit_interval == 0) {
+          if (avg_sys_free * 2 / g_dynamic_config.change_limit_interval > g_dynamic_config.usage_threshold) {
             up_limit = up_limit + g_vgpu_config.devices[device_id].hard_core / 10 > g_vgpu_config.devices[device_id].soft_core ?
                        g_vgpu_config.devices[device_id].soft_core : up_limit + g_vgpu_config.devices[device_id].hard_core / 10;
           }
           i = 0;
         }
-        avg_sys_free = i % (CHANGE_LIMIT_INTERVAL / 2) == 0 ? 0 : avg_sys_free;
+        avg_sys_free = i % (g_dynamic_config.change_limit_interval / 2) == 0 ? 0 : avg_sys_free;
         share = delta(up_limit, top_result.user_current, share, device_id);
       }
     }
     change_token(share, device_id);
-    LOGGER(DETAIL, "device: %d, util: %d, up_limit: %d, share: %d, cur: %d", device_id,
+    LOGGER(DETAIL, "device: %d, util: %d, up_limit: %d, share: %ld, cur: %ld", device_id,
            top_result.user_current, up_limit, share, g_cur_cuda_cores[device_id]);
   }
 }
@@ -392,8 +413,8 @@ static void initialization() {
                   i, cuda_error((CUresult)ret, &cuda_err_string));
     }
     // 处理器数量 * 最大驻留线程数 * 32 = 最大cuda核心数
-    g_total_cuda_cores[i] = g_max_thread_per_sm[i] * g_sm_num[i] * FACTOR;
-    LOGGER(VERBOSE, "device %d total cuda cores: %d", i, g_total_cuda_cores[i]);
+    g_total_cuda_cores[i] = (int64_t)g_max_thread_per_sm[i] * (int64_t)(g_sm_num[i]) * FACTOR;
+    LOGGER(VERBOSE, "device %d total cuda cores: %ld", i, g_total_cuda_cores[i]);
     active_utilization_notifier(i);
   }
 }
@@ -544,164 +565,164 @@ DONE:
 
 void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
   size_t *used_memory = arg;
-  // 记录gpu设备上运行的pid
   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
-  // 最大pid数1024
   unsigned int size_on_device = MAX_PIDS;
   int ret;
 
-  unsigned int i;
-  // 根据设备查找设备上运行的进程信息
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
-                      device, &size_on_device, pids_on_device);
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
+                             device, &size_on_device, pids_on_device);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+                              device, &size_on_device, pids_on_device);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
+                           device, &size_on_device, pids_on_device);
+  } else {
+    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+    LOGGER(WARNING, "nvmlDeviceGetComputeRunningProcesses function not found");
+  }
   if (unlikely(ret)) {
-    LOGGER(WARNING, "nvmlDeviceGetComputeRunningProcesses can't get pids on device, "
-           "return %d", ret);
     *used_memory = 0;
     return;
   }
-  // 校验宿主机进程目录是否存在
-  if (likely(check_in_container())) {
-    // 当宿主机进程目录存在, 代表运行于容器中
-    if (strlen(container_id) > 0) {
-      LOGGER(VERBOSE, "use cgroupv2 compatible matching mode");
-      for (i = 0; i < size_on_device; i++) {
-        if (likely(check_container_pid_v2(pids_on_device[i].pid))) {
-          LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid,
-                 pids_on_device[i].usedGpuMemory);
-          *used_memory += pids_on_device[i].usedGpuMemory;
-        }
+
+  int isCgroupv2 = strlen(container_id);
+  int inContainer = check_in_container();
+
+  if (!inContainer && size_on_device > 0) {
+    LOGGER(VERBOSE, "use host matching mode");
+  } else if (isCgroupv2 > 0 && size_on_device > 0) {
+    LOGGER(VERBOSE, "use cgroupv2 compatible matching mode");
+  }
+
+  unsigned int i;
+  for (i = 0; i < size_on_device; i++) {
+    if (likely(inContainer)) {
+      if ((isCgroupv2 >0 && check_container_pid_v2(pids_on_device[i].pid)) ||
+          check_container_pid(pids_on_device[i].pid)) {
+        LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        *used_memory += pids_on_device[i].usedGpuMemory;
       }
     } else {
-      // 校验pid是否是当前容器的pid，匹配上了就增加到已使用内存
-      for (i = 0; i < size_on_device; i++) {
-        if (likely(check_container_pid(pids_on_device[i].pid))) {
-          LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid,
-                pids_on_device[i].usedGpuMemory);
-          *used_memory += pids_on_device[i].usedGpuMemory;
-        }
-      }
-    }
-  } else {
-    // 没有找到宿主机进程目录，表示运行于物理机，添加所有进程的已使用内存
-    for (i = 0; i < size_on_device; i++) {
-      LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid,
-             pids_on_device[i].usedGpuMemory);
+      LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
       *used_memory += pids_on_device[i].usedGpuMemory;
     }
   }
+
+  // TODO　Increase the memory usage of intercepting graphic processes.
+  size_on_device = MAX_PIDS;
+  nvmlProcessInfo_t pids_on_device1[MAX_PIDS];
+
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses,
+                           device, &size_on_device, pids_on_device1);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2,
+                           device, &size_on_device, pids_on_device1);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3,
+                           device, &size_on_device, pids_on_device1);
+  } else {
+    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+    LOGGER(WARNING, "nvmlDeviceGetGraphicsRunningProcesses function not found");
+  }
+  if (unlikely(ret)) {
+    goto DONE;
+    return;
+  }
+
+  for (i = 0; i < size_on_device; i++) {
+    if (likely(inContainer)) {
+      if ((isCgroupv2 >0 && check_container_pid_v2(pids_on_device1[i].pid)) ||
+          check_container_pid(pids_on_device1[i].pid)) {
+        LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device1[i].pid, pids_on_device1[i].usedGpuMemory);
+        *used_memory += pids_on_device1[i].usedGpuMemory;
+      }
+    } else {
+      LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", pids_on_device1[i].pid, pids_on_device1[i].usedGpuMemory);
+      *used_memory += pids_on_device1[i].usedGpuMemory;
+    }
+  }
+
+DONE:
   LOGGER(VERBOSE, "total used memory: %zu", *used_memory);
 }
 
 void get_used_gpu_memory(void *arg, CUdevice device_id) {
   size_t *used_memory = arg;
   nvmlDevice_t dev;
-  // 记录gpu设备上运行的pid
   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
-  // 运行于gpu上的最大进程数1024
   unsigned int size_on_device = MAX_PIDS;
   int ret;
-
   unsigned int i;
 
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlInit_v2);
-  if (unlikely(ret)) {
-    LOGGER(WARNING, "nvmlInit error, return %d, str: %s", ret, nvml_error(ret));
-    *used_memory = 0;
-    return;
-  }
-  // 根据设备号查找设备
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_id, &dev);
-  if (unlikely(ret)) {
-    LOGGER(WARNING, "nvmlDeviceGetHandleByIndex can't find device %d, return %d, str: %s",
-                    device_id, ret, nvml_error(ret));
-    *used_memory = 0;
-    return;
-  }
-  // 根据设备查找设备上运行的进程信息
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
-                      dev, &size_on_device, pids_on_device);
-  if (unlikely(ret)) {
-    LOGGER(WARNING, "nvmlDeviceGetComputeRunningProcesses can't get pids on device %d, "
-           "return %d, str: %s", device_id, ret, nvml_error(ret));
-    *used_memory = 0;
-    return;
-  }
-  // 校验宿主机进程目录是否存在, 存在表示运行于容器中
-  if (likely(check_in_container())) {
-        // 当宿主机进程目录存在, 代表运行于容器中
-    if (strlen(container_id) > 0) {
-      LOGGER(VERBOSE, "use cgroupv2 compatible matching mode");
-      for (i = 0; i < size_on_device; i++) {
-        if (likely(check_container_pid_v2(pids_on_device[i].pid))) {
-          LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid,
-                 pids_on_device[i].usedGpuMemory);
-          *used_memory += pids_on_device[i].usedGpuMemory;
-        }
-      }
-    } else {
-      // 校验pid是否是当前容器的pid，匹配上了就增加到已使用内存
-      for (i = 0; i < size_on_device; i++) {
-        if (likely(check_container_pid(pids_on_device[i].pid))) {
-          LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid,
-                pids_on_device[i].usedGpuMemory);
-          *used_memory += pids_on_device[i].usedGpuMemory;
-        }
-      }
-    }
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_id, &dev);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_id, &dev);
   } else {
-    for (i = 0; i < size_on_device; i++) {
-      LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid,
-             pids_on_device[i].usedGpuMemory);
-      *used_memory += pids_on_device[i].usedGpuMemory;
-    }
+    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+    LOGGER(WARNING, "nvmlDeviceGetHandleByIndex function not found");
   }
-  LOGGER(VERBOSE, "total used memory: %zu", *used_memory);
+  if (unlikely(ret)) {
+    *used_memory = 0;
+    return;
+  }
+
+  get_used_gpu_memory_by_device((void *)used_memory, dev);
 }
 
 static void get_used_gpu_utilization(void *arg, CUdevice device_id) {
   nvmlProcessUtilizationSample_t processes_sample[MAX_PIDS];
-  int processes_num = MAX_PIDS;
-  unsigned int running_processes = MAX_PIDS;
-  nvmlProcessInfo_t pids_on_device[MAX_PIDS];
+  unsigned int processes_num = MAX_PIDS;
+//  unsigned int running_processes = MAX_PIDS;
+//  nvmlProcessInfo_t pids_on_device[MAX_PIDS];
   nvmlDevice_t dev;
   utilization_t *top_result = (utilization_t *)arg;
-
-  top_result->user_current = 0;
-  top_result->sys_current = 0;
 
   nvmlReturn_t ret;
   struct timeval cur;
   size_t microsec;
   int codec_util = 0;
-
   int i;
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlInit_v2);
+
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_id, &dev);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_id, &dev);
+  } else {
+    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+    LOGGER(WARNING, "nvmlDeviceGetHandleByIndex function not found");
+  }
   if (unlikely(ret)) {
-    LOGGER(WARNING, "nvmlInit error, return %d, str: %s", ret, nvml_error(ret));
     return;
   }
-  // 获取设备句柄
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_id, &dev);
-  if (unlikely(ret)) {
-    LOGGER(WARNING, "nvmlDeviceGetHandleByIndex can't find device %d, "
-                  "return %d, str: %s", device_id, ret, nvml_error(ret));
-    return;
-  }
-  // 根据设备找到设备上运行中的进程
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
-                      dev, &running_processes, pids_on_device);
-  if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetComputeRunningProcesses can't get pids on device %d, "
-           "return %d, str: %s", device_id, ret, nvml_error(ret));
-    return;
-  }
-  top_result->sys_process_num = running_processes;
+
+//  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
+//    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
+//                          dev, &running_processes, pids_on_device);
+//  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
+//    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+//                          dev, &running_processes, pids_on_device);
+//  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
+//    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
+//                          dev, &running_processes, pids_on_device);
+//  } else {
+//    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+//    LOGGER(WARNING, "nvmlDeviceGetComputeRunningProcesses function not found");
+//  }
+//  if (unlikely(ret)) {
+////    LOGGER(VERBOSE, "nvmlDeviceGetComputeRunningProcesses can't get pids on device %d, "
+////           "return %d, str: %s", device_id, ret, nvml_error(ret));
+//    return;
+//  }
+//
+//  top_result->sys_process_num = running_processes;
 
   gettimeofday(&cur, NULL);
   microsec = (cur.tv_sec - 1) * 1000UL * 1000UL + cur.tv_usec;
   top_result->checktime = microsec;
-  // 获取当前设备的线程利用率
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetProcessUtilization,
                         dev, processes_sample, &processes_num, microsec);
   if (unlikely(ret)) {
@@ -709,52 +730,39 @@ static void get_used_gpu_utilization(void *arg, CUdevice device_id) {
           "return %d, str: %s", device_id, ret, nvml_error(ret));
     return;
   }
+  top_result->sys_process_num = processes_num;
 
-  if (likely(check_in_container())) {
-    size_t isCgroupv2 = strlen(container_id);
-    for (i = 0; i < processes_num; i++) {
-      if (processes_sample[i].timeStamp >= top_result->checktime) {
-        top_result->valid = 1;
-        top_result->sys_current += GET_VALID_VALUE(processes_sample[i].smUtil);
+  top_result->user_current = 0;
+  top_result->sys_current = 0;
 
-        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
-                    GET_VALID_VALUE(processes_sample[i].decUtil);
-        top_result->sys_current += CODEC_NORMALIZE(codec_util);
-        if (isCgroupv2 > 0) {
-          if (likely(check_container_pid_v2(processes_sample[i].pid))) {
-            top_result->user_current += GET_VALID_VALUE(processes_sample[i].smUtil);
-            codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
-                        GET_VALID_VALUE(processes_sample[i].decUtil);
-            top_result->user_current += CODEC_NORMALIZE(codec_util); 
-          }
-        } else {
-          if (likely(check_container_pid(processes_sample[i].pid))) {
-            top_result->user_current += GET_VALID_VALUE(processes_sample[i].smUtil);
-            codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
-                        GET_VALID_VALUE(processes_sample[i].decUtil);
-            top_result->user_current += CODEC_NORMALIZE(codec_util); 
-          }
+  int inContainer = check_in_container();
+  int isCgroupv2 = strlen(container_id);
+
+  for (i = 0; i < processes_num; i++) {
+    if (processes_sample[i].timeStamp >= top_result->checktime) {
+      top_result->valid = 1;
+      top_result->sys_current += GET_VALID_VALUE(processes_sample[i].smUtil);
+      codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
+                   GET_VALID_VALUE(processes_sample[i].decUtil);
+      top_result->sys_current += CODEC_NORMALIZE(codec_util);
+      if (likely(inContainer)) {
+        if ((isCgroupv2 >0 && check_container_pid_v2(processes_sample[i].pid)) ||
+            check_container_pid(processes_sample[i].pid)) {
+          top_result->user_current += GET_VALID_VALUE(processes_sample[i].smUtil);
+          codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
+                       GET_VALID_VALUE(processes_sample[i].decUtil);
+          top_result->user_current += CODEC_NORMALIZE(codec_util);
         }
-      }
-    }
-  } else {
-    for (i = 0; i < processes_num; i++) {
-      if (processes_sample[i].timeStamp >= top_result->checktime) {
-        top_result->valid = 1;
-        top_result->sys_current += GET_VALID_VALUE(processes_sample[i].smUtil);
-
-        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
-                    GET_VALID_VALUE(processes_sample[i].decUtil);
-        top_result->sys_current += CODEC_NORMALIZE(codec_util);
+      } else {
         top_result->user_current += GET_VALID_VALUE(processes_sample[i].smUtil);
         codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
                      GET_VALID_VALUE(processes_sample[i].decUtil);
-        top_result->user_current += CODEC_NORMALIZE(codec_util); 
+        top_result->user_current += CODEC_NORMALIZE(codec_util);
       }
     }
   }
-  LOGGER(VERBOSE, "device: %d, sys utilization: %d", device_id, top_result->sys_current);
-  LOGGER(VERBOSE, "device: %d, used utilization: %d", device_id, top_result->user_current);
+  LOGGER(VERBOSE, "device: %d, sys util: %d, used util: %d", device_id,
+                  top_result->sys_current, top_result->user_current);
 }
 
 /** hook entrypoint */
@@ -833,16 +841,57 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
   return ret;
 }
 
-CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
-                           unsigned int flags) {
-  size_t request_size = bytesize;
-  CUresult ret;
+//CUresult cuMemAlloc_helper(CUdeviceptr *dptr, size_t bytesize, CUdevice dev) {
+//  CUresult ret = CUDA_SUCCESS
+//  if (g_vgpu_config.devices[dev].memory_limit) {
+//    size_t total_memory = g_vgpu_config.devices[dev].total_memory
+//    size_t device_memory = g_vgpu_config.devices[dev].device_memory
+//    const char *cuda_err_string = NULL;
+//    get_used_gpu_memory((void *)&used, dev);
+//    if (unlikely(used + bytesize > total_memory) {
+//       ret = CUDA_ERROR_OUT_OF_MEMORY;
+//       goto DONE;
+//    }
+//    if (!g_vgpu_config.devices[dev].memory_oversold) {
+//      // 没开启虚拟现存正常校验和分配内存
+//      if (unlikely(used + bytesize > total_memory) {
+//        ret = CUDA_ERROR_OUT_OF_MEMORY;
+//        goto DONE;
+//      }
+//    } else if (unlikely(used > device_memory)) {
+//      // 当开启了虚拟内存，当前已使用内存大于设备真实内存时，抛出oom
+//      ret = CUDA_ERROR_OUT_OF_MEMORY;
+//      goto DONE;
+//    } else if (unlikely(used + bytesize > device_memory)) {
+//      // 开启虚拟显存时，当申请内存大于设备真实分配的内存，使用host内存分配
+//FROM_HOST:
+//      ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
+//      LOGGER(DETAIL, "[cuMemAlloc_v2] alloc mem from host, return %d, str: %s", ret, cuda_error(ret, &cuda_err_string));
+//      LOGGER(DETAIL, "[cuMemAlloc_v2] device %d: used %ld, request %ld, limit %ld", dev, used, bytesize, total_memory);
+//      goto DONE;
+//    } else {
+//      // 开启了虚拟内存，但是申请内存没超过可用内存，设备正常分配，当正常分配失败再使用本地内存分配
+//      ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
+//      if (ret == CUDA_SUCCESS) {
+//        goto DONE;
+//      }
+//      LOGGER(DETAIL, "[cuMemAlloc_v2] fail to alloc mem from device %d, "
+//            "return %d, str: %s", ordinal, ret, cuda_error(ret, &cuda_err_string));
+//      goto FROM_HOST;
+//    }
+//  }
+//DONE:
+//  return ret;
+//}
 
+CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flags) {
+  CUresult ret;
   CUdevice ordinal;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
+  size_t request_size = bytesize;
   if (g_vgpu_config.devices[ordinal].memory_limit) {
     size_t used = 0;
     get_used_gpu_memory((void *)&used, ordinal);
@@ -863,7 +912,6 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
-  
   }
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
 DONE:
@@ -1078,14 +1126,13 @@ DONE:
 }
 
 CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
-  size_t used = 0;
-  size_t request_size = bytesize;
   CUresult ret;
   CUdevice ordinal;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
+  size_t used = 0, request_size = bytesize;
   if (g_vgpu_config.devices[ordinal].memory_limit) {
     get_used_gpu_memory((void *)&used, ordinal);
     if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
@@ -1099,14 +1146,13 @@ DONE:
 }
 
 CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
-  size_t used = 0;
-  size_t request_size = bytesize;
   CUresult ret;
   CUdevice ordinal;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
+  size_t used = 0, request_size = bytesize;
   if (g_vgpu_config.devices[ordinal].memory_limit) {
     get_used_gpu_memory((void *)&used, ordinal);
     if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
@@ -1146,30 +1192,24 @@ static size_t get_array_base_size(int format) {
 }
 
 static CUresult cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
-  size_t used = 0;
-  size_t base_size = 0;
-  size_t request_size = 0;
   CUresult ret = CUDA_SUCCESS;
-
   CUdevice ordinal;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-
+  size_t used = 0, base_size = 0, request_size = 0;
   if (g_vgpu_config.devices[ordinal].memory_limit) {
     base_size = get_array_base_size(pAllocateArray->Format);
     request_size = base_size * pAllocateArray->NumChannels *
                    pAllocateArray->Height * pAllocateArray->Width;
 
     get_used_gpu_memory((void *)&used, ordinal);
-
     if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
   }
-
 DONE:
   return ret;
 }
@@ -1177,12 +1217,10 @@ DONE:
 CUresult cuArrayCreate_v2(CUarray *pHandle,
                           const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
   CUresult ret;
-
   ret = cuArrayCreate_helper(pAllocateArray);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArrayCreate_v2, pHandle,
                         pAllocateArray);
 DONE:
@@ -1192,43 +1230,34 @@ DONE:
 CUresult cuArrayCreate(CUarray *pHandle,
                        const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
   CUresult ret;
-
   ret = cuArrayCreate_helper(pAllocateArray);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArrayCreate, pHandle,
-                        pAllocateArray);
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArrayCreate, pHandle, pAllocateArray);
 DONE:
   return ret;
 }
 
 static CUresult cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
-  size_t used = 0;
-  size_t base_size = 0;
-  size_t request_size = 0;
   CUresult ret = CUDA_SUCCESS;
-
   CUdevice ordinal;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-
+  size_t used = 0, base_size = 0, request_size = 0;
   if (g_vgpu_config.devices[ordinal].memory_limit) {
     base_size = get_array_base_size(pAllocateArray->Format);
     request_size = base_size * pAllocateArray->NumChannels *
                    pAllocateArray->Height * pAllocateArray->Width *
                    pAllocateArray->Depth;
     get_used_gpu_memory((void *)&used, ordinal);
-
     if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
   }
-
 DONE:
   return ret;
 }
@@ -1236,14 +1265,11 @@ DONE:
 CUresult cuArray3DCreate_v2(CUarray *pHandle,
                             const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
   CUresult ret;
-
   ret = cuArray3DCreate_helper(pAllocateArray);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArray3DCreate_v2, pHandle,
-                        pAllocateArray);
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArray3DCreate_v2, pHandle, pAllocateArray);
 DONE:
   return ret;
 }
@@ -1251,13 +1277,11 @@ DONE:
 CUresult cuArray3DCreate(CUarray *pHandle,
                          const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
   CUresult ret;
-
   ret = cuArray3DCreate_helper(pAllocateArray);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArray3DCreate, pHandle,
-                        pAllocateArray);
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArray3DCreate, pHandle, pAllocateArray);
 DONE:
   return ret;
 }
@@ -1265,17 +1289,13 @@ DONE:
 CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
                                 const CUDA_ARRAY3D_DESCRIPTOR *pMipmappedArrayDesc,
                                 unsigned int numMipmapLevels) {
-  size_t used = 0;
-  size_t base_size = 0;
-  size_t request_size = 0;
   CUresult ret;
-
   CUdevice ordinal;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-
+  size_t used = 0, base_size = 0, request_size = 0;
   if (g_vgpu_config.devices[ordinal].memory_limit) {
     base_size = get_array_base_size(pMipmappedArrayDesc->Format);
     request_size = base_size * pMipmappedArrayDesc->NumChannels *
@@ -1283,13 +1303,11 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
                    pMipmappedArrayDesc->Depth;
 
     get_used_gpu_memory((void *)&used, ordinal);
-
     if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
   }
-
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMipmappedArrayCreate, pHandle,
                         pMipmappedArrayDesc, numMipmapLevels);
 DONE:
@@ -1313,21 +1331,18 @@ CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
 }
 
 CUresult cuMemGetInfo_v2(size_t *free, size_t *total) {
-  size_t used = 0;
   CUresult ret;
   CUdevice ordinal;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-
+  size_t used = 0;
   if (g_vgpu_config.devices[ordinal].memory_limit) {
-    // 获取已使用的显卡内存
     get_used_gpu_memory((void *)&used, ordinal);
-
-    *total = g_vgpu_config.devices[ordinal].total_memory;
-    // 当已使用大于分配量，可用量为0，否则为 分配的显存总量 - 已使用的显存
-    *free = used > g_vgpu_config.devices[ordinal].total_memory ? 0 : g_vgpu_config.devices[ordinal].total_memory - used;
+    size_t total_memory = g_vgpu_config.devices[ordinal].total_memory;
+    *total = total_memory;
+    *free = (used > total_memory) ? 0 : (total_memory - used);
     LOGGER(VERBOSE, "[cuMemGetInfo_v2] device %d, used %lu, free %lu, total %lu", ordinal, used, *free, *total);
     return CUDA_SUCCESS;
   }
@@ -1337,21 +1352,21 @@ DONE:
 }
 
 CUresult cuMemGetInfo(size_t *free, size_t *total) {
-  size_t used = 0;
   CUresult ret;
   CUdevice ordinal;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
+  size_t used = 0;
   if (g_vgpu_config.devices[ordinal].memory_limit) {
     get_used_gpu_memory((void *)&used, ordinal);
-    *total = g_vgpu_config.devices[ordinal].total_memory;
-    *free = used > g_vgpu_config.devices[ordinal].total_memory ? 0 : g_vgpu_config.devices[ordinal].total_memory - used;
+    size_t total_memory = g_vgpu_config.devices[ordinal].total_memory;
+    *total = total_memory;
+    *free = used > total_memory ? 0 : (total_memory - used);
     LOGGER(VERBOSE, "[cuMemGetInfo] device %d, used %lu, free %lu, total %lu", ordinal, used, *free, *total);
     return CUDA_SUCCESS;
   }
-
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemGetInfo, free, total);
 DONE:
   return ret;
@@ -1369,7 +1384,6 @@ CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX,
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-  // 计算资源限制，根据网格数 更新当前cuda核心数
   rate_limiter(gridDimX * gridDimY * gridDimZ,
               blockDimX * blockDimY * blockDimZ, ordinal);
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchKernel_ptsz, f, gridDimX,
@@ -1390,7 +1404,6 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-  // 计算资源限制，根据网格数 更新当前cuda核心数
   rate_limiter(gridDimX * gridDimY * gridDimZ,
               blockDimX * blockDimY * blockDimZ, ordinal);
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchKernel, f, gridDimX,
@@ -1423,8 +1436,7 @@ CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f,
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
-  }    
-  // TODO 利用率限制         
+  }
   rate_limiter(config->gridDimX *config->gridDimY * config->gridDimZ,
                config->blockDimX * config->blockDimY * config->blockDimZ, ordinal);
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchKernelEx_ptsz, 
@@ -1457,8 +1469,7 @@ CUresult cuLaunchCooperativeKernel_ptsz(
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
-  }    
-  // 计算资源限制，根据网格数 更新当前cuda核心数
+  }
   rate_limiter(gridDimX * gridDimY * gridDimZ,
                blockDimX * blockDimY * blockDimZ, ordinal);
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchCooperativeKernel_ptsz, f,

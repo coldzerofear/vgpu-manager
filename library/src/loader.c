@@ -1044,13 +1044,13 @@ static void load_nvml_libraries() {
   dlclose(table);
 
   // Initialize the ml driver
-  // if (NVML_FIND_ENTRY(nvml_library_entry, nvmlInitWithFlags)) {
-  //   NVML_ENTRY_CALL(nvml_library_entry, nvmlInitWithFlags, 0);
-  // } else if (NVML_FIND_ENTRY(nvml_library_entry, nvmlInit_v2)) {
-  //   NVML_ENTRY_CALL(nvml_library_entry, nvmlInit_v2);
-  // } else {
-  //   NVML_ENTRY_CALL(nvml_library_entry, nvmlInit);
-  // }
+  if (NVML_FIND_ENTRY(nvml_library_entry, nvmlInitWithFlags)) {
+    NVML_ENTRY_CHECK(nvml_library_entry, nvmlInitWithFlags, 0);
+  } else if (NVML_FIND_ENTRY(nvml_library_entry, nvmlInit_v2)) {
+    NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit_v2);
+  } else {
+    NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit);
+  }
 }
 
 static void load_cuda_single_library(int idx) {
@@ -1520,7 +1520,13 @@ DONE:
   return ret;
 }
 
+static volatile int init_hooks_cuda_library = 0;
+static volatile int init_hooks_nvml_library = 0;
+
 void ensure_load_hooks_cuda_library() {
+  if (likely(init_hooks_cuda_library)) {
+    return;
+  }
   for (int i = 0; i < cuda_hook_nums; i++) {
     for (int j = 0; j < CUDA_ENTRY_END; j++) {
       if (unlikely(!strcmp(cuda_hooks_entry[i].name, cuda_library_entry[j].name))) {
@@ -1529,9 +1535,13 @@ void ensure_load_hooks_cuda_library() {
       }
     }
   }
+  init_hooks_cuda_library = 1;
 }
 
 void ensure_load_hooks_nvml_library() {
+  if (likely(init_hooks_nvml_library)) {
+    return;
+  }
   for (int i = 0; i < nvml_hook_nums; i++) {
     for (int j = 0; j < NVML_ENTRY_END; j++) {
       if (unlikely(!strcmp(nvml_hooks_entry[i].name, nvml_library_entry[j].name))) {
@@ -1540,14 +1550,18 @@ void ensure_load_hooks_nvml_library() {
       }
     }
   }
+  init_hooks_nvml_library = 1;
 }
 
 void load_necessary_data() {
-  load_controller_configuration();
+  // First, determine the driver version
   read_version_from_proc(driver_version);
+  load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
+  // Initialize the driver library
   pthread_once(&g_nvml_lib_init, load_nvml_libraries);
   pthread_once(&g_cuda_lib_init, load_cuda_libraries);
-  load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
+  // Read global configuration
+  load_controller_configuration();
   ensure_load_hooks_cuda_library();
   ensure_load_hooks_nvml_library();
 }

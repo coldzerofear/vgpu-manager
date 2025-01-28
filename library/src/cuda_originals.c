@@ -1129,8 +1129,7 @@ CUresult cuGraphicsUnmapResources(unsigned int count,
                          resources, hStream);
 }
 
-CUresult cuGraphicsResourceSetMapFlags_v2(CUgraphicsResource resource,
-                                          unsigned int flags) {
+CUresult cuGraphicsResourceSetMapFlags_v2(CUgraphicsResource resource, unsigned int flags) {
   return CUDA_ENTRY_CALL(cuda_library_entry, cuGraphicsResourceSetMapFlags_v2,
                          resource, flags);
 }
@@ -1139,25 +1138,21 @@ CUresult cuGraphicsSubResourceGetMappedArray(CUarray *pArray,
                                              CUgraphicsResource resource,
                                              unsigned int arrayIndex,
                                              unsigned int mipLevel) {
-  return CUDA_ENTRY_CALL(cuda_library_entry,
-                         cuGraphicsSubResourceGetMappedArray, pArray, resource,
-                         arrayIndex, mipLevel);
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuGraphicsSubResourceGetMappedArray,
+                         pArray, resource, arrayIndex, mipLevel);
 }
 
-CUresult
-cuGraphicsResourceGetMappedMipmappedArray(CUmipmappedArray *pMipmappedArray,
-                                          CUgraphicsResource resource) {
-  return CUDA_ENTRY_CALL(cuda_library_entry,
-                         cuGraphicsResourceGetMappedMipmappedArray,
+CUresult cuGraphicsResourceGetMappedMipmappedArray(CUmipmappedArray *pMipmappedArray,
+                                                   CUgraphicsResource resource) {
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuGraphicsResourceGetMappedMipmappedArray,
                          pMipmappedArray, resource);
 }
 
 CUresult cuGraphicsResourceGetMappedPointer_v2(CUdeviceptr *pDevPtr,
                                                size_t *pSize,
                                                CUgraphicsResource resource) {
-  return CUDA_ENTRY_CALL(cuda_library_entry,
-                         cuGraphicsResourceGetMappedPointer_v2, pDevPtr, pSize,
-                         resource);
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuGraphicsResourceGetMappedPointer_v2,
+                         pDevPtr, pSize, resource);
 }
 
 CUresult cuProfilerInitialize(const char *configFile, const char *outputFile,
@@ -1188,52 +1183,39 @@ CUresult cuVDPAUCtxCreate_v2(CUcontext *pCtx, unsigned int flags,
 }
 
 CUresult cuVDPAUCtxCreate(CUcontext *pCtx, unsigned int flags, CUdevice device,
-                          VdpDevice vdpDevice,
-                          VdpGetProcAddress *vdpGetProcAddress) {
+                          VdpDevice vdpDevice, VdpGetProcAddress *vdpGetProcAddress) {
   return CUDA_ENTRY_CALL(cuda_library_entry, cuVDPAUCtxCreate, pCtx, flags,
                          device, vdpDevice, vdpGetProcAddress);
 }
 
 CUresult cuGraphicsVDPAURegisterVideoSurface(CUgraphicsResource *pCudaResource,
-                                             VdpVideoSurface vdpSurface,
-                                             unsigned int flags) {
-  return CUDA_ENTRY_CALL(cuda_library_entry,
-                         cuGraphicsVDPAURegisterVideoSurface, pCudaResource,
-                         vdpSurface, flags);
+                                             VdpVideoSurface vdpSurface, unsigned int flags) {
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuGraphicsVDPAURegisterVideoSurface,
+                         pCudaResource, vdpSurface, flags);
 }
 
 CUresult cuGraphicsVDPAURegisterOutputSurface(CUgraphicsResource *pCudaResource,
-                                              VdpOutputSurface vdpSurface,
-                                              unsigned int flags) {
-  return CUDA_ENTRY_CALL(cuda_library_entry,
-                         cuGraphicsVDPAURegisterOutputSurface, pCudaResource,
-                         vdpSurface, flags);
+                                              VdpOutputSurface vdpSurface, unsigned int flags) {
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuGraphicsVDPAURegisterOutputSurface,
+                         pCudaResource, vdpSurface, flags);
 }
 
-CUresult cuGetExportTable(const void **ppExportTable,
-                          const CUuuid *pExportTableId) {
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuGetExportTable, ppExportTable,
-                         pExportTableId);
+CUresult cuGetExportTable(const void **ppExportTable, const CUuuid *pExportTableId) {
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuGetExportTable, ppExportTable, pExportTableId);
 }
 
-CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks,
-                                                     CUfunction func,
-                                                     int blockSize,
-                                                     size_t dynamicSMemSize) {
-  return CUDA_ENTRY_CALL(cuda_library_entry,
-                         cuOccupancyMaxActiveBlocksPerMultiprocessor, numBlocks,
-                         func, blockSize, dynamicSMemSize);
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int *numBlocks, CUfunction func,
+                                                     int blockSize, size_t dynamicSMemSize) {
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuOccupancyMaxActiveBlocksPerMultiprocessor,
+                         numBlocks, func, blockSize, dynamicSMemSize);
 }
 
-CUresult cuMemAdvise(CUdeviceptr devPtr, size_t count, CUmem_advise advice,
-                     CUdevice device) {
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuMemAdvise, devPtr, count, advice,
-                         device);
+CUresult cuMemAdvise(CUdeviceptr devPtr, size_t count, CUmem_advise advice, CUdevice device) {
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuMemAdvise, devPtr, count, advice, device);
 }
 
 CUresult cuMemAdvise_v2(CUdeviceptr devPtr, size_t count, CUmem_advise advice, CUmemLocation location){
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuMemAdvise_v2, devPtr, count, advice,
-                         location);
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuMemAdvise_v2, devPtr, count, advice, location);
 }
 
 CUresult cuMemPrefetchAsync_ptsz(CUdeviceptr devPtr, size_t count,
@@ -3024,7 +3006,6 @@ CUresult cuTensorMapEncodeTiled(CUtensorMap *tensorMap, CUtensorMapDataType tens
 CUresult cuTensorMapReplaceAddress(CUtensorMap *tensorMap, void *globalAddress) {
     return CUDA_ENTRY_CALL(cuda_library_entry, cuTensorMapReplaceAddress, tensorMap, globalAddress);
 }
-
 
 CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size, const CUmemAllocationProp *prop, unsigned long long flags) {
     return CUDA_ENTRY_CALL(cuda_library_entry, cuMemCreate, handle, size, prop,flags);

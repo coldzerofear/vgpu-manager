@@ -48,8 +48,9 @@ extern "C" {
   ({                                                                           \
     CUresult rt = CUDA_ENTRY_CALL(table, sym, __VA_ARGS__);                    \
     if (rt != CUDA_SUCCESS) {                                                  \
-      LOGGER(3, "%s call failed: %d", #sym, rt);                               \
+      LOGGER(2, "%s call failed: %d", #sym, rt);                               \
     }                                                                          \
+    rt;                                                                        \
   })
 
 #define CUDA_ENTRY_DEBUG_VOID_CALL(table, sym, ...)                            \

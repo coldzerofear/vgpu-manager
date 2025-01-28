@@ -47,6 +47,11 @@ target_include_directories(mem_managed_tool PUBLIC ${C_INCLUDE_PATH} "/usr/local
 target_link_libraries(mem_managed_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
 target_compile_options(mem_managed_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
+add_executable(mem_view_tool tools/mem_view_tool.c)
+target_include_directories(mem_view_tool PUBLIC ${C_INCLUDE_PATH} "/usr/local/cuda/include")
+target_link_libraries(mem_view_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
+target_compile_options(mem_view_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
+
 add_executable(virt_mem_tool tools/virt_mem_tool.c)
 target_include_directories(virt_mem_tool PUBLIC ${C_INCLUDE_PATH} "/usr/local/cuda/include")
 target_link_libraries(virt_mem_tool PRIVATE cuda ${STATIC_C_LIBRARIES})

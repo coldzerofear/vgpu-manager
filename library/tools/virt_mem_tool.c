@@ -140,7 +140,7 @@ CUresult vmm_free(void *ptr, size_t size, int device_id) {
 int main(int argc, char **argv)
 {
     if (argc != 3) {
-        printf("wrong arguments: mem_managed_tool device_index size(MB)");
+        printf("wrong arguments: mem_managed_tool device_index size(MB)\n");
         return -1;
     }
     int device_id = str2int(argv[1]);

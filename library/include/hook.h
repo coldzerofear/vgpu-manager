@@ -96,8 +96,6 @@ extern "C" {
 #define TIME_TICK (10)
 #define FACTOR (32)
 #define MAX_UTILIZATION (100)
-#define CHANGE_LIMIT_INTERVAL (30)
-#define USAGE_THRESHOLD (5)
 
 #define GET_VALID_VALUE(x) (((x) >= 0 && (x) <= 100) ? (x) : 0)
 #define CODEC_NORMALIZE(x) (x * 85 / 100)
@@ -136,6 +134,15 @@ typedef struct {
   device_t devices[MAX_DEVICE_COUNT];
   int device_count;
 } __attribute__((packed, aligned(8))) resource_data_t;
+
+/**
+ * Dynamic computing power limit configuration
+ */
+typedef struct {
+  int change_limit_interval;    // 原CHANGE_LIMIT_INTERVAL
+  int usage_threshold;          // 原USAGE_THRESHOLD
+  int error_recovery_step;      // 错误恢复步长
+} __attribute__((packed, aligned(8))) dynamic_config_t;
 
 typedef enum {
   INFO = 0,
@@ -204,11 +211,6 @@ void load_necessary_data();
  * Retrieve the currently used memory of the device
  */
 void get_used_gpu_memory_by_device(void *, nvmlDevice_t);
-
-/**
- * Retrieve the currently used memory of the device
- */
-void get_used_gpu_memory(void *, CUdevice);
 
 #ifdef __cplusplus
 }
