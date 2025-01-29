@@ -106,6 +106,12 @@ typedef struct {
 } entry_t;
 
 typedef struct {
+  int start_index;
+  int end_index;
+  int batch_code;
+} batch_t;
+
+typedef struct {
   int major;
   int minor;
 } __attribute__((packed, aligned(8))) version_t;
