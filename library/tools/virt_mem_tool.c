@@ -16,7 +16,7 @@ int str2int(char *str) {
 
 // 虚拟显存分配
 CUresult vmm_alloc(void **ptr, size_t size, int device_id) {
-    CUresult rs;
+    const CUresult rs;
     char *err = NULL;
     // 校验设备是否支持虚拟内存管理
     int deviceSupportsVmm;
@@ -112,7 +112,7 @@ CUresult vmm_free(void *ptr, size_t size, int device_id) {
  
     size_t granularity = 0;
     CUresult rs;
-    char *err = NULL;
+    const char *err = NULL;
     rs = cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
     if (rs != CUDA_SUCCESS) {
         cuGetErrorString(rs, &err);

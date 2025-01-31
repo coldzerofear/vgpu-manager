@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -41,7 +42,6 @@ import (
 //struct device_t {
 //  char uuid[48];
 //  uint64_t total_memory;
-//  uint64_t device_memory;
 //  int hard_core;
 //  int soft_core;
 //  int core_limit;
@@ -91,7 +91,6 @@ type VersionT struct {
 type DeviceT struct {
 	UUID           [48]byte
 	TotalMemory    uint64
-	DeviceMemory   uint64
 	HardCore       int32
 	SoftCore       int32
 	CoreLimit      int32
@@ -143,7 +142,8 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 	return resourceData, data, nil
 }
 
-func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod, assignDevices device.ContainerDevices) *ResourceDataT {
+func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
+	assignDevices device.ContainerDevices, node *corev1.Node) *ResourceDataT {
 	major, minor := devManager.GetVersion().CudaVersion.MajorAndMinor()
 	convert48Bytes := func(val string) [48]byte {
 		var byteArray [48]byte
@@ -155,6 +155,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod, assign
 		copy(byteArray[:], val)
 		return byteArray
 	}
+	computePolicy := GetComputePolicy(pod, node)
 	deviceCount := 0
 	deviceMap := devManager.GetDeviceMap()
 	nodeConfig := devManager.GetNodeConfig()
@@ -165,26 +166,41 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod, assign
 		}
 		deviceCount++
 		dev := DeviceT{
-			UUID:         convert48Bytes(devInfo.Uuid),
-			TotalMemory:  uint64(devInfo.Memory << 20),
-			DeviceMemory: uint64(devInfo.Memory << 20),
-			HardCore:     int32(devInfo.Core),
-			SoftCore:     int32(devInfo.Core),
+			UUID:        convert48Bytes(devInfo.Uuid),
+			TotalMemory: uint64(devInfo.Memory << 20),
+			HardCore:    int32(devInfo.Core),
+			SoftCore:    int32(devInfo.Core),
+			CoreLimit:   int32(0),
+			HardLimit:   int32(0),
 		}
-		// need limit core
-		if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
-			//  int core_limit;
-			dev.CoreLimit = 1
-			//  int hard_limit;
-			dev.HardLimit = 1
-		} else {
-			//  int core_limit;
-			dev.CoreLimit = 0
-			//  int hard_limit;
-			dev.HardLimit = 0
-		}
-		//  int memory_limit;
 		gpuDevice := deviceMap[devInfo.Uuid]
+
+		// need limit core
+		switch computePolicy {
+		case util.BalanceComputePolicy:
+			//  int soft_core;
+			dev.SoftCore = int32(gpuDevice.Core)
+			// need limit core
+			if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
+				//  int core_limit;
+				dev.CoreLimit = 1
+				if devInfo.Core >= gpuDevice.Core {
+					//  int hard_limit;
+					dev.HardLimit = 1
+				}
+			}
+		case util.FixedComputePolicy:
+			// need limit core
+			if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
+				//  int core_limit;
+				dev.CoreLimit = 1
+				//  int hard_limit;
+				dev.HardLimit = 1
+			}
+		case util.NoneComputePolicy:
+		}
+
+		//  int memory_limit;
 		if devInfo.Memory == gpuDevice.Memory && nodeConfig.DeviceMemoryScaling() == float64(1) {
 			dev.MemoryLimit = 0
 		} else {
@@ -209,7 +225,25 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod, assign
 	return data
 }
 
-func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod *corev1.Pod, assignDevices device.ContainerDevices) error {
+func GetComputePolicy(pod *corev1.Pod, node *corev1.Node) util.ComputePolicy {
+	computePolicy, ok := util.HasAnnotation(pod, util.VGPUComputePolicyAnnotation)
+	if !ok || len(computePolicy) == 0 {
+		computePolicy, _ = util.HasAnnotation(node, util.VGPUComputePolicyAnnotation)
+	}
+	switch strings.ToLower(computePolicy) {
+	case string(util.BalanceComputePolicy):
+		return util.BalanceComputePolicy
+	case string(util.FixedComputePolicy):
+		return util.FixedComputePolicy
+	case string(util.NoneComputePolicy):
+		return util.NoneComputePolicy
+	default:
+		return util.FixedComputePolicy
+	}
+}
+
+func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager,
+	pod *corev1.Pod, assignDevices device.ContainerDevices, node *corev1.Node) error {
 	if _, err := os.Stat(filePath); err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -237,6 +271,8 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		defer C.free(unsafe.Pointer(containerName))
 		C.strcpy(&vgpuConfig.container_name[0], (*C.char)(unsafe.Pointer(containerName)))
 
+		computePolicy := GetComputePolicy(pod, node)
+
 		deviceCount := 0
 		deviceMap := devManager.GetDeviceMap()
 		nodeConfig := devManager.GetNodeConfig()
@@ -252,28 +288,40 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 				C.strcpy((*C.char)(unsafe.Pointer(&cDevice.uuid[0])), (*C.char)(unsafe.Pointer(devUuid)))
 				//  uint64_t total_memory;
 				cDevice.total_memory = C.uint64_t(devInfo.Memory << 20)
-				//  uint64_t device_memory;
-				cDevice.device_memory = C.uint64_t(devInfo.Memory << 20)
 
+				gpuDevice := deviceMap[devInfo.Uuid]
 				//  int hard_core;
 				cDevice.hard_core = C.int(devInfo.Core)
 				//  int soft_core;
 				cDevice.soft_core = C.int(devInfo.Core)
-				// need limit core
-				if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
-					//  int core_limit;
-					cDevice.core_limit = 1
-					//  int hard_limit;
-					cDevice.hard_limit = 1
-				} else {
-					//  int core_limit;
-					cDevice.core_limit = 0
-					//  int hard_limit;
-					cDevice.hard_limit = 0
+				//  int core_limit;
+				cDevice.core_limit = 0
+				//  int hard_limit;
+				cDevice.hard_limit = 0
+				switch computePolicy {
+				case util.BalanceComputePolicy:
+					//  int soft_core;
+					cDevice.soft_core = C.int(gpuDevice.Core)
+					// need limit core
+					if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
+						//  int core_limit;
+						cDevice.core_limit = 1
+						if devInfo.Core >= gpuDevice.Core {
+							//  int hard_limit;
+							cDevice.hard_limit = 1
+						}
+					}
+				case util.FixedComputePolicy:
+					// need limit core
+					if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
+						//  int core_limit;
+						cDevice.core_limit = 1
+						//  int hard_limit;
+						cDevice.hard_limit = 1
+					}
+				case util.NoneComputePolicy:
 				}
-
 				//  int memory_limit;
-				gpuDevice := deviceMap[devInfo.Uuid]
 				if devInfo.Memory == gpuDevice.Memory && nodeConfig.DeviceMemoryScaling() == float64(1) {
 					cDevice.memory_limit = 0
 				} else {

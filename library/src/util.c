@@ -10,20 +10,20 @@
 #define CUDA_MEMORY_LIMIT_ENV "CUDA_MEM_LIMIT_%d"
 #define CUDA_CORE_LIMIT_ENV "CUDA_CORE_LIMIT_%d"
 #define CUDA_CORE_SOFT_LIMIT_ENV "CUDA_CORE_SOFT_LIMIT_%d"
+#define CUDA_MEM_OVERSOLD_ENV "CUDA_MEM_OVERSOLD_%d"
 #define GPU_DEVICES_UUID_ENV "GPU_DEVICES_UUID"
-#define CUDA_MEM_OVERSUBSCRIBE_ENV "CUDA_MEMORY_RATIO"
 
 static inline int get_limit(const char *name, char *data) {
   char *str = NULL;
   int ret = -1;
   str = getenv(name);
   if (unlikely(!str)) {
-    goto done;
+    goto DONE;
   }
   // memcpy(data, str, strlen(str));
   strcpy(data, str);
   ret = 0;
-done:
+DONE:
   return ret;
 }
 
@@ -77,12 +77,12 @@ int get_core_limit(uint32_t index, int *limit) {
   if (unlikely(!str)) {
     str = getenv("CUDA_CORE_LIMIT");
     if (unlikely(!str)) {
-      goto done;
+      goto DONE;
     }
   }
   *limit = iec_to_bytes(str);
   ret = 0;
-done:
+DONE:
   return ret;
 }
 
@@ -95,12 +95,12 @@ int get_core_soft_limit(uint32_t index, int *limit) {
   if (unlikely(!str)) {
     str = getenv("CUDA_CORE_SOFT_LIMIT");
     if (unlikely(!str)) {
-      goto done;
+      goto DONE;
     }
   }
   *limit = iec_to_bytes(str);
   ret = 0;
-done:
+DONE:
   return ret;
 }
 
@@ -115,16 +115,27 @@ int get_devices_uuid(char *uuids) {
   return 0;
 }
 
-int get_mem_oversold(double *ratio) {
+int get_mem_oversold(uint32_t index, int *i) {
   int ret = -1;
-  char tmp[16] = {0};
-  ret = get_limit(CUDA_MEM_OVERSUBSCRIBE_ENV, tmp);
-  if (unlikely(ret)) {
-    goto done;
+  char *str = NULL;
+  char env[32] = {0};
+  sprintf(env, CUDA_MEM_OVERSOLD_ENV, index);
+  str = getenv(env);
+  if (unlikely(!str)) {
+    str = getenv("CUDA_MEM_OVERSOLD");
+    if (unlikely(!str)) {
+        goto DONE;
+    }
   }
-  *ratio = atof(tmp);
+  if (strcmp(str, "true") == 0 ||
+      strcmp(str, "TRUE") == 0 ||
+      strcmp(str,"1") == 0) {
+    *i = 1;
+  } else {
+    *i = 0;
+  }
   ret = 0;
-done:
+DONE:
   return ret;
 }
 

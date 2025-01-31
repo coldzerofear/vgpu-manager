@@ -66,11 +66,15 @@ int main(int argc, char **argv)
         return -1;
     }
     if (res != CUDA_SUCCESS) {
-        char *msg = NULL;
+        const char *msg = NULL;
         cuGetErrorString(res, &msg);
         printf("cuMemAllocManaged failed, error: %s\n", msg);
         return -1;
     }
+    CUdeviceptr base;
+    size_t query_size;
+    cuMemGetAddressRange(&base, &query_size, d);
+    printf("Allocated size: %zu bytes\n", query_size);
     memset((void *)d, 0, size);
     while (1){
     }

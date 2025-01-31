@@ -984,7 +984,7 @@ extern int get_mem_limit(uint32_t index, size_t *limit);
 extern int get_core_limit(uint32_t index, int *limit);
 extern int get_core_soft_limit(uint32_t index, int *limit);
 extern int get_devices_uuid(char *uuids);
-extern int get_mem_oversold(double *ratio);
+extern int get_mem_oversold(uint32_t index, int *limit);
 extern int extract_container_id_v2(char *path, char *container_id, size_t container_id_size);
 
 resource_data_t g_vgpu_config = {
@@ -1281,7 +1281,6 @@ int read_file_to_config_path(const char* filename, resource_data_t* data) {
     LOGGER(VERBOSE, "hard core        : %d", g_vgpu_config.devices[i].hard_core);
     LOGGER(VERBOSE, "soft core        : %d", g_vgpu_config.devices[i].soft_core);
     LOGGER(VERBOSE, "memory oversold  : %d", g_vgpu_config.devices[i].memory_oversold);
-    LOGGER(VERBOSE, "device memory    : %ld", g_vgpu_config.devices[i].device_memory);
   }
   LOGGER(VERBOSE, "-----------------------------------------------------------");
 DONE:
@@ -1374,9 +1373,10 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     pthread_mutex_unlock(&tid_dlsym_lock);
     return h;
   }
-  // hijack cuda
+
   int i;
-  if (symbol[0] == 'c' && symbol[1] == 'u') {
+  // hijack cuda
+  if (strncmp(symbol, "cu", 2) == 0) {
     load_necessary_data();
     for (i = 0; i < cuda_hook_nums; i++) {
       if (unlikely(!strcmp(symbol, cuda_hooks_entry[i].name))) {
@@ -1386,7 +1386,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     }
   }
   // hijack nvml
-  if (symbol[0] == 'n' && symbol[1] == 'v' && symbol[2] == 'm' && symbol[3] == 'l') {
+  if (strncmp(symbol, "nvml", 4) == 0) {
     load_necessary_data();
     for (i = 0; i < nvml_hook_nums; i++) {
       if (unlikely(!strcmp(symbol, nvml_hooks_entry[i].name))) {
@@ -1440,13 +1440,6 @@ int load_controller_configuration() {
     goto DONE;
   }
   char *gpu_uuids[MAX_DEVICE_COUNT];
-  double ratio = 1;
-  ret = get_mem_oversold(&ratio);
-  if (unlikely(ret)) {
-    LOGGER(ERROR, "get device memory oversold failed");
-  } else {
-    LOGGER(VERBOSE, "get device memory oversold ratio: %f", ratio);
-  }
   int hard_cores = 0;
   int soft_cores = 0;
   g_vgpu_config.device_count = strsplit(uuids, gpu_uuids, ",");
@@ -1459,11 +1452,9 @@ int load_controller_configuration() {
     } else {
       g_vgpu_config.devices[i].memory_limit = 1;
     }
-    if (ratio > 1) {
-      g_vgpu_config.devices[i].memory_oversold = 1;
-      size_t memory = g_vgpu_config.devices[i].total_memory / ratio;
-      g_vgpu_config.devices[i].device_memory = memory;
-    } else {
+    ret = get_mem_oversold(i, &g_vgpu_config.devices[i].memory_oversold);
+    if (unlikely(ret)) {
+      LOGGER(VERBOSE, "gpu device %d memory oversold failed", i);
       g_vgpu_config.devices[i].memory_oversold = 0;
     }
     ret = get_core_limit(i, &hard_cores);
@@ -1506,7 +1497,6 @@ int load_controller_configuration() {
     LOGGER(VERBOSE, "hard core        : %d", g_vgpu_config.devices[i].hard_core);
     LOGGER(VERBOSE, "soft core        : %d", g_vgpu_config.devices[i].soft_core);
     LOGGER(VERBOSE, "memory oversold  : %d", g_vgpu_config.devices[i].memory_oversold);
-    LOGGER(VERBOSE, "device memory    : %ld", g_vgpu_config.devices[i].device_memory);
   }
   LOGGER(VERBOSE, "-----------------------------------------------------------");
   ret = write_file_to_config_path(&g_vgpu_config);

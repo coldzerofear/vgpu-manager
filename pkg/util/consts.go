@@ -3,7 +3,9 @@ package util
 const (
 	DomainPrefix = "nvidia.com"
 
-	NodeVGPUComputeLabel         = DomainPrefix + "/vgpu-compute-policy" // none / balance / fixed(default)
+	// VGPUComputePolicyAnnotation none / balance / fixed(default)
+	VGPUComputePolicyAnnotation = DomainPrefix + "/vgpu-compute-policy"
+
 	NodeNvidiaDriverVersionLabel = DomainPrefix + "/node-driver-version"
 	NodeNvidiaCudaVersionLabel   = DomainPrefix + "/node-cuda-version"
 
@@ -52,16 +54,19 @@ const (
 	PreStartContainerCheckErrType = "PreStartContainerCheckErr"
 )
 
-// * CUDA_MEM_LIMIT_<index>： 内存限制
-// * CUDA_CORE_LIMIT： 算力核心限制
-// * CUDA_CORE_SOFT_LIMIT： 算力核心软限制（允许超过硬限制）
-// * GPU_DEVICES_UUID： 设备uuid
-// * CUDA_MEMORY_OVERSUBSCRIBE： 设备内存超卖（虚拟内存）
 const (
 	NvidiaVisibleDevicesEnv = "NVIDIA_VISIBLE_DEVICES"
-	CudaMemoryLimitEnv      = "CUDA_MEM_LIMIT"
-	CudaCoreLimitEnv        = "CUDA_CORE_LIMIT"
-	GPUDeviceUuidEnv        = "GPU_DEVICES_UUID"
+
+	// CUDA_MEM_LIMIT_<index> gpu memory limit
+	CudaMemoryLimitEnv = "CUDA_MEM_LIMIT"
+	// CUDA_CORE_LIMIT_<index> gpu core limit
+	CudaCoreLimitEnv = "CUDA_CORE_LIMIT"
+	// CUDA_CORE_SOFT_LIMIT_<index> gpu core soft limit
+	CudaSoftCoreLimitEnv = "CUDA_CORE_SOFT_LIMIT"
+	// CUDA_CORE_SOFT_LIMIT_<index> gpu memory oversold switch
+	CudaMemoryOversoldEnv = "CUDA_MEM_OVERSOLD"
+	// GPU_DEVICES_UUID gpu uuid list
+	GPUDeviceUuidEnv = "GPU_DEVICES_UUID"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
@@ -72,9 +77,16 @@ const (
 type ComputePolicy string
 
 const (
-	NoneComputePolicy    ComputePolicy = "none"
+	// NoneComputePolicy There are no computing power limitations, tasks compete for GPUs on their own.
+	NoneComputePolicy ComputePolicy = "none"
+	// BalanceComputePolicy Automatically balance GPU load, maximize GPU utilization,
+	// allocate idle computing power to ongoing tasks,
+	// and roll back excess computing power when new tasks require it.
 	BalanceComputePolicy ComputePolicy = "balance"
-	FixedComputePolicy   ComputePolicy = "fixed" // default
+	// FixedComputePolicy Run tasks with a fixed computing power quota,
+	// and the utilization rate will not exceed the quota.
+	// Default strategy
+	FixedComputePolicy ComputePolicy = "fixed" // default
 )
 
 type SchedulerPolicy string

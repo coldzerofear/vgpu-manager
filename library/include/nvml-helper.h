@@ -46,11 +46,11 @@ extern "C" {
 
 #define NVML_ENTRY_CHECK(table, sym, ...)                                      \
   ({                                                                           \
-    nvmlReturn_t rt = NVML_ENTRY_CALL(table, sym, __VA_ARGS__);                \
-    if (rt != NVML_SUCCESS) {                                                  \
-      LOGGER(2, "%s call failed: %d", #sym, rt);                               \
+    nvmlReturn_t _ret = NVML_ENTRY_CALL(table, sym, __VA_ARGS__);                \
+    if (_ret != NVML_SUCCESS) {                                                  \
+      LOGGER(2, "%s call failed: %d", #sym, _ret);                               \
     }                                                                          \
-    rt;                                                                        \
+    _ret;                                                                        \
   })
 
 typedef nvmlReturn_t (*driver_sym_t)();

@@ -119,7 +119,6 @@ typedef struct {
 typedef struct {
   char uuid[48];
   size_t total_memory;
-  size_t device_memory;
   int hard_core;    // 算力硬限制最大值
   int soft_core;    // 算力软限制值
   int core_limit;   // 算力限制开关，0：关 1：开

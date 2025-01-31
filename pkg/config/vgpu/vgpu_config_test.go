@@ -9,6 +9,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -55,16 +56,33 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 			MinorNumber: 1,
 		},
 	}
+	nodes := []*corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{util.VGPUComputePolicyAnnotation: string(util.NoneComputePolicy)},
+			},
+		}, {
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{util.VGPUComputePolicyAnnotation: string(util.BalanceComputePolicy)},
+			},
+		}, {
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{util.VGPUComputePolicyAnnotation: string(util.FixedComputePolicy)},
+			},
+		},
+	}
 	devManager := manager.NewFakeDeviceManager(config, driverVersion, devices)
 	tests := []struct {
 		name    string
 		path    string
+		nodes   []*corev1.Node
 		pod     *corev1.Pod
 		devices device.ContainerDevices
 	}{
 		{
-			name: "example 1",
-			path: "/tmp/vgpu1.config",
+			name:  "example 1",
+			path:  "/tmp/vgpu1.config",
+			nodes: nodes,
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test1",
@@ -85,8 +103,9 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 			},
 		},
 		{
-			name: "example 2",
-			path: "/tmp/vgpu2.config",
+			name:  "example 2",
+			path:  "/tmp/vgpu2.config",
+			nodes: nodes,
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test2",
@@ -107,8 +126,9 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 			},
 		},
 		{
-			name: "example 3",
-			path: "/tmp/vgpu3.config",
+			name:  "example 3",
+			path:  "/tmp/vgpu3.config",
+			nodes: nodes,
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test3",
@@ -138,19 +158,23 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := WriteVGPUConfigFile(test.path, devManager, test.pod, test.devices)
-			if err != nil {
-				t.Error(err)
-			}
-			resourceData1, data, err := MmapResourceDataT(test.path)
-			if err != nil {
-				t.Error(err)
-			}
-			defer syscall.Munmap(data)
-			resourceData2 := NewResourceDataT(devManager, test.pod, test.devices)
-			assert.Equal(t, *resourceData1, *resourceData2)
-			if err = os.RemoveAll(test.path); err != nil {
-				t.Error(err)
+			for _, node := range test.nodes {
+				func() {
+					err := WriteVGPUConfigFile(test.path, devManager, test.pod, test.devices, node)
+					if err != nil {
+						t.Error(err)
+					}
+					resourceData1, data, err := MmapResourceDataT(test.path)
+					if err != nil {
+						t.Error(err)
+					}
+					defer syscall.Munmap(data)
+					resourceData2 := NewResourceDataT(devManager, test.pod, test.devices, node)
+					assert.Equal(t, *resourceData1, *resourceData2)
+					if err = os.RemoveAll(test.path); err != nil {
+						t.Error(err)
+					}
+				}()
 			}
 		})
 	}

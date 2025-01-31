@@ -50,7 +50,7 @@ int main(int argc, char **argv) {
     CUresult ret;
     ret = cuMemAlloc_v2(&d, size);
     if (ret != CUDA_SUCCESS) {
-        char *err = NULL;
+        const char *err = NULL;
         cuGetErrorString(ret, &err);
         printf("cuMemAlloc_v2 failed: %s\n", err);
         return -1;

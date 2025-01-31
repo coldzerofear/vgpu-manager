@@ -204,8 +204,8 @@ func (m *NumberDevicePlugin) GetDevicePluginOptions(context.Context, *pluginapi.
 }
 
 // ListAndWatch returns a stream of List of Devices
-// Whenever a Device state change or a Device disappears, ListAndWatch
-// returns the new list.
+// Whenever a Device state change or a Device disappears,
+// ListAndWatch returns the new list.
 func (m *NumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 		klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
@@ -298,6 +298,7 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 	allocatingPods := util.FilterAllocatingPods(activePods)
 	currentPod, err = util.GetCurrentPodByAllocatingPods(allocatingPods)
 	if err != nil {
+		klog.Errorln(err.Error())
 		return resp, err
 	}
 
@@ -307,10 +308,12 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 		number := len(containerRequest.GetDevicesIDs())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
 		if err != nil {
+			klog.Errorln(err.Error())
 			return resp, err
 		}
 		if number != len(assignDevs.Devices) {
 			err = fmt.Errorf("requested number of devices does not match")
+			klog.Errorln(err.Error())
 			return resp, err
 		}
 		var (
@@ -323,16 +326,13 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 		envMap[util.PodNamespaceEnv] = currentPod.Namespace
 		envMap[util.PodUIDEnv] = string(currentPod.UID)
 		envMap[util.ContNameEnv] = assignDevs.Name
-		claimDevices := assignDevs.Devices
-		sort.Slice(claimDevices, func(i, j int) bool {
-			devA := claimDevices[i]
-			devB := claimDevices[j]
-			return devA.Id < devB.Id
+		sort.Slice(assignDevs.Devices, func(i, j int) bool {
+			return assignDevs.Devices[i].Id < assignDevs.Devices[j].Id
 		})
-		for idx, dev := range claimDevices {
+		for idx, dev := range assignDevs.Devices {
 			memoryLimitEnv := fmt.Sprintf("%s_%d", util.CudaMemoryLimitEnv, idx)
 			envMap[memoryLimitEnv] = fmt.Sprintf("%dm", dev.Memory)
-			if dev.Core > 0 {
+			if dev.Core > 0 && dev.Core < util.HundredCore {
 				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, idx)
 				envMap[coreLimitEnv] = strconv.Itoa(dev.Core)
 			}
@@ -378,12 +378,14 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 		if cgroups.IsCgroup2UnifiedMode() {
 			podCgroupPath, err = util.GetK8sPodCGroupPath(currentPod)
 			if err != nil {
+				klog.Errorln(err.Error())
 				return resp, err
 			}
 			cgroupFullPath := util.GetK8sPodCGroupFullPath(podCgroupPath)
 			baseCgroupPath := util.SplitK8sCGroupBasePath(cgroupFullPath)
 			if util.PathIsNotExist(baseCgroupPath) {
 				err = fmt.Errorf("unable to find k8s cgroup path")
+				klog.Errorln(err.Error())
 				return resp, err
 			}
 			mounts = append(mounts, &pluginapi.Mount{
@@ -409,6 +411,7 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 		var realAllocated string
 		if realAllocated, err = podDevices.MarshalText(); err != nil {
 			err = fmt.Errorf("real allocated of encoding device failed: %v", err)
+			klog.Errorln(err.Error())
 			return resp, err
 		}
 		currentPod.Annotations[util.PodVGPURealAllocAnnotation] = realAllocated
@@ -518,9 +521,9 @@ func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugina
 		klog.Errorf("failed to get current node <%s>: %v", nodeName, err)
 		return resp, err
 	}
-	_ = node.Labels[util.NodeVGPUComputeLabel]
 	podInfo, err := m.getCurrentPodInfo(req.GetDevicesIDs())
 	if err != nil {
+		klog.Errorln(err.Error())
 		return resp, err
 	}
 
@@ -541,6 +544,7 @@ func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugina
 	realDevices := device.PodDevices{}
 	if err = realDevices.UnmarshalText(realAlloc); err != nil {
 		err = fmt.Errorf("parse pod assign devices failed: %v", err)
+		klog.Errorln(err.Error())
 		return resp, err
 	}
 	index := slices.IndexFunc(realDevices, func(contDevs device.ContainerDevices) bool {
@@ -548,9 +552,13 @@ func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugina
 	})
 	if index < 0 {
 		err = fmt.Errorf("unable to find allocated devices for container <%s>", podInfo.ContainerName)
+		klog.Errorln(err.Error())
 		return resp, err
 	}
-	err = vgpu.WriteVGPUConfigFile(vgpuConfigPath, m.manager, pod, realDevices[index])
+	err = vgpu.WriteVGPUConfigFile(vgpuConfigPath, m.manager, pod, realDevices[index], node)
+	if err != nil {
+		klog.Errorln(err.Error())
+	}
 	return resp, err
 }
 
