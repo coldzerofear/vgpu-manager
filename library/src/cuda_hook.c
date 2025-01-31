@@ -186,6 +186,7 @@ typedef struct {
   int user_current;
   int sys_current;
   uint64_t checktime;
+  int valid;
   int sys_process_num;
 } utilization_t;
 
@@ -312,6 +313,7 @@ static void *utilization_watcher(void *arg) {
     up_limits[device_id] = g_vgpu_config.devices[device_id].hard_core;
     top_results[device_id].user_current = 0;
     top_results[device_id].sys_current = 0;
+    top_results[device_id].valid = 0;
     top_results[device_id].sys_process_num = 0;
     if (g_vgpu_config.devices[device_id].core_limit) {
       need_limit = 1;
@@ -333,6 +335,9 @@ static void *utilization_watcher(void *arg) {
         continue; // 跳过没开启核心限制的
       }
       get_used_gpu_utilization((void *)&top_results[device_id], device_id);
+      if (unlikely(!top_results[device_id].valid)) {
+        continue;
+      }
       // 设备最大利用率100% - 设备当前已使用 = 空闲利用率
       sys_frees[device_id] = MAX_UTILIZATION - top_results[device_id].sys_current;
 
@@ -364,7 +369,8 @@ static void *utilization_watcher(void *arg) {
          * historical resource utilization. Second, allocate the cuda
          * cores according to the changed limit value.*/
         if (top_results[device_id].sys_process_num == 1) {
-          shares[device_id] = delta(g_vgpu_config.devices[device_id].soft_core, top_results[device_id].user_current, shares[device_id], device_id);
+          up_limits[device_id] = g_vgpu_config.devices[device_id].soft_core;
+          shares[device_id] = delta(up_limits[device_id], top_results[device_id].user_current, shares[device_id], device_id);
         } else {
           is[device_id]++;
           avg_sys_frees[device_id] += sys_frees[device_id];
@@ -380,7 +386,7 @@ static void *utilization_watcher(void *arg) {
         }
       }
       change_token(shares[device_id], device_id);
-      LOGGER(DETAIL, "device: %d, util: %d, up_limit: %d, share: %ld, cur: %ld", device_id,
+      LOGGER(DETAIL, "device: %d, user util: %d, up_limit: %d, share: %ld, curr core: %ld", device_id,
              top_results[device_id].user_current, up_limits[device_id], shares[device_id], g_cur_cuda_cores[device_id]);
     }
   }
@@ -764,7 +770,7 @@ static void get_used_gpu_utilization(void *arg, int device_id) {
   top_result->checktime = microsec;
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetProcessUtilization,
                         dev, processes_sample, &processes_num, microsec);
-  if (unlikely(ret)) {
+  if (unlikely(ret && ret != NVML_ERROR_NOT_FOUND)) {
     LOGGER(VERBOSE, "nvmlDeviceGetProcessUtilization can't get process utilization on device: %d, "
           "return %d, str: %s", device_id, ret, nvml_error(ret));
     return;
@@ -779,7 +785,7 @@ static void get_used_gpu_utilization(void *arg, int device_id) {
 
   for (i = 0; i < processes_num; i++) {
     if (processes_sample[i].timeStamp >= top_result->checktime) {
-      // top_result->valid = 1;
+      top_result->valid = 1;
       top_result->sys_current += GET_VALID_VALUE(processes_sample[i].smUtil);
       codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
                    GET_VALID_VALUE(processes_sample[i].decUtil);
