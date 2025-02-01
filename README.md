@@ -8,16 +8,18 @@ Support multi container and multi GPU virtualization allocation and rich schedul
 
 The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager) and has undergone multiple improvements.
 
-* Efficient scheduling performance
-* Ensure the security of container resource isolation
-* Simplify GRPC within containers
-* Support CUDA 12.x version drivers
-* Support CGroup v1 and v2
-* Dual scheduling strategy for nodes and devices
-* Provide GPU monitoring indicators
-* Compatible with hot swappable devices and expansion capabilities
+- [x] Efficient scheduling performance
+- [x] Ensure the security of container resource isolation
+- [x] Simplify GRPC within containers
+- [x] Support CUDA 12.x version drivers
+- [x] Support CGroupv1 and CGroupv2
+- [x] Dual scheduling strategy for nodes and devices
+- [x] Provide GPU monitoring indicators
+- [x] Idle computing power of dynamic balancing equipment
+- [ ] GPU device uses virtual memory after exceeding memory limit
+- [ ] Compatible with hot swappable devices and expansion capabilities
 
-The project is currently underway...
+> Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 
 ## Prerequisite
 
@@ -74,6 +76,8 @@ Note that the scheduler version needs to be modified according to the cluster ve
 
 Submit a VGPU container application with 10% computing power and 1GB of memory
 
+> Note: VGPU pod requires specifying the scheduler name and the number of vGPU devices to be requested by the container.
+
 ```yaml
 apiVersion: v1
 kind: Pod
@@ -81,7 +85,7 @@ metadata:
   name: gpu-pod
   namespace: default
 spec:    
-  schedulerName: vgpu-scheduler # Specify scheduler
+  schedulerName: vgpu-scheduler  # Specify scheduler (default: vgpu-manager)
   terminationGracePeriodSeconds: 0
   containers:
   - name: default
@@ -94,9 +98,9 @@ spec:
       limits:
         cpu: 2
         memory: 4Gi
-        nvidia.com/vgpu-number: 1     # one gpu
+        nvidia.com/vgpu-number: 1     # Allocate one gpu
         nvidia.com/vgpu-core: 10      # Allocate 10% of computing power
-        nvidia.com/vgpu-memory: 1024  # Allocate memory quantity
+        nvidia.com/vgpu-memory: 1024  # Allocate memory (default: Mib)
 ```
 
 Check that the container meets expectations
@@ -126,7 +130,7 @@ Sun Dec 22 19:20:47 2024
 +---------------------------------------------------------------------------------------+
 ```
 
-## Scheduling strategy 
+## Scheduling Strategy 
 
 Support scheduling strategies for both node and device dimensions
 
@@ -144,14 +148,14 @@ metadata:
     nvidia.com/device-scheduler-policy: binpack
 ```
 
-## Select devices
+## Select Devices
 
-Support selecting device type or uuid
+Support using annotations to select the device type and uuid to be selected for the pod.
+
+### Device TYPE
 
 Add annotations to vGPU pod to select or exclude device types to be scheduled: 
 `nvidia.com/include-gpu-type` `nvidia.com/exclude-gpu-type`
-
-If there are multiple devices separated by commas
 
 Example: Choose to use A10 and exclude A100
 ```yaml
@@ -161,10 +165,12 @@ metadata:
     nvidia.com/exclude-gpu-type: "A100"
 ```
 
+> Note: If there are multiple devices separated by commas
+
+### Device UUID
+
 Add annotations to vGPU pod to select or exclude device uuids to be scheduled:
 `nvidia.com/include-gpu-uuid` `nvidia.com/exclude-gpu-uuid`
-
-If there are multiple devices separated by commas
 
 Example: Select a GPU uuid
 ```yaml
@@ -172,3 +178,27 @@ metadata:
   annotations:
     nvidia.com/include-gpu-uuid: GPU-49aa2e6a-33f3-99dd-e08b-ea4beb0e0d28
 ```
+
+Example: Excluded a GPU uuid
+```yaml
+metadata:
+  annotations:
+    nvidia.com/exclude-gpu-uuid: GPU-49aa2e6a-33f3-99dd-e08b-ea4beb0e0d28
+```
+
+> Note: If there are multiple devices separated by commas
+
+## Compute Strategy
+
+Support the use of annotations on nodes or pods to configure the computing strategy to be used: `nvidia.com/vgpu-compute-policy`
+
+Supported policy values：
+
+* `fixed`：Fixed GPU core limit to ensure that task core utilization does not exceed the limit (Default)
+* `balance`：Allow tasks to run beyond the limit when there are still remaining resources on the GPU, improving the overall core utilization of the GPU
+* `none`：No core restriction effect, competing for computing power on its own
+
+> Note: If policies are configured on both Node and Pod, the configuration on Pod takes priority; otherwise, the policy on Node is used.
+
+
+
