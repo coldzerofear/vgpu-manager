@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
       printf("nvmlDeviceGetMemoryInfo_v2 failed\n");
       return -1;
     }
-    printf("device %d nvml memory, total: %ld, used: %ld, free: %ld\n", device_id, memory.total>>20, memory.used>>20, memory.free>>20);
+    printf("device %d nvml memory, total: %llu, used: %llu, free: %llu\n", device_id, memory.total>>20, memory.used>>20, memory.free>>20);
 
     //获得设备句柄
     CUdevice cuDevice;
@@ -63,7 +63,7 @@ int main(int argc, char **argv) {
         return -1;
     }
     size_t used = (total - free);
-    printf("device %d cuda memory, total: %ld, used: %ld, free: %ld\n", device_id, total>>20, used>>20, free>>20);
+    printf("device %d cuda memory, total: %llu, used: %llu, free: %llu\n", device_id, total>>20, used>>20, free>>20);
 
     nvmlProcessInfo_t pids_on_device[1024];
     unsigned int size_on_device = 1024;

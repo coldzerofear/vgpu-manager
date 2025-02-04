@@ -16,8 +16,8 @@ int str2int(char *str) {
 
 // 虚拟显存分配
 CUresult vmm_alloc(void **ptr, size_t size, int device_id) {
-    const CUresult rs;
-    char *err = NULL;
+    CUresult rs;
+    const char *err = NULL;
     // 校验设备是否支持虚拟内存管理
     int deviceSupportsVmm;
     rs = cuDeviceGetAttribute(&deviceSupportsVmm, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, device_id);
@@ -147,7 +147,7 @@ int main(int argc, char **argv)
     int size_mb = str2int(argv[2]);
     
     CUresult rs;
-    char *err = NULL;
+    const char *err = NULL;
     
     //初始化设备
     rs = cuInit(0);
