@@ -143,7 +143,7 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 }
 
 func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
-	assignDevices device.ContainerDevices, node *corev1.Node) *ResourceDataT {
+	assignDevices device.ContainerDevices, memoryOversold bool, node *corev1.Node) *ResourceDataT {
 	major, minor := devManager.GetVersion().CudaVersion.MajorAndMinor()
 	convert48Bytes := func(val string) [48]byte {
 		var byteArray [48]byte
@@ -207,7 +207,11 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 			dev.MemoryLimit = 1
 		}
 		//  int memory_oversold
-		dev.MemoryOversold = 0
+		if memoryOversold {
+			dev.MemoryOversold = 1
+		} else {
+			dev.MemoryOversold = 0
+		}
 		devices[i] = dev
 	}
 	data := &ResourceDataT{
@@ -242,8 +246,8 @@ func GetComputePolicy(pod *corev1.Pod, node *corev1.Node) util.ComputePolicy {
 	}
 }
 
-func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager,
-	pod *corev1.Pod, assignDevices device.ContainerDevices, node *corev1.Node) error {
+func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod *corev1.Pod,
+	assignDevices device.ContainerDevices, memoryOversold bool, node *corev1.Node) error {
 	if _, err := os.Stat(filePath); err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -328,7 +332,11 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager,
 					cDevice.memory_limit = 1
 				}
 				//  int memory_oversold
-				cDevice.memory_oversold = 0
+				if memoryOversold {
+					cDevice.memory_oversold = 1
+				} else {
+					cDevice.memory_oversold = 0
+				}
 				C.memcpy(
 					unsafe.Pointer(&vgpuConfig.devices[i]),
 					unsafe.Pointer(&cDevice),

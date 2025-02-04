@@ -80,4 +80,6 @@ COPY --from=builder /go/src/vgpu-manager/bin/monitor /usr/bin/monitor
 RUN mkdir -p /installed
 COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
 COPY --from=builder /vgpu-controller/build/mem_occupy_tool /installed/mem_occupy_tool
+COPY --from=builder /vgpu-controller/build/mem_managed_tool /installed/mem_managed_tool
+COPY --from=builder /vgpu-controller/build/mem_view_tool /installed/mem_view_tool
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload

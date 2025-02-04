@@ -160,7 +160,7 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			for _, node := range test.nodes {
 				func() {
-					err := WriteVGPUConfigFile(test.path, devManager, test.pod, test.devices, node)
+					err := WriteVGPUConfigFile(test.path, devManager, test.pod, test.devices, false, node)
 					if err != nil {
 						t.Error(err)
 					}
@@ -169,7 +169,7 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 						t.Error(err)
 					}
 					defer syscall.Munmap(data)
-					resourceData2 := NewResourceDataT(devManager, test.pod, test.devices, node)
+					resourceData2 := NewResourceDataT(devManager, test.pod, test.devices, false, node)
 					assert.Equal(t, *resourceData1, *resourceData2)
 					if err = os.RemoveAll(test.path); err != nil {
 						t.Error(err)

@@ -24,8 +24,9 @@ Simplify gRPC within containers, and supporting cgroupv2 container environments.
 ```
 
 ## Find new library functions
+
 ```bash
-./find_new_lib.sh /lib/x86_64-linux-gnu/libcuda.so.535.54.03 /lib/x86_64-linux-gnu/libnvidia-ml.so.535.54.03
+./find_new_lib.sh /lib/x86_64-linux-gnu/libcuda.so.1 /lib/x86_64-linux-gnu/libnvidia-ml.so.1
 ```
 
 ## Usage

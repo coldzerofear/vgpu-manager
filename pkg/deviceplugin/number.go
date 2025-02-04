@@ -555,7 +555,12 @@ func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugina
 		klog.Errorln(err.Error())
 		return resp, err
 	}
-	err = vgpu.WriteVGPUConfigFile(vgpuConfigPath, m.manager, pod, realDevices[index], node)
+	oversold := slices.ContainsFunc(pod.Spec.Containers, func(container corev1.Container) bool {
+		return container.Name == podInfo.ContainerName && slices.ContainsFunc(container.Env, func(env corev1.EnvVar) bool {
+			return env.Name == util.CudaMemoryOversoldEnv && strings.ToUpper(env.Value) == "TRUE"
+		})
+	})
+	err = vgpu.WriteVGPUConfigFile(vgpuConfigPath, m.manager, pod, realDevices[index], oversold, node)
 	if err != nil {
 		klog.Errorln(err.Error())
 	}
