@@ -37,8 +37,22 @@ func (b *nodeBinding) Name() string {
 
 func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingArgs) *extenderv1.ExtenderBindingResult {
 	klog.V(4).InfoS("BindNode", "args", args)
-
-	pod, err := b.kubeClient.CoreV1().Pods(args.PodNamespace).Get(ctx, args.PodName, metav1.GetOptions{})
+	var (
+		binding = &corev1.Binding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      args.PodName,
+				Namespace: args.PodNamespace,
+				UID:       args.PodUID,
+			},
+			Target: corev1.ObjectReference{
+				Kind: "Node",
+				Name: args.Node,
+			},
+		}
+		pod *corev1.Pod
+		err error
+	)
+	pod, err = b.kubeClient.CoreV1().Pods(args.PodNamespace).Get(ctx, args.PodName, metav1.GetOptions{})
 	if err != nil {
 		klog.ErrorS(err, "get target Pod <%s/%s> failed", args.PodNamespace, args.PodName)
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
@@ -58,23 +72,11 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 
 	err = client.PatchPodAllocationAllocating(b.kubeClient, pod)
 	if err != nil {
+		err = fmt.Errorf("patch vgpu metadata failed: %v", err)
 		klog.Errorf("Patch Pod <%s/%s> metadata failed: %v", args.PodNamespace, args.PodName, err)
-		return &extenderv1.ExtenderBindingResult{
-			Error: fmt.Sprintf("Patch vgpu metadata failed: %v", err),
-		}
+		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 
-	binding := &corev1.Binding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      args.PodName,
-			Namespace: args.PodNamespace,
-			UID:       args.PodUID,
-		},
-		Target: corev1.ObjectReference{
-			Kind: "Node",
-			Name: args.Node,
-		},
-	}
 	err = b.kubeClient.CoreV1().Pods(args.PodNamespace).Bind(ctx, binding, metav1.CreateOptions{})
 	if err != nil {
 		klog.Errorf("Pod <%s/%s> binding Node <%s> failed: %v", args.PodNamespace, args.PodName, args.Node, err)

@@ -29,9 +29,8 @@ func (pr *PodResource) start() error {
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, socketPath,
+	conn, err := grpc.DialContext(ctx, socketPath, grpc.WithContextDialer(dial),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(dial),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(defaultPodResourcesMaxSize)))
 	if err != nil {
 		return fmt.Errorf("error dialing socket %s: %v", socketPath, err)

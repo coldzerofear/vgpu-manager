@@ -46,56 +46,51 @@ func Test_DeviceFilter(t *testing.T) {
 	var nodeList []corev1.Node
 	nodeGPUMap := make(map[string]device.NodeDeviceInfos)
 	for i := 0; i < 4; i++ {
-		nodeGPUInfos := device.NodeDeviceInfos{
-			{
-				Id:         0,
-				Uuid:       "GPU-" + uuid.New().String(),
-				Core:       util.HundredCore,
-				Memory:     12288,
-				Type:       "NVIDIA RTX3080Ti",
-				Mig:        false,
-				Number:     10,
-				Numa:       0,
-				Capability: 89,
-				Healthy:    true,
-			},
-			{
-				Id:         1,
-				Uuid:       "GPU-" + uuid.New().String(),
-				Core:       util.HundredCore,
-				Memory:     12288,
-				Type:       "NVIDIA RTX3080Ti",
-				Mig:        false,
-				Number:     10,
-				Numa:       0,
-				Capability: 89,
-				Healthy:    true,
-			},
-			{
-				Id:         2,
-				Uuid:       "GPU-" + uuid.New().String(),
-				Core:       util.HundredCore,
-				Memory:     20480,
-				Type:       "NVIDIA RTX4080Ti",
-				Mig:        false,
-				Number:     10,
-				Numa:       1,
-				Capability: 89,
-				Healthy:    true,
-			},
-			{
-				Id:         3,
-				Uuid:       "GPU-" + uuid.New().String(),
-				Core:       util.HundredCore,
-				Memory:     20480,
-				Type:       "NVIDIA RTX4080Ti",
-				Mig:        false,
-				Number:     10,
-				Numa:       1,
-				Capability: 89,
-				Healthy:    true,
-			},
-		}
+		nodeGPUInfos := device.NodeDeviceInfos{{
+			Id:         0,
+			Uuid:       "GPU-" + uuid.New().String(),
+			Core:       util.HundredCore,
+			Memory:     12288,
+			Type:       "NVIDIA RTX3080Ti",
+			Mig:        false,
+			Number:     10,
+			Numa:       0,
+			Capability: 89,
+			Healthy:    true,
+		}, {
+			Id:         1,
+			Uuid:       "GPU-" + uuid.New().String(),
+			Core:       util.HundredCore,
+			Memory:     12288,
+			Type:       "NVIDIA RTX3080Ti",
+			Mig:        false,
+			Number:     10,
+			Numa:       0,
+			Capability: 89,
+			Healthy:    true,
+		}, {
+			Id:         2,
+			Uuid:       "GPU-" + uuid.New().String(),
+			Core:       util.HundredCore,
+			Memory:     20480,
+			Type:       "NVIDIA RTX4080Ti",
+			Mig:        false,
+			Number:     10,
+			Numa:       1,
+			Capability: 89,
+			Healthy:    true,
+		}, {
+			Id:         3,
+			Uuid:       "GPU-" + uuid.New().String(),
+			Core:       util.HundredCore,
+			Memory:     20480,
+			Type:       "NVIDIA RTX4080Ti",
+			Mig:        false,
+			Number:     10,
+			Numa:       1,
+			Capability: 89,
+			Healthy:    true,
+		}}
 		registerNode, _ := nodeGPUInfos.Encode()
 		heartbateTime, _ := metav1.NowMicro().MarshalText()
 		node := corev1.Node{
@@ -201,6 +196,47 @@ func Test_DeviceFilter(t *testing.T) {
 			},
 			nodeName: "",
 			err:      fmt.Errorf("pod pod-3 had been predicated"),
+		}, {
+			name: "example5: single container, multiple devices",
+			containers: []corev1.Container{
+				{
+					Name: "cont1",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
+							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 10)),
+							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+						},
+					},
+				},
+			},
+			nodeName: nodeList[0].Name,
+			err:      nil,
+		}, {
+			name: "example6: multiple containers, multiple devices",
+			containers: []corev1.Container{
+				{
+					Name: "cont1",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
+							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 10)),
+							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+						},
+					},
+				}, {
+					Name: "cont2",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
+							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 10)),
+							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+						},
+					},
+				},
+			},
+			nodeName: nodeList[0].Name,
+			err:      nil,
 		},
 	}
 	for i, testCase := range testCases {

@@ -185,10 +185,7 @@ func (pods PodsOrderedByPredicateTime) Swap(i, j int) {
 
 func GetPredicateTimeOfPod(pod corev1.Pod) uint64 {
 	assumeTimeStr, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation)
-	if !ok {
-		return math.MaxUint64
-	}
-	if len(assumeTimeStr) > PodAnnotationMaxLength {
+	if !ok || len(assumeTimeStr) > PodAnnotationMaxLength {
 		return math.MaxUint64
 	}
 	predicateTime, err := strconv.ParseUint(assumeTimeStr, 10, 64)

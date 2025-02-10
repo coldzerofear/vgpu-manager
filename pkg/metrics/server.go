@@ -5,17 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/julienschmidt/httprouter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 )
 
@@ -58,23 +52,6 @@ func (s *server) Stop() {
 		klog.Errorf("Error while stopping metrics service: %s", err.Error())
 	}
 	s.httpServer = nil
-}
-
-func GetNodeInformer(factory informers.SharedInformerFactory, nodeName string) cache.SharedIndexInformer {
-	return factory.InformerFor(&corev1.Node{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
-		watcher := cache.NewListWatchFromClient(k.CoreV1().RESTClient(), "nodes",
-			corev1.NamespaceAll, fields.OneTermEqualSelector("metadata.name", nodeName))
-		return cache.NewSharedIndexInformer(watcher, &corev1.Node{}, d, cache.Indexers{})
-	})
-}
-
-func GetPodInformer(factory informers.SharedInformerFactory, nodeName string) cache.SharedIndexInformer {
-	return factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
-		watcher := cache.NewListWatchFromClient(k.CoreV1().RESTClient(), "pods",
-			corev1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", nodeName))
-		indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
-		return cache.NewSharedIndexInformer(watcher, &corev1.Pod{}, d, indexers)
-	})
 }
 
 func NewServer(registry *prometheus.Registry, port int) *server {

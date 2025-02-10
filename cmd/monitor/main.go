@@ -14,6 +14,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -54,13 +55,13 @@ func main() {
 
 	nodeInformer := metrics.GetNodeInformer(factory, nodeConfig.NodeName())
 	podInformer := metrics.GetPodInformer(factory, nodeConfig.NodeName())
-	containerLister := metrics.NewContainerLister(podInformer)
+	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
+	podLister := listerv1.NewPodLister(podInformer.GetIndexer())
+
+	containerLister := metrics.NewContainerLister(
+		deviceplugin.ManagerDirectoryPath, nodeConfig.NodeName(), podLister)
 	nodeCollector := metrics.NewNodeGPUCollector(
-		nodeConfig.NodeName(),
-		listerv1.NewNodeLister(nodeInformer.GetIndexer()),
-		listerv1.NewPodLister(podInformer.GetIndexer()),
-		containerLister,
-	)
+		nodeConfig.NodeName(), nodeLister, podLister, containerLister)
 	server := metrics.NewServer(nodeCollector.Registry(), opt.ServerBindProt)
 
 	ctx, cancelCtx := context.WithCancel(context.Background())

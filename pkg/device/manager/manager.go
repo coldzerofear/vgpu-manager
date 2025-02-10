@@ -440,7 +440,6 @@ func (m *DeviceManager) checkHealth() {
 
 		e, ret := eventSet.Wait(5000)
 		if ret == nvml.ERROR_TIMEOUT {
-			klog.V(5).Infoln("waiting for event timeout")
 			continue
 		}
 		if ret != nvml.SUCCESS {

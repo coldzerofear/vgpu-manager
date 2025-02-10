@@ -3,15 +3,12 @@ package deviceplugin
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
@@ -19,7 +16,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,189 +28,58 @@ import (
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
-type NumberDevicePlugin struct {
-	manager      *manager.DeviceManager
-	resourceName string
-	socket       string
-	kubeClient   *kubernetes.Clientset
-	podResource  *client.PodResource
-	cache        cache.Cache
-
-	server *grpc.Server
-	health chan *pluginapi.Device
-	stop   chan struct{}
+type vnumberDevicePlugin struct {
+	base        *baseDevicePlugin
+	kubeClient  *kubernetes.Clientset
+	podResource *client.PodResource
+	cache       cache.Cache
 }
 
-var _ DevicePlugin = &NumberDevicePlugin{}
+var _ DevicePlugin = &vnumberDevicePlugin{}
 
-// NewNumberDevicePlugin returns an initialized NumberDevicePlugin
-func NewNumberDevicePlugin(resourceName string, manager *manager.DeviceManager,
-	socket string, kubeClient *kubernetes.Clientset, cache cache.Cache) DevicePlugin {
-	return &NumberDevicePlugin{
-		manager:      manager,
-		resourceName: resourceName,
-		socket:       socket,
-		kubeClient:   kubeClient,
-		podResource:  client.NewPodResource(),
-		cache:        cache,
+// NewVNumberDevicePlugin returns an initialized vnumberDevicePlugin
+func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.DeviceManager,
+	kubeClient *kubernetes.Clientset, cache cache.Cache) DevicePlugin {
 
-		// These will be reinitialized every
-		// time the plugin server is restarted.
-		server: nil,
-		health: nil,
-		stop:   nil,
+	return &vnumberDevicePlugin{
+		base:        newBaseDevicePlugin(resourceName, socket, manager),
+		kubeClient:  kubeClient,
+		podResource: client.NewPodResource(),
+		cache:       cache,
 	}
 }
 
-func (m *NumberDevicePlugin) Name() string {
-	return "number-plugin"
+func (m *vnumberDevicePlugin) Name() string {
+	return "vnumber-plugin"
 }
 
-func (m *NumberDevicePlugin) initialize() {
-	m.server = grpc.NewServer([]grpc.ServerOption{}...)
-	m.health = make(chan *pluginapi.Device)
-	m.stop = make(chan struct{})
-}
-
-func (m *NumberDevicePlugin) cleanup() {
-	close(m.stop)
-	m.server = nil
-	m.health = nil
-	m.stop = nil
-}
-
-// Start starts the gRPC server, registers the device plugin with the Kubelet,
-// and starts the device healthchecks.
-func (m *NumberDevicePlugin) Start() error {
-	m.initialize()
-
-	if err := m.serve(); err != nil {
-		klog.Infof("Could not start device plugin for '%s': %s", m.resourceName, err)
-		m.cleanup()
-		return err
-	}
-
-	klog.Infof("Starting to serve '%s' on %s", m.resourceName, m.socket)
-
-	if err := m.register(); err != nil {
-		klog.Infof("Could not register device plugin: %v", err)
-		_ = m.Stop()
-		return err
-	}
-
-	klog.Infof("Registered device plugin for '%s' with Kubelet", m.resourceName)
-
-	m.manager.AddNotifyChannel(m.Name(), m.health)
-
-	return nil
+// Start starts the gRPC server, registers the device plugin with the Kubelet.
+func (m *vnumberDevicePlugin) Start() error {
+	return m.base.Start(m.Name(), m)
 }
 
 // Stop stops the gRPC server.
-func (m *NumberDevicePlugin) Stop() error {
-	if m == nil || m.server == nil {
-		return nil
-	}
-	klog.Infof("Stopping to serve '%s' on %s", m.resourceName, m.socket)
-
-	m.manager.RemoveNotifyChannel(m.Name())
-
-	m.server.Stop()
-	err := os.Remove(m.socket)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	m.cleanup()
-	return nil
-}
-
-// serve starts the gRPC server of the device plugin.
-func (m *NumberDevicePlugin) serve() error {
-	_ = os.Remove(m.socket)
-	sock, err := net.Listen("unix", m.socket)
-	if err != nil {
-		return err
-	}
-
-	pluginapi.RegisterDevicePluginServer(m.server, m)
-
-	go func() {
-		lastCrashTime := time.Now()
-		restartCount := 0
-		for {
-			klog.Infof("Starting GRPC server for '%s'", m.resourceName)
-			if err = m.server.Serve(sock); err == nil {
-				break
-			}
-			klog.Errorf("GRPC server for '%s' crashed with error: %v", m.resourceName, err)
-
-			// restart if it has not been too often
-			// i.e. if server has crashed more than 5 times and it didn't last more than one hour each time
-			if restartCount > 5 {
-				// quit
-				klog.Fatalf("GRPC server for '%s' has repeatedly crashed recently. Quitting", m.resourceName)
-			}
-
-			timeSinceLastCrash := time.Since(lastCrashTime).Seconds()
-			lastCrashTime = time.Now()
-			if timeSinceLastCrash > 3600 {
-				// it has been one hour since the last crash.. reset the count
-				// to reflect on the frequency
-				restartCount = 1
-			} else {
-				restartCount++
-			}
-		}
-	}()
-
-	// Wait for server to start by launching a blocking connexion
-	conn, err := dial(m.socket, 5*time.Second)
-	if err != nil {
-		return err
-	}
-	_ = conn.Close()
-
-	return nil
-}
-
-// register the device plugin for the given resourceName with Kubelet.
-func (m *NumberDevicePlugin) register() error {
-	conn, err := dial(pluginapi.KubeletSocket, 5*time.Second)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	cli := pluginapi.NewRegistrationClient(conn)
-	reqt := &pluginapi.RegisterRequest{
-		Version:      pluginapi.Version,
-		Endpoint:     path.Base(m.socket),
-		ResourceName: m.resourceName,
-		Options:      &pluginapi.DevicePluginOptions{},
-	}
-
-	_, err = cli.Register(context.Background(), reqt)
-	return err
+func (m *vnumberDevicePlugin) Stop() error {
+	return m.base.Stop(m.Name())
 }
 
 // GetDevicePluginOptions returns options to be communicated with Device Manager.
-func (m *NumberDevicePlugin) GetDevicePluginOptions(context.Context, *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
-	return &pluginapi.DevicePluginOptions{
-		PreStartRequired: true,
-	}, nil
+func (m *vnumberDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
+	return &pluginapi.DevicePluginOptions{PreStartRequired: true}, nil
 }
 
 // ListAndWatch returns a stream of List of Devices
 // Whenever a Device state change or a Device disappears,
 // ListAndWatch returns the new list.
-func (m *NumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
+func (m *vnumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 		klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
 	}
-	stopCh := m.stop
+	stopCh := m.base.stop
 	for {
 		select {
-		case d := <-m.health:
-			klog.Infof("'%s' device marked unhealthy: %s", m.resourceName, d.ID)
+		case d := <-m.base.health:
+			klog.Infof("'%s' device marked unhealthy: %s", m.base.resourceName, d.ID)
 			if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 				klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
 			}
@@ -225,7 +90,7 @@ func (m *NumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.Device
 }
 
 // GetPreferredAllocation returns the preferred allocation from the set of devices specified in the request.
-func (m *NumberDevicePlugin) GetPreferredAllocation(context.Context, *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
+func (m *vnumberDevicePlugin) GetPreferredAllocation(_ context.Context, _ *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
 	return &pluginapi.PreferredAllocationResponse{}, nil
 }
 
@@ -264,7 +129,7 @@ func GetDeviceMinorMap(gpus []manager.GPUDevice) map[string]int {
 // Allocate is called during container creation so that the Device
 // Plugin can run device specific operations and instruct Kubelet
 // of the steps to make the Device available in the container.
-func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
+func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
 	klog.V(4).Infoln("Allocate", req.GetContainerRequests())
 	resp = &pluginapi.AllocateResponse{}
 	var (
@@ -290,7 +155,7 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 		}
 	}()
 
-	activePods, err = client.GetActivePodsOnNode(ctx, m.kubeClient, m.manager.GetNodeConfig().NodeName())
+	activePods, err = client.GetActivePodsOnNode(ctx, m.kubeClient, m.base.manager.GetNodeConfig().NodeName())
 	if err != nil {
 		klog.Errorf("failed to retrieve the active pods of the current node: %v", err)
 		return resp, err
@@ -301,9 +166,10 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 		klog.Errorln(err.Error())
 		return resp, err
 	}
-
+	klog.V(4).Infof("Current allocated Pod <%s/%s> Uid <%s>",
+		currentPod.Namespace, currentPod.Name, currentPod.UID)
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
-	devMinorMap := GetDeviceMinorMap(m.manager.GetDevices())
+	devMinorMap := GetDeviceMinorMap(m.base.manager.GetDevices())
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIDs())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -316,6 +182,7 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 			klog.Errorln(err.Error())
 			return resp, err
 		}
+		klog.V(4).Infof("Current allocated container is <%s>", assignDevs.Name)
 		var (
 			deviceIds []string
 			envMap    = make(map[string]string)
@@ -430,14 +297,14 @@ func (m *NumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloca
 }
 
 // GetActiveVGPUPodsOnNode Get the vgpu pods on the node
-func (m *NumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
+func (m *vnumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
 	podList := corev1.PodList{}
 	err := m.cache.List(context.Background(), &podList)
 	if err != nil {
 		klog.ErrorS(err, "GetActiveVGPUPodsOnNode failed")
 	}
 	activePods := make(map[string]*corev1.Pod)
-	nodeName := m.manager.GetNodeConfig().NodeName()
+	nodeName := m.base.manager.GetNodeConfig().NodeName()
 	for i, pod := range podList.Items {
 		if pod.Spec.NodeName != nodeName {
 			continue
@@ -451,9 +318,9 @@ func (m *NumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
 }
 
 // getCurrentPodInfoByCheckpoint find relevant pod information for devicesIDs in kubelet checkpoint
-func (m *NumberDevicePlugin) getCurrentPodInfoByCheckpoint(devicesIDs []string) (*client.PodInfo, error) {
+func (m *vnumberDevicePlugin) getCurrentPodInfoByCheckpoint(devicesIDs []string) (*client.PodInfo, error) {
 	klog.V(3).Infoln("Try get DevicePlugin checkpoint data")
-	pluginPath := m.manager.GetNodeConfig().DevicePluginPath()
+	pluginPath := m.base.manager.GetNodeConfig().DevicePluginPath()
 	cp, err := GetCheckpointData(pluginPath)
 	if err != nil {
 		return nil, err
@@ -478,7 +345,7 @@ func (m *NumberDevicePlugin) getCurrentPodInfoByCheckpoint(devicesIDs []string) 
 	return nil, fmt.Errorf("pod not found")
 }
 
-func (m *NumberDevicePlugin) getCurrentPodInfo(devicesIDs []string) (*client.PodInfo, error) {
+func (m *vnumberDevicePlugin) getCurrentPodInfo(devicesIDs []string) (*client.PodInfo, error) {
 	podResources, err := m.podResource.ListPodResource()
 	if err != nil {
 		klog.Errorf(err.Error())
@@ -496,7 +363,7 @@ func (m *NumberDevicePlugin) getCurrentPodInfo(devicesIDs []string) (*client.Pod
 // PreStartContainer is called, if indicated by Device Plugin during registeration phase,
 // before each container start. Device plugin can run device specific operations
 // such as resetting the device before making devices available to the container.
-func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *pluginapi.PreStartContainerRequest) (resp *pluginapi.PreStartContainerResponse, err error) {
+func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *pluginapi.PreStartContainerRequest) (resp *pluginapi.PreStartContainerResponse, err error) {
 	klog.V(4).Infoln("PreStartContainer", req.GetDevicesIDs())
 	resp = &pluginapi.PreStartContainerResponse{}
 	defer func() {
@@ -509,7 +376,7 @@ func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugina
 	var (
 		node     *corev1.Node
 		pod      *corev1.Pod
-		nodeName = m.manager.GetNodeConfig().NodeName()
+		nodeName = m.base.manager.GetNodeConfig().NodeName()
 	)
 	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		// Node does not require timeliness, search from API server cache.
@@ -560,16 +427,16 @@ func (m *NumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugina
 			return env.Name == util.CudaMemoryOversoldEnv && strings.ToUpper(env.Value) == "TRUE"
 		})
 	})
-	err = vgpu.WriteVGPUConfigFile(vgpuConfigPath, m.manager, pod, realDevices[index], oversold, node)
+	err = vgpu.WriteVGPUConfigFile(vgpuConfigPath, m.base.manager, pod, realDevices[index], oversold, node)
 	if err != nil {
 		klog.Errorln(err.Error())
 	}
 	return resp, err
 }
 
-func (m *NumberDevicePlugin) Devices() []*pluginapi.Device {
+func (m *vnumberDevicePlugin) Devices() []*pluginapi.Device {
 	var devices []*pluginapi.Device
-	for _, gpuDevice := range m.manager.GetDevices() {
+	for _, gpuDevice := range m.base.manager.GetDevices() {
 		if gpuDevice.Mig { // skip MIG device
 			continue
 		}

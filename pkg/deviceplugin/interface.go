@@ -4,16 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gomodules.xyz/jsonpatch/v2"
-	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -38,30 +35,27 @@ type DevicePlugin interface {
 func InitDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
 	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) []DevicePlugin {
 	socket := filepath.Join(opt.DevicePluginPath, "vgpu-number.sock")
-	plugins := []DevicePlugin{
-		NewNumberDevicePlugin(util.VGPUNumberResourceName,
-			devManager, socket, kubeClient, clusterManager.GetCache()),
-	}
+	plugins := []DevicePlugin{NewVNumberDevicePlugin(util.VGPUNumberResourceName,
+		socket, devManager, kubeClient, clusterManager.GetCache())}
 
 	var deleteResources []string
+
 	if opt.EnableCorePlugin {
 		socket = filepath.Join(opt.DevicePluginPath, "vgpu-core.sock")
-		corePlugin := NewCoreDevicePlugin(
-			util.VGPUCoreResourceName, devManager, socket,
-		)
-		plugins = append(plugins, corePlugin)
+		vcorePlugin := NewVCoreDevicePlugin(util.VGPUCoreResourceName, socket, devManager)
+		plugins = append(plugins, vcorePlugin)
 	} else {
 		deleteResources = append(deleteResources, util.VGPUCoreResourceName)
 	}
+
 	if opt.EnableMemoryPlugin {
 		socket = filepath.Join(opt.DevicePluginPath, "vgpu-memory.sock")
-		memoryPlugin := NewMemoryDevicePlugin(
-			util.VGPUMemoryResourceName, devManager, socket,
-		)
-		plugins = append(plugins, memoryPlugin)
+		vmemoryPlugin := NewVMemoryDevicePlugin(util.VGPUMemoryResourceName, socket, devManager)
+		plugins = append(plugins, vmemoryPlugin)
 	} else {
 		deleteResources = append(deleteResources, util.VGPUMemoryResourceName)
 	}
+
 	cleanupNodeResources(kubeClient, opt.NodeName, deleteResources)
 	return plugins
 }
@@ -93,18 +87,5 @@ func cleanupNodeResources(kubeClient *kubernetes.Clientset, nodeName string, res
 		if err != nil {
 			klog.V(3).Infof("Clear node <%s> resource %+v failure: %v", nodeName, resources, err)
 		}
-	}
-}
-
-// dial establishes the gRPC communication with the registered device plugin.
-func dial(unixSocketPath string, timeout time.Duration) (*grpc.ClientConn, error) {
-	if c, err := grpc.Dial(unixSocketPath, grpc.WithInsecure(), grpc.WithBlock(), grpc.WithTimeout(timeout),
-		grpc.WithDialer(func(addr string, timeout time.Duration) (net.Conn, error) {
-			return net.DialTimeout("unix", addr, timeout)
-		}),
-	); err != nil {
-		return nil, err
-	} else {
-		return c, nil
 	}
 }

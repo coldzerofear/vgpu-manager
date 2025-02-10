@@ -94,7 +94,7 @@ func PatchPodAllocationAllocating(kubeClient kubernetes.Interface, pod *corev1.P
 	predicateTime := fmt.Sprintf("%d", uint64(math.MaxUint64))
 	if util.IsVGPUResourcePod(pod) {
 		assignedPhase = util.AssignPhaseAllocating
-		predicateTime = fmt.Sprintf("%d", metav1.NowMicro().UnixMicro())
+		predicateTime = fmt.Sprintf("%d", metav1.NowMicro().UnixNano())
 	}
 	patchData := PatchMetadata{
 		Labels:      map[string]string{util.PodAssignedPhaseLabel: string(assignedPhase)},

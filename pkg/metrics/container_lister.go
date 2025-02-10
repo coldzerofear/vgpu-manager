@@ -17,7 +17,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	listerv1 "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 )
 
@@ -40,6 +39,8 @@ func GetContainerKey(uid types.UID, containerName string) ContainerKey {
 
 type ContainerLister struct {
 	mutex      sync.RWMutex
+	basePath   string
+	nodeName   string
 	podLister  listerv1.PodLister
 	containers map[ContainerKey]*ResourceConfig
 }
@@ -69,9 +70,13 @@ func (c *ContainerLister) GetResourceData(key ContainerKey) (*vgpu.ResourceDataT
 	}
 }
 
-func collectContainerKey(pods []*corev1.Pod) sets.Set[ContainerKey] {
+func (c *ContainerLister) collectContainerKey(pods []*corev1.Pod) sets.Set[ContainerKey] {
 	setKeys := sets.New[ContainerKey]()
 	for _, pod := range pods {
+		// Filter scheduling node
+		if pod.Spec.NodeName != c.nodeName {
+			continue
+		}
 		for _, container := range pod.Spec.Containers {
 			key := GetContainerKey(pod.UID, container.Name)
 			setKeys.Insert(key)
@@ -81,7 +86,7 @@ func collectContainerKey(pods []*corev1.Pod) sets.Set[ContainerKey] {
 }
 
 func (c *ContainerLister) update() error {
-	entries, err := os.ReadDir(deviceplugin.ManagerDirectoryPath)
+	entries, err := os.ReadDir(c.basePath)
 	if err != nil {
 		return err
 	}
@@ -89,12 +94,12 @@ func (c *ContainerLister) update() error {
 	if err != nil {
 		return err
 	}
-	keySet := collectContainerKey(pods)
+	keySet := c.collectContainerKey(pods)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		filePath := filepath.Join(deviceplugin.ManagerDirectoryPath, entry.Name())
+		filePath := filepath.Join(c.basePath, entry.Name())
 		fileInfo, err := os.Stat(filePath)
 		if err != nil {
 			klog.Warningf("File path <%s> detection failed: %v", filePath, err)
@@ -136,9 +141,11 @@ func (c *ContainerLister) Start(stopChan <-chan struct{}) {
 	klog.Infof("Container lister Stopped.")
 }
 
-func NewContainerLister(podInformer cache.SharedIndexInformer) *ContainerLister {
+func NewContainerLister(basePath, nodeName string, podLister listerv1.PodLister) *ContainerLister {
 	return &ContainerLister{
-		podLister:  listerv1.NewPodLister(podInformer.GetIndexer()),
+		basePath:   basePath,
+		nodeName:   nodeName,
+		podLister:  podLister,
 		containers: make(map[ContainerKey]*ResourceConfig),
 	}
 }
