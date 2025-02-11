@@ -1,11 +1,11 @@
 package options
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
+	"github.com/spf13/pflag"
 )
 
 type Options struct {
@@ -41,18 +41,18 @@ func NewOptions() *Options {
 
 var version bool
 
-func (o *Options) InitFlags(fs *flag.FlagSet) {
+func (o *Options) InitFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
 	fs.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
-	fs.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver (default: 20.0)")
-	fs.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver (default: 30)")
+	fs.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver. (default: 20.0)")
+	fs.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver. (default: 30)")
 	fs.StringVar(&o.NodeName, "node-name", o.NodeName, "If non-empty, will use this string as identification instead of the actual node name.")
 	fs.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (example: cgroupfs | systemd)")
 	fs.StringVar(&o.NodeConfigPath, "node-config-path", o.NodeConfigPath, "Specify the node configuration path to apply differentiated configuration to the node.")
-	fs.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens (default: 3456)")
-	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens (default disable service)")
-	fs.BoolVar(&version, "version", false, "Print version information and quit")
-	flag.Parse()
+	fs.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens. (default: 3456)")
+	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
+	fs.BoolVar(&version, "version", false, "Print version information and quit.")
+	pflag.Parse()
 }
 
 func (o *Options) PrintAndExitIfRequested() {

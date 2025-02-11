@@ -22,8 +22,14 @@ func InsertAnnotation(obj metav1.Object, k, v string) {
 	obj.GetAnnotations()[k] = v
 }
 
-func HasAnnotation(obj metav1.Object, anno string) (string, bool) {
-	val, ok := "", false
+func HasLabel(obj metav1.Object, label string) (val string, ok bool) {
+	if obj.GetLabels() != nil {
+		val, ok = obj.GetLabels()[label]
+	}
+	return val, ok
+}
+
+func HasAnnotation(obj metav1.Object, anno string) (val string, ok bool) {
 	if obj.GetAnnotations() != nil {
 		val, ok = obj.GetAnnotations()[anno]
 	}

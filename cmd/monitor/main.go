@@ -17,6 +17,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -27,7 +28,8 @@ import (
 func main() {
 	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
-	opt.InitFlags(flag.CommandLine)
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
+	opt.InitFlags(pflag.CommandLine)
 	defer klog.Flush()
 	opt.PrintAndExitIfRequested()
 

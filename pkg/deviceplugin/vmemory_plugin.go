@@ -91,7 +91,7 @@ func (m *vmemoryDevicePlugin) Devices() []*pluginapi.Device {
 		}
 		config := m.base.manager.GetNodeConfig()
 		for i := 0; i < gpuDevice.Memory/config.DeviceMemoryFactor(); i++ {
-			devId := fmt.Sprintf("memory-%d-%d", gpuDevice.Id, i)
+			devId := fmt.Sprintf("vmemory-%d-%d", gpuDevice.Id, i)
 			health := pluginapi.Healthy
 			if !gpuDevice.Healthy {
 				health = pluginapi.Unhealthy

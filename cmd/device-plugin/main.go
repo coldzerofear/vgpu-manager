@@ -13,10 +13,12 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/controller"
+	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/fsnotify/fsnotify"
+	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	toolscache "k8s.io/client-go/tools/cache"
@@ -30,9 +32,11 @@ import (
 func main() {
 	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
-	opt.InitFlags(flag.CommandLine)
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
+	opt.InitFlags(pflag.CommandLine)
 	defer klog.Flush()
 	opt.PrintAndExitIfRequested()
+
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {
 		klog.Fatalf("Initialization of k8s client configuration failed: %v", err)
@@ -68,6 +72,7 @@ func main() {
 	defer func() {
 		_ = watcher.Close()
 		cancelFunc()
+		time.Sleep(5 * time.Second)
 	}()
 	klog.V(3).Info("Starting OS watcher.")
 	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
@@ -91,7 +96,10 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create cluster manager failed: %v", err)
 	}
-	err = controller.RegistryControllerToManager(manager, nodeConfig)
+	controllerSwitch := map[string]bool{
+		reschedule.Name: opt.FeatureGate.Enabled(options.Reschedule),
+	}
+	err = controller.RegistryControllerToManager(manager, nodeConfig, controllerSwitch)
 	if err != nil {
 		klog.Fatalf("Registry controller to manager failed: %v", err)
 	}

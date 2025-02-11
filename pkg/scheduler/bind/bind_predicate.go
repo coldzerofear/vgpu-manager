@@ -70,8 +70,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 
-	err = client.PatchPodAllocationAllocating(b.kubeClient, pod)
-	if err != nil {
+	if err = client.PatchPodAllocationAllocating(b.kubeClient, pod); err != nil {
 		err = fmt.Errorf("patch vgpu metadata failed: %v", err)
 		klog.Errorf("Patch Pod <%s/%s> metadata failed: %v", args.PodNamespace, args.PodName, err)
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}

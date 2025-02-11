@@ -1,11 +1,12 @@
 package options
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
+	"github.com/spf13/pflag"
+	"k8s.io/component-base/featuregate"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
@@ -22,11 +23,10 @@ type Options struct {
 	DeviceMemoryFactor  int
 	DeviceCoresScaling  float64
 	NodeConfigPath      string
-	EnableMemoryPlugin  bool
-	EnableCorePlugin    bool
 	ExcludeDevices      string
 	DevicePluginPath    string
 	PprofBindPort       int
+	FeatureGate         featuregate.MutableFeatureGate
 }
 
 const (
@@ -38,9 +38,29 @@ const (
 	defaultDeviceMemoryScaling = 1.0
 	defaultDeviceCoresScaling  = 1.0
 	defaultPprofBindPort       = 0
+
+	// CorePlugin VCoreDevicePlugin feature gate will report the virtual cores of the node device to kubelet.
+	CorePlugin featuregate.Feature = "CorePlugin"
+	// MemoryPlugin VMemoryDevicePlugin feature gate will report the virtual memory of the node device to kubelet.
+	MemoryPlugin featuregate.Feature = "MemoryPlugin"
+	// Reschedule feature gate will attempt to reschedule Pods that meet the criteria.
+	Reschedule featuregate.Feature = "Reschedule"
+)
+
+var (
+	version             bool
+	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
+		CorePlugin:   {Default: false, PreRelease: featuregate.Alpha},
+		MemoryPlugin: {Default: false, PreRelease: featuregate.Alpha},
+		Reschedule:   {Default: false, PreRelease: featuregate.Alpha},
+	}
 )
 
 func NewOptions() *Options {
+	featureGate := featuregate.NewFeatureGate()
+	if err := featureGate.Add(defaultFeatureGates); err != nil {
+		panic(fmt.Sprintf("Failed to add feature gates: %v", err))
+	}
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -52,12 +72,11 @@ func NewOptions() *Options {
 		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
 		DevicePluginPath:    pluginapi.DevicePluginPath,
 		PprofBindPort:       defaultPprofBindPort,
+		FeatureGate:         featureGate,
 	}
 }
 
-var version bool
-
-func (o *Options) InitFlags(fs *flag.FlagSet) {
+func (o *Options) InitFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
 	fs.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
 	fs.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver. (default: 20.0)")
@@ -69,14 +88,12 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	fs.Float64Var(&o.DeviceMemoryScaling, "device-memory-scaling", o.DeviceMemoryScaling, "The ratio for NVIDIA device memory scaling. (default: 1.0)")
 	fs.IntVar(&o.DeviceMemoryFactor, "device-memory-factor", o.DeviceMemoryFactor, "The default gpu memory block size is 1MB.")
 	fs.StringVar(&o.NodeConfigPath, "node-config-path", o.NodeConfigPath, "Specify the node configuration path to apply differentiated configuration to the node.")
-	fs.BoolVar(&o.EnableMemoryPlugin, "enable-memory-plugin", o.EnableMemoryPlugin, "Enable memory plugin will report the virtual memory of the node device to kubelet. (default: false)")
-	fs.BoolVar(&o.EnableCorePlugin, "enable-core-plugin", o.EnableCorePlugin, "Enable core plugin will report the virtual cores of the node device to kubelet. (default: false)")
 	fs.StringVar(&o.ExcludeDevices, "exclude-devices", "", "Specify the GPU IDs that need to be excluded. (example: 0,1,2 | 0-2)")
 	fs.StringVar(&o.DevicePluginPath, "device-plugin-path", o.DevicePluginPath, "The path for kubelet receive device plugin registration.")
-	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens (default disable service)")
-
+	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
 	fs.BoolVar(&version, "version", false, "Print version information and quit.")
-	flag.Parse()
+	o.FeatureGate.AddFlag(fs)
+	pflag.Parse()
 }
 
 func (o *Options) PrintAndExitIfRequested() {

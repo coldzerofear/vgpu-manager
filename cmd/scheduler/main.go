@@ -21,6 +21,7 @@ import (
 	tlsconfig "github.com/grepplabs/cert-source/config"
 	tlsserverconfig "github.com/grepplabs/cert-source/tls/server/config"
 	"github.com/julienschmidt/httprouter"
+	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -42,7 +43,8 @@ func init() {
 func main() {
 	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
-	opt.InitFlags(flag.CommandLine)
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
+	opt.InitFlags(pflag.CommandLine)
 	defer klog.Flush()
 	opt.PrintAndExitIfRequested()
 
