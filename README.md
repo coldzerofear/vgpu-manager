@@ -17,6 +17,8 @@ The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager
 - [x] Provide GPU monitoring indicators
 - [x] Idle computing power of dynamic balancing equipment
 - [x] GPU device uses virtual memory after exceeding memory limit
+- [ ] Rescheduling device allocation failed pod
+- [ ] Webhook dynamic admission, fixing some non-standard pod configurations
 - [ ] Compatible with hot swappable devices and expansion capabilities
 - [ ] Compatible with Volcano Batch Scheduler
 
@@ -193,11 +195,11 @@ metadata:
 
 Support the use of annotations on nodes or pods to configure the computing strategy to be used: `nvidia.com/vgpu-compute-policy`
 
-Supported policy values：
+Supported policy values:
 
-* `fixed`：Fixed GPU core limit to ensure that task core utilization does not exceed the limit (Default)
-* `balance`：Allow tasks to run beyond the limit when there are still remaining resources on the GPU, improving the overall core utilization of the GPU
-* `none`：No core restriction effect, competing for computing power on its own
+* `fixed`: Fixed GPU core limit to ensure that task core utilization does not exceed the limit (Default strategy)
+* `balance`: Allow tasks to run beyond the limit when there are still remaining resources on the GPU, improving the overall core utilization of the GPU
+* `none`: No core restriction effect, competing for computing power on its own
 
 > Note: If policies are configured on both Node and Pod, the configuration on Pod takes priority; otherwise, the policy on Node is used.
 
@@ -232,3 +234,43 @@ spec:
 ```
 
 > Note: Only in the above example, defining environment variables in the env of the container is valid.
+
+## Feature Gate
+
+The device plugin of vgpu-manager has implemented some special functions that require adding the command-line parameter `--feature-gates` to enable.
+
+### CorePlugin
+
+Opening the core plugin will report the number of virtual cores to the kubelet node.
+
+Use the command `--feature-gates=CorePlugin=true` to open the feature.
+
+After opening the feature gate, check the status of the corresponding node to see the registered resource name `nvidia.com/vgpu-core`.
+
+```yaml
+status:
+  allocatable:
+    nvidia.com/vgpu-core: "200"
+  capacity:
+    nvidia.com/vgpu-core: "200"
+```
+
+> Tips: It may be useful in scenarios where node resource constraints such as `ResourceQuota` are required.
+
+### MemoryPlugin
+
+Opening the memory plugin will report virtual memory to the kubelet node.
+
+Use the command `--feature-gates=MemoryPlugin=true` to open the feature.
+
+After opening the feature gate, check the status of the corresponding node to see the registered resource name `nvidia.com/vgpu-memory`.
+
+```yaml
+status:
+  allocatable:
+    nvidia.com/vgpu-memory: "8192"
+  capacity:
+    nvidia.com/vgpu-memory: "8192"
+```
+
+> Tips: It may be useful in scenarios where node resource constraints such as `ResourceQuota` are required.
