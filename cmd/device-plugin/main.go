@@ -27,6 +27,7 @@ import (
 	rtcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	rtclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
+	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 func main() {
@@ -44,11 +45,12 @@ func main() {
 	mutationContentType := client.MutationContentType(
 		"application/vnd.kubernetes.protobuf,application/json",
 		"application/json")
-	kubeConfig, err := client.GetKubeConfig(mutationContentType, client.MutationQPS(float32(opt.QPS), opt.Burst))
+	mutationQPS := client.MutationQPS(float32(opt.QPS), opt.Burst)
+	kubeConfig, err := client.GetKubeConfig(mutationContentType, mutationQPS)
 	if err != nil {
 		klog.Fatalf("Init k8s restConfig failed: %v", err)
 	}
-	kubeClient, err := client.GetClientSet(mutationContentType, client.MutationQPS(float32(opt.QPS), opt.Burst))
+	kubeClient, err := client.GetClientSet(mutationContentType, mutationQPS)
 	if err != nil {
 		klog.Fatalf("Create k8s kubeClient failed: %v", err)
 	}
@@ -78,7 +80,7 @@ func main() {
 	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	manager, err := ctrm.New(kubeConfig, ctrm.Options{
-		HealthProbeBindAddress: "", // disable health probe
+		HealthProbeBindAddress: "0", // disable health probe
 		PprofBindAddress:       fmt.Sprintf("%d", opt.PprofBindPort),
 		Cache: rtcache.Options{
 			// trim managedFields to reduce cache memory usage.
@@ -91,7 +93,8 @@ func main() {
 				},
 			},
 		},
-		Logger: klogr.New(),
+		Metrics: metrics.Options{BindAddress: "0"}, // disable metrics service
+		Logger:  klogr.New(),
 	})
 	if err != nil {
 		klog.Fatalf("Create cluster manager failed: %v", err)

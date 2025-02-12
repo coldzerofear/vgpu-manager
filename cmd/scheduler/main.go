@@ -55,7 +55,8 @@ func main() {
 	mutationContentType := client.MutationContentType(
 		"application/vnd.kubernetes.protobuf,application/json",
 		"application/json")
-	kubeClient, err := client.GetClientSet(mutationContentType, client.MutationQPS(float32(opt.QPS), opt.Burst))
+	mutationQPS := client.MutationQPS(float32(opt.QPS), opt.Burst)
+	kubeClient, err := client.GetClientSet(mutationContentType, mutationQPS)
 	if err != nil {
 		klog.Fatalf("Create k8s kubeClient failed: %v", err)
 	}

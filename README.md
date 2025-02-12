@@ -17,7 +17,7 @@ The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager
 - [x] Provide GPU monitoring indicators
 - [x] Idle computing power of dynamic balancing equipment
 - [x] GPU device uses virtual memory after exceeding memory limit
-- [ ] Rescheduling device allocation failed pod
+- [x] Rescheduling device allocation failed pod
 - [ ] Webhook dynamic admission, fixing some non-standard pod configurations
 - [ ] Compatible with hot swappable devices and expansion capabilities
 - [ ] Compatible with Volcano Batch Scheduler
@@ -274,3 +274,12 @@ status:
 ```
 
 > Tips: It may be useful in scenarios where node resource constraints such as `ResourceQuota` are required.
+
+### Reschedule
+
+Opening the reschedule will rearrange nodes and devices for certain pods that have failed allocation.
+
+Use the command `--feature-gates=Reschedule=true` to open the feature.
+
+> Tips: In scenarios where multiple Pods are created and scheduled in parallel, device plugins may experience allocation errors. 
+> Enabling this feature can restore the erroneous Pods.
