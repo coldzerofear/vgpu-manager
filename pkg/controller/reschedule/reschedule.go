@@ -2,6 +2,7 @@ package reschedule
 
 import (
 	"context"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -25,11 +26,13 @@ type RescheduleController struct {
 }
 
 func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfig) reconcile.Reconciler {
+	client := manager.GetClient()
+	recorder := manager.GetEventRecorderFor("re-schedule")
 	return &RescheduleController{
 		nodeName: config.NodeName(),
-		client:   manager.GetClient(),
-		recovery: NewRecoveryController(manager.GetClient()),
-		recorder: manager.GetEventRecorderFor("re-schedule"),
+		client:   client,
+		recorder: recorder,
+		recovery: NewRecoveryController(client, recorder),
 	}
 }
 
@@ -73,7 +76,7 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 				return reconcile.Result{}, err
 			}
 			// Push the pod into the recovery controller.
-			r.recovery.AddRecovery(pod)
+			r.recovery.AddRecovery(pod, 20*time.Millisecond)
 		}
 		if shouldDeletePod {
 			r.recorder.Event(pod, corev1.EventTypeWarning, "Evict",

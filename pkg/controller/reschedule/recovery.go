@@ -7,7 +7,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,20 +18,22 @@ import (
 )
 
 type RecoveryController struct {
-	client client.Client
-	queue  workqueue.TypedRateLimitingInterface[*corev1.Pod]
+	client   client.Client
+	recorder record.EventRecorder
+	queue    workqueue.TypedRateLimitingInterface[*corev1.Pod]
 }
 
-func NewRecoveryController(cli client.Client) *RecoveryController {
+func NewRecoveryController(client client.Client, recorder record.EventRecorder) *RecoveryController {
 	return &RecoveryController{
-		client: cli,
+		client:   client,
+		recorder: recorder,
 		queue: workqueue.NewTypedRateLimitingQueue[*corev1.Pod](
 			workqueue.DefaultTypedControllerRateLimiter[*corev1.Pod]()),
 	}
 }
 
-func (r *RecoveryController) AddRecovery(pod *corev1.Pod) {
-	r.queue.Add(pod)
+func (r *RecoveryController) AddRecovery(pod *corev1.Pod, d time.Duration) {
+	r.queue.AddAfter(pod, d)
 }
 
 var _ manager.Runnable = &RecoveryController{}
@@ -118,13 +122,16 @@ func (r *RecoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod
 	case errors.IsNotFound(err):
 		newPod := pod.DeepCopy()
 		CleanupMetadata(newPod)
+		newPod.UID = ""
 		newPod.DeletionTimestamp = nil
 		newPod.ResourceVersion = ""
-		newPod.UID = ""
 		newPod.Spec.NodeName = ""
 		newPod.Status = corev1.PodStatus{}
 		// Create a recovered pod
 		err = r.client.Create(ctx, newPod, &client.CreateOptions{})
+		if err == nil {
+			r.recorder.Event(newPod, corev1.EventTypeNormal, "Recovery", "Pod recovery successful")
+		}
 		if errors.IsAlreadyExists(err) {
 			err = nil
 		}
@@ -136,7 +143,19 @@ func (r *RecoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod
 		// The pod has not been marked for deletion and is considered to have been restored.
 		return reconcile.Result{}, nil
 	default:
-		// The pod has not been fully GCed yet. Wait for 5 seconds and retry
-		return reconcile.Result{RequeueAfter: 5 * time.Second}, nil
+		nowTime := metav1.Now().Time
+		deledTime := currentPod.DeletionTimestamp.Time
+		if currentPod.DeletionGracePeriodSeconds != nil {
+			deledTime = deledTime.Add(time.Duration(*currentPod.DeletionGracePeriodSeconds) * time.Second)
+		}
+		requeueAfter := time.Duration(0)
+		remaining := deledTime.Sub(nowTime)
+		if remaining > 5*time.Second {
+			requeueAfter = 5 * time.Second
+		} else if remaining > 0 {
+			requeueAfter = remaining
+		}
+		// Ensure that the pod has been GC before the next retry.
+		return reconcile.Result{RequeueAfter: requeueAfter}, nil
 	}
 }
