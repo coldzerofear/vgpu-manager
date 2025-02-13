@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -19,6 +20,18 @@ const (
 	defaultPodResourcesMaxSize = 1024 * 1024 * 16
 	callTimeout                = 2 * time.Second
 )
+
+// PodResource implements the get pod resource info
+type PodResource struct {
+	sync.Mutex
+	conn   *grpc.ClientConn
+	client v1alpha1.PodResourcesListerClient
+}
+
+// NewPodResource returns an initialized PodResource
+func NewPodResource() *PodResource {
+	return &PodResource{}
+}
 
 // start starts the gRPC server, registers the pod resource with the Kubelet
 func (pr *PodResource) start() error {
@@ -48,6 +61,9 @@ func dial(ctx context.Context, addr string) (net.Conn, error) {
 
 // ListPodResource call pod resource List interface, get pod resource info
 func (pr *PodResource) ListPodResource() (*v1alpha1.ListPodResourcesResponse, error) {
+	pr.Lock()
+	defer pr.Unlock()
+
 	if err := pr.start(); err != nil {
 		return nil, err
 	}
@@ -114,15 +130,4 @@ func (pr *PodResource) stop() {
 		pr.conn = nil
 		pr.client = nil
 	}
-}
-
-// PodResource implements the get pod resource info
-type PodResource struct {
-	conn   *grpc.ClientConn
-	client v1alpha1.PodResourcesListerClient
-}
-
-// NewPodResource returns an initialized PodResource
-func NewPodResource() *PodResource {
-	return &PodResource{}
 }
