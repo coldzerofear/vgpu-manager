@@ -1,0 +1,13 @@
+{{- if .Values.devicePlugin.enable -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vgpu-manager.device-plugin" . }}-config
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+data:
+  nodeConfig.json: |
+    {{- .Values.devicePlugin.nodeConfig.json | nindent 4 }}
+{{- end }}

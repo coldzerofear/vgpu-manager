@@ -1,0 +1,145 @@
+# Default values for vgpu-manager.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# This is to override the chart name.
+nameOverride: ""
+fullnameOverride: ""
+# This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
+imagePullSecrets: []
+
+# Deployment configuration of the scheduler section
+scheduler:
+  # Should the scheduler be deployed? (default: true)
+  enable: true
+  # pod labels
+  labels: {}
+  # pod annotations
+  annotations: {}
+  # Number of deployed replicas (default: 1)
+  replicas: 1
+  # Name of deployed scheduler (default : vgpu-scheduler)
+  schedulerName: "vgpu-scheduler"
+  nodeSelector: {}
+  tolerations: []
+  terminationGracePeriodSeconds: 30
+  kubeScheduler:
+    image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler
+    imageTag: "v1.28.15"
+    imagePullPolicy: IfNotPresent
+    commands:
+      logLevel: 3
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+  schedulerExtender:
+    image: coldzerofear/vgpu-manager
+    imageTag: "latest"
+    imagePullPolicy: IfNotPresent
+    commands:
+      kubeApiQps: 20.0
+      kubeApiBurst: 30
+      # scheduler-extender service port (default: 3456)
+      serverBindPort: 3456
+      # The pprof service port used for debugging: (default disable: 0)
+      pprofBindPort: 0
+      logLevel: 3
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+# Deployment configuration of the deviceplugin section
+devicePlugin:
+  # Should the deviceplugin be deployed? (default: true)
+  enable: true
+  # pod labels
+  labels: {}
+  # pod annotations
+  annotations:
+    # This annotation is deprecated. Kept here for backward compatibility
+    # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
+    scheduler.alpha.kubernetes.io/critical-pod: ""
+  # Configure the image used by the device plugin
+  image: coldzerofear/vgpu-manager
+  imageTag: "latest"
+  imagePullPolicy: IfNotPresent
+  # Container deployment using host network mode (default: false)
+  hostNetwork: false
+  # Grace period for container recycling (default: 30s)
+  terminationGracePeriodSeconds: 30
+  # Node labels to be deployed
+  nodeSelector:
+    vgpu-manager-enable: enable
+  tolerations:
+    # This toleration is deprecated. Kept here for backward compatibility
+    # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
+    - key: CriticalAddonsOnly
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+    - effect: NoSchedule
+      operator: Exists
+  # Define container security context
+  securityContext:
+    #　If the container encounters the following errors, try using privileged mode
+    # Failed to initialize NVML: Unknown Error
+    # privileged: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+      add: ["SYS_ADMIN"]
+  runtimeClassName: ""
+  devicePlugin:
+    commands:
+      kubeApiQps: 20.0
+      kubeApiBurst: 30
+      # The number for NVIDIA device split. (default: 10)
+      deviceSplitCount: 10
+      # The ratio for NVIDIA device cores scaling. (default: 1.0)
+      deviceCoresScaling: 1.0
+      # The ratio for NVIDIA device memory scaling. (default: 1.0)
+      deviceMemoryScaling: 1.0
+      # The default gpu memory block size is 1MB. (default: 1)
+      deviceMemoryFactor: 1
+      # The pprof service port used for debugging: (default disable: 0)
+      pprofBindPort: 0
+      # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
+      cgroupDriver: ""
+      featureGates: "CorePlugin=false,MemoryPlugin=false,Reschedule=false"
+      logLevel: 3
+    resources:
+      requests:
+        cpu: 20m
+        memory: 128Mi
+  deviceMonitor:
+    commands:
+      kubeApiQps: 20.0
+      kubeApiBurst: 30
+      # Monitoring service port (default: 3456)
+      serverBindPort: 3456
+      # The pprof service port used for debugging: (default disable: 0)
+      pprofBindPort: 0
+      # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
+      cgroupDriver: ""
+      logLevel: 3
+    resources:
+      requests:
+        cpu: 20m
+        memory: 128Mi
+
+  # Define node differentiation configuration files for device plugins
+  nodeConfig:
+    json: | 
+      [
+        {
+          "nodeName": "demo0",
+          "cgroupDriver": "systemd",
+          "deviceSplitCount": 10,
+          "deviceMemoryScaling": 1,
+          "deviceMemoryFactor": 1,
+          "deviceCoresScaling": 1,
+          "excludeDevices": "0-1"
+        }
+      ]

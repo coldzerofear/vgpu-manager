@@ -1,0 +1,25 @@
+{{- if .Values.devicePlugin.enable -}}
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "vgpu-manager.device-plugin" . }}:role
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get","list","watch","update","patch"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create","get","list","watch","update","patch","delete"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get","update","patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create","patch","update"]
+{{- end }}

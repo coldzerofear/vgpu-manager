@@ -147,14 +147,13 @@ func (f *gpuFilter) heartbeatFilter(_ *corev1.Pod, nodes []corev1.Node) ([]corev
 		failedNodesMap = make(extenderv1.FailedNodesMap) // Failed nodes
 	)
 	for _, node := range nodes {
-		val, _ := util.HasAnnotation(&node, util.NodeDeviceHeartbeatAnnotation)
-		if len(val) == 0 {
+		heartbeat, ok := util.HasAnnotation(&node, util.NodeDeviceHeartbeatAnnotation)
+		if !ok || len(heartbeat) == 0 {
 			failedNodesMap[node.Name] = "node has no heartbeat"
 			continue
 		}
 		heartbeatTime := metav1.MicroTime{}
-		err := heartbeatTime.UnmarshalText([]byte(val))
-		if err != nil {
+		if err := heartbeatTime.UnmarshalText([]byte(heartbeat)); err != nil {
 			failedNodesMap[node.Name] = "node heartbeat time is not a standard timestamp"
 			continue
 		}
@@ -177,51 +176,45 @@ func (f *gpuFilter) heartbeatFilter(_ *corev1.Pod, nodes []corev1.Node) ([]corev
 }
 
 func (f *gpuFilter) CheckDeviceRequest(pod *corev1.Pod) error {
-	if err := checkCoreRequest(pod); err != nil {
-		f.recorder.Event(pod, corev1.EventTypeWarning, "ResourceError", err.Error())
-		return err
-	}
-	if err := checkNumberRequest(pod); err != nil {
-		f.recorder.Event(pod, corev1.EventTypeWarning, "ResourceError", err.Error())
-		return err
-	}
-	return nil
-}
-
-func checkNumberRequest(pod *corev1.Pod) error {
-	for i, c := range pod.Spec.Containers {
-		number := util.GetResourceOfContainer(&pod.Spec.Containers[i], util.VGPUNumberResourceName)
-		if number > util.MaxDeviceNumber {
-			return fmt.Errorf("container %s requests vGPU number exceeding limit", c.Name)
+	for _, container := range pod.Spec.Containers {
+		if err := checkCoreRequest(&container); err != nil {
+			f.recorder.Event(pod, corev1.EventTypeWarning, "ResourceError", err.Error())
+			return err
+		}
+		if err := checkNumberRequest(&container); err != nil {
+			f.recorder.Event(pod, corev1.EventTypeWarning, "ResourceError", err.Error())
+			return err
 		}
 	}
 	return nil
 }
 
-func checkCoreRequest(pod *corev1.Pod) error {
-	for i, c := range pod.Spec.Containers {
-		core := util.GetResourceOfContainer(&pod.Spec.Containers[i], util.VGPUCoreResourceName)
-		if core > util.HundredCore {
-			return fmt.Errorf("container %s requests vGPU core exceeding limit", c.Name)
-		}
+func checkNumberRequest(container *corev1.Container) error {
+	if util.GetResourceOfContainer(container, util.VGPUNumberResourceName) > util.MaxDeviceNumber {
+		return fmt.Errorf("container %s requests vGPU number exceeding limit", container.Name)
+	}
+	return nil
+}
+
+func checkCoreRequest(container *corev1.Container) error {
+	if util.GetResourceOfContainer(container, util.VGPUCoreResourceName) > util.HundredCore {
+		return fmt.Errorf("container %s requests vGPU core exceeding limit", container.Name)
 	}
 	return nil
 }
 
 func IsScheduled(pod *corev1.Pod) bool {
-	nodeName, _ := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
-	if len(nodeName) == 0 {
+	nodeName, ok := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
+	if !ok || len(nodeName) == 0 {
 		return false
 	}
 	preAlloc, ok := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
-	if !ok {
+	if !ok || len(preAlloc) == 0 {
 		return false
 	}
 	podDevices := device.PodDevices{}
-	if err := podDevices.UnmarshalText(preAlloc); err != nil {
-		return false
-	}
-	return true
+	err := podDevices.UnmarshalText(preAlloc)
+	return err == nil
 }
 
 // deviceFilter will choose one and only one node fullfil the request,

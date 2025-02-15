@@ -2,7 +2,7 @@
 
 Cuda driver API interception library, implementing hard resource limitation.
 
-Based on [vcuda-controller](https://github.com/tkestack/vcuda-controller) and [HAMi-coer](https://github.com/Project-HAMi/HAMi-core) transformation.
+Based on [vcuda-controller](https://github.com/tkestack/vcuda-controller) and [HAMi-core](https://github.com/Project-HAMi/HAMi-core) transformation.
 
 Simplify gRPC within containers, and supporting cgroupv2 container environments.
 

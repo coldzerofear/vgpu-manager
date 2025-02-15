@@ -1,0 +1,101 @@
+{{- if .Values.scheduler.enable -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.scheduler.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+      {{- include "vgpu-manager.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+        {{- include "vgpu-manager.selectorLabels" . | nindent 8 }}
+        {{- with .Values.scheduler.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if .Values.scheduler.annotations }}
+      annotations: {{ toYaml .Values.scheduler.annotations | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "vgpu-manager.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "vgpu-manager.scheduler" . }}
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: {{ .Values.scheduler.terminationGracePeriodSeconds }}
+      restartPolicy: Always
+      {{- if .Values.scheduler.nodeSelector }}
+      nodeSelector: {{ toYaml .Values.scheduler.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if .Values.scheduler.tolerations }}
+      tolerations: {{ toYaml .Values.scheduler.tolerations | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: kube-scheduler
+          image: {{ .Values.scheduler.kubeScheduler.image }}:{{ .Values.scheduler.kubeScheduler.imageTag }}
+          imagePullPolicy: {{ .Values.scheduler.kubeScheduler.imagePullPolicy | quote }}
+          command:
+            - kube-scheduler
+            {{- if ge (.Values.scheduler.kubeScheduler.imageTag | substr 3 5 | atoi) 22 }}
+            - --config=/config/config.yaml
+            {{- else }}
+            - --policy-config-file=/config/config.json
+            - --scheduler-name={{ .Values.scheduler.schedulerName }}
+            {{- end }}
+            - --leader-elect=true
+            - --leader-elect-resource-name={{ .Values.scheduler.schedulerName }}
+            - --leader-elect-resource-namespace={{ .Release.Namespace }}
+            - --v={{ .Values.scheduler.kubeScheduler.commands.logLevel }}
+          resources: {{ toYaml .Values.scheduler.kubeScheduler.resources | nindent 12 }}
+          volumeMounts:
+            - name: scheduler-config
+              mountPath: /config
+          livenessProbe:
+            failureThreshold: 8
+            httpGet:
+              path: /healthz
+              port: 10259
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 15
+        - name: scheduler-extender
+          image: {{ .Values.scheduler.schedulerExtender.image }}:{{ .Values.scheduler.schedulerExtender.imageTag }}
+          imagePullPolicy: {{ .Values.scheduler.schedulerExtender.imagePullPolicy | quote }}
+          command:
+            - scheduler
+            - --kube-api-qps={{ .Values.scheduler.schedulerExtender.commands.kubeApiQps }}
+            - --kube-api-burst={{ .Values.scheduler.schedulerExtender.commands.kubeApiBurst }}
+            - --server-bind-port={{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+            - --pprof-bind-port={{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
+            - --v={{ .Values.scheduler.schedulerExtender.commands.logLevel }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+          resources: {{ toYaml .Values.scheduler.schedulerExtender.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3456
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: scheduler-config
+          configMap:
+            name: {{ include "vgpu-manager.scheduler" . }}-config
+{{- end }}

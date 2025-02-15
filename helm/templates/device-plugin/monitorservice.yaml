@@ -1,0 +1,20 @@
+{{- if .Values.devicePlugin.enable -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vgpu-manager.device-plugin" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    {{- include "vgpu-manager.selectorLabels" . | nindent 4 }}
+{{- end }}

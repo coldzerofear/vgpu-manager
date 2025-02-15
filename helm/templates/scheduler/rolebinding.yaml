@@ -1,0 +1,82 @@
+{{- if .Values.scheduler.enable -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}-as-kube-scheduler
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vgpu-manager.scheduler" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  kind: ClusterRole
+  name: system:kube-scheduler
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}-as-volume-scheduler
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vgpu-manager.scheduler" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  kind: ClusterRole
+  name: system:volume-scheduler
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}-as-daemon-set-controller
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vgpu-manager.scheduler" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  kind: ClusterRole
+  name: system:controller:daemon-set-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}-as-node-role
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vgpu-manager.scheduler" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "vgpu-manager.scheduler" . }}:node-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}-as-leader-election-role
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vgpu-manager.scheduler" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  kind: Role
+  name: {{ include "vgpu-manager.scheduler" . }}:leader-election-role
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

@@ -1,0 +1,164 @@
+{{- if .Values.devicePlugin.enable -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "vgpu-manager.device-plugin" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+      {{- include "vgpu-manager.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+        {{- include "vgpu-manager.selectorLabels" . | nindent 8 }}
+        {{- with .Values.devicePlugin.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if .Values.devicePlugin.annotations }}
+      annotations: {{ toYaml .Values.devicePlugin.annotations | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- if .Values.devicePlugin.runtimeClassName }}
+      runtimeClassName: {{ .Values.devicePlugin.runtimeClassName }}
+      {{- end }}
+      {{- include "vgpu-manager.imagePullSecrets" . | nindent 6 }}
+      priorityClassName: system-node-critical
+      {{- if .Values.devicePlugin.nodeSelector }}
+      nodeSelector: {{ toYaml .Values.devicePlugin.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if .Values.devicePlugin.tolerations }}
+      tolerations: {{ toYaml .Values.devicePlugin.tolerations | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "vgpu-manager.device-plugin" . }}
+      terminationGracePeriodSeconds: {{ .Values.devicePlugin.terminationGracePeriodSeconds }}
+      hostPID: true
+      hostNetwork: {{ .Values.devicePlugin.hostNetwork }}
+      restartPolicy: Always
+      initContainers:
+        - name: install
+          command: ["/bin/bash", "-c", "cp /installed/* /etc/vgpu-manager/"]
+          image: {{ .Values.devicePlugin.image }}:{{ .Values.devicePlugin.imageTag }}
+          imagePullPolicy: {{ .Values.devicePlugin.imagePullPolicy | quote }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 15Mi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: manager
+              mountPath: /etc/vgpu-manager
+              mountPropagation: Bidirectional
+      containers:
+        - name: device-plugin
+          image: {{ .Values.devicePlugin.image }}:{{ .Values.devicePlugin.imageTag }}
+          imagePullPolicy: {{ .Values.devicePlugin.imagePullPolicy | quote }}
+          command:
+            - deviceplugin
+            - --kube-api-qps={{ .Values.devicePlugin.devicePlugin.commands.kubeApiQps }}
+            - --kube-api-burst={{ .Values.devicePlugin.devicePlugin.commands.kubeApiBurst }}
+            - --device-split-count={{ .Values.devicePlugin.devicePlugin.commands.deviceSplitCount }}
+            - --device-cores-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceCoresScaling }}
+            - --device-memory-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling }}
+            - --device-memory-factor={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor }}
+            - --pprof-bind-port={{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
+            - --cgroup-driver={{ .Values.devicePlugin.devicePlugin.commands.cgroupDriver }}
+            - --feature-gates={{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
+            - --node-config-path=/config/nodeConfig.json
+            - --v={{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_MIG_MONITOR_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+          securityContext: {{ toYaml .Values.devicePlugin.securityContext | nindent 12 }}
+          resources: {{ toYaml .Values.devicePlugin.devicePlugin.resources | nindent 12 }}
+          volumeMounts:
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+            - name: manager
+              mountPath: /etc/vgpu-manager
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+            - name: node-config
+              mountPath: /config
+        - name: device-monitor
+          image: {{ .Values.devicePlugin.image }}:{{ .Values.devicePlugin.imageTag }}
+          imagePullPolicy: {{ .Values.devicePlugin.imagePullPolicy | quote }}
+          command:
+            - monitor
+            - --kube-api-qps={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiQps }}
+            - --kube-api-burst={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiBurst }}
+            - --server-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+            - --pprof-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
+            - --cgroup-driver={{ .Values.devicePlugin.deviceMonitor.commands.cgroupDriver }}
+            - --node-config-path=/config/nodeConfig.json
+            - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_MIG_MONITOR_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+          securityContext: {{ toYaml .Values.devicePlugin.securityContext | nindent 12 }}
+          resources: {{ toYaml .Values.devicePlugin.deviceMonitor.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+            - name: manager
+              mountPath: /etc/vgpu-manager
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+            - name: node-config
+              mountPath: /config
+      volumes:
+        - name: kubelet
+          hostPath:
+            path: /var/lib/kubelet
+        - name: manager
+          hostPath:
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: node-config
+          configMap:
+            name: {{ include "vgpu-manager.device-plugin" . }}-config
+{{- end }}

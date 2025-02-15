@@ -1,0 +1,32 @@
+{{- if .Values.scheduler.enable -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}:leader-election-role
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get","list","watch","create","update","delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get","list","watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}:node-role
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get","list","watch","update","patch"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch","update"]
+{{- end }}

@@ -47,32 +47,57 @@ make docker-build docker-push IMG=<tag>
 
 precondition: `nvidia-container-toolkit` must be installed and correctly configure the default container runtime
 
-* deploy
+Label the node where the device plugin will be deployed: `vgpu-manager-enable=enable`
+
+```shell
+kubectl label node <nodename> vgpu-manager-enable=enable
+```
+
+### Deploy directly using YAML files
 
 ```bash
 kubectl apply -f deploy/vgpu-manager-scheduler.yaml
 kubectl apply -f deploy/vgpu-manager-deviceplugin.yaml
 ```
 
-* uninstall
+Note that the scheduler version needs to be modified according to the cluster version, Only supports scheduler versions v1.25.x and above.
+
+```yaml
+      containers:
+        - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
+          imagePullPolicy: IfNotPresent
+          name: scheduler
+```
+
+### Helm charts deployment
+
+Modify the configuration in values.yaml according to the node environment and requirements
+
+Use the following command for deployment
+
+```shell
+helm install vgpu-manager ./helm/ -n kube-system
+```
+
+Verify the installation of `vgpu-manager-device-plugin` and `vgpu-manager-scheduler`
+
+```shell
+kubectl get pods -n kube-system
+```
+
+## Uninstall
+
+### Uninstall directly according to YAML
 
 ```shell
 kubectl delete -f deploy/vgpu-manager-scheduler.yaml
 kubectl delete -f deploy/vgpu-manager-deviceplugin.yaml
 ```
 
-* label nodes with `vgpu-manager-enable=enable`
+### Helm charts uninstallation
 
 ```shell
-kubectl label node <nodename> vgpu-manager-enable=enable
-```
-
-Note that the scheduler version needs to be modified according to the cluster version
-```yaml
-      containers:
-        - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
-          imagePullPolicy: IfNotPresent
-          name: scheduler
+helm uninstall vgpu-manager -n kube-system 
 ```
 
 ## Example of use
