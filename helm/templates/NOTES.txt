@@ -1,1 +1,32 @@
+{{- if .Values.scheduler.enable }}
+vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed successfully!
+  - replica  count:  {{ .Values.scheduler.replicas }}
+  - scheduler name:  {{ .Values.scheduler.schedulerName }}
+  - server    port:  {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+  - pprof     port:  {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
+  - logger   level:  {{ .Values.scheduler.schedulerExtender.commands.logLevel }}
+{{- end }}
+
+{{- if .Values.devicePlugin.enable }}
+vgpu-manager {{ .Chart.AppVersion }} device-plugin has been deployed successfully!
+device-plugin:
+  - memory  factor:  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor }}
+  - pprof     port:  {{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
+  - logger   level:  {{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
+  - feature  gates:  {{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
+device-monitor:
+  - server    port:  {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+  - pprof     port:  {{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
+  - logger   level:  {{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
+{{- end }}
+
+{{- if .Values.webhook.enable }}
+vgpu-manager {{ .Chart.AppVersion }} webhook component has been deployed successfully!
+  - replica  count:  {{ .Values.webhook.replicas }}
+  - server    port:  {{ .Values.webhook.commands.serverBindPort }}
+  - pprof     port:  {{ .Values.webhook.commands.pprofBindPort }}
+  - cert directory:  {{ .Values.webhook.commands.certDir }}
+  - logger   level:  {{ .Values.webhook.commands.logLevel }}
+{{- end }}
+
 ** Please be patient while the chart is being deployed **

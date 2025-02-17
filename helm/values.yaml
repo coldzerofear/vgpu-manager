@@ -148,9 +148,9 @@ devicePlugin:
         }
       ]
 
-# Installing the Webhook service requires installing the Cert Manager component in advance to provide a self signed certificate for the service.
+# Installing the Webhook service requires installing the Cert-Manager component in advance to provide a self signed certificate for the service.
 webhook:
-  # Should the deviceplugin be deployed? (default: false)
+  # Should the webhook be deployed? (default: false)
   enable: false
   # Certificate validity period. (default: one year)
   certDuration: 8760h
