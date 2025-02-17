@@ -22,10 +22,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
@@ -96,19 +96,19 @@ func (m *vnumberDevicePlugin) GetPreferredAllocation(_ context.Context, _ *plugi
 }
 
 const (
-	HostProcPath             = "/proc"
-	ManagerDirectoryPath     = "/etc/vgpu-manager"
-	ContainerConfigPath      = ManagerDirectoryPath + "/config"
-	ContainerProcPath        = ManagerDirectoryPath + "/host_proc"
-	ContainerCgroupPath      = ManagerDirectoryPath + "/host_cgroup"
-	LdPreLoadFileName        = "ld.so.preload"
-	ContainerPreloadPath     = "/etc/" + LdPreLoadFileName
-	HostPreloadPath          = ManagerDirectoryPath + "/" + LdPreLoadFileName
-	VGPUControlFileName      = "libvgpu-control.so"
-	ContainerVGPUControlPath = ManagerDirectoryPath + "/driver/" + VGPUControlFileName
-	HostVGPUControlPath      = ManagerDirectoryPath + "/" + VGPUControlFileName
-	VGPUConfigFileName       = "vgpu.config"
-	DeviceListFileName       = "devices.json"
+	HostProcDirectoryPath    = "/proc"
+	ContManagerDirectoryPath = "/etc/vgpu-manager"
+	ContConfigDirectoryPath  = ContManagerDirectoryPath + "/config"
+	ContProcDirectoryPath    = ContManagerDirectoryPath + "/host_proc"
+	ContCGroupDirectoryPath  = ContManagerDirectoryPath + "/host_cgroup"
+
+	LdPreLoadFileName       = "ld.so.preload"
+	ContPreLoadFilePath     = "/etc/" + LdPreLoadFileName
+	VGPUControlFileName     = "libvgpu-control.so"
+	ContVGPUControlFilePath = ContManagerDirectoryPath + "/driver/" + VGPUControlFileName
+
+	VGPUConfigFileName = "vgpu.config"
+	DeviceListFileName = "devices.json"
 
 	NvidiaDeviceFilePrefix = "/dev/nvidia"
 	NvidiaCTLFilePath      = "/dev/nvidiactl"
@@ -116,8 +116,18 @@ const (
 	NvidiaUVMToolsFilePath = "/dev/nvidia-uvm-tools"
 )
 
+var (
+	HostManagerDirectoryPath = os.Getenv("HOST_MANAGER_DIR")
+	HostPreLoadFilePath      = HostManagerDirectoryPath + "/" + LdPreLoadFileName
+	HostVGPUControlFilePath  = HostManagerDirectoryPath + "/" + VGPUControlFileName
+)
+
 func GetHostManagerDirectoryPath(podUID types.UID, containerName string) string {
-	return fmt.Sprintf("%s/%s_%s", ManagerDirectoryPath, string(podUID), containerName)
+	return fmt.Sprintf("%s/%s_%s", HostManagerDirectoryPath, string(podUID), containerName)
+}
+
+func GetContManagerDirectoryPath(podUID types.UID, containerName string) string {
+	return fmt.Sprintf("%s/%s_%s", ContManagerDirectoryPath, string(podUID), containerName)
 }
 
 func GetDeviceMinorMap(gpus []manager.GPUDevice) map[string]int {
@@ -235,16 +245,16 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			Permissions:   "rw",
 		})
 		mounts = append(mounts, &pluginapi.Mount{ // mount /proc dir
-			ContainerPath: ContainerProcPath,
-			HostPath:      HostProcPath,
+			ContainerPath: ContProcDirectoryPath,
+			HostPath:      HostProcDirectoryPath,
 			ReadOnly:      true,
 		}, &pluginapi.Mount{ // mount ld_preload file
-			ContainerPath: ContainerPreloadPath,
-			HostPath:      HostPreloadPath,
+			ContainerPath: ContPreLoadFilePath,
+			HostPath:      HostPreLoadFilePath,
 			ReadOnly:      true,
 		}, &pluginapi.Mount{ // mount libvgpu-control.so file
-			ContainerPath: ContainerVGPUControlPath,
-			HostPath:      HostVGPUControlPath,
+			ContainerPath: ContVGPUControlFilePath,
+			HostPath:      HostVGPUControlFilePath,
 			ReadOnly:      true,
 		})
 		// The cgroup path that requires additional pod mounting in the cgroupv2 container environment.
@@ -263,25 +273,27 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 				return resp, err
 			}
 			mounts = append(mounts, &pluginapi.Mount{
-				ContainerPath: ContainerCgroupPath,
+				ContainerPath: ContCGroupDirectoryPath,
 				HostPath:      cgroupFullPath,
 				ReadOnly:      true,
 			})
 		}
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>
-		hostManagerDirectory := GetHostManagerDirectoryPath(currentPod.UID, assignDevs.Name)
-		_ = os.MkdirAll(hostManagerDirectory, 0777)
-		_ = os.Chmod(hostManagerDirectory, 0777)
+		contManagerDirectory := GetContManagerDirectoryPath(currentPod.UID, assignDevs.Name)
+		_ = os.MkdirAll(contManagerDirectory, 0777)
+		_ = os.Chmod(contManagerDirectory, 0777)
 		jsonBytes, _ := json.Marshal(containerRequest.GetDevicesIDs())
-		filePath := filepath.Join(hostManagerDirectory, DeviceListFileName)
+		filePath := filepath.Join(contManagerDirectory, DeviceListFileName)
 		if err = os.WriteFile(filePath, jsonBytes, 0664); err != nil {
 			err = fmt.Errorf("failed to write %s file: %v", DeviceListFileName, err)
 			klog.V(3).ErrorS(err, "", "pod",
 				fmt.Sprintf("%s/%s", currentPod.Namespace, currentPod.Name))
 			return resp, err
 		}
+		// <host_manager_dir>/<pod-uid>_<cont-name>
+		hostManagerDirectory := GetHostManagerDirectoryPath(currentPod.UID, assignDevs.Name)
 		mounts = append(mounts, &pluginapi.Mount{ // mount vgpu.config file
-			ContainerPath: ContainerConfigPath,
+			ContainerPath: ContConfigDirectoryPath,
 			HostPath:      hostManagerDirectory,
 			ReadOnly:      true,
 		})
@@ -422,8 +434,8 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		klog.Errorf("failed to get current pod <%s/%s>: %v", podInfo.PodNamespace, podInfo.PodName, err)
 		return resp, err
 	}
-	managerDirectory := GetHostManagerDirectoryPath(pod.UID, podInfo.ContainerName)
-	devicesFilePath := filepath.Join(managerDirectory, DeviceListFileName)
+	contManagerDirectory := GetContManagerDirectoryPath(pod.UID, podInfo.ContainerName)
+	devicesFilePath := filepath.Join(contManagerDirectory, DeviceListFileName)
 	if deviBytes, err = os.ReadFile(devicesFilePath); err != nil {
 		err = fmt.Errorf("failed to read %s file: %v", DeviceListFileName, err)
 		klog.V(3).ErrorS(err, "", "pod",
@@ -445,7 +457,7 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		return resp, err
 	}
 
-	vgpuConfigPath := filepath.Join(managerDirectory, VGPUConfigFileName)
+	vgpuConfigPath := filepath.Join(contManagerDirectory, VGPUConfigFileName)
 	klog.V(4).Infof("Pod <%s/%s> container <%s> vgpu config path is <%s>",
 		pod.Namespace, pod.Name, podInfo.ContainerName, vgpuConfigPath)
 	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)

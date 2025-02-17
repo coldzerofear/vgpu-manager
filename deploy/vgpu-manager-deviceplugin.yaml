@@ -148,6 +148,8 @@ spec:
                   fieldPath: spec.nodeName
 #            - name: CGROUP_DRIVER
 #              value: systemd
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: NVIDIA_VISIBLE_DEVICES
               value: all
             - name: NVIDIA_MIG_MONITOR_DEVICES

@@ -62,7 +62,7 @@ func main() {
 	podLister := listerv1.NewPodLister(podInformer.GetIndexer())
 
 	containerLister := metrics.NewContainerLister(
-		deviceplugin.ManagerDirectoryPath, nodeConfig.NodeName(), podLister)
+		deviceplugin.ContManagerDirectoryPath, nodeConfig.NodeName(), podLister)
 	nodeCollector := metrics.NewNodeGPUCollector(
 		nodeConfig.NodeName(), nodeLister, podLister, containerLister)
 	server := metrics.NewServer(nodeCollector.Registry(), opt.ServerBindProt)

@@ -80,6 +80,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: HOST_MANAGER_DIR
+              value: {{ .Values.devicePlugin.vgpuManagerDir }}
             - name: NVIDIA_VISIBLE_DEVICES
               value: all
             - name: NVIDIA_MIG_MONITOR_DEVICES
