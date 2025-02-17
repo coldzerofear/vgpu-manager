@@ -65,8 +65,9 @@ func main() {
 	if opt.EnableTls {
 		if len(opt.TlsKeyFile) == 0 || len(opt.TlsCertFile) == 0 {
 			klog.Fatalf("Enable Tls but did not specify a certificate file: "+
-				"tlsKeyFile: %s, tlsCertFile: %s", opt.TlsKeyFile, opt.TlsCertFile)
+				"tlsKeyFile: '%s', tlsCertFile: '%s'", opt.TlsKeyFile, opt.TlsCertFile)
 		}
+
 		tlsConfig, err = tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
 			Enable:  opt.EnableTls,
 			Refresh: time.Duration(opt.CertRefreshInterval) * time.Second,

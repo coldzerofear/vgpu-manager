@@ -18,6 +18,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+        vgpu-manager.io/ignore-webhook: "true"
         {{- include "vgpu-manager.selectorLabels" . | nindent 8 }}
         {{- with .Values.devicePlugin.labels }}
         {{- toYaml . | nindent 8 }}
@@ -150,10 +151,10 @@ spec:
       volumes:
         - name: kubelet
           hostPath:
-            path: /var/lib/kubelet
+            path: {{ .Values.devicePlugin.kubeletRootDir }}
         - name: manager
           hostPath:
-            path: /etc/vgpu-manager
+            path: {{ .Values.devicePlugin.vgpuManagerDir }}
             type: DirectoryOrCreate
         - name: cgroup
           hostPath:

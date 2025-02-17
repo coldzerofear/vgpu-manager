@@ -1,0 +1,89 @@
+{{- if .Values.webhook.enable -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vgpu-manager.webhook" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.webhook" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.webhook.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ include "vgpu-manager.webhook" . }}
+      {{- include "vgpu-manager.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: {{ include "vgpu-manager.webhook" . }}
+        vgpu-manager.io/ignore-webhook: "true"
+        {{- include "vgpu-manager.selectorLabels" . | nindent 8 }}
+        {{- with .Values.webhook.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if .Values.webhook.annotations }}
+      annotations: {{ toYaml .Values.webhook.annotations | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "vgpu-manager.imagePullSecrets" . | nindent 6 }}
+      restartPolicy: Always
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: {{ .Values.webhook.terminationGracePeriodSeconds }}
+      {{- if .Values.webhook.nodeSelector }}
+      nodeSelector: {{ toYaml .Values.webhook.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if .Values.webhook.tolerations }}
+      tolerations: {{ toYaml .Values.webhook.tolerations | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: webhook
+          image: {{ .Values.webhook.image }}:{{ .Values.webhook.imageTag }}
+          imagePullPolicy: {{ .Values.webhook.imagePullPolicy | quote }}
+          command:
+            - webhook
+            - --scheduler-name={{ .Values.scheduler.schedulerName }}
+            - --server-bind-port={{ .Values.webhook.commands.serverBindPort }}
+            - --pprof-bind-port={{ .Values.webhook.commands.pprofBindPort }}
+            - --cert-dir={{ .Values.webhook.commands.certDir }}
+            - --v={{ .Values.webhook.commands.logLevel }}
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: {{ .Values.webhook.commands.serverBindPort }}
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /readyz
+              port: {{ .Values.webhook.commands.serverBindPort }}
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          ports:
+            - name: http
+              containerPort: {{ .Values.webhook.commands.serverBindPort }}
+          resources: {{ toYaml .Values.webhook.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: cert-dir
+              mountPath: {{ .Values.webhook.commands.certDir }}
+              readOnly: true
+      volumes:
+        - name: cert-dir
+          secret:
+            secretName: {{ include "vgpu-manager.webhook" . }}-secret
+{{- end }}

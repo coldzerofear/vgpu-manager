@@ -66,7 +66,13 @@ RUN	CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags=" \
        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
        -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-       -o bin/monitor cmd/monitor/*.go
+       -o bin/monitor cmd/monitor/*.go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags=" \
+       -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
+       -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT}  \
+       -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
+       -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
+       -o bin/webhook cmd/webhook/*.go
 
 FROM quay.io/jitesoft/ubuntu:20.04
 
@@ -76,6 +82,7 @@ FROM quay.io/jitesoft/ubuntu:20.04
 COPY --from=builder /go/src/vgpu-manager/bin/scheduler /usr/bin/scheduler
 COPY --from=builder /go/src/vgpu-manager/bin/deviceplugin /usr/bin/deviceplugin
 COPY --from=builder /go/src/vgpu-manager/bin/monitor /usr/bin/monitor
+COPY --from=builder /go/src/vgpu-manager/bin/webhook /usr/bin/webhook
 
 RUN mkdir -p /installed
 COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so

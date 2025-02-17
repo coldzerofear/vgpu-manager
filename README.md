@@ -18,7 +18,7 @@ The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager
 - [x] Idle computing power of dynamic balancing equipment
 - [x] GPU device uses virtual memory after exceeding memory limit
 - [x] Rescheduling device allocation failed pod
-- [ ] Webhook dynamic admission, fixing some non-standard pod configurations
+- [x] Webhook dynamic admission, fixing some non-standard pod configurations
 - [ ] Compatible with hot swappable devices and expansion capabilities
 - [ ] Compatible with Volcano Batch Scheduler
 
@@ -69,9 +69,19 @@ Note that the scheduler version needs to be modified according to the cluster ve
           name: scheduler
 ```
 
+If you want to install the webhook service component, please ensure that the cluster has installed `cert-manager`.
+
+The Webhook service requires the use of [cert-manager](https://github.com/cert-manager/cert-manager) to generate HTTPS certificates and manage certificate renewal policies.
+
+```bash
+kubectl apply -f deploy/vgpu-manager-webhook.yaml
+```
+
 ### Helm charts deployment
 
-Modify the configuration in values.yaml according to the node environment and requirements
+Modify the configuration in values.yaml according to the node environment and requirements.
+
+If you want to install the webhook service component, please ensure that the cluster has installed `cert-manager`, then modify file helm/values.yaml `values.webhook.enable=true`.
 
 Use the following command for deployment
 
@@ -92,6 +102,7 @@ kubectl get pods -n kube-system
 ```shell
 kubectl delete -f deploy/vgpu-manager-scheduler.yaml
 kubectl delete -f deploy/vgpu-manager-deviceplugin.yaml
+kubectl delete -f deploy/vgpu-manager-webhook.yaml
 ```
 
 ### Helm charts uninstallation

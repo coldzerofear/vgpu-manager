@@ -23,7 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
-	"k8s.io/klog/v2/klogr"
 	rtcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	rtclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
@@ -94,7 +93,7 @@ func main() {
 			},
 		},
 		Metrics: metrics.Options{BindAddress: "0"}, // disable metrics service
-		Logger:  klogr.New(),
+		Logger:  klog.NewKlogr(),
 	})
 	if err != nil {
 		klog.Fatalf("Create cluster manager failed: %v", err)

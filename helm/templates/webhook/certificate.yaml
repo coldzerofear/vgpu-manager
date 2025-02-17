@@ -1,0 +1,20 @@
+{{- if .Values.webhook.enable -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "vgpu-manager.webhook" . }}-cert
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.webhook" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ include "vgpu-manager.webhook" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "vgpu-manager.webhook" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "vgpu-manager.webhook" . }}-issuer
+  secretName: {{ include "vgpu-manager.webhook" . }}-secret
+  duration: {{ .Values.webhook.certDuration }}
+  renewBefore: {{ .Values.webhook.certRenewBefore }}
+{{- end }}

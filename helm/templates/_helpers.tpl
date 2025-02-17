@@ -64,6 +64,12 @@ The app name for DevicePlugin
 {{- printf "%s-device-plugin" ( include "vgpu-manager.fullname" . ) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/*
+The app name for Webhook
+*/}}
+{{- define "vgpu-manager.webhook" -}}
+{{- printf "%s-webhook" ( include "vgpu-manager.fullname" . ) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
 
 {{/*
 Image registry secret name

@@ -1,0 +1,12 @@
+{{- if .Values.webhook.enable -}}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "vgpu-manager.webhook" . }}-issuer
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.webhook" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+{{- end }}

@@ -17,6 +17,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+        vgpu-manager.io/ignore-webhook: "true"
         {{- include "vgpu-manager.selectorLabels" . | nindent 8 }}
         {{- with .Values.scheduler.labels }}
         {{- toYaml . | nindent 8 }}
@@ -90,7 +91,7 @@ spec:
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 3456
+              port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10

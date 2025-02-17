@@ -1,0 +1,54 @@
+{{- if .Values.webhook.enable -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "vgpu-manager.webhook" . }}-cert
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.webhook" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+  name: {{ include "vgpu-manager.webhook" . }}-mutate
+webhooks:
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: {{ include "vgpu-manager.webhook" . }}
+        namespace: {{ .Release.Namespace | quote }}
+        path: /pods/mutate
+        port: {{ .Values.webhook.commands.serverBindPort }}
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    matchPolicy: Equivalent
+    name: mutatepod.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        {{- if .Values.webhook.excludeNamespaces }}
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+          {{- toYaml .Values.webhook.excludeNamespaces | nindent 10 }}
+        {{- end }}
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    reinvocationPolicy: Never
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+        resources:
+          - pods
+        scope: '*'
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+{{- end }}

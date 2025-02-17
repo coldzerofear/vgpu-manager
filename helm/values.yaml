@@ -83,7 +83,7 @@ devicePlugin:
       operator: Exists
   # Define container security context
   securityContext:
-    #　If the container encounters the following errors, try using privileged mode
+    # If the container encounters the following errors, try using privileged mode
     # Failed to initialize NVML: Unknown Error
     # privileged: true
     allowPrivilegeEscalation: false
@@ -91,6 +91,10 @@ devicePlugin:
       drop: ["ALL"]
       add: ["SYS_ADMIN"]
   runtimeClassName: ""
+  # The root directory configured in the start command of kubelet (default: /var/lib/kubelet)
+  kubeletRootDir: "/var/lib/kubelet"
+  # Configure the host path used by vgpu manager (default: /etc/vgpu-manager)
+  vgpuManagerDir: "/etc/vgpu-manager"
   devicePlugin:
     commands:
       kubeApiQps: 20.0
@@ -143,3 +147,46 @@ devicePlugin:
           "excludeDevices": "0-1"
         }
       ]
+
+# Installing the Webhook service requires installing the Cert Manager component in advance to provide a self signed certificate for the service.
+webhook:
+  # Should the deviceplugin be deployed? (default: false)
+  enable: false
+  # Certificate validity period. (default: one year)
+  certDuration: 8760h
+  # The last refresh time of the certificate. (default: 360h)
+  certRenewBefore: 360h
+  # mutate webhook failure Policy (Supported values: Ignore | Fail)
+  failurePolicy: Ignore
+  # pod labels
+  labels: {}
+  # pod annotations
+  annotations: {}
+  # Number of deployed replicas (default: 1)
+  replicas: 1
+  # Configure the image used by the webhook
+  image: coldzerofear/vgpu-manager
+  imageTag: "latest"
+  imagePullPolicy: IfNotPresent
+  # Grace period for container recycling (default: 10s)
+  terminationGracePeriodSeconds: 10
+  # Node labels to be deployed
+  nodeSelector: {}
+  tolerations: []
+  # Webhook will not be effective for resources under these namespaces.
+  excludeNamespaces:
+    - kube-system
+    - cert-manager
+  commands:
+    # webhook service port (default: 9443)
+    serverBindPort: 9443
+    # The pprof service port used for debugging: (default disable: 0)
+    pprofBindPort: 0
+    # CertDir is the directory that contains the server key and certificate.
+    certDir: /tmp/k8s-webhook-server/serving-certs
+    logLevel: 4
+  # Webhook container requests resources
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
