@@ -117,7 +117,7 @@ spec:
       hostPID: true
       initContainers:
         - name: install
-          command: ["/bin/bash", "-c", "cp /installed/* /etc/vgpu-manager/"]
+          command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           resources:

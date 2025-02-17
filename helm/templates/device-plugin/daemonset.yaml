@@ -45,7 +45,7 @@ spec:
       restartPolicy: Always
       initContainers:
         - name: install
-          command: ["/bin/bash", "-c", "cp /installed/* /etc/vgpu-manager/"]
+          command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
           image: {{ .Values.devicePlugin.image }}:{{ .Values.devicePlugin.imageTag }}
           imagePullPolicy: {{ .Values.devicePlugin.imagePullPolicy | quote }}
           resources:

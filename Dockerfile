@@ -79,14 +79,17 @@ FROM quay.io/jitesoft/ubuntu:20.04
 #ENV NVIDIA_VISIBLE_DEVICES=all
 #ENV NVIDIA_DRIVER_CAPABILITIES=utility,compute
 
+WORKDIR /
 COPY --from=builder /go/src/vgpu-manager/bin/scheduler /usr/bin/scheduler
 COPY --from=builder /go/src/vgpu-manager/bin/deviceplugin /usr/bin/deviceplugin
 COPY --from=builder /go/src/vgpu-manager/bin/monitor /usr/bin/monitor
 COPY --from=builder /go/src/vgpu-manager/bin/webhook /usr/bin/webhook
 
-RUN mkdir -p /installed
+COPY scripts scripts/
+RUN chmod +x /scripts/* && mkdir -p /installed
 COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
 COPY --from=builder /vgpu-controller/build/mem_occupy_tool /installed/mem_occupy_tool
 COPY --from=builder /vgpu-controller/build/mem_managed_tool /installed/mem_managed_tool
 COPY --from=builder /vgpu-controller/build/mem_view_tool /installed/mem_view_tool
+
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload
