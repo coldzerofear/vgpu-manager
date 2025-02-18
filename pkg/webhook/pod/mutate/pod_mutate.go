@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
@@ -63,13 +64,43 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 			pod.Spec.SchedulerName = h.options.SchedulerName
 			logger.V(4).Info("Successfully set schedulerName", "schedulerName", h.options.SchedulerName)
 		}
+		if _, ok := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation); !ok {
+			setPolicy := false
+			defaultNodePolicy := strings.ToLower(h.options.DefaultNodePolicy)
+			switch defaultNodePolicy {
+			case string(util.BinpackPolicy):
+				setPolicy = true
+				util.InsertAnnotation(pod, util.NodeSchedulerPolicyAnnotation, string(util.BinpackPolicy))
+			case string(util.SpreadPolicy):
+				setPolicy = true
+				util.InsertAnnotation(pod, util.NodeSchedulerPolicyAnnotation, string(util.SpreadPolicy))
+			}
+			if setPolicy {
+				logger.V(4).Info("Successfully set default node scheduler policy", "NodeSchedulerPolicy", defaultNodePolicy)
+			}
+		}
+		if _, ok := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation); !ok {
+			setPolicy := false
+			defaultDevicePolicy := strings.ToLower(h.options.DefaultDevicePolicy)
+			switch defaultDevicePolicy {
+			case string(util.BinpackPolicy):
+				setPolicy = true
+				util.InsertAnnotation(pod, util.DeviceSchedulerPolicyAnnotation, string(util.BinpackPolicy))
+			case string(util.SpreadPolicy):
+				setPolicy = true
+				util.InsertAnnotation(pod, util.DeviceSchedulerPolicyAnnotation, string(util.SpreadPolicy))
+			}
+			if setPolicy {
+				logger.V(4).Info("Successfully set default device scheduler policy", "DeviceSchedulerPolicy", defaultDevicePolicy)
+			}
+		}
 	}
 	return nil
 }
 
 func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admission.Response {
 	logger := log.FromContext(ctx)
-	logger.WithValues("operation", req.Operation)
+	logger = logger.WithValues("operation", req.Operation)
 	logger.V(5).Info("into pod mutate handle")
 	ctx = log.IntoContext(ctx, logger)
 	pod := &corev1.Pod{}

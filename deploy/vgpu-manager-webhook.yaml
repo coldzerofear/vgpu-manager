@@ -115,6 +115,8 @@ spec:
             - webhook
             - --server-bind-port=9443
             - --scheduler-name=vgpu-scheduler
+            - --default-node-policy=binpack
+            - --default-device-policy=binpack
             - --v=4
           livenessProbe:
             failureThreshold: 3
@@ -141,7 +143,7 @@ spec:
               containerPort: 9443
           resources:
             requests:
-              cpu: 10m
+              cpu: 20m
               memory: 32Mi
           securityContext:
             allowPrivilegeEscalation: false

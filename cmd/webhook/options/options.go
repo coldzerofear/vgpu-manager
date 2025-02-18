@@ -9,10 +9,12 @@ import (
 )
 
 type Options struct {
-	ServerBindProt int
-	PprofBindPort  int
-	SchedulerName  string
-	CertDir        string
+	ServerBindProt      int
+	PprofBindPort       int
+	SchedulerName       string
+	CertDir             string
+	DefaultNodePolicy   string
+	DefaultDevicePolicy string
 }
 
 const (
@@ -36,6 +38,8 @@ func (o *Options) InitFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens.")
 	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
 	fs.StringVar(&o.CertDir, "cert-dir", o.CertDir, "CertDir is the directory that contains the server key and certificate.")
+	fs.StringVar(&o.DefaultNodePolicy, "default-node-policy", "", "Default node scheduling policy. (supported values: binpack | spread)")
+	fs.StringVar(&o.DefaultDevicePolicy, "default-device-policy", "", "Default device scheduling policy. (supported values: binpack | spread)")
 	fs.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.Parse()
 }

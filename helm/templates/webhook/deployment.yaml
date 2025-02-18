@@ -48,6 +48,8 @@ spec:
             - --server-bind-port={{ .Values.webhook.commands.serverBindPort }}
             - --pprof-bind-port={{ .Values.webhook.commands.pprofBindPort }}
             - --cert-dir={{ .Values.webhook.commands.certDir }}
+            - --default-node-policy={{ .Values.webhook.commands.defaultNodePolicy }}
+            - --default-device-policy={{ .Values.webhook.commands.defaultDevicePolicy }}
             - --v={{ .Values.webhook.commands.logLevel }}
           livenessProbe:
             failureThreshold: 3

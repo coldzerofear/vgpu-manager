@@ -184,9 +184,13 @@ webhook:
     pprofBindPort: 0
     # CertDir is the directory that contains the server key and certificate.
     certDir: /tmp/k8s-webhook-server/serving-certs
+    # Default node scheduling policy. (supported values: binpack | spread)
+    defaultNodePolicy: binpack
+    # Default device scheduling policy. (supported values: binpack | spread)
+    defaultDevicePolicy: binpack
     logLevel: 4
   # Webhook container requests resources
   resources:
     requests:
-      cpu: 10m
+      cpu: 20m
       memory: 32Mi
