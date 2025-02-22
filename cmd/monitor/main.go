@@ -73,7 +73,7 @@ func main() {
 	factory.WaitForCacheSync(wait.NeverStop)
 	klog.V(4).Infoln("InformerFactory cache synchronization successful")
 
-	go containerLister.Start(ctx.Done())
+	containerLister.Start(5*time.Second, ctx.Done())
 	// Start pprof debug debugging service.
 	go func() {
 		if opt.PprofBindPort > 0 {

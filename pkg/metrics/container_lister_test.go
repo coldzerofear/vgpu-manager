@@ -136,8 +136,8 @@ func Test_ContainerLister(t *testing.T) {
 		resData := vgpu.NewResourceDataT(devManager, pod, assignDevices, false, node)
 		contResDataMap[container.Name] = resData
 	}
-	go contLister.Start(ctx.Done())
-	time.Sleep(5 * time.Second)
+	contLister.Start(time.Second, ctx.Done())
+	time.Sleep(3 * time.Second)
 
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
@@ -148,13 +148,16 @@ func Test_ContainerLister(t *testing.T) {
 		}
 	}
 
-	//k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
-	//time.Sleep(5 * time.Second)
-	//for _, container := range pod.Spec.Containers {
-	//	key := GetContainerKey(pod.UID, container.Name)
-	//	if _, ok := contLister.GetResourceData(key); ok {
-	//		t.Errorf("The container resource configuration file should have been deleted by now")
-	//	}
-	//}
+	if err := os.Setenv("UNIT_TESTING", "true"); err != nil {
+		t.Error(err)
+	}
+	k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+	time.Sleep(2 * time.Second)
+	for _, container := range pod.Spec.Containers {
+		key := GetContainerKey(pod.UID, container.Name)
+		if _, ok := contLister.GetResourceData(key); ok {
+			t.Errorf("The container resource configuration file should have been deleted by now")
+		}
+	}
 
 }

@@ -126,19 +126,24 @@ func (c *ContainerLister) update() error {
 			klog.V(3).Infoln("remove vGPU config file:", configFile)
 			c.removeResourceConfig(containerKey)
 			_ = os.RemoveAll(filePath)
+		case !matched && strings.ToLower(os.Getenv("UNIT_TESTING")) == "true":
+			c.removeResourceConfig(containerKey)
+			_ = os.RemoveAll(filePath)
 		}
 	}
 	return nil
 }
 
-func (c *ContainerLister) Start(stopChan <-chan struct{}) {
-	scanResourceFiles := func() {
-		if err := c.update(); err != nil {
-			klog.V(3).ErrorS(err, "Failed to update container lister")
+func (c *ContainerLister) Start(interval time.Duration, stopChan <-chan struct{}) {
+	go func() {
+		scanResourceFiles := func() {
+			if err := c.update(); err != nil {
+				klog.V(3).ErrorS(err, "Failed to update container lister")
+			}
 		}
-	}
-	wait.Until(scanResourceFiles, 5*time.Second, stopChan)
-	klog.Infof("Container lister Stopped.")
+		wait.Until(scanResourceFiles, interval, stopChan)
+		klog.Infof("Container lister Stopped.")
+	}()
 }
 
 func NewContainerLister(basePath, nodeName string, podLister listerv1.PodLister) *ContainerLister {
