@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -88,7 +89,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 
 	// Sort the devices according to the device scheduling strategy.
 	devPolicy, _ := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation)
-	switch devPolicy {
+	switch strings.ToLower(devPolicy) {
 	case string(util.BinpackPolicy):
 		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling strategy", pod.Namespace, pod.Name, devPolicy)
 		if numaDevices, ok := CanNotCrossNumaNode(needNumber, tmpStore); ok {
@@ -117,10 +118,10 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling strategy", pod.Namespace, pod.Name, devPolicy)
 		if numaDevices, ok := CanNotCrossNumaNode(needNumber, tmpStore); ok {
 			klog.V(3).Infoln("Try using NUMA allocation mode")
-			numaDevices.NumaScoreSpreadCallback(func(numaNode int, devices []*DeviceInfo) (done bool) {
+			numaDevices.NumaScoreSpreadCallback(func(numaNode int, devices []*DeviceInfo) bool {
 				// Filter numa nodes with insufficient number of devices.
 				if needNumber > len(devices) {
-					return done
+					return false
 				}
 				klog.V(4).Infof("Currently allocating devices on numa node %d", numaNode)
 				NewDeviceSpreadPriority().Sort(devices)
