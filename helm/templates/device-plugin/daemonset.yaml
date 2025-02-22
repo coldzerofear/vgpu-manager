@@ -88,6 +88,8 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+            - name: DP_DISABLE_HEALTHCHECKS
+              value: ""
           securityContext: {{ toYaml .Values.devicePlugin.securityContext | nindent 12 }}
           resources: {{ toYaml .Values.devicePlugin.devicePlugin.resources | nindent 12 }}
           volumeMounts:

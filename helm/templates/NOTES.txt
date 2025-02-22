@@ -4,6 +4,7 @@ vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed succe
   - scheduler name:  {{ .Values.scheduler.schedulerName }}
   - server    port:  {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
   - pprof     port:  {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
+  - feature  gates:  {{ .Values.scheduler.schedulerExtender.commands.featureGates }}
   - logger   level:  {{ .Values.scheduler.schedulerExtender.commands.logLevel }}
 {{- end }}
 
@@ -26,6 +27,8 @@ vgpu-manager {{ .Chart.AppVersion }} webhook component has been deployed success
   - server    port:  {{ .Values.webhook.commands.serverBindPort }}
   - pprof     port:  {{ .Values.webhook.commands.pprofBindPort }}
   - cert directory:  {{ .Values.webhook.commands.certDir }}
+  - node    policy:  {{ .Values.webhook.commands.defaultNodePolicy }}
+  - device  policy:  {{ .Values.webhook.commands.defaultDevicePolicy }}
   - logger   level:  {{ .Values.webhook.commands.logLevel }}
 {{- end }}
 

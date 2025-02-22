@@ -39,9 +39,9 @@ const (
 	defaultDeviceCoresScaling  = 1.0
 	defaultPprofBindPort       = 0
 
-	// CorePlugin VCoreDevicePlugin feature gate will report the virtual cores of the node device to kubelet.
+	// CorePlugin feature gate will report the virtual cores of the node device to kubelet.
 	CorePlugin featuregate.Feature = "CorePlugin"
-	// MemoryPlugin VMemoryDevicePlugin feature gate will report the virtual memory of the node device to kubelet.
+	// MemoryPlugin feature gate will report the virtual memory of the node device to kubelet.
 	MemoryPlugin featuregate.Feature = "MemoryPlugin"
 	// Reschedule feature gate will attempt to reschedule Pods that meet the criteria.
 	Reschedule featuregate.Feature = "Reschedule"

@@ -52,6 +52,7 @@ spec:
             - --leader-elect=true
             - --leader-elect-resource-name={{ .Values.scheduler.schedulerName }}
             - --leader-elect-resource-namespace={{ .Release.Namespace }}
+            - --feature-gates={{ .Values.scheduler.kubeScheduler.commands.featureGates }}
             - --v={{ .Values.scheduler.kubeScheduler.commands.logLevel }}
           resources: {{ toYaml .Values.scheduler.kubeScheduler.resources | nindent 12 }}
           volumeMounts:
@@ -76,6 +77,7 @@ spec:
             - --kube-api-burst={{ .Values.scheduler.schedulerExtender.commands.kubeApiBurst }}
             - --server-bind-port={{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
             - --pprof-bind-port={{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
+            - --feature-gates={{ .Values.scheduler.schedulerExtender.commands.featureGates }}
             - --v={{ .Values.scheduler.schedulerExtender.commands.logLevel }}
           ports:
             - name: http

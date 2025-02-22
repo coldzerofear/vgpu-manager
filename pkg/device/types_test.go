@@ -29,7 +29,7 @@ func Test_PodDevices(t *testing.T) {
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
-							Core:   0,
+							Cores:  0,
 							Memory: 1024,
 						},
 					},
@@ -56,13 +56,12 @@ func Test_PodDevices(t *testing.T) {
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
-							Core:   0,
+							Cores:  0,
 							Memory: 1024,
-						},
-						{
+						}, {
 							Id:     1,
 							Uuid:   gpu1uuid,
-							Core:   10,
+							Cores:  10,
 							Memory: 2048,
 						},
 					},
@@ -79,7 +78,7 @@ func Test_PodDevices(t *testing.T) {
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
-							Core:   0,
+							Cores:  0,
 							Memory: 1024,
 						},
 					},
@@ -90,7 +89,7 @@ func Test_PodDevices(t *testing.T) {
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
-							Core:   0,
+							Cores:  0,
 							Memory: 1024,
 						},
 					},
@@ -107,13 +106,12 @@ func Test_PodDevices(t *testing.T) {
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
-							Core:   0,
+							Cores:  0,
 							Memory: 1024,
-						},
-						{
+						}, {
 							Id:     1,
 							Uuid:   gpu1uuid,
-							Core:   50,
+							Cores:  50,
 							Memory: 10240,
 						},
 					},
@@ -124,13 +122,12 @@ func Test_PodDevices(t *testing.T) {
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
-							Core:   0,
+							Cores:  0,
 							Memory: 1024,
-						},
-						{
+						}, {
 							Id:     1,
 							Uuid:   gpu1uuid,
-							Core:   50,
+							Cores:  50,
 							Memory: 10240,
 						},
 					},
@@ -190,7 +187,7 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 					{
 						Id:     0,
 						Uuid:   gpu0uuid,
-						Core:   10,
+						Cores:  10,
 						Memory: 1024,
 					},
 				},
@@ -210,8 +207,7 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 					Containers: []corev1.Container{
 						{
 							Name: "cont1",
-						},
-						{
+						}, {
 							Name: "cont2",
 						},
 					},
@@ -223,13 +219,12 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 					{
 						Id:     0,
 						Uuid:   gpu0uuid,
-						Core:   10,
+						Cores:  10,
 						Memory: 1024,
-					},
-					{
+					}, {
 						Id:     1,
 						Uuid:   gpu1uuid,
-						Core:   10,
+						Cores:  10,
 						Memory: 1024,
 					},
 				},
@@ -250,8 +245,7 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 					Containers: []corev1.Container{
 						{
 							Name: "cont1",
-						},
-						{
+						}, {
 							Name: "cont2",
 						},
 					},
@@ -263,13 +257,12 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 					{
 						Id:     0,
 						Uuid:   gpu0uuid,
-						Core:   20,
+						Cores:  20,
 						Memory: 2048,
-					},
-					{
+					}, {
 						Id:     1,
 						Uuid:   gpu1uuid,
-						Core:   20,
+						Cores:  20,
 						Memory: 2048,
 					},
 				},

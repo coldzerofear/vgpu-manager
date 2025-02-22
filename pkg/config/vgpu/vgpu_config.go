@@ -168,8 +168,8 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		dev := DeviceT{
 			UUID:        convert48Bytes(devInfo.Uuid),
 			TotalMemory: uint64(devInfo.Memory << 20),
-			HardCore:    int32(devInfo.Core),
-			SoftCore:    int32(devInfo.Core),
+			HardCore:    int32(devInfo.Cores),
+			SoftCore:    int32(devInfo.Cores),
 			CoreLimit:   int32(0),
 			HardLimit:   int32(0),
 		}
@@ -181,17 +181,17 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 			//  int soft_core;
 			dev.SoftCore = int32(gpuDevice.Core)
 			// need limit core
-			if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
+			if devInfo.Cores > 0 && devInfo.Cores < util.HundredCore {
 				//  int core_limit;
 				dev.CoreLimit = 1
-				if devInfo.Core >= gpuDevice.Core {
+				if devInfo.Cores >= gpuDevice.Core {
 					//  int hard_limit;
 					dev.HardLimit = 1
 				}
 			}
 		case util.FixedComputePolicy:
 			// need limit core
-			if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
+			if devInfo.Cores > 0 && devInfo.Cores < util.HundredCore {
 				//  int core_limit;
 				dev.CoreLimit = 1
 				//  int hard_limit;
@@ -295,9 +295,9 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 
 				gpuDevice := deviceMap[devInfo.Uuid]
 				//  int hard_core;
-				cDevice.hard_core = C.int(devInfo.Core)
+				cDevice.hard_core = C.int(devInfo.Cores)
 				//  int soft_core;
-				cDevice.soft_core = C.int(devInfo.Core)
+				cDevice.soft_core = C.int(devInfo.Cores)
 				//  int core_limit;
 				cDevice.core_limit = 0
 				//  int hard_limit;
@@ -307,17 +307,17 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 					//  int soft_core;
 					cDevice.soft_core = C.int(gpuDevice.Core)
 					// need limit core
-					if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
+					if devInfo.Cores > 0 && devInfo.Cores < util.HundredCore {
 						//  int core_limit;
 						cDevice.core_limit = 1
-						if devInfo.Core >= gpuDevice.Core {
+						if devInfo.Cores >= gpuDevice.Core {
 							//  int hard_limit;
 							cDevice.hard_limit = 1
 						}
 					}
 				case util.FixedComputePolicy:
 					// need limit core
-					if devInfo.Core > 0 && devInfo.Core < util.HundredCore {
+					if devInfo.Cores > 0 && devInfo.Cores < util.HundredCore {
 						//  int core_limit;
 						cDevice.core_limit = 1
 						//  int hard_limit;

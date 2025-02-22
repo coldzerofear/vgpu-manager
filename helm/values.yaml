@@ -28,6 +28,7 @@ scheduler:
     imageTag: "v1.28.15"
     imagePullPolicy: IfNotPresent
     commands:
+      featureGates: ""
       logLevel: 3
     resources:
       requests:
@@ -44,6 +45,7 @@ scheduler:
       serverBindPort: 3456
       # The pprof service port used for debugging: (default disable: 0)
       pprofBindPort: 0
+      featureGates: "SerialBindNode=false"
       logLevel: 3
     resources:
       requests:

@@ -16,16 +16,30 @@ type DeviceInfo struct {
 	id          int
 	uuid        string
 	deviceType  string
-	totalMemory int
+	usedNumber  int
+	totalNumber int
+	usedCores   int
+	totalCores  int
 	usedMemory  int
-	totalCore   int
-	usedCore    int
+	totalMemory int
 	capability  int
-	totalNum    int
-	usedNum     int
 	numa        int
-	enableMig   bool
+	migDevice   bool
 	healthy     bool
+}
+
+func NewFakeDeviceInfo(id, usedNum, totalNum, usedCore, totalCore, usedMem, totalMem, numa int) *DeviceInfo {
+	return &DeviceInfo{
+		id:          id,
+		usedNumber:  usedNum,
+		totalNumber: totalNum,
+		usedCores:   usedCore,
+		totalCores:  totalCore,
+		usedMemory:  usedMem,
+		totalMemory: totalMem,
+		numa:        numa,
+		healthy:     true,
+	}
 }
 
 func NewDeviceInfo(gpuInfo GPUInfo) *DeviceInfo {
@@ -33,11 +47,11 @@ func NewDeviceInfo(gpuInfo GPUInfo) *DeviceInfo {
 		id:          gpuInfo.Id,
 		uuid:        gpuInfo.Uuid,
 		deviceType:  gpuInfo.Type,
-		totalCore:   gpuInfo.Core,
+		totalCores:  gpuInfo.Core,
 		totalMemory: gpuInfo.Memory,
-		enableMig:   gpuInfo.Mig,
+		migDevice:   gpuInfo.Mig,
 		capability:  gpuInfo.Capability,
-		totalNum:    gpuInfo.Number,
+		totalNumber: gpuInfo.Number,
 		numa:        gpuInfo.Numa,
 		healthy:     gpuInfo.Healthy,
 	}
@@ -45,13 +59,13 @@ func NewDeviceInfo(gpuInfo GPUInfo) *DeviceInfo {
 
 type GPUInfo struct {
 	Id         int    `json:"id"`
+	Type       string `json:"type"`
 	Uuid       string `json:"uuid"`
 	Core       int    `json:"core"`
 	Memory     int    `json:"memory"`
-	Type       string `json:"type"`
-	Mig        bool   `json:"mig"`
 	Number     int    `json:"number"`
 	Numa       int    `json:"numa"`
+	Mig        bool   `json:"mig"`
 	Capability int    `json:"capability"`
 	Healthy    bool   `json:"healthy"`
 }
@@ -129,7 +143,7 @@ func (c *ContainerDevices) UnmarshalText(text string) error {
 type ClaimDevice struct {
 	Id     int    `json:"id"`
 	Uuid   string `json:"uuid"`
-	Core   int    `json:"core"`
+	Cores  int    `json:"cores"`
 	Memory int    `json:"memory"`
 }
 
@@ -138,7 +152,7 @@ func (c *ClaimDevice) MarshalText() (string, error) {
 		return "", fmt.Errorf("self is empty")
 	}
 	return fmt.Sprintf("%d_%s_%d_%d",
-		c.Id, c.Uuid, c.Core, c.Memory), nil
+		c.Id, c.Uuid, c.Cores, c.Memory), nil
 }
 
 func (c *ClaimDevice) UnmarshalText(text string) error {
@@ -157,7 +171,7 @@ func (c *ClaimDevice) UnmarshalText(text string) error {
 	if err != nil {
 		return err
 	}
-	core, err := strconv.Atoi(split[2])
+	cores, err := strconv.Atoi(split[2])
 	if err != nil {
 		return err
 	}
@@ -167,7 +181,7 @@ func (c *ClaimDevice) UnmarshalText(text string) error {
 	}
 	c.Id = id
 	c.Uuid = split[1]
-	c.Core = core
+	c.Cores = cores
 	c.Memory = memory
 	return nil
 }
@@ -288,8 +302,8 @@ func (dev *DeviceInfo) GetNUMA() int {
 	return dev.numa
 }
 
-func (dev *DeviceInfo) Mig() bool {
-	return dev.enableMig
+func (dev *DeviceInfo) IsMIG() bool {
+	return dev.migDevice
 }
 
 // Healthy return whether the device is healthy
@@ -312,47 +326,26 @@ func (dev *DeviceInfo) GetTotalMemory() int {
 	return dev.totalMemory
 }
 
-// GetTotalCore returns the totalCore of this device
-func (dev *DeviceInfo) GetTotalCore() int {
-	return dev.totalCore
+// GetTotalCores returns the totalCore of this device
+func (dev *DeviceInfo) GetTotalCores() int {
+	return dev.totalCores
 }
 
 // GetTotalNumber returns the totalNum of this device
 func (dev *DeviceInfo) GetTotalNumber() int {
-	return dev.totalNum
+	return dev.totalNumber
 }
 
-//// AddUsedResources records the used GPU core and memory
-//func (dev *DeviceInfo) AddUsedResources(usedCore int, usedMemory int) error {
-//	if dev.usedNum+1 > dev.totalNum {
-//		return fmt.Errorf("update used number failed, total: %d, already used: %d",
-//			dev.totalNum, dev.usedNum)
-//	}
-//	if usedCore+dev.usedCore > dev.totalCore {
-//		return fmt.Errorf("update used core failed, total: %d, request: %d, already used: %d",
-//			dev.totalCore, usedCore, dev.usedCore)
-//	}
-//
-//	if usedMemory+dev.usedMemory > dev.totalMemory {
-//		return fmt.Errorf("update used memory failed, total: %d, request: %d, already used: %d",
-//			dev.totalMemory, usedMemory, dev.usedMemory)
-//	}
-//	dev.usedNum++
-//	dev.usedCore += usedCore
-//	dev.usedMemory += usedMemory
-//	return nil
-//}
-
 // addUsedResources records the used GPU core and memory
-func (dev *DeviceInfo) addUsedResources(usedCore int, usedMemory int) {
-	dev.usedNum++
-	dev.usedCore += usedCore
+func (dev *DeviceInfo) addUsedResources(usedCores int, usedMemory int) {
+	dev.usedNumber++
+	dev.usedCores += usedCores
 	dev.usedMemory += usedMemory
 }
 
 // AllocatableCores returns the remaining cores of this GPU device
 func (dev *DeviceInfo) AllocatableCores() int {
-	allocatableCores := dev.totalCore - dev.usedCore
+	allocatableCores := dev.totalCores - dev.usedCores
 	if allocatableCores >= 0 {
 		return allocatableCores
 	}
@@ -370,7 +363,7 @@ func (dev *DeviceInfo) AllocatableMemory() int {
 
 // AllocatableNumber returns the remaining number of this GPU device
 func (dev *DeviceInfo) AllocatableNumber() int {
-	allocatableNum := dev.totalNum - dev.usedNum
+	allocatableNum := dev.totalNumber - dev.usedNumber
 	if allocatableNum >= 0 {
 		return allocatableNum
 	}
@@ -380,14 +373,14 @@ func (dev *DeviceInfo) AllocatableNumber() int {
 type NodeInfo struct {
 	name          string
 	node          *corev1.Node
-	deviceMap     map[int]*DeviceInfo // gpu设备信息
+	deviceMap     map[int]*DeviceInfo
 	totalNumber   int
 	usedNumber    int
 	totalMemory   int
 	usedMemory    int
-	totalCore     int
-	usedCore      int
-	maxCapability int // 最大算力等级单位
+	totalCores    int
+	usedCores     int
+	maxCapability int
 }
 
 func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
@@ -427,16 +420,9 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	}
 
 	ret := &NodeInfo{
-		name:          node.Name,
-		node:          node,
-		deviceMap:     deviceInfoMap,
-		totalNumber:   0,
-		usedNumber:    0,
-		totalMemory:   0,
-		usedMemory:    0,
-		totalCore:     0,
-		usedCore:      0,
-		maxCapability: 0,
+		name:      node.Name,
+		node:      node,
+		deviceMap: deviceInfoMap,
 	}
 	// According to the pods' annotations, construct the node allocation state
 	for _, pod := range pods {
@@ -452,7 +438,7 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 
 		for _, contDevice := range podAssignDevices {
 			for _, device := range contDevice.Devices {
-				if err = ret.addUsedResources(device.Id, device.Core, device.Memory); err != nil {
+				if err = ret.addUsedResources(device.Id, device.Cores, device.Memory); err != nil {
 					klog.Warningf("failed to update used resource for node %s dev %d due to %v",
 						node.Name, device.Id, err)
 				}
@@ -461,19 +447,16 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	}
 
 	for _, deviceInfo := range ret.deviceMap {
-		// Do not include Mig devices and unhealthy devices in the assignable resources.
-		if deviceInfo.Mig() || !deviceInfo.Healthy() {
+		// Do not include MIG devices and unhealthy devices in the assignable resources.
+		if deviceInfo.IsMIG() || !deviceInfo.Healthy() {
 			continue
 		}
 		ret.totalNumber += deviceInfo.GetTotalNumber()
-		usedNumber := deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
-		ret.usedNumber = usedNumber
+		ret.usedNumber = deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
 		ret.totalMemory += deviceInfo.GetTotalMemory()
-		usedMemory := deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
-		ret.usedMemory = usedMemory
-		ret.totalCore += deviceInfo.GetTotalCore()
-		usedCore := deviceInfo.GetTotalCore() - deviceInfo.AllocatableCores()
-		ret.usedCore = usedCore
+		ret.usedMemory = deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
+		ret.totalCores += deviceInfo.GetTotalCores()
+		ret.usedCores = deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
 		ret.maxCapability = util.Max(ret.maxCapability, deviceInfo.capability)
 	}
 
@@ -515,14 +498,14 @@ func (n *NodeInfo) GetMaxCapability() int {
 	return n.maxCapability
 }
 
-// GetTotalCore returns the total cores of this node
-func (n *NodeInfo) GetTotalCore() int {
-	return n.totalCore
+// GetTotalCores returns the total cores of this node
+func (n *NodeInfo) GetTotalCores() int {
+	return n.totalCores
 }
 
-// GetAvailableCore returns the remaining cores of this node
-func (n *NodeInfo) GetAvailableCore() int {
-	availableCore := n.totalCore - n.usedCore
+// GetAvailableCores returns the remaining cores of this node
+func (n *NodeInfo) GetAvailableCores() int {
+	availableCore := n.totalCores - n.usedCores
 	if availableCore >= 0 {
 		return availableCore
 	}

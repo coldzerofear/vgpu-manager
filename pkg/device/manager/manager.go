@@ -115,8 +115,8 @@ func (m *DeviceManager) initDevices() *DeviceManager {
 	handlerReturn(rt)
 	m.version.CudaVersion = version.CudaVersion(cudaVersion)
 
-	// TODO Scaling Core
-	totalCore := int(m.config.DeviceCoresScaling() * float64(util.HundredCore))
+	// Scaling Cores.
+	totalCores := int(m.config.DeviceCoresScaling() * float64(util.HundredCore))
 	var err error
 	for i := 0; i < count; i++ {
 		klog.V(2).Infof("nvmlDeviceGetHandleByIndex <%d>", i)
@@ -136,13 +136,13 @@ func (m *DeviceManager) initDevices() *DeviceManager {
 		migDevice, rt := devHandle.IsMigDeviceHandle()
 		handlerReturn(rt)
 
-		memory_v2, rt := devHandle.GetMemoryInfo_v2()
+		memoryV2, rt := devHandle.GetMemoryInfo_v2()
 		handlerReturn(rt)
-		totalMemory := int(memory_v2.Total >> 20) // bytes -> mb
-		// TODO Scaling Memory
+		totalMemory := int(memoryV2.Total >> 20) // bytes -> mb
+		// Scaling Memory.
 		totalMemory = int(m.config.DeviceMemoryScaling() * float64(totalMemory))
 
-		devType, rt := devHandle.GetName()
+		deviceType, rt := devHandle.GetName()
 		handlerReturn(rt)
 
 		major, minor, rt := devHandle.GetCudaComputeCapability()
@@ -181,13 +181,13 @@ func (m *DeviceManager) initDevices() *DeviceManager {
 			numaNode = 0
 		}
 
-		device := &GPUDevice{
+		m.devices[i] = &GPUDevice{
 			GPUInfo: device.GPUInfo{
 				Id:         i,
 				Uuid:       uuid,
-				Core:       totalCore,
+				Core:       totalCores,
 				Memory:     totalMemory,
-				Type:       devType,
+				Type:       deviceType,
 				Mig:        migEnabled || migDevice,
 				Number:     m.config.DeviceSplitCount(),
 				Capability: capability,
@@ -198,7 +198,6 @@ func (m *DeviceManager) initDevices() *DeviceManager {
 			MinorNumber: minorNumber,
 			MigDevice:   migDevice,
 		}
-		m.devices[i] = device
 	}
 	return m
 }
@@ -300,12 +299,12 @@ func (m *DeviceManager) handleNotify() {
 			return
 		case dev := <-m.unhealthy:
 			m.mut.Lock()
-			device := &pluginapi.Device{
+			d := &pluginapi.Device{
 				ID:     dev.Uuid,
 				Health: pluginapi.Unhealthy,
 			}
 			for _, ch := range m.notify {
-				ch <- device
+				ch <- d
 			}
 			m.mut.Unlock()
 		}

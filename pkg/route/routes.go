@@ -48,8 +48,8 @@ func AddVersion(router *httprouter.Router) {
 }
 
 // VersionRoute returns the version of router in response
-func VersionRoute(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-	fmt.Fprint(w, fmt.Sprint(version.Get()))
+func VersionRoute(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
+	_, _ = fmt.Fprint(w, fmt.Sprint(version.Get()))
 }
 
 func AddHealthProbe(router *httprouter.Router) {
@@ -59,11 +59,11 @@ func AddHealthProbe(router *httprouter.Router) {
 			"readyz":  healthz.Ping,
 		},
 	}
-	handlerFunc := func(writer http.ResponseWriter, request *http.Request, _ httprouter.Params) {
-		probeHandler.ServeHTTP(writer, request)
+	handlerFunc := func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		probeHandler.ServeHTTP(w, r)
 	}
-	router.GET(healthzPath, DebugLogging(handlerFunc, healthzPath))
-	router.GET(readyzPath, DebugLogging(handlerFunc, readyzPath))
+	router.GET(healthzPath, handlerFunc)
+	router.GET(readyzPath, handlerFunc)
 }
 
 func AddMetricsHandle(router *httprouter.Router, metrics http.Handler) {
@@ -102,12 +102,12 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 			klog.Errorf("Failed to marshal extenderFilterResult: %+v, %+v",
 				err, extenderFilterResult)
 			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(err.Error()))
+			_, _ = w.Write([]byte(err.Error()))
 		} else {
 			klog.V(4).Infof("%s: extenderFilterResult = %s",
 				predicate.Name(), string(resultBody))
 			w.WriteHeader(http.StatusOK)
-			w.Write(resultBody)
+			_, _ = w.Write(resultBody)
 		}
 	}
 }
@@ -142,12 +142,12 @@ func BindPredicateRoute(predicate predicate.BindPredicate) httprouter.Handle {
 				err, extenderBindingResult)
 			w.WriteHeader(http.StatusInternalServerError)
 			errMsg := fmt.Sprintf("{'error':'%s'}", err.Error())
-			w.Write([]byte(errMsg))
+			_, _ = w.Write([]byte(errMsg))
 		} else {
 			klog.V(4).Infof("%s: extenderBindingResult = %s",
 				predicate.Name(), string(resultBody))
 			w.WriteHeader(http.StatusOK)
-			w.Write(resultBody)
+			_, _ = w.Write(resultBody)
 		}
 	}
 }

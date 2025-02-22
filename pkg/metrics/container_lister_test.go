@@ -100,23 +100,23 @@ func Test_ContainerLister(t *testing.T) {
 		containerName1: {{
 			Id:     0,
 			Uuid:   gpuUUID0,
-			Core:   20,
+			Cores:  20,
 			Memory: 1024,
 		}, {
 			Id:     1,
 			Uuid:   gpuUUID1,
-			Core:   30,
+			Cores:  30,
 			Memory: 2048,
 		}},
 		containerName2: {{
 			Id:     0,
 			Uuid:   gpuUUID0,
-			Core:   30,
+			Cores:  30,
 			Memory: 2048,
 		}, {
 			Id:     1,
 			Uuid:   gpuUUID1,
-			Core:   20,
+			Cores:  20,
 			Memory: 1024,
 		}},
 	}

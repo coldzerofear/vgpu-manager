@@ -121,7 +121,7 @@ data:
       managedResources:
       - name: "nvidia.com/vgpu-number"
         ignoredByScheduler: true
-      - name: "nvidia.com/vgpu-core"
+      - name: "nvidia.com/vgpu-cores"
         ignoredByScheduler: true
       - name: "nvidia.com/vgpu-memory"
         ignoredByScheduler: true

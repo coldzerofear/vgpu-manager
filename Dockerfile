@@ -4,7 +4,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG APT_MIRROR
 
-ARG GOLANG_VERSION=1.22.3
+ARG GOLANG_VERSION=1.23.1
 
 RUN echo "Asia/Shanghai" > /etc/timezone && \
     ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
@@ -75,9 +75,6 @@ RUN	CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags=" \
        -o bin/webhook cmd/webhook/*.go
 
 FROM quay.io/jitesoft/ubuntu:20.04
-
-#ENV NVIDIA_VISIBLE_DEVICES=all
-#ENV NVIDIA_DRIVER_CAPABILITIES=utility,compute
 
 WORKDIR /
 COPY --from=builder /go/src/vgpu-manager/bin/scheduler /usr/bin/scheduler

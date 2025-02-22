@@ -67,36 +67,103 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		needMemory *= factor
 	}
 	for i := range alloc.nodeInfo.GetDeviceMap() {
-		tmpStore = append(tmpStore, alloc.nodeInfo.GetDeviceMap()[i])
+		deviceInfo := alloc.nodeInfo.GetDeviceMap()[i]
+		// Filter unhealthy device.
+		if !deviceInfo.Healthy() {
+			klog.V(4).Infof("Filter unhealthy device %d", i)
+			continue
+		}
+		// Filter MIG device.
+		if deviceInfo.IsMIG() {
+			klog.V(4).Infof("Filter MIG or Mig's parent device %d", i)
+			continue
+		}
+		tmpStore = append(tmpStore, deviceInfo)
 	}
+
+	var (
+		claimDevices []ClaimDevice
+		err          error
+	)
+
 	// Sort the devices according to the device scheduling strategy.
 	devPolicy, _ := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation)
 	switch devPolicy {
 	case string(util.BinpackPolicy):
 		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling strategy", pod.Namespace, pod.Name, devPolicy)
-		NewDeviceBinpackPriority(needNumber).Sort(tmpStore)
+		if numaDevices, ok := CanNotCrossNumaNode(needNumber, tmpStore); ok {
+			klog.V(3).Infoln("Try using NUMA allocation mode")
+			numaDevices.NumaScoreBinpackCallback(func(numaNode int, devices []*DeviceInfo) bool {
+				// Filter numa nodes with insufficient number of devices.
+				if needNumber > len(devices) {
+					return false
+				}
+				klog.V(4).Infof("Currently allocating devices on numa node %d", numaNode)
+				NewDeviceBinpackPriority().Sort(devices)
+				claimDevices, err = allocateDevices(devices, pod, node.GetName(), needNumber, needCores, needMemory)
+				return err == nil
+			})
+			if err == nil {
+				goto DONE
+			}
+			// When there is only one numa, quickly return an error
+			if len(numaDevices) == 1 {
+				return nil, err
+			}
+			klog.Warningf("NUMA node allocation failed, fallback to normal resource allocation mode")
+		}
+		NewDeviceBinpackPriority().Sort(tmpStore)
 	case string(util.SpreadPolicy):
 		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling strategy", pod.Namespace, pod.Name, devPolicy)
-		NewDeviceSpreadPriority(needNumber).Sort(tmpStore)
+		if numaDevices, ok := CanNotCrossNumaNode(needNumber, tmpStore); ok {
+			klog.V(3).Infoln("Try using NUMA allocation mode")
+			numaDevices.NumaScoreSpreadCallback(func(numaNode int, devices []*DeviceInfo) (done bool) {
+				// Filter numa nodes with insufficient number of devices.
+				if needNumber > len(devices) {
+					return done
+				}
+				klog.V(4).Infof("Currently allocating devices on numa node %d", numaNode)
+				NewDeviceSpreadPriority().Sort(devices)
+				claimDevices, err = allocateDevices(devices, pod, node.GetName(), needNumber, needCores, needMemory)
+				return err == nil
+			})
+			if err == nil {
+				goto DONE
+			}
+			// When there is only one numa, quickly return an error
+			if len(numaDevices) == 1 {
+				return nil, err
+			}
+			klog.Warningf("NUMA node allocation failed, fallback to normal resource allocation mode")
+		}
+		NewDeviceSpreadPriority().Sort(tmpStore)
 	default:
 		klog.V(4).Infof("Pod <%s/%s> no device scheduling strategy", pod.Namespace, pod.Name)
-		NewSortPriority(ByDeviceIdAsc).Sort(tmpStore)
+		NewSortPriority(ByNumaAsc, ByDeviceIdAsc).Sort(tmpStore)
+	}
+	claimDevices, err = allocateDevices(tmpStore, pod, node.GetName(), needNumber, needCores, needMemory)
+	if err != nil {
+		return nil, err
 	}
 
-	assignDevice := &ContainerDevices{Name: container.Name}
+DONE:
+	if len(claimDevices) == 0 {
+		return nil, fmt.Errorf("insufficient GPU on node %s", node.GetName())
+	}
+	assignDevice := &ContainerDevices{Name: container.Name, Devices: claimDevices}
+	sort.Slice(assignDevice.Devices, func(i, j int) bool {
+		devA := assignDevice.Devices[i]
+		devB := assignDevice.Devices[j]
+		return devA.Id < devB.Id
+	})
+	return assignDevice, nil
+}
+
+func allocateDevices(tmpStore []*DeviceInfo, pod *corev1.Pod, nodeName string, needNumber, needCores, needMemory int) ([]ClaimDevice, error) {
+	var devices []ClaimDevice
 	for i, deviceInfo := range tmpStore {
 		if needNumber == 0 {
 			break
-		}
-		// Skip unhealthy device.
-		if !deviceInfo.Healthy() {
-			klog.V(4).Infof("current gpu device %d it's unhealthy, skip allocation", i)
-			continue
-		}
-		// Filter MIG device.
-		if deviceInfo.Mig() {
-			klog.V(4).Infof("current gpu device %d enabled mig mode, skip allocation", i)
-			continue
 		}
 		// Filter for insufficient number of virtual devices.
 		if deviceInfo.AllocatableNumber() == 0 {
@@ -133,21 +200,16 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 				deviceInfo.GetType(), fmt.Sprintf("'%s' or '%s'", util.PodIncludeGPUUUIDAnnotation, util.PodExcludeGPUUUIDAnnotation))
 			continue
 		}
-		assignDevice.Devices = append(assignDevice.Devices, ClaimDevice{
+		devices = append(devices, ClaimDevice{
 			Id:     deviceInfo.GetID(),
 			Uuid:   deviceInfo.GetUUID(),
-			Core:   needCores,
+			Cores:  needCores,
 			Memory: reqMemory,
 		})
 		needNumber--
 	}
 	if needNumber > 0 {
-		return nil, fmt.Errorf("insufficient GPU on node %s", node.GetName())
+		return nil, fmt.Errorf("insufficient GPU on node %s", nodeName)
 	}
-	sort.Slice(assignDevice.Devices, func(i, j int) bool {
-		devA := assignDevice.Devices[i]
-		devB := assignDevice.Devices[j]
-		return devA.Id < devB.Id
-	})
-	return assignDevice, nil
+	return devices, nil
 }

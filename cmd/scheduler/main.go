@@ -89,7 +89,7 @@ func main() {
 	option := informers.WithTransform(cache.TransformStripManagedFields())
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
 
-	bindPlugin, err := bind.New(kubeClient, recorder)
+	bindPlugin, err := bind.New(kubeClient, recorder, opt.FeatureGate.Enabled(options.SerialBindNode))
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler BindPlugin failed: %v", err)
 	}
@@ -137,6 +137,7 @@ func main() {
 			cancelFunc()
 		}
 	}()
+
 	exitCode := 0
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)

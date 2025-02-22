@@ -36,17 +36,30 @@ var (
 	ByNumaAsc = func(p1, p2 *DeviceInfo) bool {
 		return p1.GetNUMA() < p2.GetNUMA()
 	}
-	//ByAllocatableNumberAsc = func(p1, p2 *DeviceInfo) bool {
-	//	return p1.AllocatableNumber() < p2.AllocatableNumber()
-	//}
-	ByNodeScoreDes = func(p1, p2 *NodeInfo) bool {
-		return GetNodeScore(p1) > GetNodeScore(p2)
-	}
-	ByNodeScoreAsc = func(p1, p2 *NodeInfo) bool {
-		return GetNodeScore(p1) < GetNodeScore(p2)
-	}
 	ByNodeNameAsc = func(p1, p2 *NodeInfo) bool {
 		return p1.GetName() < p2.GetName()
+	}
+	// ByNodeScoreAsc Sort in ascending order based on node scores,
+	// to avoid double counting scores, a score cache was used.
+	ByNodeScoreAsc = func(nodeInfoList []*NodeInfo) func(p1, p2 *NodeInfo) bool {
+		nodeScoreMap := map[string]float64{}
+		for _, nodeInfo := range nodeInfoList {
+			nodeScoreMap[nodeInfo.GetName()] = GetNodeScore(nodeInfo)
+		}
+		return func(p1, p2 *NodeInfo) bool {
+			return nodeScoreMap[p1.GetName()] < nodeScoreMap[p2.GetName()]
+		}
+	}
+	// ByNodeScoreDes Sort in descending order based on node scores,
+	// to avoid double counting scores, a score cache was used.
+	ByNodeScoreDes = func(nodeInfoList []*NodeInfo) func(p1, p2 *NodeInfo) bool {
+		nodeScoreMap := map[string]float64{}
+		for _, nodeInfo := range nodeInfoList {
+			nodeScoreMap[nodeInfo.GetName()] = GetNodeScore(nodeInfo)
+		}
+		return func(p1, p2 *NodeInfo) bool {
+			return nodeScoreMap[p1.GetName()] > nodeScoreMap[p2.GetName()]
+		}
 	}
 )
 
@@ -90,56 +103,59 @@ func (sp *sortPriority[T]) Less(i, j int) bool {
 	return sp.less[k](sp.data[i], sp.data[j])
 }
 
-func NewNodeBinpackPriority() *sortPriority[*NodeInfo] {
-	return &sortPriority[*NodeInfo]{
-		less: []LessFunc[*NodeInfo]{
-			ByNodeScoreAsc,
-			ByNodeNameAsc,
-		},
-	}
-}
-
-// GetNodeScore 计算节点空闲资源得分：空闲资源 / 资源总量 = 可用资源百分比
+// GetNodeScore Calculate node score: freeResource / totalResource = scorePercentage
 func GetNodeScore(info *NodeInfo) float64 {
 	var multiplier = float64(100)
-	numPercentage := float64(info.GetAvailableNumber()) / float64(info.GetTotalNumber())
-	memPercentage := float64(info.GetAvailableMemory()) / float64(info.GetTotalMemory())
-	corePercentage := float64(info.GetAvailableCore()) / float64(info.GetTotalCore())
+	numPercentage := safeDiv(float64(info.GetAvailableNumber()), float64(info.GetTotalNumber()))
+	memPercentage := safeDiv(float64(info.GetAvailableMemory()), float64(info.GetTotalMemory()))
+	corePercentage := safeDiv(float64(info.GetAvailableCores()), float64(info.GetTotalCores()))
 	score := multiplier * (numPercentage + memPercentage + corePercentage)
 	klog.V(5).Infof("Current Node <%s> resource score is <%.2f>", info.name, score)
 	return score
 }
 
-func NewNodeSpreadPriority() *sortPriority[*NodeInfo] {
+func safeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
+}
+
+func NewNodeBinpackPriority(nodeInfos []*NodeInfo) *sortPriority[*NodeInfo] {
 	return &sortPriority[*NodeInfo]{
 		less: []LessFunc[*NodeInfo]{
-			ByNodeScoreDes,
+			ByNodeScoreAsc(nodeInfos),
 			ByNodeNameAsc,
 		},
 	}
 }
 
-func NewDeviceBinpackPriority(number int) *sortPriority[*DeviceInfo] {
-	var lessFunc = make([]LessFunc[*DeviceInfo], 0, 4)
-	if number > 1 {
-		lessFunc = append(lessFunc, ByNumaAsc)
-	}
-	lessFunc = append(lessFunc, ByAllocatableMemoryAsc,
-		ByAllocatableCoresAsc, ByDeviceIdAsc)
-	return &sortPriority[*DeviceInfo]{
-		less: lessFunc,
+func NewNodeSpreadPriority(nodeInfos []*NodeInfo) *sortPriority[*NodeInfo] {
+	return &sortPriority[*NodeInfo]{
+		less: []LessFunc[*NodeInfo]{
+			ByNodeScoreDes(nodeInfos),
+			ByNodeNameAsc,
+		},
 	}
 }
 
-func NewDeviceSpreadPriority(number int) *sortPriority[*DeviceInfo] {
-	var lessFunc = make([]LessFunc[*DeviceInfo], 0, 5)
-	if number > 1 {
-		lessFunc = append(lessFunc, ByNumaAsc)
-	}
-	lessFunc = append(lessFunc, ByAllocatableMemoryDes,
-		ByAllocatableNumberDes, ByAllocatableCoresDes,
-		ByDeviceIdAsc)
+func NewDeviceBinpackPriority() *sortPriority[*DeviceInfo] {
 	return &sortPriority[*DeviceInfo]{
-		less: lessFunc,
+		less: []LessFunc[*DeviceInfo]{
+			ByAllocatableMemoryAsc,
+			ByAllocatableCoresAsc,
+			ByDeviceIdAsc,
+		},
+	}
+}
+
+func NewDeviceSpreadPriority() *sortPriority[*DeviceInfo] {
+	return &sortPriority[*DeviceInfo]{
+		less: []LessFunc[*DeviceInfo]{
+			ByAllocatableMemoryDes,
+			ByAllocatableNumberDes,
+			ByAllocatableCoresDes,
+			ByDeviceIdAsc,
+		},
 	}
 }

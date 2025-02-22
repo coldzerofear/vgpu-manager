@@ -6,6 +6,7 @@ import (
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
+	"k8s.io/component-base/featuregate"
 )
 
 type Options struct {
@@ -20,6 +21,7 @@ type Options struct {
 	TlsKeyFile          string
 	TlsCertFile         string
 	CertRefreshInterval int
+	FeatureGate         featuregate.MutableFeatureGate
 }
 
 const (
@@ -29,9 +31,23 @@ const (
 	defaultServerBindProt      = 3456
 	defaultPprofBindPort       = 0
 	defaultCertRefreshInterval = 5
+
+	// SerialBindNode feature gate will Binding node operation of serial execution scheduler.
+	SerialBindNode = "SerialBindNode"
+)
+
+var (
+	version             bool
+	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
+		SerialBindNode: {Default: false, PreRelease: featuregate.Alpha},
+	}
 )
 
 func NewOptions() *Options {
+	featureGate := featuregate.NewFeatureGate()
+	if err := featureGate.Add(defaultFeatureGates); err != nil {
+		panic(fmt.Sprintf("Failed to add feature gates: %v", err))
+	}
 	return &Options{
 		SchedulerName:       defaultSchedulerName,
 		QPS:                 defaultQPS,
@@ -39,10 +55,9 @@ func NewOptions() *Options {
 		ServerBindProt:      defaultServerBindProt,
 		PprofBindPort:       defaultPprofBindPort,
 		CertRefreshInterval: defaultCertRefreshInterval,
+		FeatureGate:         featureGate,
 	}
 }
-
-var version bool
 
 func (o *Options) InitFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name.")
@@ -57,6 +72,7 @@ func (o *Options) InitFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need enable tls)")
 	fs.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
 	fs.BoolVar(&version, "version", false, "Print version information and quit.")
+	o.FeatureGate.AddFlag(fs)
 	pflag.Parse()
 }
 

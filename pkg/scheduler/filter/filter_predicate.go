@@ -266,10 +266,10 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	switch strings.ToLower(nodePolicy) {
 	case string(util.BinpackPolicy):
 		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling strategy", pod.Namespace, pod.Name, nodePolicy)
-		device.NewNodeBinpackPriority().Sort(nodeInfoList)
+		device.NewNodeBinpackPriority(nodeInfoList).Sort(nodeInfoList)
 	case string(util.SpreadPolicy):
 		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling strategy", pod.Namespace, pod.Name, nodePolicy)
-		device.NewNodeSpreadPriority().Sort(nodeInfoList)
+		device.NewNodeSpreadPriority(nodeInfoList).Sort(nodeInfoList)
 	default:
 		klog.V(4).Infof("Pod <%s/%s> no node scheduling strategy", pod.Namespace, pod.Name)
 	}

@@ -96,7 +96,7 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 					{
 						Id:     0,
 						Uuid:   gpuUUID0,
-						Core:   0,
+						Cores:  0,
 						Memory: 1024,
 					},
 				},
@@ -119,7 +119,7 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 					{
 						Id:     0,
 						Uuid:   gpuUUID0,
-						Core:   20,
+						Cores:  20,
 						Memory: 1024,
 					},
 				},
@@ -142,13 +142,12 @@ func Test_WriteVGPUConfigFile(t *testing.T) {
 					{
 						Id:     0,
 						Uuid:   gpuUUID0,
-						Core:   20,
+						Cores:  20,
 						Memory: 1024,
-					},
-					{
+					}, {
 						Id:     1,
 						Uuid:   gpuUUID1,
-						Core:   30,
+						Cores:  30,
 						Memory: 2048,
 					},
 				},

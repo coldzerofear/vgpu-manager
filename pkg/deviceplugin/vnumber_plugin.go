@@ -215,9 +215,9 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		for idx, dev := range assignDevs.Devices {
 			memoryLimitEnv := fmt.Sprintf("%s_%d", util.CudaMemoryLimitEnv, idx)
 			envMap[memoryLimitEnv] = fmt.Sprintf("%dm", dev.Memory)
-			if dev.Core > 0 && dev.Core < util.HundredCore {
+			if dev.Cores > 0 && dev.Cores < util.HundredCore {
 				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, idx)
-				envMap[coreLimitEnv] = strconv.Itoa(dev.Core)
+				envMap[coreLimitEnv] = strconv.Itoa(dev.Cores)
 			}
 			deviceIds = append(deviceIds, dev.Uuid)
 			nvidiaDeviceFile := fmt.Sprintf("%s%d",

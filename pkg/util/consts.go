@@ -11,7 +11,7 @@ const (
 
 	VGPUNumberResourceName = DomainPrefix + "/vgpu-number"
 	VGPUMemoryResourceName = DomainPrefix + "/vgpu-memory"
-	VGPUCoreResourceName   = DomainPrefix + "/vgpu-core"
+	VGPUCoreResourceName   = DomainPrefix + "/vgpu-cores"
 
 	// NodeDeviceHeartbeatAnnotation Node device heartbeat time
 	NodeDeviceHeartbeatAnnotation = DomainPrefix + "/node-device-heartbeat"

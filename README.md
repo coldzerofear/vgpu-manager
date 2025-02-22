@@ -21,13 +21,14 @@ The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager
 - [x] Webhook dynamic admission, fixing some non-standard pod configurations
 - [ ] Compatible with hot swappable devices and expansion capabilities
 - [ ] Compatible with Volcano Batch Scheduler
+- [ ] Support dynamic resource allocation (DRA)
 
 > Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 
 ## Prerequisite
 
-* Kubernetes v1.23+ (other version not tested)
-* Docker/Containerd (other version not tested)
+* Kubernetes v1.17+ (Install using helm chart method)
+* Docker / Containerd (other runtime not tested)
 * Nvidia Container Toolkit (Configure nvidia container runtime)
 
 ## Build
@@ -115,7 +116,7 @@ helm uninstall vgpu-manager -n kube-system
 
 Submit a VGPU container application with 10% computing power and 1GB of memory
 
-> Note: VGPU pod requires specifying the scheduler name and the number of vGPU devices to be requested by the container.
+> Note: vGPU pod requires specifying the scheduler name and the number of vGPU devices to be requested by the container.
 
 ```yaml
 apiVersion: v1
@@ -131,14 +132,11 @@ spec:
     image: nvidia/cuda:12.4.1-devel-ubuntu20.04
     command: ["sleep", "9999999"]
     resources:
-      requests:
-        cpu: 1
-        memory: 2Gi
       limits:
         cpu: 2
         memory: 4Gi
         nvidia.com/vgpu-number: 1     # Allocate one gpu
-        nvidia.com/vgpu-core: 10      # Allocate 10% of computing power
+        nvidia.com/vgpu-cores: 10      # Allocate 10% of computing power
         nvidia.com/vgpu-memory: 1024  # Allocate memory (default: Mib)
 ```
 
@@ -281,14 +279,14 @@ Opening the core plugin will report the number of virtual cores to the kubelet n
 
 Use the command `--feature-gates=CorePlugin=true` to open the feature.
 
-After opening the feature gate, check the status of the corresponding node to see the registered resource name `nvidia.com/vgpu-core`.
+After opening the feature gate, check the status of the corresponding node to see the registered resource name `nvidia.com/vgpu-cores`.
 
 ```yaml
 status:
   allocatable:
-    nvidia.com/vgpu-core: "200"
+    nvidia.com/vgpu-cores: "200"
   capacity:
-    nvidia.com/vgpu-core: "200"
+    nvidia.com/vgpu-cores: "200"
 ```
 
 > Tips: It may be useful in scenarios where node resource constraints such as `ResourceQuota` are required.
