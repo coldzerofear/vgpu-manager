@@ -144,7 +144,7 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 
 func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	assignDevices device.ContainerDevices, memoryOversold bool, node *corev1.Node) *ResourceDataT {
-	major, minor := devManager.GetVersion().CudaVersion.MajorAndMinor()
+	major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
 	convert48Bytes := func(val string) [48]byte {
 		var byteArray [48]byte
 		copy(byteArray[:], val)
@@ -157,7 +157,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	}
 	computePolicy := GetComputePolicy(pod, node)
 	deviceCount := 0
-	deviceMap := devManager.GetDeviceMap()
+	deviceMap := devManager.GetNodeDeviceMap()
 	nodeConfig := devManager.GetNodeConfig()
 	devices := [util.MaxDeviceNumber]DeviceT{}
 	for i, devInfo := range assignDevices.Devices {
@@ -254,7 +254,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		}
 		var vgpuConfig C.struct_resource_data_t
 		var driverVersion C.struct_version_t
-		major, minor := devManager.GetVersion().CudaVersion.MajorAndMinor()
+		major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
 		driverVersion.major = C.int(major)
 		driverVersion.minor = C.int(minor)
 		vgpuConfig.driver_version = driverVersion
@@ -278,7 +278,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		computePolicy := GetComputePolicy(pod, node)
 
 		deviceCount := 0
-		deviceMap := devManager.GetDeviceMap()
+		deviceMap := devManager.GetNodeDeviceMap()
 		nodeConfig := devManager.GetNodeConfig()
 		for i, devInfo := range assignDevices.Devices {
 			if i >= C.MAX_DEVICE_COUNT {

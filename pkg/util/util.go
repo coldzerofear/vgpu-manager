@@ -59,13 +59,6 @@ func IsVGPUEnabledNode(node *corev1.Node) bool {
 	return GetAllocatableOfNode(node, VGPUNumberResourceName) > 0
 }
 
-func Max(a, b int) int {
-	if a >= b {
-		return a
-	}
-	return b
-}
-
 // GetResourceOfContainer Return the number of resource limit.
 func GetResourceOfContainer(container *corev1.Container, resourceName corev1.ResourceName) int {
 	var count int

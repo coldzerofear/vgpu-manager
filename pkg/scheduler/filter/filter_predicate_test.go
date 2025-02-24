@@ -55,7 +55,7 @@ func Test_DeviceFilter(t *testing.T) {
 			Mig:        false,
 			Number:     10,
 			Numa:       0,
-			Capability: 89,
+			Capability: 8.9,
 			Healthy:    true,
 		}, {
 			Id:         1,
@@ -66,7 +66,7 @@ func Test_DeviceFilter(t *testing.T) {
 			Mig:        false,
 			Number:     10,
 			Numa:       0,
-			Capability: 89,
+			Capability: 8.9,
 			Healthy:    true,
 		}, {
 			Id:         2,
@@ -77,7 +77,7 @@ func Test_DeviceFilter(t *testing.T) {
 			Mig:        false,
 			Number:     10,
 			Numa:       1,
-			Capability: 89,
+			Capability: 8.9,
 			Healthy:    true,
 		}, {
 			Id:         3,
@@ -88,7 +88,7 @@ func Test_DeviceFilter(t *testing.T) {
 			Mig:        false,
 			Number:     10,
 			Numa:       1,
-			Capability: 89,
+			Capability: 8.9,
 			Healthy:    true,
 		}}
 		registerNode, _ := nodeGPUInfos.Encode()

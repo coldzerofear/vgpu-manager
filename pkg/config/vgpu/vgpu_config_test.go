@@ -5,55 +5,61 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	dpoptions "github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 )
 
-func Test_WriteVGPUConfigFile(t *testing.T) {
-	driverVersion := version.Version{
-		DriverVersion: "",
-		CudaVersion:   version.CudaVersion(12020),
+func Test_WriDriverConfigFile(t *testing.T) {
+	driverVersion := nvidia.DriverVersion{
+		DriverVersion:     "",
+		CudaDriverVersion: nvidia.CudaDriverVersion(12020),
 	}
 	option := node.MutationDPOptions(dpoptions.Options{
 		NodeName:            "testNode",
+		DeviceCoresScaling:  float64(1),
 		DeviceMemoryScaling: float64(1),
 	})
 	config, _ := node.NewNodeConfig("", option)
 	gpuUUID0 := "GPU-" + string(uuid.NewUUID())
 	gpuUUID1 := "GPU-" + string(uuid.NewUUID())
-	devices := []*manager.GPUDevice{
+	devices := []*manager.Device{
 		{
-			GPUInfo: device.GPUInfo{
-				Id:      0,
-				Uuid:    gpuUUID0,
-				Core:    100,
-				Memory:  12288,
-				Type:    "Nvidia RTX 3080Ti",
-				Number:  10,
-				Numa:    0,
-				Healthy: true,
+			GPU: &manager.GPUDevice{
+				GpuInfo: &nvidia.GpuInfo{
+					Index: 0,
+					UUID:  gpuUUID0,
+					Minor: 0,
+					Memory: nvml.Memory{
+						Total: 12288 << 20,
+					},
+					ProductName: "Nvidia RTX 3080Ti",
+				},
+				NumaNode: 0,
+				Healthy:  true,
 			},
-			MinorNumber: 0,
 		}, {
-			GPUInfo: device.GPUInfo{
-				Id:      1,
-				Uuid:    gpuUUID1,
-				Core:    100,
-				Memory:  12288,
-				Type:    "Nvidia RTX 3080Ti",
-				Number:  10,
-				Numa:    0,
-				Healthy: true,
+			GPU: &manager.GPUDevice{
+				GpuInfo: &nvidia.GpuInfo{
+					Index: 1,
+					UUID:  gpuUUID1,
+					Minor: 1,
+					Memory: nvml.Memory{
+						Total: 12288 << 20,
+					},
+					ProductName: "Nvidia RTX 3080Ti",
+				},
+				NumaNode: 0,
+				Healthy:  true,
 			},
-			MinorNumber: 1,
 		},
 	}
 	nodes := []*corev1.Node{

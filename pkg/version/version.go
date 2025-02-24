@@ -5,19 +5,6 @@ import (
 	"runtime"
 )
 
-type CudaVersion int
-
-func (v CudaVersion) MajorAndMinor() (major uint, minor uint) {
-	major = uint(v / 1000)
-	minor = uint(v % 1000 / 10)
-	return
-}
-
-type Version struct {
-	DriverVersion string
-	CudaVersion   CudaVersion
-}
-
 // Info contains versioning information.
 // TODO: Add []string of api versions supported? It's still unclear
 // how we'll want to distribute that information.

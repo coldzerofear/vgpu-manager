@@ -3,6 +3,7 @@ module github.com/coldzerofear/vgpu-manager
 go 1.23.1
 
 require (
+	github.com/NVIDIA/go-nvlib v0.7.1
 	github.com/NVIDIA/go-nvml v0.12.4-1
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/google/uuid v1.6.0
@@ -11,7 +12,7 @@ require (
 	github.com/opencontainers/runc v1.2.3
 	github.com/prometheus/client_golang v1.19.1
 	github.com/spf13/pflag v1.0.5
-	github.com/stretchr/testify v1.9.0
+	github.com/stretchr/testify v1.10.0
 	gomodules.xyz/jsonpatch/v2 v2.4.0
 	google.golang.org/grpc v1.65.0
 	k8s.io/api v0.32.0

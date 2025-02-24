@@ -74,7 +74,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 			klog.V(4).Infof("Filter unhealthy device %d", i)
 			continue
 		}
-		// Filter MIG device.
+		// Filter MIG enabled device.
 		if deviceInfo.IsMIG() {
 			klog.V(4).Infof("Filter MIG or Mig's parent device %d", i)
 			continue

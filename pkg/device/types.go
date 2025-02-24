@@ -22,7 +22,7 @@ type DeviceInfo struct {
 	totalCores  int
 	usedMemory  int
 	totalMemory int
-	capability  int
+	capability  float32
 	numa        int
 	migDevice   bool
 	healthy     bool
@@ -42,35 +42,35 @@ func NewFakeDeviceInfo(id, usedNum, totalNum, usedCore, totalCore, usedMem, tota
 	}
 }
 
-func NewDeviceInfo(gpuInfo GPUInfo) *DeviceInfo {
+func NewDeviceInfo(dev NodeDevice) *DeviceInfo {
 	return &DeviceInfo{
-		id:          gpuInfo.Id,
-		uuid:        gpuInfo.Uuid,
-		deviceType:  gpuInfo.Type,
-		totalCores:  gpuInfo.Core,
-		totalMemory: gpuInfo.Memory,
-		migDevice:   gpuInfo.Mig,
-		capability:  gpuInfo.Capability,
-		totalNumber: gpuInfo.Number,
-		numa:        gpuInfo.Numa,
-		healthy:     gpuInfo.Healthy,
+		id:          dev.Id,
+		uuid:        dev.Uuid,
+		deviceType:  dev.Type,
+		totalCores:  dev.Core,
+		totalMemory: dev.Memory,
+		migDevice:   dev.Mig,
+		capability:  dev.Capability,
+		totalNumber: dev.Number,
+		numa:        dev.Numa,
+		healthy:     dev.Healthy,
 	}
 }
 
-type GPUInfo struct {
-	Id         int    `json:"id"`
-	Type       string `json:"type"`
-	Uuid       string `json:"uuid"`
-	Core       int    `json:"core"`
-	Memory     int    `json:"memory"`
-	Number     int    `json:"number"`
-	Numa       int    `json:"numa"`
-	Mig        bool   `json:"mig"`
-	Capability int    `json:"capability"`
-	Healthy    bool   `json:"healthy"`
+type NodeDevice struct {
+	Id         int     `json:"id"`
+	Type       string  `json:"type"`
+	Uuid       string  `json:"uuid"`
+	Core       int     `json:"core"`
+	Memory     int     `json:"memory"`
+	Number     int     `json:"number"`
+	Numa       int     `json:"numa"`
+	Mig        bool    `json:"mig"`
+	Capability float32 `json:"capability"`
+	Healthy    bool    `json:"healthy"`
 }
 
-type NodeDeviceInfos []GPUInfo
+type NodeDeviceInfos []NodeDevice
 
 func (n NodeDeviceInfos) Encode() (string, error) {
 	if marshal, err := json.Marshal(n); err != nil {
@@ -312,7 +312,7 @@ func (dev *DeviceInfo) Healthy() bool {
 }
 
 // GetComputeCapability returns the capability of this device
-func (dev *DeviceInfo) GetComputeCapability() int {
+func (dev *DeviceInfo) GetComputeCapability() float32 {
 	return dev.capability
 }
 
@@ -380,7 +380,7 @@ type NodeInfo struct {
 	usedMemory    int
 	totalCores    int
 	usedCores     int
-	maxCapability int
+	maxCapability float32
 }
 
 func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
@@ -447,7 +447,7 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	}
 
 	for _, deviceInfo := range ret.deviceMap {
-		// Do not include MIG devices and unhealthy devices in the assignable resources.
+		// Do not include MIG enabled devices and unhealthy devices in the assignable resources.
 		if deviceInfo.IsMIG() || !deviceInfo.Healthy() {
 			continue
 		}
@@ -457,7 +457,7 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 		ret.usedMemory = deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
 		ret.totalCores += deviceInfo.GetTotalCores()
 		ret.usedCores = deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
-		ret.maxCapability = util.Max(ret.maxCapability, deviceInfo.capability)
+		ret.maxCapability = max(ret.maxCapability, deviceInfo.capability)
 	}
 
 	return ret, nil
@@ -494,7 +494,7 @@ func (n *NodeInfo) GetNode() *corev1.Node {
 }
 
 // GetMaxCapability returns the maxCapability of GPU devices
-func (n *NodeInfo) GetMaxCapability() int {
+func (n *NodeInfo) GetMaxCapability() float32 {
 	return n.maxCapability
 }
 

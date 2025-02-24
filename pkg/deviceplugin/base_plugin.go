@@ -19,7 +19,7 @@ type baseDevicePlugin struct {
 	manager      *manager.DeviceManager
 
 	server *grpc.Server
-	health chan *pluginapi.Device
+	health chan *manager.Device
 	stop   chan struct{}
 }
 
@@ -40,7 +40,7 @@ func newBaseDevicePlugin(resourceName, socket string, manager *manager.DeviceMan
 
 func (b *baseDevicePlugin) initialize() {
 	b.server = grpc.NewServer([]grpc.ServerOption{}...)
-	b.health = make(chan *pluginapi.Device)
+	b.health = make(chan *manager.Device)
 	b.stop = make(chan struct{})
 }
 

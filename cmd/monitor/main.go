@@ -63,8 +63,11 @@ func main() {
 
 	containerLister := metrics.NewContainerLister(
 		deviceplugin.ContManagerDirectoryPath, nodeConfig.NodeName(), podLister)
-	nodeCollector := metrics.NewNodeGPUCollector(
+	nodeCollector, err := metrics.NewNodeGPUCollector(
 		nodeConfig.NodeName(), nodeLister, podLister, containerLister)
+	if err != nil {
+		klog.Fatalf("Create node gpu collector failed: %v", err)
+	}
 	server := metrics.NewServer(nodeCollector.Registry(), opt.ServerBindProt)
 
 	ctx, cancelCtx := context.WithCancel(context.Background())

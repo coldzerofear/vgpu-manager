@@ -50,9 +50,11 @@ func (m *vcoreDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DeviceP
 	for {
 		select {
 		case d := <-m.base.health:
-			klog.Infof("'%s' device marked unhealthy: %s", m.base.resourceName, d.ID)
-			if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-				klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+			if d.GPU != nil {
+				klog.Infof("'%s' device marked unhealthy: %s", m.base.resourceName, d.GPU.UUID)
+				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
+					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+				}
 			}
 		case <-stopCh:
 			return nil
@@ -85,7 +87,7 @@ func (m *vcoreDevicePlugin) PreStartContainer(_ context.Context, _ *pluginapi.Pr
 
 func (m *vcoreDevicePlugin) Devices() []*pluginapi.Device {
 	var devices []*pluginapi.Device
-	for _, gpuDevice := range m.base.manager.GetDevices() {
+	for _, gpuDevice := range m.base.manager.GetNodeDeviceInfos() {
 		if gpuDevice.Mig { // skip mig device
 			continue
 		}

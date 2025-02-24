@@ -80,9 +80,11 @@ func (m *vnumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.Devic
 	for {
 		select {
 		case d := <-m.base.health:
-			klog.Infof("'%s' device marked unhealthy: %s", m.base.resourceName, d.ID)
-			if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-				klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+			if d.GPU != nil {
+				klog.Infof("'%s' device marked unhealthy: %s", m.base.resourceName, d.GPU.UUID)
+				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
+					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+				}
 			}
 		case <-stopCh:
 			return nil
@@ -110,7 +112,7 @@ const (
 	VGPUConfigFileName = "vgpu.config"
 	DeviceListFileName = "devices.json"
 
-	NvidiaDeviceFilePrefix = "/dev/nvidia"
+	//NvidiaDeviceFilePrefix = "/dev/nvidia"
 	NvidiaCTLFilePath      = "/dev/nvidiactl"
 	NvidiaUVMFilePath      = "/dev/nvidia-uvm"
 	NvidiaUVMToolsFilePath = "/dev/nvidia-uvm-tools"
@@ -130,13 +132,13 @@ func GetContManagerDirectoryPath(podUID types.UID, containerName string) string 
 	return fmt.Sprintf("%s/%s_%s", ContManagerDirectoryPath, string(podUID), containerName)
 }
 
-func GetDeviceMinorMap(gpus []manager.GPUDevice) map[string]int {
-	minorMap := make(map[string]int)
-	for _, gpuDevice := range gpus {
-		minorMap[gpuDevice.Uuid] = gpuDevice.MinorNumber
-	}
-	return minorMap
-}
+//func GetDeviceMinorMap(gpus []manager.GPUDevice) map[string]int {
+//	minorMap := make(map[string]int)
+//	for _, gpuDevice := range gpus {
+//		minorMap[gpuDevice.Uuid] = gpuDevice.MinorNumber
+//	}
+//	return minorMap
+//}
 
 // Allocate is called during container creation so that the Device
 // Plugin can run device specific operations and instruct Kubelet
@@ -182,7 +184,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	klog.V(4).Infof("Current allocated Pod <%s/%s> Uid <%s>",
 		currentPod.Namespace, currentPod.Name, currentPod.UID)
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
-	devMinorMap := GetDeviceMinorMap(m.base.manager.GetDevices())
+	deviceMap := m.base.manager.GetGPUDeviceMap()
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIDs())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -220,13 +222,20 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 				envMap[coreLimitEnv] = strconv.Itoa(dev.Cores)
 			}
 			deviceIds = append(deviceIds, dev.Uuid)
-			nvidiaDeviceFile := fmt.Sprintf("%s%d",
-				NvidiaDeviceFilePrefix, devMinorMap[dev.Uuid])
-			devices = append(devices, &pluginapi.DeviceSpec{
-				ContainerPath: nvidiaDeviceFile,
-				HostPath:      nvidiaDeviceFile,
-				Permissions:   "rw",
-			})
+			gpuDevice, ok := deviceMap[dev.Uuid]
+			if !ok {
+				err = fmt.Errorf("no device uuid  %s exists", dev.Uuid)
+				klog.V(3).ErrorS(err, "", "pod",
+					fmt.Sprintf("%s/%s", currentPod.Namespace, currentPod.Name))
+				return resp, err
+			}
+			for _, deviceFilePath := range gpuDevice.Paths {
+				devices = append(devices, &pluginapi.DeviceSpec{
+					ContainerPath: deviceFilePath,
+					HostPath:      deviceFilePath,
+					Permissions:   "rw",
+				})
+			}
 		}
 		deviceIdStr := strings.Join(deviceIds, ",")
 		envMap[util.GPUDeviceUuidEnv] = deviceIdStr
@@ -492,7 +501,7 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 
 func (m *vnumberDevicePlugin) Devices() []*pluginapi.Device {
 	var devices []*pluginapi.Device
-	for _, gpuDevice := range m.base.manager.GetDevices() {
+	for _, gpuDevice := range m.base.manager.GetNodeDeviceInfos() {
 		if gpuDevice.Mig { // skip MIG device
 			continue
 		}

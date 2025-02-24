@@ -6,9 +6,10 @@ import (
 	"strings"
 	"time"
 
+	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
@@ -26,6 +27,7 @@ type CollectorService interface {
 
 // nodeGPUCollector implements the Collector interface.
 type nodeGPUCollector struct {
+	*nvidia.DeviceLib
 	nodeName   string
 	nodeLister listerv1.NodeLister
 	podLister  listerv1.PodLister
@@ -35,13 +37,18 @@ type nodeGPUCollector struct {
 var _ CollectorService = &nodeGPUCollector{}
 
 func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister,
-	podLister listerv1.PodLister, contLister *ContainerLister) CollectorService {
+	podLister listerv1.PodLister, contLister *ContainerLister) (CollectorService, error) {
+	deviceLib, err := nvidia.NewDeviceLib("/")
+	if err != nil {
+		return nil, err
+	}
 	return &nodeGPUCollector{
+		DeviceLib:  deviceLib,
 		nodeName:   nodeName,
 		nodeLister: nodeLister,
 		podLister:  podLister,
 		contLister: contLister,
-	}
+	}, nil
 }
 
 // Registry return to Prometheus registry.
@@ -57,17 +64,17 @@ var (
 	physicalGPUTotalMemory = prometheus.NewDesc(
 		"physical_gpu_device_total_memory_in_bytes",
 		"Physical GPU device total memory (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "migenable", "migdevice"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "migenable"}, nil,
 	)
 	physicalGPUMemoryUsage = prometheus.NewDesc(
 		"physical_gpu_device_memory_usage_in_bytes",
 		"Physical GPU device memory usage (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "migenable", "migdevice"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "migenable"}, nil,
 	)
 	physicalGPUCoreUtilRate = prometheus.NewDesc(
 		"physical_gpu_device_core_utilization_rate",
 		"Physical GPU device core utilization rate (percentage)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "migenable", "migdevice"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "migenable"}, nil,
 	)
 	nodeVGPUTotalMemory = prometheus.NewDesc(
 		"node_vgpu_total_memory_in_bytes",
@@ -172,77 +179,57 @@ func ContainerDeviceProcUtilFunc(procUtils procUtilList,
 func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	klog.V(4).Infof("Starting to collect metrics for vGPU on node <%s>", c.nodeName)
 	var (
-		devCount       int
 		devIndexMap    = make(map[string]int)
 		devProcInfoMap = make(map[string]procInfoList)
 		devProcUtilMap = make(map[string]procUtilList)
 	)
-
-	rt := nvml.Init()
-	if rt != nvml.SUCCESS {
-		klog.Errorf("nvml Init error: %s", nvml.ErrorString(rt))
+	err := c.Init()
+	if err != nil {
+		klog.Errorln(err)
 		goto skip
 	}
-	defer nvml.Shutdown()
+	defer c.Shutdown()
 
-	devCount, rt = nvml.DeviceGetCount()
-	if rt != nvml.SUCCESS {
-		klog.Errorf("nvml DeviceGetCount error: %s", nvml.ErrorString(rt))
-		goto skip
-	}
-	for devIdx := 0; devIdx < devCount; devIdx++ {
-		hdev, rt := nvml.DeviceGetHandleByIndex(devIdx)
-		if rt != nvml.SUCCESS {
-			klog.Errorf("nvml DeviceGetHandleByIndex %d error: %s", devIdx, nvml.ErrorString(rt))
-			continue
-		}
+	err = c.VisitDevices(func(index int, hdev nvdev.Device) error {
 		memoryInfo, rt := hdev.GetMemoryInfo()
 		if rt != nvml.SUCCESS {
-			klog.Errorf("nvml DeviceGetMemoryInfo %d error: %s", devIdx, nvml.ErrorString(rt))
-			continue
+			klog.Errorf("error getting memory info for device %d: %v", index, rt)
+			return nil
 		}
 		deviceUUID, rt := hdev.GetUUID()
 		if rt != nvml.SUCCESS {
-			klog.Errorf("nvml DeviceGetUUID %d error: %s", devIdx, nvml.ErrorString(rt))
-			continue
+			klog.Errorf("error getting UUID for device %d: %v", index, rt)
+			return nil
 		}
 		deviceUtil, rt := hdev.GetUtilizationRates()
 		if rt != nvml.SUCCESS {
-			klog.Errorf("nvml DeviceGetUtilizationRates %d error: %s", devIdx, nvml.ErrorString(rt))
-			continue
+			klog.Errorf("error getting utilization rates for device %d: %v", index, rt)
+			return nil
 		}
-		migEnabled, rt := manager.DeviceHandleIsMigEnabled(hdev)
-		if rt != nvml.SUCCESS {
-			klog.Errorf("nvml DeviceHandleIsMigEnabled %d error: %s", devIdx, nvml.ErrorString(rt))
-			continue
-		}
-		migDevice, rt := hdev.IsMigDeviceHandle()
-		if rt != nvml.SUCCESS {
-			klog.Errorf("nvml DeviceIsMigDeviceHandle %d error: %s", devIdx, nvml.ErrorString(rt))
-			continue
+		migEnabled, err := hdev.IsMigEnabled()
+		if err != nil {
+			klog.Errorln(err)
+			return nil
 		}
 
-		deviceIndex := strconv.Itoa(devIdx)
+		deviceIndex := strconv.Itoa(index)
 		ch <- prometheus.MustNewConstMetric(
 			physicalGPUTotalMemory,
 			prometheus.GaugeValue,
 			float64(memoryInfo.Total),
-			c.nodeName, deviceIndex, deviceUUID,
-			fmt.Sprint(migEnabled), fmt.Sprint(migDevice))
+			c.nodeName, deviceIndex, deviceUUID, fmt.Sprint(migEnabled))
 
 		ch <- prometheus.MustNewConstMetric(
 			physicalGPUMemoryUsage,
 			prometheus.GaugeValue,
 			float64(memoryInfo.Used),
-			c.nodeName, deviceIndex, deviceUUID,
-			fmt.Sprint(migEnabled), fmt.Sprint(migDevice))
+			c.nodeName, deviceIndex, deviceUUID, fmt.Sprint(migEnabled))
 
 		ch <- prometheus.MustNewConstMetric(
 			physicalGPUCoreUtilRate,
 			prometheus.GaugeValue,
 			float64(deviceUtil.Gpu),
-			c.nodeName, deviceIndex, deviceUUID,
-			fmt.Sprint(migEnabled), fmt.Sprint(migDevice))
+			c.nodeName, deviceIndex, deviceUUID, fmt.Sprint(migEnabled))
 
 		// Aggregate GPU processes.
 		var processInfos []nvml.ProcessInfo
@@ -265,19 +252,23 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 			processInfoList[processInfo.Pid] = procInfo
 		}
-		devIndexMap[deviceUUID] = devIdx
+		devIndexMap[deviceUUID] = index
 		devProcInfoMap[deviceUUID] = processInfoList
 		lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
 		procUtilSamples, rt := hdev.GetProcessUtilization(uint64(lastTs))
 		if rt != nvml.SUCCESS {
-			klog.V(5).Infof("nvml DeviceGetProcessUtilization %d error: %s", devIdx, nvml.ErrorString(rt))
-			continue
+			klog.V(4).Infof("error getting process utilization for device %d: %v", index, rt)
+			return nil
 		}
 		processUtilList := make(procUtilList)
 		for _, procUtilSample := range procUtilSamples {
 			processUtilList[procUtilSample.Pid] = procUtilSample
 		}
 		devProcUtilMap[deviceUUID] = processUtilList
+		return nil
+	})
+	if err != nil {
+		klog.Errorln(err)
 	}
 
 skip:
@@ -297,7 +288,7 @@ skip:
 	registryNode, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 	deviceInfos, _ := device.ParseNodeDeviceInfos(registryNode)
 	for _, info := range deviceInfos {
-		// Skip the statistics of Mig device or Mig's parent device
+		// Skip the statistics of Mig device
 		if info.Mig {
 			continue
 		}

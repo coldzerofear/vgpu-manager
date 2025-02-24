@@ -61,7 +61,12 @@ func main() {
 	util.InitializeCGroupDriver(nodeConfig)
 
 	klog.V(3).Info("Initialize Device Resource Manager")
-	deviceManager := devm.NewDeviceManager(nodeConfig, kubeClient)
+	deviceManager, err := devm.NewDeviceManager(nodeConfig, kubeClient)
+	if err != nil {
+		klog.Infoln("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
+		klog.Infoln("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
+		klog.Fatalln(err)
+	}
 
 	klog.V(3).Info("Starting FS watcher.")
 	devicePluginSocket := filepath.Join(opt.DevicePluginPath, "kubelet.sock")
@@ -127,7 +132,7 @@ restart:
 	// them if they have any devices to serve. If even one plugin fails to
 	// start properly, try starting them all again.
 	for _, p := range plugins {
-		p.Stop()
+		_ = p.Stop()
 
 		// Just continue if there are no devices to serve for plugin p.
 		if len(p.Devices()) == 0 {
@@ -183,7 +188,8 @@ restart:
 exit:
 	deviceManager.Stop()
 	for _, p := range plugins {
-		p.Stop()
+		_ = p.Stop()
 	}
+
 	os.Exit(exitCode)
 }

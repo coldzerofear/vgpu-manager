@@ -2,8 +2,6 @@ package device
 
 import (
 	"sort"
-
-	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
 
 type NumaDevices map[int][]*DeviceInfo
@@ -19,7 +17,7 @@ func NewNumaDevices(devices []*DeviceInfo) NumaDevices {
 func (n NumaDevices) MaxDeviceNumberForNumaNode() int {
 	maxNum := 0
 	for _, devices := range n {
-		maxNum = util.Max(maxNum, len(devices))
+		maxNum = max(maxNum, len(devices))
 	}
 	return maxNum
 }
