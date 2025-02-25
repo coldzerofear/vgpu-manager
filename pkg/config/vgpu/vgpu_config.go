@@ -132,7 +132,9 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 		klog.Errorf("Failed to open file: %s, error: %v", filePath, err)
 		return nil, nil, err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 	data, err := syscall.Mmap(int(f.Fd()), 0, int(dataSize), syscall.PROT_WRITE|syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
 		klog.Errorf("Failed to mmap file: %s, error: %v", filePath, err)

@@ -32,6 +32,8 @@ type NodeConfig struct {
 	deviceMemoryFactor  int
 	deviceCoresScaling  float64
 	excludeDevices      sets.Int
+	gdsEnabled          bool
+	mofedEnable         bool
 	checkFields         bool
 }
 
@@ -65,6 +67,14 @@ func (nc NodeConfig) DeviceCoresScaling() float64 {
 
 func (nc NodeConfig) ExcludeDevices() sets.Int {
 	return nc.excludeDevices
+}
+
+func (nc NodeConfig) GDSEnabled() bool {
+	return nc.gdsEnabled
+}
+
+func (nc NodeConfig) MOFEDEnable() bool {
+	return nc.mofedEnable
 }
 
 func (nc NodeConfig) String() string {
@@ -104,6 +114,8 @@ func MutationDPOptions(opt dpoptions.Options) func(*NodeConfig) {
 		nodeConfig.deviceMemoryFactor = opt.DeviceMemoryFactor
 		nodeConfig.deviceCoresScaling = opt.DeviceCoresScaling
 		nodeConfig.excludeDevices = ParseExcludeDevices(opt.ExcludeDevices)
+		nodeConfig.gdsEnabled = opt.GDSEnabled
+		nodeConfig.mofedEnable = opt.MOFEDEnabled
 		nodeConfig.checkFields = true
 	}
 }

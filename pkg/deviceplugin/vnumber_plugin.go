@@ -116,12 +116,19 @@ const (
 	NvidiaCTLFilePath      = "/dev/nvidiactl"
 	NvidiaUVMFilePath      = "/dev/nvidia-uvm"
 	NvidiaUVMToolsFilePath = "/dev/nvidia-uvm-tools"
+	NvidiaModeSetFilePath  = "/dev/nvidia-modeset"
 )
 
 var (
 	HostManagerDirectoryPath = os.Getenv("HOST_MANAGER_DIR")
 	HostPreLoadFilePath      = HostManagerDirectoryPath + "/" + LdPreLoadFileName
 	HostVGPUControlFilePath  = HostManagerDirectoryPath + "/" + VGPUControlFileName
+	deviceFileMountConfig    = map[string]bool{
+		NvidiaCTLFilePath:      true,
+		NvidiaUVMFilePath:      true,
+		NvidiaUVMToolsFilePath: true,
+		NvidiaModeSetFilePath:  true,
+	}
 )
 
 func GetHostManagerDirectoryPath(podUID types.UID, containerName string) string {
@@ -131,14 +138,6 @@ func GetHostManagerDirectoryPath(podUID types.UID, containerName string) string 
 func GetContManagerDirectoryPath(podUID types.UID, containerName string) string {
 	return fmt.Sprintf("%s/%s_%s", ContManagerDirectoryPath, string(podUID), containerName)
 }
-
-//func GetDeviceMinorMap(gpus []manager.GPUDevice) map[string]int {
-//	minorMap := make(map[string]int)
-//	for _, gpuDevice := range gpus {
-//		minorMap[gpuDevice.Uuid] = gpuDevice.MinorNumber
-//	}
-//	return minorMap
-//}
 
 // Allocate is called during container creation so that the Device
 // Plugin can run device specific operations and instruct Kubelet
@@ -240,19 +239,16 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		deviceIdStr := strings.Join(deviceIds, ",")
 		envMap[util.GPUDeviceUuidEnv] = deviceIdStr
 		envMap[util.NvidiaVisibleDevicesEnv] = deviceIdStr
-		devices = append(devices, &pluginapi.DeviceSpec{
-			ContainerPath: NvidiaCTLFilePath,
-			HostPath:      NvidiaCTLFilePath,
-			Permissions:   "rw",
-		}, &pluginapi.DeviceSpec{
-			ContainerPath: NvidiaUVMFilePath,
-			HostPath:      NvidiaUVMFilePath,
-			Permissions:   "rw",
-		}, &pluginapi.DeviceSpec{
-			ContainerPath: NvidiaUVMToolsFilePath,
-			HostPath:      NvidiaUVMToolsFilePath,
-			Permissions:   "rw",
-		})
+		for devFilePath, ok := range deviceFileMountConfig {
+			if !ok || util.PathIsNotExist(devFilePath) {
+				continue
+			}
+			devices = append(devices, &pluginapi.DeviceSpec{
+				ContainerPath: devFilePath,
+				HostPath:      devFilePath,
+				Permissions:   "rw",
+			})
+		}
 		mounts = append(mounts, &pluginapi.Mount{ // mount /proc dir
 			ContainerPath: ContProcDirectoryPath,
 			HostPath:      HostProcDirectoryPath,
@@ -319,6 +315,12 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			return resp, err
 		}
 		currentPod.Annotations[util.PodVGPURealAllocAnnotation] = realAllocated
+		if m.base.manager.GetNodeConfig().GDSEnabled() {
+			envMap["NVIDIA_GDS"] = "enabled"
+		}
+		if m.base.manager.GetNodeConfig().MOFEDEnable() {
+			envMap["NVIDIA_MOFED"] = "enabled"
+		}
 		responses[i] = &pluginapi.ContainerAllocateResponse{
 			Envs:    envMap,
 			Mounts:  mounts,
@@ -344,10 +346,9 @@ func (m *vnumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
 	activePods := make(map[string]*corev1.Pod)
 	nodeName := m.base.manager.GetNodeConfig().NodeName()
 	for i, pod := range podList.Items {
-		if pod.Spec.NodeName != nodeName {
-			continue
-		}
-		if !util.IsVGPUResourcePod(&pod) || util.PodIsTerminated(&pod) {
+		if pod.Spec.NodeName != nodeName ||
+			!util.IsVGPUResourcePod(&pod) ||
+			util.PodIsTerminated(&pod) {
 			continue
 		}
 		activePods[string(pod.UID)] = &podList.Items[i]
@@ -365,10 +366,8 @@ func (m *vnumberDevicePlugin) getCurrentPodInfoByCheckpoint(devicesIDs []string)
 	}
 	devSet := sets.NewString(devicesIDs...)
 	for _, entry := range cp.PodDeviceEntries {
-		if entry.ResourceName != util.VGPUNumberResourceName {
-			continue
-		}
-		if !devSet.HasAll(entry.DeviceIDs...) {
+		if entry.ResourceName != util.VGPUNumberResourceName ||
+			!devSet.HasAll(entry.DeviceIDs...) {
 			continue
 		}
 		if pod, ok := m.GetActiveVGPUPodsOnNode()[entry.PodUID]; ok {

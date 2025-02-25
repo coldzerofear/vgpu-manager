@@ -87,11 +87,11 @@ func (m *vmemoryDevicePlugin) PreStartContainer(_ context.Context, _ *pluginapi.
 
 func (m *vmemoryDevicePlugin) Devices() []*pluginapi.Device {
 	var devices []*pluginapi.Device
+	config := m.base.manager.GetNodeConfig()
 	for _, gpuDevice := range m.base.manager.GetNodeDeviceInfos() {
 		if gpuDevice.Mig { // skip mig device
 			continue
 		}
-		config := m.base.manager.GetNodeConfig()
 		for i := 0; i < gpuDevice.Memory/config.DeviceMemoryFactor(); i++ {
 			devId := fmt.Sprintf("vmemory-%d-%d", gpuDevice.Id, i)
 			health := pluginapi.Healthy

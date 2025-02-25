@@ -26,6 +26,8 @@ type Options struct {
 	ExcludeDevices      string
 	DevicePluginPath    string
 	PprofBindPort       int
+	GDSEnabled          bool
+	MOFEDEnabled        bool
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -61,6 +63,8 @@ func NewOptions() *Options {
 	if err := featureGate.Add(defaultFeatureGates); err != nil {
 		panic(fmt.Sprintf("Failed to add feature gates: %v", err))
 	}
+	gdsEnabled := os.Getenv("NVIDIA_GDS") == "enable" || os.Getenv("NVIDIA_GDS") == "true"
+	mofedEnabledd := os.Getenv("NVIDIA_MOFED") == "enable" || os.Getenv("NVIDIA_MOFED") == "true"
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -72,6 +76,8 @@ func NewOptions() *Options {
 		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
 		DevicePluginPath:    pluginapi.DevicePluginPath,
 		PprofBindPort:       defaultPprofBindPort,
+		GDSEnabled:          gdsEnabled,
+		MOFEDEnabled:        mofedEnabledd,
 		FeatureGate:         featureGate,
 	}
 }
@@ -92,6 +98,8 @@ func (o *Options) InitFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.DevicePluginPath, "device-plugin-path", o.DevicePluginPath, "The path for kubelet receive device plugin registration.")
 	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
 	fs.BoolVar(&version, "version", false, "Print version information and quit.")
+	fs.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")
+	fs.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
 	o.FeatureGate.AddFlag(fs)
 	pflag.Parse()
 }
