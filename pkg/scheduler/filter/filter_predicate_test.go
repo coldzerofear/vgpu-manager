@@ -237,6 +237,40 @@ func Test_DeviceFilter(t *testing.T) {
 			},
 			nodeName: nodeList[0].Name,
 			err:      nil,
+		}, {
+			name: "example7: multiple containers, exceeds limit",
+			containers: []corev1.Container{
+				{
+					Name: "cont1",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
+							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 100)),
+							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 12288)),
+						},
+					},
+				}, {
+					Name: "cont2",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
+							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 100)),
+							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 12288)),
+						},
+					},
+				}, {
+					Name: "cont3",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
+							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 100)),
+							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 12288)),
+						},
+					},
+				},
+			},
+			nodeName: "",
+			err:      nil,
 		},
 	}
 	for i, testCase := range testCases {
@@ -260,24 +294,28 @@ func Test_DeviceFilter(t *testing.T) {
 			// wait for podLister to sync
 			time.Sleep(time.Second)
 
-			nodes, failedNodes, err := filterPredicate.deviceFilter(pod, nodeList)
+			nodes, _, err := filterPredicate.deviceFilter(pod, nodeList)
 			assert.Equal(t, testCase.err, err)
 			if err != nil {
 				return
 			}
-			if len(nodes) != 1 {
-				t.Fatalf("deviceFilter should return exact one node: %v, failedNodes: %v", nodes, failedNodes)
+			var nodeName string
+			if len(nodes) > 0 {
+				nodeName = nodes[0].Name
+				//t.Fatalf("deviceFilter should return exact one node: %v, failedNodes: %v", nodes, failedNodes)
 			}
-			assert.Equal(t, testCase.nodeName, nodes[0].Name)
+			assert.Equal(t, testCase.nodeName, nodeName)
 
 			// wait for podLister to sync
 			time.Sleep(time.Second)
 
-			// get the latest pod and bind it to the node
-			pod, _ = k8sClient.CoreV1().Pods(namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-			pod.Spec.NodeName = nodes[0].Name
-			pod.Status.Phase = corev1.PodRunning
-			pod, _ = k8sClient.CoreV1().Pods("test-ns").Update(context.Background(), pod, metav1.UpdateOptions{})
+			if len(nodeName) > 0 {
+				// get the latest pod and bind it to the node
+				pod, _ = k8sClient.CoreV1().Pods(namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+				pod.Spec.NodeName = nodes[0].Name
+				pod.Status.Phase = corev1.PodRunning
+				pod, _ = k8sClient.CoreV1().Pods("test-ns").Update(context.Background(), pod, metav1.UpdateOptions{})
+			}
 		})
 	}
 

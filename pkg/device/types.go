@@ -452,15 +452,28 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 			continue
 		}
 		ret.totalNumber += deviceInfo.GetTotalNumber()
-		ret.usedNumber = deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
+		ret.usedNumber += deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
 		ret.totalMemory += deviceInfo.GetTotalMemory()
-		ret.usedMemory = deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
+		ret.usedMemory += deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
 		ret.totalCores += deviceInfo.GetTotalCores()
-		ret.usedCores = deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
+		ret.usedCores += deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
 		ret.maxCapability = max(ret.maxCapability, deviceInfo.capability)
 	}
 
 	return ret, nil
+}
+
+// AddUsedResources records the used GPU core and memory
+func (n *NodeInfo) AddUsedResources(id int, core int, memory int) error {
+	if err := n.addUsedResources(id, core, memory); err != nil {
+		return err
+	}
+	if device := n.deviceMap[id]; !device.IsMIG() && device.Healthy() {
+		n.usedNumber++
+		n.usedCores += core
+		n.usedMemory += memory
+	}
+	return nil
 }
 
 // addUsedResources records the used GPU core and memory

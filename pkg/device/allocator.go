@@ -21,6 +21,16 @@ func NewAllocator(n *NodeInfo) *allocator {
 	}
 }
 
+func (alloc *allocator) addAllocateOne(contDevices *ContainerDevices) error {
+	for _, d := range contDevices.Devices {
+		err := alloc.nodeInfo.addUsedResources(d.Id, d.Cores, d.Memory)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Allocate tries to find a suitable GPU device for containers
 // and records some data in pod's annotation
 func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
@@ -37,6 +47,9 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 		assignDevices, err := alloc.allocateOne(newPod, container)
 		if err != nil {
 			klog.V(4).Infof("Container <%s> device allocation failed: %v", container.Name, err)
+			return nil, err
+		}
+		if err = alloc.addAllocateOne(assignDevices); err != nil {
 			return nil, err
 		}
 		podAssignDevices = append(podAssignDevices, *assignDevices)
@@ -76,7 +89,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		}
 		// Filter MIG enabled device.
 		if deviceInfo.IsMIG() {
-			klog.V(4).Infof("Filter MIG or Mig's parent device %d", i)
+			klog.V(4).Infof("Filter MIG enabled device %d", i)
 			continue
 		}
 		tmpStore = append(tmpStore, deviceInfo)
@@ -181,11 +194,7 @@ func allocateDevices(tmpStore []*DeviceInfo, pod *corev1.Pod, nodeName string, n
 			klog.V(4).Infof("current gpu device %d insufficient available memory, skip allocation", i)
 			continue
 		}
-		if needCores > deviceInfo.AllocatableCores() {
-			klog.V(4).Infof("current gpu device %d insufficient available core, skip allocation", i)
-			continue
-		}
-		if needCores == util.HundredCore && deviceInfo.AllocatableCores() < util.HundredCore {
+		if needCores > deviceInfo.AllocatableCores() || (needCores == util.HundredCore && deviceInfo.AllocatableCores() < util.HundredCore) {
 			klog.V(4).Infof("current gpu device %d insufficient available core, skip allocation", i)
 			continue
 		}
@@ -197,7 +206,7 @@ func allocateDevices(tmpStore []*DeviceInfo, pod *corev1.Pod, nodeName string, n
 		}
 		// Filter device uuid.
 		if !util.CheckDeviceUuid(pod.Annotations, deviceInfo.GetUUID()) {
-			klog.V(4).Infof("current gpu device <%d> type <%s> non compliant annotation[%s], skip allocation", i,
+			klog.V(4).Infof("current gpu device <%d> uuid <%s> non compliant annotation[%s], skip allocation", i,
 				deviceInfo.GetType(), fmt.Sprintf("'%s' or '%s'", util.PodIncludeGPUUUIDAnnotation, util.PodExcludeGPUUUIDAnnotation))
 			continue
 		}
