@@ -23,7 +23,7 @@ func NewAllocator(n *NodeInfo) *allocator {
 
 func (alloc *allocator) addAllocateOne(contDevices *ContainerDevices) error {
 	for _, d := range contDevices.Devices {
-		err := alloc.nodeInfo.addUsedResources(d.Id, d.Cores, d.Memory)
+		err := alloc.nodeInfo.AddUsedResources(d.Id, d.Cores, d.Memory)
 		if err != nil {
 			return err
 		}
@@ -64,8 +64,7 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 }
 
 func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container) (*ContainerDevices, error) {
-	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>",
-		container.Name, alloc.nodeInfo.GetName())
+	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", container.Name, alloc.nodeInfo.GetName())
 	node := alloc.nodeInfo.GetNode()
 	needNumber := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
 	needCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)

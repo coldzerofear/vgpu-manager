@@ -3,8 +3,10 @@ package filter
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
@@ -221,6 +223,7 @@ func IsScheduled(pod *corev1.Pod) bool {
 // so it should always be the last filter of gpuFilter
 func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
 	var (
+		mu             sync.Mutex
 		filteredNodes  = make([]corev1.Node, 0, 1)       // Successful nodes
 		failedNodesMap = make(extenderv1.FailedNodesMap) // Failed nodes
 		nodeInfoList   []*device.NodeInfo
@@ -241,26 +244,41 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		klog.Errorf("PodLister list all pod error: %v", err)
 		return filteredNodes, failedNodesMap, err
 	}
+	nodeOriginalPosition := map[string]int{}
+	wait := sync.WaitGroup{}
 	for i := range nodes {
 		node := &nodes[i]
-		_, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
-		if !ok {
-			klog.V(3).Infof("Current node <%s> has not registered any GPU devices, skipping it", node.Name)
-		}
-		if !ok || !util.IsVGPUEnabledNode(node) {
-			failedNodesMap[node.Name] = "no GPU device"
-			continue
-		}
-		// Pods on aggregation nodes.
-		nodePods := CollectPodsOnNode(pods, node)
-		nodeInfo, err := device.NewNodeInfo(node, nodePods)
-		if err != nil {
-			klog.Warningf("NewNodeInfo error, skipping node: %s, err: %v", node.Name, err)
-			failedNodesMap[node.Name] = err.Error()
-			continue
-		}
-		nodeInfoList = append(nodeInfoList, nodeInfo)
+		wait.Add(1)
+		go func(node *corev1.Node, pods []*corev1.Pod) {
+			defer wait.Done()
+			_, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
+			if !ok {
+				klog.V(3).Infof("Current node <%s> has not registered any GPU devices, skipping it", node.Name)
+			}
+			if !ok || !util.IsVGPUEnabledNode(node) {
+				mu.Lock()
+				failedNodesMap[node.Name] = "no GPU device"
+				mu.Unlock()
+				return
+			}
+			// Pods on aggregation nodes.
+			nodePods := CollectPodsOnNode(pods, node)
+			nodeInfo, err := device.NewNodeInfo(node, nodePods)
+			if err != nil {
+				klog.Warningf("NewNodeInfo error, skipping node: %s, err: %v", node.Name, err)
+				mu.Lock()
+				failedNodesMap[node.Name] = err.Error()
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			nodeInfoList = append(nodeInfoList, nodeInfo)
+			mu.Unlock()
+		}(node, pods)
+		nodeOriginalPosition[node.Name] = i
 	}
+	wait.Wait()
+
 	// Sort nodes according to node scheduling strategy.
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
 	switch strings.ToLower(nodePolicy) {
@@ -272,6 +290,9 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		device.NewNodeSpreadPriority(nodeInfoList).Sort(nodeInfoList)
 	default:
 		klog.V(4).Infof("Pod <%s/%s> no node scheduling strategy", pod.Namespace, pod.Name)
+		sort.Slice(nodeInfoList, func(i, j int) bool {
+			return nodeOriginalPosition[nodeInfoList[i].GetName()] < nodeOriginalPosition[nodeInfoList[j].GetName()]
+		})
 	}
 
 	for _, nodeInfo := range nodeInfoList {
