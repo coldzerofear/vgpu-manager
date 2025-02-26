@@ -540,8 +540,8 @@ int check_in_container() {
     }
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        // 跳过当前目录（.）和父目录（..）
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0) {
             continue;
         }
         has_entries = 1;

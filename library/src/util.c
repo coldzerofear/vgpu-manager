@@ -140,10 +140,11 @@ DONE:
 }
 
 int is_current_cgroup(const char *file_path) {
+  int ret = 0;
   FILE *file = fopen(file_path, "r");
   if (file == NULL) {
     perror("fopen");
-    return 0;
+    return ret;
   }
   char buffer[128];
   char pid_str[32];
@@ -153,24 +154,26 @@ int is_current_cgroup(const char *file_path) {
     if (len > 0 && buffer[len - 1] == '\n') {
       buffer[len - 1] = '\0';
     }
-    if (strcmp(buffer, pid_str) == 0 || strcmp(buffer, "1") == 0) {
-      fclose(file);
-      return 1;
+    // Skip files with PID 0
+    if (strcmp(buffer, "0") == 0) {
+      break;
+    }
+    if (strcmp(buffer, pid_str) == 0) {
+      ret = 1;
+      break;
     }
   }
   fclose(file);
-  return 0;
+  return ret;
 }
 
 int extract_container_id_v2(char *path, char *container_id, size_t container_id_size) {
+  int ret = -1;
   DIR *dir;
   struct dirent *entry;
   if ((dir = opendir(path)) == NULL) {
-//    perror("opendir");
-//    LOGGER(ERROR, "Failed to open %s", path);
-    return -1;
+    return ret;
   }
-
   while ((entry = readdir(dir)) != NULL) {
     if (strcmp(entry->d_name, ".") == 0 ||
         strcmp(entry->d_name, "..") == 0) {
@@ -182,11 +185,11 @@ int extract_container_id_v2(char *path, char *container_id, size_t container_id_
       if (is_current_cgroup(full_path)) {
         strncpy(container_id, entry->d_name, container_id_size - 1);
         container_id[container_id_size - 1] = '\0';
-        closedir(dir);
-        return 0;
+        ret = 0;
+        break;
       }
     }
   }
   closedir(dir);
-  return -1;
+  return ret;
 }
