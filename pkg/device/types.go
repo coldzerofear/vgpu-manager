@@ -411,14 +411,25 @@ func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
 	return podAssignDevices
 }
 
+func NewFakeNodeInfo(node *corev1.Node, devices []*DeviceInfo) *NodeInfo {
+	ret := &NodeInfo{
+		name:      node.Name,
+		node:      node,
+		deviceMap: make(map[int]*DeviceInfo),
+	}
+	for _, device := range devices {
+		ret.deviceMap[device.GetID()] = device
+	}
+	ret.initResourceStatistics()
+	return ret
+}
+
 func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	klog.V(4).Infof("NewNodeInfo creates nodeInfo for %s", node.Name)
-
 	deviceInfoMap, err := NewDeviceInfoMapByNode(node)
 	if err != nil {
 		return nil, err
 	}
-
 	ret := &NodeInfo{
 		name:      node.Name,
 		node:      node,
@@ -435,7 +446,6 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 				pod.Namespace, pod.Name)
 			continue
 		}
-
 		for _, contDevice := range podAssignDevices {
 			for _, device := range contDevice.Devices {
 				if err = ret.addUsedResources(device.Id, device.Cores, device.Memory); err != nil {
@@ -445,22 +455,26 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 			}
 		}
 	}
+	ret.initResourceStatistics()
+	return ret, nil
+}
 
-	for _, deviceInfo := range ret.deviceMap {
+func (n *NodeInfo) initResourceStatistics() {
+	n.totalNumber, n.usedNumber, n.totalMemory = 0, 0, 0
+	n.usedMemory, n.totalCores, n.usedCores, n.maxCapability = 0, 0, 0, 0
+	for _, deviceInfo := range n.deviceMap {
 		// Do not include MIG enabled devices and unhealthy devices in the assignable resources.
 		if deviceInfo.IsMIG() || !deviceInfo.Healthy() {
 			continue
 		}
-		ret.totalNumber += deviceInfo.GetTotalNumber()
-		ret.usedNumber += deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
-		ret.totalMemory += deviceInfo.GetTotalMemory()
-		ret.usedMemory += deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
-		ret.totalCores += deviceInfo.GetTotalCores()
-		ret.usedCores += deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
-		ret.maxCapability = max(ret.maxCapability, deviceInfo.capability)
+		n.totalNumber += deviceInfo.GetTotalNumber()
+		n.usedNumber += deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
+		n.totalMemory += deviceInfo.GetTotalMemory()
+		n.usedMemory += deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
+		n.totalCores += deviceInfo.GetTotalCores()
+		n.usedCores += deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
+		n.maxCapability = max(n.maxCapability, deviceInfo.capability)
 	}
-
-	return ret, nil
 }
 
 // AddUsedResources records the used GPU core and memory

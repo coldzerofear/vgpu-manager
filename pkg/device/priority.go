@@ -41,24 +41,38 @@ var (
 	}
 	// ByNodeScoreAsc Sort in ascending order based on node scores,
 	// to avoid double counting scores, a score cache was used.
-	ByNodeScoreAsc = func(nodeInfoList []*NodeInfo) func(p1, p2 *NodeInfo) bool {
+	ByNodeScoreAsc = func() func(p1, p2 *NodeInfo) bool {
 		nodeScoreMap := map[string]float64{}
-		for _, nodeInfo := range nodeInfoList {
-			nodeScoreMap[nodeInfo.GetName()] = GetNodeScore(nodeInfo)
-		}
 		return func(p1, p2 *NodeInfo) bool {
-			return nodeScoreMap[p1.GetName()] < nodeScoreMap[p2.GetName()]
+			p1Score, ok := nodeScoreMap[p1.GetName()]
+			if !ok {
+				p1Score = GetNodeScore(p1)
+				nodeScoreMap[p1.GetName()] = p1Score
+			}
+			p2Score, ok := nodeScoreMap[p2.GetName()]
+			if !ok {
+				p2Score = GetNodeScore(p2)
+				nodeScoreMap[p2.GetName()] = p2Score
+			}
+			return p1Score < p2Score
 		}
 	}
 	// ByNodeScoreDes Sort in descending order based on node scores,
 	// to avoid double counting scores, a score cache was used.
-	ByNodeScoreDes = func(nodeInfoList []*NodeInfo) func(p1, p2 *NodeInfo) bool {
+	ByNodeScoreDes = func() func(p1, p2 *NodeInfo) bool {
 		nodeScoreMap := map[string]float64{}
-		for _, nodeInfo := range nodeInfoList {
-			nodeScoreMap[nodeInfo.GetName()] = GetNodeScore(nodeInfo)
-		}
 		return func(p1, p2 *NodeInfo) bool {
-			return nodeScoreMap[p1.GetName()] > nodeScoreMap[p2.GetName()]
+			p1Score, ok := nodeScoreMap[p1.GetName()]
+			if !ok {
+				p1Score = GetNodeScore(p1)
+				nodeScoreMap[p1.GetName()] = p1Score
+			}
+			p2Score, ok := nodeScoreMap[p2.GetName()]
+			if !ok {
+				p2Score = GetNodeScore(p2)
+				nodeScoreMap[p2.GetName()] = p2Score
+			}
+			return p1Score > p2Score
 		}
 	}
 )
@@ -110,7 +124,7 @@ func GetNodeScore(info *NodeInfo) float64 {
 	memPercentage := safeDiv(float64(info.GetAvailableMemory()), float64(info.GetTotalMemory()))
 	corePercentage := safeDiv(float64(info.GetAvailableCores()), float64(info.GetTotalCores()))
 	score := multiplier * (numPercentage + memPercentage + corePercentage)
-	klog.V(5).Infof("Current Node <%s> resource score is <%.2f>", info.name, score)
+	klog.V(5).Infof("Current Node <%s> resource score is <%.2f>", info.GetName(), score)
 	return score
 }
 
@@ -121,19 +135,19 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
-func NewNodeBinpackPriority(nodeInfos []*NodeInfo) *sortPriority[*NodeInfo] {
+func NewNodeBinpackPriority() *sortPriority[*NodeInfo] {
 	return &sortPriority[*NodeInfo]{
 		less: []LessFunc[*NodeInfo]{
-			ByNodeScoreAsc(nodeInfos),
+			ByNodeScoreAsc(),
 			ByNodeNameAsc,
 		},
 	}
 }
 
-func NewNodeSpreadPriority(nodeInfos []*NodeInfo) *sortPriority[*NodeInfo] {
+func NewNodeSpreadPriority() *sortPriority[*NodeInfo] {
 	return &sortPriority[*NodeInfo]{
 		less: []LessFunc[*NodeInfo]{
-			ByNodeScoreDes(nodeInfos),
+			ByNodeScoreDes(),
 			ByNodeNameAsc,
 		},
 	}

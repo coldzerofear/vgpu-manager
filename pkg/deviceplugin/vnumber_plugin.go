@@ -511,9 +511,13 @@ func (m *vnumberDevicePlugin) Devices() []*pluginapi.Device {
 				health = pluginapi.Unhealthy
 			}
 			devices = append(devices, &pluginapi.Device{
-				ID:       devId,
-				Health:   health,
-				Topology: nil,
+				ID:     devId,
+				Health: health,
+				Topology: &pluginapi.TopologyInfo{
+					Nodes: []*pluginapi.NUMANode{{
+						ID: int64(gpuDevice.Numa),
+					}},
+				},
 			})
 		}
 	}
