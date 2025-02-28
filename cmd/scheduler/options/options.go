@@ -7,6 +7,7 @@ import (
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
 	"k8s.io/component-base/featuregate"
+	baseversion "k8s.io/component-base/version"
 )
 
 type Options struct {
@@ -32,14 +33,19 @@ const (
 	defaultPprofBindPort       = 0
 	defaultCertRefreshInterval = 5
 
-	// SerialBindNode feature gate will Binding node operation of serial execution scheduler.
-	SerialBindNode = "SerialBindNode"
+	Component = "scheduler"
+
+	// SerialBindNode feature gate will binding node operation of serial execution scheduler.
+	SerialBindNode featuregate.Feature = "SerialBindNode"
+	// GPUTopology feature gate will consider topology structure when allocating devices.
+	GPUTopology featuregate.Feature = "GPUTopology"
 )
 
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 		SerialBindNode: {Default: false, PreRelease: featuregate.Alpha},
+		GPUTopology:    {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -47,6 +53,10 @@ func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	if err := featureGate.Add(defaultFeatureGates); err != nil {
 		panic(fmt.Sprintf("Failed to add feature gates: %v", err))
+	}
+	if err := featuregate.DefaultComponentGlobalsRegistry.Register(Component,
+		baseversion.DefaultBuildEffectiveVersion(), featureGate); err != nil {
+		panic(fmt.Sprintf("Failed to registry feature gates to global: %v", err))
 	}
 	return &Options{
 		SchedulerName:       defaultSchedulerName,

@@ -1,20 +1,23 @@
-package device
+package allocator
 
 import (
 	"sort"
+
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
 
-type NumaDevices map[int][]*DeviceInfo
+type NumaNodeDevice map[int][]*device.Device
 
-func NewNumaDevices(devices []*DeviceInfo) NumaDevices {
-	numaDevices := make(NumaDevices, 0)
-	for i, device := range devices {
-		numaDevices[device.GetNUMA()] = append(numaDevices[device.GetNUMA()], devices[i])
+func NewNumaNodeDevice(devices []*device.Device) NumaNodeDevice {
+	numaNode := make(NumaNodeDevice, 0)
+	for i, dev := range devices {
+		numaNode[dev.GetNUMA()] = append(numaNode[dev.GetNUMA()], devices[i])
 	}
-	return numaDevices
+	return numaNode
 }
 
-func (n NumaDevices) MaxDeviceNumberForNumaNode() int {
+func (n NumaNodeDevice) MaxDeviceNumberForNumaNode() int {
 	maxNum := 0
 	for _, devices := range n {
 		maxNum = max(maxNum, len(devices))
@@ -22,7 +25,7 @@ func (n NumaDevices) MaxDeviceNumberForNumaNode() int {
 	return maxNum
 }
 
-func (n NumaDevices) sortScoreAsc() []int {
+func (n NumaNodeDevice) sortScoreAsc() []int {
 	numaNodes := make([]int, 0, len(n))
 	for numaNode := range n {
 		numaNodes = append(numaNodes, numaNode)
@@ -35,9 +38,31 @@ func (n NumaDevices) sortScoreAsc() []int {
 	return numaNodes
 }
 
-type Callback func(numaNode int, devices []*DeviceInfo) (done bool)
+type Callback func(numaNode int, devices []*device.Device) (done bool)
 
-func (n NumaDevices) NumaScoreBinpackCallback(callback Callback) {
+func (n NumaNodeDevice) SchedulerPolicyCallback(policy util.SchedulerPolicy, callback Callback) {
+	switch policy {
+	case util.BinpackPolicy:
+		n.BinpackCallback(callback)
+	case util.SpreadPolicy:
+		n.SpreadCallback(callback)
+	default:
+		n.DefaultCallback(callback)
+	}
+}
+
+func (n NumaNodeDevice) DefaultCallback(callback Callback) {
+	if callback == nil {
+		return
+	}
+	for numaNode, devices := range n {
+		if callback(numaNode, devices) {
+			return
+		}
+	}
+}
+
+func (n NumaNodeDevice) BinpackCallback(callback Callback) {
 	if callback == nil {
 		return
 	}
@@ -49,7 +74,7 @@ func (n NumaDevices) NumaScoreBinpackCallback(callback Callback) {
 	}
 }
 
-func (n NumaDevices) NumaScoreSpreadCallback(callback Callback) {
+func (n NumaNodeDevice) SpreadCallback(callback Callback) {
 	if callback == nil {
 		return
 	}
@@ -63,7 +88,7 @@ func (n NumaDevices) NumaScoreSpreadCallback(callback Callback) {
 }
 
 // GetDeviceScore Calculate device score: assignableResource / totalResource = scorePercentage
-func GetDeviceScore(info *DeviceInfo) float64 {
+func GetDeviceScore(info *device.Device) float64 {
 	var multiplier = float64(100)
 	numPercentage := safeDiv(float64(info.AllocatableNumber()), float64(info.GetTotalNumber()))
 	memPercentage := safeDiv(float64(info.AllocatableMemory()), float64(info.GetTotalMemory()))
@@ -73,17 +98,17 @@ func GetDeviceScore(info *DeviceInfo) float64 {
 }
 
 // GetNumaNodeScore Calculate the average score of all devices on the numa node
-func GetNumaNodeScore(devices []*DeviceInfo) float64 {
+func GetNumaNodeScore(devices []*device.Device) float64 {
 	score := float64(0)
-	for _, device := range devices {
-		score += GetDeviceScore(device)
+	for _, dev := range devices {
+		score += GetDeviceScore(dev)
 	}
 	return safeDiv(score, float64(len(devices)))
 }
 
-func CanNotCrossNumaNode(gpuNumber int, devices []*DeviceInfo) (NumaDevices, bool) {
+func CanNotCrossNumaNode(gpuNumber int, devices []*device.Device) (NumaNodeDevice, bool) {
 	if gpuNumber > 1 {
-		numaDevices := NewNumaDevices(devices)
+		numaDevices := NewNumaNodeDevice(devices)
 		if gpuNumber <= numaDevices.MaxDeviceNumberForNumaNode() {
 			return numaDevices, true
 		}

@@ -500,7 +500,7 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 
 func (m *vnumberDevicePlugin) Devices() []*pluginapi.Device {
 	var devices []*pluginapi.Device
-	for _, gpuDevice := range m.base.manager.GetNodeDeviceInfos() {
+	for _, gpuDevice := range m.base.manager.GetNodeDeviceInfo() {
 		if gpuDevice.Mig { // skip MIG device
 			continue
 		}

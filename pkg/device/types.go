@@ -7,57 +7,37 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 )
 
+type TopologyInfo struct {
+	Index int                         `json:"index"`
+	Links map[int][]links.P2PLinkType `json:"links"`
+}
+
+type NodeTopologyInfo []TopologyInfo
+
+func (n NodeTopologyInfo) Encode() (string, error) {
+	if marshal, err := json.Marshal(n); err != nil {
+		return "", err
+	} else {
+		return string(marshal), nil
+	}
+}
+
+func ParseNodeTopology(val string) (NodeTopologyInfo, error) {
+	var nodeTopologyInfo NodeTopologyInfo
+	err := json.Unmarshal([]byte(val), &nodeTopologyInfo)
+	if err != nil {
+		return nil, err
+	}
+	return nodeTopologyInfo, nil
+}
+
 type DeviceInfo struct {
-	id          int
-	uuid        string
-	deviceType  string
-	usedNumber  int
-	totalNumber int
-	usedCores   int
-	totalCores  int
-	usedMemory  int
-	totalMemory int
-	capability  float32
-	numa        int
-	migDevice   bool
-	healthy     bool
-}
-
-func NewFakeDeviceInfo(id, usedNum, totalNum, usedCore, totalCore, usedMem, totalMem, numa int) *DeviceInfo {
-	return &DeviceInfo{
-		id:          id,
-		usedNumber:  usedNum,
-		totalNumber: totalNum,
-		usedCores:   usedCore,
-		totalCores:  totalCore,
-		usedMemory:  usedMem,
-		totalMemory: totalMem,
-		numa:        numa,
-		healthy:     true,
-	}
-}
-
-func NewDeviceInfo(dev NodeDevice) *DeviceInfo {
-	return &DeviceInfo{
-		id:          dev.Id,
-		uuid:        dev.Uuid,
-		deviceType:  dev.Type,
-		totalCores:  dev.Core,
-		totalMemory: dev.Memory,
-		migDevice:   dev.Mig,
-		capability:  dev.Capability,
-		totalNumber: dev.Number,
-		numa:        dev.Numa,
-		healthy:     dev.Healthy,
-	}
-}
-
-type NodeDevice struct {
 	Id         int     `json:"id"`
 	Type       string  `json:"type"`
 	Uuid       string  `json:"uuid"`
@@ -66,13 +46,14 @@ type NodeDevice struct {
 	Number     int     `json:"number"`
 	Numa       int     `json:"numa"`
 	Mig        bool    `json:"mig"`
+	BusId      string  `json:"busId"`
 	Capability float32 `json:"capability"`
 	Healthy    bool    `json:"healthy"`
 }
 
-type NodeDeviceInfos []NodeDevice
+type NodeDeviceInfo []DeviceInfo
 
-func (n NodeDeviceInfos) Encode() (string, error) {
+func (n NodeDeviceInfo) Encode() (string, error) {
 	if marshal, err := json.Marshal(n); err != nil {
 		return "", err
 	} else {
@@ -80,15 +61,14 @@ func (n NodeDeviceInfos) Encode() (string, error) {
 	}
 }
 
-func ParseNodeDeviceInfos(val string) (NodeDeviceInfos, error) {
-	var nodeDevInfos NodeDeviceInfos
-	if err := json.Unmarshal([]byte(val), &nodeDevInfos); err != nil {
+func ParseNodeDeviceInfo(val string) (NodeDeviceInfo, error) {
+	var nodeDevice NodeDeviceInfo
+	err := json.Unmarshal([]byte(val), &nodeDevice)
+	if err != nil {
 		return nil, err
 	}
-	return nodeDevInfos, nil
+	return nodeDevice, nil
 }
-
-type PodDevices []ContainerDevices
 
 type ContainerDevices struct {
 	Name    string        `json:"name"`
@@ -186,6 +166,8 @@ func (c *ClaimDevice) UnmarshalText(text string) error {
 	return nil
 }
 
+type PodDevices []ContainerDevices
+
 func (p *PodDevices) MarshalText() (string, error) {
 	// "cont1['%d_%s_%d_%d','%d_%s_%d_%d'];cont2[]"
 	if p == nil || len(*p) == 0 {
@@ -271,80 +253,132 @@ func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDevices, e
 	return nil, fmt.Errorf("no current assignable devices found")
 }
 
-func NewDeviceInfoMapByNode(node *corev1.Node) (map[int]*DeviceInfo, error) {
+type Device struct {
+	id          int
+	uuid        string
+	deviceType  string
+	usedNumber  int
+	totalNumber int
+	usedCores   int
+	totalCores  int
+	usedMemory  int
+	totalMemory int
+	capability  float32
+	numa        int
+	busId       string
+	mig         bool
+	healthy     bool
+}
+
+func NewFakeDevice(id, usedNum, totalNum, usedCore, totalCore, usedMem, totalMem, numa int) *Device {
+	return &Device{
+		id:          id,
+		usedNumber:  usedNum,
+		totalNumber: totalNum,
+		usedCores:   usedCore,
+		totalCores:  totalCore,
+		usedMemory:  usedMem,
+		totalMemory: totalMem,
+		numa:        numa,
+		healthy:     true,
+	}
+}
+
+func NewDevice(dev DeviceInfo) *Device {
+	return &Device{
+		id:          dev.Id,
+		uuid:        dev.Uuid,
+		deviceType:  dev.Type,
+		totalCores:  dev.Core,
+		totalMemory: dev.Memory,
+		mig:         dev.Mig,
+		capability:  dev.Capability,
+		totalNumber: dev.Number,
+		numa:        dev.Numa,
+		healthy:     dev.Healthy,
+		busId:       dev.BusId,
+	}
+}
+
+func NewDeviceMapByNode(node *corev1.Node) (map[int]*Device, error) {
 	var (
-		err             error
-		nodeDeviceInfos NodeDeviceInfos
-		deviceInfoMap   = map[int]*DeviceInfo{}
+		err            error
+		nodeDeviceInfo NodeDeviceInfo
 	)
 	deviceRegister, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
-	if nodeDeviceInfos, err = ParseNodeDeviceInfos(deviceRegister); err != nil {
+	if nodeDeviceInfo, err = ParseNodeDeviceInfo(deviceRegister); err != nil {
 		return nil, fmt.Errorf("parse node device information failed: %v", err)
 	}
-	for _, gpuInfo := range nodeDeviceInfos {
-		deviceInfoMap[gpuInfo.Id] = NewDeviceInfo(gpuInfo)
+	deviceInfoMap := map[int]*Device{}
+	for _, devInfo := range nodeDeviceInfo {
+		deviceInfoMap[devInfo.Id] = NewDevice(devInfo)
 	}
 	return deviceInfoMap, nil
 }
 
 // GetID returns the idx of this device
-func (dev *DeviceInfo) GetID() int {
+func (dev *Device) GetID() int {
 	return dev.id
 }
 
 // GetUUID returns the uuid of this device
-func (dev *DeviceInfo) GetUUID() string {
+func (dev *Device) GetUUID() string {
 	return dev.uuid
 }
 
 // GetNUMA returns the numa of this device
-func (dev *DeviceInfo) GetNUMA() int {
+func (dev *Device) GetNUMA() int {
 	return dev.numa
 }
 
-func (dev *DeviceInfo) IsMIG() bool {
-	return dev.migDevice
+func (dev *Device) IsMIG() bool {
+	return dev.mig
 }
 
 // Healthy return whether the device is healthy
-func (dev *DeviceInfo) Healthy() bool {
+func (dev *Device) Healthy() bool {
 	return dev.healthy
 }
 
 // GetComputeCapability returns the capability of this device
-func (dev *DeviceInfo) GetComputeCapability() float32 {
+func (dev *Device) GetComputeCapability() float32 {
 	return dev.capability
 }
 
 // GetType returns the type of this device
-func (dev *DeviceInfo) GetType() string {
+func (dev *Device) GetType() string {
 	return dev.deviceType
 }
 
 // GetTotalMemory returns the totalMemory of this device
-func (dev *DeviceInfo) GetTotalMemory() int {
+func (dev *Device) GetTotalMemory() int {
 	return dev.totalMemory
 }
 
 // GetTotalCores returns the totalCore of this device
-func (dev *DeviceInfo) GetTotalCores() int {
+func (dev *Device) GetTotalCores() int {
 	return dev.totalCores
 }
 
 // GetTotalNumber returns the totalNum of this device
-func (dev *DeviceInfo) GetTotalNumber() int {
+func (dev *Device) GetTotalNumber() int {
 	return dev.totalNumber
 }
 
 // addUsedResources records the used GPU core and memory
-func (dev *DeviceInfo) addUsedResources(usedCores int, usedMemory int) {
+func (dev *Device) addUsedResources(usedCores int, usedMemory int) {
 	dev.usedNumber++
 	dev.usedCores += usedCores
 	dev.usedMemory += usedMemory
 }
 
+// GetBusID returns the busId of this device
+func (dev *Device) GetBusID() string {
+	return dev.busId
+}
+
 // AllocatableCores returns the remaining cores of this GPU device
-func (dev *DeviceInfo) AllocatableCores() int {
+func (dev *Device) AllocatableCores() int {
 	allocatableCores := dev.totalCores - dev.usedCores
 	if allocatableCores >= 0 {
 		return allocatableCores
@@ -353,7 +387,7 @@ func (dev *DeviceInfo) AllocatableCores() int {
 }
 
 // AllocatableMemory returns the remaining memory of this GPU device
-func (dev *DeviceInfo) AllocatableMemory() int {
+func (dev *Device) AllocatableMemory() int {
 	allocatableMemory := dev.totalMemory - dev.usedMemory
 	if allocatableMemory >= 0 {
 		return allocatableMemory
@@ -362,25 +396,12 @@ func (dev *DeviceInfo) AllocatableMemory() int {
 }
 
 // AllocatableNumber returns the remaining number of this GPU device
-func (dev *DeviceInfo) AllocatableNumber() int {
+func (dev *Device) AllocatableNumber() int {
 	allocatableNum := dev.totalNumber - dev.usedNumber
 	if allocatableNum >= 0 {
 		return allocatableNum
 	}
 	return 0
-}
-
-type NodeInfo struct {
-	name          string
-	node          *corev1.Node
-	deviceMap     map[int]*DeviceInfo
-	totalNumber   int
-	usedNumber    int
-	totalMemory   int
-	usedMemory    int
-	totalCores    int
-	usedCores     int
-	maxCapability float32
 }
 
 func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
@@ -411,11 +432,11 @@ func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
 	return podAssignDevices
 }
 
-func NewFakeNodeInfo(node *corev1.Node, devices []*DeviceInfo) *NodeInfo {
+func NewFakeNodeInfo(node *corev1.Node, devices []*Device) *NodeInfo {
 	ret := &NodeInfo{
 		name:      node.Name,
 		node:      node,
-		deviceMap: make(map[int]*DeviceInfo),
+		deviceMap: make(map[int]*Device),
 	}
 	for _, device := range devices {
 		ret.deviceMap[device.GetID()] = device
@@ -424,9 +445,22 @@ func NewFakeNodeInfo(node *corev1.Node, devices []*DeviceInfo) *NodeInfo {
 	return ret
 }
 
+type NodeInfo struct {
+	name          string
+	node          *corev1.Node
+	deviceMap     map[int]*Device
+	totalNumber   int
+	usedNumber    int
+	totalMemory   int
+	usedMemory    int
+	totalCores    int
+	usedCores     int
+	maxCapability float32
+}
+
 func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	klog.V(4).Infof("NewNodeInfo creates nodeInfo for %s", node.Name)
-	deviceInfoMap, err := NewDeviceInfoMapByNode(node)
+	deviceInfoMap, err := NewDeviceMapByNode(node)
 	if err != nil {
 		return nil, err
 	}
@@ -435,28 +469,30 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 		node:      node,
 		deviceMap: deviceInfoMap,
 	}
-	// According to the pods' annotations, construct the node allocation state
+	ret.addPodDeviceResources(pods)
+	ret.initResourceStatistics()
+	return ret, nil
+}
+
+func (n *NodeInfo) addPodDeviceResources(pods []*corev1.Pod) {
 	for _, pod := range pods {
 		if !util.IsVGPUResourcePod(pod) {
 			continue
 		}
+		// According to the pods' annotations, construct the node allocation state
 		podAssignDevices := GetPodAssignDevices(pod)
 		if len(podAssignDevices) == 0 {
-			klog.Warningf("Discovered that pod <%s/%s> device annotations may be damaged",
-				pod.Namespace, pod.Name)
+			klog.Warningf("Discovered that pod <%s/%s> device annotations may be damaged", pod.Namespace, pod.Name)
 			continue
 		}
-		for _, contDevice := range podAssignDevices {
-			for _, device := range contDevice.Devices {
-				if err = ret.addUsedResources(device.Id, device.Cores, device.Memory); err != nil {
-					klog.Warningf("failed to update used resource for node %s dev %d due to %v",
-						node.Name, device.Id, err)
+		for _, container := range podAssignDevices {
+			for _, device := range container.Devices {
+				if err := n.addUsedResources(device.Id, device.Cores, device.Memory); err != nil {
+					klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, device.Id, err)
 				}
 			}
 		}
 	}
-	ret.initResourceStatistics()
-	return ret, nil
 }
 
 func (n *NodeInfo) initResourceStatistics() {
@@ -511,7 +547,7 @@ func (n *NodeInfo) GetDeviceCount() int {
 }
 
 // GetDeviceMap returns each GPU device information structure
-func (n *NodeInfo) GetDeviceMap() map[int]*DeviceInfo {
+func (n *NodeInfo) GetDeviceMap() map[int]*Device {
 	return n.deviceMap
 }
 

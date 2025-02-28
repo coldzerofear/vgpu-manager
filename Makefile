@@ -67,7 +67,8 @@ test: fmt vet ## Run tests.
 
 .PHONY: build
 build: fmt vet ## Build binary.
-	CGO_ENABLED=0 GOOS=$(GOOS) go build -ldflags=" \
+	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
+       CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT}  \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \

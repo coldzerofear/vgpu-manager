@@ -94,8 +94,35 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 				logger.V(4).Info("Successfully set default device scheduler policy", "DeviceSchedulerPolicy", defaultDevicePolicy)
 			}
 		}
+		// Setting topology mode only makes sense when requesting multiple GPUs.
+		if IsSingleContainerMultiGPUs(pod) {
+			if _, ok := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation); !ok {
+				setTopoMode := false
+				defaultTopologyMode := strings.ToLower(h.options.DefaultTopologyMode)
+				switch defaultTopologyMode {
+				case string(util.NUMATopology):
+					setTopoMode = true
+					util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.NUMATopology))
+				case string(util.LinkTopology):
+					setTopoMode = true
+					util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.LinkTopology))
+				}
+				if setTopoMode {
+					logger.V(4).Info("Successfully set default device topology mode", "DeviceTopologyMode", defaultTopologyMode)
+				}
+			}
+		}
 	}
 	return nil
+}
+
+func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
+	for _, container := range pod.Spec.Containers {
+		if util.GetResourceOfContainer(&container, util.VGPUNumberResourceName) > 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admission.Response {

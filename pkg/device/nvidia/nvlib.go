@@ -17,14 +17,13 @@
 package nvidia
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"k8s.io/klog/v2"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
@@ -63,25 +62,12 @@ func (g *GpuInfo) GetPaths() ([]string, error) {
 }
 
 // GetNumaNode returns the NUMA node associated with the GPU device
-func (g GpuInfo) GetNumaNode() (bool, int, error) {
-	// Discard leading zeros.
-	busID := strings.ToLower(strings.TrimPrefix(int8Slice(g.PciInfo.BusId[:]).String(), "0000"))
-
-	b, err := os.ReadFile(fmt.Sprintf("/sys/bus/pci/devices/%s/numa_node", busID))
-	if err != nil {
-		return false, 0, nil
-	}
-
-	node, err := strconv.Atoi(string(bytes.TrimSpace(b)))
-	if err != nil {
-		return false, 0, fmt.Errorf("eror parsing value for NUMA node: %v", err)
-	}
-
+func (g GpuInfo) GetNumaNode() (int, bool) {
+	node := links.PciInfo(g.PciInfo).NumaNode()
 	if node < 0 {
-		return false, 0, nil
+		return 0, false
 	}
-
-	return true, node, nil
+	return int(node), true
 }
 
 type MigInfo struct {
@@ -135,11 +121,11 @@ type MigDevicePlacement struct {
 }
 
 type devInterface nvdev.Interface
-type nvmlInterface nvml.Interface
+type NvmlInterface nvml.Interface
 
 type DeviceLib struct {
 	devInterface
-	nvmlInterface
+	NvmlInterface
 	driverLibraryPath string
 	devRoot           string
 	nvidiaSMIPath     string
@@ -164,7 +150,7 @@ func NewDeviceLib(driverRoot DriverRoot) (*DeviceLib, error) {
 
 	d := DeviceLib{
 		devInterface:      nvdev.New(nvmllib),
-		nvmlInterface:     nvmllib,
+		NvmlInterface:     nvmllib,
 		driverLibraryPath: driverLibraryPath,
 		devRoot:           driverRoot.GetDevRoot(),
 		nvidiaSMIPath:     nvidiaSMIPath,
@@ -195,7 +181,7 @@ func setOrOverrideEnvvar(envvars []string, key, value string) []string {
 }
 
 func (l DeviceLib) Init() error {
-	ret := l.nvmlInterface.Init()
+	ret := l.NvmlInterface.Init()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error initializing NVML: %v", ret)
 	}
@@ -203,7 +189,7 @@ func (l DeviceLib) Init() error {
 }
 
 func (l DeviceLib) Shutdown() {
-	ret := l.nvmlInterface.Shutdown()
+	ret := l.NvmlInterface.Shutdown()
 	if ret != nvml.SUCCESS {
 		klog.Warningf("error shutting down NVML: %v", ret)
 	}

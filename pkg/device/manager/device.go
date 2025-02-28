@@ -8,12 +8,16 @@ import (
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 )
 
@@ -22,6 +26,7 @@ type GPUDevice struct {
 	NumaNode int
 	Paths    []string
 	Healthy  bool
+	Links    map[int][]links.P2PLinkType
 }
 
 type MIGDevice struct {
@@ -110,33 +115,62 @@ func (m *DeviceManager) initDevices() error {
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error getting CUDA driver version: %s", nvml.ErrorString(ret))
 	}
-
 	m.driverVersion = nvidia.DriverVersion{
 		DriverVersion:     driverVersion,
 		CudaDriverVersion: nvidia.CudaDriverVersion(cudaDriverVersion),
 	}
-
+	featureGate := featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
+	gpuTopologyEnabled := featureGate != nil && featureGate.Enabled(options.GPUTopology)
+	var linksMap map[string]map[int][]links.P2PLinkType
+	if gpuTopologyEnabled {
+		deviceList, err := gpuallocator.NewDevices(
+			gpuallocator.WithDeviceLib(m),
+			gpuallocator.WithNvmlLib(m.NvmlInterface),
+		)
+		if err != nil {
+			return fmt.Errorf("error getting gpuallocator device list: %v", err)
+		}
+		linksMap = make(map[string]map[int][]links.P2PLinkType)
+		for _, dev := range deviceList {
+			linklist := map[int][]links.P2PLinkType{}
+			for index, pLinks := range dev.Links {
+				var p2pLinks []links.P2PLinkType
+				for _, link := range pLinks {
+					p2pLinks = append(p2pLinks, link.Type)
+				}
+				linklist[index] = p2pLinks
+			}
+			linksMap[dev.UUID] = linklist
+		}
+	}
 	err := m.VisitDevices(func(i int, d nvdev.Device) error {
 		gpuInfo, err := m.GetGPUInfo(i, d)
 		if err != nil {
 			return fmt.Errorf("error getting info for GPU %d: %w", i, err)
 		}
-
 		numaNode, err := util.GetNumaInformation(i)
 		if err != nil {
 			klog.ErrorS(err, "failed to get numa information", "device", i)
 		}
+
 		healthy := !m.config.ExcludeDevices().Has(i)
 		paths, err := gpuInfo.GetPaths()
 		if err != nil {
 			return fmt.Errorf("error getting device paths for GPU %d: %v", i, err)
 		}
-
+		var p2pLinks map[int][]links.P2PLinkType
+		if gpuTopologyEnabled {
+			var ok bool
+			if p2pLinks, ok = linksMap[gpuInfo.UUID]; !ok {
+				return fmt.Errorf("error getting device links for GPU %d", i)
+			}
+		}
 		gpuDevice := &Device{GPU: &GPUDevice{
 			GpuInfo:  gpuInfo,
 			NumaNode: numaNode,
 			Paths:    paths,
 			Healthy:  healthy,
+			Links:    p2pLinks,
 		}}
 		m.devices = append(m.devices, gpuDevice)
 
@@ -194,41 +228,25 @@ func (m *DeviceManager) Start() {
 	go m.registryNode()
 }
 
-func (m *DeviceManager) GetNodeDeviceMap() map[string]device.NodeDevice {
-	// Scaling Cores.
-	totalCores := int(m.config.DeviceCoresScaling() * float64(util.HundredCore))
-	deviceMap := make(map[string]device.NodeDevice)
-	for _, gpuDevice := range m.GetGPUDeviceMap() {
-		// Scaling Memory.
-		totalMemory := int(gpuDevice.Memory.Total >> 20) // bytes -> mb
-		totalMemory = int(m.config.DeviceMemoryScaling() * float64(totalMemory))
-		capability, _ := strconv.ParseFloat(gpuDevice.CudaComputeCapability, 32)
-		deviceMap[gpuDevice.UUID] = device.NodeDevice{
-			Id:         gpuDevice.Index,
-			Type:       gpuDevice.ProductName,
-			Uuid:       gpuDevice.UUID,
-			Core:       totalCores,
-			Memory:     totalMemory,
-			Number:     m.config.DeviceSplitCount(),
-			Numa:       gpuDevice.NumaNode,
-			Mig:        gpuDevice.MigEnabled,
-			Capability: float32(capability),
-			Healthy:    gpuDevice.Healthy,
-		}
+func (m *DeviceManager) GetDeviceInfoMap() map[string]device.DeviceInfo {
+	nodeDeviceInfo := m.GetNodeDeviceInfo()
+	deviceInfoMap := make(map[string]device.DeviceInfo, len(nodeDeviceInfo))
+	for i := range nodeDeviceInfo {
+		deviceInfoMap[nodeDeviceInfo[i].Uuid] = nodeDeviceInfo[i]
 	}
-	return deviceMap
+	return deviceInfoMap
 }
 
-func (m *DeviceManager) GetNodeDeviceInfos() device.NodeDeviceInfos {
+func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 	// Scaling Cores.
 	totalCores := int(m.config.DeviceCoresScaling() * float64(util.HundredCore))
-	deviceInfos := make(device.NodeDeviceInfos, 0, len(m.devices))
+	deviceInfos := make(device.NodeDeviceInfo, 0, len(m.devices))
 	for _, gpuDevice := range m.GetGPUDeviceMap() {
 		// Scaling Memory.
 		totalMemory := int(gpuDevice.Memory.Total >> 20) // bytes -> mb
 		totalMemory = int(m.config.DeviceMemoryScaling() * float64(totalMemory))
 		capability, _ := strconv.ParseFloat(gpuDevice.CudaComputeCapability, 32)
-		deviceInfos = append(deviceInfos, device.NodeDevice{
+		deviceInfos = append(deviceInfos, device.DeviceInfo{
 			Id:         gpuDevice.Index,
 			Type:       gpuDevice.ProductName,
 			Uuid:       gpuDevice.UUID,
@@ -237,6 +255,7 @@ func (m *DeviceManager) GetNodeDeviceInfos() device.NodeDeviceInfos {
 			Number:     m.config.DeviceSplitCount(),
 			Numa:       gpuDevice.NumaNode,
 			Mig:        gpuDevice.MigEnabled,
+			BusId:      links.PciInfo(gpuDevice.PciInfo).BusID(),
 			Capability: float32(capability),
 			Healthy:    gpuDevice.Healthy,
 		})

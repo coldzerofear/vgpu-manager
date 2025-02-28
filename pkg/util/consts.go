@@ -16,6 +16,7 @@ const (
 	// NodeDeviceHeartbeatAnnotation Node device heartbeat time
 	NodeDeviceHeartbeatAnnotation = DomainPrefix + "/node-device-heartbeat"
 	NodeDeviceRegisterAnnotation  = DomainPrefix + "/node-device-register"
+	NodeDeviceTopologyAnnotation  = DomainPrefix + "/node-device-topology"
 	DeviceMemoryFactorAnnotation  = DomainPrefix + "/device-memory-factor"
 
 	// PodIncludeGpuTypeAnnotation Specify the GPU type to be used
@@ -26,6 +27,9 @@ const (
 	// Scheduling strategies at the node and device levels
 	NodeSchedulerPolicyAnnotation   = DomainPrefix + "/node-scheduler-policy"
 	DeviceSchedulerPolicyAnnotation = DomainPrefix + "/device-scheduler-policy"
+
+	// DeviceTopologyModeAnnotation Specify device topology mode
+	DeviceTopologyModeAnnotation = DomainPrefix + "/device-topology-mode"
 
 	// PodIncludeGPUUUIDAnnotation Specify the GPU UUID to be used
 	PodIncludeGPUUUIDAnnotation = DomainPrefix + "/include-gpu-uuid"
@@ -92,7 +96,7 @@ const (
 type SchedulerPolicy string
 
 const (
-	NonePolicy SchedulerPolicy = ""
+	NonePolicy SchedulerPolicy = "none"
 	// BinpackPolicy means the lower device memory remained after this allocation, the better
 	BinpackPolicy SchedulerPolicy = "binpack"
 	// SpreadPolicy means better put this task into an idle GPU card than a shared GPU card
@@ -105,4 +109,15 @@ const (
 	AssignPhaseSucceed    AssignedPhase = "succeed"
 	AssignPhaseAllocating AssignedPhase = "allocating"
 	AssignPhaseFailed     AssignedPhase = "failed"
+)
+
+type TopologyMode string
+
+const (
+	// NoneTopology Do not use any topology mode to allocate devices.
+	NoneTopology TopologyMode = "none"
+	// NUMATopology aligns the allocated devices according to numa nodes.
+	NUMATopology TopologyMode = "numa"
+	// LinkTopology find the best device set based on link topology.
+	LinkTopology TopologyMode = "link"
 )

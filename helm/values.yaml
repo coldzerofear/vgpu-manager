@@ -190,6 +190,8 @@ webhook:
     defaultNodePolicy: binpack
     # Default device scheduling policy. (supported values: binpack | spread)
     defaultDevicePolicy: binpack
+    # Default device list topology mode. (supported values: numa | link)
+    defaultTopologyMode: ""
     logLevel: 4
   # Webhook container requests resources
   resources:

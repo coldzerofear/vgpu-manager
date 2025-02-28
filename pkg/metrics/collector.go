@@ -286,16 +286,16 @@ skip:
 
 	nodeVGPUTotalMemBytes := uint64(0)
 	registryNode, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
-	deviceInfos, _ := device.ParseNodeDeviceInfos(registryNode)
-	for _, info := range deviceInfos {
+	nodeDevInfo, _ := device.ParseNodeDeviceInfo(registryNode)
+	for _, devInfo := range nodeDevInfo {
 		// Skip the statistics of Mig device
-		if info.Mig {
+		if devInfo.Mig {
 			continue
 		}
-		vGpuHealthMap[info.Uuid] = info.Healthy
-		vGpuAssignedMemMap[info.Uuid] = 0
-		vGpuTotalMemBytes := uint64(info.Memory) << 20
-		vGpuTotalMemMap[info.Uuid] = vGpuTotalMemBytes
+		vGpuHealthMap[devInfo.Uuid] = devInfo.Healthy
+		vGpuAssignedMemMap[devInfo.Uuid] = 0
+		vGpuTotalMemBytes := uint64(devInfo.Memory) << 20
+		vGpuTotalMemMap[devInfo.Uuid] = vGpuTotalMemBytes
 		nodeVGPUTotalMemBytes += vGpuTotalMemBytes
 	}
 	ch <- prometheus.MustNewConstMetric(

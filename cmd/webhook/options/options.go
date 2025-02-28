@@ -15,6 +15,7 @@ type Options struct {
 	CertDir             string
 	DefaultNodePolicy   string
 	DefaultDevicePolicy string
+	DefaultTopologyMode string
 }
 
 const (
@@ -40,6 +41,7 @@ func (o *Options) InitFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&o.CertDir, "cert-dir", o.CertDir, "CertDir is the directory that contains the server key and certificate.")
 	fs.StringVar(&o.DefaultNodePolicy, "default-node-policy", "", "Default node scheduling policy. (supported values: binpack | spread)")
 	fs.StringVar(&o.DefaultDevicePolicy, "default-device-policy", "", "Default device scheduling policy. (supported values: binpack | spread)")
+	fs.StringVar(&o.DefaultDevicePolicy, "default-topology-mode", "", "Default device list topology mode. (supported values: numa | link)")
 	fs.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.Parse()
 }

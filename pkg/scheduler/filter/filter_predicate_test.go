@@ -44,9 +44,9 @@ func Test_DeviceFilter(t *testing.T) {
 	factory.WaitForCacheSync(ctx.Done())
 
 	var nodeList []corev1.Node
-	nodeGPUMap := make(map[string]device.NodeDeviceInfos)
+	nodeGPUMap := make(map[string]device.NodeDeviceInfo)
 	for i := 0; i < 4; i++ {
-		nodeGPUInfos := device.NodeDeviceInfos{{
+		nodeGPUInfos := device.NodeDeviceInfo{{
 			Id:         0,
 			Uuid:       "GPU-" + uuid.New().String(),
 			Core:       util.HundredCore,

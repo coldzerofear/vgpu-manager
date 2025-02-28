@@ -508,7 +508,7 @@ int split_str(char *line, char *key, char *value, char d) {
 int read_cgroup(char *pidpath, char *cgroup_key, char *cgroup_value) {
   FILE *f = fopen(pidpath, "rb");
   if (f == NULL) {
-    LOGGER(VERBOSE, "read file %s failed: %s\n", pidpath, strerror(errno));
+    //LOGGER(VERBOSE, "read file %s failed: %s\n", pidpath, strerror(errno));
     return 1;
   }
   char buff[255];

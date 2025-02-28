@@ -50,6 +50,7 @@ spec:
             - --cert-dir={{ .Values.webhook.commands.certDir }}
             - --default-node-policy={{ .Values.webhook.commands.defaultNodePolicy }}
             - --default-device-policy={{ .Values.webhook.commands.defaultDevicePolicy }}
+            - --default-topology-mode={{ .Values.webhook.commands.defaultTopologyMode }}
             - --v={{ .Values.webhook.commands.logLevel }}
           livenessProbe:
             failureThreshold: 3

@@ -159,7 +159,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	}
 	computePolicy := GetComputePolicy(pod, node)
 	deviceCount := 0
-	deviceMap := devManager.GetNodeDeviceMap()
+	deviceMap := devManager.GetDeviceInfoMap()
 	nodeConfig := devManager.GetNodeConfig()
 	devices := [util.MaxDeviceNumber]DeviceT{}
 	for i, devInfo := range assignDevices.Devices {
@@ -280,7 +280,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		computePolicy := GetComputePolicy(pod, node)
 
 		deviceCount := 0
-		deviceMap := devManager.GetNodeDeviceMap()
+		deviceMap := devManager.GetDeviceInfoMap()
 		nodeConfig := devManager.GetNodeConfig()
 		for i, devInfo := range assignDevices.Devices {
 			if i >= C.MAX_DEVICE_COUNT {

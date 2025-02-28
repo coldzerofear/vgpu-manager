@@ -7,6 +7,7 @@ import (
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
 	"k8s.io/component-base/featuregate"
+	baseversion "k8s.io/component-base/version"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
@@ -41,12 +42,16 @@ const (
 	defaultDeviceCoresScaling  = 1.0
 	defaultPprofBindPort       = 0
 
+	Component = "devicePlugin"
+
 	// CorePlugin feature gate will report the virtual cores of the node device to kubelet.
 	CorePlugin featuregate.Feature = "CorePlugin"
 	// MemoryPlugin feature gate will report the virtual memory of the node device to kubelet.
 	MemoryPlugin featuregate.Feature = "MemoryPlugin"
 	// Reschedule feature gate will attempt to reschedule Pods that meet the criteria.
 	Reschedule featuregate.Feature = "Reschedule"
+	// GPUTopology feature gate will report gpu topology information to node.
+	GPUTopology featuregate.Feature = "GPUTopology"
 )
 
 var (
@@ -55,6 +60,7 @@ var (
 		CorePlugin:   {Default: false, PreRelease: featuregate.Alpha},
 		MemoryPlugin: {Default: false, PreRelease: featuregate.Alpha},
 		Reschedule:   {Default: false, PreRelease: featuregate.Alpha},
+		GPUTopology:  {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -62,6 +68,10 @@ func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	if err := featureGate.Add(defaultFeatureGates); err != nil {
 		panic(fmt.Sprintf("Failed to add feature gates: %v", err))
+	}
+	if err := featuregate.DefaultComponentGlobalsRegistry.Register(Component,
+		baseversion.DefaultBuildEffectiveVersion(), featureGate); err != nil {
+		panic(fmt.Sprintf("Failed to registry feature gates to global: %v", err))
 	}
 	gdsEnabled := os.Getenv("NVIDIA_GDS") == "enable" || os.Getenv("NVIDIA_GDS") == "true"
 	mofedEnabledd := os.Getenv("NVIDIA_MOFED") == "enable" || os.Getenv("NVIDIA_MOFED") == "true"

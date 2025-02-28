@@ -11,6 +11,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -159,7 +160,7 @@ func (f *gpuFilter) heartbeatFilter(_ *corev1.Pod, nodes []corev1.Node) ([]corev
 			failedNodesMap[node.Name] = "node heartbeat time is not a standard timestamp"
 			continue
 		}
-		if time.Since(heartbeatTime.Local()) > time.Minute {
+		if time.Since(heartbeatTime.Local()) > 2*time.Minute {
 			failedNodesMap[node.Name] = "node heartbeat timeout"
 			continue
 		}
@@ -246,8 +247,8 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	}
 	nodeOriginalPosition := map[string]int{}
 	wait := sync.WaitGroup{}
-	for i := range nodes {
-		node := &nodes[i]
+	for index := range nodes {
+		node := &nodes[index]
 		wait.Add(1)
 		go func(node *corev1.Node, pods []*corev1.Pod) {
 			defer wait.Done()
@@ -275,7 +276,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			nodeInfoList = append(nodeInfoList, nodeInfo)
 			mu.Unlock()
 		}(node, pods)
-		nodeOriginalPosition[node.Name] = i
+		nodeOriginalPosition[node.Name] = index
 	}
 	wait.Wait()
 
@@ -283,13 +284,13 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
 	switch strings.ToLower(nodePolicy) {
 	case string(util.BinpackPolicy):
-		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling strategy", pod.Namespace, pod.Name, nodePolicy)
-		device.NewNodeBinpackPriority().Sort(nodeInfoList)
+		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, nodePolicy)
+		allocator.NewNodeBinpackPriority().Sort(nodeInfoList)
 	case string(util.SpreadPolicy):
-		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling strategy", pod.Namespace, pod.Name, nodePolicy)
-		device.NewNodeSpreadPriority().Sort(nodeInfoList)
+		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, nodePolicy)
+		allocator.NewNodeSpreadPriority().Sort(nodeInfoList)
 	default:
-		klog.V(4).Infof("Pod <%s/%s> no node scheduling strategy", pod.Namespace, pod.Name)
+		klog.V(4).Infof("Pod <%s/%s> no node scheduling policy", pod.Namespace, pod.Name)
 		sort.Slice(nodeInfoList, func(i, j int) bool {
 			return nodeOriginalPosition[nodeInfoList[i].GetName()] < nodeOriginalPosition[nodeInfoList[j].GetName()]
 		})
@@ -302,7 +303,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			continue
 		}
 		// Attempt to allocate devices for pods on this node.
-		newPod, err := device.NewAllocator(nodeInfo).Allocate(pod)
+		newPod, err := allocator.NewAllocator(nodeInfo).Allocate(pod)
 		if err != nil {
 			klog.Errorln(err.Error())
 			failedNodesMap[node.Name] = err.Error()
@@ -333,7 +334,7 @@ func CollectPodsOnNode(pods []*corev1.Pod, node *corev1.Node) []*corev1.Pod {
 		if (pod.Spec.NodeName == node.Name || predicateNode == node.Name) &&
 			pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
 			ret = append(ret, pod)
-			klog.V(5).Infof("Append Pod <%s/%s> on node %s", pod.Namespace, pod.Name, node.Name)
+			klog.V(5).Infof("Append Pod <%s/%s> on node <%s>", pod.Namespace, pod.Name, node.Name)
 		}
 	}
 	return ret

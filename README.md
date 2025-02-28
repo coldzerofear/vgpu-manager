@@ -19,6 +19,7 @@ The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager
 - [x] GPU device uses virtual memory after exceeding memory limit
 - [x] Rescheduling device allocation failed pod
 - [x] Webhook dynamic admission, fixing some non-standard pod configurations
+- [x] Provide the optimal topology allocation for NUMA and NVLink
 - [ ] Compatible with hot swappable devices and expansion capabilities
 - [ ] Compatible with Volcano Batch Scheduler
 - [ ] Support dynamic resource allocation (DRA)

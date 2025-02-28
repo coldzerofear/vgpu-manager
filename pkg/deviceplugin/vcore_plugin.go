@@ -87,7 +87,7 @@ func (m *vcoreDevicePlugin) PreStartContainer(_ context.Context, _ *pluginapi.Pr
 
 func (m *vcoreDevicePlugin) Devices() []*pluginapi.Device {
 	var devices []*pluginapi.Device
-	for _, gpuDevice := range m.base.manager.GetNodeDeviceInfos() {
+	for _, gpuDevice := range m.base.manager.GetNodeDeviceInfo() {
 		if gpuDevice.Mig { // skip mig device
 			continue
 		}
