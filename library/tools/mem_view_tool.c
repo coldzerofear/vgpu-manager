@@ -17,7 +17,7 @@ int str2int(char *str) {
 //　gcc mem_view_tool.c -o mem_view_tool -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -l:libnvidia-ml.so.1 -l:libcuda.so.1
 int main(int argc, char **argv) {
     if (argc != 2) {
-      printf("wrong arguments: %s [device_id]\n", argv[0]);
+      printf("wrong arguments: %s [device_index]\n", argv[0]);
       return -1;
     }
     int device_id = str2int(argv[1]);

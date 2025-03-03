@@ -15,12 +15,13 @@ int str2int(char *str) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        printf("wrong arguments: %s [device_id] [memory_size(MB)]\n", argv[0]);
+    if (argc != 4) {
+        printf("wrong arguments: %s [device_index] [memory_size(MiB)] [time(Second)]\n", argv[0]);
         return -1;
     }
     int device_id = str2int(argv[1]);
     int size_mb = str2int(argv[2]);
+    int time = str2int(argv[3]);
 
     //初始化设备
     if (cuInit(0) != CUDA_SUCCESS) {
@@ -55,7 +56,10 @@ int main(int argc, char **argv) {
         printf("cuMemAlloc_v2 failed: %s\n", err);
         return -1;
     }
-    while (1){}
+    while (1){
+        sleep(time);
+        break;
+    }
     cuMemFree_v2(d);
     return 0;
 }

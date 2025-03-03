@@ -11,9 +11,9 @@ The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager
 - [x] Efficient scheduling performance
 - [x] Ensure the security of container resource isolation
 - [x] Simplify GRPC within containers
-- [x] Support CUDA 12.x version drivers
-- [x] Support CGroupv1 and CGroupv2
-- [x] Dual scheduling strategy for nodes and devices
+- [x] Support CUDA 12.x driver version
+- [x] Support CGroupV1 and CGroupV2
+- [x] Dual scheduling policy for nodes and devices
 - [x] Provide GPU monitoring indicators
 - [x] Idle computing power of dynamic balancing equipment
 - [x] GPU device uses virtual memory after exceeding memory limit
@@ -147,30 +147,31 @@ Check that the container meets expectations
 root@gpu-pod1:/# nvidia-smi 
 [vGPU INFO(34|loader.c|1043)]: loaded nvml libraries
 [vGPU INFO(34|loader.c|1171)]: loaded cuda libraries
-Sun Dec 22 19:20:47 2024       
-+---------------------------------------------------------------------------------------+
-| NVIDIA-SMI 535.183.01             Driver Version: 535.183.01   CUDA Version: 12.2     |
-|-----------------------------------------+----------------------+----------------------+
-| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
-|                                         |                      |               MIG M. |
-|=========================================+======================+======================|
-|   0  NVIDIA GeForce GTX 1050 Ti     Off | 00000000:01:00.0 Off |                  N/A |
-| N/A   42C    P8              N/A / ERR! |      0MiB /  1024MiB |      0%      Default |
-|                                         |                      |                  N/A |
-+-----------------------------------------+----------------------+----------------------+
+Mon Mar  3 03:04:34 2025       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.86.10              Driver Version: 570.86.10      CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce GTX 1050 Ti     Off |   00000000:01:00.0 Off |                  N/A |
+| N/A   41C    P8             N/A / 5001W |       0MiB /   1024MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
                                                                                          
-+---------------------------------------------------------------------------------------+
-| Processes:                                                                            |
-|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
-|        ID   ID                                                             Usage      |
-|=======================================================================================|
-+---------------------------------------------------------------------------------------+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
 ```
 
-## Scheduling Strategy 
+## Scheduling Policy 
 
-Support scheduling strategies for both node and device dimensions
+Support scheduling policies for both node and device dimensions
 
 * `binpack`: Choose the busiest nodes or devices to improve resource utilization and reduce fragmentation.
 * `spread`: Select the most idle node or device to distribute tasks and isolate faults.

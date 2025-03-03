@@ -41,6 +41,7 @@ extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
 
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
+static pthread_once_t g_nvml_init = PTHREAD_ONCE_INIT;
 
 static volatile int64_t g_cur_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
@@ -220,6 +221,19 @@ static int check_file_exist(const char *file_path) {
   }
 }
 
+static void nvml_init() {
+  nvmlReturn_t rt;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlInitWithFlags))) {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlInitWithFlags, 0);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlInit_v2))) {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit_v2);
+  } else {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit);
+  }
+  if (unlikely(rt)) {
+    LOGGER(FATAL, "nvmlInit failed, return %d, str: %s", rt, nvml_error(rt));
+  }
+}
 
 static void change_token(int64_t delta, int device_id) {
   int64_t cuda_cores_before = 0, cuda_cores_after = 0;
@@ -449,6 +463,7 @@ static void initialization() {
   if (unlikely(ret)) {
     LOGGER(FATAL, "cuInit error %s", cuda_error((CUresult)ret, &cuda_err_string));
   }
+  pthread_once(&g_nvml_init, nvml_init);
   unsigned int deviceCount;
   init_device_cuda_cores(&deviceCount);
   int batch_count = (deviceCount + DEVICE_BATCH_SIZE - 1) / DEVICE_BATCH_SIZE;
@@ -694,7 +709,7 @@ void get_used_gpu_memory(void *arg, CUdevice device_id) {
   size_t *used_memory = arg;
   nvmlDevice_t dev;
   nvmlReturn_t ret;
-
+  pthread_once(&g_nvml_init, nvml_init);
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
     ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_id, &dev);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
@@ -809,7 +824,7 @@ CUresult cuDriverGetVersion(int *driverVersion) {
   CUresult ret;
 
   load_necessary_data();
-  pthread_once(&g_init_set, initialization);
+//  pthread_once(&g_init_set, initialization);
 
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDriverGetVersion, driverVersion);
   if (unlikely(ret)) {

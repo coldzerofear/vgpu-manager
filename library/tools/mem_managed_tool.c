@@ -14,10 +14,9 @@ int str2int(char *str) {
     return res;
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc != 4) {
-        printf("wrong arguments: mem_managed_tool device_index size(MB) FLAG\n");
+        printf("wrong arguments: %s [device_index] [size(MiB)] [FLAG]\n", argv[0]);
         return -1;
     }
     int device_id = str2int(argv[1]);

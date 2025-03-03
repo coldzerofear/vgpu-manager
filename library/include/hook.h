@@ -43,7 +43,7 @@ extern "C" {
 /**
  * Controller configuration base path
  */
-#define VGPU_CONFIG_PATH "/etc/vgpu-manager/config"
+#define VGPU_CONFIG_PATH (VGPU_MANAGER_PATH "/config")
 
 /**
  * Controller configuration file name
@@ -53,15 +53,13 @@ extern "C" {
 /**
  * Controller configuration file path
  */
-#define CONTROLLER_CONFIG_PATH (VGPU_CONFIG_PATH "/" CONTROLLER_CONFIG_NAME)
+#define CONTROLLER_CONFIG_PATH (VGPU_MANAGER_PATH "/config/" CONTROLLER_CONFIG_NAME)
 
 #define PID_SELF_CGROUP_PATH "/proc/self/cgroup"
 
-#define PID_ONE_MOUNTINFO_PATH "/proc/1/mountinfo"
-
 #define HOST_PROC_PATH (VGPU_MANAGER_PATH "/host_proc")
 
-#define HOST_CGROUP_PID_PATH "/etc/vgpu-manager/host_proc/%d/cgroup"
+#define HOST_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/host_proc/%d/cgroup")
 
 #define HOST_CGROUP_PROCS_PATH (VGPU_MANAGER_PATH "/host_cgroup")
 
@@ -119,12 +117,12 @@ typedef struct {
 typedef struct {
   char uuid[48];
   size_t total_memory;
-  int hard_core;    // 算力硬限制最大值
-  int soft_core;    // 算力软限制值
-  int core_limit;   // 算力限制开关，0：关 1：开
-  int hard_limit;   // 算力硬限制开关，0：关 1：开
-  int memory_limit; // 内存限制开关，0：关 1：开
-  int memory_oversold; // 内存超售开关，虚拟显存：0：关 1：开
+  int hard_core;
+  int soft_core;
+  int core_limit;
+  int hard_limit;
+  int memory_limit;
+  int memory_oversold;
 } __attribute__((packed, aligned(8))) device_t;
 
 /**
@@ -144,9 +142,9 @@ typedef struct {
  * Dynamic computing power limit configuration
  */
 typedef struct {
-  int change_limit_interval;    // 原CHANGE_LIMIT_INTERVAL
-  int usage_threshold;          // 原USAGE_THRESHOLD
-  int error_recovery_step;      // 错误恢复步长
+  int change_limit_interval;
+  int usage_threshold;
+  int error_recovery_step;
 } __attribute__((packed, aligned(8))) dynamic_config_t;
 
 typedef enum {
@@ -173,38 +171,38 @@ typedef void* (*fp_dlsym)(void*, const char*);
 
 #define FUNC_ATTR_VISIBLE  __attribute__((visibility("default"))) 
 
-#define LOGGER(level, format, ...)                              \
-  ({                                                            \
-    char *_print_level_str = getenv("LOGGER_LEVEL");            \
-    int _print_level = 3;                                       \
-    if (_print_level_str) {                                     \
-      _print_level = (int)strtoul(_print_level_str, NULL, 10);  \
-      _print_level = _print_level < 0 ? 3 : _print_level;       \
-    }                                                           \
-    if (level <= _print_level) {                                \
-      if (level == INFO) {                                      \
-        fprintf(stderr, "[vGPU INFO(%d|%s|%d)]: " format "\n",  \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-      } else if (level == ERROR) {                              \
-        fprintf(stderr, "[vGPU ERROR(%d|%s|%d)]: " format "\n", \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-      } else if (level == WARNING) {                            \
-        fprintf(stderr, "[vGPU WARN(%d|%s|%d)]: " format "\n",  \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-      } else if (level == FATAL) {                              \
-        fprintf(stderr, "[vGPU FATAL(%d|%s|%d)]: " format "\n", \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-      } else if (level == VERBOSE) {                            \
+#define LOGGER(level, format, ...)                                \
+  ({                                                              \
+    char *_print_level_str = getenv("LOGGER_LEVEL");              \
+    int _print_level = 3;                                         \
+    if (_print_level_str) {                                       \
+      _print_level = (int)strtoul(_print_level_str, NULL, 10);    \
+      _print_level = _print_level < 0 ? 3 : _print_level;         \
+    }                                                             \
+    if (level <= _print_level) {                                  \
+      if (level == INFO) {                                        \
+        fprintf(stderr, "[vGPU INFO(%d|%s|%d)]: " format "\n",    \
+        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
+      } else if (level == ERROR) {                                \
+        fprintf(stderr, "[vGPU ERROR(%d|%s|%d)]: " format "\n",   \
+        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
+      } else if (level == WARNING) {                              \
+        fprintf(stderr, "[vGPU WARN(%d|%s|%d)]: " format "\n",    \
+        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
+      } else if (level == FATAL) {                                \
+        fprintf(stderr, "[vGPU FATAL(%d|%s|%d)]: " format "\n",   \
+        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
+      } else if (level == VERBOSE) {                              \
         fprintf(stderr, "[vGPU VERBOSE(%d|%s|%d)]: " format "\n", \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-      } else if (level == DETAIL) {                             \
-        fprintf(stderr, "[vGPU DETAIL(%d|%s|%d)]: " format "\n",\
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-      }                                                         \
-    }                                                           \
-    if (level == FATAL) {                                       \
-      exit(-1);                                                 \
-    }                                                           \
+        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
+      } else if (level == DETAIL) {                               \
+        fprintf(stderr, "[vGPU DETAIL(%d|%s|%d)]: " format "\n",  \
+        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
+      }                                                           \
+    }                                                             \
+    if (level == FATAL) {                                         \
+      exit(-1);                                                   \
+    }                                                             \
   })
 
 /**

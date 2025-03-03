@@ -1042,15 +1042,6 @@ static void load_nvml_libraries() {
 
   LOGGER(INFO, "loaded nvml libraries");
   dlclose(table);
-
-  // Initialize the ml driver
-  if (NVML_FIND_ENTRY(nvml_library_entry, nvmlInitWithFlags)) {
-    NVML_ENTRY_CHECK(nvml_library_entry, nvmlInitWithFlags, 0);
-  } else if (NVML_FIND_ENTRY(nvml_library_entry, nvmlInit_v2)) {
-    NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit_v2);
-  } else {
-    NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit);
-  }
 }
 
 static void load_cuda_single_library(int idx) {
@@ -1274,13 +1265,13 @@ int read_file_to_config_path(const char* filename, resource_data_t* data) {
   for (int i = 0; i < g_vgpu_config.device_count; i++) {
     LOGGER(VERBOSE, "---------------------------GPU %d---------------------------", i);
     LOGGER(VERBOSE, "gpu uuid         : %s", g_vgpu_config.devices[i].uuid);
-    LOGGER(VERBOSE, "memory limit     : %d", g_vgpu_config.devices[i].memory_limit);
-    LOGGER(VERBOSE, "total memory     : %ld", g_vgpu_config.devices[i].total_memory);
-    LOGGER(VERBOSE, "core limit       : %d", g_vgpu_config.devices[i].core_limit);
-    LOGGER(VERBOSE, "hard limit       : %d", g_vgpu_config.devices[i].hard_limit);
-    LOGGER(VERBOSE, "hard core        : %d", g_vgpu_config.devices[i].hard_core);
-    LOGGER(VERBOSE, "soft core        : %d", g_vgpu_config.devices[i].soft_core);
-    LOGGER(VERBOSE, "memory oversold  : %d", g_vgpu_config.devices[i].memory_oversold);
+    LOGGER(VERBOSE, "memory limit     : %s", g_vgpu_config.devices[i].memory_limit? "enabled" : "disabled");
+    LOGGER(VERBOSE, "+ memory size    : %ld", g_vgpu_config.devices[i].total_memory);
+    LOGGER(VERBOSE, "cores limit      : %s", g_vgpu_config.devices[i].core_limit? "enabled" : "disabled");
+    LOGGER(VERBOSE, "+ hard limit     : %s", g_vgpu_config.devices[i].hard_limit? "enabled" : "disabled");
+    LOGGER(VERBOSE, "+ hard cores     : %d", g_vgpu_config.devices[i].hard_core);
+    LOGGER(VERBOSE, "+ soft cores     : %d", g_vgpu_config.devices[i].soft_core);
+    LOGGER(VERBOSE, "memory oversold  : %s", g_vgpu_config.devices[i].memory_oversold? "enabled" : "disabled");
   }
   LOGGER(VERBOSE, "-----------------------------------------------------------");
 DONE:
@@ -1490,13 +1481,13 @@ int load_controller_configuration() {
   for (int i = 0; i < g_vgpu_config.device_count; i++) {
     LOGGER(VERBOSE, "---------------------------GPU %d---------------------------", i);
     LOGGER(VERBOSE, "gpu uuid         : %s", g_vgpu_config.devices[i].uuid);
-    LOGGER(VERBOSE, "memory limit     : %d", g_vgpu_config.devices[i].memory_limit);
-    LOGGER(VERBOSE, "total memory     : %ld", g_vgpu_config.devices[i].total_memory);
-    LOGGER(VERBOSE, "core limit       : %d", g_vgpu_config.devices[i].core_limit);
-    LOGGER(VERBOSE, "hard limit       : %d", g_vgpu_config.devices[i].hard_limit);
-    LOGGER(VERBOSE, "hard core        : %d", g_vgpu_config.devices[i].hard_core);
-    LOGGER(VERBOSE, "soft core        : %d", g_vgpu_config.devices[i].soft_core);
-    LOGGER(VERBOSE, "memory oversold  : %d", g_vgpu_config.devices[i].memory_oversold);
+    LOGGER(VERBOSE, "memory limit     : %s", g_vgpu_config.devices[i].memory_limit? "enabled" : "disabled");
+    LOGGER(VERBOSE, "+ memory size    : %ld", g_vgpu_config.devices[i].total_memory);
+    LOGGER(VERBOSE, "cores limit      : %s", g_vgpu_config.devices[i].core_limit? "enabled" : "disabled");
+    LOGGER(VERBOSE, "+ hard limit     : %s", g_vgpu_config.devices[i].hard_limit? "enabled" : "disabled");
+    LOGGER(VERBOSE, "+ hard cores     : %d", g_vgpu_config.devices[i].hard_core);
+    LOGGER(VERBOSE, "+ soft cores     : %d", g_vgpu_config.devices[i].soft_core);
+    LOGGER(VERBOSE, "memory oversold  : %s", g_vgpu_config.devices[i].memory_oversold? "enabled" : "disabled");
   }
   LOGGER(VERBOSE, "-----------------------------------------------------------");
   ret = write_file_to_config_path(&g_vgpu_config);
@@ -1510,39 +1501,6 @@ DONE:
   return ret;
 }
 
-static volatile int init_hooks_cuda_library = 0;
-static volatile int init_hooks_nvml_library = 0;
-
-void ensure_load_hooks_cuda_library() {
-  if (likely(init_hooks_cuda_library)) {
-    return;
-  }
-  for (int i = 0; i < cuda_hook_nums; i++) {
-    for (int j = 0; j < CUDA_ENTRY_END; j++) {
-      if (unlikely(!strcmp(cuda_hooks_entry[i].name, cuda_library_entry[j].name))) {
-        load_cuda_single_library(j);
-        break;
-      }
-    }
-  }
-  init_hooks_cuda_library = 1;
-}
-
-void ensure_load_hooks_nvml_library() {
-  if (likely(init_hooks_nvml_library)) {
-    return;
-  }
-  for (int i = 0; i < nvml_hook_nums; i++) {
-    for (int j = 0; j < NVML_ENTRY_END; j++) {
-      if (unlikely(!strcmp(nvml_hooks_entry[i].name, nvml_library_entry[j].name))) {
-        load_nvml_single_library(j);
-        break;
-      }
-    }
-  }
-  init_hooks_nvml_library = 1;
-}
-
 void load_necessary_data() {
   // First, determine the driver version
   read_version_from_proc(driver_version);
@@ -1552,6 +1510,4 @@ void load_necessary_data() {
   pthread_once(&g_cuda_lib_init, load_cuda_libraries);
   // Read global configuration
   load_controller_configuration();
-  ensure_load_hooks_cuda_library();
-  ensure_load_hooks_nvml_library();
 }
