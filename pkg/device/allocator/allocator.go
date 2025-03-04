@@ -261,7 +261,7 @@ func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName s
 			continue
 		}
 		if needCores > deviceInfo.AllocatableCores() || (needCores == util.HundredCore && deviceInfo.AllocatableCores() < util.HundredCore) {
-			klog.V(4).Infof("current gpu device %d insufficient available core, skip allocation", i)
+			klog.V(4).Infof("Filter device <%d> with insufficient available cores on the node <%s>", i, nodeName)
 			continue
 		}
 		// Filter device type.
@@ -273,7 +273,7 @@ func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName s
 		// Filter device uuid.
 		if !util.CheckDeviceUuid(pod.Annotations, deviceInfo.GetUUID()) {
 			klog.V(4).Infof("Filter gpu device <%d> uuid <%s> non compliant annotation[%s]", i,
-				deviceInfo.GetType(), fmt.Sprintf("'%s' or '%s'", util.PodIncludeGPUUUIDAnnotation, util.PodExcludeGPUUUIDAnnotation))
+				deviceInfo.GetUUID(), fmt.Sprintf("'%s' or '%s'", util.PodIncludeGPUUUIDAnnotation, util.PodExcludeGPUUUIDAnnotation))
 			continue
 		}
 		devices = append(devices, deviceInfo)
