@@ -48,12 +48,22 @@ extern "C" {
 /**
  * Controller configuration file name
  */
-#define CONTROLLER_CONFIG_NAME "vgpu.config"
+#define CONTROLLER_CONFIG_FILE_NAME "vgpu.config"
 
 /**
  * Controller configuration file path
  */
-#define CONTROLLER_CONFIG_PATH (VGPU_MANAGER_PATH "/config/" CONTROLLER_CONFIG_NAME)
+#define CONTROLLER_CONFIG_FILE_PATH (VGPU_MANAGER_PATH "/config/" CONTROLLER_CONFIG_FILE_NAME)
+
+/**
+ * Controller driver file name
+ */
+#define CONTROLLER_DRIVER_FILE_NAME "libvgpu-control.so"
+
+/**
+ * Controller driver file path
+ */
+#define CONTROLLER_DRIVER_FILE_PATH (VGPU_MANAGER_PATH "/driver/" CONTROLLER_DRIVER_FILE_NAME)
 
 #define PID_SELF_CGROUP_PATH "/proc/self/cgroup"
 

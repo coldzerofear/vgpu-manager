@@ -979,6 +979,7 @@ static pthread_once_t init_dlsym_flag = PTHREAD_ONCE_INIT;
 extern void* _dl_sym(void*, const char*, void*);
 /* This is the symbol search function */
 static fp_dlsym real_dlsym = NULL;
+void *lib_control;
 
 extern int get_mem_limit(uint32_t index, size_t *limit);
 extern int get_core_limit(uint32_t index, int *limit);
@@ -1289,15 +1290,15 @@ int write_file_to_config_path(resource_data_t* data) {
   if (unlikely(check_file_exist(VGPU_CONFIG_PATH))) {
       mkdir(VGPU_CONFIG_PATH, 0777);
   }
-  fd = open(CONTROLLER_CONFIG_PATH, O_CREAT | O_TRUNC | O_WRONLY, 00777);
+  fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_TRUNC | O_WRONLY, 00777);
   if (unlikely(fd == -1)) {
-    LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_PATH, strerror(errno));
+    LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     ret = 1;
     goto DONE;
   }
   wsize = (int)write(fd, (void*)data, sizeof(resource_data_t));
   if (wsize != sizeof(resource_data_t)) {
-    LOGGER(ERROR, "can't write data to %s, error %s", CONTROLLER_CONFIG_PATH, strerror(errno));
+    LOGGER(ERROR, "can't write data to %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     ret = 1;
     goto DONE;
   }
@@ -1344,6 +1345,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   LOGGER(DETAIL, "into dlsym %s", symbol);
   if (real_dlsym == NULL) {
     real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+    lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
     if (real_dlsym == NULL) {
       real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
     }
@@ -1369,6 +1371,12 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   // hijack cuda
   if (strncmp(symbol, "cu", 2) == 0) {
     load_necessary_data();
+    if (likely(lib_control)) {
+      void *f = real_dlsym(lib_control, symbol);
+      if (likely(f)) {
+        return f;
+      }
+    }
     for (i = 0; i < cuda_hook_nums; i++) {
       if (unlikely(!strcmp(symbol, cuda_hooks_entry[i].name))) {
         LOGGER(DETAIL, "search found cuda hook %s", symbol);
@@ -1379,6 +1387,12 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   // hijack nvml
   if (strncmp(symbol, "nvml", 4) == 0) {
     load_necessary_data();
+    if (likely(lib_control)) {
+      void *f = real_dlsym(lib_control, symbol);
+      if (likely(f)) {
+        return f;
+      }
+    }
     for (i = 0; i < nvml_hook_nums; i++) {
       if (unlikely(!strcmp(symbol, nvml_hooks_entry[i].name))) {
         LOGGER(DETAIL, "search found nvml hook %s", symbol);
@@ -1402,7 +1416,7 @@ int load_controller_configuration() {
       LOGGER(VERBOSE, "find current container id: %s", container_id);
     }
   }
-  ret = read_file_to_config_path(CONTROLLER_CONFIG_PATH, &g_vgpu_config);
+  ret = read_file_to_config_path(CONTROLLER_CONFIG_FILE_PATH, &g_vgpu_config);
   if (likely(ret==0)) {
     init_config_flag = 1;
     goto DONE;
@@ -1492,7 +1506,7 @@ int load_controller_configuration() {
   LOGGER(VERBOSE, "-----------------------------------------------------------");
   ret = write_file_to_config_path(&g_vgpu_config);
   if (unlikely(ret)) {
-    LOGGER(ERROR, "failed to write vgpu config file %s", CONTROLLER_CONFIG_PATH);
+    LOGGER(ERROR, "failed to write vgpu config file %s", CONTROLLER_CONFIG_FILE_PATH);
     goto DONE;
   }
   ret = 0;
