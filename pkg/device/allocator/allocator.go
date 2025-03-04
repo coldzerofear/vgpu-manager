@@ -22,9 +22,9 @@ type allocator struct {
 }
 
 func NewAllocator(nodeInfo *device.NodeInfo) *allocator {
-	var deviceList gpuallocator.DeviceList
-	for _, dev := range nodeInfo.GetDeviceMap() {
-		deviceList = append(deviceList, gpuallocator.NewDevice(dev.GetID(), dev.GetUUID(), dev.GetBusID()))
+	deviceList := make(gpuallocator.DeviceList, nodeInfo.GetDeviceCount())
+	for id, dev := range nodeInfo.GetDeviceMap() {
+		deviceList[id] = gpuallocator.NewDevice(dev.GetID(), dev.GetUUID(), dev.GetBusID())
 	}
 	alloc := &allocator{nodeInfo: nodeInfo, deviceList: deviceList}
 	featureGate := featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
