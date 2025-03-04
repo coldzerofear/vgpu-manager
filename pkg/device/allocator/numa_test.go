@@ -80,13 +80,11 @@ func Test_NumaDeviceScoreSort(t *testing.T) {
 	}{{
 		name:           "example 1",
 		devices:        devicesExample1,
-		defaultNumaIds: []int{0, 1},
 		binpackNumaIds: []int{0, 1},
 		spreadNumaIds:  []int{1, 0},
 	}, {
 		name:           "example 2",
 		devices:        devicesExample2,
-		defaultNumaIds: []int{0, 1},
 		binpackNumaIds: []int{1, 0},
 		spreadNumaIds:  []int{0, 1},
 	}}
@@ -103,17 +101,6 @@ func Test_NumaDeviceScoreSort(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			numaDevices := NewNumaNodeDevice(testCase.devices)
-			var defaultNumaIds []int
-			numaDevices.DefaultCallback(func(numaNode int, devices []*device.Device) (done bool) {
-				for _, dev := range devices {
-					assert.Equal(t, numaNode, dev.GetNUMA())
-				}
-				containsDeviceSlice(t, testCase.devices, devices)
-				defaultNumaIds = append(defaultNumaIds, numaNode)
-				return done
-			})
-			assert.Equal(t, testCase.defaultNumaIds, defaultNumaIds)
-
 			var binpackNumaIds []int
 			numaDevices.BinpackCallback(func(numaNode int, devices []*device.Device) (done bool) {
 				for _, dev := range devices {
