@@ -99,13 +99,11 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 
 		w.Header().Set("Content-Type", "application/json")
 		if resultBody, err := json.Marshal(extenderFilterResult); err != nil {
-			klog.Errorf("Failed to marshal extenderFilterResult: %+v, %+v",
-				err, extenderFilterResult)
+			klog.Errorf("Failed to marshal extenderFilterResult: %+v, %+v", err, extenderFilterResult)
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(err.Error()))
 		} else {
-			klog.V(4).Infof("%s: extenderFilterResult = %s",
-				predicate.Name(), string(resultBody))
+			klog.V(4).Infof("%s: extenderFilterResult = %s", predicate.Name(), string(resultBody))
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(resultBody)
 		}
@@ -138,14 +136,12 @@ func BindPredicateRoute(predicate predicate.BindPredicate) httprouter.Handle {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if resultBody, err := json.Marshal(extenderBindingResult); err != nil {
-			klog.Errorf("Failed to marshal extenderBindingResult: %+v, %+v",
-				err, extenderBindingResult)
+			klog.Errorf("Failed to marshal extenderBindingResult: %+v, %+v", err, extenderBindingResult)
 			w.WriteHeader(http.StatusInternalServerError)
 			errMsg := fmt.Sprintf("{'error':'%s'}", err.Error())
 			_, _ = w.Write([]byte(errMsg))
 		} else {
-			klog.V(4).Infof("%s: extenderBindingResult = %s",
-				predicate.Name(), string(resultBody))
+			klog.V(4).Infof("%s: extenderBindingResult = %s", predicate.Name(), string(resultBody))
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(resultBody)
 		}

@@ -45,7 +45,10 @@ scheduler:
       serverBindPort: 3456
       # The pprof service port used for debugging: (default disable: 0)
       pprofBindPort: 0
-      featureGates: "SerialBindNode=false"
+      # Supported feature gates:
+      # - SerialBindNode
+      # - GPUTopology
+      featureGates: ""
       logLevel: 3
     resources:
       requests:
@@ -113,7 +116,14 @@ devicePlugin:
       pprofBindPort: 0
       # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
       cgroupDriver: ""
-      featureGates: "CorePlugin=false,MemoryPlugin=false,Reschedule=false"
+      gdsEnabled: false
+      mofedEnabled: false
+      # Supported feature gates:
+      # - CorePlugin
+      # - MemoryPlugin
+      # - Reschedule
+      # - GPUTopology
+      featureGates: ""
       logLevel: 3
     resources:
       requests:

@@ -73,6 +73,8 @@ spec:
             - --pprof-bind-port={{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.devicePlugin.commands.cgroupDriver }}
             - --feature-gates={{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
+            - --mofed-enabled={{ .Values.devicePlugin.devicePlugin.commands.mofedEnabled }}
+            - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
             - --node-config-path=/config/nodeConfig.json
             - --v={{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
           env:

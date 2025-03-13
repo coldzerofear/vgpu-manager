@@ -73,8 +73,8 @@ func NewOptions() *Options {
 		baseversion.DefaultBuildEffectiveVersion(), featureGate); err != nil {
 		panic(fmt.Sprintf("Failed to registry feature gates to global: %v", err))
 	}
-	gdsEnabled := os.Getenv("NVIDIA_GDS") == "enable" || os.Getenv("NVIDIA_GDS") == "true"
-	mofedEnabledd := os.Getenv("NVIDIA_MOFED") == "enable" || os.Getenv("NVIDIA_MOFED") == "true"
+	gdsEnabled := os.Getenv("NVIDIA_GDS") == "enabled" || os.Getenv("NVIDIA_GDS") == "true"
+	mofedEnabled := os.Getenv("NVIDIA_MOFED") == "enabled" || os.Getenv("NVIDIA_MOFED") == "true"
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -87,7 +87,7 @@ func NewOptions() *Options {
 		DevicePluginPath:    pluginapi.DevicePluginPath,
 		PprofBindPort:       defaultPprofBindPort,
 		GDSEnabled:          gdsEnabled,
-		MOFEDEnabled:        mofedEnabledd,
+		MOFEDEnabled:        mofedEnabled,
 		FeatureGate:         featureGate,
 	}
 }

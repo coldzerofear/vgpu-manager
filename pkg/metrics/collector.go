@@ -64,17 +64,17 @@ var (
 	physicalGPUTotalMemory = prometheus.NewDesc(
 		"physical_gpu_device_total_memory_in_bytes",
 		"Physical GPU device total memory (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "migenable"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "migenabled"}, nil,
 	)
 	physicalGPUMemoryUsage = prometheus.NewDesc(
 		"physical_gpu_device_memory_usage_in_bytes",
 		"Physical GPU device memory usage (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "migenable"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "migenabled"}, nil,
 	)
 	physicalGPUCoreUtilRate = prometheus.NewDesc(
 		"physical_gpu_device_core_utilization_rate",
 		"Physical GPU device core utilization rate (percentage)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "migenable"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "migenabled"}, nil,
 	)
 	nodeVGPUTotalMemory = prometheus.NewDesc(
 		"node_vgpu_total_memory_in_bytes",
