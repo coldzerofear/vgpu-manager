@@ -10,12 +10,15 @@ import (
 	"github.com/julienschmidt/httprouter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/time/rate"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 )
 
 type server struct {
 	registry   *prometheus.Registry
-	port       int
+	limiter    *rate.Limiter
+	port       *int
 	httpServer *http.Server
 }
 
@@ -24,14 +27,20 @@ func (s *server) Start(stopCh <-chan struct{}) error {
 		return fmt.Errorf("metrics service has been started and cannot be restarted again")
 	}
 	opts := promhttp.HandlerOpts{Registry: s.registry}
-	handler := promhttp.HandlerFor(s.registry, opts)
-
+	next := promhttp.HandlerFor(s.registry, opts)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.limiter != nil && !s.limiter.Allow() {
+			http.Error(w, "Too many requests", http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 	routerHandle := httprouter.New()
 	route.AddHealthProbe(routerHandle)
 	route.AddMetricsHandle(routerHandle, handler)
 
 	s.httpServer = &http.Server{
-		Addr:    "0.0.0.0:" + strconv.Itoa(s.port),
+		Addr:    "0.0.0.0:" + strconv.Itoa(*s.port),
 		Handler: routerHandle,
 	}
 
@@ -54,9 +63,37 @@ func (s *server) Stop() {
 	s.httpServer = nil
 }
 
-func NewServer(registry *prometheus.Registry, port int) *server {
-	return &server{
-		registry: registry,
-		port:     port,
+type Option func(*server)
+
+func WithRegistry(registry *prometheus.Registry) Option {
+	return func(s *server) {
+		s.registry = registry
 	}
+}
+
+func WithPort(port *int) Option {
+	return func(s *server) {
+		s.port = port
+	}
+}
+
+func WithLimiter(limiter *rate.Limiter) Option {
+	return func(s *server) {
+		s.limiter = limiter
+	}
+}
+
+func NewServer(opts ...Option) *server {
+	s := &server{}
+	for _, opt := range opts {
+		opt(s)
+	}
+	// set default value
+	if s.registry == nil {
+		s.registry = prometheus.DefaultRegisterer.(*prometheus.Registry)
+	}
+	if s.port == nil {
+		s.port = ptr.To[int](3456)
+	}
+	return s
 }

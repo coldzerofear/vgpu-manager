@@ -18,10 +18,12 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/spf13/pflag"
+	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
@@ -68,7 +70,10 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create node gpu collector failed: %v", err)
 	}
-	server := metrics.NewServer(nodeCollector.Registry(), opt.ServerBindProt)
+	server := metrics.NewServer(
+		metrics.WithRegistry(nodeCollector.Registry()),
+		metrics.WithLimiter(rate.NewLimiter(rate.Every(time.Second), 1)),
+		metrics.WithPort(ptr.To[int](opt.ServerBindProt)))
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	factory.Start(ctx.Done())
