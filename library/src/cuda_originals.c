@@ -78,8 +78,16 @@ CUresult cuDevicePrimaryCtxReset(CUdevice dev) {
   return CUDA_ENTRY_CALL(cuda_library_entry, cuDevicePrimaryCtxReset, dev);
 }
 
-CUresult cuCtxCreate_v3(CUcontext *pctx, unsigned int flags, CUdevice dev) {
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuCtxCreate_v3, pctx, flags, dev);
+CUresult cuCtxCreate_v3(CUcontext *pctx, CUexecAffinityParam *paramsArray,
+                        int numParams, unsigned int flags, CUdevice dev) {
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuCtxCreate_v3, pctx, paramsArray,
+                         numParams, flags, dev);
+}
+
+CUresult cuCtxCreate_v4(CUcontext *pctx, CUctxCreateParams *ctxCreateParams,
+                        unsigned int flags, CUdevice dev) {
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuCtxCreate_v3, pctx, ctxCreateParams,
+                         flags, dev);
 }
 
 CUresult cuCtxCreate_v2(CUcontext *pctx, unsigned int flags, CUdevice dev) {
@@ -1917,10 +1925,8 @@ CUresult cuTexRefSetAddress(size_t *ByteOffset, CUtexref hTexRef,
                          hTexRef, dptr, bytes);
 }
 
-CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib,
-                              CUdevice dev) {
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetAttribute, pi, attrib,
-                         dev);
+CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib, CUdevice dev) {
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetAttribute, pi, attrib, dev);
 }
 
 CUresult cuDestroyExternalMemory(CUexternalMemory extMem) {
@@ -1928,8 +1934,7 @@ CUresult cuDestroyExternalMemory(CUexternalMemory extMem) {
 }
 
 CUresult cuDestroyExternalSemaphore(CUexternalSemaphore extSem) {
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuDestroyExternalSemaphore,
-                         extSem);
+  return CUDA_ENTRY_CALL(cuda_library_entry, cuDestroyExternalSemaphore, extSem);
 }
 
 CUresult cuDeviceGetUuid_v2(CUuuid *uuid, CUdevice dev) {

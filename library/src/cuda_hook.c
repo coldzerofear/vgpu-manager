@@ -346,13 +346,13 @@ static void *utilization_watcher(void *arg) {
     for (device_id = batch->start_index; device_id < batch->end_index; device_id++) {
       nanosleep(&wait, NULL);
       if (!g_vgpu_config.devices[device_id].core_limit) {
-        continue; // 跳过没开启核心限制的
+        continue; // Skip GPU without core limit enabled
       }
       get_used_gpu_utilization((void *)&top_results[device_id], device_id);
       if (unlikely(!top_results[device_id].valid)) {
         continue;
       }
-      // 设备最大利用率100% - 设备当前已使用 = 空闲利用率
+
       sys_frees[device_id] = MAX_UTILIZATION - top_results[device_id].sys_current;
 
       if (g_vgpu_config.devices[device_id].hard_limit) {
@@ -436,21 +436,18 @@ static void init_device_cuda_cores(unsigned int *devCount) {
   int ret;
   const char *cuda_err_string = NULL;
   for (int i = 0; i < *devCount; i++) {
-    // 初始化设备上的多处理器数量
     ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetAttribute, &g_sm_num[i],
                           CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, i);
     if (unlikely(ret)) {
       LOGGER(FATAL, "can't get processor number, device %d, error %s", i,
             cuda_error((CUresult)ret, &cuda_err_string));
     }
-    // 初始化设备处理器的最大驻留线程数
     ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetAttribute, &g_max_thread_per_sm[i],
                           CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, i);
     if (unlikely(ret)) {
       LOGGER(FATAL, "can't get max thread per processor, device %d, error %s",
                   i, cuda_error((CUresult)ret, &cuda_err_string));
     }
-    // 处理器数量 * 最大驻留线程数 * 32 = 最大cuda核心数
     g_total_cuda_cores[i] = (int64_t)g_max_thread_per_sm[i] * (int64_t)(g_sm_num[i]) * FACTOR;
     LOGGER(VERBOSE, "device %d total cuda cores: %ld", i, g_total_cuda_cores[i]);
   }

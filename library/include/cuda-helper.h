@@ -1180,6 +1180,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuTensorMapEncodeIm2col),
   CUDA_ENTRY_ENUM(cuTensorMapEncodeTiled),
   CUDA_ENTRY_ENUM(cuTensorMapReplaceAddress),
+  CUDA_ENTRY_ENUM(cuCtxCreate_v4),
   CUDA_ENTRY_END
 } cuda_entry_enum_t;
 

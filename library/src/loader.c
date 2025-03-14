@@ -552,6 +552,7 @@ entry_t cuda_library_entry[] = {
     {.name = "cuMemPoolTrimTo"},
     {.name = "cuMipmappedArrayGetSparseProperties"},
     {.name = "cuCtxCreate_v3"},
+    {.name = "cuCtxCreate_v4"},
     {.name = "cuCtxGetExecAffinity"},
     {.name = "cuDeviceGetExecAffinitySupport"},
     {.name = "cuDeviceGetGraphMemAttribute"},

@@ -25,10 +25,10 @@ RUN chmod +x build.sh && ./build.sh
 # Compile the vgpu manager binary file
 WORKDIR /go/src/vgpu-manager
 
-ENV GOPATH /go
-ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
-ENV GO111MODULE on
-ENV GOPROXY https://goproxy.cn,direct
+ENV GOPATH=/go
+ENV PATH=$GOPATH/bin:/usr/local/go/bin:$PATH
+ENV GO111MODULE=on
+ENV GOPROXY=https://goproxy.cn,direct
 
 # Copy the Go Modules manifests
 COPY go.mod go.mod

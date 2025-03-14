@@ -503,9 +503,9 @@ typedef enum CUdevice_attribute_enum {
     CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS = 89,                     /**< Device can coherently access managed memory concurrently with the CPU */
     CU_DEVICE_ATTRIBUTE_COMPUTE_PREEMPTION_SUPPORTED = 90,                  /**< Device supports compute preemption. */
     CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM = 91,       /**< Device can access host registered memory at the same virtual address as the CPU */
-    CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_MEM_OPS = 92,                        /**< ::cuStreamBatchMemOp and related APIs are supported. */
-    CU_DEVICE_ATTRIBUTE_CAN_USE_64_BIT_STREAM_MEM_OPS = 93,                 /**< 64-bit operations are supported in ::cuStreamBatchMemOp and related APIs. */
-    CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_WAIT_VALUE_NOR = 94,                 /**< ::CU_STREAM_WAIT_VALUE_NOR is supported. */
+    CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_MEM_OPS_V1 = 92,                     /**< Deprecated, along with v1 MemOps API, ::cuStreamBatchMemOp and related APIs are supported. */
+    CU_DEVICE_ATTRIBUTE_CAN_USE_64_BIT_STREAM_MEM_OPS_V1 = 93,              /**< Deprecated, along with v1 MemOps API, 64-bit operations are supported in ::cuStreamBatchMemOp and related APIs. */
+    CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_WAIT_VALUE_NOR_V1 = 94,              /**< Deprecated, along with v1 MemOps API, ::CU_STREAM_WAIT_VALUE_NOR is supported. */
     CU_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH = 95,                            /**< Device supports launching cooperative kernels via ::cuLaunchCooperativeKernel */
     CU_DEVICE_ATTRIBUTE_COOPERATIVE_MULTI_DEVICE_LAUNCH = 96,               /**< Deprecated, ::cuLaunchCooperativeKernelMultiDevice is deprecated. */
     CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97,             /**< Maximum optin shared memory per block */
@@ -532,19 +532,27 @@ typedef enum CUdevice_attribute_enum {
     CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_FLUSH_WRITES_OPTIONS = 117,         /**< The returned attribute shall be interpreted as a bitmask, where the individual bits are described by the ::CUflushGPUDirectRDMAWritesOptions enum */
     CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WRITES_ORDERING = 118,              /**< GPUDirect RDMA writes to the device do not need to be flushed for consumers within the scope indicated by the returned attribute. See ::CUGPUDirectRDMAWritesOrdering for the numerical values returned here. */
     CU_DEVICE_ATTRIBUTE_MEMPOOL_SUPPORTED_HANDLE_TYPES = 119,               /**< Handle types supported with mempool based IPC */
-
-
-
-
+    CU_DEVICE_ATTRIBUTE_CLUSTER_LAUNCH = 120,                               /**< Indicates device supports cluster launch */
     CU_DEVICE_ATTRIBUTE_DEFERRED_MAPPING_CUDA_ARRAY_SUPPORTED = 121,        /**< Device supports deferred mapping CUDA arrays and CUDA mipmapped arrays */
-
-
-    CU_DEVICE_ATTRIBUTE_CAN_USE_64_BIT_STREAM_MEM_OPS_V2 = 122,             /**< 64-bit operations are supported in ::cuStreamBatchMemOp_v2 and related v2 MemOp APIs. */
-    CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_WAIT_VALUE_NOR_V2 = 123,             /**< ::CU_STREAM_WAIT_VALUE_NOR is supported by v2 MemOp APIs. */
-
-
-    CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED = 124,                            /**< Device supports buffer sharing with dma_buf mechanism. */ 
-
+    CU_DEVICE_ATTRIBUTE_CAN_USE_64_BIT_STREAM_MEM_OPS = 122,                /**< 64-bit operations are supported in ::cuStreamBatchMemOp and related MemOp APIs. */
+    CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_WAIT_VALUE_NOR = 123,                /**< ::CU_STREAM_WAIT_VALUE_NOR is supported by MemOp APIs. */
+    CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED = 124,                            /**< Device supports buffer sharing with dma_buf mechanism. */
+    CU_DEVICE_ATTRIBUTE_IPC_EVENT_SUPPORTED = 125,                          /**< Device supports IPC Events. */
+    CU_DEVICE_ATTRIBUTE_MEM_SYNC_DOMAIN_COUNT = 126,                        /**< Number of memory domains the device supports. */
+    CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED = 127,                  /**< Device supports accessing memory using Tensor Map. */
+    CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED = 128,                 /**< Device supports exporting memory to a fabric handle with cuMemExportToShareableHandle() or requested with cuMemCreate() */
+    CU_DEVICE_ATTRIBUTE_UNIFIED_FUNCTION_POINTERS = 129,                    /**< Device supports unified function pointers. */
+    CU_DEVICE_ATTRIBUTE_NUMA_CONFIG = 130,                                  /**< NUMA configuration of a device: value is of type ::CUdeviceNumaConfig enum */
+    CU_DEVICE_ATTRIBUTE_NUMA_ID = 131,                                      /**< NUMA node ID of the GPU memory */
+    CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED = 132,                          /**< Device supports switch multicast and reduction operations. */
+    CU_DEVICE_ATTRIBUTE_MPS_ENABLED = 133,                                  /**< Indicates if contexts created on this device will be shared via MPS */
+    CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID = 134,                                 /**< NUMA ID of the host node closest to the device. Returns -1 when system does not support NUMA. */
+    CU_DEVICE_ATTRIBUTE_D3D12_CIG_SUPPORTED = 135,                          /**< Device supports CIG with D3D12. */
+    CU_DEVICE_ATTRIBUTE_MEM_DECOMPRESS_ALGORITHM_MASK = 136,                /**< The returned valued shall be interpreted as a bitmask, where the individual bits are described by the ::CUmemDecompressAlgorithm enum. */
+    CU_DEVICE_ATTRIBUTE_MEM_DECOMPRESS_MAXIMUM_LENGTH = 137,                /**< The returned valued is the maximum length in bytes of a single decompress operation that is allowed. */
+    CU_DEVICE_ATTRIBUTE_GPU_PCI_DEVICE_ID    = 139, /**< The combined 16-bit PCI device ID and 16-bit PCI vendor ID. */
+    CU_DEVICE_ATTRIBUTE_GPU_PCI_SUBSYSTEM_ID = 140, /**< The combined 16-bit PCI subsystem ID and 16-bit PCI subsystem vendor ID. */
+    CU_DEVICE_ATTRIBUTE_HOST_NUMA_MULTINODE_IPC_SUPPORTED = 143,             /**< Device supports HOST_NUMA location IPC between nodes in a multi-node system. */
     CU_DEVICE_ATTRIBUTE_MAX
 } CUdevice_attribute;
 
@@ -1508,6 +1516,29 @@ typedef struct CUexecAffinityParam_st {
     } param;
 } CUexecAffinityParam_v1;
 typedef CUexecAffinityParam_v1 CUexecAffinityParam;
+
+typedef enum CUcigDataType_enum {
+    CIG_DATA_TYPE_D3D12_COMMAND_QUEUE = 0x1,    /** D3D12 Command Queue Handle */
+} CUcigDataType;
+
+/**
+* CIG Context Create Params
+*/
+typedef struct CUctxCigParam_st {
+    CUcigDataType sharedDataType;
+    void* sharedData;
+} CUctxCigParam;
+
+/**
+* Params for creating CUDA context
+* Exactly one of execAffinityParams and cigParams
+* must be non-NULL.
+*/
+typedef struct CUctxCreateParams_st {
+    CUexecAffinityParam *execAffinityParams;
+    int                  numExecAffinityParams;
+    CUctxCigParam       *cigParams;
+} CUctxCreateParams;
 
 /**
  * Error codes
