@@ -256,15 +256,14 @@ static void change_token(int64_t delta, int device_id) {
   } while (!CAS(&g_cur_cuda_cores[device_id], cuda_cores_before, cuda_cores_after));
 }
 
-
 static void rate_limiter(int grids, int blocks, int device_id) {
-  int64_t before_cuda_cores = 0;
-  int64_t after_cuda_cores = 0;
-  int kernel_size = grids;
-
-  LOGGER(VERBOSE, "device: %d, grid: %d, blocks: %d, ", device_id , grids, blocks);
-  LOGGER(VERBOSE, "device: %d, launch kernel: %d, curr core: %ld", device_id, kernel_size, g_cur_cuda_cores[device_id]);
   if (g_vgpu_config.devices[device_id].core_limit) {
+    int64_t before_cuda_cores = 0;
+    int64_t after_cuda_cores = 0;
+    int kernel_size = grids;
+
+    LOGGER(VERBOSE, "device: %d, grid: %d, blocks: %d, ", device_id , grids, blocks);
+    LOGGER(VERBOSE, "device: %d, launch kernel: %d, curr core: %ld", device_id, kernel_size, g_cur_cuda_cores[device_id]);
     do {
     CHECK:
       before_cuda_cores = g_cur_cuda_cores[device_id];
@@ -858,10 +857,10 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGetProcAddress, symbol, pfn,
                          cudaVersion, flags);
   if (ret == CUDA_SUCCESS) {
-    if (likely(lib_control)) {
+    if (lib_control) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
-        LOGGER(VERBOSE, "cuGetProcAddress matched symbol: %s", symbol);
+        LOGGER(DETAIL, "cuGetProcAddress matched symbol: %s", symbol);
         *pfn = f;
         goto DONE;
       }
@@ -889,10 +888,10 @@ CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGetProcAddress_v2, symbol, pfn,
                          cudaVersion, flags, symbolStatus);
   if (ret == CUDA_SUCCESS) {
-    if (likely(lib_control)) {
+    if (lib_control) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
-        LOGGER(VERBOSE, "cuGetProcAddress_v2 matched symbol: %s", symbol);
+        LOGGER(DETAIL, "cuGetProcAddress_v2 matched symbol: %s", symbol);
         *pfn = f;
         goto DONE;
       }
@@ -919,7 +918,6 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
   }
   return ret;
 }
-
 
 CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flags) {
   CUresult ret;
