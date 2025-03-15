@@ -347,43 +347,59 @@ typedef enum CUstreamUpdateCaptureDependencies_flags_enum {
  * Array formats
  */
 typedef enum CUarray_format_enum {
-    CU_AD_FORMAT_UNSIGNED_INT8  = 0x01, /**< Unsigned 8-bit integers */
-    CU_AD_FORMAT_UNSIGNED_INT16 = 0x02, /**< Unsigned 16-bit integers */
-    CU_AD_FORMAT_UNSIGNED_INT32 = 0x03, /**< Unsigned 32-bit integers */
-    CU_AD_FORMAT_SIGNED_INT8    = 0x08, /**< Signed 8-bit integers */
-    CU_AD_FORMAT_SIGNED_INT16   = 0x09, /**< Signed 16-bit integers */
-    CU_AD_FORMAT_SIGNED_INT32   = 0x0a, /**< Signed 32-bit integers */
-    CU_AD_FORMAT_HALF           = 0x10, /**< 16-bit floating point */
-    CU_AD_FORMAT_FLOAT          = 0x20, /**< 32-bit floating point */
-    CU_AD_FORMAT_NV12           = 0xb0, /**< 8-bit YUV planar format, with 4:2:0 sampling */
-    CU_AD_FORMAT_UNORM_INT8X1   = 0xc0, /**< 1 channel unsigned 8-bit normalized integer */
-    CU_AD_FORMAT_UNORM_INT8X2   = 0xc1, /**< 2 channel unsigned 8-bit normalized integer */
-    CU_AD_FORMAT_UNORM_INT8X4   = 0xc2, /**< 4 channel unsigned 8-bit normalized integer */
-    CU_AD_FORMAT_UNORM_INT16X1  = 0xc3, /**< 1 channel unsigned 16-bit normalized integer */
-    CU_AD_FORMAT_UNORM_INT16X2  = 0xc4, /**< 2 channel unsigned 16-bit normalized integer */
-    CU_AD_FORMAT_UNORM_INT16X4  = 0xc5, /**< 4 channel unsigned 16-bit normalized integer */
-    CU_AD_FORMAT_SNORM_INT8X1   = 0xc6, /**< 1 channel signed 8-bit normalized integer */
-    CU_AD_FORMAT_SNORM_INT8X2   = 0xc7, /**< 2 channel signed 8-bit normalized integer */
-    CU_AD_FORMAT_SNORM_INT8X4   = 0xc8, /**< 4 channel signed 8-bit normalized integer */
-    CU_AD_FORMAT_SNORM_INT16X1  = 0xc9, /**< 1 channel signed 16-bit normalized integer */
-    CU_AD_FORMAT_SNORM_INT16X2  = 0xca, /**< 2 channel signed 16-bit normalized integer */
-    CU_AD_FORMAT_SNORM_INT16X4  = 0xcb, /**< 4 channel signed 16-bit normalized integer */
-    CU_AD_FORMAT_BC1_UNORM      = 0x91, /**< 4 channel unsigned normalized block-compressed (BC1 compression) format */
-    CU_AD_FORMAT_BC1_UNORM_SRGB = 0x92, /**< 4 channel unsigned normalized block-compressed (BC1 compression) format with sRGB encoding*/
-    CU_AD_FORMAT_BC2_UNORM      = 0x93, /**< 4 channel unsigned normalized block-compressed (BC2 compression) format */
-    CU_AD_FORMAT_BC2_UNORM_SRGB = 0x94, /**< 4 channel unsigned normalized block-compressed (BC2 compression) format with sRGB encoding*/
-    CU_AD_FORMAT_BC3_UNORM      = 0x95, /**< 4 channel unsigned normalized block-compressed (BC3 compression) format */
-    CU_AD_FORMAT_BC3_UNORM_SRGB = 0x96, /**< 4 channel unsigned normalized block-compressed (BC3 compression) format with sRGB encoding*/
-    CU_AD_FORMAT_BC4_UNORM      = 0x97, /**< 1 channel unsigned normalized block-compressed (BC4 compression) format */
-    CU_AD_FORMAT_BC4_SNORM      = 0x98, /**< 1 channel signed normalized block-compressed (BC4 compression) format */
-    CU_AD_FORMAT_BC5_UNORM      = 0x99, /**< 2 channel unsigned normalized block-compressed (BC5 compression) format */
-    CU_AD_FORMAT_BC5_SNORM      = 0x9a, /**< 2 channel signed normalized block-compressed (BC5 compression) format */
-    CU_AD_FORMAT_BC6H_UF16      = 0x9b, /**< 3 channel unsigned half-float block-compressed (BC6H compression) format */
-    CU_AD_FORMAT_BC6H_SF16      = 0x9c, /**< 3 channel signed half-float block-compressed (BC6H compression) format */
-    CU_AD_FORMAT_BC7_UNORM      = 0x9d, /**< 4 channel unsigned normalized block-compressed (BC7 compression) format */
-    CU_AD_FORMAT_BC7_UNORM_SRGB = 0x9e  /**< 4 channel unsigned normalized block-compressed (BC7 compression) format with sRGB encoding */
+    CU_AD_FORMAT_UNSIGNED_INT8            = 0x01, /**< Unsigned 8-bit integers */
+    CU_AD_FORMAT_UNSIGNED_INT16           = 0x02, /**< Unsigned 16-bit integers */
+    CU_AD_FORMAT_UNSIGNED_INT32           = 0x03, /**< Unsigned 32-bit integers */
+    CU_AD_FORMAT_SIGNED_INT8              = 0x08, /**< Signed 8-bit integers */
+    CU_AD_FORMAT_SIGNED_INT16             = 0x09, /**< Signed 16-bit integers */
+    CU_AD_FORMAT_SIGNED_INT32             = 0x0a, /**< Signed 32-bit integers */
+    CU_AD_FORMAT_HALF                     = 0x10, /**< 16-bit floating point */
+    CU_AD_FORMAT_FLOAT                    = 0x20, /**< 32-bit floating point */
+    CU_AD_FORMAT_NV12                     = 0xb0, /**< 8-bit YUV planar format, with 4:2:0 sampling */
+    CU_AD_FORMAT_UNORM_INT8X1             = 0xc0, /**< 1 channel unsigned 8-bit normalized integer */
+    CU_AD_FORMAT_UNORM_INT8X2             = 0xc1, /**< 2 channel unsigned 8-bit normalized integer */
+    CU_AD_FORMAT_UNORM_INT8X4             = 0xc2, /**< 4 channel unsigned 8-bit normalized integer */
+    CU_AD_FORMAT_UNORM_INT16X1            = 0xc3, /**< 1 channel unsigned 16-bit normalized integer */
+    CU_AD_FORMAT_UNORM_INT16X2            = 0xc4, /**< 2 channel unsigned 16-bit normalized integer */
+    CU_AD_FORMAT_UNORM_INT16X4            = 0xc5, /**< 4 channel unsigned 16-bit normalized integer */
+    CU_AD_FORMAT_SNORM_INT8X1             = 0xc6, /**< 1 channel signed 8-bit normalized integer */
+    CU_AD_FORMAT_SNORM_INT8X2             = 0xc7, /**< 2 channel signed 8-bit normalized integer */
+    CU_AD_FORMAT_SNORM_INT8X4             = 0xc8, /**< 4 channel signed 8-bit normalized integer */
+    CU_AD_FORMAT_SNORM_INT16X1            = 0xc9, /**< 1 channel signed 16-bit normalized integer */
+    CU_AD_FORMAT_SNORM_INT16X2            = 0xca, /**< 2 channel signed 16-bit normalized integer */
+    CU_AD_FORMAT_SNORM_INT16X4            = 0xcb, /**< 4 channel signed 16-bit normalized integer */
+    CU_AD_FORMAT_BC1_UNORM                = 0x91, /**< 4 channel unsigned normalized block-compressed (BC1 compression) format */
+    CU_AD_FORMAT_BC1_UNORM_SRGB           = 0x92, /**< 4 channel unsigned normalized block-compressed (BC1 compression) format with sRGB encoding*/
+    CU_AD_FORMAT_BC2_UNORM                = 0x93, /**< 4 channel unsigned normalized block-compressed (BC2 compression) format */
+    CU_AD_FORMAT_BC2_UNORM_SRGB           = 0x94, /**< 4 channel unsigned normalized block-compressed (BC2 compression) format with sRGB encoding*/
+    CU_AD_FORMAT_BC3_UNORM                = 0x95, /**< 4 channel unsigned normalized block-compressed (BC3 compression) format */
+    CU_AD_FORMAT_BC3_UNORM_SRGB           = 0x96, /**< 4 channel unsigned normalized block-compressed (BC3 compression) format with sRGB encoding*/
+    CU_AD_FORMAT_BC4_UNORM                = 0x97, /**< 1 channel unsigned normalized block-compressed (BC4 compression) format */
+    CU_AD_FORMAT_BC4_SNORM                = 0x98, /**< 1 channel signed normalized block-compressed (BC4 compression) format */
+    CU_AD_FORMAT_BC5_UNORM                = 0x99, /**< 2 channel unsigned normalized block-compressed (BC5 compression) format */
+    CU_AD_FORMAT_BC5_SNORM                = 0x9a, /**< 2 channel signed normalized block-compressed (BC5 compression) format */
+    CU_AD_FORMAT_BC6H_UF16                = 0x9b, /**< 3 channel unsigned half-float block-compressed (BC6H compression) format */
+    CU_AD_FORMAT_BC6H_SF16                = 0x9c, /**< 3 channel signed half-float block-compressed (BC6H compression) format */
+    CU_AD_FORMAT_BC7_UNORM                = 0x9d, /**< 4 channel unsigned normalized block-compressed (BC7 compression) format */
+    CU_AD_FORMAT_BC7_UNORM_SRGB           = 0x9e, /**< 4 channel unsigned normalized block-compressed (BC7 compression) format with sRGB encoding */
+    CU_AD_FORMAT_P010                     = 0x9f, /**< 10-bit YUV planar format, with 4:2:0 sampling */
+    CU_AD_FORMAT_P016                     = 0xa1, /**< 16-bit YUV planar format, with 4:2:0 sampling */
+    CU_AD_FORMAT_NV16                     = 0xa2, /**< 8-bit YUV planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_P210                     = 0xa3, /**< 10-bit YUV planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_P216                     = 0xa4, /**< 16-bit YUV planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_YUY2                     = 0xa5, /**< 2 channel, 8-bit YUV packed planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_Y210                     = 0xa6, /**< 2 channel, 10-bit YUV packed planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_Y216                     = 0xa7, /**< 2 channel, 16-bit YUV packed planar format, with 4:2:2 sampling */
+    CU_AD_FORMAT_AYUV                     = 0xa8, /**< 4 channel, 8-bit YUV packed planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_Y410                     = 0xa9, /**< 10-bit YUV packed planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_Y416                     = 0xb1, /**< 4 channel, 12-bit YUV packed planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_Y444_PLANAR8             = 0xb2, /**< 3 channel 8-bit YUV planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_Y444_PLANAR10            = 0xb3, /**< 3 channel 10-bit YUV planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_YUV444_8bit_SemiPlanar   = 0xb4, /**< 3 channel 8-bit YUV semi-planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_YUV444_16bit_SemiPlanar  = 0xb5, /**< 3 channel 16-bit YUV semi-planar format, with 4:4:4 sampling */
+    CU_AD_FORMAT_UNORM_INT_101010_2       = 0x50, /**< 4 channel unorm R10G10B10A2 RGB format */
+    CU_AD_FORMAT_MAX                      = 0x7FFFFFFF
 } CUarray_format;
-
 
 /**
  * Texture reference addressing modes
@@ -3553,23 +3569,22 @@ typedef enum CUflushGPUDirectRDMAWritesTarget_enum {
  * The additional write options for ::cuGraphDebugDotPrint
  */
 typedef enum CUgraphDebugDot_flags_enum {
-    CU_GRAPH_DEBUG_DOT_FLAGS_VERBOSE                        = 1<<0,  /** Output all debug data as if every debug flag is enabled */
-    CU_GRAPH_DEBUG_DOT_FLAGS_RUNTIME_TYPES                  = 1<<1,  /** Use CUDA Runtime structures for output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_KERNEL_NODE_PARAMS             = 1<<2,  /** Adds CUDA_KERNEL_NODE_PARAMS values to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_MEMCPY_NODE_PARAMS             = 1<<3,  /** Adds CUDA_MEMCPY3D values to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_MEMSET_NODE_PARAMS             = 1<<4,  /** Adds CUDA_MEMSET_NODE_PARAMS values to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_HOST_NODE_PARAMS               = 1<<5,  /** Adds CUDA_HOST_NODE_PARAMS values to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_EVENT_NODE_PARAMS              = 1<<6,  /** Adds CUevent handle from record and wait nodes to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_EXT_SEMAS_SIGNAL_NODE_PARAMS   = 1<<7,  /** Adds CUDA_EXT_SEM_SIGNAL_NODE_PARAMS values to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_EXT_SEMAS_WAIT_NODE_PARAMS     = 1<<8,  /** Adds CUDA_EXT_SEM_WAIT_NODE_PARAMS values to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_KERNEL_NODE_ATTRIBUTES         = 1<<9,  /** Adds CUkernelNodeAttrValue values to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_HANDLES                        = 1<<10, /** Adds node handles and every kernel function handle to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_MEM_ALLOC_NODE_PARAMS          = 1<<11, /** Adds memory alloc node parameters to output */
-    CU_GRAPH_DEBUG_DOT_FLAGS_MEM_FREE_NODE_PARAMS           = 1<<12  /** Adds memory free node parameters to output */
-
-    ,
-    CU_GRAPH_DEBUG_DOT_FLAGS_BATCH_MEM_OP_NODE_PARAMS       = 1<<13  /** Adds batch mem op node parameters to output */
-
+    CU_GRAPH_DEBUG_DOT_FLAGS_VERBOSE                        = 1<<0,  /**< Output all debug data as if every debug flag is enabled */
+    CU_GRAPH_DEBUG_DOT_FLAGS_RUNTIME_TYPES                  = 1<<1,  /**< Use CUDA Runtime structures for output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_KERNEL_NODE_PARAMS             = 1<<2,  /**< Adds CUDA_KERNEL_NODE_PARAMS values to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_MEMCPY_NODE_PARAMS             = 1<<3,  /**< Adds CUDA_MEMCPY3D values to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_MEMSET_NODE_PARAMS             = 1<<4,  /**< Adds CUDA_MEMSET_NODE_PARAMS values to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_HOST_NODE_PARAMS               = 1<<5,  /**< Adds CUDA_HOST_NODE_PARAMS values to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_EVENT_NODE_PARAMS              = 1<<6,  /**< Adds CUevent handle from record and wait nodes to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_EXT_SEMAS_SIGNAL_NODE_PARAMS   = 1<<7,  /**< Adds CUDA_EXT_SEM_SIGNAL_NODE_PARAMS values to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_EXT_SEMAS_WAIT_NODE_PARAMS     = 1<<8,  /**< Adds CUDA_EXT_SEM_WAIT_NODE_PARAMS values to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_KERNEL_NODE_ATTRIBUTES         = 1<<9,  /**< Adds CUkernelNodeAttrValue values to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_HANDLES                        = 1<<10, /**< Adds node handles and every kernel function handle to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_MEM_ALLOC_NODE_PARAMS          = 1<<11, /**< Adds memory alloc node parameters to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_MEM_FREE_NODE_PARAMS           = 1<<12, /**< Adds memory free node parameters to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_BATCH_MEM_OP_NODE_PARAMS       = 1<<13, /**< Adds batch mem op node parameters to output */
+    CU_GRAPH_DEBUG_DOT_FLAGS_EXTRA_TOPO_INFO                = 1<<14, /**< Adds edge numbering information */
+    CU_GRAPH_DEBUG_DOT_FLAGS_CONDITIONAL_NODE_PARAMS        = 1<<15  /**< Adds conditional node parameters to output */
 } CUgraphDebugDot_flags;
 
 /**
@@ -3590,29 +3605,34 @@ typedef enum CUuserObjectRetain_flags_enum {
  * Flags for instantiating a graph
  */
 typedef enum CUgraphInstantiate_flags_enum {
-    CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH  = 1, /**< Automatically free memory allocated in a graph before relaunching. */
-    CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY    = 8, /**< Run the graph using the per-node priority attributes rather than the
+    CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH  = 1 /**< Automatically free memory allocated in a graph before relaunching. */
+  , CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD               = 2 /**< Automatically upload the graph after instantiation. Only supported by
+                                                              ::cuGraphInstantiateWithParams.  The upload will be performed using the
+                                                              stream provided in \p instantiateParams. */
+  , CUDA_GRAPH_INSTANTIATE_FLAG_DEVICE_LAUNCH        = 4 /**< Instantiate the graph to be launchable from the device. This flag can only
+                                                              be used on platforms which support unified addressing. This flag cannot be
+                                                              used in conjunction with CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH. */
+  , CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY    = 8 /**< Run the graph using the per-node priority attributes rather than the
                                                               priority of the stream it is launched into. */
 } CUgraphInstantiate_flags;
-
+/**
+ * CUDA Lazy Loading status
+ */
 typedef enum CUmoduleLoadingMode_enum {
     CU_MODULE_EAGER_LOADING = 0x1, /**< Lazy Kernel Loading is not enabled */
     CU_MODULE_LAZY_LOADING  = 0x2, /**< Lazy Kernel Loading is enabled */
 } CUmoduleLoadingMode;
 
-
 /**
  * CUDA devices corresponding to an OpenGL device
  */
 typedef enum CUGLDeviceList_enum {
-  CU_GL_DEVICE_LIST_ALL = 0x01, /**< The CUDA devices for all GPUs used by the
-                                   current OpenGL context */
-  CU_GL_DEVICE_LIST_CURRENT_FRAME =
-      0x02, /**< The CUDA devices for the GPUs used by the current OpenGL
-                               context in its currently rendering frame */
-  CU_GL_DEVICE_LIST_NEXT_FRAME =
-      0x03, /**< The CUDA devices for the GPUs to be used by the current OpenGL
-                               context in the next frame */
+  CU_GL_DEVICE_LIST_ALL           = 0x01, /**< The CUDA devices for all GPUs used by the
+                                               current OpenGL context */
+  CU_GL_DEVICE_LIST_CURRENT_FRAME = 0x02, /**< The CUDA devices for the GPUs used by the current OpenGL
+                                               context in its currently rendering frame */
+  CU_GL_DEVICE_LIST_NEXT_FRAME    = 0x03, /**< The CUDA devices for the GPUs to be used by the current OpenGL
+                                               context in the next frame */
 } CUGLDeviceList;
 
 /**

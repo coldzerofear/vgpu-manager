@@ -48,7 +48,7 @@ extern "C" {
   ({                                                                           \
     CUresult _ret = CUDA_ENTRY_CALL(table, sym, __VA_ARGS__);                  \
     if (_ret != CUDA_SUCCESS) {                                                \
-      LOGGER(2, "%s call failed: %d", #sym, _ret);                             \
+      LOGGER(4, "%s call failed: %d", #sym, _ret);                             \
     }                                                                          \
     _ret;                                                                      \
   })
@@ -1140,7 +1140,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphExecBatchMemOpNodeSetParams),
   CUDA_ENTRY_ENUM(cuGraphNodeGetEnabled),
   CUDA_ENTRY_ENUM(cuGraphNodeSetEnabled),
-  CUDA_ENTRY_ENUM(cuModuleGetLoadingMode),
+  //CUDA_ENTRY_ENUM(cuModuleGetLoadingMode),
   CUDA_ENTRY_ENUM(cuMemGetHandleForAddressRange),
 
   CUDA_ENTRY_ENUM(cuGraphAddNode),
@@ -1163,14 +1163,14 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuKernelGetFunction),
   CUDA_ENTRY_ENUM(cuKernelSetAttribute),
   CUDA_ENTRY_ENUM(cuKernelSetCacheConfig),
-  CUDA_ENTRY_ENUM(cuLibraryGetGlobal),
-  CUDA_ENTRY_ENUM(cuLibraryGetKernel),
-  CUDA_ENTRY_ENUM(cuLibraryGetManaged),
-  CUDA_ENTRY_ENUM(cuLibraryGetModule),
-  CUDA_ENTRY_ENUM(cuLibraryGetUnifiedFunction),
-  CUDA_ENTRY_ENUM(cuLibraryLoadData),
-  CUDA_ENTRY_ENUM(cuLibraryLoadFromFile),
-  CUDA_ENTRY_ENUM(cuLibraryUnload),
+//  CUDA_ENTRY_ENUM(cuLibraryGetGlobal),
+//  CUDA_ENTRY_ENUM(cuLibraryGetKernel),
+//  CUDA_ENTRY_ENUM(cuLibraryGetManaged),
+//  CUDA_ENTRY_ENUM(cuLibraryGetModule),
+//  CUDA_ENTRY_ENUM(cuLibraryGetUnifiedFunction),
+//  CUDA_ENTRY_ENUM(cuLibraryLoadData),
+//  CUDA_ENTRY_ENUM(cuLibraryLoadFromFile),
+//  CUDA_ENTRY_ENUM(cuLibraryUnload),
   CUDA_ENTRY_ENUM(cuMulticastAddDevice),
   CUDA_ENTRY_ENUM(cuMulticastBindAddr),
   CUDA_ENTRY_ENUM(cuMulticastBindMem),

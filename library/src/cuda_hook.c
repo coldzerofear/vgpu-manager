@@ -40,6 +40,9 @@ extern char container_id[FILENAME_MAX];
 extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
 
+extern fp_dlsym real_dlsym;
+extern void *lib_control;
+
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 static pthread_once_t g_nvml_init = PTHREAD_ONCE_INIT;
 
@@ -65,7 +68,7 @@ static void active_utilization_notifier(int);
 
 static void *utilization_watcher(void *);
 
-static void get_used_gpu_utilization(void *, int);
+static void get_used_gpu_utilization(void *, int, nvmlDevice_t);
 
 static void init_device_cuda_cores(unsigned int *devCount);
 
@@ -87,7 +90,9 @@ static int check_file_exist(const char *);
 CUresult cuDriverGetVersion(int *driverVersion);
 CUresult cuInit(unsigned int flag);
 CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
-                          cuuint64_t flags); 
+                          cuuint64_t flags);
+CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
+                          cuuint64_t flags, void *symbolStatus);
 CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                           cuuint64_t flags, void *symbolStatus);           
 CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
@@ -124,7 +129,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
                         unsigned int blockDimX, unsigned int blockDimY,
                         unsigned int blockDimZ, unsigned int sharedMemBytes,
                         CUstream hStream, void **kernelParams, void **extra);
-CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f, 
+CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
                         void **kernelParams, void **extra);
 CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f, 
                         void **kernelParams, void **extra);
@@ -321,9 +326,18 @@ static void *utilization_watcher(void *arg) {
 
   utilization_t top_results[MAX_DEVICE_COUNT] = {};
   int up_limits[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+  nvmlDevice_t devices[MAX_DEVICE_COUNT] = {};
+
   int device_id;
   int need_limit = 0;
   for (device_id = batch->start_index; device_id < batch->end_index; device_id++) {
+    if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
+      NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_id, &devices[device_id]);
+    } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
+      NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_id, &devices[device_id]);
+    } else {
+      LOGGER(WARNING, "nvmlDeviceGetHandleByIndex function not found");
+    }
     up_limits[device_id] = g_vgpu_config.devices[device_id].hard_core;
     top_results[device_id].user_current = 0;
     top_results[device_id].sys_current = 0;
@@ -337,10 +351,10 @@ static void *utilization_watcher(void *arg) {
     LOGGER(VERBOSE, "no need cuda core limit for batch %d", batch->batch_code);
     return NULL;
   }
-  int deviceNumber = batch->end_index - batch->start_index;
+  int dev_count = batch->end_index - batch->start_index;
   struct timespec wait = {
       .tv_sec = 0,
-      .tv_nsec = 120 / deviceNumber * MILLISEC,
+      .tv_nsec = 100 / dev_count * MILLISEC,
   };
   while (1) {
     for (device_id = batch->start_index; device_id < batch->end_index; device_id++) {
@@ -348,7 +362,8 @@ static void *utilization_watcher(void *arg) {
       if (!g_vgpu_config.devices[device_id].core_limit) {
         continue; // Skip GPU without core limit enabled
       }
-      get_used_gpu_utilization((void *)&top_results[device_id], device_id);
+
+      get_used_gpu_utilization((void *)&top_results[device_id], device_id, devices[device_id]);
       if (unlikely(!top_results[device_id].valid)) {
         continue;
       }
@@ -723,12 +738,11 @@ void get_used_gpu_memory(void *arg, CUdevice device_id) {
   get_used_gpu_memory_by_device((void *)used_memory, dev);
 }
 
-static void get_used_gpu_utilization(void *arg, int device_id) {
+static void get_used_gpu_utilization(void *arg, int device_id, nvmlDevice_t dev) {
   nvmlProcessUtilizationSample_t processes_sample[MAX_PIDS];
   unsigned int processes_num = MAX_PIDS;
   unsigned int running_processes = MAX_PIDS;
   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
-  nvmlDevice_t dev;
   utilization_t *top_result = (utilization_t *)arg;
 
   nvmlReturn_t ret;
@@ -737,19 +751,6 @@ static void get_used_gpu_utilization(void *arg, int device_id) {
   int codec_util = 0;
   int i;
 
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
-    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_id, &dev);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
-    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_id, &dev);
-  } else {
-    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-    LOGGER(WARNING, "nvmlDeviceGetHandleByIndex function not found");
-  }
-  if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetHandleByIndex can't get handle on device %d, "
-           "return %d, str: %s", device_id, ret, nvml_error(ret));
-    return;
-  }
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
       ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
                              dev, &running_processes, pids_on_device);
@@ -812,7 +813,7 @@ static void get_used_gpu_utilization(void *arg, int device_id) {
       }
     }
   }
-  LOGGER(VERBOSE, "device: %d, sys util: %d, used util: %d", device_id,
+  LOGGER(VERBOSE, "device: %d, sys util: %d, user util: %d", device_id,
                   top_result->sys_current, top_result->user_current);
 }
 
@@ -853,42 +854,69 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
 
   load_necessary_data();
   pthread_once(&g_init_set, initialization);
-
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuGetProcAddress, symbol, pfn,
-                        cudaVersion, flags);
+  LOGGER(DETAIL, "cuGetProcAddress symbol: %s", symbol);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGetProcAddress, symbol, pfn,
+                         cudaVersion, flags);
   if (ret == CUDA_SUCCESS) {
+    if (likely(lib_control)) {
+      void *f = real_dlsym(lib_control, symbol);
+      if (likely(f)) {
+        LOGGER(VERBOSE, "cuGetProcAddress matched symbol: %s", symbol);
+        *pfn = f;
+        goto DONE;
+      }
+    }
     for (i = 0; i < cuda_hook_nums; i++) {
       if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
-        LOGGER(DETAIL, "match hook %s", symbol);
+        LOGGER(VERBOSE, "cuGetProcAddress matched symbol: %s", symbol);
         *pfn = cuda_hooks_entry[i].fn_ptr;
-        break;
+        goto DONE;
       }
     }
   }
-
+DONE:
   return ret;
 }
 
-CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
+CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                              cuuint64_t flags, void *symbolStatus) {
   CUresult ret;
   int i;
 
   load_necessary_data();
   pthread_once(&g_init_set, initialization);
-
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuGetProcAddress_v2, symbol, pfn,
-                        cudaVersion, flags, symbolStatus);
+  LOGGER(DETAIL, "cuGetProcAddress_v2 symbol: %s", symbol);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGetProcAddress_v2, symbol, pfn,
+                         cudaVersion, flags, symbolStatus);
   if (ret == CUDA_SUCCESS) {
+    if (likely(lib_control)) {
+      void *f = real_dlsym(lib_control, symbol);
+      if (likely(f)) {
+        LOGGER(VERBOSE, "cuGetProcAddress_v2 matched symbol: %s", symbol);
+        *pfn = f;
+        goto DONE;
+      }
+    }
     for (i = 0; i < cuda_hook_nums; i++) {
       if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
-        LOGGER(DETAIL, "match hook %s", symbol);
+        LOGGER(VERBOSE, "cuGetProcAddress_v2 matched symbol: %s", symbol);
         *pfn = cuda_hooks_entry[i].fn_ptr;
-        break;
+        goto DONE;
       }
     }
   }
+DONE:
+  return ret;
+}
 
+CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
+                             cuuint64_t flags, void *symbolStatus) {
+  CUresult ret;
+  ret = _cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, symbolStatus);
+  if (ret == CUDA_SUCCESS && strcmp(symbol,"cuGetProcAddress") == 0) {
+      // Compatible with CUDA 12
+      *pfn = _cuGetProcAddress_v2;
+  }
   return ret;
 }
 
@@ -896,7 +924,7 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
 CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flags) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -923,10 +951,10 @@ DONE:
   return ret;
 }
 
-CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize) {
+CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -947,16 +975,20 @@ CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize) {
       if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
 FROM_UVA:
         ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
-        LOGGER(VERBOSE, "[cuMemAlloc_v2] call from UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &uva_err_string));
+        LOGGER(VERBOSE, "cuMemAlloc call from UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &uva_err_string));
         goto DONE;
       }
       // 请求未超设备内存，尝试设备内存分配
-      ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
+      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc_v2))) {
+        ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
+      } else {
+        ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc, dptr, bytesize);
+      }
       if (likely(ret == CUDA_SUCCESS)) {
         goto DONE;
       }
       // 设备内存分配失败，回退到 UVA 内存进行分配
-      LOGGER(VERBOSE, "[cuMemAlloc_v2] call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
+      LOGGER(VERBOSE, "cuMemAlloc call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
       goto FROM_UVA;
     } else if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
       // 没有开启内存超配，超出内存限制直接返回OOM
@@ -964,72 +996,33 @@ FROM_UVA:
       goto DONE;
     }
   }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc, dptr, bytesize);
+  }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
-    LOGGER(VERBOSE, "[cuMemAlloc_v2] call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
+    LOGGER(VERBOSE, "cuMemAlloc call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
     goto FROM_UVA;
   }
 DONE:
   return ret;
+}
+
+CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize) {
+  return _cuMemAlloc(dptr, bytesize);
 }
 
 
 CUresult cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
-  CUresult ret;
-  CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
-  if (unlikely(ret != CUDA_SUCCESS)) {
-    goto DONE;
-  }
-  const char *mem_err_string = NULL;
-  const char *uva_err_string = NULL;
-  size_t used = 0, request_size = bytesize;
-
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
-    get_used_gpu_memory((void *)&used, ordinal);
-
-    if (unlikely(g_vgpu_config.devices[ordinal].memory_oversold)) {
-      if (unlikely(used > g_vgpu_config.devices[ordinal].total_memory)) {
-        // 已用内存超过设备真实内存，直接返回 OOM
-        ret = CUDA_ERROR_OUT_OF_MEMORY;
-        goto DONE;
-      }
-      // 请求超出内存限制，使用 UVA 内存进行分配
-      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
-FROM_UVA:
-        ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
-        LOGGER(VERBOSE, "[cuMemAlloc] call from UVA (oversold), size: %zu, ret: %d, str: %s", bytesize, ret, cuda_error(ret, &uva_err_string));
-        goto DONE;
-      }
-      // 请求未超设备内存，尝试设备内存分配
-      ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAlloc, dptr, bytesize);
-      if (likely(ret == CUDA_SUCCESS)) {
-        goto DONE;
-      }
-      // 设备内存分配失败，回退到 UVA 内存进行分配
-      LOGGER(VERBOSE, "[cuMemAlloc] call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
-      goto FROM_UVA;
-    } else if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
-      // 没有开启内存超配，超出内存限制直接返回OOM
-      ret = CUDA_ERROR_OUT_OF_MEMORY;
-      goto DONE;
-    }
-  }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAlloc, dptr, bytesize);
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
-    LOGGER(VERBOSE, "[cuMemAlloc] call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
-    goto FROM_UVA;
-  }
-DONE:
-  return ret;
+  return _cuMemAlloc(dptr, bytesize);
 }
 
-CUresult cuMemAllocPitch_v2(CUdeviceptr *dptr, size_t *pPitch,
-                            size_t WidthInBytes, size_t Height,
-                            unsigned int ElementSizeBytes) {
+CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes,
+                         size_t Height, unsigned int ElementSizeBytes) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1054,19 +1047,23 @@ CUresult cuMemAllocPitch_v2(CUdeviceptr *dptr, size_t *pPitch,
       if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
 FROM_UVA:
         ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, request_size, CU_MEM_ATTACH_GLOBAL);
-        LOGGER(VERBOSE, "[cuMemAllocPitch_v2] call from UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &uva_err_string));
+        LOGGER(VERBOSE, "cuMemAllocPitch call from UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &uva_err_string));
         if (likely(ret == CUDA_SUCCESS)) {
           *pPitch = guess_pitch;
         }
         goto DONE;
       }
       // 请求未超设备内存，尝试设备内存分配
-      ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch_v2))) {
+        ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+      } else {
+        ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+      }
       if (likely(ret == CUDA_SUCCESS)) {
         goto DONE;
       }
       // 设备内存分配失败，回退到 UVA 内存进行分配
-      LOGGER(VERBOSE, "[cuMemAllocPitch_v2] call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
+      LOGGER(VERBOSE, "cuMemAllocPitch call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
       goto FROM_UVA;
     } else if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
       // 没有开启内存超配，超出内存限制直接返回OOM
@@ -1074,80 +1071,34 @@ FROM_UVA:
       goto DONE;
     }
   }
-
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+  }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
-    LOGGER(VERBOSE, "[cuMemAllocPitch_v2] call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
+    LOGGER(VERBOSE, "cuMemAllocPitch call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
     goto FROM_UVA;
   }
 DONE:
   return ret;
+}
+
+
+CUresult cuMemAllocPitch_v2(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes,
+                            size_t Height, unsigned int ElementSizeBytes) {
+  return _cuMemAllocPitch(dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
 }
 
 CUresult cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes,
                          size_t Height, unsigned int ElementSizeBytes) {
-
-  CUresult ret;
-  CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
-  if (unlikely(ret != CUDA_SUCCESS)) {
-    goto DONE;
-  }
-  const char *mem_err_string = NULL;
-  const char *uva_err_string = NULL;
-
-  size_t used = 0;
-  // size_t request_size = ROUND_UP(WidthInBytes * Height, ElementSizeBytes);
-  size_t guess_pitch = (((WidthInBytes - 1) / ElementSizeBytes) + 1) * ElementSizeBytes;
-  size_t request_size = guess_pitch * Height;
-
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
-    get_used_gpu_memory((void *)&used, ordinal);
-
-    if (unlikely(g_vgpu_config.devices[ordinal].memory_oversold)) {
-      if (unlikely(used > g_vgpu_config.devices[ordinal].total_memory)) {
-        // 已用内存超过设备真实内存，直接返回 OOM
-        ret = CUDA_ERROR_OUT_OF_MEMORY;
-        goto DONE;
-      }
-      // 请求超出内存限制，使用 UVA 内存进行分配
-      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
-FROM_UVA:
-        ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, request_size, CU_MEM_ATTACH_GLOBAL);
-        LOGGER(VERBOSE, "[cuMemAllocPitch] call from UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &uva_err_string));
-        if (likely(ret == CUDA_SUCCESS)) {
-          *pPitch = guess_pitch;
-        }
-        goto DONE;
-      }
-      // 请求未超设备内存，尝试设备内存分配
-      ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocPitch, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
-      if (likely(ret == CUDA_SUCCESS)) {
-        goto DONE;
-      }
-      // 设备内存分配失败，回退到 UVA 内存进行分配
-      LOGGER(VERBOSE, "[cuMemAllocPitch] call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
-      goto FROM_UVA;
-    } else if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
-      // 没有开启内存超配，超出内存限制直接返回OOM
-      ret = CUDA_ERROR_OUT_OF_MEMORY;
-      goto DONE;
-    }
-  }
-
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocPitch, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
-    LOGGER(VERBOSE, "[cuMemAllocPitch] call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s", request_size, ret, cuda_error(ret, &mem_err_string));
-    goto FROM_UVA;
-  }
-DONE:
-  return ret;
+  return _cuMemAllocPitch(dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
 }
 
 CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1197,7 +1148,7 @@ DONE:
 CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1272,7 +1223,7 @@ static size_t get_array_base_size(int format) {
 static CUresult cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
   CUresult ret = CUDA_SUCCESS;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1292,33 +1243,33 @@ DONE:
   return ret;
 }
 
-CUresult cuArrayCreate_v2(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
+CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
   CUresult ret;
   ret = cuArrayCreate_helper(pAllocateArray);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArrayCreate_v2, pHandle,
-                        pAllocateArray);
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate_v2, pHandle, pAllocateArray);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate, pHandle, pAllocateArray);
+  }
 DONE:
   return ret;
 }
 
+CUresult cuArrayCreate_v2(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
+  return _cuArrayCreate(pHandle, pAllocateArray);
+}
+
 CUresult cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
-  CUresult ret;
-  ret = cuArrayCreate_helper(pAllocateArray);
-  if (ret != CUDA_SUCCESS) {
-    goto DONE;
-  }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArrayCreate, pHandle, pAllocateArray);
-DONE:
-  return ret;
+  return _cuArrayCreate(pHandle, pAllocateArray);
 }
 
 static CUresult cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
   CUresult ret = CUDA_SUCCESS;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1338,28 +1289,30 @@ DONE:
   return ret;
 }
 
-CUresult cuArray3DCreate_v2(CUarray *pHandle,
-                            const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
+CUresult _cuArray3DCreate(CUarray *pHandle,
+                          const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
   CUresult ret;
   ret = cuArray3DCreate_helper(pAllocateArray);
   if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArray3DCreate_v2, pHandle, pAllocateArray);
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate_v2, pHandle, pAllocateArray);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate, pHandle, pAllocateArray);
+  }
 DONE:
   return ret;
 }
 
+CUresult cuArray3DCreate_v2(CUarray *pHandle,
+                            const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
+  return _cuArray3DCreate(pHandle, pAllocateArray);
+}
+
 CUresult cuArray3DCreate(CUarray *pHandle,
                          const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
-  CUresult ret;
-  ret = cuArray3DCreate_helper(pAllocateArray);
-  if (ret != CUDA_SUCCESS) {
-    goto DONE;
-  }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuArray3DCreate, pHandle, pAllocateArray);
-DONE:
-  return ret;
+  return _cuArray3DCreate(pHandle, pAllocateArray);
 }
 
 CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
@@ -1367,7 +1320,7 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
                                 unsigned int numMipmapLevels) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1390,26 +1343,32 @@ DONE:
   return ret;
 }
 
-CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev) {
+CUresult _cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
   if (g_vgpu_config.devices[dev].memory_limit) {
     *bytes = g_vgpu_config.devices[dev].total_memory;
     return CUDA_SUCCESS;
   }
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
+  CUresult ret;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem, bytes, dev);
+  }
+  return ret;
+}
+
+CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev) {
+  return _cuDeviceTotalMem(bytes, dev);
 }
 
 CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
-  if (g_vgpu_config.devices[dev].memory_limit) {
-    *bytes = g_vgpu_config.devices[dev].total_memory;
-    return CUDA_SUCCESS;
-  }
-  return CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceTotalMem, bytes, dev);
+  return _cuDeviceTotalMem(bytes, dev);
 }
 
-CUresult cuMemGetInfo_v2(size_t *free, size_t *total) {
+CUresult _cuMemGetInfo(size_t *free, size_t *total) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1421,29 +1380,21 @@ CUresult cuMemGetInfo_v2(size_t *free, size_t *total) {
     *free = (used > total_memory) ? 0 : (total_memory - used);
     return CUDA_SUCCESS;
   }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemGetInfo_v2, free, total);
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, free, total);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, free, total);
+  }
 DONE:
   return ret;
 }
 
+CUresult cuMemGetInfo_v2(size_t *free, size_t *total) {
+  return _cuMemGetInfo(free, total);
+}
+
 CUresult cuMemGetInfo(size_t *free, size_t *total) {
-  CUresult ret;
-  CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
-  if (unlikely(ret != CUDA_SUCCESS)) {
-    goto DONE;
-  }
-  size_t used = 0;
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
-    get_used_gpu_memory((void *)&used, ordinal);
-    size_t total_memory = g_vgpu_config.devices[ordinal].total_memory;
-    *total = total_memory;
-    *free = used > total_memory ? 0 : (total_memory - used);
-    return CUDA_SUCCESS;
-  }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemGetInfo, free, total);
-DONE:
-  return ret;
+  return _cuMemGetInfo(free, total);
 }
 
 CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX,
@@ -1454,7 +1405,7 @@ CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX,
                              void **kernelParams, void **extra) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1474,7 +1425,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
                         CUstream hStream, void **kernelParams, void **extra) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1491,7 +1442,7 @@ CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
                           void **kernelParams, void **extra) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1507,7 +1458,7 @@ CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f,
                                void **kernelParams, void **extra) {
   CUresult ret; 
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1522,7 +1473,7 @@ DONE:
 CUresult cuLaunch(CUfunction f) {
   CUresult ret; 
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1540,7 +1491,7 @@ CUresult cuLaunchCooperativeKernel_ptsz(
     void **kernelParams) {
   CUdevice ordinal;
   CUresult ret; 
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1559,7 +1510,7 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
     unsigned int sharedMemBytes, CUstream hStream, void **kernelParams) {
   CUdevice ordinal;
   CUresult ret; 
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }    
@@ -1575,7 +1526,7 @@ DONE:
 CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
   CUresult ret;  
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1589,7 +1540,7 @@ CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height,
                            CUstream hStream) {
   CUresult ret;  
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1602,7 +1553,7 @@ DONE:
 CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z) {
   CUresult ret;
   CUdevice ordinal;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }

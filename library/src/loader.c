@@ -590,7 +590,7 @@ entry_t cuda_library_entry[] = {
     {.name = "cuGraphExecBatchMemOpNodeSetParams"},
     {.name = "cuGraphNodeGetEnabled"},
     {.name = "cuGraphNodeSetEnabled"},
-    {.name = "cuModuleGetLoadingMode"},
+    //{.name = "cuModuleGetLoadingMode"},
     {.name = "cuMemGetHandleForAddressRange"},
     {.name = "cuGraphAddNode"},
     {.name = "cuGraphAddNode_v2"},
@@ -611,14 +611,14 @@ entry_t cuda_library_entry[] = {
     {.name = "cuKernelGetFunction"},
     {.name = "cuKernelSetAttribute"},
     {.name = "cuKernelSetCacheConfig"},
-    {.name = "cuLibraryGetGlobal"},
-    {.name = "cuLibraryGetKernel"},
-    {.name = "cuLibraryGetManaged"},
-    {.name = "cuLibraryGetModule"},
-    {.name = "cuLibraryGetUnifiedFunction"},
-    {.name = "cuLibraryLoadData"},
-    {.name = "cuLibraryLoadFromFile"},
-    {.name = "cuLibraryUnload"},
+//    {.name = "cuLibraryGetGlobal"},
+//    {.name = "cuLibraryGetKernel"},
+//    {.name = "cuLibraryGetManaged"},
+//    {.name = "cuLibraryGetModule"},
+//    {.name = "cuLibraryGetUnifiedFunction"},
+//    {.name = "cuLibraryLoadData"},
+//    {.name = "cuLibraryLoadFromFile"},
+//    {.name = "cuLibraryUnload"},
     {.name = "cuMulticastAddDevice"},
     {.name = "cuMulticastBindAddr"},
     {.name = "cuMulticastBindMem"},
@@ -979,7 +979,7 @@ static pthread_once_t init_dlsym_flag = PTHREAD_ONCE_INIT;
 
 extern void* _dl_sym(void*, const char*, void*);
 /* This is the symbol search function */
-static fp_dlsym real_dlsym = NULL;
+fp_dlsym real_dlsym = NULL;
 void *lib_control;
 
 extern int get_mem_limit(uint32_t index, size_t *limit);
@@ -1375,6 +1375,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     if (likely(lib_control)) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
+        LOGGER(DETAIL, "search found cuda hook %s", symbol);
         return f;
       }
     }
@@ -1391,6 +1392,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     if (likely(lib_control)) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
+        LOGGER(DETAIL, "search found nvml hook %s", symbol);
         return f;
       }
     }
