@@ -184,6 +184,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		currentPod.Namespace, currentPod.Name, currentPod.UID)
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	deviceMap := m.base.manager.GetGPUDeviceMap()
+	memoryRatio := m.base.manager.GetNodeConfig().DeviceMemoryScaling()
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIDs())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -210,23 +211,24 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		envMap[util.PodNamespaceEnv] = currentPod.Namespace
 		envMap[util.PodUIDEnv] = string(currentPod.UID)
 		envMap[util.ContNameEnv] = assignDevs.Name
+		envMap[util.CudaMemoryRatioEnv] = fmt.Sprintf("%.2f", memoryRatio)
 		sort.Slice(assignDevs.Devices, func(i, j int) bool {
 			return assignDevs.Devices[i].Id < assignDevs.Devices[j].Id
 		})
 		for idx, dev := range assignDevs.Devices {
 			memoryLimitEnv := fmt.Sprintf("%s_%d", util.CudaMemoryLimitEnv, idx)
 			envMap[memoryLimitEnv] = fmt.Sprintf("%dm", dev.Memory)
-			if dev.Cores > 0 && dev.Cores < util.HundredCore {
-				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, idx)
-				envMap[coreLimitEnv] = strconv.Itoa(dev.Cores)
-			}
 			deviceIds = append(deviceIds, dev.Uuid)
-			gpuDevice, ok := deviceMap[dev.Uuid]
-			if !ok {
+			gpuDevice, exist := deviceMap[dev.Uuid]
+			if !exist {
 				err = fmt.Errorf("no device uuid  %s exists", dev.Uuid)
 				klog.V(3).ErrorS(err, "", "pod",
 					fmt.Sprintf("%s/%s", currentPod.Namespace, currentPod.Name))
 				return resp, err
+			}
+			if dev.Cores > 0 && dev.Cores < util.HundredCore {
+				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, idx)
+				envMap[coreLimitEnv] = strconv.Itoa(dev.Cores)
 			}
 			for _, deviceFilePath := range gpuDevice.Paths {
 				devices = append(devices, &pluginapi.DeviceSpec{
@@ -318,7 +320,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		if m.base.manager.GetNodeConfig().GDSEnabled() {
 			envMap["NVIDIA_GDS"] = "enabled"
 		}
-		if m.base.manager.GetNodeConfig().MOFEDEnable() {
+		if m.base.manager.GetNodeConfig().MOFEDEnabled() {
 			envMap["NVIDIA_MOFED"] = "enabled"
 		}
 		responses[i] = &pluginapi.ContainerAllocateResponse{

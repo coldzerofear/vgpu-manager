@@ -982,6 +982,7 @@ extern void* _dl_sym(void*, const char*, void*);
 fp_dlsym real_dlsym = NULL;
 void *lib_control;
 
+extern int get_mem_ratio(uint32_t index, double *ratio);
 extern int get_mem_limit(uint32_t index, size_t *limit);
 extern int get_core_limit(uint32_t index, int *limit);
 extern int get_core_soft_limit(uint32_t index, int *limit);
@@ -1268,7 +1269,8 @@ int read_file_to_config_path(const char* filename, resource_data_t* data) {
     LOGGER(VERBOSE, "---------------------------GPU %d---------------------------", i);
     LOGGER(VERBOSE, "gpu uuid         : %s", g_vgpu_config.devices[i].uuid);
     LOGGER(VERBOSE, "memory limit     : %s", g_vgpu_config.devices[i].memory_limit? "enabled" : "disabled");
-    LOGGER(VERBOSE, "+ memory size    : %ld", g_vgpu_config.devices[i].total_memory);
+    LOGGER(VERBOSE, "+ real  memory   : %ld", g_vgpu_config.devices[i].real_memory);
+    LOGGER(VERBOSE, "+ total memory   : %ld", g_vgpu_config.devices[i].total_memory);
     LOGGER(VERBOSE, "cores limit      : %s", g_vgpu_config.devices[i].core_limit? "enabled" : "disabled");
     LOGGER(VERBOSE, "+ hard limit     : %s", g_vgpu_config.devices[i].hard_limit? "enabled" : "disabled");
     LOGGER(VERBOSE, "+ hard cores     : %d", g_vgpu_config.devices[i].hard_core);
@@ -1447,9 +1449,12 @@ int load_controller_configuration() {
     LOGGER(ERROR, "not found gpu devices uuid");
     goto DONE;
   }
-  char *gpu_uuids[MAX_DEVICE_COUNT];
   int hard_cores = 0;
   int soft_cores = 0;
+  double ratio = 1; // default ratio = 1
+  int oversold = 0; // default disable oversold
+  size_t real_memory = 0;
+  char *gpu_uuids[MAX_DEVICE_COUNT];
   g_vgpu_config.device_count = strsplit(uuids, gpu_uuids, ",");
   for (int i = 0; i < g_vgpu_config.device_count; i++) {
     strcpy(g_vgpu_config.devices[i].uuid, gpu_uuids[i]);
@@ -1460,11 +1465,25 @@ int load_controller_configuration() {
     } else {
       g_vgpu_config.devices[i].memory_limit = 1;
     }
-    ret = get_mem_oversold(i, &g_vgpu_config.devices[i].memory_oversold);
+    ret = get_mem_oversold(i, &oversold);
     if (unlikely(ret)) {
-      LOGGER(VERBOSE, "gpu device %d memory oversold failed", i);
-      g_vgpu_config.devices[i].memory_oversold = 0;
+      LOGGER(ERROR, "get device %d memory oversold failed", i);
+      oversold = 0; // default disable oversold
     }
+    ret = get_mem_ratio(i, &ratio);
+    if (unlikely(ret)) {
+      LOGGER(ERROR, "get device %d memory ratio failed", i);
+      ratio = 1; // default ratio = 1
+    }
+    real_memory = g_vgpu_config.devices[i].total_memory;
+    if (ratio > 1) {
+      real_memory /= ratio;
+      g_vgpu_config.devices[i].memory_oversold = 1;
+    } else {
+      g_vgpu_config.devices[i].memory_oversold = oversold;
+    }
+    g_vgpu_config.devices[i].real_memory = real_memory;
+
     ret = get_core_limit(i, &hard_cores);
     if (unlikely(ret)) {
       LOGGER(VERBOSE, "get device %d core limit failed", i);
@@ -1499,7 +1518,8 @@ int load_controller_configuration() {
     LOGGER(VERBOSE, "---------------------------GPU %d---------------------------", i);
     LOGGER(VERBOSE, "gpu uuid         : %s", g_vgpu_config.devices[i].uuid);
     LOGGER(VERBOSE, "memory limit     : %s", g_vgpu_config.devices[i].memory_limit? "enabled" : "disabled");
-    LOGGER(VERBOSE, "+ memory size    : %ld", g_vgpu_config.devices[i].total_memory);
+    LOGGER(VERBOSE, "+ real  memory   : %ld", g_vgpu_config.devices[i].real_memory);
+    LOGGER(VERBOSE, "+ total memory   : %ld", g_vgpu_config.devices[i].total_memory);
     LOGGER(VERBOSE, "cores limit      : %s", g_vgpu_config.devices[i].core_limit? "enabled" : "disabled");
     LOGGER(VERBOSE, "+ hard limit     : %s", g_vgpu_config.devices[i].hard_limit? "enabled" : "disabled");
     LOGGER(VERBOSE, "+ hard cores     : %d", g_vgpu_config.devices[i].hard_core);

@@ -63,6 +63,8 @@ const (
 
 	// CUDA_MEM_LIMIT_<index> gpu memory limit
 	CudaMemoryLimitEnv = "CUDA_MEM_LIMIT"
+	// CUDA_MEM_RATIO_<index> gpu memory ratio
+	CudaMemoryRatioEnv = "CUDA_MEM_RATIO"
 	// CUDA_CORE_LIMIT_<index> gpu core limit
 	CudaCoreLimitEnv = "CUDA_CORE_LIMIT"
 	// CUDA_CORE_SOFT_LIMIT_<index> gpu core soft limit

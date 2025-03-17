@@ -127,6 +127,7 @@ typedef struct {
 typedef struct {
   char uuid[48];
   size_t total_memory;
+  size_t real_memory;
   int hard_core;
   int soft_core;
   int core_limit;

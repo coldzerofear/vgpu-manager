@@ -21,6 +21,8 @@ type NodeConfigMap struct {
 	DeviceMemoryFactor  *int     `json:"deviceMemoryFactor,omitempty"`
 	DeviceCoresScaling  *float64 `json:"deviceCoresScaling,omitempty"`
 	ExcludeDevices      *string  `json:"excludeDevices,omitempty"`
+	GDSEnabled          *bool    `json:"gdsEnabled,omitempty"`
+	MOFEDEnabled        *bool    `json:"mofedEnabled,omitempty"`
 }
 
 type NodeConfig struct {
@@ -33,7 +35,7 @@ type NodeConfig struct {
 	deviceCoresScaling  float64
 	excludeDevices      sets.Int
 	gdsEnabled          bool
-	mofedEnable         bool
+	mofedEnabled        bool
 	checkFields         bool
 }
 
@@ -73,8 +75,8 @@ func (nc NodeConfig) GDSEnabled() bool {
 	return nc.gdsEnabled
 }
 
-func (nc NodeConfig) MOFEDEnable() bool {
-	return nc.mofedEnable
+func (nc NodeConfig) MOFEDEnabled() bool {
+	return nc.mofedEnabled
 }
 
 func (nc NodeConfig) String() string {
@@ -93,7 +95,7 @@ func checkNodeConfig(nodeConfig *NodeConfig) error {
 		return fmt.Errorf("NodeConfig.DeviceSplitCount must be a positive integer greater than or equal to 0")
 	}
 	if nodeConfig.deviceMemoryScaling < 0 {
-		return fmt.Errorf("NodeConfig.DeviceMemoryScaling must be any number greater than or equal to 0 but less than or equal to 1")
+		return fmt.Errorf("NodeConfig.DeviceMemoryScaling must be any number greater than or equal to 0")
 	}
 	if nodeConfig.deviceMemoryFactor <= 0 {
 		return fmt.Errorf("NodeConfig.DeviceMemoryFactor must be a positive integer greater than 0")
@@ -115,7 +117,7 @@ func MutationDPOptions(opt dpoptions.Options) func(*NodeConfig) {
 		nodeConfig.deviceCoresScaling = opt.DeviceCoresScaling
 		nodeConfig.excludeDevices = ParseExcludeDevices(opt.ExcludeDevices)
 		nodeConfig.gdsEnabled = opt.GDSEnabled
-		nodeConfig.mofedEnable = opt.MOFEDEnabled
+		nodeConfig.mofedEnabled = opt.MOFEDEnabled
 		nodeConfig.checkFields = true
 	}
 }
@@ -165,6 +167,12 @@ func NewNodeConfig(nodeConfigPath string, mutations ...func(*NodeConfig)) (*Node
 			}
 			if nodeConfigMap.ExcludeDevices != nil {
 				config.excludeDevices = ParseExcludeDevices(*nodeConfigMap.ExcludeDevices)
+			}
+			if nodeConfigMap.GDSEnabled != nil {
+				config.gdsEnabled = *nodeConfigMap.GDSEnabled
+			}
+			if nodeConfigMap.MOFEDEnabled != nil {
+				config.mofedEnabled = *nodeConfigMap.MOFEDEnabled
 			}
 			break
 		}

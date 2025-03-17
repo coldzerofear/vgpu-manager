@@ -42,6 +42,7 @@ import (
 //struct device_t {
 //  char uuid[48];
 //  uint64_t total_memory;
+//  uint64_t real_memory;
 //  int hard_core;
 //  int soft_core;
 //  int core_limit;
@@ -91,6 +92,7 @@ type VersionT struct {
 type DeviceT struct {
 	UUID           [48]byte
 	TotalMemory    uint64
+	RealMemory     uint64
 	HardCore       int32
 	SoftCore       int32
 	CoreLimit      int32
@@ -147,6 +149,7 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	assignDevices device.ContainerDevices, memoryOversold bool, node *corev1.Node) *ResourceDataT {
 	major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
+	ratio := devManager.GetNodeConfig().DeviceMemoryScaling()
 	convert48Bytes := func(val string) [48]byte {
 		var byteArray [48]byte
 		copy(byteArray[:], val)
@@ -160,16 +163,22 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	computePolicy := GetComputePolicy(pod, node)
 	deviceCount := 0
 	deviceMap := devManager.GetDeviceInfoMap()
-	nodeConfig := devManager.GetNodeConfig()
 	devices := [util.MaxDeviceNumber]DeviceT{}
 	for i, devInfo := range assignDevices.Devices {
 		if i >= util.MaxDeviceNumber {
 			break
 		}
 		deviceCount++
+		totalMemoryBytes := uint64(devInfo.Memory) << 20
+		realMemoryBytes := totalMemoryBytes
+		if ratio > 1 {
+			memoryOversold = true
+			realMemoryBytes = uint64(float64(realMemoryBytes) / ratio)
+		}
 		dev := DeviceT{
 			UUID:        convert48Bytes(devInfo.Uuid),
-			TotalMemory: uint64(devInfo.Memory << 20),
+			TotalMemory: totalMemoryBytes,
+			RealMemory:  realMemoryBytes,
 			HardCore:    int32(devInfo.Cores),
 			SoftCore:    int32(devInfo.Cores),
 			CoreLimit:   int32(0),
@@ -203,7 +212,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		}
 
 		//  int memory_limit;
-		if devInfo.Memory == gpuDevice.Memory && nodeConfig.DeviceMemoryScaling() == float64(1) {
+		if devInfo.Memory == gpuDevice.Memory && ratio == 1 {
 			dev.MemoryLimit = 0
 		} else {
 			dev.MemoryLimit = 1
@@ -257,6 +266,8 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		var vgpuConfig C.struct_resource_data_t
 		var driverVersion C.struct_version_t
 		major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
+		ratio := devManager.GetNodeConfig().DeviceMemoryScaling()
+
 		driverVersion.major = C.int(major)
 		driverVersion.minor = C.int(minor)
 		vgpuConfig.driver_version = driverVersion
@@ -281,7 +292,6 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 
 		deviceCount := 0
 		deviceMap := devManager.GetDeviceInfoMap()
-		nodeConfig := devManager.GetNodeConfig()
 		for i, devInfo := range assignDevices.Devices {
 			if i >= C.MAX_DEVICE_COUNT {
 				break
@@ -292,9 +302,16 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 				devUuid := C.CString(devInfo.Uuid)
 				defer C.free(unsafe.Pointer(devUuid))
 				C.strcpy((*C.char)(unsafe.Pointer(&cDevice.uuid[0])), (*C.char)(unsafe.Pointer(devUuid)))
+				totalMemoryBytes := uint64(devInfo.Memory) << 20
+				realMemoryBytes := totalMemoryBytes
 				//  uint64_t total_memory;
-				cDevice.total_memory = C.uint64_t(devInfo.Memory << 20)
-
+				cDevice.total_memory = C.uint64_t(totalMemoryBytes)
+				if ratio > 1 {
+					memoryOversold = true
+					realMemoryBytes = uint64(float64(realMemoryBytes) / ratio)
+				}
+				//  uint64_t real_memory;
+				cDevice.real_memory = C.uint64_t(realMemoryBytes)
 				gpuDevice := deviceMap[devInfo.Uuid]
 				//  int hard_core;
 				cDevice.hard_core = C.int(devInfo.Cores)
@@ -327,8 +344,9 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 					}
 				case util.NoneComputePolicy:
 				}
+
 				//  int memory_limit;
-				if devInfo.Memory == gpuDevice.Memory && nodeConfig.DeviceMemoryScaling() == float64(1) {
+				if devInfo.Memory == gpuDevice.Memory && ratio == 1 {
 					cDevice.memory_limit = 0
 				} else {
 					cDevice.memory_limit = 1

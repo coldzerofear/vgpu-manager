@@ -7,25 +7,12 @@
 #include <string.h>
 #include <unistd.h>
 
-#define CUDA_MEMORY_LIMIT_ENV "CUDA_MEM_LIMIT_%d"
-#define CUDA_CORE_LIMIT_ENV "CUDA_CORE_LIMIT_%d"
-#define CUDA_CORE_SOFT_LIMIT_ENV "CUDA_CORE_SOFT_LIMIT_%d"
-#define CUDA_MEM_OVERSOLD_ENV "CUDA_MEM_OVERSOLD_%d"
+#define CUDA_MEMORY_LIMIT_ENV "CUDA_MEM_LIMIT"
+#define CUDA_MEMORY_RATIO_ENV "CUDA_MEM_RATIO"
+#define CUDA_CORE_LIMIT_ENV "CUDA_CORE_LIMIT"
+#define CUDA_CORE_SOFT_LIMIT_ENV "CUDA_CORE_SOFT_LIMIT"
+#define CUDA_MEM_OVERSOLD_ENV "CUDA_MEM_OVERSOLD"
 #define GPU_DEVICES_UUID_ENV "GPU_DEVICES_UUID"
-
-static inline int get_limit(const char *name, char *data) {
-  char *str = NULL;
-  int ret = -1;
-  str = getenv(name);
-  if (unlikely(!str)) {
-    goto DONE;
-  }
-  // memcpy(data, str, strlen(str));
-  strcpy(data, str);
-  ret = 0;
-DONE:
-  return ret;
-}
 
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
@@ -55,27 +42,51 @@ size_t iec_to_bytes(const char *iec_value) {
   return (size_t)value;
 }
 
+int get_mem_ratio(uint32_t index, double *ratio) {
+  int ret = -1;
+  char *str = NULL;
+  char env[32] = {0};
+  sprintf(env, "%s_%d", CUDA_MEMORY_RATIO_ENV, index);
+  str = getenv(env);
+  if (unlikely(!str)) {
+    str = getenv(CUDA_MEMORY_RATIO_ENV);
+    if (unlikely(!str)) {
+      goto DONE;
+    }
+  }
+  *ratio = atof(str);
+  ret = 0;
+DONE:
+  return ret;
+}
+
+
 int get_mem_limit(uint32_t index, size_t *limit) {
   int ret = -1;
-  char tmp[16] = {0};
+  char *str = NULL;
   char env[32] = {0};
-  sprintf(env, CUDA_MEMORY_LIMIT_ENV, index);
-  ret = get_limit(env, tmp);
-  if (unlikely(ret)) {
-    return ret;
+  sprintf(env, "%s_%d", CUDA_MEMORY_LIMIT_ENV, index);
+  str = getenv(env);
+  if (unlikely(!str)) {
+    str = getenv(CUDA_MEMORY_LIMIT_ENV);
+    if (unlikely(!str)) {
+      goto DONE;
+    }
   }
-  *limit = iec_to_bytes(tmp);
-  return 0;
+  *limit = iec_to_bytes(str);
+  ret = 0;
+DONE:
+  return ret;
 }
 
 int get_core_limit(uint32_t index, int *limit) {
   int ret = -1;
   char *str = NULL;
   char env[32] = {0};
-  sprintf(env, CUDA_CORE_LIMIT_ENV, index);
+  sprintf(env, "%s_%d", CUDA_CORE_LIMIT_ENV, index);
   str = getenv(env);
   if (unlikely(!str)) {
-    str = getenv("CUDA_CORE_LIMIT");
+    str = getenv(CUDA_CORE_LIMIT_ENV);
     if (unlikely(!str)) {
       goto DONE;
     }
@@ -90,10 +101,10 @@ int get_core_soft_limit(uint32_t index, int *limit) {
   int ret = -1;
   char *str = NULL;
   char env[32] = {0};
-  sprintf(env, CUDA_CORE_SOFT_LIMIT_ENV, index);
+  sprintf(env, "%s_%d", CUDA_CORE_SOFT_LIMIT_ENV, index);
   str = getenv(env);
   if (unlikely(!str)) {
-    str = getenv("CUDA_CORE_SOFT_LIMIT");
+    str = getenv(CUDA_CORE_SOFT_LIMIT_ENV);
     if (unlikely(!str)) {
       goto DONE;
     }
@@ -106,12 +117,12 @@ DONE:
 
 int get_devices_uuid(char *uuids) {
   int ret = -1;
-  char tmp[768] = {0};
-  ret = get_limit(GPU_DEVICES_UUID_ENV, tmp);
-  if (unlikely(ret)) {
+  char *str = NULL;
+  str = getenv(GPU_DEVICES_UUID_ENV);
+  if (unlikely(!str)) {
     return ret;
   }
-  strcpy(uuids, tmp);
+  strcpy(uuids, str);
   return 0;
 }
 
@@ -119,10 +130,10 @@ int get_mem_oversold(uint32_t index, int *i) {
   int ret = -1;
   char *str = NULL;
   char env[32] = {0};
-  sprintf(env, CUDA_MEM_OVERSOLD_ENV, index);
+  sprintf(env, "%s_%d", CUDA_MEM_OVERSOLD_ENV, index);
   str = getenv(env);
   if (unlikely(!str)) {
-    str = getenv("CUDA_MEM_OVERSOLD");
+    str = getenv(CUDA_MEM_OVERSOLD_ENV);
     if (unlikely(!str)) {
         goto DONE;
     }

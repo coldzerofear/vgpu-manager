@@ -104,7 +104,7 @@ var (
 	containerVGPUMemoryLimit = prometheus.NewDesc(
 		"container_vgpu_device_memory_limit_in_bytes",
 		"Container virtual GPU device memory limit (bytes)",
-		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename"}, nil,
+		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename", "phymembytes"}, nil,
 	)
 	containerVGPUUtilRate = prometheus.NewDesc(
 		"container_vgpu_device_utilization_rate",
@@ -347,6 +347,7 @@ skip:
 					vDevIndex      = strconv.Itoa(int(i))
 					deviceUUID     = string(resData.Devices[i].UUID[0:40])
 					deviceMemLimit = resData.Devices[i].TotalMemory
+					realMemBytes   = resData.Devices[i].RealMemory
 					deviceMemUsage = uint64(0)
 					deviceSMUtil   = uint32(0)
 				)
@@ -367,7 +368,8 @@ skip:
 					prometheus.GaugeValue,
 					float64(deviceMemLimit),
 					pod.Namespace, pod.Name, container.Name, vDevIndex,
-					deviceUUID, containerId, containerGPUPids, c.nodeName)
+					deviceUUID, containerId, containerGPUPids, c.nodeName,
+					strconv.FormatUint(realMemBytes, 10))
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUMemoryUsage,
 					prometheus.GaugeValue,

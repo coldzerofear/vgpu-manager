@@ -38,10 +38,11 @@ environment variable
 * VGPU_POD_UID: current pod uid
 * VGPU_CONTAINER_NAME: current container name
 * CUDA_MEM_LIMIT_<index>: gpu memory limit
+* CUDA_MEM_RATIO_<index>: gpu memory scaling ratio
 * CUDA_CORE_LIMIT_<index>: gpu core limit
 * CUDA_CORE_SOFT_LIMIT_<index>: gpu core soft limit
 * CUDA_MEM_OVERSOLD_<index>: gpu memory oversold switch
-* GPU_DEVICES_UUID: gpu uuids
+* GPU_DEVICES_UUID: gpu device uuids
 
 ## Log level
 
