@@ -40,8 +40,8 @@ spec:
       {{- end }}
       containers:
         - name: webhook
-          image: {{ .Values.webhook.image }}:{{ .Values.webhook.imageTag }}
-          imagePullPolicy: {{ .Values.webhook.imagePullPolicy | quote }}
+          image: {{ include "vgpu-manager.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command:
             - webhook
             - --scheduler-name={{ .Values.scheduler.schedulerName }}

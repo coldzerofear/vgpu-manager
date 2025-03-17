@@ -69,8 +69,8 @@ spec:
             successThreshold: 1
             timeoutSeconds: 15
         - name: scheduler-extender
-          image: {{ .Values.scheduler.schedulerExtender.image }}:{{ .Values.scheduler.schedulerExtender.imageTag }}
-          imagePullPolicy: {{ .Values.scheduler.schedulerExtender.imagePullPolicy | quote }}
+          image: {{ include "vgpu-manager.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command:
             - scheduler
             - --kube-api-qps={{ .Values.scheduler.schedulerExtender.commands.kubeApiQps }}

@@ -78,4 +78,12 @@ Image registry secret name
 imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 2 }}
 {{- end }}
 
+{{/*
+Full image name with tag
+*/}}
+{{- define "vgpu-manager.fullimage" -}}
+{{- $tag := printf "%s" .Chart.AppVersion }}
+{{- .Values.image -}}:{{- .Values.imageTag | default $tag -}}
+{{- end }}
+
 

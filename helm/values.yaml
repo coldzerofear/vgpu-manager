@@ -8,6 +8,12 @@ fullnameOverride: ""
 # This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
 imagePullSecrets: []
 
+# Set up the image repository for vgpu-manager
+image: coldzerofear/vgpu-manager
+# Overrides the image tag whose default is the chart appVersion.
+imageTag: ""
+imagePullPolicy: IfNotPresent
+
 # Deployment configuration of the scheduler section
 scheduler:
   # Should the scheduler be deployed? (default: true)
@@ -35,9 +41,6 @@ scheduler:
         cpu: 100m
         memory: 256Mi
   schedulerExtender:
-    image: coldzerofear/vgpu-manager
-    imageTag: "latest"
-    imagePullPolicy: IfNotPresent
     commands:
       kubeApiQps: 20.0
       kubeApiBurst: 30
@@ -66,10 +69,6 @@ devicePlugin:
     # This annotation is deprecated. Kept here for backward compatibility
     # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
     scheduler.alpha.kubernetes.io/critical-pod: ""
-  # Configure the image used by the device plugin
-  image: coldzerofear/vgpu-manager
-  imageTag: "latest"
-  imagePullPolicy: IfNotPresent
   # Container deployment using host network mode (default: false)
   hostNetwork: false
   # Grace period for container recycling (default: 30s)
@@ -176,10 +175,6 @@ webhook:
   annotations: {}
   # Number of deployed replicas (default: 1)
   replicas: 1
-  # Configure the image used by the webhook
-  image: coldzerofear/vgpu-manager
-  imageTag: "latest"
-  imagePullPolicy: IfNotPresent
   # Grace period for container recycling (default: 10s)
   terminationGracePeriodSeconds: 10
   # Node labels to be deployed

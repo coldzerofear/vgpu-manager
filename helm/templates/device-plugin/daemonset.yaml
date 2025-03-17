@@ -46,8 +46,8 @@ spec:
       initContainers:
         - name: install
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
-          image: {{ .Values.devicePlugin.image }}:{{ .Values.devicePlugin.imageTag }}
-          imagePullPolicy: {{ .Values.devicePlugin.imagePullPolicy | quote }}
+          image: {{ include "vgpu-manager.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           resources:
             requests:
               cpu: 10m
@@ -60,8 +60,8 @@ spec:
               mountPropagation: Bidirectional
       containers:
         - name: device-plugin
-          image: {{ .Values.devicePlugin.image }}:{{ .Values.devicePlugin.imageTag }}
-          imagePullPolicy: {{ .Values.devicePlugin.imagePullPolicy | quote }}
+          image: {{ include "vgpu-manager.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command:
             - deviceplugin
             - --kube-api-qps={{ .Values.devicePlugin.devicePlugin.commands.kubeApiQps }}
@@ -104,8 +104,8 @@ spec:
             - name: node-config
               mountPath: /config
         - name: device-monitor
-          image: {{ .Values.devicePlugin.image }}:{{ .Values.devicePlugin.imageTag }}
-          imagePullPolicy: {{ .Values.devicePlugin.imagePullPolicy | quote }}
+          image: {{ include "vgpu-manager.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command:
             - monitor
             - --kube-api-qps={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiQps }}
