@@ -99,6 +99,8 @@ devicePlugin:
   kubeletRootDir: "/var/lib/kubelet"
   # Configure the host path used by vgpu manager (default: /etc/vgpu-manager)
   vgpuManagerDir: "/etc/vgpu-manager"
+  # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
+  cgroupDriver: ""
   devicePlugin:
     commands:
       kubeApiQps: 20.0
@@ -113,8 +115,6 @@ devicePlugin:
       deviceMemoryFactor: 1
       # The pprof service port used for debugging: (default disable: 0)
       pprofBindPort: 0
-      # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
-      cgroupDriver: ""
       gdsEnabled: false
       mofedEnabled: false
       # Supported feature gates:
@@ -136,8 +136,6 @@ devicePlugin:
       serverBindPort: 3456
       # The pprof service port used for debugging: (default disable: 0)
       pprofBindPort: 0
-      # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
-      cgroupDriver: ""
       logLevel: 3
     resources:
       requests:
@@ -149,13 +147,15 @@ devicePlugin:
     json: | 
       [
         {
-          "nodeName": "demo0",
+          "nodeName": "example",
           "cgroupDriver": "systemd",
-          "deviceSplitCount": 10,
+          "deviceSplitCount": 5,
           "deviceMemoryScaling": 1,
           "deviceMemoryFactor": 1,
           "deviceCoresScaling": 1,
-          "excludeDevices": "0-1"
+          "excludeDevices": "4-7",
+          "gdsEnabled": false,
+          "mofedEnabled": false
         }
       ]
 

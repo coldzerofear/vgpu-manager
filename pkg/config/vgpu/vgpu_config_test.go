@@ -25,10 +25,11 @@ func Test_WriDriverConfigFile(t *testing.T) {
 	}
 	option := node.MutationDPOptions(dpoptions.Options{
 		NodeName:            "testNode",
+		NodeConfigPath:      "",
 		DeviceCoresScaling:  float64(1),
 		DeviceMemoryScaling: float64(1),
 	})
-	config, _ := node.NewNodeConfig("", option)
+	config, _ := node.NewNodeConfig(option)
 	gpuUUID0 := "GPU-" + string(uuid.NewUUID())
 	gpuUUID1 := "GPU-" + string(uuid.NewUUID())
 	devices := []*manager.Device{

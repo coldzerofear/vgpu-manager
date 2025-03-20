@@ -47,11 +47,11 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create k8s kubeClient failed: %v", err)
 	}
-	nodeConfig, err := node.NewNodeConfig(opt.NodeConfigPath, node.MutationMonitorOptions(*opt))
+	nodeConfig, err := node.NewNodeConfig(node.MutationMonitorOptions(*opt))
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
-	klog.V(4).Infoln("Current NodeConfig", nodeConfig.String())
+	klog.V(4).Infoln("Current NodeConfig:\n", nodeConfig.String())
 	util.InitializeCGroupDriver(nodeConfig)
 
 	// trim managedFields to reduce cache memory usage.

@@ -49,7 +49,7 @@ func (s *server) Start(stopCh <-chan struct{}) error {
 		s.Stop()
 	}()
 
-	klog.Infof("Metrics server starting on <0.0.0.0:%d>", s.port)
+	klog.Infof("Metrics server starting on <0.0.0.0:%d>", *s.port)
 	err := s.httpServer.ListenAndServe()
 	s.httpServer = nil
 	return err

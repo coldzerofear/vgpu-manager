@@ -71,7 +71,7 @@ spec:
             - --device-memory-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling }}
             - --device-memory-factor={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor }}
             - --pprof-bind-port={{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
-            - --cgroup-driver={{ .Values.devicePlugin.devicePlugin.commands.cgroupDriver }}
+            - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
             - --feature-gates={{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
             - --mofed-enabled={{ .Values.devicePlugin.devicePlugin.commands.mofedEnabled }}
             - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
@@ -112,7 +112,7 @@ spec:
             - --kube-api-burst={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiBurst }}
             - --server-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
             - --pprof-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
-            - --cgroup-driver={{ .Values.devicePlugin.deviceMonitor.commands.cgroupDriver }}
+            - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
             - --node-config-path=/config/nodeConfig.json
             - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
           ports:

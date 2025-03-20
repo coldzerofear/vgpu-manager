@@ -27,6 +27,7 @@ type NodeConfigMap struct {
 
 type NodeConfig struct {
 	nodeName            string
+	nodeConfigPath      string
 	cgroupDriver        string
 	devicePluginPath    string
 	deviceSplitCount    int
@@ -80,8 +81,21 @@ func (nc NodeConfig) MOFEDEnabled() bool {
 }
 
 func (nc NodeConfig) String() string {
-	return fmt.Sprintf("nodeName: %s, devicePluginPath: %s, deviceSplitCount: %d, deviceMemoryScaling: %2.f, deviceMemoryFactor: %d, deviceCoresScaling: %2.f, excludeDevices: %+v",
-		nc.nodeName, nc.devicePluginPath, nc.deviceSplitCount, nc.deviceMemoryScaling, nc.deviceMemoryFactor, nc.deviceCoresScaling, nc.excludeDevices.List())
+	format := `{
+  "nodeName": "%s", 
+  "devicePluginPath": "%s", 
+  "cgroupDriver": "%s", 
+  "deviceSplitCount": %d, 
+  "deviceCoresScaling": %.2f, 
+  "deviceMemoryScaling": %.2f,
+  "deviceMemoryFactor": %d,
+  "excludeDevices": %+v, 
+  "gdsEnabled": %t, 
+  "mofedEnabled": %t
+}`
+	return fmt.Sprintf(format, nc.nodeName, nc.devicePluginPath, nc.cgroupDriver,
+		nc.deviceSplitCount, nc.deviceCoresScaling, nc.deviceMemoryScaling, nc.deviceMemoryFactor,
+		nc.excludeDevices.List(), nc.gdsEnabled, nc.mofedEnabled)
 }
 
 func checkNodeConfig(nodeConfig *NodeConfig) error {
@@ -109,6 +123,7 @@ func checkNodeConfig(nodeConfig *NodeConfig) error {
 func MutationDPOptions(opt dpoptions.Options) func(*NodeConfig) {
 	return func(nodeConfig *NodeConfig) {
 		nodeConfig.nodeName = opt.NodeName
+		nodeConfig.nodeConfigPath = opt.NodeConfigPath
 		nodeConfig.cgroupDriver = opt.CGroupDriver
 		nodeConfig.deviceSplitCount = opt.DeviceSplitCount
 		nodeConfig.devicePluginPath = opt.DevicePluginPath
@@ -125,31 +140,32 @@ func MutationDPOptions(opt dpoptions.Options) func(*NodeConfig) {
 func MutationMonitorOptions(opt monitoroptions.Options) func(*NodeConfig) {
 	return func(nodeConfig *NodeConfig) {
 		nodeConfig.nodeName = opt.NodeName
+		nodeConfig.nodeConfigPath = opt.NodeConfigPath
 		nodeConfig.cgroupDriver = opt.CGroupDriver
 		nodeConfig.excludeDevices = sets.NewInt()
 		nodeConfig.checkFields = false
 	}
 }
 
-func NewNodeConfig(nodeConfigPath string, mutations ...func(*NodeConfig)) (*NodeConfig, error) {
+func NewNodeConfig(mutations ...func(*NodeConfig)) (*NodeConfig, error) {
 	config := &NodeConfig{}
 	for _, mutation := range mutations {
 		mutation(config)
 	}
-	if len(nodeConfigPath) > 0 {
-		bytes, err := os.ReadFile(nodeConfigPath)
+	if len(config.nodeConfigPath) > 0 {
+		configBytes, err := os.ReadFile(config.nodeConfigPath)
 		if err != nil {
 			return nil, err
 		}
 		var configMap []NodeConfigMap
-		if err = json.Unmarshal(bytes, &configMap); err != nil {
+		if err = json.Unmarshal(configBytes, &configMap); err != nil {
 			return nil, err
 		}
 		for _, nodeConfigMap := range configMap {
 			if nodeConfigMap.NodeName != config.nodeName {
 				continue
 			}
-			klog.Infoln("Matched Node ConfigMap", nodeConfigMap)
+			klog.Infof("Matched node config <%s>", config.nodeName)
 			if nodeConfigMap.CGroupDriver != nil {
 				config.cgroupDriver = *nodeConfigMap.CGroupDriver
 			}
