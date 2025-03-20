@@ -94,7 +94,7 @@ func main() {
 	go func() {
 		serverErr := server.Start(ctx.Done())
 		if serverErr != nil {
-			klog.Errorf("Server error occurred: %v", err)
+			klog.Errorf("Server error occurred: %v", serverErr)
 			cancelCtx()
 		}
 	}()

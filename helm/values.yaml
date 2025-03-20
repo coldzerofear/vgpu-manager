@@ -31,6 +31,7 @@ scheduler:
   terminationGracePeriodSeconds: 30
   kubeScheduler:
     image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler
+    # Warning: Change to your own cluster deployment version
     imageTag: "v1.28.15"
     imagePullPolicy: IfNotPresent
     commands:

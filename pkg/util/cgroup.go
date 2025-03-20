@@ -154,11 +154,7 @@ func GetK8sPodContainerCGroupFullPath(pod *corev1.Pod, containerName string,
 	case SYSTEMD:
 		return convertSystemdFullPath(runtimeName, containerId, cgroupName, getFullPath)
 	case CGROUPFS:
-		fullPath := getFullPath(filepath.Join(cgroupName.ToCgroupfs(), containerId))
-		if !PathIsNotExist(fullPath) {
-			return fullPath, nil
-		}
-		return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
+		return convertCGroupfsFullPath(runtimeName, containerId, cgroupName, getFullPath)
 	default:
 		return "", fmt.Errorf("unknown CGroup driver: %s", currentCGroupDriver)
 	}
@@ -167,6 +163,21 @@ func GetK8sPodContainerCGroupFullPath(pod *corev1.Pod, containerName string,
 func PathIsNotExist(fullPath string) bool {
 	_, err := os.Stat(fullPath)
 	return os.IsNotExist(err)
+}
+
+func convertCGroupfsFullPath(runtimeName, containerId string,
+	cgroupName CgroupName, getFullPath func(string) string) (string, error) {
+	fullPath := getFullPath(filepath.Join(cgroupName.ToCgroupfs(), containerId))
+	if !PathIsNotExist(fullPath) {
+		return fullPath, nil
+	}
+	fullPath = getFullPath(filepath.Join("system.slice", cgroupName[len(cgroupName)-1]))
+	if !PathIsNotExist(fullPath) {
+		return fullPath, nil
+	}
+	klog.Infof("Possible upgrade required to adapt container runtime <%s> CGroup driver <%s>",
+		runtimeName, "cgroupfs")
+	return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
 }
 
 func convertSystemdFullPath(runtimeName, containerId string,
@@ -184,33 +195,31 @@ func convertSystemdFullPath(runtimeName, containerId string,
 	}
 	cgroupPath := fmt.Sprintf("%s/%s-%s.scope", cgroupName.ToSystemd(),
 		SystemdPathPrefixOfRuntime(runtimeName), containerId)
+	fullPath := getFullPath(cgroupPath)
+	if !PathIsNotExist(fullPath) {
+		return fullPath, nil
+	}
 	switch runtimeName {
 	case "containerd":
-		fullPath := getFullPath(cgroupPath)
-		if PathIsNotExist(fullPath) {
-			klog.Warningf("CGroup full path <%s> not exist", fullPath)
-			cgroupPath = fmt.Sprintf("system.slice/%s.service/%s:%s:%s", runtimeName,
-				toSystemd(cgroupName), SystemdPathPrefixOfRuntime(runtimeName), containerId)
-			fullPath = getFullPath(cgroupPath)
-			if PathIsNotExist(fullPath) {
-				return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
-			}
+		klog.Warningf("CGroup full path <%s> not exist", fullPath)
+		cgroupPath = fmt.Sprintf("system.slice/%s.service/%s:%s:%s", runtimeName,
+			toSystemd(cgroupName), SystemdPathPrefixOfRuntime(runtimeName), containerId)
+		fullPath = getFullPath(cgroupPath)
+		if !PathIsNotExist(fullPath) {
+			return fullPath, nil
 		}
-		return fullPath, nil
 	case "docker":
-		fullPath := getFullPath(cgroupPath)
-		if PathIsNotExist(fullPath) {
-			klog.Warningf("CGroup full path <%s> not exist", fullPath)
-			cgroupPath = fmt.Sprintf("%s/%s", cgroupName.ToSystemd(), containerId)
-			fullPath = getFullPath(cgroupPath)
-			if PathIsNotExist(fullPath) {
-				return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
-			}
+		klog.Warningf("CGroup full path <%s> not exist", fullPath)
+		cgroupPath = fmt.Sprintf("%s/%s", cgroupName.ToSystemd(), containerId)
+		fullPath = getFullPath(cgroupPath)
+		if !PathIsNotExist(fullPath) {
+			return fullPath, nil
 		}
-		return fullPath, nil
 	default:
-		return getFullPath(cgroupPath), nil
 	}
+	klog.Infof("Possible upgrade required to adapt container runtime <%s> CGroup driver <%s>",
+		runtimeName, "systemd")
+	return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
 }
 
 func GetContainerStatus(pod *corev1.Pod, containerName string) (*corev1.ContainerStatus, bool) {
