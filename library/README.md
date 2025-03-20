@@ -1,21 +1,19 @@
 # VGPU-Controller
 
-Cuda driver API interception library, implementing hard resource limitation.
-
-Based on [vcuda-controller](https://github.com/tkestack/vcuda-controller) and [HAMi-core](https://github.com/Project-HAMi/HAMi-core) transformation.
-
-Simplify gRPC within containers, and supporting cgroupv2 container environments.
+CUDA driver API dynamic library for GPU virtualization and resource hard isolation.
 
 ## Project objectives:
 
-* Simplify GRPC within containers
-* Ensure hard isolation of gpu resources
-* Support CUDA 12.x version drivers
-* Support CGroupv1/CGroupv2 and Host compatibility mode
-* Optimized multi card computing power and memory limitations
-* Dynamically scale core limitations based on remaining resources
-* Allow virtual memory to be used when memory limit is exceeded
-* Allow GPU virtual memory based on UVA
+- [x] Simplify GRPC within containers
+- [x] Ensure hard isolation of gpu resources
+- [x] Support CUDA 12.x version drivers
+- [x] Support CGroupv1/CGroupv2 and Host compatibility mode
+- [x] Optimized multi card computing power and memory limitations
+- [x] Dynamically scale core limitations based on remaining resources
+- [x] Allow virtual memory to be used when memory limit is exceeded 
+- [x] Allow GPU virtual memory based on UVA
+
+> Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 
 ## Building a dynamic link library
 
@@ -29,9 +27,7 @@ Simplify gRPC within containers, and supporting cgroupv2 container environments.
 ./find_new_lib.sh /lib/x86_64-linux-gnu/libcuda.so.1 /lib/x86_64-linux-gnu/libnvidia-ml.so.1
 ```
 
-## Usage
-
-environment variable
+## Environment variable
 
 * VGPU_POD_NAME: current pod name
 * VGPU_POD_NAMESPACE: current pod namespace
@@ -59,6 +55,6 @@ Use environment variable `LOGGER_LEVEL` to set the visibility of logs
 
 ## CUDA/GPU support information
 
-CUDA 12.2.x and before are supporteds
+CUDA 12.x and before are supporteds
 
 Any architecture of GPU after Kepler are supported

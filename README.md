@@ -6,8 +6,6 @@ Support multi container and multi GPU virtualization allocation and rich schedul
 
 ## Project objectives:
 
-The project forks based on [gpu-manager](https://github.com/tkestack/gpu-manager) and has undergone multiple improvements.
-
 - [x] Efficient scheduling performance
 - [x] Ensure the security of container resource isolation
 - [x] Simplify GRPC within containers
