@@ -10,6 +10,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	cgroupsystemd "github.com/opencontainers/runc/libcontainer/cgroups/systemd"
+	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/util/qos"
@@ -21,6 +22,10 @@ var (
 )
 
 type CGroupDriver string
+
+type kubeletConfig struct {
+	CgroupDriver string `yaml:"cgroupDriver"`
+}
 
 type CgroupName []string
 
@@ -45,23 +50,21 @@ func InitializeCGroupDriver(config *node.NodeConfig) {
 		case string(CGROUPFS):
 			currentCGroupDriver = CGROUPFS
 		default:
-			kubeletConfig, err := os.ReadFile(KubeletConfigPath)
+			configBytes, err := os.ReadFile(KubeletConfigPath)
 			if err != nil {
-				klog.Exitf("Read kubelet config <%s> failed: %s", KubeletConfigPath, err.Error())
+				klog.Exitf("Read kubelet config file <%s> failed: %s", KubeletConfigPath, err.Error())
 			}
-			content := strings.ToLower(string(kubeletConfig))
-			if pos := strings.LastIndex(content, "cgroupdriver:"); pos < 0 {
-				klog.Exitf("Unable to find CGroup driver in kubeletConfig file")
+			var kubelet kubeletConfig
+			if err = yaml.Unmarshal(configBytes, &kubelet); err != nil {
+				klog.Exitf("Failed to unmarshal kubelet config: %s", err.Error())
 			}
-			if strings.Contains(content, string(SYSTEMD)) {
-				currentCGroupDriver = SYSTEMD
-			} else if strings.Contains(content, string(CGROUPFS)) {
-				currentCGroupDriver = CGROUPFS
-			} else {
-				klog.Exitf("Unable to find CGroup driver in kubeletConfig file")
+			currentCGroupDriver = CGroupDriver(kubelet.CgroupDriver)
+			if currentCGroupDriver != SYSTEMD && currentCGroupDriver != CGROUPFS {
+				klog.Exitf("Invalid CGroup driver in kubelet config: %s", currentCGroupDriver)
 			}
 		}
 	})
+	klog.Infof("Current CGroup driver is %s", currentCGroupDriver)
 }
 
 func NewPodCgroupName(pod *corev1.Pod) CgroupName {

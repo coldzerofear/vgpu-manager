@@ -274,7 +274,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			cgroupFullPath := util.GetK8sPodCGroupFullPath(podCgroupPath)
 			baseCgroupPath := util.SplitK8sCGroupBasePath(cgroupFullPath)
 			if util.PathIsNotExist(baseCgroupPath) {
-				err = fmt.Errorf("unable to find k8s cgroup path")
+				err = fmt.Errorf("unable to find k8s cgroup path: %s", baseCgroupPath)
 				klog.V(3).ErrorS(err, "", "pod",
 					fmt.Sprintf("%s/%s", currentPod.Namespace, currentPod.Name))
 				return resp, err
