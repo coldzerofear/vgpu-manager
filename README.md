@@ -1,8 +1,7 @@
 # VGPU-Manager
 
-A k8s device plugin for managing and allocating vGPU devices.
-
-Support multi container and multi GPU virtualization allocation and rich scheduling strategies.
+A k8s device plugin for managing and allocating vGPU devices, 
+support multi container and multi GPU virtualization and rich scheduling strategies.
 
 ## Project objectives:
 
@@ -27,7 +26,7 @@ Support multi container and multi GPU virtualization allocation and rich schedul
 ## Prerequisite
 
 * Kubernetes v1.17+ (Install using helm chart method)
-* Docker / Containerd (other runtime not tested)
+* docker / containerd / cri-o (other container runtime not tested)
 * Nvidia Container Toolkit (Configure nvidia container runtime)
 
 ## Build
@@ -60,7 +59,9 @@ kubectl apply -f deploy/vgpu-manager-scheduler.yaml
 kubectl apply -f deploy/vgpu-manager-deviceplugin.yaml
 ```
 
-Note that the scheduler version needs to be modified according to the cluster version, Only supports scheduler versions v1.25.x and above.
+Note that the scheduler version needs to be modified according to the cluster version, 
+If the scheduler version is v1.25.x or above, you can directly modify the imageTag for use, 
+otherwise you need to modify the scheduler configuration file.
 
 ```yaml
       containers:

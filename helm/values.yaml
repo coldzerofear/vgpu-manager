@@ -89,7 +89,8 @@ devicePlugin:
   # Define container security context
   securityContext:
     # If the container encounters the following errors, try using privileged mode
-    # Failed to initialize NVML: Unknown Error
+    # - error initializing NVML: Unknown Error
+    # - error locating "libnvidia-ml.so.1
     # privileged: true
     allowPrivilegeEscalation: false
     capabilities:

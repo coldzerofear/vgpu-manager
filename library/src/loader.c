@@ -988,7 +988,7 @@ extern int get_core_limit(uint32_t index, int *limit);
 extern int get_core_soft_limit(uint32_t index, int *limit);
 extern int get_devices_uuid(char *uuids);
 extern int get_mem_oversold(uint32_t index, int *limit);
-extern int extract_container_id_v2(char *path, char *container_id, size_t container_id_size);
+extern int extract_container_id(char *path, char *container_id, size_t container_id_size);
 
 resource_data_t g_vgpu_config = {
     .driver_version = {},
@@ -1416,7 +1416,7 @@ int load_controller_configuration() {
   }
   int ret = 1;
   if (strlen(container_id) == 0) {
-    ret = extract_container_id_v2(HOST_CGROUP_PROCS_PATH, container_id, FILENAME_MAX);
+    ret = extract_container_id(HOST_CGROUP_PROCS_PATH, container_id, FILENAME_MAX);
     if (!ret) {
       LOGGER(VERBOSE, "find current container id: %s", container_id);
     }

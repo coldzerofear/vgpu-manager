@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
 
 #define CUDA_MEMORY_LIMIT_ENV "CUDA_MEM_LIMIT"
 #define CUDA_MEMORY_RATIO_ENV "CUDA_MEM_RATIO"
@@ -160,14 +161,11 @@ int is_current_cgroup(const char *file_path) {
   char buffer[128];
   char pid_str[32];
   snprintf(pid_str, sizeof(pid_str), "%d", (int)getpid());
+
   while (fgets(buffer, sizeof(buffer), file) != NULL) {
     size_t len = strlen(buffer);
     if (len > 0 && buffer[len - 1] == '\n') {
       buffer[len - 1] = '\0';
-    }
-    // Skip files with PID 0
-    if (strcmp(buffer, "0") == 0) {
-      break;
     }
     if (strcmp(buffer, pid_str) == 0) {
       ret = 1;
@@ -178,7 +176,7 @@ int is_current_cgroup(const char *file_path) {
   return ret;
 }
 
-int extract_container_id_v2(char *path, char *container_id, size_t container_id_size) {
+int is_current_container(char *path) {
   int ret = -1;
   DIR *dir;
   struct dirent *entry;
@@ -186,17 +184,46 @@ int extract_container_id_v2(char *path, char *container_id, size_t container_id_
     return ret;
   }
   while ((entry = readdir(dir)) != NULL) {
-    if (strcmp(entry->d_name, ".") == 0 ||
-        strcmp(entry->d_name, "..") == 0) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    char full_path[PATH_MAX];
+    snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+
+    if (entry->d_type == DT_DIR) {
+      ret = is_current_container(full_path);
+      if (ret == 0) {
+        break;
+      }
+    } else if (strcmp(entry->d_name, "cgroup.procs") == 0) {
+      if (is_current_cgroup(full_path)) {
+        ret = 0;
+        break;
+      }
+    }
+  }
+  closedir(dir);
+  return ret;
+}
+
+int extract_container_id(char *path, char *container_id, size_t container_id_size) {
+  int ret = -1;
+  DIR *dir;
+  struct dirent *entry;
+  if ((dir = opendir(path)) == NULL) {
+    return ret;
+  }
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
     if (entry->d_type == DT_DIR) {
-      char full_path[FILENAME_MAX];
-      snprintf(full_path, sizeof(full_path), "%s/%s/cgroup.procs", path, entry->d_name);
-      if (is_current_cgroup(full_path)) {
+      char full_path[PATH_MAX];
+      snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+      ret = is_current_container(full_path);
+      if (ret == 0) {
         strncpy(container_id, entry->d_name, container_id_size - 1);
         container_id[container_id_size - 1] = '\0';
-        ret = 0;
         break;
       }
     }
