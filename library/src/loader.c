@@ -1003,14 +1003,10 @@ resource_data_t g_vgpu_config = {
 char container_id[FILENAME_MAX] = {0};
 char driver_version[FILENAME_MAX] = "1";
 
-static void load_nvml_libraries() {
-  void *table = NULL;
-  char driver_filename[FILENAME_MAX];
-  int i;
-
-  if (real_dlsym == NULL){
-    LOGGER(WARNING, "dlsym not found before libraries load");
+void init_real_dlsym() {
+  if (real_dlsym == NULL) {
     real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+    lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
     if (real_dlsym == NULL) {
       real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
     }
@@ -1018,6 +1014,14 @@ static void load_nvml_libraries() {
       LOGGER(FATAL, "real dlsym not found");
     }
   }
+}
+
+static void load_nvml_libraries() {
+  void *table = NULL;
+  char driver_filename[FILENAME_MAX];
+  int i;
+
+  init_real_dlsym();
 
   snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX,
            driver_version);
@@ -1051,16 +1055,7 @@ static void load_cuda_single_library(int idx) {
   void *table = NULL;
   char cuda_filename[FILENAME_MAX];
 
-  if (real_dlsym == NULL){
-    LOGGER(WARNING, "dlsym not found before libraries load");
-    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
-    if (real_dlsym == NULL) {
-      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
-    }
-    if (real_dlsym == NULL) {
-      LOGGER(FATAL, "real dlsym not found");
-    }
-  }
+  init_real_dlsym();
 
   if (likely(cuda_library_entry[idx].fn_ptr)) {
     return;
@@ -1088,16 +1083,7 @@ static void load_nvml_single_library(int idx) {
   void *table = NULL;
   char driver_filename[FILENAME_MAX];
 
-  if (real_dlsym == NULL){
-    LOGGER(WARNING, "dlsym not found before libraries load");
-    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
-    if (real_dlsym == NULL) {
-      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
-    }
-    if (real_dlsym == NULL) {
-      LOGGER(FATAL, "real dlsym not found");
-    }
-  }
+  init_real_dlsym();
 
   snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX,
            driver_version);
@@ -1126,16 +1112,7 @@ void load_cuda_libraries() {
   int i = 0;
   char cuda_filename[FILENAME_MAX];
 
-  if (real_dlsym == NULL){
-    LOGGER(WARNING, "dlsym not found before libraries load");
-    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
-    if (real_dlsym == NULL) {
-      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
-    }
-    if (real_dlsym == NULL) {
-      LOGGER(FATAL, "real dlsym not found");
-    }
-  }
+  init_real_dlsym();
 
   snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s",
                 CUDA_LIBRARY_PREFIX, driver_version);
@@ -1218,15 +1195,13 @@ static void read_version_from_proc(char *version) {
   fclose(fp);
 }
 
-int strsplit(const char *s, char **dest, const char *sep)
-{
+int strsplit(const char *s, char **dest, const char *sep) {
   char *token;
   int index = 0;
   char *src = (char *)malloc(strlen(s) + 1);
   strcpy(src, s);
   token = strtok(src, sep);
-  while (token != NULL)
-  {
+  while (token != NULL) {
     dest[index] = token;
     index += 1;
     token = strtok(NULL, sep);
@@ -1346,16 +1321,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   pthread_once(&init_dlsym_flag, init_tid_dlsyms);
 
   LOGGER(DETAIL, "into dlsym %s", symbol);
-  if (real_dlsym == NULL) {
-    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
-    lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
-    if (real_dlsym == NULL) {
-      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
-    }
-    if (real_dlsym == NULL) {
-      LOGGER(FATAL, "real dlsym not found");
-    }
-  }
+  init_real_dlsym();
 
   if (handle == RTLD_NEXT) {
     int tid;
