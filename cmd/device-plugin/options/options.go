@@ -103,7 +103,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
 	pflag.StringVar(&o.NodeName, "node-name", o.NodeName, "If non-empty, will use this string as identification instead of the actual node name.")
 	pflag.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (example: cgroupfs | systemd)")
-	pflag.IntVar(&o.DeviceSplitCount, "device-split-count", o.DeviceSplitCount, "The number for NVIDIA device split.")
+	pflag.IntVar(&o.DeviceSplitCount, "device-split-count", o.DeviceSplitCount, "The maximum number of VGPU that can be split per physical GPU.")
 	pflag.Float64Var(&o.DeviceCoresScaling, "device-cores-scaling", o.DeviceCoresScaling, "The ratio for NVIDIA device cores scaling.")
 	pflag.Float64Var(&o.DeviceMemoryScaling, "device-memory-scaling", o.DeviceMemoryScaling, "The ratio for NVIDIA device memory scaling.")
 	pflag.IntVar(&o.DeviceMemoryFactor, "device-memory-factor", o.DeviceMemoryFactor, "The default gpu memory block size is 1MB.")

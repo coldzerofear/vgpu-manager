@@ -238,38 +238,6 @@ Supported policy values:
 
 > Note: If policies are configured on both Node and Pod, the configuration on Pod takes priority; otherwise, the policy on Node is used.
 
-## GPU Memory Overslod (virtual memory)
-
-When the physical memory of the GPU reaches its limit, allowing the allocation of virtual memory to achieve the effect of memory oversold.
-
-Add the environment variable `CUDA_MEM_OVERSOLD` to the container configuration to enable this feature.
-
-Example pod:
-
-```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: gpu-example
-  namespace: default
-spec:
-  schedulerName: vgpu-scheduler
-  containers:
-  - name: default
-    image: quay.io/jitesoft/ubuntu:24.04
-    command: ["sleep", "9999999"]
-    env:
-    - name: CUDA_MEM_OVERSOLD # Add environment variables to the container
-      value: "true"
-    resources:
-      limits:
-        cpu: 2
-        memory: 2Gi
-        nvidia.com/vgpu-number: 1
-```
-
-> Note: Only in the above example, defining environment variables in the env of the container is valid.
-
 ## Feature Gate
 
 The device plugin of vgpu-manager has implemented some special functions that require adding the command-line parameter `--feature-gates` to enable.
