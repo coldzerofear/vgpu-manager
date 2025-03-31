@@ -1,6 +1,7 @@
 package options
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/spf13/pflag"
 	"k8s.io/component-base/featuregate"
 	baseversion "k8s.io/component-base/version"
+	"k8s.io/klog/v2"
 )
 
 type Options struct {
@@ -69,20 +71,23 @@ func NewOptions() *Options {
 	}
 }
 
-func (o *Options) InitFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name.")
-	fs.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
-	fs.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
-	fs.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
-	fs.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
-	fs.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens.")
-	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
-	fs.BoolVar(&o.EnableTls, "enable-tls", false, "Open TLS encrypted communication for the server. (default: false)")
-	fs.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need enable tls)")
-	fs.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need enable tls)")
-	fs.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
-	fs.BoolVar(&version, "version", false, "Print version information and quit.")
-	o.FeatureGate.AddFlag(fs)
+func (o *Options) InitFlags(fs *flag.FlagSet) {
+	klog.InitFlags(fs)
+	pflag.CommandLine.SortFlags = false
+	pflag.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
+	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
+	pflag.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
+	pflag.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
+	pflag.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name.")
+	pflag.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens.")
+	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
+	pflag.BoolVar(&o.EnableTls, "enable-tls", false, "Open TLS encrypted communication for the server. (default: false)")
+	pflag.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need enable tls)")
+	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need enable tls)")
+	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
+	o.FeatureGate.AddFlag(pflag.CommandLine)
+	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
+	pflag.CommandLine.AddGoFlagSet(fs)
 	pflag.Parse()
 }
 

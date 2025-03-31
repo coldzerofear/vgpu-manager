@@ -93,7 +93,7 @@ func NewServer(opts ...Option) *server {
 		s.registry = prometheus.DefaultRegisterer.(*prometheus.Registry)
 	}
 	if s.port == nil {
-		s.port = ptr.To[int](3456)
+		s.port = ptr.To[int](8080)
 	}
 	return s
 }

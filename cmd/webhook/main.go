@@ -9,7 +9,6 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
-	"github.com/spf13/pflag"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -18,12 +17,10 @@ import (
 )
 
 func main() {
-	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
-	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
-	opt.InitFlags(pflag.CommandLine)
-	defer klog.Flush()
+	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()
+	defer klog.Flush()
 	ctrl.SetLogger(klog.NewKlogr())
 
 	go func() {

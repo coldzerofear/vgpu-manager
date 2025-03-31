@@ -17,7 +17,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"github.com/spf13/pflag"
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -28,12 +27,10 @@ import (
 )
 
 func main() {
-	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
-	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
-	opt.InitFlags(pflag.CommandLine)
-	defer klog.Flush()
+	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()
+	defer klog.Flush()
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {

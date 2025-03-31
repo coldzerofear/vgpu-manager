@@ -1,11 +1,13 @@
 package options
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
+	"k8s.io/klog/v2"
 )
 
 type Options struct {
@@ -34,15 +36,18 @@ func NewOptions() *Options {
 
 var version bool
 
-func (o *Options) InitFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name and automatically set it to vGPU pod.")
-	fs.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens.")
-	fs.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
-	fs.StringVar(&o.CertDir, "cert-dir", o.CertDir, "CertDir is the directory that contains the server key and certificate.")
-	fs.StringVar(&o.DefaultNodePolicy, "default-node-policy", "", "Default node scheduling policy. (supported values: binpack | spread)")
-	fs.StringVar(&o.DefaultDevicePolicy, "default-device-policy", "", "Default device scheduling policy. (supported values: binpack | spread)")
-	fs.StringVar(&o.DefaultDevicePolicy, "default-topology-mode", "", "Default device list topology mode. (supported values: numa | link)")
-	fs.BoolVar(&version, "version", false, "Print version information and quit.")
+func (o *Options) InitFlags(fs *flag.FlagSet) {
+	klog.InitFlags(fs)
+	pflag.CommandLine.SortFlags = false
+	pflag.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name and automatically set it to vGPU pod.")
+	pflag.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens.")
+	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
+	pflag.StringVar(&o.CertDir, "cert-dir", o.CertDir, "CertDir is the directory that contains the server key and certificate.")
+	pflag.StringVar(&o.DefaultNodePolicy, "default-node-policy", "", "Default node scheduling policy. (supported values: binpack | spread)")
+	pflag.StringVar(&o.DefaultDevicePolicy, "default-device-policy", "", "Default device scheduling policy. (supported values: binpack | spread)")
+	pflag.StringVar(&o.DefaultDevicePolicy, "default-topology-mode", "", "Default device list topology mode. (supported values: numa | link)")
+	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
+	pflag.CommandLine.AddGoFlagSet(fs)
 	pflag.Parse()
 }
 
