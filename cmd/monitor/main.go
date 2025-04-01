@@ -11,6 +11,10 @@ import (
 	"syscall"
 	"time"
 
+	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
+	// to ensure that exec-entrypoint and run can make use of them.
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
+
 	"github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
@@ -27,6 +31,7 @@ import (
 )
 
 func main() {
+	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()

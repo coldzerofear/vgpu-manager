@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/pflag"
 	"k8s.io/component-base/featuregate"
 	baseversion "k8s.io/component-base/version"
-	"k8s.io/klog/v2"
 )
 
 type Options struct {
@@ -72,7 +71,6 @@ func NewOptions() *Options {
 }
 
 func (o *Options) InitFlags(fs *flag.FlagSet) {
-	klog.InitFlags(fs)
 	pflag.CommandLine.SortFlags = false
 	pflag.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
 	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")

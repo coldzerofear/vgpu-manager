@@ -11,17 +11,19 @@ import (
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 func main() {
+	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()
 	defer klog.Flush()
-	ctrl.SetLogger(klog.NewKlogr())
+	log.SetLogger(klog.NewKlogr())
 
 	go func() {
 		if opt.PprofBindPort > 0 {
@@ -53,7 +55,7 @@ func main() {
 	}
 
 	klog.Infoln("Starting webhook server")
-	if err := server.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := server.Start(signals.SetupSignalHandler()); err != nil {
 		klog.ErrorS(err, "problem running webhook server")
 		os.Exit(1)
 	}

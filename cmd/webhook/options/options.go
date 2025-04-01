@@ -7,7 +7,6 @@ import (
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
-	"k8s.io/klog/v2"
 )
 
 type Options struct {
@@ -37,7 +36,6 @@ func NewOptions() *Options {
 var version bool
 
 func (o *Options) InitFlags(fs *flag.FlagSet) {
-	klog.InitFlags(fs)
 	pflag.CommandLine.SortFlags = false
 	pflag.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name and automatically set it to vGPU pod.")
 	pflag.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens.")
