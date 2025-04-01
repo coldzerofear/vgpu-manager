@@ -24,6 +24,7 @@ A clear and concise description of what you expected to happen.
 If applicable, add screenshots to help explain your problem.
 
 **Environment (please complete the following information):**
+ - VGPUManager Version: [e.g. v0.3.1]
  - OS Distribution: [e.g. Ubuntu 24.04.1 LTS]
  - Kernel Version: [e.g. 6.11.0-19-generic]
  - Kubernetes Version: [e.g. v1.28.2]
