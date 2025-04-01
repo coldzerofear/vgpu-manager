@@ -30,9 +30,9 @@
 #include "include/cuda-helper.h"
 #include "include/nvml-helper.h"
 
-#define INCREMENT_SCALE_FACTOR   2560    // 缩放因子
-#define MAX_UTIL_DIFF_THRESHOLD  0.5     // 触发加速调整的利用率差异比例（原硬编码的 1/2）
-#define MIN_INCREMENT            5       // 最小增量
+#define INCREMENT_SCALE_FACTOR   2560
+#define MAX_UTIL_DIFF_THRESHOLD  0.5
+#define MIN_INCREMENT            5
 #define DEVICE_BATCH_SIZE        4
 
 extern resource_data_t g_vgpu_config;
@@ -207,7 +207,10 @@ const char *nvml_error(nvmlReturn_t code) {
 
   err_fn = nvml_library_entry[NVML_ENTRY_ENUM(nvmlErrorString)].fn_ptr;
   if (unlikely(!err_fn)) {
-    LOGGER(FATAL, "can't find nvmlErrorString");
+    LOGGER(ERROR, "can't find nvmlErrorString");
+    static char fallback_error[32];
+    snprintf(fallback_error, sizeof(fallback_error), "NVML Error (code=%d)", (int)code);
+    return fallback_error;
   }
 
   return err_fn(code);
@@ -260,19 +263,19 @@ static void rate_limiter(int grids, int blocks, int device_id) {
   if (g_vgpu_config.devices[device_id].core_limit) {
     int64_t before_cuda_cores = 0;
     int64_t after_cuda_cores = 0;
-    int kernel_size = grids;
+    int64_t kernel_size = (int64_t) grids;
 
-    LOGGER(VERBOSE, "device: %d, grid: %d, blocks: %d, ", device_id , grids, blocks);
-    LOGGER(VERBOSE, "device: %d, launch kernel: %d, curr core: %ld", device_id, kernel_size, g_cur_cuda_cores[device_id]);
+    LOGGER(VERBOSE, "device: %d, grid: %d, blocks: %d", device_id , grids, blocks);
+    LOGGER(VERBOSE, "device: %d, launch kernel: %ld, curr core: %ld", device_id, kernel_size, g_cur_cuda_cores[device_id]);
     do {
     CHECK:
       before_cuda_cores = g_cur_cuda_cores[device_id];
-      LOGGER(DETAIL, "device: %d, current core: %ld", device_id, g_cur_cuda_cores[device_id]);
+      LOGGER(DETAIL, "device: %d, current core: %ld", device_id, before_cuda_cores);
       if (before_cuda_cores < 0) {
         nanosleep(&g_cycle, NULL);
         goto CHECK;
       }
-      after_cuda_cores = before_cuda_cores - (int64_t)kernel_size;
+      after_cuda_cores = before_cuda_cores - kernel_size;
     } while (!CAS(&g_cur_cuda_cores[device_id], before_cuda_cores, after_cuda_cores));
   }
 }
@@ -491,8 +494,7 @@ static void initialization() {
 
 int split_str(char *line, char *key, char *value, char d) {
   int index = 0;
-  for (index = 0; index < strlen(line) && line[index] != d; index++){
-  }
+  for (index = 0; index < strlen(line) && line[index] != d; index++) {}
 
   if (index == strlen(line)){
     key[0] = '\0';
@@ -502,51 +504,49 @@ int split_str(char *line, char *key, char *value, char d) {
 
   int start = 0, i = 0;
   // trim head
-  for (; start < index && (line[start] == ' ' || line[start] == '\t'); start++){
-  }
+  for (; start < index && (line[start] == ' ' || line[start] == '\t'); start++) {}
 
   for (i = 0; start < index; i++, start++) {
     key[i] = line[start];
   }
   // trim tail
-  for (; i > 0 && (key[i - 1] == '\0' || key[i - 1] == '\n' || key[i - 1] == '\t'); i--){
-  }
+  for (; i > 0 && (key[i - 1] == '\0' || key[i - 1] == '\n' || key[i - 1] == '\t'); i--) {}
+
   key[i] = '\0';
 
   start = index + 1;
   i = 0;
 
   // trim head
-  for (; start < strlen(line) && (line[start] == ' ' || line[start] == '\t'); start++){
-  }
+  for (; start < strlen(line) && (line[start] == ' ' || line[start] == '\t'); start++) {}
 
   for (i = 0; start < strlen(line); i++, start++) {
     value[i] = line[start];
   }
   // trim tail
-  for (; i > 0 && (value[i - 1] == '\0' || value[i - 1] == '\n' || value[i - 1] == '\t'); i--){
-  }
+  for (; i > 0 && (value[i - 1] == '\0' || value[i - 1] == '\n' || value[i - 1] == '\t'); i--) {}
+
   value[i] = '\0';
   return 0;
 }
 
 
-int read_cgroup(char *pidpath, char *cgroup_key, char *cgroup_value) {
-  FILE *f = fopen(pidpath, "rb");
+int read_cgroup(char *pid_path, char *cgroup_key, char *cgroup_value) {
+  FILE *f = fopen(pid_path, "rb");
   if (f == NULL) {
-    //LOGGER(VERBOSE, "read file %s failed: %s\n", pidpath, strerror(errno));
     return 1;
   }
   char buff[255];
   while (fgets(buff, 255, f)) {
     int index = 0;
-    for (; index < strlen(buff) && buff[index] != ':'; index++) {
+    for (; index < strlen(buff) && buff[index] != ':'; index++) {}
+    if (index == strlen(buff)) {
+      continue;
     }
-    if (index == strlen(buff))
-      continue;
     char key[128], value[128];
-    if (split_str(&buff[index + 1], key, value, ':') != 0)
+    if (split_str(&buff[index + 1], key, value, ':') != 0) {
       continue;
+    }
     if (strcmp(key, cgroup_key) == 0) {
       strcpy(cgroup_value, value);
       fclose(f);
@@ -566,12 +566,11 @@ int check_in_container() {
     }
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        has_entries = 1;
-        break; 
+      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+        continue;
+      }
+      has_entries = 1;
+      break;
     }
     closedir(dir);
   }
@@ -582,14 +581,13 @@ int check_container_pid(unsigned int pid) {
   if (pid == 0) {
     goto DONE;
   }
-  char pidpath[128] = "";
-  sprintf(pidpath, HOST_CGROUP_PID_PATH, pid);
+  char pid_path[128] = "";
+  sprintf(pid_path, HOST_CGROUP_PID_PATH, pid);
 
   char container_cg[256];
   char process_cg[256];
 
-  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", container_cg)
-      && !read_cgroup(pidpath, "memory", process_cg)) {
+  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", container_cg) && !read_cgroup(pid_path, "memory", process_cg)) {
     LOGGER(DETAIL, "\ncontainer cg: %s\nprocess cg: %s", container_cg, process_cg);
     if (strstr(process_cg, container_cg) != NULL) {
       LOGGER(VERBOSE, "cgroup match: %s", process_cg);
@@ -605,14 +603,14 @@ int check_container_pid_v2(unsigned int pid) {
   if (pid == 0) {
     goto DONE;
   }
-  char pidpath[128] = "";
-  sprintf(pidpath, HOST_CGROUP_PID_PATH, pid);
-  if (check_file_exist(pidpath)) {
-     goto DONE;
+  char pid_path[128] = "";
+  sprintf(pid_path, HOST_CGROUP_PID_PATH, pid);
+  if (check_file_exist(pid_path)) {
+    goto DONE;
   }
-  FILE *f = fopen(pidpath, "rb");
+  FILE *f = fopen(pid_path, "rb");
   if (f == NULL) {
-    LOGGER(VERBOSE, "read file %s failed: %s\n", pidpath, strerror(errno));
+    LOGGER(VERBOSE, "read file %s failed: %s\n", pid_path, strerror(errno));
     goto DONE;
   }
   char buff[FILENAME_MAX];
@@ -751,13 +749,13 @@ static void get_used_gpu_utilization(void *arg, int device_id, nvmlDevice_t dev)
   int i;
 
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
-      ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
                              dev, &running_processes, pids_on_device);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
-      ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
                              dev, &running_processes, pids_on_device);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
-      ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
                              dev, &running_processes, pids_on_device);
   } else {
     ret = NVML_ERROR_FUNCTION_NOT_FOUND;
@@ -913,8 +911,8 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
   CUresult ret;
   ret = _cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, symbolStatus);
   if (ret == CUDA_SUCCESS && strcmp(symbol,"cuGetProcAddress") == 0) {
-      // Compatible with CUDA 12
-      *pfn = _cuGetProcAddress_v2;
+    // Compatible with CUDA 12
+    *pfn = _cuGetProcAddress_v2;
   }
   return ret;
 }

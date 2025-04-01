@@ -2924,12 +2924,25 @@ CUresult cuStreamBeginCapture(CUstream hStream, CUstreamCaptureMode mode) {
   return _cuStreamBeginCapture(hStream, mode);
 }
 
+CUresult _cuStreamBeginCapture_ptsz(CUstream hStream, CUstreamCaptureMode mode) {
+  CUresult ret;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuStreamBeginCapture_v2_ptsz))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCapture_v2_ptsz,
+                                                        hStream, mode);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCapture_ptsz,
+                                                        hStream, mode);
+  }
+  return ret;
+}
+
+
 CUresult cuStreamBeginCapture_v2_ptsz(CUstream hStream, CUstreamCaptureMode mode) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCapture_v2_ptsz, hStream, mode);
+  return _cuStreamBeginCapture_ptsz(hStream, mode);
 }
 
 CUresult cuStreamBeginCapture_ptsz(CUstream hStream, CUstreamCaptureMode mode) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamBeginCapture_ptsz, hStream, mode);
+  return _cuStreamBeginCapture_ptsz(hStream, mode);
 }
 
 CUresult _cuStreamGetCaptureInfo(CUstream hStream,
@@ -2958,18 +2971,30 @@ CUresult cuStreamGetCaptureInfo(CUstream hStream,
   return _cuStreamGetCaptureInfo(hStream, captureStatus, id);
 }
 
+CUresult _cuStreamGetCaptureInfo_ptsz(CUstream hStream,
+                                     CUstreamCaptureStatus *captureStatus,
+                                     cuuint64_t *id) {
+  CUresult ret;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuStreamGetCaptureInfo_v2_ptsz))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCaptureInfo_v2_ptsz,
+                           hStream, captureStatus, id);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCaptureInfo_ptsz,
+                           hStream, captureStatus, id);
+  }
+  return ret;
+}
+
 CUresult cuStreamGetCaptureInfo_v2_ptsz(CUstream hStream,
                                         CUstreamCaptureStatus *captureStatus,
                                         cuuint64_t *id) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCaptureInfo_v2_ptsz,
-                         hStream, captureStatus, id);
+  return _cuStreamGetCaptureInfo_ptsz(hStream, captureStatus, id);
 }
 
 CUresult cuStreamGetCaptureInfo_ptsz(CUstream hStream,
                                      CUstreamCaptureStatus *captureStatus,
                                      cuuint64_t *id) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCaptureInfo_ptsz,
-                         hStream, captureStatus, id);
+  return _cuStreamGetCaptureInfo_ptsz(hStream, captureStatus, id);
 }
 
 CUresult cuThreadExchangeStreamCaptureMode(CUstreamCaptureMode *mode) {

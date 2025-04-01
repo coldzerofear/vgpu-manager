@@ -60,15 +60,15 @@ func (p PciInfo) CPUAffinity() *uint {
 
 // NumaNode returns the numa node associates with a PCI device.
 // If numa is unsupported, -1 is returned.
-func (p PciInfo) NumaNode() int64 {
+func (p PciInfo) NumaNode() int32 {
 	// Read the numa_node file associated with the PCI Device Info
 	b, err := os.ReadFile(fmt.Sprintf("/sys/bus/pci/devices/%s/numa_node", p.BusID()))
 	if err != nil {
 		return -1
 	}
-	node, err := strconv.ParseInt(string(bytes.TrimSpace(b)), 10, 64)
+	node, err := strconv.ParseInt(string(bytes.TrimSpace(b)), 10, 32)
 	if err != nil {
 		return -1
 	}
-	return node
+	return int32(node)
 }
