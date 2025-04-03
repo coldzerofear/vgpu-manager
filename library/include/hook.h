@@ -67,16 +67,16 @@ extern "C" {
 
 #define PID_SELF_CGROUP_PATH "/proc/self/cgroup"
 
-#define HOST_PROC_PATH (VGPU_MANAGER_PATH "/host_proc")
+#define HOST_PROC_PATH (VGPU_MANAGER_PATH "/.host_proc")
 
-#define HOST_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/host_proc/%d/cgroup")
+#define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%d/cgroup")
 
-#define HOST_CGROUP_PROCS_PATH (VGPU_MANAGER_PATH "/host_cgroup")
+#define HOST_CGROUP_PATH (VGPU_MANAGER_PATH "/.host_cgroup")
 
 /**
  * Proc file path for driver version
  */
-#define DRIVER_VERSION_PROC_PATH "/proc/driver/nvidia/version"
+#define DRIVER_VERSION_PATH "/proc/driver/nvidia/version"
 
 /**
  * Driver regular expression pattern

@@ -101,8 +101,8 @@ const (
 	HostProcDirectoryPath    = "/proc"
 	ContManagerDirectoryPath = "/etc/vgpu-manager"
 	ContConfigDirectoryPath  = ContManagerDirectoryPath + "/config"
-	ContProcDirectoryPath    = ContManagerDirectoryPath + "/host_proc"
-	ContCGroupDirectoryPath  = ContManagerDirectoryPath + "/host_cgroup"
+	ContProcDirectoryPath    = ContManagerDirectoryPath + "/.host_proc"
+	ContCGroupDirectoryPath  = ContManagerDirectoryPath + "/.host_cgroup"
 
 	LdPreLoadFileName       = "ld.so.preload"
 	ContPreLoadFilePath     = "/etc/" + LdPreLoadFileName

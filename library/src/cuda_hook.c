@@ -582,7 +582,7 @@ int check_container_pid(unsigned int pid) {
     goto DONE;
   }
   char pid_path[128] = "";
-  sprintf(pid_path, HOST_CGROUP_PID_PATH, pid);
+  sprintf(pid_path, HOST_PROC_CGROUP_PID_PATH, pid);
 
   char container_cg[256];
   char process_cg[256];
@@ -604,7 +604,7 @@ int check_container_pid_v2(unsigned int pid) {
     goto DONE;
   }
   char pid_path[128] = "";
-  sprintf(pid_path, HOST_CGROUP_PID_PATH, pid);
+  sprintf(pid_path, HOST_PROC_CGROUP_PID_PATH, pid);
   if (check_file_exist(pid_path)) {
     goto DONE;
   }

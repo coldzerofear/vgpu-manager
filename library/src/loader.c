@@ -1179,10 +1179,9 @@ static void read_version_from_proc(char *version) {
   char *line = NULL;
   size_t len = 0;
 
-  FILE *fp = fopen(DRIVER_VERSION_PROC_PATH, "r");
+  FILE *fp = fopen(DRIVER_VERSION_PATH, "r");
   if (fp == NULL) {
-    LOGGER(VERBOSE, "can't open %s, error %s", DRIVER_VERSION_PROC_PATH,
-           strerror(errno));
+    LOGGER(VERBOSE, "can't open %s, error %s", DRIVER_VERSION_PATH, strerror(errno));
     return;
   }
 
@@ -1382,7 +1381,7 @@ int load_controller_configuration() {
   }
   int ret = 1;
   if (strlen(container_id) == 0) {
-    ret = extract_container_id(HOST_CGROUP_PROCS_PATH, container_id, FILENAME_MAX);
+    ret = extract_container_id(HOST_CGROUP_PATH, container_id, FILENAME_MAX);
     if (!ret) {
       LOGGER(VERBOSE, "find current container id: %s", container_id);
     }
