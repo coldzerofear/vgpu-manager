@@ -86,4 +86,23 @@ Full image name with tag
 {{- .Values.image -}}:{{- .Values.imageTag | default $tag -}}
 {{- end }}
 
+{{/*
+    Resolve the image tag for kubeScheduler.
+*/}}
+{{- define "kubeSchedulerImageTag" -}}
+{{- if .Values.scheduler.kubeScheduler.imageTag }}
+{{- .Values.scheduler.kubeScheduler.imageTag | trim -}}
+{{- else }}
+{{- include "defaultKubeVersion" . | trim -}}
+{{- end }}
+{{- end }}
 
+{{/*
+    Return the stripped Kubernetes version string by removing extra parts after semantic version number.
+    v1.31.1+k3s1 -> v1.31.1
+    v1.30.8-eks-2d5f260 -> v1.30.8
+    v1.31.1 -> v1.31.1
+*/}}
+{{- define "defaultKubeVersion" -}}
+{{ regexReplaceAll "^(v[0-9]+\\.[0-9]+\\.[0-9]+)(.*)$" .Capabilities.KubeVersion.Version "$1" }}
+{{- end -}}

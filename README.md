@@ -83,7 +83,7 @@ kubectl apply -f deploy/vgpu-manager-webhook.yaml
 
 Modify the configuration in values.yaml according to the node environment and requirements.
 
-If you want to install the webhook service component, please ensure that the cluster has installed `cert-manager`, then modify file helm/values.yaml `values.webhook.enable=true`.
+If you want to install the webhook service component, please ensure that the cluster has installed `cert-manager`, then modify file helm/values.yaml `values.webhook.enabled=true`.
 
 Use the following command for deployment
 

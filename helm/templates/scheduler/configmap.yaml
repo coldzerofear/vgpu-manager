@@ -1,4 +1,4 @@
-{{- if .Values.scheduler.enable -}}
+{{- if .Values.scheduler.enabled -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,9 +8,9 @@ metadata:
     app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
     {{- include "vgpu-manager.labels" . | nindent 4 }}
 data:
-  {{- if ge (.Values.scheduler.kubeScheduler.imageTag | substr 3 5 | atoi) 22 }}
+  {{- if ge (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 22 }}
   config.yaml: |
-    {{- if gt (.Values.scheduler.kubeScheduler.imageTag | substr 3 5 | atoi) 25 }}
+    {{- if gt (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 25}}
     apiVersion: kubescheduler.config.k8s.io/v1
     {{- else }}
     apiVersion: kubescheduler.config.k8s.io/v1beta2

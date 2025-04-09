@@ -1,4 +1,4 @@
-{{- if .Values.scheduler.enable -}}
+{{- if .Values.scheduler.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,11 +39,11 @@ spec:
       {{- end }}
       containers:
         - name: kube-scheduler
-          image: {{ .Values.scheduler.kubeScheduler.image }}:{{ .Values.scheduler.kubeScheduler.imageTag }}
+          image: {{ .Values.scheduler.kubeScheduler.image }}:{{ include "kubeSchedulerImageTag" . }}
           imagePullPolicy: {{ .Values.scheduler.kubeScheduler.imagePullPolicy | quote }}
           command:
             - kube-scheduler
-            {{- if ge (.Values.scheduler.kubeScheduler.imageTag | substr 3 5 | atoi) 22 }}
+            {{- if ge (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 22 }}
             - --config=/config/config.yaml
             {{- else }}
             - --policy-config-file=/config/config.json
@@ -52,8 +52,9 @@ spec:
             - --leader-elect=true
             - --leader-elect-resource-name={{ .Values.scheduler.schedulerName }}
             - --leader-elect-resource-namespace={{ .Release.Namespace }}
-            - --feature-gates={{ .Values.scheduler.kubeScheduler.commands.featureGates }}
-            - --v={{ .Values.scheduler.kubeScheduler.commands.logLevel }}
+            {{- range .Values.scheduler.kubeScheduler.args }}
+            - {{ . }}
+            {{- end }}
           resources: {{ toYaml .Values.scheduler.kubeScheduler.resources | nindent 12 }}
           volumeMounts:
             - name: scheduler-config

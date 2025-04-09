@@ -1,4 +1,4 @@
-{{- if .Values.webhook.enable -}}
+{{- if .Values.webhook.enabled -}}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:

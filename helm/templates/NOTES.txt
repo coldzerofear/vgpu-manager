@@ -1,4 +1,4 @@
-{{- if .Values.scheduler.enable }}
+{{- if .Values.scheduler.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed successfully!
   - replica  count:  {{ .Values.scheduler.replicas }}
   - scheduler name:  {{ .Values.scheduler.schedulerName }}
@@ -8,7 +8,7 @@ vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed succe
   - logger   level:  {{ .Values.scheduler.schedulerExtender.commands.logLevel }}
 {{- end }}
 
-{{- if .Values.devicePlugin.enable }}
+{{- if .Values.devicePlugin.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} device-plugin has been deployed successfully!
 device-plugin:
   - memory  factor:  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor }}
@@ -21,7 +21,7 @@ device-monitor:
   - logger   level:  {{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
 {{- end }}
 
-{{- if .Values.webhook.enable }}
+{{- if .Values.webhook.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} webhook component has been deployed successfully!
   - replica  count:  {{ .Values.webhook.replicas }}
   - server    port:  {{ .Values.webhook.commands.serverBindPort }}

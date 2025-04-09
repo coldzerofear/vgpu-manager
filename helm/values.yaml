@@ -17,7 +17,7 @@ imagePullPolicy: IfNotPresent
 # Deployment configuration of the scheduler section
 scheduler:
   # Should the scheduler be deployed? (default: true)
-  enable: true
+  enabled: true
   # pod labels
   labels: {}
   # pod annotations
@@ -31,12 +31,12 @@ scheduler:
   terminationGracePeriodSeconds: 30
   kubeScheduler:
     image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler
-    # Warning: Change to your own cluster deployment version
-    imageTag: "v1.28.15"
+    # Warning: Change to your own cluster version
+    imageTag: ""
     imagePullPolicy: IfNotPresent
-    commands:
-      featureGates: ""
-      logLevel: 3
+    args:
+      - --feature-gates=
+      - --v=3
     resources:
       requests:
         cpu: 100m
@@ -62,7 +62,7 @@ scheduler:
 # Deployment configuration of the deviceplugin section
 devicePlugin:
   # Should the deviceplugin be deployed? (default: true)
-  enable: true
+  enabled: true
   # pod labels
   labels: {}
   # pod annotations
@@ -167,7 +167,7 @@ devicePlugin:
 # Installing the Webhook service requires installing the Cert-Manager component in advance to provide a self signed certificate for the service.
 webhook:
   # Should the webhook be deployed? (default: false)
-  enable: false
+  enabled: false
   # Certificate validity period. (default: one year)
   certDuration: 8760h
   # The last refresh time of the certificate. (default: 360h)
