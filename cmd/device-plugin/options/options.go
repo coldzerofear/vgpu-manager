@@ -30,6 +30,7 @@ type Options struct {
 	PprofBindPort       int
 	GDSEnabled          bool
 	MOFEDEnabled        bool
+	OpenKernelModules   bool
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -111,6 +112,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
 	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")
 	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
+	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

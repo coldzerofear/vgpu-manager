@@ -241,8 +241,8 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		deviceIdStr := strings.Join(deviceIds, ",")
 		envMap[util.GPUDeviceUuidEnv] = deviceIdStr
 		envMap[util.NvidiaVisibleDevicesEnv] = deviceIdStr
-		for devFilePath, ok := range deviceFileMountConfig {
-			if !ok || util.PathIsNotExist(devFilePath) {
+		for devFilePath, enabled := range deviceFileMountConfig {
+			if !enabled || util.PathIsNotExist(devFilePath) {
 				continue
 			}
 			devices = append(devices, &pluginapi.DeviceSpec{
@@ -264,27 +264,39 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			HostPath:      HostVGPUControlFilePath,
 			ReadOnly:      true,
 		})
-		// The cgroup path that requires additional pod mounting in the cgroupv2 container environment.
-		if cgroups.IsCgroup2UnifiedMode() {
-			podCgroupPath, err = util.GetK8sPodCGroupPath(currentPod)
-			if err != nil {
-				klog.Errorln(err.Error())
-				return resp, err
-			}
-			cgroupFullPath := util.GetK8sPodCGroupFullPath(podCgroupPath)
-			baseCgroupPath := util.SplitK8sCGroupBasePath(cgroupFullPath)
-			if util.PathIsNotExist(baseCgroupPath) {
-				err = fmt.Errorf("unable to find k8s cgroup path: %s", baseCgroupPath)
-				klog.V(3).ErrorS(err, "", "pod",
-					fmt.Sprintf("%s/%s", currentPod.Namespace, currentPod.Name))
-				return resp, err
-			}
-			mounts = append(mounts, &pluginapi.Mount{
-				ContainerPath: ContCGroupDirectoryPath,
-				HostPath:      cgroupFullPath,
-				ReadOnly:      true,
-			})
+
+		podCgroupPath, err = util.GetK8sPodCGroupPath(currentPod)
+		if err != nil {
+			klog.Errorln(err.Error())
+			return resp, err
 		}
+		var hostCGroupFullPath string
+		switch {
+		case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
+			hostCGroupFullPath = util.GetK8sPodCGroupFullPath(podCgroupPath)
+		case cgroups.IsCgroup2HybridMode():
+			hostCGroupFullPath = util.GetK8sPodDeviceCGroupFullPath(podCgroupPath)
+			baseCgroupPath := util.SplitK8sCGroupBasePath(hostCGroupFullPath)
+			// If the device controller does not exist, use the path of cgroupv2.
+			if util.PathIsNotExist(baseCgroupPath) {
+				klog.V(3).Infof("try find k8s cgroup path failed: %s", baseCgroupPath)
+				hostCGroupFullPath = util.GetK8sPodCGroupFullPath(podCgroupPath)
+			}
+		default: // cgroupv1
+			hostCGroupFullPath = util.GetK8sPodDeviceCGroupFullPath(podCgroupPath)
+		}
+		baseCgroupPath := util.SplitK8sCGroupBasePath(hostCGroupFullPath)
+		if util.PathIsNotExist(baseCgroupPath) {
+			err = fmt.Errorf("unable to find k8s cgroup path: %s", baseCgroupPath)
+			klog.V(3).ErrorS(err, "", "pod",
+				fmt.Sprintf("%s/%s", currentPod.Namespace, currentPod.Name))
+			return resp, err
+		}
+		mounts = append(mounts, &pluginapi.Mount{
+			ContainerPath: ContCGroupDirectoryPath,
+			HostPath:      hostCGroupFullPath,
+			ReadOnly:      true,
+		})
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>
 		contManagerDirectory := GetContManagerDirectoryPath(currentPod.UID, assignDevs.Name)
 		_ = os.MkdirAll(contManagerDirectory, 0777)

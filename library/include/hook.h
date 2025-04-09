@@ -73,6 +73,10 @@ extern "C" {
 
 #define HOST_CGROUP_PATH (VGPU_MANAGER_PATH "/.host_cgroup")
 
+#define HOST_CGROUP_PID_BASE_PATH (VGPU_MANAGER_PATH "/.host_cgroup/%s")
+
+#define CGROUP_PROCS_FILE "cgroup.procs"
+
 /**
  * Proc file path for driver version
  */
@@ -147,6 +151,7 @@ typedef struct {
   char container_name[64];
   device_t devices[MAX_DEVICE_COUNT];
   int device_count;
+  int compatibility_mode;
 } __attribute__((packed, aligned(8))) resource_data_t;
 
 /**
@@ -173,6 +178,13 @@ typedef struct {
 } tid_dlsym;
 
 #define DLMAP_SIZE 100
+
+typedef enum VGPU_COMPATIBILITY_MODE_enum {
+	HOST_COMPATIBILITY_MODE        = 0,
+	CGROUPV1_COMPATIBILITY_MODE    = 1,
+	CGROUPV2_COMPATIBILITY_MODE    = 2,
+	OPEN_KERNEL_COMPATIBILITY_MODE = 100
+} VGPU_COMPATIBILITY_MODE;
 
 extern void* _dl_sym(void*, const char*, void*);
 

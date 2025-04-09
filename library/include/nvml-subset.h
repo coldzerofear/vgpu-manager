@@ -73,6 +73,9 @@ extern "C" {
  */
 #define NVML_MAX_PHYSICAL_BRIDGE (128)
 
+#define NVML_STRUCT_VERSION(data, ver) (unsigned int)(sizeof(nvml ## data ## _v ## ver ## _t) | \
+                                                      (ver << 24U))
+
 typedef struct nvmlDevice_st *nvmlDevice_t;
 
 typedef struct nvmlProcessInfo_st {
@@ -1631,13 +1634,51 @@ typedef struct nvmlComputeInstance_st *nvmlComputeInstance_t;
 
 typedef unsigned int nvmlDeviceArchitecture_t;
 
-typedef struct nvmlDeviceAttributes_st {
-  unsigned int multiprocessorCount;   //!< Streaming Multiprocessor count
-  unsigned int sharedCopyEngineCount; //!< Shared Copy Engine count
-  unsigned int sharedDecoderCount;    //!< Shared Decoder Engine count
-  unsigned int sharedEncoderCount;    //!< Shared Encoder Engine count
-  unsigned int sharedJpegCount;       //!< Shared JPEG Engine count
-  unsigned int sharedOfaCount;        //!< Shared OFA Engine count
+/**
+ * Information about running process on the GPU with protected memory
+ */
+typedef struct
+{
+    unsigned int        pid;                      //!< Process ID
+    unsigned long long  usedGpuMemory;            //!< Amount of used GPU memory in bytes.
+                                                  //! Under WDDM, \ref NVML_VALUE_NOT_AVAILABLE is always reported
+                                                  //! because Windows KMD manages all the memory and not the NVIDIA driver
+    unsigned int        gpuInstanceId;            //!< If MIG is enabled, stores a valid GPU instance ID. gpuInstanceId is
+                                                  //  set to 0xFFFFFFFF otherwise.
+    unsigned int        computeInstanceId;        //!< If MIG is enabled, stores a valid compute instance ID. computeInstanceId
+                                                  //  is set to 0xFFFFFFFF otherwise.
+    unsigned long long  usedGpuCcProtectedMemory; //!< Amount of used GPU conf compute protected memory in bytes.
+} nvmlProcessDetail_v1_t;
+
+/**
+ * Information about all running processes on the GPU for the given mode
+ */
+typedef struct
+{
+    unsigned int           version;             //!< Struct version, MUST be nvmlProcessDetailList_v1
+    unsigned int           mode;                //!< Process mode(Compute/Graphics/MPSCompute)
+    unsigned int           numProcArrayEntries; //!< Number of process entries in procArray
+    nvmlProcessDetail_v1_t *procArray;          //!< Process array
+} nvmlProcessDetailList_v1_t;
+
+typedef nvmlProcessDetailList_v1_t nvmlProcessDetailList_t;
+
+/**
+ * nvmlProcessDetailList version
+ */
+#define nvmlProcessDetailList_v1 NVML_STRUCT_VERSION(ProcessDetailList, 1)
+
+typedef struct nvmlDeviceAttributes_st
+{
+    unsigned int multiprocessorCount;       //!< Streaming Multiprocessor count
+    unsigned int sharedCopyEngineCount;     //!< Shared Copy Engine count
+    unsigned int sharedDecoderCount;        //!< Shared Decoder Engine count
+    unsigned int sharedEncoderCount;        //!< Shared Encoder Engine count
+    unsigned int sharedJpegCount;           //!< Shared JPEG Engine count
+    unsigned int sharedOfaCount;            //!< Shared OFA Engine count
+    unsigned int gpuInstanceSliceCount;     //!< GPU instance slice count
+    unsigned int computeInstanceSliceCount; //!< Compute instance slice count
+    unsigned long long memorySizeMB;        //!< Device memory size (in MiB)
 } nvmlDeviceAttributes_t;
 
 typedef unsigned int nvmlAffinityScope_t;

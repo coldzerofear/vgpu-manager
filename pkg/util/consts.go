@@ -73,6 +73,8 @@ const (
 	CudaMemoryOversoldEnv = "CUDA_MEM_OVERSOLD"
 	// GPU_DEVICES_UUID gpu uuid list
 	GPUDeviceUuidEnv = "GPU_DEVICES_UUID"
+	// CompatibilityModeEnv Indicate the compatibility mode of the environment
+	CompatibilityModeEnv = "ENV_COMPATIBILITY_MODE"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"

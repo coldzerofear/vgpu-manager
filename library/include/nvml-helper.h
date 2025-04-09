@@ -637,6 +637,7 @@ typedef enum {
   NVML_ENTRY_ENUM(nvmlDeviceGetConfComputeMemSizeInfo),
   NVML_ENTRY_ENUM(nvmlDeviceGetConfComputeGpuCertificate),
   NVML_ENTRY_ENUM(nvmlDeviceGetConfComputeGpuAttestationReport),
+  NVML_ENTRY_ENUM(nvmlDeviceGetRunningProcessDetailList),
   NVML_ENTRY_END
 } nvml_entry_enum_t;
 

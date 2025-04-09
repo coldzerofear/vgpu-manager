@@ -7,11 +7,12 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 - [x] Simplify GRPC within containers
 - [x] Ensure hard isolation of gpu resources
 - [x] Support CUDA 12.x version drivers
-- [x] Support CGroupv1/CGroupv2 and Host compatibility mode
+- [x] Support cgroupv1/cgroupv2 and Host compatibility mode
 - [x] Optimized multi card computing power and memory limitations
 - [x] Dynamically scale core limitations based on remaining resources
 - [x] Allow virtual memory to be used when memory limit is exceeded 
 - [x] Allow GPU virtual memory based on UVA
+- [ ] support open-gpu-kernel-modules driver compatibility mode
 
 > Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 
@@ -39,6 +40,7 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 * CUDA_CORE_SOFT_LIMIT_<index>: gpu core soft limit
 * CUDA_MEM_OVERSOLD_<index>: gpu memory oversold switch
 * GPU_DEVICES_UUID: gpu device uuids
+* ENV_COMPATIBILITY_MODE: environment compatibility mode
 
 ## Log level
 

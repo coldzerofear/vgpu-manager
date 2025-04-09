@@ -137,10 +137,9 @@ CUresult vmm_free(void *ptr, size_t size, int device_id) {
     return CUDA_SUCCESS;
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc != 3) {
-        printf("wrong arguments: mem_managed_tool device_index size(MB)\n");
+        printf("wrong arguments: %s [device_index] [size(MB)]\n", argv[0]);
         return -1;
     }
     int device_id = str2int(argv[1]);

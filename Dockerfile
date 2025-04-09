@@ -89,5 +89,6 @@ COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu
 COPY --from=builder /vgpu-controller/build/mem_occupy_tool /installed/mem_occupy_tool
 COPY --from=builder /vgpu-controller/build/mem_managed_tool /installed/mem_managed_tool
 COPY --from=builder /vgpu-controller/build/mem_view_tool /installed/mem_view_tool
+COPY --from=builder /vgpu-controller/build/extract_container_pids /installed/extract_container_pids
 
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload

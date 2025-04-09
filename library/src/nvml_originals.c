@@ -1926,3 +1926,9 @@ nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount) {
 nvmlReturn_t nvmlDeviceGetCount(unsigned int *deviceCount) {
   return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetCount, deviceCount);
 }
+
+nvmlReturn_t nvmlDeviceGetRunningProcessDetailList(nvmlDevice_t device,
+                                        nvmlProcessDetailList_t *plist) {
+  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetRunningProcessDetailList,
+                         device, plist);
+}

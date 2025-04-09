@@ -962,6 +962,7 @@ entry_t nvml_library_entry[] = {
     {.name = "nvmlDeviceGetConfComputeMemSizeInfo"},
     {.name = "nvmlDeviceGetConfComputeGpuCertificate"},
     {.name = "nvmlDeviceGetConfComputeGpuAttestationReport"},
+    {.name = "nvmlDeviceGetRunningProcessDetailList"},
 };
 
 static void UNUSED bug_on() {
@@ -982,6 +983,7 @@ extern void* _dl_sym(void*, const char*, void*);
 fp_dlsym real_dlsym = NULL;
 void *lib_control;
 
+extern int get_compatibility_mode(int *mode);
 extern int get_mem_ratio(uint32_t index, double *ratio);
 extern int get_mem_limit(uint32_t index, size_t *limit);
 extern int get_core_limit(uint32_t index, int *limit);
@@ -998,6 +1000,7 @@ resource_data_t g_vgpu_config = {
     .container_name = "",
     .devices = {},
     .device_count = 0,
+    .compatibility_mode = 0,
 };
 
 char container_id[FILENAME_MAX] = {0};
@@ -1239,6 +1242,7 @@ int read_file_to_config_path(const char* filename, resource_data_t* data) {
   LOGGER(VERBOSE, "pod uid          : %s", g_vgpu_config.pod_uid);
   LOGGER(VERBOSE, "container name   : %s", g_vgpu_config.container_name);
   LOGGER(VERBOSE, "gpu count        : %d", g_vgpu_config.device_count);
+  LOGGER(VERBOSE, "CompatibilityMode: %d", g_vgpu_config.compatibility_mode);
   for (int i = 0; i < g_vgpu_config.device_count; i++) {
     LOGGER(VERBOSE, "---------------------------GPU %d---------------------------", i);
     LOGGER(VERBOSE, "gpu uuid         : %s", g_vgpu_config.devices[i].uuid);
@@ -1298,10 +1302,10 @@ int check_tid_dlsyms(int tid, void *pointer){
   int i;
   int cursor = (tid_dlsym_count < DLMAP_SIZE) ? tid_dlsym_count : DLMAP_SIZE;
   for (i = cursor-1; i >= 0; i--) {
-      if (tid_dlsyms[i].tid == tid && 
-          tid_dlsyms[i].pointer == pointer) {
-        return 1; 
-      }
+    if (tid_dlsyms[i].tid == tid &&
+      tid_dlsyms[i].pointer == pointer) {
+      return 1;
+    }
   }
   cursor = tid_dlsym_count % DLMAP_SIZE;
   tid_dlsyms[cursor].tid = tid;
@@ -1386,10 +1390,16 @@ int load_controller_configuration() {
       LOGGER(VERBOSE, "find current container id: %s", container_id);
     }
   }
+
   ret = read_file_to_config_path(CONTROLLER_CONFIG_FILE_PATH, &g_vgpu_config);
   if (likely(ret==0)) {
     init_config_flag = 1;
     goto DONE;
+  }
+
+  ret = get_compatibility_mode(&g_vgpu_config.compatibility_mode);
+  if (unlikely(ret)) {
+    LOGGER(WARNING, "not defined env compatibility mode");
   }
   char *pod_name = getenv("VGPU_POD_NAME");
   if (likely(pod_name != NULL)){
@@ -1414,6 +1424,7 @@ int load_controller_configuration() {
     LOGGER(ERROR, "not found gpu devices uuid");
     goto DONE;
   }
+
   int hard_cores = 0;
   int soft_cores = 0;
   double ratio = 1; // default ratio = 1
@@ -1479,6 +1490,7 @@ int load_controller_configuration() {
   LOGGER(VERBOSE, "pod uid          : %s", g_vgpu_config.pod_uid);
   LOGGER(VERBOSE, "container name   : %s", g_vgpu_config.container_name);
   LOGGER(VERBOSE, "gpu count        : %d", g_vgpu_config.device_count);
+  LOGGER(VERBOSE, "CompatibilityMode: %d", g_vgpu_config.compatibility_mode);
   for (int i = 0; i < g_vgpu_config.device_count; i++) {
     LOGGER(VERBOSE, "---------------------------GPU %d---------------------------", i);
     LOGGER(VERBOSE, "gpu uuid         : %s", g_vgpu_config.devices[i].uuid);

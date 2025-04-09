@@ -75,6 +75,7 @@ spec:
             - --feature-gates={{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
             - --mofed-enabled={{ .Values.devicePlugin.devicePlugin.commands.mofedEnabled }}
             - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
+            - --open-kernel-modules={{ .Values.devicePlugin.devicePlugin.commands.openKernelModules }}
             - --node-config-path=/config/nodeConfig.json
             - --v={{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
           env:

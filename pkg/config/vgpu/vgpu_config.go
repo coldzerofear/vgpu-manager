@@ -8,9 +8,11 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/opencontainers/runc/libcontainer/cgroups"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 )
@@ -59,6 +61,7 @@ import (
 //  char container_name[64];
 //  struct device_t devices[MAX_DEVICE_COUNT];
 //  int device_count;
+//  int compatibility_mode;
 //} __attribute__((packed, aligned(8)));
 //
 //int setting_to_disk(const char* filename, struct resource_data_t* data) {
@@ -102,13 +105,14 @@ type DeviceT struct {
 }
 
 type ResourceDataT struct {
-	DriverVersion VersionT
-	PodUID        [48]byte
-	PodName       [64]byte
-	PodNamespace  [64]byte
-	ContainerName [64]byte
-	Devices       [util.MaxDeviceNumber]DeviceT
-	DeviceCount   int32
+	DriverVersion     VersionT
+	PodUID            [48]byte
+	PodName           [64]byte
+	PodNamespace      [64]byte
+	ContainerName     [64]byte
+	Devices           [util.MaxDeviceNumber]DeviceT
+	DeviceCount       int32
+	CompatibilityMode int32
 }
 
 func (r *ResourceDataT) DeepCopy() *ResourceDataT {
@@ -116,6 +120,31 @@ func (r *ResourceDataT) DeepCopy() *ResourceDataT {
 	data := &ResourceDataT{}
 	_ = json.Unmarshal(jsonBytes, data)
 	return data
+}
+
+type CompatibilityMode int32
+
+const (
+	HostMode       CompatibilityMode = 0
+	CGroupv1Mode   CompatibilityMode = 1
+	CGroupv2Mode   CompatibilityMode = 2
+	OpenKernelMode CompatibilityMode = 100
+)
+
+func getCompatibilityMode(config node.NodeConfig) CompatibilityMode {
+	mode := HostMode
+	switch {
+	case cgroups.IsCgroup2UnifiedMode():
+		mode |= CGroupv2Mode
+	case cgroups.IsCgroup2HybridMode():
+		mode |= CGroupv2Mode
+	default:
+		mode |= CGroupv1Mode
+	}
+	if config.OpenKernelModules() {
+		mode |= OpenKernelMode
+	}
+	return mode
 }
 
 func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
@@ -150,6 +179,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	assignDevices device.ContainerDevices, memoryOversold bool, node *corev1.Node) *ResourceDataT {
 	major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
 	ratio := devManager.GetNodeConfig().DeviceMemoryScaling()
+	mode := getCompatibilityMode(devManager.GetNodeConfig())
 	convert48Bytes := func(val string) [48]byte {
 		var byteArray [48]byte
 		copy(byteArray[:], val)
@@ -230,12 +260,13 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 			Major: int32(major),
 			Minor: int32(minor),
 		},
-		PodUID:        convert48Bytes(string(pod.UID)),
-		PodName:       convert64Bytes(pod.Name),
-		PodNamespace:  convert64Bytes(pod.Namespace),
-		ContainerName: convert64Bytes(assignDevices.Name),
-		Devices:       devices,
-		DeviceCount:   int32(deviceCount),
+		PodUID:            convert48Bytes(string(pod.UID)),
+		PodName:           convert64Bytes(pod.Name),
+		PodNamespace:      convert64Bytes(pod.Namespace),
+		ContainerName:     convert64Bytes(assignDevices.Name),
+		Devices:           devices,
+		DeviceCount:       int32(deviceCount),
+		CompatibilityMode: int32(mode),
 	}
 	return data
 }
@@ -271,6 +302,8 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		driverVersion.major = C.int(major)
 		driverVersion.minor = C.int(minor)
 		vgpuConfig.driver_version = driverVersion
+		mode := getCompatibilityMode(devManager.GetNodeConfig())
+		vgpuConfig.compatibility_mode = C.int(mode)
 
 		podUID := C.CString(string(pod.UID))
 		defer C.free(unsafe.Pointer(podUID))

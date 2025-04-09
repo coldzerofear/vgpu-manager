@@ -23,6 +23,7 @@ type NodeConfigMap struct {
 	ExcludeDevices      *string  `json:"excludeDevices,omitempty"`
 	GDSEnabled          *bool    `json:"gdsEnabled,omitempty"`
 	MOFEDEnabled        *bool    `json:"mofedEnabled,omitempty"`
+	OpenKernelModules   *bool    `json:"openKernelModules,omitempty"`
 }
 
 type NodeConfig struct {
@@ -37,6 +38,7 @@ type NodeConfig struct {
 	excludeDevices      sets.Int
 	gdsEnabled          bool
 	mofedEnabled        bool
+	openKernelModules   bool
 	checkFields         bool
 }
 
@@ -80,6 +82,10 @@ func (nc NodeConfig) MOFEDEnabled() bool {
 	return nc.mofedEnabled
 }
 
+func (nc NodeConfig) OpenKernelModules() bool {
+	return nc.openKernelModules
+}
+
 func (nc NodeConfig) String() string {
 	format := `{
   "nodeName": "%s", 
@@ -91,11 +97,12 @@ func (nc NodeConfig) String() string {
   "deviceMemoryFactor": %d,
   "excludeDevices": %+v, 
   "gdsEnabled": %t, 
-  "mofedEnabled": %t
+  "mofedEnabled": %t,
+  "openKernelModules": %t
 }`
 	return fmt.Sprintf(format, nc.nodeName, nc.devicePluginPath, nc.cgroupDriver,
 		nc.deviceSplitCount, nc.deviceCoresScaling, nc.deviceMemoryScaling, nc.deviceMemoryFactor,
-		nc.excludeDevices.List(), nc.gdsEnabled, nc.mofedEnabled)
+		nc.excludeDevices.List(), nc.gdsEnabled, nc.mofedEnabled, nc.openKernelModules)
 }
 
 func checkNodeConfig(nodeConfig *NodeConfig) error {
@@ -133,6 +140,7 @@ func MutationDPOptions(opt dpoptions.Options) func(*NodeConfig) {
 		nodeConfig.excludeDevices = ParseExcludeDevices(opt.ExcludeDevices)
 		nodeConfig.gdsEnabled = opt.GDSEnabled
 		nodeConfig.mofedEnabled = opt.MOFEDEnabled
+		nodeConfig.openKernelModules = opt.OpenKernelModules
 		nodeConfig.checkFields = true
 	}
 }
@@ -189,6 +197,9 @@ func NewNodeConfig(mutations ...func(*NodeConfig)) (*NodeConfig, error) {
 			}
 			if nodeConfigMap.MOFEDEnabled != nil {
 				config.mofedEnabled = *nodeConfigMap.MOFEDEnabled
+			}
+			if nodeConfigMap.OpenKernelModules != nil {
+				config.openKernelModules = *nodeConfigMap.OpenKernelModules
 			}
 			break
 		}

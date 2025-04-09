@@ -7,7 +7,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <errno.h>
 
+#define MAX_PID_STR_LEN 32
+#define COMPATIBILITY_MODE_ENV "ENV_COMPATIBILITY_MODE"
 #define CUDA_MEMORY_LIMIT_ENV "CUDA_MEM_LIMIT"
 #define CUDA_MEMORY_RATIO_ENV "CUDA_MEM_RATIO"
 #define CUDA_CORE_LIMIT_ENV "CUDA_CORE_LIMIT"
@@ -43,6 +46,19 @@ size_t iec_to_bytes(const char *iec_value) {
   return (size_t)value;
 }
 
+int get_compatibility_mode(int *mode) {
+  int ret = -1;
+  char *str = NULL;
+  str = getenv(COMPATIBILITY_MODE_ENV);
+  if (unlikely(!str)) {
+    goto DONE;
+  }
+  *mode = iec_to_bytes(str);
+  ret = 0;
+DONE:
+  return ret;
+}
+
 int get_mem_ratio(uint32_t index, double *ratio) {
   int ret = -1;
   char *str = NULL;
@@ -60,7 +76,6 @@ int get_mem_ratio(uint32_t index, double *ratio) {
 DONE:
   return ret;
 }
-
 
 int get_mem_limit(uint32_t index, size_t *limit) {
   int ret = -1;
@@ -151,38 +166,48 @@ DONE:
   return ret;
 }
 
-int is_current_cgroup(const char *file_path) {
+static int is_current_cgroup(const char *cgroup_procs_path) {
   int ret = 0;
-  FILE *file = fopen(file_path, "r");
-  if (file == NULL) {
-    perror("fopen");
+  if (!cgroup_procs_path) {
+    LOGGER(ERROR, "invalid NULL cgroup_procs_path parameter");
     return ret;
   }
-  char buffer[128];
-  char pid_str[32];
+
+  char pid_str[MAX_PID_STR_LEN];
   snprintf(pid_str, sizeof(pid_str), "%d", (int)getpid());
 
-  while (fgets(buffer, sizeof(buffer), file) != NULL) {
-    size_t len = strlen(buffer);
-    if (len > 0 && buffer[len - 1] == '\n') {
-      buffer[len - 1] = '\0';
-    }
-    if (strcmp(buffer, pid_str) == 0) {
+  FILE *fp = NULL;
+  if ((fp = fopen(cgroup_procs_path, "r")) == NULL) {
+    //fprintf(stderr, "Failed to open %s: %s\n", cgroup_procs_path, strerror(errno));
+    return ret;
+  }
+
+  char line[MAX_PID_STR_LEN];
+  while (fgets(line, sizeof(line), fp)) {
+    line[strcspn(line, "\n")] = '\0';
+    if (strcmp(line, pid_str) == 0) {
       ret = 1;
       break;
     }
   }
-  fclose(file);
+  fclose(fp);
   return ret;
 }
 
-int is_current_container(char *path) {
+static int is_current_container(const char *path) {
   int ret = -1;
-  DIR *dir;
-  struct dirent *entry;
-  if ((dir = opendir(path)) == NULL) {
+  if (!path) {
+    LOGGER(ERROR, "invalid NULL path parameter");
     return ret;
   }
+
+  DIR *dir = NULL;
+  if ((dir = opendir(path)) == NULL) {
+    LOGGER(ERROR, "cannot open directory %s: %s", path, strerror(errno));
+    return ret;
+  }
+
+  struct dirent *entry;
   while ((entry = readdir(dir)) != NULL) {
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
@@ -191,43 +216,119 @@ int is_current_container(char *path) {
     snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
 
     if (entry->d_type == DT_DIR) {
-      ret = is_current_container(full_path);
-      if (ret == 0) {
+      if ((ret = is_current_container(full_path)) == 0) {
         break;
       }
-    } else if (strcmp(entry->d_name, "cgroup.procs") == 0) {
+    } else if (strcmp(entry->d_name, CGROUP_PROCS_FILE) == 0) {
       if (is_current_cgroup(full_path)) {
         ret = 0;
         break;
       }
     }
   }
+
   closedir(dir);
   return ret;
 }
 
-int extract_container_id(char *path, char *container_id, size_t container_id_size) {
+int extract_container_id(char *base_path, char *container_id, size_t container_id_size) {
   int ret = -1;
-  DIR *dir;
-  struct dirent *entry;
-  if ((dir = opendir(path)) == NULL) {
+  if (!base_path) {
+    LOGGER(ERROR, "invalid NULL base_path parameter");
     return ret;
   }
+
+  DIR *dir = NULL;
+  if ((dir = opendir(base_path)) == NULL) {
+    //LOGGER(ERROR, "cannot open directory %s: %s", base_path, strerror(errno));
+    return ret;
+  }
+
+  struct dirent *entry;
   while ((entry = readdir(dir)) != NULL) {
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
-    if (entry->d_type == DT_DIR) {
-      char full_path[PATH_MAX];
-      snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
-      ret = is_current_container(full_path);
-      if (ret == 0) {
-        strncpy(container_id, entry->d_name, container_id_size - 1);
-        container_id[container_id_size - 1] = '\0';
-        break;
-      }
+
+    if (entry->d_type != DT_DIR) {
+      continue;
+    }
+
+    char full_path[PATH_MAX];
+    snprintf(full_path, sizeof(full_path), "%s/%s", base_path, entry->d_name);
+
+    if ((ret = is_current_container(full_path)) == 0) {
+      strncpy(container_id, entry->d_name, container_id_size - 1);
+      container_id[container_id_size - 1] = '\0';
+      break;
     }
   }
+
   closedir(dir);
   return ret;
 }
+
+int extract_container_pids(char *base_path, int **pids, int *pids_size) {
+  if (!base_path) {
+    LOGGER(ERROR, "invalid NULL base_path parameter");
+    return -1;
+  }
+
+  char proc_path[PATH_MAX];
+  snprintf(proc_path, sizeof(proc_path), "%s/%s", base_path, CGROUP_PROCS_FILE);
+
+  if (access(proc_path, F_OK) != 0) {
+    //LOGGER(WARNING, "cgroup.procs not found in %s: %s", base_path, strerror(errno));
+    return -1;
+  }
+
+  FILE *fp = fopen(proc_path, "r");
+  if (!fp) {
+    LOGGER(WARNING, "error opening %s: %s", proc_path, strerror(errno));
+    return -1;
+  }
+
+  int capacity = *pids_size;
+  *pids = malloc(capacity * sizeof(int));
+  if (!*pids) {
+    LOGGER(ERROR, "initial memory allocation failed");
+    *pids = NULL;
+    fclose(fp);
+    return -1;
+  }
+  *pids_size = 0;
+
+  char line[MAX_PID_STR_LEN];
+  while (fgets(line, sizeof(line), fp)) {
+    char *endptr;
+    long pid = strtol(line, &endptr, 10);
+
+    if (endptr == line || (*endptr != '\n' && *endptr != '\0')) {
+      LOGGER(ERROR, "invalid PID format: %s", line);
+      continue;
+    }
+
+    if (*pids_size >= capacity) {
+      int new_capacity = capacity * 2;
+      int *new_pids = realloc(*pids, new_capacity * sizeof(int));
+      if (!new_pids) {
+        LOGGER(ERROR, "memory reallocation failed");
+        break;
+      }
+      *pids = new_pids;
+      capacity = new_capacity;
+    }
+
+    (*pids)[(*pids_size)++] = (int)pid;
+  }
+
+  fclose(fp);
+  if (*pids_size > 0 && *pids_size < capacity) {
+    int *shrunk = realloc(*pids, *pids_size * sizeof(int));
+    if (shrunk) {
+      *pids = shrunk;
+    }
+  }
+  return 0;
+}
+

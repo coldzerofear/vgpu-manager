@@ -326,15 +326,24 @@ skip:
 
 		for _, container := range pod.Spec.Containers {
 			key := GetContainerKey(pod.UID, container.Name)
-			resData, ok := c.contLister.GetResourceData(key)
-			if !ok {
+			resData, exist := c.contLister.GetResourceData(key)
+			if !exist {
 				continue
 			}
 
 			klog.V(4).Infoln("Container matching: using resource data", "ContainerName", container.Name)
-			getFullPath := util.GetK8sPodDeviceCGroupFullPath
-			if cgroups.IsCgroup2UnifiedMode() {
+			var getFullPath func(string) string
+			switch {
+			case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
 				getFullPath = util.GetK8sPodCGroupFullPath
+			case cgroups.IsCgroup2HybridMode():
+				// If the device controller does not exist, use the path of cgroupv2.
+				getFullPath = util.GetK8sPodDeviceCGroupFullPath
+				if util.PathIsNotExist(util.CGroupDevicePath) {
+					getFullPath = util.GetK8sPodCGroupFullPath
+				}
+			default: // cgroupv1
+				getFullPath = util.GetK8sPodDeviceCGroupFullPath
 			}
 			var containerPids []uint32
 			ContainerPidsFunc(pod, container.Name, getFullPath, func(pid int) {
