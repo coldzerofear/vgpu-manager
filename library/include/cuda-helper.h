@@ -863,7 +863,7 @@ typedef enum {
   /** cuGraphHostNodeSetParams */
   CUDA_ENTRY_ENUM(cuGraphHostNodeSetParams),
   /** cuGraphInstantiate */
-  CUDA_ENTRY_ENUM(cuGraphInstantiate),
+//  CUDA_ENTRY_ENUM(cuGraphInstantiate),
   /** cuGraphKernelNodeGetParams */
   CUDA_ENTRY_ENUM(cuGraphKernelNodeGetParams),
   /** cuGraphKernelNodeSetParams */
@@ -943,7 +943,7 @@ typedef enum {
   /** cuGraphExecMemsetNodeSetParams */
   CUDA_ENTRY_ENUM(cuGraphExecMemsetNodeSetParams),
   /** cuGraphExecUpdate */
-  CUDA_ENTRY_ENUM(cuGraphExecUpdate),
+//  CUDA_ENTRY_ENUM(cuGraphExecUpdate),
   /** cuMemAddressFree */
   CUDA_ENTRY_ENUM(cuMemAddressFree),
   /** cuMemAddressReserve */
@@ -979,7 +979,7 @@ typedef enum {
   /** cuFuncGetModule */
   CUDA_ENTRY_ENUM(cuFuncGetModule),
   /** cuGraphInstantiate_v2 */
-  CUDA_ENTRY_ENUM(cuGraphInstantiate_v2),
+//  CUDA_ENTRY_ENUM(cuGraphInstantiate_v2),
   /** cuGraphKernelNodeCopyAttributes */
   CUDA_ENTRY_ENUM(cuGraphKernelNodeCopyAttributes),
   /** cuGraphKernelNodeGetAttribute */
@@ -1115,7 +1115,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphAddMemAllocNode),
   CUDA_ENTRY_ENUM(cuGraphAddMemFreeNode),
   CUDA_ENTRY_ENUM(cuGraphDebugDotPrint),
-  CUDA_ENTRY_ENUM(cuGraphInstantiateWithFlags),
+//  CUDA_ENTRY_ENUM(cuGraphInstantiateWithFlags),
   CUDA_ENTRY_ENUM(cuGraphMemAllocNodeGetParams),
   CUDA_ENTRY_ENUM(cuGraphMemFreeNodeGetParams),
   CUDA_ENTRY_ENUM(cuGraphReleaseUserObject),
@@ -1147,8 +1147,8 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphAddNode_v2),
   CUDA_ENTRY_ENUM(cuGraphExecGetFlags),
   CUDA_ENTRY_ENUM(cuGraphExecNodeSetParams),
-  CUDA_ENTRY_ENUM(cuGraphInstantiateWithParams),
-  CUDA_ENTRY_ENUM(cuGraphInstantiateWithParams_ptsz),
+//  CUDA_ENTRY_ENUM(cuGraphInstantiateWithParams),
+//  CUDA_ENTRY_ENUM(cuGraphInstantiateWithParams_ptsz),
   CUDA_ENTRY_ENUM(cuGraphNodeSetParams),
   CUDA_ENTRY_ENUM(cuStreamGetId),
   CUDA_ENTRY_ENUM(cuStreamGetId_ptsz),
@@ -1159,10 +1159,10 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuCoredumpSetAttributeGlobal),
   CUDA_ENTRY_ENUM(cuCtxGetId),
   CUDA_ENTRY_ENUM(cuCtxSetFlags),
-  CUDA_ENTRY_ENUM(cuKernelGetAttribute),
-  CUDA_ENTRY_ENUM(cuKernelGetFunction),
-  CUDA_ENTRY_ENUM(cuKernelSetAttribute),
-  CUDA_ENTRY_ENUM(cuKernelSetCacheConfig),
+//  CUDA_ENTRY_ENUM(cuKernelGetAttribute),
+//  CUDA_ENTRY_ENUM(cuKernelGetFunction),
+//  CUDA_ENTRY_ENUM(cuKernelSetAttribute),
+//  CUDA_ENTRY_ENUM(cuKernelSetCacheConfig),
 //  CUDA_ENTRY_ENUM(cuLibraryGetGlobal),
 //  CUDA_ENTRY_ENUM(cuLibraryGetKernel),
 //  CUDA_ENTRY_ENUM(cuLibraryGetManaged),

@@ -77,6 +77,8 @@ RUN	CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURC
 
 FROM quay.io/jitesoft/ubuntu:20.04
 
+ENV NVIDIA_DISABLE_REQUIRE="true"
+
 WORKDIR /
 COPY --from=builder /go/src/vgpu-manager/bin/scheduler /usr/bin/scheduler
 COPY --from=builder /go/src/vgpu-manager/bin/deviceplugin /usr/bin/deviceplugin
