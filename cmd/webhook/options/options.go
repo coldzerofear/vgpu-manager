@@ -17,6 +17,7 @@ type Options struct {
 	DefaultNodePolicy   string
 	DefaultDevicePolicy string
 	DefaultTopologyMode string
+	DefaultRuntimeClass string
 }
 
 const (
@@ -44,6 +45,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.DefaultNodePolicy, "default-node-policy", "", "Default node scheduling policy. (supported values: binpack | spread)")
 	pflag.StringVar(&o.DefaultDevicePolicy, "default-device-policy", "", "Default device scheduling policy. (supported values: binpack | spread)")
 	pflag.StringVar(&o.DefaultDevicePolicy, "default-topology-mode", "", "Default device list topology mode. (supported values: numa | link)")
+	pflag.StringVar(&o.DefaultRuntimeClass, "default-runtime-class", "", "Specify the default container runtimeClassName for the vGPU pod")
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
 	pflag.Parse()

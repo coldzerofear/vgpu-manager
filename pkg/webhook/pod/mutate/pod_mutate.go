@@ -10,6 +10,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -43,6 +44,77 @@ func needVGPUNumber(container *corev1.Container) bool {
 		util.GetResourceOfContainer(container, util.VGPUMemoryResourceName) > 0
 }
 
+func setDefaultSchedulerName(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
+	if len(options.SchedulerName) > 0 && (pod.Spec.SchedulerName == "" || pod.Spec.SchedulerName == "default-scheduler") {
+		pod.Spec.SchedulerName = options.SchedulerName
+		logger.V(4).Info("Successfully set schedulerName", "schedulerName", options.SchedulerName)
+	}
+}
+
+func setDefaultNodeSchedulerPolicy(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
+	if _, ok := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation); !ok {
+		setPolicy := false
+		defaultNodePolicy := strings.ToLower(options.DefaultNodePolicy)
+		switch defaultNodePolicy {
+		case string(util.BinpackPolicy):
+			setPolicy = true
+			util.InsertAnnotation(pod, util.NodeSchedulerPolicyAnnotation, string(util.BinpackPolicy))
+		case string(util.SpreadPolicy):
+			setPolicy = true
+			util.InsertAnnotation(pod, util.NodeSchedulerPolicyAnnotation, string(util.SpreadPolicy))
+		}
+		if setPolicy {
+			logger.V(4).Info("Successfully set default node scheduler policy", "NodeSchedulerPolicy", defaultNodePolicy)
+		}
+	}
+}
+
+func setDefaultDeviceSchedulerPolicy(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
+	if _, ok := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation); !ok {
+		setPolicy := false
+		defaultDevicePolicy := strings.ToLower(options.DefaultDevicePolicy)
+		switch defaultDevicePolicy {
+		case string(util.BinpackPolicy):
+			setPolicy = true
+			util.InsertAnnotation(pod, util.DeviceSchedulerPolicyAnnotation, string(util.BinpackPolicy))
+		case string(util.SpreadPolicy):
+			setPolicy = true
+			util.InsertAnnotation(pod, util.DeviceSchedulerPolicyAnnotation, string(util.SpreadPolicy))
+		}
+		if setPolicy {
+			logger.V(4).Info("Successfully set default device scheduler policy", "DeviceSchedulerPolicy", defaultDevicePolicy)
+		}
+	}
+}
+
+func setDefaultDeviceTopologyMode(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
+	// Setting topology mode only makes sense when requesting multiple GPUs.
+	if IsSingleContainerMultiGPUs(pod) {
+		if _, ok := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation); !ok {
+			setTopoMode := false
+			defaultTopologyMode := strings.ToLower(options.DefaultTopologyMode)
+			switch defaultTopologyMode {
+			case string(util.NUMATopology):
+				setTopoMode = true
+				util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.NUMATopology))
+			case string(util.LinkTopology):
+				setTopoMode = true
+				util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.LinkTopology))
+			}
+			if setTopoMode {
+				logger.V(4).Info("Successfully set default device topology mode", "DeviceTopologyMode", defaultTopologyMode)
+			}
+		}
+	}
+}
+
+func setDefaultRuntimeClassName(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
+	if len(options.DefaultRuntimeClass) > 0 && (pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName == "") {
+		pod.Spec.RuntimeClassName = ptr.To[string](options.DefaultRuntimeClass)
+		logger.V(4).Info("Successfully set default runtimeClassName", "runtimeClassName", options.DefaultRuntimeClass)
+	}
+}
+
 func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
 	for i, container := range pod.Spec.Containers {
@@ -59,59 +131,11 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 	if util.IsVGPUResourcePod(pod) {
 		// Cleaning metadata to prevent impact on scheduling
 		reschedule.CleanupMetadata(pod)
-		if len(h.options.SchedulerName) > 0 &&
-			(pod.Spec.SchedulerName == "" || pod.Spec.SchedulerName == "default-scheduler") {
-			pod.Spec.SchedulerName = h.options.SchedulerName
-			logger.V(4).Info("Successfully set schedulerName", "schedulerName", h.options.SchedulerName)
-		}
-		if _, ok := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation); !ok {
-			setPolicy := false
-			defaultNodePolicy := strings.ToLower(h.options.DefaultNodePolicy)
-			switch defaultNodePolicy {
-			case string(util.BinpackPolicy):
-				setPolicy = true
-				util.InsertAnnotation(pod, util.NodeSchedulerPolicyAnnotation, string(util.BinpackPolicy))
-			case string(util.SpreadPolicy):
-				setPolicy = true
-				util.InsertAnnotation(pod, util.NodeSchedulerPolicyAnnotation, string(util.SpreadPolicy))
-			}
-			if setPolicy {
-				logger.V(4).Info("Successfully set default node scheduler policy", "NodeSchedulerPolicy", defaultNodePolicy)
-			}
-		}
-		if _, ok := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation); !ok {
-			setPolicy := false
-			defaultDevicePolicy := strings.ToLower(h.options.DefaultDevicePolicy)
-			switch defaultDevicePolicy {
-			case string(util.BinpackPolicy):
-				setPolicy = true
-				util.InsertAnnotation(pod, util.DeviceSchedulerPolicyAnnotation, string(util.BinpackPolicy))
-			case string(util.SpreadPolicy):
-				setPolicy = true
-				util.InsertAnnotation(pod, util.DeviceSchedulerPolicyAnnotation, string(util.SpreadPolicy))
-			}
-			if setPolicy {
-				logger.V(4).Info("Successfully set default device scheduler policy", "DeviceSchedulerPolicy", defaultDevicePolicy)
-			}
-		}
-		// Setting topology mode only makes sense when requesting multiple GPUs.
-		if IsSingleContainerMultiGPUs(pod) {
-			if _, ok := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation); !ok {
-				setTopoMode := false
-				defaultTopologyMode := strings.ToLower(h.options.DefaultTopologyMode)
-				switch defaultTopologyMode {
-				case string(util.NUMATopology):
-					setTopoMode = true
-					util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.NUMATopology))
-				case string(util.LinkTopology):
-					setTopoMode = true
-					util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.LinkTopology))
-				}
-				if setTopoMode {
-					logger.V(4).Info("Successfully set default device topology mode", "DeviceTopologyMode", defaultTopologyMode)
-				}
-			}
-		}
+		setDefaultSchedulerName(pod, h.options, logger)
+		setDefaultNodeSchedulerPolicy(pod, h.options, logger)
+		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)
+		setDefaultDeviceTopologyMode(pod, h.options, logger)
+		setDefaultRuntimeClassName(pod, h.options, logger)
 	}
 	return nil
 }
