@@ -3,7 +3,6 @@
 package gpuallocator
 
 import (
-	"fmt"
 	"sort"
 	"testing"
 
@@ -11,9 +10,6 @@ import (
 )
 
 const pad = ^int(0)
-
-type TestGPU Device
-type TestNode []*TestGPU
 
 type AllocTest struct {
 	size   int
@@ -108,40 +104,12 @@ func RunPolicyAllocTests(t *testing.T, policy Policy, tests []PolicyAllocTest) {
 	}
 }
 
-func NewTestGPU(index int) *TestGPU {
-	return &TestGPU{
-		nvlibDevice: nvlibDevice{
-			UUID: fmt.Sprintf("GPU-%d", index),
-			PCI:  struct{ BusID string }{fmt.Sprintf("GPU-%d", index)},
-		},
-		Index: index,
-		Links: make(map[int][]P2PLink),
-	}
-}
-
-func (from *TestGPU) AddLink(to *TestGPU, linkType nvml.P2PLinkType) {
-	link := P2PLink{(*Device)(to), linkType}
-	from.Links[to.Index] = append(from.Links[to.Index], link)
-}
-
-func (n TestNode) AddLink(from, to int, linkType nvml.P2PLinkType) {
-	n[from].AddLink(n[to], linkType)
-}
-
-func (n TestNode) Devices() []*Device {
-	var devices []*Device
-	for _, gpu := range n {
-		devices = append(devices, (*Device)(gpu))
-	}
-	return devices
-}
-
-func New4xRTX8000Node() TestNode {
-	node := TestNode{
-		NewTestGPU(0),
-		NewTestGPU(1),
-		NewTestGPU(2),
-		NewTestGPU(3),
+func New4xRTX8000Node() DeviceList {
+	node := DeviceList{
+		NewDevice(0, "GPU-0", "GPU-0"),
+		NewDevice(1, "GPU-1", "GPU-1"),
+		NewDevice(2, "GPU-2", "GPU-2"),
+		NewDevice(3, "GPU-3", "GPU-3"),
 	}
 
 	// NVLinks
@@ -163,16 +131,16 @@ func New4xRTX8000Node() TestNode {
 	return node
 }
 
-func NewDGX1PascalNode() TestNode {
-	node := TestNode{
-		NewTestGPU(0),
-		NewTestGPU(1),
-		NewTestGPU(2),
-		NewTestGPU(3),
-		NewTestGPU(4),
-		NewTestGPU(5),
-		NewTestGPU(6),
-		NewTestGPU(7),
+func NewDGX1PascalNode() DeviceList {
+	node := DeviceList{
+		NewDevice(0, "GPU-0", "GPU-0"),
+		NewDevice(1, "GPU-1", "GPU-1"),
+		NewDevice(2, "GPU-2", "GPU-2"),
+		NewDevice(3, "GPU-3", "GPU-3"),
+		NewDevice(4, "GPU-4", "GPU-4"),
+		NewDevice(5, "GPU-5", "GPU-5"),
+		NewDevice(6, "GPU-6", "GPU-6"),
+		NewDevice(7, "GPU-7", "GPU-7"),
 	}
 
 	// NVLinks
@@ -284,16 +252,16 @@ func NewDGX1PascalNode() TestNode {
 	return node
 }
 
-func NewDGX1VoltaNode() TestNode {
-	node := TestNode{
-		NewTestGPU(0),
-		NewTestGPU(1),
-		NewTestGPU(2),
-		NewTestGPU(3),
-		NewTestGPU(4),
-		NewTestGPU(5),
-		NewTestGPU(6),
-		NewTestGPU(7),
+func NewDGX1VoltaNode() DeviceList {
+	node := DeviceList{
+		NewDevice(0, "GPU-0", "GPU-0"),
+		NewDevice(1, "GPU-1", "GPU-1"),
+		NewDevice(2, "GPU-2", "GPU-2"),
+		NewDevice(3, "GPU-3", "GPU-3"),
+		NewDevice(4, "GPU-4", "GPU-4"),
+		NewDevice(5, "GPU-5", "GPU-5"),
+		NewDevice(6, "GPU-6", "GPU-6"),
+		NewDevice(7, "GPU-7", "GPU-7"),
 	}
 
 	// NVLinks

@@ -88,6 +88,10 @@ func (d DeviceList) AddLink(from, to int, linkType links.P2PLinkType) {
 	d[from].AddLink(d[to], linkType)
 }
 
+func (d DeviceList) Devices() []*Device {
+	return d
+}
+
 // DeviceSet is used to hold and manipulate a set of unique GPU devices.
 type DeviceSet map[string]*Device
 
