@@ -39,7 +39,8 @@ add_library(vgpu-control SHARED
     src/cuda_hook.c
     src/nvml_hook.c
     src/loader.c
-    src/util.c)
+    src/util.c
+    src/lock.c)
 target_link_libraries(vgpu-control ${STATIC_C_LIBRARIES})
 target_compile_options(vgpu-control PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 

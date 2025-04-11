@@ -98,11 +98,15 @@ func (m *vnumberDevicePlugin) GetPreferredAllocation(_ context.Context, _ *plugi
 }
 
 const (
+	VGPUConfigDirName        = "config"
 	HostProcDirectoryPath    = "/proc"
 	ContManagerDirectoryPath = "/etc/vgpu-manager"
-	ContConfigDirectoryPath  = ContManagerDirectoryPath + "/config"
+	ContConfigDirectoryPath  = ContManagerDirectoryPath + "/" + VGPUConfigDirName
 	ContProcDirectoryPath    = ContManagerDirectoryPath + "/.host_proc"
 	ContCGroupDirectoryPath  = ContManagerDirectoryPath + "/.host_cgroup"
+
+	VGPULockDirName  = "vgpu_lock"
+	ContVGPULockPath = "/tmp/." + VGPULockDirName
 
 	LdPreLoadFileName       = "ld.so.preload"
 	ContPreLoadFilePath     = "/etc/" + LdPreLoadFileName
@@ -301,20 +305,33 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		contManagerDirectory := GetContManagerDirectoryPath(currentPod.UID, assignDevs.Name)
 		_ = os.MkdirAll(contManagerDirectory, 0777)
 		_ = os.Chmod(contManagerDirectory, 0777)
-		jsonBytes, _ := json.Marshal(containerRequest.GetDevicesIDs())
+		// /etc/vgpu-manager/<pod-uid>_<cont-name>/devices.json
 		filePath := filepath.Join(contManagerDirectory, DeviceListFileName)
+		jsonBytes, _ := json.Marshal(containerRequest.GetDevicesIDs())
 		if err = os.WriteFile(filePath, jsonBytes, 0664); err != nil {
 			err = fmt.Errorf("failed to write %s file: %v", DeviceListFileName, err)
 			klog.V(3).ErrorS(err, "", "pod",
 				fmt.Sprintf("%s/%s", currentPod.Namespace, currentPod.Name))
 			return resp, err
 		}
+		// /etc/vgpu-manager/<pod-uid>_<cont-name>/vgpu_lock
+		contVGPULockPath := filepath.Join(contManagerDirectory, VGPULockDirName)
+		_ = os.MkdirAll(contVGPULockPath, 0777)
+		_ = os.Chmod(contVGPULockPath, 0777)
 		// <host_manager_dir>/<pod-uid>_<cont-name>
 		hostManagerDirectory := GetHostManagerDirectoryPath(currentPod.UID, assignDevs.Name)
+		// <host_manager_dir>/<pod-uid>_<cont-name>/config
+		hostVGPUConfigPath := filepath.Join(hostManagerDirectory, VGPUConfigDirName)
+		// <host_manager_dir>/<pod-uid>_<cont-name>/vgpu_lock
+		hostVGPULockPath := filepath.Join(hostManagerDirectory, VGPULockDirName)
 		mounts = append(mounts, &pluginapi.Mount{ // mount vgpu.config file
 			ContainerPath: ContConfigDirectoryPath,
-			HostPath:      hostManagerDirectory,
+			HostPath:      hostVGPUConfigPath,
 			ReadOnly:      true,
+		}, &pluginapi.Mount{ // mount vgpu_lock dir
+			ContainerPath: ContVGPULockPath,
+			HostPath:      hostVGPULockPath,
+			ReadOnly:      false,
 		})
 		podDevices := device.PodDevices{}
 		if realAlloc, ok := util.HasAnnotation(currentPod, util.PodVGPURealAllocAnnotation); ok {
@@ -456,7 +473,9 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		klog.Errorf("failed to get current pod <%s/%s>: %v", podInfo.PodNamespace, podInfo.PodName, err)
 		return resp, err
 	}
+	// /etc/vgpu-manager/<pod-uid>_<cont-name>
 	contManagerDirectory := GetContManagerDirectoryPath(pod.UID, podInfo.ContainerName)
+	// /etc/vgpu-manager/<pod-uid>_<cont-name>/devices.json
 	devicesFilePath := filepath.Join(contManagerDirectory, DeviceListFileName)
 	if deviBytes, err = os.ReadFile(devicesFilePath); err != nil {
 		err = fmt.Errorf("failed to read %s file: %v", DeviceListFileName, err)
@@ -478,10 +497,14 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 			fmt.Sprintf("%s/%s", podInfo.PodNamespace, podInfo.PodName))
 		return resp, err
 	}
-
-	vgpuConfigPath := filepath.Join(contManagerDirectory, VGPUConfigFileName)
+	// /etc/vgpu-manager/<pod-uid>_<cont-name>/config
+	contVGPUConfigPath := filepath.Join(contManagerDirectory, VGPUConfigDirName)
+	_ = os.MkdirAll(contVGPUConfigPath, 0777)
+	_ = os.Chmod(contVGPUConfigPath, 0777)
+	// /etc/vgpu-manager/<pod-uid>_<cont-name>/config/vgpu.config
+	vgpuConfigFilePath := filepath.Join(contVGPUConfigPath, VGPUConfigFileName)
 	klog.V(4).Infof("Pod <%s/%s> container <%s> vgpu config path is <%s>",
-		pod.Namespace, pod.Name, podInfo.ContainerName, vgpuConfigPath)
+		pod.Namespace, pod.Name, podInfo.ContainerName, vgpuConfigFilePath)
 	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
 	realDevices := device.PodDevices{}
 	if err = realDevices.UnmarshalText(realAlloc); err != nil {
@@ -504,7 +527,7 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 			return env.Name == util.CudaMemoryOversoldEnv && strings.ToUpper(env.Value) == "TRUE"
 		})
 	})
-	err = vgpu.WriteVGPUConfigFile(vgpuConfigPath, m.base.manager, pod, realDevices[index], oversold, node)
+	err = vgpu.WriteVGPUConfigFile(vgpuConfigFilePath, m.base.manager, pod, realDevices[index], oversold, node)
 	if err != nil {
 		klog.V(3).ErrorS(err, "", "pod",
 			fmt.Sprintf("%s/%s", podInfo.PodNamespace, podInfo.PodName))

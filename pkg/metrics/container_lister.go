@@ -110,20 +110,25 @@ func (c *ContainerLister) update() error {
 		_, existKey := c.GetResourceData(containerKey)
 		switch {
 		case matched && !existKey:
-			configFile := filepath.Join(filePath, deviceplugin.VGPUConfigFileName)
+			configFile := filepath.Join(filePath, deviceplugin.VGPUConfigDirName, deviceplugin.VGPUConfigFileName)
 			resourceData, data, err := vgpu.MmapResourceDataT(configFile)
+			if err != nil && os.IsNotExist(err) {
+				// TODO Retaining the old directory is to adapt to the old pods.
+				configFile = filepath.Join(filePath, deviceplugin.VGPUConfigFileName)
+				resourceData, data, err = vgpu.MmapResourceDataT(configFile)
+			}
 			if err != nil {
-				klog.V(4).Infof("Failed to mmap resource data <%s>: %v", configFile, err)
+				klog.V(4).Infof("Failed to mmap resource file <%s>: %v", configFile, err)
 				continue
 			}
-			klog.V(3).Infoln("add vGPU config file:", configFile)
+			klog.V(3).Infoln("Add vGPU config file:", configFile)
 			c.addResourceConfig(containerKey, &ResourceConfig{
 				DataBytes:    data,
 				ResourceData: resourceData,
 			})
 		case !matched && fileInfo.ModTime().Add(time.Minute).Before(time.Now()):
 			configFile := filepath.Join(filePath, deviceplugin.VGPUConfigFileName)
-			klog.V(3).Infoln("remove vGPU config file:", configFile)
+			klog.V(3).Infoln("Remove vGPU config file:", configFile)
 			c.removeResourceConfig(containerKey)
 			_ = os.RemoveAll(filePath)
 		case !matched && strings.ToLower(os.Getenv("UNIT_TESTING")) == "true":

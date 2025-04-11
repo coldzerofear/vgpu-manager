@@ -1262,16 +1262,15 @@ DONE:
 }
 
 int write_file_to_config_path(resource_data_t* data) {
-  int fd = 0;
   int wsize = 0;
   int ret = 0;
   if (unlikely(check_file_exist(VGPU_MANAGER_PATH))) {
-      mkdir(VGPU_MANAGER_PATH, 0777);
+    mkdir(VGPU_MANAGER_PATH, 0777);
   }
   if (unlikely(check_file_exist(VGPU_CONFIG_PATH))) {
-      mkdir(VGPU_CONFIG_PATH, 0777);
+    mkdir(VGPU_CONFIG_PATH, 0777);
   }
-  fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_TRUNC | O_WRONLY, 00777);
+  int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_TRUNC | O_WRONLY, 00777);
   if (unlikely(fd == -1)) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     ret = 1;
