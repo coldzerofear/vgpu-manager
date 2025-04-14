@@ -105,6 +105,15 @@ typedef struct CUgraphNode_st *CUgraphNode;                  /**< CUDA graph nod
 typedef struct CUgraphExec_st *CUgraphExec;                  /**< CUDA executable graph */
 typedef struct CUmemPoolHandle_st *CUmemoryPool;             /**< CUDA memory pool */
 typedef struct CUuserObject_st *CUuserObject;                /**< CUDA user object for graphs */
+typedef cuuint64_t CUgraphConditionalHandle; /**< CUDA graph conditional handle */
+typedef struct CUgraphDeviceUpdatableNode_st *CUgraphDeviceNode; /**< CUDA graph device node handle */
+typedef struct CUasyncCallbackEntry_st *CUasyncCallbackHandle;            /**< CUDA async notification callback handle */
+/*!
+ * \typedef typedef struct CUgreenCtx_st* CUgreenCtx
+ * A green context handle. This handle can be used safely from only one CPU thread at a time.
+ * Created via ::cuGreenCtxCreate
+ */
+typedef struct CUgreenCtx_st *CUgreenCtx;
 
 #ifndef CU_UUID_HAS_BEEN_DEFINED
 #define CU_UUID_HAS_BEEN_DEFINED

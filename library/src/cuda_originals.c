@@ -2627,12 +2627,33 @@ CUresult cuGraphAddHostNode(CUgraphNode *phGraphNode, CUgraph hGraph,
                          hGraph, dependencies, numDependencies, nodeParams);
 }
 
+CUresult _cuGraphAddKernelNode(CUgraphNode *phGraphNode, CUgraph hGraph,
+                              const CUgraphNode *dependencies,
+                              size_t numDependencies,
+                              const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
+  CUresult ret;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphAddKernelNode_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddKernelNode_v2, phGraphNode,
+                                  hGraph, dependencies, numDependencies, nodeParams);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddKernelNode, phGraphNode,
+                                  hGraph, dependencies, numDependencies, nodeParams);
+  }
+  return ret;
+}
+
 CUresult cuGraphAddKernelNode(CUgraphNode *phGraphNode, CUgraph hGraph,
                               const CUgraphNode *dependencies,
                               size_t numDependencies,
                               const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddKernelNode, phGraphNode,
-                         hGraph, dependencies, numDependencies, nodeParams);
+  return _cuGraphAddKernelNode(phGraphNode, hGraph, dependencies, numDependencies, nodeParams);
+}
+
+CUresult cuGraphAddKernelNode_v2(CUgraphNode *phGraphNode, CUgraph hGraph,
+                              const CUgraphNode *dependencies,
+                              size_t numDependencies,
+                              const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
+  return _cuGraphAddKernelNode(phGraphNode, hGraph, dependencies, numDependencies, nodeParams);
 }
 
 CUresult cuGraphAddMemcpyNode(CUgraphNode *phGraphNode, CUgraph hGraph,
@@ -2736,16 +2757,51 @@ CUresult cuGraphHostNodeSetParams(CUgraphNode hNode,
 //  return _cuGraphInstantiate(phGraphExec, hGraph, phErrorNode, logBuffer, bufferSize);
 //}
 
+CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode,
+                                    CUDA_KERNEL_NODE_PARAMS *nodeParams) {
+  CUresult ret;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeGetParams_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphKernelNodeGetParams_v2,
+                                        hNode, nodeParams);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphKernelNodeGetParams,
+                                        hNode, nodeParams);
+  }
+  return ret;
+}
+
 CUresult cuGraphKernelNodeGetParams(CUgraphNode hNode,
                                     CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphKernelNodeGetParams, hNode,
-                         nodeParams);
+  return _cuGraphKernelNodeGetParams(hNode, nodeParams);
 }
+
+CUresult cuGraphKernelNodeGetParams_v2(CUgraphNode hNode,
+                                    CUDA_KERNEL_NODE_PARAMS *nodeParams) {
+  return _cuGraphKernelNodeGetParams(hNode, nodeParams);
+}
+
+CUresult _cuGraphKernelNodeSetParams(CUgraphNode hNode,
+                                    const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
+  CUresult ret;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeSetParams_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphKernelNodeSetParams_v2,
+                                        hNode, nodeParams);
+  } else {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphKernelNodeSetParams,
+                                        hNode, nodeParams);
+  }
+  return ret;
+}
+
 
 CUresult cuGraphKernelNodeSetParams(CUgraphNode hNode,
                                     const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphKernelNodeSetParams, hNode,
-                         nodeParams);
+  return _cuGraphKernelNodeSetParams(hNode, nodeParams);
+}
+
+CUresult cuGraphKernelNodeSetParams_v2(CUgraphNode hNode,
+                                    const CUDA_KERNEL_NODE_PARAMS *nodeParams) {
+  return _cuGraphKernelNodeSetParams(hNode, nodeParams);
 }
 
 CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
@@ -2869,6 +2925,22 @@ CUresult cuStreamGetCtx(CUstream hStream, CUcontext *pctx) {
 CUresult cuStreamGetCtx_ptsz(CUstream hStream, CUcontext *pctx) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCtx_ptsz, hStream,
                          pctx);
+}
+
+CUresult cuStreamGetCtx_v2(CUstream hStream, CUcontext *pCtx, CUgreenCtx *pGreenCtx) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCtx_v2, hStream,
+                          pCtx, pGreenCtx);
+}
+
+CUresult cuStreamGetCtx_v2_ptsz(CUstream hStream, CUcontext *pCtx, CUgreenCtx *pGreenCtx) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCtx_v2_ptsz, hStream,
+                         pCtx, pGreenCtx);
+}
+
+CUresult cuGreenCtxStreamCreate(CUstream* phStream, CUgreenCtx greenCtx,
+                                unsigned int flags, int priority) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGreenCtxStreamCreate, phStream,
+                         greenCtx, flags, priority);
 }
 
 CUresult cuStreamIsCapturing(CUstream hStream,
@@ -3033,6 +3105,13 @@ CUresult cuGraphExecMemsetNodeSetParams(CUgraphExec hGraphExec, CUgraphNode hNod
 //                           CUgraphNode *hErrorNode_out,
 //                           CUgraphExecUpdateResult *updateResult_out) {
 //  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecUpdate, hGraphExec,
+//                         hGraph, hErrorNode_out, updateResult_out);
+//}
+
+//CUresult cuGraphExecUpdate_v2(CUgraphExec hGraphExec, CUgraph hGraph,
+//                           CUgraphNode *hErrorNode_out,
+//                           CUgraphExecUpdateResult *updateResult_out) {
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecUpdate_v2, hGraphExec,
 //                         hGraph, hErrorNode_out, updateResult_out);
 //}
 

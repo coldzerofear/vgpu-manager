@@ -836,6 +836,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphAddHostNode),
   /** cuGraphAddKernelNode */
   CUDA_ENTRY_ENUM(cuGraphAddKernelNode),
+  CUDA_ENTRY_ENUM(cuGraphAddKernelNode_v2),
   /** cuGraphAddMemcpyNode */
   CUDA_ENTRY_ENUM(cuGraphAddMemcpyNode),
   /** cuGraphAddMemsetNode */
@@ -866,8 +867,10 @@ typedef enum {
 //  CUDA_ENTRY_ENUM(cuGraphInstantiate),
   /** cuGraphKernelNodeGetParams */
   CUDA_ENTRY_ENUM(cuGraphKernelNodeGetParams),
+  CUDA_ENTRY_ENUM(cuGraphKernelNodeGetParams_v2),
   /** cuGraphKernelNodeSetParams */
   CUDA_ENTRY_ENUM(cuGraphKernelNodeSetParams),
+  CUDA_ENTRY_ENUM(cuGraphKernelNodeSetParams_v2),
   /** cuGraphLaunch */
   CUDA_ENTRY_ENUM(cuGraphLaunch),
   /** cuGraphLaunch_ptsz */
@@ -912,8 +915,11 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuStreamEndCapture_ptsz),
   /** cuStreamGetCtx */
   CUDA_ENTRY_ENUM(cuStreamGetCtx),
+  CUDA_ENTRY_ENUM(cuStreamGetCtx_v2),
   /** cuStreamGetCtx_ptsz */
   CUDA_ENTRY_ENUM(cuStreamGetCtx_ptsz),
+  CUDA_ENTRY_ENUM(cuStreamGetCtx_v2_ptsz),
+  CUDA_ENTRY_ENUM(cuGreenCtxStreamCreate),
   /** cuStreamIsCapturing */
   CUDA_ENTRY_ENUM(cuStreamIsCapturing),
   /** cuStreamIsCapturing_ptsz */
@@ -944,6 +950,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphExecMemsetNodeSetParams),
   /** cuGraphExecUpdate */
 //  CUDA_ENTRY_ENUM(cuGraphExecUpdate),
+//  CUDA_ENTRY_ENUM(cuGraphExecUpdate_v2),
   /** cuMemAddressFree */
   CUDA_ENTRY_ENUM(cuMemAddressFree),
   /** cuMemAddressReserve */
