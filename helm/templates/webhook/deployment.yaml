@@ -44,7 +44,7 @@ spec:
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command:
             - webhook
-            {{- if .Values.scheduler.enabled -}}
+            {{- if .Values.scheduler.enabled }}
             - --scheduler-name={{ .Values.scheduler.schedulerName }}
             {{- end }}
             - --server-bind-port={{ .Values.webhook.commands.serverBindPort }}
@@ -53,7 +53,7 @@ spec:
             - --default-node-policy={{ .Values.webhook.commands.defaultNodePolicy }}
             - --default-device-policy={{ .Values.webhook.commands.defaultDevicePolicy }}
             - --default-topology-mode={{ .Values.webhook.commands.defaultTopologyMode }}
-            {{- if .Values.devicePlugin.enabled -}}
+            {{- if .Values.devicePlugin.enabled }}
             - --default-runtime-class={{ .Values.devicePlugin.runtimeClassName }}
             {{- end }}
             - --v={{ .Values.webhook.commands.logLevel }}
