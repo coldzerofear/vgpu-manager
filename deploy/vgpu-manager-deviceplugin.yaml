@@ -62,6 +62,7 @@ data:
       {
         "nodeName": "demo0",
         "cgroupDriver": "systemd",
+        "deviceListStrategy": "envvar",
         "deviceSplitCount": 10,
         "deviceMemoryScaling": 1,
         "deviceMemoryFactor": 1,

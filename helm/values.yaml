@@ -107,6 +107,8 @@ devicePlugin:
     commands:
       kubeApiQps: 20.0
       kubeApiBurst: 30
+      # The desired strategy for passing the device list to the underlying runtime. (supported values: "envvar" | "volume-mounts")
+      deviceListStrategy: "envvar"
       # The number for NVIDIA device split. (default: 10)
       deviceSplitCount: 10
       # The ratio for NVIDIA device cores scaling. (default: 1.0)
@@ -153,6 +155,7 @@ devicePlugin:
         {
           "nodeName": "example",
           "cgroupDriver": "systemd",
+          "deviceListStrategy": "envvar",
           "deviceSplitCount": 5,
           "deviceMemoryScaling": 1,
           "deviceMemoryFactor": 1,

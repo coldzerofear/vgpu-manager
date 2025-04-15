@@ -66,6 +66,7 @@ spec:
             - deviceplugin
             - --kube-api-qps={{ .Values.devicePlugin.devicePlugin.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.devicePlugin.devicePlugin.commands.kubeApiBurst }}
+            - --device-list-strategy={{ .Values.devicePlugin.devicePlugin.commands.deviceListStrategy }}
             - --device-split-count={{ .Values.devicePlugin.devicePlugin.commands.deviceSplitCount }}
             - --device-cores-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceCoresScaling }}
             - --device-memory-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling }}

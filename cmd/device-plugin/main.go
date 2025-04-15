@@ -60,7 +60,7 @@ func main() {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
 	klog.V(4).Infoln("Current NodeConfig:\n", nodeConfig.String())
-	util.InitializeCGroupDriver(nodeConfig)
+	util.InitializeCGroupDriver(nodeConfig.CGroupDriver())
 
 	klog.V(3).Info("Initialize Device Resource Manager")
 	deviceManager, err := devm.NewDeviceManager(nodeConfig, kubeClient)

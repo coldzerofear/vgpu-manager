@@ -54,7 +54,7 @@ func main() {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
 	klog.V(4).Infoln("Current NodeConfig:\n", nodeConfig.String())
-	util.InitializeCGroupDriver(nodeConfig)
+	util.InitializeCGroupDriver(nodeConfig.CGroupDriver())
 
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())

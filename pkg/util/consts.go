@@ -59,8 +59,6 @@ const (
 )
 
 const (
-	NvidiaVisibleDevicesEnv = "NVIDIA_VISIBLE_DEVICES"
-
 	// CUDA_MEM_LIMIT_<index> gpu memory limit
 	CudaMemoryLimitEnv = "CUDA_MEM_LIMIT"
 	// CUDA_MEM_RATIO_<index> gpu memory ratio
@@ -72,7 +70,7 @@ const (
 	// CUDA_CORE_SOFT_LIMIT_<index> gpu memory oversold switch
 	CudaMemoryOversoldEnv = "CUDA_MEM_OVERSOLD"
 	// GPU_DEVICES_UUID gpu uuid list
-	GPUDeviceUuidEnv = "GPU_DEVICES_UUID"
+	GPUDevicesUuidEnv = "GPU_DEVICES_UUID"
 	// CompatibilityModeEnv Indicate the compatibility mode of the environment
 	CompatibilityModeEnv = "ENV_COMPATIBILITY_MODE"
 
@@ -124,4 +122,12 @@ const (
 	NUMATopology TopologyMode = "numa"
 	// LinkTopology find the best device set based on link topology.
 	LinkTopology TopologyMode = "link"
+)
+
+// Constants to represent the various device list strategies
+const (
+	DeviceListStrategyEnvvar         = "envvar"
+	DeviceListStrategyVolumeMounts   = "volume-mounts"
+	DeviceListStrategyCDIAnnotations = "cdi-annotations"
+	DeviceListStrategyCDICRI         = "cdi-cri"
 )

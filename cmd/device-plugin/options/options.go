@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
 	"k8s.io/component-base/featuregate"
@@ -20,6 +21,7 @@ type Options struct {
 
 	NodeName            string
 	CGroupDriver        string
+	DeviceListStrategy  string
 	DeviceSplitCount    int
 	DeviceMemoryScaling float64
 	DeviceMemoryFactor  int
@@ -38,6 +40,7 @@ const (
 	defaultQPS   = 20.0
 	defaultBurst = 30
 
+	defaultDeviceListStrategy  = util.DeviceListStrategyEnvvar
 	defaultDeviceSplitCount    = 10
 	defaultDeviceMemoryFactor  = 1
 	defaultDeviceMemoryScaling = 1.0
@@ -82,6 +85,7 @@ func NewOptions() *Options {
 		Burst:               defaultBurst,
 		NodeName:            os.Getenv("NODE_NAME"),
 		CGroupDriver:        os.Getenv("CGROUP_DRIVER"),
+		DeviceListStrategy:  defaultDeviceListStrategy,
 		DeviceSplitCount:    defaultDeviceSplitCount,
 		DeviceCoresScaling:  defaultDeviceCoresScaling,
 		DeviceMemoryScaling: defaultDeviceMemoryScaling,
@@ -101,13 +105,14 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
 	pflag.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
 	pflag.StringVar(&o.NodeName, "node-name", o.NodeName, "If non-empty, will use this string as identification instead of the actual node name.")
-	pflag.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (example: cgroupfs | systemd)")
+	pflag.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (supported values: \"cgroupfs\" | \"system\")")
+	pflag.StringVar(&o.DeviceListStrategy, "device-list-strategy", o.DeviceListStrategy, "The desired strategy for passing the device list to the underlying runtime. (supported values: \"envvar\" | \"volume-mounts\")")
 	pflag.IntVar(&o.DeviceSplitCount, "device-split-count", o.DeviceSplitCount, "The maximum number of VGPU that can be split per physical GPU.")
 	pflag.Float64Var(&o.DeviceCoresScaling, "device-cores-scaling", o.DeviceCoresScaling, "The ratio for NVIDIA device cores scaling.")
 	pflag.Float64Var(&o.DeviceMemoryScaling, "device-memory-scaling", o.DeviceMemoryScaling, "The ratio for NVIDIA device memory scaling.")
 	pflag.IntVar(&o.DeviceMemoryFactor, "device-memory-factor", o.DeviceMemoryFactor, "The default gpu memory block size is 1MB.")
 	pflag.StringVar(&o.NodeConfigPath, "node-config-path", o.NodeConfigPath, "Specify the node configuration path to apply differentiated configuration to the node.")
-	pflag.StringVar(&o.ExcludeDevices, "exclude-devices", "", "Specify the GPU IDs that need to be excluded. (example: 0,1,2 | 0-2)")
+	pflag.StringVar(&o.ExcludeDevices, "exclude-devices", "", "Specify the GPU IDs that need to be excluded. (example: \"0,1,2\" | \"0-2\")")
 	pflag.StringVar(&o.DevicePluginPath, "device-plugin-path", o.DevicePluginPath, "The path for kubelet receive device plugin registration.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
 	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")

@@ -54,15 +54,16 @@ spec:
 
 NodeConfig is a JSON formatted array, with each array element having the following structural parameters
 
-| Parameter Name      | Value Format                  | Describe                                                                               |
-|---------------------|-------------------------------|----------------------------------------------------------------------------------------|
-| nodeName            | string                        | Configure k8s node name (required)                                                     |
-| cgroupDriver        | example: "cgroupfs"/"systemd" | Specify the cgroup driver used (optional)                                              |
-| deviceSplitCount    | int                           | The maximum number of VGPU that can be split per physical GPU (optional)               |
-| deviceMemoryScaling | float                         | The ratio for NVIDIA device memory scaling (optional)                                  |
-| deviceMemoryFactor  | int                           | The default gpu memory block size is 1MB (optional)                                    |
-| deviceCoresScaling  | float                         | The ratio for NVIDIA device cores scaling (optional)                                   |
-| excludeDevices      | example: "0,1,2"/"0-2"        | Specify the GPU IDs that need to be excluded (optional)                                |
-| gdsEnabled          | bool                          | Ensure that containers are started with NVIDIA_GDS=enabled (optional)                  |
-| mofedEnabled        | bool                          | Ensure that containers are started with NVIDIA_MOFED=enabled (optional)                |
-| openKernelModules   | bool                          | If using the open-gpu-kernel-modules, open it and enable compatibility mode (optional) |
+| Parameter Name      | Value Format                              | Describe                                                                               |
+|---------------------|-------------------------------------------|----------------------------------------------------------------------------------------|
+| nodeName            | string                                    | Configure k8s node name (required)                                                     |
+| cgroupDriver        | Supported values: "cgroupfs"/"systemd"    | Specify the cgroup driver used (optional)                                              |
+| deviceListStrategy  | supported values: "envvar"/"volume-mounts"| The desired strategy for passing the device list to the underlying runtime (optional)  |
+| deviceSplitCount    | int                                       | The maximum number of VGPU that can be split per physical GPU (optional)               |
+| deviceMemoryScaling | float                                     | The ratio for NVIDIA device memory scaling (optional)                                  |
+| deviceMemoryFactor  | int                                       | The default gpu memory block size is 1MB (optional)                                    |
+| deviceCoresScaling  | float                                     | The ratio for NVIDIA device cores scaling (optional)                                   |
+| excludeDevices      | example: "0,1,2"/"0-2"                    | Specify the GPU IDs that need to be excluded (optional)                                |
+| gdsEnabled          | bool                                      | Ensure that containers are started with NVIDIA_GDS=enabled (optional)                  |
+| mofedEnabled        | bool                                      | Ensure that containers are started with NVIDIA_MOFED=enabled (optional)                |
+| openKernelModules   | bool                                      | If using the open-gpu-kernel-modules, open it and enable compatibility mode (optional) |

@@ -9,6 +9,7 @@ import (
 
 	dpoptions "github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	monitoroptions "github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
@@ -16,6 +17,7 @@ import (
 type NodeConfigMap struct {
 	NodeName            string   `json:"nodeName"`
 	CGroupDriver        *string  `json:"cgroupDriver,omitempty"`
+	DeviceListStrategy  *string  `json:"deviceListStrategy,omitempty"`
 	DeviceSplitCount    *int     `json:"deviceSplitCount,omitempty"`
 	DeviceMemoryScaling *float64 `json:"deviceMemoryScaling,omitempty"`
 	DeviceMemoryFactor  *int     `json:"deviceMemoryFactor,omitempty"`
@@ -30,6 +32,7 @@ type NodeConfig struct {
 	nodeName            string
 	nodeConfigPath      string
 	cgroupDriver        string
+	deviceListStrategy  string
 	devicePluginPath    string
 	deviceSplitCount    int
 	deviceMemoryScaling float64
@@ -48,6 +51,10 @@ func (nc NodeConfig) NodeName() string {
 
 func (nc NodeConfig) CGroupDriver() string {
 	return nc.cgroupDriver
+}
+
+func (nc NodeConfig) DeviceListStrategy() string {
+	return nc.deviceListStrategy
 }
 
 func (nc NodeConfig) DevicePluginPath() string {
@@ -91,6 +98,7 @@ func (nc NodeConfig) String() string {
   "nodeName": "%s", 
   "devicePluginPath": "%s", 
   "cgroupDriver": "%s", 
+  "deviceListStrategy": "%s",
   "deviceSplitCount": %d, 
   "deviceCoresScaling": %.2f, 
   "deviceMemoryScaling": %.2f,
@@ -100,7 +108,7 @@ func (nc NodeConfig) String() string {
   "mofedEnabled": %t,
   "openKernelModules": %t
 }`
-	return fmt.Sprintf(format, nc.nodeName, nc.devicePluginPath, nc.cgroupDriver,
+	return fmt.Sprintf(format, nc.nodeName, nc.devicePluginPath, nc.cgroupDriver, nc.deviceListStrategy,
 		nc.deviceSplitCount, nc.deviceCoresScaling, nc.deviceMemoryScaling, nc.deviceMemoryFactor,
 		nc.excludeDevices.List(), nc.gdsEnabled, nc.mofedEnabled, nc.openKernelModules)
 }
@@ -108,6 +116,12 @@ func (nc NodeConfig) String() string {
 func checkNodeConfig(nodeConfig *NodeConfig) error {
 	if nodeConfig == nil {
 		return fmt.Errorf("NodeConfig is empty")
+	}
+	switch nodeConfig.deviceListStrategy {
+	case util.DeviceListStrategyEnvvar:
+	case util.DeviceListStrategyVolumeMounts:
+	default:
+		return fmt.Errorf("NodeConfig.DeviceListStrategy unknown strategy value: %s", nodeConfig.deviceListStrategy)
 	}
 	if len(nodeConfig.devicePluginPath) == 0 {
 		return fmt.Errorf("NodeConfig.DevicePluginPath is empty")
@@ -132,6 +146,7 @@ func MutationDPOptions(opt dpoptions.Options) func(*NodeConfig) {
 		nodeConfig.nodeName = opt.NodeName
 		nodeConfig.nodeConfigPath = opt.NodeConfigPath
 		nodeConfig.cgroupDriver = opt.CGroupDriver
+		nodeConfig.deviceListStrategy = opt.DeviceListStrategy
 		nodeConfig.deviceSplitCount = opt.DeviceSplitCount
 		nodeConfig.devicePluginPath = opt.DevicePluginPath
 		nodeConfig.deviceMemoryScaling = opt.DeviceMemoryScaling
@@ -176,6 +191,9 @@ func NewNodeConfig(mutations ...func(*NodeConfig)) (*NodeConfig, error) {
 			klog.Infof("Matched node config <%s>", config.nodeName)
 			if nodeConfigMap.CGroupDriver != nil {
 				config.cgroupDriver = *nodeConfigMap.CGroupDriver
+			}
+			if nodeConfigMap.DeviceListStrategy != nil {
+				config.deviceListStrategy = *nodeConfigMap.DeviceListStrategy
 			}
 			if nodeConfigMap.DeviceSplitCount != nil {
 				config.deviceSplitCount = *nodeConfigMap.DeviceSplitCount

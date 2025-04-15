@@ -121,18 +121,16 @@ const (
 	NvidiaUVMFilePath      = "/dev/nvidia-uvm"
 	NvidiaUVMToolsFilePath = "/dev/nvidia-uvm-tools"
 	NvidiaModeSetFilePath  = "/dev/nvidia-modeset"
+
+	deviceListEnvVar                          = "NVIDIA_VISIBLE_DEVICES"
+	deviceListAsVolumeMountsHostPath          = "/dev/null"
+	deviceListAsVolumeMountsContainerPathRoot = "/var/run/nvidia-container-devices"
 )
 
 var (
 	HostManagerDirectoryPath = os.Getenv("HOST_MANAGER_DIR")
 	HostPreLoadFilePath      = HostManagerDirectoryPath + "/" + LdPreLoadFileName
 	HostVGPUControlFilePath  = HostManagerDirectoryPath + "/" + VGPUControlFileName
-	deviceFileMountConfig    = map[string]bool{
-		NvidiaCTLFilePath:      true,
-		NvidiaUVMFilePath:      true,
-		NvidiaUVMToolsFilePath: true,
-		NvidiaModeSetFilePath:  true,
-	}
 )
 
 func GetHostManagerDirectoryPath(podUID types.UID, containerName string) string {
@@ -141,6 +139,36 @@ func GetHostManagerDirectoryPath(podUID types.UID, containerName string) string 
 
 func GetContManagerDirectoryPath(podUID types.UID, containerName string) string {
 	return fmt.Sprintf("%s/%s_%s", ContManagerDirectoryPath, string(podUID), containerName)
+}
+
+func (m *vnumberDevicePlugin) passDeviceSpecs(gpus []manager.GPUDevice) []*pluginapi.DeviceSpec {
+	deviceMountOptional := map[string]bool{
+		NvidiaCTLFilePath:      true,
+		NvidiaUVMFilePath:      true,
+		NvidiaUVMToolsFilePath: true,
+		NvidiaModeSetFilePath:  true,
+	}
+	var specs []*pluginapi.DeviceSpec
+	for _, gpuDevice := range gpus {
+		for _, devPath := range gpuDevice.Paths {
+			specs = append(specs, &pluginapi.DeviceSpec{
+				ContainerPath: devPath,
+				HostPath:      devPath,
+				Permissions:   "rw",
+			})
+		}
+	}
+	for devPath, enabled := range deviceMountOptional {
+		if !enabled || util.PathIsNotExist(devPath) {
+			continue
+		}
+		specs = append(specs, &pluginapi.DeviceSpec{
+			ContainerPath: devPath,
+			HostPath:      devPath,
+			Permissions:   "rw",
+		})
+	}
+	return specs
 }
 
 // Allocate is called during container creation so that the Device
@@ -173,7 +201,8 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		}
 	}()
 
-	activePods, err = client.GetActivePodsOnNode(ctx, m.kubeClient, m.base.manager.GetNodeConfig().NodeName())
+	nodeConfig := m.base.manager.GetNodeConfig()
+	activePods, err = client.GetActivePodsOnNode(ctx, m.kubeClient, nodeConfig.NodeName())
 	if err != nil {
 		klog.Errorf("failed to retrieve the active pods of the current node: %v", err)
 		return resp, err
@@ -188,7 +217,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		currentPod.Namespace, currentPod.Name, currentPod.UID)
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	deviceMap := m.base.manager.GetGPUDeviceMap()
-	memoryRatio := m.base.manager.GetNodeConfig().DeviceMemoryScaling()
+	memoryRatio := nodeConfig.DeviceMemoryScaling()
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIDs())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -206,10 +235,11 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		klog.V(4).Infof("Current Pod <%s/%s> allocated container is <%s>",
 			currentPod.Namespace, currentPod.Name, assignDevs.Name)
 		var (
-			deviceIds []string
-			envMap    = make(map[string]string)
-			mounts    []*pluginapi.Mount
-			devices   []*pluginapi.DeviceSpec
+			deviceIds   []string
+			envMap      = make(map[string]string)
+			mounts      []*pluginapi.Mount
+			gpuDevices  []manager.GPUDevice
+			deviceSpecs []*pluginapi.DeviceSpec
 		)
 		envMap[util.PodNameEnv] = currentPod.Name
 		envMap[util.PodNamespaceEnv] = currentPod.Namespace
@@ -230,31 +260,27 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 					fmt.Sprintf("%s/%s", currentPod.Namespace, currentPod.Name))
 				return resp, err
 			}
+			gpuDevices = append(gpuDevices, gpuDevice)
 			if dev.Cores > 0 && dev.Cores < util.HundredCore {
 				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, idx)
 				envMap[coreLimitEnv] = strconv.Itoa(dev.Cores)
 			}
-			for _, deviceFilePath := range gpuDevice.Paths {
-				devices = append(devices, &pluginapi.DeviceSpec{
-					ContainerPath: deviceFilePath,
-					HostPath:      deviceFilePath,
-					Permissions:   "rw",
+		}
+		deviceIdsVal := strings.Join(deviceIds, ",")
+		envMap[util.GPUDevicesUuidEnv] = deviceIdsVal
+		switch nodeConfig.DeviceListStrategy() {
+		case util.DeviceListStrategyEnvvar:
+			envMap[deviceListEnvVar] = deviceIdsVal
+		case util.DeviceListStrategyVolumeMounts:
+			envMap[deviceListEnvVar] = deviceListAsVolumeMountsContainerPathRoot
+			for _, id := range deviceIds {
+				mounts = append(mounts, &pluginapi.Mount{
+					HostPath:      deviceListAsVolumeMountsHostPath,
+					ContainerPath: filepath.Join(deviceListAsVolumeMountsContainerPathRoot, id),
 				})
 			}
 		}
-		deviceIdStr := strings.Join(deviceIds, ",")
-		envMap[util.GPUDeviceUuidEnv] = deviceIdStr
-		envMap[util.NvidiaVisibleDevicesEnv] = deviceIdStr
-		for devFilePath, enabled := range deviceFileMountConfig {
-			if !enabled || util.PathIsNotExist(devFilePath) {
-				continue
-			}
-			devices = append(devices, &pluginapi.DeviceSpec{
-				ContainerPath: devFilePath,
-				HostPath:      devFilePath,
-				Permissions:   "rw",
-			})
-		}
+		deviceSpecs = append(deviceSpecs, m.passDeviceSpecs(gpuDevices)...)
 		mounts = append(mounts, &pluginapi.Mount{ // mount /proc dir
 			ContainerPath: ContProcDirectoryPath,
 			HostPath:      HostProcDirectoryPath,
@@ -355,7 +381,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		responses[i] = &pluginapi.ContainerAllocateResponse{
 			Envs:    envMap,
 			Mounts:  mounts,
-			Devices: devices,
+			Devices: deviceSpecs,
 		}
 	}
 	resp.ContainerResponses = responses

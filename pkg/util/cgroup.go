@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	cgroupsystemd "github.com/opencontainers/runc/libcontainer/cgroups/systemd"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -42,9 +41,9 @@ const (
 	CGROUPFS CGroupDriver = "cgroupfs"
 )
 
-func InitializeCGroupDriver(config *node.NodeConfig) {
+func InitializeCGroupDriver(cgroupDriver string) {
 	initCGroupOnce.Do(func() {
-		switch strings.ToLower(config.CGroupDriver()) {
+		switch strings.ToLower(cgroupDriver) {
 		case string(SYSTEMD):
 			currentCGroupDriver = SYSTEMD
 		case string(CGROUPFS):
