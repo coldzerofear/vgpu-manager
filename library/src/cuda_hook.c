@@ -874,8 +874,12 @@ static void get_used_gpu_utilization(void *arg, int device_id, nvmlDevice_t dev)
 
   nvmlReturn_t ret;
   struct timeval cur, prev;
-  int i;
 
+  // When using open source kernel modules, nvmlDeviceGetComputeRunningProcesses can only
+  // query processes in the container namespace, so skip inaccurate process count queries.
+  if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+    goto SKIP;
+  }
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
     ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
                              dev, &running_processes, pids_on_device);
@@ -897,6 +901,7 @@ static void get_used_gpu_utilization(void *arg, int device_id, nvmlDevice_t dev)
 
   top_result->sys_process_num = running_processes;
 
+SKIP:
   gettimeofday(&cur, NULL);
   struct timeval temp = {1, 0};
   timersub(&cur, &temp, &prev);
@@ -913,11 +918,10 @@ static void get_used_gpu_utilization(void *arg, int device_id, nvmlDevice_t dev)
     return;
   }
 
-  // When using open source kernel modules, nvmlDevice∝mputeRunningProcesses can only
-  // query processes in the container namespace, while nvmlDeviceVNet cessUtilization
+  // When using open source kernel modules, nvmlDeviceGetComputeRunningProcesses can only
+  // query processes in the container namespace, while nvmlDeviceGetProcessUtilization
   // can query global processes, so it may need to be updated to the global process count here.
-  if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) ==
-       OPEN_KERNEL_COMPATIBILITY_MODE && processes_num > running_processes) {
+  if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
     top_result->sys_process_num = processes_num;
   }
 
@@ -927,6 +931,7 @@ static void get_used_gpu_utilization(void *arg, int device_id, nvmlDevice_t dev)
   int sm_util = 0;
   int codec_util = 0;
 
+  int i;
   if ((g_vgpu_config.compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
     int *pids_on_container = NULL;
