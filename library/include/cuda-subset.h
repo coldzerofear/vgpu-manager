@@ -1322,6 +1322,53 @@ typedef struct CUDA_HOST_NODE_PARAMS_v2_st {
 } CUDA_HOST_NODE_PARAMS_v2;
 
 /**
+ * Conditional node handle flags
+ */
+#define CU_GRAPH_COND_ASSIGN_DEFAULT   0x1 /**< Default value is applied when graph is launched. */
+
+/**
+ * Conditional node types
+ */
+typedef enum CUgraphConditionalNodeType_enum {
+     CU_GRAPH_COND_TYPE_IF = 0,     /**< Conditional 'if/else' Node. Body[0] executed if condition is non-zero.  If \p size == 2, an optional ELSE graph is created and this is executed if the condition is zero. */
+     CU_GRAPH_COND_TYPE_WHILE = 1,  /**< Conditional 'while' Node. Body executed repeatedly while condition value is non-zero. */
+     CU_GRAPH_COND_TYPE_SWITCH = 2, /**< Conditional 'switch' Node. Body[n] is executed once, where 'n' is the value of the condition. If the condition does not match a body index, no body is launched. */
+} CUgraphConditionalNodeType;
+
+/**
+ * Conditional node parameters
+ */
+typedef struct CUDA_CONDITIONAL_NODE_PARAMS {
+    CUgraphConditionalHandle handle;   /**< Conditional node handle.
+                                            Handles must be created in advance of creating the node
+                                            using ::cuGraphConditionalHandleCreate. */
+    CUgraphConditionalNodeType type;   /**< Type of conditional node. */
+    unsigned int size;                 /**< Size of graph output array.  Allowed values are 1 for CU_GRAPH_COND_TYPE_WHILE, 1 or 2
+                                            for CU_GRAPH_COND_TYPE_IF, or any value greater than zero for CU_GRAPH_COND_TYPE_SWITCH. */
+    CUgraph *phGraph_out;              /**< CUDA-owned array populated with conditional node child graphs during creation of the node.
+                                            Valid for the lifetime of the conditional node.
+                                            The contents of the graph(s) are subject to the following constraints:
+
+                                            - Allowed node types are kernel nodes, empty nodes, child graphs, memsets,
+                                              memcopies, and conditionals. This applies recursively to child graphs and conditional bodies.
+                                            - All kernels, including kernels in nested conditionals or child graphs at any level,
+                                              must belong to the same CUDA context.
+
+                                            These graphs may be populated using graph node creation APIs or ::cuStreamBeginCaptureToGraph.
+
+                                            CU_GRAPH_COND_TYPE_IF:
+                                            phGraph_out[0] is executed when the condition is non-zero.  If \p size == 2, phGraph_out[1] will
+                                            be executed when the condition is zero.
+                                            CU_GRAPH_COND_TYPE_WHILE:
+                                            phGraph_out[0] is executed as long as the condition is non-zero.
+                                            CU_GRAPH_COND_TYPE_SWITCH:
+                                            phGraph_out[n] is executed when the condition is equal to n.  If the condition >= \p size,
+                                            no body graph is executed.
+                                         */
+    CUcontext ctx;                     /**< Context on which to run the node.  Must match context used to create the handle and all body nodes. */
+} CUDA_CONDITIONAL_NODE_PARAMS;
+
+/**
  * Child graph node parameters
  */
 typedef struct CUDA_CHILD_GRAPH_NODE_PARAMS_st {
@@ -2991,6 +3038,7 @@ typedef enum CUmemAllocationHandleType_enum {
     CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 0x1,  /**< Allows a file descriptor to be used for exporting. Permitted only on POSIX systems. (int) */
     CU_MEM_HANDLE_TYPE_WIN32                 = 0x2,  /**< Allows a Win32 NT handle to be used for exporting. (HANDLE) */
     CU_MEM_HANDLE_TYPE_WIN32_KMT             = 0x4,  /**< Allows a Win32 KMT handle to be used for exporting. (D3DKMT_HANDLE) */
+    CU_MEM_HANDLE_TYPE_FABRIC                = 0x8,  /**< Allows a fabric handle to be used for exporting. (CUmemFabricHandle)*/
     CU_MEM_HANDLE_TYPE_MAX                   = 0x7FFFFFFF
 } CUmemAllocationHandleType;
 
@@ -3003,7 +3051,6 @@ typedef enum CUmemAccess_flags_enum {
     CU_MEM_ACCESS_FLAGS_PROT_READWRITE   = 0x3,  /**< Make the address range read-write accessible */
     CU_MEM_ACCESS_FLAGS_PROT_MAX         = 0x7FFFFFFF
 } CUmemAccess_flags;
-
 
 /**
  * Specifies the type of location
@@ -3279,7 +3326,8 @@ typedef struct CUmemPoolProps_st {
      */
     void *win32SecurityAttributes;
     size_t maxSize;             /**< Maximum pool size. When set to 0, defaults to a system dependent value. */
-    unsigned char reserved[56]; /**< reserved for future use, must be 0 */
+    unsigned short usage;       /**< Bitmask indicating intended usage for the pool. */
+    unsigned char reserved[54]; /**< reserved for future use, must be 0 */
 } CUmemPoolProps_v1;
 typedef CUmemPoolProps_v1 CUmemPoolProps;
 
@@ -3298,29 +3346,32 @@ typedef struct CUDA_MEM_ALLOC_NODE_PARAMS_v2_st {
     CUdeviceptr dptr; /**< out: address of the allocation returned by CUDA */
 } CUDA_MEM_ALLOC_NODE_PARAMS_v2;
 
+/**
+ * Graph node parameters.  See ::cuGraphAddNode.
+ */
 typedef struct CUgraphNodeParams_st {
-    CUgraphNodeType type;
-    int reserved0[3];
+    CUgraphNodeType type; /**< Type of the node */
+    int reserved0[3]; /**< Reserved. Must be zero. */
 
     union {
-        long long                             reserved1[29];
-        CUDA_KERNEL_NODE_PARAMS_v3            kernel;
-        CUDA_MEMCPY_NODE_PARAMS               memcpy;
-        CUDA_MEMSET_NODE_PARAMS_v2            memset;
-        CUDA_HOST_NODE_PARAMS_v2              host;
-        CUDA_CHILD_GRAPH_NODE_PARAMS          graph;
-        CUDA_EVENT_WAIT_NODE_PARAMS           eventWait;
-        CUDA_EVENT_RECORD_NODE_PARAMS         eventRecord;
-        CUDA_EXT_SEM_SIGNAL_NODE_PARAMS_v2    extSemSignal;
-        CUDA_EXT_SEM_WAIT_NODE_PARAMS_v2      extSemWait;
-        CUDA_MEM_ALLOC_NODE_PARAMS_v2         alloc;
-        CUDA_MEM_FREE_NODE_PARAMS             free;
-        CUDA_BATCH_MEM_OP_NODE_PARAMS_v2      memOp;
+        long long                             reserved1[29]; /**< Padding. Unused bytes must be zero. */
+        CUDA_KERNEL_NODE_PARAMS_v3            kernel;        /**< Kernel node parameters. */
+        CUDA_MEMCPY_NODE_PARAMS               memcpy;        /**< Memcpy node parameters. */
+        CUDA_MEMSET_NODE_PARAMS_v2            memset;        /**< Memset node parameters. */
+        CUDA_HOST_NODE_PARAMS_v2              host;          /**< Host node parameters. */
+        CUDA_CHILD_GRAPH_NODE_PARAMS          graph;         /**< Child graph node parameters. */
+        CUDA_EVENT_WAIT_NODE_PARAMS           eventWait;     /**< Event wait node parameters. */
+        CUDA_EVENT_RECORD_NODE_PARAMS         eventRecord;   /**< Event record node parameters. */
+        CUDA_EXT_SEM_SIGNAL_NODE_PARAMS_v2    extSemSignal;  /**< External semaphore signal node parameters. */
+        CUDA_EXT_SEM_WAIT_NODE_PARAMS_v2      extSemWait;    /**< External semaphore wait node parameters. */
+        CUDA_MEM_ALLOC_NODE_PARAMS_v2         alloc;         /**< Memory allocation node parameters. */
+        CUDA_MEM_FREE_NODE_PARAMS             free;          /**< Memory free node parameters. */
+        CUDA_BATCH_MEM_OP_NODE_PARAMS_v2      memOp;         /**< MemOp node parameters. */
+        CUDA_CONDITIONAL_NODE_PARAMS          conditional;   /**< Conditional node parameters. */
     };
 
-    long long reserved2;
+    long long reserved2; /**< Reserved bytes. Must be zero. */
 } CUgraphNodeParams;
-
 /**
  * Opaque data for exporting a pool allocation
  */
@@ -3332,7 +3383,7 @@ typedef CUmemPoolPtrExportData_v1 CUmemPoolPtrExportData;
 /**
  * Memory allocation node parameters
  */
-typedef struct CUDA_MEM_ALLOC_NODE_PARAMS_st {
+typedef struct CUDA_MEM_ALLOC_NODE_PARAMS_v1_st {
     /**
     * in: location where the allocation should reside (specified in ::location).
     * ::handleTypes must be ::CU_MEM_HANDLE_TYPE_NONE. IPC is not supported.
@@ -3342,7 +3393,8 @@ typedef struct CUDA_MEM_ALLOC_NODE_PARAMS_st {
     size_t accessDescCount; /**< in: number of memory access descriptors.  Must not exceed the number of GPUs. */
     size_t bytesize; /**< in: size in bytes of the requested allocation */
     CUdeviceptr dptr; /**< out: address of the allocation returned by CUDA */
-} CUDA_MEM_ALLOC_NODE_PARAMS;
+} CUDA_MEM_ALLOC_NODE_PARAMS_v1;
+typedef CUDA_MEM_ALLOC_NODE_PARAMS_v1 CUDA_MEM_ALLOC_NODE_PARAMS;
 
 typedef enum CUgraphMem_attribute_enum {
     /**
