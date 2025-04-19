@@ -12,7 +12,7 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 - [x] Dynamically scale core limitations based on remaining resources
 - [x] Allow virtual memory to be used when memory limit is exceeded 
 - [x] Allow GPU virtual memory based on UVA
-- [x] support open-gpu-kernel-modules driver compatibility mode
+- [x] Support open-gpu-kernel-modules driver compatibility mode
 
 > Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 

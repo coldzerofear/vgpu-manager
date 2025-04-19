@@ -6,22 +6,13 @@ vgpu-manager supports virtual memory functionality, which allows the use of GPUs
 
 Set a floating-point number greater than 1 using the startup parameter `--device-memory-scaling` of the device plugin.
 
-Example:
-
 ```yaml
 $ kubectl edit ds -n kube-system vgpu-manager-device-plugin
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: vgpu-manager-device-plugin
-  namespace: kube-system
-spec:
-  template:
-    spec:
-      containers:
-        - command:
-            - deviceplugin
-            - --device-memory-scaling=2.0 # Set the memory scaling ratio to 2 times
+  containers:
+  - name: device-plugin
+    command:
+    - deviceplugin
+    - --device-memory-scaling=2.0 # Set the memory scaling ratio to 2 times
 ```
 
 After waiting for the device plugin pod to run again, check the node annotation:
@@ -42,7 +33,7 @@ When the physical memory of the GPU reaches its limit, allowing the allocation o
 
 Add the environment variable `CUDA_MEM_OVERSOLD` to the container configuration to enable this feature.
 
-Example pod:
+Pod example:
 
 ```yaml
 apiVersion: v1

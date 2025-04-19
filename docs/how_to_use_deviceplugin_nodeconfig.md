@@ -4,9 +4,10 @@ The vgpu-manager supports configuring NodeConfig and mounting it to the device p
 
 ## Usage
 
-Create nodeconfig.json configmap
+Create nodeConfig.json configmap
 
 Example:
+
 ```yaml
 apiVersion: v1
 data:
