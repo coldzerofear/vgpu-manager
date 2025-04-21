@@ -22,13 +22,28 @@ type NodeTopologyInfo []TopologyInfo
 
 func (n NodeTopologyInfo) Encode() (string, error) {
 	if marshal, err := json.Marshal(n); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to encode node topology: %w", err)
 	} else {
 		return string(marshal), nil
 	}
 }
 
+func (n *NodeTopologyInfo) Decode(val string) error {
+	if n == nil {
+		return fmt.Errorf("self is empty")
+	}
+	topology, err := ParseNodeTopology(val)
+	if err != nil {
+		return fmt.Errorf("failed to decode node topology: %w", err)
+	}
+	*n = topology
+	return nil
+}
+
 func ParseNodeTopology(val string) (NodeTopologyInfo, error) {
+	if strings.TrimSpace(val) == "" {
+		return nil, fmt.Errorf("input value is empty")
+	}
 	var nodeTopologyInfo NodeTopologyInfo
 	err := json.Unmarshal([]byte(val), &nodeTopologyInfo)
 	if err != nil {
@@ -55,13 +70,28 @@ type NodeDeviceInfo []DeviceInfo
 
 func (n NodeDeviceInfo) Encode() (string, error) {
 	if marshal, err := json.Marshal(n); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to encode node device info: %w", err)
 	} else {
 		return string(marshal), nil
 	}
 }
 
+func (n *NodeDeviceInfo) Decode(val string) error {
+	if n == nil {
+		return fmt.Errorf("self is empty")
+	}
+	nodeDevice, err := ParseNodeDeviceInfo(val)
+	if err != nil {
+		return fmt.Errorf("failed to decode node device info: %w", err)
+	}
+	*n = nodeDevice
+	return nil
+}
+
 func ParseNodeDeviceInfo(val string) (NodeDeviceInfo, error) {
+	if strings.TrimSpace(val) == "" {
+		return nil, fmt.Errorf("input value is empty")
+	}
 	var nodeDevice NodeDeviceInfo
 	err := json.Unmarshal([]byte(val), &nodeDevice)
 	if err != nil {
@@ -94,7 +124,7 @@ func (c *ContainerDevices) UnmarshalText(text string) error {
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
-		return fmt.Errorf("text is empty")
+		return fmt.Errorf("input text is empty")
 	}
 	startIndex := strings.Index(text, "[")
 	if startIndex < 0 || startIndex == len(text)-1 {
@@ -104,7 +134,7 @@ func (c *ContainerDevices) UnmarshalText(text string) error {
 	if endIndex < 0 || endIndex != len(text)-1 {
 		return fmt.Errorf("decoding format error")
 	}
-	cds := []ClaimDevice{}
+	cds := make([]ClaimDevice, 0)
 	for _, subText := range strings.Split(text[startIndex+1:len(text)-1], ",") {
 		if len(subText) == 0 {
 			continue
@@ -141,7 +171,7 @@ func (c *ClaimDevice) UnmarshalText(text string) error {
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
-		return fmt.Errorf("text is empty")
+		return fmt.Errorf("input text is empty")
 	}
 	split := strings.Split(text, "_")
 	if len(split) != 4 {
@@ -190,9 +220,9 @@ func (p *PodDevices) UnmarshalText(text string) error {
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
-		return fmt.Errorf("text is empty")
+		return fmt.Errorf("input text is empty")
 	}
-	cds := []ContainerDevices{}
+	cds := make([]ContainerDevices, 0)
 	for _, subText := range strings.Split(text, ";") {
 		if len(subText) == 0 {
 			continue
