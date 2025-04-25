@@ -42,6 +42,7 @@ spec:
         - name: webhook
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          env: {{ toYaml .Values.webhook.env | nindent 12 }}
           command:
             - webhook
             {{- if .Values.scheduler.enabled }}

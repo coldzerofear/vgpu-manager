@@ -23,8 +23,10 @@ spec:
         {{- with .Values.devicePlugin.labels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      annotations:
+        device-plugin-config/checksum: {{ include (print $.Template.BasePath "/device-plugin/configmap.yaml") . | sha256sum }}
       {{- if .Values.devicePlugin.annotations }}
-      annotations: {{ toYaml .Values.devicePlugin.annotations | nindent 8 }}
+        {{- toYaml .Values.devicePlugin.annotations | nindent 8 }}
       {{- end }}
     spec:
       {{- if .Values.devicePlugin.runtimeClassName }}
@@ -92,8 +94,9 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
-            - name: DP_DISABLE_HEALTHCHECKS
-              value: ""
+          {{- if .Values.devicePlugin.devicePlugin.env }}
+            {{- toYaml .Values.devicePlugin.devicePlugin.env | nindent 12 }}
+          {{- end }}
           securityContext: {{ toYaml .Values.devicePlugin.securityContext | nindent 12 }}
           resources: {{ toYaml .Values.devicePlugin.devicePlugin.resources | nindent 12 }}
           volumeMounts:
@@ -131,6 +134,9 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+          {{- if .Values.devicePlugin.deviceMonitor.env }}
+            {{- toYaml .Values.devicePlugin.deviceMonitor.env | nindent 12 }}
+          {{- end }}
           securityContext: {{ toYaml .Values.devicePlugin.securityContext | nindent 12 }}
           resources: {{ toYaml .Values.devicePlugin.deviceMonitor.resources | nindent 12 }}
           livenessProbe:

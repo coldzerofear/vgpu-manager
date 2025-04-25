@@ -22,8 +22,10 @@ spec:
         {{- with .Values.scheduler.labels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+      annotations:
+        scheduler-config/checksum: {{ include (print $.Template.BasePath "/scheduler/configmap.yaml") . | sha256sum }}
       {{- if .Values.scheduler.annotations }}
-      annotations: {{ toYaml .Values.scheduler.annotations | nindent 8 }}
+        {{- toYaml .Values.scheduler.annotations | nindent 8 }}
       {{- end }}
     spec:
       {{- include "vgpu-manager.imagePullSecrets" . | nindent 6 }}
@@ -41,6 +43,7 @@ spec:
         - name: kube-scheduler
           image: {{ .Values.scheduler.kubeScheduler.image }}:{{ include "kubeSchedulerImageTag" . }}
           imagePullPolicy: {{ .Values.scheduler.kubeScheduler.imagePullPolicy | quote }}
+          env: {{ toYaml .Values.scheduler.kubeScheduler.env | nindent 12 }}
           command:
             - kube-scheduler
             {{- if ge (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 22 }}
@@ -72,6 +75,7 @@ spec:
         - name: scheduler-extender
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          env: {{ toYaml .Values.scheduler.schedulerExtender.env | nindent 12 }}
           command:
             - scheduler
             - --kube-api-qps={{ .Values.scheduler.schedulerExtender.commands.kubeApiQps }}

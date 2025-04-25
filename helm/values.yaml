@@ -34,6 +34,7 @@ scheduler:
     # Warning: Change to your own cluster version
     imageTag: ""
     imagePullPolicy: IfNotPresent
+    env: []
     args:
       - --feature-gates=
       - --v=3
@@ -42,6 +43,7 @@ scheduler:
         cpu: 100m
         memory: 256Mi
   schedulerExtender:
+    env: []
     commands:
       kubeApiQps: 20.0
       kubeApiBurst: 30
@@ -104,6 +106,9 @@ devicePlugin:
   # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
   cgroupDriver: ""
   devicePlugin:
+    env:
+      - name: DP_DISABLE_HEALTHCHECKS
+        value: ""
     commands:
       kubeApiQps: 20.0
       kubeApiBurst: 30
@@ -135,6 +140,7 @@ devicePlugin:
         cpu: 20m
         memory: 128Mi
   deviceMonitor:
+    env: []
     commands:
       kubeApiQps: 20.0
       kubeApiBurst: 30
@@ -192,6 +198,7 @@ webhook:
   excludeNamespaces:
     - kube-system
     - cert-manager
+  env: []
   commands:
     # webhook service port (default: 9443)
     serverBindPort: 9443
