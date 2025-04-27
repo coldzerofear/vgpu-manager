@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -170,6 +171,28 @@ func MutationMonitorOptions(opt monitoroptions.Options) func(*NodeConfig) {
 	}
 }
 
+func regexpMatch(expr, target string) bool {
+	compile, err := regexp.Compile(expr)
+	if err != nil {
+		return false
+	}
+	return compile.MatchString(target)
+}
+
+func matchNodeName(cmNodeName, cuNodeName string) bool {
+	cmNodeName = strings.TrimSpace(cmNodeName)
+	if len(cmNodeName) == 0 {
+		return false
+	}
+	if cmNodeName == cuNodeName {
+		return true
+	}
+	if cmNodeName[0] != '^' && cmNodeName[len(cmNodeName)-1] != '$' {
+		cmNodeName = "^" + cmNodeName + "$"
+	}
+	return regexpMatch(cmNodeName, cuNodeName)
+}
+
 func NewNodeConfig(mutations ...func(*NodeConfig)) (*NodeConfig, error) {
 	config := &NodeConfig{}
 	for _, mutation := range mutations {
@@ -180,44 +203,45 @@ func NewNodeConfig(mutations ...func(*NodeConfig)) (*NodeConfig, error) {
 		if err != nil {
 			return nil, err
 		}
-		var configMap []NodeConfigMap
-		if err = json.Unmarshal(configBytes, &configMap); err != nil {
+		var nodeConfigs []NodeConfigMap
+		if err = json.Unmarshal(configBytes, &nodeConfigs); err != nil {
 			return nil, err
 		}
-		for _, nodeConfigMap := range configMap {
-			if nodeConfigMap.NodeName != config.nodeName {
+		for _, nodeConfig := range nodeConfigs {
+			if !matchNodeName(nodeConfig.NodeName, config.nodeName) {
 				continue
 			}
-			klog.Infof("Matched node config <%s>", config.nodeName)
-			if nodeConfigMap.CGroupDriver != nil {
-				config.cgroupDriver = *nodeConfigMap.CGroupDriver
+			klog.InfoS("Matched node config", "nodeConfig.nodeName",
+				nodeConfig.NodeName, "current.nodeName", config.nodeName)
+			if nodeConfig.CGroupDriver != nil {
+				config.cgroupDriver = *nodeConfig.CGroupDriver
 			}
-			if nodeConfigMap.DeviceListStrategy != nil {
-				config.deviceListStrategy = *nodeConfigMap.DeviceListStrategy
+			if nodeConfig.DeviceListStrategy != nil {
+				config.deviceListStrategy = *nodeConfig.DeviceListStrategy
 			}
-			if nodeConfigMap.DeviceSplitCount != nil {
-				config.deviceSplitCount = *nodeConfigMap.DeviceSplitCount
+			if nodeConfig.DeviceSplitCount != nil {
+				config.deviceSplitCount = *nodeConfig.DeviceSplitCount
 			}
-			if nodeConfigMap.DeviceMemoryFactor != nil {
-				config.deviceMemoryFactor = *nodeConfigMap.DeviceMemoryFactor
+			if nodeConfig.DeviceMemoryFactor != nil {
+				config.deviceMemoryFactor = *nodeConfig.DeviceMemoryFactor
 			}
-			if nodeConfigMap.DeviceCoresScaling != nil {
-				config.deviceCoresScaling = *nodeConfigMap.DeviceCoresScaling
+			if nodeConfig.DeviceCoresScaling != nil {
+				config.deviceCoresScaling = *nodeConfig.DeviceCoresScaling
 			}
-			if nodeConfigMap.DeviceMemoryScaling != nil {
-				config.deviceMemoryScaling = *nodeConfigMap.DeviceMemoryScaling
+			if nodeConfig.DeviceMemoryScaling != nil {
+				config.deviceMemoryScaling = *nodeConfig.DeviceMemoryScaling
 			}
-			if nodeConfigMap.ExcludeDevices != nil {
-				config.excludeDevices = ParseExcludeDevices(*nodeConfigMap.ExcludeDevices)
+			if nodeConfig.ExcludeDevices != nil {
+				config.excludeDevices = ParseExcludeDevices(*nodeConfig.ExcludeDevices)
 			}
-			if nodeConfigMap.GDSEnabled != nil {
-				config.gdsEnabled = *nodeConfigMap.GDSEnabled
+			if nodeConfig.GDSEnabled != nil {
+				config.gdsEnabled = *nodeConfig.GDSEnabled
 			}
-			if nodeConfigMap.MOFEDEnabled != nil {
-				config.mofedEnabled = *nodeConfigMap.MOFEDEnabled
+			if nodeConfig.MOFEDEnabled != nil {
+				config.mofedEnabled = *nodeConfig.MOFEDEnabled
 			}
-			if nodeConfigMap.OpenKernelModules != nil {
-				config.openKernelModules = *nodeConfigMap.OpenKernelModules
+			if nodeConfig.OpenKernelModules != nil {
+				config.openKernelModules = *nodeConfig.OpenKernelModules
 			}
 			break
 		}

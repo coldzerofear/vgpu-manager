@@ -41,3 +41,80 @@ func Test_ParseExcludeDevices(t *testing.T) {
 		})
 	}
 }
+
+func Test_MatchNodeName(t *testing.T) {
+	tests := []struct {
+		name       string
+		cmNodeName string
+		cuNodeName string
+		want       bool
+	}{
+		{
+			name:       "example 1, Equal names",
+			cmNodeName: "testNode",
+			cuNodeName: "testNode",
+			want:       true,
+		}, {
+			name:       "example 2",
+			cmNodeName: "test.*",
+			cuNodeName: "testNode",
+			want:       true,
+		}, {
+			name:       "example 3",
+			cmNodeName: "^test_",
+			cuNodeName: "testNode",
+			want:       false,
+		}, {
+			name:       "example 4",
+			cmNodeName: "\\.Node$",
+			cuNodeName: "test.Node",
+			want:       true,
+		}, {
+			name:       "example 5",
+			cmNodeName: `Node$`,
+			cuNodeName: "testNode",
+			want:       true,
+		}, {
+			name:       "example 6",
+			cmNodeName: `(?i)node$`,
+			cuNodeName: "testNode",
+			want:       true,
+		}, {
+			name:       "example 7",
+			cmNodeName: `(?i)node(1|2)$`,
+			cuNodeName: "testNode2",
+			want:       true,
+		}, {
+			name:       "example 8",
+			cmNodeName: `(?i)node(1|2)$`,
+			cuNodeName: "testNode3",
+			want:       false,
+		}, {
+			name:       "example 9",
+			cmNodeName: "^test\\.",
+			cuNodeName: "test.Node",
+			want:       true,
+		}, {
+			name:       "example 10",
+			cmNodeName: "test",
+			cuNodeName: "testNode",
+			want:       false,
+		}, {
+			name:       "example 11",
+			cmNodeName: "*Node",
+			cuNodeName: "testNode",
+			want:       true,
+		}, {
+			name:       "example 12",
+			cmNodeName: "^test",
+			cuNodeName: "testNode",
+			want:       true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := matchNodeName(test.cmNodeName, test.cuNodeName)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
