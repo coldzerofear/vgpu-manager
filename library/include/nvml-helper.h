@@ -570,7 +570,6 @@ typedef enum {
   NVML_ENTRY_ENUM(nvmlDeviceGetComputeRunningProcesses_v3),
   NVML_ENTRY_ENUM(nvmlDeviceGetDefaultEccMode),
   NVML_ENTRY_ENUM(nvmlDeviceGetDynamicPstatesInfo),
-  // NVML_ENTRY_ENUM(nvmlDeviceGetFanControlPolicy),
   NVML_ENTRY_ENUM(nvmlDeviceGetFanControlPolicy_v2),
   NVML_ENTRY_ENUM(nvmlDeviceGetGpcClkMinMaxVfOffset),
   NVML_ENTRY_ENUM(nvmlDeviceGetGpcClkVfOffset),

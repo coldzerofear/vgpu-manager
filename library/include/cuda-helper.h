@@ -1110,6 +1110,7 @@ typedef enum {
   /** cuMipmappedArrayGetSparseProperties */
   CUDA_ENTRY_ENUM(cuMipmappedArrayGetSparseProperties),
   CUDA_ENTRY_ENUM(cuCtxCreate_v3),
+  CUDA_ENTRY_ENUM(cuCtxCreate_v4),
   CUDA_ENTRY_ENUM(cuCtxGetExecAffinity),
   CUDA_ENTRY_ENUM(cuDeviceGetExecAffinitySupport),
 //  CUDA_ENTRY_ENUM(cuDeviceGetGraphMemAttribute),
@@ -1119,7 +1120,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuFlushGPUDirectRDMAWrites),
   CUDA_ENTRY_ENUM(cuGetProcAddress),
   CUDA_ENTRY_ENUM(cuGetProcAddress_v2),
-//  CUDA_ENTRY_ENUM(cuGraphAddMemAllocNode),
+  CUDA_ENTRY_ENUM(cuGraphAddMemAllocNode),
 //  CUDA_ENTRY_ENUM(cuGraphAddMemFreeNode),
   CUDA_ENTRY_ENUM(cuGraphDebugDotPrint),
 //  CUDA_ENTRY_ENUM(cuGraphInstantiateWithFlags),
@@ -1187,7 +1188,6 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuTensorMapEncodeIm2col),
   CUDA_ENTRY_ENUM(cuTensorMapEncodeTiled),
   CUDA_ENTRY_ENUM(cuTensorMapReplaceAddress),
-  CUDA_ENTRY_ENUM(cuCtxCreate_v4),
   CUDA_ENTRY_END
 } cuda_entry_enum_t;
 
