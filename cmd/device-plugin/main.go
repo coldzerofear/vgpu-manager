@@ -65,9 +65,7 @@ func main() {
 	klog.V(3).Info("Initialize Device Resource Manager")
 	deviceManager, err := devm.NewDeviceManager(nodeConfig, kubeClient)
 	if err != nil {
-		klog.Infoln("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
-		klog.Infoln("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
-		klog.Fatalln(err)
+		klog.Fatalf("Create device manager failed: %v", err)
 	}
 
 	klog.V(3).Info("Starting FS watcher.")

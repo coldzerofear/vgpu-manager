@@ -88,9 +88,12 @@ func NewFakeDeviceManager(config *node.NodeConfig, version nvidia.DriverVersion,
 func NewDeviceManager(config *node.NodeConfig, kubeClient *kubernetes.Clientset) (*DeviceManager, error) {
 	driverlib, err := nvidia.NewDeviceLib("/")
 	if err != nil {
+		klog.Error("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
+		klog.Error("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
+		klog.Error("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
+		klog.Error("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
 		return nil, err
 	}
-
 	m := &DeviceManager{
 		DeviceLib: driverlib,
 		config:    config,
@@ -99,14 +102,20 @@ func NewDeviceManager(config *node.NodeConfig, kubeClient *kubernetes.Clientset)
 		unhealthy: make(chan *Device),
 		notify:    make(map[string]chan *Device),
 	}
-	return m, m.initDevices()
+	if err = m.Init(); err != nil {
+		klog.Errorf("If this is a GPU node, did you set the default container runtime to `nvidia`?")
+		klog.Errorf("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
+		klog.Errorf("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
+		klog.Errorf("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
+		return nil, err
+	}
+	defer m.Shutdown()
+	err = m.initDevices()
+	return m, err
 }
 
 func (m *DeviceManager) initDevices() error {
-	if err := m.Init(); err != nil {
-		return err
-	}
-	defer m.Shutdown()
+
 	driverVersion, ret := m.SystemGetDriverVersion()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error getting driver version: %s", nvml.ErrorString(ret))
