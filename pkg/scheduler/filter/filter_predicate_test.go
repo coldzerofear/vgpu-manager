@@ -115,9 +115,10 @@ func Test_DeviceFilter(t *testing.T) {
 		nodeGPUMap[node.Name] = nodeGPUInfos
 		nodeList = append(nodeList, node)
 	}
-
+	podUID := k8stypes.UID(uuid.NewString())
 	testCases := []struct {
 		name        string
+		uid         *k8stypes.UID
 		annotations map[string]string
 		containers  []corev1.Container
 		// result
@@ -177,6 +178,7 @@ func Test_DeviceFilter(t *testing.T) {
 			err:      fmt.Errorf("container cont1 requests vGPU number exceeding limit"),
 		}, {
 			name: "example4: single container, scheduled",
+			uid:  &podUID,
 			annotations: map[string]string{
 				util.PodPredicateNodeAnnotation: nodeList[1].Name,
 				util.PodVGPUPreAllocAnnotation: fmt.Sprintf("cont1[0_%s_10_2048]",
@@ -195,7 +197,7 @@ func Test_DeviceFilter(t *testing.T) {
 				},
 			},
 			nodeName: "",
-			err:      fmt.Errorf("pod pod-3 had been predicated"),
+			err:      fmt.Errorf("pod %s had been predicated", podUID),
 		}, {
 			name: "example5: single container, multiple devices",
 			containers: []corev1.Container{
@@ -289,6 +291,9 @@ func Test_DeviceFilter(t *testing.T) {
 					Phase: corev1.PodPending,
 				},
 			}
+			if testCase.uid != nil {
+				pod.UID = *testCase.uid
+			}
 			pod, _ = k8sClient.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{})
 
 			// wait for podLister to sync
@@ -323,7 +328,7 @@ func Test_DeviceFilter(t *testing.T) {
 
 func Test_HeartbeatFilter(t *testing.T) {
 	filterPredicate := gpuFilter{}
-	time, err := metav1.NowMicro().MarshalText()
+	timestamp, err := metav1.NowMicro().MarshalText()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +382,7 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(time),
+							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
 							util.DeviceMemoryFactorAnnotation:  "",
 						},
 					},
@@ -395,7 +400,7 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(time),
+							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
 							util.DeviceMemoryFactorAnnotation:  "-1",
 						},
 					},
@@ -431,7 +436,7 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(time),
+							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
 							util.DeviceMemoryFactorAnnotation:  "10",
 						},
 					},
@@ -442,7 +447,7 @@ func Test_HeartbeatFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(time),
+							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
 							util.DeviceMemoryFactorAnnotation:  "10",
 						},
 					},

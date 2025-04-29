@@ -62,8 +62,7 @@ func (alloc *allocator) addAllocateOne(contDevices *device.ContainerDevices) err
 // Allocate tries to find a suitable GPU device for containers
 // and records some data in pod's annotation
 func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
-	klog.V(4).Infof("Attempt to allocate pod <%s/%s> on node <%s>",
-		pod.Namespace, pod.Name, alloc.nodeInfo.GetName())
+	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
 	newPod := pod.DeepCopy()
 	var podAssignDevices device.PodDevices
 	for i := range newPod.Spec.Containers {
@@ -74,17 +73,22 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 		}
 		assignDevices, err := alloc.allocateOne(newPod, container)
 		if err != nil {
-			klog.V(4).Infof("Container <%s> device allocation failed: %v", container.Name, err)
+			klog.V(4).InfoS(err.Error(), "node", alloc.nodeInfo.GetName(),
+				"pod", klog.KObj(pod), "container", container.Name)
 			return nil, err
 		}
 		if err = alloc.addAllocateOne(assignDevices); err != nil {
-			return nil, err
+			klog.V(4).InfoS(err.Error(), "node", alloc.nodeInfo.GetName(),
+				"pod", klog.KObj(pod), "container", container.Name)
+			return nil, fmt.Errorf("internal device scheduling error")
 		}
 		podAssignDevices = append(podAssignDevices, *assignDevices)
 	}
 	preAlloc, err := podAssignDevices.MarshalText()
 	if err != nil {
-		return nil, fmt.Errorf("pod assign devices encoding failed: %v", err)
+		klog.V(4).InfoS(fmt.Sprintf("assign devices encoding failed: %v", err),
+			"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod))
+		return nil, fmt.Errorf("assign devices encoding failed")
 	}
 	util.InsertAnnotation(newPod, util.PodVGPUPreAllocAnnotation, preAlloc)
 	util.InsertAnnotation(newPod, util.PodPredicateNodeAnnotation, alloc.nodeInfo.GetName())
@@ -106,7 +110,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	needCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
 	needMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
 	if needNumber > alloc.nodeInfo.GetDeviceCount() {
-		return nil, fmt.Errorf("no enough GPU number on node %s", node.GetName())
+		return nil, fmt.Errorf("no enough GPU number on node")
 	}
 	// Calculate the actual requested memory size based on the node memory factor.
 	if needMemory > 0 {
@@ -120,7 +124,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	)
 	deviceStore := filterDevices(alloc.nodeInfo.GetDeviceMap(), pod, node.GetName(), needCores, needMemory)
 	if needNumber > len(deviceStore) {
-		return nil, fmt.Errorf("insufficient GPU on node %s", node.GetName())
+		return nil, fmt.Errorf("insufficient GPU on node")
 	} else if needNumber == len(deviceStore) {
 		claimDevices = allocateByNumbers(deviceStore, needNumber, needCores, needMemory)
 		goto DONE
@@ -143,7 +147,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	}
 DONE:
 	if len(claimDevices) != needNumber {
-		return nil, fmt.Errorf("insufficient GPU on node %s", node.GetName())
+		return nil, fmt.Errorf("insufficient GPU on node")
 	}
 	assignDevice := &device.ContainerDevices{Name: container.Name, Devices: claimDevices}
 	sort.Slice(assignDevice.Devices, func(i, j int) bool {
@@ -247,7 +251,7 @@ func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName s
 		}
 		// Filter for insufficient number of virtual devices.
 		if deviceInfo.AllocatableNumber() == 0 {
-			klog.V(4).Infof("Filter device <%d> insufficient available number on the node %s", i, nodeName)
+			klog.V(4).Infof("Filter device <%d> insufficient available number on the node <%s>", i, nodeName)
 			continue
 		}
 		reqMemory := needMemory

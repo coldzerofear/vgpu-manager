@@ -66,13 +66,13 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 		if len(pod.OwnerReferences) == 0 {
 			r.recorder.Event(pod, corev1.EventTypeWarning, "Recovery",
 				"Delete the current pod, causing the controller to recovery the pod and restart scheduling")
-			klog.V(4).Infof("Try to recovery pod <%s/%s> uid <%s>", pod.Namespace, pod.Name, pod.UID)
+			klog.V(4).Infof("Try to recovery pod <%s> uid <%s>", klog.KObj(pod), pod.UID)
 			// Attempt to delete pod
 			err := r.client.Delete(ctx, pod, &client.DeleteOptions{
 				Preconditions: metav1.NewUIDPreconditions(string(pod.UID)),
 			})
 			if err != nil {
-				klog.Errorf("Failed to delete pod <%s/%s>: %v", pod.Namespace, pod.Name, err)
+				klog.Errorf("Failed to delete pod <%s>: %v", klog.KObj(pod), err)
 				return reconcile.Result{}, err
 			}
 			// Push the pod into the recovery controller.
@@ -81,13 +81,13 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 		if shouldDeletePod {
 			r.recorder.Event(pod, corev1.EventTypeWarning, "Evict",
 				"Evict the current pod, causing the controller to rebuild the pod and restart scheduling")
-			klog.V(4).Infof("Try to evict pod <%s/%s> uid <%s>", pod.Namespace, pod.Name, pod.UID)
+			klog.V(4).Infof("Try to evict pod <%s> uid <%s>", klog.KObj(pod), pod.UID)
 			// Attempt to delete pod
 			err := r.client.Delete(ctx, pod, &client.DeleteOptions{
 				Preconditions: metav1.NewUIDPreconditions(string(pod.UID)),
 			})
 			if err != nil {
-				klog.Errorf("Failed to delete pod <%s/%s>: %v", pod.Namespace, pod.Name, err)
+				klog.Errorf("Failed to delete pod <%s>: %v", klog.KObj(pod), err)
 				return reconcile.Result{}, err
 			}
 		}

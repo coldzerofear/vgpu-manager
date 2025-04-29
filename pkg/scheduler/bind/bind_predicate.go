@@ -74,7 +74,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	b.Lock()
 	defer b.Unlock()
 
-	klog.V(4).InfoS("BindNode", "args", args)
+	klog.V(4).InfoS("BindingNode", "ExtenderBindingArgs", args)
 	var (
 		binding = &corev1.Binding{
 			ObjectMeta: metav1.ObjectMeta{
@@ -93,7 +93,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 
 	pod, err = b.kubeClient.CoreV1().Pods(args.PodNamespace).Get(ctx, args.PodName, metav1.GetOptions{})
 	if err != nil {
-		klog.ErrorS(err, "get target Pod <%s/%s> failed", args.PodNamespace, args.PodName)
+		klog.ErrorS(err, "Get target Pod <%s/%s> failed", args.PodNamespace, args.PodName)
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 	if pod.UID != args.PodUID {
@@ -105,13 +105,13 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	nodeName, ok := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
 	if ok && nodeName != args.Node {
 		err = fmt.Errorf("predicate node is different from the node to be bound")
-		klog.Warningf("Pod <%s/%s> %s", pod.Namespace, pod.Name, err.Error())
+		klog.Warningf("Pod <%s> %s", klog.KObj(pod), err.Error())
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 
 	if err = client.PatchPodAllocationAllocating(b.kubeClient, pod); err != nil {
 		err = fmt.Errorf("patch vgpu metadata failed: %v", err)
-		klog.Errorf("Patch Pod <%s/%s> metadata failed: %v", args.PodNamespace, args.PodName, err)
+		klog.Errorf("Patch Pod <%s> metadata failed: %v", klog.KObj(pod), err)
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 
@@ -125,7 +125,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	}
 
 	b.recorder.Eventf(pod, corev1.EventTypeNormal, "BindingSucceed",
-		"Successfully binding <%s/%s> to node <%s>", pod.Namespace, pod.Name, args.Node)
-	klog.V(3).Infof("Pod <%s/%s> binding Node <%s> successful", args.PodNamespace, args.PodName, args.Node)
+		"Successfully binding <%s> to node <%s>", klog.KObj(pod), args.Node)
+	klog.V(3).Infof("Pod <%s> binding Node <%s> successful", klog.KObj(pod), args.Node)
 	return &extenderv1.ExtenderBindingResult{}
 }

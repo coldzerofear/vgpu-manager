@@ -88,22 +88,23 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 		var extenderArgs extenderv1.ExtenderArgs
 		var extenderFilterResult *extenderv1.ExtenderFilterResult
 		if err := json.NewDecoder(body).Decode(&extenderArgs); err != nil {
-			klog.Errorf("Decode extender filter args err, %v", err)
+			klog.Errorf("Decode extender filter args failed: %v", err)
 			extenderFilterResult = &extenderv1.ExtenderFilterResult{
 				Error: err.Error(),
 			}
 		} else {
 			extenderFilterResult = predicate.Filter(r.Context(), extenderArgs)
-			klog.V(4).Infof("%s: ExtenderArgs = %+v", predicate.Name(), extenderArgs)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		if resultBody, err := json.Marshal(extenderFilterResult); err != nil {
-			klog.Errorf("Failed to marshal extenderFilterResult: %+v, %+v", err, extenderFilterResult)
+			klog.ErrorS(err, "Failed to marshal extenderFilterResult",
+				"extenderFilterResult", extenderFilterResult)
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(err.Error()))
 		} else {
-			klog.V(4).Infof("%s: extenderFilterResult = %s", predicate.Name(), string(resultBody))
+			klog.V(4).InfoS(predicate.Name()+" return extenderFilterResult",
+				"extenderFilterResult", string(resultBody))
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(resultBody)
 		}
@@ -126,22 +127,23 @@ func BindPredicateRoute(predicate predicate.BindPredicate) httprouter.Handle {
 		var extenderBindingResult *extenderv1.ExtenderBindingResult
 
 		if err := json.NewDecoder(body).Decode(&extenderBindingArgs); err != nil {
-			klog.Errorf("Decode extender binding args err, %v", err)
+			klog.Errorf("Decode extender binding args failed: %v", err)
 			extenderBindingResult = &extenderv1.ExtenderBindingResult{
 				Error: err.Error(),
 			}
 		} else {
 			extenderBindingResult = predicate.Bind(r.Context(), extenderBindingArgs)
-			klog.V(4).Infof("%s: ExtenderBindingArgs = %+v", predicate.Name(), extenderBindingArgs)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if resultBody, err := json.Marshal(extenderBindingResult); err != nil {
-			klog.Errorf("Failed to marshal extenderBindingResult: %+v, %+v", err, extenderBindingResult)
+			klog.ErrorS(err, "Failed to marshal extenderBindingResult",
+				"extenderBindingResult", extenderBindingResult)
 			w.WriteHeader(http.StatusInternalServerError)
 			errMsg := fmt.Sprintf("{'error':'%s'}", err.Error())
 			_, _ = w.Write([]byte(errMsg))
 		} else {
-			klog.V(4).Infof("%s: extenderBindingResult = %s", predicate.Name(), string(resultBody))
+			klog.V(4).InfoS(predicate.Name()+" return extenderBindingResult",
+				"extenderBindingResult", string(resultBody))
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(resultBody)
 		}

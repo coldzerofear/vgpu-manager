@@ -59,13 +59,14 @@ func (f *gpuFilter) Name() string {
 type filterFunc func(*corev1.Pod, []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error)
 
 func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
-	klog.V(4).InfoS("FilterNode", "args", args)
+	klog.V(4).InfoS("FilterNode", "ExtenderArgs", args)
 	if args.Pod == nil {
 		return &extenderv1.ExtenderFilterResult{
-			Error: "Pod is empty",
+			Error: "Parameter Pod is empty",
 		}
 	}
 	if !util.IsVGPUResourcePod(args.Pod) {
+		klog.V(5).InfoS("Skip pods that do not request vGPU", "pod", klog.KObj(args.Pod))
 		return &extenderv1.ExtenderFilterResult{
 			Nodes:     args.Nodes,
 			NodeNames: args.NodeNames,
@@ -135,7 +136,9 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extende
 	filteredNodes := make([]corev1.Node, 0, len(nodeNames))
 	for _, nodeName := range nodeNames {
 		if node, err := f.nodeLister.Get(nodeName); err != nil {
-			failedNodesMap[nodeName] = fmt.Sprintf("node %s cache failed: %v", nodeName, err)
+			errMsg := "get node cache failed"
+			klog.ErrorS(err, errMsg, "node", nodeName)
+			failedNodesMap[nodeName] = errMsg
 		} else {
 			filteredNodes = append(filteredNodes, *node)
 		}
@@ -232,7 +235,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	)
 	// Skip pods that have already been scheduled.
 	if IsScheduled(pod) {
-		return filteredNodes, failedNodesMap, fmt.Errorf("pod %s had been predicated", pod.Name)
+		return filteredNodes, failedNodesMap, fmt.Errorf("pod %s had been predicated", pod.UID)
 	}
 
 	if err := f.CheckDeviceRequest(pod); err != nil {
@@ -242,7 +245,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 
 	pods, err := f.podLister.List(labels.Everything())
 	if err != nil {
-		klog.Errorf("PodLister list all pod error: %v", err)
+		klog.Errorf("PodLister get all pod failed: %v", err)
 		return filteredNodes, failedNodesMap, err
 	}
 	nodeOriginalPosition := map[string]int{}
@@ -254,11 +257,11 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			defer wait.Done()
 			_, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 			if !ok {
-				klog.V(3).Infof("Current node <%s> has not registered any GPU devices, skipping it", node.Name)
+				klog.V(3).Infof("The node <%s> has not registered any GPU devices, skipping node", node.Name)
 			}
 			if !ok || !util.IsVGPUEnabledNode(node) {
 				mu.Lock()
-				failedNodesMap[node.Name] = "no GPU device"
+				failedNodesMap[node.Name] = "node without GPU device"
 				mu.Unlock()
 				return
 			}
@@ -266,7 +269,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			nodePods := CollectPodsOnNode(pods, node)
 			nodeInfo, err := device.NewNodeInfo(node, nodePods)
 			if err != nil {
-				klog.Warningf("NewNodeInfo error, skipping node: %s, err: %v", node.Name, err)
+				klog.ErrorS(err, "Create node info failed, skipping node", "node", node.Name)
 				mu.Lock()
 				failedNodesMap[node.Name] = err.Error()
 				mu.Unlock()
@@ -284,13 +287,13 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
 	switch strings.ToLower(nodePolicy) {
 	case string(util.BinpackPolicy):
-		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, nodePolicy)
+		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), nodePolicy)
 		allocator.NewNodeBinpackPriority().Sort(nodeInfoList)
 	case string(util.SpreadPolicy):
-		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, nodePolicy)
+		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), nodePolicy)
 		allocator.NewNodeSpreadPriority().Sort(nodeInfoList)
 	default:
-		klog.V(4).Infof("Pod <%s/%s> no node scheduling policy", pod.Namespace, pod.Name)
+		klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
 		sort.Slice(nodeInfoList, func(i, j int) bool {
 			return nodeOriginalPosition[nodeInfoList[i].GetName()] < nodeOriginalPosition[nodeInfoList[j].GetName()]
 		})
@@ -305,14 +308,14 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		// Attempt to allocate devices for pods on this node.
 		newPod, err := allocator.NewAllocator(nodeInfo).Allocate(pod)
 		if err != nil {
-			klog.Errorln(err.Error())
+			klog.ErrorS(err, "node device allocate failed", "node", node.Name, "pod", klog.KObj(pod))
 			failedNodesMap[node.Name] = err.Error()
 			continue
 		}
 		err = client.PatchPodVGPUAnnotation(f.kubeClient, newPod)
 		if err != nil {
-			errMsg := fmt.Sprintf("patch pod vgpu metadata failed: %v", err)
-			klog.Errorln(errMsg)
+			errMsg := fmt.Sprintf("patch vGPU metadata failed")
+			klog.ErrorS(err, errMsg, "pod", klog.KObj(pod))
 			failedNodesMap[node.Name] = errMsg
 			continue
 		}
@@ -334,7 +337,7 @@ func CollectPodsOnNode(pods []*corev1.Pod, node *corev1.Node) []*corev1.Pod {
 		if (pod.Spec.NodeName == node.Name || predicateNode == node.Name) &&
 			pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
 			ret = append(ret, pod)
-			klog.V(5).Infof("Append Pod <%s/%s> on node <%s>", pod.Namespace, pod.Name, node.Name)
+			klog.V(5).Infof("Append Pod <%s> on node <%s>", klog.KObj(pod), node.Name)
 		}
 	}
 	return ret
