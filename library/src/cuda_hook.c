@@ -1355,7 +1355,7 @@ FROM_UVA:
         goto DONE;
       }
 
-      ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync, dptr, bytesize, hStream);
+      ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
       if (likely(ret == CUDA_SUCCESS)) {
         goto DONE;
       }
@@ -1367,7 +1367,7 @@ FROM_UVA:
       goto DONE;
     }
   }
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync, dptr, bytesize, hStream);
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocAsync call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s",
                         request_size, ret, cuda_error(ret, &mem_err_string));
@@ -1680,7 +1680,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
   }
   rate_limiter(gridDimX * gridDimY * gridDimZ,
               blockDimX * blockDimY * blockDimZ, ordinal);
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchKernel, f, gridDimX,
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernel), f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
                          sharedMemBytes, hStream, kernelParams, extra);
 DONE:
@@ -1697,7 +1697,7 @@ CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
   }
   rate_limiter(config->gridDimX * config->gridDimY * config->gridDimZ,
                config->blockDimX * config->blockDimY * config->blockDimZ, ordinal);
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchKernelEx, 
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernelEx),
                          config, f, kernelParams, extra);
 DONE:
   return ret;
@@ -1765,7 +1765,7 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
   }    
   rate_limiter(gridDimX * gridDimY * gridDimZ,
                blockDimX * blockDimY * blockDimZ, ordinal);
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchCooperativeKernel, f,
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchCooperativeKernel), f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
                          blockDimZ, sharedMemBytes, hStream, kernelParams);
 DONE:
