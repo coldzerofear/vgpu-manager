@@ -115,6 +115,26 @@ func setDefaultRuntimeClassName(pod *corev1.Pod, options *options.Options, logge
 	}
 }
 
+func cleanupMetadata(pod *corev1.Pod) {
+	// Cleaning metadata to prevent impact on scheduling.
+	reschedule.CleanupMetadata(pod)
+	// Clean up invalid scheduling policy annotations.
+	if !util.IsVGPUResourcePod(pod) {
+		if _, ok := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation); ok {
+			delete(pod.Annotations, util.NodeSchedulerPolicyAnnotation)
+		}
+		if _, ok := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation); ok {
+			delete(pod.Annotations, util.DeviceSchedulerPolicyAnnotation)
+		}
+	}
+	// Clean up invalid topology mode annotations.
+	if !IsSingleContainerMultiGPUs(pod) {
+		if _, ok := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation); ok {
+			delete(pod.Annotations, util.DeviceTopologyModeAnnotation)
+		}
+	}
+}
+
 func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
 	for i, container := range pod.Spec.Containers {
@@ -127,10 +147,9 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 			logger.V(4).Info("Successfully set 1 vGPU number", "containerName", container.Name)
 		}
 	}
-
+	// Clean up some useless metadata.
+	cleanupMetadata(pod)
 	if util.IsVGPUResourcePod(pod) {
-		// Cleaning metadata to prevent impact on scheduling
-		reschedule.CleanupMetadata(pod)
 		setDefaultSchedulerName(pod, h.options, logger)
 		setDefaultNodeSchedulerPolicy(pod, h.options, logger)
 		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)

@@ -141,6 +141,7 @@ spec:
   template:
     metadata:
       labels:
+        vgpu-manager.io/ignore-webhook: "true"
         app: vgpu-manager-scheduler
     spec:
       serviceAccountName: vgpu-manager-scheduler

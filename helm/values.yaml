@@ -24,24 +24,29 @@ scheduler:
   annotations: {}
   # Number of deployed replicas (default: 1)
   replicas: 1
-  # Name of deployed scheduler (default : vgpu-scheduler)
+  # Name of deployed scheduler (default: vgpu-scheduler)
   schedulerName: "vgpu-scheduler"
   nodeSelector: {}
   tolerations: []
   terminationGracePeriodSeconds: 30
   kubeScheduler:
     image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler
-    # Warning: Change to your own cluster version
+    # Warning: Change to your own cluster version (default automatic detection)
     imageTag: ""
     imagePullPolicy: IfNotPresent
     env: []
     args:
       - --feature-gates=
       - --v=3
-    resources:
-      requests:
-        cpu: 100m
-        memory: 256Mi
+    # Kube-scheduler container requests resources.
+    # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
+    resources: {}
+#      requests:
+#        cpu: 100m
+#        memory: 128Mi
+#      limits:
+#        cpu: 1000m
+#        memory: 1Gi
   schedulerExtender:
     env: []
     commands:
@@ -49,17 +54,22 @@ scheduler:
       kubeApiBurst: 30
       # scheduler-extender service port (default: 3456)
       serverBindPort: 3456
-      # The pprof service port used for debugging: (default disable: 0)
+      # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
       # Supported feature gates:
       # - SerialBindNode
       # - GPUTopology
-      featureGates: ""
+      featureGates: "SerialBindNode=true"
       logLevel: 3
-    resources:
-      requests:
-        cpu: 100m
-        memory: 128Mi
+    # Scheduler extender container requests resources.
+    # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
+    resources: {}
+#      requests:
+#        cpu: 100m
+#        memory: 128Mi
+#      limits:
+#        cpu: 1000m
+#        memory: 1Gi
 
 # Deployment configuration of the deviceplugin section
 devicePlugin:
@@ -122,7 +132,7 @@ devicePlugin:
       deviceMemoryScaling: 1.0
       # The default gpu memory block size is 1MB. (default: 1)
       deviceMemoryFactor: 1
-      # The pprof service port used for debugging: (default disable: 0)
+      # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
       gdsEnabled: false
       mofedEnabled: false
@@ -135,10 +145,15 @@ devicePlugin:
       # - GPUTopology
       featureGates: ""
       logLevel: 3
-    resources:
-      requests:
-        cpu: 20m
-        memory: 128Mi
+    # Device plugin container requests resources.
+    # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
+    resources: {}
+#      requests:
+#        cpu: 100m
+#        memory: 128Mi
+#      limits:
+#        cpu: 1000m
+#        memory: 1Gi
   deviceMonitor:
     env: []
     commands:
@@ -146,14 +161,18 @@ devicePlugin:
       kubeApiBurst: 30
       # Monitoring service port (default: 3456)
       serverBindPort: 3456
-      # The pprof service port used for debugging: (default disable: 0)
+      # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
       logLevel: 3
-    resources:
-      requests:
-        cpu: 20m
-        memory: 128Mi
-
+    # Device monitor container requests resources.
+    # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
+    resources: {}
+#      requests:
+#        cpu: 50m
+#        memory: 128Mi
+#      limits:
+#        cpu: 500m
+#        memory: 512Mi
   # Define node differentiation configuration files for device plugins
   nodeConfig:
     json: | 
@@ -182,7 +201,7 @@ webhook:
   # The last refresh time of the certificate. (default: 360h)
   certRenewBefore: 360h
   # mutate webhook failure Policy (Supported values: Ignore | Fail)
-  failurePolicy: Ignore
+  failurePolicy: Fail
   # pod labels
   labels: {}
   # pod annotations
@@ -198,11 +217,13 @@ webhook:
   excludeNamespaces:
     - kube-system
     - cert-manager
+#    - istio-system
+#    - volcano-system
   env: []
   commands:
     # webhook service port (default: 9443)
     serverBindPort: 9443
-    # The pprof service port used for debugging: (default disable: 0)
+    # The pprof service port used for debugging (default disable: 0)
     pprofBindPort: 0
     # CertDir is the directory that contains the server key and certificate.
     certDir: /tmp/k8s-webhook-server/serving-certs
@@ -213,8 +234,12 @@ webhook:
     # Default device list topology mode. (supported values: numa | link)
     defaultTopologyMode: ""
     logLevel: 4
-  # Webhook container requests resources
-  resources:
-    requests:
-      cpu: 20m
-      memory: 32Mi
+  # Webhook container requests resources.
+  # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
+  resources: {}
+#    requests:
+#      cpu: 20m
+#      memory: 32Mi
+#    limits:
+#      cpu: 200m
+#      memory: 256Mi

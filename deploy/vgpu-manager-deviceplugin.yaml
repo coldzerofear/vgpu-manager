@@ -94,6 +94,7 @@ spec:
       annotations:
         scheduler.alpha.kubernetes.io/critical-pod: ""
       labels:
+        vgpu-manager.io/ignore-webhook: "true"
         app: vgpu-manager-device-plugin
     spec:
       tolerations:
