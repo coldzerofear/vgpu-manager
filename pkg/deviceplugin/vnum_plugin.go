@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
@@ -38,7 +39,7 @@ type vnumberDevicePlugin struct {
 
 var _ DevicePlugin = &vnumberDevicePlugin{}
 
-// NewVNumberDevicePlugin returns an initialized vnumberDevicePlugin
+// NewVNumberDevicePlugin returns an initialized vnumberDevicePlugin.
 func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.DeviceManager,
 	kubeClient *kubernetes.Clientset, cache cache.Cache) DevicePlugin {
 
@@ -66,15 +67,15 @@ func (m *vnumberDevicePlugin) Stop() error {
 
 // GetDevicePluginOptions returns options to be communicated with Device Manager.
 func (m *vnumberDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
-	klog.V(4).Infoln("GetDevicePluginOptions")
+	klog.V(4).InfoS("GetDevicePluginOptions", "pluginName", m.Name())
 	return &pluginapi.DevicePluginOptions{PreStartRequired: true}, nil
 }
 
-// ListAndWatch returns a stream of List of Devices
+// ListAndWatch returns a stream of List of Devices,
 // Whenever a Device state change or a Device disappears,
 // ListAndWatch returns the new list.
 func (m *vnumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
-	klog.V(4).Infoln("ListAndWatch", s)
+	klog.V(4).InfoS("ListAndWatch", "pluginName", m.Name(), "server", s)
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 		klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
 	}
@@ -82,7 +83,7 @@ func (m *vnumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.Devic
 	for {
 		select {
 		case d := <-m.base.health:
-			if d.GPU != nil {
+			if d.GPU != nil && !d.GPU.MigEnabled {
 				klog.Infof("'%s' device marked unhealthy: %s", m.base.resourceName, d.GPU.UUID)
 				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
@@ -96,7 +97,7 @@ func (m *vnumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.Devic
 
 // GetPreferredAllocation returns the preferred allocation from the set of devices specified in the request.
 func (m *vnumberDevicePlugin) GetPreferredAllocation(_ context.Context, req *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
-	klog.V(4).Infoln("GetPreferredAllocation", req.GetContainerRequests())
+	klog.V(4).InfoS("GetPreferredAllocation", "pluginName", m.Name(), "request", req.GetContainerRequests())
 	return &pluginapi.PreferredAllocationResponse{}, nil
 }
 
@@ -119,7 +120,6 @@ const (
 	VGPUConfigFileName = "vgpu.config"
 	DeviceListFileName = "devices.json"
 
-	//NvidiaDeviceFilePrefix = "/dev/nvidia"
 	NvidiaCTLFilePath      = "/dev/nvidiactl"
 	NvidiaUVMFilePath      = "/dev/nvidia-uvm"
 	NvidiaUVMToolsFilePath = "/dev/nvidia-uvm-tools"
@@ -144,22 +144,29 @@ func GetContManagerDirectoryPath(podUID types.UID, containerName string) string 
 	return fmt.Sprintf("%s/%s_%s", ContManagerDirectoryPath, string(podUID), containerName)
 }
 
-func (m *vnumberDevicePlugin) passDeviceSpecs(gpus []manager.GPUDevice) []*pluginapi.DeviceSpec {
+func passDeviceSpecs(devices []manager.Device) []*pluginapi.DeviceSpec {
 	deviceMountOptional := map[string]bool{
 		NvidiaCTLFilePath:      true,
 		NvidiaUVMFilePath:      true,
 		NvidiaUVMToolsFilePath: true,
 		NvidiaModeSetFilePath:  true,
 	}
-	var specs []*pluginapi.DeviceSpec
-	for _, gpuDevice := range gpus {
-		for _, devPath := range gpuDevice.Paths {
-			specs = append(specs, &pluginapi.DeviceSpec{
-				ContainerPath: devPath,
-				HostPath:      devPath,
-				Permissions:   "rw",
-			})
+	devPaths := sets.NewString()
+	for _, dev := range devices {
+		if dev.GPU != nil {
+			devPaths.Insert(dev.GPU.Paths...)
 		}
+		if dev.MIG != nil {
+			devPaths.Insert(dev.MIG.Paths...)
+		}
+	}
+	var specs []*pluginapi.DeviceSpec
+	for devPath := range devPaths {
+		specs = append(specs, &pluginapi.DeviceSpec{
+			ContainerPath: devPath,
+			HostPath:      devPath,
+			Permissions:   "rw",
+		})
 	}
 	for devPath, enabled := range deviceMountOptional {
 		if !enabled || util.PathIsNotExist(devPath) {
@@ -174,18 +181,42 @@ func (m *vnumberDevicePlugin) passDeviceSpecs(gpus []manager.GPUDevice) []*plugi
 	return specs
 }
 
+func updateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, config node.NodeConfig, deviceIDs ...string) error {
+	switch config.DeviceListStrategy() {
+	case util.DeviceListStrategyEnvvar:
+		response.Envs[deviceListEnvVar] = strings.Join(deviceIDs, ",")
+	case util.DeviceListStrategyVolumeMounts:
+		response.Envs[deviceListEnvVar] = deviceListAsVolumeMountsContainerPathRoot
+		for _, id := range deviceIDs {
+			response.Mounts = append(response.Mounts, &pluginapi.Mount{
+				HostPath:      deviceListAsVolumeMountsHostPath,
+				ContainerPath: filepath.Join(deviceListAsVolumeMountsContainerPathRoot, id),
+			})
+		}
+	default:
+		return fmt.Errorf("unsupported device list strategy: %s", config.DeviceListStrategy())
+	}
+	if config.GDSEnabled() {
+		response.Envs["NVIDIA_GDS"] = "enabled"
+	}
+	if config.MOFEDEnabled() {
+		response.Envs["NVIDIA_MOFED"] = "enabled"
+	}
+	return nil
+}
+
 // Allocate is called during container creation so that the Device
 // Plugin can run device specific operations and instruct Kubelet
 // of the steps to make the Device available in the container.
 func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
-	klog.V(4).Infoln("Allocate", req.GetContainerRequests())
-	resp = &pluginapi.AllocateResponse{}
+	klog.V(4).InfoS("Allocate", "pluginName", m.Name(), "request", req.GetContainerRequests())
 	var (
 		activePods    []corev1.Pod
 		currentPod    *corev1.Pod
 		assignDevs    *device.ContainerDevices
 		podCgroupPath string
 	)
+	resp = &pluginapi.AllocateResponse{}
 	// When an error occurs, return a fixed format error message
 	// and patch the failed metadata allocation.
 	defer func() {
@@ -234,52 +265,44 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		}
 		klog.V(4).Infof("Current Pod <%s> allocated container is <%s>", klog.KObj(currentPod), assignDevs.Name)
 		var (
-			deviceIds   []string
-			envMap      = make(map[string]string)
-			mounts      []*pluginapi.Mount
-			gpuDevices  []manager.GPUDevice
-			deviceSpecs []*pluginapi.DeviceSpec
+			deviceIds  []string
+			gpuDevices []manager.Device
+			response   = &pluginapi.ContainerAllocateResponse{
+				Envs: make(map[string]string),
+			}
 		)
-		envMap[util.PodNameEnv] = currentPod.Name
-		envMap[util.PodNamespaceEnv] = currentPod.Namespace
-		envMap[util.PodUIDEnv] = string(currentPod.UID)
-		envMap[util.ContNameEnv] = assignDevs.Name
-		envMap[util.CudaMemoryRatioEnv] = fmt.Sprintf("%.2f", memoryRatio)
+		response.Envs[util.PodNameEnv] = currentPod.Name
+		response.Envs[util.PodNamespaceEnv] = currentPod.Namespace
+		response.Envs[util.PodUIDEnv] = string(currentPod.UID)
+		response.Envs[util.ContNameEnv] = assignDevs.Name
+		response.Envs[util.CudaMemoryRatioEnv] = fmt.Sprintf("%.2f", memoryRatio)
 		sort.Slice(assignDevs.Devices, func(i, j int) bool {
 			return assignDevs.Devices[i].Id < assignDevs.Devices[j].Id
 		})
 		for idx, dev := range assignDevs.Devices {
 			memoryLimitEnv := fmt.Sprintf("%s_%d", util.CudaMemoryLimitEnv, idx)
-			envMap[memoryLimitEnv] = fmt.Sprintf("%dm", dev.Memory)
+			response.Envs[memoryLimitEnv] = fmt.Sprintf("%dm", dev.Memory)
 			deviceIds = append(deviceIds, dev.Uuid)
-			gpuDevice, exist := deviceMap[dev.Uuid]
-			if !exist {
-				err = fmt.Errorf("device %s does not exist", dev.Uuid)
+			gpuDevice, exists := deviceMap[dev.Uuid]
+			if !exists {
+				err = fmt.Errorf("GPU device %s does not exist", dev.Uuid)
 				klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
 				return resp, err
 			}
-			gpuDevices = append(gpuDevices, gpuDevice)
+			gpuDevices = append(gpuDevices, manager.Device{GPU: &gpuDevice})
 			if dev.Cores > 0 && dev.Cores < util.HundredCore {
 				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, idx)
-				envMap[coreLimitEnv] = strconv.Itoa(dev.Cores)
+				response.Envs[coreLimitEnv] = strconv.Itoa(dev.Cores)
 			}
 		}
-		deviceIdsVal := strings.Join(deviceIds, ",")
-		envMap[util.GPUDevicesUuidEnv] = deviceIdsVal
-		switch nodeConfig.DeviceListStrategy() {
-		case util.DeviceListStrategyEnvvar:
-			envMap[deviceListEnvVar] = deviceIdsVal
-		case util.DeviceListStrategyVolumeMounts:
-			envMap[deviceListEnvVar] = deviceListAsVolumeMountsContainerPathRoot
-			for _, id := range deviceIds {
-				mounts = append(mounts, &pluginapi.Mount{
-					HostPath:      deviceListAsVolumeMountsHostPath,
-					ContainerPath: filepath.Join(deviceListAsVolumeMountsContainerPathRoot, id),
-				})
-			}
+		response.Envs[util.GPUDevicesUuidEnv] = strings.Join(deviceIds, ",")
+		err = updateResponseForNodeConfig(response, nodeConfig, deviceIds...)
+		if err != nil {
+			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
+			return resp, err
 		}
-		deviceSpecs = append(deviceSpecs, m.passDeviceSpecs(gpuDevices)...)
-		mounts = append(mounts, &pluginapi.Mount{ // mount /proc dir
+		response.Devices = append(response.Devices, passDeviceSpecs(gpuDevices)...)
+		response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount /proc dir
 			ContainerPath: ContProcDirectoryPath,
 			HostPath:      HostProcDirectoryPath,
 			ReadOnly:      true,
@@ -319,7 +342,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
 			return resp, err
 		}
-		mounts = append(mounts, &pluginapi.Mount{
+		response.Mounts = append(response.Mounts, &pluginapi.Mount{
 			ContainerPath: ContCGroupDirectoryPath,
 			HostPath:      hostCGroupFullPath,
 			ReadOnly:      true,
@@ -346,7 +369,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		hostVGPUConfigPath := filepath.Join(hostManagerDirectory, VGPUConfigDirName)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/vgpu_lock
 		hostVGPULockPath := filepath.Join(hostManagerDirectory, VGPULockDirName)
-		mounts = append(mounts, &pluginapi.Mount{ // mount vgpu.config file
+		response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount vgpu.config file
 			ContainerPath: ContConfigDirectoryPath,
 			HostPath:      hostVGPUConfigPath,
 			ReadOnly:      true,
@@ -367,17 +390,8 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			return resp, err
 		}
 		currentPod.Annotations[util.PodVGPURealAllocAnnotation] = realAllocated
-		if m.base.manager.GetNodeConfig().GDSEnabled() {
-			envMap["NVIDIA_GDS"] = "enabled"
-		}
-		if m.base.manager.GetNodeConfig().MOFEDEnabled() {
-			envMap["NVIDIA_MOFED"] = "enabled"
-		}
-		responses[i] = &pluginapi.ContainerAllocateResponse{
-			Envs:    envMap,
-			Mounts:  mounts,
-			Devices: deviceSpecs,
-		}
+
+		responses[i] = response
 	}
 	resp.ContainerResponses = responses
 	patchErr := client.PatchPodAllocationSucceed(m.kubeClient, currentPod)
@@ -387,7 +401,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	return resp, nil
 }
 
-// GetActiveVGPUPodsOnNode Get the vgpu pods on the node
+// GetActiveVGPUPodsOnNode Get the vgpu pods on the node.
 func (m *vnumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
 	podList := corev1.PodList{}
 	err := m.cache.List(context.Background(), &podList)
@@ -451,9 +465,8 @@ func (m *vnumberDevicePlugin) getCurrentPodInfo(devicesIDs []string) (*client.Po
 // PreStartContainer is called, if indicated by Device Plugin during registeration phase,
 // before each container start. Device plugin can run device specific operations
 // such as resetting the device before making devices available to the container.
-func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context,
-	req *pluginapi.PreStartContainerRequest) (resp *pluginapi.PreStartContainerResponse, err error) {
-	klog.V(4).Infoln("PreStartContainer", req.GetDevicesIDs())
+func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *pluginapi.PreStartContainerRequest) (resp *pluginapi.PreStartContainerResponse, err error) {
+	klog.V(4).InfoS("PreStartContainer", "pluginName", m.Name(), "request", req.GetDevicesIDs())
 	resp = &pluginapi.PreStartContainerResponse{}
 	defer func() {
 		if err != nil {

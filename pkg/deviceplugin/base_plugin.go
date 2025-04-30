@@ -25,7 +25,7 @@ type baseDevicePlugin struct {
 	stop   chan struct{}
 }
 
-// newBaseDevicePlugin returns an initialized baseDevicePlugin
+// newBaseDevicePlugin returns an initialized baseDevicePlugin.
 func newBaseDevicePlugin(resourceName, socket string, manager *manager.DeviceManager) *baseDevicePlugin {
 	return &baseDevicePlugin{
 		resourceName: resourceName,

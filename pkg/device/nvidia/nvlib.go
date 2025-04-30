@@ -248,7 +248,7 @@ func (l DeviceLib) Shutdown() {
 //	return devices, nil
 //}
 
-func (l DeviceLib) GetGPUInfo(index int, device nvdev.Device) (*GpuInfo, error) {
+func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) {
 	if err := l.Init(); err != nil {
 		return nil, err
 	}

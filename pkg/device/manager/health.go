@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -19,19 +20,18 @@ const (
 )
 
 // CheckHealth performs health checks on a set of devices, writing to the 'unhealthy' channel with any unhealthy devices
-func (m *DeviceManager) checkHealth() {
+func (m *DeviceManager) checkHealth() error {
 	disableHealthChecks := strings.ToLower(os.Getenv(envDisableHealthChecks))
 	if disableHealthChecks == "all" {
 		disableHealthChecks = allHealthChecks
 	}
 	if strings.Contains(disableHealthChecks, "xids") {
-		return
+		return nil
 	}
 
 	if err := m.Init(); err != nil {
-		klog.Fatalln(err)
+		return err
 	}
-
 	defer m.Shutdown()
 
 	// FIXME: formalize the full list and document it.
@@ -55,7 +55,9 @@ func (m *DeviceManager) checkHealth() {
 		skippedXids[additionalXid] = true
 	}
 	eventSet, ret := m.EventSetCreate()
-	handlerReturn(ret)
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("failed to create event set: %v", ret)
+	}
 	defer func() {
 		_ = eventSet.Free()
 	}()
@@ -108,7 +110,7 @@ func (m *DeviceManager) checkHealth() {
 		select {
 		case <-stopCh:
 			klog.V(5).Infoln("DeviceManager check health has stopped")
-			return
+			return nil
 		default:
 		}
 

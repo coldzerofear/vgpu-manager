@@ -124,6 +124,13 @@ const (
 	LinkTopology TopologyMode = "link"
 )
 
+// Constants representing the various MIG strategies
+const (
+	MigStrategyNone   = "none"
+	MigStrategySingle = "single"
+	MigStrategyMixed  = "mixed"
+)
+
 // Constants to represent the various device list strategies
 const (
 	DeviceListStrategyEnvvar         = "envvar"

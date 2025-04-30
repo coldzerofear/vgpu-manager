@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -34,11 +35,13 @@ type DevicePlugin interface {
 	Devices() []*pluginapi.Device
 }
 
-func InitDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
-	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) []DevicePlugin {
+func GetDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
+	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) ([]DevicePlugin, error) {
 	socket := filepath.Join(opt.DevicePluginPath, "vgpu-number.sock")
-	plugins := []DevicePlugin{NewVNumberDevicePlugin(util.VGPUNumberResourceName,
-		socket, devManager, kubeClient, clusterManager.GetCache())}
+	plugins := []DevicePlugin{
+		NewVNumberDevicePlugin(util.VGPUNumberResourceName,
+			socket, devManager, kubeClient, clusterManager.GetCache()),
+	}
 
 	var deleteResources []string
 
@@ -58,8 +61,42 @@ func InitDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
 		deleteResources = append(deleteResources, util.VGPUMemoryResourceName)
 	}
 
+	migStrategy := devManager.GetNodeConfig().MigStrategy()
+	if migStrategy != util.MigStrategyNone {
+		var requireUniformMIGDevices bool
+		if migStrategy == util.MigStrategySingle {
+			requireUniformMIGDevices = true
+		}
+		if err := devManager.AssertAllMigDevicesAreValid(requireUniformMIGDevices); err != nil {
+			return nil, fmt.Errorf("invalid MIG configuration: %v", err)
+		}
+		allMigEnabled := true
+		for _, gpuDevice := range devManager.GetGPUDeviceMap() {
+			if !gpuDevice.Healthy { //Skip excluded devices
+				continue
+			}
+			if !gpuDevice.MigEnabled {
+				allMigEnabled = false
+				break
+			}
+		}
+		migDevices := devManager.GetMIGDeviceMap()
+		if requireUniformMIGDevices && !allMigEnabled && len(migDevices) != 0 {
+			return nil, fmt.Errorf("all devices on the node must be configured with the same migEnabled value")
+		}
+		resourceSet := sets.NewString()
+		for _, mig := range migDevices {
+			resource := strings.ReplaceAll("mig-"+mig.Profile, "+", ".")
+			resourceSet.Insert(resource)
+		}
+		for resource := range resourceSet {
+			resourceName := fmt.Sprintf("%s/%s", util.DomainPrefix, resource)
+			socket = filepath.Join(opt.DevicePluginPath, fmt.Sprintf("nvidia-%s.sock", resource))
+			plugins = append(plugins, NewMigDevicePlugin(resourceName, socket, devManager))
+		}
+	}
 	go CycleCleanupNodeResources(kubeClient, opt.NodeName, deleteResources)
-	return plugins
+	return plugins, nil
 }
 
 const defaultDoneCount = 6

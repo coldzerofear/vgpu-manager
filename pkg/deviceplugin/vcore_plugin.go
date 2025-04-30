@@ -15,7 +15,7 @@ type vcoreDevicePlugin struct {
 
 var _ DevicePlugin = &vcoreDevicePlugin{}
 
-// NewVCoreDevicePlugin returns an initialized vcoreDevicePlugin
+// NewVCoreDevicePlugin returns an initialized vcoreDevicePlugin.
 func NewVCoreDevicePlugin(resourceName, socket string, manager *manager.DeviceManager) DevicePlugin {
 	return &vcoreDevicePlugin{base: newBaseDevicePlugin(resourceName, socket, manager)}
 }
@@ -34,14 +34,14 @@ func (m *vcoreDevicePlugin) Stop() error {
 	return m.base.Stop(m.Name())
 }
 
-// GetDevicePluginOptions returns options to be communicated with Device Manager
+// GetDevicePluginOptions returns options to be communicated with Device Manager.
 func (m *vcoreDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
 	return &pluginapi.DevicePluginOptions{}, nil
 }
 
-// ListAndWatch returns a stream of List of Devices
-// Whenever a Device state change or a Device disappears, ListAndWatch
-// returns the new list
+// ListAndWatch returns a stream of List of Devices,
+// Whenever a Device state change or a Device disappears,
+// ListAndWatch returns the new list.
 func (m *vcoreDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 		klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
@@ -50,7 +50,7 @@ func (m *vcoreDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DeviceP
 	for {
 		select {
 		case d := <-m.base.health:
-			if d.GPU != nil {
+			if d.GPU != nil && !d.GPU.MigEnabled {
 				klog.Infof("'%s' device marked unhealthy: %s", m.base.resourceName, d.GPU.UUID)
 				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
@@ -62,14 +62,14 @@ func (m *vcoreDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DeviceP
 	}
 }
 
-// GetPreferredAllocation returns the preferred allocation from the set of devices specified in the request
+// GetPreferredAllocation returns the preferred allocation from the set of devices specified in the request.
 func (m *vcoreDevicePlugin) GetPreferredAllocation(_ context.Context, _ *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
 	return &pluginapi.PreferredAllocationResponse{}, nil
 }
 
 // Allocate is called during container creation so that the Device
 // Plugin can run device specific operations and instruct Kubelet
-// of the steps to make the Device available in the container
+// of the steps to make the Device available in the container.
 func (m *vcoreDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateRequest) (*pluginapi.AllocateResponse, error) {
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	for i := range req.ContainerRequests {

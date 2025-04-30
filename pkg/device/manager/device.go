@@ -2,7 +2,6 @@ package manager
 
 import (
 	"fmt"
-	"runtime/debug"
 	"strconv"
 	"sync"
 
@@ -115,7 +114,6 @@ func NewDeviceManager(config *node.NodeConfig, kubeClient *kubernetes.Clientset)
 }
 
 func (m *DeviceManager) initDevices() error {
-
 	driverVersion, ret := m.SystemGetDriverVersion()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error getting driver version: %s", nvml.ErrorString(ret))
@@ -128,9 +126,12 @@ func (m *DeviceManager) initDevices() error {
 		DriverVersion:     driverVersion,
 		CudaDriverVersion: nvidia.CudaDriverVersion(cudaDriverVersion),
 	}
-	featureGate := featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-	gpuTopologyEnabled := featureGate != nil && featureGate.Enabled(options.GPUTopology)
-	var linksMap map[string]map[int][]links.P2PLinkType
+	var (
+		linksMap           map[string]map[int][]links.P2PLinkType
+		featureGate        = featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
+		gpuTopologyEnabled = featureGate != nil && featureGate.Enabled(options.GPUTopology)
+		exists             = false
+	)
 	if gpuTopologyEnabled {
 		deviceList, err := gpuallocator.NewDevices(
 			gpuallocator.WithDeviceLib(m),
@@ -153,7 +154,7 @@ func (m *DeviceManager) initDevices() error {
 		}
 	}
 	err := m.VisitDevices(func(i int, d nvdev.Device) error {
-		gpuInfo, err := m.GetGPUInfo(i, d)
+		gpuInfo, err := m.GetGpuInfo(i, d)
 		if err != nil {
 			return fmt.Errorf("error getting info for GPU %d: %w", i, err)
 		}
@@ -163,14 +164,16 @@ func (m *DeviceManager) initDevices() error {
 		}
 
 		healthy := !m.config.ExcludeDevices().Has(i)
+		if !healthy {
+			klog.Infof("exclude GPU %d from the device list and mark it as unhealthy", i)
+		}
 		paths, err := gpuInfo.GetPaths()
 		if err != nil {
 			return fmt.Errorf("error getting device paths for GPU %d: %v", i, err)
 		}
 		var p2pLinks map[int][]links.P2PLinkType
 		if gpuTopologyEnabled {
-			var ok bool
-			if p2pLinks, ok = linksMap[gpuInfo.UUID]; !ok {
+			if p2pLinks, exists = linksMap[gpuInfo.UUID]; !exists {
 				return fmt.Errorf("error getting device links for GPU %d", i)
 			}
 		}
@@ -204,6 +207,55 @@ func (m *DeviceManager) initDevices() error {
 	return err
 }
 
+func (m *DeviceManager) AssertAllMigDevicesAreValid(uniform bool) error {
+	if err := m.Init(); err != nil {
+		return err
+	}
+	defer m.Shutdown()
+	err := m.VisitDevices(func(i int, d nvdev.Device) error {
+		isMigEnabled, err := d.IsMigEnabled()
+		if err != nil {
+			return err
+		}
+		if !isMigEnabled {
+			return nil
+		}
+		migDevices, err := d.GetMigDevices()
+		if err != nil {
+			return err
+		}
+		if uniform && len(migDevices) == 0 {
+			return fmt.Errorf("device %v has no MIG devices configured", i)
+		}
+		if !uniform && len(migDevices) == 0 {
+			klog.Warningf("device %v has no MIG devices configured", i)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("at least one device with migEnabled=true was not configured correctly: %v", err)
+	}
+
+	if !uniform {
+		return nil
+	}
+
+	var previousAttributes *nvml.DeviceAttributes
+	return m.VisitMigDevices(func(i int, d nvdev.Device, j int, m nvdev.MigDevice) error {
+		attrs, ret := m.GetAttributes()
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("error getting device attributes: %v", ret)
+		}
+		if previousAttributes == nil {
+			previousAttributes = &attrs
+		} else if attrs != *previousAttributes {
+			return fmt.Errorf("more than one MIG device type present on node")
+		}
+
+		return nil
+	})
+}
+
 func (m *DeviceManager) GetGPUDeviceMap() map[string]GPUDevice {
 	m.mut.Lock()
 	defer m.mut.Unlock()
@@ -229,12 +281,16 @@ func (m *DeviceManager) GetMIGDeviceMap() map[string]MIGDevice {
 }
 
 func (m *DeviceManager) Start() {
-	klog.V(4).Infoln("DeviceManager starting check health...")
-	go m.checkHealth()
 	klog.V(4).Infoln("DeviceManager starting handle notify...")
 	go m.handleNotify()
 	klog.V(4).Infoln("DeviceManager starting registry node...")
 	go m.registryNode()
+	klog.V(4).Infoln("DeviceManager starting check health...")
+	go func() {
+		if err := m.checkHealth(); err != nil {
+			klog.Errorf("Failed to start health check: %v; continuing with health checks disabled", err)
+		}
+	}()
 }
 
 func (m *DeviceManager) GetDeviceInfoMap() map[string]device.DeviceInfo {
@@ -295,13 +351,6 @@ func (m *DeviceManager) Stop() {
 	m.stop = make(chan struct{})
 	if err := m.cleanupRegistry(); err != nil {
 		klog.ErrorS(err, "cleanup node registry failed")
-	}
-}
-
-func handlerReturn(r nvml.Return) {
-	if r != nvml.SUCCESS {
-		stack := debug.Stack()
-		klog.Fatalf("Nvml call failed: %v\nStack trace:\n%s", nvml.ErrorString(r), string(stack))
 	}
 }
 

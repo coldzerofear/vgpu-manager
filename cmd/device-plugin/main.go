@@ -111,7 +111,10 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Registry controller to manager failed: %v", err)
 	}
-	plugins := deviceplugin.InitDevicePlugins(opt, deviceManager, manager, kubeClient)
+	plugins, err := deviceplugin.GetDevicePlugins(opt, deviceManager, manager, kubeClient)
+	if err != nil {
+		klog.Fatalf("Get device plugins failed: %v", err)
+	}
 
 	klog.Infoln("Starting cluster manager.")
 	go func() {

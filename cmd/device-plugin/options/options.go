@@ -33,6 +33,7 @@ type Options struct {
 	GDSEnabled          bool
 	MOFEDEnabled        bool
 	OpenKernelModules   bool
+	MigStrategy         string
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -46,6 +47,7 @@ const (
 	defaultDeviceMemoryScaling = 1.0
 	defaultDeviceCoresScaling  = 1.0
 	defaultPprofBindPort       = 0
+	defaultMigStrategy         = util.MigStrategyNone
 
 	Component = "devicePlugin"
 
@@ -94,6 +96,7 @@ func NewOptions() *Options {
 		PprofBindPort:       defaultPprofBindPort,
 		GDSEnabled:          gdsEnabled,
 		MOFEDEnabled:        mofedEnabled,
+		MigStrategy:         defaultMigStrategy,
 		FeatureGate:         featureGate,
 	}
 }
@@ -118,6 +121,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")
 	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
 	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
+	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

@@ -5,19 +5,20 @@ support multi container and multi GPU virtualization and rich scheduling strateg
 
 ## Project objectives:
 
-- [x] Efficient scheduling performance
+- [x] Ensure scheduling performance and maintain correct allocation
 - [x] Ensure the security of container resource isolation
-- [x] Simplify GRPC within containers
-- [x] Support CUDA 12.x driver version
-- [x] Support CGroupV1 and CGroupV2
-- [x] Dual scheduling policy for nodes and devices
-- [x] Provide GPU monitoring indicators
+- [x] Do not obtain host PID through gRPC to device plugin
+- [x] Support the latest CUDA 12.x driver version
+- [x] Support cgroupv1 and cgroupv2 container environments
+- [x] Support dual scheduling policy for nodes and devices
+- [x] Provide multi-dimensional vGPU monitoring metrics
 - [x] Idle computing power of dynamic balancing equipment
 - [x] GPU device uses virtual memory after exceeding memory limit
 - [x] Rescheduling device allocation failed pod
 - [x] Webhook dynamic admission, fixing some non-standard pod configurations
 - [x] Provide the optimal topology allocation for NUMA and NVLink
 - [x] Compatible with open-gpu-kernel-modules
+- [ ] Support MIG strategy device allocation
 - [ ] Compatible with hot swappable devices and expansion capabilities
 - [ ] Compatible with Volcano Batch Scheduler
 - [ ] Support dynamic resource allocation (DRA)

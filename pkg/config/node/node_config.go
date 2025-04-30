@@ -26,6 +26,7 @@ type NodeConfigMap struct {
 	ExcludeDevices      *string  `json:"excludeDevices,omitempty"`
 	GDSEnabled          *bool    `json:"gdsEnabled,omitempty"`
 	MOFEDEnabled        *bool    `json:"mofedEnabled,omitempty"`
+	MigStrategy         *string  `json:"migStrategy,omitempty"`
 	OpenKernelModules   *bool    `json:"openKernelModules,omitempty"`
 }
 
@@ -42,6 +43,7 @@ type NodeConfig struct {
 	excludeDevices      sets.Int
 	gdsEnabled          bool
 	mofedEnabled        bool
+	migStrategy         string
 	openKernelModules   bool
 	checkFields         bool
 }
@@ -94,11 +96,16 @@ func (nc NodeConfig) OpenKernelModules() bool {
 	return nc.openKernelModules
 }
 
+func (nc NodeConfig) MigStrategy() string {
+	return nc.migStrategy
+}
+
 func (nc NodeConfig) String() string {
 	format := `{
   "nodeName": "%s", 
   "devicePluginPath": "%s", 
   "cgroupDriver": "%s", 
+  "migStrategy": "%s",
   "deviceListStrategy": "%s",
   "deviceSplitCount": %d, 
   "deviceCoresScaling": %.2f, 
@@ -109,9 +116,9 @@ func (nc NodeConfig) String() string {
   "mofedEnabled": %t,
   "openKernelModules": %t
 }`
-	return fmt.Sprintf(format, nc.nodeName, nc.devicePluginPath, nc.cgroupDriver, nc.deviceListStrategy,
-		nc.deviceSplitCount, nc.deviceCoresScaling, nc.deviceMemoryScaling, nc.deviceMemoryFactor,
-		nc.excludeDevices.List(), nc.gdsEnabled, nc.mofedEnabled, nc.openKernelModules)
+	return fmt.Sprintf(format, nc.nodeName, nc.devicePluginPath, nc.cgroupDriver, nc.migStrategy,
+		nc.deviceListStrategy, nc.deviceSplitCount, nc.deviceCoresScaling, nc.deviceMemoryScaling,
+		nc.deviceMemoryFactor, nc.excludeDevices.List(), nc.gdsEnabled, nc.mofedEnabled, nc.openKernelModules)
 }
 
 func checkNodeConfig(nodeConfig *NodeConfig) error {
@@ -122,7 +129,14 @@ func checkNodeConfig(nodeConfig *NodeConfig) error {
 	case util.DeviceListStrategyEnvvar:
 	case util.DeviceListStrategyVolumeMounts:
 	default:
-		return fmt.Errorf("NodeConfig.DeviceListStrategy unknown strategy value: %s", nodeConfig.deviceListStrategy)
+		return fmt.Errorf("unknown deviceListStrategy value: %s", nodeConfig.deviceListStrategy)
+	}
+	switch nodeConfig.migStrategy {
+	case util.MigStrategyNone:
+	case util.MigStrategySingle:
+	case util.MigStrategyMixed:
+	default:
+		return fmt.Errorf("unknown migStrategy value: %s", nodeConfig.deviceListStrategy)
 	}
 	if len(nodeConfig.devicePluginPath) == 0 {
 		return fmt.Errorf("NodeConfig.DevicePluginPath is empty")
@@ -147,6 +161,7 @@ func MutationDPOptions(opt dpoptions.Options) func(*NodeConfig) {
 		nodeConfig.nodeName = opt.NodeName
 		nodeConfig.nodeConfigPath = opt.NodeConfigPath
 		nodeConfig.cgroupDriver = opt.CGroupDriver
+		nodeConfig.migStrategy = opt.MigStrategy
 		nodeConfig.deviceListStrategy = opt.DeviceListStrategy
 		nodeConfig.deviceSplitCount = opt.DeviceSplitCount
 		nodeConfig.devicePluginPath = opt.DevicePluginPath
@@ -239,6 +254,9 @@ func NewNodeConfig(mutations ...func(*NodeConfig)) (*NodeConfig, error) {
 			}
 			if nodeConfig.MOFEDEnabled != nil {
 				config.mofedEnabled = *nodeConfig.MOFEDEnabled
+			}
+			if nodeConfig.MigStrategy != nil {
+				config.migStrategy = *nodeConfig.MigStrategy
 			}
 			if nodeConfig.OpenKernelModules != nil {
 				config.openKernelModules = *nodeConfig.OpenKernelModules
