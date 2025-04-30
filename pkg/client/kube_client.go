@@ -28,40 +28,48 @@ func InitKubeConfig(masterUrl, kubeconfig string) error {
 	return err
 }
 
-func GetKubeConfig(mutations ...func(*rest.Config)) (*rest.Config, error) {
+type Option func(*rest.Config)
+
+func NewKubeConfig(opts ...Option) (*rest.Config, error) {
 	err := InitKubeConfig("", "")
 	if err != nil {
 		return nil, err
 	}
 	config := rest.CopyConfig(kubeConfig)
-	for _, mutation := range mutations {
-		mutation(config)
+	for _, opt := range opts {
+		opt(config)
 	}
 	return config, nil
 }
 
-func GetClientSet(mutations ...func(*rest.Config)) (*kubernetes.Clientset, error) {
-	config, err := GetKubeConfig(mutations...)
+func NewClientSet(opts ...Option) (*kubernetes.Clientset, error) {
+	config, err := NewKubeConfig(opts...)
 	if err != nil {
 		return nil, err
 	}
 	return kubernetes.NewForConfig(config)
 }
 
-func MutationQPS(qps float32, burst int) func(*rest.Config) {
+func WithQPS(qps float32, burst int) Option {
 	return func(config *rest.Config) {
 		config.QPS = qps
 		config.Burst = burst
 	}
 }
 
-func MutationUser(userAgent string) func(*rest.Config) {
+func WithUser(userAgent string) Option {
 	return func(config *rest.Config) {
 		config.UserAgent = userAgent
 	}
 }
 
-func MutationContentType(acceptContentTypes, contentType string) func(*rest.Config) {
+func WithDefaultContentType() Option {
+	return WithContentType(
+		"application/vnd.kubernetes.protobuf,application/json",
+		"application/json")
+}
+
+func WithContentType(acceptContentTypes, contentType string) Option {
 	return func(config *rest.Config) {
 		config.AcceptContentTypes = acceptContentTypes
 		config.ContentType = contentType
