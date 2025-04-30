@@ -23,7 +23,7 @@ func Test_WriDriverConfigFile(t *testing.T) {
 		DriverVersion:     "",
 		CudaDriverVersion: nvidia.CudaDriverVersion(12020),
 	}
-	option := node.MutationDPOptions(dpoptions.Options{
+	option := node.WithDevicePluginOptions(dpoptions.Options{
 		NodeName:            "testNode",
 		NodeConfigPath:      "",
 		DeviceCoresScaling:  float64(1),

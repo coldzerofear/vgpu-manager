@@ -63,7 +63,7 @@ func Test_ContainerLister(t *testing.T) {
 		DriverVersion:     "",
 		CudaDriverVersion: nvidia.CudaDriverVersion(12020),
 	}
-	option := node.MutationDPOptions(dpoptions.Options{
+	option := node.WithDevicePluginOptions(dpoptions.Options{
 		NodeName:            nodeName,
 		NodeConfigPath:      "",
 		DeviceSplitCount:    10,

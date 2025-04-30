@@ -41,22 +41,22 @@ func main() {
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {
-		klog.Fatalf("Initialization of k8s client configuration failed: %v", err)
+		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
 	}
 
 	kubeConfig, err := client.NewKubeConfig(
 		client.WithQPS(float32(opt.QPS), opt.Burst),
 		client.WithDefaultContentType())
 	if err != nil {
-		klog.Fatalf("Init k8s restConfig failed: %v", err)
+		klog.Fatalf("Create kubeConfig failed: %v", err)
 	}
 	kubeClient, err := client.NewClientSet(
 		client.WithQPS(float32(opt.QPS), opt.Burst),
 		client.WithDefaultContentType())
 	if err != nil {
-		klog.Fatalf("Create k8s kubeClient failed: %v", err)
+		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
-	nodeConfig, err := node.NewNodeConfig(node.MutationDPOptions(*opt))
+	nodeConfig, err := node.NewNodeConfig(node.WithDevicePluginOptions(*opt))
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
