@@ -8,6 +8,11 @@ metadata:
     app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
     {{- include "vgpu-manager.labels" . | nindent 4 }}
 data:
+  {{- if .Values.devicePlugin.nodeConfig.yaml }}
+  nodeConfig.yaml: |
+    {{- .Values.devicePlugin.nodeConfig.yaml | nindent 4 }}
+  {{- else }}
   nodeConfig.json: |
     {{- .Values.devicePlugin.nodeConfig.json | nindent 4 }}
+  {{- end }}
 {{- end }}

@@ -175,22 +175,37 @@ devicePlugin:
 #        memory: 512Mi
   # Define node differentiation configuration files for device plugins
   nodeConfig:
-    json: | 
-      [
-        {
-          "nodeName": "example",
-          "cgroupDriver": "systemd",
-          "deviceListStrategy": "envvar",
-          "deviceSplitCount": 5,
-          "deviceMemoryScaling": 1,
-          "deviceMemoryFactor": 1,
-          "deviceCoresScaling": 1,
-          "excludeDevices": "4-7",
-          "gdsEnabled": false,
-          "mofedEnabled": false,
-          "openKernelModules": false
-        }
-      ]
+    # NodeConfig supports both YAML and JSON formats, choose one to use
+    yaml: |
+      version: v1
+      config:
+       - nodeName: example
+         cgroupDriver: systemd
+         deviceListStrategy: envvar
+         deviceSplitCount: 5
+         deviceMemoryScaling: 1
+         deviceMemoryFactor: 1
+         deviceCoresScaling: 1
+         excludeDevices: "4-7"
+         gdsEnabled: false
+         mofedEnabled: false
+         openKernelModules: false
+#    json: |
+#      [
+#        {
+#          "nodeName": "example",
+#          "cgroupDriver": "systemd",
+#          "deviceListStrategy": "envvar",
+#          "deviceSplitCount": 5,
+#          "deviceMemoryScaling": 1,
+#          "deviceMemoryFactor": 1,
+#          "deviceCoresScaling": 1,
+#          "excludeDevices": "4-7",
+#          "gdsEnabled": false,
+#          "mofedEnabled": false,
+#          "openKernelModules": false
+#        }
+#      ]
 
 # Installing the Webhook service requires installing the Cert-Manager component in advance to provide a self signed certificate for the service.
 webhook:

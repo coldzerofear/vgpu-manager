@@ -149,37 +149,37 @@ func (nc NodeConfig) YamlString() string {
 	result.WriteString("config:\n")
 	result.WriteString(fmt.Sprintf(" - nodeName: %s\n", nc.nodeName))
 	if nc.cgroupDriver != nil {
-		result.WriteString(fmt.Sprintf(" - cgroupDriver: %s\n", *nc.cgroupDriver))
+		result.WriteString(fmt.Sprintf("   cgroupDriver: %s\n", *nc.cgroupDriver))
 	}
 	if nc.deviceListStrategy != nil {
-		result.WriteString(fmt.Sprintf(" - deviceListStrategy: %s\n", *nc.deviceListStrategy))
+		result.WriteString(fmt.Sprintf("   deviceListStrategy: %s\n", *nc.deviceListStrategy))
 	}
 	if nc.deviceSplitCount != nil {
-		result.WriteString(fmt.Sprintf(" - deviceSplitCount: %d\n", *nc.deviceSplitCount))
+		result.WriteString(fmt.Sprintf("   deviceSplitCount: %d\n", *nc.deviceSplitCount))
 	}
 	if nc.deviceMemoryScaling != nil {
-		result.WriteString(fmt.Sprintf(" - deviceMemoryScaling: %.2f\n", *nc.deviceMemoryScaling))
+		result.WriteString(fmt.Sprintf("   deviceMemoryScaling: %.2f\n", *nc.deviceMemoryScaling))
 	}
 	if nc.deviceMemoryFactor != nil {
-		result.WriteString(fmt.Sprintf(" - deviceMemoryFactor: %d\n", *nc.deviceMemoryFactor))
+		result.WriteString(fmt.Sprintf("   deviceMemoryFactor: %d\n", *nc.deviceMemoryFactor))
 	}
 	if nc.deviceCoresScaling != nil {
-		result.WriteString(fmt.Sprintf(" - deviceCoresScaling: %.2f\n", *nc.deviceCoresScaling))
+		result.WriteString(fmt.Sprintf("   deviceCoresScaling: %.2f\n", *nc.deviceCoresScaling))
 	}
 	if len(nc.excludeDevices) > 0 {
-		result.WriteString(fmt.Sprintf(" - excludeDevices: %+v\n", nc.excludeDevices.List()))
+		result.WriteString(fmt.Sprintf("   excludeDevices: %+v\n", nc.excludeDevices.List()))
 	}
 	if nc.gdsEnabled != nil {
-		result.WriteString(fmt.Sprintf(" - gdsEnabled: %t\n", *nc.gdsEnabled))
+		result.WriteString(fmt.Sprintf("   gdsEnabled: %t\n", *nc.gdsEnabled))
 	}
 	if nc.mofedEnabled != nil {
-		result.WriteString(fmt.Sprintf(" - mofedEnabled: %t\n", *nc.mofedEnabled))
+		result.WriteString(fmt.Sprintf("   mofedEnabled: %t\n", *nc.mofedEnabled))
 	}
 	if nc.migStrategy != nil {
-		result.WriteString(fmt.Sprintf(" - migStrategy: %s\n", *nc.migStrategy))
+		result.WriteString(fmt.Sprintf("   migStrategy: %s\n", *nc.migStrategy))
 	}
 	if nc.openKernelModules != nil {
-		result.WriteString(fmt.Sprintf(" - openKernelModules: %t\n", *nc.openKernelModules))
+		result.WriteString(fmt.Sprintf("   openKernelModules: %t\n", *nc.openKernelModules))
 	}
 	return result.String()
 }

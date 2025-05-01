@@ -39,10 +39,10 @@ func (r *RecoveryController) AddRecovery(pod *corev1.Pod, d time.Duration) {
 var _ manager.Runnable = &RecoveryController{}
 
 func (r *RecoveryController) Start(ctx context.Context) error {
-	klog.V(3).Infoln("starting pod recovery controller")
+	klog.V(3).Infoln("Starting pod recovery controller")
 	go wait.UntilWithContext(ctx, r.runWorker(), time.Second)
 	<-ctx.Done()
-	klog.V(3).Infoln("stopping pod recovery controller")
+	klog.V(3).Infoln("Stopping pod recovery controller")
 	r.queue.ShutDown()
 	return nil
 }
@@ -69,7 +69,7 @@ func (r *RecoveryController) processNextItem() bool {
 	result, err := r.recoveryWorker(context.Background(), pod.DeepCopy())
 	switch {
 	case err != nil:
-		klog.V(4).ErrorS(err, "recovery failed", "pod",
+		klog.V(4).ErrorS(err, "Recovery failed", "pod",
 			client.ObjectKeyFromObject(pod).String())
 		r.queue.AddRateLimited(pod)
 	case result.RequeueAfter > 0:
@@ -82,7 +82,7 @@ func (r *RecoveryController) processNextItem() bool {
 	case result.Requeue:
 		r.queue.AddRateLimited(pod)
 	default:
-		klog.V(4).InfoS("recovery successful", "pod",
+		klog.V(4).InfoS("Recovery successful", "pod",
 			client.ObjectKeyFromObject(pod).String())
 		// Finally, if no error occurs we Forget this item so it does not
 		// get queued again until another change happens.

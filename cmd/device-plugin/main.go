@@ -60,7 +60,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
-	klog.V(4).Infoln("Current NodeConfig:\n", nodeConfig.String())
+	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
 	util.InitializeCGroupDriver(nodeConfig.CGroupDriver())
 
 	klog.V(3).Info("Initialize Device Resource Manager")

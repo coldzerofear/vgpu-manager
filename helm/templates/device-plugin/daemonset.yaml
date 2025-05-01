@@ -79,7 +79,11 @@ spec:
             - --mofed-enabled={{ .Values.devicePlugin.devicePlugin.commands.mofedEnabled }}
             - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
             - --open-kernel-modules={{ .Values.devicePlugin.devicePlugin.commands.openKernelModules }}
+            {{- if .Values.devicePlugin.nodeConfig.yaml }}
+            - --node-config-path=/config/nodeConfig.yaml
+            {{- else }}
             - --node-config-path=/config/nodeConfig.json
+            {{- end }}
             - --v={{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
           env:
             - name: NODE_NAME
@@ -118,7 +122,11 @@ spec:
             - --server-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
             - --pprof-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
+            {{- if .Values.devicePlugin.nodeConfig.yaml }}
+            - --node-config-path=/config/nodeConfig.yaml
+            {{- else }}
             - --node-config-path=/config/nodeConfig.json
+            {{- end }}
             - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
           ports:
             - name: http
