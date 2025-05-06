@@ -2,8 +2,6 @@ package mutate
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 
@@ -13,10 +11,9 @@ import (
 	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -115,6 +112,18 @@ func setDefaultRuntimeClassName(pod *corev1.Pod, options *options.Options, logge
 	}
 }
 
+// fixSpecifiedNodeName fix using nodeSelector to specify scheduling nodes for pod.
+func fixSpecifiedNodeName(pod *corev1.Pod, logger logr.Logger) {
+	if pod.Spec.NodeName != "" {
+		if pod.Spec.NodeSelector == nil {
+			pod.Spec.NodeSelector = map[string]string{}
+		}
+		pod.Spec.NodeSelector[corev1.LabelHostname] = pod.Spec.NodeName
+		logger.Info("Successfully fix specified nodeName", "spec.nodeName", pod.Spec.NodeName)
+		pod.Spec.NodeName = ""
+	}
+}
+
 func cleanupMetadata(pod *corev1.Pod) {
 	// Cleaning metadata to prevent impact on scheduling.
 	reschedule.CleanupMetadata(pod)
@@ -155,6 +164,7 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)
 		setDefaultDeviceTopologyMode(pod, h.options, logger)
 		setDefaultRuntimeClassName(pod, h.options, logger)
+		fixSpecifiedNodeName(pod, logger)
 	}
 	return nil
 }
@@ -169,41 +179,34 @@ func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
 }
 
 func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admission.Response {
-	logger := log.FromContext(ctx)
-	logger = logger.WithValues("operation", req.Operation)
+	logger := log.FromContext(ctx).WithValues("operation", req.Operation)
 	logger.V(5).Info("into pod mutate handle")
 	ctx = log.IntoContext(ctx, logger)
-	pod := &corev1.Pod{}
 	switch req.Operation {
 	case admissionv1.Create:
+		pod := &corev1.Pod{}
 		if err := h.decoder.Decode(req, pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
 		// Default the object
 		if err := h.MutateCreate(ctx, pod); err != nil {
-			var apiStatus apierrors.APIStatus
-			if errors.As(err, &apiStatus) {
-				return admission.Response{
-					AdmissionResponse: admissionv1.AdmissionResponse{
-						Allowed: false,
-						Result:  ptr.To[metav1.Status](apiStatus.Status()),
-					}}
-			}
+			//var apiStatus apierrors.APIStatus
+			//if errors.As(err, &apiStatus) {
+			//	return admission.Response{AdmissionResponse: admissionv1.AdmissionResponse{
+			//		Allowed: false,
+			//		Result:  ptr.To[metav1.Status](apiStatus.Status()),
+			//	}}
+			//}
 			return admission.Denied(err.Error())
 		}
+		// Create the patch
+		marshalled, err := json.Marshal(pod)
+		if err != nil {
+			return admission.Errored(http.StatusInternalServerError, err)
+		}
+		return admission.PatchResponseFromRaw(req.Object.Raw, marshalled)
 	default:
-		// Always skip when a DELETE operation received in custom mutation handler.
-		return admission.Response{
-			AdmissionResponse: admissionv1.AdmissionResponse{
-				Allowed: true,
-				Result:  &metav1.Status{Code: http.StatusOK},
-			}}
+		// Always skip when a DELETE or UPDATE operation received in custom mutation handler.
+		return admission.ValidationResponse(true, "")
 	}
-
-	// Create the patch
-	marshalled, err := json.Marshal(pod)
-	if err != nil {
-		return admission.Errored(http.StatusInternalServerError, err)
-	}
-	return admission.PatchResponseFromRaw(req.Object.Raw, marshalled)
 }

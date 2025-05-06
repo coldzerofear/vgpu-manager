@@ -77,20 +77,23 @@ func WithContentType(acceptContentTypes, contentType string) Option {
 }
 
 func GetActivePodsOnNode(ctx context.Context, kubeClient kubernetes.Interface, nodeName string) ([]corev1.Pod, error) {
-	fieldSelector, err := fields.ParseSelector("spec.nodeName=" + nodeName + "," +
-		"status.phase!=" + string(corev1.PodSucceeded) + ",status.phase!=" + string(corev1.PodFailed))
-	if err != nil {
-		return nil, err
-	}
-	var podList *corev1.PodList
-	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-		podList, err = kubeClient.CoreV1().Pods(corev1.NamespaceAll).List(ctx, metav1.ListOptions{
-			FieldSelector: fieldSelector.String(),
-			LabelSelector: labels.FormatLabels(map[string]string{
-				util.PodAssignedPhaseLabel: string(util.AssignPhaseAllocating),
-			}),
-			//ResourceVersion: "0",
+	var (
+		podList       *corev1.PodList
+		err           error
+		fieldSelector = fields.AndSelectors(
+			fields.OneTermEqualSelector("spec.nodeName", nodeName),
+			fields.OneTermNotEqualSelector("status.phase", string(corev1.PodSucceeded)),
+			fields.OneTermNotEqualSelector("status.phase", string(corev1.PodFailed))).String()
+		labelSelector = labels.FormatLabels(map[string]string{
+			util.PodAssignedPhaseLabel: string(util.AssignPhaseAllocating),
 		})
+		listOptions = metav1.ListOptions{
+			FieldSelector: fieldSelector,
+			LabelSelector: labelSelector,
+		}
+	)
+	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
+		podList, err = kubeClient.CoreV1().Pods(corev1.NamespaceAll).List(ctx, listOptions)
 		return err
 	})
 	if err != nil {

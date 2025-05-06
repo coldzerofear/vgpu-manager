@@ -43,7 +43,7 @@ func RegistryControllerToManager(manager ctrm.Manager, config *node.NodeConfig, 
 				klog.Errorln(err.Error())
 				continue
 			}
-			klog.V(4).Infoln("registry controller to manager", "controller", name)
+			klog.V(4).InfoS("Registry controller to manager", "controller", name)
 			if err = controller.RegistryToManager(manager); err != nil {
 				klog.ErrorS(err, "unable to registry controller", "controller", name)
 				return

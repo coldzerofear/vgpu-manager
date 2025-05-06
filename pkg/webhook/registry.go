@@ -27,7 +27,7 @@ func RegistryWebhookToServer(server webhook.Server, scheme *runtime.Scheme, opt 
 	once.Do(func() {
 		for path, webhookFunc := range webhookFuncMap {
 			hook := webhookFunc(scheme, opt)
-			klog.V(4).Infoln("registry webhook to server", "path", path)
+			klog.V(4).InfoS("Registry webhook to server", "path", path)
 			server.Register(path, hook)
 		}
 	})
