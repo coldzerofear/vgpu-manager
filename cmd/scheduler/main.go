@@ -55,8 +55,9 @@ func main() {
 		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
 	}
 	kubeClient, err := client.NewClientSet(
-		client.WithQPS(float32(opt.QPS), opt.Burst),
-		client.WithDefaultContentType())
+		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
+		//client.WithDefaultContentType(),
+		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
@@ -138,17 +139,17 @@ func main() {
 		}
 	}()
 
-	exitCode := 0
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	select {
 	case s := <-sigChan:
 		klog.Infof("Received signal %v, shutting down...", s)
-		_ = server.Shutdown(context.Background())
+		if err = server.Shutdown(context.Background()); err != nil {
+			klog.Errorf("Error while stopping extender service: %s", err.Error())
+		}
 		cancelFunc()
 	case <-ctx.Done():
 		klog.Errorln("Internal error, service abnormal stop")
-		exitCode = 1
+		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
-	os.Exit(exitCode)
 }

@@ -152,6 +152,8 @@ spec:
                   fieldPath: spec.nodeName
 #            - name: CGROUP_DRIVER
 #              value: systemd
+            - name: KUBE_FEATURE_WatchListClient
+              value: "true"
             - name: HOST_MANAGER_DIR
               value: /etc/vgpu-manager
             - name: NVIDIA_VISIBLE_DEVICES
@@ -194,6 +196,8 @@ spec:
                   fieldPath: spec.nodeName
 #            - name: CGROUP_DRIVER
 #              value: systemd
+            - name: KUBE_FEATURE_WatchListClient
+              value: "true"
             - name: NVIDIA_VISIBLE_DEVICES
               value: all
             - name: NVIDIA_MIG_MONITOR_DEVICES

@@ -56,7 +56,7 @@ func (s *server) Start(stopCh <-chan struct{}) error {
 }
 
 func (s *server) Stop() {
-	klog.Infof("Stopping metrics service.")
+	klog.Infof("Stopping metrics service")
 	if err := s.httpServer.Shutdown(context.Background()); err != nil {
 		klog.Errorf("Error while stopping metrics service: %s", err.Error())
 	}

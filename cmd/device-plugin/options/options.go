@@ -8,6 +8,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/component-base/featuregate"
 	baseversion "k8s.io/component-base/version"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -73,13 +74,9 @@ var (
 
 func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
-	if err := featureGate.Add(defaultFeatureGates); err != nil {
-		panic(fmt.Sprintf("Failed to add feature gates: %v", err))
-	}
-	if err := featuregate.DefaultComponentGlobalsRegistry.Register(Component,
-		baseversion.DefaultBuildEffectiveVersion(), featureGate); err != nil {
-		panic(fmt.Sprintf("Failed to registry feature gates to global: %v", err))
-	}
+	runtime.Must(featureGate.Add(defaultFeatureGates))
+	runtime.Must(featuregate.DefaultComponentGlobalsRegistry.Register(
+		Component, baseversion.DefaultBuildEffectiveVersion(), featureGate))
 	gdsEnabled := os.Getenv("NVIDIA_GDS") == "enabled" || os.Getenv("NVIDIA_GDS") == "true"
 	mofedEnabled := os.Getenv("NVIDIA_MOFED") == "enabled" || os.Getenv("NVIDIA_MOFED") == "true"
 	return &Options{

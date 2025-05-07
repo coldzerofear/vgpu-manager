@@ -4,7 +4,6 @@ import (
 	"flag"
 	"net/http"
 	_ "net/http/pprof"
-	"os"
 	"strconv"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
@@ -57,6 +56,6 @@ func main() {
 	klog.Infoln("Starting webhook server")
 	if err := server.Start(signals.SetupSignalHandler()); err != nil {
 		klog.ErrorS(err, "problem running webhook server")
-		os.Exit(1)
+		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
 }

@@ -166,6 +166,16 @@ spec:
           volumeMounts:
             - name: scheduler-config
               mountPath: /config
+          livenessProbe:
+            failureThreshold: 8
+            httpGet:
+              path: /healthz
+              port: 10259
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 15
         - image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           name: scheduler-extender
@@ -173,16 +183,13 @@ spec:
             - scheduler
             - --server-bind-port=3456
             - --v=4
+          env:
+            - name: KUBE_FEATURE_WatchListClient
+              value: "true"
           ports:
             - name: http
               containerPort: 3456
-          resources:
-            requests:
-              cpu: 50m
-              memory: 128Mi
-            limits:
-              cpu: 200m
-              memory: 512Mi
+          resources: {}
           livenessProbe:
             httpGet:
               path: /healthz

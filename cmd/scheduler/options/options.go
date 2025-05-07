@@ -7,6 +7,7 @@ import (
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
+	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/component-base/featuregate"
 	baseversion "k8s.io/component-base/version"
 )
@@ -45,20 +46,16 @@ const (
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		SerialBindNode: {Default: false, PreRelease: featuregate.Alpha},
+		SerialBindNode: {Default: true, PreRelease: featuregate.Beta},
 		GPUTopology:    {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
 func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
-	if err := featureGate.Add(defaultFeatureGates); err != nil {
-		panic(fmt.Sprintf("Failed to add feature gates: %v", err))
-	}
-	if err := featuregate.DefaultComponentGlobalsRegistry.Register(Component,
-		baseversion.DefaultBuildEffectiveVersion(), featureGate); err != nil {
-		panic(fmt.Sprintf("Failed to registry feature gates to global: %v", err))
-	}
+	runtime.Must(featureGate.Add(defaultFeatureGates))
+	runtime.Must(featuregate.DefaultComponentGlobalsRegistry.Register(
+		Component, baseversion.DefaultBuildEffectiveVersion(), featureGate))
 	return &Options{
 		SchedulerName:       defaultSchedulerName,
 		QPS:                 defaultQPS,

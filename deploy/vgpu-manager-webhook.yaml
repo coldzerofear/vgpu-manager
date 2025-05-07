@@ -107,6 +107,7 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+      priorityClassName: system-node-critical
       terminationGracePeriodSeconds: 10
       containers:
         - name: webhook
@@ -142,10 +143,7 @@ spec:
           ports:
             - name: http
               containerPort: 9443
-          resources:
-            requests:
-              cpu: 20m
-              memory: 32Mi
+          resources: {}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

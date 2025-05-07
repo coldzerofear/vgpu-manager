@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -12,6 +11,7 @@ import (
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/utils/ptr"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
@@ -45,14 +45,16 @@ func main() {
 	}
 
 	kubeConfig, err := client.NewKubeConfig(
-		client.WithQPS(float32(opt.QPS), opt.Burst),
-		client.WithDefaultContentType())
+		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
+		//client.WithDefaultContentType(),
+		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Fatalf("Create kubeConfig failed: %v", err)
 	}
 	kubeClient, err := client.NewClientSet(
-		client.WithQPS(float32(opt.QPS), opt.Burst),
-		client.WithDefaultContentType())
+		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
+		//client.WithDefaultContentType(),
+		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
@@ -75,22 +77,20 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Failed to create FS watcher: %v", err)
 	}
+	defer watcher.Close()
 	clusterCtx, cancelFunc := context.WithCancel(context.Background())
-	defer func() {
-		_ = watcher.Close()
-		cancelFunc()
-		time.Sleep(5 * time.Second)
-	}()
 	klog.V(3).Info("Starting OS watcher.")
 	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	manager, err := ctrm.New(kubeConfig, ctrm.Options{
-		HealthProbeBindAddress: "0", // disable health probe
+		HealthProbeBindAddress: "0", // Disable manager health probe service
 		PprofBindAddress:       fmt.Sprintf("%d", opt.PprofBindPort),
 		Cache: rtcache.Options{
-			// trim managedFields to reduce cache memory usage.
+			// Trim managedFields to reduce cache memory usage.
 			DefaultTransform:         rtcache.TransformStripManagedFields(),
 			DefaultWatchErrorHandler: toolscache.DefaultWatchErrorHandler,
+			// Enable bookmark event adaptation WatchListClient feature.
+			DefaultEnableWatchBookmarks: ptr.To[bool](true),
 			ByObject: map[rtclient.Object]rtcache.ByObject{
 				&corev1.Pod{}: {
 					Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
@@ -98,7 +98,7 @@ func main() {
 				},
 			},
 		},
-		Metrics: metrics.Options{BindAddress: "0"}, // disable metrics service
+		Metrics: metrics.Options{BindAddress: "0"}, // Disable manager metrics service
 		Logger:  klog.NewKlogr(),
 	})
 	if err != nil {
@@ -123,11 +123,6 @@ func main() {
 			cancelFunc()
 		}
 	}()
-	klog.V(4).Infoln("Waiting for cluster manager cache synchronization...")
-	if ok := manager.GetCache().WaitForCacheSync(clusterCtx); !ok {
-		klog.Fatalf("Cannot wait for cluster manager cache sync")
-	}
-	klog.V(4).Infoln("Cluster manager cache synchronization successful")
 	deviceManager.Start()
 
 restart:
@@ -190,10 +185,13 @@ restart:
 		}
 	}
 exit:
+	cancelFunc()
 	deviceManager.Stop()
 	for _, p := range plugins {
 		_ = p.Stop()
 	}
 
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
+	}
 }

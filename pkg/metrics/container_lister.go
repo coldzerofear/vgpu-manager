@@ -143,7 +143,7 @@ func (c *ContainerLister) Start(interval time.Duration, stopChan <-chan struct{}
 	go func() {
 		scanResourceFiles := func() {
 			if err := c.update(); err != nil {
-				klog.V(3).ErrorS(err, "Failed to update container lister")
+				klog.V(1).ErrorS(err, "Failed to update container lister")
 			}
 		}
 		wait.Until(scanResourceFiles, interval, stopChan)

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -9,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -50,14 +52,19 @@ func NewClientSet(opts ...Option) (*kubernetes.Clientset, error) {
 	return kubernetes.NewForConfig(config)
 }
 
-func WithQPS(qps float32, burst int) Option {
+func WithQPSBurst(qps float32, burst int) Option {
 	return func(config *rest.Config) {
 		config.QPS = qps
 		config.Burst = burst
+		config.RateLimiter = nil
 	}
 }
 
-func WithUser(userAgent string) Option {
+func WithDefaultUserAgent() Option {
+	return WithUserAgent(rest.DefaultKubernetesUserAgent())
+}
+
+func WithUserAgent(userAgent string) Option {
 	return func(config *rest.Config) {
 		config.UserAgent = userAgent
 	}
@@ -65,8 +72,8 @@ func WithUser(userAgent string) Option {
 
 func WithDefaultContentType() Option {
 	return WithContentType(
-		"application/vnd.kubernetes.protobuf,application/json",
-		"application/json")
+		strings.Join([]string{runtime.ContentTypeProtobuf, runtime.ContentTypeJSON}, ","),
+		runtime.ContentTypeJSON)
 }
 
 func WithContentType(acceptContentTypes, contentType string) Option {

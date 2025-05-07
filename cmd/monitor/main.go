@@ -11,10 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
-	// to ensure that exec-entrypoint and run can make use of them.
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
-
 	"github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
@@ -25,6 +21,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
+	// to ensure that exec-entrypoint and run can make use of them.
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -42,8 +41,9 @@ func main() {
 		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
 	}
 	kubeClient, err := client.NewClientSet(
-		client.WithQPS(float32(opt.QPS), opt.Burst),
-		client.WithDefaultContentType())
+		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
+		//client.WithDefaultContentType(),
+		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
@@ -51,7 +51,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
-	klog.V(4).Infoln("Current NodeConfig:\n", nodeConfig.String())
+	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
 	util.InitializeCGroupDriver(nodeConfig.CGroupDriver())
 
 	// trim managedFields to reduce cache memory usage.
@@ -92,24 +92,20 @@ func main() {
 	}()
 	// Start prometheus indicator collection service.
 	go func() {
-		serverErr := server.Start(ctx.Done())
-		if serverErr != nil {
+		if serverErr := server.Start(ctx.Done()); serverErr != nil {
 			klog.Errorf("Server error occurred: %v", serverErr)
 			cancelCtx()
 		}
 	}()
 
-	exitCode := 0
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	select {
 	case s := <-sigChan:
 		klog.Infof("Received signal %v, shutting down...", s)
 		cancelCtx()
-		time.Sleep(5 * time.Second)
 	case <-ctx.Done():
 		klog.Errorln("Internal error, service abnormal stop")
-		exitCode = 1
+		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
-	os.Exit(exitCode)
 }
