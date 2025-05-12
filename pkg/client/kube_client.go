@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -50,6 +51,12 @@ func NewClientSet(opts ...Option) (*kubernetes.Clientset, error) {
 		return nil, err
 	}
 	return kubernetes.NewForConfig(config)
+}
+
+func WithTimeoutSecond(seconds uint) Option {
+	return func(config *rest.Config) {
+		config.Timeout = time.Duration(seconds) * time.Second
+	}
 }
 
 func WithQPSBurst(qps float32, burst int) Option {

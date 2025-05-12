@@ -86,12 +86,12 @@ func GetDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
 		}
 		resourceSet := sets.NewString()
 		for _, mig := range migDevices {
-			resource := strings.ReplaceAll("mig-"+mig.Profile, "+", ".")
+			resource := strings.ReplaceAll(mig.Profile, "+", ".")
 			resourceSet.Insert(resource)
 		}
 		for resource := range resourceSet {
-			resourceName := fmt.Sprintf("%s/%s", util.DomainPrefix, resource)
-			socket = filepath.Join(opt.DevicePluginPath, fmt.Sprintf("nvidia-%s.sock", resource))
+			resourceName := util.MIGDeviceResourceNamePrefix + resource
+			socket = filepath.Join(opt.DevicePluginPath, fmt.Sprintf("nvidia-mig-%s.sock", resource))
 			plugins = append(plugins, NewMigDevicePlugin(resourceName, socket, devManager))
 		}
 	}

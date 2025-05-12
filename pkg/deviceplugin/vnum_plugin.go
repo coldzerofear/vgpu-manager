@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
 	"k8s.io/client-go/util/retry"
@@ -45,8 +46,8 @@ func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.Device
 
 	return &vnumberDevicePlugin{
 		base:        newBaseDevicePlugin(resourceName, socket, manager),
-		kubeClient:  kubeClient,
 		podResource: client.NewPodResource(),
+		kubeClient:  kubeClient,
 		cache:       cache,
 	}
 }
@@ -412,8 +413,8 @@ func (m *vnumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
 	nodeName := m.base.manager.GetNodeConfig().NodeName()
 	for i, pod := range podList.Items {
 		if pod.Spec.NodeName != nodeName ||
-			!util.IsVGPUResourcePod(&pod) ||
-			util.PodIsTerminated(&pod) {
+			util.PodIsTerminated(&pod) ||
+			!util.IsVGPUResourcePod(&pod) {
 			continue
 		}
 		activePods[string(pod.UID)] = &podList.Items[i]
@@ -448,15 +449,18 @@ func (m *vnumberDevicePlugin) getCurrentPodInfoByCheckpoint(devicesIDs []string)
 }
 
 func (m *vnumberDevicePlugin) getCurrentPodInfo(devicesIDs []string) (*client.PodInfo, error) {
-	podResources, err := m.podResource.ListPodResource()
+	resp, err := m.podResource.ListPodResource()
 	if err != nil {
 		klog.ErrorS(err, "ListPodResource failed")
 		return m.getCurrentPodInfoByCheckpoint(devicesIDs)
 	}
-	podInfo, err := m.podResource.GetPodInfoByResourceDeviceIDs(
-		podResources, util.VGPUNumberResourceName, devicesIDs)
+	deviceSet := sets.NewString(devicesIDs...)
+	podInfo, err := m.podResource.GetPodInfoByMatchFunc(resp, func(devices *v1alpha1.ContainerDevices) bool {
+		return devices.GetResourceName() == util.VGPUNumberResourceName &&
+			deviceSet.HasAll(devices.GetDeviceIds()...)
+	})
 	if err != nil {
-		klog.ErrorS(err, "GetPodInfoByResourceDeviceIDs failed")
+		klog.ErrorS(err, "GetPodInfoByMatchFunc failed")
 		return m.getCurrentPodInfoByCheckpoint(devicesIDs)
 	}
 	return podInfo, nil

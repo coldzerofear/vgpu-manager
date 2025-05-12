@@ -9,9 +9,10 @@ const (
 	NodeNvidiaDriverVersionLabel = DomainPrefix + "/node-driver-version"
 	NodeNvidiaCudaVersionLabel   = DomainPrefix + "/node-cuda-version"
 
-	VGPUNumberResourceName = DomainPrefix + "/vgpu-number"
-	VGPUMemoryResourceName = DomainPrefix + "/vgpu-memory"
-	VGPUCoreResourceName   = DomainPrefix + "/vgpu-cores"
+	MIGDeviceResourceNamePrefix = DomainPrefix + "/mig-"
+	VGPUNumberResourceName      = DomainPrefix + "/vgpu-number"
+	VGPUMemoryResourceName      = DomainPrefix + "/vgpu-memory"
+	VGPUCoreResourceName        = DomainPrefix + "/vgpu-cores"
 
 	// NodeDeviceHeartbeatAnnotation Node device heartbeat time
 	NodeDeviceHeartbeatAnnotation = DomainPrefix + "/node-device-heartbeat"

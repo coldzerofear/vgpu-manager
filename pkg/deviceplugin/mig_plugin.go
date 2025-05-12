@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -43,7 +44,7 @@ func (m *migDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *pluginapi
 
 func (m *migDevicePlugin) relatedParentDevice(parentUUID string) bool {
 	for _, migDevice := range m.base.manager.GetMIGDeviceMap() {
-		if migDevice.Parent.UUID == parentUUID && m.base.resourceName == GetMigResourceName(migDevice) {
+		if migDevice.Parent.UUID == parentUUID && m.base.resourceName == GetMigResourceName(migDevice.MigInfo) {
 			return true
 		}
 	}
@@ -63,7 +64,7 @@ func (m *migDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlu
 		select {
 		case d := <-m.base.health:
 			// If MIG devices related to resources are marked as unhealthy, resend the device list.
-			if d.MIG != nil && m.base.resourceName == GetMigResourceName(*d.MIG) {
+			if d.MIG != nil && m.base.resourceName == GetMigResourceName(d.MIG.MigInfo) {
 				klog.Infof("'%s' device marked unhealthy: %s", m.base.resourceName, d.MIG.UUID)
 				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
@@ -125,9 +126,9 @@ func (m *migDevicePlugin) PreStartContainer(_ context.Context, _ *pluginapi.PreS
 	return &pluginapi.PreStartContainerResponse{}, nil
 }
 
-func GetMigResourceName(migDevice manager.MIGDevice) string {
-	resource := strings.ReplaceAll("mig-"+migDevice.Profile, "+", ".")
-	return fmt.Sprintf("%s/%s", util.DomainPrefix, resource)
+func GetMigResourceName(migInfo *nvidia.MigInfo) string {
+	resource := strings.ReplaceAll(migInfo.Profile, "+", ".")
+	return util.MIGDeviceResourceNamePrefix + resource
 }
 
 func (m *migDevicePlugin) Devices() []*pluginapi.Device {
@@ -138,7 +139,7 @@ func (m *migDevicePlugin) Devices() []*pluginapi.Device {
 		if !ok || !gpuDevice.Healthy { // Skip if the parent device is unhealthy
 			continue
 		}
-		if m.base.resourceName == GetMigResourceName(migDevice) {
+		if m.base.resourceName == GetMigResourceName(migDevice.MigInfo) {
 			health := pluginapi.Healthy
 			if !migDevice.Healthy {
 				health = pluginapi.Unhealthy

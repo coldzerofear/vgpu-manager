@@ -71,10 +71,11 @@ func (g GpuInfo) GetNumaNode() (int, bool) {
 }
 
 type MigInfo struct {
-	UUID          string `json:"uuid"`
 	Index         int
+	UUID          string `json:"uuid"`
 	Profile       string
 	Parent        *GpuInfo
+	Memory        nvml.Memory
 	Placement     *MigDevicePlacement
 	GiProfileInfo *nvml.GpuInstanceProfileInfo
 	GiInfo        *nvml.GpuInstanceInfo
@@ -377,6 +378,10 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 
 	migInfos := make(map[string]*MigInfo)
 	err := walkMigDevices(device, func(i int, migDevice nvml.Device) error {
+		memoryInfo, ret := migDevice.GetMemoryInfo()
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("error getting memory info for MIG device: %v", ret)
+		}
 		giID, ret := migDevice.GetGpuInstanceId()
 		if ret != nvml.SUCCESS {
 			return fmt.Errorf("error getting GPU instance ID for MIG device: %v", ret)
@@ -438,8 +443,9 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 		}
 
 		migInfos[uuid] = &MigInfo{
-			UUID:          uuid,
 			Index:         i,
+			UUID:          uuid,
+			Memory:        memoryInfo,
 			Profile:       migProfile.Profile.String(),
 			Parent:        gpuInfo,
 			Placement:     &placement,

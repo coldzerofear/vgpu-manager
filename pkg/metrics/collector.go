@@ -2,22 +2,29 @@ package metrics
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 )
 
 type CollectorService interface {
@@ -28,10 +35,11 @@ type CollectorService interface {
 // nodeGPUCollector implements the Collector interface.
 type nodeGPUCollector struct {
 	*nvidia.DeviceLib
-	nodeName   string
-	nodeLister listerv1.NodeLister
-	podLister  listerv1.PodLister
-	contLister *ContainerLister
+	nodeName    string
+	nodeLister  listerv1.NodeLister
+	podLister   listerv1.PodLister
+	contLister  *ContainerLister
+	podResource *client.PodResource
 }
 
 var _ CollectorService = &nodeGPUCollector{}
@@ -52,6 +60,8 @@ func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister,
 		nodeLister: nodeLister,
 		podLister:  podLister,
 		contLister: contLister,
+		podResource: client.NewPodResource(
+			client.WithCallTimeoutSecond(5)),
 	}, nil
 }
 
@@ -68,17 +78,33 @@ var (
 	physicalGPUTotalMemory = prometheus.NewDesc(
 		"physical_gpu_device_total_memory_in_bytes",
 		"Physical GPU device total memory (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "migenabled"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "devicetype", "pcibusid", "minornum", "migenabled", "capability"}, nil,
 	)
 	physicalGPUMemoryUsage = prometheus.NewDesc(
 		"physical_gpu_device_memory_usage_in_bytes",
 		"Physical GPU device memory usage (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "migenabled"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "devicetype", "pcibusid", "minornum", "migenabled", "capability"}, nil,
+	)
+	physicalGPUMemoryUtilRate = prometheus.NewDesc(
+		"physical_gpu_device_memory_utilization_rate",
+		"Physical GPU device memory utilization rate (percentage)",
+		[]string{"nodename", "deviceidx", "deviceuuid", "devicetype", "pcibusid", "minornum", "migenabled", "capability"}, nil,
 	)
 	physicalGPUCoreUtilRate = prometheus.NewDesc(
 		"physical_gpu_device_core_utilization_rate",
 		"Physical GPU device core utilization rate (percentage)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "migenabled"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "devicetype", "pcibusid", "minornum", "migenabled", "capability"}, nil,
+	)
+
+	nodeGPUDriverVersionInfo = prometheus.NewDesc(
+		"node_gpu_driver_version_info",
+		"Driver information for GPU node",
+		[]string{"nodename", "driverversion", "cudaversion", "nvmlversion"}, nil,
+	)
+	nodePhysicalGPUCount = prometheus.NewDesc(
+		"node_physical_gpu_total_count",
+		"Total count of physical GPUs on the node",
+		[]string{"nodename"}, nil,
 	)
 	nodeVGPUTotalMemory = prometheus.NewDesc(
 		"node_vgpu_total_memory_in_bytes",
@@ -90,30 +116,53 @@ var (
 		"Node virtual GPU assigned memory (bytes)",
 		[]string{"nodename"}, nil,
 	)
+
 	virtGPUTotalMemory = prometheus.NewDesc(
 		"vgpu_device_total_memory_in_bytes",
 		"Virtual GPU device total memory (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "healthy"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "phymembytes", "healthy"}, nil,
 	)
 	virtGPUAssignedMemory = prometheus.NewDesc(
 		"vgpu_device_assigned_memory_in_bytes",
 		"Virtual GPU device assigned memory (bytes)",
-		[]string{"nodename", "deviceidx", "deviceuuid", "healthy"}, nil,
+		[]string{"nodename", "deviceidx", "deviceuuid", "phymembytes", "healthy"}, nil,
+	)
+
+	containerVGPUMemoryLimit = prometheus.NewDesc(
+		"container_vgpu_device_memory_limit_in_bytes",
+		"Container virtual GPU device memory limit (bytes)",
+		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename", "phymembytes"}, nil,
 	)
 	containerVGPUMemoryUsage = prometheus.NewDesc(
 		"container_vgpu_device_memory_usage_in_bytes",
 		"Container virtual GPU device memory usage (bytes)",
 		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename"}, nil,
 	)
-	containerVGPUMemoryLimit = prometheus.NewDesc(
-		"container_vgpu_device_memory_limit_in_bytes",
-		"Container virtual GPU device memory limit (bytes)",
-		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename", "phymembytes"}, nil,
-	)
-	containerVGPUUtilRate = prometheus.NewDesc(
-		"container_vgpu_device_utilization_rate",
-		"Container virtual GPU device utilization rate (percentage)",
+	containerVGPUMemoryUtilRate = prometheus.NewDesc(
+		"container_vgpu_device_memory_utilization_rate",
+		"Container virtual GPU device memory utilization rate (percentage)",
 		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename"}, nil,
+	)
+	containerVGPUCoreUtilRate = prometheus.NewDesc(
+		"container_vgpu_device_core_utilization_rate",
+		"Container virtual GPU device core utilization rate (percentage)",
+		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename"}, nil,
+	)
+
+	migDeviceTotalMemory = prometheus.NewDesc(
+		"mig_device_total_memory_in_bytes",
+		"MIG device total memory (bytes)",
+		[]string{"nodename", "deviceidx", "deviceuuid", "parentuuid", "ciid", "giid", "profile", "healthy", "podnamespace", "podname", "ctrname"}, nil,
+	)
+	migDeviceMemoryUsage = prometheus.NewDesc(
+		"mig_device_memory_usage_in_bytes",
+		"MIG device memory usage (bytes)",
+		[]string{"nodename", "deviceidx", "deviceuuid", "parentuuid", "ciid", "giid", "profile", "healthy", "podnamespace", "podname", "ctrname"}, nil,
+	)
+	migDeviceMemoryUtilRate = prometheus.NewDesc(
+		"mig_device_memory_utilization_rate",
+		"MIG device memory utilization rate (percentage)",
+		[]string{"nodename", "deviceidx", "deviceuuid", "parentuuid", "ciid", "giid", "profile", "healthy", "podnamespace", "podname", "ctrname"}, nil,
 	)
 )
 
@@ -123,14 +172,21 @@ var (
 func (c nodeGPUCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- physicalGPUTotalMemory
 	ch <- physicalGPUMemoryUsage
+	ch <- physicalGPUMemoryUtilRate
 	ch <- physicalGPUCoreUtilRate
+	ch <- nodeGPUDriverVersionInfo
+	ch <- nodePhysicalGPUCount
 	ch <- nodeVGPUTotalMemory
 	ch <- nodeVGPUAssignedMemory
 	ch <- virtGPUTotalMemory
 	ch <- virtGPUAssignedMemory
 	ch <- containerVGPUMemoryUsage
 	ch <- containerVGPUMemoryLimit
-	ch <- containerVGPUUtilRate
+	ch <- containerVGPUMemoryUtilRate
+	ch <- containerVGPUCoreUtilRate
+	ch <- migDeviceTotalMemory
+	ch <- migDeviceMemoryUsage
+	ch <- migDeviceMemoryUtilRate
 }
 
 type procInfoList map[uint32]nvml.ProcessInfo_v1
@@ -143,13 +199,16 @@ func ContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(stri
 		klog.Errorf(err.Error())
 		return
 	}
-	klog.Infof("Detected Pod <%s/%s> container <%s> CGroup path: %s", pod.Namespace, pod.Name, containerName, cgroupFullPath)
+	klog.V(3).InfoS("Detected pod container cgroup path", "pod",
+		klog.KObj(pod), "container", containerName, "cgroupPath", cgroupFullPath)
 	pids, err := cgroups.GetAllPids(cgroupFullPath)
 	if err != nil {
-		klog.Errorf("Get Pod <%s/%s> container <%s> CGroup pids error: %v", pod.Namespace, pod.Name, containerName, err)
+		klog.ErrorS(err, "Failed to retrieve container pids",
+			"pod", klog.KObj(pod), "container", containerName)
 		return
 	}
-	klog.V(4).Infof("Pod <%s/%s> container <%s>  CGroup path <%s> pids: %+v", pod.Namespace, pod.Name, containerName, cgroupFullPath, pids)
+	klog.V(4).Infof("Pod <%s/%s> container <%s>  CGroup path <%s> pids: %+v",
+		pod.Namespace, pod.Name, containerName, cgroupFullPath, pids)
 	for _, pid := range pids {
 		f(pid)
 	}
@@ -184,59 +243,123 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	klog.V(4).Infof("Starting to collect metrics for vGPU on node <%s>", c.nodeName)
 	var (
 		devIndexMap    = make(map[string]int)
+		devMemInfoMap  = make(map[string]nvml.Memory)
 		devProcInfoMap = make(map[string]procInfoList)
 		devProcUtilMap = make(map[string]procUtilList)
+		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
 	)
 	err := c.Init()
 	if err != nil {
 		klog.Errorln(err)
-		goto skip
+		goto skipNvml
 	}
 	defer c.Shutdown()
 
-	err = c.VisitDevices(func(index int, hdev nvdev.Device) error {
-		memoryInfo, rt := hdev.GetMemoryInfo()
-		if rt != nvml.SUCCESS {
-			klog.Errorf("error getting memory info for device %d: %v", index, rt)
-			return nil
+	func() {
+		driverVersion, ret := c.SystemGetDriverVersion()
+		if ret != nvml.SUCCESS {
+			klog.Errorf("error getting driver version: %s", nvml.ErrorString(ret))
+			driverVersion = "N/A"
 		}
-		deviceUUID, rt := hdev.GetUUID()
-		if rt != nvml.SUCCESS {
-			klog.Errorf("error getting UUID for device %d: %v", index, rt)
-			return nil
+		cudaVersion := ""
+		version, ret := c.SystemGetCudaDriverVersion()
+		if ret != nvml.SUCCESS {
+			klog.Errorf("error getting CUDA driver version: %s", nvml.ErrorString(ret))
+			cudaVersion = "N/A"
+		} else {
+			cudaVersion = strconv.Itoa(version)
 		}
-		deviceUtil, rt := hdev.GetUtilizationRates()
-		if rt != nvml.SUCCESS {
-			klog.Errorf("error getting utilization rates for device %d: %v", index, rt)
-			return nil
+		nvmlVersion, ret := c.SystemGetNVMLVersion()
+		if ret != nvml.SUCCESS {
+			klog.Errorf("error getting NVML driver version: %s", nvml.ErrorString(ret))
+			nvmlVersion = "N/A"
 		}
-		migEnabled, err := hdev.IsMigEnabled()
-		if err != nil {
-			klog.Errorln(err)
-			return nil
-		}
+		ch <- prometheus.MustNewConstMetric(
+			nodeGPUDriverVersionInfo,
+			prometheus.GaugeValue,
+			float64(1),
+			c.nodeName, driverVersion, cudaVersion, nvmlVersion)
 
+		count, ret := c.DeviceGetCount()
+		if ret != nvml.SUCCESS {
+			klog.Errorf("error getting device count: %s", nvml.ErrorString(ret))
+		} else {
+			ch <- prometheus.MustNewConstMetric(
+				nodePhysicalGPUCount,
+				prometheus.GaugeValue,
+				float64(count),
+				c.nodeName)
+		}
+	}()
+
+	err = c.VisitDevices(func(index int, hdev nvdev.Device) error {
+		gpuInfo, err := c.GetGpuInfo(index, hdev)
+		if err != nil {
+			klog.Errorf("error getting info for GPU %d: %v", index, err)
+			return nil
+		}
+		devIndexMap[gpuInfo.UUID] = index
+		devMemInfoMap[gpuInfo.UUID] = gpuInfo.Memory
+		busId := links.PciInfo(gpuInfo.PciInfo).BusID()
+		migEnabled := fmt.Sprint(gpuInfo.MigEnabled)
 		deviceIndex := strconv.Itoa(index)
+		minorNumber := strconv.Itoa(gpuInfo.Minor)
 		ch <- prometheus.MustNewConstMetric(
 			physicalGPUTotalMemory,
 			prometheus.GaugeValue,
-			float64(memoryInfo.Total),
-			c.nodeName, deviceIndex, deviceUUID, fmt.Sprint(migEnabled))
+			float64(gpuInfo.Memory.Total),
+			c.nodeName, deviceIndex, gpuInfo.UUID, gpuInfo.ProductName,
+			busId, minorNumber, migEnabled, gpuInfo.CudaComputeCapability)
 
 		ch <- prometheus.MustNewConstMetric(
 			physicalGPUMemoryUsage,
 			prometheus.GaugeValue,
-			float64(memoryInfo.Used),
-			c.nodeName, deviceIndex, deviceUUID, fmt.Sprint(migEnabled))
+			float64(gpuInfo.Memory.Used),
+			c.nodeName, deviceIndex, gpuInfo.UUID, gpuInfo.ProductName,
+			busId, minorNumber, migEnabled, gpuInfo.CudaComputeCapability)
 
+		memoryUtilRate := int64(0)
+		if gpuInfo.Memory.Total > 0 {
+			memoryUtilRate = int64(float64(gpuInfo.Memory.Used) / float64(gpuInfo.Memory.Total) * 100)
+		}
 		ch <- prometheus.MustNewConstMetric(
-			physicalGPUCoreUtilRate,
+			physicalGPUMemoryUtilRate,
 			prometheus.GaugeValue,
-			float64(deviceUtil.Gpu),
-			c.nodeName, deviceIndex, deviceUUID, fmt.Sprint(migEnabled))
+			float64(memoryUtilRate),
+			c.nodeName, deviceIndex, gpuInfo.UUID, gpuInfo.ProductName,
+			busId, minorNumber, migEnabled, gpuInfo.CudaComputeCapability)
+
+		migInfos, err := c.GetMigInfos(gpuInfo)
+		if err != nil {
+			klog.Errorf("error getting MIG infos for GPU %d: %v", index, err)
+		}
+		if len(migInfos) > 0 {
+			devMigInfosMap[gpuInfo.UUID] = maps.Values[map[string]*nvidia.MigInfo](migInfos)
+		}
+
+		// Skip unsupported operations after enabling Mig.
+		if gpuInfo.MigEnabled {
+			return nil
+		}
+
+		// On MIG-enabled GPUs, querying device utilization rates is not currently supported.
+		deviceUtil, rt := hdev.GetUtilizationRates()
+		if rt != nvml.SUCCESS {
+			klog.Errorf("error getting utilization rates for device %d: %s", index, nvml.ErrorString(rt))
+		} else {
+			ch <- prometheus.MustNewConstMetric(
+				physicalGPUCoreUtilRate,
+				prometheus.GaugeValue,
+				float64(deviceUtil.Gpu),
+				c.nodeName, deviceIndex, gpuInfo.UUID, gpuInfo.ProductName,
+				busId, minorNumber, migEnabled, gpuInfo.CudaComputeCapability)
+		}
 
 		// Aggregate GPU processes.
 		var processInfos []nvml.ProcessInfo
+		// In MIG mode, if device handle is provided, the API returns aggregate information, only if the caller has appropriate privileges.
+		// Per-instance information can be queried by using specific MIG device handles.
+		// Querying per-instance information using MIG device handles is not supported if the device is in vGPU Host virtualization mode.
 		if procs, rt := hdev.GetGraphicsRunningProcesses(); rt == nvml.SUCCESS {
 			processInfos = append(processInfos, procs...)
 		}
@@ -256,26 +379,27 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 			processInfoList[processInfo.Pid] = procInfo
 		}
-		devIndexMap[deviceUUID] = index
-		devProcInfoMap[deviceUUID] = processInfoList
+		devProcInfoMap[gpuInfo.UUID] = processInfoList
+
+		// On MIG-enabled GPUs, querying process utilization is not currently supported.
 		lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
 		procUtilSamples, rt := hdev.GetProcessUtilization(uint64(lastTs))
 		if rt != nvml.SUCCESS {
-			klog.V(4).Infof("error getting process utilization for device %d: %v", index, rt)
+			klog.V(4).Infof("error getting process utilization for device %d: %s", index, nvml.ErrorString(rt))
 			return nil
 		}
 		processUtilList := make(procUtilList)
 		for _, procUtilSample := range procUtilSamples {
 			processUtilList[procUtilSample.Pid] = procUtilSample
 		}
-		devProcUtilMap[deviceUUID] = processUtilList
+		devProcUtilMap[gpuInfo.UUID] = processUtilList
 		return nil
 	})
 	if err != nil {
-		klog.Errorln(err)
+		klog.Errorln(err.Error())
 	}
 
-skip:
+skipNvml:
 	var (
 		vGpuHealthMap      = make(map[string]bool)
 		vGpuTotalMemMap    = make(map[string]uint64)
@@ -292,7 +416,7 @@ skip:
 	registryNode, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 	nodeDevInfo, _ := device.ParseNodeDeviceInfo(registryNode)
 	for _, devInfo := range nodeDevInfo {
-		// Skip the statistics of Mig device
+		// Skip the statistics of MIG device.
 		if devInfo.Mig {
 			continue
 		}
@@ -308,7 +432,7 @@ skip:
 		float64(nodeVGPUTotalMemBytes),
 		c.nodeName,
 	)
-	// get current node.
+	// Get current node.
 	pods, err := c.podLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("pod lister list error: %v", err)
@@ -329,8 +453,8 @@ skip:
 		})
 
 		for _, container := range pod.Spec.Containers {
-			key := GetContainerKey(pod.UID, container.Name)
-			resData, exist := c.contLister.GetResourceData(key)
+			contKey := GetContainerKey(pod.UID, container.Name)
+			resData, exist := c.contLister.GetResourceData(contKey)
 			if !exist {
 				continue
 			}
@@ -383,14 +507,29 @@ skip:
 					pod.Namespace, pod.Name, container.Name, vDevIndex,
 					deviceUUID, containerId, containerGPUPids, c.nodeName,
 					strconv.FormatUint(realMemBytes, 10))
+				// TODO Unable to calculate the usage of virtual video memory
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUMemoryUsage,
 					prometheus.GaugeValue,
 					float64(deviceMemUsage),
 					pod.Namespace, pod.Name, container.Name, vDevIndex,
 					deviceUUID, containerId, containerGPUPids, c.nodeName)
+				memoryUtilRate := int64(0)
+				if deviceMemLimit > 0 {
+					memoryUtilRate = int64(float64(deviceMemUsage) / float64(deviceMemLimit) * 100)
+					if memoryUtilRate > 100 {
+						memoryUtilRate = 100
+					}
+				}
+				// TODO Unable to calculate the usage of virtual video memory
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUUtilRate,
+					containerVGPUMemoryUtilRate,
+					prometheus.GaugeValue,
+					float64(memoryUtilRate),
+					pod.Namespace, pod.Name, container.Name, vDevIndex,
+					deviceUUID, containerId, containerGPUPids, c.nodeName)
+				ch <- prometheus.MustNewConstMetric(
+					containerVGPUCoreUtilRate,
 					prometheus.GaugeValue,
 					float64(deviceSMUtil),
 					pod.Namespace, pod.Name, container.Name, vDevIndex,
@@ -405,21 +544,107 @@ skip:
 		float64(nodeAssignedMemBytes),
 		c.nodeName)
 
+	var (
+		listResourceOnce        sync.Once
+		podResourcesResp        *v1alpha1.ListPodResourcesResponse
+		listMigPodResourcesFunc = func() *v1alpha1.ListPodResourcesResponse {
+			listResourceOnce.Do(func() {
+				resource, err := c.podResource.ListPodResource(func(devices *v1alpha1.ContainerDevices) bool {
+					return len(devices.GetDeviceIds()) > 0 &&
+						strings.HasPrefix(devices.GetResourceName(), util.MIGDeviceResourceNamePrefix)
+				})
+				if err != nil {
+					klog.ErrorS(err, "ListPodResource failed")
+				} else {
+					podResourcesResp = resource
+				}
+			})
+			return podResourcesResp
+		}
+	)
+
+	FlattenMigInfosMapFunc(devMigInfosMap, func(parentUUID string, migInfo *nvidia.MigInfo) {
+		migInx := strconv.Itoa(migInfo.Index)
+		ciId := fmt.Sprintf("%d", migInfo.CiInfo.Id)
+		giId := fmt.Sprintf("%d", migInfo.GiInfo.Id)
+		isHealthy := fmt.Sprint(vGpuHealthMap[parentUUID])
+		podResourcesResp = listMigPodResourcesFunc()
+		podInfo := client.PodInfo{}
+		podInfoP, _ := c.podResource.GetPodInfoByMatchFunc(podResourcesResp,
+			func(devices *v1alpha1.ContainerDevices) bool {
+				return devices.GetResourceName() == deviceplugin.GetMigResourceName(migInfo) &&
+					slices.Contains(devices.GetDeviceIds(), migInfo.UUID)
+			})
+		if podInfoP != nil {
+			podInfo = *podInfoP
+		}
+		ch <- prometheus.MustNewConstMetric(
+			migDeviceTotalMemory,
+			prometheus.GaugeValue,
+			float64(migInfo.Memory.Total),
+			c.nodeName, migInx, migInfo.UUID, parentUUID, ciId, giId, migInfo.Profile,
+			isHealthy, podInfo.PodNamespace, podInfo.PodName, podInfo.ContainerName)
+		ch <- prometheus.MustNewConstMetric(
+			migDeviceMemoryUsage,
+			prometheus.GaugeValue,
+			float64(migInfo.Memory.Used),
+			c.nodeName, migInx, migInfo.UUID, parentUUID, ciId, giId, migInfo.Profile,
+			isHealthy, podInfo.PodNamespace, podInfo.PodName, podInfo.ContainerName)
+		memoryUtilRate := int64(0)
+		if migInfo.Memory.Total > 0 {
+			memoryUtilRate = int64(float64(migInfo.Memory.Used) / float64(migInfo.Memory.Total) * 100)
+			if memoryUtilRate > 100 {
+				memoryUtilRate = 100
+			}
+		}
+		ch <- prometheus.MustNewConstMetric(
+			migDeviceMemoryUtilRate,
+			prometheus.GaugeValue,
+			float64(memoryUtilRate),
+			c.nodeName, migInx, migInfo.UUID, parentUUID, ciId, giId, migInfo.Profile,
+			isHealthy, podInfo.PodNamespace, podInfo.PodName, podInfo.ContainerName)
+	})
+
+	devMemRatioMap := make(map[string]float64, len(vGpuTotalMemMap))
 	for uuid, totalMem := range vGpuTotalMemMap {
+		phyTotalMemory := totalMem
+		if memory, exists := devMemInfoMap[uuid]; exists {
+			phyTotalMemory = memory.Total
+		}
+		devMemRatioMap[uuid] = float64(totalMem) / float64(phyTotalMemory)
 		ch <- prometheus.MustNewConstMetric(
 			virtGPUTotalMemory,
 			prometheus.GaugeValue,
 			float64(totalMem),
-			c.nodeName, strconv.Itoa(devIndexMap[uuid]),
-			uuid, fmt.Sprint(vGpuHealthMap[uuid]))
+			c.nodeName, strconv.Itoa(devIndexMap[uuid]), uuid,
+			strconv.FormatUint(phyTotalMemory, 10), fmt.Sprint(vGpuHealthMap[uuid]))
 	}
+
 	for uuid, assignedMem := range vGpuAssignedMemMap {
+		phyAssignedMemory := assignedMem
+		if memRatio := devMemRatioMap[uuid]; memRatio > 1 {
+			phyAssignedMemory = uint64(float64(phyAssignedMemory) / memRatio)
+		}
 		ch <- prometheus.MustNewConstMetric(
 			virtGPUAssignedMemory,
 			prometheus.GaugeValue,
 			float64(assignedMem),
-			c.nodeName, strconv.Itoa(devIndexMap[uuid]),
-			uuid, fmt.Sprint(vGpuHealthMap[uuid]))
+			c.nodeName, strconv.Itoa(devIndexMap[uuid]), uuid,
+			strconv.FormatUint(phyAssignedMemory, 10), fmt.Sprint(vGpuHealthMap[uuid]))
+	}
+}
+
+func FlattenMigInfosMapFunc(migInfosMap map[string][]*nvidia.MigInfo, f func(parentUUID string, migInfo *nvidia.MigInfo)) {
+	if f == nil {
+		return
+	}
+	for parentUUID, migInfos := range migInfosMap {
+		for _, migInfo := range migInfos {
+			if migInfo == nil {
+				continue
+			}
+			f(parentUUID, migInfo)
+		}
 	}
 }
 
