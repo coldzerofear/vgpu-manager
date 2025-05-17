@@ -54,6 +54,20 @@ Label the node where the device plugin will be deployed: `vgpu-manager-enable=en
 kubectl label node <nodename> vgpu-manager-enable=enable
 ```
 
+### Helm charts deployment (recommend)
+
+Modify the configuration in values.yaml according to the node environment and requirements.
+
+```shell
+helm install vgpu-manager ./helm/ -n kube-system
+```
+
+Verify the installation of `vgpu-manager-device-plugin` and `vgpu-manager-scheduler`
+
+```shell
+kubectl get pods -n kube-system
+```
+
 ### Deploy directly using YAML files
 
 ```bash
@@ -80,25 +94,13 @@ The Webhook service requires the use of [cert-manager](https://github.com/cert-m
 kubectl apply -f deploy/vgpu-manager-webhook.yaml
 ```
 
-### Helm charts deployment
-
-Modify the configuration in values.yaml according to the node environment and requirements.
-
-If you want to install the webhook service component, please ensure that the cluster has installed `cert-manager`, then modify file helm/values.yaml `values.webhook.enabled=true`.
-
-Use the following command for deployment
-
-```shell
-helm install vgpu-manager ./helm/ -n kube-system
-```
-
-Verify the installation of `vgpu-manager-device-plugin` and `vgpu-manager-scheduler`
-
-```shell
-kubectl get pods -n kube-system
-```
-
 ## Uninstall
+
+### Helm charts uninstallation
+
+```shell
+helm uninstall vgpu-manager -n kube-system 
+```
 
 ### Uninstall directly according to YAML
 
@@ -106,12 +108,6 @@ kubectl get pods -n kube-system
 kubectl delete -f deploy/vgpu-manager-scheduler.yaml
 kubectl delete -f deploy/vgpu-manager-deviceplugin.yaml
 kubectl delete -f deploy/vgpu-manager-webhook.yaml
-```
-
-### Helm charts uninstallation
-
-```shell
-helm uninstall vgpu-manager -n kube-system 
 ```
 
 ## Example of use

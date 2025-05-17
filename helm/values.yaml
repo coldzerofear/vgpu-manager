@@ -215,12 +215,18 @@ devicePlugin:
 
 # Installing the Webhook service requires installing the Cert-Manager component in advance to provide a self signed certificate for the service.
 webhook:
-  # Should the webhook be deployed? (default: false)
-  enabled: false
-  # Certificate validity period. (default: one year)
-  certDuration: 8760h
-  # The last refresh time of the certificate. (default: 360h)
-  certRenewBefore: 360h
+  # Should the webhook be deployed? (default: true)
+  enabled: true
+  # Certificate validity period. (Unit day, default: 10 year)
+  certDuration: 3650
+
+  # If enabled, certificate distribution will be done using Cert Manager,
+  # which will take over the automatic renewal of certificates
+  certManager:
+    enabled: false
+    # The last refresh time of the certificate. (Unit day, default: 30 day)
+    certRenewBefore: 30
+
   # mutate webhook failure Policy (Supported values: Ignore | Fail)
   failurePolicy: Fail
   # pod labels

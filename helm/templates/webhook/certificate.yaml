@@ -1,4 +1,5 @@
 {{- if .Values.webhook.enabled -}}
+{{- if .Values.webhook.certManager.enabled -}}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -15,6 +16,82 @@ spec:
     kind: Issuer
     name: {{ include "vgpu-manager.webhook" . }}-issuer
   secretName: {{ include "vgpu-manager.webhook" . }}-secret
-  duration: {{ .Values.webhook.certDuration }}
-  renewBefore: {{ .Values.webhook.certRenewBefore }}
+  duration: {{ printf "%dh" (mul .Values.webhook.certDuration 24) }}
+  renewBefore: {{ printf "%dh" (mul .Values.webhook.certManager.certRenewBefore 24) }}
+{{- else }}
+{{- $webhookSvcName := include "vgpu-manager.webhook" . }}
+{{- $webhookSvcAltNames := list (printf "%s.%s.svc" $webhookSvcName .Release.Namespace) (printf "%s.%s.svc.cluster.local" $webhookSvcName .Release.Namespace) }}
+{{- $certName := printf "%s-cert" (include "vgpu-manager.webhook" .) }}
+{{- $duration := int .Values.webhook.certDuration }}
+{{- $ca := genCA $certName $duration }}
+{{- $cert := genSignedCert (printf "%s.%s" $webhookSvcName .Release.Namespace) nil $webhookSvcAltNames $duration $ca }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vgpu-manager.webhook" . }}-secret
+  namespace: {{ .Release.Namespace | quote }}
+  annotations:
+    "helm.sh/hook": "pre-install"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.webhook" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $ca.Cert | b64enc }}
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.webhook" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+  name: {{ include "vgpu-manager.webhook" . }}-mutate
+webhooks:
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      caBundle: {{ $ca.Cert | b64enc }}
+      service:
+        name: {{ include "vgpu-manager.webhook" . }}
+        namespace: {{ .Release.Namespace | quote }}
+        path: /pods/mutate
+        port: {{ .Values.webhook.commands.serverBindPort }}
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    matchPolicy: Equivalent
+    name: mutatepod.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        {{- if .Values.webhook.excludeNamespaces }}
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+          {{- toYaml .Values.webhook.excludeNamespaces | nindent 10 }}
+        {{- end }}
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    reinvocationPolicy: Never
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+        resources:
+          - pods
+        scope: '*'
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+{{- end }}
 {{- end }}
