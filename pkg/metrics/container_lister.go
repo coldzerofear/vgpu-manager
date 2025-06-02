@@ -11,6 +11,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -97,6 +98,10 @@ func (c *ContainerLister) update() error {
 	keySet := c.collectContainerKey(pods)
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			continue
+		}
+		// Skip the checkpoint folder to prevent accidental deletion.
+		if entry.Name() == util.Checkpoints {
 			continue
 		}
 		filePath := filepath.Join(c.basePath, entry.Name())

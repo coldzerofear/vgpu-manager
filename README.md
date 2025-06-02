@@ -18,7 +18,7 @@ support multi container and multi GPU virtualization and rich scheduling strateg
 - [x] Webhook dynamic admission, fixing some non-standard pod configurations
 - [x] Provide the optimal topology allocation for NUMA and NVLink
 - [x] Compatible with open-gpu-kernel-modules
-- [ ] Support MIG strategy device allocation
+- [x] Support MIG strategy device allocation
 - [ ] Compatible with hot swappable devices and expansion capabilities
 - [ ] Compatible with Volcano Batch Scheduler
 - [ ] Support dynamic resource allocation (DRA)

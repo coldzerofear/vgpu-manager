@@ -21,14 +21,14 @@ import (
 
 const Path = "/pods/mutate"
 
-func NewMutateWebhook(scheme *runtime.Scheme, options *options.Options) *admission.Webhook {
+func NewMutateWebhook(scheme *runtime.Scheme, options *options.Options) (*admission.Webhook, error) {
 	return &admission.Webhook{
 		Handler: &mutateHandle{
 			decoder: admission.NewDecoder(scheme),
 			options: options,
 		},
 		RecoverPanic: ptr.To[bool](true),
-	}
+	}, nil
 }
 
 type mutateHandle struct {

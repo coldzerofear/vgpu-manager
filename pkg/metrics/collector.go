@@ -570,11 +570,10 @@ skipNvml:
 		isHealthy := fmt.Sprint(vGpuHealthMap[parentUUID])
 		podResourcesResp = listMigPodResourcesFunc()
 		podInfo := client.PodInfo{}
-		podInfoP, _ := c.podResource.GetPodInfoByMatchFunc(podResourcesResp,
-			func(devices *v1alpha1.ContainerDevices) bool {
-				return devices.GetResourceName() == deviceplugin.GetMigResourceName(migInfo) &&
-					slices.Contains(devices.GetDeviceIds(), migInfo.UUID)
-			})
+		podInfoP, _ := c.podResource.GetPodInfoByMatchFunc(podResourcesResp, func(devices *v1alpha1.ContainerDevices) bool {
+			return devices.GetResourceName() == deviceplugin.GetMigResourceName(migInfo) &&
+				slices.Contains(devices.GetDeviceIds(), migInfo.UUID)
+		})
 		if podInfoP != nil {
 			podInfo = *podInfoP
 		}

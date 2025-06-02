@@ -48,7 +48,7 @@ const (
 	defaultDeviceMemoryScaling = 1.0
 	defaultDeviceCoresScaling  = 1.0
 	defaultPprofBindPort       = 0
-	defaultMigStrategy         = util.MigStrategyNone
+	defaultMigStrategy         = util.MigStrategyMixed
 
 	Component = "devicePlugin"
 
@@ -107,7 +107,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.NodeName, "node-name", o.NodeName, "If non-empty, will use this string as identification instead of the actual node name.")
 	pflag.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (supported values: \"cgroupfs\" | \"system\")")
 	pflag.StringVar(&o.DeviceListStrategy, "device-list-strategy", o.DeviceListStrategy, "The desired strategy for passing the device list to the underlying runtime. (supported values: \"envvar\" | \"volume-mounts\")")
-	pflag.IntVar(&o.DeviceSplitCount, "device-split-count", o.DeviceSplitCount, "The maximum number of VGPU that can be split per physical GPU.")
+	pflag.IntVar(&o.DeviceSplitCount, "device-split-count", o.DeviceSplitCount, "The maximum number of vGPU that can be split per physical GPU.")
 	pflag.Float64Var(&o.DeviceCoresScaling, "device-cores-scaling", o.DeviceCoresScaling, "The ratio for NVIDIA device cores scaling.")
 	pflag.Float64Var(&o.DeviceMemoryScaling, "device-memory-scaling", o.DeviceMemoryScaling, "The ratio for NVIDIA device memory scaling.")
 	pflag.IntVar(&o.DeviceMemoryFactor, "device-memory-factor", o.DeviceMemoryFactor, "The default gpu memory block size is 1MB.")

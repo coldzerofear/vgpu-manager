@@ -14,6 +14,7 @@ require (
 	github.com/prometheus/client_golang v1.19.1
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.10.0
+	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	golang.org/x/time v0.7.0
 	gomodules.xyz/jsonpatch/v2 v2.4.0
 	google.golang.org/grpc v1.65.0
@@ -26,6 +27,7 @@ require (
 	k8s.io/kube-scheduler v0.32.0
 	k8s.io/kubectl v0.32.0
 	k8s.io/kubelet v0.32.0
+	k8s.io/kubernetes v1.32.0
 	k8s.io/utils v0.0.0-20241104100929-3ea5e8cea738
 	sigs.k8s.io/controller-runtime v0.19.7
 )
@@ -69,7 +71,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/otel v1.28.0 // indirect
 	go.opentelemetry.io/otel/trace v1.28.0 // indirect
-	golang.org/x/exp v0.0.0-20230515195305-f3d0a9c9a5cc // indirect
 	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/oauth2 v0.23.0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
@@ -85,4 +86,21 @@ require (
 	sigs.k8s.io/json v0.0.0-20241010143419-9aa6b5e7a4b3 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.2 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
+)
+
+replace (
+	k8s.io/cloud-provider => k8s.io/cloud-provider v0.32.0
+	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.32.0
+	k8s.io/controller-manager => k8s.io/controller-manager v0.32.0
+	k8s.io/cri-client => k8s.io/cri-client v0.32.0
+	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.32.0
+	k8s.io/dynamic-resource-allocation => k8s.io/dynamic-resource-allocation v0.32.0
+	k8s.io/endpointslice => k8s.io/endpointslice v0.32.0
+	k8s.io/externaljwt => k8s.io/externaljwt v0.32.0
+	k8s.io/kube-aggregator => k8s.io/kube-aggregator v0.32.0
+	k8s.io/kube-controller-manager => k8s.io/kube-controller-manager v0.32.0
+	k8s.io/kube-proxy => k8s.io/kube-proxy v0.32.0
+	k8s.io/mount-utils => k8s.io/mount-utils v0.32.0
+	k8s.io/pod-security-admission => k8s.io/pod-security-admission v0.32.0
+	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.32.0
 )

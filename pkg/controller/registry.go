@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
@@ -16,7 +15,7 @@ type Controller interface {
 	RegistryToManager(manager ctrm.Manager) error
 }
 
-type newController func(manager ctrm.Manager, config *node.NodeConfig) reconcile.Reconciler
+type newController func(manager ctrm.Manager, config *node.NodeConfig) (reconcile.Reconciler, error)
 
 var (
 	once              sync.Once
@@ -33,14 +32,19 @@ func init() {
 
 func RegistryControllerToManager(manager ctrm.Manager, config *node.NodeConfig, controllerSwitch map[string]bool) (err error) {
 	once.Do(func() {
+		var c reconcile.Reconciler
 		for name, newControllerFunc := range controllerFuncMap {
 			if !controllerSwitch[name] {
 				continue
 			}
-			controller, ok := newControllerFunc(manager, config).(Controller)
+			c, err = newControllerFunc(manager, config)
+			if err != nil {
+				klog.ErrorS(err, "unable to create controller", "controller", name)
+				return
+			}
+			controller, ok := c.(Controller)
 			if !ok {
-				err = fmt.Errorf("%s has not implemented a controller, skip it", name)
-				klog.Errorln(err.Error())
+				klog.Errorf("%s has not implemented a controller, skip it", name)
 				continue
 			}
 			klog.V(4).InfoS("Registry controller to manager", "controller", name)

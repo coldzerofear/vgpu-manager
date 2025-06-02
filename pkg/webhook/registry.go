@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"net/http"
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
@@ -11,22 +12,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-type newWebhook func(*runtime.Scheme, *options.Options) *admission.Webhook
+type newWebhookFunc func(*runtime.Scheme, *options.Options) (*admission.Webhook, error)
 
 var (
 	once           sync.Once
-	webhookFuncMap map[string]newWebhook
+	webhookFuncMap map[string]newWebhookFunc
 )
 
 func init() {
-	webhookFuncMap = make(map[string]newWebhook)
+	webhookFuncMap = make(map[string]newWebhookFunc)
 	webhookFuncMap[podmutate.Path] = podmutate.NewMutateWebhook
 }
 
 func RegistryWebhookToServer(server webhook.Server, scheme *runtime.Scheme, opt *options.Options) (err error) {
 	once.Do(func() {
+		var hook http.Handler
 		for path, webhookFunc := range webhookFuncMap {
-			hook := webhookFunc(scheme, opt)
+			hook, err = webhookFunc(scheme, opt)
+			if err != nil {
+				klog.ErrorS(err, "unable to create webhook", "path", path)
+				return
+			}
 			klog.V(4).InfoS("Registry webhook to server", "path", path)
 			server.Register(path, hook)
 		}

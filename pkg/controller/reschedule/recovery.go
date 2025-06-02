@@ -17,44 +17,63 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-type RecoveryController struct {
-	client   client.Client
-	recorder record.EventRecorder
-	queue    workqueue.TypedRateLimitingInterface[*corev1.Pod]
+type recoveryController struct {
+	client             client.Client
+	recorder           record.EventRecorder
+	queue              workqueue.TypedRateLimitingInterface[*corev1.Pod]
+	recoveryCheckpoint *recoveryCheckpoint
 }
 
-func NewRecoveryController(client client.Client, recorder record.EventRecorder) *RecoveryController {
-	return &RecoveryController{
-		client:   client,
-		recorder: recorder,
+func newRecoveryController(client client.Client, recorder record.EventRecorder) (*recoveryController, error) {
+	checkpoint, err := newRecoveryCheckpoint()
+	if err != nil {
+		return nil, err
+	}
+	return &recoveryController{
+		client:             client,
+		recorder:           recorder,
+		recoveryCheckpoint: checkpoint,
 		queue: workqueue.NewTypedRateLimitingQueue[*corev1.Pod](
 			workqueue.DefaultTypedControllerRateLimiter[*corev1.Pod]()),
-	}
+	}, nil
 }
 
-func (r *RecoveryController) AddRecovery(pod *corev1.Pod, d time.Duration) {
+func (r *recoveryController) AddPodToRecoveryQueue(pod *corev1.Pod, d time.Duration) {
+	if err := r.recoveryCheckpoint.AddPod(pod); err != nil {
+		klog.ErrorS(err, "add pod to recovery checkpoint failed")
+	}
 	r.queue.AddAfter(pod, d)
 }
 
-var _ manager.Runnable = &RecoveryController{}
+var _ manager.Runnable = &recoveryController{}
 
-func (r *RecoveryController) Start(ctx context.Context) error {
+func (r *recoveryController) Start(ctx context.Context) error {
 	klog.V(3).Infoln("Starting pod recovery controller")
 	go wait.UntilWithContext(ctx, r.runWorker(), time.Second)
+
+	// First startup, insert pods from the checkpoint into the recovery queue
+	pods, err := r.recoveryCheckpoint.ListPod()
+	if err != nil {
+		klog.ErrorS(err, "list pod for recovery checkpoint failed")
+	}
+	for i := range pods {
+		klog.InfoS("Find unrecovered historical pods from the checkpoint", "pod", klog.KObj(pods[i]))
+		r.queue.Add(pods[i])
+	}
 	<-ctx.Done()
 	klog.V(3).Infoln("Stopping pod recovery controller")
 	r.queue.ShutDown()
 	return nil
 }
 
-func (r *RecoveryController) runWorker() func(ctx context.Context) {
+func (r *recoveryController) runWorker() func(ctx context.Context) {
 	return func(_ context.Context) {
 		for r.processNextItem() {
 		}
 	}
 }
 
-func (r *RecoveryController) processNextItem() bool {
+func (r *recoveryController) processNextItem() bool {
 	pod, shutdown := r.queue.Get()
 	if shutdown {
 		return false
@@ -69,8 +88,7 @@ func (r *RecoveryController) processNextItem() bool {
 	result, err := r.recoveryWorker(context.Background(), pod.DeepCopy())
 	switch {
 	case err != nil:
-		klog.V(4).ErrorS(err, "Recovery failed", "pod",
-			client.ObjectKeyFromObject(pod).String())
+		klog.V(4).ErrorS(err, "Recovery failed", "pod", klog.KObj(pod))
 		r.queue.AddRateLimited(pod)
 	case result.RequeueAfter > 0:
 		// The result.RequeueAfter request will be lost, if it is returned
@@ -82,11 +100,13 @@ func (r *RecoveryController) processNextItem() bool {
 	case result.Requeue:
 		r.queue.AddRateLimited(pod)
 	default:
-		klog.V(4).InfoS("Recovery successful", "pod",
-			client.ObjectKeyFromObject(pod).String())
+		klog.V(4).InfoS("Recovery successful", "pod", klog.KObj(pod))
 		// Finally, if no error occurs we Forget this item so it does not
 		// get queued again until another change happens.
 		r.queue.Forget(pod)
+		if err = r.recoveryCheckpoint.RemovePod(klog.KObj(pod).String()); err != nil {
+			klog.ErrorS(err, "remove pod for recovery checkpoint failed", "pod", klog.KObj(pod))
+		}
 	}
 
 	return true
@@ -114,7 +134,7 @@ func CleanupMetadata(pod *corev1.Pod) {
 	}
 }
 
-func (r *RecoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod) (reconcile.Result, error) {
+func (r *recoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod) (reconcile.Result, error) {
 	podKey := client.ObjectKeyFromObject(pod)
 	currentPod := corev1.Pod{}
 	err := r.client.Get(ctx, podKey, &currentPod)
@@ -128,8 +148,7 @@ func (r *RecoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod
 		newPod.Spec.NodeName = ""
 		newPod.Status = corev1.PodStatus{}
 		// Create a recovered pod
-		err = r.client.Create(ctx, newPod, &client.CreateOptions{})
-		if err == nil {
+		if err = r.client.Create(ctx, newPod, &client.CreateOptions{}); err == nil {
 			r.recorder.Event(newPod, corev1.EventTypeNormal, "Recovery", "Pod recovery successful")
 		}
 		if errors.IsAlreadyExists(err) {

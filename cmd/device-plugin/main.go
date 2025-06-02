@@ -115,6 +115,9 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Get device plugins failed: %v", err)
 	}
+	if len(plugins) == 0 {
+		klog.Fatalf("No device plugins found")
+	}
 
 	klog.Infoln("Starting cluster manager.")
 	go func() {

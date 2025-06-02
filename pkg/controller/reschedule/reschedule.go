@@ -21,19 +21,23 @@ const Name string = "Reschedule"
 type RescheduleController struct {
 	nodeName string
 	client   client.Client
-	recovery *RecoveryController
+	recovery *recoveryController
 	recorder record.EventRecorder
 }
 
-func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfig) reconcile.Reconciler {
+func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfig) (reconcile.Reconciler, error) {
 	client := manager.GetClient()
 	recorder := manager.GetEventRecorderFor("re-schedule")
+	recovery, err := newRecoveryController(client, recorder)
+	if err != nil {
+		return nil, err
+	}
 	return &RescheduleController{
 		nodeName: config.NodeName(),
 		client:   client,
 		recorder: recorder,
-		recovery: NewRecoveryController(client, recorder),
-	}
+		recovery: recovery,
+	}, nil
 }
 
 func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -76,7 +80,7 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 				return reconcile.Result{}, err
 			}
 			// Push the pod into the recovery controller.
-			r.recovery.AddRecovery(pod, 20*time.Millisecond)
+			r.recovery.AddPodToRecoveryQueue(pod, 20*time.Millisecond)
 		}
 		if shouldDeletePod {
 			r.recorder.Event(pod, corev1.EventTypeWarning, "Evict",

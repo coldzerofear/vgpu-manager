@@ -37,31 +37,33 @@ type DevicePlugin interface {
 
 func GetDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
 	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) ([]DevicePlugin, error) {
-	socket := filepath.Join(opt.DevicePluginPath, "vgpu-number.sock")
-	plugins := []DevicePlugin{
-		NewVNumberDevicePlugin(util.VGPUNumberResourceName,
-			socket, devManager, kubeClient, clusterManager.GetCache()),
+
+	var plugins []DevicePlugin
+	migStrategy := devManager.GetNodeConfig().MigStrategy()
+	if migStrategy != util.MigStrategySingle {
+		socket := filepath.Join(opt.DevicePluginPath, "nvidia-vgpu.sock")
+		plugins = append(plugins, NewVNumberDevicePlugin(util.VGPUNumberResourceName,
+			socket, devManager, kubeClient, clusterManager.GetCache()))
 	}
 
 	var deleteResources []string
 
 	if opt.FeatureGate.Enabled(options.CorePlugin) {
-		socket = filepath.Join(opt.DevicePluginPath, "vgpu-core.sock")
-		vcorePlugin := NewVCoreDevicePlugin(util.VGPUCoreResourceName, socket, devManager)
-		plugins = append(plugins, vcorePlugin)
+		socket := filepath.Join(opt.DevicePluginPath, "nvidia-vgpu-core.sock")
+		plugins = append(plugins, NewVCoreDevicePlugin(util.VGPUCoreResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUCoreResourceName)
 	}
 
 	if opt.FeatureGate.Enabled(options.MemoryPlugin) {
-		socket = filepath.Join(opt.DevicePluginPath, "vgpu-memory.sock")
-		vmemoryPlugin := NewVMemoryDevicePlugin(util.VGPUMemoryResourceName, socket, devManager)
-		plugins = append(plugins, vmemoryPlugin)
+		socket := filepath.Join(opt.DevicePluginPath, "nvidia-vgpu-memory.sock")
+		plugins = append(plugins, NewVMemoryDevicePlugin(util.VGPUMemoryResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUMemoryResourceName)
 	}
 
-	migStrategy := devManager.GetNodeConfig().MigStrategy()
+	go CycleCleanupNodeResources(kubeClient, opt.NodeName, deleteResources)
+
 	if migStrategy != util.MigStrategyNone {
 		var requireUniformMIGDevices bool
 		if migStrategy == util.MigStrategySingle {
@@ -70,18 +72,9 @@ func GetDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
 		if err := devManager.AssertAllMigDevicesAreValid(requireUniformMIGDevices); err != nil {
 			return nil, fmt.Errorf("invalid MIG configuration: %v", err)
 		}
-		allMigEnabled := true
-		for _, gpuDevice := range devManager.GetGPUDeviceMap() {
-			if !gpuDevice.Healthy { //Skip excluded devices
-				continue
-			}
-			if !gpuDevice.MigEnabled {
-				allMigEnabled = false
-				break
-			}
-		}
+
 		migDevices := devManager.GetMIGDeviceMap()
-		if requireUniformMIGDevices && !allMigEnabled && len(migDevices) != 0 {
+		if requireUniformMIGDevices && !devManager.AllAvailableGpuMigEnabled() && len(migDevices) != 0 {
 			return nil, fmt.Errorf("all devices on the node must be configured with the same migEnabled value")
 		}
 		resourceSet := sets.NewString()
@@ -91,11 +84,11 @@ func GetDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
 		}
 		for resource := range resourceSet {
 			resourceName := util.MIGDeviceResourceNamePrefix + resource
-			socket = filepath.Join(opt.DevicePluginPath, fmt.Sprintf("nvidia-mig-%s.sock", resource))
+			socket := filepath.Join(opt.DevicePluginPath, fmt.Sprintf("nvidia-mig-%s.sock", resource))
 			plugins = append(plugins, NewMigDevicePlugin(resourceName, socket, devManager))
 		}
 	}
-	go CycleCleanupNodeResources(kubeClient, opt.NodeName, deleteResources)
+
 	return plugins, nil
 }
 

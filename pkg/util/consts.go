@@ -79,6 +79,7 @@ const (
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
 	PodUIDEnv       = "VGPU_POD_UID"
 	ContNameEnv     = "VGPU_CONTAINER_NAME"
+	Checkpoints     = "checkpoints"
 )
 
 type ComputePolicy string

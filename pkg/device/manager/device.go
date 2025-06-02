@@ -256,6 +256,20 @@ func (m *DeviceManager) AssertAllMigDevicesAreValid(uniform bool) error {
 	})
 }
 
+func (m *DeviceManager) AllAvailableGpuMigEnabled() bool {
+	allMigEnabled := true
+	for _, gpuDevice := range m.GetGPUDeviceMap() {
+		if !gpuDevice.Healthy { // Skip excluded devices
+			continue
+		}
+		if !gpuDevice.MigEnabled {
+			allMigEnabled = false
+			break
+		}
+	}
+	return allMigEnabled
+}
+
 func (m *DeviceManager) GetGPUDeviceMap() map[string]GPUDevice {
 	m.mut.Lock()
 	defer m.mut.Unlock()
