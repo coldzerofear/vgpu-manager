@@ -23,6 +23,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/bind"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	tlsconfig "github.com/grepplabs/cert-source/config"
+	tlsserver "github.com/grepplabs/cert-source/tls/server"
 	tlsserverconfig "github.com/grepplabs/cert-source/tls/server/config"
 	"github.com/julienschmidt/httprouter"
 	corev1 "k8s.io/api/core/v1"
@@ -76,7 +77,11 @@ func main() {
 				Key:  opt.TlsKeyFile,
 				Cert: opt.TlsCertFile,
 			},
-		})
+			// Using http/1.1 will prevent from being vulnerable to the HTTP/2 Stream Cancellation and Rapid Reset CVEs.
+			// For more information see:
+			// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
+			// - https://github.com/advisories/GHSA-4374-p667-p6c8
+		}, tlsserver.WithTLSServerNextProtos([]string{"http/1.1"}))
 		if err != nil {
 			klog.Fatalf("GetServerTLSConfig failed: %v", err)
 		}

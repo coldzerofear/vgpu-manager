@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"net/http"
 	_ "net/http/pprof"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
+	tlsserver "github.com/grepplabs/cert-source/tls/server"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -36,6 +38,13 @@ func main() {
 	server := webhook.NewServer(webhook.Options{
 		Port:    opt.ServerBindProt,
 		CertDir: opt.CertDir,
+		TLSOpts: []func(*tls.Config){
+			// Using http/1.1 will prevent from being vulnerable to the HTTP/2 Stream Cancellation and Rapid Reset CVEs.
+			// For more information see:
+			// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
+			// - https://github.com/advisories/GHSA-4374-p667-p6c8
+			tlsserver.WithTLSServerNextProtos([]string{"http/1.1"}),
+		},
 	})
 
 	// init probe
