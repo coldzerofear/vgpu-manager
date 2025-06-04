@@ -29,10 +29,10 @@ func (m *DeviceManager) checkHealth() error {
 		return nil
 	}
 
-	if err := m.Init(); err != nil {
+	if err := m.NvmlInit(); err != nil {
 		return err
 	}
-	defer m.Shutdown()
+	defer m.NvmlShutdown()
 
 	// FIXME: formalize the full list and document it.
 	// http://docs.nvidia.com/deploy/xid-errors/index.html#topic_4

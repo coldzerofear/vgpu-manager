@@ -1,20 +1,20 @@
 package manager
 
 import (
-	"strconv"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"golang.org/x/exp/maps"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 )
 
-func (m *DeviceManager) getNodeTopologyInfo() device.NodeTopologyInfo {
+func (m *DeviceManager) GetNodeTopologyInfo() device.NodeTopologyInfo {
 	nodeTopo := device.NodeTopologyInfo{}
 	for _, dev := range m.devices {
 		if dev.MIG != nil {
@@ -28,69 +28,86 @@ func (m *DeviceManager) getNodeTopologyInfo() device.NodeTopologyInfo {
 	return nodeTopo
 }
 
-func (m *DeviceManager) registryNode() {
-	featureGate := featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-	gpuTopologyEnabled := featureGate != nil && featureGate.Enabled(options.GPUTopology)
-	registryNode := func() error {
-		nodeDeviceInfos := m.GetNodeDeviceInfo()
-		registryGPUs, err := nodeDeviceInfos.Encode()
-		if err != nil {
-			return err
+func patchNodeMetadata(cli kubernetes.Interface, nodeName string, patchMetadata client.PatchMetadata) error {
+	if len(patchMetadata.Annotations) > 0 || len(patchMetadata.Labels) > 0 {
+		metadata := client.PatchMetadata{}
+		if len(patchMetadata.Annotations) > 0 {
+			metadata.Annotations = patchMetadata.Annotations
 		}
-		heartbeatTime, err := metav1.NowMicro().MarshalText()
-		if err != nil {
-			return err
-		}
-		var registryGPUTopology string
-		if gpuTopologyEnabled {
-			nodeTopo := m.getNodeTopologyInfo()
-			registryGPUTopology, err = nodeTopo.Encode()
-			if err != nil {
-				return err
-			}
-		}
-		patchData := client.PatchMetadata{
-			Annotations: map[string]string{
-				util.NodeDeviceRegisterAnnotation:  registryGPUs,
-				util.NodeDeviceHeartbeatAnnotation: string(heartbeatTime),
-				util.NodeDeviceTopologyAnnotation:  registryGPUTopology,
-				util.DeviceMemoryFactorAnnotation:  strconv.Itoa(m.config.DeviceMemoryFactor()),
-			},
-			Labels: map[string]string{
-				util.NodeNvidiaDriverVersionLabel: m.driverVersion.DriverVersion,
-				util.NodeNvidiaCudaVersionLabel:   strconv.Itoa(int(m.driverVersion.CudaDriverVersion)),
-			},
+		if len(patchMetadata.Labels) > 0 {
+			metadata.Labels = patchMetadata.Labels
 		}
 		return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-			return client.PatchNodeMetadata(m.client, m.config.NodeName(), patchData)
+			return client.PatchNodeMetadata(cli, nodeName, metadata)
 		})
 	}
+	return nil
+}
+
+func (m *DeviceManager) registryDevices() {
+	patchMetadata := client.PatchMetadata{
+		Annotations: map[string]string{},
+		Labels:      map[string]string{},
+	}
+	featureGate := featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
 	stopCh := m.stop
 	for {
 		select {
 		case <-stopCh:
-			klog.V(5).Infoln("DeviceManager Node registration has stopped")
+			klog.V(1).Infoln("DeviceManager Node registration has stopped")
+			m.mut.Lock()
+			funcs := maps.Clone(m.cleanupRegistryFuncs)
+			m.mut.Unlock()
+
+			maps.Clear(patchMetadata.Labels)
+			maps.Clear(patchMetadata.Annotations)
+			for name, fn := range funcs {
+				metadata, err := fn(featureGate)
+				if err != nil {
+					klog.ErrorS(err, "Preparing to clean device infos metadata failed", "pluginName", name)
+					continue
+				}
+				if metadata != nil {
+					maps.Copy(patchMetadata.Labels, metadata.Labels)
+					maps.Copy(patchMetadata.Annotations, metadata.Annotations)
+				}
+			}
+			if err := patchNodeMetadata(m.client, m.config.NodeName(), patchMetadata); err != nil {
+				klog.ErrorS(err, "Cleanup node device registry infos failed")
+			}
 			return
-		default:
-			if err := registryNode(); err != nil {
+		case <-ticker.C:
+			m.mut.Lock()
+			funcs := maps.Clone(m.registryFuncs)
+			m.mut.Unlock()
+
+			// Reset trigger to detect per second when there are no registered functions.
+			if len(funcs) == 0 {
+				ticker.Reset(time.Second)
+				continue
+			}
+			maps.Clear(patchMetadata.Labels)
+			maps.Clear(patchMetadata.Annotations)
+			for name, fn := range funcs {
+				metadata, err := fn(featureGate)
+				if err != nil {
+					klog.ErrorS(err, "Failed to prepare device infos metadata", "pluginName", name)
+					continue
+				}
+				if metadata != nil {
+					maps.Copy(patchMetadata.Labels, metadata.Labels)
+					maps.Copy(patchMetadata.Annotations, metadata.Annotations)
+				}
+			}
+			if err := patchNodeMetadata(m.client, m.config.NodeName(), patchMetadata); err != nil {
 				klog.ErrorS(err, "Registry node device infos failed")
-				time.Sleep(time.Second * 5)
+				ticker.Reset(10 * time.Second)
 			} else {
-				time.Sleep(time.Second * 30)
+				ticker.Reset(30 * time.Second)
 			}
 		}
 	}
-}
-
-func (m *DeviceManager) cleanupRegistry() error {
-	patchData := client.PatchMetadata{
-		Annotations: map[string]string{
-			util.NodeDeviceHeartbeatAnnotation: "",
-			util.NodeDeviceRegisterAnnotation:  "",
-			util.NodeDeviceTopologyAnnotation:  "",
-		},
-	}
-	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-		return client.PatchNodeMetadata(m.client, m.config.NodeName(), patchData)
-	})
 }

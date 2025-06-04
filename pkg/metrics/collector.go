@@ -248,12 +248,12 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devProcUtilMap = make(map[string]procUtilList)
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
 	)
-	err := c.Init()
+	err := c.NvmlInit()
 	if err != nil {
 		klog.Errorln(err)
 		goto skipNvml
 	}
-	defer c.Shutdown()
+	defer c.NvmlShutdown()
 
 	func() {
 		driverVersion, ret := c.SystemGetDriverVersion()

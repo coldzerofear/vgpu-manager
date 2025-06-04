@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
@@ -23,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -58,12 +60,68 @@ func (m *vnumberDevicePlugin) Name() string {
 
 // Start starts the gRPC server, registers the device plugin with the Kubelet.
 func (m *vnumberDevicePlugin) Start() error {
-	return m.base.Start(m.Name(), m)
+	err := m.base.Start(m.Name(), m)
+	if err == nil {
+		m.base.manager.AddRegistryFunc(m.Name(), m.registryDevices)
+		m.base.manager.AddCleanupRegistryFunc(m.Name(), m.cleanupRegistry)
+	}
+	return err
 }
 
 // Stop stops the gRPC server.
 func (m *vnumberDevicePlugin) Stop() error {
-	return m.base.Stop(m.Name())
+	err := m.base.Stop(m.Name())
+	if err == nil {
+		m.base.manager.RemoveRegistryFunc(m.Name())
+		m.base.manager.RemoveCleanupRegistryFunc(m.Name())
+	}
+	return err
+}
+
+func (m *vnumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGate) (*client.PatchMetadata, error) {
+	gpuTopologyEnabled := featureGate != nil && featureGate.Enabled(options.GPUTopology)
+	nodeDeviceInfos := m.base.manager.GetNodeDeviceInfo()
+	registryGPUs, err := nodeDeviceInfos.Encode()
+	if err != nil {
+		return nil, err
+	}
+	heartbeatTime, err := metav1.NowMicro().MarshalText()
+	if err != nil {
+		return nil, err
+	}
+	var registryGPUTopology string
+	if gpuTopologyEnabled {
+		nodeTopo := m.base.manager.GetNodeTopologyInfo()
+		registryGPUTopology, err = nodeTopo.Encode()
+		if err != nil {
+			return nil, err
+		}
+	}
+	metadata := client.PatchMetadata{
+		Annotations: map[string]string{
+			util.NodeDeviceRegisterAnnotation:  registryGPUs,
+			util.NodeDeviceHeartbeatAnnotation: string(heartbeatTime),
+			util.NodeDeviceTopologyAnnotation:  registryGPUTopology,
+			util.DeviceMemoryFactorAnnotation:  strconv.Itoa(m.base.manager.GetNodeConfig().DeviceMemoryFactor()),
+		},
+		Labels: map[string]string{
+			util.NodeNvidiaDriverVersionLabel: m.base.manager.GetDriverVersion().DriverVersion,
+			util.NodeNvidiaCudaVersionLabel:   strconv.Itoa(int(m.base.manager.GetDriverVersion().CudaDriverVersion)),
+		},
+	}
+	return &metadata, nil
+}
+
+func (m *vnumberDevicePlugin) cleanupRegistry(_ featuregate.FeatureGate) (*client.PatchMetadata, error) {
+	metadata := client.PatchMetadata{
+		Annotations: map[string]string{
+			util.NodeDeviceHeartbeatAnnotation: "",
+			util.NodeDeviceRegisterAnnotation:  "",
+			util.NodeDeviceTopologyAnnotation:  "",
+			util.DeviceMemoryFactorAnnotation:  "",
+		},
+	}
+	return &metadata, nil
 }
 
 // GetDevicePluginOptions returns options to be communicated with Device Manager.
@@ -488,8 +546,8 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 	)
 	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		// Node does not require timeliness, search from API server cache.
-		options := metav1.GetOptions{ResourceVersion: "0"}
-		node, err = m.kubeClient.CoreV1().Nodes().Get(ctx, nodeName, options)
+		opts := metav1.GetOptions{ResourceVersion: "0"}
+		node, err = m.kubeClient.CoreV1().Nodes().Get(ctx, nodeName, opts)
 		return err
 	})
 	if err != nil {

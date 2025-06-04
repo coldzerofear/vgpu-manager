@@ -122,11 +122,11 @@ type MigDevicePlacement struct {
 }
 
 type devInterface nvdev.Interface
-type NvmlInterface nvml.Interface
+type nvmlInterface nvml.Interface
 
 type DeviceLib struct {
 	devInterface
-	NvmlInterface
+	nvmlInterface
 	driverLibraryPath string
 	devRoot           string
 	nvidiaSMIPath     string
@@ -151,7 +151,7 @@ func NewDeviceLib(driverRoot DriverRoot) (*DeviceLib, error) {
 
 	d := DeviceLib{
 		devInterface:      nvdev.New(nvmllib),
-		NvmlInterface:     nvmllib,
+		nvmlInterface:     nvmllib,
 		driverLibraryPath: driverLibraryPath,
 		devRoot:           driverRoot.GetDevRoot(),
 		nvidiaSMIPath:     nvidiaSMIPath,
@@ -181,16 +181,16 @@ func setOrOverrideEnvvar(envvars []string, key, value string) []string {
 	return append(updated, fmt.Sprintf("%s=%s", key, value))
 }
 
-func (l DeviceLib) Init() error {
-	ret := l.NvmlInterface.Init()
+func (l DeviceLib) NvmlInit() error {
+	ret := l.nvmlInterface.Init()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error initializing NVML: %v", ret)
 	}
 	return nil
 }
 
-func (l DeviceLib) Shutdown() {
-	ret := l.NvmlInterface.Shutdown()
+func (l DeviceLib) NvmlShutdown() {
+	ret := l.nvmlInterface.Shutdown()
 	if ret != nvml.SUCCESS {
 		klog.Warningf("error shutting down NVML: %v", ret)
 	}
@@ -250,10 +250,10 @@ func (l DeviceLib) Shutdown() {
 //}
 
 func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) {
-	if err := l.Init(); err != nil {
+	if err := l.NvmlInit(); err != nil {
 		return nil, err
 	}
-	defer l.Shutdown()
+	defer l.NvmlShutdown()
 	pciInfo, ret := device.GetPciInfo()
 	if ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("error getting pci info for device %d: %v", index, ret)
@@ -366,10 +366,10 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 		return nil, nil
 	}
 
-	if err := l.Init(); err != nil {
+	if err := l.NvmlInit(); err != nil {
 		return nil, err
 	}
-	defer l.Shutdown()
+	defer l.NvmlShutdown()
 
 	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
 	if ret != nvml.SUCCESS {
@@ -468,7 +468,7 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 }
 
 func walkMigDevices(d nvml.Device, f func(i int, d nvml.Device) error) error {
-	count, ret := nvml.Device(d).GetMaxMigDeviceCount()
+	count, ret := d.GetMaxMigDeviceCount()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error getting max MIG device count: %v", ret)
 	}
@@ -532,10 +532,10 @@ func (l DeviceLib) SetComputeMode(uuids []string, mode string) error {
 
 // TODO: Reenable dynamic MIG functionality once it is supported in Kubernetes 1.32
 func (l DeviceLib) CreateMigDevice(gpu *GpuInfo, profile nvdev.MigProfile, placement *nvml.GpuInstancePlacement) (*MigInfo, error) {
-	if err := l.Init(); err != nil {
+	if err := l.NvmlInit(); err != nil {
 		return nil, err
 	}
-	defer l.Shutdown()
+	defer l.NvmlShutdown()
 
 	profileInfo := profile.GetInfo()
 
@@ -612,10 +612,10 @@ func (l DeviceLib) CreateMigDevice(gpu *GpuInfo, profile nvdev.MigProfile, place
 }
 
 func (l DeviceLib) DeleteMigDevice(mig *MigInfo) error {
-	if err := l.Init(); err != nil {
+	if err := l.NvmlInit(); err != nil {
 		return err
 	}
-	defer l.Shutdown()
+	defer l.NvmlShutdown()
 
 	parent, ret := l.DeviceGetHandleByUUID(mig.Parent.UUID)
 	if ret != nvml.SUCCESS {

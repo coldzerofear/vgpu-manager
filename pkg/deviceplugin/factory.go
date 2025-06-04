@@ -89,6 +89,10 @@ func GetDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
 		}
 	}
 
+	if len(plugins) == 0 {
+		return nil, fmt.Errorf("no available device plugins")
+	}
+
 	return plugins, nil
 }
 

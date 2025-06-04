@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
@@ -39,6 +41,8 @@ type Device struct {
 	MIG *MIGDevice
 }
 
+type RegistryFunc func(featuregate.FeatureGate) (*client.PatchMetadata, error)
+
 type DeviceManager struct {
 	*nvidia.DeviceLib
 	mut           sync.Mutex
@@ -47,9 +51,11 @@ type DeviceManager struct {
 	driverVersion nvidia.DriverVersion
 	devices       []*Device
 
-	unhealthy chan *Device
-	notify    map[string]chan *Device
-	stop      chan struct{}
+	unhealthy            chan *Device
+	notify               map[string]chan *Device
+	registryFuncs        map[string]RegistryFunc
+	cleanupRegistryFuncs map[string]RegistryFunc
+	stop                 chan struct{}
 }
 
 func (m *DeviceManager) GetDriverVersion() nvidia.DriverVersion {
@@ -72,15 +78,41 @@ func (m *DeviceManager) RemoveNotifyChannel(name string) {
 	m.mut.Unlock()
 }
 
+func (m *DeviceManager) AddRegistryFunc(name string, fn func(featuregate.FeatureGate) (*client.PatchMetadata, error)) {
+	m.mut.Lock()
+	m.registryFuncs[name] = fn
+	m.mut.Unlock()
+}
+
+func (m *DeviceManager) RemoveRegistryFunc(name string) {
+	m.mut.Lock()
+	delete(m.registryFuncs, name)
+	m.mut.Unlock()
+}
+
+func (m *DeviceManager) AddCleanupRegistryFunc(name string, fn func(featuregate.FeatureGate) (*client.PatchMetadata, error)) {
+	m.mut.Lock()
+	m.cleanupRegistryFuncs[name] = fn
+	m.mut.Unlock()
+}
+
+func (m *DeviceManager) RemoveCleanupRegistryFunc(name string) {
+	m.mut.Lock()
+	delete(m.cleanupRegistryFuncs, name)
+	m.mut.Unlock()
+}
+
 func NewFakeDeviceManager(config *node.NodeConfig, version nvidia.DriverVersion, devices []*Device) *DeviceManager {
 	return &DeviceManager{
-		driverVersion: version,
-		config:        config,
-		devices:       devices,
-		client:        fake.NewSimpleClientset(),
-		stop:          make(chan struct{}),
-		unhealthy:     make(chan *Device),
-		notify:        make(map[string]chan *Device),
+		driverVersion:        version,
+		config:               config,
+		devices:              devices,
+		client:               fake.NewSimpleClientset(),
+		stop:                 make(chan struct{}),
+		unhealthy:            make(chan *Device),
+		notify:               make(map[string]chan *Device),
+		registryFuncs:        make(map[string]RegistryFunc),
+		cleanupRegistryFuncs: make(map[string]RegistryFunc),
 	}
 }
 
@@ -94,21 +126,23 @@ func NewDeviceManager(config *node.NodeConfig, kubeClient *kubernetes.Clientset)
 		return nil, err
 	}
 	m := &DeviceManager{
-		DeviceLib: driverlib,
-		config:    config,
-		client:    kubeClient,
-		stop:      make(chan struct{}),
-		unhealthy: make(chan *Device),
-		notify:    make(map[string]chan *Device),
+		DeviceLib:            driverlib,
+		config:               config,
+		client:               kubeClient,
+		stop:                 make(chan struct{}),
+		unhealthy:            make(chan *Device),
+		notify:               make(map[string]chan *Device),
+		registryFuncs:        make(map[string]RegistryFunc),
+		cleanupRegistryFuncs: make(map[string]RegistryFunc),
 	}
-	if err = m.Init(); err != nil {
+	if err = m.NvmlInit(); err != nil {
 		klog.Errorf("If this is a GPU node, did you set the default container runtime to `nvidia`?")
 		klog.Errorf("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
 		klog.Errorf("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
 		klog.Errorf("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
 		return nil, err
 	}
-	defer m.Shutdown()
+	defer m.NvmlShutdown()
 	err = m.initDevices()
 	return m, err
 }
@@ -135,7 +169,7 @@ func (m *DeviceManager) initDevices() error {
 	if gpuTopologyEnabled {
 		deviceList, err := gpuallocator.NewDevices(
 			gpuallocator.WithDeviceLib(m),
-			gpuallocator.WithNvmlLib(m.NvmlInterface),
+			gpuallocator.WithNvmlLib(m),
 		)
 		if err != nil {
 			return fmt.Errorf("error getting gpuallocator device list: %v", err)
@@ -208,10 +242,10 @@ func (m *DeviceManager) initDevices() error {
 }
 
 func (m *DeviceManager) AssertAllMigDevicesAreValid(uniform bool) error {
-	if err := m.Init(); err != nil {
+	if err := m.NvmlInit(); err != nil {
 		return err
 	}
-	defer m.Shutdown()
+	defer m.NvmlShutdown()
 	err := m.VisitDevices(func(i int, d nvdev.Device) error {
 		isMigEnabled, err := d.IsMigEnabled()
 		if err != nil {
@@ -297,8 +331,8 @@ func (m *DeviceManager) GetMIGDeviceMap() map[string]MIGDevice {
 func (m *DeviceManager) Start() {
 	klog.V(4).Infoln("DeviceManager starting handle notify...")
 	go m.handleNotify()
-	klog.V(4).Infoln("DeviceManager starting registry node...")
-	go m.registryNode()
+	klog.V(4).Infoln("DeviceManager starting registry devices...")
+	go m.registryDevices()
 	klog.V(4).Infoln("DeviceManager starting check health...")
 	go func() {
 		if err := m.checkHealth(); err != nil {
@@ -363,9 +397,7 @@ func (m *DeviceManager) Stop() {
 	klog.Infof("DeviceManager stopping...")
 	close(m.stop)
 	m.stop = make(chan struct{})
-	if err := m.cleanupRegistry(); err != nil {
-		klog.ErrorS(err, "cleanup node registry failed")
-	}
+	time.Sleep(time.Second)
 }
 
 func (m *DeviceManager) modifyDeviceUnHealthy(device *Device) {

@@ -85,13 +85,12 @@ func (b *baseDevicePlugin) Stop(name string) error {
 	}
 	klog.Infof("Stopping to serve '%s' on %s", b.resourceName, b.socket)
 
-	b.manager.RemoveNotifyChannel(name)
-
 	b.server.Stop()
 	if err := os.Remove(b.socket); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	b.cleanup()
+	b.manager.RemoveNotifyChannel(name)
 	return nil
 }
 
