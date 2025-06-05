@@ -98,7 +98,9 @@ func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReq
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	for i, containerRequest := range req.ContainerRequests {
 		deviceIds := containerRequest.GetDevicesIDs()
-		responses[i] = &pluginapi.ContainerAllocateResponse{}
+		responses[i] = &pluginapi.ContainerAllocateResponse{
+			Envs: make(map[string]string),
+		}
 		err := updateResponseForNodeConfig(responses[i], nodeConfig, deviceIds...)
 		if err != nil {
 			klog.Errorln(err)
