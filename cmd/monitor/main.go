@@ -70,10 +70,12 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create node gpu collector failed: %v", err)
 	}
+	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 1)
 	server := metrics.NewServer(
 		metrics.WithRegistry(nodeCollector.Registry()),
-		metrics.WithLimiter(rate.NewLimiter(rate.Every(time.Second), 1)),
-		metrics.WithPort(ptr.To[int](opt.ServerBindProt)))
+		metrics.WithPort(ptr.To[int](opt.ServerBindProt)),
+		metrics.WithLimiter(rateLimiter),
+		metrics.WithTimeoutSecond(30))
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	factory.Start(ctx.Done())

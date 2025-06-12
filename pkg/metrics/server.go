@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/julienschmidt/httprouter"
@@ -18,22 +19,37 @@ import (
 type server struct {
 	registry   *prometheus.Registry
 	limiter    *rate.Limiter
+	timeout    time.Duration
 	port       *int
 	httpServer *http.Server
+}
+
+type klogErrLog struct{}
+
+func (k klogErrLog) Println(v ...interface{}) {
+	klog.Errorln(v...)
 }
 
 func (s *server) Start(stopCh <-chan struct{}) error {
 	if s.httpServer != nil {
 		return fmt.Errorf("metrics service has been started and cannot be restarted again")
 	}
-	opts := promhttp.HandlerOpts{Registry: s.registry}
-	next := promhttp.HandlerFor(s.registry, opts)
+
+	var (
+		opts = promhttp.HandlerOpts{
+			Registry: s.registry,
+			ErrorLog: klogErrLog{},
+			Timeout:  s.timeout,
+		}
+		next = promhttp.HandlerFor(s.registry, opts)
+	)
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.limiter != nil && !s.limiter.Allow() {
 			http.Error(w, "Too many requests", http.StatusTooManyRequests)
-			return
+		} else {
+			next.ServeHTTP(w, r)
 		}
-		next.ServeHTTP(w, r)
 	})
 	routerHandle := httprouter.New()
 	route.AddHealthProbe(routerHandle)
@@ -80,6 +96,12 @@ func WithPort(port *int) Option {
 func WithLimiter(limiter *rate.Limiter) Option {
 	return func(s *server) {
 		s.limiter = limiter
+	}
+}
+
+func WithTimeoutSecond(seconds uint) Option {
+	return func(s *server) {
+		s.timeout = time.Duration(seconds) * time.Second
 	}
 }
 
