@@ -1,10 +1,12 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
@@ -30,6 +32,32 @@ func (k klogErrLog) Println(v ...interface{}) {
 	klog.Errorln(v...)
 }
 
+type lastResponse struct {
+	header http.Header
+	status int
+	body   []byte
+}
+
+type responseRecorder struct {
+	writer http.ResponseWriter
+	buffer *bytes.Buffer
+	status int
+}
+
+func (r *responseRecorder) Header() http.Header {
+	return r.writer.Header()
+}
+
+func (r *responseRecorder) Write(b []byte) (int, error) {
+	r.buffer.Write(b)
+	return r.writer.Write(b)
+}
+
+func (r *responseRecorder) WriteHeader(status int) {
+	r.status = status
+	r.writer.WriteHeader(status)
+}
+
 func (s *server) Start(stopCh <-chan struct{}) error {
 	if s.httpServer != nil {
 		return fmt.Errorf("metrics service has been started and cannot be restarted again")
@@ -41,14 +69,44 @@ func (s *server) Start(stopCh <-chan struct{}) error {
 			ErrorLog: klogErrLog{},
 			Timeout:  s.timeout,
 		}
-		next = promhttp.HandlerFor(s.registry, opts)
+		lastResp     lastResponse
+		lastRespLock sync.RWMutex
+		next         = promhttp.HandlerFor(s.registry, opts)
 	)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.limiter != nil && !s.limiter.Allow() {
-			http.Error(w, "Too many requests", http.StatusTooManyRequests)
+			lastRespLock.RLock()
+			defer lastRespLock.RUnlock()
+
+			if lastResp.status == http.StatusOK {
+				for k, v := range lastResp.header {
+					w.Header()[k] = v
+				}
+				w.Header().Set("X-Rate-Limited", "true")
+				w.WriteHeader(lastResp.status)
+				w.Write(lastResp.body)
+			} else {
+				http.Error(w, "Too many requests", http.StatusTooManyRequests)
+			}
+
 		} else {
-			next.ServeHTTP(w, r)
+			recorder := &responseRecorder{
+				writer: w,
+				buffer: bytes.NewBuffer(nil),
+				status: http.StatusOK,
+			}
+
+			next.ServeHTTP(recorder, r)
+
+			lastRespLock.Lock()
+			lastResp = lastResponse{
+				body:   recorder.buffer.Bytes(),
+				status: recorder.status,
+				header: recorder.Header().Clone(),
+			}
+			lastRespLock.Unlock()
+
 		}
 	})
 	routerHandle := httprouter.New()
