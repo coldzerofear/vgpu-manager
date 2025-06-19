@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
-	"time"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -56,6 +55,7 @@ type DeviceManager struct {
 	registryFuncs        map[string]RegistryFunc
 	cleanupRegistryFuncs map[string]RegistryFunc
 	stop                 chan struct{}
+	waitCleanup          chan struct{}
 }
 
 func (m *DeviceManager) GetDriverVersion() nvidia.DriverVersion {
@@ -78,7 +78,7 @@ func (m *DeviceManager) RemoveNotifyChannel(name string) {
 	m.mut.Unlock()
 }
 
-func (m *DeviceManager) AddRegistryFunc(name string, fn func(featuregate.FeatureGate) (*client.PatchMetadata, error)) {
+func (m *DeviceManager) AddRegistryFunc(name string, fn RegistryFunc) {
 	m.mut.Lock()
 	m.registryFuncs[name] = fn
 	m.mut.Unlock()
@@ -90,7 +90,7 @@ func (m *DeviceManager) RemoveRegistryFunc(name string) {
 	m.mut.Unlock()
 }
 
-func (m *DeviceManager) AddCleanupRegistryFunc(name string, fn func(featuregate.FeatureGate) (*client.PatchMetadata, error)) {
+func (m *DeviceManager) AddCleanupRegistryFunc(name string, fn RegistryFunc) {
 	m.mut.Lock()
 	m.cleanupRegistryFuncs[name] = fn
 	m.mut.Unlock()
@@ -108,7 +108,6 @@ func NewFakeDeviceManager(config *node.NodeConfig, version nvidia.DriverVersion,
 		config:               config,
 		devices:              devices,
 		client:               fake.NewSimpleClientset(),
-		stop:                 make(chan struct{}),
 		unhealthy:            make(chan *Device),
 		notify:               make(map[string]chan *Device),
 		registryFuncs:        make(map[string]RegistryFunc),
@@ -129,7 +128,6 @@ func NewDeviceManager(config *node.NodeConfig, kubeClient *kubernetes.Clientset)
 		DeviceLib:            driverlib,
 		config:               config,
 		client:               kubeClient,
-		stop:                 make(chan struct{}),
 		unhealthy:            make(chan *Device),
 		notify:               make(map[string]chan *Device),
 		registryFuncs:        make(map[string]RegistryFunc),
@@ -328,7 +326,14 @@ func (m *DeviceManager) GetMIGDeviceMap() map[string]MIGDevice {
 	return deviceMap
 }
 
+func (m *DeviceManager) initialize() {
+	m.stop = make(chan struct{})
+	m.waitCleanup = make(chan struct{})
+}
+
 func (m *DeviceManager) Start() {
+	m.Stop()
+	m.initialize()
 	klog.V(4).Infoln("DeviceManager starting handle notify...")
 	go m.handleNotify()
 	klog.V(4).Infoln("DeviceManager starting registry devices...")
@@ -385,6 +390,12 @@ func (m *DeviceManager) handleNotify() {
 			return
 		case dev := <-m.unhealthy:
 			m.mut.Lock()
+			if dev.GPU != nil {
+				dev.GPU.Healthy = false
+			}
+			if dev.MIG != nil {
+				dev.MIG.Healthy = false
+			}
 			for _, ch := range m.notify {
 				ch <- dev
 			}
@@ -394,20 +405,11 @@ func (m *DeviceManager) handleNotify() {
 }
 
 func (m *DeviceManager) Stop() {
-	klog.Infof("DeviceManager stopping...")
-	close(m.stop)
-	m.stop = make(chan struct{})
-	time.Sleep(time.Second)
-}
-
-func (m *DeviceManager) modifyDeviceUnHealthy(device *Device) {
-	m.mut.Lock()
-	defer m.mut.Unlock()
-	if device.GPU != nil {
-		device.GPU.Healthy = false
+	if m.stop != nil {
+		klog.Infof("DeviceManager stopping...")
+		close(m.stop)
+		<-m.waitCleanup
+		m.stop = nil
+		m.waitCleanup = nil
 	}
-	if device.MIG != nil {
-		device.MIG.Healthy = false
-	}
-	m.unhealthy <- device
 }

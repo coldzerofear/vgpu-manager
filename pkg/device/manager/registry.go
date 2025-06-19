@@ -54,6 +54,7 @@ func (m *DeviceManager) registryDevices() {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	stopCh := m.stop
+	cleanCh := m.waitCleanup
 	for {
 		select {
 		case <-stopCh:
@@ -78,6 +79,7 @@ func (m *DeviceManager) registryDevices() {
 			if err := patchNodeMetadata(m.client, m.config.NodeName(), patchMetadata); err != nil {
 				klog.ErrorS(err, "Cleanup node device registry infos failed")
 			}
+			close(cleanCh)
 			return
 		case <-ticker.C:
 			m.mut.Lock()

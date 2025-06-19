@@ -84,14 +84,14 @@ func (m *DeviceManager) checkHealth() error {
 		devHandle, ret := nvml.DeviceGetHandleByUUID(uuid)
 		if ret != nvml.SUCCESS {
 			klog.Infof("unable to get device handle from %s: %v; marking it as unhealthy.", uuid, ret)
-			m.modifyDeviceUnHealthy(d)
+			m.unhealthy <- d
 			continue
 		}
 
 		supportedEvents, ret := devHandle.GetSupportedEventTypes()
 		if ret != nvml.SUCCESS {
 			klog.Infof("Unable to determine the supported events for %v: %v; marking it as unhealthy.", uuid, ret)
-			m.modifyDeviceUnHealthy(d)
+			m.unhealthy <- d
 			continue
 		}
 
@@ -101,7 +101,7 @@ func (m *DeviceManager) checkHealth() error {
 		}
 		if ret != nvml.SUCCESS {
 			klog.Infof("Marking device %v as unhealthy: %v", uuid, ret)
-			m.modifyDeviceUnHealthy(d)
+			m.unhealthy <- d
 		}
 	}
 
@@ -121,7 +121,7 @@ func (m *DeviceManager) checkHealth() error {
 		if ret != nvml.SUCCESS {
 			klog.Infof("Error waiting for event: %v; Marking all devices as unhealthy", ret)
 			for i := range m.devices {
-				m.modifyDeviceUnHealthy(m.devices[i])
+				m.unhealthy <- m.devices[i]
 			}
 			continue
 		}
@@ -142,7 +142,7 @@ func (m *DeviceManager) checkHealth() error {
 			// If we cannot reliably determine the device UUID, we mark all devices as unhealthy.
 			klog.Infof("Failed to determine uuid for event %v: %v; Marking all devices as unhealthy.", e, ret)
 			for i := range m.devices {
-				m.modifyDeviceUnHealthy(m.devices[i])
+				m.unhealthy <- m.devices[i]
 			}
 			continue
 		}
@@ -164,7 +164,7 @@ func (m *DeviceManager) checkHealth() error {
 
 		klog.Infof("XidCriticalError: Xid=%d on Device=%s; marking device as unhealthy.", e.EventData, d.MIG.UUID)
 
-		m.modifyDeviceUnHealthy(d)
+		m.unhealthy <- d
 	}
 }
 

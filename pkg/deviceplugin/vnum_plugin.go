@@ -71,10 +71,8 @@ func (m *vnumberDevicePlugin) Start() error {
 // Stop stops the gRPC server.
 func (m *vnumberDevicePlugin) Stop() error {
 	err := m.base.Stop(m.Name())
-	if err == nil {
-		m.base.manager.RemoveRegistryFunc(m.Name())
-		m.base.manager.RemoveCleanupRegistryFunc(m.Name())
-	}
+	m.base.manager.RemoveRegistryFunc(m.Name())
+	m.base.manager.RemoveCleanupRegistryFunc(m.Name())
 	return err
 }
 
