@@ -36,7 +36,7 @@ func main() {
 
 	klog.Infoln("Create webhook server")
 	server := webhook.NewServer(webhook.Options{
-		Port:    opt.ServerBindProt,
+		Port:    opt.ServerBindPort,
 		CertDir: opt.CertDir,
 		TLSOpts: []func(*tls.Config){
 			// Using http/1.1 will prevent from being vulnerable to the HTTP/2 Stream Cancellation and Rapid Reset CVEs.

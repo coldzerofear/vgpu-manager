@@ -25,7 +25,6 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
@@ -73,7 +72,7 @@ func main() {
 	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 1)
 	server := metrics.NewServer(
 		metrics.WithRegistry(nodeCollector.Registry()),
-		metrics.WithPort(ptr.To[int](opt.ServerBindProt)),
+		metrics.WithPort(&opt.ServerBindPort),
 		metrics.WithLimiter(rateLimiter),
 		metrics.WithTimeoutSecond(30))
 

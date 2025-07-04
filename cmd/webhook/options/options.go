@@ -10,7 +10,7 @@ import (
 )
 
 type Options struct {
-	ServerBindProt      int
+	ServerBindPort      int
 	PprofBindPort       int
 	SchedulerName       string
 	CertDir             string
@@ -21,14 +21,14 @@ type Options struct {
 }
 
 const (
-	defaultServerBindProt = 9443
+	defaultServerBindPort = 9443
 	defaultPprofBindPort  = 0
 	defaultCertDir        = "/tmp/k8s-webhook-server/serving-certs"
 )
 
 func NewOptions() *Options {
 	return &Options{
-		ServerBindProt: defaultServerBindProt,
+		ServerBindPort: defaultServerBindPort,
 		PprofBindPort:  defaultPprofBindPort,
 		CertDir:        defaultCertDir,
 	}
@@ -39,7 +39,7 @@ var version bool
 func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.CommandLine.SortFlags = false
 	pflag.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name and automatically set it to vGPU pod.")
-	pflag.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens.")
+	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
 	pflag.StringVar(&o.CertDir, "cert-dir", o.CertDir, "CertDir is the directory that contains the server key and certificate.")
 	pflag.StringVar(&o.DefaultNodePolicy, "default-node-policy", "", "Default node scheduling policy. (supported values: \"binpack\" | \"spread\")")

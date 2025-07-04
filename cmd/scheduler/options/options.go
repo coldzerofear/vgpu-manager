@@ -18,7 +18,7 @@ type Options struct {
 	MasterURL           string
 	QPS                 float64
 	Burst               int
-	ServerBindProt      int
+	ServerBindPort      int
 	PprofBindPort       int
 	EnableTls           bool
 	TlsKeyFile          string
@@ -31,7 +31,7 @@ const (
 	defaultSchedulerName       = "vgpu-scheduler"
 	defaultQPS                 = 20.0
 	defaultBurst               = 30
-	defaultServerBindProt      = 3456
+	defaultServerBindPort      = 3456
 	defaultPprofBindPort       = 0
 	defaultCertRefreshInterval = 5
 
@@ -60,7 +60,7 @@ func NewOptions() *Options {
 		SchedulerName:       defaultSchedulerName,
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
-		ServerBindProt:      defaultServerBindProt,
+		ServerBindPort:      defaultServerBindPort,
 		PprofBindPort:       defaultPprofBindPort,
 		CertRefreshInterval: defaultCertRefreshInterval,
 		FeatureGate:         featureGate,
@@ -74,7 +74,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
 	pflag.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
 	pflag.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name.")
-	pflag.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens.")
+	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
 	pflag.BoolVar(&o.EnableTls, "enable-tls", false, "Open TLS encrypted communication for the server. (default: false)")
 	pflag.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need enable tls)")

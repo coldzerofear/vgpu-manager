@@ -18,14 +18,14 @@ type Options struct {
 	NodeName       string
 	CGroupDriver   string
 	NodeConfigPath string
-	ServerBindProt int
+	ServerBindPort int
 	PprofBindPort  int
 }
 
 const (
 	defaultQPS            = 20.0
 	defaultBurst          = 30
-	defaultServerBindProt = 3456
+	defaultServerBindPort = 3456
 	defaultPprofBindPort  = 0
 )
 
@@ -35,7 +35,7 @@ func NewOptions() *Options {
 		Burst:          defaultBurst,
 		NodeName:       os.Getenv("NODE_NAME"),
 		CGroupDriver:   os.Getenv("CGROUP_DRIVER"),
-		ServerBindProt: defaultServerBindProt,
+		ServerBindPort: defaultServerBindPort,
 		PprofBindPort:  defaultPprofBindPort,
 	}
 }
@@ -51,7 +51,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.NodeName, "node-name", o.NodeName, "If non-empty, will use this string as identification instead of the actual node name.")
 	pflag.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (supported values: \"cgroupfs\" | \"systemd\")")
 	pflag.StringVar(&o.NodeConfigPath, "node-config-path", o.NodeConfigPath, "Specify the node configuration path to apply differentiated configuration to the node.")
-	pflag.IntVar(&o.ServerBindProt, "server-bind-port", o.ServerBindProt, "The port on which the server listens.")
+	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

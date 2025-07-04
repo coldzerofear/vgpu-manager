@@ -125,17 +125,17 @@ func main() {
 	}()
 
 	server := http.Server{
-		Addr:      "0.0.0.0:" + strconv.Itoa(opt.ServerBindProt),
+		Addr:      "0.0.0.0:" + strconv.Itoa(opt.ServerBindPort),
 		Handler:   handler,
 		TLSConfig: tlsConfig,
 	}
 	go func() {
 		var serverErr error
 		if opt.EnableTls {
-			klog.Infof("Tls Server starting on <0.0.0.0:%d>", opt.ServerBindProt)
+			klog.Infof("Tls Server starting on <0.0.0.0:%d>", opt.ServerBindPort)
 			serverErr = server.ListenAndServeTLS("", "")
 		} else {
-			klog.Infof("Server starting on <0.0.0.0:%d>", opt.ServerBindProt)
+			klog.Infof("Server starting on <0.0.0.0:%d>", opt.ServerBindPort)
 			serverErr = server.ListenAndServe()
 		}
 		if serverErr != nil {
