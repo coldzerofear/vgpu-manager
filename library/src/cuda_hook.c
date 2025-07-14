@@ -288,25 +288,26 @@ static void rate_limiter(int grids, int blocks, int device_id) {
 }
 
 static int64_t delta(int up_limit, int user_current, int64_t share, int device_index) {
-  // 1. 使用更宽的数据类型防止计算溢出
+  // 1. Using wider data types to prevent computation overflow
   int64_t sm_num = (int64_t)g_sm_num[device_index];
   int64_t max_thread = (int64_t)g_max_thread_per_sm[device_index];
 
-  // 2. 计算利用率差异
+  // 2. Calculate the difference in utilization rate
   int utilization_diff = abs(up_limit - user_current);
   if (utilization_diff < MIN_INCREMENT) {
     utilization_diff = MIN_INCREMENT;
   }
 
-  // 3. 计算增量（使用64位运算防止溢出）
+  // 3. Calculate increment (using 64 bit operation to prevent overflow)
   int64_t increment = sm_num * sm_num * max_thread * (int64_t)(utilization_diff) / INCREMENT_SCALE_FACTOR;
 
-  // 4. 加速调整逻辑（使用浮点阈值代替硬编码）
+  // 4. Accelerate adjustment logic (using floating-point thresholds instead of hard coding)
   if ((float)utilization_diff / (float)(up_limit) > MAX_UTIL_DIFF_THRESHOLD) {
     increment = increment * utilization_diff * 2 / (up_limit + 1);
   }
 
-  // 5. 错误处理优化：负增量时不再终止进程，而是回退到安全值
+  // 5. Error handling optimization: When the increment is negative,
+  //    the process is no longer terminated, but rolled back to a safe value
   if (unlikely(increment < 0 || increment > INT_MAX)) {
     LOGGER(ERROR, "device %d, increment overflow: %ld, current sm: %ld, thread_per_sm: %ld, diff: %d",
            device_index, increment, sm_num, max_thread, utilization_diff);
@@ -1147,22 +1148,23 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
   size_t used = 0, request_size = bytesize;
   if (g_vgpu_config.devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
-
     get_used_gpu_memory((void *)&used, ordinal);
+
+    // Exceeded total memory, return OOM
+    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+      ret = CUDA_ERROR_OUT_OF_MEMORY;
+      goto DONE;
+    }
     if (g_vgpu_config.devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
       if (unlikely(used > g_vgpu_config.devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
-      // The requested memory exceeds the device's memory limit,
-      // using global unified memory
       if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
+        // The requested memory exceeds the device's memory limit, using global unified memory
         flags = CU_MEM_ATTACH_GLOBAL;
       }
-    } else if (used + request_size > g_vgpu_config.devices[ordinal].total_memory) {
-      ret = CUDA_ERROR_OUT_OF_MEMORY;
-      goto DONE;
     }
   }
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
@@ -1182,9 +1184,16 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   const char *mem_err_string = NULL;
   const char *uva_err_string = NULL;
   size_t used = 0, request_size = bytesize;
+
   if (g_vgpu_config.devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
+
+    // Exceeded total memory, return OOM
+    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+      ret = CUDA_ERROR_OUT_OF_MEMORY;
+      goto DONE;
+    }
 
     if (g_vgpu_config.devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
@@ -1192,41 +1201,33 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
-      // The requested memory exceeds the device's memory limit,
-      // using global unified memory
+
       if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
-FROM_UVA:
-        ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
-        LOGGER(VERBOSE, "cuMemAlloc call from UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &uva_err_string));
-        goto DONE;
-      }
-      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc_v2))) {
-        ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
+        // The requested memory exceeds the device's memory limit, using global unified memory
+        goto ALLOCATED_TO_UVA;
       } else {
-        ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc, dptr, bytesize);
+        // The requested memory is within the device's memory limit, using device memory
+        goto ALLOCATED_TO_GPU;
       }
-      if (likely(ret == CUDA_SUCCESS)) {
-        goto DONE;
-      }
-      LOGGER(VERBOSE, "cuMemAlloc call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &mem_err_string));
-      goto FROM_UVA;
-    } else if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
-      ret = CUDA_ERROR_OUT_OF_MEMORY;
-      goto DONE;
     }
   }
+
+ALLOCATED_TO_GPU:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
   } else {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc, dptr, bytesize);
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
-    LOGGER(VERBOSE, "cuMemAlloc call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &mem_err_string));
-    goto FROM_UVA;
+    LOGGER(VERBOSE, "cuMemAlloc OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
+                    request_size, ret, cuda_error(ret, &mem_err_string));
+  } else {
+    goto DONE;
   }
+ALLOCATED_TO_UVA:
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
+  LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
+                  request_size, ret, cuda_error(ret, &uva_err_string));
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -1235,7 +1236,6 @@ DONE:
 CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize) {
   return _cuMemAlloc(dptr, bytesize);
 }
-
 
 CUresult cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   return _cuMemAlloc(dptr, bytesize);
@@ -1262,50 +1262,47 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
 
+    // Exceeded total memory, return OOM
+    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+      ret = CUDA_ERROR_OUT_OF_MEMORY;
+      goto DONE;
+    }
+
     if (g_vgpu_config.devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
       if (unlikely(used > g_vgpu_config.devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
-      // The requested memory exceeds the device's memory limit,
-      // using global unified memory
-      if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
-FROM_UVA:
-        ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, request_size, CU_MEM_ATTACH_GLOBAL);
-        LOGGER(VERBOSE, "cuMemAllocPitch call from UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &uva_err_string));
-        if (likely(ret == CUDA_SUCCESS)) {
-          *pPitch = guess_pitch;
-        }
-        goto DONE;
-      }
 
-      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch_v2))) {
-        ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+      if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
+        // The requested memory exceeds the device's memory limit, using global unified memory
+        goto ALLOCATED_TO_UVA;
       } else {
-        ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+        // The requested memory is within the device's memory limit, using device memory
+        goto ALLOCATED_TO_GPU;
       }
-      if (likely(ret == CUDA_SUCCESS)) {
-        goto DONE;
-      }
-      LOGGER(VERBOSE, "cuMemAllocPitch call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &mem_err_string));
-      goto FROM_UVA;
-    } else if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
-      ret = CUDA_ERROR_OUT_OF_MEMORY;
-      goto DONE;
     }
   }
+
+ALLOCATED_TO_GPU:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
   } else {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
-    LOGGER(VERBOSE, "cuMemAllocPitch call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &mem_err_string));
-    goto FROM_UVA;
+    LOGGER(VERBOSE, "cuMemAllocPitch OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
+                    request_size, ret, cuda_error(ret, &mem_err_string));
+  } else {
+    goto DONE;
+  }
+ALLOCATED_TO_UVA:
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, request_size, CU_MEM_ATTACH_GLOBAL);
+  LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
+                  request_size, ret, cuda_error(ret, &uva_err_string));
+  if (likely(ret == CUDA_SUCCESS)) {
+    *pPitch = guess_pitch;
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -1339,40 +1336,40 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
 
+    // Exceeded total memory, return OOM
+    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+      ret = CUDA_ERROR_OUT_OF_MEMORY;
+      goto DONE;
+    }
+
     if (g_vgpu_config.devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
       if (unlikely(used > g_vgpu_config.devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
-      // The requested memory exceeds the device's memory limit,
-      // using global unified memory
-      if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
-FROM_UVA:
-        ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
-        LOGGER(VERBOSE, "cuMemAllocAsync call from UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &uva_err_string));
-        goto DONE;
-      }
 
-      ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
-      if (likely(ret == CUDA_SUCCESS)) {
-        goto DONE;
+      if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
+        // The requested memory exceeds the device's memory limit, using global unified memory
+        goto ALLOCATED_TO_UVA;
+      } else {
+        // The requested memory is within the device's memory limit, using device memory
+        goto ALLOCATED_TO_GPU;
       }
-      LOGGER(VERBOSE, "cuMemAllocAsync call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &mem_err_string));
-      goto FROM_UVA;
-    } else if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
-      ret = CUDA_ERROR_OUT_OF_MEMORY;
-      goto DONE;
     }
   }
+ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
-    LOGGER(VERBOSE, "cuMemAllocAsync call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &mem_err_string));
-    goto FROM_UVA;
+    LOGGER(VERBOSE, "cuMemAllocAsync OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
+                    request_size, ret, cuda_error(ret, &mem_err_string));
+  } else {
+    goto DONE;
   }
+ALLOCATED_TO_UVA:
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
+  LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
+                  request_size, ret, cuda_error(ret, &uva_err_string));
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -1394,39 +1391,41 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
 
+    // Exceeded total memory, return OOM
+    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+      ret = CUDA_ERROR_OUT_OF_MEMORY;
+      goto DONE;
+    }
+
     if (g_vgpu_config.devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
       if (unlikely(used > g_vgpu_config.devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
-      // The requested memory exceeds the device's memory limit,
-      // using global unified memory
+
       if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
-FROM_UVA:
-        ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
-        LOGGER(VERBOSE, "cuMemAllocAsync_ptsz call from UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &uva_err_string));
-        goto DONE;
+        // The requested memory exceeds the device's memory limit, using global unified memory
+        goto ALLOCATED_TO_UVA;
+      } else {
+        // The requested memory is within the device's memory limit, using device memory
+        goto ALLOCATED_TO_GPU;
       }
-      ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
-      if (likely(ret == CUDA_SUCCESS)) {
-        goto DONE;
-      }
-      LOGGER(VERBOSE, "cuMemAllocAsync_ptsz call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &mem_err_string));
-      goto FROM_UVA;
-    } else if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
-      ret = CUDA_ERROR_OUT_OF_MEMORY;
-      goto DONE;
+
     }
   }
+ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
-    LOGGER(VERBOSE, "cuMemAllocAsync_ptsz call failed, fallback to UVA (oversold), size: %zu, ret: %d, str: %s",
-                        request_size, ret, cuda_error(ret, &mem_err_string));
-    goto FROM_UVA;
+    LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
+                    request_size, ret, cuda_error(ret, &mem_err_string));
+  } else {
+    goto DONE;
   }
+ALLOCATED_TO_UVA:
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
+  LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
+                  request_size, ret, cuda_error(ret, &uva_err_string));
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -1472,11 +1471,20 @@ static CUresult cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray
     base_size = get_array_base_size(pAllocateArray->Format);
     request_size = base_size * pAllocateArray->NumChannels *
                    pAllocateArray->Height * pAllocateArray->Width;
-
     get_used_gpu_memory((void *)&used, ordinal);
-    if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
+
+    // Exceeded total memory, return OOM
+    if (unlikely(used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
+    }
+
+    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+      // Used memory exceeds device memory limit, return OOM
+      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].real_memory)) {
+        ret = CUDA_ERROR_OUT_OF_MEMORY;
+        goto DONE;
+      }
     }
   }
 DONE:
@@ -1524,9 +1532,19 @@ static CUresult cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateA
                    pAllocateArray->Height * pAllocateArray->Width *
                    pAllocateArray->Depth;
     get_used_gpu_memory((void *)&used, ordinal);
-    if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
+
+    // Exceeded total memory, return OOM
+    if (unlikely(used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
+    }
+
+    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+      // Used memory exceeds device memory limit, return OOM
+      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].real_memory)) {
+        ret = CUDA_ERROR_OUT_OF_MEMORY;
+        goto DONE;
+      }
     }
   }
 DONE:
@@ -1580,9 +1598,19 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
                    pMipmappedArrayDesc->Depth;
 
     get_used_gpu_memory((void *)&used, ordinal);
-    if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].total_memory)) {
+
+    // Exceeded total memory, return OOM
+    if (unlikely(used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
+    }
+
+    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+      // Used memory exceeds device memory limit, return OOM
+      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].real_memory)) {
+        ret = CUDA_ERROR_OUT_OF_MEMORY;
+        goto DONE;
+      }
     }
   }
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMipmappedArrayCreate, pHandle,

@@ -24,7 +24,7 @@ metadata:
   name: numa-pod-example
   namespace: default
 spec:    
-  schedulerName: vgpu-scheduler  # Specify scheduler (default: vgpu-manager)
+  schedulerName: vgpu-scheduler  # Specify scheduler (default: vgpu-scheduler)
   containers:
   - name: default
     image: nvidia/cuda:12.4.1-devel-ubuntu20.04
@@ -75,7 +75,7 @@ metadata:
   name: link-pod-example
   namespace: default
 spec:    
-  schedulerName: vgpu-scheduler  # Specify scheduler (default: vgpu-manager)
+  schedulerName: vgpu-scheduler  # Specify scheduler (default: vgpu-scheduler)
   containers:
   - name: default
     image: nvidia/cuda:12.4.1-devel-ubuntu20.04
