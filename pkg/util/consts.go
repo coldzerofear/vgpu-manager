@@ -18,7 +18,7 @@ const (
 	NodeDeviceHeartbeatAnnotation = DomainPrefix + "/node-device-heartbeat"
 	NodeDeviceRegisterAnnotation  = DomainPrefix + "/node-device-register"
 	NodeDeviceTopologyAnnotation  = DomainPrefix + "/node-device-topology"
-	DeviceMemoryFactorAnnotation  = DomainPrefix + "/device-memory-factor"
+	NodeConfigInfoAnnotation      = DomainPrefix + "/node-config-info"
 
 	// PodIncludeGpuTypeAnnotation Specify the GPU type to be used
 	PodIncludeGpuTypeAnnotation = DomainPrefix + "/include-gpu-type"
@@ -28,6 +28,7 @@ const (
 	// Scheduling strategies at the node and device levels
 	NodeSchedulerPolicyAnnotation   = DomainPrefix + "/node-scheduler-policy"
 	DeviceSchedulerPolicyAnnotation = DomainPrefix + "/device-scheduler-policy"
+	MemorySchedulerPolicyAnnotation = DomainPrefix + "/memory-scheduler-policy"
 
 	// DeviceTopologyModeAnnotation Specify device topology mode
 	DeviceTopologyModeAnnotation = DomainPrefix + "/device-topology-mode"
@@ -139,4 +140,13 @@ const (
 	DeviceListStrategyVolumeMounts   = "volume-mounts"
 	DeviceListStrategyCDIAnnotations = "cdi-annotations"
 	DeviceListStrategyCDICRI         = "cdi-cri"
+)
+
+type MemorySchedulerPolicy string
+
+const (
+	// VirtualMemoryPolicy means selecting nodes with GPU virtual memory enabled
+	VirtualMemoryPolicy MemorySchedulerPolicy = "virtual"
+	// PhysicalMemoryPolicy Means selecting nodes with GPU physical memory
+	PhysicalMemoryPolicy MemorySchedulerPolicy = "physical"
 )

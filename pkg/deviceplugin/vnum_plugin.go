@@ -76,31 +76,70 @@ func (m *vnumberDevicePlugin) Stop() error {
 	return err
 }
 
+var (
+	encodeNodeConfigInfo   string
+	encodeNodeTopologyInfo string
+)
+
+func (m *vnumberDevicePlugin) getEncodeNodeTopologyInfo() (string, error) {
+	if encodeNodeTopologyInfo == "" {
+		nodeTopologyInfo := m.base.manager.GetNodeTopologyInfo()
+		info, err := nodeTopologyInfo.Encode()
+		if err != nil {
+			return "", fmt.Errorf("encoding node topology information failed: %v", err)
+		}
+		klog.V(3).Infof("node GPU topology information: %s", info)
+		encodeNodeTopologyInfo = info
+	}
+	return encodeNodeTopologyInfo, nil
+}
+
+func (m *vnumberDevicePlugin) getDecodeNodeConfigInfo() (string, error) {
+	if encodeNodeConfigInfo == "" {
+		nodeConfigInfo := device.NodeConfigInfo{
+			DeviceSplit:   m.base.manager.GetNodeConfig().DeviceSplitCount(),
+			CoresScaling:  m.base.manager.GetNodeConfig().DeviceCoresScaling(),
+			MemoryFactor:  m.base.manager.GetNodeConfig().DeviceMemoryFactor(),
+			MemoryScaling: m.base.manager.GetNodeConfig().DeviceMemoryScaling(),
+		}
+		info, err := nodeConfigInfo.Encode()
+		if err != nil {
+			return "", fmt.Errorf("encoding node configuration information failed: %v", err)
+		}
+		klog.V(3).Infof("node GPU configuration information: %s", info)
+		encodeNodeConfigInfo = info
+	}
+	return encodeNodeConfigInfo, nil
+}
+
 func (m *vnumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGate) (*client.PatchMetadata, error) {
 	gpuTopologyEnabled := featureGate != nil && featureGate.Enabled(options.GPUTopology)
 	nodeDeviceInfos := m.base.manager.GetNodeDeviceInfo()
 	registryGPUs, err := nodeDeviceInfos.Encode()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encoding node device information failed: %v", err)
 	}
 	heartbeatTime, err := metav1.NowMicro().MarshalText()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to generate node heartbeat timestamp: %v", err)
 	}
 	var registryGPUTopology string
 	if gpuTopologyEnabled {
-		nodeTopo := m.base.manager.GetNodeTopologyInfo()
-		registryGPUTopology, err = nodeTopo.Encode()
+		registryGPUTopology, err = m.getEncodeNodeTopologyInfo()
 		if err != nil {
 			return nil, err
 		}
+	}
+	nodeConfigEncode, err := m.getDecodeNodeConfigInfo()
+	if err != nil {
+		return nil, err
 	}
 	metadata := client.PatchMetadata{
 		Annotations: map[string]string{
 			util.NodeDeviceRegisterAnnotation:  registryGPUs,
 			util.NodeDeviceHeartbeatAnnotation: string(heartbeatTime),
 			util.NodeDeviceTopologyAnnotation:  registryGPUTopology,
-			util.DeviceMemoryFactorAnnotation:  strconv.Itoa(m.base.manager.GetNodeConfig().DeviceMemoryFactor()),
+			util.NodeConfigInfoAnnotation:      nodeConfigEncode,
 		},
 		Labels: map[string]string{
 			util.NodeNvidiaDriverVersionLabel: m.base.manager.GetDriverVersion().DriverVersion,
@@ -116,7 +155,7 @@ func (m *vnumberDevicePlugin) cleanupRegistry(_ featuregate.FeatureGate) (*clien
 			util.NodeDeviceHeartbeatAnnotation: "",
 			util.NodeDeviceRegisterAnnotation:  "",
 			util.NodeDeviceTopologyAnnotation:  "",
-			util.DeviceMemoryFactorAnnotation:  "",
+			util.NodeConfigInfoAnnotation:      "",
 		},
 	}
 	return &metadata, nil

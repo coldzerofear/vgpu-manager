@@ -3896,14 +3896,13 @@ CUresult cuTensorMapReplaceAddress(CUtensorMap *tensorMap, void *globalAddress) 
     return CUDA_ENTRY_CHECK(cuda_library_entry, cuTensorMapReplaceAddress, tensorMap, globalAddress);
 }
 
-CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
-                    const CUmemAllocationProp *prop, unsigned long long flags) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop,flags);
-}
-
 CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
                   CUmemGenericAllocationHandle handle, unsigned long long flags) {
     return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemMap, ptr, size, offset, handle, flags);
+}
+
+CUresult cuMemUnmap(CUdeviceptr ptr, size_t size) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemUnmap, ptr, size);
 }
 
 CUresult cuMemAddressReserve(CUdeviceptr *ptr, size_t size, size_t alignment,
@@ -3955,8 +3954,4 @@ CUresult cuMemRetainAllocationHandle(CUmemGenericAllocationHandle *handle, void 
 
 CUresult cuMemSetAccess(CUdeviceptr ptr, size_t size, const CUmemAccessDesc *desc, size_t count) {
     return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemSetAccess, ptr, size, desc, count);
-}
-
-CUresult cuMemUnmap(CUdeviceptr ptr, size_t size) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemUnmap, ptr, size);
 }

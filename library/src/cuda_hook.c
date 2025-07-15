@@ -157,6 +157,8 @@ CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height,
 CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z);
 CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
 CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
+CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
+                     const CUmemAllocationProp *prop, unsigned long long flags);
 
 entry_t cuda_hooks_entry[] = {
     {.name = "cuDriverGetVersion", .fn_ptr = cuDriverGetVersion},
@@ -189,6 +191,7 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuFuncSetBlockShape", .fn_ptr = cuFuncSetBlockShape},
     {.name = "cuMemAllocAsync", .fn_ptr = cuMemAllocAsync},
     {.name = "cuMemAllocAsync_ptsz", .fn_ptr = cuMemAllocAsync_ptsz},
+    {.name = "cuMemCreate", .fn_ptr = cuMemCreate},
 };
 
 const int cuda_hook_nums =
@@ -1615,6 +1618,41 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   }
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMipmappedArrayCreate, pHandle,
                         pMipmappedArrayDesc, numMipmapLevels);
+DONE:
+  unlock_gpu_device(lock_fd);
+  return ret;
+}
+
+CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
+                    const CUmemAllocationProp *prop, unsigned long long flags) {
+  CUresult ret;
+  CUdevice ordinal;
+  int lock_fd = -1;
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    goto DONE;
+  }
+  size_t used = 0, request_size = size;
+  if (g_vgpu_config.devices[ordinal].memory_limit) {
+    lock_fd = lock_gpu_device(ordinal);
+    get_used_gpu_memory((void *)&used, ordinal);
+
+    // Exceeded total memory, return OOM
+    if (unlikely(used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+      ret = CUDA_ERROR_OUT_OF_MEMORY;
+      goto DONE;
+    }
+
+    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+      // Used memory exceeds device memory limit, return OOM
+      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].real_memory)) {
+        ret = CUDA_ERROR_OUT_OF_MEMORY;
+        goto DONE;
+      }
+    }
+  }
+
+  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;

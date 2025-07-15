@@ -13,6 +13,34 @@ import (
 	"k8s.io/klog/v2"
 )
 
+type NodeConfigInfo struct {
+	DeviceSplit   int     `json:"deviceSplit"`
+	CoresScaling  float64 `json:"coresScaling"`
+	MemoryFactor  int     `json:"memoryFactor"`
+	MemoryScaling float64 `json:"memoryScaling"`
+}
+
+func (n NodeConfigInfo) Encode() (string, error) {
+	if marshal, err := json.Marshal(n); err != nil {
+		return "", err
+	} else {
+		return string(marshal), nil
+	}
+}
+
+func (n *NodeConfigInfo) Decode(val string) error {
+	if n == nil {
+		return fmt.Errorf("self is empty")
+	}
+	if strings.TrimSpace(val) == "" {
+		return fmt.Errorf("input value is empty")
+	}
+	if err := json.Unmarshal([]byte(val), n); err != nil {
+		return err
+	}
+	return nil
+}
+
 type TopologyInfo struct {
 	Index int                         `json:"index"`
 	Links map[int][]links.P2PLinkType `json:"links"`
@@ -22,7 +50,7 @@ type NodeTopologyInfo []TopologyInfo
 
 func (n NodeTopologyInfo) Encode() (string, error) {
 	if marshal, err := json.Marshal(n); err != nil {
-		return "", fmt.Errorf("failed to encode node topology: %w", err)
+		return "", err
 	} else {
 		return string(marshal), nil
 	}
@@ -34,7 +62,7 @@ func (n *NodeTopologyInfo) Decode(val string) error {
 	}
 	topology, err := ParseNodeTopology(val)
 	if err != nil {
-		return fmt.Errorf("failed to decode node topology: %w", err)
+		return err
 	}
 	*n = topology
 	return nil
@@ -70,7 +98,7 @@ type NodeDeviceInfo []DeviceInfo
 
 func (n NodeDeviceInfo) Encode() (string, error) {
 	if marshal, err := json.Marshal(n); err != nil {
-		return "", fmt.Errorf("failed to encode node device info: %w", err)
+		return "", err
 	} else {
 		return string(marshal), nil
 	}
@@ -82,7 +110,7 @@ func (n *NodeDeviceInfo) Decode(val string) error {
 	}
 	nodeDevice, err := ParseNodeDeviceInfo(val)
 	if err != nil {
-		return fmt.Errorf("failed to decode node device info: %w", err)
+		return err
 	}
 	*n = nodeDevice
 	return nil

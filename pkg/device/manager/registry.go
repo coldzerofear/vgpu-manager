@@ -96,7 +96,7 @@ func (m *DeviceManager) registryDevices() {
 			for name, fn := range funcs {
 				metadata, err := fn(featureGate)
 				if err != nil {
-					klog.ErrorS(err, "Failed to prepare device infos metadata", "pluginName", name)
+					klog.ErrorS(err, "Failed to prepare devices metadata", "pluginName", name)
 					continue
 				}
 				if metadata != nil {
@@ -105,7 +105,7 @@ func (m *DeviceManager) registryDevices() {
 				}
 			}
 			if err := patchNodeMetadata(m.client, m.config.NodeName(), patchMetadata); err != nil {
-				klog.ErrorS(err, "Registry node device infos failed")
+				klog.ErrorS(err, "Registry node devices metadata failed")
 				ticker.Reset(10 * time.Second)
 			} else {
 				ticker.Reset(30 * time.Second)

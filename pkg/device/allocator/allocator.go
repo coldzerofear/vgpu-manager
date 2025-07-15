@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/scheduler/options"
@@ -114,9 +113,12 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	}
 	// Calculate the actual requested memory size based on the node memory factor.
 	if needMemory > 0 {
-		memFactor := node.Annotations[util.DeviceMemoryFactorAnnotation]
-		factor, _ := strconv.Atoi(memFactor)
-		needMemory *= factor
+		nodeConfigInfo := device.NodeConfigInfo{}
+		err := nodeConfigInfo.Decode(node.Annotations[util.NodeConfigInfoAnnotation])
+		if err != nil {
+			return nil, fmt.Errorf("decoding node configuration information failed: %v", err)
+		}
+		needMemory *= nodeConfigInfo.MemoryFactor
 	}
 	var (
 		claimDevices []device.ClaimDevice

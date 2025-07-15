@@ -58,6 +58,10 @@ CUresult vmm_alloc(void **ptr, size_t size, int device_id) {
         printf("cuMemAddressReserve failed: %s\n", err);
         return rs;
     }
+
+    printf("cuMemAddressReserve\n");
+    sleep(10);
+
     // 申请物理地址
     CUmemGenericAllocationHandle allocationHandle;
     rs = cuMemCreate(&allocationHandle, size, &prop, 0);
@@ -66,6 +70,9 @@ CUresult vmm_alloc(void **ptr, size_t size, int device_id) {
         printf("cuMemCreate failed: %s\n", err);
         return rs;
     }
+    printf("cuMemCreate\n");
+    sleep(10);
+
     // 虚拟地址和物理地址映射
     rs = cuMemMap(dptr, size, 0, allocationHandle, 0);
     if (rs != CUDA_SUCCESS) {
@@ -73,6 +80,7 @@ CUresult vmm_alloc(void **ptr, size_t size, int device_id) {
         printf("cuMemMap failed: %s\n", err);
         return rs;
     }
+
     // 释放物理地址handle 此处并不会真正释放物理地址
     rs = cuMemRelease(allocationHandle);
     if (rs != CUDA_SUCCESS) {
@@ -80,7 +88,10 @@ CUresult vmm_alloc(void **ptr, size_t size, int device_id) {
         printf("cuMemRelease failed: %s\n", err);
         return rs;
     }
-    
+
+    printf("cuMemRelease\n");
+    sleep(10);
+
     // 设置访问权限
     CUmemAccessDesc accessDescriptor = {};
     accessDescriptor.location.id   = prop.location.id;
@@ -119,7 +130,7 @@ CUresult vmm_free(void *ptr, size_t size, int device_id) {
         printf("cuMemGetAllocationGranularity failed: %s\n", err);
         return rs;
     }
- 
+
     size = ((size - 1) / granularity + 1) * granularity;
     rs = cuMemUnmap((CUdeviceptr)ptr, size);
     if (rs != CUDA_SUCCESS) {
@@ -127,6 +138,10 @@ CUresult vmm_free(void *ptr, size_t size, int device_id) {
         printf("cuMemUnmap failed: %s\n", err);
         return rs;
     }
+
+    printf("cuMemUnmap\n");
+    sleep(10);
+
     rs = cuMemAddressFree((CUdeviceptr)ptr, size);
     if (rs != CUDA_SUCCESS) {
         cuGetErrorString(rs, &err);
@@ -134,6 +149,8 @@ CUresult vmm_free(void *ptr, size_t size, int device_id) {
         return rs;
     }
 
+    printf("cuMemAddressFree\n");
+    sleep(10);
     return CUDA_SUCCESS;
 }
 
@@ -185,6 +202,9 @@ int main(int argc, char **argv) {
     }
     // memset(d, 0, size);
     while (1){
+        printf("vmm_alloc\n");
+        sleep(10);
+        break;
     }
     if (vmm_free((void *)d, size, device_id) != CUDA_SUCCESS) {
         printf("vmm_free failed\n");

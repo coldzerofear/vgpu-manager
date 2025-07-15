@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,7 +93,7 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 	}
 
 	filters := []filterFunc{
-		f.heartbeatFilter,
+		f.nodeFilter,
 		f.deviceFilter,
 	}
 
@@ -146,37 +145,74 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extende
 	return filteredNodes, failedNodesMap
 }
 
-// TODO heartbeatFilter filter nodes with heartbeat timeout
-func (f *gpuFilter) heartbeatFilter(_ *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
+// TODO nodeFilter Filter nodes with heartbeat timeout and certain configuration errors
+func (f *gpuFilter) nodeFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
 	var (
-		filteredNodes  = make([]corev1.Node, 0)          // Successful nodes
-		failedNodesMap = make(extenderv1.FailedNodesMap) // Failed nodes
+		filteredNodes    = make([]corev1.Node, 0, len(nodes)) // Successful nodes
+		failedNodesMap   = make(extenderv1.FailedNodesMap)    // Failed nodes
+		memoryPolicyFunc = func(info *device.NodeConfigInfo) error {
+			return nil
+		}
 	)
-	for _, node := range nodes {
+
+	policy, _ := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation)
+	switch strings.ToLower(policy) {
+	case string(util.VirtualMemoryPolicy):
+		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.VirtualMemoryPolicy)
+		memoryPolicyFunc = func(info *device.NodeConfigInfo) error {
+			if info.MemoryScaling <= 1 {
+				return fmt.Errorf("node GPU use physical memory")
+			}
+			return nil
+		}
+	case string(util.PhysicalMemoryPolicy):
+		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.PhysicalMemoryPolicy)
+		memoryPolicyFunc = func(info *device.NodeConfigInfo) error {
+			if info.MemoryScaling > 1 {
+				return fmt.Errorf("node GPU use virtual memory")
+			}
+			return nil
+		}
+	}
+	for i, node := range nodes {
 		heartbeat, ok := util.HasAnnotation(&node, util.NodeDeviceHeartbeatAnnotation)
 		if !ok || len(heartbeat) == 0 {
-			failedNodesMap[node.Name] = "node has no heartbeat"
+			failedNodesMap[node.Name] = "node without device heartbeat"
 			continue
 		}
 		heartbeatTime := metav1.MicroTime{}
 		if err := heartbeatTime.UnmarshalText([]byte(heartbeat)); err != nil {
-			failedNodesMap[node.Name] = "node heartbeat time is not a standard timestamp"
+			failedNodesMap[node.Name] = "node with incorrect heartbeat timestamp"
 			continue
 		}
 		if time.Since(heartbeatTime.Local()) > 2*time.Minute {
-			failedNodesMap[node.Name] = "node heartbeat timeout"
+			failedNodesMap[node.Name] = "node with heartbeat timeout"
 			continue
 		}
-		memFactor, ok := util.HasAnnotation(&node, util.DeviceMemoryFactorAnnotation)
-		if !ok || len(memFactor) == 0 {
-			failedNodesMap[node.Name] = "node device memory factor is empty"
+		configInfoStr, ok := util.HasAnnotation(&node, util.NodeConfigInfoAnnotation)
+		if !ok || len(configInfoStr) == 0 {
+			failedNodesMap[node.Name] = "node with empty configuration information"
 			continue
 		}
-		if factor, err := strconv.Atoi(memFactor); err != nil || factor <= 0 {
-			failedNodesMap[node.Name] = "node device memory factor error"
+		nodeConfigInfo := device.NodeConfigInfo{}
+		if err := nodeConfigInfo.Decode(configInfoStr); err != nil {
+			klog.V(3).ErrorS(err, "decoding node configuration information failed", "node", node.Name)
+			failedNodesMap[node.Name] = "node with incorrect configuration information"
 			continue
 		}
-		filteredNodes = append(filteredNodes, node)
+		if nodeConfigInfo.DeviceSplit <= 0 {
+			failedNodesMap[node.Name] = "node without GPU device"
+			continue
+		}
+		if nodeConfigInfo.MemoryFactor <= 0 {
+			failedNodesMap[node.Name] = "node with incorrect GPU memory factor"
+			continue
+		}
+		if err := memoryPolicyFunc(&nodeConfigInfo); err != nil {
+			failedNodesMap[node.Name] = err.Error()
+			continue
+		}
+		filteredNodes = append(filteredNodes, nodes[i])
 	}
 	return filteredNodes, failedNodesMap, nil
 }
@@ -239,7 +275,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	}
 
 	if err := f.CheckDeviceRequest(pod); err != nil {
-		klog.Error(err)
+		klog.ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
 		return filteredNodes, failedNodesMap, err
 	}
 
