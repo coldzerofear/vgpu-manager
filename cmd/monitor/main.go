@@ -46,26 +46,26 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
-	nodeConfig, err := node.NewNodeConfig(node.WithMonitorOptions(*opt))
+	nodeConfig, err := node.NewNodeConfig(node.WithMonitorOptions(*opt), false)
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
-	util.InitializeCGroupDriver(nodeConfig.CGroupDriver())
+	util.InitializeCGroupDriver(nodeConfig.GetCGroupDriver())
 
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
 
-	nodeInformer := metrics.GetNodeInformer(factory, nodeConfig.NodeName())
-	podInformer := metrics.GetPodInformer(factory, nodeConfig.NodeName())
+	nodeInformer := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
+	podInformer := metrics.GetPodInformer(factory, nodeConfig.GetNodeName())
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
 	podLister := listerv1.NewPodLister(podInformer.GetIndexer())
 
 	containerLister := metrics.NewContainerLister(
-		deviceplugin.ContManagerDirectoryPath, nodeConfig.NodeName(), podLister)
+		deviceplugin.ContManagerDirectoryPath, nodeConfig.GetNodeName(), podLister)
 	nodeCollector, err := metrics.NewNodeGPUCollector(
-		nodeConfig.NodeName(), nodeLister, podLister, containerLister)
+		nodeConfig.GetNodeName(), nodeLister, podLister, containerLister)
 	if err != nil {
 		klog.Fatalf("Create node gpu collector failed: %v", err)
 	}

@@ -92,7 +92,7 @@ func (m *vmemoryDevicePlugin) Devices() []*pluginapi.Device {
 		if gpuDevice.Mig { // skip mig device
 			continue
 		}
-		for i := 0; i < gpuDevice.Memory/config.DeviceMemoryFactor(); i++ {
+		for i := 0; i < gpuDevice.Memory/config.GetDeviceMemoryFactor(); i++ {
 			devId := fmt.Sprintf("vmem-%d-%d", gpuDevice.Id, i)
 			health := pluginapi.Healthy
 			if !gpuDevice.Healthy {

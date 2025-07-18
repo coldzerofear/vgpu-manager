@@ -93,30 +93,26 @@ func (m *migDevicePlugin) GetPreferredAllocation(_ context.Context, _ *pluginapi
 // of the steps to make the Device available in the container.
 func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateRequest) (*pluginapi.AllocateResponse, error) {
 	klog.V(4).InfoS("Allocate", "pluginName", m.Name(), "request", req.GetContainerRequests())
-	nodeConfig := m.base.manager.GetNodeConfig()
 	deviceMap := m.base.manager.GetMIGDeviceMap()
+	imexChannels := m.base.manager.GetImexChannels()
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	for i, containerRequest := range req.ContainerRequests {
 		deviceIds := containerRequest.GetDevicesIDs()
 		responses[i] = &pluginapi.ContainerAllocateResponse{
 			Envs: make(map[string]string),
 		}
-		err := updateResponseForNodeConfig(responses[i], nodeConfig, deviceIds...)
-		if err != nil {
-			klog.Errorln(err)
-			return nil, err
-		}
+		updateResponseForNodeConfig(responses[i], m.base.manager, deviceIds...)
 		var devices []manager.Device
 		for _, uuid := range deviceIds {
 			migDevice, exists := deviceMap[uuid]
 			if !exists {
-				err = fmt.Errorf("MIG device %s does not exist", uuid)
+				err := fmt.Errorf("MIG device %s does not exist", uuid)
 				klog.Errorln(err)
 				return nil, err
 			}
 			devices = append(devices, manager.Device{MIG: &migDevice})
 		}
-		responses[i].Devices = append(responses[i].Devices, passDeviceSpecs(devices)...)
+		responses[i].Devices = append(responses[i].Devices, passDeviceSpecs(devices, imexChannels)...)
 	}
 	return &pluginapi.AllocateResponse{ContainerResponses: responses}, nil
 }

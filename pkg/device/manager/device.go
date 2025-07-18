@@ -13,6 +13,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
@@ -46,9 +47,10 @@ type DeviceManager struct {
 	*nvidia.DeviceLib
 	mut           sync.Mutex
 	client        kubernetes.Interface
-	config        *node.NodeConfig
+	config        *node.NodeConfigSpec
 	driverVersion nvidia.DriverVersion
 	devices       []*Device
+	imexChannels  imex.Channels
 
 	unhealthy            chan *Device
 	notify               map[string]chan *Device
@@ -62,8 +64,12 @@ func (m *DeviceManager) GetDriverVersion() nvidia.DriverVersion {
 	return m.driverVersion
 }
 
-func (m *DeviceManager) GetNodeConfig() node.NodeConfig {
+func (m *DeviceManager) GetNodeConfig() node.NodeConfigSpec {
 	return *m.config
+}
+
+func (m *DeviceManager) GetImexChannels() imex.Channels {
+	return m.imexChannels
 }
 
 func (m *DeviceManager) AddNotifyChannel(name string, ch chan *Device) {
@@ -102,7 +108,7 @@ func (m *DeviceManager) RemoveCleanupRegistryFunc(name string) {
 	m.mut.Unlock()
 }
 
-func NewFakeDeviceManager(config *node.NodeConfig, version nvidia.DriverVersion, devices []*Device) *DeviceManager {
+func NewFakeDeviceManager(config *node.NodeConfigSpec, version nvidia.DriverVersion, devices []*Device) *DeviceManager {
 	return &DeviceManager{
 		driverVersion:        version,
 		config:               config,
@@ -115,7 +121,7 @@ func NewFakeDeviceManager(config *node.NodeConfig, version nvidia.DriverVersion,
 	}
 }
 
-func NewDeviceManager(config *node.NodeConfig, kubeClient *kubernetes.Clientset) (*DeviceManager, error) {
+func NewDeviceManager(config *node.NodeConfigSpec, kubeClient *kubernetes.Clientset) (*DeviceManager, error) {
 	driverlib, err := nvidia.NewDeviceLib("/")
 	if err != nil {
 		klog.Error("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
@@ -145,7 +151,7 @@ func NewDeviceManager(config *node.NodeConfig, kubeClient *kubernetes.Clientset)
 	return m, err
 }
 
-func (m *DeviceManager) initDevices() error {
+func (m *DeviceManager) initDevices() (err error) {
 	driverVersion, ret := m.SystemGetDriverVersion()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error getting driver version: %s", nvml.ErrorString(ret))
@@ -185,20 +191,32 @@ func (m *DeviceManager) initDevices() error {
 			linksMap[dev.UUID] = linklist
 		}
 	}
-	err := m.VisitDevices(func(i int, d nvdev.Device) error {
+	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), "/")
+	if err != nil {
+		return fmt.Errorf("error querying IMEX channels: %w", err)
+	}
+
+	excludeDevices := m.config.GetExcludeDevices()
+	err = m.VisitDevices(func(i int, d nvdev.Device) error {
 		gpuInfo, err := m.GetGpuInfo(i, d)
 		if err != nil {
 			return fmt.Errorf("error getting info for GPU %d: %w", i, err)
 		}
-		numaNode, err := util.GetNumaInformation(i)
+		numaNode, err := util.GetNumaInformation(m.NvidiaSMIPath, i)
 		if err != nil {
-			klog.ErrorS(err, "failed to get numa information", "device", i)
+			klog.ErrorS(err, "failed to get numa information", "nvidia-smi", m.NvidiaSMIPath, "device", i)
 		}
 
-		healthy := !m.config.ExcludeDevices().Has(i)
-		if !healthy {
-			klog.Infof("exclude GPU %d from the device list and mark it as unhealthy", i)
+		healthy := true
+		if excludeDevices.HasIntID(i) {
+			klog.Infof("exclude GPU ID <%d> from the device list and mark it as unhealthy", i)
+			healthy = false
 		}
+		if healthy && excludeDevices.HasStringID(gpuInfo.UUID) {
+			klog.Infof("exclude GPU UUID <%s> from the device list and mark it as unhealthy", gpuInfo.UUID)
+			healthy = false
+		}
+
 		paths, err := gpuInfo.GetPaths()
 		if err != nil {
 			return fmt.Errorf("error getting device paths for GPU %d: %v", i, err)
@@ -357,12 +375,12 @@ func (m *DeviceManager) GetDeviceInfoMap() map[string]device.DeviceInfo {
 
 func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 	// Scaling Cores.
-	totalCores := int(m.config.DeviceCoresScaling() * float64(util.HundredCore))
+	totalCores := int(m.config.GetDeviceCoresScaling() * float64(util.HundredCore))
 	deviceInfos := make(device.NodeDeviceInfo, 0, len(m.devices))
 	for _, gpuDevice := range m.GetGPUDeviceMap() {
 		// Scaling Memory.
 		totalMemory := int(gpuDevice.Memory.Total >> 20) // bytes -> mb
-		totalMemory = int(m.config.DeviceMemoryScaling() * float64(totalMemory))
+		totalMemory = int(m.config.GetDeviceMemoryScaling() * float64(totalMemory))
 		capability, _ := strconv.ParseFloat(gpuDevice.CudaComputeCapability, 32)
 		deviceInfos = append(deviceInfos, device.DeviceInfo{
 			Id:         gpuDevice.Index,
@@ -370,7 +388,7 @@ func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 			Uuid:       gpuDevice.UUID,
 			Core:       totalCores,
 			Memory:     totalMemory,
-			Number:     m.config.DeviceSplitCount(),
+			Number:     m.config.GetDeviceSplitCount(),
 			Numa:       gpuDevice.NumaNode,
 			Mig:        gpuDevice.MigEnabled,
 			BusId:      links.PciInfo(gpuDevice.PciInfo).BusID(),

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
-	dpoptions "github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -21,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/utils/ptr"
 )
 
 func Test_ContainerLister(t *testing.T) {
@@ -63,15 +63,16 @@ func Test_ContainerLister(t *testing.T) {
 		DriverVersion:     "",
 		CudaDriverVersion: nvidia.CudaDriverVersion(12020),
 	}
-	option := node.WithDevicePluginOptions(dpoptions.Options{
-		NodeName:            nodeName,
-		NodeConfigPath:      "",
-		DeviceSplitCount:    10,
-		DeviceMemoryFactor:  1,
-		DeviceCoresScaling:  float64(1),
-		DeviceMemoryScaling: float64(1),
-	})
-	config, _ := node.NewNodeConfig(option)
+	config, err := node.NewNodeConfig(func(spec *node.NodeConfigSpec) {
+		spec.NodeName = nodeName
+		spec.DeviceSplitCount = ptr.To(10)
+		spec.DeviceMemoryFactor = ptr.To(1)
+		spec.DeviceCoresScaling = ptr.To(float64(1))
+		spec.DeviceMemoryScaling = ptr.To(float64(1))
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gpuUUID0 := "GPU-" + string(uuid.NewUUID())
 	gpuUUID1 := "GPU-" + string(uuid.NewUUID())
 	devices := []*manager.Device{

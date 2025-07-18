@@ -131,7 +131,7 @@ const (
 	OpenKernelMode CompatibilityMode = 100
 )
 
-func getCompatibilityMode(config node.NodeConfig) CompatibilityMode {
+func getCompatibilityMode(config node.NodeConfigSpec) CompatibilityMode {
 	mode := HostMode
 	switch {
 	case cgroups.IsCgroup2UnifiedMode():
@@ -141,7 +141,7 @@ func getCompatibilityMode(config node.NodeConfig) CompatibilityMode {
 	default:
 		mode |= CGroupv1Mode
 	}
-	if config.OpenKernelModules() {
+	if config.GetOpenKernelModules() {
 		mode |= OpenKernelMode
 	}
 	return mode
@@ -178,7 +178,7 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	assignDevices device.ContainerDevices, memoryOversold bool, node *corev1.Node) *ResourceDataT {
 	major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
-	ratio := devManager.GetNodeConfig().DeviceMemoryScaling()
+	ratio := devManager.GetNodeConfig().GetDeviceMemoryScaling()
 	mode := getCompatibilityMode(devManager.GetNodeConfig())
 	convert48Bytes := func(val string) [48]byte {
 		var byteArray [48]byte
@@ -297,7 +297,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		var vgpuConfig C.struct_resource_data_t
 		var driverVersion C.struct_version_t
 		major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
-		ratio := devManager.GetNodeConfig().DeviceMemoryScaling()
+		ratio := devManager.GetNodeConfig().GetDeviceMemoryScaling()
 
 		driverVersion.major = C.int(major)
 		driverVersion.minor = C.int(minor)

@@ -25,7 +25,7 @@ type RescheduleController struct {
 	recorder record.EventRecorder
 }
 
-func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfig) (reconcile.Reconciler, error) {
+func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) (reconcile.Reconciler, error) {
 	client := manager.GetClient()
 	recorder := manager.GetEventRecorderFor("re-schedule")
 	recovery, err := newRecoveryController(client, recorder)
@@ -33,7 +33,7 @@ func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfig) (rec
 		return nil, err
 	}
 	return &RescheduleController{
-		nodeName: config.NodeName(),
+		nodeName: config.GetNodeName(),
 		client:   client,
 		recorder: recorder,
 		recovery: recovery,

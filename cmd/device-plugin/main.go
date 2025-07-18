@@ -58,12 +58,12 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
-	nodeConfig, err := node.NewNodeConfig(node.WithDevicePluginOptions(*opt))
+	nodeConfig, err := node.NewNodeConfig(node.WithDevicePluginOptions(*opt), true)
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
-	util.InitializeCGroupDriver(nodeConfig.CGroupDriver())
+	util.InitializeCGroupDriver(nodeConfig.GetCGroupDriver())
 
 	klog.V(3).Info("Initialize Device Resource Manager")
 	deviceManager, err := devm.NewDeviceManager(nodeConfig, kubeClient)

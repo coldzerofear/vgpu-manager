@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"golang.org/x/exp/slices"
 	"k8s.io/klog/v2"
 )
 
@@ -76,6 +77,19 @@ var (
 			return p1Score > p2Score
 		}
 	}
+	// ByNodeGPUTopology Nodes with GPU topology information will be ranked first.
+	ByNodeGPUTopology = func(p1, p2 *device.NodeInfo) bool {
+		hasTopo1 := p1.HasGPUTopology()
+		hasTopo2 := p2.HasGPUTopology()
+		switch {
+		case hasTopo1 && !hasTopo2:
+			return true // p1 has topology, p2 does not → p1 ranks first
+		case !hasTopo1 && hasTopo2:
+			return false // p2 has topology, p1 does not → p2 ranks first
+		default:
+			return false // both are the same: continue to compare in the future
+		}
+	}
 )
 
 type sortPriority[T any] struct {
@@ -136,21 +150,31 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
-func NewNodeBinpackPriority() *sortPriority[*device.NodeInfo] {
+func NewNodeBinpackPriority(needGPUTopo bool) *sortPriority[*device.NodeInfo] {
+	less := []LessFunc[*device.NodeInfo]{
+		ByNodeScoreAsc(),
+		ByNodeNameAsc,
+	}
+	if needGPUTopo {
+		less = slices.Insert[[]LessFunc[*device.NodeInfo],
+			LessFunc[*device.NodeInfo]](less, 0, ByNodeGPUTopology)
+	}
 	return &sortPriority[*device.NodeInfo]{
-		less: []LessFunc[*device.NodeInfo]{
-			ByNodeScoreAsc(),
-			ByNodeNameAsc,
-		},
+		less: less,
 	}
 }
 
-func NewNodeSpreadPriority() *sortPriority[*device.NodeInfo] {
+func NewNodeSpreadPriority(needGPUTopo bool) *sortPriority[*device.NodeInfo] {
+	less := []LessFunc[*device.NodeInfo]{
+		ByNodeScoreDes(),
+		ByNodeNameAsc,
+	}
+	if needGPUTopo {
+		less = slices.Insert[[]LessFunc[*device.NodeInfo],
+			LessFunc[*device.NodeInfo]](less, 0, ByNodeGPUTopology)
+	}
 	return &sortPriority[*device.NodeInfo]{
-		less: []LessFunc[*device.NodeInfo]{
-			ByNodeScoreDes(),
-			ByNodeNameAsc,
-		},
+		less: less,
 	}
 }
 

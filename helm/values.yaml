@@ -142,6 +142,8 @@ devicePlugin:
       mofedEnabled: false
       # If using the open-gpu-kernel-modules, open it and enable compatibility mode. (default: false)
       openKernelModules: false
+      # Strategy for starting MIG device plugin service (supported values: "none" | "single" | "mixed")
+      migStrategy: mixed
       # Supported feature gates:
       # - CorePlugin
       # - MemoryPlugin
@@ -184,7 +186,7 @@ devicePlugin:
     # NodeConfig supports both YAML and JSON formats, choose one to use
     yaml: |
       version: v1
-      config:
+      configs:
        - nodeName: example
          cgroupDriver: systemd
          deviceListStrategy: envvar
@@ -192,7 +194,7 @@ devicePlugin:
          deviceMemoryScaling: 1
          deviceMemoryFactor: 1
          deviceCoresScaling: 1
-         excludeDevices: "4-7"
+         excludeDevices: "4..7"
          gdsEnabled: false
          mofedEnabled: false
          openKernelModules: false

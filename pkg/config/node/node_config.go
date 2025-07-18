@@ -6,226 +6,165 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 
 	dpoptions "github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	monitoroptions "github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gopkg.in/yaml.v3"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 )
 
 const Version = "v1"
 
-type ConfigYaml struct {
-	Version string   `yaml:"version"`
-	Config  []Config `yaml:"config,omitempty"`
+type ConfigTemplate struct {
+	Version string       `json:"version"           yaml:"version"`
+	Configs []ConfigSpec `json:"configs,omitempty" yaml:"configs,omitempty"`
 }
 
-type Config struct {
-	NodeName            string   `json:"nodeName" yaml:"nodeName"`
-	CGroupDriver        *string  `json:"cgroupDriver,omitempty" yaml:"cgroupDriver,omitempty"`
-	DeviceListStrategy  *string  `json:"deviceListStrategy,omitempty" yaml:"deviceListStrategy,omitempty"`
-	DeviceSplitCount    *int     `json:"deviceSplitCount,omitempty" yaml:"deviceSplitCount,omitempty"`
-	DeviceMemoryScaling *float64 `json:"deviceMemoryScaling,omitempty" yaml:"deviceMemoryScaling,omitempty"`
-	DeviceMemoryFactor  *int     `json:"deviceMemoryFactor,omitempty" yaml:"deviceMemoryFactor,omitempty"`
-	DeviceCoresScaling  *float64 `json:"deviceCoresScaling,omitempty" yaml:"deviceCoresScaling,omitempty"`
-	ExcludeDevices      *string  `json:"excludeDevices,omitempty" yaml:"excludeDevices,omitempty"`
-	GDSEnabled          *bool    `json:"gdsEnabled,omitempty" yaml:"gdsEnabled,omitempty"`
-	MOFEDEnabled        *bool    `json:"mofedEnabled,omitempty" yaml:"mofedEnabled,omitempty"`
-	MigStrategy         *string  `json:"migStrategy,omitempty" yaml:"migStrategy,omitempty"`
-	OpenKernelModules   *bool    `json:"openKernelModules,omitempty" yaml:"openKernelModules,omitempty"`
+type ConfigSpec struct {
+	NodeName            string     `json:"nodeName"                      yaml:"nodeName"`
+	CGroupDriver        *string    `json:"cgroupDriver,omitempty"        yaml:"cgroupDriver,omitempty"`
+	DeviceListStrategy  *string    `json:"deviceListStrategy,omitempty"  yaml:"deviceListStrategy,omitempty"`
+	DeviceSplitCount    *int       `json:"deviceSplitCount,omitempty"    yaml:"deviceSplitCount,omitempty"`
+	DeviceMemoryScaling *float64   `json:"deviceMemoryScaling,omitempty" yaml:"deviceMemoryScaling,omitempty"`
+	DeviceMemoryFactor  *int       `json:"deviceMemoryFactor,omitempty"  yaml:"deviceMemoryFactor,omitempty"`
+	DeviceCoresScaling  *float64   `json:"deviceCoresScaling,omitempty"  yaml:"deviceCoresScaling,omitempty"`
+	ExcludeDevices      *IDStore   `json:"excludeDevices,omitempty"      yaml:"excludeDevices,omitempty"`
+	GDSEnabled          *bool      `json:"gdsEnabled,omitempty"          yaml:"gdsEnabled,omitempty"`
+	MOFEDEnabled        *bool      `json:"mofedEnabled,omitempty"        yaml:"mofedEnabled,omitempty"`
+	MigStrategy         *string    `json:"migStrategy,omitempty"         yaml:"migStrategy,omitempty"`
+	OpenKernelModules   *bool      `json:"openKernelModules,omitempty"   yaml:"openKernelModules,omitempty"`
+	Imex                *imex.Imex `json:"imex,omitempty"                yaml:"imex,omitempty"`
 }
 
-type NodeConfig struct {
-	nodeName            string
-	nodeConfigPath      string
-	devicePluginPath    *string
-	cgroupDriver        *string
-	deviceListStrategy  *string
-	deviceSplitCount    *int
-	deviceMemoryScaling *float64
-	deviceMemoryFactor  *int
-	deviceCoresScaling  *float64
-	excludeDevices      sets.Int
-	gdsEnabled          *bool
-	mofedEnabled        *bool
-	migStrategy         *string
-	openKernelModules   *bool
-	checkFields         bool
+type NodeConfigSpec struct {
+	ConfigSpec       `json:",inline" yaml:",inline"`
+	devicePluginPath *string
+	nodeConfigPath   string
+	CheckFields      bool
 }
 
-func (nc NodeConfig) NodeName() string {
-	return nc.nodeName
+func (nc NodeConfigSpec) GetNodeName() string {
+	return nc.NodeName
 }
 
-func (nc NodeConfig) CGroupDriver() string {
-	if nc.cgroupDriver == nil {
+func (nc NodeConfigSpec) GetCGroupDriver() string {
+	if nc.CGroupDriver == nil {
 		return ""
 	}
-	return *nc.cgroupDriver
+	return *nc.CGroupDriver
 }
 
-func (nc NodeConfig) DeviceListStrategy() string {
-	if nc.deviceListStrategy == nil {
+func (nc NodeConfigSpec) GetDeviceListStrategy() string {
+	if nc.DeviceListStrategy == nil {
 		return ""
 	}
-	return *nc.deviceListStrategy
+	return *nc.DeviceListStrategy
 }
 
-func (nc NodeConfig) DevicePluginPath() string {
+func (nc NodeConfigSpec) GetDevicePluginPath() string {
 	if nc.devicePluginPath == nil {
 		return ""
 	}
 	return *nc.devicePluginPath
 }
 
-func (nc NodeConfig) DeviceSplitCount() int {
-	if nc.deviceSplitCount == nil {
+func (nc NodeConfigSpec) GetDeviceSplitCount() int {
+	if nc.DeviceSplitCount == nil {
 		return 0
 	}
-	return *nc.deviceSplitCount
+	return *nc.DeviceSplitCount
 }
 
-func (nc NodeConfig) DeviceMemoryScaling() float64 {
-	if nc.deviceMemoryScaling == nil {
+func (nc NodeConfigSpec) GetDeviceMemoryScaling() float64 {
+	if nc.DeviceMemoryScaling == nil {
 		return 0
 	}
-	return *nc.deviceMemoryScaling
+	return *nc.DeviceMemoryScaling
 }
 
-func (nc NodeConfig) DeviceMemoryFactor() int {
-	if nc.deviceMemoryFactor == nil {
+func (nc NodeConfigSpec) GetDeviceMemoryFactor() int {
+	if nc.DeviceMemoryFactor == nil {
 		return 0
 	}
-	return *nc.deviceMemoryFactor
+	return *nc.DeviceMemoryFactor
 }
 
-func (nc NodeConfig) DeviceCoresScaling() float64 {
-	if nc.deviceCoresScaling == nil {
+func (nc NodeConfigSpec) GetDeviceCoresScaling() float64 {
+	if nc.DeviceCoresScaling == nil {
 		return 0
 	}
-	return *nc.deviceCoresScaling
+	return *nc.DeviceCoresScaling
 }
 
-func (nc NodeConfig) ExcludeDevices() sets.Int {
-	return nc.excludeDevices
+func (nc NodeConfigSpec) GetExcludeDevices() IDStore {
+	if nc.ExcludeDevices == nil {
+		return NewIDStore()
+	}
+	return *nc.ExcludeDevices
 }
 
-func (nc NodeConfig) GDSEnabled() bool {
-	if nc.gdsEnabled == nil {
+func (nc NodeConfigSpec) GetGDSEnabled() bool {
+	if nc.GDSEnabled == nil {
 		return false
 	}
-	return *nc.gdsEnabled
+	return *nc.GDSEnabled
 }
 
-func (nc NodeConfig) MOFEDEnabled() bool {
-	if nc.mofedEnabled == nil {
+func (nc NodeConfigSpec) GetMOFEDEnabled() bool {
+	if nc.MOFEDEnabled == nil {
 		return false
 	}
-	return *nc.mofedEnabled
+	return *nc.MOFEDEnabled
 }
 
-func (nc NodeConfig) OpenKernelModules() bool {
-	if nc.openKernelModules == nil {
+func (nc NodeConfigSpec) GetOpenKernelModules() bool {
+	if nc.OpenKernelModules == nil {
 		return false
 	}
-	return *nc.openKernelModules
+	return *nc.OpenKernelModules
 }
 
-func (nc NodeConfig) MigStrategy() string {
-	if nc.migStrategy == nil {
+func (nc NodeConfigSpec) GetMigStrategy() string {
+	if nc.MigStrategy == nil {
 		return ""
 	}
-	return *nc.migStrategy
+	return *nc.MigStrategy
 }
 
-func (nc NodeConfig) YamlString() string {
-	var result strings.Builder
-	result.WriteString("version: v1\n")
-	result.WriteString("config:\n")
-	result.WriteString(fmt.Sprintf(" - nodeName: %s\n", nc.nodeName))
-	if nc.cgroupDriver != nil {
-		result.WriteString(fmt.Sprintf("   cgroupDriver: %s\n", *nc.cgroupDriver))
+func (nc NodeConfigSpec) GetIMEX() imex.Imex {
+	if nc.Imex == nil {
+		return imex.Imex{}
 	}
-	if nc.deviceListStrategy != nil {
-		result.WriteString(fmt.Sprintf("   deviceListStrategy: %s\n", *nc.deviceListStrategy))
-	}
-	if nc.deviceSplitCount != nil {
-		result.WriteString(fmt.Sprintf("   deviceSplitCount: %d\n", *nc.deviceSplitCount))
-	}
-	if nc.deviceMemoryScaling != nil {
-		result.WriteString(fmt.Sprintf("   deviceMemoryScaling: %.2f\n", *nc.deviceMemoryScaling))
-	}
-	if nc.deviceMemoryFactor != nil {
-		result.WriteString(fmt.Sprintf("   deviceMemoryFactor: %d\n", *nc.deviceMemoryFactor))
-	}
-	if nc.deviceCoresScaling != nil {
-		result.WriteString(fmt.Sprintf("   deviceCoresScaling: %.2f\n", *nc.deviceCoresScaling))
-	}
-	if len(nc.excludeDevices) > 0 {
-		result.WriteString(fmt.Sprintf("   excludeDevices: %+v\n", nc.excludeDevices.List()))
-	}
-	if nc.gdsEnabled != nil {
-		result.WriteString(fmt.Sprintf("   gdsEnabled: %t\n", *nc.gdsEnabled))
-	}
-	if nc.mofedEnabled != nil {
-		result.WriteString(fmt.Sprintf("   mofedEnabled: %t\n", *nc.mofedEnabled))
-	}
-	if nc.migStrategy != nil {
-		result.WriteString(fmt.Sprintf("   migStrategy: %s\n", *nc.migStrategy))
-	}
-	if nc.openKernelModules != nil {
-		result.WriteString(fmt.Sprintf("   openKernelModules: %t\n", *nc.openKernelModules))
-	}
-	return result.String()
+	return *nc.Imex
 }
 
-func (nc NodeConfig) JsonString() string {
-	var result strings.Builder
-	result.WriteString("{\n")
-	result.WriteString(fmt.Sprintf("  \"nodeName\": \"%s\"\n", nc.nodeName))
-	if nc.cgroupDriver != nil {
-		result.WriteString(fmt.Sprintf("  \"cgroupDriver\": \"%s\"\n", *nc.cgroupDriver))
+func (nc NodeConfigSpec) YamlString() string {
+	ct := ConfigTemplate{
+		Version: Version,
+		Configs: []ConfigSpec{
+			nc.ConfigSpec,
+		},
 	}
-	if nc.deviceListStrategy != nil {
-		result.WriteString(fmt.Sprintf("  \"deviceListStrategy\": \"%s\"\n", *nc.deviceListStrategy))
+	marshal, err := yaml.Marshal(ct)
+	if err != nil {
+		klog.Warningf("node config yaml.Marshal failed: %v", err)
 	}
-	if nc.deviceSplitCount != nil {
-		result.WriteString(fmt.Sprintf("  \"deviceSplitCount\": %d\n", *nc.deviceSplitCount))
-	}
-	if nc.deviceMemoryScaling != nil {
-		result.WriteString(fmt.Sprintf("  \"deviceMemoryScaling\": %.2f\n", *nc.deviceMemoryScaling))
-	}
-	if nc.deviceMemoryFactor != nil {
-		result.WriteString(fmt.Sprintf("  \"deviceMemoryFactor\": %d\n", *nc.deviceMemoryFactor))
-	}
-	if nc.deviceCoresScaling != nil {
-		result.WriteString(fmt.Sprintf("  \"deviceCoresScaling\": %.2f\n", *nc.deviceCoresScaling))
-	}
-	if len(nc.excludeDevices) > 0 {
-		result.WriteString(fmt.Sprintf("  \"excludeDevices\": %+v\n", nc.excludeDevices.List()))
-	}
-	if nc.gdsEnabled != nil {
-		result.WriteString(fmt.Sprintf("  \"gdsEnabled\": %t\n", *nc.gdsEnabled))
-	}
-	if nc.mofedEnabled != nil {
-		result.WriteString(fmt.Sprintf("  \"mofedEnabled\": %t\n", *nc.mofedEnabled))
-	}
-	if nc.migStrategy != nil {
-		result.WriteString(fmt.Sprintf("  \"migStrategy\": \"%s\"\n", *nc.migStrategy))
-	}
-	if nc.openKernelModules != nil {
-		result.WriteString(fmt.Sprintf("  \"openKernelModules\": %t\n", *nc.openKernelModules))
-	}
-	result.WriteString("}")
-	return result.String()
+	return string(marshal)
 }
 
-func (nc NodeConfig) String() string {
+func (nc NodeConfigSpec) JsonString() string {
+	marshal, err := json.MarshalIndent(nc, "", "  ")
+	if err != nil {
+		klog.Warningf("node config json.Marshal failed: %v", err)
+	}
+	return string(marshal)
+}
+
+func (nc NodeConfigSpec) String() string {
 	configPath := strings.TrimSpace(nc.nodeConfigPath)
 	if configPath == "" {
 		return nc.YamlString()
@@ -241,40 +180,36 @@ func (nc NodeConfig) String() string {
 	}
 }
 
-func (nc NodeConfig) checkNodeConfig() error {
-	if !nc.checkFields {
-		return nil
-	}
-
-	switch nc.DeviceListStrategy() {
+func (nc NodeConfigSpec) checkNodeConfig() (errs []error) {
+	switch nc.GetDeviceListStrategy() {
 	case util.DeviceListStrategyEnvvar:
 	case util.DeviceListStrategyVolumeMounts:
 	default:
-		return fmt.Errorf("unknown deviceListStrategy value: %s", nc.DeviceListStrategy())
+		errs = append(errs, fmt.Errorf("unknown deviceListStrategy value: \"%s\"", nc.GetDeviceListStrategy()))
 	}
-	switch nc.MigStrategy() {
+	switch nc.GetMigStrategy() {
 	case util.MigStrategyNone:
 	case util.MigStrategySingle:
 	case util.MigStrategyMixed:
 	default:
-		return fmt.Errorf("unknown migStrategy value: %s", nc.MigStrategy())
+		errs = append(errs, fmt.Errorf("unknown migStrategy value: \"%s\"", nc.GetMigStrategy()))
 	}
-	if nc.DevicePluginPath() == "" {
-		return fmt.Errorf("devicePluginPath is empty")
+	if nc.GetDevicePluginPath() == "" {
+		errs = append(errs, fmt.Errorf("devicePluginPath cannot be empty"))
 	}
-	if nc.DeviceSplitCount() < 0 {
-		return fmt.Errorf("deviceSplitCount must be a positive integer greater than or equal to 0")
+	if nc.GetDeviceSplitCount() < 0 {
+		errs = append(errs, fmt.Errorf("deviceSplitCount must be a positive integer greater than or equal to 0"))
 	}
-	if nc.DeviceMemoryScaling() < 0 {
-		return fmt.Errorf("deviceMemoryScaling must be any number greater than or equal to 0")
+	if nc.GetDeviceMemoryScaling() < 0 {
+		errs = append(errs, fmt.Errorf("deviceMemoryScaling must be any number greater than or equal to 0"))
 	}
-	if nc.DeviceMemoryFactor() <= 0 {
-		return fmt.Errorf("deviceMemoryFactor must be a positive integer greater than 0")
+	if nc.GetDeviceMemoryFactor() <= 0 {
+		errs = append(errs, fmt.Errorf("deviceMemoryFactor must be a positive integer greater than 0"))
 	}
-	if nc.DeviceCoresScaling() < 0 || nc.DeviceCoresScaling() > 1 {
-		return fmt.Errorf("deviceCoresScaling must be any number greater than or equal to 0 but less than or equal to 1")
+	if nc.GetDeviceCoresScaling() < 0 || nc.GetDeviceCoresScaling() > 1 {
+		errs = append(errs, fmt.Errorf("deviceCoresScaling must be any number greater than or equal to 0 but less than or equal to 1"))
 	}
-	return nil
+	return errs
 }
 
 func regexpMatch(expr, target string) bool {
@@ -299,161 +234,149 @@ func matchNodeName(cmNodeName, cuNodeName string) bool {
 	return regexpMatch(cmNodeName, cuNodeName)
 }
 
-func parseConfig(configFile string) ([]Config, error) {
+func parseConfigTemplate(configFile string) (*ConfigTemplate, error) {
 	configFile = strings.TrimSpace(configFile)
 	configBytes, err := os.ReadFile(configFile)
 	if err != nil {
 		return nil, fmt.Errorf("error read config file: %v", err)
 	}
-	var config ConfigYaml
+	var configTemp ConfigTemplate
 	fileName := strings.ToLower(filepath.Base(configFile))
 	switch {
 	case strings.HasSuffix(fileName, ".yaml"), strings.HasSuffix(fileName, ".yml"):
-		if err = yaml.Unmarshal(configBytes, &config); err != nil {
+		if err = yaml.Unmarshal(configBytes, &configTemp); err != nil {
 			return nil, fmt.Errorf("yaml unmarshal error: %v", err)
 		}
-		if config.Version == "" {
-			config.Version = Version
+		if configTemp.Version == "" {
+			configTemp.Version = Version
 		}
 	case strings.HasSuffix(fileName, ".json"):
-		var configs []Config
+		var configs []ConfigSpec
 		if err = json.Unmarshal(configBytes, &configs); err != nil {
 			return nil, fmt.Errorf("json unmarshal error: %v", err)
 		}
-		config = ConfigYaml{
+		configTemp = ConfigTemplate{
 			Version: Version,
-			Config:  configs,
+			Configs: configs,
 		}
 	default:
-		return nil, fmt.Errorf("unsupported config file format")
+		return nil, fmt.Errorf("unsupported config file format: %s", fileName)
 	}
-	if config.Version != Version {
-		return nil, fmt.Errorf("unknown config version: %v", config.Version)
+	if configTemp.Version != Version {
+		return nil, fmt.Errorf("unknown config version: %v", configTemp.Version)
 	}
-	return config.Config, nil
+	return &configTemp, nil
 }
 
-type Option func(*NodeConfig)
+type Option func(*NodeConfigSpec)
 
 func WithDevicePluginOptions(opt dpoptions.Options) Option {
-	return func(nodeConfig *NodeConfig) {
-		nodeConfig.nodeName = opt.NodeName
+	return func(nodeConfig *NodeConfigSpec) {
+		nodeConfig.NodeName = opt.NodeName
 		nodeConfig.nodeConfigPath = opt.NodeConfigPath
-		nodeConfig.cgroupDriver = ptr.To[string](opt.CGroupDriver)
-		nodeConfig.migStrategy = ptr.To[string](opt.MigStrategy)
-		nodeConfig.deviceListStrategy = ptr.To[string](opt.DeviceListStrategy)
-		nodeConfig.deviceSplitCount = ptr.To[int](opt.DeviceSplitCount)
+		nodeConfig.CGroupDriver = ptr.To[string](opt.CGroupDriver)
+		nodeConfig.MigStrategy = ptr.To[string](opt.MigStrategy)
+		nodeConfig.DeviceListStrategy = ptr.To[string](opt.DeviceListStrategy)
+		nodeConfig.DeviceSplitCount = ptr.To[int](opt.DeviceSplitCount)
 		nodeConfig.devicePluginPath = ptr.To[string](opt.DevicePluginPath)
-		nodeConfig.deviceMemoryScaling = ptr.To[float64](opt.DeviceMemoryScaling)
-		nodeConfig.deviceMemoryFactor = ptr.To[int](opt.DeviceMemoryFactor)
-		nodeConfig.deviceCoresScaling = ptr.To[float64](opt.DeviceCoresScaling)
-		nodeConfig.excludeDevices = ParseExcludeDevices(opt.ExcludeDevices)
-		nodeConfig.gdsEnabled = ptr.To[bool](opt.GDSEnabled)
-		nodeConfig.mofedEnabled = ptr.To[bool](opt.MOFEDEnabled)
-		nodeConfig.openKernelModules = ptr.To[bool](opt.OpenKernelModules)
-		nodeConfig.checkFields = true
+		nodeConfig.DeviceMemoryScaling = ptr.To[float64](opt.DeviceMemoryScaling)
+		nodeConfig.DeviceMemoryFactor = ptr.To[int](opt.DeviceMemoryFactor)
+		nodeConfig.DeviceCoresScaling = ptr.To[float64](opt.DeviceCoresScaling)
+		nodeConfig.ExcludeDevices = ptr.To[IDStore](parseDeviceIDs(opt.ExcludeDevices))
+		nodeConfig.GDSEnabled = ptr.To[bool](opt.GDSEnabled)
+		nodeConfig.MOFEDEnabled = ptr.To[bool](opt.MOFEDEnabled)
+		nodeConfig.OpenKernelModules = ptr.To[bool](opt.OpenKernelModules)
+		if len(opt.ImexChannelIDs) > 0 {
+			nodeConfig.Imex = &imex.Imex{
+				ChannelIDs: opt.ImexChannelIDs,
+				Required:   opt.ImexRequired,
+			}
+		}
 	}
 }
 
-func WithMonitorOptions(opt monitoroptions.Options) func(*NodeConfig) {
-	return func(nodeConfig *NodeConfig) {
-		nodeConfig.nodeName = opt.NodeName
+func WithMonitorOptions(opt monitoroptions.Options) Option {
+	return func(nodeConfig *NodeConfigSpec) {
+		nodeConfig.NodeName = opt.NodeName
 		nodeConfig.nodeConfigPath = opt.NodeConfigPath
-		nodeConfig.cgroupDriver = ptr.To[string](opt.CGroupDriver)
-		nodeConfig.excludeDevices = sets.NewInt()
-		nodeConfig.checkFields = false
+		nodeConfig.CGroupDriver = ptr.To[string](opt.CGroupDriver)
 	}
 }
 
-func NewNodeConfig(option Option) (*NodeConfig, error) {
-	if option == nil {
-		return nil, fmt.Errorf("option is empty")
+func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
+	configTemp, err := parseConfigTemplate(nodeConfig.nodeConfigPath)
+	if err != nil {
+		klog.Errorf("parse node config file failed: %v", err)
+		return err
 	}
-	nodeConfig := &NodeConfig{}
+	for _, config := range configTemp.Configs {
+		if !matchNodeName(config.NodeName, nodeConfig.NodeName) {
+			continue
+		}
+		klog.InfoS("Matched node config", "nodeConfig.nodeName",
+			config.NodeName, "current.nodeName", nodeConfig.NodeName)
+		if config.CGroupDriver != nil {
+			nodeConfig.CGroupDriver = config.CGroupDriver
+		}
+		if config.DeviceListStrategy != nil {
+			nodeConfig.DeviceListStrategy = config.DeviceListStrategy
+		}
+		if config.DeviceSplitCount != nil {
+			nodeConfig.DeviceSplitCount = config.DeviceSplitCount
+		}
+		if config.DeviceMemoryFactor != nil {
+			nodeConfig.DeviceMemoryFactor = config.DeviceMemoryFactor
+		}
+		if config.DeviceCoresScaling != nil {
+			nodeConfig.DeviceCoresScaling = config.DeviceCoresScaling
+		}
+		if config.DeviceMemoryScaling != nil {
+			nodeConfig.DeviceMemoryScaling = config.DeviceMemoryScaling
+		}
+		if config.ExcludeDevices != nil {
+			nodeConfig.ExcludeDevices = config.ExcludeDevices
+		}
+		if config.GDSEnabled != nil {
+			nodeConfig.GDSEnabled = config.GDSEnabled
+		}
+		if config.MOFEDEnabled != nil {
+			nodeConfig.MOFEDEnabled = config.MOFEDEnabled
+		}
+		if config.MigStrategy != nil {
+			nodeConfig.MigStrategy = config.MigStrategy
+		}
+		if config.OpenKernelModules != nil {
+			nodeConfig.OpenKernelModules = config.OpenKernelModules
+		}
+		if config.Imex != nil {
+			nodeConfig.Imex = config.Imex
+		}
+		break
+	}
+	return nil
+}
+
+func NewNodeConfig(option Option, checkFields bool) (*NodeConfigSpec, error) {
+	if option == nil {
+		return nil, fmt.Errorf("node config option cannot is empty")
+	}
+	nodeConfig := &NodeConfigSpec{}
 	option(nodeConfig)
+
 	if len(nodeConfig.nodeConfigPath) > 0 {
-		configs, err := parseConfig(nodeConfig.nodeConfigPath)
-		if err != nil {
-			klog.Errorf("parse node config file failed: %v", err)
+		if err := loadConfigSpec(nodeConfig); err != nil {
 			return nil, err
 		}
-		for _, config := range configs {
-			if !matchNodeName(config.NodeName, nodeConfig.nodeName) {
-				continue
-			}
-			klog.InfoS("Matched node config", "nodeConfig.nodeName",
-				config.NodeName, "current.nodeName", nodeConfig.nodeName)
-
-			if config.CGroupDriver != nil {
-				nodeConfig.cgroupDriver = config.CGroupDriver
-			}
-			if config.DeviceListStrategy != nil {
-				nodeConfig.deviceListStrategy = config.DeviceListStrategy
-			}
-			if config.DeviceSplitCount != nil {
-				nodeConfig.deviceSplitCount = config.DeviceSplitCount
-			}
-			if config.DeviceMemoryFactor != nil {
-				nodeConfig.deviceMemoryFactor = config.DeviceMemoryFactor
-			}
-			if config.DeviceCoresScaling != nil {
-				nodeConfig.deviceCoresScaling = config.DeviceCoresScaling
-			}
-			if config.DeviceMemoryScaling != nil {
-				nodeConfig.deviceMemoryScaling = config.DeviceMemoryScaling
-			}
-			if config.ExcludeDevices != nil {
-				nodeConfig.excludeDevices = ParseExcludeDevices(*config.ExcludeDevices)
-			}
-			if config.GDSEnabled != nil {
-				nodeConfig.gdsEnabled = config.GDSEnabled
-			}
-			if config.MOFEDEnabled != nil {
-				nodeConfig.mofedEnabled = config.MOFEDEnabled
-			}
-			if config.MigStrategy != nil {
-				nodeConfig.migStrategy = config.MigStrategy
-			}
-			if config.OpenKernelModules != nil {
-				nodeConfig.openKernelModules = config.OpenKernelModules
-			}
-			break
+	}
+	if checkFields {
+		errs := nodeConfig.checkNodeConfig()
+		var errMsg []string
+		for _, err := range errs {
+			errMsg = append(errMsg, err.Error())
+		}
+		if len(errMsg) > 0 {
+			return nil, fmt.Errorf(strings.Join(errMsg, ", "))
 		}
 	}
-	return nodeConfig, nodeConfig.checkNodeConfig()
-}
-
-func ParseExcludeDevices(excludeDevices string) sets.Int {
-	exDevs := sets.NewInt()
-	excludeDevices = strings.TrimSpace(excludeDevices)
-	if len(excludeDevices) == 0 {
-		return exDevs
-	}
-	for _, str := range strings.Split(excludeDevices, ",") {
-		split := strings.Split(strings.TrimSpace(str), "-")
-		switch len(split) {
-		case 1:
-			atoi, err := strconv.Atoi(strings.TrimSpace(split[0]))
-			if err != nil {
-				klog.Errorf("Call ParseExcludeDevices failed: excludeDevices: [%s], err: %v", excludeDevices, err)
-				continue
-			}
-			exDevs.Insert(atoi)
-		case 2:
-			start, err := strconv.Atoi(strings.TrimSpace(split[0]))
-			if err != nil {
-				klog.Errorf("Call ParseExcludeDevices failed: excludeDevices: [%s], err: %v", excludeDevices, err)
-				continue
-			}
-			end, err := strconv.Atoi(strings.TrimSpace(split[1]))
-			if err != nil {
-				klog.Errorf("Call ParseExcludeDevices failed: excludeDevices: [%s], err: %v", excludeDevices, err)
-				continue
-			}
-			for ; start <= end; start++ {
-				exDevs.Insert(start)
-			}
-		}
-	}
-	return exDevs
+	return nodeConfig, nil
 }

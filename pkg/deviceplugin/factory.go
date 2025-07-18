@@ -39,7 +39,7 @@ func GetDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
 	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) ([]DevicePlugin, error) {
 
 	var plugins []DevicePlugin
-	migStrategy := devManager.GetNodeConfig().MigStrategy()
+	migStrategy := devManager.GetNodeConfig().GetMigStrategy()
 	if migStrategy != util.MigStrategySingle {
 		socket := filepath.Join(opt.DevicePluginPath, "nvidia-vgpu.sock")
 		plugins = append(plugins, NewVNumberDevicePlugin(util.VGPUNumberResourceName,

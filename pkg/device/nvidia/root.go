@@ -22,11 +22,11 @@ import (
 	"path/filepath"
 )
 
-type DriverRoot string
+type RootPath string
 
 // GetDriverLibraryPath returns path to `libnvidia-ml.so.1` in the driver root.
 // The folder for this file is also expected to be the location of other driver files.
-func (r DriverRoot) GetDriverLibraryPath() (string, error) {
+func (r RootPath) GetDriverLibraryPath() (string, error) {
 	librarySearchPaths := []string{
 		"/usr/lib64",
 		"/usr/lib/x86_64-linux-gnu",
@@ -45,7 +45,7 @@ func (r DriverRoot) GetDriverLibraryPath() (string, error) {
 }
 
 // getNvidiaSMIPath returns path to the `nvidia-smi` executable in the driver root.
-func (r DriverRoot) getNvidiaSMIPath() (string, error) {
+func (r RootPath) getNvidiaSMIPath() (string, error) {
 	binarySearchPaths := []string{
 		"/usr/bin",
 		"/usr/sbin",
@@ -63,7 +63,7 @@ func (r DriverRoot) getNvidiaSMIPath() (string, error) {
 
 // isDevRoot checks whether the specified root is a dev root.
 // A dev root is defined as a root containing a /dev folder.
-func (r DriverRoot) isDevRoot() bool {
+func (r RootPath) isDevRoot() bool {
 	stat, err := os.Stat(filepath.Join(string(r), "dev"))
 	if err != nil {
 		return false
@@ -73,7 +73,7 @@ func (r DriverRoot) isDevRoot() bool {
 
 // GetDevRoot returns the dev root associated with the root.
 // If the root is not a dev root, this defaults to "/".
-func (r DriverRoot) GetDevRoot() string {
+func (r RootPath) GetDevRoot() string {
 	if r.isDevRoot() {
 		return string(r)
 	}
@@ -83,7 +83,7 @@ func (r DriverRoot) GetDevRoot() string {
 // findFile searches the root for a specified file.
 // A number of folders can be specified to search in addition to the root itself.
 // If the file represents a symlink, this is resolved and the final path is returned.
-func (r DriverRoot) findFile(name string, searchIn ...string) (string, error) {
+func (r RootPath) findFile(name string, searchIn ...string) (string, error) {
 
 	for _, d := range append([]string{"/"}, searchIn...) {
 		l := filepath.Join(string(r), d, name)

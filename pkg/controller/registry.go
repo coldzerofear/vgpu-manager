@@ -15,7 +15,7 @@ type Controller interface {
 	RegistryToManager(manager ctrm.Manager) error
 }
 
-type newController func(manager ctrm.Manager, config *node.NodeConfig) (reconcile.Reconciler, error)
+type newController func(manager ctrm.Manager, config *node.NodeConfigSpec) (reconcile.Reconciler, error)
 
 var (
 	once              sync.Once
@@ -30,7 +30,7 @@ func init() {
 	controllerFuncMap[reschedule.Name] = reschedule.NewRescheduleController
 }
 
-func RegistryControllerToManager(manager ctrm.Manager, config *node.NodeConfig, controllerSwitch map[string]bool) (err error) {
+func RegistryControllerToManager(manager ctrm.Manager, config *node.NodeConfigSpec, controllerSwitch map[string]bool) (err error) {
 	once.Do(func() {
 		var c reconcile.Reconciler
 		for name, newControllerFunc := range controllerFuncMap {

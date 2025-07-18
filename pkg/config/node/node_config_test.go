@@ -5,45 +5,10 @@ import (
 	"os"
 	"testing"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/stretchr/testify/assert"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
 )
-
-func Test_ParseExcludeDevices(t *testing.T) {
-	tests := []struct {
-		name   string
-		exDevs string
-		want   sets.Int
-	}{
-		{
-			name:   "example 1",
-			exDevs: "0,0",
-			want:   sets.NewInt(0),
-		},
-		{
-			name:   "example 2",
-			exDevs: "0,1,3,3",
-			want:   sets.NewInt(0, 1, 3),
-		},
-		{
-			name:   "example 3",
-			exDevs: "0-3",
-			want:   sets.NewInt(0, 1, 2, 3),
-		},
-		{
-			name:   "example 4",
-			exDevs: "0-2,4-6",
-			want:   sets.NewInt(0, 1, 2, 4, 5, 6),
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			deviceSet := ParseExcludeDevices(test.exDevs)
-			assert.Equal(t, test.want, deviceSet)
-		})
-	}
-}
 
 func Test_MatchNodeName(t *testing.T) {
 	tests := []struct {
@@ -122,19 +87,19 @@ func Test_MatchNodeName(t *testing.T) {
 	}
 }
 
-func Test_ParseConfig(t *testing.T) {
+func Test_parseConfigTemplate(t *testing.T) {
 	tests := []struct {
 		name          string
 		configPath    string
 		configContent string
-		configs       []Config
+		configs       []ConfigSpec
 		err           error
 	}{{
 		name:       "example 1, parse yaml",
 		configPath: "/tmp/config.yaml",
 		configContent: `
 version: v1
-config:
+configs:
  - nodeName: testNode
    cgroupDriver: systemd
    deviceListStrategy: envvar
@@ -142,12 +107,17 @@ config:
    deviceMemoryScaling: 1.0
    deviceMemoryFactor: 1
    deviceCoresScaling: 1.0
-   excludeDevices: "0-2"
+   excludeDevices: "0..2"
    gdsEnabled: true
    migStrategy: none
    openKernelModules: true
+   imex:
+     channelIDs:
+      - 100
+      - 200
+     required: true
 `,
-		configs: []Config{{
+		configs: []ConfigSpec{{
 			NodeName:            "testNode",
 			CGroupDriver:        ptr.To[string]("systemd"),
 			DeviceListStrategy:  ptr.To[string]("envvar"),
@@ -155,10 +125,14 @@ config:
 			DeviceMemoryScaling: ptr.To[float64](1),
 			DeviceMemoryFactor:  ptr.To[int](1),
 			DeviceCoresScaling:  ptr.To[float64](1),
-			ExcludeDevices:      ptr.To[string]("0-2"),
+			ExcludeDevices:      ptr.To[IDStore](NewIntIDStore(0, 1, 2)),
 			GDSEnabled:          ptr.To[bool](true),
 			MigStrategy:         ptr.To[string]("none"),
 			OpenKernelModules:   ptr.To[bool](true),
+			Imex: ptr.To[imex.Imex](imex.Imex{
+				ChannelIDs: []int{100, 200},
+				Required:   true,
+			}),
 		}},
 		err: nil,
 	}, {
@@ -174,15 +148,19 @@ config:
     "deviceMemoryScaling": 1.0,
     "deviceMemoryFactor": 1,
     "deviceCoresScaling": 1.0,
-    "excludeDevices": "0-2",
+    "excludeDevices": "0..2",
     "gdsEnabled": true,
     "mofedEnabled": true,
     "migStrategy": "none",
-    "openKernelModules": true
+    "openKernelModules": true,
+    "imex": {
+      "channelIDs": [100, 200],
+      "required": true
+    }
   }
 ]
 `,
-		configs: []Config{{
+		configs: []ConfigSpec{{
 			NodeName:            "testNode",
 			CGroupDriver:        ptr.To[string]("systemd"),
 			DeviceListStrategy:  ptr.To[string]("envvar"),
@@ -190,11 +168,15 @@ config:
 			DeviceMemoryScaling: ptr.To[float64](1),
 			DeviceMemoryFactor:  ptr.To[int](1),
 			DeviceCoresScaling:  ptr.To[float64](1),
-			ExcludeDevices:      ptr.To[string]("0-2"),
+			ExcludeDevices:      ptr.To[IDStore](NewIntIDStore(0, 1, 2)),
 			GDSEnabled:          ptr.To[bool](true),
 			MOFEDEnabled:        ptr.To[bool](true),
 			MigStrategy:         ptr.To[string]("none"),
 			OpenKernelModules:   ptr.To[bool](true),
+			Imex: ptr.To[imex.Imex](imex.Imex{
+				ChannelIDs: []int{100, 200},
+				Required:   true,
+			}),
 		}},
 		err: nil,
 	}, {
@@ -205,21 +187,12 @@ config:
   {
     "nodeName": "testNode",
     "cgroupDriver": "systemd",
-    "deviceListStrategy": "envvar",
-    "deviceSplitCount": 10,
-    "deviceMemoryScaling": 1.0,
-    "deviceMemoryFactor": 1,
-    "deviceCoresScaling": 1.0,
-    "excludeDevices": "0-2",
-    "gdsEnabled": true,
-    "mofedEnabled": true,
-    "migStrategy": "none",
-    "openKernelModules": true
+    "deviceListStrategy": "envvar"
   }
 ]
 `,
 		configs: nil,
-		err:     fmt.Errorf("unsupported config file format"),
+		err:     fmt.Errorf("unsupported config file format: config.jsxx"),
 	}, {
 		name:       "example 4, config version error",
 		configPath: "/tmp/config.yaml",
@@ -234,14 +207,113 @@ config: []
 		t.Run(test.name, func(t *testing.T) {
 			err := os.WriteFile(test.configPath, []byte(test.configContent), 0755)
 			if err != nil {
-				t.Error(err)
-				return
+				t.Fatal(err)
 			}
 			defer os.RemoveAll(test.configPath)
-			config, err := parseConfig(test.configPath)
-			assert.Equal(t, test.err, err)
-			assert.Equal(t, test.configs, config)
+			config, err := parseConfigTemplate(test.configPath)
+			if err != nil {
+				assert.Equal(t, test.err, err)
+			}
+			if config != nil {
+				assert.Equal(t, test.configs, config.Configs)
+			}
 		})
 	}
 
+}
+
+func Test_NodeConfigToString(t *testing.T) {
+	config, err := NewNodeConfig(func(spec *NodeConfigSpec) {
+		spec.NodeName = "testNode"
+		spec.CGroupDriver = ptr.To[string]("systemd")
+		spec.DeviceListStrategy = ptr.To[string]("envvar")
+		spec.DeviceSplitCount = ptr.To[int](10)
+		spec.DeviceMemoryScaling = ptr.To[float64](1)
+		spec.DeviceMemoryFactor = ptr.To[int](1)
+		spec.DeviceCoresScaling = ptr.To[float64](1)
+		spec.ExcludeDevices = ptr.To[IDStore](NewIntIDStore(0, 1, 2))
+		spec.GDSEnabled = ptr.To[bool](true)
+		spec.MOFEDEnabled = ptr.To[bool](true)
+		spec.MigStrategy = ptr.To[string]("none")
+		spec.OpenKernelModules = ptr.To[bool](true)
+		spec.Imex = ptr.To[imex.Imex](imex.Imex{
+			ChannelIDs: []int{100, 200},
+			Required:   true,
+		})
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name       string
+		configFunc func() *NodeConfigSpec
+		want       string
+	}{{
+		name: "example1, json string",
+		configFunc: func() *NodeConfigSpec {
+			config.nodeConfigPath = "/config.json"
+			return config
+		},
+		want: `{
+  "nodeName": "testNode",
+  "cgroupDriver": "systemd",
+  "deviceListStrategy": "envvar",
+  "deviceSplitCount": 10,
+  "deviceMemoryScaling": 1,
+  "deviceMemoryFactor": 1,
+  "deviceCoresScaling": 1,
+  "excludeDevices": [
+    "0",
+    "1",
+    "2"
+  ],
+  "gdsEnabled": true,
+  "mofedEnabled": true,
+  "migStrategy": "none",
+  "openKernelModules": true,
+  "imex": {
+    "channelIDs": [
+      100,
+      200
+    ],
+    "required": true
+  },
+  "CheckFields": false
+}`,
+	}, {
+		name: "example2, yaml string",
+		configFunc: func() *NodeConfigSpec {
+			config.nodeConfigPath = "/config.yaml"
+			return config
+		},
+		want: `version: v1
+configs:
+    - nodeName: testNode
+      cgroupDriver: systemd
+      deviceListStrategy: envvar
+      deviceSplitCount: 10
+      deviceMemoryScaling: 1
+      deviceMemoryFactor: 1
+      deviceCoresScaling: 1
+      excludeDevices:
+        - "0"
+        - "1"
+        - "2"
+      gdsEnabled: true
+      mofedEnabled: true
+      migStrategy: none
+      openKernelModules: true
+      imex:
+        channelIDs:
+            - 100
+            - 200
+        required: true
+`,
+	}}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := test.configFunc().String()
+			assert.Equal(t, test.want, result)
+		})
+	}
 }

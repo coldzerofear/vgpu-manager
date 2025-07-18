@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
@@ -35,6 +37,8 @@ type Options struct {
 	MOFEDEnabled        bool
 	OpenKernelModules   bool
 	MigStrategy         string
+	ImexChannelIDs      []int
+	ImexRequired        bool
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -79,6 +83,14 @@ func NewOptions() *Options {
 		Component, baseversion.DefaultBuildEffectiveVersion(), featureGate))
 	gdsEnabled := os.Getenv("NVIDIA_GDS") == "enabled" || os.Getenv("NVIDIA_GDS") == "true"
 	mofedEnabled := os.Getenv("NVIDIA_MOFED") == "enabled" || os.Getenv("NVIDIA_MOFED") == "true"
+	var imexChannelIDs []int
+	imexChannelStr := strings.TrimSpace(os.Getenv("IMEX_CHANNEL_IDS"))
+	for _, split := range strings.Split(imexChannelStr, ",") {
+		if atoi, err := strconv.Atoi(strings.TrimSpace(split)); err == nil {
+			imexChannelIDs = append(imexChannelIDs, atoi)
+		}
+	}
+	imexRequired := strings.EqualFold(strings.TrimSpace(os.Getenv("IMEX_REQUIRED")), "true")
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -95,6 +107,8 @@ func NewOptions() *Options {
 		MOFEDEnabled:        mofedEnabled,
 		MigStrategy:         defaultMigStrategy,
 		FeatureGate:         featureGate,
+		ImexChannelIDs:      imexChannelIDs,
+		ImexRequired:        imexRequired,
 	}
 }
 
@@ -119,6 +133,8 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
 	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
+	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")
+	pflag.BoolVar(&o.ImexRequired, "imex-required", o.ImexRequired, "The specified IMEX channels are required.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

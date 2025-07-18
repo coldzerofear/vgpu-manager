@@ -1,0 +1,55 @@
+# Policy
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: vgpu-manager-mutating-admission-policy
+spec:
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups:   [""]
+        apiVersions: ["v1"]
+        operations:  ["CREATE"]
+        resources:   ["pods"]
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+  variables:
+    - name: resourceRequests
+      expression: "object.spec.containers.map(c, has(c.resources.requests) ? c.resources.requests : {})"
+    - name: resourceLimits
+      expression: "object.spec.containers.map(c, has(c.resources.limits) ? c.resources.limits : {})"
+  matchConditions:
+    - name: need-default-scheduler
+      expression: "!has(object.spec.schedulerName)"
+    - name: requested-vgpu-number
+      expression: >
+        variables.resourceRequests.exists(r, has(r['nvidia.com/vgpu-number']) && int(r['nvidia.com/vgpu-number']) > 0) || 
+        variables.resourceLimits.exists(l, has(l['nvidia.com/vgpu-number']) && int(l['nvidia.com/vgpu-number']) > 0)
+  failurePolicy: Ignore #Fail
+  reinvocationPolicy: Never #IfNeeded
+  mutations:
+    - patchType: "ApplyConfiguration"
+      expression: >
+        Object{
+          spec: Object.spec{
+            schedulerName: "vgpu-scheduler"
+          }
+        }
+---
+# Policy Binding
+apiVersion: admissionregistration.k8s.io/v1alpha1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: vgpu-manager-mutating-admission-policy-binding
+spec:
+  policyName: vgpu-manager-mutating-admission-policy

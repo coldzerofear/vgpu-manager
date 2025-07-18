@@ -230,8 +230,8 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 	return allocatingPods
 }
 
-func GetNumaInformation(idx int) (int, error) {
-	cmd := exec.Command("nvidia-smi", "topo", "-m")
+func GetNumaInformation(nvidiaSMIPath string, idx int) (int, error) {
+	cmd := exec.Command(nvidiaSMIPath, "topo", "-m")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, err
@@ -289,4 +289,13 @@ func parseNvidiaNumaInfo(idx int, nvidiaTopoStr string) (int, error) {
 		}
 	}
 	return result, nil
+}
+
+func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
+	for _, container := range pod.Spec.Containers {
+		if GetResourceOfContainer(&container, VGPUNumberResourceName) > 1 {
+			return true
+		}
+	}
+	return false
 }

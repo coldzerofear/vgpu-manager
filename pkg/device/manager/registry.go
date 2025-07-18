@@ -17,7 +17,7 @@ import (
 func (m *DeviceManager) GetNodeTopologyInfo() device.NodeTopologyInfo {
 	nodeTopo := device.NodeTopologyInfo{}
 	for _, dev := range m.devices {
-		if dev.MIG != nil {
+		if dev.GPU == nil {
 			continue
 		}
 		nodeTopo = append(nodeTopo, device.TopologyInfo{
@@ -50,7 +50,9 @@ func (m *DeviceManager) registryDevices() {
 		Labels:      map[string]string{},
 	}
 	featureGate := featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-
+	if featureGate == nil {
+		featureGate = featuregate.NewFeatureGate()
+	}
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	stopCh := m.stop
@@ -76,7 +78,7 @@ func (m *DeviceManager) registryDevices() {
 					maps.Copy(patchMetadata.Annotations, metadata.Annotations)
 				}
 			}
-			if err := patchNodeMetadata(m.client, m.config.NodeName(), patchMetadata); err != nil {
+			if err := patchNodeMetadata(m.client, m.config.GetNodeName(), patchMetadata); err != nil {
 				klog.ErrorS(err, "Cleanup node device registry infos failed")
 			}
 			close(cleanCh)
@@ -104,7 +106,7 @@ func (m *DeviceManager) registryDevices() {
 					maps.Copy(patchMetadata.Annotations, metadata.Annotations)
 				}
 			}
-			if err := patchNodeMetadata(m.client, m.config.NodeName(), patchMetadata); err != nil {
+			if err := patchNodeMetadata(m.client, m.config.GetNodeName(), patchMetadata); err != nil {
 				klog.ErrorS(err, "Registry node devices metadata failed")
 				ticker.Reset(10 * time.Second)
 			} else {

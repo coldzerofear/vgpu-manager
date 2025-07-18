@@ -13,9 +13,9 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
-	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
@@ -97,10 +97,10 @@ func (m *vnumberDevicePlugin) getEncodeNodeTopologyInfo() (string, error) {
 func (m *vnumberDevicePlugin) getDecodeNodeConfigInfo() (string, error) {
 	if encodeNodeConfigInfo == "" {
 		nodeConfigInfo := device.NodeConfigInfo{
-			DeviceSplit:   m.base.manager.GetNodeConfig().DeviceSplitCount(),
-			CoresScaling:  m.base.manager.GetNodeConfig().DeviceCoresScaling(),
-			MemoryFactor:  m.base.manager.GetNodeConfig().DeviceMemoryFactor(),
-			MemoryScaling: m.base.manager.GetNodeConfig().DeviceMemoryScaling(),
+			DeviceSplit:   m.base.manager.GetNodeConfig().GetDeviceSplitCount(),
+			CoresScaling:  m.base.manager.GetNodeConfig().GetDeviceCoresScaling(),
+			MemoryFactor:  m.base.manager.GetNodeConfig().GetDeviceMemoryFactor(),
+			MemoryScaling: m.base.manager.GetNodeConfig().GetDeviceMemoryScaling(),
 		}
 		info, err := nodeConfigInfo.Encode()
 		if err != nil {
@@ -113,7 +113,6 @@ func (m *vnumberDevicePlugin) getDecodeNodeConfigInfo() (string, error) {
 }
 
 func (m *vnumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGate) (*client.PatchMetadata, error) {
-	gpuTopologyEnabled := featureGate != nil && featureGate.Enabled(options.GPUTopology)
 	nodeDeviceInfos := m.base.manager.GetNodeDeviceInfo()
 	registryGPUs, err := nodeDeviceInfos.Encode()
 	if err != nil {
@@ -124,7 +123,7 @@ func (m *vnumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGat
 		return nil, fmt.Errorf("failed to generate node heartbeat timestamp: %v", err)
 	}
 	var registryGPUTopology string
-	if gpuTopologyEnabled {
+	if featureGate.Enabled(options.GPUTopology) {
 		registryGPUTopology, err = m.getEncodeNodeTopologyInfo()
 		if err != nil {
 			return nil, err
@@ -240,7 +239,7 @@ func GetContManagerDirectoryPath(podUID types.UID, containerName string) string 
 	return fmt.Sprintf("%s/%s_%s", ContManagerDirectoryPath, string(podUID), containerName)
 }
 
-func passDeviceSpecs(devices []manager.Device) []*pluginapi.DeviceSpec {
+func passDeviceSpecs(devices []manager.Device, imexChannels imex.Channels) []*pluginapi.DeviceSpec {
 	deviceMountOptional := map[string]bool{
 		NvidiaCTLFilePath:      true,
 		NvidiaUVMFilePath:      true,
@@ -274,31 +273,57 @@ func passDeviceSpecs(devices []manager.Device) []*pluginapi.DeviceSpec {
 			Permissions:   "rw",
 		})
 	}
+	for _, channel := range imexChannels {
+		spec := &pluginapi.DeviceSpec{
+			ContainerPath: channel.Path,
+			// TODO: The HostPath property for a channel is not the correct value to use here.
+			// The `devRoot` there represents the devRoot in the current container when discovering devices
+			// and is set to "{{ .*config.Flags.Plugin.ContainerDriverRoot }}/dev".
+			// The devRoot in this context is the {{ .config.Flags.NvidiaDevRoot }} and defines the
+			// root for device nodes on the host. This is usually / or /run/nvidia/driver when the
+			// driver container is used.
+			HostPath:    channel.HostPath,
+			Permissions: "rw",
+		}
+		specs = append(specs, spec)
+	}
 	return specs
 }
 
-func updateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, config node.NodeConfig, deviceIDs ...string) error {
-	switch config.DeviceListStrategy() {
+func updateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, devManager *manager.DeviceManager, deviceIDs ...string) {
+	switch devManager.GetNodeConfig().GetDeviceListStrategy() {
 	case util.DeviceListStrategyEnvvar:
 		response.Envs[deviceListEnvVar] = strings.Join(deviceIDs, ",")
+		var channelIDs []string
+		for _, channel := range devManager.GetImexChannels() {
+			channelIDs = append(channelIDs, channel.ID)
+		}
+		if len(channelIDs) > 0 {
+			response.Envs[imex.ImexChannelEnvVar] = strings.Join(channelIDs, ",")
+		}
 	case util.DeviceListStrategyVolumeMounts:
 		response.Envs[deviceListEnvVar] = deviceListAsVolumeMountsContainerPathRoot
 		for _, id := range deviceIDs {
-			response.Mounts = append(response.Mounts, &pluginapi.Mount{
+			mount := &pluginapi.Mount{
 				HostPath:      deviceListAsVolumeMountsHostPath,
 				ContainerPath: filepath.Join(deviceListAsVolumeMountsContainerPathRoot, id),
-			})
+			}
+			response.Mounts = append(response.Mounts, mount)
 		}
-	default:
-		return fmt.Errorf("unsupported device list strategy: %s", config.DeviceListStrategy())
+		for _, channel := range devManager.GetImexChannels() {
+			mount := &pluginapi.Mount{
+				HostPath:      deviceListAsVolumeMountsHostPath,
+				ContainerPath: filepath.Join(deviceListAsVolumeMountsContainerPathRoot, "imex", channel.ID),
+			}
+			response.Mounts = append(response.Mounts, mount)
+		}
 	}
-	if config.GDSEnabled() {
+	if devManager.GetNodeConfig().GetGDSEnabled() {
 		response.Envs["NVIDIA_GDS"] = "enabled"
 	}
-	if config.MOFEDEnabled() {
+	if devManager.GetNodeConfig().GetMOFEDEnabled() {
 		response.Envs["NVIDIA_MOFED"] = "enabled"
 	}
-	return nil
 }
 
 // Allocate is called during container creation so that the Device
@@ -331,7 +356,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	}()
 
 	nodeConfig := m.base.manager.GetNodeConfig()
-	activePods, err = client.GetActivePodsOnNode(ctx, m.kubeClient, nodeConfig.NodeName())
+	activePods, err = client.GetActivePodsOnNode(ctx, m.kubeClient, nodeConfig.GetNodeName())
 	if err != nil {
 		klog.Errorf("failed to retrieve the active pods of the current node: %v", err)
 		return resp, err
@@ -346,7 +371,8 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	deviceMap := m.base.manager.GetGPUDeviceMap()
-	memoryRatio := nodeConfig.DeviceMemoryScaling()
+	memoryRatio := nodeConfig.GetDeviceMemoryScaling()
+	imexChannels := m.base.manager.GetImexChannels()
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIDs())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -392,12 +418,8 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			}
 		}
 		response.Envs[util.GPUDevicesUuidEnv] = strings.Join(deviceIds, ",")
-		err = updateResponseForNodeConfig(response, nodeConfig, deviceIds...)
-		if err != nil {
-			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
-			return resp, err
-		}
-		response.Devices = append(response.Devices, passDeviceSpecs(gpuDevices)...)
+		updateResponseForNodeConfig(response, m.base.manager, deviceIds...)
+		response.Devices = append(response.Devices, passDeviceSpecs(gpuDevices, imexChannels)...)
 		response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount /proc dir
 			ContainerPath: ContProcDirectoryPath,
 			HostPath:      HostProcDirectoryPath,
@@ -505,7 +527,7 @@ func (m *vnumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
 		klog.ErrorS(err, "Failed to query the pod list in the cache")
 	}
 	activePods := make(map[string]*corev1.Pod)
-	nodeName := m.base.manager.GetNodeConfig().NodeName()
+	nodeName := m.base.manager.GetNodeConfig().GetNodeName()
 	for i, pod := range podList.Items {
 		if pod.Spec.NodeName != nodeName ||
 			util.PodIsTerminated(&pod) ||
@@ -520,8 +542,8 @@ func (m *vnumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
 // getCurrentPodInfoByCheckpoint find relevant pod information for devicesIDs in kubelet checkpoint
 func (m *vnumberDevicePlugin) getCurrentPodInfoByCheckpoint(devicesIDs []string) (*client.PodInfo, error) {
 	klog.V(3).Infoln("Try get DevicePlugin checkpoint data")
-	pluginPath := m.base.manager.GetNodeConfig().DevicePluginPath()
-	cp, err := GetCheckpointData(pluginPath)
+	devicePluginPath := m.base.manager.GetNodeConfig().GetDevicePluginPath()
+	cp, err := GetCheckpointData(devicePluginPath)
 	if err != nil {
 		return nil, err
 	}
@@ -579,7 +601,7 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		pod       *corev1.Pod
 		deviBytes []byte
 		deviceIDs []string
-		nodeName  = m.base.manager.GetNodeConfig().NodeName()
+		nodeName  = m.base.manager.GetNodeConfig().GetNodeName()
 	)
 	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		// Node does not require timeliness, search from API server cache.

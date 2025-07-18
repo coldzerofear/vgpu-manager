@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
-	dpoptions "github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
@@ -16,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/utils/ptr"
 )
 
 func Test_WriDriverConfigFile(t *testing.T) {
@@ -23,13 +23,14 @@ func Test_WriDriverConfigFile(t *testing.T) {
 		DriverVersion:     "",
 		CudaDriverVersion: nvidia.CudaDriverVersion(12020),
 	}
-	option := node.WithDevicePluginOptions(dpoptions.Options{
-		NodeName:            "testNode",
-		NodeConfigPath:      "",
-		DeviceCoresScaling:  float64(1),
-		DeviceMemoryScaling: float64(1),
-	})
-	config, _ := node.NewNodeConfig(option)
+	config, err := node.NewNodeConfig(func(spec *node.NodeConfigSpec) {
+		spec.NodeName = "testNode"
+		spec.DeviceCoresScaling = ptr.To(float64(1))
+		spec.DeviceMemoryScaling = ptr.To(float64(1))
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gpuUUID0 := "GPU-" + string(uuid.NewUUID())
 	gpuUUID1 := "GPU-" + string(uuid.NewUUID())
 	devices := []*manager.Device{

@@ -6,46 +6,21 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 )
 
 type allocator struct {
-	nodeInfo   *device.NodeInfo
-	deviceList gpuallocator.DeviceList
+	nodeInfo *device.NodeInfo
 }
 
 func NewAllocator(nodeInfo *device.NodeInfo) *allocator {
-	deviceList := make(gpuallocator.DeviceList, nodeInfo.GetDeviceCount())
-	for id, dev := range nodeInfo.GetDeviceMap() {
-		deviceList[id] = gpuallocator.NewDevice(dev.GetID(), dev.GetUUID(), dev.GetBusID())
+	return &allocator{
+		nodeInfo: nodeInfo,
 	}
-	alloc := &allocator{nodeInfo: nodeInfo, deviceList: deviceList}
-	featureGate := featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-	if featureGate != nil && featureGate.Enabled(options.GPUTopology) {
-		val, ok := util.HasAnnotation(nodeInfo.GetNode(), util.NodeDeviceTopologyAnnotation)
-		if !ok || len(val) == 0 {
-			klog.V(3).Infof("There is no device topology information on the node <%s>", nodeInfo.GetName())
-			return alloc
-		}
-		nodeTopology, err := device.ParseNodeTopology(val)
-		if err != nil {
-			klog.V(3).ErrorS(err, "parse node device topology failed", "node", nodeInfo.GetName())
-		}
-		for _, devTopoInfo := range nodeTopology {
-			for toIdx, links := range devTopoInfo.Links {
-				for _, linkType := range links {
-					deviceList.AddLink(devTopoInfo.Index, toIdx, linkType)
-				}
-			}
-		}
-	}
-	return alloc
 }
 
 func (alloc *allocator) addAllocateOne(contDevices *device.ContainerDevices) error {
@@ -164,7 +139,7 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 		switch strings.ToLower(topologyMode) {
 		case string(util.LinkTopology):
 			klog.V(4).Infof("Pod <%s/%s> use Links topology mode", pod.Namespace, pod.Name)
-			devices, _ := alloc.deviceList.Filter(getDeviceUUIDs(deviceStore))
+			devices, _ := alloc.nodeInfo.GetDeviceList().Filter(getDeviceUUIDs(deviceStore))
 			devices = gpuallocator.NewBestEffortPolicy().Allocate(devices, nil, needNumber)
 			if len(devices) == needNumber {
 				return allocateByDevices(deviceStore, devices, needCores, needMemory)
