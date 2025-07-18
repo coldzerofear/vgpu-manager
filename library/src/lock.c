@@ -3,7 +3,7 @@
 #include <sys/file.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <time.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 #include <stdio.h>
 #include <errno.h>
@@ -61,8 +61,8 @@ int lock_gpu_device(int ordinal) {
   char lock_path[LOCK_PATH_SIZE];
   get_lock_path(ordinal, lock_path, LOCK_PATH_SIZE);
 
-  struct timespec start, now;
-  clock_gettime(CLOCK_MONOTONIC, &start);
+  struct timeval start, now;
+  gettimeofday(&start, NULL);
 
   while (1) {
     int fd = try_acquire_lock(lock_path);
@@ -70,9 +70,9 @@ int lock_gpu_device(int ordinal) {
       return fd; // success
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &now);
+    gettimeofday(&now, NULL);
     long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
-                      (now.tv_nsec - start.tv_nsec) / 1000000;
+                      (now.tv_usec - start.tv_usec) / 1000;
     if (elapsed_ms >= LOCK_TIMEOUT_MS) {
       LOGGER(ERROR, "lock timeout for device %d", ordinal);
       return -1; // timeout

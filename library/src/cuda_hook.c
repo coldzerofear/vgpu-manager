@@ -440,7 +440,7 @@ static void active_utilization_notifier(int batch_code) {
   pthread_t tid;
   pthread_create(&tid, NULL, utilization_watcher, &batches[batch_code]);
   char thread_name[32] = {0};
-  sprintf(thread_name, "utilization_watcher_batch_%d", batches[batch_code].batch_code);
+  sprintf(thread_name, "watch_util_bt_%d", batches[batch_code].batch_code);
 #ifdef __APPLE__
   pthread_setname_np(thread_name);
 #else
