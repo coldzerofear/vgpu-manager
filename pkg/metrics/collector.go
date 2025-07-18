@@ -196,7 +196,7 @@ type procUtilList map[uint32]nvml.ProcessUtilizationSample
 func ContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(string) string, f func(pid int)) {
 	cgroupFullPath, err := util.GetK8sPodContainerCGroupFullPath(pod, containerName, fullPath)
 	if err != nil {
-		klog.Errorf(err.Error())
+		klog.Errorln(err)
 		return
 	}
 	klog.V(3).InfoS("Detected pod container cgroup path", "pod",

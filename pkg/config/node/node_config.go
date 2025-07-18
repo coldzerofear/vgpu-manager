@@ -375,7 +375,7 @@ func NewNodeConfig(option Option, checkFields bool) (*NodeConfigSpec, error) {
 			errMsg = append(errMsg, err.Error())
 		}
 		if len(errMsg) > 0 {
-			return nil, fmt.Errorf(strings.Join(errMsg, ", "))
+			return nil, fmt.Errorf("%s", strings.Join(errMsg, ", "))
 		}
 	}
 	return nodeConfig, nil

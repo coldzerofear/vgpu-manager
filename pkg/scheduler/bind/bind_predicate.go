@@ -99,7 +99,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	if pod.UID != args.PodUID {
 		errMessage := fmt.Sprintf("different UID from the target pod: "+
 			"current: %s, target: %s", pod.UID, args.PodUID)
-		klog.Errorf(errMessage)
+		klog.Errorln(errMessage)
 		return &extenderv1.ExtenderBindingResult{Error: errMessage}
 	}
 	nodeName, ok := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
