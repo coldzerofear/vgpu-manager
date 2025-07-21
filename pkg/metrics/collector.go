@@ -15,7 +15,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
-	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/prometheus/client_golang/prometheus"
@@ -405,7 +404,7 @@ skipNvml:
 		vGpuTotalMemMap    = make(map[string]uint64)
 		vGpuAssignedMemMap = make(map[string]uint64)
 	)
-
+	// Get current node.
 	node, err := c.nodeLister.Get(c.nodeName)
 	if err != nil {
 		klog.Errorf("node lister get node <%s> error: %v", c.nodeName, err)
@@ -432,16 +431,16 @@ skipNvml:
 		float64(nodeVGPUTotalMemBytes),
 		c.nodeName,
 	)
-	// Get current node.
+	// Get all pods.
 	pods, err := c.podLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("pod lister list error: %v", err)
 		return
 	}
-	// Filter out some useless pods.
-	pods = filter.CollectPodsOnNode(pods, node)
+
 	nodeAssignedMemBytes := uint64(0)
-	for _, pod := range pods {
+	// Filter out some useless pods.
+	util.PodsOnNode(pods, node, func(pod *corev1.Pod) {
 		// Aggregate the allocated memory size on the node.
 		podDevices := device.GetPodAssignDevices(pod)
 		FlattenDevicesFunc(podDevices, func(claimDevice device.ClaimDevice) {
@@ -536,7 +535,7 @@ skipNvml:
 					deviceUUID, containerId, containerGPUPids, c.nodeName)
 			}
 		}
-	}
+	})
 
 	ch <- prometheus.MustNewConstMetric(
 		nodeVGPUAssignedMemory,

@@ -573,21 +573,21 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 		deviceList:  deviceList,
 		gpuTopology: gpuTopology,
 	}
-	ret.addPodDeviceResources(pods)
+	ret.addPodDevResources(pods)
 	ret.initResourceStatistics()
 	return ret, nil
 }
 
-func (n *NodeInfo) addPodDeviceResources(pods []*corev1.Pod) {
-	for _, pod := range pods {
+func (n *NodeInfo) addPodDevResources(pods []*corev1.Pod) {
+	util.PodsOnNode(pods, n.node, func(pod *corev1.Pod) {
 		if !util.IsVGPUResourcePod(pod) {
-			continue
+			return
 		}
 		// According to the pods' annotations, construct the node allocation state
 		podAssignDevices := GetPodAssignDevices(pod)
 		if len(podAssignDevices) == 0 {
 			klog.Warningf("Discovered that pod <%s/%s> device annotations may be damaged", pod.Namespace, pod.Name)
-			continue
+			return
 		}
 		for _, container := range podAssignDevices {
 			for _, device := range container.Devices {
@@ -596,7 +596,7 @@ func (n *NodeInfo) addPodDeviceResources(pods []*corev1.Pod) {
 				}
 			}
 		}
-	}
+	})
 }
 
 func (n *NodeInfo) initResourceStatistics() {

@@ -299,3 +299,21 @@ func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
 	}
 	return false
 }
+
+func PodsOnNode(pods []*corev1.Pod, node *corev1.Node, callback func(*corev1.Pod)) {
+	if callback == nil {
+		klog.Warningln("PodsOnNode callback is empty")
+		return
+	}
+	klog.V(5).Infof("pods on node <%s>", node.Name)
+	for _, pod := range pods {
+		var predicateNode string
+		if pod.Spec.NodeName == "" {
+			predicateNode, _ = HasAnnotation(pod, PodPredicateNodeAnnotation)
+		}
+		if (pod.Spec.NodeName == node.Name || predicateNode == node.Name) &&
+			pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+			callback(pod)
+		}
+	}
+}

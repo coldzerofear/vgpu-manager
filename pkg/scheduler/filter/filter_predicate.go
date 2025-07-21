@@ -299,9 +299,8 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				mu.Unlock()
 				return
 			}
-			// Pods on aggregation nodes.
-			nodePods := CollectPodsOnNode(pods, node)
-			nodeInfo, err := device.NewNodeInfo(node, nodePods)
+			// Aggregate node resource distribution.
+			nodeInfo, err := device.NewNodeInfo(node, pods)
 			if err != nil {
 				klog.ErrorS(err, "Create node info failed, skipping node", "node", node.Name)
 				mu.Lock()
@@ -370,21 +369,4 @@ func needGPUTopology(pod *corev1.Pod) bool {
 		return strings.EqualFold(topoMode, string(util.LinkTopology)) && util.IsSingleContainerMultiGPUs(pod)
 	}
 	return false
-}
-
-func CollectPodsOnNode(pods []*corev1.Pod, node *corev1.Node) []*corev1.Pod {
-	klog.V(5).Infof("Collect pods on node <%s>", node.Name)
-	var ret []*corev1.Pod
-	for _, pod := range pods {
-		var predicateNode string
-		if pod.Spec.NodeName == "" {
-			predicateNode, _ = util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
-		}
-		if (pod.Spec.NodeName == node.Name || predicateNode == node.Name) &&
-			pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
-			ret = append(ret, pod)
-			klog.V(5).Infof("Append Pod <%s> on node <%s>", klog.KObj(pod), node.Name)
-		}
-	}
-	return ret
 }
