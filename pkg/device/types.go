@@ -363,6 +363,25 @@ func NewDevice(dev DeviceInfo) *Device {
 	}
 }
 
+func (dev *Device) DeepCopy() *Device {
+	return &Device{
+		id:          dev.id,
+		uuid:        dev.uuid,
+		deviceType:  dev.deviceType,
+		totalCores:  dev.totalCores,
+		usedCores:   dev.usedCores,
+		totalMemory: dev.totalMemory,
+		usedMemory:  dev.usedMemory,
+		mig:         dev.mig,
+		capability:  dev.capability,
+		totalNumber: dev.totalNumber,
+		usedNumber:  dev.usedNumber,
+		numa:        dev.numa,
+		healthy:     dev.healthy,
+		busId:       dev.busId,
+	}
+}
+
 var (
 	gpuTopoEnabledOnce sync.Once
 	gpuTopologyEnabled bool
@@ -595,6 +614,27 @@ func NewNodeInfoByNodeInfo(nodeInfo *framework.NodeInfo) (*NodeInfo, error) {
 	ret.addDeviceResourcesByPodInfos(nodeInfo.Pods)
 	ret.initResourceStatistics()
 	return ret, nil
+}
+
+func (n *NodeInfo) Clone() framework.StateData {
+	deviceMap := make(map[int]*Device, len(n.deviceMap))
+	for index, device := range n.deviceMap {
+		deviceMap[index] = device.DeepCopy()
+	}
+	return &NodeInfo{
+		name:          n.name,
+		node:          n.node.DeepCopy(),
+		deviceMap:     deviceMap,
+		deviceList:    n.deviceList,
+		totalNumber:   n.totalNumber,
+		usedNumber:    n.usedNumber,
+		totalMemory:   n.totalMemory,
+		usedMemory:    n.usedMemory,
+		totalCores:    n.totalCores,
+		usedCores:     n.usedCores,
+		maxCapability: n.maxCapability,
+		gpuTopology:   n.gpuTopology,
+	}
 }
 
 func (n *NodeInfo) addDeviceResourcesByPodInfos(podInfos []*framework.PodInfo) {
