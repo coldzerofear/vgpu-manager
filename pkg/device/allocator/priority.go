@@ -42,37 +42,37 @@ var (
 	ByNodeNameAsc = func(p1, p2 *device.NodeInfo) bool {
 		return p1.GetName() < p2.GetName()
 	}
-	// ByNodeScoreAsc Sort in ascending order based on node scores,
+	// BySpreadNodeScore Sort in descending order based on spread node scores,
 	// to avoid double counting scores, a score cache was used.
-	ByNodeScoreAsc = func() func(p1, p2 *device.NodeInfo) bool {
+	BySpreadNodeScore = func() func(p1, p2 *device.NodeInfo) bool {
 		nodeScoreMap := map[string]float64{}
 		return func(p1, p2 *device.NodeInfo) bool {
 			p1Score, ok := nodeScoreMap[p1.GetName()]
 			if !ok {
-				p1Score = GetNodeScore(p1, util.HundredCore)
+				p1Score = GetSpreadNodeScore(p1, util.HundredCore)
 				nodeScoreMap[p1.GetName()] = p1Score
 			}
 			p2Score, ok := nodeScoreMap[p2.GetName()]
 			if !ok {
-				p2Score = GetNodeScore(p2, util.HundredCore)
+				p2Score = GetSpreadNodeScore(p2, util.HundredCore)
 				nodeScoreMap[p2.GetName()] = p2Score
 			}
-			return p1Score < p2Score
+			return p1Score > p2Score
 		}
 	}
-	// ByNodeScoreDes Sort in descending order based on node scores,
+	// ByBinpackNodeScore Sort in descending order based on binpack node scores,
 	// to avoid double counting scores, a score cache was used.
-	ByNodeScoreDes = func() func(p1, p2 *device.NodeInfo) bool {
+	ByBinpackNodeScore = func() func(p1, p2 *device.NodeInfo) bool {
 		nodeScoreMap := map[string]float64{}
 		return func(p1, p2 *device.NodeInfo) bool {
 			p1Score, ok := nodeScoreMap[p1.GetName()]
 			if !ok {
-				p1Score = GetNodeScore(p1, util.HundredCore)
+				p1Score = GetBinpackNodeScore(p1, util.HundredCore)
 				nodeScoreMap[p1.GetName()] = p1Score
 			}
 			p2Score, ok := nodeScoreMap[p2.GetName()]
 			if !ok {
-				p2Score = GetNodeScore(p2, util.HundredCore)
+				p2Score = GetBinpackNodeScore(p2, util.HundredCore)
 				nodeScoreMap[p2.GetName()] = p2Score
 			}
 			return p1Score > p2Score
@@ -133,13 +133,23 @@ func (sp *sortPriority[T]) Less(i, j int) bool {
 	return sp.less[k](sp.data[i], sp.data[j])
 }
 
-// GetNodeScore Calculate node score: freeResource / totalResource = scorePercentage
-func GetNodeScore(info *device.NodeInfo, multiplier float64) float64 {
-	numPercentage := safeDiv(float64(info.GetAvailableNumber()), float64(info.GetTotalNumber()))
-	memPercentage := safeDiv(float64(info.GetAvailableMemory()), float64(info.GetTotalMemory()))
-	corePercentage := safeDiv(float64(info.GetAvailableCores()), float64(info.GetTotalCores()))
-	score := multiplier * (numPercentage + memPercentage + corePercentage)
-	klog.V(5).Infof("Current Node <%s> resource score is <%.2f>", info.GetName(), score)
+// GetSpreadNodeScore Calculate node score: freeResource / totalResource = scorePercentage
+func GetSpreadNodeScore(info *device.NodeInfo, multiplier float64) float64 {
+	numFreePercentage := safeDiv(float64(info.GetAvailableNumber()), float64(info.GetTotalNumber()))
+	memFreePercentage := safeDiv(float64(info.GetAvailableMemory()), float64(info.GetTotalMemory()))
+	coreFreePercentage := safeDiv(float64(info.GetAvailableCores()), float64(info.GetTotalCores()))
+	score := multiplier * (numFreePercentage + memFreePercentage + coreFreePercentage) / 3.0
+	klog.V(5).Infof("Spread Node <%s> resource score is <%.2f>", info.GetName(), score)
+	return score
+}
+
+// GetBinpackNodeScore Calculate node score: usedResource / totalResource = scorePercentage
+func GetBinpackNodeScore(info *device.NodeInfo, multiplier float64) float64 {
+	numUsedPercentage := 1 - safeDiv(float64(info.GetAvailableNumber()), float64(info.GetTotalNumber()))
+	memUsedPercentage := 1 - safeDiv(float64(info.GetAvailableMemory()), float64(info.GetTotalMemory()))
+	coreUsedPercentage := 1 - safeDiv(float64(info.GetAvailableCores()), float64(info.GetTotalCores()))
+	score := multiplier * (numUsedPercentage + memUsedPercentage + coreUsedPercentage) / 3.0
+	klog.V(5).Infof("Binpack Node <%s> resource score is <%.2f>", info.GetName(), score)
 	return score
 }
 
@@ -152,7 +162,7 @@ func safeDiv(a, b float64) float64 {
 
 func NewNodeBinpackPriority(needGPUTopo bool) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
-		ByNodeScoreAsc(),
+		ByBinpackNodeScore(),
 		ByNodeNameAsc,
 	}
 	if needGPUTopo {
@@ -166,7 +176,7 @@ func NewNodeBinpackPriority(needGPUTopo bool) *sortPriority[*device.NodeInfo] {
 
 func NewNodeSpreadPriority(needGPUTopo bool) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
-		ByNodeScoreDes(),
+		BySpreadNodeScore(),
 		ByNodeNameAsc,
 	}
 	if needGPUTopo {
