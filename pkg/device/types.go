@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 type NodeConfigInfo struct {
@@ -560,9 +561,9 @@ type NodeInfo struct {
 	gpuTopology   bool
 }
 
-func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
+func NewNodeInfoByNodePods(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	klog.V(4).Infof("create nodeInfo for %s", node.Name)
-	deviceMap, deviceList, gpuTopology, err := NewDeviceMapAndDeviceList(node)
+	deviceMap, deviceList, hasTopology, err := NewDeviceMapAndDeviceList(node)
 	if err != nil {
 		return nil, err
 	}
@@ -571,32 +572,60 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 		name:        node.Name,
 		deviceMap:   deviceMap,
 		deviceList:  deviceList,
-		gpuTopology: gpuTopology,
+		gpuTopology: hasTopology,
 	}
-	ret.addPodDevResources(pods)
+	ret.addDeviceResourcesByPods(pods)
 	ret.initResourceStatistics()
 	return ret, nil
 }
 
-func (n *NodeInfo) addPodDevResources(pods []*corev1.Pod) {
+func NewNodeInfoByNodeInfo(nodeInfo *framework.NodeInfo) (*NodeInfo, error) {
+	klog.V(4).Infof("create nodeInfo for %s", nodeInfo.Node().Name)
+	deviceMap, deviceList, hasTopology, err := NewDeviceMapAndDeviceList(nodeInfo.Node())
+	if err != nil {
+		return nil, err
+	}
+	ret := &NodeInfo{
+		node:        nodeInfo.Node(),
+		name:        nodeInfo.Node().GetName(),
+		deviceMap:   deviceMap,
+		deviceList:  deviceList,
+		gpuTopology: hasTopology,
+	}
+	ret.addDeviceResourcesByPodInfos(nodeInfo.Pods)
+	ret.initResourceStatistics()
+	return ret, nil
+}
+
+func (n *NodeInfo) addDeviceResourcesByPodInfos(podInfos []*framework.PodInfo) {
+	for _, podInfo := range podInfos {
+		n.addDeviceResources(podInfo.Pod)
+	}
+}
+
+func (n *NodeInfo) addDeviceResourcesByPods(pods []*corev1.Pod) {
 	util.PodsOnNode(pods, n.node, func(pod *corev1.Pod) {
-		if !util.IsVGPUResourcePod(pod) {
-			return
-		}
-		// According to the pods' annotations, construct the node allocation state
-		podAssignDevices := GetPodAssignDevices(pod)
-		if len(podAssignDevices) == 0 {
-			klog.Warningf("Discovered that pod <%s/%s> device annotations may be damaged", pod.Namespace, pod.Name)
-			return
-		}
-		for _, container := range podAssignDevices {
-			for _, device := range container.Devices {
-				if err := n.addUsedResources(device.Id, device.Cores, device.Memory); err != nil {
-					klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, device.Id, err)
-				}
+		n.addDeviceResources(pod)
+	})
+}
+
+func (n *NodeInfo) addDeviceResources(pod *corev1.Pod) {
+	if !util.IsVGPUResourcePod(pod) {
+		return
+	}
+	// According to the pods' annotations, construct the node allocation state
+	podAssignDevices := GetPodAssignDevices(pod)
+	if len(podAssignDevices) == 0 {
+		klog.V(3).InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
+		return
+	}
+	for _, container := range podAssignDevices {
+		for _, device := range container.Devices {
+			if err := n.addUsedResources(device.Id, device.Cores, device.Memory); err != nil {
+				klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, device.Id, err)
 			}
 		}
-	})
+	}
 }
 
 func (n *NodeInfo) initResourceStatistics() {

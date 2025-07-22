@@ -145,16 +145,10 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extende
 	return filteredNodes, failedNodesMap
 }
 
-// TODO nodeFilter Filter nodes with heartbeat timeout and certain configuration errors
-func (f *gpuFilter) nodeFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
-	var (
-		filteredNodes    = make([]corev1.Node, 0, len(nodes)) // Successful nodes
-		failedNodesMap   = make(extenderv1.FailedNodesMap)    // Failed nodes
-		memoryPolicyFunc = func(info *device.NodeConfigInfo) error {
-			return nil
-		}
-	)
-
+func GetMemoryPolicyFunc(pod *corev1.Pod) func(info *device.NodeConfigInfo) error {
+	memoryPolicyFunc := func(info *device.NodeConfigInfo) error {
+		return nil
+	}
 	policy, _ := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation)
 	switch strings.ToLower(policy) {
 	case string(util.VirtualMemoryPolicy), "virt":
@@ -174,41 +168,51 @@ func (f *gpuFilter) nodeFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.N
 			return nil
 		}
 	}
+	return memoryPolicyFunc
+}
+
+func CheckNode(node *corev1.Node, checkFunc func(info *device.NodeConfigInfo) error) error {
+	heartbeat, ok := util.HasAnnotation(node, util.NodeDeviceHeartbeatAnnotation)
+	if !ok || len(heartbeat) == 0 {
+		return fmt.Errorf("node without device heartbeat")
+	}
+	heartbeatTime := metav1.MicroTime{}
+	if err := heartbeatTime.UnmarshalText([]byte(heartbeat)); err != nil {
+		return fmt.Errorf("node with incorrect heartbeat timestamp")
+	}
+	if time.Since(heartbeatTime.Local()) > 2*time.Minute {
+		return fmt.Errorf("node with heartbeat timeout")
+	}
+	configInfoStr, ok := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
+	if !ok || len(configInfoStr) == 0 {
+		return fmt.Errorf("node with empty configuration information")
+	}
+	nodeConfigInfo := device.NodeConfigInfo{}
+	if err := nodeConfigInfo.Decode(configInfoStr); err != nil {
+		klog.V(3).ErrorS(err, "decoding node configuration information failed", "node", node.Name)
+		return fmt.Errorf("node with incorrect configuration information")
+	}
+	if nodeConfigInfo.DeviceSplit <= 0 {
+		return fmt.Errorf("node without GPU device")
+	}
+	if nodeConfigInfo.MemoryFactor <= 0 {
+		return fmt.Errorf("node with incorrect GPU memory factor")
+	}
+	if err := checkFunc(&nodeConfigInfo); err != nil {
+		return err
+	}
+	return nil
+}
+
+// TODO nodeFilter Filter nodes with heartbeat timeout and certain configuration errors
+func (f *gpuFilter) nodeFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
+	var (
+		filteredNodes  = make([]corev1.Node, 0, len(nodes)) // Successful nodes
+		failedNodesMap = make(extenderv1.FailedNodesMap)    // Failed nodes
+	)
+	memoryPolicyFunc := GetMemoryPolicyFunc(pod)
 	for i, node := range nodes {
-		heartbeat, ok := util.HasAnnotation(&node, util.NodeDeviceHeartbeatAnnotation)
-		if !ok || len(heartbeat) == 0 {
-			failedNodesMap[node.Name] = "node without device heartbeat"
-			continue
-		}
-		heartbeatTime := metav1.MicroTime{}
-		if err := heartbeatTime.UnmarshalText([]byte(heartbeat)); err != nil {
-			failedNodesMap[node.Name] = "node with incorrect heartbeat timestamp"
-			continue
-		}
-		if time.Since(heartbeatTime.Local()) > 2*time.Minute {
-			failedNodesMap[node.Name] = "node with heartbeat timeout"
-			continue
-		}
-		configInfoStr, ok := util.HasAnnotation(&node, util.NodeConfigInfoAnnotation)
-		if !ok || len(configInfoStr) == 0 {
-			failedNodesMap[node.Name] = "node with empty configuration information"
-			continue
-		}
-		nodeConfigInfo := device.NodeConfigInfo{}
-		if err := nodeConfigInfo.Decode(configInfoStr); err != nil {
-			klog.V(3).ErrorS(err, "decoding node configuration information failed", "node", node.Name)
-			failedNodesMap[node.Name] = "node with incorrect configuration information"
-			continue
-		}
-		if nodeConfigInfo.DeviceSplit <= 0 {
-			failedNodesMap[node.Name] = "node without GPU device"
-			continue
-		}
-		if nodeConfigInfo.MemoryFactor <= 0 {
-			failedNodesMap[node.Name] = "node with incorrect GPU memory factor"
-			continue
-		}
-		if err := memoryPolicyFunc(&nodeConfigInfo); err != nil {
+		if err := CheckNode(&node, memoryPolicyFunc); err != nil {
 			failedNodesMap[node.Name] = err.Error()
 			continue
 		}
@@ -300,7 +304,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				return
 			}
 			// Aggregate node resource distribution.
-			nodeInfo, err := device.NewNodeInfo(node, pods)
+			nodeInfo, err := device.NewNodeInfoByNodePods(node, pods)
 			if err != nil {
 				klog.ErrorS(err, "Create node info failed, skipping node", "node", node.Name)
 				mu.Lock()

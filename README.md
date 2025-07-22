@@ -1,50 +1,54 @@
 # VGPU-Manager
 
-A k8s device plugin for managing and allocating vGPU devices, 
-support multi container and multi GPU virtualization and rich scheduling strategies.
+A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) devices. Supports multi-container and multi-GPU virtualization with advanced scheduling strategies.
 
-## Project objectives:
+## Project objectives
 
-- [x] Ensure scheduling performance and maintain correct allocation
+- [x] Ensure the correctness of scheduling performance and device allocation
 - [x] Ensure the security of container resource isolation
 - [x] Do not obtain host PID through gRPC to device plugin
 - [x] Support the latest CUDA 12.x driver version
-- [x] Support cgroupv1 and cgroupv2 container environments
-- [x] Support dual scheduling policy for nodes and devices
+- [x] Compatible with both cgroupv1 and cgroupv2 container environments
+- [x] Dual-layer scheduling policies (node-level and device-level)
 - [x] Provide multi-dimensional vGPU monitoring metrics
 - [x] Idle computing power of dynamic balancing equipment
 - [x] GPU device uses virtual memory after exceeding memory limit
-- [x] Rescheduling device allocation failed pod
+- [x] Automatic rescheduling of pods with failed device allocations
 - [x] Webhook dynamic admission, fixing some non-standard pod configurations
 - [x] Provide the optimal topology allocation for NUMA and NVLink
 - [x] Compatible with open-gpu-kernel-modules
 - [x] Support MIG strategy device allocation
-- [ ] Compatible with hot swappable devices and expansion capabilities
+- [ ] Provide a scheduler framework plugin to achieve high-performance scheduling
+- [ ] Support device hot plugging and expansion ([device-mounter](https://github.com/coldzerofear/device-mounter))
 - [ ] Compatible with Volcano Batch Scheduler
 - [ ] Support dynamic resource allocation (DRA)
 
-> Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
+> **describe**:
+> :white_check_mark: Completed feature
+> :black_square_button: Planned/In-progress feature
 
 ## Prerequisite
 
 * Kubernetes v1.17+ (Install using helm chart method)
-* docker / containerd / cri-o (other container runtime not tested)
-* Nvidia Container Toolkit (Configure nvidia container runtime)
+* Container runtime (docker / containerd / cri-o - others untested)
+* Nvidia Container Toolkit (with NVIDIA container runtime configured)
 
 ## Build
 
-* compile binary
+**Compile binaries:**
+
 ```shell
 make build
 ```
-> Note: After the program compilation is completed, three binary files will be generated in the /bin directory
+> Note: The compiled file is stored in the bin directory
 
-* build docker image and push it
+**Build and push Docker image:**
+
 ```shell
-make docker-build docker-push IMG=<tag>
+make docker-build docker-push IMG=<your-image-tag>
 ```
 
-## Deploy
+## Deployment
 
 precondition: `nvidia-container-toolkit` must be installed and correctly configure the default container runtime
 
@@ -54,18 +58,21 @@ Label the node where the device plugin will be deployed: `vgpu-manager-enable=en
 kubectl label node <nodename> vgpu-manager-enable=enable
 ```
 
-### Helm charts deployment (recommend)
+### Helm chart (Recommended)
 
-Modify the configuration in values.yaml according to the node environment and requirements.
+Modify `values.yaml` according to your environment requirements
 
 ```shell
 helm install vgpu-manager ./helm/ -n kube-system
 ```
 
-Verify the installation of `vgpu-manager-device-plugin` and `vgpu-manager-scheduler`
+Verify installation
 
 ```shell
-kubectl get pods -n kube-system
+$ kubectl get pods -n kube-system 
+vgpu-manager-device-plugin-dvlll                       2/2     Running   0          10s
+vgpu-manager-scheduler-6949f5d645-g57fj                2/2     Running   0          10s
+vgpu-manager-webhook-854c56bb97-5f4lm                  1/1     Running   0          10s
 ```
 
 ### Deploy directly using YAML files
@@ -81,7 +88,7 @@ otherwise you need to modify the scheduler configuration file.
 
 ```yaml
       containers:
-        - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
+        - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:<your-k8s-version>
           imagePullPolicy: IfNotPresent
           name: scheduler
 ```
@@ -123,7 +130,7 @@ metadata:
   name: gpu-pod
   namespace: default
 spec:    
-  schedulerName: vgpu-scheduler  # Specify scheduler (default: vgpu-manager)
+  schedulerName: vgpu-scheduler  # Specify scheduler (default: vgpu-scheduler)
   terminationGracePeriodSeconds: 0
   containers:
   - name: default
@@ -134,7 +141,7 @@ spec:
         cpu: 2
         memory: 4Gi
         nvidia.com/vgpu-number: 1     # Allocate one gpu
-        nvidia.com/vgpu-cores: 10      # Allocate 10% of computing power
+        nvidia.com/vgpu-cores: 10     # Allocate 10% of computing power
         nvidia.com/vgpu-memory: 1024  # Allocate memory (default: Mib)
 ```
 
@@ -236,7 +243,7 @@ Supported policy values:
 
 > Note: If policies are configured on both Node and Pod, the configuration on Pod takes priority; otherwise, the policy on Node is used.
 
-## Feature Gate
+## Feature Gates
 
 The device plugin of vgpu-manager has implemented some special functions that require adding the command-line parameter `--feature-gates` to enable.
 

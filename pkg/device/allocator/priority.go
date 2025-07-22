@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/slices"
 	"k8s.io/klog/v2"
 )
@@ -48,12 +49,12 @@ var (
 		return func(p1, p2 *device.NodeInfo) bool {
 			p1Score, ok := nodeScoreMap[p1.GetName()]
 			if !ok {
-				p1Score = GetNodeScore(p1)
+				p1Score = GetNodeScore(p1, util.HundredCore)
 				nodeScoreMap[p1.GetName()] = p1Score
 			}
 			p2Score, ok := nodeScoreMap[p2.GetName()]
 			if !ok {
-				p2Score = GetNodeScore(p2)
+				p2Score = GetNodeScore(p2, util.HundredCore)
 				nodeScoreMap[p2.GetName()] = p2Score
 			}
 			return p1Score < p2Score
@@ -66,12 +67,12 @@ var (
 		return func(p1, p2 *device.NodeInfo) bool {
 			p1Score, ok := nodeScoreMap[p1.GetName()]
 			if !ok {
-				p1Score = GetNodeScore(p1)
+				p1Score = GetNodeScore(p1, util.HundredCore)
 				nodeScoreMap[p1.GetName()] = p1Score
 			}
 			p2Score, ok := nodeScoreMap[p2.GetName()]
 			if !ok {
-				p2Score = GetNodeScore(p2)
+				p2Score = GetNodeScore(p2, util.HundredCore)
 				nodeScoreMap[p2.GetName()] = p2Score
 			}
 			return p1Score > p2Score
@@ -133,8 +134,7 @@ func (sp *sortPriority[T]) Less(i, j int) bool {
 }
 
 // GetNodeScore Calculate node score: freeResource / totalResource = scorePercentage
-func GetNodeScore(info *device.NodeInfo) float64 {
-	var multiplier = float64(100)
+func GetNodeScore(info *device.NodeInfo, multiplier float64) float64 {
 	numPercentage := safeDiv(float64(info.GetAvailableNumber()), float64(info.GetTotalNumber()))
 	memPercentage := safeDiv(float64(info.GetAvailableMemory()), float64(info.GetTotalMemory()))
 	corePercentage := safeDiv(float64(info.GetAvailableCores()), float64(info.GetTotalCores()))
