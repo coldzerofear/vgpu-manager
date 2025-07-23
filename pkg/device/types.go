@@ -566,7 +566,7 @@ type NodeInfo struct {
 	gpuTopology   bool
 }
 
-func NewNodeInfoByNodePods(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
+func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	klog.V(4).Infof("create nodeInfo for %s", node.Name)
 	deviceMap, deviceList, hasTopology, err := NewDeviceMapAndDeviceList(node)
 	if err != nil {
@@ -579,25 +579,7 @@ func NewNodeInfoByNodePods(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, er
 		deviceList:  deviceList,
 		gpuTopology: hasTopology,
 	}
-	ret.addDeviceResourcesByPods(pods)
-	ret.initResourceStatistics()
-	return ret, nil
-}
-
-func NewNodeInfoByNodeInfo(nodeInfo *framework.NodeInfo) (*NodeInfo, error) {
-	klog.V(4).Infof("create nodeInfo for %s", nodeInfo.Node().Name)
-	deviceMap, deviceList, hasTopology, err := NewDeviceMapAndDeviceList(nodeInfo.Node())
-	if err != nil {
-		return nil, err
-	}
-	ret := &NodeInfo{
-		node:        nodeInfo.Node(),
-		name:        nodeInfo.GetName(),
-		deviceMap:   deviceMap,
-		deviceList:  deviceList,
-		gpuTopology: hasTopology,
-	}
-	ret.addDeviceResourcesByPodInfos(nodeInfo.Pods)
+	ret.addPodsDeviceResources(pods)
 	ret.initResourceStatistics()
 	return ret, nil
 }
@@ -614,13 +596,7 @@ func (n *NodeInfo) Clone() framework.StateData {
 	return &nodeInfo
 }
 
-func (n *NodeInfo) addDeviceResourcesByPodInfos(podInfos []*framework.PodInfo) {
-	for _, podInfo := range podInfos {
-		n.addDeviceResources(podInfo.Pod)
-	}
-}
-
-func (n *NodeInfo) addDeviceResourcesByPods(pods []*corev1.Pod) {
+func (n *NodeInfo) addPodsDeviceResources(pods []*corev1.Pod) {
 	util.PodsOnNode(pods, n.node, func(pod *corev1.Pod) {
 		n.addDeviceResources(pod)
 	})

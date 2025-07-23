@@ -304,7 +304,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				return
 			}
 			// Aggregate node resource distribution.
-			nodeInfo, err := device.NewNodeInfoByNodePods(node, pods)
+			nodeInfo, err := device.NewNodeInfo(node, pods)
 			if err != nil {
 				klog.ErrorS(err, "Create node info failed, skipping node", "node", node.Name)
 				mu.Lock()
