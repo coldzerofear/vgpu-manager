@@ -20,7 +20,7 @@ func Test_NodePriority(t *testing.T) {
 				Name: fmt.Sprintf("testNode%d", i),
 			},
 		}
-		nodeInfoList[i] = device.NewFakeNodeInfo(node, false, []*device.Device{
+		nodeInfoList[i] = device.NewFakeNodeInfo(node, false,
 			device.NewFakeDevice(0, 1, 10, 80, 100, 40000, 80000, 0),
 			device.NewFakeDevice(1, 2, 10, 70, 100, 40000, 80000, 0),
 			device.NewFakeDevice(2, 3, 10, 60, 100, 40000, 80000, 0),
@@ -29,7 +29,7 @@ func Test_NodePriority(t *testing.T) {
 			device.NewFakeDevice(5, 6, 10, 30, 100, 40000, 80000, 1),
 			device.NewFakeDevice(6, 7, 10, 20, 100, 40000, 80000, 1),
 			device.NewFakeDevice(7, 8, 10, 10, 100, 40000, 80000, 1),
-		})
+		)
 	}
 	start := time.Now()
 	NewNodeBinpackPriority(false).Sort(nodeInfoList)
@@ -63,30 +63,30 @@ func Test_NodeSorting(t *testing.T) {
 		},
 	}
 	nodes := []*device.NodeInfo{
-		device.NewFakeNodeInfo(nodeA, false, []*device.Device{
+		device.NewFakeNodeInfo(nodeA, false,
 			device.NewFakeDevice(0, 1, 0, 0, 100, 0, 80000, 0),
 			device.NewFakeDevice(1, 2, 0, 0, 100, 0, 80000, 0),
 			device.NewFakeDevice(2, 3, 0, 0, 100, 0, 80000, 0),
 			device.NewFakeDevice(3, 4, 0, 0, 100, 0, 80000, 0),
-		}),
-		device.NewFakeNodeInfo(nodeB, true, []*device.Device{
+		),
+		device.NewFakeNodeInfo(nodeB, true,
 			device.NewFakeDevice(0, 1, 10, 50, 100, 40000, 80000, 0),
 			device.NewFakeDevice(1, 2, 10, 50, 100, 40000, 80000, 0),
 			device.NewFakeDevice(2, 3, 10, 50, 100, 40000, 80000, 0),
 			device.NewFakeDevice(3, 4, 10, 50, 100, 40000, 80000, 0),
-		}),
-		device.NewFakeNodeInfo(nodeC, true, []*device.Device{
+		),
+		device.NewFakeNodeInfo(nodeC, true,
 			device.NewFakeDevice(0, 1, 10, 80, 100, 50000, 80000, 0),
 			device.NewFakeDevice(1, 2, 10, 80, 100, 50000, 80000, 0),
 			device.NewFakeDevice(2, 3, 10, 80, 100, 50000, 80000, 0),
 			device.NewFakeDevice(3, 4, 10, 80, 100, 50000, 80000, 0),
-		}),
-		device.NewFakeNodeInfo(nodeD, true, []*device.Device{
+		),
+		device.NewFakeNodeInfo(nodeD, true,
 			device.NewFakeDevice(0, 1, 10, 80, 100, 50000, 80000, 0),
 			device.NewFakeDevice(1, 2, 10, 80, 100, 50000, 80000, 0),
 			device.NewFakeDevice(2, 3, 10, 80, 100, 50000, 80000, 0),
 			device.NewFakeDevice(3, 4, 10, 80, 100, 50000, 80000, 0),
-		}),
+		),
 	}
 
 	NewNodeBinpackPriority(true).Sort(nodes)

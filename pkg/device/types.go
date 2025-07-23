@@ -364,22 +364,8 @@ func NewDevice(dev DeviceInfo) *Device {
 }
 
 func (dev *Device) DeepCopy() *Device {
-	return &Device{
-		id:          dev.id,
-		uuid:        dev.uuid,
-		deviceType:  dev.deviceType,
-		totalCores:  dev.totalCores,
-		usedCores:   dev.usedCores,
-		totalMemory: dev.totalMemory,
-		usedMemory:  dev.usedMemory,
-		mig:         dev.mig,
-		capability:  dev.capability,
-		totalNumber: dev.totalNumber,
-		usedNumber:  dev.usedNumber,
-		numa:        dev.numa,
-		healthy:     dev.healthy,
-		busId:       dev.busId,
-	}
+	device := *dev
+	return &device
 }
 
 var (
@@ -529,15 +515,15 @@ func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
 	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
 	if len(realAlloc) > 0 {
 		if err := realAssignDevices.UnmarshalText(realAlloc); err != nil {
-			klog.Warningf("Pod <%s/%s> real allocation device annotation parse failed: %v",
-				pod.Namespace, pod.Name, err)
+			msg := fmt.Sprintf("pod annotation[%s] parsing failed", util.PodVGPURealAllocAnnotation)
+			klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod), "annoValue", realAlloc)
 		}
 	}
 	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
 	if len(preAlloc) > 0 {
 		if err := preAssignDevices.UnmarshalText(preAlloc); err != nil {
-			klog.Warningf("Pod <%s/%s> pre allocation device annotation parse failed: %v",
-				pod.Namespace, pod.Name, err)
+			msg := fmt.Sprintf("pod annotation[%s] parsing failed", util.PodVGPUPreAllocAnnotation)
+			klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod), "annoValue", preAlloc)
 		}
 	}
 	if len(realAssignDevices) >= len(preAssignDevices) {
@@ -548,7 +534,7 @@ func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
 	return podAssignDevices
 }
 
-func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices []*Device) *NodeInfo {
+func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *NodeInfo {
 	ret := &NodeInfo{
 		name:        node.Name,
 		node:        node,
@@ -606,7 +592,7 @@ func NewNodeInfoByNodeInfo(nodeInfo *framework.NodeInfo) (*NodeInfo, error) {
 	}
 	ret := &NodeInfo{
 		node:        nodeInfo.Node(),
-		name:        nodeInfo.Node().GetName(),
+		name:        nodeInfo.GetName(),
 		deviceMap:   deviceMap,
 		deviceList:  deviceList,
 		gpuTopology: hasTopology,
@@ -617,24 +603,15 @@ func NewNodeInfoByNodeInfo(nodeInfo *framework.NodeInfo) (*NodeInfo, error) {
 }
 
 func (n *NodeInfo) Clone() framework.StateData {
+	nodeInfo := *n
+	nodeInfo.node = n.node.DeepCopy()
 	deviceMap := make(map[int]*Device, len(n.deviceMap))
 	for index, device := range n.deviceMap {
 		deviceMap[index] = device.DeepCopy()
 	}
-	return &NodeInfo{
-		name:          n.name,
-		node:          n.node.DeepCopy(),
-		deviceMap:     deviceMap,
-		deviceList:    n.deviceList,
-		totalNumber:   n.totalNumber,
-		usedNumber:    n.usedNumber,
-		totalMemory:   n.totalMemory,
-		usedMemory:    n.usedMemory,
-		totalCores:    n.totalCores,
-		usedCores:     n.usedCores,
-		maxCapability: n.maxCapability,
-		gpuTopology:   n.gpuTopology,
-	}
+	nodeInfo.deviceMap = deviceMap
+	nodeInfo.deviceList = slices.Clone(n.deviceList)
+	return &nodeInfo
 }
 
 func (n *NodeInfo) addDeviceResourcesByPodInfos(podInfos []*framework.PodInfo) {

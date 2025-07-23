@@ -127,6 +127,7 @@ func PatchPodVGPUAnnotation(kubeClient kubernetes.Interface, pod *corev1.Pod) er
 	patchData.Annotations[util.PodPredicateNodeAnnotation] = nodeName
 	preAlloc := pod.Annotations[util.PodVGPUPreAllocAnnotation]
 	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = preAlloc
+	patchData.Annotations[util.PodVGPURealAllocAnnotation] = ""
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		return PatchPodMetadata(kubeClient, pod, patchData)
 	})
