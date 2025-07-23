@@ -290,8 +290,8 @@ func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDevices, e
 		}
 		return nil
 	}
-	realAlloc, ok := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
-	if !ok {
+	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
+	if len(realAlloc) == 0 {
 		if err := checkExistCont(preAllocPodDevices[0].Name); err != nil {
 			return nil, err
 		}
