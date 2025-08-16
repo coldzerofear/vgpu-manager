@@ -240,8 +240,7 @@ func GetNumaInformation(nvidiaSMIPath string, idx int) (int, error) {
 	return parseNvidiaNumaInfo(idx, string(out))
 }
 
-func parseNvidiaNumaInfo(idx int, nvidiaTopoStr string) (int, error) {
-	result := 0
+func parseNvidiaNumaInfo(idx int, nvidiaTopoStr string) (result int, err error) {
 	numaAffinityColumnIndex := 0
 	for index, val := range strings.Split(nvidiaTopoStr, "\n") {
 		if !strings.Contains(val, "GPU") {
@@ -282,7 +281,7 @@ func parseNvidiaNumaInfo(idx int, nvidiaTopoStr string) (int, error) {
 				klog.InfoS("current card has not established numa topology", "gpu row info", words, "index", idx)
 				return 0, nil
 			}
-			result, err := strconv.Atoi(words[numaAffinityColumnIndex])
+			result, err = strconv.Atoi(words[numaAffinityColumnIndex])
 			if err != nil {
 				return result, err
 			}
