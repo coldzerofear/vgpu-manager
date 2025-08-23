@@ -35,7 +35,9 @@
 #define MIN_INCREMENT            5
 #define DEVICE_BATCH_SIZE        4
 
-extern resource_data_t g_vgpu_config;
+extern resource_data_t* g_vgpu_config;
+extern device_util_t* g_device_util;
+
 extern char container_id[FILENAME_MAX];
 extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
@@ -43,10 +45,13 @@ extern entry_t nvml_library_entry[];
 extern int lock_gpu_device(int device);
 extern void unlock_gpu_device(int fd);
 
+extern int device_util_read_lock(int ordinal);
+extern void device_util_unlock(int fd, int ordinal);
+
 extern fp_dlsym real_dlsym;
 extern void *lib_control;
 
-extern int extract_container_pids(char *base_path, int **pids, int *pids_size);
+extern int extract_container_pids(char *base_path, int *pids, int *pids_size);
 
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 static pthread_once_t g_nvml_init = PTHREAD_ONCE_INIT;
@@ -72,6 +77,10 @@ static const struct timespec g_cycle = {
 static void active_utilization_notifier(int);
 
 static void *utilization_watcher(void *);
+
+static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *, nvmlProcessUtilizationSample_t *, unsigned int *, int, nvmlDevice_t);
+
+static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *, nvmlProcessUtilizationSample_t *, unsigned int *, int, nvmlDevice_t);
 
 static void get_used_gpu_utilization(void *, int, nvmlDevice_t);
 
@@ -197,15 +206,6 @@ entry_t cuda_hooks_entry[] = {
 const int cuda_hook_nums =
     sizeof(cuda_hooks_entry) / sizeof(cuda_hooks_entry[0]);
 
-/** dynamic rate control */
-typedef struct {
-  int user_current;
-  int sys_current;
-  uint64_t checktime;
-  int valid;
-  int sys_process_num;
-} utilization_t;
-
 dynamic_config_t g_dynamic_config = {
   .change_limit_interval = 30,
   .usage_threshold = 5,
@@ -270,7 +270,7 @@ static void change_token(int64_t delta, int device_id) {
 }
 
 static void rate_limiter(int grids, int blocks, int device_id) {
-  if (g_vgpu_config.devices[device_id].core_limit) {
+  if (g_vgpu_config->devices[device_id].core_limit) {
     int64_t before_cuda_cores = 0;
     int64_t after_cuda_cores = 0;
     int64_t kernel_size = (int64_t) grids;
@@ -342,7 +342,7 @@ static void *utilization_watcher(void *arg) {
   nvmlDevice_t devices[MAX_DEVICE_COUNT] = {};
 
   int device_id;
-  int need_limit = 0;
+//  int need_limit = 0;
   for (device_id = batch->start_index; device_id < batch->end_index; device_id++) {
     if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
       NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_id, &devices[device_id]);
@@ -351,19 +351,19 @@ static void *utilization_watcher(void *arg) {
     } else {
       LOGGER(WARNING, "nvmlDeviceGetHandleByIndex function not found");
     }
-    up_limits[device_id] = g_vgpu_config.devices[device_id].hard_core;
+    up_limits[device_id] = g_vgpu_config->devices[device_id].hard_core;
     top_results[device_id].user_current = 0;
     top_results[device_id].sys_current = 0;
     top_results[device_id].valid = 0;
     top_results[device_id].sys_process_num = 0;
-    if (g_vgpu_config.devices[device_id].core_limit) {
-      need_limit = 1;
-    }
+//    if (g_vgpu_config->devices[device_id].core_limit) {
+//      need_limit = 1;
+//    }
   }
-  if (likely(!need_limit)) {
-    LOGGER(VERBOSE, "no need cuda core limit for batch %d", batch->batch_code);
-    return NULL;
-  }
+//  if (likely(!need_limit)) {
+//    LOGGER(VERBOSE, "no need cuda core limit for batch %d", batch->batch_code);
+//    return NULL;
+//  }
   int dev_count = batch->end_index - batch->start_index;
   struct timespec wait = {
       .tv_sec = 0,
@@ -372,7 +372,7 @@ static void *utilization_watcher(void *arg) {
   while (1) {
     for (device_id = batch->start_index; device_id < batch->end_index; device_id++) {
       nanosleep(&wait, NULL);
-      if (!g_vgpu_config.devices[device_id].core_limit) {
+      if (!g_vgpu_config->devices[device_id].core_limit) {
         continue; // Skip GPU without core limit enabled
       }
 
@@ -383,20 +383,20 @@ static void *utilization_watcher(void *arg) {
 
       sys_frees[device_id] = MAX_UTILIZATION - top_results[device_id].sys_current;
 
-      if (g_vgpu_config.devices[device_id].hard_limit) {
+      if (g_vgpu_config->devices[device_id].hard_limit) {
         /* Avoid usage jitter when application is initialized*/
         if (top_results[device_id].sys_process_num == 1 && top_results[device_id].user_current < up_limits[device_id] / 10) {
           g_cur_cuda_cores[device_id] =
-              delta(g_vgpu_config.devices[device_id].hard_core, top_results[device_id].user_current, shares[device_id], device_id);
+              delta(g_vgpu_config->devices[device_id].hard_core, top_results[device_id].user_current, shares[device_id], device_id);
           continue;
         }
-        shares[device_id] = delta(g_vgpu_config.devices[device_id].hard_core, top_results[device_id].user_current, shares[device_id], device_id);
+        shares[device_id] = delta(g_vgpu_config->devices[device_id].hard_core, top_results[device_id].user_current, shares[device_id], device_id);
       } else {
         if (pre_sys_process_nums[device_id] != top_results[device_id].sys_process_num) {
           /* When a new process comes, all processes are reset to initial value*/
           if (pre_sys_process_nums[device_id] < top_results[device_id].sys_process_num) {
             shares[device_id] = (int64_t) g_max_thread_per_sm[device_id];
-            up_limits[device_id] = g_vgpu_config.devices[device_id].hard_core;
+            up_limits[device_id] = g_vgpu_config->devices[device_id].hard_core;
             is[device_id] = 0;
             avg_sys_frees[device_id] = 0;
           }
@@ -411,15 +411,15 @@ static void *utilization_watcher(void *arg) {
          * historical resource utilization. Second, allocate the cuda
          * cores according to the changed limit value.*/
         if (top_results[device_id].sys_process_num == 1) {
-          up_limits[device_id] = g_vgpu_config.devices[device_id].soft_core;
+          up_limits[device_id] = g_vgpu_config->devices[device_id].soft_core;
           shares[device_id] = delta(up_limits[device_id], top_results[device_id].user_current, shares[device_id], device_id);
         } else {
           is[device_id]++;
           avg_sys_frees[device_id] += sys_frees[device_id];
           if (is[device_id] % g_dynamic_config.change_limit_interval == 0) {
             if (avg_sys_frees[device_id] * 2 / g_dynamic_config.change_limit_interval > g_dynamic_config.usage_threshold) {
-              up_limits[device_id] = up_limits[device_id] + g_vgpu_config.devices[device_id].hard_core / 10 > g_vgpu_config.devices[device_id].soft_core ?
-                         g_vgpu_config.devices[device_id].soft_core : up_limits[device_id] + g_vgpu_config.devices[device_id].hard_core / 10;
+              up_limits[device_id] = up_limits[device_id] + g_vgpu_config->devices[device_id].hard_core / 10 > g_vgpu_config->devices[device_id].soft_core ?
+                         g_vgpu_config->devices[device_id].soft_core : up_limits[device_id] + g_vgpu_config->devices[device_id].hard_core / 10;
             }
             is[device_id] = 0;
           }
@@ -622,29 +622,29 @@ DONE:
   return 0;
 }
 
-//static int int_compare(const void *a, const void *b) {
-//  const int *pa = (const int *)a;
-//  const int *pb = (const int *)b;
-//  return (*pa > *pb) - (*pa < *pb);
-//}
+static int int_compare(const void *a, const void *b) {
+  const int *pa = (const int *)a;
+  const int *pb = (const int *)b;
+  return (*pa > *pb) - (*pa < *pb);
+}
 
 int check_container_pid_by_open_kernel(unsigned int pid, int *pids_on_container, int pids_size) {
   int ret = 0;
-  if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) != OPEN_KERNEL_COMPATIBILITY_MODE) {
+  if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) != OPEN_KERNEL_COMPATIBILITY_MODE) {
     return ret;
   }
   if (pid == 0 || !pids_on_container || pids_size <= 0) {
     goto DONE;
   }
-//  if (bsearch(&pid, pids_on_container, (size_t)pids_size, sizeof(int), int_compare)) {
-//    ret = 1;
-//  }
-  for (int i = 0; i < pids_size; i++) {
-    if (pid == pids_on_container[i]) {
-      ret = 1;
-      break;
-    }
+  if (bsearch(&pid, pids_on_container, (size_t)pids_size, sizeof(int), int_compare)) {
+    ret = 1;
   }
+//  for (int i = 0; i < pids_size; i++) {
+//    if (pid == pids_on_container[i]) {
+//      ret = 1;
+//      break;
+//    }
+//  }
 DONE:
   if (ret) {
      LOGGER(VERBOSE, "cgroup match pid=%d", pid);
@@ -679,19 +679,20 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
   }
 
   unsigned int i;
-  if ((g_vgpu_config.compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
+  if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
     LOGGER(VERBOSE, "use cgroupv2 compatibility mode");
-    int pids_size = MAX_PIDS;
-    int *pids_on_container = NULL;
+    int pids_size = 0;
+    int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
       if (check_container_pid_by_cgroupv2(pids_on_device[i].pid)) {
         LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         *used_memory += pids_on_device[i].usedGpuMemory;
-      } else if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-        if (!pids_on_container) {
+      } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+        if (unlikely(pids_size == 0)) {
           char proc_path[PATH_MAX];
+          pids_size = MAX_PIDS;
           snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-          extract_container_pids(proc_path, &pids_on_container, &pids_size);
+          extract_container_pids(proc_path, pids_on_container, &pids_size);
         }
         if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
           LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
@@ -699,23 +700,20 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
         }
       }
     }
-    if (pids_on_container) {
-      free(pids_on_container);
-      pids_on_container = NULL;
-    }
-  } else if ((g_vgpu_config.compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
+  } else if ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
     LOGGER(VERBOSE, "use cgroupv1 compatibility mode");
-    int pids_size = MAX_PIDS;
-    int *pids_on_container = NULL;
+    int pids_size = 0;
+    int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
       if (check_container_pid_by_cgroupv1(pids_on_device[i].pid)) {
         LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         *used_memory += pids_on_device[i].usedGpuMemory;
-      } else if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-        if (!pids_on_container) {
+      } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+        if (unlikely(pids_size == 0)) {
           char proc_path[PATH_MAX];
+          pids_size = MAX_PIDS;
           snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-          extract_container_pids(proc_path, &pids_on_container, &pids_size);
+          extract_container_pids(proc_path, pids_on_container, &pids_size);
         }
         if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
           LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
@@ -723,35 +721,27 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
         }
       }
     }
-    if (pids_on_container) {
-      free(pids_on_container);
-      pids_on_container = NULL;
-    }
-  } else if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+  } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
     LOGGER(VERBOSE, "use open kernel driver compatibility mode");
     int pids_size = MAX_PIDS;
-    int *pids_on_container = NULL;
+    int pids_on_container[MAX_PIDS];
     char proc_path[PATH_MAX];
     snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-    extract_container_pids(proc_path, &pids_on_container, &pids_size);
+    extract_container_pids(proc_path, pids_on_container, &pids_size);
     for (i = 0; i < size_on_device; i++) {
       if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
         LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         *used_memory += pids_on_device[i].usedGpuMemory;
       }
     }
-    if (pids_on_container) {
-      free(pids_on_container);
-      pids_on_container = NULL;
-    }
-  } else if (g_vgpu_config.compatibility_mode == HOST_COMPATIBILITY_MODE) {
+  } else if (g_vgpu_config->compatibility_mode == HOST_COMPATIBILITY_MODE) {
     LOGGER(VERBOSE, "use host compatibility mode");
     for (i = 0; i < size_on_device; i++) { // Host mode does not verify PID
       LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
       *used_memory += pids_on_device[i].usedGpuMemory;
     }
   } else {
-    LOGGER(FATAL, "unknown env compatibility mode: %d", g_vgpu_config.compatibility_mode);
+    LOGGER(FATAL, "unknown env compatibility mode: %d", g_vgpu_config->compatibility_mode);
   }
 
   // TODO　Increase the memory usage of intercepting graphic processes.
@@ -775,18 +765,19 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
     goto DONE;
   }
 
-  if ((g_vgpu_config.compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
-    int pids_size = MAX_PIDS;
-    int *pids_on_container = NULL;
+  if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
+    int pids_size = 0;
+    int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
       if (check_container_pid_by_cgroupv2(graphic_pids_on_device[i].pid)) {
         LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
         *used_memory += graphic_pids_on_device[i].usedGpuMemory;
-      } else if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-        if (!pids_on_container) {
+      } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+        if (unlikely(pids_size == 0)) {
           char proc_path[PATH_MAX];
+          pids_size = MAX_PIDS;
           snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-          extract_container_pids(proc_path, &pids_on_container, &pids_size);
+          extract_container_pids(proc_path, pids_on_container, &pids_size);
         }
         if (check_container_pid_by_open_kernel(graphic_pids_on_device[i].pid, pids_on_container, pids_size)) {
           LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
@@ -794,22 +785,19 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
         }
       }
     }
-    if (pids_on_container) {
-      free(pids_on_container);
-      pids_on_container = NULL;
-    }
-  } else if ((g_vgpu_config.compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
-    int pids_size = MAX_PIDS;
-    int *pids_on_container = NULL;
+  } else if ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
+    int pids_size = 0;
+    int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
       if (check_container_pid_by_cgroupv1(graphic_pids_on_device[i].pid)) {
         LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
         *used_memory += graphic_pids_on_device[i].usedGpuMemory;
-      } else if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-        if (!pids_on_container) {
+      } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+        if (unlikely(pids_size == 0)) {
           char proc_path[PATH_MAX];
+          pids_size = MAX_PIDS;
           snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-          extract_container_pids(proc_path, &pids_on_container, &pids_size);
+          extract_container_pids(proc_path, pids_on_container, &pids_size);
         }
         if (check_container_pid_by_open_kernel(graphic_pids_on_device[i].pid, pids_on_container, pids_size)) {
           LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
@@ -817,27 +805,19 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
         }
       }
     }
-    if (pids_on_container) {
-      free(pids_on_container);
-      pids_on_container = NULL;
-    }
-  } else if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+  } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
-    int *pids_on_container = NULL;
+    int pids_on_container[MAX_PIDS];
     char proc_path[PATH_MAX];
     snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-    extract_container_pids(proc_path, &pids_on_container, &pids_size);
+    extract_container_pids(proc_path, pids_on_container, &pids_size);
     for (i = 0; i < size_on_device; i++) {
       if (check_container_pid_by_open_kernel(graphic_pids_on_device[i].pid, pids_on_container, pids_size)) {
         LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
         *used_memory += graphic_pids_on_device[i].usedGpuMemory;
       }
     }
-    if (pids_on_container) {
-      free(pids_on_container);
-      pids_on_container = NULL;
-    }
-  } else if (g_vgpu_config.compatibility_mode == HOST_COMPATIBILITY_MODE) {
+  } else if (g_vgpu_config->compatibility_mode == HOST_COMPATIBILITY_MODE) {
     for (i = 0; i < size_on_device; i++) {
       LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
       *used_memory += graphic_pids_on_device[i].usedGpuMemory;
@@ -869,21 +849,34 @@ void get_used_gpu_memory(void *arg, CUdevice device_id) {
   get_used_gpu_memory_by_device((void *)used_memory, dev);
 }
 
-static void get_used_gpu_utilization(void *arg, int device_id, nvmlDevice_t dev) {
-  nvmlProcessUtilizationSample_t processes_sample[MAX_PIDS];
-  unsigned int processes_num = MAX_PIDS;
-  unsigned int running_processes = MAX_PIDS;
-  nvmlProcessInfo_t pids_on_device[MAX_PIDS];
-  utilization_t *top_result = (utilization_t *)arg;
+static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample, unsigned int *processes_size, int device_id, nvmlDevice_t dev) {
+  int fd = device_util_read_lock(device_id);
+  if (fd < 0) {
+    LOGGER(ERROR, "Failed to acquire read lock for device %d", device_id);
+    return NVML_ERROR_UNKNOWN;
+  }
+  unsigned int actual_size = g_device_util->devices[device_id].processes_size;
+  unsigned int copy_size = (*processes_size < actual_size) ? *processes_size : actual_size;
+  if (copy_size > 0 && processes_sample != NULL) {
+    memcpy(processes_sample,  g_device_util->devices[device_id].processes, copy_size * sizeof(nvmlProcessUtilizationSample_t));
+  }
+  *processes_size = actual_size;
+  top_result->sys_process_num = g_device_util->devices[device_id].running_processes;
+  top_result->checktime = (uint64_t)g_device_util->devices[device_id].lastSeenTimeStamp;
+  return NVML_SUCCESS;
+}
 
+static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample, unsigned int *processes_size, int device_id, nvmlDevice_t dev) {
   nvmlReturn_t ret;
   struct timeval cur, prev;
-
   // When using open source kernel modules, nvmlDeviceGetComputeRunningProcesses can only
   // query processes in the container namespace, so skip inaccurate process count queries.
-  if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+  if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
     goto SKIP;
   }
+  nvmlProcessInfo_t pids_on_device[MAX_PIDS];
+  unsigned int running_processes = MAX_PIDS;
+
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
     ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
                              dev, &running_processes, pids_on_device);
@@ -900,7 +893,7 @@ static void get_used_gpu_utilization(void *arg, int device_id, nvmlDevice_t dev)
   if (unlikely(ret)) {
     LOGGER(VERBOSE, "nvmlDeviceGetComputeRunningProcesses can't get pids on device %d, "
            "return %d, str: %s", device_id, ret, nvml_error(ret));
-    return;
+    return ret;
   }
 
   top_result->sys_process_num = running_processes;
@@ -913,20 +906,38 @@ SKIP:
   top_result->checktime = microsec;
 
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetProcessUtilization,
-                        dev, processes_sample, &processes_num, microsec);
+                        dev, processes_sample, processes_size, microsec);
   if (unlikely(ret)) {
     if (ret != NVML_ERROR_NOT_FOUND) {
       LOGGER(VERBOSE, "nvmlDeviceGetProcessUtilization can't get process utilization on device: %d, "
                 "return %d, str: %s", device_id, ret, nvml_error(ret));
     }
-    return;
+    return ret;
   }
 
   // When using open source kernel modules, nvmlDeviceGetComputeRunningProcesses can only
   // query processes in the container namespace, while nvmlDeviceGetProcessUtilization
   // can query global processes, so it may need to be updated to the global process count here.
-  if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-    top_result->sys_process_num = processes_num;
+  if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+    top_result->sys_process_num = *processes_size;
+  }
+
+  return NVML_SUCCESS;
+}
+
+static void get_used_gpu_utilization(void *arg, int device_id, nvmlDevice_t dev) {
+  utilization_t *top_result = (utilization_t *)arg;
+  nvmlProcessUtilizationSample_t processes_sample[MAX_PIDS];
+  unsigned int processes_num = MAX_PIDS;
+
+  nvmlReturn_t ret;
+  if (g_vgpu_config->sm_watcher) {
+    ret = get_gpu_process_from_external_watcher(top_result, processes_sample, &processes_num, device_id, dev);
+  } else {
+    ret = get_gpu_process_from_local_nvml_driver(top_result, processes_sample, &processes_num, device_id, dev);
+  }
+  if (unlikely(ret)) {
+    return;
   }
 
   top_result->user_current = 0;
@@ -936,9 +947,9 @@ SKIP:
   int codec_util = 0;
 
   int i;
-  if ((g_vgpu_config.compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
-    int pids_size = MAX_PIDS;
-    int *pids_on_container = NULL;
+  if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
+    int pids_size = 0;
+    int pids_on_container[MAX_PIDS];
     for (i = 0; i < processes_num; i++) {
       if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
@@ -949,11 +960,12 @@ SKIP:
         top_result->sys_current += sm_util + codec_util;
         if (check_container_pid_by_cgroupv2(processes_sample[i].pid)) {
           top_result->user_current += sm_util + codec_util;
-        } else if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-          if (!pids_on_container) {
+        } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+          if (unlikely(pids_size == 0)) {
             char proc_path[PATH_MAX];
+            pids_size = MAX_PIDS;
             snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-            extract_container_pids(proc_path, &pids_on_container, &pids_size);
+            extract_container_pids(proc_path, pids_on_container, &pids_size);
           }
           if (check_container_pid_by_open_kernel(processes_sample[i].pid, pids_on_container, pids_size)) {
             top_result->user_current += sm_util + codec_util;
@@ -961,13 +973,9 @@ SKIP:
         }
       }
     }
-    if (pids_on_container) {
-      free(pids_on_container);
-      pids_on_container = NULL;
-    }
-  } else if ((g_vgpu_config.compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
-    int pids_size = MAX_PIDS;
-    int *pids_on_container = NULL;
+  } else if ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
+    int pids_size = 0;
+    int pids_on_container[MAX_PIDS];
     for (i = 0; i < processes_num; i++) {
       if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
@@ -978,11 +986,12 @@ SKIP:
         top_result->sys_current += sm_util + codec_util;
         if (check_container_pid_by_cgroupv1(processes_sample[i].pid)) {
           top_result->user_current += sm_util + codec_util;
-        } else if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-          if (!pids_on_container) {
+        } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+          if (unlikely(pids_size == 0)) {
             char proc_path[PATH_MAX];
+            pids_size = MAX_PIDS;
             snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-            extract_container_pids(proc_path, &pids_on_container, &pids_size);
+            extract_container_pids(proc_path, pids_on_container, &pids_size);
           }
           if (check_container_pid_by_open_kernel(processes_sample[i].pid, pids_on_container, pids_size)) {
             top_result->user_current += sm_util + codec_util;
@@ -990,16 +999,12 @@ SKIP:
         }
       }
     }
-    if (pids_on_container) {
-      free(pids_on_container);
-      pids_on_container = NULL;
-    }
-  } else if ((g_vgpu_config.compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-    int pids_size = MAX_PIDS;
-    int *pids_on_container = NULL;
+  } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
+    int pids_size = 0;
+    int pids_on_container[MAX_PIDS];
     char proc_path[PATH_MAX];
     snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-    extract_container_pids(proc_path, &pids_on_container, &pids_size);
+    extract_container_pids(proc_path, pids_on_container, &pids_size);
     for (i = 0; i < processes_num; i++) {
       if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
@@ -1013,11 +1018,7 @@ SKIP:
         }
       }
     }
-    if (pids_on_container) {
-      free(pids_on_container);
-      pids_on_container = NULL;
-    }
-  } else if (g_vgpu_config.compatibility_mode == HOST_COMPATIBILITY_MODE) {
+  } else if (g_vgpu_config->compatibility_mode == HOST_COMPATIBILITY_MODE) {
     for (i = 0; i < processes_num; i++) {
       if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
@@ -1030,7 +1031,7 @@ SKIP:
       }
     }
   } else {
-    LOGGER(FATAL, "unknown env compatibility mode: %d", g_vgpu_config.compatibility_mode);
+    LOGGER(FATAL, "unknown env compatibility mode: %d", g_vgpu_config->compatibility_mode);
   }
 
   LOGGER(VERBOSE, "device: %d, sys util: %d, user util: %d", device_id,
@@ -1149,22 +1150,22 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
     goto DONE;
   }
   size_t used = 0, request_size = bytesize;
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
 
     // Exceeded total memory, return OOM
-    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+    if ((used + request_size) > g_vgpu_config->devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
-    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+    if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used > g_vgpu_config.devices[ordinal].real_memory)) {
+      if (unlikely(used > g_vgpu_config->devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
-      if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
         // The requested memory exceeds the device's memory limit, using global unified memory
         flags = CU_MEM_ATTACH_GLOBAL;
       }
@@ -1188,24 +1189,24 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   const char *uva_err_string = NULL;
   size_t used = 0, request_size = bytesize;
 
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
 
     // Exceeded total memory, return OOM
-    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+    if ((used + request_size) > g_vgpu_config->devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
 
-    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+    if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used > g_vgpu_config.devices[ordinal].real_memory)) {
+      if (unlikely(used > g_vgpu_config->devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
 
-      if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
         // The requested memory exceeds the device's memory limit, using global unified memory
         goto ALLOCATED_TO_UVA;
       } else {
@@ -1221,7 +1222,7 @@ ALLOCATED_TO_GPU:
   } else {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc, dptr, bytesize);
   }
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
+  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config->devices[ordinal].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAlloc OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, cuda_error(ret, &mem_err_string));
   } else {
@@ -1261,24 +1262,24 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   size_t guess_pitch = (((WidthInBytes - 1) / ElementSizeBytes) + 1) * ElementSizeBytes;
   size_t request_size = guess_pitch * Height;
 
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
 
     // Exceeded total memory, return OOM
-    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+    if ((used + request_size) > g_vgpu_config->devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
 
-    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+    if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used > g_vgpu_config.devices[ordinal].real_memory)) {
+      if (unlikely(used > g_vgpu_config->devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
 
-      if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
         // The requested memory exceeds the device's memory limit, using global unified memory
         goto ALLOCATED_TO_UVA;
       } else {
@@ -1294,7 +1295,7 @@ ALLOCATED_TO_GPU:
   } else {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
   }
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
+  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config->devices[ordinal].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocPitch OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, cuda_error(ret, &mem_err_string));
   } else {
@@ -1335,24 +1336,24 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   const char *uva_err_string = NULL;
   size_t used = 0, request_size = bytesize;
 
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
 
     // Exceeded total memory, return OOM
-    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+    if ((used + request_size) > g_vgpu_config->devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
 
-    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+    if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used > g_vgpu_config.devices[ordinal].real_memory)) {
+      if (unlikely(used > g_vgpu_config->devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
 
-      if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
         // The requested memory exceeds the device's memory limit, using global unified memory
         goto ALLOCATED_TO_UVA;
       } else {
@@ -1363,7 +1364,7 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   }
 ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
+  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config->devices[ordinal].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocAsync OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, cuda_error(ret, &mem_err_string));
   } else {
@@ -1390,24 +1391,24 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   const char *uva_err_string = NULL;
   size_t used = 0, request_size = bytesize;
 
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
 
     // Exceeded total memory, return OOM
-    if ((used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+    if ((used + request_size) > g_vgpu_config->devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
 
-    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+    if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used > g_vgpu_config.devices[ordinal].real_memory)) {
+      if (unlikely(used > g_vgpu_config->devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
 
-      if ((used + request_size) > g_vgpu_config.devices[ordinal].real_memory) {
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
         // The requested memory exceeds the device's memory limit, using global unified memory
         goto ALLOCATED_TO_UVA;
       } else {
@@ -1419,7 +1420,7 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   }
 ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config.devices[ordinal].memory_oversold)) {
+  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && g_vgpu_config->devices[ordinal].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, cuda_error(ret, &mem_err_string));
   } else {
@@ -1468,7 +1469,7 @@ static CUresult cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray
     goto DONE;
   }
   size_t used = 0, base_size = 0, request_size = 0;
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
 
     base_size = get_array_base_size(pAllocateArray->Format);
@@ -1477,14 +1478,14 @@ static CUresult cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray
     get_used_gpu_memory((void *)&used, ordinal);
 
     // Exceeded total memory, return OOM
-    if (unlikely(used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+    if (unlikely(used + request_size) > g_vgpu_config->devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
 
-    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+    if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].real_memory)) {
+      if (unlikely(used + request_size > g_vgpu_config->devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
@@ -1527,7 +1528,7 @@ static CUresult cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateA
     goto DONE;
   }
   size_t used = 0, base_size = 0, request_size = 0;
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
 
     base_size = get_array_base_size(pAllocateArray->Format);
@@ -1537,14 +1538,14 @@ static CUresult cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateA
     get_used_gpu_memory((void *)&used, ordinal);
 
     // Exceeded total memory, return OOM
-    if (unlikely(used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+    if (unlikely(used + request_size) > g_vgpu_config->devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
 
-    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+    if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].real_memory)) {
+      if (unlikely(used + request_size > g_vgpu_config->devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
@@ -1592,7 +1593,7 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
     goto DONE;
   }
   size_t used = 0, base_size = 0, request_size = 0;
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
 
     base_size = get_array_base_size(pMipmappedArrayDesc->Format);
@@ -1603,14 +1604,14 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
     get_used_gpu_memory((void *)&used, ordinal);
 
     // Exceeded total memory, return OOM
-    if (unlikely(used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+    if (unlikely(used + request_size) > g_vgpu_config->devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
 
-    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+    if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].real_memory)) {
+      if (unlikely(used + request_size > g_vgpu_config->devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
@@ -1633,19 +1634,19 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
     goto DONE;
   }
   size_t used = 0, request_size = size;
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
     get_used_gpu_memory((void *)&used, ordinal);
 
     // Exceeded total memory, return OOM
-    if (unlikely(used + request_size) > g_vgpu_config.devices[ordinal].total_memory) {
+    if (unlikely(used + request_size) > g_vgpu_config->devices[ordinal].total_memory) {
       ret = CUDA_ERROR_OUT_OF_MEMORY;
       goto DONE;
     }
 
-    if (g_vgpu_config.devices[ordinal].memory_oversold) {
+    if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used + request_size > g_vgpu_config.devices[ordinal].real_memory)) {
+      if (unlikely(used + request_size > g_vgpu_config->devices[ordinal].real_memory)) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
@@ -1659,8 +1660,8 @@ DONE:
 }
 
 CUresult _cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
-  if (g_vgpu_config.devices[dev].memory_limit) {
-    *bytes = g_vgpu_config.devices[dev].total_memory;
+  if (g_vgpu_config->devices[dev].memory_limit) {
+    *bytes = g_vgpu_config->devices[dev].total_memory;
     return CUDA_SUCCESS;
   }
   CUresult ret;
@@ -1688,9 +1689,9 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
     goto DONE;
   }
   size_t used = 0;
-  if (g_vgpu_config.devices[ordinal].memory_limit) {
+  if (g_vgpu_config->devices[ordinal].memory_limit) {
     get_used_gpu_memory((void *)&used, ordinal);
-    size_t total_memory = g_vgpu_config.devices[ordinal].total_memory;
+    size_t total_memory = g_vgpu_config->devices[ordinal].total_memory;
     *total = total_memory;
     *free = (used > total_memory) ? 0 : (total_memory - used);
     return CUDA_SUCCESS;
@@ -1871,7 +1872,7 @@ CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z) {
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  if (g_vgpu_config.devices[ordinal].core_limit) {
+  if (g_vgpu_config->devices[ordinal].core_limit) {
     while (!CAS(&g_block_locker[ordinal], 0, 1)) {}
 
     g_block_x[ordinal] = x;

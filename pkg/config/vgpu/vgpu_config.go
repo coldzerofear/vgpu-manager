@@ -62,6 +62,7 @@ import (
 //  struct device_t devices[MAX_DEVICE_COUNT];
 //  int device_count;
 //  int compatibility_mode;
+//  int sm_watcher;
 //} __attribute__((packed, aligned(8)));
 //
 //int setting_to_disk(const char* filename, struct resource_data_t* data) {
@@ -113,6 +114,7 @@ type ResourceDataT struct {
 	Devices           [util.MaxDeviceNumber]DeviceT
 	DeviceCount       int32
 	CompatibilityMode int32
+	SMWatcher         int32
 }
 
 func (r *ResourceDataT) DeepCopy() *ResourceDataT {
@@ -267,6 +269,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		Devices:           devices,
 		DeviceCount:       int32(deviceCount),
 		CompatibilityMode: int32(mode),
+		SMWatcher:         int32(0),
 	}
 	return data
 }
@@ -304,6 +307,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		vgpuConfig.driver_version = driverVersion
 		mode := getCompatibilityMode(devManager.GetNodeConfig())
 		vgpuConfig.compatibility_mode = C.int(mode)
+		vgpuConfig.sm_watcher = C.int(0)
 
 		podUID := C.CString(string(pod.UID))
 		defer C.free(unsafe.Pointer(podUID))

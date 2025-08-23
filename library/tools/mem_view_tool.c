@@ -68,7 +68,8 @@ int main(int argc, char **argv) {
         return -1;
     }
     size_t used = (total - free);
-    printf("device %d cuda memory, total: %lluMB, used: %lluMB, free: %lluMB\n", device_id, total>>20, used>>20, free>>20);
+
+    printf("device %d cuda memory, total: %zuMB, used: %zuMB, free: %zuMB\n", device_id, total>>20, used>>20, free>>20);
 
     nvmlProcessInfo_t pids_on_device[1024];
     unsigned int size_on_device = 1024;

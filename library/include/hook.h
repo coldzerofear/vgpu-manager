@@ -56,6 +56,17 @@ extern "C" {
 #define CONTROLLER_CONFIG_FILE_PATH (VGPU_MANAGER_PATH "/config/" CONTROLLER_CONFIG_FILE_NAME)
 
 /**
+ * Controller sm utilization watcher file name
+ */
+#define CONTROLLER_SM_UTIL_FILE_NAME "sm_util.config"
+
+/**
+ * Controller sm utilization watcher file path
+ */
+#define CONTROLLER_SM_UTIL_FILE_PATH (VGPU_MANAGER_PATH "/watcher/" CONTROLLER_SM_UTIL_FILE_NAME)
+
+
+/**
  * Controller driver file name
  */
 #define CONTROLLER_DRIVER_FILE_NAME "libvgpu-control.so"
@@ -152,6 +163,7 @@ typedef struct {
   device_t devices[MAX_DEVICE_COUNT];
   int device_count;
   int compatibility_mode;
+  int sm_watcher;
 } __attribute__((packed, aligned(8))) resource_data_t;
 
 /**
@@ -162,6 +174,28 @@ typedef struct {
   int usage_threshold;
   int error_recovery_step;
 } __attribute__((packed, aligned(8))) dynamic_config_t;
+
+typedef struct {
+  nvmlProcessUtilizationSample_t processes[MAX_PIDS];
+  unsigned int processes_size;
+  unsigned int running_processes;
+  unsigned long long lastSeenTimeStamp;
+  unsigned char lock_byte;
+} __attribute__((packed, aligned(8))) device_process_t;
+
+typedef struct {
+  device_process_t devices[MAX_DEVICE_COUNT];
+} __attribute__((packed, aligned(8))) device_util_t;
+
+/** dynamic rate control */
+typedef struct {
+  int user_current;
+  int sys_current;
+  uint64_t checktime;
+  int valid;
+  int sys_process_num;
+} utilization_t;
+
 
 typedef enum {
   INFO = 0,

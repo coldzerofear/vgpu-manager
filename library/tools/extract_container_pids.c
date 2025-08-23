@@ -3,7 +3,7 @@
 #include <unistd.h>
 #include <string.h>
 
-extern int extract_container_pids(char *base_path, int **pids, int *pids_size);
+extern int extract_container_pids(char *base_path, int *pids, int *pids_size);
 
 //static int int_compare(const void *a, const void *b) {
 //  const int *pa = (const int *)a;
@@ -53,8 +53,8 @@ int main(int argc, char **argv) {
 
     char *base_path = argv[1];
     int pids_size = 1024;
-    int *pids_on_container = NULL;
-    int ret = extract_container_pids(base_path, &pids_on_container, &pids_size);
+    int pids_on_container[1024];
+    int ret = extract_container_pids(base_path, pids_on_container, &pids_size);
     if (ret != 0) {
       printf("extract_container_pids failed: %s\n", base_path);
       return -1;

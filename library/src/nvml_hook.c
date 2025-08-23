@@ -4,7 +4,7 @@
 #include "include/nvml-helper.h"
 
 extern entry_t nvml_library_entry[];
-extern resource_data_t g_vgpu_config;
+extern resource_data_t* g_vgpu_config;
 
 nvmlReturn_t nvmlInitWithFlags(unsigned int flags);
 nvmlReturn_t nvmlInit_v2(void);
@@ -47,10 +47,10 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) 
     LOGGER(VERBOSE, "nvmlDeviceGetIndex call error, return %d", ret);
     goto DONE;
   }
-  if (g_vgpu_config.devices[index].memory_limit) {
+  if (g_vgpu_config->devices[index].memory_limit) {
     size_t used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
-    memory->total = g_vgpu_config.devices[index].total_memory;
+    memory->total = g_vgpu_config->devices[index].total_memory;
     memory->used = used;
     memory->free = memory->used > memory->total ? 0 : memory->total - memory->used;
     return NVML_SUCCESS;
@@ -69,10 +69,10 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *me
     goto DONE;
   }
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
-  if (ret == NVML_SUCCESS && g_vgpu_config.devices[index].memory_limit) {
+  if (ret == NVML_SUCCESS && g_vgpu_config->devices[index].memory_limit) {
     size_t used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
-    memory->total = g_vgpu_config.devices[index].total_memory;
+    memory->total = g_vgpu_config->devices[index].total_memory;
     memory->used = used;
     //memory->free = (used + memory->reserved) > g_vcuda_config.gpu_memory ? 0 : g_vcuda_config.gpu_memory - used - memory->reserved;
     memory->free = used > memory->total ? 0 : memory->total - memory->used;
@@ -89,7 +89,7 @@ nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device, nvmlComputeMode_t mod
     LOGGER(VERBOSE, "nvmlDeviceGetIndex call error, return %d", ret);
     goto DONE;
   }
-  if (g_vgpu_config.devices[index].memory_limit || g_vgpu_config.devices[index].core_limit) {
+  if (g_vgpu_config->devices[index].memory_limit || g_vgpu_config->devices[index].core_limit) {
     return NVML_ERROR_NOT_SUPPORTED;
   }
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetComputeMode, device, mode);

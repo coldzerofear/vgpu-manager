@@ -8,12 +8,19 @@
 #include <stdio.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stddef.h>
+#include <sys/mman.h>
 
 #define LOCK_DIR "/tmp/.vgpu_lock"
 #define LOCK_PATH_FORMAT (LOCK_DIR "/vgpu_%d.lock")
 #define LOCK_PATH_SIZE   32
-#define SPIN_INTERVAL_MS 100
+#define SPIN_INTERVAL_MS 20
 #define LOCK_TIMEOUT_MS  5000
+
+#define GET_DEVICE_LOCK_OFFSET(device_index)     \
+     (offsetof(device_util_t, devices) +         \
+     (device_index) * sizeof(device_process_t) + \
+     offsetof(device_process_t, lock_byte))
 
 static const struct timespec sleep_time = {
   .tv_sec = 0,
@@ -92,5 +99,71 @@ void unlock_gpu_device(int fd) {
     .l_len = 0,
   };
   fcntl(fd, F_SETLK, &fl);
+  close(fd);
+}
+
+
+int device_util_read_lock(int ordinal) {
+  if (ordinal >= MAX_DEVICE_COUNT) {
+    LOGGER(ERROR, "invalid device index %d", ordinal);
+    return -1;
+  }
+  int fd = open(CONTROLLER_SM_UTIL_FILE_PATH, O_RDONLY | O_CLOEXEC);
+  if (fd == -1) {
+    LOGGER(ERROR, "failed to open shared file: %s", strerror(errno));
+    return -1;
+  }
+  struct flock lock;
+  lock.l_type = F_RDLCK;      // 读锁
+  lock.l_whence = SEEK_SET;
+  lock.l_start = GET_DEVICE_LOCK_OFFSET(ordinal);
+  lock.l_len = 1; // 锁定1个字节
+  lock.l_pid = 0;
+  // F_SETLKW 会阻塞直到获取锁
+  if (fcntl(fd, F_SETLKW, &lock) == -1) {
+    LOGGER(ERROR, "fcntl read lock failed for device %d: %s",
+               ordinal, strerror(errno));
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+int device_util_write_lock(int ordinal) {
+  if (ordinal >= MAX_DEVICE_COUNT) {
+    LOGGER(ERROR, "invalid device index %d", ordinal);
+    return -1;
+  }
+  // 以读写模式打开文件，如果不存在则创建，设置close-on-exec标志
+  int fd = open(CONTROLLER_SM_UTIL_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (fd == -1) {
+    LOGGER(ERROR, "failed to open shared file: %s", strerror(errno));
+    return -1;
+  }
+  struct flock lock;
+  lock.l_type = F_WRLCK;      // 写锁
+  lock.l_whence = SEEK_SET;
+  lock.l_start = GET_DEVICE_LOCK_OFFSET(ordinal);
+  lock.l_len = 1; // 锁定1个字节
+  lock.l_pid = 0;
+  // F_SETLKW 会阻塞直到获取锁
+  if (fcntl(fd, F_SETLKW, &lock) == -1) {
+    LOGGER(ERROR, "fcntl write lock failed for device %d: %s",
+           ordinal, strerror(errno));
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+void device_util_unlock(int fd, int ordinal) {
+  if (fd < 0) return;
+  struct flock lock;
+  lock.l_type = F_UNLCK;      // 解锁
+  lock.l_whence = SEEK_SET;
+  lock.l_start = GET_DEVICE_LOCK_OFFSET(ordinal);
+  lock.l_len = 1; // 解锁1个字节
+  lock.l_pid = 0;
+  fcntl(fd, F_SETLK, &lock);
   close(fd);
 }

@@ -23,6 +23,7 @@ require (
 	k8s.io/apimachinery v0.32.6
 	k8s.io/client-go v0.32.6
 	k8s.io/component-base v0.32.6
+	k8s.io/cri-api v0.32.6
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/kube-scheduler v0.32.6
 	k8s.io/kubectl v0.32.6
@@ -91,7 +92,7 @@ require (
 	k8s.io/apiextensions-apiserver v0.32.6 // indirect
 	k8s.io/apiserver v0.32.6 // indirect
 	k8s.io/component-helpers v0.32.6 // indirect
-	k8s.io/controller-manager v0.0.0 // indirect
+	k8s.io/controller-manager v0.32.6 // indirect
 	k8s.io/dynamic-resource-allocation v0.0.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20241105132330-32ad38e42d3f // indirect
 	sigs.k8s.io/json v0.0.0-20241010143419-9aa6b5e7a4b3 // indirect

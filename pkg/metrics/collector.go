@@ -496,7 +496,11 @@ skipNvml:
 				containerGPUPids := strings.Join(tmpPids, ",")
 				ContainerDeviceProcUtilFunc(devProcUtilMap[deviceUUID], containerPids,
 					func(sample nvml.ProcessUtilizationSample) {
-						deviceSMUtil += sample.SmUtil
+						smUtil := GetValidValue(sample.SmUtil)
+						codecUtil := GetValidValue(sample.EncUtil) +
+							GetValidValue(sample.DecUtil)
+						codecUtil = CodecNormalize(codecUtil)
+						deviceSMUtil += smUtil + codecUtil
 					})
 
 				ch <- prometheus.MustNewConstMetric(
@@ -530,7 +534,7 @@ skipNvml:
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUCoreUtilRate,
 					prometheus.GaugeValue,
-					float64(deviceSMUtil),
+					float64(GetPercentageValue(deviceSMUtil)),
 					pod.Namespace, pod.Name, container.Name, vDevIndex,
 					deviceUUID, containerId, containerGPUPids, c.nodeName)
 			}
