@@ -11,14 +11,16 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 )
 
 const (
-	WatcherDir = util.ManagerRootPath + "/" + util.Watcher
-	SMUtilFile = util.SMUtilFile
+	WatcherDir   = util.ManagerRootPath + "/" + util.Watcher
+	SMUtilFile   = util.SMUtilFile
+	MaxBatchSize = 4
 )
 
 func WrapChannelWithContext[T any](ch <-chan T) (context.Context, context.CancelFunc) {
@@ -50,8 +52,8 @@ func (m *DeviceManager) doWatcher() {
 
 	ctx, cancelFunc := WrapChannelWithContext(m.stop)
 	defer cancelFunc()
-
 	filePath := filepath.Join(WatcherDir, SMUtilFile)
+
 	wait.UntilWithContext(ctx, func(ctx context.Context) {
 		if err := watcher.PrepareDeviceUtilFile(filePath); err != nil {
 			klog.ErrorS(err, "PrepareDeviceUtilFile failed")
@@ -81,8 +83,26 @@ func (m *DeviceManager) doWatcher() {
 		}
 		defer m.NvmlShutdown()
 
+		count, ret := m.DeviceGetCount()
+		if ret != nvml.SUCCESS {
+			klog.Errorf("error getting device count: %s", ret.Error())
+			return
+		}
+		batches := watcher.BalanceBatches(count, MaxBatchSize)
+		wg := sync.WaitGroup{}
 		_ = wait.PollUntilContextCancel(ctx, 120*time.Millisecond, true, func(ctx context.Context) (bool, error) {
-			return false, m.smWatcher(filePath, deviceUtil)
+			var watcherErr error
+			for _, batch := range batches {
+				wg.Add(1)
+				go func(config watcher.BatchConfig) {
+					defer wg.Done()
+					if err := m.smWatcher(filePath, deviceUtil, config); err != nil {
+						watcherErr = err
+					}
+				}(batch)
+			}
+			wg.Wait()
+			return false, watcherErr
 		})
 	}, time.Second)
 
@@ -90,8 +110,8 @@ func (m *DeviceManager) doWatcher() {
 	m.waitCleanup <- struct{}{}
 }
 
-func (m *DeviceManager) smWatcher(filePath string, deviceUtil *watcher.DeviceUtilT) error {
-	err := m.VisitDevices(func(i int, d device.Device) error {
+func (m *DeviceManager) smWatcher(filePath string, deviceUtil *watcher.DeviceUtilT, batch watcher.BatchConfig) error {
+	watcherFunc := func(i int, d device.Device) error {
 		if enabled, _ := d.IsMigEnabled(); enabled {
 			return nil
 		}
@@ -111,7 +131,7 @@ func (m *DeviceManager) smWatcher(filePath string, deviceUtil *watcher.DeviceUti
 
 		fd, err := watcher.DeviceUtilWLock(i, filePath)
 		if err != nil {
-			klog.V(3).ErrorS(err, "DeviceUtilWLock failed")
+			klog.V(3).ErrorS(err, "DeviceUtilWLock failed", "device", i)
 			return err
 		}
 		defer watcher.DeviceUtilUnlock(fd, i)
@@ -137,9 +157,17 @@ func (m *DeviceManager) smWatcher(filePath string, deviceUtil *watcher.DeviceUti
 			}
 		}
 		return nil
-	})
-	if err != nil {
-		klog.ErrorS(err, "nvml VisitDevices failed")
 	}
-	return err
+	for i := batch.StartIndex; i <= batch.EndIndex; i++ {
+		dev, ret := m.DeviceGetHandleByIndex(i)
+		if ret != nvml.SUCCESS {
+			return fmt.Errorf("error getting device handle for index '%v': %v", i, ret)
+		}
+		newDevice, _ := m.NewDevice(dev)
+		if err := watcherFunc(i, newDevice); err != nil {
+			klog.ErrorS(err, "SM Watcher failed")
+			return err
+		}
+	}
+	return nil
 }

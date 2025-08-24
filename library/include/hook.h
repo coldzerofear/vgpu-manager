@@ -206,7 +206,6 @@ typedef struct {
   int sys_process_num;
 } utilization_t;
 
-
 typedef enum {
   INFO = 0,
   ERROR = 1,

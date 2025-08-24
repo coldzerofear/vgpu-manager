@@ -481,6 +481,26 @@ static void init_device_cuda_cores(unsigned int *devCount) {
   }
 }
 
+static void balance_batches(unsigned int deviceCount) {
+    if (deviceCount == 0) return;
+    int batch_count = (deviceCount + DEVICE_BATCH_SIZE - 1) / DEVICE_BATCH_SIZE;
+    int base_size = deviceCount / batch_count;
+    int remainder = deviceCount % batch_count;
+    int current_index = 0;
+    for (int i = 0; i < batch_count; i++) {
+        int batch_size = base_size;
+        if (i < remainder) {
+            batch_size++;
+        }
+        batches[i].start_index = current_index;
+        batches[i].end_index = current_index + batch_size;
+        batches[i].batch_code = i;
+
+        current_index += batch_size;
+        active_utilization_notifier(i);
+    }
+}
+
 static void initialization() {
   int ret;
   const char *cuda_err_string = NULL;
@@ -491,16 +511,7 @@ static void initialization() {
   pthread_once(&g_nvml_init, nvml_init);
   unsigned int deviceCount;
   init_device_cuda_cores(&deviceCount);
-  int batch_count = (deviceCount + DEVICE_BATCH_SIZE - 1) / DEVICE_BATCH_SIZE;
-  for (int i = 0; i < batch_count; i++) {
-    batches[i].start_index = i * DEVICE_BATCH_SIZE;
-    batches[i].end_index = (i + 1) * DEVICE_BATCH_SIZE;
-    batches[i].batch_code = i;
-    if (batches[i].end_index > deviceCount) {
-      batches[i].end_index = deviceCount;
-    }
-    active_utilization_notifier(i);
-  }
+  balance_batches(deviceCount);
 }
 
 int split_str(char *line, char *key, char *value, char d) {
@@ -849,27 +860,6 @@ void get_used_gpu_memory(void *arg, CUdevice device_id) {
   get_used_gpu_memory_by_device((void *)used_memory, dev);
 }
 
-static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample, unsigned int *processes_size, int device_id, nvmlDevice_t dev) {
-  int fd = device_util_read_lock(device_id);
-  if (fd < 0) {
-    LOGGER(ERROR, "Failed to acquire read lock for device %d", device_id);
-    return NVML_ERROR_UNKNOWN;
-  }
-
-  unsigned int actual_size = g_device_util->devices[device_id].process_util_samples_size;
-  unsigned int copy_size = (*processes_size < actual_size) ? *processes_size : actual_size;
-  if (copy_size > 0 && processes_sample != NULL) {
-    memcpy(processes_sample, g_device_util->devices[device_id].process_util_samples, copy_size * sizeof(nvmlProcessUtilizationSample_t));
-  }
-  *processes_size = copy_size;
-
-  top_result->sys_process_num = g_device_util->devices[device_id].compute_processes_size;
-  top_result->checktime = (uint64_t)g_device_util->devices[device_id].lastSeenTimeStamp;
-
-  device_util_unlock(fd, device_id);
-  return NVML_SUCCESS;
-}
-
 static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample, unsigned int *processes_size, int device_id, nvmlDevice_t dev) {
   nvmlReturn_t ret;
   struct timeval cur, prev;
@@ -926,6 +916,42 @@ SKIP:
     top_result->sys_process_num = *processes_size;
   }
 
+  return NVML_SUCCESS;
+}
+
+int is_expired(unsigned long long lastTs) {
+    struct timeval cur;
+    gettimeofday(&cur, NULL);
+    unsigned long long cur_us = cur.tv_sec * 1000000 + cur.tv_usec;
+    return (cur_us - lastTs) >= 5000000; // 5,000,000 microsecond
+}
+
+static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample, unsigned int *processes_size, int device_id, nvmlDevice_t dev) {
+  int fd = device_util_read_lock(device_id);
+  if (fd < 0) {
+    LOGGER(ERROR, "failed to acquire read lock for device %d, fallback to nvml driver", device_id);
+    return get_gpu_process_from_local_nvml_driver(top_result, processes_sample, processes_size, device_id, dev);
+  }
+  int expired = is_expired(g_device_util->devices[device_id].lastSeenTimeStamp);
+  if (expired) {
+    goto DONE;
+  }
+  unsigned int actual_size = g_device_util->devices[device_id].process_util_samples_size;
+  unsigned int copy_size = (*processes_size < actual_size) ? *processes_size : actual_size;
+  if (copy_size > 0 && processes_sample != NULL) {
+    memcpy(processes_sample, g_device_util->devices[device_id].process_util_samples, copy_size * sizeof(nvmlProcessUtilizationSample_t));
+  }
+  *processes_size = copy_size;
+
+  top_result->sys_process_num = g_device_util->devices[device_id].compute_processes_size;
+  top_result->checktime = (uint64_t)g_device_util->devices[device_id].lastSeenTimeStamp;
+
+DONE:
+  device_util_unlock(fd, device_id);
+  if (expired) {
+     LOGGER(ERROR, "device %d process utilization time window timeout detected, fallback to nvml driver", device_id);
+     return get_gpu_process_from_local_nvml_driver(top_result, processes_sample, processes_size, device_id, dev);
+  }
   return NVML_SUCCESS;
 }
 

@@ -651,6 +651,13 @@ func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtilT, index int, hdev n
 		klog.V(4).InfoS("collector device processes from sm watcher", "device", index)
 		fd, err := watcher.DeviceUtilRLock(index, smFilePath)
 		if err == nil {
+			micro := time.UnixMicro(int64(deviceUtil.Devices[index].LastSeenTimeStamp))
+			if time.Now().Sub(micro) > 5*time.Second {
+				watcher.DeviceUtilUnlock(fd, index)
+				klog.V(3).InfoS("Process utilization time window timeout detected, rollback using nvml driver to obtain utilization", "device", index)
+				nvmlProcessInfoFunc()
+				goto nvmlProcessUtil
+			}
 			if deviceUtil.Devices[index].ComputeProcessesSize > 0 {
 				processInfos = append(processInfos, deviceUtil.Devices[index].ComputeProcesses[:deviceUtil.Devices[index].ComputeProcessesSize]...)
 			}
@@ -659,12 +666,6 @@ func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtilT, index int, hdev n
 			}
 			if len(processInfos) == 0 {
 				nvmlProcessInfoFunc()
-			}
-			micro := time.UnixMicro(int64(deviceUtil.Devices[index].LastSeenTimeStamp))
-			if time.Now().Sub(micro) > 5*time.Second {
-				watcher.DeviceUtilUnlock(fd, index)
-				klog.V(3).InfoS("Process utilization time window timeout detected, rollback using nvml driver to obtain utilization", "device", index)
-				goto nvmlProcessUtil
 			}
 			if deviceUtil.Devices[index].ProcessUtilSamplesSize > 0 {
 				processUtilizationSamples = append(processUtilizationSamples, deviceUtil.Devices[index].ProcessUtilSamples[:deviceUtil.Devices[index].ProcessUtilSamplesSize]...)
