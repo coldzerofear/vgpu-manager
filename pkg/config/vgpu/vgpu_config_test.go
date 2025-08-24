@@ -1,6 +1,8 @@
 package vgpu
 
 import (
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/component-base/featuregate"
 	"os"
 	"syscall"
 	"testing"
@@ -79,7 +81,16 @@ func Test_WriDriverConfigFile(t *testing.T) {
 			},
 		},
 	}
-	devManager := manager.NewFakeDeviceManager(config, driverVersion, devices)
+	featureGate := featuregate.NewFeatureGate()
+	runtime.Must(featureGate.Add(map[featuregate.Feature]featuregate.FeatureSpec{
+		util.SMWatcher: {Default: true, PreRelease: featuregate.Alpha},
+	}))
+
+	devManager := manager.NewFakeDeviceManager(
+		manager.WithNodeConfigSpec(config),
+		manager.WithDevices(devices),
+		manager.WithNvidiaVersion(driverVersion),
+		manager.WithFeatureGate(featureGate))
 	tests := []struct {
 		name    string
 		path    string
@@ -167,13 +178,13 @@ func Test_WriDriverConfigFile(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			for _, node := range test.nodes {
 				func() {
-					err := WriteVGPUConfigFile(test.path, devManager, test.pod, test.devices, false, node)
+					err = WriteVGPUConfigFile(test.path, devManager, test.pod, test.devices, false, node)
 					if err != nil {
-						t.Error(err)
+						t.Fatal(err)
 					}
 					resourceData1, data, err := MmapResourceDataT(test.path)
 					if err != nil {
-						t.Error(err)
+						t.Fatal(err)
 					}
 					defer syscall.Munmap(data)
 					resourceData2 := NewResourceDataT(devManager, test.pod, test.devices, false, node)

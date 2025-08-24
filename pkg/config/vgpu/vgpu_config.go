@@ -39,7 +39,7 @@ import (
 //struct version_t {
 //  int major;
 //  int minor;
-//} __attribute__((packed, aligned(8)));
+//};
 //
 //struct device_t {
 //  char uuid[48];
@@ -51,7 +51,7 @@ import (
 //  int hard_limit;
 //  int memory_limit;
 //  int memory_oversold;
-//} __attribute__((packed, aligned(8)));
+//};
 //
 //struct resource_data_t {
 //  struct version_t driver_version;
@@ -63,7 +63,7 @@ import (
 //  int device_count;
 //  int compatibility_mode;
 //  int sm_watcher;
-//} __attribute__((packed, aligned(8)));
+//};
 //
 //int setting_to_disk(const char* filename, struct resource_data_t* data) {
 //  int fd = 0;
@@ -77,8 +77,8 @@ import (
 //
 //  wsize = (int)write(fd, (void*)data, sizeof(struct resource_data_t));
 //  if (wsize != sizeof(struct resource_data_t)) {
-//    ret = 2;
-//	goto DONE;
+//    ret = 1;
+//	  goto DONE;
 //  }
 //
 //DONE:
@@ -157,8 +157,9 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 	}
 	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
 	if fileInfo.Size() != dataSize {
-		klog.Errorf("File size mismatch, expected: %d, actual: %d", dataSize, fileInfo.Size())
-		return nil, nil, fmt.Errorf("file size mismatch")
+		err = fmt.Errorf("file size mismatch, expected: %d, actual: %d", dataSize, fileInfo.Size())
+		klog.Errorln(err)
+		return nil, nil, err
 	}
 	f, err := os.OpenFile(filePath, os.O_RDWR, 0666)
 	if err != nil {
@@ -195,6 +196,11 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	computePolicy := GetComputePolicy(pod, node)
 	deviceCount := 0
 	deviceMap := devManager.GetDeviceInfoMap()
+	smWatcher := 0
+	if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
+		smWatcher = 1
+	}
+
 	devices := [util.MaxDeviceNumber]DeviceT{}
 	for i, devInfo := range assignDevices.Devices {
 		if i >= util.MaxDeviceNumber {
@@ -269,7 +275,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		Devices:           devices,
 		DeviceCount:       int32(deviceCount),
 		CompatibilityMode: int32(mode),
-		SMWatcher:         int32(0),
+		SMWatcher:         int32(smWatcher),
 	}
 	return data
 }
@@ -307,7 +313,11 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		vgpuConfig.driver_version = driverVersion
 		mode := getCompatibilityMode(devManager.GetNodeConfig())
 		vgpuConfig.compatibility_mode = C.int(mode)
-		vgpuConfig.sm_watcher = C.int(0)
+		if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
+			vgpuConfig.sm_watcher = C.int(1)
+		} else {
+			vgpuConfig.sm_watcher = C.int(0)
+		}
 
 		podUID := C.CString(string(pod.UID))
 		defer C.free(unsafe.Pointer(podUID))

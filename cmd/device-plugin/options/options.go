@@ -57,13 +57,15 @@ const (
 	Component = "devicePlugin"
 
 	// CorePlugin feature gate will report the virtual cores of the node device to kubelet.
-	CorePlugin featuregate.Feature = "CorePlugin"
+	CorePlugin featuregate.Feature = util.CorePlugin
 	// MemoryPlugin feature gate will report the virtual memory of the node device to kubelet.
-	MemoryPlugin featuregate.Feature = "MemoryPlugin"
+	MemoryPlugin featuregate.Feature = util.MemoryPlugin
 	// Reschedule feature gate will attempt to reschedule Pods that meet the criteria.
-	Reschedule featuregate.Feature = "Reschedule"
+	Reschedule featuregate.Feature = util.Reschedule
 	// GPUTopology feature gate will report gpu topology information to node.
-	GPUTopology featuregate.Feature = "GPUTopology"
+	GPUTopology featuregate.Feature = util.GPUTopology
+	// SMWatcher feature gate will initiate an independent utilization observation thread to share the results with the vGPU Pod node, reducing driver call consumption.
+	SMWatcher featuregate.Feature = util.SMWatcher
 )
 
 var (
@@ -73,6 +75,7 @@ var (
 		MemoryPlugin: {Default: false, PreRelease: featuregate.Alpha},
 		Reschedule:   {Default: false, PreRelease: featuregate.Alpha},
 		GPUTopology:  {Default: false, PreRelease: featuregate.Alpha},
+		SMWatcher:    {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 

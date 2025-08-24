@@ -7,7 +7,6 @@ import (
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
-	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -51,6 +50,7 @@ type DeviceManager struct {
 	driverVersion nvidia.DriverVersion
 	devices       []*Device
 	imexChannels  imex.Channels
+	featureGate   featuregate.FeatureGate
 
 	unhealthy            chan *Device
 	notify               map[string]chan *Device
@@ -108,38 +108,88 @@ func (m *DeviceManager) RemoveCleanupRegistryFunc(name string) {
 	m.mut.Unlock()
 }
 
-func NewFakeDeviceManager(config *node.NodeConfigSpec, version nvidia.DriverVersion, devices []*Device) *DeviceManager {
-	return &DeviceManager{
-		driverVersion:        version,
-		config:               config,
-		devices:              devices,
+func NewFakeDeviceManager(opts ...OptionFunc) *DeviceManager {
+	m := &DeviceManager{
 		client:               fake.NewSimpleClientset(),
+		featureGate:          featuregate.NewFeatureGate(),
 		unhealthy:            make(chan *Device),
 		notify:               make(map[string]chan *Device),
 		registryFuncs:        make(map[string]RegistryFunc),
 		cleanupRegistryFuncs: make(map[string]RegistryFunc),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+type OptionFunc func(*DeviceManager)
+
+func WithDevices(devices []*Device) OptionFunc {
+	return func(m *DeviceManager) {
+		m.devices = devices
 	}
 }
 
-func NewDeviceManager(config *node.NodeConfigSpec, kubeClient *kubernetes.Clientset) (*DeviceManager, error) {
-	driverlib, err := nvidia.NewDeviceLib("/")
-	if err != nil {
-		klog.Error("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
-		klog.Error("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
-		klog.Error("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
-		klog.Error("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
-		return nil, err
+func WithNvidiaVersion(version nvidia.DriverVersion) OptionFunc {
+	return func(m *DeviceManager) {
+		m.driverVersion = version
 	}
+}
+
+func WithNodeConfigSpec(config *node.NodeConfigSpec) OptionFunc {
+	return func(d *DeviceManager) {
+		d.config = config
+	}
+}
+
+func WithFeatureGate(featureGate featuregate.FeatureGate) OptionFunc {
+	return func(d *DeviceManager) {
+		d.featureGate = featureGate
+	}
+}
+
+func WithKubeClient(kubeClient *kubernetes.Clientset) OptionFunc {
+	return func(d *DeviceManager) {
+		d.client = kubeClient
+	}
+}
+
+func WithDeviceLib(lib *nvidia.DeviceLib) OptionFunc {
+	return func(d *DeviceManager) {
+		d.DeviceLib = lib
+	}
+}
+
+func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceManager, error) {
 	m := &DeviceManager{
-		DeviceLib:            driverlib,
 		config:               config,
-		client:               kubeClient,
 		unhealthy:            make(chan *Device),
 		notify:               make(map[string]chan *Device),
 		registryFuncs:        make(map[string]RegistryFunc),
 		cleanupRegistryFuncs: make(map[string]RegistryFunc),
 	}
-	if err = m.NvmlInit(); err != nil {
+	for _, opt := range opts {
+		opt(m)
+	}
+	if m.client == nil {
+		m.client = fake.NewSimpleClientset()
+	}
+	if m.DeviceLib == nil {
+		driverlib, err := nvidia.NewDeviceLib("/")
+		if err != nil {
+			klog.Error("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
+			klog.Error("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
+			klog.Error("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
+			klog.Error("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
+			return nil, err
+		}
+		m.DeviceLib = driverlib
+	}
+	if m.featureGate == nil {
+		m.featureGate = featuregate.NewFeatureGate()
+	}
+	if err := m.NvmlInit(); err != nil {
 		klog.Errorf("If this is a GPU node, did you set the default container runtime to `nvidia`?")
 		klog.Errorf("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
 		klog.Errorf("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
@@ -147,7 +197,7 @@ func NewDeviceManager(config *node.NodeConfigSpec, kubeClient *kubernetes.Client
 		return nil, err
 	}
 	defer m.NvmlShutdown()
-	err = m.initDevices()
+	err := m.initDevices()
 	return m, err
 }
 
@@ -166,8 +216,7 @@ func (m *DeviceManager) initDevices() (err error) {
 	}
 	var (
 		linksMap           map[string]map[int][]links.P2PLinkType
-		featureGate        = featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-		gpuTopologyEnabled = featureGate != nil && featureGate.Enabled(options.GPUTopology)
+		gpuTopologyEnabled = m.featureGate.Enabled(util.GPUTopology)
 		exists             = false
 	)
 	if gpuTopologyEnabled {
@@ -320,6 +369,10 @@ func (m *DeviceManager) AllAvailableGpuMigEnabled() bool {
 	return allMigEnabled
 }
 
+func (m *DeviceManager) GetFeatureGate() featuregate.FeatureGate {
+	return m.featureGate
+}
+
 func (m *DeviceManager) GetGPUDeviceMap() map[string]GPUDevice {
 	m.mut.Lock()
 	defer m.mut.Unlock()
@@ -362,6 +415,7 @@ func (m *DeviceManager) Start() {
 			klog.Errorf("Failed to start health check: %v; continuing with health checks disabled", err)
 		}
 	}()
+	go m.doWatcher()
 }
 
 func (m *DeviceManager) GetDeviceInfoMap() map[string]device.DeviceInfo {
@@ -427,6 +481,10 @@ func (m *DeviceManager) Stop() {
 		klog.Infof("DeviceManager stopping...")
 		close(m.stop)
 		<-m.waitCleanup
+		if m.featureGate.Enabled(util.SMWatcher) {
+			<-m.waitCleanup
+		}
+		close(m.waitCleanup)
 		m.stop = nil
 		m.waitCleanup = nil
 	}

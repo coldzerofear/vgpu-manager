@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -123,9 +122,8 @@ func (m *vnumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGat
 		return nil, fmt.Errorf("failed to generate node heartbeat timestamp: %v", err)
 	}
 	var registryGPUTopology string
-	if featureGate.Enabled(options.GPUTopology) {
-		registryGPUTopology, err = m.getEncodeNodeTopologyInfo()
-		if err != nil {
+	if featureGate.Enabled(util.GPUTopology) {
+		if registryGPUTopology, err = m.getEncodeNodeTopologyInfo(); err != nil {
 			return nil, err
 		}
 	}
@@ -199,10 +197,11 @@ func (m *vnumberDevicePlugin) GetPreferredAllocation(_ context.Context, req *plu
 const (
 	VGPUConfigDirName        = "config"
 	HostProcDirectoryPath    = "/proc"
-	ContManagerDirectoryPath = "/etc/vgpu-manager"
+	ContManagerDirectoryPath = util.ManagerRootPath
 	ContConfigDirectoryPath  = ContManagerDirectoryPath + "/" + VGPUConfigDirName
 	ContProcDirectoryPath    = ContManagerDirectoryPath + "/.host_proc"
 	ContCGroupDirectoryPath  = ContManagerDirectoryPath + "/.host_cgroup"
+	ContWatcherDirectoryPath = ContManagerDirectoryPath + "/" + util.Watcher
 
 	VGPULockDirName  = "vgpu_lock"
 	ContVGPULockPath = "/tmp/." + VGPULockDirName
@@ -229,6 +228,7 @@ var (
 	HostManagerDirectoryPath = os.Getenv("HOST_MANAGER_DIR")
 	HostPreLoadFilePath      = HostManagerDirectoryPath + "/" + LdPreLoadFileName
 	HostVGPUControlFilePath  = HostManagerDirectoryPath + "/" + VGPUControlFileName
+	HostWatcherDirectoryPath = HostManagerDirectoryPath + "/" + util.Watcher
 )
 
 func GetHostManagerDirectoryPath(podUID types.UID, containerName string) string {
@@ -373,6 +373,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	deviceMap := m.base.manager.GetGPUDeviceMap()
 	memoryRatio := nodeConfig.GetDeviceMemoryScaling()
 	imexChannels := m.base.manager.GetImexChannels()
+	enabledSMWatcher := m.base.manager.GetFeatureGate().Enabled(util.SMWatcher)
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIDs())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -433,7 +434,13 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			HostPath:      HostVGPUControlFilePath,
 			ReadOnly:      true,
 		})
-
+		if enabledSMWatcher {
+			response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount /proc dir
+				ContainerPath: ContWatcherDirectoryPath,
+				HostPath:      HostWatcherDirectoryPath,
+				ReadOnly:      true,
+			})
+		}
 		podCgroupPath, err = util.GetK8sPodCGroupPath(currentPod)
 		if err != nil {
 			klog.Errorln(err.Error())

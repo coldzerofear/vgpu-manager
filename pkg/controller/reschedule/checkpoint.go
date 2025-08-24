@@ -6,7 +6,6 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
@@ -16,7 +15,7 @@ import (
 )
 
 const (
-	checkpointDir             = deviceplugin.ContManagerDirectoryPath + "/" + util.Checkpoints
+	checkpointDir             = util.ManagerRootPath + "/" + util.Checkpoints
 	recoveryPodCheckpointFile = "recovery-checkpoint.json"
 )
 

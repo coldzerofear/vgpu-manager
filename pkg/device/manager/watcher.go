@@ -1,0 +1,145 @@
+package manager
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog/v2"
+	"path/filepath"
+	"syscall"
+	"time"
+	"unsafe"
+)
+
+const (
+	WatcherDir = util.ManagerRootPath + "/" + util.Watcher
+	SMUtilFile = util.SMUtilFile
+)
+
+func WrapChannelWithContext[T any](ch <-chan T) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		defer cancel()
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return ctx, cancel
+}
+
+func (m *DeviceManager) doWatcher() {
+	if !m.featureGate.Enabled(util.SMWatcher) {
+		return
+	}
+
+	klog.V(4).Infoln("DeviceManager starting sm watcher...")
+
+	ctx, cancelFunc := WrapChannelWithContext(m.stop)
+	defer cancelFunc()
+
+	filePath := filepath.Join(WatcherDir, SMUtilFile)
+	wait.UntilWithContext(ctx, func(ctx context.Context) {
+		if err := watcher.PrepareDeviceUtilFile(filePath); err != nil {
+			klog.ErrorS(err, "PrepareDeviceUtilFile failed")
+			return
+		}
+		deviceUtil, data, err := watcher.MmapDeviceUtilT(filePath)
+		if err != nil {
+			klog.ErrorS(err, "WatchDeviceUtilFile failed")
+			return
+		}
+		defer func() {
+			_, _, errno := syscall.Syscall(
+				syscall.SYS_MSYNC,
+				uintptr(unsafe.Pointer(&data[0])),
+				uintptr(len(data)),
+				uintptr(syscall.MS_SYNC),
+			)
+			if errno != 0 {
+				klog.V(3).ErrorS(fmt.Errorf("msync error: %d", errno), "Failed to sync mmap data")
+			}
+			_ = syscall.Munmap(data)
+		}()
+
+		if err = m.NvmlInit(); err != nil {
+			klog.ErrorS(err, "NvmlInit failed")
+			return
+		}
+		defer m.NvmlShutdown()
+
+		_ = wait.PollUntilContextCancel(ctx, 120*time.Millisecond, true, func(ctx context.Context) (bool, error) {
+			return false, m.smWatcher(filePath, deviceUtil)
+		})
+	}, time.Second)
+
+	klog.V(3).Infoln("DeviceManager sm watcher stopped")
+	m.waitCleanup <- struct{}{}
+}
+
+func (m *DeviceManager) smWatcher(filePath string, deviceUtil *watcher.DeviceUtilT) error {
+	err := m.VisitDevices(func(i int, d device.Device) error {
+		if enabled, _ := d.IsMigEnabled(); enabled {
+			return nil
+		}
+		computeProcesses, rt := d.GetComputeRunningProcesses()
+		if rt != nvml.SUCCESS {
+			klog.ErrorS(errors.New(rt.Error()), "GetComputeRunningProcesses failed", "device", i)
+			return nil
+		}
+		graphicsProcesses, rt := d.GetGraphicsRunningProcesses()
+		if rt != nvml.SUCCESS {
+			klog.ErrorS(errors.New(rt.Error()), "GetGraphicsRunningProcesses failed", "device", i)
+			return nil
+		}
+
+		lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
+		procUtilSamples, rt := d.GetProcessUtilization(uint64(lastTs))
+
+		fd, err := watcher.DeviceUtilWLock(i, filePath)
+		if err != nil {
+			klog.V(3).ErrorS(err, "DeviceUtilWLock failed")
+			return err
+		}
+		defer watcher.DeviceUtilUnlock(fd, i)
+
+		computeProcessesSize := min(len(computeProcesses), watcher.MAX_PIDS)
+		deviceUtil.Devices[i].ComputeProcessesSize = uint32(computeProcessesSize)
+		for index, process := range computeProcesses[:computeProcessesSize] {
+			deviceUtil.Devices[i].ComputeProcesses[index] = process
+		}
+
+		graphicsProcessesSize := min(len(graphicsProcesses), watcher.MAX_PIDS)
+		deviceUtil.Devices[i].GraphicsProcessesSize = uint32(graphicsProcessesSize)
+		for index, process := range graphicsProcesses[:graphicsProcessesSize] {
+			deviceUtil.Devices[i].GraphicsProcesses[index] = process
+		}
+
+		deviceUtil.Devices[i].LastSeenTimeStamp = uint64(lastTs)
+		if rt == nvml.SUCCESS {
+			processUtilSamplesSize := min(len(procUtilSamples), watcher.MAX_PIDS)
+			deviceUtil.Devices[i].ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
+			for index, sample := range procUtilSamples[:processUtilSamplesSize] {
+				deviceUtil.Devices[i].ProcessUtilSamples[index] = sample
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		klog.ErrorS(err, "nvml VisitDevices failed")
+	}
+	return err
+}

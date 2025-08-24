@@ -2,6 +2,9 @@ package metrics
 
 import (
 	"context"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/component-base/featuregate"
 	"os"
 	"path/filepath"
 	"testing"
@@ -106,8 +109,16 @@ func Test_ContainerLister(t *testing.T) {
 			},
 		},
 	}
+	featureGate := featuregate.NewFeatureGate()
+	runtime.Must(featureGate.Add(map[featuregate.Feature]featuregate.FeatureSpec{
+		util.SMWatcher: {Default: true, PreRelease: featuregate.Alpha},
+	}))
 
-	devManager := manager.NewFakeDeviceManager(config, driverVersion, devices)
+	devManager := manager.NewFakeDeviceManager(
+		manager.WithNodeConfigSpec(config),
+		manager.WithDevices(devices),
+		manager.WithNvidiaVersion(driverVersion),
+		manager.WithFeatureGate(featureGate))
 	contDeviceMap := map[string][]device.ClaimDevice{
 		containerName1: {{
 			Id:     0,

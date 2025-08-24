@@ -1267,7 +1267,7 @@ int mmap_file_to_config_path(const char* filename, resource_data_t** data) {
   }
   *data = (resource_data_t*)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (data == MAP_FAILED) {
-    LOGGER(ERROR, "mmap failed: %s", strerror(errno));
+    LOGGER(ERROR, "mmap global config failed: %s", strerror(errno));
     ret = 1;
     goto DONE;
   }
@@ -1296,13 +1296,13 @@ int mmap_file_to_util_path(const char* filename, device_util_t** data) {
   }
   if (sb.st_size != sizeof(device_util_t)) {
     LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
-                    sizeof(resource_data_t), (long long)sb.st_size);
+                    sizeof(device_util_t), (long long)sb.st_size);
     ret = 1;
     goto DONE;
   }
   *data = (device_util_t*)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (data == MAP_FAILED) {
-    LOGGER(ERROR, "mmap failed: %s", strerror(errno));
+    LOGGER(ERROR, "mmap sm watcher failed: %s", strerror(errno));
     ret = 1;
     goto DONE;
   }

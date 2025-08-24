@@ -137,7 +137,7 @@ typedef struct {
 typedef struct {
   int major;
   int minor;
-} __attribute__((packed, aligned(8))) version_t;
+} version_t;
 
 typedef struct {
   char uuid[48];
@@ -149,7 +149,7 @@ typedef struct {
   int hard_limit;
   int memory_limit;
   int memory_oversold;
-} __attribute__((packed, aligned(8))) device_t;
+} device_t;
 
 /**
  * Controller configuration data format
@@ -164,7 +164,7 @@ typedef struct {
   int device_count;
   int compatibility_mode;
   int sm_watcher;
-} __attribute__((packed, aligned(8))) resource_data_t;
+} resource_data_t;
 
 /**
  * Dynamic computing power limit configuration
@@ -173,19 +173,29 @@ typedef struct {
   int change_limit_interval;
   int usage_threshold;
   int error_recovery_step;
-} __attribute__((packed, aligned(8))) dynamic_config_t;
+} dynamic_config_t;
 
 typedef struct {
-  nvmlProcessUtilizationSample_t processes[MAX_PIDS];
-  unsigned int processes_size;
-  unsigned int running_processes;
+  unsigned int pid;
+  unsigned long long usedGpuMemory;
+  unsigned int  gpuInstanceId;
+  unsigned int  computeInstanceId;
+} nvmlProcessInfoV2_t;
+
+typedef struct {
+  nvmlProcessUtilizationSample_t process_util_samples[MAX_PIDS];
+  unsigned int process_util_samples_size;
   unsigned long long lastSeenTimeStamp;
+  nvmlProcessInfoV2_t compute_processes[MAX_PIDS];
+  unsigned int compute_processes_size;
+  nvmlProcessInfoV2_t graphics_processes[MAX_PIDS];
+  unsigned int graphics_processes_size;
   unsigned char lock_byte;
-} __attribute__((packed, aligned(8))) device_process_t;
+} device_process_t;
 
 typedef struct {
   device_process_t devices[MAX_DEVICE_COUNT];
-} __attribute__((packed, aligned(8))) device_util_t;
+} device_util_t;
 
 /** dynamic rate control */
 typedef struct {

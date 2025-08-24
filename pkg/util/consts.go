@@ -58,6 +58,11 @@ const (
 	AllocateCheckErrMsg           = "Allocate check failed"
 	PreStartContainerCheckErrMsg  = "PreStartContainer check failed"
 	PreStartContainerCheckErrType = "PreStartContainerCheckErr"
+
+	ManagerRootPath = "/etc/vgpu-manager"
+	Checkpoints     = "checkpoints"
+	Watcher         = "watcher"
+	SMUtilFile      = "sm_util.config"
 )
 
 const (
@@ -80,7 +85,6 @@ const (
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
 	PodUIDEnv       = "VGPU_POD_UID"
 	ContNameEnv     = "VGPU_CONTAINER_NAME"
-	Checkpoints     = "checkpoints"
 )
 
 type ComputePolicy string
@@ -149,4 +153,14 @@ const (
 	VirtualMemoryPolicy MemorySchedulerPolicy = "virtual"
 	// PhysicalMemoryPolicy Means selecting nodes with GPU physical memory
 	PhysicalMemoryPolicy MemorySchedulerPolicy = "physical"
+)
+
+// FeatureGates
+const (
+	CorePlugin     = "CorePlugin"
+	MemoryPlugin   = "MemoryPlugin"
+	Reschedule     = "Reschedule"
+	GPUTopology    = "GPUTopology"
+	SMWatcher      = "SMWatcher"
+	SerialBindNode = "SerialBindNode"
 )

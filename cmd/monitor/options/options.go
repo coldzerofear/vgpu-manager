@@ -3,6 +3,10 @@ package options
 import (
 	"flag"
 	"fmt"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/component-base/featuregate"
+	baseversion "k8s.io/component-base/version"
 	"os"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
@@ -20,6 +24,7 @@ type Options struct {
 	NodeConfigPath string
 	ServerBindPort int
 	PprofBindPort  int
+	FeatureGate    featuregate.MutableFeatureGate
 }
 
 const (
@@ -27,9 +32,17 @@ const (
 	defaultBurst          = 30
 	defaultServerBindPort = 3456
 	defaultPprofBindPort  = 0
+
+	Component = "deviceMonitor"
+	// SMWatcher feature gate will obtain shared utilization data aggregation corresponding indicators from external observers.
+	SMWatcher featuregate.Feature = util.SMWatcher
 )
 
 func NewOptions() *Options {
+	featureGate := featuregate.NewFeatureGate()
+	runtime.Must(featureGate.Add(defaultFeatureGates))
+	runtime.Must(featuregate.DefaultComponentGlobalsRegistry.Register(
+		Component, baseversion.DefaultBuildEffectiveVersion(), featureGate))
 	return &Options{
 		QPS:            defaultQPS,
 		Burst:          defaultBurst,
@@ -37,10 +50,16 @@ func NewOptions() *Options {
 		CGroupDriver:   os.Getenv("CGROUP_DRIVER"),
 		ServerBindPort: defaultServerBindPort,
 		PprofBindPort:  defaultPprofBindPort,
+		FeatureGate:    featureGate,
 	}
 }
 
-var version bool
+var (
+	version             bool
+	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
+		SMWatcher: {Default: false, PreRelease: featuregate.Alpha},
+	}
+)
 
 func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.CommandLine.SortFlags = false
@@ -53,6 +72,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.NodeConfigPath, "node-config-path", o.NodeConfigPath, "Specify the node configuration path to apply differentiated configuration to the node.")
 	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
+	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
 	pflag.Parse()

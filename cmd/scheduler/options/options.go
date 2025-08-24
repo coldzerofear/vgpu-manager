@@ -3,6 +3,7 @@ package options
 import (
 	"flag"
 	"fmt"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"os"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
@@ -38,9 +39,9 @@ const (
 	Component = "scheduler"
 
 	// SerialBindNode feature gate will binding node operation of serial execution scheduler.
-	SerialBindNode featuregate.Feature = "SerialBindNode"
+	SerialBindNode featuregate.Feature = util.SerialBindNode
 	// GPUTopology feature gate will consider topology structure when allocating devices.
-	GPUTopology featuregate.Feature = "GPUTopology"
+	GPUTopology featuregate.Feature = util.GPUTopology
 )
 
 var (

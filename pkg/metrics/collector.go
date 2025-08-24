@@ -2,10 +2,14 @@ package metrics
 
 import (
 	"fmt"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
+	"k8s.io/component-base/featuregate"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
@@ -39,12 +43,13 @@ type nodeGPUCollector struct {
 	podLister   listerv1.PodLister
 	contLister  *ContainerLister
 	podResource *client.PodResource
+	featureGate featuregate.FeatureGate
 }
 
 var _ CollectorService = &nodeGPUCollector{}
 
-func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister,
-	podLister listerv1.PodLister, contLister *ContainerLister) (CollectorService, error) {
+func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister, podLister listerv1.PodLister,
+	contLister *ContainerLister, featureGate featuregate.FeatureGate) (CollectorService, error) {
 	deviceLib, err := nvidia.NewDeviceLib("/")
 	if err != nil {
 		klog.Error("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
@@ -54,11 +59,12 @@ func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister,
 		return nil, err
 	}
 	return &nodeGPUCollector{
-		DeviceLib:  deviceLib,
-		nodeName:   nodeName,
-		nodeLister: nodeLister,
-		podLister:  podLister,
-		contLister: contLister,
+		DeviceLib:   deviceLib,
+		nodeName:    nodeName,
+		nodeLister:  nodeLister,
+		podLister:   podLister,
+		contLister:  contLister,
+		featureGate: featureGate,
 		podResource: client.NewPodResource(
 			client.WithCallTimeoutSecond(5)),
 	}, nil
@@ -237,6 +243,8 @@ func ContainerDeviceProcUtilFunc(procUtils procUtilList,
 	}
 }
 
+var smFilePath = filepath.Join(util.ManagerRootPath, util.Watcher, util.SMUtilFile)
+
 // Collect device indicators
 func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	klog.V(4).Infof("Starting to collect metrics for vGPU on node <%s>", c.nodeName)
@@ -246,13 +254,21 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devProcInfoMap = make(map[string]procInfoList)
 		devProcUtilMap = make(map[string]procUtilList)
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
+
+		deviceUtil     *watcher.DeviceUtilT
+		deviceUtilData []byte
 	)
 	err := c.NvmlInit()
 	if err != nil {
 		klog.Errorln(err)
 		goto skipNvml
 	}
-	defer c.NvmlShutdown()
+	defer func() {
+		c.NvmlShutdown()
+		if deviceUtil != nil && deviceUtilData != nil {
+			_ = syscall.Munmap(deviceUtilData)
+		}
+	}()
 
 	func() {
 		driverVersion, ret := c.SystemGetDriverVersion()
@@ -290,6 +306,13 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				c.nodeName)
 		}
 	}()
+
+	if c.featureGate.Enabled(util.SMWatcher) {
+		deviceUtil, deviceUtilData, err = watcher.MmapDeviceUtilT(smFilePath)
+		if err != nil {
+			klog.V(3).ErrorS(err, "Failed to read manager SM util file")
+		}
+	}
 
 	err = c.VisitDevices(func(index int, hdev nvdev.Device) error {
 		gpuInfo, err := c.GetGpuInfo(index, hdev)
@@ -342,56 +365,19 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		// On MIG-enabled GPUs, querying device utilization rates is not currently supported.
-		deviceUtil, rt := hdev.GetUtilizationRates()
+		deviceUtilRates, rt := hdev.GetUtilizationRates()
 		if rt != nvml.SUCCESS {
 			klog.Errorf("error getting utilization rates for device %d: %s", index, nvml.ErrorString(rt))
 		} else {
 			ch <- prometheus.MustNewConstMetric(
 				physicalGPUCoreUtilRate,
 				prometheus.GaugeValue,
-				float64(deviceUtil.Gpu),
+				float64(deviceUtilRates.Gpu),
 				c.nodeName, deviceIndex, gpuInfo.UUID, gpuInfo.ProductName,
 				busId, minorNumber, migEnabled, gpuInfo.CudaComputeCapability)
 		}
 
-		// Aggregate GPU processes.
-		var processInfos []nvml.ProcessInfo
-		// In MIG mode, if device handle is provided, the API returns aggregate information, only if the caller has appropriate privileges.
-		// Per-instance information can be queried by using specific MIG device handles.
-		// Querying per-instance information using MIG device handles is not supported if the device is in vGPU Host virtualization mode.
-		if procs, rt := hdev.GetGraphicsRunningProcesses(); rt == nvml.SUCCESS {
-			processInfos = append(processInfos, procs...)
-		}
-		if procs, rt := hdev.GetComputeRunningProcesses(); rt == nvml.SUCCESS {
-			processInfos = append(processInfos, procs...)
-		}
-		processInfoList := make(procInfoList)
-		for _, processInfo := range processInfos {
-			procInfo, ok := processInfoList[processInfo.Pid]
-			if ok {
-				procInfo.UsedGpuMemory += processInfo.UsedGpuMemory
-			} else {
-				procInfo = nvml.ProcessInfo_v1{
-					Pid:           processInfo.Pid,
-					UsedGpuMemory: processInfo.UsedGpuMemory,
-				}
-			}
-			processInfoList[processInfo.Pid] = procInfo
-		}
-		devProcInfoMap[gpuInfo.UUID] = processInfoList
-
-		// On MIG-enabled GPUs, querying process utilization is not currently supported.
-		lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
-		procUtilSamples, rt := hdev.GetProcessUtilization(uint64(lastTs))
-		if rt != nvml.SUCCESS {
-			klog.V(4).Infof("error getting process utilization for device %d: %s", index, nvml.ErrorString(rt))
-			return nil
-		}
-		processUtilList := make(procUtilList)
-		for _, procUtilSample := range procUtilSamples {
-			processUtilList[procUtilSample.Pid] = procUtilSample
-		}
-		devProcUtilMap[gpuInfo.UUID] = processUtilList
+		CollectorDeviceProcesses(deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
 		return nil
 	})
 	if err != nil {
@@ -634,6 +620,93 @@ skipNvml:
 			c.nodeName, strconv.Itoa(devIndexMap[uuid]), uuid,
 			strconv.FormatUint(phyAssignedMemory, 10), fmt.Sprint(vGpuHealthMap[uuid]))
 	}
+}
+
+func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtilT, index int, hdev nvml.Device, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList) {
+	uuid, rt := hdev.GetUUID()
+	if rt != nvml.SUCCESS {
+		err := fmt.Errorf("error getting pci info for device %d: %v", index, rt)
+		klog.ErrorS(err, "Skip the device collection process")
+		return
+	}
+	// Aggregate GPU processes.
+	var (
+		processInfos              []nvml.ProcessInfo
+		processUtilizationSamples []nvml.ProcessUtilizationSample
+	)
+
+	nvmlProcessInfoFunc := func() {
+		// In MIG mode, if device handle is provided, the API returns aggregate information, only if the caller has appropriate privileges.
+		// Per-instance information can be queried by using specific MIG device handles.
+		// Querying per-instance information using MIG device handles is not supported if the device is in vGPU Host virtualization mode.
+		if procs, rt := hdev.GetGraphicsRunningProcesses(); rt == nvml.SUCCESS {
+			processInfos = append(processInfos, procs...)
+		}
+		if procs, rt := hdev.GetComputeRunningProcesses(); rt == nvml.SUCCESS {
+			processInfos = append(processInfos, procs...)
+		}
+	}
+
+	if deviceUtil != nil {
+		klog.V(4).InfoS("collector device processes from sm watcher", "device", index)
+		fd, err := watcher.DeviceUtilRLock(index, smFilePath)
+		if err == nil {
+			if deviceUtil.Devices[index].ComputeProcessesSize > 0 {
+				processInfos = append(processInfos, deviceUtil.Devices[index].ComputeProcesses[:deviceUtil.Devices[index].ComputeProcessesSize]...)
+			}
+			if deviceUtil.Devices[index].GraphicsProcessesSize > 0 {
+				processInfos = append(processInfos, deviceUtil.Devices[index].GraphicsProcesses[:deviceUtil.Devices[index].GraphicsProcessesSize]...)
+			}
+			if len(processInfos) == 0 {
+				nvmlProcessInfoFunc()
+			}
+			micro := time.UnixMicro(int64(deviceUtil.Devices[index].LastSeenTimeStamp))
+			if time.Now().Sub(micro) > 5*time.Second {
+				watcher.DeviceUtilUnlock(fd, index)
+				klog.V(3).InfoS("Process utilization time window timeout detected, rollback using nvml driver to obtain utilization", "device", index)
+				goto nvmlProcessUtil
+			}
+			if deviceUtil.Devices[index].ProcessUtilSamplesSize > 0 {
+				processUtilizationSamples = append(processUtilizationSamples, deviceUtil.Devices[index].ProcessUtilSamples[:deviceUtil.Devices[index].ProcessUtilSamplesSize]...)
+			}
+			watcher.DeviceUtilUnlock(fd, index)
+			goto collecProcessInfo
+		} else {
+			klog.V(3).ErrorS(err, "SM Watcher lock failed, fallback to nvml driver call", "device", index)
+		}
+	}
+
+	nvmlProcessInfoFunc()
+
+nvmlProcessUtil:
+	// On MIG-enabled GPUs, querying process utilization is not currently supported.
+	processUtilizationSamples, rt = hdev.GetProcessUtilization(uint64(time.Now().Add(-1 * time.Second).UnixMicro()))
+	if rt != nvml.SUCCESS {
+		klog.V(4).Infof("error getting process utilization for device %d: %s", index, nvml.ErrorString(rt))
+		processUtilizationSamples = nil
+	}
+
+collecProcessInfo:
+	processInfoList := make(procInfoList, len(processInfos))
+	for _, processInfo := range processInfos {
+		procInfo, ok := processInfoList[processInfo.Pid]
+		if ok {
+			procInfo.UsedGpuMemory += processInfo.UsedGpuMemory
+		} else {
+			procInfo = nvml.ProcessInfo_v1{
+				Pid:           processInfo.Pid,
+				UsedGpuMemory: processInfo.UsedGpuMemory,
+			}
+		}
+		processInfoList[processInfo.Pid] = procInfo
+	}
+	devProcInfoMap[uuid] = processInfoList
+
+	processUtilList := make(procUtilList, len(processUtilizationSamples))
+	for _, procUtilSample := range processUtilizationSamples {
+		processUtilList[procUtilSample.Pid] = procUtilSample
+	}
+	devProcUtilMap[uuid] = processUtilList
 }
 
 func FlattenMigInfosMapFunc(migInfosMap map[string][]*nvidia.MigInfo, f func(parentUUID string, migInfo *nvidia.MigInfo)) {

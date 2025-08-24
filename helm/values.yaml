@@ -149,6 +149,7 @@ devicePlugin:
       # - MemoryPlugin
       # - Reschedule
       # - GPUTopology
+      # - SMWatcher
       featureGates: ""
       logLevel: 3
     # Device plugin container requests resources.
@@ -171,6 +172,9 @@ devicePlugin:
       serverBindPort: 3456
       # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
+      # Supported feature gates:
+      # - SMWatcher
+      featureGates: ""
       logLevel: 3
     # Device monitor container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.

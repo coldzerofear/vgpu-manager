@@ -18,7 +18,7 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-type server struct {
+type Server struct {
 	registry   *prometheus.Registry
 	limiter    *rate.Limiter
 	timeout    time.Duration
@@ -58,7 +58,7 @@ func (r *responseRecorder) WriteHeader(status int) {
 	r.writer.WriteHeader(status)
 }
 
-func (s *server) Start(stopCh <-chan struct{}) error {
+func (s *Server) Start(stopCh <-chan struct{}) error {
 	if s.httpServer != nil {
 		return fmt.Errorf("metrics service has been started and cannot be restarted again")
 	}
@@ -71,7 +71,7 @@ func (s *server) Start(stopCh <-chan struct{}) error {
 		}
 		lastResp     lastResponse
 		lastRespLock sync.RWMutex
-		next         = promhttp.HandlerFor(s.registry, opts)
+		next         = promhttp.InstrumentMetricHandler(s.registry, promhttp.HandlerFor(s.registry, opts))
 	)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +85,7 @@ func (s *server) Start(stopCh <-chan struct{}) error {
 				}
 				w.Header().Set("X-Rate-Limited", "true")
 				w.WriteHeader(lastResp.status)
-				w.Write(lastResp.body)
+				_, _ = w.Write(lastResp.body)
 			} else {
 				http.Error(w, "Too many requests", http.StatusTooManyRequests)
 			}
@@ -129,7 +129,7 @@ func (s *server) Start(stopCh <-chan struct{}) error {
 	return err
 }
 
-func (s *server) Stop() {
+func (s *Server) Stop() {
 	klog.Infof("Stopping metrics service")
 	if err := s.httpServer.Shutdown(context.Background()); err != nil {
 		klog.Errorf("Error while stopping metrics service: %s", err.Error())
@@ -137,34 +137,34 @@ func (s *server) Stop() {
 	s.httpServer = nil
 }
 
-type Option func(*server)
+type Option func(*Server)
 
 func WithRegistry(registry *prometheus.Registry) Option {
-	return func(s *server) {
+	return func(s *Server) {
 		s.registry = registry
 	}
 }
 
 func WithPort(port *int) Option {
-	return func(s *server) {
+	return func(s *Server) {
 		s.port = port
 	}
 }
 
 func WithLimiter(limiter *rate.Limiter) Option {
-	return func(s *server) {
+	return func(s *Server) {
 		s.limiter = limiter
 	}
 }
 
 func WithTimeoutSecond(seconds uint) Option {
-	return func(s *server) {
+	return func(s *Server) {
 		s.timeout = time.Duration(seconds) * time.Second
 	}
 }
 
-func NewServer(opts ...Option) *server {
-	s := &server{}
+func NewServer(opts ...Option) *Server {
+	s := &Server{}
 	for _, opt := range opts {
 		opt(s)
 	}

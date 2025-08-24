@@ -3,14 +3,12 @@ package manager
 import (
 	"time"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 )
 
@@ -49,10 +47,7 @@ func (m *DeviceManager) registryDevices() {
 		Annotations: map[string]string{},
 		Labels:      map[string]string{},
 	}
-	featureGate := featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-	if featureGate == nil {
-		featureGate = featuregate.NewFeatureGate()
-	}
+
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	stopCh := m.stop
@@ -68,7 +63,7 @@ func (m *DeviceManager) registryDevices() {
 			maps.Clear(patchMetadata.Labels)
 			maps.Clear(patchMetadata.Annotations)
 			for name, fn := range funcs {
-				metadata, err := fn(featureGate)
+				metadata, err := fn(m.featureGate)
 				if err != nil {
 					klog.ErrorS(err, "Preparing to clean device infos metadata failed", "pluginName", name)
 					continue
@@ -81,7 +76,7 @@ func (m *DeviceManager) registryDevices() {
 			if err := patchNodeMetadata(m.client, m.config.GetNodeName(), patchMetadata); err != nil {
 				klog.ErrorS(err, "Cleanup node device registry infos failed")
 			}
-			close(cleanCh)
+			cleanCh <- struct{}{}
 			return
 		case <-ticker.C:
 			m.mut.Lock()
@@ -96,7 +91,7 @@ func (m *DeviceManager) registryDevices() {
 			maps.Clear(patchMetadata.Labels)
 			maps.Clear(patchMetadata.Annotations)
 			for name, fn := range funcs {
-				metadata, err := fn(featureGate)
+				metadata, err := fn(m.featureGate)
 				if err != nil {
 					klog.ErrorS(err, "Failed to prepare devices metadata", "pluginName", name)
 					continue

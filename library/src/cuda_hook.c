@@ -855,14 +855,18 @@ static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_res
     LOGGER(ERROR, "Failed to acquire read lock for device %d", device_id);
     return NVML_ERROR_UNKNOWN;
   }
-  unsigned int actual_size = g_device_util->devices[device_id].processes_size;
+
+  unsigned int actual_size = g_device_util->devices[device_id].process_util_samples_size;
   unsigned int copy_size = (*processes_size < actual_size) ? *processes_size : actual_size;
   if (copy_size > 0 && processes_sample != NULL) {
-    memcpy(processes_sample,  g_device_util->devices[device_id].processes, copy_size * sizeof(nvmlProcessUtilizationSample_t));
+    memcpy(processes_sample, g_device_util->devices[device_id].process_util_samples, copy_size * sizeof(nvmlProcessUtilizationSample_t));
   }
-  *processes_size = actual_size;
-  top_result->sys_process_num = g_device_util->devices[device_id].running_processes;
+  *processes_size = copy_size;
+
+  top_result->sys_process_num = g_device_util->devices[device_id].compute_processes_size;
   top_result->checktime = (uint64_t)g_device_util->devices[device_id].lastSeenTimeStamp;
+
+  device_util_unlock(fd, device_id);
   return NVML_SUCCESS;
 }
 

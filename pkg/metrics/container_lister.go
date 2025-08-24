@@ -71,6 +71,11 @@ func (c *ContainerLister) GetResourceData(key ContainerKey) (*vgpu.ResourceDataT
 	}
 }
 
+var excludedFolders = map[string]bool{
+	util.Checkpoints: true,
+	util.Watcher:     true,
+}
+
 func (c *ContainerLister) collectContainerKey(pods []*corev1.Pod) sets.Set[ContainerKey] {
 	setKeys := sets.New[ContainerKey]()
 	for _, pod := range pods {
@@ -100,8 +105,8 @@ func (c *ContainerLister) update() error {
 		if !entry.IsDir() {
 			continue
 		}
-		// Skip the checkpoint folder to prevent accidental deletion.
-		if entry.Name() == util.Checkpoints {
+		// Exclude some folders to prevent accidental deletion.
+		if excludedFolders[entry.Name()] {
 			continue
 		}
 		filePath := filepath.Join(c.basePath, entry.Name())

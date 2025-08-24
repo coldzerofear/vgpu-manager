@@ -66,7 +66,10 @@ func main() {
 	util.InitializeCGroupDriver(nodeConfig.GetCGroupDriver())
 
 	klog.V(3).Info("Initialize Device Resource Manager")
-	deviceManager, err := devm.NewDeviceManager(nodeConfig, kubeClient)
+	deviceManager, err := devm.NewDeviceManager(
+		nodeConfig,
+		devm.WithKubeClient(kubeClient),
+		devm.WithFeatureGate(opt.FeatureGate))
 	if err != nil {
 		klog.Fatalf("Create device manager failed: %v", err)
 	}
