@@ -3,12 +3,14 @@ package filter
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
@@ -131,8 +133,8 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 }
 
 func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extenderv1.FailedNodesMap) {
-	failedNodesMap := make(extenderv1.FailedNodesMap)
 	filteredNodes := make([]corev1.Node, 0, len(nodeNames))
+	failedNodesMap := make(extenderv1.FailedNodesMap, len(nodeNames))
 	for _, nodeName := range nodeNames {
 		if node, err := f.nodeLister.Get(nodeName); err != nil {
 			errMsg := "get node cache failed"
@@ -145,15 +147,15 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extende
 	return filteredNodes, failedNodesMap
 }
 
-func GetMemoryPolicyFunc(pod *corev1.Pod) func(info *device.NodeConfigInfo) error {
-	memoryPolicyFunc := func(info *device.NodeConfigInfo) error {
+func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
+	memoryPolicyFunc := func(node *corev1.Node, info *device.NodeConfigInfo) error {
 		return nil
 	}
 	policy, _ := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation)
 	switch strings.ToLower(policy) {
 	case string(util.VirtualMemoryPolicy), "virt":
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.VirtualMemoryPolicy)
-		memoryPolicyFunc = func(info *device.NodeConfigInfo) error {
+		memoryPolicyFunc = func(node *corev1.Node, info *device.NodeConfigInfo) error {
 			if info.MemoryScaling <= 1 {
 				return fmt.Errorf("node GPU use physical memory")
 			}
@@ -161,7 +163,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) func(info *device.NodeConfigInfo) erro
 		}
 	case string(util.PhysicalMemoryPolicy), "phy":
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.PhysicalMemoryPolicy)
-		memoryPolicyFunc = func(info *device.NodeConfigInfo) error {
+		memoryPolicyFunc = func(node *corev1.Node, info *device.NodeConfigInfo) error {
 			if info.MemoryScaling > 1 {
 				return fmt.Errorf("node GPU use virtual memory")
 			}
@@ -171,7 +173,9 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) func(info *device.NodeConfigInfo) erro
 	return memoryPolicyFunc
 }
 
-func CheckNode(node *corev1.Node, checkFunc func(info *device.NodeConfigInfo) error) error {
+type CheckNodeFunc func(node *corev1.Node, info *device.NodeConfigInfo) error
+
+func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) error {
 	heartbeat, ok := util.HasAnnotation(node, util.NodeDeviceHeartbeatAnnotation)
 	if !ok || len(heartbeat) == 0 {
 		return fmt.Errorf("node without device heartbeat")
@@ -198,25 +202,27 @@ func CheckNode(node *corev1.Node, checkFunc func(info *device.NodeConfigInfo) er
 	if nodeConfigInfo.MemoryFactor <= 0 {
 		return fmt.Errorf("node with incorrect GPU memory factor")
 	}
-	if err := checkFunc(&nodeConfigInfo); err != nil {
-		return err
+	for _, checkFunc := range checkNodeFuncs {
+		if err := checkFunc(node, &nodeConfigInfo); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// TODO nodeFilter Filter nodes with heartbeat timeout and certain configuration errors
+// nodeFilter Filter nodes with heartbeat timeout and certain configuration errors
 func (f *gpuFilter) nodeFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
 	var (
-		filteredNodes  = make([]corev1.Node, 0, len(nodes)) // Successful nodes
-		failedNodesMap = make(extenderv1.FailedNodesMap)    // Failed nodes
+		filteredNodes  = make([]corev1.Node, 0, len(nodes))          // Successful nodes
+		failedNodesMap = make(extenderv1.FailedNodesMap, len(nodes)) // Failed nodes
 	)
 	memoryPolicyFunc := GetMemoryPolicyFunc(pod)
 	for i, node := range nodes {
 		if err := CheckNode(&node, memoryPolicyFunc); err != nil {
 			failedNodesMap[node.Name] = err.Error()
-			continue
+		} else {
+			filteredNodes = append(filteredNodes, nodes[i])
 		}
-		filteredNodes = append(filteredNodes, nodes[i])
 	}
 	return filteredNodes, failedNodesMap, nil
 }
@@ -267,10 +273,9 @@ func IsScheduled(pod *corev1.Pod) bool {
 // so it should always be the last filter of gpuFilter
 func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
 	var (
-		mu             sync.Mutex
-		filteredNodes  = make([]corev1.Node, 0, 1)       // Successful nodes
-		failedNodesMap = make(extenderv1.FailedNodesMap) // Failed nodes
-		nodeInfoList   []*device.NodeInfo
+		filteredNodes  = make([]corev1.Node, 0, 1)                   // Successful nodes
+		failedNodesMap = make(extenderv1.FailedNodesMap, len(nodes)) // Failed nodes
+		nodeInfoList   = make([]*device.NodeInfo, 0, len(nodes))
 		success        bool
 	)
 	// Skip pods that have already been scheduled.
@@ -288,37 +293,54 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		klog.Errorf("PodLister get all pod failed: %v", err)
 		return filteredNodes, failedNodesMap, err
 	}
-	nodeOriginalPosition := map[string]int{}
-	wait := sync.WaitGroup{}
-	for index := range nodes {
-		node := &nodes[index]
-		wait.Add(1)
-		go func(node *corev1.Node, pods []*corev1.Pod) {
-			defer wait.Done()
-			_, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
-			if !ok || !util.IsVGPUEnabledNode(node) {
-				klog.V(3).InfoS("node has not registered any GPU devices, skipping it", "node", node.Name)
-				mu.Lock()
-				failedNodesMap[node.Name] = "node without GPU device"
-				mu.Unlock()
-				return
+
+	var (
+		mutex                = sync.Mutex{}
+		waitGroup            = sync.WaitGroup{}
+		nodeOriginalPosition = make(map[string]int, len(nodes))
+	)
+	maxGoroutines := runtime.NumCPU() * 2
+	batchSize := (len(nodes) + maxGoroutines - 1) / maxGoroutines
+	batches := watcher.BalanceBatches(len(nodes), batchSize)
+	for _, batch := range batches {
+		waitGroup.Add(1)
+		go func(startIndex, endIndex, count int) {
+			defer waitGroup.Done()
+			batchNodeInfos := make([]*device.NodeInfo, 0, count)
+			batchFailedNodes := make(map[string]string, count)
+			batchNodeOrigPosition := make(map[string]int, count)
+			for index := startIndex; index <= endIndex; index++ {
+				node := &nodes[index]
+				batchNodeOrigPosition[node.Name] = index
+				_, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
+				if !ok || !util.IsVGPUEnabledNode(node) {
+					klog.V(3).InfoS("node has not registered any GPU devices, skipping it", "node", node.Name)
+					batchFailedNodes[node.Name] = "node without GPU device"
+					continue
+				}
+				nodeInfo, err := device.NewNodeInfo(node, pods)
+				if err != nil {
+					klog.ErrorS(err, "Create node info failed, skipping node", "node", node.Name)
+					batchFailedNodes[node.Name] = err.Error()
+					continue
+				}
+				batchNodeInfos = append(batchNodeInfos, nodeInfo)
 			}
-			// Aggregate node resource distribution.
-			nodeInfo, err := device.NewNodeInfo(node, pods)
-			if err != nil {
-				klog.ErrorS(err, "Create node info failed, skipping node", "node", node.Name)
-				mu.Lock()
-				failedNodesMap[node.Name] = err.Error()
-				mu.Unlock()
-				return
+
+			mutex.Lock()
+			for name, reason := range batchFailedNodes {
+				failedNodesMap[name] = reason
 			}
-			mu.Lock()
-			nodeInfoList = append(nodeInfoList, nodeInfo)
-			mu.Unlock()
-		}(node, pods)
-		nodeOriginalPosition[node.Name] = index
+			for index := range batchNodeInfos {
+				nodeInfoList = append(nodeInfoList, batchNodeInfos[index])
+			}
+			for node, index := range batchNodeOrigPosition {
+				nodeOriginalPosition[node] = index
+			}
+			mutex.Unlock()
+		}(batch.StartIndex, batch.EndIndex, batch.Count)
 	}
-	wait.Wait()
+	waitGroup.Wait()
 
 	// Sort nodes according to node scheduling strategy.
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
