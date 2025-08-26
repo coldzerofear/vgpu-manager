@@ -556,12 +556,6 @@ nvmlReturn_t nvmlDeviceGetPerformanceState(nvmlDevice_t device,
                          device, pState);
 }
 
-nvmlReturn_t nvmlDeviceGetPersistenceMode(nvmlDevice_t device,
-                                          nvmlEnableState_t *mode) {
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetPersistenceMode,
-                         device, mode);
-}
-
 nvmlReturn_t nvmlDeviceGetPowerManagementDefaultLimit(nvmlDevice_t device,
                                          unsigned int *defaultLimit) {
   return NVML_ENTRY_CALL(nvml_library_entry,

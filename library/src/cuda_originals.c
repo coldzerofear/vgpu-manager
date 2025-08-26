@@ -3445,19 +3445,6 @@ CUresult cuGraphUpload_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
                          hStream);
 }
 
-
-CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
-                                 CUmemoryPool pool, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr,
-                         bytesize, pool, hStream);
-}
-
-CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
-                                      CUmemoryPool pool, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr,
-                         bytesize, pool, hStream);
-}
-
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemFreeAsync), dptr, hStream);
 }

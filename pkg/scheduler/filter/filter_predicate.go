@@ -15,6 +15,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -328,15 +329,11 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			}
 
 			mutex.Lock()
-			for name, reason := range batchFailedNodes {
-				failedNodesMap[name] = reason
-			}
+			maps.Copy(failedNodesMap, batchFailedNodes)
 			for index := range batchNodeInfos {
 				nodeInfoList = append(nodeInfoList, batchNodeInfos[index])
 			}
-			for node, index := range batchNodeOrigPosition {
-				nodeOriginalPosition[node] = index
-			}
+			maps.Copy(nodeOriginalPosition, batchNodeOrigPosition)
 			mutex.Unlock()
 		}(batch.StartIndex, batch.EndIndex, batch.Count)
 	}

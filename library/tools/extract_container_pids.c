@@ -5,26 +5,20 @@
 
 extern int extract_container_pids(char *base_path, int *pids, int *pids_size);
 
-//static int int_compare(const void *a, const void *b) {
-//  const int *pa = (const int *)a;
-//  const int *pb = (const int *)b;
-//  return (*pa > *pb) - (*pa < *pb);
-//}
+static int int_compare(const void *a, const void *b) {
+  const int *pa = (const int *)a;
+  const int *pb = (const int *)b;
+  return (*pa > *pb) - (*pa < *pb);
+}
 
 int check_container_pid_by_open_kernel(unsigned int pid, int *pids_on_container, int pids_size) {
   int ret = 0;
   if (pid == 0 || !pids_on_container || pids_size <= 0) {
     return ret;
   }
-  for (int i = 0; i < pids_size; i++) {
-    if (pid == pids_on_container[i]) {
-      ret = 1;
-      break;
-    }
+  if (bsearch(&pid, pids_on_container, (size_t)pids_size, sizeof(int), int_compare)) {
+    ret = 1;
   }
-//  if (bsearch(&pid, pids_on_container, (size_t)pids_size, sizeof(int), int_compare)) {
-//    ret = 1;
-//  }
   return ret;
 }
 

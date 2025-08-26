@@ -23,27 +23,23 @@ int main(int argc, char **argv) {
     int size_mb = str2int(argv[2]);
     int time = str2int(argv[3]);
 
-    //初始化设备
     if (cuInit(0) != CUDA_SUCCESS) {
         printf("cuInit failed\n");
         return -1;
     }
 
-    //获得设备句柄
     CUdevice cuDevice;
     if (cuDeviceGet(&cuDevice, device_id) != CUDA_SUCCESS) {
         printf("cuDeviceGet failed\n");
         return -1;
     }
 
-    //创建上下文
     CUcontext cuContext;
     if (cuCtxCreate_v2(&cuContext, 0, cuDevice) != CUDA_SUCCESS) {
         printf("cuCtxCreate_v2 failed\n");
         return -1; 
     }
 
-    //显存中分配向量空间
     size_t size = size_mb;
     size *= 1024 * 1024;
     CUdeviceptr d;
