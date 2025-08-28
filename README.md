@@ -18,6 +18,7 @@ A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) device
 - [x] Provide the optimal topology allocation for NUMA and NVLink
 - [x] Compatible with open-gpu-kernel-modules
 - [x] Support MIG strategy device allocation
+- [x] Add an independent core utilization Watcher to avoid frequent driver calls
 - [ ] Provide a scheduler framework plugin to achieve high-performance scheduling
 - [ ] Support device hot plugging and expansion ([device-mounter](https://github.com/coldzerofear/device-mounter))
 - [ ] Compatible with Volcano Batch Scheduler

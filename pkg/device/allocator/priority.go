@@ -36,8 +36,17 @@ var (
 	ByAllocatableNumberDes = func(p1, p2 *device.Device) bool {
 		return p1.AllocatableNumber() > p2.AllocatableNumber()
 	}
-	ByNumaAsc = func(p1, p2 *device.Device) bool {
-		return p1.GetNUMA() < p2.GetNUMA()
+	ByNuma = func(p1, p2 *device.Device) bool {
+		switch {
+		case p1.GetNUMA() < 0 && p2.GetNUMA() < 0:
+			return false
+		case p1.GetNUMA() < 0:
+			return false
+		case p2.GetNUMA() < 0:
+			return true
+		default:
+			return p1.GetNUMA() < p2.GetNUMA()
+		}
 	}
 	ByNodeNameAsc = func(p1, p2 *device.NodeInfo) bool {
 		return p1.GetName() < p2.GetName()
@@ -78,10 +87,23 @@ var (
 			return p1Score > p2Score
 		}
 	}
-	// ByNodeGPUTopology Nodes with GPU topology information will be ranked first.
+	// ByNodeGPUTopology Nodes with GPU Link topology information will be ranked first.
 	ByNodeGPUTopology = func(p1, p2 *device.NodeInfo) bool {
 		hasTopo1 := p1.HasGPUTopology()
 		hasTopo2 := p2.HasGPUTopology()
+		switch {
+		case hasTopo1 && !hasTopo2:
+			return true // p1 has topology, p2 does not → p1 ranks first
+		case !hasTopo1 && hasTopo2:
+			return false // p2 has topology, p1 does not → p2 ranks first
+		default:
+			return false // both are the same: continue to compare in the future
+		}
+	}
+	// ByNodeNUMATopology Nodes with GPU NUMA topology information will be ranked first.
+	ByNodeNUMATopology = func(p1, p2 *device.NodeInfo) bool {
+		hasTopo1 := p1.HasNUMATopology()
+		hasTopo2 := p2.HasNUMATopology()
 		switch {
 		case hasTopo1 && !hasTopo2:
 			return true // p1 has topology, p2 does not → p1 ranks first
@@ -160,31 +182,35 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
-func NewNodeBinpackPriority(needGPUTopo bool) *sortPriority[*device.NodeInfo] {
+func ApplyTopologyMode(mode util.TopologyMode, less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
+	switch mode {
+	case util.LinkTopology:
+		less = slices.Insert[[]LessFunc[*device.NodeInfo],
+			LessFunc[*device.NodeInfo]](less, 0, ByNodeGPUTopology)
+	case util.NUMATopology:
+		less = slices.Insert[[]LessFunc[*device.NodeInfo],
+			LessFunc[*device.NodeInfo]](less, 0, ByNodeNUMATopology)
+	}
+	return less
+}
+
+func NewNodeBinpackPriority(mode util.TopologyMode) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
 		ByBinpackNodeScore(),
 		ByNodeNameAsc,
 	}
-	if needGPUTopo {
-		less = slices.Insert[[]LessFunc[*device.NodeInfo],
-			LessFunc[*device.NodeInfo]](less, 0, ByNodeGPUTopology)
-	}
 	return &sortPriority[*device.NodeInfo]{
-		less: less,
+		less: ApplyTopologyMode(mode, less),
 	}
 }
 
-func NewNodeSpreadPriority(needGPUTopo bool) *sortPriority[*device.NodeInfo] {
+func NewNodeSpreadPriority(mode util.TopologyMode) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
 		BySpreadNodeScore(),
 		ByNodeNameAsc,
 	}
-	if needGPUTopo {
-		less = slices.Insert[[]LessFunc[*device.NodeInfo],
-			LessFunc[*device.NodeInfo]](less, 0, ByNodeGPUTopology)
-	}
 	return &sortPriority[*device.NodeInfo]{
-		less: less,
+		less: ApplyTopologyMode(mode, less),
 	}
 }
 

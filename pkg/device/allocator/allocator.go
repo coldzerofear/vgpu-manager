@@ -10,16 +10,20 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
 
 type allocator struct {
 	nodeInfo *device.NodeInfo
+	recorder record.EventRecorder
 }
 
-func NewAllocator(nodeInfo *device.NodeInfo) *allocator {
+func NewAllocator(nodeInfo *device.NodeInfo, recorder record.EventRecorder) *allocator {
 	return &allocator{
 		nodeInfo: nodeInfo,
+		recorder: recorder,
 	}
 }
 
@@ -108,18 +112,23 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	}
 	// Sort the devices according to the device scheduling strategy.
 	devicePolicy, _ = util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation)
-	switch strings.ToLower(devicePolicy) {
+	switch policy := strings.ToLower(devicePolicy); policy {
 	case string(util.BinpackPolicy):
-		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, devicePolicy)
+		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, policy)
 		NewDeviceBinpackPriority().Sort(deviceStore)
 		claimDevices = alloc.allocateByTopologyMode(pod, deviceStore, util.BinpackPolicy, needNumber, needCores, needMemory)
 	case string(util.SpreadPolicy):
-		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, devicePolicy)
+		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, policy)
 		NewDeviceSpreadPriority().Sort(deviceStore)
 		claimDevices = alloc.allocateByTopologyMode(pod, deviceStore, util.SpreadPolicy, needNumber, needCores, needMemory)
 	default:
-		klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
-		NewSortPriority(ByNumaAsc, ByDeviceIdAsc).Sort(deviceStore)
+		if policy == "" || policy == string(util.NonePolicy) {
+			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
+		} else {
+			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s", pod.Namespace, pod.Name, devicePolicy)
+			alloc.sendEventf(pod, corev1.EventTypeWarning, "DevicePolicy", "Unsupported device scheduling policy '%s'", devicePolicy)
+		}
+		NewSortPriority(ByNuma, ByDeviceIdAsc).Sort(deviceStore)
 		claimDevices = alloc.allocateByTopologyMode(pod, deviceStore, util.NonePolicy, needNumber, needCores, needMemory)
 	}
 DONE:
@@ -133,39 +142,60 @@ DONE:
 	return assignDevice, nil
 }
 
+func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
+	if alloc.recorder != nil {
+		alloc.recorder.Eventf(object, eventtype, reason, messageFmt, args)
+	}
+}
+
 func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*device.Device, policy util.SchedulerPolicy, needNumber, needCores, needMemory int) []device.ClaimDevice {
 	if needNumber > 1 {
 		topologyMode, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
 		switch strings.ToLower(topologyMode) {
 		case string(util.LinkTopology):
 			klog.V(4).Infof("Pod <%s/%s> use Links topology mode", pod.Namespace, pod.Name)
-			devices, _ := alloc.nodeInfo.GetDeviceList().Filter(getDeviceUUIDs(deviceStore))
-			devices = gpuallocator.NewBestEffortPolicy().Allocate(devices, nil, needNumber)
-			if len(devices) == needNumber {
-				return allocateByDevices(deviceStore, devices, needCores, needMemory)
+			if alloc.nodeInfo.HasGPUTopology() {
+				devices, _ := alloc.nodeInfo.GetDeviceList().Filter(getDeviceUUIDs(deviceStore))
+				devices = gpuallocator.NewBestEffortPolicy().Allocate(devices, nil, needNumber)
+				if len(devices) == needNumber {
+					return allocateByDevices(deviceStore, devices, needCores, needMemory)
+				}
+				klog.Warningf("LinkTopology allocation failed, fallback to normal allocation mode")
+			} else {
+				klog.V(3).InfoS("Current node does not have GPU topology information, fallback to normal allocation mode",
+					"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod))
 			}
-			klog.Warningf("LinkTopology allocation failed, fallback to normal allocation mode")
 		case string(util.NUMATopology):
 			klog.V(4).Infof("Pod <%s/%s> use NUMA topology mode", pod.Namespace, pod.Name)
-			if numaDevices, ok := CanNotCrossNumaNode(needNumber, deviceStore); ok {
-				var claimDevices []device.ClaimDevice
-				numaDevices.SchedulerPolicyCallback(policy, func(_ int, devices []*device.Device) bool {
-					// Filter numa nodes with insufficient number of devices.
-					if needNumber > len(devices) {
-						return false
+			if alloc.nodeInfo.HasNUMATopology() {
+				numaNode, notCrossNuma := CanNotCrossNumaNode(needNumber, deviceStore)
+				if notCrossNuma {
+					var claimDevices []device.ClaimDevice
+					callbackFunc := func(_ int, devices []*device.Device) bool {
+						// Filter numa nodes with insufficient number of devices.
+						if needNumber > len(devices) {
+							return false
+						}
+						claimDevices = allocateByNumbers(devices, needNumber, needCores, needMemory)
+						return true
 					}
-					claimDevices = allocateByNumbers(devices, needNumber, needCores, needMemory)
-					return true
-				})
-				if len(claimDevices) == needNumber {
-					return claimDevices
+					numaNode.SchedulerPolicyCallback(policy, callbackFunc)
+					if len(claimDevices) == needNumber {
+						return claimDevices
+					}
+					klog.Warningf("NUMA node allocation failed, fallback to normal resource allocation mode")
+				} else {
+					klog.Warningf("NUMA node does not meet the request, fallback to normal resource allocation mode")
 				}
-				klog.Warningf("NUMA node allocation failed, fallback to normal resource allocation mode")
 			} else {
-				klog.Warningf("NUMA node does not meet the request, fallback to normal resource allocation mode")
+				klog.V(3).InfoS("Current node does not have NUMA topology information, fallback to normal allocation mode",
+					"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod))
 			}
 		case "", string(util.NoneTopology):
 			klog.V(4).Infof("Pod <%s/%s> none topology mode", pod.Namespace, pod.Name)
+		default:
+			klog.V(4).Infof("Pod <%s/%s> not supported topology mode: %s", pod.Namespace, pod.Name, topologyMode)
+			alloc.sendEventf(pod, corev1.EventTypeWarning, "DeviceTopologyMode", "Unsupported device topology mode '%s'", topologyMode)
 		}
 	}
 	return allocateByNumbers(deviceStore, needNumber, needCores, needMemory)

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,11 +33,11 @@ func Test_NodePriority(t *testing.T) {
 		)
 	}
 	start := time.Now()
-	NewNodeBinpackPriority(false).Sort(nodeInfoList)
+	NewNodeBinpackPriority(util.NoneTopology).Sort(nodeInfoList)
 	since := time.Since(start)
 	fmt.Printf("call NewNodeBinpackPriority took %d Milliseconds\n", since.Milliseconds())
 	start = time.Now()
-	NewNodeSpreadPriority(false).Sort(nodeInfoList)
+	NewNodeSpreadPriority(util.NoneTopology).Sort(nodeInfoList)
 	since = time.Since(start)
 	fmt.Printf("call NewNodeSpreadPriority took %d Milliseconds\n", since.Milliseconds())
 }
@@ -89,7 +90,7 @@ func Test_NodeSorting(t *testing.T) {
 		),
 	}
 
-	NewNodeBinpackPriority(true).Sort(nodes)
+	NewNodeBinpackPriority(util.LinkTopology).Sort(nodes)
 	wantNodeNames := []string{nodeC.Name, nodeD.Name, nodeB.Name, nodeA.Name}
 	binpackNodeNames := make([]string, len(nodes))
 	for i, node := range nodes {
@@ -97,7 +98,7 @@ func Test_NodeSorting(t *testing.T) {
 	}
 	assert.Equal(t, wantNodeNames, binpackNodeNames)
 
-	NewNodeSpreadPriority(true).Sort(nodes)
+	NewNodeSpreadPriority(util.LinkTopology).Sort(nodes)
 	wantNodeNames = []string{nodeB.Name, nodeC.Name, nodeD.Name, nodeA.Name}
 	spreadNodeNames := make([]string, len(nodes))
 	for i, node := range nodes {
@@ -105,7 +106,7 @@ func Test_NodeSorting(t *testing.T) {
 	}
 	assert.Equal(t, wantNodeNames, spreadNodeNames)
 
-	NewNodeSpreadPriority(false).Sort(nodes)
+	NewNodeSpreadPriority(util.NoneTopology).Sort(nodes)
 	wantNodeNames = []string{nodeA.Name, nodeB.Name, nodeC.Name, nodeD.Name}
 	spreadNodeNames = make([]string, len(nodes))
 	for i, node := range nodes {

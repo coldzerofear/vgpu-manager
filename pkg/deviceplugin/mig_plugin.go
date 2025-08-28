@@ -142,14 +142,18 @@ func (m *migDevicePlugin) Devices() []*pluginapi.Device {
 			if !migDevice.Healthy {
 				health = pluginapi.Unhealthy
 			}
+			var topologyInfo *pluginapi.TopologyInfo
+			if gpuDevice.NumaNode >= 0 {
+				topologyInfo = &pluginapi.TopologyInfo{
+					Nodes: []*pluginapi.NUMANode{
+						{ID: int64(gpuDevice.NumaNode)},
+					},
+				}
+			}
 			devices = append(devices, &pluginapi.Device{
-				ID:     uuid,
-				Health: health,
-				Topology: &pluginapi.TopologyInfo{
-					Nodes: []*pluginapi.NUMANode{{
-						ID: int64(gpuDevice.NumaNode),
-					}},
-				},
+				ID:       uuid,
+				Health:   health,
+				Topology: topologyInfo,
 			})
 		}
 	}

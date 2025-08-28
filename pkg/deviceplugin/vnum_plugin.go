@@ -112,8 +112,7 @@ func (m *vnumberDevicePlugin) getDecodeNodeConfigInfo() (string, error) {
 }
 
 func (m *vnumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGate) (*client.PatchMetadata, error) {
-	nodeDeviceInfos := m.base.manager.GetNodeDeviceInfo()
-	registryGPUs, err := nodeDeviceInfos.Encode()
+	registryGPUs, err := m.base.manager.GetNodeDeviceInfo().Encode()
 	if err != nil {
 		return nil, fmt.Errorf("encoding node device information failed: %v", err)
 	}
@@ -697,6 +696,14 @@ func (m *vnumberDevicePlugin) Devices() []*pluginapi.Device {
 		if gpuDevice.Mig { // skip MIG device
 			continue
 		}
+		var topologyInfo *pluginapi.TopologyInfo
+		if gpuDevice.Numa >= 0 {
+			topologyInfo = &pluginapi.TopologyInfo{
+				Nodes: []*pluginapi.NUMANode{
+					{ID: int64(gpuDevice.Numa)},
+				},
+			}
+		}
 		for i := 0; i < gpuDevice.Number; i++ {
 			devId := fmt.Sprintf("%d:%s:%d", gpuDevice.Id, gpuDevice.Uuid, i)
 			health := pluginapi.Healthy
@@ -704,13 +711,9 @@ func (m *vnumberDevicePlugin) Devices() []*pluginapi.Device {
 				health = pluginapi.Unhealthy
 			}
 			devices = append(devices, &pluginapi.Device{
-				ID:     devId,
-				Health: health,
-				Topology: &pluginapi.TopologyInfo{
-					Nodes: []*pluginapi.NUMANode{{
-						ID: int64(gpuDevice.Numa),
-					}},
-				},
+				ID:       devId,
+				Health:   health,
+				Topology: topologyInfo,
 			})
 		}
 	}

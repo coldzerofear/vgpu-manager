@@ -382,25 +382,30 @@ func IsGPUTopologyEnabled() bool {
 	return gpuTopologyEnabled
 }
 
-func NewDeviceMapAndDeviceList(node *corev1.Node) (map[int]*Device, gpuallocator.DeviceList, bool, error) {
+func NewDeviceMapListAndTopology(node *corev1.Node) (map[int]*Device, gpuallocator.DeviceList, bool, bool, error) {
 	deviceRegister, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 	nodeDeviceInfo, err := ParseNodeDeviceInfo(deviceRegister)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("parse node device information failed: %v", err)
+		return nil, nil, false, false, fmt.Errorf("parse node device information failed: %v", err)
 	}
 	deviceMap := make(map[int]*Device, len(nodeDeviceInfo))
 	deviceList := make(gpuallocator.DeviceList, len(nodeDeviceInfo))
+	numaSet := map[int]struct{}{}
 	for _, deviceInfo := range nodeDeviceInfo {
+		if deviceInfo.Numa >= 0 {
+			numaSet[deviceInfo.Numa] = struct{}{}
+		}
 		deviceMap[deviceInfo.Id] = NewDevice(deviceInfo)
 		deviceList[deviceInfo.Id] = gpuallocator.NewDevice(
 			deviceInfo.Id, deviceInfo.Uuid, deviceInfo.BusId)
 	}
 	hasGPUTopology := false
+	hasNumaTopology := len(numaSet) > 1
 	if IsGPUTopologyEnabled() {
 		topoStr, ok := util.HasAnnotation(node, util.NodeDeviceTopologyAnnotation)
 		if !ok || len(topoStr) == 0 {
 			klog.V(3).InfoS("node does not have device topology information", "node", node.Name)
-			return deviceMap, deviceList, false, nil
+			return deviceMap, deviceList, false, hasNumaTopology, nil
 		}
 		nodeTopology, err := ParseNodeTopology(topoStr)
 		if err != nil {
@@ -415,7 +420,7 @@ func NewDeviceMapAndDeviceList(node *corev1.Node) (map[int]*Device, gpuallocator
 			}
 		}
 	}
-	return deviceMap, deviceList, hasGPUTopology, nil
+	return deviceMap, deviceList, hasGPUTopology, hasNumaTopology, nil
 }
 
 // GetID returns the idx of this device
@@ -564,20 +569,22 @@ type NodeInfo struct {
 	usedCores     int
 	maxCapability float32
 	gpuTopology   bool
+	numaTopology  bool
 }
 
 func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	klog.V(4).Infof("create nodeInfo for %s", node.Name)
-	deviceMap, deviceList, hasTopology, err := NewDeviceMapAndDeviceList(node)
+	devMap, devList, gpuTopo, numaTopo, err := NewDeviceMapListAndTopology(node)
 	if err != nil {
 		return nil, err
 	}
 	ret := &NodeInfo{
-		node:        node,
-		name:        node.Name,
-		deviceMap:   deviceMap,
-		deviceList:  deviceList,
-		gpuTopology: hasTopology,
+		node:         node,
+		name:         node.Name,
+		deviceMap:    devMap,
+		deviceList:   devList,
+		gpuTopology:  gpuTopo,
+		numaTopology: numaTopo,
 	}
 	ret.addPodsDeviceResources(pods)
 	ret.initResourceStatistics()
@@ -734,7 +741,12 @@ func (n *NodeInfo) GetAvailableNumber() int {
 	return 0
 }
 
-// HasGPUTopology Return whether there is GPU topology information
+// HasGPUTopology Return whether there is GPU link topology information
 func (n *NodeInfo) HasGPUTopology() bool {
 	return n.gpuTopology
+}
+
+// HasNUMATopology Return whether there is GPU numa topology information
+func (n *NodeInfo) HasNUMATopology() bool {
+	return n.numaTopology
 }

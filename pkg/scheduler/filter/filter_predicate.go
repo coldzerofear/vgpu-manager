@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -341,33 +340,39 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 
 	// Sort nodes according to node scheduling strategy.
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
-	switch strings.ToLower(nodePolicy) {
+	switch policy := strings.ToLower(nodePolicy); policy {
 	case string(util.BinpackPolicy):
-		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), nodePolicy)
-		allocator.NewNodeBinpackPriority(needGPUTopology(pod)).Sort(nodeInfoList)
+		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), policy)
+		allocator.NewNodeBinpackPriority(PodUsedGPUTopologyMode(pod)).Sort(nodeInfoList)
 	case string(util.SpreadPolicy):
-		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), nodePolicy)
-		allocator.NewNodeSpreadPriority(needGPUTopology(pod)).Sort(nodeInfoList)
+		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), policy)
+		allocator.NewNodeSpreadPriority(PodUsedGPUTopologyMode(pod)).Sort(nodeInfoList)
 	default:
-		klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
+		if policy == "" || policy == string(util.NonePolicy) {
+			klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
+		} else {
+			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), nodePolicy)
+			f.recorder.Eventf(pod, corev1.EventTypeWarning, "NodePolicy", "Unsupported node scheduling policy '%s'", nodePolicy)
+		}
 		less := []allocator.LessFunc[*device.NodeInfo]{func(p1, p2 *device.NodeInfo) bool {
 			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
 		}}
-		if needGPUTopology(pod) {
-			less = slices.Insert[[]allocator.LessFunc[*device.NodeInfo],
-				allocator.LessFunc[*device.NodeInfo]](less, 0, allocator.ByNodeGPUTopology)
-		}
+		less = allocator.ApplyTopologyMode(PodUsedGPUTopologyMode(pod), less)
 		allocator.NewSortPriority[*device.NodeInfo](less...).Sort(nodeInfoList)
 	}
-
-	for _, nodeInfo := range nodeInfoList {
+	recorder := f.recorder
+	for i, nodeInfo := range nodeInfoList {
 		node := nodeInfo.GetNode()
 		if success {
 			failedNodesMap[node.Name] = fmt.Sprintf("pod %s has already been matched to another node", pod.UID)
 			continue
 		}
+		if i > 0 {
+			// Only send one event.
+			recorder = nil
+		}
 		// Attempt to allocate devices for pods on this node.
-		newPod, err := allocator.NewAllocator(nodeInfo).Allocate(pod)
+		newPod, err := allocator.NewAllocator(nodeInfo, recorder).Allocate(pod)
 		if err != nil {
 			klog.ErrorS(err, "node device allocate failed", "node", node.Name, "pod", klog.KObj(pod))
 			failedNodesMap[node.Name] = err.Error()
@@ -386,10 +391,14 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	return filteredNodes, failedNodesMap, nil
 }
 
-func needGPUTopology(pod *corev1.Pod) bool {
-	if device.IsGPUTopologyEnabled() {
-		topoMode, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
-		return strings.EqualFold(topoMode, string(util.LinkTopology)) && util.IsSingleContainerMultiGPUs(pod)
+func PodUsedGPUTopologyMode(pod *corev1.Pod) util.TopologyMode {
+	topoMode, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
+	switch {
+	case topoMode == string(util.LinkTopology) && device.IsGPUTopologyEnabled() && util.IsSingleContainerMultiGPUs(pod):
+		return util.LinkTopology
+	case topoMode == string(util.NUMATopology) && util.IsSingleContainerMultiGPUs(pod):
+		return util.NUMATopology
+	default:
+		return util.NoneTopology
 	}
-	return false
 }

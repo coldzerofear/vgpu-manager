@@ -131,33 +131,49 @@ func Test_parseNvidiaNumaInfo(t *testing.T) {
 		wantErr       bool
 	}{
 		{
-			name: "single Tesla P4 NUMA",
+			name: "no GPU index",
 			idx:  0,
 			nvidiaTopoStr: `GPU0    CPU Affinity    NUMA Affinity ...
                             ...`,
-			want:    0,
+			want:    -1,
 			wantErr: false,
 		}, {
 			name: "two Tesla P4 NUMA topo with index 0",
 			idx:  0,
-			nvidiaTopoStr: `GPU0    GPU1    CPU Affinity    NUMA Affinity ...
-                            ...`,
+			nvidiaTopoStr: `	GPU0	GPU1	CPU Affinity	NUMA Affinity ...
+GPU0	X	NV18	0-8	0
+GPU1	NV18	X	0-8	0`,
 			want:    0,
 			wantErr: false,
 		}, {
 			name: "two Tesla P4 NUMA topo with index 1",
 			idx:  1,
-			nvidiaTopoStr: `GPU0    GPU1    CPU Affinity    NUMA Affinity ...
-                            ...`,
+			nvidiaTopoStr: `	GPU0	GPU1	CPU Affinity	NUMA Affinity ...
+GPU0	X	NV18	0-8	0
+GPU1	NV18	X	0-8	0`,
 			want:    0,
 			wantErr: false,
 		}, {
 			name: "NUMA Affinity is empty",
 			idx:  0,
-			nvidiaTopoStr: `GPU0	CPU Affinity	NUMA Affinity	GPU NUMA ID
+			nvidiaTopoStr: `	GPU0	CPU Affinity	NUMA Affinity	GPU NUMA ID
 GPU0	X`,
-			want:    0,
+			want:    -1,
 			wantErr: false,
+		}, {
+			name: "NUMA Affinity is N/A",
+			idx:  0,
+			nvidiaTopoStr: `	GPU0	CPU Affinity	NUMA Affinity	GPU NUMA ID
+GPU0	X	0-8	N/A	X`,
+			want:    -1,
+			wantErr: false,
+		}, {
+			name: "NUMA Affinity is not a number",
+			idx:  0,
+			nvidiaTopoStr: `	GPU0	CPU Affinity	NUMA Affinity	GPU NUMA ID
+GPU0	X	0-8	??	X`,
+			want:    -1,
+			wantErr: true,
 		}, {
 			name: "multi-gpu topo with index 4",
 			idx:  4,
