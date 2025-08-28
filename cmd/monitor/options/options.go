@@ -3,11 +3,12 @@ package options
 import (
 	"flag"
 	"fmt"
+	"os"
+
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/component-base/featuregate"
-	baseversion "k8s.io/component-base/version"
-	"os"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
@@ -41,8 +42,8 @@ const (
 func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(defaultFeatureGates))
-	runtime.Must(featuregate.DefaultComponentGlobalsRegistry.Register(
-		Component, baseversion.DefaultBuildEffectiveVersion(), featureGate))
+	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
+		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate))
 	return &Options{
 		QPS:            defaultQPS,
 		Burst:          defaultBurst,

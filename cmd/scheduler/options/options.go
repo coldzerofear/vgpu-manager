@@ -3,14 +3,16 @@ package options
 import (
 	"flag"
 	"fmt"
+
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/apiserver/pkg/util/compatibility"
+
 	"os"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/component-base/featuregate"
-	baseversion "k8s.io/component-base/version"
 )
 
 type Options struct {
@@ -55,8 +57,8 @@ var (
 func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(defaultFeatureGates))
-	runtime.Must(featuregate.DefaultComponentGlobalsRegistry.Register(
-		Component, baseversion.DefaultBuildEffectiveVersion(), featureGate))
+	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
+		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate))
 	return &Options{
 		SchedulerName:       defaultSchedulerName,
 		QPS:                 defaultQPS,

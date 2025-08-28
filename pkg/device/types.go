@@ -13,9 +13,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/component-base/featuregate"
+	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"k8s.io/kube-scheduler/framework"
 )
 
 type NodeConfigInfo struct {
@@ -375,7 +375,7 @@ var (
 
 func IsGPUTopologyEnabled() bool {
 	gpuTopoEnabledOnce.Do(func() {
-		featureGate := featuregate.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
+		featureGate := compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
 		gpuTopologyEnabled = featureGate != nil && featureGate.Enabled(options.GPUTopology)
 		klog.InfoS("Feature Gates[GPUTopology]", "enabled", gpuTopologyEnabled)
 	})

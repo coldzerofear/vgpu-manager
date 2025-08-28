@@ -10,6 +10,7 @@ import (
 )
 
 type vmemoryDevicePlugin struct {
+	pluginapi.UnimplementedDevicePluginServer
 	base *baseDevicePlugin
 }
 

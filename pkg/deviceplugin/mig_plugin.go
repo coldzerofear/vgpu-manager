@@ -13,6 +13,7 @@ import (
 )
 
 type migDevicePlugin struct {
+	pluginapi.UnimplementedDevicePluginServer
 	base *baseDevicePlugin
 }
 
@@ -97,7 +98,7 @@ func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReq
 	imexChannels := m.base.manager.GetImexChannels()
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	for i, containerRequest := range req.ContainerRequests {
-		deviceIds := containerRequest.GetDevicesIDs()
+		deviceIds := containerRequest.GetDevicesIds()
 		responses[i] = &pluginapi.ContainerAllocateResponse{
 			Envs: make(map[string]string),
 		}

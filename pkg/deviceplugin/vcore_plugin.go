@@ -10,6 +10,7 @@ import (
 )
 
 type vcoreDevicePlugin struct {
+	pluginapi.UnimplementedDevicePluginServer
 	base *baseDevicePlugin
 }
 

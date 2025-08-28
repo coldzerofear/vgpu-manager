@@ -11,8 +11,8 @@ import (
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/component-base/featuregate"
-	baseversion "k8s.io/component-base/version"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
@@ -82,8 +82,8 @@ var (
 func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(defaultFeatureGates))
-	runtime.Must(featuregate.DefaultComponentGlobalsRegistry.Register(
-		Component, baseversion.DefaultBuildEffectiveVersion(), featureGate))
+	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
+		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate))
 	gdsEnabled := os.Getenv("NVIDIA_GDS") == "enabled" || os.Getenv("NVIDIA_GDS") == "true"
 	mofedEnabled := os.Getenv("NVIDIA_MOFED") == "enabled" || os.Getenv("NVIDIA_MOFED") == "true"
 	var imexChannelIDs []int

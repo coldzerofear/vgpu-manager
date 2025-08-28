@@ -33,6 +33,7 @@ import (
 )
 
 type vnumberDevicePlugin struct {
+	pluginapi.UnimplementedDevicePluginServer
 	base        *baseDevicePlugin
 	kubeClient  *kubernetes.Clientset
 	podResource *client.PodResource
@@ -374,7 +375,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	imexChannels := m.base.manager.GetImexChannels()
 	enabledSMWatcher := m.base.manager.GetFeatureGate().Enabled(util.SMWatcher)
 	for i, containerRequest := range req.ContainerRequests {
-		number := len(containerRequest.GetDevicesIDs())
+		number := len(containerRequest.GetDevicesIds())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
 		if err != nil {
 			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
@@ -477,7 +478,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		_ = os.Chmod(contManagerDirectory, 0777)
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>/devices.json
 		filePath := filepath.Join(contManagerDirectory, DeviceListFileName)
-		jsonBytes, _ := json.Marshal(containerRequest.GetDevicesIDs())
+		jsonBytes, _ := json.Marshal(containerRequest.GetDevicesIds())
 		if err = os.WriteFile(filePath, jsonBytes, 0664); err != nil {
 			err = fmt.Errorf("failed to write %s file: %v", DeviceListFileName, err)
 			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
@@ -593,7 +594,7 @@ func (m *vnumberDevicePlugin) getCurrentPodInfo(devicesIDs []string) (*client.Po
 // before each container start. Device plugin can run device specific operations
 // such as resetting the device before making devices available to the container.
 func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *pluginapi.PreStartContainerRequest) (resp *pluginapi.PreStartContainerResponse, err error) {
-	klog.V(4).InfoS("PreStartContainer", "pluginName", m.Name(), "request", req.GetDevicesIDs())
+	klog.V(4).InfoS("PreStartContainer", "pluginName", m.Name(), "request", req.GetDevicesIds())
 	resp = &pluginapi.PreStartContainerResponse{}
 	defer func() {
 		if err != nil {
@@ -619,7 +620,7 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		klog.Errorf("failed to get node <%s>: %v", nodeName, err)
 		return resp, err
 	}
-	podInfo, err := m.getCurrentPodInfo(req.GetDevicesIDs())
+	podInfo, err := m.getCurrentPodInfo(req.GetDevicesIds())
 	if err != nil {
 		klog.Errorln(err.Error())
 		return resp, err
@@ -649,8 +650,8 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		return resp, err
 	}
 	// Verify if there are any errors in the allocation of container equipment.
-	if len(deviceIDs) != len(req.GetDevicesIDs()) ||
-		!sets.NewString(req.GetDevicesIDs()...).HasAll(deviceIDs...) {
+	if len(deviceIDs) != len(req.GetDevicesIds()) ||
+		!sets.NewString(req.GetDevicesIds()...).HasAll(deviceIDs...) {
 		err = fmt.Errorf("inconsistent allocation results of container equipment")
 		klog.V(3).ErrorS(err, "", "pod", klog.KObj(pod))
 		return resp, err
