@@ -418,15 +418,6 @@ func (m *DeviceManager) Start() {
 	go m.doWatcher()
 }
 
-func (m *DeviceManager) GetDeviceInfoMap() map[string]device.DeviceInfo {
-	nodeDeviceInfo := m.GetNodeDeviceInfo()
-	deviceInfoMap := make(map[string]device.DeviceInfo, len(nodeDeviceInfo))
-	for i := range nodeDeviceInfo {
-		deviceInfoMap[nodeDeviceInfo[i].Uuid] = nodeDeviceInfo[i]
-	}
-	return deviceInfoMap
-}
-
 func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 	// Scaling Cores.
 	totalCores := int(m.config.GetDeviceCoresScaling() * float64(util.HundredCore))

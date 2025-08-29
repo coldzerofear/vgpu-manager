@@ -1013,6 +1013,7 @@ resource_data_t vgpu_config_temp = {
     .pod_namespace = "",
     .container_name = "",
     .devices = {},
+    .host_index = {},
     .device_count = 0,
     .compatibility_mode = 0,
     .sm_watcher = 0,

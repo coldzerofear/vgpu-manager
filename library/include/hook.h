@@ -161,6 +161,7 @@ typedef struct {
   char pod_namespace[64];
   char container_name[64];
   device_t devices[MAX_DEVICE_COUNT];
+  char host_index[MAX_DEVICE_COUNT][48];
   int device_count;
   int compatibility_mode;
   int sm_watcher;

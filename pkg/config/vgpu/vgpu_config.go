@@ -60,6 +60,7 @@ import (
 //  char pod_namespace[64];
 //  char container_name[64];
 //  struct device_t devices[MAX_DEVICE_COUNT];
+//  char host_index[MAX_DEVICE_COUNT][48];
 //  int device_count;
 //  int compatibility_mode;
 //  int sm_watcher;
@@ -88,6 +89,10 @@ import (
 //}
 import "C"
 
+const (
+	MAX_DEVICE_COUNT = C.MAX_DEVICE_COUNT
+)
+
 type VersionT struct {
 	Major int32
 	Minor int32
@@ -111,7 +116,8 @@ type ResourceDataT struct {
 	PodName           [64]byte
 	PodNamespace      [64]byte
 	ContainerName     [64]byte
-	Devices           [util.MaxDeviceNumber]DeviceT
+	Devices           [MAX_DEVICE_COUNT]DeviceT
+	HostIndex         [MAX_DEVICE_COUNT][48]byte
 	DeviceCount       int32
 	CompatibilityMode int32
 	SMWatcher         int32
@@ -194,16 +200,23 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		return byteArray
 	}
 	computePolicy := GetComputePolicy(pod, node)
-	deviceCount := 0
-	deviceMap := devManager.GetDeviceInfoMap()
+
+	hostIndex := [MAX_DEVICE_COUNT][48]byte{}
+	deviceInfos := devManager.GetNodeDeviceInfo()
+	deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))
+	for i := range deviceInfos[:min(MAX_DEVICE_COUNT, len(deviceInfos))] {
+		deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
+		hostIndex[deviceInfos[i].Id] = convert48Bytes(deviceInfos[i].Uuid)
+	}
+
 	smWatcher := 0
 	if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
 		smWatcher = 1
 	}
-
-	devices := [util.MaxDeviceNumber]DeviceT{}
+	deviceCount := 0
+	devices := [MAX_DEVICE_COUNT]DeviceT{}
 	for i, devInfo := range assignDevices.Devices {
-		if i >= util.MaxDeviceNumber {
+		if i >= MAX_DEVICE_COUNT {
 			break
 		}
 		deviceCount++
@@ -222,7 +235,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 			CoreLimit:   int32(0),
 			HardLimit:   int32(0),
 		}
-		gpuDevice := deviceMap[devInfo.Uuid]
+		gpuDevice := deviceInfoMap[devInfo.Uuid]
 
 		// need limit core
 		switch computePolicy {
@@ -263,6 +276,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		}
 		devices[i] = dev
 	}
+
 	data := &ResourceDataT{
 		DriverVersion: VersionT{
 			Major: int32(major),
@@ -273,6 +287,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		PodNamespace:      convert64Bytes(pod.Namespace),
 		ContainerName:     convert64Bytes(assignDevices.Name),
 		Devices:           devices,
+		HostIndex:         hostIndex,
 		DeviceCount:       int32(deviceCount),
 		CompatibilityMode: int32(mode),
 		SMWatcher:         int32(smWatcher),
@@ -337,8 +352,20 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 
 		computePolicy := GetComputePolicy(pod, node)
 
+		deviceInfos := devManager.GetNodeDeviceInfo()
+		deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))
+		for i := range deviceInfos[:min(MAX_DEVICE_COUNT, len(deviceInfos))] {
+			func() {
+				deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
+				deviceUuid := C.CString(deviceInfos[i].Uuid)
+				defer C.free(unsafe.Pointer(deviceUuid))
+				C.strcpy((*C.char)(unsafe.Pointer(&vgpuConfig.host_index[deviceInfos[i].Id][0])),
+					(*C.char)(unsafe.Pointer(deviceUuid)))
+			}()
+		}
+
 		deviceCount := 0
-		deviceMap := devManager.GetDeviceInfoMap()
+		//deviceMap := devManager.GetDeviceInfoMap()
 		for i, devInfo := range assignDevices.Devices {
 			if i >= C.MAX_DEVICE_COUNT {
 				break
@@ -359,7 +386,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 				}
 				//  uint64_t real_memory;
 				cDevice.real_memory = C.uint64_t(realMemoryBytes)
-				gpuDevice := deviceMap[devInfo.Uuid]
+				gpuDevice := deviceInfoMap[devInfo.Uuid]
 				//  int hard_core;
 				cDevice.hard_core = C.int(devInfo.Cores)
 				//  int soft_core;
