@@ -509,23 +509,28 @@ static void init_device_cuda_cores(unsigned int *devCount) {
 }
 
 static void balance_batches(unsigned int deviceCount) {
-    if (deviceCount == 0) return;
-    int batch_count = (deviceCount + DEVICE_BATCH_SIZE - 1) / DEVICE_BATCH_SIZE;
-    int base_size = deviceCount / batch_count;
-    int remainder = deviceCount % batch_count;
-    int current_index = 0;
-    for (int i = 0; i < batch_count; i++) {
-        int batch_size = base_size;
-        if (i < remainder) {
-            batch_size++;
-        }
-        batches[i].start_index = current_index;
-        batches[i].end_index = current_index + batch_size;
-        batches[i].batch_code = i;
-
-        current_index += batch_size;
-        active_utilization_notifier(i);
+  if (deviceCount == 0) return;
+  int batch_size = DEVICE_BATCH_SIZE;
+  // When sm watcher is turned on, all devices are merged into one batch, reducing the number of monitoring threads.
+  if (g_vgpu_config->sm_watcher) {
+    batch_size = MAX_DEVICE_COUNT;
+  }
+  int batch_count = (deviceCount + batch_size - 1) / batch_size;
+  int base_size = deviceCount / batch_count;
+  int remainder = deviceCount % batch_count;
+  int current_index = 0;
+  int current_size = 0;
+  for (int i = 0; i < batch_count; i++) {
+    int current_size = base_size;
+    if (i < remainder) {
+      current_size++;
     }
+    batches[i].start_index = current_index;
+    batches[i].end_index = current_index + current_size;
+    batches[i].batch_code = i;
+    current_index += current_size;
+    active_utilization_notifier(i);
+  }
 }
 
 static void initialization() {
@@ -956,7 +961,7 @@ int is_expired(unsigned long long lastTs) {
 static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample, unsigned int *processes_size, int device_id, int host_index, nvmlDevice_t dev) {
   int fd = device_util_read_lock(host_index);
   if (fd < 0) {
-    LOGGER(ERROR, "failed to acquire read lock for host device %d, fallback to nvml driver", host_index);
+    LOGGER(WARNING, "failed to acquire read lock for host device %d, fallback to nvml driver", host_index);
     return get_gpu_process_from_local_nvml_driver(top_result, processes_sample, processes_size, device_id, dev);
   }
   int expired = is_expired(g_device_util->devices[host_index].lastSeenTimeStamp);
@@ -976,7 +981,7 @@ static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_res
 DONE:
   device_util_unlock(fd, host_index);
   if (expired) {
-     LOGGER(ERROR, "host device %d process utilization time window timeout detected, fallback to nvml driver", host_index);
+     LOGGER(WARNING, "host device %d process utilization time window timeout detected, fallback to nvml driver", host_index);
      return get_gpu_process_from_local_nvml_driver(top_result, processes_sample, processes_size, device_id, dev);
   }
   return NVML_SUCCESS;
