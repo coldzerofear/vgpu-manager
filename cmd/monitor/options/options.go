@@ -37,6 +37,16 @@ const (
 	Component = "deviceMonitor"
 	// SMWatcher feature gate will obtain shared utilization data aggregation corresponding indicators from external observers.
 	SMWatcher featuregate.Feature = util.SMWatcher
+	// VMemoryNode feature gate will track the allocation of virtual memory on the device and provide more accurate virtual memory monitoring statistics.
+	VMemoryNode featuregate.Feature = util.VMemoryNode
+)
+
+var (
+	version             bool
+	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
+		SMWatcher:   {Default: false, PreRelease: featuregate.Alpha},
+		VMemoryNode: {Default: false, PreRelease: featuregate.Alpha},
+	}
 )
 
 func NewOptions() *Options {
@@ -54,13 +64,6 @@ func NewOptions() *Options {
 		FeatureGate:    featureGate,
 	}
 }
-
-var (
-	version             bool
-	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		SMWatcher: {Default: false, PreRelease: featuregate.Alpha},
-	}
-)
 
 func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.CommandLine.SortFlags = false

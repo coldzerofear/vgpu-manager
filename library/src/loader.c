@@ -28,6 +28,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/stat.h>  
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -991,6 +992,9 @@ static void UNUSED bug_on() {
 static pthread_once_t g_cuda_lib_init = PTHREAD_ONCE_INIT;
 static pthread_once_t g_nvml_lib_init = PTHREAD_ONCE_INIT;
 static pthread_once_t init_dlsym_flag = PTHREAD_ONCE_INIT;
+static pthread_once_t init_host_indexes = PTHREAD_ONCE_INIT;
+
+static int host_device_indexes[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
 extern void* _dl_sym(void*, const char*, void*);
 /* This is the symbol search function */
@@ -1004,7 +1008,13 @@ extern int get_core_limit(uint32_t index, int *limit);
 extern int get_core_soft_limit(uint32_t index, int *limit);
 extern int get_devices_uuid(char *uuids);
 extern int get_mem_oversold(uint32_t index, int *limit);
+extern int get_vmem_node_enabled(int *enabled);
 extern int extract_container_id(char *path, char *container_id, size_t container_id_size);
+
+// vmemory node lock
+extern int device_vmem_write_lock(int ordinal);
+extern int device_vmem_read_lock(int ordinal);
+extern void device_vmem_unlock(int fd, int ordinal);
 
 resource_data_t vgpu_config_temp = {
     .driver_version = {},
@@ -1017,15 +1027,23 @@ resource_data_t vgpu_config_temp = {
     .device_count = 0,
     .compatibility_mode = 0,
     .sm_watcher = 0,
+    .vmem_node = 0,
 };
 
 resource_data_t* g_vgpu_config = &vgpu_config_temp;
 
-device_util_t device_util_temp = {
-    .devices = {},
+device_util_t* g_device_util = NULL;
+
+memory_node_t memory_node_temp = {
+    .dptr = 0,
+    .bytes = 0,
+    .node = LIST_HEAD_INIT(memory_node_temp.node)
 };
 
-device_util_t* g_device_util = &device_util_temp;
+memory_node_t* g_memory_node = &memory_node_temp;
+static pthread_mutex_t g_memory_node_lock = PTHREAD_MUTEX_INITIALIZER;
+
+device_vmemory_t* g_device_vmem = NULL;
 
 char container_id[FILENAME_MAX] = {0};
 char driver_version[FILENAME_MAX] = "1";
@@ -1243,7 +1261,8 @@ int check_file_exist(const char *file_path) {
   }
 }
 
-int mmap_file_to_config_path(const char* filename, resource_data_t** data) {
+int mmap_file_to_config_path(resource_data_t** data) {
+  const char* filename = CONTROLLER_CONFIG_FILE_PATH;
   if (unlikely(check_file_exist(filename))) {
     return 1;
   }
@@ -1267,7 +1286,7 @@ int mmap_file_to_config_path(const char* filename, resource_data_t** data) {
     goto DONE;
   }
   *data = (resource_data_t*)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-  if (data == MAP_FAILED) {
+  if (*data == MAP_FAILED) {
     LOGGER(ERROR, "mmap global config failed: %s", strerror(errno));
     ret = 1;
     goto DONE;
@@ -1302,12 +1321,65 @@ int mmap_file_to_util_path(const char* filename, device_util_t** data) {
     goto DONE;
   }
   *data = (device_util_t*)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-  if (data == MAP_FAILED) {
+  if (*data == MAP_FAILED) {
     LOGGER(ERROR, "mmap sm watcher failed: %s", strerror(errno));
     ret = 1;
     goto DONE;
   }
 
+DONE:
+  close(fd);
+  return ret;
+}
+
+int mmap_file_to_vmem_node(device_vmemory_t** data) {
+  int fd;
+  int created = 0;
+  if (unlikely(check_file_exist(VMEMORY_NODE_PATH))) {
+    mkdir(VMEMORY_NODE_PATH, 0755);
+  }
+  const char* filename = VMEMORY_NODE_FILE_PATH;
+  if (unlikely(check_file_exist(filename))) {
+    fd = open(filename, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (unlikely(fd == -1)) {
+      LOGGER(ERROR, "can't create %s, error %s", filename, strerror(errno));
+      return 1;
+    }
+    created = 1;
+    if (ftruncate(fd, sizeof(device_vmemory_t)) == -1) {
+      LOGGER(ERROR, "ftruncate failed: %s", strerror(errno));
+      close(fd);
+      return 1;
+    }
+  } else {
+    fd = open(filename, O_RDWR | O_CLOEXEC);
+    if (unlikely(fd == -1)) {
+      LOGGER(ERROR, "can't open %s, error %s", filename, strerror(errno));
+      return 1;
+    }
+  }
+  int ret = 0;
+  struct stat sb;
+  if (fstat(fd, &sb) == -1) {
+    LOGGER(ERROR, "fstat failed: %s", strerror(errno));
+    ret = 1;
+    goto DONE;
+  }
+  if (!created && sb.st_size != sizeof(device_vmemory_t)) {
+    LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
+                   sizeof(device_vmemory_t), (long long)sb.st_size);
+    ret = 1;
+    goto DONE;
+  }
+  *data = (device_vmemory_t*)mmap(NULL, sb.st_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+  if (*data == MAP_FAILED) {
+    LOGGER(ERROR, "mmap vmemory node failed: %s", strerror(errno));
+    ret = 1;
+    goto DONE;
+  }
+  if (created) {
+    memset(*data, 0, sizeof(device_vmemory_t));
+  }
 DONE:
   close(fd);
   return ret;
@@ -1322,6 +1394,7 @@ void print_global_vgpu_config() {
   LOGGER(VERBOSE, "gpu count        : %d", g_vgpu_config->device_count);
   LOGGER(VERBOSE, "CompatibilityMode: %d", g_vgpu_config->compatibility_mode);
   LOGGER(VERBOSE, "SM Watcher       : %s", g_vgpu_config->sm_watcher?"enabled" : "disabled");
+  LOGGER(VERBOSE, "VMemory Node     : %s", g_vgpu_config->vmem_node?"enabled" : "disabled");
   for (int i = 0; i < g_vgpu_config->device_count; i++) {
     LOGGER(VERBOSE, "---------------------------GPU %d---------------------------", i);
     LOGGER(VERBOSE, "gpu uuid         : %s", g_vgpu_config->devices[i].uuid);
@@ -1359,7 +1432,7 @@ int write_file_to_config_path(resource_data_t* data) {
     goto DONE;
   }
 
-  ret = mmap_file_to_config_path(CONTROLLER_CONFIG_FILE_PATH, &data);
+  ret = mmap_file_to_config_path(&data);
   if (unlikely(ret)) {
     ret = 1;
     goto DONE;
@@ -1424,7 +1497,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   int i;
   // hijack cuda
   if (strncmp(symbol, "cu", 2) == 0) {
-    load_necessary_data();
+    _load_necessary_data();
     if (likely(lib_control)) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
@@ -1441,7 +1514,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   }
   // hijack nvml
   if (strncmp(symbol, "nvml", 4) == 0) {
-    load_necessary_data();
+    _load_necessary_data();
     if (likely(lib_control)) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
@@ -1459,6 +1532,194 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   return real_dlsym(handle, symbol);
 }
 
+int pid_exists(int pid) {
+  if (pid <= 0) {
+    return 1;
+  }
+  int result = kill(pid, 0);
+  if (result == 0) {
+    return 0;
+  }
+  switch (errno) {
+  case ESRCH:
+    return 1;
+  case EPERM:
+    return 0;
+  }
+  char path[PATH_MAX];
+  snprintf(path, sizeof(path), "/proc/%d", pid);
+  return check_file_exist(path);
+}
+
+void rm_vmem_node_by_non_existent_device_pid(int device_id, int pid) {
+  unsigned int processes_size = g_device_vmem->devices[device_id].processes_size;
+  for (int i = processes_size - 1; i >= 0; i--) {
+    if (g_device_vmem->devices[device_id].processes[i].pid == pid) {
+      g_device_vmem->devices[device_id].processes[i] = g_device_vmem->devices[device_id].processes[processes_size-1];
+      g_device_vmem->devices[device_id].processes[processes_size-1].pid = 0;
+      g_device_vmem->devices[device_id].processes[processes_size-1].used = 0;
+      g_device_vmem->devices[device_id].processes_size--;
+      processes_size--;
+      continue;
+    }
+    if (pid_exists(g_device_vmem->devices[device_id].processes[i].pid) != 0) {
+      LOGGER(WARNING, "detected that process %d does not exist, kicked out virtual memory node",
+                       g_device_vmem->devices[device_id].processes[i].pid);
+      g_device_vmem->devices[device_id].processes[i] = g_device_vmem->devices[device_id].processes[processes_size-1];
+      g_device_vmem->devices[device_id].processes[processes_size-1].pid = 0;
+      g_device_vmem->devices[device_id].processes[processes_size-1].used = 0;
+      g_device_vmem->devices[device_id].processes_size--;
+      processes_size--;
+      continue;
+    }
+  }
+}
+
+void rm_vmem_node_by_device_pid(int device_id, int pid) {
+  int index = -1;
+  unsigned int processes_size = g_device_vmem->devices[device_id].processes_size;
+  for (int i = 0; i < processes_size; i++) {
+    if (g_device_vmem->devices[device_id].processes[i].pid == pid) {
+      index = i;
+      break;
+    }
+  }
+  if (index >= 0) {
+    g_device_vmem->devices[device_id].processes[index] = g_device_vmem->devices[device_id].processes[processes_size-1];
+    g_device_vmem->devices[device_id].processes[processes_size-1].pid = 0;
+    g_device_vmem->devices[device_id].processes[processes_size-1].used = 0;
+    g_device_vmem->devices[device_id].processes_size--;
+  }
+}
+
+void exit_cleanup_vmem_nodes() {
+ int pid = getpid();
+ LOGGER(WARNING, "process program %d exits", pid);
+ if (g_device_vmem != NULL) {
+   for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
+     if (g_device_vmem->devices[index].processes_size == 0) {
+       continue;
+     }
+     int fd = device_vmem_write_lock(index);
+     if (fd < 0) continue;
+     rm_vmem_node_by_device_pid(index, pid);
+     __sync_synchronize();
+     device_vmem_unlock(fd, index);
+   }
+ }
+}
+
+void check_vmem_nodes() {
+  if (g_device_vmem != NULL) {
+    int pid = getpid();
+    for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
+      if (g_device_vmem->devices[index].processes_size == 0) {
+        continue;
+      }
+      int fd = device_vmem_write_lock(index);
+      if (fd < 0) continue;
+      rm_vmem_node_by_non_existent_device_pid(index, pid);
+      __sync_synchronize();
+      device_vmem_unlock(fd, index);
+    }
+  }
+}
+
+void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int device_id) {
+  memory_node_t *new_node = NULL;
+  new_node = (memory_node_t*) malloc(sizeof(memory_node_t));
+  if (!new_node) {
+    LOGGER(FATAL, "failed to allocate memory node");
+  }
+  LOGGER(VERBOSE, "malloc virt memory to device %d, dptr %lld, size %ld", device_id, dptr, bytes);
+
+  new_node->dptr = dptr;
+  new_node->bytes = bytes;
+  INIT_LIST_HEAD(&new_node->node);
+
+  pthread_mutex_lock(&g_memory_node_lock);
+  list_add(&new_node->node, &g_memory_node->node);
+  pthread_mutex_unlock(&g_memory_node_lock);
+
+  if (g_device_vmem != NULL) {
+    device_id = host_device_indexes[device_id];
+    int fd = device_vmem_write_lock(device_id);
+    if (fd < 0) return;
+    int pid = getpid();
+    int found = 0;
+    unsigned int processes_size = g_device_vmem->devices[device_id].processes_size;
+    for (int i = 0; i < processes_size; i++) {
+      if (g_device_vmem->devices[device_id].processes[i].pid == pid) {
+        g_device_vmem->devices[device_id].processes[i].used += bytes;
+        found = 1;
+        break;
+      }
+    }
+    if (!found) {
+      g_device_vmem->devices[device_id].processes[processes_size].pid = pid;
+      g_device_vmem->devices[device_id].processes[processes_size].used = bytes;
+      g_device_vmem->devices[device_id].processes_size++;
+    }
+    device_vmem_unlock(fd, device_id);
+  }
+}
+
+void free_gpu_virt_memory(CUdeviceptr dptr, int device_id) {
+  int found = 0;
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter;
+  list_for_each(iter, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    if (entry_tmp == NULL) continue;
+    if (entry_tmp->dptr == dptr) {
+      found = 1;
+      break;
+    }
+  }
+  if (!found) return;
+
+  size_t size = entry_tmp->bytes;
+  LOGGER(VERBOSE, "free virt memory to device %d, dptr %lld, size %ld", device_id, dptr, size);
+
+  pthread_mutex_lock(&g_memory_node_lock);
+  list_del(&entry_tmp->node);
+  free(entry_tmp);
+  pthread_mutex_unlock(&g_memory_node_lock);
+
+  if (g_device_vmem != NULL) {
+    device_id = host_device_indexes[device_id];
+    int fd = device_vmem_write_lock(device_id);
+    if (fd < 0) return;
+
+    int pid = getpid();
+    for (int i = 0; i< g_device_vmem->devices[device_id].processes_size; i++) {
+      if (g_device_vmem->devices[device_id].processes[i].pid == pid) {
+        g_device_vmem->devices[device_id].processes[i].used =
+           (g_device_vmem->devices[device_id].processes[i].used >= size) ?
+           (g_device_vmem->devices[device_id].processes[i].used - size) : 0;
+        break;
+      }
+    }
+    device_vmem_unlock(fd, device_id);
+  }
+}
+
+void get_used_gpu_virt_memory(void *arg, int device_id) {
+  size_t count = 0;
+  size_t *used_memory = arg;
+  if (g_vgpu_config->vmem_node && g_device_vmem != NULL) {
+    device_id = host_device_indexes[device_id];
+    int fd = device_vmem_read_lock(device_id);
+    if (fd < 0) goto DONE;
+    for (int i = 0; i < g_device_vmem->devices[device_id].processes_size; i++) {
+      count += g_device_vmem->devices[device_id].processes[i].used;
+    }
+    device_vmem_unlock(fd, device_id);
+  }
+DONE:
+  *used_memory = count;
+}
+
 static volatile int init_config_flag = 0;
 
 int load_controller_configuration() {
@@ -1473,14 +1734,24 @@ int load_controller_configuration() {
     }
   }
 
-  ret = mmap_file_to_config_path(CONTROLLER_CONFIG_FILE_PATH, &g_vgpu_config);
-  if (likely(ret==0)) {
+  ret = mmap_file_to_config_path(&g_vgpu_config);
+  if (likely(ret == 0)) {
     init_config_flag = 1;
     print_global_vgpu_config();
     if (g_vgpu_config->sm_watcher) {
       ret = mmap_file_to_util_path(CONTROLLER_SM_UTIL_FILE_PATH, &g_device_util);
       if (ret) {
         LOGGER(FATAL, "mmap sm watcher file failed");
+      }
+    }
+    if (g_vgpu_config->vmem_node) {
+      ret = mmap_file_to_vmem_node(&g_device_vmem);
+      if (ret) {
+        LOGGER(FATAL, "mmap vmem nodes file failed");
+      }
+      check_vmem_nodes();
+      if (atexit(exit_cleanup_vmem_nodes) != 0) {
+        LOGGER(FATAL ,"register exit handler failed: %d", errno);
       }
     }
     goto DONE;
@@ -1520,7 +1791,10 @@ int load_controller_configuration() {
   int oversold = 0; // default disable oversold
   size_t real_memory = 0;
   char *gpu_uuids[MAX_DEVICE_COUNT];
+  int vnode_enable = 0;
   g_vgpu_config->device_count = strsplit(uuids, gpu_uuids, ",");
+  get_vmem_node_enabled(&vnode_enable);
+  g_vgpu_config->vmem_node = vnode_enable;
   for (int i = 0; i < g_vgpu_config->device_count; i++) {
     strcpy(g_vgpu_config->devices[i].uuid, gpu_uuids[i]);
     ret = get_mem_limit(i, &g_vgpu_config->devices[i].total_memory);
@@ -1581,13 +1855,82 @@ int load_controller_configuration() {
     goto DONE;
   }
   print_global_vgpu_config();
+  if (g_vgpu_config->vmem_node) {
+    ret = mmap_file_to_vmem_node(&g_device_vmem);
+    if (ret) {
+      LOGGER(FATAL, "mmap vmem nodes file failed");
+    }
+    check_vmem_nodes();
+    if (atexit(exit_cleanup_vmem_nodes) != 0) {
+      LOGGER(FATAL ,"register exit handler failed: %d", errno);
+    }
+  }
   ret = 0;
   init_config_flag = 1;
 DONE:
   return ret;
 }
 
-void load_necessary_data() {
+void get_device_and_uuid_and_hostindex(int device_id, nvmlDevice_t *device, char *uuid, unsigned int uuid_length, int *hindex) {
+  nvmlReturn_t rt;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_id, device);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_id, device);
+  } else {
+    rt = NVML_ERROR_FUNCTION_NOT_FOUND;
+    LOGGER(WARNING, "nvmlDeviceGetHandleByIndex function not found");
+  }
+  if (unlikely(rt)) {
+    LOGGER(FATAL, "nvmlDeviceGetHandleByIndex failed, device %d, return %d", device_id, rt);
+  }
+  rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetUUID, *device, uuid, uuid_length);
+  if (unlikely(rt)) {
+    LOGGER(FATAL, "nvmlDeviceGetUUID failed, device %d, return %d", device_id, rt);
+  }
+
+  for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
+    if (strcmp(g_vgpu_config->host_index[index], uuid) == 0) {
+      *hindex = index;
+      LOGGER(VERBOSE, "find the host location %d corresponding to device %d", index, device_id);
+      break;
+    }
+  }
+}
+
+
+void init_host_device_indexes() {
+  nvmlReturn_t rt;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlInitWithFlags))) {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlInitWithFlags, 0);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlInit_v2))) {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit_v2);
+  } else {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit);
+  }
+  if (unlikely(rt)) {
+    LOGGER(FATAL, "nvmlInit failed, return %d", rt);
+  }
+  unsigned int device_count;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetCount))) {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCount, &device_count);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetCount_v2))) {
+    rt = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCount_v2, &device_count);
+  } else {
+    rt = NVML_ERROR_FUNCTION_NOT_FOUND;
+    LOGGER(WARNING, "nvmlDeviceGetCount function not found");
+  }
+  if (unlikely(rt)) {
+    LOGGER(FATAL, "nvmlDeviceGetCount failed, return %d", rt);
+  }
+  for (int device_id = 0; device_id < device_count; device_id++) {
+    char uuid[48];
+    nvmlDevice_t device;
+    get_device_and_uuid_and_hostindex(device_id, &device, uuid, 48, &host_device_indexes[device_id]);
+  }
+}
+
+void _load_necessary_data() {
   // First, determine the driver version
   read_version_from_proc(driver_version);
   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
@@ -1596,4 +1939,9 @@ void load_necessary_data() {
   pthread_once(&g_cuda_lib_init, load_cuda_libraries);
   // Read global configuration
   load_controller_configuration();
+}
+
+void load_necessary_data() {
+  _load_necessary_data();
+  pthread_once(&init_host_indexes, init_host_device_indexes);
 }

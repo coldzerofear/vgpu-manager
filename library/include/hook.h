@@ -32,6 +32,7 @@ extern "C" {
 #include <stdlib.h>
 #include <unistd.h>
 
+#include "list.h"
 #include "nvml-subset.h"
 #include "cuda-subset.h"
 
@@ -65,7 +66,6 @@ extern "C" {
  */
 #define CONTROLLER_SM_UTIL_FILE_PATH (VGPU_MANAGER_PATH "/watcher/" CONTROLLER_SM_UTIL_FILE_NAME)
 
-
 /**
  * Controller driver file name
  */
@@ -87,6 +87,18 @@ extern "C" {
 #define HOST_CGROUP_PID_BASE_PATH (VGPU_MANAGER_PATH "/.host_cgroup/%s")
 
 #define CGROUP_PROCS_FILE "cgroup.procs"
+
+#define TMP_DIR "/tmp"
+
+#define VGPU_LOCK_DIR "/.vgpu_lock"
+
+#define VGPU_LOCK_PATH (TMP_DIR VGPU_LOCK_DIR)
+
+#define VMEMORY_NODE_DIR "/.vmem_node"
+
+#define VMEMORY_NODE_PATH (TMP_DIR VMEMORY_NODE_DIR)
+
+#define VMEMORY_NODE_FILE_PATH (TMP_DIR VMEMORY_NODE_DIR "/vmem_node.config")
 
 /**
  * Proc file path for driver version
@@ -163,8 +175,11 @@ typedef struct {
   device_t devices[MAX_DEVICE_COUNT];
   char host_index[MAX_DEVICE_COUNT][48];
   int device_count;
+
+  // TODO No modifications allowed during runtime.
   int compatibility_mode;
   int sm_watcher;
+  int vmem_node;
 } resource_data_t;
 
 /**
@@ -198,6 +213,27 @@ typedef struct {
   device_process_t devices[MAX_DEVICE_COUNT];
 } device_util_t;
 
+typedef struct {
+  CUdeviceptr dptr;
+  size_t bytes;
+  struct list_head node;
+} memory_node_t;
+
+typedef struct {
+  int pid;
+  size_t used;
+} process_used_t;
+
+typedef struct {
+  process_used_t processes[MAX_PIDS];
+  unsigned int processes_size;
+  unsigned char lock_byte;
+} device_vmem_used_t;
+
+typedef struct {
+  device_vmem_used_t devices[MAX_DEVICE_COUNT];
+} device_vmemory_t;
+
 /** dynamic rate control */
 typedef struct {
   int user_current;
@@ -217,17 +253,17 @@ typedef enum {
 } log_level_enum_t;
 
 typedef struct {
-    int tid;
-    void *pointer;
+  int tid;
+  void *pointer;
 } tid_dlsym;
 
 #define DLMAP_SIZE 100
 
 typedef enum VGPU_COMPATIBILITY_MODE_enum {
-	HOST_COMPATIBILITY_MODE        = 0,
-	CGROUPV1_COMPATIBILITY_MODE    = 1,
-	CGROUPV2_COMPATIBILITY_MODE    = 2,
-	OPEN_KERNEL_COMPATIBILITY_MODE = 100
+  HOST_COMPATIBILITY_MODE        = 0,
+  CGROUPV1_COMPATIBILITY_MODE    = 1,
+  CGROUPV2_COMPATIBILITY_MODE    = 2,
+  OPEN_KERNEL_COMPATIBILITY_MODE = 100
 } VGPU_COMPATIBILITY_MODE;
 
 extern void* _dl_sym(void*, const char*, void*);
@@ -236,7 +272,15 @@ typedef void (*atomic_fn_ptr)(int, void *);
 
 typedef void* (*fp_dlsym)(void*, const char*);
 
-#define FUNC_ATTR_VISIBLE  __attribute__((visibility("default"))) 
+#define FUNC_ATTR_VISIBLE  __attribute__((visibility("default")))
+
+#define container_of(ptr, type, member)                                        \
+  ({                                                                           \
+    const typeof(((type *)0)->member) *__mptr =                                \
+        (const typeof(((type *)0)->member) *)(ptr);                            \
+    (type *)((char *)__mptr - offsetof(type, member));                         \
+  })
+
 
 #define LOGGER(level, format, ...)                                \
   ({                                                              \
@@ -276,11 +320,23 @@ typedef void* (*fp_dlsym)(void*, const char*);
  * Load library and initialize some data
  */
 void load_necessary_data();
+void _load_necessary_data();
 
 /**
  * Retrieve the currently used memory of the device
  */
 void get_used_gpu_memory_by_device(void *, nvmlDevice_t);
+
+/**
+ * Retrieve the used virtual memory recorded on the GPU
+ */
+void get_used_gpu_virt_memory(void *, int device_id);
+
+void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int device_id);
+
+void free_gpu_virt_memory(CUdeviceptr dptr, int device_id);
+
+void get_device_and_uuid_and_hostindex(int device_id, nvmlDevice_t *device, char *uuid, unsigned int uuid_length, int *hindex);
 
 #ifdef __cplusplus
 }

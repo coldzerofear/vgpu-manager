@@ -163,4 +163,5 @@ const (
 	GPUTopology    = "GPUTopology"
 	SMWatcher      = "SMWatcher"
 	SerialBindNode = "SerialBindNode"
+	VMemoryNode    = "VMemoryNode"
 )

@@ -1,11 +1,12 @@
 package vgpu
 
 import (
-	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/component-base/featuregate"
 	"os"
 	"syscall"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/component-base/featuregate"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
@@ -83,7 +84,8 @@ func Test_WriDriverConfigFile(t *testing.T) {
 	}
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(map[featuregate.Feature]featuregate.FeatureSpec{
-		util.SMWatcher: {Default: true, PreRelease: featuregate.Alpha},
+		util.SMWatcher:   {Default: true, PreRelease: featuregate.Alpha},
+		util.VMemoryNode: {Default: true, PreRelease: featuregate.Alpha},
 	}))
 
 	devManager := manager.NewFakeDeviceManager(

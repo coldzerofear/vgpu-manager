@@ -2,13 +2,14 @@ package metrics
 
 import (
 	"context"
-	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/component-base/featuregate"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/component-base/featuregate"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
@@ -111,7 +112,8 @@ func Test_ContainerLister(t *testing.T) {
 	}
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(map[featuregate.Feature]featuregate.FeatureSpec{
-		util.SMWatcher: {Default: true, PreRelease: featuregate.Alpha},
+		util.SMWatcher:   {Default: true, PreRelease: featuregate.Alpha},
+		util.VMemoryNode: {Default: true, PreRelease: featuregate.Alpha},
 	}))
 
 	devManager := manager.NewFakeDeviceManager(

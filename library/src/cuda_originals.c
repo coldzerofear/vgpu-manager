@@ -299,24 +299,6 @@ CUresult cuLinkDestroy(CUlinkState state) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuLinkDestroy, state);
 }
 
-CUresult _cuMemFree(CUdeviceptr dptr) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemFree_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFree_v2, dptr);
-  } else {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFree, dptr);
-  }
-  return ret;
-}
-
-CUresult cuMemFree_v2(CUdeviceptr dptr) {
-  return _cuMemFree(dptr);
-}
-
-CUresult cuMemFree(CUdeviceptr dptr) {
-  return _cuMemFree(dptr);
-}
-
 CUresult _cuMemGetAddressRange(CUdeviceptr *pbase, size_t *psize, CUdeviceptr dptr) {
   CUresult ret;
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetAddressRange_v2))) {
@@ -3442,15 +3424,6 @@ CUresult cuGraphUpload(CUgraphExec hGraphExec, CUstream hStream) {
 
 CUresult cuGraphUpload_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphUpload_ptsz, hGraphExec,
-                         hStream);
-}
-
-CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemFreeAsync), dptr, hStream);
-}
-
-CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFreeAsync_ptsz, dptr,
                          hStream);
 }
 

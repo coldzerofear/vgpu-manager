@@ -66,6 +66,8 @@ const (
 	GPUTopology featuregate.Feature = util.GPUTopology
 	// SMWatcher feature gate will initiate an independent utilization observation thread to share the results with the vGPU Pod node, reducing driver call consumption.
 	SMWatcher featuregate.Feature = util.SMWatcher
+	// VMemoryNode feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
+	VMemoryNode featuregate.Feature = util.VMemoryNode
 )
 
 var (
@@ -76,6 +78,7 @@ var (
 		Reschedule:   {Default: false, PreRelease: featuregate.Alpha},
 		GPUTopology:  {Default: false, PreRelease: featuregate.Alpha},
 		SMWatcher:    {Default: false, PreRelease: featuregate.Alpha},
+		VMemoryNode:  {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 

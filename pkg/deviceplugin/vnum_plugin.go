@@ -206,6 +206,9 @@ const (
 	VGPULockDirName  = "vgpu_lock"
 	ContVGPULockPath = "/tmp/." + VGPULockDirName
 
+	VMemoryNodeDirName  = "vmem_node"
+	ContVMemoryNodePath = "/tmp/." + VMemoryNodeDirName
+
 	LdPreLoadFileName       = "ld.so.preload"
 	ContPreLoadFilePath     = "/etc/" + LdPreLoadFileName
 	VGPUControlFileName     = "libvgpu-control.so"
@@ -488,12 +491,21 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		contVGPULockPath := filepath.Join(contManagerDirectory, VGPULockDirName)
 		_ = os.MkdirAll(contVGPULockPath, 0777)
 		_ = os.Chmod(contVGPULockPath, 0777)
+
+		// /etc/vgpu-manager/<pod-uid>_<cont-name>/vmem_node
+		contVMemoryNodePath := filepath.Join(contManagerDirectory, VMemoryNodeDirName)
+		_ = os.MkdirAll(contVMemoryNodePath, 0777)
+		_ = os.Chmod(contVMemoryNodePath, 0777)
+
 		// <host_manager_dir>/<pod-uid>_<cont-name>
 		hostManagerDirectory := GetHostManagerDirectoryPath(currentPod.UID, assignDevs.Name)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/config
 		hostVGPUConfigPath := filepath.Join(hostManagerDirectory, VGPUConfigDirName)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/vgpu_lock
 		hostVGPULockPath := filepath.Join(hostManagerDirectory, VGPULockDirName)
+		// <host_manager_dir>/<pod-uid>_<cont-name>/vmem_node
+		hostVMemNodePath := filepath.Join(hostManagerDirectory, VMemoryNodeDirName)
+
 		response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount vgpu.config file
 			ContainerPath: ContConfigDirectoryPath,
 			HostPath:      hostVGPUConfigPath,
@@ -501,6 +513,10 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		}, &pluginapi.Mount{ // mount vgpu_lock dir
 			ContainerPath: ContVGPULockPath,
 			HostPath:      hostVGPULockPath,
+			ReadOnly:      false,
+		}, &pluginapi.Mount{ // mount vmem_node dir
+			ContainerPath: ContVMemoryNodePath,
+			HostPath:      hostVMemNodePath,
 			ReadOnly:      false,
 		})
 		podDevices := device.PodDevices{}

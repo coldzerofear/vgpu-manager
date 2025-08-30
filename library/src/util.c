@@ -17,6 +17,7 @@
 #define CUDA_CORE_SOFT_LIMIT_ENV "CUDA_CORE_SOFT_LIMIT"
 #define CUDA_MEM_OVERSOLD_ENV "CUDA_MEM_OVERSOLD"
 #define GPU_DEVICES_UUID_ENV "GPU_DEVICES_UUID"
+#define VMEM_NODE_ENABLED_ENV "VMEMORY_NODE_ENABLED"
 
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
@@ -140,6 +141,25 @@ int get_devices_uuid(char *uuids) {
   }
   strcpy(uuids, str);
   return 0;
+}
+
+int get_vmem_node_enabled(int *i) {
+  int ret = -1;
+  char *str = NULL;
+  str = getenv(VMEM_NODE_ENABLED_ENV);
+  if (unlikely(!str)) {
+    goto DONE;
+  }
+  if (strcmp(str, "true") == 0 ||
+      strcmp(str, "TRUE") == 0 ||
+      strcmp(str,"1") == 0) {
+    *i = 1;
+  } else {
+    *i = 0;
+  }
+  ret = 0;
+DONE:
+  return ret;
 }
 
 int get_mem_oversold(uint32_t index, int *i) {

@@ -64,6 +64,7 @@ import (
 //  int device_count;
 //  int compatibility_mode;
 //  int sm_watcher;
+//  int vmem_node;
 //};
 //
 //int setting_to_disk(const char* filename, struct resource_data_t* data) {
@@ -121,6 +122,7 @@ type ResourceDataT struct {
 	DeviceCount       int32
 	CompatibilityMode int32
 	SMWatcher         int32
+	VMemoryNode       int32
 }
 
 func (r *ResourceDataT) DeepCopy() *ResourceDataT {
@@ -213,6 +215,10 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
 		smWatcher = 1
 	}
+	vMemoryNode := 0
+	if devManager.GetFeatureGate().Enabled(util.VMemoryNode) {
+		vMemoryNode = 1
+	}
 	deviceCount := 0
 	devices := [MAX_DEVICE_COUNT]DeviceT{}
 	for i, devInfo := range assignDevices.Devices {
@@ -291,6 +297,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		DeviceCount:       int32(deviceCount),
 		CompatibilityMode: int32(mode),
 		SMWatcher:         int32(smWatcher),
+		VMemoryNode:       int32(vMemoryNode),
 	}
 	return data
 }
@@ -333,7 +340,11 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		} else {
 			vgpuConfig.sm_watcher = C.int(0)
 		}
-
+		if devManager.GetFeatureGate().Enabled(util.VMemoryNode) {
+			vgpuConfig.vmem_node = C.int(1)
+		} else {
+			vgpuConfig.vmem_node = C.int(0)
+		}
 		podUID := C.CString(string(pod.UID))
 		defer C.free(unsafe.Pointer(podUID))
 		C.strcpy(&vgpuConfig.pod_uid[0], (*C.char)(unsafe.Pointer(podUID)))
@@ -365,7 +376,6 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		}
 
 		deviceCount := 0
-		//deviceMap := devManager.GetDeviceInfoMap()
 		for i, devInfo := range assignDevices.Devices {
 			if i >= C.MAX_DEVICE_COUNT {
 				break
