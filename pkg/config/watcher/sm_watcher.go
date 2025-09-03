@@ -2,12 +2,13 @@ package watcher
 
 import (
 	"fmt"
-	"github.com/NVIDIA/go-nvml/pkg/nvml"
-	"k8s.io/klog/v2"
 	"os"
 	"path/filepath"
 	"syscall"
 	"unsafe"
+
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"k8s.io/klog/v2"
 )
 
 //#include <stdio.h>
@@ -140,6 +141,89 @@ type DeviceUtilT struct {
 	Devices [MAX_DEVICE_COUNT]DeviceProcessT
 }
 
+type DeviceUtil struct {
+	deviceUtil *DeviceUtilT
+	deviceData []byte
+	filePath   string
+	fd         int
+}
+
+func (d *DeviceUtil) GetUtil() *DeviceUtilT {
+	return d.deviceUtil
+}
+
+func (d *DeviceUtil) RLock(ordinal int) error {
+	if d == nil {
+		return fmt.Errorf("DeviceUtil is nil")
+	}
+	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MAX_DEVICE_COUNT {
+		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
+	}
+	fd, err := DeviceUtilRLock(ordinal, d.filePath)
+	if err != nil {
+		return err
+	}
+	d.fd = fd
+	return nil
+}
+
+func (d *DeviceUtil) WLock(ordinal int) error {
+	if d == nil {
+		return fmt.Errorf("DeviceUtil is nil")
+	}
+	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MAX_DEVICE_COUNT {
+		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
+	}
+	fd, err := DeviceUtilWLock(ordinal, d.filePath)
+	if err != nil {
+		return err
+	}
+	d.fd = fd
+	return nil
+}
+
+func (d *DeviceUtil) Unlock(ordinal int) error {
+	if d == nil {
+		return fmt.Errorf("DeviceUtil is nil")
+	}
+	if d.fd < 0 || ordinal < 0 || ordinal >= MAX_DEVICE_COUNT {
+		return fmt.Errorf("invalid parameter, fd=%d, device=%d", d.fd, ordinal)
+	}
+	DeviceUtilUnlock(d.fd, ordinal)
+	return nil
+}
+
+func (d *DeviceUtil) Munmap(msync bool) error {
+	if d == nil {
+		return fmt.Errorf("DeviceUtil is nil")
+	}
+	if msync {
+		_, _, errno := syscall.Syscall(
+			syscall.SYS_MSYNC,
+			uintptr(unsafe.Pointer(&d.deviceData[0])),
+			uintptr(len(d.deviceData)),
+			uintptr(syscall.MS_SYNC),
+		)
+		if errno != 0 {
+			klog.V(3).ErrorS(fmt.Errorf("msync error: %d", errno), "failed to sync mmap")
+		}
+	}
+	return syscall.Munmap(d.deviceData)
+}
+
+func NewDeviceUtil(filePath string) (*DeviceUtil, error) {
+	util, data, err := MmapDeviceUtilT(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return &DeviceUtil{
+		deviceUtil: util,
+		deviceData: data,
+		filePath:   filePath,
+		fd:         -1,
+	}, nil
+}
+
 func CreateDeviceUtilFile(filePath string) error {
 	f, err := os.Create(filePath)
 	if err != nil {
@@ -227,7 +311,7 @@ func MmapDeviceUtilT(filePath string) (*DeviceUtilT, []byte, error) {
 	return resourceData, data, nil
 }
 
-// DeviceUtilRLock get device read lock
+// DeviceUtilRLock get device util file read lock
 func DeviceUtilRLock(ordinal int, filepath string) (int, error) {
 	cFilePath := C.CString(filepath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -239,7 +323,7 @@ func DeviceUtilRLock(ordinal int, filepath string) (int, error) {
 	return int(fd), nil
 }
 
-// DeviceUtilWLock get device write lock
+// DeviceUtilWLock get device util file write lock
 func DeviceUtilWLock(ordinal int, filepath string) (int, error) {
 	cFilePath := C.CString(filepath)
 	defer C.free(unsafe.Pointer(cFilePath))
@@ -251,7 +335,7 @@ func DeviceUtilWLock(ordinal int, filepath string) (int, error) {
 	return int(fd), nil
 }
 
-// DeviceUtilUnlock unlock device
+// DeviceUtilUnlock unlock device util file
 func DeviceUtilUnlock(fd int, ordinal int) {
 	C.device_util_unlock(C.int(fd), C.int(ordinal))
 }

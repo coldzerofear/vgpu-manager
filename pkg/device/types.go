@@ -400,7 +400,7 @@ func NewDeviceMapListAndTopology(node *corev1.Node) (map[int]*Device, gpuallocat
 			deviceInfo.Id, deviceInfo.Uuid, deviceInfo.BusId)
 	}
 	hasGPUTopology := false
-	hasNumaTopology := len(numaSet) > 1
+	hasNumaTopology := len(numaSet) > 0
 	if IsGPUTopologyEnabled() {
 		topoStr, ok := util.HasAnnotation(node, util.NodeDeviceTopologyAnnotation)
 		if !ok || len(topoStr) == 0 {

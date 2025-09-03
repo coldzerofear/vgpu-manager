@@ -125,6 +125,35 @@ type ResourceDataT struct {
 	VMemoryNode       int32
 }
 
+type ResourceData struct {
+	resourceCfg  *ResourceDataT
+	resourceData []byte
+	filePath     string
+}
+
+func (r *ResourceData) GetCfg() *ResourceDataT {
+	return r.resourceCfg
+}
+
+func (r *ResourceData) Munmap() error {
+	if r == nil {
+		return fmt.Errorf("ResourceData is nil")
+	}
+	return syscall.Munmap(r.resourceData)
+}
+
+func NewResourceData(filePath string) (*ResourceData, error) {
+	cfg, data, err := MmapResourceDataT(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return &ResourceData{
+		resourceCfg:  cfg,
+		resourceData: data,
+		filePath:     filePath,
+	}, nil
+}
+
 func (r *ResourceDataT) DeepCopy() *ResourceDataT {
 	jsonBytes, _ := json.Marshal(r)
 	data := &ResourceDataT{}
@@ -160,7 +189,7 @@ func getCompatibilityMode(config node.NodeConfigSpec) CompatibilityMode {
 func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
-		klog.Errorf("Failed to stat file: %s, error: %v", filePath, err)
+		//klog.Errorf("Failed to stat file: %s, error: %v", filePath, err)
 		return nil, nil, err
 	}
 	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))

@@ -2,15 +2,15 @@ package metrics
 
 import (
 	"fmt"
-	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
-	"k8s.io/component-base/featuregate"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
+	"k8s.io/component-base/featuregate"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -141,7 +141,7 @@ var (
 	containerVGPUMemoryUsage = prometheus.NewDesc(
 		"container_vgpu_device_memory_usage_in_bytes",
 		"Container virtual GPU device memory usage (bytes)",
-		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename"}, nil,
+		[]string{"podnamespace", "podname", "ctrname", "vdeviceid", "deviceuuid", "ctrid", "ctrpids", "nodename", "phymembytes"}, nil,
 	)
 	containerVGPUMemoryUtilRate = prometheus.NewDesc(
 		"container_vgpu_device_memory_utilization_rate",
@@ -254,9 +254,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devProcInfoMap = make(map[string]procInfoList)
 		devProcUtilMap = make(map[string]procUtilList)
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
-
-		deviceUtil     *watcher.DeviceUtilT
-		deviceUtilData []byte
+		deviceUtil     *watcher.DeviceUtil
 	)
 	err := c.NvmlInit()
 	if err != nil {
@@ -265,9 +263,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	defer func() {
 		c.NvmlShutdown()
-		if deviceUtil != nil && deviceUtilData != nil {
-			_ = syscall.Munmap(deviceUtilData)
-		}
+		_ = deviceUtil.Munmap(false)
 	}()
 
 	func() {
@@ -308,8 +304,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	}()
 
 	if c.featureGate.Enabled(util.SMWatcher) {
-		deviceUtil, deviceUtilData, err = watcher.MmapDeviceUtilT(smFilePath)
-		if err != nil {
+		if deviceUtil, err = watcher.NewDeviceUtil(smFilePath); err != nil {
 			klog.V(3).ErrorS(err, "Failed to read manager SM util file")
 		}
 	}
@@ -439,7 +434,7 @@ skipNvml:
 
 		for _, container := range pod.Spec.Containers {
 			contKey := GetContainerKey(pod.UID, container.Name)
-			resData, exist := c.contLister.GetResourceData(contKey)
+			resData, exist := c.contLister.GetResourceDataT(contKey)
 			if !exist {
 				continue
 			}
@@ -466,12 +461,13 @@ skipNvml:
 
 			for i := int32(0); i < resData.DeviceCount; i++ {
 				var (
-					vDevIndex      = strconv.Itoa(int(i))
-					deviceUUID     = string(resData.Devices[i].UUID[0:40])
-					deviceMemLimit = resData.Devices[i].TotalMemory
-					realMemBytes   = resData.Devices[i].RealMemory
-					deviceMemUsage = uint64(0)
-					deviceSMUtil   = uint32(0)
+					vDevIndex       = strconv.Itoa(int(i))
+					deviceUUID      = string(resData.Devices[i].UUID[0:40])
+					deviceMemLimit  = resData.Devices[i].TotalMemory
+					realMemBytes    = resData.Devices[i].RealMemory
+					deviceMemUsage  = uint64(0)
+					deviceVMemUsage = uint64(0)
+					deviceSMUtil    = uint32(0)
 				)
 				var tmpPids []string
 				ContainerDeviceProcInfoFunc(devProcInfoMap[deviceUUID], containerPids,
@@ -496,21 +492,52 @@ skipNvml:
 					pod.Namespace, pod.Name, container.Name, vDevIndex,
 					deviceUUID, containerId, containerGPUPids, c.nodeName,
 					strconv.FormatUint(realMemBytes, 10))
-				// TODO Unable to calculate the usage of virtual video memory
+
+				// TODO handler Virtual Memory Cache node.
+				if c.featureGate.Enabled(util.VMemoryNode) {
+					// Calculate virtual memory, if any.
+					func() {
+						// TODO Prevent gpu task from exiting unexpectedly, and fail to clean up the virtual cache in time.
+						if len(tmpPids) == 0 {
+							return
+						}
+						vMemory, ok := c.contLister.GetResourceVMem(contKey)
+						if !ok {
+							return
+						}
+						vHostIndex := -1
+						for i, uuid := range resData.HostIndex {
+							if deviceUUID == string(uuid[0:40]) {
+								vHostIndex = i
+								continue
+							}
+						}
+						if err := vMemory.RLock(vHostIndex); err != nil {
+							klog.V(3).ErrorS(err, "virtual memory RLock failed", "vHostIndex", vHostIndex)
+							return
+						}
+						defer func() { _ = vMemory.Unlock(vHostIndex) }()
+						for index := uint32(0); index < vMemory.GetVMem().Devices[vHostIndex].ProcessesSize; index++ {
+							deviceVMemUsage += vMemory.GetVMem().Devices[vHostIndex].Processes[index].Used
+						}
+					}()
+				}
+
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUMemoryUsage,
 					prometheus.GaugeValue,
-					float64(deviceMemUsage),
+					float64(deviceMemUsage+deviceVMemUsage),
 					pod.Namespace, pod.Name, container.Name, vDevIndex,
-					deviceUUID, containerId, containerGPUPids, c.nodeName)
+					deviceUUID, containerId, containerGPUPids, c.nodeName,
+					strconv.FormatUint(deviceMemUsage, 10))
+
+				deviceMemUsage += deviceVMemUsage
 				memoryUtilRate := int64(0)
-				if deviceMemLimit > 0 {
+				if deviceMemUsage >= deviceMemLimit {
+					memoryUtilRate = 100
+				} else if deviceMemLimit > 0 {
 					memoryUtilRate = int64(float64(deviceMemUsage) / float64(deviceMemLimit) * 100)
-					if memoryUtilRate > 100 {
-						memoryUtilRate = 100
-					}
 				}
-				// TODO Unable to calculate the usage of virtual video memory
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUMemoryUtilRate,
 					prometheus.GaugeValue,
@@ -622,7 +649,7 @@ skipNvml:
 	}
 }
 
-func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtilT, index int, hdev nvml.Device, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList) {
+func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtil, index int, hdev nvml.Device, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList) {
 	uuid, rt := hdev.GetUUID()
 	if rt != nvml.SUCCESS {
 		err := fmt.Errorf("error getting pci info for device %d: %v", index, rt)
@@ -649,28 +676,27 @@ func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtilT, index int, hdev n
 
 	if deviceUtil != nil {
 		klog.V(4).InfoS("collector device processes from sm watcher", "device", index)
-		fd, err := watcher.DeviceUtilRLock(index, smFilePath)
-		if err == nil {
-			micro := time.UnixMicro(int64(deviceUtil.Devices[index].LastSeenTimeStamp))
+		if err := deviceUtil.RLock(index); err == nil {
+			micro := time.UnixMicro(int64(deviceUtil.GetUtil().Devices[index].LastSeenTimeStamp))
 			if time.Now().Sub(micro) > 5*time.Second {
-				watcher.DeviceUtilUnlock(fd, index)
+				_ = deviceUtil.Unlock(index)
 				klog.V(3).InfoS("Process utilization time window timeout detected, rollback using nvml driver to obtain utilization", "device", index)
 				nvmlProcessInfoFunc()
 				goto nvmlProcessUtil
 			}
-			if deviceUtil.Devices[index].ComputeProcessesSize > 0 {
-				processInfos = append(processInfos, deviceUtil.Devices[index].ComputeProcesses[:deviceUtil.Devices[index].ComputeProcessesSize]...)
+			if deviceUtil.GetUtil().Devices[index].ComputeProcessesSize > 0 {
+				processInfos = append(processInfos, deviceUtil.GetUtil().Devices[index].ComputeProcesses[:deviceUtil.GetUtil().Devices[index].ComputeProcessesSize]...)
 			}
-			if deviceUtil.Devices[index].GraphicsProcessesSize > 0 {
-				processInfos = append(processInfos, deviceUtil.Devices[index].GraphicsProcesses[:deviceUtil.Devices[index].GraphicsProcessesSize]...)
+			if deviceUtil.GetUtil().Devices[index].GraphicsProcessesSize > 0 {
+				processInfos = append(processInfos, deviceUtil.GetUtil().Devices[index].GraphicsProcesses[:deviceUtil.GetUtil().Devices[index].GraphicsProcessesSize]...)
 			}
 			if len(processInfos) == 0 {
 				nvmlProcessInfoFunc()
 			}
-			if deviceUtil.Devices[index].ProcessUtilSamplesSize > 0 {
-				processUtilizationSamples = append(processUtilizationSamples, deviceUtil.Devices[index].ProcessUtilSamples[:deviceUtil.Devices[index].ProcessUtilSamplesSize]...)
+			if deviceUtil.GetUtil().Devices[index].ProcessUtilSamplesSize > 0 {
+				processUtilizationSamples = append(processUtilizationSamples, deviceUtil.GetUtil().Devices[index].ProcessUtilSamples[:deviceUtil.GetUtil().Devices[index].ProcessUtilSamplesSize]...)
 			}
-			watcher.DeviceUtilUnlock(fd, index)
+			_ = deviceUtil.Unlock(index)
 			goto collecProcessInfo
 		} else {
 			klog.V(3).ErrorS(err, "SM Watcher lock failed, fallback to nvml driver call", "device", index)
