@@ -3,11 +3,10 @@ package options
 import (
 	"flag"
 	"fmt"
+	"os"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apiserver/pkg/util/compatibility"
-
-	"os"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
@@ -40,8 +39,10 @@ const (
 
 	Component = "scheduler"
 
-	// SerialBindNode feature gate will binding node operation of serial execution scheduler.
+	// SerialBindNode feature gate will serially execute the binding node operations of the scheduler.
 	SerialBindNode featuregate.Feature = util.SerialBindNode
+	// SerialFilterNode feature gate will serially execute the filter node operations of the scheduler.
+	SerialFilterNode featuregate.Feature = util.SerialFilterNode
 	// GPUTopology feature gate will consider topology structure when allocating devices.
 	GPUTopology featuregate.Feature = util.GPUTopology
 )
@@ -49,8 +50,9 @@ const (
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		SerialBindNode: {Default: true, PreRelease: featuregate.Beta},
-		GPUTopology:    {Default: false, PreRelease: featuregate.Alpha},
+		SerialBindNode:   {Default: true, PreRelease: featuregate.Beta},
+		SerialFilterNode: {Default: false, PreRelease: featuregate.Alpha},
+		GPUTopology:      {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 

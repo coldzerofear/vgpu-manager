@@ -13,6 +13,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/serial"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
@@ -27,6 +28,7 @@ import (
 )
 
 type gpuFilter struct {
+	sync.Locker
 	kubeClient kubernetes.Interface
 	nodeLister listerv1.NodeLister
 	podLister  listerv1.PodLister
@@ -39,13 +41,14 @@ const (
 
 var _ predicate.FilterPredicate = &gpuFilter{}
 
-func New(client kubernetes.Interface, factory informers.SharedInformerFactory, recorder record.EventRecorder) (*gpuFilter, error) {
+func New(client kubernetes.Interface, factory informers.SharedInformerFactory, recorder record.EventRecorder, serialFilterNode bool) (*gpuFilter, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 	podLister := listerv1.NewPodLister(podInformer.GetIndexer())
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
-
+	locker := serial.NewLock(Name, nil, serialFilterNode)
 	return &gpuFilter{
+		Locker:     locker,
 		kubeClient: client,
 		nodeLister: nodeLister,
 		podLister:  podLister,
@@ -299,6 +302,9 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		klog.ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
 		return filteredNodes, failedNodesMap, err
 	}
+
+	f.Lock()
+	defer f.Unlock()
 
 	pods, err := f.podLister.List(labels.Everything())
 	if err != nil {

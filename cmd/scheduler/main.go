@@ -99,7 +99,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler BindPlugin failed: %v", err)
 	}
-	filterPlugin, err := filter.New(kubeClient, factory, recorder)
+	filterPlugin, err := filter.New(kubeClient, factory, recorder, opt.FeatureGate.Enabled(options.SerialFilterNode))
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler FilterPlugin failed: %v", err)
 	}

@@ -157,11 +157,12 @@ const (
 
 // FeatureGates
 const (
-	CorePlugin     = "CorePlugin"
-	MemoryPlugin   = "MemoryPlugin"
-	Reschedule     = "Reschedule"
-	GPUTopology    = "GPUTopology"
-	SMWatcher      = "SMWatcher"
-	SerialBindNode = "SerialBindNode"
-	VMemoryNode    = "VMemoryNode"
+	CorePlugin       = "CorePlugin"
+	MemoryPlugin     = "MemoryPlugin"
+	Reschedule       = "Reschedule"
+	GPUTopology      = "GPUTopology"
+	SMWatcher        = "SMWatcher"
+	SerialBindNode   = "SerialBindNode"
+	SerialFilterNode = "SerialFilterNode"
+	VMemoryNode      = "VMemoryNode"
 )

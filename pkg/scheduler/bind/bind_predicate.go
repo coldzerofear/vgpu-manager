@@ -8,6 +8,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/serial"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,37 +17,6 @@ import (
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
-
-type Lock struct {
-	sync.Mutex
-	timestamp int64
-	enable    bool
-}
-
-func NewLock(enable bool) *Lock {
-	return &Lock{
-		enable: enable,
-	}
-}
-
-func (l *Lock) Lock() {
-	if l.enable {
-		l.Mutex.Lock()
-	}
-	l.timestamp = time.Now().UnixMicro()
-}
-
-func (l *Lock) Unlock() {
-	since := time.Since(time.UnixMicro(l.timestamp))
-	l.timestamp = 0
-	if l.enable {
-		klog.V(5).Infof("Binding node took %d milliseconds", since.Milliseconds())
-		if sleepTimestamp := 30*time.Millisecond - since; sleepTimestamp > 0 {
-			time.Sleep(sleepTimestamp)
-		}
-		l.Mutex.Unlock()
-	}
-}
 
 type nodeBinding struct {
 	sync.Locker
@@ -59,8 +29,10 @@ const Name = "BindPredicate"
 var _ predicate.BindPredicate = &nodeBinding{}
 
 func New(client kubernetes.Interface, recorder record.EventRecorder, serialBindNode bool) (*nodeBinding, error) {
+	minLockingDuration := 30 * time.Millisecond
+	locker := serial.NewLock(Name, &minLockingDuration, serialBindNode)
 	return &nodeBinding{
-		Locker:     NewLock(serialBindNode),
+		Locker:     locker,
 		kubeClient: client,
 		recorder:   recorder,
 	}, nil
