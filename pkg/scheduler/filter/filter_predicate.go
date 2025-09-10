@@ -255,18 +255,18 @@ func checkCoreRequest(container *corev1.Container) error {
 	return nil
 }
 
-func IsScheduled(pod *corev1.Pod) bool {
+func IsScheduled(pod *corev1.Pod) (string, bool) {
 	nodeName, ok := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
 	if !ok || len(nodeName) == 0 {
-		return false
+		return "", false
 	}
 	preAlloc, ok := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
 	if !ok || len(preAlloc) == 0 {
-		return false
+		return "", false
 	}
 	podDevices := device.PodDevices{}
 	err := podDevices.UnmarshalText(preAlloc)
-	return err == nil
+	return nodeName, err == nil
 }
 
 // deviceFilter will choose one and only one node fullfil the request,
@@ -279,8 +279,20 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		success        bool
 	)
 	// Skip pods that have already been scheduled.
-	if IsScheduled(pod) {
-		return filteredNodes, failedNodesMap, fmt.Errorf("pod %s had been predicated", pod.UID)
+	if nodeName, ok := IsScheduled(pod); ok {
+		foundNode := false
+		for i, node := range nodes {
+			if !foundNode && node.Name == nodeName {
+				filteredNodes = append(filteredNodes, nodes[i])
+				foundNode = true
+				continue
+			}
+			failedNodesMap[node.Name] = fmt.Sprintf("pod has been scheduled to node %s", node.Name)
+		}
+		if foundNode {
+			return filteredNodes, failedNodesMap, nil
+		}
+		return nil, nil, fmt.Errorf("pod %s had been predicated", pod.UID)
 	}
 
 	if err := f.CheckDeviceRequest(pod); err != nil {
@@ -383,6 +395,10 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			klog.ErrorS(err, errMsg, "pod", klog.KObj(pod))
 			failedNodesMap[node.Name] = errMsg
 			continue
+		}
+		cachePod, err := f.podLister.Pods(newPod.Namespace).Get(newPod.Name)
+		if err == nil && util.CompareResourceVersion(cachePod, newPod) < 0 {
+			cachePod.ObjectMeta = newPod.ObjectMeta
 		}
 		filteredNodes = append(filteredNodes, *node)
 		success = true

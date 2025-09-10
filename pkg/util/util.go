@@ -319,3 +319,29 @@ func PodsOnNode(pods []*corev1.Pod, node *corev1.Node, callback func(*corev1.Pod
 		}
 	}
 }
+
+// CompareResourceVersion compares resourceversions, resource versions are actually
+// ints, so we can easily compare them.
+// If objA.resourceVersion > objB.resourceVersion, return 1;
+// objA.resourceVersion == objB.resourceVersion, return 0;
+// objA.resourceVersion < objB.resourceVersion, return -1;
+func CompareResourceVersion(objA, objB metav1.Object) int {
+	a, err := strconv.ParseUint(objA.GetResourceVersion(), 10, 64)
+	if err != nil {
+		// coder error
+		panic(err)
+	}
+	b, err := strconv.ParseUint(objB.GetResourceVersion(), 10, 64)
+	if err != nil {
+		// coder error
+		panic(err)
+	}
+
+	if a > b {
+		return 1
+	}
+	if a == b {
+		return 0
+	}
+	return -1
+}
