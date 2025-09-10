@@ -4,17 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"time"
+	"unsafe"
+
 	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
-	"path/filepath"
-	"sync"
-	"syscall"
-	"time"
-	"unsafe"
 )
 
 const (
@@ -51,7 +52,11 @@ func (m *DeviceManager) doWatcher() {
 	klog.V(4).Infoln("DeviceManager starting sm watcher...")
 
 	ctx, cancelFunc := WrapChannelWithContext(m.stop)
-	defer cancelFunc()
+	m.wait.Add(1)
+	defer func() {
+		cancelFunc()
+		m.wait.Done()
+	}()
 	filePath := filepath.Join(WatcherDir, SMUtilFile)
 
 	wait.UntilWithContext(ctx, func(ctx context.Context) {
@@ -107,7 +112,6 @@ func (m *DeviceManager) doWatcher() {
 	}, time.Second)
 
 	klog.V(3).Infoln("DeviceManager sm watcher stopped")
-	m.waitCleanup <- struct{}{}
 }
 
 func (m *DeviceManager) smWatcher(filePath string, deviceUtil *watcher.DeviceUtilT, batch watcher.BatchConfig) error {

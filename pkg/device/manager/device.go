@@ -57,7 +57,7 @@ type DeviceManager struct {
 	registryFuncs        map[string]RegistryFunc
 	cleanupRegistryFuncs map[string]RegistryFunc
 	stop                 chan struct{}
-	waitCleanup          chan struct{}
+	wait                 sync.WaitGroup
 }
 
 func (m *DeviceManager) GetDriverVersion() nvidia.DriverVersion {
@@ -399,7 +399,6 @@ func (m *DeviceManager) GetMIGDeviceMap() map[string]MIGDevice {
 
 func (m *DeviceManager) initialize() {
 	m.stop = make(chan struct{})
-	m.waitCleanup = make(chan struct{})
 }
 
 func (m *DeviceManager) Start() {
@@ -446,6 +445,8 @@ func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 
 func (m *DeviceManager) handleNotify() {
 	stopCh := m.stop
+	m.wait.Add(1)
+	defer m.wait.Done()
 	for {
 		select {
 		case <-stopCh:
@@ -471,12 +472,7 @@ func (m *DeviceManager) Stop() {
 	if m.stop != nil {
 		klog.Infof("DeviceManager stopping...")
 		close(m.stop)
-		<-m.waitCleanup
-		if m.featureGate.Enabled(util.SMWatcher) {
-			<-m.waitCleanup
-		}
-		close(m.waitCleanup)
+		m.wait.Wait()
 		m.stop = nil
-		m.waitCleanup = nil
 	}
 }

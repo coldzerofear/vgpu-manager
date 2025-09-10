@@ -32,7 +32,13 @@ func (m *DeviceManager) checkHealth() error {
 	if err := m.NvmlInit(); err != nil {
 		return err
 	}
-	defer m.NvmlShutdown()
+
+	stopCh := m.stop
+	m.wait.Add(1)
+	defer func() {
+		m.NvmlShutdown()
+		m.wait.Done()
+	}()
 
 	// FIXME: formalize the full list and document it.
 	// http://docs.nvidia.com/deploy/xid-errors/index.html#topic_4
@@ -105,7 +111,6 @@ func (m *DeviceManager) checkHealth() error {
 		}
 	}
 
-	stopCh := m.stop
 	for {
 		select {
 		case <-stopCh:
