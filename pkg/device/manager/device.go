@@ -202,18 +202,6 @@ func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceM
 }
 
 func (m *DeviceManager) initDevices() (err error) {
-	driverVersion, ret := m.SystemGetDriverVersion()
-	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error getting driver version: %s", nvml.ErrorString(ret))
-	}
-	cudaDriverVersion, ret := m.SystemGetCudaDriverVersion()
-	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error getting CUDA driver version: %s", nvml.ErrorString(ret))
-	}
-	m.driverVersion = nvidia.DriverVersion{
-		DriverVersion:     driverVersion,
-		CudaDriverVersion: nvidia.CudaDriverVersion(cudaDriverVersion),
-	}
 	var (
 		linksMap           map[string]map[int][]links.P2PLinkType
 		gpuTopologyEnabled = m.featureGate.Enabled(util.GPUTopology)
@@ -244,7 +232,10 @@ func (m *DeviceManager) initDevices() (err error) {
 	if err != nil {
 		return fmt.Errorf("error querying IMEX channels: %w", err)
 	}
-
+	m.driverVersion, err = m.DeviceLib.GetDriverVersion()
+	if err != nil {
+		return err
+	}
 	excludeDevices := m.config.GetExcludeDevices()
 	err = m.VisitDevices(func(i int, d nvdev.Device) error {
 		gpuInfo, err := m.GetGpuInfo(i, d)
