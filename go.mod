@@ -13,7 +13,7 @@ require (
 	github.com/opencontainers/runc v1.2.6
 	github.com/prometheus/client_golang v1.22.0
 	github.com/spf13/pflag v1.0.6
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	golang.org/x/time v0.9.0
 	gomodules.xyz/jsonpatch/v2 v2.4.0
@@ -94,6 +94,7 @@ require (
 )
 
 replace (
+	github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20250919193215-e435d1485517
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.34.0
 	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.34.0
 	k8s.io/controller-manager => k8s.io/controller-manager v0.34.0
