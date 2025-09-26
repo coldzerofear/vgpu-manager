@@ -2,6 +2,7 @@ package manager
 
 import (
 	"fmt"
+	"os/exec"
 	"strconv"
 	"sync"
 
@@ -215,34 +216,44 @@ func (m *DeviceManager) initDevices() (err error) {
 		CudaDriverVersion: nvidia.CudaDriverVersion(cudaDriverVersion),
 	}
 	var (
-		linksMap           map[string]map[int][]links.P2PLinkType
+		devLinksMap        map[string]map[int][]links.P2PLinkType
 		gpuTopologyEnabled = m.featureGate.Enabled(util.GPUTopology)
 		exists             = false
 	)
 	if gpuTopologyEnabled {
 		deviceList, err := gpuallocator.NewDevices(
-			gpuallocator.WithDeviceLib(m),
 			gpuallocator.WithNvmlLib(m),
+			gpuallocator.WithDeviceLib(m),
 		)
 		if err != nil {
 			return fmt.Errorf("error getting gpuallocator device list: %v", err)
 		}
-		linksMap = make(map[string]map[int][]links.P2PLinkType)
+		devLinksMap = make(map[string]map[int][]links.P2PLinkType, len(deviceList))
 		for _, dev := range deviceList {
-			linklist := map[int][]links.P2PLinkType{}
+			devLinklist := make(map[int][]links.P2PLinkType, len(dev.Links))
 			for index, pLinks := range dev.Links {
-				var p2pLinks []links.P2PLinkType
-				for _, link := range pLinks {
-					p2pLinks = append(p2pLinks, link.Type)
+				p2pLinks := make([]links.P2PLinkType, len(pLinks))
+				for i, link := range pLinks {
+					p2pLinks[i] = link.Type
 				}
-				linklist[index] = p2pLinks
+				devLinklist[index] = p2pLinks
 			}
-			linksMap[dev.UUID] = linklist
+			devLinksMap[dev.UUID] = devLinklist
 		}
 	}
 	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), "/")
 	if err != nil {
 		return fmt.Errorf("error querying IMEX channels: %w", err)
+	}
+
+	if klog.V(5).Enabled() {
+		cmd := exec.Command(m.NvidiaSMIPath, "topo", "-m")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			klog.V(5).ErrorS(err, "failed to get numa information", "nvidia-smi", m.NvidiaSMIPath)
+		} else {
+			klog.V(5).InfoS("nvidia-smi topo -m output", "result", string(out))
+		}
 	}
 
 	excludeDevices := m.config.GetExcludeDevices()
@@ -251,10 +262,8 @@ func (m *DeviceManager) initDevices() (err error) {
 		if err != nil {
 			return fmt.Errorf("error getting info for GPU %d: %w", i, err)
 		}
-		numaNode, err := util.GetNumaInformation(m.NvidiaSMIPath, i)
-		if err != nil {
-			klog.ErrorS(err, "failed to get numa information", "nvidia-smi", m.NvidiaSMIPath, "device", i)
-		}
+
+		numaNode, _ := gpuInfo.GetNumaNode()
 
 		healthy := true
 		if excludeDevices.HasIntID(i) {
@@ -272,13 +281,13 @@ func (m *DeviceManager) initDevices() (err error) {
 		}
 		var p2pLinks map[int][]links.P2PLinkType
 		if gpuTopologyEnabled {
-			if p2pLinks, exists = linksMap[gpuInfo.UUID]; !exists {
+			if p2pLinks, exists = devLinksMap[gpuInfo.UUID]; !exists {
 				return fmt.Errorf("error getting device links for GPU %d", i)
 			}
 		}
 		gpuDevice := &Device{GPU: &GPUDevice{
 			GpuInfo:  gpuInfo,
-			NumaNode: numaNode,
+			NumaNode: int(numaNode),
 			Paths:    paths,
 			Healthy:  healthy,
 			Links:    p2pLinks,
