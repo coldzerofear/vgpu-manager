@@ -154,7 +154,7 @@ int device_util_write_lock(int ordinal) {
 
 void device_util_unlock(int fd, int ordinal) {
   if (fd < 0) return;
-  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) return
+  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) return;
   struct flock lock;
   lock.l_type = F_UNLCK;
   lock.l_whence = SEEK_SET;
@@ -217,7 +217,7 @@ int device_vmem_write_lock(int ordinal) {
 
 void device_vmem_unlock(int fd, int ordinal) {
   if (fd < 0) return;
-  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) return
+  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) return;
   struct flock lock;
   lock.l_type = F_UNLCK;
   lock.l_whence = SEEK_SET;

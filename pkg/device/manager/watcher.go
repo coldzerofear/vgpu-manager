@@ -101,7 +101,6 @@ func (m *DeviceManager) doWatcher() {
 	}, time.Second)
 
 	klog.V(3).Infoln("DeviceManager sm watcher stopped")
-	m.waitCleanup <- struct{}{}
 }
 
 func (m *DeviceManager) smWatcher(deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig) error {
@@ -109,19 +108,19 @@ func (m *DeviceManager) smWatcher(deviceUtil *watcher.DeviceUtil, batch watcher.
 		if enabled, _ := d.IsMigEnabled(); enabled {
 			return nil
 		}
-		computeProcesses, rt := d.GetComputeRunningProcessesBySize(watcher.MAX_PIDS)
+		computeProcesses, rt := d.GetComputeRunningProcessesBySize(watcher.MaxPids)
 		if rt != nvml.SUCCESS {
 			klog.ErrorS(errors.New(rt.Error()), "GetComputeRunningProcesses failed", "device", i)
 			return nil
 		}
-		graphicsProcesses, rt := d.GetGraphicsRunningProcessesBySize(watcher.MAX_PIDS)
+		graphicsProcesses, rt := d.GetGraphicsRunningProcessesBySize(watcher.MaxPids)
 		if rt != nvml.SUCCESS {
 			klog.ErrorS(errors.New(rt.Error()), "GetGraphicsRunningProcesses failed", "device", i)
 			return nil
 		}
 
 		lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
-		procUtilSamples, rt := d.GetProcessUtilizationBySize(uint64(lastTs), watcher.MAX_PIDS)
+		procUtilSamples, rt := d.GetProcessUtilizationBySize(uint64(lastTs), watcher.MaxPids)
 
 		if err := deviceUtil.WLock(i); err != nil {
 			klog.V(3).ErrorS(err, "DeviceUtilWLock failed", "device", i)
@@ -131,13 +130,13 @@ func (m *DeviceManager) smWatcher(deviceUtil *watcher.DeviceUtil, batch watcher.
 			_ = deviceUtil.Unlock(i)
 		}()
 
-		computeProcessesSize := min(len(computeProcesses), watcher.MAX_PIDS)
+		computeProcessesSize := min(len(computeProcesses), watcher.MaxPids)
 		deviceUtil.GetUtil().Devices[i].ComputeProcessesSize = uint32(computeProcessesSize)
 		for index, process := range computeProcesses[:computeProcessesSize] {
 			deviceUtil.GetUtil().Devices[i].ComputeProcesses[index] = process
 		}
 
-		graphicsProcessesSize := min(len(graphicsProcesses), watcher.MAX_PIDS)
+		graphicsProcessesSize := min(len(graphicsProcesses), watcher.MaxPids)
 		deviceUtil.GetUtil().Devices[i].GraphicsProcessesSize = uint32(graphicsProcessesSize)
 		for index, process := range graphicsProcesses[:graphicsProcessesSize] {
 			deviceUtil.GetUtil().Devices[i].GraphicsProcesses[index] = process
@@ -145,7 +144,7 @@ func (m *DeviceManager) smWatcher(deviceUtil *watcher.DeviceUtil, batch watcher.
 
 		deviceUtil.GetUtil().Devices[i].LastSeenTimeStamp = uint64(lastTs)
 		if rt == nvml.SUCCESS {
-			processUtilSamplesSize := min(len(procUtilSamples), watcher.MAX_PIDS)
+			processUtilSamplesSize := min(len(procUtilSamples), watcher.MaxPids)
 			deviceUtil.GetUtil().Devices[i].ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
 			for index, sample := range procUtilSamples[:processUtilSamplesSize] {
 				deviceUtil.GetUtil().Devices[i].ProcessUtilSamples[index] = sample

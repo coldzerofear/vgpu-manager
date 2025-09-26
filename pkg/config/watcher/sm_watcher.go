@@ -156,7 +156,7 @@ func (d *DeviceUtil) RLock(ordinal int) error {
 	if d == nil {
 		return fmt.Errorf("DeviceUtil is nil")
 	}
-	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MAX_DEVICE_COUNT {
+	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
 	}
 	fd, err := DeviceUtilRLock(ordinal, d.filePath)
@@ -171,7 +171,7 @@ func (d *DeviceUtil) WLock(ordinal int) error {
 	if d == nil {
 		return fmt.Errorf("DeviceUtil is nil")
 	}
-	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MAX_DEVICE_COUNT {
+	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
 	}
 	fd, err := DeviceUtilWLock(ordinal, d.filePath)
@@ -186,7 +186,7 @@ func (d *DeviceUtil) Unlock(ordinal int) error {
 	if d == nil {
 		return fmt.Errorf("DeviceUtil is nil")
 	}
-	if d.fd < 0 || ordinal < 0 || ordinal >= MAX_DEVICE_COUNT {
+	if d.fd < 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, fd=%d, device=%d", d.fd, ordinal)
 	}
 	DeviceUtilUnlock(d.fd, ordinal)

@@ -84,8 +84,8 @@ import (
 import "C"
 
 const (
-	MAX_PIDS         = C.MAX_PIDS
-	MAX_DEVICE_COUNT = C.MAX_DEVICE_COUNT
+	MaxPids        = C.MAX_PIDS
+	MaxDeviceCount = C.MAX_DEVICE_COUNT
 )
 
 type ProcessUsedT struct {
@@ -94,7 +94,7 @@ type ProcessUsedT struct {
 }
 
 type DeviceVMemUsedT struct {
-	Processes     [MAX_PIDS]ProcessUsedT
+	Processes     [MaxPids]ProcessUsedT
 	ProcessesSize uint32
 	LockByte      uint8
 }
@@ -118,7 +118,7 @@ func (d *DeviceVMemory) RLock(ordinal int) error {
 	if d == nil {
 		return fmt.Errorf("DeviceVMemory is nil")
 	}
-	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MAX_DEVICE_COUNT {
+	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
 	}
 	fd, err := DeviceVMemRLock(ordinal, d.filePath)
@@ -133,7 +133,7 @@ func (d *DeviceVMemory) Unlock(ordinal int) error {
 	if d == nil {
 		return fmt.Errorf("DeviceVMemory is nil")
 	}
-	if d.fd < 0 || ordinal < 0 || ordinal >= MAX_DEVICE_COUNT {
+	if d.fd < 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, fd=%d, device=%d", d.fd, ordinal)
 	}
 	DeviceVMemUnlock(d.fd, ordinal)
