@@ -87,7 +87,7 @@ static void init_device_cuda_cores(unsigned int *devCount);
 
 static void initialization();
 
-static void rate_limiter(int, int, int);
+static void rate_limiter(int grids, int blocks, int device);
 
 static void change_token(int64_t, int);
 
