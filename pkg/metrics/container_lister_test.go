@@ -61,7 +61,7 @@ func Test_ContainerLister(t *testing.T) {
 			}},
 		},
 	}
-	k8sClient.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+	_, _ = k8sClient.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 
 	driverVersion := nvidia.DriverVersion{
 		DriverVersion:     "",
@@ -166,7 +166,7 @@ func Test_ContainerLister(t *testing.T) {
 
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
-		if data, ok := contLister.GetResourceData(key); !ok {
+		if data, ok := contLister.GetResourceDataT(key); !ok {
 			t.Errorf("Unable to find container resource configuration file")
 		} else {
 			assert.Equal(t, contResDataMap[container.Name], data)
@@ -176,11 +176,11 @@ func Test_ContainerLister(t *testing.T) {
 	if err := os.Setenv("UNIT_TESTING", "true"); err != nil {
 		t.Error(err)
 	}
-	k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
+	_ = k8sClient.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{})
 	time.Sleep(2 * time.Second)
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
-		if _, ok := contLister.GetResourceData(key); ok {
+		if _, ok := contLister.GetResourceDataT(key); ok {
 			t.Errorf("The container resource configuration file should have been deleted by now")
 		}
 	}

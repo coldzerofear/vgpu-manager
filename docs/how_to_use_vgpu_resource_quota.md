@@ -1,10 +1,10 @@
 ## Describe
 
-vgpu-manager supports quota control of VGPU resources using `ResourceQuota`
+vgpu-manager supports quota control of vGPU resources using `ResourceQuota`
 
 ## Example
 
-Create a `ResourceQuota`, limit the default namespace to only apply for one VGPU.
+Create a `ResourceQuota`, limit the default namespace to only apply for one vGPU.
 
 ```yaml
 apiVersion: v1
@@ -17,7 +17,7 @@ spec:
     requests.nvidia.com/vgpu-number: "1"
 ```
 
-Check the resource quota, at this time, there are no pods using vgpu.
+Check the resource quota, at this time, there are no pods using vGPU.
 
 ```bash
 $ kubectl get quota vgpu-resource-quota
@@ -32,7 +32,7 @@ Resource                         Used  Hard
 requests.nvidia.com/vgpu-number  0     1
 ```
 
-Create a vgpu pod. at this time, it can be created normally.
+Create a vGPU pod. at this time, it can be created normally.
 
 ```yaml
 apiVersion: v1
@@ -51,7 +51,7 @@ spec:
         nvidia.com/vgpu-number: 1 # apply for one
 ```
 
-Check quota, vgpu has been used as 1.
+Check quota, vGPU has been used as 1.
 
 ```bash
 $ kubectl describe quota vgpu-resource-quota
@@ -62,18 +62,18 @@ Resource                         Used  Hard
 requests.nvidia.com/vgpu-number  1     1
 ```
 
-At this point, the available VGPU for the default namespace has reached the quota limit.
+At this point, the available vGPU for the default namespace has reached the quota limit.
 
-If you create vgpu pod again, the request will be rejected.
+If you create vGPU pod again, the request will be rejected.
 
 ```bash
 $ kubectl apply -f vgpu-pod.yaml 
 Error from server (Forbidden): error when creating "vgpu-pod.yaml": pods "vgpu-pod-test1" is forbidden: exceeded quota: vgpu-resource-quota, requested: requests.nvidia.com/vgpu-number=1, used: requests.nvidia.com/vgpu-number=1, limited: requests.nvidia.com/vgpu-number=1
 ```
 
-## HardLimit key
+## HardLimit ResourceName
 
-| Key                             | Describe                                                       |
+| ResourceName                    | Describe                                                       |
 |---------------------------------|----------------------------------------------------------------|
 | requests.nvidia.com/vgpu-number | Limit the number of VGPU applications that can be applied for. |
 | requests.nvidia.com/vgpu-cores  | Limit the number of vGPU cores that can be applied for.        |

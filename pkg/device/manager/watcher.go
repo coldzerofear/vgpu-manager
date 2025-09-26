@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -64,22 +62,13 @@ func (m *DeviceManager) doWatcher() {
 			klog.ErrorS(err, "PrepareDeviceUtilFile failed")
 			return
 		}
-		deviceUtil, data, err := watcher.MmapDeviceUtilT(filePath)
+		deviceUtil, err := watcher.NewDeviceUtil(filePath)
 		if err != nil {
 			klog.ErrorS(err, "WatchDeviceUtilFile failed")
 			return
 		}
 		defer func() {
-			_, _, errno := syscall.Syscall(
-				syscall.SYS_MSYNC,
-				uintptr(unsafe.Pointer(&data[0])),
-				uintptr(len(data)),
-				uintptr(syscall.MS_SYNC),
-			)
-			if errno != 0 {
-				klog.V(3).ErrorS(fmt.Errorf("msync error: %d", errno), "Failed to sync mmap data")
-			}
-			_ = syscall.Munmap(data)
+			_ = deviceUtil.Munmap(true)
 		}()
 
 		if err = m.NvmlInit(); err != nil {
@@ -101,7 +90,7 @@ func (m *DeviceManager) doWatcher() {
 				wg.Add(1)
 				go func(config watcher.BatchConfig) {
 					defer wg.Done()
-					if err := m.smWatcher(filePath, deviceUtil, config); err != nil {
+					if err := m.smWatcher(deviceUtil, config); err != nil {
 						watcherErr = err
 					}
 				}(batch)
@@ -114,50 +103,51 @@ func (m *DeviceManager) doWatcher() {
 	klog.V(3).Infoln("DeviceManager sm watcher stopped")
 }
 
-func (m *DeviceManager) smWatcher(filePath string, deviceUtil *watcher.DeviceUtilT, batch watcher.BatchConfig) error {
+func (m *DeviceManager) smWatcher(deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig) error {
 	watcherFunc := func(i int, d device.Device) error {
 		if enabled, _ := d.IsMigEnabled(); enabled {
 			return nil
 		}
-		computeProcesses, rt := d.GetComputeRunningProcesses()
+		computeProcesses, rt := d.GetComputeRunningProcessesBySize(watcher.MaxPids)
 		if rt != nvml.SUCCESS {
 			klog.ErrorS(errors.New(rt.Error()), "GetComputeRunningProcesses failed", "device", i)
 			return nil
 		}
-		graphicsProcesses, rt := d.GetGraphicsRunningProcesses()
+		graphicsProcesses, rt := d.GetGraphicsRunningProcessesBySize(watcher.MaxPids)
 		if rt != nvml.SUCCESS {
 			klog.ErrorS(errors.New(rt.Error()), "GetGraphicsRunningProcesses failed", "device", i)
 			return nil
 		}
 
 		lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
-		procUtilSamples, rt := d.GetProcessUtilization(uint64(lastTs))
+		procUtilSamples, rt := d.GetProcessUtilizationBySize(uint64(lastTs), watcher.MaxPids)
 
-		fd, err := watcher.DeviceUtilWLock(i, filePath)
-		if err != nil {
+		if err := deviceUtil.WLock(i); err != nil {
 			klog.V(3).ErrorS(err, "DeviceUtilWLock failed", "device", i)
 			return err
 		}
-		defer watcher.DeviceUtilUnlock(fd, i)
+		defer func() {
+			_ = deviceUtil.Unlock(i)
+		}()
 
 		computeProcessesSize := min(len(computeProcesses), watcher.MaxPids)
-		deviceUtil.Devices[i].ComputeProcessesSize = uint32(computeProcessesSize)
+		deviceUtil.GetUtil().Devices[i].ComputeProcessesSize = uint32(computeProcessesSize)
 		for index, process := range computeProcesses[:computeProcessesSize] {
-			deviceUtil.Devices[i].ComputeProcesses[index] = process
+			deviceUtil.GetUtil().Devices[i].ComputeProcesses[index] = process
 		}
 
 		graphicsProcessesSize := min(len(graphicsProcesses), watcher.MaxPids)
-		deviceUtil.Devices[i].GraphicsProcessesSize = uint32(graphicsProcessesSize)
+		deviceUtil.GetUtil().Devices[i].GraphicsProcessesSize = uint32(graphicsProcessesSize)
 		for index, process := range graphicsProcesses[:graphicsProcessesSize] {
-			deviceUtil.Devices[i].GraphicsProcesses[index] = process
+			deviceUtil.GetUtil().Devices[i].GraphicsProcesses[index] = process
 		}
 
-		deviceUtil.Devices[i].LastSeenTimeStamp = uint64(lastTs)
+		deviceUtil.GetUtil().Devices[i].LastSeenTimeStamp = uint64(lastTs)
 		if rt == nvml.SUCCESS {
 			processUtilSamplesSize := min(len(procUtilSamples), watcher.MaxPids)
-			deviceUtil.Devices[i].ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
+			deviceUtil.GetUtil().Devices[i].ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
 			for index, sample := range procUtilSamples[:processUtilSamplesSize] {
-				deviceUtil.Devices[i].ProcessUtilSamples[index] = sample
+				deviceUtil.GetUtil().Devices[i].ProcessUtilSamples[index] = sample
 			}
 		}
 		return nil

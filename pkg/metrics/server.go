@@ -32,10 +32,36 @@ func (k klogErrLog) Println(v ...interface{}) {
 	klog.Errorln(v...)
 }
 
-type lastResponse struct {
+type response struct {
 	header http.Header
 	status int
 	body   []byte
+}
+
+func (r *response) Clone() response {
+	return response{
+		header: r.header.Clone(),
+		status: r.status,
+		body:   bytes.Clone(r.body),
+	}
+}
+
+type lastResponse struct {
+	mutex    sync.RWMutex
+	response response
+}
+
+func (r *lastResponse) GetResponse() response {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	return r.response.Clone()
+}
+
+func (r *lastResponse) SetResponse(resp response) {
+	resp = resp.Clone()
+	r.mutex.Lock()
+	r.response = resp
+	r.mutex.Unlock()
 }
 
 type responseRecorder struct {
@@ -58,6 +84,14 @@ func (r *responseRecorder) WriteHeader(status int) {
 	r.writer.WriteHeader(status)
 }
 
+func (r *responseRecorder) GetResponse() response {
+	return response{
+		body:   r.buffer.Bytes(),
+		status: r.status,
+		header: r.Header(),
+	}
+}
+
 func (s *Server) Start(stopCh <-chan struct{}) error {
 	if s.httpServer != nil {
 		return fmt.Errorf("metrics service has been started and cannot be restarted again")
@@ -69,44 +103,31 @@ func (s *Server) Start(stopCh <-chan struct{}) error {
 			ErrorLog: klogErrLog{},
 			Timeout:  s.timeout,
 		}
-		lastResp     lastResponse
-		lastRespLock sync.RWMutex
-		next         = promhttp.InstrumentMetricHandler(s.registry, promhttp.HandlerFor(s.registry, opts))
+		lastResp = &lastResponse{}
+		next     = promhttp.InstrumentMetricHandler(s.registry, promhttp.HandlerFor(s.registry, opts))
 	)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.limiter != nil && !s.limiter.Allow() {
-			lastRespLock.RLock()
-			defer lastRespLock.RUnlock()
-
-			if lastResp.status == http.StatusOK {
-				for k, v := range lastResp.header {
-					w.Header()[k] = v
-				}
-				w.Header().Set("X-Rate-Limited", "true")
-				w.WriteHeader(lastResp.status)
-				_, _ = w.Write(lastResp.body)
-			} else {
+			resp := lastResp.GetResponse()
+			if resp.status != http.StatusOK {
 				http.Error(w, "Too many requests", http.StatusTooManyRequests)
+				return
 			}
-
+			w.Header().Set("X-Rate-Limited", "true")
+			for k, v := range resp.header {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(resp.status)
+			_, _ = w.Write(resp.body)
 		} else {
 			recorder := &responseRecorder{
 				writer: w,
 				buffer: bytes.NewBuffer(nil),
 				status: http.StatusOK,
 			}
-
 			next.ServeHTTP(recorder, r)
-
-			lastRespLock.Lock()
-			lastResp = lastResponse{
-				body:   recorder.buffer.Bytes(),
-				status: recorder.status,
-				header: recorder.Header().Clone(),
-			}
-			lastRespLock.Unlock()
-
+			lastResp.SetResponse(recorder.GetResponse())
 		}
 	})
 	routerHandle := httprouter.New()

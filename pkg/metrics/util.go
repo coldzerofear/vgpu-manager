@@ -1,7 +1,7 @@
 package metrics
 
 func GetValidValue(x uint32) uint32 {
-	if x >= 0 && x <= 100 {
+	if x <= 100 {
 		return x
 	}
 	return 0

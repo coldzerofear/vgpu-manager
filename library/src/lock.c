@@ -58,7 +58,7 @@ static int try_acquire_lock(const char *path) {
 }
 
 int lock_gpu_device(int ordinal) {
-  if (ordinal >= MAX_DEVICE_COUNT) {
+  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
     LOGGER(ERROR, "invalid device index %d", ordinal);
     return -1;
   }
@@ -103,7 +103,7 @@ void unlock_gpu_device(int fd) {
 }
 
 int device_util_read_lock(int ordinal) {
-  if (ordinal >= MAX_DEVICE_COUNT) {
+  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
     LOGGER(ERROR, "(SMWatcher) invalid device index %d", ordinal);
     return -1;
   }
@@ -128,7 +128,7 @@ int device_util_read_lock(int ordinal) {
 }
 
 int device_util_write_lock(int ordinal) {
-  if (ordinal >= MAX_DEVICE_COUNT) {
+  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
     LOGGER(ERROR, "(SMWatcher) invalid device index %d", ordinal);
     return -1;
   }
@@ -154,6 +154,7 @@ int device_util_write_lock(int ordinal) {
 
 void device_util_unlock(int fd, int ordinal) {
   if (fd < 0) return;
+  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) return;
   struct flock lock;
   lock.l_type = F_UNLCK;
   lock.l_whence = SEEK_SET;
@@ -165,7 +166,7 @@ void device_util_unlock(int fd, int ordinal) {
 }
 
 int device_vmem_read_lock(int ordinal) {
-  if (ordinal >= MAX_DEVICE_COUNT) {
+  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
     LOGGER(ERROR, "(VMemNode) invalid device index %d", ordinal);
     return -1;
   }
@@ -190,7 +191,7 @@ int device_vmem_read_lock(int ordinal) {
 }
 
 int device_vmem_write_lock(int ordinal) {
-  if (ordinal >= MAX_DEVICE_COUNT) {
+  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
     LOGGER(ERROR, "(VMemNode) invalid device index %d", ordinal);
     return -1;
   }
@@ -216,6 +217,7 @@ int device_vmem_write_lock(int ordinal) {
 
 void device_vmem_unlock(int fd, int ordinal) {
   if (fd < 0) return;
+  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) return;
   struct flock lock;
   lock.l_type = F_UNLCK;
   lock.l_whence = SEEK_SET;

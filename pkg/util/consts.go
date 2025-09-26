@@ -62,6 +62,8 @@ const (
 	Checkpoints     = "checkpoints"
 	Watcher         = "watcher"
 	SMUtilFile      = "sm_util.config"
+	VMemNode        = "vmem_node"
+	VMemNodeFile    = "vmem_node.config"
 )
 
 const (

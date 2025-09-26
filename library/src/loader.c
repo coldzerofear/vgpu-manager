@@ -1592,6 +1592,7 @@ void rm_vmem_node_by_device_pid(int device_id, int pid) {
   }
 }
 
+// Before exiting the program, check and clean up any unreleased virtual memory records.
 void exit_cleanup_vmem_nodes() {
  int pid = getpid();
  LOGGER(WARNING, "process program %d exits", pid);
@@ -1797,6 +1798,8 @@ int load_controller_configuration() {
   g_vgpu_config->vmem_node = vnode_enable;
   for (int i = 0; i < g_vgpu_config->device_count; i++) {
     strcpy(g_vgpu_config->devices[i].uuid, gpu_uuids[i]);
+    // TODO Temporarily consistent with the equipment sequence in the container.
+    strcpy(g_vgpu_config->host_index[i], gpu_uuids[i]);
     ret = get_mem_limit(i, &g_vgpu_config->devices[i].total_memory);
     if (unlikely(ret)) {
       LOGGER(VERBOSE, "gpu device %d turn off memory limit", i);
