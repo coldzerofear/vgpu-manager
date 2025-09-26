@@ -22,7 +22,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <dlfcn.h>
-#include <pthread.h>
 #include <regex.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1453,12 +1452,11 @@ void init_tid_dlsyms(){
   memset(tid_dlsyms, 0, sizeof(tid_dlsym) * DLMAP_SIZE);
 }
 
-int check_tid_dlsyms(int tid, void *pointer){
+int check_tid_dlsyms(pthread_t tid, void *pointer){
   int i;
   int cursor = (tid_dlsym_count < DLMAP_SIZE) ? tid_dlsym_count : DLMAP_SIZE;
   for (i = cursor-1; i >= 0; i--) {
-    if (tid_dlsyms[i].tid == tid &&
-      tid_dlsyms[i].pointer == pointer) {
+    if (tid_dlsyms[i].pointer == pointer && pthread_equal(tid_dlsyms[i].tid, tid)) {
       return 1;
     }
   }
@@ -1482,7 +1480,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   init_real_dlsym();
 
   if (handle == RTLD_NEXT) {
-    int tid;
+    pthread_t tid;
     void *h = real_dlsym(RTLD_NEXT,symbol);
     pthread_mutex_lock(&tid_dlsym_lock);
     tid = pthread_self();

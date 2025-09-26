@@ -7,7 +7,6 @@
 #include <sys/stat.h>
 #include <stdio.h>
 #include <errno.h>
-#include <pthread.h>
 #include <stddef.h>
 #include <sys/mman.h>
 

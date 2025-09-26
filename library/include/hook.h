@@ -31,6 +31,7 @@ extern "C" {
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include "list.h"
 #include "nvml-subset.h"
@@ -255,7 +256,7 @@ typedef enum {
 } log_level_enum_t;
 
 typedef struct {
-  int tid;
+  pthread_t tid;
   void *pointer;
 } tid_dlsym;
 
