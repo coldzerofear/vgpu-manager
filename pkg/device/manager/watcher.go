@@ -50,7 +50,11 @@ func (m *DeviceManager) doWatcher() {
 	klog.V(4).Infoln("DeviceManager starting sm watcher...")
 
 	ctx, cancelFunc := WrapChannelWithContext(m.stop)
-	defer cancelFunc()
+	m.wait.Add(1)
+	defer func() {
+		cancelFunc()
+		m.wait.Done()
+	}()
 	filePath := filepath.Join(WatcherDir, SMUtilFile)
 
 	wait.UntilWithContext(ctx, func(ctx context.Context) {

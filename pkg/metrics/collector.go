@@ -468,8 +468,8 @@ skipNvml:
 					deviceMemUsage  = uint64(0)
 					deviceVMemUsage = uint64(0)
 					deviceSMUtil    = uint32(0)
+					tmpPids        []string
 				)
-				var tmpPids []string
 				ContainerDeviceProcInfoFunc(devProcInfoMap[deviceUUID], containerPids,
 					func(process nvml.ProcessInfo_v1) {
 						tmpPids = append(tmpPids, strconv.Itoa(int(process.Pid)))

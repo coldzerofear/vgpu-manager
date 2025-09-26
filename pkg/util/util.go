@@ -3,7 +3,6 @@ package util
 import (
 	"fmt"
 	"math"
-	"os/exec"
 	"slices"
 	"sort"
 	"strconv"
@@ -230,69 +229,6 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 	return allocatingPods
 }
 
-func GetNumaInformation(nvidiaSMIPath string, idx int) (int, error) {
-	cmd := exec.Command(nvidiaSMIPath, "topo", "-m")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return 0, err
-	}
-	klog.V(5).InfoS("nvidia-smi topo -m output", "result", string(out))
-	return parseNvidiaNumaInfo(idx, string(out))
-}
-
-func parseNvidiaNumaInfo(idx int, nvidiaTopoStr string) (int, error) {
-	var (
-		numaAffinityColumnIndex = 0
-		result                  = -1
-		err                     error
-	)
-	for index, val := range strings.Split(nvidiaTopoStr, "\n") {
-		if !strings.Contains(val, "GPU") {
-			continue
-		}
-		// Example: GPU0	 X 	0-7		N/A		N/A
-		// Many values are separated by two tabs, but this actually represents 5 values instead of 7
-		// So add logic to remove multiple tabs
-		words := strings.Split(strings.ReplaceAll(val, "\t\t", "\t"), "\t")
-		klog.V(5).InfoS("parseNumaInfo", "words", words)
-		// get numa affinity column number
-		if index == 0 {
-			for columnIndex, headerVal := range words {
-				// The topology output of a single card is as follows:
-				// 			GPU0	CPU Affinity	NUMA Affinity	GPU NUMA ID
-				// GPU0	 X 	0-7		N/A		N/A
-				//Legend: Other content omitted
-
-				// The topology output in the case of multiple cards is as follows:
-				// 			GPU0	GPU1	CPU Affinity	NUMA Affinity
-				// GPU0	 X 	PHB	0-31		N/A
-				// GPU1	PHB	 X 	0-31		N/A
-				// Legend: Other content omitted
-
-				// We need to get the value of the NUMA Affinity column, but their column indexes are inconsistent,
-				// so we need to get the index first and then get the value.
-				if strings.Contains(headerVal, "NUMA Affinity") {
-					// The header is one column less than the actual row.
-					numaAffinityColumnIndex = columnIndex
-					continue
-				}
-			}
-			continue
-		}
-		klog.V(5).InfoS("nvidia-smi topo -m row output", "row output", words, "length", len(words))
-		if strings.Contains(words[0], fmt.Sprint(idx)) {
-			if len(words) <= numaAffinityColumnIndex || words[numaAffinityColumnIndex] == "N/A" {
-				klog.InfoS("current card has not established numa topology", "gpu row info", words, "index", idx)
-				return -1, nil
-			}
-			if result, err = strconv.Atoi(words[numaAffinityColumnIndex]); err != nil {
-				return -1, err
-			}
-		}
-	}
-	return result, nil
-}
-
 func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
 	for _, container := range pod.Spec.Containers {
 		if GetResourceOfContainer(&container, VGPUNumberResourceName) > 1 {
@@ -318,4 +254,30 @@ func PodsOnNode(pods []*corev1.Pod, node *corev1.Node, callback func(*corev1.Pod
 			callback(pod)
 		}
 	}
+}
+
+// CompareResourceVersion compares resourceversions, resource versions are actually
+// ints, so we can easily compare them.
+// If objA.resourceVersion > objB.resourceVersion, return 1;
+// objA.resourceVersion == objB.resourceVersion, return 0;
+// objA.resourceVersion < objB.resourceVersion, return -1;
+func CompareResourceVersion(objA, objB metav1.Object) int {
+	a, err := strconv.ParseUint(objA.GetResourceVersion(), 10, 64)
+	if err != nil {
+		// coder error
+		panic(err)
+	}
+	b, err := strconv.ParseUint(objB.GetResourceVersion(), 10, 64)
+	if err != nil {
+		// coder error
+		panic(err)
+	}
+
+	if a > b {
+		return 1
+	}
+	if a == b {
+		return 0
+	}
+	return -1
 }

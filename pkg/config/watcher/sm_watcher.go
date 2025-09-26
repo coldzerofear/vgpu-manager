@@ -122,23 +122,23 @@ import (
 import "C"
 
 const (
-	MAX_PIDS         = C.MAX_PIDS
-	MAX_DEVICE_COUNT = C.MAX_DEVICE_COUNT
+	MaxPids        = C.MAX_PIDS
+	MaxDeviceCount = C.MAX_DEVICE_COUNT
 )
 
 type DeviceProcessT struct {
-	ProcessUtilSamples     [MAX_PIDS]nvml.ProcessUtilizationSample
+	ProcessUtilSamples     [MaxPids]nvml.ProcessUtilizationSample
 	ProcessUtilSamplesSize uint32
 	LastSeenTimeStamp      uint64
-	ComputeProcesses       [MAX_PIDS]nvml.ProcessInfo
+	ComputeProcesses       [MaxPids]nvml.ProcessInfo
 	ComputeProcessesSize   uint32
-	GraphicsProcesses      [MAX_PIDS]nvml.ProcessInfo
+	GraphicsProcesses      [MaxPids]nvml.ProcessInfo
 	GraphicsProcessesSize  uint32
 	LockByte               uint8
 }
 
 type DeviceUtilT struct {
-	Devices [MAX_DEVICE_COUNT]DeviceProcessT
+	Devices [MaxDeviceCount]DeviceProcessT
 }
 
 type DeviceUtil struct {

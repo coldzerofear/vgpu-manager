@@ -47,8 +47,7 @@ const (
 	// PodVGPURealAllocAnnotation Real device information allocated by device plugins
 	PodVGPURealAllocAnnotation = DomainPrefix + "/real-allocated"
 
-	HundredCore     = 100
-	MaxDeviceNumber = 16
+	HundredCore = 100
 
 	// MaxContainerLimit max container num
 	MaxContainerLimit = 300000
@@ -159,11 +158,12 @@ const (
 
 // FeatureGates
 const (
-	CorePlugin     = "CorePlugin"
-	MemoryPlugin   = "MemoryPlugin"
-	Reschedule     = "Reschedule"
-	GPUTopology    = "GPUTopology"
-	SMWatcher      = "SMWatcher"
-	SerialBindNode = "SerialBindNode"
-	VMemoryNode    = "VMemoryNode"
+	CorePlugin       = "CorePlugin"
+	MemoryPlugin     = "MemoryPlugin"
+	Reschedule       = "Reschedule"
+	GPUTopology      = "GPUTopology"
+	SMWatcher        = "SMWatcher"
+	SerialBindNode   = "SerialBindNode"
+	SerialFilterNode = "SerialFilterNode"
+	VMemoryNode      = "VMemoryNode"
 )

@@ -12,6 +12,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
@@ -38,6 +39,7 @@ func main() {
 	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()
 	defer klog.Flush()
+	log.SetLogger(klog.NewKlogr())
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {
@@ -102,7 +104,6 @@ func main() {
 			},
 		},
 		Metrics: metrics.Options{BindAddress: "0"}, // Disable manager metrics service
-		Logger:  klog.NewKlogr(),
 	})
 	if err != nil {
 		klog.Fatalf("Create cluster manager failed: %v", err)

@@ -13,6 +13,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-scheduler/framework"
@@ -390,24 +391,23 @@ func NewDeviceMapListAndTopology(node *corev1.Node) (map[int]*Device, gpuallocat
 	}
 	deviceMap := make(map[int]*Device, len(nodeDeviceInfo))
 	deviceList := make(gpuallocator.DeviceList, len(nodeDeviceInfo))
-	numaSet := map[int]struct{}{}
-	for _, deviceInfo := range nodeDeviceInfo {
-		if deviceInfo.Numa >= 0 {
-			numaSet[deviceInfo.Numa] = struct{}{}
+	numaSet := sets.NewInt()
+	for _, device := range nodeDeviceInfo {
+		if device.Numa >= 0 {
+			numaSet.Insert(device.Numa)
 		}
-		deviceMap[deviceInfo.Id] = NewDevice(deviceInfo)
-		deviceList[deviceInfo.Id] = gpuallocator.NewDevice(
-			deviceInfo.Id, deviceInfo.Uuid, deviceInfo.BusId)
+		deviceMap[device.Id] = NewDevice(device)
+		deviceList[device.Id] = gpuallocator.NewDevice(device.Id, device.Uuid, device.BusId)
 	}
 	hasGPUTopology := false
-	hasNumaTopology := len(numaSet) > 0
+	hasNumaAffinity := numaSet.Len() != 0
 	if IsGPUTopologyEnabled() {
-		topoStr, ok := util.HasAnnotation(node, util.NodeDeviceTopologyAnnotation)
-		if !ok || len(topoStr) == 0 {
+		topoValue, ok := util.HasAnnotation(node, util.NodeDeviceTopologyAnnotation)
+		if !ok || len(topoValue) == 0 {
 			klog.V(3).InfoS("node does not have device topology information", "node", node.Name)
-			return deviceMap, deviceList, false, hasNumaTopology, nil
+			return deviceMap, deviceList, false, hasNumaAffinity, nil
 		}
-		nodeTopology, err := ParseNodeTopology(topoStr)
+		nodeTopology, err := ParseNodeTopology(topoValue)
 		if err != nil {
 			klog.V(3).ErrorS(err, "parse node device topology failed", "node", node.Name)
 		}
@@ -420,7 +420,7 @@ func NewDeviceMapListAndTopology(node *corev1.Node) (map[int]*Device, gpuallocat
 			}
 		}
 	}
-	return deviceMap, deviceList, hasGPUTopology, hasNumaTopology, nil
+	return deviceMap, deviceList, hasGPUTopology, hasNumaAffinity, nil
 }
 
 // GetID returns the idx of this device

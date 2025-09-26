@@ -1924,9 +1924,9 @@ void init_host_device_indexes() {
     LOGGER(FATAL, "nvmlDeviceGetCount failed, return %d", rt);
   }
   for (int device_id = 0; device_id < device_count; device_id++) {
-    char uuid[48];
+    char uuid[UUID_BUFFER_SIZE];
     nvmlDevice_t device;
-    get_device_and_uuid_and_hostindex(device_id, &device, uuid, 48, &host_device_indexes[device_id]);
+    get_device_and_uuid_and_hostindex(device_id, &device, uuid, UUID_BUFFER_SIZE, &host_device_indexes[device_id]);
   }
 }
 

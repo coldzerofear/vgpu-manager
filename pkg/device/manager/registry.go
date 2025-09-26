@@ -43,15 +43,19 @@ func patchNodeMetadata(cli kubernetes.Interface, nodeName string, patchMetadata 
 }
 
 func (m *DeviceManager) registryDevices() {
+	stopCh := m.stop
+	m.wait.Add(1)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer func() {
+		ticker.Stop()
+		m.wait.Done()
+	}()
+
 	patchMetadata := client.PatchMetadata{
 		Annotations: map[string]string{},
 		Labels:      map[string]string{},
 	}
 
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	stopCh := m.stop
-	cleanCh := m.waitCleanup
 	for {
 		select {
 		case <-stopCh:
@@ -76,7 +80,6 @@ func (m *DeviceManager) registryDevices() {
 			if err := patchNodeMetadata(m.client, m.config.GetNodeName(), patchMetadata); err != nil {
 				klog.ErrorS(err, "Cleanup node device registry infos failed")
 			}
-			cleanCh <- struct{}{}
 			return
 		case <-ticker.C:
 			m.mut.Lock()

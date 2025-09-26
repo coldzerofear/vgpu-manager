@@ -347,8 +347,8 @@ static void *utilization_watcher(void *arg) {
   int device_id;
 //  int need_limit = 0;
   for (device_id = batch->start_index; device_id < batch->end_index; device_id++) {
-    char uuid[48];
-    get_device_and_uuid_and_hostindex(device_id, &devices[device_id], uuid, 48, &host_index[device_id]);
+    char uuid[UUID_BUFFER_SIZE];
+    get_device_and_uuid_and_hostindex(device_id, &devices[device_id], uuid, UUID_BUFFER_SIZE, &host_index[device_id]);
 
     up_limits[device_id] = g_vgpu_config->devices[device_id].hard_core;
     top_results[device_id].user_current = 0;

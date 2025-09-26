@@ -116,6 +116,8 @@ extern "C" {
  * Max sample pid size
  */
 #define MAX_PIDS (1024)
+#define UUID_BUFFER_SIZE (48)
+#define NAME_BUFFER_SIZE (64)
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
@@ -152,7 +154,7 @@ typedef struct {
 } version_t;
 
 typedef struct {
-  char uuid[48];
+  char uuid[UUID_BUFFER_SIZE];
   size_t total_memory;
   size_t real_memory;
   int hard_core;
@@ -168,12 +170,12 @@ typedef struct {
  */
 typedef struct {
   version_t driver_version;
-  char pod_uid[48];
-  char pod_name[64];
-  char pod_namespace[64];
-  char container_name[64];
+  char pod_uid[UUID_BUFFER_SIZE];
+  char pod_name[NAME_BUFFER_SIZE];
+  char pod_namespace[NAME_BUFFER_SIZE];
+  char container_name[NAME_BUFFER_SIZE];
   device_t devices[MAX_DEVICE_COUNT];
-  char host_index[MAX_DEVICE_COUNT][48];
+  char host_index[MAX_DEVICE_COUNT][UUID_BUFFER_SIZE];
   int device_count;
 
   // TODO No modifications allowed during runtime.

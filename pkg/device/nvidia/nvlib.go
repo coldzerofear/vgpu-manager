@@ -58,12 +58,9 @@ func (g *GpuInfo) GetPaths() ([]string, error) {
 }
 
 // GetNumaNode returns the NUMA node associated with the GPU device
-func (g GpuInfo) GetNumaNode() (int, bool) {
+func (g GpuInfo) GetNumaNode() (int32, bool) {
 	node := links.PciInfo(g.PciInfo).NumaNode()
-	if node < 0 {
-		return 0, false
-	}
-	return int(node), true
+	return node, node >= 0
 }
 
 type MigInfo struct {

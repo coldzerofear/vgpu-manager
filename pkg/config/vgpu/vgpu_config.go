@@ -32,6 +32,14 @@ import (
 //#define MAX_DEVICE_COUNT 16
 //#endif
 //
+//#ifndef UUID_BUFFER_SIZE
+//#define UUID_BUFFER_SIZE 48
+//#endif
+//
+//#ifndef NAME_BUFFER_SIZE
+//#define NAME_BUFFER_SIZE 64
+//#endif
+//
 //#ifndef FILENAME_MAX
 //#define FILENAME_MAX 260
 //#endif
@@ -42,7 +50,7 @@ import (
 //};
 //
 //struct device_t {
-//  char uuid[48];
+//  char uuid[UUID_BUFFER_SIZE];
 //  uint64_t total_memory;
 //  uint64_t real_memory;
 //  int hard_core;
@@ -55,12 +63,12 @@ import (
 //
 //struct resource_data_t {
 //  struct version_t driver_version;
-//  char pod_uid[48];
-//  char pod_name[64];
-//  char pod_namespace[64];
-//  char container_name[64];
+//  char pod_uid[UUID_BUFFER_SIZE];
+//  char pod_name[NAME_BUFFER_SIZE];
+//  char pod_namespace[NAME_BUFFER_SIZE];
+//  char container_name[NAME_BUFFER_SIZE];
 //  struct device_t devices[MAX_DEVICE_COUNT];
-//  char host_index[MAX_DEVICE_COUNT][48];
+//  char host_index[MAX_DEVICE_COUNT][UUID_BUFFER_SIZE];
 //  int device_count;
 //  int compatibility_mode;
 //  int sm_watcher;
@@ -91,7 +99,9 @@ import (
 import "C"
 
 const (
-	MAX_DEVICE_COUNT = C.MAX_DEVICE_COUNT
+	MaxDeviceCount = C.MAX_DEVICE_COUNT
+	NameBufferSize = C.NAME_BUFFER_SIZE
+	UuidBufferSize = C.UUID_BUFFER_SIZE
 )
 
 type VersionT struct {
@@ -100,7 +110,7 @@ type VersionT struct {
 }
 
 type DeviceT struct {
-	UUID           [48]byte
+	UUID           [UuidBufferSize]byte
 	TotalMemory    uint64
 	RealMemory     uint64
 	HardCore       int32
@@ -113,12 +123,12 @@ type DeviceT struct {
 
 type ResourceDataT struct {
 	DriverVersion     VersionT
-	PodUID            [48]byte
-	PodName           [64]byte
-	PodNamespace      [64]byte
-	ContainerName     [64]byte
-	Devices           [MAX_DEVICE_COUNT]DeviceT
-	HostIndex         [MAX_DEVICE_COUNT][48]byte
+	PodUID            [UuidBufferSize]byte
+	PodName           [NameBufferSize]byte
+	PodNamespace      [NameBufferSize]byte
+	ContainerName     [NameBufferSize]byte
+	Devices           [MaxDeviceCount]DeviceT
+	HostIndex         [MaxDeviceCount][UuidBufferSize]byte
 	DeviceCount       int32
 	CompatibilityMode int32
 	SMWatcher         int32
@@ -220,22 +230,22 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
 	ratio := devManager.GetNodeConfig().GetDeviceMemoryScaling()
 	mode := getCompatibilityMode(devManager.GetNodeConfig())
-	convert48Bytes := func(val string) [48]byte {
-		var byteArray [48]byte
+	convert48Bytes := func(val string) [UuidBufferSize]byte {
+		var byteArray [UuidBufferSize]byte
 		copy(byteArray[:], val)
 		return byteArray
 	}
-	convert64Bytes := func(val string) [64]byte {
-		var byteArray [64]byte
+	convert64Bytes := func(val string) [NameBufferSize]byte {
+		var byteArray [NameBufferSize]byte
 		copy(byteArray[:], val)
 		return byteArray
 	}
 	computePolicy := GetComputePolicy(pod, node)
 
-	hostIndex := [MAX_DEVICE_COUNT][48]byte{}
+	hostIndex := [MaxDeviceCount][UuidBufferSize]byte{}
 	deviceInfos := devManager.GetNodeDeviceInfo()
 	deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))
-	for i := range deviceInfos[:min(MAX_DEVICE_COUNT, len(deviceInfos))] {
+	for i := range deviceInfos[:min(MaxDeviceCount, len(deviceInfos))] {
 		deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
 		hostIndex[deviceInfos[i].Id] = convert48Bytes(deviceInfos[i].Uuid)
 	}
@@ -249,9 +259,9 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		vMemoryNode = 1
 	}
 	deviceCount := 0
-	devices := [MAX_DEVICE_COUNT]DeviceT{}
+	devices := [MaxDeviceCount]DeviceT{}
 	for i, devInfo := range assignDevices.Devices {
-		if i >= MAX_DEVICE_COUNT {
+		if i >= MaxDeviceCount {
 			break
 		}
 		deviceCount++
@@ -394,7 +404,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 
 		deviceInfos := devManager.GetNodeDeviceInfo()
 		deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))
-		for i := range deviceInfos[:min(MAX_DEVICE_COUNT, len(deviceInfos))] {
+		for i := range deviceInfos[:min(MaxDeviceCount, len(deviceInfos))] {
 			func() {
 				deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
 				deviceUuid := C.CString(deviceInfos[i].Uuid)
