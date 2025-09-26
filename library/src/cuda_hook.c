@@ -1510,7 +1510,8 @@ static size_t get_array_base_size(int format) {
   return base_size;
 }
 
-static CUresult cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
+
+CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
   CUresult ret;
   CUdevice ordinal;
   int lock_fd = -1;
@@ -1518,6 +1519,7 @@ static CUresult cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
+
   size_t used = 0, vmem_used = 0, base_size = 0, request_size = 0;
   if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
@@ -1536,29 +1538,20 @@ static CUresult cuArrayCreate_helper(const CUDA_ARRAY_DESCRIPTOR *pAllocateArray
 
     if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used + request_size > g_vgpu_config->devices[ordinal].real_memory)) {
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
     }
   }
-DONE:
-  unlock_gpu_device(lock_fd);
-  return ret;
-}
 
-CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocateArray) {
-  CUresult ret;
-  ret = cuArrayCreate_helper(pAllocateArray);
-  if (ret != CUDA_SUCCESS) {
-    goto DONE;
-  }
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate_v2, pHandle, pAllocateArray);
   } else {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate, pHandle, pAllocateArray);
   }
 DONE:
+  unlock_gpu_device(lock_fd);
   return ret;
 }
 
@@ -1570,7 +1563,7 @@ CUresult cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocateA
   return _cuArrayCreate(pHandle, pAllocateArray);
 }
 
-static CUresult cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
+CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
   CUresult ret;
   CUdevice ordinal;
   int lock_fd = -1;
@@ -1578,6 +1571,7 @@ static CUresult cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateA
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
+
   size_t used = 0, vmem_used = 0, base_size = 0, request_size = 0;
   if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
@@ -1597,40 +1591,28 @@ static CUresult cuArray3DCreate_helper(const CUDA_ARRAY3D_DESCRIPTOR *pAllocateA
 
     if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used + request_size > g_vgpu_config->devices[ordinal].real_memory)) {
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
     }
   }
-DONE:
-  unlock_gpu_device(lock_fd);
-  return ret;
-}
 
-CUresult _cuArray3DCreate(CUarray *pHandle,
-                          const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
-  CUresult ret;
-  ret = cuArray3DCreate_helper(pAllocateArray);
-  if (ret != CUDA_SUCCESS) {
-    goto DONE;
-  }
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate_v2, pHandle, pAllocateArray);
   } else {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate, pHandle, pAllocateArray);
   }
 DONE:
+  unlock_gpu_device(lock_fd);
   return ret;
 }
 
-CUresult cuArray3DCreate_v2(CUarray *pHandle,
-                            const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
+CUresult cuArray3DCreate_v2(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
   return _cuArray3DCreate(pHandle, pAllocateArray);
 }
 
-CUresult cuArray3DCreate(CUarray *pHandle,
-                         const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
+CUresult cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray) {
   return _cuArray3DCreate(pHandle, pAllocateArray);
 }
 
@@ -1664,7 +1646,7 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
 
     if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used + request_size > g_vgpu_config->devices[ordinal].real_memory)) {
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
@@ -1700,7 +1682,7 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
 
     if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-      if (unlikely(used + request_size > g_vgpu_config->devices[ordinal].real_memory)) {
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
         ret = CUDA_ERROR_OUT_OF_MEMORY;
         goto DONE;
       }
@@ -1865,7 +1847,7 @@ CUresult cuLaunchCooperativeKernel_ptsz(
     unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream,
     void **kernelParams) {
   CUdevice ordinal;
-  CUresult ret; 
+  CUresult ret;
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1960,6 +1942,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   size_t used = 0, vmem_used = 0, request_size = bytesize;
   if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
+
     get_used_gpu_memory((void *)&used, ordinal);
     get_used_gpu_virt_memory((void *)&vmem_used, ordinal);
 
@@ -1971,10 +1954,10 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
 
     if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-//      if (unlikely(used > g_vgpu_config->devices[ordinal].real_memory)) {
-//        ret = CUDA_ERROR_OUT_OF_MEMORY;
-//        goto DONE;
-//      }
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
+        ret = CUDA_ERROR_OUT_OF_MEMORY;
+        goto DONE;
+      }
     }
   }
 
@@ -1997,6 +1980,7 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   size_t used = 0, vmem_used = 0, request_size = bytesize;
   if (g_vgpu_config->devices[ordinal].memory_limit) {
     lock_fd = lock_gpu_device(ordinal);
+
     get_used_gpu_memory((void *)&used, ordinal);
     get_used_gpu_virt_memory((void *)&vmem_used, ordinal);
 
@@ -2008,10 +1992,10 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
 
     if (g_vgpu_config->devices[ordinal].memory_oversold) {
       // Used memory exceeds device memory limit, return OOM
-//      if (unlikely(used > g_vgpu_config->devices[ordinal].real_memory)) {
-//        ret = CUDA_ERROR_OUT_OF_MEMORY;
-//        goto DONE;
-//      }
+      if ((used + request_size) > g_vgpu_config->devices[ordinal].real_memory) {
+        ret = CUDA_ERROR_OUT_OF_MEMORY;
+        goto DONE;
+      }
     }
   }
 
@@ -2021,45 +2005,31 @@ DONE:
   return ret;
 }
 
-
 CUresult _cuMemFree(CUdeviceptr dptr) {
   CUresult ret;
+  CUdevice ordinal;
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    goto DONE;
+  }
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemFree_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFree_v2, dptr);
   } else {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFree, dptr);
   }
+  if (likely(ret == CUDA_SUCCESS)) {
+    free_gpu_virt_memory(dptr, ordinal);
+  }
+DONE:
   return ret;
 }
 
 CUresult cuMemFree_v2(CUdeviceptr dptr) {
-  CUresult ret;
-  CUdevice ordinal;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
-  if (unlikely(ret != CUDA_SUCCESS)) {
-    goto DONE;
-  }
-  ret = _cuMemFree(dptr);
-  if (likely(ret == CUDA_SUCCESS)) {
-    free_gpu_virt_memory(dptr, ordinal);
-  }
-DONE:
-  return ret;
+  return _cuMemFree(dptr);
 }
 
 CUresult cuMemFree(CUdeviceptr dptr) {
-  CUresult ret;
-  CUdevice ordinal;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &ordinal);
-  if (unlikely(ret != CUDA_SUCCESS)) {
-    goto DONE;
-  }
-  ret = _cuMemFree(dptr);
-  if (likely(ret == CUDA_SUCCESS)) {
-    free_gpu_virt_memory(dptr, ordinal);
-  }
-DONE:
-  return ret;
+  return _cuMemFree(dptr);
 }
 
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {

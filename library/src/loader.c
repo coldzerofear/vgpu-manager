@@ -1779,7 +1779,7 @@ int load_controller_configuration() {
     strncpy(g_vgpu_config->container_name, container_name, sizeof(g_vgpu_config->container_name)-1);
   }
 
-  char uuids[768];
+  char uuids[UUID_BUFFER_SIZE*MAX_DEVICE_COUNT];
   ret = get_devices_uuid(uuids);
   if (unlikely(ret)) {
     LOGGER(ERROR, "not found gpu devices uuid");
