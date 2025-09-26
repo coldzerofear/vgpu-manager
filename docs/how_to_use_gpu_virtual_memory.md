@@ -6,6 +6,8 @@ vgpu-manager supports virtual memory functionality, which allows the use of GPUs
 
 Set a floating-point number greater than 1 using the startup parameter `--device-memory-scaling` of the device plugin.
 
+In the following example, setting the memory scaling to 2 means that the available GPU memory is twice that of physical memory, with half allocated to GPU memory and the other half to CPU memory.
+
 ```yaml
 $ kubectl edit ds -n kube-system vgpu-manager-device-plugin
   containers:
