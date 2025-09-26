@@ -2,6 +2,7 @@ package mutate
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -34,11 +35,6 @@ func NewMutateWebhook(scheme *runtime.Scheme, options *options.Options) (*admiss
 type mutateHandle struct {
 	decoder admission.Decoder
 	options *options.Options
-}
-
-func needVGPUNumber(container *corev1.Container) bool {
-	return util.GetResourceOfContainer(container, util.VGPUCoreResourceName) > 0 ||
-		util.GetResourceOfContainer(container, util.VGPUMemoryResourceName) > 0
 }
 
 func setDefaultSchedulerName(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
@@ -85,22 +81,19 @@ func setDefaultDeviceSchedulerPolicy(pod *corev1.Pod, options *options.Options, 
 }
 
 func setDefaultDeviceTopologyMode(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
-	// Setting topology mode only makes sense when requesting multiple GPUs.
-	if util.IsSingleContainerMultiGPUs(pod) {
-		if _, ok := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation); !ok {
-			setTopoMode := false
-			defaultTopologyMode := strings.ToLower(options.DefaultTopologyMode)
-			switch defaultTopologyMode {
-			case string(util.NUMATopology):
-				setTopoMode = true
-				util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.NUMATopology))
-			case string(util.LinkTopology):
-				setTopoMode = true
-				util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.LinkTopology))
-			}
-			if setTopoMode {
-				logger.V(4).Info("Successfully set default device topology mode", "DeviceTopologyMode", defaultTopologyMode)
-			}
+	if _, ok := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation); !ok {
+		setTopoMode := false
+		defaultTopologyMode := strings.ToLower(options.DefaultTopologyMode)
+		switch defaultTopologyMode {
+		case string(util.NUMATopology):
+			setTopoMode = true
+			util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.NUMATopology))
+		case string(util.LinkTopology):
+			setTopoMode = true
+			util.InsertAnnotation(pod, util.DeviceTopologyModeAnnotation, string(util.LinkTopology))
+		}
+		if setTopoMode {
+			logger.V(4).Info("Successfully set default device topology mode", "DeviceTopologyMode", defaultTopologyMode)
 		}
 	}
 }
@@ -124,48 +117,71 @@ func fixSpecifiedNodeName(pod *corev1.Pod, logger logr.Logger) {
 	}
 }
 
-func cleanupMetadata(pod *corev1.Pod) {
-	// Cleaning metadata to prevent impact on scheduling.
-	reschedule.CleanupMetadata(pod)
-	// Clean up invalid scheduling policy annotations.
-	if !util.IsVGPUResourcePod(pod) {
-		if _, ok := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation); ok {
-			delete(pod.Annotations, util.NodeSchedulerPolicyAnnotation)
-		}
-		if _, ok := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation); ok {
-			delete(pod.Annotations, util.DeviceSchedulerPolicyAnnotation)
-		}
+func cleanupSchedulerPolicyAnnotation(pod *corev1.Pod) {
+	if _, ok := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation); ok {
+		delete(pod.Annotations, util.NodeSchedulerPolicyAnnotation)
 	}
-	// Clean up invalid topology mode annotations.
-	if !util.IsSingleContainerMultiGPUs(pod) {
-		if _, ok := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation); ok {
-			delete(pod.Annotations, util.DeviceTopologyModeAnnotation)
-		}
+	if _, ok := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation); ok {
+		delete(pod.Annotations, util.DeviceSchedulerPolicyAnnotation)
+	}
+}
+
+func cleanupTopologyModeAnnotation(pod *corev1.Pod) {
+	if _, ok := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation); ok {
+		delete(pod.Annotations, util.DeviceTopologyModeAnnotation)
 	}
 }
 
 func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
-	for i, container := range pod.Spec.Containers {
-		if util.IsVGPURequiredContainer(&container) {
-			continue
-		}
-		// default 1 gpu
-		if needVGPUNumber(&container) {
-			pod.Spec.Containers[i].Resources.Limits[util.VGPUNumberResourceName] = resource.MustParse("1")
+
+	isVGPUPod := false
+	isMultiGPUs := false
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		number := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
+		cores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
+		memory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
+
+		if number == 0 && (cores > 0 || memory > 0) {
+			number = 1
+			container.Resources.Limits[util.VGPUNumberResourceName] = resource.MustParse(fmt.Sprintf("%d", number))
 			logger.V(4).Info("Successfully set 1 vGPU number", "containerName", container.Name)
 		}
+
+		if number > 0 && cores == 0 && memory == 0 {
+			cores = util.HundredCore
+			container.Resources.Limits[util.VGPUCoreResourceName] = resource.MustParse(fmt.Sprintf("%d", cores))
+			logger.V(4).Info("Successfully set 100 vGPU cores", "containerName", container.Name)
+		}
+
+		if number > 0 {
+			isVGPUPod = true
+		}
+		if number > 1 {
+			isMultiGPUs = true
+		}
 	}
-	// Clean up some useless metadata.
-	cleanupMetadata(pod)
-	if util.IsVGPUResourcePod(pod) {
+	// Cleaning metadata to prevent impact on scheduling.
+	reschedule.CleanupMetadata(pod)
+	if isVGPUPod {
 		setDefaultSchedulerName(pod, h.options, logger)
 		setDefaultNodeSchedulerPolicy(pod, h.options, logger)
 		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)
-		setDefaultDeviceTopologyMode(pod, h.options, logger)
 		setDefaultRuntimeClassName(pod, h.options, logger)
 		fixSpecifiedNodeName(pod, logger)
+	} else {
+		// Clean up invalid scheduling policy annotations.
+		cleanupSchedulerPolicyAnnotation(pod)
 	}
+	if isMultiGPUs {
+		// Setting topology mode only makes sense when requesting multiple GPUs.
+		setDefaultDeviceTopologyMode(pod, h.options, logger)
+	} else {
+		// Clean up invalid topology mode annotations.
+		cleanupTopologyModeAnnotation(pod)
+	}
+
 	return nil
 }
 

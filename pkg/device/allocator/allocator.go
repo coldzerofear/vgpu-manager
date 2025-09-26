@@ -99,6 +99,9 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		}
 		needMemory *= nodeConfigInfo.MemoryFactor
 	}
+	if needCores == 0 && needMemory == 0 {
+		needCores = util.HundredCore
+	}
 	var (
 		claimDevices []device.ClaimDevice
 		devicePolicy string
