@@ -105,19 +105,19 @@ func (m *DeviceManager) smWatcher(deviceUtil *watcher.DeviceUtil, batch watcher.
 		if enabled, _ := d.IsMigEnabled(); enabled {
 			return nil
 		}
-		computeProcesses, rt := d.GetComputeRunningProcesses()
+		computeProcesses, rt := d.GetComputeRunningProcessesBySize(watcher.MAX_PIDS)
 		if rt != nvml.SUCCESS {
 			klog.ErrorS(errors.New(rt.Error()), "GetComputeRunningProcesses failed", "device", i)
 			return nil
 		}
-		graphicsProcesses, rt := d.GetGraphicsRunningProcesses()
+		graphicsProcesses, rt := d.GetGraphicsRunningProcessesBySize(watcher.MAX_PIDS)
 		if rt != nvml.SUCCESS {
 			klog.ErrorS(errors.New(rt.Error()), "GetGraphicsRunningProcesses failed", "device", i)
 			return nil
 		}
 
 		lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
-		procUtilSamples, rt := d.GetProcessUtilization(uint64(lastTs))
+		procUtilSamples, rt := d.GetProcessUtilizationBySize(uint64(lastTs), watcher.MAX_PIDS)
 
 		if err := deviceUtil.WLock(i); err != nil {
 			klog.V(3).ErrorS(err, "DeviceUtilWLock failed", "device", i)
