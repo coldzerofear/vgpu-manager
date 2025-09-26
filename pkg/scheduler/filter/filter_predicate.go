@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
@@ -245,7 +246,7 @@ func (f *gpuFilter) CheckDeviceRequest(pod *corev1.Pod) error {
 }
 
 func checkNumberRequest(container *corev1.Container) error {
-	if util.GetResourceOfContainer(container, util.VGPUNumberResourceName) > util.MaxDeviceNumber {
+	if util.GetResourceOfContainer(container, util.VGPUNumberResourceName) > vgpu.MaxDeviceCount {
 		return fmt.Errorf("container %s requests vGPU number exceeding limit", container.Name)
 	}
 	return nil

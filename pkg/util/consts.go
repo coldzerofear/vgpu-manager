@@ -47,8 +47,7 @@ const (
 	// PodVGPURealAllocAnnotation Real device information allocated by device plugins
 	PodVGPURealAllocAnnotation = DomainPrefix + "/real-allocated"
 
-	HundredCore     = 100
-	MaxDeviceNumber = 16
+	HundredCore = 100
 
 	// MaxContainerLimit max container num
 	MaxContainerLimit = 300000

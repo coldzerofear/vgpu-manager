@@ -184,7 +184,7 @@ func Test_DeviceFilter(t *testing.T) {
 			nodeName: "",
 			err:      fmt.Errorf("container cont1 requests vGPU number exceeding limit"),
 		}, {
-			name: "example4: single container, scheduled",
+			name: "example4: single container, scheduled and with node",
 			uid:  &podUID,
 			annotations: map[string]string{
 				util.PodPredicateNodeAnnotation: nodeList[1].Name,
@@ -203,10 +203,32 @@ func Test_DeviceFilter(t *testing.T) {
 					},
 				},
 			},
+			nodeName: nodeList[1].Name,
+			err:      nil,
+		}, {
+			name: "example5: single container, scheduled, no nodes",
+			uid:  &podUID,
+			annotations: map[string]string{
+				util.PodPredicateNodeAnnotation: "noNode",
+				util.PodVGPUPreAllocAnnotation: fmt.Sprintf("cont1[0_%s_10_2048]",
+					nodeGPUMap[nodeList[1].Name][0].Uuid),
+			},
+			containers: []corev1.Container{
+				{
+					Name: "cont1",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 1)),
+							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 10)),
+							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+						},
+					},
+				},
+			},
 			nodeName: "",
 			err:      fmt.Errorf("pod %s had been predicated", podUID),
 		}, {
-			name: "example5: single container, multiple devices",
+			name: "example6: single container, multiple devices",
 			containers: []corev1.Container{
 				{
 					Name: "cont1",
@@ -222,7 +244,7 @@ func Test_DeviceFilter(t *testing.T) {
 			nodeName: nodeList[0].Name,
 			err:      nil,
 		}, {
-			name: "example6: multiple containers, multiple devices",
+			name: "example7: multiple containers, multiple devices",
 			containers: []corev1.Container{
 				{
 					Name: "cont1",
@@ -247,7 +269,7 @@ func Test_DeviceFilter(t *testing.T) {
 			nodeName: nodeList[0].Name,
 			err:      nil,
 		}, {
-			name: "example7: multiple containers, exceeds limit",
+			name: "example8: multiple containers, exceeds limit",
 			containers: []corev1.Container{
 				{
 					Name: "cont1",
@@ -286,10 +308,11 @@ func Test_DeviceFilter(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:        fmt.Sprintf("pod-%d", i),
-					Namespace:   namespace,
-					UID:         k8stypes.UID(uuid.NewString()),
-					Annotations: testCase.annotations,
+					Name:            fmt.Sprintf("pod-%d", i),
+					Namespace:       namespace,
+					UID:             k8stypes.UID(uuid.NewString()),
+					Annotations:     testCase.annotations,
+					ResourceVersion: "1",
 				},
 				Spec: corev1.PodSpec{
 					Containers: testCase.containers,

@@ -140,13 +140,13 @@ func (m *DeviceManager) smWatcher(filePath string, deviceUtil *watcher.DeviceUti
 		}
 		defer watcher.DeviceUtilUnlock(fd, i)
 
-		computeProcessesSize := min(len(computeProcesses), watcher.MAX_PIDS)
+		computeProcessesSize := min(len(computeProcesses), watcher.MaxPids)
 		deviceUtil.Devices[i].ComputeProcessesSize = uint32(computeProcessesSize)
 		for index, process := range computeProcesses[:computeProcessesSize] {
 			deviceUtil.Devices[i].ComputeProcesses[index] = process
 		}
 
-		graphicsProcessesSize := min(len(graphicsProcesses), watcher.MAX_PIDS)
+		graphicsProcessesSize := min(len(graphicsProcesses), watcher.MaxPids)
 		deviceUtil.Devices[i].GraphicsProcessesSize = uint32(graphicsProcessesSize)
 		for index, process := range graphicsProcesses[:graphicsProcessesSize] {
 			deviceUtil.Devices[i].GraphicsProcesses[index] = process
@@ -154,7 +154,7 @@ func (m *DeviceManager) smWatcher(filePath string, deviceUtil *watcher.DeviceUti
 
 		deviceUtil.Devices[i].LastSeenTimeStamp = uint64(lastTs)
 		if rt == nvml.SUCCESS {
-			processUtilSamplesSize := min(len(procUtilSamples), watcher.MAX_PIDS)
+			processUtilSamplesSize := min(len(procUtilSamples), watcher.MaxPids)
 			deviceUtil.Devices[i].ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
 			for index, sample := range procUtilSamples[:processUtilSamplesSize] {
 				deviceUtil.Devices[i].ProcessUtilSamples[index] = sample
