@@ -164,6 +164,7 @@ typedef struct {
   int hard_limit;
   int memory_limit;
   int memory_oversold;
+  int activate;
 } device_t;
 
 /**
@@ -176,9 +177,6 @@ typedef struct {
   char pod_namespace[NAME_BUFFER_SIZE];
   char container_name[NAME_BUFFER_SIZE];
   device_t devices[MAX_DEVICE_COUNT];
-  char host_index[MAX_DEVICE_COUNT][UUID_BUFFER_SIZE];
-  int device_count;
-
   // TODO No modifications allowed during runtime.
   int compatibility_mode;
   int sm_watcher;
@@ -339,7 +337,11 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int device_id);
 
 void free_gpu_virt_memory(CUdeviceptr dptr, int device_id);
 
-void get_device_and_uuid_and_hostindex(int device_id, nvmlDevice_t *device, char *uuid, unsigned int uuid_length, int *hindex);
+int get_nvml_device_index_by_cuda_device(CUdevice device);
+
+int get_host_device_index_by_cuda_device(CUdevice device);
+
+int get_host_device_index_by_nvml_device(nvmlDevice_t device);
 
 #ifdef __cplusplus
 }

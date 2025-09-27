@@ -6,7 +6,7 @@
 extern entry_t nvml_library_entry[];
 extern resource_data_t* g_vgpu_config;
 
-extern int lock_gpu_device(int device);
+extern int lock_gpu_device(int host_index);
 extern void unlock_gpu_device(int fd);
 
 nvmlReturn_t nvmlInitWithFlags(unsigned int flags);
@@ -46,26 +46,32 @@ nvmlReturn_t nvmlInit(void) {
 
 nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) {
   nvmlReturn_t ret;
-  int index;
+  int nvml_index;
   int fd = -1;
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &index);
+  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
   if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetIndex call error, return %d", ret);
+    LOGGER(VERBOSE, "nvmlDeviceGetIndex call failed, return %d", ret);
     goto DONE;
   }
-  if (g_vgpu_config->devices[index].memory_limit) {
-    fd = lock_gpu_device(index);
+  int host_index = get_host_device_index_by_nvml_device(device);
+  if (host_index < 0) {
+    goto CALL;
+  }
+  if (g_vgpu_config->devices[host_index].memory_limit) {
+    fd = lock_gpu_device(host_index);
+
     size_t used = 0, vmem_used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
-    get_used_gpu_virt_memory((void *)&vmem_used, index);
+    get_used_gpu_virt_memory((void *)&vmem_used, host_index);
 
-    size_t total_memory = g_vgpu_config->devices[index].total_memory;
+    size_t total_memory = g_vgpu_config->devices[host_index].total_memory;
     memory->total = total_memory;
-    memory->used = used + vmem_used >= total_memory ? total_memory: used + vmem_used;
-    memory->free = total_memory - memory->used;
+    memory->used = (used + vmem_used) >= total_memory ? total_memory : (used + vmem_used);
+    memory->free = memory->total - memory->used;
     ret = NVML_SUCCESS;
     goto DONE;
   }
+CALL:
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryInfo, device, memory);
 DONE:
   unlock_gpu_device(fd);
@@ -73,26 +79,31 @@ DONE:
 }
 
 nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *memory) {
-  nvmlReturn_t ret;
-  int index;
   int fd = -1;
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &index);
+  int nvml_index;
+  nvmlReturn_t ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
   if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetIndex call error, return %d", ret);
+    LOGGER(VERBOSE, "nvmlDeviceGetIndex call failed, return %d", ret);
     goto DONE;
   }
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
-  if (ret == NVML_SUCCESS && g_vgpu_config->devices[index].memory_limit) {
-    fd = lock_gpu_device(index);
+
+  int host_index = get_host_device_index_by_nvml_device(device);
+  if (host_index < 0) {
+    goto DONE;
+  }
+  if (ret == NVML_SUCCESS && g_vgpu_config->devices[host_index].memory_limit) {
+    fd = lock_gpu_device(host_index);
+
     size_t used = 0, vmem_used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
-    get_used_gpu_virt_memory((void *)&vmem_used, index);
+    get_used_gpu_virt_memory((void *)&vmem_used, host_index);
 
-    size_t total_memory = g_vgpu_config->devices[index].total_memory;
+    size_t total_memory = g_vgpu_config->devices[host_index].total_memory;
     memory->total = total_memory;
-    memory->used = used + vmem_used >= total_memory ? total_memory : used + vmem_used;
+    memory->used = (used + vmem_used) >= total_memory ? total_memory : (used + vmem_used);
     //memory->free = (used + memory->reserved) > g_vcuda_config.gpu_memory ? 0 : g_vcuda_config.gpu_memory - used - memory->reserved;
-    memory->free = total_memory - memory->used;
+    memory->free = memory->total - memory->used;
   }
 DONE:
   unlock_gpu_device(fd);
@@ -100,16 +111,21 @@ DONE:
 }
 
 nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device, nvmlComputeMode_t mode) {
-  nvmlReturn_t ret;
-  int index;
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &index);
+  int nvml_index;
+  nvmlReturn_t ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
   if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetIndex call error, return %d", ret);
+    LOGGER(VERBOSE, "nvmlDeviceGetIndex call failed, return %d", ret);
     goto DONE;
   }
-  if (g_vgpu_config->devices[index].memory_limit || g_vgpu_config->devices[index].core_limit) {
-    return NVML_ERROR_NOT_SUPPORTED;
+  int host_index = get_host_device_index_by_nvml_device(device);
+  if (host_index < 0) {
+    goto CALL;
   }
+  if (g_vgpu_config->devices[host_index].memory_limit || g_vgpu_config->devices[host_index].core_limit) {
+    ret = NVML_ERROR_NOT_SUPPORTED;
+    goto DONE;
+  }
+CALL:
   ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetComputeMode, device, mode);
 DONE:
   return ret;

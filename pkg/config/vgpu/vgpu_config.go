@@ -59,6 +59,7 @@ import (
 //  int hard_limit;
 //  int memory_limit;
 //  int memory_oversold;
+//  int activate;
 //};
 //
 //struct resource_data_t {
@@ -68,8 +69,6 @@ import (
 //  char pod_namespace[NAME_BUFFER_SIZE];
 //  char container_name[NAME_BUFFER_SIZE];
 //  struct device_t devices[MAX_DEVICE_COUNT];
-//  char host_index[MAX_DEVICE_COUNT][UUID_BUFFER_SIZE];
-//  int device_count;
 //  int compatibility_mode;
 //  int sm_watcher;
 //  int vmem_node;
@@ -119,6 +118,7 @@ type DeviceT struct {
 	HardLimit      int32
 	MemoryLimit    int32
 	MemoryOversold int32
+	Activate       int32
 }
 
 type ResourceDataT struct {
@@ -128,8 +128,6 @@ type ResourceDataT struct {
 	PodNamespace      [NameBufferSize]byte
 	ContainerName     [NameBufferSize]byte
 	Devices           [MaxDeviceCount]DeviceT
-	HostIndex         [MaxDeviceCount][UuidBufferSize]byte
-	DeviceCount       int32
 	CompatibilityMode int32
 	SMWatcher         int32
 	VMemoryNode       int32
@@ -242,12 +240,10 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	}
 	computePolicy := GetComputePolicy(pod, node)
 
-	hostIndex := [MaxDeviceCount][UuidBufferSize]byte{}
 	deviceInfos := devManager.GetNodeDeviceInfo()
 	deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))
 	for i := range deviceInfos[:min(MaxDeviceCount, len(deviceInfos))] {
 		deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
-		hostIndex[deviceInfos[i].Id] = convert48Bytes(deviceInfos[i].Uuid)
 	}
 
 	smWatcher := 0
@@ -258,13 +254,11 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	if devManager.GetFeatureGate().Enabled(util.VMemoryNode) {
 		vMemoryNode = 1
 	}
-	deviceCount := 0
 	devices := [MaxDeviceCount]DeviceT{}
 	for i, devInfo := range assignDevices.Devices {
 		if i >= MaxDeviceCount {
 			break
 		}
-		deviceCount++
 		totalMemoryBytes := uint64(devInfo.Memory) << 20
 		realMemoryBytes := totalMemoryBytes
 		if ratio > 1 {
@@ -279,6 +273,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 			SoftCore:    int32(devInfo.Cores),
 			CoreLimit:   int32(0),
 			HardLimit:   int32(0),
+			Activate:    int32(1),
 		}
 		gpuDevice := deviceInfoMap[devInfo.Uuid]
 
@@ -319,7 +314,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		} else {
 			dev.MemoryOversold = 0
 		}
-		devices[i] = dev
+		devices[gpuDevice.Id] = dev
 	}
 
 	data := &ResourceDataT{
@@ -332,8 +327,6 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		PodNamespace:      convert64Bytes(pod.Namespace),
 		ContainerName:     convert64Bytes(assignDevices.Name),
 		Devices:           devices,
-		HostIndex:         hostIndex,
-		DeviceCount:       int32(deviceCount),
 		CompatibilityMode: int32(mode),
 		SMWatcher:         int32(smWatcher),
 		VMemoryNode:       int32(vMemoryNode),
@@ -405,21 +398,14 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		deviceInfos := devManager.GetNodeDeviceInfo()
 		deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))
 		for i := range deviceInfos[:min(MaxDeviceCount, len(deviceInfos))] {
-			func() {
-				deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
-				deviceUuid := C.CString(deviceInfos[i].Uuid)
-				defer C.free(unsafe.Pointer(deviceUuid))
-				C.strcpy((*C.char)(unsafe.Pointer(&vgpuConfig.host_index[deviceInfos[i].Id][0])),
-					(*C.char)(unsafe.Pointer(deviceUuid)))
-			}()
+			deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
 		}
 
-		deviceCount := 0
 		for i, devInfo := range assignDevices.Devices {
 			if i >= C.MAX_DEVICE_COUNT {
 				break
 			}
-			deviceCount++
+
 			func() {
 				var cDevice C.struct_device_t
 				devUuid := C.CString(devInfo.Uuid)
@@ -444,6 +430,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 				cDevice.core_limit = 0
 				//  int hard_limit;
 				cDevice.hard_limit = 0
+				cDevice.activate = 1
 				switch computePolicy {
 				case util.BalanceComputePolicy:
 					//  int soft_core;
@@ -481,13 +468,12 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 					cDevice.memory_oversold = 0
 				}
 				C.memcpy(
-					unsafe.Pointer(&vgpuConfig.devices[i]),
+					unsafe.Pointer(&vgpuConfig.devices[gpuDevice.Id]),
 					unsafe.Pointer(&cDevice),
 					C.size_t(unsafe.Sizeof(cDevice)),
 				)
 			}()
 		}
-		vgpuConfig.device_count = C.int(deviceCount)
 
 		cFileName := C.CString(filePath)
 		defer C.free(unsafe.Pointer(cFileName))

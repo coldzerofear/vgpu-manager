@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"k8s.io/component-base/featuregate"
 
@@ -459,17 +460,29 @@ skipNvml:
 			})
 			_, containerId := util.GetContainerRuntime(pod, container.Name)
 
-			for i := int32(0); i < resData.DeviceCount; i++ {
+			deviceCount := 0
+			for i := int32(0); i < vgpu.MaxDeviceCount; i++ {
+				containerDevice := resData.Devices[i]
+				if containerDevice.Activate == 0 {
+					continue
+				}
+				deviceUUID := string(containerDevice.UUID[0:40])
+				vHostIndex, exists := devIndexMap[deviceUUID]
+				if !exists {
+					continue
+				}
+
 				var (
-					vDevIndex       = strconv.Itoa(int(i))
-					deviceUUID      = string(resData.Devices[i].UUID[0:40])
-					deviceMemLimit  = resData.Devices[i].TotalMemory
-					realMemBytes    = resData.Devices[i].RealMemory
+					deviceMemLimit  = containerDevice.TotalMemory
+					realMemBytes    = containerDevice.RealMemory
+					vDevIndex       = strconv.Itoa(deviceCount)
 					deviceMemUsage  = uint64(0)
 					deviceVMemUsage = uint64(0)
 					deviceSMUtil    = uint32(0)
-					tmpPids        []string
+					tmpPids         []string
 				)
+				deviceCount++
+
 				ContainerDeviceProcInfoFunc(devProcInfoMap[deviceUUID], containerPids,
 					func(process nvml.ProcessInfo_v1) {
 						tmpPids = append(tmpPids, strconv.Itoa(int(process.Pid)))
@@ -501,18 +514,11 @@ skipNvml:
 						if len(tmpPids) == 0 {
 							return
 						}
-						vMemory, ok := c.contLister.GetResourceVMem(contKey)
-						if !ok {
+						vMemory, exists := c.contLister.GetResourceVMem(contKey)
+						if !exists {
 							return
 						}
-						vHostIndex := -1
-						for i, uuid := range resData.HostIndex {
-							if deviceUUID == string(uuid[0:40]) {
-								vHostIndex = i
-								continue
-							}
-						}
-						if err := vMemory.RLock(vHostIndex); err != nil {
+						if err = vMemory.RLock(vHostIndex); err != nil {
 							klog.V(3).ErrorS(err, "virtual memory RLock failed", "vHostIndex", vHostIndex)
 							return
 						}

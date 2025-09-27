@@ -3,17 +3,17 @@
 #include <sys/file.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/time.h>
 #include <sys/stat.h>
 #include <stdio.h>
 #include <errno.h>
 #include <stddef.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 
 #define LOCK_PATH_FORMAT (TMP_DIR VGPU_LOCK_DIR "/vgpu_%d.lock")
 #define LOCK_PATH_SIZE   32
-#define SPIN_INTERVAL_MS 20
-#define LOCK_TIMEOUT_MS  3000
+#define SPIN_INTERVAL_MS 10
+#define LOCK_TIMEOUT_MS  5000
 
 #define GET_DEVICE_LOCK_OFFSET(device_index) \
   offsetof(device_util_t, devices[device_index].lock_byte)
@@ -26,17 +26,17 @@ static const struct timespec sleep_time = {
   .tv_nsec = SPIN_INTERVAL_MS * MILLISEC,
 };
 
-static pthread_mutex_t dir_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static void ensure_lock_dir() {
-  pthread_mutex_lock(&dir_mutex);
+static void ensure_create_lock_dir() {
+  pthread_mutex_lock(&mutex);
   if (access(VGPU_LOCK_PATH, F_OK) != 0) {
     mkdir(VGPU_LOCK_PATH, 0755);
   }
-  pthread_mutex_unlock(&dir_mutex);
+  pthread_mutex_unlock(&mutex);
 }
 
-static void get_lock_path(int ordinal, char *buffer, size_t size) {
+static void get_lock_file_path(int ordinal, char *buffer, size_t size) {
   snprintf(buffer, size, LOCK_PATH_FORMAT, ordinal);
 }
 
@@ -56,16 +56,16 @@ static int try_acquire_lock(const char *path) {
   return fd;
 }
 
-int lock_gpu_device(int ordinal) {
-  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
-    LOGGER(ERROR, "invalid device index %d", ordinal);
+int lock_gpu_device(int device_index) {
+  if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) {
+    LOGGER(ERROR, "invalid device index %d", device_index);
     return -1;
   }
-  LOGGER(VERBOSE, "lock gpu device %d", ordinal);
+  LOGGER(VERBOSE, "lock gpu device %d", device_index);
 
-  ensure_lock_dir();
+  ensure_create_lock_dir();
   char lock_path[LOCK_PATH_SIZE];
-  get_lock_path(ordinal, lock_path, LOCK_PATH_SIZE);
+  get_lock_file_path(device_index, lock_path, LOCK_PATH_SIZE);
 
   struct timeval start, now;
   gettimeofday(&start, NULL);
@@ -80,8 +80,8 @@ int lock_gpu_device(int ordinal) {
     long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
                       (now.tv_usec - start.tv_usec) / 1000;
     if (elapsed_ms >= LOCK_TIMEOUT_MS) {
-      LOGGER(ERROR, "lock timeout for device %d", ordinal);
-      return -1; // timeout
+      LOGGER(ERROR, "lock timeout for device %d", device_index);
+      return -1;
     }
     // retry
     nanosleep(&sleep_time, NULL);
@@ -101,9 +101,9 @@ void unlock_gpu_device(int fd) {
   close(fd);
 }
 
-int device_util_read_lock(int ordinal) {
-  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
-    LOGGER(ERROR, "(SMWatcher) invalid device index %d", ordinal);
+int device_util_read_lock(int device_index) {
+  if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) {
+    LOGGER(ERROR, "(SMWatcher) invalid device index %d", device_index);
     return -1;
   }
   int fd = open(CONTROLLER_SM_UTIL_FILE_PATH, O_RDONLY | O_CLOEXEC);
@@ -114,21 +114,21 @@ int device_util_read_lock(int ordinal) {
   struct flock lock;
   lock.l_type = F_RDLCK;
   lock.l_whence = SEEK_SET;
-  lock.l_start = GET_DEVICE_LOCK_OFFSET(ordinal);
+  lock.l_start = GET_DEVICE_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
   if (fcntl(fd, F_SETLKW, &lock) == -1) {
     LOGGER(ERROR, "(SMWatcher) fcntl read lock failed for device %d: %s",
-               ordinal, strerror(errno));
+               device_index, strerror(errno));
     close(fd);
     return -1;
   }
   return fd;
 }
 
-int device_util_write_lock(int ordinal) {
-  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
-    LOGGER(ERROR, "(SMWatcher) invalid device index %d", ordinal);
+int device_util_write_lock(int device_index) {
+  if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) {
+    LOGGER(ERROR, "(SMWatcher) invalid device index %d", device_index);
     return -1;
   }
   int fd = open(CONTROLLER_SM_UTIL_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
@@ -139,34 +139,34 @@ int device_util_write_lock(int ordinal) {
   struct flock lock;
   lock.l_type = F_WRLCK;
   lock.l_whence = SEEK_SET;
-  lock.l_start = GET_DEVICE_LOCK_OFFSET(ordinal);
+  lock.l_start = GET_DEVICE_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
   if (fcntl(fd, F_SETLKW, &lock) == -1) {
     LOGGER(ERROR, "(SMWatcher) fcntl write lock failed for device %d: %s",
-           ordinal, strerror(errno));
+           device_index, strerror(errno));
     close(fd);
     return -1;
   }
   return fd;
 }
 
-void device_util_unlock(int fd, int ordinal) {
+void device_util_unlock(int fd, int device_index) {
   if (fd < 0) return;
-  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) return;
+  if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) return;
   struct flock lock;
   lock.l_type = F_UNLCK;
   lock.l_whence = SEEK_SET;
-  lock.l_start = GET_DEVICE_LOCK_OFFSET(ordinal);
+  lock.l_start = GET_DEVICE_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
   fcntl(fd, F_SETLK, &lock);
   close(fd);
 }
 
-int device_vmem_read_lock(int ordinal) {
-  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
-    LOGGER(ERROR, "(VMemNode) invalid device index %d", ordinal);
+int device_vmem_read_lock(int device_index) {
+  if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) {
+    LOGGER(ERROR, "(VMemNode) invalid device index %d", device_index);
     return -1;
   }
   int fd = open(VMEMORY_NODE_FILE_PATH, O_RDONLY | O_CLOEXEC);
@@ -177,21 +177,21 @@ int device_vmem_read_lock(int ordinal) {
   struct flock lock;
   lock.l_type = F_RDLCK;
   lock.l_whence = SEEK_SET;
-  lock.l_start = GET_VMEMORY_LOCK_OFFSET(ordinal);
+  lock.l_start = GET_VMEMORY_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
   if (fcntl(fd, F_SETLKW, &lock) == -1) {
     LOGGER(ERROR, "(VMemNode) fcntl read lock failed for device %d: %s",
-               ordinal, strerror(errno));
+               device_index, strerror(errno));
     close(fd);
     return -1;
   }
   return fd;
 }
 
-int device_vmem_write_lock(int ordinal) {
-  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) {
-    LOGGER(ERROR, "(VMemNode) invalid device index %d", ordinal);
+int device_vmem_write_lock(int device_index) {
+  if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) {
+    LOGGER(ERROR, "(VMemNode) invalid device index %d", device_index);
     return -1;
   }
   int fd = open(VMEMORY_NODE_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
@@ -202,25 +202,25 @@ int device_vmem_write_lock(int ordinal) {
   struct flock lock;
   lock.l_type = F_WRLCK;
   lock.l_whence = SEEK_SET;
-  lock.l_start = GET_VMEMORY_LOCK_OFFSET(ordinal);
+  lock.l_start = GET_VMEMORY_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
   if (fcntl(fd, F_SETLKW, &lock) == -1) {
     LOGGER(ERROR, "(VMemNode) fcntl write lock failed for device %d: %s",
-           ordinal, strerror(errno));
+           device_index, strerror(errno));
     close(fd);
     return -1;
   }
   return fd;
 }
 
-void device_vmem_unlock(int fd, int ordinal) {
+void device_vmem_unlock(int fd, int device_index) {
   if (fd < 0) return;
-  if (unlikely(ordinal < 0 || ordinal >= MAX_DEVICE_COUNT)) return;
+  if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) return;
   struct flock lock;
   lock.l_type = F_UNLCK;
   lock.l_whence = SEEK_SET;
-  lock.l_start = GET_VMEMORY_LOCK_OFFSET(ordinal);
+  lock.l_start = GET_VMEMORY_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
   fcntl(fd, F_SETLK, &lock);
