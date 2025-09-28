@@ -11,6 +11,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"k8s.io/component-base/featuregate"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
@@ -200,7 +201,7 @@ type procInfoList map[uint32]nvml.ProcessInfo_v1
 type procUtilList map[uint32]nvml.ProcessUtilizationSample
 
 func ContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(string) string, f func(pid int)) {
-	cgroupFullPath, err := util.GetK8sPodContainerCGroupFullPath(pod, containerName, fullPath)
+	cgroupFullPath, err := cgroup.GetK8sPodContainerCGroupFullPath(pod, containerName, fullPath)
 	if err != nil {
 		klog.Errorln(err)
 		return
@@ -444,21 +445,21 @@ skipNvml:
 			var getFullPath func(string) string
 			switch {
 			case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
-				getFullPath = util.GetK8sPodCGroupFullPath
+				getFullPath = cgroup.GetK8sPodCGroupFullPath
 			case cgroups.IsCgroup2HybridMode():
 				// If the device controller does not exist, use the path of cgroupv2.
-				getFullPath = util.GetK8sPodDeviceCGroupFullPath
-				if util.PathIsNotExist(util.CGroupDevicePath) {
-					getFullPath = util.GetK8sPodCGroupFullPath
+				getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
+				if util.PathIsNotExist(cgroup.CGroupDevicePath) {
+					getFullPath = cgroup.GetK8sPodCGroupFullPath
 				}
 			default: // cgroupv1
-				getFullPath = util.GetK8sPodDeviceCGroupFullPath
+				getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
 			}
 			var containerPids []uint32
 			ContainerPidsFunc(pod, container.Name, getFullPath, func(pid int) {
 				containerPids = append(containerPids, uint32(pid))
 			})
-			_, containerId := util.GetContainerRuntime(pod, container.Name)
+			_, containerId := cgroup.GetContainerRuntime(pod, container.Name)
 
 			deviceCount := 0
 			for i := int32(0); i < vgpu.MaxDeviceCount; i++ {

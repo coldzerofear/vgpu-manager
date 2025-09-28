@@ -3,6 +3,7 @@ package util
 import (
 	"fmt"
 	"math"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -280,4 +281,9 @@ func CompareResourceVersion(objA, objB metav1.Object) int {
 		return 0
 	}
 	return -1
+}
+
+func PathIsNotExist(fullPath string) bool {
+	_, err := os.Stat(fullPath)
+	return os.IsNotExist(err)
 }

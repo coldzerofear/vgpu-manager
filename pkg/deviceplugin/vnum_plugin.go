@@ -17,6 +17,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -442,7 +443,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 				ReadOnly:      true,
 			})
 		}
-		podCgroupPath, err = util.GetK8sPodCGroupPath(currentPod)
+		podCgroupPath, err = cgroup.GetK8sPodCGroupPath(currentPod)
 		if err != nil {
 			klog.Errorln(err.Error())
 			return resp, err
@@ -450,19 +451,19 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		var hostCGroupFullPath string
 		switch {
 		case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
-			hostCGroupFullPath = util.GetK8sPodCGroupFullPath(podCgroupPath)
+			hostCGroupFullPath = cgroup.GetK8sPodCGroupFullPath(podCgroupPath)
 		case cgroups.IsCgroup2HybridMode():
-			hostCGroupFullPath = util.GetK8sPodDeviceCGroupFullPath(podCgroupPath)
-			baseCgroupPath := util.SplitK8sCGroupBasePath(hostCGroupFullPath)
+			hostCGroupFullPath = cgroup.GetK8sPodDeviceCGroupFullPath(podCgroupPath)
+			baseCgroupPath := cgroup.SplitK8sCGroupBasePath(hostCGroupFullPath)
 			// If the device controller does not exist, use the path of cgroupv2.
 			if util.PathIsNotExist(baseCgroupPath) {
 				klog.V(3).Infof("try find k8s cgroup path failed: %s", baseCgroupPath)
-				hostCGroupFullPath = util.GetK8sPodCGroupFullPath(podCgroupPath)
+				hostCGroupFullPath = cgroup.GetK8sPodCGroupFullPath(podCgroupPath)
 			}
 		default: // cgroupv1
-			hostCGroupFullPath = util.GetK8sPodDeviceCGroupFullPath(podCgroupPath)
+			hostCGroupFullPath = cgroup.GetK8sPodDeviceCGroupFullPath(podCgroupPath)
 		}
-		baseCgroupPath := util.SplitK8sCGroupBasePath(hostCGroupFullPath)
+		baseCgroupPath := cgroup.SplitK8sCGroupBasePath(hostCGroupFullPath)
 		if util.PathIsNotExist(baseCgroupPath) {
 			err = fmt.Errorf("unable to find k8s cgroup path: %s", baseCgroupPath)
 			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))

@@ -1,19 +1,21 @@
-package util
+package cgroup
 
 import (
 	"context"
 	"fmt"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	criapi "k8s.io/cri-api/pkg/apis"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
-	"k8s.io/utils/ptr"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	criapi "k8s.io/cri-api/pkg/apis"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/utils/ptr"
 
 	cgroupsystemd "github.com/opencontainers/runc/libcontainer/cgroups/systemd"
 	"gopkg.in/yaml.v3"
@@ -40,6 +42,7 @@ const (
 	systemdSuffix string = ".slice"
 
 	KubeletConfigPath = "/var/lib/kubelet/config.yaml"
+	KubeadmFlagsPath  = "/var/lib/kubelet/kubeadm-flags.env"
 
 	CGroupBasePath   = "/sys/fs/cgroup"
 	CGroupDevicePath = CGroupBasePath + "/devices"
@@ -48,7 +51,7 @@ const (
 	CGROUPFS CGroupDriver = "cgroupfs"
 )
 
-func InitializeCGroupDriver(cgroupDriver string) {
+func MustInitCGroupDriver(cgroupDriver string) {
 	initCGroupOnce.Do(func() {
 		switch strings.ToLower(cgroupDriver) {
 		case string(SYSTEMD):
@@ -56,21 +59,127 @@ func InitializeCGroupDriver(cgroupDriver string) {
 		case string(CGROUPFS):
 			currentCGroupDriver = CGROUPFS
 		default:
-			configBytes, err := os.ReadFile(KubeletConfigPath)
+			getCgroupDriverFuncs := []func() (CGroupDriver, error){
+				readKubeletConfigCgroupDriver,
+				readKubeadmFlagsCgroupDriver,
+				detectCgroupDriver,
+			}
+			var err error
+			for _, getCgroupDriver := range getCgroupDriverFuncs {
+				currentCGroupDriver, err = getCgroupDriver()
+				if err != nil {
+					klog.V(4).ErrorS(err, "Attempt to extract cgroup driver failed")
+				} else {
+					break
+				}
+			}
 			if err != nil {
-				klog.Exitf("Read kubelet config file <%s> failed: %s", KubeletConfigPath, err.Error())
-			}
-			var kubelet kubeletConfig
-			if err = yaml.Unmarshal(configBytes, &kubelet); err != nil {
-				klog.Exitf("Failed to unmarshal kubelet config: %s", err.Error())
-			}
-			currentCGroupDriver = CGroupDriver(kubelet.CgroupDriver)
-			if currentCGroupDriver != SYSTEMD && currentCGroupDriver != CGROUPFS {
-				klog.Exitf("Invalid CGroup driver in kubelet config: %s", currentCGroupDriver)
+				klog.Exitln("Unable to detect a valid cgroup driver")
 			}
 		}
 	})
-	klog.Infof("Current CGroup driver is %s", currentCGroupDriver)
+	klog.Infof("Current environment cgroup driver is '%s'", currentCGroupDriver)
+}
+
+// readKubeletConfigCgroupDriver Extract cgroup driver from kubelet configuration file
+func readKubeletConfigCgroupDriver() (CGroupDriver, error) {
+	configBytes, err := os.ReadFile(KubeletConfigPath)
+	if err != nil {
+		return "", fmt.Errorf("read kubelet-config file <%s> failed: %v", KubeletConfigPath, err)
+	}
+	var kubelet kubeletConfig
+	if err = yaml.Unmarshal(configBytes, &kubelet); err != nil {
+		return "", fmt.Errorf("failed to unmarshal kubelet-config: %v", err)
+	}
+	switch kubelet.CgroupDriver {
+	case string(SYSTEMD):
+		return SYSTEMD, nil
+	case string(CGROUPFS):
+		return CGROUPFS, nil
+	case "":
+		return "", fmt.Errorf("cgroup driver not found in kubelet-config <%s>", KubeletConfigPath)
+	default:
+		return "", fmt.Errorf("invalid cgroup driver in kubelet-config: %s", kubelet.CgroupDriver)
+	}
+}
+
+// readKubeadmFlagsCgroupDriver Extract cgroup driver from kubeadm-flags.env file
+func readKubeadmFlagsCgroupDriver() (CGroupDriver, error) {
+	configBytes, err := os.ReadFile(KubeadmFlagsPath)
+	if err != nil {
+		return "", fmt.Errorf("read kubeadm-flags file <%s> failed: %v", KubeadmFlagsPath, err)
+	}
+	content := string(configBytes)
+
+	// Look for --cgroup-driver in command line arguments
+	if !strings.Contains(content, "--cgroup-driver") {
+		return "", fmt.Errorf("cgroup driver not found in kubelet-flags <%s>", KubeadmFlagsPath)
+	}
+	driver := ""
+	lines := strings.Split(content, "\n")
+out:
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "--cgroup-driver") {
+			continue
+		}
+		parts := strings.Fields(line)
+		for i, part := range parts {
+			if part == "--cgroup-driver" && i+1 < len(parts) {
+				driver = parts[i+1]
+				if driver == string(SYSTEMD) || driver == string(CGROUPFS) {
+					break out
+				}
+			}
+		}
+	}
+	switch driver {
+	case string(SYSTEMD):
+		return SYSTEMD, nil
+	case string(CGROUPFS):
+		return CGROUPFS, nil
+	default:
+		return "", fmt.Errorf("invalid cgroup driver in kubelet-flags: %s", driver)
+	}
+}
+
+// detectCgroupDriver detects the cgroup driver (cgroupfs or systemd) on the system
+func detectCgroupDriver() (CGroupDriver, error) {
+	// Check if systemd is managing cgroups by looking for systemd cgroup hierarchy
+	// In systemd-managed systems, there's typically a systemd slice at the root
+	if _, err := os.Stat("/sys/fs/cgroup/system.slice"); err == nil {
+		return SYSTEMD, nil
+	}
+
+	// Check if we can find systemd cgroup paths
+	if _, err := os.Stat("/sys/fs/cgroup/systemd"); err == nil {
+		return SYSTEMD, nil
+	}
+
+	// Check for cgroupfs by looking for traditional cgroup hierarchy
+	// In cgroupfs systems, we typically see individual controller directories
+	if _, err := os.Stat("/sys/fs/cgroup/cpu"); err == nil {
+		return CGROUPFS, nil
+	}
+
+	// Additional check for cgroup v2 with cgroupfs driver
+	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
+		// Check if systemd is not managing this hierarchy
+		if _, err := os.Stat("/sys/fs/cgroup/system.slice"); err != nil {
+			return CGROUPFS, nil
+		}
+	}
+
+	// Check for hybrid mode where systemd might be managing some controllers
+	if _, err := os.Stat("/sys/fs/cgroup/unified"); err == nil {
+		// In hybrid mode, check if systemd is managing the unified hierarchy
+		if _, err := os.Stat("/sys/fs/cgroup/unified/system.slice"); err == nil {
+			return SYSTEMD, nil
+		}
+		return CGROUPFS, nil
+	}
+
+	return "", fmt.Errorf("unable to detect cgroup driver on system")
 }
 
 func getCgroupDriverFromCRI(ctx context.Context, runtimeServer criapi.RuntimeService) (*CGroupDriver, error) {
@@ -215,19 +324,14 @@ func GetK8sPodContainerCGroupFullPath(pod *corev1.Pod, containerName string,
 	}
 }
 
-func PathIsNotExist(fullPath string) bool {
-	_, err := os.Stat(fullPath)
-	return os.IsNotExist(err)
-}
-
 func convertCGroupfsFullPath(runtimeName, containerId string,
 	cgroupName CgroupName, getFullPath func(string) string) (string, error) {
 	fullPath := getFullPath(filepath.Join(cgroupName.ToCgroupfs(), containerId))
-	if !PathIsNotExist(fullPath) {
+	if !util.PathIsNotExist(fullPath) {
 		return fullPath, nil
 	}
 	fullPath = getFullPath(filepath.Join("system.slice", cgroupName[len(cgroupName)-1]))
-	if !PathIsNotExist(fullPath) {
+	if !util.PathIsNotExist(fullPath) {
 		return fullPath, nil
 	}
 	klog.Infof("Possible upgrade required to adapt container runtime <%s> CGroup driver <%s>",
@@ -251,7 +355,7 @@ func convertSystemdFullPath(runtimeName, containerId string,
 	cgroupPath := fmt.Sprintf("%s/%s-%s.scope", cgroupName.ToSystemd(),
 		SystemdPathPrefixOfRuntime(runtimeName), containerId)
 	fullPath := getFullPath(cgroupPath)
-	if !PathIsNotExist(fullPath) {
+	if !util.PathIsNotExist(fullPath) {
 		return fullPath, nil
 	}
 	switch runtimeName {
@@ -260,14 +364,14 @@ func convertSystemdFullPath(runtimeName, containerId string,
 		cgroupPath = fmt.Sprintf("system.slice/%s.service/%s:%s:%s", runtimeName,
 			toSystemd(cgroupName), SystemdPathPrefixOfRuntime(runtimeName), containerId)
 		fullPath = getFullPath(cgroupPath)
-		if !PathIsNotExist(fullPath) {
+		if !util.PathIsNotExist(fullPath) {
 			return fullPath, nil
 		}
 	case "docker":
 		klog.Warningf("CGroup full path <%s> not exist", fullPath)
 		cgroupPath = fmt.Sprintf("%s/%s", cgroupName.ToSystemd(), containerId)
 		fullPath = getFullPath(cgroupPath)
-		if !PathIsNotExist(fullPath) {
+		if !util.PathIsNotExist(fullPath) {
 			return fullPath, nil
 		}
 	default:

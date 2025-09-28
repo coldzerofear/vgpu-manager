@@ -16,7 +16,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
-	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -51,7 +51,7 @@ func main() {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
-	util.InitializeCGroupDriver(nodeConfig.GetCGroupDriver())
+	cgroup.MustInitCGroupDriver(nodeConfig.GetCGroupDriver())
 
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())

@@ -21,7 +21,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
-	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/fsnotify/fsnotify"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -65,7 +65,7 @@ func main() {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
-	util.InitializeCGroupDriver(nodeConfig.GetCGroupDriver())
+	cgroup.MustInitCGroupDriver(nodeConfig.GetCGroupDriver())
 
 	klog.V(3).Info("Initialize Device Resource Manager")
 	deviceManager, err := devm.NewDeviceManager(
