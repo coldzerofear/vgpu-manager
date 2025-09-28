@@ -312,7 +312,7 @@ typedef void* (*fp_dlsym)(void*, const char*);
         getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
       }                                                           \
     }                                                             \
-    if (level == FATAL) {                                         \
+    if (unlikely(level == FATAL)) {                               \
       exit(-1);                                                   \
     }                                                             \
   })

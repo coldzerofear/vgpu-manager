@@ -1631,11 +1631,11 @@ void check_vmem_nodes() {
 
 static pthread_mutex_t device_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 // [cuda index] -> nvml index
-int cuda_to_nvml_device_index[MAX_DEVICE_COUNT] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+static volatile int cuda_to_nvml_device_index[MAX_DEVICE_COUNT] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 // [cuda index] -> host index
-int cuda_to_host_device_index[MAX_DEVICE_COUNT] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+static volatile int cuda_to_host_device_index[MAX_DEVICE_COUNT] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 // [nvml index] -> host index
-int nvml_to_host_device_index[MAX_DEVICE_COUNT] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+static volatile int nvml_to_host_device_index[MAX_DEVICE_COUNT] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 
 void get_host_device_index_by_uuid(char *uuid, int *host_index) {
   for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
@@ -1653,9 +1653,12 @@ int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
     LOGGER(VERBOSE, "nvmlDeviceGetIndex call error, return %d", ret);
     return -1;
   }
-
-  pthread_mutex_lock(&device_index_mutex);
   int host_index = nvml_to_host_device_index[nvml_index];
+  if (likely(host_index >= 0)) {
+    return host_index;
+  }
+  pthread_mutex_lock(&device_index_mutex);
+  host_index = nvml_to_host_device_index[nvml_index];
   if (host_index < 0) {
     char uuid[UUID_BUFFER_SIZE];
     ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetUUID, device, uuid, UUID_BUFFER_SIZE);
@@ -1663,9 +1666,9 @@ int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
       LOGGER(VERBOSE, "nvmlDeviceGetUUID failed, device %d, return %d", nvml_index, ret);
       goto DONE;
     }
-    get_host_device_index_by_uuid(uuid, &nvml_to_host_device_index[nvml_index]);
-    host_index = nvml_to_host_device_index[nvml_index];
+    get_host_device_index_by_uuid(uuid, &host_index);
     if (host_index >= 0) {
+      nvml_to_host_device_index[nvml_index] = host_index;
       LOGGER(VERBOSE, "nvml device %d => host device %d", nvml_index, host_index);
     }
   }
@@ -1717,9 +1720,9 @@ int _get_host_device_index_by_cuda_device(CUdevice device) {
     }
     char uuid[UUID_BUFFER_SIZE];
     formatUuid(cu_uuid, uuid, UUID_BUFFER_SIZE);
-    get_host_device_index_by_uuid(uuid, &cuda_to_host_device_index[cuda_index]);
-    host_index = cuda_to_host_device_index[cuda_index];
+    get_host_device_index_by_uuid(uuid, &host_index);
     if (host_index >= 0) {
+      cuda_to_host_device_index[cuda_index] = host_index;
       LOGGER(VERBOSE, "cuda device %d => host device %d", cuda_index, host_index);
     }
   }
@@ -1727,16 +1730,25 @@ int _get_host_device_index_by_cuda_device(CUdevice device) {
 }
 
 int get_host_device_index_by_cuda_device(CUdevice device) {
+  int cuda_index = (int) device;
+  int host_index = cuda_to_host_device_index[cuda_index];
+  if (likely(host_index >= 0)) {
+    return host_index;
+  }
   pthread_mutex_lock(&device_index_mutex);
-  int host_index = _get_host_device_index_by_cuda_device(device);
+  host_index = _get_host_device_index_by_cuda_device(device);
   pthread_mutex_unlock(&device_index_mutex);
   return host_index;
 }
 
 int get_nvml_device_index_by_cuda_device(CUdevice device) {
-  pthread_mutex_lock(&device_index_mutex);
   int cuda_index = (int) device;
   int nvml_index = cuda_to_nvml_device_index[cuda_index];
+  if (likely(nvml_index >= 0)) {
+    return nvml_index;
+  }
+  pthread_mutex_lock(&device_index_mutex);
+  nvml_index = cuda_to_nvml_device_index[cuda_index];
   if (nvml_index < 0) {
     int host_index = _get_host_device_index_by_cuda_device(device);
     if (host_index < 0) {
@@ -2028,7 +2040,7 @@ void init_nvml_to_host_device_index() {
   if (unlikely(rt)) {
     LOGGER(FATAL, "nvmlDeviceGetCount failed, return %d", rt);
   }
-  
+
   nvmlDevice_t device;
   for (int device_index = 0; device_index < device_count; device_index++) {
     if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {

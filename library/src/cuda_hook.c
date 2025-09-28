@@ -57,8 +57,8 @@ static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 static volatile int64_t g_cur_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
-static int g_sm_num[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static volatile int g_sm_num[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static volatile int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
 static int g_block_x[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 static int g_block_y[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
@@ -170,7 +170,6 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
                                  CUmemoryPool pool, CUstream hStream);
 CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
                                  CUmemoryPool pool, CUstream hStream);
-CUresult _cuMemFree(CUdeviceptr dptr);
 CUresult cuMemFree_v2(CUdeviceptr dptr);
 CUresult cuMemFree(CUdeviceptr dptr);
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream);
@@ -338,7 +337,7 @@ static int is[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 static int pre_sys_process_nums[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
 static int up_limits[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
+static volatile nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
 
 static void *utilization_watcher(void *arg) {
   batch_t *batch = (batch_t *)arg;
@@ -365,7 +364,7 @@ static void *utilization_watcher(void *arg) {
 //      need_limit = 1;
 //    }
   }
-//  if (likely(!need_limit)) {
+//  if (!need_limit) {
 //    LOGGER(VERBOSE, "no need cuda core limit for batch %d", batch->batch_code);
 //    return NULL;
 //  }
@@ -380,14 +379,12 @@ static void *utilization_watcher(void *arg) {
       nanosleep(&wait, NULL);
       host_index = host_indexes[cuda_index];
 
-      if (!g_vgpu_config->devices[host_index].core_limit) {
-        continue; // Skip GPU without core limit enabled
-      }
+      // Skip GPU without core limit enabled
+      if (!g_vgpu_config->devices[host_index].core_limit) continue;
 
       get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
-      if (unlikely(!top_results[host_index].valid)) {
-        continue;
-      }
+
+      if (unlikely(!top_results[host_index].valid)) continue;
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
@@ -1015,9 +1012,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
   } else {
     ret = get_gpu_process_from_local_nvml_driver(top_result, processes_sample, &processes_num, cuda_index, dev);
   }
-  if (unlikely(ret)) {
-    return;
-  }
+  if (unlikely(ret)) return;
 
   top_result->user_current = 0;
   top_result->sys_current = 0;
