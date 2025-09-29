@@ -283,7 +283,7 @@ static void rate_limiter(int grids, int blocks, CUdevice device) {
     do {
     CHECK:
       before_cuda_cores = g_cur_cuda_cores[host_index];
-      LOGGER(DETAIL, "device: %d, current core: %ld", host_index, before_cuda_cores);
+      LOGGER(DETAIL, "cuda device: %d, host device: %d, current core: %ld", device, host_index, before_cuda_cores);
       if (before_cuda_cores < 0) {
         nanosleep(&g_cycle, NULL);
         goto CHECK;
@@ -918,13 +918,13 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_re
   unsigned int running_processes = MAX_PIDS;
 
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
-    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
+    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
                              dev, &running_processes, pids_on_device);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
-    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
                              dev, &running_processes, pids_on_device);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
-    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
+    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
                              dev, &running_processes, pids_on_device);
   } else {
     ret = NVML_ERROR_FUNCTION_NOT_FOUND;
@@ -1310,8 +1310,10 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
 ALLOCATED_TO_GPU:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
-  } else {
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc, dptr, bytesize);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAlloc OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
@@ -1391,8 +1393,10 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
 ALLOCATED_TO_GPU:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
-  } else {
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocPitch OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
@@ -1617,8 +1621,10 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
 CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate_v2, pHandle, pAllocateArray);
-  } else {
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate, pHandle, pAllocateArray);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -1673,8 +1679,10 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
 CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate_v2, pHandle, pAllocateArray);
-  } else {
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate, pHandle, pAllocateArray);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -1790,8 +1798,10 @@ CUresult _cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
 CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
-  } else {
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem, bytes, dev);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
   }
   return ret;
 }
@@ -1831,8 +1841,10 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
 CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, free, total);
-  } else {
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, free, total);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -2133,8 +2145,10 @@ CUresult _cuMemFree(CUdeviceptr dptr) {
   }
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemFree_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFree_v2, dptr);
-  } else {
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemFree))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFree, dptr);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
   }
   if (likely(ret == CUDA_SUCCESS)) {
     free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));

@@ -244,15 +244,6 @@ typedef struct {
   int sys_process_num;
 } utilization_t;
 
-typedef enum {
-  INFO = 0,
-  ERROR = 1,
-  WARNING = 2,
-  FATAL = 3,
-  VERBOSE = 4,
-  DETAIL = 5,
-} log_level_enum_t;
-
 typedef struct {
   pthread_t tid;
   void *pointer;
@@ -282,39 +273,43 @@ typedef void* (*fp_dlsym)(void*, const char*);
     (type *)((char *)__mptr - offsetof(type, member));                         \
   })
 
+typedef enum {
+  INFO = 0,
+  ERROR = 1,
+  WARNING = 2,
+  FATAL = 3,
+  VERBOSE = 4,
+  DETAIL = 5,
+} log_level_enum_t;
 
-#define LOGGER(level, format, ...)                                \
-  ({                                                              \
-    char *_print_level_str = getenv("LOGGER_LEVEL");              \
-    int _print_level = 3;                                         \
-    if (_print_level_str) {                                       \
-      _print_level = (int)strtoul(_print_level_str, NULL, 10);    \
-      _print_level = _print_level < 0 ? 3 : _print_level;         \
-    }                                                             \
-    if (level <= _print_level) {                                  \
-      if (level == INFO) {                                        \
-        fprintf(stderr, "[vGPU INFO(%d|%s|%d)]: " format "\n",    \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
-      } else if (level == ERROR) {                                \
-        fprintf(stderr, "[vGPU ERROR(%d|%s|%d)]: " format "\n",   \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
-      } else if (level == WARNING) {                              \
-        fprintf(stderr, "[vGPU WARN(%d|%s|%d)]: " format "\n",    \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
-      } else if (level == FATAL) {                                \
-        fprintf(stderr, "[vGPU FATAL(%d|%s|%d)]: " format "\n",   \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
-      } else if (level == VERBOSE) {                              \
-        fprintf(stderr, "[vGPU VERBOSE(%d|%s|%d)]: " format "\n", \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
-      } else if (level == DETAIL) {                               \
-        fprintf(stderr, "[vGPU DETAIL(%d|%s|%d)]: " format "\n",  \
-        getpid(), basename(__FILE__), __LINE__, ##__VA_ARGS__);   \
-      }                                                           \
-    }                                                             \
-    if (unlikely(level == FATAL)) {                               \
-      exit(-1);                                                   \
-    }                                                             \
+static const char *_level_names[] = {
+  "INFO",     /* LOG_LEVEL_INFO    */
+  "ERROR",    /* LOG_LEVEL_ERROR   */
+  "WARNING",  /* LOG_LEVEL_WARNING */
+  "FATAL",    /* LOG_LEVEL_FATAL   */
+  "VERBOSE",  /* LOG_LEVEL_VERBOSE */
+  "DETAIL"    /* LOG_LEVEL_DETAIL  */
+};
+
+#define LOGGER(level, format, ...)                                  \
+  ({                                                                \
+    static int _print_level = -1;                                   \
+    if (_print_level == -1) {                                       \
+      char *_print_level_str = getenv("LOGGER_LEVEL");              \
+      if (_print_level_str && *_print_level_str) {                  \
+        _print_level = (int)strtoul(_print_level_str, NULL, 10);    \
+      }                                                             \
+      _print_level = _print_level < INFO ? FATAL : _print_level;    \
+      _print_level = _print_level > DETAIL ? DETAIL : _print_level; \
+    }                                                               \
+    if (level >= 0 && level <= _print_level) {                      \
+      fprintf(stderr, "[vGPU %s(%d|%s|%d)]: " format "\n",          \
+      _level_names[level], getpid(), basename(__FILE__),            \
+      __LINE__, ##__VA_ARGS__);                                     \
+    }                                                               \
+    if (unlikely(level == FATAL)) {                                 \
+      exit(1);                                                      \
+    }                                                               \
   })
 
 /**

@@ -31,17 +31,17 @@ const int nvml_hook_nums = sizeof(nvml_hooks_entry) / sizeof(nvml_hooks_entry[0]
 
 nvmlReturn_t nvmlInitWithFlags(unsigned int flags) {
   load_necessary_data();
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlInitWithFlags, flags);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlInitWithFlags, flags);
 }
 
 nvmlReturn_t nvmlInit_v2(void) {
   load_necessary_data();
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlInit_v2);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit_v2);
 }
 
 nvmlReturn_t nvmlInit(void) {
   load_necessary_data();
-  return NVML_ENTRY_CALL(nvml_library_entry, nvmlInit);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlInit);
 }
 
 nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) {
@@ -72,7 +72,7 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) 
     goto DONE;
   }
 CALL:
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryInfo, device, memory);
+  ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo, device, memory);
 DONE:
   unlock_gpu_device(fd);
   return ret;
@@ -86,7 +86,7 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *me
     LOGGER(VERBOSE, "nvmlDeviceGetIndex call failed, return %d", ret);
     goto DONE;
   }
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
+  ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
 
   int host_index = get_host_device_index_by_nvml_device(device);
   if (host_index < 0) {
@@ -126,7 +126,7 @@ nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device, nvmlComputeMode_t mod
     goto DONE;
   }
 CALL:
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceSetComputeMode, device, mode);
+  ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceSetComputeMode, device, mode);
 DONE:
   return ret;
 }

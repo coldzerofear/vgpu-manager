@@ -48,7 +48,7 @@ extern "C" {
   ({                                                                           \
     nvmlReturn_t _ret = NVML_ENTRY_CALL(table, sym, __VA_ARGS__);              \
     if (_ret != NVML_SUCCESS) {                                                \
-      LOGGER(2, "%s call failed: %d", #sym, _ret);                             \
+      LOGGER(4, "%s call failed: %d", #sym, _ret);                             \
     }                                                                          \
     _ret;                                                                      \
   })

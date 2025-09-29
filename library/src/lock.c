@@ -79,7 +79,7 @@ int lock_gpu_device(int device_index) {
     gettimeofday(&now, NULL);
     long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
                       (now.tv_usec - start.tv_usec) / 1000;
-    if (elapsed_ms >= LOCK_TIMEOUT_MS) {
+    if (unlikely(elapsed_ms >= LOCK_TIMEOUT_MS)) {
       LOGGER(ERROR, "lock timeout for device %d", device_index);
       return -1;
     }
