@@ -16,6 +16,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -34,6 +35,7 @@ func main() {
 	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()
 	defer klog.Flush()
+	util.SetGlobalDomain(opt.Domain)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {

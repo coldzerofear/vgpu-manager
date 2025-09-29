@@ -78,6 +78,7 @@ spec:
           env: {{ toYaml .Values.scheduler.schedulerExtender.env | nindent 12 }}
           command:
             - scheduler
+            - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
             - --kube-api-qps={{ .Values.scheduler.schedulerExtender.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.scheduler.schedulerExtender.commands.kubeApiBurst }}
             - --server-bind-port={{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}

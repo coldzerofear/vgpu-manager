@@ -49,6 +49,7 @@ spec:
             {{- if .Values.scheduler.enabled }}
             - --scheduler-name={{ .Values.scheduler.schedulerName }}
             {{- end }}
+            - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
             - --server-bind-port={{ .Values.webhook.commands.serverBindPort }}
             - --pprof-bind-port={{ .Values.webhook.commands.pprofBindPort }}
             - --cert-dir={{ .Values.webhook.commands.certDir }}

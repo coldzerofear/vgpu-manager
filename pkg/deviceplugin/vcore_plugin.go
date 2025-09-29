@@ -92,7 +92,7 @@ func (m *vcoreDevicePlugin) Devices() []*pluginapi.Device {
 		if gpuDevice.Mig { // skip mig device
 			continue
 		}
-		for i := 0; i < gpuDevice.Core; i++ {
+		for i := int64(0); i < gpuDevice.Core; i++ {
 			devId := fmt.Sprintf("vcore-%d-%d", gpuDevice.Id, i)
 			health := pluginapi.Healthy
 			if !gpuDevice.Healthy {

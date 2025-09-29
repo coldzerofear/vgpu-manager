@@ -31,11 +31,11 @@ data:
       weight: 1
       httpTimeout: 30s
       managedResources:
-      - name: "nvidia.com/vgpu-number"
+      - name: "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-number"
         ignoredByScheduler: true
-      - name: "nvidia.com/vgpu-cores"
+      - name: "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-cores"
         ignoredByScheduler: true
-      - name: "nvidia.com/vgpu-memory"
+      - name: "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-memory"
         ignoredByScheduler: true
   {{- else }}
   config.json: |
@@ -53,15 +53,15 @@ data:
           "httpTimeout": 30000000000,
           "managedResources": [
             {
-              "name": "nvidia.com/vgpu-number",
+              "name": "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-number",
               "ignoredByScheduler": true
             },
             {
-              "name": "nvidia.com/vgpu-cores",
+              "name": "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-cores",
               "ignoredByScheduler": true
             },
             {
-              "name": "nvidia.com/vgpu-memory",
+              "name": "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-memory",
               "ignoredByScheduler": true
             }
           ],

@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -25,6 +26,7 @@ func main() {
 	opt.PrintAndExitIfRequested()
 	defer klog.Flush()
 	log.SetLogger(klog.NewKlogr())
+	util.SetGlobalDomain(opt.Domain)
 
 	go func() {
 		if opt.PprofBindPort > 0 {

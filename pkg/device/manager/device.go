@@ -428,12 +428,12 @@ func (m *DeviceManager) Start() {
 
 func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 	// Scaling Cores.
-	totalCores := int(m.config.GetDeviceCoresScaling() * float64(util.HundredCore))
+	totalCores := int64(m.config.GetDeviceCoresScaling() * float64(util.HundredCore))
 	deviceInfos := make(device.NodeDeviceInfo, 0, len(m.devices))
 	for _, gpuDevice := range m.GetGPUDeviceMap() {
 		// Scaling Memory.
-		totalMemory := int(gpuDevice.Memory.Total >> 20) // bytes -> mb
-		totalMemory = int(m.config.GetDeviceMemoryScaling() * float64(totalMemory))
+		totalMemory := int64(gpuDevice.Memory.Total >> 20) // bytes -> mb
+		totalMemory = int64(m.config.GetDeviceMemoryScaling() * float64(totalMemory))
 		capability, _ := strconv.ParseFloat(gpuDevice.CudaComputeCapability, 32)
 		deviceInfos = append(deviceInfos, device.DeviceInfo{
 			Id:         gpuDevice.Index,

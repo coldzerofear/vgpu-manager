@@ -37,33 +37,32 @@ func HasAnnotation(obj metav1.Object, anno string) (val string, ok bool) {
 }
 
 // GetCapacityOfNode Return the capacity of node resources.
-func GetCapacityOfNode(node *corev1.Node, resourceName string) int {
-	val, ok := node.Status.Capacity[corev1.ResourceName(resourceName)]
-	if !ok {
-		return 0
+func GetCapacityOfNode(node *corev1.Node, resourceName string) (int64, bool) {
+	if val, ok := node.Status.Capacity[corev1.ResourceName(resourceName)]; ok {
+		return val.Value(), true
 	}
-	return int(val.Value())
+	return 0, false
 }
 
 // GetAllocatableOfNode Return the number of resources that can be allocated to the node.
-func GetAllocatableOfNode(node *corev1.Node, resourceName string) int {
-	val, ok := node.Status.Allocatable[corev1.ResourceName(resourceName)]
-	if !ok {
-		return 0
+func GetAllocatableOfNode(node *corev1.Node, resourceName string) (int64, bool) {
+	if val, ok := node.Status.Allocatable[corev1.ResourceName(resourceName)]; ok {
+		return val.Value(), true
 	}
-	return int(val.Value())
+	return 0, false
 }
 
-// IsVGPUEnabledNode Determine whether there are VGPU devices on the node.
+// IsVGPUEnabledNode Determine whether there are vGPU devices on the node.
 func IsVGPUEnabledNode(node *corev1.Node) bool {
-	return GetAllocatableOfNode(node, VGPUNumberResourceName) > 0
+	val, _ := GetAllocatableOfNode(node, VGPUNumberResourceName)
+	return val > 0
 }
 
 // GetResourceOfContainer Return the number of resource limit.
-func GetResourceOfContainer(container *corev1.Container, resourceName corev1.ResourceName) int {
-	var count int
-	if val, ok := container.Resources.Limits[resourceName]; ok {
-		count = int(val.Value())
+func GetResourceOfContainer(container *corev1.Container, resourceName string) int64 {
+	var count int64
+	if val, ok := container.Resources.Limits[corev1.ResourceName(resourceName)]; ok {
+		count = val.Value()
 	}
 	return count
 }
@@ -74,8 +73,8 @@ func IsVGPURequiredContainer(c *corev1.Container) bool {
 }
 
 // GetResourceOfPod Return the number of resource limit for all containers of Pod.
-func GetResourceOfPod(pod *corev1.Pod, resourceName corev1.ResourceName) int {
-	var total int
+func GetResourceOfPod(pod *corev1.Pod, resourceName string) int64 {
+	var total int64
 	for i := range pod.Spec.Containers {
 		total += GetResourceOfContainer(&pod.Spec.Containers[i], resourceName)
 	}

@@ -1,3 +1,5 @@
+vgpu-manager use global domain: {{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
+
 {{- if .Values.scheduler.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed successfully!
   - replica  count:  {{ .Values.scheduler.replicas }}

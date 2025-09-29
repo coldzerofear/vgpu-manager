@@ -49,7 +49,7 @@ func Test_BindPredicate(t *testing.T) {
 						Name: "cont1",
 						Resources: corev1.ResourceRequirements{
 							Limits: corev1.ResourceList{
-								util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 1)),
+								corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 1)),
 							},
 						},
 					}},

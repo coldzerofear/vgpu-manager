@@ -15,11 +15,13 @@ import (
 )
 
 type Options struct {
+	KubeConfigFile string
+	MasterURL      string
+	QPS            float64
+	Burst          int
+
+	Domain              string
 	SchedulerName       string
-	KubeConfigFile      string
-	MasterURL           string
-	QPS                 float64
-	Burst               int
 	ServerBindPort      int
 	PprofBindPort       int
 	EnableTls           bool
@@ -62,11 +64,12 @@ func NewOptions() *Options {
 	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
 		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate))
 	return &Options{
-		SchedulerName:       defaultSchedulerName,
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
 		ServerBindPort:      defaultServerBindPort,
 		PprofBindPort:       defaultPprofBindPort,
+		Domain:              util.GetGlobalDomain(),
+		SchedulerName:       defaultSchedulerName,
 		CertRefreshInterval: defaultCertRefreshInterval,
 		FeatureGate:         featureGate,
 	}
@@ -78,6 +81,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
 	pflag.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
 	pflag.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
+	pflag.StringVar(&o.Domain, "domain", o.Domain, "Set global domain name to replace all resource and annotation domains.")
 	pflag.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name.")
 	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")

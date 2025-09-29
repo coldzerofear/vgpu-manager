@@ -1,52 +1,77 @@
 package util
 
-const (
-	DomainPrefix = "nvidia.com"
+import (
+	"strings"
+	"sync"
+
+	"k8s.io/klog/v2"
+)
+
+var (
+	domainName     = "nvidia.com"
+	initDomainOnce sync.Once
 
 	// VGPUComputePolicyAnnotation none / balance / fixed(default)
-	VGPUComputePolicyAnnotation = DomainPrefix + "/vgpu-compute-policy"
+	VGPUComputePolicyAnnotation = domainName + "/vgpu-compute-policy"
 
-	NodeNvidiaDriverVersionLabel = DomainPrefix + "/node-driver-version"
-	NodeNvidiaCudaVersionLabel   = DomainPrefix + "/node-cuda-version"
+	NodeNvidiaDriverVersionLabel = domainName + "/node-driver-version"
+	NodeNvidiaCudaVersionLabel   = domainName + "/node-cuda-version"
 
-	MIGDeviceResourceNamePrefix = DomainPrefix + "/mig-"
-	VGPUNumberResourceName      = DomainPrefix + "/vgpu-number"
-	VGPUMemoryResourceName      = DomainPrefix + "/vgpu-memory"
-	VGPUCoreResourceName        = DomainPrefix + "/vgpu-cores"
+	MIGDeviceResourceNamePrefix = domainName + "/mig-"
+	VGPUNumberResourceName      = domainName + "/vgpu-number"
+	VGPUMemoryResourceName      = domainName + "/vgpu-memory"
+	VGPUCoreResourceName        = domainName + "/vgpu-cores"
 
 	// NodeDeviceHeartbeatAnnotation Node device heartbeat time
-	NodeDeviceHeartbeatAnnotation = DomainPrefix + "/node-device-heartbeat"
-	NodeDeviceRegisterAnnotation  = DomainPrefix + "/node-device-register"
-	NodeDeviceTopologyAnnotation  = DomainPrefix + "/node-device-topology"
-	NodeConfigInfoAnnotation      = DomainPrefix + "/node-config-info"
+	NodeDeviceHeartbeatAnnotation = domainName + "/node-device-heartbeat"
+	NodeDeviceRegisterAnnotation  = domainName + "/node-device-register"
+	NodeDeviceTopologyAnnotation  = domainName + "/node-device-topology"
+	NodeConfigInfoAnnotation      = domainName + "/node-config-info"
 
 	// PodIncludeGpuTypeAnnotation Specify the GPU type to be used
-	PodIncludeGpuTypeAnnotation = DomainPrefix + "/include-gpu-type"
+	PodIncludeGpuTypeAnnotation = domainName + "/include-gpu-type"
 	// PodExcludeGpuTypeAnnotation Specify the GPU type to exclude
-	PodExcludeGpuTypeAnnotation = DomainPrefix + "/exclude-gpu-type"
+	PodExcludeGpuTypeAnnotation = domainName + "/exclude-gpu-type"
 
 	// Scheduling strategies at the node and device levels
-	NodeSchedulerPolicyAnnotation   = DomainPrefix + "/node-scheduler-policy"
-	DeviceSchedulerPolicyAnnotation = DomainPrefix + "/device-scheduler-policy"
-	MemorySchedulerPolicyAnnotation = DomainPrefix + "/memory-scheduler-policy"
+	NodeSchedulerPolicyAnnotation   = domainName + "/node-scheduler-policy"
+	DeviceSchedulerPolicyAnnotation = domainName + "/device-scheduler-policy"
+	MemorySchedulerPolicyAnnotation = domainName + "/memory-scheduler-policy"
 
 	// DeviceTopologyModeAnnotation Specify device topology mode
-	DeviceTopologyModeAnnotation = DomainPrefix + "/device-topology-mode"
+	DeviceTopologyModeAnnotation = domainName + "/device-topology-mode"
 
 	// PodIncludeGPUUUIDAnnotation Specify the GPU UUID to be used
-	PodIncludeGPUUUIDAnnotation = DomainPrefix + "/include-gpu-uuid"
+	PodIncludeGPUUUIDAnnotation = domainName + "/include-gpu-uuid"
 	// PodExcludeGPUUUIDAnnotation Specify the GPU UUID to be excluded
-	PodExcludeGPUUUIDAnnotation = DomainPrefix + "/exclude-gpu-uuid"
+	PodExcludeGPUUUIDAnnotation = domainName + "/exclude-gpu-uuid"
 
-	PodPredicateNodeAnnotation = DomainPrefix + "/predicate-node"
-	PodPredicateTimeAnnotation = DomainPrefix + "/predicate-time"
-	PodAssignedPhaseLabel      = DomainPrefix + "/assigned-phase"
+	PodPredicateNodeAnnotation = domainName + "/predicate-node"
+	PodPredicateTimeAnnotation = domainName + "/predicate-time"
+	PodAssignedPhaseLabel      = domainName + "/assigned-phase"
 
 	// PodVGPUPreAllocAnnotation Pre allocated device information by the scheduler
-	PodVGPUPreAllocAnnotation = DomainPrefix + "/pre-allocated"
+	PodVGPUPreAllocAnnotation = domainName + "/pre-allocated"
 	// PodVGPURealAllocAnnotation Real device information allocated by device plugins
-	PodVGPURealAllocAnnotation = DomainPrefix + "/real-allocated"
+	PodVGPURealAllocAnnotation = domainName + "/real-allocated"
+)
 
+func GetGlobalDomain() string {
+	return domainName
+}
+
+func SetGlobalDomain(domain string) {
+	initDomainOnce.Do(func() {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			klog.Fatalf("domain name cannot be empty")
+		}
+		domainName = domain
+		klog.Infof("Successfully set the domain name to %s", domain)
+	})
+}
+
+const (
 	HundredCore = 100
 
 	// MaxContainerLimit max container num

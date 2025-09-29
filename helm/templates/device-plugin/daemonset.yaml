@@ -66,6 +66,7 @@ spec:
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command:
             - deviceplugin
+            - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
             - --kube-api-qps={{ .Values.devicePlugin.devicePlugin.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.devicePlugin.devicePlugin.commands.kubeApiBurst }}
             - --device-list-strategy={{ .Values.devicePlugin.devicePlugin.commands.deviceListStrategy }}
@@ -118,6 +119,7 @@ spec:
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command:
             - monitor
+            - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
             - --kube-api-qps={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiBurst }}
             - --server-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}

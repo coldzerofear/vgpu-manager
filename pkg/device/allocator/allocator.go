@@ -84,7 +84,7 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container) (*device.ContainerDevices, error) {
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", container.Name, alloc.nodeInfo.GetName())
 	node := alloc.nodeInfo.GetNode()
-	needNumber := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
+	needNumber := int(util.GetResourceOfContainer(container, util.VGPUNumberResourceName))
 	needCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
 	needMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
 	if needNumber > alloc.nodeInfo.GetDeviceCount() {
@@ -97,7 +97,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		if err != nil {
 			return nil, fmt.Errorf("decoding node configuration information failed: %v", err)
 		}
-		needMemory *= nodeConfigInfo.MemoryFactor
+		needMemory *= int64(nodeConfigInfo.MemoryFactor)
 	}
 	if needCores == 0 && needMemory == 0 {
 		needCores = util.HundredCore
@@ -151,7 +151,7 @@ func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, mes
 	}
 }
 
-func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*device.Device, policy util.SchedulerPolicy, needNumber, needCores, needMemory int) []device.ClaimDevice {
+func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*device.Device, policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64) []device.ClaimDevice {
 	if needNumber > 1 {
 		topologyMode, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
 		switch strings.ToLower(topologyMode) {
@@ -204,7 +204,7 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 	return allocateByNumbers(deviceStore, needNumber, needCores, needMemory)
 }
 
-func allocateByDevices(deviceStore []*device.Device, devices []*gpuallocator.Device, needCores, needMemory int) []device.ClaimDevice {
+func allocateByDevices(deviceStore []*device.Device, devices []*gpuallocator.Device, needCores, needMemory int64) []device.ClaimDevice {
 	claimDevices := make([]device.ClaimDevice, len(devices))
 	for i, dev := range devices {
 		reqMemory := needMemory
@@ -226,7 +226,7 @@ func allocateByDevices(deviceStore []*device.Device, devices []*gpuallocator.Dev
 	return claimDevices
 }
 
-func allocateByNumbers(deviceStore []*device.Device, needNumber, needCores, needMemory int) []device.ClaimDevice {
+func allocateByNumbers(deviceStore []*device.Device, needNumber int, needCores, needMemory int64) []device.ClaimDevice {
 	devices := make([]device.ClaimDevice, needNumber)
 	for i, deviceInfo := range deviceStore[0:needNumber] {
 		reqMemory := needMemory
@@ -245,7 +245,7 @@ func allocateByNumbers(deviceStore []*device.Device, needNumber, needCores, need
 	return devices
 }
 
-func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName string, needCores, needMemory int) []*device.Device {
+func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName string, needCores, needMemory int64) []*device.Device {
 	var devices []*device.Device
 	for i := range deviceMap {
 		deviceInfo := deviceMap[i]

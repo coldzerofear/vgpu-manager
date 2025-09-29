@@ -12,7 +12,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gomodules.xyz/jsonpatch/v2"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -121,12 +120,13 @@ func CycleCleanupNodeResources(kubeClient *kubernetes.Clientset, nodeName string
 func cleanupNodeResources(ctx context.Context, kubeClient *kubernetes.Clientset, nodeName string, resources []string) bool {
 	node, err := kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {
-		klog.Fatalf("get node %s failed: %v", nodeName, err)
+		klog.ErrorS(err, "get node failed", "node", nodeName)
+		return false
 	}
 	var jsonPatches []jsonpatch.Operation
 	for _, resourceName := range resources {
-		_, existAllocatable := node.Status.Allocatable[corev1.ResourceName(resourceName)]
-		_, existCapacity := node.Status.Capacity[corev1.ResourceName(resourceName)]
+		_, existAllocatable := util.GetAllocatableOfNode(node, resourceName)
+		_, existCapacity := util.GetCapacityOfNode(node, resourceName)
 		resourceName = strings.ReplaceAll(resourceName, "/", "~1")
 		if existCapacity {
 			jsonPatches = append(jsonPatches, jsonpatch.NewOperation("remove",
@@ -139,12 +139,11 @@ func cleanupNodeResources(ctx context.Context, kubeClient *kubernetes.Clientset,
 	}
 	if len(jsonPatches) > 0 {
 		patchDataBytes, _ := json.Marshal(jsonPatches)
-		_, err := kubeClient.CoreV1().Nodes().Patch(ctx, nodeName, types.JSONPatchType,
+		_, err = kubeClient.CoreV1().Nodes().Patch(ctx, nodeName, types.JSONPatchType,
 			patchDataBytes, metav1.PatchOptions{}, "status")
 		if err != nil {
-			klog.V(3).Infof("Clear node <%s> resource %+v failure: %v", nodeName, resources, err)
+			klog.V(3).ErrorS(err, "clear node resource failure", "node", nodeName, "resources", resources)
 		}
-		return false
 	}
-	return true
+	return len(jsonPatches) == 0
 }

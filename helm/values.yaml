@@ -14,6 +14,9 @@ image: coldzerofear/vgpu-manager
 imageTag: ""
 imagePullPolicy: IfNotPresent
 
+# Set global domain name to replace all resource and annotation domains.
+globalDomain: nvidia.com
+
 # Deployment configuration of the scheduler section
 scheduler:
   # Should the scheduler be deployed? (default: true)

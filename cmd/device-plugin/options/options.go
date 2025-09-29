@@ -22,6 +22,7 @@ type Options struct {
 	QPS            float64
 	Burst          int
 
+	Domain              string
 	NodeName            string
 	CGroupDriver        string
 	DeviceListStrategy  string
@@ -100,6 +101,7 @@ func NewOptions() *Options {
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
+		Domain:              util.GetGlobalDomain(),
 		NodeName:            os.Getenv("NODE_NAME"),
 		CGroupDriver:        os.Getenv("CGROUP_DRIVER"),
 		DeviceListStrategy:  defaultDeviceListStrategy,
@@ -124,6 +126,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
 	pflag.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
 	pflag.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
+	pflag.StringVar(&o.Domain, "domain", o.Domain, "Set global domain name to replace all resource and annotation domains.")
 	pflag.StringVar(&o.NodeName, "node-name", o.NodeName, "If non-empty, will use this string as identification instead of the actual node name.")
 	pflag.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (supported values: \"cgroupfs\" | \"system\")")
 	pflag.StringVar(&o.DeviceListStrategy, "device-list-strategy", o.DeviceListStrategy, "The desired strategy for passing the device list to the underlying runtime. (supported values: \"envvar\" | \"volume-mounts\")")

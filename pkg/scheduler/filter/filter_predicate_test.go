@@ -112,10 +112,10 @@ func Test_DeviceFilter(t *testing.T) {
 			},
 			Status: corev1.NodeStatus{
 				Capacity: corev1.ResourceList{
-					util.VGPUNumberResourceName: resource.MustParse("10"),
+					corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("10"),
 				},
 				Allocatable: corev1.ResourceList{
-					util.VGPUNumberResourceName: resource.MustParse("10"),
+					corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("10"),
 				},
 			},
 		}
@@ -140,9 +140,9 @@ func Test_DeviceFilter(t *testing.T) {
 					Name: "cont1",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 1)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 0)),
-							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 1)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 0)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 2048)),
 						},
 					},
 				},
@@ -157,8 +157,8 @@ func Test_DeviceFilter(t *testing.T) {
 					Name: "cont1",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 1)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 101)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 1)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 101)),
 							//util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
 						},
 					},
@@ -174,7 +174,7 @@ func Test_DeviceFilter(t *testing.T) {
 					Name: "cont1",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 17)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 17)),
 							//util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 101)),
 							//util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
 						},
@@ -196,9 +196,9 @@ func Test_DeviceFilter(t *testing.T) {
 					Name: "cont1",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 1)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 10)),
-							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 1)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 10)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 2048)),
 						},
 					},
 				},
@@ -218,9 +218,9 @@ func Test_DeviceFilter(t *testing.T) {
 					Name: "cont1",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 1)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 10)),
-							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 1)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 10)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 2048)),
 						},
 					},
 				},
@@ -234,9 +234,9 @@ func Test_DeviceFilter(t *testing.T) {
 					Name: "cont1",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 10)),
-							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 2)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 10)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 2048)),
 						},
 					},
 				},
@@ -250,18 +250,18 @@ func Test_DeviceFilter(t *testing.T) {
 					Name: "cont1",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 10)),
-							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 2)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 10)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 2048)),
 						},
 					},
 				}, {
 					Name: "cont2",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 10)),
-							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 2048)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 2)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 10)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 2048)),
 						},
 					},
 				},
@@ -275,27 +275,27 @@ func Test_DeviceFilter(t *testing.T) {
 					Name: "cont1",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 100)),
-							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 12288)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 2)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 100)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 12288)),
 						},
 					},
 				}, {
 					Name: "cont2",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 100)),
-							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 12288)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 2)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 100)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 12288)),
 						},
 					},
 				}, {
 					Name: "cont3",
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							util.VGPUNumberResourceName: resource.MustParse(fmt.Sprintf("%d", 2)),
-							util.VGPUCoreResourceName:   resource.MustParse(fmt.Sprintf("%d", 100)),
-							util.VGPUMemoryResourceName: resource.MustParse(fmt.Sprintf("%d", 12288)),
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 2)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 100)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 12288)),
 						},
 					},
 				},

@@ -417,7 +417,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			gpuDevices = append(gpuDevices, manager.Device{GPU: &gpuDevice})
 			if dev.Cores > 0 && dev.Cores < util.HundredCore {
 				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, idx)
-				response.Envs[coreLimitEnv] = strconv.Itoa(dev.Cores)
+				response.Envs[coreLimitEnv] = strconv.FormatInt(dev.Cores, 10)
 			}
 		}
 		response.Envs[util.GPUDevicesUuidEnv] = strings.Join(deviceIds, ",")

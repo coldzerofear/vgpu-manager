@@ -142,16 +142,17 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 		number := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
 		cores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
 		memory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
-
 		if number == 0 && (cores > 0 || memory > 0) {
 			number = 1
-			container.Resources.Limits[util.VGPUNumberResourceName] = resource.MustParse(fmt.Sprintf("%d", number))
+			quantity := resource.MustParse(fmt.Sprintf("%d", number))
+			container.Resources.Limits[corev1.ResourceName(util.VGPUNumberResourceName)] = quantity
 			logger.V(4).Info("Successfully set 1 vGPU number", "containerName", container.Name)
 		}
 
 		if number > 0 && cores == 0 && memory == 0 {
 			cores = util.HundredCore
-			container.Resources.Limits[util.VGPUCoreResourceName] = resource.MustParse(fmt.Sprintf("%d", cores))
+			quantity := resource.MustParse(fmt.Sprintf("%d", cores))
+			container.Resources.Limits[corev1.ResourceName(util.VGPUCoreResourceName)] = quantity
 			logger.V(4).Info("Successfully set 100 vGPU cores", "containerName", container.Name)
 		}
 
