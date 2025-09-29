@@ -1650,7 +1650,8 @@ int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
   int nvml_index;
   nvmlReturn_t ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
   if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetIndex call error, return %d", ret);
+    LOGGER(VERBOSE, "nvmlDeviceGetIndex call failed, return %d, str: %s",
+                     ret, NVML_ERROR(nvml_library_entry, ret));
     return -1;
   }
   int host_index = nvml_to_host_device_index[nvml_index];
@@ -1663,7 +1664,8 @@ int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
     char uuid[UUID_BUFFER_SIZE];
     ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetUUID, device, uuid, UUID_BUFFER_SIZE);
     if (unlikely(ret)) {
-      LOGGER(VERBOSE, "nvmlDeviceGetUUID failed, device %d, return %d", nvml_index, ret);
+      LOGGER(VERBOSE, "nvmlDeviceGetUUID call failed, host device %d, return %d, str: %s",
+                       host_index, ret, NVML_ERROR(nvml_library_entry, ret));
       goto DONE;
     }
     get_host_device_index_by_uuid(uuid, &host_index);
@@ -1712,10 +1714,10 @@ int _get_host_device_index_by_cuda_device(CUdevice device) {
       ret = NVML_ENTRY_CALL(cuda_library_entry, cuDeviceGetUuid, &cu_uuid, device);
     } else {
       ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-      LOGGER(WARNING, "cuDeviceGetUuid function not found");
     }
     if (unlikely(ret)) {
-      LOGGER(VERBOSE, "cuDeviceGetUuid can't get uuid on device %d, return %d", cuda_index, ret);
+      LOGGER(VERBOSE, "cuDeviceGetUuid can't get uuid on cuda device %d, return %d, str: %s",
+                       cuda_index, ret, CUDA_ERROR(cuda_library_entry, ret));
       return -1;
     }
     char uuid[UUID_BUFFER_SIZE];
@@ -2025,7 +2027,7 @@ void init_nvml_to_host_device_index() {
     rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlInit);
   }
   if (unlikely(rt)) {
-    LOGGER(FATAL, "nvmlInit failed, return %d", rt);
+    LOGGER(FATAL, "nvmlInit failed, return %d, str: %s", rt, NVML_ERROR(nvml_library_entry, rt));
   }
 
   unsigned int device_count;
@@ -2035,10 +2037,9 @@ void init_nvml_to_host_device_index() {
     rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetCount_v2, &device_count);
   } else {
     rt = NVML_ERROR_FUNCTION_NOT_FOUND;
-    LOGGER(WARNING, "nvmlDeviceGetCount function not found");
   }
   if (unlikely(rt)) {
-    LOGGER(FATAL, "nvmlDeviceGetCount failed, return %d", rt);
+    LOGGER(FATAL, "nvmlDeviceGetCount call failed, return %d, str: %s", rt, NVML_ERROR(nvml_library_entry, rt));
   }
 
   nvmlDevice_t device;
@@ -2049,10 +2050,10 @@ void init_nvml_to_host_device_index() {
       rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_index, &device);
     } else {
       rt = NVML_ERROR_FUNCTION_NOT_FOUND;
-      LOGGER(WARNING, "nvmlDeviceGetHandleByIndex function not found");
     }
     if (unlikely(rt)) {
-      LOGGER(ERROR, "nvmlDeviceGetHandleByIndex failed, device %d, return %d", device_index, rt);
+      LOGGER(ERROR, "nvmlDeviceGetHandleByIndex call failed, nvml device %d, return %d, str: %s",
+                    device_index, rt, NVML_ERROR(nvml_library_entry, rt));
       continue;
     }
     get_host_device_index_by_nvml_device(device);

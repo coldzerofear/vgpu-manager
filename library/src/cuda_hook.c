@@ -90,10 +90,6 @@ static void rate_limiter(int grids, int blocks, CUdevice device);
 
 static void change_token(int64_t, int);
 
-static const char *nvml_error(nvmlReturn_t);
-
-static const char *cuda_error(CUresult, const char **);
-
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index);
 
 static int check_file_exist(const char *);
@@ -223,25 +219,6 @@ dynamic_config_t g_dynamic_config = {
   .usage_threshold = 5,
   .error_recovery_step = 10
 };
-
-const char *nvml_error(nvmlReturn_t code) {
-  const char *(*err_fn)(nvmlReturn_t) = NULL;
-
-  err_fn = nvml_library_entry[NVML_ENTRY_ENUM(nvmlErrorString)].fn_ptr;
-  if (unlikely(!err_fn)) {
-    LOGGER(ERROR, "can't find nvmlErrorString");
-    static char fallback_error[32];
-    snprintf(fallback_error, sizeof(fallback_error), "NVML Error (code=%d)", (int)code);
-    return fallback_error;
-  }
-
-  return err_fn(code);
-}
-
-const char *cuda_error(CUresult code, const char **p) {
-  CUDA_ENTRY_CALL(cuda_library_entry, cuGetErrorString, code, p);
-  return *p;
-}
 
 static int check_file_exist(const char *file_path) {
   int ret = 0;
@@ -454,20 +431,17 @@ static void active_utilization_notifier(int batch_code) {
 }
 
 static void init_device_cuda_cores(int *device_count) {
-  const char *cuda_err_string = NULL;
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetCount, device_count);
   if (unlikely(ret)) {
-    LOGGER(FATAL, "cuDeviceGetCount call failed, return %d, str: %s", ret, cuda_error(ret, &cuda_err_string));
+    LOGGER(FATAL, "cuDeviceGetCount call failed, return %d, str: %s", ret, CUDA_ERROR(cuda_library_entry, ret));
   }
-
   CUdevice device;
   nvmlReturn_t rt;
   for (int cuda_index = 0; cuda_index < *device_count; cuda_index++) {
-
     ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGet, &device, cuda_index);
     if (unlikely(ret)) {
       LOGGER(FATAL, "cuDeviceGet call failed, cuda device %d, return %d, str %s",
-            cuda_index, ret, cuda_error(ret, &cuda_err_string));
+            cuda_index, ret, CUDA_ERROR(cuda_library_entry, ret));
     }
     int host_index = get_host_device_index_by_cuda_device(device);
     if (host_index < 0) {
@@ -484,25 +458,24 @@ static void init_device_cuda_cores(int *device_count) {
       rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, nvml_index, &nvml_devices[host_index]);
     } else {
       rt = NVML_ERROR_FUNCTION_NOT_FOUND;
-      LOGGER(WARNING, "nvmlDeviceGetHandleByIndex function not found");
     }
     if (unlikely(rt)) {
       LOGGER(FATAL, "nvmlDeviceGetHandleByIndex call failed, nvml device %d, return %d, str %s",
-             nvml_index, rt, nvml_error(rt));
+                     nvml_index, rt, NVML_ERROR(nvml_library_entry, rt));
     }
 
     ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetAttribute, &g_sm_num[host_index],
                           CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device);
     if (unlikely(ret)) {
       LOGGER(FATAL, "can't get processor number, cuda device %d, return %d, str %s",
-            device, ret, cuda_error(ret, &cuda_err_string));
+                     device, ret, CUDA_ERROR(cuda_library_entry, ret));
     }
 
     ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetAttribute, &g_max_thread_per_sm[host_index],
                           CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, device);
     if (unlikely(ret)) {
       LOGGER(FATAL, "can't get max thread per processor, cuda device %d, return %d, str %s",
-            device, ret, cuda_error(ret, &cuda_err_string));
+                     device, ret, CUDA_ERROR(cuda_library_entry, ret));
     }
     g_total_cuda_cores[host_index] = (int64_t)g_max_thread_per_sm[host_index] * (int64_t)(g_sm_num[host_index]) * FACTOR;
 
@@ -538,10 +511,9 @@ static void balance_batches(int device_count) {
 
 static void initialization() {
   int ret;
-  const char *cuda_err_string = NULL;
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuInit, 0);
   if (unlikely(ret)) {
-    LOGGER(ERROR, "cuInit error %s", cuda_error((CUresult)ret, &cuda_err_string));
+    LOGGER(ERROR, "cuInit error %s", CUDA_ERROR(cuda_library_entry, (CUresult)ret));
     LOGGER(ERROR, "initialization of sm watcher failed");
     return;
   }
@@ -718,11 +690,11 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                            device, &size_on_device, pids_on_device);
   } else {
     ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-    LOGGER(WARNING, "nvmlDeviceGetComputeRunningProcesses function not found");
   }
   if (unlikely(ret)) {
     *used_memory = 0;
-    LOGGER(ERROR, "nvmlDeviceGetComputeRunningProcesses call failed, return: %d, str: %s", ret, nvml_error(ret));
+    LOGGER(ERROR, "nvmlDeviceGetComputeRunningProcesses call failed, return: %d, str: %s",
+                   ret, NVML_ERROR(nvml_library_entry, ret));
     return;
   }
 
@@ -807,10 +779,10 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                            device, &size_on_device, graphic_pids_on_device);
   } else {
     ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-    LOGGER(WARNING, "nvmlDeviceGetGraphicsRunningProcesses function not found");
   }
   if (unlikely(ret)) {
-    LOGGER(ERROR, "nvmlDeviceGetGraphicsRunningProcesses call failed, return: %d, str: %s", ret, nvml_error(ret));
+    LOGGER(ERROR, "nvmlDeviceGetGraphicsRunningProcesses call failed, return: %d, str: %s",
+                   ret, NVML_ERROR(nvml_library_entry, ret));
     goto DONE;
   }
 
@@ -895,11 +867,11 @@ void get_used_gpu_memory(void *arg, CUdevice device) {
     ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, nvml_index, &dev);
   } else {
     ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-    LOGGER(WARNING, "nvmlDeviceGetHandleByIndex function not found");
   }
   if (unlikely(ret)) {
     *used_memory = 0;
-    LOGGER(ERROR, "nvmlDeviceGetHandleByIndex call failed, return: %d, str: %s", ret, nvml_error(ret));
+    LOGGER(ERROR, "nvmlDeviceGetHandleByIndex call failed, nvml device: %d, return: %d, str: %s",
+                   nvml_index, ret, NVML_ERROR(nvml_library_entry, ret));
     return;
   }
 
@@ -928,11 +900,10 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_re
                              dev, &running_processes, pids_on_device);
   } else {
     ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-    LOGGER(WARNING, "nvmlDeviceGetComputeRunningProcesses function not found");
   }
   if (unlikely(ret)) {
     LOGGER(VERBOSE, "nvmlDeviceGetComputeRunningProcesses can't get pids on cuda device %d, "
-           "return %d, str: %s", cuda_index, ret, nvml_error(ret));
+                 "return %d, str: %s", cuda_index, ret, NVML_ERROR(nvml_library_entry, ret));
     return ret;
   }
 
@@ -950,7 +921,7 @@ SKIP:
   if (unlikely(ret)) {
     if (ret != NVML_ERROR_NOT_FOUND) {
       LOGGER(VERBOSE, "nvmlDeviceGetProcessUtilization can't get process utilization on cuda device: %d, "
-                "return %d, str: %s", cuda_index, ret, nvml_error(ret));
+                      "return %d, str: %s", cuda_index, ret, NVML_ERROR(nvml_library_entry, ret));
     }
     return ret;
   }
@@ -1270,10 +1241,7 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  const char *mem_err_string = NULL;
-  const char *uva_err_string = NULL;
   size_t used = 0, vmem_used = 0, request_size = bytesize;
-
   int host_index = get_host_device_index_by_cuda_device(device);
   if (host_index < 0) {
     goto ALLOCATED_TO_GPU;
@@ -1317,14 +1285,14 @@ ALLOCATED_TO_GPU:
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAlloc OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
-                    request_size, ret, cuda_error(ret, &mem_err_string));
+                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   } else {
     goto DONE;
   }
 ALLOCATED_TO_UVA:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
-                  request_size, ret, cuda_error(ret, &uva_err_string));
+                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, bytesize, host_index);
   }
@@ -1350,9 +1318,6 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-
-  const char *mem_err_string = NULL;
-  const char *uva_err_string = NULL;
   size_t used = 0, vmem_used = 0;
   // size_t request_size = ROUND_UP(WidthInBytes * Height, ElementSizeBytes);
   size_t guess_pitch = (((WidthInBytes - 1) / ElementSizeBytes) + 1) * ElementSizeBytes;
@@ -1400,14 +1365,14 @@ ALLOCATED_TO_GPU:
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocPitch OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
-                    request_size, ret, cuda_error(ret, &mem_err_string));
+                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   } else {
     goto DONE;
   }
 ALLOCATED_TO_UVA:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, request_size, CU_MEM_ATTACH_GLOBAL);
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
-                  request_size, ret, cuda_error(ret, &uva_err_string));
+                  request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     *pPitch = guess_pitch;
     malloc_gpu_virt_memory(*dptr, request_size, host_index);
@@ -1436,8 +1401,6 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  const char *mem_err_string = NULL;
-  const char *uva_err_string = NULL;
   size_t used = 0, vmem_used = 0, request_size = bytesize;
   int host_index = get_host_device_index_by_cuda_device(device);
   if (host_index < 0) {
@@ -1475,14 +1438,14 @@ ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocAsync OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
-                    request_size, ret, cuda_error(ret, &mem_err_string));
+                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   } else {
     goto DONE;
   }
 ALLOCATED_TO_UVA:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
-                  request_size, ret, cuda_error(ret, &uva_err_string));
+                  request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, bytesize, host_index);
   }
@@ -1499,10 +1462,7 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  const char *mem_err_string = NULL;
-  const char *uva_err_string = NULL;
   size_t used = 0, vmem_used = 0, request_size = bytesize;
-
   int host_index = get_host_device_index_by_cuda_device(device);
   if (host_index < 0) {
     goto ALLOCATED_TO_GPU;
@@ -1540,14 +1500,14 @@ ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
-                    request_size, ret, cuda_error(ret, &mem_err_string));
+                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   } else {
     goto DONE;
   }
 ALLOCATED_TO_UVA:
   ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
-                  request_size, ret, cuda_error(ret, &uva_err_string));
+                  request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, request_size, host_index);
   }
@@ -1738,7 +1698,7 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
 //    }
   }
 CALL:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMipmappedArrayCreate, pHandle,
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMipmappedArrayCreate, pHandle,
                         pMipmappedArrayDesc, numMipmapLevels);
 DONE:
   unlock_gpu_device(lock_fd);
@@ -1779,7 +1739,7 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
 //    }
   }
 CALL:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -2088,7 +2048,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
 //    }
   }
 CALL:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -2130,7 +2090,7 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
 //    }
   }
 CALL:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;

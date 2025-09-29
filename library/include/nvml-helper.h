@@ -44,11 +44,28 @@ extern "C" {
     _entry(__VA_ARGS__);                                                       \
   })
 
+#define NVML_ERROR(table, code)                                                \
+  ({                                                                           \
+    const char *(*_err_fn)(nvmlReturn_t) = NULL;                               \
+    const char *_result_str = NULL;                                            \
+    _err_fn = (table)[NVML_ENTRY_ENUM(nvmlErrorString)].fn_ptr;                \
+    if (unlikely(!_err_fn)) {                                                  \
+      static char _fallback_error[32];                                         \
+      snprintf(_fallback_error, sizeof(_fallback_error),                       \
+                 "NVML Error (code=%d)", (int)(code));                         \
+      _result_str = _fallback_error;                                           \
+    } else {                                                                   \
+      _result_str = _err_fn(code);                                             \
+    }                                                                          \
+    _result_str;                                                               \
+  })
+
 #define NVML_ENTRY_CHECK(table, sym, ...)                                      \
   ({                                                                           \
     nvmlReturn_t _ret = NVML_ENTRY_CALL(table, sym, __VA_ARGS__);              \
-    if (_ret != NVML_SUCCESS) {                                                \
-      LOGGER(4, "%s call failed: %d", #sym, _ret);                             \
+    if (unlikely(_ret != NVML_SUCCESS)) {                                      \
+      LOGGER(4, "%s call failed, return: %d, str: %s",                         \
+                 #sym, _ret, NVML_ERROR(table, _ret));                         \
     }                                                                          \
     _ret;                                                                      \
   })

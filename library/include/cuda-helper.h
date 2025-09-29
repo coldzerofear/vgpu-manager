@@ -53,11 +53,27 @@ extern "C" {
     _entry(__VA_ARGS__);                                                       \
   })
 
+#define CUDA_ERROR(table, code)                                                \
+  ({                                                                           \
+    const char *_error_str = NULL;                                             \
+    cuda_sym_t _entry = (table)[CUDA_ENTRY_ENUM(cuGetErrorString)].fn_ptr;     \
+    if (unlikely(!_entry)) {                                                   \
+      static char _fallback_error[32];                                         \
+      snprintf(_fallback_error, sizeof(_fallback_error),                       \
+                 "CUDA Error (code=%d)", (int)(code));                         \
+      _error_str = _fallback_error;                                            \
+    } else {                                                                   \
+      _entry(code, &_error_str);                                               \
+    }                                                                          \
+    _error_str;                                                                \
+  })
+
 #define CUDA_ENTRY_CHECK(table, sym, ...)                                      \
   ({                                                                           \
     CUresult _ret = CUDA_ENTRY_CALL(table, sym, __VA_ARGS__);                  \
-    if (_ret != CUDA_SUCCESS) {                                                \
-      LOGGER(4, "%s call failed: %d", #sym, _ret);                             \
+    if (unlikely(_ret != CUDA_SUCCESS)) {                                      \
+      LOGGER(4, "%s call failed, return: %d, str: %s",                         \
+                 #sym, _ret, CUDA_ERROR(table, _ret));                         \
     }                                                                          \
     _ret;                                                                      \
   })
