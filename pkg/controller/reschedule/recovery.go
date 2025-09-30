@@ -100,12 +100,15 @@ func (r *recoveryController) processNextItem() bool {
 	case result.Requeue:
 		r.queue.AddRateLimited(pod)
 	default:
-		klog.V(4).InfoS("Recovery successful", "pod", klog.KObj(pod))
-		// Finally, if no error occurs we Forget this item so it does not
-		// get queued again until another change happens.
-		r.queue.Forget(pod)
-		if err = r.recoveryCheckpoint.RemovePod(klog.KObj(pod).String()); err != nil {
-			klog.ErrorS(err, "remove pod for recovery checkpoint failed", "pod", klog.KObj(pod))
+		obj := klog.KObj(pod)
+		if err = r.recoveryCheckpoint.RemovePod(obj.String()); err != nil {
+			klog.ErrorS(err, "remove pod for recovery checkpoint failed", "pod", obj)
+			r.queue.AddRateLimited(pod)
+		} else {
+			klog.V(5).InfoS("Recovery successful", "pod", obj)
+			// Finally, if no error occurs we Forget this item so it does not
+			// get queued again until another change happens.
+			r.queue.Forget(pod)
 		}
 	}
 
