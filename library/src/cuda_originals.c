@@ -135,7 +135,7 @@ CUresult cuCtxCreate_v3(CUcontext *pctx, CUexecAffinityParam *paramsArray,
 
 CUresult cuCtxCreate_v4(CUcontext *pctx, CUctxCreateParams *ctxCreateParams,
                         unsigned int flags, CUdevice dev) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxCreate_v3, pctx, ctxCreateParams,
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxCreate_v4, pctx, ctxCreateParams,
                          flags, dev);
 }
 
