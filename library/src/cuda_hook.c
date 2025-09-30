@@ -93,83 +93,117 @@ static void change_token(int64_t, int);
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index);
 
 static int check_file_exist(const char *);
-
 //static int int_compare(const void *a, const void *b);
 
 /** export function definition */
 CUresult cuDriverGetVersion(int *driverVersion);
 CUresult cuInit(unsigned int flag);
-CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
-                          cuuint64_t flags);
-CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
-                          cuuint64_t flags, void *symbolStatus);
-CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
-                          cuuint64_t flags, void *symbolStatus);           
-CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
-                           unsigned int flags);
+CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion, cuuint64_t flags);
+CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion, cuuint64_t flags, void *symbolStatus);
+CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion, cuuint64_t flags, void *symbolStatus);
+CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flags);
 CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize);
 CUresult cuMemAlloc(CUdeviceptr *dptr, size_t bytesize);
-CUresult cuMemAllocPitch_v2(CUdeviceptr *dptr, size_t *pPitch,
-                            size_t WidthInBytes, size_t Height,
-                            unsigned int ElementSizeBytes);
-CUresult cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes,
-                         size_t Height, unsigned int ElementSizeBytes);
-CUresult cuArrayCreate_v2(CUarray *pHandle,
-                          const CUDA_ARRAY_DESCRIPTOR *pAllocateArray);
-CUresult cuArrayCreate(CUarray *pHandle,
-                       const CUDA_ARRAY_DESCRIPTOR *pAllocateArray);
-CUresult cuArray3DCreate_v2(CUarray *pHandle,
-                            const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray);
-CUresult cuArray3DCreate(CUarray *pHandle,
-                         const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray);
-CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
-                       const CUDA_ARRAY3D_DESCRIPTOR *pMipmappedArrayDesc,
-                       unsigned int numMipmapLevels);
+CUresult cuMemAllocPitch_v2(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes, size_t Height, unsigned int ElementSizeBytes);
+CUresult cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes, size_t Height, unsigned int ElementSizeBytes);
+CUresult cuArrayCreate_v2(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocateArray);
+CUresult cuArrayCreate(CUarray *pHandle,  const CUDA_ARRAY_DESCRIPTOR *pAllocateArray);
+CUresult cuArray3DCreate_v2(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray);
+CUresult cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllocateArray);
+CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pMipmappedArrayDesc, unsigned int numMipmapLevels);
 CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice dev);
 CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev);
 CUresult cuMemGetInfo_v2(size_t *free, size_t *total);
 CUresult cuMemGetInfo(size_t *free, size_t *total);
-CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX,
-                        unsigned int gridDimY, unsigned int gridDimZ,
-                        unsigned int blockDimX, unsigned int blockDimY,
-                        unsigned int blockDimZ, unsigned int sharedMemBytes,
-                        CUstream hStream, void **kernelParams, void **extra);
-CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
-                        unsigned int gridDimY, unsigned int gridDimZ,
-                        unsigned int blockDimX, unsigned int blockDimY,
-                        unsigned int blockDimZ, unsigned int sharedMemBytes,
-                        CUstream hStream, void **kernelParams, void **extra);
-CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
-                        void **kernelParams, void **extra);
-CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f, 
-                        void **kernelParams, void **extra);
+CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ, unsigned int blockDimX,
+                        unsigned int blockDimY, unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream, void **kernelParams, void **extra);
+CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
+                        unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream, void **kernelParams, void **extra);
+CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f, void **kernelParams, void **extra);
+CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f, void **kernelParams, void **extra);
 CUresult cuLaunch(CUfunction f);
-CUresult cuLaunchCooperativeKernel_ptsz(CUfunction f, unsigned int gridDimX, 
-                                  unsigned int gridDimY, unsigned int gridDimZ, 
-                                  unsigned int blockDimX, unsigned int blockDimY,
-                                  unsigned int blockDimZ, unsigned int sharedMemBytes, 
-                                  CUstream hStream, void **kernelParams);
-CUresult cuLaunchCooperativeKernel(CUfunction f, unsigned int gridDimX,
-                                  unsigned int gridDimY, unsigned int gridDimZ,
-                                  unsigned int blockDimX, unsigned int blockDimY,
-                                  unsigned int blockDimZ, unsigned int sharedMemBytes,
-                                  CUstream hStream, void **kernelParams);
+CUresult cuLaunchCooperativeKernel_ptsz(CUfunction f, unsigned int gridDimX,  unsigned int gridDimY, unsigned int gridDimZ, unsigned int blockDimX,
+                        unsigned int blockDimY, unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream, void **kernelParams);
+CUresult cuLaunchCooperativeKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ, unsigned int blockDimX,
+                        unsigned int blockDimY, unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream, void **kernelParams);
 CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height);
-CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height,
-                           CUstream hStream);
+CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstream hStream);
 CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z);
 CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
 CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
-CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
-                     const CUmemAllocationProp *prop, unsigned long long flags);
-CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
-                                 CUmemoryPool pool, CUstream hStream);
-CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
-                                 CUmemoryPool pool, CUstream hStream);
+CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size, const CUmemAllocationProp *prop, unsigned long long flags);
+CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize, CUmemoryPool pool, CUstream hStream);
+CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUmemoryPool pool, CUstream hStream);
 CUresult cuMemFree_v2(CUdeviceptr dptr);
 CUresult cuMemFree(CUdeviceptr dptr);
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream);
 CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream);
+
+CUresult cuMemcpy_ptds(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount);
+CUresult cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount);
+CUresult cuMemcpyAsync_ptsz(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyPeer_ptds(CUdeviceptr dstDevice, CUcontext dstContext,  CUdeviceptr srcDevice, CUcontext srcContext, size_t ByteCount);
+CUresult cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext, CUdeviceptr srcDevice, CUcontext srcContext, size_t ByteCount);
+CUresult cuMemcpyPeerAsync_ptsz(CUdeviceptr dstDevice, CUcontext dstContext, CUdeviceptr srcDevice, CUcontext srcContext, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext dstContext, CUdeviceptr srcDevice, CUcontext srcContext, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyHtoD_v2_ptds(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount);
+CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount);
+CUresult cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount);
+CUresult cuMemcpyHtoDAsync_v2_ptsz(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyDtoH_v2_ptds(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyDtoHAsync_v2_ptsz(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyDtoD_v2_ptds(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyDtoD_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyDtoDAsync_v2_ptsz(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpy2DUnaligned_v2_ptds(const CUDA_MEMCPY2D *pCopy);
+CUresult cuMemcpy2DUnaligned_v2(const CUDA_MEMCPY2D *pCopy);
+CUresult cuMemcpy2DUnaligned(const CUDA_MEMCPY2D *pCopy);
+CUresult cuMemcpy2DAsync_v2_ptsz(const CUDA_MEMCPY2D *pCopy, CUstream hStream);
+CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *pCopy, CUstream hStream);
+CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D *pCopy, CUstream hStream);
+CUresult cuMemcpy3D_v2_ptds(const CUDA_MEMCPY3D *pCopy);
+CUresult cuMemcpy3D_v2(const CUDA_MEMCPY3D *pCopy);
+CUresult cuMemcpy3D(const CUDA_MEMCPY3D *pCopy);
+CUresult cuMemcpy3DAsync_v2_ptsz(const CUDA_MEMCPY3D *pCopy, CUstream hStream);
+CUresult cuMemcpy3DAsync_v2(const CUDA_MEMCPY3D *pCopy, CUstream hStream);
+CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream);
+CUresult cuMemcpy3DPeer_ptds(const CUDA_MEMCPY3D_PEER *pCopy);
+CUresult cuMemcpy3DPeer(const CUDA_MEMCPY3D_PEER *pCopy);
+CUresult cuMemcpy3DPeerAsync_ptsz(const CUDA_MEMCPY3D_PEER *pCopy, CUstream hStream);
+CUresult cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy, CUstream hStream);
+CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *pCopy);
+CUresult cuMemcpy2D(const CUDA_MEMCPY2D *pCopy);
+CUresult cuMemcpyAtoA_v2_ptds(CUarray dstArray, size_t dstOffset, CUarray srcArray, size_t srcOffset, size_t ByteCount);
+CUresult cuMemcpyAtoA_v2(CUarray dstArray, size_t dstOffset, CUarray srcArray, size_t srcOffset, size_t ByteCount);
+CUresult cuMemcpyAtoA(CUarray dstArray, size_t dstOffset, CUarray srcArray, size_t srcOffset, size_t ByteCount);
+CUresult cuMemcpyAtoD_v2(CUdeviceptr dstDevice, CUarray srcArray, size_t srcOffset, size_t ByteCount);
+CUresult cuMemcpyAtoD(CUdeviceptr dstDevice, CUarray srcArray, size_t srcOffset, size_t ByteCount);
+CUresult cuMemcpyAtoD_v2_ptds(CUdeviceptr dstDevice, CUarray srcArray, size_t srcOffset, size_t ByteCount);
+CUresult cuMemcpyAtoH_v2_ptds(void *dstHost, CUarray srcArray, size_t srcOffset, size_t ByteCount);
+CUresult cuMemcpyAtoH_v2(void *dstHost, CUarray srcArray, size_t srcOffset, size_t ByteCount);
+CUresult cuMemcpyAtoH(void *dstHost, CUarray srcArray, size_t srcOffset, size_t ByteCount);
+CUresult cuMemcpyAtoHAsync_v2_ptsz(void *dstHost, CUarray srcArray, size_t srcOffset, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyAtoHAsync_v2(void *dstHost, CUarray srcArray, size_t srcOffset, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyAtoHAsync(void *dstHost, CUarray srcArray, size_t srcOffset, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyDtoA_v2_ptds(CUarray dstArray, size_t dstOffset, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyDtoA_v2(CUarray dstArray, size_t dstOffset, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyDtoA(CUarray dstArray, size_t dstOffset, CUdeviceptr srcDevice, size_t ByteCount);
+CUresult cuMemcpyHtoA_v2_ptds(CUarray dstArray, size_t dstOffset, const void *srcHost, size_t ByteCount);
+CUresult cuMemcpyHtoA_v2(CUarray dstArray, size_t dstOffset, const void *srcHost, size_t ByteCount);
+CUresult cuMemcpyHtoA(CUarray dstArray, size_t dstOffset, const void *srcHost, size_t ByteCount);
+CUresult cuMemcpyHtoAAsync_v2_ptsz(CUarray dstArray, size_t dstOffset, const void *srcHost, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyHtoAAsync_v2(CUarray dstArray, size_t dstOffset, const void *srcHost, size_t ByteCount, CUstream hStream);
+CUresult cuMemcpyHtoAAsync(CUarray dstArray, size_t dstOffset, const void *srcHost, size_t ByteCount, CUstream hStream);
 
 entry_t cuda_hooks_entry[] = {
     {.name = "cuDriverGetVersion", .fn_ptr = cuDriverGetVersion},
@@ -209,6 +243,73 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuMemFree", .fn_ptr = cuMemFree},
     {.name = "cuMemFreeAsync", .fn_ptr = cuMemFreeAsync},
     {.name = "cuMemFreeAsync_ptsz", .fn_ptr = cuMemFreeAsync_ptsz},
+    // cuMemcpy
+    {.name = "cuMemcpy_ptds", .fn_ptr = cuMemcpy_ptds},
+    {.name = "cuMemcpy", .fn_ptr = cuMemcpy},
+    {.name = "cuMemcpyAsync_ptsz", .fn_ptr = cuMemcpyAsync_ptsz},
+    {.name = "cuMemcpyAsync", .fn_ptr = cuMemcpyAsync},
+    {.name = "cuMemcpyPeer_ptds", .fn_ptr = cuMemcpyPeer_ptds},
+    {.name = "cuMemcpyPeer", .fn_ptr = cuMemcpyPeer},
+    {.name = "cuMemcpyPeerAsync_ptsz", .fn_ptr = cuMemcpyPeerAsync_ptsz},
+    {.name = "cuMemcpyPeerAsync", .fn_ptr = cuMemcpyPeerAsync},
+    {.name = "cuMemcpyHtoD_v2_ptds", .fn_ptr = cuMemcpyHtoD_v2_ptds},
+    {.name = "cuMemcpyHtoD_v2", .fn_ptr = cuMemcpyHtoD_v2},
+    {.name = "cuMemcpyHtoD", .fn_ptr = cuMemcpyHtoD},
+    {.name = "cuMemcpyHtoDAsync_v2_ptsz", .fn_ptr = cuMemcpyHtoDAsync_v2_ptsz},
+    {.name = "cuMemcpyHtoDAsync_v2", .fn_ptr = cuMemcpyHtoDAsync_v2},
+    {.name = "cuMemcpyHtoDAsync", .fn_ptr = cuMemcpyHtoDAsync},
+    {.name = "cuMemcpyDtoH_v2_ptds", .fn_ptr = cuMemcpyDtoH_v2_ptds},
+    {.name = "cuMemcpyDtoH_v2", .fn_ptr = cuMemcpyDtoH_v2},
+    {.name = "cuMemcpyDtoH", .fn_ptr = cuMemcpyDtoH},
+    {.name = "cuMemcpyDtoHAsync_v2_ptsz", .fn_ptr = cuMemcpyDtoHAsync_v2_ptsz},
+    {.name = "cuMemcpyDtoHAsync_v2", .fn_ptr = cuMemcpyDtoHAsync_v2},
+    {.name = "cuMemcpyDtoHAsync", .fn_ptr = cuMemcpyDtoHAsync},
+    {.name = "cuMemcpyDtoD_v2_ptds", .fn_ptr = cuMemcpyDtoD_v2_ptds},
+    {.name = "cuMemcpyDtoD_v2", .fn_ptr = cuMemcpyDtoD_v2},
+    {.name = "cuMemcpyDtoD", .fn_ptr = cuMemcpyDtoD},
+    {.name = "cuMemcpyDtoDAsync_v2_ptsz", .fn_ptr = cuMemcpyDtoDAsync_v2_ptsz},
+    {.name = "cuMemcpyDtoDAsync_v2", .fn_ptr = cuMemcpyDtoDAsync_v2},
+    {.name = "cuMemcpyDtoDAsync", .fn_ptr = cuMemcpyDtoDAsync},
+    {.name = "cuMemcpy2DUnaligned_v2_ptds", .fn_ptr = cuMemcpy2DUnaligned_v2_ptds},
+    {.name = "cuMemcpy2DUnaligned_v2", .fn_ptr = cuMemcpy2DUnaligned_v2},
+    {.name = "cuMemcpy2DUnaligned", .fn_ptr = cuMemcpy2DUnaligned},
+    {.name = "cuMemcpy2DAsync_v2_ptsz", .fn_ptr = cuMemcpy2DAsync_v2_ptsz},
+    {.name = "cuMemcpy2DAsync_v2", .fn_ptr = cuMemcpy2DAsync_v2},
+    {.name = "cuMemcpy2DAsync", .fn_ptr = cuMemcpy2DAsync},
+    {.name = "cuMemcpy3D_v2_ptds", .fn_ptr = cuMemcpy3D_v2_ptds},
+    {.name = "cuMemcpy3D_v2", .fn_ptr = cuMemcpy3D_v2},
+    {.name = "cuMemcpy3D", .fn_ptr = cuMemcpy3D},
+    {.name = "cuMemcpy3DAsync_v2_ptsz", .fn_ptr = cuMemcpy3DAsync_v2_ptsz},
+    {.name = "cuMemcpy3DAsync_v2", .fn_ptr = cuMemcpy3DAsync_v2},
+    {.name = "cuMemcpy3DAsync", .fn_ptr = cuMemcpy3DAsync},
+    {.name = "cuMemcpy3DPeer_ptds", .fn_ptr = cuMemcpy3DPeer_ptds},
+    {.name = "cuMemcpy3DPeer", .fn_ptr = cuMemcpy3DPeer},
+    {.name = "cuMemcpy3DPeerAsync_ptsz", .fn_ptr = cuMemcpy3DPeerAsync_ptsz},
+    {.name = "cuMemcpy3DPeerAsync", .fn_ptr = cuMemcpy3DPeerAsync},
+    {.name = "cuMemcpy2D_v2", .fn_ptr = cuMemcpy2D_v2},
+    {.name = "cuMemcpy2D", .fn_ptr = cuMemcpy2D},
+    {.name = "cuMemcpyAtoA_v2_ptds", .fn_ptr = cuMemcpyAtoA_v2_ptds},
+    {.name = "cuMemcpyAtoA_v2", .fn_ptr = cuMemcpyAtoA_v2},
+    {.name = "cuMemcpyAtoA", .fn_ptr = cuMemcpyAtoA},
+    {.name = "cuMemcpyAtoD_v2", .fn_ptr = cuMemcpyAtoD_v2},
+    {.name = "cuMemcpyAtoD", .fn_ptr = cuMemcpyAtoD},
+    {.name = "cuMemcpyAtoD_v2_ptds", .fn_ptr = cuMemcpyAtoD_v2_ptds},
+    {.name = "cuMemcpyAtoH_v2_ptds", .fn_ptr = cuMemcpyAtoH_v2_ptds},
+    {.name = "cuMemcpyAtoH_v2", .fn_ptr = cuMemcpyAtoH_v2},
+    {.name = "cuMemcpyAtoH", .fn_ptr = cuMemcpyAtoH},
+    {.name = "cuMemcpyAtoHAsync_v2_ptsz", .fn_ptr = cuMemcpyAtoHAsync_v2_ptsz},
+    {.name = "cuMemcpyAtoHAsync_v2", .fn_ptr = cuMemcpyAtoHAsync_v2},
+    {.name = "cuMemcpyAtoHAsync", .fn_ptr = cuMemcpyAtoHAsync},
+    {.name = "cuMemcpyDtoA_v2_ptds", .fn_ptr = cuMemcpyDtoA_v2_ptds},
+    {.name = "cuMemcpyDtoA_v2", .fn_ptr = cuMemcpyDtoA_v2},
+    {.name = "cuMemcpyDtoA", .fn_ptr = cuMemcpyDtoA},
+    {.name = "cuMemcpyHtoA_v2_ptds", .fn_ptr = cuMemcpyHtoA_v2_ptds},
+    {.name = "cuMemcpyHtoA_v2", .fn_ptr = cuMemcpyHtoA_v2},
+    {.name = "cuMemcpyHtoA", .fn_ptr = cuMemcpyHtoA},
+    {.name = "cuMemcpyHtoAAsync_v2_ptsz", .fn_ptr = cuMemcpyHtoAAsync_v2_ptsz},
+    {.name = "cuMemcpyHtoAAsync_v2", .fn_ptr = cuMemcpyHtoAAsync_v2},
+    {.name = "cuMemcpyHtoAAsync", .fn_ptr = cuMemcpyHtoAAsync}
+
 };
 
 const int cuda_hook_nums =
@@ -2155,3 +2256,784 @@ DONE:
   return ret;
 }
 
+// Memory copy related methods also limit the utilization rate.
+
+CUresult handleRateLimiter() {
+  CUresult ret;
+  CUdevice device;
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    goto DONE;
+  }
+  int host_index = get_host_device_index_by_cuda_device(device);
+  if (host_index < 0) {
+    goto DONE;
+  }
+  rate_limiter(1, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
+DONE:
+  return ret;
+}
+
+CUresult cuMemcpy_ptds(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy_ptds, dst, src, ByteCount);
+}
+
+CUresult cuMemcpy(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy), dst, src, ByteCount);
+}
+
+CUresult cuMemcpyAsync_ptsz(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAsync_ptsz, dst, src, ByteCount, hStream);
+}
+
+CUresult cuMemcpyAsync(CUdeviceptr dst, CUdeviceptr src, size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyAsync), dst, src, ByteCount, hStream);
+}
+
+CUresult cuMemcpyPeer_ptds(CUdeviceptr dstDevice, CUcontext dstContext,
+                           CUdeviceptr srcDevice, CUcontext srcContext,
+                           size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyPeer_ptds, dstDevice,
+                         dstContext, srcDevice, srcContext, ByteCount);
+}
+
+CUresult cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext,
+                      CUdeviceptr srcDevice, CUcontext srcContext,
+                      size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyPeer), dstDevice,
+                         dstContext, srcDevice, srcContext, ByteCount);
+}
+
+CUresult cuMemcpyPeerAsync_ptsz(CUdeviceptr dstDevice, CUcontext dstContext,
+                                CUdeviceptr srcDevice, CUcontext srcContext,
+                                size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyPeerAsync_ptsz, dstDevice,
+                         dstContext, srcDevice, srcContext, ByteCount, hStream);
+}
+
+CUresult cuMemcpyPeerAsync(CUdeviceptr dstDevice, CUcontext dstContext,
+                           CUdeviceptr srcDevice, CUcontext srcContext,
+                           size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyPeerAsync), dstDevice,
+                         dstContext, srcDevice, srcContext, ByteCount, hStream);
+}
+
+CUresult cuMemcpyHtoD_v2_ptds(CUdeviceptr dstDevice, const void *srcHost,
+                              size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoD_v2_ptds, dstDevice,
+                         srcHost, ByteCount);
+}
+
+CUresult _cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoD_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoD_v2),
+                           dstDevice, srcHost, ByteCount);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyHtoD))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoD, dstDevice, srcHost, ByteCount);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpyHtoD_v2(CUdeviceptr dstDevice, const void *srcHost,
+                         size_t ByteCount) {
+  return _cuMemcpyHtoD(dstDevice, srcHost, ByteCount);
+}
+
+CUresult cuMemcpyHtoD(CUdeviceptr dstDevice, const void *srcHost,
+                      size_t ByteCount) {
+  return _cuMemcpyHtoD(dstDevice, srcHost, ByteCount);
+}
+
+CUresult cuMemcpyHtoDAsync_v2_ptsz(CUdeviceptr dstDevice, const void *srcHost,
+                                   size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoDAsync_v2_ptsz,
+                         dstDevice, srcHost, ByteCount, hStream);
+}
+
+CUresult _cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost,
+                           size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoDAsync_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoDAsync_v2),
+                           dstDevice, srcHost, ByteCount, hStream);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyHtoDAsync))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoDAsync,
+                           dstDevice, srcHost, ByteCount, hStream);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpyHtoDAsync_v2(CUdeviceptr dstDevice, const void *srcHost,
+                              size_t ByteCount, CUstream hStream) {
+  return _cuMemcpyHtoDAsync(dstDevice, srcHost, ByteCount, hStream);
+}
+
+CUresult cuMemcpyHtoDAsync(CUdeviceptr dstDevice, const void *srcHost,
+                           size_t ByteCount, CUstream hStream) {
+  return _cuMemcpyHtoDAsync(dstDevice, srcHost, ByteCount, hStream);
+}
+
+CUresult cuMemcpyDtoH_v2_ptds(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoH_v2_ptds, dstHost,
+                         srcDevice, ByteCount);
+}
+
+CUresult _cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoH_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoH_v2),
+                                       dstHost, srcDevice, ByteCount);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoH))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoH, dstHost,
+                                                srcDevice, ByteCount);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+
+CUresult cuMemcpyDtoH_v2(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount) {
+  return _cuMemcpyDtoH(dstHost, srcDevice, ByteCount);
+}
+
+CUresult cuMemcpyDtoH(void *dstHost, CUdeviceptr srcDevice, size_t ByteCount) {
+  return _cuMemcpyDtoH(dstHost, srcDevice, ByteCount);
+}
+
+CUresult cuMemcpyDtoHAsync_v2_ptsz(void *dstHost, CUdeviceptr srcDevice,
+                                   size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoHAsync_v2_ptsz, dstHost,
+                         srcDevice, ByteCount, hStream);
+}
+
+CUresult _cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice,
+                           size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoHAsync_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoHAsync_v2), dstHost,
+                                              srcDevice, ByteCount, hStream);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoHAsync))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoHAsync, dstHost,
+                                              srcDevice, ByteCount, hStream);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpyDtoHAsync_v2(void *dstHost, CUdeviceptr srcDevice,
+                              size_t ByteCount, CUstream hStream) {
+  return _cuMemcpyDtoHAsync(dstHost, srcDevice, ByteCount, hStream);
+}
+
+CUresult cuMemcpyDtoHAsync(void *dstHost, CUdeviceptr srcDevice,
+                           size_t ByteCount, CUstream hStream) {
+  return _cuMemcpyDtoHAsync(dstHost, srcDevice, ByteCount, hStream);
+}
+
+CUresult cuMemcpyDtoD_v2_ptds(CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoD_v2_ptds, dstDevice,
+                         srcDevice, ByteCount);
+}
+
+CUresult _cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+                      size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoD_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoD_v2),
+                           dstDevice, srcDevice, ByteCount);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoD))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoD,
+                           dstDevice, srcDevice, ByteCount);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+
+CUresult cuMemcpyDtoD_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+                         size_t ByteCount) {
+  return _cuMemcpyDtoD(dstDevice, srcDevice, ByteCount);
+}
+
+CUresult cuMemcpyDtoD(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+                      size_t ByteCount) {
+  return _cuMemcpyDtoD(dstDevice, srcDevice, ByteCount);
+}
+
+CUresult cuMemcpyDtoDAsync_v2_ptsz(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+                                   size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoDAsync_v2_ptsz,
+                         dstDevice, srcDevice, ByteCount, hStream);
+}
+
+CUresult _cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+                           size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoDAsync_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyDtoDAsync_v2),
+                                  dstDevice, srcDevice, ByteCount, hStream);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoDAsync))){
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoDAsync, dstDevice,
+                                             srcDevice, ByteCount, hStream);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+
+CUresult cuMemcpyDtoDAsync_v2(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+                              size_t ByteCount, CUstream hStream) {
+  return _cuMemcpyDtoDAsync(dstDevice, srcDevice, ByteCount, hStream);
+}
+
+CUresult cuMemcpyDtoDAsync(CUdeviceptr dstDevice, CUdeviceptr srcDevice,
+                           size_t ByteCount, CUstream hStream) {
+  return _cuMemcpyDtoDAsync(dstDevice, srcDevice, ByteCount, hStream);
+}
+
+CUresult cuMemcpy2DUnaligned_v2_ptds(const CUDA_MEMCPY2D *pCopy) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy2DUnaligned_v2_ptds, pCopy);
+}
+
+CUresult _cuMemcpy2DUnaligned(const CUDA_MEMCPY2D *pCopy) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2DUnaligned_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2DUnaligned_v2), pCopy);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy2DUnaligned))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy2DUnaligned, pCopy);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpy2DUnaligned_v2(const CUDA_MEMCPY2D *pCopy) {
+  return _cuMemcpy2DUnaligned(pCopy);
+}
+
+CUresult cuMemcpy2DUnaligned(const CUDA_MEMCPY2D *pCopy) {
+  return _cuMemcpy2DUnaligned(pCopy);
+}
+
+CUresult cuMemcpy2DAsync_v2_ptsz(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy2DAsync_v2_ptsz, pCopy,
+                         hStream);
+}
+
+
+CUresult _cuMemcpy2DAsync(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy2DAsync_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy2DAsync_v2), pCopy, hStream);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy2DAsync))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy2DAsync, pCopy, hStream);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
+  return _cuMemcpy2DAsync(pCopy, hStream);
+}
+
+CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
+  return _cuMemcpy2DAsync(pCopy, hStream);
+}
+
+CUresult cuMemcpy3D_v2_ptds(const CUDA_MEMCPY3D *pCopy) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy3D_v2_ptds, pCopy);
+}
+
+CUresult _cuMemcpy3D(const CUDA_MEMCPY3D *pCopy) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy3D_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy3D_v2), pCopy);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy3D))){
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy3D, pCopy);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpy3D_v2(const CUDA_MEMCPY3D *pCopy) {
+  return _cuMemcpy3D(pCopy);
+}
+
+CUresult cuMemcpy3D(const CUDA_MEMCPY3D *pCopy) {
+  return _cuMemcpy3D(pCopy);
+}
+
+CUresult cuMemcpy3DAsync_v2_ptsz(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy3DAsync_v2_ptsz, pCopy,
+                         hStream);
+}
+
+CUresult _cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy3DAsync_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy3DAsync_v2), pCopy, hStream);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy3DAsync))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy3DAsync, pCopy, hStream);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+
+CUresult cuMemcpy3DAsync_v2(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
+  return _cuMemcpy3DAsync(pCopy, hStream);
+}
+
+CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
+  return _cuMemcpy3DAsync(pCopy, hStream);
+}
+
+CUresult cuMemcpy3DPeer_ptds(const CUDA_MEMCPY3D_PEER *pCopy) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy3DPeer_ptds, pCopy);
+}
+
+CUresult cuMemcpy3DPeer(const CUDA_MEMCPY3D_PEER *pCopy) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy3DPeer), pCopy);
+}
+
+CUresult cuMemcpy3DPeerAsync_ptsz(const CUDA_MEMCPY3D_PEER *pCopy,
+                                  CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy3DPeerAsync_ptsz, pCopy,
+                         hStream);
+}
+
+CUresult cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy,
+                             CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpy3DPeerAsync), pCopy,
+                         hStream);
+}
+
+CUresult _cuMemcpy2D(const CUDA_MEMCPY2D *pCopy) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2D_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpy2D_v2), pCopy);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpy2D))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy2D, pCopy);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+
+CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *pCopy) {
+  return _cuMemcpy2D(pCopy);
+}
+
+CUresult cuMemcpy2D(const CUDA_MEMCPY2D *pCopy) {
+  return _cuMemcpy2D(pCopy);
+}
+
+CUresult cuMemcpyAtoA_v2_ptds(CUarray dstArray, size_t dstOffset,
+                              CUarray srcArray, size_t srcOffset,
+                              size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoA_v2_ptds, dstArray,
+                         dstOffset, srcArray, srcOffset, ByteCount);
+}
+
+CUresult _cuMemcpyAtoA(CUarray dstArray, size_t dstOffset, CUarray srcArray,
+                       size_t srcOffset, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoA_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoA_v2), dstArray,
+                               dstOffset, srcArray, srcOffset, ByteCount);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyAtoA))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoA, dstArray,
+                               dstOffset, srcArray, srcOffset, ByteCount);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+
+CUresult cuMemcpyAtoA_v2(CUarray dstArray, size_t dstOffset, CUarray srcArray,
+                         size_t srcOffset, size_t ByteCount) {
+  return _cuMemcpyAtoA(dstArray, dstOffset, srcArray, srcOffset, ByteCount);
+}
+
+CUresult cuMemcpyAtoA(CUarray dstArray, size_t dstOffset, CUarray srcArray,
+                      size_t srcOffset, size_t ByteCount) {
+  return _cuMemcpyAtoA(dstArray, dstOffset, srcArray, srcOffset, ByteCount);
+}
+
+CUresult _cuMemcpyAtoD(CUdeviceptr dstDevice, CUarray srcArray,
+                      size_t srcOffset, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoD_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoD_v2), dstDevice, srcArray,
+                                                   srcOffset, ByteCount);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyAtoD))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoD, dstDevice, srcArray,
+                                                   srcOffset, ByteCount);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpyAtoD_v2(CUdeviceptr dstDevice, CUarray srcArray,
+                         size_t srcOffset, size_t ByteCount) {
+  return _cuMemcpyAtoD(dstDevice, srcArray, srcOffset, ByteCount);
+}
+
+CUresult cuMemcpyAtoD(CUdeviceptr dstDevice, CUarray srcArray,
+                      size_t srcOffset, size_t ByteCount) {
+  return _cuMemcpyAtoD(dstDevice, srcArray, srcOffset, ByteCount);
+}
+
+
+CUresult cuMemcpyAtoD_v2_ptds(CUdeviceptr dstDevice, CUarray srcArray,
+                              size_t srcOffset, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoD_v2_ptds, dstDevice,
+                         srcArray, srcOffset, ByteCount);
+}
+
+CUresult cuMemcpyAtoH_v2_ptds(void *dstHost, CUarray srcArray, size_t srcOffset,
+                              size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoH_v2_ptds, dstHost,
+                         srcArray, srcOffset, ByteCount);
+}
+
+CUresult _cuMemcpyAtoH(void *dstHost, CUarray srcArray, size_t srcOffset,
+                      size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoH_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyAtoH_v2), dstHost, srcArray,
+                                                    srcOffset, ByteCount);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyAtoH))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoH, dstHost, srcArray,
+                                                    srcOffset, ByteCount);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpyAtoH_v2(void *dstHost, CUarray srcArray, size_t srcOffset,
+                         size_t ByteCount) {
+  return _cuMemcpyAtoH(dstHost, srcArray, srcOffset, ByteCount);
+}
+
+CUresult cuMemcpyAtoH(void *dstHost, CUarray srcArray, size_t srcOffset,
+                      size_t ByteCount) {
+  return _cuMemcpyAtoH(dstHost, srcArray, srcOffset, ByteCount);
+}
+
+CUresult cuMemcpyAtoHAsync_v2_ptsz(void *dstHost, CUarray srcArray,
+                                   size_t srcOffset, size_t ByteCount,
+                                   CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyAtoHAsync_v2_ptsz, dstHost,
+                         srcArray, srcOffset, ByteCount, hStream);
+}
+
+CUresult _cuMemcpyAtoHAsync(void *dstHost, CUarray srcArray, size_t srcOffset,
+                           size_t ByteCount, CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyAtoHAsync_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyAtoHAsync_v2), dstHost,
+                                     srcArray, srcOffset, ByteCount, hStream);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyAtoHAsync))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry,  cuMemcpyAtoHAsync, dstHost,
+                                   srcArray, srcOffset, ByteCount, hStream);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpyAtoHAsync_v2(void *dstHost, CUarray srcArray, size_t srcOffset,
+                              size_t ByteCount, CUstream hStream) {
+  return _cuMemcpyAtoHAsync(dstHost, srcArray, srcOffset, ByteCount, hStream);
+}
+
+CUresult cuMemcpyAtoHAsync(void *dstHost, CUarray srcArray, size_t srcOffset,
+                           size_t ByteCount, CUstream hStream) {
+  return _cuMemcpyAtoHAsync(dstHost, srcArray, srcOffset, ByteCount, hStream);
+}
+
+CUresult cuMemcpyDtoA_v2_ptds(CUarray dstArray, size_t dstOffset,
+                              CUdeviceptr srcDevice, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoA_v2_ptds, dstArray,
+                         dstOffset, srcDevice, ByteCount);
+}
+
+CUresult _cuMemcpyDtoA(CUarray dstArray, size_t dstOffset, CUdeviceptr srcDevice,
+                      size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoA_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyDtoA_v2), dstArray,
+                                               dstOffset, srcDevice, ByteCount);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyDtoA))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyDtoA, dstArray, dstOffset,
+                                                           srcDevice, ByteCount);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+CUresult cuMemcpyDtoA_v2(CUarray dstArray, size_t dstOffset,
+                         CUdeviceptr srcDevice, size_t ByteCount) {
+  return _cuMemcpyDtoA(dstArray, dstOffset, srcDevice, ByteCount);
+}
+
+CUresult cuMemcpyDtoA(CUarray dstArray, size_t dstOffset, CUdeviceptr srcDevice,
+                      size_t ByteCount) {
+  return _cuMemcpyDtoA(dstArray, dstOffset, srcDevice, ByteCount);
+}
+
+CUresult cuMemcpyHtoA_v2_ptds(CUarray dstArray, size_t dstOffset,
+                              const void *srcHost, size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoA_v2_ptds, dstArray,
+                         dstOffset, srcHost, ByteCount);
+}
+
+CUresult _cuMemcpyHtoA(CUarray dstArray, size_t dstOffset, const void *srcHost,
+                      size_t ByteCount) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoA_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTDS(cuMemcpyHtoA_v2), dstArray,
+                                            dstOffset, srcHost, ByteCount);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyHtoA))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoA, dstArray, dstOffset,
+                                                       srcHost, ByteCount);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+
+CUresult cuMemcpyHtoA_v2(CUarray dstArray, size_t dstOffset,
+                         const void *srcHost, size_t ByteCount) {
+  return _cuMemcpyHtoA(dstArray, dstOffset, srcHost, ByteCount);
+}
+
+CUresult cuMemcpyHtoA(CUarray dstArray, size_t dstOffset, const void *srcHost,
+                      size_t ByteCount) {
+  return _cuMemcpyHtoA(dstArray, dstOffset, srcHost, ByteCount);
+}
+
+CUresult cuMemcpyHtoAAsync_v2_ptsz(CUarray dstArray, size_t dstOffset,
+                                   const void *srcHost, size_t ByteCount,
+                                   CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoAAsync_v2_ptsz,
+                         dstArray, dstOffset, srcHost, ByteCount, hStream);
+}
+
+CUresult _cuMemcpyHtoAAsync(CUarray dstArray, size_t dstOffset,
+                           const void *srcHost, size_t ByteCount,
+                           CUstream hStream) {
+  CUresult ret = handleRateLimiter();
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoAAsync_v2)))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemcpyHtoAAsync_v2), dstArray,
+                                       dstOffset, srcHost, ByteCount, hStream);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemcpyHtoAAsync))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpyHtoAAsync, dstArray,
+                                    dstOffset, srcHost, ByteCount, hStream);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
+
+CUresult cuMemcpyHtoAAsync_v2(CUarray dstArray, size_t dstOffset,
+                              const void *srcHost, size_t ByteCount,
+                              CUstream hStream) {
+  return _cuMemcpyHtoAAsync(dstArray, dstOffset, srcHost, ByteCount, hStream);
+}
+
+CUresult cuMemcpyHtoAAsync(CUarray dstArray, size_t dstOffset,
+                           const void *srcHost, size_t ByteCount,
+                           CUstream hStream) {
+  return _cuMemcpyHtoAAsync(dstArray, dstOffset, srcHost, ByteCount, hStream);
+}
