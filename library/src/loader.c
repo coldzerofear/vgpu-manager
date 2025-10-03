@@ -31,7 +31,6 @@
 #include <sys/stat.h>  
 #include <sys/types.h>
 #include <sys/mman.h>
-#include <strings.h>
 
 #include "include/hook.h"
 #include "include/cuda-helper.h"
@@ -1639,7 +1638,7 @@ static volatile int nvml_to_host_device_index[MAX_DEVICE_COUNT] = {-1,-1,-1,-1,-
 
 void get_host_device_index_by_uuid(char *uuid, int *host_index) {
   for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
-    if (g_vgpu_config->devices[index].activate && strcasecmp(g_vgpu_config->devices[index].uuid, uuid) == 0) {
+    if (g_vgpu_config->devices[index].activate && strcmp(g_vgpu_config->devices[index].uuid, uuid) == 0) {
       *host_index = index;
       break;
     }
@@ -1680,26 +1679,14 @@ DONE:
 }
 
 void formatUuid(CUuuid uuid, char* uuid_str, int len) {
-    if (len < 41) {
+    if (unlikely(len < 41)) {
       if (len > 0) uuid_str[0] = '\0';
       return;
     }
-    snprintf(uuid_str, len,
-             "%s-"
-             "%02X%02X%02X%02X-"         // byte 0-3
-             "%02X%02X-"                 // byte 4-5
-             "%02X%02X-"                 // byte 6-7
-             "%02X%02X-"                 // byte 8-9
-             "%02X%02X%02X%02X%02X%02X", // byte 10-15
-             "GPU",
-             (unsigned char)uuid.bytes[0], (unsigned char)uuid.bytes[1],
-             (unsigned char)uuid.bytes[2], (unsigned char)uuid.bytes[3],
-             (unsigned char)uuid.bytes[4], (unsigned char)uuid.bytes[5],
-             (unsigned char)uuid.bytes[6], (unsigned char)uuid.bytes[7],
-             (unsigned char)uuid.bytes[8], (unsigned char)uuid.bytes[9],
-             (unsigned char)uuid.bytes[10], (unsigned char)uuid.bytes[11],
-             (unsigned char)uuid.bytes[12], (unsigned char)uuid.bytes[13],
-             (unsigned char)uuid.bytes[14], (unsigned char)uuid.bytes[15]);
+    uint8_t *b = (uint8_t *)uuid.bytes;
+    snprintf(uuid_str, len, "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                            b[0x0], b[0x1], b[0x2], b[0x3], b[0x4], b[0x5], b[0x6], b[0x7],
+                            b[0x8], b[0x9], b[0xA], b[0xB], b[0xC], b[0xD], b[0xE], b[0xF]);
 }
 
 int _get_host_device_index_by_cuda_device(CUdevice device) {
