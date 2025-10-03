@@ -689,6 +689,10 @@ int read_cgroup(char *pid_path, char *cgroup_key, char *cgroup_value) {
 }
 
 int check_container_pid_by_cgroupv1(unsigned int pid) {
+  int ret = 0;
+  if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) != CGROUPV1_COMPATIBILITY_MODE) {
+    return ret;
+  }
   if (pid == 0) {
     goto DONE;
   }
@@ -701,26 +705,33 @@ int check_container_pid_by_cgroupv1(unsigned int pid) {
   if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", container_cg) && !read_cgroup(pid_path, "memory", process_cg)) {
     LOGGER(DETAIL, "\ncontainer cg: %s\nprocess cg: %s", container_cg, process_cg);
     if (strstr(process_cg, container_cg) != NULL) {
-      LOGGER(VERBOSE, "cgroup match pid=%d, cg=%s", pid, process_cg);
-      return 1;
+      ret = 1;
     }
   }
 DONE:
-  LOGGER(VERBOSE, "cgroup mismatch pid=%d", pid);
-  return 0;
+  if (ret) {
+    LOGGER(VERBOSE, "cgroup match pid=%d, cg=%s", pid, process_cg);
+  } else {
+    LOGGER(VERBOSE, "cgroup mismatch pid=%d", pid);
+  }
+  return ret;
 }
 
 int check_container_pid_by_cgroupv2(unsigned int pid) {
+  int ret = 0;
+  if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) != CGROUPV2_COMPATIBILITY_MODE) {
+    return ret;
+  }
   if (pid == 0) {
     goto DONE;
   }
   char pid_path[128] = "";
   sprintf(pid_path, HOST_PROC_CGROUP_PID_PATH, pid);
-  if (!check_file_exist(pid_path)) {
+  if (unlikely(!check_file_exist(pid_path))) {
     goto DONE;
   }
   FILE *fp = fopen(pid_path, "rb");
-  if (!fp) {
+  if (unlikely(!fp)) {
     LOGGER(VERBOSE, "read file %s failed: %s", pid_path, strerror(errno));
     goto DONE;
   }
@@ -731,15 +742,18 @@ int check_container_pid_by_cgroupv2(unsigned int pid) {
       buff[len - 1] = '\0';
     }
     if (strcmp(buff, "0::/") == 0 || strstr(buff, container_id) != NULL) {
-      fclose(fp);
-      LOGGER(VERBOSE, "cgroup match pid=%d, cg=%s", pid, buff);
-      return 1;
+      ret = 1;
+      break;
     }
   }
   fclose(fp);
 DONE:
-  LOGGER(VERBOSE, "cgroup mismatch pid=%d", pid);
-  return 0;
+  if (ret) {
+    LOGGER(VERBOSE, "cgroup match pid=%d, cg=%s", pid, buff);
+  } else {
+    LOGGER(VERBOSE, "cgroup mismatch pid=%d", pid);
+  }
+  return ret;
 }
 
 static int int_compare(const void *a, const void *b) {

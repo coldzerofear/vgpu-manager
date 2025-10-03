@@ -111,6 +111,13 @@ const (
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
 	PodUIDEnv       = "VGPU_POD_UID"
 	ContNameEnv     = "VGPU_CONTAINER_NAME"
+
+	CudaDeviceOrder    = "CUDA_DEVICE_ORDER"
+	CudaVisibleDevices = "CUDA_VISIBLE_DEVICES"
+	// DeviceOrderFastestFirst According to the graphics card from fast to slow order.
+	DeviceOrderFastestFirst = "FASTEST_FIRST"
+	// DeviceOrderPciBusId According to the number of PCI bus from small to large, consistent with nvidia-smi.
+	DeviceOrderPciBusId = "PCI_BUS_ID"
 )
 
 type ComputePolicy string
