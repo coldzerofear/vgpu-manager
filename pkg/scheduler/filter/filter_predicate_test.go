@@ -34,7 +34,7 @@ func Test_DeviceFilter(t *testing.T) {
 	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
 
-	filterPredicate, err := New(k8sClient, factory, recorder, false)
+	filterPredicate, err := New(k8sClient, factory, recorder, true)
 	if err != nil {
 		t.Fatalf("failed to create new filterPredicate due to %v", err)
 	}

@@ -29,7 +29,7 @@ import (
 )
 
 type gpuFilter struct {
-	sync.Locker
+	locker     *serial.Locker
 	kubeClient kubernetes.Interface
 	nodeLister listerv1.NodeLister
 	podLister  listerv1.PodLister
@@ -47,9 +47,10 @@ func New(client kubernetes.Interface, factory informers.SharedInformerFactory, r
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 	podLister := listerv1.NewPodLister(podInformer.GetIndexer())
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
-	locker := serial.NewLock(Name, nil, serialFilterNode)
+	locker := serial.NewLocker(serial.WithName(Name),
+		serial.WithEnabled(serialFilterNode))
 	return &gpuFilter{
-		Locker:     locker,
+		locker:     locker,
 		kubeClient: client,
 		nodeLister: nodeLister,
 		podLister:  podLister,
@@ -304,8 +305,8 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		return filteredNodes, failedNodesMap, err
 	}
 
-	f.Lock()
-	defer f.Unlock()
+	f.locker.Lock()
+	defer f.locker.Unlock()
 
 	pods, err := f.podLister.List(labels.Everything())
 	if err != nil {

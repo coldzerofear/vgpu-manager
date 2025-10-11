@@ -3,7 +3,6 @@ package bind
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
@@ -19,7 +18,7 @@ import (
 )
 
 type nodeBinding struct {
-	sync.Locker
+	locker     *serial.Locker
 	kubeClient kubernetes.Interface
 	recorder   record.EventRecorder
 }
@@ -30,9 +29,11 @@ var _ predicate.BindPredicate = &nodeBinding{}
 
 func New(client kubernetes.Interface, recorder record.EventRecorder, serialBindNode bool) (*nodeBinding, error) {
 	minLockingDuration := 30 * time.Millisecond
-	locker := serial.NewLock(Name, &minLockingDuration, serialBindNode)
+	locker := serial.NewLocker(serial.WithName(Name),
+		serial.WithEnabled(serialBindNode),
+		serial.WithLockDuration(&minLockingDuration))
 	return &nodeBinding{
-		Locker:     locker,
+		locker:     locker,
 		kubeClient: client,
 		recorder:   recorder,
 	}, nil
@@ -43,8 +44,8 @@ func (b *nodeBinding) Name() string {
 }
 
 func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingArgs) *extenderv1.ExtenderBindingResult {
-	b.Lock()
-	defer b.Unlock()
+	b.locker.Lock(args.Node)
+	defer b.locker.Unlock(args.Node)
 
 	klog.V(4).InfoS("BindingNode", "ExtenderBindingArgs", args)
 	var (
