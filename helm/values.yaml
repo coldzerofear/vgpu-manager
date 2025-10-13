@@ -143,8 +143,6 @@ devicePlugin:
       pprofBindPort: 0
       gdsEnabled: false
       mofedEnabled: false
-      # If using the open-gpu-kernel-modules, open it and enable compatibility mode. (default: false)
-      openKernelModules: false
       # Strategy for starting MIG device plugin service (supported values: "none" | "single" | "mixed")
       migStrategy: mixed
       # Supported feature gates:
@@ -204,7 +202,6 @@ devicePlugin:
          excludeDevices: "4..7"
          gdsEnabled: false
          mofedEnabled: false
-         openKernelModules: false
 #    json: |
 #      [
 #        {
@@ -217,8 +214,7 @@ devicePlugin:
 #          "deviceCoresScaling": 1,
 #          "excludeDevices": "4-7",
 #          "gdsEnabled": false,
-#          "mofedEnabled": false,
-#          "openKernelModules": false
+#          "mofedEnabled": false
 #        }
 #      ]
 

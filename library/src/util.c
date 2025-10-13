@@ -289,57 +289,57 @@ int extract_container_id(char *base_path, char *container_id, size_t container_i
 }
 
 static int compare_pids(const void *a, const void *b) {
-    int pid1 = *(const int *)a;
-    int pid2 = *(const int *)b;
-    return (pid1 > pid2) - (pid1 < pid2);
+  int pid1 = *(const int *)a;
+  int pid2 = *(const int *)b;
+  return (pid1 > pid2) - (pid1 < pid2);
 }
 
 int extract_container_pids(char *base_path, int *pids, int *pids_size) {
-    if (!base_path || !pids || !pids_size) {
-        LOGGER(ERROR, "invalid NULL parameter");
-        *pids_size = 0;
-        return -1;
+  if (!base_path || !pids || !pids_size) {
+    LOGGER(ERROR, "invalid NULL parameter");
+    *pids_size = 0;
+    return -1;
+  }
+
+  char proc_path[PATH_MAX];
+  snprintf(proc_path, sizeof(proc_path), "%s/%s", base_path, CGROUP_PROCS_FILE);
+
+  if (access(proc_path, F_OK) != 0) {
+    //LOGGER(WARNING, "cgroup.procs not found in %s: %s", base_path, strerror(errno));
+    *pids_size = 0;
+    return -1;
+  }
+
+  FILE *fp = fopen(proc_path, "r");
+  if (!fp) {
+    LOGGER(WARNING, "error opening %s: %s", proc_path, strerror(errno));
+    *pids_size = 0;
+    return -1;
+  }
+
+  int max_size = *pids_size;
+  int actual_count = 0;
+  char line[MAX_PID_STR_LEN];
+
+  while (fgets(line, sizeof(line), fp) && actual_count < max_size) {
+    char *endptr;
+    long pid = strtol(line, &endptr, 10);
+
+    if (endptr == line || (*endptr != '\n' && *endptr != '\0')) {
+      LOGGER(ERROR, "invalid PID format: %s", line);
+      continue;
     }
+    pids[actual_count++] = (int)pid;
+  }
 
-    char proc_path[PATH_MAX];
-    snprintf(proc_path, sizeof(proc_path), "%s/%s", base_path, CGROUP_PROCS_FILE);
+  if (actual_count > 0) {
+    qsort(pids, actual_count, sizeof(int), compare_pids);
+  }
 
-    if (access(proc_path, F_OK) != 0) {
-        //LOGGER(WARNING, "cgroup.procs not found in %s: %s", base_path, strerror(errno));
-        *pids_size = 0;
-        return -1;
-    }
-
-    FILE *fp = fopen(proc_path, "r");
-    if (!fp) {
-        LOGGER(WARNING, "error opening %s: %s", proc_path, strerror(errno));
-        *pids_size = 0;
-        return -1;
-    }
-
-    int max_size = *pids_size;
-    int actual_count = 0;
-    char line[MAX_PID_STR_LEN];
-
-    while (fgets(line, sizeof(line), fp) && actual_count < max_size) {
-        char *endptr;
-        long pid = strtol(line, &endptr, 10);
-
-        if (endptr == line || (*endptr != '\n' && *endptr != '\0')) {
-            LOGGER(ERROR, "invalid PID format: %s", line);
-            continue;
-        }
-        pids[actual_count++] = (int)pid;
-    }
-
-    if (actual_count > 0) {
-        qsort(pids, actual_count, sizeof(int), compare_pids);
-    }
-
-    *pids_size = actual_count;
-    if (!feof(fp) && actual_count >= max_size) {
-        LOGGER(WARNING, "PID array full, only stored %d PIDs", max_size);
-    }
-    fclose(fp);
-    return 0;
+  *pids_size = actual_count;
+  if (!feof(fp) && actual_count >= max_size) {
+    LOGGER(WARNING, "PID array full, only stored %d PIDs", max_size);
+  }
+  fclose(fp);
+  return 0;
 }

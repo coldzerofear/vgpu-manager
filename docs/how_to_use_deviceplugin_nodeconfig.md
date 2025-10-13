@@ -18,7 +18,6 @@ NodeConfig is array, with each array element having the following structural par
 | excludeDevices      | string (example: "0,1,2"/"0..2")           | Specify the GPU IDs or UUIDs that need to be excluded (optional)                       |
 | gdsEnabled          | bool                                       | Ensure that containers are started with NVIDIA_GDS=enabled (optional)                  |
 | mofedEnabled        | bool                                       | Ensure that containers are started with NVIDIA_MOFED=enabled (optional)                |
-| openKernelModules   | bool                                       | If using the open-gpu-kernel-modules, open it and enable compatibility mode (optional) |
 | migStrategy         | string (support: "none"/"mixed"/"single")  | Strategy for starting MIG device plugin service.  (optional)                           |
 
 ## Example
@@ -37,8 +36,7 @@ NodeConfig currently supports both JSON and YAML formats, Identify and use the c
     "deviceMemoryScaling": 1.0,
     "deviceMemoryFactor": 1,
     "deviceCoresScaling": 1.0,
-    "excludeDevices": "0..2",
-    "openKernelModules": true
+    "excludeDevices": "0..2"
   }
 ]
 ```
@@ -123,7 +121,6 @@ configs:
    deviceMemoryFactor: 1
    deviceCoresScaling: 1.0
    excludeDevices: "0..2"
-   openKernelModules: true
 ```
 
 `excludeDevices` Supports multiple formats, You can fill in GPU ID or UUID

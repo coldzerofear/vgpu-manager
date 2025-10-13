@@ -67,8 +67,7 @@ data:
         "deviceMemoryScaling": 1,
         "deviceMemoryFactor": 1,
         "deviceCoresScaling": 1,
-        "excludeDevices": "0-1",
-        "openKernelModules": false
+        "excludeDevices": "0-1"
       }
     ]
 kind: ConfigMap
@@ -143,7 +142,6 @@ spec:
             - --device-cores-scaling=1
             - --device-memory-scaling=1
             - --node-config-path=/config/nodeConfig.json
-            - --open-kernel-modules=false
             - --v=4
           env:
             - name: NODE_NAME

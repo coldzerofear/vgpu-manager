@@ -36,7 +36,6 @@ type ConfigSpec struct {
 	GDSEnabled          *bool      `json:"gdsEnabled,omitempty"          yaml:"gdsEnabled,omitempty"`
 	MOFEDEnabled        *bool      `json:"mofedEnabled,omitempty"        yaml:"mofedEnabled,omitempty"`
 	MigStrategy         *string    `json:"migStrategy,omitempty"         yaml:"migStrategy,omitempty"`
-	OpenKernelModules   *bool      `json:"openKernelModules,omitempty"   yaml:"openKernelModules,omitempty"`
 	Imex                *imex.Imex `json:"imex,omitempty"                yaml:"imex,omitempty"`
 }
 
@@ -119,13 +118,6 @@ func (nc NodeConfigSpec) GetMOFEDEnabled() bool {
 		return false
 	}
 	return *nc.MOFEDEnabled
-}
-
-func (nc NodeConfigSpec) GetOpenKernelModules() bool {
-	if nc.OpenKernelModules == nil {
-		return false
-	}
-	return *nc.OpenKernelModules
 }
 
 func (nc NodeConfigSpec) GetMigStrategy() string {
@@ -285,7 +277,6 @@ func WithDevicePluginOptions(opt dpoptions.Options) Option {
 		nodeConfig.ExcludeDevices = ptr.To[IDStore](parseDeviceIDs(opt.ExcludeDevices))
 		nodeConfig.GDSEnabled = ptr.To[bool](opt.GDSEnabled)
 		nodeConfig.MOFEDEnabled = ptr.To[bool](opt.MOFEDEnabled)
-		nodeConfig.OpenKernelModules = ptr.To[bool](opt.OpenKernelModules)
 		if len(opt.ImexChannelIDs) > 0 {
 			nodeConfig.Imex = &imex.Imex{
 				ChannelIDs: opt.ImexChannelIDs,
@@ -344,9 +335,6 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 		}
 		if config.MigStrategy != nil {
 			nodeConfig.MigStrategy = config.MigStrategy
-		}
-		if config.OpenKernelModules != nil {
-			nodeConfig.OpenKernelModules = config.OpenKernelModules
 		}
 		if config.Imex != nil {
 			nodeConfig.Imex = config.Imex
