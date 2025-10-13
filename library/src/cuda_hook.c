@@ -588,8 +588,9 @@ int read_cgroup(char *pid_path, char *cgroup_key, char *cgroup_value) {
 }
 
 int check_container_pid_by_cgroupv1(unsigned int pid) {
+  int ret = 0;
   if (pid == 0) {
-    goto DONE;
+    return ret;
   }
   char pid_path[128] = "";
   sprintf(pid_path, HOST_PROC_CGROUP_PID_PATH, pid);
@@ -599,29 +600,25 @@ int check_container_pid_by_cgroupv1(unsigned int pid) {
 
   if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", container_cg) && !read_cgroup(pid_path, "memory", process_cg)) {
     LOGGER(DETAIL, "\ncontainer cg: %s\nprocess cg: %s", container_cg, process_cg);
-    if (strstr(process_cg, container_cg) != NULL) {
-      LOGGER(VERBOSE, "cgroup match pid=%d, cg=%s", pid, process_cg);
-      return 1;
-    }
+    if (strstr(process_cg, container_cg) != NULL) ret = 1;
   }
-DONE:
-  LOGGER(VERBOSE, "cgroup mismatch pid=%d", pid);
-  return 0;
+  return ret;
 }
 
 int check_container_pid_by_cgroupv2(unsigned int pid) {
+  int ret = 0;
   if (pid == 0) {
-    goto DONE;
+    return ret;
   }
   char pid_path[128] = "";
   sprintf(pid_path, HOST_PROC_CGROUP_PID_PATH, pid);
   if (!check_file_exist(pid_path)) {
-    goto DONE;
+    return ret;
   }
   FILE *fp = fopen(pid_path, "rb");
   if (!fp) {
     LOGGER(VERBOSE, "read file %s failed: %s", pid_path, strerror(errno));
-    goto DONE;
+    return ret;
   }
   char buff[FILENAME_MAX];
   while (fgets(buff, FILENAME_MAX, fp)) {
@@ -630,15 +627,12 @@ int check_container_pid_by_cgroupv2(unsigned int pid) {
       buff[len - 1] = '\0';
     }
     if (strcmp(buff, "0::/") == 0 || strstr(buff, container_id) != NULL) {
-      fclose(fp);
-      LOGGER(VERBOSE, "cgroup match pid=%d, cg=%s", pid, buff);
-      return 1;
+      ret = 1;
+      break;
     }
   }
   fclose(fp);
-DONE:
-  LOGGER(VERBOSE, "cgroup mismatch pid=%d", pid);
-  return 0;
+  return ret;
 }
 
 static int int_compare(const void *a, const void *b) {
@@ -649,26 +643,11 @@ static int int_compare(const void *a, const void *b) {
 
 int check_container_pid_by_open_kernel(unsigned int pid, int *pids_on_container, int pids_size) {
   int ret = 0;
-  if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) != OPEN_KERNEL_COMPATIBILITY_MODE) {
-    return ret;
-  }
   if (pid == 0 || !pids_on_container || pids_size <= 0) {
-    goto DONE;
+    return ret;
   }
   if (bsearch(&pid, pids_on_container, (size_t)pids_size, sizeof(int), int_compare)) {
     ret = 1;
-  }
-//  for (int i = 0; i < pids_size; i++) {
-//    if (pid == pids_on_container[i]) {
-//      ret = 1;
-//      break;
-//    }
-//  }
-DONE:
-  if (ret) {
-     LOGGER(VERBOSE, "cgroup match pid=%d", pid);
-  } else {
-     LOGGER(VERBOSE, "cgroup mismatch pid=%d", pid);
   }
   return ret;
 }
@@ -700,7 +679,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
 
   unsigned int i;
   if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
-    LOGGER(VERBOSE, "use cgroupv2 compatibility mode");
+    //LOGGER(VERBOSE, "use cgroupv2 compatibility mode");
     int pids_size = 0;
     int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
@@ -721,7 +700,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
       }
     }
   } else if ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
-    LOGGER(VERBOSE, "use cgroupv1 compatibility mode");
+    //LOGGER(VERBOSE, "use cgroupv1 compatibility mode");
     int pids_size = 0;
     int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
@@ -742,7 +721,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
       }
     }
   } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-    LOGGER(VERBOSE, "use open kernel driver compatibility mode");
+    //LOGGER(VERBOSE, "use open kernel driver compatibility mode");
     int pids_size = MAX_PIDS;
     int pids_on_container[MAX_PIDS];
     char proc_path[PATH_MAX];
@@ -755,13 +734,13 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
       }
     }
   } else if (g_vgpu_config->compatibility_mode == HOST_COMPATIBILITY_MODE) {
-    LOGGER(VERBOSE, "use host compatibility mode");
+    //LOGGER(VERBOSE, "use host compatibility mode");
     for (i = 0; i < size_on_device; i++) { // Host mode does not verify PID
       LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
       *used_memory += pids_on_device[i].usedGpuMemory;
     }
   } else {
-    LOGGER(FATAL, "unknown env compatibility mode: %d", g_vgpu_config->compatibility_mode);
+    LOGGER(FATAL, "unsupported environment compatibility mode: %d", g_vgpu_config->compatibility_mode);
   }
 
   // TODO　Increase the memory usage of intercepting graphic processes.

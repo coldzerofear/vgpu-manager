@@ -61,7 +61,6 @@ int lock_gpu_device(int device_index) {
     LOGGER(ERROR, "invalid device index %d", device_index);
     return -1;
   }
-  LOGGER(VERBOSE, "lock gpu device %d", device_index);
 
   ensure_create_lock_dir();
   char lock_path[LOCK_PATH_SIZE];
@@ -73,6 +72,7 @@ int lock_gpu_device(int device_index) {
   while (1) {
     int fd = try_acquire_lock(lock_path);
     if (fd != -1) {
+      LOGGER(VERBOSE, "locked gpu device %d, fd %d", device_index, fd);
       return fd; // success
     }
 
@@ -99,6 +99,7 @@ void unlock_gpu_device(int fd) {
   };
   fcntl(fd, F_SETLK, &fl);
   close(fd);
+  LOGGER(VERBOSE, "released gpu device fd %d", fd);
 }
 
 int device_util_read_lock(int device_index) {
