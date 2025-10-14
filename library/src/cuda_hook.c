@@ -782,7 +782,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                    ret, NVML_ERROR(nvml_library_entry, ret));
     goto DONE;
   }
-  accumulate_used_memory(used_memory, pids_on_device, size_on_device);
+  accumulate_used_memory(used_memory, graphic_pids_on_device, size_on_device);
 
 DONE:
   LOGGER(VERBOSE, "total used memory: %zu", *used_memory);
