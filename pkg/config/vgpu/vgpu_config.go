@@ -150,6 +150,18 @@ func (r *ResourceData) Munmap() error {
 	return syscall.Munmap(r.resourceData)
 }
 
+func CheckResourceDataSize(filePath string) error {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
+	if fileInfo.Size() != dataSize {
+		return fmt.Errorf("vGPU config file size mismatch, expected: %d, actual: %d", dataSize, fileInfo.Size())
+	}
+	return nil
+}
+
 func NewResourceData(filePath string) (*ResourceData, error) {
 	cfg, data, err := MmapResourceDataT(filePath)
 	if err != nil {
@@ -198,14 +210,7 @@ func getCompatibilityMode(featureGate featuregate.FeatureGate) CompatibilityMode
 }
 
 func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		//klog.Errorf("Failed to stat file: %s, error: %v", filePath, err)
-		return nil, nil, err
-	}
-	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
-	if fileInfo.Size() != dataSize {
-		err = fmt.Errorf("file size mismatch, expected: %d, actual: %d", dataSize, fileInfo.Size())
+	if err := CheckResourceDataSize(filePath); err != nil {
 		klog.Errorln(err)
 		return nil, nil, err
 	}
@@ -217,6 +222,7 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 	defer func() {
 		_ = f.Close()
 	}()
+	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
 	data, err := syscall.Mmap(int(f.Fd()), 0, int(dataSize), syscall.PROT_WRITE|syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
 		klog.Errorf("Failed to mmap file: %s, error: %v", filePath, err)

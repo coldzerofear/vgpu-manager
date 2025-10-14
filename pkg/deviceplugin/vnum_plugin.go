@@ -728,8 +728,16 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 	err = vgpu.WriteVGPUConfigFile(vgpuConfigFilePath, m.base.manager, pod, realDevices[index], oversold, node)
 	if err != nil {
 		klog.V(3).ErrorS(err, "write vGPU config failed", "pod", klog.KObj(pod))
+		return resp, err
 	}
-	return resp, err
+	// Extra check the size of the VGPU configuration file.
+	// When a version upgrade causes a change in the configuration structure,
+	// the controller can reschedule these pods that cannot be started
+	if err = vgpu.CheckResourceDataSize(vgpuConfigFilePath); err != nil {
+		klog.ErrorS(err, "CheckResourceDataSize failed", "filePath", vgpuConfigFilePath)
+		return resp, err
+	}
+	return resp, nil
 }
 
 func (m *vnumberDevicePlugin) Devices() []*pluginapi.Device {
