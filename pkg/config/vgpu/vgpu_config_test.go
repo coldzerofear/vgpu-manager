@@ -86,6 +86,7 @@ func Test_WriDriverConfigFile(t *testing.T) {
 	runtime.Must(featureGate.Add(map[featuregate.Feature]featuregate.FeatureSpec{
 		util.SMWatcher:   {Default: true, PreRelease: featuregate.Alpha},
 		util.VMemoryNode: {Default: true, PreRelease: featuregate.Alpha},
+		util.ClientMode:  {Default: true, PreRelease: featuregate.Alpha},
 	}))
 
 	devManager := manager.NewFakeDeviceManager(

@@ -95,6 +95,12 @@ build: fmt vet ## Build binary.
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
         -o bin/webhook cmd/webhook/*.go
+	CGO_ENABLED=0 GOOS=$(GOOS) go build -ldflags=" \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
+        -o bin/device-client cmd/client/*.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -108,6 +114,10 @@ docker-build: ## Build docker image.
 .PHONY: docker-push
 docker-push: ## Push docker image.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: generate
+generate: ## API code generation.
+	protoc --go_out=. --go-grpc_out=. pkg/api/registry/api.proto
 
 ##@ Release
 #.PHONY: publish # Push the image to the remote registry

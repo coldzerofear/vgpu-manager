@@ -13,6 +13,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 )
 
@@ -175,11 +176,14 @@ const (
 	CGroupv1Mode   CompatibilityMode = 1
 	CGroupv2Mode   CompatibilityMode = 2
 	OpenKernelMode CompatibilityMode = 100
+	ClientMode     CompatibilityMode = 200
 )
 
-func getCompatibilityMode() CompatibilityMode {
+func getCompatibilityMode(featureGate featuregate.FeatureGate) CompatibilityMode {
 	mode := HostMode
 	switch {
+	case featureGate.Enabled(util.ClientMode):
+		mode |= ClientMode
 	case cgroups.IsCgroup2UnifiedMode():
 		mode |= CGroupv2Mode
 	case cgroups.IsCgroup2HybridMode():
@@ -187,7 +191,7 @@ func getCompatibilityMode() CompatibilityMode {
 	default:
 		mode |= CGroupv1Mode
 	}
-	if mode != HostMode {
+	if mode != HostMode && mode != ClientMode {
 		mode |= OpenKernelMode
 	}
 	return mode
@@ -314,7 +318,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		}
 		devices[gpuDevice.Id] = dev
 	}
-
+	compMode := getCompatibilityMode(devManager.GetFeatureGate())
 	data := &ResourceDataT{
 		DriverVersion: VersionT{
 			Major: int32(major),
@@ -325,7 +329,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		PodNamespace:      convert64Bytes(pod.Namespace),
 		ContainerName:     convert64Bytes(assignDevices.Name),
 		Devices:           devices,
-		CompatibilityMode: int32(getCompatibilityMode()),
+		CompatibilityMode: int32(compMode),
 		SMWatcher:         int32(smWatcher),
 		VMemoryNode:       int32(vMemoryNode),
 	}
@@ -363,7 +367,8 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		driverVersion.major = C.int(major)
 		driverVersion.minor = C.int(minor)
 		vgpuConfig.driver_version = driverVersion
-		vgpuConfig.compatibility_mode = C.int(getCompatibilityMode())
+		compMode := getCompatibilityMode(devManager.GetFeatureGate())
+		vgpuConfig.compatibility_mode = C.int(compMode)
 		if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
 			vgpuConfig.sm_watcher = C.int(1)
 		} else {

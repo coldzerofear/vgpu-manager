@@ -1,0 +1,16 @@
+syntax = 'proto3';
+
+option go_package="pkg/api/registry";
+
+package registry;
+
+service VDeviceRegistry {
+  rpc RegisterContainerDevice(ContainerDeviceRequest) returns (ContainerDeviceResponse) {};
+}
+
+message ContainerDeviceRequest {
+  string pod_uid        = 1;
+  string container_name = 2;
+}
+
+message ContainerDeviceResponse {}

@@ -415,9 +415,9 @@ func (m *DeviceManager) Start() {
 	m.initialize()
 	klog.V(4).Infoln("DeviceManager starting handle notify...")
 	go m.handleNotify()
-	klog.V(4).Infoln("DeviceManager starting registry devices...")
+	klog.V(4).Infoln("DeviceManager starting registry node devices...")
 	go m.registryDevices()
-	klog.V(4).Infoln("DeviceManager starting check health...")
+	klog.V(4).Infoln("DeviceManager starting check devices health...")
 	go func() {
 		if err := m.checkHealth(); err != nil {
 			klog.Errorf("Failed to start health check: %v; continuing with health checks disabled", err)

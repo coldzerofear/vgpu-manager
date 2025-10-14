@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 )
 
@@ -285,4 +286,8 @@ func CompareResourceVersion(objA, objB metav1.Object) int {
 func PathIsNotExist(fullPath string) bool {
 	_, err := os.Stat(fullPath)
 	return os.IsNotExist(err)
+}
+
+func GetPodContainerManagerPath(managerBaseDir string, podUID types.UID, containerName string) string {
+	return fmt.Sprintf("%s/%s_%s", managerBaseDir, string(podUID), containerName)
 }

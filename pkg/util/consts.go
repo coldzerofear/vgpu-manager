@@ -84,8 +84,10 @@ const (
 	PreStartContainerCheckErrType = "PreStartContainerCheckErr"
 
 	ManagerRootPath = "/etc/vgpu-manager"
+	Config          = "config"
 	Checkpoints     = "checkpoints"
 	Watcher         = "watcher"
+	Registry        = "registry"
 	SMUtilFile      = "sm_util.config"
 	VMemNode        = "vmem_node"
 	VMemNodeFile    = "vmem_node.config"
@@ -191,4 +193,5 @@ const (
 	SerialBindNode   = "SerialBindNode"
 	SerialFilterNode = "SerialFilterNode"
 	VMemoryNode      = "VMemoryNode"
+	ClientMode       = "ClientMode"
 )

@@ -157,11 +157,11 @@ devicePlugin:
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
     resources: {}
 #      requests:
-#        cpu: 100m
-#        memory: 128Mi
+#        cpu: 200m
+#        memory: 256Mi
 #      limits:
-#        cpu: 1000m
-#        memory: 1Gi
+#        cpu: 2000m
+#        memory: 2Gi
   deviceMonitor:
     env:
       - name: KUBE_FEATURE_WatchListClient

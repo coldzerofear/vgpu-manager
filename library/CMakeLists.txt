@@ -40,6 +40,7 @@ add_library(vgpu-control SHARED
     src/cuda_hook.c
     src/nvml_hook.c
     src/loader.c
+    src/register.c
     src/util.c
     src/lock.c)
 target_link_libraries(vgpu-control ${STATIC_C_LIBRARIES})

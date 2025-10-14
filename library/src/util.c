@@ -301,18 +301,14 @@ int extract_container_pids(char *base_path, int *pids, int *pids_size) {
     return -1;
   }
 
-  char proc_path[PATH_MAX];
-  snprintf(proc_path, sizeof(proc_path), "%s/%s", base_path, CGROUP_PROCS_FILE);
-
-  if (access(proc_path, F_OK) != 0) {
-    //LOGGER(WARNING, "cgroup.procs not found in %s: %s", base_path, strerror(errno));
+  if (access(base_path, F_OK) != 0) {
     *pids_size = 0;
     return -1;
   }
 
-  FILE *fp = fopen(proc_path, "r");
+  FILE *fp = fopen(base_path, "r");
   if (!fp) {
-    LOGGER(WARNING, "error opening %s: %s", proc_path, strerror(errno));
+    LOGGER(WARNING, "error opening %s: %s", base_path, strerror(errno));
     *pids_size = 0;
     return -1;
   }

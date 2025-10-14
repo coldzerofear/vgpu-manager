@@ -438,7 +438,7 @@ static void init_device_cuda_cores(int *device_count) {
   CUdevice device;
   nvmlReturn_t rt;
   for (int cuda_index = 0; cuda_index < *device_count; cuda_index++) {
-    ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGet, &device, cuda_index);
+    ret = CUDA_INTERNAL_CALL(cuda_library_entry, cuDeviceGet, &device, cuda_index);
     if (unlikely(ret)) {
       LOGGER(FATAL, "cuDeviceGet call failed, cuda device %d, return %d, str %s",
             cuda_index, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -453,9 +453,9 @@ static void init_device_cuda_cores(int *device_count) {
     }
 
     if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
-      rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, nvml_index, &nvml_devices[host_index]);
+      rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, nvml_index, &nvml_devices[host_index]);
     } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
-      rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, nvml_index, &nvml_devices[host_index]);
+      rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, nvml_index, &nvml_devices[host_index]);
     } else {
       rt = NVML_ERROR_FUNCTION_NOT_FOUND;
     }
@@ -464,14 +464,14 @@ static void init_device_cuda_cores(int *device_count) {
                      nvml_index, rt, NVML_ERROR(nvml_library_entry, rt));
     }
 
-    ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetAttribute, &g_sm_num[host_index],
+    ret = CUDA_INTERNAL_CALL(cuda_library_entry, cuDeviceGetAttribute, &g_sm_num[host_index],
                           CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device);
     if (unlikely(ret)) {
       LOGGER(FATAL, "can't get processor number, cuda device %d, return %d, str %s",
                      device, ret, CUDA_ERROR(cuda_library_entry, ret));
     }
 
-    ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDeviceGetAttribute, &g_max_thread_per_sm[host_index],
+    ret = CUDA_INTERNAL_CALL(cuda_library_entry, cuDeviceGetAttribute, &g_max_thread_per_sm[host_index],
                           CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, device);
     if (unlikely(ret)) {
       LOGGER(FATAL, "can't get max thread per processor, cuda device %d, return %d, str %s",
@@ -511,7 +511,7 @@ static void balance_batches(int device_count) {
 
 static void initialization() {
   int ret;
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuInit, 0);
+  ret = CUDA_INTERNAL_CALL(cuda_library_entry, cuInit, 0);
   if (unlikely(ret)) {
     LOGGER(ERROR, "cuInit error %s", CUDA_ERROR(cuda_library_entry, (CUresult)ret));
     LOGGER(ERROR, "initialization of sm watcher failed");
@@ -652,39 +652,29 @@ int check_container_pid_by_open_kernel(unsigned int pid, int *pids_on_container,
   return ret;
 }
 
-void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
-  size_t *used_memory = arg;
-  nvmlProcessInfo_t pids_on_device[MAX_PIDS];
-  unsigned int size_on_device = MAX_PIDS;
-  nvmlReturn_t ret;
-
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
-                           device, &size_on_device, pids_on_device);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
-                           device, &size_on_device, pids_on_device);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
-                           device, &size_on_device, pids_on_device);
-  } else {
-    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-  }
-  if (unlikely(ret)) {
-    *used_memory = 0;
-    LOGGER(ERROR, "nvmlDeviceGetComputeRunningProcesses call failed, return: %d, str: %s",
-                   ret, NVML_ERROR(nvml_library_entry, ret));
-    return;
-  }
-
+void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_device, unsigned int size_on_device) {
   unsigned int i;
-  if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
+  if (size_on_device == 0) {
+  } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
+    int pids_size = MAX_PIDS;
+    int pids_on_container[MAX_PIDS];
+    extract_container_pids(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size);
+    if (unlikely(pids_size == 0)) {
+      LOGGER(FATAL, "unable to find registered container process");
+    }
+    for (i = 0; i < size_on_device; i++) {
+      if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
+        LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        *used_memory += pids_on_device[i].usedGpuMemory;
+      }
+    }
+  } else if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
     //LOGGER(VERBOSE, "use cgroupv2 compatibility mode");
     int pids_size = 0;
     int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
       if (check_container_pid_by_cgroupv2(pids_on_device[i].pid)) {
-        LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         *used_memory += pids_on_device[i].usedGpuMemory;
       } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
         if (unlikely(pids_size == 0)) {
@@ -694,7 +684,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
           extract_container_pids(proc_path, pids_on_container, &pids_size);
         }
         if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
-          LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+          LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
           *used_memory += pids_on_device[i].usedGpuMemory;
         }
       }
@@ -705,7 +695,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
     int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
       if (check_container_pid_by_cgroupv1(pids_on_device[i].pid)) {
-        LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         *used_memory += pids_on_device[i].usedGpuMemory;
       } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
         if (unlikely(pids_size == 0)) {
@@ -715,7 +705,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
           extract_container_pids(proc_path, pids_on_container, &pids_size);
         }
         if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
-          LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+          LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
           *used_memory += pids_on_device[i].usedGpuMemory;
         }
       }
@@ -729,32 +719,60 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
     extract_container_pids(proc_path, pids_on_container, &pids_size);
     for (i = 0; i < size_on_device; i++) {
       if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
-        LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         *used_memory += pids_on_device[i].usedGpuMemory;
       }
     }
   } else if (g_vgpu_config->compatibility_mode == HOST_COMPATIBILITY_MODE) {
     //LOGGER(VERBOSE, "use host compatibility mode");
     for (i = 0; i < size_on_device; i++) { // Host mode does not verify PID
-      LOGGER(VERBOSE, "pid[%d] compute use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+      LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
       *used_memory += pids_on_device[i].usedGpuMemory;
     }
   } else {
     LOGGER(FATAL, "unsupported environment compatibility mode: %d", g_vgpu_config->compatibility_mode);
   }
 
+}
+
+void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
+  size_t *used_memory = arg;
+  nvmlProcessInfo_t pids_on_device[MAX_PIDS];
+  unsigned int size_on_device = MAX_PIDS;
+  nvmlReturn_t ret;
+
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
+                             device, &size_on_device, pids_on_device);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+                             device, &size_on_device, pids_on_device);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
+                             device, &size_on_device, pids_on_device);
+  } else {
+    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+  }
+  if (unlikely(ret)) {
+    *used_memory = 0;
+    LOGGER(ERROR, "nvmlDeviceGetComputeRunningProcesses call failed, return: %d, str: %s",
+                   ret, NVML_ERROR(nvml_library_entry, ret));
+    return;
+  }
+  accumulate_used_memory(used_memory, pids_on_device, size_on_device);
+
   // TODO　Increase the memory usage of intercepting graphic processes.
   size_on_device = MAX_PIDS;
   nvmlProcessInfo_t graphic_pids_on_device[MAX_PIDS];
 
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses,
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses,
                            device, &size_on_device, graphic_pids_on_device);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2,
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2,
                            device, &size_on_device, graphic_pids_on_device);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3,
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3,
                            device, &size_on_device, graphic_pids_on_device);
   } else {
     ret = NVML_ERROR_FUNCTION_NOT_FOUND;
@@ -764,65 +782,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                    ret, NVML_ERROR(nvml_library_entry, ret));
     goto DONE;
   }
-
-  if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
-    int pids_size = 0;
-    int pids_on_container[MAX_PIDS];
-    for (i = 0; i < size_on_device; i++) {
-      if (check_container_pid_by_cgroupv2(graphic_pids_on_device[i].pid)) {
-        LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
-        *used_memory += graphic_pids_on_device[i].usedGpuMemory;
-      } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-        if (unlikely(pids_size == 0)) {
-          char proc_path[PATH_MAX];
-          pids_size = MAX_PIDS;
-          snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-          extract_container_pids(proc_path, pids_on_container, &pids_size);
-        }
-        if (check_container_pid_by_open_kernel(graphic_pids_on_device[i].pid, pids_on_container, pids_size)) {
-          LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
-          *used_memory += graphic_pids_on_device[i].usedGpuMemory;
-        }
-      }
-    }
-  } else if ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
-    int pids_size = 0;
-    int pids_on_container[MAX_PIDS];
-    for (i = 0; i < size_on_device; i++) {
-      if (check_container_pid_by_cgroupv1(graphic_pids_on_device[i].pid)) {
-        LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
-        *used_memory += graphic_pids_on_device[i].usedGpuMemory;
-      } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-        if (unlikely(pids_size == 0)) {
-          char proc_path[PATH_MAX];
-          pids_size = MAX_PIDS;
-          snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-          extract_container_pids(proc_path, pids_on_container, &pids_size);
-        }
-        if (check_container_pid_by_open_kernel(graphic_pids_on_device[i].pid, pids_on_container, pids_size)) {
-          LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
-          *used_memory += graphic_pids_on_device[i].usedGpuMemory;
-        }
-      }
-    }
-  } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-    int pids_size = MAX_PIDS;
-    int pids_on_container[MAX_PIDS];
-    char proc_path[PATH_MAX];
-    snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-    extract_container_pids(proc_path, pids_on_container, &pids_size);
-    for (i = 0; i < size_on_device; i++) {
-      if (check_container_pid_by_open_kernel(graphic_pids_on_device[i].pid, pids_on_container, pids_size)) {
-        LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
-        *used_memory += graphic_pids_on_device[i].usedGpuMemory;
-      }
-    }
-  } else if (g_vgpu_config->compatibility_mode == HOST_COMPATIBILITY_MODE) {
-    for (i = 0; i < size_on_device; i++) {
-      LOGGER(VERBOSE, "pid[%d] graphics use memory: %lld", graphic_pids_on_device[i].pid, graphic_pids_on_device[i].usedGpuMemory);
-      *used_memory += graphic_pids_on_device[i].usedGpuMemory;
-    }
-  }
+  accumulate_used_memory(used_memory, pids_on_device, size_on_device);
 
 DONE:
   LOGGER(VERBOSE, "total used memory: %zu", *used_memory);
@@ -841,9 +801,9 @@ void get_used_gpu_memory(void *arg, CUdevice device) {
   nvmlDevice_t dev;
   nvmlReturn_t ret;
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, nvml_index, &dev);
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, nvml_index, &dev);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, nvml_index, &dev);
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, nvml_index, &dev);
   } else {
     ret = NVML_ERROR_FUNCTION_NOT_FOUND;
   }
@@ -860,22 +820,17 @@ void get_used_gpu_memory(void *arg, CUdevice device) {
 static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample, unsigned int *processes_size, int cuda_index, nvmlDevice_t dev) {
   nvmlReturn_t ret;
   struct timeval cur, prev;
-  // When using open source kernel modules, nvmlDeviceGetComputeRunningProcesses can only
-  // query processes in the container namespace, so skip inaccurate process count queries.
-  if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-    goto SKIP;
-  }
   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
   unsigned int running_processes = MAX_PIDS;
 
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
                              dev, &running_processes, pids_on_device);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
                              dev, &running_processes, pids_on_device);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
                              dev, &running_processes, pids_on_device);
   } else {
     ret = NVML_ERROR_FUNCTION_NOT_FOUND;
@@ -888,15 +843,14 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_re
 
   top_result->sys_process_num = running_processes;
 
-SKIP:
   gettimeofday(&cur, NULL);
   struct timeval temp = {1, 0};
   timersub(&cur, &temp, &prev);
   uint64_t microsec = (uint64_t)prev.tv_sec * 1000000ULL + prev.tv_usec;
   top_result->checktime = microsec;
 
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetProcessUtilization,
-                        dev, processes_sample, processes_size, microsec);
+  ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetProcessUtilization,
+                           dev, processes_sample, processes_size, microsec);
   if (unlikely(ret)) {
     if (ret != NVML_ERROR_NOT_FOUND) {
       LOGGER(VERBOSE, "nvmlDeviceGetProcessUtilization can't get process utilization on cuda device: %d, "
@@ -909,7 +863,9 @@ SKIP:
   // query processes in the container namespace, while nvmlDeviceGetProcessUtilization
   // can query global processes, so it may need to be updated to the global process count here.
   if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-    top_result->sys_process_num = *processes_size;
+    if (*processes_size > running_processes) {
+       top_result->sys_process_num = *processes_size;
+    }
   }
 
   return NVML_SUCCESS;
@@ -971,7 +927,28 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
   int codec_util = 0;
 
   int i;
-  if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
+
+  if (processes_num == 0) {
+  } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
+    int pids_size = MAX_PIDS;
+    int pids_on_container[MAX_PIDS];
+    extract_container_pids(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size);
+    if (likely(pids_size > 0)) {
+      for (i = 0; i < processes_num; i++) {
+        if (processes_sample[i].timeStamp >= top_result->checktime) {
+          top_result->valid = 1;
+          sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
+          codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
+                       GET_VALID_VALUE(processes_sample[i].decUtil);
+          codec_util = CODEC_NORMALIZE(codec_util);
+          top_result->sys_current += sm_util + codec_util;
+          if (check_container_pid_by_open_kernel(processes_sample[i].pid, pids_on_container, pids_size)) {
+            top_result->user_current += sm_util + codec_util;
+          }
+        }
+      }
+    }
+  } else if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
     int pids_size = 0;
     int pids_on_container[MAX_PIDS];
     for (i = 0; i < processes_num; i++) {
@@ -1069,7 +1046,7 @@ CUresult cuDriverGetVersion(int *driverVersion) {
   load_necessary_data();
 //  pthread_once(&g_init_set, initialization);
 
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuDriverGetVersion, driverVersion);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDriverGetVersion, driverVersion);
   if (unlikely(ret)) {
     goto DONE;
   }
@@ -1170,7 +1147,7 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1203,7 +1180,7 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
     }
   }
 CALL:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
   if (ret == CUDA_SUCCESS && flags == CU_MEM_ATTACH_GLOBAL) {
     malloc_gpu_virt_memory(*dptr, bytesize, host_index);
   }
@@ -1216,7 +1193,7 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1269,7 +1246,7 @@ ALLOCATED_TO_GPU:
     goto DONE;
   }
 ALLOCATED_TO_UVA:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
@@ -1293,7 +1270,7 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1349,7 +1326,7 @@ ALLOCATED_TO_GPU:
     goto DONE;
   }
 ALLOCATED_TO_UVA:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, request_size, CU_MEM_ATTACH_GLOBAL);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, request_size, CU_MEM_ATTACH_GLOBAL);
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
@@ -1376,7 +1353,7 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1414,7 +1391,7 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
     }
   }
 ALLOCATED_TO_GPU:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocAsync OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -1422,7 +1399,7 @@ ALLOCATED_TO_GPU:
     goto DONE;
   }
 ALLOCATED_TO_UVA:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
@@ -1437,7 +1414,7 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1476,7 +1453,7 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
     }
   }
 ALLOCATED_TO_GPU:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -1484,7 +1461,7 @@ ALLOCATED_TO_GPU:
     goto DONE;
   }
 ALLOCATED_TO_UVA:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, CU_MEM_ATTACH_GLOBAL);
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
@@ -1525,7 +1502,7 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1582,7 +1559,7 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1642,7 +1619,7 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1689,7 +1666,7 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1757,7 +1734,7 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1806,13 +1783,13 @@ CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX,
                              void **kernelParams, void **extra) {
   CUresult ret;
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   rate_limiter(gridDimX * gridDimY * gridDimZ,
               blockDimX * blockDimY * blockDimZ, device);
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchKernel_ptsz, f, gridDimX,
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernel_ptsz, f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
                          sharedMemBytes, hStream, kernelParams, extra);
 DONE:
@@ -1826,13 +1803,13 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
                         CUstream hStream, void **kernelParams, void **extra) {
   CUresult ret;
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   rate_limiter(gridDimX * gridDimY * gridDimZ,
               blockDimX * blockDimY * blockDimZ, device);
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernel), f, gridDimX,
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernel), f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
                          sharedMemBytes, hStream, kernelParams, extra);
 DONE:
@@ -1843,13 +1820,13 @@ CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
                           void **kernelParams, void **extra) {
   CUresult ret;
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   rate_limiter(config->gridDimX * config->gridDimY * config->gridDimZ,
                config->blockDimX * config->blockDimY * config->blockDimZ, device);
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernelEx),
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernelEx),
                          config, f, kernelParams, extra);
 DONE:
   return ret;
@@ -1859,13 +1836,13 @@ CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f,
                                void **kernelParams, void **extra) {
   CUresult ret; 
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   rate_limiter(config->gridDimX *config->gridDimY * config->gridDimZ,
                config->blockDimX * config->blockDimY * config->blockDimZ, device);
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchKernelEx_ptsz, 
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernelEx_ptsz, 
                          config, f, kernelParams, extra);
 DONE:
   return ret;
@@ -1874,7 +1851,7 @@ DONE:
 CUresult cuLaunch(CUfunction f) {
   CUresult ret; 
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1884,7 +1861,7 @@ CUresult cuLaunch(CUfunction f) {
   }
   rate_limiter(1, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
 CALL:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunch, f);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunch, f);
 DONE:
   return ret;
 }
@@ -1896,13 +1873,13 @@ CUresult cuLaunchCooperativeKernel_ptsz(
     void **kernelParams) {
   CUdevice device;
   CUresult ret;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   rate_limiter(gridDimX * gridDimY * gridDimZ,
                blockDimX * blockDimY * blockDimZ, device);
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchCooperativeKernel_ptsz, f,
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchCooperativeKernel_ptsz, f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
                          blockDimZ, sharedMemBytes, hStream, kernelParams);
 DONE:
@@ -1915,13 +1892,13 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
     unsigned int sharedMemBytes, CUstream hStream, void **kernelParams) {
   CUdevice device;
   CUresult ret; 
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }    
   rate_limiter(gridDimX * gridDimY * gridDimZ,
                blockDimX * blockDimY * blockDimZ, device);
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchCooperativeKernel), f,
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchCooperativeKernel), f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
                          blockDimZ, sharedMemBytes, hStream, kernelParams);
 DONE:
@@ -1931,7 +1908,7 @@ DONE:
 CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
   CUresult ret;  
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1941,7 +1918,7 @@ CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
   }
   rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
 CALL:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchGrid, f, grid_width,grid_height);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGrid, f, grid_width,grid_height);
 DONE:
   return ret;
 }
@@ -1949,7 +1926,7 @@ DONE:
 CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstream hStream) {
   CUresult ret;  
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1959,7 +1936,7 @@ CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstre
   }
   rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
 CALL:
-  ret = CUDA_ENTRY_CALL(cuda_library_entry, cuLaunchGridAsync, f, grid_width, grid_height, hStream);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGridAsync, f, grid_width, grid_height, hStream);
 DONE:
   return ret;
 }
@@ -1967,7 +1944,7 @@ DONE:
 CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z) {
   CUresult ret;
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -1987,7 +1964,7 @@ CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z) {
     while (!CAS(&g_block_locker[host_index], 1, 0)) {}
   }
 CALL:
-  ret =  CUDA_ENTRY_CALL(cuda_library_entry, cuFuncSetBlockShape, hfunc, x, y, z);
+  ret =  CUDA_ENTRY_CHECK(cuda_library_entry, cuFuncSetBlockShape, hfunc, x, y, z);
 DONE:
   return ret;
 }
@@ -1997,7 +1974,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -2038,7 +2015,7 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -2078,7 +2055,7 @@ DONE:
 CUresult _cuMemFree(CUdeviceptr dptr) {
   CUresult ret;
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -2107,7 +2084,7 @@ CUresult cuMemFree(CUdeviceptr dptr) {
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
@@ -2122,7 +2099,7 @@ DONE:
 CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }

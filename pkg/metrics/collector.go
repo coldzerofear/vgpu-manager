@@ -200,27 +200,6 @@ type procInfoList map[uint32]nvml.ProcessInfo_v1
 
 type procUtilList map[uint32]nvml.ProcessUtilizationSample
 
-func ContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(string) string, f func(pid int)) {
-	cgroupFullPath, err := cgroup.GetK8sPodContainerCGroupFullPath(pod, containerName, fullPath)
-	if err != nil {
-		klog.Errorln(err)
-		return
-	}
-	klog.V(3).InfoS("Detected pod container cgroup path", "pod",
-		klog.KObj(pod), "container", containerName, "cgroupPath", cgroupFullPath)
-	pids, err := cgroups.GetAllPids(cgroupFullPath)
-	if err != nil {
-		klog.ErrorS(err, "Failed to retrieve container pids",
-			"pod", klog.KObj(pod), "container", containerName)
-		return
-	}
-	klog.V(4).Infof("Pod <%s/%s> container <%s>  CGroup path <%s> pids: %+v",
-		pod.Namespace, pod.Name, containerName, cgroupFullPath, pids)
-	for _, pid := range pids {
-		f(pid)
-	}
-}
-
 func ContainerDeviceProcInfoFunc(procInfos procInfoList,
 	containerPids []uint32, f func(nvml.ProcessInfo_v1)) {
 	if procInfos == nil {
@@ -456,7 +435,7 @@ skipNvml:
 				getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
 			}
 			var containerPids []uint32
-			ContainerPidsFunc(pod, container.Name, getFullPath, func(pid int) {
+			_ = cgroup.GetContainerPidsFunc(pod, container.Name, getFullPath, func(pid int) {
 				containerPids = append(containerPids, uint32(pid))
 			})
 			_, containerId := cgroup.GetContainerRuntime(pod, container.Name)

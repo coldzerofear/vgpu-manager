@@ -113,9 +113,9 @@ func main() {
 	controllerSwitch := map[string]bool{
 		reschedule.Name: opt.FeatureGate.Enabled(options.Reschedule),
 	}
-	err = controller.RegistryControllerToManager(manager, nodeConfig, controllerSwitch)
+	err = controller.RegisterControllerToManager(manager, nodeConfig, controllerSwitch)
 	if err != nil {
-		klog.Fatalf("Registry controller to manager failed: %v", err)
+		klog.Fatalf("Register controller to manager failed: %v", err)
 	}
 	plugins, err := deviceplugin.GetDevicePlugins(opt, deviceManager, manager, kubeClient)
 	if err != nil {

@@ -12,7 +12,7 @@ import (
 
 type Controller interface {
 	reconcile.Reconciler
-	RegistryToManager(manager ctrm.Manager) error
+	RegisterToManager(manager ctrm.Manager) error
 }
 
 type newController func(manager ctrm.Manager, config *node.NodeConfigSpec) (reconcile.Reconciler, error)
@@ -30,7 +30,7 @@ func init() {
 	controllerFuncMap[reschedule.Name] = reschedule.NewRescheduleController
 }
 
-func RegistryControllerToManager(manager ctrm.Manager, config *node.NodeConfigSpec, controllerSwitch map[string]bool) (err error) {
+func RegisterControllerToManager(manager ctrm.Manager, config *node.NodeConfigSpec, controllerSwitch map[string]bool) (err error) {
 	once.Do(func() {
 		var c reconcile.Reconciler
 		for name, newControllerFunc := range controllerFuncMap {
@@ -47,9 +47,9 @@ func RegistryControllerToManager(manager ctrm.Manager, config *node.NodeConfigSp
 				klog.Errorf("%s has not implemented a controller, skip it", name)
 				continue
 			}
-			klog.V(4).InfoS("Registry controller to manager", "controller", name)
-			if err = controller.RegistryToManager(manager); err != nil {
-				klog.ErrorS(err, "unable to registry controller", "controller", name)
+			klog.V(4).InfoS("Register controller to manager", "controller", name)
+			if err = controller.RegisterToManager(manager); err != nil {
+				klog.ErrorS(err, "unable to register controller", "controller", name)
 				return
 			}
 		}

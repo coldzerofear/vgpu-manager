@@ -19,6 +19,11 @@ find "$SRC_DIR" -type f | while read -r src_file; do
     rel_path="${src_file#$SRC_DIR/}"
     dest_file="$DEST_DIR/$rel_path"
 
+    dest_dir=$(dirname "$dest_file")
+    if [[ ! -d "$dest_dir" ]]; then
+        mkdir -p "$dest_dir"
+    fi
+
     do_copy=false
     if [[ ! -f "$dest_file" ]]; then
         echo "copy file: $rel_path ($src_file -> $dest_file)"
@@ -30,6 +35,8 @@ find "$SRC_DIR" -type f | while read -r src_file; do
         if [[ "$src_md5" != "$dest_md5" ]]; then
             echo "replace file: $rel_path (MD5: $dest_md5 -> $src_md5)"
             do_copy=true
+        else
+            echo "skipped file: $rel_path (MD5: $dest_md5)"
         fi
     fi
 

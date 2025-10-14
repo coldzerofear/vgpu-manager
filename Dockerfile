@@ -74,7 +74,13 @@ RUN	CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURC
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/webhook cmd/webhook/*.go
+        -o bin/webhook cmd/webhook/*.go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags=" \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
+        -o bin/device-client cmd/client/*.go
 
 FROM quay.io/jitesoft/ubuntu:20.04
 
@@ -87,11 +93,12 @@ COPY --from=builder /go/src/vgpu-manager/bin/monitor /usr/bin/monitor
 COPY --from=builder /go/src/vgpu-manager/bin/webhook /usr/bin/webhook
 
 COPY scripts scripts/
-RUN chmod +x /scripts/* && mkdir -p /installed
+RUN chmod +x /scripts/* && mkdir -p /installed/registry
 COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
 COPY --from=builder /vgpu-controller/build/mem_occupy_tool /installed/mem_occupy_tool
 COPY --from=builder /vgpu-controller/build/mem_managed_tool /installed/mem_managed_tool
 COPY --from=builder /vgpu-controller/build/mem_view_tool /installed/mem_view_tool
 COPY --from=builder /vgpu-controller/build/extract_container_pids /installed/extract_container_pids
+COPY --from=builder /go/src/vgpu-manager/bin/device-client /installed/registry/device-client
 
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload

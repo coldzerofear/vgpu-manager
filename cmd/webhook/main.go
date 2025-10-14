@@ -60,8 +60,8 @@ func main() {
 	server.Register("/healthz", probeHandler)
 	server.Register("/readyz", probeHandler)
 
-	if err := pkgwebhook.RegistryWebhookToServer(server, scheme.Scheme, opt); err != nil {
-		klog.Fatalf("Registry webhook to server failed: %v", err)
+	if err := pkgwebhook.RegisterWebhookToServer(server, scheme.Scheme, opt); err != nil {
+		klog.Fatalf("Register webhook to server failed: %v", err)
 	}
 
 	klog.Infoln("Starting webhook server")

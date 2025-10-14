@@ -68,6 +68,8 @@ const (
 	SMWatcher featuregate.Feature = util.SMWatcher
 	// VMemoryNode feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
 	VMemoryNode featuregate.Feature = util.VMemoryNode
+	// ClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
+	ClientMode featuregate.Feature = util.ClientMode
 )
 
 var (
@@ -79,6 +81,7 @@ var (
 		GPUTopology:  {Default: false, PreRelease: featuregate.Alpha},
 		SMWatcher:    {Default: false, PreRelease: featuregate.Alpha},
 		VMemoryNode:  {Default: false, PreRelease: featuregate.Alpha},
+		ClientMode:   {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 

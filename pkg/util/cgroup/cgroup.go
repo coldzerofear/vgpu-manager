@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	criapi "k8s.io/cri-api/pkg/apis"
@@ -431,4 +432,30 @@ func SplitK8sCGroupBasePath(cgroupFullPath string) string {
 		break
 	}
 	return basePath
+}
+
+func GetContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(string) string, fns ...func(pid int)) []int {
+	cgroupFullPath, err := GetK8sPodContainerCGroupFullPath(pod, containerName, fullPath)
+	if err != nil {
+		klog.Errorln(err)
+		return nil
+	}
+	klog.V(4).InfoS("Get container cgroup path", "pod",
+		klog.KObj(pod), "container", containerName, "cgroupPath", cgroupFullPath)
+	pids, err := cgroups.GetAllPids(cgroupFullPath)
+	if err != nil {
+		klog.ErrorS(err, "Failed to retrieve container pids",
+			"pod", klog.KObj(pod), "container", containerName)
+		return nil
+	}
+	klog.V(5).InfoS("Get container all pids", "pod", klog.KObj(pod),
+		"container", containerName, "cgroupPath", cgroupFullPath, "pids", pids)
+	if len(fns) > 0 {
+		for _, pid := range pids {
+			for _, fn := range fns {
+				fn(pid)
+			}
+		}
+	}
+	return pids
 }

@@ -24,7 +24,7 @@ func init() {
 	webhookFuncMap[podmutate.Path] = podmutate.NewMutateWebhook
 }
 
-func RegistryWebhookToServer(server webhook.Server, scheme *runtime.Scheme, opt *options.Options) (err error) {
+func RegisterWebhookToServer(server webhook.Server, scheme *runtime.Scheme, opt *options.Options) (err error) {
 	once.Do(func() {
 		var hook http.Handler
 		for path, webhookFunc := range webhookFuncMap {
@@ -33,7 +33,7 @@ func RegistryWebhookToServer(server webhook.Server, scheme *runtime.Scheme, opt 
 				klog.ErrorS(err, "unable to create webhook", "path", path)
 				return
 			}
-			klog.V(4).InfoS("Registry webhook to server", "path", path)
+			klog.V(4).InfoS("Register webhook to server", "path", path)
 			server.Register(path, hook)
 		}
 	})
