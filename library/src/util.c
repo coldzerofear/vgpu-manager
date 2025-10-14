@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #define MAX_PID_STR_LEN 32
 #define COMPATIBILITY_MODE_ENV "ENV_COMPATIBILITY_MODE"
@@ -198,7 +199,6 @@ static int is_current_cgroup(const char *cgroup_procs_path) {
 
   FILE *fp = NULL;
   if ((fp = fopen(cgroup_procs_path, "r")) == NULL) {
-    //fprintf(stderr, "Failed to open %s: %s\n", cgroup_procs_path, strerror(errno));
     return ret;
   }
 
@@ -260,7 +260,6 @@ int extract_container_id(char *base_path, char *container_id, size_t container_i
 
   DIR *dir = NULL;
   if ((dir = opendir(base_path)) == NULL) {
-    //LOGGER(ERROR, "cannot open directory %s: %s", base_path, strerror(errno));
     return ret;
   }
 
@@ -294,21 +293,21 @@ static int compare_pids(const void *a, const void *b) {
   return (pid1 > pid2) - (pid1 < pid2);
 }
 
-int extract_container_pids(char *base_path, int *pids, int *pids_size) {
-  if (!base_path || !pids || !pids_size) {
+int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size) {
+  if (!file_path || !pids || !pids_size) {
     LOGGER(ERROR, "invalid NULL parameter");
     *pids_size = 0;
     return -1;
   }
 
-  if (access(base_path, F_OK) != 0) {
+  if (access(file_path, F_OK) != 0) {
     *pids_size = 0;
     return -1;
   }
 
-  FILE *fp = fopen(base_path, "r");
+  FILE *fp = fopen(file_path, "r");
   if (!fp) {
-    LOGGER(WARNING, "error opening %s: %s", base_path, strerror(errno));
+    LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
     *pids_size = 0;
     return -1;
   }
@@ -325,6 +324,9 @@ int extract_container_pids(char *base_path, int *pids, int *pids_size) {
       LOGGER(ERROR, "invalid PID format: %s", line);
       continue;
     }
+    if (pid <= 0 || pid > INT_MAX) {
+      continue;
+    }
     pids[actual_count++] = (int)pid;
   }
 
@@ -337,5 +339,127 @@ int extract_container_pids(char *base_path, int *pids, int *pids_size) {
     LOGGER(WARNING, "PID array full, only stored %d PIDs", max_size);
   }
   fclose(fp);
+  return 0;
+}
+
+static int read_procs_file(const char *dir, const char *filename, int *pids, int max_size, int *current_count) {
+  char filepath[PATH_MAX];
+  snprintf(filepath, sizeof(filepath), "%s/%s", dir, filename);
+
+  FILE *f = fopen(filepath, "r");
+  if (!f) {
+    if (errno == ENOENT) {
+      return 0;
+    }
+    return -1;
+  }
+
+  char line[MAX_PID_STR_LEN];
+  while (fgets(line, sizeof(line), f) && *current_count < max_size) {
+    line[strcspn(line, "\n")] = '\0';
+    if (strlen(line) == 0) {
+      continue;
+    }
+
+    char *endptr;
+    long pid = strtol(line, &endptr, 10);
+    if (endptr == line || *endptr != '\0') {
+      continue;
+    }
+    if (pid <= 0 || pid > INT_MAX) {
+      continue;
+    }
+    pids[*current_count] = (int)pid;
+    (*current_count)++;
+  }
+
+  fclose(f);
+  return 0;
+}
+
+static int process_directory(const char *path, int *pids, int max_size, int *current_count) {
+  // Attempt to read the cgroup.procs file from the current directory.
+  int ret = read_procs_file(path, CGROUP_PROCS_FILE, pids, max_size, current_count);
+  // If reading cgroup.com fails and the error is ENOTSUP, try reading cgroup.threads.
+  if (ret != 0 && errno == ENOTSUP) {
+    ret = read_procs_file(path, CGROUP_THREADS_FILE, pids, max_size, current_count);
+  }
+  return ret;
+}
+
+// Recursively traverse the directory and collect all PIDs.
+static int walk_directory(const char *path, int *pids, int max_size, int *current_count) {
+  // First, handle the current directory
+  if (process_directory(path, pids, max_size, current_count) != 0) {
+    // 如果不是因为文件不存在而失败，记录错误但继续
+    if (errno != ENOENT) {
+      LOGGER(WARNING, "failed to read process file in %s: %s", path, strerror(errno));
+    }
+  }
+  DIR *dir = opendir(path);
+  if (!dir) {
+    if (errno != EACCES) {
+      LOGGER(WARNING, "cannot open directory %s: %s", path, strerror(errno));
+    }
+    return 0;
+  }
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL && *current_count < max_size) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+
+    char full_path[PATH_MAX];
+    snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+
+    // Skip files that cannot be stated.
+    struct stat statbuf;
+    if (stat(full_path, &statbuf) != 0) {
+      continue;
+    }
+
+    if (S_ISDIR(statbuf.st_mode)) {
+      // Recursive processing of subdirectories.
+      if (walk_directory(full_path, pids, max_size, current_count) != 0) {
+        closedir(dir);
+        return -1;
+      }
+    }
+  }
+
+  closedir(dir);
+  return 0;
+}
+
+int extract_container_pids(char *base_path, int *pids, int *pids_size) {
+  if (!base_path || !pids || !pids_size) {
+    LOGGER(ERROR, "invalid NULL parameter");
+    *pids_size = 0;
+    return -1;
+  }
+
+  if (access(base_path, F_OK) != 0) {
+    *pids_size = 0;
+    return -1;
+  }
+
+  int max_size = *pids_size;
+  int actual_count = 0;
+
+  if (walk_directory(base_path, pids, max_size, &actual_count) != 0) {
+    LOGGER(ERROR, "failed to walk directory %s", base_path);
+    *pids_size = 0;
+    return -1;
+  }
+
+  if (actual_count > 0) {
+    qsort(pids, actual_count, sizeof(int), compare_pids);
+  }
+
+  *pids_size = actual_count;
+  if (actual_count >= max_size) {
+    LOGGER(WARNING, "PID array full, only stored %d PIDs", max_size);
+  }
   return 0;
 }

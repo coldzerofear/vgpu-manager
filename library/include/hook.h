@@ -92,8 +92,9 @@ extern "C" {
 #define HOST_CGROUP_PATH (VGPU_MANAGER_PATH "/.host_cgroup")
 
 #define CGROUP_PROCS_FILE "cgroup.procs"
+#define CGROUP_THREADS_FILE "cgroup.threads"
 
-#define HOST_CGROUP_PID_BASE_PATH (VGPU_MANAGER_PATH "/.host_cgroup/%s/" CGROUP_PROCS_FILE)
+#define HOST_CGROUP_PID_BASE_PATH (VGPU_MANAGER_PATH "/.host_cgroup/%s")
 
 #define TMP_DIR "/tmp"
 
