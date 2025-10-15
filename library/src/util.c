@@ -151,9 +151,7 @@ int get_vmem_node_enabled(int *i) {
   if (unlikely(!str)) {
     goto DONE;
   }
-  if (strcmp(str, "true") == 0 ||
-      strcmp(str, "TRUE") == 0 ||
-      strcmp(str,"1") == 0) {
+  if (strcmp(str, "true") == 0 || strcmp(str, "TRUE") == 0 || strcmp(str,"1") == 0) {
     *i = 1;
   } else {
     *i = 0;
@@ -172,12 +170,10 @@ int get_mem_oversold(uint32_t index, int *i) {
   if (unlikely(!str)) {
     str = getenv(CUDA_MEM_OVERSOLD_ENV);
     if (unlikely(!str)) {
-        goto DONE;
+      goto DONE;
     }
   }
-  if (strcmp(str, "true") == 0 ||
-      strcmp(str, "TRUE") == 0 ||
-      strcmp(str,"1") == 0) {
+  if (strcmp(str, "true") == 0 || strcmp(str, "TRUE") == 0 || strcmp(str,"1") == 0) {
     *i = 1;
   } else {
     *i = 0;
@@ -188,7 +184,7 @@ DONE:
 }
 
 static int is_current_cgroup(const char *cgroup_procs_path) {
-  int ret = 0;
+  int ret = -1;
   if (!cgroup_procs_path) {
     LOGGER(ERROR, "invalid NULL cgroup_procs_path parameter");
     return ret;
@@ -206,7 +202,7 @@ static int is_current_cgroup(const char *cgroup_procs_path) {
   while (fgets(line, sizeof(line), fp)) {
     line[strcspn(line, "\n")] = '\0';
     if (strcmp(line, pid_str) == 0) {
-      ret = 1;
+      ret = 0;
       break;
     }
   }
@@ -240,8 +236,16 @@ static int is_current_container(const char *path) {
         break;
       }
     } else if (strcmp(entry->d_name, CGROUP_PROCS_FILE) == 0) {
-      if (is_current_cgroup(full_path)) {
+      if (is_current_cgroup(full_path) == 0) {
         ret = 0;
+      } else if (errno == ENOTSUP) {
+        // For a threaded cgroup, read returns ENOTSUP, and we should
+        // read from cgroup.threads instead.
+        char threads_path[PATH_MAX];
+        snprintf(threads_path, sizeof(threads_path), "%s/%s", path, CGROUP_THREADS_FILE);
+        ret = is_current_cgroup(threads_path);
+      }
+      if (ret == 0) {
         break;
       }
     }
@@ -268,10 +272,7 @@ int extract_container_id(char *base_path, char *container_id, size_t container_i
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
-
-    if (entry->d_type != DT_DIR) {
-      continue;
-    }
+    if (entry->d_type != DT_DIR)  continue;
 
     char full_path[PATH_MAX];
     snprintf(full_path, sizeof(full_path), "%s/%s", base_path, entry->d_name);
@@ -391,7 +392,6 @@ static int process_directory(const char *path, int *pids, int max_size, int *cur
 static int walk_directory(const char *path, int *pids, int max_size, int *current_count) {
   // First, handle the current directory
   if (process_directory(path, pids, max_size, current_count) != 0) {
-    // 如果不是因为文件不存在而失败，记录错误但继续
     if (errno != ENOENT) {
       LOGGER(WARNING, "failed to read process file in %s: %s", path, strerror(errno));
     }

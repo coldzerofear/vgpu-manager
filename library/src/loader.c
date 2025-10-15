@@ -2053,7 +2053,7 @@ void init_nvml_to_host_device_index() {
 
 void _load_necessary_data() {
   // First, determine the driver version
-  if (strcmp(driver_version, "1")) {
+  if (strcmp(driver_version, "1") == 0) {
     read_version_from_proc(driver_version);
   }
   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
