@@ -52,6 +52,9 @@ extern void *lib_control;
 
 extern int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size);
 extern int extract_container_pids(char *base_path, int *pids, int *pids_size);
+extern int pid_exists(int pid);
+extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
+extern int device_pid_in_same_container(unsigned int pid);
 
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 
@@ -94,8 +97,6 @@ static void change_token(int64_t, int);
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index);
 
 static int check_file_exist(const char *);
-
-//static int int_compare(const void *a, const void *b);
 
 /** export function definition */
 CUresult cuDriverGetVersion(int *driverVersion);
@@ -561,14 +562,14 @@ int split_str(char *line, char *key, char *value, char d) {
   return 0;
 }
 
-
 int read_cgroup(char *pid_path, char *cgroup_key, char *cgroup_value) {
-  FILE *f = fopen(pid_path, "rb");
+  int ret = -1;
+  FILE *f = fopen(pid_path, "r");
   if (f == NULL) {
-    return 1;
+    return ret;
   }
-  char buff[255];
-  while (fgets(buff, 255, f)) {
+  char buff[256];
+  while (fgets(buff, 256, f)) {
     int index = 0;
     for (; index < strlen(buff) && buff[index] != ':'; index++) {}
     if (index == strlen(buff)) {
@@ -580,47 +581,53 @@ int read_cgroup(char *pid_path, char *cgroup_key, char *cgroup_value) {
     }
     if (strcmp(key, cgroup_key) == 0) {
       strcpy(cgroup_value, value);
-      fclose(f);
-      return 0;
+      ret = 0;
+      break;
     }
   }
   fclose(f);
-  return 1;
+  return ret;
 }
 
-int check_container_pid_by_cgroupv1(unsigned int pid) {
-  int ret = 0;
-  if (pid == 0) {
+// Container PID matching method in cgroupv1 mode
+int check_device_pid_in_cgroupv1_container(unsigned int device_pid) {
+  int ret = -1;
+  if (device_pid == 0) {
     return ret;
   }
-  char pid_path[128] = "";
-  sprintf(pid_path, HOST_PROC_CGROUP_PID_PATH, pid);
-
-  char container_cg[256];
-  char process_cg[256];
-
-  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", container_cg) && !read_cgroup(pid_path, "memory", process_cg)) {
-    LOGGER(DETAIL, "\ncontainer cg: %s\nprocess cg: %s", container_cg, process_cg);
-    if (strstr(process_cg, container_cg) != NULL) ret = 1;
+  char host_pid_path[128];
+  char cont_process_cg[256];
+  char host_process_cg[256];
+  sprintf(host_pid_path, HOST_PROC_CGROUP_PID_PATH, device_pid);
+  if (!read_cgroup(PID_SELF_CGROUP_PATH, "memory", cont_process_cg) &&
+      !read_cgroup(host_pid_path, "memory", host_process_cg)) {
+    LOGGER(DETAIL, "\ncontainer process cgroup: %s\nhost process cgroup: %s", cont_process_cg, host_process_cg);
+    if (strstr(host_process_cg, cont_process_cg) != NULL) {
+      ret = 0;
+    }
   }
   return ret;
 }
 
-int check_container_pid_by_cgroupv2(unsigned int pid) {
-  int ret = 0;
-  if (pid == 0) {
+// Container PID matching method in cgroupv2 mode
+int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
+  int ret = -1;
+  if (device_pid == 0) {
     return ret;
   }
-  char pid_path[128] = "";
-  sprintf(pid_path, HOST_PROC_CGROUP_PID_PATH, pid);
-  if (!check_file_exist(pid_path)) {
+
+  char host_pid_path[128];
+  sprintf(host_pid_path, HOST_PROC_CGROUP_PID_PATH, device_pid);
+  if (!check_file_exist(host_pid_path)) {
     return ret;
   }
-  FILE *fp = fopen(pid_path, "rb");
+
+  FILE *fp = fopen(host_pid_path, "r");
   if (!fp) {
-    LOGGER(VERBOSE, "read file %s failed: %s", pid_path, strerror(errno));
+    LOGGER(VERBOSE, "read host pid path %s failed: %s", host_pid_path, strerror(errno));
     return ret;
   }
+
   char buff[FILENAME_MAX];
   while (fgets(buff, FILENAME_MAX, fp)) {
     size_t len = strlen(buff);
@@ -628,7 +635,7 @@ int check_container_pid_by_cgroupv2(unsigned int pid) {
       buff[len - 1] = '\0';
     }
     if (strcmp(buff, "0::/") == 0 || strstr(buff, container_id) != NULL) {
-      ret = 1;
+      ret = 0;
       break;
     }
   }
@@ -642,13 +649,33 @@ static int int_compare(const void *a, const void *b) {
   return (*pa > *pb) - (*pa < *pb);
 }
 
-int check_container_pid_by_open_kernel(unsigned int pid, int *pids_on_container, int pids_size) {
-  int ret = 0;
-  if (pid == 0 || !pids_on_container || pids_size <= 0) {
+int check_device_pid_in_ordered_container_pids(unsigned int device_pid, int *container_pids, int pids_size) {
+  int ret = -1;
+  if (device_pid == 0 || !container_pids || pids_size <= 0) {
     return ret;
   }
-  if (bsearch(&pid, pids_on_container, (size_t)pids_size, sizeof(int), int_compare)) {
-    ret = 1;
+  if (bsearch(&device_pid, container_pids, (size_t)pids_size, sizeof(int), int_compare)) {
+    ret = 0;
+  }
+  return ret;
+}
+
+int check_device_pid_in_local_container_pid(unsigned int device_pid) {
+  int ret = -1;
+  if (device_pid == 0) {
+    return ret;
+  }
+  // Check if PID exists in the container.
+  if (pid_exists(device_pid) != 0) {
+    return ret;
+  }
+  // Check if PID exists in the current container namespace.
+  if (device_pid_in_same_container(device_pid) != 0) {
+    return ret;
+  }
+  // Check if the process is using GPU.
+  if (library_exists_in_process_maps("nvidia", device_pid) == 0) {
+    ret = 0;
   }
   return ret;
 }
@@ -656,6 +683,7 @@ int check_container_pid_by_open_kernel(unsigned int pid, int *pids_on_container,
 void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_device, unsigned int size_on_device) {
   unsigned int i;
   if (size_on_device == 0) {
+    // If there are no processes running on the device, quickly skip them.
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
     int pids_on_container[MAX_PIDS];
@@ -663,19 +691,26 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
     if (unlikely(pids_size == 0)) {
       LOGGER(FATAL, "unable to find registered container process");
     }
+    int matchClientMode = 0;
+    int matchOpenKernel = 0;
     for (i = 0; i < size_on_device; i++) {
-      if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
-        LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+      if (!matchOpenKernel && check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        matchClientMode = 1;
+        *used_memory += pids_on_device[i].usedGpuMemory;
+      } else if (!matchClientMode && (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE &&
+                  check_device_pid_in_local_container_pid(pids_on_device[i].pid) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        matchOpenKernel = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
       }
     }
   } else if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
-    //LOGGER(VERBOSE, "use cgroupv2 compatibility mode");
     int pids_size = 0;
     int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
-      if (check_container_pid_by_cgroupv2(pids_on_device[i].pid)) {
-        LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+      if (check_device_pid_in_cgroupv2_container(pids_on_device[i].pid) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         *used_memory += pids_on_device[i].usedGpuMemory;
       } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
         if (unlikely(pids_size == 0)) {
@@ -684,19 +719,18 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
           snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
           extract_container_pids(proc_path, pids_on_container, &pids_size);
         }
-        if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
-          LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        if (check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
+          LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
           *used_memory += pids_on_device[i].usedGpuMemory;
         }
       }
     }
   } else if ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
-    //LOGGER(VERBOSE, "use cgroupv1 compatibility mode");
     int pids_size = 0;
     int pids_on_container[MAX_PIDS];
     for (i = 0; i < size_on_device; i++) {
-      if (check_container_pid_by_cgroupv1(pids_on_device[i].pid)) {
-        LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+      if (check_device_pid_in_cgroupv1_container(pids_on_device[i].pid) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         *used_memory += pids_on_device[i].usedGpuMemory;
       } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
         if (unlikely(pids_size == 0)) {
@@ -705,29 +739,28 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
           snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
           extract_container_pids(proc_path, pids_on_container, &pids_size);
         }
-        if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
-          LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        if (check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
+          LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
           *used_memory += pids_on_device[i].usedGpuMemory;
         }
       }
     }
   } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-    //LOGGER(VERBOSE, "use open kernel driver compatibility mode");
     int pids_size = MAX_PIDS;
     int pids_on_container[MAX_PIDS];
     char proc_path[PATH_MAX];
     snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
     extract_container_pids(proc_path, pids_on_container, &pids_size);
     for (i = 0; i < size_on_device; i++) {
-      if (check_container_pid_by_open_kernel(pids_on_device[i].pid, pids_on_container, pids_size)) {
-        LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+      if (check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         *used_memory += pids_on_device[i].usedGpuMemory;
       }
     }
   } else if (g_vgpu_config->compatibility_mode == HOST_COMPATIBILITY_MODE) {
-    //LOGGER(VERBOSE, "use host compatibility mode");
-    for (i = 0; i < size_on_device; i++) { // Host mode does not verify PID
-      LOGGER(VERBOSE, "pid[%d] use memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+    // Host Mode does not verify PID
+    for (i = 0; i < size_on_device; i++) {
+      LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
       *used_memory += pids_on_device[i].usedGpuMemory;
     }
   } else {
@@ -853,9 +886,11 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_re
   ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetProcessUtilization,
                            dev, processes_sample, processes_size, microsec);
   if (unlikely(ret)) {
+    // Frequent calls to nvmlDeviceGetProcessUtilization may result in the return of NVML_ERROR_NOT_FOUND,
+    // which is a normal phenomenon and should be avoided from printing these invalid logs.
     if (ret != NVML_ERROR_NOT_FOUND) {
-      LOGGER(VERBOSE, "nvmlDeviceGetProcessUtilization can't get process utilization on cuda device: %d, "
-                      "return %d, str: %s", cuda_index, ret, NVML_ERROR(nvml_library_entry, ret));
+      LOGGER(VERBOSE, "nvmlDeviceGetProcessUtilization can't get process utilization on cuda device %d, "
+                      "return: %d, str: %s", cuda_index, ret, NVML_ERROR(nvml_library_entry, ret));
     }
     return ret;
   }
@@ -930,11 +965,14 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
   int i;
 
   if (processes_num == 0) {
+    // If there are no processes running on the device, quickly skip them.
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
     int pids_on_container[MAX_PIDS];
     get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size);
     if (likely(pids_size > 0)) {
+      int matchClientMode = 0;
+      int matchOpenKernel = 0;
       for (i = 0; i < processes_num; i++) {
         if (processes_sample[i].timeStamp >= top_result->checktime) {
           top_result->valid = 1;
@@ -943,7 +981,12 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
                        GET_VALID_VALUE(processes_sample[i].decUtil);
           codec_util = CODEC_NORMALIZE(codec_util);
           top_result->sys_current += sm_util + codec_util;
-          if (check_container_pid_by_open_kernel(processes_sample[i].pid, pids_on_container, pids_size)) {
+          if (!matchOpenKernel && check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
+            matchClientMode = 1;
+            top_result->user_current += sm_util + codec_util;
+          } else if (!matchClientMode && (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE &&
+                     check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
+            matchOpenKernel = 1;
             top_result->user_current += sm_util + codec_util;
           }
         }
@@ -960,7 +1003,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
                      GET_VALID_VALUE(processes_sample[i].decUtil);
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
-        if (check_container_pid_by_cgroupv2(processes_sample[i].pid)) {
+        if (check_device_pid_in_cgroupv2_container(processes_sample[i].pid) == 0) {
           top_result->user_current += sm_util + codec_util;
         } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
           if (unlikely(pids_size == 0)) {
@@ -969,7 +1012,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
             snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
             extract_container_pids(proc_path, pids_on_container, &pids_size);
           }
-          if (check_container_pid_by_open_kernel(processes_sample[i].pid, pids_on_container, pids_size)) {
+          if (check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
             top_result->user_current += sm_util + codec_util;
           }
         }
@@ -986,7 +1029,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
                      GET_VALID_VALUE(processes_sample[i].decUtil);
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
-        if (check_container_pid_by_cgroupv1(processes_sample[i].pid)) {
+        if (check_device_pid_in_cgroupv1_container(processes_sample[i].pid) == 0) {
           top_result->user_current += sm_util + codec_util;
         } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
           if (unlikely(pids_size == 0)) {
@@ -995,7 +1038,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
             snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
             extract_container_pids(proc_path, pids_on_container, &pids_size);
           }
-          if (check_container_pid_by_open_kernel(processes_sample[i].pid, pids_on_container, pids_size)) {
+          if (check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
             top_result->user_current += sm_util + codec_util;
           }
         }
@@ -1015,7 +1058,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
                      GET_VALID_VALUE(processes_sample[i].decUtil);
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
-        if (check_container_pid_by_open_kernel(processes_sample[i].pid, pids_on_container, pids_size)) {
+        if (check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
           top_result->user_current += sm_util + codec_util;
         }
       }

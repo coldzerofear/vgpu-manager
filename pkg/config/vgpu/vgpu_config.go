@@ -203,7 +203,7 @@ func getCompatibilityMode(featureGate featuregate.FeatureGate) CompatibilityMode
 	default:
 		mode |= CGroupv1Mode
 	}
-	if mode != HostMode && mode != ClientMode {
+	if mode != HostMode {
 		mode |= OpenKernelMode
 	}
 	return mode

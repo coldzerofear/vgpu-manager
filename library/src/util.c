@@ -463,3 +463,66 @@ int extract_container_pids(char *base_path, int *pids, int *pids_size) {
   }
   return 0;
 }
+
+char *GetNthMapsToken(char *line, int n) {
+  char *context = NULL;
+  // coverity[var_deref_model] Yes, we're using strtok_r correctly
+  char *token = strtok_r(line, " ", &context);
+  while (token && --n > 0) {
+    token = strtok_r(NULL, " ", &context);
+  }
+  return token;
+}
+
+int library_exists_in_process_maps(char const *libName, unsigned int pid) {
+  int ret = -1;
+  char fileName[512];
+  sprintf(fileName, "/proc/%d/maps", pid);
+
+  FILE *fMaps = fopen(fileName, "r");
+  if (NULL == fMaps) {
+    return ret;
+  }
+
+  // Read the file line by line
+  char line[1024];
+  while (fgets(line, sizeof(line), fMaps)) {
+    char *libPath = GetNthMapsToken(line, 6);
+    if (libPath == NULL) {
+      continue;
+    }
+    char *p = strstr(libPath, libName);
+    if (p == NULL) {
+      continue;
+    }
+    ret = 0;
+    break;
+  }
+
+  fclose(fMaps);
+  return ret;
+}
+
+int device_pid_in_same_container(unsigned int pid) {
+  // For the k8s container, these two namespace types already
+  // determine whether the PID is in the same container or not.
+  const char *ns_types[] = {"mnt", "cgroup", NULL};
+  for (int i = 0; ns_types[i] != NULL; i++) {
+    char device_path[128];
+    struct stat device_st;
+    snprintf(device_path, sizeof(device_path), "/proc/%d/ns/%s", pid, ns_types[i]);
+    if (stat(device_path, &device_st) != 0) {
+      return -1;
+    }
+    char self_path[128];
+    struct stat self_st;
+    snprintf(self_path, sizeof(self_path), "%s/%s", PID_SELF_NS_PATH, ns_types[i]);
+    if (stat(self_path, &self_st) != 0) {
+      return -1;
+    }
+    if (device_st.st_ino != self_st.st_ino) {
+      return -1;
+    }
+  }
+  return 0;
+}

@@ -85,6 +85,8 @@ extern "C" {
 
 #define PID_SELF_CGROUP_PATH "/proc/self/cgroup"
 
+#define PID_SELF_NS_PATH "/proc/self/ns"
+
 #define HOST_PROC_PATH (VGPU_MANAGER_PATH "/.host_proc")
 
 #define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%d/cgroup")
