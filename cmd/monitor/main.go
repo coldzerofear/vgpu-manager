@@ -22,6 +22,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/component-base/logs"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -30,11 +32,11 @@ import (
 )
 
 func main() {
-	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()
-	defer klog.Flush()
+	logs.InitLogs()
+	defer logs.FlushLogs()
 	util.SetGlobalDomain(opt.Domain)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)

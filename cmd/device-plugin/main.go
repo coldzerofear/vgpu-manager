@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/component-base/logs"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -35,11 +37,11 @@ import (
 )
 
 func main() {
-	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()
-	defer klog.Flush()
+	logs.InitLogs()
+	defer logs.FlushLogs()
 	log.SetLogger(klog.NewKlogr())
 	util.SetGlobalDomain(opt.Domain)
 
