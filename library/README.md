@@ -4,15 +4,16 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 
 ## Project objectives:
 
-- [x] Simplify GRPC within containers
 - [x] Ensure hard isolation of gpu resources
-- [x] Support CUDA 12.x version drivers
-- [x] Support cgroupv1/cgroupv2 and Host compatibility mode
+- [x] Support CUDA 13.x version drivers
+- [x] Support cgroupv1 and cgroupv2 container environment
 - [x] Optimized multi card computing power and memory limitations
 - [x] Dynamically scale core limitations based on remaining resources
-- [x] Allow virtual memory to be used when memory limit is exceeded 
-- [x] Allow GPU virtual memory based on UVA
+- [x] GPU Virtual Memory Overallocation Based on UVA
 - [x] Support open-gpu-kernel-modules driver compatibility mode
+- [x] Record GPU virtual memory allocation and limits
+- [x] Support gpu utilization information provided by external observers to reduce driving overhead
+- [x] Support client registration mode to improve container security
 
 > Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 
@@ -57,6 +58,6 @@ Use environment variable `LOGGER_LEVEL` to set the visibility of logs
 
 ## CUDA/GPU support information
 
-CUDA 12.x and before are supporteds
+CUDA 13.x and before are supporteds
 
 Any architecture of GPU after Kepler are supported

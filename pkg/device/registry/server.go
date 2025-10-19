@@ -1,6 +1,5 @@
 package registry
 
-import "C"
 import (
 	"bytes"
 	"context"
