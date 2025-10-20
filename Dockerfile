@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.1-devel-ubuntu20.04 as builder
+FROM nvidia/cuda:12.4.1-devel-ubuntu20.04 AS builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64

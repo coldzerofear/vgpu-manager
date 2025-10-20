@@ -13,7 +13,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 )
 
@@ -191,10 +190,10 @@ const (
 	ClientMode     CompatibilityMode = 200
 )
 
-func getCompatibilityMode(featureGate featuregate.FeatureGate) CompatibilityMode {
+func getCompatibilityMode(devManager *manager.DeviceManager) CompatibilityMode {
 	mode := HostMode
 	switch {
-	case featureGate.Enabled(util.ClientMode):
+	case devManager.GetFeatureGate().Enabled(util.ClientMode):
 		mode |= ClientMode
 	case cgroups.IsCgroup2UnifiedMode():
 		mode |= CGroupv2Mode
@@ -203,7 +202,7 @@ func getCompatibilityMode(featureGate featuregate.FeatureGate) CompatibilityMode
 	default:
 		mode |= CGroupv1Mode
 	}
-	if mode != HostMode {
+	if devManager.GetNodeConfig().GetOpenKernelModules() {
 		mode |= OpenKernelMode
 	}
 	return mode
@@ -324,7 +323,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		}
 		devices[gpuDevice.Id] = dev
 	}
-	compMode := getCompatibilityMode(devManager.GetFeatureGate())
+	compMode := getCompatibilityMode(devManager)
 	data := &ResourceDataT{
 		DriverVersion: VersionT{
 			Major: int32(major),
@@ -373,7 +372,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		driverVersion.major = C.int(major)
 		driverVersion.minor = C.int(minor)
 		vgpuConfig.driver_version = driverVersion
-		compMode := getCompatibilityMode(devManager.GetFeatureGate())
+		compMode := getCompatibilityMode(devManager)
 		vgpuConfig.compatibility_mode = C.int(compMode)
 		if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
 			vgpuConfig.sm_watcher = C.int(1)

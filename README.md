@@ -7,7 +7,7 @@ A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) device
 - [x] Ensure the correctness of scheduling performance and device allocation
 - [x] Ensure the security of container resource isolation
 - [x] Do not obtain host PID through gRPC to device plugin
-- [x] Support the latest CUDA 12.x driver version
+- [x] Support the latest CUDA 13.x driver version
 - [x] Compatible with both cgroupv1 and cgroupv2 container environments
 - [x] Dual-layer scheduling policies (node-level and device-level)
 - [x] Provide multi-dimensional vGPU monitoring metrics

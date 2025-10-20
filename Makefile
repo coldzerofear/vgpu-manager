@@ -107,9 +107,9 @@ build: fmt vet ## Build binary.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH=$(GIT_BRANCH) --build-arg APT_MIRROR=$(APT_MIRROR) \
-      --build-arg GIT_COMMIT=$(GIT_COMMIT) --build-arg GIT_TREE_STATE=$(GIT_TREE_STATE) \
-      --build-arg BUILD_DATE=$(BUILD_DATE) -t "${IMG}" -f Dockerfile .
+	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH="${GIT_BRANCH}" --build-arg APT_MIRROR="${APT_MIRROR}" \
+      --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
+      --build-arg BUILD_DATE="${BUILD_DATE}" -t "${IMG}" -f Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push docker image.

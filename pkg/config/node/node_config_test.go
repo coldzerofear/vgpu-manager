@@ -110,6 +110,7 @@ configs:
    excludeDevices: "0..2"
    gdsEnabled: true
    migStrategy: none
+   openKernelModules: true
    imex:
      channelIDs:
       - 100
@@ -127,6 +128,7 @@ configs:
 			ExcludeDevices:      ptr.To[IDStore](NewIntIDStore(0, 1, 2)),
 			GDSEnabled:          ptr.To[bool](true),
 			MigStrategy:         ptr.To[string]("none"),
+			OpenKernelModules:   ptr.To[bool](true),
 			Imex: ptr.To[imex.Imex](imex.Imex{
 				ChannelIDs: []int{100, 200},
 				Required:   true,
@@ -150,6 +152,7 @@ configs:
     "gdsEnabled": true,
     "mofedEnabled": true,
     "migStrategy": "none",
+    "openKernelModules": true,
     "imex": {
       "channelIDs": [100, 200],
       "required": true
@@ -169,6 +172,7 @@ configs:
 			GDSEnabled:          ptr.To[bool](true),
 			MOFEDEnabled:        ptr.To[bool](true),
 			MigStrategy:         ptr.To[string]("none"),
+			OpenKernelModules:   ptr.To[bool](true),
 			Imex: ptr.To[imex.Imex](imex.Imex{
 				ChannelIDs: []int{100, 200},
 				Required:   true,
@@ -231,6 +235,7 @@ func Test_NodeConfigToString(t *testing.T) {
 		spec.GDSEnabled = ptr.To[bool](true)
 		spec.MOFEDEnabled = ptr.To[bool](true)
 		spec.MigStrategy = ptr.To[string]("none")
+		spec.OpenKernelModules = ptr.To[bool](true)
 		spec.Imex = ptr.To[imex.Imex](imex.Imex{
 			ChannelIDs: []int{100, 200},
 			Required:   true,
@@ -265,6 +270,7 @@ func Test_NodeConfigToString(t *testing.T) {
   "gdsEnabled": true,
   "mofedEnabled": true,
   "migStrategy": "none",
+  "openKernelModules": true,
   "imex": {
     "channelIDs": [
       100,
@@ -296,6 +302,7 @@ configs:
       gdsEnabled: true
       mofedEnabled: true
       migStrategy: none
+      openKernelModules: true
       imex:
         channelIDs:
             - 100
