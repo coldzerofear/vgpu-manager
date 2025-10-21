@@ -2,9 +2,9 @@ package deviceplugin
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
@@ -93,7 +93,7 @@ func (m *vcoreDevicePlugin) Devices() []*pluginapi.Device {
 			continue
 		}
 		for i := int64(0); i < gpuDevice.Core; i++ {
-			devId := fmt.Sprintf("vcore-%d-%d", gpuDevice.Id, i)
+			devId := util.MakeDeviceID(int64(gpuDevice.Id), i)
 			health := pluginapi.Healthy
 			if !gpuDevice.Healthy {
 				health = pluginapi.Unhealthy

@@ -1,6 +1,7 @@
 package util
 
 import (
+	"encoding/base64"
 	"fmt"
 	"math"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -290,4 +292,50 @@ func PathIsNotExist(fullPath string) bool {
 
 func GetPodContainerManagerPath(managerBaseDir string, podUID types.UID, containerName string) string {
 	return fmt.Sprintf("%s/%s_%s", managerBaseDir, string(podUID), containerName)
+}
+
+// MakeDeviceID generates compact binary encoded device IDs.
+// gpuId must be in [0, 255], i must be non-negative.
+func MakeDeviceID(gpuId, i int64) string {
+	if gpuId < 0 || gpuId >= 256 {
+		panic(fmt.Errorf("gpuId must be in [0, 255], got %d", gpuId))
+	}
+	if i < 0 {
+		panic(fmt.Errorf("i must be non-negative, got %d", i))
+	}
+	combined := (uint64(i) << 8) | uint64(gpuId)
+	var buf [10]byte
+	w := buf[:0]
+	w = protowire.AppendVarint(w, combined)
+	return base64.RawURLEncoding.EncodeToString(w)
+}
+
+// ParseDeviceID parses a device ID into gpuId and i.
+func ParseDeviceID(devId string) (gpuId, i int64, err error) {
+	if devId == "" {
+		return 0, 0, fmt.Errorf("empty device ID")
+	}
+
+	data, err := base64.RawURLEncoding.DecodeString(devId)
+	if err != nil {
+		return 0, 0, fmt.Errorf("base64 decode failed: %w", err)
+	}
+
+	v, n := protowire.ConsumeVarint(data)
+	if n <= 0 {
+		return 0, 0, fmt.Errorf("invalid varint encoding")
+	}
+	if n != len(data) {
+		return 0, 0, fmt.Errorf("extra data in device ID: expected %d bytes, got %d", n, len(data))
+	}
+
+	gpuId = int64(v & 0xFF)
+	i = int64(v >> 8)
+
+	// Check if there is any extra data (strict mode)
+	if gpuId < 0 || gpuId >= 256 {
+		return 0, 0, fmt.Errorf("invalid gpuId in device ID: %d", gpuId)
+	}
+
+	return gpuId, i, nil
 }

@@ -2,9 +2,9 @@ package deviceplugin
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
@@ -95,7 +95,7 @@ func (m *vmemoryDevicePlugin) Devices() []*pluginapi.Device {
 		}
 		memorySize := gpuDevice.Memory / int64(config.GetDeviceMemoryFactor())
 		for i := int64(0); i < memorySize; i++ {
-			devId := fmt.Sprintf("vmem-%d-%d", gpuDevice.Id, i)
+			devId := util.MakeDeviceID(int64(gpuDevice.Id), i)
 			health := pluginapi.Healthy
 			if !gpuDevice.Healthy {
 				health = pluginapi.Unhealthy

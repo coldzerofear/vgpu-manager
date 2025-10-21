@@ -121,3 +121,81 @@ func Test_CheckDeviceUuid(t *testing.T) {
 		})
 	}
 }
+
+func Test_MakeDeviceID(t *testing.T) {
+	testCases1 := []struct {
+		gpuId, i int64
+	}{
+		{0, 0},
+		{15, 10000},
+		{255, 1000000},
+	}
+	t.Run("encoding and decoding", func(t *testing.T) {
+		for _, tc := range testCases1 {
+			id := MakeDeviceID(tc.gpuId, tc.i)
+			gpuId, i, err := ParseDeviceID(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assert.Equal(t, tc.gpuId, gpuId)
+			assert.Equal(t, tc.i, i)
+		}
+	})
+
+	t.Run("small space exhaustive", func(t *testing.T) {
+		set := make(map[string]struct{})
+		for gpuId := 0; gpuId < 4; gpuId++ {
+			for i := 0; i < 1000; i++ {
+				id := MakeDeviceID(int64(gpuId), int64(i))
+				if _, exists := set[id]; exists {
+					t.Fatalf("duplicate: gpuId=%d, i=%d", gpuId, i)
+				}
+				set[id] = struct{}{}
+			}
+		}
+	})
+
+	t.Run("round-trip and uniqueness", func(t *testing.T) {
+		testCases := [][2]int64{
+			{0, 0}, {1, 0}, {255, 0},
+			{0, 1}, {1, 1}, {255, 1},
+			{0, 12345}, {128, 99999}, {255, 1048575},
+		}
+
+		seen := make(map[string]struct{})
+
+		for _, tc := range testCases {
+			gpuId, i := tc[0], tc[1]
+			id := MakeDeviceID(gpuId, i)
+			if _, exists := seen[id]; exists {
+				t.Fatalf("Duplicate ID: %s for (%d,%d)", id, gpuId, i)
+			}
+			seen[id] = struct{}{}
+			parsedGpuId, parsedI, err := ParseDeviceID(id)
+			if err != nil {
+				t.Fatalf("Parse failed: %v", err)
+			}
+			assert.Equal(t, gpuId, parsedGpuId)
+			assert.Equal(t, i, parsedI)
+		}
+	})
+
+	t.Run("boundary cases", func(t *testing.T) {
+		cases := []struct{ gpuId, i int64 }{
+			{0, 0},
+			{255, 0},
+			{0, 1},
+			{255, 1},
+			{0, 1048575},
+			{15, 1048575},
+		}
+		set := make(map[string]struct{})
+		for _, tc := range cases {
+			id := MakeDeviceID(tc.gpuId, tc.i)
+			if _, exists := set[id]; exists {
+				t.Fatalf("boundary duplicate: %v", tc)
+			}
+			set[id] = struct{}{}
+		}
+	})
+}
