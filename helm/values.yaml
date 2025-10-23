@@ -122,6 +122,8 @@ devicePlugin:
   cgroupDriver: ""
   devicePlugin:
     env:
+      - name: DP_ENABLE_HEALTHCHECKS
+        value: ""
       - name: DP_DISABLE_HEALTHCHECKS
         value: ""
       - name: KUBE_FEATURE_WatchListClient
