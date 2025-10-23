@@ -18,11 +18,13 @@ package nvidia
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"k8s.io/klog/v2"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	nvinfo "github.com/NVIDIA/go-nvlib/pkg/nvlib/info"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 )
 
@@ -51,6 +53,16 @@ type GpuInfo struct {
 	Architecture          string
 	CudaComputeCapability string
 	MigProfiles           []*MigProfileInfo
+}
+
+type GpuDevice struct {
+	*GpuInfo
+}
+
+type WslGpuInfo GpuDevice
+
+func (w *WslGpuInfo) GetPaths() ([]string, error) {
+	return []string{"/dev/dxg"}, nil
 }
 
 func (g *GpuInfo) GetPaths() ([]string, error) {
@@ -114,15 +126,52 @@ type MigDevicePlacement struct {
 	nvml.GpuInstancePlacement
 }
 
+type infoInterface nvinfo.Interface
 type devInterface nvdev.Interface
 type nvmlInterface nvml.Interface
 
 type DeviceLib struct {
 	devInterface
 	nvmlInterface
+	infoInterface
 	DriverLibraryPath string
 	DevRoot           string
 	NvidiaSMIPath     string
+}
+
+var (
+	deviceLib *DeviceLib
+	initErr   error
+	initOnce  sync.Once
+)
+
+func InitDeviceLib(root RootPath) (*DeviceLib, error) {
+	initOnce.Do(func() {
+		defer func() {
+			if initErr != nil {
+				klog.Errorln("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
+				klog.Errorln("If this is a GPU node, did you set the container runtime to `nvidia`?")
+				klog.Errorln("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
+				klog.Errorln("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
+				klog.Errorln("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
+			}
+		}()
+		deviceLib, initErr = NewDeviceLib(root)
+		if initErr != nil {
+			return
+		}
+		platform := deviceLib.ResolvePlatform()
+		switch platform {
+		case nvinfo.PlatformNVML, nvinfo.PlatformWSL:
+			if initErr = deviceLib.NvmlInit(); initErr != nil {
+				return
+			}
+			defer deviceLib.NvmlShutdown()
+		default:
+			initErr = fmt.Errorf("incompatible platform detected %v", platform)
+		}
+	})
+	return deviceLib, initErr
 }
 
 func NewDeviceLib(root RootPath) (*DeviceLib, error) {
@@ -141,15 +190,36 @@ func NewDeviceLib(root RootPath) (*DeviceLib, error) {
 	nvmllib := nvml.New(
 		nvml.WithLibraryPath(driverLibraryPath),
 	)
+	devicelib := nvdev.New(nvmllib)
+	infolib := nvinfo.New(
+		nvinfo.WithNvmlLib(nvmllib),
+		nvinfo.WithDeviceLib(devicelib),
+	)
 
 	d := DeviceLib{
-		devInterface:      nvdev.New(nvmllib),
+		devInterface:      devicelib,
 		nvmlInterface:     nvmllib,
+		infoInterface:     infolib,
 		DriverLibraryPath: driverLibraryPath,
 		DevRoot:           root.GetDevRoot(),
 		NvidiaSMIPath:     nvidiaSMIPath,
 	}
 	return &d, nil
+}
+
+func (l DeviceLib) NvmlInit() error {
+	ret := l.nvmlInterface.Init()
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("error initializing NVML: %v", ret)
+	}
+	return nil
+}
+
+func (l DeviceLib) NvmlShutdown() {
+	ret := l.nvmlInterface.Shutdown()
+	if ret != nvml.SUCCESS {
+		klog.Warningf("error shutting down NVML: %v", ret)
+	}
 }
 
 //// prependPathListEnvvar prepends a specified list of strings to a specified envvar and returns its value.
@@ -173,21 +243,6 @@ func NewDeviceLib(root RootPath) (*DeviceLib, error) {
 //	}
 //	return append(updated, fmt.Sprintf("%s=%s", key, value))
 //}
-
-func (l DeviceLib) NvmlInit() error {
-	ret := l.nvmlInterface.Init()
-	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error initializing NVML: %v", ret)
-	}
-	return nil
-}
-
-func (l DeviceLib) NvmlShutdown() {
-	ret := l.nvmlInterface.Shutdown()
-	if ret != nvml.SUCCESS {
-		klog.Warningf("error shutting down NVML: %v", ret)
-	}
-}
 
 //func (l DeviceLib) enumerateAllPossibleDevices(config *Config) (AllocatableDevices, error) {
 //	alldevices := make(AllocatableDevices)
@@ -503,7 +558,7 @@ func walkMigDevices(d nvml.Device, f func(i int, d nvml.Device) error) error {
 //	}
 //	return nil
 //}
-//
+
 //func (l DeviceLib) SetComputeMode(uuids []string, mode string) error {
 //	for _, uuid := range uuids {
 //		cmd := exec.Command(

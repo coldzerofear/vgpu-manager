@@ -175,8 +175,7 @@ func (m *vnumberDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *plugi
 	return &pluginapi.DevicePluginOptions{PreStartRequired: true}, nil
 }
 
-// ListAndWatch returns a stream of List of Devices,
-// Whenever a Device state change or a Device disappears,
+// ListAndWatch returns a stream of List of Devices, Whenever a Device state change or a Device disappears,
 // ListAndWatch returns the new list.
 func (m *vnumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	klog.V(4).InfoS("ListAndWatch", "pluginName", m.Name(), "server", s)
@@ -243,14 +242,6 @@ var (
 	HostWatcherDirectoryPath = HostManagerDirectoryPath + "/" + util.Watcher
 	HostDeviceRegistryPath   = HostManagerDirectoryPath + "/" + util.Registry
 )
-
-//func GetHostManagerDirectoryPath(podUID types.UID, containerName string) string {
-//	return fmt.Sprintf("%s/%s_%s", HostManagerDirectoryPath, string(podUID), containerName)
-//}
-
-//func GetContManagerDirectoryPath(podUID types.UID, containerName string) string {
-//	return fmt.Sprintf("%s/%s_%s", ContManagerDirectoryPath, string(podUID), containerName)
-//}
 
 func passDeviceSpecs(devices []manager.Device, imexChannels imex.Channels) []*pluginapi.DeviceSpec {
 	deviceMountOptional := map[string]bool{

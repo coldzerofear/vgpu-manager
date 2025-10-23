@@ -52,8 +52,7 @@ func (m *migDevicePlugin) relatedParentDevice(parentUUID string) bool {
 	return false
 }
 
-// ListAndWatch returns a stream of List of Devices,
-// Whenever a Device state change or a Device disappears,
+// ListAndWatch returns a stream of List of Devices, Whenever a Device state change or a Device disappears,
 // ListAndWatch returns the new list.
 func (m *migDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	klog.V(4).InfoS("ListAndWatch", "pluginName", m.Name(), "server", s)
@@ -98,13 +97,10 @@ func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReq
 	imexChannels := m.base.manager.GetImexChannels()
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	for i, containerRequest := range req.ContainerRequests {
-		deviceIds := containerRequest.GetDevicesIds()
-		responses[i] = &pluginapi.ContainerAllocateResponse{
-			Envs: make(map[string]string),
-		}
-		updateResponseForNodeConfig(responses[i], m.base.manager, deviceIds...)
-		var devices []manager.Device
-		for _, uuid := range deviceIds {
+		responses[i] = &pluginapi.ContainerAllocateResponse{Envs: make(map[string]string)}
+		updateResponseForNodeConfig(responses[i], m.base.manager, containerRequest.GetDevicesIds()...)
+		devices := make([]manager.Device, 0, len(containerRequest.GetDevicesIds()))
+		for _, uuid := range containerRequest.GetDevicesIds() {
 			migDevice, exists := deviceMap[uuid]
 			if !exists {
 				err := fmt.Errorf("MIG device %s does not exist", uuid)

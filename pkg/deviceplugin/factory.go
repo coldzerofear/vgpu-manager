@@ -34,34 +34,34 @@ type DevicePlugin interface {
 	Devices() []*pluginapi.Device
 }
 
-func GetDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
+func GetDevicePlugins(devicePluginPath string, devManager *manager.DeviceManager,
 	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) ([]DevicePlugin, error) {
 
 	var plugins []DevicePlugin
 	migStrategy := devManager.GetNodeConfig().GetMigStrategy()
 	if migStrategy != util.MigStrategySingle {
-		socket := filepath.Join(opt.DevicePluginPath, "nvidia-vgpu.sock")
+		socket := filepath.Join(devicePluginPath, "nvidia-vgpu.sock")
 		plugins = append(plugins, NewVNumberDevicePlugin(util.VGPUNumberResourceName,
 			socket, devManager, kubeClient, clusterManager.GetCache()))
 	}
 
 	var deleteResources []string
-
-	if opt.FeatureGate.Enabled(options.CorePlugin) {
-		socket := filepath.Join(opt.DevicePluginPath, "nvidia-vgpu-core.sock")
+	if devManager.GetFeatureGate().Enabled(options.CorePlugin) {
+		socket := filepath.Join(devicePluginPath, "nvidia-vgpu-core.sock")
 		plugins = append(plugins, NewVCoreDevicePlugin(util.VGPUCoreResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUCoreResourceName)
 	}
 
-	if opt.FeatureGate.Enabled(options.MemoryPlugin) {
-		socket := filepath.Join(opt.DevicePluginPath, "nvidia-vgpu-memory.sock")
+	if devManager.GetFeatureGate().Enabled(options.MemoryPlugin) {
+		socket := filepath.Join(devicePluginPath, "nvidia-vgpu-memory.sock")
 		plugins = append(plugins, NewVMemoryDevicePlugin(util.VGPUMemoryResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUMemoryResourceName)
 	}
 
-	go CycleCleanupNodeResources(kubeClient, opt.NodeName, deleteResources)
+	nodeName := devManager.GetNodeConfig().GetNodeName()
+	go CycleCleanupNodeResources(kubeClient, nodeName, deleteResources)
 
 	if migStrategy != util.MigStrategyNone {
 		var requireUniformMIGDevices bool
@@ -83,7 +83,7 @@ func GetDevicePlugins(opt *options.Options, devManager *manager.DeviceManager,
 		}
 		for resource := range resourceSet {
 			resourceName := util.MIGDeviceResourceNamePrefix + resource
-			socket := filepath.Join(opt.DevicePluginPath, fmt.Sprintf("nvidia-mig-%s.sock", resource))
+			socket := filepath.Join(devicePluginPath, fmt.Sprintf("nvidia-mig-%s.sock", resource))
 			plugins = append(plugins, NewMigDevicePlugin(resourceName, socket, devManager))
 		}
 	}

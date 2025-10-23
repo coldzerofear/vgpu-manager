@@ -209,6 +209,9 @@ func (nc NodeConfigSpec) checkNodeConfig() (errs []error) {
 	if nc.GetDeviceCoresScaling() < 0 || nc.GetDeviceCoresScaling() > 1 {
 		errs = append(errs, fmt.Errorf("deviceCoresScaling must be any number greater than or equal to 0 but less than or equal to 1"))
 	}
+	if err := imex.AssertChannelIDsValid(nc.GetIMEX().ChannelIDs); err != nil {
+		errs = append(errs, fmt.Errorf("invalid IMEX channel IDs: %w", err))
+	}
 	return errs
 }
 
@@ -356,27 +359,32 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 	return nil
 }
 
-func NewNodeConfig(option Option, checkFields bool) (*NodeConfigSpec, error) {
+func NewNodeConfig(option Option, checkFields bool) (config *NodeConfigSpec, err error) {
 	if option == nil {
 		return nil, fmt.Errorf("node config option cannot is empty")
 	}
-	nodeConfig := &NodeConfigSpec{}
-	option(nodeConfig)
+	config = &NodeConfigSpec{}
+	option(config)
 
-	if len(nodeConfig.nodeConfigPath) > 0 {
-		if err := loadConfigSpec(nodeConfig); err != nil {
+	if len(config.nodeConfigPath) > 0 {
+		if err = loadConfigSpec(config); err != nil {
 			return nil, err
 		}
 	}
 	if checkFields {
-		errs := nodeConfig.checkNodeConfig()
-		var errMsg []string
-		for _, err := range errs {
-			errMsg = append(errMsg, err.Error())
-		}
-		if len(errMsg) > 0 {
-			return nil, fmt.Errorf("%s", strings.Join(errMsg, ", "))
-		}
+		errs := config.checkNodeConfig()
+		err = MergeError(errs)
 	}
-	return nodeConfig, nil
+	return config, err
+}
+
+func MergeError(errs []error) error {
+	errMsgs := make([]string, len(errs))
+	for i, err := range errs {
+		errMsgs[i] = err.Error()
+	}
+	if len(errMsgs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errMsgs, "; "))
+	}
+	return nil
 }

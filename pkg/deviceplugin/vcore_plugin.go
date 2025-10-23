@@ -40,8 +40,7 @@ func (m *vcoreDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *plugina
 	return &pluginapi.DevicePluginOptions{}, nil
 }
 
-// ListAndWatch returns a stream of List of Devices,
-// Whenever a Device state change or a Device disappears,
+// ListAndWatch returns a stream of List of Devices, Whenever a Device state change or a Device disappears,
 // ListAndWatch returns the new list.
 func (m *vcoreDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {

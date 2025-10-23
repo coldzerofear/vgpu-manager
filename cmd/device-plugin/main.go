@@ -119,7 +119,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Register controller to manager failed: %v", err)
 	}
-	plugins, err := deviceplugin.GetDevicePlugins(opt, deviceManager, manager, kubeClient)
+	plugins, err := deviceplugin.GetDevicePlugins(opt.DevicePluginPath, deviceManager, manager, kubeClient)
 	if err != nil {
 		klog.Fatalf("Get device plugins failed: %v", err)
 	}
@@ -143,12 +143,12 @@ restart:
 
 		// Just continue if there are no devices to serve for plugin p.
 		if len(p.Devices()) == 0 {
-			klog.Warningf("Plugin %s devices is empty, skip it", p.Name())
+			klog.Warningf("Plugin '%s' devices is empty, skip it", p.Name())
 			continue
 		}
 		// Start the gRPC server for plugin p and connect it with the kubelet.
 		if err := p.Start(); err != nil {
-			klog.Errorf("Plugin %s failed to start: %v", p.Name(), err)
+			klog.Errorf("Plugin '%s' failed to start: %v", p.Name(), err)
 			// If there was an error starting any plugins, restart them all.
 			goto restart
 		}

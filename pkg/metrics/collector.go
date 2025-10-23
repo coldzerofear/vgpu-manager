@@ -53,12 +53,8 @@ var _ CollectorService = &nodeGPUCollector{}
 
 func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister, podLister listerv1.PodLister,
 	contLister *ContainerLister, featureGate featuregate.FeatureGate) (CollectorService, error) {
-	deviceLib, err := nvidia.NewDeviceLib("/")
+	deviceLib, err := nvidia.InitDeviceLib("/")
 	if err != nil {
-		klog.Error("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
-		klog.Error("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
-		klog.Error("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
-		klog.Error("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
 		return nil, err
 	}
 	return &nodeGPUCollector{
