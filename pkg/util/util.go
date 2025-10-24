@@ -213,18 +213,18 @@ func GetCurrentPodByAllocatingPods(allocatingPods []corev1.Pod) (*corev1.Pod, er
 // FilterAllocatingPods filter out the list of pods to be allocated.
 func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 	var allocatingPods []corev1.Pod
+	requiredAnnoKeys := []string{
+		PodPredicateTimeAnnotation, PodPredicateNodeAnnotation, PodVGPUPreAllocAnnotation,
+	}
 	for i, pod := range activePods {
 		klog.V(5).Infof("FilterPod <%s/%s> %s", pod.Namespace, pod.Name, pod.Status.Phase)
 		if !IsVGPUResourcePod(&pod) || IsShouldDeletePod(&pod) {
 			continue
 		}
-		if _, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation); !ok {
-			continue
-		}
-		if _, ok := HasAnnotation(&pod, PodPredicateNodeAnnotation); !ok {
-			continue
-		}
-		if _, ok := HasAnnotation(&pod, PodVGPUPreAllocAnnotation); !ok {
+		if slices.ContainsFunc(requiredAnnoKeys, func(key string) bool {
+			_, exists := HasAnnotation(&pod, key)
+			return !exists
+		}) {
 			continue
 		}
 		allocatingPods = append(allocatingPods, activePods[i])

@@ -97,7 +97,7 @@ func dial(ctx context.Context, addr string) (net.Conn, error) {
 type DeviceKeepFunc func(devices *v1alpha1.ContainerDevices) bool
 
 // ListPodResource call pod resource List interface, get pod resource info
-func (pr *PodResource) ListPodResource(filterFuncs ...DeviceKeepFunc) (*v1alpha1.ListPodResourcesResponse, error) {
+func (pr *PodResource) ListPodResource(ctx context.Context, filterFuncs ...DeviceKeepFunc) (*v1alpha1.ListPodResourcesResponse, error) {
 	pr.Lock()
 	defer pr.Unlock()
 
@@ -111,7 +111,7 @@ func (pr *PodResource) ListPodResource(filterFuncs ...DeviceKeepFunc) (*v1alpha1
 	if pr.conn == nil || pr.client == nil {
 		return nil, fmt.Errorf("client not init")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), pr.callTimeout)
+	ctx, cancel := context.WithTimeout(ctx, pr.callTimeout)
 	defer cancel()
 	resp, err := pr.client.List(ctx, &v1alpha1.ListPodResourcesRequest{})
 	if err != nil {

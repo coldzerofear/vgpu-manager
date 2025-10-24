@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -685,10 +686,11 @@ skipNvml:
 		podResourcesResp        *v1alpha1.ListPodResourcesResponse
 		listMigPodResourcesFunc = func() *v1alpha1.ListPodResourcesResponse {
 			listResourceOnce.Do(func() {
-				resource, err := c.podResource.ListPodResource(func(devices *v1alpha1.ContainerDevices) bool {
-					return len(devices.GetDeviceIds()) > 0 &&
-						strings.HasPrefix(devices.GetResourceName(), util.MIGDeviceResourceNamePrefix)
-				})
+				resource, err := c.podResource.ListPodResource(context.Background(),
+					func(devices *v1alpha1.ContainerDevices) bool {
+						return len(devices.GetDeviceIds()) > 0 &&
+							strings.HasPrefix(devices.GetResourceName(), util.MIGDeviceResourceNamePrefix)
+					})
 				if err != nil {
 					klog.ErrorS(err, "ListPodResource failed")
 				} else {

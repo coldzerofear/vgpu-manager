@@ -3,6 +3,7 @@ package deviceplugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	client2 "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"k8s.io/client-go/util/retry"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -48,9 +50,10 @@ var _ DevicePlugin = &vnumberDevicePlugin{}
 func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.DeviceManager,
 	kubeClient *kubernetes.Clientset, cache cache.Cache) DevicePlugin {
 	server := registry.NewDeviceRegistryServer(cache, ContManagerDirectoryPath)
+	podResource := client.NewPodResource(client.WithCallTimeoutSecond(5))
 	return &vnumberDevicePlugin{
 		base:        newBaseDevicePlugin(resourceName, socket, manager),
-		podResource: client.NewPodResource(),
+		podResource: podResource,
 		kubeClient:  kubeClient,
 		server:      server,
 		cache:       cache,
@@ -557,41 +560,32 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	return resp, nil
 }
 
-// GetActiveVGPUPodsOnNode Get the vgpu pods on the node.
-func (m *vnumberDevicePlugin) GetActiveVGPUPodsOnNode() map[string]*corev1.Pod {
-	podList := corev1.PodList{}
-	err := m.cache.List(context.Background(), &podList)
-	if err != nil {
-		klog.ErrorS(err, "Failed to query the pod list in the cache")
-	}
-	activePods := make(map[string]*corev1.Pod)
-	nodeName := m.base.manager.GetNodeConfig().GetNodeName()
-	for i, pod := range podList.Items {
-		if pod.Spec.NodeName != nodeName ||
-			util.PodIsTerminated(&pod) ||
-			!util.IsVGPUResourcePod(&pod) {
-			continue
-		}
-		activePods[string(pod.UID)] = &podList.Items[i]
-	}
-	return activePods
-}
-
-// getCurrentPodInfoByCheckpoint find relevant pod information for devicesIDs in kubelet checkpoint
-func (m *vnumberDevicePlugin) getCurrentPodInfoByCheckpoint(devicesIDs []string) (*client.PodInfo, error) {
-	klog.V(3).Infoln("Try get DevicePlugin checkpoint data")
+// GetPodInfoByCheckpoint find relevant pod information for devicesIDs in kubelet checkpoint
+func (m *vnumberDevicePlugin) GetPodInfoByCheckpoint(ctx context.Context, devicesIDs []string) (*client.PodInfo, error) {
+	klog.V(3).Infoln("Attempt to retrieve pod information from the device plugin checkpoint")
 	devicePluginPath := m.base.manager.GetNodeConfig().GetDevicePluginPath()
-	cp, err := GetCheckpointData(devicePluginPath)
+	checkpoint, err := GetDevicePluginCheckpointData(devicePluginPath)
 	if err != nil {
 		return nil, err
 	}
 	devSet := sets.NewString(devicesIDs...)
-	for _, entry := range cp.PodDeviceEntries {
-		if entry.ResourceName != util.VGPUNumberResourceName ||
-			!devSet.HasAll(entry.DeviceIDs...) {
+	nodeName := m.base.manager.GetNodeConfig().GetNodeName()
+	for _, entry := range checkpoint.PodDeviceEntries {
+		if entry.ResourceName != util.VGPUNumberResourceName || !devSet.HasAll(entry.DeviceIDs...) {
 			continue
 		}
-		if pod, ok := m.GetActiveVGPUPodsOnNode()[entry.PodUID]; ok {
+		podList := corev1.PodList{}
+		if err = m.cache.List(ctx, &podList,
+			client2.MatchingFields{"metadata.uid": entry.PodUID},
+			client2.UnsafeDisableDeepCopyOption(true)); err != nil {
+			return nil, err
+		}
+		for _, pod := range podList.Items {
+			if pod.Spec.NodeName != nodeName ||
+				util.PodIsTerminated(&pod) ||
+				!util.IsVGPUResourcePod(&pod) {
+				continue
+			}
 			return &client.PodInfo{
 				PodName:       pod.Name,
 				PodNamespace:  pod.Namespace,
@@ -600,23 +594,25 @@ func (m *vnumberDevicePlugin) getCurrentPodInfoByCheckpoint(devicesIDs []string)
 		}
 		break
 	}
-	return nil, fmt.Errorf("pod not found")
+	return nil, fmt.Errorf("pod info not found")
 }
 
-func (m *vnumberDevicePlugin) getCurrentPodInfo(devicesIDs []string) (*client.PodInfo, error) {
-	resp, err := m.podResource.ListPodResource()
+func (m *vnumberDevicePlugin) GetPodInfoByDeviceIDs(ctx context.Context, devicesIDs ...string) (*client.PodInfo, error) {
+	if len(devicesIDs) == 0 {
+		return nil, errors.New("deviceIDs cannot be empty")
+	}
+	resp, err := m.podResource.ListPodResource(ctx)
 	if err != nil {
 		klog.ErrorS(err, "ListPodResource failed")
-		return m.getCurrentPodInfoByCheckpoint(devicesIDs)
+		return m.GetPodInfoByCheckpoint(ctx, devicesIDs)
 	}
 	deviceSet := sets.NewString(devicesIDs...)
 	podInfo, err := m.podResource.GetPodInfoByMatchFunc(resp, func(devices *v1alpha1.ContainerDevices) bool {
-		return devices.GetResourceName() == util.VGPUNumberResourceName &&
-			deviceSet.HasAll(devices.GetDeviceIds()...)
+		return devices.GetResourceName() == util.VGPUNumberResourceName && deviceSet.HasAll(devices.GetDeviceIds()...)
 	})
 	if err != nil {
 		klog.ErrorS(err, "GetPodInfoByMatchFunc failed")
-		return m.getCurrentPodInfoByCheckpoint(devicesIDs)
+		return m.GetPodInfoByCheckpoint(ctx, devicesIDs)
 	}
 	return podInfo, nil
 }
@@ -651,7 +647,7 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		klog.Errorf("failed to get node <%s>: %v", nodeName, err)
 		return resp, err
 	}
-	podInfo, err := m.getCurrentPodInfo(req.GetDevicesIds())
+	podInfo, err := m.GetPodInfoByDeviceIDs(ctx, req.GetDevicesIds()...)
 	if err != nil {
 		klog.Errorln(err.Error())
 		return resp, err

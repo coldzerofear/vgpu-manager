@@ -120,8 +120,9 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 		return resp, err
 	}
 	podList := corev1.PodList{}
-	err = s.cache.List(ctx, &podList, client.MatchingFields{"metadata.uid": req.PodUid})
-	if err != nil {
+	if err = s.cache.List(ctx, &podList,
+		client.MatchingFields{"metadata.uid": req.PodUid},
+		client.UnsafeDisableDeepCopyOption(true)); err != nil {
 		return resp, err
 	}
 	if len(podList.Items) != 1 {
