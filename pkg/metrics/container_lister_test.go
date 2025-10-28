@@ -33,7 +33,7 @@ func Test_ContainerLister(t *testing.T) {
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
 	podLister := factory.Core().V1().Pods().Lister()
 	basePath := "/tmp/vgpu-manager"
-	_ = os.MkdirAll(basePath, 07777)
+	_ = os.MkdirAll(basePath, 0777)
 	contLister := NewContainerLister(basePath, nodeName, podLister)
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer func() {
@@ -114,6 +114,7 @@ func Test_ContainerLister(t *testing.T) {
 	runtime.Must(featureGate.Add(map[featuregate.Feature]featuregate.FeatureSpec{
 		util.SMWatcher:   {Default: true, PreRelease: featuregate.Alpha},
 		util.VMemoryNode: {Default: true, PreRelease: featuregate.Alpha},
+		util.ClientMode:  {Default: true, PreRelease: featuregate.Alpha},
 	}))
 
 	devManager := manager.NewFakeDeviceManager(
@@ -150,19 +151,20 @@ func Test_ContainerLister(t *testing.T) {
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
 		path := filepath.Join(basePath, string(key))
-		_ = os.Mkdir(path, 07777)
+		_ = os.MkdirAll(path, 0777)
 		path = filepath.Join(path, deviceplugin.VGPUConfigFileName)
 		claimDevices := contDeviceMap[container.Name]
 		assignDevices := device.ContainerDevices{Name: container.Name, Devices: claimDevices}
-		err := vgpu.WriteVGPUConfigFile(path, devManager, pod, assignDevices, false, node)
+		err = vgpu.WriteVGPUConfigFile(path, devManager, pod, assignDevices, false, node)
 		if err != nil {
 			t.Error(err)
 		}
 		resData := vgpu.NewResourceDataT(devManager, pod, assignDevices, false, node)
 		contResDataMap[container.Name] = resData
 	}
+
 	contLister.Start(time.Second, ctx.Done())
-	time.Sleep(3 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)

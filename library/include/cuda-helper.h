@@ -46,6 +46,12 @@ extern "C" {
 
 #define CUDA_FIND_ENTRY(table, sym) ({ (table)[CUDA_ENTRY_ENUM(sym)].fn_ptr; })
 
+#define CUDA_INTERNAL_CALL(table, sym, ...)                                    \
+  ({                                                                           \
+    cuda_sym_t _entry = CUDA_FIND_ENTRY(table, sym);                           \
+    _entry(__VA_ARGS__);                                                       \
+  })
+
 #define CUDA_ENTRY_CALL(table, sym, ...)                                       \
   ({                                                                           \
     LOGGER(5, "hooking %s", #sym);                                             \
@@ -66,6 +72,16 @@ extern "C" {
       _entry(code, &_error_str);                                               \
     }                                                                          \
     _error_str;                                                                \
+  })
+
+#define CUDA_INTERNAL_CHECK(table, sym, ...)                                   \
+  ({                                                                           \
+    CUresult _ret = CUDA_INTERNAL_CALL(table, sym, __VA_ARGS__);               \
+    if (unlikely(_ret != CUDA_SUCCESS)) {                                      \
+      LOGGER(4, "%s call failed, return: %d, str: %s",                         \
+                 #sym, _ret, CUDA_ERROR(table, _ret));                         \
+    }                                                                          \
+    _ret;                                                                      \
   })
 
 #define CUDA_ENTRY_CHECK(table, sym, ...)                                      \

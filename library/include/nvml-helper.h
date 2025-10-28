@@ -37,6 +37,12 @@ extern "C" {
 
 #define NVML_FIND_ENTRY(table, sym) ({ (table)[NVML_ENTRY_ENUM(sym)].fn_ptr; })
 
+#define NVML_INTERNAL_CALL(table, sym, ...)                                    \
+  ({                                                                           \
+    driver_sym_t _entry = NVML_FIND_ENTRY(table, sym);                         \
+    _entry(__VA_ARGS__);                                                       \
+  })
+
 #define NVML_ENTRY_CALL(table, sym, ...)                                       \
   ({                                                                           \
     LOGGER(5, "hooking %s", #sym);                                             \
@@ -58,6 +64,16 @@ extern "C" {
       _result_str = _err_fn(code);                                             \
     }                                                                          \
     _result_str;                                                               \
+  })
+
+#define NVML_INTERNAL_CHECK(table, sym, ...)                                   \
+  ({                                                                           \
+    nvmlReturn_t _ret = NVML_INTERNAL_CALL(table, sym, __VA_ARGS__);           \
+    if (unlikely(_ret != NVML_SUCCESS)) {                                      \
+      LOGGER(4, "%s call failed, return: %d, str: %s",                         \
+                 #sym, _ret, NVML_ERROR(table, _ret));                         \
+    }                                                                          \
+    _ret;                                                                      \
   })
 
 #define NVML_ENTRY_CHECK(table, sym, ...)                                      \

@@ -99,7 +99,7 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 	return reconcile.Result{}, nil
 }
 
-func (r *RescheduleController) RegistryToManager(manager ctrm.Manager) error {
+func (r *RescheduleController) RegisterToManager(manager ctrm.Manager) error {
 	err := builder.ControllerManagedBy(manager).
 		For(&corev1.Pod{}).Named(Name).Complete(r)
 	if err == nil {

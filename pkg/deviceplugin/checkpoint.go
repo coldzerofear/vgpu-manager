@@ -53,7 +53,7 @@ type CheckpointData struct {
 	Data *Checkpoint `json:"Data"`
 }
 
-func GetCheckpointData(devicePluginPath string) (*Checkpoint, error) {
+func GetDevicePluginCheckpointData(devicePluginPath string) (*Checkpoint, error) {
 	cpFile := filepath.Join(devicePluginPath, CheckPointFileName)
 	data, err := os.ReadFile(cpFile)
 	if err != nil {

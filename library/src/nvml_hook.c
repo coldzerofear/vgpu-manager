@@ -48,9 +48,8 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) 
   nvmlReturn_t ret;
   int nvml_index;
   int fd = -1;
-  ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
+  ret = NVML_INTERNAL_CHECK(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
   if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetIndex call failed, return %d", ret);
     goto DONE;
   }
   int host_index = get_host_device_index_by_nvml_device(device);
@@ -81,9 +80,8 @@ DONE:
 nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *memory) {
   int fd = -1;
   int nvml_index;
-  nvmlReturn_t ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
+  nvmlReturn_t ret = NVML_INTERNAL_CHECK(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
   if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetIndex call failed, return %d", ret);
     goto DONE;
   }
   ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
@@ -112,9 +110,8 @@ DONE:
 
 nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device, nvmlComputeMode_t mode) {
   int nvml_index;
-  nvmlReturn_t ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
+  nvmlReturn_t ret = NVML_INTERNAL_CHECK(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
   if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetIndex call failed, return %d", ret);
     goto DONE;
   }
   int host_index = get_host_device_index_by_nvml_device(device);

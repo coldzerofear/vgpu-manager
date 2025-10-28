@@ -14,7 +14,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
-	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
@@ -22,6 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/component-base/logs"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -30,11 +31,11 @@ import (
 )
 
 func main() {
-	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()
-	defer klog.Flush()
+	logs.InitLogs()
+	defer logs.FlushLogs()
 	util.SetGlobalDomain(opt.Domain)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
@@ -65,7 +66,7 @@ func main() {
 	podLister := listerv1.NewPodLister(podInformer.GetIndexer())
 
 	containerLister := metrics.NewContainerLister(
-		deviceplugin.ContManagerDirectoryPath, nodeConfig.GetNodeName(), podLister)
+		util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
 	nodeCollector, err := metrics.NewNodeGPUCollector(nodeConfig.GetNodeName(),
 		nodeLister, podLister, containerLister, opt.FeatureGate)
 	if err != nil {

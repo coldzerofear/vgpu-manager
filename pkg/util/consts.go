@@ -7,57 +7,60 @@ import (
 	"k8s.io/klog/v2"
 )
 
+const (
+	NvidiaDomain                 = "nvidia.com"
+	NodeNvidiaDriverVersionLabel = NvidiaDomain + "/node-driver-version"
+	NodeNvidiaCudaVersionLabel   = NvidiaDomain + "/node-cuda-version"
+)
+
 var (
-	domainName     = "nvidia.com"
-	initDomainOnce sync.Once
+	globalDomainName = NvidiaDomain
+	initDomainOnce   sync.Once
 
 	// VGPUComputePolicyAnnotation none / balance / fixed(default)
-	VGPUComputePolicyAnnotation = domainName + "/vgpu-compute-policy"
+	VGPUComputePolicyAnnotation = globalDomainName + "/vgpu-compute-policy"
 
-	NodeNvidiaDriverVersionLabel = domainName + "/node-driver-version"
-	NodeNvidiaCudaVersionLabel   = domainName + "/node-cuda-version"
-
-	MIGDeviceResourceNamePrefix = domainName + "/mig-"
-	VGPUNumberResourceName      = domainName + "/vgpu-number"
-	VGPUMemoryResourceName      = domainName + "/vgpu-memory"
-	VGPUCoreResourceName        = domainName + "/vgpu-cores"
+	MIGDeviceResourceNamePrefix = globalDomainName + "/mig-"
+	VGPUNumberResourceName      = globalDomainName + "/vgpu-number"
+	VGPUMemoryResourceName      = globalDomainName + "/vgpu-memory"
+	VGPUCoreResourceName        = globalDomainName + "/vgpu-cores"
 
 	// NodeDeviceHeartbeatAnnotation Node device heartbeat time
-	NodeDeviceHeartbeatAnnotation = domainName + "/node-device-heartbeat"
-	NodeDeviceRegisterAnnotation  = domainName + "/node-device-register"
-	NodeDeviceTopologyAnnotation  = domainName + "/node-device-topology"
-	NodeConfigInfoAnnotation      = domainName + "/node-config-info"
+	NodeDeviceHeartbeatAnnotation = globalDomainName + "/node-device-heartbeat"
+	NodeDeviceRegisterAnnotation  = globalDomainName + "/node-device-register"
+	NodeDeviceTopologyAnnotation  = globalDomainName + "/node-device-topology"
+	NodeConfigInfoAnnotation      = globalDomainName + "/node-config-info"
 
 	// PodIncludeGpuTypeAnnotation Specify the GPU type to be used
-	PodIncludeGpuTypeAnnotation = domainName + "/include-gpu-type"
+	PodIncludeGpuTypeAnnotation = globalDomainName + "/include-gpu-type"
 	// PodExcludeGpuTypeAnnotation Specify the GPU type to exclude
-	PodExcludeGpuTypeAnnotation = domainName + "/exclude-gpu-type"
+	PodExcludeGpuTypeAnnotation = globalDomainName + "/exclude-gpu-type"
 
 	// Scheduling strategies at the node and device levels
-	NodeSchedulerPolicyAnnotation   = domainName + "/node-scheduler-policy"
-	DeviceSchedulerPolicyAnnotation = domainName + "/device-scheduler-policy"
-	MemorySchedulerPolicyAnnotation = domainName + "/memory-scheduler-policy"
+	NodeSchedulerPolicyAnnotation   = globalDomainName + "/node-scheduler-policy"
+	DeviceSchedulerPolicyAnnotation = globalDomainName + "/device-scheduler-policy"
+	MemorySchedulerPolicyAnnotation = globalDomainName + "/memory-scheduler-policy"
 
 	// DeviceTopologyModeAnnotation Specify device topology mode
-	DeviceTopologyModeAnnotation = domainName + "/device-topology-mode"
+	DeviceTopologyModeAnnotation = globalDomainName + "/device-topology-mode"
 
 	// PodIncludeGPUUUIDAnnotation Specify the GPU UUID to be used
-	PodIncludeGPUUUIDAnnotation = domainName + "/include-gpu-uuid"
+	PodIncludeGPUUUIDAnnotation = globalDomainName + "/include-gpu-uuid"
 	// PodExcludeGPUUUIDAnnotation Specify the GPU UUID to be excluded
-	PodExcludeGPUUUIDAnnotation = domainName + "/exclude-gpu-uuid"
+	PodExcludeGPUUUIDAnnotation = globalDomainName + "/exclude-gpu-uuid"
 
-	PodPredicateNodeAnnotation = domainName + "/predicate-node"
-	PodPredicateTimeAnnotation = domainName + "/predicate-time"
-	PodAssignedPhaseLabel      = domainName + "/assigned-phase"
+	PodPredicateNodeAnnotation = globalDomainName + "/predicate-node"
+	PodPredicateTimeAnnotation = globalDomainName + "/predicate-time"
+	PodAssignedPhaseLabel      = globalDomainName + "/assigned-phase"
 
 	// PodVGPUPreAllocAnnotation Pre allocated device information by the scheduler
-	PodVGPUPreAllocAnnotation = domainName + "/pre-allocated"
+	PodVGPUPreAllocAnnotation = globalDomainName + "/pre-allocated"
 	// PodVGPURealAllocAnnotation Real device information allocated by device plugins
-	PodVGPURealAllocAnnotation = domainName + "/real-allocated"
+	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
 )
 
 func GetGlobalDomain() string {
-	return domainName
+	return globalDomainName
 }
 
 func SetGlobalDomain(domain string) {
@@ -66,7 +69,7 @@ func SetGlobalDomain(domain string) {
 		if domain == "" {
 			klog.Fatalf("domain name cannot be empty")
 		}
-		domainName = domain
+		globalDomainName = domain
 		klog.Infof("Successfully set the domain name to %s", domain)
 	})
 }
@@ -84,8 +87,10 @@ const (
 	PreStartContainerCheckErrType = "PreStartContainerCheckErr"
 
 	ManagerRootPath = "/etc/vgpu-manager"
+	Config          = "config"
 	Checkpoints     = "checkpoints"
 	Watcher         = "watcher"
+	Registry        = "registry"
 	SMUtilFile      = "sm_util.config"
 	VMemNode        = "vmem_node"
 	VMemNodeFile    = "vmem_node.config"
@@ -191,4 +196,5 @@ const (
 	SerialBindNode   = "SerialBindNode"
 	SerialFilterNode = "SerialFilterNode"
 	VMemoryNode      = "VMemoryNode"
+	ClientMode       = "ClientMode"
 )

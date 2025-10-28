@@ -93,6 +93,7 @@ func (c *ContainerLister) GetResourceDataT(key ContainerKey) (*vgpu.ResourceData
 var excludedFolders = map[string]bool{
 	util.Checkpoints: true,
 	util.Watcher:     true,
+	util.Registry:    true,
 }
 
 func (c *ContainerLister) collectContainerKey(pods []*corev1.Pod) sets.Set[ContainerKey] {
@@ -140,7 +141,7 @@ func (c *ContainerLister) update() error {
 		_, existVMem := c.GetResourceVMem(containerKey)
 		switch {
 		case matched && !existCfg:
-			configFile := filepath.Join(filePath, deviceplugin.VGPUConfigDirName, deviceplugin.VGPUConfigFileName)
+			configFile := filepath.Join(filePath, util.Config, deviceplugin.VGPUConfigFileName)
 			resourceData, err := vgpu.NewResourceData(configFile)
 			if err != nil && os.IsNotExist(err) {
 				// TODO Retaining the old directory is to adapt to the old pods.

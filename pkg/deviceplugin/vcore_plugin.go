@@ -2,9 +2,9 @@ package deviceplugin
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
@@ -40,8 +40,7 @@ func (m *vcoreDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *plugina
 	return &pluginapi.DevicePluginOptions{}, nil
 }
 
-// ListAndWatch returns a stream of List of Devices,
-// Whenever a Device state change or a Device disappears,
+// ListAndWatch returns a stream of List of Devices, Whenever a Device state change or a Device disappears,
 // ListAndWatch returns the new list.
 func (m *vcoreDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
@@ -93,7 +92,7 @@ func (m *vcoreDevicePlugin) Devices() []*pluginapi.Device {
 			continue
 		}
 		for i := int64(0); i < gpuDevice.Core; i++ {
-			devId := fmt.Sprintf("vcore-%d-%d", gpuDevice.Id, i)
+			devId := util.MakeDeviceID(int64(gpuDevice.Id), i)
 			health := pluginapi.Healthy
 			if !gpuDevice.Healthy {
 				health = pluginapi.Unhealthy

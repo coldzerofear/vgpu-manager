@@ -12,6 +12,7 @@ import (
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/component-base/logs"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -20,11 +21,11 @@ import (
 )
 
 func main() {
-	klog.InitFlags(flag.CommandLine)
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
 	opt.PrintAndExitIfRequested()
-	defer klog.Flush()
+	logs.InitLogs()
+	defer logs.FlushLogs()
 	log.SetLogger(klog.NewKlogr())
 	util.SetGlobalDomain(opt.Domain)
 
@@ -60,8 +61,8 @@ func main() {
 	server.Register("/healthz", probeHandler)
 	server.Register("/readyz", probeHandler)
 
-	if err := pkgwebhook.RegistryWebhookToServer(server, scheme.Scheme, opt); err != nil {
-		klog.Fatalf("Registry webhook to server failed: %v", err)
+	if err := pkgwebhook.RegisterWebhookToServer(server, scheme.Scheme, opt); err != nil {
+		klog.Fatalf("Register webhook to server failed: %v", err)
 	}
 
 	klog.Infoln("Starting webhook server")

@@ -1,6 +1,5 @@
 package vmem
 
-import "C"
 import (
 	"fmt"
 	"os"

@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/component-base/featuregate"
+	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
@@ -36,6 +37,7 @@ type Options struct {
 	PprofBindPort       int
 	GDSEnabled          bool
 	MOFEDEnabled        bool
+	OpenKernelModules   bool
 	MigStrategy         string
 	ImexChannelIDs      []int
 	ImexRequired        bool
@@ -68,6 +70,8 @@ const (
 	SMWatcher featuregate.Feature = util.SMWatcher
 	// VMemoryNode feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
 	VMemoryNode featuregate.Feature = util.VMemoryNode
+	// ClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
+	ClientMode featuregate.Feature = util.ClientMode
 )
 
 var (
@@ -79,6 +83,7 @@ var (
 		GPUTopology:  {Default: false, PreRelease: featuregate.Alpha},
 		SMWatcher:    {Default: false, PreRelease: featuregate.Alpha},
 		VMemoryNode:  {Default: false, PreRelease: featuregate.Alpha},
+		ClientMode:   {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -120,6 +125,7 @@ func NewOptions() *Options {
 }
 
 func (o *Options) InitFlags(fs *flag.FlagSet) {
+	klog.InitFlags(fs)
 	pflag.CommandLine.SortFlags = false
 	pflag.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
 	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
@@ -139,16 +145,21 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable service)")
 	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")
 	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
+	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")
 	pflag.BoolVar(&o.ImexRequired, "imex-required", o.ImexRequired, "The specified IMEX channels are required.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
+}
+
+func (o *Options) FlagParse() {
 	pflag.Parse()
 }
 
 func (o *Options) PrintAndExitIfRequested() {
+	o.FlagParse()
 	if version {
 		fmt.Printf("%#v\n", pkgversion.Get())
 		os.Exit(0)

@@ -51,17 +51,24 @@ extern "C" {
  * Controller configuration file name
  */
 #define CONTROLLER_CONFIG_FILE_NAME "vgpu.config"
-
 /**
  * Controller configuration file path
  */
 #define CONTROLLER_CONFIG_FILE_PATH (VGPU_MANAGER_PATH "/config/" CONTROLLER_CONFIG_FILE_NAME)
 
 /**
+ * Container pids configuration file name
+ */
+#define CONTAINER_PIDS_CONFIG_FILE_NAME "pids.config"
+/**
+ * Container pids configuration file path
+ */
+#define CONTAINER_PIDS_CONFIG_FILE_PATH (VGPU_MANAGER_PATH "/config/" CONTAINER_PIDS_CONFIG_FILE_NAME)
+
+/**
  * Controller sm utilization watcher file name
  */
 #define CONTROLLER_SM_UTIL_FILE_NAME "sm_util.config"
-
 /**
  * Controller sm utilization watcher file path
  */
@@ -71,7 +78,6 @@ extern "C" {
  * Controller driver file name
  */
 #define CONTROLLER_DRIVER_FILE_NAME "libvgpu-control.so"
-
 /**
  * Controller driver file path
  */
@@ -79,15 +85,18 @@ extern "C" {
 
 #define PID_SELF_CGROUP_PATH "/proc/self/cgroup"
 
+#define PID_SELF_NS_PATH "/proc/self/ns"
+
 #define HOST_PROC_PATH (VGPU_MANAGER_PATH "/.host_proc")
 
 #define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%d/cgroup")
 
 #define HOST_CGROUP_PATH (VGPU_MANAGER_PATH "/.host_cgroup")
 
-#define HOST_CGROUP_PID_BASE_PATH (VGPU_MANAGER_PATH "/.host_cgroup/%s")
-
 #define CGROUP_PROCS_FILE "cgroup.procs"
+#define CGROUP_THREADS_FILE "cgroup.threads"
+
+#define HOST_CGROUP_PID_BASE_PATH (VGPU_MANAGER_PATH "/.host_cgroup/%s")
 
 #define TMP_DIR "/tmp"
 
@@ -255,7 +264,8 @@ typedef enum VGPU_COMPATIBILITY_MODE_enum {
   HOST_COMPATIBILITY_MODE        = 0,
   CGROUPV1_COMPATIBILITY_MODE    = 1,
   CGROUPV2_COMPATIBILITY_MODE    = 2,
-  OPEN_KERNEL_COMPATIBILITY_MODE = 100
+  OPEN_KERNEL_COMPATIBILITY_MODE = 100,
+  CLIENT_COMPATIBILITY_MODE      = 200
 } VGPU_COMPATIBILITY_MODE;
 
 extern void* _dl_sym(void*, const char*, void*);
@@ -303,9 +313,9 @@ static const char *_level_names[] = {
       _print_level = _print_level > DETAIL ? DETAIL : _print_level; \
     }                                                               \
     if (level >= 0 && level <= _print_level) {                      \
-      fprintf(stderr, "[vGPU %s(%d|%s|%d)]: " format "\n",          \
-      _level_names[level], getpid(), basename(__FILE__),            \
-      __LINE__, ##__VA_ARGS__);                                     \
+      fprintf(stderr, "[vGPU %s(%d|%ld|%s|%d)]: " format "\n",      \
+              _level_names[level], getpid(), pthread_self(),        \
+              basename(__FILE__), __LINE__, ##__VA_ARGS__);         \
     }                                                               \
     if (unlikely(level == FATAL)) {                                 \
       exit(1);                                                      \
@@ -337,6 +347,8 @@ int get_nvml_device_index_by_cuda_device(CUdevice device);
 int get_host_device_index_by_cuda_device(CUdevice device);
 
 int get_host_device_index_by_nvml_device(nvmlDevice_t device);
+
+void register_to_remote_with_data(const char* pod_uid, const char* container);
 
 #ifdef __cplusplus
 }

@@ -95,19 +95,29 @@ build: fmt vet ## Build binary.
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
         -o bin/webhook cmd/webhook/*.go
+	CGO_ENABLED=0 GOOS=$(GOOS) go build -ldflags=" \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
+        -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
+        -o bin/device-client cmd/client/*.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH=$(GIT_BRANCH) --build-arg APT_MIRROR=$(APT_MIRROR) \
-      --build-arg GIT_COMMIT=$(GIT_COMMIT) --build-arg GIT_TREE_STATE=$(GIT_TREE_STATE) \
-      --build-arg BUILD_DATE=$(BUILD_DATE) -t "${IMG}" -f Dockerfile .
+	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH="${GIT_BRANCH}" --build-arg APT_MIRROR="${APT_MIRROR}" \
+      --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
+      --build-arg BUILD_DATE="${BUILD_DATE}" -t "${IMG}" -f Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push docker image.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: generate
+generate: ## API code generation.
+	protoc --go_out=. --go-grpc_out=. pkg/api/registry/api.proto
 
 ##@ Release
 #.PHONY: publish # Push the image to the remote registry

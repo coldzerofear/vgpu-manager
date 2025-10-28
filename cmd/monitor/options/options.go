@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/component-base/featuregate"
+	"k8s.io/klog/v2"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
@@ -68,6 +69,7 @@ func NewOptions() *Options {
 }
 
 func (o *Options) InitFlags(fs *flag.FlagSet) {
+	klog.InitFlags(fs)
 	pflag.CommandLine.SortFlags = false
 	pflag.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
 	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
@@ -82,10 +84,14 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
+}
+
+func (o *Options) FlagParse() {
 	pflag.Parse()
 }
 
 func (o *Options) PrintAndExitIfRequested() {
+	o.FlagParse()
 	if version {
 		fmt.Printf("%#v\n", pkgversion.Get())
 		os.Exit(0)

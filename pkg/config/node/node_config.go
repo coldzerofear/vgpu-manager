@@ -36,6 +36,7 @@ type ConfigSpec struct {
 	GDSEnabled          *bool      `json:"gdsEnabled,omitempty"          yaml:"gdsEnabled,omitempty"`
 	MOFEDEnabled        *bool      `json:"mofedEnabled,omitempty"        yaml:"mofedEnabled,omitempty"`
 	MigStrategy         *string    `json:"migStrategy,omitempty"         yaml:"migStrategy,omitempty"`
+	OpenKernelModules   *bool      `json:"openKernelModules,omitempty"   yaml:"openKernelModules,omitempty"`
 	Imex                *imex.Imex `json:"imex,omitempty"                yaml:"imex,omitempty"`
 }
 
@@ -120,6 +121,13 @@ func (nc NodeConfigSpec) GetMOFEDEnabled() bool {
 	return *nc.MOFEDEnabled
 }
 
+func (nc NodeConfigSpec) GetOpenKernelModules() bool {
+	if nc.OpenKernelModules == nil {
+		return false
+	}
+	return *nc.OpenKernelModules
+}
+
 func (nc NodeConfigSpec) GetMigStrategy() string {
 	if nc.MigStrategy == nil {
 		return ""
@@ -201,6 +209,9 @@ func (nc NodeConfigSpec) checkNodeConfig() (errs []error) {
 	if nc.GetDeviceCoresScaling() < 0 || nc.GetDeviceCoresScaling() > 1 {
 		errs = append(errs, fmt.Errorf("deviceCoresScaling must be any number greater than or equal to 0 but less than or equal to 1"))
 	}
+	if err := imex.AssertChannelIDsValid(nc.GetIMEX().ChannelIDs); err != nil {
+		errs = append(errs, fmt.Errorf("invalid IMEX channel IDs: %w", err))
+	}
 	return errs
 }
 
@@ -277,6 +288,7 @@ func WithDevicePluginOptions(opt dpoptions.Options) Option {
 		nodeConfig.ExcludeDevices = ptr.To[IDStore](parseDeviceIDs(opt.ExcludeDevices))
 		nodeConfig.GDSEnabled = ptr.To[bool](opt.GDSEnabled)
 		nodeConfig.MOFEDEnabled = ptr.To[bool](opt.MOFEDEnabled)
+		nodeConfig.OpenKernelModules = ptr.To[bool](opt.OpenKernelModules)
 		if len(opt.ImexChannelIDs) > 0 {
 			nodeConfig.Imex = &imex.Imex{
 				ChannelIDs: opt.ImexChannelIDs,
@@ -336,6 +348,9 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 		if config.MigStrategy != nil {
 			nodeConfig.MigStrategy = config.MigStrategy
 		}
+		if config.OpenKernelModules != nil {
+			nodeConfig.OpenKernelModules = config.OpenKernelModules
+		}
 		if config.Imex != nil {
 			nodeConfig.Imex = config.Imex
 		}
@@ -344,27 +359,32 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 	return nil
 }
 
-func NewNodeConfig(option Option, checkFields bool) (*NodeConfigSpec, error) {
+func NewNodeConfig(option Option, checkFields bool) (config *NodeConfigSpec, err error) {
 	if option == nil {
 		return nil, fmt.Errorf("node config option cannot is empty")
 	}
-	nodeConfig := &NodeConfigSpec{}
-	option(nodeConfig)
+	config = &NodeConfigSpec{}
+	option(config)
 
-	if len(nodeConfig.nodeConfigPath) > 0 {
-		if err := loadConfigSpec(nodeConfig); err != nil {
+	if len(config.nodeConfigPath) > 0 {
+		if err = loadConfigSpec(config); err != nil {
 			return nil, err
 		}
 	}
 	if checkFields {
-		errs := nodeConfig.checkNodeConfig()
-		var errMsg []string
-		for _, err := range errs {
-			errMsg = append(errMsg, err.Error())
-		}
-		if len(errMsg) > 0 {
-			return nil, fmt.Errorf("%s", strings.Join(errMsg, ", "))
-		}
+		errs := config.checkNodeConfig()
+		err = MergeError(errs)
 	}
-	return nodeConfig, nil
+	return config, err
+}
+
+func MergeError(errs []error) error {
+	errMsgs := make([]string, len(errs))
+	for i, err := range errs {
+		errMsgs[i] = err.Error()
+	}
+	if len(errMsgs) > 0 {
+		return fmt.Errorf("%s", strings.Join(errMsgs, "; "))
+	}
+	return nil
 }

@@ -149,6 +149,18 @@ func (r *ResourceData) Munmap() error {
 	return syscall.Munmap(r.resourceData)
 }
 
+func CheckResourceDataSize(filePath string) error {
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return err
+	}
+	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
+	if fileInfo.Size() != dataSize {
+		return fmt.Errorf("vGPU config file size mismatch, expected: %d, actual: %d", dataSize, fileInfo.Size())
+	}
+	return nil
+}
+
 func NewResourceData(filePath string) (*ResourceData, error) {
 	cfg, data, err := MmapResourceDataT(filePath)
 	if err != nil {
@@ -175,11 +187,14 @@ const (
 	CGroupv1Mode   CompatibilityMode = 1
 	CGroupv2Mode   CompatibilityMode = 2
 	OpenKernelMode CompatibilityMode = 100
+	ClientMode     CompatibilityMode = 200
 )
 
-func getCompatibilityMode() CompatibilityMode {
+func getCompatibilityMode(devManager *manager.DeviceManager) CompatibilityMode {
 	mode := HostMode
 	switch {
+	case devManager.GetFeatureGate().Enabled(util.ClientMode):
+		mode |= ClientMode
 	case cgroups.IsCgroup2UnifiedMode():
 		mode |= CGroupv2Mode
 	case cgroups.IsCgroup2HybridMode():
@@ -187,21 +202,14 @@ func getCompatibilityMode() CompatibilityMode {
 	default:
 		mode |= CGroupv1Mode
 	}
-	if mode != HostMode {
+	if devManager.GetNodeConfig().GetOpenKernelModules() {
 		mode |= OpenKernelMode
 	}
 	return mode
 }
 
 func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		//klog.Errorf("Failed to stat file: %s, error: %v", filePath, err)
-		return nil, nil, err
-	}
-	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
-	if fileInfo.Size() != dataSize {
-		err = fmt.Errorf("file size mismatch, expected: %d, actual: %d", dataSize, fileInfo.Size())
+	if err := CheckResourceDataSize(filePath); err != nil {
 		klog.Errorln(err)
 		return nil, nil, err
 	}
@@ -213,6 +221,7 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 	defer func() {
 		_ = f.Close()
 	}()
+	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
 	data, err := syscall.Mmap(int(f.Fd()), 0, int(dataSize), syscall.PROT_WRITE|syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
 		klog.Errorf("Failed to mmap file: %s, error: %v", filePath, err)
@@ -314,7 +323,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		}
 		devices[gpuDevice.Id] = dev
 	}
-
+	compMode := getCompatibilityMode(devManager)
 	data := &ResourceDataT{
 		DriverVersion: VersionT{
 			Major: int32(major),
@@ -325,7 +334,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		PodNamespace:      convert64Bytes(pod.Namespace),
 		ContainerName:     convert64Bytes(assignDevices.Name),
 		Devices:           devices,
-		CompatibilityMode: int32(getCompatibilityMode()),
+		CompatibilityMode: int32(compMode),
 		SMWatcher:         int32(smWatcher),
 		VMemoryNode:       int32(vMemoryNode),
 	}
@@ -363,7 +372,8 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		driverVersion.major = C.int(major)
 		driverVersion.minor = C.int(minor)
 		vgpuConfig.driver_version = driverVersion
-		vgpuConfig.compatibility_mode = C.int(getCompatibilityMode())
+		compMode := getCompatibilityMode(devManager)
+		vgpuConfig.compatibility_mode = C.int(compMode)
 		if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
 			vgpuConfig.sm_watcher = C.int(1)
 		} else {

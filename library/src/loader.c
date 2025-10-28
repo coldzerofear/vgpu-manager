@@ -1278,7 +1278,7 @@ int mmap_file_to_config_path(resource_data_t** data) {
   }
   if (sb.st_size != sizeof(resource_data_t)) {
     LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
-                    sizeof(resource_data_t), (long long)sb.st_size);
+                  sizeof(resource_data_t), (long long)sb.st_size);
     ret = 1;
     goto DONE;
   }
@@ -1645,10 +1645,8 @@ void get_host_device_index_by_uuid(char *uuid, int *host_index) {
 
 int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
   int nvml_index;
-  nvmlReturn_t ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
+  nvmlReturn_t ret = NVML_INTERNAL_CHECK(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
   if (unlikely(ret)) {
-    LOGGER(VERBOSE, "nvmlDeviceGetIndex call failed, return %d, str: %s",
-                     ret, NVML_ERROR(nvml_library_entry, ret));
     return -1;
   }
   int host_index = nvml_to_host_device_index[nvml_index];
@@ -1659,7 +1657,7 @@ int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
   host_index = nvml_to_host_device_index[nvml_index];
   if (host_index < 0) {
     char uuid[UUID_BUFFER_SIZE];
-    ret = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetUUID, device, uuid, UUID_BUFFER_SIZE);
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetUUID, device, uuid, UUID_BUFFER_SIZE);
     if (unlikely(ret)) {
       LOGGER(VERBOSE, "nvmlDeviceGetUUID call failed, host device %d, return %d, str: %s",
                        host_index, ret, NVML_ERROR(nvml_library_entry, ret));
@@ -1693,12 +1691,12 @@ int _get_host_device_index_by_cuda_device(CUdevice device) {
   if (host_index < 0) {
     CUuuid cu_uuid;
     CUresult ret;
-    if (likely(NVML_FIND_ENTRY(cuda_library_entry, cuDeviceGetUuid_v2))) {
-      ret = NVML_ENTRY_CALL(cuda_library_entry, cuDeviceGetUuid_v2, &cu_uuid, device);
-    } else if (likely(NVML_FIND_ENTRY(cuda_library_entry, cuDeviceGetUuid))){
-      ret = NVML_ENTRY_CALL(cuda_library_entry, cuDeviceGetUuid, &cu_uuid, device);
+    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetUuid_v2))) {
+      ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetUuid_v2, &cu_uuid, device);
+    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetUuid))){
+      ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetUuid, &cu_uuid, device);
     } else {
-      ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+      ret = CUDA_ERROR_NOT_FOUND;
     }
     if (unlikely(ret)) {
       LOGGER(VERBOSE, "cuDeviceGetUuid can't get uuid on cuda device %d, return %d, str: %s",
@@ -1851,10 +1849,10 @@ DONE:
   *used_memory = count;
 }
 
-static volatile int init_config_flag = 0;
+static volatile pid_t init_current_pid = 0;
 
 int load_controller_configuration() {
-  if (likely(init_config_flag)) {
+  if (likely(init_current_pid == getpid())) {
     return 0;
   }
   int ret = 1;
@@ -1867,7 +1865,7 @@ int load_controller_configuration() {
 
   ret = mmap_file_to_config_path(&g_vgpu_config);
   if (likely(ret == 0)) {
-    init_config_flag = 1;
+    init_current_pid = getpid();
     print_global_vgpu_config();
     if (g_vgpu_config->sm_watcher) {
       ret = mmap_file_to_util_path(CONTROLLER_SM_UTIL_FILE_PATH, &g_device_util);
@@ -1882,8 +1880,12 @@ int load_controller_configuration() {
       }
       check_vmem_nodes();
       if (atexit(exit_cleanup_vmem_nodes) != 0) {
-        LOGGER(FATAL ,"register exit handler failed: %d", errno);
+        LOGGER(ERROR ,"register exit handler failed: %d", errno);
       }
+    }
+    if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
+      LOGGER(VERBOSE, "register to remote manager: uid: %s", g_vgpu_config->pod_uid);
+      register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name);
     }
     goto DONE;
   }
@@ -1996,8 +1998,12 @@ int load_controller_configuration() {
       LOGGER(FATAL ,"register exit handler failed: %d", errno);
     }
   }
+  if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
+    LOGGER(VERBOSE, "register to remote manager: uid: %s", g_vgpu_config->pod_uid);
+    register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name);
+  }
   ret = 0;
-  init_config_flag = 1;
+  init_current_pid = getpid();
 DONE:
   return ret;
 }
@@ -2005,40 +2011,40 @@ DONE:
 void init_nvml_to_host_device_index() {
   nvmlReturn_t rt;
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlInitWithFlags))) {
-    rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlInitWithFlags, 0);
+    rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlInitWithFlags, 0);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlInit_v2))) {
-    rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlInit_v2);
+    rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlInit_v2);
   } else {
-    rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlInit);
+    rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlInit);
   }
   if (unlikely(rt)) {
-    LOGGER(FATAL, "nvmlInit failed, return %d, str: %s", rt, NVML_ERROR(nvml_library_entry, rt));
+    LOGGER(FATAL, "nvmlInit failed, return: %d, str: %s", rt, NVML_ERROR(nvml_library_entry, rt));
   }
 
   unsigned int device_count;
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetCount))) {
-    rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetCount, &device_count);
+    rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetCount, &device_count);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetCount_v2))) {
-    rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetCount_v2, &device_count);
+    rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetCount_v2, &device_count);
   } else {
     rt = NVML_ERROR_FUNCTION_NOT_FOUND;
   }
   if (unlikely(rt)) {
-    LOGGER(FATAL, "nvmlDeviceGetCount call failed, return %d, str: %s", rt, NVML_ERROR(nvml_library_entry, rt));
+    LOGGER(FATAL, "nvmlDeviceGetCount call failed, return: %d, str: %s", rt, NVML_ERROR(nvml_library_entry, rt));
   }
 
   nvmlDevice_t device;
   for (int device_index = 0; device_index < device_count; device_index++) {
     if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
-      rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_index, &device);
+      rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_index, &device);
     } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
-      rt = NVML_ENTRY_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_index, &device);
+      rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_index, &device);
     } else {
       rt = NVML_ERROR_FUNCTION_NOT_FOUND;
     }
     if (unlikely(rt)) {
-      LOGGER(ERROR, "nvmlDeviceGetHandleByIndex call failed, nvml device %d, return %d, str: %s",
-                    device_index, rt, NVML_ERROR(nvml_library_entry, rt));
+      LOGGER(ERROR, "nvmlDeviceGetHandleByIndex call failed, nvml device: %d, return: %d, str: %s",
+                     device_index, rt, NVML_ERROR(nvml_library_entry, rt));
       continue;
     }
     get_host_device_index_by_nvml_device(device);
@@ -2047,7 +2053,9 @@ void init_nvml_to_host_device_index() {
 
 void _load_necessary_data() {
   // First, determine the driver version
-  read_version_from_proc(driver_version);
+  if (strcmp(driver_version, "1") == 0) {
+    read_version_from_proc(driver_version);
+  }
   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
   // Initialize the driver library
   pthread_once(&g_nvml_lib_init, load_nvml_libraries);

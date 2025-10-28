@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	"github.com/NVIDIA/go-nvlib/pkg/nvlib/info"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
@@ -162,8 +163,8 @@ func WithDeviceLib(lib *nvidia.DeviceLib) OptionFunc {
 	}
 }
 
-func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceManager, error) {
-	m := &DeviceManager{
+func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (m *DeviceManager, err error) {
+	m = &DeviceManager{
 		config:               config,
 		unhealthy:            make(chan *Device),
 		notify:               make(map[string]chan *Device),
@@ -176,33 +177,23 @@ func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceM
 	if m.client == nil {
 		m.client = fake.NewSimpleClientset()
 	}
-	if m.DeviceLib == nil {
-		driverlib, err := nvidia.NewDeviceLib("/")
-		if err != nil {
-			klog.Error("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
-			klog.Error("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
-			klog.Error("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
-			klog.Error("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
-			return nil, err
-		}
-		m.DeviceLib = driverlib
-	}
 	if m.featureGate == nil {
 		m.featureGate = featuregate.NewFeatureGate()
 	}
-	if err := m.NvmlInit(); err != nil {
-		klog.Errorf("If this is a GPU node, did you set the default container runtime to `nvidia`?")
-		klog.Errorf("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
-		klog.Errorf("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
-		klog.Errorf("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
-		return nil, err
+	if m.DeviceLib == nil {
+		if m.DeviceLib, err = nvidia.InitDeviceLib("/"); err != nil {
+			return nil, err
+		}
 	}
-	defer m.NvmlShutdown()
-	err := m.initDevices()
-	return m, err
+	return m, m.initDevices()
 }
 
 func (m *DeviceManager) initDevices() (err error) {
+	if err = m.NvmlInit(); err != nil {
+		return err
+	}
+	defer m.NvmlShutdown()
+
 	driverVersion, ret := m.SystemGetDriverVersion()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error getting driver version: %s", nvml.ErrorString(ret))
@@ -255,6 +246,7 @@ func (m *DeviceManager) initDevices() (err error) {
 			klog.V(5).InfoS("nvidia-smi topo -m output", "result", string(out))
 		}
 	}
+	platform := m.ResolvePlatform()
 
 	excludeDevices := m.config.GetExcludeDevices()
 	err = m.VisitDevices(func(i int, d nvdev.Device) error {
@@ -262,7 +254,6 @@ func (m *DeviceManager) initDevices() (err error) {
 		if err != nil {
 			return fmt.Errorf("error getting info for GPU %d: %w", i, err)
 		}
-
 		numaNode, _ := gpuInfo.GetNumaNode()
 
 		healthy := true
@@ -275,9 +266,12 @@ func (m *DeviceManager) initDevices() (err error) {
 			healthy = false
 		}
 
-		paths, err := gpuInfo.GetPaths()
-		if err != nil {
-			return fmt.Errorf("error getting device paths for GPU %d: %v", i, err)
+		var paths []string
+		if platform == info.PlatformWSL {
+			wslGpuInfo := nvidia.WslGpuInfo{GpuInfo: gpuInfo}
+			paths, _ = wslGpuInfo.GetPaths()
+		} else {
+			paths, _ = gpuInfo.GetPaths()
 		}
 		var p2pLinks map[int][]links.P2PLinkType
 		if gpuTopologyEnabled {
@@ -293,6 +287,10 @@ func (m *DeviceManager) initDevices() (err error) {
 			Links:    p2pLinks,
 		}}
 		m.devices = append(m.devices, gpuDevice)
+
+		if m.GetNodeConfig().GetMigStrategy() == util.MigStrategyNone {
+			return nil
+		}
 
 		migInfos, err := m.GetMigInfos(gpuInfo)
 		if err != nil {
@@ -415,9 +413,9 @@ func (m *DeviceManager) Start() {
 	m.initialize()
 	klog.V(4).Infoln("DeviceManager starting handle notify...")
 	go m.handleNotify()
-	klog.V(4).Infoln("DeviceManager starting registry devices...")
+	klog.V(4).Infoln("DeviceManager starting registry node devices...")
 	go m.registryDevices()
-	klog.V(4).Infoln("DeviceManager starting check health...")
+	klog.V(4).Infoln("DeviceManager starting check devices health...")
 	go func() {
 		if err := m.checkHealth(); err != nil {
 			klog.Errorf("Failed to start health check: %v; continuing with health checks disabled", err)

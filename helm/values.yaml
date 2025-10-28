@@ -122,6 +122,8 @@ devicePlugin:
   cgroupDriver: ""
   devicePlugin:
     env:
+      - name: DP_ENABLE_HEALTHCHECKS
+        value: ""
       - name: DP_DISABLE_HEALTHCHECKS
         value: ""
       - name: KUBE_FEATURE_WatchListClient
@@ -143,6 +145,8 @@ devicePlugin:
       pprofBindPort: 0
       gdsEnabled: false
       mofedEnabled: false
+      # If using the open-gpu-kernel-modules, open it and enable compatibility mode. (default: false)
+      openKernelModules: false
       # Strategy for starting MIG device plugin service (supported values: "none" | "single" | "mixed")
       migStrategy: mixed
       # Supported feature gates:
@@ -157,11 +161,11 @@ devicePlugin:
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
     resources: {}
 #      requests:
-#        cpu: 100m
-#        memory: 128Mi
+#        cpu: 200m
+#        memory: 256Mi
 #      limits:
-#        cpu: 1000m
-#        memory: 1Gi
+#        cpu: 2000m
+#        memory: 2Gi
   deviceMonitor:
     env:
       - name: KUBE_FEATURE_WatchListClient
@@ -202,6 +206,7 @@ devicePlugin:
          excludeDevices: "4..7"
          gdsEnabled: false
          mofedEnabled: false
+         openKernelModules: false
 #    json: |
 #      [
 #        {
@@ -214,7 +219,8 @@ devicePlugin:
 #          "deviceCoresScaling": 1,
 #          "excludeDevices": "4-7",
 #          "gdsEnabled": false,
-#          "mofedEnabled": false
+#          "mofedEnabled": false,
+#          "openKernelModules": false
 #        }
 #      ]
 
