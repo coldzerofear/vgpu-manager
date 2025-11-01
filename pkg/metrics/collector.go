@@ -335,9 +335,11 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devTypeMap[gpuInfo.UUID] = gpuInfo.ProductName
 		devMemInfoMap[gpuInfo.UUID] = gpuInfo.Memory
 		busId := links.PciInfo(gpuInfo.PciInfo).BusID()
-		numa := links.PciInfo(gpuInfo.PciInfo).NumaNode()
 		migEnabled := fmt.Sprint(gpuInfo.MigEnabled)
-		numaNode := strconv.Itoa(int(numa))
+		var numaNode string
+		if numa := links.PciInfo(gpuInfo.PciInfo).NumaNode(); numa >= 0 {
+			numaNode = strconv.Itoa(int(numa))
+		}
 		deviceIndex := strconv.Itoa(index)
 		minorNumber := strconv.Itoa(gpuInfo.Minor)
 		ch <- prometheus.MustNewConstMetric(

@@ -9,9 +9,9 @@ extern resource_data_t* g_vgpu_config;
 extern int lock_gpu_device(int host_index);
 extern void unlock_gpu_device(int fd);
 
-nvmlReturn_t nvmlInitWithFlags(unsigned int flags);
-nvmlReturn_t nvmlInit_v2(void);
 nvmlReturn_t nvmlInit(void);
+nvmlReturn_t nvmlInit_v2(void);
+nvmlReturn_t nvmlInitWithFlags(unsigned int flags);
 nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory);
 nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *memory);
 nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device, nvmlComputeMode_t mode);
@@ -130,6 +130,7 @@ DONE:
 
 nvmlReturn_t nvmlDeviceGetPersistenceMode(nvmlDevice_t device, nvmlEnableState_t *mode) {
   // fix: https://forums.developer.nvidia.com/t/nvidia-smi-uses-all-of-ram-and-swap/295639/15
+  LOGGER(5, "hooking nvmlDeviceGetPersistenceMode");
   *mode = NVML_FEATURE_DISABLED;
   return NVML_SUCCESS;
 }

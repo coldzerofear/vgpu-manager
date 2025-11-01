@@ -1926,3 +1926,11 @@ nvmlReturn_t nvmlDeviceGetRunningProcessDetailList(nvmlDevice_t device,
   return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetRunningProcessDetailList,
                          device, plist);
 }
+
+nvmlReturn_t nvmlDeviceGetNumaNodeId(nvmlDevice_t device, unsigned int *numaId) {
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetNumaNodeId, device, numaId);
+}
+
+nvmlReturn_t nvmlDeviceGetCapabilities(nvmlDevice_t device, nvmlDeviceCapabilities_t *caps) {
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCapabilities, device, caps);
+}

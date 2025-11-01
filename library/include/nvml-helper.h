@@ -670,6 +670,8 @@ typedef enum {
   NVML_ENTRY_ENUM(nvmlDeviceGetConfComputeGpuCertificate),
   NVML_ENTRY_ENUM(nvmlDeviceGetConfComputeGpuAttestationReport),
   NVML_ENTRY_ENUM(nvmlDeviceGetRunningProcessDetailList),
+  NVML_ENTRY_ENUM(nvmlDeviceGetNumaNodeId),
+  NVML_ENTRY_ENUM(nvmlDeviceGetCapabilities),
   NVML_ENTRY_END
 } nvml_entry_enum_t;
 
