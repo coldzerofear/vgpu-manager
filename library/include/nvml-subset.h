@@ -1663,6 +1663,15 @@ typedef struct
 
 typedef nvmlProcessDetailList_v1_t nvmlProcessDetailList_t;
 
+// Device capabilities
+typedef struct
+{
+    unsigned int  capMask; // OUT: Bit mask of capabilities.
+    unsigned int  version; // the API version number
+} nvmlDeviceCapabilities_v1_t;
+
+typedef nvmlDeviceCapabilities_v1_t nvmlDeviceCapabilities_t;
+
 /**
  * nvmlProcessDetailList version
  */

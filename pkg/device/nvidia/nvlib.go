@@ -307,7 +307,10 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		return nil, fmt.Errorf("error getting pci info for device %d: %v", index, ret)
 	}
 	minor, ret := device.GetMinorNumber()
-	if ret != nvml.SUCCESS {
+	if ret == nvml.ERROR_NOT_SUPPORTED {
+		minor = index
+		klog.Warningf("device %d not support getting minor number, try using index as minor number", index)
+	} else if ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("error getting minor number for device %d: %v", index, ret)
 	}
 	uuid, ret := device.GetUUID()

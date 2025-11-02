@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,7 @@ func MustInitCGroupDriver(cgroupDriver string) {
 			getCgroupDriverFuncs := []func() (CGroupDriver, error){
 				readKubeletConfigCgroupDriver,
 				readKubeadmFlagsCgroupDriver,
+				getCgroupDriverFromKubeletProcess,
 				detectCgroupDriver,
 			}
 			var err error
@@ -144,8 +146,116 @@ out:
 	}
 }
 
+// getCgroupDriverFromKubeletProcess gets cgroup driver by finding kubelet process and parsing its command line arguments
+// This function is separated for easier unit testing
+func getCgroupDriverFromKubeletProcess() (CGroupDriver, error) {
+	// Find kubelet process
+	kubeletPID, err := findKubeletProcess()
+	if err != nil {
+		//klog.V(4).Infof("Failed to find kubelet process: %v", err)
+		return "", err
+	}
+
+	// Read command line arguments from /proc/<pid>/cmdline
+	cmdline, err := readProcessCmdline(kubeletPID)
+	if err != nil {
+		//klog.V(4).Infof("Failed to read kubelet cmdline: %v", err)
+		return "", err
+	}
+
+	// Parse cgroup driver from command line arguments
+	return parseCgroupDriverFromCmdline(cmdline)
+}
+
+// parseCgroupDriverFromCmdline parses cgroup driver from command line arguments
+func parseCgroupDriverFromCmdline(args []string) (CGroupDriver, error) {
+	// First, try to find --cgroup-driver parameter
+	for i, arg := range args {
+		// Handle both formats: "--cgroup-driver=value" and "--cgroup-driver value"
+		var driver string
+		if strings.HasPrefix(arg, "--cgroup-driver=") {
+			driver = strings.TrimPrefix(arg, "--cgroup-driver=")
+
+		} else if arg == "--cgroup-driver" && i+1 < len(args) {
+			driver = args[i+1]
+		}
+		if driver == string(SYSTEMD) {
+			return SYSTEMD, nil
+		}
+		if driver == string(CGROUPFS) {
+			return CGROUPFS, nil
+		}
+	}
+	return "", fmt.Errorf("failed to parse cgroup driver from args: %v", args)
+}
+
+// findKubeletProcess finds the kubelet process PID by reading /proc filesystem
+func findKubeletProcess() (int, error) {
+	procDir, err := os.Open("/proc")
+	if err != nil {
+		return 0, fmt.Errorf("failed to open /proc: %v", err)
+	}
+	defer procDir.Close()
+
+	entries, err := procDir.Readdirnames(0)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read /proc directory: %v", err)
+	}
+
+	for _, entry := range entries {
+		// Check if entry is a numeric PID
+		pid, err := strconv.Atoi(entry)
+		if err != nil {
+			continue // Skip non-numeric entries
+		}
+
+		// Read process comm file to get process name
+		commPath := filepath.Join("/proc", entry, "comm")
+		commData, err := os.ReadFile(commPath)
+		if err != nil {
+			continue // Skip if we can't read comm file
+		}
+
+		// Check if this is kubelet process
+		comm := strings.TrimSpace(string(commData))
+		if comm == "kubelet" {
+			return pid, nil
+		}
+	}
+
+	return 0, fmt.Errorf("kubelet process not found")
+}
+
+// readProcessCmdline reads the command line arguments from /proc/<pid>/cmdline
+func readProcessCmdline(pid int) ([]string, error) {
+	cmdlinePath := filepath.Join("/proc", strconv.Itoa(pid), "cmdline")
+	cmdlineData, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read cmdline file: %v", err)
+	}
+
+	// Split by null bytes and filter out empty strings
+	var args []string
+	for _, arg := range strings.Split(string(cmdlineData), "\x00") {
+		if arg != "" {
+			args = append(args, arg)
+		}
+	}
+
+	return args, nil
+}
+
 // detectCgroupDriver detects the cgroup driver (cgroupfs or systemd) on the system
 func detectCgroupDriver() (CGroupDriver, error) {
+	_, err1 := os.Stat("/sys/fs/cgroup/kubepods.slice")
+	_, err2 := os.Stat("/sys/fs/cgroup/kubepods")
+	switch {
+	case err1 == nil && err2 != nil:
+		return SYSTEMD, nil
+	case err2 == nil && err1 != nil:
+		return CGROUPFS, nil
+	}
+
 	// Check if systemd is managing cgroups by looking for systemd cgroup hierarchy
 	// In systemd-managed systems, there's typically a systemd slice at the root
 	if _, err := os.Stat("/sys/fs/cgroup/system.slice"); err == nil {

@@ -977,6 +977,8 @@ entry_t nvml_library_entry[] = {
     {.name = "nvmlDeviceGetConfComputeGpuCertificate"},
     {.name = "nvmlDeviceGetConfComputeGpuAttestationReport"},
     {.name = "nvmlDeviceGetRunningProcessDetailList"},
+    {.name = "nvmlDeviceGetNumaNodeId"},
+    {.name = "nvmlDeviceGetCapabilities"},
 };
 
 static void UNUSED bug_on() {
@@ -988,6 +990,7 @@ static void UNUSED bug_on() {
 }
 
 /** register once set */
+static pthread_once_t g_cuda_ver_init = PTHREAD_ONCE_INIT;
 static pthread_once_t g_cuda_lib_init = PTHREAD_ONCE_INIT;
 static pthread_once_t g_nvml_lib_init = PTHREAD_ONCE_INIT;
 static pthread_once_t init_dlsym_flag = PTHREAD_ONCE_INIT;
@@ -1216,7 +1219,7 @@ static void matchRegex(const char *pattern, const char *matchString,
   return;
 }
 
-static void read_version_from_proc(char *version) {
+static void read_version_from_proc(void) {
 
   char *line = NULL;
   size_t len = 0;
@@ -1229,7 +1232,7 @@ static void read_version_from_proc(char *version) {
 
   while ((getline(&line, &len, fp) != -1)) {
     if (strncmp(line, "NVRM", 4) == 0) {
-      matchRegex(DRIVER_VERSION_MATCH_PATTERN, line, version);
+      matchRegex(DRIVER_VERSION_MATCH_PATTERN, line, driver_version);
       break;
     }
   }
@@ -1388,23 +1391,22 @@ void print_global_vgpu_config() {
   LOGGER(VERBOSE, "Pod Namespace    : %s", g_vgpu_config->pod_namespace);
   LOGGER(VERBOSE, "Pod Uid          : %s", g_vgpu_config->pod_uid);
   LOGGER(VERBOSE, "Container Name   : %s", g_vgpu_config->container_name);
-//  LOGGER(VERBOSE, "gpu count        : %d", g_vgpu_config->device_count);
   LOGGER(VERBOSE, "CompatibilityMode: %d", g_vgpu_config->compatibility_mode);
-  LOGGER(VERBOSE, "SM Watcher       : %s", g_vgpu_config->sm_watcher?"enabled" : "disabled");
-  LOGGER(VERBOSE, "VMemory Node     : %s", g_vgpu_config->vmem_node?"enabled" : "disabled");
+  LOGGER(VERBOSE, "SM Watcher       : %s", g_vgpu_config->sm_watcher ? "enabled" : "disabled");
+  LOGGER(VERBOSE, "VMemory Node     : %s", g_vgpu_config->vmem_node ? "enabled" : "disabled");
   int index = 0;
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
     if (g_vgpu_config->devices[i].activate) {
       LOGGER(VERBOSE, "---------------------------GPU %d---------------------------", index);
       LOGGER(VERBOSE, "GPU UUID         : %s", g_vgpu_config->devices[i].uuid);
-      LOGGER(VERBOSE, "Memory Limit     : %s", g_vgpu_config->devices[i].memory_limit? "enabled" : "disabled");
+      LOGGER(VERBOSE, "Memory Limit     : %s", g_vgpu_config->devices[i].memory_limit ? "enabled" : "disabled");
       LOGGER(VERBOSE, "+ RealMemorySize : %ld", g_vgpu_config->devices[i].real_memory);
       LOGGER(VERBOSE, "+ TotalMemorySize: %ld", g_vgpu_config->devices[i].total_memory);
-      LOGGER(VERBOSE, "Cores  Limit     : %s", g_vgpu_config->devices[i].core_limit? "enabled" : "disabled");
-      LOGGER(VERBOSE, "+ HardLimit      : %s", g_vgpu_config->devices[i].hard_limit? "enabled" : "disabled");
+      LOGGER(VERBOSE, "Cores  Limit     : %s", g_vgpu_config->devices[i].core_limit ? "enabled" : "disabled");
+      LOGGER(VERBOSE, "+ HardLimit      : %s", g_vgpu_config->devices[i].hard_limit ? "enabled" : "disabled");
       LOGGER(VERBOSE, "+ HardCoreSize   : %d", g_vgpu_config->devices[i].hard_core);
       LOGGER(VERBOSE, "+ SoftCoreSize   : %d", g_vgpu_config->devices[i].soft_core);
-      LOGGER(VERBOSE, "Memory Oversold  : %s", g_vgpu_config->devices[i].memory_oversold? "enabled" : "disabled");
+      LOGGER(VERBOSE, "Memory Oversold  : %s", g_vgpu_config->devices[i].memory_oversold ? "enabled" : "disabled");
       index++;
     }
   }
@@ -1457,8 +1459,8 @@ void init_tid_dlsyms(){
 int check_tid_dlsyms(pthread_t tid, void *pointer){
   int i;
   int cursor = (tid_dlsym_count < DLMAP_SIZE) ? tid_dlsym_count : DLMAP_SIZE;
-  for (i = cursor-1; i >= 0; i--) {
-    if (tid_dlsyms[i].pointer == pointer && pthread_equal(tid_dlsyms[i].tid, tid)) {
+  for (i = cursor - 1; i >= 0; i--) {
+    if ((tid_dlsyms[i].pointer == pointer) && pthread_equal(tid_dlsyms[i].tid, tid)) {
       return 1;
     }
   }
@@ -1476,16 +1478,13 @@ extern entry_t nvml_hooks_entry[];
 extern const int nvml_hook_nums;
 
 FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
-  pthread_once(&init_dlsym_flag, init_tid_dlsyms);
-
   LOGGER(DETAIL, "into dlsym %s", symbol);
   init_real_dlsym();
-
   if (handle == RTLD_NEXT) {
-    pthread_t tid;
+    pthread_once(&init_dlsym_flag, init_tid_dlsyms);
     void *h = real_dlsym(RTLD_NEXT,symbol);
     pthread_mutex_lock(&tid_dlsym_lock);
-    tid = pthread_self();
+    pthread_t tid = pthread_self();
     if (check_tid_dlsyms(tid, h)){
       LOGGER(WARNING, "recursive dlsym: %s",symbol);
       h = NULL;
@@ -2053,9 +2052,7 @@ void init_nvml_to_host_device_index() {
 
 void _load_necessary_data() {
   // First, determine the driver version
-  if (strcmp(driver_version, "1") == 0) {
-    read_version_from_proc(driver_version);
-  }
+  pthread_once(&g_cuda_ver_init, read_version_from_proc);
   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
   // Initialize the driver library
   pthread_once(&g_nvml_lib_init, load_nvml_libraries);
