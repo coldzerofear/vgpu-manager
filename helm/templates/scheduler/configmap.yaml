@@ -18,12 +18,12 @@ data:
     kind: KubeSchedulerConfiguration
     leaderElection:
       leaderElect: true
-      resourceName: {{ .Values.scheduler.schedulerName }}
+      resourceName: {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
       resourceNamespace: {{ .Release.Namespace | quote }}
     profiles:
-    - schedulerName: {{ .Values.scheduler.schedulerName }}
+    - schedulerName: {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
     extenders:
-    - urlPrefix: "http://127.0.0.1:{{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}/scheduler"
+    - urlPrefix: "http://127.0.0.1:{{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}/scheduler"
       filterVerb: filter
       bindVerb: bind
       enableHTTPS: false
@@ -44,7 +44,7 @@ data:
       "apiVersion": "v1",
       "extenders": [
         {
-          "urlPrefix": "http://127.0.0.1:{{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}/scheduler",
+          "urlPrefix": "http://127.0.0.1:{{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}/scheduler",
           "filterVerb": "filter",
           "bindVerb": "bind",
           "enableHttps": false,

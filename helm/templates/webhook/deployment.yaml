@@ -47,10 +47,10 @@ spec:
           command:
             - webhook
             {{- if .Values.scheduler.enabled }}
-            - --scheduler-name={{ .Values.scheduler.schedulerName }}
+            - --scheduler-name={{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
             {{- end }}
             - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
-            - --server-bind-port={{ .Values.webhook.commands.serverBindPort }}
+            - --server-bind-port={{ .Values.webhook.commands.serverBindPort | default 9443 }}
             - --pprof-bind-port={{ .Values.webhook.commands.pprofBindPort }}
             - --cert-dir={{ .Values.webhook.commands.certDir }}
             - --default-node-policy={{ .Values.webhook.commands.defaultNodePolicy }}
@@ -64,7 +64,7 @@ spec:
             failureThreshold: 3
             httpGet:
               path: /healthz
-              port: {{ .Values.webhook.commands.serverBindPort }}
+              port: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
               scheme: HTTPS
             initialDelaySeconds: 15
             periodSeconds: 20
@@ -74,7 +74,7 @@ spec:
             failureThreshold: 3
             httpGet:
               path: /readyz
-              port: {{ .Values.webhook.commands.serverBindPort }}
+              port: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
               scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -82,7 +82,11 @@ spec:
             timeoutSeconds: 1
           ports:
             - name: http
-              containerPort: {{ .Values.webhook.commands.serverBindPort }}
+              containerPort: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
+            {{- if gt (int .Values.webhook.commands.pprofBindPort) 0 }}
+            - name: pprof
+              containerPort: {{ .Values.webhook.commands.pprofBindPort }}
+            {{- end }}
           resources: {{ toYaml .Values.webhook.resources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -91,7 +95,7 @@ spec:
                 - ALL
           volumeMounts:
             - name: cert-dir
-              mountPath: {{ .Values.webhook.commands.certDir }}
+              mountPath: {{ .Values.webhook.commands.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
               readOnly: true
       volumes:
         - name: cert-dir

@@ -11,9 +11,21 @@ spec:
   type: ClusterIP
   ports:
     - name: http
-      port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+      port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
       targetPort: http
       protocol: TCP
+    {{- if gt (int .Values.devicePlugin.devicePlugin.commands.pprofBindPort) 0 }}
+    - name: pprof1
+      port: {{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
+      targetPort: pprof1
+      protocol: TCP
+    {{- end }}
+    {{- if gt (int .Values.devicePlugin.deviceMonitor.commands.pprofBindPort) 0 }}
+    - name: pprof
+      port: {{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
+      targetPort: pprof2
+      protocol: TCP
+    {{- end }}
   selector:
     app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
     {{- include "vgpu-manager.selectorLabels" . | nindent 4 }}

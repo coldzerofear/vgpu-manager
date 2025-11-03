@@ -69,18 +69,18 @@ spec:
             - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
             - --kube-api-qps={{ .Values.devicePlugin.devicePlugin.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.devicePlugin.devicePlugin.commands.kubeApiBurst }}
-            - --device-list-strategy={{ .Values.devicePlugin.devicePlugin.commands.deviceListStrategy }}
-            - --device-split-count={{ .Values.devicePlugin.devicePlugin.commands.deviceSplitCount }}
-            - --device-cores-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceCoresScaling }}
-            - --device-memory-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling }}
-            - --device-memory-factor={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor }}
+            - --device-list-strategy={{ .Values.devicePlugin.devicePlugin.commands.deviceListStrategy | default "envvar" }}
+            - --device-split-count={{ .Values.devicePlugin.devicePlugin.commands.deviceSplitCount | default 10 }}
+            - --device-cores-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceCoresScaling | default 1.0 }}
+            - --device-memory-scaling={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling | default 1.0 }}
+            - --device-memory-factor={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor | default 1 }}
             - --pprof-bind-port={{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
             - --feature-gates={{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
             - --mofed-enabled={{ .Values.devicePlugin.devicePlugin.commands.mofedEnabled }}
             - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
             - --open-kernel-modules={{ .Values.devicePlugin.devicePlugin.commands.openKernelModules }}
-            - --mig-strategy={{ .Values.devicePlugin.devicePlugin.commands.migStrategy }}
+            - --mig-strategy={{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
             {{- if .Values.devicePlugin.nodeConfig.yaml }}
             - --node-config-path=/config/nodeConfig.yaml
             {{- else }}
@@ -93,7 +93,7 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: HOST_MANAGER_DIR
-              value: {{ .Values.devicePlugin.vgpuManagerDir }}
+              value: {{ .Values.devicePlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
             - name: NVIDIA_VISIBLE_DEVICES
               value: all
             - name: NVIDIA_MIG_MONITOR_DEVICES
@@ -102,6 +102,11 @@ spec:
               value: utility,compute
           {{- if .Values.devicePlugin.devicePlugin.env }}
             {{- toYaml .Values.devicePlugin.devicePlugin.env | nindent 12 }}
+          {{- end }}
+          {{- if gt (int .Values.devicePlugin.devicePlugin.commands.pprofBindPort) 0 }}
+          ports:
+            - name: pprof1
+              containerPort: {{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
           {{- end }}
           securityContext: {{ toYaml .Values.devicePlugin.securityContext | nindent 12 }}
           resources: {{ toYaml .Values.devicePlugin.devicePlugin.resources | nindent 12 }}
@@ -122,7 +127,7 @@ spec:
             - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
             - --kube-api-qps={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiBurst }}
-            - --server-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+            - --server-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
             - --pprof-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
             - --feature-gates={{ .Values.devicePlugin.deviceMonitor.commands.featureGates }}
@@ -134,7 +139,11 @@ spec:
             - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
           ports:
             - name: http
-              containerPort: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+              containerPort: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
+            {{- if gt (int .Values.devicePlugin.deviceMonitor.commands.pprofBindPort) 0 }}
+            - name: pprof2
+              containerPort: {{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
+            {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:
@@ -154,14 +163,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+              port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
               scheme: HTTP
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+              port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -177,10 +186,10 @@ spec:
       volumes:
         - name: kubelet
           hostPath:
-            path: {{ .Values.devicePlugin.kubeletRootDir }}
+            path: {{ .Values.devicePlugin.kubeletRootDir | default "/var/lib/kubelet" }}
         - name: manager
           hostPath:
-            path: {{ .Values.devicePlugin.vgpuManagerDir }}
+            path: {{ .Values.devicePlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
             type: DirectoryOrCreate
         - name: cgroup
           hostPath:

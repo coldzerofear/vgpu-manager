@@ -11,9 +11,15 @@ spec:
   type: ClusterIP
   ports:
     - name: http
-      port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+      port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
       targetPort: http
       protocol: TCP
+    {{- if gt (int .Values.scheduler.schedulerExtender.commands.pprofBindPort) 0 }}
+    - name: pprof
+      port: {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
+      targetPort: http
+      protocol: TCP
+    {{- end }}
   selector:
     app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
     {{- include "vgpu-manager.selectorLabels" . | nindent 4 }}

@@ -11,9 +11,15 @@ spec:
   type: ClusterIP
   ports:
     - name: http
-      port: {{ .Values.webhook.commands.serverBindPort }}
+      port: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
       targetPort: http
       protocol: TCP
+    {{- if gt (int .Values.webhook.commands.pprofBindPort) 0 }}
+    - name: pprof
+      port: {{ .Values.webhook.commands.pprofBindPort }}
+      targetPort: pprof
+      protocol: TCP
+    {{- end }}
   selector:
     app.kubernetes.io/component: {{ include "vgpu-manager.webhook" . }}
     {{- include "vgpu-manager.selectorLabels" . | nindent 4 }}

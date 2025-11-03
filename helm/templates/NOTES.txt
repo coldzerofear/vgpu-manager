@@ -3,8 +3,8 @@ vgpu-manager use global domain: {{ default "nvidia.com" .Values.globalDomain | t
 {{- if .Values.scheduler.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed successfully!
   - replica  count:  {{ .Values.scheduler.replicas }}
-  - scheduler name:  {{ .Values.scheduler.schedulerName }}
-  - server    port:  {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+  - scheduler name:  {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
+  - server    port:  {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
   - pprof     port:  {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
   - feature  gates:  {{ .Values.scheduler.schedulerExtender.commands.featureGates }}
   - logger   level:  {{ .Values.scheduler.schedulerExtender.commands.logLevel }}
@@ -13,12 +13,17 @@ vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed succe
 {{- if .Values.devicePlugin.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} device-plugin has been deployed successfully!
 device-plugin:
-  - memory  factor:  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor }}
+  - list  strategy:  {{ .Values.devicePlugin.devicePlugin.commands.deviceListStrategy | default "envvar" }}
+  - mig   strategy:  {{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
+  - split    count:  {{ .Values.devicePlugin.devicePlugin.commands.deviceSplitCount | default 10 }}
+  - cores  scaling:  {{ .Values.devicePlugin.devicePlugin.commands.deviceCoresScaling | default 1.0 }}
+  - memory scaling:  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling | default 1.0 }}
+  - memory  factor:  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor | default 1 }}
   - pprof     port:  {{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
   - logger   level:  {{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
   - feature  gates:  {{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
 device-monitor:
-  - server    port:  {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort }}
+  - server    port:  {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
   - pprof     port:  {{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
   - logger   level:  {{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
   - feature  gates:  {{ .Values.devicePlugin.deviceMonitor.commands.featureGates }}
@@ -27,9 +32,9 @@ device-monitor:
 {{- if .Values.webhook.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} webhook component has been deployed successfully!
   - replica  count:  {{ .Values.webhook.replicas }}
-  - server    port:  {{ .Values.webhook.commands.serverBindPort }}
+  - server    port:  {{ .Values.webhook.commands.serverBindPort | default 9443 }}
   - pprof     port:  {{ .Values.webhook.commands.pprofBindPort }}
-  - cert directory:  {{ .Values.webhook.commands.certDir }}
+  - cert directory:  {{ .Values.webhook.commands.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
   - node    policy:  {{ .Values.webhook.commands.defaultNodePolicy }}
   - device  policy:  {{ .Values.webhook.commands.defaultDevicePolicy }}
   - logger   level:  {{ .Values.webhook.commands.logLevel }}

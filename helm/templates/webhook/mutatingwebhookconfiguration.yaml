@@ -16,7 +16,7 @@ webhooks:
         name: {{ include "vgpu-manager.webhook" . }}
         namespace: {{ .Release.Namespace | quote }}
         path: /pods/mutate
-        port: {{ .Values.webhook.commands.serverBindPort }}
+        port: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
     failurePolicy: {{ .Values.webhook.failurePolicy }}
     matchPolicy: Equivalent
     name: mutatepod.vgpu-manager.io

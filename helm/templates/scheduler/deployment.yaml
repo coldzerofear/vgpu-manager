@@ -50,10 +50,10 @@ spec:
             - --config=/config/config.yaml
             {{- else }}
             - --policy-config-file=/config/config.json
-            - --scheduler-name={{ .Values.scheduler.schedulerName }}
+            - --scheduler-name={{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
             {{- end }}
             - --leader-elect=true
-            - --leader-elect-resource-name={{ .Values.scheduler.schedulerName }}
+            - --leader-elect-resource-name={{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
             - --leader-elect-resource-namespace={{ .Release.Namespace }}
             {{- range .Values.scheduler.kubeScheduler.args }}
             - {{ . }}
@@ -81,25 +81,29 @@ spec:
             - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
             - --kube-api-qps={{ .Values.scheduler.schedulerExtender.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.scheduler.schedulerExtender.commands.kubeApiBurst }}
-            - --server-bind-port={{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+            - --server-bind-port={{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
             - --pprof-bind-port={{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
             - --feature-gates={{ .Values.scheduler.schedulerExtender.commands.featureGates }}
             - --v={{ .Values.scheduler.schedulerExtender.commands.logLevel }}
           ports:
             - name: http
-              containerPort: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+              containerPort: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
+            {{- if gt (int .Values.scheduler.schedulerExtender.commands.pprofBindPort) 0 }}
+            - name: pprof
+              containerPort: {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
+            {{- end }}
           resources: {{ toYaml .Values.scheduler.schedulerExtender.resources | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /healthz
-              port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+              port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
               scheme: HTTP
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort }}
+              port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
