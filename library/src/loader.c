@@ -1068,8 +1068,7 @@ static void load_nvml_libraries() {
 
   init_real_dlsym();
 
-  snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX,
-           driver_version);
+  snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX, driver_version);
   driver_filename[FILENAME_MAX - 1] = '\0';
 
   table = dlopen(driver_filename, RTLD_NOW | RTLD_NODELETE);
@@ -1101,12 +1100,11 @@ static void load_cuda_single_library(int idx) {
   char cuda_filename[FILENAME_MAX];
 
   init_real_dlsym();
-
   if (likely(cuda_library_entry[idx].fn_ptr)) {
     return;
   }
-  snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s",
-                CUDA_LIBRARY_PREFIX, driver_version);
+
+  snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s", CUDA_LIBRARY_PREFIX, driver_version);
   cuda_filename[FILENAME_MAX - 1] = '\0';
 
   table = dlopen(cuda_filename, RTLD_NOW | RTLD_NODELETE);
@@ -1129,14 +1127,12 @@ static void load_nvml_single_library(int idx) {
   char driver_filename[FILENAME_MAX];
 
   init_real_dlsym();
-
-  snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX,
-           driver_version);
-  driver_filename[FILENAME_MAX - 1] = '\0';
-
   if (likely(nvml_library_entry[idx].fn_ptr)) {
     return;
   }
+
+  snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX, driver_version);
+  driver_filename[FILENAME_MAX - 1] = '\0';
 
   table = dlopen(driver_filename, RTLD_NOW | RTLD_NODELETE);
   if (unlikely(!table)) {
@@ -1159,8 +1155,7 @@ void load_cuda_libraries() {
 
   init_real_dlsym();
 
-  snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s",
-                CUDA_LIBRARY_PREFIX, driver_version);
+  snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s", CUDA_LIBRARY_PREFIX, driver_version);
   cuda_filename[FILENAME_MAX - 1] = '\0';
 
   table = dlopen(cuda_filename, RTLD_NOW | RTLD_NODELETE);
@@ -1478,57 +1473,66 @@ extern entry_t nvml_hooks_entry[];
 extern const int nvml_hook_nums;
 
 FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
+  static __thread int recursion_depth = 0;
+  if (recursion_depth > 0) {
+    LOGGER(WARNING, "recursion protection triggered for %s", symbol);
+    return real_dlsym ? real_dlsym(handle, symbol) : NULL;
+  }
+  recursion_depth++;
+
   LOGGER(DETAIL, "into dlsym %s", symbol);
   init_real_dlsym();
-  if (handle == RTLD_NEXT) {
-    pthread_once(&init_dlsym_flag, init_tid_dlsyms);
-    void *h = real_dlsym(RTLD_NEXT,symbol);
-    pthread_mutex_lock(&tid_dlsym_lock);
-    pthread_t tid = pthread_self();
-    if (check_tid_dlsyms(tid, h)){
-      LOGGER(WARNING, "recursive dlsym: %s",symbol);
-      h = NULL;
-    }
-    pthread_mutex_unlock(&tid_dlsym_lock);
-    return h;
-  }
 
   int i;
-  // hijack cuda
-  if (strncmp(symbol, "cu", 2) == 0) {
+  void* result = NULL;
+  if (handle == RTLD_NEXT) {
+    pthread_once(&init_dlsym_flag, init_tid_dlsyms);
+    result = real_dlsym(RTLD_NEXT, symbol);
+    pthread_mutex_lock(&tid_dlsym_lock);
+    pthread_t tid = pthread_self();
+    if (check_tid_dlsyms(tid, result)) {
+      LOGGER(WARNING, "recursive dlsym: %s",symbol);
+      result = NULL;
+    }
+    pthread_mutex_unlock(&tid_dlsym_lock);
+    goto DONE;
+  } else if (strncmp(symbol, "cu", 2) == 0) { // hijack cuda
     _load_necessary_data();
     if (likely(lib_control)) {
-      void *f = real_dlsym(lib_control, symbol);
-      if (likely(f)) {
+      result = real_dlsym(lib_control, symbol);
+      if (likely(result)) {
         LOGGER(DETAIL, "search found cuda hook %s", symbol);
-        return f;
+        goto DONE;
       }
     }
     for (i = 0; i < cuda_hook_nums; i++) {
       if (unlikely(!strcmp(symbol, cuda_hooks_entry[i].name))) {
         LOGGER(DETAIL, "search found cuda hook %s", symbol);
-        return cuda_hooks_entry[i].fn_ptr;
+        result = cuda_hooks_entry[i].fn_ptr;
+        goto DONE;
       }
     }
-  }
-  // hijack nvml
-  if (strncmp(symbol, "nvml", 4) == 0) {
+  } else if (strncmp(symbol, "nvml", 4) == 0) { // hijack nvml
     _load_necessary_data();
     if (likely(lib_control)) {
-      void *f = real_dlsym(lib_control, symbol);
-      if (likely(f)) {
+      result = real_dlsym(lib_control, symbol);
+      if (likely(result)) {
         LOGGER(DETAIL, "search found nvml hook %s", symbol);
-        return f;
+        goto DONE;
       }
     }
     for (i = 0; i < nvml_hook_nums; i++) {
       if (unlikely(!strcmp(symbol, nvml_hooks_entry[i].name))) {
         LOGGER(DETAIL, "search found nvml hook %s", symbol);
-        return nvml_hooks_entry[i].fn_ptr;
+        result = nvml_hooks_entry[i].fn_ptr;
+        goto DONE;
       }
     }
   }
-  return real_dlsym(handle, symbol);
+  result = real_dlsym(handle, symbol);
+DONE:
+  recursion_depth--;
+  return result;
 }
 
 int pid_exists(int pid) {

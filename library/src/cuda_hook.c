@@ -1088,13 +1088,11 @@ CUresult cuDriverGetVersion(int *driverVersion) {
   CUresult ret;
 
   load_necessary_data();
-//  pthread_once(&g_init_set, initialization);
-
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDriverGetVersion, driverVersion);
   if (unlikely(ret)) {
     goto DONE;
   }
-
+//  pthread_once(&g_init_set, initialization);
 DONE:
   return ret;
 }
@@ -1103,13 +1101,11 @@ CUresult cuInit(unsigned int flag) {
   CUresult ret;
 
   load_necessary_data();
-  pthread_once(&g_init_set, initialization);
-
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuInit, flag);
   if (unlikely(ret)) {
     goto DONE;
   }
-
+  pthread_once(&g_init_set, initialization);
 DONE:
   return ret;
 }
@@ -1117,14 +1113,12 @@ DONE:
 CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
                           cuuint64_t flags) {
   CUresult ret;
-  int i;
-
   load_necessary_data();
-  pthread_once(&g_init_set, initialization);
   LOGGER(DETAIL, "cuGetProcAddress symbol: %s", symbol);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGetProcAddress, symbol, pfn,
                          cudaVersion, flags);
-  if (ret == CUDA_SUCCESS) {
+  if (likely(ret == CUDA_SUCCESS)) {
+    pthread_once(&g_init_set, initialization);
     if (lib_control) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
@@ -1133,7 +1127,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
         goto DONE;
       }
     }
-    for (i = 0; i < cuda_hook_nums; i++) {
+    for (int i = 0; i < cuda_hook_nums; i++) {
       if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
         LOGGER(VERBOSE, "cuGetProcAddress matched symbol: %s", symbol);
         *pfn = cuda_hooks_entry[i].fn_ptr;
@@ -1148,14 +1142,12 @@ DONE:
 CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                              cuuint64_t flags, void *symbolStatus) {
   CUresult ret;
-  int i;
-
   load_necessary_data();
-  pthread_once(&g_init_set, initialization);
   LOGGER(DETAIL, "cuGetProcAddress_v2 symbol: %s", symbol);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGetProcAddress_v2, symbol, pfn,
                          cudaVersion, flags, symbolStatus);
-  if (ret == CUDA_SUCCESS) {
+  if (likely(ret == CUDA_SUCCESS)) {
+    pthread_once(&g_init_set, initialization);
     if (lib_control) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
@@ -1164,7 +1156,7 @@ CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
         goto DONE;
       }
     }
-    for (i = 0; i < cuda_hook_nums; i++) {
+    for (int i = 0; i < cuda_hook_nums; i++) {
       if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
         LOGGER(VERBOSE, "cuGetProcAddress_v2 matched symbol: %s", symbol);
         *pfn = cuda_hooks_entry[i].fn_ptr;
@@ -2154,4 +2146,3 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
 DONE:
   return ret;
 }
-
