@@ -6,7 +6,6 @@ import (
 	"flag"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -119,30 +118,22 @@ func main() {
 	klog.Infoln("Waiting for InformerFactory cache synchronization...")
 	factory.WaitForCacheSync(wait.NeverStop)
 	klog.Infoln("InformerFactory cache synchronization successful")
-
-	go func() {
-		if opt.PprofBindPort > 0 {
-			addr := "0.0.0.0:" + strconv.Itoa(opt.PprofBindPort)
-			klog.V(4).Infof("Debug Server starting on <%s>", addr)
-			klog.V(4).ErrorS(http.ListenAndServe(addr, nil), "Debug Server error occurred")
-		}
-	}()
-
+	// Start pprof debug debugging service.
+	route.StartDebugServer(opt.PprofBindPort)
 	server := http.Server{
 		Addr:      "0.0.0.0:" + strconv.Itoa(opt.ServerBindPort),
 		Handler:   handler,
 		TLSConfig: tlsConfig,
 	}
 	go func() {
-		var serverErr error
 		if opt.EnableTls {
 			klog.Infof("Tls Server starting on <0.0.0.0:%d>", opt.ServerBindPort)
-			serverErr = server.ListenAndServeTLS("", "")
+			err = server.ListenAndServeTLS("", "")
 		} else {
 			klog.Infof("Server starting on <0.0.0.0:%d>", opt.ServerBindPort)
-			serverErr = server.ListenAndServe()
+			err = server.ListenAndServe()
 		}
-		if serverErr != nil {
+		if err != nil {
 			klog.Errorf("Server error occurred: %v", err)
 			cancelFunc()
 		}

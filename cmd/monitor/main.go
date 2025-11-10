@@ -3,11 +3,8 @@ package main
 import (
 	"context"
 	"flag"
-	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -15,6 +12,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
+	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"golang.org/x/time/rate"
@@ -87,13 +85,7 @@ func main() {
 
 	containerLister.Start(5*time.Second, ctx.Done())
 	// Start pprof debug debugging service.
-	go func() {
-		if opt.PprofBindPort > 0 {
-			addr := "0.0.0.0:" + strconv.Itoa(opt.PprofBindPort)
-			klog.V(4).Infof("Debug Server starting on <%s>", addr)
-			klog.V(4).ErrorS(http.ListenAndServe(addr, nil), "Debug Server error occurred")
-		}
-	}()
+	route.StartDebugServer(opt.PprofBindPort)
 	// Start prometheus indicator collection service.
 	go func() {
 		if serverErr := server.Start(ctx.Done()); serverErr != nil {

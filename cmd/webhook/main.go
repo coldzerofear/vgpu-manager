@@ -3,11 +3,9 @@ package main
 import (
 	"crypto/tls"
 	"flag"
-	"net/http"
-	_ "net/http/pprof"
-	"strconv"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
@@ -29,14 +27,8 @@ func main() {
 	log.SetLogger(klog.NewKlogr())
 	util.SetGlobalDomain(opt.Domain)
 
-	go func() {
-		if opt.PprofBindPort > 0 {
-			addr := "0.0.0.0:" + strconv.Itoa(opt.PprofBindPort)
-			klog.V(4).Infof("Debug Server starting on <%s>", addr)
-			klog.V(4).ErrorS(http.ListenAndServe(addr, nil), "Debug Server error occurred")
-		}
-	}()
-
+	// Start pprof debug debugging service.
+	route.StartDebugServer(opt.PprofBindPort)
 	klog.Infoln("Create webhook server")
 	server := webhook.NewServer(webhook.Options{
 		Port:    opt.ServerBindPort,
