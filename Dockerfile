@@ -4,7 +4,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG APT_MIRROR
 
-ARG GOLANG_VERSION=1.24.3
+ARG GOLANG_VERSION=1.24.7
 
 RUN echo "Asia/Shanghai" > /etc/timezone && \
     ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime

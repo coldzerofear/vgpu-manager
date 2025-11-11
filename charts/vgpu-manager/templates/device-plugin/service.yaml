@@ -21,7 +21,7 @@ spec:
       protocol: TCP
     {{- end }}
     {{- if gt (int .Values.devicePlugin.deviceMonitor.commands.pprofBindPort) 0 }}
-    - name: pprof
+    - name: pprof2
       port: {{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
       targetPort: pprof2
       protocol: TCP

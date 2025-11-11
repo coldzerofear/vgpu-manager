@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,9 +20,11 @@ import (
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/rest"
 	"k8s.io/component-base/logs"
-
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -40,10 +44,14 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
 	}
-	kubeClient, err := client.NewClientSet(
+	kubeConfig, err := client.NewKubeConfig(
 		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
 		//client.WithDefaultContentType(),
 		client.WithDefaultUserAgent())
+	if err != nil {
+		klog.Fatalf("Create kubeConfig failed: %v", err)
+	}
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
@@ -71,12 +79,26 @@ func main() {
 		klog.Fatalf("Create node gpu collector failed: %v", err)
 	}
 	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 1)
-	server := metrics.NewServer(
+	opts := []metrics.Option{
 		metrics.WithRegistry(nodeCollector.Registry()),
 		metrics.WithPort(&opt.ServerBindPort),
 		metrics.WithLimiter(rateLimiter),
-		metrics.WithTimeoutSecond(30))
-
+		metrics.WithTimeoutSecond(30),
+	}
+	if opt.EnableRBAC {
+		httpClient := &http.Client{Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}}
+		config := rest.CopyConfig(kubeConfig)
+		authorization, err := filters.WithAuthenticationAndAuthorization(config, httpClient)
+		if err != nil {
+			klog.Fatalf("Create authClient failed: %v", err)
+		}
+		opts = append(opts, metrics.WithMiddleware(func(handler http.Handler) (http.Handler, error) {
+			return authorization(klog.NewKlogr(), handler)
+		}))
+	}
+	server := metrics.NewServer(opts...)
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	factory.Start(ctx.Done())
 	klog.V(4).Infoln("Waiting for InformerFactory cache synchronization...")
@@ -88,8 +110,8 @@ func main() {
 	route.StartDebugServer(opt.PprofBindPort)
 	// Start prometheus indicator collection service.
 	go func() {
-		if serverErr := server.Start(ctx.Done()); serverErr != nil {
-			klog.Errorf("Server error occurred: %v", serverErr)
+		if err := server.Start(ctx.Done()); err != nil {
+			klog.Errorf("Server error occurred: %v", err)
 			cancelCtx()
 		}
 	}()

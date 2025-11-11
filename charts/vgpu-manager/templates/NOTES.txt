@@ -26,6 +26,7 @@ device-monitor:
   - server    port:  {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
   - pprof     port:  {{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
   - logger   level:  {{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
+  - enable    rbac:  {{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
   - feature  gates:  {{ .Values.devicePlugin.deviceMonitor.commands.featureGates }}
 {{- end }}
 

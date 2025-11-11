@@ -136,6 +136,7 @@ spec:
             {{- else }}
             - --node-config-path=/config/nodeConfig.json
             {{- end }}
+            - --enable-rbac={{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
             - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
           ports:
             - name: http

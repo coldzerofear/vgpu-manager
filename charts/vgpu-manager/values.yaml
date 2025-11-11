@@ -180,6 +180,7 @@ devicePlugin:
       # Supported feature gates:
       # - SMWatcher
       featureGates: ""
+      enableRBAC: false
       logLevel: 3
     # Device monitor container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.

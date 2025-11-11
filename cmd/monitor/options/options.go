@@ -27,6 +27,7 @@ type Options struct {
 	NodeConfigPath string
 	ServerBindPort int
 	PprofBindPort  int
+	EnableRBAC     bool
 	FeatureGate    featuregate.MutableFeatureGate
 }
 
@@ -81,6 +82,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.NodeConfigPath, "node-config-path", o.NodeConfigPath, "Specify the node configuration path to apply differentiated configuration to the node.")
 	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable)")
+	pflag.BoolVar(&o.EnableRBAC, "enable-rbac", false, "Enable RBAC authentication for metrics service.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

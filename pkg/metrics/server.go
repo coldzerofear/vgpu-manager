@@ -18,12 +18,15 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+type Middleware func(handler http.Handler) (http.Handler, error)
+
 type Server struct {
 	registry   *prometheus.Registry
 	limiter    *rate.Limiter
 	timeout    time.Duration
 	port       *int
 	httpServer *http.Server
+	middleware Middleware
 }
 
 type klogErrLog struct{}
@@ -92,22 +95,19 @@ func (r *responseRecorder) GetResponse() response {
 	}
 }
 
-func (s *Server) Start(stopCh <-chan struct{}) error {
+func (s *Server) Start(stopCh <-chan struct{}) (err error) {
 	if s.httpServer != nil {
 		return fmt.Errorf("metrics service has been started and cannot be restarted again")
 	}
 
-	var (
-		opts = promhttp.HandlerOpts{
-			Registry: s.registry,
-			ErrorLog: klogErrLog{},
-			Timeout:  s.timeout,
-		}
-		lastResp = &lastResponse{}
-		next     = promhttp.InstrumentMetricHandler(s.registry, promhttp.HandlerFor(s.registry, opts))
-	)
-
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	lastResp := &lastResponse{}
+	metricHandler := promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{
+		Registry: s.registry,
+		ErrorLog: klogErrLog{},
+		Timeout:  s.timeout,
+	})
+	metricHandler = promhttp.InstrumentMetricHandler(s.registry, metricHandler)
+	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.limiter != nil && !s.limiter.Allow() {
 			resp := lastResp.GetResponse()
 			if resp.status != http.StatusOK {
@@ -126,10 +126,16 @@ func (s *Server) Start(stopCh <-chan struct{}) error {
 				buffer: bytes.NewBuffer(nil),
 				status: http.StatusOK,
 			}
-			next.ServeHTTP(recorder, r)
+			metricHandler.ServeHTTP(recorder, r)
 			lastResp.SetResponse(recorder.GetResponse())
 		}
 	})
+	if s.middleware != nil {
+		handler, err = s.middleware(handler)
+		if err != nil {
+			return err
+		}
+	}
 	routerHandle := httprouter.New()
 	route.AddHealthProbe(routerHandle)
 	route.AddMetricsHandle(routerHandle, handler)
@@ -145,7 +151,8 @@ func (s *Server) Start(stopCh <-chan struct{}) error {
 	}()
 
 	klog.Infof("Metrics server starting on <0.0.0.0:%d>", *s.port)
-	err := s.httpServer.ListenAndServe()
+	// Block here until the service exits.
+	err = s.httpServer.ListenAndServe()
 	s.httpServer = nil
 	return err
 }
@@ -181,6 +188,12 @@ func WithLimiter(limiter *rate.Limiter) Option {
 func WithTimeoutSecond(seconds uint) Option {
 	return func(s *Server) {
 		s.timeout = time.Duration(seconds) * time.Second
+	}
+}
+
+func WithMiddleware(fn Middleware) Option {
+	return func(s *Server) {
+		s.middleware = fn
 	}
 }
 
