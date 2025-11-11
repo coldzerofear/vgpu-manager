@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"flag"
 	"net/http"
 	"os"
@@ -86,11 +85,11 @@ func main() {
 		metrics.WithTimeoutSecond(30),
 	}
 	if opt.EnableRBAC {
-		httpClient := &http.Client{Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		}}
-		config := rest.CopyConfig(kubeConfig)
-		authorization, err := filters.WithAuthenticationAndAuthorization(config, httpClient)
+		httpClient, err := rest.HTTPClientFor(kubeConfig)
+		if err != nil {
+			klog.Fatalf("Create httpClient failed: %v", err)
+		}
+		authorization, err := filters.WithAuthenticationAndAuthorization(kubeConfig, httpClient)
 		if err != nil {
 			klog.Fatalf("Create authClient failed: %v", err)
 		}
