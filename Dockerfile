@@ -12,7 +12,7 @@ RUN if [ -n "$APT_MIRROR" ]; then sed -i "s@http://archive.ubuntu.com@${APT_MIRR
     apt-get -y update && apt-get -y install --no-install-recommends make cmake g++ ca-certificates wget && \
     rm -rf /var/lib/apt/lists/*
 
-RUN wget -nv -O - https://golang.google.cn/dl/go${GOLANG_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz \
+RUN wget -nv -O - https://dl.google.com/go/go${GOLANG_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz \
     | tar -C /usr/local -xz
 
 # Compile vgpu driver library files
