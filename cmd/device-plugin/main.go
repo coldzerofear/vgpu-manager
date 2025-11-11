@@ -93,7 +93,12 @@ func main() {
 
 	manager, err := ctrm.New(kubeConfig, ctrm.Options{
 		HealthProbeBindAddress: "0", // Disable manager health probe service
-		PprofBindAddress:       fmt.Sprintf("%d", opt.PprofBindPort),
+		PprofBindAddress: func() string {
+			if opt.PprofBindPort > 0 {
+				return fmt.Sprintf(":%d", opt.PprofBindPort)
+			}
+			return "0"
+		}(),
 		Cache: rtcache.Options{
 			// Trim managedFields to reduce cache memory usage.
 			DefaultTransform:         rtcache.TransformStripManagedFields(),
