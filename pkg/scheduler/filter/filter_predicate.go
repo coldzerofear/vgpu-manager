@@ -19,10 +19,11 @@ import (
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
@@ -32,26 +33,47 @@ type gpuFilter struct {
 	locker     *serial.Locker
 	kubeClient kubernetes.Interface
 	nodeLister listerv1.NodeLister
-	podLister  listerv1.PodLister
+	podLister  client.PodLister
 	recorder   record.EventRecorder
 }
 
 const (
-	Name = "FilterPredicate"
+	Name                            = "FilterPredicate"
+	indexerKeyPodRequestVGPU        = "pod.requestVGPU"
+	indexerKeyPodPlanSchedulingNode = "pod.planSchedulingNode"
 )
 
 var _ predicate.FilterPredicate = &gpuFilter{}
+var podIndexers = cache.Indexers{
+	indexerKeyPodRequestVGPU: func(obj interface{}) ([]string, error) {
+		if pod, ok := obj.(*corev1.Pod); ok && util.IsVGPUResourcePod(pod) {
+			return []string{"true"}, nil
+		}
+		return []string{"false"}, nil
+	},
+	indexerKeyPodPlanSchedulingNode: func(obj interface{}) ([]string, error) {
+		nodeName := ""
+		if pod, ok := obj.(*corev1.Pod); ok {
+			nodeName = util.PodPlanSchedulingNode(pod)
+		}
+		return []string{nodeName}, nil
+	},
+}
 
-func New(client kubernetes.Interface, factory informers.SharedInformerFactory, recorder record.EventRecorder, serialFilterNode bool) (*gpuFilter, error) {
+func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactory,
+	recorder record.EventRecorder, serialFilterNode bool) (*gpuFilter, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
-	podLister := listerv1.NewPodLister(podInformer.GetIndexer())
+	if err := podInformer.AddIndexers(podIndexers); err != nil {
+		return nil, err
+	}
+	podLister := client.NewPodLister(podInformer.GetIndexer())
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
 	locker := serial.NewLocker(serial.WithName(Name),
 		serial.WithEnabled(serialFilterNode))
 	return &gpuFilter{
 		locker:     locker,
-		kubeClient: client,
+		kubeClient: kubeClient,
 		nodeLister: nodeLister,
 		podLister:  podLister,
 		recorder:   recorder,
@@ -274,13 +296,11 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 	return nodeName, err == nil
 }
 
-// deviceFilter will choose one and only one node fullfil the request,
-// so it should always be the last filter of gpuFilter
+// deviceFilter will choose one and only one node fullfil the request, so it should always be the last filter of gpuFilter
 func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error) {
 	var (
 		filteredNodes  = make([]corev1.Node, 0, 1)                   // Successful nodes
 		failedNodesMap = make(extenderv1.FailedNodesMap, len(nodes)) // Failed nodes
-		nodeInfoList   = make([]*device.NodeInfo, 0, len(nodes))
 		success        bool
 	)
 	// Skip pods that have already been scheduled.
@@ -308,15 +328,10 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	f.locker.Lock()
 	defer f.locker.Unlock()
 
-	pods, err := f.podLister.List(labels.Everything())
-	if err != nil {
-		klog.Errorf("PodLister get all pod failed: %v", err)
-		return filteredNodes, failedNodesMap, err
-	}
-
 	var (
 		mutex                = sync.Mutex{}
 		waitGroup            = sync.WaitGroup{}
+		nodeInfoList         = make([]*device.NodeInfo, 0, len(nodes))
 		nodeOriginalPosition = make(map[string]int, len(nodes))
 	)
 	maxGoroutines := runtime.NumCPU() * 2
@@ -338,6 +353,15 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 					batchFailedNodes[node.Name] = "node without GPU device"
 					continue
 				}
+				pods, err := f.podLister.ListByIndexFiled(fields.Set{
+					indexerKeyPodRequestVGPU:        "true",
+					indexerKeyPodPlanSchedulingNode: node.Name,
+				})
+				if err != nil {
+					klog.Errorf("PodLister list GPU Pods on node <%s> failed: %v", node.Name, err)
+					batchFailedNodes[node.Name] = err.Error()
+					continue
+				}
 				nodeInfo, err := device.NewNodeInfo(node, pods)
 				if err != nil {
 					klog.ErrorS(err, "Create node info failed, skipping node", "node", node.Name)
@@ -357,6 +381,10 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		}(batch.StartIndex, batch.EndIndex, batch.Count)
 	}
 	waitGroup.Wait()
+	// Quickly return results
+	if len(nodeInfoList) == 0 {
+		return filteredNodes, failedNodesMap, nil
+	}
 
 	// Sort nodes according to node scheduling strategy.
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)

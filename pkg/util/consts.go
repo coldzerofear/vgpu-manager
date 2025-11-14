@@ -11,6 +11,7 @@ const (
 	NvidiaDomain                 = "nvidia.com"
 	NodeNvidiaDriverVersionLabel = NvidiaDomain + "/node-driver-version"
 	NodeNvidiaCudaVersionLabel   = NvidiaDomain + "/node-cuda-version"
+	NvidiaNativeGPUResourceName  = NvidiaDomain + "/gpu"
 )
 
 var (

@@ -384,29 +384,40 @@ func IsGPUTopologyEnabled() bool {
 	return gpuTopologyEnabled
 }
 
-func NewDeviceMapListAndTopology(node *corev1.Node) (map[int]*Device, gpuallocator.DeviceList, bool, bool, error) {
+type DeviceGatherInfo struct {
+	DeviceMap           map[int]*Device
+	DeviceList          gpuallocator.DeviceList
+	DeviceIndexMap      map[string]int
+	EnabledGPUTopology  bool
+	EnabledNumaAffinity bool
+}
+
+func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
 	deviceRegister, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 	nodeDeviceInfo, err := ParseNodeDeviceInfo(deviceRegister)
 	if err != nil {
-		return nil, nil, false, false, fmt.Errorf("parse node device information failed: %v", err)
+		return nil, fmt.Errorf("parse node device information failed: %v", err)
 	}
-	deviceMap := make(map[int]*Device, len(nodeDeviceInfo))
-	deviceList := make(gpuallocator.DeviceList, len(nodeDeviceInfo))
+	deviceGatherInfo := DeviceGatherInfo{
+		DeviceMap:      make(map[int]*Device, len(nodeDeviceInfo)),
+		DeviceList:     make(gpuallocator.DeviceList, len(nodeDeviceInfo)),
+		DeviceIndexMap: make(map[string]int, len(nodeDeviceInfo)),
+	}
 	numaSet := sets.NewInt()
 	for _, device := range nodeDeviceInfo {
 		if device.Numa >= 0 {
 			numaSet.Insert(device.Numa)
 		}
-		deviceMap[device.Id] = NewDevice(device)
-		deviceList[device.Id] = gpuallocator.NewDevice(device.Id, device.Uuid, device.BusId)
+		deviceGatherInfo.DeviceIndexMap[device.Uuid] = device.Id
+		deviceGatherInfo.DeviceMap[device.Id] = NewDevice(device)
+		deviceGatherInfo.DeviceList[device.Id] = gpuallocator.NewDevice(device.Id, device.Uuid, device.BusId)
 	}
-	hasGPUTopology := false
-	hasNumaAffinity := numaSet.Len() != 0
+	deviceGatherInfo.EnabledNumaAffinity = numaSet.Len() != 0
 	if IsGPUTopologyEnabled() {
 		topoValue, ok := util.HasAnnotation(node, util.NodeDeviceTopologyAnnotation)
 		if !ok || len(topoValue) == 0 {
 			klog.V(3).InfoS("node does not have device topology information", "node", node.Name)
-			return deviceMap, deviceList, false, hasNumaAffinity, nil
+			return &deviceGatherInfo, nil
 		}
 		nodeTopology, err := ParseNodeTopology(topoValue)
 		if err != nil {
@@ -415,13 +426,13 @@ func NewDeviceMapListAndTopology(node *corev1.Node) (map[int]*Device, gpuallocat
 		for _, deviceTopoInfo := range nodeTopology {
 			for toIdx, p2pLinks := range deviceTopoInfo.Links {
 				for _, p2pLinkType := range p2pLinks {
-					hasGPUTopology = true
-					deviceList.AddLink(deviceTopoInfo.Index, toIdx, p2pLinkType)
+					deviceGatherInfo.EnabledGPUTopology = true
+					deviceGatherInfo.DeviceList.AddLink(deviceTopoInfo.Index, toIdx, p2pLinkType)
 				}
 			}
 		}
 	}
-	return deviceMap, deviceList, hasGPUTopology, hasNumaAffinity, nil
+	return &deviceGatherInfo, nil
 }
 
 // GetID returns the idx of this device
@@ -542,14 +553,16 @@ func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
 
 func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *NodeInfo {
 	ret := &NodeInfo{
-		name:        node.Name,
-		node:        node,
-		gpuTopology: gpuTopology,
-		deviceMap:   make(map[int]*Device, len(devices)),
-		deviceList:  make(gpuallocator.DeviceList, len(devices)),
+		name:           node.Name,
+		node:           node,
+		gpuTopology:    gpuTopology,
+		deviceMap:      make(map[int]*Device, len(devices)),
+		deviceList:     make(gpuallocator.DeviceList, len(devices)),
+		deviceIndexMap: make(map[string]int, len(devices)),
 	}
 	for _, device := range devices {
 		ret.deviceMap[device.GetID()] = device
+		ret.deviceIndexMap[device.GetUUID()] = device.GetID()
 		ret.deviceList[device.GetID()] = gpuallocator.NewDevice(
 			device.GetID(), device.GetUUID(), device.GetBusID())
 	}
@@ -558,34 +571,36 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 }
 
 type NodeInfo struct {
-	name          string
-	node          *corev1.Node
-	deviceMap     map[int]*Device
-	deviceList    gpuallocator.DeviceList
-	totalNumber   int
-	usedNumber    int
-	totalMemory   int64
-	usedMemory    int64
-	totalCores    int64
-	usedCores     int64
-	maxCapability float32
-	gpuTopology   bool
-	numaTopology  bool
+	name           string
+	node           *corev1.Node
+	deviceMap      map[int]*Device
+	deviceIndexMap map[string]int
+	deviceList     gpuallocator.DeviceList
+	totalNumber    int
+	usedNumber     int
+	totalMemory    int64
+	usedMemory     int64
+	totalCores     int64
+	usedCores      int64
+	maxCapability  float32
+	gpuTopology    bool
+	numaTopology   bool
 }
 
 func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
-	klog.V(4).Infof("create nodeInfo for %s", node.Name)
-	devMap, devList, gpuTopo, numaTopo, err := NewDeviceMapListAndTopology(node)
+	klog.V(4).Infof("new nodeInfo for %s", node.Name)
+	gatherInfo, err := NewNodeDeviceGatherInfo(node)
 	if err != nil {
 		return nil, err
 	}
 	ret := &NodeInfo{
-		node:         node,
-		name:         node.Name,
-		deviceMap:    devMap,
-		deviceList:   devList,
-		gpuTopology:  gpuTopo,
-		numaTopology: numaTopo,
+		node:           node,
+		name:           node.Name,
+		deviceMap:      gatherInfo.DeviceMap,
+		deviceList:     gatherInfo.DeviceList,
+		deviceIndexMap: gatherInfo.DeviceIndexMap,
+		gpuTopology:    gatherInfo.EnabledGPUTopology,
+		numaTopology:   gatherInfo.EnabledNumaAffinity,
 	}
 	ret.addPodsDeviceResources(pods)
 	ret.initResourceStatistics()
@@ -605,7 +620,7 @@ func (n *NodeInfo) Clone() framework.StateData {
 }
 
 func (n *NodeInfo) addPodsDeviceResources(pods []*corev1.Pod) {
-	util.PodsOnNode(pods, n.node, func(pod *corev1.Pod) {
+	util.PodsOnNodeCallback(pods, n.node, func(pod *corev1.Pod) {
 		n.addDeviceResources(pod)
 	})
 }
@@ -622,7 +637,12 @@ func (n *NodeInfo) addDeviceResources(pod *corev1.Pod) {
 	}
 	for _, container := range podAssignDevices {
 		for _, device := range container.Devices {
-			if err := n.addUsedResources(device.Id, device.Cores, device.Memory); err != nil {
+			id, ok := n.deviceIndexMap[device.Uuid]
+			if !ok {
+				klog.Warningf("device UUID <%s> does not exist in the NodeInfo <%s>", device.Uuid, n.name)
+				continue
+			}
+			if err := n.addUsedResources(id, device.Cores, device.Memory); err != nil {
 				klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, device.Id, err)
 			}
 		}

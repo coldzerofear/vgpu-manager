@@ -86,7 +86,12 @@ func GetResourceOfPod(pod *corev1.Pod, resourceName string) int64 {
 
 // IsVGPUResourcePod Determine if a pod has vGPU resource request.
 func IsVGPUResourcePod(pod *corev1.Pod) bool {
-	return GetResourceOfPod(pod, VGPUNumberResourceName) > 0
+	for i := range pod.Spec.Containers {
+		if GetResourceOfContainer(&pod.Spec.Containers[i], VGPUNumberResourceName) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckDeviceType Check if the device type meets expectations.
@@ -241,20 +246,25 @@ func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
 	return false
 }
 
-func PodsOnNode(pods []*corev1.Pod, node *corev1.Node, callback func(*corev1.Pod)) {
-	if callback == nil {
-		klog.Warningln("PodsOnNode callback is empty")
+func PodPlanSchedulingNode(pod *corev1.Pod) string {
+	if pod.Spec.NodeName != "" {
+		return pod.Spec.NodeName
+	}
+	predicateNode, _ := HasAnnotation(pod, PodPredicateNodeAnnotation)
+	return predicateNode
+}
+
+func PodsOnNodeCallback(pods []*corev1.Pod, node *corev1.Node, callbackFn func(*corev1.Pod)) {
+	if callbackFn == nil {
+		klog.Warningln("PodsOnNodeCallback callback function is empty")
 		return
 	}
-	klog.V(5).Infof("pods on node <%s>", node.Name)
+	klog.V(5).InfoS("pods on node callback", "node", node.Name)
 	for _, pod := range pods {
-		var predicateNode string
-		if pod.Spec.NodeName == "" {
-			predicateNode, _ = HasAnnotation(pod, PodPredicateNodeAnnotation)
-		}
-		if (pod.Spec.NodeName == node.Name || predicateNode == node.Name) &&
-			pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
-			callback(pod)
+		if PodPlanSchedulingNode(pod) == node.Name &&
+			pod.Status.Phase != corev1.PodSucceeded &&
+			pod.Status.Phase != corev1.PodFailed {
+			callbackFn(pod)
 		}
 	}
 }

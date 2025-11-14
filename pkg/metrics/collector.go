@@ -234,26 +234,26 @@ type procInfoList map[uint32]nvml.ProcessInfo_v1
 
 type procUtilList map[uint32]nvml.ProcessUtilizationSample
 
-func ContainerDeviceProcInfoFunc(procInfos procInfoList,
-	containerPids []uint32, f func(nvml.ProcessInfo_v1)) {
-	if procInfos == nil {
+func ContainerDeviceProcInfoEach(procInfos procInfoList,
+	containerPids []uint32, fn func(nvml.ProcessInfo_v1)) {
+	if procInfos == nil || fn == nil {
 		return
 	}
 	for _, contPid := range containerPids {
 		if process, ok := procInfos[contPid]; ok {
-			f(process)
+			fn(process)
 		}
 	}
 }
 
-func ContainerDeviceProcUtilFunc(procUtils procUtilList,
-	containerPids []uint32, f func(nvml.ProcessUtilizationSample)) {
-	if procUtils == nil {
+func ContainerDeviceProcUtilEach(procUtils procUtilList,
+	containerPids []uint32, fn func(nvml.ProcessUtilizationSample)) {
+	if procUtils == nil || fn == nil {
 		return
 	}
 	for _, contPid := range containerPids {
 		if process, ok := procUtils[contPid]; ok {
-			f(process)
+			fn(process)
 		}
 	}
 }
@@ -466,11 +466,11 @@ skipNvml:
 	vGpuAssignedNumberMap := make(map[string]int)
 	sharedContainersMap := make(map[string]int)
 	// Filter out some useless pods.
-	util.PodsOnNode(pods, node, func(pod *corev1.Pod) {
+	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
 		// Aggregate the allocated memory size on the node.
 		podDevices := device.GetPodAssignDevices(pod)
 		devContainersMap := make(map[string]sets.Set[string])
-		FlattenDevicesFunc(podDevices, func(name string, claimDevice device.ClaimDevice) {
+		FlattenDevicesEach(podDevices, func(name string, claimDevice device.ClaimDevice) {
 			if set, ok := devContainersMap[claimDevice.Uuid]; !ok {
 				devContainersMap[claimDevice.Uuid] = sets.New[string](name)
 			} else {
@@ -535,13 +535,13 @@ skipNvml:
 				)
 				deviceCount++
 
-				ContainerDeviceProcInfoFunc(devProcInfoMap[deviceUUID], containerPids,
+				ContainerDeviceProcInfoEach(devProcInfoMap[deviceUUID], containerPids,
 					func(process nvml.ProcessInfo_v1) {
 						tmpPids = append(tmpPids, strconv.Itoa(int(process.Pid)))
 						deviceMemUsage += process.UsedGpuMemory
 					})
 				containerGPUPids := strings.Join(tmpPids, ",")
-				ContainerDeviceProcUtilFunc(devProcUtilMap[deviceUUID], containerPids,
+				ContainerDeviceProcUtilEach(devProcUtilMap[deviceUUID], containerPids,
 					func(sample nvml.ProcessUtilizationSample) {
 						smUtil := GetValidValue(sample.SmUtil)
 						codecUtil := GetValidValue(sample.EncUtil) +
@@ -703,7 +703,7 @@ skipNvml:
 		}
 	)
 
-	FlattenMigInfosMapFunc(devMigInfosMap, func(parentUUID string, migInfo *nvidia.MigInfo) {
+	FlattenMigInfosMapEach(devMigInfosMap, func(parentUUID string, migInfo *nvidia.MigInfo) {
 		migInx := strconv.Itoa(migInfo.Index)
 		ciId := fmt.Sprintf("%d", migInfo.CiInfo.Id)
 		giId := fmt.Sprintf("%d", migInfo.GiInfo.Id)
@@ -833,8 +833,9 @@ collecProcessInfo:
 	devProcUtilMap[uuid] = processUtilList
 }
 
-func FlattenMigInfosMapFunc(migInfosMap map[string][]*nvidia.MigInfo, f func(string, *nvidia.MigInfo)) {
-	if f == nil {
+func FlattenMigInfosMapEach(migInfosMap map[string][]*nvidia.MigInfo,
+	fn func(parentUuid string, mig *nvidia.MigInfo)) {
+	if fn == nil {
 		return
 	}
 	for parentUUID, migInfos := range migInfosMap {
@@ -842,18 +843,19 @@ func FlattenMigInfosMapFunc(migInfosMap map[string][]*nvidia.MigInfo, f func(str
 			if migInfo == nil {
 				continue
 			}
-			f(parentUUID, migInfo)
+			fn(parentUUID, migInfo)
 		}
 	}
 }
 
-func FlattenDevicesFunc(podDevices device.PodDevices, f func(string, device.ClaimDevice)) {
-	if f == nil {
+func FlattenDevicesEach(podDevices device.PodDevices,
+	fn func(contName string, claim device.ClaimDevice)) {
+	if fn == nil {
 		return
 	}
 	for _, contDevices := range podDevices {
 		for _, dev := range contDevices.Devices {
-			f(contDevices.Name, dev)
+			fn(contDevices.Name, dev)
 		}
 	}
 }
