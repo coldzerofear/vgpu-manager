@@ -16,6 +16,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -79,10 +80,12 @@ func main() {
 	}
 	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 1)
 	opts := []metrics.Option{
-		metrics.WithRegistry(nodeCollector.Registry()),
-		metrics.WithPort(&opt.ServerBindPort),
 		metrics.WithLimiter(rateLimiter),
+		metrics.WithCollectors(nodeCollector),
+		metrics.WithPort(&opt.ServerBindPort),
 		metrics.WithTimeoutSecond(30),
+		metrics.WithDebugMetrics(opt.PprofBindPort > 0),
+		metrics.WithLabels(prometheus.Labels{"service": "vGPU"}),
 	}
 	if opt.EnableRBAC {
 		httpClient, err := rest.HTTPClientFor(kubeConfig)
@@ -109,7 +112,7 @@ func main() {
 	route.StartDebugServer(opt.PprofBindPort)
 	// Start prometheus indicator collection service.
 	go func() {
-		if err := server.Start(ctx.Done()); err != nil {
+		if err := server.Start(ctx); err != nil {
 			klog.Errorf("Server error occurred: %v", err)
 			cancelCtx()
 		}

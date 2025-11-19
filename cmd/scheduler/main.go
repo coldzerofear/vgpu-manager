@@ -133,7 +133,7 @@ func main() {
 			klog.Infof("Server starting on <0.0.0.0:%d>", opt.ServerBindPort)
 			err = server.ListenAndServe()
 		}
-		if err != nil {
+		if err != nil && err != http.ErrServerClosed {
 			klog.Errorf("Server error occurred: %v", err)
 			cancelFunc()
 		}

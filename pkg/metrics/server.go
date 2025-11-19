@@ -12,7 +12,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/julienschmidt/httprouter"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/exp/maps"
 	"golang.org/x/time/rate"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -21,12 +23,15 @@ import (
 type Middleware func(handler http.Handler) (http.Handler, error)
 
 type Server struct {
-	registry   *prometheus.Registry
-	limiter    *rate.Limiter
-	timeout    time.Duration
-	port       *int
-	httpServer *http.Server
-	middleware Middleware
+	mutex        sync.Mutex
+	collectors   []prometheus.Collector
+	labels       prometheus.Labels
+	limiter      *rate.Limiter
+	timeout      time.Duration
+	port         *int
+	debugMetrics bool
+	httpServer   *http.Server
+	middleware   Middleware
 }
 
 type klogErrLog struct{}
@@ -95,18 +100,44 @@ func (r *responseRecorder) GetResponse() response {
 	}
 }
 
-func (s *Server) Start(stopCh <-chan struct{}) (err error) {
-	if s.httpServer != nil {
+func (s *Server) Start(ctx context.Context) (err error) {
+	if !s.mutex.TryLock() {
 		return fmt.Errorf("metrics service has been started and cannot be restarted again")
 	}
+	defer s.mutex.Unlock()
 
-	lastResp := &lastResponse{}
-	metricHandler := promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{
-		Registry: s.registry,
-		ErrorLog: klogErrLog{},
-		Timeout:  s.timeout,
+	var (
+		lastResp                         = &lastResponse{}
+		registry                         = prometheus.NewRegistry()
+		registerer prometheus.Registerer = registry
+		gatherer   prometheus.Gatherer   = registry
+	)
+	if len(s.labels) > 0 {
+		registerer = prometheus.WrapRegistererWith(s.labels, registerer)
+	}
+	if s.debugMetrics {
+		for _, collector := range []prometheus.Collector{
+			collectors.NewGoCollector(),
+			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+		} {
+			if err = registerer.Register(collector); err != nil {
+				return err
+			}
+		}
+	}
+	for _, collector := range s.collectors {
+		if err = registerer.Register(collector); err != nil {
+			return err
+		}
+	}
+
+	metricHandler := promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{
+		Registry:      registerer,
+		ErrorLog:      klogErrLog{},
+		Timeout:       s.timeout,
+		ErrorHandling: promhttp.HTTPErrorOnError,
 	})
-	metricHandler = promhttp.InstrumentMetricHandler(s.registry, metricHandler)
+	metricHandler = promhttp.InstrumentMetricHandler(registerer, metricHandler)
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.limiter != nil && !s.limiter.Allow() {
 			resp := lastResp.GetResponse()
@@ -145,33 +176,43 @@ func (s *Server) Start(stopCh <-chan struct{}) (err error) {
 		Handler: routerHandle,
 	}
 
+	idleConnsClosed := make(chan struct{})
 	go func() {
-		<-stopCh
-		s.Stop()
+		select {
+		case <-ctx.Done():
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+			defer cancel()
+			if err := s.stop(ctx); err != nil {
+				klog.ErrorS(err, "error while stopping metrics service")
+			}
+			close(idleConnsClosed)
+		case <-idleConnsClosed:
+			_ = s.stop(ctx)
+		}
 	}()
 
 	klog.Infof("Metrics server starting on <0.0.0.0:%d>", *s.port)
 	// Block here until the service exits.
-	err = s.httpServer.ListenAndServe()
-	s.httpServer = nil
-	return err
+	if err = s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		close(idleConnsClosed)
+		return err
+	}
+
+	<-idleConnsClosed
+	return nil
 }
 
-func (s *Server) Stop() {
+func (s *Server) stop(ctx context.Context) error {
 	klog.Infof("Stopping metrics service")
-	if err := s.httpServer.Shutdown(context.Background()); err != nil {
-		klog.Errorf("Error while stopping metrics service: %s", err.Error())
+	if server := s.httpServer; server != nil {
+		if err := server.Shutdown(ctx); err != nil {
+			return err
+		}
 	}
-	s.httpServer = nil
+	return nil
 }
 
 type Option func(*Server)
-
-func WithRegistry(registry *prometheus.Registry) Option {
-	return func(s *Server) {
-		s.registry = registry
-	}
-}
 
 func WithPort(port *int) Option {
 	return func(s *Server) {
@@ -197,15 +238,33 @@ func WithMiddleware(fn Middleware) Option {
 	}
 }
 
+func WithLabels(labels prometheus.Labels) Option {
+	return func(s *Server) {
+		if s.labels == nil {
+			s.labels = prometheus.Labels{}
+		}
+		maps.Copy(s.labels, labels)
+	}
+}
+
+func WithCollectors(cs ...prometheus.Collector) Option {
+	return func(s *Server) {
+		s.collectors = append(s.collectors, cs...)
+	}
+}
+
+func WithDebugMetrics(b bool) Option {
+	return func(s *Server) {
+		s.debugMetrics = b
+	}
+}
+
 func NewServer(opts ...Option) *Server {
 	s := &Server{}
 	for _, opt := range opts {
 		opt(s)
 	}
-	// set default value
-	if s.registry == nil {
-		s.registry = prometheus.DefaultRegisterer.(*prometheus.Registry)
-	}
+
 	if s.port == nil {
 		s.port = ptr.To[int](8080)
 	}

@@ -34,11 +34,6 @@ import (
 	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 )
 
-type CollectorService interface {
-	prometheus.Collector
-	Registry() *prometheus.Registry
-}
-
 // nodeGPUCollector implements the Collector interface.
 type nodeGPUCollector struct {
 	*nvidia.DeviceLib
@@ -50,10 +45,8 @@ type nodeGPUCollector struct {
 	featureGate featuregate.FeatureGate
 }
 
-var _ CollectorService = &nodeGPUCollector{}
-
 func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister, podLister listerv1.PodLister,
-	contLister *ContainerLister, featureGate featuregate.FeatureGate) (CollectorService, error) {
+	contLister *ContainerLister, featureGate featuregate.FeatureGate) (prometheus.Collector, error) {
 	deviceLib, err := nvidia.InitDeviceLib("/")
 	if err != nil {
 		return nil, err
@@ -68,14 +61,6 @@ func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister, podLis
 		podResource: client.NewPodResource(
 			client.WithCallTimeoutSecond(5)),
 	}, nil
-}
-
-// Registry return to Prometheus registry.
-func (c *nodeGPUCollector) Registry() *prometheus.Registry {
-	registry := prometheus.NewRegistry()
-	labels := prometheus.Labels{"zone": "vGPU"}
-	prometheus.WrapRegistererWith(labels, registry).MustRegister(c)
-	return registry
 }
 
 // Descriptors used by the nodeGPUCollector below.
