@@ -43,7 +43,7 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 	log.SetLogger(klog.NewKlogr())
-	util.SetGlobalDomain(opt.Domain)
+	util.MustInitGlobalDomain(opt.Domain)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {

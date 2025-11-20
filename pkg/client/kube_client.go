@@ -2,11 +2,15 @@ package client
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -68,7 +72,47 @@ func WithQPSBurst(qps float32, burst int) Option {
 }
 
 func WithDefaultUserAgent() Option {
-	return WithUserAgent(rest.DefaultKubernetesUserAgent())
+	return WithUserAgent(DefaultUserAgent())
+}
+
+// adjustCommand returns the last component of the
+// OS-specific command path for use in User-Agent.
+func adjustCommand(p string) string {
+	// Unlikely, but better than returning "".
+	if len(p) == 0 {
+		return "unknown"
+	}
+	return filepath.Base(p)
+}
+
+// adjustCommit returns sufficient significant figures of the commit's git hash.
+func adjustCommit(c string) string {
+	if len(c) == 0 {
+		return "unknown"
+	}
+	if len(c) > 7 {
+		return c[:7]
+	}
+	return c
+}
+
+// adjustVersion strips "alpha", "beta", etc. from version in form
+// major.minor.patch-[alpha|beta|etc].
+func adjustVersion(v string) string {
+	if len(v) == 0 {
+		return "unknown"
+	}
+	seg := strings.SplitN(v, "-", 2)
+	return seg[0]
+}
+
+// DefaultUserAgent returns a User-Agent string built from static global vars.
+func DefaultUserAgent() string {
+	return fmt.Sprintf("%s/%s (%s) vgpu-manager/%s",
+		adjustCommand(os.Args[0]),
+		adjustVersion(version.Get().Version),
+		version.Get().Platform,
+		adjustCommit(version.Get().GitCommit))
 }
 
 func WithUserAgent(userAgent string) Option {

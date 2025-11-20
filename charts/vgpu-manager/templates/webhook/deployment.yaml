@@ -49,7 +49,7 @@ spec:
             {{- if .Values.scheduler.enabled }}
             - --scheduler-name={{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
             {{- end }}
-            - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
+            - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}
             - --server-bind-port={{ .Values.webhook.commands.serverBindPort | default 9443 }}
             - --pprof-bind-port={{ .Values.webhook.commands.pprofBindPort }}
             - --cert-dir={{ .Values.webhook.commands.certDir }}

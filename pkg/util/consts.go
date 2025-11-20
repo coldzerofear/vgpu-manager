@@ -60,17 +60,45 @@ var (
 	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
 )
 
+func initConstants() {
+	VGPUComputePolicyAnnotation = globalDomainName + "/vgpu-compute-policy"
+	MIGDeviceResourceNamePrefix = globalDomainName + "/mig-"
+	VGPUNumberResourceName = globalDomainName + "/vgpu-number"
+	VGPUMemoryResourceName = globalDomainName + "/vgpu-memory"
+	VGPUCoreResourceName = globalDomainName + "/vgpu-cores"
+	NodeDeviceHeartbeatAnnotation = globalDomainName + "/node-device-heartbeat"
+	NodeDeviceRegisterAnnotation = globalDomainName + "/node-device-register"
+	NodeDeviceTopologyAnnotation = globalDomainName + "/node-device-topology"
+	NodeConfigInfoAnnotation = globalDomainName + "/node-config-info"
+	PodIncludeGpuTypeAnnotation = globalDomainName + "/include-gpu-type"
+	PodExcludeGpuTypeAnnotation = globalDomainName + "/exclude-gpu-type"
+	NodeSchedulerPolicyAnnotation = globalDomainName + "/node-scheduler-policy"
+	DeviceSchedulerPolicyAnnotation = globalDomainName + "/device-scheduler-policy"
+	MemorySchedulerPolicyAnnotation = globalDomainName + "/memory-scheduler-policy"
+	DeviceTopologyModeAnnotation = globalDomainName + "/device-topology-mode"
+	PodIncludeGPUUUIDAnnotation = globalDomainName + "/include-gpu-uuid"
+	PodExcludeGPUUUIDAnnotation = globalDomainName + "/exclude-gpu-uuid"
+	PodPredicateNodeAnnotation = globalDomainName + "/predicate-node"
+	PodPredicateTimeAnnotation = globalDomainName + "/predicate-time"
+	PodAssignedPhaseLabel = globalDomainName + "/assigned-phase"
+	PodVGPUPreAllocAnnotation = globalDomainName + "/pre-allocated"
+	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
+}
+
 func GetGlobalDomain() string {
 	return globalDomainName
 }
 
-func SetGlobalDomain(domain string) {
+func MustInitGlobalDomain(domain string) {
 	initDomainOnce.Do(func() {
 		domain = strings.TrimSpace(domain)
 		if domain == "" {
 			klog.Fatalf("domain name cannot be empty")
 		}
-		globalDomainName = domain
+		if domain != globalDomainName {
+			globalDomainName = domain
+			initConstants()
+		}
 		klog.Infof("Successfully set the domain name to %s", domain)
 	})
 }

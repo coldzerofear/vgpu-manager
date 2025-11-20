@@ -6,9 +6,8 @@ import (
 )
 
 // Info contains versioning information.
-// TODO: Add []string of api versions supported? It's still unclear
-// how we'll want to distribute that information.
 type Info struct {
+	Version      string `json:"version"`
 	GitBranch    string `json:"gitBranch"`
 	GitCommit    string `json:"gitCommit"`
 	GitTreeState string `json:"gitTreeState"`
@@ -20,7 +19,7 @@ type Info struct {
 
 // String returns info as a human-friendly version string.
 func (info Info) String() string {
-	return info.GitBranch + "-" + info.GitCommit
+	return info.Version + "-" + info.GitBranch + "-" + info.GitCommit
 }
 
 // Get returns the overall codebase version. It's for detecting
@@ -29,6 +28,7 @@ func Get() Info {
 	// These variables typically come from -ldflags settings and in
 	// their absence fallback to the settings in pkg/version/base.go
 	return Info{
+		Version:      version,
 		GitBranch:    gitBranch,
 		GitCommit:    gitCommit,
 		GitTreeState: gitTreeState,

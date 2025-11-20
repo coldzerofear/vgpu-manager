@@ -4,19 +4,24 @@ GOOS ?= linux
 TAG ?= latest
 IMG ?= coldzerofear/vgpu-manager:$(TAG)
 APT_MIRROR ?= https://mirrors.aliyun.com
+VERSION ?= $(shell cat VERSION)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
-GOBIN=$(shell go env GOPATH)/bin
+  GOBIN=$(shell go env GOPATH)/bin
 else
-GOBIN=$(shell go env GOBIN)
+  GOBIN=$(shell go env GOBIN)
 endif
 
-# Git Version
+# Git info
 GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "Not a git repo")
 GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo "Not a git tree")
-GIT_TREE_STATE := $(shell if git diff-index --quiet HEAD --; then echo "clean"; else echo "dirty"; fi)
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+ifeq ($(strip $(shell git status --porcelain 2>/dev/null)),)
+  GIT_TREE_STATE?=clean
+else
+  GIT_TREE_STATE?=dirty
+endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
 # Be aware that the target commands are only tested with Docker which is
@@ -69,6 +74,7 @@ test: fmt vet ## Run tests.
 build: fmt vet ## Build binary.
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
        	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
+       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT}  \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
@@ -76,6 +82,7 @@ build: fmt vet ## Build binary.
         -o bin/scheduler cmd/scheduler/*.go
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
        	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
+       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
        	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
        	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
        	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
@@ -83,6 +90,7 @@ build: fmt vet ## Build binary.
     	-o bin/deviceplugin cmd/device-plugin/*.go
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
     	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
+       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
     	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
     	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
     	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
@@ -90,12 +98,14 @@ build: fmt vet ## Build binary.
     	-o bin/monitor cmd/monitor/*.go
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
     	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
+       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT}  \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
         -o bin/webhook cmd/webhook/*.go
 	CGO_ENABLED=0 GOOS=$(GOOS) go build -ldflags=" \
+       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
@@ -109,7 +119,7 @@ build: fmt vet ## Build binary.
 docker-build: ## Build docker image.
 	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH="${GIT_BRANCH}" --build-arg APT_MIRROR="${APT_MIRROR}" \
       --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
-      --build-arg BUILD_DATE="${BUILD_DATE}" -t "${IMG}" -f Dockerfile .
+      --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" -t "${IMG}" -f Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push docker image.
@@ -118,13 +128,3 @@ docker-push: ## Push docker image.
 .PHONY: generate
 generate: ## API code generation.
 	protoc --go_out=. --go-grpc_out=. pkg/api/registry/api.proto
-
-##@ Release
-#.PHONY: publish # Push the image to the remote registry
-#publish:
-#	docker buildx build \
-#		--platform linux/amd64,linux/arm64 \
-#		--output "type=image,push=true" \
-#		--file ./Dockerfile.cross \
-#		--tag $(IMG) \
-#		.

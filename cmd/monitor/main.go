@@ -38,7 +38,7 @@ func main() {
 	opt.PrintAndExitIfRequested()
 	logs.InitLogs()
 	defer logs.FlushLogs()
-	util.SetGlobalDomain(opt.Domain)
+	util.MustInitGlobalDomain(opt.Domain)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {

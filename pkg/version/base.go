@@ -12,6 +12,8 @@ package version
 // in-tree values are dummy values used for "git archive", which also
 // works for GitHub tar downloads.
 var (
+	// Version is the MAJOR.MINOR version of the artifacts being built
+	version string = "unknown"
 	// branch of git
 	gitBranch string = "Not a git repo"
 	// sha1 from git, output of $(git rev-parse HEAD)

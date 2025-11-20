@@ -25,7 +25,7 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 	log.SetLogger(klog.NewKlogr())
-	util.SetGlobalDomain(opt.Domain)
+	util.MustInitGlobalDomain(opt.Domain)
 
 	// Start pprof debug debugging service.
 	route.StartDebugServer(opt.PprofBindPort)
