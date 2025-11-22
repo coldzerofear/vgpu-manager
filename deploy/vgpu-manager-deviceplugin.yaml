@@ -138,7 +138,7 @@ spec:
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
-            - deviceplugin
+            - device-plugin
             - --device-split-count=10
             - --device-cores-scaling=1
             - --device-memory-scaling=1
@@ -182,7 +182,7 @@ spec:
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
-            - monitor
+            - device-monitor
             - --server-bind-port=3456
             - --node-config-path=/config/nodeConfig.json
             - --v=4

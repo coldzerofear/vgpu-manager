@@ -40,12 +40,12 @@ spec:
       tolerations: {{ toYaml .Values.webhook.tolerations | nindent 8 }}
       {{- end }}
       containers:
-        - name: webhook
+        - name: device-webhook
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           env: {{ toYaml .Values.webhook.env | nindent 12 }}
           command:
-            - webhook
+            - device-webhook
             {{- if .Values.scheduler.enabled }}
             - --scheduler-name={{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
             {{- end }}

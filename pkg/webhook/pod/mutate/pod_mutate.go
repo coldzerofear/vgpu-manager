@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
+	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/go-logr/logr"

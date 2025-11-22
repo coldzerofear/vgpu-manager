@@ -72,12 +72,12 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 15
-        - name: scheduler-extender
+        - name: device-scheduler
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           env: {{ toYaml .Values.scheduler.schedulerExtender.env | nindent 12 }}
           command:
-            - scheduler
+            - device-scheduler
             - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}
             - --kube-api-qps={{ .Values.scheduler.schedulerExtender.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.scheduler.schedulerExtender.commands.kubeApiBurst }}

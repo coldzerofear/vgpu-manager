@@ -65,7 +65,7 @@ spec:
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command:
-            - deviceplugin
+            - device-plugin
             - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}
             - --kube-api-qps={{ .Values.devicePlugin.devicePlugin.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.devicePlugin.devicePlugin.commands.kubeApiBurst }}
@@ -123,7 +123,7 @@ spec:
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command:
-            - monitor
+            - device-monitor
             - --domain={{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}
             - --kube-api-qps={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiQps }}
             - --kube-api-burst={{ .Values.devicePlugin.deviceMonitor.commands.kubeApiBurst }}

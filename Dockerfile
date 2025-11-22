@@ -6,14 +6,13 @@ ARG APT_MIRROR
 
 ARG GOLANG_VERSION=1.24.7
 
-RUN echo "Asia/Shanghai" > /etc/timezone && \
-    ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+RUN echo "Asia/Shanghai" > /etc/timezone && ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+
 RUN if [ -n "$APT_MIRROR" ]; then sed -i "s@http://archive.ubuntu.com@${APT_MIRROR}@g" /etc/apt/sources.list ; fi && \
     apt-get -y update && apt-get -y install --no-install-recommends make cmake g++ ca-certificates wget && \
     rm -rf /var/lib/apt/lists/*
 
-RUN wget -nv -O - https://dl.google.com/go/go${GOLANG_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz \
-    | tar -C /usr/local -xz
+RUN wget -nv -O - https://dl.google.com/go/go${GOLANG_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz | tar -C /usr/local -xz
 
 # Compile vgpu driver library files
 WORKDIR /vgpu-controller
@@ -26,8 +25,8 @@ RUN chmod +x build.sh && ./build.sh
 WORKDIR /go/src/vgpu-manager
 
 ENV GOPATH=/go
-ENV PATH=$GOPATH/bin:/usr/local/go/bin:$PATH
 ENV GO111MODULE=on
+ENV PATH=$GOPATH/bin:/usr/local/go/bin:$PATH
 ENV GOPROXY=https://goproxy.cn,direct
 
 # Copy the Go Modules manifests
@@ -48,58 +47,65 @@ ARG BUILD_VERSION
 COPY cmd cmd/
 COPY pkg pkg/
 
-RUN	CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
         CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.version=${BUILD_VERSION} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/scheduler cmd/scheduler/*.go && \
-    CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
+        -o bin/device-scheduler cmd/device-scheduler/*.go
+
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
         CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.version=${BUILD_VERSION} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/deviceplugin cmd/device-plugin/*.go && \
-    CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
+        -o bin/device-plugin cmd/device-plugin/*.go
+
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
         CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.version=${BUILD_VERSION} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/monitor cmd/monitor/*.go && \
-    CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
+        -o bin/device-monitor cmd/device-monitor/*.go
+
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
         CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.version=${BUILD_VERSION} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/webhook cmd/webhook/*.go && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags=" \
+        -o bin/device-webhook cmd/device-webhook/*.go
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags=" \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.version=${BUILD_VERSION} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/device-client cmd/client/*.go
+        -o bin/device-client cmd/device-client/*.go
 
 FROM quay.io/jitesoft/ubuntu:20.04
 
 ENV NVIDIA_DISABLE_REQUIRE="true"
 
 WORKDIR /
-COPY --from=builder /go/src/vgpu-manager/bin/scheduler /usr/bin/scheduler
-COPY --from=builder /go/src/vgpu-manager/bin/deviceplugin /usr/bin/deviceplugin
-COPY --from=builder /go/src/vgpu-manager/bin/monitor /usr/bin/monitor
-COPY --from=builder /go/src/vgpu-manager/bin/webhook /usr/bin/webhook
+
+COPY --from=builder /go/src/vgpu-manager/bin/device-scheduler /usr/bin/device-scheduler
+COPY --from=builder /go/src/vgpu-manager/bin/device-plugin /usr/bin/device-plugin
+COPY --from=builder /go/src/vgpu-manager/bin/device-monitor /usr/bin/device-monitor
+COPY --from=builder /go/src/vgpu-manager/bin/device-webhook /usr/bin/device-webhook
 
 COPY scripts scripts/
+
 RUN chmod +x /scripts/* && mkdir -p /installed/registry
+
 COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
 COPY --from=builder /vgpu-controller/build/mem_occupy_tool /installed/mem_occupy_tool
 COPY --from=builder /vgpu-controller/build/mem_managed_tool /installed/mem_managed_tool

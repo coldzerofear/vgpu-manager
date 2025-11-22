@@ -68,6 +68,10 @@ test: fmt vet ## Run tests.
     CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' \
     go test ./... -coverprofile cover.out
 
+.PHONY: generate
+generate: ## API code generation.
+	protoc --go_out=. --go-grpc_out=. pkg/api/registry/api.proto
+
 ##@ Build
 
 .PHONY: build
@@ -79,7 +83,7 @@ build: fmt vet ## Build binary.
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT}  \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/scheduler cmd/scheduler/*.go
+        -o bin/device-scheduler cmd/device-scheduler/*.go
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
        	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
        	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
@@ -87,7 +91,7 @@ build: fmt vet ## Build binary.
        	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
        	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
       	-X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-    	-o bin/deviceplugin cmd/device-plugin/*.go
+    	-o bin/device-plugin cmd/device-plugin/*.go
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
     	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
        	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
@@ -95,7 +99,7 @@ build: fmt vet ## Build binary.
     	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
     	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
     	-X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-    	-o bin/monitor cmd/monitor/*.go
+    	-o bin/device-monitor cmd/device-monitor/*.go
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
     	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
        	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
@@ -103,14 +107,14 @@ build: fmt vet ## Build binary.
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT}  \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/webhook cmd/webhook/*.go
+        -o bin/device-webhook cmd/device-webhook/*.go
 	CGO_ENABLED=0 GOOS=$(GOOS) go build -ldflags=" \
        	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
         -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/device-client cmd/client/*.go
+        -o bin/device-client cmd/device-client/*.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -125,6 +129,21 @@ docker-build: ## Build docker image.
 docker-push: ## Push docker image.
 	$(CONTAINER_TOOL) push ${IMG}
 
-.PHONY: generate
-generate: ## API code generation.
-	protoc --go_out=. --go-grpc_out=. pkg/api/registry/api.proto
+# PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
+# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
+# - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
+# - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
+# To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
+PLATFORMS ?= linux/arm64,linux/amd64
+.PHONY: docker-buildx
+docker-buildx: ## Build and push docker image for the manager for cross-platform support
+	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	- $(CONTAINER_TOOL) buildx create --name vgpu-manager-builder
+	$(CONTAINER_TOOL) buildx use vgpu-manager-builder
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg GIT_BRANCH="${GIT_BRANCH}" \
+      --build-arg APT_MIRROR="${APT_MIRROR}" --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
+	  --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" --tag "${IMG}" -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx rm vgpu-manager-builder
+	rm Dockerfile.cross

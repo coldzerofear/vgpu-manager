@@ -110,11 +110,11 @@ spec:
       priorityClassName: system-node-critical
       terminationGracePeriodSeconds: 10
       containers:
-        - name: webhook
+        - name: device-webhook
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
           command:
-            - webhook
+            - device-webhook
             - --server-bind-port=9443
             - --scheduler-name=vgpu-scheduler
             - --default-node-policy=binpack

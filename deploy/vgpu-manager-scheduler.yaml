@@ -155,7 +155,7 @@ spec:
       containers:
         - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
           imagePullPolicy: IfNotPresent
-          name: scheduler
+          name: kube-scheduler
           command:
             - kube-scheduler
             - --config=/config/config.yaml
@@ -178,9 +178,9 @@ spec:
             timeoutSeconds: 15
         - image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
-          name: scheduler-extender
+          name: device-scheduler
           command:
-            - scheduler
+            - device-scheduler
             - --server-bind-port=3456
             - --v=4
           env:

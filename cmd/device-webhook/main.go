@@ -4,7 +4,7 @@ import (
 	"crypto/tls"
 	"flag"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
+	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"

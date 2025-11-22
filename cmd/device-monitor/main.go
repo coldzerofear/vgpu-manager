@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
+	"github.com/coldzerofear/vgpu-manager/cmd/device-monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"

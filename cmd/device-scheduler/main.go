@@ -19,7 +19,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/scheduler/options"
+	"github.com/coldzerofear/vgpu-manager/cmd/device-scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/bind"

@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/webhook/options"
+	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	podmutate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/mutate"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"

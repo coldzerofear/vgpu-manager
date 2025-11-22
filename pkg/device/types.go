@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/scheduler/options"
+	"github.com/coldzerofear/vgpu-manager/cmd/device-scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"

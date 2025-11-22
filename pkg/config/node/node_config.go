@@ -8,8 +8,8 @@ import (
 	"regexp"
 	"strings"
 
+	monitoroptions "github.com/coldzerofear/vgpu-manager/cmd/device-monitor/options"
 	dpoptions "github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
-	monitoroptions "github.com/coldzerofear/vgpu-manager/cmd/monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gopkg.in/yaml.v3"
