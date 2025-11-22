@@ -1,4 +1,4 @@
-package deviceplugin
+package vgpu
 
 import (
 	"context"
@@ -18,6 +18,8 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/checkpoint"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
@@ -35,24 +37,24 @@ import (
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
-type vnumberDevicePlugin struct {
+type vNumberDevicePlugin struct {
 	pluginapi.UnimplementedDevicePluginServer
-	base        *baseDevicePlugin
+	baseServer  base.PluginServer
 	kubeClient  *kubernetes.Clientset
 	podResource *client.PodResource
 	server      *registry.DeviceRegistryServerImpl
 	cache       cache.Cache
 }
 
-var _ DevicePlugin = &vnumberDevicePlugin{}
+var _ base.DevicePlugin = &vNumberDevicePlugin{}
 
-// NewVNumberDevicePlugin returns an initialized vnumberDevicePlugin.
+// NewVNumberDevicePlugin returns an initialized vNumberDevicePlugin.
 func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.DeviceManager,
-	kubeClient *kubernetes.Clientset, cache cache.Cache) DevicePlugin {
+	kubeClient *kubernetes.Clientset, cache cache.Cache) base.DevicePlugin {
 	server := registry.NewDeviceRegistryServer(cache, ContManagerDirectoryPath)
 	podResource := client.NewPodResource(client.WithCallTimeoutSecond(5))
-	return &vnumberDevicePlugin{
-		base:        newBaseDevicePlugin(resourceName, socket, manager),
+	return &vNumberDevicePlugin{
+		baseServer:  base.NewBasePluginServer(resourceName, socket, manager),
 		podResource: podResource,
 		kubeClient:  kubeClient,
 		server:      server,
@@ -60,17 +62,17 @@ func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.Device
 	}
 }
 
-func (m *vnumberDevicePlugin) Name() string {
+func (m *vNumberDevicePlugin) Name() string {
 	return "vnumber-plugin"
 }
 
 // Start starts the gRPC server, registers the device plugin with the Kubelet.
-func (m *vnumberDevicePlugin) Start() error {
-	err := m.base.Start(m.Name(), m)
+func (m *vNumberDevicePlugin) Start() error {
+	err := m.baseServer.Start(m.Name(), m)
 	if err == nil {
-		m.base.manager.AddRegistryFunc(m.Name(), m.registryDevices)
-		m.base.manager.AddCleanupRegistryFunc(m.Name(), m.cleanupRegistry)
-		if m.base.manager.GetFeatureGate().Enabled(util.ClientMode) {
+		m.baseServer.GetDeviceManager().AddRegistryFunc(m.Name(), m.registryDevices)
+		m.baseServer.GetDeviceManager().AddCleanupRegistryFunc(m.Name(), m.cleanupRegistry)
+		if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.ClientMode) {
 			if err = m.server.Start(); err != nil {
 				klog.ErrorS(err, "DeviceRegistryServer failed to start")
 			}
@@ -80,11 +82,11 @@ func (m *vnumberDevicePlugin) Start() error {
 }
 
 // Stop stops the gRPC server.
-func (m *vnumberDevicePlugin) Stop() error {
-	err := m.base.Stop(m.Name())
-	m.base.manager.RemoveRegistryFunc(m.Name())
-	m.base.manager.RemoveCleanupRegistryFunc(m.Name())
-	if m.base.manager.GetFeatureGate().Enabled(util.ClientMode) {
+func (m *vNumberDevicePlugin) Stop() error {
+	err := m.baseServer.Stop(m.Name())
+	m.baseServer.GetDeviceManager().RemoveRegistryFunc(m.Name())
+	m.baseServer.GetDeviceManager().RemoveCleanupRegistryFunc(m.Name())
+	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.ClientMode) {
 		m.server.Stop()
 	}
 	return err
@@ -95,9 +97,9 @@ var (
 	encodeNodeTopologyInfo string
 )
 
-func (m *vnumberDevicePlugin) getEncodeNodeTopologyInfo() (string, error) {
+func (m *vNumberDevicePlugin) getEncodeNodeTopologyInfo() (string, error) {
 	if encodeNodeTopologyInfo == "" {
-		nodeTopologyInfo := m.base.manager.GetNodeTopologyInfo()
+		nodeTopologyInfo := m.baseServer.GetDeviceManager().GetNodeTopologyInfo()
 		info, err := nodeTopologyInfo.Encode()
 		if err != nil {
 			return "", fmt.Errorf("encoding node topology information failed: %v", err)
@@ -108,13 +110,13 @@ func (m *vnumberDevicePlugin) getEncodeNodeTopologyInfo() (string, error) {
 	return encodeNodeTopologyInfo, nil
 }
 
-func (m *vnumberDevicePlugin) getDecodeNodeConfigInfo() (string, error) {
+func (m *vNumberDevicePlugin) getDecodeNodeConfigInfo() (string, error) {
 	if encodeNodeConfigInfo == "" {
 		nodeConfigInfo := device.NodeConfigInfo{
-			DeviceSplit:   m.base.manager.GetNodeConfig().GetDeviceSplitCount(),
-			CoresScaling:  m.base.manager.GetNodeConfig().GetDeviceCoresScaling(),
-			MemoryFactor:  m.base.manager.GetNodeConfig().GetDeviceMemoryFactor(),
-			MemoryScaling: m.base.manager.GetNodeConfig().GetDeviceMemoryScaling(),
+			DeviceSplit:   m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceSplitCount(),
+			CoresScaling:  m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceCoresScaling(),
+			MemoryFactor:  m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceMemoryFactor(),
+			MemoryScaling: m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceMemoryScaling(),
 		}
 		info, err := nodeConfigInfo.Encode()
 		if err != nil {
@@ -126,8 +128,8 @@ func (m *vnumberDevicePlugin) getDecodeNodeConfigInfo() (string, error) {
 	return encodeNodeConfigInfo, nil
 }
 
-func (m *vnumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGate) (*client.PatchMetadata, error) {
-	registryGPUs, err := m.base.manager.GetNodeDeviceInfo().Encode()
+func (m *vNumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGate) (*client.PatchMetadata, error) {
+	registryGPUs, err := m.baseServer.GetDeviceManager().GetNodeDeviceInfo().Encode()
 	if err != nil {
 		return nil, fmt.Errorf("encoding node device information failed: %v", err)
 	}
@@ -153,14 +155,14 @@ func (m *vnumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGat
 			util.NodeConfigInfoAnnotation:      nodeConfigEncode,
 		},
 		Labels: map[string]string{
-			util.NodeNvidiaDriverVersionLabel: m.base.manager.GetDriverVersion().DriverVersion,
-			util.NodeNvidiaCudaVersionLabel:   strconv.Itoa(int(m.base.manager.GetDriverVersion().CudaDriverVersion)),
+			util.NodeNvidiaDriverVersionLabel: m.baseServer.GetDeviceManager().GetDriverVersion().DriverVersion,
+			util.NodeNvidiaCudaVersionLabel:   strconv.Itoa(int(m.baseServer.GetDeviceManager().GetDriverVersion().CudaDriverVersion)),
 		},
 	}
 	return &metadata, nil
 }
 
-func (m *vnumberDevicePlugin) cleanupRegistry(_ featuregate.FeatureGate) (*client.PatchMetadata, error) {
+func (m *vNumberDevicePlugin) cleanupRegistry(_ featuregate.FeatureGate) (*client.PatchMetadata, error) {
 	metadata := client.PatchMetadata{
 		Annotations: map[string]string{
 			util.NodeDeviceHeartbeatAnnotation: "",
@@ -173,24 +175,24 @@ func (m *vnumberDevicePlugin) cleanupRegistry(_ featuregate.FeatureGate) (*clien
 }
 
 // GetDevicePluginOptions returns options to be communicated with Device Manager.
-func (m *vnumberDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
+func (m *vNumberDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
 	klog.V(4).InfoS("GetDevicePluginOptions", "pluginName", m.Name())
 	return &pluginapi.DevicePluginOptions{PreStartRequired: true}, nil
 }
 
 // ListAndWatch returns a stream of List of Devices, Whenever a Device state change or a Device disappears,
 // ListAndWatch returns the new list.
-func (m *vnumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
+func (m *vNumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	klog.V(4).InfoS("ListAndWatch", "pluginName", m.Name(), "server", s)
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 		klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
 	}
-	stopCh := m.base.stop
+	stopCh := m.baseServer.GetStopCh()
 	for {
 		select {
-		case d := <-m.base.health:
+		case d := <-m.baseServer.GetDeviceCh():
 			if d.GPU != nil && !d.GPU.MigEnabled {
-				klog.Infof("'%s' device marked unhealthy: %s", m.base.resourceName, d.GPU.UUID)
+				klog.Infof("'%s' device marked unhealthy: %s", m.baseServer.GetResourceName(), d.GPU.UUID)
 				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
 					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
 				}
@@ -202,7 +204,7 @@ func (m *vnumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.Devic
 }
 
 // GetPreferredAllocation returns the preferred allocation from the set of devices specified in the request.
-func (m *vnumberDevicePlugin) GetPreferredAllocation(_ context.Context, req *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
+func (m *vNumberDevicePlugin) GetPreferredAllocation(_ context.Context, req *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
 	klog.V(4).InfoS("GetPreferredAllocation", "pluginName", m.Name(), "request", req.GetContainerRequests())
 	return &pluginapi.PreferredAllocationResponse{}, nil
 }
@@ -246,7 +248,7 @@ var (
 	HostDeviceRegistryPath   = HostManagerDirectoryPath + "/" + util.Registry
 )
 
-func passDeviceSpecs(devices []manager.Device, imexChannels imex.Channels) []*pluginapi.DeviceSpec {
+func PassDeviceSpecs(devices []manager.Device, imexChannels imex.Channels) []*pluginapi.DeviceSpec {
 	deviceMountOptional := map[string]bool{
 		NvidiaCTLFilePath:      true,
 		NvidiaUVMFilePath:      true,
@@ -297,7 +299,7 @@ func passDeviceSpecs(devices []manager.Device, imexChannels imex.Channels) []*pl
 	return specs
 }
 
-func updateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, devManager *manager.DeviceManager, deviceIDs ...string) {
+func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, devManager *manager.DeviceManager, deviceIDs ...string) {
 	switch devManager.GetNodeConfig().GetDeviceListStrategy() {
 	case util.DeviceListStrategyEnvvar:
 		response.Envs[deviceListEnvVar] = strings.Join(deviceIDs, ",")
@@ -336,7 +338,7 @@ func updateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, 
 // Allocate is called during container creation so that the Device
 // Plugin can run device specific operations and instruct Kubelet
 // of the steps to make the Device available in the container.
-func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
+func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
 	klog.V(4).InfoS("Allocate", "pluginName", m.Name(), "request", req.GetContainerRequests())
 	var (
 		activePods    []corev1.Pod
@@ -362,7 +364,7 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		}
 	}()
 
-	nodeConfig := m.base.manager.GetNodeConfig()
+	nodeConfig := m.baseServer.GetDeviceManager().GetNodeConfig()
 	activePods, err = client.GetActivePodsOnNode(ctx, m.kubeClient, nodeConfig.GetNodeName())
 	if err != nil {
 		klog.Errorf("failed to retrieve the active pods of the current node: %v", err)
@@ -377,11 +379,11 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	klog.V(4).InfoS("Equipment allocation in progress", "pod", klog.KObj(currentPod), "uid", currentPod.UID)
 
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
-	deviceMap := m.base.manager.GetGPUDeviceMap()
+	deviceMap := m.baseServer.GetDeviceManager().GetGPUDeviceMap()
 	memoryRatio := nodeConfig.GetDeviceMemoryScaling()
-	imexChannels := m.base.manager.GetImexChannels()
-	enabledSMWatcher := m.base.manager.GetFeatureGate().Enabled(util.SMWatcher)
-	enabledClientMode := m.base.manager.GetFeatureGate().Enabled(util.ClientMode)
+	imexChannels := m.baseServer.GetDeviceManager().GetImexChannels()
+	enabledSMWatcher := m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.SMWatcher)
+	enabledClientMode := m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.ClientMode)
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIds())
 		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -427,8 +429,8 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			}
 		}
 		response.Envs[util.GPUDevicesUuidEnv] = strings.Join(deviceIds, ",")
-		updateResponseForNodeConfig(response, m.base.manager, deviceIds...)
-		response.Devices = append(response.Devices, passDeviceSpecs(gpuDevices, imexChannels)...)
+		UpdateResponseForNodeConfig(response, m.baseServer.GetDeviceManager(), deviceIds...)
+		response.Devices = append(response.Devices, PassDeviceSpecs(gpuDevices, imexChannels)...)
 		response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount ld_preload file
 			ContainerPath: ContPreLoadFilePath,
 			HostPath:      HostPreLoadFilePath,
@@ -561,16 +563,16 @@ func (m *vnumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 }
 
 // GetPodInfoByCheckpoint find relevant pod information for devicesIDs in kubelet checkpoint
-func (m *vnumberDevicePlugin) GetPodInfoByCheckpoint(ctx context.Context, devicesIDs []string) (*client.PodInfo, error) {
+func (m *vNumberDevicePlugin) GetPodInfoByCheckpoint(ctx context.Context, devicesIDs []string) (*client.PodInfo, error) {
 	klog.V(3).Infoln("Attempt to retrieve pod information from the device plugin checkpoint")
-	devicePluginPath := m.base.manager.GetNodeConfig().GetDevicePluginPath()
-	checkpoint, err := GetDevicePluginCheckpointData(devicePluginPath)
+	devicePluginPath := m.baseServer.GetDeviceManager().GetNodeConfig().GetDevicePluginPath()
+	checkpointData, err := checkpoint.GetDevicePluginCheckpointData(devicePluginPath)
 	if err != nil {
 		return nil, err
 	}
 	devSet := sets.NewString(devicesIDs...)
-	nodeName := m.base.manager.GetNodeConfig().GetNodeName()
-	for _, entry := range checkpoint.PodDeviceEntries {
+	nodeName := m.baseServer.GetDeviceManager().GetNodeConfig().GetNodeName()
+	for _, entry := range checkpointData.PodDeviceEntries {
 		if entry.ResourceName != util.VGPUNumberResourceName || !devSet.HasAll(entry.DeviceIDs...) {
 			continue
 		}
@@ -597,7 +599,7 @@ func (m *vnumberDevicePlugin) GetPodInfoByCheckpoint(ctx context.Context, device
 	return nil, fmt.Errorf("pod info not found")
 }
 
-func (m *vnumberDevicePlugin) GetPodInfoByDeviceIDs(ctx context.Context, devicesIDs ...string) (*client.PodInfo, error) {
+func (m *vNumberDevicePlugin) GetPodInfoByDeviceIDs(ctx context.Context, devicesIDs ...string) (*client.PodInfo, error) {
 	if len(devicesIDs) == 0 {
 		return nil, errors.New("deviceIDs cannot be empty")
 	}
@@ -620,7 +622,7 @@ func (m *vnumberDevicePlugin) GetPodInfoByDeviceIDs(ctx context.Context, devices
 // PreStartContainer is called, if indicated by Device Plugin during registeration phase,
 // before each container start. Device plugin can run device specific operations
 // such as resetting the device before making devices available to the container.
-func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *pluginapi.PreStartContainerRequest) (resp *pluginapi.PreStartContainerResponse, err error) {
+func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *pluginapi.PreStartContainerRequest) (resp *pluginapi.PreStartContainerResponse, err error) {
 	klog.V(4).InfoS("PreStartContainer", "pluginName", m.Name(), "request", req.GetDevicesIds())
 	resp = &pluginapi.PreStartContainerResponse{}
 	defer func() {
@@ -635,7 +637,7 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		pod       *corev1.Pod
 		deviBytes []byte
 		deviceIDs []string
-		nodeName  = m.base.manager.GetNodeConfig().GetNodeName()
+		nodeName  = m.baseServer.GetDeviceManager().GetNodeConfig().GetNodeName()
 	)
 	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		// Node does not require timeliness, search from API server cache.
@@ -712,7 +714,7 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 			return env.Name == util.CudaMemoryOversoldEnv && strings.ToUpper(env.Value) == "TRUE"
 		})
 	})
-	err = vgpu.WriteVGPUConfigFile(vgpuConfigFilePath, m.base.manager, pod, realDevices[index], oversold, node)
+	err = vgpu.WriteVGPUConfigFile(vgpuConfigFilePath, m.baseServer.GetDeviceManager(), pod, realDevices[index], oversold, node)
 	if err != nil {
 		klog.V(3).ErrorS(err, "write vGPU config failed", "pod", klog.KObj(pod))
 		return resp, err
@@ -727,9 +729,9 @@ func (m *vnumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 	return resp, nil
 }
 
-func (m *vnumberDevicePlugin) Devices() []*pluginapi.Device {
+func (m *vNumberDevicePlugin) Devices() []*pluginapi.Device {
 	var devices []*pluginapi.Device
-	for _, gpuDevice := range m.base.manager.GetNodeDeviceInfo() {
+	for _, gpuDevice := range m.baseServer.GetDeviceManager().GetNodeDeviceInfo() {
 		if gpuDevice.Mig { // skip MIG device
 			continue
 		}

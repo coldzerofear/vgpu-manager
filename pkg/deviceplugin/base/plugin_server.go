@@ -1,4 +1,4 @@
-package deviceplugin
+package base
 
 import (
 	"context"
@@ -15,7 +15,9 @@ import (
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
-type baseDevicePlugin struct {
+var _ PluginServer = &basePluginServerImpl{}
+
+type basePluginServerImpl struct {
 	resourceName string
 	socket       string
 	manager      *manager.DeviceManager
@@ -25,9 +27,9 @@ type baseDevicePlugin struct {
 	stop   chan struct{}
 }
 
-// newBaseDevicePlugin returns an initialized baseDevicePlugin.
-func newBaseDevicePlugin(resourceName, socket string, manager *manager.DeviceManager) *baseDevicePlugin {
-	return &baseDevicePlugin{
+// NewBasePluginServer returns an initialized basePluginServerImpl.
+func NewBasePluginServer(resourceName, socket string, manager *manager.DeviceManager) PluginServer {
+	return &basePluginServerImpl{
 		resourceName: resourceName,
 		socket:       socket,
 		manager:      manager,
@@ -40,22 +42,26 @@ func newBaseDevicePlugin(resourceName, socket string, manager *manager.DeviceMan
 	}
 }
 
-func (b *baseDevicePlugin) initialize() {
+func (b *basePluginServerImpl) initialize() {
 	b.server = grpc.NewServer([]grpc.ServerOption{}...)
 	b.health = make(chan *manager.Device)
 	b.stop = make(chan struct{})
 }
 
-func (b *baseDevicePlugin) cleanup() {
+func (b *basePluginServerImpl) cleanup() {
 	close(b.stop)
 	b.server = nil
 	b.health = nil
 	b.stop = nil
 }
 
+func (b *basePluginServerImpl) GetDeviceManager() *manager.DeviceManager {
+	return b.manager
+}
+
 // Start starts the gRPC server, registers the device plugin with the Kubelet,
 // and starts the device healthchecks.
-func (b *baseDevicePlugin) Start(name string, server pluginapi.DevicePluginServer) error {
+func (b *basePluginServerImpl) Start(name string, server pluginapi.DevicePluginServer) error {
 	b.initialize()
 
 	if err := b.serve(server); err != nil {
@@ -79,7 +85,7 @@ func (b *baseDevicePlugin) Start(name string, server pluginapi.DevicePluginServe
 }
 
 // Stop stops the gRPC server.
-func (b *baseDevicePlugin) Stop(name string) error {
+func (b *basePluginServerImpl) Stop(name string) error {
 	if b == nil || b.server == nil {
 		return nil
 	}
@@ -97,8 +103,20 @@ func (b *baseDevicePlugin) Stop(name string) error {
 	return nil
 }
 
+func (b *basePluginServerImpl) GetStopCh() chan struct{} {
+	return b.stop
+}
+
+func (b *basePluginServerImpl) GetDeviceCh() chan *manager.Device {
+	return b.health
+}
+
+func (b *basePluginServerImpl) GetResourceName() string {
+	return b.resourceName
+}
+
 // serve starts the gRPC server of the device plugin.
-func (b *baseDevicePlugin) serve(server pluginapi.DevicePluginServer) error {
+func (b *basePluginServerImpl) serve(server pluginapi.DevicePluginServer) error {
 	_ = os.Remove(b.socket)
 	sock, err := net.Listen("unix", b.socket)
 	if err != nil {
@@ -148,7 +166,7 @@ func (b *baseDevicePlugin) serve(server pluginapi.DevicePluginServer) error {
 }
 
 // register the device plugin for the given resourceName with Kubelet.
-func (b *baseDevicePlugin) register() error {
+func (b *basePluginServerImpl) register() error {
 	conn, err := b.dial(pluginapi.KubeletSocket, 5*time.Second)
 	if err != nil {
 		return err
@@ -170,7 +188,7 @@ func (b *baseDevicePlugin) register() error {
 }
 
 // dial establishes the gRPC communication with the registered device plugin.
-func (b *baseDevicePlugin) dial(unixSocketPath string, timeout time.Duration) (*grpc.ClientConn, error) {
+func (b *basePluginServerImpl) dial(unixSocketPath string, timeout time.Duration) (*grpc.ClientConn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	//nolint:staticcheck  // TODO: Switch to grpc.NewClient

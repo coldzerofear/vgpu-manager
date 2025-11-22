@@ -1,4 +1,4 @@
-package metrics
+package collector
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
+	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/component-base/featuregate"
@@ -22,7 +24,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
-	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,13 +41,13 @@ type nodeGPUCollector struct {
 	nodeName    string
 	nodeLister  listerv1.NodeLister
 	podLister   listerv1.PodLister
-	contLister  *ContainerLister
+	contLister  *lister.ContainerLister
 	podResource *client.PodResource
 	featureGate featuregate.FeatureGate
 }
 
 func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister, podLister listerv1.PodLister,
-	contLister *ContainerLister, featureGate featuregate.FeatureGate) (prometheus.Collector, error) {
+	contLister *lister.ContainerLister, featureGate featuregate.FeatureGate) (prometheus.Collector, error) {
 	deviceLib, err := nvidia.InitDeviceLib("/")
 	if err != nil {
 		return nil, err
@@ -471,7 +472,7 @@ skipNvml:
 			sharedContainersMap[uuid] += set.Len()
 		}
 		for _, container := range pod.Spec.Containers {
-			contKey := GetContainerKey(pod.UID, container.Name)
+			contKey := lister.GetContainerKey(pod.UID, container.Name)
 			resData, exist := c.contLister.GetResourceDataT(contKey)
 			if !exist {
 				continue
@@ -528,10 +529,10 @@ skipNvml:
 				containerGPUPids := strings.Join(tmpPids, ",")
 				ContainerDeviceProcUtilEach(devProcUtilMap[deviceUUID], containerPids,
 					func(sample nvml.ProcessUtilizationSample) {
-						smUtil := GetValidValue(sample.SmUtil)
-						codecUtil := GetValidValue(sample.EncUtil) +
-							GetValidValue(sample.DecUtil)
-						codecUtil = CodecNormalize(codecUtil)
+						smUtil := util.GetValidValue(sample.SmUtil)
+						codecUtil := util.GetValidValue(sample.EncUtil) +
+							util.GetValidValue(sample.DecUtil)
+						codecUtil = util.CodecNormalize(codecUtil)
 						deviceSMUtil += smUtil + codecUtil
 					})
 
@@ -590,7 +591,7 @@ skipNvml:
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUCoreUtilRate,
 					prometheus.GaugeValue,
-					float64(GetPercentageValue(deviceSMUtil)),
+					float64(util.GetPercentageValue(deviceSMUtil)),
 					pod.Namespace, pod.Name, container.Name, vDevIndex,
 					deviceUUID, containerId, containerGPUPids, c.nodeName)
 			}
@@ -696,7 +697,7 @@ skipNvml:
 		podResourcesResp = listMigPodResourcesFunc()
 		podInfo := client.PodInfo{}
 		podInfoP, _ := c.podResource.GetPodInfoByMatchFunc(podResourcesResp, func(devices *v1alpha1.ContainerDevices) bool {
-			return devices.GetResourceName() == deviceplugin.GetMigResourceName(migInfo) &&
+			return devices.GetResourceName() == mig.GetMigResourceName(migInfo) &&
 				slices.Contains(devices.GetDeviceIds(), migInfo.UUID)
 		})
 		if podInfoP != nil {

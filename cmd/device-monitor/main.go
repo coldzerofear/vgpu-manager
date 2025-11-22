@@ -13,6 +13,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
+	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
+	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
+	"github.com/coldzerofear/vgpu-manager/pkg/metrics/server"
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
@@ -71,21 +74,21 @@ func main() {
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
 	podLister := listerv1.NewPodLister(podInformer.GetIndexer())
 
-	containerLister := metrics.NewContainerLister(
+	containerLister := lister.NewContainerLister(
 		util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
-	nodeCollector, err := metrics.NewNodeGPUCollector(nodeConfig.GetNodeName(),
+	nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig.GetNodeName(),
 		nodeLister, podLister, containerLister, opt.FeatureGate)
 	if err != nil {
 		klog.Fatalf("Create node gpu collector failed: %v", err)
 	}
 	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 1)
-	opts := []metrics.Option{
-		metrics.WithLimiter(rateLimiter),
-		metrics.WithCollectors(nodeCollector),
-		metrics.WithPort(&opt.ServerBindPort),
-		metrics.WithTimeoutSecond(30),
-		metrics.WithDebugMetrics(opt.PprofBindPort > 0),
-		metrics.WithLabels(prometheus.Labels{"service": "vGPU"}),
+	opts := []server.Option{
+		server.WithLimiter(rateLimiter),
+		server.WithCollectors(nodeCollector),
+		server.WithPort(&opt.ServerBindPort),
+		server.WithTimeoutSecond(30),
+		server.WithDebugMetrics(opt.PprofBindPort > 0),
+		server.WithLabels(prometheus.Labels{"service": "vGPU"}),
 	}
 	if opt.EnableRBAC {
 		httpClient, err := rest.HTTPClientFor(kubeConfig)
@@ -96,11 +99,11 @@ func main() {
 		if err != nil {
 			klog.Fatalf("Create authClient failed: %v", err)
 		}
-		opts = append(opts, metrics.WithMiddleware(func(handler http.Handler) (http.Handler, error) {
+		opts = append(opts, server.WithMiddleware(func(handler http.Handler) (http.Handler, error) {
 			return authorization(klog.NewKlogr(), handler)
 		}))
 	}
-	server := metrics.NewServer(opts...)
+	metricsServer := server.NewServer(opts...)
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	factory.Start(ctx.Done())
 	klog.V(4).Infoln("Waiting for InformerFactory cache synchronization...")
@@ -112,7 +115,7 @@ func main() {
 	route.StartDebugServer(opt.PprofBindPort)
 	// Start prometheus indicator collection service.
 	go func() {
-		if err := server.Start(ctx); err != nil {
+		if err = metricsServer.Start(ctx); err != nil {
 			klog.Errorf("Server error occurred: %v", err)
 			cancelCtx()
 		}

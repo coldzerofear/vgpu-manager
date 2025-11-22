@@ -10,6 +10,9 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gomodules.xyz/jsonpatch/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,44 +21,31 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
-	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-type DevicePlugin interface {
-	pluginapi.DevicePluginServer
-	// Name return device plugin name.
-	Name() string
-	// Start the plugin.
-	Start() error
-	// Stop the plugin.
-	Stop() error
-	// Devices return device list.
-	Devices() []*pluginapi.Device
-}
-
 func GetDevicePlugins(devicePluginPath string, devManager *manager.DeviceManager,
-	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) ([]DevicePlugin, error) {
+	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) ([]base.DevicePlugin, error) {
 
-	var plugins []DevicePlugin
+	var plugins []base.DevicePlugin
 	migStrategy := devManager.GetNodeConfig().GetMigStrategy()
 	if migStrategy != util.MigStrategySingle {
 		socket := filepath.Join(devicePluginPath, "nvidia-vgpu.sock")
-		plugins = append(plugins, NewVNumberDevicePlugin(util.VGPUNumberResourceName,
+		plugins = append(plugins, vgpu.NewVNumberDevicePlugin(util.VGPUNumberResourceName,
 			socket, devManager, kubeClient, clusterManager.GetCache()))
 	}
 
 	var deleteResources []string
 	if devManager.GetFeatureGate().Enabled(options.CorePlugin) {
 		socket := filepath.Join(devicePluginPath, "nvidia-vgpu-core.sock")
-		plugins = append(plugins, NewVCoreDevicePlugin(util.VGPUCoreResourceName, socket, devManager))
+		plugins = append(plugins, vgpu.NewVCoreDevicePlugin(util.VGPUCoreResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUCoreResourceName)
 	}
 
 	if devManager.GetFeatureGate().Enabled(options.MemoryPlugin) {
 		socket := filepath.Join(devicePluginPath, "nvidia-vgpu-memory.sock")
-		plugins = append(plugins, NewVMemoryDevicePlugin(util.VGPUMemoryResourceName, socket, devManager))
+		plugins = append(plugins, vgpu.NewVMemoryDevicePlugin(util.VGPUMemoryResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUMemoryResourceName)
 	}
@@ -77,14 +67,14 @@ func GetDevicePlugins(devicePluginPath string, devManager *manager.DeviceManager
 			return nil, fmt.Errorf("all devices on the node must be configured with the same migEnabled value")
 		}
 		resourceSet := sets.NewString()
-		for _, mig := range migDevices {
-			resource := strings.ReplaceAll(mig.Profile, "+", ".")
+		for _, migDev := range migDevices {
+			resource := strings.ReplaceAll(migDev.Profile, "+", ".")
 			resourceSet.Insert(resource)
 		}
 		for resource := range resourceSet {
 			resourceName := util.MIGDeviceResourceNamePrefix + resource
 			socket := filepath.Join(devicePluginPath, fmt.Sprintf("nvidia-mig-%s.sock", resource))
-			plugins = append(plugins, NewMigDevicePlugin(resourceName, socket, devManager))
+			plugins = append(plugins, mig.NewMigDevicePlugin(resourceName, socket, devManager))
 		}
 	}
 

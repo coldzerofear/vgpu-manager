@@ -1,4 +1,4 @@
-package metrics
+package lister
 
 import (
 	"fmt"
@@ -10,7 +10,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vmem"
-	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
+	dpvgpu "github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -141,11 +141,11 @@ func (c *ContainerLister) update() error {
 		_, existVMem := c.GetResourceVMem(containerKey)
 		switch {
 		case matched && !existCfg:
-			configFile := filepath.Join(filePath, util.Config, deviceplugin.VGPUConfigFileName)
+			configFile := filepath.Join(filePath, util.Config, dpvgpu.VGPUConfigFileName)
 			resourceData, err := vgpu.NewResourceData(configFile)
 			if err != nil && os.IsNotExist(err) {
 				// TODO Retaining the old directory is to adapt to the old pods.
-				configFile = filepath.Join(filePath, deviceplugin.VGPUConfigFileName)
+				configFile = filepath.Join(filePath, dpvgpu.VGPUConfigFileName)
 				resourceData, err = vgpu.NewResourceData(configFile)
 			}
 			if err != nil {

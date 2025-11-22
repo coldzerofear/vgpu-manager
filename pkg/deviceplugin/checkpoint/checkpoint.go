@@ -1,4 +1,4 @@
-package deviceplugin
+package checkpoint
 
 import (
 	"encoding/json"

@@ -1,4 +1,4 @@
-package metrics
+package lister
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
-	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
+	dpvgpu "github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -152,7 +152,7 @@ func Test_ContainerLister(t *testing.T) {
 		key := GetContainerKey(pod.UID, container.Name)
 		path := filepath.Join(basePath, string(key))
 		_ = os.MkdirAll(path, 0777)
-		path = filepath.Join(path, deviceplugin.VGPUConfigFileName)
+		path = filepath.Join(path, dpvgpu.VGPUConfigFileName)
 		claimDevices := contDeviceMap[container.Name]
 		assignDevices := device.ContainerDevices{Name: container.Name, Devices: claimDevices}
 		err = vgpu.WriteVGPUConfigFile(path, devManager, pod, assignDevices, false, node)
