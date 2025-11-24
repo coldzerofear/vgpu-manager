@@ -2,23 +2,29 @@ package filter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	testing2 "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
@@ -27,13 +33,52 @@ const (
 	namespace = "test-ns"
 )
 
-func Test_DeviceFilter(t *testing.T) {
-	k8sClient := fake.NewSimpleClientset()
-	factory := informers.NewSharedInformerFactory(k8sClient, 0)
+func Test_Parallel_Scheduling(t *testing.T) {
+	k8sClient := fake.NewClientset()
+	k8sClient.PrependReactor("patch", "pods", func(a testing2.Action) (bool, runtime.Object, error) {
+		action := a.(testing2.PatchAction)
+		obj, err := k8sClient.Tracker().Get(action.GetResource(), action.GetNamespace(), action.GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		pod, ok := obj.(*corev1.Pod)
+		if !ok {
+			return true, nil, fmt.Errorf("unexpected object type: %T", obj)
+		}
+		pod.ResourceVersion += "1"
+		var patchedBytes []byte
+		currentBytes, _ := json.Marshal(pod)
+		switch action.GetPatchType() {
+		case k8stypes.JSONPatchType:
+			// JSON Patch (RFC 6902)
+			patch, err := jsonpatch.DecodePatch(action.GetPatch())
+			if err != nil {
+				return true, nil, err
+			}
+			patchedBytes, err = patch.Apply(currentBytes)
+			if err != nil {
+				return true, nil, err
+			}
+		case k8stypes.MergePatchType, k8stypes.StrategicMergePatchType:
+			// Merge Patch (RFC 7386)
+			patchedBytes, err = jsonpatch.MergePatch(currentBytes, action.GetPatch())
+			if err != nil {
+				return true, nil, err
+			}
+		default:
+			return true, nil, fmt.Errorf("unsupported patch type: %v", action.GetPatchType())
+		}
+		newPod := &corev1.Pod{}
+		if err = json.Unmarshal(patchedBytes, newPod); err != nil {
+			return true, nil, err
+		}
+		newPod.DeepCopyInto(pod)
+		return true, pod, nil
+	})
 	broadcaster := record.NewBroadcaster()
 	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
-
+	factory := informers.NewSharedInformerFactory(k8sClient, 0)
 	filterPredicate, err := New(k8sClient, factory, recorder, true)
 	if err != nil {
 		t.Fatalf("failed to create new filterPredicate due to %v", err)
@@ -43,6 +88,100 @@ func Test_DeviceFilter(t *testing.T) {
 	factory.Start(ctx.Done())
 	factory.WaitForCacheSync(ctx.Done())
 
+	nodes, _ := buildNodeList()
+	nodeList := corev1.NodeList{Items: nodes}
+
+	wg := sync.WaitGroup{}
+	errCh := make(chan string, 50)
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			pod := &corev1.Pod{}
+			pod.Name = fmt.Sprintf("test-pod%d", i)
+			pod.Namespace = namespace
+			pod.Spec.Containers = []corev1.Container{
+				{
+					Name: "cont1",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 1)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 20)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 2048)),
+						},
+					},
+				},
+				{
+					Name: "cont2",
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{
+							corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 1)),
+							corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse(fmt.Sprintf("%d", 20)),
+							corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse(fmt.Sprintf("%d", 2048)),
+						},
+					},
+				},
+			}
+			pod.UID = k8stypes.UID(uuid.NewString())
+			pod.ResourceVersion = "1"
+			pod, err := k8sClient.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+			if err != nil {
+				errCh <- err.Error()
+				return
+			}
+			result := filterPredicate.Filter(ctx, extenderv1.ExtenderArgs{
+				Pod:   pod,
+				Nodes: &nodeList,
+			})
+			if result.Error != "" {
+				errCh <- result.Error
+				return
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatal(err)
+	}
+
+	list, err := filterPredicate.podLister.List(labels.Everything())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range nodes {
+		nodeInfo, err := device.NewNodeInfo(&node, list)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if nodeInfo.GetUsedCores() > nodeInfo.GetTotalCores() {
+			t.Fatalf("The GPU core allocation of node %s exceeds the limit", node.Name)
+		}
+		if nodeInfo.GetUsedNumber() > nodeInfo.GetTotalNumber() {
+			t.Fatalf("The GPU number allocation of node %s exceeds the limit", node.Name)
+		}
+		if nodeInfo.GetUsedMemory() > nodeInfo.GetTotalMemory() {
+			t.Fatalf("The GPU memory allocation of node %s exceeds the limit", node.Name)
+		}
+
+		for _, dev := range nodeInfo.GetDeviceMap() {
+			if dev.GetUsedCores() > dev.GetTotalCores() {
+				t.Fatalf("The GPU %d core allocation of node %s exceeds the limit", dev.GetID(), node.Name)
+			}
+			if dev.GetUsedNumber() > dev.GetTotalNumber() {
+				t.Fatalf("The GPU %d number allocation of node %s exceeds the limit", dev.GetID(), node.Name)
+			}
+			if dev.GetUsedMemory() > dev.GetTotalMemory() {
+				t.Fatalf("The GPU %d memory allocation of node %s exceeds the limit", dev.GetID(), node.Name)
+			}
+		}
+	}
+}
+
+func buildNodeList() ([]corev1.Node, map[string]device.NodeDeviceInfo) {
 	var nodeList []corev1.Node
 	nodeGPUMap := make(map[string]device.NodeDeviceInfo)
 	nodeConfig := device.NodeConfigInfo{
@@ -112,16 +251,36 @@ func Test_DeviceFilter(t *testing.T) {
 			},
 			Status: corev1.NodeStatus{
 				Capacity: corev1.ResourceList{
-					corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("10"),
+					corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("40"),
 				},
 				Allocatable: corev1.ResourceList{
-					corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("10"),
+					corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("40"),
 				},
 			},
 		}
 		nodeGPUMap[node.Name] = nodeGPUInfos
 		nodeList = append(nodeList, node)
 	}
+	return nodeList, nodeGPUMap
+}
+
+func Test_DeviceFilter(t *testing.T) {
+	k8sClient := fake.NewClientset()
+	factory := informers.NewSharedInformerFactory(k8sClient, 0)
+	broadcaster := record.NewBroadcaster()
+	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
+	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
+
+	filterPredicate, err := New(k8sClient, factory, recorder, false)
+	if err != nil {
+		t.Fatalf("failed to create new filterPredicate due to %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	factory.Start(ctx.Done())
+	factory.WaitForCacheSync(ctx.Done())
+
+	nodeList, nodeGPUMap := buildNodeList()
 	podUID := k8stypes.UID(uuid.NewString())
 	testCases := []struct {
 		name        string
@@ -327,7 +486,7 @@ func Test_DeviceFilter(t *testing.T) {
 			pod, _ = k8sClient.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{})
 
 			// wait for podLister to sync
-			time.Sleep(time.Second)
+			//time.Sleep(time.Second)
 
 			nodes, _, err := filterPredicate.deviceFilter(pod, nodeList)
 			assert.Equal(t, testCase.err, err)
@@ -342,7 +501,7 @@ func Test_DeviceFilter(t *testing.T) {
 			assert.Equal(t, testCase.nodeName, nodeName)
 
 			// wait for podLister to sync
-			time.Sleep(time.Second)
+			//time.Sleep(time.Second)
 
 			if len(nodeName) > 0 {
 				// get the latest pod and bind it to the node

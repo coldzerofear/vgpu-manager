@@ -5,6 +5,7 @@ go 1.24.7
 require (
 	github.com/NVIDIA/go-nvlib v0.8.0
 	github.com/NVIDIA/go-nvml v0.13.0-1
+	github.com/evanphx/json-patch v0.5.2
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-logr/logr v1.4.2
 	github.com/google/uuid v1.6.0

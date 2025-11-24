@@ -42,7 +42,7 @@ func NewLocker(options ...Option) *Locker {
 		opt(&locker)
 	}
 	if locker.enabled {
-		n := runtime.NumCPU()
+		n := runtime.NumCPU() * 2
 		if n < 4 {
 			n = 4
 		}

@@ -474,14 +474,29 @@ func (dev *Device) GetTotalMemory() int64 {
 	return dev.totalMemory
 }
 
-// GetTotalCores returns the totalCore of this device
+// GetUsedMemory returns the usedMemory of this device
+func (dev *Device) GetUsedMemory() int64 {
+	return dev.usedMemory
+}
+
+// GetTotalCores returns the totalCores of this device
 func (dev *Device) GetTotalCores() int64 {
 	return dev.totalCores
+}
+
+// GetUsedCores returns the usedCores of this device
+func (dev *Device) GetUsedCores() int64 {
+	return dev.usedCores
 }
 
 // GetTotalNumber returns the totalNum of this device
 func (dev *Device) GetTotalNumber() int {
 	return dev.totalNumber
+}
+
+// GetUsedNumber returns the usedNumber of this device
+func (dev *Device) GetUsedNumber() int {
+	return dev.usedNumber
 }
 
 // addUsedResources records the used GPU core and memory
@@ -725,6 +740,11 @@ func (n *NodeInfo) GetTotalCores() int64 {
 	return n.totalCores
 }
 
+// GetUsedCores returns the used cores of this node
+func (n *NodeInfo) GetUsedCores() int64 {
+	return n.usedCores
+}
+
 // GetAvailableCores returns the remaining cores of this node
 func (n *NodeInfo) GetAvailableCores() int64 {
 	availableCore := n.totalCores - n.usedCores
@@ -739,6 +759,11 @@ func (n *NodeInfo) GetTotalMemory() int64 {
 	return n.totalMemory
 }
 
+// GetUsedMemory returns the used memory of this node
+func (n *NodeInfo) GetUsedMemory() int64 {
+	return n.usedMemory
+}
+
 // GetAvailableMemory returns the remaining memory of this node
 func (n *NodeInfo) GetAvailableMemory() int64 {
 	availableMem := n.totalMemory - n.usedMemory
@@ -751,6 +776,11 @@ func (n *NodeInfo) GetAvailableMemory() int64 {
 // GetTotalNumber returns the total number of this node
 func (n *NodeInfo) GetTotalNumber() int {
 	return n.totalNumber
+}
+
+// GetUsedNumber returns the used number of this node
+func (n *NodeInfo) GetUsedNumber() int {
+	return n.usedNumber
 }
 
 // GetAvailableNumber returns the remaining number of this node
