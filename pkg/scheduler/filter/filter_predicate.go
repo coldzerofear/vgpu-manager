@@ -19,7 +19,6 @@ import (
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -38,9 +37,9 @@ type gpuFilter struct {
 }
 
 const (
-	Name                            = "FilterPredicate"
-	indexerKeyPodRequestVGPU        = "pod.requestVGPU"
-	indexerKeyPodPlanSchedulingNode = "pod.planSchedulingNode"
+	Name                     = "FilterPredicate"
+	indexerKeyPodRequestVGPU = "pod.requestVGPU"
+	//indexerKeyPodPlanSchedulingNode = "pod.planSchedulingNode"
 )
 
 var _ predicate.FilterPredicate = &gpuFilter{}
@@ -51,13 +50,13 @@ var podIndexers = cache.Indexers{
 		}
 		return []string{"false"}, nil
 	},
-	indexerKeyPodPlanSchedulingNode: func(obj interface{}) ([]string, error) {
-		nodeName := ""
-		if pod, ok := obj.(*corev1.Pod); ok {
-			nodeName = util.PodPlanSchedulingNode(pod)
-		}
-		return []string{nodeName}, nil
-	},
+	//indexerKeyPodPlanSchedulingNode: func(obj interface{}) ([]string, error) {
+	//	nodeName := ""
+	//	if pod, ok := obj.(*corev1.Pod); ok {
+	//		nodeName = util.PodPlanSchedulingNode(pod)
+	//	}
+	//	return []string{nodeName}, nil
+	//},
 }
 
 func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactory,
@@ -328,6 +327,12 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	f.locker.Lock()
 	defer f.locker.Unlock()
 
+	pods, err := f.podLister.ListByIndexValue(indexerKeyPodRequestVGPU, "true")
+	if err != nil {
+		klog.ErrorS(err, "PodLister list all vGPU Pods failed")
+		return filteredNodes, failedNodesMap, err
+	}
+
 	var (
 		mutex                = sync.Mutex{}
 		waitGroup            = sync.WaitGroup{}
@@ -351,15 +356,6 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				if !ok || !util.IsVGPUEnabledNode(node) {
 					klog.V(3).InfoS("node has not registered any GPU devices, skipping it", "node", node.Name)
 					batchFailedNodes[node.Name] = "node without GPU device"
-					continue
-				}
-				pods, err := f.podLister.ListByIndexFiled(fields.Set{
-					indexerKeyPodRequestVGPU:        "true",
-					indexerKeyPodPlanSchedulingNode: node.Name,
-				})
-				if err != nil {
-					klog.Errorf("PodLister list GPU Pods on node <%s> failed: %v", node.Name, err)
-					batchFailedNodes[node.Name] = err.Error()
 					continue
 				}
 				nodeInfo, err := device.NewNodeInfo(node, pods)

@@ -16,7 +16,8 @@ import (
 // All objects returned here must be treated as read-only.
 type PodLister interface {
 	listerv1.PodLister
-	ListByIndexFiled(fieldSet fields.Set) ([]*corev1.Pod, error)
+	ListByIndexValue(indexName, indexedValue string) ([]*corev1.Pod, error)
+	ListByIndexFiledSet(fieldSet fields.Set) ([]*corev1.Pod, error)
 }
 
 // podLister implements the PodLister interface.
@@ -34,7 +35,19 @@ func NewPodLister(indexer cache.Indexer) PodLister {
 	}
 }
 
-func (s *podLister) ListByIndexFiled(fieldSet fields.Set) ([]*corev1.Pod, error) {
+func (s *podLister) ListByIndexValue(indexName, indexedValue string) ([]*corev1.Pod, error) {
+	objs, err := s.indexer.ByIndex(indexName, indexedValue)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]*corev1.Pod, 0, len(objs))
+	for _, obj := range objs {
+		ret = append(ret, obj.(*corev1.Pod))
+	}
+	return ret, nil
+}
+
+func (s *podLister) ListByIndexFiledSet(fieldSet fields.Set) ([]*corev1.Pod, error) {
 	requirements := fieldSet.AsSelector().Requirements()
 	if len(requirements) == 0 {
 		return s.List(labels.Everything())

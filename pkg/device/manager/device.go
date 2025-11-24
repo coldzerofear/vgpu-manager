@@ -3,6 +3,7 @@ package manager
 import (
 	"fmt"
 	"os/exec"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -447,6 +448,9 @@ func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 			Healthy:    gpuDevice.Healthy,
 		})
 	}
+	sort.Slice(deviceInfos, func(i, j int) bool {
+		return deviceInfos[i].Id < deviceInfos[j].Id
+	})
 	return deviceInfos
 }
 
