@@ -56,6 +56,9 @@ extern "C" {
   ({                                                                           \
     LOGGER(5, "hooking %s", #sym);                                             \
     cuda_sym_t _entry = CUDA_FIND_ENTRY(table, sym);                           \
+    if (unlikely(!_entry)) {                                                   \
+      LOGGER(1, "hooking failed: %s is NULL", #sym);                           \
+    }                                                                          \
     _entry(__VA_ARGS__);                                                       \
   })
 
@@ -447,7 +450,7 @@ typedef enum {
   /** cuDeviceCanAccessPeer */
   CUDA_ENTRY_ENUM(cuDeviceCanAccessPeer),
   /** cuCtxEnablePeerAccess */
-  CUDA_ENTRY_ENUM(cuCtxEnablePeerAccess),
+  //CUDA_ENTRY_ENUM(cuCtxEnablePeerAccess),
   /** cuCtxDisablePeerAccess */
   CUDA_ENTRY_ENUM(cuCtxDisablePeerAccess),
   /** cuIpcGetEventHandle */
@@ -521,7 +524,7 @@ typedef enum {
   /** cuGraphicsVDPAURegisterOutputSurface */
   CUDA_ENTRY_ENUM(cuGraphicsVDPAURegisterOutputSurface),
   /** cuGetExportTable */
-  CUDA_ENTRY_ENUM(cuGetExportTable),
+  //CUDA_ENTRY_ENUM(cuGetExportTable),
   /** cuOccupancyMaxActiveBlocksPerMultiprocessor */
   CUDA_ENTRY_ENUM(cuOccupancyMaxActiveBlocksPerMultiprocessor),
   /** cuMemAdvise */
@@ -946,14 +949,14 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuSignalExternalSemaphoresAsync),
   /** cuSignalExternalSemaphoresAsync_ptsz */
   CUDA_ENTRY_ENUM(cuSignalExternalSemaphoresAsync_ptsz),
-  /** cuStreamBeginCapture */
-  CUDA_ENTRY_ENUM(cuStreamBeginCapture),
-  /** cuStreamBeginCapture_ptsz */
-  CUDA_ENTRY_ENUM(cuStreamBeginCapture_ptsz),
-  /** cuStreamEndCapture */
-  CUDA_ENTRY_ENUM(cuStreamEndCapture),
-  /** cuStreamEndCapture_ptsz */
-  CUDA_ENTRY_ENUM(cuStreamEndCapture_ptsz),
+//  /** cuStreamBeginCapture */
+//  CUDA_ENTRY_ENUM(cuStreamBeginCapture),
+//  /** cuStreamBeginCapture_ptsz */
+//  CUDA_ENTRY_ENUM(cuStreamBeginCapture_ptsz),
+//  /** cuStreamEndCapture */
+//  CUDA_ENTRY_ENUM(cuStreamEndCapture),
+//  /** cuStreamEndCapture_ptsz */
+//  CUDA_ENTRY_ENUM(cuStreamEndCapture_ptsz),
   /** cuStreamGetCtx */
   CUDA_ENTRY_ENUM(cuStreamGetCtx),
   CUDA_ENTRY_ENUM(cuStreamGetCtx_v2),
@@ -972,9 +975,9 @@ typedef enum {
   /** cuGraphExecKernelNodeSetParams */
   CUDA_ENTRY_ENUM(cuGraphExecKernelNodeSetParams),
   /** cuStreamBeginCapture_v2 */
-  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2),
+//  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2),
   /** cuStreamBeginCapture_v2_ptsz */
-  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2_ptsz),
+//  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2_ptsz),
   /** cuStreamGetCaptureInfo */
 //  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo),
   /** cuStreamGetCaptureInfo_ptsz */
@@ -1216,14 +1219,14 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuKernelGetFunction),
   CUDA_ENTRY_ENUM(cuKernelSetAttribute),
   CUDA_ENTRY_ENUM(cuKernelSetCacheConfig),
-  CUDA_ENTRY_ENUM(cuLibraryGetGlobal),
-  CUDA_ENTRY_ENUM(cuLibraryGetKernel),
-  CUDA_ENTRY_ENUM(cuLibraryGetManaged),
-  CUDA_ENTRY_ENUM(cuLibraryGetModule),
-  CUDA_ENTRY_ENUM(cuLibraryGetUnifiedFunction),
-  CUDA_ENTRY_ENUM(cuLibraryLoadData),
-  CUDA_ENTRY_ENUM(cuLibraryLoadFromFile),
-  CUDA_ENTRY_ENUM(cuLibraryUnload),
+//  CUDA_ENTRY_ENUM(cuLibraryGetGlobal),
+//  CUDA_ENTRY_ENUM(cuLibraryGetKernel),
+//  CUDA_ENTRY_ENUM(cuLibraryGetManaged),
+//  CUDA_ENTRY_ENUM(cuLibraryGetModule),
+//  CUDA_ENTRY_ENUM(cuLibraryGetUnifiedFunction),
+//  CUDA_ENTRY_ENUM(cuLibraryLoadData),
+//  CUDA_ENTRY_ENUM(cuLibraryLoadFromFile),
+//  CUDA_ENTRY_ENUM(cuLibraryUnload),
   CUDA_ENTRY_ENUM(cuMulticastAddDevice),
   CUDA_ENTRY_ENUM(cuMulticastBindAddr),
   CUDA_ENTRY_ENUM(cuMulticastBindMem),

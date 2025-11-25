@@ -47,6 +47,9 @@ extern "C" {
   ({                                                                           \
     LOGGER(5, "hooking %s", #sym);                                             \
     driver_sym_t _entry = NVML_FIND_ENTRY(table, sym);                         \
+    if (unlikely(!_entry)) {                                                   \
+      LOGGER(1, "hooking failed: %s is NULL", #sym);                           \
+    }                                                                          \
     _entry(__VA_ARGS__);                                                       \
   })
 
