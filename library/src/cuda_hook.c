@@ -937,7 +937,7 @@ static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_res
 DONE:
   device_util_unlock(fd, host_index);
   if (expired) {
-     LOGGER(WARNING, "host device %d process utilization time window timeout detected, fallback to nvml driver", host_index);
+     LOGGER(VERBOSE, "host device %d process utilization time window timeout detected, fallback to nvml driver", host_index);
      return get_gpu_process_from_local_nvml_driver(top_result, processes_sample, processes_size, cuda_index, dev);
   }
   return NVML_SUCCESS;

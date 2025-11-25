@@ -84,7 +84,7 @@ func (m *DeviceManager) doWatcher() {
 		}
 		batches := watcher.BalanceBatches(count, MaxBatchSize)
 		wg := sync.WaitGroup{}
-		_ = wait.PollUntilContextCancel(ctx, 120*time.Millisecond, true, func(ctx context.Context) (bool, error) {
+		_ = wait.PollUntilContextCancel(ctx, 100*time.Millisecond, true, func(ctx context.Context) (bool, error) {
 			var watcherErr error
 			for _, batch := range batches {
 				wg.Add(1)
