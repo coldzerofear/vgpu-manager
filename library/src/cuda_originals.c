@@ -1415,10 +1415,10 @@ CUresult cuDeviceCanAccessPeer(int *canAccessPeer, CUdevice dev,
 //                         Flags);
 //}
 
-CUresult cuCtxDisablePeerAccess(CUcontext peerContext) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDisablePeerAccess,
-                         peerContext);
-}
+//CUresult cuCtxDisablePeerAccess(CUcontext peerContext) {
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxDisablePeerAccess,
+//                         peerContext);
+//}
 
 CUresult cuIpcGetEventHandle(CUipcEventHandle *pHandle, CUevent event) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuIpcGetEventHandle, pHandle,
@@ -3294,33 +3294,33 @@ CUresult cuGraphExecMemsetNodeSetParams(CUgraphExec hGraphExec, CUgraphNode hNod
                          hGraphExec, hNode, memsetParams, ctx);
 }
 
-CUresult _cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
-                           CUgraphNode *hErrorNode_out,
-                           CUgraphExecUpdateResult *updateResult_out) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphExecUpdate_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecUpdate_v2,
-                    hGraphExec, hGraph, hErrorNode_out, updateResult_out);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphExecUpdate))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecUpdate,
-                    hGraphExec, hGraph, hErrorNode_out, updateResult_out);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
-CUresult cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
-                           CUgraphNode *hErrorNode_out,
-                           CUgraphExecUpdateResult *updateResult_out) {
-  return _cuGraphExecUpdate(hGraphExec, hGraph, hErrorNode_out, updateResult_out);
-}
-
-CUresult cuGraphExecUpdate_v2(CUgraphExec hGraphExec, CUgraph hGraph,
-                           CUgraphNode *hErrorNode_out,
-                           CUgraphExecUpdateResult *updateResult_out) {
-  return _cuGraphExecUpdate(hGraphExec, hGraph, hErrorNode_out, updateResult_out);
-}
+//CUresult _cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
+//                           CUgraphNode *hErrorNode_out,
+//                           CUgraphExecUpdateResult *updateResult_out) {
+//  CUresult ret;
+//  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphExecUpdate_v2))) {
+//    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecUpdate_v2,
+//                    hGraphExec, hGraph, hErrorNode_out, updateResult_out);
+//  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphExecUpdate))) {
+//    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecUpdate,
+//                    hGraphExec, hGraph, hErrorNode_out, updateResult_out);
+//  } else {
+//    ret = CUDA_ERROR_NOT_FOUND;
+//  }
+//  return ret;
+//}
+//
+//CUresult cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
+//                           CUgraphNode *hErrorNode_out,
+//                           CUgraphExecUpdateResult *updateResult_out) {
+//  return _cuGraphExecUpdate(hGraphExec, hGraph, hErrorNode_out, updateResult_out);
+//}
+//
+//CUresult cuGraphExecUpdate_v2(CUgraphExec hGraphExec, CUgraph hGraph,
+//                           CUgraphNode *hErrorNode_out,
+//                           CUgraphExecUpdateResult *updateResult_out) {
+//  return _cuGraphExecUpdate(hGraphExec, hGraph, hErrorNode_out, updateResult_out);
+//}
 
 CUresult cuCtxResetPersistingL2Cache(void) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxResetPersistingL2Cache);
@@ -3789,9 +3789,9 @@ CUresult  cuGraphNodeSetEnabled(CUgraphExec hGraphExec, CUgraphNode hNode, unsig
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphNodeSetEnabled, hGraphExec, hNode, isEnabled);
 }
 
-CUresult cuModuleGetLoadingMode(CUmoduleLoadingMode *mode){
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuModuleGetLoadingMode, mode);
-}
+//CUresult cuModuleGetLoadingMode(CUmoduleLoadingMode *mode){
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, cuModuleGetLoadingMode, mode);
+//}
 
 CUresult cuMemGetHandleForAddressRange(void *handle, CUdeviceptr dptr, size_t size,
                                        CUmemRangeHandleType handleType, unsigned long long flags){

@@ -452,7 +452,7 @@ typedef enum {
   /** cuCtxEnablePeerAccess */
   //CUDA_ENTRY_ENUM(cuCtxEnablePeerAccess),
   /** cuCtxDisablePeerAccess */
-  CUDA_ENTRY_ENUM(cuCtxDisablePeerAccess),
+  //CUDA_ENTRY_ENUM(cuCtxDisablePeerAccess),
   /** cuIpcGetEventHandle */
   CUDA_ENTRY_ENUM(cuIpcGetEventHandle),
   /** cuIpcOpenEventHandle */
@@ -993,8 +993,8 @@ typedef enum {
   /** cuGraphExecMemsetNodeSetParams */
   CUDA_ENTRY_ENUM(cuGraphExecMemsetNodeSetParams),
   /** cuGraphExecUpdate */
-  CUDA_ENTRY_ENUM(cuGraphExecUpdate),
-  CUDA_ENTRY_ENUM(cuGraphExecUpdate_v2),
+//  CUDA_ENTRY_ENUM(cuGraphExecUpdate),
+//  CUDA_ENTRY_ENUM(cuGraphExecUpdate_v2),
   /** cuMemAddressFree */
   CUDA_ENTRY_ENUM(cuMemAddressFree),
   /** cuMemAddressReserve */
@@ -1197,7 +1197,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphExecBatchMemOpNodeSetParams),
   CUDA_ENTRY_ENUM(cuGraphNodeGetEnabled),
   CUDA_ENTRY_ENUM(cuGraphNodeSetEnabled),
-  CUDA_ENTRY_ENUM(cuModuleGetLoadingMode),
+//  CUDA_ENTRY_ENUM(cuModuleGetLoadingMode),
   CUDA_ENTRY_ENUM(cuMemGetHandleForAddressRange),
 
   CUDA_ENTRY_ENUM(cuGraphAddNode),
