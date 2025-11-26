@@ -108,10 +108,11 @@ func adjustVersion(v string) string {
 
 // DefaultUserAgent returns a User-Agent string built from static global vars.
 func DefaultUserAgent() string {
-	return fmt.Sprintf("%s/%s (%s) vgpu-manager/%s",
+	return fmt.Sprintf("%s/%s (%s) %s/%s",
 		adjustCommand(os.Args[0]),
 		adjustVersion(version.Get().Version),
 		version.Get().Platform,
+		util.ComponentName,
 		adjustCommit(version.Get().GitCommit))
 }
 

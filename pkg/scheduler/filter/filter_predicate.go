@@ -2,11 +2,11 @@ package filter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
@@ -18,7 +18,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -183,7 +182,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.VirtualMemoryPolicy)
 		memoryPolicyFunc = func(node *corev1.Node, info *device.NodeConfigInfo) error {
 			if info.MemoryScaling <= 1 {
-				return fmt.Errorf("node GPU use physical memory")
+				return errors.New(GPUMemTypeMismatch)
 			}
 			return nil
 		}
@@ -191,7 +190,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.PhysicalMemoryPolicy)
 		memoryPolicyFunc = func(node *corev1.Node, info *device.NodeConfigInfo) error {
 			if info.MemoryScaling > 1 {
-				return fmt.Errorf("node GPU use virtual memory")
+				return errors.New(GPUMemTypeMismatch)
 			}
 			return nil
 		}
@@ -199,34 +198,39 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 	return memoryPolicyFunc
 }
 
+const (
+	NoGPUDevice            = "no GPU device"
+	NoGPUConfigInfo        = "no GPU configuration info"
+	IncorrectGPUConfig     = "incorrect GPU configuration"
+	IncorrectGPUMemFactory = "incorrect GPU memory factor"
+	GPUMemTypeMismatch     = "GPU memory type mismatch"
+	NoGPURegister          = "no GPU device registered"
+)
+
 type CheckNodeFunc func(node *corev1.Node, info *device.NodeConfigInfo) error
 
 func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) error {
-	heartbeat, ok := util.HasAnnotation(node, util.NodeDeviceHeartbeatAnnotation)
-	if !ok || len(heartbeat) == 0 {
-		return fmt.Errorf("node without device heartbeat")
+	if !util.IsVGPUEnabledNode(node) {
+		return errors.New(NoGPUDevice)
 	}
-	heartbeatTime := metav1.MicroTime{}
-	if err := heartbeatTime.UnmarshalText([]byte(heartbeat)); err != nil {
-		return fmt.Errorf("node with incorrect heartbeat timestamp")
+	if val, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation); !ok || len(val) == 0 {
+		klog.V(3).InfoS("node has not registered any GPU devices", "node", node.Name)
+		return errors.New(NoGPURegister)
 	}
-	if time.Since(heartbeatTime.Local()) > 2*time.Minute {
-		return fmt.Errorf("node with heartbeat timeout")
-	}
-	configInfoStr, ok := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
-	if !ok || len(configInfoStr) == 0 {
-		return fmt.Errorf("node with empty configuration information")
+	devConfigInfo, ok := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
+	if !ok || len(devConfigInfo) == 0 {
+		return errors.New(NoGPUConfigInfo)
 	}
 	nodeConfigInfo := device.NodeConfigInfo{}
-	if err := nodeConfigInfo.Decode(configInfoStr); err != nil {
+	if err := nodeConfigInfo.Decode(devConfigInfo); err != nil {
 		klog.V(3).ErrorS(err, "decoding node configuration information failed", "node", node.Name)
-		return fmt.Errorf("node with incorrect configuration information")
+		return errors.New(IncorrectGPUConfig)
 	}
 	if nodeConfigInfo.DeviceSplit <= 0 {
-		return fmt.Errorf("node without GPU device")
+		return errors.New(NoGPUDevice)
 	}
 	if nodeConfigInfo.MemoryFactor <= 0 {
-		return fmt.Errorf("node with incorrect GPU memory factor")
+		return errors.New(IncorrectGPUMemFactory)
 	}
 	for _, checkFunc := range checkNodeFuncs {
 		if err := checkFunc(node, &nodeConfigInfo); err != nil {
@@ -352,15 +356,9 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			for index := startIndex; index <= endIndex; index++ {
 				node := &nodes[index]
 				batchNodeOrigPosition[node.Name] = index
-				_, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
-				if !ok || !util.IsVGPUEnabledNode(node) {
-					klog.V(3).InfoS("node has not registered any GPU devices, skipping it", "node", node.Name)
-					batchFailedNodes[node.Name] = "node without GPU device"
-					continue
-				}
 				nodeInfo, err := device.NewNodeInfo(node, pods)
 				if err != nil {
-					klog.ErrorS(err, "Create node info failed, skipping node", "node", node.Name)
+					klog.ErrorS(err, "new node info failed, skipping node", "node", node.Name)
 					batchFailedNodes[node.Name] = err.Error()
 					continue
 				}

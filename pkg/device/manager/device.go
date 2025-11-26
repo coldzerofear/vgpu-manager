@@ -56,6 +56,7 @@ type DeviceManager struct {
 	featureGate   featuregate.FeatureGate
 
 	unhealthy            chan *Device
+	reRegister           chan struct{}
 	notify               map[string]chan *Device
 	registryFuncs        map[string]RegistryFunc
 	cleanupRegistryFuncs map[string]RegistryFunc
@@ -116,6 +117,7 @@ func NewFakeDeviceManager(opts ...OptionFunc) *DeviceManager {
 		client:               fake.NewSimpleClientset(),
 		featureGate:          featuregate.NewFeatureGate(),
 		unhealthy:            make(chan *Device),
+		reRegister:           make(chan struct{}),
 		notify:               make(map[string]chan *Device),
 		registryFuncs:        make(map[string]RegistryFunc),
 		cleanupRegistryFuncs: make(map[string]RegistryFunc),
@@ -168,6 +170,7 @@ func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (m *Devic
 	m = &DeviceManager{
 		config:               config,
 		unhealthy:            make(chan *Device),
+		reRegister:           make(chan struct{}),
 		notify:               make(map[string]chan *Device),
 		registryFuncs:        make(map[string]RegistryFunc),
 		cleanupRegistryFuncs: make(map[string]RegistryFunc),
@@ -412,17 +415,26 @@ func (m *DeviceManager) initialize() {
 func (m *DeviceManager) Start() {
 	m.Stop()
 	m.initialize()
-	klog.V(4).Infoln("DeviceManager starting handle notify...")
-	go m.handleNotify()
-	klog.V(4).Infoln("DeviceManager starting registry node devices...")
-	go m.registryDevices()
-	klog.V(4).Infoln("DeviceManager starting check devices health...")
 	go func() {
+		klog.Infoln("DeviceManager starting handle notify...")
+		m.handleNotify()
+	}()
+	go func() {
+		klog.Infoln("DeviceManager starting registry node devices...")
+		m.registryDevices()
+	}()
+	go func() {
+		klog.Infoln("DeviceManager starting check devices health...")
 		if err := m.checkHealth(); err != nil {
 			klog.Errorf("Failed to start health check: %v; continuing with health checks disabled", err)
 		}
 	}()
-	go m.doWatcher()
+	if m.featureGate.Enabled(util.SMWatcher) {
+		go func() {
+			klog.Infoln("DeviceManager starting sm watcher...")
+			m.doWatcher()
+		}()
+	}
 }
 
 func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
@@ -470,6 +482,10 @@ func (m *DeviceManager) handleNotify() {
 			}
 			if dev.MIG != nil {
 				dev.MIG.Healthy = false
+			}
+			select {
+			case m.reRegister <- struct{}{}:
+			default:
 			}
 			for _, ch := range m.notify {
 				ch <- dev

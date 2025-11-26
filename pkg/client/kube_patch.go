@@ -13,11 +13,12 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/pointer"
 )
 
 type PatchMetadata struct {
-	Annotations map[string]string `json:"annotations,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]*string `json:"annotations,omitempty"`
+	Labels      map[string]*string `json:"labels,omitempty"`
 }
 
 func PatchPodMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod, patchMetadata PatchMetadata) error {
@@ -33,7 +34,7 @@ func PatchPodMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod, patchMet
 		return err
 	}
 	rsPod, err := kubeClient.CoreV1().Pods(pod.Namespace).
-		Patch(context.Background(), pod.Name, k8stypes.StrategicMergePatchType, bytes, metav1.PatchOptions{})
+		Patch(context.Background(), pod.Name, k8stypes.MergePatchType, bytes, metav1.PatchOptions{})
 	if err == nil {
 		rsPod.DeepCopyInto(pod)
 	}
@@ -53,7 +54,7 @@ func PatchNodeMetadata(kubeClient kubernetes.Interface, nodeName string, patchMe
 		return err
 	}
 	_, err = kubeClient.CoreV1().Nodes().
-		Patch(context.Background(), nodeName, k8stypes.StrategicMergePatchType, bytes, metav1.PatchOptions{})
+		Patch(context.Background(), nodeName, k8stypes.MergePatchType, bytes, metav1.PatchOptions{})
 	return err
 }
 
@@ -75,12 +76,12 @@ func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod)
 		predicateTime = fmt.Sprintf("%d", uint64(math.MaxUint64))
 	}
 	patchData := PatchMetadata{
-		Labels: map[string]string{
-			util.PodAssignedPhaseLabel: string(assignedPhase),
+		Labels: map[string]*string{
+			util.PodAssignedPhaseLabel: pointer.String(string(assignedPhase)),
 		},
-		Annotations: map[string]string{
-			util.PodVGPURealAllocAnnotation: realAlloc,
-			util.PodPredicateTimeAnnotation: predicateTime,
+		Annotations: map[string]*string{
+			util.PodVGPURealAllocAnnotation: pointer.String(realAlloc),
+			util.PodPredicateTimeAnnotation: pointer.String(predicateTime),
 		},
 	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
@@ -97,8 +98,12 @@ func PatchPodAllocationAllocating(kubeClient kubernetes.Interface, pod *corev1.P
 		predicateTime = fmt.Sprintf("%d", metav1.NowMicro().UnixNano())
 	}
 	patchData := PatchMetadata{
-		Labels:      map[string]string{util.PodAssignedPhaseLabel: string(assignedPhase)},
-		Annotations: map[string]string{util.PodPredicateTimeAnnotation: predicateTime},
+		Labels: map[string]*string{
+			util.PodAssignedPhaseLabel: pointer.String(string(assignedPhase)),
+		},
+		Annotations: map[string]*string{
+			util.PodPredicateTimeAnnotation: pointer.String(predicateTime),
+		},
 	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		return PatchPodMetadata(kubeClient, pod, patchData)
@@ -108,11 +113,11 @@ func PatchPodAllocationAllocating(kubeClient kubernetes.Interface, pod *corev1.P
 // PatchPodAllocationFailed patch pod metadata marking device allocation failed.
 func PatchPodAllocationFailed(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
 	patchData := PatchMetadata{
-		Labels: map[string]string{
-			util.PodAssignedPhaseLabel: string(util.AssignPhaseFailed),
+		Labels: map[string]*string{
+			util.PodAssignedPhaseLabel: pointer.String(string(util.AssignPhaseFailed)),
 		},
-		Annotations: map[string]string{
-			util.PodPredicateTimeAnnotation: fmt.Sprintf("%d", uint64(math.MaxUint64)),
+		Annotations: map[string]*string{
+			util.PodPredicateTimeAnnotation: pointer.String(fmt.Sprintf("%d", uint64(math.MaxUint64))),
 		},
 	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
@@ -122,12 +127,12 @@ func PatchPodAllocationFailed(kubeClient kubernetes.Interface, pod *corev1.Pod) 
 
 // PatchPodVGPUAnnotation patch pod vGPU scheduling and allocation metadata.
 func PatchPodVGPUAnnotation(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
-	patchData := PatchMetadata{Annotations: map[string]string{}}
+	patchData := PatchMetadata{Annotations: map[string]*string{}}
 	nodeName := pod.Annotations[util.PodPredicateNodeAnnotation]
-	patchData.Annotations[util.PodPredicateNodeAnnotation] = nodeName
+	patchData.Annotations[util.PodPredicateNodeAnnotation] = pointer.String(nodeName)
 	preAlloc := pod.Annotations[util.PodVGPUPreAllocAnnotation]
-	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = preAlloc
-	patchData.Annotations[util.PodVGPURealAllocAnnotation] = ""
+	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = pointer.String(preAlloc)
+	patchData.Annotations[util.PodVGPURealAllocAnnotation] = pointer.String("")
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		return PatchPodMetadata(kubeClient, pod, patchData)
 	})

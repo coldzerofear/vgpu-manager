@@ -44,7 +44,7 @@ func NewBasePluginServer(resourceName, socket string, manager *manager.DeviceMan
 
 func (b *basePluginServerImpl) initialize() {
 	b.server = grpc.NewServer([]grpc.ServerOption{}...)
-	b.health = make(chan *manager.Device)
+	b.health = make(chan *manager.Device, 1)
 	b.stop = make(chan struct{})
 }
 

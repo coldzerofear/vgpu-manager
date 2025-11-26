@@ -8,6 +8,7 @@ import (
 )
 
 const (
+	ComponentName                = "vgpu-manager"
 	NvidiaDomain                 = "nvidia.com"
 	NodeNvidiaDriverVersionLabel = NvidiaDomain + "/node-driver-version"
 	NodeNvidiaCudaVersionLabel   = NvidiaDomain + "/node-cuda-version"
@@ -27,6 +28,7 @@ var (
 	VGPUCoreResourceName        = globalDomainName + "/vgpu-cores"
 
 	// NodeDeviceHeartbeatAnnotation Node device heartbeat time
+	// Deprecated
 	NodeDeviceHeartbeatAnnotation = globalDomainName + "/node-device-heartbeat"
 	NodeDeviceRegisterAnnotation  = globalDomainName + "/node-device-register"
 	NodeDeviceTopologyAnnotation  = globalDomainName + "/node-device-topology"

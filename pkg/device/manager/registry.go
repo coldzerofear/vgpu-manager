@@ -52,8 +52,8 @@ func (m *DeviceManager) registryDevices() {
 	}()
 
 	patchMetadata := client.PatchMetadata{
-		Annotations: map[string]string{},
-		Labels:      map[string]string{},
+		Annotations: map[string]*string{},
+		Labels:      map[string]*string{},
 	}
 
 	for {
@@ -81,6 +81,9 @@ func (m *DeviceManager) registryDevices() {
 				klog.ErrorS(err, "Cleanup node device registry infos failed")
 			}
 			return
+		case <-m.reRegister:
+			klog.V(3).Infoln("Trigger immediate re registration of node devices")
+			ticker.Reset(0)
 		case <-ticker.C:
 			m.mut.Lock()
 			funcs := maps.Clone(m.registryFuncs)

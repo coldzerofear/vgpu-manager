@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -238,15 +237,13 @@ func buildNodeList() ([]corev1.Node, map[string]device.NodeDeviceInfo) {
 			Healthy:    true,
 		}}
 		registerNode, _ := nodeGPUInfos.Encode()
-		heartbateTime, _ := metav1.NowMicro().MarshalText()
 		node := corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "testnode" + strconv.Itoa(i),
 				Labels: map[string]string{},
 				Annotations: map[string]string{
-					util.NodeDeviceHeartbeatAnnotation: string(heartbateTime),
-					util.NodeDeviceRegisterAnnotation:  registerNode,
-					util.NodeConfigInfoAnnotation:      encodeNodeConfig,
+					util.NodeDeviceRegisterAnnotation: registerNode,
+					util.NodeConfigInfoAnnotation:     encodeNodeConfig,
 				},
 			},
 			Status: corev1.NodeStatus{
@@ -517,13 +514,13 @@ func Test_DeviceFilter(t *testing.T) {
 
 func Test_NodeFilter(t *testing.T) {
 	filterPredicate := gpuFilter{}
-	oldTimestamp, err := metav1.Time{Time: time.Unix(0, 0)}.MarshalText()
-	if err != nil {
-		t.Fatal(err)
-	}
-	timestamp, err := metav1.NowMicro().MarshalText()
-	if err != nil {
-		t.Fatal(err)
+	nodeStatus := corev1.NodeStatus{
+		Allocatable: corev1.ResourceList{
+			corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("1"),
+		},
+		Capacity: corev1.ResourceList{
+			corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("1"),
+		},
 	}
 	testCases := []struct {
 		name  string
@@ -534,7 +531,7 @@ func Test_NodeFilter(t *testing.T) {
 		failedNodesMap extenderv1.FailedNodesMap
 	}{
 		{
-			name: "example1, no heartbeat timestamp",
+			name: "example1, no node config info",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{},
@@ -547,18 +544,20 @@ func Test_NodeFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: "",
+							util.NodeConfigInfoAnnotation:     "",
+							util.NodeDeviceRegisterAnnotation: "[]",
 						},
 					},
+					Status: nodeStatus,
 				},
 			},
 			filterNodes: []corev1.Node{},
 			failedNodesMap: map[string]string{
-				"testnode": "node without device heartbeat",
+				"testnode": NoGPUConfigInfo,
 			},
 		},
 		{
-			name: "example2, wrong heartbeat timestamp",
+			name: "example2, incorrect node config info",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{},
@@ -571,18 +570,20 @@ func Test_NodeFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: "xxxxx",
+							util.NodeConfigInfoAnnotation:     "xxxxxxxxx",
+							util.NodeDeviceRegisterAnnotation: "[]",
 						},
 					},
+					Status: nodeStatus,
 				},
 			},
 			filterNodes: []corev1.Node{},
 			failedNodesMap: map[string]string{
-				"testnode": "node with incorrect heartbeat timestamp",
+				"testnode": IncorrectGPUConfig,
 			},
 		},
 		{
-			name: "example3, timeout heartbeat timestamp",
+			name: "example3, no GPU device",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{},
@@ -595,81 +596,7 @@ func Test_NodeFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(oldTimestamp),
-						},
-					},
-				},
-			},
-			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": "node with heartbeat timeout",
-			},
-		},
-		{
-			name: "example4, no node config info",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: map[string]string{},
-					Name:        "testpod",
-					Namespace:   namespace,
-				},
-			},
-			nodes: []corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "testnode",
-						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
-							util.NodeConfigInfoAnnotation:      "",
-						},
-					},
-				},
-			},
-			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": "node with empty configuration information",
-			},
-		},
-		{
-			name: "example5, incorrect node config info",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: map[string]string{},
-					Name:        "testpod",
-					Namespace:   namespace,
-				},
-			},
-			nodes: []corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "testnode",
-						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
-							util.NodeConfigInfoAnnotation:      "xxxxxxxxx",
-						},
-					},
-				},
-			},
-			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": "node with incorrect configuration information",
-			},
-		},
-		{
-			name: "example6, no GPU device",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Annotations: map[string]string{},
-					Name:        "testpod",
-					Namespace:   namespace,
-				},
-			},
-			nodes: []corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "testnode",
-						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
+							util.NodeDeviceRegisterAnnotation: "[]",
 							util.NodeConfigInfoAnnotation: func() string {
 								config := device.NodeConfigInfo{}
 								encode, _ := config.Encode()
@@ -681,11 +608,11 @@ func Test_NodeFilter(t *testing.T) {
 			},
 			filterNodes: []corev1.Node{},
 			failedNodesMap: map[string]string{
-				"testnode": "node without GPU device",
+				"testnode": NoGPUDevice,
 			},
 		},
 		{
-			name: "example7, incorrect GPU memory factor",
+			name: "example4, no GPU device registered",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{},
@@ -698,7 +625,36 @@ func Test_NodeFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
+							util.NodeConfigInfoAnnotation: func() string {
+								config := device.NodeConfigInfo{}
+								encode, _ := config.Encode()
+								return encode
+							}(),
+						},
+					},
+					Status: nodeStatus,
+				},
+			},
+			filterNodes: []corev1.Node{},
+			failedNodesMap: map[string]string{
+				"testnode": NoGPURegister,
+			},
+		},
+		{
+			name: "example5, incorrect GPU memory factor",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{},
+					Name:        "testpod",
+					Namespace:   namespace,
+				},
+			},
+			nodes: []corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+						Annotations: map[string]string{
+							util.NodeDeviceRegisterAnnotation: "[]",
 							util.NodeConfigInfoAnnotation: func() string {
 								config := device.NodeConfigInfo{DeviceSplit: 1}
 								encode, _ := config.Encode()
@@ -706,15 +662,16 @@ func Test_NodeFilter(t *testing.T) {
 							}(),
 						},
 					},
+					Status: nodeStatus,
 				},
 			},
 			filterNodes: []corev1.Node{},
 			failedNodesMap: map[string]string{
-				"testnode": "node with incorrect GPU memory factor",
+				"testnode": IncorrectGPUMemFactory,
 			},
 		},
 		{
-			name: "example8, no virtual memory nodes",
+			name: "example6, no gpu virtual memory nodes",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -729,7 +686,7 @@ func Test_NodeFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
+							util.NodeDeviceRegisterAnnotation: "[]",
 							util.NodeConfigInfoAnnotation: func() string {
 								config := device.NodeConfigInfo{
 									DeviceSplit:   1,
@@ -741,15 +698,16 @@ func Test_NodeFilter(t *testing.T) {
 							}(),
 						},
 					},
+					Status: nodeStatus,
 				},
 			},
 			filterNodes: []corev1.Node{},
 			failedNodesMap: map[string]string{
-				"testnode": "node GPU use physical memory",
+				"testnode": GPUMemTypeMismatch,
 			},
 		},
 		{
-			name: "example9, no physical memory nodes",
+			name: "example7, no gpu physical memory nodes",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -764,7 +722,7 @@ func Test_NodeFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
+							util.NodeDeviceRegisterAnnotation: "[]",
 							util.NodeConfigInfoAnnotation: func() string {
 								config := device.NodeConfigInfo{
 									DeviceSplit:   1,
@@ -776,15 +734,16 @@ func Test_NodeFilter(t *testing.T) {
 							}(),
 						},
 					},
+					Status: nodeStatus,
 				},
 			},
 			filterNodes: []corev1.Node{},
 			failedNodesMap: map[string]string{
-				"testnode": "node GPU use virtual memory",
+				"testnode": GPUMemTypeMismatch,
 			},
 		},
 		{
-			name: "example10, success",
+			name: "example8, success",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{},
@@ -797,7 +756,7 @@ func Test_NodeFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
+							util.NodeDeviceRegisterAnnotation: "[]",
 							util.NodeConfigInfoAnnotation: func() string {
 								config := device.NodeConfigInfo{
 									DeviceSplit:   1,
@@ -810,6 +769,7 @@ func Test_NodeFilter(t *testing.T) {
 							}(),
 						},
 					},
+					Status: nodeStatus,
 				},
 			},
 			filterNodes: []corev1.Node{
@@ -817,7 +777,7 @@ func Test_NodeFilter(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "testnode",
 						Annotations: map[string]string{
-							util.NodeDeviceHeartbeatAnnotation: string(timestamp),
+							util.NodeDeviceRegisterAnnotation: "[]",
 							util.NodeConfigInfoAnnotation: func() string {
 								config := device.NodeConfigInfo{
 									DeviceSplit:   1,
@@ -830,6 +790,7 @@ func Test_NodeFilter(t *testing.T) {
 							}(),
 						},
 					},
+					Status: nodeStatus,
 				},
 			},
 			failedNodesMap: map[string]string{},

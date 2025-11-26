@@ -433,7 +433,7 @@ static void active_utilization_notifier(int batch_code) {
 }
 
 static void init_device_cuda_cores(int *device_count) {
-  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetCount, device_count);
+  CUresult ret = CUDA_INTERNAL_CALL(cuda_library_entry, cuDeviceGetCount, device_count);
   if (unlikely(ret)) {
     LOGGER(FATAL, "cuDeviceGetCount call failed, return %d, str: %s", ret, CUDA_ERROR(cuda_library_entry, ret));
   }

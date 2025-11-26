@@ -30,6 +30,7 @@ import (
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
+	"k8s.io/utils/pointer"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	client2 "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -133,30 +134,29 @@ func (m *vNumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGat
 	if err != nil {
 		return nil, fmt.Errorf("encoding node device information failed: %v", err)
 	}
-	heartbeatTime, err := metav1.NowMicro().MarshalText()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate node heartbeat timestamp: %v", err)
-	}
-	var registryGPUTopology string
+	var registryGPUTopology *string
 	if featureGate.Enabled(util.GPUTopology) {
-		if registryGPUTopology, err = m.getEncodeNodeTopologyInfo(); err != nil {
+		gpuTopology, err := m.getEncodeNodeTopologyInfo()
+		if err != nil {
 			return nil, err
 		}
+		registryGPUTopology = &gpuTopology
 	}
 	nodeConfigEncode, err := m.getDecodeNodeConfigInfo()
 	if err != nil {
 		return nil, err
 	}
+	driverVersion := m.baseServer.GetDeviceManager().GetDriverVersion().DriverVersion
+	cudaDriverVersion := strconv.Itoa(int(m.baseServer.GetDeviceManager().GetDriverVersion().CudaDriverVersion))
 	metadata := client.PatchMetadata{
-		Annotations: map[string]string{
-			util.NodeDeviceRegisterAnnotation:  registryGPUs,
-			util.NodeDeviceHeartbeatAnnotation: string(heartbeatTime),
-			util.NodeDeviceTopologyAnnotation:  registryGPUTopology,
-			util.NodeConfigInfoAnnotation:      nodeConfigEncode,
+		Annotations: map[string]*string{
+			util.NodeConfigInfoAnnotation:     pointer.String(nodeConfigEncode),
+			util.NodeDeviceRegisterAnnotation: pointer.String(registryGPUs),
+			util.NodeDeviceTopologyAnnotation: registryGPUTopology,
 		},
-		Labels: map[string]string{
-			util.NodeNvidiaDriverVersionLabel: m.baseServer.GetDeviceManager().GetDriverVersion().DriverVersion,
-			util.NodeNvidiaCudaVersionLabel:   strconv.Itoa(int(m.baseServer.GetDeviceManager().GetDriverVersion().CudaDriverVersion)),
+		Labels: map[string]*string{
+			util.NodeNvidiaDriverVersionLabel: pointer.String(driverVersion),
+			util.NodeNvidiaCudaVersionLabel:   pointer.String(cudaDriverVersion),
 		},
 	}
 	return &metadata, nil
@@ -164,11 +164,16 @@ func (m *vNumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGat
 
 func (m *vNumberDevicePlugin) cleanupRegistry(_ featuregate.FeatureGate) (*client.PatchMetadata, error) {
 	metadata := client.PatchMetadata{
-		Annotations: map[string]string{
-			util.NodeDeviceHeartbeatAnnotation: "",
-			util.NodeDeviceRegisterAnnotation:  "",
-			util.NodeDeviceTopologyAnnotation:  "",
-			util.NodeConfigInfoAnnotation:      "",
+		Annotations: map[string]*string{
+			// TODO Reserved for cleaning up after upgrading
+			util.NodeDeviceHeartbeatAnnotation: nil,
+			util.NodeDeviceRegisterAnnotation:  nil,
+			util.NodeDeviceTopologyAnnotation:  nil,
+			util.NodeConfigInfoAnnotation:      nil,
+		},
+		Labels: map[string]*string{
+			util.NodeNvidiaDriverVersionLabel: nil,
+			util.NodeNvidiaCudaVersionLabel:   nil,
 		},
 	}
 	return &metadata, nil

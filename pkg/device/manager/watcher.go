@@ -43,12 +43,6 @@ func WrapChannelWithContext[T any](ch <-chan T) (context.Context, context.Cancel
 }
 
 func (m *DeviceManager) doWatcher() {
-	if !m.featureGate.Enabled(util.SMWatcher) {
-		return
-	}
-
-	klog.V(4).Infoln("DeviceManager starting sm watcher...")
-
 	ctx, cancelFunc := WrapChannelWithContext(m.stop)
 	m.wait.Add(1)
 	defer func() {
@@ -72,7 +66,7 @@ func (m *DeviceManager) doWatcher() {
 		}()
 
 		if err = m.NvmlInit(); err != nil {
-			klog.ErrorS(err, "NvmlInit failed")
+			klog.ErrorS(err, "nvmlInit failed")
 			return
 		}
 		defer m.NvmlShutdown()

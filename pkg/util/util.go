@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/klog/v2"
 )
 
@@ -136,7 +137,10 @@ func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
 
 // ShouldRetry Determine whether the error of apiserver is of the type that needs to be retried.
 func ShouldRetry(err error) bool {
-	return errors.IsConflict(err) || errors.IsServerTimeout(err) || errors.IsTooManyRequests(err)
+	// these errors indicate a transient error that should be retried.
+	return errors.IsConflict(err) || errors.IsServerTimeout(err) ||
+		errors.IsTooManyRequests(err) || net.IsConnectionReset(err) ||
+		net.IsHTTP2ConnectionLost(err)
 }
 
 // IsShouldDeletePod Determine whether the pod has been deleted or needs to be deleted.
