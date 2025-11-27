@@ -1,6 +1,7 @@
 package allocator
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -55,15 +56,15 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 			return nil, err
 		}
 		if err = alloc.addAllocateOne(assignDevices); err != nil {
-			klog.V(4).InfoS(err.Error(), "node", alloc.nodeInfo.GetName(),
-				"pod", klog.KObj(pod), "container", container.Name)
+			klog.V(3).ErrorS(err, "Failed to add assigned resources", "node",
+				alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", container.Name)
 			return nil, fmt.Errorf("internal device scheduling error")
 		}
 		podAssignDevices = append(podAssignDevices, *assignDevices)
 	}
 	preAlloc, err := podAssignDevices.MarshalText()
 	if err != nil {
-		klog.V(4).InfoS(fmt.Sprintf("assign devices encoding failed: %v", err),
+		klog.V(2).ErrorS(err, "assign devices encoding failed",
 			"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod))
 		return nil, fmt.Errorf("assign devices encoding failed")
 	}
@@ -87,14 +88,14 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	needCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
 	needMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
 	if needNumber > alloc.nodeInfo.GetDeviceCount() {
-		return nil, fmt.Errorf("no enough GPU number on node")
+		return nil, errors.New("insufficient GPU cards")
 	}
 	// Calculate the actual requested memory size based on the node memory factor.
 	if needMemory > 0 {
 		nodeConfigInfo := device.NodeConfigInfo{}
-		err := nodeConfigInfo.Decode(node.Annotations[util.NodeConfigInfoAnnotation])
-		if err != nil {
-			return nil, fmt.Errorf("decoding node configuration information failed: %v", err)
+		if err := nodeConfigInfo.Decode(node.Annotations[util.NodeConfigInfoAnnotation]); err != nil {
+			klog.V(3).ErrorS(err, "decoding node configuration information failed")
+			return nil, errors.New("incorrect GPU configuration")
 		}
 		needMemory *= int64(nodeConfigInfo.MemoryFactor)
 	}
@@ -105,9 +106,9 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		claimDevices []device.ClaimDevice
 		devicePolicy string
 	)
-	deviceStore := filterDevices(alloc.nodeInfo.GetDeviceMap(), pod, node.GetName(), needCores, needMemory)
+	deviceStore, reasonStore := filterDevices(alloc.nodeInfo.GetDeviceMap(), pod, node.GetName(), needCores, needMemory)
 	if needNumber > len(deviceStore) {
-		return nil, fmt.Errorf("insufficient GPU on node")
+		goto DONE
 	} else if needNumber == len(deviceStore) {
 		claimDevices = allocateByNumbers(deviceStore, needNumber, needCores, needMemory)
 		goto DONE
@@ -135,7 +136,8 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	}
 DONE:
 	if len(claimDevices) != needNumber {
-		return nil, fmt.Errorf("insufficient GPU on node")
+		klog.V(5).InfoS("Insufficient node resources", "node", node.GetName(), "pod", klog.KObj(pod), "container", container.Name, "reason", reasonStore)
+		return nil, errors.New("insufficient GPU resources")
 	}
 	assignDevice := &device.ContainerDevices{Name: container.Name, Devices: claimDevices}
 	sort.Slice(assignDevice.Devices, func(i, j int) bool {
@@ -244,23 +246,39 @@ func allocateByNumbers(deviceStore []*device.Device, needNumber int, needCores, 
 	return devices
 }
 
-func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName string, needCores, needMemory int64) []*device.Device {
+type FailedReason string
+
+const (
+	DeviceUnhealthy    FailedReason = "DeviceUnhealthy"
+	DeviceEnableMig    FailedReason = "DeviceEnableMig"
+	InsufficientNumber FailedReason = "InsufficientNumber"
+	InsufficientMemory FailedReason = "InsufficientMemory"
+	InsufficientSMCore FailedReason = "InsufficientSMCore"
+	DeviceTypeMismatch FailedReason = "DeviceTypeMismatch"
+	DeviceUuidMismatch FailedReason = "DeviceUuidMismatch"
+)
+
+func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName string, needCores, needMemory int64) ([]*device.Device, map[FailedReason]int) {
 	var devices []*device.Device
+	reasonMap := make(map[FailedReason]int)
 	for i := range deviceMap {
 		deviceInfo := deviceMap[i]
 		// Filter unhealthy device.
 		if !deviceInfo.Healthy() {
-			klog.V(4).Infof("Filter unhealthy device <%d> on the node <%s>", i, nodeName)
+			klog.V(4).InfoS("Filter unhealthy devices on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+			reasonMap[DeviceUnhealthy]++
 			continue
 		}
 		// Filter MIG enabled device.
 		if deviceInfo.IsMIG() {
-			klog.V(4).Infof("Filter MIG enabled device <%d> on the node <%s>", i, nodeName)
+			klog.V(4).InfoS("Filter devices with MIG enabled on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+			reasonMap[DeviceEnableMig]++
 			continue
 		}
 		// Filter for insufficient number of virtual devices.
 		if deviceInfo.AllocatableNumber() == 0 {
-			klog.V(4).Infof("Filter device <%d> insufficient available number on the node <%s>", i, nodeName)
+			klog.V(4).InfoS("Filter devices with insufficient available number on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+			reasonMap[InsufficientNumber]++
 			continue
 		}
 		reqMemory := needMemory
@@ -270,26 +288,30 @@ func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName s
 			reqMemory = deviceInfo.GetTotalMemory()
 		}
 		if reqMemory > deviceInfo.AllocatableMemory() {
-			klog.V(4).Infof("Filter device <%d> with insufficient available memory on the node <%s>", i, nodeName)
+			klog.V(4).InfoS("Filter devices with insufficient available memory on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+			reasonMap[InsufficientMemory]++
 			continue
 		}
 		if needCores > deviceInfo.AllocatableCores() || (needCores == util.HundredCore && deviceInfo.AllocatableCores() < util.HundredCore) {
-			klog.V(4).Infof("Filter device <%d> with insufficient available cores on the node <%s>", i, nodeName)
+			klog.V(4).InfoS("Filter devices with insufficient available cores on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+			reasonMap[InsufficientSMCore]++
 			continue
 		}
 		// Filter device type.
 		if !util.CheckDeviceType(pod.Annotations, deviceInfo.GetType()) {
-			klog.V(4).Infof("Filter gpu device <%d> type <%s> non compliant annotation[%s]", i,
-				deviceInfo.GetType(), fmt.Sprintf("'%s' or '%s'", util.PodIncludeGpuTypeAnnotation, util.PodExcludeGpuTypeAnnotation))
+			klog.V(4).InfoS("Filter devices with type mismatches on the node", "node", nodeName, "deviceIndex", i, "deviceType", deviceInfo.GetType(),
+				"includeTypes", pod.Annotations[util.PodIncludeGpuTypeAnnotation], "excludeTypes", pod.Annotations[util.PodExcludeGpuTypeAnnotation])
+			reasonMap[DeviceTypeMismatch]++
 			continue
 		}
 		// Filter device uuid.
 		if !util.CheckDeviceUuid(pod.Annotations, deviceInfo.GetUUID()) {
-			klog.V(4).Infof("Filter gpu device <%d> uuid <%s> non compliant annotation[%s]", i,
-				deviceInfo.GetUUID(), fmt.Sprintf("'%s' or '%s'", util.PodIncludeGPUUUIDAnnotation, util.PodExcludeGPUUUIDAnnotation))
+			klog.V(4).InfoS("Filter devices with uuid mismatches on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
+				"includeUuids", pod.Annotations[util.PodIncludeGPUUUIDAnnotation], "excludeUuids", pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
+			reasonMap[DeviceUuidMismatch]++
 			continue
 		}
 		devices = append(devices, deviceInfo)
 	}
-	return devices
+	return devices, reasonMap
 }

@@ -579,7 +579,7 @@ func Test_NodeFilter(t *testing.T) {
 			},
 			filterNodes: []corev1.Node{},
 			failedNodesMap: map[string]string{
-				"testnode": IncorrectGPUConfig,
+				"testnode": IncorrectGPUConfigInfo,
 			},
 		},
 		{

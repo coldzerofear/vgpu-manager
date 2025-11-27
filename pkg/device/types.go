@@ -2,6 +2,7 @@ package device
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -396,7 +397,8 @@ func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
 	deviceRegister, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 	nodeDeviceInfo, err := ParseNodeDeviceInfo(deviceRegister)
 	if err != nil {
-		return nil, fmt.Errorf("parse node device information failed: %v", err)
+		klog.ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
+		return nil, errors.New("incorrect GPU registry")
 	}
 	deviceGatherInfo := DeviceGatherInfo{
 		DeviceMap:      make(map[int]*Device, len(nodeDeviceInfo)),

@@ -66,7 +66,8 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 
 	pod, err = b.kubeClient.CoreV1().Pods(args.PodNamespace).Get(ctx, args.PodName, metav1.GetOptions{})
 	if err != nil {
-		klog.ErrorS(err, "Get target Pod <%s/%s> failed", args.PodNamespace, args.PodName)
+		klog.ErrorS(err, "KubeClient Get target Pod failed", "targetPod",
+			fmt.Sprintf("%s/%s", args.PodNamespace, args.PodName))
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 	if pod.UID != args.PodUID {
@@ -93,7 +94,9 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 		klog.Errorf("Pod <%s/%s> binding Node <%s> failed: %v", args.PodNamespace, args.PodName, args.Node, err)
 		b.recorder.Event(pod, corev1.EventTypeWarning, "BindingFailed", err.Error())
 		// patch failed metadata
-		_ = client.PatchPodAllocationFailed(b.kubeClient, pod)
+		if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
+			klog.ErrorS(err, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
+		}
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 

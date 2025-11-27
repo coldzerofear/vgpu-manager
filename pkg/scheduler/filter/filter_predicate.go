@@ -201,7 +201,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 const (
 	NoGPUDevice            = "no GPU device"
 	NoGPUConfigInfo        = "no GPU configuration info"
-	IncorrectGPUConfig     = "incorrect GPU configuration"
+	IncorrectGPUConfigInfo = "incorrect GPU config info"
 	IncorrectGPUMemFactory = "incorrect GPU memory factor"
 	GPUMemTypeMismatch     = "GPU memory type mismatch"
 	NoGPURegister          = "no GPU device registered"
@@ -224,7 +224,7 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) error {
 	nodeConfigInfo := device.NodeConfigInfo{}
 	if err := nodeConfigInfo.Decode(devConfigInfo); err != nil {
 		klog.V(3).ErrorS(err, "decoding node configuration information failed", "node", node.Name)
-		return errors.New(IncorrectGPUConfig)
+		return errors.New(IncorrectGPUConfigInfo)
 	}
 	if nodeConfigInfo.DeviceSplit <= 0 {
 		return errors.New(NoGPUDevice)
@@ -416,7 +416,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		// Attempt to allocate devices for pods on this node.
 		newPod, err := allocator.NewAllocator(nodeInfo, recorder).Allocate(pod)
 		if err != nil {
-			klog.ErrorS(err, "node device allocate failed", "node", node.Name, "pod", klog.KObj(pod))
+			klog.V(1).ErrorS(err, "node device allocate failed", "node", node.Name, "pod", klog.KObj(pod))
 			failedNodesMap[node.Name] = err.Error()
 			continue
 		}
@@ -429,11 +429,15 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		cachePod, err := f.podLister.Pods(newPod.Namespace).Get(newPod.Name)
 		if err == nil && util.CompareResourceVersion(cachePod, newPod) < 0 {
 			cachePod.ObjectMeta = newPod.ObjectMeta
+		} else if err != nil {
+			klog.ErrorS(err, "PodLister get pod failed", "pod", klog.KObj(pod))
 		}
 		filteredNodes = append(filteredNodes, *node)
 		success = true
 	}
-
+	if success {
+		f.recorder.Eventf(pod, corev1.EventTypeNormal, "FilteringSucceed", "Successfully matched to node <%s>", filteredNodes[0].Name)
+	}
 	return filteredNodes, failedNodesMap, nil
 }
 
