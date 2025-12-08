@@ -1030,7 +1030,7 @@ resource_data_t vgpu_config_temp = {
     .vmem_node = 0,
 };
 
-resource_data_t* g_vgpu_config = &vgpu_config_temp;
+resource_data_t* g_vgpu_config = NULL;
 
 device_util_t* g_device_util = NULL;
 
@@ -1853,47 +1853,11 @@ DONE:
 }
 
 static volatile pid_t init_current_pid = 0;
+static pthread_mutex_t init_config_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-int load_controller_configuration() {
-  if (likely(init_current_pid == getpid())) {
-    return 0;
-  }
-  int ret = 1;
-  if (strlen(container_id) == 0) {
-    ret = extract_container_id(HOST_CGROUP_PATH, container_id, FILENAME_MAX);
-    if (!ret) {
-      LOGGER(VERBOSE, "find current container id: %s", container_id);
-    }
-  }
-
-  ret = mmap_file_to_config_path(&g_vgpu_config);
-  if (likely(ret == 0)) {
-    init_current_pid = getpid();
-    print_global_vgpu_config();
-    if (g_vgpu_config->sm_watcher) {
-      ret = mmap_file_to_util_path(CONTROLLER_SM_UTIL_FILE_PATH, &g_device_util);
-      if (ret) {
-        LOGGER(FATAL, "mmap sm watcher file failed");
-      }
-    }
-    if (g_vgpu_config->vmem_node) {
-      ret = mmap_file_to_vmem_node(&g_device_vmem);
-      if (ret) {
-        LOGGER(FATAL, "mmap vmem nodes file failed");
-      }
-      check_vmem_nodes();
-      if (atexit(exit_cleanup_vmem_nodes) != 0) {
-        LOGGER(ERROR ,"register exit handler failed: %d", errno);
-      }
-    }
-    if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
-      LOGGER(VERBOSE, "register to remote manager: uid: %s", g_vgpu_config->pod_uid);
-      register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name);
-    }
-    goto DONE;
-  }
-
-  ret = get_compatibility_mode(&g_vgpu_config->compatibility_mode);
+int init_g_vgpu_config_by_env() {
+  g_vgpu_config = &vgpu_config_temp;
+  int ret = get_compatibility_mode(&g_vgpu_config->compatibility_mode);
   if (unlikely(ret)) {
     LOGGER(WARNING, "not defined env compatibility mode");
   }
@@ -1918,7 +1882,7 @@ int load_controller_configuration() {
   ret = get_devices_uuid(uuids);
   if (unlikely(ret)) {
     LOGGER(ERROR, "not found gpu devices uuid");
-    goto DONE;
+    return ret;
   }
 
   int hard_cores = 0;
@@ -1984,30 +1948,66 @@ int load_controller_configuration() {
       g_vgpu_config->devices[i].hard_limit = 0;
     }
   }
+  return 0;
+}
 
-  ret = write_file_to_config_path(g_vgpu_config);
-  if (unlikely(ret)) {
-    LOGGER(ERROR, "failed to write vgpu config file %s", CONTROLLER_CONFIG_FILE_PATH);
+int load_controller_configuration() {
+  int ret = 1;
+  pid_t pid = getpid();
+  pthread_mutex_lock(&init_config_mutex);
+  if (likely(init_current_pid == getpid())) {
+    ret = 0;
     goto DONE;
   }
-  print_global_vgpu_config();
-  if (g_vgpu_config->vmem_node) {
+  if (strlen(container_id) == 0) {
+    ret = extract_container_id(HOST_CGROUP_PATH, container_id, FILENAME_MAX);
+    if (ret == 0) {
+      LOGGER(VERBOSE, "find current container id: %s", container_id);
+    }
+  }
+  if (g_vgpu_config == NULL) {
+    ret = mmap_file_to_config_path(&g_vgpu_config);
+    if (unlikely(ret != 0)) {
+      ret = init_g_vgpu_config_by_env();
+      if (unlikely(ret != 0)) {
+        g_vgpu_config = NULL;
+        goto DONE;
+      }
+      ret = write_file_to_config_path(g_vgpu_config);
+      if (unlikely(ret != 0)) {
+        LOGGER(ERROR, "failed to write vgpu config file %s", CONTROLLER_CONFIG_FILE_PATH);
+        goto DONE;
+      }
+    }
+    print_global_vgpu_config();
+  }
+  if (g_vgpu_config->sm_watcher && g_device_util == NULL) {
+    ret = mmap_file_to_util_path(CONTROLLER_SM_UTIL_FILE_PATH, &g_device_util);
+    if (ret) {
+      pthread_mutex_unlock(&init_config_mutex);
+      LOGGER(FATAL, "mmap sm watcher file failed");
+    }
+  }
+  if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {
     ret = mmap_file_to_vmem_node(&g_device_vmem);
     if (ret) {
+      pthread_mutex_unlock(&init_config_mutex);
       LOGGER(FATAL, "mmap vmem nodes file failed");
     }
     check_vmem_nodes();
     if (atexit(exit_cleanup_vmem_nodes) != 0) {
-      LOGGER(FATAL ,"register exit handler failed: %d", errno);
+      LOGGER(ERROR ,"register exit handler failed: %d", errno);
     }
   }
+
   if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     LOGGER(VERBOSE, "register to remote manager: uid: %s", g_vgpu_config->pod_uid);
     register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name);
   }
   ret = 0;
-  init_current_pid = getpid();
+  init_current_pid = pid;
 DONE:
+  pthread_mutex_unlock(&init_config_mutex);
   return ret;
 }
 
