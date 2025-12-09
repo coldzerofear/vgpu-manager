@@ -1662,8 +1662,8 @@ int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
     char uuid[UUID_BUFFER_SIZE];
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetUUID, device, uuid, UUID_BUFFER_SIZE);
     if (unlikely(ret)) {
-      LOGGER(VERBOSE, "nvmlDeviceGetUUID call failed, host device %d, return %d, str: %s",
-                       host_index, ret, NVML_ERROR(nvml_library_entry, ret));
+      LOGGER(VERBOSE, "nvmlDeviceGetUUID call failed, nvml device %d, return %d, str: %s",
+                       nvml_index, ret, NVML_ERROR(nvml_library_entry, ret));
       goto DONE;
     }
     get_host_device_index_by_uuid(uuid, &host_index);
@@ -1718,11 +1718,7 @@ int _get_host_device_index_by_cuda_device(CUdevice device) {
 }
 
 int get_host_device_index_by_cuda_device(CUdevice device) {
-  int cuda_index = (int) device;
-  int host_index = cuda_to_host_device_index[cuda_index];
-  if (likely(host_index >= 0)) {
-    return host_index;
-  }
+  int host_index = -1;
   pthread_mutex_lock(&device_index_mutex);
   host_index = _get_host_device_index_by_cuda_device(device);
   pthread_mutex_unlock(&device_index_mutex);
@@ -1731,10 +1727,7 @@ int get_host_device_index_by_cuda_device(CUdevice device) {
 
 int get_nvml_device_index_by_cuda_device(CUdevice device) {
   int cuda_index = (int) device;
-  int nvml_index = cuda_to_nvml_device_index[cuda_index];
-  if (likely(nvml_index >= 0)) {
-    return nvml_index;
-  }
+  int nvml_index = -1;
   pthread_mutex_lock(&device_index_mutex);
   nvml_index = cuda_to_nvml_device_index[cuda_index];
   if (nvml_index < 0) {
@@ -1755,6 +1748,22 @@ int get_nvml_device_index_by_cuda_device(CUdevice device) {
 DONE:
   pthread_mutex_unlock(&device_index_mutex);
   return nvml_index;
+}
+
+static volatile pid_t reset_index_changed_pid = 0;
+
+// Reset CUDA device index only when PID changes.
+void reset_cuda_index_mapping() {
+  pid_t pid = getpid();
+  pthread_mutex_lock(&device_index_mutex);
+  if (reset_index_changed_pid != pid) {
+    for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
+      cuda_to_host_device_index[index] = -1;
+      cuda_to_nvml_device_index[index] = -1;
+    }
+  }
+  reset_index_changed_pid = pid;
+  pthread_mutex_unlock(&device_index_mutex);
 }
 
 void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
@@ -1852,7 +1861,7 @@ DONE:
   *used_memory = count;
 }
 
-static volatile pid_t init_current_pid = 0;
+static volatile pid_t init_config_changed_pid = 0;
 static pthread_mutex_t init_config_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int init_g_vgpu_config_by_env() {
@@ -1897,6 +1906,7 @@ int init_g_vgpu_config_by_env() {
   g_vgpu_config->vmem_node = vnode_enable;
   for (int i = 0; i < device_count; i++) {
     strcpy(g_vgpu_config->devices[i].uuid, gpu_uuids[i]);
+    g_vgpu_config->devices[i].activate = 1;
     ret = get_mem_limit(i, &g_vgpu_config->devices[i].total_memory);
     if (unlikely(ret)) {
       LOGGER(VERBOSE, "gpu device %d turn off memory limit", i);
@@ -1955,7 +1965,7 @@ int load_controller_configuration() {
   int ret = 1;
   pid_t pid = getpid();
   pthread_mutex_lock(&init_config_mutex);
-  if (likely(init_current_pid == getpid())) {
+  if (likely(init_config_changed_pid == getpid())) {
     ret = 0;
     goto DONE;
   }
@@ -2005,7 +2015,7 @@ int load_controller_configuration() {
     register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name);
   }
   ret = 0;
-  init_current_pid = pid;
+  init_config_changed_pid = pid;
 DONE:
   pthread_mutex_unlock(&init_config_mutex);
   return ret;
@@ -2063,6 +2073,7 @@ void _load_necessary_data() {
   pthread_once(&g_cuda_lib_init, load_cuda_libraries);
   // Read global configuration
   load_controller_configuration();
+  reset_cuda_index_mapping();
 }
 
 void load_necessary_data() {

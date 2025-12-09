@@ -334,6 +334,11 @@ static void *utilization_watcher(void *arg) {
     host_index = get_host_device_index_by_cuda_device(cuda_index);
     host_indexes[cuda_index] = host_index;
 
+    is[host_index] = 0;
+    shares[host_index] = 0;
+    sys_frees[host_index] = 0;
+    avg_sys_frees[host_index] = 0;
+    pre_sys_process_nums[host_index] = 1;
     up_limits[host_index] = g_vgpu_config->devices[host_index].hard_core;
     top_results[host_index].user_current = 0;
     top_results[host_index].sys_current = 0;
@@ -351,7 +356,7 @@ static void *utilization_watcher(void *arg) {
   int dev_count = batch->end_index - batch->start_index;
   struct timespec wait = {
       .tv_sec = 0,
-      .tv_nsec = 100 / dev_count * MILLISEC,
+      .tv_nsec = 80 / dev_count * MILLISEC,
   };
   while (1) {
     for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
