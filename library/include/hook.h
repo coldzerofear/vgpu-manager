@@ -284,19 +284,19 @@ typedef void* (*fp_dlsym)(void*, const char*);
   })
 
 typedef enum {
-  INFO = 0,
+  FATAL = 0,
   ERROR = 1,
   WARNING = 2,
-  FATAL = 3,
+  INFO = 3,
   VERBOSE = 4,
   DETAIL = 5,
 } log_level_enum_t;
 
 static const char *_level_names[] = {
-  "INFO",     /* LOG_LEVEL_INFO    */
+  "FATAL",    /* LOG_LEVEL_FATAL   */
   "ERROR",    /* LOG_LEVEL_ERROR   */
   "WARNING",  /* LOG_LEVEL_WARNING */
-  "FATAL",    /* LOG_LEVEL_FATAL   */
+  "INFO",     /* LOG_LEVEL_INFO    */
   "VERBOSE",  /* LOG_LEVEL_VERBOSE */
   "DETAIL"    /* LOG_LEVEL_DETAIL  */
 };

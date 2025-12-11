@@ -1598,7 +1598,7 @@ void rm_vmem_node_by_device_pid(int device_id, int pid) {
 // Before exiting the program, check and clean up any unreleased virtual memory records.
 void exit_cleanup_vmem_nodes() {
  int pid = getpid();
- LOGGER(WARNING, "process program %d exits", pid);
+ LOGGER(INFO, "process program %d exits", pid);
  if (g_device_vmem != NULL) {
    for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
      if (g_device_vmem->devices[index].processes_size == 0) {

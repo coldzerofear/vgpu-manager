@@ -49,12 +49,12 @@ Use environment variable `LOGGER_LEVEL` to set the visibility of logs
 
 | LOGGER_LEVEL       | description                                 |
 | ------------------ |---------------------------------------------|
-| 0                  | infos                                       |
-| 1                  | errors,infos                                |
-| 2                  | warnings,errors,infos                       |
-| 3 (default)        | fatal,warnings,errors,infos                 |
-| 4                  | verbose,fatal,warnings,errors,infos         |
-| 5                  | details,verbose,fatal,warnings,errors,infos |
+| 0                  | fatal                                       |
+| 1                  | errors,fatal                                |
+| 2                  | warnings,errors,fatal                       |
+| 3 (default)        | infos,warnings,errors,fatal                 |
+| 4                  | verbose,infos,warnings,errors,fatal         |
+| 5                  | details,verbose,infos,warnings,errors,fatal |
 
 ## CUDA/GPU support information
 

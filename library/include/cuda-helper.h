@@ -54,10 +54,10 @@ extern "C" {
 
 #define CUDA_ENTRY_CALL(table, sym, ...)                                       \
   ({                                                                           \
-    LOGGER(5, "hooking %s", #sym);                                             \
+    LOGGER(DETAIL, "hooking %s", #sym);                                        \
     cuda_sym_t _entry = CUDA_FIND_ENTRY(table, sym);                           \
     if (unlikely(!_entry)) {                                                   \
-      LOGGER(1, "hooking failed: %s is NULL", #sym);                           \
+      LOGGER(ERROR, "hooking failed: %s is NULL", #sym);                       \
     }                                                                          \
     _entry(__VA_ARGS__);                                                       \
   })
@@ -81,7 +81,7 @@ extern "C" {
   ({                                                                           \
     CUresult _ret = CUDA_INTERNAL_CALL(table, sym, __VA_ARGS__);               \
     if (unlikely(_ret != CUDA_SUCCESS)) {                                      \
-      LOGGER(4, "%s call failed, return: %d, str: %s",                         \
+      LOGGER(VERBOSE, "%s call failed, return: %d, str: %s",                   \
                  #sym, _ret, CUDA_ERROR(table, _ret));                         \
     }                                                                          \
     _ret;                                                                      \
@@ -91,7 +91,7 @@ extern "C" {
   ({                                                                           \
     CUresult _ret = CUDA_ENTRY_CALL(table, sym, __VA_ARGS__);                  \
     if (unlikely(_ret != CUDA_SUCCESS)) {                                      \
-      LOGGER(4, "%s call failed, return: %d, str: %s",                         \
+      LOGGER(VERBOSE, "%s call failed, return: %d, str: %s",                   \
                  #sym, _ret, CUDA_ERROR(table, _ret));                         \
     }                                                                          \
     _ret;                                                                      \

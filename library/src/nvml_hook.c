@@ -130,7 +130,7 @@ DONE:
 
 nvmlReturn_t nvmlDeviceGetPersistenceMode(nvmlDevice_t device, nvmlEnableState_t *mode) {
   // fix: https://forums.developer.nvidia.com/t/nvidia-smi-uses-all-of-ram-and-swap/295639/15
-  LOGGER(5, "hooking nvmlDeviceGetPersistenceMode");
+  LOGGER(DETAIL, "hooking nvmlDeviceGetPersistenceMode");
   *mode = NVML_FEATURE_DISABLED;
   return NVML_SUCCESS;
 }

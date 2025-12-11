@@ -45,10 +45,10 @@ extern "C" {
 
 #define NVML_ENTRY_CALL(table, sym, ...)                                       \
   ({                                                                           \
-    LOGGER(5, "hooking %s", #sym);                                             \
+    LOGGER(DETAIL, "hooking %s", #sym);                                        \
     driver_sym_t _entry = NVML_FIND_ENTRY(table, sym);                         \
     if (unlikely(!_entry)) {                                                   \
-      LOGGER(1, "hooking failed: %s is NULL", #sym);                           \
+      LOGGER(ERROR, "hooking failed: %s is NULL", #sym);                       \
     }                                                                          \
     _entry(__VA_ARGS__);                                                       \
   })
@@ -73,7 +73,7 @@ extern "C" {
   ({                                                                           \
     nvmlReturn_t _ret = NVML_INTERNAL_CALL(table, sym, __VA_ARGS__);           \
     if (unlikely(_ret != NVML_SUCCESS)) {                                      \
-      LOGGER(4, "%s call failed, return: %d, str: %s",                         \
+      LOGGER(VERBOSE, "%s call failed, return: %d, str: %s",                   \
                  #sym, _ret, NVML_ERROR(table, _ret));                         \
     }                                                                          \
     _ret;                                                                      \
@@ -83,7 +83,7 @@ extern "C" {
   ({                                                                           \
     nvmlReturn_t _ret = NVML_ENTRY_CALL(table, sym, __VA_ARGS__);              \
     if (unlikely(_ret != NVML_SUCCESS)) {                                      \
-      LOGGER(4, "%s call failed, return: %d, str: %s",                         \
+      LOGGER(VERBOSE, "%s call failed, return: %d, str: %s",                   \
                  #sym, _ret, NVML_ERROR(table, _ret));                         \
     }                                                                          \
     _ret;                                                                      \
