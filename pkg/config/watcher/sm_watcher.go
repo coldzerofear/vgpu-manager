@@ -205,7 +205,7 @@ func (d *DeviceUtil) Munmap(msync bool) error {
 			uintptr(syscall.MS_SYNC),
 		)
 		if errno != 0 {
-			klog.V(3).ErrorS(fmt.Errorf("msync error: %d", errno), "failed to sync mmap")
+			klog.V(3).ErrorS(errno, "failed to sync mmap", "filepath", d.filePath)
 		}
 	}
 	return syscall.Munmap(d.deviceData)
@@ -227,7 +227,7 @@ func NewDeviceUtil(filePath string) (*DeviceUtil, error) {
 func CreateDeviceUtilFile(filePath string) error {
 	f, err := os.Create(filePath)
 	if err != nil {
-		klog.Errorf("Failed to create file: %s, error: %v", filePath, err)
+		klog.ErrorS(err, "Failed to create device util file", "filepath", filePath)
 		return err
 	}
 	defer func() {
@@ -237,7 +237,7 @@ func CreateDeviceUtilFile(filePath string) error {
 	dataSize := int64(unsafe.Sizeof(DeviceUtilT{}))
 	err = f.Truncate(dataSize)
 	if err != nil {
-		klog.Errorf("Failed to truncate file: %s, error: %v", filePath, err)
+		klog.ErrorS(err, "Failed to truncate device util file", "filepath", filePath)
 		return err
 	}
 	if err = f.Sync(); err != nil {
@@ -255,7 +255,6 @@ func PrepareDeviceUtilFile(filePath string) error {
 			return err
 		}
 		if err = CreateDeviceUtilFile(filePath); err != nil {
-			klog.Errorf("Failed to create file: %s, error: %v", filePath, err)
 			return err
 		}
 		fileInfo, err = os.Stat(filePath)
@@ -273,14 +272,10 @@ func PrepareDeviceUtilFile(filePath string) error {
 	klog.Warningf("File %s exists but size mismatch (%d != %d), deleting",
 		filePath, fileInfo.Size(), dataSize)
 	if err = os.Remove(filePath); err != nil {
-		klog.Errorf("Failed to remove file: %s, error: %v", filePath, err)
+		klog.ErrorS(err, "Failed to remove old device util file", "filepath", filePath)
 		return err
 	}
-	if err = CreateDeviceUtilFile(filePath); err != nil {
-		klog.Errorf("Failed to create file: %s, error: %v", filePath, err)
-		return err
-	}
-	return nil
+	return CreateDeviceUtilFile(filePath)
 }
 
 func MmapDeviceUtilT(filePath string) (*DeviceUtilT, []byte, error) {
@@ -296,7 +291,7 @@ func MmapDeviceUtilT(filePath string) (*DeviceUtilT, []byte, error) {
 	}
 	f, err := os.OpenFile(filePath, os.O_RDWR, 0666)
 	if err != nil {
-		klog.Errorf("Failed to open file: %s, error: %v", filePath, err)
+		klog.ErrorS(err, "Failed to open file", "filepath", filePath)
 		return nil, nil, err
 	}
 	defer func() {
@@ -304,7 +299,7 @@ func MmapDeviceUtilT(filePath string) (*DeviceUtilT, []byte, error) {
 	}()
 	data, err := syscall.Mmap(int(f.Fd()), 0, int(dataSize), syscall.PROT_WRITE|syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
-		klog.Errorf("Failed to mmap file: %s, error: %v", filePath, err)
+		klog.ErrorS(err, "Failed to mmap file", "filepath", filePath)
 		return nil, nil, err
 	}
 	resourceData := (*DeviceUtilT)(unsafe.Pointer(&data[0]))

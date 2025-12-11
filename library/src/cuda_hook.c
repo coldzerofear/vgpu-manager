@@ -496,7 +496,7 @@ static void balance_batches(int device_count) {
   int batch_size = DEVICE_BATCH_SIZE;
   // When sm watcher is turned on, all devices are merged into one batch, reducing the number of monitoring threads.
   if (g_vgpu_config->sm_watcher) {
-    batch_size = MAX_DEVICE_COUNT;
+    batch_size = MAX_DEVICE_COUNT / 2;
   }
   int batch_count = (device_count + batch_size - 1) / batch_size;
   int base_size = device_count / batch_count;
