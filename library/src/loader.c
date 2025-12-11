@@ -1497,23 +1497,23 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     pthread_mutex_unlock(&tid_dlsym_lock);
     goto DONE;
   } else if (strncmp(symbol, "cu", 2) == 0) { // hijack cuda
-    _load_necessary_data();
     if (likely(lib_control)) {
       result = real_dlsym(lib_control, symbol);
       if (likely(result)) {
         LOGGER(DETAIL, "search found cuda hook %s", symbol);
+        _load_necessary_data();
         goto DONE;
       }
     }
     for (i = 0; i < cuda_hook_nums; i++) {
       if (unlikely(!strcmp(symbol, cuda_hooks_entry[i].name))) {
-        LOGGER(DETAIL, "search found cuda hook %s", symbol);
         result = cuda_hooks_entry[i].fn_ptr;
+        LOGGER(DETAIL, "search found cuda hook %s", symbol);
+        _load_necessary_data();
         goto DONE;
       }
     }
   } else if (strncmp(symbol, "nvml", 4) == 0) { // hijack nvml
-    _load_necessary_data();
     if (likely(lib_control)) {
       result = real_dlsym(lib_control, symbol);
       if (likely(result)) {
@@ -1523,8 +1523,8 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     }
     for (i = 0; i < nvml_hook_nums; i++) {
       if (unlikely(!strcmp(symbol, nvml_hooks_entry[i].name))) {
-        LOGGER(DETAIL, "search found nvml hook %s", symbol);
         result = nvml_hooks_entry[i].fn_ptr;
+        LOGGER(DETAIL, "search found nvml hook %s", symbol);
         goto DONE;
       }
     }
