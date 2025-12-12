@@ -106,16 +106,33 @@ type DeviceVMemory struct {
 	deviceVMem *DeviceVMemoryT
 	deviceData []byte
 	filePath   string
+}
+
+type DeviceVMemoryWrap struct {
+	deviceVMem *DeviceVMemoryT
+	filePath   string
 	fd         int
 }
 
-func (d *DeviceVMemory) GetVMem() *DeviceVMemoryT {
+func (d *DeviceVMemory) GetWrap() *DeviceVMemoryWrap {
+	return &DeviceVMemoryWrap{
+		deviceVMem: d.deviceVMem,
+		filePath:   d.filePath,
+		fd:         -1,
+	}
+}
+
+// GetVMem Lock access should be added during use
+func (d *DeviceVMemoryWrap) GetVMem() *DeviceVMemoryT {
 	return d.deviceVMem
 }
 
-func (d *DeviceVMemory) RLock(ordinal int) error {
+func (d *DeviceVMemoryWrap) RLock(ordinal int) error {
 	if d == nil {
-		return fmt.Errorf("DeviceVMemory is nil")
+		return fmt.Errorf("DeviceVMemoryWrap is nil")
+	}
+	if d.fd >= 0 {
+		return fmt.Errorf("lock already exists")
 	}
 	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
@@ -128,14 +145,15 @@ func (d *DeviceVMemory) RLock(ordinal int) error {
 	return nil
 }
 
-func (d *DeviceVMemory) Unlock(ordinal int) error {
+func (d *DeviceVMemoryWrap) Unlock(ordinal int) error {
 	if d == nil {
-		return fmt.Errorf("DeviceVMemory is nil")
+		return fmt.Errorf("DeviceVMemoryWrap is nil")
 	}
 	if d.fd < 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, fd=%d, device=%d", d.fd, ordinal)
 	}
 	DeviceVMemUnlock(d.fd, ordinal)
+	d.fd = -1
 	return nil
 }
 
@@ -155,7 +173,6 @@ func NewDeviceVMemory(filePath string) (*DeviceVMemory, error) {
 		deviceVMem: vmem,
 		deviceData: data,
 		filePath:   filePath,
-		fd:         -1,
 	}, nil
 }
 

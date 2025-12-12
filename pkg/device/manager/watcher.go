@@ -115,7 +115,7 @@ func (m *DeviceManager) smWatcherBatchWithContext(deviceUtil *watcher.DeviceUtil
 				return fmt.Errorf("error getting device handle for index '%v': %v", i, ret)
 			}
 			newDevice, _ := m.NewDevice(dev)
-			if err := m.smWatcherSingleDevice(deviceUtil, i, newDevice); err != nil {
+			if err := m.smWatcherSingleDevice(deviceUtil.GetWrap(), i, newDevice); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
@@ -124,7 +124,7 @@ func (m *DeviceManager) smWatcherBatchWithContext(deviceUtil *watcher.DeviceUtil
 	}
 }
 
-func (m *DeviceManager) smWatcherSingleDevice(deviceUtil *watcher.DeviceUtil, i int, d device.Device) error {
+func (m *DeviceManager) smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, i int, d device.Device) error {
 	if enabled, _ := d.IsMigEnabled(); enabled {
 		return nil
 	}

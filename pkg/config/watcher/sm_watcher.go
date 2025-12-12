@@ -145,16 +145,33 @@ type DeviceUtil struct {
 	deviceUtil *DeviceUtilT
 	deviceData []byte
 	filePath   string
+}
+
+type DeviceUtilWrap struct {
+	deviceUtil *DeviceUtilT
+	filePath   string
 	fd         int
 }
 
-func (d *DeviceUtil) GetUtil() *DeviceUtilT {
+func (d *DeviceUtil) GetWrap() *DeviceUtilWrap {
+	return &DeviceUtilWrap{
+		deviceUtil: d.deviceUtil,
+		filePath:   d.filePath,
+		fd:         -1,
+	}
+}
+
+// GetUtil Lock access should be added during use
+func (d *DeviceUtilWrap) GetUtil() *DeviceUtilT {
 	return d.deviceUtil
 }
 
-func (d *DeviceUtil) RLock(ordinal int) error {
+func (d *DeviceUtilWrap) RLock(ordinal int) error {
 	if d == nil {
-		return fmt.Errorf("DeviceUtil is nil")
+		return fmt.Errorf("DeviceUtilWrap is nil")
+	}
+	if d.fd >= 0 {
+		return fmt.Errorf("lock already exists")
 	}
 	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
@@ -167,9 +184,12 @@ func (d *DeviceUtil) RLock(ordinal int) error {
 	return nil
 }
 
-func (d *DeviceUtil) WLock(ordinal int) error {
+func (d *DeviceUtilWrap) WLock(ordinal int) error {
 	if d == nil {
-		return fmt.Errorf("DeviceUtil is nil")
+		return fmt.Errorf("DeviceUtilWrap is nil")
+	}
+	if d.fd >= 0 {
+		return fmt.Errorf("lock already exists")
 	}
 	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
@@ -182,14 +202,15 @@ func (d *DeviceUtil) WLock(ordinal int) error {
 	return nil
 }
 
-func (d *DeviceUtil) Unlock(ordinal int) error {
+func (d *DeviceUtilWrap) Unlock(ordinal int) error {
 	if d == nil {
-		return fmt.Errorf("DeviceUtil is nil")
+		return fmt.Errorf("DeviceUtilWrap is nil")
 	}
 	if d.fd < 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
 		return fmt.Errorf("invalid parameter, fd=%d, device=%d", d.fd, ordinal)
 	}
 	DeviceUtilUnlock(d.fd, ordinal)
+	d.fd = -1
 	return nil
 }
 
@@ -220,7 +241,6 @@ func NewDeviceUtil(filePath string) (*DeviceUtil, error) {
 		deviceUtil: util,
 		deviceData: data,
 		filePath:   filePath,
-		fd:         -1,
 	}, nil
 }
 

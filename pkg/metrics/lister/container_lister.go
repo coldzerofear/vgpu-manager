@@ -72,11 +72,13 @@ func (c *ContainerLister) addResourceVMem(key ContainerKey, data *vmem.DeviceVMe
 	c.mutex.Unlock()
 }
 
-func (c *ContainerLister) GetResourceVMem(key ContainerKey) (*vmem.DeviceVMemory, bool) {
+func (c *ContainerLister) GetResourceVMem(key ContainerKey) (*vmem.DeviceVMemoryWrap, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	data, ok := c.containerVMems[key]
-	return data, ok
+	if data, ok := c.containerVMems[key]; ok {
+		return data.GetWrap(), ok
+	}
+	return nil, false
 }
 
 func (c *ContainerLister) GetResourceDataT(key ContainerKey) (*vgpu.ResourceDataT, bool) {
@@ -157,8 +159,10 @@ func (c *ContainerLister) update() error {
 		case matched && !existVMem:
 			configFile := filepath.Join(filePath, util.VMemNode, util.VMemNodeFile)
 			resourceVMem, err := vmem.NewDeviceVMemory(configFile)
-			if err != nil && !os.IsNotExist(err) {
-				klog.V(4).ErrorS(err, "Failed to new device vMemory", "filePath", configFile)
+			if err != nil {
+				if !os.IsNotExist(err) {
+					klog.V(4).ErrorS(err, "Failed to new device vMemory", "filePath", configFile)
+				}
 				continue
 			}
 			klog.V(3).Infoln("Add vGPU vMemory file:", configFile)

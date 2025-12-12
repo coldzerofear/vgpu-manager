@@ -379,7 +379,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				minorNumber, migEnabled, gpuInfo.CudaComputeCapability, numaNode)
 		}
 
-		CollectorDeviceProcesses(deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
+		CollectorDeviceProcesses(deviceUtil.GetWrap(), index, hdev, devProcInfoMap, devProcUtilMap)
 		return nil
 	})
 	if err != nil {
@@ -732,7 +732,7 @@ skipNvml:
 
 }
 
-func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtil, index int, hdev nvml.Device, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList) {
+func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtilWrap, index int, hdev nvml.Device, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList) {
 	uuid, rt := hdev.GetUUID()
 	if rt != nvml.SUCCESS {
 		err := fmt.Errorf("error getting pci info for device %d: %v", index, rt)

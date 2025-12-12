@@ -163,8 +163,8 @@ func Test_ContainerLister(t *testing.T) {
 		contResDataMap[container.Name] = resData
 	}
 
-	contLister.Start(time.Second, ctx.Done())
-	time.Sleep(5 * time.Second)
+	contLister.Start(200*time.Millisecond, ctx.Done())
+	time.Sleep(2 * time.Second)
 
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
