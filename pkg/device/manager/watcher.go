@@ -88,7 +88,7 @@ func (m *DeviceManager) doWatcher() {
 			wg.Add(1)
 			go func(config watcher.BatchConfig) {
 				defer wg.Done()
-				err := m.smWatcherBatchWithContext(deviceUtil, batch, subCtx)
+				err := m.smWatcherBatchWithContext(deviceUtil, config, subCtx)
 				if err != nil {
 					subCancelFunc()
 				}
