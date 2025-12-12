@@ -436,15 +436,6 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		response.Envs[util.GPUDevicesUuidEnv] = strings.Join(deviceIds, ",")
 		UpdateResponseForNodeConfig(response, m.baseServer.GetDeviceManager(), deviceIds...)
 		response.Devices = append(response.Devices, PassDeviceSpecs(gpuDevices, imexChannels)...)
-		response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount ld_preload file
-			ContainerPath: ContPreLoadFilePath,
-			HostPath:      HostPreLoadFilePath,
-			ReadOnly:      true,
-		}, &pluginapi.Mount{ // mount libvgpu-control.so file
-			ContainerPath: ContVGPUControlFilePath,
-			HostPath:      HostVGPUControlFilePath,
-			ReadOnly:      true,
-		})
 
 		if enabledClientMode {
 			// mount /etc/vgpu-manager/registry dir
@@ -507,8 +498,9 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		filePath := filepath.Join(contManagerDirectory, DeviceListFileName)
 		jsonBytes, _ := json.Marshal(containerRequest.GetDevicesIds())
 		if err = os.WriteFile(filePath, jsonBytes, 0664); err != nil {
-			err = fmt.Errorf("failed to write %s file: %v", DeviceListFileName, err)
-			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
+			msg := fmt.Sprintf("writing to %s failed", DeviceListFileName)
+			klog.V(3).ErrorS(err, msg, "pod", klog.KObj(currentPod))
+			err = fmt.Errorf("%s: %v", msg, err)
 			return resp, err
 		}
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>/vgpu_lock
@@ -531,7 +523,12 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		// <host_manager_dir>/<pod-uid>_<cont-name>/vmem_node
 		hostVMemNodePath := filepath.Join(hostManagerDirectory, util.VMemNode)
 
-		response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount vgpu.config file
+		response.Mounts = append(response.Mounts, &pluginapi.Mount{
+			// mount libvgpu-control.so file
+			ContainerPath: ContVGPUControlFilePath,
+			HostPath:      HostVGPUControlFilePath,
+			ReadOnly:      true,
+		}, &pluginapi.Mount{ // mount vgpu.config file
 			ContainerPath: ContConfigDirectoryPath,
 			HostPath:      hostVGPUConfigPath,
 			ReadOnly:      true,
@@ -544,6 +541,16 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			HostPath:      hostVMemNodePath,
 			ReadOnly:      false,
 		})
+
+		if !util.VGPUControlDisabled(currentPod, assignDevs.Name) {
+			//response.Envs[util.LdPreloadEnv] = ContVGPUControlFilePath
+			response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount ld_preload file
+				ContainerPath: ContPreLoadFilePath,
+				HostPath:      HostPreLoadFilePath,
+				ReadOnly:      true,
+			})
+		}
+
 		podDevices := device.PodDevices{}
 		if realAlloc, ok := util.HasAnnotation(currentPod, util.PodVGPURealAllocAnnotation); ok {
 			_ = podDevices.UnmarshalText(realAlloc)
@@ -551,8 +558,9 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		podDevices = append(podDevices, *assignDevs)
 		var realAllocated string
 		if realAllocated, err = podDevices.MarshalText(); err != nil {
-			err = fmt.Errorf("real allocated of encoding device failed: %v", err)
-			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
+			msg := "encoding the device for real allocation failed"
+			klog.V(3).ErrorS(err, msg, "pod", klog.KObj(currentPod))
+			err = fmt.Errorf("%s: %v", msg, err)
 			return resp, err
 		}
 		currentPod.Annotations[util.PodVGPURealAllocAnnotation] = realAllocated
@@ -651,7 +659,7 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		return err
 	})
 	if err != nil {
-		klog.Errorf("failed to get node <%s>: %v", nodeName, err)
+		klog.ErrorS(err, "get node failed", "node", nodeName)
 		return resp, err
 	}
 	podInfo, err := m.GetPodInfoByDeviceIDs(ctx, req.GetDevicesIds()...)
@@ -675,13 +683,15 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 	// /etc/vgpu-manager/<pod-uid>_<cont-name>/devices.json
 	devicesFilePath := filepath.Join(contManagerDirectory, DeviceListFileName)
 	if deviBytes, err = os.ReadFile(devicesFilePath); err != nil {
-		err = fmt.Errorf("failed to read %s file: %v", DeviceListFileName, err)
-		klog.V(3).ErrorS(err, "", "pod", klog.KObj(pod))
+		msg := fmt.Sprintf("failed to read %s file", DeviceListFileName)
+		klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod))
+		err = fmt.Errorf("%s: %v", msg, err)
 		return resp, err
 	}
 	if err = json.Unmarshal(deviBytes, &deviceIDs); err != nil {
-		err = fmt.Errorf("failed to read %s file: %v", DeviceListFileName, err)
-		klog.V(3).ErrorS(err, "", "pod", klog.KObj(pod))
+		msg := fmt.Sprintf("unmarshal %s failed", DeviceListFileName)
+		klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod))
+		err = fmt.Errorf("%s: %v", msg, err)
 		return resp, err
 	}
 	// Verify if there are any errors in the allocation of container equipment.
@@ -702,8 +712,9 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
 	realDevices := device.PodDevices{}
 	if err = realDevices.UnmarshalText(realAlloc); err != nil {
-		err = fmt.Errorf("parse pod assign devices failed: %v", err)
-		klog.V(3).ErrorS(err, "", "pod", klog.KObj(pod))
+		msg := "parse pod assign devices failed"
+		klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod))
+		err = fmt.Errorf("%s: %v", msg, err)
 		return resp, err
 	}
 	index := slices.IndexFunc(realDevices, func(contDevs device.ContainerDevices) bool {
@@ -721,7 +732,7 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 	})
 	err = vgpu.WriteVGPUConfigFile(vgpuConfigFilePath, m.baseServer.GetDeviceManager(), pod, realDevices[index], oversold, node)
 	if err != nil {
-		klog.V(3).ErrorS(err, "write vGPU config failed", "pod", klog.KObj(pod))
+		klog.V(3).ErrorS(err, "Writing vGPU config failed", "pod", klog.KObj(pod))
 		return resp, err
 	}
 	// Extra check the size of the VGPU configuration file.

@@ -375,3 +375,20 @@ func GetPercentageValue(x uint32) uint32 {
 		return x
 	}
 }
+
+func VGPUControlDisabled(pod *corev1.Pod, containerName string) bool {
+	index := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool {
+		return c.Name == containerName
+	})
+	if index < 0 {
+		return false
+	}
+	disabled := false
+	for _, envVar := range pod.Spec.Containers[index].Env {
+		if envVar.Name == DisableVGPUEnv {
+			disabled = envVar.Value == "true"
+			break
+		}
+	}
+	return disabled
+}

@@ -128,6 +128,7 @@ const (
 )
 
 const (
+	LdPreloadEnv = "LD_PRELOAD"
 	// CUDA_MEM_LIMIT_<index> gpu memory limit
 	CudaMemoryLimitEnv = "CUDA_MEM_LIMIT"
 	// CUDA_MEM_RATIO_<index> gpu memory ratio
@@ -147,6 +148,7 @@ const (
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
 	PodUIDEnv       = "VGPU_POD_UID"
 	ContNameEnv     = "VGPU_CONTAINER_NAME"
+	DisableVGPUEnv  = "DISABLE_VGPU_CONTROL"
 )
 
 type ComputePolicy string
