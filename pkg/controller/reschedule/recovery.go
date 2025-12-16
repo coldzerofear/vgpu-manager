@@ -29,12 +29,13 @@ func newRecoveryController(client client.Client, recorder record.EventRecorder) 
 	if err != nil {
 		return nil, err
 	}
+	queue := workqueue.NewTypedRateLimitingQueue[*corev1.Pod](
+		workqueue.DefaultTypedControllerRateLimiter[*corev1.Pod]())
 	return &recoveryController{
 		client:             client,
 		recorder:           recorder,
 		recoveryCheckpoint: checkpoint,
-		queue: workqueue.NewTypedRateLimitingQueue[*corev1.Pod](
-			workqueue.DefaultTypedControllerRateLimiter[*corev1.Pod]()),
+		queue:              queue,
 	}, nil
 }
 
@@ -166,12 +167,12 @@ func (r *recoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod
 		return reconcile.Result{}, nil
 	default:
 		nowTime := metav1.Now().Time
-		deledTime := currentPod.DeletionTimestamp.Time
+		deleteTime := currentPod.DeletionTimestamp.Time
 		if currentPod.DeletionGracePeriodSeconds != nil {
-			deledTime = deledTime.Add(time.Duration(*currentPod.DeletionGracePeriodSeconds) * time.Second)
+			deleteTime = deleteTime.Add(time.Duration(*currentPod.DeletionGracePeriodSeconds) * time.Second)
 		}
 		requeueAfter := time.Duration(0)
-		remaining := deledTime.Sub(nowTime)
+		remaining := deleteTime.Sub(nowTime)
 		if remaining > 5*time.Second {
 			requeueAfter = 5 * time.Second
 		} else if remaining > 0 {
