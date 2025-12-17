@@ -39,6 +39,9 @@ rules:
     resources: ["pods/status"]
     verbs: ["get","update","patch"]
   - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
     resources: ["events"]
     verbs: ["create","patch","update"]
 ---
