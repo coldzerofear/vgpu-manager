@@ -1012,6 +1012,7 @@ extern int get_devices_uuid(char *uuids);
 extern int get_mem_oversold(uint32_t index, int *limit);
 extern int get_vmem_node_enabled(int *enabled);
 extern int extract_container_id(char *path, char *container_id, size_t container_id_size);
+extern int find_file(const char *base_dir, const char *target_str, char *result_path, size_t result_path_size);
 
 // vmemory node lock
 extern int device_vmem_write_lock(int ordinal);
@@ -1061,15 +1062,100 @@ void init_real_dlsym() {
   }
 }
 
+int wsl_environment = -1;
+int is_wsl_environment() {
+  if (wsl_environment >= 0) {
+    return wsl_environment;
+  }
+  char buffer[1024];
+  FILE *file = fopen("/proc/version", "r");
+  if (file == NULL) {
+    LOGGER(ERROR, "failed to open /proc/version");
+    return 0;
+  }
+  if (fgets(buffer, sizeof(buffer), file) == NULL) {
+    LOGGER(ERROR, "failed to read /proc/version");
+    fclose(file);
+    return 0;
+  }
+  fclose(file);
+  // Check if the string "WSL2" is in the version string
+  if (strstr(buffer, "WSL2") != NULL && strstr(buffer, "microsoft") != NULL) {
+    wsl_environment = 1;
+    return wsl_environment; // Running in WSL
+  }
+  wsl_environment = 0;
+  return wsl_environment; // Not running in WSL
+}
+
+static void* load_other_nvml_libraries(const char *symbol) {
+  void *table = NULL;
+  void *result = NULL;
+  char driver_filename[FILENAME_MAX];
+  if (!symbol) {
+    return NULL;
+  }
+  init_real_dlsym();
+  if (is_wsl_environment()) {
+    if (find_file("/usr/lib/wsl/drivers", DRIVER_ML_LIBRARY_PREFIX, driver_filename, FILENAME_MAX)) {
+      find_file("/lib/wsl/drivers", DRIVER_ML_LIBRARY_PREFIX, driver_filename, FILENAME_MAX);
+    }
+  } else {
+    snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX, driver_version);
+    driver_filename[FILENAME_MAX - 1] = '\0';
+  }
+
+  table = dlopen(driver_filename, RTLD_NOW | RTLD_NODELETE);
+  if (unlikely(!table)) {
+    return NULL;
+  }
+  result = real_dlsym(table, symbol);
+  LOGGER(WARNING, "loaded other %s", symbol);
+  dlclose(table);
+  return result;
+}
+
+static void* load_other_cuda_libraries(const char *symbol) {
+  void *table = NULL;
+  void *result = NULL;
+  char cuda_filename[FILENAME_MAX];
+  if (!symbol) {
+    return NULL;
+  }
+  init_real_dlsym();
+  if (is_wsl_environment()) {
+    if (find_file("/usr/lib/wsl/drivers", CUDA_LIBRARY_PREFIX, cuda_filename, FILENAME_MAX)) {
+      find_file("/lib/wsl/drivers", CUDA_LIBRARY_PREFIX, cuda_filename, FILENAME_MAX);
+    }
+  } else {
+    snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s", CUDA_LIBRARY_PREFIX, driver_version);
+    cuda_filename[FILENAME_MAX - 1] = '\0';
+  }
+
+  table = dlopen(cuda_filename, RTLD_NOW | RTLD_NODELETE);
+  if (unlikely(!table)) {
+    return NULL;
+  }
+  result = real_dlsym(table, symbol);
+  LOGGER(WARNING, "loaded other %s", symbol);
+  dlclose(table);
+  return result;
+}
+
 static void load_nvml_libraries() {
   void *table = NULL;
   char driver_filename[FILENAME_MAX];
   int i;
 
   init_real_dlsym();
-
-  snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX, driver_version);
-  driver_filename[FILENAME_MAX - 1] = '\0';
+  if (is_wsl_environment()) {
+    if (find_file("/usr/lib/wsl/drivers", DRIVER_ML_LIBRARY_PREFIX, driver_filename, FILENAME_MAX)) {
+      find_file("/lib/wsl/drivers", DRIVER_ML_LIBRARY_PREFIX, driver_filename, FILENAME_MAX);
+    }
+  } else {
+    snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX, driver_version);
+    driver_filename[FILENAME_MAX - 1] = '\0';
+  }
 
   table = dlopen(driver_filename, RTLD_NOW | RTLD_NODELETE);
   if (unlikely(!table)) {
@@ -1103,9 +1189,14 @@ static void load_cuda_single_library(int idx) {
   if (likely(cuda_library_entry[idx].fn_ptr)) {
     return;
   }
-
-  snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s", CUDA_LIBRARY_PREFIX, driver_version);
-  cuda_filename[FILENAME_MAX - 1] = '\0';
+  if (is_wsl_environment()) {
+    if (find_file("/usr/lib/wsl/drivers", CUDA_LIBRARY_PREFIX, cuda_filename, FILENAME_MAX)) {
+      find_file("/lib/wsl/drivers", CUDA_LIBRARY_PREFIX, cuda_filename, FILENAME_MAX);
+    }
+  } else {
+    snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s", CUDA_LIBRARY_PREFIX, driver_version);
+    cuda_filename[FILENAME_MAX - 1] = '\0';
+  }
 
   table = dlopen(cuda_filename, RTLD_NOW | RTLD_NODELETE);
   if (unlikely(!table)) {
@@ -1121,7 +1212,6 @@ static void load_cuda_single_library(int idx) {
   dlclose(table);
 }
 
-
 static void load_nvml_single_library(int idx) {
   void *table = NULL;
   char driver_filename[FILENAME_MAX];
@@ -1130,9 +1220,14 @@ static void load_nvml_single_library(int idx) {
   if (likely(nvml_library_entry[idx].fn_ptr)) {
     return;
   }
-
-  snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX, driver_version);
-  driver_filename[FILENAME_MAX - 1] = '\0';
+  if (is_wsl_environment()) {
+    if (find_file("/usr/lib/wsl/drivers", DRIVER_ML_LIBRARY_PREFIX, driver_filename, FILENAME_MAX)) {
+      find_file("/lib/wsl/drivers", DRIVER_ML_LIBRARY_PREFIX, driver_filename, FILENAME_MAX);
+    }
+  } else {
+    snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX, driver_version);
+    driver_filename[FILENAME_MAX - 1] = '\0';
+  }
 
   table = dlopen(driver_filename, RTLD_NOW | RTLD_NODELETE);
   if (unlikely(!table)) {
@@ -1154,9 +1249,14 @@ void load_cuda_libraries() {
   char cuda_filename[FILENAME_MAX];
 
   init_real_dlsym();
-
-  snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s", CUDA_LIBRARY_PREFIX, driver_version);
-  cuda_filename[FILENAME_MAX - 1] = '\0';
+  if (is_wsl_environment()) {
+    if (find_file("/usr/lib/wsl/drivers", CUDA_LIBRARY_PREFIX, cuda_filename, FILENAME_MAX)) {
+      find_file("/lib/wsl/drivers", CUDA_LIBRARY_PREFIX, cuda_filename, FILENAME_MAX);
+    }
+  } else {
+    snprintf(cuda_filename, FILENAME_MAX - 1, "%s.%s", CUDA_LIBRARY_PREFIX, driver_version);
+    cuda_filename[FILENAME_MAX - 1] = '\0';
+  }
 
   table = dlopen(cuda_filename, RTLD_NOW | RTLD_NODELETE);
   if (unlikely(!table)) {
@@ -1513,6 +1613,10 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
         goto DONE;
       }
     }
+    if (is_wsl_environment()) {
+      result = load_other_cuda_libraries(symbol);
+      if (result) goto DONE;
+    }
   } else if (strncmp(symbol, "nvml", 4) == 0) { // hijack nvml
     if (likely(lib_control)) {
       result = real_dlsym(lib_control, symbol);
@@ -1527,6 +1631,10 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
         LOGGER(DETAIL, "search found nvml hook %s", symbol);
         goto DONE;
       }
+    }
+    if (is_wsl_environment()) {
+      result = load_other_nvml_libraries(symbol);
+      if (result) goto DONE;
     }
   }
   result = real_dlsym(handle, symbol);

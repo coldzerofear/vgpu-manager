@@ -526,3 +526,42 @@ int device_pid_in_same_container(unsigned int pid) {
   }
   return 0;
 }
+
+int find_file(const char *base_dir, const char *target_str, char *result_path, size_t result_path_size) {
+  DIR *dir;
+  struct dirent *entry;
+  struct stat statbuf;
+  char full_path[PATH_MAX];
+
+  if (!base_dir || !target_str || !result_path || result_path_size == 0) {
+    LOGGER(ERROR, "invalid input parameter");
+    return -1;
+  }
+  if ((dir = opendir(base_dir)) == NULL) {
+    LOGGER(ERROR, "cannot open directory %s: %s", base_dir, strerror(errno));
+    return -1;
+  }
+
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    snprintf(full_path, sizeof(full_path), "%s/%s", base_dir, entry->d_name);
+    if (lstat(full_path, &statbuf) == -1) {
+      continue;
+    }
+    if (S_ISDIR(statbuf.st_mode)) {
+      if (find_file(full_path, target_str, result_path, result_path_size) == 0) {
+        closedir(dir);
+        return 0;
+      }
+    } else if (S_ISREG(statbuf.st_mode) && strstr(entry->d_name, target_str) != NULL) {
+      strncpy(result_path, full_path, result_path_size - 1);
+      result_path[result_path_size - 1] = '\0';
+      closedir(dir);
+      return 0;
+    }
+  }
+  closedir(dir);
+  return -1;
+}

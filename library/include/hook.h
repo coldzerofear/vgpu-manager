@@ -309,7 +309,7 @@ static const char *_level_names[] = {
       if (_print_level_str && *_print_level_str) {                  \
         _print_level = (int)strtoul(_print_level_str, NULL, 10);    \
       }                                                             \
-      _print_level = _print_level < INFO ? FATAL : _print_level;    \
+      _print_level = _print_level < FATAL ? INFO : _print_level;    \
       _print_level = _print_level > DETAIL ? DETAIL : _print_level; \
     }                                                               \
     if (level >= 0 && level <= _print_level) {                      \
