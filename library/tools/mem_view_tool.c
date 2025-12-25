@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
       printf("nvmlDeviceGetMemoryInfo_v2 failed\n");
       return -1;
     }
-    printf("device %d nvml memory, total: %lluMB, used: %lluMB, free: %lluMB\n", device_id, memory.total>>20, memory.used>>20, memory.free>>20);
+    printf("device %d nvml memory, total: %lluMiB, used: %lluMiB, free: %lluMiB\n", device_id, memory.total>>20, memory.used>>20, memory.free>>20);
 
     size_t free;
     size_t total;
@@ -69,7 +69,7 @@ int main(int argc, char **argv) {
     }
     size_t used = (total - free);
 
-    printf("device %d cuda memory, total: %zuMB, used: %zuMB, free: %zuMB\n", device_id, total>>20, used>>20, free>>20);
+    printf("device %d cuda memory, total: %zuMiB, used: %zuMiB, free: %zuMiB\n", device_id, total>>20, used>>20, free>>20);
 
     nvmlProcessInfo_t pids_on_device[1024];
     unsigned int size_on_device = 1024;
@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
     printf("---------------ComputeProcesses size %d---------------\n", size_on_device);
     int i;
     for (i = 0; i < size_on_device; i++) {
-      printf("ComputeProcesses pid[%d] use memory: %lldMB\n", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory>>20);
+      printf("ComputeProcesses pid[%d] use memory: %lldBytes %lldMiB\n", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory, pids_on_device[i].usedGpuMemory>>20);
     }
     size_on_device = 1024;
     nvmlProcessInfo_t pids_on_device1[1024];
@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
     }
     printf("---------------GraphicProcesses size %d---------------\n", size_on_device);
     for (i = 0; i < size_on_device; i++) {
-      printf("GraphicProcesses pid[%d] use memory: %lldMB\n", pids_on_device1[i].pid, pids_on_device1[i].usedGpuMemory>>20);
+      printf("GraphicProcesses pid[%d] use memory: %lldBytes %lldMiB\n", pids_on_device1[i].pid, pids_on_device1[i].usedGpuMemory, pids_on_device1[i].usedGpuMemory>>20);
     }
     struct timeval cur, prev;
     struct timeval temp = {1, 0};
