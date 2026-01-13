@@ -44,18 +44,13 @@ func patchNodeMetadata(cli kubernetes.Interface, nodeName string, patchMetadata 
 
 func (m *DeviceManager) registryDevices() {
 	stopCh := m.stop
-	m.wait.Add(1)
 	ticker := time.NewTicker(20 * time.Millisecond)
-	defer func() {
-		ticker.Stop()
-		m.wait.Done()
-	}()
+	defer ticker.Stop()
 
 	patchMetadata := client.PatchMetadata{
 		Annotations: map[string]*string{},
 		Labels:      map[string]*string{},
 	}
-
 	for {
 		select {
 		case <-stopCh:

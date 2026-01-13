@@ -44,11 +44,7 @@ func WrapChannelWithContext[T any](ch <-chan T) (context.Context, context.Cancel
 
 func (m *DeviceManager) doWatcher() {
 	ctx, cancelFunc := WrapChannelWithContext(m.stop)
-	m.wait.Add(1)
-	defer func() {
-		cancelFunc()
-		m.wait.Done()
-	}()
+	defer cancelFunc()
 	filePath := filepath.Join(WatcherDir, SMUtilFile)
 
 	wait.UntilWithContext(ctx, func(ctx context.Context) {

@@ -1,6 +1,6 @@
 module github.com/coldzerofear/vgpu-manager
 
-go 1.24.7
+go 1.25.3
 
 require (
 	github.com/NVIDIA/go-nvlib v0.9.0
@@ -21,16 +21,16 @@ require (
 	google.golang.org/grpc v1.72.1
 	google.golang.org/protobuf v1.36.5
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.34.0
-	k8s.io/apimachinery v0.34.0
-	k8s.io/apiserver v0.34.0
-	k8s.io/client-go v0.34.0
-	k8s.io/component-base v0.34.0
-	k8s.io/cri-api v0.34.0
+	k8s.io/api v0.34.2
+	k8s.io/apimachinery v0.34.2
+	k8s.io/apiserver v0.34.2
+	k8s.io/client-go v0.34.2
+	k8s.io/component-base v0.34.2
+	k8s.io/cri-api v0.34.2
 	k8s.io/klog/v2 v2.130.1
-	k8s.io/kube-scheduler v0.34.0
-	k8s.io/kubectl v0.34.0
-	k8s.io/kubelet v0.34.0
+	k8s.io/kube-scheduler v0.34.2
+	k8s.io/kubectl v0.34.2
+	k8s.io/kubelet v0.34.2
 	k8s.io/kubernetes v1.34.2
 	k8s.io/utils v0.0.0-20250604170112-4c0f3b243397
 	sigs.k8s.io/controller-runtime v0.22.0
@@ -105,7 +105,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250303144028-a0af3efb3deb // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
-	k8s.io/apiextensions-apiserver v0.34.0 // indirect
+	k8s.io/apiextensions-apiserver v0.34.2 // indirect
 	k8s.io/controller-manager v0.0.0 // indirect
 	k8s.io/cri-client v0.0.0 // indirect
 	k8s.io/kube-openapi v0.0.0-20250710124328-f3f2b991d03b // indirect
@@ -118,18 +118,18 @@ require (
 
 replace (
 	github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20250919193215-e435d1485517
-	k8s.io/cloud-provider => k8s.io/cloud-provider v0.34.0
-	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.34.0
-	k8s.io/controller-manager => k8s.io/controller-manager v0.34.0
-	k8s.io/cri-client => k8s.io/cri-client v0.34.0
-	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.34.0
-	k8s.io/dynamic-resource-allocation => k8s.io/dynamic-resource-allocation v0.34.0
-	k8s.io/endpointslice => k8s.io/endpointslice v0.34.0
-	k8s.io/externaljwt => k8s.io/externaljwt v0.34.0
-	k8s.io/kube-aggregator => k8s.io/kube-aggregator v0.34.0
-	k8s.io/kube-controller-manager => k8s.io/kube-controller-manager v0.34.0
-	k8s.io/kube-proxy => k8s.io/kube-proxy v0.34.0
-	k8s.io/mount-utils => k8s.io/mount-utils v0.34.0
-	k8s.io/pod-security-admission => k8s.io/pod-security-admission v0.34.0
-	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.34.0
+	k8s.io/cloud-provider => k8s.io/cloud-provider v0.34.2
+	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.34.2
+	k8s.io/controller-manager => k8s.io/controller-manager v0.34.2
+	k8s.io/cri-client => k8s.io/cri-client v0.34.2
+	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.34.2
+	k8s.io/dynamic-resource-allocation => k8s.io/dynamic-resource-allocation v0.34.2
+	k8s.io/endpointslice => k8s.io/endpointslice v0.34.2
+	k8s.io/externaljwt => k8s.io/externaljwt v0.34.2
+	k8s.io/kube-aggregator => k8s.io/kube-aggregator v0.34.2
+	k8s.io/kube-controller-manager => k8s.io/kube-controller-manager v0.34.2
+	k8s.io/kube-proxy => k8s.io/kube-proxy v0.34.2
+	k8s.io/mount-utils => k8s.io/mount-utils v0.34.2
+	k8s.io/pod-security-admission => k8s.io/pod-security-admission v0.34.2
+	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.34.2
 )

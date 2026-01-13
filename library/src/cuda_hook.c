@@ -325,11 +325,7 @@ static void *utilization_watcher(void *arg) {
 
   int host_indexes[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
-//  CUdevice cuda_device;
-//  CUresult result;
-  int host_index;
-  int cuda_index;
-//  int need_limit = 0;
+  int host_index, cuda_index;
   for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
     host_index = get_host_device_index_by_cuda_device(cuda_index);
     host_indexes[cuda_index] = host_index;
@@ -344,19 +340,11 @@ static void *utilization_watcher(void *arg) {
     top_results[host_index].sys_current = 0;
     top_results[host_index].valid = 0;
     top_results[host_index].sys_process_num = 0;
-//    if (g_vgpu_config->devices[host_index].core_limit) {
-//      need_limit = 1;
-//    }
   }
-//  if (!need_limit) {
-//    LOGGER(VERBOSE, "no need cuda core limit for batch %d", batch->batch_code);
-//    return NULL;
-//  }
-
   int dev_count = batch->end_index - batch->start_index;
   struct timespec wait = {
-      .tv_sec = 0,
-      .tv_nsec = 80 / dev_count * MILLISEC,
+    .tv_sec = 0,
+    .tv_nsec = 80 / dev_count * MILLISEC,
   };
   while (1) {
     for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
@@ -1119,7 +1107,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
                           cuuint64_t flags) {
   CUresult ret;
   load_necessary_data();
-  LOGGER(DETAIL, "cuGetProcAddress symbol: %s", symbol);
+  LOGGER(DETAIL, "cuGetProcAddress symbol: %s, version: %d", symbol, cudaVersion);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGetProcAddress, symbol, pfn,
                          cudaVersion, flags);
   if (likely(ret == CUDA_SUCCESS)) {
@@ -1148,7 +1136,7 @@ CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                              cuuint64_t flags, void *symbolStatus) {
   CUresult ret;
   load_necessary_data();
-  LOGGER(DETAIL, "cuGetProcAddress_v2 symbol: %s", symbol);
+  LOGGER(DETAIL, "cuGetProcAddress_v2 symbol: %s, version: %d", symbol, cudaVersion);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGetProcAddress_v2, symbol, pfn,
                          cudaVersion, flags, symbolStatus);
   if (likely(ret == CUDA_SUCCESS)) {

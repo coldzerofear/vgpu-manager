@@ -415,25 +415,25 @@ func (m *DeviceManager) initialize() {
 func (m *DeviceManager) Start() {
 	m.Stop()
 	m.initialize()
-	go func() {
+	m.wait.Go(func() {
 		klog.Infoln("DeviceManager starting handle notify...")
 		m.handleNotify()
-	}()
-	go func() {
+	})
+	m.wait.Go(func() {
 		klog.Infoln("DeviceManager starting registry node devices...")
 		m.registryDevices()
-	}()
-	go func() {
+	})
+	m.wait.Go(func() {
 		klog.Infoln("DeviceManager starting check devices health...")
 		if err := m.checkHealth(); err != nil {
-			klog.Errorf("Failed to start health check: %v; continuing with health checks disabled", err)
+			klog.ErrorS(err, "Failed to initiate device health check")
 		}
-	}()
+	})
 	if m.featureGate.Enabled(util.SMWatcher) {
-		go func() {
+		m.wait.Go(func() {
 			klog.Infoln("DeviceManager starting sm watcher...")
 			m.doWatcher()
-		}()
+		})
 	}
 }
 
@@ -468,8 +468,6 @@ func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 
 func (m *DeviceManager) handleNotify() {
 	stopCh := m.stop
-	m.wait.Add(1)
-	defer m.wait.Done()
 	for {
 		select {
 		case <-stopCh:

@@ -34,13 +34,8 @@ func (m *DeviceManager) checkHealth() error {
 	if err := m.NvmlInit(); err != nil {
 		return err
 	}
-
+	defer m.NvmlShutdown()
 	stopCh := m.stop
-	m.wait.Add(1)
-	defer func() {
-		m.NvmlShutdown()
-		m.wait.Done()
-	}()
 
 	klog.Infof("Ignoring the following XIDs for health checks: %v", xids)
 
