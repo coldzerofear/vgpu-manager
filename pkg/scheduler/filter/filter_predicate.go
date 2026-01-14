@@ -426,12 +426,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			failedNodesMap[node.Name] = errMsg
 			continue
 		}
-		cachePod, err := f.podLister.Pods(newPod.Namespace).Get(newPod.Name)
-		if err == nil && util.CompareResourceVersion(cachePod, newPod) < 0 {
-			cachePod.ObjectMeta = newPod.ObjectMeta
-		} else if err != nil {
-			klog.ErrorS(err, "PodLister get pod failed", "pod", klog.KObj(pod))
-		}
+		f.podLister.Mutation(newPod)
 		filteredNodes = append(filteredNodes, *node)
 		success = true
 	}

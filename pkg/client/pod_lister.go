@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -10,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 )
 
 // PodLister helps list Pods.
@@ -18,25 +20,33 @@ type PodLister interface {
 	listerv1.PodLister
 	ListByIndexValue(indexName, indexedValue string) ([]*corev1.Pod, error)
 	ListByIndexFiledSet(fieldSet fields.Set) ([]*corev1.Pod, error)
+	Mutation(*corev1.Pod)
 }
 
 // podLister implements the PodLister interface.
 type podLister struct {
 	listerv1.PodLister
 	indexer cache.Indexer
+	cache   cache.MutationCache
 }
 
 // NewPodLister returns a new PodLister.
 func NewPodLister(indexer cache.Indexer) PodLister {
-	lister := listerv1.NewPodLister(indexer)
 	return &podLister{
-		PodLister: lister,
 		indexer:   indexer,
+		PodLister: listerv1.NewPodLister(indexer),
+		cache: cache.NewIntegerResourceVersionMutationCache(
+			klog.Background(), indexer, indexer, time.Minute, false,
+		),
 	}
 }
 
+func (s *podLister) Mutation(pod *corev1.Pod) {
+	s.cache.Mutation(pod)
+}
+
 func (s *podLister) ListByIndexValue(indexName, indexedValue string) ([]*corev1.Pod, error) {
-	objs, err := s.indexer.ByIndex(indexName, indexedValue)
+	objs, err := s.cache.ByIndex(indexName, indexedValue)
 	if err != nil {
 		return nil, err
 	}
