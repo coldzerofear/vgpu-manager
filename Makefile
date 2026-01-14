@@ -23,6 +23,15 @@ else
   GIT_TREE_STATE?=dirty
 endif
 
+VERSION_PKG = github.com/coldzerofear/vgpu-manager/pkg
+CGO_CFLAGS = -D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv
+CGO_LDFLAGS_ALLOW = -Wl,--unresolved-symbols=ignore-in-object-files
+GO_BUILD_LDFLAGS = -X $(VERSION_PKG)/version.version=${VERSION} \
+                   -X $(VERSION_PKG)/version.gitBranch=${GIT_BRANCH} \
+                   -X $(VERSION_PKG)/version.gitCommit=${GIT_COMMIT} \
+                   -X $(VERSION_PKG)/version.gitTreeState=${GIT_TREE_STATE} \
+                   -X $(VERSION_PKG)/version.buildDate=${BUILD_DATE}
+
 # CONTAINER_TOOL defines the container tool to be used for building images.
 # Be aware that the target commands are only tested with Docker which is
 # scaffolded by default. However, you might want to replace it to use other
@@ -64,8 +73,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: fmt vet ## Run tests.
-	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
-    CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' \
+	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
     go test ./... -coverprofile cover.out
 
 .PHONY: generate
@@ -76,45 +84,15 @@ generate: ## API code generation.
 
 .PHONY: build
 build: fmt vet ## Build binary.
-	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
-       	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
-       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT}  \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/device-scheduler cmd/device-scheduler/*.go
-	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
-       	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
-       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
-       	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
-       	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
-       	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
-      	-X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-    	-o bin/device-plugin cmd/device-plugin/*.go
-	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
-    	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
-       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
-    	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
-    	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
-    	-X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
-    	-X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-    	-o bin/device-monitor cmd/device-monitor/*.go
-	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv" \
-    	CGO_LDFLAGS_ALLOW='-Wl,--unresolved-symbols=ignore-in-object-files' go build -ldflags=" \
-       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT}  \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/device-webhook cmd/device-webhook/*.go
-	CGO_ENABLED=0 GOOS=$(GOOS) go build -ldflags=" \
-       	-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${VERSION} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
-        -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}" \
-        -o bin/device-client cmd/device-client/*.go
+	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
+        go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/device-scheduler cmd/device-scheduler/*.go
+	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
+        go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/device-plugin cmd/device-plugin/*.go
+	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
+        go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/device-monitor cmd/device-monitor/*.go
+	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
+        go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/device-webhook cmd/device-webhook/*.go
+	CGO_ENABLED=0 GOOS=$(GOOS) go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/device-client cmd/device-client/*.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

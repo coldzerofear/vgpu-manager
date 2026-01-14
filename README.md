@@ -65,7 +65,7 @@ kubectl label node <nodename> vgpu-manager-enable=enable
 Modify `values.yaml` according to your environment requirements
 
 ```shell
-helm install vgpu-manager ./helm/ -n kube-system
+helm install vgpu-manager ./charts/vgpu-manager -n kube-system
 ```
 
 Verify installation
