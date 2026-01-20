@@ -17,8 +17,9 @@
 #define CUDA_CORE_LIMIT_ENV "CUDA_CORE_LIMIT"
 #define CUDA_CORE_SOFT_LIMIT_ENV "CUDA_CORE_SOFT_LIMIT"
 #define CUDA_MEM_OVERSOLD_ENV "CUDA_MEM_OVERSOLD"
-#define GPU_DEVICES_UUID_ENV "GPU_DEVICES_UUID"
 #define VMEM_NODE_ENABLED_ENV "VMEMORY_NODE_ENABLED"
+#define GPU_DEVICES_UUID_ENV "GPU_DEVICES_UUID"
+#define NVIDIA_VISIBLE_DEVICES_ENV "NVIDIA_VISIBLE_DEVICES"
 
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
@@ -138,7 +139,11 @@ int get_devices_uuid(char *uuids) {
   char *str = NULL;
   str = getenv(GPU_DEVICES_UUID_ENV);
   if (unlikely(!str)) {
-    return ret;
+    // Fallback to using Nvidia environment variables
+    str = getenv(NVIDIA_VISIBLE_DEVICES_ENV);
+    if (unlikely(!str)) {
+      return ret;
+    }
   }
   strcpy(uuids, str);
   return 0;

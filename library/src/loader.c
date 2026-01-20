@@ -1050,14 +1050,30 @@ char driver_version[FILENAME_MAX] = "1";
 
 void init_real_dlsym() {
   if (real_dlsym == NULL) {
-    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
-    lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
-    if (real_dlsym == NULL) {
+    const char* glibc_versions[] = {
+      "GLIBC_2.2.5",  // for amd64
+      "GLIBC_2.17",   // for arm64
+      "GLIBC_2.3",
+      "GLIBC_2.4",
+      "GLIBC_2.10",
+      "GLIBC_2.18",
+      "GLIBC_2.22",
+       NULL
+    };
+    for (int i = 0; glibc_versions[i] != NULL; i++) {
+      real_dlsym = dlvsym(RTLD_NEXT, "dlsym", glibc_versions[i]);
+      if (real_dlsym) {
+        LOGGER(VERBOSE, "found dlsym with version: %s", glibc_versions[i]);
+        break;
+      }
+    }
+    if (unlikely(!real_dlsym)) {
       real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+      if (!real_dlsym) {
+        LOGGER(FATAL, "real dlsym not found");
+      }
     }
-    if (real_dlsym == NULL) {
-      LOGGER(FATAL, "real dlsym not found");
-    }
+    lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
   }
 }
 
@@ -1755,14 +1771,17 @@ static volatile pid_t reset_index_changed_pid = 0;
 // Reset CUDA device index only when PID changes.
 void reset_cuda_index_mapping() {
   pid_t pid = getpid();
+  if (likely(reset_index_changed_pid == pid)) {
+    return;
+  }
   pthread_mutex_lock(&device_index_mutex);
   if (reset_index_changed_pid != pid) {
     for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
       cuda_to_host_device_index[index] = -1;
       cuda_to_nvml_device_index[index] = -1;
     }
+    reset_index_changed_pid = pid;
   }
-  reset_index_changed_pid = pid;
   pthread_mutex_unlock(&device_index_mutex);
 }
 
@@ -1947,7 +1966,7 @@ int init_g_vgpu_config_by_env() {
         LOGGER(VERBOSE, "get device %d core soft limit failed", i);
         soft_cores = 0;
       }
-      if (soft_cores > 0) {
+      if (soft_cores > 0 && soft_cores > hard_cores) {
         LOGGER(VERBOSE, "gpu device %d turn up core soft limit", i);
         g_vgpu_config->devices[i].hard_limit = 0;
         g_vgpu_config->devices[i].soft_core = soft_cores;
@@ -1964,8 +1983,12 @@ int init_g_vgpu_config_by_env() {
 int load_controller_configuration() {
   int ret = 1;
   pid_t pid = getpid();
+  if (likely(init_config_changed_pid == pid)) {
+    return 0;
+  }
   pthread_mutex_lock(&init_config_mutex);
-  if (likely(init_config_changed_pid == getpid())) {
+  // Double check lock
+  if (init_config_changed_pid == pid) {
     ret = 0;
     goto DONE;
   }
