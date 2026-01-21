@@ -18,6 +18,7 @@ import (
 	"golang.org/x/time/rate"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 )
 
 type Middleware func(handler http.Handler) (http.Handler, error)
@@ -32,6 +33,7 @@ type Server struct {
 	debugMetrics bool
 	httpServer   *http.Server
 	middleware   Middleware
+	readyChecker healthz.Checker
 }
 
 type klogErrLog struct{}
@@ -169,6 +171,7 @@ func (s *Server) Start(ctx context.Context) (err error) {
 	}
 	routerHandle := httprouter.New()
 	route.AddHealthProbe(routerHandle)
+	route.AddReadyProbe(routerHandle, s.readyChecker)
 	route.AddMetricsHandle(routerHandle, handler)
 
 	s.httpServer = &http.Server{
@@ -213,6 +216,12 @@ func (s *Server) stop(ctx context.Context) error {
 }
 
 type Option func(*Server)
+
+func WithReadyChecker(c healthz.Checker) Option {
+	return func(s *Server) {
+		s.readyChecker = c
+	}
+}
 
 func WithPort(port *int) Option {
 	return func(s *Server) {
@@ -264,7 +273,9 @@ func NewServer(opts ...Option) *Server {
 	for _, opt := range opts {
 		opt(s)
 	}
-
+	if s.readyChecker == nil {
+		s.readyChecker = healthz.Ping
+	}
 	if s.port == nil {
 		s.port = ptr.To[int](8080)
 	}

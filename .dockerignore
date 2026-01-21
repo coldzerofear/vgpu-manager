@@ -1,0 +1,24 @@
+# More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
+# .dockerignore
+.git
+.gitignore
+.github
+.idea
+.vscode
+.build
+.gitlab
+*.md
+
+bin/
+charts/
+build/
+dist/
+
+*.exe
+*.so
+*.a
+*.log
+*.tmp
+.DS_Store
+
+*_test.go

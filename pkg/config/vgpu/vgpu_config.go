@@ -180,30 +180,20 @@ func (r *ResourceDataT) DeepCopy() *ResourceDataT {
 	return data
 }
 
-type CompatibilityMode int32
-
-const (
-	HostMode       CompatibilityMode = 0
-	CGroupv1Mode   CompatibilityMode = 1
-	CGroupv2Mode   CompatibilityMode = 2
-	OpenKernelMode CompatibilityMode = 100
-	ClientMode     CompatibilityMode = 200
-)
-
-func getCompatibilityMode(devManager *manager.DeviceManager) CompatibilityMode {
-	mode := HostMode
+func getCompatibilityMode(devManager *manager.DeviceManager) util.CompatibilityMode {
+	mode := util.HostMode
 	switch {
 	case devManager.GetFeatureGate().Enabled(util.ClientMode):
-		mode |= ClientMode
+		mode |= util.ClientRegMode
 	case cgroups.IsCgroup2UnifiedMode():
-		mode |= CGroupv2Mode
+		mode |= util.CGroupv2Mode
 	case cgroups.IsCgroup2HybridMode():
-		mode |= CGroupv2Mode
+		mode |= util.CGroupv2Mode
 	default:
-		mode |= CGroupv1Mode
+		mode |= util.CGroupv1Mode
 	}
 	if devManager.GetNodeConfig().GetOpenKernelModules() {
-		mode |= OpenKernelMode
+		mode |= util.OpenKernelMode
 	}
 	return mode
 }

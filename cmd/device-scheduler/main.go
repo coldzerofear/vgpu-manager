@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/component-base/logs"
-
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -31,7 +31,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -106,18 +105,30 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler FilterPlugin failed: %v", err)
 	}
+
 	handler := httprouter.New()
 	route.AddVersion(handler)
 	route.AddHealthProbe(handler)
+	route.AddReadyProbe(handler, func(req *http.Request) error {
+		if !util.InformerFactoryHasSynced(factory, req.Context()) {
+			return errors.New("informer has not completed all synchronization")
+		}
+		return nil
+	})
 	route.AddFilterPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
-
 	factory.Start(ctx.Done())
-	klog.Infoln("Waiting for InformerFactory cache synchronization...")
-	factory.WaitForCacheSync(wait.NeverStop)
-	klog.Infoln("InformerFactory cache synchronization successful")
+	if klog.V(4).Enabled() {
+		go func() {
+			klog.Infoln("Waiting for InformerFactory cache synchronization...")
+			if util.InformerFactoryHasSynced(factory, ctx) {
+				klog.Infoln("InformerFactory cache synchronization successful")
+			}
+		}()
+	}
+
 	// Start pprof debug debugging service.
 	route.StartDebugServer(opt.PprofBindPort)
 	server := http.Server{

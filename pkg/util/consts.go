@@ -13,6 +13,8 @@ const (
 	NodeNvidiaDriverVersionLabel = NvidiaDomain + "/node-driver-version"
 	NodeNvidiaCudaVersionLabel   = NvidiaDomain + "/node-cuda-version"
 	NvidiaNativeGPUResourceName  = NvidiaDomain + "/gpu"
+
+	DRADriverName = "manager.nvidia.com"
 )
 
 var (
@@ -122,6 +124,7 @@ const (
 	Checkpoints     = "checkpoints"
 	Watcher         = "watcher"
 	Registry        = "registry"
+	Claims          = "claims"
 	SMUtilFile      = "sm_util.config"
 	VMemNode        = "vmem_node"
 	VMemNodeFile    = "vmem_node.config"
@@ -149,6 +152,13 @@ const (
 	PodUIDEnv       = "VGPU_POD_UID"
 	ContNameEnv     = "VGPU_CONTAINER_NAME"
 	DisableVGPUEnv  = "DISABLE_VGPU_CONTROL"
+
+	CudaDeviceOrder    = "CUDA_DEVICE_ORDER"
+	CudaVisibleDevices = "CUDA_VISIBLE_DEVICES"
+	// DeviceOrderFastestFirst According to the graphics card from fast to slow order.
+	DeviceOrderFastestFirst = "FASTEST_FIRST"
+	// DeviceOrderPciBusId According to the number of PCI bus from small to large, consistent with nvidia-smi.
+	DeviceOrderPciBusId = "PCI_BUS_ID"
 )
 
 type ComputePolicy string
@@ -230,4 +240,20 @@ const (
 	SerialFilterNode = "SerialFilterNode"
 	VMemoryNode      = "VMemoryNode"
 	ClientMode       = "ClientMode"
+)
+
+// CompatibilityMode Container environment compatibility mode type
+type CompatibilityMode int32
+
+const (
+	// HostMode Indicates that the GPU tasks is running on the host.
+	HostMode CompatibilityMode = 0
+	// CGroupv1Mode Indicates that GPU tasks run within the container built by cgroup v1.
+	CGroupv1Mode CompatibilityMode = 1
+	// CGroupv2Mode Indicates that GPU tasks run within the container built by cgroup v2.
+	CGroupv2Mode CompatibilityMode = 2
+	// OpenKernelMode Indicates the open-source kernel currently used by the GPU driver.
+	OpenKernelMode CompatibilityMode = 100
+	// ClientRegMode Use client mode to register GPU tasks.
+	ClientRegMode CompatibilityMode = 200
 )

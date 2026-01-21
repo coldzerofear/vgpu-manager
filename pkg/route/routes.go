@@ -2,6 +2,7 @@ package route
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,18 +53,30 @@ func VersionRoute(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
 	_, _ = fmt.Fprint(w, fmt.Sprint(version.Get()))
 }
 
-func AddHealthProbe(router *httprouter.Router) {
+func AddReadyProbe(router *httprouter.Router, checker ...healthz.Checker) {
+	c := healthz.Ping
+	if len(checker) > 0 {
+		c = checker[0]
+	}
 	probeHandler := &healthz.Handler{
-		Checks: map[string]healthz.Checker{
-			"healthz": healthz.Ping,
-			"readyz":  healthz.Ping,
-		},
+		Checks: map[string]healthz.Checker{"readyz": c},
 	}
-	handlerFunc := func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	router.GET(readyzPath, func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		probeHandler.ServeHTTP(w, r)
+	})
+}
+
+func AddHealthProbe(router *httprouter.Router, checker ...healthz.Checker) {
+	c := healthz.Ping
+	if len(checker) > 0 {
+		c = checker[0]
 	}
-	router.GET(healthzPath, handlerFunc)
-	router.GET(readyzPath, handlerFunc)
+	probeHandler := &healthz.Handler{
+		Checks: map[string]healthz.Checker{"healthz": c},
+	}
+	router.GET(healthzPath, func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		probeHandler.ServeHTTP(w, r)
+	})
 }
 
 func AddMetricsHandle(router *httprouter.Router, metrics http.Handler) {
@@ -93,6 +106,14 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 				Error: err.Error(),
 			}
 		} else {
+			if !predicate.IsReady(r.Context()) {
+				err = context.DeadlineExceeded
+				klog.ErrorS(err, predicate.Name()+" is not ready yet")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(err.Error()))
+				return
+			}
 			extenderFilterResult = predicate.Filter(r.Context(), extenderArgs)
 		}
 
@@ -132,6 +153,15 @@ func BindPredicateRoute(predicate predicate.BindPredicate) httprouter.Handle {
 				Error: err.Error(),
 			}
 		} else {
+			if !predicate.IsReady(r.Context()) {
+				err = context.DeadlineExceeded
+				klog.ErrorS(err, predicate.Name()+" is not ready yet")
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				errMsg := fmt.Sprintf("{'error':'%s'}", err.Error())
+				_, _ = w.Write([]byte(errMsg))
+				return
+			}
 			extenderBindingResult = predicate.Bind(r.Context(), extenderBindingArgs)
 		}
 		w.Header().Set("Content-Type", "application/json")

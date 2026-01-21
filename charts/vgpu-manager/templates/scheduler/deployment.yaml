@@ -39,6 +39,16 @@ spec:
       {{- if .Values.scheduler.tolerations }}
       tolerations: {{ toYaml .Values.scheduler.tolerations | nindent 8 }}
       {{- end }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/component
+                    operator: In
+                    values:
+                      - {{ include "vgpu-manager.scheduler" . }}
+              topologyKey: "kubernetes.io/hostname"
       containers:
         - name: kube-scheduler
           image: {{ .Values.scheduler.kubeScheduler.image }}:{{ include "kubeSchedulerImageTag" . }}
@@ -96,14 +106,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
+              port: http
               scheme: HTTP
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
+              port: http
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10

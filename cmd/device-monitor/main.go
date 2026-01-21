@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"net/http"
 	"os"
@@ -21,7 +22,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/time/rate"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -89,6 +89,12 @@ func main() {
 		server.WithTimeoutSecond(30),
 		server.WithDebugMetrics(opt.PprofBindPort > 0),
 		server.WithLabels(prometheus.Labels{"service": "vGPU"}),
+		server.WithReadyChecker(func(req *http.Request) error {
+			if !util.InformerFactoryHasSynced(factory, req.Context()) {
+				return errors.New("informer has not completed all synchronization")
+			}
+			return nil
+		}),
 	}
 	if opt.EnableRBAC {
 		httpClient, err := rest.HTTPClientFor(kubeConfig)
@@ -105,16 +111,18 @@ func main() {
 	}
 	metricsServer := server.NewServer(opts...)
 	ctx, cancelCtx := context.WithCancel(context.Background())
-	factory.Start(ctx.Done())
-	klog.V(4).Infoln("Waiting for InformerFactory cache synchronization...")
-	factory.WaitForCacheSync(wait.NeverStop)
-	klog.V(4).Infoln("InformerFactory cache synchronization successful")
-
-	containerLister.Start(5*time.Second, ctx.Done())
-	// Start pprof debug debugging service.
-	route.StartDebugServer(opt.PprofBindPort)
-	// Start prometheus indicator collection service.
 	go func() {
+		factory.Start(ctx.Done())
+		klog.V(4).Infoln("Waiting for InformerFactory cache synchronization...")
+		if util.InformerFactoryHasSynced(factory, ctx) {
+			klog.V(4).Infoln("InformerFactory cache synchronization successful")
+			containerLister.Start(5*time.Second, ctx.Done())
+		}
+	}()
+	go func() {
+		// Start pprof debug debugging service.
+		route.StartDebugServer(opt.PprofBindPort)
+		// Start prometheus indicator collection service.
 		if err = metricsServer.Start(ctx); err != nil {
 			klog.Errorf("Server error occurred: %v", err)
 			cancelCtx()

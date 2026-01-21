@@ -96,6 +96,7 @@ var excludedFolders = map[string]bool{
 	util.Checkpoints: true,
 	util.Watcher:     true,
 	util.Registry:    true,
+	util.Claims:      true,
 }
 
 func (c *ContainerLister) collectContainerKey(pods []*corev1.Pod) sets.Set[ContainerKey] {

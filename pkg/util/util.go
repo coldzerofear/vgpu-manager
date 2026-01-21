@@ -1,6 +1,7 @@
 package util
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"math"
@@ -16,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/client-go/informers"
 	"k8s.io/klog/v2"
 )
 
@@ -365,4 +367,13 @@ func VGPUControlDisabled(pod *corev1.Pod, containerName string) bool {
 		}
 	}
 	return disabled
+}
+
+func InformerFactoryHasSynced(factory informers.SharedInformerFactory, ctx context.Context) bool {
+	for _, synced := range factory.WaitForCacheSync(ctx.Done()) {
+		if !synced {
+			return false
+		}
+	}
+	return true
 }

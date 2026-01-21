@@ -28,11 +28,12 @@ import (
 )
 
 type gpuFilter struct {
-	locker     *serial.Locker
-	kubeClient kubernetes.Interface
-	nodeLister listerv1.NodeLister
-	podLister  client.PodLister
-	recorder   record.EventRecorder
+	locker      *serial.Locker
+	kubeClient  kubernetes.Interface
+	nodeLister  listerv1.NodeLister
+	podLister   client.PodLister
+	recorder    record.EventRecorder
+	hasSyncFunc func(ctx context.Context) bool
 }
 
 const (
@@ -41,22 +42,24 @@ const (
 	//indexerKeyPodPlanSchedulingNode = "pod.planSchedulingNode"
 )
 
-var _ predicate.FilterPredicate = &gpuFilter{}
-var podIndexers = cache.Indexers{
-	indexerKeyPodRequestVGPU: func(obj interface{}) ([]string, error) {
-		if pod, ok := obj.(*corev1.Pod); ok && util.IsVGPUResourcePod(pod) {
-			return []string{"true"}, nil
-		}
-		return []string{"false"}, nil
-	},
-	//indexerKeyPodPlanSchedulingNode: func(obj interface{}) ([]string, error) {
-	//	nodeName := ""
-	//	if pod, ok := obj.(*corev1.Pod); ok {
-	//		nodeName = util.PodPlanSchedulingNode(pod)
-	//	}
-	//	return []string{nodeName}, nil
-	//},
-}
+var (
+	_           predicate.FilterPredicate = &gpuFilter{}
+	podIndexers                           = cache.Indexers{
+		indexerKeyPodRequestVGPU: func(obj interface{}) ([]string, error) {
+			if pod, ok := obj.(*corev1.Pod); ok && util.IsVGPUResourcePod(pod) {
+				return []string{"true"}, nil
+			}
+			return []string{"false"}, nil
+		},
+		//indexerKeyPodPlanSchedulingNode: func(obj interface{}) ([]string, error) {
+		//	nodeName := ""
+		//	if pod, ok := obj.(*corev1.Pod); ok {
+		//		nodeName = util.PodPlanSchedulingNode(pod)
+		//	}
+		//	return []string{nodeName}, nil
+		//},
+	}
+)
 
 func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactory,
 	recorder record.EventRecorder, serialFilterNode bool) (*gpuFilter, error) {
@@ -69,12 +72,21 @@ func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactor
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
 	locker := serial.NewLocker(serial.WithName(Name),
 		serial.WithEnabled(serialFilterNode))
+	hasSyncFunc := func(ctx context.Context) bool {
+		return cache.WaitForCacheSync(
+			ctx.Done(),
+			podInformer.HasSynced,
+			nodeInformer.HasSynced,
+		)
+	}
+	podInformer.HasSynced()
 	return &gpuFilter{
-		locker:     locker,
-		kubeClient: kubeClient,
-		nodeLister: nodeLister,
-		podLister:  podLister,
-		recorder:   recorder,
+		locker:      locker,
+		kubeClient:  kubeClient,
+		nodeLister:  nodeLister,
+		podLister:   podLister,
+		recorder:    recorder,
+		hasSyncFunc: hasSyncFunc,
 	}, nil
 }
 
@@ -83,6 +95,10 @@ func (f *gpuFilter) Name() string {
 }
 
 type filterFunc func(*corev1.Pod, []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error)
+
+func (f *gpuFilter) IsReady(ctx context.Context) bool {
+	return f.hasSyncFunc(ctx)
+}
 
 func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
 	klog.V(4).InfoS("FilterNode", "ExtenderArgs", args)

@@ -11,6 +11,8 @@ type FilterPredicate interface {
 	Name() string
 	// Filter returns the filter result of predictor, this will tell the suitable nodes to running pod.
 	Filter(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult
+	// IsReady Return whether the current plugin is ready.
+	IsReady(ctx context.Context) bool
 }
 
 type BindPredicate interface {
@@ -18,4 +20,6 @@ type BindPredicate interface {
 	Name() string
 	// Bind Finally bind the pod to a specific node.
 	Bind(ctx context.Context, args extenderv1.ExtenderBindingArgs) *extenderv1.ExtenderBindingResult
+	// IsReady Return whether the current plugin is ready.
+	IsReady(ctx context.Context) bool
 }

@@ -16,9 +16,7 @@ RUN wget -nv -O - https://dl.google.com/go/go${GOLANG_VERSION}.${TARGETOS}-${TAR
 
 # Compile vgpu driver library files
 WORKDIR /vgpu-controller
-
 COPY library/ .
-
 RUN chmod +x build.sh && ./build.sh
 
 # Compile the vgpu manager binary file
@@ -37,11 +35,11 @@ COPY go.sum go.sum
 # and so that source changes don't invalidate our downloaded layer
 RUN go mod download
 
-ARG GIT_BRANCH
-ARG GIT_COMMIT
-ARG GIT_TREE_STATE
-ARG BUILD_DATE
-ARG BUILD_VERSION
+ARG GIT_BRANCH="unknown"
+ARG GIT_COMMIT="unknown"
+ARG GIT_TREE_STATE="dirty"
+ARG BUILD_DATE="1970-01-01T00:00:00Z"
+ARG BUILD_VERSION="N/A"
 
 # Copy the go source
 COPY cmd cmd/
@@ -67,12 +65,13 @@ ENV NVIDIA_DISABLE_REQUIRE="true"
 
 WORKDIR /
 
-COPY --from=builder /go/src/vgpu-manager/bin/device-scheduler /usr/bin/device-scheduler
-COPY --from=builder /go/src/vgpu-manager/bin/device-plugin /usr/bin/device-plugin
-COPY --from=builder /go/src/vgpu-manager/bin/device-monitor /usr/bin/device-monitor
-COPY --from=builder /go/src/vgpu-manager/bin/device-webhook /usr/bin/device-webhook
+COPY --from=builder /go/src/vgpu-manager/bin/device-scheduler /usr/local/bin/device-scheduler
+COPY --from=builder /go/src/vgpu-manager/bin/device-plugin /usr/local/bin/device-plugin
+COPY --from=builder /go/src/vgpu-manager/bin/device-monitor /usr/local/bin/device-monitor
+COPY --from=builder /go/src/vgpu-manager/bin/device-webhook /usr/local/bin/device-webhook
 
 COPY scripts scripts/
+COPY LICENSE /
 
 RUN chmod +x /scripts/* && mkdir -p /installed/registry
 

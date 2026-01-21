@@ -93,7 +93,7 @@ func (m *DeviceManager) checkHealth() error {
 	for {
 		select {
 		case <-stopCh:
-			klog.V(5).Infoln("DeviceManager check health has stopped")
+			klog.V(3).Infoln("DeviceManager check health has stopped")
 			return nil
 		default:
 		}
@@ -103,10 +103,14 @@ func (m *DeviceManager) checkHealth() error {
 			continue
 		}
 		if ret != nvml.SUCCESS {
-			klog.Infof("Error waiting for event: %v; Marking all devices as unhealthy", ret)
-			for i := range m.devices {
-				m.unhealthy <- m.devices[i]
+			if ret == nvml.ERROR_GPU_IS_LOST {
+				klog.Warningf("GPU is lost error: %v; Marking all devices as unhealthy", ret)
+				for i := range m.devices {
+					m.unhealthy <- m.devices[i]
+				}
+				continue
 			}
+			klog.V(6).Infof("Error waiting for NVML event: %v. Retrying...", ret)
 			continue
 		}
 

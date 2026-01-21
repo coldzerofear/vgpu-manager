@@ -134,20 +134,20 @@ func (m *migDevicePlugin) Devices() []*pluginapi.Device {
 	var devices []*pluginapi.Device
 	deviceMap := m.baseServer.GetDeviceManager().GetGPUDeviceMap()
 	for uuid, migDevice := range m.baseServer.GetDeviceManager().GetMIGDeviceMap() {
-		gpuDevice, ok := deviceMap[migDevice.Parent.UUID]
-		if !ok || !gpuDevice.Healthy { // Skip if the parent device is unhealthy
+		parentDevice, ok := deviceMap[migDevice.Parent.UUID]
+		if !ok {
 			continue
 		}
 		if m.baseServer.GetResourceName() == GetMigResourceName(migDevice.MigInfo) {
 			health := pluginapi.Healthy
-			if !migDevice.Healthy {
+			if !parentDevice.Healthy || !migDevice.Healthy {
 				health = pluginapi.Unhealthy
 			}
 			var topologyInfo *pluginapi.TopologyInfo
-			if gpuDevice.NumaNode >= 0 {
+			if parentDevice.NumaNode >= 0 {
 				topologyInfo = &pluginapi.TopologyInfo{
 					Nodes: []*pluginapi.NUMANode{
-						{ID: int64(gpuDevice.NumaNode)},
+						{ID: int64(parentDevice.NumaNode)},
 					},
 				}
 			}

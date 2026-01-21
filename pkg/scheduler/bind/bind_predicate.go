@@ -43,6 +43,10 @@ func (b *nodeBinding) Name() string {
 	return Name
 }
 
+func (b *nodeBinding) IsReady(ctx context.Context) bool {
+	return true
+}
+
 func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingArgs) *extenderv1.ExtenderBindingResult {
 	b.locker.Lock(args.Node)
 	defer b.locker.Unlock(args.Node)

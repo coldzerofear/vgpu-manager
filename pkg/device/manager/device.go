@@ -43,6 +43,35 @@ type Device struct {
 	MIG *MIGDevice
 }
 
+func (d Device) getUuid() string {
+	if d.GPU != nil {
+		return d.GPU.UUID
+	}
+	if d.MIG != nil {
+		return d.MIG.UUID
+	}
+	return ""
+}
+
+func (d Device) isHealthy() bool {
+	if d.GPU != nil {
+		return d.GPU.Healthy
+	}
+	if d.MIG != nil {
+		return d.MIG.Healthy
+	}
+	return false
+}
+
+func (d Device) setUnhealthy() {
+	if d.GPU != nil {
+		d.GPU.Healthy = false
+	}
+	if d.MIG != nil {
+		d.MIG.Healthy = false
+	}
+}
+
 type RegistryFunc func(featuregate.FeatureGate) (*client.PatchMetadata, error)
 
 type DeviceManager struct {
@@ -166,30 +195,35 @@ func WithDeviceLib(lib *nvidia.DeviceLib) OptionFunc {
 	}
 }
 
-func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (m *DeviceManager, err error) {
-	m = &DeviceManager{
+func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceManager, error) {
+	manager := &DeviceManager{
 		config:               config,
-		unhealthy:            make(chan *Device),
-		reRegister:           make(chan struct{}),
+		reRegister:           make(chan struct{}, 1),
 		notify:               make(map[string]chan *Device),
 		registryFuncs:        make(map[string]RegistryFunc),
 		cleanupRegistryFuncs: make(map[string]RegistryFunc),
 	}
 	for _, opt := range opts {
-		opt(m)
+		opt(manager)
 	}
-	if m.client == nil {
-		m.client = fake.NewSimpleClientset()
+	if manager.client == nil {
+		manager.client = fake.NewSimpleClientset()
 	}
-	if m.featureGate == nil {
-		m.featureGate = featuregate.NewFeatureGate()
+	if manager.featureGate == nil {
+		manager.featureGate = featuregate.NewFeatureGate()
 	}
-	if m.DeviceLib == nil {
-		if m.DeviceLib, err = nvidia.InitDeviceLib("/"); err != nil {
+	if manager.DeviceLib == nil {
+		deviceLib, err := nvidia.InitDeviceLib("/")
+		if err != nil {
 			return nil, err
 		}
+		manager.DeviceLib = deviceLib
 	}
-	return m, m.initDevices()
+	if err := manager.initDevices(); err != nil {
+		return nil, err
+	}
+	manager.unhealthy = make(chan *Device, len(manager.devices))
+	return manager, nil
 }
 
 func (m *DeviceManager) initDevices() (err error) {
@@ -198,17 +232,9 @@ func (m *DeviceManager) initDevices() (err error) {
 	}
 	defer m.NvmlShutdown()
 
-	driverVersion, ret := m.SystemGetDriverVersion()
-	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error getting driver version: %s", nvml.ErrorString(ret))
-	}
-	cudaDriverVersion, ret := m.SystemGetCudaDriverVersion()
-	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error getting CUDA driver version: %s", nvml.ErrorString(ret))
-	}
-	m.driverVersion = nvidia.DriverVersion{
-		DriverVersion:     driverVersion,
-		CudaDriverVersion: nvidia.CudaDriverVersion(cudaDriverVersion),
+	m.driverVersion, err = m.DeviceLib.GetDriverVersion()
+	if err != nil {
+		return err
 	}
 	var (
 		devLinksMap        map[string]map[int][]links.P2PLinkType
@@ -471,22 +497,27 @@ func (m *DeviceManager) handleNotify() {
 	for {
 		select {
 		case <-stopCh:
-			klog.V(5).Infoln("DeviceManager handle notify has stopped")
+			klog.V(3).Infoln("DeviceManager handle notify has stopped")
 			return
 		case dev := <-m.unhealthy:
+			if !dev.isHealthy() {
+				klog.V(4).Infof("Device: %s is aleady marked unhealthy. Skip notifications", dev.getUuid())
+				continue
+			}
+
 			m.mut.Lock()
-			if dev.GPU != nil {
-				dev.GPU.Healthy = false
-			}
-			if dev.MIG != nil {
-				dev.MIG.Healthy = false
-			}
+			dev.setUnhealthy()
 			select {
 			case m.reRegister <- struct{}{}:
 			default:
+				klog.Errorf("Re registration channel is full, stop sending requests")
 			}
-			for _, ch := range m.notify {
-				ch <- dev
+			for name, ch := range m.notify {
+				select {
+				case ch <- dev:
+				default:
+					klog.Errorf("Notification channel is full. Stop sending device %s unhealthy notifications to %s", dev.getUuid(), name)
+				}
 			}
 			m.mut.Unlock()
 		}
