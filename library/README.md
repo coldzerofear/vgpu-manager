@@ -40,8 +40,9 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 * CUDA_CORE_LIMIT_<index>: gpu core limit
 * CUDA_CORE_SOFT_LIMIT_<index>: gpu core soft limit
 * CUDA_MEM_OVERSOLD_<index>: gpu memory oversold switch
-* GPU_DEVICES_UUID: gpu device uuids
-* ENV_COMPATIBILITY_MODE: environment compatibility mode
+* MANAGER_VISIBLE_DEVICES: List of GPU UUIDs visible to container
+* MANAGER_VISIBLE_DEVICE_<index>: Single GPU UUID visible to the container
+* MANAGER_COMPATIBILITY_MODE: Environment compatibility mode
 
 ## Log level
 

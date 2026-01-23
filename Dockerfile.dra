@@ -1,0 +1,56 @@
+# Declared here for use in FROM directives below
+ARG TOOLKIT_CONTAINER_IMAGE=unknown
+
+ARG BASE_BUILD_IMAGE=unknown
+
+FROM ${BASE_BUILD_IMAGE} AS builder
+
+FROM ghcr.io/nvidia/k8s-dra-driver-gpu:v25.12.0-dev-839e966a AS bash
+
+# Pull the nvidia-cdi-hook binary out of the relevant toolkit container
+# (arch: TARGETPLATFORM, set via --platform).
+FROM ${TOOLKIT_CONTAINER_IMAGE} AS toolkit
+
+# Construct production image (arch: TARGETPLATFORM, set via the `--platform` CLI
+# arg). Note that nvcr.io/nvidia/distroless/cc is based on
+# https://github.com/GoogleContainerTools/distroless; specifically on debian12.
+# For consistency, the build stage above derives from Debian 12 directly. The
+# `-dev` suffic is to get busybox as a shell added. For RUN directives to pick
+# that up, use `SHELL ["/busybox/sh", "-c"]`.
+FROM nvcr.io/nvidia/distroless/cc:v3.2.2-dev
+
+ENV NVIDIA_DISABLE_REQUIRE="true"
+# ENV NVIDIA_VISIBLE_DEVICES=all
+# ENV NVIDIA_DRIVER_CAPABILITIES=utility,compute
+
+LABEL io.k8s.display-name="VGPU-Manager DRA Driver for NVIDIA GPUs"
+LABEL name="VGPU-Manager DRA Driver for NVIDIA GPUs"
+LABEL summary="VGPU-Manager DRA Driver for NVIDIA GPUs"
+LABEL description="VGPU-Manager DRA Driver for NVIDIA GPUs"
+LABEL org.opencontainers.image.description="VGPU-Manager DRA Driver for NVIDIA GPUs"
+LABEL org.opencontainers.image.source="https://github.com/coldzerofear/vgpu-manager"
+
+# Add top-level license (AL2) file into the container image
+COPY LICENSE /
+# RUN mkdir -p /installed/registry
+
+COPY --from=bash       /bin/bash                                 /bin/bash
+COPY --from=toolkit    /artifacts/rpm/usr/bin/nvidia-cdi-hook    /usr/bin/nvidia-cdi-hook
+COPY --from=builder    /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
+COPY --from=builder    /go/src/vgpu-manager/bin/device-client    /installed/registry/device-client
+COPY --from=builder    /go/src/vgpu-manager/bin/kubelet-plugin   /usr/local/bin/kubelet-plugin
+
+COPY --chmod=755 scripts/install_files.sh           /usr/bin/install_files.sh
+COPY --chmod=755 scripts/bind_to_driver.sh          /usr/bin/bind_to_driver.sh
+COPY --chmod=755 scripts/unbind_from_driver.sh      /usr/bin/unbind_from_driver.sh
+COPY --chmod=755 scripts/kubelet-plugin-prestart.sh /usr/bin/kubelet-plugin-prestart.sh
+
+# Use root by default (for example, the init container as of now needs
+# this, otherwise `ln: /driver-root: Permission denied`).
+COPY --from=builder /etc/passwd /etc/passwd
+COPY --from=builder /etc/group  /etc/group
+USER root:root
+
+# Smoke-test executables (provide early build feedback).
+RUN ["kubelet-plugin", "--version"]
+RUN ["/bin/bash", "--version"]

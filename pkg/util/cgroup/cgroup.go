@@ -1,7 +1,6 @@
 package cgroup
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path"
@@ -9,16 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	criapi "k8s.io/cri-api/pkg/apis"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
-	"k8s.io/utils/ptr"
-
 	cgroupsystemd "github.com/opencontainers/runc/libcontainer/cgroups/systemd"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -293,54 +285,54 @@ func detectCgroupDriver() (CGroupDriver, error) {
 	return "", fmt.Errorf("unable to detect cgroup driver on system")
 }
 
-func getCgroupDriverFromCRI(ctx context.Context, runtimeServer criapi.RuntimeService) (*CGroupDriver, error) {
-	klog.V(4).InfoS("Getting CRI runtime configuration information")
-
-	var (
-		cgroupDriver  *CGroupDriver
-		runtimeConfig *runtimeapi.RuntimeConfigResponse
-		err           error
-	)
-	// Retry a couple of times, hoping that any errors are transient.
-	// Fail quickly on known, non transient errors.
-	for i := 0; i < 3; i++ {
-		runtimeConfig, err = runtimeServer.RuntimeConfig(ctx)
-		if err != nil {
-			s, ok := status.FromError(err)
-			if !ok || s.Code() != codes.Unimplemented {
-				// We could introduce a backoff delay or jitter, but this is largely catching cases
-				// where the runtime is still starting up and we request too early.
-				// Give it a little more time.
-				time.Sleep(time.Second * 2)
-				continue
-			}
-			// CRI implementation doesn't support RuntimeConfig, fallback
-			klog.InfoS("CRI implementation should be updated to support RuntimeConfig when KubeletCgroupDriverFromCRI feature gate has been enabled. Falling back to using cgroupDriver from kubelet config.")
-			return nil, nil
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	// Calling GetLinux().GetCgroupDriver() won't segfault, but it will always default to systemd
-	// which is not intended by the fields not being populated
-	linuxConfig := runtimeConfig.GetLinux()
-	if linuxConfig == nil {
-		return nil, nil
-	}
-
-	switch d := linuxConfig.GetCgroupDriver(); d {
-	case runtimeapi.CgroupDriver_SYSTEMD:
-		cgroupDriver = ptr.To(SYSTEMD)
-	case runtimeapi.CgroupDriver_CGROUPFS:
-		cgroupDriver = ptr.To(CGROUPFS)
-	default:
-		return nil, fmt.Errorf("runtime returned an unknown cgroup driver %d", d)
-	}
-	klog.InfoS("Using cgroup driver setting received from the CRI runtime", "cgroupDriver", *cgroupDriver)
-	return cgroupDriver, nil
-}
+//func getCgroupDriverFromCRI(ctx context.Context, runtimeServer criapi.RuntimeService) (*CGroupDriver, error) {
+//	klog.V(4).InfoS("Getting CRI runtime configuration information")
+//
+//	var (
+//		cgroupDriver  *CGroupDriver
+//		runtimeConfig *runtimeapi.RuntimeConfigResponse
+//		err           error
+//	)
+//	// Retry a couple of times, hoping that any errors are transient.
+//	// Fail quickly on known, non transient errors.
+//	for i := 0; i < 3; i++ {
+//		runtimeConfig, err = runtimeServer.RuntimeConfig(ctx)
+//		if err != nil {
+//			s, ok := status.FromError(err)
+//			if !ok || s.Code() != codes.Unimplemented {
+//				// We could introduce a backoff delay or jitter, but this is largely catching cases
+//				// where the runtime is still starting up and we request too early.
+//				// Give it a little more time.
+//				time.Sleep(time.Second * 2)
+//				continue
+//			}
+//			// CRI implementation doesn't support RuntimeConfig, fallback
+//			klog.InfoS("CRI implementation should be updated to support RuntimeConfig when KubeletCgroupDriverFromCRI feature gate has been enabled. Falling back to using cgroupDriver from kubelet config.")
+//			return nil, nil
+//		}
+//	}
+//	if err != nil {
+//		return nil, err
+//	}
+//
+//	// Calling GetLinux().GetCgroupDriver() won't segfault, but it will always default to systemd
+//	// which is not intended by the fields not being populated
+//	linuxConfig := runtimeConfig.GetLinux()
+//	if linuxConfig == nil {
+//		return nil, nil
+//	}
+//
+//	switch d := linuxConfig.GetCgroupDriver(); d {
+//	case runtimeapi.CgroupDriver_SYSTEMD:
+//		cgroupDriver = ptr.To(SYSTEMD)
+//	case runtimeapi.CgroupDriver_CGROUPFS:
+//		cgroupDriver = ptr.To(CGROUPFS)
+//	default:
+//		return nil, fmt.Errorf("runtime returned an unknown cgroup driver %d", d)
+//	}
+//	klog.InfoS("Using cgroup driver setting received from the CRI runtime", "cgroupDriver", *cgroupDriver)
+//	return cgroupDriver, nil
+//}
 
 func NewPodCgroupName(pod *corev1.Pod) CgroupName {
 	podQos := pod.Status.QOSClass
@@ -360,7 +352,7 @@ func NewPodCgroupName(pod *corev1.Pod) CgroupName {
 	return cgroupName
 }
 
-// cgroupName.ToSystemd converts the internal cgroup name to a systemd name.
+// ToSystemd cgroupName.ToSystemd converts the internal cgroup name to a systemd name.
 // For example, the name {"kubepods", "burstable", "pod1234-abcd-5678-efgh"} becomes
 // "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod1234_abcd_5678_efgh.slice"
 // This function always expands the systemd name into the cgroupfs form. If only
@@ -398,19 +390,6 @@ func GetK8sPodDeviceCGroupFullPath(podCGroupPath string) string {
 // GetK8sPodCGroupFullPath Obtain the cgroupv2 full path of the pod.
 func GetK8sPodCGroupFullPath(podCGroupPath string) string {
 	return filepath.Join(CGroupBasePath, podCGroupPath)
-}
-
-// GetK8sPodCGroupPath Obtain the relative path of pod cgroup for k8s.
-func GetK8sPodCGroupPath(pod *corev1.Pod) (string, error) {
-	cgroupName := NewPodCgroupName(pod)
-	switch currentCGroupDriver {
-	case SYSTEMD:
-		return cgroupName.ToSystemd(), nil
-	case CGROUPFS:
-		return cgroupName.ToCgroupfs(), nil
-	default:
-		return "", fmt.Errorf("unknown CGroup driver: %s", currentCGroupDriver)
-	}
 }
 
 func GetK8sPodContainerCGroupFullPath(pod *corev1.Pod, containerName string,
@@ -493,8 +472,8 @@ func convertSystemdFullPath(runtimeName, containerId string,
 }
 
 func GetContainerStatus(pod *corev1.Pod, containerName string) (*corev1.ContainerStatus, bool) {
-	for i, status := range pod.Status.ContainerStatuses {
-		if status.Name == containerName {
+	for i, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == containerName {
 			return &pod.Status.ContainerStatuses[i], true
 		}
 	}
@@ -502,8 +481,8 @@ func GetContainerStatus(pod *corev1.Pod, containerName string) (*corev1.Containe
 }
 
 func GetContainerRuntime(pod *corev1.Pod, containerName string) (runtimeName string, containerId string) {
-	if status, ok := GetContainerStatus(pod, containerName); ok {
-		runtimeName, containerId = ParseContainerRuntime(status.ContainerID)
+	if cs, ok := GetContainerStatus(pod, containerName); ok {
+		runtimeName, containerId = ParseContainerRuntime(cs.ContainerID)
 	}
 	return
 }
@@ -528,20 +507,6 @@ func SystemdPathPrefixOfRuntime(runtimeName string) string {
 		}
 		return runtimeName
 	}
-}
-
-func SplitK8sCGroupBasePath(cgroupFullPath string) string {
-	basePath := cgroupFullPath
-	for {
-		split, _ := filepath.Split(basePath)
-		split = filepath.Clean(split)
-		if strings.Contains(split, "kubepods") {
-			basePath = split
-			continue
-		}
-		break
-	}
-	return basePath
 }
 
 func GetContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(string) string, fns ...func(pid int)) []int {

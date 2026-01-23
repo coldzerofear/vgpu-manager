@@ -20,10 +20,10 @@ A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) device
 - [x] Support MIG strategy device allocation
 - [x] Add an independent core utilization Watcher to avoid frequent driver calls
 - [x] Support gpu registration mode, reduce the exposed host information, and provide a safer gpu container environment.
+- [x] Support dynamic resource allocation (DRA)
 - [ ] Provide a scheduler framework plugin to achieve high-performance scheduling
 - [ ] Support device hot plugging and expansion ([device-mounter](https://github.com/coldzerofear/device-mounter))
 - [ ] Compatible with Volcano Batch Scheduler
-- [ ] Support dynamic resource allocation (DRA)
 
 > **describe**:
 > :white_check_mark: Completed feature
@@ -47,7 +47,7 @@ make build
 **Build and push Docker image:**
 
 ```shell
-make docker-build docker-push IMG=<your-image-tag>
+make docker-build-base docker-build docker-push REGISTRY=<your-image-registry> TAG=<your-image-tag>
 ```
 
 ## Deployment

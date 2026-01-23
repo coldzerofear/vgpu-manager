@@ -1,0 +1,46 @@
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: vgpu-manager
+spec:
+  selectors:
+    - cel:
+        expression: |-
+          device.driver == "manager.nvidia.com" && device.attributes["manager.nvidia.com"].type == "vgpu"
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: single-vgpu-0
+  namespace: default
+spec:
+  devices:
+    requests:
+      - name: single-vgpu
+        exactly:
+          deviceClassName: vgpu-manager
+          capacity:
+            requests:
+              cores: 50
+              memory: 4Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: single-vgpu-pod
+  namespace: default
+spec:
+  containers:
+    - name: ctr0
+      image: ubuntu:24.04
+      command: ["bash", "-c"]
+      args: ["export; trap 'exit 0' TERM; sleep 9999 & wait"]
+      resources:
+        requests:
+          cpu: 1
+        claims:
+          - name: single-vgpu
+  resourceClaims:
+    - name: single-vgpu
+      resourceClaimName: single-vgpu-0

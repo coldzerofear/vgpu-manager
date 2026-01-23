@@ -121,6 +121,7 @@ const (
 
 	ManagerRootPath = "/etc/vgpu-manager"
 	Config          = "config"
+	Tools           = "tools"
 	Checkpoints     = "checkpoints"
 	Watcher         = "watcher"
 	Registry        = "registry"
@@ -142,10 +143,12 @@ const (
 	CudaSoftCoreLimitEnv = "CUDA_CORE_SOFT_LIMIT"
 	// CUDA_CORE_SOFT_LIMIT_<index> gpu memory oversold switch
 	CudaMemoryOversoldEnv = "CUDA_MEM_OVERSOLD"
-	// GPU_DEVICES_UUID gpu uuid list
-	GPUDevicesUuidEnv = "GPU_DEVICES_UUID"
-	// CompatibilityModeEnv Indicate the compatibility mode of the environment
-	CompatibilityModeEnv = "ENV_COMPATIBILITY_MODE"
+	// ManagerVisibleDevice Single GPU UUID visible to the container
+	ManagerVisibleDevice = "MANAGER_VISIBLE_DEVICE"
+	// ManagerVisibleDevices List of GPU UUIDs visible to container
+	ManagerVisibleDevices = "MANAGER_VISIBLE_DEVICES"
+	// ManagerCompatibilityMode Indicate the compatibility mode of the environment
+	ManagerCompatibilityMode = "MANAGER_COMPATIBILITY_MODE"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"

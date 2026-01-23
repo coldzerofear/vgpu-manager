@@ -1,26 +1,17 @@
+# CONTAINER_TOOL defines the container tool to be used for building images.
+# Be aware that the target commands are only tested with Docker which is
+# scaffolded by default. However, you might want to replace it to use other
+# tools. (i.e. podman)
+CONTAINER_TOOL ?= docker
 GOOS ?= linux
 
-# Image URL to use all building/pushing image targets
-TAG ?= latest
-IMG ?= coldzerofear/vgpu-manager:$(TAG)
-APT_MIRROR ?= https://mirrors.aliyun.com
-VERSION ?= $(shell cat VERSION)
+include $(CURDIR)/versions.mk
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
   GOBIN=$(shell go env GOPATH)/bin
 else
   GOBIN=$(shell go env GOBIN)
-endif
-
-# Git info
-GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "Not a git repo")
-GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo "Not a git tree")
-BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
-ifeq ($(strip $(shell git status --porcelain 2>/dev/null)),)
-  GIT_TREE_STATE?=clean
-else
-  GIT_TREE_STATE?=dirty
 endif
 
 VERSION_PKG = github.com/coldzerofear/vgpu-manager/pkg
@@ -31,12 +22,6 @@ GO_BUILD_LDFLAGS = -X $(VERSION_PKG)/version.version=${VERSION} \
                    -X $(VERSION_PKG)/version.gitCommit=${GIT_COMMIT} \
                    -X $(VERSION_PKG)/version.gitTreeState=${GIT_TREE_STATE} \
                    -X $(VERSION_PKG)/version.buildDate=${BUILD_DATE}
-
-# CONTAINER_TOOL defines the container tool to be used for building images.
-# Be aware that the target commands are only tested with Docker which is
-# scaffolded by default. However, you might want to replace it to use other
-# tools. (i.e. podman)
-CONTAINER_TOOL ?= docker
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -74,7 +59,7 @@ vet: ## Run go vet against code.
 .PHONY: test
 test: fmt vet ## Run tests.
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
-    go test ./... -coverprofile cover.out
+    go test -ldflags="$(GO_BUILD_LDFLAGS)" ./... -coverprofile cover.out
 
 .PHONY: generate
 generate: ## API code generation.
@@ -93,19 +78,41 @@ build: fmt vet ## Build binary.
 	CGO_ENABLED=1 GOOS=$(GOOS) CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
         go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/device-webhook cmd/device-webhook/*.go
 	CGO_ENABLED=0 GOOS=$(GOOS) go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/device-client cmd/device-client/*.go
+	CGO_ENABLED=1 GOOS=$(GOOS) CGO_LDFLAGS_ALLOW="$(CGO_LDFLAGS_ALLOW)" \
+        go build -ldflags="$(GO_BUILD_LDFLAGS)" -o bin/kubelet-plugin cmd/kubelet-plugin/*.go
+
+.PHONY: docker-build-base
+docker-build-base: ## Build base docker image.
+	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH="${GIT_BRANCH}" --build-arg APT_MIRROR="${APT_MIRROR}" \
+      --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
+      --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
+      --build-arg GOLANG_VERSION="${GOLANG_VERSION}" -t "${BASE_IMG}" -f Dockerfile.base .
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH="${GIT_BRANCH}" --build-arg APT_MIRROR="${APT_MIRROR}" \
-      --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
-      --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" -t "${IMG}" -f Dockerfile .
+	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" -t "${IMG}" -f Dockerfile .
+
+.PHONY: docker-build-dra
+docker-build-dra: ## Build dra driver docker image.
+	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
+	  --build-arg TOOLKIT_CONTAINER_IMAGE="${TOOLKIT_CONTAINER_IMAGE}" -t "${DRA_IMG}" -f Dockerfile.dra .
+
+.PHONY: docker-build-all
+docker-build-all: docker-build-base docker-build docker-build-dra ## Build all docker image.
 
 .PHONY: docker-push
 docker-push: ## Push docker image.
 	$(CONTAINER_TOOL) push ${IMG}
+
+.PHONY: docker-push-dra
+docker-push-dra: ## Push dra driver docker image.
+	$(CONTAINER_TOOL) push ${DRA_IMG}
+
+.PHONY: docker-push-all
+docker-push-all: docker-push docker-push-dra ## Push all docker image.
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -117,11 +124,15 @@ PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	sed '/--platform=/! s/^[[:space:]]*FROM[[:space:]]/FROM --platform=\$$\{BUILDPLATFORM\} /' Dockerfile > Dockerfile.cross
+	sed '/--platform=/! s/^[[:space:]]*FROM[[:space:]]/FROM --platform=\$$\{BUILDPLATFORM\} /' Dockerfile.base > Dockerfile.base.cross
 	- $(CONTAINER_TOOL) buildx create --name vgpu-manager-builder
 	$(CONTAINER_TOOL) buildx use vgpu-manager-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg GIT_BRANCH="${GIT_BRANCH}" \
+	- $(CONTAINER_TOOL) buildx build --platform=$(PLATFORMS) --build-arg GIT_BRANCH="${GIT_BRANCH}" \
       --build-arg APT_MIRROR="${APT_MIRROR}" --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
-	  --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" --tag "${IMG}" -f Dockerfile.cross .
+	  --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
+	  --tag "${BASE_IMG}" -f Dockerfile.base.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
+	  --tag "${IMG}" -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm vgpu-manager-builder
-	rm Dockerfile.cross
+	rm -f Dockerfile.cross Dockerfile.base.cross

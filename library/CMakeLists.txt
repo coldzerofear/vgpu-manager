@@ -67,11 +67,6 @@ target_include_directories(virt_mem_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/i
 target_link_libraries(virt_mem_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
 target_compile_options(virt_mem_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-add_executable(extract_container_pids tools/extract_container_pids.c src/util.c)
-target_include_directories(extract_container_pids PUBLIC ${C_INCLUDE_PATH})
-target_link_libraries(extract_container_pids PRIVATE ${STATIC_C_LIBRARIES})
-target_compile_options(extract_container_pids PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
-
 add_executable(mem_pool_tool tools/mem_pool_tool.c)
 target_include_directories(mem_pool_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
 target_link_libraries(mem_pool_tool PRIVATE cuda ${STATIC_C_LIBRARIES})

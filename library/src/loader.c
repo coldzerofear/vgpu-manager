@@ -1008,10 +1008,10 @@ extern int get_mem_ratio(uint32_t index, double *ratio);
 extern int get_mem_limit(uint32_t index, size_t *limit);
 extern int get_core_limit(uint32_t index, int *limit);
 extern int get_core_soft_limit(uint32_t index, int *limit);
-extern int get_devices_uuid(char *uuids);
+extern int get_device_uuid(uint32_t index, char *uuid);
+extern int get_device_uuids(char *uuids);
 extern int get_mem_oversold(uint32_t index, int *limit);
 extern int get_vmem_node_enabled(int *enabled);
-extern int extract_container_id(char *path, char *container_id, size_t container_id_size);
 
 // vmemory node lock
 extern int device_vmem_write_lock(int ordinal);
@@ -1044,8 +1044,6 @@ memory_node_t* g_memory_node = &memory_node_temp;
 static pthread_mutex_t g_memory_node_lock = PTHREAD_MUTEX_INITIALIZER;
 
 device_vmemory_t* g_device_vmem = NULL;
-
-char container_id[FILENAME_MAX] = {0};
 char driver_version[FILENAME_MAX] = "1";
 
 void init_real_dlsym() {
@@ -1905,12 +1903,18 @@ int init_g_vgpu_config_by_env() {
   if (likely(container_name != NULL)){
     strncpy(g_vgpu_config->container_name, container_name, sizeof(g_vgpu_config->container_name)-1);
   }
-
-  char uuids[UUID_BUFFER_SIZE*MAX_DEVICE_COUNT];
-  ret = get_devices_uuid(uuids);
+  int i;
+  char uuids[UUID_BUFFER_SIZE * MAX_DEVICE_COUNT];
+  ret = get_device_uuids(uuids);
   if (unlikely(ret)) {
-    LOGGER(ERROR, "not found gpu devices uuid");
-    return ret;
+    for (i = 0; i < MAX_DEVICE_COUNT; i++) {
+      char *uuid = &uuids[i * UUID_BUFFER_SIZE];
+      memset(uuid, 0, UUID_BUFFER_SIZE);
+      if (get_device_uuid(i, uuid) != 0) {
+        strncpy(uuid, FAKE_GPU_UUID, UUID_BUFFER_SIZE - 1);
+        uuid[UUID_BUFFER_SIZE - 1] = '\0';
+      }
+    }
   }
 
   int hard_cores = 0;
@@ -1923,7 +1927,11 @@ int init_g_vgpu_config_by_env() {
   int device_count = strsplit(uuids, gpu_uuids, ",");
   get_vmem_node_enabled(&vnode_enable);
   g_vgpu_config->vmem_node = vnode_enable;
-  for (int i = 0; i < device_count; i++) {
+  for (i = 0; i < device_count; i++) {
+    // skip fake uuid
+    if (strcmp(gpu_uuids[i], FAKE_GPU_UUID) == 0) {
+      continue;
+    }
     strcpy(g_vgpu_config->devices[i].uuid, gpu_uuids[i]);
     g_vgpu_config->devices[i].activate = 1;
     ret = get_mem_limit(i, &g_vgpu_config->devices[i].total_memory);
@@ -1991,12 +1999,6 @@ int load_controller_configuration() {
   if (init_config_changed_pid == pid) {
     ret = 0;
     goto DONE;
-  }
-  if (strlen(container_id) == 0) {
-    ret = extract_container_id(HOST_CGROUP_PATH, container_id, FILENAME_MAX);
-    if (ret == 0) {
-      LOGGER(VERBOSE, "find current container id: %s", container_id);
-    }
   }
   if (g_vgpu_config == NULL) {
     ret = mmap_file_to_config_path(&g_vgpu_config);

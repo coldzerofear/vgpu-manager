@@ -21,8 +21,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/checkpoint"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
-	"github.com/opencontainers/runc/libcontainer/cgroups"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -219,7 +217,6 @@ const (
 	ContManagerDirectoryPath = util.ManagerRootPath
 	ContConfigDirectoryPath  = ContManagerDirectoryPath + "/" + util.Config
 	ContProcDirectoryPath    = ContManagerDirectoryPath + "/.host_proc"
-	ContCGroupDirectoryPath  = ContManagerDirectoryPath + "/.host_cgroup"
 	ContWatcherDirectoryPath = ContManagerDirectoryPath + "/" + util.Watcher
 	ContDeviceRegistryPath   = ContManagerDirectoryPath + "/" + util.Registry
 
@@ -243,6 +240,8 @@ const (
 	deviceListEnvVar                          = "NVIDIA_VISIBLE_DEVICES"
 	deviceListAsVolumeMountsHostPath          = "/dev/null"
 	deviceListAsVolumeMountsContainerPathRoot = "/var/run/nvidia-container-devices"
+
+	fakeDeviceUUID = "GPU-00000000-0000-0000-0000-000000000000"
 )
 
 var (
@@ -346,10 +345,9 @@ func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, 
 func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
 	klog.V(4).InfoS("Allocate", "pluginName", m.Name(), "request", req.GetContainerRequests())
 	var (
-		activePods    []corev1.Pod
-		currentPod    *corev1.Pod
-		assignDevs    *device.ContainerDevices
-		podCgroupPath string
+		activePods []corev1.Pod
+		currentPod *corev1.Pod
+		assignDevs *device.ContainerDevices
 	)
 	resp = &pluginapi.AllocateResponse{}
 	// When an error occurs, return a fixed format error message
@@ -403,12 +401,16 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		}
 		klog.V(4).Infof("Current Pod <%s> allocated container is <%s>", klog.KObj(currentPod), assignDevs.Name)
 		var (
-			deviceIds  []string
-			gpuDevices []manager.Device
-			response   = &pluginapi.ContainerAllocateResponse{
+			deviceIds   []string
+			gpuDevices  []manager.Device
+			deviceUuids = make([]string, vgpu.MaxDeviceCount)
+			response    = &pluginapi.ContainerAllocateResponse{
 				Envs: make(map[string]string),
 			}
 		)
+		for idx := 0; idx < vgpu.MaxDeviceCount; idx++ {
+			deviceUuids[idx] = fakeDeviceUUID // Fill in fake uuids for placeholder purposes
+		}
 		response.Envs[util.PodNameEnv] = currentPod.Name
 		response.Envs[util.PodNamespaceEnv] = currentPod.Namespace
 		response.Envs[util.PodUIDEnv] = string(currentPod.UID)
@@ -417,23 +419,24 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		sort.Slice(assignDevs.Devices, func(i, j int) bool {
 			return assignDevs.Devices[i].Id < assignDevs.Devices[j].Id
 		})
-		for idx, dev := range assignDevs.Devices {
-			memoryLimitEnv := fmt.Sprintf("%s_%d", util.CudaMemoryLimitEnv, idx)
-			response.Envs[memoryLimitEnv] = fmt.Sprintf("%dm", dev.Memory)
-			deviceIds = append(deviceIds, dev.Uuid)
+		for _, dev := range assignDevs.Devices {
 			gpuDevice, exists := deviceMap[dev.Uuid]
 			if !exists {
 				err = fmt.Errorf("GPU device %s does not exist", dev.Uuid)
 				klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
 				return resp, err
 			}
+			deviceUuids[gpuDevice.Index] = dev.Uuid
+			deviceIds = append(deviceIds, dev.Uuid)
 			gpuDevices = append(gpuDevices, manager.Device{GPU: &gpuDevice})
+			memoryLimitEnv := fmt.Sprintf("%s_%d", util.CudaMemoryLimitEnv, gpuDevice.Index)
+			response.Envs[memoryLimitEnv] = fmt.Sprintf("%dm", dev.Memory)
 			if dev.Cores > 0 && dev.Cores < util.HundredCore {
-				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, idx)
+				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, gpuDevice.Index)
 				response.Envs[coreLimitEnv] = strconv.FormatInt(dev.Cores, 10)
 			}
 		}
-		response.Envs[util.GPUDevicesUuidEnv] = strings.Join(deviceIds, ",")
+		response.Envs[util.ManagerVisibleDevices] = strings.Join(deviceUuids, ",")
 		UpdateResponseForNodeConfig(response, m.baseServer.GetDeviceManager(), deviceIds...)
 		response.Devices = append(response.Devices, PassDeviceSpecs(gpuDevices, imexChannels)...)
 
@@ -445,39 +448,10 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 				ReadOnly:      true,
 			})
 		} else {
-			podCgroupPath, err = cgroup.GetK8sPodCGroupPath(currentPod)
-			if err != nil {
-				klog.Errorln(err.Error())
-				return resp, err
-			}
-			var hostCGroupFullPath string
-			switch {
-			case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
-				hostCGroupFullPath = cgroup.GetK8sPodCGroupFullPath(podCgroupPath)
-			case cgroups.IsCgroup2HybridMode():
-				hostCGroupFullPath = cgroup.GetK8sPodDeviceCGroupFullPath(podCgroupPath)
-				baseCgroupPath := cgroup.SplitK8sCGroupBasePath(hostCGroupFullPath)
-				// If the device controller does not exist, use the path of cgroupv2.
-				if util.PathIsNotExist(baseCgroupPath) {
-					klog.V(3).Infof("try find k8s cgroup path failed: %s", baseCgroupPath)
-					hostCGroupFullPath = cgroup.GetK8sPodCGroupFullPath(podCgroupPath)
-				}
-			default: // cgroupv1
-				hostCGroupFullPath = cgroup.GetK8sPodDeviceCGroupFullPath(podCgroupPath)
-			}
-			baseCgroupPath := cgroup.SplitK8sCGroupBasePath(hostCGroupFullPath)
-			if util.PathIsNotExist(baseCgroupPath) {
-				err = fmt.Errorf("unable to find k8s cgroup path: %s", baseCgroupPath)
-				klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
-				return resp, err
-			}
-			response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount /etc/vgpu-manager/.host_proc dir
+			// mount /etc/vgpu-manager/.host_proc dir
+			response.Mounts = append(response.Mounts, &pluginapi.Mount{
 				ContainerPath: ContProcDirectoryPath,
 				HostPath:      HostProcDirectoryPath,
-				ReadOnly:      true,
-			}, &pluginapi.Mount{ // mount /etc/vgpu-manager/.host_cgroup dir
-				ContainerPath: ContCGroupDirectoryPath,
-				HostPath:      hostCGroupFullPath,
 				ReadOnly:      true,
 			})
 		}

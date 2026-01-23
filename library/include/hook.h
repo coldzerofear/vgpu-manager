@@ -91,13 +91,6 @@ extern "C" {
 
 #define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%d/cgroup")
 
-#define HOST_CGROUP_PATH (VGPU_MANAGER_PATH "/.host_cgroup")
-
-#define CGROUP_PROCS_FILE "cgroup.procs"
-#define CGROUP_THREADS_FILE "cgroup.threads"
-
-#define HOST_CGROUP_PID_BASE_PATH (VGPU_MANAGER_PATH "/.host_cgroup/%s")
-
 #define TMP_DIR "/tmp"
 
 #define VGPU_LOCK_DIR "/.vgpu_lock"
@@ -146,6 +139,8 @@ extern "C" {
 
 #define GET_VALID_VALUE(x) (((x) >= 0 && (x) <= 100) ? (x) : 0)
 #define CODEC_NORMALIZE(x) (x * 85 / 100)
+
+#define FAKE_GPU_UUID "GPU-00000000-0000-0000-0000-000000000000"
 
 typedef struct {
   void *fn_ptr;

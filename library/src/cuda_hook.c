@@ -37,7 +37,6 @@
 extern resource_data_t* g_vgpu_config;
 extern device_util_t* g_device_util;
 
-extern char container_id[FILENAME_MAX];
 extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
 
@@ -50,11 +49,10 @@ extern void device_util_unlock(int fd, int ordinal);
 extern fp_dlsym real_dlsym;
 extern void *lib_control;
 
-extern int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size);
-extern int extract_container_pids(char *base_path, int *pids, int *pids_size);
 extern int pid_exists(int pid);
-extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
 extern int device_pid_in_same_container(unsigned int pid);
+extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
+extern int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size);
 
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 
@@ -627,7 +625,7 @@ int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
     if (len > 0 && buff[len - 1] == '\n') {
       buff[len - 1] = '\0';
     }
-    if (strcmp(buff, "0::/") == 0 || strstr(buff, container_id) != NULL) {
+    if (strcmp(buff, "0::/") == 0) {
       ret = 0;
       break;
     }
@@ -675,78 +673,61 @@ int check_device_pid_in_local_container_pid(unsigned int device_pid) {
 
 void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_device, unsigned int size_on_device) {
   unsigned int i;
+  int matchOpenKernel = 0;
+  int openKernelMode = (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE;
+
   if (size_on_device == 0) {
     // If there are no processes running on the device, quickly skip them.
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
-    int pids_on_container[MAX_PIDS];
+    int pids_on_container[pids_size];
     get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size);
     if (unlikely(pids_size == 0)) {
       LOGGER(FATAL, "unable to find registered container process");
     }
     int matchClientMode = 0;
-    int matchOpenKernel = 0;
     for (i = 0; i < size_on_device; i++) {
       if (!matchOpenKernel && check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         matchClientMode = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
-      } else if (!matchClientMode && (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE &&
-                  check_device_pid_in_local_container_pid(pids_on_device[i].pid) == 0) {
+      } else if (!matchClientMode && openKernelMode && check_device_pid_in_local_container_pid(pids_on_device[i].pid) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         matchOpenKernel = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
       }
     }
   } else if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
-    int pids_size = 0;
-    int pids_on_container[MAX_PIDS];
+    int matchCGroupV2Mode = 0;
     for (i = 0; i < size_on_device; i++) {
-      if (check_device_pid_in_cgroupv2_container(pids_on_device[i].pid) == 0) {
+      if (!matchOpenKernel && check_device_pid_in_cgroupv2_container(pids_on_device[i].pid) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        matchCGroupV2Mode = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
-      } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-        if (unlikely(pids_size == 0)) {
-          char proc_path[PATH_MAX];
-          pids_size = MAX_PIDS;
-          snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-          extract_container_pids(proc_path, pids_on_container, &pids_size);
-        }
-        if (check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
-          LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
-          *used_memory += pids_on_device[i].usedGpuMemory;
-        }
+      } else if (!matchCGroupV2Mode && openKernelMode && check_device_pid_in_local_container_pid(pids_on_device[i].pid) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        matchOpenKernel = 1;
+        *used_memory += pids_on_device[i].usedGpuMemory;
       }
     }
   } else if ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
-    int pids_size = 0;
-    int pids_on_container[MAX_PIDS];
+    int matchCGroupV1Mode = 0;
     for (i = 0; i < size_on_device; i++) {
-      if (check_device_pid_in_cgroupv1_container(pids_on_device[i].pid) == 0) {
+      if (!matchOpenKernel && check_device_pid_in_cgroupv1_container(pids_on_device[i].pid) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        matchCGroupV1Mode = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
-      } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-        if (unlikely(pids_size == 0)) {
-          char proc_path[PATH_MAX];
-          pids_size = MAX_PIDS;
-          snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-          extract_container_pids(proc_path, pids_on_container, &pids_size);
-        }
-        if (check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
-          LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
-          *used_memory += pids_on_device[i].usedGpuMemory;
-        }
+      } else if (!matchCGroupV1Mode && openKernelMode && check_device_pid_in_local_container_pid(pids_on_device[i].pid) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        matchOpenKernel = 1;
+        *used_memory += pids_on_device[i].usedGpuMemory;
       }
     }
-  } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-    int pids_size = MAX_PIDS;
-    int pids_on_container[MAX_PIDS];
-    char proc_path[PATH_MAX];
-    snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-    extract_container_pids(proc_path, pids_on_container, &pids_size);
+  } else if (openKernelMode) {
     for (i = 0; i < size_on_device; i++) {
-      if (check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
+      if (check_device_pid_in_local_container_pid(pids_on_device[i].pid) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        matchOpenKernel = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
       }
     }
@@ -956,6 +937,8 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
   int codec_util = 0;
 
   int i;
+  int matchOpenKernel = 0;
+  int openKernelMode = (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE;
 
   if (processes_num == 0) {
     // If there are no processes running on the device, quickly skip them.
@@ -965,20 +948,17 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
     get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size);
     if (likely(pids_size > 0)) {
       int matchClientMode = 0;
-      int matchOpenKernel = 0;
       for (i = 0; i < processes_num; i++) {
         if (processes_sample[i].timeStamp >= top_result->checktime) {
           top_result->valid = 1;
           sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
-          codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
-                       GET_VALID_VALUE(processes_sample[i].decUtil);
+          codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
           codec_util = CODEC_NORMALIZE(codec_util);
           top_result->sys_current += sm_util + codec_util;
           if (!matchOpenKernel && check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
             matchClientMode = 1;
             top_result->user_current += sm_util + codec_util;
-          } else if (!matchClientMode && (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE &&
-                     check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
+          } else if (!matchClientMode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
             matchOpenKernel = 1;
             top_result->user_current += sm_util + codec_util;
           }
@@ -986,72 +966,51 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
       }
     }
   } else if ((g_vgpu_config->compatibility_mode & CGROUPV2_COMPATIBILITY_MODE) == CGROUPV2_COMPATIBILITY_MODE) {
-    int pids_size = 0;
-    int pids_on_container[MAX_PIDS];
+    int matchCGroupV2Mode = 0;
     for (i = 0; i < processes_num; i++) {
       if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
         sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
-        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
-                     GET_VALID_VALUE(processes_sample[i].decUtil);
+        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
-        if (check_device_pid_in_cgroupv2_container(processes_sample[i].pid) == 0) {
+        if (!matchOpenKernel && check_device_pid_in_cgroupv2_container(processes_sample[i].pid) == 0) {
+          matchCGroupV2Mode = 1;
           top_result->user_current += sm_util + codec_util;
-        } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-          if (unlikely(pids_size == 0)) {
-            char proc_path[PATH_MAX];
-            pids_size = MAX_PIDS;
-            snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-            extract_container_pids(proc_path, pids_on_container, &pids_size);
-          }
-          if (check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
-            top_result->user_current += sm_util + codec_util;
-          }
+        } else if (!matchCGroupV2Mode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
+          matchOpenKernel = 1;
+          top_result->user_current += sm_util + codec_util;
         }
       }
     }
   } else if ((g_vgpu_config->compatibility_mode & CGROUPV1_COMPATIBILITY_MODE) == CGROUPV1_COMPATIBILITY_MODE) {
-    int pids_size = 0;
-    int pids_on_container[MAX_PIDS];
+    int matchCGroupV1Mode = 0;
     for (i = 0; i < processes_num; i++) {
       if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
         sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
-        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
-                     GET_VALID_VALUE(processes_sample[i].decUtil);
+        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
-        if (check_device_pid_in_cgroupv1_container(processes_sample[i].pid) == 0) {
+        if (!matchOpenKernel && check_device_pid_in_cgroupv1_container(processes_sample[i].pid) == 0) {
+          matchCGroupV1Mode = 1;
           top_result->user_current += sm_util + codec_util;
-        } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-          if (unlikely(pids_size == 0)) {
-            char proc_path[PATH_MAX];
-            pids_size = MAX_PIDS;
-            snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-            extract_container_pids(proc_path, pids_on_container, &pids_size);
-          }
-          if (check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
-            top_result->user_current += sm_util + codec_util;
-          }
+        } else if (!matchCGroupV1Mode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
+          matchOpenKernel = 1;
+          top_result->user_current += sm_util + codec_util;
         }
       }
     }
-  } else if ((g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE) {
-    int pids_size = 0;
-    int pids_on_container[MAX_PIDS];
-    char proc_path[PATH_MAX];
-    snprintf(proc_path, sizeof(proc_path), HOST_CGROUP_PID_BASE_PATH, container_id);
-    extract_container_pids(proc_path, pids_on_container, &pids_size);
+  } else if (openKernelMode) {
     for (i = 0; i < processes_num; i++) {
       if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
         sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
-        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
-                     GET_VALID_VALUE(processes_sample[i].decUtil);
+        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
-        if (check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
+        if (check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
+          matchOpenKernel = 1;
           top_result->user_current += sm_util + codec_util;
         }
       }
@@ -1061,15 +1020,14 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
       if (processes_sample[i].timeStamp >= top_result->checktime) {
         top_result->valid = 1;
         sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
-        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) +
-                     GET_VALID_VALUE(processes_sample[i].decUtil);
+        codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
         top_result->user_current += sm_util + codec_util;
       }
     }
   } else {
-    LOGGER(FATAL, "unknown env compatibility mode: %d", g_vgpu_config->compatibility_mode);
+    LOGGER(FATAL, "unknown environment compatibility mode: %d", g_vgpu_config->compatibility_mode);
   }
 
   LOGGER(VERBOSE, "cuda device: %d, host device: %d, sys util: %d, user util: %d",
