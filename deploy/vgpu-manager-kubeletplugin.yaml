@@ -88,6 +88,7 @@ spec:
       initContainers:
         - name: init-container
           image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
           command: [bash, /usr/bin/kubelet-plugin-prestart.sh]
@@ -106,7 +107,7 @@ spec:
             - name: driver-root-parent
               mountPath: /driver-root-parent
               readOnly: true
-        - name: install
+        - name: init-install
           image: coldzerofear/vgpu-manager-dra:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c, /usr/bin/install_files.sh]
@@ -152,8 +153,6 @@ spec:
               value: /var/run/cdi
             - name: HEALTHCHECK_PORT
               value: "4567"
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
             - name: NVIDIA_MIG_CONFIG_DEVICES
