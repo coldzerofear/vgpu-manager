@@ -27,6 +27,7 @@ require (
 	k8s.io/client-go v0.34.2
 	k8s.io/component-base v0.34.2
 	k8s.io/cri-api v0.34.2
+	k8s.io/dynamic-resource-allocation v0.34.2
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/kube-scheduler v0.34.2
 	k8s.io/kubectl v0.34.2
