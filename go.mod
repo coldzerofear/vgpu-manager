@@ -6,7 +6,7 @@ require (
 	github.com/NVIDIA/go-nvlib v0.9.0
 	github.com/NVIDIA/go-nvml v0.13.0-1
 	github.com/NVIDIA/k8s-dra-driver-gpu v0.0.0-20260108173021-6a1af5e6a4d4
-	github.com/NVIDIA/nvidia-container-toolkit v1.18.1
+	github.com/NVIDIA/nvidia-container-toolkit v1.18.2
 	github.com/blang/semver/v4 v4.0.0
 	github.com/evanphx/json-patch v0.5.2
 	github.com/fsnotify/fsnotify v1.9.0
@@ -16,14 +16,14 @@ require (
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/opencontainers/runc v1.4.0
 	github.com/prometheus/client_golang v1.23.2
-	github.com/sirupsen/logrus v1.9.3
+	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
 	github.com/urfave/cli/v2 v2.27.7
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 	golang.org/x/time v0.14.0
 	gomodules.xyz/jsonpatch/v2 v2.4.0
-	google.golang.org/grpc v1.77.0
+	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.10
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.34.2
@@ -39,8 +39,8 @@ require (
 	k8s.io/kubernetes v1.34.2
 	k8s.io/utils v0.0.0-20250604170112-4c0f3b243397
 	sigs.k8s.io/controller-runtime v0.22.0
-	tags.cncf.io/container-device-interface v1.0.2-0.20251114135136-1b24d969689f
-	tags.cncf.io/container-device-interface/specs-go v1.0.0
+	tags.cncf.io/container-device-interface v1.1.0
+	tags.cncf.io/container-device-interface/specs-go v1.1.0
 )
 
 require (
@@ -52,7 +52,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
-	github.com/cyphar/filepath-securejoin v0.5.1 // indirect
+	github.com/cyphar/filepath-securejoin v0.5.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
@@ -116,8 +116,8 @@ require (
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/term v0.37.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20251022142026-3a174f9686a8 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20251022142026-3a174f9686a8 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20251029180050-ab9386a59fda // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20251029180050-ab9386a59fda // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	k8s.io/apiextensions-apiserver v0.34.2 // indirect

@@ -103,6 +103,11 @@ func (d *GpuDeviceInfo) GetDevice() resourceapi.Device {
 	if d.PcieRootAttr != nil {
 		device.Attributes[d.PcieRootAttr.Name] = d.PcieRootAttr.Value
 	}
+	if d.AddressingMode != nil {
+		device.Attributes["addressingMode"] = resourceapi.DeviceAttribute{
+			StringValue: d.AddressingMode,
+		}
+	}
 	return device
 }
 
@@ -166,6 +171,11 @@ func (d *MigDeviceInfo) GetDevice() resourceapi.Device {
 	}
 	if d.Parent.PcieRootAttr != nil {
 		device.Attributes[d.Parent.PcieRootAttr.Name] = d.Parent.PcieRootAttr.Value
+	}
+	if d.Parent.AddressingMode != nil {
+		device.Attributes["addressingMode"] = resourceapi.DeviceAttribute{
+			StringValue: d.Parent.AddressingMode,
+		}
 	}
 	return device
 }

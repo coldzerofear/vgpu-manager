@@ -172,6 +172,16 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		return preparedClaim.PreparedDevices.GetDevices(), nil
 	}
 
+	// In certain scenarios, the same device can be prepared/allocated more than once for different claims
+	// due to races between data processing in different goroutines in the scheduler, or when pods are
+	// force-deleted while the kubelet still considers the devices allocated.
+	// To prevent this, we check whether any device requested in the incoming claim has already been prepared
+	// and fail the request if so (unless the prior preparation was performed with admin access).
+	// More details: https://github.com/kubernetes/kubernetes/pull/136269
+	if err := s.validateNoOverlappingPreparedDevices(checkpoint, claim); err != nil {
+		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
+	}
+
 	err = s.updateCheckpoint(func(checkpoint *Checkpoint) {
 		checkpoint.V2.PreparedClaims[claimUID] = PreparedClaim{
 			CheckpointState: ClaimCheckpointStatePrepareStarted,
@@ -705,6 +715,63 @@ func (s *DeviceState) UpdateDeviceHealthStatus(d *AllocatableDevice, hs HealthSt
 		return
 	}
 	klog.V(4).Infof("Updated device: %s health status to %s", d.UUID(), hs)
+}
+
+// requestedNonAdminDevices returns the set of device names requested by the claim,
+// excluding admin-access allocations.
+func (s *DeviceState) requestedNonAdminDevices(claim *resourceapi.ResourceClaim) map[string]struct{} {
+	requested := make(map[string]struct{}, len(claim.Status.Allocation.Devices.Results))
+
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != util.DRADriverName {
+			continue
+		}
+		if r.AdminAccess != nil && *r.AdminAccess {
+			continue
+		}
+		requested[r.Device] = struct{}{}
+	}
+	return requested
+}
+
+// validateNoOverlappingPreparedDevices checks whether the given claim requests any device that is
+// already allocated (non-admin) to a different claim that has completed preparation.
+func (s *DeviceState) validateNoOverlappingPreparedDevices(checkpoint *Checkpoint, claim *resourceapi.ResourceClaim) error {
+	claimUID := string(claim.UID)
+
+	// Get the set of requested non-admin devices for the current claim.
+	requestedDevices := s.requestedNonAdminDevices(claim)
+	if len(requestedDevices) == 0 {
+		return nil
+	}
+
+	for existingClaimUID, pc := range checkpoint.V2.PreparedClaims {
+		// Skip the current claim.
+		if existingClaimUID == claimUID {
+			continue
+		}
+		if pc.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+			continue
+		}
+
+		// Get the non-admin devices from the prepared claim in the checkpoint.
+		// We allow overlapping device allocations only if they are requested with admin access.
+		preparedDevices := pc.GetNonAdminDevices()
+		if len(preparedDevices) == 0 {
+			continue
+		}
+
+		// Check for overlaps between requested devices from the current claim and others.
+		for device := range requestedDevices {
+			if _, found := preparedDevices[device]; found {
+				return fmt.Errorf(
+					"requested device %s is already allocated to different claim %s",
+					device, existingClaimUID,
+				)
+			}
+		}
+	}
+	return nil
 }
 
 // TODO: Dynamic MIG is not yet supported with structured parameters.
