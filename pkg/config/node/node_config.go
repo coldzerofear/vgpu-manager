@@ -206,8 +206,8 @@ func (nc NodeConfigSpec) checkNodeConfig() (errs []error) {
 	if nc.GetDeviceMemoryFactor() <= 0 {
 		errs = append(errs, fmt.Errorf("deviceMemoryFactor must be a positive integer greater than 0"))
 	}
-	if nc.GetDeviceCoresScaling() < 0 || nc.GetDeviceCoresScaling() > 1 {
-		errs = append(errs, fmt.Errorf("deviceCoresScaling must be any number greater than or equal to 0 but less than or equal to 1"))
+	if nc.GetDeviceCoresScaling() < 0 {
+		errs = append(errs, fmt.Errorf("deviceCoresScaling must be any number greater than or equal to 0"))
 	}
 	if err := imex.AssertChannelIDsValid(nc.GetIMEX().ChannelIDs); err != nil {
 		errs = append(errs, fmt.Errorf("invalid IMEX channel IDs: %w", err))

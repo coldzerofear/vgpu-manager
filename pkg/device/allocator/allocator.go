@@ -288,12 +288,14 @@ func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName s
 			reqMemory = deviceInfo.GetTotalMemory()
 		}
 		if reqMemory > deviceInfo.AllocatableMemory() {
-			klog.V(4).InfoS("Filter devices with insufficient available memory on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+			klog.V(4).InfoS("Filter devices with insufficient available memory on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
+				"availableMemory", deviceInfo.AllocatableMemory(), "requestedMemory", reqMemory)
 			reasonMap[InsufficientMemory]++
 			continue
 		}
-		if needCores > deviceInfo.AllocatableCores() || (needCores == util.HundredCore && deviceInfo.AllocatableCores() < util.HundredCore) {
-			klog.V(4).InfoS("Filter devices with insufficient available cores on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+		if needCores > deviceInfo.AllocatableCores() || deviceInfo.AllocatableCores() == 0 {
+			klog.V(4).InfoS("Filter devices with insufficient available cores on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
+				"availableCores", deviceInfo.AllocatableCores(), "requestedCores", needCores)
 			reasonMap[InsufficientSMCore]++
 			continue
 		}
