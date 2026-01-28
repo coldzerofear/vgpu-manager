@@ -82,12 +82,13 @@ func main() {
 		klog.Fatalf("Create node gpu collector failed: %v", err)
 	}
 	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 1)
+	infoCollector := collector.NewBuildInfoCollector(nodeConfig.GetNodeName())
 	opts := []server.Option{
 		server.WithLimiter(rateLimiter),
-		server.WithCollectors(nodeCollector),
 		server.WithPort(&opt.ServerBindPort),
 		server.WithTimeoutSecond(30),
 		server.WithDebugMetrics(opt.PprofBindPort > 0),
+		server.WithCollectors(nodeCollector, infoCollector),
 		server.WithLabels(prometheus.Labels{"service": "vGPU"}),
 		server.WithReadyChecker(func(req *http.Request) error {
 			if !util.InformerFactoryHasSynced(factory, req.Context()) {

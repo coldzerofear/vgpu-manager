@@ -38,9 +38,12 @@ type mutateHandle struct {
 }
 
 func setDefaultSchedulerName(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
-	if len(options.SchedulerName) > 0 && (pod.Spec.SchedulerName == "" || pod.Spec.SchedulerName == "default-scheduler") {
+	if len(options.SchedulerName) > 0 && (pod.Spec.SchedulerName == "" || pod.Spec.SchedulerName == corev1.DefaultSchedulerName) {
 		pod.Spec.SchedulerName = options.SchedulerName
 		logger.V(4).Info("Successfully set schedulerName", "schedulerName", options.SchedulerName)
+	}
+	if len(options.SchedulerName) > 0 && pod.Spec.SchedulerName != options.SchedulerName {
+		logger.Info("Pod already has different scheduler assigned", "schedulerName", pod.Spec.SchedulerName)
 	}
 }
 
