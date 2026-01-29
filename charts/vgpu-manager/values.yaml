@@ -64,6 +64,7 @@ scheduler:
       # Supported feature gates:
       # - SerialBindNode (default: true)
       # - GPUTopology
+      # - SerialFilterNode
       featureGates: ""
       logLevel: 3
     # Scheduler extender container requests resources.
@@ -155,6 +156,8 @@ devicePlugin:
       # - Reschedule
       # - GPUTopology
       # - SMWatcher
+      # - VMemoryNode
+      # - ClientMode
       featureGates: ""
       logLevel: 3
     # Device plugin container requests resources.
@@ -179,6 +182,7 @@ devicePlugin:
       pprofBindPort: 0
       # Supported feature gates:
       # - SMWatcher
+      # - VMemoryNode
       featureGates: ""
       enableRBAC: false
       logLevel: 3

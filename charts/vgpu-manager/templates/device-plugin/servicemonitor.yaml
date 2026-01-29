@@ -1,0 +1,21 @@
+{{- if and (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") .Values.devicePlugin.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "vgpu-manager.device-plugin" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  endpoints:
+    - path: /metrics
+      port: metrics
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+      {{- include "vgpu-manager.selectorLabels" . | nindent 4 }}
+{{- end }}

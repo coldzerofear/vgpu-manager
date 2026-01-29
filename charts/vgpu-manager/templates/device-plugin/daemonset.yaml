@@ -139,7 +139,7 @@ spec:
             - --enable-rbac={{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
             - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
           ports:
-            - name: http
+            - name: metrics
               containerPort: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
             {{- if gt (int .Values.devicePlugin.deviceMonitor.commands.pprofBindPort) 0 }}
             - name: pprof2
