@@ -222,7 +222,7 @@ func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
 }
 
 func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
-	assignDevices device.ContainerDevices, memoryOversold bool, node *corev1.Node) *ResourceDataT {
+	containerClaim device.ContainerDeviceClaim, memoryOversold bool, node *corev1.Node) *ResourceDataT {
 	major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
 	ratio := devManager.GetNodeConfig().GetDeviceMemoryScaling()
 	convert48Bytes := func(val string) [UuidBufferSize]byte {
@@ -252,27 +252,27 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		vMemoryNode = 1
 	}
 	devices := [MaxDeviceCount]DeviceT{}
-	for i, devInfo := range assignDevices.Devices {
+	for i, claim := range containerClaim.DeviceClaims {
 		if i >= MaxDeviceCount {
 			break
 		}
-		totalMemoryBytes := uint64(devInfo.Memory) << 20
+		totalMemoryBytes := uint64(claim.Memory) << 20
 		realMemoryBytes := totalMemoryBytes
 		if ratio > 1 {
 			memoryOversold = true
 			realMemoryBytes = uint64(float64(realMemoryBytes) / ratio)
 		}
 		dev := DeviceT{
-			UUID:        convert48Bytes(devInfo.Uuid),
+			UUID:        convert48Bytes(claim.Uuid),
 			TotalMemory: totalMemoryBytes,
 			RealMemory:  realMemoryBytes,
-			HardCore:    int32(devInfo.Cores),
-			SoftCore:    int32(devInfo.Cores),
+			HardCore:    int32(claim.Cores),
+			SoftCore:    int32(claim.Cores),
 			CoreLimit:   int32(0),
 			HardLimit:   int32(0),
 			Activate:    int32(1),
 		}
-		gpuDevice := deviceInfoMap[devInfo.Uuid]
+		gpuDevice := deviceInfoMap[claim.Uuid]
 
 		// need limit core
 		switch computePolicy {
@@ -280,17 +280,17 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 			//  int soft_core;
 			dev.SoftCore = int32(gpuDevice.Core)
 			// need limit core
-			if devInfo.Cores > 0 && devInfo.Cores < util.HundredCore {
+			if claim.Cores > 0 && claim.Cores < util.HundredCore {
 				//  int core_limit;
 				dev.CoreLimit = 1
-				if devInfo.Cores >= gpuDevice.Core {
+				if claim.Cores >= gpuDevice.Core {
 					//  int hard_limit;
 					dev.HardLimit = 1
 				}
 			}
 		case util.FixedComputePolicy:
 			// need limit core
-			if devInfo.Cores > 0 && devInfo.Cores < util.HundredCore {
+			if claim.Cores > 0 && claim.Cores < util.HundredCore {
 				//  int core_limit;
 				dev.CoreLimit = 1
 				//  int hard_limit;
@@ -300,7 +300,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		}
 
 		//  int memory_limit;
-		if devInfo.Memory == gpuDevice.Memory && ratio == 1 {
+		if claim.Memory == gpuDevice.Memory && ratio == 1 {
 			dev.MemoryLimit = 0
 		} else {
 			dev.MemoryLimit = 1
@@ -322,7 +322,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		PodUID:            convert48Bytes(string(pod.UID)),
 		PodName:           convert64Bytes(pod.Name),
 		PodNamespace:      convert64Bytes(pod.Namespace),
-		ContainerName:     convert64Bytes(assignDevices.Name),
+		ContainerName:     convert64Bytes(containerClaim.Name),
 		Devices:           devices,
 		CompatibilityMode: int32(compMode),
 		SMWatcher:         int32(smWatcher),
@@ -349,7 +349,7 @@ func GetComputePolicy(pod *corev1.Pod, node *corev1.Node) util.ComputePolicy {
 }
 
 func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod *corev1.Pod,
-	assignDevices device.ContainerDevices, memoryOversold bool, node *corev1.Node) error {
+	containerClaim device.ContainerDeviceClaim, memoryOversold bool, node *corev1.Node) error {
 	if _, err := os.Stat(filePath); err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -386,7 +386,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		defer C.free(unsafe.Pointer(podNamespace))
 		C.strcpy(&vgpuConfig.pod_namespace[0], (*C.char)(unsafe.Pointer(podNamespace)))
 
-		containerName := C.CString(assignDevices.Name)
+		containerName := C.CString(containerClaim.Name)
 		defer C.free(unsafe.Pointer(containerName))
 		C.strcpy(&vgpuConfig.container_name[0], (*C.char)(unsafe.Pointer(containerName)))
 
@@ -398,17 +398,17 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 			deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
 		}
 
-		for i, devInfo := range assignDevices.Devices {
+		for i, claim := range containerClaim.DeviceClaims {
 			if i >= C.MAX_DEVICE_COUNT {
 				break
 			}
 
 			func() {
 				var cDevice C.struct_device_t
-				devUuid := C.CString(devInfo.Uuid)
+				devUuid := C.CString(claim.Uuid)
 				defer C.free(unsafe.Pointer(devUuid))
 				C.strcpy((*C.char)(unsafe.Pointer(&cDevice.uuid[0])), (*C.char)(unsafe.Pointer(devUuid)))
-				totalMemoryBytes := uint64(devInfo.Memory) << 20
+				totalMemoryBytes := uint64(claim.Memory) << 20
 				realMemoryBytes := totalMemoryBytes
 				//  uint64_t total_memory;
 				cDevice.total_memory = C.uint64_t(totalMemoryBytes)
@@ -418,11 +418,11 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 				}
 				//  uint64_t real_memory;
 				cDevice.real_memory = C.uint64_t(realMemoryBytes)
-				gpuDevice := deviceInfoMap[devInfo.Uuid]
+				gpuDevice := deviceInfoMap[claim.Uuid]
 				//  int hard_core;
-				cDevice.hard_core = C.int(devInfo.Cores)
+				cDevice.hard_core = C.int(claim.Cores)
 				//  int soft_core;
-				cDevice.soft_core = C.int(devInfo.Cores)
+				cDevice.soft_core = C.int(claim.Cores)
 				//  int core_limit;
 				cDevice.core_limit = 0
 				//  int hard_limit;
@@ -433,17 +433,17 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 					//  int soft_core;
 					cDevice.soft_core = C.int(gpuDevice.Core)
 					// need limit core
-					if devInfo.Cores > 0 && devInfo.Cores < util.HundredCore {
+					if claim.Cores > 0 && claim.Cores < util.HundredCore {
 						//  int core_limit;
 						cDevice.core_limit = 1
-						if devInfo.Cores >= gpuDevice.Core {
+						if claim.Cores >= gpuDevice.Core {
 							//  int hard_limit;
 							cDevice.hard_limit = 1
 						}
 					}
 				case util.FixedComputePolicy:
 					// need limit core
-					if devInfo.Cores > 0 && devInfo.Cores < util.HundredCore {
+					if claim.Cores > 0 && claim.Cores < util.HundredCore {
 						//  int core_limit;
 						cDevice.core_limit = 1
 						//  int hard_limit;
@@ -453,7 +453,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 				}
 
 				//  int memory_limit;
-				if devInfo.Memory == gpuDevice.Memory && ratio == 1 {
+				if claim.Memory == gpuDevice.Memory && ratio == 1 {
 					cDevice.memory_limit = 0
 				} else {
 					cDevice.memory_limit = 1

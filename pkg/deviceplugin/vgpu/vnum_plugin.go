@@ -347,7 +347,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	var (
 		activePods []corev1.Pod
 		currentPod *corev1.Pod
-		assignDevs *device.ContainerDevices
+		contClaim  *device.ContainerDeviceClaim
 	)
 	resp = &pluginapi.AllocateResponse{}
 	// When an error occurs, return a fixed format error message
@@ -389,17 +389,17 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	enabledClientMode := m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.ClientMode)
 	for i, containerRequest := range req.ContainerRequests {
 		number := len(containerRequest.GetDevicesIds())
-		assignDevs, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
+		contClaim, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
 		if err != nil {
 			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
 			return resp, err
 		}
-		if number != len(assignDevs.Devices) {
+		if number != len(contClaim.DeviceClaims) {
 			err = fmt.Errorf("requested number of devices does not match")
 			klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
 			return resp, err
 		}
-		klog.V(4).Infof("Current Pod <%s> allocated container is <%s>", klog.KObj(currentPod), assignDevs.Name)
+		klog.V(4).Infof("Current Pod <%s> allocated container is <%s>", klog.KObj(currentPod), contClaim.Name)
 		var (
 			deviceIds   []string
 			gpuDevices  []manager.Device
@@ -414,26 +414,26 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		response.Envs[util.PodNameEnv] = currentPod.Name
 		response.Envs[util.PodNamespaceEnv] = currentPod.Namespace
 		response.Envs[util.PodUIDEnv] = string(currentPod.UID)
-		response.Envs[util.ContNameEnv] = assignDevs.Name
+		response.Envs[util.ContNameEnv] = contClaim.Name
 		response.Envs[util.CudaMemoryRatioEnv] = fmt.Sprintf("%.2f", memoryRatio)
-		sort.Slice(assignDevs.Devices, func(i, j int) bool {
-			return assignDevs.Devices[i].Id < assignDevs.Devices[j].Id
+		sort.Slice(contClaim.DeviceClaims, func(i, j int) bool {
+			return contClaim.DeviceClaims[i].Id < contClaim.DeviceClaims[j].Id
 		})
-		for _, dev := range assignDevs.Devices {
-			gpuDevice, exists := deviceMap[dev.Uuid]
+		for _, deviceClaim := range contClaim.DeviceClaims {
+			gpuDevice, exists := deviceMap[deviceClaim.Uuid]
 			if !exists {
-				err = fmt.Errorf("GPU device %s does not exist", dev.Uuid)
+				err = fmt.Errorf("GPU device %s does not exist", deviceClaim.Uuid)
 				klog.V(3).ErrorS(err, "", "pod", klog.KObj(currentPod))
 				return resp, err
 			}
-			deviceUuids[gpuDevice.Index] = dev.Uuid
-			deviceIds = append(deviceIds, dev.Uuid)
+			deviceUuids[gpuDevice.Index] = deviceClaim.Uuid
+			deviceIds = append(deviceIds, deviceClaim.Uuid)
 			gpuDevices = append(gpuDevices, manager.Device{GPU: &gpuDevice})
 			memoryLimitEnv := fmt.Sprintf("%s_%d", util.CudaMemoryLimitEnv, gpuDevice.Index)
-			response.Envs[memoryLimitEnv] = fmt.Sprintf("%dm", dev.Memory)
-			if dev.Cores > 0 && dev.Cores < util.HundredCore {
+			response.Envs[memoryLimitEnv] = fmt.Sprintf("%dm", deviceClaim.Memory)
+			if deviceClaim.Cores > 0 && deviceClaim.Cores < util.HundredCore {
 				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, gpuDevice.Index)
-				response.Envs[coreLimitEnv] = strconv.FormatInt(dev.Cores, 10)
+				response.Envs[coreLimitEnv] = strconv.FormatInt(deviceClaim.Cores, 10)
 			}
 		}
 		response.Envs[util.ManagerVisibleDevices] = strings.Join(deviceUuids, ",")
@@ -465,7 +465,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		}
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>
 		contManagerDirectory := util.GetPodContainerManagerPath(ContManagerDirectoryPath,
-			currentPod.UID, assignDevs.Name)
+			currentPod.UID, contClaim.Name)
 		_ = os.MkdirAll(contManagerDirectory, 0777)
 		_ = os.Chmod(contManagerDirectory, 0777)
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>/devices.json
@@ -489,7 +489,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 
 		// <host_manager_dir>/<pod-uid>_<cont-name>
 		hostManagerDirectory := util.GetPodContainerManagerPath(HostManagerDirectoryPath,
-			currentPod.UID, assignDevs.Name)
+			currentPod.UID, contClaim.Name)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/config
 		hostVGPUConfigPath := filepath.Join(hostManagerDirectory, util.Config)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/vgpu_lock
@@ -516,7 +516,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			ReadOnly:      false,
 		})
 
-		if !util.VGPUControlDisabled(currentPod, assignDevs.Name) {
+		if !util.VGPUControlDisabled(currentPod, contClaim.Name) {
 			//response.Envs[util.LdPreloadEnv] = ContVGPUControlFilePath
 			response.Mounts = append(response.Mounts, &pluginapi.Mount{ // mount ld_preload file
 				ContainerPath: ContPreLoadFilePath,
@@ -525,11 +525,11 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			})
 		}
 
-		podDevices := device.PodDevices{}
+		podDevices := device.PodDeviceClaim{}
 		if realAlloc, ok := util.HasAnnotation(currentPod, util.PodVGPURealAllocAnnotation); ok {
 			_ = podDevices.UnmarshalText(realAlloc)
 		}
-		podDevices = append(podDevices, *assignDevs)
+		podDevices = append(podDevices, *contClaim)
 		var realAllocated string
 		if realAllocated, err = podDevices.MarshalText(); err != nil {
 			msg := "encoding the device for real allocation failed"
@@ -684,14 +684,14 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 	klog.V(4).Infof("Pod <%s/%s> container <%s> vgpu config path is <%s>",
 		pod.Namespace, pod.Name, podInfo.ContainerName, vgpuConfigFilePath)
 	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
-	realDevices := device.PodDevices{}
+	realDevices := device.PodDeviceClaim{}
 	if err = realDevices.UnmarshalText(realAlloc); err != nil {
 		msg := "parse pod assign devices failed"
 		klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod))
 		err = fmt.Errorf("%s: %v", msg, err)
 		return resp, err
 	}
-	index := slices.IndexFunc(realDevices, func(contDevs device.ContainerDevices) bool {
+	index := slices.IndexFunc(realDevices, func(contDevs device.ContainerDeviceClaim) bool {
 		return contDevs.Name == podInfo.ContainerName
 	})
 	if index < 0 {

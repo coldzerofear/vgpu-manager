@@ -61,11 +61,11 @@ func PatchNodeMetadata(kubeClient kubernetes.Interface, nodeName string, patchMe
 // PatchPodAllocationSucceed patch pod metadata marking device allocation successful.
 func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
 	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
-	preDevices := device.PodDevices{}
+	preDevices := device.PodDeviceClaim{}
 	_ = preDevices.UnmarshalText(preAlloc)
 
 	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
-	realDevices := device.PodDevices{}
+	realDevices := device.PodDeviceClaim{}
 	_ = realDevices.UnmarshalText(realAlloc)
 
 	assignedPhase := util.AssignPhaseAllocating

@@ -99,7 +99,7 @@ func Test_WriDriverConfigFile(t *testing.T) {
 		path    string
 		nodes   []*corev1.Node
 		pod     *corev1.Pod
-		devices device.ContainerDevices
+		devices device.ContainerDeviceClaim
 	}{
 		{
 			name:  "example 1",
@@ -112,9 +112,9 @@ func Test_WriDriverConfigFile(t *testing.T) {
 					UID:       uuid.NewUUID(),
 				},
 			},
-			devices: device.ContainerDevices{
+			devices: device.ContainerDeviceClaim{
 				Name: "test",
-				Devices: []device.ClaimDevice{
+				DeviceClaims: []device.DeviceClaim{
 					{
 						Id:     0,
 						Uuid:   gpuUUID0,
@@ -135,9 +135,9 @@ func Test_WriDriverConfigFile(t *testing.T) {
 					UID:       uuid.NewUUID(),
 				},
 			},
-			devices: device.ContainerDevices{
+			devices: device.ContainerDeviceClaim{
 				Name: "test",
-				Devices: []device.ClaimDevice{
+				DeviceClaims: []device.DeviceClaim{
 					{
 						Id:     0,
 						Uuid:   gpuUUID0,
@@ -158,9 +158,9 @@ func Test_WriDriverConfigFile(t *testing.T) {
 					UID:       uuid.NewUUID(),
 				},
 			},
-			devices: device.ContainerDevices{
+			devices: device.ContainerDeviceClaim{
 				Name: "test",
-				Devices: []device.ClaimDevice{
+				DeviceClaims: []device.DeviceClaim{
 					{
 						Id:     0,
 						Uuid:   gpuUUID0,

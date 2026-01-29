@@ -27,22 +27,22 @@ type NodeConfigInfo struct {
 	MemoryScaling float64 `json:"memoryScaling"`
 }
 
-func (n NodeConfigInfo) Encode() (string, error) {
-	if marshal, err := json.Marshal(n); err != nil {
+func (nci NodeConfigInfo) Encode() (string, error) {
+	if marshal, err := json.Marshal(nci); err != nil {
 		return "", err
 	} else {
 		return string(marshal), nil
 	}
 }
 
-func (n *NodeConfigInfo) Decode(val string) error {
-	if n == nil {
+func (nci *NodeConfigInfo) Decode(val string) error {
+	if nci == nil {
 		return fmt.Errorf("self is empty")
 	}
 	if strings.TrimSpace(val) == "" {
 		return fmt.Errorf("input value is empty")
 	}
-	if err := json.Unmarshal([]byte(val), n); err != nil {
+	if err := json.Unmarshal([]byte(val), nci); err != nil {
 		return err
 	}
 	return nil
@@ -55,23 +55,23 @@ type TopologyInfo struct {
 
 type NodeTopologyInfo []TopologyInfo
 
-func (n NodeTopologyInfo) Encode() (string, error) {
-	if marshal, err := json.Marshal(n); err != nil {
+func (nti NodeTopologyInfo) Encode() (string, error) {
+	if marshal, err := json.Marshal(nti); err != nil {
 		return "", err
 	} else {
 		return string(marshal), nil
 	}
 }
 
-func (n *NodeTopologyInfo) Decode(val string) error {
-	if n == nil {
+func (nti *NodeTopologyInfo) Decode(val string) error {
+	if nti == nil {
 		return fmt.Errorf("self is empty")
 	}
-	topology, err := ParseNodeTopology(val)
+	nodeTopoInfo, err := ParseNodeTopology(val)
 	if err != nil {
 		return err
 	}
-	*n = topology
+	*nti = nodeTopoInfo
 	return nil
 }
 
@@ -79,12 +79,11 @@ func ParseNodeTopology(val string) (NodeTopologyInfo, error) {
 	if strings.TrimSpace(val) == "" {
 		return nil, fmt.Errorf("input value is empty")
 	}
-	var nodeTopologyInfo NodeTopologyInfo
-	err := json.Unmarshal([]byte(val), &nodeTopologyInfo)
-	if err != nil {
+	var nodeTopoInfo NodeTopologyInfo
+	if err := json.Unmarshal([]byte(val), &nodeTopoInfo); err != nil {
 		return nil, err
 	}
-	return nodeTopologyInfo, nil
+	return nodeTopoInfo, nil
 }
 
 type DeviceInfo struct {
@@ -135,26 +134,26 @@ func ParseNodeDeviceInfo(val string) (NodeDeviceInfo, error) {
 	return nodeDevice, nil
 }
 
-type ContainerDevices struct {
-	Name    string        `json:"name"`
-	Devices []ClaimDevice `json:"devices"`
+type ContainerDeviceClaim struct {
+	Name         string        `json:"name"`
+	DeviceClaims []DeviceClaim `json:"deviceClaims"`
 }
 
-func (c *ContainerDevices) MarshalText() (string, error) {
+func (cdc *ContainerDeviceClaim) MarshalText() (string, error) {
 	var devs []string
-	for _, device := range c.Devices {
-		text, err := device.MarshalText()
+	for _, deviceClaim := range cdc.DeviceClaims {
+		text, err := deviceClaim.MarshalText()
 		if err != nil {
 			return "", err
 		}
 		devs = append(devs, text)
 	}
-	text := fmt.Sprintf("%s[%s]", c.Name, strings.Join(devs, ","))
+	text := fmt.Sprintf("%s[%s]", cdc.Name, strings.Join(devs, ","))
 	return text, nil
 }
 
-func (c *ContainerDevices) UnmarshalText(text string) error {
-	if c == nil {
+func (cdc *ContainerDeviceClaim) UnmarshalText(text string) error {
+	if cdc == nil {
 		return fmt.Errorf("self is empty")
 	}
 	text = strings.ReplaceAll(text, " ", "")
@@ -169,39 +168,39 @@ func (c *ContainerDevices) UnmarshalText(text string) error {
 	if endIndex < 0 || endIndex != len(text)-1 {
 		return fmt.Errorf("decoding format error")
 	}
-	cds := make([]ClaimDevice, 0)
+	dcs := make([]DeviceClaim, 0)
 	for _, subText := range strings.Split(text[startIndex+1:len(text)-1], ",") {
 		if len(subText) == 0 {
 			continue
 		}
-		cd := ClaimDevice{}
-		if err := cd.UnmarshalText(subText); err != nil {
+		dc := DeviceClaim{}
+		if err := dc.UnmarshalText(subText); err != nil {
 			return err
 		}
-		cds = append(cds, cd)
+		dcs = append(dcs, dc)
 	}
-	c.Name = text[:startIndex]
-	c.Devices = cds
+	cdc.Name = text[:startIndex]
+	cdc.DeviceClaims = dcs
 	return nil
 }
 
-type ClaimDevice struct {
+type DeviceClaim struct {
 	Id     int    `json:"id"`
 	Uuid   string `json:"uuid"`
 	Cores  int64  `json:"cores"`
 	Memory int64  `json:"memory"`
 }
 
-func (c *ClaimDevice) MarshalText() (string, error) {
-	if c == nil {
+func (dc *DeviceClaim) MarshalText() (string, error) {
+	if dc == nil {
 		return "", fmt.Errorf("self is empty")
 	}
 	return fmt.Sprintf("%d_%s_%d_%d",
-		c.Id, c.Uuid, c.Cores, c.Memory), nil
+		dc.Id, dc.Uuid, dc.Cores, dc.Memory), nil
 }
 
-func (c *ClaimDevice) UnmarshalText(text string) error {
-	if c == nil {
+func (dc *DeviceClaim) UnmarshalText(text string) error {
+	if dc == nil {
 		return fmt.Errorf("self is empty")
 	}
 	text = strings.ReplaceAll(text, " ", "")
@@ -216,7 +215,6 @@ func (c *ClaimDevice) UnmarshalText(text string) error {
 	if err != nil {
 		return err
 	}
-
 	cores, err := strconv.ParseInt(split[2], 10, 64)
 	if err != nil {
 		return err
@@ -225,58 +223,59 @@ func (c *ClaimDevice) UnmarshalText(text string) error {
 	if err != nil {
 		return err
 	}
-	c.Id = id
-	c.Uuid = split[1]
-	c.Cores = cores
-	c.Memory = memory
+	dc.Id = id
+	dc.Uuid = split[1]
+	dc.Cores = cores
+	dc.Memory = memory
 	return nil
 }
 
-type PodDevices []ContainerDevices
+type PodDeviceClaim []ContainerDeviceClaim
 
-func (p *PodDevices) MarshalText() (string, error) {
+func (pdc *PodDeviceClaim) MarshalText() (string, error) {
 	// "cont1['%d_%s_%d_%d','%d_%s_%d_%d'];cont2[]"
-	if p == nil || len(*p) == 0 {
+	if pdc == nil || len(*pdc) == 0 {
 		return "", fmt.Errorf("self is empty")
 	}
-	var texts []string
-	for _, contDevs := range *p {
-		text, err := contDevs.MarshalText()
+	texts := make([]string, len(*pdc))
+	for i, contClaim := range *pdc {
+		text, err := contClaim.MarshalText()
 		if err != nil {
 			return "", err
 		}
-		texts = append(texts, text)
+		texts[i] = text
 	}
 	return strings.Join(texts, ";"), nil
 }
 
-func (p *PodDevices) UnmarshalText(text string) error {
-	if p == nil {
+func (pdc *PodDeviceClaim) UnmarshalText(text string) error {
+	if pdc == nil {
 		return fmt.Errorf("self is empty")
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
 		return fmt.Errorf("input text is empty")
 	}
-	cds := make([]ContainerDevices, 0)
-	for _, subText := range strings.Split(text, ";") {
+	split := strings.Split(text, ";")
+	cdcs := make([]ContainerDeviceClaim, 0, len(split))
+	for _, subText := range split {
 		if len(subText) == 0 {
 			continue
 		}
-		cd := ContainerDevices{}
-		if err := cd.UnmarshalText(subText); err != nil {
+		cdc := ContainerDeviceClaim{}
+		if err := cdc.UnmarshalText(subText); err != nil {
 			return err
 		}
-		cds = append(cds, cd)
+		cdcs = append(cdcs, cdc)
 	}
-	*p = cds
+	*pdc = cdcs
 	return nil
 }
 
 // GetCurrentPreAllocateContainerDevice find the device information pre allocated to the current container.
-func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDevices, error) {
+func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClaim, error) {
 	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
-	preAllocPodDevices := PodDevices{}
+	preAllocPodDevices := PodDeviceClaim{}
 	if err := preAllocPodDevices.UnmarshalText(preAlloc); err != nil {
 		return nil, fmt.Errorf("parse pre assign devices failed: %v", err)
 	}
@@ -300,15 +299,14 @@ func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDevices, e
 		}
 		return &preAllocPodDevices[0], nil
 	}
-	realAllocPodDevices := PodDevices{}
+	realAllocPodDevices := PodDeviceClaim{}
 	if err := realAllocPodDevices.UnmarshalText(realAlloc); err != nil {
 		return nil, fmt.Errorf("parse real assign devices failed: %v", err)
 	}
 	for i, contDevs := range preAllocPodDevices {
-		isAssigned := slices.ContainsFunc(realAllocPodDevices,
-			func(cd ContainerDevices) bool {
-				return cd.Name == contDevs.Name
-			})
+		isAssigned := slices.ContainsFunc(realAllocPodDevices, func(cd ContainerDeviceClaim) bool {
+			return cd.Name == contDevs.Name
+		})
 		if !isAssigned {
 			if err := checkExistCont(preAllocPodDevices[i].Name); err != nil {
 				return nil, err
@@ -540,32 +538,32 @@ func (dev *Device) AllocatableNumber() int {
 	return 0
 }
 
-func GetPodAssignDevices(pod *corev1.Pod) PodDevices {
+// GetPodDeviceClaim Retrieve device claim information for a pod,
+// return it if there is actual allocated device claim,
+// otherwise revert back to the device claims pre allocated by the scheduler.
+func GetPodDeviceClaim(pod *corev1.Pod) PodDeviceClaim {
 	var (
-		podAssignDevices  PodDevices
-		realAssignDevices = PodDevices{}
-		preAssignDevices  = PodDevices{}
+		realPodDeviceClaim = PodDeviceClaim{}
+		prePodDeviceClaim  = PodDeviceClaim{}
 	)
 	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
 	if len(realAlloc) > 0 {
-		if err := realAssignDevices.UnmarshalText(realAlloc); err != nil {
+		if err := realPodDeviceClaim.UnmarshalText(realAlloc); err != nil {
 			msg := fmt.Sprintf("pod annotation[%s] parsing failed", util.PodVGPURealAllocAnnotation)
 			klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod), "annoValue", realAlloc)
 		}
 	}
 	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
 	if len(preAlloc) > 0 {
-		if err := preAssignDevices.UnmarshalText(preAlloc); err != nil {
+		if err := prePodDeviceClaim.UnmarshalText(preAlloc); err != nil {
 			msg := fmt.Sprintf("pod annotation[%s] parsing failed", util.PodVGPUPreAllocAnnotation)
 			klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod), "annoValue", preAlloc)
 		}
 	}
-	if len(realAssignDevices) >= len(preAssignDevices) {
-		podAssignDevices = realAssignDevices
-	} else {
-		podAssignDevices = preAssignDevices
+	if len(realPodDeviceClaim) >= len(prePodDeviceClaim) {
+		return realPodDeviceClaim
 	}
-	return podAssignDevices
+	return prePodDeviceClaim
 }
 
 func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *NodeInfo {
@@ -583,7 +581,7 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 		ret.deviceList[device.GetID()] = gpuallocator.NewDevice(
 			device.GetID(), device.GetUUID(), device.GetBusID())
 	}
-	ret.initResourceStatistics()
+	ret.ResetResourceUsage()
 	return ret
 }
 
@@ -619,8 +617,10 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 		gpuTopology:    gatherInfo.EnabledGPUTopology,
 		numaTopology:   gatherInfo.EnabledNumaAffinity,
 	}
-	ret.addPodsDeviceResources(pods)
-	ret.initResourceStatistics()
+	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
+		ret.addPodUsedResources(pod)
+	})
+	ret.ResetResourceUsage()
 	return ret, nil
 }
 
@@ -636,74 +636,58 @@ func (n *NodeInfo) Clone() framework.StateData {
 	return &nodeInfo
 }
 
-func (n *NodeInfo) addPodsDeviceResources(pods []*corev1.Pod) {
-	util.PodsOnNodeCallback(pods, n.node, func(pod *corev1.Pod) {
-		n.addDeviceResources(pod)
-	})
-}
-
-func (n *NodeInfo) addDeviceResources(pod *corev1.Pod) {
+func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
 	if !util.IsVGPUResourcePod(pod) {
 		return
 	}
 	// According to the pods' annotations, construct the node allocation state
-	podAssignDevices := GetPodAssignDevices(pod)
-	if len(podAssignDevices) == 0 {
-		klog.V(3).InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
+	podDeviceClaim := GetPodDeviceClaim(pod)
+	if len(podDeviceClaim) == 0 {
+		klog.InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
 		return
 	}
-	for _, container := range podAssignDevices {
-		for _, device := range container.Devices {
-			id, ok := n.deviceIndexMap[device.Uuid]
-			if !ok {
-				klog.Warningf("device UUID <%s> does not exist in the NodeInfo <%s>", device.Uuid, n.name)
-				continue
-			}
-			if err := n.addUsedResources(id, device.Cores, device.Memory); err != nil {
-				klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, device.Id, err)
+	for _, containerClaim := range podDeviceClaim {
+		for _, claim := range containerClaim.DeviceClaims {
+			if err := n.AddUsedResources(claim, false); err != nil {
+				klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, claim.Id, err)
 			}
 		}
 	}
 }
 
-func (n *NodeInfo) initResourceStatistics() {
+func (n *NodeInfo) ResetResourceUsage() {
 	n.totalNumber, n.usedNumber, n.totalMemory = 0, 0, 0
 	n.usedMemory, n.totalCores, n.usedCores, n.maxCapability = 0, 0, 0, 0
 	for _, deviceInfo := range n.deviceMap {
 		// Do not include MIG enabled devices and unhealthy devices in the assignable resources.
-		if deviceInfo.IsMIG() || !deviceInfo.Healthy() {
-			continue
+		if !deviceInfo.IsMIG() && deviceInfo.Healthy() {
+			n.totalNumber += deviceInfo.GetTotalNumber()
+			n.usedNumber += deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
+			n.totalMemory += deviceInfo.GetTotalMemory()
+			n.usedMemory += deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
+			n.totalCores += deviceInfo.GetTotalCores()
+			n.usedCores += deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
+			n.maxCapability = max(n.maxCapability, deviceInfo.capability)
 		}
-		n.totalNumber += deviceInfo.GetTotalNumber()
-		n.usedNumber += deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
-		n.totalMemory += deviceInfo.GetTotalMemory()
-		n.usedMemory += deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
-		n.totalCores += deviceInfo.GetTotalCores()
-		n.usedCores += deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
-		n.maxCapability = max(n.maxCapability, deviceInfo.capability)
 	}
 }
 
 // AddUsedResources records the used GPU core and memory
-func (n *NodeInfo) AddUsedResources(id int, core, memory int64) error {
-	if err := n.addUsedResources(id, core, memory); err != nil {
-		return err
-	}
-	if device := n.deviceMap[id]; !device.IsMIG() && device.Healthy() {
-		n.usedNumber++
-		n.usedCores += core
-		n.usedMemory += memory
-	}
-	return nil
-}
-
-// addUsedResources records the used GPU core and memory
-func (n *NodeInfo) addUsedResources(id int, core, memory int64) error {
-	device, ok := n.deviceMap[id]
+func (n *NodeInfo) AddUsedResources(claim DeviceClaim, updateUsage bool) error {
+	deviceId, ok := n.deviceIndexMap[claim.Uuid]
 	if !ok {
-		return fmt.Errorf("device ID <%d> does not exist in the NodeInfo <%s>", id, n.name)
+		return fmt.Errorf("device UUID <%s> does not exist in the NodeInfo <%s>", claim.Uuid, n.name)
 	}
-	device.addUsedResources(core, memory)
+	device, ok := n.deviceMap[deviceId]
+	if !ok {
+		return fmt.Errorf("device ID <%d> does not exist in the NodeInfo <%s>", deviceId, n.name)
+	}
+	device.addUsedResources(claim.Cores, claim.Memory)
+	if updateUsage && !device.IsMIG() && device.Healthy() {
+		n.usedNumber++
+		n.usedCores += claim.Cores
+		n.usedMemory += claim.Memory
+	}
 	return nil
 }
 

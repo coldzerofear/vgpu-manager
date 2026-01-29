@@ -496,9 +496,9 @@ skipNvml:
 	// Filter out some useless pods.
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
 		// Aggregate the allocated memory size on the node.
-		podDevices := device.GetPodAssignDevices(pod)
+		podDeviceClaim := device.GetPodDeviceClaim(pod)
 		devContainersMap := make(map[string]sets.Set[string])
-		FlattenDevicesEach(podDevices, func(ctrName string, claimDevice device.ClaimDevice) {
+		FlattenDevicesEach(podDeviceClaim, func(ctrName string, claimDevice device.DeviceClaim) {
 			if ctrNameSet, ok := devContainersMap[claimDevice.Uuid]; ok {
 				ctrNameSet.Insert(ctrName)
 			} else {
@@ -902,14 +902,14 @@ func FlattenMigInfosMapEach(migInfosMap map[string][]*nvidia.MigInfo,
 	}
 }
 
-func FlattenDevicesEach(podDevices device.PodDevices,
-	fn func(ctrName string, claim device.ClaimDevice)) {
+func FlattenDevicesEach(podDeviceClaim device.PodDeviceClaim,
+	fn func(ctrName string, claim device.DeviceClaim)) {
 	if fn == nil {
 		return
 	}
-	for _, contDevices := range podDevices {
-		for _, dev := range contDevices.Devices {
-			fn(contDevices.Name, dev)
+	for _, containerClaim := range podDeviceClaim {
+		for _, claim := range containerClaim.DeviceClaims {
+			fn(containerClaim.Name, claim)
 		}
 	}
 }

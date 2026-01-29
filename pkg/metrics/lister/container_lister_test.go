@@ -122,7 +122,7 @@ func Test_ContainerLister(t *testing.T) {
 		manager.WithDevices(devices),
 		manager.WithNvidiaVersion(driverVersion),
 		manager.WithFeatureGate(featureGate))
-	contDeviceMap := map[string][]device.ClaimDevice{
+	contDevClaimsMap := map[string][]device.DeviceClaim{
 		containerName1: {{
 			Id:     0,
 			Uuid:   gpuUUID0,
@@ -153,8 +153,8 @@ func Test_ContainerLister(t *testing.T) {
 		path := filepath.Join(basePath, string(key))
 		_ = os.MkdirAll(path, 0777)
 		path = filepath.Join(path, dpvgpu.VGPUConfigFileName)
-		claimDevices := contDeviceMap[container.Name]
-		assignDevices := device.ContainerDevices{Name: container.Name, Devices: claimDevices}
+		deviceClaims := contDevClaimsMap[container.Name]
+		assignDevices := device.ContainerDeviceClaim{Name: container.Name, DeviceClaims: deviceClaims}
 		err = vgpu.WriteVGPUConfigFile(path, devManager, pod, assignDevices, false, node)
 		if err != nil {
 			t.Error(err)

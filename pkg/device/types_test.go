@@ -17,15 +17,15 @@ func Test_PodDevices(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		devices PodDevices
+		devices PodDeviceClaim
 		want    string
 	}{
 		{
 			name: "example 1: single container, single device",
-			devices: PodDevices{
+			devices: PodDeviceClaim{
 				{
 					Name: "cont1",
-					Devices: []ClaimDevice{
+					DeviceClaims: []DeviceClaim{
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
@@ -39,20 +39,20 @@ func Test_PodDevices(t *testing.T) {
 		},
 		{
 			name: "example 2: single container, no device",
-			devices: PodDevices{
+			devices: PodDeviceClaim{
 				{
-					Name:    "cont1",
-					Devices: []ClaimDevice{},
+					Name:         "cont1",
+					DeviceClaims: []DeviceClaim{},
 				},
 			},
 			want: fmt.Sprintf("cont1[]"),
 		},
 		{
 			name: "example 3: single container, multiple device",
-			devices: PodDevices{
+			devices: PodDeviceClaim{
 				{
 					Name: "cont1",
-					Devices: []ClaimDevice{
+					DeviceClaims: []DeviceClaim{
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
@@ -71,10 +71,10 @@ func Test_PodDevices(t *testing.T) {
 		},
 		{
 			name: "example 4: multiple container, single device",
-			devices: PodDevices{
+			devices: PodDeviceClaim{
 				{
 					Name: "cont1",
-					Devices: []ClaimDevice{
+					DeviceClaims: []DeviceClaim{
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
@@ -85,7 +85,7 @@ func Test_PodDevices(t *testing.T) {
 				},
 				{
 					Name: "cont2",
-					Devices: []ClaimDevice{
+					DeviceClaims: []DeviceClaim{
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
@@ -99,10 +99,10 @@ func Test_PodDevices(t *testing.T) {
 		},
 		{
 			name: "example 5: multiple container, multiple device",
-			devices: PodDevices{
+			devices: PodDeviceClaim{
 				{
 					Name: "cont1",
-					Devices: []ClaimDevice{
+					DeviceClaims: []DeviceClaim{
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
@@ -118,7 +118,7 @@ func Test_PodDevices(t *testing.T) {
 				},
 				{
 					Name: "cont2",
-					Devices: []ClaimDevice{
+					DeviceClaims: []DeviceClaim{
 						{
 							Id:     0,
 							Uuid:   gpu0uuid,
@@ -144,7 +144,7 @@ func Test_PodDevices(t *testing.T) {
 				t.Error(err)
 			}
 			assert.Equal(t, test.want, text)
-			podDevices := PodDevices{}
+			podDevices := PodDeviceClaim{}
 			err = podDevices.UnmarshalText(text)
 			if err != nil {
 				t.Error(err)
@@ -161,7 +161,7 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 	tests := []struct {
 		name string
 		pod  *corev1.Pod
-		want *ContainerDevices
+		want *ContainerDeviceClaim
 	}{
 		{
 			name: "example 1",
@@ -181,9 +181,9 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 					},
 				},
 			},
-			want: &ContainerDevices{
+			want: &ContainerDeviceClaim{
 				Name: "cont1",
-				Devices: []ClaimDevice{
+				DeviceClaims: []DeviceClaim{
 					{
 						Id:     0,
 						Uuid:   gpu0uuid,
@@ -213,9 +213,9 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 					},
 				},
 			},
-			want: &ContainerDevices{
+			want: &ContainerDeviceClaim{
 				Name: "cont2",
-				Devices: []ClaimDevice{
+				DeviceClaims: []DeviceClaim{
 					{
 						Id:     0,
 						Uuid:   gpu0uuid,
@@ -251,9 +251,9 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 					},
 				},
 			},
-			want: &ContainerDevices{
+			want: &ContainerDeviceClaim{
 				Name: "cont2",
-				Devices: []ClaimDevice{
+				DeviceClaims: []DeviceClaim{
 					{
 						Id:     0,
 						Uuid:   gpu0uuid,

@@ -310,7 +310,7 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 	if !ok || len(preAlloc) == 0 {
 		return "", false
 	}
-	podDevices := device.PodDevices{}
+	podDevices := device.PodDeviceClaim{}
 	err := podDevices.UnmarshalText(preAlloc)
 	return nodeName, err == nil
 }
