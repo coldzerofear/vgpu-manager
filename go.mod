@@ -8,6 +8,7 @@ require (
 	github.com/NVIDIA/k8s-dra-driver-gpu v0.0.0-20260108173021-6a1af5e6a4d4
 	github.com/NVIDIA/nvidia-container-toolkit v1.18.2
 	github.com/blang/semver/v4 v4.0.0
+	github.com/docker/go-units v0.5.0
 	github.com/evanphx/json-patch v0.5.2
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-logr/logr v1.4.3

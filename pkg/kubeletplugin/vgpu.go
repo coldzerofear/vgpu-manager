@@ -10,6 +10,7 @@ import (
 	"github.com/blang/semver/v4"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/docker/go-units"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -27,10 +28,6 @@ type VGpuDeviceInfo struct {
 func (d *VGpuDeviceInfo) CanonicalName() string {
 	return fmt.Sprintf("vgpu-%d", d.Minor)
 }
-
-const (
-	UnitMiB = 1024 * 1024
-)
 
 func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 	device := resourceapi.Device{
@@ -85,9 +82,9 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 				RequestPolicy: &resourceapi.CapacityRequestPolicy{
 					Default: resource.NewQuantity(int64(d.Memory.Total), resource.BinarySI),
 					ValidRange: &resourceapi.CapacityRequestPolicyRange{
-						Min:  resource.NewQuantity(int64(UnitMiB), resource.BinarySI),
+						Min:  resource.NewQuantity(int64(units.MiB), resource.BinarySI),
 						Max:  resource.NewQuantity(int64(d.Memory.Total), resource.BinarySI),
-						Step: resource.NewQuantity(int64(UnitMiB), resource.BinarySI),
+						Step: resource.NewQuantity(int64(units.MiB), resource.BinarySI),
 					},
 				},
 			},
@@ -178,7 +175,7 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 	deviceCapacityMap := m.getConsumableCapacityMap(claim)
 	for _, device := range deviceSlice {
 		idx := device.Index
-		totalMemoryMB := device.Memory.Total / UnitMiB
+		totalMemoryMB := device.Memory.Total / units.MiB
 		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaMemoryRatioEnv, idx, 1))
 		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=FALSE", util.CudaMemoryOversoldEnv, idx))
 		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.UUID))
@@ -192,7 +189,7 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 			if quantity, ok := resourceMap[MemoryResourceName]; ok {
 				if val, ok := quantity.AsInt64(); ok {
 					// TODO Only enable memory limit when the request is less than the entire card
-					requestMB := uint64(val / UnitMiB)
+					requestMB := uint64(val / units.MiB)
 					if requestMB < totalMemoryMB {
 						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
 					}
