@@ -24,15 +24,19 @@ import (
 
 var (
 	initKubeConfig sync.Once
+	initErr        error
 	kubeConfig     *rest.Config
 )
 
 func InitKubeConfig(masterUrl, kubeconfig string) error {
-	var err error
 	initKubeConfig.Do(func() {
-		kubeConfig, err = clientcmd.BuildConfigFromFlags(masterUrl, kubeconfig)
+		if kubeconfig == "" && masterUrl == "" {
+			kubeConfig, initErr = rest.InClusterConfig()
+		} else {
+			kubeConfig, initErr = clientcmd.BuildConfigFromFlags(masterUrl, kubeconfig)
+		}
 	})
-	return err
+	return initErr
 }
 
 type Option func(*rest.Config)
