@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/blang/semver/v4"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
@@ -39,13 +40,13 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 				StringValue: ptr.To(string(VGpuDeviceType)),
 			},
 			"uuid": {
-				StringValue: &d.UUID,
+				StringValue: ptr.To(strings.ToLower(d.UUID)),
 			},
 			"minor": {
 				IntValue: ptr.To(int64(d.Minor)),
 			},
 			"productName": {
-				StringValue: &d.ProductName,
+				StringValue: ptr.To(strings.ToUpper(d.ProductName)),
 			},
 			"brand": {
 				StringValue: &d.Brand,
@@ -68,7 +69,7 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 			d.PcieRootAttr.Name: d.PcieRootAttr.Value,
 		},
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
-			coresResourceName: {
+			CoresResourceName: {
 				Value: *resource.NewQuantity(int64(util.HundredCore), resource.DecimalSI),
 				RequestPolicy: &resourceapi.CapacityRequestPolicy{
 					Default: resource.NewQuantity(int64(util.HundredCore), resource.DecimalSI),
@@ -79,7 +80,7 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 					},
 				},
 			},
-			memoryResourceName: {
+			MemoryResourceName: {
 				Value: *resource.NewQuantity(int64(d.Memory.Total), resource.BinarySI),
 				RequestPolicy: &resourceapi.CapacityRequestPolicy{
 					Default: resource.NewQuantity(int64(d.Memory.Total), resource.BinarySI),
@@ -92,6 +93,11 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 			},
 		},
 		AllowMultipleAllocations: pointer.Bool(true),
+	}
+	if numaNode, ok := d.GetNumaNode(); ok {
+		device.Attributes["numaNode"] = resourceapi.DeviceAttribute{
+			IntValue: ptr.To(int64(numaNode)),
+		}
 	}
 	return device
 }
@@ -112,8 +118,8 @@ func NewVGPUManager(deviceLib *deviceLib, hostManagerPath string) *VGPUManager {
 }
 
 var (
-	coresResourceName  = resourceapi.QualifiedName("cores")
-	memoryResourceName = resourceapi.QualifiedName("memory")
+	CoresResourceName  = resourceapi.QualifiedName("cores")
+	MemoryResourceName = resourceapi.QualifiedName("memory")
 )
 
 func (m *VGPUManager) getVGpuDeviceSlice(devices AllocatableDevices) []*VGpuDeviceInfo {
@@ -177,13 +183,13 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=FALSE", util.CudaMemoryOversoldEnv, idx))
 		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.UUID))
 		if resourceMap, exists := deviceCapacityMap[device.CanonicalName()]; exists {
-			if quantity, ok := resourceMap[coresResourceName]; ok {
+			if quantity, ok := resourceMap[CoresResourceName]; ok {
 				if val, ok := quantity.AsInt64(); ok {
 					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, val))
 					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, val))
 				}
 			}
-			if quantity, ok := resourceMap[memoryResourceName]; ok {
+			if quantity, ok := resourceMap[MemoryResourceName]; ok {
 				if val, ok := quantity.AsInt64(); ok {
 					// TODO Only enable memory limit when the request is less than the entire card
 					requestMB := uint64(val / UnitMiB)

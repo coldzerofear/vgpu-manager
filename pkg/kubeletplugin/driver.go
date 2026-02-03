@@ -107,6 +107,11 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		})
 	}
 
+	// Pass `nodeUnprepareResource` function to the cleanup manager.
+	if err := state.checkpointCleanupManager.Start(ctx, driver.nodeUnprepareResource); err != nil {
+		return nil, fmt.Errorf("error starting CheckpointCleanupManager: %w", err)
+	}
+
 	if err := driver.publishResources(ctx, config); err != nil {
 		return nil, err
 	}
@@ -128,6 +133,10 @@ func (d *driver) Shutdown() error {
 	}
 
 	d.wg.Wait()
+
+	if err := d.state.checkpointCleanupManager.Stop(); err != nil {
+		return fmt.Errorf("error stopping CheckpointCleanupManager: %w", err)
+	}
 
 	d.pluginhelper.Stop()
 	return nil

@@ -47,12 +47,13 @@ type DeviceConfigState struct {
 
 type DeviceState struct {
 	sync.Mutex
-	cdi            *CDIHandler
-	vgpuManager    *VGPUManager
-	tsManager      *TimeSlicingManager
-	vfioPciManager *VfioPciManager
-	allocatable    AllocatableDevices
-	config         *Config
+	cdi                      *CDIHandler
+	vgpuManager              *VGPUManager
+	tsManager                *TimeSlicingManager
+	vfioPciManager           *VfioPciManager
+	allocatable              AllocatableDevices
+	checkpointCleanupManager *CheckpointCleanupManager
+	config                   *Config
 
 	nvdevlib          *deviceLib
 	checkpointManager checkpointmanager.CheckpointManager
@@ -123,11 +124,12 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		tsManager:         tsManager,
 		vgpuManager:       vgpuManager,
 		vfioPciManager:    vfioPciManager,
+		allocatable:       allocatable,
 		config:            config,
 		nvdevlib:          nvdevlib,
 		checkpointManager: checkpointManager,
 	}
-	state.allocatable = allocatable
+	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.ClientSets.Resource)
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
 	if err != nil {
@@ -150,6 +152,19 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceClaim) ([]kubeletplugin.Device, error) {
 	s.Lock()
 	defer s.Unlock()
+
+	if featuregates.Enabled(featuregates.VGPUSupport) && len(claim.Status.ReservedFor) > 1 {
+		for _, result := range claim.Status.Allocation.Devices.Results {
+			if result.Driver != util.DRADriverName {
+				continue
+			}
+			if device, ok := s.allocatable[result.Device]; ok && device.Type() == VGpuDeviceType {
+				klog.Errorf("vGPU claim cannot be applied to multiple Pods simultaneously",
+					"resourceClaim", klog.KObj(claim), "claimUid", claim.UID)
+				return nil, fmt.Errorf("claim cannot be used for multiple Pods simultaneously")
+			}
+		}
+	}
 
 	claimUID := string(claim.UID)
 
@@ -186,6 +201,8 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		checkpoint.V2.PreparedClaims[claimUID] = PreparedClaim{
 			CheckpointState: ClaimCheckpointStatePrepareStarted,
 			Status:          claim.Status,
+			Name:            claim.Name,
+			Namespace:       claim.Namespace,
 		}
 	})
 	if err != nil {
@@ -249,8 +266,10 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimUID string) error {
 
 	switch pc.CheckpointState {
 	case ClaimCheckpointStatePrepareStarted:
-		klog.Infof("unprepare noop: claim preparation started but not completed: %v", claimUID)
-		return nil
+		// Preparation was started but not completed. There are no devices to unprepare
+		// since preparation didn't complete successfully, but we still need to continue
+		// to ensure the claim gets deleted from the checkpoint.
+		klog.Infof("unprepare: claim preparation started but not completed: %v", claimUID)
 	case ClaimCheckpointStatePrepareCompleted:
 		if err := s.unprepareDevices(ctx, claimUID, pc.PreparedDevices); err != nil {
 			return fmt.Errorf("unprepare devices failed: %w", err)

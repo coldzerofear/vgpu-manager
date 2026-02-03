@@ -16,6 +16,12 @@
 
 package kubeletplugin
 
+import (
+	"fmt"
+
+	resourcev1 "k8s.io/api/resource/v1"
+)
+
 const (
 	VGpuDeviceType    = "vgpu"
 	GpuDeviceType     = "gpu"
@@ -28,4 +34,8 @@ type UUIDProvider interface {
 	UUIDs() []string
 	GpuUUIDs() []string
 	MigDeviceUUIDs() []string
+}
+
+func ResourceClaimToString(rc *resourcev1.ResourceClaim) string {
+	return fmt.Sprintf("%s/%s:%s", rc.Namespace, rc.Name, rc.UID)
 }
