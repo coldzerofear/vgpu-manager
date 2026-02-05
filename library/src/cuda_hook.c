@@ -49,7 +49,8 @@ extern void device_util_unlock(int fd, int ordinal);
 extern fp_dlsym real_dlsym;
 extern void *lib_control;
 
-extern int pid_exists(int pid);
+extern int pid_exist(int pid);
+extern int file_exist(const char *);
 extern int device_pid_in_same_container(unsigned int pid);
 extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
 extern int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size);
@@ -93,8 +94,6 @@ static void rate_limiter(int grids, int blocks, CUdevice device);
 static void change_token(int64_t, int);
 
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index);
-
-static int check_file_exist(const char *);
 
 /** export function definition */
 CUresult cuDriverGetVersion(int *driverVersion);
@@ -219,15 +218,6 @@ dynamic_config_t g_dynamic_config = {
   .usage_threshold = 5,
   .error_recovery_step = 10
 };
-
-static int check_file_exist(const char *file_path) {
-  int ret = 0;
-  if (access(file_path, F_OK) == 0) {
-      ret = 1;
-  }
-  return ret;
-}
-
 
 static void change_token(int64_t delta, int host_index) {
   int64_t cuda_cores_before = 0, cuda_cores_after = 0;
@@ -606,10 +596,10 @@ int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
   if (device_pid == 0) {
     return ret;
   }
-
+  // TODO May I need to check if there are zombie processes?
   char host_pid_path[128];
   sprintf(host_pid_path, HOST_PROC_CGROUP_PID_PATH, device_pid);
-  if (!check_file_exist(host_pid_path)) {
+  if (file_exist(host_pid_path) != 0) {
     return ret;
   }
 
@@ -657,7 +647,7 @@ int check_device_pid_in_local_container_pid(unsigned int device_pid) {
     return ret;
   }
   // Check if PID exists in the container.
-  if (pid_exists(device_pid) != 0) {
+  if (pid_exist(device_pid) != 0) {
     return ret;
   }
   // Check if PID exists in the current container namespace.

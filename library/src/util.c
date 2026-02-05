@@ -9,6 +9,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <signal.h>
 
 #define MAX_PID_STR_LEN 32
 #define CUDA_MEMORY_LIMIT_ENV "CUDA_MEM_LIMIT"
@@ -298,6 +299,53 @@ int device_pid_in_same_container(unsigned int pid) {
     if (device_st.st_ino != self_st.st_ino) {
       return -1;
     }
+  }
+  return 0;
+}
+
+int file_exist(const char *file_path) {
+  return (access(file_path, F_OK) == 0) ? 0 : -1;
+}
+
+int pid_exist(int pid) {
+  if (pid <= 0) return -1;
+  return (kill(pid, 0) == 0 ? 0 : (errno == ESRCH ? -1 : 0));
+//  int result = kill(pid, 0);
+//  if (result == 0) {
+//    return 0;
+//  }
+//  switch (errno) {
+//  case ESRCH:
+//    return -1;
+//  case EPERM:
+//    return 0;
+//  }
+//  char path[64];
+//  snprintf(path, sizeof(path), "/proc/%d", pid);
+//  return file_exist(path);
+}
+
+// 1: is zombie
+// 0: not zombie
+// -1: error
+int is_zombie_proc(int pid) {
+  if (pid <= 0) return -1;
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+
+  FILE *fp = fopen(path, "r");
+  if (fp == NULL) return -1;
+
+  int unused_pid;
+  char comm[1024];
+  char state;
+  int ret = fscanf(fp, "%d %s %c", &unused_pid, comm, &state);
+  fclose(fp);
+
+  if (ret != 3 || ret == EOF) {
+    return -1;
+  } else if (state == 'Z' || state == 'z') {
+    return 1;
   }
   return 0;
 }

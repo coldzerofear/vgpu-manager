@@ -1012,6 +1012,9 @@ extern int get_device_uuid(uint32_t index, char *uuid);
 extern int get_device_uuids(char *uuids);
 extern int get_mem_oversold(uint32_t index, int *limit);
 extern int get_vmem_node_enabled(int *enabled);
+extern int file_exist(const char *file_path);
+extern int pid_exist(int pid);
+extern int is_zombie_proc(int pid);
 
 // vmemory node lock
 extern int device_vmem_write_lock(int ordinal);
@@ -1262,17 +1265,9 @@ int strsplit(const char *s, char **dest, const char *sep) {
   return index;
 }
 
-int check_file_exist(const char *file_path) {
-  if (access(file_path, F_OK) != -1) {
-      return 0;
-  } else {
-      return 1;
-  }
-}
-
 int mmap_file_to_config_path(resource_data_t** data) {
   const char* filename = CONTROLLER_CONFIG_FILE_PATH;
-  if (unlikely(check_file_exist(filename))) {
+  if (unlikely(file_exist(filename) != 0)) {
     return 1;
   }
   int fd;
@@ -1307,7 +1302,7 @@ DONE:
 }
 
 int mmap_file_to_util_path(const char* filename, device_util_t** data) {
-  if (unlikely(check_file_exist(filename))) {
+  if (unlikely(file_exist(filename) != 0)) {
     return 1;
   }
   int fd;
@@ -1344,11 +1339,11 @@ DONE:
 int mmap_file_to_vmem_node(device_vmemory_t** data) {
   int fd;
   int created = 0;
-  if (unlikely(check_file_exist(VMEMORY_NODE_PATH))) {
+  if (unlikely(file_exist(VMEMORY_NODE_PATH) != 0)) {
     mkdir(VMEMORY_NODE_PATH, 0755);
   }
   const char* filename = VMEMORY_NODE_FILE_PATH;
-  if (unlikely(check_file_exist(filename))) {
+  if (unlikely(file_exist(filename) != 0)) {
     fd = open(filename, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (unlikely(fd == -1)) {
       LOGGER(ERROR, "can't create %s, error %s", filename, strerror(errno));
@@ -1425,10 +1420,10 @@ void print_global_vgpu_config() {
 int write_file_to_config_path(resource_data_t* data) {
   int wsize = 0;
   int ret = 0;
-  if (unlikely(check_file_exist(VGPU_MANAGER_PATH))) {
+  if (unlikely(file_exist(VGPU_MANAGER_PATH) != 0)) {
     mkdir(VGPU_MANAGER_PATH, 0755);
   }
-  if (unlikely(check_file_exist(VGPU_CONFIG_PATH))) {
+  if (unlikely(file_exist(VGPU_CONFIG_PATH) != 0)) {
     mkdir(VGPU_CONFIG_PATH, 0755);
   }
   int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_TRUNC | O_WRONLY, 0644);
@@ -1549,45 +1544,26 @@ DONE:
   return result;
 }
 
-int pid_exists(int pid) {
-  if (pid <= 0) {
-    return 1;
-  }
-  int result = kill(pid, 0);
-  if (result == 0) {
-    return 0;
-  }
-  switch (errno) {
-  case ESRCH:
-    return 1;
-  case EPERM:
-    return 0;
-  }
-  char path[PATH_MAX];
-  snprintf(path, sizeof(path), "/proc/%d", pid);
-  return check_file_exist(path);
-}
-
 void rm_vmem_node_by_non_existent_device_pid(int device_id, int pid) {
   unsigned int processes_size = g_device_vmem->devices[device_id].processes_size;
   for (int i = processes_size - 1; i >= 0; i--) {
-    if (g_device_vmem->devices[device_id].processes[i].pid == pid) {
-      g_device_vmem->devices[device_id].processes[i] = g_device_vmem->devices[device_id].processes[processes_size-1];
-      g_device_vmem->devices[device_id].processes[processes_size-1].pid = 0;
-      g_device_vmem->devices[device_id].processes[processes_size-1].used = 0;
-      g_device_vmem->devices[device_id].processes_size--;
-      processes_size--;
-      continue;
+    int curr_pid = g_device_vmem->devices[device_id].processes[i].pid;
+    int kick_out = 0;
+    if (curr_pid == pid) {
+      kick_out = 1;
+    } else if (pid_exist(curr_pid) != 0) {
+      LOGGER(WARNING, "detected that process %d does not exist, kicked out virtual memory node", curr_pid);
+      kick_out = 1;
+    } else if (is_zombie_proc(curr_pid) != 0) {
+      LOGGER(WARNING, "detected that process %d is a zombie, kicked out virtual memory node", curr_pid);
+      kick_out = 1;
     }
-    if (pid_exists(g_device_vmem->devices[device_id].processes[i].pid) != 0) {
-      LOGGER(WARNING, "detected that process %d does not exist, kicked out virtual memory node",
-                       g_device_vmem->devices[device_id].processes[i].pid);
+    if (kick_out) {
       g_device_vmem->devices[device_id].processes[i] = g_device_vmem->devices[device_id].processes[processes_size-1];
       g_device_vmem->devices[device_id].processes[processes_size-1].pid = 0;
       g_device_vmem->devices[device_id].processes[processes_size-1].used = 0;
       g_device_vmem->devices[device_id].processes_size--;
       processes_size--;
-      continue;
     }
   }
 }
@@ -1609,10 +1585,8 @@ void rm_vmem_node_by_device_pid(int device_id, int pid) {
   }
 }
 
-// Before exiting the program, check and clean up any unreleased virtual memory records.
-void exit_cleanup_vmem_nodes() {
- int pid = getpid();
- LOGGER(INFO, "process program %d exits", pid);
+// Clean up the virtual memory records of PID
+void cleanup_vmem_nodes(int pid) {
  if (g_device_vmem != NULL) {
    for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
      if (g_device_vmem->devices[index].processes_size == 0) {
@@ -1627,7 +1601,29 @@ void exit_cleanup_vmem_nodes() {
  }
 }
 
-void check_vmem_nodes() {
+// Cleaning operation when the processing program exits
+void exit_cleanup_handler() {
+ static int cleanup_done = 0;
+ // Prevent re-entry (exit_handler might be called multiple times)
+ if (__sync_lock_test_and_set(&cleanup_done, 1)) {
+   return;
+ }
+ int pid = getpid();
+ LOGGER(INFO, "process program %d exits", pid);
+ cleanup_vmem_nodes(pid);
+}
+
+// Signal handler for cleanup
+void signal_cleanup_handler(int signum) {
+  LOGGER(INFO, "caught signal %d, cleaning up", signum);
+  exit_cleanup_handler();
+  // Re-raise signal with default handler to ensure proper exit code
+  signal(signum, SIG_DFL);
+  raise(signum);
+}
+
+// check and clean up any unreleased virtual memory records.
+void check_cleanup_vmem_nodes() {
   if (g_device_vmem != NULL) {
     int pid = getpid();
     for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
@@ -2029,10 +2025,17 @@ int load_controller_configuration() {
       pthread_mutex_unlock(&init_config_mutex);
       LOGGER(FATAL, "mmap vmem nodes file failed");
     }
-    check_vmem_nodes();
-    if (atexit(exit_cleanup_vmem_nodes) != 0) {
+    check_cleanup_vmem_nodes();
+    if (atexit(exit_cleanup_handler) != 0) {
       LOGGER(ERROR ,"register exit handler failed: %d", errno);
     }
+    // Register signal handlers for cleanup on crashes
+    signal(SIGTERM, signal_cleanup_handler);
+    signal(SIGINT, signal_cleanup_handler);
+    signal(SIGHUP, signal_cleanup_handler);
+    signal(SIGABRT, signal_cleanup_handler);
+    // Note: SIGKILL and SIGSTOP cannot be caught
+    LOGGER(VERBOSE, "registered cleanup handlers for signals");
   }
 
   if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {

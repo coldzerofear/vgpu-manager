@@ -36,10 +36,6 @@ static void ensure_create_lock_dir() {
   pthread_mutex_unlock(&mutex);
 }
 
-static void get_lock_file_path(int ordinal, char *buffer, size_t size) {
-  snprintf(buffer, size, LOCK_PATH_FORMAT, ordinal);
-}
-
 static int try_acquire_lock(const char *path) {
   int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
   if (fd == -1) return -1;
@@ -64,7 +60,7 @@ int lock_gpu_device(int device_index) {
 
   ensure_create_lock_dir();
   char lock_path[LOCK_PATH_SIZE];
-  get_lock_file_path(device_index, lock_path, LOCK_PATH_SIZE);
+  snprintf(lock_path, LOCK_PATH_SIZE, LOCK_PATH_FORMAT, device_index);
 
   struct timeval start, now;
   gettimeofday(&start, NULL);
