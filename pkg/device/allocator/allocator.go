@@ -106,7 +106,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		deviceClaims []device.DeviceClaim
 		devicePolicy string
 	)
-	deviceStore, reasonStore := filterDevices(alloc.nodeInfo.GetDeviceMap(), pod, node.GetName(), needCores, needMemory)
+	deviceStore, reasonStore := alloc.filterDevices(pod, needCores, needMemory)
 	if needNumber > len(deviceStore) {
 		goto DONE
 	} else if needNumber == len(deviceStore) {
@@ -129,14 +129,16 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
 		} else {
 			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s", pod.Namespace, pod.Name, devicePolicy)
-			alloc.sendEventf(pod, corev1.EventTypeWarning, "DevicePolicy", "Unsupported device scheduling policy '%s'", devicePolicy)
+			alloc.sendEventf(pod, corev1.EventTypeWarning, "DevicePolicy",
+				"Unsupported device scheduling policy '%s'", devicePolicy)
 		}
 		NewSortPriority(ByNuma, ByDeviceIdAsc).Sort(deviceStore)
 		deviceClaims = alloc.allocateByTopologyMode(pod, deviceStore, util.NonePolicy, needNumber, needCores, needMemory)
 	}
 DONE:
 	if len(deviceClaims) != needNumber {
-		klog.V(5).InfoS("Insufficient node resources", "node", node.GetName(), "pod", klog.KObj(pod), "container", container.Name, "reason", reasonStore)
+		klog.V(5).InfoS("Insufficient node resources", "node", node.GetName(),
+			"pod", klog.KObj(pod), "container", container.Name, "reason", reasonStore)
 		return nil, errors.New("insufficient GPU resources")
 	}
 	containerClaim := &device.ContainerDeviceClaim{
@@ -261,26 +263,29 @@ const (
 	DeviceUuidMismatch FailedReason = "DeviceUuidMismatch"
 )
 
-func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName string, needCores, needMemory int64) ([]*device.Device, map[FailedReason]int) {
-	var devices []*device.Device
+func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int64) ([]*device.Device, map[FailedReason]int) {
+	nodeName := alloc.nodeInfo.GetName()
 	reasonMap := make(map[FailedReason]int)
-	for i := range deviceMap {
-		deviceInfo := deviceMap[i]
+	devices := make([]*device.Device, 0, alloc.nodeInfo.GetDeviceCount())
+	for i, deviceInfo := range alloc.nodeInfo.GetDeviceMap() {
 		// Filter unhealthy device.
 		if !deviceInfo.Healthy() {
-			klog.V(4).InfoS("Filter unhealthy devices on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+			klog.V(4).InfoS("Filter unhealthy devices on the node", "node", nodeName,
+				"deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
 			reasonMap[DeviceUnhealthy]++
 			continue
 		}
 		// Filter MIG enabled device.
 		if deviceInfo.IsMIG() {
-			klog.V(4).InfoS("Filter devices with MIG enabled on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+			klog.V(4).InfoS("Filter devices with MIG enabled on the node", "node",
+				nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
 			reasonMap[DeviceEnableMig]++
 			continue
 		}
 		// Filter for insufficient number of virtual devices.
 		if deviceInfo.AllocatableNumber() == 0 {
-			klog.V(4).InfoS("Filter devices with insufficient available number on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
+			klog.V(4).InfoS("Filter devices with insufficient available number on the node",
+				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
 			reasonMap[InsufficientNumber]++
 			continue
 		}
@@ -291,28 +296,34 @@ func filterDevices(deviceMap map[int]*device.Device, pod *corev1.Pod, nodeName s
 			reqMemory = deviceInfo.GetTotalMemory()
 		}
 		if reqMemory > deviceInfo.AllocatableMemory() {
-			klog.V(4).InfoS("Filter devices with insufficient available memory on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
+			klog.V(4).InfoS("Filter devices with insufficient available memory on the node",
+				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
 				"availableMemory", deviceInfo.AllocatableMemory(), "requestedMemory", reqMemory)
 			reasonMap[InsufficientMemory]++
 			continue
 		}
 		if needCores > deviceInfo.AllocatableCores() || deviceInfo.AllocatableCores() == 0 {
-			klog.V(4).InfoS("Filter devices with insufficient available cores on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
+			klog.V(4).InfoS("Filter devices with insufficient available cores on the node",
+				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
 				"availableCores", deviceInfo.AllocatableCores(), "requestedCores", needCores)
 			reasonMap[InsufficientSMCore]++
 			continue
 		}
 		// Filter device type.
 		if !util.CheckDeviceType(pod.Annotations, deviceInfo.GetType()) {
-			klog.V(4).InfoS("Filter devices with type mismatches on the node", "node", nodeName, "deviceIndex", i, "deviceType", deviceInfo.GetType(),
-				"includeTypes", pod.Annotations[util.PodIncludeGpuTypeAnnotation], "excludeTypes", pod.Annotations[util.PodExcludeGpuTypeAnnotation])
+			klog.V(4).InfoS("Filter devices with type mismatches on the node",
+				"node", nodeName, "deviceIndex", i, "deviceType", deviceInfo.GetType(),
+				"includeTypes", pod.Annotations[util.PodIncludeGpuTypeAnnotation],
+				"excludeTypes", pod.Annotations[util.PodExcludeGpuTypeAnnotation])
 			reasonMap[DeviceTypeMismatch]++
 			continue
 		}
 		// Filter device uuid.
 		if !util.CheckDeviceUuid(pod.Annotations, deviceInfo.GetUUID()) {
-			klog.V(4).InfoS("Filter devices with uuid mismatches on the node", "node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
-				"includeUuids", pod.Annotations[util.PodIncludeGPUUUIDAnnotation], "excludeUuids", pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
+			klog.V(4).InfoS("Filter devices with uuid mismatches on the node",
+				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
+				"includeUuids", pod.Annotations[util.PodIncludeGPUUUIDAnnotation],
+				"excludeUuids", pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
 			reasonMap[DeviceUuidMismatch]++
 			continue
 		}

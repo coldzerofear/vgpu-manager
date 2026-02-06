@@ -549,14 +549,14 @@ func GetPodDeviceClaim(pod *corev1.Pod) PodDeviceClaim {
 	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
 	if len(realAlloc) > 0 {
 		if err := realPodDeviceClaim.UnmarshalText(realAlloc); err != nil {
-			msg := fmt.Sprintf("pod annotation[%s] parsing failed", util.PodVGPURealAllocAnnotation)
+			msg := fmt.Sprintf("pod annotation['%s'] parsing failed", util.PodVGPURealAllocAnnotation)
 			klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod), "annoValue", realAlloc)
 		}
 	}
 	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
 	if len(preAlloc) > 0 {
 		if err := prePodDeviceClaim.UnmarshalText(preAlloc); err != nil {
-			msg := fmt.Sprintf("pod annotation[%s] parsing failed", util.PodVGPUPreAllocAnnotation)
+			msg := fmt.Sprintf("pod annotation['%s'] parsing failed", util.PodVGPUPreAllocAnnotation)
 			klog.V(3).ErrorS(err, msg, "pod", klog.KObj(pod), "annoValue", preAlloc)
 		}
 	}
