@@ -1,3 +1,4 @@
+{{- $nc := .Values.devicePlugin.nodeConfig | default dict }}
 {{- if .Values.devicePlugin.enabled -}}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -81,9 +82,9 @@ spec:
             - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
             - --open-kernel-modules={{ .Values.devicePlugin.devicePlugin.commands.openKernelModules }}
             - --mig-strategy={{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
-            {{- if .Values.devicePlugin.nodeConfig.yaml }}
+            {{- if $nc.yaml }}
             - --node-config-path=/config/nodeConfig.yaml
-            {{- else }}
+            {{- else if $nc.json }}
             - --node-config-path=/config/nodeConfig.json
             {{- end }}
             - --v={{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
@@ -117,8 +118,10 @@ spec:
               mountPath: /etc/vgpu-manager
             - name: cgroup
               mountPath: /sys/fs/cgroup
+            {{- if or $nc.yaml $nc.json }}
             - name: node-config
               mountPath: /config
+            {{- end }}
         - name: device-monitor
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
@@ -131,9 +134,9 @@ spec:
             - --pprof-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
             - --feature-gates={{ .Values.devicePlugin.deviceMonitor.commands.featureGates }}
-            {{- if .Values.devicePlugin.nodeConfig.yaml }}
+            {{- if $nc.yaml }}
             - --node-config-path=/config/nodeConfig.yaml
-            {{- else }}
+            {{- else if $nc.json }}
             - --node-config-path=/config/nodeConfig.json
             {{- end }}
             - --enable-rbac={{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
@@ -182,8 +185,10 @@ spec:
               mountPath: /etc/vgpu-manager
             - name: cgroup
               mountPath: /sys/fs/cgroup
+            {{- if or $nc.yaml $nc.json }}
             - name: node-config
               mountPath: /config
+            {{- end }}
       volumes:
         - name: kubelet
           hostPath:
@@ -195,7 +200,9 @@ spec:
         - name: cgroup
           hostPath:
             path: /sys/fs/cgroup
+        {{- if or $nc.yaml $nc.json }}
         - name: node-config
           configMap:
             name: {{ include "vgpu-manager.device-plugin" . }}-config
+        {{- end }}
 {{- end }}

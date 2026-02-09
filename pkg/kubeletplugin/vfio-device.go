@@ -278,7 +278,7 @@ func GetVfioCommonCDIContainerEdits() *cdiapi.ContainerEdits {
 	}
 }
 
-// GetCDIContainerEdits returns the CDI spec for a container to have access to the GPU while bound on vfio-pci driver.
+// GetVfioCDIContainerEdits returns the CDI spec for a container to have access to the GPU while bound on vfio-pci driver.
 func GetVfioCDIContainerEdits(info *VfioDeviceInfo) *cdiapi.ContainerEdits {
 	vfioDevicePath := filepath.Join(vfioDevicesRoot, fmt.Sprintf("%d", info.iommuGroup))
 	return &cdiapi.ContainerEdits{

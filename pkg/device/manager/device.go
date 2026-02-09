@@ -142,7 +142,7 @@ func (m *DeviceManager) RemoveCleanupRegistryFunc(name string) {
 }
 
 func NewFakeDeviceManager(opts ...OptionFunc) *DeviceManager {
-	m := &DeviceManager{
+	manager := &DeviceManager{
 		client:               fake.NewSimpleClientset(),
 		featureGate:          featuregate.NewFeatureGate(),
 		unhealthy:            make(chan *Device),
@@ -152,9 +152,9 @@ func NewFakeDeviceManager(opts ...OptionFunc) *DeviceManager {
 		cleanupRegistryFuncs: make(map[string]RegistryFunc),
 	}
 	for _, opt := range opts {
-		opt(m)
+		opt(manager)
 	}
-	return m
+	return manager
 }
 
 type OptionFunc func(*DeviceManager)
@@ -269,9 +269,8 @@ func (m *DeviceManager) initDevices() (err error) {
 
 	if klog.V(5).Enabled() {
 		cmd := exec.Command(m.NvidiaSMIPath, "topo", "-m")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			klog.V(5).ErrorS(err, "failed to get numa information", "nvidia-smi", m.NvidiaSMIPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			klog.V(5).ErrorS(err, "failed to execute nvidia-smi", "nvidia-smi", m.NvidiaSMIPath)
 		} else {
 			klog.V(5).InfoS("nvidia-smi topo -m output", "result", string(out))
 		}

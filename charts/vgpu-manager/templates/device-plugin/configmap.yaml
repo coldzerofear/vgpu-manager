@@ -1,4 +1,5 @@
-{{- if .Values.devicePlugin.enabled -}}
+{{- $nc := .Values.devicePlugin.nodeConfig | default dict }}
+{{- if and .Values.devicePlugin.enabled (or $nc.yaml $nc.json) -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,11 +9,11 @@ metadata:
     app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
     {{- include "vgpu-manager.labels" . | nindent 4 }}
 data:
-  {{- if .Values.devicePlugin.nodeConfig.yaml }}
+  {{- if $nc.yaml }}
   nodeConfig.yaml: |
-    {{- .Values.devicePlugin.nodeConfig.yaml | nindent 4 }}
-  {{- else }}
+    {{- $nc.yaml | nindent 4 }}
+  {{- else if $nc.json }}
   nodeConfig.json: |
-    {{- .Values.devicePlugin.nodeConfig.json | nindent 4 }}
+    {{- $nc.json | nindent 4 }}
   {{- end }}
 {{- end }}
