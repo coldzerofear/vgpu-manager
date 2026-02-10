@@ -179,7 +179,7 @@ spec:
               port: 4567
               service: liveness
             failureThreshold: 3
-            periodSeconds: 10
+            periodSeconds: 30
             timeoutSeconds: 10
           volumeMounts:
             - mountPath: /var/lib/kubelet/plugins_registry

@@ -2,31 +2,41 @@ package mutate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/docker/go-units"
 	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/runtime"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 const Path = "/pods/mutate"
 
-func NewMutateWebhook(scheme *runtime.Scheme, options *options.Options) (*admission.Webhook, error) {
+func NewMutateWebhook(client client.Client, options *options.Options) (*admission.Webhook, error) {
 	return &admission.Webhook{
 		Handler: &mutateHandle{
-			decoder: admission.NewDecoder(scheme),
+			decoder: admission.NewDecoder(client.Scheme()),
 			options: options,
+			client:  client,
 		},
 		RecoverPanic: ptr.To[bool](true),
 	}, nil
@@ -35,6 +45,7 @@ func NewMutateWebhook(scheme *runtime.Scheme, options *options.Options) (*admiss
 type mutateHandle struct {
 	decoder admission.Decoder
 	options *options.Options
+	client  client.Client
 }
 
 func setDefaultSchedulerName(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
@@ -189,35 +200,221 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 	return nil
 }
 
+// buildResourceClaim Build vGPU resource claims based on container requests.
+func (h *mutateHandle) buildResourceClaim(pod *corev1.Pod, container *corev1.Container) *resourceapi.ResourceClaim {
+	deviceCount := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
+	capacityRequest := make(map[resourceapi.QualifiedName]resource.Quantity)
+	if deviceCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName); deviceCores > 0 {
+		capacityRequest[kubeletplugin.CoresResourceName] = *resource.NewQuantity(deviceCores, resource.DecimalSI)
+	}
+	if deviceMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName); deviceMemory > 0 {
+		deviceMemory = deviceMemory * units.MiB
+		capacityRequest[kubeletplugin.MemoryResourceName] = *resource.NewQuantity(deviceMemory, resource.BinarySI)
+	}
+
+	deviceSelectors := []resourceapi.DeviceSelector{{
+		CEL: &resourceapi.CELDeviceSelector{
+			Expression: fmt.Sprintf(`device.attributes["%s"].type == "%s"`,
+				util.DRADriverName, kubeletplugin.VGpuDeviceType),
+		},
+	}}
+	if uuids, _ := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation); len(uuids) > 0 {
+		split := strings.Split(strings.ToLower(uuids), ",")
+		includeUuids := make([]string, 0, len(split))
+		for _, uuid := range split {
+			if uuid = strings.TrimSpace(uuid); uuid != "" {
+				includeUuids = append(includeUuids, uuid)
+			}
+		}
+		if len(includeUuids) > 0 {
+			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
+				CEL: &resourceapi.CELDeviceSelector{
+					Expression: fmt.Sprintf(`device.attributes["%s"].uuid in ["%s"]`,
+						util.DRADriverName, strings.Join(includeUuids, `","`)),
+				},
+			})
+		}
+	}
+	if uuids, _ := util.HasAnnotation(pod, util.PodExcludeGPUUUIDAnnotation); len(uuids) > 0 {
+		split := strings.Split(strings.ToLower(uuids), ",")
+		excludeUuids := make([]string, 0, len(split))
+		for _, uuid := range split {
+			if uuid = strings.TrimSpace(uuid); uuid != "" {
+				excludeUuids = append(excludeUuids, uuid)
+			}
+		}
+		if len(excludeUuids) > 0 {
+			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
+				CEL: &resourceapi.CELDeviceSelector{
+					Expression: fmt.Sprintf(`device.attributes["%s"].uuid not in ["%s"]`,
+						util.DRADriverName, strings.Join(excludeUuids, `","`)),
+				},
+			})
+		}
+	}
+	if types, _ := util.HasAnnotation(pod, util.PodIncludeGpuTypeAnnotation); len(types) > 0 {
+		split := strings.Split(strings.ToUpper(types), ",")
+		includeTypes := make([]string, 0, len(split))
+		for _, name := range split {
+			if name = strings.TrimSpace(name); name != "" {
+				includeTypes = append(includeTypes, name)
+			}
+		}
+		if len(includeTypes) > 0 {
+			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
+				CEL: &resourceapi.CELDeviceSelector{
+					Expression: fmt.Sprintf(`device.attributes["%s"].productName in ["%s"]`,
+						util.DRADriverName, strings.Join(includeTypes, `","`)),
+				},
+			})
+		}
+	}
+	if types, _ := util.HasAnnotation(pod, util.PodExcludeGpuTypeAnnotation); len(types) > 0 {
+		split := strings.Split(strings.ToUpper(types), ",")
+		excludeTypes := make([]string, 0, len(split))
+		for _, name := range split {
+			if name = strings.TrimSpace(name); name != "" {
+				excludeTypes = append(excludeTypes, name)
+			}
+		}
+		if len(excludeTypes) > 0 {
+			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
+				CEL: &resourceapi.CELDeviceSelector{
+					Expression: fmt.Sprintf(`device.attributes["%s"].productName not in ["%s"]`,
+						util.DRADriverName, strings.Join(excludeTypes, `","`)),
+				},
+			})
+		}
+	}
+	deviceConstraints := []resourceapi.DeviceConstraint{{
+		Requests:          []string{kubeletplugin.VGpuDeviceType},
+		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
+	}}
+
+	switch filter.PodUsedGPUTopologyMode(pod) {
+	case util.LinkTopology:
+	case util.NUMATopology:
+		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+			Requests:       []string{kubeletplugin.VGpuDeviceType},
+			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
+		})
+	}
+
+	resourceClaim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				"vgpu-manager.io/owner-pod": pod.Name,
+			},
+			GenerateName: fmt.Sprintf("%s-%s-", pod.Name, container.Name),
+			Namespace:    pod.Namespace,
+		},
+		Spec: resourceapi.ResourceClaimSpec{
+			Devices: resourceapi.DeviceClaim{
+				Constraints: deviceConstraints,
+				Requests: []resourceapi.DeviceRequest{
+					{
+						Name: kubeletplugin.VGpuDeviceType,
+						Exactly: &resourceapi.ExactDeviceRequest{
+							DeviceClassName: util.ComponentName,
+							AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+							Count:           deviceCount,
+							Capacity: &resourceapi.CapacityRequirements{
+								Requests: capacityRequest,
+							},
+							Selectors: deviceSelectors,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return resourceClaim
+}
+
+// MutateToDRA Convert pod's extended resource requests into DRA requests
+func (h *mutateHandle) MutateToDRA(ctx context.Context, pod *corev1.Pod) (err error) {
+	logger := log.FromContext(ctx)
+	var resourceClaims []types.NamespacedName
+	defer func() {
+		if err != nil && len(resourceClaims) > 0 {
+			if delErr := h.client.DeleteAllOf(
+				context.Background(),
+				&resourceapi.ResourceClaim{},
+				client.InNamespace(pod.Namespace),
+				client.MatchingLabels{"vgpu-manager.io/owner-pod": pod.Name},
+			); delErr != nil {
+				logger.Error(delErr, "Failed to clear vGPU resourceClaims", "resourceClaims", resourceClaims)
+			}
+		}
+	}()
+
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		if util.GetResourceOfContainer(container, util.VGPUNumberResourceName) == 0 {
+			continue
+		}
+		// Create container resource claim
+		resourceClaim := h.buildResourceClaim(pod, container)
+		if err = h.client.Create(ctx, resourceClaim); err != nil {
+			logger.Error(err, "Failed to create vGPU resourceClaim", "container", container.Name)
+			return err
+		}
+		resourceClaims = append(resourceClaims, client.ObjectKeyFromObject(resourceClaim))
+		logger.Info("Successfully created resourceClaim", "resourceClaim",
+			klog.KObj(resourceClaim), "container", container.Name)
+		// Convert container resource requests into DRA requests.
+		util.DelResourceOfContainer(container, util.VGPUNumberResourceName)
+		util.DelResourceOfContainer(container, util.VGPUCoreResourceName)
+		util.DelResourceOfContainer(container, util.VGPUMemoryResourceName)
+		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{
+			Name: resourceClaim.Name,
+		})
+		pod.Spec.ResourceClaims = append(pod.Spec.ResourceClaims, corev1.PodResourceClaim{
+			Name:              resourceClaim.Name,
+			ResourceClaimName: &resourceClaim.Name,
+		})
+	}
+	return nil
+}
+
 func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admission.Response {
 	logger := log.FromContext(ctx).WithValues("operation", req.Operation)
 	logger.V(5).Info("into pod mutate handle")
+
+	var err error
+	pod := &corev1.Pod{}
 	ctx = log.IntoContext(ctx, logger)
 	switch req.Operation {
 	case admissionv1.Create:
-		pod := &corev1.Pod{}
-		if err := h.decoder.Decode(req, pod); err != nil {
+		if err = h.decoder.Decode(req, pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		// Default the object
-		if err := h.MutateCreate(ctx, pod); err != nil {
-			//var apiStatus apierrors.APIStatus
-			//if errors.As(err, &apiStatus) {
-			//	return admission.Response{AdmissionResponse: admissionv1.AdmissionResponse{
-			//		Allowed: false,
-			//		Result:  ptr.To[metav1.Status](apiStatus.Status()),
-			//	}}
-			//}
-			return admission.Denied(err.Error())
+		err = h.MutateCreate(ctx, pod)
+		if err == nil && h.options.DefaultConvertToDRA {
+			err = h.MutateToDRA(ctx, pod)
 		}
-		// Create the patch
-		marshalled, err := json.Marshal(pod)
-		if err != nil {
-			return admission.Errored(http.StatusInternalServerError, err)
-		}
-		return admission.PatchResponseFromRaw(req.Object.Raw, marshalled)
 	default:
 		// Always skip when a DELETE or UPDATE operation received in custom mutation handler.
 		return admission.ValidationResponse(true, "")
 	}
+
+	// Check the error message first.
+	if err != nil {
+		var apiStatus apierrors.APIStatus
+		if errors.As(err, &apiStatus) {
+			return admission.Response{AdmissionResponse: admissionv1.AdmissionResponse{
+				Allowed: false,
+				Result:  ptr.To[metav1.Status](apiStatus.Status()),
+			}}
+		}
+		return admission.Denied(err.Error())
+	}
+
+	// Create the patch
+	marshalled, err := json.Marshal(pod)
+	if err != nil {
+		return admission.Errored(http.StatusInternalServerError, err)
+	}
+	return admission.PatchResponseFromRaw(req.Object.Raw, marshalled)
 }

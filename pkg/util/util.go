@@ -64,6 +64,15 @@ func IsVGPUEnabledNode(node *corev1.Node) bool {
 	return val > 0
 }
 
+func DelResourceOfContainer(container *corev1.Container, resourceName string) {
+	if container.Resources.Requests != nil {
+		delete(container.Resources.Requests, corev1.ResourceName(resourceName))
+	}
+	if container.Resources.Limits != nil {
+		delete(container.Resources.Limits, corev1.ResourceName(resourceName))
+	}
+}
+
 // GetResourceOfContainer Return the number of resource limit.
 func GetResourceOfContainer(container *corev1.Container, resourceName string) int64 {
 	var count int64

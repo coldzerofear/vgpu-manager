@@ -6,13 +6,14 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	podmutate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/mutate"
-	"k8s.io/apimachinery/pkg/runtime"
+	podvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/validate"
 	"k8s.io/klog/v2"
+	rtclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-type newWebhookFunc func(*runtime.Scheme, *options.Options) (*admission.Webhook, error)
+type newWebhookFunc func(rtclient.Client, *options.Options) (*admission.Webhook, error)
 
 var (
 	once           sync.Once
@@ -22,13 +23,14 @@ var (
 func init() {
 	webhookFuncMap = make(map[string]newWebhookFunc)
 	webhookFuncMap[podmutate.Path] = podmutate.NewMutateWebhook
+	webhookFuncMap[podvalidate.Path] = podvalidate.NewValidateWebhook
 }
 
-func RegisterWebhookToServer(server webhook.Server, scheme *runtime.Scheme, opt *options.Options) (err error) {
+func RegisterWebhookToServer(server webhook.Server, client rtclient.Client, opt *options.Options) (err error) {
 	once.Do(func() {
 		var hook http.Handler
 		for path, webhookFunc := range webhookFuncMap {
-			hook, err = webhookFunc(scheme, opt)
+			hook, err = webhookFunc(client, opt)
 			if err != nil {
 				klog.ErrorS(err, "unable to create webhook", "path", path)
 				return
