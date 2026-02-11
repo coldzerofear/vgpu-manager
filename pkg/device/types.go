@@ -13,6 +13,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/util/compatibility"
@@ -624,7 +625,7 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 	return ret, nil
 }
 
-func (n *NodeInfo) Clone() framework.StateData {
+func (n *NodeInfo) DeepCopy() *NodeInfo {
 	nodeInfo := *n
 	nodeInfo.node = n.node.DeepCopy()
 	deviceMap := make(map[int]*Device, len(n.deviceMap))
@@ -632,8 +633,13 @@ func (n *NodeInfo) Clone() framework.StateData {
 		deviceMap[index] = device.DeepCopy()
 	}
 	nodeInfo.deviceMap = deviceMap
+	nodeInfo.deviceIndexMap = maps.Clone(n.deviceIndexMap)
 	nodeInfo.deviceList = slices.Clone(n.deviceList)
 	return &nodeInfo
+}
+
+func (n *NodeInfo) Clone() framework.StateData {
+	return n.DeepCopy()
 }
 
 func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
