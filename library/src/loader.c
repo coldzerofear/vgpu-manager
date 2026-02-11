@@ -1391,10 +1391,18 @@ DONE:
 
 void print_global_vgpu_config() {
   LOGGER(VERBOSE, "------------------print_global_vgpu_config------------------");
-  LOGGER(VERBOSE, "Pod Name         : %s", g_vgpu_config->pod_name);
-  LOGGER(VERBOSE, "Pod Namespace    : %s", g_vgpu_config->pod_namespace);
-  LOGGER(VERBOSE, "Pod Uid          : %s", g_vgpu_config->pod_uid);
-  LOGGER(VERBOSE, "Container Name   : %s", g_vgpu_config->container_name);
+  if (g_vgpu_config->pod_name && *g_vgpu_config->pod_name != '\0') {
+    LOGGER(VERBOSE, "Pod Name         : %s", g_vgpu_config->pod_name);
+  }
+  if (g_vgpu_config->pod_namespace && *g_vgpu_config->pod_namespace != '\0') {
+    LOGGER(VERBOSE, "Pod Namespace    : %s", g_vgpu_config->pod_namespace);
+  }
+  if (g_vgpu_config->pod_uid && *g_vgpu_config->pod_uid != '\0') {
+    LOGGER(VERBOSE, "Pod Uid          : %s", g_vgpu_config->pod_uid);
+  }
+  if (g_vgpu_config->container_name && *g_vgpu_config->container_name != '\0') {
+    LOGGER(VERBOSE, "Container Name   : %s", g_vgpu_config->container_name);
+  }
   LOGGER(VERBOSE, "CompatibilityMode: %d", g_vgpu_config->compatibility_mode);
   LOGGER(VERBOSE, "SM Watcher       : %s", g_vgpu_config->sm_watcher ? "enabled" : "disabled");
   LOGGER(VERBOSE, "VMemory Node     : %s", g_vgpu_config->vmem_node ? "enabled" : "disabled");
