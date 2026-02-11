@@ -13,7 +13,6 @@ type Flags struct {
 	KubeClientConfig pkgflags.KubeClientConfig
 
 	NodeName                      string
-	Namespace                     string
 	CdiRoot                       string
 	ContainerDriverRoot           string
 	HostDriverRoot                string

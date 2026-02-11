@@ -57,13 +57,6 @@ func newApp() *cli.App {
 			Destination: &flags.NodeName,
 			EnvVars:     []string{"NODE_NAME"},
 		},
-		//&cli.StringFlag{
-		//	Name:        "namespace",
-		//	Usage:       "The namespace used for the custom resources.",
-		//	Value:       "default",
-		//	Destination: &flags.Namespace,
-		//	EnvVars:     []string{"NAMESPACE"},
-		//},
 		&cli.StringFlag{
 			Name:        "cdi-root",
 			Usage:       "Absolute path to the directory where CDI files will be generated.",

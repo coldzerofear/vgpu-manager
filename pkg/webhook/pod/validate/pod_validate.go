@@ -23,6 +23,7 @@ func NewValidateWebhook(client client.Client, options *options.Options) (*admiss
 		Handler: &validateHandle{
 			decoder: admission.NewDecoder(client.Scheme()),
 			options: options,
+			client:  client,
 		},
 		RecoverPanic: ptr.To[bool](true),
 	}, nil
@@ -31,6 +32,7 @@ func NewValidateWebhook(client client.Client, options *options.Options) (*admiss
 type validateHandle struct {
 	decoder admission.Decoder
 	options *options.Options
+	client  client.Client
 }
 
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) error {

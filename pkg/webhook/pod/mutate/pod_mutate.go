@@ -22,14 +22,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 const Path = "/pods/mutate"
+
+const DRAAnnotation = "vgpu-manager.io/resourceClaims"
 
 func NewMutateWebhook(client client.Client, options *options.Options) (*admission.Webhook, error) {
 	return &admission.Webhook{
@@ -196,7 +200,7 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 		// Clean up invalid topology mode annotations.
 		cleanupTopologyModeAnnotation(pod)
 	}
-
+	delete(pod.Annotations, DRAAnnotation)
 	return nil
 }
 
@@ -311,20 +315,18 @@ func (h *mutateHandle) buildResourceClaim(pod *corev1.Pod, container *corev1.Con
 		Spec: resourceapi.ResourceClaimSpec{
 			Devices: resourceapi.DeviceClaim{
 				Constraints: deviceConstraints,
-				Requests: []resourceapi.DeviceRequest{
-					{
-						Name: kubeletplugin.VGpuDeviceType,
-						Exactly: &resourceapi.ExactDeviceRequest{
-							DeviceClassName: util.ComponentName,
-							AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
-							Count:           deviceCount,
-							Capacity: &resourceapi.CapacityRequirements{
-								Requests: capacityRequest,
-							},
-							Selectors: deviceSelectors,
+				Requests: []resourceapi.DeviceRequest{{
+					Name: kubeletplugin.VGpuDeviceType,
+					Exactly: &resourceapi.ExactDeviceRequest{
+						DeviceClassName: util.ComponentName,
+						AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+						Count:           deviceCount,
+						Capacity: &resourceapi.CapacityRequirements{
+							Requests: capacityRequest,
 						},
+						Selectors: deviceSelectors,
 					},
-				},
+				}},
 			},
 		},
 	}
@@ -375,6 +377,67 @@ func (h *mutateHandle) MutateToDRA(ctx context.Context, pod *corev1.Pod) (err er
 			ResourceClaimName: &resourceClaim.Name,
 		})
 	}
+	claims := make([]string, len(resourceClaims))
+	for i, claim := range resourceClaims {
+		claims[i] = claim.String()
+	}
+	if len(claims) > 0 {
+		util.InsertAnnotation(pod, DRAAnnotation, strings.Join(claims, ","))
+	}
+	return nil
+}
+
+func (h *mutateHandle) MutateUpdate(ctx context.Context, pod *corev1.Pod) error {
+	logger := log.FromContext(ctx)
+	val, ok := util.HasAnnotation(pod, DRAAnnotation)
+	if !ok {
+		return nil
+	}
+	var claims []string
+	for _, key := range strings.Split(val, ",") {
+		if key = strings.TrimSpace(key); key == "" {
+			continue
+		}
+		namespace, name, err := cache.SplitMetaNamespaceKey(key)
+		if err != nil {
+			logger.Error(err, "SplitMetaNamespaceKey failed", "resourceKey", key)
+			continue
+		}
+		if namespace == "" {
+			namespace = pod.Namespace
+		}
+		objKey := types.NamespacedName{Name: name, Namespace: namespace}
+		if err = h.updateResourceOwner(ctx, pod, objKey); err != nil {
+			claims = append(claims, key)
+		}
+	}
+	if len(claims) > 0 {
+		pod.Annotations[DRAAnnotation] = strings.Join(claims, ",")
+	} else {
+		delete(pod.Annotations, DRAAnnotation)
+	}
+	return nil
+}
+
+func (h *mutateHandle) updateResourceOwner(ctx context.Context, owner metav1.Object, resourceKey types.NamespacedName) error {
+	logger := log.FromContext(ctx).WithValues("ResourceClaim", resourceKey.String())
+	claim := &resourceapi.ResourceClaim{}
+	if err := h.client.Get(ctx, resourceKey, claim); err != nil {
+		logger.Error(err, "get resourceClaim failed")
+		return client.IgnoreNotFound(err)
+	}
+	if !controllerutil.HasControllerReference(claim) {
+		if err := controllerutil.SetControllerReference(claim, owner, h.client.Scheme()); err != nil {
+			logger.Error(err, "SetControllerReference failed")
+			return err
+		}
+		if err := h.client.Update(ctx, claim); err != nil {
+			logger.Error(err, "update resourceClaim failed")
+			return err
+		}
+	} else {
+		logger.V(3).Info("resourceClaim already has a controller reference, skip updating")
+	}
 	return nil
 }
 
@@ -393,6 +456,13 @@ func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admiss
 		err = h.MutateCreate(ctx, pod)
 		if err == nil && h.options.DefaultConvertToDRA {
 			err = h.MutateToDRA(ctx, pod)
+		}
+	case admissionv1.Update:
+		if err = h.decoder.Decode(req, pod); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		if h.options.DefaultConvertToDRA {
+			err = h.MutateUpdate(ctx, pod)
 		}
 	default:
 		// Always skip when a DELETE or UPDATE operation received in custom mutation handler.
