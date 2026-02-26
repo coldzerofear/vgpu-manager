@@ -10,7 +10,7 @@ metadata:
 data:
   {{- if ge (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 22 }}
   config.yaml: |
-    {{- if gt (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 25}}
+    {{- if ge (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 25}}
     apiVersion: kubescheduler.config.k8s.io/v1
     {{- else }}
     apiVersion: kubescheduler.config.k8s.io/v1beta2
