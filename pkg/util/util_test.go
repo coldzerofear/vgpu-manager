@@ -1,6 +1,8 @@
 package util
 
 import (
+	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/google/uuid"
@@ -198,4 +200,64 @@ func Test_MakeDeviceID(t *testing.T) {
 			set[id] = struct{}{}
 		}
 	})
+}
+
+func Test_GenerateK8sSafeResourceName(t *testing.T) {
+	testCases := []struct {
+		inputs []string
+	}{
+		{inputs: []string{"default", "test1.test1"}},
+		{inputs: []string{"default", "ddssaawdddddddsadwwwwwww", "--"}},
+		{inputs: []string{"---", "default", "ddssaawdddddddsadwwwwwww.test1"}},
+		{inputs: []string{"default", "test1.test1", ".", "----"}},
+		{inputs: []string{"default", "test1.test1..test1..test1..test1", ".", "--.test1.test1"}},
+		{inputs: []string{"default", uuid.NewString(), uuid.NewString()}},
+		{inputs: []string{"1", "1"}},
+	}
+	for i, test := range testCases {
+		t.Run(fmt.Sprintf("example %d", i+1), func(t *testing.T) {
+			name := GenerateK8sSafeResourceName(test.inputs...)
+			fmt.Println(name)
+			assertDNS1123Compatibility(t, name)
+		})
+	}
+}
+
+func Test_MakeDNS1123Compatible(t *testing.T) {
+	examples := []struct {
+		name     string
+		expected string
+	}{
+		{
+			name:     "Pinco.Pallo-kubeworld.it-clientconfig",
+			expected: "pincopallo-kubeworldit-clientconfig",
+		},
+		{
+			name:     "tOk3_?ofTHE-Year",
+			expected: "tok3ofthe-year",
+		},
+		{
+			name:     "----tOk3_?ofTHE-YEAR!",
+			expected: "tok3ofthe-year",
+		},
+		{
+			name:     "tOk3_?ofTHE-YEAR--",
+			expected: "tok3ofthe-year",
+		},
+	}
+
+	for _, example := range examples {
+		t.Run(example.name, func(t *testing.T) {
+			name := MakeDNS1123Compatible(example.name)
+
+			assert.Equal(t, example.expected, name)
+			assertDNS1123Compatibility(t, name)
+		})
+	}
+}
+
+func assertDNS1123Compatibility(t *testing.T, name string) {
+	dns1123FormatRegexp := regexp.MustCompile("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+	assert.True(t, len(name) <= DNS1123NameMaximumLength, "Name length needs to be shorter than %d", DNS1123NameMaximumLength)
+	assert.Regexp(t, dns1123FormatRegexp, name, "Name needs to be in DNS-1123 allowed format")
 }

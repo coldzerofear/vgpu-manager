@@ -2,10 +2,13 @@ package util
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -385,4 +388,72 @@ func InformerFactoryHasSynced(factory informers.SharedInformerFactory, ctx conte
 		}
 	}
 	return true
+}
+
+const (
+	DNS1123NameMaximumLength         = 63
+	DNS1123NotAllowedCharacters      = "[^-a-z0-9]"
+	DNS1123NotAllowedStartCharacters = "^[^a-z0-9]+"
+	DNS1123NotAllowedEndCharacters   = "[^a-z0-9]+$"
+	hashPrefixLength                 = 8
+	separator                        = "-"
+)
+
+// GenerateK8sSafeResourceName Generate names that comply with the K8s DNS-1123 specification and have a length not exceeding 63
+func GenerateK8sSafeResourceName(str ...string) string {
+	joined := strings.Join(str, separator)
+	if joined == "" {
+		return ""
+	}
+
+	hashSuffix := GenerateShortHash(joined, hashPrefixLength)
+
+	// Combine the original joined string with the hash suffix.
+	nameWithHash := joined + separator + hashSuffix
+
+	// Truncate the final name if it's longer than the maximum allowed length.
+	if len(nameWithHash) > DNS1123NameMaximumLength {
+		// Calculate the maximum length the prefix can have.
+		// The final name will be: truncated_prefix + "-" + hashSuffix
+		maxPrefixLen := DNS1123NameMaximumLength - len(hashSuffix) - 1 // -1 for the separator '-'
+		// Truncate the part before the hash to fit within the limit.
+		truncatedPrefix := nameWithHash[:maxPrefixLen]
+		// Re-assemble the name. It might end with '-' from the prefix or start with an invalid char after truncation.
+		// We'll pass the whole truncated string to the compliance function.
+		nameWithHash = truncatedPrefix + separator + hashSuffix
+	}
+
+	// Ensure the final name adheres to DNS-1123 rules.
+	return MakeDNS1123Compatible(nameWithHash)
+}
+
+// MakeDNS1123Compatible It makes a string compliant with RFC 1123 for use as a DNS subdomain name.
+// https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names
+func MakeDNS1123Compatible(name string) string {
+	name = strings.ToLower(name)
+
+	nameNotAllowedChars := regexp.MustCompile(DNS1123NotAllowedCharacters)
+	name = nameNotAllowedChars.ReplaceAllString(name, "")
+
+	nameNotAllowedStartChars := regexp.MustCompile(DNS1123NotAllowedStartCharacters)
+	name = nameNotAllowedStartChars.ReplaceAllString(name, "")
+
+	if len(name) > DNS1123NameMaximumLength {
+		name = name[0:DNS1123NameMaximumLength]
+	}
+
+	nameNotAllowedEndChars := regexp.MustCompile(DNS1123NotAllowedEndCharacters)
+	name = nameNotAllowedEndChars.ReplaceAllString(name, "")
+
+	return name
+}
+
+// GenerateShortHash Generate a hexadecimal hash prefix of specified length
+func GenerateShortHash(input string, length int) string {
+	h := sha256.Sum256([]byte(input))
+	fullHex := hex.EncodeToString(h[:])
+	if length > len(fullHex) {
+		length = len(fullHex)
+	}
+	return fullHex[:length]
 }

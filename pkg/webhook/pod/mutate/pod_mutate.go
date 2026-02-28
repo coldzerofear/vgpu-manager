@@ -5,14 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
-	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"github.com/docker/go-units"
+	"github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/common"
 	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -22,8 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -32,8 +29,6 @@ import (
 )
 
 const Path = "/pods/mutate"
-
-const DRAAnnotation = "vgpu-manager.io/resourceClaims"
 
 func NewMutateWebhook(client client.Client, options *options.Options) (*admission.Webhook, error) {
 	return &admission.Webhook{
@@ -200,221 +195,120 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 		// Clean up invalid topology mode annotations.
 		cleanupTopologyModeAnnotation(pod)
 	}
-	delete(pod.Annotations, DRAAnnotation)
+
+	delete(pod.Annotations, util.DRAOriResAnnotation)
+	if h.options.DefaultConvertToDRA {
+		return h.convertDRARequest(ctx, pod)
+	}
 	return nil
 }
 
-// buildResourceClaim Build vGPU resource claims based on container requests.
-func (h *mutateHandle) buildResourceClaim(pod *corev1.Pod, container *corev1.Container) *resourceapi.ResourceClaim {
-	deviceCount := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
-	capacityRequest := make(map[resourceapi.QualifiedName]resource.Quantity)
-	if deviceCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName); deviceCores > 0 {
-		capacityRequest[kubeletplugin.CoresResourceName] = *resource.NewQuantity(deviceCores, resource.DecimalSI)
-	}
-	if deviceMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName); deviceMemory > 0 {
-		deviceMemory = deviceMemory * units.MiB
-		capacityRequest[kubeletplugin.MemoryResourceName] = *resource.NewQuantity(deviceMemory, resource.BinarySI)
-	}
-
-	deviceSelectors := []resourceapi.DeviceSelector{{
-		CEL: &resourceapi.CELDeviceSelector{
-			Expression: fmt.Sprintf(`device.attributes["%s"].type == "%s"`,
-				util.DRADriverName, kubeletplugin.VGpuDeviceType),
-		},
-	}}
-	if uuids, _ := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation); len(uuids) > 0 {
-		split := strings.Split(strings.ToLower(uuids), ",")
-		includeUuids := make([]string, 0, len(split))
-		for _, uuid := range split {
-			if uuid = strings.TrimSpace(uuid); uuid != "" {
-				includeUuids = append(includeUuids, uuid)
-			}
-		}
-		if len(includeUuids) > 0 {
-			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
-				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes["%s"].uuid in ["%s"]`,
-						util.DRADriverName, strings.Join(includeUuids, `","`)),
-				},
-			})
-		}
-	}
-	if uuids, _ := util.HasAnnotation(pod, util.PodExcludeGPUUUIDAnnotation); len(uuids) > 0 {
-		split := strings.Split(strings.ToLower(uuids), ",")
-		excludeUuids := make([]string, 0, len(split))
-		for _, uuid := range split {
-			if uuid = strings.TrimSpace(uuid); uuid != "" {
-				excludeUuids = append(excludeUuids, uuid)
-			}
-		}
-		if len(excludeUuids) > 0 {
-			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
-				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes["%s"].uuid not in ["%s"]`,
-						util.DRADriverName, strings.Join(excludeUuids, `","`)),
-				},
-			})
-		}
-	}
-	if types, _ := util.HasAnnotation(pod, util.PodIncludeGpuTypeAnnotation); len(types) > 0 {
-		split := strings.Split(strings.ToUpper(types), ",")
-		includeTypes := make([]string, 0, len(split))
-		for _, name := range split {
-			if name = strings.TrimSpace(name); name != "" {
-				includeTypes = append(includeTypes, name)
-			}
-		}
-		if len(includeTypes) > 0 {
-			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
-				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes["%s"].productName in ["%s"]`,
-						util.DRADriverName, strings.Join(includeTypes, `","`)),
-				},
-			})
-		}
-	}
-	if types, _ := util.HasAnnotation(pod, util.PodExcludeGpuTypeAnnotation); len(types) > 0 {
-		split := strings.Split(strings.ToUpper(types), ",")
-		excludeTypes := make([]string, 0, len(split))
-		for _, name := range split {
-			if name = strings.TrimSpace(name); name != "" {
-				excludeTypes = append(excludeTypes, name)
-			}
-		}
-		if len(excludeTypes) > 0 {
-			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
-				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes["%s"].productName not in ["%s"]`,
-						util.DRADriverName, strings.Join(excludeTypes, `","`)),
-				},
-			})
-		}
-	}
-	deviceConstraints := []resourceapi.DeviceConstraint{{
-		Requests:          []string{kubeletplugin.VGpuDeviceType},
-		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
-	}}
-
-	switch filter.PodUsedGPUTopologyMode(pod) {
-	case util.LinkTopology:
-	case util.NUMATopology:
-		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-			Requests:       []string{kubeletplugin.VGpuDeviceType},
-			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
-		})
-	}
-
-	resourceClaim := &resourceapi.ResourceClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels: map[string]string{
-				"vgpu-manager.io/owner-pod": pod.Name,
-			},
-			GenerateName: fmt.Sprintf("%s-%s-", pod.Name, container.Name),
-			Namespace:    pod.Namespace,
-		},
-		Spec: resourceapi.ResourceClaimSpec{
-			Devices: resourceapi.DeviceClaim{
-				Constraints: deviceConstraints,
-				Requests: []resourceapi.DeviceRequest{{
-					Name: kubeletplugin.VGpuDeviceType,
-					Exactly: &resourceapi.ExactDeviceRequest{
-						DeviceClassName: util.ComponentName,
-						AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
-						Count:           deviceCount,
-						Capacity: &resourceapi.CapacityRequirements{
-							Requests: capacityRequest,
-						},
-						Selectors: deviceSelectors,
-					},
-				}},
-			},
-		},
-	}
-
-	return resourceClaim
-}
-
-// MutateToDRA Convert pod's extended resource requests into DRA requests
-func (h *mutateHandle) MutateToDRA(ctx context.Context, pod *corev1.Pod) (err error) {
+// convertDRARequest Convert pod's extended resource requests into DRA requests
+func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
-	var resourceClaims []types.NamespacedName
-	defer func() {
-		if err != nil && len(resourceClaims) > 0 {
-			if delErr := h.client.DeleteAllOf(
-				context.Background(),
-				&resourceapi.ResourceClaim{},
-				client.InNamespace(pod.Namespace),
-				client.MatchingLabels{"vgpu-manager.io/owner-pod": pod.Name},
-			); delErr != nil {
-				logger.Error(delErr, "Failed to clear vGPU resourceClaims", "resourceClaims", resourceClaims)
-			}
-		}
-	}()
-
+	resourceInfos := make(common.ResourceInfos, 0)
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
-		if util.GetResourceOfContainer(container, util.VGPUNumberResourceName) == 0 {
+		if !util.IsVGPURequiredContainer(container) {
 			continue
 		}
-		// Create container resource claim
-		resourceClaim := h.buildResourceClaim(pod, container)
-		if err = h.client.Create(ctx, resourceClaim); err != nil {
-			logger.Error(err, "Failed to create vGPU resourceClaim", "container", container.Name)
-			return err
+
+		deviceCount := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
+		deviceCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
+		deviceMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
+
+		resourceInfo := common.ResourceInfo{
+			Name: container.Name,
+			Resources: map[corev1.ResourceName]resource.Quantity{
+				corev1.ResourceName(util.VGPUNumberResourceName): *resource.NewQuantity(deviceCount, resource.DecimalSI),
+				corev1.ResourceName(util.VGPUCoreResourceName):   *resource.NewQuantity(deviceCores, resource.DecimalSI),
+				corev1.ResourceName(util.VGPUMemoryResourceName): *resource.NewQuantity(deviceMemory, resource.DecimalSI),
+			},
 		}
-		resourceClaims = append(resourceClaims, client.ObjectKeyFromObject(resourceClaim))
-		logger.Info("Successfully created resourceClaim", "resourceClaim",
-			klog.KObj(resourceClaim), "container", container.Name)
+		resourceInfos = append(resourceInfos, resourceInfo)
 		// Convert container resource requests into DRA requests.
 		util.DelResourceOfContainer(container, util.VGPUNumberResourceName)
 		util.DelResourceOfContainer(container, util.VGPUCoreResourceName)
 		util.DelResourceOfContainer(container, util.VGPUMemoryResourceName)
+		resourceClaimName := util.GenerateK8sSafeResourceName(pod.Name, container.Name)
 		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{
-			Name: resourceClaim.Name,
+			Name: resourceClaimName,
 		})
 		pod.Spec.ResourceClaims = append(pod.Spec.ResourceClaims, corev1.PodResourceClaim{
-			Name:              resourceClaim.Name,
-			ResourceClaimName: &resourceClaim.Name,
+			Name:              resourceClaimName,
+			ResourceClaimName: &resourceClaimName,
 		})
+		logger.V(2).Info("Successfully convert vGPU requests to resourceClaims", "container", container.Name,
+			"vGPUNumber", deviceCount, "vGPUCores", deviceCores, "vGPUMemory", deviceMemory)
 	}
-	claims := make([]string, len(resourceClaims))
-	for i, claim := range resourceClaims {
-		claims[i] = claim.String()
+	if len(resourceInfos) > 0 {
+		encode, err := resourceInfos.Encode()
+		if err != nil {
+			logger.Error(err, "Encoding original resource information failed")
+			return apierrors.NewBadRequest(fmt.Sprintf("Encoding original resource information failed: %v", err))
+		}
+		util.InsertAnnotation(pod, util.DRAOriResAnnotation, encode)
+		logger.Info("Successfully convert all vGPU requests to resourceClaims")
 	}
-	if len(claims) > 0 {
-		util.InsertAnnotation(pod, DRAAnnotation, strings.Join(claims, ","))
+	return nil
+}
+
+func (h *mutateHandle) updateDRAClaims(ctx context.Context, pod *corev1.Pod) error {
+	logger := log.FromContext(ctx)
+	val, ok := util.HasAnnotation(pod, util.DRAOriResAnnotation)
+	if !ok || len(val) == 0 {
+		return nil
+	}
+	infos := common.ResourceInfos{}
+	if err := infos.Decode(val); err != nil {
+		logger.V(2).Error(err, "Decoding original resource information failed")
+		return nil
+	}
+
+	updatedInfos := make(common.ResourceInfos, 0, len(infos))
+	for i, info := range infos {
+		index := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
+			return container.Name == info.Name
+		})
+		if index < 0 {
+			logger.V(1).Info("Container not found, skip ResourceClaim update", "container", info.Name)
+			continue
+		}
+		container := &pod.Spec.Containers[index]
+		resourceClaimName := util.GenerateK8sSafeResourceName(pod.Name, container.Name)
+		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
+			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
+		}) {
+			logger.V(1).Info("ResourceClaimName for container not found, skip ResourceClaim update",
+				"container", info.Name, "resourceClaimName", resourceClaimName)
+			continue
+		}
+		resourceClaimKey := types.NamespacedName{
+			Name:      resourceClaimName,
+			Namespace: pod.Namespace,
+		}
+		if err := h.updateResourceOwner(ctx, pod, resourceClaimKey); err != nil {
+			updatedInfos = append(updatedInfos, infos[i])
+		}
+	}
+
+	if len(updatedInfos) > 0 {
+		encode, err := updatedInfos.Encode()
+		if err != nil {
+			logger.Error(err, "Encoding original resource information failed")
+			return apierrors.NewBadRequest(fmt.Sprintf("Encoding original resource information failed: %v", err))
+		}
+		util.InsertAnnotation(pod, util.DRAOriResAnnotation, encode)
+	} else {
+		delete(pod.Annotations, util.DRAOriResAnnotation)
+		logger.Info("Successfully updated the ownership of all resourceClaims")
 	}
 	return nil
 }
 
 func (h *mutateHandle) MutateUpdate(ctx context.Context, pod *corev1.Pod) error {
-	logger := log.FromContext(ctx)
-	val, ok := util.HasAnnotation(pod, DRAAnnotation)
-	if !ok {
-		return nil
-	}
-	var claims []string
-	for _, key := range strings.Split(val, ",") {
-		if key = strings.TrimSpace(key); key == "" {
-			continue
-		}
-		namespace, name, err := cache.SplitMetaNamespaceKey(key)
-		if err != nil {
-			logger.Error(err, "SplitMetaNamespaceKey failed", "resourceKey", key)
-			continue
-		}
-		if namespace == "" {
-			namespace = pod.Namespace
-		}
-		objKey := types.NamespacedName{Name: name, Namespace: namespace}
-		if err = h.updateResourceOwner(ctx, pod, objKey); err != nil {
-			claims = append(claims, key)
-		}
-	}
-	if len(claims) > 0 {
-		pod.Annotations[DRAAnnotation] = strings.Join(claims, ",")
-	} else {
-		delete(pod.Annotations, DRAAnnotation)
+	if h.options.DefaultConvertToDRA {
+		return h.updateDRAClaims(ctx, pod)
 	}
 	return nil
 }
@@ -454,16 +348,11 @@ func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admiss
 			return admission.Errored(http.StatusBadRequest, err)
 		}
 		err = h.MutateCreate(ctx, pod)
-		if err == nil && h.options.DefaultConvertToDRA {
-			err = h.MutateToDRA(ctx, pod)
-		}
 	case admissionv1.Update:
 		if err = h.decoder.Decode(req, pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		if h.options.DefaultConvertToDRA {
-			err = h.MutateUpdate(ctx, pod)
-		}
+		err = h.MutateUpdate(ctx, pod)
 	default:
 		// Always skip when a DELETE or UPDATE operation received in custom mutation handler.
 		return admission.ValidationResponse(true, "")

@@ -15,6 +15,11 @@ const (
 	NvidiaNativeGPUResourceName  = NvidiaDomain + "/gpu"
 
 	DRADriverName = "manager.nvidia.com"
+
+	IgnoreWebhookAnnotation = "vgpu-manager.io/ignore-webhook"
+	DRAOriResAnnotation     = "vgpu-manager.io/original-resources"
+	DRAOwnerPodLabel        = "vgpu-manager.io/owner-pod"
+	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
 )
 
 var (
