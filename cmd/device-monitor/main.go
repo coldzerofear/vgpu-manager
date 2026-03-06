@@ -58,7 +58,10 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
-	nodeConfig, err := node.NewNodeConfig(node.WithMonitorOptions(*opt), false)
+	nodeConfig, err := node.NewNodeConfig(
+		node.WithNodeNameOption(opt.NodeName),
+		node.WithConfigPathOption(opt.NodeConfigPath),
+		node.WithCGroupDriverOption(opt.CGroupDriver))
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}

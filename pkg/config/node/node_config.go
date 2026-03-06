@@ -8,8 +8,6 @@ import (
 	"regexp"
 	"strings"
 
-	monitoroptions "github.com/coldzerofear/vgpu-manager/cmd/device-monitor/options"
-	dpoptions "github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gopkg.in/yaml.v3"
@@ -35,6 +33,7 @@ type ConfigSpec struct {
 	ExcludeDevices      *IDStore   `json:"excludeDevices,omitempty"      yaml:"excludeDevices,omitempty"`
 	GDSEnabled          *bool      `json:"gdsEnabled,omitempty"          yaml:"gdsEnabled,omitempty"`
 	MOFEDEnabled        *bool      `json:"mofedEnabled,omitempty"        yaml:"mofedEnabled,omitempty"`
+	GDRCopyEnabled      *bool      `json:"gdrcopyEnabled"                yaml:"gdrcopyEnabled"`
 	MigStrategy         *string    `json:"migStrategy,omitempty"         yaml:"migStrategy,omitempty"`
 	OpenKernelModules   *bool      `json:"openKernelModules,omitempty"   yaml:"openKernelModules,omitempty"`
 	Imex                *imex.Imex `json:"imex,omitempty"                yaml:"imex,omitempty"`
@@ -44,7 +43,7 @@ type NodeConfigSpec struct {
 	ConfigSpec       `json:",inline" yaml:",inline"`
 	devicePluginPath *string
 	nodeConfigPath   string
-	CheckFields      bool
+	checkFields      bool
 }
 
 func (nc NodeConfigSpec) GetNodeName() string {
@@ -121,6 +120,13 @@ func (nc NodeConfigSpec) GetMOFEDEnabled() bool {
 	return *nc.MOFEDEnabled
 }
 
+func (nc NodeConfigSpec) GetGDRCopyEnabled() bool {
+	if nc.GDRCopyEnabled == nil {
+		return false
+	}
+	return *nc.GDRCopyEnabled
+}
+
 func (nc NodeConfigSpec) GetOpenKernelModules() bool {
 	if nc.OpenKernelModules == nil {
 		return false
@@ -152,6 +158,7 @@ func (nc NodeConfigSpec) YamlString() string {
 	marshal, err := yaml.Marshal(ct)
 	if err != nil {
 		klog.Warningf("node config yaml.Marshal failed: %v", err)
+		return ""
 	}
 	return string(marshal)
 }
@@ -160,6 +167,7 @@ func (nc NodeConfigSpec) JsonString() string {
 	marshal, err := json.MarshalIndent(nc, "", "  ")
 	if err != nil {
 		klog.Warningf("node config json.Marshal failed: %v", err)
+		return ""
 	}
 	return string(marshal)
 }
@@ -271,41 +279,6 @@ func parseConfigTemplate(configFile string) (*ConfigTemplate, error) {
 	return &configTemp, nil
 }
 
-type Option func(*NodeConfigSpec)
-
-func WithDevicePluginOptions(opt dpoptions.Options) Option {
-	return func(nodeConfig *NodeConfigSpec) {
-		nodeConfig.NodeName = opt.NodeName
-		nodeConfig.nodeConfigPath = opt.NodeConfigPath
-		nodeConfig.CGroupDriver = ptr.To[string](opt.CGroupDriver)
-		nodeConfig.MigStrategy = ptr.To[string](opt.MigStrategy)
-		nodeConfig.DeviceListStrategy = ptr.To[string](opt.DeviceListStrategy)
-		nodeConfig.DeviceSplitCount = ptr.To[int](opt.DeviceSplitCount)
-		nodeConfig.devicePluginPath = ptr.To[string](opt.DevicePluginPath)
-		nodeConfig.DeviceMemoryScaling = ptr.To[float64](opt.DeviceMemoryScaling)
-		nodeConfig.DeviceMemoryFactor = ptr.To[int](opt.DeviceMemoryFactor)
-		nodeConfig.DeviceCoresScaling = ptr.To[float64](opt.DeviceCoresScaling)
-		nodeConfig.ExcludeDevices = ptr.To[IDStore](parseDeviceIDs(opt.ExcludeDevices))
-		nodeConfig.GDSEnabled = ptr.To[bool](opt.GDSEnabled)
-		nodeConfig.MOFEDEnabled = ptr.To[bool](opt.MOFEDEnabled)
-		nodeConfig.OpenKernelModules = ptr.To[bool](opt.OpenKernelModules)
-		if len(opt.ImexChannelIDs) > 0 {
-			nodeConfig.Imex = &imex.Imex{
-				ChannelIDs: opt.ImexChannelIDs,
-				Required:   opt.ImexRequired,
-			}
-		}
-	}
-}
-
-func WithMonitorOptions(opt monitoroptions.Options) Option {
-	return func(nodeConfig *NodeConfigSpec) {
-		nodeConfig.NodeName = opt.NodeName
-		nodeConfig.nodeConfigPath = opt.NodeConfigPath
-		nodeConfig.CGroupDriver = ptr.To[string](opt.CGroupDriver)
-	}
-}
-
 func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 	configTemp, err := parseConfigTemplate(nodeConfig.nodeConfigPath)
 	if err != nil {
@@ -359,19 +332,130 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 	return nil
 }
 
-func NewNodeConfig(option Option, checkFields bool) (config *NodeConfigSpec, err error) {
-	if option == nil {
-		return nil, fmt.Errorf("node config option cannot is empty")
+type Option func(*NodeConfigSpec)
+
+func WithIMEXOption(imexChannelIDs []int, imexRequired bool) Option {
+	return func(spec *NodeConfigSpec) {
+		if len(imexChannelIDs) > 0 {
+			spec.Imex = &imex.Imex{
+				ChannelIDs: imexChannelIDs,
+				Required:   imexRequired,
+			}
+		}
+	}
+}
+
+func WithGDSEnabledOption(gdsEnabled bool) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.GDSEnabled = ptr.To[bool](gdsEnabled)
+	}
+}
+
+func WithMOFEDEnabledOption(mofedEnabled bool) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.MOFEDEnabled = ptr.To[bool](mofedEnabled)
+	}
+}
+
+func WithGDRCopyEnabledOption(gdrcopyEnabled bool) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.GDRCopyEnabled = ptr.To[bool](gdrcopyEnabled)
+	}
+}
+
+func WithOpenKernelModulesOption(openKernelModules bool) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.OpenKernelModules = ptr.To[bool](openKernelModules)
+	}
+}
+
+func WithExcludeDevicesOption(excludeDevices string) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.ExcludeDevices = ptr.To[IDStore](parseDeviceIDs(excludeDevices))
+	}
+}
+
+func WithDeviceCoresScalingOption(deviceCoresScaling float64) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.DeviceCoresScaling = ptr.To[float64](deviceCoresScaling)
+	}
+}
+
+func WithDeviceMemoryFactorOption(deviceMemoryFactor int) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.DeviceMemoryFactor = ptr.To[int](deviceMemoryFactor)
+	}
+}
+
+func WithDeviceMemoryScalingOption(deviceMemoryScaling float64) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.DeviceMemoryScaling = ptr.To[float64](deviceMemoryScaling)
+	}
+}
+
+func WithDevicePluginPathOption(devicePluginPath string) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.devicePluginPath = ptr.To[string](devicePluginPath)
+	}
+}
+
+func WithDeviceSplitCountOption(deviceSplitCount int) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.DeviceSplitCount = ptr.To[int](deviceSplitCount)
+	}
+}
+
+func WithDeviceListStrategyOption(deviceListStrategy string) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.DeviceListStrategy = ptr.To[string](deviceListStrategy)
+	}
+}
+
+func WithMigStrategyOption(migStrategy string) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.MigStrategy = ptr.To[string](migStrategy)
+	}
+}
+
+func WithCGroupDriverOption(cgroupDriver string) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.CGroupDriver = ptr.To[string](cgroupDriver)
+	}
+}
+
+func WithNodeNameOption(nodeName string) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.NodeName = nodeName
+	}
+}
+
+func WithConfigPathOption(configPath string) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.nodeConfigPath = configPath
+	}
+}
+
+func WithCheckFieldsOption(checkFields bool) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.checkFields = checkFields
+	}
+}
+
+func NewNodeConfig(options ...Option) (config *NodeConfigSpec, err error) {
+	if len(options) == 0 {
+		return nil, fmt.Errorf("node config options cannot is empty")
 	}
 	config = &NodeConfigSpec{}
-	option(config)
+	for _, option := range options {
+		option(config)
+	}
 
 	if len(config.nodeConfigPath) > 0 {
 		if err = loadConfigSpec(config); err != nil {
 			return nil, err
 		}
 	}
-	if checkFields {
+	if config.checkFields {
 		errs := config.checkNodeConfig()
 		err = MergeError(errs)
 	}

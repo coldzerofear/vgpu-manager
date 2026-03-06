@@ -37,6 +37,7 @@ type Options struct {
 	PprofBindPort       int
 	GDSEnabled          bool
 	MOFEDEnabled        bool
+	GDRCopyEnabled      bool
 	OpenKernelModules   bool
 	MigStrategy         string
 	ImexChannelIDs      []int
@@ -120,6 +121,7 @@ func NewOptions() *Options {
 		PprofBindPort:       defaultPprofBindPort,
 		GDSEnabled:          util.GetEnvEnabled("NVIDIA_GDS"),
 		MOFEDEnabled:        util.GetEnvEnabled("NVIDIA_MOFED"),
+		GDRCopyEnabled:      util.GetEnvEnabled("NVIDIA_GDRCOPY"),
 		MigStrategy:         defaultMigStrategy,
 		FeatureGate:         featureGate,
 		ImexChannelIDs:      imexChannelIDs,
@@ -148,6 +150,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable)")
 	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")
 	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
+	pflag.BoolVar(&o.GDRCopyEnabled, "gdrcopy-enabled", o.GDRCopyEnabled, "Ensure that containers are started with NVIDIA_GDRCOPY=enabled.")
 	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")

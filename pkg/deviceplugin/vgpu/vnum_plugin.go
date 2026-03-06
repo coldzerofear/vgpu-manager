@@ -337,6 +337,9 @@ func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, 
 	if devManager.GetNodeConfig().GetMOFEDEnabled() {
 		response.Envs["NVIDIA_MOFED"] = "enabled"
 	}
+	if devManager.GetNodeConfig().GetGDRCopyEnabled() {
+		response.Envs["NVIDIA_GDRCOPY"] = "enabled"
+	}
 }
 
 // Allocate is called during container creation so that the Device

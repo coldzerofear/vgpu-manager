@@ -223,24 +223,21 @@ config: []
 }
 
 func Test_NodeConfigToString(t *testing.T) {
-	config, err := NewNodeConfig(func(spec *NodeConfigSpec) {
-		spec.NodeName = "testNode"
-		spec.CGroupDriver = ptr.To[string]("systemd")
-		spec.DeviceListStrategy = ptr.To[string]("envvar")
-		spec.DeviceSplitCount = ptr.To[int](10)
-		spec.DeviceMemoryScaling = ptr.To[float64](1)
-		spec.DeviceMemoryFactor = ptr.To[int](1)
-		spec.DeviceCoresScaling = ptr.To[float64](1)
-		spec.ExcludeDevices = ptr.To[IDStore](NewIntIDStore(0, 1, 2))
-		spec.GDSEnabled = ptr.To[bool](true)
-		spec.MOFEDEnabled = ptr.To[bool](true)
-		spec.MigStrategy = ptr.To[string]("none")
-		spec.OpenKernelModules = ptr.To[bool](true)
-		spec.Imex = ptr.To[imex.Imex](imex.Imex{
-			ChannelIDs: []int{100, 200},
-			Required:   true,
-		})
-	}, false)
+	config, err := NewNodeConfig(
+		WithNodeNameOption("testNode"),
+		WithCGroupDriverOption("systemd"),
+		WithDeviceListStrategyOption("envvar"),
+		WithDeviceSplitCountOption(10),
+		WithDeviceMemoryScalingOption(1),
+		WithDeviceMemoryFactorOption(1),
+		WithDeviceCoresScalingOption(1),
+		WithExcludeDevicesOption("0,1,2"),
+		WithGDSEnabledOption(true),
+		WithMOFEDEnabledOption(true),
+		WithMigStrategyOption("none"),
+		WithOpenKernelModulesOption(true),
+		WithIMEXOption([]int{100, 200}, true),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

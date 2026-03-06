@@ -24,7 +24,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/utils/ptr"
 )
 
 func Test_ContainerLister(t *testing.T) {
@@ -67,13 +66,13 @@ func Test_ContainerLister(t *testing.T) {
 		DriverVersion:     "",
 		CudaDriverVersion: nvidia.CudaDriverVersion(12020),
 	}
-	config, err := node.NewNodeConfig(func(spec *node.NodeConfigSpec) {
-		spec.NodeName = nodeName
-		spec.DeviceSplitCount = ptr.To(10)
-		spec.DeviceMemoryFactor = ptr.To(1)
-		spec.DeviceCoresScaling = ptr.To(float64(1))
-		spec.DeviceMemoryScaling = ptr.To(float64(1))
-	}, false)
+	config, err := node.NewNodeConfig(
+		node.WithNodeNameOption("testNode"),
+		node.WithDeviceSplitCountOption(10),
+		node.WithDeviceMemoryFactorOption(1),
+		node.WithDeviceCoresScalingOption(1),
+		node.WithDeviceMemoryScalingOption(1),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
