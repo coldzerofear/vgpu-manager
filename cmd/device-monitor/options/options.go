@@ -56,7 +56,10 @@ func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(defaultFeatureGates))
 	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
-		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate))
+		Component,
+		compatibility.DefaultBuildEffectiveVersion(),
+		featureGate,
+	))
 	return &Options{
 		QPS:            defaultQPS,
 		Burst:          defaultBurst,

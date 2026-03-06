@@ -457,3 +457,11 @@ func GenerateShortHash(input string, length int) string {
 	}
 	return fullHex[:length]
 }
+
+func GetEnvEnabled(env string) bool {
+	if val, ok := os.LookupEnv(env); ok {
+		val = strings.TrimSpace(val)
+		return val == "1" || strings.EqualFold(val, "enabled") || strings.EqualFold(val, "true")
+	}
+	return false
+}

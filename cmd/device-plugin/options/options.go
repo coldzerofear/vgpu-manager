@@ -91,17 +91,20 @@ func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(defaultFeatureGates))
 	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
-		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate))
-	gdsEnabled := os.Getenv("NVIDIA_GDS") == "enabled" || os.Getenv("NVIDIA_GDS") == "true"
-	mofedEnabled := os.Getenv("NVIDIA_MOFED") == "enabled" || os.Getenv("NVIDIA_MOFED") == "true"
+		Component,
+		compatibility.DefaultBuildEffectiveVersion(),
+		featureGate,
+	))
 	var imexChannelIDs []int
-	imexChannelStr := strings.TrimSpace(os.Getenv("IMEX_CHANNEL_IDS"))
-	for _, split := range strings.Split(imexChannelStr, ",") {
-		if atoi, err := strconv.Atoi(strings.TrimSpace(split)); err == nil {
+	for _, val := range strings.Split(os.Getenv("IMEX_CHANNEL_IDS"), ",") {
+		if val = strings.TrimSpace(val); val == "" {
+			continue
+		}
+		if atoi, err := strconv.Atoi(val); err == nil {
 			imexChannelIDs = append(imexChannelIDs, atoi)
 		}
 	}
-	imexRequired := strings.EqualFold(strings.TrimSpace(os.Getenv("IMEX_REQUIRED")), "true")
+
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -115,12 +118,12 @@ func NewOptions() *Options {
 		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
 		DevicePluginPath:    pluginapi.DevicePluginPath,
 		PprofBindPort:       defaultPprofBindPort,
-		GDSEnabled:          gdsEnabled,
-		MOFEDEnabled:        mofedEnabled,
+		GDSEnabled:          util.GetEnvEnabled("NVIDIA_GDS"),
+		MOFEDEnabled:        util.GetEnvEnabled("NVIDIA_MOFED"),
 		MigStrategy:         defaultMigStrategy,
 		FeatureGate:         featureGate,
 		ImexChannelIDs:      imexChannelIDs,
-		ImexRequired:        imexRequired,
+		ImexRequired:        util.GetEnvEnabled("IMEX_REQUIRED"),
 	}
 }
 

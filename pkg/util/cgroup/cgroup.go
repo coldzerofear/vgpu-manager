@@ -53,20 +53,19 @@ func MustInitCGroupDriver(cgroupDriver string) {
 		case string(CGROUPFS):
 			currentCGroupDriver = CGROUPFS
 		default:
-			getCgroupDriverFuncs := []func() (CGroupDriver, error){
+			funcs := []func() (CGroupDriver, error){
 				readKubeletConfigCgroupDriver,
 				readKubeadmFlagsCgroupDriver,
 				getCgroupDriverFromKubeletProcess,
 				detectCgroupDriver,
 			}
 			var err error
-			for _, getCgroupDriver := range getCgroupDriverFuncs {
-				currentCGroupDriver, err = getCgroupDriver()
-				if err != nil {
+			for _, fn := range funcs {
+				if currentCGroupDriver, err = fn(); err != nil {
 					klog.V(4).ErrorS(err, "Attempt to extract cgroup driver failed")
-				} else {
-					break
+					continue
 				}
+				break
 			}
 			if err != nil {
 				klog.Exitln("Unable to detect a valid cgroup driver")
@@ -284,55 +283,6 @@ func detectCgroupDriver() (CGroupDriver, error) {
 
 	return "", fmt.Errorf("unable to detect cgroup driver on system")
 }
-
-//func getCgroupDriverFromCRI(ctx context.Context, runtimeServer criapi.RuntimeService) (*CGroupDriver, error) {
-//	klog.V(4).InfoS("Getting CRI runtime configuration information")
-//
-//	var (
-//		cgroupDriver  *CGroupDriver
-//		runtimeConfig *runtimeapi.RuntimeConfigResponse
-//		err           error
-//	)
-//	// Retry a couple of times, hoping that any errors are transient.
-//	// Fail quickly on known, non transient errors.
-//	for i := 0; i < 3; i++ {
-//		runtimeConfig, err = runtimeServer.RuntimeConfig(ctx)
-//		if err != nil {
-//			s, ok := status.FromError(err)
-//			if !ok || s.Code() != codes.Unimplemented {
-//				// We could introduce a backoff delay or jitter, but this is largely catching cases
-//				// where the runtime is still starting up and we request too early.
-//				// Give it a little more time.
-//				time.Sleep(time.Second * 2)
-//				continue
-//			}
-//			// CRI implementation doesn't support RuntimeConfig, fallback
-//			klog.InfoS("CRI implementation should be updated to support RuntimeConfig when KubeletCgroupDriverFromCRI feature gate has been enabled. Falling back to using cgroupDriver from kubelet config.")
-//			return nil, nil
-//		}
-//	}
-//	if err != nil {
-//		return nil, err
-//	}
-//
-//	// Calling GetLinux().GetCgroupDriver() won't segfault, but it will always default to systemd
-//	// which is not intended by the fields not being populated
-//	linuxConfig := runtimeConfig.GetLinux()
-//	if linuxConfig == nil {
-//		return nil, nil
-//	}
-//
-//	switch d := linuxConfig.GetCgroupDriver(); d {
-//	case runtimeapi.CgroupDriver_SYSTEMD:
-//		cgroupDriver = ptr.To(SYSTEMD)
-//	case runtimeapi.CgroupDriver_CGROUPFS:
-//		cgroupDriver = ptr.To(CGROUPFS)
-//	default:
-//		return nil, fmt.Errorf("runtime returned an unknown cgroup driver %d", d)
-//	}
-//	klog.InfoS("Using cgroup driver setting received from the CRI runtime", "cgroupDriver", *cgroupDriver)
-//	return cgroupDriver, nil
-//}
 
 func NewPodCgroupName(pod *corev1.Pod) CgroupName {
 	podQos := pod.Status.QOSClass
