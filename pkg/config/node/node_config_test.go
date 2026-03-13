@@ -274,8 +274,7 @@ func Test_NodeConfigToString(t *testing.T) {
       200
     ],
     "required": true
-  },
-  "CheckFields": false
+  }
 }`,
 	}, {
 		name: "example2, yaml string",

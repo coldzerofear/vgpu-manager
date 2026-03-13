@@ -159,7 +159,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 				continue
 			}
 			if device, ok := s.allocatable[result.Device]; ok && device.Type() == VGpuDeviceType {
-				klog.Errorf("vGPU claim cannot be applied to multiple Pods simultaneously",
+				klog.ErrorS(nil, "vGPU claim cannot be applied to multiple Pods simultaneously",
 					"resourceClaim", klog.KObj(claim), "claimUid", claim.UID)
 				return nil, fmt.Errorf("claim cannot be used for multiple Pods simultaneously")
 			}
