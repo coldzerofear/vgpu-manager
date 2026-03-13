@@ -18,6 +18,7 @@ const (
 
 	IgnoreWebhookAnnotation = "vgpu-manager.io/ignore-webhook"
 	DRAOriResAnnotation     = "vgpu-manager.io/original-resources"
+	DRAGenNameAnnotation    = "vgpu-manager.io/generate-name"
 	DRAOwnerPodLabel        = "vgpu-manager.io/owner-pod"
 	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
 )

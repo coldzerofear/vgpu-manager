@@ -58,7 +58,7 @@ func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) er
 }
 
 // buildResourceClaim Build vGPU resource claims based on container requests.
-func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.ResourceInfo, ownerPod, timestamp string) *resourceapi.ResourceClaim {
+func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.ResourceInfo, resourceClaimName, ownerPod, timestamp string) *resourceapi.ResourceClaim {
 	var (
 		deviceCount     int64
 		capacityRequest = make(map[resourceapi.QualifiedName]resource.Quantity)
@@ -160,15 +160,13 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.Resourc
 			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
 		})
 	}
-
 	resourceClaim := &resourceapi.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
 				util.DRAOwnerPodLabel:   ownerPod,
 				util.DRACreateTimeLabel: timestamp,
 			},
-			//GenerateName: fmt.Sprintf("%s-%s-", pod.Name, container.Name),
-			Name:      util.GenerateK8sSafeResourceName(pod.Name, info.Name),
+			Name:      resourceClaimName,
 			Namespace: pod.Namespace,
 		},
 		Spec: resourceapi.ResourceClaimSpec{
@@ -212,12 +210,6 @@ func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (
 		return apierrors.NewBadRequest(fmt.Sprintf("Decoding original resource information failed: %v", err))
 	}
 
-	//ownerPodValue := util.GenerateK8sSafeResourceName(pod.Namespace, pod.Name)
-	//if ownerPodValue == "" {
-	//	err = apierrors.NewInternalError(errors.New("the owner pod label value for generating resource claims is invalid"))
-	//	logger.Error(err, "", "generatedValue", ownerPodValue)
-	//	return err
-	//}
 	ownerPod := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
 	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
 	resourceClaimKeys := make([]types.NamespacedName, 0, len(infos))
@@ -239,6 +231,10 @@ func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (
 		}
 	}()
 
+	resourceName := pod.Name
+	if pod.GenerateName != "" {
+		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
+	}
 	for i, info := range infos {
 		index := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
 			return container.Name == info.Name
@@ -252,7 +248,7 @@ func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (
 			return err
 		}
 		container := &pod.Spec.Containers[index]
-		resourceClaimName := util.GenerateK8sSafeResourceName(pod.Name, container.Name)
+		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 		}) {
@@ -263,7 +259,7 @@ func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (
 			return err
 		}
 		// Create container resource claim
-		resourceClaim := h.buildResourceClaim(pod, info, ownerPod, createTimestamp)
+		resourceClaim := h.buildResourceClaim(pod, info, resourceClaimName, ownerPod, createTimestamp)
 		if err = h.client.Create(ctx, resourceClaim); err != nil {
 			logger.Error(err, "Failed to create vGPU resourceClaim", "container", container.Name)
 			return err
@@ -273,7 +269,7 @@ func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (
 			klog.KObj(resourceClaim), "container", container.Name)
 	}
 	if len(resourceClaimKeys) > 0 {
-		logger.Info("Successfully created all vGPU resourceClaims")
+		logger.Info("Successfully created all vGPU resourceClaims", "resourceClaims", resourceClaimKeys)
 	}
 	return nil
 }
@@ -300,6 +296,10 @@ func (h *validateHandle) deleteDRAClaims(ctx context.Context, pod *corev1.Pod) e
 		logger.V(2).Error(err, "Decoding original resource information failed")
 		return nil
 	}
+	resourceName := pod.Name
+	if pod.GenerateName != "" {
+		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
+	}
 
 	for _, info := range infos {
 		index := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
@@ -310,7 +310,7 @@ func (h *validateHandle) deleteDRAClaims(ctx context.Context, pod *corev1.Pod) e
 			continue
 		}
 		container := &pod.Spec.Containers[index]
-		resourceClaimName := util.GenerateK8sSafeResourceName(pod.Name, container.Name)
+		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 		}) {
@@ -324,8 +324,7 @@ func (h *validateHandle) deleteDRAClaims(ctx context.Context, pod *corev1.Pod) e
 				Namespace: pod.Namespace,
 			},
 		}
-		err := h.client.Delete(context.Background(), resourceClaim)
-		if err != nil && !apierrors.IsNotFound(err) {
+		if err := h.client.Delete(context.Background(), resourceClaim); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "Failed to delete ResourceClaim", "resourceClaim", klog.KObj(resourceClaim))
 		}
 	}
