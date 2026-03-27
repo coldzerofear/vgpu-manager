@@ -1,4 +1,5 @@
 #include "include/hook.h"
+#include "include/metrics.h"
 
 #include <sys/file.h>
 #include <fcntl.h>
@@ -27,6 +28,12 @@ static const struct timespec sleep_time = {
 };
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t elapsed_time_ns(const struct timeval *start,
+                                const struct timeval *end) {
+  int64_t sec = (int64_t)(end->tv_sec - start->tv_sec);
+  int64_t usec = (int64_t)(end->tv_usec - start->tv_usec);
+  return (uint64_t)(sec * 1000000000LL + usec * 1000LL);
+}
 
 static void ensure_create_lock_dir() {
   pthread_mutex_lock(&mutex);
@@ -66,16 +73,17 @@ int lock_gpu_device(int device_index) {
   gettimeofday(&start, NULL);
 
   while (1) {
+    gettimeofday(&now, NULL);
     int fd = try_acquire_lock(lock_path);
     if (fd != -1) {
-      LOGGER(VERBOSE, "locked gpu device %d, fd %d", device_index, fd);
+      metrics_record_lock_wait(device_index, elapsed_time_ns(&start, &now), 0);
       return fd; // success
     }
 
-    gettimeofday(&now, NULL);
     long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 +
                       (now.tv_usec - start.tv_usec) / 1000;
     if (unlikely(elapsed_ms >= LOCK_TIMEOUT_MS)) {
+      metrics_record_lock_wait(device_index, elapsed_time_ns(&start, &now), 1);
       LOGGER(ERROR, "lock timeout for device %d", device_index);
       return -1;
     }
@@ -95,7 +103,6 @@ void unlock_gpu_device(int fd) {
   };
   fcntl(fd, F_SETLK, &fl);
   close(fd);
-  LOGGER(VERBOSE, "released gpu device fd %d", fd);
 }
 
 int device_util_read_lock(int device_index) {

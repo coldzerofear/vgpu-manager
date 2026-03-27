@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 /*
  * Tencent is pleased to support the open source community by making TKEStack
  * available.
@@ -1008,8 +1010,8 @@ extern int get_mem_ratio(uint32_t index, double *ratio);
 extern int get_mem_limit(uint32_t index, size_t *limit);
 extern int get_core_limit(uint32_t index, int *limit);
 extern int get_core_soft_limit(uint32_t index, int *limit);
-extern int get_device_uuid(uint32_t index, char *uuid);
-extern int get_device_uuids(char *uuids);
+extern int get_device_uuid(uint32_t index, char *uuid, size_t uuid_size);
+extern int get_device_uuids(char *uuids, size_t uuids_size);
 extern int get_mem_oversold(uint32_t index, int *limit);
 extern int get_vmem_node_enabled(int *enabled);
 extern int file_exist(const char *file_path);
@@ -1251,18 +1253,25 @@ static void read_version_from_proc(void) {
   fclose(fp);
 }
 
-int strsplit(const char *s, char **dest, const char *sep) {
+int strsplit(char *s, char **dest, const char *sep) {
   char *token;
   int index = 0;
-  char *src = (char *)malloc(strlen(s) + 1);
-  strcpy(src, s);
-  token = strtok(src, sep);
-  while (token != NULL) {
+  char *context = NULL;
+  token = strtok_r(s, sep, &context);
+  while (token != NULL && index < MAX_DEVICE_COUNT) {
     dest[index] = token;
     index += 1;
-    token = strtok(NULL, sep);
+    token = strtok_r(NULL, sep, &context);
   }
   return index;
+}
+
+static int is_valid_device_index(int index, const char *kind) {
+  if (likely(index >= 0 && index < MAX_DEVICE_COUNT)) {
+    return 1;
+  }
+  LOGGER(ERROR, "invalid %s index %d", kind, index);
+  return 0;
 }
 
 int mmap_file_to_config_path(resource_data_t** data) {
@@ -1518,7 +1527,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
       result = real_dlsym(lib_control, symbol);
       if (likely(result)) {
         LOGGER(DETAIL, "search found cuda hook %s", symbol);
-        _load_necessary_data();
+        load_necessary_data();
         goto DONE;
       }
     }
@@ -1526,7 +1535,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
       if (unlikely(!strcmp(symbol, cuda_hooks_entry[i].name))) {
         result = cuda_hooks_entry[i].fn_ptr;
         LOGGER(DETAIL, "search found cuda hook %s", symbol);
-        _load_necessary_data();
+        load_necessary_data();
         goto DONE;
       }
     }
@@ -1670,6 +1679,9 @@ int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
   if (unlikely(ret)) {
     return -1;
   }
+  if (unlikely(!is_valid_device_index(nvml_index, "nvml"))) {
+    return -1;
+  }
   int host_index = nvml_to_host_device_index[nvml_index];
   if (likely(host_index >= 0)) {
     return host_index;
@@ -1708,6 +1720,9 @@ void formatUuid(CUuuid uuid, char* uuid_str, int len) {
 
 int _get_host_device_index_by_cuda_device(CUdevice device) {
   int cuda_index = (int) device;
+  if (unlikely(!is_valid_device_index(cuda_index, "cuda"))) {
+    return -1;
+  }
   int host_index = cuda_to_host_device_index[cuda_index];
   if (host_index < 0) {
     CUuuid cu_uuid;
@@ -1745,6 +1760,9 @@ int get_host_device_index_by_cuda_device(CUdevice device) {
 
 int get_nvml_device_index_by_cuda_device(CUdevice device) {
   int cuda_index = (int) device;
+  if (unlikely(!is_valid_device_index(cuda_index, "cuda"))) {
+    return -1;
+  }
   int nvml_index = -1;
   pthread_mutex_lock(&device_index_mutex);
   nvml_index = cuda_to_nvml_device_index[cuda_index];
@@ -1820,6 +1838,11 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
       }
     }
     if (!found) {
+      if (unlikely(processes_size >= MAX_PIDS)) {
+        LOGGER(ERROR, "host device %d virtual memory process list is full", host_index);
+        device_vmem_unlock(fd, host_index);
+        return;
+      }
       g_device_vmem->devices[host_index].processes[processes_size].pid = pid;
       g_device_vmem->devices[host_index].processes[processes_size].used = bytes;
       g_device_vmem->devices[host_index].processes_size++;
@@ -1832,21 +1855,21 @@ void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
   int found = 0;
   memory_node_t *entry_tmp = NULL;
   struct list_head *iter;
+  size_t size = 0;
+  pthread_mutex_lock(&g_memory_node_lock);
   list_for_each(iter, &g_memory_node->node) {
     entry_tmp = container_of(iter, memory_node_t, node);
     if (entry_tmp == NULL) continue;
     if (entry_tmp->dptr == dptr) {
       found = 1;
+      size = entry_tmp->bytes;
+      list_del(&entry_tmp->node);
+      free(entry_tmp);
       break;
     }
   }
-  if (!found) return;
-
-  size_t size = entry_tmp->bytes;
-  pthread_mutex_lock(&g_memory_node_lock);
-  list_del(&entry_tmp->node);
-  free(entry_tmp);
   pthread_mutex_unlock(&g_memory_node_lock);
+  if (!found) return;
 
   if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
   LOGGER(VERBOSE, "free virt memory to host device %d, dptr %lld, size %ld", host_index, dptr, size);
@@ -1894,27 +1917,31 @@ int init_g_vgpu_config_by_env() {
   char *pod_name = getenv("VGPU_POD_NAME");
   if (likely(pod_name != NULL)){
     strncpy(g_vgpu_config->pod_name, pod_name, sizeof(g_vgpu_config->pod_name)-1);
+    g_vgpu_config->pod_name[sizeof(g_vgpu_config->pod_name) - 1] = '\0';
   }
   char *pod_namespace = getenv("VGPU_POD_NAMESPACE");
   if (likely(pod_namespace != NULL)){
     strncpy(g_vgpu_config->pod_namespace, pod_namespace, sizeof(g_vgpu_config->pod_namespace)-1);
+    g_vgpu_config->pod_namespace[sizeof(g_vgpu_config->pod_namespace) - 1] = '\0';
   }
   char *pod_uid = getenv("VGPU_POD_UID");
   if (likely(pod_uid != NULL)){
     strncpy(g_vgpu_config->pod_uid, pod_uid, sizeof(g_vgpu_config->pod_uid)-1);
+    g_vgpu_config->pod_uid[sizeof(g_vgpu_config->pod_uid) - 1] = '\0';
   }
   char *container_name = getenv("VGPU_CONTAINER_NAME");
   if (likely(container_name != NULL)){
     strncpy(g_vgpu_config->container_name, container_name, sizeof(g_vgpu_config->container_name)-1);
+    g_vgpu_config->container_name[sizeof(g_vgpu_config->container_name) - 1] = '\0';
   }
   int i;
   char uuids[UUID_BUFFER_SIZE * MAX_DEVICE_COUNT];
-  ret = get_device_uuids(uuids);
+  ret = get_device_uuids(uuids, sizeof(uuids));
   if (unlikely(ret)) {
     for (i = 0; i < MAX_DEVICE_COUNT; i++) {
       char *uuid = &uuids[i * UUID_BUFFER_SIZE];
       memset(uuid, 0, UUID_BUFFER_SIZE);
-      if (get_device_uuid(i, uuid) != 0) {
+      if (get_device_uuid(i, uuid, UUID_BUFFER_SIZE) != 0) {
         strncpy(uuid, FAKE_GPU_UUID, UUID_BUFFER_SIZE - 1);
         uuid[UUID_BUFFER_SIZE - 1] = '\0';
       }
@@ -1936,7 +1963,10 @@ int init_g_vgpu_config_by_env() {
     if (strcmp(gpu_uuids[i], FAKE_GPU_UUID) == 0) {
       continue;
     }
-    strcpy(g_vgpu_config->devices[i].uuid, gpu_uuids[i]);
+    if (snprintf(g_vgpu_config->devices[i].uuid, UUID_BUFFER_SIZE, "%s", gpu_uuids[i]) >= UUID_BUFFER_SIZE) {
+      LOGGER(WARNING, "gpu uuid at index %d truncated", i);
+      continue;
+    }
     g_vgpu_config->devices[i].activate = 1;
     ret = get_mem_limit(i, &g_vgpu_config->devices[i].total_memory);
     if (unlikely(ret)) {
@@ -2059,6 +2089,10 @@ DONE:
 
 void init_nvml_to_host_device_index() {
   nvmlReturn_t rt;
+  // Intentionally perform a real NVML init here once more before building the
+  // NVML-to-host-device mapping. This front-loads NVML readiness so later hook
+  // paths can assume NVML is initialized instead of paying repeated lazy-init
+  // checks during the library lifetime.
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlInitWithFlags))) {
     rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlInitWithFlags, 0);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlInit_v2))) {
@@ -2100,7 +2134,7 @@ void init_nvml_to_host_device_index() {
   }
 }
 
-void _load_necessary_data() {
+void load_necessary_data() {
   // First, determine the driver version
   pthread_once(&g_cuda_ver_init, read_version_from_proc);
   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));
@@ -2112,7 +2146,6 @@ void _load_necessary_data() {
   reset_cuda_index_mapping();
 }
 
-void load_necessary_data() {
-  _load_necessary_data();
+void init_devices_mapping() {
   pthread_once(&init_nvml_host_index, init_nvml_to_host_device_index);
 }

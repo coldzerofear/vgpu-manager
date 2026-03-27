@@ -62,7 +62,7 @@ int get_compatibility_mode(int *mode) {
 
 int get_mem_ratio(uint32_t index, double *ratio) {
   char env[32] = {0};
-  sprintf(env, "%s_%d", CUDA_MEMORY_RATIO_ENV, index);
+  snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_RATIO_ENV, index);
   char *str = getenv(env);
   if (!str) {
     str = getenv(CUDA_MEMORY_RATIO_ENV);
@@ -79,7 +79,7 @@ int get_mem_ratio(uint32_t index, double *ratio) {
 
 int get_mem_limit(uint32_t index, size_t *limit) {
   char env[32] = {0};
-  sprintf(env, "%s_%d", CUDA_MEMORY_LIMIT_ENV, index);
+  snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_LIMIT_ENV, index);
   char *str = getenv(env);
   if (!str) {
     str = getenv(CUDA_MEMORY_LIMIT_ENV);
@@ -96,7 +96,7 @@ int get_mem_limit(uint32_t index, size_t *limit) {
 
 int get_core_limit(uint32_t index, int *limit) {
   char env[32] = {0};
-  sprintf(env, "%s_%d", CUDA_CORE_LIMIT_ENV, index);
+  snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_LIMIT_ENV, index);
   char *str = getenv(env);
   if (!str) {
     str = getenv(CUDA_CORE_LIMIT_ENV);
@@ -113,7 +113,7 @@ int get_core_limit(uint32_t index, int *limit) {
 
 int get_core_soft_limit(uint32_t index, int *limit) {
   char env[32] = {0};
-  sprintf(env, "%s_%d", CUDA_CORE_SOFT_LIMIT_ENV, index);
+  snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_SOFT_LIMIT_ENV, index);
   char *str = getenv(env);
   if (!str) {
     str = getenv(CUDA_CORE_SOFT_LIMIT_ENV);
@@ -128,24 +128,30 @@ int get_core_soft_limit(uint32_t index, int *limit) {
   return 0;
 }
 
-int get_device_uuid(uint32_t index, char *uuid) {
+int get_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
   char env[32] = {0};
-  sprintf(env, "%s_%d", MANAGER_VISIBLE_DEVICE_ENV, index);
+  snprintf(env, sizeof(env), "%s_%d", MANAGER_VISIBLE_DEVICE_ENV, index);
   char *str = getenv(env);
   if (!str || str[0] == '\0') {
     return -1;
   }
-  strcpy(uuid, str);
+  if (snprintf(uuid, uuid_size, "%s", str) >= uuid_size) {
+    LOGGER(WARNING, "device uuid env %s truncated", env);
+    return -1;
+  }
   return 0;
 }
 
-int get_device_uuids(char *uuids) {
+int get_device_uuids(char *uuids, size_t uuids_size) {
   char *str = NULL;
   str = getenv(MANAGER_VISIBLE_DEVICES_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
-  strcpy(uuids, str);
+  if (snprintf(uuids, uuids_size, "%s", str) >= uuids_size) {
+    LOGGER(WARNING, "device uuids env %s truncated", MANAGER_VISIBLE_DEVICES_ENV);
+    return -1;
+  }
   return 0;
 }
 
@@ -167,7 +173,7 @@ int get_vmem_node_enabled(int *i) {
 
 int get_mem_oversold(uint32_t index, int *i) {
   char env[32] = {0};
-  sprintf(env, "%s_%d", CUDA_MEM_OVERSOLD_ENV, index);
+  snprintf(env, sizeof(env), "%s_%d", CUDA_MEM_OVERSOLD_ENV, index);
   char *str = getenv(env);
   if (!str) {
     str = getenv(CUDA_MEM_OVERSOLD_ENV);
@@ -253,7 +259,7 @@ char *GetNthMapsToken(char *line, int n) {
 int library_exists_in_process_maps(char const *libName, unsigned int pid) {
   int ret = -1;
   char fileName[512];
-  sprintf(fileName, "/proc/%d/maps", pid);
+  snprintf(fileName, sizeof(fileName), "/proc/%d/maps", pid);
 
   FILE *fMaps = fopen(fileName, "r");
   if (NULL == fMaps) {

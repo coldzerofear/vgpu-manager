@@ -42,7 +42,8 @@ add_library(vgpu-control SHARED
     src/loader.c
     src/register.c
     src/util.c
-    src/lock.c)
+    src/lock.c
+    src/metrics.c)
 target_link_libraries(vgpu-control ${STATIC_C_LIBRARIES})
 target_compile_options(vgpu-control PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 

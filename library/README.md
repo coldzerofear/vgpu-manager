@@ -52,8 +52,8 @@ Use environment variable `LOGGER_LEVEL` to set the visibility of logs
 | ------------------ |---------------------------------------------|
 | 0                  | fatal                                       |
 | 1                  | errors,fatal                                |
-| 2                  | warnings,errors,fatal                       |
-| 3 (default)        | infos,warnings,errors,fatal                 |
+| 2 (default)        | warnings,errors,fatal                       |
+| 3                  | infos,warnings,errors,fatal                 |
 | 4                  | verbose,infos,warnings,errors,fatal         |
 | 5                  | details,verbose,infos,warnings,errors,fatal |
 
