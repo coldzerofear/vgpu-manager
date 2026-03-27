@@ -352,6 +352,9 @@ func GetK8sPodContainerCGroupFullPath(pod *corev1.Pod, containerName string,
 	if !ok {
 		return "", fmt.Errorf("failed to obtain container cgroup path")
 	}
+	if containerStatus.State.Running == nil {
+		return "", fmt.Errorf("Pod %s container %s not running", klog.KObj(pod), containerName)
+	}
 	runtimeName, containerId = ParseContainerRuntime(containerStatus.ContainerID)
 	cgroupName := NewPodCgroupName(pod)
 	switch currentCGroupDriver {
@@ -381,37 +384,38 @@ func convertCGroupfsFullPath(runtimeName, containerId string,
 
 func convertSystemdFullPath(runtimeName, containerId string,
 	cgroupName CgroupName, getFullPath func(string) string) (string, error) {
-	var toSystemd = func(cgroupName CgroupName) string {
-		if len(cgroupName) == 0 || (len(cgroupName) == 1 && cgroupName[0] == "") {
-			return "/"
-		}
-		var newparts []string
-		for _, part := range cgroupName {
-			part = strings.Replace(part, "-", "_", -1)
-			newparts = append(newparts, part)
-		}
-		return strings.Join(newparts, "-") + ".slice"
-	}
-	cgroupPath := fmt.Sprintf("%s/%s-%s.scope", cgroupName.ToSystemd(),
-		SystemdPathPrefixOfRuntime(runtimeName), containerId)
+	runtimePrefix := SystemdPathPrefixOfRuntime(runtimeName)
+	cgroupPath := fmt.Sprintf("%s/%s-%s", cgroupName.ToSystemd(), runtimePrefix, containerId)
 	fullPath := getFullPath(cgroupPath)
 	if !util.PathIsNotExist(fullPath) {
+		return fullPath, nil
+	}
+	if fullPath = getFullPath(cgroupPath + ".scope"); !util.PathIsNotExist(fullPath) {
 		return fullPath, nil
 	}
 	switch runtimeName {
 	case "containerd":
 		klog.Warningf("CGroup full path <%s> not exist", fullPath)
+		var toSystemd = func(cgroupName CgroupName) string {
+			if len(cgroupName) == 0 || (len(cgroupName) == 1 && cgroupName[0] == "") {
+				return "/"
+			}
+			var newparts []string
+			for _, part := range cgroupName {
+				part = strings.Replace(part, "-", "_", -1)
+				newparts = append(newparts, part)
+			}
+			return strings.Join(newparts, "-") + ".slice"
+		}
 		cgroupPath = fmt.Sprintf("system.slice/%s.service/%s:%s:%s", runtimeName,
-			toSystemd(cgroupName), SystemdPathPrefixOfRuntime(runtimeName), containerId)
-		fullPath = getFullPath(cgroupPath)
-		if !util.PathIsNotExist(fullPath) {
+			toSystemd(cgroupName), runtimePrefix, containerId)
+		if fullPath = getFullPath(cgroupPath); !util.PathIsNotExist(fullPath) {
 			return fullPath, nil
 		}
 	case "docker":
 		klog.Warningf("CGroup full path <%s> not exist", fullPath)
 		cgroupPath = fmt.Sprintf("%s/%s", cgroupName.ToSystemd(), containerId)
-		fullPath = getFullPath(cgroupPath)
-		if !util.PathIsNotExist(fullPath) {
+		if fullPath = getFullPath(cgroupPath); !util.PathIsNotExist(fullPath) {
 			return fullPath, nil
 		}
 	default:
@@ -422,8 +426,8 @@ func convertSystemdFullPath(runtimeName, containerId string,
 }
 
 func GetContainerStatus(pod *corev1.Pod, containerName string) (*corev1.ContainerStatus, bool) {
-	for i, cs := range pod.Status.ContainerStatuses {
-		if cs.Name == containerName {
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == containerName {
 			return &pod.Status.ContainerStatuses[i], true
 		}
 	}

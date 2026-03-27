@@ -19,7 +19,7 @@ var (
 	address        string
 	podUid         string
 	containerName  string
-	timeoutSeconds = 10
+	timeoutSeconds = 12
 	version        bool
 )
 
@@ -59,7 +59,7 @@ func main() {
 			return net.DialTimeout("unix", addr, d)
 		}))
 	if err != nil {
-		klog.Fatalf("can't dial %s, error %v", address, err)
+		klog.Fatalf("can't dial %s: %v", address, err)
 	}
 	defer func() {
 		_ = conn.Close()
@@ -73,6 +73,6 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if _, err = client.RegisterContainerDevice(ctx, req); err != nil {
-		klog.Fatalf("fail to get response from manager, error %v", err)
+		klog.Fatalf("fail to get response from manager: %v", err)
 	}
 }
