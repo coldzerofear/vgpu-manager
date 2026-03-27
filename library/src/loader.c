@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-
 /*
  * Tencent is pleased to support the open source community by making TKEStack
  * available.
@@ -1400,16 +1398,16 @@ DONE:
 
 void print_global_vgpu_config() {
   LOGGER(VERBOSE, "------------------print_global_vgpu_config------------------");
-  if (g_vgpu_config->pod_name && *g_vgpu_config->pod_name != '\0') {
+  if (g_vgpu_config->pod_name[0] != '\0') {
     LOGGER(VERBOSE, "Pod Name         : %s", g_vgpu_config->pod_name);
   }
-  if (g_vgpu_config->pod_namespace && *g_vgpu_config->pod_namespace != '\0') {
+  if (g_vgpu_config->pod_namespace[0] != '\0') {
     LOGGER(VERBOSE, "Pod Namespace    : %s", g_vgpu_config->pod_namespace);
   }
-  if (g_vgpu_config->pod_uid && *g_vgpu_config->pod_uid != '\0') {
+  if (g_vgpu_config->pod_uid[0] != '\0') {
     LOGGER(VERBOSE, "Pod Uid          : %s", g_vgpu_config->pod_uid);
   }
-  if (g_vgpu_config->container_name && *g_vgpu_config->container_name != '\0') {
+  if (g_vgpu_config->container_name[0] != '\0') {
     LOGGER(VERBOSE, "Container Name   : %s", g_vgpu_config->container_name);
   }
   LOGGER(VERBOSE, "CompatibilityMode: %d", g_vgpu_config->compatibility_mode);

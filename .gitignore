@@ -1,0 +1,7 @@
+.idea
+.vscode
+
+bin/
+build/
+library/build/
+library/.vscode/

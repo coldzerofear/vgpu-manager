@@ -332,10 +332,14 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	//   - None (Supported by the platform but currently inactive)
 	//   - ""   (Not supported by the platform)
 	var addressingMode *string
-	if mode, err := device.GetAddressingModeAsString(); err != nil {
-		return nil, fmt.Errorf("error getting addressing mode for device %d: %w", index, err)
-	} else if mode != "" {
-		addressingMode = &mode
+	if l.nvmlInterface.Extensions().LookupSymbol("nvmlDeviceGetAddressingMode") == nil {
+		if mode, err := device.GetAddressingModeAsString(); err != nil {
+			return nil, fmt.Errorf("error getting addressing mode for device %d: %w", index, err)
+		} else if mode != "" {
+			addressingMode = &mode
+		}
+	} else {
+		klog.V(4).Infof("Skipping addressing mode lookup for device %d because NVML symbol nvmlDeviceGetAddressingMode is unavailable", index)
 	}
 
 	var pcieRootAttr *deviceattribute.DeviceAttribute

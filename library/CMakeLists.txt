@@ -34,6 +34,7 @@ add_library(vgpu-control SHARED
     include/nvml-subset.h
     include/cuda-helper.h
     include/nvml-helper.h
+    include/metrics.h
     include/vdpau/vdpau.h
     src/cuda_originals.c
     src/nvml_originals.c

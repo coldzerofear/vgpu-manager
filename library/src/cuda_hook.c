@@ -1215,7 +1215,6 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
   if (path == MEMORY_PATH_UVA) {
     flags = CU_MEM_ATTACH_GLOBAL;
   }
-CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
   if (ret == CUDA_SUCCESS && flags == CU_MEM_ATTACH_GLOBAL) {
     malloc_gpu_virt_memory(*dptr, bytesize, host_index);
@@ -1246,7 +1245,6 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
     goto ALLOCATED_TO_UVA;
   }
 
-ALLOCATED_TO_GPU:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc))) {
@@ -1307,7 +1305,6 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
     goto ALLOCATED_TO_UVA;
   }
 
-ALLOCATED_TO_GPU:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch))) {
@@ -1367,7 +1364,6 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   if (path == MEMORY_PATH_UVA) {
     goto ALLOCATED_TO_UVA;
   }
-ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
@@ -1409,7 +1405,6 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   if (path == MEMORY_PATH_UVA) {
     goto ALLOCATED_TO_UVA;
   }
-ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
@@ -1474,7 +1469,6 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate_v2, pHandle, pAllocateArray);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate))) {
@@ -1512,7 +1506,6 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate_v2, pHandle, pAllocateArray);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate))) {
@@ -1552,9 +1545,8 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMipmappedArrayCreate, pHandle,
-                        pMipmappedArrayDesc, numMipmapLevels);
+                         pMipmappedArrayDesc, numMipmapLevels);
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -1578,7 +1570,6 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
 DONE:
   unlock_gpu_device(lock_fd);
@@ -1634,7 +1625,6 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
     ret = CUDA_SUCCESS;
     goto DONE;
   }
-CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, free, total);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
@@ -1867,7 +1857,6 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
 DONE:
   unlock_gpu_device(lock_fd);
@@ -1892,7 +1881,6 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
 DONE:
   unlock_gpu_device(lock_fd);
