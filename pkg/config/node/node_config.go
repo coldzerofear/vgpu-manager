@@ -33,7 +33,7 @@ type ConfigSpec struct {
 	ExcludeDevices      *IDStore   `json:"excludeDevices,omitempty"      yaml:"excludeDevices,omitempty"`
 	GDSEnabled          *bool      `json:"gdsEnabled,omitempty"          yaml:"gdsEnabled,omitempty"`
 	MOFEDEnabled        *bool      `json:"mofedEnabled,omitempty"        yaml:"mofedEnabled,omitempty"`
-	GDRCopyEnabled      *bool      `json:"gdrcopyEnabled"                yaml:"gdrcopyEnabled"`
+	GDRCopyEnabled      *bool      `json:"gdrcopyEnabled,omitempty"      yaml:"gdrcopyEnabled,omitempty"`
 	MigStrategy         *string    `json:"migStrategy,omitempty"         yaml:"migStrategy,omitempty"`
 	OpenKernelModules   *bool      `json:"openKernelModules,omitempty"   yaml:"openKernelModules,omitempty"`
 	Imex                *imex.Imex `json:"imex,omitempty"                yaml:"imex,omitempty"`

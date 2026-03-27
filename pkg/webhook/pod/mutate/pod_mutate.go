@@ -21,6 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -207,6 +208,11 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
 	resourceInfos := make(common.ResourceInfos, 0)
+	resourceName := pod.Name
+	if pod.GenerateName != "" {
+		resourceName = fmt.Sprintf("%s%s", pod.GenerateName, rand.String(5))
+		util.InsertAnnotation(pod, util.DRAGenNameAnnotation, resourceName)
+	}
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
 		if !util.IsVGPURequiredContainer(container) {
@@ -230,7 +236,7 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) e
 		util.DelResourceOfContainer(container, util.VGPUNumberResourceName)
 		util.DelResourceOfContainer(container, util.VGPUCoreResourceName)
 		util.DelResourceOfContainer(container, util.VGPUMemoryResourceName)
-		resourceClaimName := util.GenerateK8sSafeResourceName(pod.Name, container.Name)
+		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
 		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{
 			Name: resourceClaimName,
 		})
@@ -264,7 +270,10 @@ func (h *mutateHandle) updateDRAClaims(ctx context.Context, pod *corev1.Pod) err
 		logger.V(2).Error(err, "Decoding original resource information failed")
 		return nil
 	}
-
+	resourceName := pod.Name
+	if pod.GenerateName != "" {
+		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
+	}
 	updatedInfos := make(common.ResourceInfos, 0, len(infos))
 	for i, info := range infos {
 		index := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
@@ -275,7 +284,7 @@ func (h *mutateHandle) updateDRAClaims(ctx context.Context, pod *corev1.Pod) err
 			continue
 		}
 		container := &pod.Spec.Containers[index]
-		resourceClaimName := util.GenerateK8sSafeResourceName(pod.Name, container.Name)
+		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 		}) {
