@@ -10,9 +10,9 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - name: http
+    - name: https
       port: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
-      targetPort: http
+      targetPort: https
       protocol: TCP
     {{- if gt (int .Values.webhook.commands.pprofBindPort) 0 }}
     - name: pprof

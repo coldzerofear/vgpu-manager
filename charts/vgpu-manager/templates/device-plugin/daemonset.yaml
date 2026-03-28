@@ -118,9 +118,11 @@ spec:
               mountPath: /etc/vgpu-manager
             - name: cgroup
               mountPath: /sys/fs/cgroup
+              readOnly: true
             {{- if or $nc.yaml $nc.json }}
             - name: node-config
               mountPath: /config
+              readOnly: true
             {{- end }}
         - name: device-monitor
           image: {{ include "vgpu-manager.fullimage" . }}
@@ -140,6 +142,13 @@ spec:
             - --node-config-path=/config/nodeConfig.json
             {{- end }}
             - --enable-rbac={{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
+            {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
+            - --enable-tls=true
+            - --tls-key-file={{ .Values.devicePlugin.deviceMonitor.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.key
+            - --tls-cert-file={{ .Values.devicePlugin.deviceMonitor.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.crt
+            - --cert-refresh-interval={{ .Values.devicePlugin.deviceMonitor.commands.certRefreshInterval | default 5 }}
+            {{- end }}
+            - --min-scrape-interval={{ .Values.devicePlugin.deviceMonitor.commands.minScrapeInterval | default 1 }}
             - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
           ports:
             - name: metrics
@@ -167,28 +176,44 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
+              port: metrics
+              {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
+              scheme: HTTPS
+              {{- else }}
               scheme: HTTP
+              {{- end }}
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
+              port: metrics
+              {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
+              scheme: HTTPS
+              {{- else }}
               scheme: HTTP
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
           volumeMounts:
             - name: kubelet
               mountPath: /var/lib/kubelet
+              readOnly: true
             - name: manager
               mountPath: /etc/vgpu-manager
             - name: cgroup
               mountPath: /sys/fs/cgroup
+              readOnly: true
             {{- if or $nc.yaml $nc.json }}
             - name: node-config
               mountPath: /config
+              readOnly: true
             {{- end }}
+          {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
+            - name: cert-dir
+              mountPath: {{ .Values.devicePlugin.deviceMonitor.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
+              readOnly: true
+          {{- end }}
       volumes:
         - name: kubelet
           hostPath:
@@ -204,5 +229,10 @@ spec:
         - name: node-config
           configMap:
             name: {{ include "vgpu-manager.device-plugin" . }}-config
+        {{- end }}
+        {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
+        - name: cert-dir
+          secret:
+            secretName: {{ include "vgpu-manager.device-plugin" . }}-secret
         {{- end }}
 {{- end }}

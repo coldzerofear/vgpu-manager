@@ -41,14 +41,16 @@ spec:
       {{- end }}
       affinity:
         podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                  - key: app.kubernetes.io/component
-                    operator: In
-                    values:
-                      - {{ include "vgpu-manager.scheduler" . }}
-              topologyKey: "kubernetes.io/hostname"
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values:
+                        - {{ include "vgpu-manager.scheduler" . }}
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: kube-scheduler
           image: {{ .Values.scheduler.kubeScheduler.image }}:{{ include "kubeSchedulerImageTag" . }}
@@ -72,6 +74,7 @@ spec:
           volumeMounts:
             - name: scheduler-config
               mountPath: /config
+              readOnly: true
           livenessProbe:
             failureThreshold: 8
             httpGet:
@@ -94,9 +97,19 @@ spec:
             - --server-bind-port={{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
             - --pprof-bind-port={{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
             - --feature-gates={{ .Values.scheduler.schedulerExtender.commands.featureGates }}
+            {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+            - --enable-tls=true
+            - --tls-key-file={{ .Values.scheduler.schedulerExtender.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.key
+            - --tls-cert-file={{ .Values.scheduler.schedulerExtender.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.crt
+            - --cert-refresh-interval={{ .Values.scheduler.schedulerExtender.commands.certRefreshInterval | default 5 }}
+            {{- end }}
             - --v={{ .Values.scheduler.schedulerExtender.commands.logLevel }}
           ports:
+            {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+            - name: https
+            {{- else }}
             - name: http
+            {{- end }}
               containerPort: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
             {{- if gt (int .Values.scheduler.schedulerExtender.commands.pprofBindPort) 0 }}
             - name: pprof
@@ -106,19 +119,40 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
+              {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+              port: https
+              scheme: HTTPS
+              {{- else }}
               port: http
               scheme: HTTP
+              {{- end }}
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
+              {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+              port: https
+              scheme: HTTPS
+              {{- else }}
               port: http
               scheme: HTTP
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
+          {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+          volumeMounts:
+            - name: cert-dir
+              mountPath: {{ .Values.scheduler.schedulerExtender.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
+              readOnly: true
+          {{- end }}
       volumes:
         - name: scheduler-config
           configMap:
             name: {{ include "vgpu-manager.scheduler" . }}-config
+        {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+        - name: cert-dir
+          secret:
+            secretName: {{ include "vgpu-manager.scheduler" . }}-secret
+        {{- end }}
 {{- end }}

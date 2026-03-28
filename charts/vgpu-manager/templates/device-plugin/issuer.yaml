@@ -1,0 +1,14 @@
+{{- if and .Values.devicePlugin.enabled .Values.devicePlugin.deviceMonitor.tls.enabled -}}
+{{- if .Values.devicePlugin.deviceMonitor.tls.certManager.enabled -}}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ include "vgpu-manager.device-plugin" . }}-issuer
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+{{- end }}
+{{- end }}

@@ -24,3 +24,14 @@ kubectl apply -f deploy/vgpu-manager-kubeletplugin.yaml
 
 ## Usage
 
+Submit a request for a single VGPU pod
+
+```yaml
+kubectl apply -f  example/dra/pod-single-vgpu.yaml
+```
+
+Submit a request for a multi VGPU pod
+
+```yaml
+kubectl apply -f  example/dra/pod-multi-vgpu.yaml
+```

@@ -11,6 +11,11 @@ spec:
   endpoints:
     - path: /metrics
       port: metrics
+      {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true
+      {{- end }}
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace | quote }}

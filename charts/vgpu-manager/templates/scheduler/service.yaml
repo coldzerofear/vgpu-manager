@@ -10,14 +10,19 @@ metadata:
 spec:
   type: ClusterIP
   ports:
+    {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+    - name: https
+      targetPort: https
+    {{- else }}
     - name: http
-      port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
       targetPort: http
+    {{- end }}
+      port: {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
       protocol: TCP
     {{- if gt (int .Values.scheduler.schedulerExtender.commands.pprofBindPort) 0 }}
     - name: pprof
       port: {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
-      targetPort: http
+      targetPort: pprof
       protocol: TCP
     {{- end }}
   selector:

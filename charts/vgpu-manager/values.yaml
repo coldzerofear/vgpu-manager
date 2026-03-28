@@ -51,6 +51,20 @@ scheduler:
 #        cpu: 1000m
 #        memory: 1Gi
   schedulerExtender:
+    tls:
+      # Enable TLS for the device monitor endpoint.
+      # When enabled, the endpoint will be served over HTTPS instead of HTTP.
+      enabled: false
+      # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
+      certDir: /tmp/k8s-webhook-server/serving-certs
+      # Certificate validity period. (Unit day, default: 10 year)
+      certDuration: 3650
+      # If enabled, certificate distribution will be done using Cert Manager,
+      # which will take over the automatic renewal of certificates
+      certManager:
+        enabled: false
+        # The last refresh time of the certificate. (Unit day, default: 30 day)
+        certRenewBefore: 30
     env:
       - name: KUBE_FEATURE_WatchListClient
         value: "true"
@@ -66,6 +80,8 @@ scheduler:
       # - GPUTopology
       # - SerialFilterNode
       featureGates: ""
+      # Certificate refresh interval in seconds (TLS only works when enabled)
+      certRefreshInterval: 5
       logLevel: 3
     # Scheduler extender container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
@@ -170,6 +186,20 @@ devicePlugin:
 #        cpu: 2000m
 #        memory: 2Gi
   deviceMonitor:
+    tls:
+      # Enable TLS for the device monitor endpoint.
+      # When enabled, the endpoint will be served over HTTPS instead of HTTP.
+      enabled: false
+      # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
+      certDir: /tmp/k8s-webhook-server/serving-certs
+      # Certificate validity period. (Unit day, default: 10 year)
+      certDuration: 3650
+      # If enabled, certificate distribution will be done using Cert Manager,
+      # which will take over the automatic renewal of certificates
+      certManager:
+        enabled: false
+        # The last refresh time of the certificate. (Unit day, default: 30 day)
+        certRenewBefore: 30
     env:
       - name: KUBE_FEATURE_WatchListClient
         value: "true"
@@ -184,7 +214,12 @@ devicePlugin:
       # - SMWatcher
       # - VMemoryNode
       featureGates: ""
+      # Enable RBAC authentication for metrics service
       enableRBAC: false
+      # Certificate refresh interval in seconds (TLS only works when enabled)
+      certRefreshInterval: 5
+      # Minimum grasping interval in seconds.
+      minScrapeInterval: 1
       logLevel: 3
     # Device monitor container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.

@@ -1,0 +1,45 @@
+{{- if and .Values.devicePlugin.enabled .Values.devicePlugin.deviceMonitor.tls.enabled -}}
+{{- if .Values.devicePlugin.deviceMonitor.tls.certManager.enabled -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "vgpu-manager.device-plugin" . }}-cert
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ include "vgpu-manager.device-plugin" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "vgpu-manager.device-plugin" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "vgpu-manager.device-plugin" . }}-issuer
+  secretName: {{ include "vgpu-manager.device-plugin" . }}-secret
+  duration: {{ printf "%dh" (mul .Values.devicePlugin.deviceMonitor.tls.certDuration 24) }}
+  renewBefore: {{ printf "%dh" (mul .Values.devicePlugin.deviceMonitor.tls.certManager.certRenewBefore 24) }}
+{{- else }}
+{{- $webhookSvcName := include "vgpu-manager.device-plugin" . }}
+{{- $webhookSvcAltNames := list (printf "%s.%s.svc" $webhookSvcName .Release.Namespace) (printf "%s.%s.svc.cluster.local" $webhookSvcName .Release.Namespace) }}
+{{- $certName := printf "%s-cert" (include "vgpu-manager.device-plugin" .) }}
+{{- $duration := int .Values.devicePlugin.deviceMonitor.tls.certDuration }}
+{{- $ca := genCA $certName $duration }}
+{{- $cert := genSignedCert (printf "%s.%s" $webhookSvcName .Release.Namespace) nil $webhookSvcAltNames $duration $ca }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vgpu-manager.device-plugin" . }}-secret
+  namespace: {{ .Release.Namespace | quote }}
+  annotations:
+    "helm.sh/hook": "pre-install,pre-upgrade"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $ca.Cert | b64enc }}
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+{{- end }}
+{{- end }}

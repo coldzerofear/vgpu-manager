@@ -3,43 +3,46 @@ vgpu-manager deploy in namespace: {{ .Release.Namespace | quote }}
 
 {{- if .Values.scheduler.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed successfully!
-  - replica  count:  {{ .Values.scheduler.replicas }}
-  - scheduler name:  {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
-  - server    port:  {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
-  - pprof     port:  {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
-  - feature  gates:  {{ .Values.scheduler.schedulerExtender.commands.featureGates }}
-  - logger   level:  {{ .Values.scheduler.schedulerExtender.commands.logLevel }}
+  - ReplicaCount  :  {{ .Values.scheduler.replicas }}
+  - SchedulerName :  {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
+  - ServerBindPort:  {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
+  - PprofBindPort :  {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
+  - EnableTLS     :  {{ .Values.scheduler.schedulerExtender.tls.enabled | default false }}
+  - FeatureGates  :  {{ .Values.scheduler.schedulerExtender.commands.featureGates }}
+  - LoggerLevel   :  {{ .Values.scheduler.schedulerExtender.commands.logLevel }}
 {{- end }}
 
 {{- if .Values.devicePlugin.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} device-plugin has been deployed successfully!
 device-plugin:
-  - list  strategy:  {{ .Values.devicePlugin.devicePlugin.commands.deviceListStrategy | default "envvar" }}
-  - mig   strategy:  {{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
-  - split    count:  {{ .Values.devicePlugin.devicePlugin.commands.deviceSplitCount | default 10 }}
-  - cores  scaling:  {{ .Values.devicePlugin.devicePlugin.commands.deviceCoresScaling | default 1.0 }}
-  - memory scaling:  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling | default 1.0 }}
-  - memory  factor:  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor | default 1 }}
-  - pprof     port:  {{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
-  - logger   level:  {{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
-  - feature  gates:  {{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
+  - ListStrategy  :  {{ .Values.devicePlugin.devicePlugin.commands.deviceListStrategy | default "envvar" }}
+  - MigStrategy   :  {{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
+  - SplitCount    :  {{ .Values.devicePlugin.devicePlugin.commands.deviceSplitCount | default 10 }}
+  - CoresScaling  :  {{ .Values.devicePlugin.devicePlugin.commands.deviceCoresScaling | default 1.0 }}
+  - MemoryScaling :  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling | default 1.0 }}
+  - MemoryFactor  :  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor | default 1 }}
+  - PprofBindPort :  {{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
+  - FeatureGates  :  {{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
+  - LoggerLevel   :  {{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
 device-monitor:
-  - server    port:  {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
-  - pprof     port:  {{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
-  - logger   level:  {{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
-  - enable    rbac:  {{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
-  - feature  gates:  {{ .Values.devicePlugin.deviceMonitor.commands.featureGates }}
+  - ServerBindPort:  {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
+  - PprofBindPort :  {{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
+  - EnableTLS     :  {{ .Values.devicePlugin.deviceMonitor.tls.enabled | default false }}
+  - EnableRBAC    :  {{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
+  - ScrapeInterval:  {{ .Values.devicePlugin.deviceMonitor.commands.minScrapeInterval | default 1 }}
+  - FeatureGates  :  {{ .Values.devicePlugin.deviceMonitor.commands.featureGates }}
+  - LoggerLevel   :  {{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
 {{- end }}
 
 {{- if .Values.webhook.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} webhook component has been deployed successfully!
-  - replica  count:  {{ .Values.webhook.replicas }}
-  - server    port:  {{ .Values.webhook.commands.serverBindPort | default 9443 }}
-  - pprof     port:  {{ .Values.webhook.commands.pprofBindPort }}
-  - cert directory:  {{ .Values.webhook.commands.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
-  - node    policy:  {{ .Values.webhook.commands.defaultNodePolicy }}
-  - device  policy:  {{ .Values.webhook.commands.defaultDevicePolicy }}
-  - logger   level:  {{ .Values.webhook.commands.logLevel }}
+  - ReplicaCount  :  {{ .Values.webhook.replicas }}
+  - ServerBindPort:  {{ .Values.webhook.commands.serverBindPort | default 9443 }}
+  - PprofBindPort :  {{ .Values.webhook.commands.pprofBindPort }}
+  - CertDirectory :  {{ .Values.webhook.commands.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
+  - NodePolicy    :  {{ .Values.webhook.commands.defaultNodePolicy }}
+  - DevicePolicy  :  {{ .Values.webhook.commands.defaultDevicePolicy }}
+  - LoggerLevel   :  {{ .Values.webhook.commands.logLevel }}
 {{- end }}
 
 ** Please be patient while the chart is being deployed **

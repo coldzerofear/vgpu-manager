@@ -81,7 +81,7 @@ spec:
             successThreshold: 1
             timeoutSeconds: 1
           ports:
-            - name: http
+            - name: https
               containerPort: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
             {{- if gt (int .Values.webhook.commands.pprofBindPort) 0 }}
             - name: pprof
