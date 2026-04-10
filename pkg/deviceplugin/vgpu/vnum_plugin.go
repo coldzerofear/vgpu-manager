@@ -737,13 +737,12 @@ func (m *vNumberDevicePlugin) Devices() []*pluginapi.Device {
 			}
 		}
 		for i := 0; i < gpuDevice.Number; i++ {
-			devId := fmt.Sprintf("%d:%s:%d", gpuDevice.Id, gpuDevice.Uuid, i)
 			health := pluginapi.Healthy
 			if !gpuDevice.Healthy {
 				health = pluginapi.Unhealthy
 			}
 			devices = append(devices, &pluginapi.Device{
-				ID:       devId,
+				ID:       fmt.Sprintf("%s::%d", gpuDevice.Uuid, i),
 				Health:   health,
 				Topology: topologyInfo,
 			})
