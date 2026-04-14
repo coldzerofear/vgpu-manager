@@ -238,17 +238,61 @@ const (
 	PhysicalMemoryPolicy MemorySchedulerPolicy = "physical"
 )
 
+func (p MemorySchedulerPolicy) String() string {
+	return string(p)
+}
+
 // FeatureGates
 const (
-	CorePlugin       = "CorePlugin"
-	MemoryPlugin     = "MemoryPlugin"
-	Reschedule       = "Reschedule"
-	GPUTopology      = "GPUTopology"
-	SMWatcher        = "SMWatcher"
-	SerialBindNode   = "SerialBindNode"
-	SerialFilterNode = "SerialFilterNode"
-	VMemoryNode      = "VMemoryNode"
-	ClientMode       = "ClientMode"
+	CorePlugin       = "CorePlugin"       // GPUCoreResourcePlugin
+	MemoryPlugin     = "MemoryPlugin"     // GPUMemoryResourcePlugin
+	Reschedule       = "Reschedule"       // AllocationFailureReschedule
+	GPUTopology      = "GPUTopology"      // GPUTopologyAwareAllocation
+	SMWatcher        = "SMWatcher"        // SharedSMUtilizationWatcher
+	SerialBindNode   = "SerialBindNode"   // SerializedNodeBind
+	SerialFilterNode = "SerialFilterNode" // SerializedNodeFilter
+	VMemoryNode      = "VMemoryNode"      // VGPUMemoryTracking
+	ClientMode       = "ClientMode"       // DevicePluginClientMode
+)
+
+const (
+	// GPUCoreResourcePlugin reports virtual GPU core resources to kubelet
+	// for node allocatable visibility only.
+	GPUCoreResourcePlugin = "GPUCoreResourcePlugin"
+
+	// GPUMemoryResourcePlugin reports virtual GPU memory resources to kubelet
+	// for node allocatable visibility only.
+	GPUMemoryResourcePlugin = "GPUMemoryResourcePlugin"
+
+	// AllocationFailureReschedule enables rescheduling or recovery for pods
+	// whose device allocation failed or whose assigned devices became abnormal.
+	AllocationFailureReschedule = "AllocationFailureReschedule"
+
+	// TopologyAwareGPUAllocation prefers better multi-GPU combinations based on topology.
+	TopologyAwareGPUAllocation = "TopologyAwareGPUAllocation"
+
+	// SharedSMUtilizationWatcher enables a shared watcher to monitor SM utilization
+	// instead of starting one watcher per container.
+	SharedSMUtilizationWatcher = "SharedSMUtilizationWatcher"
+
+	// SerializedNodeBind serializes bind operations in the scheduler extender
+	// to reduce allocation conflicts during concurrent pod creation.
+	SerializedNodeBind = "SerializedNodeBind"
+
+	// SerializedNodeFilter serializes filter operations in the scheduler extender
+	// to avoid inconsistent resource views during concurrent scheduling.
+	SerializedNodeFilter = "SerializedNodeFilter"
+
+	// VirtualMemoryTracking tracks virtual device memory allocation through local records.
+	VirtualMemoryTracking = "VirtualMemoryTracking"
+
+	// DevicePluginClientMode enables Unix gRPC client mode for communication
+	// between allocated containers and the device plugin.
+	DevicePluginClientMode = "DevicePluginClientMode"
+
+	// HonorPreAllocatedDeviceIDs makes preferred allocation follow
+	// pre-allocated device IDs whenever possible.
+	HonorPreAllocatedDeviceIDs = "HonorPreAllocatedDeviceIDs"
 )
 
 // CompatibilityMode Container environment compatibility mode type

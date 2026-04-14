@@ -500,7 +500,7 @@ func (m *DeviceManager) handleNotify() {
 			return
 		case dev := <-m.unhealthy:
 			if !dev.isHealthy() {
-				klog.V(4).Infof("Device: %s is aleady marked unhealthy. Skip notifications", dev.getUuid())
+				klog.V(4).Infof("Device %s is already marked unhealthy. Skip notifications", dev.getUuid())
 				continue
 			}
 

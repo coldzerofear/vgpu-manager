@@ -73,18 +73,21 @@ const (
 	VMemoryNode featuregate.Feature = util.VMemoryNode
 	// ClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
 	ClientMode featuregate.Feature = util.ClientMode
+	// HonorPreAllocatedDeviceIDs makes preferred allocation follow pre-allocated device IDs whenever possible.
+	HonorPreAllocatedDeviceIDs featuregate.Feature = util.HonorPreAllocatedDeviceIDs
 )
 
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		CorePlugin:   {Default: false, PreRelease: featuregate.Alpha},
-		MemoryPlugin: {Default: false, PreRelease: featuregate.Alpha},
-		Reschedule:   {Default: false, PreRelease: featuregate.Alpha},
-		GPUTopology:  {Default: false, PreRelease: featuregate.Alpha},
-		SMWatcher:    {Default: false, PreRelease: featuregate.Alpha},
-		VMemoryNode:  {Default: false, PreRelease: featuregate.Alpha},
-		ClientMode:   {Default: false, PreRelease: featuregate.Alpha},
+		CorePlugin:                 {Default: false, PreRelease: featuregate.Alpha},
+		MemoryPlugin:               {Default: false, PreRelease: featuregate.Alpha},
+		Reschedule:                 {Default: false, PreRelease: featuregate.Alpha},
+		GPUTopology:                {Default: false, PreRelease: featuregate.Alpha},
+		SMWatcher:                  {Default: false, PreRelease: featuregate.Alpha},
+		VMemoryNode:                {Default: false, PreRelease: featuregate.Alpha},
+		ClientMode:                 {Default: false, PreRelease: featuregate.Alpha},
+		HonorPreAllocatedDeviceIDs: {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 

@@ -364,21 +364,22 @@ func GetPercentageValue(x uint32) uint32 {
 	}
 }
 
-func VGPUControlDisabled(pod *corev1.Pod, containerName string) bool {
-	index := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool {
-		return c.Name == containerName
-	})
-	if index < 0 {
-		return false
-	}
-	disabled := false
-	for _, envVar := range pod.Spec.Containers[index].Env {
-		if envVar.Name == DisableVGPUEnv {
-			disabled = envVar.Value == "true"
-			break
+func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool {
+	for _, cont := range pod.Spec.Containers {
+		if cont.Name != containerName {
+			continue
+		}
+		for _, env := range cont.Env {
+			if env.Name != envName {
+				continue
+			}
+			val := strings.TrimSpace(env.Value)
+			if val == "1" || strings.EqualFold(val, "true") {
+				return true
+			}
 		}
 	}
-	return disabled
+	return false
 }
 
 func InformerFactoryHasSynced(factory informers.SharedInformerFactory, ctx context.Context) bool {

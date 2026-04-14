@@ -273,6 +273,23 @@ func (pdc *PodDeviceClaim) UnmarshalText(text string) error {
 	return nil
 }
 
+func UpdatePodRealContainerDeviceClaim(pod *corev1.Pod, cdc ContainerDeviceClaim) error {
+	pdc := PodDeviceClaim{}
+	val, ok := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
+	if ok {
+		if err := pdc.UnmarshalText(val); err != nil {
+			klog.Warningf("decoding pod real container device claim failed: %v", err)
+		}
+	}
+	pdc = append(pdc, cdc)
+	val, err := pdc.MarshalText()
+	if err != nil {
+		return fmt.Errorf("encoding pod real container device claim failed: %v", err)
+	}
+	util.InsertAnnotation(pod, util.PodVGPURealAllocAnnotation, val)
+	return nil
+}
+
 // GetCurrentPreAllocateContainerDevice find the device information pre allocated to the current container.
 func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClaim, error) {
 	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
@@ -281,7 +298,7 @@ func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClai
 		return nil, fmt.Errorf("parse pre assign devices failed: %v", err)
 	}
 	if len(preAllocPodDevices) == 0 {
-		return nil, fmt.Errorf("current pre assign devices is empty")
+		return nil, errors.New("current pre assign devices is empty")
 	}
 	checkExistCont := func(contName string) error {
 		exist := slices.ContainsFunc(pod.Spec.Containers, func(container corev1.Container) bool {
