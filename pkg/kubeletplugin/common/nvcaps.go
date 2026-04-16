@@ -64,6 +64,24 @@ func (i *NVcapDeviceInfo) CDICharDevNode() *cdispec.DeviceNode {
 	}
 }
 
+// A note: MIG minors are predictable, and can be looked up in
+// `/proc/driver/nvidia-caps/mig-minors`:
+//
+// $ cat /proc/driver/nvidia-caps/mig-minors
+// ...
+// gpu0/gi0/access 3
+// gpu0/gi0/ci0/access 4
+// gpu0/gi0/ci1/access 5
+// gpu0/gi0/ci2/access 6
+// ...
+// gpu3/gi3/ci3/access 439
+// gpu3/gi3/ci4/access 440
+// gpu3/gi3/ci5/access 441
+// ...
+// gpu6/gi11/ci5/access 918
+// gpu6/gi11/ci6/access 919
+// gpu6/gi11/ci7/access 920
+
 // Parse a capabilities file under /proc/driver/nvidia/capabilities and return
 // an NVcapDeviceInfo struct with its `Path` set to
 // `/dev/nvidia-caps/nvidia-cap<MINOR>`.

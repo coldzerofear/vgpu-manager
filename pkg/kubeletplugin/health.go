@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	drapb "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
@@ -43,11 +44,13 @@ type healthcheck struct {
 	server *grpc.Server
 	wg     sync.WaitGroup
 
+	kphelper *kubeletplugin.Helper
+
 	regClient registerapi.RegistrationClient
 	draClient drapb.DRAPluginClient
 }
 
-func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error) {
+func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin.Helper) (*healthcheck, error) {
 	port := config.Flags.HealthcheckPort
 	if port < 0 {
 		return nil, nil
@@ -92,6 +95,7 @@ func startHealthcheck(ctx context.Context, config *Config) (*healthcheck, error)
 		server:    server,
 		regClient: registerapi.NewRegistrationClient(regConn),
 		draClient: drapb.NewDRAPluginClient(draConn),
+		kphelper:  helper,
 	}
 	grpc_health_v1.RegisterHealthServer(server, healthcheck)
 
@@ -129,14 +133,16 @@ func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheck
 		klog.ErrorS(err, "failed to call GetInfo")
 		return status, nil
 	}
-	klog.V(6).Infof("Successfully invoked GetInfo: %v", info)
+	klog.V(7).Infof("Health check: successfully invoked GetInfo: %v", info)
 
 	_, err = h.draClient.NodePrepareResources(ctx, &drapb.NodePrepareResourcesRequest{})
 	if err != nil {
 		klog.ErrorS(err, "failed to call NodePrepareResources")
 		return status, nil
 	}
-	klog.V(6).Info("Successfully invoked NodePrepareResources")
+
+	klog.V(7).Info("Health check: success: got NodePrepareResourcesResponse for noop request")
+	klog.V(6).Infof("Current kubelet plugin registration status: %s", h.kphelper.RegistrationStatus())
 
 	status.Status = grpc_health_v1.HealthCheckResponse_SERVING
 	return status, nil

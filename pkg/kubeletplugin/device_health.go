@@ -24,12 +24,85 @@ import (
 	"sync"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/klog/v2"
 )
 
 const (
 	FullGPUInstanceID uint32 = 0xFFFFFFFF
 )
+
+const (
+	TaintKeyXID         = util.DRADriverName + "/xid"
+	TaintKeyGPULost     = util.DRADriverName + "/gpu-lost"
+	TaintKeyUnmonitored = util.DRADriverName + "/unmonitored"
+)
+
+// TODO(issue #1001):Remove this hardcoded constant and switch to the upstream
+// resourceapi.DeviceTaintEffectNone once the k8s.io/api dependency is bumped
+// to a version that includes it (KEP-5055 beta).
+// DeviceTaintEffectNone is an informational effect that does not affect
+// scheduling or eviction.
+const DeviceTaintEffectNone resourceapi.DeviceTaintEffect = "None"
+
+// DeviceHealthEventType classifies the category of health event detected by
+// the NVML health monitor.
+type DeviceHealthEventType string
+
+const (
+	HealthEventXID         DeviceHealthEventType = "xid"
+	HealthEventGPULost     DeviceHealthEventType = "gpu-lost"
+	HealthEventUnmonitored DeviceHealthEventType = "unmonitored"
+)
+
+// DeviceHealthEvent carries a typed health notification from the NVML health
+// monitor to the driver's event handler, enabling the driver to set the
+// appropriate DRA device taint per the Option A schema (KEP-5055).
+// Devices is a batch: for GPU_LOST and unmonitored events where all affected devices
+// are aggregated into a single event so the consumer applies one ResourceSlice
+// update instead of N.
+type DeviceHealthEvent struct {
+	Devices   []*AllocatableDevice
+	EventType DeviceHealthEventType
+	// inspired by NVML Event type and only meaningful for xid errors.
+	// may have to create a custom type based on future device-api
+	EventData uint64
+}
+
+// healthEventToTaint maps a DeviceHealthEvent to the corresponding DRA
+// DeviceTaint using the Option A taint key schema: one key per health
+// dimension under the gpu.nvidia.com domain.
+func healthEventToTaint(monitor deviceHealthMonitor, event *DeviceHealthEvent) *resourceapi.DeviceTaint {
+	switch event.EventType {
+	case HealthEventXID:
+		effect := resourceapi.DeviceTaintEffectNoSchedule
+		if monitor != nil && monitor.IsEventNonFatal(event) {
+			effect = DeviceTaintEffectNone
+		}
+		return &resourceapi.DeviceTaint{
+			Key:    TaintKeyXID,
+			Value:  strconv.FormatUint(event.EventData, 10),
+			Effect: effect,
+		}
+	case HealthEventGPULost:
+		return &resourceapi.DeviceTaint{
+			Key:    TaintKeyGPULost,
+			Effect: resourceapi.DeviceTaintEffectNoSchedule,
+		}
+	case HealthEventUnmonitored:
+		return &resourceapi.DeviceTaint{
+			Key:    TaintKeyUnmonitored,
+			Effect: DeviceTaintEffectNone,
+		}
+	default:
+		klog.Errorf("Unknown health event type %q, defaulting to unmonitored taint", event.EventType)
+		return &resourceapi.DeviceTaint{
+			Key:    TaintKeyUnmonitored,
+			Effect: DeviceTaintEffectNone,
+		}
+	}
+}
 
 // For a MIG device the placement is defined by the 3-tuple <parent UUID, GI, CI>.
 // For a full device the returned 3-tuple is the device's uuid and (FullGPUInstanceID) 0xFFFFFFFF for the other two elements.
@@ -38,25 +111,31 @@ type devicePlacementMap map[string]map[uint32]map[uint32]*AllocatableDevice
 type nvmlDeviceHealthMonitor struct {
 	nvmllib           nvml.Interface
 	eventSet          nvml.EventSet
-	unhealthy         chan *AllocatableDevice
+	unhealthy         chan *DeviceHealthEvent
 	deviceByPlacement devicePlacementMap
 	skippedXids       map[uint64]bool
 	wg                sync.WaitGroup
 }
 
-func newNvmlDeviceHealthMonitor(config *Config, allocatable AllocatableDevices, nvdevlib *deviceLib) (*nvmlDeviceHealthMonitor, error) {
+func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocatableDevices, nvdevlib *deviceLib) (*nvmlDeviceHealthMonitor, error) {
 	if nvdevlib == nil {
 		return nil, fmt.Errorf("nvml library is nil")
 	}
-	if ret := nvdevlib.NvmlInit(); ret != nvml.SUCCESS {
+	if ret := nvdevlib.Init(); ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("failed to initialize NVML: %v", ret)
 	}
-	defer nvdevlib.NvmlShutdown()
+	defer func() {
+		_ = nvdevlib.Shutdown()
+	}()
 
+	if perGPUAllocatable == nil {
+		return nil, fmt.Errorf("perGPUAllocatable is nil")
+	}
+	all := perGPUAllocatable.GetAllDevices()
 	m := &nvmlDeviceHealthMonitor{
 		nvmllib:           nvdevlib,
-		unhealthy:         make(chan *AllocatableDevice, len(allocatable)),
-		deviceByPlacement: getDevicePlacementMap(allocatable),
+		unhealthy:         make(chan *DeviceHealthEvent, len(all)),
+		deviceByPlacement: getDevicePlacementMap(all),
 		skippedXids:       xidsToSkip(config.Flags.AdditionalXidsToIgnore),
 	}
 	return m, nil
@@ -99,24 +178,24 @@ func (m *nvmlDeviceHealthMonitor) registerEventsForDevices() {
 		gpu, ret := m.nvmllib.DeviceGetHandleByUUID(parentUUID)
 		if ret != nvml.SUCCESS {
 			klog.Warningf("Unable to get device handle from UUID[%s]: %v; marking it as unhealthy", parentUUID, ret)
-			m.markAllMigDevicesUnhealthy(giMap)
+			m.sendHealthEventForDevices(giMap, HealthEventUnmonitored)
 			continue
 		}
 
 		supportedEvents, ret := gpu.GetSupportedEventTypes()
 		if ret != nvml.SUCCESS {
 			klog.Warningf("unable to determine the supported events for %s: %v; marking it as unhealthy", parentUUID, ret)
-			m.markAllMigDevicesUnhealthy(giMap)
+			m.sendHealthEventForDevices(giMap, HealthEventUnmonitored)
 			continue
 		}
 
 		ret = gpu.RegisterEvents(eventMask&supportedEvents, m.eventSet)
 		if ret == nvml.ERROR_NOT_SUPPORTED {
 			klog.Warningf("Device %v is too old to support healthchecking.", parentUUID)
-		}
-		if ret != nvml.SUCCESS {
+			m.sendHealthEventForDevices(giMap, HealthEventUnmonitored)
+		} else if ret != nvml.SUCCESS {
 			klog.Warningf("unable to register events for %s: %v; marking it as unhealthy", parentUUID, ret)
-			m.markAllMigDevicesUnhealthy(giMap)
+			m.sendHealthEventForDevices(giMap, HealthEventUnmonitored)
 		}
 	}
 }
@@ -155,7 +234,7 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 			if ret != nvml.SUCCESS {
 				if ret == nvml.ERROR_GPU_IS_LOST {
 					klog.Warningf("GPU is lost error: %v; Marking all devices as unhealthy", ret)
-					m.markAllDevicesUnhealthy()
+					m.sendHealthEventForAllDevices(HealthEventGPULost)
 					continue
 				}
 				klog.V(6).Infof("Error waiting for NVML event: %v. Retrying...", ret)
@@ -172,10 +251,10 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				continue
 			}
 
-			if m.skippedXids[xid] {
-				klog.V(6).Infof("Skipping XID event: Data=%d, Type=%d, GI=%d, CI=%d", xid, eType, gi, ci)
-				continue
-			}
+			//if m.skippedXids[xid] {
+			//	klog.V(6).Infof("Skipping XID event: Data=%d, Type=%d, GI=%d, CI=%d", xid, eType, gi, ci)
+			//	continue
+			//}
 
 			klog.V(4).Infof("Processing event XID=%d event", xid)
 			// this seems an extreme action.
@@ -184,7 +263,7 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 			eventUUID, ret := event.Device.GetUUID()
 			if ret != nvml.SUCCESS {
 				klog.Warningf("Failed to determine uuid for event %v: %v; Marking all devices as unhealthy.", event, ret)
-				m.markAllDevicesUnhealthy()
+				m.sendHealthEventForAllDevices(HealthEventGPULost)
 				continue
 			}
 			affectedDevice := m.deviceByPlacement.get(eventUUID, gi, ci)
@@ -193,43 +272,72 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				continue
 			}
 
-			klog.V(4).Infof("Sending unhealthy notification for device %s due to event type:%v and event data:%d", affectedDevice.UUID(), eType, xid)
-			m.unhealthy <- affectedDevice
-		}
-	}
-}
-
-func (m *nvmlDeviceHealthMonitor) Unhealthy() <-chan *AllocatableDevice {
-	return m.unhealthy
-}
-
-func (m *nvmlDeviceHealthMonitor) markAllDevicesUnhealthy() {
-	for _, giMap := range m.deviceByPlacement {
-		m.markAllMigDevicesUnhealthy(giMap)
-	}
-}
-
-// markAllMigDevicesUnhealthy is a helper function to mark every mig device under a parent as unhealthy.
-func (m *nvmlDeviceHealthMonitor) markAllMigDevicesUnhealthy(giMap map[uint32]map[uint32]*AllocatableDevice) {
-	for _, ciMap := range giMap {
-		for _, dev := range ciMap {
-			// Non-blocking send to avoid deadlocks if channel is full.
-			select {
-			case m.unhealthy <- dev:
-				klog.V(6).Infof("Marked device %s as unhealthy", dev.UUID())
-			// TODO: The non-blocking send protects the health-monitor goroutine from deadlocks,
-			// but dropping an unhealthy notification means the device's health transition may
-			// never reach the consumer. Consider follow-up improvements:
-			//   - increase the channel buffer beyond len(allocatable) to reduce backpressure;
-			//   - introduce a special "all devices unhealthy" message when bulk updates occur;
-			//   - or revisit whether blocking briefly here is acceptable.
-			default:
-				klog.Errorf("Unhealthy channel full. Dropping unhealthy notification for device %s", dev.UUID())
+			klog.V(4).Infof("Sending XID=%d health event for device %s", xid, affectedDevice.UUID())
+			m.unhealthy <- &DeviceHealthEvent{
+				Devices:   []*AllocatableDevice{affectedDevice},
+				EventType: HealthEventXID,
+				EventData: xid,
 			}
 		}
 	}
 }
 
+func (m *nvmlDeviceHealthMonitor) Unhealthy() <-chan *DeviceHealthEvent {
+	return m.unhealthy
+}
+
+// sendHealthEventForAllDevices aggregates every device across all GPUs into a
+// single batched DeviceHealthEvent so the consumer makes one ResourceSlice
+// update.
+func (m *nvmlDeviceHealthMonitor) sendHealthEventForAllDevices(eventType DeviceHealthEventType) {
+	var devices []*AllocatableDevice
+	for _, giMap := range m.deviceByPlacement {
+		devices = append(devices, flattenMIGDeviceMap(giMap)...)
+	}
+	m.sendBatchedHealthEvent(devices, eventType)
+}
+
+// sendHealthEventForDevices aggregates all devices under a single parent GPU
+// into one batched DeviceHealthEvent.
+func (m *nvmlDeviceHealthMonitor) sendHealthEventForDevices(giMap map[uint32]map[uint32]*AllocatableDevice, eventType DeviceHealthEventType) {
+	m.sendBatchedHealthEvent(flattenMIGDeviceMap(giMap), eventType)
+}
+
+// flattenMIGDeviceMap flattens a GI→CI device map into a slice.
+func flattenMIGDeviceMap(giMap map[uint32]map[uint32]*AllocatableDevice) []*AllocatableDevice {
+	var devices []*AllocatableDevice
+	for _, ciMap := range giMap {
+		for _, dev := range ciMap {
+			devices = append(devices, dev)
+		}
+	}
+	return devices
+}
+
+// sendBatchedHealthEvent sends a single DeviceHealthEvent containing all
+// affected devices. Uses a non-blocking send to protect the monitor goroutine
+// from deadlocks when the channel is full.
+func (m *nvmlDeviceHealthMonitor) sendBatchedHealthEvent(devices []*AllocatableDevice, eventType DeviceHealthEventType) {
+	if len(devices) == 0 {
+		return
+	}
+	event := &DeviceHealthEvent{
+		Devices:   devices,
+		EventType: eventType,
+	}
+	select {
+	case m.unhealthy <- event:
+		klog.V(6).Infof("Sent batched %s health event for %d device(s)", eventType, len(devices))
+	default:
+		klog.Errorf("Health event channel full; dropping batched %s event for %d device(s)", eventType, len(devices))
+	}
+}
+
+// The purpose of this function is to allow for a O(1) lookup of
+// AllocatableDevice by ([parent]UUID, GI, CI) when processing health events. It
+// currently assumes that this is constant for the lifetime of the healthchecker
+// which does not hold for Dynamic MIG. This will have to be resolved once we
+// support device health checking with dynamic MIG.
 func getDevicePlacementMap(allocatable AllocatableDevices) devicePlacementMap {
 	placementMap := make(devicePlacementMap)
 
@@ -246,16 +354,20 @@ func getDevicePlacementMap(allocatable AllocatableDevices) devicePlacementMap {
 			giID = FullGPUInstanceID
 			ciID = FullGPUInstanceID
 
-		case MigDeviceType:
-			parentUUID = d.Mig.Parent.UUID
+		case MigStaticDeviceType:
+			parentUUID = d.MigStatic.Parent.UUID
+
+			// Note(JP): it's unclear why we handle this case here (and why do
+			// we think this can be empty?)
 			if parentUUID == "" {
 				continue
 			}
-			giID = d.Mig.GiInfo.Id
-			ciID = d.Mig.CiInfo.Id
+			giID = d.MigStatic.GiInfo.Id
+			ciID = d.MigStatic.CiInfo.Id
 
 		default:
-			klog.V(6).Infof("Skipping device with unknown type: %s", d.Type())
+			// This may be a problem; and should be logged
+			klog.V(4).Infof("getDevicePlacementMap: skipping device with type: %s", d.Type())
 			continue
 		}
 		placementMap.addDevice(parentUUID, giID, ciID, d)
@@ -335,4 +447,14 @@ func xidsToSkip(additionalXids string) map[uint64]bool {
 		skippedXids[additionalXid] = true
 	}
 	return skippedXids
+}
+
+// IsEventNonFatal evaluates whether a hardware event is considered an application-level
+// warning (None) rather than a critical hardware failure (NoSchedule).
+// Currently, it only checks for XID events.
+func (m *nvmlDeviceHealthMonitor) IsEventNonFatal(event *DeviceHealthEvent) bool {
+	if event.EventType == HealthEventXID {
+		return m.skippedXids[event.EventData]
+	}
+	return false
 }

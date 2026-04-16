@@ -232,3 +232,29 @@ spec:
             path: /etc/vgpu-manager
             type: DirectoryOrCreate
           name: manager
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu-manager
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu'"
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: vgpu-manager
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"
+---
+kind: DeviceClass
+metadata:
+  name: mig-manager
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'mig'"

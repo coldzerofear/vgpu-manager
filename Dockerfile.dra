@@ -38,7 +38,13 @@ COPY --from=bash       /bin/bash                                 /bin/bash
 COPY --from=toolkit    /artifacts/rpm/usr/bin/nvidia-cdi-hook    /usr/bin/nvidia-cdi-hook
 COPY --from=builder    /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
 COPY --from=builder    /go/src/vgpu-manager/bin/device-client    /installed/registry/device-client
+COPY --from=builder    /vgpu-controller/build/mem_occupy_tool    /installed/tools/mem_occupy_tool
+COPY --from=builder    /vgpu-controller/build/mem_managed_tool   /installed/tools/mem_managed_tool
+COPY --from=builder    /vgpu-controller/build/mem_view_tool      /installed/tools/mem_view_tool
 COPY --from=builder    /go/src/vgpu-manager/bin/kubelet-plugin   /usr/local/bin/kubelet-plugin
+COPY --from=builder    /go/src/vgpu-manager/bin/device-webhook   /usr/local/bin/device-webhook
+
+RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload
 
 COPY --chmod=755 scripts/install_files.sh           /usr/bin/install_files.sh
 COPY --chmod=755 scripts/bind_to_driver.sh          /usr/bin/bind_to_driver.sh

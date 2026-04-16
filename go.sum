@@ -1,11 +1,13 @@
 cel.dev/expr v0.24.0 h1:56OvJKSH3hDGL0ml5uSxZmz3/3Pq4tJ+fb1unVLAFcY=
 cel.dev/expr v0.24.0/go.mod h1:hLPLo1W4QUmuYdA72RBX06QTs6MXw941piREPl3Yfiw=
+github.com/Masterminds/semver v1.5.0 h1:H65muMkzWKEuNDnfl9d70GUjFniHKHRbFPGBuZ3QEww=
+github.com/Masterminds/semver v1.5.0/go.mod h1:MB6lktGJrhw8PrUyiEoblNEGEQ+RzHPF078ddwwvV3Y=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/NVIDIA/go-nvlib v0.9.0 h1:GKLIvLJ0uhCtTLLZp2Q8QIDRxOYH45MM4Y5OO3U5Rho=
 github.com/NVIDIA/go-nvlib v0.9.0/go.mod h1:7mzx9FSdO9fXWP9NKuZmWkCwhkEcSWQFe2tmFwtLb9c=
-github.com/NVIDIA/k8s-dra-driver-gpu v0.0.0-20260108173021-6a1af5e6a4d4 h1:mZFOMMg3g04qumHEmAclVY+nb/jIBYXQg1IjoSTdxwo=
-github.com/NVIDIA/k8s-dra-driver-gpu v0.0.0-20260108173021-6a1af5e6a4d4/go.mod h1:Jf8mPD5Srr5XnccOF1Mjk1gqL7tZ2dl5GX/JI0okdRI=
+github.com/NVIDIA/k8s-dra-driver-gpu v0.0.0-20260304152636-db70fc24dd3f h1:sud+Wi40+/EGJKI5R04yWOGM4mKcqEZwH6cflaG007E=
+github.com/NVIDIA/k8s-dra-driver-gpu v0.0.0-20260304152636-db70fc24dd3f/go.mod h1:gQf1wA0RPy3ygdBpIsnkLYtUhUTUouPbMXYNrgRo/Y8=
 github.com/NVIDIA/nvidia-container-toolkit v1.18.2 h1:S46SDe5aez/qeRvTybHQqOXPNcRphLnIuXoqDDyx8YY=
 github.com/NVIDIA/nvidia-container-toolkit v1.18.2/go.mod h1:/mroSjCgjTpYH74dlaPw7KDQHIry/xDuQiii9SP5eCY=
 github.com/antlr4-go/antlr/v4 v4.13.0 h1:lxCg3LAv+EUK6t1i0y1V6/SLeUi0eKEKdhQAlS8TVTI=

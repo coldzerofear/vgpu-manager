@@ -18,6 +18,7 @@ VERSION_PKG = github.com/coldzerofear/vgpu-manager/pkg
 CGO_CFLAGS = -D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv
 CGO_LDFLAGS_ALLOW = -Wl,--unresolved-symbols=ignore-in-object-files
 GO_BUILD_LDFLAGS = -X $(VERSION_PKG)/version.version=${VERSION} \
+                   -X $(VERSION_PKG)/version.NvVersion=${NVVERSION} \
                    -X $(VERSION_PKG)/version.gitBranch=${GIT_BRANCH} \
                    -X $(VERSION_PKG)/version.gitCommit=${GIT_COMMIT} \
                    -X $(VERSION_PKG)/version.gitTreeState=${GIT_TREE_STATE} \
@@ -86,7 +87,8 @@ docker-build-base: ## Build base docker image.
 	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH="${GIT_BRANCH}" --build-arg APT_MIRROR="${APT_MIRROR}" \
       --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
       --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
-      --build-arg GOLANG_VERSION="${GOLANG_VERSION}" -t "${BASE_IMG}" -f Dockerfile.base .
+      --build-arg BUILD_NVVERSION="${NVVERSION}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
+      -t "${BASE_IMG}" -f Dockerfile.base .
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

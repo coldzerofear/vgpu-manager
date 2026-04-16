@@ -151,10 +151,10 @@ func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceIn
 				if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 					return nil
 				}
-				klog.Errorf("Unexpected error checking if gpu device %q is free: %v", info.pcieBusID, err)
+				klog.Errorf("Unexpected error checking if gpu device %q is free: %v", info.pciBusID, err)
 				continue
 			}
-			klog.Infof("gpu device %q has open fds by process(es): %s", info.pcieBusID, string(out))
+			klog.Infof("gpu device %q has open fds by process(es): %s", info.pciBusID, string(out))
 		}
 	}
 }
@@ -174,10 +174,10 @@ func (vm *VfioPciManager) verifyDisabledVFs(pcieBusID string) error {
 
 // Configure binds the GPU to the vfio-pci driver.
 func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) error {
-	perGpuLock.Get(info.pcieBusID).Lock()
-	defer perGpuLock.Get(info.pcieBusID).Unlock()
+	perGpuLock.Get(info.pciBusID).Lock()
+	defer perGpuLock.Get(info.pciBusID).Unlock()
 
-	driver, err := getDriver(pciDevicesRoot, info.pcieBusID)
+	driver, err := getDriver(pciDevicesRoot, info.pciBusID)
 	if err != nil {
 		return err
 	}
@@ -192,11 +192,11 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 	if err != nil {
 		return err
 	}
-	err = vm.verifyDisabledVFs(info.pcieBusID)
+	err = vm.verifyDisabledVFs(info.pciBusID)
 	if err != nil {
 		return err
 	}
-	err = vm.changeDriver(info.pcieBusID, vm.driver)
+	err = vm.changeDriver(info.pciBusID, vm.driver)
 	if err != nil {
 		return err
 	}
@@ -205,22 +205,22 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 
 // Unconfigure binds the GPU to the nvidia driver.
 func (vm *VfioPciManager) Unconfigure(ctx context.Context, info *VfioDeviceInfo) error {
-	perGpuLock.Get(info.pcieBusID).Lock()
-	defer perGpuLock.Get(info.pcieBusID).Unlock()
+	perGpuLock.Get(info.pciBusID).Lock()
+	defer perGpuLock.Get(info.pciBusID).Unlock()
 
 	// Do nothing if we dont expect to switch to nvidia driver.
 	if !vm.nvidiaEnabled {
 		return nil
 	}
 
-	driver, err := getDriver(pciDevicesRoot, info.pcieBusID)
+	driver, err := getDriver(pciDevicesRoot, info.pciBusID)
 	if err != nil {
 		return err
 	}
 	if driver == nvidiaDriver {
 		return nil
 	}
-	err = vm.changeDriver(info.pcieBusID, nvidiaDriver)
+	err = vm.changeDriver(info.pciBusID, nvidiaDriver)
 	if err != nil {
 		return err
 	}
@@ -274,6 +274,10 @@ func GetVfioCommonCDIContainerEdits() *cdiapi.ContainerEdits {
 					Path: filepath.Join(vfioDevicesRoot, "vfio"),
 				},
 			},
+			// Make sure that NVIDIA_VISIBLE_DEVICES is set to void to avoid the
+			// nvidia-container-runtime honoring it in addition to the underlying
+			// runtime honoring CDI.
+			Env: []string{"NVIDIA_VISIBLE_DEVICES=void"},
 		},
 	}
 }

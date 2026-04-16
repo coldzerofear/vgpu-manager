@@ -5,9 +5,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"strings"
 
-	"github.com/blang/semver/v4"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/docker/go-units"
@@ -22,7 +20,7 @@ import (
 )
 
 type VGpuDeviceInfo struct {
-	*GpuDeviceInfo
+	*GpuDeviceInfo `json:",inline"`
 }
 
 func (d *VGpuDeviceInfo) CanonicalName() string {
@@ -30,41 +28,19 @@ func (d *VGpuDeviceInfo) CanonicalName() string {
 }
 
 func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
+	attr := d.GpuDeviceInfo.Attributes()
+	attr["type"] = resourceapi.DeviceAttribute{
+		StringValue: ptr.To(VGpuDeviceType),
+	}
+	if numaNode, ok := d.GetNumaNode(); ok {
+		attr["numaNode"] = resourceapi.DeviceAttribute{
+			IntValue: ptr.To(int64(numaNode)),
+		}
+	}
+
 	device := resourceapi.Device{
-		Name: d.CanonicalName(),
-		Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-			"type": {
-				StringValue: ptr.To(string(VGpuDeviceType)),
-			},
-			"uuid": {
-				StringValue: ptr.To(strings.ToLower(d.UUID)),
-			},
-			"minor": {
-				IntValue: ptr.To(int64(d.Minor)),
-			},
-			"productName": {
-				StringValue: ptr.To(strings.ToUpper(d.ProductName)),
-			},
-			"brand": {
-				StringValue: &d.Brand,
-			},
-			"architecture": {
-				StringValue: &d.Architecture,
-			},
-			"cudaComputeCapability": {
-				VersionValue: ptr.To(semver.MustParse(d.CudaComputeCapability).String()),
-			},
-			"driverVersion": {
-				VersionValue: ptr.To(semver.MustParse(d.DriverVersion.DriverVersion).String()),
-			},
-			"cudaDriverVersion": {
-				VersionValue: ptr.To(semver.MustParse(d.DriverVersion.CudaDriverVersion.String()).String()),
-			},
-			"pcieBusID": {
-				StringValue: &d.PcieBusID,
-			},
-			d.PcieRootAttr.Name: d.PcieRootAttr.Value,
-		},
+		Name:       d.CanonicalName(),
+		Attributes: attr,
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			CoresResourceName: {
 				Value: *resource.NewQuantity(int64(util.HundredCore), resource.DecimalSI),
@@ -90,11 +66,6 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 			},
 		},
 		AllowMultipleAllocations: pointer.Bool(true),
-	}
-	if numaNode, ok := d.GetNumaNode(); ok {
-		device.Attributes["numaNode"] = resourceapi.DeviceAttribute{
-			IntValue: ptr.To(int64(numaNode)),
-		}
 	}
 	return device
 }
@@ -160,18 +131,19 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 		klog.Warningf("Failed to change mod of basic host path %s: %s", baseHostPath, err)
 	}
 
-	var (
-		vGpuEnvs []string
-		envMode  = util.HostMode
-	)
+	envMode := util.HostMode
 	if cgroups.IsCgroup2UnifiedMode() || cgroups.IsCgroup2HybridMode() {
 		envMode |= util.CGroupv2Mode
 	} else {
 		envMode |= util.CGroupv1Mode
 	}
+	conttainerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
+	vGpuEnvs := []string{
+		fmt.Sprintf("%s=%s", util.LdPreloadEnv, conttainerDriverFile),
+		fmt.Sprintf("%s=''", util.ManagerVisibleDevices),
+		fmt.Sprintf("%s=%v", util.ManagerCompatibilityMode, envMode),
+	}
 	// TODO Covering the visible uuid list
-	vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=''", util.ManagerVisibleDevices))
-	vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=%v", util.ManagerCompatibilityMode, envMode))
 	deviceCapacityMap := m.getConsumableCapacityMap(claim)
 	for _, device := range deviceSlice {
 		idx := device.Index
@@ -213,7 +185,7 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 					Options:       []string{"ro", "nosuid", "nodev", "bind"},
 				},
 				{
-					ContainerPath: filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName),
+					ContainerPath: conttainerDriverFile,
 					HostPath:      filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName),
 					Options:       []string{"ro", "nosuid", "nodev", "bind"},
 				},
@@ -242,7 +214,7 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 	}
 }
 
-func (m *VGPUManager) Cleanup(claimUID string, _ PreparedDeviceList) error {
+func (m *VGPUManager) Unprepare(claimUID string, _ PreparedDeviceList) error {
 	_ = os.RemoveAll(filepath.Join(m.hostManagerPath, util.Claims, claimUID))
 	return nil
 }

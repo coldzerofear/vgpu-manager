@@ -17,44 +17,88 @@
 package kubeletplugin
 
 import (
+	"fmt"
+	"maps"
 	"slices"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 )
 
+// The device name is the canonical device name announced by us a DRA
+// ResourceSlice). It must be a (node-local) unambiguous device identifier. It's
+// exposed to users in error messages. It's played back to us upon a
+// NodePrepareResources request, which is when we look it up in the
+// `AllocatableDevices` map. Conceptually, this the same as
+// kubeletplugin.Device.DeviceName (documented with 'DeviceName identifies the
+// device inside that pool').
+type DeviceName = string
+
+// Represents the PCI address (BDF format) of a physical GPU device.
+type PCIBusID = string
+
+type AllocatableDevices map[DeviceName]*AllocatableDevice
+
+type PerGPUAllocatableDevices struct {
+	allocatablesMap map[PCIBusID]AllocatableDevices
+}
+
+// AllocatableDevice represents an individual device that can be allocated.
 type AllocatableDevice struct {
-	Gpu  *GpuDeviceInfo
-	Mig  *MigDeviceInfo
-	Vfio *VfioDeviceInfo
-	VGpu *VGpuDeviceInfo
+	VGpu       *VGpuDeviceInfo
+	Gpu        *GpuDeviceInfo
+	MigDynamic *MigSpec
+	MigStatic  *MigDeviceInfo
+	Vfio       *VfioDeviceInfo
+
+	// taints holds DRA device taints set by the health monitor. Published
+	// as part of the device's ResourceSlice entry so the scheduler and
+	// kubelet honour them per KEP-5055.
+	taints []resourceapi.DeviceTaint
 }
 
 func (d AllocatableDevice) Type() string {
+	if d.VGpu != nil {
+		return VGpuDeviceType
+	}
 	if d.Gpu != nil {
 		return GpuDeviceType
 	}
-	if d.Mig != nil {
-		return MigDeviceType
+	if d.MigDynamic != nil {
+		return MigDynamicDeviceType
+	}
+	if d.MigStatic != nil {
+		return MigStaticDeviceType
 	}
 	if d.Vfio != nil {
 		return VfioDeviceType
 	}
-	if d.VGpu != nil {
-		return VGpuDeviceType
-	}
 	return UnknownDeviceType
+}
+
+func (d AllocatableDevice) IsStaticOrDynMigDevice() bool {
+	switch d.Type() {
+	case MigStaticDeviceType, MigDynamicDeviceType:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *AllocatableDevice) CanonicalName() string {
 	switch d.Type() {
-	case GpuDeviceType:
-		return d.Gpu.CanonicalName()
-	case MigDeviceType:
-		return d.Mig.CanonicalName()
-	case VfioDeviceType:
-		return d.Vfio.CanonicalName()
 	case VGpuDeviceType:
 		return d.VGpu.CanonicalName()
+	case GpuDeviceType:
+		return d.Gpu.CanonicalName()
+	case MigStaticDeviceType:
+		return d.MigStatic.CanonicalName()
+	case MigDynamicDeviceType:
+		return d.MigDynamic.CanonicalName()
+	case VfioDeviceType:
+		return d.Vfio.CanonicalName()
 	}
 	panic("unexpected type for AllocatableDevice")
 }
@@ -63,8 +107,10 @@ func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 	switch d.Type() {
 	case GpuDeviceType:
 		return d.Gpu.GetDevice()
-	case MigDeviceType:
-		return d.Mig.GetDevice()
+	case MigStaticDeviceType:
+		return d.MigStatic.GetDevice()
+	case MigDynamicDeviceType:
+		panic("GetDevice() must currently not be called for MigDynamicDeviceType")
 	case VfioDeviceType:
 		return d.Vfio.GetDevice()
 	case VGpuDeviceType:
@@ -73,8 +119,11 @@ func (d *AllocatableDevice) GetDevice() resourceapi.Device {
 	panic("unexpected type for AllocatableDevice")
 }
 
-// This concept will have to change for abstract allocatable devices that do not
-// have a UUID before actualization.
+// UUID() is here for `AllocatableDevices` to implement the `UUIDProvider`
+// interface. Conceptually, at least since introduction of DynamicMIG, some
+// allocatable devices are abstract devices that do not have a UUID before
+// actualization -- hence, the idea of `AllocatableDevices` implementing
+// UUIDProvider is brittle.
 func (d AllocatableDevice) UUID() string {
 	if d.VGpu != nil {
 		return d.VGpu.UUID
@@ -82,8 +131,16 @@ func (d AllocatableDevice) UUID() string {
 	if d.Gpu != nil {
 		return d.Gpu.UUID
 	}
-	if d.Mig != nil {
-		return d.Mig.UUID
+	if d.MigStatic != nil {
+		return d.MigStatic.UUID
+	}
+	if d.MigDynamic != nil {
+		// For now, the caller must sure to never call UUID() on such a device.
+		// This method for now exists because when the DynamicMIG feature gate
+		// is disabled, `AllocatableDevices` _can_ implement UUIDProvider; and
+		// that feature is used throughout the code base. This needs
+		// restructuring and cleanup.
+		panic("unexpected UUID() call for AllocatableDevice of type MigDynamic")
 	}
 	if d.Vfio != nil {
 		return d.Vfio.UUID
@@ -91,49 +148,24 @@ func (d AllocatableDevice) UUID() string {
 	panic("unexpected type for AllocatableDevice")
 }
 
-type AllocatableDeviceList []*AllocatableDevice
-
-type AllocatableDevices map[string]*AllocatableDevice
-
-func (d AllocatableDevices) getDevicesByGPUPCIBusID(pcieBusID string) AllocatableDeviceList {
-	var devices AllocatableDeviceList
-	for _, device := range d {
-		switch device.Type() {
-		case VGpuDeviceType:
-			if device.VGpu.PcieBusID == pcieBusID {
-				devices = append(devices, device)
-			}
-		case GpuDeviceType:
-			if device.Gpu.PcieBusID == pcieBusID {
-				devices = append(devices, device)
-			}
-		case MigDeviceType:
-			if device.Mig.PcieBusID == pcieBusID {
-				devices = append(devices, device)
-			}
-		case VfioDeviceType:
-			if device.Vfio.pcieBusID == pcieBusID {
-				devices = append(devices, device)
-			}
-		}
+func (d *AllocatableDevice) GetGPUPCIBusID() string {
+	switch d.Type() {
+	case VGpuDeviceType:
+		return d.VGpu.pciBusID
+	case GpuDeviceType:
+		return d.Gpu.pciBusID
+	case MigStaticDeviceType:
+		return d.MigStatic.pciBusID
+	case MigDynamicDeviceType:
+		return d.MigDynamic.Parent.pciBusID
+	case VfioDeviceType:
+		return d.Vfio.pciBusID
 	}
-	return devices
+	panic("unexpected type for AllocatableDevice")
 }
 
-func (d AllocatableDevices) GetGPUByPCIeBusID(pcieBusID string) *AllocatableDevice {
-	for _, device := range d {
-		if device.Type() != GpuDeviceType {
-			continue
-		}
-		if device.Gpu.PcieBusID == pcieBusID {
-			return device
-		}
-	}
-	return nil
-}
-
-func (d AllocatableDevices) GetGPUs() AllocatableDeviceList {
-	var devices AllocatableDeviceList
+func (d AllocatableDevices) GetGPUs() []*AllocatableDevice {
+	var devices []*AllocatableDevice
 	for _, device := range d {
 		if device.Type() == GpuDeviceType {
 			devices = append(devices, device)
@@ -142,18 +174,8 @@ func (d AllocatableDevices) GetGPUs() AllocatableDeviceList {
 	return devices
 }
 
-func (d AllocatableDevices) GetMigDevices() AllocatableDeviceList {
-	var devices AllocatableDeviceList
-	for _, device := range d {
-		if device.Type() == MigDeviceType {
-			devices = append(devices, device)
-		}
-	}
-	return devices
-}
-
-func (d AllocatableDevices) GetVfioDevices() AllocatableDeviceList {
-	var devices AllocatableDeviceList
+func (d AllocatableDevices) GetVfioDevices() []*AllocatableDevice {
+	var devices []*AllocatableDevice
 	for _, device := range d {
 		if device.Type() == VfioDeviceType {
 			devices = append(devices, device)
@@ -162,25 +184,30 @@ func (d AllocatableDevices) GetVfioDevices() AllocatableDeviceList {
 	return devices
 }
 
+// Required for implementing UUIDProvider. Meant to return (only) full GPU UUIDs.
 func (d AllocatableDevices) GpuUUIDs() []string {
-	var uuids []string
+	uuids := sets.NewString()
 	for _, device := range d {
 		if device.Type() == GpuDeviceType {
-			uuids = append(uuids, device.Gpu.UUID)
+			uuids.Insert(device.UUID())
 		}
 		if device.Type() == VGpuDeviceType {
-			uuids = append(uuids, device.VGpu.UUID)
+			uuids.Insert(device.UUID())
 		}
 	}
-	slices.Sort(uuids)
-	return uuids
+	return uuids.List()
 }
 
+// Required for implementing UUIDProvider. Meant to return MIG device UUIDs.
+// Must not be called when the DynamicMIG featuregate is enabled.
 func (d AllocatableDevices) MigDeviceUUIDs() []string {
+	if featuregates.Enabled(featuregates.DynamicMIG) {
+		panic("MigDeviceUUIDs() unexpectedly called (DynamicMIG is enabled)")
+	}
 	var uuids []string
-	for _, device := range d {
-		if device.Type() == MigDeviceType {
-			uuids = append(uuids, device.Mig.UUID)
+	for _, dev := range d {
+		if dev.Type() == MigStaticDeviceType {
+			uuids = append(uuids, dev.UUID())
 		}
 	}
 	slices.Sort(uuids)
@@ -198,50 +225,144 @@ func (d AllocatableDevices) VfioDeviceUUIDs() []string {
 	return uuids
 }
 
+// Required for implementing UUIDProvider. Meant to return full GPU UUIDs and
+// MIG device UUIDs. Must not be used when the DynamicMIG featuregate is
+// enabled. Unsure what it's supposed to return for VFIO devices.
 func (d AllocatableDevices) UUIDs() []string {
-	uuids := append(d.GpuUUIDs(), d.MigDeviceUUIDs()...)
-	uuids = append(uuids, d.VfioDeviceUUIDs()...)
+	var uuids = make([]string, 0, len(d))
+	for _, dev := range d {
+		uuids = append(uuids, dev.UUID())
+	}
 	slices.Sort(uuids)
 	return uuids
 }
 
-func (d AllocatableDevices) RemoveSiblingDevices(device *AllocatableDevice) {
+func (d *PerGPUAllocatableDevices) GetGPUDeviceByPCIBusID(pciBusID string) *AllocatableDevice {
+	if devices, ok := d.allocatablesMap[pciBusID]; ok {
+		for _, device := range devices {
+			if device.Type() != GpuDeviceType {
+				continue
+			}
+			return device
+		}
+	}
+	return nil
+}
+
+func (d *PerGPUAllocatableDevices) AddGPUAllocatables(pciBusID string, allocatables AllocatableDevices) error {
+	if allocatables == nil {
+		return fmt.Errorf("allocatables is nil")
+	}
+	if _, ok := d.allocatablesMap[pciBusID]; !ok {
+		d.allocatablesMap[pciBusID] = make(AllocatableDevices)
+	}
+	klog.Infof("Adding allocatables for PCI bus ID: %s", pciBusID)
+	d.allocatablesMap[pciBusID] = allocatables
+	return nil
+}
+
+func (d *PerGPUAllocatableDevices) AddAllocatableDevice(allocatable *AllocatableDevice) error {
+	if allocatable == nil {
+		return fmt.Errorf("allocatable is nil")
+	}
+	pciBusID := allocatable.GetGPUPCIBusID()
+	if _, ok := d.allocatablesMap[pciBusID]; !ok {
+		d.allocatablesMap[pciBusID] = make(AllocatableDevices)
+	}
+	klog.Infof("Adding allocatable device %q for PCI bus ID: %s", allocatable.CanonicalName(), pciBusID)
+	d.allocatablesMap[pciBusID][allocatable.CanonicalName()] = allocatable
+	return nil
+}
+
+func (d *PerGPUAllocatableDevices) GetAllocatableDevice(deviceName DeviceName) *AllocatableDevice {
+	for _, devices := range d.allocatablesMap {
+		if device, ok := devices[deviceName]; ok {
+			return device
+		}
+	}
+	return nil
+}
+
+func (d *PerGPUAllocatableDevices) GetAllDevices() AllocatableDevices {
+	all := make(AllocatableDevices)
+	for _, devices := range d.allocatablesMap {
+		maps.Copy(all, devices)
+	}
+	return all
+}
+
+// TODO: This needs a code comment, clarifying the complexity across device
+// types. This function is tied to PassthroughSuppert and hence for now
+// guaranteed to not be exercised when DynamicMIG is enabled.
+func (d *PerGPUAllocatableDevices) RemoveSiblingDevices(device *AllocatableDevice) {
 	var pciBusID string
 	switch device.Type() {
+	case VGpuDeviceType:
+		pciBusID = device.VGpu.pciBusID
 	case GpuDeviceType:
-		pciBusID = device.Gpu.PcieBusID
+		pciBusID = device.Gpu.pciBusID
 	case VfioDeviceType:
-		pciBusID = device.Vfio.pcieBusID
-	case MigDeviceType:
-		// TODO: Implement once dynamic MIG is supported.
+		pciBusID = device.Vfio.pciBusID
+	case MigStaticDeviceType:
+		// TODO: Implement once/if static MIG is supported in the context of
+		// PassthroughSupport.
+		return
+	case MigDynamicDeviceType:
+		// TODO: Implement once/if dynamic MIG is supported in the context of
+		// PassthroughSupport.
 		return
 	}
 
-	siblings := d.getDevicesByGPUPCIBusID(pciBusID)
-	for _, sibling := range siblings {
+	for _, sibling := range d.allocatablesMap[pciBusID] {
 		if sibling.Type() == device.Type() {
 			continue
 		}
 		switch sibling.Type() {
+		case VGpuDeviceType:
+			delete(d.allocatablesMap[pciBusID], sibling.VGpu.CanonicalName())
 		case GpuDeviceType:
-			delete(d, sibling.Gpu.CanonicalName())
+			delete(d.allocatablesMap[pciBusID], sibling.Gpu.CanonicalName())
 		case VfioDeviceType:
-			delete(d, sibling.Vfio.CanonicalName())
-		case MigDeviceType:
-			// TODO: Implement once dynamic MIG is supported.
+			delete(d.allocatablesMap[pciBusID], sibling.Vfio.CanonicalName())
+		case MigStaticDeviceType:
+			// TODO
+			continue
+		case MigDynamicDeviceType:
+			// TODO
 			continue
 		}
 	}
 }
 
-func (d *AllocatableDevice) IsHealthy() bool {
-	switch d.Type() {
-	case VGpuDeviceType:
-		return d.VGpu.Health == Healthy
-	case GpuDeviceType:
-		return d.Gpu.Health == Healthy
-	case MigDeviceType:
-		return d.Mig.Health == Healthy
+// Taints returns a copy of the device's taints to prevent data races
+// when being read concurrently by the ResourceSlice builder.
+func (d *AllocatableDevice) Taints() []resourceapi.DeviceTaint {
+	return slices.Clone(d.taints)
+}
+
+// AddOrUpdateTaint adds a new taint or updates an existing one with the same
+// key. The value and effect are always updated to the latest event received.
+// Meaning, if a device receives multiple events for the same taint dimension
+// (e.g., XID 48 followed by XID 63), the value is overwritten and only the most recent event data is retained.
+// Returns true if the taint set was modified.
+func (d *AllocatableDevice) AddOrUpdateTaint(taint *resourceapi.DeviceTaint) bool {
+	for i, existing := range d.taints {
+		if existing.Key == taint.Key {
+
+			// 1. If nothing actually changed, exit early to avoid API calls
+			if existing.Value == taint.Value && existing.Effect == taint.Effect {
+				return false
+			}
+
+			// 2. Otherwise, update the fields and the timestamp
+			d.taints[i].Value = taint.Value
+			d.taints[i].Effect = taint.Effect
+			d.taints[i].TimeAdded = nil // reset timestamp for the API server
+			return true
+		}
 	}
-	panic("unexpected type for AllocatableDevice")
+
+	// 3. Key doesn't exist yet, append the dereferenced struct
+	d.taints = append(d.taints, *taint)
+	return true
 }

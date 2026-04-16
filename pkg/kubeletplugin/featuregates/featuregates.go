@@ -17,9 +17,11 @@
 package featuregates
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
+	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/component-base/featuregate"
@@ -35,16 +37,27 @@ const (
 	TimeSlicingSettings featuregate.Feature = "TimeSlicingSettings"
 
 	// MPSSupport allows MPS (Multi-Process Service) settings to be specified.
-	MPSSupport featuregate.Feature = "MPSSupport"
+	//MPSSupport featuregate.Feature = "MPSSupport"
 
 	// IMEXDaemonsWithDNSNames allows using DNS names instead of raw IPs for IMEX daemons.
-	IMEXDaemonsWithDNSNames featuregate.Feature = "IMEXDaemonsWithDNSNames"
+	//IMEXDaemonsWithDNSNames featuregate.Feature = "IMEXDaemonsWithDNSNames"
 
 	// PassthroughSupport allows gpus to be configured with the vfio-pci driver.
 	PassthroughSupport featuregate.Feature = "PassthroughSupport"
 
 	// NVMLDeviceHealthCheck allows Device Health Checking using NVML.
 	NVMLDeviceHealthCheck featuregate.Feature = "NVMLDeviceHealthCheck"
+
+	// DynamicMIG Enable dynamic MIG device management.
+	DynamicMIG featuregate.Feature = "DynamicMIG"
+
+	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
+	// storing daemon info directly in ComputeDomainStatus.Nodes.
+	//ComputeDomainCliques featuregate.Feature = "ComputeDomainCliques"
+
+	// CrashOnNVLinkFabricErrors causes the kubelet plugin to crash instead of
+	// falling back to non-fabric mode when NVLink fabric errors are detected.
+	//CrashOnNVLinkFabricErrors featuregate.Feature = "CrashOnNVLinkFabricErrors"
 )
 
 // defaultFeatureGates contains the default settings for all project-specific feature gates.
@@ -64,20 +77,20 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(25, 8),
 		},
 	},
-	MPSSupport: {
-		{
-			Default:    false,
-			PreRelease: featuregate.Alpha,
-			Version:    version.MajorMinor(25, 8),
-		},
-	},
-	IMEXDaemonsWithDNSNames: {
-		{
-			Default:    true,
-			PreRelease: featuregate.Beta,
-			Version:    version.MajorMinor(25, 8),
-		},
-	},
+	//MPSSupport: {
+	//	{
+	//		Default:    false,
+	//		PreRelease: featuregate.Alpha,
+	//		Version:    version.MajorMinor(25, 8),
+	//	},
+	//},
+	//IMEXDaemonsWithDNSNames: {
+	//	{
+	//		Default:    true,
+	//		PreRelease: featuregate.Beta,
+	//		Version:    version.MajorMinor(25, 8),
+	//	},
+	//},
 	PassthroughSupport: {
 		{
 			Default:    false,
@@ -85,7 +98,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(25, 12),
 		},
 	},
-
+	DynamicMIG: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(25, 12),
+		},
+	},
 	NVMLDeviceHealthCheck: {
 		{
 			Default:    true,
@@ -93,6 +112,20 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(25, 12),
 		},
 	},
+	//ComputeDomainCliques: {
+	//	{
+	//		Default:    true,
+	//		PreRelease: featuregate.Beta,
+	//		Version:    version.MajorMinor(25, 12),
+	//	},
+	//},
+	//CrashOnNVLinkFabricErrors: {
+	//	{
+	//		Default:    true,
+	//		PreRelease: featuregate.Beta,
+	//		Version:    version.MajorMinor(25, 12),
+	//	},
+	//},
 }
 
 var (
@@ -114,7 +147,7 @@ func FeatureGates() featuregate.MutableVersionedFeatureGate {
 
 // parseProjectVersion parses the project version string and returns major.minor version.
 func parseProjectVersion() *version.Version {
-	versionStr := "v1.28"
+	versionStr := pkgversion.NvVersion
 	v := version.MustParse(strings.TrimPrefix(versionStr, "v"))
 	return version.MajorMinor(v.Major(), v.Minor())
 }
@@ -140,6 +173,46 @@ func newFeatureGates(version *version.Version) featuregate.MutableVersionedFeatu
 	utilruntime.Must(fg.SetFromMap(loggingOverrides))
 
 	return fg
+}
+
+// ValidateFeatureGates validates feature gate dependencies and returns an error if
+// any dependencies are not satisfied.
+func ValidateFeatureGates() error {
+	if Enabled(VGPUSupport) {
+		if Enabled(TimeSlicingSettings) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, TimeSlicingSettings)
+		}
+		//if Enabled(MPSSupport) {
+		//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, MPSSupport)
+		//}
+		if Enabled(PassthroughSupport) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, PassthroughSupport)
+		}
+		//if Enabled(DynamicMIG) {
+		//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, DynamicMIG)
+		//}
+		//if Enabled(ComputeDomainCliques) {
+		//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, ComputeDomainCliques)
+		//}
+	}
+	// ComputeDomainCliques requires IMEXDaemonsWithDNSNames
+	//if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {
+	//	return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainCliques, IMEXDaemonsWithDNSNames)
+	//}
+
+	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, PassthroughSupport)
+	}
+
+	if Enabled(DynamicMIG) && Enabled(NVMLDeviceHealthCheck) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, NVMLDeviceHealthCheck)
+	}
+
+	//if Enabled(DynamicMIG) && Enabled(MPSSupport) {
+	//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, MPSSupport)
+	//}
+
+	return nil
 }
 
 // Enabled returns true if the specified feature gate is enabled in the global FeatureGates singleton.

@@ -64,19 +64,15 @@ func (m *CheckpointCleanupManager) Start(ctx context.Context, unprepfunc TypeUnp
 	m.cancelContext = cancel
 	m.unprepfunc = unprepfunc
 
-	m.waitGroup.Add(1)
-	go func() {
-		defer m.waitGroup.Done()
+	m.waitGroup.Go(func() {
 		// Start producer: periodically submit cleanup task.
 		m.triggerPeriodically(ctx)
-	}()
+	})
 
-	m.waitGroup.Add(1)
-	go func() {
-		defer m.waitGroup.Done()
+	m.waitGroup.Go(func() {
 		// Start consumer
 		m.worker(ctx)
-	}()
+	})
 
 	klog.V(6).Infof("CheckpointCleanupManager started")
 	return nil
@@ -109,7 +105,7 @@ func (m *CheckpointCleanupManager) Stop() error {
 //  4. Holding DeviceState lock during the entire cleanup (which could take seconds with
 //     multiple API calls) would unnecessarily block normal Prepare/Unprepare operations.
 func (m *CheckpointCleanupManager) cleanup(ctx context.Context) {
-	cp, err := m.devicestate.getCheckpoint()
+	cp, err := m.devicestate.getCheckpoint(ctx)
 	if err != nil {
 		klog.Errorf("Checkpointed RC cleanup: unable to get checkpoint: %s", err)
 		return

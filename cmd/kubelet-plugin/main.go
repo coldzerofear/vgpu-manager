@@ -32,7 +32,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
 	"github.com/urfave/cli/v2"
+	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/component-base/logs"
+	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 )
@@ -57,6 +59,13 @@ func newApp() *cli.App {
 			Destination: &flags.NodeName,
 			EnvVars:     []string{"NODE_NAME"},
 		},
+		//&cli.StringFlag{
+		//	Name:        "namespace",
+		//	Usage:       "The namespace used for the custom resources.",
+		//	Value:       "default",
+		//	Destination: &flags.Namespace,
+		//	EnvVars:     []string{"NAMESPACE"},
+		//},
 		&cli.StringFlag{
 			Name:        "cdi-root",
 			Usage:       "Absolute path to the directory where CDI files will be generated.",
@@ -85,6 +94,13 @@ func newApp() *cli.App {
 			Destination: &flags.NvidiaCDIHookPath,
 			EnvVars:     []string{"NVIDIA_CDI_HOOK_PATH"},
 		},
+		//&cli.StringFlag{
+		//	Name:        "image-name",
+		//	Usage:       "The full image name to use for rendering templates.",
+		//	Required:    true,
+		//	Destination: &flags.ImageName,
+		//	EnvVars:     []string{"IMAGE_NAME"},
+		//},
 		&cli.StringFlag{
 			Name:        "kubelet-registrar-directory-path",
 			Usage:       "Absolute path to the directory where kubelet stores plugin registrations.",
@@ -138,11 +154,20 @@ func newApp() *cli.App {
 				return fmt.Errorf("arguments not supported: %v", c.Args().Slice())
 			}
 			// `loggingConfig` must be applied before doing any logging
-			err := loggingConfig.Apply()
-			pkgflags.LogStartupConfig(flags, loggingConfig)
+			err := logsapi.ValidateAndApply(loggingConfig.Config, featuregates.FeatureGates())
+
+			// Store klog's log verbosity setting in this program's config for
+			// later runtime inspection (it's otherwise not accessible anymore
+			// because we do not expose the raw `cliFlags`.
+			flags.KlogVerbosity = int(loggingConfig.Config.Verbosity)
+			LogStartupConfig(flags, loggingConfig)
 			return err
 		},
 		Action: func(c *cli.Context) error {
+			if err := featuregates.ValidateFeatureGates(); err != nil {
+				return fmt.Errorf("feature gate validation failed: %w", err)
+			}
+
 			clientSets, err := flags.KubeClientConfig.NewClientSets()
 			if err != nil {
 				return fmt.Errorf("create client: %w", err)
@@ -265,4 +290,23 @@ func pflagToCLI(flag *pflag.Flag, category string) cli.Flag {
 		Destination: flag.Value,
 		EnvVars:     []string{strings.ToUpper(strings.ReplaceAll(flag.Name, "-", "_"))},
 	}
+}
+
+func LogStartupConfig(parsedFlags any, loggingConfig *pkgflags.LoggingConfig) {
+	// Always log component startup config (level 0).
+	klog.Infof("\nFeature gates: %#v\nFlags: %s",
+		// Flat boolean map -- no pretty-printing needed.
+		featuregates.ToMap(),
+		// Based on go-spew's Sdump(), with indentation. Type information is
+		// always displayed (cannot be disabled). Rely on `parsedFlags` to also
+		// contain the klog log verbosity (we want to log this here in any case,
+		// so that the log output explicitly mentions that).
+		dump.Pretty(parsedFlags),
+	)
+
+	// This is a complex object, comprised of largely static default klog
+	// component configuration. Various parts can be overridden via environment
+	// variables or CLI flags: it makes sense to log the interpolated config,
+	// but only on a high verbosity level.
+	klog.V(6).Infof("Logging config: %s", dump.Pretty(loggingConfig))
 }

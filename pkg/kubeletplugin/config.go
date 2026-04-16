@@ -13,13 +13,16 @@ type Flags struct {
 	KubeClientConfig pkgflags.KubeClientConfig
 
 	NodeName                      string
+	Namespace                     string
 	CdiRoot                       string
 	ContainerDriverRoot           string
 	HostDriverRoot                string
 	NvidiaCDIHookPath             string
+	ImageName                     string
 	KubeletRegistrarDirectoryPath string
 	KubeletPluginsDirectoryPath   string
 	HealthcheckPort               int
+	KlogVerbosity                 int
 	AdditionalXidsToIgnore        string
 	HostManagerDir                string
 }

@@ -18,7 +18,6 @@ package kubeletplugin
 
 import (
 	"fmt"
-	"slices"
 
 	configapi "github.com/NVIDIA/k8s-dra-driver-gpu/api/nvidia.com/resource/v1beta1"
 )
@@ -55,20 +54,16 @@ func NewTimeSlicingManager(deviceLib *deviceLib) *TimeSlicingManager {
 	}
 }
 
-func (t *TimeSlicingManager) SetTimeSlice(devices UUIDProvider, config *configapi.TimeSlicingConfig) error {
-	// Ensure all devices are full devices
-	if !slices.Equal(devices.UUIDs(), devices.GpuUUIDs()) {
-		return fmt.Errorf("can only set the time-slice interval on full GPUs")
-	}
-
+// `uuids` must be full-GPU (non-MIG) UUIDs. The caller must ensure that.
+func (t *TimeSlicingManager) SetTimeSlice(uuids []string, config *configapi.TimeSlicingConfig) error { // Ensure all devices are full devices
 	// Set the compute mode of the GPU to DEFAULT.
-	err := t.nvdevlib.SetComputeMode(devices.UUIDs(), "DEFAULT")
+	err := t.nvdevlib.SetComputeMode(uuids, "DEFAULT")
 	if err != nil {
 		return fmt.Errorf("error setting compute mode: %w", err)
 	}
 
 	// Set the time slice based on the config provided.
-	err = t.nvdevlib.SetTimeSlice(devices.UUIDs(), config.Interval.Int())
+	err = t.nvdevlib.SetTimeSlice(uuids, config.Interval.Int())
 	if err != nil {
 		return fmt.Errorf("error setting time slice: %w", err)
 	}

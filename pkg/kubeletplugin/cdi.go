@@ -19,6 +19,9 @@ package kubeletplugin
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -29,24 +32,16 @@ import (
 	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi"
 	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/spec"
 	transformroot "github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/transform/root"
+	utilcache "k8s.io/apimachinery/pkg/util/cache"
 	"k8s.io/klog/v2"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
-
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 )
 
 const (
-	cdiVendor = "k8s." + util.DRADriverName
-
-	cdiDeviceClass = "device"
-	cdiDeviceKind  = cdiVendor + "/" + cdiDeviceClass
-	cdiClaimClass  = "claim"
-	cdiClaimKind   = cdiVendor + "/" + cdiClaimClass
-
-	cdiBaseSpecIdentifier = "base"
-	cdiVfioSpecIdentifier = "vfio"
+	cdiVendor     = "k8s." + util.DRADriverName
+	cdiClaimClass = "claim"
 
 	defaultCDIRoot = "/var/run/cdi"
 	procNvCapsPath = "/proc/driver/nvidia/capabilities"
@@ -56,18 +51,15 @@ type CDIHandler struct {
 	logger            *logrus.Logger
 	nvml              nvml.Interface
 	nvdevice          nvdevice.Interface
-	nvcdiDevice       nvcdi.Interface
 	nvcdiClaim        nvcdi.Interface
-	cache             *cdiapi.Cache
 	driverRoot        string
 	devRoot           string
 	targetDriverRoot  string
 	nvidiaCDIHookPath string
 
-	cdiRoot     string
-	vendor      string
-	deviceClass string
-	claimClass  string
+	specCache *utilcache.Expiring
+
+	cdiRoot string
 }
 
 func NewCDIHandler(opts ...cdiOption) (*CDIHandler, error) {
@@ -89,32 +81,7 @@ func NewCDIHandler(opts ...cdiOption) (*CDIHandler, error) {
 	if h.nvdevice == nil {
 		h.nvdevice = nvdevice.New(h.nvml)
 	}
-	if h.vendor == "" {
-		h.vendor = cdiVendor
-	}
-	if h.deviceClass == "" {
-		h.deviceClass = cdiDeviceClass
-	}
-	if h.claimClass == "" {
-		h.claimClass = cdiClaimClass
-	}
-	if h.nvcdiDevice == nil {
-		nvcdilib, err := nvcdi.New(
-			nvcdi.WithDeviceLib(h.nvdevice),
-			nvcdi.WithDriverRoot(h.driverRoot),
-			nvcdi.WithDevRoot(h.devRoot),
-			nvcdi.WithLogger(h.logger),
-			nvcdi.WithNvmlLib(h.nvml),
-			nvcdi.WithMode(nvcdi.ModeNvml),
-			nvcdi.WithVendor(h.vendor),
-			nvcdi.WithClass(h.deviceClass),
-			nvcdi.WithNVIDIACDIHookPath(h.nvidiaCDIHookPath),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create CDI library for devices: %w", err)
-		}
-		h.nvcdiDevice = nvcdilib
-	}
+
 	if h.nvcdiClaim == nil {
 		nvcdilib, err := nvcdi.New(
 			nvcdi.WithDeviceLib(h.nvdevice),
@@ -123,24 +90,19 @@ func NewCDIHandler(opts ...cdiOption) (*CDIHandler, error) {
 			nvcdi.WithLogger(h.logger),
 			nvcdi.WithNvmlLib(h.nvml),
 			nvcdi.WithMode(nvcdi.ModeNvml),
-			nvcdi.WithVendor(h.vendor),
-			nvcdi.WithClass(h.claimClass),
+			nvcdi.WithVendor(cdiVendor),
+			nvcdi.WithClass(cdiClaimClass),
 			nvcdi.WithNVIDIACDIHookPath(h.nvidiaCDIHookPath),
+			nvcdi.WithFeatureFlags(nvcdi.FeatureDisableNvsandboxUtils),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create CDI library for claims: %w", err)
 		}
 		h.nvcdiClaim = nvcdilib
 	}
-	if h.cache == nil {
-		cache, err := cdiapi.NewCache(
-			cdiapi.WithSpecDirs(h.cdiRoot),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create a new CDI cache: %w", err)
-		}
-		h.cache = cache
-	}
+
+	// The expiration time is defined upon key insert, not cache-globally.
+	h.specCache = utilcache.NewExpiring()
 
 	return h, nil
 }
@@ -156,198 +118,219 @@ func (cdi *CDIHandler) writeSpec(spec spec.Interface, specName string) error {
 		return fmt.Errorf("failed to transform driver root in CDI spec: %w", err)
 	}
 
-	// Update the spec to include only the minimum version necessary.
-	minVersion, err := cdispec.MinimumRequiredVersion(spec.Raw())
+	klog.V(7).Infof("Write CDI spec: %s", specName)
+	return spec.Save(filepath.Join(cdi.cdiRoot, specName+".yaml"))
+}
+
+func (cdi *CDIHandler) GetCommonEditsCached() (*cdiapi.ContainerEdits, error) {
+	key := "commonEdits"
+	if v, ok := cdi.specCache.Get(key); ok {
+		edits, ok := v.(*cdiapi.ContainerEdits)
+		if !ok {
+			return nil, fmt.Errorf("expected *cdiapi.ContainerEdits, got %T", v)
+		}
+		// Return a shallow copy so that cache entry consumer is less likely to
+		// mutate the cache entry.
+		clone := *edits
+		return &clone, nil
+	}
+
+	t0 := time.Now()
+	v, err := cdi.nvcdiClaim.GetCommonEdits()
+	klog.V(7).Infof("t_cdi_get_common_edits %.3f s", time.Since(t0).Seconds())
+
 	if err != nil {
-		return fmt.Errorf("failed to get minimum required CDI spec version: %w", err)
+		return nil, err
 	}
-	spec.Raw().Version = minVersion
 
-	// Write the spec out to disk.
-	return cdi.cache.WriteSpec(spec.Raw(), specName)
-
+	cdi.specCache.Set(key, v, 5*time.Minute)
+	// Return a shallow copy, see above.
+	clone := *v
+	return &clone, nil
 }
 
-func (cdi *CDIHandler) CreateStandardDeviceSpecFile(allocatable AllocatableDevices) error {
-	if err := cdi.createStandardNvidiaDeviceSpecFile(allocatable); err != nil {
-		klog.Errorf("failed to create standard nvidia device spec file: %v", err)
-		return err
-	}
-
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		if err := cdi.createStandardVfioDeviceSpecFile(allocatable); err != nil {
-			klog.Errorf("failed to create standard vfio device spec file: %v", err)
-			return err
+func (cdi *CDIHandler) WarmupDevSpecCache(uuids []string) {
+	for _, uuid := range uuids {
+		_, err := cdi.GetDeviceSpecsByUUIDCached(uuid)
+		if err != nil {
+			klog.Warningf("Ignore error during cache warmup: GetDeviceSpecsByUUIDCached() failed: %s", err)
 		}
 	}
-	return nil
 }
 
-func (cdi *CDIHandler) createStandardVfioDeviceSpecFile(allocatable AllocatableDevices) error {
-	commonEdits := GetVfioCommonCDIContainerEdits()
-	var deviceSpecs []cdispec.Device
-	for _, device := range allocatable {
-		if device.Type() != VfioDeviceType {
-			continue
+func (cdi *CDIHandler) GetDeviceSpecsByUUIDCached(uuid string) ([]cdispec.Device, error) {
+	key := uuid
+	if v, ok := cdi.specCache.Get(key); ok {
+		devs, ok := v.([]cdispec.Device)
+		if !ok {
+			return nil, fmt.Errorf("expected []cdispec.Device, got %T", v)
 		}
-		edits := GetVfioCDIContainerEdits(device.Vfio)
-		dspec := cdispec.Device{
-			Name:           device.CanonicalName(),
-			ContainerEdits: *edits.ContainerEdits,
-		}
-		deviceSpecs = append(deviceSpecs, dspec)
+		clone := make([]cdispec.Device, len(devs))
+		copy(clone, devs)
+		return clone, nil
 	}
 
-	if len(deviceSpecs) == 0 {
-		return nil
-	}
-
-	spec, err := spec.New(
-		spec.WithVendor(cdiVendor),
-		spec.WithClass(cdiDeviceClass),
-		spec.WithDeviceSpecs(deviceSpecs),
-		spec.WithEdits(*commonEdits.ContainerEdits),
-	)
+	t0 := time.Now()
+	devs, err := cdi.nvcdiClaim.GetDeviceSpecsByID(uuid)
+	klog.V(1).Infof("GetDeviceSpecsByID() called for %s, t_cdi_get_device_specs_by_id %.3f s", uuid, time.Since(t0).Seconds())
 	if err != nil {
-		return fmt.Errorf("failed to creat CDI spec: %w", err)
+		return nil, err
 	}
-
-	specName := cdiapi.GenerateTransientSpecName(cdiVendor, cdiDeviceClass, cdiVfioSpecIdentifier)
-	klog.Infof("Writing vfio spec for %s to %s", specName, cdi.cdiRoot)
-	return cdi.writeSpec(spec, specName)
+	cdi.specCache.Set(key, devs, 5*time.Minute)
+	clone := make([]cdispec.Device, len(devs))
+	copy(clone, devs)
+	return clone, nil
 }
 
-func (cdi *CDIHandler) createStandardNvidiaDeviceSpecFile(allocatable AllocatableDevices) error {
-	// Initialize NVML in order to get the device edits.
-	if r := cdi.nvml.Init(); r != nvml.SUCCESS {
-		return fmt.Errorf("failed to initialize NVML: %v", r)
-	}
-	defer func() {
-		if r := cdi.nvml.Shutdown(); r != nvml.SUCCESS {
-			klog.Warningf("failed to shutdown NVML: %v", r)
-		}
-	}()
-
-	// Generate the set of common edits.
-	commonEdits, err := cdi.nvcdiDevice.GetCommonEdits()
+// Note(JP): for a regular GPU, this canonical name is for example `gpu-0`, with
+// the numerical suffix as of the time of writing reflecting the device minor.
+// NVMLs' DeviceSetMigMode() is documented with 'This API may unbind or reset
+// the device to activate the requested mode. Thus, the attributes associated
+// with the device, such as minor number, might change. The caller of this API
+// is expected to query such attributes again.' -- if the minor is indeed not
+// necessarily stable, there may be problems associating this spec _long-term_
+// with that name. That is an argument for always dynamically generating also
+// full-GPU CDI spec during prepare() (or: to cache it, and re-generate it every
+// now and then during this program's lifetime).
+func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices PreparedDevices) error {
+	// Generate those parts of the container spec that are not device-specific
+	// (to inject e.g. driver library mounts and meta devices). Note that
+	// `nvcdiDevice.GetCommonEdits()` may usually initialize nvsandboxutilslib
+	// under the hood -- we now prevent that from happening by using
+	// `nvcdi.FeatureDisableNvsandboxUtils` above.
+	commonEdits, err := cdi.GetCommonEditsCached()
 	if err != nil {
 		return fmt.Errorf("failed to get common CDI spec edits: %w", err)
 	}
 
-	// Make sure that NVIDIA_VISIBLE_DEVICES is set to void to avoid the
-	// nvidia-container-runtime honoring it in addition to the underlying
-	// runtime honoring CDI.
-	commonEdits.Env = append(
-		commonEdits.Env,
-		"NVIDIA_VISIBLE_DEVICES=void")
-
-	// Generate device specs for all full GPUs and MIG devices.
 	var deviceSpecs []cdispec.Device
-	for _, device := range allocatable {
-		if device.Type() == VfioDeviceType {
-			continue
-		}
 
-		uuid := device.UUID()
-		if device.Type() == MigDeviceType {
-			// Goal: inject parent dev node. Other dev nodes specific to this
-			// MIG device are injected 'manually' further below. That is because
-			// currently `nvcdiDevice.GetDeviceSpecsByID()` may yield an
-			// incomplete spec for MIG devices, see
-			// https://github.com/NVIDIA/k8s-dra-driver-gpu/issues/787. Instead,
-			// manually create the required dev node spec for the consuming
-			// container via GetDevNodesForMigDevice() below.
-			uuid = device.Mig.Parent.UUID
-		}
-
-		dspecs, err := cdi.nvcdiDevice.GetDeviceSpecsByID(uuid)
-		if err != nil {
-			return fmt.Errorf("unable to get device spec for %s: %w", device.CanonicalName(), err)
-		}
-		dspecs[0].Name = device.CanonicalName()
-
-		if device.Type() == MigDeviceType {
-			devnodesForMig, err := cdi.GetDevNodesForMigDevice(device.Mig.Parent.Minor, int(device.Mig.GiInfo.Id), int(device.Mig.CiInfo.Id))
-			if err != nil {
-				return fmt.Errorf("failed to construct MIG device DeviceNode edits: %w", err)
-			}
-			klog.V(7).Infof("CDI spec: appending MIG device nodes")
-			dspecs[0].ContainerEdits.DeviceNodes = append(dspecs[0].ContainerEdits.DeviceNodes, devnodesForMig...)
-		}
-
-		deviceSpecs = append(deviceSpecs, dspecs[0])
-	}
-
-	// Generate base spec from commonEdits and deviceEdits.
-	spec, err := spec.New(
-		spec.WithVendor(cdiVendor),
-		spec.WithClass(cdiDeviceClass),
-		spec.WithDeviceSpecs(deviceSpecs),
-		spec.WithEdits(*commonEdits.ContainerEdits),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to creat CDI spec: %w", err)
-	}
-
-	specName := cdiapi.GenerateTransientSpecName(cdiVendor, cdiDeviceClass, cdiBaseSpecIdentifier)
-	klog.Infof("Writing spec for %s to %s", specName, cdi.cdiRoot)
-	return cdi.writeSpec(spec, specName)
-}
-
-func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices PreparedDevices) error {
-	// Generate claim specific specs for each device.
-	var deviceSpecs []cdispec.Device
 	for _, group := range preparedDevices {
-		// If there are no edits passed back as part of the device config state, skip it
-		if group.ConfigState.containerEdits == nil {
-			continue
-		}
+		for _, dev := range group.Devices {
+			uuid := ""
 
-		// Apply any edits passed back as part of the device config state to all devices
-		for _, device := range group.Devices {
-			deviceSpec := cdispec.Device{
-				Name:           fmt.Sprintf("%s-%s", claimUID, device.CanonicalName()),
-				ContainerEdits: *group.ConfigState.containerEdits.ContainerEdits,
+			// Construct claim-specific CDI device name in accordance with the
+			// naming convention encoded in `GetClaimDeviceName()` below.
+			dname := fmt.Sprintf("%s-%s", claimUID, dev.CanonicalName())
+
+			var dspec cdispec.Device
+
+			if dev.Type() == GpuDeviceType {
+				uuid = dev.Gpu.Info.UUID
+				// Get (copy of) cached CDI spec (is safe to be mutated below,
+				// w/o compromising cache).
+				dspecsgpu, err := cdi.GetDeviceSpecsByUUIDCached(uuid)
+				if err != nil {
+					return fmt.Errorf("unable to get device spec for %s: %w", dname, err)
+				}
+				dspec = dspecsgpu[0]
 			}
 
-			deviceSpecs = append(deviceSpecs, deviceSpec)
+			if dev.Type() == VGpuDeviceType {
+				uuid = dev.VGpu.Info.UUID
+				// Get (copy of) cached CDI spec (is safe to be mutated below,
+				// w/o compromising cache).
+				dspecsgpu, err := cdi.GetDeviceSpecsByUUIDCached(uuid)
+				if err != nil {
+					return fmt.Errorf("unable to get device spec for %s: %w", dname, err)
+				}
+				dspec = dspecsgpu[0]
+			}
+
+			if dev.Type() == VfioDeviceType {
+				// For now, just overwrite commonEdits (potentially multiple
+				// times with the same data). Can we also use
+				// `cdi.nvcdiDevice.GetCommonEdits()` here (wasn't done in the
+				// original vfio PR)? Also: assume that all devices in
+				// `preparedDevices` are vfio devices; a mixture isn't supported
+				// by the current business logic and leads to unexpected
+				// behavior.
+				commonEdits = GetVfioCommonCDIContainerEdits()
+				dspec = cdispec.Device{
+					ContainerEdits: *GetVfioCDIContainerEdits(dev.Vfio.Info).ContainerEdits,
+				}
+			}
+
+			if dev.Type() == PreparedMigDeviceType {
+				// Here, get the 'parent dev node' part of the spec. THe spec
+				// fragment for other dev nodes specific to this MIG device is
+				// generated further below. One reason for doing things this way
+				// is that `nvcdiDevice.GetDeviceSpecsByID(MIG_UUID)` may yield
+				// an incomplete spec for MIG devices, see
+				// https://github.com/NVIDIA/k8s-dra-driver-gpu/issues/787.
+				uuid = dev.Mig.Concrete.ParentUUID
+				// Get (copy of) cached device spec (is safe to be mutated below,
+				// w/o compromising cache).
+				dspecsmig, err := cdi.GetDeviceSpecsByUUIDCached(uuid)
+				if err != nil {
+					return fmt.Errorf("unable to get device spec for %s: %w", dname, err)
+				}
+				dspec = dspecsmig[0]
+
+				devnodesForMig, err := cdi.GetDevNodesForMigDevice(dev.Mig.Concrete)
+				if err != nil {
+					return fmt.Errorf("failed to construct MIG device DeviceNode edits: %w", err)
+				}
+				klog.V(7).Infof("CDI spec: appending MIG device nodes")
+				dspec.ContainerEdits.DeviceNodes = append(dspec.ContainerEdits.DeviceNodes, devnodesForMig...)
+			}
+
+			// Associate thew newly generated spec with the claim-specific
+			// device name.
+			dspec.Name = dname
+
+			// If there are edits passed as part of the device config state (set
+			// on the group), add them to the spec for this device.
+			if group.ConfigState.containerEdits != nil {
+				deviceEdits := &cdiapi.ContainerEdits{
+					ContainerEdits: &dspec.ContainerEdits,
+				}
+				deviceEdits = deviceEdits.Append(group.ConfigState.containerEdits)
+				dspec.ContainerEdits = *deviceEdits.ContainerEdits
+			}
+			klog.V(7).Infof("Number of device nodes about to inject for device %s: %d", dname, len(dspec.ContainerEdits.DeviceNodes))
+			deviceSpecs = append(deviceSpecs, dspec)
 		}
 	}
 
-	// If there are no claim specific deviceSpecs, just return without creating the spec file
-	if len(deviceSpecs) == 0 {
-		return nil
-	}
-
-	// Generate the claim specific device spec for this driver.
+	tws0 := time.Now()
 	spec, err := spec.New(
 		spec.WithVendor(cdiVendor),
 		spec.WithClass(cdiClaimClass),
 		spec.WithDeviceSpecs(deviceSpecs),
+		spec.WithEdits(*commonEdits.ContainerEdits),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to creat CDI spec: %w", err)
+		return fmt.Errorf("failed to create CDI spec: %w", err)
 	}
 
-	// Write the spec out to disk.
+	// Write the per-claim spec that was generated above to the filesystem. As
+	// it is bound to a DRA ResourceClaim, it's transient (bound to the lifetime
+	// of a container). Hence, Use the "transient spec" concept from CDI.
 	specName := cdiapi.GenerateTransientSpecName(cdiVendor, cdiClaimClass, claimUID)
-	klog.Infof("Writing claim spec for %s to %s", specName, cdi.cdiRoot)
-	return cdi.writeSpec(spec, specName)
+	klog.V(6).Infof("Writing CDI spec '%s' for claim '%s'", specName, claimUID)
+	result := cdi.writeSpec(spec, specName)
+
+	klog.V(7).Infof("t_gen_write_cdi_spec %.3f s", time.Since(tws0).Seconds())
+	return result
 }
 
 func (cdi *CDIHandler) DeleteClaimSpecFile(claimUID string) error {
 	specName := cdiapi.GenerateTransientSpecName(cdiVendor, cdiClaimClass, claimUID)
-	return cdi.cache.RemoveSpec(specName)
-}
-
-func (cdi *CDIHandler) GetStandardDevice(device *AllocatableDevice) string {
-	return cdiparser.QualifiedName(cdiVendor, cdiDeviceClass, device.CanonicalName())
-}
-
-func (cdi *CDIHandler) GetClaimDevice(claimUID string, device *AllocatableDevice, containerEdits *cdiapi.ContainerEdits) string {
-	if containerEdits == nil {
-		return ""
+	klog.V(6).Infof("Delete CDI spec file: '%s', claim '%s'", specName, claimUID)
+	err := os.Remove(filepath.Join(cdi.cdiRoot, specName+".yaml"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
+	return nil
+}
+
+// Philosophy: all devices to be injected into a container are defined in a
+// single, transient CDI spec. This function returns the fully qualified
+// identifier for a device defined in that spec. Example:
+// k8s.gpu.nvidia.com/claim=dab5ab50-d59a-42a6-af16-cfd4628c0f7a-gpu-0
+// That identifier can be used elsewhere, and _points to the spec_.
+func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, device *AllocatableDevice, containerEdits *cdiapi.ContainerEdits) string {
 	return cdiparser.QualifiedName(cdiVendor, cdiClaimClass, fmt.Sprintf("%s-%s", claimUID, device.CanonicalName()))
 }
 
@@ -368,9 +351,9 @@ func (cdi *CDIHandler) GetClaimDevice(claimUID string, device *AllocatableDevice
 // without actually requiring the same device nodes to be explicitly created on
 // the host. That is what is achieved below with the structure created in
 // cdiDevNodeFromNVCapDevInfo().
-func (cdi *CDIHandler) GetDevNodesForMigDevice(parentMinor int, giId int, ciId int) ([]*cdispec.DeviceNode, error) {
-	gipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/access", procNvCapsPath, parentMinor, giId)
-	cipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/ci%d/access", procNvCapsPath, parentMinor, giId, ciId)
+func (cdi *CDIHandler) GetDevNodesForMigDevice(mlt *MigLiveTuple) ([]*cdispec.DeviceNode, error) {
+	gipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/access", procNvCapsPath, mlt.ParentMinor, mlt.GIID)
+	cipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/ci%d/access", procNvCapsPath, mlt.ParentMinor, mlt.GIID, mlt.CIID)
 
 	giCapsInfo, err := common.ParseNVCapDeviceInfo(gipath)
 	if err != nil {

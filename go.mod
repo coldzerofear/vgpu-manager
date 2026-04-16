@@ -3,11 +3,11 @@ module github.com/coldzerofear/vgpu-manager
 go 1.25.3
 
 require (
+	github.com/Masterminds/semver v1.5.0
 	github.com/NVIDIA/go-nvlib v0.9.0
 	github.com/NVIDIA/go-nvml v0.13.0-1
-	github.com/NVIDIA/k8s-dra-driver-gpu v0.0.0-20260108173021-6a1af5e6a4d4
+	github.com/NVIDIA/k8s-dra-driver-gpu v0.0.0-20260304152636-db70fc24dd3f
 	github.com/NVIDIA/nvidia-container-toolkit v1.18.2
-	github.com/blang/semver/v4 v4.0.0
 	github.com/docker/go-units v0.5.0
 	github.com/evanphx/json-patch v0.5.2
 	github.com/fsnotify/fsnotify v1.9.0
@@ -32,7 +32,7 @@ require (
 	k8s.io/apiserver v0.34.2
 	k8s.io/client-go v0.34.2
 	k8s.io/component-base v0.34.2
-	k8s.io/dynamic-resource-allocation v0.34.0
+	k8s.io/dynamic-resource-allocation v0.34.2
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/kube-scheduler v0.34.2
 	k8s.io/kubectl v0.34.2
@@ -49,6 +49,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
@@ -135,7 +136,6 @@ require (
 
 replace (
 	github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20250919193215-e435d1485517
-	github.com/NVIDIA/k8s-dra-driver-gpu/pkg/featuregates => ./pkg/kubeletplugin/featuregates
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.2.8
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.34.2
 	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.34.2
