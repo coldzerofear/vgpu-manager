@@ -14,7 +14,7 @@ Using DRA requires the independent installation of the DRA driver for the vgpu-m
 * glibc >= 2.17 & glibc < 2.30
 * kernel version >= 3.10
 
-> Note: DRAConsumableCapacity作为 Kubernetes 1.34 中的 alpha 功能引入。功能门必须在 kubelet、kube-apiserver、kube-scheduler 和 kube-controller-manager 中启用。DRAConsumableCapacity
+> Note: DRAConsumableCapacity 作为 Kubernetes 1.34 中的 alpha 功能引入，功能门必须在 kubelet、kube-apiserver、kube-scheduler 和 kube-controller-manager 中启用。
 
 ## Install
 

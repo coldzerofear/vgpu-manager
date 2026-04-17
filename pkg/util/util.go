@@ -466,3 +466,13 @@ func GetEnvEnabled(env string) bool {
 	}
 	return false
 }
+
+func EnsureDir(path string, perm os.FileMode) error {
+	if err := os.MkdirAll(path, perm); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, perm); err != nil {
+		return err
+	}
+	return nil
+}

@@ -376,7 +376,7 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 		err = h.ValidateUpdate(ctx, oldPod, newPod)
 	case admissionv1.Delete:
 		pod := &corev1.Pod{}
-		if err = h.decoder.Decode(req, pod); err != nil {
+		if err = h.decoder.DecodeRaw(req.OldObject, pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
 		err = h.ValidateDelete(ctx, pod)

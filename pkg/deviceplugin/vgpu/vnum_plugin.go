@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
@@ -40,6 +41,7 @@ import (
 
 type vNumberDevicePlugin struct {
 	pluginapi.UnimplementedDevicePluginServer
+	mutex       sync.Mutex
 	baseServer  base.PluginServer
 	kubeClient  *kubernetes.Clientset
 	podResource *client.PodResource
@@ -383,6 +385,9 @@ func buildPreferredAllocationResponsesFromClaims(
 
 // GetPreferredAllocation returns the preferred allocation from the set of devices specified in the request.
 func (m *vNumberDevicePlugin) GetPreferredAllocation(ctx context.Context, req *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
 	klog.V(4).InfoS("GetPreferredAllocation", "pluginName", m.Name(), "request", req.GetContainerRequests())
 
 	requests := req.GetContainerRequests()
@@ -554,6 +559,9 @@ func (m *vNumberDevicePlugin) getCurrentPod(ctx context.Context) (*corev1.Pod, e
 // Plugin can run device specific operations and instruct Kubelet
 // of the steps to make the Device available in the container.
 func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
 	klog.V(4).InfoS("Allocate", "pluginName", m.Name(), "request", req.GetContainerRequests())
 
 	var currentPod *corev1.Pod
@@ -671,7 +679,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>
 		// <host_manager_dir>/<pod-uid>_<cont-name>
 		contDir, hostDir := getContainerManagerPaths(currentPod.GetUID(), contClaim.Name)
-		_ = ensureDir(contDir, 0o777)
+		_ = util.EnsureDir(contDir, 0o777)
 		devicesJsonFilePath := filepath.Join(contDir, DeviceListFileName)
 		if err = writeJSONFile(devicesJsonFilePath, containerRequest.GetDevicesIds(), 0o664); err != nil {
 			klog.V(3).ErrorS(err, fmt.Sprintf("write %s failed", DeviceListFileName),
@@ -682,11 +690,11 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>/vgpu_lock
 		contVGPULockPath := filepath.Join(contDir, VGPULockDirName)
-		_ = ensureDir(contVGPULockPath, 0o777)
+		_ = util.EnsureDir(contVGPULockPath, 0o777)
 
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>/vmem_node
 		contVMemoryNodePath := filepath.Join(contDir, util.VMemNode)
-		_ = ensureDir(contVMemoryNodePath, 0o777)
+		_ = util.EnsureDir(contVMemoryNodePath, 0o777)
 
 		// <host_manager_dir>/<pod-uid>_<cont-name>/config
 		hostVGPUConfigPath := filepath.Join(hostDir, util.Config)
@@ -825,16 +833,6 @@ func (m *vNumberDevicePlugin) getNodeWithRetry(ctx context.Context, nodeName, rv
 	return node, nil
 }
 
-func ensureDir(path string, perm os.FileMode) error {
-	if err := os.MkdirAll(path, perm); err != nil {
-		return err
-	}
-	if err := os.Chmod(path, perm); err != nil {
-		return err
-	}
-	return nil
-}
-
 func writeJSONFile(path string, v any, perm os.FileMode) error {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -922,7 +920,7 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		return resp, fmt.Errorf("inconsistent allocation results of container equipment")
 	}
 	configDirPath := filepath.Join(contDir, util.Config)
-	_ = ensureDir(configDirPath, 0o777)
+	_ = util.EnsureDir(configDirPath, 0o777)
 	configFilePath := filepath.Join(configDirPath, VGPUConfigFileName)
 	klog.V(4).InfoS(
 		"vGPU config path resolved",

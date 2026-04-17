@@ -1,3 +1,38 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-webhook
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-webhook:role
+rules:
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims
+    verbs:
+      - get
+      - create
+      - update
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-webhook-as-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vgpu-manager-webhook:role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-webhook
+    namespace: kube-system
+---
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -65,6 +100,65 @@ webhooks:
           - v1
         operations:
           - CREATE
+          - UPDATE
+        resources:
+          - pods
+        scope: '*'
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - UPDATE
+        resources:
+          - pods/status
+        scope: '*'
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: kube-system/vgpu-manager-webhook-cert
+  name: vgpu-manager-webhook-validate
+webhooks:
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: vgpu-manager-webhook
+        namespace: kube-system
+        path: /pods/validate
+        port: 443
+    failurePolicy: Fail # Ignore
+    matchPolicy: Equivalent
+    name: validatepod.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - cert-manager
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - DELETE
         resources:
           - pods
         scope: '*'
@@ -107,17 +201,17 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       priorityClassName: system-node-critical
+      serviceAccountName: vgpu-manager-webhook
       terminationGracePeriodSeconds: 10
       containers:
         - name: device-webhook
-          image: coldzerofear/vgpu-manager:latest
+          image: coldzerofear/vgpu-manager-dra:latest
           imagePullPolicy: IfNotPresent
           command:
             - device-webhook
             - --server-bind-port=9443
-            - --scheduler-name=vgpu-scheduler
-            - --default-node-policy=binpack
-            - --default-device-policy=binpack
+            - --default-topology-mode=link
+            - --default-convert2-dra
             - --v=4
           livenessProbe:
             failureThreshold: 3
@@ -130,13 +224,13 @@ spec:
             successThreshold: 1
             timeoutSeconds: 1
           readinessProbe:
-            failureThreshold: 3
+            failureThreshold: 5
             httpGet:
               path: /readyz
               port: 9443
               scheme: HTTPS
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 5
             successThreshold: 1
             timeoutSeconds: 1
           ports:

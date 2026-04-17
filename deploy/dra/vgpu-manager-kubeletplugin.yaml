@@ -98,7 +98,7 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
-          command: [bash, /usr/bin/kubelet-plugin-prestart.sh]
+          command: [bash, -c, /usr/bin/kubelet-plugin-prestart.sh]
           env:
             - name: NVIDIA_DRIVER_ROOT
               value: /
@@ -144,7 +144,7 @@ spec:
                 sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
-              hami-kubelet-plugin -v 6
+              kubelet-plugin -v 6
           env:
             - name: NODE_NAME
               valueFrom:
@@ -204,7 +204,6 @@ spec:
               name: manager
       dnsPolicy: ClusterFirst
       priorityClassName: "system-cluster-critical"
-      serviceAccount: vgpu-manager-kubelet-plugin
       serviceAccountName: vgpu-manager-kubelet-plugin
       securityContext: {}
       volumes:
@@ -251,6 +250,7 @@ spec:
     - cel:
         expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"
 ---
+apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
   name: mig-manager

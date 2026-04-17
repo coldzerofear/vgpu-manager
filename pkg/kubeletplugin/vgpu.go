@@ -130,11 +130,16 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 	if err := os.RemoveAll(baseContPath); err != nil {
 		klog.Warningf("Failed to remove basic host path %s: %s", baseHostPath, err)
 	}
-	if err := os.MkdirAll(baseContPath, 0777); err != nil {
-		klog.Warningf("Failed to create basic host path %s: %s", baseHostPath, err)
+	preparedDirs := []string{
+		baseContPath,
+		filepath.Join(baseContPath, util.Config),
+		filepath.Join(baseContPath, vgpu.VGPULockDirName),
+		filepath.Join(baseContPath, util.VMemNode),
 	}
-	if err := os.Chmod(baseContPath, 0777); err != nil {
-		klog.Warningf("Failed to change mod of basic host path %s: %s", baseHostPath, err)
+	for _, dirPath := range preparedDirs {
+		if err := util.EnsureDir(dirPath, 0o777); err != nil {
+			klog.Warningf("Failed to ensure directory %s: %s", dirPath, err)
+		}
 	}
 
 	envMode := util.HostMode
@@ -145,8 +150,8 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 	}
 	conttainerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
 	vGpuEnvs := []string{
+		fmt.Sprintf("%s=", util.ManagerVisibleDevices),
 		fmt.Sprintf("%s=%s", util.LdPreloadEnv, conttainerDriverFile),
-		fmt.Sprintf("%s=''", util.ManagerVisibleDevices),
 		fmt.Sprintf("%s=%v", util.ManagerCompatibilityMode, envMode),
 	}
 	// TODO Covering the visible uuid list

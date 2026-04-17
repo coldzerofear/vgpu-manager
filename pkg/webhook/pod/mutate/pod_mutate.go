@@ -330,7 +330,7 @@ func (h *mutateHandle) updateResourceOwner(ctx context.Context, owner metav1.Obj
 		return client.IgnoreNotFound(err)
 	}
 	if !controllerutil.HasControllerReference(claim) {
-		if err := controllerutil.SetControllerReference(claim, owner, h.client.Scheme()); err != nil {
+		if err := controllerutil.SetControllerReference(owner, claim, h.client.Scheme()); err != nil {
 			logger.Error(err, "SetControllerReference failed")
 			return err
 		}

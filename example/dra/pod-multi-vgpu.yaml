@@ -1,15 +1,5 @@
 ---
 apiVersion: resource.k8s.io/v1
-kind: DeviceClass
-metadata:
-  name: vgpu-manager
-spec:
-  selectors:
-    - cel:
-        expression: |-
-          device.driver == "manager.nvidia.com" && device.attributes["manager.nvidia.com"].type == "vgpu"
----
-apiVersion: resource.k8s.io/v1
 kind: ResourceClaim
 metadata:
   name: multi-vgpu-0
@@ -40,7 +30,7 @@ spec:
       args: ["export; trap 'exit 0' TERM; sleep 9999 & wait"]
       resources:
         requests:
-          cpu: 1
+          cpu: "1"
         claims:
           - name: multi-vgpu
   resourceClaims:
