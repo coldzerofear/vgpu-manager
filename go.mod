@@ -4,7 +4,7 @@ go 1.25.3
 
 require (
 	github.com/Masterminds/semver v1.5.0
-	github.com/NVIDIA/go-nvlib v0.9.0
+	github.com/NVIDIA/go-nvlib v0.10.0
 	github.com/NVIDIA/go-nvml v0.13.0-1
 	github.com/NVIDIA/k8s-dra-driver-gpu v0.0.0-20260304152636-db70fc24dd3f
 	github.com/NVIDIA/nvidia-container-toolkit v1.18.2
