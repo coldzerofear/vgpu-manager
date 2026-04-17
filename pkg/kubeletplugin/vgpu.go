@@ -165,16 +165,28 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 		if resourceMap, exists := deviceCapacityMap[device.CanonicalName()]; exists {
 			if quantity, ok := resourceMap[CoresResourceName]; ok {
 				if val, ok := quantity.AsInt64(); ok {
-					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, val))
-					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, val))
+					// Rewrite environment variables to avoid interference from built-in environment variables in container images.
+					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaCoreLimitEnv))
+					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaSoftCoreLimitEnv))
+					if val < util.HundredCore {
+						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, val))
+						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, val))
+					} else {
+						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaCoreLimitEnv, idx))
+						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaSoftCoreLimitEnv, idx))
+					}
 				}
 			}
 			if quantity, ok := resourceMap[MemoryResourceName]; ok {
 				if val, ok := quantity.AsInt64(); ok {
 					// TODO Only enable memory limit when the request is less than the entire card
 					requestMB := uint64(val / units.MiB)
+					// Rewrite environment variables to avoid interference from built-in environment variables in container images.
+					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaMemoryLimitEnv))
 					if requestMB < totalMemoryMB {
 						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
+					} else {
+						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaMemoryLimitEnv, idx))
 					}
 				}
 			}
