@@ -53,7 +53,7 @@ func (d Device) getUuid() string {
 	return ""
 }
 
-func (d Device) isHealthy() bool {
+func (d Device) IsHealthy() bool {
 	if d.GPU != nil {
 		return d.GPU.Healthy
 	}
@@ -491,6 +491,26 @@ func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 	return deviceInfos
 }
 
+// RegisterNotify Notify immediate node device registration operation
+func (m *DeviceManager) RegisterNotify() {
+	select {
+	case m.reRegister <- struct{}{}:
+	default:
+		klog.Errorf("Re registration channel is full, stop sending requests")
+	}
+}
+
+// deviceNotify Send the device to each plugin subscribed to the channel
+func (m *DeviceManager) deviceNotify(dev *Device) {
+	for name, ch := range m.notify {
+		select {
+		case ch <- dev:
+		default:
+			klog.Errorf("Notification channel is full. Stop sending device %s unhealthy notifications to %s", dev.getUuid(), name)
+		}
+	}
+}
+
 func (m *DeviceManager) handleNotify() {
 	stopCh := m.stop
 	for {
@@ -499,25 +519,15 @@ func (m *DeviceManager) handleNotify() {
 			klog.V(3).Infoln("DeviceManager handle notify has stopped")
 			return
 		case dev := <-m.unhealthy:
-			if !dev.isHealthy() {
+			if !dev.IsHealthy() {
 				klog.V(4).Infof("Device %s is already marked unhealthy. Skip notifications", dev.getUuid())
 				continue
 			}
 
 			m.mut.Lock()
 			dev.setUnhealthy()
-			select {
-			case m.reRegister <- struct{}{}:
-			default:
-				klog.Errorf("Re registration channel is full, stop sending requests")
-			}
-			for name, ch := range m.notify {
-				select {
-				case ch <- dev:
-				default:
-					klog.Errorf("Notification channel is full. Stop sending device %s unhealthy notifications to %s", dev.getUuid(), name)
-				}
-			}
+			m.RegisterNotify()
+			m.deviceNotify(dev)
 			m.mut.Unlock()
 		}
 	}
