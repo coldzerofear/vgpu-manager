@@ -275,8 +275,8 @@ func (pdc *PodDeviceClaim) UnmarshalText(text string) error {
 
 func UpdatePodRealContainerDeviceClaim(pod *corev1.Pod, cdc ContainerDeviceClaim) error {
 	pdc := PodDeviceClaim{}
-	val, ok := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
-	if ok {
+	val, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
+	if val != "" {
 		if err := pdc.UnmarshalText(val); err != nil {
 			klog.Warningf("decoding pod real container device claim failed: %v", err)
 		}

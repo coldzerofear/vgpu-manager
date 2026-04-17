@@ -593,7 +593,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		contClaim, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
 		if err != nil {
 			klog.V(3).ErrorS(err, "get pod pre-allocate device claim failed", "pod",
-				klog.KObj(currentPod), "container", contClaim.Name, "reqIndex", i, "deviceIDs", containerRequest.GetDevicesIds())
+				klog.KObj(currentPod), "reqIndex", i, "deviceIDs", containerRequest.GetDevicesIds())
 			return resp, err
 		}
 		if len(containerRequest.GetDevicesIds()) != len(contClaim.DeviceClaims) {
@@ -916,7 +916,7 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		return resp, fmt.Errorf("read %s failed: %w", DeviceListFileName, err)
 	}
 	// Verify if there are any errors in the allocation of container equipment.
-	if sets.NewString(allocatedDeviceIDs...).Equal(sets.NewString(req.GetDevicesIds()...)) {
+	if !sets.NewString(allocatedDeviceIDs...).Equal(sets.NewString(req.GetDevicesIds()...)) {
 		klog.ErrorS(nil, "inconsistent allocation results of container equipment", "pod", klog.KObj(pod),
 			"container", podInfo.ContainerName, "reqDeviceIDs", req.GetDevicesIds(), "allocatedDeviceIDs", allocatedDeviceIDs)
 		return resp, fmt.Errorf("inconsistent allocation results of container equipment")
