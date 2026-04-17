@@ -17,9 +17,8 @@
 package kubeletplugin
 
 import (
-	"slices"
-
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 )
 
@@ -209,12 +208,15 @@ func (g *PreparedDeviceGroup) GetDeviceNames() []DeviceName {
 
 // UUIDs only for full GPUs.
 func (l PreparedDeviceList) GpuUUIDs() []string {
-	var uuids []string
+	var uuids = sets.NewString()
 	for _, device := range l.Gpus() {
-		uuids = append(uuids, device.Gpu.Info.UUID)
+		uuids.Insert(device.Gpu.Info.UUID)
 	}
-	slices.Sort(uuids)
-	return uuids
+	for _, device := range l.VGpus() {
+		uuids.Insert(device.VGpu.Info.UUID)
+	}
+	return uuids.List()
+
 }
 
 //func (g *PreparedDeviceGroup) GpuUUIDs() []string {

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	pkgflags "github.com/NVIDIA/k8s-dra-driver-gpu/pkg/flags"
@@ -30,11 +29,8 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
-	"github.com/spf13/pflag"
 	"github.com/urfave/cli/v2"
-	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/component-base/logs"
-	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 )
@@ -47,8 +43,10 @@ func main() {
 }
 
 func newApp() *cli.App {
+	// init FeatureGates
+	_ = featuregates.FeatureGates()
 	loggingConfig := pkgflags.NewLoggingConfig()
-	featureGateConfig := NewFeatureGateConfig()
+	featureGateConfig := pkgflags.NewFeatureGateConfig()
 	flags := &pkgkubeletplugin.Flags{}
 
 	cliFlags := []cli.Flag{
@@ -154,13 +152,13 @@ func newApp() *cli.App {
 				return fmt.Errorf("arguments not supported: %v", c.Args().Slice())
 			}
 			// `loggingConfig` must be applied before doing any logging
-			err := logsapi.ValidateAndApply(loggingConfig.Config, featuregates.FeatureGates())
+			err := loggingConfig.Apply()
 
 			// Store klog's log verbosity setting in this program's config for
 			// later runtime inspection (it's otherwise not accessible anymore
 			// because we do not expose the raw `cliFlags`.
 			flags.KlogVerbosity = int(loggingConfig.Config.Verbosity)
-			LogStartupConfig(flags, loggingConfig)
+			pkgflags.LogStartupConfig(flags, loggingConfig)
 			return err
 		},
 		Action: func(c *cli.Context) error {
@@ -251,62 +249,4 @@ func RunPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error {
 	}
 
 	return nil
-}
-
-// FeatureGateConfig manages the unified feature gate registry containing both
-// project-specific and standard Kubernetes feature gates.
-type FeatureGateConfig struct{}
-
-// NewFeatureGateConfig creates a new unified feature gate configuration.
-func NewFeatureGateConfig() *FeatureGateConfig {
-	return &FeatureGateConfig{}
-}
-
-// Flags returns the CLI flags for the unified feature gate configuration.
-func (f *FeatureGateConfig) Flags() []cli.Flag {
-	var fs pflag.FlagSet
-
-	// Add the unified feature gates flag containing both project and logging features
-	fs.AddFlag(&pflag.Flag{
-		Name: "feature-gates",
-		Usage: "A set of key=value pairs that describe feature gates for alpha/experimental features. " +
-			"Options are:\n     " + strings.Join(featuregates.KnownFeatures(), "\n     "),
-		Value: featuregates.FeatureGates().(pflag.Value), //nolint:forcetypeassert // No need for type check: FeatureGates is a *featuregate.featureGate, which implements pflag.Value.
-	})
-
-	var flags []cli.Flag
-	fs.VisitAll(func(flag *pflag.Flag) {
-		flags = append(flags, pflagToCLI(flag, "Feature Gates:"))
-	})
-	return flags
-}
-
-func pflagToCLI(flag *pflag.Flag, category string) cli.Flag {
-	return &cli.GenericFlag{
-		Name:        flag.Name,
-		Category:    category,
-		Usage:       flag.Usage,
-		Value:       flag.Value,
-		Destination: flag.Value,
-		EnvVars:     []string{strings.ToUpper(strings.ReplaceAll(flag.Name, "-", "_"))},
-	}
-}
-
-func LogStartupConfig(parsedFlags any, loggingConfig *pkgflags.LoggingConfig) {
-	// Always log component startup config (level 0).
-	klog.Infof("\nFeature gates: %#v\nFlags: %s",
-		// Flat boolean map -- no pretty-printing needed.
-		featuregates.ToMap(),
-		// Based on go-spew's Sdump(), with indentation. Type information is
-		// always displayed (cannot be disabled). Rely on `parsedFlags` to also
-		// contain the klog log verbosity (we want to log this here in any case,
-		// so that the log output explicitly mentions that).
-		dump.Pretty(parsedFlags),
-	)
-
-	// This is a complex object, comprised of largely static default klog
-	// component configuration. Various parts can be overridden via environment
-	// variables or CLI flags: it makes sense to log the interpolated config,
-	// but only on a high verbosity level.
-	klog.V(6).Infof("Logging config: %s", dump.Pretty(loggingConfig))
 }

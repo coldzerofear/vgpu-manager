@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	_ "unsafe"
 
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -37,10 +38,10 @@ const (
 	TimeSlicingSettings featuregate.Feature = "TimeSlicingSettings"
 
 	// MPSSupport allows MPS (Multi-Process Service) settings to be specified.
-	//MPSSupport featuregate.Feature = "MPSSupport"
+	MPSSupport featuregate.Feature = "MPSSupport"
 
 	// IMEXDaemonsWithDNSNames allows using DNS names instead of raw IPs for IMEX daemons.
-	//IMEXDaemonsWithDNSNames featuregate.Feature = "IMEXDaemonsWithDNSNames"
+	IMEXDaemonsWithDNSNames featuregate.Feature = "IMEXDaemonsWithDNSNames"
 
 	// PassthroughSupport allows gpus to be configured with the vfio-pci driver.
 	PassthroughSupport featuregate.Feature = "PassthroughSupport"
@@ -77,20 +78,20 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(25, 8),
 		},
 	},
-	//MPSSupport: {
-	//	{
-	//		Default:    false,
-	//		PreRelease: featuregate.Alpha,
-	//		Version:    version.MajorMinor(25, 8),
-	//	},
-	//},
-	//IMEXDaemonsWithDNSNames: {
-	//	{
-	//		Default:    true,
-	//		PreRelease: featuregate.Beta,
-	//		Version:    version.MajorMinor(25, 8),
-	//	},
-	//},
+	MPSSupport: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(25, 8),
+		},
+	},
+	IMEXDaemonsWithDNSNames: {
+		{
+			Default:    true,
+			PreRelease: featuregate.Beta,
+			Version:    version.MajorMinor(25, 8),
+		},
+	},
 	PassthroughSupport: {
 		{
 			Default:    false,
@@ -130,7 +131,8 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 
 var (
 	featureGatesOnce sync.Once
-	featureGates     featuregate.MutableVersionedFeatureGate
+	//go:linkname featureGates github.com/NVIDIA/k8s-dra-driver-gpu/pkg/featuregates.featureGates
+	featureGates featuregate.MutableVersionedFeatureGate
 )
 
 // FeatureGates instantiates and returns the package-level singleton representing
@@ -179,12 +181,12 @@ func newFeatureGates(version *version.Version) featuregate.MutableVersionedFeatu
 // any dependencies are not satisfied.
 func ValidateFeatureGates() error {
 	if Enabled(VGPUSupport) {
-		if Enabled(TimeSlicingSettings) {
-			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, TimeSlicingSettings)
-		}
-		//if Enabled(MPSSupport) {
-		//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, MPSSupport)
+		//if Enabled(TimeSlicingSettings) {
+		//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, TimeSlicingSettings)
 		//}
+		if Enabled(MPSSupport) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, MPSSupport)
+		}
 		if Enabled(PassthroughSupport) {
 			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, PassthroughSupport)
 		}
@@ -208,9 +210,13 @@ func ValidateFeatureGates() error {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, NVMLDeviceHealthCheck)
 	}
 
-	//if Enabled(DynamicMIG) && Enabled(MPSSupport) {
-	//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, MPSSupport)
-	//}
+	if Enabled(DynamicMIG) && Enabled(MPSSupport) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, MPSSupport)
+	}
+
+	if Enabled(PassthroughSupport) && Enabled(NVMLDeviceHealthCheck) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", PassthroughSupport, NVMLDeviceHealthCheck)
+	}
 
 	return nil
 }
