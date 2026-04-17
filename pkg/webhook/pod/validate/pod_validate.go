@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -147,6 +148,21 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.Resourc
 			})
 		}
 	}
+	policy, _ := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation)
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	if policy == util.VirtualMemoryPolicy.String() || strings.HasPrefix(policy, "virt") {
+		deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
+			CEL: &resourceapi.CELDeviceSelector{
+				Expression: fmt.Sprintf(`device.attributes["%s"].memoryRatio > 100`, util.DRADriverName),
+			},
+		})
+	} else if policy == util.PhysicalMemoryPolicy.String() || strings.HasPrefix(policy, "phy") {
+		deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
+			CEL: &resourceapi.CELDeviceSelector{
+				Expression: fmt.Sprintf(`device.attributes["%s"].memoryRatio <= 100`, util.DRADriverName),
+			},
+		})
+	}
 	deviceConstraints := []resourceapi.DeviceConstraint{{
 		Requests:          []string{kubeletplugin.VGpuDeviceType},
 		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
@@ -154,6 +170,10 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.Resourc
 
 	switch filter.PodUsedGPUTopologyMode(pod) {
 	case util.LinkTopology:
+		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+			Requests:       []string{kubeletplugin.VGpuDeviceType},
+			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributePCIeRoot)),
+		})
 	case util.NUMATopology:
 		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 			Requests:       []string{kubeletplugin.VGpuDeviceType},
@@ -175,7 +195,7 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.Resourc
 				Requests: []resourceapi.DeviceRequest{{
 					Name: kubeletplugin.VGpuDeviceType,
 					Exactly: &resourceapi.ExactDeviceRequest{
-						DeviceClassName: util.ComponentName,
+						DeviceClassName: util.VGPUDeviceClassName,
 						AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
 						Count:           deviceCount,
 						Capacity: &resourceapi.CapacityRequirements{

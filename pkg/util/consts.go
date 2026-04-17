@@ -14,7 +14,10 @@ const (
 	NodeNvidiaCudaVersionLabel   = NvidiaDomain + "/node-cuda-version"
 	NvidiaNativeGPUResourceName  = NvidiaDomain + "/gpu"
 
-	DRADriverName = "manager.nvidia.com"
+	DRADriverName       = "manager.nvidia.com"
+	GPUDeviceClassName  = "gpu-manager"
+	VGPUDeviceClassName = "vgpu-manager"
+	MIGDeviceClassName  = "mig-manager"
 
 	IgnoreWebhookAnnotation = "vgpu-manager.io/ignore-webhook"
 	DRAOriResAnnotation     = "vgpu-manager.io/original-resources"
