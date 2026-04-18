@@ -211,7 +211,6 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) e
 	resourceName := pod.Name
 	if pod.GenerateName != "" {
 		resourceName = fmt.Sprintf("%s%s", pod.GenerateName, rand.String(5))
-		util.InsertAnnotation(pod, util.DRAGenNameAnnotation, resourceName)
 	}
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
@@ -252,6 +251,9 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) e
 		if err != nil {
 			logger.Error(err, "Encoding original resource information failed")
 			return apierrors.NewBadRequest(fmt.Sprintf("Encoding original resource information failed: %v", err))
+		}
+		if pod.GenerateName != "" {
+			util.InsertAnnotation(pod, util.DRAGenNameAnnotation, resourceName)
 		}
 		util.InsertAnnotation(pod, util.DRAOriResAnnotation, encode)
 		logger.Info("Successfully convert all vGPU requests to resourceClaims")

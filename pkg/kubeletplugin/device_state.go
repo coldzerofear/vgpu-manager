@@ -509,6 +509,7 @@ func (s *DeviceState) unpreparePartiallyPrepairedClaim(cuid string, pc PreparedC
 	// For now, there's nothing to do when DynamicMIG is not enabled.
 	if !featuregates.Enabled(featuregates.DynamicMIG) {
 		klog.Infof("unprepare noop: preparation started but not completed for claim %s (devices: %v)", PreparedClaimToString(&pc, cuid), pc.Status.Allocation.Devices.Results)
+		return nil
 	}
 
 	// When DynamicMIG is enabled, try to identify an orphaned MIG device
