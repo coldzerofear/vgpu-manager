@@ -32,6 +32,7 @@ require (
 	k8s.io/apiserver v0.34.2
 	k8s.io/client-go v0.34.2
 	k8s.io/component-base v0.34.2
+	k8s.io/component-helpers v0.34.2
 	k8s.io/dynamic-resource-allocation v0.34.2
 	k8s.io/klog/v2 v2.130.1
 	k8s.io/kube-scheduler v0.34.2
@@ -139,6 +140,7 @@ replace (
 	github.com/opencontainers/runc => github.com/opencontainers/runc v1.2.8
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.34.2
 	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.34.2
+	k8s.io/component-helpers => k8s.io/component-helpers v0.34.2
 	k8s.io/controller-manager => k8s.io/controller-manager v0.34.2
 	k8s.io/cri-client => k8s.io/cri-client v0.34.2
 	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.34.2

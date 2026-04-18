@@ -21,10 +21,15 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/informers"
+	"k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
 )
 
 func InsertAnnotation(obj metav1.Object, k, v string) {
+	if obj == nil {
+		return
+	}
 	if obj.GetAnnotations() == nil {
 		obj.SetAnnotations(map[string]string{})
 	}
@@ -32,6 +37,9 @@ func InsertAnnotation(obj metav1.Object, k, v string) {
 }
 
 func HasLabel(obj metav1.Object, label string) (val string, ok bool) {
+	if obj == nil {
+		return "", false
+	}
 	if obj.GetLabels() != nil {
 		val, ok = obj.GetLabels()[label]
 	}
@@ -39,6 +47,9 @@ func HasLabel(obj metav1.Object, label string) (val string, ok bool) {
 }
 
 func HasAnnotation(obj metav1.Object, anno string) (val string, ok bool) {
+	if obj == nil {
+		return "", false
+	}
 	if obj.GetAnnotations() != nil {
 		val, ok = obj.GetAnnotations()[anno]
 	}
@@ -47,6 +58,9 @@ func HasAnnotation(obj metav1.Object, anno string) (val string, ok bool) {
 
 // GetCapacityOfNode Return the capacity of node resources.
 func GetCapacityOfNode(node *corev1.Node, resourceName string) (int64, bool) {
+	if node == nil {
+		return 0, false
+	}
 	if val, ok := node.Status.Capacity[corev1.ResourceName(resourceName)]; ok {
 		return val.Value(), true
 	}
@@ -55,6 +69,9 @@ func GetCapacityOfNode(node *corev1.Node, resourceName string) (int64, bool) {
 
 // GetAllocatableOfNode Return the number of resources that can be allocated to the node.
 func GetAllocatableOfNode(node *corev1.Node, resourceName string) (int64, bool) {
+	if node == nil {
+		return 0, false
+	}
 	if val, ok := node.Status.Allocatable[corev1.ResourceName(resourceName)]; ok {
 		return val.Value(), true
 	}
@@ -63,11 +80,17 @@ func GetAllocatableOfNode(node *corev1.Node, resourceName string) (int64, bool) 
 
 // IsVGPUEnabledNode Determine whether there are vGPU devices on the node.
 func IsVGPUEnabledNode(node *corev1.Node) bool {
+	if node == nil {
+		return false
+	}
 	val, _ := GetAllocatableOfNode(node, VGPUNumberResourceName)
 	return val > 0
 }
 
 func DelResourceOfContainer(container *corev1.Container, resourceName string) {
+	if container == nil {
+		return
+	}
 	if container.Resources.Requests != nil {
 		delete(container.Resources.Requests, corev1.ResourceName(resourceName))
 	}
@@ -78,11 +101,37 @@ func DelResourceOfContainer(container *corev1.Container, resourceName string) {
 
 // GetResourceOfContainer Return the number of resource limit.
 func GetResourceOfContainer(container *corev1.Container, resourceName string) int64 {
+	if container == nil {
+		return 0
+	}
 	var count int64
 	if val, ok := container.Resources.Limits[corev1.ResourceName(resourceName)]; ok {
 		count = val.Value()
 	}
 	return count
+}
+
+// HasExtendedResource Return true when pod requests extended resources
+func HasExtendedResource(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	// Extended resources is often defined through limits.
+	limits := resource.PodLimits(pod, resource.PodResourcesOptions{})
+	for name, qty := range limits {
+		if helper.IsExtendedResourceName(name) && qty.Value() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// HasDRARequests Return true when pod requests DRA resourceClaims
+func HasDRARequests(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	return len(pod.Spec.ResourceClaims) > 0
 }
 
 // IsVGPURequiredContainer tell if the container is a vGPU request container.
@@ -92,6 +141,9 @@ func IsVGPURequiredContainer(c *corev1.Container) bool {
 
 // GetResourceOfPod Return the number of resource limit for all containers of Pod.
 func GetResourceOfPod(pod *corev1.Pod, resourceName string) int64 {
+	if pod == nil {
+		return 0
+	}
 	var total int64
 	for i := range pod.Spec.Containers {
 		total += GetResourceOfContainer(&pod.Spec.Containers[i], resourceName)
@@ -101,6 +153,9 @@ func GetResourceOfPod(pod *corev1.Pod, resourceName string) int64 {
 
 // IsVGPUResourcePod Determine if a pod has vGPU resource request.
 func IsVGPUResourcePod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
 	for i := range pod.Spec.Containers {
 		if GetResourceOfContainer(&pod.Spec.Containers[i], VGPUNumberResourceName) > 0 {
 			return true
@@ -111,6 +166,9 @@ func IsVGPUResourcePod(pod *corev1.Pod) bool {
 
 // CheckDeviceType Check if the device type meets expectations.
 func CheckDeviceType(annotations map[string]string, deviceType string) bool {
+	if annotations == nil {
+		return false
+	}
 	deviceType = strings.ToUpper(strings.TrimSpace(deviceType))
 	if includes, ok := annotations[PodIncludeGpuTypeAnnotation]; ok {
 		includeTypes := strings.Split(strings.ToUpper(includes), ",")
@@ -133,6 +191,9 @@ func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 
 // CheckDeviceUuid Check if the device uuid meets expectations.
 func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
+	if annotations == nil {
+		return false
+	}
 	deviceUUID = strings.ToUpper(strings.TrimSpace(deviceUUID))
 	if includes, ok := annotations[PodIncludeGPUUUIDAnnotation]; ok {
 		includeUUIDs := strings.Split(strings.ToUpper(includes), ",")
@@ -159,6 +220,9 @@ func ShouldRetry(err error) bool {
 
 // IsShouldDeletePod Determine whether the pod has been deleted or needs to be deleted.
 func IsShouldDeletePod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
 	if pod.DeletionTimestamp != nil {
 		return true
 	}
@@ -177,6 +241,9 @@ func IsShouldDeletePod(pod *corev1.Pod) bool {
 }
 
 func PodIsTerminated(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
 	return pod.Status.Phase == corev1.PodFailed ||
 		pod.Status.Phase == corev1.PodSucceeded ||
 		(pod.DeletionTimestamp != nil && notRunning(pod.Status.ContainerStatuses))
@@ -256,6 +323,9 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 }
 
 func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
 	for _, container := range pod.Spec.Containers {
 		if GetResourceOfContainer(&container, VGPUNumberResourceName) > 1 {
 			return true
@@ -265,6 +335,9 @@ func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
 }
 
 func PodPlanSchedulingNode(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
 	if pod.Spec.NodeName != "" {
 		return pod.Spec.NodeName
 	}
@@ -273,6 +346,10 @@ func PodPlanSchedulingNode(pod *corev1.Pod) string {
 }
 
 func PodsOnNodeCallback(pods []*corev1.Pod, node *corev1.Node, callbackFn func(*corev1.Pod)) {
+	if node == nil {
+		klog.Warningln("node is empty")
+		return
+	}
 	if callbackFn == nil {
 		klog.Warningln("PodsOnNodeCallback callback function is empty")
 		return
@@ -365,6 +442,9 @@ func GetPercentageValue(x uint32) uint32 {
 }
 
 func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool {
+	if pod == nil {
+		return false
+	}
 	for _, cont := range pod.Spec.Containers {
 		if cont.Name != containerName {
 			continue
@@ -383,6 +463,9 @@ func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool
 }
 
 func InformerFactoryHasSynced(factory informers.SharedInformerFactory, ctx context.Context) bool {
+	if factory == nil {
+		return false
+	}
 	for _, synced := range factory.WaitForCacheSync(ctx.Done()) {
 		if !synced {
 			return false

@@ -184,7 +184,6 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 		setDefaultNodeSchedulerPolicy(pod, h.options, logger)
 		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)
 		setDefaultRuntimeClassName(pod, h.options, logger)
-		fixSpecifiedNodeName(pod, logger)
 	} else {
 		// Clean up invalid scheduling policy annotations.
 		cleanupSchedulerPolicyAnnotation(pod)
@@ -195,6 +194,13 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 	} else {
 		// Clean up invalid topology mode annotations.
 		cleanupTopologyModeAnnotation(pod)
+	}
+	// When a pod requests vGPU, resource claims, or extends resources,
+	// the scheduler may need to collaborate to complete device allocation.
+	// Therefore, here we will modify the specified node to a node selector to make the scheduler effective,
+	// so that possible device allocation failure issues can be fixed.
+	if isVGPUPod || util.HasDRARequests(pod) || util.HasExtendedResource(pod) {
+		fixSpecifiedNodeName(pod, logger)
 	}
 
 	delete(pod.Annotations, util.DRAOriResAnnotation)
