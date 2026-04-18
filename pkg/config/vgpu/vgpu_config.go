@@ -235,7 +235,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		copy(byteArray[:], val)
 		return byteArray
 	}
-	computePolicy := GetComputePolicy(pod, node)
+	computePolicy := GetDefaultComputePolicy(pod, node)
 
 	deviceInfos := devManager.GetNodeDeviceInfo()
 	deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))
@@ -331,12 +331,16 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 	return data
 }
 
-func GetComputePolicy(pod *corev1.Pod, node *corev1.Node) util.ComputePolicy {
+func GetDefaultComputePolicy(pod *corev1.Pod, node *corev1.Node) util.ComputePolicy {
 	computePolicy, ok := util.HasAnnotation(pod, util.VGPUComputePolicyAnnotation)
 	if !ok || len(computePolicy) == 0 {
 		computePolicy, _ = util.HasAnnotation(node, util.VGPUComputePolicyAnnotation)
 	}
-	switch strings.ToLower(computePolicy) {
+	return GetComputePolicy(computePolicy)
+}
+
+func GetComputePolicy(policy string) util.ComputePolicy {
+	switch strings.ToLower(policy) {
 	case string(util.BalanceComputePolicy):
 		return util.BalanceComputePolicy
 	case string(util.FixedComputePolicy):
@@ -390,7 +394,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		defer C.free(unsafe.Pointer(containerName))
 		C.strcpy(&vgpuConfig.container_name[0], (*C.char)(unsafe.Pointer(containerName)))
 
-		computePolicy := GetComputePolicy(pod, node)
+		computePolicy := GetDefaultComputePolicy(pod, node)
 
 		deviceInfos := devManager.GetNodeDeviceInfo()
 		deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))

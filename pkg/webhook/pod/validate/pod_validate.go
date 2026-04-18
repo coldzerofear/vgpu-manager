@@ -180,14 +180,19 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.Resourc
 			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
 		})
 	}
+	var annotations map[string]string
+	if val, ok := util.HasAnnotation(pod, util.VGPUComputePolicyAnnotation); ok {
+		annotations = map[string]string{util.VGPUComputePolicyAnnotation: val}
+	}
 	resourceClaim := &resourceapi.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
 				util.DRAOwnerPodLabel:   ownerPod,
 				util.DRACreateTimeLabel: timestamp,
 			},
-			Name:      resourceClaimName,
-			Namespace: pod.Namespace,
+			Annotations: annotations,
+			Name:        resourceClaimName,
+			Namespace:   pod.Namespace,
 		},
 		Spec: resourceapi.ResourceClaimSpec{
 			Devices: resourceapi.DeviceClaim{

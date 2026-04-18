@@ -5,7 +5,9 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 
+	vgpu2 "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/docker/go-units"
@@ -141,6 +143,12 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 			klog.Warningf("Failed to ensure directory %s: %s", dirPath, err)
 		}
 	}
+	computePolicy := util.FixedComputePolicy
+	for key, val := range claim.GetAnnotations() {
+		if strings.HasSuffix(key, "/vgpu-compute-policy") && val != "" {
+			computePolicy = vgpu2.GetComputePolicy(val)
+		}
+	}
 
 	envMode := util.HostMode
 	if cgroups.IsCgroup2UnifiedMode() || cgroups.IsCgroup2HybridMode() {
@@ -168,10 +176,17 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 					// Rewrite environment variables to avoid interference from built-in environment variables in container images.
 					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaCoreLimitEnv))
 					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaSoftCoreLimitEnv))
+					softVal := val
+					if computePolicy == util.BalanceComputePolicy {
+						softVal = util.HundredCore
+					} else if computePolicy == util.NoneComputePolicy {
+						val = util.HundredCore
+					}
 					if val < util.HundredCore {
 						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, val))
-						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, val))
+						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, softVal))
 					} else {
+						// 100% unlimited computing power
 						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaCoreLimitEnv, idx))
 						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaSoftCoreLimitEnv, idx))
 					}
