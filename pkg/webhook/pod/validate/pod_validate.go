@@ -67,10 +67,10 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.Resourc
 	if quantity, ok := info.Resources[corev1.ResourceName(util.VGPUNumberResourceName)]; ok {
 		deviceCount = quantity.Value()
 	}
-	if quantity, ok := info.Resources[corev1.ResourceName(util.VGPUCoreResourceName)]; ok {
+	if quantity, ok := info.Resources[corev1.ResourceName(util.VGPUCoreResourceName)]; ok && quantity.Value() > 0 {
 		capacityRequest[kubeletplugin.CoresResourceName] = *resource.NewQuantity(quantity.Value(), resource.DecimalSI)
 	}
-	if quantity, ok := info.Resources[corev1.ResourceName(util.VGPUMemoryResourceName)]; ok {
+	if quantity, ok := info.Resources[corev1.ResourceName(util.VGPUMemoryResourceName)]; ok && quantity.Value() > 0 {
 		capacityRequest[kubeletplugin.MemoryResourceName] = *resource.NewQuantity(quantity.Value()*units.MiB, resource.BinarySI)
 	}
 
@@ -163,6 +163,7 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.Resourc
 			},
 		})
 	}
+	// Device uuids are mutually exclusive, ensuring that each physical device is only assigned once.
 	deviceConstraints := []resourceapi.DeviceConstraint{{
 		Requests:          []string{kubeletplugin.VGpuDeviceType},
 		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
@@ -272,6 +273,17 @@ func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (
 			logger.V(5).Error(err, "")
 			return err
 		}
+
+		quantity, ok := info.Resources[corev1.ResourceName(util.VGPUCoreResourceName)]
+		if ok && quantity.Value() > util.HundredCore {
+			msg := fmt.Sprintf("container %s requests vGPU core exceeding limit", info.Name)
+			err := apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+				field.Invalid(field.NewPath("spec").Child("containers").Index(index).Child("resources").
+					Child("limits").Key(util.VGPUCoreResourceName), quantity.Value(), msg)})
+			logger.V(3).Error(err, "")
+			return err
+		}
+
 		container := &pod.Spec.Containers[index]
 		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
