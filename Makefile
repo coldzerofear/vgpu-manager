@@ -95,11 +95,14 @@ docker-build-base: ## Build base docker image.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" -t "${IMG}" -f Dockerfile .
+	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
+	  --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
+	  -t "${IMG}" -f Dockerfile .
 
 .PHONY: docker-build-dra
 docker-build-dra: ## Build dra driver docker image.
 	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
+	  --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
 	  --build-arg TOOLKIT_CONTAINER_IMAGE="${TOOLKIT_CONTAINER_IMAGE}" -t "${DRA_IMG}" -f Dockerfile.dra .
 
 .PHONY: docker-build-all
@@ -135,6 +138,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	  --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
 	  --tag "${BASE_IMG}" -f Dockerfile.base.cross .
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
+      --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
 	  --tag "${IMG}" -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm vgpu-manager-builder
 	rm -f Dockerfile.cross Dockerfile.base.cross

@@ -147,6 +147,7 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 	for key, val := range claim.GetAnnotations() {
 		if strings.HasSuffix(key, "/vgpu-compute-policy") && val != "" {
 			computePolicy = vgpu2.GetComputePolicy(val)
+			break
 		}
 	}
 

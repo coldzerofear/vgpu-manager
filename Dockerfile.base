@@ -14,6 +14,9 @@ RUN if [ -n "$APT_MIRROR" ]; then sed -i "s@http://archive.ubuntu.com@${APT_MIRR
 
 RUN wget -nv -O - https://dl.google.com/go/go${GOLANG_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz | tar -C /usr/local -xz
 
+# Add top-level license (AL2) file into the container image
+COPY LICENSE /
+
 # Compile vgpu driver library files
 WORKDIR /vgpu-controller
 COPY library/ .
@@ -41,6 +44,20 @@ ARG GIT_TREE_STATE="dirty"
 ARG BUILD_DATE="1970-01-01T00:00:00Z"
 ARG BUILD_VERSION="N/A"
 ARG BUILD_NVVERSION="v25.12.0"
+
+LABEL io.k8s.display-name="VGPU-Manager Base Builder"
+LABEL name="VGPU-Manager Base Builder"
+LABEL summary="Base build image for vGPU manager components"
+LABEL description="Builder image used to compile vGPU manager binaries and the vGPU controller library"
+LABEL org.opencontainers.image.title="VGPU-Manager Base Builder"
+LABEL org.opencontainers.image.description="Builder image used to compile vGPU manager binaries and the vGPU controller library"
+LABEL org.opencontainers.image.url="https://github.com/coldzerofear/vgpu-manager"
+LABEL org.opencontainers.image.source="https://github.com/coldzerofear/vgpu-manager"
+LABEL org.opencontainers.image.version="${BUILD_VERSION}"
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.vendor="coldzerofear"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Copy the go source
 COPY cmd cmd/

@@ -25,15 +25,26 @@ ENV NVIDIA_DISABLE_REQUIRE="true"
 # ENV NVIDIA_VISIBLE_DEVICES=all
 # ENV NVIDIA_DRIVER_CAPABILITIES=utility,compute
 
-LABEL io.k8s.display-name="VGPU-Manager DRA Driver for NVIDIA GPUs"
-LABEL name="VGPU-Manager DRA Driver for NVIDIA GPUs"
-LABEL summary="VGPU-Manager DRA Driver for NVIDIA GPUs"
-LABEL description="VGPU-Manager DRA Driver for NVIDIA GPUs"
-LABEL org.opencontainers.image.description="VGPU-Manager DRA Driver for NVIDIA GPUs"
+ARG BUILD_VERSION="N/A"
+ARG GIT_COMMIT="unknown"
+ARG BUILD_DATE="1970-01-01T00:00:00Z"
+
+LABEL io.k8s.display-name="VGPU-Manager DRA Driver"
+LABEL name="VGPU-Manager DRA Driver"
+LABEL summary="Dynamic Resource Allocation driver for NVIDIA vGPU devices"
+LABEL description="DRA driver and webhook runtime for managing NVIDIA vGPU devices in Kubernetes"
+LABEL org.opencontainers.image.title="VGPU-Manager DRA Driver"
+LABEL org.opencontainers.image.description="DRA driver and webhook runtime for managing NVIDIA vGPU devices in Kubernetes"
+LABEL org.opencontainers.image.url="https://github.com/coldzerofear/vgpu-manager"
 LABEL org.opencontainers.image.source="https://github.com/coldzerofear/vgpu-manager"
+LABEL org.opencontainers.image.version="${BUILD_VERSION}"
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.vendor="coldzerofear"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Add top-level license (AL2) file into the container image
-COPY LICENSE /
+COPY --from=builder /LICENSE /LICENSE
 # RUN mkdir -p /installed/registry
 
 COPY --from=bash       /bin/bash                                 /bin/bash

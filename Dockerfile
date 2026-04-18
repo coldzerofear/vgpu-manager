@@ -7,6 +7,24 @@ FROM quay.io/jitesoft/ubuntu:20.04
 
 ENV NVIDIA_DISABLE_REQUIRE="true"
 
+ARG BUILD_VERSION="N/A"
+ARG GIT_COMMIT="unknown"
+ARG BUILD_DATE="1970-01-01T00:00:00Z"
+
+LABEL io.k8s.display-name="VGPU-Manager"
+LABEL name="VGPU-Manager"
+LABEL summary="Kubernetes manager for NVIDIA vGPU resources"
+LABEL description="Manager binaries for scheduling, device plugin, monitoring, and webhook integration for NVIDIA vGPU resources"
+LABEL org.opencontainers.image.title="VGPU-Manager"
+LABEL org.opencontainers.image.description="Manager binaries for scheduling, device plugin, monitoring, and webhook integration for NVIDIA vGPU resources"
+LABEL org.opencontainers.image.url="https://github.com/coldzerofear/vgpu-manager"
+LABEL org.opencontainers.image.source="https://github.com/coldzerofear/vgpu-manager"
+LABEL org.opencontainers.image.version="${BUILD_VERSION}"
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.vendor="coldzerofear"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
 WORKDIR /
 
 COPY --from=builder /go/src/vgpu-manager/bin/device-scheduler /usr/local/bin/device-scheduler
@@ -15,7 +33,7 @@ COPY --from=builder /go/src/vgpu-manager/bin/device-monitor   /usr/local/bin/dev
 COPY --from=builder /go/src/vgpu-manager/bin/device-webhook   /usr/local/bin/device-webhook
 
 # Add top-level license (AL2) file into the container image
-COPY LICENSE /
+COPY --from=builder /LICENSE /LICENSE
 COPY --chmod=755 scripts/install_files.sh scripts/install_files.sh
 
 COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
