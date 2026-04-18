@@ -454,6 +454,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 
 func PodUsedGPUTopologyMode(pod *corev1.Pod) util.TopologyMode {
 	topoMode, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
+	topoMode = strings.ToLower(topoMode)
 	switch {
 	case topoMode == string(util.LinkTopology) && device.IsGPUTopologyEnabled() && util.IsSingleContainerMultiGPUs(pod):
 		return util.LinkTopology

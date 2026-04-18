@@ -19,6 +19,7 @@ import (
 	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-scheduler/framework"
+	"k8s.io/utils/pointer"
 )
 
 type NodeConfigInfo struct {
@@ -389,16 +390,25 @@ func (dev *Device) DeepCopy() *Device {
 
 var (
 	gpuTopoEnabledOnce sync.Once
-	gpuTopologyEnabled bool
+	gpuTopologyEnabled *bool
 )
 
+func SetGPUTopologyEnabled(flag bool) {
+	gpuTopologyEnabled = &flag
+}
+
 func IsGPUTopologyEnabled() bool {
-	gpuTopoEnabledOnce.Do(func() {
-		featureGate := compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-		gpuTopologyEnabled = featureGate != nil && featureGate.Enabled(options.GPUTopology)
-		klog.InfoS("Feature Gates[GPUTopology]", "enabled", gpuTopologyEnabled)
-	})
-	return gpuTopologyEnabled
+	if gpuTopologyEnabled == nil {
+		gpuTopoEnabledOnce.Do(func() {
+			featureGate := compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
+			gpuTopologyEnabled = pointer.Bool(featureGate != nil && featureGate.Enabled(options.GPUTopology))
+			klog.InfoS("Feature Gates[GPUTopology]", "enabled", gpuTopologyEnabled)
+		})
+		if gpuTopologyEnabled == nil {
+			gpuTopologyEnabled = pointer.Bool(false)
+		}
+	}
+	return *gpuTopologyEnabled
 }
 
 type DeviceGatherInfo struct {

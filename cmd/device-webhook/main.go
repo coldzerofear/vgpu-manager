@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	pkgclient "github.com/coldzerofear/vgpu-manager/pkg/client"
@@ -65,6 +66,11 @@ func main() {
 	klog.Infoln("Init webhook server probe")
 	server.Register("/healthz", probeHandler)
 	server.Register("/readyz", probeHandler)
+
+	if opt.DefaultConvertToDRA {
+		// DRA defaults to enabling multi card GPU topology management.
+		device.SetGPUTopologyEnabled(true)
+	}
 
 	if err := pkgwebhook.RegisterWebhookToServer(server, client, opt); err != nil {
 		klog.Fatalf("Register webhook to server failed: %v", err)
