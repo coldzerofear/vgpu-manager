@@ -21,22 +21,25 @@ type Options struct {
 	DefaultDevicePolicy   string
 	DefaultTopologyMode   string
 	DefaultRuntimeClass   string
+	VGPUDeviceClassName   string
 	DefaultConvertToDRA   bool
 	CombinedResourceClaim bool
 }
 
 const (
-	defaultServerBindPort = 9443
-	defaultPprofBindPort  = 0
-	defaultCertDir        = "/tmp/k8s-webhook-server/serving-certs"
+	defaultServerBindPort  = 9443
+	defaultPprofBindPort   = 0
+	defaultCertDir         = "/tmp/k8s-webhook-server/serving-certs"
+	defaultVGPUDeviceClass = util.VGPUDeviceClassName
 )
 
 func NewOptions() *Options {
 	return &Options{
-		ServerBindPort: defaultServerBindPort,
-		PprofBindPort:  defaultPprofBindPort,
-		Domain:         util.GetGlobalDomain(),
-		CertDir:        defaultCertDir,
+		ServerBindPort:      defaultServerBindPort,
+		PprofBindPort:       defaultPprofBindPort,
+		Domain:              util.GetGlobalDomain(),
+		CertDir:             defaultCertDir,
+		VGPUDeviceClassName: defaultVGPUDeviceClass,
 	}
 }
 
@@ -54,6 +57,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.DefaultDevicePolicy, "default-device-policy", "", "Default device scheduling policy. (supported values: \"binpack\" | \"spread\")")
 	pflag.StringVar(&o.DefaultTopologyMode, "default-topology-mode", "", "Default device list topology mode. (supported values: \"numa\" | \"link\")")
 	pflag.StringVar(&o.DefaultRuntimeClass, "default-runtime-class", "", "Specify the default container runtimeClassName for the vGPU pod.")
+	pflag.StringVar(&o.VGPUDeviceClassName, "vgpu-device-class-name", o.VGPUDeviceClassName, "Specify the name of the vGPU device class for DRA conversion.")
 	pflag.BoolVar(&o.DefaultConvertToDRA, "default-convert2-dra", false, "Enable the conversion of vGPU extended resources into DRA requests.")
 	pflag.BoolVar(&o.CombinedResourceClaim, "combined-resource-claim", false, "combine multiple claim requests into one resource claim. (need to enable `default-convert2-dra`)")
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")

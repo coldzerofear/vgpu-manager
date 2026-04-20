@@ -65,38 +65,288 @@ func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) er
 	return nil
 }
 
+type containerKind string
+
+const (
+	containerKindInit containerKind = "initContainer"
+	containerKindApp  containerKind = "container"
+)
+
+type requestUsage struct {
+	InitContainers sets.Set[string]
+	AppContainers  sets.Set[string]
+}
+
+type containerRef struct {
+	Name   string
+	Claims []corev1.ResourceClaim
+	Kind   containerKind
+}
+
+type resourceInfoMap struct {
+	contResMap map[string]string
+	resReqMap  map[string]sets.Set[string]
+}
+
+func newResourceInfoCache() *resourceInfoMap {
+	return &resourceInfoMap{
+		contResMap: make(map[string]string),
+		resReqMap:  make(map[string]sets.Set[string]),
+	}
+}
+
+func (m *resourceInfoMap) GetReqSet(contName, claimName string) (sets.Set[string], bool) {
+	if m.contResMap[contName] != claimName {
+		return nil, false
+	}
+	set, ok := m.resReqMap[claimName]
+	return set, ok
+}
+
+func (m *resourceInfoMap) Insert(contName, claimName, request string) {
+	m.contResMap[contName] = claimName
+	set, ok := m.resReqMap[claimName]
+	if !ok {
+		set = sets.New[string]()
+	}
+	set.Insert(request)
+	m.resReqMap[claimName] = set
+}
+
+func (h *validateHandle) getConvertedContainerClaimsMap(pod *corev1.Pod) *resourceInfoMap {
+	cache := newResourceInfoCache()
+	val, ok := util.HasAnnotation(pod, util.DRAOriResAnnotation)
+	if !ok || len(val) == 0 {
+		return cache
+	}
+	infos := common.ResourceInfos{}
+	if err := infos.Decode(val); err != nil {
+		return cache
+	}
+	if len(infos) == 0 {
+		return cache
+	}
+
+	resourceName := pod.Name
+	if h.options.CombinedResourceClaim {
+		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
+		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
+		for _, resourceInfo := range infos {
+			resourceRequestName := util.GenerateK8sSafeResourceName(resourceInfo.Name, kubeletplugin.VGpuDeviceType)
+			cache.Insert(resourceInfo.Name, resourceClaimName, resourceRequestName)
+		}
+	} else {
+		if pod.GenerateName != "" {
+			resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
+		}
+		for _, resourceInfo := range infos {
+			resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, resourceInfo.Name)
+			cache.Insert(resourceInfo.Name, resourceClaimName, kubeletplugin.VGpuDeviceType)
+		}
+	}
+	return cache
+}
+
 func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *corev1.Pod) error {
-	keySet := sets.New[string]()
-	var repeat []corev1.ResourceClaim
-	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
-		for _, claim := range container.Resources.Claims {
-			if keySet.Has(claim.Name + claim.Request) {
-				repeat = append(repeat, claim)
+	// fast return
+	if !util.HasDRARequests(pod) {
+		return nil
+	}
+
+	var allContainers []containerRef
+	claimsMap := h.getConvertedContainerClaimsMap(pod)
+
+	for _, c := range pod.Spec.InitContainers {
+		allContainers = append(allContainers, containerRef{
+			Name:   c.Name,
+			Claims: c.Resources.Claims,
+			Kind:   containerKindInit,
+		})
+	}
+	for _, c := range pod.Spec.Containers {
+		allContainers = append(allContainers, containerRef{
+			Name:   c.Name,
+			Claims: c.Resources.Claims,
+			Kind:   containerKindApp,
+		})
+	}
+
+	// key format: "<podClaimName>/<requestName>"
+	usages := map[string]requestUsage{}
+	for _, c := range allContainers {
+		// All actual vGPU requests hit by the current container
+		containerVGPURequests := sets.New[string]()
+
+		for _, claimRef := range c.Claims {
+			var requestKeys []string
+			// Special processing should be applied to the resource Claims requests converted from webhooks, as these resources have not yet been created at this time.
+			// Without the need to determine the type of vgpu, simply collect requestKeys.
+			if requestSet, ok := claimsMap.GetReqSet(c.Name, claimRef.Name); ok {
+				if claimRef.Request != "" {
+					requestKeys = []string{buildVGPURequestKey(claimRef.Name, claimRef.Request)}
+				} else {
+					for request, _ := range requestSet {
+						requestKeys = append(requestKeys, buildVGPURequestKey(claimRef.Name, request))
+					}
+				}
 			} else {
-				keySet.Insert(claim.Name + claim.Request)
+				requests, err := h.resolveVGPURequestsFromContainerClaim(ctx, pod, claimRef)
+				if err != nil {
+					return fmt.Errorf("%s container %q claim %q validation failed: %w", c.Kind, c.Name, claimRef.Name, err)
+				}
+				requestKeys = requests
+			}
+
+			for _, reqKey := range requestKeys {
+				containerVGPURequests.Insert(reqKey)
+
+				usage := usages[reqKey]
+				if usage.InitContainers == nil {
+					usage.InitContainers = sets.New[string]()
+				}
+				if usage.AppContainers == nil {
+					usage.AppContainers = sets.New[string]()
+				}
+
+				switch c.Kind {
+				case containerKindInit:
+					usage.InitContainers.Insert(c.Name)
+					// init-init Do not allow sharing
+					if usage.InitContainers.Len() > 1 {
+						return fmt.Errorf(
+							"vgpu request %q is referenced by multiple %s %v; sharing is only allowed between init and app containers",
+							reqKey, c.Kind, sets.List(usage.InitContainers),
+						)
+					}
+				case containerKindApp:
+					usage.AppContainers.Insert(c.Name)
+					// app-app Do not allow sharing
+					if usage.AppContainers.Len() > 1 {
+						return fmt.Errorf(
+							"vgpu request %q is referenced by multiple %s %v; sharing is only allowed between init and app containers",
+							reqKey, c.Kind, sets.List(usage.AppContainers),
+						)
+					}
+				default:
+					return fmt.Errorf("unknown container kind %q for container %q", c.Kind, c.Name)
+				}
+
+				usages[reqKey] = usage
 			}
 		}
-	}
-	for _, claim := range repeat {
-		index := slices.IndexFunc(pod.Spec.ResourceClaims, func(item corev1.PodResourceClaim) bool {
-			return item.Name == claim.Name
-		})
-		if index < 0 {
-			continue
-		}
-		resourceClaim := &pod.Spec.ResourceClaims[index]
-		if resourceClaim.ResourceClaimName != nil && *resourceClaim.ResourceClaimName != "" {
-			// TODO check vgpu
 
-			continue
-		}
-		if resourceClaim.ResourceClaimTemplateName != nil && *resourceClaim.ResourceClaimTemplateName != "" {
-			// TODO check vgpu
-
-			continue
+		// After the final expansion of a single container, it can only hit a maximum of 1 vGPU request
+		if containerVGPURequests.Len() > 1 {
+			return fmt.Errorf(
+				"%s %q references multiple vgpu requests %v; one container can request at most one vgpu request",
+				c.Kind, c.Name, sets.List(containerVGPURequests),
+			)
 		}
 	}
+
 	return nil
+}
+
+// resolveVGPURequestsFromContainerClaim expands one container claim reference
+// into actual vgpu request keys in the form "<podClaimName>/<requestName>".
+//
+// Rules:
+// - if claimRef.Request is set: only that request is checked
+// - if claimRef.Request is empty: all vgpu requests in the claim are checked
+func (h *validateHandle) resolveVGPURequestsFromContainerClaim(
+	ctx context.Context,
+	pod *corev1.Pod,
+	claimRef corev1.ResourceClaim,
+) ([]string, error) {
+	podClaim, err := findPodResourceClaim(pod, claimRef.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	deviceRequests, err := h.getDeviceRequestsForPodClaim(ctx, pod.Namespace, podClaim)
+	if err != nil {
+		// skip not found resource
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	// Explicitly specify request: only check this request
+	if claimRef.Request != "" {
+		for _, req := range deviceRequests {
+			if req.Name != claimRef.Request {
+				continue
+			}
+			if h.isVGPUDeviceRequest(req) {
+				return []string{buildVGPURequestKey(claimRef.Name, req.Name)}, nil
+			}
+			return nil, nil
+		}
+		return nil, fmt.Errorf("request %q not found in pod resourceClaim %q", claimRef.Request, claimRef.Name)
+	}
+
+	// Unspecified request: Check all VGPU requests under the entire claim
+	var result []string
+	for _, req := range deviceRequests {
+		if h.isVGPUDeviceRequest(req) {
+			result = append(result, buildVGPURequestKey(claimRef.Name, req.Name))
+		}
+	}
+	return result, nil
+}
+
+func findPodResourceClaim(pod *corev1.Pod, podClaimName string) (*corev1.PodResourceClaim, error) {
+	for i := range pod.Spec.ResourceClaims {
+		if pod.Spec.ResourceClaims[i].Name == podClaimName {
+			return &pod.Spec.ResourceClaims[i], nil
+		}
+	}
+	return nil, fmt.Errorf("pod resourceClaim %q not found", podClaimName)
+}
+
+// getDeviceRequestsForPodClaim loads device requests from either:
+// - spec.resourceClaims[].resourceClaimName
+// - spec.resourceClaims[].resourceClaimTemplateName
+func (h *validateHandle) getDeviceRequestsForPodClaim(
+	ctx context.Context,
+	namespace string,
+	podClaim *corev1.PodResourceClaim,
+) ([]resourceapi.DeviceRequest, error) {
+	if podClaim == nil {
+		return nil, fmt.Errorf("podClaim is nil")
+	}
+
+	if podClaim.ResourceClaimName != nil && *podClaim.ResourceClaimName != "" {
+		var rc resourceapi.ResourceClaim
+		if err := h.client.Get(ctx, client.ObjectKey{
+			Namespace: namespace,
+			Name:      *podClaim.ResourceClaimName,
+		}, &rc); err != nil {
+			return nil, fmt.Errorf("get ResourceClaim %q failed: %w", *podClaim.ResourceClaimName, err)
+		}
+		return rc.Spec.Devices.Requests, nil
+	}
+
+	if podClaim.ResourceClaimTemplateName != nil && *podClaim.ResourceClaimTemplateName != "" {
+		var tpl resourceapi.ResourceClaimTemplate
+		if err := h.client.Get(ctx, client.ObjectKey{
+			Namespace: namespace,
+			Name:      *podClaim.ResourceClaimTemplateName,
+		}, &tpl); err != nil {
+			return nil, fmt.Errorf("get ResourceClaimTemplate %q failed: %w", *podClaim.ResourceClaimTemplateName, err)
+		}
+		return tpl.Spec.Spec.Devices.Requests, nil
+	}
+
+	return nil, fmt.Errorf(
+		"pod resourceClaim %q must specify one of resourceClaimName or resourceClaimTemplateName",
+		podClaim.Name,
+	)
+}
+
+func buildVGPURequestKey(podClaimName, requestName string) string {
+	return podClaimName + "/" + requestName
 }
 
 // buildResourceClaim Build vGPU resource claims based on container requests.
@@ -295,6 +545,31 @@ func buildDeviceRequest(pod *corev1.Pod, requestName, deviceClassName string, in
 	}
 }
 
+func (h *validateHandle) isVGPUDeviceRequest(req resourceapi.DeviceRequest) bool {
+	if req.Exactly == nil {
+		return false
+	}
+
+	// VGPUDeviceClassName hit represents the vgpu type
+	if req.Exactly.DeviceClassName == h.options.VGPUDeviceClassName {
+		return true
+	}
+
+	// Driver constant and device type constant must appear simultaneously in selectors
+	for _, sel := range req.Exactly.Selectors {
+		if sel.CEL == nil {
+			continue
+		}
+		expr := sel.CEL.Expression
+
+		if strings.Contains(expr, util.DRADriverName) && strings.Contains(expr, kubeletplugin.VGpuDeviceType) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func CheckResourceName(pod *corev1.Pod, resourceName string) error {
 	if resourceName == "" {
 		return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
@@ -320,9 +595,9 @@ func (h *validateHandle) createCombinedResourceClaim(ctx context.Context, pod *c
 			return err
 		}
 		container := &pod.Spec.Containers[containerIndex]
-		resourceRequestName := util.GenerateK8sSafeResourceName(container.Name, "vgpu")
+		resourceRequestName := util.GenerateK8sSafeResourceName(container.Name, kubeletplugin.VGpuDeviceType)
 
-		request := buildDeviceRequest(pod, resourceRequestName, util.VGPUDeviceClassName, info)
+		request := buildDeviceRequest(pod, resourceRequestName, h.options.VGPUDeviceClassName, info)
 		resourceRequests[i] = request
 	}
 
@@ -426,7 +701,7 @@ func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *cor
 		}
 
 		// Create container resource claim
-		request := buildDeviceRequest(pod, kubeletplugin.VGpuDeviceType, util.VGPUDeviceClassName, info)
+		request := buildDeviceRequest(pod, kubeletplugin.VGpuDeviceType, h.options.VGPUDeviceClassName, info)
 		resourceClaim := h.buildResourceClaim(pod, []resourceapi.DeviceRequest{request}, resourceClaimName, ownerPod, createTimestamp)
 		if err = h.client.Create(ctx, resourceClaim); err != nil {
 			logger.Error(err, "Failed to create vGPU resourceClaim", "container", container.Name)

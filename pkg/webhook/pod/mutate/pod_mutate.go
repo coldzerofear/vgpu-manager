@@ -10,6 +10,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/common"
 	"github.com/go-logr/logr"
@@ -247,7 +248,7 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) e
 		// Convert container resource requests into DRA requests.
 		if h.options.CombinedResourceClaim {
 			resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
-			resourceRequestName := util.GenerateK8sSafeResourceName(container.Name, "vgpu")
+			resourceRequestName := util.GenerateK8sSafeResourceName(container.Name, kubeletplugin.VGpuDeviceType)
 			container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{
 				Name:    resourceClaimName,
 				Request: resourceRequestName,
