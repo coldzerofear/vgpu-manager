@@ -166,9 +166,6 @@ func IsVGPUResourcePod(pod *corev1.Pod) bool {
 
 // CheckDeviceType Check if the device type meets expectations.
 func CheckDeviceType(annotations map[string]string, deviceType string) bool {
-	if annotations == nil {
-		return false
-	}
 	deviceType = strings.ToUpper(strings.TrimSpace(deviceType))
 	if includes, ok := annotations[PodIncludeGpuTypeAnnotation]; ok {
 		includeTypes := strings.Split(strings.ToUpper(includes), ",")
@@ -191,9 +188,6 @@ func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 
 // CheckDeviceUuid Check if the device uuid meets expectations.
 func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
-	if annotations == nil {
-		return false
-	}
 	deviceUUID = strings.ToUpper(strings.TrimSpace(deviceUUID))
 	if includes, ok := annotations[PodIncludeGPUUUIDAnnotation]; ok {
 		includeUUIDs := strings.Split(strings.ToUpper(includes), ",")

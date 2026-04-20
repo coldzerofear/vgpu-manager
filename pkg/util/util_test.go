@@ -59,6 +59,11 @@ func Test_CheckDeviceType(t *testing.T) {
 				PodIncludeGpuTypeAnnotation: "RTX 4090,RTX 3080",
 			},
 			want: true,
+		}, {
+			name:        "example 7: empty annotations",
+			cardType:    "NVIDIA-NVIDIA GeForce RTX 3080 Ti",
+			annotations: nil,
+			want:        true,
 		},
 	}
 
@@ -113,6 +118,11 @@ func Test_CheckDeviceUuid(t *testing.T) {
 				PodExcludeGPUUUIDAnnotation: "GPU-" + uuid.New().String() + "," + gpu0Uuid,
 			},
 			want: false,
+		}, {
+			name:        "example 6: empty annotations",
+			cardUuid:    gpu0Uuid,
+			annotations: nil,
+			want:        true,
 		},
 	}
 
