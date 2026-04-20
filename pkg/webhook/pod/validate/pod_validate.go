@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -54,36 +55,46 @@ type validateHandle struct {
 
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) error {
 	if h.options.DefaultConvertToDRA {
-		keySet := sets.New[string]()
-		var repeat []corev1.ResourceClaim
-		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
-			for _, claim := range container.Resources.Claims {
-				if keySet.Has(claim.Name + claim.Request) {
-					repeat = append(repeat, claim)
-				} else {
-					keySet.Insert(claim.Name + claim.Request)
-				}
-			}
+		if err := h.checkResourceClaimRequests(ctx, pod); err != nil {
+			return err
 		}
-		for _, claim := range repeat {
-			index := slices.IndexFunc(pod.Spec.ResourceClaims, func(item corev1.PodResourceClaim) bool {
-				return item.Name == claim.Name
-			})
-			if index < 0 {
-				continue
-			}
-			resourceClaim := &pod.Spec.ResourceClaims[index]
-			if resourceClaim.ResourceClaimName != nil && *resourceClaim.ResourceClaimName != "" {
-				// TODO check vgpu
-				continue
-			}
-			if resourceClaim.ResourceClaimTemplateName != nil && *resourceClaim.ResourceClaimTemplateName != "" {
-				// TODO check vgpu
-				continue
-			}
+		if err := h.createResourceClaims(ctx, pod); err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		return h.createResourceClaims(ctx, pod)
+func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *corev1.Pod) error {
+	keySet := sets.New[string]()
+	var repeat []corev1.ResourceClaim
+	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		for _, claim := range container.Resources.Claims {
+			if keySet.Has(claim.Name + claim.Request) {
+				repeat = append(repeat, claim)
+			} else {
+				keySet.Insert(claim.Name + claim.Request)
+			}
+		}
+	}
+	for _, claim := range repeat {
+		index := slices.IndexFunc(pod.Spec.ResourceClaims, func(item corev1.PodResourceClaim) bool {
+			return item.Name == claim.Name
+		})
+		if index < 0 {
+			continue
+		}
+		resourceClaim := &pod.Spec.ResourceClaims[index]
+		if resourceClaim.ResourceClaimName != nil && *resourceClaim.ResourceClaimName != "" {
+			// TODO check vgpu
+
+			continue
+		}
+		if resourceClaim.ResourceClaimTemplateName != nil && *resourceClaim.ResourceClaimTemplateName != "" {
+			// TODO check vgpu
+
+			continue
+		}
 	}
 	return nil
 }
@@ -92,28 +103,54 @@ func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) er
 func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, resourceClaimName, ownerPod, timestamp string) *resourceapi.ResourceClaim {
 	var deviceConstraints []resourceapi.DeviceConstraint
 
+	//// Handling multiple request device allocation constraints
+	//if len(requests) > 1 {
+	//	// All requests are mutually exclusive by device UUID to ensure that multiple requests are not assigned the same device
+	//	deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+	//		Requests:          []string{}, // match all requests
+	//		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
+	//	})
+	//
+	//	switch filter.PodUsedGPUTopologyMode(pod) {
+	//	case util.LinkTopology:
+	//		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+	//			Requests:       []string{}, // match all requests
+	//			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributePCIeRoot)),
+	//		})
+	//	case util.NUMATopology:
+	//		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+	//			Requests:       []string{}, // match all requests
+	//			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
+	//		})
+	//	}
+	//}
+
 	for _, request := range requests {
-		// Device uuids are mutually exclusive, ensuring that each physical device is only assigned once.
-		if request.Exactly.Count > 1 {
+		// Handling multiple device allocation constraints
+		if (request.Exactly.Count > 1 && (request.Exactly.AllocationMode == "" ||
+			request.Exactly.AllocationMode == resourceapi.DeviceAllocationModeExactCount)) ||
+			request.Exactly.AllocationMode == resourceapi.DeviceAllocationModeAll {
+
+			// The uuids of multiple devices in a single request are mutually exclusive, ensuring that each physical device is only assigned once.
 			deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 				Requests:          []string{request.Name},
 				DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
 			})
-		}
 
-		switch filter.PodUsedGPUTopologyMode(pod) {
-		case util.LinkTopology:
-			deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-				Requests:       []string{request.Name},
-				MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributePCIeRoot)),
-			})
-		case util.NUMATopology:
-			deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-				Requests:       []string{request.Name},
-				MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
-			})
+			// Multiple devices are matched and allocated according to defined topology patterns to ensure optimal performance.
+			switch filter.PodUsedGPUTopologyMode(pod) {
+			case util.LinkTopology:
+				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+					Requests:       []string{request.Name},
+					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributePCIeRoot)),
+				})
+			case util.NUMATopology:
+				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+					Requests:       []string{request.Name},
+					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
+				})
+			}
 		}
-
 	}
 
 	var annotations map[string]string
@@ -316,15 +353,25 @@ func checkResourceInfo(pod *corev1.Pod, infoIndex int, resourceInfo common.Resou
 		return containerIndex, err
 	}
 
+	var errs field.ErrorList
 	quantity, ok := resourceInfo.Resources[corev1.ResourceName(util.VGPUCoreResourceName)]
 	if ok && quantity.Value() > util.HundredCore {
 		msg := fmt.Sprintf("container %s requests vGPU core exceeding limit", resourceInfo.Name)
-		err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
-			field.Invalid(field.NewPath("spec").Child("containers").Index(containerIndex).Child("resources").
-				Child("limits").Key(util.VGPUCoreResourceName), quantity.Value(), msg)})
-		return containerIndex, err
+		errs = append(errs, field.Invalid(field.NewPath("spec").Child("containers").Index(containerIndex).
+			Child("resources").Child("limits").Key(util.VGPUCoreResourceName), quantity.Value(), msg))
 	}
-	return containerIndex, nil
+
+	quantity, ok = resourceInfo.Resources[corev1.ResourceName(util.VGPUNumberResourceName)]
+	if ok && quantity.Value() > vgpu.MaxDeviceCount {
+		msg := fmt.Sprintf("container %s requests vGPU number exceeding limit", resourceInfo.Name)
+		errs = append(errs, field.Invalid(field.NewPath("spec").Child("containers").Index(containerIndex).
+			Child("resources").Child("limits").Key(util.VGPUNumberResourceName), quantity.Value(), msg))
+	}
+	if len(errs) > 0 {
+		err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, errs)
+	}
+
+	return containerIndex, err
 }
 
 func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos) (err error) {

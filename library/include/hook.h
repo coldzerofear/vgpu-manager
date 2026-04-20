@@ -317,7 +317,7 @@ static inline int get_logger_print_level(void) {
 #define LOGGER(level, format, ...)                                  \
   ({                                                                \
     if (LOGGER_SHOULD_PRINT(level)) {                               \
-      fprintf(stderr, "[vGPU %s(%d|%" PRIuPTR "|%s|%d)]: " format "\n", \
+      fprintf(stderr, "[vGPU %s(%d|%" PRIuPTR "|%s:%d)]: " format "\n", \
               _level_names[level], getpid(),                        \
               (uintptr_t)pthread_self(),                            \
               basename(__FILE__), __LINE__, ##__VA_ARGS__);         \
