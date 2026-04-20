@@ -208,10 +208,14 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 	for _, group := range preparedDevices {
 		for _, dev := range group.Devices {
 			uuid := ""
+			deviceSuffix := dev.CanonicalName()
+			if dev.AllocationKey != "" {
+				deviceSuffix = dev.AllocationKey
+			}
 
 			// Construct claim-specific CDI device name in accordance with the
 			// naming convention encoded in `GetClaimDeviceName()` below.
-			dname := fmt.Sprintf("%s-%s", claimUID, dev.CanonicalName())
+			dname := fmt.Sprintf("%s-%s", claimUID, deviceSuffix)
 
 			var dspec cdispec.Device
 
@@ -288,6 +292,13 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 				deviceEdits = deviceEdits.Append(group.ConfigState.containerEdits)
 				dspec.ContainerEdits = *deviceEdits.ContainerEdits
 			}
+			if dev.containerEdits != nil {
+				deviceEdits := &cdiapi.ContainerEdits{
+					ContainerEdits: &dspec.ContainerEdits,
+				}
+				deviceEdits = deviceEdits.Append(dev.containerEdits)
+				dspec.ContainerEdits = *deviceEdits.ContainerEdits
+			}
 			klog.V(7).Infof("Number of device nodes about to inject for device %s: %d", dname, len(dspec.ContainerEdits.DeviceNodes))
 			deviceSpecs = append(deviceSpecs, dspec)
 		}
@@ -330,8 +341,12 @@ func (cdi *CDIHandler) DeleteClaimSpecFile(claimUID string) error {
 // identifier for a device defined in that spec. Example:
 // k8s.gpu.nvidia.com/claim=dab5ab50-d59a-42a6-af16-cfd4628c0f7a-gpu-0
 // That identifier can be used elsewhere, and _points to the spec_.
-func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, device *AllocatableDevice, containerEdits *cdiapi.ContainerEdits) string {
-	return cdiparser.QualifiedName(cdiVendor, cdiClaimClass, fmt.Sprintf("%s-%s", claimUID, device.CanonicalName()))
+func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, allocationKey string, device *AllocatableDevice) string {
+	deviceSuffix := device.CanonicalName()
+	if allocationKey != "" {
+		deviceSuffix = allocationKey
+	}
+	return cdiparser.QualifiedName(cdiVendor, cdiClaimClass, fmt.Sprintf("%s-%s", claimUID, deviceSuffix))
 }
 
 // Construct and return the CDI `deviceNodes` specification for the two

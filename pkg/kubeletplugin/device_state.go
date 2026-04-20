@@ -22,6 +22,7 @@ import (
 	"io"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -737,21 +738,35 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 	// Walk through each config and its associated device allocation results
 	// and construct the list of prepared devices to return.
 	var preparedDevices PreparedDevices
+	vgpuClaimCommonEditsApplied := false
 	for c, results := range configResultsMap {
 		preparedDeviceGroup := PreparedDeviceGroup{
 			ConfigState: *preparedDeviceGroupConfigState[c],
 		}
 
-		for _, result := range results {
+		for idx, result := range results {
 			cdiDevices := []string{}
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
 			if allocatableDevice == nil {
 				return nil, fmt.Errorf("allocatable not found for device %q", result.Device)
 			}
+
+			allocationKey := ""
+			shareID := ""
+			if featuregates.Enabled(featuregates.VGPUSupport) && allocatableDevice.Type() == VGpuDeviceType {
+				allocationKey = buildAllocationKey(*result, idx)
+				if result.ShareID != nil {
+					shareID = string(*result.ShareID)
+				}
+				if !vgpuClaimCommonEditsApplied {
+					preparedDeviceGroup.ConfigState.containerEdits = mergeContainerEdits(preparedDeviceGroup.ConfigState.containerEdits, s.vgpuManager.GetClaimCommonContainerEdits(claim))
+					vgpuClaimCommonEditsApplied = true
+				}
+			}
 			// The claim-specific CDI spec (of kind `k8s.gpu.nvidia.com/claim`)
 			// has not yet been generated. But we already know the name of a
 			// ClaimDevice entry that it will enumerate (by convention).
-			if d := s.cdi.GetClaimDeviceName(string(claim.UID), allocatableDevice, preparedDeviceGroupConfigState[c].containerEdits); d != "" {
+			if d := s.cdi.GetClaimDeviceName(string(claim.UID), allocationKey, allocatableDevice); d != "" {
 				cdiDevices = append(cdiDevices, d)
 			}
 
@@ -762,10 +777,15 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				CDIDeviceIDs: cdiDevices,
 			}
 
-			var preparedDevice PreparedDevice
+			preparedDevice := PreparedDevice{
+				Request:       result.Request,
+				ShareID:       shareID,
+				AllocationKey: allocationKey,
+			}
 
 			switch allocatableDevice.Type() {
 			case VGpuDeviceType:
+				preparedDevice.containerEdits = s.vgpuManager.GetAllocationContainerEdits(claim, allocationKey, result, allocatableDevice)
 				preparedDevice.VGpu = &PreparedVGpuDevice{
 					Info:   allocatableDevice.VGpu,
 					Device: device,
@@ -815,6 +835,53 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 	}
 
 	return preparedDevices, nil
+}
+
+func buildAllocationKey(result resourceapi.DeviceRequestAllocationResult, ordinal int) string {
+	device := sanitizeAllocationKeyToken(result.Device)
+	request := sanitizeAllocationKeyToken(result.Request)
+	if result.ShareID != nil && *result.ShareID != "" {
+		shareID := sanitizeAllocationKeyToken(string(*result.ShareID))
+		return fmt.Sprintf("%s-share-%s", device, shareID)
+	}
+	return fmt.Sprintf("%s-req-%s-%d", device, request, ordinal)
+}
+
+func sanitizeAllocationKeyToken(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
+}
+
+func mergeContainerEdits(base *cdiapi.ContainerEdits, extra *cdiapi.ContainerEdits) *cdiapi.ContainerEdits {
+	if extra == nil {
+		return base
+	}
+	if base == nil {
+		clone := *extra
+		return &clone
+	}
+	return base.Append(extra)
 }
 
 func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, devices PreparedDevices) error {
@@ -974,10 +1041,6 @@ func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.S
 
 	// Declare a device group state object to populate.
 	var configState DeviceConfigState
-
-	if featuregates.Enabled(featuregates.VGPUSupport) {
-		configState.containerEdits = s.vgpuManager.GetCDIContainerEdits(claim, requestedDevices)
-	}
 
 	// Apply time-slicing settings (if available and feature gate enabled).
 	if featuregates.Enabled(featuregates.TimeSlicingSettings) && config.IsTimeSlicing() {

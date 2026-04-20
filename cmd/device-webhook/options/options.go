@@ -12,16 +12,17 @@ import (
 )
 
 type Options struct {
-	ServerBindPort      int
-	PprofBindPort       int
-	Domain              string
-	CertDir             string
-	SchedulerName       string
-	DefaultNodePolicy   string
-	DefaultDevicePolicy string
-	DefaultTopologyMode string
-	DefaultRuntimeClass string
-	DefaultConvertToDRA bool
+	ServerBindPort        int
+	PprofBindPort         int
+	Domain                string
+	CertDir               string
+	SchedulerName         string
+	DefaultNodePolicy     string
+	DefaultDevicePolicy   string
+	DefaultTopologyMode   string
+	DefaultRuntimeClass   string
+	DefaultConvertToDRA   bool
+	CombinedResourceClaim bool
 }
 
 const (
@@ -54,6 +55,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.DefaultTopologyMode, "default-topology-mode", "", "Default device list topology mode. (supported values: \"numa\" | \"link\")")
 	pflag.StringVar(&o.DefaultRuntimeClass, "default-runtime-class", "", "Specify the default container runtimeClassName for the vGPU pod.")
 	pflag.BoolVar(&o.DefaultConvertToDRA, "default-convert2-dra", false, "Enable the conversion of vGPU extended resources into DRA requests.")
+	pflag.BoolVar(&o.CombinedResourceClaim, "combined-resource-claim", false, "combine multiple claim requests into one resource claim. (need to enable `default-convert2-dra`)")
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
 }

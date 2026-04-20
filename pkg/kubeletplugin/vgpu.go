@@ -2,7 +2,6 @@ package kubeletplugin
 
 import (
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,29 +108,32 @@ func (m *VGPUManager) getVGpuDeviceSlice(devices AllocatableDevices) []*VGpuDevi
 	return vGPUs
 }
 
-func (m *VGPUManager) getConsumableCapacityMap(claim *resourceapi.ResourceClaim) map[string]map[resourceapi.QualifiedName]resource.Quantity {
-	resMap := map[string]map[resourceapi.QualifiedName]resource.Quantity{}
-	for _, result := range claim.Status.Allocation.Devices.Results {
-		deviceName := result.Device
-		if _, exists := resMap[deviceName]; !exists {
-			resMap[deviceName] = map[resourceapi.QualifiedName]resource.Quantity{}
+func (m *VGPUManager) getComputePolicy(claim *resourceapi.ResourceClaim) util.ComputePolicy {
+	computePolicy := util.FixedComputePolicy
+	for key, val := range claim.GetAnnotations() {
+		if strings.HasSuffix(key, "/vgpu-compute-policy") && val != "" {
+			computePolicy = vgpu2.GetComputePolicy(val)
+			break
 		}
-		maps.Copy(resMap[deviceName], result.ConsumedCapacity)
 	}
-	return resMap
+	return computePolicy
 }
 
-func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, devices AllocatableDevices) *cdiapi.ContainerEdits {
-	deviceSlice := m.getVGpuDeviceSlice(devices)
-	if len(deviceSlice) == 0 {
-		return nil
-	}
-	baseContPath := filepath.Join(m.contManagerPath, util.Claims, string(claim.UID))
-	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, string(claim.UID))
-	// TODO: We should check the status of claim, becasue there may be two pod share the claim
+func (m *VGPUManager) ensureClaimDirectories(claimUID string) (string, string) {
+	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID)
+	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID)
 	if err := os.RemoveAll(baseContPath); err != nil {
-		klog.Warningf("Failed to remove basic host path %s: %s", baseHostPath, err)
+		klog.Warningf("Failed to remove claim container path %s: %s", baseContPath, err)
 	}
+	if err := util.EnsureDir(baseContPath, 0o777); err != nil {
+		klog.Warningf("Failed to ensure directory %s: %s", baseContPath, err)
+	}
+	return baseContPath, baseHostPath
+}
+
+func (m *VGPUManager) ensureAllocationDirectories(claimUID, allocationKey string) (string, string) {
+	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID, allocationKey)
+	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID, allocationKey)
 	preparedDirs := []string{
 		baseContPath,
 		filepath.Join(baseContPath, util.Config),
@@ -143,13 +145,11 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 			klog.Warningf("Failed to ensure directory %s: %s", dirPath, err)
 		}
 	}
-	computePolicy := util.FixedComputePolicy
-	for key, val := range claim.GetAnnotations() {
-		if strings.HasSuffix(key, "/vgpu-compute-policy") && val != "" {
-			computePolicy = vgpu2.GetComputePolicy(val)
-			break
-		}
-	}
+	return baseContPath, baseHostPath
+}
+
+func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceClaim) *cdiapi.ContainerEdits {
+	_, _ = m.ensureClaimDirectories(string(claim.UID))
 
 	envMode := util.HostMode
 	if cgroups.IsCgroup2UnifiedMode() || cgroups.IsCgroup2HybridMode() {
@@ -163,51 +163,7 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 		fmt.Sprintf("%s=%s", util.LdPreloadEnv, conttainerDriverFile),
 		fmt.Sprintf("%s=%v", util.ManagerCompatibilityMode, envMode),
 	}
-	// TODO Covering the visible uuid list
-	deviceCapacityMap := m.getConsumableCapacityMap(claim)
-	for _, device := range deviceSlice {
-		idx := device.Index
-		totalMemoryMB := device.Memory.Total / units.MiB
-		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaMemoryRatioEnv, idx, 1))
-		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=FALSE", util.CudaMemoryOversoldEnv, idx))
-		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.UUID))
-		if resourceMap, exists := deviceCapacityMap[device.CanonicalName()]; exists {
-			if quantity, ok := resourceMap[CoresResourceName]; ok {
-				if val, ok := quantity.AsInt64(); ok {
-					// Rewrite environment variables to avoid interference from built-in environment variables in container images.
-					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaCoreLimitEnv))
-					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaSoftCoreLimitEnv))
-					softVal := val
-					if computePolicy == util.BalanceComputePolicy {
-						softVal = util.HundredCore
-					} else if computePolicy == util.NoneComputePolicy {
-						val = util.HundredCore
-					}
-					if val < util.HundredCore {
-						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, val))
-						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, softVal))
-					} else {
-						// 100% unlimited computing power
-						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaCoreLimitEnv, idx))
-						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaSoftCoreLimitEnv, idx))
-					}
-				}
-			}
-			if quantity, ok := resourceMap[MemoryResourceName]; ok {
-				if val, ok := quantity.AsInt64(); ok {
-					// TODO Only enable memory limit when the request is less than the entire card
-					requestMB := uint64(val / units.MiB)
-					// Rewrite environment variables to avoid interference from built-in environment variables in container images.
-					vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaMemoryLimitEnv))
-					if requestMB < totalMemoryMB {
-						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
-					} else {
-						vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaMemoryLimitEnv, idx))
-					}
-				}
-			}
-		}
-	}
+
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
 			Env: vGpuEnvs,
@@ -233,19 +189,78 @@ func (m *VGPUManager) GetCDIContainerEdits(claim *resourceapi.ResourceClaim, dev
 					HostPath:      filepath.Join(m.hostManagerPath, vgpu.LdPreLoadFileName),
 					Options:       []string{"ro", "nosuid", "nodev", "bind"},
 				},
+			},
+		},
+	}
+}
+
+func (m *VGPUManager) GetAllocationContainerEdits(claim *resourceapi.ResourceClaim, allocationKey string, result *resourceapi.DeviceRequestAllocationResult, device *AllocatableDevice) *cdiapi.ContainerEdits {
+	if result == nil || device == nil || device.Type() != VGpuDeviceType {
+		return nil
+	}
+	if allocationKey == "" {
+		allocationKey = "default"
+	}
+	_, allocationHostPath := m.ensureAllocationDirectories(string(claim.UID), allocationKey)
+
+	computePolicy := m.getComputePolicy(claim)
+	idx := device.VGpu.Index
+	totalMemoryMB := device.VGpu.Memory.Total / units.MiB
+	vGpuEnvs := []string{
+		fmt.Sprintf("%s_%d=%v", util.CudaMemoryRatioEnv, idx, 1),
+		fmt.Sprintf("%s_%d=FALSE", util.CudaMemoryOversoldEnv, idx),
+		fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.VGpu.UUID),
+	}
+
+	if quantity, ok := result.ConsumedCapacity[CoresResourceName]; ok {
+		if val, ok := quantity.AsInt64(); ok {
+			vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaCoreLimitEnv))
+			vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaSoftCoreLimitEnv))
+			softVal := val
+			if computePolicy == util.BalanceComputePolicy {
+				softVal = util.HundredCore
+			} else if computePolicy == util.NoneComputePolicy {
+				val = util.HundredCore
+			}
+			if val < util.HundredCore {
+				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, val))
+				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, softVal))
+			} else {
+				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaCoreLimitEnv, idx))
+				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaSoftCoreLimitEnv, idx))
+			}
+		}
+	}
+
+	if quantity, ok := result.ConsumedCapacity[MemoryResourceName]; ok {
+		if val, ok := quantity.AsInt64(); ok {
+			requestMB := uint64(val / units.MiB)
+			vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaMemoryLimitEnv))
+			if requestMB < totalMemoryMB {
+				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
+			} else {
+				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaMemoryLimitEnv, idx))
+			}
+		}
+	}
+
+	return &cdiapi.ContainerEdits{
+		ContainerEdits: &cdispec.ContainerEdits{
+			Env: vGpuEnvs,
+			Mounts: []*cdispec.Mount{
 				{
 					ContainerPath: filepath.Join(m.contManagerPath, util.Config),
-					HostPath:      filepath.Join(baseHostPath, util.Config),
+					HostPath:      filepath.Join(allocationHostPath, util.Config),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
 				{
 					ContainerPath: filepath.Join(vgpu.ContVGPULockPath),
-					HostPath:      filepath.Join(baseHostPath, vgpu.VGPULockDirName),
+					HostPath:      filepath.Join(allocationHostPath, vgpu.VGPULockDirName),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
 				{
 					ContainerPath: filepath.Join(vgpu.ContVMemoryNodePath),
-					HostPath:      filepath.Join(baseHostPath, util.VMemNode),
+					HostPath:      filepath.Join(allocationHostPath, util.VMemNode),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
 			},

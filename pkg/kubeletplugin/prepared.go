@@ -20,6 +20,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
+	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
 // Reflects a prepared MIG device, regardless of its origin (static MIG, or
@@ -32,6 +33,14 @@ type PreparedDeviceList []PreparedDevice
 type PreparedDevices []*PreparedDeviceGroup
 
 type PreparedDevice struct {
+	Request string `json:"request,omitempty"`
+	ShareID string `json:"shareID,omitempty"`
+	// AllocationKey uniquely identifies one allocation result for this claim.
+	// It is used to generate unique CDI device names per request/share.
+	AllocationKey string `json:"allocationKey,omitempty"`
+
+	containerEdits *cdiapi.ContainerEdits
+
 	VGpu *PreparedVGpuDevice `json:"vgpu"`
 	// Represents a prepared full GPU.
 	Gpu *PreparedGpuDevice `json:"gpu"`

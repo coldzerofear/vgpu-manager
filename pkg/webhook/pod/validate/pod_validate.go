@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/klog/v2"
@@ -53,13 +54,92 @@ type validateHandle struct {
 
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) error {
 	if h.options.DefaultConvertToDRA {
-		return h.createDRAClaims(ctx, pod)
+		keySet := sets.New[string]()
+		var repeat []corev1.ResourceClaim
+		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+			for _, claim := range container.Resources.Claims {
+				if keySet.Has(claim.Name + claim.Request) {
+					repeat = append(repeat, claim)
+				} else {
+					keySet.Insert(claim.Name + claim.Request)
+				}
+			}
+		}
+		for _, claim := range repeat {
+			index := slices.IndexFunc(pod.Spec.ResourceClaims, func(item corev1.PodResourceClaim) bool {
+				return item.Name == claim.Name
+			})
+			if index < 0 {
+				continue
+			}
+			resourceClaim := &pod.Spec.ResourceClaims[index]
+			if resourceClaim.ResourceClaimName != nil && *resourceClaim.ResourceClaimName != "" {
+				// TODO check vgpu
+				continue
+			}
+			if resourceClaim.ResourceClaimTemplateName != nil && *resourceClaim.ResourceClaimTemplateName != "" {
+				// TODO check vgpu
+				continue
+			}
+		}
+
+		return h.createResourceClaims(ctx, pod)
 	}
 	return nil
 }
 
 // buildResourceClaim Build vGPU resource claims based on container requests.
-func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.ResourceInfo, resourceClaimName, ownerPod, timestamp string) *resourceapi.ResourceClaim {
+func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, resourceClaimName, ownerPod, timestamp string) *resourceapi.ResourceClaim {
+	var deviceConstraints []resourceapi.DeviceConstraint
+
+	for _, request := range requests {
+		// Device uuids are mutually exclusive, ensuring that each physical device is only assigned once.
+		if request.Exactly.Count > 1 {
+			deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+				Requests:          []string{request.Name},
+				DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
+			})
+		}
+
+		switch filter.PodUsedGPUTopologyMode(pod) {
+		case util.LinkTopology:
+			deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+				Requests:       []string{request.Name},
+				MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributePCIeRoot)),
+			})
+		case util.NUMATopology:
+			deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
+				Requests:       []string{request.Name},
+				MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
+			})
+		}
+
+	}
+
+	var annotations map[string]string
+	if val, ok := util.HasAnnotation(pod, util.VGPUComputePolicyAnnotation); ok {
+		annotations = map[string]string{util.VGPUComputePolicyAnnotation: val}
+	}
+	return &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				util.DRAOwnerPodLabel:   ownerPod,
+				util.DRACreateTimeLabel: timestamp,
+			},
+			Annotations: annotations,
+			Name:        resourceClaimName,
+			Namespace:   pod.Namespace,
+		},
+		Spec: resourceapi.ResourceClaimSpec{
+			Devices: resourceapi.DeviceClaim{
+				Constraints: deviceConstraints,
+				Requests:    requests,
+			},
+		},
+	}
+}
+
+func buildDeviceRequest(pod *corev1.Pod, requestName, deviceClassName string, info common.ResourceInfo) resourceapi.DeviceRequest {
 	var (
 		deviceCount     int64
 		capacityRequest = make(map[resourceapi.QualifiedName]resource.Quantity)
@@ -163,82 +243,104 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, info common.Resourc
 			},
 		})
 	}
-	// Device uuids are mutually exclusive, ensuring that each physical device is only assigned once.
-	deviceConstraints := []resourceapi.DeviceConstraint{{
-		Requests:          []string{kubeletplugin.VGpuDeviceType},
-		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
-	}}
 
-	switch filter.PodUsedGPUTopologyMode(pod) {
-	case util.LinkTopology:
-		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-			Requests:       []string{kubeletplugin.VGpuDeviceType},
-			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributePCIeRoot)),
-		})
-	case util.NUMATopology:
-		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
-			Requests:       []string{kubeletplugin.VGpuDeviceType},
-			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
-		})
-	}
-	var annotations map[string]string
-	if val, ok := util.HasAnnotation(pod, util.VGPUComputePolicyAnnotation); ok {
-		annotations = map[string]string{util.VGPUComputePolicyAnnotation: val}
-	}
-	resourceClaim := &resourceapi.ResourceClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels: map[string]string{
-				util.DRAOwnerPodLabel:   ownerPod,
-				util.DRACreateTimeLabel: timestamp,
+	return resourceapi.DeviceRequest{
+		Name: requestName,
+		Exactly: &resourceapi.ExactDeviceRequest{
+			DeviceClassName: deviceClassName,
+			AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+			Count:           deviceCount,
+			Capacity: &resourceapi.CapacityRequirements{
+				Requests: capacityRequest,
 			},
-			Annotations: annotations,
-			Name:        resourceClaimName,
-			Namespace:   pod.Namespace,
-		},
-		Spec: resourceapi.ResourceClaimSpec{
-			Devices: resourceapi.DeviceClaim{
-				Constraints: deviceConstraints,
-				Requests: []resourceapi.DeviceRequest{{
-					Name: kubeletplugin.VGpuDeviceType,
-					Exactly: &resourceapi.ExactDeviceRequest{
-						DeviceClassName: util.VGPUDeviceClassName,
-						AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
-						Count:           deviceCount,
-						Capacity: &resourceapi.CapacityRequirements{
-							Requests: capacityRequest,
-						},
-						Selectors: deviceSelectors,
-					},
-				}},
-			},
+			Selectors: deviceSelectors,
 		},
 	}
-
-	return resourceClaim
 }
 
-func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (err error) {
-	logger := log.FromContext(ctx)
-	val, ok := util.HasAnnotation(pod, util.DRAOriResAnnotation)
-	if !ok || len(val) == 0 {
-		return nil
+func CheckResourceName(pod *corev1.Pod, resourceName string) error {
+	if resourceName == "" {
+		return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+			field.Invalid(field.NewPath("metadata").Child("annotations").Child(util.DRAGenNameAnnotation),
+				resourceName, "generate name cannot be empty")})
 	}
-	if len(val) > util.PodAnnotationMaxLength {
-		err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
-			field.Invalid(field.NewPath("metadata").Child("annotations").Child(util.DRAOriResAnnotation),
-				field.OmitValueType{}, "recorded value is too long")})
-		logger.V(5).Error(err, "")
+	return nil
+}
+
+func (h *validateHandle) createCombinedResourceClaim(ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos) error {
+	logger := log.FromContext(ctx)
+
+	resourceName, _ := util.HasAnnotation(pod, util.DRAGenNameAnnotation)
+	if err := CheckResourceName(pod, resourceName); err != nil {
 		return err
 	}
-	infos := common.ResourceInfos{}
-	if err = infos.Decode(val); err != nil {
-		logger.V(2).Error(err, "Decoding original resource information failed")
-		return apierrors.NewBadRequest(fmt.Sprintf("Decoding original resource information failed: %v", err))
+
+	resourceRequests := make([]resourceapi.DeviceRequest, len(resourceInfos))
+	for i, info := range resourceInfos {
+		containerIndex, err := checkResourceInfo(pod, i, info)
+		if err != nil {
+			logger.V(3).Error(err, "")
+			return err
+		}
+		container := &pod.Spec.Containers[containerIndex]
+		resourceRequestName := util.GenerateK8sSafeResourceName(container.Name, "vgpu")
+
+		request := buildDeviceRequest(pod, resourceRequestName, util.VGPUDeviceClassName, info)
+		resourceRequests[i] = request
 	}
 
 	ownerPod := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
 	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
-	resourceClaimKeys := make([]types.NamespacedName, 0, len(infos))
+	resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
+	resourceClaim := h.buildResourceClaim(pod, resourceRequests, resourceClaimName, ownerPod, createTimestamp)
+
+	if err := h.client.Create(ctx, resourceClaim); err != nil {
+		logger.Error(err, "Failed to create combined vGPU resourceClaim")
+		return err
+	}
+
+	logger.Info("Successfully created combined vGPU resourceClaim", "resourceClaim", klog.KObj(resourceClaim))
+
+	return nil
+}
+
+func checkResourceInfo(pod *corev1.Pod, infoIndex int, resourceInfo common.ResourceInfo) (containerIndex int, err error) {
+	containerIndex = slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
+		return container.Name == resourceInfo.Name
+	})
+	if containerIndex < 0 {
+		err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+			field.Invalid(field.NewPath("metadata").Child("annotations").
+				Child(util.DRAOriResAnnotation).Index(infoIndex).Child("containerName"),
+				resourceInfo.Name, "container not found")})
+		return containerIndex, err
+	}
+
+	quantity, ok := resourceInfo.Resources[corev1.ResourceName(util.VGPUCoreResourceName)]
+	if ok && quantity.Value() > util.HundredCore {
+		msg := fmt.Sprintf("container %s requests vGPU core exceeding limit", resourceInfo.Name)
+		err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+			field.Invalid(field.NewPath("spec").Child("containers").Index(containerIndex).Child("resources").
+				Child("limits").Key(util.VGPUCoreResourceName), quantity.Value(), msg)})
+		return containerIndex, err
+	}
+	return containerIndex, nil
+}
+
+func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos) (err error) {
+	logger := log.FromContext(ctx)
+	ownerPod := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
+	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
+	resourceClaimKeys := make([]types.NamespacedName, 0, len(resourceInfos))
+
+	resourceName := pod.Name
+	if pod.GenerateName != "" {
+		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
+		if err = CheckResourceName(pod, resourceName); err != nil {
+			return err
+		}
+	}
+
 	defer func() {
 		// Clean up the created resources when an error occurs,
 		// using timestamp label to prevent accidental deletion of resources during batch deletion.
@@ -257,34 +359,14 @@ func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (
 		}
 	}()
 
-	resourceName := pod.Name
-	if pod.GenerateName != "" {
-		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
-	}
-	for i, info := range infos {
-		index := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
-			return container.Name == info.Name
-		})
-		if index < 0 {
-			err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
-				field.Invalid(field.NewPath("metadata").Child("annotations").
-					Child(util.DRAOriResAnnotation).Index(i).Child("containerName"),
-					info.Name, "container not found")})
-			logger.V(5).Error(err, "")
-			return err
-		}
-
-		quantity, ok := info.Resources[corev1.ResourceName(util.VGPUCoreResourceName)]
-		if ok && quantity.Value() > util.HundredCore {
-			msg := fmt.Sprintf("container %s requests vGPU core exceeding limit", info.Name)
-			err := apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
-				field.Invalid(field.NewPath("spec").Child("containers").Index(index).Child("resources").
-					Child("limits").Key(util.VGPUCoreResourceName), quantity.Value(), msg)})
+	for i, info := range resourceInfos {
+		containerIndex, err := checkResourceInfo(pod, i, info)
+		if err != nil {
 			logger.V(3).Error(err, "")
 			return err
 		}
 
-		container := &pod.Spec.Containers[index]
+		container := &pod.Spec.Containers[containerIndex]
 		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
@@ -295,8 +377,10 @@ func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (
 			logger.V(5).Error(err, "")
 			return err
 		}
+
 		// Create container resource claim
-		resourceClaim := h.buildResourceClaim(pod, info, resourceClaimName, ownerPod, createTimestamp)
+		request := buildDeviceRequest(pod, kubeletplugin.VGpuDeviceType, util.VGPUDeviceClassName, info)
+		resourceClaim := h.buildResourceClaim(pod, []resourceapi.DeviceRequest{request}, resourceClaimName, ownerPod, createTimestamp)
 		if err = h.client.Create(ctx, resourceClaim); err != nil {
 			logger.Error(err, "Failed to create vGPU resourceClaim", "container", container.Name)
 			return err
@@ -305,8 +389,45 @@ func (h *validateHandle) createDRAClaims(ctx context.Context, pod *corev1.Pod) (
 		logger.V(2).Info("Successfully created resourceClaim", "resourceClaim",
 			klog.KObj(resourceClaim), "container", container.Name)
 	}
+
 	if len(resourceClaimKeys) > 0 {
 		logger.Info("Successfully created all vGPU resourceClaims", "resourceClaims", resourceClaimKeys)
+	}
+	return nil
+}
+
+func (h *validateHandle) createResourceClaims(ctx context.Context, pod *corev1.Pod) (err error) {
+	logger := log.FromContext(ctx)
+	val, ok := util.HasAnnotation(pod, util.DRAOriResAnnotation)
+	if !ok || len(val) == 0 {
+		return nil
+	}
+	if len(val) > util.PodAnnotationMaxLength {
+		err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+			field.Invalid(field.NewPath("metadata").Child("annotations").Child(util.DRAOriResAnnotation),
+				field.OmitValueType{}, "recorded value is too long")})
+		logger.V(5).Error(err, "")
+		return err
+	}
+	infos := common.ResourceInfos{}
+	if err = infos.Decode(val); err != nil {
+		logger.V(2).Error(err, "Decoding original resource information failed")
+		return apierrors.NewBadRequest(fmt.Sprintf("Decoding original resource information failed: %v", err))
+	}
+
+	// fast return
+	if len(infos) == 0 {
+		return nil
+	}
+
+	if h.options.CombinedResourceClaim {
+		if err = h.createCombinedResourceClaim(ctx, pod, infos); err != nil {
+			return err
+		}
+	} else {
+		if err = h.createMultiResourceClaims(ctx, pod, infos); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -317,12 +438,12 @@ func (h *validateHandle) ValidateUpdate(ctx context.Context, oldPod, newPod *cor
 
 func (h *validateHandle) ValidateDelete(ctx context.Context, pod *corev1.Pod) error {
 	if h.options.DefaultConvertToDRA {
-		return h.deleteDRAClaims(ctx, pod)
+		return h.deleteResourceClaims(ctx, pod)
 	}
 	return nil
 }
 
-func (h *validateHandle) deleteDRAClaims(ctx context.Context, pod *corev1.Pod) error {
+func (h *validateHandle) deleteResourceClaims(ctx context.Context, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
 	val, ok := util.HasAnnotation(pod, util.DRAOriResAnnotation)
 	if !ok || len(val) == 0 {
@@ -333,20 +454,51 @@ func (h *validateHandle) deleteDRAClaims(ctx context.Context, pod *corev1.Pod) e
 		logger.V(2).Error(err, "Decoding original resource information failed")
 		return nil
 	}
+	// fast return
+	if len(infos) == 0 {
+		return nil
+	}
+
 	resourceName := pod.Name
+
+	// try delete CombinedResourceClaim
+	if h.options.CombinedResourceClaim {
+		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
+		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
+		if slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
+			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
+		}) {
+			logger.V(1).Info("ResourceClaimName not found, skip ResourceClaim delete",
+				"resourceClaimName", resourceClaimName)
+		} else {
+			resourceClaim := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceClaimName,
+					Namespace: pod.Namespace,
+				},
+			}
+			if err := h.client.Delete(ctx, resourceClaim); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete ResourceClaim", "resourceClaim", klog.KObj(resourceClaim))
+			}
+		}
+	}
+
 	if pod.GenerateName != "" {
 		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
 	}
 
+	// try delete MultiResourceClaims
 	for _, info := range infos {
-		index := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
+
+		containerIndex := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
 			return container.Name == info.Name
 		})
-		if index < 0 {
+		if containerIndex < 0 {
 			logger.V(1).Info("Container not found, skip ResourceClaim delete", "container", info.Name)
 			continue
 		}
-		container := &pod.Spec.Containers[index]
+
+		container := &pod.Spec.Containers[containerIndex]
 		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
@@ -361,7 +513,7 @@ func (h *validateHandle) deleteDRAClaims(ctx context.Context, pod *corev1.Pod) e
 				Namespace: pod.Namespace,
 			},
 		}
-		if err := h.client.Delete(context.Background(), resourceClaim); err != nil && !apierrors.IsNotFound(err) {
+		if err := h.client.Delete(ctx, resourceClaim); err != nil && !apierrors.IsNotFound(err) {
 			logger.Error(err, "Failed to delete ResourceClaim", "resourceClaim", klog.KObj(resourceClaim))
 		}
 	}
