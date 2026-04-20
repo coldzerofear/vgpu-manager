@@ -13,6 +13,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/common"
+	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,12 +33,13 @@ import (
 
 const Path = "/pods/mutate"
 
-func NewMutateWebhook(client client.Client, options *options.Options) (*admission.Webhook, error) {
+func NewMutateWebhook(client client.Client, options *options.Options, claimReader resourcereader.ClaimRequestReader) (*admission.Webhook, error) {
 	return &admission.Webhook{
 		Handler: &mutateHandle{
 			decoder: admission.NewDecoder(client.Scheme()),
 			options: options,
 			client:  client,
+			reader:  claimReader,
 		},
 		RecoverPanic: ptr.To[bool](true),
 	}, nil
@@ -47,6 +49,14 @@ type mutateHandle struct {
 	decoder admission.Decoder
 	options *options.Options
 	client  client.Client
+	reader  resourcereader.ClaimRequestReader
+}
+
+func (h *mutateHandle) mutation(obj client.Object) {
+	if h.reader == nil {
+		return
+	}
+	h.reader.Mutation(obj)
 }
 
 func setDefaultSchedulerName(pod *corev1.Pod, options *options.Options, logger logr.Logger) {
@@ -405,6 +415,7 @@ func (h *mutateHandle) updateResourceOwner(ctx context.Context, owner metav1.Obj
 		logger.Error(err, "get resourceClaim failed")
 		return client.IgnoreNotFound(err)
 	}
+	h.mutation(claim)
 	if !controllerutil.HasControllerReference(claim) {
 		if err := controllerutil.SetControllerReference(owner, claim, h.client.Scheme()); err != nil {
 			logger.Error(err, "SetControllerReference failed")
@@ -414,6 +425,7 @@ func (h *mutateHandle) updateResourceOwner(ctx context.Context, owner metav1.Obj
 			logger.Error(err, "update resourceClaim ownerReference failed")
 			return err
 		}
+		h.mutation(claim)
 	} else {
 		logger.V(3).Info("resourceClaim already has a controller reference, skip updating")
 	}

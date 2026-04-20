@@ -15,9 +15,12 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
+	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
 	resourcev1 "k8s.io/api/resource/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
+	k8scache "k8s.io/client-go/tools/cache"
 	"k8s.io/component-base/logs"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -138,6 +141,44 @@ func startCacheAsync(
 	return nil
 }
 
+func newMirrorIndexer(informer cache.Informer) (k8scache.Indexer, error) {
+	indexer := k8scache.NewIndexer(k8scache.MetaNamespaceKeyFunc, k8scache.Indexers{})
+	_, err := informer.AddEventHandler(k8scache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if err := indexer.Add(obj); err != nil {
+				utilruntime.HandleErrorWithLogger(klog.Background(), err, "add object to mirror indexer")
+			}
+		},
+		UpdateFunc: func(_, newObj interface{}) {
+			if err := indexer.Update(newObj); err != nil {
+				utilruntime.HandleErrorWithLogger(klog.Background(), err, "update object in mirror indexer")
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			key, err := k8scache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+			if err != nil {
+				utilruntime.HandleErrorWithLogger(klog.Background(), err, "build delete key for mirror indexer")
+				return
+			}
+			storedObj, exists, err := indexer.GetByKey(key)
+			if err != nil {
+				utilruntime.HandleErrorWithLogger(klog.Background(), err, "get object from mirror indexer by key")
+				return
+			}
+			if !exists {
+				return
+			}
+			if err := indexer.Delete(storedObj); err != nil {
+				utilruntime.HandleErrorWithLogger(klog.Background(), err, "delete object from mirror indexer")
+			}
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return indexer, nil
+}
+
 func main() {
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
@@ -190,12 +231,22 @@ func main() {
 		Scheme: scheme.Scheme,
 	}
 
+	var claimReader resourcereader.ClaimRequestReader
+	var claimIndexer k8scache.Indexer
+	var templateIndexer k8scache.Indexer
+	var liveClient rtclient.Client
+
 	if opt.DefaultConvertToDRA {
 		if opt.VGPUDeviceClassName == "" {
 			klog.Fatalln("When DRA resource conversion is enabled, an available vgpu device class must be specified")
 		}
 		// DRA defaults to enabling multi card GPU topology management.
 		device.SetGPUTopologyEnabled(true)
+
+		liveClient, err = rtclient.New(config, rtclient.Options{Scheme: scheme.Scheme})
+		if err != nil {
+			klog.Fatalf("Create live kubeClient failed: %v", err)
+		}
 
 		c, err := cache.New(config, cache.Options{
 			Scheme:     clientOptions.Scheme,
@@ -213,8 +264,24 @@ func main() {
 			klog.Fatalf("Start clientCache failed: %v", err)
 		}
 
-		clientOptions.Cache = &rtclient.CacheOptions{
-			Reader: c,
+		clientOptions.Cache = &rtclient.CacheOptions{Reader: c}
+
+		claimInformer, err := c.GetInformer(ctx, &resourcev1.ResourceClaim{}, cache.BlockUntilSynced(false))
+		if err != nil {
+			klog.Fatalf("Get ResourceClaim informer failed: %v", err)
+		}
+		templateInformer, err := c.GetInformer(ctx, &resourcev1.ResourceClaimTemplate{}, cache.BlockUntilSynced(false))
+		if err != nil {
+			klog.Fatalf("Get ResourceClaimTemplate informer failed: %v", err)
+		}
+
+		claimIndexer, err = newMirrorIndexer(claimInformer)
+		if err != nil {
+			klog.Fatalf("Create ResourceClaim mirror indexer failed: %v", err)
+		}
+		templateIndexer, err = newMirrorIndexer(templateInformer)
+		if err != nil {
+			klog.Fatalf("Create ResourceClaimTemplate mirror indexer failed: %v", err)
 		}
 	} else {
 		cacheGate.MarkReady()
@@ -224,8 +291,13 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
+	if opt.DefaultConvertToDRA {
+		// The mutation cache overlays informer snapshots with fresher write-through
+		// updates and live-API fallback results.
+		claimReader = resourcereader.NewClaimRequestReader(client, liveClient, claimIndexer, templateIndexer, time.Minute)
+	}
 
-	if err := pkgwebhook.RegisterWebhookToServer(server, client, opt); err != nil {
+	if err := pkgwebhook.RegisterWebhookToServer(server, client, opt, claimReader); err != nil {
 		klog.Fatalf("Register webhook to server failed: %v", err)
 	}
 

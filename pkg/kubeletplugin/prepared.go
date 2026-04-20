@@ -33,11 +33,8 @@ type PreparedDeviceList []PreparedDevice
 type PreparedDevices []*PreparedDeviceGroup
 
 type PreparedDevice struct {
-	Request string `json:"request,omitempty"`
-	ShareID string `json:"shareID,omitempty"`
-	// AllocationKey uniquely identifies one allocation result for this claim.
-	// It is used to generate unique CDI device names per request/share.
-	AllocationKey string `json:"allocationKey,omitempty"`
+	Request     string `json:"request,omitempty"`
+	CDIDeviceID string `json:"cdiDeviceID,omitempty"`
 
 	containerEdits *cdiapi.ContainerEdits
 

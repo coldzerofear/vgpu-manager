@@ -208,10 +208,7 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 	for _, group := range preparedDevices {
 		for _, dev := range group.Devices {
 			uuid := ""
-			deviceSuffix := dev.CanonicalName()
-			if dev.AllocationKey != "" {
-				deviceSuffix = dev.AllocationKey
-			}
+			deviceSuffix := getClaimDeviceSuffix(dev.CDIDeviceID, dev.CanonicalName(), dev.Type())
 
 			// Construct claim-specific CDI device name in accordance with the
 			// naming convention encoded in `GetClaimDeviceName()` below.
@@ -341,12 +338,16 @@ func (cdi *CDIHandler) DeleteClaimSpecFile(claimUID string) error {
 // identifier for a device defined in that spec. Example:
 // k8s.gpu.nvidia.com/claim=dab5ab50-d59a-42a6-af16-cfd4628c0f7a-gpu-0
 // That identifier can be used elsewhere, and _points to the spec_.
-func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, allocationKey string, device *AllocatableDevice) string {
-	deviceSuffix := device.CanonicalName()
-	if allocationKey != "" {
-		deviceSuffix = allocationKey
-	}
+func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, cdiDeviceID string, device *AllocatableDevice) string {
+	deviceSuffix := getClaimDeviceSuffix(cdiDeviceID, device.CanonicalName(), device.Type())
 	return cdiparser.QualifiedName(cdiVendor, cdiClaimClass, fmt.Sprintf("%s-%s", claimUID, deviceSuffix))
+}
+
+func getClaimDeviceSuffix(cdiDeviceID, canonicalName, deviceType string) string {
+	if deviceType == VGpuDeviceType && cdiDeviceID != "" {
+		return cdiDeviceID
+	}
+	return canonicalName
 }
 
 // Construct and return the CDI `deviceNodes` specification for the two

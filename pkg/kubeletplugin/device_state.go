@@ -739,6 +739,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 	// and construct the list of prepared devices to return.
 	var preparedDevices PreparedDevices
 	vgpuClaimCommonEditsApplied := false
+	requestMountEditsApplied := map[string]bool{}
 	for c, results := range configResultsMap {
 		preparedDeviceGroup := PreparedDeviceGroup{
 			ConfigState: *preparedDeviceGroupConfigState[c],
@@ -751,13 +752,11 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				return nil, fmt.Errorf("allocatable not found for device %q", result.Device)
 			}
 
-			allocationKey := ""
-			shareID := ""
+			requestScopeKey := ""
+			cdiDeviceID := ""
 			if featuregates.Enabled(featuregates.VGPUSupport) && allocatableDevice.Type() == VGpuDeviceType {
-				allocationKey = buildAllocationKey(*result, idx)
-				if result.ShareID != nil {
-					shareID = string(*result.ShareID)
-				}
+				requestScopeKey = buildRequestScopeKey(result.Request)
+				cdiDeviceID = buildCDIDeviceID(*result, idx, allocatableDevice)
 				if !vgpuClaimCommonEditsApplied {
 					preparedDeviceGroup.ConfigState.containerEdits = mergeContainerEdits(preparedDeviceGroup.ConfigState.containerEdits, s.vgpuManager.GetClaimCommonContainerEdits(claim))
 					vgpuClaimCommonEditsApplied = true
@@ -766,7 +765,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			// The claim-specific CDI spec (of kind `k8s.gpu.nvidia.com/claim`)
 			// has not yet been generated. But we already know the name of a
 			// ClaimDevice entry that it will enumerate (by convention).
-			if d := s.cdi.GetClaimDeviceName(string(claim.UID), allocationKey, allocatableDevice); d != "" {
+			if d := s.cdi.GetClaimDeviceName(string(claim.UID), cdiDeviceID, allocatableDevice); d != "" {
 				cdiDevices = append(cdiDevices, d)
 			}
 
@@ -777,15 +776,15 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				CDIDeviceIDs: cdiDevices,
 			}
 
-			preparedDevice := PreparedDevice{
-				Request:       result.Request,
-				ShareID:       shareID,
-				AllocationKey: allocationKey,
-			}
+			preparedDevice := PreparedDevice{Request: result.Request, CDIDeviceID: cdiDeviceID}
 
 			switch allocatableDevice.Type() {
 			case VGpuDeviceType:
-				preparedDevice.containerEdits = s.vgpuManager.GetAllocationContainerEdits(claim, allocationKey, result, allocatableDevice)
+				preparedDevice.containerEdits = s.vgpuManager.GetAllocationEnvContainerEdits(claim, result, allocatableDevice)
+				if !requestMountEditsApplied[requestScopeKey] {
+					preparedDevice.containerEdits = mergeContainerEdits(preparedDevice.containerEdits, s.vgpuManager.GetRequestMountContainerEdits(claim, requestScopeKey))
+					requestMountEditsApplied[requestScopeKey] = true
+				}
 				preparedDevice.VGpu = &PreparedVGpuDevice{
 					Info:   allocatableDevice.VGpu,
 					Device: device,
@@ -837,17 +836,24 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 	return preparedDevices, nil
 }
 
-func buildAllocationKey(result resourceapi.DeviceRequestAllocationResult, ordinal int) string {
-	device := sanitizeAllocationKeyToken(result.Device)
-	request := sanitizeAllocationKeyToken(result.Request)
-	if result.ShareID != nil && *result.ShareID != "" {
-		shareID := sanitizeAllocationKeyToken(string(*result.ShareID))
-		return fmt.Sprintf("%s-share-%s", device, shareID)
-	}
-	return fmt.Sprintf("%s-req-%s-%d", device, request, ordinal)
+func buildRequestScopeKey(request string) string {
+	return sanitizeScopeToken(request)
 }
 
-func sanitizeAllocationKeyToken(value string) string {
+func buildCDIDeviceID(result resourceapi.DeviceRequestAllocationResult, ordinal int, device *AllocatableDevice) string {
+	if device == nil || device.Type() != VGpuDeviceType {
+		return ""
+	}
+
+	requestScopeKey := buildRequestScopeKey(result.Request)
+	canonicalName := sanitizeScopeToken(device.CanonicalName())
+	if result.ShareID != nil && *result.ShareID != "" {
+		return fmt.Sprintf("%s-%s-share-%s", requestScopeKey, canonicalName, sanitizeScopeToken(string(*result.ShareID)))
+	}
+	return fmt.Sprintf("%s-%s-%d", requestScopeKey, canonicalName, ordinal)
+}
+
+func sanitizeScopeToken(value string) string {
 	if value == "" {
 		return "unknown"
 	}

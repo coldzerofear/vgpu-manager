@@ -131,9 +131,9 @@ func (m *VGPUManager) ensureClaimDirectories(claimUID string) (string, string) {
 	return baseContPath, baseHostPath
 }
 
-func (m *VGPUManager) ensureAllocationDirectories(claimUID, allocationKey string) (string, string) {
-	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID, allocationKey)
-	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID, allocationKey)
+func (m *VGPUManager) ensureRequestScopeDirectories(claimUID, requestScopeKey string) (string, string) {
+	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID, requestScopeKey)
+	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID, requestScopeKey)
 	preparedDirs := []string{
 		baseContPath,
 		filepath.Join(baseContPath, util.Config),
@@ -194,14 +194,10 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	}
 }
 
-func (m *VGPUManager) GetAllocationContainerEdits(claim *resourceapi.ResourceClaim, allocationKey string, result *resourceapi.DeviceRequestAllocationResult, device *AllocatableDevice) *cdiapi.ContainerEdits {
+func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult, device *AllocatableDevice) *cdiapi.ContainerEdits {
 	if result == nil || device == nil || device.Type() != VGpuDeviceType {
 		return nil
 	}
-	if allocationKey == "" {
-		allocationKey = "default"
-	}
-	_, allocationHostPath := m.ensureAllocationDirectories(string(claim.UID), allocationKey)
 
 	computePolicy := m.getComputePolicy(claim)
 	idx := device.VGpu.Index
@@ -247,20 +243,35 @@ func (m *VGPUManager) GetAllocationContainerEdits(claim *resourceapi.ResourceCla
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
 			Env: vGpuEnvs,
+		},
+	}
+}
+
+func (m *VGPUManager) GetRequestMountContainerEdits(claim *resourceapi.ResourceClaim, requestScopeKey string) *cdiapi.ContainerEdits {
+	if claim == nil {
+		return nil
+	}
+	if requestScopeKey == "" {
+		requestScopeKey = "default"
+	}
+	_, requestHostPath := m.ensureRequestScopeDirectories(string(claim.UID), requestScopeKey)
+
+	return &cdiapi.ContainerEdits{
+		ContainerEdits: &cdispec.ContainerEdits{
 			Mounts: []*cdispec.Mount{
 				{
 					ContainerPath: filepath.Join(m.contManagerPath, util.Config),
-					HostPath:      filepath.Join(allocationHostPath, util.Config),
+					HostPath:      filepath.Join(requestHostPath, util.Config),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
 				{
 					ContainerPath: filepath.Join(vgpu.ContVGPULockPath),
-					HostPath:      filepath.Join(allocationHostPath, vgpu.VGPULockDirName),
+					HostPath:      filepath.Join(requestHostPath, vgpu.VGPULockDirName),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
 				{
 					ContainerPath: filepath.Join(vgpu.ContVMemoryNodePath),
-					HostPath:      filepath.Join(allocationHostPath, util.VMemNode),
+					HostPath:      filepath.Join(requestHostPath, util.VMemNode),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
 			},

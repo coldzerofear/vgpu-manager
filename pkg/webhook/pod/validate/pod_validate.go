@@ -15,6 +15,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/common"
+	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	"github.com/docker/go-units"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -36,12 +37,13 @@ import (
 
 const Path = "/pods/validate"
 
-func NewValidateWebhook(client client.Client, options *options.Options) (*admission.Webhook, error) {
+func NewValidateWebhook(client client.Client, options *options.Options, claimReader resourcereader.ClaimRequestReader) (*admission.Webhook, error) {
 	return &admission.Webhook{
 		Handler: &validateHandle{
 			decoder: admission.NewDecoder(client.Scheme()),
 			options: options,
 			client:  client,
+			reader:  claimReader,
 		},
 		RecoverPanic: ptr.To[bool](true),
 	}, nil
@@ -51,6 +53,7 @@ type validateHandle struct {
 	decoder admission.Decoder
 	options *options.Options
 	client  client.Client
+	reader  resourcereader.ClaimRequestReader
 }
 
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) error {
@@ -84,33 +87,42 @@ type containerRef struct {
 }
 
 type resourceInfoMap struct {
-	contResMap map[string]string
-	resReqMap  map[string]sets.Set[string]
+	contClaimReqMap map[string]map[string]sets.Set[string]
 }
 
 func newResourceInfoCache() *resourceInfoMap {
 	return &resourceInfoMap{
-		contResMap: make(map[string]string),
-		resReqMap:  make(map[string]sets.Set[string]),
+		contClaimReqMap: make(map[string]map[string]sets.Set[string]),
 	}
 }
 
 func (m *resourceInfoMap) GetReqSet(contName, claimName string) (sets.Set[string], bool) {
-	if m.contResMap[contName] != claimName {
+	claimReqMap, ok := m.contClaimReqMap[contName]
+	if !ok {
 		return nil, false
 	}
-	set, ok := m.resReqMap[claimName]
+	set, ok := claimReqMap[claimName]
 	return set, ok
 }
 
 func (m *resourceInfoMap) Insert(contName, claimName, request string) {
-	m.contResMap[contName] = claimName
-	set, ok := m.resReqMap[claimName]
+	claimReqMap, ok := m.contClaimReqMap[contName]
+	if !ok {
+		claimReqMap = make(map[string]sets.Set[string])
+		m.contClaimReqMap[contName] = claimReqMap
+	}
+
+	set, ok := claimReqMap[claimName]
 	if !ok {
 		set = sets.New[string]()
 	}
 	set.Insert(request)
-	m.resReqMap[claimName] = set
+	claimReqMap[claimName] = set
+}
+
+type deviceRequestCacheEntry struct {
+	requests []resourceapi.DeviceRequest
+	err      error
 }
 
 func (h *validateHandle) getConvertedContainerClaimsMap(pod *corev1.Pod) *resourceInfoMap {
@@ -173,6 +185,7 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 
 	// key format: "<podClaimName>/<requestName>"
 	usages := map[string]requestUsage{}
+	requestCache := map[string]deviceRequestCacheEntry{}
 	for _, c := range allContainers {
 		// All actual vGPU requests hit by the current container
 		containerVGPURequests := sets.New[string]()
@@ -190,12 +203,13 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 					}
 				}
 			} else {
-				requests, err := h.resolveVGPURequestsFromContainerClaim(ctx, pod, claimRef)
+				requests, err := h.resolveVGPURequestsFromContainerClaim(ctx, pod, claimRef, requestCache)
 				if err != nil {
 					return fmt.Errorf("%s container %q claim %q validation failed: %w", c.Kind, c.Name, claimRef.Name, err)
 				}
 				requestKeys = requests
 			}
+			slices.Sort(requestKeys)
 
 			for _, reqKey := range requestKeys {
 				containerVGPURequests.Insert(reqKey)
@@ -257,13 +271,14 @@ func (h *validateHandle) resolveVGPURequestsFromContainerClaim(
 	ctx context.Context,
 	pod *corev1.Pod,
 	claimRef corev1.ResourceClaim,
+	requestCache map[string]deviceRequestCacheEntry,
 ) ([]string, error) {
 	podClaim, err := findPodResourceClaim(pod, claimRef.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	deviceRequests, err := h.getDeviceRequestsForPodClaim(ctx, pod.Namespace, podClaim)
+	deviceRequests, err := h.getDeviceRequestsForPodClaimCached(ctx, pod.Namespace, podClaim, requestCache)
 	if err != nil {
 		// skip not found resource
 		if apierrors.IsNotFound(err) {
@@ -296,6 +311,21 @@ func (h *validateHandle) resolveVGPURequestsFromContainerClaim(
 	return result, nil
 }
 
+func (h *validateHandle) getDeviceRequestsForPodClaimCached(
+	ctx context.Context,
+	namespace string,
+	podClaim *corev1.PodResourceClaim,
+	requestCache map[string]deviceRequestCacheEntry,
+) ([]resourceapi.DeviceRequest, error) {
+	cacheKey := namespace + "/" + podClaim.Name
+	if cacheEntry, ok := requestCache[cacheKey]; ok {
+		return cacheEntry.requests, cacheEntry.err
+	}
+	requests, err := h.getDeviceRequestsForPodClaim(ctx, namespace, podClaim)
+	requestCache[cacheKey] = deviceRequestCacheEntry{requests: requests, err: err}
+	return requests, err
+}
+
 func findPodResourceClaim(pod *corev1.Pod, podClaimName string) (*corev1.PodResourceClaim, error) {
 	for i := range pod.Spec.ResourceClaims {
 		if pod.Spec.ResourceClaims[i].Name == podClaimName {
@@ -313,6 +343,10 @@ func (h *validateHandle) getDeviceRequestsForPodClaim(
 	namespace string,
 	podClaim *corev1.PodResourceClaim,
 ) ([]resourceapi.DeviceRequest, error) {
+	if h.reader != nil {
+		return h.reader.GetDeviceRequestsForPodClaim(ctx, namespace, podClaim)
+	}
+
 	if podClaim == nil {
 		return nil, fmt.Errorf("podClaim is nil")
 	}
@@ -343,6 +377,13 @@ func (h *validateHandle) getDeviceRequestsForPodClaim(
 		"pod resourceClaim %q must specify one of resourceClaimName or resourceClaimTemplateName",
 		podClaim.Name,
 	)
+}
+
+func (h *validateHandle) mutation(obj client.Object) {
+	if h.reader == nil {
+		return
+	}
+	h.reader.Mutation(obj)
 }
 
 func buildVGPURequestKey(podClaimName, requestName string) string {
@@ -610,6 +651,7 @@ func (h *validateHandle) createCombinedResourceClaim(ctx context.Context, pod *c
 		logger.Error(err, "Failed to create combined vGPU resourceClaim")
 		return err
 	}
+	h.mutation(resourceClaim)
 
 	logger.Info("Successfully created combined vGPU resourceClaim", "resourceClaim", klog.KObj(resourceClaim))
 
@@ -707,6 +749,7 @@ func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *cor
 			logger.Error(err, "Failed to create vGPU resourceClaim", "container", container.Name)
 			return err
 		}
+		h.mutation(resourceClaim)
 		resourceClaimKeys = append(resourceClaimKeys, client.ObjectKeyFromObject(resourceClaim))
 		logger.V(2).Info("Successfully created resourceClaim", "resourceClaim",
 			klog.KObj(resourceClaim), "container", container.Name)
