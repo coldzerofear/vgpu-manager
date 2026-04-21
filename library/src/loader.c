@@ -1015,6 +1015,7 @@ extern int get_vmem_node_enabled(int *enabled);
 extern int file_exist(const char *file_path);
 extern int pid_exist(int pid);
 extern int is_zombie_proc(int pid);
+extern int get_sm_watcher_enabled(int *i);
 
 // vmemory node lock
 extern int device_vmem_write_lock(int ordinal);
@@ -1411,7 +1412,7 @@ void print_global_vgpu_config() {
     LOGGER(VERBOSE, "Container Name   : %s", g_vgpu_config->container_name);
   }
   LOGGER(VERBOSE, "CompatibilityMode: %d", g_vgpu_config->compatibility_mode);
-  LOGGER(VERBOSE, "SM Watcher       : %s", g_vgpu_config->sm_watcher ? "enabled" : "disabled");
+  LOGGER(VERBOSE, "Ext SM Watcher   : %s", g_vgpu_config->sm_watcher ? "enabled" : "disabled");
   LOGGER(VERBOSE, "VMemory Node     : %s", g_vgpu_config->vmem_node ? "enabled" : "disabled");
   int index = 0;
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
@@ -1952,10 +1953,9 @@ int init_g_vgpu_config_by_env() {
   int oversold = 0; // default disable oversold
   size_t real_memory = 0;
   char *gpu_uuids[MAX_DEVICE_COUNT];
-  int vnode_enable = 0;
   int device_count = strsplit(uuids, gpu_uuids, ",");
-  get_vmem_node_enabled(&vnode_enable);
-  g_vgpu_config->vmem_node = vnode_enable;
+  get_vmem_node_enabled(&g_vgpu_config->vmem_node);
+  get_sm_watcher_enabled(&g_vgpu_config->sm_watcher);
   for (i = 0; i < device_count; i++) {
     // skip fake uuid
     if (strcmp(gpu_uuids[i], FAKE_GPU_UUID) == 0) {

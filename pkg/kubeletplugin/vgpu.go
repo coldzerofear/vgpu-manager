@@ -8,6 +8,7 @@ import (
 
 	vgpu2 "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/docker/go-units"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
@@ -157,39 +158,45 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	} else {
 		envMode |= util.CGroupv1Mode
 	}
-	conttainerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
+	envMode |= util.OpenKernelMode
+	containerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
 	vGpuEnvs := []string{
 		fmt.Sprintf("%s=", util.ManagerVisibleDevices),
-		fmt.Sprintf("%s=%s", util.LdPreloadEnv, conttainerDriverFile),
+		fmt.Sprintf("%s=%s", util.LdPreloadEnv, containerDriverFile),
 		fmt.Sprintf("%s=%v", util.ManagerCompatibilityMode, envMode),
 	}
-
+	mounts := []*cdispec.Mount{
+		// TODO mount /etc/vgpu-manager/registry dir
+		{
+			ContainerPath: m.contManagerPath + "/.host_proc",
+			HostPath:      vgpu.HostProcDirectoryPath,
+			Options:       []string{"ro", "nosuid", "nodev", "bind"},
+		},
+		{
+			ContainerPath: containerDriverFile,
+			HostPath:      filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName),
+			Options:       []string{"ro", "nosuid", "nodev", "bind"},
+		},
+		{
+			ContainerPath: filepath.Join(vgpu.ContPreLoadFilePath),
+			HostPath:      filepath.Join(m.hostManagerPath, vgpu.LdPreLoadFileName),
+			Options:       []string{"ro", "nosuid", "nodev", "bind"},
+		},
+	}
+	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
+		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=TRUE", util.ExternalSmWatcherEnabled))
+		mounts = append(mounts, &cdispec.Mount{
+			ContainerPath: filepath.Join(m.contManagerPath, util.Watcher),
+			HostPath:      filepath.Join(m.hostManagerPath, util.Watcher),
+			Options:       []string{"ro", "nosuid", "nodev", "bind"},
+		})
+	} else {
+		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=FALSE", util.ExternalSmWatcherEnabled))
+	}
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			Env: vGpuEnvs,
-			Mounts: []*cdispec.Mount{
-				// TODO mount /etc/vgpu-manager/registry dir
-				{
-					ContainerPath: m.contManagerPath + "/.host_proc",
-					HostPath:      vgpu.HostProcDirectoryPath,
-					Options:       []string{"ro", "nosuid", "nodev", "bind"},
-				},
-				{
-					ContainerPath: filepath.Join(m.contManagerPath, util.Watcher),
-					HostPath:      filepath.Join(m.hostManagerPath, util.Watcher),
-					Options:       []string{"ro", "nosuid", "nodev", "bind"},
-				},
-				{
-					ContainerPath: conttainerDriverFile,
-					HostPath:      filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName),
-					Options:       []string{"ro", "nosuid", "nodev", "bind"},
-				},
-				{
-					ContainerPath: filepath.Join(vgpu.ContPreLoadFilePath),
-					HostPath:      filepath.Join(m.hostManagerPath, vgpu.LdPreLoadFileName),
-					Options:       []string{"ro", "nosuid", "nodev", "bind"},
-				},
-			},
+			Env:    vGpuEnvs,
+			Mounts: mounts,
 		},
 	}
 }

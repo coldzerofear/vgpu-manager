@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -156,6 +157,15 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 
 		driver.wg.Go(func() {
 			driver.deviceHealthEvents(ctx, config.Flags.NodeName)
+		})
+	}
+
+	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
+		driver.wg.Go(func() {
+			klog.V(4).Info("Starting to extended shared SM utilization watcher")
+			filePath := filepath.Join(manager.WatcherDir, manager.SMUtilFile)
+			manager.SMUtilWatcher(ctx, state.nvdevlib.DeviceLib, filePath)
+			klog.V(4).Info("stopping extended shared SM utilization watcher")
 		})
 	}
 

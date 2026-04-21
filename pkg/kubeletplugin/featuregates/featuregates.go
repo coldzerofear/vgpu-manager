@@ -22,6 +22,7 @@ import (
 	"sync"
 	_ "unsafe"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/version"
@@ -51,6 +52,8 @@ const (
 
 	// DynamicMIG Enable dynamic MIG device management.
 	DynamicMIG featuregate.Feature = "DynamicMIG"
+
+	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
 
 	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
 	// storing daemon info directly in ComputeDomainStatus.Nodes.
@@ -109,6 +112,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 	NVMLDeviceHealthCheck: {
 		{
 			Default:    true,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(25, 12),
+		},
+	},
+	SharedSMUtilizationWatcher: {
+		{
+			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(25, 12),
 		},
@@ -201,6 +211,9 @@ func ValidateFeatureGates() error {
 	//if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {
 	//	return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainCliques, IMEXDaemonsWithDNSNames)
 	//}
+	if Enabled(SharedSMUtilizationWatcher) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", SharedSMUtilizationWatcher, VGPUSupport)
+	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, PassthroughSupport)

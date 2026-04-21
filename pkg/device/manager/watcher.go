@@ -11,6 +11,7 @@ import (
 	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
@@ -46,7 +47,11 @@ func (m *DeviceManager) doWatcher() {
 	ctx, cancelFunc := WrapChannelWithContext(m.stop)
 	defer cancelFunc()
 	filePath := filepath.Join(WatcherDir, SMUtilFile)
+	SMUtilWatcher(ctx, m.DeviceLib, filePath)
+	klog.V(3).Infoln("DeviceManager sm watcher stopped")
+}
 
+func SMUtilWatcher(ctx context.Context, deviceLib *nvidia.DeviceLib, filePath string) {
 	wait.UntilWithContext(ctx, func(ctx context.Context) {
 		if err := watcher.PrepareDeviceUtilFile(filePath); err != nil {
 			klog.ErrorS(err, "PrepareDeviceUtilFile failed")
@@ -61,13 +66,13 @@ func (m *DeviceManager) doWatcher() {
 			_ = deviceUtil.Munmap(true)
 		}()
 
-		if err = m.NvmlInit(); err != nil {
+		if err = deviceLib.NvmlInit(); err != nil {
 			klog.ErrorS(err, "nvmlInit failed")
 			return
 		}
-		defer m.NvmlShutdown()
+		defer deviceLib.NvmlShutdown()
 
-		count, ret := m.DeviceGetCount()
+		count, ret := deviceLib.DeviceGetCount()
 		if ret != nvml.SUCCESS {
 			klog.Errorf("error getting device count: %s", ret.Error())
 			return
@@ -84,19 +89,16 @@ func (m *DeviceManager) doWatcher() {
 			wg.Add(1)
 			go func(config watcher.BatchConfig) {
 				defer wg.Done()
-				err := m.smWatcherBatchWithContext(deviceUtil, config, subCtx)
-				if err != nil {
+				if err := smWatcherBatchWithContext(deviceLib, deviceUtil, config, subCtx); err != nil {
 					subCancelFunc()
 				}
 			}(batch)
 		}
 		wg.Wait()
 	}, time.Second)
-
-	klog.V(3).Infoln("DeviceManager sm watcher stopped")
 }
 
-func (m *DeviceManager) smWatcherBatchWithContext(deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig, ctx context.Context) error {
+func smWatcherBatchWithContext(deviceLib *nvidia.DeviceLib, deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig, ctx context.Context) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
 	for {
 		for i := batch.StartIndex; i <= batch.EndIndex; i++ {
@@ -106,12 +108,12 @@ func (m *DeviceManager) smWatcherBatchWithContext(deviceUtil *watcher.DeviceUtil
 			default:
 			}
 
-			dev, ret := m.DeviceGetHandleByIndex(i)
+			dev, ret := deviceLib.DeviceGetHandleByIndex(i)
 			if ret != nvml.SUCCESS {
 				return fmt.Errorf("error getting device handle for index '%v': %v", i, ret)
 			}
-			newDevice, _ := m.NewDevice(dev)
-			if err := m.smWatcherSingleDevice(deviceUtil.GetWrap(), i, newDevice); err != nil {
+			newDevice, _ := deviceLib.NewDevice(dev)
+			if err := smWatcherSingleDevice(deviceUtil.GetWrap(), i, newDevice); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
@@ -120,7 +122,7 @@ func (m *DeviceManager) smWatcherBatchWithContext(deviceUtil *watcher.DeviceUtil
 	}
 }
 
-func (m *DeviceManager) smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, i int, d device.Device) error {
+func smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, i int, d device.Device) error {
 	if enabled, _ := d.IsMigEnabled(); enabled {
 		return nil
 	}

@@ -629,6 +629,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		response.Envs[util.PodUIDEnv] = string(currentPod.UID)
 		response.Envs[util.ContNameEnv] = contClaim.Name
 		response.Envs[util.CudaMemoryRatioEnv] = fmt.Sprintf("%.2f", memoryRatio)
+		response.Envs[util.ExternalSmWatcherEnabled] = "false"
 		sort.Slice(contClaim.DeviceClaims, func(i, j int) bool {
 			return contClaim.DeviceClaims[i].Id < contClaim.DeviceClaims[j].Id
 		})
@@ -669,6 +670,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			})
 		}
 		if enabledSMWatcher {
+			response.Envs[util.ExternalSmWatcherEnabled] = "true"
 			// mount /etc/vgpu-manager/watcher dir
 			response.Mounts = append(response.Mounts, &pluginapi.Mount{
 				ContainerPath: ContWatcherDirectoryPath,
