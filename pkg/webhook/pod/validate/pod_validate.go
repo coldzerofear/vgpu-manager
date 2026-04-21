@@ -357,6 +357,9 @@ func (h *validateHandle) getDeviceRequestsForPodClaim(
 			Namespace: namespace,
 			Name:      *podClaim.ResourceClaimName,
 		}, &rc); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("get ResourceClaim %q failed: %w", *podClaim.ResourceClaimName, err)
 		}
 		return rc.Spec.Devices.Requests, nil
@@ -368,6 +371,9 @@ func (h *validateHandle) getDeviceRequestsForPodClaim(
 			Namespace: namespace,
 			Name:      *podClaim.ResourceClaimTemplateName,
 		}, &tpl); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("get ResourceClaimTemplate %q failed: %w", *podClaim.ResourceClaimTemplateName, err)
 		}
 		return tpl.Spec.Spec.Devices.Requests, nil

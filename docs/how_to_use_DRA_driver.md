@@ -7,14 +7,12 @@ Using DRA requires the independent installation of the DRA driver for the vgpu-m
 ## Prerequisite
 
 * NVIDIA drivers >= 440
-* nvidia-docker version > 2.0
-* default runtime configured as nvidia for containerd/docker/cri-o container runtime
-    - `accept-nvidia-visible-devices-as-volume-mounts` option should be set to `true` for NVIDIA Container Runtime
-* Kubernetes version >= 1.34 wit DRAConsumableCapacity feature enabled
+* [CDI](https://github.com/cncf-tags/container-device-interface?tab=readme-ov-file#how-to-configure-cdi) must be enabled in the underlying container runtime (such as Containerd or CRI-O).
+* Kubernetes version >= 1.34 wit [DRAConsumableCapacity](https://kubernetes.io/blog/2025/09/18/kubernetes-v1-34-dra-consumable-capacity/) feature enabled
 * glibc >= 2.17 & glibc < 2.35
 * kernel version >= 3.10
 
-> Note: DRAConsumableCapacity 作为 Kubernetes 1.34 中的 alpha 功能引入，功能门必须在 kubelet、kube-apiserver、kube-scheduler 和 kube-controller-manager 中启用。
+> Note: DRAConsumableCapacity is introduced as an alpha feature in Kubernetes 1.34, and the feature gates must be enabled in kubelet, kube-apiserver, kube-scheduler, and kube-controller-manager.
 
 ## Install DRA driver
 
@@ -132,7 +130,7 @@ DRAExtendedResource must be enabled simultaneously in these three components
 * kube-scheduler
 * kubelet
 
-After enabling, you can define the extension resource name in `DeviceClass.spec.sextendedResourceName`, for example:
+After enabling, you can define the extension resource name in `DeviceClass.spec.extendedResourceName`, for example:
 
 ```yaml
 apiVersion: resource.k8s.io/v1
@@ -150,9 +148,29 @@ spec:
 Then the Pod can request like a traditional extended resource:
 
 ```yaml
-resources:
-  requests:
-    nvidia.com/gpu: 2
-  limits:
-    nvidia.com/gpu: 2
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-pod
+  namespace: default
+spec:
+  containers:
+    - name: default
+      image: nvidia/cuda:12.4.1-devel-ubuntu20.04
+      command: ["sleep", "9999999"]
+      resources:
+        limits:
+          nvidia.com/gpu: 2 # Request two GPUs
+```
+
+After the pod is created, devices are allocated and started normally. At this time, the pod status will display the mapping relationship between the extended resource name and DRA resource claims
+
+```yaml
+status:
+  extendedResourceClaimStatus:
+    resourceClaimName: gpu-full-pod-extended-resources-x7k9m
+    requestMappings:
+    - containerName: default
+      requestName: container-0-request-0
+      resourceName: nvidia.com/gpu
 ```

@@ -294,7 +294,7 @@ func main() {
 	if opt.DefaultConvertToDRA {
 		// The mutation cache overlays informer snapshots with fresher write-through
 		// updates and live-API fallback results.
-		claimReader = resourcereader.NewClaimRequestReader(client, liveClient, claimIndexer, templateIndexer, time.Minute)
+		claimReader = resourcereader.NewClaimRequestReader(liveClient, claimIndexer, templateIndexer, time.Minute)
 	}
 
 	if err := pkgwebhook.RegisterWebhookToServer(server, client, opt, claimReader); err != nil {

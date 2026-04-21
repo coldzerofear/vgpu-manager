@@ -52,6 +52,13 @@ type mutateHandle struct {
 	reader  resourcereader.ClaimRequestReader
 }
 
+func (h *mutateHandle) getResourceClaim(ctx context.Context, key client.ObjectKey, obj *resourceapi.ResourceClaim) error {
+	if h.reader == nil {
+		return h.client.Get(ctx, key, obj)
+	}
+	return h.reader.GetResourceClaim(ctx, key, obj)
+}
+
 func (h *mutateHandle) mutation(obj client.Object) {
 	if h.reader == nil {
 		return
@@ -411,11 +418,10 @@ func (h *mutateHandle) MutateUpdate(ctx context.Context, pod *corev1.Pod) error 
 func (h *mutateHandle) updateResourceOwner(ctx context.Context, owner metav1.Object, resourceKey types.NamespacedName) error {
 	logger := log.FromContext(ctx).WithValues("ResourceClaim", resourceKey.String())
 	claim := &resourceapi.ResourceClaim{}
-	if err := h.client.Get(ctx, resourceKey, claim); err != nil {
+	if err := h.getResourceClaim(ctx, resourceKey, claim); err != nil {
 		logger.Error(err, "get resourceClaim failed")
 		return client.IgnoreNotFound(err)
 	}
-	h.mutation(claim)
 	if !controllerutil.HasControllerReference(claim) {
 		if err := controllerutil.SetControllerReference(owner, claim, h.client.Scheme()); err != nil {
 			logger.Error(err, "SetControllerReference failed")
