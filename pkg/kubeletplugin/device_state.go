@@ -190,13 +190,23 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	return state, nil
 }
 
+func reservedForPodNumber(claim *resourceapi.ResourceClaim) int {
+	var count = 0
+	for _, reference := range claim.Status.ReservedFor {
+		if reference.APIGroup == "" && reference.Resource == "pods" {
+			count++
+		}
+	}
+	return count
+}
+
 func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceClaim) ([]kubeletplugin.Device, error) {
 	tplock0 := time.Now()
 	s.Lock()
 	defer s.Unlock()
 	klog.V(6).Infof("t_prep_state_lock_acq %.3f s", time.Since(tplock0).Seconds())
 
-	if featuregates.Enabled(featuregates.VGPUSupport) && len(claim.Status.ReservedFor) > 1 {
+	if featuregates.Enabled(featuregates.VGPUSupport) && reservedForPodNumber(claim) > 1 {
 		for _, result := range claim.Status.Allocation.Devices.Results {
 			if result.Driver != util.DRADriverName {
 				continue
@@ -754,7 +764,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 
 			requestScopeKey := ""
 			cdiDeviceID := ""
-			if featuregates.Enabled(featuregates.VGPUSupport) && allocatableDevice.Type() == VGpuDeviceType {
+			if allocatableDevice.Type() == VGpuDeviceType && featuregates.Enabled(featuregates.VGPUSupport) {
 				requestScopeKey = buildRequestScopeKey(result.Request)
 				cdiDeviceID = buildCDIDeviceID(*result, idx, allocatableDevice)
 				if !vgpuClaimCommonEditsApplied {
