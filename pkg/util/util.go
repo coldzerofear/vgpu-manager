@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -364,7 +365,7 @@ func PathIsNotExist(fullPath string) bool {
 }
 
 func GetPodContainerManagerPath(managerBaseDir string, podUID types.UID, containerName string) string {
-	return fmt.Sprintf("%s/%s_%s", managerBaseDir, string(podUID), containerName)
+	return filepath.Join(managerBaseDir, fmt.Sprintf("%s_%s", string(podUID), containerName))
 }
 
 // MakeDeviceID generates compact binary encoded device IDs.

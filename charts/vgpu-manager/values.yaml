@@ -30,7 +30,15 @@ scheduler:
   # Name of deployed scheduler (default: vgpu-scheduler)
   schedulerName: "vgpu-scheduler"
   nodeSelector: {}
-  tolerations: []
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: CriticalAddonsOnly
+      operator: Exists
   terminationGracePeriodSeconds: 30
   kubeScheduler:
     image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler
@@ -120,6 +128,9 @@ devicePlugin:
       operator: Exists
     - effect: NoSchedule
       operator: Exists
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
   # Define container security context
   securityContext:
     # If the container encounters the following errors, try using privileged mode
@@ -290,7 +301,15 @@ webhook:
   terminationGracePeriodSeconds: 10
   # Node labels to be deployed
   nodeSelector: {}
-  tolerations: []
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: CriticalAddonsOnly
+      operator: Exists
   # Webhook will not be effective for resources under these namespaces.
   excludeNamespaces:
     - kube-system

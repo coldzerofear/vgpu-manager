@@ -449,10 +449,10 @@ const (
 
 var (
 	HostManagerDirectoryPath = os.Getenv("HOST_MANAGER_DIR")
-	HostPreLoadFilePath      = HostManagerDirectoryPath + "/" + LdPreLoadFileName
-	HostVGPUControlFilePath  = HostManagerDirectoryPath + "/" + VGPUControlFileName
-	HostWatcherDirectoryPath = HostManagerDirectoryPath + "/" + util.Watcher
-	HostDeviceRegistryPath   = HostManagerDirectoryPath + "/" + util.Registry
+	HostPreLoadFilePath      = filepath.Join(HostManagerDirectoryPath, LdPreLoadFileName)
+	HostVGPUControlFilePath  = filepath.Join(HostManagerDirectoryPath, VGPUControlFileName)
+	HostWatcherDirectoryPath = filepath.Join(HostManagerDirectoryPath, util.Watcher)
+	HostDeviceRegistryPath   = filepath.Join(HostManagerDirectoryPath, util.Registry)
 )
 
 var deviceMountOptional = map[string]bool{
