@@ -263,8 +263,6 @@ typedef enum VGPU_COMPATIBILITY_MODE_enum {
   CLIENT_COMPATIBILITY_MODE      = 200
 } VGPU_COMPATIBILITY_MODE;
 
-extern void* _dl_sym(void*, const char*, void*);
-
 typedef void (*atomic_fn_ptr)(int, void *);
 
 typedef void* (*fp_dlsym)(void*, const char*);

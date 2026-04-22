@@ -1065,16 +1065,24 @@ void init_real_dlsym() {
     for (int i = 0; glibc_versions[i] != NULL; i++) {
       real_dlsym = dlvsym(RTLD_NEXT, "dlsym", glibc_versions[i]);
       if (real_dlsym) {
-        LOGGER(VERBOSE, "found dlsym with version: %s", glibc_versions[i]);
+        LOGGER(INFO, "find the dlsym version: %s", glibc_versions[i]);
         break;
       }
     }
     if (unlikely(!real_dlsym)) {
-      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+      void *libc_handle = dlopen("libc.so.6", RTLD_LAZY);
+      if (libc_handle) {
+        real_dlsym = dlsym(libc_handle, "dlsym");
+      }
+      if (unlikely(!real_dlsym)) {
+        real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+      }
       if (!real_dlsym) {
-        LOGGER(FATAL, "real dlsym not found");
+        LOGGER(FATAL, "unable to find the real dlsym");
       }
     }
+  }
+  if (lib_control == NULL) {
     lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
   }
 }
