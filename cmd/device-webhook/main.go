@@ -297,7 +297,7 @@ func main() {
 		claimReader = resourcereader.NewClaimRequestReader(liveClient, claimIndexer, templateIndexer, time.Minute)
 	}
 
-	if err := pkgwebhook.RegisterWebhookToServer(server, client, opt, claimReader); err != nil {
+	if err := pkgwebhook.RegisterWebhookToServer(server, cacheGate, client, opt, claimReader); err != nil {
 		klog.Fatalf("Register webhook to server failed: %v", err)
 	}
 

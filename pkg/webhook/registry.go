@@ -8,37 +8,57 @@ import (
 	podmutate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/mutate"
 	podvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/validate"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
+	"k8s.io/controller-manager/pkg/healthz"
 	"k8s.io/klog/v2"
 	rtclient "sigs.k8s.io/controller-runtime/pkg/client"
+
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-type newWebhookFunc func(rtclient.Client, *options.Options, resourcereader.ClaimRequestReader) (*admission.Webhook, error)
+type NewWebhookFunc func(rtclient.Client, *options.Options, resourcereader.ClaimRequestReader) (*admission.Webhook, error)
 
 var (
-	once           sync.Once
-	webhookFuncMap map[string]newWebhookFunc
+	registerOnce      sync.Once
+	registerErr       error
+	newWebhookFuncMap map[string]NewWebhookFunc
 )
 
 func init() {
-	webhookFuncMap = make(map[string]newWebhookFunc)
-	webhookFuncMap[podmutate.Path] = podmutate.NewMutateWebhook
-	webhookFuncMap[podvalidate.Path] = podvalidate.NewValidateWebhook
+	newWebhookFuncMap = make(map[string]NewWebhookFunc)
+	newWebhookFuncMap[podmutate.Path] = podmutate.NewMutateWebhook
+	newWebhookFuncMap[podvalidate.Path] = podvalidate.NewValidateWebhook
 }
 
-func RegisterWebhookToServer(server webhook.Server, client rtclient.Client, opt *options.Options, claimReader resourcereader.ClaimRequestReader) (err error) {
-	once.Do(func() {
-		var hook http.Handler
-		for path, webhookFunc := range webhookFuncMap {
-			hook, err = webhookFunc(client, opt, claimReader)
-			if err != nil {
-				klog.ErrorS(err, "unable to create webhook", "path", path)
+func healthCheckMiddleware(healthChecker healthz.UnnamedHealthChecker, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := healthChecker.Check(r); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func RegisterWebhookToServer(
+	server webhook.Server, checker healthz.UnnamedHealthChecker,
+	client rtclient.Client, opt *options.Options,
+	claimReader resourcereader.ClaimRequestReader,
+) error {
+	registerOnce.Do(func() {
+		var webhookHandler http.Handler
+		for path, newWebhookFunc := range newWebhookFuncMap {
+			webhookHandler, registerErr = newWebhookFunc(client, opt, claimReader)
+			if registerErr != nil {
+				klog.ErrorS(registerErr, "unable to create webhook", "path", path)
 				return
 			}
+			if checker != nil {
+				webhookHandler = healthCheckMiddleware(checker, webhookHandler)
+			}
 			klog.V(4).InfoS("Register webhook to server", "path", path)
-			server.Register(path, hook)
+			server.Register(path, webhookHandler)
 		}
 	})
-	return err
+	return registerErr
 }
