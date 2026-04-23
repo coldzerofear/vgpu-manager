@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
@@ -149,64 +150,8 @@ func (rw *resourceClaimWebhook) isVGPUSubRequest(ctx context.Context, req resour
 	return common.SubRequestLooksLikeVGPU(ctx, rw.reader, req, rw.options.VGPUDeviceClassName)
 }
 
-type allocatedResultMeta struct {
-	MainRequest string
-	IsVGPU      bool
-}
-
-// buildAllocatedResultIndex：按 allocation result 的 Request 建索引。
-// key:
-// - Exactly: "mainReq"
-// - FirstAvailable: "mainReq/subReq"
-func (rw *resourceClaimWebhook) buildAllocatedResultIndex(ctx context.Context, claim *resourceapi.ResourceClaim) map[string]allocatedResultMeta {
-	index := map[string]allocatedResultMeta{}
-
-	for _, req := range claim.Spec.Devices.Requests {
-		if req.Exactly != nil {
-			index[req.Name] = allocatedResultMeta{
-				MainRequest: req.Name,
-				IsVGPU:      rw.isVGPUDeviceRequest(ctx, req),
-			}
-			continue
-		}
-
-		for _, subReq := range req.FirstAvailable {
-			index[req.Name+"/"+subReq.Name] = allocatedResultMeta{
-				MainRequest: req.Name,
-				IsVGPU:      rw.isVGPUSubRequest(ctx, subReq),
-			}
-		}
-	}
-
-	return index
-}
-
-// getAllocatedVGPURequests：把“当前 claim 实际已分配为 vgpu 的 mainRequest”集合归并出来。
-// 注意：
-// - 一个 mainRequest 允许对应多条 result
-// - 这里归并到 mainRequest 粒度，不按 result 数量报错
 func (rw *resourceClaimWebhook) getAllocatedVGPURequests(ctx context.Context, claim *resourceapi.ResourceClaim) sets.Set[string] {
-	result := sets.New[string]()
-
-	if claim == nil || claim.Status.Allocation == nil {
-		return result
-	}
-
-	index := rw.buildAllocatedResultIndex(ctx, claim)
-	for _, allocResult := range claim.Status.Allocation.Devices.Results {
-		if allocResult.Driver != util.DRADriverName {
-			continue
-		}
-		meta, ok := index[allocResult.Request]
-		if !ok {
-			continue
-		}
-		if meta.IsVGPU {
-			result.Insert(meta.MainRequest)
-		}
-	}
-
-	return result
+	return claimresolve.GetAllocatedVGPURequests(ctx, claim, util.DRADriverName, rw.isVGPUDeviceRequest, rw.isVGPUSubRequest)
 }
 
 type actualRequestUsage struct {
@@ -215,106 +160,12 @@ type actualRequestUsage struct {
 	AppContainers  sets.Set[string] // "<ns>/<pod>/<container>"
 }
 
-func (rw *resourceClaimWebhook) getReservedPods(
-	ctx context.Context,
-	claim *resourceapi.ResourceClaim,
-) ([]*corev1.Pod, error) {
-	var result []*corev1.Pod
-
-	for _, ref := range claim.Status.ReservedFor {
-		if ref.APIGroup != "" || ref.Resource != "pods" {
-			continue
-		}
-
-		var pod corev1.Pod
-		err := rw.reader.GetPod(ctx, client.ObjectKey{
-			Namespace: claim.Namespace,
-			Name:      ref.Name,
-		}, &pod)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			return nil, err
-		}
-
-		if ref.UID != "" && pod.UID != ref.UID {
-			continue
-		}
-
-		result = append(result, &pod)
-	}
-
-	return result, nil
-}
-
 // resolveActualAllocatedRequestsForClaimRef：把一个容器对某个 claimRef 的引用，
 // 展开成“当前这个实际 claim 已分配出来的 vgpu mainRequest”。
 //
 // 规则：
 // - claimRef.Request != "": 如果该 mainRequest 实际已落成 vgpu，则只返回它
 // - claimRef.Request == "": 返回该 claim 当前已分配出来的全部 vgpu mainRequest
-func resolveActualAllocatedRequestsForClaimRef(
-	claimRef corev1.ResourceClaim,
-	allocatedVGPUReqs sets.Set[string],
-) []string {
-	if allocatedVGPUReqs.Len() == 0 {
-		return nil
-	}
-
-	if claimRef.Request != "" {
-		if allocatedVGPUReqs.Has(claimRef.Request) {
-			return []string{claimRef.Request}
-		}
-		return nil
-	}
-
-	result := sets.List(allocatedVGPUReqs)
-	slices.Sort(result)
-	return result
-}
-
-// resolveActualClaimNameForPodClaim：把 pod 内的 claim alias 解析成实际 ResourceClaim 名。
-// 支持：
-// - spec.resourceClaims[].resourceClaimName
-// - spec.resourceClaims[].resourceClaimTemplateName + status.resourceClaimStatuses
-func (rw *resourceClaimWebhook) resolveActualClaimNameForPodClaim(
-	ctx context.Context,
-	pod *corev1.Pod,
-	podClaimName string,
-) (string, bool, error) {
-
-	podClaim, err := common.FindPodResourceClaim(pod, podClaimName)
-	if err != nil {
-		return "", false, err
-	}
-
-	if podClaim.ResourceClaimName != nil && *podClaim.ResourceClaimName != "" {
-		return *podClaim.ResourceClaimName, true, nil
-	}
-
-	if podClaim.ResourceClaimTemplateName != nil && *podClaim.ResourceClaimTemplateName != "" {
-		status := getPodResourceClaimStatus(pod, podClaimName)
-		if status == nil || status.ResourceClaimName == nil || *status.ResourceClaimName == "" {
-			return "", false, nil
-		}
-		return *status.ResourceClaimName, true, nil
-	}
-	return "", false, fmt.Errorf(
-		"pod %s/%s resourceClaim %q must specify one of resourceClaimName or resourceClaimTemplateName",
-		pod.Namespace, pod.Name, podClaimName,
-	)
-}
-
-func getPodResourceClaimStatus(pod *corev1.Pod, podClaimName string) *corev1.PodResourceClaimStatus {
-	for i := range pod.Status.ResourceClaimStatuses {
-		if pod.Status.ResourceClaimStatuses[i].Name == podClaimName {
-			return &pod.Status.ResourceClaimStatuses[i]
-		}
-	}
-	return nil
-}
-
 // validateOneReservedPodAgainstAllocatedClaim：
 // 对当前 claim 的一个 reserved pod 做最终裁决。
 //
@@ -341,7 +192,7 @@ func (rw *resourceClaimWebhook) validateOneReservedPodAgainstAllocatedClaim(
 		containerCurrentClaimReqs := sets.New[string]()
 
 		for _, claimRef := range c.Claims {
-			actualClaimName, ok, err := rw.resolveActualClaimNameForPodClaim(ctx, pod, claimRef.Name)
+			actualClaimName, ok, err := claimresolve.ResolveActualClaimNameForPodClaim(pod, claimRef.Name)
 			if err != nil {
 				return fmt.Errorf("resolve actual claim for pod %s/%s claimRef %q failed: %w",
 					pod.Namespace, pod.Name, claimRef.Name, err)
@@ -364,7 +215,7 @@ func (rw *resourceClaimWebhook) validateOneReservedPodAgainstAllocatedClaim(
 			}
 
 			// 这个 container 最终命中了哪个 claim 的 vGPU
-			actualHitReqs := resolveActualAllocatedRequestsForClaimRef(claimRef, actualAllocatedVGPUReqs)
+			actualHitReqs := claimresolve.ResolveActualAllocatedRequestsForClaimRef(claimRef, actualAllocatedVGPUReqs)
 			if len(actualHitReqs) > 0 {
 				containerActualVGPUClaims.Insert(string(actualClaim.UID))
 			}
@@ -477,7 +328,7 @@ func (rw *resourceClaimWebhook) validateAllocatedVGPUSharing(
 		return nil
 	}
 
-	reservedPods, err := rw.getReservedPods(ctx, claim)
+	reservedPods, err := claimresolve.GetReservedPods(ctx, rw.reader, claim)
 	if err != nil {
 		return err
 	}
@@ -504,7 +355,7 @@ func (rw *resourceClaimWebhook) isVGPUDeviceResult(
 	if result.Driver != util.DRADriverName {
 		return false
 	}
-	index := rw.buildAllocatedResultIndex(ctx, claim)
+	index := claimresolve.BuildAllocatedResultIndex(ctx, claim, rw.isVGPUDeviceRequest, rw.isVGPUSubRequest)
 	meta, ok := index[result.Request]
 	return ok && meta.IsVGPU
 }

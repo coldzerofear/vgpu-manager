@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -20,6 +21,31 @@ import (
 
 func TestBuildRequestScopeKey_Sanitize(t *testing.T) {
 	assert.Equal(t, "req-name", buildRequestScopeKey("req@name"))
+}
+
+func TestResolveMainRequestName(t *testing.T) {
+	claim := &resourceapi.ResourceClaim{
+		Spec: resourceapi.ResourceClaimSpec{
+			Devices: resourceapi.DeviceClaim{Requests: []resourceapi.DeviceRequest{
+				{Name: "exact", Exactly: &resourceapi.ExactDeviceRequest{}},
+				{Name: "fa", FirstAvailable: []resourceapi.DeviceSubRequest{{Name: "sub-a"}, {Name: "sub-b"}}},
+			}},
+		},
+	}
+
+	assert.Equal(t, "exact", resolveMainRequestName(claim, "exact"))
+	assert.Equal(t, "fa", resolveMainRequestName(claim, "fa/sub-a"))
+	assert.Equal(t, "", resolveMainRequestName(claim, "missing"))
+}
+
+func TestResolveVGPUResultPartitionKey_FallbackToRequest(t *testing.T) {
+	info := &claimresolve.PartitionInfo{
+		RequestToPartition: map[string]string{"req-a": "pod-123-app"},
+	}
+
+	assert.Equal(t, "pod-123-app", resolveVGPUResultPartitionKey("req-a", info))
+	assert.Equal(t, "req-b", resolveVGPUResultPartitionKey("req-b", info))
+	assert.Equal(t, "req-c", resolveVGPUResultPartitionKey("req@c", nil))
 }
 
 func TestGetClaimDeviceName_UsesRequestScopeForVGPU(t *testing.T) {
@@ -66,7 +92,7 @@ func TestVGPURequestMountEdits_AreRequestScopedForMounts(t *testing.T) {
 	manager := &VGPUManager{hostManagerPath: hostRoot, contManagerPath: contRoot}
 
 	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: types.UID("claim-a")}}
-	requestKey := "single-vgpu"
+	partitionKey := "single-vgpu"
 	result := &resourceapi.DeviceRequestAllocationResult{
 		ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{
 			CoresResourceName:  *resource.NewQuantity(50, resource.DecimalSI),
@@ -82,11 +108,11 @@ func TestVGPURequestMountEdits_AreRequestScopedForMounts(t *testing.T) {
 	}}}}
 
 	edits := manager.GetAllocationEnvContainerEdits(claim, result, device)
-	edits = edits.Append(manager.GetRequestMountContainerEdits(claim, requestKey))
+	edits = edits.Append(manager.GetPartitionMountContainerEdits(claim, partitionKey))
 	require.NotNil(t, edits)
 	require.NotNil(t, edits.ContainerEdits)
 
-	hostBase := filepath.Join(hostRoot, util.Claims, "claim-a", requestKey)
+	hostBase := filepath.Join(hostRoot, util.Claims, "claim-a", partitionKey)
 
 	hostPaths := make([]string, 0, len(edits.ContainerEdits.Mounts))
 	for _, m := range edits.ContainerEdits.Mounts {

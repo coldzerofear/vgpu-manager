@@ -97,13 +97,13 @@
 
 ## 4. 总体方案
 
-核心思想：将“可注入单元”从 **Claim 粒度**下沉到 **allocation result 粒度**，同时将“挂载目录作用域”收敛为 **request 粒度**。
+核心思想：将“可注入单元”从 **Claim 粒度**下沉到 **allocation result 粒度**，同时将“挂载目录作用域”收敛为 **partition 粒度**。
 
 - 以 `result`（request + device + share）为基本注入对象。
 - 对每个 result 生成唯一 `cdiDeviceID`（用于 CDI 唯一命名）。
 - vGPU 容器 edits 拆分为：
   - 设备级 env（allocation/result 级）
-  - request 级目录挂载（同 request 多设备共用）
+  - partition 级目录挂载（同一消费者分区内共用）
 
 
 ## 5. 关键设计点
@@ -159,17 +159,18 @@
 - 核心算力限制（`cores`）
 - 显存限制（`memory`）
 
-#### request 级目录挂载
+#### partition 级目录挂载
 
-针对固定容器路径的挂载（`config`、`vgpu_lock`、`vmem_node`），按 request 分组：
+针对固定容器路径的挂载（`config`、`vgpu_lock`、`vmem_node`），按消费者分区分组：
 
-- 目录路径：`claims/<claimUID>/<request>/...`
-- 同 request 下多个设备/result 共用同一目录
-- 不同 request 隔离目录
+- 目录路径：`claims/<claimUID>/<partitionKey>/...`
+- 同一 partition 下多个设备/result 共用同一目录
+- 不同 partition 隔离目录
 
 说明：
 
-- 该策略依赖 webhook 保障“单容器最多一个 vGPU request”。
+- `partitionKey` 由 `claim.Status.ReservedFor` 关联 Pod 中“容器 <-> 实际命中 request”二部图的连通分量推导得到。
+- 当无法可靠推导消费者分区时，回退到按 `request` 分组。
 - 目录维护以容器侧映射路径为准，不额外维护冗余 host 目录树。
 
 ### 5.5 作用域隔离（保证不影响其他设备）
@@ -204,14 +205,16 @@
 3. `pkg/kubeletplugin/cdi.go`
    - 支持 device-level 叠加 edits
 
-### 阶段 B.5（Step 2.5）：目录作用域收敛（待对齐）
+### 阶段 B.5（Step 2.5）：目录作用域收敛（进行中）
 
-目标：从“按 allocation 挂载目录”收敛为“按 request 挂载目录”。
+目标：从“按 allocation 挂载目录”收敛为“按 partition 挂载目录”，异常时回退到 request。
 
 1. `pkg/kubeletplugin/vgpu.go`
-   - 将 `config` / `vgpu_lock` / `vmem_node` 的挂载键从 `allocationKey` 改为 `request`
+   - 将 `config` / `vgpu_lock` / `vmem_node` 的挂载键从 `allocationKey` 改为 `partitionKey`
 2. `pkg/kubeletplugin/device_state.go`
-   - 绑定 request 作用域的目录编辑
+   - 基于 `ReservedFor` 解析 vGPU 消费者分区，并绑定 partition 作用域的目录编辑
+3. `pkg/claimresolve`
+   - 统一复用 webhook / kubeletplugin 的 vGPU 实际消费者解析与连通分量分区逻辑
 
 ### 阶段 C（Step 3）：测试与回归（进行中）
 
@@ -219,8 +222,8 @@
 
 1. cdiDeviceID 唯一性与稳定性
 2. 同设备多 shareID 的 CDI 设备名唯一
-3. request 级目录挂载路径正确
-4. 同 request 多设备共用目录、不同 request 隔离
+3. partition 级目录挂载路径正确
+4. 同 partition 多设备共用目录、不同 partition 隔离
 5. 非 vgpu 设备回归
 
 建议新增的最小单测断言：
@@ -228,7 +231,7 @@
 1. `buildCDIDeviceID` 在有 `ShareID` 与无 `ShareID` 时都可稳定生成唯一键（含字符归一化）。
 2. `GetClaimDeviceName` 在传入 `cdiDeviceID` 时使用 result 级命名，未传入时回退 canonical 设备名。
 3. 同一 request + 同一设备不同 `shareID` 对应的 `cdiDeviceID` 可生成不同 CDI 名称。
-4. request 级挂载路径命中 `claims/<claimUID>/<request>/...`。
+4. partition 级挂载路径命中 `claims/<claimUID>/<partitionKey>/...`，分区解析失败时回退到 `claims/<claimUID>/<request>/...`。
 5. `GetAllocationEnvContainerEdits` 的 env 内容与 `ConsumedCapacity` 一致（cores/memory/visible）。
 6. Unprepare 后 claim 目录与 CDI 临时文件可正常清理。
 
@@ -257,10 +260,10 @@
 
 ### 风险 2：固定容器路径重复 mount 导致冲突
 
-- 影响：同容器多设备时，若仍按设备/share 级挂载，可能触发重复 destination mount 行为不确定。
+- 影响：若仍按 request 挂载，在“单容器多 request”或“共享 request 将多个容器连通”场景下会出现目录分组不准确。
 - 缓解：
-  - 将固定路径挂载收敛到 request 级作用域。
-  - 依赖 webhook 保证单容器最多命中一个 vGPU request。
+  - 将固定路径挂载收敛到消费者分区作用域。
+  - 分区解析失败时回退到 request 级作用域。
 
 ### 风险 3：Unprepare 清理不完整
 
@@ -285,7 +288,7 @@
 1. 每个容器仅收到其 request 对应 CDI Device
 2. 环境变量中的 cores/memory/visible 不串扰
 3. 同 device 不同 share 的 CDI 名称唯一
-4. request 级目录挂载无冲突
+4. partition 级目录挂载无冲突
 5. Unprepare 后目录与 CDI 临时文件正常清理
 
 
@@ -295,7 +298,7 @@
 
 1. Step 1（cdiDeviceID + CDI 命名）建立正确映射基础；
 2. Step 2（edits 拆分）解决配置串扰；
-3. Step 2.5（目录作用域收敛到 request）解决固定路径挂载冲突；
+3. Step 2.5（目录作用域收敛到 partition）解决固定路径挂载冲突，并保留 request fallback；
 4. Step 3 做回归收口。
 
 该方案的优点是：

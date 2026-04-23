@@ -132,9 +132,9 @@ func (m *VGPUManager) ensureClaimDirectories(claimUID string) (string, string) {
 	return baseContPath, baseHostPath
 }
 
-func (m *VGPUManager) ensureRequestScopeDirectories(claimUID, requestScopeKey string) (string, string) {
-	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID, requestScopeKey)
-	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID, requestScopeKey)
+func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) (string, string) {
+	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID, partitionKey)
+	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID, partitionKey)
 	preparedDirs := []string{
 		baseContPath,
 		filepath.Join(baseContPath, util.Config),
@@ -254,31 +254,31 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	}
 }
 
-func (m *VGPUManager) GetRequestMountContainerEdits(claim *resourceapi.ResourceClaim, requestScopeKey string) *cdiapi.ContainerEdits {
+func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.ResourceClaim, partitionKey string) *cdiapi.ContainerEdits {
 	if claim == nil {
 		return nil
 	}
-	if requestScopeKey == "" {
-		requestScopeKey = "default"
+	if partitionKey == "" {
+		partitionKey = "default"
 	}
-	_, requestHostPath := m.ensureRequestScopeDirectories(string(claim.UID), requestScopeKey)
+	_, partitionHostPath := m.ensurePartitionDirectories(string(claim.UID), partitionKey)
 
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
 			Mounts: []*cdispec.Mount{
 				{
 					ContainerPath: filepath.Join(m.contManagerPath, util.Config),
-					HostPath:      filepath.Join(requestHostPath, util.Config),
+					HostPath:      filepath.Join(partitionHostPath, util.Config),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
 				{
 					ContainerPath: filepath.Join(vgpu.ContVGPULockPath),
-					HostPath:      filepath.Join(requestHostPath, vgpu.VGPULockDirName),
+					HostPath:      filepath.Join(partitionHostPath, vgpu.VGPULockDirName),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
 				{
 					ContainerPath: filepath.Join(vgpu.ContVMemoryNodePath),
-					HostPath:      filepath.Join(requestHostPath, util.VMemNode),
+					HostPath:      filepath.Join(partitionHostPath, util.VMemNode),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
 			},
