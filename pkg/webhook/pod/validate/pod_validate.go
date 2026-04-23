@@ -14,7 +14,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/common"
+	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	"github.com/docker/go-units"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -37,13 +37,13 @@ import (
 
 const Path = "/pods/validate"
 
-func NewValidateWebhook(client client.Client, options *options.Options, claimReader resourcereader.ClaimRequestReader) (*admission.Webhook, error) {
+func NewValidateWebhook(client client.Client, options *options.Options, reader resourcereader.ResourceAPIReader) (http.Handler, error) {
 	return &admission.Webhook{
 		Handler: &validateHandle{
 			decoder: admission.NewDecoder(client.Scheme()),
 			options: options,
 			client:  client,
-			reader:  claimReader,
+			reader:  reader,
 		},
 		RecoverPanic: ptr.To[bool](true),
 	}, nil
@@ -53,7 +53,7 @@ type validateHandle struct {
 	decoder admission.Decoder
 	options *options.Options
 	client  client.Client
-	reader  resourcereader.ClaimRequestReader
+	reader  resourcereader.ResourceAPIReader
 }
 
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) error {
@@ -68,22 +68,63 @@ func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) er
 	return nil
 }
 
-type containerKind string
+// buildPodRequestIndex 按“主 request”建立 Pod 阶段可判定索引:
+// - Exactly: 直接判断是否 definite vgpu
+// - FirstAvailable:
+//   - 全是 vgpu -> definite vgpu
+//   - 全不是 vgpu -> non-vgpu
+//   - 混合 -> mixed-maybe-vgpu，Pod 阶段不做最终冲突判断
+func (h *validateHandle) buildPodRequestIndex(ctx context.Context, requests []resourceapi.DeviceRequest) map[string]podRequestMeta {
+	index := make(map[string]podRequestMeta, len(requests))
 
-const (
-	containerKindInit containerKind = "initContainer"
-	containerKindApp  containerKind = "container"
-)
+	for _, req := range requests {
+		switch {
+		case req.Exactly != nil:
+			class := common.MainRequestNonVGPU
+			if h.isVGPUDeviceRequest(ctx, req) {
+				class = common.MainRequestDefVGPU
+			}
+			index[req.Name] = podRequestMeta{
+				MainRequest: req.Name,
+				Class:       class,
+			}
+
+		case len(req.FirstAvailable) > 0:
+			vgpuCount := 0
+			for _, subReq := range req.FirstAvailable {
+				if h.isVGPUSubRequest(ctx, subReq) {
+					vgpuCount++
+				}
+			}
+
+			class := common.MainRequestNonVGPU
+			switch {
+			case vgpuCount == 0:
+				class = common.MainRequestNonVGPU
+			case vgpuCount == len(req.FirstAvailable):
+				class = common.MainRequestDefVGPU
+			default:
+				class = common.MainRequestMixedMaybe
+			}
+
+			index[req.Name] = podRequestMeta{
+				MainRequest: req.Name,
+				Class:       class,
+			}
+		}
+	}
+
+	return index
+}
 
 type requestUsage struct {
 	InitContainers sets.Set[string]
 	AppContainers  sets.Set[string]
 }
 
-type containerRef struct {
-	Name   string
-	Claims []corev1.ResourceClaim
-	Kind   containerKind
+type podRequestMeta struct {
+	MainRequest string
+	Class       common.MainRequestClass
 }
 
 type resourceInfoMap struct {
@@ -159,41 +200,35 @@ func (h *validateHandle) getConvertedContainerClaimsMap(pod *corev1.Pod) *resour
 	return cache
 }
 
+// checkResourceClaimRequests：Pod 阶段校验规则
+// 1. 一个容器最多只能命中 1 个 definite-vgpu claim
+// 2. 一个容器可以命中同一个 claim 下多个 definite-vgpu request
+// 3. init-init 不允许同 mainRequest 重叠
+// 4. app-app 不允许同 mainRequest 重叠
+// 5. init-app 允许同 mainRequest 重叠
+// 6. mixed FirstAvailable 先不判，留给 claim webhook
 func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *corev1.Pod) error {
 	// fast return
 	if !util.HasDRARequests(pod) {
 		return nil
 	}
 
-	var allContainers []containerRef
+	allContainers := common.GetAllPodContainers(pod)
 	claimsMap := h.getConvertedContainerClaimsMap(pod)
 
-	for _, c := range pod.Spec.InitContainers {
-		allContainers = append(allContainers, containerRef{
-			Name:   c.Name,
-			Claims: c.Resources.Claims,
-			Kind:   containerKindInit,
-		})
-	}
-	for _, c := range pod.Spec.Containers {
-		allContainers = append(allContainers, containerRef{
-			Name:   c.Name,
-			Claims: c.Resources.Claims,
-			Kind:   containerKindApp,
-		})
-	}
-
-	// key format: "<podClaimName>/<requestName>"
+	// key format: "<podClaimName>/<mainRequest>"
 	usages := map[string]requestUsage{}
 	requestCache := map[string]deviceRequestCacheEntry{}
+
 	for _, c := range allContainers {
-		// All actual vGPU requests hit by the current container
-		containerVGPURequests := sets.New[string]()
+		containerVGPUClaims := sets.New[string]()
+		containerResolvedReqKeys := sets.New[string]()
 
 		for _, claimRef := range c.Claims {
 			var requestKeys []string
+
 			// Special processing should be applied to the resource Claims requests converted from webhooks, as these resources have not yet been created at this time.
-			// Without the need to determine the type of vgpu, simply collect requestKeys.
+			// No need to determine the type of vGPU (it must be vGPU), just collect requestKeys.
 			if requestSet, ok := claimsMap.GetReqSet(c.Name, claimRef.Name); ok {
 				if claimRef.Request != "" {
 					requestKeys = []string{buildVGPURequestKey(claimRef.Name, claimRef.Request)}
@@ -202,78 +237,81 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 						requestKeys = append(requestKeys, buildVGPURequestKey(claimRef.Name, request))
 					}
 				}
+				slices.Sort(requestKeys)
 			} else {
-				requests, err := h.resolveVGPURequestsFromContainerClaim(ctx, pod, claimRef, requestCache)
+				var err error
+				requestKeys, err = h.resolveDefiniteVGPURequestsFromContainerClaim(ctx, pod, claimRef, requestCache)
 				if err != nil {
-					return fmt.Errorf("%s container %q claim %q validation failed: %w", c.Kind, c.Name, claimRef.Name, err)
+					return fmt.Errorf("%s %q claim %q validation failed: %w", c.Kind, c.Name, claimRef.Name, err)
 				}
-				requestKeys = requests
 			}
-			slices.Sort(requestKeys)
 
+			if len(requestKeys) > 0 {
+				containerVGPUClaims.Insert(claimRef.Name)
+			}
 			for _, reqKey := range requestKeys {
-				containerVGPURequests.Insert(reqKey)
-
-				usage := usages[reqKey]
-				if usage.InitContainers == nil {
-					usage.InitContainers = sets.New[string]()
-				}
-				if usage.AppContainers == nil {
-					usage.AppContainers = sets.New[string]()
-				}
-
-				switch c.Kind {
-				case containerKindInit:
-					usage.InitContainers.Insert(c.Name)
-					// init-init Do not allow sharing
-					if usage.InitContainers.Len() > 1 {
-						return fmt.Errorf(
-							"vgpu request %q is referenced by multiple %s %v; sharing is only allowed between init and app containers",
-							reqKey, c.Kind, sets.List(usage.InitContainers),
-						)
-					}
-				case containerKindApp:
-					usage.AppContainers.Insert(c.Name)
-					// app-app Do not allow sharing
-					if usage.AppContainers.Len() > 1 {
-						return fmt.Errorf(
-							"vgpu request %q is referenced by multiple %s %v; sharing is only allowed between init and app containers",
-							reqKey, c.Kind, sets.List(usage.AppContainers),
-						)
-					}
-				default:
-					return fmt.Errorf("unknown container kind %q for container %q", c.Kind, c.Name)
-				}
-
-				usages[reqKey] = usage
+				containerResolvedReqKeys.Insert(reqKey)
 			}
 		}
 
-		// After the final expansion of a single container, it can only hit a maximum of 1 vGPU request
-		if containerVGPURequests.Len() > 1 {
+		// A container can hit a maximum of 1 vGPU claim
+		if containerVGPUClaims.Len() > 1 {
 			return fmt.Errorf(
-				"%s %q references multiple vgpu requests %v; one container can request at most one vgpu request",
-				c.Kind, c.Name, sets.List(containerVGPURequests),
+				"%s %q references multiple vgpu claims %v; one container can use at most one vgpu claim",
+				c.Kind, c.Name, sets.List(containerVGPUClaims),
 			)
+		}
+
+		// Conflict Matrix
+		for _, reqKey := range sets.List(containerResolvedReqKeys) {
+			usage := usages[reqKey]
+			if usage.InitContainers == nil {
+				usage.InitContainers = sets.New[string]()
+			}
+			if usage.AppContainers == nil {
+				usage.AppContainers = sets.New[string]()
+			}
+
+			switch c.Kind {
+			case common.ContainerKindInit:
+				usage.InitContainers.Insert(c.Name)
+				if usage.InitContainers.Len() > 1 {
+					return fmt.Errorf(
+						"vgpu request %q is referenced by multiple init containers %v; sharing is only allowed between init and app containers",
+						reqKey, sets.List(usage.InitContainers),
+					)
+				}
+			case common.ContainerKindApp:
+				usage.AppContainers.Insert(c.Name)
+				if usage.AppContainers.Len() > 1 {
+					return fmt.Errorf(
+						"vgpu request %q is referenced by multiple app containers %v; sharing is only allowed between init and app containers",
+						reqKey, sets.List(usage.AppContainers),
+					)
+				}
+			default:
+				return fmt.Errorf("unknown container kind %q for container %q", c.Kind, c.Name)
+			}
+
+			usages[reqKey] = usage
 		}
 	}
 
 	return nil
 }
 
-// resolveVGPURequestsFromContainerClaim expands one container claim reference
-// into actual vgpu request keys in the form "<podClaimName>/<requestName>".
-//
-// Rules:
-// - if claimRef.Request is set: only that request is checked
-// - if claimRef.Request is empty: all vgpu requests in the claim are checked
-func (h *validateHandle) resolveVGPURequestsFromContainerClaim(
+// resolveDefiniteVGPURequestsFromContainerClaim 只返回 Pod 阶段“能确定”的 vgpu main request。
+// 规则：
+// - claimRef.Request != "": 仅检查这个主 request
+// - claimRef.Request == "": 返回该 claim 下全部 definite-vgpu 主 request
+// - mixed FirstAvailable: 这里不返回，留给 claim webhook 兜底
+func (h *validateHandle) resolveDefiniteVGPURequestsFromContainerClaim(
 	ctx context.Context,
 	pod *corev1.Pod,
 	claimRef corev1.ResourceClaim,
 	requestCache map[string]deviceRequestCacheEntry,
 ) ([]string, error) {
-	podClaim, err := findPodResourceClaim(pod, claimRef.Name)
+	podClaim, err := common.FindPodResourceClaim(pod, claimRef.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -287,27 +325,29 @@ func (h *validateHandle) resolveVGPURequestsFromContainerClaim(
 		return nil, err
 	}
 
+	index := h.buildPodRequestIndex(ctx, deviceRequests)
+
 	// Explicitly specify request: only check this request
 	if claimRef.Request != "" {
-		for _, req := range deviceRequests {
-			if req.Name != claimRef.Request {
-				continue
-			}
-			if h.isVGPUDeviceRequest(req) {
-				return []string{buildVGPURequestKey(claimRef.Name, req.Name)}, nil
-			}
+		meta, ok := index[claimRef.Request]
+		if !ok {
+			return nil, fmt.Errorf("request %q not found in pod resourceClaim %q", claimRef.Request, claimRef.Name)
+		}
+		if meta.Class != common.MainRequestDefVGPU {
+			// Non VGPU or mixed, both left for claim webhook to check
 			return nil, nil
 		}
-		return nil, fmt.Errorf("request %q not found in pod resourceClaim %q", claimRef.Request, claimRef.Name)
+		return []string{buildVGPURequestKey(claimRef.Name, meta.MainRequest)}, nil
 	}
 
-	// Unspecified request: Check all VGPU requests under the entire claim
+	// claimRef.Request is empty: Expand all define vgpu main requests under this claim
 	var result []string
-	for _, req := range deviceRequests {
-		if h.isVGPUDeviceRequest(req) {
-			result = append(result, buildVGPURequestKey(claimRef.Name, req.Name))
+	for _, meta := range index {
+		if meta.Class == common.MainRequestDefVGPU {
+			result = append(result, buildVGPURequestKey(claimRef.Name, meta.MainRequest))
 		}
 	}
+	slices.Sort(result)
 	return result, nil
 }
 
@@ -324,15 +364,6 @@ func (h *validateHandle) getDeviceRequestsForPodClaimCached(
 	requests, err := h.getDeviceRequestsForPodClaim(ctx, namespace, podClaim)
 	requestCache[cacheKey] = deviceRequestCacheEntry{requests: requests, err: err}
 	return requests, err
-}
-
-func findPodResourceClaim(pod *corev1.Pod, podClaimName string) (*corev1.PodResourceClaim, error) {
-	for i := range pod.Spec.ResourceClaims {
-		if pod.Spec.ResourceClaims[i].Name == podClaimName {
-			return &pod.Spec.ResourceClaims[i], nil
-		}
-	}
-	return nil, fmt.Errorf("pod resourceClaim %q not found", podClaimName)
 }
 
 // getDeviceRequestsForPodClaim loads device requests from either:
@@ -392,8 +423,8 @@ func (h *validateHandle) mutation(obj client.Object) {
 	h.reader.Mutation(obj)
 }
 
-func buildVGPURequestKey(podClaimName, requestName string) string {
-	return podClaimName + "/" + requestName
+func buildVGPURequestKey(podClaimName, mainRequest string) string {
+	return podClaimName + "/" + mainRequest
 }
 
 // buildResourceClaim Build vGPU resource claims based on container requests.
@@ -592,29 +623,12 @@ func buildDeviceRequest(pod *corev1.Pod, requestName, deviceClassName string, in
 	}
 }
 
-func (h *validateHandle) isVGPUDeviceRequest(req resourceapi.DeviceRequest) bool {
-	if req.Exactly == nil {
-		return false
-	}
+func (h *validateHandle) isVGPUDeviceRequest(ctx context.Context, req resourceapi.DeviceRequest) bool {
+	return common.DeviceRequestLooksLikeVGPU(ctx, h.reader, req, h.options.VGPUDeviceClassName)
+}
 
-	// VGPUDeviceClassName hit represents the vgpu type
-	if req.Exactly.DeviceClassName == h.options.VGPUDeviceClassName {
-		return true
-	}
-
-	// Driver constant and device type constant must appear simultaneously in selectors
-	for _, sel := range req.Exactly.Selectors {
-		if sel.CEL == nil {
-			continue
-		}
-		expr := sel.CEL.Expression
-
-		if strings.Contains(expr, util.DRADriverName) && strings.Contains(expr, kubeletplugin.VGpuDeviceType) {
-			return true
-		}
-	}
-
-	return false
+func (h *validateHandle) isVGPUSubRequest(ctx context.Context, req resourceapi.DeviceSubRequest) bool {
+	return common.SubRequestLooksLikeVGPU(ctx, h.reader, req, h.options.VGPUDeviceClassName)
 }
 
 func CheckResourceName(pod *corev1.Pod, resourceName string) error {

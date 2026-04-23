@@ -26,7 +26,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NVIDIA/k8s-dra-driver-gpu/pkg/flock"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/sirupsen/logrus"
@@ -35,10 +34,11 @@ import (
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 
-	configapi "github.com/NVIDIA/k8s-dra-driver-gpu/api/nvidia.com/resource/v1beta1"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
 type OpaqueDeviceConfig struct {
@@ -190,23 +190,13 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	return state, nil
 }
 
-func reservedForPodNumber(claim *resourceapi.ResourceClaim) int {
-	var count = 0
-	for _, reference := range claim.Status.ReservedFor {
-		if reference.APIGroup == "" && reference.Resource == "pods" {
-			count++
-		}
-	}
-	return count
-}
-
 func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceClaim) ([]kubeletplugin.Device, error) {
 	tplock0 := time.Now()
 	s.Lock()
 	defer s.Unlock()
 	klog.V(6).Infof("t_prep_state_lock_acq %.3f s", time.Since(tplock0).Seconds())
 
-	if featuregates.Enabled(featuregates.VGPUSupport) && reservedForPodNumber(claim) > 1 {
+	if featuregates.Enabled(featuregates.VGPUSupport) && util.CountReservedPods(claim) > 1 {
 		for _, result := range claim.Status.Allocation.Devices.Results {
 			if result.Driver != util.DRADriverName {
 				continue

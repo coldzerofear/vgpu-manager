@@ -29,6 +29,22 @@ rules:
       - get
       - list
       - watch
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - deviceclasses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -172,6 +188,58 @@ webhooks:
         resources:
           - pods
         scope: '*'
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: vgpu-manager-webhook
+        namespace: kube-system
+        path: /resourceclaim/validate
+        port: 443
+    failurePolicy: Fail # Ignore
+    matchPolicy: Equivalent
+    name: validateresourceclaim.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+#        - key: kubernetes.io/metadata.name
+#          operator: NotIn
+#          values:
+#            - kube-system
+#            - cert-manager
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    rules:
+      - apiGroups:
+          - "resource.k8s.io"
+        apiVersions:
+          - v1beta1
+          - v1beta2
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - resourceclaims
+          - resourceclaimtemplates
+      - apiGroups:
+          - "resource.k8s.io"
+        apiVersions:
+          - v1
+        operations:
+          - UPDATE
+        resources:
+          - resourceclaims/status
+        scope: "Namespaced"
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
 ---

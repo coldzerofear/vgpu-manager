@@ -17,6 +17,7 @@ import (
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
+	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -231,10 +232,14 @@ func main() {
 		Scheme: scheme.Scheme,
 	}
 
-	var claimReader resourcereader.ClaimRequestReader
-	var claimIndexer k8scache.Indexer
-	var templateIndexer k8scache.Indexer
-	var liveClient rtclient.Client
+	var (
+		resourceReader  resourcereader.ResourceAPIReader
+		claimIndexer    k8scache.Indexer
+		templateIndexer k8scache.Indexer
+		classIndexer    k8scache.Indexer
+		podIndexer      k8scache.Indexer
+		liveClient      rtclient.Client
+	)
 
 	if opt.DefaultConvertToDRA {
 		if opt.VGPUDeviceClassName == "" {
@@ -249,9 +254,10 @@ func main() {
 		}
 
 		c, err := cache.New(config, cache.Options{
-			Scheme:     clientOptions.Scheme,
-			HTTPClient: clientOptions.HTTPClient,
-			Mapper:     clientOptions.Mapper,
+			Scheme:           clientOptions.Scheme,
+			HTTPClient:       clientOptions.HTTPClient,
+			Mapper:           clientOptions.Mapper,
+			DefaultTransform: cache.TransformStripManagedFields(),
 		})
 		if err != nil {
 			klog.Fatalf("Create clientCache failed: %v", err)
@@ -259,6 +265,8 @@ func main() {
 		warmupObjects := []rtclient.Object{
 			&resourcev1.ResourceClaim{},
 			&resourcev1.ResourceClaimTemplate{},
+			&resourcev1.DeviceClass{},
+			&corev1.Pod{},
 		}
 		if err := startCacheAsync(ctx, cancel, c, warmupObjects, cacheGate); err != nil {
 			klog.Fatalf("Start clientCache failed: %v", err)
@@ -274,7 +282,14 @@ func main() {
 		if err != nil {
 			klog.Fatalf("Get ResourceClaimTemplate informer failed: %v", err)
 		}
-
+		classInformer, err := c.GetInformer(ctx, &resourcev1.DeviceClass{}, cache.BlockUntilSynced(false))
+		if err != nil {
+			klog.Fatalf("Get DeviceClass informer failed: %v", err)
+		}
+		podInformer, err := c.GetInformer(ctx, &corev1.Pod{}, cache.BlockUntilSynced(false))
+		if err != nil {
+			klog.Fatalf("Get Pod informer failed: %v", err)
+		}
 		claimIndexer, err = newMirrorIndexer(claimInformer)
 		if err != nil {
 			klog.Fatalf("Create ResourceClaim mirror indexer failed: %v", err)
@@ -282,6 +297,14 @@ func main() {
 		templateIndexer, err = newMirrorIndexer(templateInformer)
 		if err != nil {
 			klog.Fatalf("Create ResourceClaimTemplate mirror indexer failed: %v", err)
+		}
+		classIndexer, err = newMirrorIndexer(classInformer)
+		if err != nil {
+			klog.Fatalf("Create DeviceClass mirror indexer failed: %v", err)
+		}
+		podIndexer, err = newMirrorIndexer(podInformer)
+		if err != nil {
+			klog.Fatalf("Create Pod mirror indexer failed: %v", err)
 		}
 	} else {
 		cacheGate.MarkReady()
@@ -294,10 +317,10 @@ func main() {
 	if opt.DefaultConvertToDRA {
 		// The mutation cache overlays informer snapshots with fresher write-through
 		// updates and live-API fallback results.
-		claimReader = resourcereader.NewClaimRequestReader(liveClient, claimIndexer, templateIndexer, time.Minute)
+		resourceReader = resourcereader.NewResourceAPIReader(liveClient, claimIndexer, templateIndexer, classIndexer, podIndexer, 30*time.Second)
 	}
 
-	if err := pkgwebhook.RegisterWebhookToServer(server, cacheGate, client, opt, claimReader); err != nil {
+	if err := pkgwebhook.RegisterWebhookToServer(server, cacheGate, client, opt, resourceReader); err != nil {
 		klog.Fatalf("Register webhook to server failed: %v", err)
 	}
 

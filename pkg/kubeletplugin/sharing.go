@@ -19,7 +19,7 @@ package kubeletplugin
 import (
 	"fmt"
 
-	configapi "github.com/NVIDIA/k8s-dra-driver-gpu/api/nvidia.com/resource/v1beta1"
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
 type TimeSlicingManager struct {

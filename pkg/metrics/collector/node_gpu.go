@@ -22,7 +22,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
-	"github.com/opencontainers/runc/libcontainer/cgroups"
+	"github.com/opencontainers/cgroups"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"

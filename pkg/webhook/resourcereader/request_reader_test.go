@@ -30,7 +30,7 @@ func TestGetDeviceRequestsForPodClaim_LiveFallbackAndMutationCache(t *testing.T)
 	}
 
 	liveClient := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(claim).Build()
-	reader := NewClaimRequestReader(liveClient, newIndexer(), newIndexer(), time.Minute)
+	reader := NewResourceAPIReader(liveClient, newIndexer(), newIndexer(), newIndexer(), newIndexer(), time.Minute)
 
 	podClaim := &corev1.PodResourceClaim{Name: "pc-a", ResourceClaimName: ptr.To("claim-a")}
 
@@ -61,7 +61,7 @@ func TestGetDeviceRequestsForPodClaim_TemplatePath(t *testing.T) {
 	}
 
 	cachedClient := fake.NewClientBuilder().WithScheme(testScheme).WithObjects(tpl).Build()
-	reader := NewClaimRequestReader(cachedClient, newIndexer(), newIndexer(), time.Minute)
+	reader := NewResourceAPIReader(cachedClient, newIndexer(), newIndexer(), newIndexer(), newIndexer(), time.Minute)
 
 	podClaim := &corev1.PodResourceClaim{Name: "pc-a", ResourceClaimTemplateName: ptr.To("tpl-a")}
 	requests, err := reader.GetDeviceRequestsForPodClaim(ctx, "default", podClaim)
@@ -72,7 +72,7 @@ func TestGetDeviceRequestsForPodClaim_TemplatePath(t *testing.T) {
 
 func TestGetDeviceRequestsForPodClaim_NotFoundWhenNoClients(t *testing.T) {
 	ctx := context.Background()
-	reader := NewClaimRequestReader(nil, newIndexer(), newIndexer(), time.Minute)
+	reader := NewResourceAPIReader(nil, newIndexer(), newIndexer(), newIndexer(), newIndexer(), time.Minute)
 
 	podClaim := &corev1.PodResourceClaim{Name: "pc-a", ResourceClaimName: ptr.To("missing")}
 	_, err := reader.GetDeviceRequestsForPodClaim(ctx, "default", podClaim)

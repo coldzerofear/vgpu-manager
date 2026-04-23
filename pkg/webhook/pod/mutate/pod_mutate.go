@@ -12,7 +12,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/common"
+	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -33,13 +33,13 @@ import (
 
 const Path = "/pods/mutate"
 
-func NewMutateWebhook(client client.Client, options *options.Options, claimReader resourcereader.ClaimRequestReader) (*admission.Webhook, error) {
+func NewMutateWebhook(client client.Client, options *options.Options, reader resourcereader.ResourceAPIReader) (http.Handler, error) {
 	return &admission.Webhook{
 		Handler: &mutateHandle{
 			decoder: admission.NewDecoder(client.Scheme()),
 			options: options,
 			client:  client,
-			reader:  claimReader,
+			reader:  reader,
 		},
 		RecoverPanic: ptr.To[bool](true),
 	}, nil
@@ -49,7 +49,7 @@ type mutateHandle struct {
 	decoder admission.Decoder
 	options *options.Options
 	client  client.Client
-	reader  resourcereader.ClaimRequestReader
+	reader  resourcereader.ResourceAPIReader
 }
 
 func (h *mutateHandle) getResourceClaim(ctx context.Context, key client.ObjectKey, obj *resourceapi.ResourceClaim) error {

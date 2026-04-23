@@ -258,7 +258,7 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 				// generated further below. One reason for doing things this way
 				// is that `nvcdiDevice.GetDeviceSpecsByID(MIG_UUID)` may yield
 				// an incomplete spec for MIG devices, see
-				// https://github.com/NVIDIA/k8s-dra-driver-gpu/issues/787.
+				// https://sigs.k8s.io/dra-driver-nvidia-gpu/issues/787.
 				uuid = dev.Mig.Concrete.ParentUUID
 				// Get (copy of) cached device spec (is safe to be mutated below,
 				// w/o compromising cache).

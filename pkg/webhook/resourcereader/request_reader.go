@@ -15,22 +15,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-type ClaimRequestReader interface {
+type ResourceAPIReader interface {
 	GetDeviceRequestsForPodClaim(ctx context.Context, namespace string, podClaim *corev1.PodResourceClaim) ([]resourceapi.DeviceRequest, error)
 	GetResourceClaim(ctx context.Context, key client.ObjectKey, obj *resourceapi.ResourceClaim) error
 	GetResourceClaimTemplate(ctx context.Context, key client.ObjectKey, obj *resourceapi.ResourceClaimTemplate) error
+	GetDeviceClass(ctx context.Context, key client.ObjectKey, obj *resourceapi.DeviceClass) error
+	GetPod(ctx context.Context, key client.ObjectKey, obj *corev1.Pod) error
 	Mutation(obj client.Object)
 }
 
-type claimRequestReader struct {
+type resourceAPIReader struct {
 	liveClient client.Client
 
 	claimMutationCache    kcache.MutationCache
 	templateMutationCache kcache.MutationCache
+	classMutationCache    kcache.MutationCache
+	podMutationCache      kcache.MutationCache
 }
 
-func NewClaimRequestReader(liveClient client.Client, claimIndexer, templateIndexer kcache.Indexer, ttl time.Duration) ClaimRequestReader {
-	return &claimRequestReader{
+func NewResourceAPIReader(
+	liveClient client.Client, claimIndexer, templateIndexer,
+	classIndexer, podIndexer kcache.Indexer, ttl time.Duration,
+) ResourceAPIReader {
+	return &resourceAPIReader{
 		liveClient: liveClient,
 		claimMutationCache: kcache.NewIntegerResourceVersionMutationCache(
 			klog.Background(), claimIndexer, claimIndexer, ttl, true,
@@ -38,10 +45,16 @@ func NewClaimRequestReader(liveClient client.Client, claimIndexer, templateIndex
 		templateMutationCache: kcache.NewIntegerResourceVersionMutationCache(
 			klog.Background(), templateIndexer, templateIndexer, ttl, true,
 		),
+		classMutationCache: kcache.NewIntegerResourceVersionMutationCache(
+			klog.Background(), classIndexer, classIndexer, ttl, true,
+		),
+		podMutationCache: kcache.NewIntegerResourceVersionMutationCache(
+			klog.Background(), podIndexer, podIndexer, ttl, true,
+		),
 	}
 }
 
-func (r *claimRequestReader) GetDeviceRequestsForPodClaim(ctx context.Context, namespace string, podClaim *corev1.PodResourceClaim) ([]resourceapi.DeviceRequest, error) {
+func (r *resourceAPIReader) GetDeviceRequestsForPodClaim(ctx context.Context, namespace string, podClaim *corev1.PodResourceClaim) ([]resourceapi.DeviceRequest, error) {
 	if podClaim == nil {
 		return nil, fmt.Errorf("podClaim is nil")
 	}
@@ -65,7 +78,7 @@ func (r *claimRequestReader) GetDeviceRequestsForPodClaim(ctx context.Context, n
 	return nil, fmt.Errorf("pod resourceClaim %q must specify one of resourceClaimName or resourceClaimTemplateName", podClaim.Name)
 }
 
-func (r *claimRequestReader) GetResourceClaim(ctx context.Context, key client.ObjectKey, obj *resourceapi.ResourceClaim) error {
+func (r *resourceAPIReader) GetResourceClaim(ctx context.Context, key client.ObjectKey, obj *resourceapi.ResourceClaim) error {
 	if obj == nil {
 		return fmt.Errorf("obj is nil")
 	}
@@ -77,7 +90,7 @@ func (r *claimRequestReader) GetResourceClaim(ctx context.Context, key client.Ob
 	return nil
 }
 
-func (r *claimRequestReader) GetResourceClaimTemplate(ctx context.Context, key client.ObjectKey, obj *resourceapi.ResourceClaimTemplate) error {
+func (r *resourceAPIReader) GetResourceClaimTemplate(ctx context.Context, key client.ObjectKey, obj *resourceapi.ResourceClaimTemplate) error {
 	if obj == nil {
 		return fmt.Errorf("obj is nil")
 	}
@@ -89,7 +102,31 @@ func (r *claimRequestReader) GetResourceClaimTemplate(ctx context.Context, key c
 	return nil
 }
 
-func (r *claimRequestReader) Mutation(obj client.Object) {
+func (r *resourceAPIReader) GetDeviceClass(ctx context.Context, key client.ObjectKey, obj *resourceapi.DeviceClass) error {
+	if obj == nil {
+		return fmt.Errorf("obj is nil")
+	}
+	if class, err := r.getDeviceClass(ctx, key); err != nil {
+		return err
+	} else {
+		class.DeepCopyInto(obj)
+	}
+	return nil
+}
+
+func (r *resourceAPIReader) GetPod(ctx context.Context, key client.ObjectKey, obj *corev1.Pod) error {
+	if obj == nil {
+		return fmt.Errorf("obj is nil")
+	}
+	if pod, err := r.getPod(ctx, key); err != nil {
+		return err
+	} else {
+		pod.DeepCopyInto(obj)
+	}
+	return nil
+}
+
+func (r *resourceAPIReader) Mutation(obj client.Object) {
 	if obj == nil {
 		return
 	}
@@ -98,10 +135,14 @@ func (r *claimRequestReader) Mutation(obj client.Object) {
 		r.claimMutationCache.Mutation(typed.DeepCopy())
 	case *resourceapi.ResourceClaimTemplate:
 		r.templateMutationCache.Mutation(typed.DeepCopy())
+	case *resourceapi.DeviceClass:
+		r.classMutationCache.Mutation(typed.DeepCopy())
+	case *corev1.Pod:
+		r.podMutationCache.Mutation(typed.DeepCopy())
 	}
 }
 
-func (r *claimRequestReader) getResourceClaim(ctx context.Context, key types.NamespacedName) (*resourceapi.ResourceClaim, error) {
+func (r *resourceAPIReader) getResourceClaim(ctx context.Context, key types.NamespacedName) (*resourceapi.ResourceClaim, error) {
 	if obj, exists, err := r.claimMutationCache.GetByKey(key.String()); err != nil {
 		return nil, err
 	} else if exists {
@@ -125,7 +166,7 @@ func (r *claimRequestReader) getResourceClaim(ctx context.Context, key types.Nam
 	return claim, nil
 }
 
-func (r *claimRequestReader) getResourceClaimTemplate(ctx context.Context, key types.NamespacedName) (*resourceapi.ResourceClaimTemplate, error) {
+func (r *resourceAPIReader) getResourceClaimTemplate(ctx context.Context, key types.NamespacedName) (*resourceapi.ResourceClaimTemplate, error) {
 	if obj, exists, err := r.templateMutationCache.GetByKey(key.String()); err != nil {
 		return nil, err
 	} else if exists {
@@ -141,6 +182,54 @@ func (r *claimRequestReader) getResourceClaimTemplate(ctx context.Context, key t
 	}
 
 	tpl := &resourceapi.ResourceClaimTemplate{}
+	if err := r.liveClient.Get(ctx, key, tpl); err != nil {
+		return nil, err
+	}
+
+	r.Mutation(tpl)
+	return tpl, nil
+}
+
+func (r *resourceAPIReader) getDeviceClass(ctx context.Context, key types.NamespacedName) (*resourceapi.DeviceClass, error) {
+	if obj, exists, err := r.classMutationCache.GetByKey(key.String()); err != nil {
+		return nil, err
+	} else if exists {
+		tpl, ok := obj.(*resourceapi.DeviceClass)
+		if !ok {
+			return nil, fmt.Errorf("unexpected object type %T for DeviceClass %q", obj, key.String())
+		}
+		return tpl.DeepCopy(), nil
+	}
+
+	if r.liveClient == nil {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Group: resourceapi.GroupName, Resource: "deviceclasses"}, key.String())
+	}
+
+	tpl := &resourceapi.DeviceClass{}
+	if err := r.liveClient.Get(ctx, key, tpl); err != nil {
+		return nil, err
+	}
+
+	r.Mutation(tpl)
+	return tpl, nil
+}
+
+func (r *resourceAPIReader) getPod(ctx context.Context, key types.NamespacedName) (*corev1.Pod, error) {
+	if obj, exists, err := r.podMutationCache.GetByKey(key.String()); err != nil {
+		return nil, err
+	} else if exists {
+		tpl, ok := obj.(*corev1.Pod)
+		if !ok {
+			return nil, fmt.Errorf("unexpected object type %T for DeviceClass %q", obj, key.String())
+		}
+		return tpl.DeepCopy(), nil
+	}
+
+	if r.liveClient == nil {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Group: corev1.GroupName, Resource: "pods"}, key.String())
+	}
+
+	tpl := &corev1.Pod{}
 	if err := r.liveClient.Get(ctx, key, tpl); err != nil {
 		return nil, err
 	}
