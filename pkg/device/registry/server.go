@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"net"
 	"os"
 	"path/filepath"
@@ -96,6 +97,19 @@ func (s *DeviceRegistryServerImpl) IsRunning() bool {
 	return s.running
 }
 
+func (s *DeviceRegistryServerImpl) getPodNoCopyByUID(ctx context.Context, uid string) (*corev1.Pod, error) {
+	podList := corev1.PodList{}
+	if err := s.cache.List(ctx, &podList,
+		client.MatchingFields{"metadata.uid": uid},
+		client.UnsafeDisableDeepCopyOption(true)); err != nil {
+		return nil, err
+	}
+	if len(podList.Items) != 1 {
+		return nil, fmt.Errorf("unable to find pod %s", uid)
+	}
+	return &podList.Items[0], nil
+}
+
 func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, req *registry.ContainerDeviceRequest) (resp *registry.ContainerDeviceResponse, err error) {
 	klog.V(4).InfoS("RegisterContainerDevice", "podUid", req.GetPodUid(), "containerName", req.GetContainerName())
 	defer func() {
@@ -119,19 +133,9 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 		err = fmt.Errorf("container name cannot be empty")
 		return resp, err
 	}
-	podList := corev1.PodList{}
-	if err = s.cache.List(ctx, &podList,
-		client.MatchingFields{"metadata.uid": req.PodUid},
-		client.UnsafeDisableDeepCopyOption(true)); err != nil {
-		return resp, err
-	}
-	if len(podList.Items) != 1 {
-		err = fmt.Errorf("unable to find pod %s", req.PodUid)
-		return resp, err
-	}
-	pod := &podList.Items[0]
-	if util.PodIsTerminated(pod) {
-		err = fmt.Errorf("terminated pod %s", klog.KObj(pod).String())
+
+	pod, err := s.getPodNoCopyByUID(ctx, req.PodUid)
+	if err != nil {
 		return resp, err
 	}
 	contIndex := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
@@ -145,22 +149,86 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 		err = fmt.Errorf("container %s does not have vGPU", req.ContainerName)
 		return resp, err
 	}
+	if util.PodIsTerminated(pod) {
+		err = fmt.Errorf("terminated pod %s", klog.KObj(pod).String())
+		return resp, err
+	}
+	if status, ok := cgroup.GetContainerStatus(pod, req.ContainerName); !ok || status.State.Running == nil {
+		containerID := ""
+		if ok {
+			containerID = status.ContainerID
+		}
+		klog.V(4).InfoS("Container is not ready, waiting for running state",
+			"podUid", req.PodUid,
+			"containerName", req.ContainerName,
+			"resourceVersion", pod.ResourceVersion,
+			"containerID", containerID)
+		err = wait.PollUntilContextCancel(ctx, 40*time.Millisecond, true, func(ctx context.Context) (bool, error) {
+			newPod, err := s.getPodNoCopyByUID(ctx, req.PodUid)
+			if err != nil {
+				return false, err
+			}
+			// fast return
+			if pod.ResourceVersion == newPod.ResourceVersion {
+				return false, nil
+			}
+			pod = newPod
+			if util.PodIsTerminated(pod) {
+				return false, fmt.Errorf("terminated pod %s", klog.KObj(pod).String())
+			}
+			if status, ok = cgroup.GetContainerStatus(pod, req.ContainerName); ok && status.State.Running != nil {
+				klog.V(4).InfoS("Container entered running state",
+					"podUid", req.PodUid,
+					"containerName", req.ContainerName,
+					"resourceVersion", pod.ResourceVersion,
+					"containerID", status.ContainerID,
+					"startedAt", status.State.Running.StartedAt)
+				return true, nil
+			}
+			return false, nil
+		})
+		if err != nil {
+			return resp, err
+		}
+	}
 
-	var getFullPath func(string) string
+	runtimeName, containerID := cgroup.GetContainerRuntime(pod, req.ContainerName)
+	var (
+		getFullPath    func(string) string
+		cgroupPathMode string
+	)
 	switch {
 	case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
 		getFullPath = cgroup.GetK8sPodCGroupFullPath
+		cgroupPathMode = "cgroupv2-unified"
 	case cgroups.IsCgroup2HybridMode():
 		// If the device controller does not exist, use the path of cgroupv2.
 		getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
+		cgroupPathMode = "cgroupv2-hybrid-device"
 		if util.PathIsNotExist(cgroup.CGroupDevicePath) {
 			getFullPath = cgroup.GetK8sPodCGroupFullPath
+			cgroupPathMode = "cgroupv2-hybrid-base"
 		}
 	default: // cgroupv1
 		getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
+		cgroupPathMode = "cgroupv1-device"
 	}
+	klog.V(4).InfoS("Preparing to resolve container pids",
+		"podUid", req.PodUid,
+		"containerName", req.ContainerName,
+		"resourceVersion", pod.ResourceVersion,
+		"runtime", runtimeName,
+		"containerID", containerID,
+		"cgroupPathMode", cgroupPathMode)
 	contPids := cgroup.GetContainerPidsFunc(pod, req.ContainerName, getFullPath)
 	if len(contPids) == 0 {
+		klog.V(4).InfoS("Container pid resolution returned empty result",
+			"podUid", req.PodUid,
+			"containerName", req.ContainerName,
+			"resourceVersion", pod.ResourceVersion,
+			"runtime", runtimeName,
+			"containerID", containerID,
+			"cgroupPathMode", cgroupPathMode)
 		err = fmt.Errorf("unable to find the process ID of the container %s", req.ContainerName)
 		return resp, err
 	}

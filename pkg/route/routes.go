@@ -100,29 +100,28 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 
 		var extenderArgs extenderv1.ExtenderArgs
 		var extenderFilterResult *extenderv1.ExtenderFilterResult
+
 		if err := json.NewDecoder(body).Decode(&extenderArgs); err != nil {
 			klog.Errorf("Decode extender filter args failed: %v", err)
 			extenderFilterResult = &extenderv1.ExtenderFilterResult{
 				Error: err.Error(),
 			}
-		} else {
-			if !predicate.IsReady(r.Context()) {
-				err = context.DeadlineExceeded
-				klog.ErrorS(err, predicate.Name()+" is not ready yet")
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(err.Error()))
-				return
+		} else if !predicate.IsReady(r.Context()) {
+			err = context.DeadlineExceeded
+			klog.ErrorS(err, predicate.Name()+" is not ready yet")
+			extenderFilterResult = &extenderv1.ExtenderFilterResult{
+				Error: err.Error(),
 			}
+		} else {
 			extenderFilterResult = predicate.Filter(r.Context(), extenderArgs)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		if resultBody, err := json.Marshal(extenderFilterResult); err != nil {
-			klog.ErrorS(err, "Failed to marshal extenderFilterResult",
-				"extenderFilterResult", extenderFilterResult)
+			errMsg := "Failed to marshal extenderFilterResult"
+			klog.ErrorS(err, errMsg, "extenderFilterResult", extenderFilterResult)
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(err.Error()))
+			_, _ = w.Write([]byte(fmt.Sprintf("{'Error':'%s: %s'}", errMsg, err.Error())))
 		} else {
 			klog.V(4).InfoS(predicate.Name()+" return extenderFilterResult",
 				"extenderFilterResult", string(resultBody))
@@ -152,25 +151,21 @@ func BindPredicateRoute(predicate predicate.BindPredicate) httprouter.Handle {
 			extenderBindingResult = &extenderv1.ExtenderBindingResult{
 				Error: err.Error(),
 			}
-		} else {
-			if !predicate.IsReady(r.Context()) {
-				err = context.DeadlineExceeded
-				klog.ErrorS(err, predicate.Name()+" is not ready yet")
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusInternalServerError)
-				errMsg := fmt.Sprintf("{'error':'%s'}", err.Error())
-				_, _ = w.Write([]byte(errMsg))
-				return
+		} else if !predicate.IsReady(r.Context()) {
+			err = context.DeadlineExceeded
+			klog.ErrorS(err, predicate.Name()+" is not ready yet")
+			extenderBindingResult = &extenderv1.ExtenderBindingResult{
+				Error: err.Error(),
 			}
+		} else {
 			extenderBindingResult = predicate.Bind(r.Context(), extenderBindingArgs)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if resultBody, err := json.Marshal(extenderBindingResult); err != nil {
-			klog.ErrorS(err, "Failed to marshal extenderBindingResult",
-				"extenderBindingResult", extenderBindingResult)
+			errMsg := "Failed to marshal extenderBindingResult"
+			klog.ErrorS(err, errMsg, "extenderBindingResult", extenderBindingResult)
 			w.WriteHeader(http.StatusInternalServerError)
-			errMsg := fmt.Sprintf("{'error':'%s'}", err.Error())
-			_, _ = w.Write([]byte(errMsg))
+			_, _ = w.Write([]byte(fmt.Sprintf("{'Error':'%s: %s'}", errMsg, err.Error())))
 		} else {
 			klog.V(4).InfoS(predicate.Name()+" return extenderBindingResult",
 				"extenderBindingResult", string(resultBody))

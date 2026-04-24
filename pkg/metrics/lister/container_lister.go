@@ -97,6 +97,7 @@ var excludedFolders = map[string]bool{
 	util.Watcher:     true,
 	util.Registry:    true,
 	util.Claims:      true,
+	util.Tools:       true,
 }
 
 func (c *ContainerLister) collectContainerKey(pods []*corev1.Pod) sets.Set[ContainerKey] {
@@ -182,6 +183,7 @@ func (c *ContainerLister) update() error {
 
 func (c *ContainerLister) Start(interval time.Duration, stopChan <-chan struct{}) {
 	go func() {
+		klog.InfoS("Container lister start", "interval", interval.String())
 		scanResourceFiles := func() {
 			if err := c.update(); err != nil {
 				klog.V(1).ErrorS(err, "Failed to update container lister")

@@ -2,10 +2,13 @@ package util
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -18,10 +21,15 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/informers"
+	"k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
 )
 
 func InsertAnnotation(obj metav1.Object, k, v string) {
+	if obj == nil {
+		return
+	}
 	if obj.GetAnnotations() == nil {
 		obj.SetAnnotations(map[string]string{})
 	}
@@ -29,6 +37,9 @@ func InsertAnnotation(obj metav1.Object, k, v string) {
 }
 
 func HasLabel(obj metav1.Object, label string) (val string, ok bool) {
+	if obj == nil {
+		return "", false
+	}
 	if obj.GetLabels() != nil {
 		val, ok = obj.GetLabels()[label]
 	}
@@ -36,6 +47,9 @@ func HasLabel(obj metav1.Object, label string) (val string, ok bool) {
 }
 
 func HasAnnotation(obj metav1.Object, anno string) (val string, ok bool) {
+	if obj == nil {
+		return "", false
+	}
 	if obj.GetAnnotations() != nil {
 		val, ok = obj.GetAnnotations()[anno]
 	}
@@ -44,6 +58,9 @@ func HasAnnotation(obj metav1.Object, anno string) (val string, ok bool) {
 
 // GetCapacityOfNode Return the capacity of node resources.
 func GetCapacityOfNode(node *corev1.Node, resourceName string) (int64, bool) {
+	if node == nil {
+		return 0, false
+	}
 	if val, ok := node.Status.Capacity[corev1.ResourceName(resourceName)]; ok {
 		return val.Value(), true
 	}
@@ -52,6 +69,9 @@ func GetCapacityOfNode(node *corev1.Node, resourceName string) (int64, bool) {
 
 // GetAllocatableOfNode Return the number of resources that can be allocated to the node.
 func GetAllocatableOfNode(node *corev1.Node, resourceName string) (int64, bool) {
+	if node == nil {
+		return 0, false
+	}
 	if val, ok := node.Status.Allocatable[corev1.ResourceName(resourceName)]; ok {
 		return val.Value(), true
 	}
@@ -60,17 +80,58 @@ func GetAllocatableOfNode(node *corev1.Node, resourceName string) (int64, bool) 
 
 // IsVGPUEnabledNode Determine whether there are vGPU devices on the node.
 func IsVGPUEnabledNode(node *corev1.Node) bool {
+	if node == nil {
+		return false
+	}
 	val, _ := GetAllocatableOfNode(node, VGPUNumberResourceName)
 	return val > 0
 }
 
+func DelResourceOfContainer(container *corev1.Container, resourceName string) {
+	if container == nil {
+		return
+	}
+	if container.Resources.Requests != nil {
+		delete(container.Resources.Requests, corev1.ResourceName(resourceName))
+	}
+	if container.Resources.Limits != nil {
+		delete(container.Resources.Limits, corev1.ResourceName(resourceName))
+	}
+}
+
 // GetResourceOfContainer Return the number of resource limit.
 func GetResourceOfContainer(container *corev1.Container, resourceName string) int64 {
+	if container == nil {
+		return 0
+	}
 	var count int64
 	if val, ok := container.Resources.Limits[corev1.ResourceName(resourceName)]; ok {
 		count = val.Value()
 	}
 	return count
+}
+
+// HasExtendedResource Return true when pod requests extended resources
+func HasExtendedResource(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	// Extended resources is often defined through limits.
+	limits := resource.PodLimits(pod, resource.PodResourcesOptions{})
+	for name, qty := range limits {
+		if helper.IsExtendedResourceName(name) && qty.Value() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// HasDRARequests Return true when pod requests DRA resourceClaims
+func HasDRARequests(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	return len(pod.Spec.ResourceClaims) > 0
 }
 
 // IsVGPURequiredContainer tell if the container is a vGPU request container.
@@ -80,6 +141,9 @@ func IsVGPURequiredContainer(c *corev1.Container) bool {
 
 // GetResourceOfPod Return the number of resource limit for all containers of Pod.
 func GetResourceOfPod(pod *corev1.Pod, resourceName string) int64 {
+	if pod == nil {
+		return 0
+	}
 	var total int64
 	for i := range pod.Spec.Containers {
 		total += GetResourceOfContainer(&pod.Spec.Containers[i], resourceName)
@@ -89,6 +153,9 @@ func GetResourceOfPod(pod *corev1.Pod, resourceName string) int64 {
 
 // IsVGPUResourcePod Determine if a pod has vGPU resource request.
 func IsVGPUResourcePod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
 	for i := range pod.Spec.Containers {
 		if GetResourceOfContainer(&pod.Spec.Containers[i], VGPUNumberResourceName) > 0 {
 			return true
@@ -147,6 +214,9 @@ func ShouldRetry(err error) bool {
 
 // IsShouldDeletePod Determine whether the pod has been deleted or needs to be deleted.
 func IsShouldDeletePod(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
 	if pod.DeletionTimestamp != nil {
 		return true
 	}
@@ -165,6 +235,9 @@ func IsShouldDeletePod(pod *corev1.Pod) bool {
 }
 
 func PodIsTerminated(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
 	return pod.Status.Phase == corev1.PodFailed ||
 		pod.Status.Phase == corev1.PodSucceeded ||
 		(pod.DeletionTimestamp != nil && notRunning(pod.Status.ContainerStatuses))
@@ -244,6 +317,9 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 }
 
 func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
 	for _, container := range pod.Spec.Containers {
 		if GetResourceOfContainer(&container, VGPUNumberResourceName) > 1 {
 			return true
@@ -253,6 +329,9 @@ func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
 }
 
 func PodPlanSchedulingNode(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
 	if pod.Spec.NodeName != "" {
 		return pod.Spec.NodeName
 	}
@@ -261,6 +340,10 @@ func PodPlanSchedulingNode(pod *corev1.Pod) string {
 }
 
 func PodsOnNodeCallback(pods []*corev1.Pod, node *corev1.Node, callbackFn func(*corev1.Pod)) {
+	if node == nil {
+		klog.Warningln("node is empty")
+		return
+	}
 	if callbackFn == nil {
 		klog.Warningln("PodsOnNodeCallback callback function is empty")
 		return
@@ -352,28 +435,121 @@ func GetPercentageValue(x uint32) uint32 {
 	}
 }
 
-func VGPUControlDisabled(pod *corev1.Pod, containerName string) bool {
-	index := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool {
-		return c.Name == containerName
-	})
-	if index < 0 {
+func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool {
+	if pod == nil {
 		return false
 	}
-	disabled := false
-	for _, envVar := range pod.Spec.Containers[index].Env {
-		if envVar.Name == DisableVGPUEnv {
-			disabled = envVar.Value == "true"
-			break
+	for _, cont := range pod.Spec.Containers {
+		if cont.Name != containerName {
+			continue
+		}
+		for _, env := range cont.Env {
+			if env.Name != envName {
+				continue
+			}
+			val := strings.TrimSpace(env.Value)
+			if val == "1" || strings.EqualFold(val, "true") {
+				return true
+			}
 		}
 	}
-	return disabled
+	return false
 }
 
 func InformerFactoryHasSynced(factory informers.SharedInformerFactory, ctx context.Context) bool {
+	if factory == nil {
+		return false
+	}
 	for _, synced := range factory.WaitForCacheSync(ctx.Done()) {
 		if !synced {
 			return false
 		}
 	}
 	return true
+}
+
+const (
+	DNS1123NameMaximumLength         = 63
+	DNS1123NotAllowedCharacters      = "[^-a-z0-9]"
+	DNS1123NotAllowedStartCharacters = "^[^a-z0-9]+"
+	DNS1123NotAllowedEndCharacters   = "[^a-z0-9]+$"
+	hashPrefixLength                 = 8
+	separator                        = "-"
+)
+
+// GenerateK8sSafeResourceName Generate names that comply with the K8s DNS-1123 specification and have a length not exceeding 63
+func GenerateK8sSafeResourceName(str ...string) string {
+	joined := strings.Join(str, separator)
+	if joined == "" {
+		return ""
+	}
+
+	hashSuffix := GenerateShortHash(joined, hashPrefixLength)
+
+	// Combine the original joined string with the hash suffix.
+	nameWithHash := joined + separator + hashSuffix
+
+	// Truncate the final name if it's longer than the maximum allowed length.
+	if len(nameWithHash) > DNS1123NameMaximumLength {
+		// Calculate the maximum length the prefix can have.
+		// The final name will be: truncated_prefix + "-" + hashSuffix
+		maxPrefixLen := DNS1123NameMaximumLength - len(hashSuffix) - 1 // -1 for the separator '-'
+		// Truncate the part before the hash to fit within the limit.
+		truncatedPrefix := nameWithHash[:maxPrefixLen]
+		// Re-assemble the name. It might end with '-' from the prefix or start with an invalid char after truncation.
+		// We'll pass the whole truncated string to the compliance function.
+		nameWithHash = truncatedPrefix + separator + hashSuffix
+	}
+
+	// Ensure the final name adheres to DNS-1123 rules.
+	return MakeDNS1123Compatible(nameWithHash)
+}
+
+// MakeDNS1123Compatible It makes a string compliant with RFC 1123 for use as a DNS subdomain name.
+// https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#dns-subdomain-names
+func MakeDNS1123Compatible(name string) string {
+	name = strings.ToLower(name)
+
+	nameNotAllowedChars := regexp.MustCompile(DNS1123NotAllowedCharacters)
+	name = nameNotAllowedChars.ReplaceAllString(name, "")
+
+	nameNotAllowedStartChars := regexp.MustCompile(DNS1123NotAllowedStartCharacters)
+	name = nameNotAllowedStartChars.ReplaceAllString(name, "")
+
+	if len(name) > DNS1123NameMaximumLength {
+		name = name[0:DNS1123NameMaximumLength]
+	}
+
+	nameNotAllowedEndChars := regexp.MustCompile(DNS1123NotAllowedEndCharacters)
+	name = nameNotAllowedEndChars.ReplaceAllString(name, "")
+
+	return name
+}
+
+// GenerateShortHash Generate a hexadecimal hash prefix of specified length
+func GenerateShortHash(input string, length int) string {
+	h := sha256.Sum256([]byte(input))
+	fullHex := hex.EncodeToString(h[:])
+	if length > len(fullHex) {
+		length = len(fullHex)
+	}
+	return fullHex[:length]
+}
+
+func GetEnvEnabled(env string) bool {
+	if val, ok := os.LookupEnv(env); ok {
+		val = strings.TrimSpace(val)
+		return val == "1" || strings.EqualFold(val, "enabled") || strings.EqualFold(val, "true")
+	}
+	return false
+}
+
+func EnsureDir(path string, perm os.FileMode) error {
+	if err := os.MkdirAll(path, perm); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, perm); err != nil {
+		return err
+	}
+	return nil
 }

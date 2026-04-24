@@ -34,6 +34,7 @@ add_library(vgpu-control SHARED
     include/nvml-subset.h
     include/cuda-helper.h
     include/nvml-helper.h
+    include/metrics.h
     include/vdpau/vdpau.h
     src/cuda_originals.c
     src/nvml_originals.c
@@ -42,7 +43,8 @@ add_library(vgpu-control SHARED
     src/loader.c
     src/register.c
     src/util.c
-    src/lock.c)
+    src/lock.c
+    src/metrics.c)
 target_link_libraries(vgpu-control ${STATIC_C_LIBRARIES})
 target_compile_options(vgpu-control PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
@@ -66,11 +68,6 @@ add_executable(virt_mem_tool tools/virt_mem_tool.c)
 target_include_directories(virt_mem_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)
 target_link_libraries(virt_mem_tool PRIVATE cuda ${STATIC_C_LIBRARIES})
 target_compile_options(virt_mem_tool PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
-
-add_executable(extract_container_pids tools/extract_container_pids.c src/util.c)
-target_include_directories(extract_container_pids PUBLIC ${C_INCLUDE_PATH})
-target_link_libraries(extract_container_pids PRIVATE ${STATIC_C_LIBRARIES})
-target_compile_options(extract_container_pids PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
 add_executable(mem_pool_tool tools/mem_pool_tool.c)
 target_include_directories(mem_pool_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)

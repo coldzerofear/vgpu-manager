@@ -21,21 +21,28 @@ type Options struct {
 	QPS            float64
 	Burst          int
 
-	Domain         string
-	NodeName       string
-	CGroupDriver   string
-	NodeConfigPath string
-	ServerBindPort int
-	PprofBindPort  int
-	EnableRBAC     bool
-	FeatureGate    featuregate.MutableFeatureGate
+	Domain              string
+	NodeName            string
+	CGroupDriver        string
+	NodeConfigPath      string
+	ServerBindPort      int
+	PprofBindPort       int
+	EnableRBAC          bool
+	EnableTls           bool
+	TlsKeyFile          string
+	TlsCertFile         string
+	CertRefreshInterval int
+	MinScrapeInterval   int
+	FeatureGate         featuregate.MutableFeatureGate
 }
 
 const (
-	defaultQPS            = 20.0
-	defaultBurst          = 30
-	defaultServerBindPort = 3456
-	defaultPprofBindPort  = 0
+	defaultQPS                 = 20.0
+	defaultBurst               = 30
+	defaultServerBindPort      = 3456
+	defaultPprofBindPort       = 0
+	defaultCertRefreshInterval = 5
+	defaultMinScrapeInterval   = 1
 
 	Component = "deviceMonitor"
 	// SMWatcher feature gate will obtain shared utilization data aggregation corresponding indicators from external observers.
@@ -56,16 +63,21 @@ func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(defaultFeatureGates))
 	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
-		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate))
+		Component,
+		compatibility.DefaultBuildEffectiveVersion(),
+		featureGate,
+	))
 	return &Options{
-		QPS:            defaultQPS,
-		Burst:          defaultBurst,
-		Domain:         util.GetGlobalDomain(),
-		NodeName:       os.Getenv("NODE_NAME"),
-		CGroupDriver:   os.Getenv("CGROUP_DRIVER"),
-		ServerBindPort: defaultServerBindPort,
-		PprofBindPort:  defaultPprofBindPort,
-		FeatureGate:    featureGate,
+		QPS:                 defaultQPS,
+		Burst:               defaultBurst,
+		Domain:              util.GetGlobalDomain(),
+		NodeName:            os.Getenv("NODE_NAME"),
+		CGroupDriver:        os.Getenv("CGROUP_DRIVER"),
+		ServerBindPort:      defaultServerBindPort,
+		PprofBindPort:       defaultPprofBindPort,
+		CertRefreshInterval: defaultCertRefreshInterval,
+		MinScrapeInterval:   defaultMinScrapeInterval,
+		FeatureGate:         featureGate,
 	}
 }
 
@@ -88,6 +100,11 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable)")
 	pflag.BoolVar(&o.EnableRBAC, "enable-rbac", false, "Enable RBAC authentication for metrics service.")
+	pflag.BoolVar(&o.EnableTls, "enable-tls", false, "Open TLS encrypted communication for the server. (default: false)")
+	pflag.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need --enable-tls)")
+	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
+	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
+	pflag.IntVar(&o.MinScrapeInterval, "min-scrape-interval", o.MinScrapeInterval, "Minimum grasping interval in seconds.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

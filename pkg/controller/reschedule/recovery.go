@@ -2,6 +2,7 @@ package reschedule
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -57,6 +58,9 @@ func (r *recoveryController) Start(ctx context.Context) error {
 	if err != nil {
 		klog.ErrorS(err, "list pod for recovery checkpoint failed")
 	}
+	sort.Slice(pods, func(i, j int) bool {
+		return pods[i].CreationTimestamp.Before(&pods[j].CreationTimestamp)
+	})
 	for i := range pods {
 		klog.InfoS("Find unrecovered historical pods from the checkpoint", "pod", klog.KObj(pods[i]))
 		r.queue.Add(pods[i])

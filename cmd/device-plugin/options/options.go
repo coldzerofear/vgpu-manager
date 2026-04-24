@@ -37,6 +37,7 @@ type Options struct {
 	PprofBindPort       int
 	GDSEnabled          bool
 	MOFEDEnabled        bool
+	GDRCopyEnabled      bool
 	OpenKernelModules   bool
 	MigStrategy         string
 	ImexChannelIDs      []int
@@ -72,18 +73,21 @@ const (
 	VMemoryNode featuregate.Feature = util.VMemoryNode
 	// ClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
 	ClientMode featuregate.Feature = util.ClientMode
+	// HonorPreAllocatedDeviceIDs makes preferred allocation follow pre-allocated device IDs whenever possible.
+	HonorPreAllocatedDeviceIDs featuregate.Feature = util.HonorPreAllocatedDeviceIDs
 )
 
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		CorePlugin:   {Default: false, PreRelease: featuregate.Alpha},
-		MemoryPlugin: {Default: false, PreRelease: featuregate.Alpha},
-		Reschedule:   {Default: false, PreRelease: featuregate.Alpha},
-		GPUTopology:  {Default: false, PreRelease: featuregate.Alpha},
-		SMWatcher:    {Default: false, PreRelease: featuregate.Alpha},
-		VMemoryNode:  {Default: false, PreRelease: featuregate.Alpha},
-		ClientMode:   {Default: false, PreRelease: featuregate.Alpha},
+		CorePlugin:                 {Default: false, PreRelease: featuregate.Alpha},
+		MemoryPlugin:               {Default: false, PreRelease: featuregate.Alpha},
+		Reschedule:                 {Default: false, PreRelease: featuregate.Alpha},
+		GPUTopology:                {Default: false, PreRelease: featuregate.Alpha},
+		SMWatcher:                  {Default: false, PreRelease: featuregate.Alpha},
+		VMemoryNode:                {Default: false, PreRelease: featuregate.Alpha},
+		ClientMode:                 {Default: false, PreRelease: featuregate.Alpha},
+		HonorPreAllocatedDeviceIDs: {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -91,17 +95,20 @@ func NewOptions() *Options {
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(defaultFeatureGates))
 	runtime.Must(compatibility.DefaultComponentGlobalsRegistry.Register(
-		Component, compatibility.DefaultBuildEffectiveVersion(), featureGate))
-	gdsEnabled := os.Getenv("NVIDIA_GDS") == "enabled" || os.Getenv("NVIDIA_GDS") == "true"
-	mofedEnabled := os.Getenv("NVIDIA_MOFED") == "enabled" || os.Getenv("NVIDIA_MOFED") == "true"
+		Component,
+		compatibility.DefaultBuildEffectiveVersion(),
+		featureGate,
+	))
 	var imexChannelIDs []int
-	imexChannelStr := strings.TrimSpace(os.Getenv("IMEX_CHANNEL_IDS"))
-	for _, split := range strings.Split(imexChannelStr, ",") {
-		if atoi, err := strconv.Atoi(strings.TrimSpace(split)); err == nil {
+	for _, val := range strings.Split(os.Getenv("IMEX_CHANNEL_IDS"), ",") {
+		if val = strings.TrimSpace(val); val == "" {
+			continue
+		}
+		if atoi, err := strconv.Atoi(val); err == nil {
 			imexChannelIDs = append(imexChannelIDs, atoi)
 		}
 	}
-	imexRequired := strings.EqualFold(strings.TrimSpace(os.Getenv("IMEX_REQUIRED")), "true")
+
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -115,12 +122,13 @@ func NewOptions() *Options {
 		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
 		DevicePluginPath:    pluginapi.DevicePluginPath,
 		PprofBindPort:       defaultPprofBindPort,
-		GDSEnabled:          gdsEnabled,
-		MOFEDEnabled:        mofedEnabled,
+		GDSEnabled:          util.GetEnvEnabled("NVIDIA_GDS"),
+		MOFEDEnabled:        util.GetEnvEnabled("NVIDIA_MOFED"),
+		GDRCopyEnabled:      util.GetEnvEnabled("NVIDIA_GDRCOPY"),
 		MigStrategy:         defaultMigStrategy,
 		FeatureGate:         featureGate,
 		ImexChannelIDs:      imexChannelIDs,
-		ImexRequired:        imexRequired,
+		ImexRequired:        util.GetEnvEnabled("IMEX_REQUIRED"),
 	}
 }
 
@@ -150,6 +158,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable)")
 	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")
 	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
+	pflag.BoolVar(&o.GDRCopyEnabled, "gdrcopy-enabled", o.GDRCopyEnabled, "Ensure that containers are started with NVIDIA_GDRCOPY=enabled.")
 	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")

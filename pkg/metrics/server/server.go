@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -34,6 +35,7 @@ type Server struct {
 	httpServer   *http.Server
 	middleware   Middleware
 	readyChecker healthz.Checker
+	tlsConfig    *tls.Config
 }
 
 type klogErrLog struct{}
@@ -175,8 +177,9 @@ func (s *Server) Start(ctx context.Context) (err error) {
 	route.AddMetricsHandle(routerHandle, handler)
 
 	s.httpServer = &http.Server{
-		Addr:    "0.0.0.0:" + strconv.Itoa(*s.port),
-		Handler: routerHandle,
+		Addr:      "0.0.0.0:" + strconv.Itoa(*s.port),
+		Handler:   routerHandle,
+		TLSConfig: s.tlsConfig,
 	}
 
 	idleConnsClosed := make(chan struct{})
@@ -196,7 +199,12 @@ func (s *Server) Start(ctx context.Context) (err error) {
 
 	klog.Infof("Metrics server starting on <0.0.0.0:%d>", *s.port)
 	// Block here until the service exits.
-	if err = s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if s.tlsConfig == nil {
+		err = s.httpServer.ListenAndServe()
+	} else {
+		err = s.httpServer.ListenAndServeTLS("", "")
+	}
+	if err != nil && err != http.ErrServerClosed {
 		close(idleConnsClosed)
 		return err
 	}
@@ -265,6 +273,12 @@ func WithCollectors(cs ...prometheus.Collector) Option {
 func WithDebugMetrics(b bool) Option {
 	return func(s *Server) {
 		s.debugMetrics = b
+	}
+}
+
+func WithTLSConfig(t *tls.Config) Option {
+	return func(s *Server) {
+		s.tlsConfig = t
 	}
 }
 

@@ -1,85 +1,45 @@
-FROM nvidia/cuda:12.4.1-devel-ubuntu20.04 AS builder
+# Declared here for use in FROM directives below
+ARG BASE_BUILD_IMAGE=unknown
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
-ARG APT_MIRROR
-
-ARG GOLANG_VERSION=1.25.3
-
-RUN echo "Asia/Shanghai" > /etc/timezone && ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
-
-RUN if [ -n "$APT_MIRROR" ]; then sed -i "s@http://archive.ubuntu.com@${APT_MIRROR}@g" /etc/apt/sources.list ; fi && \
-    apt-get -y update && apt-get -y install --no-install-recommends make cmake g++ ca-certificates wget && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN wget -nv -O - https://dl.google.com/go/go${GOLANG_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz | tar -C /usr/local -xz
-
-# Compile vgpu driver library files
-WORKDIR /vgpu-controller
-COPY library/ .
-RUN chmod +x build.sh && ./build.sh
-
-# Compile the vgpu manager binary file
-WORKDIR /go/src/vgpu-manager
-
-ENV GOPATH=/go
-ENV GO111MODULE=on
-ENV PATH=$GOPATH/bin:/usr/local/go/bin:$PATH
-ENV GOPROXY=https://goproxy.cn,direct
-
-# Copy the Go Modules manifests
-COPY go.mod go.mod
-COPY go.sum go.sum
-
-# cache deps before building and copying source so that we don't need to re-download as much
-# and so that source changes don't invalidate our downloaded layer
-RUN go mod download
-
-ARG GIT_BRANCH="unknown"
-ARG GIT_COMMIT="unknown"
-ARG GIT_TREE_STATE="dirty"
-ARG BUILD_DATE="1970-01-01T00:00:00Z"
-ARG BUILD_VERSION="N/A"
-
-# Copy the go source
-COPY cmd cmd/
-COPY pkg pkg/
-
-ARG LD_FLAGS="-X github.com/coldzerofear/vgpu-manager/pkg/version.version=${BUILD_VERSION} \
-             -X github.com/coldzerofear/vgpu-manager/pkg/version.gitBranch=${GIT_BRANCH} \
-             -X github.com/coldzerofear/vgpu-manager/pkg/version.gitCommit=${GIT_COMMIT} \
-             -X github.com/coldzerofear/vgpu-manager/pkg/version.gitTreeState=${GIT_TREE_STATE} \
-             -X github.com/coldzerofear/vgpu-manager/pkg/version.buildDate=${BUILD_DATE}"
-ENV CGO_CFLAGS="-D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv"
-ENV CGO_LDFLAGS_ALLOW="-Wl,--unresolved-symbols=ignore-in-object-files"
-
-RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-scheduler cmd/device-scheduler/*.go
-RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-plugin cmd/device-plugin/*.go
-RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-monitor cmd/device-monitor/*.go
-RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-webhook cmd/device-webhook/*.go
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-client cmd/device-client/*.go
+FROM ${BASE_BUILD_IMAGE} AS builder
 
 FROM quay.io/jitesoft/ubuntu:20.04
 
 ENV NVIDIA_DISABLE_REQUIRE="true"
 
+ARG BUILD_VERSION="N/A"
+ARG GIT_COMMIT="unknown"
+ARG BUILD_DATE="1970-01-01T00:00:00Z"
+
+LABEL io.k8s.display-name="VGPU-Manager"
+LABEL name="VGPU-Manager"
+LABEL summary="Kubernetes manager for NVIDIA vGPU resources"
+LABEL description="Manager binaries for scheduling, device plugin, monitoring, and webhook integration for NVIDIA vGPU resources"
+LABEL org.opencontainers.image.title="VGPU-Manager"
+LABEL org.opencontainers.image.description="Manager binaries for scheduling, device plugin, monitoring, and webhook integration for NVIDIA vGPU resources"
+LABEL org.opencontainers.image.url="https://github.com/coldzerofear/vgpu-manager"
+LABEL org.opencontainers.image.source="https://github.com/coldzerofear/vgpu-manager"
+LABEL org.opencontainers.image.version="${BUILD_VERSION}"
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.vendor="coldzerofear"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
 WORKDIR /
 
 COPY --from=builder /go/src/vgpu-manager/bin/device-scheduler /usr/local/bin/device-scheduler
-COPY --from=builder /go/src/vgpu-manager/bin/device-plugin /usr/local/bin/device-plugin
-COPY --from=builder /go/src/vgpu-manager/bin/device-monitor /usr/local/bin/device-monitor
-COPY --from=builder /go/src/vgpu-manager/bin/device-webhook /usr/local/bin/device-webhook
+COPY --from=builder /go/src/vgpu-manager/bin/device-plugin    /usr/local/bin/device-plugin
+COPY --from=builder /go/src/vgpu-manager/bin/device-monitor   /usr/local/bin/device-monitor
+COPY --from=builder /go/src/vgpu-manager/bin/device-webhook   /usr/local/bin/device-webhook
 
-COPY scripts scripts/
-COPY LICENSE /
-
-RUN chmod +x /scripts/* && mkdir -p /installed/registry
+# Add top-level license (AL2) file into the container image
+COPY --from=builder /LICENSE /LICENSE
+COPY --chmod=755 scripts/install_files.sh scripts/install_files.sh
 
 COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
-COPY --from=builder /vgpu-controller/build/mem_occupy_tool /installed/mem_occupy_tool
-COPY --from=builder /vgpu-controller/build/mem_managed_tool /installed/mem_managed_tool
-COPY --from=builder /vgpu-controller/build/mem_view_tool /installed/mem_view_tool
-COPY --from=builder /vgpu-controller/build/extract_container_pids /installed/extract_container_pids
-COPY --from=builder /go/src/vgpu-manager/bin/device-client /installed/registry/device-client
+COPY --from=builder /vgpu-controller/build/mem_occupy_tool    /installed/tools/mem_occupy_tool
+COPY --from=builder /vgpu-controller/build/mem_managed_tool   /installed/tools/mem_managed_tool
+COPY --from=builder /vgpu-controller/build/mem_view_tool      /installed/tools/mem_view_tool
+COPY --from=builder /go/src/vgpu-manager/bin/device-client    /installed/registry/device-client
 
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload

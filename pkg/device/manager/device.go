@@ -53,7 +53,7 @@ func (d Device) getUuid() string {
 	return ""
 }
 
-func (d Device) isHealthy() bool {
+func (d Device) IsHealthy() bool {
 	if d.GPU != nil {
 		return d.GPU.Healthy
 	}
@@ -142,7 +142,7 @@ func (m *DeviceManager) RemoveCleanupRegistryFunc(name string) {
 }
 
 func NewFakeDeviceManager(opts ...OptionFunc) *DeviceManager {
-	m := &DeviceManager{
+	manager := &DeviceManager{
 		client:               fake.NewSimpleClientset(),
 		featureGate:          featuregate.NewFeatureGate(),
 		unhealthy:            make(chan *Device),
@@ -152,9 +152,9 @@ func NewFakeDeviceManager(opts ...OptionFunc) *DeviceManager {
 		cleanupRegistryFuncs: make(map[string]RegistryFunc),
 	}
 	for _, opt := range opts {
-		opt(m)
+		opt(manager)
 	}
-	return m
+	return manager
 }
 
 type OptionFunc func(*DeviceManager)
@@ -269,9 +269,8 @@ func (m *DeviceManager) initDevices() (err error) {
 
 	if klog.V(5).Enabled() {
 		cmd := exec.Command(m.NvidiaSMIPath, "topo", "-m")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			klog.V(5).ErrorS(err, "failed to get numa information", "nvidia-smi", m.NvidiaSMIPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			klog.V(5).ErrorS(err, "failed to execute nvidia-smi", "nvidia-smi", m.NvidiaSMIPath)
 		} else {
 			klog.V(5).InfoS("nvidia-smi topo -m output", "result", string(out))
 		}
@@ -492,6 +491,26 @@ func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 	return deviceInfos
 }
 
+// RegisterNotify Notify immediate node device registration operation
+func (m *DeviceManager) RegisterNotify() {
+	select {
+	case m.reRegister <- struct{}{}:
+	default:
+		klog.Errorf("Re registration channel is full, stop sending requests")
+	}
+}
+
+// deviceNotify Send the device to each plugin subscribed to the channel
+func (m *DeviceManager) deviceNotify(dev *Device) {
+	for name, ch := range m.notify {
+		select {
+		case ch <- dev:
+		default:
+			klog.Errorf("Notification channel is full. Stop sending device %s unhealthy notifications to %s", dev.getUuid(), name)
+		}
+	}
+}
+
 func (m *DeviceManager) handleNotify() {
 	stopCh := m.stop
 	for {
@@ -500,25 +519,15 @@ func (m *DeviceManager) handleNotify() {
 			klog.V(3).Infoln("DeviceManager handle notify has stopped")
 			return
 		case dev := <-m.unhealthy:
-			if !dev.isHealthy() {
-				klog.V(4).Infof("Device: %s is aleady marked unhealthy. Skip notifications", dev.getUuid())
+			if !dev.IsHealthy() {
+				klog.V(4).Infof("Device %s is already marked unhealthy. Skip notifications", dev.getUuid())
 				continue
 			}
 
 			m.mut.Lock()
 			dev.setUnhealthy()
-			select {
-			case m.reRegister <- struct{}{}:
-			default:
-				klog.Errorf("Re registration channel is full, stop sending requests")
-			}
-			for name, ch := range m.notify {
-				select {
-				case ch <- dev:
-				default:
-					klog.Errorf("Notification channel is full. Stop sending device %s unhealthy notifications to %s", dev.getUuid(), name)
-				}
-			}
+			m.RegisterNotify()
+			m.deviceNotify(dev)
 			m.mut.Unlock()
 		}
 	}

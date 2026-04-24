@@ -189,29 +189,29 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extende
 }
 
 func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
-	memoryPolicyFunc := func(node *corev1.Node, info *device.NodeConfigInfo) error {
-		return nil
-	}
 	policy, _ := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation)
-	switch strings.ToLower(policy) {
-	case string(util.VirtualMemoryPolicy), "virt":
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	if policy == util.VirtualMemoryPolicy.String() || strings.HasPrefix(policy, "virt") {
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.VirtualMemoryPolicy)
-		memoryPolicyFunc = func(node *corev1.Node, info *device.NodeConfigInfo) error {
+		return func(node *corev1.Node, info *device.NodeConfigInfo) error {
 			if info.MemoryScaling <= 1 {
 				return errors.New(GPUMemTypeMismatch)
 			}
 			return nil
 		}
-	case string(util.PhysicalMemoryPolicy), "phy":
+	}
+	if policy == util.PhysicalMemoryPolicy.String() || strings.HasPrefix(policy, "phy") {
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.PhysicalMemoryPolicy)
-		memoryPolicyFunc = func(node *corev1.Node, info *device.NodeConfigInfo) error {
+		return func(node *corev1.Node, info *device.NodeConfigInfo) error {
 			if info.MemoryScaling > 1 {
 				return errors.New(GPUMemTypeMismatch)
 			}
 			return nil
 		}
 	}
-	return memoryPolicyFunc
+	return func(node *corev1.Node, info *device.NodeConfigInfo) error {
+		return nil
+	}
 }
 
 const (
@@ -310,7 +310,7 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 	if !ok || len(preAlloc) == 0 {
 		return "", false
 	}
-	podDevices := device.PodDevices{}
+	podDevices := device.PodDeviceClaim{}
 	err := podDevices.UnmarshalText(preAlloc)
 	return nodeName, err == nil
 }
@@ -454,6 +454,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 
 func PodUsedGPUTopologyMode(pod *corev1.Pod) util.TopologyMode {
 	topoMode, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
+	topoMode = strings.ToLower(topoMode)
 	switch {
 	case topoMode == string(util.LinkTopology) && device.IsGPUTopologyEnabled() && util.IsSingleContainerMultiGPUs(pod):
 		return util.LinkTopology

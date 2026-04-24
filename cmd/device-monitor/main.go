@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,6 +21,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
+	tlsconfig "github.com/grepplabs/cert-source/config"
+	tlsserver "github.com/grepplabs/cert-source/tls/server"
+	tlsserverconfig "github.com/grepplabs/cert-source/tls/server/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/informers"
@@ -49,7 +53,6 @@ func main() {
 	}
 	kubeConfig, err := client.NewKubeConfig(
 		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
-		//client.WithDefaultContentType(),
 		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Fatalf("Create kubeConfig failed: %v", err)
@@ -58,7 +61,10 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
-	nodeConfig, err := node.NewNodeConfig(node.WithMonitorOptions(*opt), false)
+	nodeConfig, err := node.NewNodeConfig(
+		node.WithNodeNameOption(opt.NodeName),
+		node.WithConfigPathOption(opt.NodeConfigPath),
+		node.WithCGroupDriverOption(opt.CGroupDriver))
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
@@ -81,14 +87,19 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create node gpu collector failed: %v", err)
 	}
-	rateLimiter := rate.NewLimiter(rate.Every(time.Second), 1)
+	minScrapeIntervalDuration := time.Second
+	if opt.MinScrapeInterval > 1 {
+		minScrapeIntervalDuration *= time.Duration(opt.MinScrapeInterval)
+	}
+
+	infoCollector := collector.NewBuildInfoCollector(nodeConfig.GetNodeName())
 	opts := []server.Option{
-		server.WithLimiter(rateLimiter),
-		server.WithCollectors(nodeCollector),
 		server.WithPort(&opt.ServerBindPort),
 		server.WithTimeoutSecond(30),
 		server.WithDebugMetrics(opt.PprofBindPort > 0),
+		server.WithCollectors(nodeCollector, infoCollector),
 		server.WithLabels(prometheus.Labels{"service": "vGPU"}),
+		server.WithLimiter(rate.NewLimiter(rate.Every(minScrapeIntervalDuration), 1)),
 		server.WithReadyChecker(func(req *http.Request) error {
 			if !util.InformerFactoryHasSynced(factory, req.Context()) {
 				return errors.New("informer has not completed all synchronization")
@@ -96,6 +107,30 @@ func main() {
 			return nil
 		}),
 	}
+	if opt.EnableTls {
+		if len(opt.TlsKeyFile) == 0 || len(opt.TlsCertFile) == 0 {
+			klog.Fatalf("Enable Tls but did not specify a certificate file: "+
+				"tlsKeyFile: '%s', tlsCertFile: '%s'", opt.TlsKeyFile, opt.TlsCertFile)
+		}
+
+		tlsConfig, err := tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
+			Enable:  opt.EnableTls,
+			Refresh: time.Duration(opt.CertRefreshInterval) * time.Second,
+			File: tlsconfig.TLSServerFiles{
+				Key:  opt.TlsKeyFile,
+				Cert: opt.TlsCertFile,
+			},
+			// Using http/1.1 will prevent from being vulnerable to the HTTP/2 Stream Cancellation and Rapid Reset CVEs.
+			// For more information see:
+			// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
+			// - https://github.com/advisories/GHSA-4374-p667-p6c8
+		}, tlsserver.WithTLSServerNextProtos([]string{"http/1.1"}))
+		if err != nil {
+			klog.Fatalf("GetServerTLSConfig failed: %v", err)
+		}
+		opts = append(opts, server.WithTLSConfig(tlsConfig))
+	}
+
 	if opt.EnableRBAC {
 		httpClient, err := rest.HTTPClientFor(kubeConfig)
 		if err != nil {

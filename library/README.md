@@ -40,8 +40,9 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 * CUDA_CORE_LIMIT_<index>: gpu core limit
 * CUDA_CORE_SOFT_LIMIT_<index>: gpu core soft limit
 * CUDA_MEM_OVERSOLD_<index>: gpu memory oversold switch
-* GPU_DEVICES_UUID: gpu device uuids
-* ENV_COMPATIBILITY_MODE: environment compatibility mode
+* MANAGER_VISIBLE_DEVICES: List of GPU UUIDs visible to container
+* MANAGER_VISIBLE_DEVICE_<index>: Single GPU UUID visible to the container
+* MANAGER_COMPATIBILITY_MODE: Environment compatibility mode
 
 ## Log level
 
@@ -51,8 +52,8 @@ Use environment variable `LOGGER_LEVEL` to set the visibility of logs
 | ------------------ |---------------------------------------------|
 | 0                  | fatal                                       |
 | 1                  | errors,fatal                                |
-| 2                  | warnings,errors,fatal                       |
-| 3 (default)        | infos,warnings,errors,fatal                 |
+| 2 (default)        | warnings,errors,fatal                       |
+| 3                  | infos,warnings,errors,fatal                 |
 | 4                  | verbose,infos,warnings,errors,fatal         |
 | 5                  | details,verbose,infos,warnings,errors,fatal |
 

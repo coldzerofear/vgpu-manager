@@ -37,8 +37,7 @@ webhooks:
         namespace: kube-system
         path: /pods/mutate
         port: 443
-    failurePolicy: Ignore
-#    failurePolicy: Fail
+    failurePolicy: Fail # Ignore
     matchPolicy: Equivalent
     name: mutatepod.vgpu-manager.io
     namespaceSelector:

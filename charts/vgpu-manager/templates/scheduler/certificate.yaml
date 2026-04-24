@@ -1,0 +1,45 @@
+{{- if and .Values.scheduler.enabled .Values.scheduler.schedulerExtender.tls.enabled -}}
+{{- if .Values.scheduler.schedulerExtender.tls.certManager.enabled -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}-cert
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ include "vgpu-manager.scheduler" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "vgpu-manager.scheduler" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "vgpu-manager.scheduler" . }}-issuer
+  secretName: {{ include "vgpu-manager.scheduler" . }}-secret
+  duration: {{ printf "%dh" (mul .Values.scheduler.schedulerExtender.tls.certDuration 24) }}
+  renewBefore: {{ printf "%dh" (mul .Values.scheduler.schedulerExtender.tls.certManager.certRenewBefore 24) }}
+{{- else }}
+{{- $webhookSvcName := include "vgpu-manager.scheduler" . }}
+{{- $webhookSvcAltNames := list (printf "%s.%s.svc" $webhookSvcName .Release.Namespace) (printf "%s.%s.svc.cluster.local" $webhookSvcName .Release.Namespace) }}
+{{- $certName := printf "%s-cert" (include "vgpu-manager.scheduler" .) }}
+{{- $duration := int .Values.scheduler.schedulerExtender.tls.certDuration }}
+{{- $ca := genCA $certName $duration }}
+{{- $cert := genSignedCert (printf "%s.%s" $webhookSvcName .Release.Namespace) nil $webhookSvcAltNames $duration $ca }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}-secret
+  namespace: {{ .Release.Namespace | quote }}
+  annotations:
+    "helm.sh/hook": "pre-install,pre-upgrade"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $ca.Cert | b64enc }}
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+{{- end }}
+{{- end }}

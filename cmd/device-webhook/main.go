@@ -3,8 +3,10 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
+	pkgclient "github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/component-base/logs"
 	"k8s.io/klog/v2"
+	rtclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
@@ -26,6 +29,17 @@ func main() {
 	defer logs.FlushLogs()
 	log.SetLogger(klog.NewKlogr())
 	util.MustInitGlobalDomain(opt.Domain)
+
+	config, err := pkgclient.NewKubeConfig(pkgclient.WithDefaultUserAgent())
+	if err != nil {
+		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
+	}
+	client, err := rtclient.New(config, rtclient.Options{
+		Scheme: scheme.Scheme,
+	})
+	if err != nil {
+		klog.Fatalf("Create kubeClient failed: %v", err)
+	}
 
 	// Start pprof debug debugging service.
 	route.StartDebugServer(opt.PprofBindPort)
@@ -53,7 +67,12 @@ func main() {
 	server.Register("/healthz", probeHandler)
 	server.Register("/readyz", probeHandler)
 
-	if err := pkgwebhook.RegisterWebhookToServer(server, scheme.Scheme, opt); err != nil {
+	if opt.DefaultConvertToDRA {
+		// DRA defaults to enabling multi card GPU topology management.
+		device.SetGPUTopologyEnabled(true)
+	}
+
+	if err := pkgwebhook.RegisterWebhookToServer(server, client, opt); err != nil {
 		klog.Fatalf("Register webhook to server failed: %v", err)
 	}
 

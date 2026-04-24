@@ -52,19 +52,35 @@ func main() {
 
 	kubeConfig, err := client.NewKubeConfig(
 		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
-		//client.WithDefaultContentType(),
 		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Fatalf("Create kubeConfig failed: %v", err)
 	}
 	kubeClient, err := client.NewClientSet(
 		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
-		//client.WithDefaultContentType(),
 		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
-	nodeConfig, err := node.NewNodeConfig(node.WithDevicePluginOptions(*opt), true)
+
+	nodeConfig, err := node.NewNodeConfig(
+		node.WithNodeNameOption(opt.NodeName),
+		node.WithConfigPathOption(opt.NodeConfigPath),
+		node.WithCGroupDriverOption(opt.CGroupDriver),
+		node.WithMigStrategyOption(opt.MigStrategy),
+		node.WithDeviceListStrategyOption(opt.DeviceListStrategy),
+		node.WithDeviceSplitCountOption(opt.DeviceSplitCount),
+		node.WithDevicePluginPathOption(opt.DevicePluginPath),
+		node.WithDeviceMemoryScalingOption(opt.DeviceMemoryScaling),
+		node.WithDeviceMemoryFactorOption(opt.DeviceMemoryFactor),
+		node.WithDeviceCoresScalingOption(opt.DeviceCoresScaling),
+		node.WithExcludeDevicesOption(opt.ExcludeDevices),
+		node.WithGDSEnabledOption(opt.GDSEnabled),
+		node.WithMOFEDEnabledOption(opt.MOFEDEnabled),
+		node.WithGDRCopyEnabledOption(opt.GDRCopyEnabled),
+		node.WithOpenKernelModulesOption(opt.OpenKernelModules),
+		node.WithIMEXOption(opt.ImexChannelIDs, opt.ImexRequired),
+		node.WithCheckFieldsOption(true))
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}

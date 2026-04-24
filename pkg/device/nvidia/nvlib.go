@@ -52,19 +52,20 @@ type DriverVersion struct {
 }
 
 type GpuInfo struct {
-	Index                 int
-	UUID                  string `json:"uuid"`
-	Minor                 int
-	MigEnabled            bool
-	PciInfo               nvml.PciInfo
-	Memory                nvml.Memory
-	ProductName           string
-	Brand                 string
-	Architecture          string
-	CudaComputeCapability string
-	MigProfiles           []*MigProfileInfo
-	DriverVersion         DriverVersion
-	PcieRootAttr          *deviceattribute.DeviceAttribute
+	Index                 int                              `json:"-"`
+	UUID                  string                           `json:"uuid"`
+	Minor                 int                              `json:"-"`
+	MigEnabled            bool                             `json:"-"`
+	PciInfo               nvml.PciInfo                     `json:"-"`
+	Memory                nvml.Memory                      `json:"-"`
+	ProductName           string                           `json:"-"`
+	Brand                 string                           `json:"-"`
+	Architecture          string                           `json:"-"`
+	CudaComputeCapability string                           `json:"-"`
+	MigProfiles           []*MigProfileInfo                `json:"-"`
+	DriverVersion         DriverVersion                    `json:"-"`
+	PcieRootAttr          *deviceattribute.DeviceAttribute `json:"-"`
+	AddressingMode        *string                          `json:"-"`
 }
 
 type GpuDevice struct {
@@ -88,16 +89,16 @@ func (g GpuInfo) GetNumaNode() (int32, bool) {
 }
 
 type MigInfo struct {
-	Index         int
-	UUID          string `json:"uuid"`
-	Profile       string
-	Parent        *GpuInfo
-	Memory        nvml.Memory
-	Placement     *MigDevicePlacement
-	GiProfileInfo *nvml.GpuInstanceProfileInfo
-	GiInfo        *nvml.GpuInstanceInfo
-	CiProfileInfo *nvml.ComputeInstanceProfileInfo
-	CiInfo        *nvml.ComputeInstanceInfo
+	Index         int                              `json:"-"`
+	UUID          string                           `json:"uuid"`
+	Profile       string                           `json:"profile"`
+	Parent        *GpuInfo                         `json:"-"`
+	Memory        nvml.Memory                      `json:"-"`
+	Placement     *MigDevicePlacement              `json:"-"`
+	GiProfileInfo *nvml.GpuInstanceProfileInfo     `json:"-"`
+	GiInfo        *nvml.GpuInstanceInfo            `json:"-"`
+	CiProfileInfo *nvml.ComputeInstanceProfileInfo `json:"-"`
+	CiInfo        *nvml.ComputeInstanceInfo        `json:"-"`
 }
 
 func (m *MigInfo) GetPaths() ([]string, error) {
@@ -222,7 +223,17 @@ func NewDeviceLib(root RootPath) (*DeviceLib, error) {
 	return &d, nil
 }
 
+func (l DeviceLib) NvmlInitWithFlags(flags uint32) error {
+	klog.V(6).Infof("Call NVML InitWithFlags: %d", flags)
+	ret := l.nvmlInterface.InitWithFlags(flags)
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("error initializing NVML: %v", ret)
+	}
+	return nil
+}
+
 func (l DeviceLib) NvmlInit() error {
+	klog.V(6).Infof("Call NVML Init")
 	ret := l.nvmlInterface.Init()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error initializing NVML: %v", ret)
@@ -231,6 +242,7 @@ func (l DeviceLib) NvmlInit() error {
 }
 
 func (l DeviceLib) NvmlShutdown() {
+	klog.V(6).Infof("Call NVML shutdown")
 	ret := l.nvmlInterface.Shutdown()
 	if ret != nvml.SUCCESS {
 		klog.Warningf("error shutting down NVML: %v", ret)
@@ -275,10 +287,10 @@ func (l DeviceLib) GetDriverVersion() (DriverVersion, error) {
 }
 
 func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) {
-	if err := l.NvmlInit(); err != nil {
-		return nil, err
-	}
-	defer l.NvmlShutdown()
+	//if err := l.NvmlInit(); err != nil {
+	//	return nil, err
+	//}
+	//defer l.NvmlShutdown()
 
 	minor, ret := device.GetMinorNumber()
 	if ret == nvml.ERROR_NOT_SUPPORTED {
@@ -322,6 +334,19 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	driverVersion, err := l.GetDriverVersion()
 	if err != nil {
 		return nil, err
+	}
+
+	// Get the memory-addressing mode supported by the device.
+	// On coherent-memory systems, the possible modes are:
+	//   - HMM  (Hardware Memory Management)
+	//   - ATS  (Address Translation Service)
+	//   - None (Supported by the platform but currently inactive)
+	//   - ""   (Not supported by the platform)
+	var addressingMode *string
+	if mode, err := device.GetAddressingModeAsString(); err != nil {
+		return nil, fmt.Errorf("error getting addressing mode for device %d: %w", index, err)
+	} else if mode != "" {
+		addressingMode = &mode
 	}
 
 	var pcieRootAttr *deviceattribute.DeviceAttribute
@@ -398,6 +423,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		MigProfiles:           migProfiles,
 		PcieRootAttr:          pcieRootAttr,
 		DriverVersion:         driverVersion,
+		AddressingMode:        addressingMode,
 	}
 
 	return gpuInfo, nil
@@ -408,10 +434,10 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 		return nil, nil
 	}
 
-	if err := l.NvmlInit(); err != nil {
-		return nil, err
-	}
-	defer l.NvmlShutdown()
+	//if err := l.NvmlInit(); err != nil {
+	//	return nil, err
+	//}
+	//defer l.NvmlShutdown()
 
 	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
 	if ret != nvml.SUCCESS {
@@ -571,113 +597,3 @@ func (l DeviceLib) SetComputeMode(uuids []string, mode string) error {
 	}
 	return nil
 }
-
-// TODO: Reenable dynamic MIG functionality once it is supported in Kubernetes 1.32
-//func (l DeviceLib) CreateMigDevice(gpu *GpuInfo, profile nvdev.MigProfile, placement *nvml.GpuInstancePlacement) (*MigInfo, error) {
-//	if err := l.NvmlInit(); err != nil {
-//		return nil, err
-//	}
-//	defer l.NvmlShutdown()
-//
-//	profileInfo := profile.GetInfo()
-//
-//	device, ret := l.DeviceGetHandleByUUID(gpu.UUID)
-//	if ret != nvml.SUCCESS {
-//		return nil, fmt.Errorf("error getting GPU device handle: %v", ret)
-//	}
-//
-//	giProfileInfo, ret := device.GetGpuInstanceProfileInfo(profileInfo.GIProfileID)
-//	if ret != nvml.SUCCESS {
-//		return nil, fmt.Errorf("error getting GPU instance profile info for '%v': %v", profile, ret)
-//	}
-//
-//	gi, ret := device.CreateGpuInstanceWithPlacement(&giProfileInfo, placement)
-//	if ret != nvml.SUCCESS {
-//		return nil, fmt.Errorf("error creating GPU instance for '%v': %v", profile, ret)
-//	}
-//
-//	giInfo, ret := gi.GetInfo()
-//	if ret != nvml.SUCCESS {
-//		return nil, fmt.Errorf("error getting GPU instance info for '%v': %v", profile, ret)
-//	}
-//
-//	ciProfileInfo, ret := gi.GetComputeInstanceProfileInfo(profileInfo.CIProfileID, profileInfo.CIEngProfileID)
-//	if ret != nvml.SUCCESS {
-//		return nil, fmt.Errorf("error getting Compute instance profile info for '%v': %v", profile, ret)
-//	}
-//
-//	ci, ret := gi.CreateComputeInstance(&ciProfileInfo)
-//	if ret != nvml.SUCCESS {
-//		return nil, fmt.Errorf("error creating Compute instance for '%v': %v", profile, ret)
-//	}
-//
-//	ciInfo, ret := ci.GetInfo()
-//	if ret != nvml.SUCCESS {
-//		return nil, fmt.Errorf("error getting GPU instance info for '%v': %v", profile, ret)
-//	}
-//
-//	uuid := ""
-//	err := walkMigDevices(device, func(i int, migDevice nvml.Device) error {
-//		giID, ret := migDevice.GetGpuInstanceId()
-//		if ret != nvml.SUCCESS {
-//			return fmt.Errorf("error getting GPU instance ID for MIG device: %v", ret)
-//		}
-//		ciID, ret := migDevice.GetComputeInstanceId()
-//		if ret != nvml.SUCCESS {
-//			return fmt.Errorf("error getting Compute instance ID for MIG device: %v", ret)
-//		}
-//		if giID != int(giInfo.Id) || ciID != int(ciInfo.Id) {
-//			return nil
-//		}
-//		uuid, ret = migDevice.GetUUID()
-//		if ret != nvml.SUCCESS {
-//			return fmt.Errorf("error getting UUID for MIG device: %v", ret)
-//		}
-//		return nil
-//	})
-//	if err != nil {
-//		return nil, fmt.Errorf("error processing MIG device for GI and CI just created: %w", err)
-//	}
-//	if uuid == "" {
-//		return nil, fmt.Errorf("unable to find MIG device for GI and CI just created")
-//	}
-//
-//	migInfo := &MigInfo{
-//		UUID:    uuid,
-//		Parent:  gpu,
-//		Profile: profile.String(),
-//		GiInfo:  &giInfo,
-//		CiInfo:  &ciInfo,
-//	}
-//
-//	return migInfo, nil
-//}
-//
-//func (l DeviceLib) DeleteMigDevice(mig *MigInfo) error {
-//	if err := l.NvmlInit(); err != nil {
-//		return err
-//	}
-//	defer l.NvmlShutdown()
-//
-//	parent, ret := l.DeviceGetHandleByUUID(mig.Parent.UUID)
-//	if ret != nvml.SUCCESS {
-//		return fmt.Errorf("error getting device from UUID '%v': %v", mig.Parent.UUID, ret)
-//	}
-//	gi, ret := parent.GetGpuInstanceById(int(mig.GiInfo.Id))
-//	if ret != nvml.SUCCESS {
-//		return fmt.Errorf("error getting GPU instance ID for MIG device: %v", ret)
-//	}
-//	ci, ret := gi.GetComputeInstanceById(int(mig.CiInfo.Id))
-//	if ret != nvml.SUCCESS {
-//		return fmt.Errorf("error getting Compute instance ID for MIG device: %v", ret)
-//	}
-//	ret = ci.Destroy()
-//	if ret != nvml.SUCCESS {
-//		return fmt.Errorf("error destroying Compute Instance: %v", ret)
-//	}
-//	ret = gi.Destroy()
-//	if ret != nvml.SUCCESS {
-//		return fmt.Errorf("error destroying GPU Instance: %v", ret)
-//	}
-//	return nil
-//}

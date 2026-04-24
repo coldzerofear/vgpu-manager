@@ -15,7 +15,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -24,15 +23,19 @@ import (
 
 var (
 	initKubeConfig sync.Once
+	initErr        error
 	kubeConfig     *rest.Config
 )
 
 func InitKubeConfig(masterUrl, kubeconfig string) error {
-	var err error
 	initKubeConfig.Do(func() {
-		kubeConfig, err = clientcmd.BuildConfigFromFlags(masterUrl, kubeconfig)
+		if kubeconfig == "" && masterUrl == "" {
+			kubeConfig, initErr = rest.InClusterConfig()
+		} else {
+			kubeConfig, initErr = clientcmd.BuildConfigFromFlags(masterUrl, kubeconfig)
+		}
 	})
-	return err
+	return initErr
 }
 
 type Option func(*rest.Config)
@@ -120,12 +123,6 @@ func WithUserAgent(userAgent string) Option {
 	return func(config *rest.Config) {
 		config.UserAgent = userAgent
 	}
-}
-
-func WithDefaultContentType() Option {
-	return WithContentType(
-		strings.Join([]string{runtime.ContentTypeProtobuf, runtime.ContentTypeJSON}, ","),
-		runtime.ContentTypeJSON)
 }
 
 func WithContentType(acceptContentTypes, contentType string) Option {

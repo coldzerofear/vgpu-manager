@@ -41,7 +41,11 @@ find "$SRC_DIR" -type f | while read -r src_file; do
     fi
 
     if [[ "$do_copy" == true ]]; then
-        cp -f --preserve=all "$src_file" "$dest_file"
+        if cp --help 2>&1 | grep -q -- '--preserve'; then
+            cp -f --preserve=all "$src_file" "$dest_file"
+        else
+            cp -fp "$src_file" "$dest_file"
+        fi
     fi
 done
 

@@ -18,7 +18,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/utils/ptr"
 )
 
 func Test_WriDriverConfigFile(t *testing.T) {
@@ -26,11 +25,11 @@ func Test_WriDriverConfigFile(t *testing.T) {
 		DriverVersion:     "",
 		CudaDriverVersion: nvidia.CudaDriverVersion(12020),
 	}
-	config, err := node.NewNodeConfig(func(spec *node.NodeConfigSpec) {
-		spec.NodeName = "testNode"
-		spec.DeviceCoresScaling = ptr.To(float64(1))
-		spec.DeviceMemoryScaling = ptr.To(float64(1))
-	}, false)
+	config, err := node.NewNodeConfig(
+		node.WithNodeNameOption("testNode"),
+		node.WithDeviceCoresScalingOption(1),
+		node.WithDeviceMemoryScalingOption(1),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +98,7 @@ func Test_WriDriverConfigFile(t *testing.T) {
 		path    string
 		nodes   []*corev1.Node
 		pod     *corev1.Pod
-		devices device.ContainerDevices
+		devices device.ContainerDeviceClaim
 	}{
 		{
 			name:  "example 1",
@@ -112,9 +111,9 @@ func Test_WriDriverConfigFile(t *testing.T) {
 					UID:       uuid.NewUUID(),
 				},
 			},
-			devices: device.ContainerDevices{
+			devices: device.ContainerDeviceClaim{
 				Name: "test",
-				Devices: []device.ClaimDevice{
+				DeviceClaims: []device.DeviceClaim{
 					{
 						Id:     0,
 						Uuid:   gpuUUID0,
@@ -135,9 +134,9 @@ func Test_WriDriverConfigFile(t *testing.T) {
 					UID:       uuid.NewUUID(),
 				},
 			},
-			devices: device.ContainerDevices{
+			devices: device.ContainerDeviceClaim{
 				Name: "test",
-				Devices: []device.ClaimDevice{
+				DeviceClaims: []device.DeviceClaim{
 					{
 						Id:     0,
 						Uuid:   gpuUUID0,
@@ -158,9 +157,9 @@ func Test_WriDriverConfigFile(t *testing.T) {
 					UID:       uuid.NewUUID(),
 				},
 			},
-			devices: device.ContainerDevices{
+			devices: device.ContainerDeviceClaim{
 				Name: "test",
-				Devices: []device.ClaimDevice{
+				DeviceClaims: []device.DeviceClaim{
 					{
 						Id:     0,
 						Uuid:   gpuUUID0,

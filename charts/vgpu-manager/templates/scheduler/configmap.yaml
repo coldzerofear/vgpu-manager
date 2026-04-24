@@ -9,8 +9,9 @@ metadata:
     {{- include "vgpu-manager.labels" . | nindent 4 }}
 data:
   {{- if ge (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 22 }}
+  {{/* K8s >= 1.22: Use KubeSchedulerConfiguration API */}}
   config.yaml: |
-    {{- if gt (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 25}}
+    {{- if ge (regexReplaceAll "[^0-9]" .Capabilities.KubeVersion.Minor "" | int) 25}}
     apiVersion: kubescheduler.config.k8s.io/v1
     {{- else }}
     apiVersion: kubescheduler.config.k8s.io/v1beta2
@@ -23,10 +24,17 @@ data:
     profiles:
     - schedulerName: {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
     extenders:
+    {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+    - urlPrefix: "https://127.0.0.1:{{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}/scheduler"
+      enableHTTPS: true
+      tlsConfig:
+        insecure: true
+    {{- else }}
     - urlPrefix: "http://127.0.0.1:{{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}/scheduler"
+      enableHTTPS: false
+    {{- end }}
       filterVerb: filter
       bindVerb: bind
-      enableHTTPS: false
       nodeCacheCapable: true
       weight: 1
       httpTimeout: 30s
@@ -38,16 +46,25 @@ data:
       - name: "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-memory"
         ignoredByScheduler: true
   {{- else }}
+  {{/* K8s < 1.22: Use legacy Policy API */}}
   config.json: |
     {
       "kind": "Policy",
       "apiVersion": "v1",
       "extenders": [
         {
+          {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+          "urlPrefix": "https://127.0.0.1:{{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}/scheduler",
+          "enableHttps": true,
+          "tlsConfig": {
+            "insecure": true
+          },
+          {{- else }}
           "urlPrefix": "http://127.0.0.1:{{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}/scheduler",
+          "enableHttps": false,
+          {{- end }}
           "filterVerb": "filter",
           "bindVerb": "bind",
-          "enableHttps": false,
           "weight": 1,
           "nodeCacheCapable": true,
           "httpTimeout": 30000000000,

@@ -18,8 +18,10 @@ NodeConfig is array, with each array element having the following structural par
 | excludeDevices      | string (example: "0,1,2"/"0..2")           | Specify the GPU IDs or UUIDs that need to be excluded (optional)                       |
 | gdsEnabled          | bool                                       | Ensure that containers are started with NVIDIA_GDS=enabled (optional)                  |
 | mofedEnabled        | bool                                       | Ensure that containers are started with NVIDIA_MOFED=enabled (optional)                |
+| gdrcopyEnabled      | bool                                       | Ensure that containers are started with NVIDIA_GDRCOPY=enabled (optional)              |
 | openKernelModules   | bool                                       | If using the open-gpu-kernel-modules, open it and enable compatibility mode (optional) |
-| migStrategy         | string (support: "none"/"mixed"/"single")  | Strategy for starting MIG device plugin service.  (optional)                           |
+| migStrategy         | string (support: "none"/"mixed"/"single")  | Strategy for starting MIG device plugin service (optional)                             |
+| imex                | object                                     | Nvidia IMEX channels configuration (optional)                                          |
 
 ## Example
 
@@ -38,6 +40,11 @@ NodeConfig currently supports both JSON and YAML formats, Identify and use the c
     "deviceMemoryFactor": 1,
     "deviceCoresScaling": 1.0,
     "excludeDevices": "0..2",
+    "migStrategy": "mixed",
+    "imex": {
+      "channelIDs": [0],
+      "required": true
+    },
     "openKernelModules": true
   }
 ]
@@ -123,6 +130,10 @@ configs:
    deviceMemoryFactor: 1
    deviceCoresScaling: 1.0
    excludeDevices: "0..2"
+   migStrategy: mixed
+   imex:
+     channelIDs: [0]
+     required: true
    openKernelModules: true
 ```
 
@@ -222,10 +233,11 @@ spec:
       - name: device-plugin
         command:
         - deviceplugin
-        - --node-config-path=/config/nodeConfig.json # Specify the path of the nodeconfig file
+        - --node-config-path=/config/nodeConfig.json # Specify the path of the node config file
         volumeMounts: # Add Mount
         - name: node-config
-          mountPath: /config        
+          mountPath: /config
+      volumes:
       - name: node-config
         configMap:    # Add nodeConfig configmap
           name: vgpu-manager-device-plugin-config

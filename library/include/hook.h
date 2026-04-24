@@ -91,13 +91,6 @@ extern "C" {
 
 #define HOST_PROC_CGROUP_PID_PATH (VGPU_MANAGER_PATH "/.host_proc/%d/cgroup")
 
-#define HOST_CGROUP_PATH (VGPU_MANAGER_PATH "/.host_cgroup")
-
-#define CGROUP_PROCS_FILE "cgroup.procs"
-#define CGROUP_THREADS_FILE "cgroup.threads"
-
-#define HOST_CGROUP_PID_BASE_PATH (VGPU_MANAGER_PATH "/.host_cgroup/%s")
-
 #define TMP_DIR "/tmp"
 
 #define VGPU_LOCK_DIR "/.vgpu_lock"
@@ -146,6 +139,8 @@ extern "C" {
 
 #define GET_VALID_VALUE(x) (((x) >= 0 && (x) <= 100) ? (x) : 0)
 #define CODEC_NORMALIZE(x) (x * 85 / 100)
+
+#define FAKE_GPU_UUID "GPU-00000000-0000-0000-0000-000000000000"
 
 typedef struct {
   void *fn_ptr;
@@ -301,20 +296,30 @@ static const char *_level_names[] = {
   "DETAIL"    /* LOG_LEVEL_DETAIL  */
 };
 
+static inline int get_logger_print_level(void) {
+  static int print_level = -1;
+
+  if (print_level == -1) {
+    char *print_level_str = getenv("LOGGER_LEVEL");
+    if (print_level_str && *print_level_str) {
+      print_level = (int)strtoul(print_level_str, NULL, 10);
+    }
+    print_level = print_level < FATAL ? WARNING : print_level;
+    print_level = print_level > DETAIL ? DETAIL : print_level;
+  }
+
+  return print_level;
+}
+
+#define LOGGER_SHOULD_PRINT(level) \
+  ((level) >= 0 && (level) <= get_logger_print_level())
+
 #define LOGGER(level, format, ...)                                  \
   ({                                                                \
-    static int _print_level = -1;                                   \
-    if (_print_level == -1) {                                       \
-      char *_print_level_str = getenv("LOGGER_LEVEL");              \
-      if (_print_level_str && *_print_level_str) {                  \
-        _print_level = (int)strtoul(_print_level_str, NULL, 10);    \
-      }                                                             \
-      _print_level = _print_level < INFO ? FATAL : _print_level;    \
-      _print_level = _print_level > DETAIL ? DETAIL : _print_level; \
-    }                                                               \
-    if (level >= 0 && level <= _print_level) {                      \
-      fprintf(stderr, "[vGPU %s(%d|%ld|%s|%d)]: " format "\n",      \
-              _level_names[level], getpid(), pthread_self(),        \
+    if (LOGGER_SHOULD_PRINT(level)) {                               \
+      fprintf(stderr, "[vGPU %s(%d|%" PRIuPTR "|%s|%d)]: " format "\n", \
+              _level_names[level], getpid(),                        \
+              (uintptr_t)pthread_self(),                            \
               basename(__FILE__), __LINE__, ##__VA_ARGS__);         \
     }                                                               \
     if (unlikely(level == FATAL)) {                                 \
@@ -326,7 +331,11 @@ static const char *_level_names[] = {
  * Load library and initialize some data
  */
 void load_necessary_data();
-void _load_necessary_data();
+
+/**
+ * Initialize device ID mapping relationship
+ */
+void init_devices_mapping();
 
 /**
  * Retrieve the currently used memory of the device
