@@ -1326,7 +1326,7 @@ static inline int is_abi_conflict_base(const char *sym) {
      * the caller uses the returned pointer to look up other CUDA symbols,
      * and those subsequent lookups must STILL go through our hook so
      * cuda_hooks_entry[] substitution can happen. Handling of that case
-     * lives directly in cuGetProcAddress() / _cuGetProcAddress_v2() where
+     * lives directly in cuGetProcAddress() / cuGetProcAddress_v2() where
      * we substitute *pfn with our matching-ABI wrapper (4-arg hook -> our
      * 4-arg wrapper, 5-arg hook -> our 5-arg wrapper).
      */

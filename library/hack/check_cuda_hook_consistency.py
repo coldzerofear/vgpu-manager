@@ -58,7 +58,7 @@ ABI_CONFLICT_FAMILIES = {
     "cuGraphRemoveDependencies":     ("cuGraphRemoveDependencies",       "cuGraphRemoveDependencies_v2"),
     "cuGraphAddNode":                ("cuGraphAddNode",                  "cuGraphAddNode_v2"),
     # cuGetProcAddress is handled inline in cuGetProcAddress() and
-    # _cuGetProcAddress_v2() rather than via is_abi_conflict_base(), so
+    # cuGetProcAddress_v2() rather than via is_abi_conflict_base(), so
     # it is intentionally NOT in this table.
 }
 

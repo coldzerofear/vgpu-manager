@@ -172,8 +172,6 @@ CUresult cuDriverGetVersion(int *driverVersion);
 CUresult cuInit(unsigned int flag);
 CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
                           cuuint64_t flags);
-CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
-                          cuuint64_t flags, void *symbolStatus);
 CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                           cuuint64_t flags, void *symbolStatus);           
 CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
@@ -1152,7 +1150,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
      * The wrapper we substitute in must match the 4-arg v1 ABI of this
      * hook's own signature, so the caller invokes it with the parameter
      * frame we expect. (The 5-arg v2 case is handled inside the 5-arg
-     * _cuGetProcAddress_v2 hook below.)
+     * cuGetProcAddress_v2 hook below.)
      */
     if (strcmp(symbol, "cuGetProcAddress") == 0) {
       LOGGER(VERBOSE, "cuGetProcAddress: substitute self-lookup with our "
@@ -1203,7 +1201,7 @@ DONE:
   return ret;
 }
 
-CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
+CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                              cuuint64_t flags, void *symbolStatus) {
   CUresult ret;
   load_necessary_data();
@@ -1224,7 +1222,7 @@ CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     if (strcmp(symbol, "cuGetProcAddress") == 0) {
       LOGGER(VERBOSE, "cuGetProcAddress_v2: substitute cuGetProcAddress "
                       "self-lookup with our 5-arg _v2 wrapper");
-      *pfn = (void *)_cuGetProcAddress_v2;
+      *pfn = (void *)cuGetProcAddress_v2;
       goto DONE;
     }
 
@@ -1255,17 +1253,6 @@ CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
   }
 DONE:
   return ret;
-}
-
-CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
-                             cuuint64_t flags, void *symbolStatus) {
-  /*
-   * Thin wrapper - the self-lookup special case and all substitution logic
-   * lives in _cuGetProcAddress_v2 directly, so we no longer need the old
-   * post-correction pattern (which only fixed one of the two cases and
-   * broke a CUDA-11-ver-hint edge case in the process).
-   */
-  return _cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, symbolStatus);
 }
 
 CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flags) {
