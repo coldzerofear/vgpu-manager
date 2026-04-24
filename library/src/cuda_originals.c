@@ -135,8 +135,11 @@ CUresult cuCtxCreate_v3(CUcontext *pctx, CUexecAffinityParam *paramsArray,
 
 CUresult cuCtxCreate_v4(CUcontext *pctx, CUctxCreateParams *ctxCreateParams,
                         unsigned int flags, CUdevice dev) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuCtxCreate_v4, pctx, ctxCreateParams,
-                         flags, dev);
+  /* ABI-conflict new-ABI wrapper: must NOT fall back to cuCtxCreate_v2.
+   * If host libcuda.so is too old for _v4, return CUDA_ERROR_NOT_SUPPORTED
+   * rather than dereferencing NULL or calling a differently-shaped ABI. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuCtxCreate_v4, pctx,
+                                 ctxCreateParams, flags, dev);
 }
 
 CUresult _cuCtxCreate(CUcontext *pctx, unsigned int flags, CUdevice dev) {
@@ -1772,7 +1775,9 @@ CUresult cuMemAdvise(CUdeviceptr devPtr, size_t count, CUmem_advise advice, CUde
 }
 
 CUresult cuMemAdvise_v2(CUdeviceptr devPtr, size_t count, CUmem_advise advice, CUmemLocation location){
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAdvise_v2, devPtr, count, advice, location);
+  /* ABI-conflict new-ABI: last arg is CUmemLocation (struct), not CUdevice (int).
+   * No fallback to cuMemAdvise. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuMemAdvise_v2, devPtr, count, advice, location);
 }
 
 CUresult cuMemPrefetchAsync_ptsz(CUdeviceptr devPtr, size_t count,
@@ -1787,16 +1792,18 @@ CUresult cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count,
                          dstDevice, hStream);
 }
 
-CUresult cuMemPrefetchAsync_v2_ptsz(CUdeviceptr devPtr, size_t count, 
+CUresult cuMemPrefetchAsync_v2_ptsz(CUdeviceptr devPtr, size_t count,
                             CUmemLocation location, unsigned int flags, CUstream hStream){
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemPrefetchAsync_v2_ptsz, devPtr, count,
-                         location, flags, hStream);
+  /* ABI-conflict new-ABI: 5 args incl. CUmemLocation + flags. No fallback. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuMemPrefetchAsync_v2_ptsz, devPtr, count,
+                                 location, flags, hStream);
 }
 
-CUresult cuMemPrefetchAsync_v2(CUdeviceptr devPtr, size_t count, 
+CUresult cuMemPrefetchAsync_v2(CUdeviceptr devPtr, size_t count,
                             CUmemLocation location, unsigned int flags, CUstream hStream){
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemPrefetchAsync_v2), devPtr, count,
-                         location, flags, hStream);
+  /* ABI-conflict new-ABI: 5 args incl. CUmemLocation + flags. No fallback. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuMemPrefetchAsync_v2), devPtr, count,
+                                 location, flags, hStream);
 }
 
 CUresult cuMemRangeGetAttribute(void *data, size_t dataSize,
@@ -2804,8 +2811,9 @@ CUresult cuGraphAddDependencies(CUgraph hGraph, const CUgraphNode *from,
 CUresult cuGraphAddDependencies_v2(CUgraph hGraph, const CUgraphNode *from,
                                 const CUgraphNode *to, const CUgraphEdgeData *edgeData,
                                 size_t numDependencies) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddDependencies_v2, hGraph,
-                          from, to, edgeData, numDependencies);
+  /* ABI-conflict new-ABI: adds CUgraphEdgeData*. No fallback to _v1. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphAddDependencies_v2, hGraph,
+                                 from, to, edgeData, numDependencies);
 }
 
 CUresult cuGraphAddEmptyNode(CUgraphNode *phGraphNode, CUgraph hGraph,
@@ -2907,8 +2915,9 @@ CUresult cuGraphGetEdges(CUgraph hGraph, CUgraphNode *from, CUgraphNode *to,
 
 CUresult cuGraphGetEdges_v2(CUgraph hGraph, CUgraphNode *from, CUgraphNode *to,
                             CUgraphEdgeData *edgeData, size_t *numEdges) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphGetEdges_v2, hGraph, from, to,
-                          edgeData, numEdges);
+  /* ABI-conflict new-ABI: adds CUgraphEdgeData*. No fallback to _v1. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphGetEdges_v2, hGraph, from, to,
+                                 edgeData, numEdges);
 }
 
 CUresult cuGraphGetNodes(CUgraph hGraph, CUgraphNode *nodes, size_t *numNodes) {
@@ -3061,6 +3070,15 @@ CUresult cuGraphNodeGetDependencies(CUgraphNode hNode,
                          dependencies, numDependencies);
 }
 
+CUresult cuGraphNodeGetDependencies_v2(CUgraphNode hNode,
+                                       CUgraphNode *dependencies,
+                                       CUgraphEdgeData *edgeData,
+                                       size_t *numDependencies) {
+  /* ABI-conflict new-ABI: adds CUgraphEdgeData*. No fallback to _v1. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphNodeGetDependencies_v2, hNode,
+                                 dependencies, edgeData, numDependencies);
+}
+
 CUresult cuGraphNodeGetDependentNodes(CUgraphNode hNode,
                                       CUgraphNode *dependentNodes,
                                       size_t *numDependentNodes) {
@@ -3070,8 +3088,9 @@ CUresult cuGraphNodeGetDependentNodes(CUgraphNode hNode,
 
 CUresult cuGraphNodeGetDependentNodes_v2(CUgraphNode hNode, CUgraphNode *dependentNodes,
                                          CUgraphEdgeData *edgeData, size_t *numDependentNodes) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphNodeGetDependentNodes_v2, hNode,
-                          dependentNodes, edgeData, numDependentNodes);
+  /* ABI-conflict new-ABI: adds CUgraphEdgeData*. No fallback to _v1. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphNodeGetDependentNodes_v2, hNode,
+                                 dependentNodes, edgeData, numDependentNodes);
 }
 
 CUresult cuGraphNodeGetType(CUgraphNode hNode, CUgraphNodeType *type) {
@@ -3088,8 +3107,9 @@ CUresult cuGraphRemoveDependencies(CUgraph hGraph, const CUgraphNode *from,
 CUresult cuGraphRemoveDependencies_v2(CUgraph hGraph, const CUgraphNode *from,
                                     const CUgraphNode *to, const CUgraphEdgeData *edgeData,
                                     size_t numDependencies) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphRemoveDependencies_v2, hGraph,
-                          from, to, edgeData, numDependencies);
+  /* ABI-conflict new-ABI: adds CUgraphEdgeData*. No fallback to _v1. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphRemoveDependencies_v2, hGraph,
+                                 from, to, edgeData, numDependencies);
 }
 
 CUresult cuImportExternalMemory(CUexternalMemory *extMem_out,
@@ -3839,8 +3859,9 @@ CUresult cuMemGetHandleForAddressRange(void *handle, CUdeviceptr dptr, size_t si
 CUresult cuGraphAddNode_v2(CUgraphNode* phGraphNode, CUgraph hGraph,
                            const CUgraphNode* dependencies, const CUgraphEdgeData* dependencyData,
                            size_t numDependencies, CUgraphNodeParams* nodeParams) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddNode_v2, phGraphNode, hGraph,
-                          dependencies, dependencyData, numDependencies, nodeParams);
+  /* ABI-conflict new-ABI: adds CUgraphEdgeData*. No fallback to _v1. */
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuGraphAddNode_v2, phGraphNode, hGraph,
+                                 dependencies, dependencyData, numDependencies, nodeParams);
 }
 
 CUresult cuGraphAddNode(CUgraphNode* phGraphNode, CUgraph hGraph, const CUgraphNode* dependencies,

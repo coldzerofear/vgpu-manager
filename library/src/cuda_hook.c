@@ -1143,6 +1143,21 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
         goto DONE;
       }
     }
+    /*
+     * ABI-conflict defense: if the caller asked for a base name whose
+     * unversioned form binds to different ABIs across CUDA majors, refuse to
+     * substitute with our hook by base-name matching. The real libcuda has
+     * already resolved *pfn to the correct versioned implementation based on
+     * cudaVersion; returning that untouched is safer than binding the caller
+     * to a hook whose C signature only matches one ABI. Hooking a conflict
+     * family REQUIRES registering the versioned name (e.g. "cuCtxCreate_v4")
+     * in cuda_hooks_entry[], not the base name.
+     */
+    if (is_abi_conflict_base(symbol)) {
+      LOGGER(VERBOSE, "cuGetProcAddress: skip base-name hook substitution for "
+                      "ABI-conflict family %s (cudaVersion=%d)", symbol, cudaVersion);
+      goto DONE;
+    }
     for (int i = 0; i < cuda_hook_nums; i++) {
       if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
         LOGGER(VERBOSE, "cuGetProcAddress matched symbol: %s", symbol);
@@ -1172,6 +1187,12 @@ CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
         *pfn = f;
         goto DONE;
       }
+    }
+    /* Same ABI-conflict defense as in cuGetProcAddress above. */
+    if (is_abi_conflict_base(symbol)) {
+      LOGGER(VERBOSE, "cuGetProcAddress_v2: skip base-name hook substitution for "
+                      "ABI-conflict family %s (cudaVersion=%d)", symbol, cudaVersion);
+      goto DONE;
     }
     for (int i = 0; i < cuda_hook_nums; i++) {
       if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
