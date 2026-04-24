@@ -126,6 +126,11 @@ func NewOptions() *Options {
 
 func (o *Options) InitFlags(fs *flag.FlagSet) {
 	klog.InitFlags(fs)
+	// Opt into the new klog behavior so that -stderrthreshold is honored even
+	// when -logtostderr=true (the default).
+	// Ref: kubernetes/klog#212, kubernetes/klog#432
+	_ = fs.Set("legacy_stderr_threshold_behavior", "false")
+	_ = fs.Set("stderrthreshold", "INFO")
 	pflag.CommandLine.SortFlags = false
 	pflag.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
 	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
