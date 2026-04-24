@@ -1143,6 +1143,25 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
     pthread_once(&g_init_set, initialization);
 
     /*
+     * Special case: caller is asking for cuGetProcAddress itself. We MUST
+     * return our own wrapper (not real libcuda's pointer) - otherwise the
+     * caller uses the returned pfn to do indirect lookups for cuMemAlloc /
+     * cuLaunchKernel / ... and those lookups bypass our cuda_hooks_entry[]
+     * substitution entirely, neutering the entire hook layer.
+     *
+     * The wrapper we substitute in must match the 4-arg v1 ABI of this
+     * hook's own signature, so the caller invokes it with the parameter
+     * frame we expect. (The 5-arg v2 case is handled inside the 5-arg
+     * _cuGetProcAddress_v2 hook below.)
+     */
+    if (strcmp(symbol, "cuGetProcAddress") == 0) {
+      LOGGER(VERBOSE, "cuGetProcAddress: substitute self-lookup with our "
+                      "4-arg wrapper to preserve hook coverage");
+      *pfn = (void *)cuGetProcAddress;
+      goto DONE;
+    }
+
+    /*
      * ABI-conflict defense (MUST run before the lib_control / hooks_entry
      * substitution below). Real libcuda's cuGetProcAddress has already
      * written an ABI-correct function pointer to *pfn based on `cudaVersion`
@@ -1152,12 +1171,11 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
      * the CUDA 13 caller to our 3-arg v2 wrapper (or vice-versa) and the
      * parameter frame is misaligned on the very next call.
      *
-     * For conflict families we therefore keep the real libcuda pointer and
-     * intentionally skip our hook substitution. If a conflict family ever
-     * needs to be hooked, the hook MUST be registered under the versioned
-     * name (cuCtxCreate_v2 AND cuCtxCreate_v4 separately, each with a
-     * matching-ABI implementation) in cuda_hooks_entry[] - never the
-     * unversioned base name.
+     * Safe for these conflict families because vgpu-manager does not hook
+     * them - the unversioned wrappers in cuda_originals.c are forward-only,
+     * so "keep the real libcuda pointer" does not lose any instrumentation.
+     * Contrast with cuGetProcAddress above which MUST be substituted with
+     * our wrapper to keep the hook chain alive for subsequent lookups.
      */
     if (is_abi_conflict_base(symbol)) {
       LOGGER(VERBOSE, "cuGetProcAddress: keep libcuda pointer for ABI-conflict "
@@ -1196,6 +1214,20 @@ CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     init_devices_mapping();
     pthread_once(&g_init_set, initialization);
 
+    /*
+     * Self-lookup special case - see cuGetProcAddress (4-arg hook) above
+     * for the full rationale. Here the caller is in the 5-arg v2 hook, so
+     * their PFN_cuGetProcAddress type has the v2 5-arg ABI (or they
+     * explicitly declared 5-arg). Substitute our own v2 entry point so
+     * the caller's subsequent indirect lookups re-enter our hook.
+     */
+    if (strcmp(symbol, "cuGetProcAddress") == 0) {
+      LOGGER(VERBOSE, "cuGetProcAddress_v2: substitute cuGetProcAddress "
+                      "self-lookup with our 5-arg _v2 wrapper");
+      *pfn = (void *)_cuGetProcAddress_v2;
+      goto DONE;
+    }
+
     /* Same ABI-conflict defense as in cuGetProcAddress above - must run
      * BEFORE the lib_control / hooks_entry substitution. See the comment
      * there for the full rationale. */
@@ -1228,21 +1260,10 @@ DONE:
 CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                              cuuint64_t flags, void *symbolStatus) {
   /*
-   * Previously this wrapper included a post-correction:
-   *   if (ret == CUDA_SUCCESS && strcmp(symbol,"cuGetProcAddress") == 0)
-   *     *pfn = _cuGetProcAddress_v2;
-   *
-   * That was a workaround for our own lib_control dlsym substitution above
-   * blindly binding the caller to our 4-arg `cuGetProcAddress` wrapper even
-   * when the caller was a CUDA 12+ binary expecting the 5-arg `_v2` ABI.
-   *
-   * `cuGetProcAddress` is now on the is_abi_conflict_base() list in
-   * cuda-helper.h, so _cuGetProcAddress_v2() short-circuits before the
-   * lib_control substitution and leaves the real libcuda pointer in *pfn
-   * - which is already ABI-correct for the caller's `cudaVersion`. The
-   * post-correction became dead weight and would in fact break the edge
-   * case where a CUDA 11 caller explicitly invokes cuGetProcAddress_v2()
-   * with cudaVersion < 12000 wanting a v1 (4-arg) pointer back.
+   * Thin wrapper - the self-lookup special case and all substitution logic
+   * lives in _cuGetProcAddress_v2 directly, so we no longer need the old
+   * post-correction pattern (which only fixed one of the two cases and
+   * broke a CUDA-11-ver-hint edge case in the process).
    */
   return _cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, symbolStatus);
 }

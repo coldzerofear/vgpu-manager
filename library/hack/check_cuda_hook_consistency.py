@@ -57,19 +57,14 @@ ABI_CONFLICT_FAMILIES = {
     "cuGraphAddDependencies":        ("cuGraphAddDependencies",          "cuGraphAddDependencies_v2"),
     "cuGraphRemoveDependencies":     ("cuGraphRemoveDependencies",       "cuGraphRemoveDependencies_v2"),
     "cuGraphAddNode":                ("cuGraphAddNode",                  "cuGraphAddNode_v2"),
-    "cuGetProcAddress":              ("cuGetProcAddress",                "cuGetProcAddress_v2"),
+    # cuGetProcAddress is handled inline in cuGetProcAddress() and
+    # _cuGetProcAddress_v2() rather than via is_abi_conflict_base(), so
+    # it is intentionally NOT in this table.
 }
 
-# R5 allowlist: conflict-family base names that MAY appear in cuda_hooks_entry[].
-# Rule R5 normally forbids this because cuGetProcAddress-path substitution
-# would bind to a fixed ABI wrapper. But cuGetProcAddress is special:
-#   - It is in is_abi_conflict_base(), so the cuGetProcAddress hook itself
-#     short-circuits substitution for it (no unsafe path 1).
-#   - It is registered in cuda_hooks_entry[] only so the dlsym() hook in
-#     loader.c has a fallback when lib_control dlopen fails. That path
-#     substitutes by exact ELF name, both sides use the v1 4-arg ABI for
-#     the unversioned symbol, so ABI is symmetric and safe.
-R5_ALLOWLIST = {"cuGetProcAddress"}
+# R5 allowlist: conflict-family base names that MAY appear in
+# cuda_hooks_entry[]. Empty today.
+R5_ALLOWLIST: set = set()
 
 
 def strip_c_comments(content: str) -> str:

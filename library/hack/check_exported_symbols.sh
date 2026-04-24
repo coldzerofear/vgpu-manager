@@ -44,6 +44,10 @@ FAMILIES=(
   "cuGraphRemoveDependencies     cuGraphRemoveDependencies      cuGraphRemoveDependencies_v2"
   "cuGraphAddNode                cuGraphAddNode                 cuGraphAddNode_v2"
   "cuGetProcAddress              cuGetProcAddress               cuGetProcAddress_v2"
+  # cuGetProcAddress above is listed for export-completeness (we must
+  # export both ABI versions of this symbol) even though its substitution
+  # logic is handled specially inside cuGetProcAddress() / _v2() in
+  # cuda_hook.c rather than via is_abi_conflict_base().
 )
 
 # Snapshot exported defined text symbols.

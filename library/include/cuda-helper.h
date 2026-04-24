@@ -1318,7 +1318,18 @@ static inline int is_abi_conflict_base(const char *sym) {
     "cuGraphAddDependencies",
     "cuGraphRemoveDependencies",
     "cuGraphAddNode",
-    "cuGetProcAddress",            /* v1 (4 args) -> _v2 (+CUdriverProcAddressQueryResult*) */
+    /*
+     * Note: cuGetProcAddress is intentionally NOT listed here even though
+     * its unversioned form also has cross-major ABI drift (v1 4-arg vs _v2
+     * 5-arg with CUdriverProcAddressQueryResult*). The usual "keep the real
+     * libcuda pointer" short-circuit would break a different invariant:
+     * the caller uses the returned pointer to look up other CUDA symbols,
+     * and those subsequent lookups must STILL go through our hook so
+     * cuda_hooks_entry[] substitution can happen. Handling of that case
+     * lives directly in cuGetProcAddress() / _cuGetProcAddress_v2() where
+     * we substitute *pfn with our matching-ABI wrapper (4-arg hook -> our
+     * 4-arg wrapper, 5-arg hook -> our 5-arg wrapper).
+     */
     NULL,
   };
   if (sym == NULL) return 0;
