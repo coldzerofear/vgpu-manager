@@ -874,6 +874,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphAddChildGraphNode),
   /** cuGraphAddDependencies */
   CUDA_ENTRY_ENUM(cuGraphAddDependencies),
+  CUDA_ENTRY_ENUM(cuGraphAddDependencies_v2),
   /** cuGraphAddEmptyNode */
   CUDA_ENTRY_ENUM(cuGraphAddEmptyNode),
   /** cuGraphAddHostNode */
@@ -899,6 +900,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphExecDestroy),
   /** cuGraphGetEdges */
   CUDA_ENTRY_ENUM(cuGraphGetEdges),
+  CUDA_ENTRY_ENUM(cuGraphGetEdges_v2),
   /** cuGraphGetNodes */
   CUDA_ENTRY_ENUM(cuGraphGetNodes),
   /** cuGraphGetRootNodes */
@@ -933,10 +935,12 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphNodeGetDependencies),
   /** cuGraphNodeGetDependentNodes */
   CUDA_ENTRY_ENUM(cuGraphNodeGetDependentNodes),
+  CUDA_ENTRY_ENUM(cuGraphNodeGetDependentNodes_v2),
   /** cuGraphNodeGetType */
   CUDA_ENTRY_ENUM(cuGraphNodeGetType),
   /** cuGraphRemoveDependencies */
   CUDA_ENTRY_ENUM(cuGraphRemoveDependencies),
+  CUDA_ENTRY_ENUM(cuGraphRemoveDependencies_v2),
   /** cuImportExternalMemory */
   CUDA_ENTRY_ENUM(cuImportExternalMemory),
   /** cuImportExternalSemaphore */

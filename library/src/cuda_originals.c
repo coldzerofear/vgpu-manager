@@ -2732,13 +2732,13 @@ CUresult cuTexRefGetMipmapLevelClamp(float *pminMipmapLevelClamp,
                                      float *pmaxMipmapLevelClamp,
                                      CUtexref hTexRef) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuTexRefGetMipmapLevelClamp,
-                         pminMipmapLevelClamp, pmaxMipmapLevelClamp, hTexRef);
+                          pminMipmapLevelClamp, pmaxMipmapLevelClamp, hTexRef);
 }
 
 CUresult cuTexRefGetMipmappedArray(CUmipmappedArray *phMipmappedArray,
                                    CUtexref hTexRef) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuTexRefGetMipmappedArray,
-                         phMipmappedArray, hTexRef);
+                          phMipmappedArray, hTexRef);
 }
 
 CUresult cuDeviceGetAttribute(int *pi, CUdevice_attribute attrib, CUdevice dev) {
@@ -2753,17 +2753,28 @@ CUresult cuDestroyExternalSemaphore(CUexternalSemaphore extSem) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuDestroyExternalSemaphore, extSem);
 }
 
+CUresult _cuDeviceGetUuid(CUuuid *uuid, CUdevice dev) {
+  CUresult ret;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetUuid_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetUuid_v2, uuid, dev);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetUuid))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetUuid,uuid, dev);
+  } else {
+    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  return ret;
+}
+
 CUresult cuDeviceGetUuid_v2(CUuuid *uuid, CUdevice dev) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetUuid_v2, uuid, dev);
+  return _cuDeviceGetUuid(uuid, dev);
 }
 
 CUresult cuDeviceGetUuid(CUuuid *uuid, CUdevice dev) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetUuid, uuid, dev);
+  return _cuDeviceGetUuid(uuid, dev);
 }
 
-CUresult cuExternalMemoryGetMappedBuffer(
-    CUdeviceptr *devPtr, CUexternalMemory extMem,
-    const CUDA_EXTERNAL_MEMORY_BUFFER_DESC *bufferDesc) {
+CUresult cuExternalMemoryGetMappedBuffer(CUdeviceptr *devPtr, CUexternalMemory extMem,
+                                         const CUDA_EXTERNAL_MEMORY_BUFFER_DESC *bufferDesc) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuExternalMemoryGetMappedBuffer,
                          devPtr, extMem, bufferDesc);
 }
@@ -2787,7 +2798,14 @@ CUresult cuGraphAddChildGraphNode(CUgraphNode *phGraphNode, CUgraph hGraph,
 CUresult cuGraphAddDependencies(CUgraph hGraph, const CUgraphNode *from,
                                 const CUgraphNode *to, size_t numDependencies) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddDependencies, hGraph,
-                         from, to, numDependencies, numDependencies);
+                          from, to, numDependencies);
+}
+
+CUresult cuGraphAddDependencies_v2(CUgraph hGraph, const CUgraphNode *from,
+                                const CUgraphNode *to, const CUgraphEdgeData *edgeData,
+                                size_t numDependencies) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddDependencies_v2, hGraph,
+                          from, to, edgeData, numDependencies);
 }
 
 CUresult cuGraphAddEmptyNode(CUgraphNode *phGraphNode, CUgraph hGraph,
@@ -2885,6 +2903,12 @@ CUresult cuGraphGetEdges(CUgraph hGraph, CUgraphNode *from, CUgraphNode *to,
                          size_t *numEdges) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphGetEdges, hGraph, from, to,
                          numEdges);
+}
+
+CUresult cuGraphGetEdges_v2(CUgraph hGraph, CUgraphNode *from, CUgraphNode *to,
+                            CUgraphEdgeData *edgeData, size_t *numEdges) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphGetEdges_v2, hGraph, from, to,
+                          edgeData, numEdges);
 }
 
 CUresult cuGraphGetNodes(CUgraph hGraph, CUgraphNode *nodes, size_t *numNodes) {
@@ -3044,6 +3068,12 @@ CUresult cuGraphNodeGetDependentNodes(CUgraphNode hNode,
                          hNode, dependentNodes, numDependentNodes);
 }
 
+CUresult cuGraphNodeGetDependentNodes_v2(CUgraphNode hNode, CUgraphNode *dependentNodes,
+                                         CUgraphEdgeData *edgeData, size_t *numDependentNodes) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphNodeGetDependentNodes_v2, hNode,
+                          dependentNodes, edgeData, numDependentNodes);
+}
+
 CUresult cuGraphNodeGetType(CUgraphNode hNode, CUgraphNodeType *type) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphNodeGetType, hNode, type);
 }
@@ -3053,6 +3083,13 @@ CUresult cuGraphRemoveDependencies(CUgraph hGraph, const CUgraphNode *from,
                                    size_t numDependencies) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphRemoveDependencies, hGraph,
                          from, to, numDependencies);
+}
+
+CUresult cuGraphRemoveDependencies_v2(CUgraph hGraph, const CUgraphNode *from,
+                                    const CUgraphNode *to, const CUgraphEdgeData *edgeData,
+                                    size_t numDependencies) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphRemoveDependencies_v2, hGraph,
+                          from, to, edgeData, numDependencies);
 }
 
 CUresult cuImportExternalMemory(CUexternalMemory *extMem_out,
