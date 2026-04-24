@@ -43,6 +43,7 @@ FAMILIES=(
   "cuGraphAddDependencies        cuGraphAddDependencies         cuGraphAddDependencies_v2"
   "cuGraphRemoveDependencies     cuGraphRemoveDependencies      cuGraphRemoveDependencies_v2"
   "cuGraphAddNode                cuGraphAddNode                 cuGraphAddNode_v2"
+  "cuGetProcAddress              cuGetProcAddress               cuGetProcAddress_v2"
 )
 
 # Snapshot exported defined text symbols.

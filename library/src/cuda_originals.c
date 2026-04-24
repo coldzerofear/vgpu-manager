@@ -2099,6 +2099,13 @@ CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *pCopy) {
   return _cuMemcpy2D(pCopy);
 }
 
+/* Per-thread default stream variant. Registered in cuda_library_entry[] and
+ * the dispatch enum, so we must also export it as an ELF symbol or apps
+ * compiled with -DCUDA_API_PER_THREAD_DEFAULT_STREAM bypass us entirely. */
+CUresult cuMemcpy2D_v2_ptds(const CUDA_MEMCPY2D *pCopy) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemcpy2D_v2_ptds, pCopy);
+}
+
 CUresult cuMemcpy2D(const CUDA_MEMCPY2D *pCopy) {
   return _cuMemcpy2D(pCopy);
 }

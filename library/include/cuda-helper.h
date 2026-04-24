@@ -1318,6 +1318,7 @@ static inline int is_abi_conflict_base(const char *sym) {
     "cuGraphAddDependencies",
     "cuGraphRemoveDependencies",
     "cuGraphAddNode",
+    "cuGetProcAddress",            /* v1 (4 args) -> _v2 (+CUdriverProcAddressQueryResult*) */
     NULL,
   };
   if (sym == NULL) return 0;

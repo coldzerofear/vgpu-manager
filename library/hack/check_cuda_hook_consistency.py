@@ -16,13 +16,19 @@ Rules enforced:
   R4. ABI-conflict families: both old and new ABI versions must be registered.
   R5. The unversioned base name of an ABI-conflict family must NOT appear in
       cuda_hooks_entry[] in src/cuda_hook.c (rule 3 in cuda-helper.h).
-  R6. (WARN) Every (1) entry should have a wrapper function definition.
+  R6. Every (1) entry must have a wrapper function definition exported from
+      the .so (unless explicitly allowlisted as forward-only).
 
-Exit 0 if all pass; exit 1 on any R1-R5 violation.
+Exit 0 if all pass; exit 1 on any R1-R6 violation.
+
+Use --allow-r6 <name> repeatedly to allowlist specific symbols (e.g. entries
+that intentionally have no ELF wrapper); the default allowlist is empty so
+any regression trips the build.
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from collections import Counter
@@ -51,7 +57,19 @@ ABI_CONFLICT_FAMILIES = {
     "cuGraphAddDependencies":        ("cuGraphAddDependencies",          "cuGraphAddDependencies_v2"),
     "cuGraphRemoveDependencies":     ("cuGraphRemoveDependencies",       "cuGraphRemoveDependencies_v2"),
     "cuGraphAddNode":                ("cuGraphAddNode",                  "cuGraphAddNode_v2"),
+    "cuGetProcAddress":              ("cuGetProcAddress",                "cuGetProcAddress_v2"),
 }
+
+# R5 allowlist: conflict-family base names that MAY appear in cuda_hooks_entry[].
+# Rule R5 normally forbids this because cuGetProcAddress-path substitution
+# would bind to a fixed ABI wrapper. But cuGetProcAddress is special:
+#   - It is in is_abi_conflict_base(), so the cuGetProcAddress hook itself
+#     short-circuits substitution for it (no unsafe path 1).
+#   - It is registered in cuda_hooks_entry[] only so the dlsym() hook in
+#     loader.c has a fallback when lib_control dlopen fails. That path
+#     substitutes by exact ELF name, both sides use the v1 4-arg ABI for
+#     the unversioned symbol, so ABI is symmetric and safe.
+R5_ALLOWLIST = {"cuGetProcAddress"}
 
 
 def strip_c_comments(content: str) -> str:
@@ -130,6 +148,15 @@ def fmt(items: Iterable[str], cap: int = 20) -> str:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--allow-r6", action="append", default=[],
+        help="allowlist a symbol from R6 missing-wrapper check (repeatable); "
+             "use when a dispatch-table entry is intentionally forward-only "
+             "with no corresponding ELF export")
+    args = ap.parse_args()
+    r6_allowlist = set(args.allow_r6)
+
     loader_entries = extract_library_entry(read_text(LOADER_FILE))
     enum_entries = extract_enum_entries(read_text(HELPER_HEADER))
     hooks_entries = extract_hooks_entry(read_text(HOOK_FILE))
@@ -175,8 +202,9 @@ def main() -> int:
             )
 
     # R5. Conflict-family BASE names must not appear in cuda_hooks_entry[]
+    # except for explicitly allowlisted ones (see R5_ALLOWLIST comment).
     for base in ABI_CONFLICT_FAMILIES:
-        if base in hooks_entries:
+        if base in hooks_entries and base not in R5_ALLOWLIST:
             errors.append(
                 f"[R5] ABI-conflict base name '{base}' is registered in "
                 f"cuda_hooks_entry[] - cuGetProcAddress substitution will "
@@ -184,13 +212,16 @@ def main() -> int:
                 f"names separately instead."
             )
 
-    # R6. (warn) Each loader entry ideally has a wrapper
+    # R6. Every loader entry must have a wrapper function (or be explicitly
+    # allowlisted via --allow-r6 for forward-only entries).
     wrapper_defs = extract_wrapper_defs(WRAPPER_FILES)
-    missing_wrappers = set(loader_entries) - wrapper_defs
+    missing_wrappers = (set(loader_entries) - wrapper_defs) - r6_allowlist
     if missing_wrappers:
-        warnings.append(
-            f"[R6 warn] loader entries with no wrapper function in "
-            f"cuda_originals.c / cuda_hook.c: {fmt(missing_wrappers)}"
+        errors.append(
+            f"[R6] loader entries with no wrapper function in "
+            f"cuda_originals.c / cuda_hook.c: {fmt(missing_wrappers)}. "
+            f"Add a wrapper or pass --allow-r6 <symbol> if the entry is "
+            f"intentionally forward-only."
         )
 
     # Report

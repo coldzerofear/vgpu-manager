@@ -58,16 +58,20 @@ extern int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_
 
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 
-static volatile int64_t g_cur_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+/* `= {0}` relies on C's rule that any explicit initializer zero-fills the
+ * remainder, so these scale automatically with MAX_DEVICE_COUNT. */
+static volatile int64_t g_cur_cuda_cores[MAX_DEVICE_COUNT]   = {0};
+static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0};
 
-static int g_sm_num[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int g_sm_num[MAX_DEVICE_COUNT]            = {0};
+static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0};
 
-static int g_block_x[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-static int g_block_y[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-static int g_block_z[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-static uint32_t g_block_locker[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+/* Block-dim defaults of 1 are set in load_necessary_data(); declaring with
+ * {0} here is fine because those paths read them only after initialisation. */
+static int g_block_x[MAX_DEVICE_COUNT] = {0};
+static int g_block_y[MAX_DEVICE_COUNT] = {0};
+static int g_block_z[MAX_DEVICE_COUNT] = {0};
+static uint32_t g_block_locker[MAX_DEVICE_COUNT] = {0};
 
 static const struct timespec g_cycle = {
   .tv_sec = 0,
@@ -364,13 +368,15 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   return share;
 }
 
-static int64_t shares[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static int sys_frees[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static int avg_sys_frees[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static int is[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int64_t shares[MAX_DEVICE_COUNT]    = {0};
+static int sys_frees[MAX_DEVICE_COUNT]      = {0};
+static int avg_sys_frees[MAX_DEVICE_COUNT]  = {0};
+static int is[MAX_DEVICE_COUNT]             = {0};
+/* pre_sys_process_nums starts at 1 so the first observed "real" count does
+ * not trigger the "new process detected, reset limits" branch at line 431. */
 static int pre_sys_process_nums[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
-static int up_limits[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int up_limits[MAX_DEVICE_COUNT]      = {0};
 static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
 
 static void *utilization_watcher(void *arg) {
@@ -378,7 +384,7 @@ static void *utilization_watcher(void *arg) {
   LOGGER(VERBOSE, "start %s batch code %d", __FUNCTION__, batch->batch_code);
   LOGGER(VERBOSE, "batch code %d, start index %d, end index %d", batch->batch_code, batch->start_index, batch->end_index);
 
-  int host_indexes[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+  int host_indexes[MAX_DEVICE_COUNT] = {0};
 
   int host_index, cuda_index;
   for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
@@ -1221,13 +1227,24 @@ DONE:
 
 CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                              cuuint64_t flags, void *symbolStatus) {
-  CUresult ret;
-  ret = _cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, symbolStatus);
-  if (ret == CUDA_SUCCESS && strcmp(symbol,"cuGetProcAddress") == 0) {
-    // Compatible with CUDA 12
-    *pfn = _cuGetProcAddress_v2;
-  }
-  return ret;
+  /*
+   * Previously this wrapper included a post-correction:
+   *   if (ret == CUDA_SUCCESS && strcmp(symbol,"cuGetProcAddress") == 0)
+   *     *pfn = _cuGetProcAddress_v2;
+   *
+   * That was a workaround for our own lib_control dlsym substitution above
+   * blindly binding the caller to our 4-arg `cuGetProcAddress` wrapper even
+   * when the caller was a CUDA 12+ binary expecting the 5-arg `_v2` ABI.
+   *
+   * `cuGetProcAddress` is now on the is_abi_conflict_base() list in
+   * cuda-helper.h, so _cuGetProcAddress_v2() short-circuits before the
+   * lib_control substitution and leaves the real libcuda pointer in *pfn
+   * - which is already ABI-correct for the caller's `cudaVersion`. The
+   * post-correction became dead weight and would in fact break the edge
+   * case where a CUDA 11 caller explicitly invokes cuGetProcAddress_v2()
+   * with cudaVersion < 12000 wanting a v1 (4-arg) pointer back.
+   */
+  return _cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, symbolStatus);
 }
 
 CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flags) {
