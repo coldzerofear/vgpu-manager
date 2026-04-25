@@ -9,6 +9,7 @@ import (
 	podvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/pod/validate"
 	resvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/resourceclaim/validate"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/controller-manager/pkg/healthz"
 	"k8s.io/klog/v2"
 	rtclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
-type NewWebhookHandlerFunc func(rtclient.Client, *options.Options, resourcereader.ResourceAPIReader) (http.Handler, error)
+type NewWebhookHandlerFunc func(rtclient.Client, *options.Options, resourcereader.ResourceAPIReader, events.EventRecorderLogger) (http.Handler, error)
 
 var (
 	registerOnce             sync.Once
@@ -28,7 +29,7 @@ func init() {
 	newWebhookHandlerFuncMap = make(map[string]NewWebhookHandlerFunc)
 	newWebhookHandlerFuncMap[podmutate.Path] = podmutate.NewMutateWebhook
 	newWebhookHandlerFuncMap[podvalidate.Path] = podvalidate.NewValidateWebhook
-	newWebhookHandlerFuncMap[resvalidate.Path] = resvalidate.NewWebhookHandler
+	newWebhookHandlerFuncMap[resvalidate.Path] = resvalidate.NewValidateWebhook
 }
 
 func healthCheckMiddleware(healthChecker healthz.UnnamedHealthChecker, next http.Handler) http.Handler {
@@ -45,11 +46,12 @@ func RegisterWebhookToServer(
 	server webhook.Server, checker healthz.UnnamedHealthChecker,
 	client rtclient.Client, opt *options.Options,
 	reader resourcereader.ResourceAPIReader,
+	recorder events.EventRecorderLogger,
 ) error {
 	registerOnce.Do(func() {
 		var webhookHandler http.Handler
 		for path, newWebhookFunc := range newWebhookHandlerFuncMap {
-			webhookHandler, registerErr = newWebhookFunc(client, opt, reader)
+			webhookHandler, registerErr = newWebhookFunc(client, opt, reader, recorder)
 			if registerErr != nil {
 				klog.ErrorS(registerErr, "unable to create webhook", "path", path)
 				return

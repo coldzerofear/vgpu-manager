@@ -9,16 +9,19 @@ import (
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 )
 
-// Reason is the reason reported back in status.
-const Reason = "Evicted"
+const (
+	// Reason is the reason reported back in status.
+	Reason = "Evict"
+	Action = "Evicted"
+)
 
 type Eviction interface {
-	Evict(ctx context.Context, pod *corev1.Pod, eventRecorder record.EventRecorder, gracePeriodSeconds int64, evictMsg string) bool
+	Evict(ctx context.Context, pod *corev1.Pod, eventRecorder events.EventRecorder, gracePeriodSeconds int64, evictMsg string) bool
 }
 
 func GetEvictionVersion(kubeClient kubernetes.Interface) (string, error) {
@@ -88,7 +91,7 @@ func (e *eviction) evictPod(ctx context.Context, gracePeriodSeconds *int64, pod 
 	}
 }
 
-func (e *eviction) Evict(ctx context.Context, pod *corev1.Pod, eventRecorder record.EventRecorder, gracePeriodSeconds int64, evictMsg string) bool {
+func (e *eviction) Evict(ctx context.Context, pod *corev1.Pod, eventRecorder events.EventRecorder, gracePeriodSeconds int64, evictMsg string) bool {
 	if types.IsCriticalPod(pod) {
 		klog.ErrorS(nil, "Cannot evict a critical pod", "pod", klog.KObj(pod))
 		return false
@@ -99,7 +102,7 @@ func (e *eviction) Evict(ctx context.Context, pod *corev1.Pod, eventRecorder rec
 		return false
 	}
 
-	eventRecorder.Eventf(pod, corev1.EventTypeWarning, Reason, evictMsg)
+	eventRecorder.Eventf(pod, nil, corev1.EventTypeWarning, Reason, Action, evictMsg)
 	klog.InfoS("Successfully evicted pod", "pod", klog.KObj(pod))
 	return true
 }

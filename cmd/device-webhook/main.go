@@ -17,11 +17,15 @@ import (
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
+	admissionv1 "k8s.io/api/admission/v1"
+	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	k8scache "k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/component-base/logs"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -34,7 +38,13 @@ import (
 
 var (
 	cacheSyncTimeout = 2 * time.Minute
+	Scheme           = scheme.Scheme
 )
+
+func init() {
+	utilruntime.Must(admissionv1.AddToScheme(Scheme))
+	utilruntime.Must(admissionv1beta1.AddToScheme(Scheme))
+}
 
 // cacheSyncGate indicates whether the cache has completed initial synchronization.
 // - ready=false, err=nil: Still synchronizing
@@ -229,7 +239,7 @@ func main() {
 	server.Register("/readyz", probeHandler)
 
 	clientOptions := rtclient.Options{
-		Scheme: scheme.Scheme,
+		Scheme: Scheme,
 	}
 
 	var (
@@ -239,6 +249,7 @@ func main() {
 		classIndexer    k8scache.Indexer
 		podIndexer      k8scache.Indexer
 		liveClient      rtclient.Client
+		recorder        events.EventRecorderLogger
 	)
 
 	if opt.DefaultConvertToDRA {
@@ -248,10 +259,30 @@ func main() {
 		// DRA defaults to enabling multi card GPU topology management.
 		device.SetGPUTopologyEnabled(true)
 
-		liveClient, err = rtclient.New(config, rtclient.Options{Scheme: scheme.Scheme})
+		liveClient, err = rtclient.New(config, rtclient.Options{Scheme: Scheme})
 		if err != nil {
 			klog.Fatalf("Create live kubeClient failed: %v", err)
 		}
+
+		kubeClient, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			klog.Fatalf("Create kubeClient failed: %v", err)
+		}
+
+		broadcaster := events.NewBroadcaster(&events.EventSinkImpl{Interface: kubeClient.EventsV1()})
+		if err = broadcaster.StartRecordingToSinkWithContext(ctx); err != nil {
+			klog.Fatalf("Failed to start Sink: %v", err)
+		}
+		stopLog, err := broadcaster.StartLogging(klog.Background())
+		if err != nil {
+			klog.Fatalf("Failed to start Logging: %v", err)
+		}
+		defer func() {
+			stopLog()
+			broadcaster.Shutdown()
+		}()
+
+		recorder = broadcaster.NewRecorder(Scheme, util.ComponentName)
 
 		c, err := cache.New(config, cache.Options{
 			Scheme:           clientOptions.Scheme,
@@ -320,7 +351,7 @@ func main() {
 		resourceReader = resourcereader.NewResourceAPIReader(liveClient, claimIndexer, templateIndexer, classIndexer, podIndexer, 30*time.Second)
 	}
 
-	if err := pkgwebhook.RegisterWebhookToServer(server, cacheGate, client, opt, resourceReader); err != nil {
+	if err := pkgwebhook.RegisterWebhookToServer(server, cacheGate, client, opt, resourceReader, recorder); err != nil {
 		klog.Fatalf("Register webhook to server failed: %v", err)
 	}
 

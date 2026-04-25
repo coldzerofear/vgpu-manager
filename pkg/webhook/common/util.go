@@ -22,13 +22,13 @@ func FindPodResourceClaim(pod *corev1.Pod, podClaimName string) (*corev1.PodReso
 	return nil, fmt.Errorf("pod resourceClaim %q not found", podClaimName)
 }
 
-func SubRequestLooksLikeVGPU(ctx context.Context, reader resourcereader.ResourceAPIReader, req resourceapi.DeviceSubRequest, vgpuClassName string) bool {
+func SubRequestLooksLikeVGPU(ctx context.Context, reader resourcereader.ResourceAPIReader, req resourceapi.DeviceSubRequest, matchedDriver bool, vgpuClassName string) bool {
 	// VGPUDeviceClassName hit represents the vgpu type
 	if req.DeviceClassName == vgpuClassName {
 		return true
 	}
 
-	matchDriver := false
+	matchDriver := matchedDriver
 	matchDevice := false
 	if reader != nil {
 		dc := resourceapi.DeviceClass{}
@@ -68,7 +68,7 @@ func SubRequestLooksLikeVGPU(ctx context.Context, reader resourcereader.Resource
 	return matchDriver && matchDevice
 }
 
-func ExactLooksLikeVGPU(ctx context.Context, reader resourcereader.ResourceAPIReader, req *resourceapi.ExactDeviceRequest, vgpuClassName string) bool {
+func ExactLooksLikeVGPU(ctx context.Context, reader resourcereader.ResourceAPIReader, req *resourceapi.ExactDeviceRequest, matchedDriver bool, vgpuClassName string) bool {
 	if req == nil {
 		return false
 	}
@@ -77,7 +77,7 @@ func ExactLooksLikeVGPU(ctx context.Context, reader resourcereader.ResourceAPIRe
 		return true
 	}
 
-	matchDriver := false
+	matchDriver := matchedDriver
 	matchDevice := false
 
 	if reader != nil {
@@ -118,14 +118,14 @@ func ExactLooksLikeVGPU(ctx context.Context, reader resourcereader.ResourceAPIRe
 	return matchDriver && matchDevice
 }
 
-func DeviceRequestLooksLikeVGPU(ctx context.Context, reader resourcereader.ResourceAPIReader, req resourceapi.DeviceRequest, vgpuClassName string) bool {
+func DeviceRequestLooksLikeVGPU(ctx context.Context, reader resourcereader.ResourceAPIReader, req resourceapi.DeviceRequest, matchedDriver bool, vgpuClassName string) bool {
 	switch {
 	case req.Exactly != nil:
-		return ExactLooksLikeVGPU(ctx, reader, req.Exactly, vgpuClassName)
+		return ExactLooksLikeVGPU(ctx, reader, req.Exactly, matchedDriver, vgpuClassName)
 	case len(req.FirstAvailable) > 0:
 		// This is just a 'whether to include vgpu candidates', not a definitive judgment in the Pod stage
 		for _, sub := range req.FirstAvailable {
-			if SubRequestLooksLikeVGPU(ctx, reader, sub, vgpuClassName) {
+			if SubRequestLooksLikeVGPU(ctx, reader, sub, matchedDriver, vgpuClassName) {
 				return true
 			}
 		}

@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -37,7 +38,9 @@ import (
 
 const Path = "/pods/validate"
 
-func NewValidateWebhook(client client.Client, options *options.Options, reader resourcereader.ResourceAPIReader) (http.Handler, error) {
+func NewValidateWebhook(client client.Client, options *options.Options,
+	reader resourcereader.ResourceAPIReader, _ events.EventRecorderLogger,
+) (http.Handler, error) {
 	return &admission.Webhook{
 		Handler: &validateHandle{
 			decoder: admission.NewDecoder(client.Scheme()),
@@ -624,11 +627,11 @@ func buildDeviceRequest(pod *corev1.Pod, requestName, deviceClassName string, in
 }
 
 func (h *validateHandle) isVGPUDeviceRequest(ctx context.Context, req resourceapi.DeviceRequest) bool {
-	return common.DeviceRequestLooksLikeVGPU(ctx, h.reader, req, h.options.VGPUDeviceClassName)
+	return common.DeviceRequestLooksLikeVGPU(ctx, h.reader, req, false, h.options.VGPUDeviceClassName)
 }
 
 func (h *validateHandle) isVGPUSubRequest(ctx context.Context, req resourceapi.DeviceSubRequest) bool {
-	return common.SubRequestLooksLikeVGPU(ctx, h.reader, req, h.options.VGPUDeviceClassName)
+	return common.SubRequestLooksLikeVGPU(ctx, h.reader, req, false, h.options.VGPUDeviceClassName)
 }
 
 func CheckResourceName(pod *corev1.Pod, resourceName string) error {

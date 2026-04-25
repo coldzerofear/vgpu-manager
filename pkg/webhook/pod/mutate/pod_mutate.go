@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -33,7 +34,9 @@ import (
 
 const Path = "/pods/mutate"
 
-func NewMutateWebhook(client client.Client, options *options.Options, reader resourcereader.ResourceAPIReader) (http.Handler, error) {
+func NewMutateWebhook(client client.Client, options *options.Options,
+	reader resourcereader.ResourceAPIReader, _ events.EventRecorderLogger,
+) (http.Handler, error) {
 	return &admission.Webhook{
 		Handler: &mutateHandle{
 			decoder: admission.NewDecoder(client.Scheme()),
