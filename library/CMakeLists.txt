@@ -110,6 +110,56 @@ if(BUILD_TESTS)
     add_subdirectory(test)
 endif()
 
+# ---------------------------------------------------------------------------
+# Optional: Vulkan implicit layer module.
+#
+# When enabled, src/vulkan/*.c compiles as a CMake OBJECT library and links
+# into libvgpu-control.so. The .so then doubles as a Vulkan implicit layer
+# alongside its CUDA hook role - one .so, two roles, single mount point.
+#
+# CUDA-only consumers see no behaviour change either way:
+#   - When OFF (default): .so does not export any vk* symbol; build does
+#     not require Vulkan-Headers.
+#   - When ON: extra vk* entry points appear in the .so but no existing
+#     CUDA path is altered.
+#
+# Enable with:
+#   cmake -DBUILD_VULKAN_LAYER=ON ..
+#
+# Requirements when enabled:
+#   - Vulkan-Headers (e.g. apt install libvulkan-dev)
+#   - CMake >= 3.7 for the bundled FindVulkan module
+#
+# Notes:
+#   - Phase 1 of the rollout - src/vulkan/* are stubs. See
+#     docs/how_to_develop_vulkan_implicit_layer.md for the phased plan.
+#   - To switch a build tree from OFF to ON or vice versa, prefer a fresh
+#     CMake configure step; reusing the same build/ directory with a
+#     different option value is supported but a clean is safer.
+# ---------------------------------------------------------------------------
+option(BUILD_VULKAN_LAYER "Build the Vulkan implicit layer module" OFF)
+if(BUILD_VULKAN_LAYER)
+    if(CMAKE_VERSION VERSION_LESS 3.7)
+        message(FATAL_ERROR
+            "BUILD_VULKAN_LAYER=ON requires CMake >= 3.7 for FindVulkan; "
+            "current version is ${CMAKE_VERSION}. Either upgrade CMake or "
+            "leave BUILD_VULKAN_LAYER off.")
+    endif()
+    find_package(Vulkan REQUIRED)
+    message(STATUS "[vgpu] Vulkan implicit layer ENABLED "
+                   "(headers: ${Vulkan_INCLUDE_DIRS})")
+    add_library(vgpu_vulkan_mod OBJECT
+        src/vulkan/layer.c
+        src/vulkan/dispatch.c
+        src/vulkan/physdev_index.c
+        src/vulkan/hooks_alloc.c
+        src/vulkan/hooks_memory.c
+        src/vulkan/hooks_submit.c)
+    target_include_directories(vgpu_vulkan_mod
+        PRIVATE ${Vulkan_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR})
+    target_sources(vgpu-control PRIVATE $<TARGET_OBJECTS:vgpu_vulkan_mod>)
+endif()
+
 # find_package(CUDAToolkit REQUIRED)
 add_executable(mem_occupy_tool tools/mem_occupy_tool.c)
 target_include_directories(mem_occupy_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)

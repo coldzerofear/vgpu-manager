@@ -59,6 +59,16 @@ tools: configure ## Build all aux tools (mem_occupy_tool, mem_view_tool, etc.).
 .PHONY: all
 all: build tools ## Build the .so and every aux tool.
 
+.PHONY: build-vulkan
+build-vulkan: ## Build libvgpu-control.so with the Vulkan implicit layer module.
+	@mkdir -p $(BUILD_DIR)
+	cd $(BUILD_DIR) && CUDA_HOME=$(CUDA_HOME) $(CMAKE) \
+	    -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
+	    -DBUILD_VULKAN_LAYER=ON \
+	    $(CMAKE_EXTRA_ARGS) \
+	    $(LIBRARY_DIR)
+	$(MAKE) -C $(BUILD_DIR) -j$(J) vgpu-control
+
 .PHONY: clean
 clean: ## Remove the build tree.
 	rm -rf $(BUILD_DIR)
