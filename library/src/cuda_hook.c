@@ -1678,9 +1678,51 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
   has_limited_view = load_limited_memory_view(device, &host_index, &lock_fd,
                                               &used, &vmem_used);
   if (has_limited_view) {
-    size_t total_memory = g_vgpu_config->devices[host_index].total_memory;
-    *total = total_memory;
-    *free = (used + vmem_used) >= total_memory ? 0 : (total_memory - used - vmem_used);
+    size_t configured = g_vgpu_config->devices[host_index].total_memory;
+    size_t actual_total;
+
+    if (g_vgpu_config->devices[host_index].memory_oversold) {
+      /*
+       * Oversold UVA mode: configured total is intentionally LARGER than
+       * the physical slice (real_memory). prepare_memory_allocation routes
+       * the overflow allocations through cuMemAllocManaged. Reporting the
+       * configured total here is what makes the oversold capacity visible
+       * to the application; clamping at the real driver total would tell
+       * apps they have less memory than we are actually willing to give
+       * them via UVA, and the entire oversold design becomes inert.
+       */
+      actual_total = configured;
+    } else {
+      /*
+       * Normal slicing: ask real libcuda for its compute-usable total
+       * (physical minus driver-reserved page tables / framebuffer / ECC
+       * overhead - varies per driver/display/ECC, ~hundreds of MiB on
+       * consumer cards) and clamp the configured limit at that. Without
+       * this clamp, apps that read cuMemGetInfo as the truth and try to
+       * allocate up to it (vLLM, PyTorch caching allocator) hit OOM in
+       * the last few hundred MiB the driver was never going to hand out.
+       *
+       * If the real call somehow fails, degrade to the previous behaviour
+       * (report configured value, no clamp) rather than synthesising a
+       * potentially-wrong number.
+       */
+      size_t real_total = 0, real_free_unused = 0;
+      CUresult sub = CUDA_ERROR_NOT_FOUND;
+      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2,
+                               &real_free_unused, &real_total);
+      } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo,
+                               &real_free_unused, &real_total);
+      }
+      actual_total = (sub == CUDA_SUCCESS && real_total > 0
+                      && real_total < configured)
+                     ? real_total : configured;
+    }
+
+    *total = actual_total;
+    *free  = (used + vmem_used) >= actual_total
+             ? 0 : (actual_total - used - vmem_used);
     ret = CUDA_SUCCESS;
     goto DONE;
   }
