@@ -357,6 +357,14 @@ int get_host_device_index_by_cuda_device(CUdevice device);
 
 int get_host_device_index_by_nvml_device(nvmlDevice_t device);
 
+/* host_index -> nvmlDevice_t. Resolves via the UUID string already
+ * loaded into g_vgpu_config (no dependency on the lazily-built
+ * nvml_to_host_device_index[] map, which is populated only once the
+ * CUDA bootstrap path runs). NVML must be initialized before this
+ * call; the Vulkan layer entry triggers init_devices_mapping() at
+ * vkCreateInstance success to satisfy that precondition. */
+nvmlReturn_t get_nvml_device_by_host_index(int host_index, nvmlDevice_t *out);
+
 void register_to_remote_with_data(const char* pod_uid, const char* container);
 
 #ifdef __cplusplus

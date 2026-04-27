@@ -1,0 +1,13 @@
+{
+  "file_format_version": "1.2.0",
+  "layer": {
+    "name": "VK_LAYER_VGPU_MANAGER_vgpu",
+    "type": "GLOBAL",
+    "library_path": "/etc/vgpu-manager/driver/libvgpu-control.so",
+    "api_version": "1.3.0",
+    "implementation_version": "1",
+    "description": "vgpu-manager Vulkan implicit layer: per-pod GPU memory budget, heap-size clamp, and SM rate limiting (mirrors the CUDA hook path).",
+    "enable_environment":  { "VGPU_VULKAN_ENABLE":  "1" },
+    "disable_environment": { "VGPU_VULKAN_DISABLE": "1" }
+  }
+}

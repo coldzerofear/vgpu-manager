@@ -22,9 +22,9 @@
 
 #include "include/hook.h"   /* g_vgpu_config, resource_data_t */
 
-#include "dispatch.h"
-#include "physdev_index.h"
-#include "hooks_memory.h"
+#include "include/vulkan/dispatch.h"
+#include "include/vulkan/physdev_index.h"
+#include "include/vulkan/hooks_memory.h"
 
 extern resource_data_t *g_vgpu_config;
 
@@ -92,7 +92,7 @@ vgpu_vk_GetPhysicalDeviceMemoryProperties(
   VkInstance owner = vgpu_vk_physdev_owner(physicalDevice);
   if (owner == VK_NULL_HANDLE) return;
 
-  vgpu_instance_dispatch_t *d = vgpu_get_instance_dispatch(owner);
+  vgpu_vk_instance_dispatch_t *d = vgpu_vk_get_instance_dispatch(owner);
   if (d == NULL || d->pfn_GetPhysicalDeviceMemoryProperties == NULL) {
     return;
   }
@@ -113,7 +113,7 @@ vgpu_vk_GetPhysicalDeviceMemoryProperties2(
   VkInstance owner = vgpu_vk_physdev_owner(physicalDevice);
   if (owner == VK_NULL_HANDLE) return;
 
-  vgpu_instance_dispatch_t *d = vgpu_get_instance_dispatch(owner);
+  vgpu_vk_instance_dispatch_t *d = vgpu_vk_get_instance_dispatch(owner);
   if (d == NULL || d->pfn_GetPhysicalDeviceMemoryProperties2 == NULL) {
     return;
   }

@@ -42,4 +42,11 @@ COPY --from=builder /vgpu-controller/build/mem_managed_tool   /installed/tools/m
 COPY --from=builder /vgpu-controller/build/mem_view_tool      /installed/tools/mem_view_tool
 COPY --from=builder /go/src/vgpu-manager/bin/device-client    /installed/registry/device-client
 
+# Vulkan implicit-layer manifest. Stays unconditional even on CUDA-only
+# Pods: the layer's enable_environment gate (VGPU_VULKAN_ENABLE=1) is
+# only set by device-plugin for Pods that opt in, so the loader does not
+# probe the .so for non-Vulkan workloads.
+COPY --from=builder /vgpu-controller/build/vulkan/implicit_layer.d/vgpu_manager_implicit_layer.json \
+                    /installed/vulkan/implicit_layer.d/vgpu_manager_implicit_layer.json
+
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload

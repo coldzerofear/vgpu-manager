@@ -1,5 +1,5 @@
 /*
- * vkGetPhysicalDeviceMemoryProperties / _2 / _2KHR clamp hooks (Phase 4).
+ * vkGetPhysicalDeviceMemoryProperties / _2 / _2KHR clamp hooks.
  *
  * Single concern: when a Vulkan application asks the driver "how much
  * memory does this physical device have?", we report the per-pod vGPU
@@ -16,9 +16,9 @@
  * See clamp_cap_for_phys in hooks_memory.c for the full rationale.
  *
  * These hooks do NOT touch budget enforcement, lock_gpu_device, NVML
- * `used` view, or any cross-process state. Phase 5 introduces those
- * paths via vk_layer_AllocateMemory. Phase 4 is a pure read + clamp,
- * cheap enough that per-call cost is negligible.
+ * `used` view, or any cross-process state — those live in
+ * hooks_alloc.c (vkAllocateMemory). The clamp here is a pure read +
+ * clamp, cheap enough that per-call cost is negligible.
  */
 #ifndef VGPU_VULKAN_HOOKS_MEMORY_H
 #define VGPU_VULKAN_HOOKS_MEMORY_H

@@ -89,6 +89,46 @@ static int load_limited_memory_view(CUdevice device, int *host_index,
                                     int *lock_fd, size_t *used,
                                     size_t *vmem_used);
 
+/* Pure decision: given an already-resolved host_index plus a snapshot of
+ * (used, vmem_used) read under lock, pick GPU/UVA/OOM. No NVML I/O, no
+ * locking, no g_vgpu_config validity check (caller has done both).
+ *
+ * Shared by prepare_memory_allocation (CUdevice-keyed, CUDA path) and
+ * vgpu_check_alloc_budget (host_index-keyed, Vulkan path). Keeping the
+ * decision in one place is what guarantees the two API surfaces stay in
+ * lock-step on cap selection and oversold semantics.
+ *
+ * Cap rules:
+ *   kind=VIRTUAL  -> total_memory (CUDA, oversold-aware)
+ *   kind=PHYSICAL -> real_memory  (Vulkan / physical-only consumers).
+ *                    Also forces allow_uva=0 to make UVA structurally
+ *                    unreachable for those consumers. */
+static vgpu_path_t decide_path_with_used(int host_index,
+                                         size_t request_size,
+                                         vgpu_budget_kind_t kind,
+                                         int allow_uva,
+                                         size_t used,
+                                         size_t vmem_used) {
+  size_t cap;
+  if (kind == VGPU_BUDGET_KIND_PHYSICAL) {
+    cap = g_vgpu_config->devices[host_index].real_memory;
+    allow_uva = 0;
+  } else {
+    cap = g_vgpu_config->devices[host_index].total_memory;
+  }
+
+  if ((used + vmem_used + request_size) > cap) {
+    return VGPU_PATH_OOM;
+  }
+
+  if (allow_uva && g_vgpu_config->devices[host_index].memory_oversold &&
+      (used + request_size) > g_vgpu_config->devices[host_index].real_memory) {
+    return VGPU_PATH_UVA;
+  }
+
+  return VGPU_PATH_GPU;
+}
+
 vgpu_path_t prepare_memory_allocation(CUdevice device,
                                       size_t request_size,
                                       vgpu_budget_kind_t kind,
@@ -101,31 +141,47 @@ vgpu_path_t prepare_memory_allocation(CUdevice device,
   if (!load_limited_memory_view(device, host_index, lock_fd, &used, &vmem_used)) {
     return VGPU_PATH_GPU;
   }
+  return decide_path_with_used(*host_index, request_size, kind, allow_uva,
+                               used, vmem_used);
+}
 
-  /* Cap depends on kind:
-   *   VIRTUAL  : g_vgpu_config[*].total_memory (CUDA, oversold-aware)
-   *   PHYSICAL : g_vgpu_config[*].real_memory  (Vulkan and any other
-   *                                             physical-only API)
-   * PHYSICAL kind also forces allow_uva=0 below; the caller should
-   * already pass 0 but this is defensive in case of misconfiguration. */
-  size_t cap;
-  if (kind == VGPU_BUDGET_KIND_PHYSICAL) {
-    cap = g_vgpu_config->devices[*host_index].real_memory;
-    allow_uva = 0;
-  } else {
-    cap = g_vgpu_config->devices[*host_index].total_memory;
+vgpu_path_t vgpu_check_alloc_budget(int host_index,
+                                    size_t request_size,
+                                    vgpu_budget_kind_t kind,
+                                    int allow_uva,
+                                    int *lock_fd) {
+  *lock_fd = -1;
+
+  /* Mirror load_limited_memory_view's "unmanaged" short-circuits, but
+   * keyed by host_index instead of CUdevice. Returning GPU + lock_fd=-1
+   * means "do not enforce a budget on this device", same contract as
+   * the CUDA-side helper. */
+  if (g_vgpu_config == NULL) return VGPU_PATH_GPU;
+  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return VGPU_PATH_GPU;
+  if (!g_vgpu_config->devices[host_index].memory_limit) return VGPU_PATH_GPU;
+
+  /* Resolve nvmlDevice_t via host_index -> uuid -> nvmlDeviceGetHandleByUUID.
+   * Independent of init_devices_mapping's nvml_to_host_device_index[] —
+   * that array would be unfilled in pure-Vulkan apps that never reached
+   * the CUDA path. NVML must already be init'd (the Vulkan layer triggers
+   * init_devices_mapping at vk_layer_CreateInstance success). */
+  nvmlDevice_t dev;
+  if (get_nvml_device_by_host_index(host_index, &dev) != NVML_SUCCESS) {
+    /* Cannot read NVML — degrade to "no enforcement" rather than block
+     * the application. Logging at VERBOSE keeps the noise low; if it
+     * happens repeatedly the operator can correlate via metrics. */
+    LOGGER(VERBOSE, "vgpu_check_alloc_budget: NVML handle unavailable for "
+                    "host device %d, skipping enforcement", host_index);
+    return VGPU_PATH_GPU;
   }
 
-  if ((used + vmem_used + request_size) > cap) {
-    return VGPU_PATH_OOM;
-  }
-
-  if (allow_uva && g_vgpu_config->devices[*host_index].memory_oversold &&
-      (used + request_size) > g_vgpu_config->devices[*host_index].real_memory) {
-    return VGPU_PATH_UVA;
-  }
-
-  return VGPU_PATH_GPU;
+  *lock_fd = lock_gpu_device(host_index);
+  size_t used = 0;
+  size_t vmem_used = 0;
+  get_used_gpu_memory_by_device((void *)&used, dev);
+  get_used_gpu_virt_memory((void *)&vmem_used, host_index);
+  return decide_path_with_used(host_index, request_size, kind, allow_uva,
+                               used, vmem_used);
 }
 
 static int load_limited_memory_view(CUdevice device,
@@ -318,28 +374,45 @@ static void change_token(int64_t delta, int host_index) {
   } while (!CAS(&g_cur_cuda_cores[host_index], cuda_cores_before, cuda_cores_after));
 }
 
+/* Host-index-keyed core. Public: budget.h surfaces it for non-CUDA hook
+ * layers (Vulkan vkQueueSubmit) that already hold a host_index but no
+ * CUdevice. CAS-decrement on the per-device token bucket, blocking
+ * (nanosleep + retry) when the bucket is depleted. Tokens are
+ * replenished by the utilization_watcher thread, which initialization()
+ * starts via balance_batches/active_utilization_notifier. */
+void vgpu_rate_limit_by_host_index(int kernel_size, int host_index) {
+  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
+  if (!g_vgpu_config->devices[host_index].core_limit) return;
+
+  int64_t before_cuda_cores = 0;
+  int64_t after_cuda_cores = 0;
+  int64_t size = (int64_t)kernel_size;
+
+  do {
+  CHECK:
+    before_cuda_cores = g_cur_cuda_cores[host_index];
+    if (before_cuda_cores < 0) {
+      metrics_record_rate_limit_hit(host_index);
+      nanosleep(&g_cycle, NULL);
+      goto CHECK;
+    }
+    after_cuda_cores = before_cuda_cores - size;
+  } while (!CAS(&g_cur_cuda_cores[host_index], before_cuda_cores, after_cuda_cores));
+}
+
+/* CUDA-keyed wrapper. Resolves CUdevice -> host_index then delegates
+ * to the shared core. `blocks` is currently unused — historical signal
+ * for future per-thread weighting; kept in the signature so the 11
+ * existing CUDA call sites remain untouched. */
 static void rate_limiter(int grids, int blocks, CUdevice device) {
   (void)blocks;
   int host_index = get_host_device_index_by_cuda_device(device);
-  if (host_index < 0) {
-    return;
-  }
-  if (g_vgpu_config->devices[host_index].core_limit) {
-    int64_t before_cuda_cores = 0;
-    int64_t after_cuda_cores = 0;
-    int64_t kernel_size = (int64_t) grids;
+  if (host_index < 0) return;
+  vgpu_rate_limit_by_host_index(grids, host_index);
+}
 
-    do {
-    CHECK:
-      before_cuda_cores = g_cur_cuda_cores[host_index];
-      if (before_cuda_cores < 0) {
-        metrics_record_rate_limit_hit(host_index);
-        nanosleep(&g_cycle, NULL);
-        goto CHECK;
-      }
-      after_cuda_cores = before_cuda_cores - kernel_size;
-    } while (!CAS(&g_cur_cuda_cores[host_index], before_cuda_cores, after_cuda_cores));
-  }
+void vgpu_ensure_sm_watcher_started(void) {
+  pthread_once(&g_init_set, initialization);
 }
 
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index) {
@@ -588,6 +661,7 @@ static void initialization() {
   init_device_cuda_cores(&device_count);
   balance_batches(device_count);
 }
+
 
 int split_str(char *line, char *key, char *value, char d) {
   int index = 0;
@@ -1156,7 +1230,7 @@ CUresult cuDriverGetVersion(int *driverVersion) {
     goto DONE;
   }
   init_devices_mapping();
-//  pthread_once(&g_init_set, initialization);
+//  vgpu_ensure_sm_watcher_started();
 DONE:
   return ret;
 }
@@ -1170,7 +1244,7 @@ CUresult cuInit(unsigned int flag) {
     goto DONE;
   }
   init_devices_mapping();
-  pthread_once(&g_init_set, initialization);
+  vgpu_ensure_sm_watcher_started();
 DONE:
   return ret;
 }
@@ -1184,7 +1258,7 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
                          cudaVersion, flags);
   if (likely(ret == CUDA_SUCCESS)) {
     init_devices_mapping();
-    pthread_once(&g_init_set, initialization);
+    vgpu_ensure_sm_watcher_started();
 
     /*
      * Special case: caller is asking for cuGetProcAddress itself. We MUST
@@ -1256,7 +1330,7 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                          cudaVersion, flags, symbolStatus);
   if (likely(ret == CUDA_SUCCESS)) {
     init_devices_mapping();
-    pthread_once(&g_init_set, initialization);
+    vgpu_ensure_sm_watcher_started();
 
     /*
      * Self-lookup special case - see cuGetProcAddress (4-arg hook) above

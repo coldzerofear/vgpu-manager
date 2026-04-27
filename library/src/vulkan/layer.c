@@ -1,14 +1,15 @@
 /*
- * vgpu-manager Vulkan implicit layer - core skeleton (Phase 2).
+ * vgpu-manager Vulkan implicit layer - core wiring.
  *
  * Implements the loader<->layer negotiation protocol, the dispatch
- * chain wiring at vkCreateInstance / vkCreateDevice time, and the
- * per-layer GetProcAddr lookups. NO business logic - every call is
- * forwarded transparently to the next layer in the chain. Memory
- * budget enforcement (Phase 5), heap clamping (Phase 4), queue
- * throttling (Phase 6) layer on top of this skeleton.
+ * chain wiring at vkCreateInstance / vkCreateDevice time, the
+ * per-layer GetInstance/DeviceProcAddr lookups, and the bootstrap of
+ * vgpu-manager's runtime state (config + NVML + SM watcher) on first
+ * Vulkan instance creation. The actual hook bodies live in
+ * hooks_memory.c (heap clamp), hooks_alloc.c (memory budget) and
+ * hooks_submit.c (SM rate limit).
  *
- * Symbol export discipline (very important, see layer.h):
+ * Symbol export discipline (see layer.h for details):
  *   - the only ELF-exported symbol is vkNegotiateLoaderLayerInterfaceVersion
  *   - every other entry point in this file is static
  *   - the layer's GetInstance/DeviceProcAddr return our static pointers
@@ -22,12 +23,16 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 
-#include "include/hook.h"   /* load_necessary_data() */
+#include "include/hook.h"     /* load_necessary_data, init_devices_mapping */
+#include "include/budget.h"   /* vgpu_ensure_sm_watcher_started */
 
-#include "layer.h"
-#include "dispatch.h"
-#include "physdev_index.h"
-#include "hooks_memory.h"
+#include "include/vulkan/layer.h"
+#include "include/vulkan/dispatch.h"
+#include "include/vulkan/physdev_index.h"
+#include "include/vulkan/queue_index.h"
+#include "include/vulkan/hooks_memory.h"
+#include "include/vulkan/hooks_alloc.h"
+#include "include/vulkan/hooks_submit.h"
 
 /* Forward declarations of the static hooks - referenced by the GetProcAddr
  * lookups before their bodies appear below. */
@@ -130,16 +135,16 @@ vk_layer_CreateInstance(const VkInstanceCreateInfo  *pCreateInfo,
    * next layer's GIPA so subsequent hooks can route forwarding calls,
    * and DestroyInstance so vk_layer_DestroyInstance can clean up. Other
    * pfn_ fields stay NULL until later phases register more hooks. */
-  vgpu_instance_dispatch_t entry;
+  vgpu_vk_instance_dispatch_t entry;
   memset(&entry, 0, sizeof(entry));
   entry.instance                = *pInstance;
   entry.pfn_GetInstanceProcAddr = next_gipa;
   entry.pfn_DestroyInstance     =
       (PFN_vkDestroyInstance)next_gipa(*pInstance, "vkDestroyInstance");
 
-  /* Phase 4 fields. _2 falls back to _2KHR for pre-1.1 instances that
-   * loaded VK_KHR_get_physical_device_properties2 - same fallback shape
-   * Phase 3 already uses for vkGetPhysicalDeviceProperties2. */
+  /* Heap-clamp pfns (hooks_memory.c). _2 falls back to _2KHR for
+   * pre-1.1 instances that loaded VK_KHR_get_physical_device_properties2
+   * - same fallback shape physdev_index uses for the UUID resolver. */
   entry.pfn_GetPhysicalDeviceMemoryProperties =
       (PFN_vkGetPhysicalDeviceMemoryProperties)
       next_gipa(*pInstance, "vkGetPhysicalDeviceMemoryProperties");
@@ -152,7 +157,7 @@ vk_layer_CreateInstance(const VkInstanceCreateInfo  *pCreateInfo,
         next_gipa(*pInstance, "vkGetPhysicalDeviceMemoryProperties2KHR");
   }
 
-  vgpu_register_instance(&entry);
+  vgpu_vk_register_instance_dispatch(&entry);
 
   /* Eagerly populate the VkPhysicalDevice -> host_index cache for every
    * physdev this instance can see. Failures here are logged but never
@@ -161,13 +166,42 @@ vk_layer_CreateInstance(const VkInstanceCreateInfo  *pCreateInfo,
    * read with no Vulkan loader round-trip. */
   vgpu_vk_register_instance_physdevs(*pInstance, next_gipa);
 
+  /* Front-load NVML readiness before any vkAllocateMemory can arrive.
+   * load_necessary_data() above only dlsym'd the NVML symbols; the
+   * actual nvmlInit_v2 call lives inside init_nvml_to_host_device_index,
+   * which init_devices_mapping invokes via pthread_once. Without this
+   * the first vgpu_check_alloc_budget would resolve a nvmlDevice_t
+   * against an uninitialised NVML library and fall through to "no
+   * enforcement" — silently bypassing the budget on the first alloc.
+   *
+   * Deliberately deferred until after next_create succeeded: if the
+   * NVIDIA ICD failed to come up (no GPU, broken driver), the next
+   * layer's vkCreateInstance has already returned an error and we will
+   * not reach here. Calling init_devices_mapping in that state would
+   * trip the LOGGER(FATAL,...) inside init_nvml_to_host_device_index.
+   *
+   * pthread_once-guarded internally, so multiple instances or a CUDA
+   * path that already triggered it are no-ops. */
+  init_devices_mapping();
+
+  /* Front-load SM rate-limiter readiness. cuda_hook.c's initialization()
+   * runs cuInit, populates g_total_cuda_cores, and starts the
+   * utilization_watcher thread that replenishes the per-device token
+   * bucket. Without this, the first vkQueueSubmit would push
+   * g_cur_cuda_cores below zero and stall in nanosleep forever (the
+   * watcher would never run to refill it).
+   *
+   * pthread_once-guarded — a CUDA path that already triggered it is
+   * a no-op; multiple Vulkan instances are also fine. */
+  vgpu_ensure_sm_watcher_started();
+
   return VK_SUCCESS;
 }
 
 static VKAPI_ATTR void VKAPI_CALL
 vk_layer_DestroyInstance(VkInstance instance,
                          const VkAllocationCallbacks *pAllocator) {
-  vgpu_instance_dispatch_t *d = vgpu_get_instance_dispatch(instance);
+  vgpu_vk_instance_dispatch_t *d = vgpu_vk_get_instance_dispatch(instance);
   PFN_vkDestroyInstance next  = (d != NULL) ? d->pfn_DestroyInstance : NULL;
   /* Drop physdev cache entries first, then dispatch entry, before
    * forwarding the destroy. Order matters in case a racing concurrent
@@ -176,7 +210,7 @@ vk_layer_DestroyInstance(VkInstance instance,
    * or no entry (and bails out). It never sees a stale phys -> host
    * mapping for an instance whose dispatch table is already gone. */
   vgpu_vk_unregister_instance_physdevs(instance);
-  vgpu_remove_instance(instance);
+  vgpu_vk_remove_instance_dispatch(instance);
   if (next != NULL) {
     next(instance, pAllocator);
   }
@@ -222,14 +256,40 @@ vk_layer_CreateDevice(VkPhysicalDevice              physicalDevice,
     return result;
   }
 
-  vgpu_device_dispatch_t entry;
+  vgpu_vk_device_dispatch_t entry;
   memset(&entry, 0, sizeof(entry));
   entry.device                = *pDevice;
   entry.physical_device       = physicalDevice;
   entry.pfn_GetDeviceProcAddr = next_gdpa;
   entry.pfn_DestroyDevice     =
       (PFN_vkDestroyDevice)next_gdpa(*pDevice, "vkDestroyDevice");
-  vgpu_register_device(&entry);
+
+  /* Memory budget pfns (hooks_alloc.c). NULL is tolerated by the
+   * corresponding hooks (they degrade to a defensive error / no-op
+   * rather than crashing). */
+  entry.pfn_AllocateMemory =
+      (PFN_vkAllocateMemory)next_gdpa(*pDevice, "vkAllocateMemory");
+  entry.pfn_FreeMemory =
+      (PFN_vkFreeMemory)next_gdpa(*pDevice, "vkFreeMemory");
+
+  /* Queue acquisition + submit pfns (hooks_submit.c). _2 falls back to
+   * the KHR synchronization2 alias when the 1.3 core entry is
+   * unavailable — same fallback pattern used elsewhere for
+   * promoted-extension APIs. */
+  entry.pfn_GetDeviceQueue =
+      (PFN_vkGetDeviceQueue)next_gdpa(*pDevice, "vkGetDeviceQueue");
+  entry.pfn_GetDeviceQueue2 =
+      (PFN_vkGetDeviceQueue2)next_gdpa(*pDevice, "vkGetDeviceQueue2");
+  entry.pfn_QueueSubmit =
+      (PFN_vkQueueSubmit)next_gdpa(*pDevice, "vkQueueSubmit");
+  entry.pfn_QueueSubmit2 =
+      (PFN_vkQueueSubmit2)next_gdpa(*pDevice, "vkQueueSubmit2");
+  if (entry.pfn_QueueSubmit2 == NULL) {
+    entry.pfn_QueueSubmit2 =
+        (PFN_vkQueueSubmit2)next_gdpa(*pDevice, "vkQueueSubmit2KHR");
+  }
+
+  vgpu_vk_register_device_dispatch(&entry);
 
   return VK_SUCCESS;
 }
@@ -237,9 +297,17 @@ vk_layer_CreateDevice(VkPhysicalDevice              physicalDevice,
 static VKAPI_ATTR void VKAPI_CALL
 vk_layer_DestroyDevice(VkDevice device,
                        const VkAllocationCallbacks *pAllocator) {
-  vgpu_device_dispatch_t *d = vgpu_get_device_dispatch(device);
+  vgpu_vk_device_dispatch_t *d = vgpu_vk_get_device_dispatch(device);
   PFN_vkDestroyDevice next  = (d != NULL) ? d->pfn_DestroyDevice : NULL;
-  vgpu_remove_device(device);
+  /* Drop queue cache entries first, then dispatch entry, before
+   * forwarding the destroy. Same ordering rationale as
+   * vk_layer_DestroyInstance: a racing concurrent submit either sees
+   * a fully-registered device (and gets a valid forward) or no entry
+   * (and bails out via VK_ERROR_INITIALIZATION_FAILED). It never
+   * sees a stale queue -> device mapping for a device whose dispatch
+   * table is already gone. */
+  vgpu_vk_unregister_queues_for_device(device);
+  vgpu_vk_remove_device_dispatch(device);
   if (next != NULL) {
     next(device, pAllocator);
   }
@@ -274,9 +342,9 @@ vk_layer_GetInstanceProcAddr(VkInstance instance, const char *pName) {
     return (PFN_vkVoidFunction)vk_layer_GetDeviceProcAddr;
   }
 
-  /* Phase 4: clamp device-local heap size on memory-properties query.
-   * The Vulkan 1.1 _2 entry and the original _2KHR alias have identical
-   * signatures and identical semantics, so they share one hook function. */
+  /* Heap-clamp on memory-properties query. The Vulkan 1.1 _2 entry
+   * and the original _2KHR alias have identical signatures and
+   * identical semantics, so they share one hook function. */
   if (strcmp(pName, "vkGetPhysicalDeviceMemoryProperties") == 0) {
     return (PFN_vkVoidFunction)vgpu_vk_GetPhysicalDeviceMemoryProperties;
   }
@@ -290,7 +358,7 @@ vk_layer_GetInstanceProcAddr(VkInstance instance, const char *pName) {
    * instance == NULL (vkCreateInstance, vkEnumerateInstance*) are all
    * handled in the explicit names above. */
   if (instance != VK_NULL_HANDLE) {
-    vgpu_instance_dispatch_t *d = vgpu_get_instance_dispatch(instance);
+    vgpu_vk_instance_dispatch_t *d = vgpu_vk_get_instance_dispatch(instance);
     if (d != NULL && d->pfn_GetInstanceProcAddr != NULL) {
       return d->pfn_GetInstanceProcAddr(instance, pName);
     }
@@ -309,8 +377,34 @@ vk_layer_GetDeviceProcAddr(VkDevice device, const char *pName) {
     return (PFN_vkVoidFunction)vk_layer_DestroyDevice;
   }
 
+  /* Device-memory budget enforcement. */
+  if (strcmp(pName, "vkAllocateMemory") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_AllocateMemory;
+  }
+  if (strcmp(pName, "vkFreeMemory") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_FreeMemory;
+  }
+
+  /* SM rate limit on queue submission, plus the queue acquisition
+   * hooks that record VkQueue -> VkDevice for the submit hooks.
+   * _2 and _2KHR share the same hook function (identical signatures,
+   * identical semantics). */
+  if (strcmp(pName, "vkGetDeviceQueue") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_GetDeviceQueue;
+  }
+  if (strcmp(pName, "vkGetDeviceQueue2") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_GetDeviceQueue2;
+  }
+  if (strcmp(pName, "vkQueueSubmit") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_QueueSubmit;
+  }
+  if (strcmp(pName, "vkQueueSubmit2") == 0 ||
+      strcmp(pName, "vkQueueSubmit2KHR") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_QueueSubmit2;
+  }
+
   if (device != VK_NULL_HANDLE) {
-    vgpu_device_dispatch_t *d = vgpu_get_device_dispatch(device);
+    vgpu_vk_device_dispatch_t *d = vgpu_vk_get_device_dispatch(device);
     if (d != NULL && d->pfn_GetDeviceProcAddr != NULL) {
       return d->pfn_GetDeviceProcAddr(device, pName);
     }
@@ -338,8 +432,9 @@ vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct
   }
   pVersionStruct->pfnGetInstanceProcAddr       = vk_layer_GetInstanceProcAddr;
   pVersionStruct->pfnGetDeviceProcAddr         = vk_layer_GetDeviceProcAddr;
-  /* No physical-device-level hook in Phase 2; Phase 4 will provide one
-   * via the dispatch chain rather than this back-channel. */
+  /* Physical-device-level hooks (vkGetPhysicalDeviceMemoryProperties[2])
+   * are routed via the GIPA chain returned above; the v2 back-channel
+   * is unused. */
   pVersionStruct->pfnGetPhysicalDeviceProcAddr = NULL;
   return VK_SUCCESS;
 }

@@ -132,3 +132,27 @@ test: build-tests ## Build then run all tests with LD_PRELOAD of libvgpu-control
 test-cuda13-abi: build-tests ## Run just the CUDA 13 ABI-conflict smoke test.
 	LD_PRELOAD=$(SO_FILE) TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
 	    $(BUILD_DIR)/test/test_cuda13_abi
+
+##@ Vulkan unit tests (no GPU / no CUDA needed)
+
+.PHONY: test-vulkan-unit
+test-vulkan-unit: ## Build + run the Vulkan layer unit tests under test/vulkan/.
+	@mkdir -p $(BUILD_DIR)
+	cd $(BUILD_DIR) && CUDA_HOME=$(CUDA_HOME) $(CMAKE) \
+	    -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
+	    -DBUILD_VULKAN_LAYER=ON \
+	    -DBUILD_TESTS=ON \
+	    $(CMAKE_EXTRA_ARGS) \
+	    $(LIBRARY_DIR)
+	$(MAKE) -C $(BUILD_DIR) -j$(J) vgpu-control
+	$(MAKE) -C $(BUILD_DIR) -j$(J) test_dispatch test_queue_index \
+	    test_physdev_index test_memprops_clamp test_alloc_budget \
+	    test_alloc_import test_submit_throttle test_layer_init \
+	    vgpu_vk_copy_runner
+	$(BASH) $(BUILD_DIR)/test/vulkan/run_unit_tests.sh \
+	    $(BUILD_DIR)/test/vulkan $(SO_FILE)
+
+.PHONY: check-vulkan-layer
+check-vulkan-layer: $(SO_FILE) ## Sanity-check the built .so for Vulkan-layer hygiene.
+	$(BASH) $(LIBRARY_DIR)hack/check_vulkan_layer.sh \
+	    $(SO_FILE) $(LIBRARY_DIR)deploy/vgpu_manager_implicit_layer.json

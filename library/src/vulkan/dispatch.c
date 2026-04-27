@@ -16,15 +16,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "dispatch.h"
+#include "include/vulkan/dispatch.h"
 
 typedef struct vgpu_instance_node {
-  vgpu_instance_dispatch_t   entry;
+  vgpu_vk_instance_dispatch_t   entry;
   struct vgpu_instance_node *next;
 } vgpu_instance_node_t;
 
 typedef struct vgpu_device_node {
-  vgpu_device_dispatch_t   entry;
+  vgpu_vk_device_dispatch_t   entry;
   struct vgpu_device_node *next;
 } vgpu_device_node_t;
 
@@ -33,8 +33,8 @@ static vgpu_device_node_t   *g_devices   = NULL;
 static pthread_rwlock_t g_instance_lock = PTHREAD_RWLOCK_INITIALIZER;
 static pthread_rwlock_t g_device_lock   = PTHREAD_RWLOCK_INITIALIZER;
 
-vgpu_instance_dispatch_t *vgpu_get_instance_dispatch(VkInstance instance) {
-  vgpu_instance_dispatch_t *result = NULL;
+vgpu_vk_instance_dispatch_t *vgpu_vk_get_instance_dispatch(VkInstance instance) {
+  vgpu_vk_instance_dispatch_t *result = NULL;
   pthread_rwlock_rdlock(&g_instance_lock);
   for (vgpu_instance_node_t *n = g_instances; n != NULL; n = n->next) {
     if (n->entry.instance == instance) {
@@ -46,8 +46,8 @@ vgpu_instance_dispatch_t *vgpu_get_instance_dispatch(VkInstance instance) {
   return result;
 }
 
-vgpu_device_dispatch_t *vgpu_get_device_dispatch(VkDevice device) {
-  vgpu_device_dispatch_t *result = NULL;
+vgpu_vk_device_dispatch_t *vgpu_vk_get_device_dispatch(VkDevice device) {
+  vgpu_vk_device_dispatch_t *result = NULL;
   pthread_rwlock_rdlock(&g_device_lock);
   for (vgpu_device_node_t *n = g_devices; n != NULL; n = n->next) {
     if (n->entry.device == device) {
@@ -59,7 +59,7 @@ vgpu_device_dispatch_t *vgpu_get_device_dispatch(VkDevice device) {
   return result;
 }
 
-void vgpu_register_instance(const vgpu_instance_dispatch_t *entry) {
+void vgpu_vk_register_instance_dispatch(const vgpu_vk_instance_dispatch_t *entry) {
   if (entry == NULL) return;
   vgpu_instance_node_t *node = (vgpu_instance_node_t *)calloc(1, sizeof(*node));
   if (node == NULL) return;
@@ -71,7 +71,7 @@ void vgpu_register_instance(const vgpu_instance_dispatch_t *entry) {
   pthread_rwlock_unlock(&g_instance_lock);
 }
 
-void vgpu_register_device(const vgpu_device_dispatch_t *entry) {
+void vgpu_vk_register_device_dispatch(const vgpu_vk_device_dispatch_t *entry) {
   if (entry == NULL) return;
   vgpu_device_node_t *node = (vgpu_device_node_t *)calloc(1, sizeof(*node));
   if (node == NULL) return;
@@ -83,7 +83,7 @@ void vgpu_register_device(const vgpu_device_dispatch_t *entry) {
   pthread_rwlock_unlock(&g_device_lock);
 }
 
-void vgpu_remove_instance(VkInstance instance) {
+void vgpu_vk_remove_instance_dispatch(VkInstance instance) {
   pthread_rwlock_wrlock(&g_instance_lock);
   vgpu_instance_node_t **prev = &g_instances;
   while (*prev != NULL) {
@@ -98,7 +98,7 @@ void vgpu_remove_instance(VkInstance instance) {
   pthread_rwlock_unlock(&g_instance_lock);
 }
 
-void vgpu_remove_device(VkDevice device) {
+void vgpu_vk_remove_device_dispatch(VkDevice device) {
   pthread_rwlock_wrlock(&g_device_lock);
   vgpu_device_node_t **prev = &g_devices;
   while (*prev != NULL) {

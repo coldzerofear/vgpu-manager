@@ -1698,6 +1698,28 @@ void get_host_device_index_by_uuid_bytes(const uint8_t uuid[16], int *host_index
   get_host_device_index_by_uuid(uuid_str, host_index);
 }
 
+nvmlReturn_t get_nvml_device_by_host_index(int host_index, nvmlDevice_t *out) {
+  if (out == NULL) {
+    return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) {
+    return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (g_vgpu_config == NULL) {
+    return NVML_ERROR_UNINITIALIZED;
+  }
+  /* g_vgpu_config->devices[].uuid is populated synchronously by
+   * load_controller_configuration during load_necessary_data(); reading
+   * it without taking device_index_mutex is safe — the array is
+   * write-once at config load and read-only thereafter. */
+  const char *uuid = g_vgpu_config->devices[host_index].uuid;
+  if (uuid[0] == '\0') {
+    return NVML_ERROR_NOT_FOUND;
+  }
+  return NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByUUID,
+                             uuid, out);
+}
+
 int get_host_device_index_by_nvml_device(nvmlDevice_t device) {
   int nvml_index;
   nvmlReturn_t ret = NVML_INTERNAL_CHECK(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);

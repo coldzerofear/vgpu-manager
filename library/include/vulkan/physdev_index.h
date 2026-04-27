@@ -3,14 +3,14 @@
  *
  * Vulkan apps refer to GPUs via VkPhysicalDevice handles obtained from
  * vkEnumeratePhysicalDevices. Our budget bookkeeping is keyed by
- * `host_index` (an index into g_vgpu_config->devices[]). To enforce
- * memory limits inside vk_layer_AllocateMemory (Phase 5+) we need a
- * fast, ABI-correct way to translate one to the other.
+ * `host_index` (an index into g_vgpu_config->devices[]). The Vulkan
+ * memory-budget hook (hooks_alloc.c) needs a fast, ABI-correct way to
+ * translate one to the other.
  *
  * Bridge: VkPhysicalDeviceIDProperties::deviceUUID, populated by the
  * NVIDIA Vulkan ICD, is exactly the same 16-byte UUID NVML reports via
- * nvmlDeviceGetUUID. get_host_device_index_by_uuid_bytes() (added in
- * Phase 0 in include/budget.h) does the final string-keyed lookup.
+ * nvmlDeviceGetUUID. get_host_device_index_by_uuid_bytes() in
+ * include/budget.h does the final string-keyed lookup.
  *
  * Lifecycle:
  *   - vk_layer_CreateInstance calls vgpu_vk_register_instance_physdevs

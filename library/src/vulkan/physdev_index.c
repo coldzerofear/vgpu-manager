@@ -25,7 +25,7 @@
 #include "include/budget.h"   /* get_host_device_index_by_uuid_bytes */
 #include "include/hook.h"     /* LOGGER */
 
-#include "physdev_index.h"
+#include "include/vulkan/physdev_index.h"
 
 typedef struct vgpu_vk_phys_node {
   VkPhysicalDevice           phys;

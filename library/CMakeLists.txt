@@ -118,24 +118,27 @@ endif()
 # alongside its CUDA hook role - one .so, two roles, single mount point.
 #
 # CUDA-only consumers see no behaviour change either way:
-#   - When OFF (default): .so does not export any vk* symbol; build does
-#     not require Vulkan-Headers.
-#   - When ON: extra vk* entry points appear in the .so but no existing
-#     CUDA path is altered.
+#   - When OFF: .so does not export any vk* symbol; build does not
+#     require Vulkan-Headers.
+#   - When ON:  the Vulkan layer code is linked into the .so. Loading
+#     of the layer at runtime is gated by the manifest's
+#     enable_environment (VGPU_VULKAN_ENABLE=1), so even when ON the
+#     CUDA-only Pods that don't set the env are not affected.
 #
-# Enable with:
-#   cmake -DBUILD_VULKAN_LAYER=ON ..
+# Default:
+#   - The CMake option below defaults to OFF for direct cmake invokers.
+#   - The build.sh wrapper sets BUILD_VULKAN_LAYER=ON by default; set
+#     the env var BUILD_VULKAN_LAYER=OFF on the wrapper to override.
+#   - The standard release Docker image is built via build.sh, so the
+#     shipped artifact has the layer compiled in.
 #
 # Requirements when enabled:
 #   - Vulkan-Headers (e.g. apt install libvulkan-dev)
 #   - CMake >= 3.7 for the bundled FindVulkan module
 #
-# Notes:
-#   - Phase 1 of the rollout - src/vulkan/* are stubs. See
-#     docs/how_to_develop_vulkan_implicit_layer.md for the phased plan.
-#   - To switch a build tree from OFF to ON or vice versa, prefer a fresh
-#     CMake configure step; reusing the same build/ directory with a
-#     different option value is supported but a clean is safer.
+# To switch a build tree from OFF to ON or vice versa, prefer a fresh
+# CMake configure step; reusing the same build/ directory with a
+# different option value is supported but a clean is safer.
 # ---------------------------------------------------------------------------
 option(BUILD_VULKAN_LAYER "Build the Vulkan implicit layer module" OFF)
 if(BUILD_VULKAN_LAYER)
@@ -152,6 +155,7 @@ if(BUILD_VULKAN_LAYER)
         src/vulkan/layer.c
         src/vulkan/dispatch.c
         src/vulkan/physdev_index.c
+        src/vulkan/queue_index.c
         src/vulkan/hooks_alloc.c
         src/vulkan/hooks_memory.c
         src/vulkan/hooks_submit.c)
@@ -165,6 +169,35 @@ if(BUILD_VULKAN_LAYER)
     set_target_properties(vgpu_vulkan_mod PROPERTIES
         POSITION_INDEPENDENT_CODE ON)
     target_sources(vgpu-control PRIVATE $<TARGET_OBJECTS:vgpu_vulkan_mod>)
+
+    # Ship the Vulkan implicit-layer manifest alongside the .so.
+    #
+    # Copy at configure time into the build tree so the top-level Dockerfile
+    # (which COPY --from=builder reads paths under build/) sees a stable
+    # location regardless of source-tree layout. Using configure_file with
+    # COPYONLY (no @VAR@ substitution) keeps the manifest exactly as
+    # checked in - the library_path is hard-coded to the runtime mount
+    # location (/etc/vgpu-manager/driver/libvgpu-control.so), matching
+    # device-plugin's ContVGPUControlFilePath.
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/deploy/vgpu_manager_implicit_layer.json
+        ${CMAKE_CURRENT_BINARY_DIR}/vulkan/implicit_layer.d/vgpu_manager_implicit_layer.json
+        COPYONLY)
+
+    # CMake install rule. Not part of the current Docker-based release flow
+    # (top-level Dockerfile does direct COPY --from=builder), but harmless
+    # and useful for downstream packaging / `make install` consumers.
+    install(FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/deploy/vgpu_manager_implicit_layer.json
+        DESTINATION etc/vulkan/implicit_layer.d)
+
+    # Vulkan layer unit tests. Independent of CUDAToolkit_FOUND — these
+    # tests run on any host with libvulkan-dev (no GPU, no CUDA, no
+    # NVML), so devcontainers and CI runners without an NVIDIA stack
+    # can still exercise them.
+    if(BUILD_TESTS)
+        add_subdirectory(test/vulkan)
+    endif()
 endif()
 
 # find_package(CUDAToolkit REQUIRED)
