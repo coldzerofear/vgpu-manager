@@ -24,6 +24,7 @@
 
 #include "layer.h"
 #include "dispatch.h"
+#include "physdev_index.h"
 
 /* Forward declarations of the static hooks - referenced by the GetProcAddr
  * lookups before their bodies appear below. */
@@ -123,6 +124,13 @@ vk_layer_CreateInstance(const VkInstanceCreateInfo  *pCreateInfo,
       (PFN_vkDestroyInstance)next_gipa(*pInstance, "vkDestroyInstance");
   vgpu_register_instance(&entry);
 
+  /* Eagerly populate the VkPhysicalDevice -> host_index cache for every
+   * physdev this instance can see. Failures here are logged but never
+   * propagate - vkCreateInstance must not fail just because we could
+   * not classify a device. The lookup at hook time becomes a pure cache
+   * read with no Vulkan loader round-trip. */
+  vgpu_vk_register_instance_physdevs(*pInstance, next_gipa);
+
   return VK_SUCCESS;
 }
 
@@ -131,8 +139,13 @@ vk_layer_DestroyInstance(VkInstance instance,
                          const VkAllocationCallbacks *pAllocator) {
   vgpu_instance_dispatch_t *d = vgpu_get_instance_dispatch(instance);
   PFN_vkDestroyInstance next  = (d != NULL) ? d->pfn_DestroyInstance : NULL;
-  /* Remove the entry first so a racing concurrent lookup that arrives
-   * after vkDestroyInstance returns can't see a stale dispatch table. */
+  /* Drop physdev cache entries first, then dispatch entry, before
+   * forwarding the destroy. Order matters in case a racing concurrent
+   * lookup arrives between our removals and the chain destroy: it
+   * either sees a fully-registered instance (and gets a valid forward)
+   * or no entry (and bails out). It never sees a stale phys -> host
+   * mapping for an instance whose dispatch table is already gone. */
+  vgpu_vk_unregister_instance_physdevs(instance);
   vgpu_remove_instance(instance);
   if (next != NULL) {
     next(instance, pAllocator);

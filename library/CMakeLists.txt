@@ -157,6 +157,13 @@ if(BUILD_VULKAN_LAYER)
         src/vulkan/hooks_submit.c)
     target_include_directories(vgpu_vulkan_mod
         PRIVATE ${Vulkan_INCLUDE_DIRS} ${CMAKE_SOURCE_DIR})
+    # CMake's default for OBJECT libraries is POSITION_INDEPENDENT_CODE=OFF,
+    # which fails to link into the SHARED parent target as soon as any
+    # translation unit references a GOT-resident symbol like stderr (any
+    # file using LOGGER triggers this). Set it explicitly to match the
+    # parent vgpu-control target.
+    set_target_properties(vgpu_vulkan_mod PROPERTIES
+        POSITION_INDEPENDENT_CODE ON)
     target_sources(vgpu-control PRIVATE $<TARGET_OBJECTS:vgpu_vulkan_mod>)
 endif()
 
