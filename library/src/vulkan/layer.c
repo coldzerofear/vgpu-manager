@@ -22,6 +22,8 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 
+#include "include/hook.h"   /* load_necessary_data() */
+
 #include "layer.h"
 #include "dispatch.h"
 #include "physdev_index.h"
@@ -82,6 +84,17 @@ static VKAPI_ATTR VkResult VKAPI_CALL
 vk_layer_CreateInstance(const VkInstanceCreateInfo  *pCreateInfo,
                         const VkAllocationCallbacks *pAllocator,
                         VkInstance                  *pInstance) {
+  /* Ensure vgpu-manager's global state is loaded before we touch any of
+   * it. For pure-Vulkan applications (no CUDA, no NVML calls) nothing
+   * else triggers initialisation - the existing CUDA / NVML hook entry
+   * points are dormant. Without this, vgpu_vk_register_instance_physdevs
+   * below would dereference a NULL g_vgpu_config and crash.
+   *
+   * load_necessary_data is pthread_once-guarded internally so this is
+   * a no-op after the first call regardless of which API surface
+   * (CUDA, Vulkan, future) reaches it first. */
+  load_necessary_data();
+
   const VkLayerInstanceCreateInfo *chain_info =
       find_instance_chain_info(pCreateInfo, VK_LAYER_LINK_INFO);
   if (chain_info == NULL || chain_info->u.pLayerInfo == NULL) {

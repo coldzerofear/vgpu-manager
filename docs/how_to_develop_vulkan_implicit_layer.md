@@ -330,7 +330,7 @@ void                      vgpu_remove_device    (VkDevice);
 
 注意点：
 - **必须用 `VK_LAYER_EXPORT`** 修饰所有 loader 入口（即 default visibility）
-- **不能在 `vkCreateInstance` 之前调 `load_necessary_data()`**——那时还没必要建 NVML/CUDA 状态。等到第一次内存或队列 hook 触发时再调
+- **`vkCreateInstance` 入口调 `load_necessary_data()`**——Phase 3 开始 Vulkan 路径会读 `g_vgpu_config`（physdev UUID → host_index 解析），必须先初始化。`pthread_once` 保证幂等。原文档此处早期写"不调"是基于 Phase 2 不触达 vgpu 状态的假设，Phase 3 起改为必调。代价仅是纯 Vulkan 应用首次 `vkCreateInstance` 多 dlopen 一次 libcuda（~8 MB / ~10 ms），NVIDIA 系统上 libcuda 本来就在 host，可忽略
 - **dispatch table 的 chain info** 通过 `VkLayerInstanceCreateInfo` 的 `pNext` 链拿，必须严格按 Vulkan loader spec 处理
 
 **验收**：

@@ -6,6 +6,13 @@
  * one or two Vulkan instances and a handful of physical devices, so
  * O(N) lookup is fine and the data structure stays trivially correct.
  *
+ * Init contract: callers MUST ensure load_necessary_data() has run
+ * before invoking vgpu_vk_register_instance_physdevs(). The UUID
+ * resolver below dereferences g_vgpu_config which is populated by
+ * load_controller_configuration(), invoked from load_necessary_data().
+ * Today the only caller is vk_layer_CreateInstance which calls
+ * load_necessary_data() at its entry point.
+ *
  * See physdev_index.h for the lifecycle contract.
  */
 #include <pthread.h>
