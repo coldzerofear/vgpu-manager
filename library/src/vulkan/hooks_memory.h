@@ -3,18 +3,17 @@
  *
  * Single concern: when a Vulkan application asks the driver "how much
  * memory does this physical device have?", we report the per-pod vGPU
- * physical slice (g_vgpu_config[host_index].real_memory) instead of
- * the raw card capacity, for any heap flagged DEVICE_LOCAL_BIT.
+ * cap instead of the raw card capacity, for any heap flagged
+ * DEVICE_LOCAL_BIT.
  *
- * Why real_memory and not total_memory:
- *   - total_memory may be larger than the physical slice when the user
- *     enables CUDA oversold (UVA fallback). Vulkan has NO equivalent of
- *     cuMemAllocManaged - vkAllocateMemory always returns physical
- *     memory or fails. Reporting an oversold heap size to a Vulkan app
- *     guarantees it OOMs near the top of "available" memory.
- *   - real_memory matches what the driver itself can hand out via
- *     vkAllocateMemory; what we report and what the driver delivers
- *     stay consistent.
+ * Cap selection mirrors the cuMemGetInfo hook so the two paths read in
+ * the same shape:
+ *   - oversold ON  -> real_memory  (Vulkan has no UVA equivalent of
+ *                                    cuMemAllocManaged, so the
+ *                                    UVA-inclusive total_memory is
+ *                                    unreachable from Vulkan)
+ *   - oversold OFF -> total_memory (== real_memory by config invariant)
+ * See clamp_cap_for_phys in hooks_memory.c for the full rationale.
  *
  * These hooks do NOT touch budget enforcement, lock_gpu_device, NVML
  * `used` view, or any cross-process state. Phase 5 introduces those

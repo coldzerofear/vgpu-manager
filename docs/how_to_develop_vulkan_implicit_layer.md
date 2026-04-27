@@ -372,26 +372,27 @@ int vgpu_vk_physdev_to_host_index(VkPhysicalDevice phys);
 
 ### Phase 4：Memory properties clamp
 
-**目标**：Hook `vkGetPhysicalDeviceMemoryProperties` / `_2`，把 device-local heap size clamp 到 `g_vgpu_config->devices[host_index].real_memory`（**物理切片**，不是 oversold 的 `total_memory`）。
+**目标**：Hook `vkGetPhysicalDeviceMemoryProperties` / `_2`，把 device-local heap size clamp 到 vGPU 的物理可用上限。
 
 **新文件**：[library/src/vulkan/hooks_memory.c](../library/src/vulkan/hooks_memory.c)
 
 实现要点：
 - 调下层拿原始 `VkPhysicalDeviceMemoryProperties`
 - 判定哪些 heap 是 device-local（`VK_MEMORY_HEAP_DEVICE_LOCAL_BIT`）
-- 对 device-local heap：`heap.size = min(heap.size, g_vgpu_config->devices[host_index].real_memory)`
+- **对 device-local heap：`heap.size = min(heap.size, cap)`**，其中 `cap` 由 oversold 状态决定（与 `cuMemGetInfo` 路径形态对称）：
+  - **oversold ON**：`cap = real_memory`（物理切片）—— Vulkan 没有 UVA 等价物，UVA 容量永远不可达
+  - **oversold OFF**：`cap = total_memory`（按 `g_vgpu_config` invariant 等于 `real_memory`）—— 同 cuMemGetInfo 在非 oversold 路径的取值
 - host-visible / staging heap 不动
-- **不要按 oversold 状态 gate**：跟 cuMemGetInfo 不同，Vulkan 没有 UVA 等价物，oversold 容量在 Vulkan 端**永远不可达**。即使用户配置了 oversold，Vulkan 应用看到的物理上限仍然只能是 `real_memory`——告诉它更多反而误导，让它以为还有空间最后却 OOM
-- non-NVIDIA 设备（host_index < 0）不动
+- non-NVIDIA 设备（host_index < 0）/ memory_limit 未配（== 0）不动
 
-**为什么是 `real_memory` 而不是 `total_memory`**：
+**为什么这样选 cap**：
 
-CUDA 的 `cuMemGetInfo` 在 oversold 时报 `total_memory`（含 UVA 容量），是因为 CUDA 的 `cuMemAllocManaged` 真的能给出超物理容量（驱动按页 swap）。Vulkan 没有等价机制——`vkAllocateMemory` 总是物理分配，告诉它一个超物理的 heap size 应用一旦真去用最后那部分就会失败。所以 Vulkan 这条路径**只看物理切片**。
+CUDA 的 `cuMemGetInfo` 在 oversold ON 时报 `total_memory`（含 UVA 容量），因为 `cuMemAllocManaged` 真能给出超物理容量。Vulkan 没有等价机制——`vkAllocateMemory` 总是物理分配——所以 oversold ON 时必须给 Vulkan 看 `real_memory`。oversold OFF 时 `total_memory == real_memory`（config 保证），picking 哪个都行；选 `total_memory` 是为了跟 cuMemGetInfo 那条 `actual_total = total_memory` 的非 oversold 分支结构一致，code review 时一眼看出"两条 hook 是一对"。
 
 **验收**：
 - [ ] 在 4 GiB 限额的 Pod 内跑 `vulkaninfo`，device-local heap size 显示 4 GiB（而不是物理 24 GiB）
 - [ ] CPU 可见 heap 不被 clamp
-- [ ] oversold 配置下 heap size 仍然显示 `real_memory`（**不**显示 `total_memory`）—— 这是与 cuMemGetInfo 的故意差异
+- [ ] oversold ON 配置下 heap size 报 `real_memory`，oversold OFF 配置下报 `total_memory`（按 invariant 二者相等）
 - [ ] non-NVIDIA 设备（如 CPU vendor）heap 不动
 
 **预估**：0.5 天
