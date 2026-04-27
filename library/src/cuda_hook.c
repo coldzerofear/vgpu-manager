@@ -829,8 +829,8 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
     return;
   }
   accumulate_used_memory(used_memory, pids_on_device, size_on_device);
+  unsigned int compute_pids_count = size_on_device;
 
-  // TODO　Increase the memory usage of intercepting graphic processes.
   size_on_device = MAX_PIDS;
   nvmlProcessInfo_t graphic_pids_on_device[MAX_PIDS];
 
@@ -851,7 +851,40 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                    ret, NVML_ERROR(nvml_library_entry, ret));
     goto DONE;
   }
-  accumulate_used_memory(used_memory, graphic_pids_on_device, size_on_device);
+
+  /* Deduplicate compute vs graphics PIDs.
+   *
+   * NVML's nvmlProcessInfo_t.usedGpuMemory is the per-PROCESS total memory
+   * usage on the device, not per-context. A process that owns BOTH a compute
+   * context (CUDA / OpenCL) and a graphics context (Vulkan / OpenGL / DirectX)
+   * shows up in both lists with the SAME usedGpuMemory value. Without dedup,
+   * accumulating both lists doubles that process's contribution and inflates
+   * `used` to ~2x reality.
+   *
+   * This is a real production hazard for CUDA + render mixed apps such as
+   * Isaac Sim, Omniverse, UE5 with CUDA inference plugins, or any app that
+   * pairs CUDA work with an OpenGL/Vulkan visualisation. Filter out graphics
+   * entries whose PID is already accounted for in the compute list. */
+  unsigned int graphic_unique_count = 0;
+  for (unsigned int i = 0; i < size_on_device; i++) {
+    int already_seen = 0;
+    for (unsigned int j = 0; j < compute_pids_count; j++) {
+      if (graphic_pids_on_device[i].pid == pids_on_device[j].pid) {
+        already_seen = 1;
+        break;
+      }
+    }
+    if (!already_seen) {
+      if (graphic_unique_count != i) {
+        graphic_pids_on_device[graphic_unique_count] = graphic_pids_on_device[i];
+      }
+      graphic_unique_count++;
+    } else {
+      LOGGER(DETAIL, "process id %d also owns a graphics context; skipped to "
+                     "avoid double-counting", graphic_pids_on_device[i].pid);
+    }
+  }
+  accumulate_used_memory(used_memory, graphic_pids_on_device, graphic_unique_count);
 
 DONE:
   LOGGER(VERBOSE, "total used memory: %zu", *used_memory);
