@@ -27,6 +27,7 @@
 #include "layer.h"
 #include "dispatch.h"
 #include "physdev_index.h"
+#include "hooks_memory.h"
 
 /* Forward declarations of the static hooks - referenced by the GetProcAddr
  * lookups before their bodies appear below. */
@@ -135,6 +136,22 @@ vk_layer_CreateInstance(const VkInstanceCreateInfo  *pCreateInfo,
   entry.pfn_GetInstanceProcAddr = next_gipa;
   entry.pfn_DestroyInstance     =
       (PFN_vkDestroyInstance)next_gipa(*pInstance, "vkDestroyInstance");
+
+  /* Phase 4 fields. _2 falls back to _2KHR for pre-1.1 instances that
+   * loaded VK_KHR_get_physical_device_properties2 - same fallback shape
+   * Phase 3 already uses for vkGetPhysicalDeviceProperties2. */
+  entry.pfn_GetPhysicalDeviceMemoryProperties =
+      (PFN_vkGetPhysicalDeviceMemoryProperties)
+      next_gipa(*pInstance, "vkGetPhysicalDeviceMemoryProperties");
+  entry.pfn_GetPhysicalDeviceMemoryProperties2 =
+      (PFN_vkGetPhysicalDeviceMemoryProperties2)
+      next_gipa(*pInstance, "vkGetPhysicalDeviceMemoryProperties2");
+  if (entry.pfn_GetPhysicalDeviceMemoryProperties2 == NULL) {
+    entry.pfn_GetPhysicalDeviceMemoryProperties2 =
+        (PFN_vkGetPhysicalDeviceMemoryProperties2)
+        next_gipa(*pInstance, "vkGetPhysicalDeviceMemoryProperties2KHR");
+  }
+
   vgpu_register_instance(&entry);
 
   /* Eagerly populate the VkPhysicalDevice -> host_index cache for every
@@ -255,6 +272,17 @@ vk_layer_GetInstanceProcAddr(VkInstance instance, const char *pName) {
   /* vkGetDeviceProcAddr is queryable at instance scope per the spec. */
   if (strcmp(pName, "vkGetDeviceProcAddr") == 0) {
     return (PFN_vkVoidFunction)vk_layer_GetDeviceProcAddr;
+  }
+
+  /* Phase 4: clamp device-local heap size on memory-properties query.
+   * The Vulkan 1.1 _2 entry and the original _2KHR alias have identical
+   * signatures and identical semantics, so they share one hook function. */
+  if (strcmp(pName, "vkGetPhysicalDeviceMemoryProperties") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_GetPhysicalDeviceMemoryProperties;
+  }
+  if (strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2") == 0 ||
+      strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2KHR") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_GetPhysicalDeviceMemoryProperties2;
   }
 
   /* Anything else: forward to the next layer. We only do this when we

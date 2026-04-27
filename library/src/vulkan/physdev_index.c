@@ -175,3 +175,18 @@ int vgpu_vk_physdev_to_host_index(VkPhysicalDevice phys) {
   pthread_rwlock_unlock(&g_phys_lock);
   return result;
 }
+
+VkInstance vgpu_vk_physdev_owner(VkPhysicalDevice phys) {
+  VkInstance result = VK_NULL_HANDLE;
+  if (phys == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+
+  pthread_rwlock_rdlock(&g_phys_lock);
+  for (vgpu_vk_phys_node_t *n = g_phys_cache; n != NULL; n = n->next) {
+    if (n->phys == phys) {
+      result = n->owner;
+      break;
+    }
+  }
+  pthread_rwlock_unlock(&g_phys_lock);
+  return result;
+}

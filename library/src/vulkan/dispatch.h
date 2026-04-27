@@ -34,11 +34,18 @@ extern "C" {
 #endif
 
 typedef struct {
-  VkInstance                 instance;
-  PFN_vkGetInstanceProcAddr  pfn_GetInstanceProcAddr;
-  PFN_vkDestroyInstance      pfn_DestroyInstance;
-  /* Phase 3+: PFN_vkEnumeratePhysicalDevices, GetPhysicalDeviceProperties2,
-   *           GetPhysicalDeviceMemoryProperties[2] */
+  VkInstance                                 instance;
+  PFN_vkGetInstanceProcAddr                  pfn_GetInstanceProcAddr;
+  PFN_vkDestroyInstance                      pfn_DestroyInstance;
+
+  /* Phase 4: clamp device-local heap size to vgpu real_memory.
+   * pfn_GetPhysicalDeviceMemoryProperties is required (Vulkan 1.0 core);
+   * pfn_GetPhysicalDeviceMemoryProperties2 is Vulkan 1.1 core and may
+   * fall back to the KHR alias on pre-1.1 instances - the populator in
+   * vk_layer_CreateInstance tries both names. NULL means "next layer
+   * does not provide it"; the corresponding hook returns gracefully. */
+  PFN_vkGetPhysicalDeviceMemoryProperties    pfn_GetPhysicalDeviceMemoryProperties;
+  PFN_vkGetPhysicalDeviceMemoryProperties2   pfn_GetPhysicalDeviceMemoryProperties2;
 } vgpu_instance_dispatch_t;
 
 typedef struct {

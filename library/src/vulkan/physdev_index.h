@@ -60,6 +60,13 @@ vgpu_vk_unregister_instance_physdevs(VkInstance instance);
 VGPU_VK_INTERNAL int
 vgpu_vk_physdev_to_host_index(VkPhysicalDevice phys);
 
+/* Returns the VkInstance that owns `phys`, or VK_NULL_HANDLE if not
+ * registered. Vulkan hooks that receive VkPhysicalDevice as input
+ * (vkGetPhysicalDeviceMemoryProperties, vkEnumerateDeviceExtensionProperties,
+ * etc.) need this to find the instance dispatch table for forwarding. */
+VGPU_VK_INTERNAL VkInstance
+vgpu_vk_physdev_owner(VkPhysicalDevice phys);
+
 #ifdef __cplusplus
 }
 #endif
