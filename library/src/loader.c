@@ -35,6 +35,7 @@
 #include "include/hook.h"
 #include "include/cuda-helper.h"
 #include "include/nvml-helper.h"
+#include "include/budget.h"
 
 entry_t cuda_library_entry[] = {
     {.name = "cuInit"},
@@ -1674,6 +1675,27 @@ void get_host_device_index_by_uuid(char *uuid, int *host_index) {
       break;
     }
   }
+}
+
+void get_host_device_index_by_uuid_bytes(const uint8_t uuid[16], int *host_index) {
+  /* Format the 16 raw bytes into NVIDIA's canonical
+   *   GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   * representation, then dispatch to the existing string-keyed lookup.
+   *
+   * Vulkan's VkPhysicalDeviceIDProperties::deviceUUID is exactly this
+   * 16-byte format (per VK_KHR_external_memory_capabilities), and NVML's
+   * nvmlDeviceGetUUID returns the same bytes wrapped in the GPU-...
+   * string. Sharing the lookup keeps a single source of truth for
+   * "which host_index does this physical device map to". */
+  if (uuid == NULL) return;
+  char uuid_str[UUID_BUFFER_SIZE];
+  snprintf(uuid_str, sizeof(uuid_str),
+           "GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+           uuid[0x0], uuid[0x1], uuid[0x2], uuid[0x3],
+           uuid[0x4], uuid[0x5], uuid[0x6], uuid[0x7],
+           uuid[0x8], uuid[0x9], uuid[0xA], uuid[0xB],
+           uuid[0xC], uuid[0xD], uuid[0xE], uuid[0xF]);
+  get_host_device_index_by_uuid(uuid_str, host_index);
 }
 
 int get_host_device_index_by_nvml_device(nvmlDevice_t device) {

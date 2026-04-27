@@ -29,6 +29,7 @@
 #include "include/cuda-helper.h"
 #include "include/metrics.h"
 #include "include/nvml-helper.h"
+#include "include/budget.h"
 
 #define INCREMENT_SCALE_FACTOR   2560
 #define MAX_UTIL_DIFF_THRESHOLD  0.5
@@ -78,11 +79,9 @@ static const struct timespec g_cycle = {
   .tv_nsec = TIME_TICK * MILLISEC,
 };
 
-typedef enum {
-  MEMORY_PATH_GPU = 0,
-  MEMORY_PATH_UVA = 1,
-  MEMORY_PATH_OOM = 2,
-} memory_path_t;
+/* memory_path_t / MEMORY_PATH_* moved to include/budget.h as
+ * vgpu_path_t / VGPU_PATH_* so non-CUDA hook layers (Vulkan etc.) can
+ * consume the same decision result. */
 
 static void get_used_gpu_memory(void *, CUdevice);
 static size_t get_array_base_size(int format);
@@ -90,29 +89,43 @@ static int load_limited_memory_view(CUdevice device, int *host_index,
                                     int *lock_fd, size_t *used,
                                     size_t *vmem_used);
 
-static memory_path_t prepare_memory_allocation(CUdevice device,
-                                               size_t request_size,
-                                               int allow_uva,
-                                               int *host_index,
-                                               int *lock_fd) {
+vgpu_path_t prepare_memory_allocation(CUdevice device,
+                                      size_t request_size,
+                                      vgpu_budget_kind_t kind,
+                                      int allow_uva,
+                                      int *host_index,
+                                      int *lock_fd) {
   size_t used = 0;
   size_t vmem_used = 0;
 
   if (!load_limited_memory_view(device, host_index, lock_fd, &used, &vmem_used)) {
-    return MEMORY_PATH_GPU;
+    return VGPU_PATH_GPU;
   }
 
-  if ((used + vmem_used + request_size) >
-      g_vgpu_config->devices[*host_index].total_memory) {
-    return MEMORY_PATH_OOM;
+  /* Cap depends on kind:
+   *   VIRTUAL  : g_vgpu_config[*].total_memory (CUDA, oversold-aware)
+   *   PHYSICAL : g_vgpu_config[*].real_memory  (Vulkan and any other
+   *                                             physical-only API)
+   * PHYSICAL kind also forces allow_uva=0 below; the caller should
+   * already pass 0 but this is defensive in case of misconfiguration. */
+  size_t cap;
+  if (kind == VGPU_BUDGET_KIND_PHYSICAL) {
+    cap = g_vgpu_config->devices[*host_index].real_memory;
+    allow_uva = 0;
+  } else {
+    cap = g_vgpu_config->devices[*host_index].total_memory;
+  }
+
+  if ((used + vmem_used + request_size) > cap) {
+    return VGPU_PATH_OOM;
   }
 
   if (allow_uva && g_vgpu_config->devices[*host_index].memory_oversold &&
       (used + request_size) > g_vgpu_config->devices[*host_index].real_memory) {
-    return MEMORY_PATH_UVA;
+    return VGPU_PATH_UVA;
   }
 
-  return MEMORY_PATH_GPU;
+  return VGPU_PATH_GPU;
 }
 
 static int load_limited_memory_view(CUdevice device,
@@ -1292,19 +1305,19 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   int host_index = -1;
-  path = prepare_memory_allocation(device, bytesize, 1, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, bytesize, VGPU_BUDGET_KIND_VIRTUAL, 1, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-  if (path == MEMORY_PATH_UVA) {
+  if (path == VGPU_PATH_UVA) {
     flags = CU_MEM_ATTACH_GLOBAL;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
@@ -1320,20 +1333,20 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   size_t request_size = bytesize;
   int host_index = -1;
-  path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 1, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-  if (path == MEMORY_PATH_UVA) {
+  if (path == VGPU_PATH_UVA) {
     goto ALLOCATED_TO_UVA;
   }
 
@@ -1377,7 +1390,7 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1387,13 +1400,13 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   size_t request_size = guess_pitch * Height;
 
   int host_index = -1;
-  path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 1, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-  if (path == MEMORY_PATH_UVA) {
+  if (path == VGPU_PATH_UVA) {
     goto ALLOCATED_TO_UVA;
   }
 
@@ -1440,20 +1453,20 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   size_t request_size = bytesize;
   int host_index = -1;
-  path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 1, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-  if (path == MEMORY_PATH_UVA) {
+  if (path == VGPU_PATH_UVA) {
     goto ALLOCATED_TO_UVA;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
@@ -1481,20 +1494,20 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   size_t request_size = bytesize;
   int host_index = -1;
-  path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 1, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-  if (path == MEMORY_PATH_UVA) {
+  if (path == VGPU_PATH_UVA) {
     goto ALLOCATED_TO_UVA;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
@@ -1548,15 +1561,15 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   int host_index = -1;
   size_t request_size = get_array_request_size(pAllocateArray);
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 0, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
@@ -1585,15 +1598,15 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   int host_index = -1;
   size_t request_size = get_array3d_request_size(pAllocateArray);
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 0, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
@@ -1624,15 +1637,15 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   int host_index = -1;
   size_t request_size = get_array3d_request_size(pMipmappedArrayDesc);
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 0, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
@@ -1649,15 +1662,15 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   int host_index = -1;
   size_t request_size = size;
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 0, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
@@ -1978,15 +1991,15 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   int host_index = -1;
   size_t request_size = bytesize;
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 0, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
@@ -2002,15 +2015,15 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  memory_path_t path;
+  vgpu_path_t path;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
   int host_index = -1;
   size_t request_size = bytesize;
-  path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
-  if (path == MEMORY_PATH_OOM) {
+  path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 0, &host_index, &lock_fd);
+  if (path == VGPU_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
