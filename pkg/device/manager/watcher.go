@@ -135,6 +135,29 @@ func (m *DeviceManager) smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap
 		return nil
 	}
 
+	// Dedupe: drop graphics entries whose PID is already in the compute list.
+	// NVML's nvmlProcessInfo_t.UsedGpuMemory is the per-PROCESS total, not
+	// per-context, so a process that owns both compute (CUDA / OpenCL) and
+	// graphics (Vulkan / OpenGL / DirectX) contexts shows up in both lists
+	// with the SAME UsedGpuMemory. Without dedup, downstream consumers that
+	// merge the lists (the in-container hook library, the metrics collector,
+	// future readers) double-count this process. Filter once here, at the
+	// shared-memory publishing point, so every consumer sees clean data.
+	// Mirrors the C-side fix in cuda_hook.c commit 20e9519.
+	if len(computeProcesses) > 0 && len(graphicsProcesses) > 0 {
+		computePids := make(map[uint32]struct{}, len(computeProcesses))
+		for _, p := range computeProcesses {
+			computePids[p.Pid] = struct{}{}
+		}
+		deduped := graphicsProcesses[:0]
+		for _, p := range graphicsProcesses {
+			if _, dup := computePids[p.Pid]; !dup {
+				deduped = append(deduped, p)
+			}
+		}
+		graphicsProcesses = deduped
+	}
+
 	lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
 	procUtilSamples, rt := d.GetProcessUtilizationBySize(uint64(lastTs), watcher.MaxPids)
 
