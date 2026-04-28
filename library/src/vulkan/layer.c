@@ -34,6 +34,13 @@
 #include "include/vulkan/hooks_alloc.h"
 #include "include/vulkan/hooks_submit.h"
 
+/* The layer name advertised in our implicit-layer manifest at
+ * library/deploy/vgpu_manager_implicit_layer.json. Used by the
+ * vkEnumerate*Properties hooks below to recognise own-name queries
+ * vs queries for other layers / unfiltered queries. MUST stay in
+ * lockstep with the manifest "name" field. */
+#define VGPU_VK_LAYER_NAME "VK_LAYER_VGPU_MANAGER_vgpu"
+
 /* Forward declarations of the static hooks - referenced by the GetProcAddr
  * lookups before their bodies appear below. */
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
@@ -314,6 +321,86 @@ vk_layer_DestroyDevice(VkDevice device,
 }
 
 /* ------------------------------------------------------------------ */
+/* Enumerate*Properties hooks (Vulkan 1.3 §38.3.1)                     */
+/*                                                                     */
+/* The Vulkan loader queries each layer's GIPA with VK_NULL_HANDLE     */
+/* during its initialization handshake to discover which extensions    */
+/* and layers each layer reports. The 4 hook names below are what the  */
+/* loader probes. If GIPA returns NULL for any of them, the loader     */
+/* (and downstream graphics frameworks like NVIDIA Carbonite, used by  */
+/* Isaac Sim Kit) dereferences the NULL while assembling the enabled   */
+/* extension list and SegFaults inside libvulkan.so during             */
+/* vkCreateInstance — observed by HAMi PR #182 in production with     */
+/* Isaac Sim Kit 6.0.0-rc.22.                                          */
+/*                                                                     */
+/* Spec-correct contract:                                              */
+/*   - pLayerName == OUR layer name -> VK_SUCCESS, count = 0           */
+/*     (we expose no instance/device extensions of our own)            */
+/*   - pLayerName == NULL or any other layer's name                    */
+/*     -> VK_ERROR_LAYER_NOT_PRESENT                                   */
+/*     This is critical: returning VK_SUCCESS with count=0 here makes  */
+/*     the loader treat our zero-count as authoritative for "all       */
+/*     instance extensions", silently hiding the ICD's instance-level  */
+/*     extensions and breaking any vkCreateInstance call that requests */
+/*     driver extensions. LAYER_NOT_PRESENT lets the loader walk past  */
+/*     us to the next layer / ICD, preserving the dispatch chain.     */
+/* ------------------------------------------------------------------ */
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+vgpu_vk_EnumerateInstanceExtensionProperties(const char           *pLayerName,
+                                             uint32_t             *pPropertyCount,
+                                             VkExtensionProperties *pProperties) {
+  (void)pProperties;
+  if (pLayerName != NULL && strcmp(pLayerName, VGPU_VK_LAYER_NAME) == 0) {
+    if (pPropertyCount) *pPropertyCount = 0;
+    return VK_SUCCESS;
+  }
+  return VK_ERROR_LAYER_NOT_PRESENT;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+vgpu_vk_EnumerateInstanceLayerProperties(uint32_t          *pPropertyCount,
+                                         VkLayerProperties *pProperties) {
+  /* The loader sources the layer list from manifest files itself; the
+   * layer just reports its own count. Returning 0 is accepted by the
+   * loader and matches HAMi PR #182's choice. */
+  (void)pProperties;
+  if (pPropertyCount) *pPropertyCount = 0;
+  return VK_SUCCESS;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+vgpu_vk_EnumerateDeviceExtensionProperties(VkPhysicalDevice       physicalDevice,
+                                           const char            *pLayerName,
+                                           uint32_t              *pPropertyCount,
+                                           VkExtensionProperties *pProperties) {
+  /* Same own-name vs other-name rule as the instance variant. The
+   * SegFault HAMi observed was on the instance variant; we apply the
+   * same shape here for consistency with the spec and to avoid the
+   * symmetric trap should some future caller probe the device path
+   * with VK_NULL_HANDLE-equivalent uninitialized handles. */
+  (void)physicalDevice;
+  (void)pProperties;
+  if (pLayerName != NULL && strcmp(pLayerName, VGPU_VK_LAYER_NAME) == 0) {
+    if (pPropertyCount) *pPropertyCount = 0;
+    return VK_SUCCESS;
+  }
+  return VK_ERROR_LAYER_NOT_PRESENT;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+vgpu_vk_EnumerateDeviceLayerProperties(VkPhysicalDevice    physicalDevice,
+                                       uint32_t           *pPropertyCount,
+                                       VkLayerProperties  *pProperties) {
+  /* Deprecated since Vulkan 1.0.13 — the loader handles it itself.
+   * Reporting count=0 keeps spec-conformant callers happy. */
+  (void)physicalDevice;
+  (void)pProperties;
+  if (pPropertyCount) *pPropertyCount = 0;
+  return VK_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
 /* GetInstance/DeviceProcAddr                                          */
 /* ------------------------------------------------------------------ */
 
@@ -353,10 +440,30 @@ vk_layer_GetInstanceProcAddr(VkInstance instance, const char *pName) {
     return (PFN_vkVoidFunction)vgpu_vk_GetPhysicalDeviceMemoryProperties2;
   }
 
+  /* Spec-required Enumerate*Properties hooks. These MUST resolve to a
+   * non-NULL pfn when the loader probes our GIPA with VK_NULL_HANDLE
+   * during initialization, otherwise downstream code (NVIDIA Carbonite
+   * was the observed crash site in HAMi PR #182's Isaac Sim
+   * deployment) dereferences NULL during extension-list assembly and
+   * SegFaults. See the function bodies above for the spec-correct
+   * own-name-vs-other-name return shape. */
+  if (strcmp(pName, "vkEnumerateInstanceExtensionProperties") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_EnumerateInstanceExtensionProperties;
+  }
+  if (strcmp(pName, "vkEnumerateInstanceLayerProperties") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_EnumerateInstanceLayerProperties;
+  }
+  if (strcmp(pName, "vkEnumerateDeviceExtensionProperties") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_EnumerateDeviceExtensionProperties;
+  }
+  if (strcmp(pName, "vkEnumerateDeviceLayerProperties") == 0) {
+    return (PFN_vkVoidFunction)vgpu_vk_EnumerateDeviceLayerProperties;
+  }
+
   /* Anything else: forward to the next layer. We only do this when we
    * have an instance handle to look up; the few functions queryable at
-   * instance == NULL (vkCreateInstance, vkEnumerateInstance*) are all
-   * handled in the explicit names above. */
+   * instance == NULL (vkCreateInstance, the four vkEnumerate*Properties
+   * above) are all handled in the explicit names above. */
   if (instance != VK_NULL_HANDLE) {
     vgpu_vk_instance_dispatch_t *d = vgpu_vk_get_instance_dispatch(instance);
     if (d != NULL && d->pfn_GetInstanceProcAddr != NULL) {

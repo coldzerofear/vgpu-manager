@@ -97,6 +97,144 @@ static void check_negotiate_rejects_null(void *h) {
   printf("ok: negotiate rejects NULL pVersionStruct\n");
 }
 
+/* End-to-end exercise of the four Enumerate*Properties hooks via the
+ * dlopen + negotiate + GIPA path. Catches the NULL-GIPA SegFault that
+ * HAMi PR #182 observed on Isaac Sim Kit + NVIDIA Carbonite — if any
+ * of these GIPA lookups returns NULL, the loader (or downstream
+ * graphics framework) would dereference and crash.
+ *
+ * Important: -O3 -DNDEBUG (the standard test build flags) strips
+ * assert() down to ((void)0), so any function call placed INSIDE an
+ * assert() expression silently disappears. Pre-evaluate side-effecting
+ * calls into a local variable, then assert on the captured value;
+ * for hard-fail conditions where assertion-stripping would crash a
+ * subsequent step, use an explicit `if + fprintf + exit` instead. */
+static void check_enumerate_hooks_resolve_with_null_instance(void *h) {
+  PFN_vkNegotiate fn =
+      (PFN_vkNegotiate)dlsym(h, "vkNegotiateLoaderLayerInterfaceVersion");
+  if (fn == NULL) {
+    fprintf(stderr, "FAIL: vkNegotiate symbol missing\n");
+    exit(1);
+  }
+  VkNegotiateLayerInterface iface;
+  memset(&iface, 0, sizeof(iface));
+  iface.sType = LAYER_NEGOTIATE_INTERFACE_STRUCT;
+  iface.loaderLayerInterfaceVersion = 2;
+  /* Side-effect-bearing call OUTSIDE assert so NDEBUG cannot strip it. */
+  VkResult neg_r = fn(&iface);
+  assert(neg_r == VK_SUCCESS);
+  PFN_vkGetInstanceProcAddr gipa = iface.pfnGetInstanceProcAddr;
+  if (gipa == NULL) {
+    fprintf(stderr, "FAIL: negotiate did not populate pfnGetInstanceProcAddr\n");
+    exit(1);
+  }
+
+  /* Each hooked name MUST resolve to a non-NULL pfn even with
+   * VK_NULL_HANDLE as the instance — that is precisely the bug. */
+  static const char *const names[] = {
+    "vkEnumerateInstanceExtensionProperties",
+    "vkEnumerateInstanceLayerProperties",
+    "vkEnumerateDeviceExtensionProperties",
+    "vkEnumerateDeviceLayerProperties",
+    NULL,
+  };
+  for (const char *const *p = names; *p; p++) {
+    PFN_vkVoidFunction pfn = gipa(VK_NULL_HANDLE, *p);
+    if (pfn == NULL) {
+      fprintf(stderr,
+              "FAIL: GIPA(VK_NULL_HANDLE, %s) returned NULL — would "
+              "SegFault under loaders that dereference the result "
+              "(see HAMi PR #182 Isaac Sim repro)\n", *p);
+      exit(1);
+    }
+  }
+  printf("ok: 4 vkEnumerate*Properties hooks resolve via GIPA(VK_NULL_HANDLE, ...)\n");
+
+  /* Behavioral: instance-extension query semantics.
+   *   - own-name => VK_SUCCESS, count = 0
+   *   - NULL or other name => VK_ERROR_LAYER_NOT_PRESENT (so the
+   *     loader walks past us to the ICD instead of treating our
+   *     zero-count as authoritative). */
+  typedef VkResult (VKAPI_PTR *PFN_inst_ext)(const char *, uint32_t *,
+                                             VkExtensionProperties *);
+  PFN_inst_ext inst_ext =
+      (PFN_inst_ext)gipa(VK_NULL_HANDLE,
+                         "vkEnumerateInstanceExtensionProperties");
+  uint32_t cnt;
+  VkResult r;
+
+  cnt = 99;
+  r = inst_ext("VK_LAYER_VGPU_MANAGER_vgpu", &cnt, NULL);
+  if (r != VK_SUCCESS || cnt != 0) {
+    fprintf(stderr, "FAIL: inst_ext(own-name) r=%d cnt=%u (want 0/0)\n", r, cnt);
+    exit(1);
+  }
+
+  cnt = 99;
+  r = inst_ext(NULL, &cnt, NULL);
+  if (r != VK_ERROR_LAYER_NOT_PRESENT) {
+    fprintf(stderr, "FAIL: inst_ext(NULL) r=%d (want VK_ERROR_LAYER_NOT_PRESENT)\n", r);
+    exit(1);
+  }
+
+  cnt = 99;
+  r = inst_ext("VK_LAYER_SOME_OTHER_LAYER", &cnt, NULL);
+  if (r != VK_ERROR_LAYER_NOT_PRESENT) {
+    fprintf(stderr, "FAIL: inst_ext(other-name) r=%d (want VK_ERROR_LAYER_NOT_PRESENT)\n", r);
+    exit(1);
+  }
+  printf("ok: own-name => SUCCESS/0; NULL or other name => LAYER_NOT_PRESENT\n");
+
+  /* Layer-properties query: always VK_SUCCESS with count=0. */
+  typedef VkResult (VKAPI_PTR *PFN_inst_lay)(uint32_t *, VkLayerProperties *);
+  PFN_inst_lay inst_lay =
+      (PFN_inst_lay)gipa(VK_NULL_HANDLE,
+                         "vkEnumerateInstanceLayerProperties");
+  cnt = 99;
+  r = inst_lay(&cnt, NULL);
+  if (r != VK_SUCCESS || cnt != 0) {
+    fprintf(stderr, "FAIL: inst_lay r=%d cnt=%u (want 0/0)\n", r, cnt);
+    exit(1);
+  }
+  printf("ok: vkEnumerateInstanceLayerProperties => SUCCESS, count=0\n");
+
+  /* Same shape for the device variants. We pass a fake non-NULL
+   * physdev handle; the hook ignores it (only pLayerName matters). */
+  typedef VkResult (VKAPI_PTR *PFN_dev_ext)(VkPhysicalDevice, const char *,
+                                            uint32_t *,
+                                            VkExtensionProperties *);
+  PFN_dev_ext dev_ext =
+      (PFN_dev_ext)gipa(VK_NULL_HANDLE,
+                        "vkEnumerateDeviceExtensionProperties");
+  VkPhysicalDevice phys = (VkPhysicalDevice)(uintptr_t)0x1;
+  cnt = 99;
+  r = dev_ext(phys, "VK_LAYER_VGPU_MANAGER_vgpu", &cnt, NULL);
+  if (r != VK_SUCCESS || cnt != 0) {
+    fprintf(stderr, "FAIL: dev_ext(own-name) r=%d cnt=%u (want 0/0)\n", r, cnt);
+    exit(1);
+  }
+  cnt = 99;
+  r = dev_ext(phys, NULL, &cnt, NULL);
+  if (r != VK_ERROR_LAYER_NOT_PRESENT) {
+    fprintf(stderr, "FAIL: dev_ext(NULL) r=%d (want VK_ERROR_LAYER_NOT_PRESENT)\n", r);
+    exit(1);
+  }
+  printf("ok: vkEnumerateDeviceExtensionProperties: own-name SUCCESS/0, NULL LAYER_NOT_PRESENT\n");
+
+  typedef VkResult (VKAPI_PTR *PFN_dev_lay)(VkPhysicalDevice, uint32_t *,
+                                            VkLayerProperties *);
+  PFN_dev_lay dev_lay =
+      (PFN_dev_lay)gipa(VK_NULL_HANDLE,
+                        "vkEnumerateDeviceLayerProperties");
+  cnt = 99;
+  r = dev_lay(phys, &cnt, NULL);
+  if (r != VK_SUCCESS || cnt != 0) {
+    fprintf(stderr, "FAIL: dev_lay r=%d cnt=%u (want 0/0)\n", r, cnt);
+    exit(1);
+  }
+  printf("ok: vkEnumerateDeviceLayerProperties => SUCCESS, count=0\n");
+}
+
 static void check_only_one_vk_export(const char *so_path) {
   /* Use a symbol-list pipe: dlsym only finds named symbols, but we
    * want to assert no OTHER vk* symbol is exported. Easiest is to
@@ -147,6 +285,7 @@ int main(void) {
   check_negotiate_clamps_high_version(h);
   check_negotiate_rejects_v1(h);
   check_negotiate_rejects_null(h);
+  check_enumerate_hooks_resolve_with_null_instance(h);
   dlclose(h);
 
   check_only_one_vk_export(so_path);
