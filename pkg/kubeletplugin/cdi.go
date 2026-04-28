@@ -208,10 +208,11 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 	for _, group := range preparedDevices {
 		for _, dev := range group.Devices {
 			uuid := ""
+			deviceSuffix := getClaimDeviceSuffix(dev.CDIDeviceID, dev.CanonicalName(), dev.Type())
 
 			// Construct claim-specific CDI device name in accordance with the
 			// naming convention encoded in `GetClaimDeviceName()` below.
-			dname := fmt.Sprintf("%s-%s", claimUID, dev.CanonicalName())
+			dname := fmt.Sprintf("%s-%s", claimUID, deviceSuffix)
 
 			var dspec cdispec.Device
 
@@ -257,7 +258,7 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 				// generated further below. One reason for doing things this way
 				// is that `nvcdiDevice.GetDeviceSpecsByID(MIG_UUID)` may yield
 				// an incomplete spec for MIG devices, see
-				// https://github.com/NVIDIA/k8s-dra-driver-gpu/issues/787.
+				// https://sigs.k8s.io/dra-driver-nvidia-gpu/issues/787.
 				uuid = dev.Mig.Concrete.ParentUUID
 				// Get (copy of) cached device spec (is safe to be mutated below,
 				// w/o compromising cache).
@@ -286,6 +287,13 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 					ContainerEdits: &dspec.ContainerEdits,
 				}
 				deviceEdits = deviceEdits.Append(group.ConfigState.containerEdits)
+				dspec.ContainerEdits = *deviceEdits.ContainerEdits
+			}
+			if dev.containerEdits != nil {
+				deviceEdits := &cdiapi.ContainerEdits{
+					ContainerEdits: &dspec.ContainerEdits,
+				}
+				deviceEdits = deviceEdits.Append(dev.containerEdits)
 				dspec.ContainerEdits = *deviceEdits.ContainerEdits
 			}
 			klog.V(7).Infof("Number of device nodes about to inject for device %s: %d", dname, len(dspec.ContainerEdits.DeviceNodes))
@@ -330,8 +338,16 @@ func (cdi *CDIHandler) DeleteClaimSpecFile(claimUID string) error {
 // identifier for a device defined in that spec. Example:
 // k8s.gpu.nvidia.com/claim=dab5ab50-d59a-42a6-af16-cfd4628c0f7a-gpu-0
 // That identifier can be used elsewhere, and _points to the spec_.
-func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, device *AllocatableDevice, containerEdits *cdiapi.ContainerEdits) string {
-	return cdiparser.QualifiedName(cdiVendor, cdiClaimClass, fmt.Sprintf("%s-%s", claimUID, device.CanonicalName()))
+func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, cdiDeviceID string, device *AllocatableDevice) string {
+	deviceSuffix := getClaimDeviceSuffix(cdiDeviceID, device.CanonicalName(), device.Type())
+	return cdiparser.QualifiedName(cdiVendor, cdiClaimClass, fmt.Sprintf("%s-%s", claimUID, deviceSuffix))
+}
+
+func getClaimDeviceSuffix(cdiDeviceID, canonicalName, deviceType string) string {
+	if deviceType == VGpuDeviceType && cdiDeviceID != "" {
+		return cdiDeviceID
+	}
+	return canonicalName
 }
 
 // Construct and return the CDI `deviceNodes` specification for the two

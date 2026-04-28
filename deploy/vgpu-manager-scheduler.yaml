@@ -152,6 +152,35 @@ spec:
       priorityClassName: system-node-critical
       terminationGracePeriodSeconds: 30
       restartPolicy: Always
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: CriticalAddonsOnly
+          operator: Exists
+      affinity:
+        nodeAffinity:
+          # Pod should run as much as possible on control plane nodes.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+        podAntiAffinity:
+          # When there are multiple replicas, try to disperse pods on different nodes as much as possible.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: ["vgpu-manager-scheduler"]
+                topologyKey: kubernetes.io/hostname
       containers:
         - image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
           imagePullPolicy: IfNotPresent

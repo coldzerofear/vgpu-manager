@@ -38,6 +38,27 @@ spec:
       {{- end }}
       {{- if .Values.webhook.tolerations }}
       tolerations: {{ toYaml .Values.webhook.tolerations | nindent 8 }}
+      affinity:
+        nodeAffinity:
+          # Pod should run as much as possible on control plane nodes.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+        podAntiAffinity:
+          # When there are multiple replicas, try to disperse pods on different nodes as much as possible.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values:
+                        - {{ include "vgpu-manager.webhook" . }}
+                topologyKey: kubernetes.io/hostname
       {{- end }}
       containers:
         - name: device-webhook

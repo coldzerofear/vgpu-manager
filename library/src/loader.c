@@ -1020,6 +1020,7 @@ extern int get_vmem_node_enabled(int *enabled);
 extern int file_exist(const char *file_path);
 extern int pid_exist(int pid);
 extern int is_zombie_proc(int pid);
+extern int get_sm_watcher_enabled(int *i);
 
 // vmemory node lock
 extern int device_vmem_write_lock(int ordinal);
@@ -1069,16 +1070,24 @@ void init_real_dlsym() {
     for (int i = 0; glibc_versions[i] != NULL; i++) {
       real_dlsym = dlvsym(RTLD_NEXT, "dlsym", glibc_versions[i]);
       if (real_dlsym) {
-        LOGGER(VERBOSE, "found dlsym with version: %s", glibc_versions[i]);
+        LOGGER(INFO, "find the dlsym version: %s", glibc_versions[i]);
         break;
       }
     }
     if (unlikely(!real_dlsym)) {
-      real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+      void *libc_handle = dlopen("libc.so.6", RTLD_LAZY);
+      if (libc_handle) {
+        real_dlsym = dlsym(libc_handle, "dlsym");
+      }
+      if (unlikely(!real_dlsym)) {
+        real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
+      }
       if (!real_dlsym) {
-        LOGGER(FATAL, "real dlsym not found");
+        LOGGER(FATAL, "unable to find the real dlsym");
       }
     }
+  }
+  if (lib_control == NULL) {
     lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
   }
 }
@@ -1416,7 +1425,7 @@ void print_global_vgpu_config() {
     LOGGER(VERBOSE, "Container Name   : %s", g_vgpu_config->container_name);
   }
   LOGGER(VERBOSE, "CompatibilityMode: %d", g_vgpu_config->compatibility_mode);
-  LOGGER(VERBOSE, "SM Watcher       : %s", g_vgpu_config->sm_watcher ? "enabled" : "disabled");
+  LOGGER(VERBOSE, "Ext SM Watcher   : %s", g_vgpu_config->sm_watcher ? "enabled" : "disabled");
   LOGGER(VERBOSE, "VMemory Node     : %s", g_vgpu_config->vmem_node ? "enabled" : "disabled");
   int index = 0;
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
@@ -1957,10 +1966,9 @@ int init_g_vgpu_config_by_env() {
   int oversold = 0; // default disable oversold
   size_t real_memory = 0;
   char *gpu_uuids[MAX_DEVICE_COUNT];
-  int vnode_enable = 0;
   int device_count = strsplit(uuids, gpu_uuids, ",");
-  get_vmem_node_enabled(&vnode_enable);
-  g_vgpu_config->vmem_node = vnode_enable;
+  get_vmem_node_enabled(&g_vgpu_config->vmem_node);
+  get_sm_watcher_enabled(&g_vgpu_config->sm_watcher);
   for (i = 0; i < device_count; i++) {
     // skip fake uuid
     if (strcmp(gpu_uuids[i], FAKE_GPU_UUID) == 0) {

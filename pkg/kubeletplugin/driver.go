@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -35,8 +37,8 @@ import (
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
 
-	"github.com/NVIDIA/k8s-dra-driver-gpu/pkg/flock"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
 )
 
 // DriverPrepUprepFlockPath is the path to a lock file used to make sure
@@ -156,6 +158,28 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 
 		driver.wg.Go(func() {
 			driver.deviceHealthEvents(ctx, config.Flags.NodeName)
+		})
+	}
+
+	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
+		driver.wg.Go(func() {
+			klog.V(4).Info("Starting to extended shared SM utilization watcher")
+			gpuDeviceMap := make(map[string]*manager.GPUDevice)
+			for _, vgpuDevice := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
+				gpuInfo := vgpuDevice.VGpu.GpuDeviceInfo.GpuInfo
+				numaNode, _ := gpuInfo.GetNumaNode()
+				paths, _ := gpuInfo.GetPaths()
+				gpuDeviceMap[gpuInfo.UUID] = &manager.GPUDevice{
+					GpuInfo:  gpuInfo,
+					NumaNode: int(numaNode),
+					Paths:    paths,
+					Healthy:  true,
+					Links:    map[int][]links.P2PLinkType{},
+				}
+			}
+			filePath := filepath.Join(manager.WatcherDir, manager.SMUtilFile)
+			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, gpuDeviceMap, filePath)
+			klog.V(4).Info("stopping extended shared SM utilization watcher")
 		})
 	}
 

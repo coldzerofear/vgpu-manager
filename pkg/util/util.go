@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -16,6 +17,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protowire"
 	corev1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -364,7 +366,7 @@ func PathIsNotExist(fullPath string) bool {
 }
 
 func GetPodContainerManagerPath(managerBaseDir string, podUID types.UID, containerName string) string {
-	return fmt.Sprintf("%s/%s_%s", managerBaseDir, string(podUID), containerName)
+	return filepath.Join(managerBaseDir, fmt.Sprintf("%s_%s", string(podUID), containerName))
 }
 
 // MakeDeviceID generates compact binary encoded device IDs.
@@ -552,4 +554,17 @@ func EnsureDir(path string, perm os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+func CountReservedPods(claim *resourceapi.ResourceClaim) int {
+	var count = 0
+	if claim == nil {
+		return count
+	}
+	for _, reference := range claim.Status.ReservedFor {
+		if reference.APIGroup == "" && reference.Resource == "pods" {
+			count++
+		}
+	}
+	return count
 }

@@ -10,7 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -26,11 +26,11 @@ type RescheduleController struct {
 	client   client.Client
 	eviction client2.Eviction
 	recovery *recoveryController
-	recorder record.EventRecorder
+	recorder events.EventRecorder
 }
 
 func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) (reconcile.Reconciler, error) {
-	recorder := manager.GetEventRecorderFor("re-schedule")
+	recorder := manager.GetEventRecorder("re-schedule")
 	recovery, err := newRecoveryController(manager.GetClient(), recorder)
 	if err != nil {
 		return nil, err
@@ -91,8 +91,8 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 				klog.ErrorS(err, "Failed to delete pod", "pod", klog.KObj(pod))
 				return reconcile.Result{}, err
 			}
-			r.recorder.Event(pod, corev1.EventTypeWarning, "Recovery",
-				"Deleting pod to allow its controller to recreate and reschedule it.")
+			r.recorder.Eventf(pod, nil, corev1.EventTypeWarning, "Recovery", "Deleted",
+				"Pod has been deleted, the controller will recreate and reschedule it")
 			// Push the pod into the recovery controller.
 			r.recovery.AddPodToRecoveryQueue(pod, 20*time.Millisecond)
 		}

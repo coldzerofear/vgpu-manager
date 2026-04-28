@@ -158,6 +158,7 @@ const (
 	ManagerVisibleDevices = "MANAGER_VISIBLE_DEVICES"
 	// ManagerCompatibilityMode Indicate the compatibility mode of the environment
 	ManagerCompatibilityMode = "MANAGER_COMPATIBILITY_MODE"
+	ExternalSmWatcherEnabled = "EXTERNAL_SM_WATCHER_ENABLED"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"

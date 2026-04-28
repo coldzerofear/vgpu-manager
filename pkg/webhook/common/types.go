@@ -25,3 +25,25 @@ func (r ResourceInfos) Encode() (string, error) {
 func (r *ResourceInfos) Decode(val string) error {
 	return json.Unmarshal([]byte(val), r)
 }
+
+type MainRequestClass string
+
+const (
+	MainRequestNonVGPU MainRequestClass = "non-vgpu"
+	MainRequestDefVGPU MainRequestClass = "definite-vgpu"
+	// FirstAvailable mixed, requires final ruling from the claim webhook
+	MainRequestMixedMaybe MainRequestClass = "mixed-maybe-vgpu"
+)
+
+type ContainerKind string
+
+const (
+	ContainerKindInit ContainerKind = "initContainer"
+	ContainerKindApp  ContainerKind = "container"
+)
+
+type ContainerRef struct {
+	Name   string
+	Claims []corev1.ResourceClaim
+	Kind   ContainerKind
+}

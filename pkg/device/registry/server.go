@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,10 +16,12 @@ import (
 	"time"
 	"unsafe"
 
+	"k8s.io/apimachinery/pkg/util/wait"
+
 	"github.com/coldzerofear/vgpu-manager/pkg/api/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
-	"github.com/opencontainers/runc/libcontainer/cgroups"
+	"github.com/opencontainers/cgroups"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"

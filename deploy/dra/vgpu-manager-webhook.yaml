@@ -16,9 +16,43 @@ rules:
       - resourceclaims
     verbs:
       - get
+      - list
+      - watch
       - create
       - update
       - delete
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaimtemplates
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - deviceclasses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+      - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -164,6 +198,58 @@ webhooks:
         scope: '*'
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: vgpu-manager-webhook
+        namespace: kube-system
+        path: /resourceclaim/validate
+        port: 443
+    failurePolicy: Fail # Ignore
+    matchPolicy: Equivalent
+    name: validateresourceclaim.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+#        - key: kubernetes.io/metadata.name
+#          operator: NotIn
+#          values:
+#            - kube-system
+#            - cert-manager
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    rules:
+      - apiGroups:
+          - "resource.k8s.io"
+        apiVersions:
+          - v1beta1
+          - v1beta2
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - resourceclaims
+          - resourceclaimtemplates
+      - apiGroups:
+          - "resource.k8s.io"
+        apiVersions:
+          - v1
+        operations:
+          - UPDATE
+        resources:
+          - resourceclaims/status
+        scope: "Namespaced"
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
 ---
 apiVersion: v1
 kind: Service
@@ -203,6 +289,33 @@ spec:
       priorityClassName: system-node-critical
       serviceAccountName: vgpu-manager-webhook
       terminationGracePeriodSeconds: 10
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: CriticalAddonsOnly
+          operator: Exists
+      affinity:
+        nodeAffinity:
+          # Pod should run as much as possible on control plane nodes.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+        podAntiAffinity:
+          # When there are multiple replicas, try to disperse pods on different nodes as much as possible.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: vgpu-manager-webhook
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: device-webhook
           image: coldzerofear/vgpu-manager-dra:latest
@@ -224,13 +337,13 @@ spec:
             successThreshold: 1
             timeoutSeconds: 1
           readinessProbe:
-            failureThreshold: 5
+            failureThreshold: 3
             httpGet:
               path: /readyz
               port: 9443
               scheme: HTTPS
             initialDelaySeconds: 5
-            periodSeconds: 5
+            periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 1
           ports:

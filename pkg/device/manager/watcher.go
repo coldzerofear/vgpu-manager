@@ -10,6 +10,7 @@ import (
 	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
@@ -45,7 +46,11 @@ func (m *DeviceManager) doWatcher() {
 	ctx, cancelFunc := WrapChannelWithContext(m.stop)
 	defer cancelFunc()
 	filePath := filepath.Join(WatcherDir, SMUtilFile)
+	SMUtilWatcherStart(ctx, m.DeviceLib, m.getGPUDeviceMap(), filePath)
+	klog.V(3).Infoln("DeviceManager sm watcher stopped")
+}
 
+func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDeviceMap map[string]*GPUDevice, filePath string) {
 	wait.UntilWithContext(ctx, func(ctx context.Context) {
 		if err := watcher.PrepareDeviceUtilFile(filePath); err != nil {
 			klog.ErrorS(err, "PrepareDeviceUtilFile failed")
@@ -60,25 +65,26 @@ func (m *DeviceManager) doWatcher() {
 			_ = deviceUtil.Munmap(true)
 		}()
 
-		if err = m.NvmlInit(); err != nil {
+		if err = deviceLib.NvmlInit(); err != nil {
 			klog.ErrorS(err, "nvmlInit failed")
 			return
 		}
-		defer m.NvmlShutdown()
+		defer deviceLib.NvmlShutdown()
 
-		var gpuDevices []*GPUDevice
-		var deviceHandlers []device.Device
-		for uuid, dev := range m.getGPUDeviceMap() {
-			handle, ret := m.DeviceGetHandleByUUID(uuid)
+		gpuDevices := make([]*GPUDevice, 0, len(gpuDeviceMap))
+		deviceHandlers := make([]device.Device, 0, len(gpuDeviceMap))
+		for uuid, dev := range gpuDeviceMap {
+			handle, ret := deviceLib.DeviceGetHandleByUUID(uuid)
 			if ret != nvml.SUCCESS {
 				klog.Errorf("error getting device handle for uuid '%v': %v", uuid, ret)
 				return
 			}
 			gpuDevices = append(gpuDevices, dev)
-			devHandle, _ := m.NewDevice(handle)
+			devHandle, _ := deviceLib.NewDevice(handle)
 			deviceHandlers = append(deviceHandlers, devHandle)
 		}
-		if len(deviceHandlers) <= 0 {
+		if len(deviceHandlers) == 0 {
+			klog.V(3).Infoln("no gpu device handle, will exit retry")
 			return
 		}
 
@@ -92,7 +98,7 @@ func (m *DeviceManager) doWatcher() {
 			wg.Add(1)
 			go func(config watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) {
 				defer wg.Done()
-				err := m.smWatcherBatchWithContext(subCtx, deviceUtil, config, devices, handles)
+				err := smWatcherBatchWithContext(subCtx, deviceUtil, config, devices, handles)
 				if err != nil {
 					subCancelFunc()
 				}
@@ -100,11 +106,9 @@ func (m *DeviceManager) doWatcher() {
 		}
 		wg.Wait()
 	}, time.Second)
-
-	klog.V(3).Infoln("DeviceManager sm watcher stopped")
 }
 
-func (m *DeviceManager) smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) error {
+func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
 	for {
 		for i := batch.StartIndex; i <= batch.EndIndex; i++ {
@@ -117,7 +121,7 @@ func (m *DeviceManager) smWatcherBatchWithContext(ctx context.Context, deviceUti
 			gpuDevice := devices[i]
 			gpuHandle := handles[i]
 
-			if err := m.smWatcherSingleDevice(deviceUtil.GetWrap(), gpuDevice, gpuHandle); err != nil {
+			if err := smWatcherSingleDevice(deviceUtil.GetWrap(), gpuDevice, gpuHandle); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
@@ -126,13 +130,13 @@ func (m *DeviceManager) smWatcherBatchWithContext(ctx context.Context, deviceUti
 	}
 }
 
-func (m *DeviceManager) smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, info *GPUDevice, d device.Device) error {
+func smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, info *GPUDevice, d device.Device) error {
 	if !info.Healthy || info.MigEnabled {
 		return nil
 	}
-	//if enabled, _ := d.IsMigEnabled(); enabled {
-	//	return nil
-	//}
+	if enabled, _ := d.IsMigEnabled(); enabled {
+		return nil
+	}
 	i := info.Index
 	computeProcesses, rt := d.GetComputeRunningProcessesBySize(watcher.MaxPids)
 	if rt != nvml.SUCCESS {

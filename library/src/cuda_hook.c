@@ -1675,8 +1675,11 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
   CUdevice device;
   int lock_fd = -1;
   memory_path_t path;
+  int locationDev = (prop != NULL && prop->location.type == CU_MEM_LOCATION_TYPE_DEVICE);
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
-  if (unlikely(ret != CUDA_SUCCESS)) {
+  if (ret != CUDA_SUCCESS && locationDev) {
+    device = prop->location.id;
+  } else if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
   int host_index = -1;

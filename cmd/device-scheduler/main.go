@@ -89,6 +89,7 @@ func main() {
 	}
 
 	broadcaster := record.NewBroadcaster()
+	defer broadcaster.Shutdown()
 	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
 	recorder := broadcaster.NewRecorder(Scheme, corev1.EventSource{Component: opt.SchedulerName})
 
