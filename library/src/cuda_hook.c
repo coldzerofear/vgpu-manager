@@ -98,25 +98,49 @@ static int load_limited_memory_view(CUdevice device, int *host_index,
  * decision in one place is what guarantees the two API surfaces stay in
  * lock-step on cap selection and oversold semantics.
  *
- * Cap rules:
- *   kind=VIRTUAL  -> total_memory (CUDA, oversold-aware)
- *   kind=PHYSICAL -> real_memory  (Vulkan / physical-only consumers).
- *                    Also forces allow_uva=0 to make UVA structurally
- *                    unreachable for those consumers. */
+ * Two distinct accounting modes:
+ *
+ *   kind=PHYSICAL — pure-physical accounting. Cap is real_memory; only
+ *     `used` (NVML view of physically-resident memory) is summed
+ *     against it. `vmem_used` (UVA bookkeeping) is intentionally NOT
+ *     added because the caller cannot consume UVA capacity:
+ *       - Vulkan has no UVA equivalent; vkAllocateMemory is always
+ *         physical pinning
+ *       - any future "physical-only" API gets the same treatment
+ *     Including vmem_used here would falsely OOM when a co-resident
+ *     CUDA workload has bookings in UVA that are not currently
+ *     consuming GPU RAM (driver paged them to host). Forces
+ *     allow_uva=0 so UVA is structurally unreachable.
+ *
+ *   kind=VIRTUAL — oversold-aware accounting (CUDA semantics). Cap is
+ *     total_memory; both `used` and `vmem_used` count against it.
+ *     UVA fallback fires when allow_uva is set and physical-only
+ *     usage would exceed real_memory while the (used+vmem_used+req)
+ *     total still fits within total_memory under oversold. CUDA
+ *     non-UVA functions pass allow_uva=0 here and accept that
+ *     `used+request` may exceed real_memory under oversold — the
+ *     deliberate tradeoff that lets non-UVA APIs share the
+ *     oversold capacity at the cost of occasional driver-level OOM
+ *     on the trailing request.
+ */
 static vgpu_path_t decide_path_with_used(int host_index,
                                          size_t request_size,
                                          vgpu_budget_kind_t kind,
                                          int allow_uva,
                                          size_t used,
                                          size_t vmem_used) {
-  size_t cap;
   if (kind == VGPU_BUDGET_KIND_PHYSICAL) {
-    cap = g_vgpu_config->devices[host_index].real_memory;
-    allow_uva = 0;
-  } else {
-    cap = g_vgpu_config->devices[host_index].total_memory;
+    /* Pure physical: ignore vmem_used. Vulkan's request is bounded
+     * only by what is physically free on the Pod's slice. */
+    if ((used + request_size) >
+        g_vgpu_config->devices[host_index].real_memory) {
+      return VGPU_PATH_OOM;
+    }
+    return VGPU_PATH_GPU;
   }
 
+  /* VIRTUAL: oversold-aware total-memory accounting. */
+  size_t cap = g_vgpu_config->devices[host_index].total_memory;
   if ((used + vmem_used + request_size) > cap) {
     return VGPU_PATH_OOM;
   }

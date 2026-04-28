@@ -56,19 +56,37 @@ typedef enum {
 } vgpu_path_t;
 
 /*
- * Upper-bound semantics requested by the caller.
+ * Upper-bound semantics requested by the caller. The two kinds also
+ * determine WHICH terms are summed against the cap, not just the cap
+ * value itself — Vulkan and any future "I cannot use UVA" API need
+ * pure-physical accounting, distinct from the oversold-aware view
+ * the CUDA path needs.
  *
- * VIRTUAL : Cap = g_vgpu_config[host_index].total_memory.
- *           Includes oversold UVA capacity. The CUDA hooks pass this
- *           because cuMemAllocManaged can legitimately consume the
- *           oversold amount via host paging.
+ * VIRTUAL  — oversold-aware accounting (CUDA semantics).
+ *   Cap   = g_vgpu_config[host_index].total_memory.
+ *   Check = (used + vmem_used + request_size) <= cap.
+ *   Includes oversold UVA capacity. The CUDA hooks pass this kind
+ *   because cuMemAllocManaged can legitimately consume the oversold
+ *   amount via host paging, and CUDA non-UVA hooks accept the
+ *   tradeoff that `used+request` may exceed real_memory under
+ *   oversold (the trailing request gets a driver-level OOM, the rest
+ *   of the workload runs).
  *
- * PHYSICAL: Cap = g_vgpu_config[host_index].real_memory.
- *           The hard physical cap. Vulkan and any future
- *           physical-only API uses this. Forces allow_uva = 0
- *           internally - no UVA fallback can ever be returned.
- *           Heap-size reporting paths that drive direct allocation
- *           sizing should also use this.
+ * PHYSICAL — pure-physical accounting (Vulkan / physical-only APIs).
+ *   Cap   = g_vgpu_config[host_index].real_memory.
+ *   Check = (used + request_size) <= cap.
+ *   `vmem_used` is intentionally NOT added: the caller cannot consume
+ *   UVA capacity, and UVA bookings do not pin physical memory (the
+ *   driver pages them to host RAM under pressure). Including
+ *   vmem_used here would falsely OOM Vulkan when a co-resident CUDA
+ *   workload has parked memory in UVA that is not currently
+ *   resident on the GPU. The PHYSICAL branch returns early before
+ *   any UVA logic, so VGPU_PATH_UVA is structurally unreachable
+ *   regardless of the allow_uva input.
+ *
+ *   Heap-size reporting paths that drive direct allocation sizing
+ *   (e.g., Phase 4 vkGetPhysicalDeviceMemoryProperties clamp) cap to
+ *   real_memory under the same logic.
  */
 typedef enum {
   VGPU_BUDGET_KIND_VIRTUAL  = 0,
@@ -119,14 +137,22 @@ void get_host_device_index_by_uuid_bytes(const uint8_t uuid[16],
  * Host-index-keyed budget check for non-CUDA hook layers (Vulkan today).
  *
  * Same decision shape as prepare_memory_allocation: lock the device,
- * read NVML-aggregated `used` plus tracked `vmem_used`, compare against
- * the cap dictated by `kind`, return GPU/UVA/OOM. Differs only in input
- * surface — caller already has a host_index (e.g. resolved from a
- * VkPhysicalDevice via deviceUUID), no CUdevice in scope.
+ * read NVML-aggregated `used` (and vmem_used for the VIRTUAL kind only),
+ * compare against the cap dictated by `kind`, return GPU/UVA/OOM.
+ * Differs only in input surface — caller already has a host_index
+ * (e.g. resolved from a VkPhysicalDevice via deviceUUID), no CUdevice
+ * in scope.
  *
  * `used` view comes from NVML's compute+graphics process aggregation
  * (already PID-deduped in get_used_gpu_memory_by_device), so a process
  * mixing CUDA and Vulkan only contributes its physical footprint once.
+ *
+ * Vulkan callers MUST pass kind=PHYSICAL and allow_uva=0 — Vulkan has
+ * no UVA fallback path. Under PHYSICAL the check is pure-physical:
+ * vmem_used is NOT summed against the cap (see vgpu_budget_kind_t
+ * comment for the rationale and the false-OOM case it averts), and
+ * VGPU_PATH_UVA is structurally unreachable from this kind regardless
+ * of allow_uva.
  *
  * Lock ownership contract is identical to prepare_memory_allocation:
  *   - on any non-OOM return the device lock_fd is held; caller must
@@ -134,10 +160,6 @@ void get_host_device_index_by_uuid_bytes(const uint8_t uuid[16],
  *   - on OOM the lock is held so caller can metrics_record_oom() first
  *   - if the device is unmanaged (host_index out of range, memory_limit==0,
  *     or NVML resolution failed), returns VGPU_PATH_GPU with *lock_fd=-1
- *
- * Vulkan callers MUST pass kind=PHYSICAL and allow_uva=0 — Vulkan has no
- * UVA fallback path. The function defends against misuse internally
- * (PHYSICAL forces allow_uva=0).
  */
 vgpu_path_t vgpu_check_alloc_budget(int host_index,
                                     size_t request_size,
