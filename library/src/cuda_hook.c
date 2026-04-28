@@ -1404,6 +1404,10 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
+  if (unlikely(dptr == NULL)) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1432,6 +1436,20 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path: defensive early return matching HAMi PR #182
+   * commit 88143ab4. Existing logic is already structurally safe
+   * (the *dptr deref via malloc_gpu_virt_memory is gated on
+   * ret==SUCCESS, which the driver won't return for NULL dptr), but
+   * forwarding immediately avoids the budget check + lock acquisition
+   * for what is always a probe / fallback / invalid call. */
+  if (unlikely(dptr == NULL)) {
+    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc_v2))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
+    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc, dptr, bytesize);
+    }
+    return CUDA_ERROR_NOT_FOUND;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1489,6 +1507,19 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path. The UVA fallback below dereferences *pPitch
+   * unconditionally; *dptr deref is guarded by ret==SUCCESS but cheap
+   * to short-circuit anyway. Forward to driver for INVALID_VALUE. */
+  if (unlikely(dptr == NULL || pPitch == NULL)) {
+    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch_v2))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch_v2,
+                               dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch,
+                               dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
+    }
+    return CUDA_ERROR_NOT_FOUND;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1552,6 +1583,10 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
+  if (unlikely(dptr == NULL)) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1593,6 +1628,10 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
+  if (unlikely(dptr == NULL)) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1660,6 +1699,22 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path: forward to the driver so the caller sees the
+   * canonical CUDA_ERROR_INVALID_VALUE instead of a SegFault inside
+   * get_array_request_size (which dereferences pAllocateArray->Format
+   * etc. with no NULL check). NVIDIA OptiX / Aftermath fallback init
+   * paths probe with NULL during early init; without this guard
+   * libvgpu-control.so crashes Isaac Sim Kit at startup. Mirrors
+   * HAMi PR #182 commit 88143ab4 / 275ba3db / 01a58f13 patterns.
+   * Keeps the CUDA-side semantics (NULL -> INVALID_VALUE) intact. */
+  if (unlikely(pAllocateArray == NULL)) {
+    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate_v2))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate_v2, pHandle, pAllocateArray);
+    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate, pHandle, pAllocateArray);
+    }
+    return CUDA_ERROR_NOT_FOUND;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1697,6 +1752,15 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path; same rationale as _cuArrayCreate above. */
+  if (unlikely(pAllocateArray == NULL)) {
+    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate_v2))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate_v2, pHandle, pAllocateArray);
+    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate, pHandle, pAllocateArray);
+    }
+    return CUDA_ERROR_NOT_FOUND;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1736,6 +1800,11 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path; same rationale as _cuArrayCreate above. */
+  if (unlikely(pMipmappedArrayDesc == NULL)) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMipmappedArrayCreate,
+                             pHandle, pMipmappedArrayDesc, numMipmapLevels);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1761,6 +1830,10 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
+  if (unlikely(handle == NULL)) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -1781,6 +1854,17 @@ DONE:
 
 CUresult _cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
   CUresult ret;
+  /* NULL-arg fast path: skip our cached-limit branch (which would
+   * dereference *bytes) and forward to the driver, matching
+   * un-hooked CUDA semantics (driver returns CUDA_ERROR_INVALID_VALUE). */
+  if (unlikely(bytes == NULL)) {
+    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem_v2))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
+    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem, bytes, dev);
+    }
+    return CUDA_ERROR_NOT_FOUND;
+  }
   int host_index = get_host_device_index_by_cuda_device(dev);
   if (host_index < 0) {
     goto CALL;
@@ -1813,6 +1897,18 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
   CUdevice device;
   int lock_fd = -1;
   int has_limited_view;
+  /* NULL-arg fast path: skip the limited-view branch (which would
+   * dereference *total / *free) and forward to the driver. Mirrors
+   * HAMi PR #182 commit 03f99d70 — OptiX's cuMemGetInfo probes hit
+   * this path during init. */
+  if (unlikely(free == NULL || total == NULL)) {
+    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, free, total);
+    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
+      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, free, total);
+    }
+    return CUDA_ERROR_NOT_FOUND;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -2090,6 +2186,11 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
+  if (unlikely(dptr == NULL)) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync),
+                             dptr, bytesize, pool, hStream);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -2114,6 +2215,11 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
+  /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
+  if (unlikely(dptr == NULL)) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz,
+                             dptr, bytesize, pool, hStream);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
