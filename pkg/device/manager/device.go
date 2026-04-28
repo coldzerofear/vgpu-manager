@@ -421,6 +421,18 @@ func (m *DeviceManager) GetGPUDeviceMap() map[string]GPUDevice {
 	return deviceMap
 }
 
+func (m *DeviceManager) getGPUDeviceMap() map[string]*GPUDevice {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	deviceMap := make(map[string]*GPUDevice)
+	for _, dev := range m.devices {
+		if dev.GPU != nil {
+			deviceMap[dev.GPU.UUID] = dev.GPU
+		}
+	}
+	return deviceMap
+}
+
 func (m *DeviceManager) GetMIGDeviceMap() map[string]MIGDevice {
 	m.mut.Lock()
 	defer m.mut.Unlock()
