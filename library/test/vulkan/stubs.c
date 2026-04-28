@@ -106,7 +106,12 @@ void unlock_gpu_device(int fd) {
 /* ---- UUID-bytes -> host_index resolver -------------------------- */
 
 /* Format the 16-byte UUID into the canonical "GPU-..." string and
- * scan vgpu_test_config.devices[i].uuid for a match. */
+ * scan vgpu_test_config.devices[i] for an active slot whose UUID
+ * matches. Mirrors loader.c:1673's get_host_device_index_by_uuid,
+ * which gates on `activate && strcmp(uuid)` — keeping the test stub
+ * at production-equivalent semantics ensures tests catch bugs where
+ * the layer relies on the activate flag. Test setups must therefore
+ * set both .uuid and .activate = 1 when staging an assigned device. */
 void get_host_device_index_by_uuid_bytes(const uint8_t uuid[16],
                                          int *host_index) {
   if (uuid == NULL || host_index == NULL || g_vgpu_config == NULL) return;
@@ -118,7 +123,8 @@ void get_host_device_index_by_uuid_bytes(const uint8_t uuid[16],
            uuid[0x8], uuid[0x9], uuid[0xA], uuid[0xB],
            uuid[0xC], uuid[0xD], uuid[0xE], uuid[0xF]);
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
-    if (strcmp(g_vgpu_config->devices[i].uuid, uuid_str) == 0) {
+    if (g_vgpu_config->devices[i].activate &&
+        strcmp(g_vgpu_config->devices[i].uuid, uuid_str) == 0) {
       *host_index = i;
       return;
     }

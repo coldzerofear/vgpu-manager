@@ -104,14 +104,21 @@ static void seed_fake_devices(void) {
 /* Configure g_vgpu_config so that fake_uuids[0] -> host_index 0,
  * fake_uuids[2] -> host_index 1. fake_uuids[1] is intentionally
  * absent so its lookup yields -1 (non-NVIDIA / not allocated to this
- * pod). */
+ * pod).
+ *
+ * Each assigned slot needs both .uuid and .activate = 1 — see
+ * loader.c:2017 in production for the same atomic write, and
+ * stubs.c::get_host_device_index_by_uuid_bytes for the activate-gated
+ * matcher. */
 static void seed_config(void) {
   vgpu_test_reset_config();
   /* host_index 0 <- fake_uuids[0] */
   format_uuid(g_fake_uuids[0], g_vgpu_config->devices[0].uuid);
+  g_vgpu_config->devices[0].activate = 1;
   /* host_index 1 <- fake_uuids[2] */
   format_uuid(g_fake_uuids[2], g_vgpu_config->devices[1].uuid);
-  /* All other slots: zero uuid (memset earlier) -> never matches. */
+  g_vgpu_config->devices[1].activate = 1;
+  /* All other slots: zero uuid + activate=0 -> never matches. */
 }
 
 /* ---- Zero-UUID fallback tests (HAMi PR #182 parity) -------------- */
@@ -142,6 +149,7 @@ static void test_zero_uuid_single_gpu_fallback(void) {
    * does not match any fake_uuids[i], proving the fallback (not the
    * strict matcher) is what binds host_index 5 to phys[0]. */
   format_uuid(k_real_uuid_one, g_vgpu_config->devices[5].uuid);
+  g_vgpu_config->devices[5].activate = 1;
 
   VkInstance inst = (VkInstance)(uintptr_t)0xCC;
   vgpu_vk_register_instance_physdevs(inst, fake_gipa);
@@ -170,7 +178,9 @@ static void test_zero_uuid_multi_gpu_no_fallback(void) {
   /* Two assigned GPUs in g_vgpu_config (slots 2 and 7), neither
    * matching any fake UUID. */
   format_uuid(k_real_uuid_one, g_vgpu_config->devices[2].uuid);
+  g_vgpu_config->devices[2].activate = 1;
   format_uuid(k_real_uuid_two, g_vgpu_config->devices[7].uuid);
+  g_vgpu_config->devices[7].activate = 1;
 
   VkInstance inst = (VkInstance)(uintptr_t)0xCD;
   vgpu_vk_register_instance_physdevs(inst, fake_gipa);
@@ -193,6 +203,7 @@ static void test_normal_uuid_unaffected_by_fallback(void) {
    * Strict match must put phys[0] at host_index 3; fallback must NOT
    * fire because deviceUUID is non-zero. */
   format_uuid(g_fake_uuids[0], g_vgpu_config->devices[3].uuid);
+  g_vgpu_config->devices[3].activate = 1;
 
   VkInstance inst = (VkInstance)(uintptr_t)0xCE;
   vgpu_vk_register_instance_physdevs(inst, fake_gipa);

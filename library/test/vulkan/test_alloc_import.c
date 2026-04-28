@@ -80,6 +80,7 @@ static void setup(void) {
 
   snprintf(g_vgpu_config->devices[HOST_INDEX].uuid, UUID_BUFFER_SIZE,
            "GPU-11223344-5566-7788-99aa-bbccddeeff00");
+  g_vgpu_config->devices[HOST_INDEX].activate     = 1;
   g_vgpu_config->devices[HOST_INDEX].memory_limit = 1;
   g_vgpu_config->devices[HOST_INDEX].real_memory  = 4ull << 30;
   g_vgpu_config->devices[HOST_INDEX].total_memory = 4ull << 30;

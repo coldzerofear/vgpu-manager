@@ -101,6 +101,7 @@ static void setup(int memory_limit, int memory_oversold,
            g_uuid_bytes[0x4], g_uuid_bytes[0x5], g_uuid_bytes[0x6], g_uuid_bytes[0x7],
            g_uuid_bytes[0x8], g_uuid_bytes[0x9], g_uuid_bytes[0xA], g_uuid_bytes[0xB],
            g_uuid_bytes[0xC], g_uuid_bytes[0xD], g_uuid_bytes[0xE], g_uuid_bytes[0xF]);
+  g_vgpu_config->devices[HOST_INDEX].activate        = 1;
   g_vgpu_config->devices[HOST_INDEX].memory_limit    = memory_limit;
   g_vgpu_config->devices[HOST_INDEX].memory_oversold = memory_oversold;
   g_vgpu_config->devices[HOST_INDEX].real_memory     = real_mem;

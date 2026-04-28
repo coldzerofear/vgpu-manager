@@ -52,12 +52,20 @@ static int is_zero_uuid(const uint8_t u[16]) {
   return 1;
 }
 
-/* Count host_index slots in g_vgpu_config that have been assigned a
- * real GPU. loader.c:2010 explicitly skips FAKE_GPU_UUID before
- * populating devices[].uuid, so an empty uuid[0] reliably means "no
- * GPU at this slot for this Pod". The fake-UUID byte pattern (16
- * zeros, identical to a zero deviceUUID) NEVER reaches g_vgpu_config,
- * so this counter is not confused by it.
+/* Count host_index slots in g_vgpu_config that have been assigned to
+ * the Pod and are currently active. The activation flag is the
+ * codebase's canonical "is this slot live" predicate — see
+ * loader.c:1673 (get_host_device_index_by_uuid uses
+ * `activate && strcmp(uuid)`) and loader.c:1424 (config dump iterates
+ * by activate). loader.c:2017 sets activate = 1 atomically with the
+ * UUID write, so in production state the two are coupled, but using
+ * activate is what stays consistent if a future flow ever
+ * deactivates a slot at runtime without zeroing the UUID.
+ *
+ * loader.c:2010 already skips FAKE_GPU_UUID before populating any
+ * fields, so the all-zero deviceUUID byte pattern (which is identical
+ * to FAKE_GPU_UUID's bytes) never reaches g_vgpu_config — neither
+ * .uuid nor .activate get touched on those slots.
  *
  * Returns count; when count == 1, *out_single_idx is set to that slot. */
 static int count_assigned_devices(int *out_single_idx) {
@@ -65,7 +73,7 @@ static int count_assigned_devices(int *out_single_idx) {
   int single_idx  = -1;
   if (g_vgpu_config == NULL) return 0;
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
-    if (g_vgpu_config->devices[i].uuid[0] != '\0') {
+    if (g_vgpu_config->devices[i].activate) {
       valid_count++;
       single_idx = i;
     }

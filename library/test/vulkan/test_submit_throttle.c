@@ -109,6 +109,7 @@ static void setup(void) {
 
   snprintf(g_vgpu_config->devices[HOST_INDEX].uuid, UUID_BUFFER_SIZE,
            "GPU-77777777-7777-7777-7777-777777777777");
+  g_vgpu_config->devices[HOST_INDEX].activate     = 1;
   g_vgpu_config->devices[HOST_INDEX].memory_limit = 1;
 
   vgpu_vk_register_instance_physdevs(g_inst, phys_gipa);
