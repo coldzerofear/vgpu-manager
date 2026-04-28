@@ -33,6 +33,21 @@ set(VK_LAYER_HOOKS_SUBMIT_SRC  ${CMAKE_SOURCE_DIR}/src/vulkan/hooks_submit.c)
 # Stubs file shared by every binary.
 set(VK_TEST_STUBS ${VK_TEST_SRC_DIR}/stubs.c)
 
+# Compile flags applied to every test binary. -UNDEBUG re-enables the
+# assert() expansion under CMAKE_BUILD_TYPE=Release (which would
+# otherwise add -DNDEBUG via CMAKE_C_FLAGS_RELEASE and silently
+# strip every assert(...) — including any side-effecting function
+# call placed inside one — to ((void)0)).
+#
+# Without -UNDEBUG, patterns like
+#     assert(some_function_with_side_effects() == EXPECTED);
+# both miss the verification AND drop the call itself; tests then
+# pass vacuously regardless of whether the code under test works.
+# Build-system level fix is preferred over per-call refactoring
+# because it covers every test target uniformly and survives any
+# future-added test that uses the same idiom.
+set(VGPU_VK_TEST_COMPILE_OPTS -UNDEBUG)
+
 # Helper to declare one test target with the given extra layer sources.
 # Usage: vgpu_vk_add_test(<name> [<src1> [<src2> ...]])
 function(vgpu_vk_add_test name)
@@ -42,6 +57,7 @@ function(vgpu_vk_add_test name)
         ${VK_TEST_STUBS}
         ${layer_srcs})
     target_include_directories(${name} PRIVATE ${VK_TEST_COMMON_INCLUDES})
+    target_compile_options(${name} PRIVATE ${VGPU_VK_TEST_COMPILE_OPTS})
     target_link_libraries(${name} PRIVATE pthread dl)
     # Stubs.c expects to override symbols normally exported with
     # default visibility from cuda_hook.c. To avoid -fvisibility=hidden
@@ -52,8 +68,11 @@ endfunction()
 # ---- Test targets ---------------------------------------------------
 
 # 1. Negotiate protocol: dlopen the built libvgpu-control.so.
+#    test_layer_init does not go through vgpu_vk_add_test (it doesn't
+#    link any layer .c file directly), so apply -UNDEBUG manually.
 add_executable(test_layer_init ${VK_TEST_SRC_DIR}/test_layer_init.c)
 target_include_directories(test_layer_init PRIVATE ${VK_TEST_COMMON_INCLUDES})
+target_compile_options(test_layer_init PRIVATE ${VGPU_VK_TEST_COMPILE_OPTS})
 target_link_libraries(test_layer_init PRIVATE dl)
 
 # 2. Dispatch register / lookup / remove.

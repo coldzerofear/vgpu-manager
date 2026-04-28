@@ -128,7 +128,10 @@ static void test_fd_import_short_circuits_budget(void) {
   imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
   imp.fd         = 42;
 
-  assert(call_alloc_with_pnext(&imp) == VK_SUCCESS);
+  /* Pre-evaluate the side-effect call so it survives any future build
+   * that re-enables NDEBUG; assert verifies the captured value only. */
+  VkResult r = call_alloc_with_pnext(&imp);
+  assert(r == VK_SUCCESS);
   assert(g_alloc_calls == 1);
   assert(vgpu_test_budget_call_count == 0);
   assert(vgpu_test_unlock_call_count == 0);
@@ -148,7 +151,8 @@ static void test_host_pointer_import_short_circuits_budget(void) {
   imp.handleType   = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
   imp.pHostPointer = buffer;
 
-  assert(call_alloc_with_pnext(&imp) == VK_SUCCESS);
+  VkResult r = call_alloc_with_pnext(&imp);
+  assert(r == VK_SUCCESS);
   assert(g_alloc_calls == 1);
   assert(vgpu_test_budget_call_count == 0);
   vgpu_test_pass("VkImportMemoryHostPointerInfoEXT short-circuits when valid");
@@ -170,7 +174,8 @@ static void test_fd_minus_one_does_not_short_circuit(void) {
   imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
   imp.fd         = -1;
 
-  assert(call_alloc_with_pnext(&imp) == VK_ERROR_OUT_OF_DEVICE_MEMORY);
+  VkResult r = call_alloc_with_pnext(&imp);
+  assert(r == VK_ERROR_OUT_OF_DEVICE_MEMORY);
   assert(g_alloc_calls == 0);
   assert(vgpu_test_budget_call_count == 1);
   assert(vgpu_test_unlock_call_count == 1);
@@ -189,7 +194,8 @@ static void test_handle_type_zero_does_not_short_circuit(void) {
   imp.handleType = 0;        /* invalid */
   imp.fd         = 5;        /* otherwise plausible */
 
-  assert(call_alloc_with_pnext(&imp) == VK_ERROR_OUT_OF_DEVICE_MEMORY);
+  VkResult r = call_alloc_with_pnext(&imp);
+  assert(r == VK_ERROR_OUT_OF_DEVICE_MEMORY);
   assert(g_alloc_calls == 0);
   assert(vgpu_test_budget_call_count == 1);
   vgpu_test_pass("handleType=0 falls through to budget");
@@ -207,7 +213,8 @@ static void test_host_pointer_null_does_not_short_circuit(void) {
   imp.handleType   = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
   imp.pHostPointer = NULL;
 
-  assert(call_alloc_with_pnext(&imp) == VK_ERROR_OUT_OF_DEVICE_MEMORY);
+  VkResult r = call_alloc_with_pnext(&imp);
+  assert(r == VK_ERROR_OUT_OF_DEVICE_MEMORY);
   assert(g_alloc_calls == 0);
   vgpu_test_pass("pHostPointer=NULL falls through to budget");
   teardown();
@@ -217,7 +224,8 @@ static void test_no_pnext_goes_through_budget(void) {
   setup();
   vgpu_test_budget_forced_path    = VGPU_PATH_GPU;
   vgpu_test_budget_lock_fd_to_set = 55;
-  assert(call_alloc_with_pnext(NULL) == VK_SUCCESS);
+  VkResult r = call_alloc_with_pnext(NULL);
+  assert(r == VK_SUCCESS);
   assert(g_alloc_calls == 1);
   assert(vgpu_test_budget_call_count == 1);
   vgpu_test_pass("no pNext (plain alloc) goes through budget");
@@ -236,7 +244,8 @@ static void test_export_struct_does_not_short_circuit(void) {
   exp.sType       = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
   exp.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
-  assert(call_alloc_with_pnext(&exp) == VK_SUCCESS);
+  VkResult r = call_alloc_with_pnext(&exp);
+  assert(r == VK_SUCCESS);
   assert(g_alloc_calls == 1);
   assert(vgpu_test_budget_call_count == 1);
   vgpu_test_pass("VkExportMemoryAllocateInfo goes through budget (not import)");

@@ -166,7 +166,10 @@ static void test_oom_path_blocks_alloc(void) {
   info.allocationSize = 8ull << 30;
 
   VkDeviceMemory m = VK_NULL_HANDLE;
-  assert(vgpu_vk_AllocateMemory(g_dev, &info, NULL, &m) == VK_ERROR_OUT_OF_DEVICE_MEMORY);
+  /* Pre-evaluate side-effect call so it survives any future build that
+   * re-enables NDEBUG; assert verifies the captured return code only. */
+  VkResult r = vgpu_vk_AllocateMemory(g_dev, &info, NULL, &m);
+  assert(r == VK_ERROR_OUT_OF_DEVICE_MEMORY);
   /* alloc was NOT called — we returned OOM before forward. */
   assert(g_alloc_calls == 0);
   /* Lock was held, so unlock must have fired exactly once. */
@@ -189,7 +192,8 @@ static void test_unlock_skipped_when_lock_fd_negative(void) {
   info.allocationSize = 1ull << 30;
 
   VkDeviceMemory m = VK_NULL_HANDLE;
-  assert(vgpu_vk_AllocateMemory(g_dev, &info, NULL, &m) == VK_SUCCESS);
+  VkResult r = vgpu_vk_AllocateMemory(g_dev, &info, NULL, &m);
+  assert(r == VK_SUCCESS);
   (void)m;
   assert(g_alloc_calls == 1);
   assert(vgpu_test_unlock_call_count == 0);
@@ -218,7 +222,8 @@ static void test_missing_dispatch_returns_init_failed(void) {
   info.sType          = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
   info.allocationSize = 1ull << 30;
   VkDeviceMemory m = VK_NULL_HANDLE;
-  assert(vgpu_vk_AllocateMemory(g_dev, &info, NULL, &m) == VK_ERROR_INITIALIZATION_FAILED);
+  VkResult r = vgpu_vk_AllocateMemory(g_dev, &info, NULL, &m);
+  assert(r == VK_ERROR_INITIALIZATION_FAILED);
   (void)m;
   assert(g_alloc_calls == 0);
   vgpu_test_pass("missing dispatch => VK_ERROR_INITIALIZATION_FAILED");
