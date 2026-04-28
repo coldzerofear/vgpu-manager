@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	resourceapi "k8s.io/api/resource/v1"
@@ -163,8 +164,21 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
 		driver.wg.Go(func() {
 			klog.V(4).Info("Starting to extended shared SM utilization watcher")
+			gpuDeviceMap := make(map[string]*manager.GPUDevice)
+			for _, vgpuDevice := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
+				gpuInfo := vgpuDevice.VGpu.GpuDeviceInfo.GpuInfo
+				numaNode, _ := gpuInfo.GetNumaNode()
+				paths, _ := gpuInfo.GetPaths()
+				gpuDeviceMap[gpuInfo.UUID] = &manager.GPUDevice{
+					GpuInfo:  gpuInfo,
+					NumaNode: int(numaNode),
+					Paths:    paths,
+					Healthy:  true,
+					Links:    map[int][]links.P2PLinkType{},
+				}
+			}
 			filePath := filepath.Join(manager.WatcherDir, manager.SMUtilFile)
-			manager.SMUtilWatcher(ctx, state.nvdevlib.DeviceLib, filePath)
+			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, gpuDeviceMap, filePath)
 			klog.V(4).Info("stopping extended shared SM utilization watcher")
 		})
 	}

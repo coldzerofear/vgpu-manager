@@ -46,11 +46,11 @@ func (m *DeviceManager) doWatcher() {
 	ctx, cancelFunc := WrapChannelWithContext(m.stop)
 	defer cancelFunc()
 	filePath := filepath.Join(WatcherDir, SMUtilFile)
-	SMUtilWatcher(ctx, m.DeviceLib, filePath)
+	SMUtilWatcherStart(ctx, m.DeviceLib, m.getGPUDeviceMap(), filePath)
 	klog.V(3).Infoln("DeviceManager sm watcher stopped")
 }
 
-func SMUtilWatcher(ctx context.Context, deviceLib *nvidia.DeviceLib, filePath string) {
+func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDeviceMap map[string]*GPUDevice, filePath string) {
 	wait.UntilWithContext(ctx, func(ctx context.Context) {
 		if err := watcher.PrepareDeviceUtilFile(filePath); err != nil {
 			klog.ErrorS(err, "PrepareDeviceUtilFile failed")
@@ -71,19 +71,20 @@ func SMUtilWatcher(ctx context.Context, deviceLib *nvidia.DeviceLib, filePath st
 		}
 		defer deviceLib.NvmlShutdown()
 
-		var gpuDevices []*GPUDevice
-		var deviceHandlers []device.Device
-		for uuid, dev := range m.getGPUDeviceMap() {
-			handle, ret := m.DeviceGetHandleByUUID(uuid)
+		gpuDevices := make([]*GPUDevice, 0, len(gpuDeviceMap))
+		deviceHandlers := make([]device.Device, 0, len(gpuDeviceMap))
+		for uuid, dev := range gpuDeviceMap {
+			handle, ret := deviceLib.DeviceGetHandleByUUID(uuid)
 			if ret != nvml.SUCCESS {
 				klog.Errorf("error getting device handle for uuid '%v': %v", uuid, ret)
 				return
 			}
 			gpuDevices = append(gpuDevices, dev)
-			devHandle, _ := m.NewDevice(handle)
+			devHandle, _ := deviceLib.NewDevice(handle)
 			deviceHandlers = append(deviceHandlers, devHandle)
 		}
-		if len(deviceHandlers) <= 0 {
+		if len(deviceHandlers) == 0 {
+			klog.V(3).Infoln("no gpu device handle, will exit retry")
 			return
 		}
 
@@ -97,7 +98,7 @@ func SMUtilWatcher(ctx context.Context, deviceLib *nvidia.DeviceLib, filePath st
 			wg.Add(1)
 			go func(config watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) {
 				defer wg.Done()
-				err := smWatcherBatchWithContext(subCtx, deviceLib, deviceUtil, config, devices, handles)
+				err := smWatcherBatchWithContext(subCtx, deviceUtil, config, devices, handles)
 				if err != nil {
 					subCancelFunc()
 				}
@@ -107,7 +108,7 @@ func SMUtilWatcher(ctx context.Context, deviceLib *nvidia.DeviceLib, filePath st
 	}, time.Second)
 }
 
-func smWatcherBatchWithContext(ctx context.Context, deviceLib *nvidia.DeviceLib, deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) error {
+func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
 	for {
 		for i := batch.StartIndex; i <= batch.EndIndex; i++ {
@@ -120,7 +121,7 @@ func smWatcherBatchWithContext(ctx context.Context, deviceLib *nvidia.DeviceLib,
 			gpuDevice := devices[i]
 			gpuHandle := handles[i]
 
-			if err := m.smWatcherSingleDevice(deviceUtil.GetWrap(), gpuDevice, gpuHandle); err != nil {
+			if err := smWatcherSingleDevice(deviceUtil.GetWrap(), gpuDevice, gpuHandle); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
@@ -133,9 +134,9 @@ func smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, info *GPUDevice, 
 	if !info.Healthy || info.MigEnabled {
 		return nil
 	}
-	//if enabled, _ := d.IsMigEnabled(); enabled {
-	//	return nil
-	//}
+	if enabled, _ := d.IsMigEnabled(); enabled {
+		return nil
+	}
 	i := info.Index
 	computeProcesses, rt := d.GetComputeRunningProcessesBySize(watcher.MaxPids)
 	if rt != nvml.SUCCESS {
