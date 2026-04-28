@@ -23,9 +23,11 @@
 #include <vulkan/vulkan.h>
 
 #include "include/budget.h"   /* get_host_device_index_by_uuid_bytes */
-#include "include/hook.h"     /* LOGGER */
+#include "include/hook.h"     /* LOGGER, g_vgpu_config, MAX_DEVICE_COUNT */
 
 #include "include/vulkan/physdev_index.h"
+
+extern resource_data_t *g_vgpu_config;
 
 typedef struct vgpu_vk_phys_node {
   VkPhysicalDevice           phys;
@@ -36,6 +38,41 @@ typedef struct vgpu_vk_phys_node {
 
 static vgpu_vk_phys_node_t *g_phys_cache = NULL;
 static pthread_rwlock_t     g_phys_lock  = PTHREAD_RWLOCK_INITIALIZER;
+
+/* Detect the all-zero deviceUUID returned by certain NVIDIA driver +
+ * container configurations (observed on driver 580.142 inside
+ * containers, see Project-HAMi/HAMi-core#182). NVML reports the
+ * correct UUID on the same hosts, so the strict UUID match falls
+ * through to host_index = -1 and the budget would silently bypass.
+ * This predicate is the trigger for the single-GPU fallback. */
+static int is_zero_uuid(const uint8_t u[16]) {
+  for (int i = 0; i < 16; i++) {
+    if (u[i] != 0) return 0;
+  }
+  return 1;
+}
+
+/* Count host_index slots in g_vgpu_config that have been assigned a
+ * real GPU. loader.c:2010 explicitly skips FAKE_GPU_UUID before
+ * populating devices[].uuid, so an empty uuid[0] reliably means "no
+ * GPU at this slot for this Pod". The fake-UUID byte pattern (16
+ * zeros, identical to a zero deviceUUID) NEVER reaches g_vgpu_config,
+ * so this counter is not confused by it.
+ *
+ * Returns count; when count == 1, *out_single_idx is set to that slot. */
+static int count_assigned_devices(int *out_single_idx) {
+  int valid_count = 0;
+  int single_idx  = -1;
+  if (g_vgpu_config == NULL) return 0;
+  for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
+    if (g_vgpu_config->devices[i].uuid[0] != '\0') {
+      valid_count++;
+      single_idx = i;
+    }
+  }
+  if (out_single_idx) *out_single_idx = single_idx;
+  return valid_count;
+}
 
 /* Resolve a single physdev's UUID to host_index via the next-layer
  * GIPA. Returns -1 on any failure (non-NVIDIA device, pre-1.1 Vulkan
@@ -76,6 +113,33 @@ static int resolve_phys_uuid(VkPhysicalDevice           phys,
 
   int host_index = -1;
   get_host_device_index_by_uuid_bytes(id_props.deviceUUID, &host_index);
+
+  /* Zero-UUID + single-GPU fallback. See is_zero_uuid above for the
+   * driver/container quirk this guards against; see
+   * count_assigned_devices for why uuid[0]!='\0' is the right
+   * discriminator (FAKE_GPU_UUID does not reach g_vgpu_config).
+   *
+   * Multi-GPU Pods deliberately do NOT fall back: with multiple
+   * unmatched physdevs we cannot tell which host_index this one is.
+   * Failing open (host_index = -1, no enforcement) is preferable to
+   * mis-binding the budget to the wrong device. */
+  if (host_index < 0 && is_zero_uuid(id_props.deviceUUID)) {
+    int single_idx  = -1;
+    int valid_count = count_assigned_devices(&single_idx);
+    if (valid_count == 1) {
+      LOGGER(WARNING,
+             "vk physdev %p: deviceUUID returned all zeros (likely a "
+             "driver/container quirk); Pod has exactly 1 GPU assigned, "
+             "using single-GPU fallback host_index=%d",
+             (void *)phys, single_idx);
+      host_index = single_idx;
+    } else {
+      LOGGER(WARNING,
+             "vk physdev %p: deviceUUID returned all zeros, Pod has %d "
+             "GPUs assigned (cannot disambiguate); leaving host_index=-1",
+             (void *)phys, valid_count);
+    }
+  }
   return host_index;
 }
 

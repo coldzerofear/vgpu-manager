@@ -114,6 +114,95 @@ static void seed_config(void) {
   /* All other slots: zero uuid (memset earlier) -> never matches. */
 }
 
+/* ---- Zero-UUID fallback tests (HAMi PR #182 parity) -------------- */
+
+/* Real-looking UUID bytes used by the regression / multi-GPU tests
+ * below. Need to differ from the seeded fake UUIDs (0xA0+i in every
+ * byte) so the strict match clearly distinguishes which slot wins. */
+static const uint8_t k_real_uuid_one[16] = {
+  0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03,
+  0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B
+};
+static const uint8_t k_real_uuid_two[16] = {
+  0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x11, 0x12, 0x13,
+  0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B
+};
+
+/* Single-GPU container hits the buggy NVIDIA driver: deviceUUID is
+ * all zeros. The fallback must map to the only assigned host_index
+ * regardless of the zero UUID's strict-match miss. */
+static void test_zero_uuid_single_gpu_fallback(void) {
+  vgpu_test_reset_all();
+  seed_fake_devices();
+  /* Override fake_uuids[0] to all-zero — simulates the driver quirk. */
+  memset(g_fake_uuids[0], 0, 16);
+
+  /* Configure g_vgpu_config so the Pod has EXACTLY ONE assigned GPU
+   * at host_index 5. The UUID we register is k_real_uuid_one which
+   * does not match any fake_uuids[i], proving the fallback (not the
+   * strict matcher) is what binds host_index 5 to phys[0]. */
+  format_uuid(k_real_uuid_one, g_vgpu_config->devices[5].uuid);
+
+  VkInstance inst = (VkInstance)(uintptr_t)0xCC;
+  vgpu_vk_register_instance_physdevs(inst, fake_gipa);
+
+  /* phys[0] zero UUID + 1 assigned GPU => fallback fires. */
+  assert(vgpu_vk_physdev_to_host_index(g_fake_phys_list[0]) == 5);
+  /* phys[1], phys[2] return non-zero UUIDs that do not match the
+   * single config slot => standard miss, host_index=-1, fallback
+   * NOT applied (zero-UUID predicate is the gate). */
+  assert(vgpu_vk_physdev_to_host_index(g_fake_phys_list[1]) == -1);
+  assert(vgpu_vk_physdev_to_host_index(g_fake_phys_list[2]) == -1);
+  vgpu_test_pass("zero-UUID + single-GPU Pod => fallback to that host_index");
+
+  vgpu_vk_unregister_instance_physdevs(inst);
+}
+
+/* Multi-GPU container with the same driver bug: must NOT fall back —
+ * we cannot disambiguate which host_index this physdev should be.
+ * Failing open (host_index=-1, no enforcement on this physdev) is
+ * preferable to mis-binding the budget to the wrong device. */
+static void test_zero_uuid_multi_gpu_no_fallback(void) {
+  vgpu_test_reset_all();
+  seed_fake_devices();
+  memset(g_fake_uuids[0], 0, 16);
+
+  /* Two assigned GPUs in g_vgpu_config (slots 2 and 7), neither
+   * matching any fake UUID. */
+  format_uuid(k_real_uuid_one, g_vgpu_config->devices[2].uuid);
+  format_uuid(k_real_uuid_two, g_vgpu_config->devices[7].uuid);
+
+  VkInstance inst = (VkInstance)(uintptr_t)0xCD;
+  vgpu_vk_register_instance_physdevs(inst, fake_gipa);
+
+  /* phys[0] zero UUID + 2 assigned GPUs => fallback declines, returns -1. */
+  assert(vgpu_vk_physdev_to_host_index(g_fake_phys_list[0]) == -1);
+  vgpu_test_pass("zero-UUID + multi-GPU Pod => no fallback (host_index=-1)");
+
+  vgpu_vk_unregister_instance_physdevs(inst);
+}
+
+/* Regression: the fallback is gated by is_zero_uuid. Normal (non-zero)
+ * UUIDs continue to go through the strict UUID matcher, even in the
+ * single-GPU-Pod case. */
+static void test_normal_uuid_unaffected_by_fallback(void) {
+  vgpu_test_reset_all();
+  seed_fake_devices();
+  /* Configure exactly one slot, with a UUID that matches fake_uuids[0]
+   * (which seed_fake_devices set to 0xA0 in every byte — non-zero).
+   * Strict match must put phys[0] at host_index 3; fallback must NOT
+   * fire because deviceUUID is non-zero. */
+  format_uuid(g_fake_uuids[0], g_vgpu_config->devices[3].uuid);
+
+  VkInstance inst = (VkInstance)(uintptr_t)0xCE;
+  vgpu_vk_register_instance_physdevs(inst, fake_gipa);
+
+  assert(vgpu_vk_physdev_to_host_index(g_fake_phys_list[0]) == 3);
+  vgpu_test_pass("normal (non-zero) UUID still resolved by strict match");
+
+  vgpu_vk_unregister_instance_physdevs(inst);
+}
+
 int main(void) {
   vgpu_test_reset_all();
   seed_fake_devices();
@@ -163,6 +252,11 @@ int main(void) {
   vgpu_vk_register_instance_physdevs(VK_NULL_HANDLE, fake_gipa); /* no crash */
   vgpu_vk_register_instance_physdevs(inst_a, NULL);              /* no crash */
   vgpu_test_pass("NULL inputs handled defensively");
+
+  /* Zero-UUID + single-GPU fallback (HAMi PR #182 parity fix). */
+  test_zero_uuid_single_gpu_fallback();
+  test_zero_uuid_multi_gpu_no_fallback();
+  test_normal_uuid_unaffected_by_fallback();
 
   printf("ok: test_physdev_index complete\n");
   return 0;

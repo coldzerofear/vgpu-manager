@@ -416,6 +416,25 @@ vk_layer_GetDeviceProcAddr(VkDevice device, const char *pName) {
 /* Loader<->layer negotiation - the only ELF-exported entry point.    */
 /* ------------------------------------------------------------------ */
 
+/* Belt-and-suspenders: explicitly attach visibility=default to the
+ * loader entry point regardless of what VK_LAYER_EXPORT happens to
+ * expand to. HAMi PR #182 hit a production failure where a build
+ * compiled with -fvisibility=hidden combined with a Vulkan-Headers
+ * version where VK_LAYER_EXPORT had degenerated to empty caused this
+ * symbol to be hidden. The Vulkan loader could see the .so via the
+ * implicit-layer manifest but failed to dlsym this entry, silently
+ * inserted the layer name into the chain WITHOUT wiring any function
+ * pointers, and every vk* call then bypassed our hooks straight into
+ * the ICD — heap reported the unclamped native size, vkAllocateMemory
+ * exceeded budget, no error.
+ *
+ * Our build does not currently use -fvisibility=hidden and our
+ * VK_LAYER_EXPORT fallback already produces visibility=default, so in
+ * practice this is redundant today (verified by hack/check_vulkan_layer.sh
+ * which greps `nm -D` on every CI build). The redundancy guards
+ * against a future change to either the build flags or the headers
+ * that would otherwise silently regress the layer. */
+__attribute__((visibility("default")))
 VK_LAYER_EXPORT VkResult VKAPI_CALL
 vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct) {
   if (pVersionStruct == NULL) {
