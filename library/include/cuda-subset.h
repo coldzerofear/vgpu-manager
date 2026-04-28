@@ -50,9 +50,15 @@
 #define HIJACK_CUDA_SUBSET_H
 
 /**
- * CUDA API version number
+ * CUDA API version number.
+ *
+ * This is the CUDA release that the declarations in this vendored subset
+ * are intended to track. Not used to gate any conditional compilation inside
+ * the library - it is a documentation tag only. hack/check_struct_layout.py
+ * validates at build time that struct layouts still match the real cuda.h
+ * on the build host, which is the authoritative compat check.
  */
-#define CUDA_VERSION 12020
+#define CUDA_VERSION 13020
 
 #ifdef __cplusplus
 extern "C" {

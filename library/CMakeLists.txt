@@ -48,6 +48,68 @@ add_library(vgpu-control SHARED
 target_link_libraries(vgpu-control ${STATIC_C_LIBRARIES})
 target_compile_options(vgpu-control PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
+# ---------------------------------------------------------------------------
+# Build-time integrity checks for the CUDA hook layer.
+#
+# These scripts are intentionally split out of C code into Python/Bash so
+# they can scan the entire dispatch table / enum / wrapper set without
+# hand-maintaining a parallel list inside cuda-helper.h. See hack/*.
+#
+# VGPU_RUN_HOOK_CHECKS=OFF disables all three (useful for offline builds).
+# ---------------------------------------------------------------------------
+option(VGPU_RUN_HOOK_CHECKS "Run hack/check_*.* during build" ON)
+
+if(VGPU_RUN_HOOK_CHECKS)
+    find_package(Python3 COMPONENTS Interpreter)
+
+    if(Python3_Interpreter_FOUND)
+        # Pre-build: static consistency between dispatch table, enum order,
+        # wrappers, and ABI-conflict family coverage. Always runs; failure
+        # stops the build.
+        add_custom_target(vgpu_check_hook_consistency ALL
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/hack/check_cuda_hook_consistency.py
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "[vgpu] check CUDA hook registration consistency"
+            VERBATIM)
+        add_dependencies(vgpu-control vgpu_check_hook_consistency)
+
+        # Pre-build: struct layout validation against the real <cuda.h>.
+        # The script itself exits 0 with [SKIP] if no cuda.h is present, so
+        # this never blocks builds in environments without a CUDA toolkit.
+        add_custom_target(vgpu_check_struct_layout ALL
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/hack/check_struct_layout.py
+                    --cuda-home ${CUDA_HOME}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "[vgpu] check cuda-subset.h struct layout vs real <cuda.h>"
+            VERBATIM)
+        add_dependencies(vgpu-control vgpu_check_struct_layout)
+    else()
+        message(WARNING "Python3 not found - skipping hack/check_*.py hook checks")
+    endif()
+
+    # Post-build: verify the linked .so exports BOTH ABI versions of every
+    # conflict family. Only requires nm + bash.
+    add_custom_command(TARGET vgpu-control POST_BUILD
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/hack/check_exported_symbols.sh
+                $<TARGET_FILE:vgpu-control>
+        COMMENT "[vgpu] check ABI-conflict symbol exports in libvgpu-control.so"
+        VERBATIM)
+endif()
+
+# ---------------------------------------------------------------------------
+# Optional: compile the smoke tests in test/.
+# Disabled by default to keep the main build light. Enable with:
+#   cmake -DBUILD_TESTS=ON ..
+# The test/ subdir self-skips if no CUDA toolkit is locatable.
+# ---------------------------------------------------------------------------
+option(BUILD_TESTS "Build smoke tests under test/" OFF)
+if(BUILD_TESTS)
+    add_subdirectory(test)
+endif()
+
 # find_package(CUDAToolkit REQUIRED)
 add_executable(mem_occupy_tool tools/mem_occupy_tool.c)
 target_include_directories(mem_occupy_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)

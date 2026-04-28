@@ -865,18 +865,24 @@ nvmlProcessUtil:
 	}
 
 collecProcessInfo:
+	// NVML's nvmlProcessInfo_t.UsedGpuMemory is the per-PROCESS total, not
+	// per-context. A process that owns both compute (CUDA / OpenCL) and
+	// graphics (Vulkan / OpenGL / DirectX) contexts shows up in both the
+	// Compute and Graphics process lists with the SAME UsedGpuMemory value
+	// (typical for Isaac Sim, Omniverse, UE5 + CUDA inference, etc.).
+	// Skip the duplicate to avoid doubling the metric. This guards both
+	// the SM-watcher path (in case the watcher dedup is bypassed) and the
+	// direct nvmlProcessInfoFunc fallback. Same fix class as cuda_hook.c
+	// commit 20e9519 and watcher.go in this commit.
 	processInfoList := make(procInfoList, len(processInfos))
 	for _, processInfo := range processInfos {
-		procInfo, ok := processInfoList[processInfo.Pid]
-		if ok {
-			procInfo.UsedGpuMemory += processInfo.UsedGpuMemory
-		} else {
-			procInfo = nvml.ProcessInfo_v1{
-				Pid:           processInfo.Pid,
-				UsedGpuMemory: processInfo.UsedGpuMemory,
-			}
+		if _, ok := processInfoList[processInfo.Pid]; ok {
+			continue
 		}
-		processInfoList[processInfo.Pid] = procInfo
+		processInfoList[processInfo.Pid] = nvml.ProcessInfo_v1{
+			Pid:           processInfo.Pid,
+			UsedGpuMemory: processInfo.UsedGpuMemory,
+		}
 	}
 	devProcInfoMap[uuid] = processInfoList
 

@@ -90,10 +90,11 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *me
     get_used_gpu_memory_by_device((void *)&used, device);
     get_used_gpu_virt_memory((void *)&vmem_used, host_index);
 
-    size_t total_memory = g_vgpu_config->devices[host_index].total_memory;
-    memory->total = total_memory;
-    memory->used = (used + vmem_used) >= total_memory ? total_memory : (used + vmem_used);
-    //memory->free = (used + memory->reserved) > g_vcuda_config.gpu_memory ? 0 : g_vcuda_config.gpu_memory - used - memory->reserved;
+    size_t total = g_vgpu_config->devices[host_index].total_memory;
+    size_t total_used = used + vmem_used;
+    memory->total = total;
+    memory->used = total_used >= total ? total : total_used;
+    //memory->free = (memory->used + memory->reserved) >= memory->total ? 0 : memory->total - (memory->used + memory->reserved);
     memory->free = memory->total - memory->used;
   }
 DONE:

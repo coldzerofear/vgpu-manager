@@ -97,6 +97,29 @@ extern "C" {
     _ret;                                                                      \
   })
 
+/*
+ * CUDA_ENTRY_CHECK_STRICT
+ *
+ * For ABI-incompatible versioned symbols (e.g. cuCtxCreate_v4, cuMemAdvise_v2,
+ * cuMemPrefetchAsync_v2, graph *_v2). These wrappers must NOT fall through or
+ * dereference a NULL fn_ptr: if the symbol is absent in the host libcuda.so
+ * the caller is either on a wrong-version driver or asking for an API that
+ * does not exist on this system. Returning CUDA_ERROR_NOT_SUPPORTED is far
+ * safer than invoking NULL or silently downgrading to a differently-shaped
+ * older ABI.
+ */
+#define CUDA_ENTRY_CHECK_STRICT(table, sym, ...)                               \
+  ({                                                                           \
+    CUresult _ret_strict;                                                      \
+    if (unlikely(!CUDA_FIND_ENTRY(table, sym))) {                              \
+      LOGGER(ERROR, "%s not available in host libcuda.so", #sym);              \
+      _ret_strict = CUDA_ERROR_NOT_SUPPORTED;                                  \
+    } else {                                                                   \
+      _ret_strict = CUDA_ENTRY_CHECK(table, sym, __VA_ARGS__);                 \
+    }                                                                          \
+    _ret_strict;                                                               \
+  })
+
 #define CUDA_ENTRY_DEBUG_VOID_CALL(table, sym, ...)                            \
   ({                                                                           \
     cuda_debug_void_sym_t _entry = CUDA_FIND_ENTRY(table, sym);                \
@@ -874,6 +897,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphAddChildGraphNode),
   /** cuGraphAddDependencies */
   CUDA_ENTRY_ENUM(cuGraphAddDependencies),
+  CUDA_ENTRY_ENUM(cuGraphAddDependencies_v2),
   /** cuGraphAddEmptyNode */
   CUDA_ENTRY_ENUM(cuGraphAddEmptyNode),
   /** cuGraphAddHostNode */
@@ -899,6 +923,7 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphExecDestroy),
   /** cuGraphGetEdges */
   CUDA_ENTRY_ENUM(cuGraphGetEdges),
+  CUDA_ENTRY_ENUM(cuGraphGetEdges_v2),
   /** cuGraphGetNodes */
   CUDA_ENTRY_ENUM(cuGraphGetNodes),
   /** cuGraphGetRootNodes */
@@ -931,12 +956,15 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphNodeFindInClone),
   /** cuGraphNodeGetDependencies */
   CUDA_ENTRY_ENUM(cuGraphNodeGetDependencies),
+  CUDA_ENTRY_ENUM(cuGraphNodeGetDependencies_v2),
   /** cuGraphNodeGetDependentNodes */
   CUDA_ENTRY_ENUM(cuGraphNodeGetDependentNodes),
+  CUDA_ENTRY_ENUM(cuGraphNodeGetDependentNodes_v2),
   /** cuGraphNodeGetType */
   CUDA_ENTRY_ENUM(cuGraphNodeGetType),
   /** cuGraphRemoveDependencies */
   CUDA_ENTRY_ENUM(cuGraphRemoveDependencies),
+  CUDA_ENTRY_ENUM(cuGraphRemoveDependencies_v2),
   /** cuImportExternalMemory */
   CUDA_ENTRY_ENUM(cuImportExternalMemory),
   /** cuImportExternalSemaphore */
@@ -1253,6 +1281,70 @@ typedef void (*cuda_debug_void_sym_t)();
  * CUDA library debug result function pointer
  */
 typedef CUDBGResult (*cuda_debug_result_sym_t)();
+
+/*
+ * ABI-conflict API families.
+ *
+ * These are CUDA Driver API base names whose C-language unversioned form
+ * resolves to a DIFFERENT versioned ELF symbol with a DIFFERENT signature
+ * depending on the CUDA major version of the caller's headers:
+ *
+ *   CUDA 11/12 source: cuCtxCreate(...) -> ELF cuCtxCreate_v2(pctx, flags, dev)
+ *   CUDA 13   source: cuCtxCreate(...) -> ELF cuCtxCreate_v4(pctx, params, flags, dev)
+ *
+ * Correctness rules for this library:
+ *
+ *   1. Every versioned ELF symbol (cuCtxCreate_v2 / _v4, cuMemAdvise / _v2,
+ *      cuMemPrefetchAsync / _v2, graph / _v2, ...) MUST be exported as a
+ *      separate function with the exact signature for that version.
+ *   2. A wrapper for a newer ABI must NEVER fall back to an older ABI
+ *      implementation. Use CUDA_ENTRY_CHECK_STRICT.
+ *   3. The unversioned BASE NAME of a conflict family must NEVER be
+ *      registered in cuda_hooks_entry[] for cuGetProcAddress substitution.
+ *      If hooking is needed, register versioned names (cuCtxCreate_v2 AND
+ *      cuCtxCreate_v4) separately, each with a hook whose signature matches
+ *      that ABI.
+ *
+ * is_abi_conflict_base() enforces rule 3 at runtime.
+ */
+static inline int is_abi_conflict_base(const char *sym) {
+  static const char *const g_abi_conflict_bases[] = {
+    "cuCtxCreate",                 /* v2 (3 args) -> v4 (CUctxCreateParams*)   */
+    "cuMemAdvise",                 /* (CUdevice)  -> _v2 (CUmemLocation)       */
+    "cuMemPrefetchAsync",          /* 4 args      -> _v2 (+CUmemLocation,flags)*/
+    "cuGraphGetEdges",             /* +CUgraphEdgeData* in _v2                 */
+    "cuGraphNodeGetDependencies",
+    "cuGraphNodeGetDependentNodes",
+    "cuGraphAddDependencies",
+    "cuGraphRemoveDependencies",
+    "cuGraphAddNode",
+    /*
+     * Note: cuGetProcAddress is intentionally NOT listed here even though
+     * its unversioned form also has cross-major ABI drift (v1 4-arg vs _v2
+     * 5-arg with CUdriverProcAddressQueryResult*). The usual "keep the real
+     * libcuda pointer" short-circuit would break a different invariant:
+     * the caller uses the returned pointer to look up other CUDA symbols,
+     * and those subsequent lookups must STILL go through our hook so
+     * cuda_hooks_entry[] substitution can happen. Handling of that case
+     * lives directly in cuGetProcAddress() / cuGetProcAddress_v2() where
+     * we substitute *pfn with our matching-ABI wrapper (4-arg hook -> our
+     * 4-arg wrapper, 5-arg hook -> our 5-arg wrapper).
+     */
+    NULL,
+  };
+  if (sym == NULL) return 0;
+  for (const char *const *p = g_abi_conflict_bases; *p != NULL; ++p) {
+    if (strcmp(sym, *p) == 0) return 1;
+  }
+  return 0;
+}
+
+/*
+ * NOTE: full struct layout validation is done by hack/check_struct_layout.py,
+ * which compiles a probe program against both this header and the real
+ * <cuda.h> on the build host. Any struct listed in cuda-subset.h that drifts
+ * from the real CUDA SDK will be reported at build time. See CMakeLists.txt.
+ */
 
 #ifdef __cplusplus
 }

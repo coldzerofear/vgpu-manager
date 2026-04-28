@@ -4,4 +4,6 @@
 bin/
 build/
 library/build/
+library/build_test/
 library/.vscode/
+library/hack/__pycache__/

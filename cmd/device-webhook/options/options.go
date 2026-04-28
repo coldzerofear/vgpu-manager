@@ -47,6 +47,11 @@ var version bool
 
 func (o *Options) InitFlags(fs *flag.FlagSet) {
 	klog.InitFlags(fs)
+	// Opt into the new klog behavior so that -stderrthreshold is honored even
+	// when -logtostderr=true (the default).
+	// Ref: kubernetes/klog#212, kubernetes/klog#432
+	_ = fs.Set("legacy_stderr_threshold_behavior", "false")
+	_ = fs.Set("stderrthreshold", "INFO")
 	pflag.CommandLine.SortFlags = false
 	pflag.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name and automatically set it to vGPU pod.")
 	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
