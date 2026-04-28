@@ -450,6 +450,7 @@ entry_t cuda_library_entry[] = {
     {.name = "cuGraphMemsetNodeSetParams"},
     {.name = "cuGraphNodeFindInClone"},
     {.name = "cuGraphNodeGetDependencies"},
+    {.name = "cuGraphNodeGetDependencies_v2"},
     {.name = "cuGraphNodeGetDependentNodes"},
     {.name = "cuGraphNodeGetDependentNodes_v2"},
     {.name = "cuGraphNodeGetType"},

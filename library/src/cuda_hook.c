@@ -58,16 +58,20 @@ extern int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_
 
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 
-static volatile int64_t g_cur_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+/* `= {0}` relies on C's rule that any explicit initializer zero-fills the
+ * remainder, so these scale automatically with MAX_DEVICE_COUNT. */
+static volatile int64_t g_cur_cuda_cores[MAX_DEVICE_COUNT]   = {0};
+static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0};
 
-static int g_sm_num[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int g_sm_num[MAX_DEVICE_COUNT]            = {0};
+static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0};
 
-static int g_block_x[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-static int g_block_y[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-static int g_block_z[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
-static uint32_t g_block_locker[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+/* Block-dim defaults of 1 are set in load_necessary_data(); declaring with
+ * {0} here is fine because those paths read them only after initialisation. */
+static int g_block_x[MAX_DEVICE_COUNT] = {0};
+static int g_block_y[MAX_DEVICE_COUNT] = {0};
+static int g_block_z[MAX_DEVICE_COUNT] = {0};
+static uint32_t g_block_locker[MAX_DEVICE_COUNT] = {0};
 
 static const struct timespec g_cycle = {
   .tv_sec = 0,
@@ -168,8 +172,6 @@ CUresult cuDriverGetVersion(int *driverVersion);
 CUresult cuInit(unsigned int flag);
 CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
                           cuuint64_t flags);
-CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
-                          cuuint64_t flags, void *symbolStatus);
 CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                           cuuint64_t flags, void *symbolStatus);           
 CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize,
@@ -364,13 +366,15 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   return share;
 }
 
-static int64_t shares[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static int sys_frees[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static int avg_sys_frees[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static int is[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int64_t shares[MAX_DEVICE_COUNT]    = {0};
+static int sys_frees[MAX_DEVICE_COUNT]      = {0};
+static int avg_sys_frees[MAX_DEVICE_COUNT]  = {0};
+static int is[MAX_DEVICE_COUNT]             = {0};
+/* pre_sys_process_nums starts at 1 so the first observed "real" count does
+ * not trigger the "new process detected, reset limits" branch at line 431. */
 static int pre_sys_process_nums[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
-static int up_limits[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static int up_limits[MAX_DEVICE_COUNT]      = {0};
 static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
 
 static void *utilization_watcher(void *arg) {
@@ -378,7 +382,7 @@ static void *utilization_watcher(void *arg) {
   LOGGER(VERBOSE, "start %s batch code %d", __FUNCTION__, batch->batch_code);
   LOGGER(VERBOSE, "batch code %d, start index %d, end index %d", batch->batch_code, batch->start_index, batch->end_index);
 
-  int host_indexes[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+  int host_indexes[MAX_DEVICE_COUNT] = {0};
 
   int host_index, cuda_index;
   for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
@@ -825,8 +829,8 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
     return;
   }
   accumulate_used_memory(used_memory, pids_on_device, size_on_device);
+  unsigned int compute_pids_count = size_on_device;
 
-  // TODO　Increase the memory usage of intercepting graphic processes.
   size_on_device = MAX_PIDS;
   nvmlProcessInfo_t graphic_pids_on_device[MAX_PIDS];
 
@@ -847,7 +851,40 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                    ret, NVML_ERROR(nvml_library_entry, ret));
     goto DONE;
   }
-  accumulate_used_memory(used_memory, graphic_pids_on_device, size_on_device);
+
+  /* Deduplicate compute vs graphics PIDs.
+   *
+   * NVML's nvmlProcessInfo_t.usedGpuMemory is the per-PROCESS total memory
+   * usage on the device, not per-context. A process that owns BOTH a compute
+   * context (CUDA / OpenCL) and a graphics context (Vulkan / OpenGL / DirectX)
+   * shows up in both lists with the SAME usedGpuMemory value. Without dedup,
+   * accumulating both lists doubles that process's contribution and inflates
+   * `used` to ~2x reality.
+   *
+   * This is a real production hazard for CUDA + render mixed apps such as
+   * Isaac Sim, Omniverse, UE5 with CUDA inference plugins, or any app that
+   * pairs CUDA work with an OpenGL/Vulkan visualisation. Filter out graphics
+   * entries whose PID is already accounted for in the compute list. */
+  unsigned int graphic_unique_count = 0;
+  for (unsigned int i = 0; i < size_on_device; i++) {
+    int already_seen = 0;
+    for (unsigned int j = 0; j < compute_pids_count; j++) {
+      if (graphic_pids_on_device[i].pid == pids_on_device[j].pid) {
+        already_seen = 1;
+        break;
+      }
+    }
+    if (!already_seen) {
+      if (graphic_unique_count != i) {
+        graphic_pids_on_device[graphic_unique_count] = graphic_pids_on_device[i];
+      }
+      graphic_unique_count++;
+    } else {
+      LOGGER(DETAIL, "process id %d also owns a graphics context; skipped to "
+                     "avoid double-counting", graphic_pids_on_device[i].pid);
+    }
+  }
+  accumulate_used_memory(used_memory, graphic_pids_on_device, graphic_unique_count);
 
 DONE:
   LOGGER(VERBOSE, "total used memory: %zu", *used_memory);
@@ -911,6 +948,27 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_re
 
   top_result->sys_process_num = running_processes;
 
+  if (running_processes == 0) {
+    running_processes = MAX_PIDS;
+    nvmlProcessInfo_t graphic_pids_on_device[MAX_PIDS];
+
+    if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses,
+                               dev, &running_processes, graphic_pids_on_device);
+    } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2,
+                               dev, &running_processes, graphic_pids_on_device);
+    } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3,
+                               dev, &running_processes, graphic_pids_on_device);
+    } else {
+      ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+    }
+    if (likely(ret == NVML_SUCCESS)) {
+      top_result->sys_process_num = running_processes;
+    }
+  }
+
   gettimeofday(&cur, NULL);
   struct timeval temp = {1, 0};
   timersub(&cur, &temp, &prev);
@@ -966,7 +1024,11 @@ static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_res
   }
   *processes_size = copy_size;
 
-  top_result->sys_process_num = g_device_util->devices[host_index].compute_processes_size;
+  if (g_device_util->devices[host_index].compute_processes_size >= g_device_util->devices[host_index].graphics_processes_size) {
+    top_result->sys_process_num = g_device_util->devices[host_index].compute_processes_size;
+  } else {
+    top_result->sys_process_num = g_device_util->devices[host_index].graphics_processes_size;
+  }
   top_result->checktime = (uint64_t)g_device_util->devices[host_index].lastSeenTimeStamp;
 
 DONE:
@@ -1135,6 +1197,48 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
   if (likely(ret == CUDA_SUCCESS)) {
     init_devices_mapping();
     pthread_once(&g_init_set, initialization);
+
+    /*
+     * Special case: caller is asking for cuGetProcAddress itself. We MUST
+     * return our own wrapper (not real libcuda's pointer) - otherwise the
+     * caller uses the returned pfn to do indirect lookups for cuMemAlloc /
+     * cuLaunchKernel / ... and those lookups bypass our cuda_hooks_entry[]
+     * substitution entirely, neutering the entire hook layer.
+     *
+     * The wrapper we substitute in must match the 4-arg v1 ABI of this
+     * hook's own signature, so the caller invokes it with the parameter
+     * frame we expect. (The 5-arg v2 case is handled inside the 5-arg
+     * cuGetProcAddress_v2 hook below.)
+     */
+    if (strcmp(symbol, "cuGetProcAddress") == 0) {
+      LOGGER(VERBOSE, "cuGetProcAddress: substitute self-lookup with our "
+                      "4-arg wrapper to preserve hook coverage");
+      *pfn = (void *)cuGetProcAddress;
+      goto DONE;
+    }
+
+    /*
+     * ABI-conflict defense (MUST run before the lib_control / hooks_entry
+     * substitution below). Real libcuda's cuGetProcAddress has already
+     * written an ABI-correct function pointer to *pfn based on `cudaVersion`
+     * (e.g. cuCtxCreate_v4 for cudaVersion >= 13000, cuCtxCreate_v2 for
+     * cudaVersion < 13000). If we then overwrite *pfn with whatever our
+     * libvgpu-control.so exports under the unversioned base name, we bind
+     * the CUDA 13 caller to our 3-arg v2 wrapper (or vice-versa) and the
+     * parameter frame is misaligned on the very next call.
+     *
+     * Safe for these conflict families because vgpu-manager does not hook
+     * them - the unversioned wrappers in cuda_originals.c are forward-only,
+     * so "keep the real libcuda pointer" does not lose any instrumentation.
+     * Contrast with cuGetProcAddress above which MUST be substituted with
+     * our wrapper to keep the hook chain alive for subsequent lookups.
+     */
+    if (is_abi_conflict_base(symbol)) {
+      LOGGER(VERBOSE, "cuGetProcAddress: keep libcuda pointer for ABI-conflict "
+                      "family %s (cudaVersion=%d)", symbol, cudaVersion);
+      goto DONE;
+    }
+
     if (lib_control) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
@@ -1155,7 +1259,7 @@ DONE:
   return ret;
 }
 
-CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
+CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                              cuuint64_t flags, void *symbolStatus) {
   CUresult ret;
   load_necessary_data();
@@ -1165,6 +1269,30 @@ CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
   if (likely(ret == CUDA_SUCCESS)) {
     init_devices_mapping();
     pthread_once(&g_init_set, initialization);
+
+    /*
+     * Self-lookup special case - see cuGetProcAddress (4-arg hook) above
+     * for the full rationale. Here the caller is in the 5-arg v2 hook, so
+     * their PFN_cuGetProcAddress type has the v2 5-arg ABI (or they
+     * explicitly declared 5-arg). Substitute our own v2 entry point so
+     * the caller's subsequent indirect lookups re-enter our hook.
+     */
+    if (strcmp(symbol, "cuGetProcAddress") == 0) {
+      LOGGER(VERBOSE, "cuGetProcAddress_v2: substitute cuGetProcAddress "
+                      "self-lookup with our 5-arg _v2 wrapper");
+      *pfn = (void *)cuGetProcAddress_v2;
+      goto DONE;
+    }
+
+    /* Same ABI-conflict defense as in cuGetProcAddress above - must run
+     * BEFORE the lib_control / hooks_entry substitution. See the comment
+     * there for the full rationale. */
+    if (is_abi_conflict_base(symbol)) {
+      LOGGER(VERBOSE, "cuGetProcAddress_v2: keep libcuda pointer for "
+                      "ABI-conflict family %s (cudaVersion=%d)", symbol, cudaVersion);
+      goto DONE;
+    }
+
     if (lib_control) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
@@ -1182,17 +1310,6 @@ CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     }
   }
 DONE:
-  return ret;
-}
-
-CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
-                             cuuint64_t flags, void *symbolStatus) {
-  CUresult ret;
-  ret = _cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, symbolStatus);
-  if (ret == CUDA_SUCCESS && strcmp(symbol,"cuGetProcAddress") == 0) {
-    // Compatible with CUDA 12
-    *pfn = _cuGetProcAddress_v2;
-  }
   return ret;
 }
 
@@ -1619,9 +1736,51 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
   has_limited_view = load_limited_memory_view(device, &host_index, &lock_fd,
                                               &used, &vmem_used);
   if (has_limited_view) {
-    size_t total_memory = g_vgpu_config->devices[host_index].total_memory;
-    *total = total_memory;
-    *free = (used + vmem_used) >= total_memory ? 0 : (total_memory - used - vmem_used);
+    size_t configured = g_vgpu_config->devices[host_index].total_memory;
+    size_t actual_total;
+
+    if (g_vgpu_config->devices[host_index].memory_oversold) {
+      /*
+       * Oversold UVA mode: configured total is intentionally LARGER than
+       * the physical slice (real_memory). prepare_memory_allocation routes
+       * the overflow allocations through cuMemAllocManaged. Reporting the
+       * configured total here is what makes the oversold capacity visible
+       * to the application; clamping at the real driver total would tell
+       * apps they have less memory than we are actually willing to give
+       * them via UVA, and the entire oversold design becomes inert.
+       */
+      actual_total = configured;
+    } else {
+      /*
+       * Normal slicing: ask real libcuda for its compute-usable total
+       * (physical minus driver-reserved page tables / framebuffer / ECC
+       * overhead - varies per driver/display/ECC, ~hundreds of MiB on
+       * consumer cards) and clamp the configured limit at that. Without
+       * this clamp, apps that read cuMemGetInfo as the truth and try to
+       * allocate up to it (vLLM, PyTorch caching allocator) hit OOM in
+       * the last few hundred MiB the driver was never going to hand out.
+       *
+       * If the real call somehow fails, degrade to the previous behaviour
+       * (report configured value, no clamp) rather than synthesising a
+       * potentially-wrong number.
+       */
+      size_t real_total = 0, real_free_unused = 0;
+      CUresult sub = CUDA_ERROR_NOT_FOUND;
+      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2,
+                               &real_free_unused, &real_total);
+      } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo,
+                               &real_free_unused, &real_total);
+      }
+      actual_total = (sub == CUDA_SUCCESS && real_total > 0
+                      && real_total < configured)
+                     ? real_total : configured;
+    }
+
+    *total = actual_total;
+    *free  = (used + vmem_used) >= actual_total
+             ? 0 : (actual_total - used - vmem_used);
     ret = CUDA_SUCCESS;
     goto DONE;
   }
