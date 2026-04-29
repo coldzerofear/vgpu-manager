@@ -41,7 +41,7 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 		IntValue: ptr.To[int64](100),
 	}
 	if numaNode, ok := d.GetNumaNode(); ok {
-		attr["numaNode"] = resourceapi.DeviceAttribute{
+		attr["numa"] = resourceapi.DeviceAttribute{
 			IntValue: ptr.To(int64(numaNode)),
 		}
 	}

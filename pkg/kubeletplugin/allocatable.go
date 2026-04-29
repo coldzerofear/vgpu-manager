@@ -159,7 +159,7 @@ func (d *AllocatableDevice) GetGPUPCIBusID() string {
 	case MigDynamicDeviceType:
 		return d.MigDynamic.Parent.pciBusID
 	case VfioDeviceType:
-		return d.Vfio.pciBusID
+		return d.Vfio.PciBusID
 	}
 	panic("unexpected type for AllocatableDevice")
 }
@@ -312,7 +312,7 @@ func (d *PerGPUAllocatableDevices) RemoveSiblingDevices(device *AllocatableDevic
 	case GpuDeviceType:
 		pciBusID = device.Gpu.pciBusID
 	case VfioDeviceType:
-		pciBusID = device.Vfio.pciBusID
+		pciBusID = device.Vfio.PciBusID
 	case MigStaticDeviceType:
 		// TODO: Implement once/if static MIG is supported in the context of
 		// PassthroughSupport.

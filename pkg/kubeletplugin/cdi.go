@@ -26,6 +26,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/sirupsen/logrus"
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 
 	nvdevice "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -52,6 +53,7 @@ type CDIHandler struct {
 	nvml              nvml.Interface
 	nvdevice          nvdevice.Interface
 	nvcdiClaim        nvcdi.Interface
+	vfiocdi           *vfioCDIHandler
 	driverRoot        string
 	devRoot           string
 	targetDriverRoot  string
@@ -239,17 +241,15 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 			}
 
 			if dev.Type() == VfioDeviceType {
-				// For now, just overwrite commonEdits (potentially multiple
-				// times with the same data). Can we also use
-				// `cdi.nvcdiDevice.GetCommonEdits()` here (wasn't done in the
-				// original vfio PR)? Also: assume that all devices in
-				// `preparedDevices` are vfio devices; a mixture isn't supported
-				// by the current business logic and leads to unexpected
-				// behavior.
-				commonEdits = GetVfioCommonCDIContainerEdits()
-				dspec = cdispec.Device{
-					ContainerEdits: *GetVfioCDIContainerEdits(dev.Vfio.Info).ContainerEdits,
+				castConfig, ok := group.ConfigState.Config.(*configapi.VfioDeviceConfig)
+				if !ok {
+					return fmt.Errorf("received invalid config type for the vfio device")
 				}
+				dspecsvfio, err := cdi.vfiocdi.GetDeviceSpecsByPCIBusID(dev.Vfio.Info.PciBusID, castConfig.Iommu.ShouldPreferIommuFD())
+				if err != nil {
+					return fmt.Errorf("failed to get CDI container edits for vfio device: %w", err)
+				}
+				dspec = dspecsvfio[0]
 			}
 
 			if dev.Type() == PreparedMigDeviceType {
@@ -283,11 +283,28 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 			// If there are edits passed as part of the device config state (set
 			// on the group), add them to the spec for this device.
 			if group.ConfigState.containerEdits != nil {
-				deviceEdits := &cdiapi.ContainerEdits{
-					ContainerEdits: &dspec.ContainerEdits,
+				var isVfioDeviceConfigType bool
+				if group.ConfigState.Config != nil {
+					// If claim requests vfio devices, we assume that all vfio
+					// device requests use the same config. We also assume that
+					// other device types are not requested in the same claim.
+					// With that, we expect to only encounter this codepath once
+					// and override the common edits that's initialized with nvcdi specs.
+					_, isVfioDeviceConfigType = group.ConfigState.Config.(*configapi.VfioDeviceConfig)
+					if isVfioDeviceConfigType {
+						commonEdits = group.ConfigState.containerEdits
+					}
 				}
-				deviceEdits = deviceEdits.Append(group.ConfigState.containerEdits)
-				dspec.ContainerEdits = *deviceEdits.ContainerEdits
+
+				// Only non-vfio devices require the group config state to be applied to
+				// the device cdi spec.
+				if !isVfioDeviceConfigType {
+					deviceEdits := &cdiapi.ContainerEdits{
+						ContainerEdits: &dspec.ContainerEdits,
+					}
+					deviceEdits = deviceEdits.Append(group.ConfigState.containerEdits)
+					dspec.ContainerEdits = *deviceEdits.ContainerEdits
+				}
 			}
 			if dev.containerEdits != nil {
 				deviceEdits := &cdiapi.ContainerEdits{

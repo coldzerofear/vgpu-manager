@@ -84,3 +84,10 @@ func WithLogger(logger *logrus.Logger) cdiOption {
 		c.logger = logger
 	}
 }
+
+// WithVfioCDIHandler provides an cdiOption to set the vfio CDI handler used by the 'cdi' interface.
+func WithVfioCDIHandler(vfioCDIHandler *vfioCDIHandler) cdiOption {
+	return func(c *CDIHandler) {
+		c.vfiocdi = vfioCDIHandler
+	}
+}

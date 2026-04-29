@@ -41,7 +41,7 @@ require (
 	k8s.io/kubernetes v1.36.0
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2
 	sigs.k8s.io/controller-runtime v0.23.2
-	sigs.k8s.io/dra-driver-nvidia-gpu v0.0.0-20260422185953-61fae924ba79
+	sigs.k8s.io/dra-driver-nvidia-gpu v0.0.0-20260428230924-14178eb0db1e
 	tags.cncf.io/container-device-interface v1.1.0
 	tags.cncf.io/container-device-interface/specs-go v1.1.0
 )
@@ -166,5 +166,5 @@ replace (
 	k8s.io/mount-utils => k8s.io/mount-utils v0.35.0
 	k8s.io/pod-security-admission => k8s.io/pod-security-admission v0.35.0
 	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.35.0
-//k8s.io/streaming => k8s.io/streaming v0.35.0
+	k8s.io/streaming => k8s.io/streaming v0.35.0
 )

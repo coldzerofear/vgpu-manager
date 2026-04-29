@@ -48,7 +48,8 @@ type OpaqueDeviceConfig struct {
 }
 
 type DeviceConfigState struct {
-	MpsControlDaemonID string `json:"mpsControlDaemonID"`
+	MpsControlDaemonID string              `json:"mpsControlDaemonID"`
+	Config             configapi.Interface `json:"-"` // don't serialize this.
 	containerEdits     *cdiapi.ContainerEdits
 }
 
@@ -99,7 +100,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		cdilogger.SetOutput(io.Discard)
 	}
 
-	cdi, err := NewCDIHandler(
+	cdiOptions := []cdiOption{
 		WithNvml(nvdevlib),
 		WithDeviceLib(nvdevlib),
 		WithDriverRoot(string(containerDriverRoot)),
@@ -108,7 +109,16 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		WithNVIDIACDIHookPath(config.Flags.NvidiaCDIHookPath),
 		WithCDIRoot(config.Flags.CdiRoot),
 		WithLogger(cdilogger),
-	)
+	}
+	var vfioCDIHandler *vfioCDIHandler
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		vfioCDIHandler, err = NewVfioCDIHandler()
+		if err != nil {
+			return nil, fmt.Errorf("unable to create vfio CDI handler: %w", err)
+		}
+		cdiOptions = append(cdiOptions, WithVfioCDIHandler(vfioCDIHandler))
+	}
+	cdi, err := NewCDIHandler(cdiOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create CDI handler: %w", err)
 	}
@@ -145,10 +155,9 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	//}
 
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioPciManager = NewVfioPciManager(string(containerDriverRoot), string(hostDriverRoot), nvdevlib, true /* nvidiaEnabled */)
-		// Validate passthrough support if feature gate is enabled.
-		if err := vfioPciManager.ValidatePassthroughSupport(); err != nil {
-			klog.Fatalf("Failed to validate passthrough support: %v", err)
+		vfioPciManager, err = NewVfioPciManager(string(containerDriverRoot), string(hostDriverRoot), nvdevlib, true /* nvidiaEnabled */)
+		if err != nil {
+			return nil, fmt.Errorf("unable to create vfio pci manager: %v", err)
 		}
 	}
 
@@ -1014,7 +1023,7 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
 	case VfioDeviceType:
-		gpu, _, err := s.nvdevlib.discoverGPUByPCIBusID(device.Vfio.pciBusID)
+		gpu, _, err := s.nvdevlib.discoverGPUByPCIBusID(device.Vfio.PciBusID)
 		if err != nil {
 			return fmt.Errorf("error discovering gpu by pci bus id: %w", err)
 		}
@@ -1118,11 +1127,23 @@ func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.S
 }
 
 func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configapi.VfioDeviceConfig, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
-	if !featuregates.Enabled(featuregates.PassthroughSupport) {
-		return nil, nil
+	configState := DeviceConfigState{
+		Config: config,
 	}
-	var configState DeviceConfigState
 
+	// Add common vfio device container edits to the group config. This is
+	// configuring vfio devices only for a specific group. Its assumed that
+	// there is only a single vfio device configuration applied in the
+	// resourceclaim for all its requests. This means there's only a single
+	// prepared devices group and these edits are never duplicated. This
+	// implicitly assumptes that other device types are not present in the
+	// resourceclaim allocation.
+	commonEdits, err := s.cdi.vfiocdi.GetCommonEdits(config.Iommu.ShouldEnableAPIDevice(), config.Iommu.ShouldPreferIommuFD())
+	if err != nil {
+		return nil, fmt.Errorf("error getting common vfio device container edits: %w", err)
+	}
+
+	configState.containerEdits = commonEdits
 	// Configure the vfio-pci devices.
 	for _, r := range results {
 		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)

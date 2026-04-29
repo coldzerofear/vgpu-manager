@@ -313,8 +313,8 @@ sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.34.0 h1:hSfpvjjTQXQY2
 sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.34.0/go.mod h1:Ve9uj1L+deCXFrPOk1LpFXqTg7LCFzFso6PA48q/XZw=
 sigs.k8s.io/controller-runtime v0.23.2 h1:Oh3FliXaA2CS1chpUXvjVNJtsvGZYUxQH8s7bvR7aXk=
 sigs.k8s.io/controller-runtime v0.23.2/go.mod h1:B6COOxKptp+YaUT5q4l6LqUJTRpizbgf9KSRNdQGns0=
-sigs.k8s.io/dra-driver-nvidia-gpu v0.0.0-20260422185953-61fae924ba79 h1:ewM0FI80ibiXRWt5ax7oBxzoPtvG7WyKQITiVsV58mU=
-sigs.k8s.io/dra-driver-nvidia-gpu v0.0.0-20260422185953-61fae924ba79/go.mod h1:2bc7hN1qD0uU1rwO3cdjr/b7ctLy9ZT2l/AjmHa/6Zg=
+sigs.k8s.io/dra-driver-nvidia-gpu v0.0.0-20260428230924-14178eb0db1e h1:KuBL9Y7gEQiuqdQMPtir2BnvD2s3XcLtMeMUQ14dHq0=
+sigs.k8s.io/dra-driver-nvidia-gpu v0.0.0-20260428230924-14178eb0db1e/go.mod h1:2bc7hN1qD0uU1rwO3cdjr/b7ctLy9ZT2l/AjmHa/6Zg=
 sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 h1:IpInykpT6ceI+QxKBbEflcR5EXP7sU1kvOlxwZh5txg=
 sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730/go.mod h1:mdzfpAEoE6DHQEN0uh9ZbOCuHbLK5wOm7dK4ctXE9Tg=
 sigs.k8s.io/randfill v1.0.0 h1:JfjMILfT8A6RbawdsK2JXGBR5AQVfd+9TbzrlneTyrU=

@@ -51,10 +51,12 @@ type VfioDeviceInfo struct {
 	index                  int
 	parent                 *GpuDeviceInfo
 	productName            string
-	pciBusID               string
+	PciBusID               string `json:"pciBusID"`
+	pciBusIDAttr           *deviceattribute.DeviceAttribute
 	pcieRootAttr           *deviceattribute.DeviceAttribute
 	numaNode               int
 	iommuGroup             int
+	iommuFDEnabled         bool
 	addressableMemoryBytes uint64
 }
 
@@ -225,7 +227,10 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 				StringValue: &d.productName,
 			},
 			pciBusIDAttrName: {
-				StringValue: &d.pciBusID,
+				StringValue: &d.PciBusID,
+			},
+			"iommuFDEnabled": {
+				BoolValue: ptr.To(d.iommuFDEnabled),
 			},
 		},
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
@@ -236,9 +241,9 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 	}
 
 	// TODO pciBusIDAttr
-	//if d.pciBusIDAttr != nil {
-	//	device.Attributes[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
-	//}
+	if d.pciBusIDAttr != nil {
+		device.Attributes[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
+	}
 	if d.pcieRootAttr != nil {
 		device.Attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}

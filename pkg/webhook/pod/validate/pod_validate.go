@@ -456,7 +456,7 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, requests []resource
 	//	case util.NUMATopology:
 	//		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 	//			Requests:       []string{}, // match all requests
-	//			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
+	//			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numa"),
 	//		})
 	//	}
 	//}
@@ -483,7 +483,7 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, requests []resource
 			case util.NUMATopology:
 				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 					Requests:       []string{request.Name},
-					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numaNode"),
+					MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numa"),
 				})
 			}
 		}
