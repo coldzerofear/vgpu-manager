@@ -49,6 +49,57 @@ vk_layer_GetInstanceProcAddr(VkInstance instance, const char *pName);
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_layer_GetDeviceProcAddr(VkDevice device, const char *pName);
 
+/* Cached "first successful" next-layer GIPA / GDPA — used as a fallback
+ * when GIPA / GDPA is invoked with a handle we have not registered.
+ *
+ * Why this cache exists: NVIDIA driver and upper-layer wrappers (e.g.,
+ * NVIDIA Carbonite under Isaac Sim — see HAMi PR #182's repro) can probe
+ * our GIPA / GDPA with VkInstance / VkDevice handles that never appeared
+ * in our register call (because an upper layer wrapped them, or because
+ * the probe arrives before our register completes). The original code
+ * returned NULL in that case; the caller dereferences the result while
+ * assembling its dispatch table and SegFaults. Forwarding via the cached
+ * next-layer GIPA / GDPA turns the crash into a benign chain walk.
+ *
+ * Correctness rationale: in any single loader instance, the chain that
+ * follows our layer is invariant across VkInstance / VkDevice creations,
+ * so the next-gipa captured during the first successful CreateInstance
+ * is a valid forwarder for any later instance's queries. The cache is
+ * write-once: only the first successful create publishes a value, via a
+ * compare-and-swap so a concurrent second create cannot clobber it.
+ *
+ * Thread safety: the publishing CAS uses __atomic with seq_cst; the
+ * read-side load on the GIPA / GDPA fall-through path uses atomic load.
+ * No pthread mutex involvement — this path runs on every probe, must
+ * stay lock-free. */
+static PFN_vkGetInstanceProcAddr g_first_next_gipa = NULL;
+static PFN_vkGetDeviceProcAddr   g_first_next_gdpa = NULL;
+
+static inline void cache_first_next_gipa(PFN_vkGetInstanceProcAddr p) {
+  if (p == NULL) return;
+  PFN_vkGetInstanceProcAddr expected = NULL;
+  /* Write-once. Subsequent CreateInstance calls are no-ops here. */
+  __atomic_compare_exchange_n(&g_first_next_gipa, &expected, p,
+                              /*weak=*/0,
+                              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+static inline void cache_first_next_gdpa(PFN_vkGetDeviceProcAddr p) {
+  if (p == NULL) return;
+  PFN_vkGetDeviceProcAddr expected = NULL;
+  __atomic_compare_exchange_n(&g_first_next_gdpa, &expected, p,
+                              /*weak=*/0,
+                              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+static inline PFN_vkGetInstanceProcAddr load_first_next_gipa(void) {
+  return __atomic_load_n(&g_first_next_gipa, __ATOMIC_SEQ_CST);
+}
+
+static inline PFN_vkGetDeviceProcAddr load_first_next_gdpa(void) {
+  return __atomic_load_n(&g_first_next_gdpa, __ATOMIC_SEQ_CST);
+}
+
 /* ------------------------------------------------------------------ */
 /* Chain helpers                                                       */
 /* ------------------------------------------------------------------ */
@@ -165,6 +216,13 @@ vk_layer_CreateInstance(const VkInstanceCreateInfo  *pCreateInfo,
   }
 
   vgpu_vk_register_instance_dispatch(&entry);
+
+  /* Publish the next-layer GIPA into the unregistered-handle fallback
+   * cache. Only the first successful CreateInstance wins (CAS). Done
+   * AFTER register so that any concurrent probe with this handle is
+   * already covered by the dispatch lookup; the cache only matters for
+   * handles that never reach our register at all. */
+  cache_first_next_gipa(next_gipa);
 
   /* Eagerly populate the VkPhysicalDevice -> host_index cache for every
    * physdev this instance can see. Failures here are logged but never
@@ -297,6 +355,11 @@ vk_layer_CreateDevice(VkPhysicalDevice              physicalDevice,
   }
 
   vgpu_vk_register_device_dispatch(&entry);
+
+  /* Publish the next-layer GDPA into the unregistered-handle fallback
+   * cache. Same write-once semantics as the GIPA cache in
+   * vk_layer_CreateInstance — see commentary near g_first_next_gipa. */
+  cache_first_next_gdpa(next_gdpa);
 
   return VK_SUCCESS;
 }
@@ -469,6 +532,16 @@ vk_layer_GetInstanceProcAddr(VkInstance instance, const char *pName) {
     if (d != NULL && d->pfn_GetInstanceProcAddr != NULL) {
       return d->pfn_GetInstanceProcAddr(instance, pName);
     }
+    /* Unregistered VkInstance: fall back to the GIPA captured at the
+     * first successful CreateInstance. This handles upper-layer-wrapped
+     * handles and pre-register probes that would otherwise SegFault the
+     * caller (HAMi PR #182 Carbonite repro). The cache is invariant
+     * within a single loader instance, so it is a valid forwarder for
+     * any handle's queries. */
+    PFN_vkGetInstanceProcAddr cached = load_first_next_gipa();
+    if (cached != NULL) {
+      return cached(instance, pName);
+    }
   }
   return NULL;
 }
@@ -514,6 +587,12 @@ vk_layer_GetDeviceProcAddr(VkDevice device, const char *pName) {
     vgpu_vk_device_dispatch_t *d = vgpu_vk_get_device_dispatch(device);
     if (d != NULL && d->pfn_GetDeviceProcAddr != NULL) {
       return d->pfn_GetDeviceProcAddr(device, pName);
+    }
+    /* Unregistered VkDevice: same fallback rationale as the GIPA tail
+     * above. See g_first_next_gipa commentary. */
+    PFN_vkGetDeviceProcAddr cached = load_first_next_gdpa();
+    if (cached != NULL) {
+      return cached(device, pName);
     }
   }
   return NULL;

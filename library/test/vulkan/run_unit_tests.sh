@@ -49,6 +49,7 @@ TESTS=(
   test_alloc_budget
   test_alloc_import
   test_submit_throttle
+  test_layer_fallback
   test_layer_init
 )
 

@@ -112,6 +112,21 @@ vgpu_vk_add_test(test_submit_throttle
     ${VK_LAYER_QUEUE_SRC}
     ${VK_LAYER_HOOKS_SUBMIT_SRC})
 
+# 9. Unregistered-handle GIPA/GDPA fallback (HAMi PR #182 Carbonite repro).
+#    Direct-link test that drives vk_layer_CreateInstance / CreateDevice
+#    through a fully mocked next-layer chain to seed the cache, then
+#    probes the layer's GIPA / GDPA with an unregistered handle and
+#    asserts the call forwards via the cached next-gipa/gdpa instead of
+#    returning NULL. Pulls in layer.c plus its full dependency chain.
+vgpu_vk_add_test(test_layer_fallback
+    ${CMAKE_SOURCE_DIR}/src/vulkan/layer.c
+    ${VK_LAYER_DISPATCH_SRC}
+    ${VK_LAYER_PHYSDEV_SRC}
+    ${VK_LAYER_QUEUE_SRC}
+    ${VK_LAYER_HOOKS_MEMORY_SRC}
+    ${VK_LAYER_HOOKS_ALLOC_SRC}
+    ${VK_LAYER_HOOKS_SUBMIT_SRC})
+
 # ---- Stage runner script into the test build dir -------------------
 
 add_custom_target(vgpu_vk_copy_runner ALL
