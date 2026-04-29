@@ -27,6 +27,7 @@
 #include "include/vulkan/physdev_index.h"
 #include "include/vulkan/queue_index.h"
 #include "include/vulkan/hooks_submit.h"
+#include "include/vulkan/trace.h"
 
 /* Per-submit token claim. Vulkan submits are opaque from the layer's
  * perspective (cmdbuf/dispatch counts and per-thread workload buried
@@ -90,10 +91,14 @@ vgpu_vk_QueueSubmit(VkQueue              queue,
   if (d == NULL || d->pfn_QueueSubmit == NULL) {
     /* Match hooks_alloc.c's contract: an unroutable call surfaces a
      * canonical Vulkan failure rather than crashing the app. */
+    VGPU_VK_TRACE("vkQueueSubmit: queue=%p unroutable -> INIT_FAILED",
+                  (void *)queue);
     return VK_ERROR_INITIALIZATION_FAILED;
   }
 
   int host_index = vgpu_vk_physdev_to_host_index(d->physical_device);
+  VGPU_VK_TRACE("vkQueueSubmit: queue=%p host_index=%d submitCount=%u",
+                (void *)queue, host_index, submitCount);
   vgpu_rate_limit_by_host_index(VGPU_VK_SUBMIT_TOKEN_COST, host_index);
 
   return d->pfn_QueueSubmit(queue, submitCount, pSubmits, fence);
@@ -109,10 +114,14 @@ vgpu_vk_QueueSubmit2(VkQueue              queue,
   vgpu_vk_device_dispatch_t *d = (dev != VK_NULL_HANDLE)
                               ? vgpu_vk_get_device_dispatch(dev) : NULL;
   if (d == NULL || d->pfn_QueueSubmit2 == NULL) {
+    VGPU_VK_TRACE("vkQueueSubmit2: queue=%p unroutable -> INIT_FAILED",
+                  (void *)queue);
     return VK_ERROR_INITIALIZATION_FAILED;
   }
 
   int host_index = vgpu_vk_physdev_to_host_index(d->physical_device);
+  VGPU_VK_TRACE("vkQueueSubmit2: queue=%p host_index=%d submitCount=%u",
+                (void *)queue, host_index, submitCount);
   vgpu_rate_limit_by_host_index(VGPU_VK_SUBMIT_TOKEN_COST, host_index);
 
   return d->pfn_QueueSubmit2(queue, submitCount, pSubmits, fence);

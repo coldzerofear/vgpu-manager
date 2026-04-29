@@ -33,6 +33,7 @@
 #include "include/vulkan/hooks_memory.h"
 #include "include/vulkan/hooks_alloc.h"
 #include "include/vulkan/hooks_submit.h"
+#include "include/vulkan/trace.h"
 
 /* The layer name advertised in our implicit-layer manifest at
  * library/deploy/vgpu_manager_implicit_layer.json. Used by the
@@ -224,6 +225,9 @@ vk_layer_CreateInstance(const VkInstanceCreateInfo  *pCreateInfo,
    * handles that never reach our register at all. */
   cache_first_next_gipa(next_gipa);
 
+  VGPU_VK_TRACE("vk_layer_CreateInstance: registered instance=%p next_gipa=%p",
+                (void *)*pInstance, (void *)next_gipa);
+
   /* Eagerly populate the VkPhysicalDevice -> host_index cache for every
    * physdev this instance can see. Failures here are logged but never
    * propagate - vkCreateInstance must not fail just because we could
@@ -365,6 +369,9 @@ vk_layer_CreateDevice(VkPhysicalDevice              physicalDevice,
    * cache. Same write-once semantics as the GIPA cache in
    * vk_layer_CreateInstance — see commentary near g_first_next_gipa. */
   cache_first_next_gdpa(next_gdpa);
+
+  VGPU_VK_TRACE("vk_layer_CreateDevice: registered device=%p physdev=%p next_gdpa=%p",
+                (void *)*pDevice, (void *)physicalDevice, (void *)next_gdpa);
 
   return VK_SUCCESS;
 }
@@ -545,8 +552,12 @@ vk_layer_GetInstanceProcAddr(VkInstance instance, const char *pName) {
      * any handle's queries. */
     PFN_vkGetInstanceProcAddr cached = load_first_next_gipa();
     if (cached != NULL) {
+      VGPU_VK_TRACE("GIPA fallback: instance=%p pName=%s -> cached_gipa=%p",
+                    (void *)instance, pName, (void *)cached);
       return cached(instance, pName);
     }
+    VGPU_VK_TRACE("GIPA: instance=%p pName=%s NOT registered AND no cache -> NULL",
+                  (void *)instance, pName);
   }
   return NULL;
 }
@@ -603,8 +614,12 @@ vk_layer_GetDeviceProcAddr(VkDevice device, const char *pName) {
      * above. See g_first_next_gipa commentary. */
     PFN_vkGetDeviceProcAddr cached = load_first_next_gdpa();
     if (cached != NULL) {
+      VGPU_VK_TRACE("GDPA fallback: device=%p pName=%s -> cached_gdpa=%p",
+                    (void *)device, pName, (void *)cached);
       return cached(device, pName);
     }
+    VGPU_VK_TRACE("GDPA: device=%p pName=%s NOT registered AND no cache -> NULL",
+                  (void *)device, pName);
   }
   return NULL;
 }

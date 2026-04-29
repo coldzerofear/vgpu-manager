@@ -25,6 +25,7 @@
 #include "include/vulkan/dispatch.h"
 #include "include/vulkan/physdev_index.h"
 #include "include/vulkan/hooks_memory.h"
+#include "include/vulkan/trace.h"
 
 extern resource_data_t *g_vgpu_config;
 
@@ -70,6 +71,8 @@ static void clamp_device_local_heaps(VkPhysicalDeviceMemoryProperties *props,
       continue;
     }
     if (props->memoryHeaps[i].size > cap) {
+      VGPU_VK_TRACE("heap clamp: heap[%u] %llu -> %zu (DEVICE_LOCAL)",
+                    i, (unsigned long long)props->memoryHeaps[i].size, cap);
       props->memoryHeaps[i].size = (VkDeviceSize)cap;
     }
   }

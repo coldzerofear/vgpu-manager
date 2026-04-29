@@ -31,6 +31,7 @@
 #include "include/hook.h"   /* LOGGER, unlock_gpu_device */
 
 #include "include/vulkan/dispatch.h"
+#include "include/vulkan/trace.h"
 #include "include/vulkan/physdev_index.h"
 #include "include/vulkan/hooks_alloc.h"
 
@@ -127,15 +128,23 @@ vgpu_vk_AllocateMemory(VkDevice                     device,
     /* No dispatch entry / next-layer pfn missing — we cannot forward.
      * Return the same error a Vulkan loader would surface for an
      * unroutable call instead of crashing. */
+    VGPU_VK_TRACE("vkAllocateMemory: device=%p dispatch missing -> INIT_FAILED",
+                  (void *)device);
     return VK_ERROR_INITIALIZATION_FAILED;
   }
   if (pAllocateInfo == NULL || pMemory == NULL) {
     /* Spec says these must be non-NULL; let the next layer surface the
      * canonical validation error. */
+    VGPU_VK_TRACE("vkAllocateMemory: device=%p NULL pAllocateInfo/pMemory -> forward",
+                  (void *)device);
     return d->pfn_AllocateMemory(device, pAllocateInfo, pAllocator, pMemory);
   }
 
   int host_index = vgpu_vk_physdev_to_host_index(d->physical_device);
+  VGPU_VK_TRACE("vkAllocateMemory: device=%p size=%zu host_index=%d",
+                (void *)device,
+                (size_t)pAllocateInfo->allocationSize,
+                host_index);
 
   /* Import path short-circuit. Logged at DETAIL so operators can
    * correlate "Vulkan alloc accepted with no budget delta" against
@@ -145,6 +154,7 @@ vgpu_vk_AllocateMemory(VkDevice                     device,
            "vkAllocateMemory: import path detected, skipping budget "
            "(host_index=%d size=%zu)",
            host_index, (size_t)pAllocateInfo->allocationSize);
+    VGPU_VK_TRACE("vkAllocateMemory: import path detected, SKIP budget");
     return d->pfn_AllocateMemory(device, pAllocateInfo, pAllocator, pMemory);
   }
 
@@ -162,6 +172,8 @@ vgpu_vk_AllocateMemory(VkDevice                     device,
            "vkAllocateMemory: OOM at host_index=%d size=%zu, "
            "returning VK_ERROR_OUT_OF_DEVICE_MEMORY",
            host_index, (size_t)pAllocateInfo->allocationSize);
+    VGPU_VK_TRACE("vkAllocateMemory: OOM host_index=%d size=%zu -> VK_ERROR_OUT_OF_DEVICE_MEMORY",
+                  host_index, (size_t)pAllocateInfo->allocationSize);
     if (lock_fd >= 0) unlock_gpu_device(lock_fd);
     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
   }
@@ -171,6 +183,7 @@ vgpu_vk_AllocateMemory(VkDevice                     device,
    * forward as if it were a plain GPU grant. */
 
   VkResult r = d->pfn_AllocateMemory(device, pAllocateInfo, pAllocator, pMemory);
+  VGPU_VK_TRACE("vkAllocateMemory: forward result=%d", (int)r);
   if (lock_fd >= 0) unlock_gpu_device(lock_fd);
   return r;
 }
