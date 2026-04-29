@@ -1852,24 +1852,54 @@ DONE:
 CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
                     const CUmemAllocationProp *prop, unsigned long long flags) {
   CUresult ret;
-  CUdevice device;
   int lock_fd = -1;
   vgpu_path_t path;
-  /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
+
+  /* NULL-arg fast path: same rationale as _cuMemAlloc above (forward
+   * to driver so the caller sees its canonical INVALID_VALUE instead
+   * of crashing inside our hook). */
   if (unlikely(handle == NULL)) {
     return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
   }
-  /* Fall back to prop->location.id when cuCtxGetDevice fails (e.g.,
-   * driver not yet initialized for this thread). For non-DEVICE-typed
-   * allocations there is no usable target device id at all, so we
-   * have no choice but to bail. Merged from main commit 43a7bae. */
-  int locationDev = (prop != NULL && prop->location.type == CU_MEM_LOCATION_TYPE_DEVICE);
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
-  if (ret != CUDA_SUCCESS && locationDev) {
-    device = prop->location.id;
-  } else if (ret != CUDA_SUCCESS) {
-    goto DONE;
+
+  /* Skip budget bookkeeping entirely for non-DEVICE allocations.
+   *
+   * cuMemCreate's prop->location.type can be:
+   *   - CU_MEM_LOCATION_TYPE_DEVICE          -> GPU VRAM, count toward budget
+   *   - CU_MEM_LOCATION_TYPE_HOST            -> pinned host RAM
+   *   - CU_MEM_LOCATION_TYPE_HOST_NUMA       -> NUMA-pinned host RAM
+   *   - CU_MEM_LOCATION_TYPE_HOST_NUMA_CURRENT -> ditto, current NUMA node
+   *
+   * Host-typed allocations live in pinned host RAM and are governed
+   * by the K8s pod memory cgroup, not by our GPU-VRAM budget. The
+   * pre-merge code (and main commit 43a7bae, and HAMi PR #182's
+   * pre-#188 code) ran prepare_memory_allocation for these, which
+   * over-charged the device budget and risked falsely OOM'ing later
+   * true-VRAM allocations. Mirrors HAMi PR #188's `do_oom_check`
+   * gating but applied at the entry instead of around the post-
+   * success tracking call (vgpu does pre-alloc budget checks; HAMi
+   * does post-alloc tracking — same outcome, different shape).
+   *
+   * NULL prop is also forwarded straight to the driver so the
+   * caller sees the canonical INVALID_VALUE error instead of us
+   * silently treating it as DEVICE. */
+  if (prop == NULL || prop->location.type != CU_MEM_LOCATION_TYPE_DEVICE) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
   }
+
+  /* Use prop->location.id (the VMM target device) rather than the
+   * current context's device. They differ in cross-device VMM on
+   * multi-GPU pods: the app may hold a context on device A while
+   * explicitly creating VMM allocations on device B. Tracking
+   * against context-device would charge the wrong host_index's
+   * budget. CUDA defines location.id as the device ordinal for
+   * DEVICE-typed allocations, identical to a CUdevice value, so
+   * the cast is safe. We do not call cuCtxGetDevice here at all —
+   * cross-device VMM is the correctness target, and avoiding the
+   * call also sidesteps the cuCtxGetDevice-failure SegFault path
+   * that main commit 43a7bae had to guard against. */
+  CUdevice device = (CUdevice)prop->location.id;
+
   int host_index = -1;
   size_t request_size = size;
   path = prepare_memory_allocation(device, request_size, VGPU_BUDGET_KIND_VIRTUAL, 0, &host_index, &lock_fd);
