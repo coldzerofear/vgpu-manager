@@ -67,7 +67,17 @@ typedef struct {
   PFN_vkGetDeviceQueue      pfn_GetDeviceQueue;
   PFN_vkGetDeviceQueue2     pfn_GetDeviceQueue2;
   PFN_vkQueueSubmit         pfn_QueueSubmit;
+#if defined(VK_VERSION_1_3)
+  /* Vulkan 1.3 core. The PFN_vkQueueSubmit2 typedef itself is defined
+   * only when the Vulkan-Headers in the build environment expose 1.3 —
+   * older Vulkan-Headers (e.g. Ubuntu 20.04 ships 1.2) do not declare
+   * the type and would fail to compile this struct. The
+   * VK_KHR_synchronization2 path (vkQueueSubmit2KHR, same signature)
+   * also routes through this slot at runtime when 1.3 is available;
+   * builds without 1.3 headers degrade gracefully to QueueSubmit-only
+   * (the KHR extension is unreachable without the v1.3 typedef). */
   PFN_vkQueueSubmit2        pfn_QueueSubmit2;
+#endif
 } vgpu_vk_device_dispatch_t;
 
 /* Lookup. Returns NULL if not registered. Result pointer is stable for

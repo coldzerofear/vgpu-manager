@@ -99,6 +99,7 @@ vgpu_vk_QueueSubmit(VkQueue              queue,
   return d->pfn_QueueSubmit(queue, submitCount, pSubmits, fence);
 }
 
+#if defined(VK_VERSION_1_3)
 VKAPI_ATTR VkResult VKAPI_CALL
 vgpu_vk_QueueSubmit2(VkQueue              queue,
                      uint32_t             submitCount,
@@ -116,4 +117,5 @@ vgpu_vk_QueueSubmit2(VkQueue              queue,
 
   return d->pfn_QueueSubmit2(queue, submitCount, pSubmits, fence);
 }
+#endif
 

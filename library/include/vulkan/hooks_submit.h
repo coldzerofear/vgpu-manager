@@ -49,14 +49,21 @@ vgpu_vk_QueueSubmit(VkQueue              queue,
                     const VkSubmitInfo  *pSubmits,
                     VkFence              fence);
 
+#if defined(VK_VERSION_1_3)
 /* Used for both vkQueueSubmit2 (Vulkan 1.3 core) and
  * vkQueueSubmit2KHR (VK_KHR_synchronization2 alias). Identical
- * signatures, identical semantics. */
+ * signatures, identical semantics. Compiled only when the
+ * Vulkan-Headers in the build environment expose 1.3 — older headers
+ * (e.g. Ubuntu 20.04 ships Vulkan 1.2) do not declare VkSubmitInfo2 /
+ * PFN_vkQueueSubmit2 and the layer falls back to QueueSubmit-only
+ * (the synchronization2 KHR extension is unreachable without the 1.3
+ * typedef). */
 VGPU_VK_INTERNAL VKAPI_ATTR VkResult VKAPI_CALL
 vgpu_vk_QueueSubmit2(VkQueue              queue,
                      uint32_t             submitCount,
                      const VkSubmitInfo2 *pSubmits,
                      VkFence              fence);
+#endif
 
 #ifdef __cplusplus
 }

@@ -347,12 +347,17 @@ vk_layer_CreateDevice(VkPhysicalDevice              physicalDevice,
       (PFN_vkGetDeviceQueue2)next_gdpa(*pDevice, "vkGetDeviceQueue2");
   entry.pfn_QueueSubmit =
       (PFN_vkQueueSubmit)next_gdpa(*pDevice, "vkQueueSubmit");
+#if defined(VK_VERSION_1_3)
+  /* Vulkan 1.3 core entry. Compiled out when the build's Vulkan-Headers
+   * predate 1.3 (no PFN_vkQueueSubmit2 typedef). The KHR alias
+   * fallback below is also gated because it shares the 1.3 PFN type. */
   entry.pfn_QueueSubmit2 =
       (PFN_vkQueueSubmit2)next_gdpa(*pDevice, "vkQueueSubmit2");
   if (entry.pfn_QueueSubmit2 == NULL) {
     entry.pfn_QueueSubmit2 =
         (PFN_vkQueueSubmit2)next_gdpa(*pDevice, "vkQueueSubmit2KHR");
   }
+#endif
 
   vgpu_vk_register_device_dispatch(&entry);
 
@@ -578,10 +583,16 @@ vk_layer_GetDeviceProcAddr(VkDevice device, const char *pName) {
   if (strcmp(pName, "vkQueueSubmit") == 0) {
     return (PFN_vkVoidFunction)vgpu_vk_QueueSubmit;
   }
+#if defined(VK_VERSION_1_3)
+  /* Same gate as the dispatch slot / hook function definition: the
+   * 1.3 core entry and its KHR alias share PFN_vkQueueSubmit2, which
+   * is undeclared on Vulkan-Headers <1.3. Without 1.3 headers the
+   * loader simply falls through to the next layer for these names. */
   if (strcmp(pName, "vkQueueSubmit2") == 0 ||
       strcmp(pName, "vkQueueSubmit2KHR") == 0) {
     return (PFN_vkVoidFunction)vgpu_vk_QueueSubmit2;
   }
+#endif
 
   if (device != VK_NULL_HANDLE) {
     vgpu_vk_device_dispatch_t *d = vgpu_vk_get_device_dispatch(device);
