@@ -132,6 +132,22 @@ if(VGPU_RUN_HOOK_CHECKS)
                 $<TARGET_FILE:vgpu-control>
         COMMENT "[vgpu] check ABI-conflict symbol exports in libvgpu-control.so"
         VERBATIM)
+
+    # Pre-build: forbid __attribute__((constructor)) / ((destructor)) in
+    # library/src/. .init_array entries run at .so load time inside every
+    # LD_PRELOAD'd process — concurrent with NVIDIA ICD bringup — and are
+    # the prime root-cause candidate for the unsolved Step C regression
+    # documented in HAMi-core PR #182. We rely on (no constructors + no
+    # NVIDIA DT_NEEDED + narrow .dynsym + manifest gating) to neutralize
+    # that risk class without splitting the .so. This guard preserves
+    # the no-constructors invariant.
+    add_custom_target(vgpu_check_no_constructors ALL
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/hack/check_no_constructors.sh
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "[vgpu] check no constructor/destructor attributes in src/"
+        VERBATIM)
+    add_dependencies(vgpu-control vgpu_check_no_constructors)
 endif()
 
 # ---------------------------------------------------------------------------
