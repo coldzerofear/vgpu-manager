@@ -174,6 +174,16 @@ func (d AllocatableDevices) GetGPUs() []*AllocatableDevice {
 	return devices
 }
 
+func (d AllocatableDevices) GetVGPUs() []*AllocatableDevice {
+	var devices []*AllocatableDevice
+	for _, device := range d {
+		if device.Type() == VGpuDeviceType {
+			devices = append(devices, device)
+		}
+	}
+	return devices
+}
+
 func (d AllocatableDevices) GetVfioDevices() []*AllocatableDevice {
 	var devices []*AllocatableDevice
 	for _, device := range d {

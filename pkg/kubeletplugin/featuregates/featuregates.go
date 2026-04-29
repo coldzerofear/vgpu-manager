@@ -22,12 +22,13 @@ import (
 	"sync"
 	_ "unsafe"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/component-base/featuregate"
 	logsapi "k8s.io/component-base/logs/api/v1"
-	//"github.com/NVIDIA/k8s-dra-driver-gpu/internal/info"
+	//"sigs.k8s.io/dra-driver-nvidia-gpu/internal/info"
 )
 
 const (
@@ -51,6 +52,8 @@ const (
 
 	// DynamicMIG Enable dynamic MIG device management.
 	DynamicMIG featuregate.Feature = "DynamicMIG"
+
+	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
 
 	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
 	// storing daemon info directly in ComputeDomainStatus.Nodes.
@@ -113,6 +116,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(25, 12),
 		},
 	},
+	SharedSMUtilizationWatcher: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(25, 12),
+		},
+	},
 	//ComputeDomainCliques: {
 	//	{
 	//		Default:    true,
@@ -131,7 +141,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 
 var (
 	featureGatesOnce sync.Once
-	//go:linkname featureGates github.com/NVIDIA/k8s-dra-driver-gpu/pkg/featuregates.featureGates
+	//go:linkname featureGates sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates.featureGates
 	featureGates featuregate.MutableVersionedFeatureGate
 )
 
@@ -201,6 +211,9 @@ func ValidateFeatureGates() error {
 	//if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {
 	//	return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainCliques, IMEXDaemonsWithDNSNames)
 	//}
+	if Enabled(SharedSMUtilizationWatcher) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", SharedSMUtilizationWatcher, VGPUSupport)
+	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, PassthroughSupport)

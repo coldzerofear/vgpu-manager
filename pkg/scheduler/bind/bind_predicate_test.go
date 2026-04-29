@@ -23,6 +23,8 @@ func Test_BindPredicate(t *testing.T) {
 	broadcaster := record.NewBroadcaster()
 	broadcaster.StartRecordingToSink(&typedv1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
+	defer broadcaster.Shutdown()
+
 	bindPredicate, err := New(k8sClient, recorder, true)
 	if err != nil {
 		t.Fatalf("failed to create new bindPredicate due to %v", err)

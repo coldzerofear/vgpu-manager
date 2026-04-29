@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	pkgflags "github.com/NVIDIA/k8s-dra-driver-gpu/pkg/flags"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
 type Flags struct {

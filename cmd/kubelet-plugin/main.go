@@ -24,7 +24,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	pkgflags "github.com/NVIDIA/k8s-dra-driver-gpu/pkg/flags"
 	pkgkubeletplugin "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
@@ -33,6 +32,7 @@ import (
 	"k8s.io/component-base/logs"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
+	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
 func main() {

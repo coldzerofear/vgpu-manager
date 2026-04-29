@@ -263,8 +263,6 @@ typedef enum VGPU_COMPATIBILITY_MODE_enum {
   CLIENT_COMPATIBILITY_MODE      = 200
 } VGPU_COMPATIBILITY_MODE;
 
-extern void* _dl_sym(void*, const char*, void*);
-
 typedef void (*atomic_fn_ptr)(int, void *);
 
 typedef void* (*fp_dlsym)(void*, const char*);
@@ -317,7 +315,7 @@ static inline int get_logger_print_level(void) {
 #define LOGGER(level, format, ...)                                  \
   ({                                                                \
     if (LOGGER_SHOULD_PRINT(level)) {                               \
-      fprintf(stderr, "[vGPU %s(%d|%" PRIuPTR "|%s|%d)]: " format "\n", \
+      fprintf(stderr, "[vGPU %s(%d|%" PRIuPTR "|%s:%d)]: " format "\n", \
               _level_names[level], getpid(),                        \
               (uintptr_t)pthread_self(),                            \
               basename(__FILE__), __LINE__, ##__VA_ARGS__);         \

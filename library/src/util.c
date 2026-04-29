@@ -22,6 +22,7 @@
 #define MANAGER_VISIBLE_DEVICES_ENV (MANAGER_VISIBLE_DEVICE_ENV "S")
 //#define NVIDIA_VISIBLE_DEVICES_ENV "NVIDIA_VISIBLE_DEVICES"
 #define MANAGER_COMPATIBILITY_MODE_ENV "MANAGER_COMPATIBILITY_MODE"
+#define EXTERNAL_SM_WATCHER_ENABLED_ENV "EXTERNAL_SM_WATCHER_ENABLED"
 
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
@@ -155,12 +156,7 @@ int get_device_uuids(char *uuids, size_t uuids_size) {
   return 0;
 }
 
-int get_vmem_node_enabled(int *i) {
-  char *str = NULL;
-  str = getenv(VMEM_NODE_ENABLED_ENV);
-  if (!str) {
-    return -1;
-  }
+void value_enabled(char *str, int *i) {
   if (strcmp(str, "true") == 0 ||
       strcmp(str, "TRUE") == 0 ||
       strcmp(str,"1") == 0) {
@@ -168,6 +164,15 @@ int get_vmem_node_enabled(int *i) {
   } else {
     *i = 0;
   }
+}
+
+int get_vmem_node_enabled(int *i) {
+  char *str = NULL;
+  str = getenv(VMEM_NODE_ENABLED_ENV);
+  if (!str) {
+    return -1;
+  }
+  value_enabled(str, i);
   return 0;
 }
 
@@ -181,13 +186,16 @@ int get_mem_oversold(uint32_t index, int *i) {
       return -1;
     }
   }
-  if (strcmp(str, "true") == 0 ||
-      strcmp(str, "TRUE") == 0 ||
-      strcmp(str,"1") == 0) {
-    *i = 1;
-  } else {
-    *i = 0;
+  value_enabled(str, i);
+  return 0;
+}
+
+int get_sm_watcher_enabled(int *i) {
+  char *str = getenv(EXTERNAL_SM_WATCHER_ENABLED_ENV);
+  if (!str) {
+    return -1;
   }
+  value_enabled(str, i);
   return 0;
 }
 

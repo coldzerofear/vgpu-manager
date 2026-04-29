@@ -10,8 +10,8 @@ import (
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"github.com/opencontainers/runc/libcontainer/cgroups"
-	cgroupsystemd "github.com/opencontainers/runc/libcontainer/cgroups/systemd"
+	"github.com/opencontainers/cgroups"
+	"github.com/opencontainers/cgroups/systemd"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -316,7 +316,7 @@ func (cgroupName CgroupName) ToSystemd() string {
 		part = escapeSystemdCgroupName(part)
 		newparts = append(newparts, part)
 	}
-	result, err := cgroupsystemd.ExpandSlice(strings.Join(newparts, "-") + systemdSuffix)
+	result, err := systemd.ExpandSlice(strings.Join(newparts, "-") + systemdSuffix)
 	if err != nil {
 		// Should never happen...
 		panic(fmt.Errorf("error converting cgroup name [%v] to systemd format: %v", cgroupName, err))

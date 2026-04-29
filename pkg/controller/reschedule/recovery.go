@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -20,12 +20,12 @@ import (
 
 type recoveryController struct {
 	client             client.Client
-	recorder           record.EventRecorder
+	recorder           events.EventRecorder
 	queue              workqueue.TypedRateLimitingInterface[*corev1.Pod]
 	recoveryCheckpoint *recoveryCheckpoint
 }
 
-func newRecoveryController(client client.Client, recorder record.EventRecorder) (*recoveryController, error) {
+func newRecoveryController(client client.Client, recorder events.EventRecorder) (*recoveryController, error) {
 	checkpoint, err := newRecoveryCheckpoint()
 	if err != nil {
 		return nil, err
@@ -157,7 +157,7 @@ func (r *recoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod
 		newPod.Status = corev1.PodStatus{}
 		// Create a recovered pod
 		if err = r.client.Create(ctx, newPod, &client.CreateOptions{}); err == nil {
-			r.recorder.Event(newPod, corev1.EventTypeNormal, "Recovery", "Pod recovery successful")
+			r.recorder.Eventf(newPod, nil, corev1.EventTypeNormal, "Recovery", "Recovered", "Pod has been successfully recovered")
 		}
 		if errors.IsAlreadyExists(err) {
 			err = nil

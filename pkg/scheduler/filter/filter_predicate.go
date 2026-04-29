@@ -79,7 +79,6 @@ func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactor
 			nodeInformer.HasSynced,
 		)
 	}
-	podInformer.HasSynced()
 	return &gpuFilter{
 		locker:      locker,
 		kubeClient:  kubeClient,

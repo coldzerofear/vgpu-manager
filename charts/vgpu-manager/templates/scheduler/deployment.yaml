@@ -40,7 +40,16 @@ spec:
       tolerations: {{ toYaml .Values.scheduler.tolerations | nindent 8 }}
       {{- end }}
       affinity:
+        nodeAffinity:
+          # Pod should run as much as possible on control plane nodes.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
         podAntiAffinity:
+          # When there are multiple replicas, try to disperse pods on different nodes as much as possible.
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               podAffinityTerm:

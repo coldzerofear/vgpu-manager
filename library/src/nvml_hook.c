@@ -46,18 +46,13 @@ nvmlReturn_t nvmlInit(void) {
 
 nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) {
   nvmlReturn_t ret;
-  int nvml_index;
-  int fd = -1;
-  ret = NVML_INTERNAL_CHECK(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
-  if (unlikely(ret)) {
-    goto DONE;
-  }
+  int lock_fd = -1;
   int host_index = get_host_device_index_by_nvml_device(device);
   if (host_index < 0) {
     goto CALL;
   }
   if (g_vgpu_config->devices[host_index].memory_limit) {
-    fd = lock_gpu_device(host_index);
+    lock_fd = lock_gpu_device(host_index);
 
     size_t used = 0, vmem_used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
@@ -73,28 +68,24 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) 
 CALL:
   ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo, device, memory);
 DONE:
-  unlock_gpu_device(fd);
+  unlock_gpu_device(lock_fd);
   return ret;
 }
 
 nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *memory) {
-  int fd = -1;
-  int nvml_index;
-  nvmlReturn_t ret = NVML_INTERNAL_CHECK(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
-  if (unlikely(ret)) {
+  nvmlReturn_t ret;
+  int lock_fd = -1;
+  ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
+  if (unlikely(ret != NVML_SUCCESS)) {
     goto DONE;
   }
   int host_index = get_host_device_index_by_nvml_device(device);
   if (host_index < 0) {
-    goto CALL;
+    goto DONE;
   }
   if (g_vgpu_config->devices[host_index].memory_limit) {
-    fd = lock_gpu_device(host_index);
+    lock_fd = lock_gpu_device(host_index);
 
-    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
-    if (unlikely(ret)) {
-      goto DONE;
-    }
     size_t used = 0, vmem_used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
     get_used_gpu_virt_memory((void *)&vmem_used, host_index);
@@ -105,21 +96,14 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *me
     memory->used = total_used >= total ? total : total_used;
     //memory->free = (memory->used + memory->reserved) >= memory->total ? 0 : memory->total - (memory->used + memory->reserved);
     memory->free = memory->total - memory->used;
-    goto DONE;
   }
-CALL:
-  ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
 DONE:
-  unlock_gpu_device(fd);
+  unlock_gpu_device(lock_fd);
   return ret;
 }
 
 nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device, nvmlComputeMode_t mode) {
-  int nvml_index;
-  nvmlReturn_t ret = NVML_INTERNAL_CHECK(nvml_library_entry, nvmlDeviceGetIndex, device, &nvml_index);
-  if (unlikely(ret)) {
-    goto DONE;
-  }
+  nvmlReturn_t ret;
   int host_index = get_host_device_index_by_nvml_device(device);
   if (host_index < 0) {
     goto CALL;

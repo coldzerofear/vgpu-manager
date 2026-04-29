@@ -1059,6 +1059,27 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_re
 
   top_result->sys_process_num = running_processes;
 
+  if (running_processes == 0) {
+    running_processes = MAX_PIDS;
+    nvmlProcessInfo_t graphic_pids_on_device[MAX_PIDS];
+
+    if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses,
+                               dev, &running_processes, graphic_pids_on_device);
+    } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2,
+                               dev, &running_processes, graphic_pids_on_device);
+    } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
+      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3,
+                               dev, &running_processes, graphic_pids_on_device);
+    } else {
+      ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+    }
+    if (likely(ret == NVML_SUCCESS)) {
+      top_result->sys_process_num = running_processes;
+    }
+  }
+
   gettimeofday(&cur, NULL);
   struct timeval temp = {1, 0};
   timersub(&cur, &temp, &prev);
@@ -1114,7 +1135,11 @@ static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_res
   }
   *processes_size = copy_size;
 
-  top_result->sys_process_num = g_device_util->devices[host_index].compute_processes_size;
+  if (g_device_util->devices[host_index].compute_processes_size >= g_device_util->devices[host_index].graphics_processes_size) {
+    top_result->sys_process_num = g_device_util->devices[host_index].compute_processes_size;
+  } else {
+    top_result->sys_process_num = g_device_util->devices[host_index].graphics_processes_size;
+  }
   top_result->checktime = (uint64_t)g_device_util->devices[host_index].lastSeenTimeStamp;
 
 DONE:
@@ -1834,8 +1859,15 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
   if (unlikely(handle == NULL)) {
     return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
   }
+  /* Fall back to prop->location.id when cuCtxGetDevice fails (e.g.,
+   * driver not yet initialized for this thread). For non-DEVICE-typed
+   * allocations there is no usable target device id at all, so we
+   * have no choice but to bail. Merged from main commit 43a7bae. */
+  int locationDev = (prop != NULL && prop->location.type == CU_MEM_LOCATION_TYPE_DEVICE);
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
-  if (unlikely(ret != CUDA_SUCCESS)) {
+  if (ret != CUDA_SUCCESS && locationDev) {
+    device = prop->location.id;
+  } else if (ret != CUDA_SUCCESS) {
     goto DONE;
   }
   int host_index = -1;
