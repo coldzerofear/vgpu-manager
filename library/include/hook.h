@@ -33,6 +33,43 @@ extern "C" {
 #include <unistd.h>
 #include <pthread.h>
 
+/* Toolchain assumption gate.
+ *
+ * libvgpu-control.so is a glibc-only, GCC-compatible-only build target.
+ * Hard-failing here gives a clear error instead of letting the build
+ * limp on until linker errors point at obscure undefined references
+ * like `_dl_sym`. Concrete dependencies that have no portable fallback:
+ *
+ *   loader.c       — extern void* _dl_sym(...) is a glibc PRIVATE
+ *                    symbol used as the last-resort fallback in
+ *                    init_real_dlsym(). musl / Bionic do not export it.
+ *   loader.c       — dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.X") is glibc
+ *                    versioned-symbol lookup. POSIX has dlsym, not
+ *                    dlvsym; the GLIBC_* version strings are also
+ *                    glibc-internal.
+ *   hook.h         — FUNC_ATTR_VISIBLE, UNUSED, likely / unlikely use
+ *                    GCC __attribute__ / __builtin_expect extensions.
+ *   cuda_hook.c    — CAS uses __sync_bool_compare_and_swap (GCC builtin).
+ *   src/vulkan/    — __atomic_compare_exchange_n / __atomic_load_n
+ *                    (GCC C11 atomics).
+ *
+ * Note that __GNUC__ is also defined by Clang for GCC-compat — the
+ * gate accepts Clang on glibc, which works in practice (Clang
+ * implements all the GCC extensions we use). What we reject is musl
+ * (Alpine), Bionic (Android), MSVC, and other non-GNU/non-glibc
+ * toolchains where the LD_PRELOAD dlsym-interception mechanism cannot
+ * be assembled.
+ */
+#if !defined(__GNUC__) || !defined(__GLIBC__)
+#  error "libvgpu-control.so requires a GCC-compatible compiler "        \
+         "(GCC or Clang) AND glibc. The library uses _dl_sym, dlvsym "   \
+         "with GLIBC_* versions, __attribute__((visibility/alias/used)), "\
+         "__builtin_expect / __builtin_return_address, and "             \
+         "__sync_bool_compare_and_swap / __atomic_* builtins, none of "  \
+         "which have portable fallbacks. musl libc (Alpine), Bionic "    \
+         "(Android), and MSVC are out of scope."
+#endif
+
 #include "list.h"
 #include "nvml-subset.h"
 #include "cuda-subset.h"
