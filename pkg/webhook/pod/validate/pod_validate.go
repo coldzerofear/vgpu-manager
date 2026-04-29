@@ -62,7 +62,12 @@ type validateHandle struct {
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) error {
 	if h.options.DefaultConvertToDRA {
 		if err := h.checkResourceClaimRequests(ctx, pod); err != nil {
-			return err
+			return &apierrors.StatusError{
+				ErrStatus: metav1.Status{
+					Message: err.Error(),
+					Reason:  metav1.StatusReasonInvalid,
+				},
+			}
 		}
 		if err := h.createResourceClaims(ctx, pod); err != nil {
 			return err
