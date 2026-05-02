@@ -153,7 +153,7 @@ DONE:
 
 func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
 	if alloc.recorder != nil {
-		alloc.recorder.Eventf(object, eventtype, reason, messageFmt, args)
+		alloc.recorder.Eventf(object, eventtype, reason, messageFmt, args...)
 	}
 }
 

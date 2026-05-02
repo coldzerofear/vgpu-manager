@@ -795,6 +795,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				PoolName:     result.Pool,
 				DeviceName:   result.Device,
 				CDIDeviceIDs: cdiDevices,
+				ShareID:      result.ShareID,
 			}
 
 			preparedDevice := PreparedDevice{Request: result.Request, CDIDeviceID: cdiDeviceID}
