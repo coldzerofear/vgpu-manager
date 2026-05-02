@@ -202,6 +202,54 @@ config: []
 `,
 		configs: nil,
 		err:     fmt.Errorf("unknown config version: v0"),
+	}, {
+		name:       "example 5, support json5",
+		configPath: "/tmp/config.json",
+		configContent: `
+[
+  {
+	// this is a comment
+    "nodeName": "testNode",
+    "cgroupDriver": "systemd",
+    "deviceListStrategy": "envvar",
+    "deviceSplitCount": 10,
+	/*
+        this is a comment
+    */
+    "deviceMemoryScaling": 1.0,
+    "deviceMemoryFactor": 1,
+    "deviceCoresScaling": 1.0,
+    "excludeDevices": "0..2",
+    "gdsEnabled": true,
+    "mofedEnabled": true,
+    "migStrategy": "none",
+    "openKernelModules": true,
+    imex: {
+      "channelIDs": [100, 200,],
+      "required": true,
+    },
+  }
+]
+`,
+		configs: []ConfigSpec{{
+			NodeName:            "testNode",
+			CGroupDriver:        ptr.To[string]("systemd"),
+			DeviceListStrategy:  ptr.To[string]("envvar"),
+			DeviceSplitCount:    ptr.To[int](10),
+			DeviceMemoryScaling: ptr.To[float64](1),
+			DeviceMemoryFactor:  ptr.To[int](1),
+			DeviceCoresScaling:  ptr.To[float64](1),
+			ExcludeDevices:      ptr.To[IDStore](NewIntIDStore(0, 1, 2)),
+			GDSEnabled:          ptr.To[bool](true),
+			MOFEDEnabled:        ptr.To[bool](true),
+			MigStrategy:         ptr.To[string]("none"),
+			OpenKernelModules:   ptr.To[bool](true),
+			Imex: ptr.To[imex.Imex](imex.Imex{
+				ChannelIDs: []int{100, 200},
+				Required:   true,
+			}),
+		}},
+		err: nil,
 	}}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

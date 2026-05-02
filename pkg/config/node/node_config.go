@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/adhocore/jsonc"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gopkg.in/yaml.v3"
@@ -262,6 +263,7 @@ func parseConfigTemplate(configFile string) (*ConfigTemplate, error) {
 			configTemp.Version = Version
 		}
 	case strings.HasSuffix(fileName, ".json"):
+		configBytes = jsonc.New().Strip(configBytes)
 		var configs []ConfigSpec
 		if err = json.Unmarshal(configBytes, &configs); err != nil {
 			return nil, fmt.Errorf("json unmarshal error: %v", err)

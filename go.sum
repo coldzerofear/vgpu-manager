@@ -12,6 +12,8 @@ github.com/NVIDIA/go-nvlib v0.10.0 h1:2jbAFmvLBntIc/4iUChI9DzxyYNI92pohXU4kFuNrg
 github.com/NVIDIA/go-nvlib v0.10.0/go.mod h1:7mzx9FSdO9fXWP9NKuZmWkCwhkEcSWQFe2tmFwtLb9c=
 github.com/NVIDIA/nvidia-container-toolkit v1.19.0 h1:iuttW93jclh0+y3RdBw8DR7v6Gfv6h+HjjY87cTyn9M=
 github.com/NVIDIA/nvidia-container-toolkit v1.19.0/go.mod h1:4aDFESAMdSDUGqFD6q3CBRaScL1ZNbMVDifD67cPxUw=
+github.com/adhocore/jsonc v0.10.0 h1:YjNX9TojBfxQJ4kuoiNqVR5SFqu1YBEMsm+HxWnxbOI=
+github.com/adhocore/jsonc v0.10.0/go.mod h1:Ar4gd3i83+1Z+5M5SG6Vrfw9q3TO544OwLXH4+ZhWTE=
 github.com/antlr4-go/antlr/v4 v4.13.1 h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=
 github.com/antlr4-go/antlr/v4 v4.13.1/go.mod h1:GKmUxMtwp6ZgGwZSva4eWPC5mS6vUAmOABFgjdkM7Nw=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=

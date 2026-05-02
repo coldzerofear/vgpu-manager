@@ -7,6 +7,7 @@ require (
 	github.com/NVIDIA/go-nvlib v0.10.0
 	github.com/NVIDIA/go-nvml v0.13.0-1.0.20260212130905-92cf8c963449
 	github.com/NVIDIA/nvidia-container-toolkit v1.19.0
+	github.com/adhocore/jsonc v0.10.0
 	github.com/docker/go-units v0.5.0
 	github.com/evanphx/json-patch v0.5.2
 	github.com/fsnotify/fsnotify v1.10.0
