@@ -26,10 +26,8 @@ import (
 	"github.com/Masterminds/semver"
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	resourceapi "k8s.io/api/resource/v1"
-	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/utils/ptr"
 )
 
@@ -139,7 +137,6 @@ func CommonCapacitiesMig(p *nvml.GpuInstanceProfileInfo) map[resourceapi.Qualifi
 // CommonAttributesMig returns device attributes for MIG devices that are
 // in common among the 'static MIG' and 'dynamic MIG' cases.
 func CommonAttributesMig(parent *nvidia.GpuInfo, profileName string) map[resourceapi.QualifiedName]resourceapi.DeviceAttribute {
-	pciBusIDAttrName := resourceapi.QualifiedName(deviceattribute.StandardDeviceAttributePrefix + "pciBusID")
 	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 		"type": {
 			StringValue: ptr.To("mig"),
@@ -168,9 +165,6 @@ func CommonAttributesMig(parent *nvidia.GpuInfo, profileName string) map[resourc
 		"cudaDriverVersion": {
 			VersionValue: ptr.To(semver.MustParse(parent.DriverVersion.CudaDriverVersion.String()).String()),
 		},
-		pciBusIDAttrName: {
-			StringValue: ptr.To(links.PciInfo(parent.PciInfo).BusID()),
-		},
 	}
 
 	if parent.AddressingMode != nil {
@@ -179,10 +173,9 @@ func CommonAttributesMig(parent *nvidia.GpuInfo, profileName string) map[resourc
 		}
 	}
 
-	// TODO pciBusIDAttr
-	//if parent.pciBusIDAttr != nil {
-	//	attrs[parent.pciBusIDAttr.Name] = parent.pciBusIDAttr.Value
-	//}
+	if parent.PciBusIDAttr != nil {
+		attrs[parent.PciBusIDAttr.Name] = parent.PciBusIDAttr.Value
+	}
 
 	if parent.PcieRootAttr != nil {
 		attrs[parent.PcieRootAttr.Name] = parent.PcieRootAttr.Value

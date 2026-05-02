@@ -111,8 +111,6 @@ func (d *GpuDeviceInfo) AddDetailAfterWalkingMigProfiles(maxcap PartCapacityMap,
 }
 
 func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceAttribute {
-	// TODO: Consume GetPCIBusIDAttribute from https://github.com/kubernetes/kubernetes/blob/4c5746c0bc529439f78af458f8131b5def4dbe5d/staging/src/k8s.io/dynamic-resource-allocation/deviceattribute/attribute.go#L39
-	pciBusIDAttrName := resourceapi.QualifiedName(deviceattribute.StandardDeviceAttributePrefix + "pciBusID")
 	attrs := map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 		"type": {
 			StringValue: ptr.To(GpuDeviceType),
@@ -141,15 +139,11 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		"cudaDriverVersion": {
 			VersionValue: ptr.To(semver.MustParse(d.DriverVersion.CudaDriverVersion.String()).String()),
 		},
-		pciBusIDAttrName: {
-			StringValue: &d.pciBusID,
-		},
 	}
 
-	// TODO pciBusIDAttr
-	//if d.pciBusIDAttr != nil {
-	//	attrs[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
-	//}
+	if d.PciBusIDAttr != nil {
+		attrs[d.PciBusIDAttr.Name] = d.PciBusIDAttr.Value
+	}
 	if d.PcieRootAttr != nil {
 		attrs[d.PcieRootAttr.Name] = d.PcieRootAttr.Value
 	}
@@ -203,8 +197,6 @@ func (d *MigDeviceInfo) GetDevice() resourceapi.Device {
 }
 
 func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
-	// TODO: Consume GetPCIBusIDAttribute from https://github.com/kubernetes/kubernetes/blob/4c5746c0bc529439f78af458f8131b5def4dbe5d/staging/src/k8s.io/dynamic-resource-allocation/deviceattribute/attribute.go#L39
-	pciBusIDAttrName := resourceapi.QualifiedName(deviceattribute.StandardDeviceAttributePrefix + "pciBusID")
 	device := resourceapi.Device{
 		Name: d.CanonicalName(),
 		Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
@@ -226,9 +218,6 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 			"productName": {
 				StringValue: &d.productName,
 			},
-			pciBusIDAttrName: {
-				StringValue: &d.PciBusID,
-			},
 			"iommuFDEnabled": {
 				BoolValue: ptr.To(d.iommuFDEnabled),
 			},
@@ -240,7 +229,6 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 		},
 	}
 
-	// TODO pciBusIDAttr
 	if d.pciBusIDAttr != nil {
 		device.Attributes[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
 	}

@@ -24,14 +24,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
-	"k8s.io/dynamic-resource-allocation/deviceattribute"
-	"k8s.io/klog/v2"
-
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	nvinfo "github.com/NVIDIA/go-nvlib/pkg/nvlib/info"
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	"k8s.io/dynamic-resource-allocation/deviceattribute"
+	"k8s.io/klog/v2"
 )
 
 type CudaDriverVersion int
@@ -64,6 +63,7 @@ type GpuInfo struct {
 	CudaComputeCapability string                           `json:"-"`
 	MigProfiles           []*MigProfileInfo                `json:"-"`
 	DriverVersion         DriverVersion                    `json:"-"`
+	PciBusIDAttr          *deviceattribute.DeviceAttribute `json:"-"`
 	PcieRootAttr          *deviceattribute.DeviceAttribute `json:"-"`
 	AddressingMode        *string                          `json:"-"`
 }
@@ -335,6 +335,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	if err != nil {
 		return nil, err
 	}
+	pciBusID := links.PciInfo(pciInfo).BusID()
 
 	// Get the memory-addressing mode supported by the device.
 	// On coherent-memory systems, the possible modes are:
@@ -349,8 +350,15 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		addressingMode = &mode
 	}
 
+	var pciBusIDAttr *deviceattribute.DeviceAttribute
+	attr, err := deviceattribute.GetPCIBusIDAttribute(pciBusID)
+	if err != nil {
+		return nil, fmt.Errorf("error getting PCI bus ID for device %d: %w", index, err)
+	}
+	pciBusIDAttr = &attr
+
 	var pcieRootAttr *deviceattribute.DeviceAttribute
-	if attr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(links.PciInfo(pciInfo).BusID()); err == nil {
+	if attr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pciBusID); err == nil {
 		pcieRootAttr = &attr
 	} else {
 		klog.Warningf("error getting PCIe root for device %d, continuing without attribute: %v", index, err)
@@ -421,6 +429,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		Architecture:          architecture,
 		CudaComputeCapability: cudaComputeCapability,
 		MigProfiles:           migProfiles,
+		PciBusIDAttr:          pciBusIDAttr,
 		PcieRootAttr:          pcieRootAttr,
 		DriverVersion:         driverVersion,
 		AddressingMode:        addressingMode,

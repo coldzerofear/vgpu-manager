@@ -351,14 +351,14 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 	}
 
 	var pciBusIDAttr *deviceattribute.DeviceAttribute
-	//attr, err := deviceattribute.GetPCIBusIDAttribute(device.Address)
-	//if err != nil {
-	//	return nil, fmt.Errorf("error getting PCI bus ID for device %s: %w", device.Address, err)
-	//}
-	//pciBusIDAttr = &attr
+	attr, err := deviceattribute.GetPCIBusIDAttribute(device.Address)
+	if err != nil {
+		return nil, fmt.Errorf("error getting PCI bus ID for device %s: %w", device.Address, err)
+	}
+	pciBusIDAttr = &attr
 
 	var pcieRootAttr *deviceattribute.DeviceAttribute
-	attr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(device.Address)
+	attr, err = deviceattribute.GetPCIeRootAttributeByPCIBusID(device.Address)
 	if err == nil {
 		pcieRootAttr = &attr
 	} else {
