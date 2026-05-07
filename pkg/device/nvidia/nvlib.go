@@ -310,7 +310,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	memory, ret := device.GetMemoryInfo()
 	if ret != nvml.SUCCESS {
 		if ret == nvml.ERROR_NOT_SUPPORTED {
-			klog.Infoln("device %d does not support getting memory info (possible unified memory architecture), skipping", index)
+			klog.Infof("device %d does not support getting memory info (possible unified memory architecture), skipping", index)
 		} else {
 			return nil, fmt.Errorf("error getting memory info for device %d: %v", index, ret)
 		}
