@@ -129,8 +129,8 @@ func PatchPodAllocationFailed(kubeClient kubernetes.Interface, pod *corev1.Pod) 
 	})
 }
 
-// PatchPodVGPUAnnotation patch pod vGPU scheduling and allocation metadata.
-func PatchPodVGPUAnnotation(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
+// PatchPodPreAllocatedMetadata patch vGPU pre allocated metadata annotations
+func PatchPodPreAllocatedMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
 	patchData := PatchMetadata{Annotations: map[string]*string{}}
 	nodeName := pod.Annotations[util.PodPredicateNodeAnnotation]
 	patchData.Annotations[util.PodPredicateNodeAnnotation] = pointer.String(nodeName)

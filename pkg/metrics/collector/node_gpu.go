@@ -483,7 +483,7 @@ skipNvml:
 			strconv.Itoa(nodeConfigInfo.MemoryFactor))
 	}
 
-	// Get all pods.
+	// Get all pods on the current node.
 	pods, err := c.podLister.List(labels.Everything())
 	if err != nil {
 		klog.Errorf("pod lister list error: %v", err)

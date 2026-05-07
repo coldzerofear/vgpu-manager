@@ -25,6 +25,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 )
 
 type gpuFilter struct {
@@ -103,7 +104,7 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 	klog.V(4).InfoS("FilterNode", "ExtenderArgs", args)
 	if args.Pod == nil {
 		return &extenderv1.ExtenderFilterResult{
-			Error: "Parameter Pod is empty",
+			Error: "ExtenderArgs.Pod cannot be empty",
 		}
 	}
 	if !util.IsVGPUResourcePod(args.Pod) {
@@ -179,7 +180,7 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extende
 		if node, err := f.nodeLister.Get(nodeName); err != nil {
 			errMsg := "get node cache failed"
 			klog.ErrorS(err, errMsg, "node", nodeName)
-			failedNodesMap[nodeName] = errMsg
+			failedNodesMap[nodeName] = fmt.Sprintf("%s: %v", errMsg, err)
 		} else {
 			filteredNodes = append(filteredNodes, *node)
 		}
@@ -323,19 +324,23 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	)
 	// Skip pods that have already been scheduled.
 	if nodeName, ok := IsScheduled(pod); ok {
-		foundNode := false
-		for i, node := range nodes {
-			if !foundNode && node.Name == nodeName {
-				filteredNodes = append(filteredNodes, nodes[i])
-				foundNode = true
-				continue
+		// Allow device filtering and repair scheduling status to be triggered again when the pod is in an unschedulable state
+		if !device.PodStatusUnschedulable(pod) {
+			foundNode := false
+			for i, node := range nodes {
+				if !foundNode && node.Name == nodeName {
+					filteredNodes = append(filteredNodes, nodes[i])
+					foundNode = true
+					continue
+				}
+				failedNodesMap[node.Name] = fmt.Sprintf("pod has been scheduled to node %s", node.Name)
 			}
-			failedNodesMap[node.Name] = fmt.Sprintf("pod has been scheduled to node %s", node.Name)
+			if foundNode {
+				return filteredNodes, failedNodesMap, nil
+			}
+
+			return nil, nil, fmt.Errorf("pod %s had been predicated", pod.UID)
 		}
-		if foundNode {
-			return filteredNodes, failedNodesMap, nil
-		}
-		return nil, nil, fmt.Errorf("pod %s had been predicated", pod.UID)
 	}
 
 	if err := f.CheckDeviceRequest(pod); err != nil {
@@ -435,13 +440,14 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			failedNodesMap[node.Name] = err.Error()
 			continue
 		}
-		if err = client.PatchPodVGPUAnnotation(f.kubeClient, newPod); err != nil {
+		if err = client.PatchPodPreAllocatedMetadata(f.kubeClient, newPod); err != nil {
 			errMsg := fmt.Sprintf("patch vGPU metadata failed")
 			klog.ErrorS(err, errMsg, "pod", klog.KObj(pod))
 			failedNodesMap[node.Name] = errMsg
 			continue
 		}
-		f.podLister.Mutation(newPod)
+		// Modify scheduling status to prevent incorrect calculation of device resource claims caused by old non schedulable status.
+		f.podLister.Mutation(mutationPodScheduledCondition(newPod))
 		filteredNodes = append(filteredNodes, *node)
 		success = true
 	}
@@ -449,6 +455,15 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		f.recorder.Eventf(pod, corev1.EventTypeNormal, "FilteringSucceed", "Successfully matched to node <%s>", filteredNodes[0].Name)
 	}
 	return filteredNodes, failedNodesMap, nil
+}
+
+func mutationPodScheduledCondition(pod *corev1.Pod) *corev1.Pod {
+	index, _ := podutil.GetPodCondition(&pod.Status, corev1.PodScheduled)
+	if index >= 0 {
+		pod.Status.Conditions[index].Status = corev1.ConditionTrue
+		pod.Status.Conditions[index].Reason = ""
+	}
+	return pod
 }
 
 func PodUsedGPUTopologyMode(pod *corev1.Pod) util.TopologyMode {

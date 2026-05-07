@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/component-base/logs"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -51,14 +52,13 @@ func main() {
 	}
 
 	kubeConfig, err := client.NewKubeConfig(
-		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
+		client.WithQPSBurst(opt.QPS, opt.Burst),
+		client.WithTimeoutSecond(opt.Timeout),
 		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Fatalf("Create kubeConfig failed: %v", err)
 	}
-	kubeClient, err := client.NewClientSet(
-		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
-		client.WithDefaultUserAgent())
+	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}

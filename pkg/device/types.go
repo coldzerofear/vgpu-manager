@@ -19,6 +19,7 @@ import (
 	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-scheduler/framework"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/utils/pointer"
 )
 
@@ -669,8 +670,25 @@ func (n *NodeInfo) Clone() framework.StateData {
 	return n.DeepCopy()
 }
 
+// PodStatusUnschedulable Determine whether the scheduler has marked the pod as unschedulable
+func PodStatusUnschedulable(pod *corev1.Pod) bool {
+	if pod.Spec.NodeName == "" {
+		_, condition := podutil.GetPodCondition(&pod.Status, corev1.PodScheduled)
+		if condition != nil {
+			return condition.Status == corev1.ConditionFalse &&
+				condition.Reason == corev1.PodReasonUnschedulable
+		}
+	}
+	return false
+}
+
 func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
 	if !util.IsVGPUResourcePod(pod) {
+		return
+	}
+
+	// Ignore pods marked as unschedulable by the scheduler
+	if PodStatusUnschedulable(pod) {
 		return
 	}
 	// According to the pods' annotations, construct the node allocation state

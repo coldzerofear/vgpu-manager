@@ -52,7 +52,7 @@ func main() {
 		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
 	}
 	kubeConfig, err := client.NewKubeConfig(
-		client.WithQPSBurst(float32(opt.QPS), opt.Burst),
+		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Fatalf("Create kubeConfig failed: %v", err)
