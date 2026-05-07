@@ -40,7 +40,6 @@ type gpuFilter struct {
 const (
 	Name                     = "FilterPredicate"
 	indexerKeyPodRequestVGPU = "pod.requestVGPU"
-	//indexerKeyPodPlanSchedulingNode = "pod.planSchedulingNode"
 )
 
 var (
@@ -52,13 +51,6 @@ var (
 			}
 			return []string{"false"}, nil
 		},
-		//indexerKeyPodPlanSchedulingNode: func(obj interface{}) ([]string, error) {
-		//	nodeName := ""
-		//	if pod, ok := obj.(*corev1.Pod); ok {
-		//		nodeName = util.PodPlanSchedulingNode(pod)
-		//	}
-		//	return []string{nodeName}, nil
-		//},
 	}
 )
 
@@ -341,6 +333,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 
 			return nil, nil, fmt.Errorf("pod %s had been predicated", pod.UID)
 		}
+		klog.V(3).InfoS("Pod scheduled condition is unschedulable, Re trigger device pre allocation", "pod", klog.KObj(pod))
 	}
 
 	if err := f.CheckDeviceRequest(pod); err != nil {

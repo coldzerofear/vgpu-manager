@@ -75,13 +75,18 @@ func main() {
 	option := informers.WithTransform(cache.TransformStripManagedFields())
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
 
-	nodeInformer := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
-	podInformer := metrics.GetPodInformer(factory, nodeConfig.GetNodeName())
+	nodeInformer, err := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
+	if err != nil {
+		klog.Fatalf("GetNodeInformer failed: %v", err)
+	}
+	podInformer, err := metrics.GetPodInformer(factory, nodeConfig.GetNodeName())
+	if err != nil {
+		klog.Fatalf("GetPodInformer failed: %v", err)
+	}
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
-	podLister := listerv1.NewPodLister(podInformer.GetIndexer())
+	podLister := client.NewPodLister(podInformer.GetIndexer())
 
-	containerLister := lister.NewContainerLister(
-		util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
+	containerLister := lister.NewContainerLister(util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
 	nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig.GetNodeName(),
 		nodeLister, podLister, containerLister, opt.FeatureGate)
 	if err != nil {

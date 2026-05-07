@@ -19,6 +19,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
+	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
@@ -26,7 +27,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/sets"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-base/featuregate"
@@ -39,14 +40,16 @@ type nodeGPUCollector struct {
 	*nvidia.DeviceLib
 	nodeName    string
 	nodeLister  listerv1.NodeLister
-	podLister   listerv1.PodLister
+	podLister   client.PodLister
 	contLister  *lister.ContainerLister
 	podResource *client.PodResource
 	featureGate featuregate.FeatureGate
 }
 
-func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister, podLister listerv1.PodLister,
-	contLister *lister.ContainerLister, featureGate featuregate.FeatureGate) (prometheus.Collector, error) {
+func NewNodeGPUCollector(
+	nodeName string, nodeLister listerv1.NodeLister, podLister client.PodLister,
+	contLister *lister.ContainerLister, featureGate featuregate.FeatureGate,
+) (prometheus.Collector, error) {
 	deviceLib, err := nvidia.InitDeviceLib("/")
 	if err != nil {
 		return nil, err
@@ -484,7 +487,10 @@ skipNvml:
 	}
 
 	// Get all pods on the current node.
-	pods, err := c.podLister.List(labels.Everything())
+	pods, err := c.podLister.ListByIndexFiledSet(fields.Set{
+		metrics.IndexerKeyPodPlanSchedulingNode:  c.nodeName,
+		metrics.IndexerKeyPodStatusUnschedulable: "false",
+	})
 	if err != nil {
 		klog.Errorf("pod lister list error: %v", err)
 		return
