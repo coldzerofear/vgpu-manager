@@ -10,7 +10,12 @@
  *                                          equal to real_memory)
  *   - host_index < 0 => no clamp (forward only)
  *   - memory_limit == 0 => no clamp (forward only)
- *   - _2 path also clamps; pNext extension structs untouched
+ *   - _2 path also clamps the V1 heap.size array
+ *   - _2 path inflates VK_EXT_memory_budget heapUsage when the
+ *     ICD-reported heapBudget exceeds the partition cap, leaving
+ *     heapBudget itself untouched (Carbonite/PhysX deadlock workaround;
+ *     see clamp_budget_pnext in hooks_memory.c)
+ *   - _2 path leaves pNext linkage / non-budget extensions intact
  */
 #include <assert.h>
 #include <stdio.h>
@@ -216,7 +221,10 @@ static void test_clamps_via_v2_entry(void) {
   g_fake_heap_count = 1;
   heap(0, 32ull << 30, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
 
-  /* pNext chain with a budget extension struct — must NOT be touched. */
+  /* pNext chain with an all-zero budget extension struct. The clamp
+   * path's "icd_budget <= cap_vk continue" short-circuit means a zero
+   * heapBudget never triggers inflation, so the extension struct
+   * stays bit-identical here — coverage for the no-op short-circuit. */
   VkPhysicalDeviceMemoryBudgetPropertiesEXT budget_ext;
   memset(&budget_ext, 0, sizeof(budget_ext));
   budget_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
@@ -228,9 +236,179 @@ static void test_clamps_via_v2_entry(void) {
 
   vgpu_vk_GetPhysicalDeviceMemoryProperties2(g_phys, &props2);
   assert(props2.memoryProperties.memoryHeaps[0].size == (2ull << 30));
-  /* Sanity: pNext budget struct still attached. */
+  /* pNext linkage preserved. */
   assert(props2.pNext == &budget_ext);
-  vgpu_test_pass("_2 entry clamps and leaves pNext extension untouched");
+  /* Zero budget => short-circuit => zero usage stays zero. */
+  assert(budget_ext.heapBudget[0] == 0);
+  assert(budget_ext.heapUsage[0]  == 0);
+  vgpu_test_pass("_2 entry clamps heap.size; zero budget short-circuits inflate");
+  teardown();
+}
+
+/* Helper that mirrors fake_get_memprops2 but lets the test pre-populate
+ * the budget struct via the pNext chain — the next layer's pfn now
+ * sets per-heap heapBudget / heapUsage so we can assert the inflate
+ * arithmetic. The "pre-populated values flow through" pattern matches
+ * how a real ICD reports them: the ICD writes into the pNext-chained
+ * struct that the caller passed in. */
+static VkDeviceSize g_fake_icd_budget[VK_MAX_MEMORY_HEAPS];
+static VkDeviceSize g_fake_icd_usage [VK_MAX_MEMORY_HEAPS];
+static VKAPI_ATTR void VKAPI_CALL
+fake_get_memprops2_with_budget(VkPhysicalDevice phys,
+                               VkPhysicalDeviceMemoryProperties2 *out) {
+  fake_get_memprops(phys, &out->memoryProperties);
+  for (VkBaseOutStructure *p = (VkBaseOutStructure *)out->pNext;
+       p != NULL; p = p->pNext) {
+    if (p->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT) {
+      VkPhysicalDeviceMemoryBudgetPropertiesEXT *bud =
+          (VkPhysicalDeviceMemoryBudgetPropertiesEXT *)p;
+      for (uint32_t i = 0; i < VK_MAX_MEMORY_HEAPS; i++) {
+        bud->heapBudget[i] = g_fake_icd_budget[i];
+        bud->heapUsage[i]  = g_fake_icd_usage[i];
+      }
+    }
+  }
+}
+
+/* Re-seat the dispatch entry's pfn_GetPhysicalDeviceMemoryProperties2
+ * so the next-layer call writes our pre-staged budget values. */
+static void install_budget_aware_pfn(void) {
+  vgpu_vk_instance_dispatch_t *d = vgpu_vk_get_instance_dispatch(g_inst);
+  assert(d != NULL);
+  d->pfn_GetPhysicalDeviceMemoryProperties2 = fake_get_memprops2_with_budget;
+}
+
+static void test_inflates_heap_usage_when_icd_budget_above_cap(void) {
+  /* 23 GiB partition (mirrors HAMi-core PR #182's production repro:
+   * isaac-launchable-0, 23 GiB partition on a 46 GiB card). */
+  setup(/*memory_limit*/ 1, /*oversold*/ 0,
+        /*real*/ 23ull << 30, /*total*/ 23ull << 30);
+  g_fake_heap_count = 1;
+  heap(0, 46ull << 30, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+
+  /* ICD reports: 32 GiB free, 11 GiB already used (a 46 GiB card with
+   * 14 GiB held by other tenants).  cap = 23 GiB. delta = 32-23 = 9 GiB.
+   * Expected post-inflate: heapBudget unchanged (32 GiB),
+   * heapUsage = 11 + 9 = 20 GiB.  Engine sees
+   * available = 32 - 20 = 12 GiB, which is partition - icd_usage =
+   * 23 - 11 = 12 GiB.  Matches HAMi commit 58d304f post-fix shape. */
+  g_fake_icd_budget[0] = 32ull << 30;
+  g_fake_icd_usage [0] = 11ull << 30;
+  install_budget_aware_pfn();
+
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget_ext;
+  memset(&budget_ext, 0, sizeof(budget_ext));
+  budget_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+
+  VkPhysicalDeviceMemoryProperties2 props2;
+  memset(&props2, 0, sizeof(props2));
+  props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+  props2.pNext = &budget_ext;
+
+  vgpu_vk_GetPhysicalDeviceMemoryProperties2(g_phys, &props2);
+
+  /* heap.size still clamped to partition. */
+  assert(props2.memoryProperties.memoryHeaps[0].size == (23ull << 30));
+  /* heapBudget MUST stay at ICD-reported value (PhysX deadlock guard). */
+  assert(budget_ext.heapBudget[0] == (32ull << 30));
+  /* heapUsage inflated by delta. */
+  assert(budget_ext.heapUsage[0] == (20ull << 30));
+  vgpu_test_pass("_2 entry inflates heapUsage by (icd_budget - cap)");
+  teardown();
+}
+
+static void test_does_not_inflate_when_icd_budget_below_cap(void) {
+  /* Partition is 23 GiB but ICD currently reports only 8 GiB free
+   * (heavy other tenants). 8 < 23, so we skip the inflate — the
+   * engine's available calculation 8 - icd_usage already reflects
+   * a tighter constraint than partition. Safe to leave alone. */
+  setup(/*memory_limit*/ 1, /*oversold*/ 0,
+        /*real*/ 23ull << 30, /*total*/ 23ull << 30);
+  g_fake_heap_count = 1;
+  heap(0, 46ull << 30, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+  g_fake_icd_budget[0] = 8ull << 30;
+  g_fake_icd_usage [0] = 1ull << 30;
+  install_budget_aware_pfn();
+
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget_ext;
+  memset(&budget_ext, 0, sizeof(budget_ext));
+  budget_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+  VkPhysicalDeviceMemoryProperties2 props2;
+  memset(&props2, 0, sizeof(props2));
+  props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+  props2.pNext = &budget_ext;
+
+  vgpu_vk_GetPhysicalDeviceMemoryProperties2(g_phys, &props2);
+
+  assert(budget_ext.heapBudget[0] == (8ull << 30));
+  assert(budget_ext.heapUsage[0]  == (1ull << 30));
+  vgpu_test_pass("_2 entry skips inflate when icd_budget <= cap");
+  teardown();
+}
+
+static void test_does_not_inflate_when_no_cap(void) {
+  /* memory_limit=0 in g_vgpu_config => clamp_cap_for_phys returns 0
+   * => clamp_budget_pnext early-returns. heapBudget AND heapUsage
+   * both pass through untouched (no-op enforce path). */
+  setup(/*memory_limit*/ 0, /*oversold*/ 0,
+        /*real*/ 23ull << 30, /*total*/ 23ull << 30);
+  g_fake_heap_count = 1;
+  heap(0, 46ull << 30, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+  g_fake_icd_budget[0] = 32ull << 30;
+  g_fake_icd_usage [0] = 11ull << 30;
+  install_budget_aware_pfn();
+
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget_ext;
+  memset(&budget_ext, 0, sizeof(budget_ext));
+  budget_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+  VkPhysicalDeviceMemoryProperties2 props2;
+  memset(&props2, 0, sizeof(props2));
+  props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+  props2.pNext = &budget_ext;
+
+  vgpu_vk_GetPhysicalDeviceMemoryProperties2(g_phys, &props2);
+
+  /* No clamp at all — heap.size also untouched. */
+  assert(props2.memoryProperties.memoryHeaps[0].size == (46ull << 30));
+  assert(budget_ext.heapBudget[0] == (32ull << 30));
+  assert(budget_ext.heapUsage[0]  == (11ull << 30));
+  vgpu_test_pass("_2 entry leaves budget alone when memory_limit=0");
+  teardown();
+}
+
+static void test_inflate_skips_non_device_local_heap(void) {
+  /* Two heaps reported by ICD: heap[0] DEVICE_LOCAL (the one we want
+   * to constrain), heap[1] host-visible / staging. The inflate must
+   * touch heap[0] only — host-visible memory is system RAM, not
+   * subject to the GPU partition. */
+  setup(/*memory_limit*/ 1, /*oversold*/ 0,
+        /*real*/ 23ull << 30, /*total*/ 23ull << 30);
+  g_fake_heap_count = 2;
+  heap(0, 46ull << 30, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+  heap(1, 16ull << 30, /*flags*/ 0);
+  g_fake_icd_budget[0] = 32ull << 30;
+  g_fake_icd_usage [0] = 11ull << 30;
+  g_fake_icd_budget[1] = 12ull << 30;
+  g_fake_icd_usage [1] =  3ull << 30;
+  install_budget_aware_pfn();
+
+  VkPhysicalDeviceMemoryBudgetPropertiesEXT budget_ext;
+  memset(&budget_ext, 0, sizeof(budget_ext));
+  budget_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+  VkPhysicalDeviceMemoryProperties2 props2;
+  memset(&props2, 0, sizeof(props2));
+  props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+  props2.pNext = &budget_ext;
+
+  vgpu_vk_GetPhysicalDeviceMemoryProperties2(g_phys, &props2);
+
+  /* DEVICE_LOCAL heap[0]: inflated by 9 GiB. */
+  assert(budget_ext.heapBudget[0] == (32ull << 30));
+  assert(budget_ext.heapUsage[0]  == (20ull << 30));
+  /* host-visible heap[1]: untouched. */
+  assert(budget_ext.heapBudget[1] == (12ull << 30));
+  assert(budget_ext.heapUsage[1]  == ( 3ull << 30));
+  vgpu_test_pass("_2 entry inflate skips non-DEVICE_LOCAL heaps");
   teardown();
 }
 
@@ -241,6 +419,10 @@ int main(void) {
   test_does_not_clamp_when_unmanaged();
   test_does_not_clamp_smaller_heap();
   test_clamps_via_v2_entry();
+  test_inflates_heap_usage_when_icd_budget_above_cap();
+  test_does_not_inflate_when_icd_budget_below_cap();
+  test_does_not_inflate_when_no_cap();
+  test_inflate_skips_non_device_local_heap();
   printf("ok: test_memprops_clamp complete\n");
   return 0;
 }
