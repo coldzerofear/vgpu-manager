@@ -18,6 +18,14 @@ Rules enforced:
       cuda_hooks_entry[] in src/cuda_hook.c (rule 3 in cuda-helper.h).
   R6. Every (1) entry must have a wrapper function definition exported from
       the .so (unless explicitly allowlisted as forward-only).
+  R7. Every base name that has TWO OR MORE _vN siblings in the dispatch
+      table must be classified as either:
+       - ABI-conflict (added to ABI_CONFLICT_FAMILIES)         => R4/R5 apply
+       - signature-stable (added to R7_ALLOWLIST with reason)  => safe to ignore
+      Catches regressions where a newly-added versioned hook silently
+      introduces a frame-mismatch risk at the cuGetProcAddress
+      substitution site (HAMi-core PR #182 / vgpu-manager Issue #1834
+      class of LD_PRELOAD hangs).
 
 Exit 0 if all pass; exit 1 on any R1-R6 violation.
 
@@ -65,6 +73,28 @@ ABI_CONFLICT_FAMILIES = {
 # R5 allowlist: conflict-family base names that MAY appear in
 # cuda_hooks_entry[]. Empty today.
 R5_ALLOWLIST: set = set()
+
+# R7 allowlist: base names that have multiple ELF _vN exports but where
+# the C parameter list is IDENTICAL across all versions (driver-internal
+# bumps for descriptor format changes etc., not real ABI breaks).
+# Adding a name here is a claim verified by the author at allowlisting
+# time — re-verify if any new _vN form gets added later.
+#
+# To audit: each version's wrapper in src/cuda_originals.c (or its
+# trampoline like _cuFooBar) MUST take the same parameter types in the
+# same order as every other version of that base name.
+R7_ALLOWLIST: dict = {
+    # cuTexRefSetAddress2D / _v2 / _v3 — all take
+    #   (CUtexref, const CUDA_ARRAY_DESCRIPTOR *, CUdeviceptr, size_t)
+    # The v-bumps reflected internal CUDA_ARRAY_DESCRIPTOR struct format
+    # changes, not C ABI. Texture references have been deprecated since
+    # CUDA 5.0 and removed in CUDA 12.0, so there is no driver-595 risk.
+    # Verified against src/cuda_originals.c:977-1020 (2026-05).
+    "cuTexRefSetAddress2D":
+        "All _vN forms take 4 args (CUtexref, const CUDA_ARRAY_DESCRIPTOR *, "
+        "CUdeviceptr, size_t Pitch). Version bumps were internal descriptor "
+        "format only. Tex refs deprecated since CUDA 5.0, removed in CUDA 12.0.",
+}
 
 
 def strip_c_comments(content: str) -> str:
@@ -217,6 +247,47 @@ def main() -> int:
             f"cuda_originals.c / cuda_hook.c: {fmt(missing_wrappers)}. "
             f"Add a wrapper or pass --allow-r6 <symbol> if the entry is "
             f"intentionally forward-only."
+        )
+
+    # R7. Multi-version base audit. Every base name with 2+ versioned
+    # siblings in the dispatch table must be explicitly classified as
+    # either an ABI-conflict family (handled by R4/R5) or a
+    # signature-stable family (in R7_ALLOWLIST). Catches the case where
+    # a future commit adds a new cuFooBar_v3 hook without the maintainer
+    # noticing that the C parameter list changed between _v2 and _v3,
+    # which would let cuGetProcAddress substitute the wrong-ABI wrapper
+    # and produce the LD_PRELOAD frame-mismatch hang documented in
+    # HAMi-core Issue #1834.
+    multi_ver_bases: dict[str, list[int]] = {}
+    ver_re = re.compile(r"^(cu[A-Z][A-Za-z0-9_]*)_v(\d+)$")
+    for entry in loader_entries:
+        m = ver_re.match(entry)
+        if m:
+            base = m.group(1)
+            ver = int(m.group(2))
+            multi_ver_bases.setdefault(base, []).append(ver)
+    multi_ver = {b: sorted(v) for b, v in multi_ver_bases.items() if len(v) >= 2}
+    classified = set(ABI_CONFLICT_FAMILIES) | set(R7_ALLOWLIST)
+    unclassified = {b: vs for b, vs in multi_ver.items() if b not in classified}
+    if unclassified:
+        lines = []
+        for base, vers in sorted(unclassified.items()):
+            ver_str = ", ".join(f"_v{v}" for v in vers)
+            lines.append(f"           - {base}  ({ver_str})")
+        errors.append(
+            f"[R7] {len(unclassified)} base name(s) have multiple _vN "
+            f"siblings in cuda_library_entry[] but are not classified:\n"
+            + "\n".join(lines)
+            + "\n         Each must go into ONE of:\n"
+            f"           ABI_CONFLICT_FAMILIES  (if signatures DIFFER across\n"
+            f"                                   versions — like cuCtxCreate\n"
+            f"                                   where _v2 has 3 args and _v4\n"
+            f"                                   has 4)\n"
+            f"           R7_ALLOWLIST           (if all versions take the\n"
+            f"                                   SAME C parameter list — only\n"
+            f"                                   internal driver bumps)\n"
+            f"         Verify each wrapper signature in cuda_originals.c\n"
+            f"         BEFORE deciding."
         )
 
     # Report
