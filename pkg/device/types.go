@@ -683,6 +683,15 @@ func PodStatusUnschedulable(pod *corev1.Pod) bool {
 	if pod.Spec.NodeName != "" {
 		return false
 	}
+	// The previous bind cycle failed; the prior allocation is void. Treat
+	// the pod as unschedulable so NodeInfo skips its stale GPU claim during
+	// re-allocation (avoiding the pod squeezing itself out of its origin
+	// node) and Filter re-triggers device pre-allocation instead of forcing
+	// the pod back to a possibly broken predicate-node.
+	if phase, ok := util.HasLabel(pod, util.PodAssignedPhaseLabel); ok &&
+		phase == string(util.AssignPhaseFailed) {
+		return true
+	}
 	_, condition := podutil.GetPodCondition(&pod.Status, corev1.PodScheduled)
 	if condition == nil {
 		return false

@@ -285,20 +285,27 @@ func Test_PodStatusUnschedulable(t *testing.T) {
 	base := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
 
 	type podOpts struct {
-		nodeName      string
-		condition     *corev1.PodCondition
-		predicateTime string // empty = annotation absent
+		nodeName       string
+		condition      *corev1.PodCondition
+		predicateTime  string // empty = annotation absent
+		assignedPhase  string // empty = label absent
 	}
 	makePod := func(o podOpts) *corev1.Pod {
 		pod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
-			Spec:       corev1.PodSpec{NodeName: o.nodeName},
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{},
+				Labels:      map[string]string{},
+			},
+			Spec: corev1.PodSpec{NodeName: o.nodeName},
 		}
 		if o.condition != nil {
 			pod.Status.Conditions = []corev1.PodCondition{*o.condition}
 		}
 		if o.predicateTime != "" {
 			pod.Annotations[util.PodPredicateTimeAnnotation] = o.predicateTime
+		}
+		if o.assignedPhase != "" {
+			pod.Labels[util.PodAssignedPhaseLabel] = o.assignedPhase
 		}
 		return pod
 	}
@@ -325,6 +332,34 @@ func Test_PodStatusUnschedulable(t *testing.T) {
 				nodeName:      "node-1",
 				condition:     unschedulableCond(base),
 				predicateTime: nanos(base),
+			}),
+			want: false,
+		},
+		{
+			name: "bind failed last cycle (phase=failed) is treated as unschedulable",
+			pod: makePod(podOpts{
+				assignedPhase: string(util.AssignPhaseFailed),
+				// MaxUint64 sentinel is what PatchPodAllocationFailed writes;
+				// without the phase=failed early return the time-stamp branch
+				// would erroneously return false.
+				predicateTime: fmt.Sprintf("%d", uint64(^uint64(0))),
+				condition:     unschedulableCond(base),
+			}),
+			want: true,
+		},
+		{
+			name: "phase=failed bypass works even without PodScheduled condition",
+			pod: makePod(podOpts{
+				assignedPhase: string(util.AssignPhaseFailed),
+			}),
+			want: true,
+		},
+		{
+			name: "phase=allocating does not trigger the bind-failure bypass",
+			pod: makePod(podOpts{
+				assignedPhase: string(util.AssignPhaseAllocating),
+				condition:     unschedulableCond(base),
+				predicateTime: nanos(base.Add(2 * time.Second)),
 			}),
 			want: false,
 		},
