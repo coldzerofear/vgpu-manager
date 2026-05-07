@@ -25,7 +25,6 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
-	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 )
 
 type gpuFilter struct {
@@ -439,8 +438,11 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			failedNodesMap[node.Name] = errMsg
 			continue
 		}
-		// Modify scheduling status to prevent incorrect calculation of device resource claims caused by old non schedulable status.
-		f.podLister.Mutation(mutationPodScheduledCondition(newPod))
+		// Cache the patched Pod locally to bridge the informer watch lag.
+		// Concurrent Filter calls on neighbouring pods would otherwise rebuild
+		// NodeInfo from a stale informer view (without our pre-allocated
+		// annotation) and miscount free GPU.
+		f.podLister.Mutation(newPod)
 		filteredNodes = append(filteredNodes, *node)
 		success = true
 	}
@@ -448,15 +450,6 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		f.recorder.Eventf(pod, corev1.EventTypeNormal, "FilteringSucceed", "Successfully matched to node <%s>", filteredNodes[0].Name)
 	}
 	return filteredNodes, failedNodesMap, nil
-}
-
-func mutationPodScheduledCondition(pod *corev1.Pod) *corev1.Pod {
-	index, _ := podutil.GetPodCondition(&pod.Status, corev1.PodScheduled)
-	if index >= 0 {
-		pod.Status.Conditions[index].Status = corev1.ConditionTrue
-		pod.Status.Conditions[index].Reason = ""
-	}
-	return pod
 }
 
 func PodUsedGPUTopologyMode(pod *corev1.Pod) util.TopologyMode {

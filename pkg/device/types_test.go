@@ -3,6 +3,7 @@ package device
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/google/uuid"
@@ -276,6 +277,136 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 				t.Error(err)
 			}
 			assert.Equal(t, *test.want, *contDevices)
+		})
+	}
+}
+
+func Test_PodStatusUnschedulable(t *testing.T) {
+	base := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+
+	type podOpts struct {
+		nodeName      string
+		condition     *corev1.PodCondition
+		predicateTime string // empty = annotation absent
+	}
+	makePod := func(o podOpts) *corev1.Pod {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+			Spec:       corev1.PodSpec{NodeName: o.nodeName},
+		}
+		if o.condition != nil {
+			pod.Status.Conditions = []corev1.PodCondition{*o.condition}
+		}
+		if o.predicateTime != "" {
+			pod.Annotations[util.PodPredicateTimeAnnotation] = o.predicateTime
+		}
+		return pod
+	}
+	unschedulableCond := func(at time.Time) *corev1.PodCondition {
+		return &corev1.PodCondition{
+			Type:               corev1.PodScheduled,
+			Status:             corev1.ConditionFalse,
+			Reason:             corev1.PodReasonUnschedulable,
+			LastTransitionTime: metav1.NewTime(at),
+		}
+	}
+	nanos := func(t time.Time) string {
+		return fmt.Sprintf("%d", t.UnixNano())
+	}
+
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "already bound to a node returns false regardless of condition",
+			pod: makePod(podOpts{
+				nodeName:      "node-1",
+				condition:     unschedulableCond(base),
+				predicateTime: nanos(base),
+			}),
+			want: false,
+		},
+		{
+			name: "no PodScheduled condition (first scheduling attempt)",
+			pod:  makePod(podOpts{}),
+			want: false,
+		},
+		{
+			name: "condition is False but reason is not Unschedulable",
+			pod: makePod(podOpts{
+				condition: &corev1.PodCondition{
+					Type:               corev1.PodScheduled,
+					Status:             corev1.ConditionFalse,
+					Reason:             "SchedulerError",
+					LastTransitionTime: metav1.NewTime(base),
+				},
+			}),
+			want: false,
+		},
+		{
+			name: "condition Status True is never Unschedulable",
+			pod: makePod(podOpts{
+				condition: &corev1.PodCondition{
+					Type:               corev1.PodScheduled,
+					Status:             corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(base),
+				},
+			}),
+			want: false,
+		},
+		{
+			name: "Unschedulable condition with no predicate-time annotation falls back to condition-only logic",
+			pod: makePod(podOpts{
+				condition: unschedulableCond(base),
+			}),
+			want: true,
+		},
+		{
+			name: "predicate-time strictly newer than condition: Filter passed in current cycle",
+			pod: makePod(podOpts{
+				condition:     unschedulableCond(base),
+				predicateTime: nanos(base.Add(2 * time.Second)),
+			}),
+			want: false,
+		},
+		{
+			name: "predicate-time older than condition: current cycle rejected after Filter",
+			pod: makePod(podOpts{
+				condition:     unschedulableCond(base.Add(2 * time.Second)),
+				predicateTime: nanos(base),
+			}),
+			want: true,
+		},
+		{
+			name: "same-second boundary is conservatively treated as condition newer",
+			pod: makePod(podOpts{
+				condition:     unschedulableCond(base),
+				predicateTime: nanos(base.Add(500 * time.Millisecond)),
+			}),
+			want: true,
+		},
+		{
+			name: "malformed predicate-time falls back to condition-only logic",
+			pod: makePod(podOpts{
+				condition:     unschedulableCond(base),
+				predicateTime: "not-a-number",
+			}),
+			want: true,
+		},
+		{
+			name: "empty predicate-time string falls back to condition-only logic",
+			pod: makePod(podOpts{
+				condition:     unschedulableCond(base),
+				predicateTime: "",
+			}),
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, PodStatusUnschedulable(tt.pod))
 		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
@@ -670,16 +671,42 @@ func (n *NodeInfo) Clone() framework.StateData {
 	return n.DeepCopy()
 }
 
-// PodStatusUnschedulable Determine whether the scheduler has marked the pod as unschedulable
+// PodStatusUnschedulable reports whether the scheduler has marked the pod
+// unschedulable for the *current* scheduling cycle. The PodScheduled=False
+// condition can persist across cycles, so a stale Unschedulable from a
+// previous failed cycle would falsely exclude the pod's GPU usage from
+// NodeInfo. To disambiguate, compare against PodPredicateTimeAnnotation
+// (stamped by Filter on every pass): if the predicate-time is newer than
+// condition.LastTransitionTime, the current cycle has already passed Filter
+// and the pod is occupying GPU resources regardless of the stale condition.
 func PodStatusUnschedulable(pod *corev1.Pod) bool {
-	if pod.Spec.NodeName == "" {
-		_, condition := podutil.GetPodCondition(&pod.Status, corev1.PodScheduled)
-		if condition != nil {
-			return condition.Status == corev1.ConditionFalse &&
-				condition.Reason == corev1.PodReasonUnschedulable
-		}
+	if pod.Spec.NodeName != "" {
+		return false
 	}
-	return false
+	_, condition := podutil.GetPodCondition(&pod.Status, corev1.PodScheduled)
+	if condition == nil {
+		return false
+	}
+	if condition.Status != corev1.ConditionFalse ||
+		condition.Reason != corev1.PodReasonUnschedulable {
+		return false
+	}
+	predicateTimeStr, ok := util.HasAnnotation(pod, util.PodPredicateTimeAnnotation)
+	if !ok || predicateTimeStr == "" {
+		return true
+	}
+	predicateTimeNanos, err := strconv.ParseUint(predicateTimeStr, 10, 64)
+	if err != nil {
+		return true
+	}
+	// LastTransitionTime is persisted at second precision (RFC3339), so
+	// compare in seconds. Same-second is conservatively treated as
+	// "condition newer" to avoid double-allocation when ordering is
+	// ambiguous.
+	if int64(predicateTimeNanos/uint64(time.Second)) > condition.LastTransitionTime.Unix() {
+		return false
+	}
+	return true
 }
 
 func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
