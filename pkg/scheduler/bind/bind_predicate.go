@@ -55,20 +55,24 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 
 	pod, err := b.kubeClient.CoreV1().Pods(args.PodNamespace).Get(ctx, args.PodName, metav1.GetOptions{})
 	if err != nil {
-		klog.ErrorS(err, "KubeClient Get target Pod failed", "targetPod",
+		klog.ErrorS(err, "kubeClient get target pod failed", "targetPod",
 			fmt.Sprintf("%s/%s", args.PodNamespace, args.PodName))
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 	if pod.UID != args.PodUID {
-		errMessage := fmt.Sprintf("different UID from the target pod: "+
-			"current: %s, target: %s", pod.UID, args.PodUID)
-		klog.Errorln(errMessage)
-		return &extenderv1.ExtenderBindingResult{Error: errMessage}
+		msg := "different UID from the target pod"
+		klog.InfoS(msg, "pod", klog.KObj(pod), "current", pod.UID, "target", args.PodUID)
+		return &extenderv1.ExtenderBindingResult{Error: msg}
 	}
 	nodeName, ok := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
 	if ok && nodeName != args.Node {
 		err = fmt.Errorf("predicate node is different from the node to be bound")
-		klog.Warningf("Pod <%s> %s", klog.KObj(pod), err.Error())
+		klog.ErrorS(err, "", "pod", klog.KObj(pod))
+		b.recorder.Event(pod, corev1.EventTypeWarning, "BindingFailed", err.Error())
+		// patch failed metadata
+		if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
+			klog.ErrorS(patchErr, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
+		}
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 
