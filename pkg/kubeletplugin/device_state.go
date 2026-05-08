@@ -28,6 +28,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/bootid"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/sirupsen/logrus"
 	resourceapi "k8s.io/api/resource/v1"
@@ -187,13 +188,43 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to list checkpoints: %v", err)
 	}
 
+	currentBootID, err := bootid.GetCurrentBootID()
+	if err != nil {
+		return nil, fmt.Errorf("read node boot id: %w", err)
+	}
+
 	for _, c := range checkpoints {
 		if c == DriverPluginCheckpointFileBasename {
-			return state, nil
+			cp, err := state.getCheckpoint(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("unable to get checkpoint: %w", err)
+			}
+			storedBootID := cp.GetNodeBootID()
+			if storedBootID == "" { //nolint:gocritic,staticcheck
+				// legacy checkpoint file does not contain a boot ID, inject current boot ID
+				// note: this is a temporary workaround to ensure that the checkpoint file is always updated with the current boot ID
+				// note: this will temporary break the assertion that its prepared devices are prepared by the same boot ID
+				klog.V(4).Info("The existing checkpoint file does not contain a boot ID, injecting current boot ID")
+				err := state.updateCheckpoint(ctx, func(checkpoint *Checkpoint) {
+					checkpoint.V2.NodeBootID = currentBootID
+				})
+				if err != nil {
+					return nil, fmt.Errorf("unable to update checkpoint: %w", err)
+				}
+				//syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
+				return state, nil
+			} else if storedBootID == currentBootID {
+				//syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
+				return state, nil
+			} else {
+				klog.Infof("Invalidating checkpoint: checkpoint nodeBootID %q != current %q", storedBootID, currentBootID)
+			}
 		}
 	}
 
-	if err := state.createCheckpoint(ctx, &Checkpoint{}); err != nil {
+	klog.Infof("Create empty checkpoint")
+	newCheckpoint := &Checkpoint{V2: &CheckpointV2{NodeBootID: currentBootID}}
+	if err := state.createCheckpoint(ctx, newCheckpoint); err != nil {
 		return nil, fmt.Errorf("unable to create fresh checkpoint: %v", err)
 	}
 
@@ -563,6 +594,10 @@ func (s *DeviceState) createCheckpoint(ctx context.Context, cp *Checkpoint) erro
 	klog.V(7).Info("acquired cplock (createCheckpoint)")
 	err = s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFileBasename, cp)
 	klog.V(7).Info("create cp: done")
+	if err != nil {
+		return err
+	}
+	//syncPreparedDevicesGaugeFromCheckpoint(s.config.flags.nodeName, cp)
 	return err
 }
 

@@ -27,10 +27,32 @@ import (
 
 type PartCapacityMap map[resourceapi.QualifiedName]resourceapi.DeviceCapacity
 
+// This is the single source of truth for the non-MIG full-GPU capacity
+// field and MUST be used by both the GetDevice() path and the
+// partitions PartCapacities(). The two publish paths are
+// dispatched separately (feature-gate-gated in publishResources()), so
+// without a shared helper they may silently drift.
+func (d *GpuDeviceInfo) fullGpuCapacity() PartCapacityMap {
+	return PartCapacityMap{
+		"memory": resourceapi.DeviceCapacity{
+			Value: *resource.NewQuantity(int64(d.Memory.Total), resource.BinarySI),
+		},
+	}
+}
+
 // KEP 4815 device announcement: return the full device capacity for this device
 // (uses information from looking at all MIG profiles beforehand).
+//
+// When MIG profiles have not been inspected for Full GPU (e.g. on Ampere
+// with MIG disabled), maxCapacities is empty. Fall back to advertising
+// at least the GPU's total memory, matching the
+// legacy non-DynamicMIG GetDevice() path so that the full GPU device is
+// announced with quantitative capacity in both paths.
 func (d *GpuDeviceInfo) PartCapacities() PartCapacityMap {
-	return d.maxCapacities
+	if len(d.maxCapacities) > 0 {
+		return d.maxCapacities
+	}
+	return d.fullGpuCapacity()
 }
 
 // KEP 4815 device announcement: return the name for the shared counter
@@ -48,36 +70,49 @@ func (d *GpuDeviceInfo) GetSharedCounterSetName() string {
 // define one counter per device capacity dimension, and add one counter
 // (capacity 1) per memory slice.
 func (d *GpuDeviceInfo) PartSharedCounterSets() []resourceapi.CounterSet {
+	// Returns nil when no MIG profile data has been collected for this GPU
+	// (e.g. on Ampere with MIG disabled, or for vGPU guests). Such GPUs have
+	// no partitions, so a per-GPU CounterSet has no consumers and the
+	// Kubernetes API would reject an empty Counters map.
+	// error: spec.sharedCounters[0].counters: Required value
+	if len(d.maxCapacities) == 0 {
+		return nil
+	}
 	return []resourceapi.CounterSet{{
 		Name:     d.GetSharedCounterSetName(),
 		Counters: addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
 	}}
 }
 
-func (d *VGpuDeviceInfo) PartSharedCounterSets() []resourceapi.CounterSet {
-	return []resourceapi.CounterSet{{
-		Name:     d.GetSharedCounterSetName(),
-		Counters: addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
-	}}
-}
+//func (d *VGpuDeviceInfo) PartSharedCounterSets() []resourceapi.CounterSet {
+//	return []resourceapi.CounterSet{{
+//		Name:     d.GetSharedCounterSetName(),
+//		Counters: addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
+//	}}
+//}
 
 // KEP 4815 device announcement: define what this full GPU consumes when allocated.
 // Let the full device consume everything. Goals: 1) when the full device is
 // allocated, all available counters drop to zero. 2) when the smallest
 // partition gets allocated, the full device cannot be allocated anymore.
 func (d *GpuDeviceInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
+	// Returns nil when no MIG profile data has been collected for this GPU
+	// (matches PartSharedCounterSets — there is no CounterSet to consume from).
+	if len(d.maxCapacities) == 0 {
+		return nil
+	}
 	return []resourceapi.DeviceCounterConsumption{{
 		CounterSet: d.GetSharedCounterSetName(),
 		Counters:   addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
 	}}
 }
 
-func (d *VGpuDeviceInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
-	return []resourceapi.DeviceCounterConsumption{{
-		CounterSet: d.GetSharedCounterSetName(),
-		Counters:   addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
-	}}
-}
+//func (d *VGpuDeviceInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
+//	return []resourceapi.DeviceCounterConsumption{{
+//		CounterSet: d.GetSharedCounterSetName(),
+//		Counters:   addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
+//	}}
+//}
 
 // KEP 4815 device announcement: return the 'full' device description.
 func (d *GpuDeviceInfo) PartGetDevice() resourceapi.Device {
@@ -99,11 +134,11 @@ func (d *GpuDeviceInfo) PartGetDevice() resourceapi.Device {
 
 func (d *VGpuDeviceInfo) PartGetDevice() resourceapi.Device {
 	dev := d.GetDevice()
-	//capacities := d.PartCapacities()
-	//for name, capacity := range dev.Capacity {
-	//	capacities[name] = capacity
-	//}
-	//dev.Capacity = capacities
+	capacities := d.PartCapacities()
+	for name, capacity := range dev.Capacity {
+		capacities[name] = capacity
+	}
+	dev.Capacity = capacities
 	dev.ConsumesCounters = d.PartConsumesCounters()
 	return dev
 }
