@@ -54,7 +54,7 @@ var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 		SerialBindNode:   {Default: true, PreRelease: featuregate.Beta},
-		SerialFilterNode: {Default: false, PreRelease: featuregate.Alpha},
+		SerialFilterNode: {Default: true, PreRelease: featuregate.Beta},
 		GPUTopology:      {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
