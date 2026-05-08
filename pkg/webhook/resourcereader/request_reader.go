@@ -58,9 +58,10 @@ func (r *resourceAPIReader) GetDeviceRequestsForPodClaim(ctx context.Context, na
 	if podClaim == nil {
 		return nil, fmt.Errorf("podClaim is nil")
 	}
-
+	objKey := types.NamespacedName{Namespace: namespace}
 	if podClaim.ResourceClaimName != nil && *podClaim.ResourceClaimName != "" {
-		claim, err := r.getResourceClaim(ctx, types.NamespacedName{Namespace: namespace, Name: *podClaim.ResourceClaimName})
+		objKey.Name = *podClaim.ResourceClaimName
+		claim, err := r.getResourceClaim(ctx, objKey, true)
 		if err != nil {
 			return nil, err
 		}
@@ -68,7 +69,8 @@ func (r *resourceAPIReader) GetDeviceRequestsForPodClaim(ctx context.Context, na
 	}
 
 	if podClaim.ResourceClaimTemplateName != nil && *podClaim.ResourceClaimTemplateName != "" {
-		tpl, err := r.getResourceClaimTemplate(ctx, types.NamespacedName{Namespace: namespace, Name: *podClaim.ResourceClaimTemplateName})
+		objKey.Name = *podClaim.ResourceClaimTemplateName
+		tpl, err := r.getResourceClaimTemplate(ctx, objKey, true)
 		if err != nil {
 			return nil, err
 		}
@@ -82,7 +84,7 @@ func (r *resourceAPIReader) GetResourceClaim(ctx context.Context, key client.Obj
 	if obj == nil {
 		return fmt.Errorf("obj is nil")
 	}
-	if claim, err := r.getResourceClaim(ctx, key); err != nil {
+	if claim, err := r.getResourceClaim(ctx, key, false); err != nil {
 		return err
 	} else {
 		claim.DeepCopyInto(obj)
@@ -94,7 +96,7 @@ func (r *resourceAPIReader) GetResourceClaimTemplate(ctx context.Context, key cl
 	if obj == nil {
 		return fmt.Errorf("obj is nil")
 	}
-	if claim, err := r.getResourceClaimTemplate(ctx, key); err != nil {
+	if claim, err := r.getResourceClaimTemplate(ctx, key, false); err != nil {
 		return err
 	} else {
 		claim.DeepCopyInto(obj)
@@ -106,7 +108,7 @@ func (r *resourceAPIReader) GetDeviceClass(ctx context.Context, key client.Objec
 	if obj == nil {
 		return fmt.Errorf("obj is nil")
 	}
-	if class, err := r.getDeviceClass(ctx, key); err != nil {
+	if class, err := r.getDeviceClass(ctx, key, false); err != nil {
 		return err
 	} else {
 		class.DeepCopyInto(obj)
@@ -118,7 +120,7 @@ func (r *resourceAPIReader) GetPod(ctx context.Context, key client.ObjectKey, ob
 	if obj == nil {
 		return fmt.Errorf("obj is nil")
 	}
-	if pod, err := r.getPod(ctx, key); err != nil {
+	if pod, err := r.getPod(ctx, key, false); err != nil {
 		return err
 	} else {
 		pod.DeepCopyInto(obj)
@@ -142,13 +144,16 @@ func (r *resourceAPIReader) Mutation(obj client.Object) {
 	}
 }
 
-func (r *resourceAPIReader) getResourceClaim(ctx context.Context, key types.NamespacedName) (*resourceapi.ResourceClaim, error) {
+func (r *resourceAPIReader) getResourceClaim(ctx context.Context, key types.NamespacedName, deepCopy bool) (*resourceapi.ResourceClaim, error) {
 	if obj, exists, err := r.claimMutationCache.GetByKey(key.String()); err != nil {
 		return nil, err
 	} else if exists {
 		claim, ok := obj.(*resourceapi.ResourceClaim)
 		if !ok {
 			return nil, fmt.Errorf("unexpected object type %T for ResourceClaim %q", obj, key.String())
+		}
+		if !deepCopy {
+			return claim, nil
 		}
 		return claim.DeepCopy(), nil
 	}
@@ -163,16 +168,22 @@ func (r *resourceAPIReader) getResourceClaim(ctx context.Context, key types.Name
 	}
 
 	r.Mutation(claim)
-	return claim, nil
+	if !deepCopy {
+		return claim, nil
+	}
+	return claim.DeepCopy(), nil
 }
 
-func (r *resourceAPIReader) getResourceClaimTemplate(ctx context.Context, key types.NamespacedName) (*resourceapi.ResourceClaimTemplate, error) {
+func (r *resourceAPIReader) getResourceClaimTemplate(ctx context.Context, key types.NamespacedName, deepCopy bool) (*resourceapi.ResourceClaimTemplate, error) {
 	if obj, exists, err := r.templateMutationCache.GetByKey(key.String()); err != nil {
 		return nil, err
 	} else if exists {
 		tpl, ok := obj.(*resourceapi.ResourceClaimTemplate)
 		if !ok {
 			return nil, fmt.Errorf("unexpected object type %T for ResourceClaimTemplate %q", obj, key.String())
+		}
+		if !deepCopy {
+			return tpl, nil
 		}
 		return tpl.DeepCopy(), nil
 	}
@@ -182,58 +193,73 @@ func (r *resourceAPIReader) getResourceClaimTemplate(ctx context.Context, key ty
 	}
 
 	tpl := &resourceapi.ResourceClaimTemplate{}
-	if err := r.liveClient.Get(ctx, key, tpl); err != nil {
+	if err := r.liveClient.Get(ctx, key, tpl, client.UnsafeDisableDeepCopy); err != nil {
 		return nil, err
 	}
 
 	r.Mutation(tpl)
-	return tpl, nil
+	if !deepCopy {
+		return tpl, nil
+	}
+	return tpl.DeepCopy(), nil
 }
 
-func (r *resourceAPIReader) getDeviceClass(ctx context.Context, key types.NamespacedName) (*resourceapi.DeviceClass, error) {
+func (r *resourceAPIReader) getDeviceClass(ctx context.Context, key types.NamespacedName, deepCopy bool) (*resourceapi.DeviceClass, error) {
 	if obj, exists, err := r.classMutationCache.GetByKey(key.String()); err != nil {
 		return nil, err
 	} else if exists {
-		tpl, ok := obj.(*resourceapi.DeviceClass)
+		class, ok := obj.(*resourceapi.DeviceClass)
 		if !ok {
 			return nil, fmt.Errorf("unexpected object type %T for DeviceClass %q", obj, key.String())
 		}
-		return tpl.DeepCopy(), nil
+		if !deepCopy {
+			return class, nil
+		}
+		return class.DeepCopy(), nil
 	}
 
 	if r.liveClient == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Group: resourceapi.GroupName, Resource: "deviceclasses"}, key.String())
 	}
 
-	tpl := &resourceapi.DeviceClass{}
-	if err := r.liveClient.Get(ctx, key, tpl); err != nil {
+	class := &resourceapi.DeviceClass{}
+	if err := r.liveClient.Get(ctx, key, class, client.UnsafeDisableDeepCopy); err != nil {
 		return nil, err
 	}
 
-	r.Mutation(tpl)
-	return tpl, nil
+	r.Mutation(class)
+	if !deepCopy {
+		return class, nil
+	}
+	return class.DeepCopy(), nil
 }
 
-func (r *resourceAPIReader) getPod(ctx context.Context, key types.NamespacedName) (*corev1.Pod, error) {
+func (r *resourceAPIReader) getPod(ctx context.Context, key types.NamespacedName, deepCopy bool) (*corev1.Pod, error) {
 	if obj, exists, err := r.podMutationCache.GetByKey(key.String()); err != nil {
 		return nil, err
 	} else if exists {
-		tpl, ok := obj.(*corev1.Pod)
+		pod, ok := obj.(*corev1.Pod)
 		if !ok {
 			return nil, fmt.Errorf("unexpected object type %T for DeviceClass %q", obj, key.String())
 		}
-		return tpl.DeepCopy(), nil
+		if !deepCopy {
+			return pod, nil
+		}
+		return pod.DeepCopy(), nil
 	}
 
 	if r.liveClient == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Group: corev1.GroupName, Resource: "pods"}, key.String())
 	}
 
-	tpl := &corev1.Pod{}
-	if err := r.liveClient.Get(ctx, key, tpl); err != nil {
+	pod := &corev1.Pod{}
+	if err := r.liveClient.Get(ctx, key, pod, client.UnsafeDisableDeepCopy); err != nil {
 		return nil, err
 	}
 
-	r.Mutation(tpl)
-	return tpl, nil
+	r.Mutation(pod)
+	if !deepCopy {
+		return pod, nil
+	}
+	return pod.DeepCopy(), nil
 }
