@@ -2,9 +2,7 @@ package validate
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -15,7 +13,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
-	admissionv1beta1 "k8s.io/api/admission/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -39,17 +37,22 @@ func NewValidateWebhook(client client.Client, options *options.Options,
 	if !options.DefaultConvertToDRA {
 		return nil, nil
 	}
-	return &resourceClaimWebhook{
-		options:  options,
-		scheme:   client.Scheme(),
-		logger:   klog.NewKlogr(),
-		reader:   reader,
-		recorder: recorder,
-		codecs:   serializer.NewCodecFactory(client.Scheme()),
+	scheme := client.Scheme()
+	codecs := serializer.NewCodecFactory(scheme)
+	return &admission.Webhook{
+		Handler: &validateHandle{
+			options:  options,
+			scheme:   scheme,
+			logger:   klog.NewKlogr(),
+			reader:   reader,
+			recorder: recorder,
+			codecs:   codecs,
+		},
+		RecoverPanic: ptr.To[bool](true),
 	}, nil
 }
 
-type resourceClaimWebhook struct {
+type validateHandle struct {
 	options  *options.Options
 	scheme   *runtime.Scheme
 	logger   logr.Logger
@@ -58,121 +61,21 @@ type resourceClaimWebhook struct {
 	codecs   serializer.CodecFactory
 }
 
-// serve handles the http portion of a request prior to handing to an admit
-// function.
-func (rw *resourceClaimWebhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	logger := rw.logger
-	var body []byte
-	if r.Body != nil {
-		data, err := io.ReadAll(r.Body)
-		if err != nil {
-			logger.Error(err, "failed to read body")
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		body = data
-	}
-
-	// verify the content type is accurate
-	contentType := r.Header.Get("Content-Type")
-	if contentType != "application/json" {
-		msg := fmt.Sprintf("contentType=%s, expected application/json", contentType)
-		logger.Error(nil, msg)
-		http.Error(w, msg, http.StatusUnsupportedMediaType)
-		return
-	}
-
-	logger.V(5).Info(fmt.Sprintf("handling request: %s", body))
-
-	requestedAdmissionReview, err := rw.readAdmissionReview(body)
-	if err != nil {
-		msg := fmt.Sprintf("failed to read AdmissionReview from request body: %v", err)
-		logger.Error(nil, msg)
-		http.Error(w, msg, http.StatusBadRequest)
-		return
-	}
-
-	logger = admission.DefaultLogConstructor(logger, &admission.Request{
-		AdmissionRequest: *requestedAdmissionReview.Request,
-	})
-	logger = logger.WithValues("operation", requestedAdmissionReview.Request.Operation)
+func (rw *validateHandle) Handle(ctx context.Context, req admission.Request) admission.Response {
+	logger := log.FromContext(ctx)
+	logger.V(5).Info(fmt.Sprintf("handling request: %v", req))
+	logger = logger.WithValues("operation", req.Operation)
 	logger.V(4).Info("into resourceClaim validate handle")
-	ctx := log.IntoContext(r.Context(), logger)
-
-	responseAdmissionReview := &admissionv1.AdmissionReview{}
-	responseAdmissionReview.SetGroupVersionKind(requestedAdmissionReview.GroupVersionKind())
-	responseAdmissionReview.Response = rw.admitResourceClaimParameters(ctx, *requestedAdmissionReview)
-	responseAdmissionReview.Response.UID = requestedAdmissionReview.Request.UID
-
-	logger.V(5).Info(fmt.Sprintf("sending response: %v", responseAdmissionReview))
-	respBytes, err := json.Marshal(responseAdmissionReview)
-	if err != nil {
-		logger.Error(err, "responseAdmissionReview marshal failed")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	if _, err := w.Write(respBytes); err != nil {
-		logger.Error(err, "Write response body failed")
-	}
-}
-
-var (
-	admissionReviewV1GVK      = admissionv1.SchemeGroupVersion.WithKind("AdmissionReview")
-	admissionReviewV1beta1GVK = admissionv1beta1.SchemeGroupVersion.WithKind("AdmissionReview")
-)
-
-func (rw *resourceClaimWebhook) readAdmissionReview(data []byte) (*admissionv1.AdmissionReview, error) {
-	deserializer := rw.codecs.UniversalDeserializer()
-	obj, gvk, err := deserializer.Decode(data, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("request could not be decoded: %w", err)
-	}
-
-	var requestedAdmissionReview *admissionv1.AdmissionReview
-
-	switch *gvk {
-	case admissionReviewV1GVK:
-		admissionReview, ok := obj.(*admissionv1.AdmissionReview)
-		if !ok {
-			return nil, fmt.Errorf("expected v1.AdmissionReview but got: %T", obj)
-		}
-		requestedAdmissionReview = admissionReview
-	case admissionReviewV1beta1GVK:
-		admissionReview, ok := obj.(*admissionv1beta1.AdmissionReview)
-		if !ok {
-			return nil, fmt.Errorf("expected v1.AdmissionReview but got: %T", obj)
-		}
-		requestedAdmissionReview = &admissionv1.AdmissionReview{}
-		requestedAdmissionReview.TypeMeta = admissionReview.TypeMeta
-		// Both v1 and v1beta1 AdmissionReview types are exactly the same, so directly convert the pointer to v1.
-		if admissionReview.Request != nil {
-			marshal, err := json.Marshal(admissionReview.Request)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal AdmissionReview request: %v", err)
-			}
-			requestedAdmissionReview.Request = &admissionv1.AdmissionRequest{}
-			err = json.Unmarshal(marshal, &requestedAdmissionReview.Request)
-			if err != nil {
-				return nil, fmt.Errorf("failed to unmarshal AdmissionReview request: %v", err)
-			}
-		}
-		if admissionReview.Response != nil {
-			marshal, err := json.Marshal(admissionReview.Response)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal AdmissionReview response: %v", err)
-			}
-			requestedAdmissionReview.Response = &admissionv1.AdmissionResponse{}
-			err = json.Unmarshal(marshal, &requestedAdmissionReview.Response)
-			if err != nil {
-				return nil, fmt.Errorf("failed to unmarshal AdmissionReview response: %v", err)
-			}
-		}
+	ctx = log.IntoContext(ctx, logger)
+	switch req.Operation {
+	case admissionv1.Create, admissionv1.Update:
+		resp := rw.admitResourceClaimParameters(ctx, req.AdmissionRequest)
+		logger.V(5).Info(fmt.Sprintf("sending response: %v", resp))
+		return admission.Response{AdmissionResponse: resp}
 	default:
-		return nil, fmt.Errorf("unsupported group version kind: %v", gvk)
+		// Always skip when a DELETE or UPDATE operation received in custom mutation handler.
+		return admission.Allowed("")
 	}
-
-	return requestedAdmissionReview, nil
 }
 
 func buildClaimScopedRequestKey(claimUID, mainRequest string) string {
@@ -187,15 +90,15 @@ func containerID(pod *corev1.Pod, containerName string) string {
 	return pod.Namespace + "/" + pod.Name + "/" + containerName
 }
 
-func (rw *resourceClaimWebhook) isVGPUDeviceRequest(ctx context.Context, matchedDriver bool, req resourceapi.DeviceRequest) bool {
+func (rw *validateHandle) isVGPUDeviceRequest(ctx context.Context, matchedDriver bool, req resourceapi.DeviceRequest) bool {
 	return common.DeviceRequestLooksLikeVGPU(ctx, rw.reader, req, matchedDriver, rw.options.VGPUDeviceClassName)
 }
 
-func (rw *resourceClaimWebhook) isVGPUSubRequest(ctx context.Context, matchedDriver bool, req resourceapi.DeviceSubRequest) bool {
+func (rw *validateHandle) isVGPUSubRequest(ctx context.Context, matchedDriver bool, req resourceapi.DeviceSubRequest) bool {
 	return common.SubRequestLooksLikeVGPU(ctx, rw.reader, req, matchedDriver, rw.options.VGPUDeviceClassName)
 }
 
-func (rw *resourceClaimWebhook) getAllocatedVGPURequests(ctx context.Context, claim *resourceapi.ResourceClaim) sets.Set[string] {
+func (rw *validateHandle) getAllocatedVGPURequests(ctx context.Context, claim *resourceapi.ResourceClaim) sets.Set[string] {
 	return claimresolve.GetAllocatedVGPURequests(ctx, claim, util.DRADriverName,
 		func(ctx context.Context, request resourceapi.DeviceRequest) bool {
 			return rw.isVGPUDeviceRequest(ctx, true, request)
@@ -220,7 +123,7 @@ type actualRequestUsage struct {
 //   - init-init cannot hit the same mainRequest
 //   - init-app allow hitting the same mainRequest
 //   - cross Pod sharing of the same mainRequest is not allowed
-func (rw *resourceClaimWebhook) validateOneReservedPodAgainstAllocatedClaim(
+func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 	ctx context.Context,
 	pod *corev1.Pod,
 	currentClaim *resourceapi.ResourceClaim,
@@ -333,7 +236,7 @@ func (rw *resourceClaimWebhook) validateOneReservedPodAgainstAllocatedClaim(
 	return nil
 }
 
-func (rw *resourceClaimWebhook) getClaimCached(
+func (rw *validateHandle) getClaimCached(
 	ctx context.Context,
 	namespace, name string,
 	cache map[string]*resourceapi.ResourceClaim,
@@ -356,7 +259,7 @@ func (rw *resourceClaimWebhook) getClaimCached(
 }
 
 // validateAllocatedVGPUSharing The entrance to the claim/status webhook.
-func (rw *resourceClaimWebhook) validateAllocatedVGPUSharing(
+func (rw *validateHandle) validateAllocatedVGPUSharing(
 	ctx context.Context,
 	claim *resourceapi.ResourceClaim,
 ) error {
@@ -395,19 +298,19 @@ func (rw *resourceClaimWebhook) validateAllocatedVGPUSharing(
 
 // admitResourceClaimParameters accepts both ResourceClaims and ResourceClaimTemplates and validates their
 // opaque device configuration parameters for this driver.
-func (rw *resourceClaimWebhook) admitResourceClaimParameters(ctx context.Context, ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+func (rw *validateHandle) admitResourceClaimParameters(ctx context.Context, req admissionv1.AdmissionRequest) admissionv1.AdmissionResponse {
 	logger := log.FromContext(ctx)
 	logger.V(2).Info("admitting resource claim parameters")
 
 	var deviceConfigs []resourceapi.DeviceClaimConfiguration
 	var specPath string
 
-	switch ar.Request.Resource {
+	switch req.Resource {
 	case resourceClaimResourceV1, resourceClaimResourceV1Beta1, resourceClaimResourceV1Beta2:
-		claim, err := rw.extractResourceClaim(ar, ar.Request.Object.Raw)
+		claim, err := rw.extractResourceClaim(req)
 		if err != nil {
 			logger.Error(err, "extractResourceClaim failed")
-			return &admissionv1.AdmissionResponse{
+			return admissionv1.AdmissionResponse{
 				Result: &metav1.Status{
 					Message: err.Error(),
 					Reason:  metav1.StatusReasonBadRequest,
@@ -415,13 +318,13 @@ func (rw *resourceClaimWebhook) admitResourceClaimParameters(ctx context.Context
 			}
 		}
 
-		if ar.Request.Operation == admissionv1.Update && ar.Request.SubResource == "status" {
+		if req.Operation == admissionv1.Update && req.SubResource == "status" {
 			if err = rw.validateAllocatedVGPUSharing(ctx, claim); err != nil {
 				if rw.recorder != nil {
 					rw.recorder.Eventf(claim, nil, corev1.EventTypeWarning, "AdmissionFailed", "Conflict", err.Error())
 				}
 				logger.Error(err, "validateAllocatedVGPUSharing failed")
-				return &admissionv1.AdmissionResponse{
+				return admissionv1.AdmissionResponse{
 					Result: &metav1.Status{
 						Message: err.Error(),
 						Reason:  metav1.StatusReasonInvalid,
@@ -433,10 +336,10 @@ func (rw *resourceClaimWebhook) admitResourceClaimParameters(ctx context.Context
 		deviceConfigs = claim.Spec.Devices.Config
 		specPath = "spec"
 	case resourceClaimTemplateResourceV1, resourceClaimTemplateResourceV1Beta1, resourceClaimTemplateResourceV1Beta2:
-		claimTemplate, err := rw.extractResourceClaimTemplate(ar)
+		claimTemplate, err := rw.extractResourceClaimTemplate(req)
 		if err != nil {
 			logger.Error(err, "extractResourceClaimTemplate failed")
-			return &admissionv1.AdmissionResponse{
+			return admissionv1.AdmissionResponse{
 				Result: &metav1.Status{
 					Message: err.Error(),
 					Reason:  metav1.StatusReasonBadRequest,
@@ -446,9 +349,9 @@ func (rw *resourceClaimWebhook) admitResourceClaimParameters(ctx context.Context
 		deviceConfigs = claimTemplate.Spec.Spec.Devices.Config
 		specPath = "spec.spec"
 	default:
-		msg := fmt.Sprintf("expected resource to be one of the supported versions for resourceclaims or resourceclaimtemplates, got %s", ar.Request.Resource)
+		msg := fmt.Sprintf("expected resource to be one of the supported versions for resourceclaims or resourceclaimtemplates, got %s", req.Resource)
 		logger.Error(nil, msg)
-		return &admissionv1.AdmissionResponse{
+		return admissionv1.AdmissionResponse{
 			Result: &metav1.Status{
 				Message: msg,
 				Reason:  metav1.StatusReasonBadRequest,
@@ -505,7 +408,7 @@ func (rw *resourceClaimWebhook) admitResourceClaimParameters(ctx context.Context
 		}
 		msg := fmt.Sprintf("%d configs failed to validate: %s", len(errs), strings.Join(errMsgs, "; "))
 		logger.Error(nil, msg)
-		return &admissionv1.AdmissionResponse{
+		return admissionv1.AdmissionResponse{
 			Result: &metav1.Status{
 				Message: msg,
 				Reason:  metav1.StatusReasonInvalid,
@@ -513,7 +416,5 @@ func (rw *resourceClaimWebhook) admitResourceClaimParameters(ctx context.Context
 		}
 	}
 
-	return &admissionv1.AdmissionResponse{
-		Allowed: true,
-	}
+	return admissionv1.AdmissionResponse{Allowed: true}
 }

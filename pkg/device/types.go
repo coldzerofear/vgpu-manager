@@ -424,8 +424,8 @@ type DeviceGatherInfo struct {
 func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
 	deviceRegister, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 	nodeDeviceInfo, err := ParseNodeDeviceInfo(deviceRegister)
-	if err != nil {
-		klog.ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
+	if err != nil || len(nodeDeviceInfo) == 0 {
+		klog.V(2).ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
 		return nil, errors.New("incorrect GPU registry")
 	}
 	deviceGatherInfo := DeviceGatherInfo{

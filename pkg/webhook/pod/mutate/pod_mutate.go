@@ -443,7 +443,7 @@ func (h *mutateHandle) updateResourceOwner(ctx context.Context, owner metav1.Obj
 
 func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admission.Response {
 	logger := log.FromContext(ctx).WithValues("operation", req.Operation)
-	logger.V(5).Info("into pod mutate handle")
+	logger.V(4).Info("into pod mutate handle")
 
 	var err error
 	pod := &corev1.Pod{}

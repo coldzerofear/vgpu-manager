@@ -915,7 +915,7 @@ func (h *validateHandle) deleteResourceClaims(ctx context.Context, pod *corev1.P
 
 func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admission.Response {
 	logger := log.FromContext(ctx).WithValues("operation", req.Operation)
-	logger.V(5).Info("into pod validate handle")
+	logger.V(4).Info("into pod validate handle")
 
 	var err error
 	var warnings []string

@@ -336,7 +336,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	}
 
 	if err := f.CheckDeviceRequest(pod); err != nil {
-		klog.ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
+		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
 		return filteredNodes, failedNodesMap, err
 	}
 
@@ -370,7 +370,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				batchNodeOrigPosition[node.Name] = index
 				nodeInfo, err := device.NewNodeInfo(node, pods)
 				if err != nil {
-					klog.ErrorS(err, "new node info failed, skipping node", "node", node.Name)
+					klog.V(3).ErrorS(err, "new node info failed, skipping node", "node", node.Name)
 					batchFailedNodes[node.Name] = err.Error()
 					continue
 				}

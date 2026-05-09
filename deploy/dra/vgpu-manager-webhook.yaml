@@ -239,6 +239,7 @@ webhooks:
         resources:
           - resourceclaims
           - resourceclaimtemplates
+        scope: "Namespaced"
       - apiGroups:
           - "resource.k8s.io"
         apiVersions:
