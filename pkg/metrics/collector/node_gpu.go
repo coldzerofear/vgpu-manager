@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -526,7 +527,7 @@ skipNvml:
 				continue
 			}
 
-			klog.V(4).Infoln("Container matching: using resource data", "ContainerName", container.Name)
+			klog.V(4).Infoln("Container matching: using resource data", "pod", klog.KObj(pod), "container", container.Name)
 			var getFullPath func(string) string
 			switch {
 			case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
@@ -553,7 +554,12 @@ skipNvml:
 					continue
 				}
 				deviceUUID := string(containerDevice.UUID[0:40])
-				vHostIndex, exists := devIndexMap[deviceUUID]
+				if !utf8.ValidString(deviceUUID) {
+					klog.InfoS("Invalid UTF-8 device uuid, skip current device", "pod", klog.KObj(pod),
+						"container", container.Name, "deviceUuid", deviceUUID, "deviceIndex", i)
+					continue
+				}
+				devHostIndex, exists := devIndexMap[deviceUUID]
 				if !exists {
 					continue
 				}
@@ -608,13 +614,13 @@ skipNvml:
 						if !exists {
 							return
 						}
-						if err = vMemory.RLock(vHostIndex); err != nil {
-							klog.V(3).ErrorS(err, "virtual memory RLock failed", "vHostIndex", vHostIndex)
+						if err = vMemory.RLock(devHostIndex); err != nil {
+							klog.V(3).ErrorS(err, "virtual memory RLock failed", "devHostIndex", devHostIndex)
 							return
 						}
-						defer func() { _ = vMemory.Unlock(vHostIndex) }()
-						for index := uint32(0); index < vMemory.GetVMem().Devices[vHostIndex].ProcessesSize; index++ {
-							deviceVMemUsage += vMemory.GetVMem().Devices[vHostIndex].Processes[index].Used
+						defer func() { _ = vMemory.Unlock(devHostIndex) }()
+						for index := uint32(0); index < vMemory.GetVMem().Devices[devHostIndex].ProcessesSize; index++ {
+							deviceVMemUsage += vMemory.GetVMem().Devices[devHostIndex].Processes[index].Used
 						}
 					}()
 				}
