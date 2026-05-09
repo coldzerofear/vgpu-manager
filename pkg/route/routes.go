@@ -24,8 +24,9 @@ const (
 	metricsPath = "/metrics"
 	apiPrefix   = "/scheduler"
 	// predication router path
-	filterPerfix = apiPrefix + "/filter"
-	bindPerfix   = apiPrefix + "/bind"
+	filterPerfix       = apiPrefix + "/filter"
+	bindPerfix         = apiPrefix + "/bind"
+	maxRequestBodySize = 7 * 1024 * 1024 // max 7mb request body size
 )
 
 func checkBody(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +97,9 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 		checkBody(w, r)
 
 		var buf bytes.Buffer
-		body := io.TeeReader(r.Body, &buf)
+		// Limit the body size to prevent deep nesting/resource exhaustion attacks
+		limitedReader := io.LimitReader(r.Body, maxRequestBodySize)
+		body := io.TeeReader(limitedReader, &buf)
 
 		var extenderArgs extenderv1.ExtenderArgs
 		var extenderFilterResult *extenderv1.ExtenderFilterResult
@@ -141,7 +144,9 @@ func BindPredicateRoute(predicate predicate.BindPredicate) httprouter.Handle {
 		checkBody(w, r)
 
 		var buf bytes.Buffer
-		body := io.TeeReader(r.Body, &buf)
+		// Limit the body size to prevent deep nesting/resource exhaustion attacks
+		limitedReader := io.LimitReader(r.Body, maxRequestBodySize)
+		body := io.TeeReader(limitedReader, &buf)
 
 		var extenderBindingArgs extenderv1.ExtenderBindingArgs
 		var extenderBindingResult *extenderv1.ExtenderBindingResult
