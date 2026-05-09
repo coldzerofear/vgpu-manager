@@ -1106,6 +1106,11 @@ func supportsMIGModeToggle(dev nvml.Device) bool {
 }
 
 func isDynamicMIGCapable(gpuInfo *GpuDeviceInfo, dev nvdev.Device) (bool, error) {
+	if !gpuInfo.MigCapable {
+		klog.Warningf("GPU %s: hardware does not support MIG - skipping DynamicMIG", gpuInfo.String())
+		return false, nil
+	}
+
 	vMode, vret := dev.GetVirtualizationMode()
 	if vret != nvml.SUCCESS {
 		return false, fmt.Errorf("error getting GPU virtualization mode: %v", vret)

@@ -1360,3 +1360,14 @@ func (s *DeviceState) AddDeviceTaint(d *AllocatableDevice, taint *resourceapi.De
 	defer s.Unlock()
 	return d.AddOrUpdateTaint(taint)
 }
+
+// Returns false on nodes where GPU hardware is not MIG capable (L4/Ada,T4/Turing)
+// Used by the driver at startup to gate the DynamicMIG-specific code paths.
+func (s *DeviceState) IsMigCapable() bool {
+	for _, gpu := range s.nvdevlib.gpuInfosByUUID {
+		if gpu.MigCapable {
+			return true
+		}
+	}
+	return false
+}

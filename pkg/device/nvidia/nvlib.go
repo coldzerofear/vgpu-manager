@@ -54,6 +54,7 @@ type GpuInfo struct {
 	Index                 int                              `json:"-"`
 	UUID                  string                           `json:"uuid"`
 	Minor                 int                              `json:"-"`
+	MigCapable            bool                             `json:"-"`
 	MigEnabled            bool                             `json:"-"`
 	PciInfo               nvml.PciInfo                     `json:"-"`
 	Memory                nvml.Memory                      `json:"-"`
@@ -303,6 +304,10 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	if ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("error getting UUID for device %d: %v", index, ret)
 	}
+	migCapable, err := device.IsMigCapable()
+	if err != nil {
+		return nil, fmt.Errorf("error checking MIG capability for device %d: %w", index, err)
+	}
 	migEnabled, err := device.IsMigEnabled()
 	if err != nil {
 		return nil, fmt.Errorf("error checking if MIG mode enabled for device %d: %w", index, err)
@@ -425,6 +430,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		UUID:                  uuid,
 		Minor:                 minor,
 		Index:                 index,
+		MigCapable:            migCapable,
 		MigEnabled:            migEnabled,
 		PciInfo:               pciInfo,
 		Memory:                memory,
