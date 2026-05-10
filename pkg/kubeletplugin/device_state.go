@@ -786,7 +786,8 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 	vgpuClaimCommonEditsApplied := false
 	partitionMountEditsApplied := map[string]bool{}
 	var vgpuPartitionInfo *claimresolve.PartitionInfo
-	if featuregates.Enabled(featuregates.VGPUSupport) {
+	vgpuSupportEnabled := featuregates.Enabled(featuregates.VGPUSupport)
+	if vgpuSupportEnabled {
 		vgpuPartitionInfo, err = s.resolveVGPUClaimPartitions(ctx, claim)
 		if err != nil {
 			return nil, fmt.Errorf("resolve vgpu claim partitions failed: %w", err)
@@ -806,7 +807,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 
 			partitionKey := ""
 			cdiDeviceID := ""
-			if allocatableDevice.Type() == VGpuDeviceType && featuregates.Enabled(featuregates.VGPUSupport) {
+			if vgpuSupportEnabled && allocatableDevice.Type() == VGpuDeviceType {
 				mainRequest := resolveMainRequestName(claim, result.Request)
 				if mainRequest == "" {
 					mainRequest = result.Request
