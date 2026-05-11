@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
@@ -62,6 +63,14 @@ type validateHandle struct {
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) error {
 	if h.options.DefaultConvertToDRA {
 		if err := h.checkResourceClaimRequests(ctx, pod); err != nil {
+			return &apierrors.StatusError{
+				ErrStatus: metav1.Status{
+					Message: err.Error(),
+					Reason:  metav1.StatusReasonInvalid,
+				},
+			}
+		}
+		if err := h.checkCrossPodsVGPURequestConflict(ctx, pod); err != nil {
 			return &apierrors.StatusError{
 				ErrStatus: metav1.Status{
 					Message: err.Error(),
@@ -208,7 +217,7 @@ func (h *validateHandle) getConvertedContainerClaimsMap(pod *corev1.Pod) *resour
 	return cache
 }
 
-// checkResourceClaimRequests：Pod stage verification rules
+// checkResourceClaimRequests：Pod stage verification rules (within a single pod)
 // 1. A container can only hit a maximum of 1 definite-vgpu claim
 // 2. A container can hit multiple definite-vgpu requests under the same claim
 // 3. init-init Do not allow overlapping with mainRequest
@@ -216,6 +225,9 @@ func (h *validateHandle) getConvertedContainerClaimsMap(pod *corev1.Pod) *resour
 // 5. init-app Allow overlap with mainRequest
 // 6. mixed FirstAvailable Don't verify for now, leave it to the claim webhook
 // 7. init-app cross-overlap: an init container may only overlap with at most one app container
+//
+// Cross-pod rule (enforced separately in checkCrossPodsVGPURequestConflict):
+// 8. cross-pod: two pods must not use the same definite-vgpu mainRequest from a shared named claim
 func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *corev1.Pod) error {
 	// fast return
 	if !util.HasDRARequests(pod) {
@@ -848,6 +860,164 @@ func (h *validateHandle) createResourceClaims(ctx context.Context, pod *corev1.P
 	} else {
 		if err = h.createMultiResourceClaims(ctx, pod, infos); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// hasDefiniteVGPURequests reports whether the index contains at least one definite vGPU request.
+func hasDefiniteVGPURequests(index map[string]podRequestMeta) bool {
+	for _, meta := range index {
+		if meta.Class == common.MainRequestDefVGPU {
+			return true
+		}
+	}
+	return false
+}
+
+// findPodClaimNameForActualClaim returns the pod-local claim name (spec.resourceClaims[].name)
+// that resolves to actualClaimName, checking both direct resourceClaimName references and
+// template-resolved names stored in status.resourceClaimStatuses.
+func findPodClaimNameForActualClaim(pod *corev1.Pod, actualClaimName string) string {
+	for _, pc := range pod.Spec.ResourceClaims {
+		if pc.ResourceClaimName != nil && *pc.ResourceClaimName == actualClaimName {
+			return pc.Name
+		}
+		if pc.ResourceClaimTemplateName != nil {
+			if st := claimresolve.GetPodResourceClaimStatus(pod, pc.Name); st != nil &&
+				st.ResourceClaimName != nil && *st.ResourceClaimName == actualClaimName {
+				return pc.Name
+			}
+		}
+	}
+	return ""
+}
+
+// collectPodClaimVGPURefs returns the set of definite-vGPU mainRequest names that pod
+// uses from the claim identified by podClaimName within that pod's spec.
+func (h *validateHandle) collectPodClaimVGPURefs(
+	pod *corev1.Pod,
+	podClaimName string,
+	requestIndex map[string]podRequestMeta,
+) sets.Set[string] {
+	result := sets.New[string]()
+	for _, c := range common.GetAllPodContainers(pod) {
+		for _, claimRef := range c.Claims {
+			if claimRef.Name != podClaimName {
+				continue
+			}
+			if claimRef.Request != "" {
+				if meta, ok := requestIndex[claimRef.Request]; ok && meta.Class == common.MainRequestDefVGPU {
+					result.Insert(meta.MainRequest)
+				}
+			} else {
+				for _, meta := range requestIndex {
+					if meta.Class == common.MainRequestDefVGPU {
+						result.Insert(meta.MainRequest)
+					}
+				}
+			}
+		}
+	}
+	return result
+}
+
+// checkCrossPodsVGPURequestConflict implements rule 8: cross-pod vGPU request sharing prohibition.
+//
+// For each named (non-template) ResourceClaim the new pod references, if the claim already
+// has other pods in status.reservedFor, the new pod must not use the same definite-vGPU
+// mainRequest as any of those reserved pods.
+//
+// This is a best-effort early check: concurrent pod admissions that race before either pod is
+// reserved are caught later by the ResourceClaim validate webhook.
+func (h *validateHandle) checkCrossPodsVGPURequestConflict(ctx context.Context, pod *corev1.Pod) error {
+	if !util.HasDRARequests(pod) {
+		return nil
+	}
+
+	for _, podClaim := range pod.Spec.ResourceClaims {
+		// Template claims are per-pod and cannot be shared; skip them.
+		if podClaim.ResourceClaimName == nil || *podClaim.ResourceClaimName == "" {
+			continue
+		}
+		actualClaimName := *podClaim.ResourceClaimName
+
+		// Fetch the actual claim.
+		var claim resourceapi.ResourceClaim
+		claimKey := client.ObjectKey{Namespace: pod.Namespace, Name: actualClaimName}
+		if h.reader != nil {
+			if err := h.reader.GetResourceClaim(ctx, claimKey, &claim); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return fmt.Errorf("get claim %q: %w", actualClaimName, err)
+			}
+		} else {
+			if err := h.client.Get(ctx, claimKey, &claim); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return fmt.Errorf("get claim %q: %w", actualClaimName, err)
+			}
+		}
+
+		// Nothing reserved yet — no conflict possible.
+		if len(claim.Status.ReservedFor) == 0 {
+			continue
+		}
+
+		// Build a spec-level request index and skip claims with no definite vGPU requests.
+		requestIndex := h.buildPodRequestIndex(ctx, claim.Spec.Devices.Requests)
+		if !hasDefiniteVGPURequests(requestIndex) {
+			continue
+		}
+
+		// Compute which vGPU mainRequests the new pod uses from this claim.
+		newPodReqs := h.collectPodClaimVGPURefs(pod, podClaim.Name, requestIndex)
+		if newPodReqs.Len() == 0 {
+			continue
+		}
+
+		// Compare against every pod already reserved for this claim.
+		for _, ref := range claim.Status.ReservedFor {
+			if ref.APIGroup != "" || ref.Resource != "pods" {
+				continue
+			}
+			var existingPod corev1.Pod
+			podKey := client.ObjectKey{Namespace: claim.Namespace, Name: ref.Name}
+			var getErr error
+			if h.reader != nil {
+				getErr = h.reader.GetPod(ctx, podKey, &existingPod)
+			} else {
+				getErr = h.client.Get(ctx, podKey, &existingPod)
+			}
+			if getErr != nil {
+				if apierrors.IsNotFound(getErr) {
+					continue
+				}
+				return fmt.Errorf("get reserved pod %q for claim %q: %w", ref.Name, actualClaimName, getErr)
+			}
+			// Skip stale reservations (UID mismatch) and self-references.
+			if ref.UID != "" && existingPod.UID != ref.UID {
+				continue
+			}
+			if existingPod.Name == pod.Name && existingPod.Namespace == pod.Namespace {
+				continue
+			}
+
+			existingPodClaimName := findPodClaimNameForActualClaim(&existingPod, actualClaimName)
+			if existingPodClaimName == "" {
+				continue
+			}
+			existingReqs := h.collectPodClaimVGPURefs(&existingPod, existingPodClaimName, requestIndex)
+			if overlap := newPodReqs.Intersection(existingReqs); overlap.Len() > 0 {
+				return fmt.Errorf(
+					"pod %q and pod %s/%s both use vgpu requests %v from claim %q; "+
+						"cross-pod sharing of the same vgpu request is not allowed",
+					pod.Name, existingPod.Namespace, existingPod.Name,
+					sets.List(overlap), actualClaimName,
+				)
+			}
 		}
 	}
 	return nil

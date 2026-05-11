@@ -294,3 +294,306 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 		})
 	}
 }
+
+// existingPod creates a pre-existing pod (already running in the cluster) with a given name.
+func existingPod(name string, podClaims []corev1.PodResourceClaim, inits, apps []corev1.Container) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+		Spec: corev1.PodSpec{
+			ResourceClaims: podClaims,
+			InitContainers: inits,
+			Containers:     apps,
+		},
+	}
+}
+
+// vgpuClaimReserved creates a vGPU ResourceClaim with status.reservedFor pointing to podName.
+func vgpuClaimReserved(name, podName string, requestNames ...string) *resourceapi.ResourceClaim {
+	claim := vgpuClaim(name, requestNames...)
+	claim.Status.ReservedFor = []resourceapi.ResourceClaimConsumerReference{
+		{Resource: "pods", Name: podName},
+	}
+	return claim
+}
+
+func TestCheckCrossPodsVGPURequestConflict(t *testing.T) {
+	ctx := context.Background()
+
+	// podWithTemplateClaim builds an existing pod that referenced a claim via template;
+	// the resolved actual claim name is recorded in status.resourceClaimStatuses.
+	podWithTemplateClaim := func(name, podClaimName, templateName, resolvedClaimName string,
+		apps []corev1.Container) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+			Spec: corev1.PodSpec{
+				ResourceClaims: []corev1.PodResourceClaim{{
+					Name:                      podClaimName,
+					ResourceClaimTemplateName: ptr.To(templateName),
+				}},
+				Containers: apps,
+			},
+			Status: corev1.PodStatus{
+				ResourceClaimStatuses: []corev1.PodResourceClaimStatus{{
+					Name:              podClaimName,
+					ResourceClaimName: ptr.To(resolvedClaimName),
+				}},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		objs    []client.Object
+		pod     *corev1.Pod
+		wantErr string
+	}{
+		// ---------------------------------------------------------------
+		// Fast-path: no DRA requests at all
+		// ---------------------------------------------------------------
+		{
+			name: "no DRA requests: pass",
+			pod:  pod(nil, nil, []corev1.Container{cont("app")}),
+		},
+
+		// ---------------------------------------------------------------
+		// Template claims are per-pod and cannot be shared → skip
+		// ---------------------------------------------------------------
+		{
+			name: "template claim only: pass",
+			pod: func() *corev1.Pod {
+				p := pod(nil, nil, []corev1.Container{cont("app-a", claimRef("pc-x", ""))})
+				p.Spec.ResourceClaims = []corev1.PodResourceClaim{{
+					Name:                      "pc-x",
+					ResourceClaimTemplateName: ptr.To("my-template"),
+				}}
+				return p
+			}(),
+		},
+
+		// ---------------------------------------------------------------
+		// Named claim does not exist yet (will be created later) → skip
+		// ---------------------------------------------------------------
+		{
+			name: "named claim not yet created: pass",
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+		},
+
+		// ---------------------------------------------------------------
+		// Named claim exists but has no reservedFor entries → nothing to compare
+		// ---------------------------------------------------------------
+		{
+			name: "named claim with no reservedFor: pass",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+		},
+
+		// ---------------------------------------------------------------
+		// Named claim with reservedFor but requests are non-vGPU → skip
+		// ---------------------------------------------------------------
+		{
+			name: "non-vGPU named claim with reservedFor: pass",
+			objs: []client.Object{
+				func() *resourceapi.ResourceClaim {
+					c := &resourceapi.ResourceClaim{
+						ObjectMeta: metav1.ObjectMeta{Namespace: testNS, Name: "claim-x"},
+						Spec: resourceapi.ResourceClaimSpec{
+							Devices: resourceapi.DeviceClaim{
+								Requests: []resourceapi.DeviceRequest{{
+									Name:    "req1",
+									Exactly: &resourceapi.ExactDeviceRequest{DeviceClassName: "some-other-class"},
+								}},
+							},
+						},
+					}
+					c.Status.ReservedFor = []resourceapi.ResourceClaimConsumerReference{
+						{Resource: "pods", Name: "existing-pod"},
+					}
+					return c
+				}(),
+				existingPod("existing-pod",
+					[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+					nil,
+					[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+				),
+			},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+		},
+
+		// ---------------------------------------------------------------
+		// Both pods reference all requests of the same claim → error
+		// ---------------------------------------------------------------
+		{
+			name: "cross-pod: both pods use all requests of the same claim: error",
+			objs: []client.Object{
+				vgpuClaimReserved("claim-x", "existing-pod", "req1"),
+				existingPod("existing-pod",
+					[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+					nil,
+					[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+				),
+			},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+			wantErr: "cross-pod sharing of the same vgpu request is not allowed",
+		},
+
+		// ---------------------------------------------------------------
+		// Both pods use the same specific scoped request → error
+		// ---------------------------------------------------------------
+		{
+			name: "cross-pod: both pods use the same specific request: error",
+			objs: []client.Object{
+				vgpuClaimReserved("claim-x", "existing-pod", "req1", "req2"),
+				existingPod("existing-pod",
+					[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+					nil,
+					[]corev1.Container{cont("app-a", claimRef("pc-x", "req1"))},
+				),
+			},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a", claimRef("pc-x", "req1"))},
+			),
+			wantErr: "cross-pod sharing of the same vgpu request is not allowed",
+		},
+
+		// ---------------------------------------------------------------
+		// Pods use different specific requests from the same claim → pass
+		// ---------------------------------------------------------------
+		{
+			name: "cross-pod: pods use different specific requests: pass",
+			objs: []client.Object{
+				vgpuClaimReserved("claim-x", "existing-pod", "req1", "req2"),
+				existingPod("existing-pod",
+					[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+					nil,
+					[]corev1.Container{cont("app-a", claimRef("pc-x", "req1"))},
+				),
+			},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a", claimRef("pc-x", "req2"))},
+			),
+		},
+
+		// ---------------------------------------------------------------
+		// New pod references the claim in spec.resourceClaims but no
+		// container actually has a claimRef to it → newPodReqs is empty → pass
+		// ---------------------------------------------------------------
+		{
+			name: "new pod references claim but no container uses it: pass",
+			objs: []client.Object{
+				vgpuClaimReserved("claim-x", "existing-pod", "req1"),
+				existingPod("existing-pod",
+					[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+					nil,
+					[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+				),
+			},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a")}, // no claim refs in container
+			),
+		},
+
+		// ---------------------------------------------------------------
+		// Stale reservation: ref.UID does not match the existing pod's UID → skip
+		// ---------------------------------------------------------------
+		{
+			name: "stale UID in reservedFor: pass",
+			objs: func() []client.Object {
+				claim := vgpuClaim("claim-x", "req1")
+				claim.Status.ReservedFor = []resourceapi.ResourceClaimConsumerReference{
+					{Resource: "pods", Name: "existing-pod", UID: "stale-uid"},
+				}
+				ep := existingPod("existing-pod",
+					[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+					nil,
+					[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+				)
+				ep.UID = "current-uid"
+				return []client.Object{claim, ep}
+			}(),
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+		},
+
+		// ---------------------------------------------------------------
+		// Self-reference: reserved pod has the same name as the new pod → skip
+		// ---------------------------------------------------------------
+		{
+			name: "self-reference in reservedFor: pass",
+			objs: []client.Object{
+				// "test-pod" is the name the `pod` helper always sets
+				vgpuClaimReserved("claim-x", "test-pod", "req1"),
+				existingPod("test-pod",
+					[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+					nil,
+					[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+				),
+			},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+		},
+
+		// ---------------------------------------------------------------
+		// Existing pod referenced the claim via template (resolved name in status)
+		// → findPodClaimNameForActualClaim must detect it → conflict → error
+		// ---------------------------------------------------------------
+		{
+			name: "existing pod used template-resolved claim: error",
+			objs: func() []client.Object {
+				claim := vgpuClaim("claim-x", "req1")
+				claim.Status.ReservedFor = []resourceapi.ResourceClaimConsumerReference{
+					{Resource: "pods", Name: "existing-pod"},
+				}
+				ep := podWithTemplateClaim("existing-pod", "pc-x", "my-template", "claim-x",
+					[]corev1.Container{cont("app-a", claimRef("pc-x", ""))})
+				return []client.Object{claim, ep}
+			}(),
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				nil,
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+			wantErr: "cross-pod sharing of the same vgpu request is not allowed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHandle(t, tt.objs...)
+			err := h.checkCrossPodsVGPURequestConflict(ctx, tt.pod)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
