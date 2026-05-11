@@ -55,6 +55,8 @@ const (
 
 	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
 
+	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
+
 	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
 	// storing daemon info directly in ComputeDomainStatus.Nodes.
 	//ComputeDomainCliques featuregate.Feature = "ComputeDomainCliques"
@@ -117,6 +119,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	SharedSMUtilizationWatcher: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(25, 12),
+		},
+	},
+	DevicePluginClientMode: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
@@ -213,6 +222,9 @@ func ValidateFeatureGates() error {
 	//}
 	if Enabled(SharedSMUtilizationWatcher) && !Enabled(VGPUSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", SharedSMUtilizationWatcher, VGPUSupport)
+	}
+	if Enabled(DevicePluginClientMode) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", DevicePluginClientMode, VGPUSupport)
 	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {

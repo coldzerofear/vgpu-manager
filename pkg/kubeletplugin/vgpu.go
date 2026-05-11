@@ -1,19 +1,24 @@
 package kubeletplugin
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	vgpu2 "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/docker/go-units"
+	"github.com/google/uuid"
 	"github.com/opencontainers/cgroups"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	draclient "k8s.io/dynamic-resource-allocation/client"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 	"k8s.io/utils/ptr"
@@ -83,13 +88,15 @@ type VGPUManager struct {
 	hostManagerPath string
 	contManagerPath string
 	nvdevlib        *deviceLib
+	draClient       *draclient.Client
 }
 
-func NewVGPUManager(deviceLib *deviceLib, hostManagerPath string) *VGPUManager {
+func NewVGPUManager(deviceLib *deviceLib, hostManagerPath string, draClient *draclient.Client) *VGPUManager {
 	return &VGPUManager{
 		nvdevlib:        deviceLib,
 		contManagerPath: util.ManagerRootPath,
 		hostManagerPath: hostManagerPath,
+		draClient:       draClient,
 	}
 }
 
@@ -153,9 +160,12 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	_, _ = m.ensureClaimDirectories(string(claim.UID))
 
 	compMode := util.HostMode
-	if cgroups.IsCgroup2UnifiedMode() || cgroups.IsCgroup2HybridMode() {
+	switch {
+	case featuregates.Enabled(featuregates.DevicePluginClientMode):
+		compMode |= util.ClientRegMode
+	case cgroups.IsCgroup2UnifiedMode(), cgroups.IsCgroup2HybridMode():
 		compMode |= util.CGroupv2Mode
-	} else {
+	default:
 		compMode |= util.CGroupv1Mode
 	}
 	compMode |= util.OpenKernelMode
@@ -172,7 +182,11 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 		fmt.Sprintf("%s=FALSE", util.CudaMemoryOversoldEnv),
 	}
 	mounts := []*cdispec.Mount{
-		// TODO mount /etc/vgpu-manager/registry dir
+		{
+			ContainerPath: filepath.Join(m.contManagerPath, util.Registry),
+			HostPath:      filepath.Join(m.hostManagerPath, util.Registry),
+			Options:       []string{"ro", "nosuid", "nodev", "bind"},
+		},
 		{
 			ContainerPath: m.contManagerPath + "/.host_proc",
 			HostPath:      vgpu.HostProcDirectoryPath,
@@ -259,17 +273,37 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	}
 }
 
-func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.ResourceClaim, partitionKey string) *cdiapi.ContainerEdits {
+func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.ResourceClaim, partitionKey string) (*cdiapi.ContainerEdits, error) {
 	if claim == nil {
-		return nil
+		return nil, nil
 	}
 	if partitionKey == "" {
+		// TODO It's unlikely to run up to this point
 		partitionKey = "default"
 	}
 	_, partitionHostPath := m.ensurePartitionDirectories(string(claim.UID), partitionKey)
 
+	var envs []string
+	if featuregates.Enabled(featuregates.DevicePluginClientMode) {
+		partitionUuid := uuid.NewString()
+		envs = append(envs, fmt.Sprintf("%s=%s", util.ManagerClientRegisterUuid, partitionUuid))
+		metadata := client.PatchMetadata{Annotations: map[string]*string{
+			fmt.Sprintf("%s/%s", util.DRADriverName, partitionUuid): &partitionKey,
+		}}
+		data, err := metadata.MarshalJSON()
+		if err != nil {
+			return nil, err
+		}
+		_, err = m.draClient.ResourceClaims(claim.Namespace).
+			Patch(context.Background(), claim.Name, metadata.PatchType(), data, metav1.PatchOptions{})
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
+			Env: envs,
 			Mounts: []*cdispec.Mount{
 				{
 					ContainerPath: filepath.Join(m.contManagerPath, util.Config),
@@ -288,7 +322,7 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 				},
 			},
 		},
-	}
+	}, nil
 }
 
 func (m *VGPUManager) Unprepare(claimUID string, _ PreparedDeviceList) error {

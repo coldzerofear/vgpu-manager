@@ -144,7 +144,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	)
 
 	if featuregates.Enabled(featuregates.VGPUSupport) {
-		vgpuManager = NewVGPUManager(nvdevlib, config.Flags.HostManagerDir)
+		vgpuManager = NewVGPUManager(nvdevlib, config.Flags.HostManagerDir, config.ClientSets.Resource)
 	}
 
 	if featuregates.Enabled(featuregates.TimeSlicingSettings) {
@@ -840,7 +840,11 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			case VGpuDeviceType:
 				preparedDevice.containerEdits = s.vgpuManager.GetAllocationEnvContainerEdits(claim, result, allocatableDevice)
 				if !partitionMountEditsApplied[partitionKey] {
-					preparedDevice.containerEdits = mergeContainerEdits(preparedDevice.containerEdits, s.vgpuManager.GetPartitionMountContainerEdits(claim, partitionKey))
+					edits, err := s.vgpuManager.GetPartitionMountContainerEdits(claim, partitionKey)
+					if err != nil {
+						return nil, fmt.Errorf("error getting vgpu partition container edits: %w", err)
+					}
+					preparedDevice.containerEdits = mergeContainerEdits(preparedDevice.containerEdits, edits)
 					partitionMountEditsApplied[partitionKey] = true
 				}
 				preparedDevice.VGpu = &PreparedVGpuDevice{
