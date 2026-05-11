@@ -34,7 +34,7 @@ const Path = "/resourceclaim/validate"
 func NewValidateWebhook(client client.Client, options *options.Options,
 	reader resourcereader.ResourceAPIReader, recorder events.EventRecorderLogger,
 ) (http.Handler, error) {
-	if !options.DefaultConvertToDRA {
+	if !options.DRAAdmissionEnabled {
 		return nil, nil
 	}
 	scheme := client.Scheme()
@@ -159,7 +159,7 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 				continue
 			}
 
-			// Accumulate the VGPU claims hit by this container
+			// Accumulate the vGPU claims hit by this container
 			actualHitReqs := claimresolve.ResolveActualAllocatedRequestsForClaimRef(claimRef, actualAllocatedVGPUReqs)
 			if len(actualHitReqs) > 0 {
 				containerActualVGPUClaims.Insert(string(actualClaim.UID))

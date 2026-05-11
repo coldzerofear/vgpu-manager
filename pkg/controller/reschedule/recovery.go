@@ -125,6 +125,7 @@ var (
 	removedAnnotations = []string{
 		util.PodVGPUPreAllocAnnotation, util.PodVGPURealAllocAnnotation,
 		util.PodPredicateNodeAnnotation, util.PodPredicateTimeAnnotation,
+		util.DRAOriResAnnotation, util.DRAGenNameAnnotation,
 	}
 )
 

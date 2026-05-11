@@ -258,7 +258,15 @@ func main() {
 		}
 		// DRA defaults to enabling multi card GPU topology management.
 		device.SetGPUTopologyEnabled(true)
+	}
 
+	if opt.CombinedResourceClaim && !opt.DefaultConvertToDRA {
+		klog.Fatalln("The prerequisite for enabling combination resource declaration is to enable default conversion to DRA")
+	}
+
+	needInitClient := opt.DRAAdmissionEnabled || opt.DefaultConvertToDRA
+
+	if needInitClient {
 		liveClient, err = rtclient.New(config, rtclient.Options{Scheme: Scheme})
 		if err != nil {
 			klog.Fatalf("Create live kubeClient failed: %v", err)
@@ -345,7 +353,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
-	if opt.DefaultConvertToDRA {
+	if needInitClient {
 		// The mutation cache overlays informer snapshots with fresher write-through
 		// updates and live-API fallback results.
 		resourceReader = resourcereader.NewResourceAPIReader(liveClient, claimIndexer, templateIndexer, classIndexer, podIndexer, 30*time.Second)

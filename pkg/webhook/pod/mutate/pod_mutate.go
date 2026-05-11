@@ -224,7 +224,6 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 		fixSpecifiedNodeName(pod, logger)
 	}
 
-	delete(pod.Annotations, util.DRAOriResAnnotation)
 	if h.options.DefaultConvertToDRA {
 		return h.convertDRARequest(ctx, pod)
 	}
@@ -308,7 +307,7 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) e
 	return nil
 }
 
-func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *corev1.Pod, infos common.ResourceInfos) error {
+func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *corev1.Pod, _ common.ResourceInfos) error {
 	logger := log.FromContext(ctx)
 	resourceName, _ := util.HasAnnotation(pod, util.DRAGenNameAnnotation)
 
