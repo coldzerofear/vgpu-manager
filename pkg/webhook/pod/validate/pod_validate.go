@@ -215,6 +215,7 @@ func (h *validateHandle) getConvertedContainerClaimsMap(pod *corev1.Pod) *resour
 // 4. app-app Do not allow overlapping with mainRequest
 // 5. init-app Allow overlap with mainRequest
 // 6. mixed FirstAvailable Don't verify for now, leave it to the claim webhook
+// 7. init-app cross-overlap: an init container may only overlap with at most one app container
 func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *corev1.Pod) error {
 	// fast return
 	if !util.HasDRARequests(pod) {
@@ -302,6 +303,33 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 			}
 
 			usages[reqKey] = usage
+		}
+	}
+
+	// Rule 7: init-app cross-overlap prohibition.
+	// For every request key that has both an init and an app container,
+	// record which app containers each init container overlaps with.
+	// If any single init container ends up overlapping with more than one
+	// distinct app container, the pod is invalid.
+	initAppOverlap := map[string]sets.Set[string]{}
+	for _, usage := range usages {
+		if usage.InitContainers.Len() == 0 || usage.AppContainers.Len() == 0 {
+			continue
+		}
+		for _, initName := range sets.List(usage.InitContainers) {
+			if initAppOverlap[initName] == nil {
+				initAppOverlap[initName] = sets.New[string]()
+			}
+			initAppOverlap[initName].Insert(sets.List(usage.AppContainers)...)
+		}
+	}
+	for initName, appConts := range initAppOverlap {
+		if appConts.Len() > 1 {
+			return fmt.Errorf(
+				"init container %q overlaps vgpu requests with multiple app containers %v; "+
+					"an init container may only share vgpu requests with at most one app container",
+				initName, sets.List(appConts),
+			)
 		}
 	}
 
