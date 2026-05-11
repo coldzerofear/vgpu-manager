@@ -76,12 +76,12 @@ func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) er
 	return nil
 }
 
-// buildPodRequestIndex 按“主 request”建立 Pod 阶段可判定索引:
-// - Exactly: 直接判断是否 definite vgpu
+// buildPodRequestIndex Establish a decidable index for Pod stage based on the 'main request'
+// - Exactly: Directly determine whether it is defined as a vGPU request
 // - FirstAvailable:
-//   - 全是 vgpu -> definite vgpu
-//   - 全不是 vgpu -> non-vgpu
-//   - 混合 -> mixed-maybe-vgpu，Pod 阶段不做最终冲突判断
+//   - All of them are vGPU -> definite vgpu
+//   - None of them are vGPU -> non-vgpu
+//   - Mixed with vGPU -> mixed-maybe-vgpu, No final conflict judgment is made during the Pod stage
 func (h *validateHandle) buildPodRequestIndex(ctx context.Context, requests []resourceapi.DeviceRequest) map[string]podRequestMeta {
 	index := make(map[string]podRequestMeta, len(requests))
 
@@ -208,13 +208,13 @@ func (h *validateHandle) getConvertedContainerClaimsMap(pod *corev1.Pod) *resour
 	return cache
 }
 
-// checkResourceClaimRequests：Pod 阶段校验规则
-// 1. 一个容器最多只能命中 1 个 definite-vgpu claim
-// 2. 一个容器可以命中同一个 claim 下多个 definite-vgpu request
-// 3. init-init 不允许同 mainRequest 重叠
-// 4. app-app 不允许同 mainRequest 重叠
-// 5. init-app 允许同 mainRequest 重叠
-// 6. mixed FirstAvailable 先不判，留给 claim webhook
+// checkResourceClaimRequests：Pod stage verification rules
+// 1. A container can only hit a maximum of 1 definite-vgpu claim
+// 2. A container can hit multiple definite-vgpu requests under the same claim
+// 3. init-init Do not allow overlapping with mainRequest
+// 4. app-app Do not allow overlapping with mainRequest
+// 5. init-app Allow overlap with mainRequest
+// 6. mixed FirstAvailable Don't verify for now, leave it to the claim webhook
 func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *corev1.Pod) error {
 	// fast return
 	if !util.HasDRARequests(pod) {
@@ -308,11 +308,11 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 	return nil
 }
 
-// resolveDefiniteVGPURequestsFromContainerClaim 只返回 Pod 阶段“能确定”的 vgpu main request。
-// 规则：
-// - claimRef.Request != "": 仅检查这个主 request
-// - claimRef.Request == "": 返回该 claim 下全部 definite-vgpu 主 request
-// - mixed FirstAvailable: 这里不返回，留给 claim webhook 兜底
+// resolveDefiniteVGPURequestsFromContainerClaim Only return vGPU main requests that can be confirmed during the Pod stage.
+// rules：
+// - claimRef.Request != "": Only check this main request
+// - claimRef.Request == "": Return all vGPU main requests defined under this claim
+// - mixed FirstAvailable: Do not check, leave it for resource claim webhook verification
 func (h *validateHandle) resolveDefiniteVGPURequestsFromContainerClaim(
 	ctx context.Context,
 	pod *corev1.Pod,
@@ -342,7 +342,7 @@ func (h *validateHandle) resolveDefiniteVGPURequestsFromContainerClaim(
 			return nil, fmt.Errorf("request %q not found in pod resourceClaim %q", claimRef.Request, claimRef.Name)
 		}
 		if meta.Class != common.MainRequestDefVGPU {
-			// Non VGPU or mixed, both left for claim webhook to check
+			// Non vGPU or mixed, both left for claim webhook to check
 			return nil, nil
 		}
 		return []string{buildVGPURequestKey(claimRef.Name, meta.MainRequest)}, nil
