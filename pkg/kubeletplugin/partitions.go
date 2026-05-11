@@ -122,23 +122,16 @@ func (d *GpuDeviceInfo) PartGetDevice() resourceapi.Device {
 		Capacity:         d.PartCapacities(),
 		ConsumesCounters: d.PartConsumesCounters(),
 	}
-
-	// Not available in all environments, enrich advertised device only
-	// conditionally.
-	if d.PcieRootAttr != nil {
-		dev.Attributes[d.PcieRootAttr.Name] = d.PcieRootAttr.Value
-	}
-
 	return dev
 }
 
 func (d *VGpuDeviceInfo) PartGetDevice() resourceapi.Device {
 	dev := d.GetDevice()
-	capacities := d.PartCapacities()
-	for name, capacity := range dev.Capacity {
-		capacities[name] = capacity
-	}
-	dev.Capacity = capacities
+	//capacities := d.PartCapacities()
+	//for name, capacity := range dev.Capacity {
+	//	capacities[name] = capacity
+	//}
+	//dev.Capacity = capacities
 	dev.ConsumesCounters = d.PartConsumesCounters()
 	return dev
 }
