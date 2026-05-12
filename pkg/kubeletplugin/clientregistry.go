@@ -20,9 +20,11 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
+	listerv1 "k8s.io/client-go/listers/core/v1"
+	resourcev1 "k8s.io/client-go/listers/resource/v1"
 	kcache "k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -101,36 +103,32 @@ func NewClientRegisterResolver(
 		driverName:            driverName,
 		allocatedVGPURequests: allocatedVGPURequests,
 	}
-	r.reader = &informerCacheReader{podLister: podLister, claimIndexer: claimIndexer}
+	claimLister := resourcev1.NewResourceClaimLister(claimIndexer)
+	r.reader = &informerCacheReader{
+		podLister:   podLister,
+		claimLister: claimLister,
+	}
 	return r
 }
 
 // PodByUID is the legacy device-plugin lookup: the calling library already
 // knows its pod UID and we just hand back the cached pod object.
 func (r *ClientRegisterResolver) PodByUID(_ context.Context, uid string) (*corev1.Pod, error) {
-	if uid == "" {
-		return nil, fmt.Errorf("pod uid is empty")
-	}
 	pods, err := r.podLister.ListByIndexValue("metadata.uid", uid)
 	if err != nil {
 		return nil, err
 	}
-	switch len(pods) {
-	case 0:
-		return nil, fmt.Errorf("no pod found for uid %s", uid)
-	case 1:
-		return pods[0], nil
-	default:
-		return nil, fmt.Errorf("ambiguous lookup: %d pods match uid %s", len(pods), uid)
+	if len(pods) != 1 {
+		if len(pods) > 1 {
+			klog.ErrorS(nil, "find multiple pods matching UID", "uid", uid, "pods", util.ObjectKeys(pods...))
+		}
+		return nil, apierrors.NewNotFound(corev1.Resource("pods"), "uid "+uid)
 	}
+	return pods[0], nil
 }
 
 // TargetByUUID implements registry.GetTargetByUUIDFunc.
 func (r *ClientRegisterResolver) TargetByUUID(ctx context.Context, uuid string) (*registry.Target, error) {
-	if uuid == "" {
-		return nil, fmt.Errorf("uuid is empty")
-	}
-
 	claim, partitionKey, err := r.lookupClaim(uuid)
 	if err != nil {
 		return nil, err
@@ -147,14 +145,13 @@ func (r *ClientRegisterResolver) TargetByUUID(ctx context.Context, uuid string) 
 		return nil, fmt.Errorf("resolve partitions for claim %s/%s: %w",
 			claim.Namespace, claim.Name, err)
 	}
-
 	detail, ok := info.Partitions[partitionKey]
 	if !ok {
 		return nil, fmt.Errorf("partition %q not present in claim %s/%s (have %d partitions)",
 			partitionKey, claim.Namespace, claim.Name, len(info.Partitions))
 	}
 
-	pod, containerName, err := r.pickRunningContainer(detail.Containers)
+	pod, containerName, err := r.pickRunningContainer(detail)
 	if err != nil {
 		return nil, fmt.Errorf("partition %q in claim %s/%s: %w",
 			partitionKey, claim.Namespace, claim.Name, err)
@@ -176,12 +173,11 @@ func (r *ClientRegisterResolver) lookupClaim(uuid string) (*resourceapi.Resource
 	if err != nil {
 		return nil, "", fmt.Errorf("index lookup for uuid %s: %w", uuid, err)
 	}
-	switch len(objs) {
-	case 0:
-		return nil, "", fmt.Errorf("no resourceClaim found for uuid %s", uuid)
-	case 1:
-	default:
-		return nil, "", fmt.Errorf("uuid %s collides across %d claims", uuid, len(objs))
+	if len(objs) != 1 {
+		if len(objs) > 1 {
+			klog.ErrorS(nil, "find multiple claims matching uuid", "uuid", uuid, "claims", objs)
+		}
+		return nil, "", apierrors.NewNotFound(resourceapi.Resource("resourceclaims"), "register uuid "+uuid)
 	}
 	claim, ok := objs[0].(*resourceapi.ResourceClaim)
 	if !ok {
@@ -204,12 +200,12 @@ func (r *ClientRegisterResolver) lookupClaim(uuid string) (*resourceapi.Resource
 // app container; K8s lifecycle guarantees they don't run concurrently. So the
 // "first Running" container is well-defined whenever a register call is in
 // flight.
-func (r *ClientRegisterResolver) pickRunningContainer(containerKeys []string) (*corev1.Pod, string, error) {
-	if len(containerKeys) == 0 {
+func (r *ClientRegisterResolver) pickRunningContainer(detail claimresolve.PartitionDetail) (*corev1.Pod, string, error) {
+	if len(detail.Containers) == 0 {
 		return nil, "", fmt.Errorf("partition contains no containers")
 	}
 	var seen []string
-	for _, key := range containerKeys {
+	for _, key := range detail.Containers {
 		parts := strings.SplitN(key, "/", 3)
 		if len(parts) != 3 {
 			return nil, "", fmt.Errorf("malformed container key %q", key)
@@ -232,6 +228,7 @@ func (r *ClientRegisterResolver) pickRunningContainer(containerKeys []string) (*
 			return pod, containerName, nil
 		}
 	}
+
 	return nil, "", fmt.Errorf("no candidate container is currently running (candidates: %v)", seen)
 }
 
@@ -255,8 +252,8 @@ func findContainerStatus(pod *corev1.Pod, name string) (*corev1.ContainerStatus,
 // the claimresolve.Reader interface. It avoids API calls in the resolve path
 // by serving from the local informer caches.
 type informerCacheReader struct {
-	podLister    client.PodLister
-	claimIndexer kcache.Indexer
+	podLister   listerv1.PodLister
+	claimLister resourcev1.ResourceClaimLister
 }
 
 func (r *informerCacheReader) GetPod(_ context.Context, key ctrlclient.ObjectKey, out *corev1.Pod) error {
@@ -269,19 +266,9 @@ func (r *informerCacheReader) GetPod(_ context.Context, key ctrlclient.ObjectKey
 }
 
 func (r *informerCacheReader) GetResourceClaim(_ context.Context, key ctrlclient.ObjectKey, out *resourceapi.ResourceClaim) error {
-	obj, exists, err := r.claimIndexer.GetByKey(key.String())
+	claim, err := r.claimLister.ResourceClaims(key.Namespace).Get(key.Name)
 	if err != nil {
 		return err
-	}
-	if !exists {
-		return apierrors.NewNotFound(
-			schema.GroupResource{Group: resourceapi.GroupName, Resource: "resourceclaims"},
-			key.Name,
-		)
-	}
-	claim, ok := obj.(*resourceapi.ResourceClaim)
-	if !ok {
-		return fmt.Errorf("indexer entry for %s has unexpected type %T", key, obj)
 	}
 	claim.DeepCopyInto(out)
 	return nil

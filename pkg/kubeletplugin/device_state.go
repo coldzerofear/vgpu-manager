@@ -994,6 +994,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 			switch device.Type() {
 			case VGpuDeviceType:
 				klog.V(4).Infof("Unprepare: vGPU: clean up temporary files for vGPU (GPU %s)", device.VGpu.Info.String())
+				vGpuDevices = append(vGpuDevices, device)
 			case GpuDeviceType:
 				klog.V(4).Infof("Unprepare: regular GPU: noop (GPU %s)", device.Gpu.Info.String())
 			case PreparedMigDeviceType:
@@ -1017,8 +1018,6 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 				}
 			}
 		}
-
-		vGpuDevices = append(vGpuDevices, group.Devices.VGpus()...)
 
 		// Stop any MPS control daemons started for each group of prepared devices.
 		//if featuregates.Enabled(featuregates.MPSSupport) {

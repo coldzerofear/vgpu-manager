@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -36,6 +37,14 @@ func ResolveClaimVGPUPartitions(
 	return ResolveClaimVGPUPartitionsFromAllocatedRequests(ctx, reader, claim, allocatedRequests)
 }
 
+type PartitionMap struct {
+	RequestPodsMap        map[string]*corev1.Pod
+	PartitionPodMap       map[string]*corev1.Pod
+	PodContainerMap       map[*corev1.Pod][]string
+	ContainerPartitionMap map[*corev1.Pod][]string
+	ContainerRequestsMap  map[*corev1.Pod][]string
+}
+
 func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 	ctx context.Context,
 	reader Reader,
@@ -63,11 +72,15 @@ func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 		return info, nil
 	}
 
+	partitionPodMap := PartitionMap{
+		RequestPodsMap:  map[string]*corev1.Pod{},
+		PartitionPodMap: map[string]*corev1.Pod{},
+	}
 	graph := map[string]sets.Set[string]{}
 	resolvedEdges := 0
 	for _, pod := range reservedPods {
-		for _, container := range getAllPodContainers(pod) {
-			containerKey := buildContainerKey(pod, container.Kind, container.Name)
+		for _, container := range common.GetAllPodContainers(pod) {
+			containerKey := buildContainerKey(pod, string(container.Kind), container.Name)
 			for _, claimRef := range container.Claims {
 				actualClaimName, ok, err := ResolveActualClaimNameForPodClaim(pod, claimRef.Name)
 				if err != nil {
@@ -81,6 +94,10 @@ func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 				for _, request := range actualRequests {
 					requestNode := buildRequestNode(request)
 					linkGraph(graph, containerKey, requestNode)
+
+					partitionPodMap.RequestPodsMap[request] = pod
+					partitionPodMap.PartitionPodMap[containerKey] = pod
+
 					resolvedEdges++
 				}
 			}
@@ -115,11 +132,7 @@ func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 }
 
 func buildContainerKey(pod *corev1.Pod, kind, containerName string) string {
-	podUID := string(pod.UID)
-	if podUID == "" {
-		podUID = pod.Namespace + "/" + pod.Name
-	}
-	return sanitizePartitionToken(podUID) + "/" + sanitizePartitionToken(kind) + "/" + sanitizePartitionToken(containerName)
+	return string(pod.UID) + "/" + kind + "/" + containerName
 }
 
 func buildRequestNode(request string) string {
@@ -165,9 +178,10 @@ func walkPartition(graph map[string]sets.Set[string], start string, visited sets
 		}
 	}
 
-	containerList := sets.List(containers)
-	requestList := sets.List(requests)
-	return PartitionDetail{Containers: containerList, Requests: requestList}
+	return PartitionDetail{
+		Containers: sets.List(containers),
+		Requests:   sets.List(requests),
+	}
 }
 
 func buildPartitionKey(containers, requests []string) string {
@@ -185,47 +199,4 @@ func buildPartitionKey(containers, requests []string) string {
 func shortHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])[:12]
-}
-
-func sanitizePartitionToken(value string) string {
-	if value == "" {
-		return "unknown"
-	}
-	var b strings.Builder
-	b.Grow(len(value))
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-' || r == '_' || r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	if b.Len() == 0 {
-		return "unknown"
-	}
-	return b.String()
-}
-
-type containerRef struct {
-	Name   string
-	Claims []corev1.ResourceClaim
-	Kind   string
-}
-
-func getAllPodContainers(pod *corev1.Pod) []containerRef {
-	all := make([]containerRef, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
-	for _, c := range pod.Spec.InitContainers {
-		all = append(all, containerRef{Name: c.Name, Claims: c.Resources.Claims, Kind: "init"})
-	}
-	for _, c := range pod.Spec.Containers {
-		all = append(all, containerRef{Name: c.Name, Claims: c.Resources.Claims, Kind: "app"})
-	}
-	return all
 }

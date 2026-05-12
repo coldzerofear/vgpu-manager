@@ -189,11 +189,6 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 			Options:       []string{"ro", "nosuid", "nodev", "bind"},
 		},
 		{
-			ContainerPath: m.contManagerPath + "/.host_proc",
-			HostPath:      vgpu.HostProcDirectoryPath,
-			Options:       []string{"ro", "nosuid", "nodev", "bind"},
-		},
-		{
 			ContainerPath: containerDriverFile,
 			HostPath:      filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName),
 			Options:       []string{"ro", "nosuid", "nodev", "bind"},
@@ -203,6 +198,13 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 			HostPath:      filepath.Join(m.hostManagerPath, vgpu.LdPreLoadFileName),
 			Options:       []string{"ro", "nosuid", "nodev", "bind"},
 		},
+	}
+	if !featuregates.Enabled(featuregates.DevicePluginClientMode) {
+		mounts = append(mounts, &cdispec.Mount{
+			ContainerPath: m.contManagerPath + "/.host_proc",
+			HostPath:      vgpu.HostProcDirectoryPath,
+			Options:       []string{"ro", "nosuid", "nodev", "bind"},
+		})
 	}
 	smWatcherEnabled := "FALSE"
 	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {

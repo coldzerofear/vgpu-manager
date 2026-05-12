@@ -677,7 +677,7 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 		})
 	})
 
-	factory.Start(ctx.Done())
+	factory.StartWithContext(ctx)
 	for typ, ok := range factory.WaitForCacheSync(ctx.Done()) {
 		if !ok {
 			return fmt.Errorf("informer for %v did not sync before context closed", typ)

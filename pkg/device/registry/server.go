@@ -16,6 +16,7 @@ import (
 	"time"
 	"unsafe"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/registry"
@@ -188,6 +189,9 @@ func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *regis
 	pollErr := wait.PollUntilContextCancel(ctx, resolveBackoff, true, func(ctx context.Context) (bool, error) {
 		t, err := s.lookupTarget(ctx, req)
 		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, err
+			}
 			lastErr = err
 			klog.V(5).InfoS("register target lookup failed; retrying", "err", err)
 			return false, nil
@@ -232,7 +236,6 @@ func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *regis
 			return false, nil
 		}
 
-		sort.Ints(candidatePids)
 		target = t
 		pids = candidatePids
 		return true, nil
@@ -335,10 +338,9 @@ func validateLegacyContainer(pod *corev1.Pod, containerName string) error {
 // persistPids writes the sorted PID list to <configDir>/pids.config atomically
 // (flock + truncate+write) via the in-tree cgo helper.
 func (s *DeviceRegistryServerImpl) persistPids(configDir string, pids []int) error {
-	if err := os.MkdirAll(configDir, 0o777); err != nil {
-		return fmt.Errorf("ensure config dir %s: %w", configDir, err)
-	}
+	_ = os.MkdirAll(configDir, 0o777)
 	var buf bytes.Buffer
+	sort.Ints(pids)
 	for _, pid := range pids {
 		buf.WriteString(strconv.Itoa(pid))
 		buf.WriteByte('\n')

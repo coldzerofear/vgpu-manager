@@ -23,6 +23,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/checkpoint"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -756,9 +757,6 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 }
 
 func (m *vNumberDevicePlugin) getPodByUid(ctx context.Context, uid string, deepCopy bool) (*corev1.Pod, error) {
-	if uid == "" {
-		return nil, fmt.Errorf("uid cannot be empty")
-	}
 	var opts []client2.ListOption
 	if deepCopy {
 		opts = []client2.ListOption{client2.MatchingFields{"metadata.uid": uid}}
@@ -773,7 +771,7 @@ func (m *vNumberDevicePlugin) getPodByUid(ctx context.Context, uid string, deepC
 		return nil, err
 	}
 	if len(podList.Items) != 1 {
-		return nil, fmt.Errorf("unable to find pod %s", uid)
+		return nil, apierrors.NewNotFound(corev1.Resource("pods"), "uid "+uid)
 	}
 	return &podList.Items[0], nil
 }

@@ -29,6 +29,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func InsertAnnotation(obj metav1.Object, k, v string) {
@@ -608,4 +609,12 @@ func NewMirrorIndexer(informer cache.Informer) (k8scache.Indexer, k8scache.Resou
 		return nil, nil, err
 	}
 	return indexer, registration, nil
+}
+
+func ObjectKeys[T client.Object](objects ...T) []string {
+	keys := make([]string, 0, len(objects))
+	for _, object := range objects {
+		keys = append(keys, client.ObjectKeyFromObject(object).String())
+	}
+	return keys
 }
