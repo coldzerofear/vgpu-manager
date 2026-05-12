@@ -24,10 +24,7 @@ import (
 	"github.com/opencontainers/cgroups"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 //#include <stdio.h>
@@ -71,25 +68,27 @@ const (
 	PidsConfig = "pids.config"
 )
 
-func NewDeviceRegistryServer(cache cache.Cache, containerPath string) *DeviceRegistryServerImpl {
-	runtime.Must(cache.IndexField(context.Background(), &corev1.Pod{},
-		"metadata.uid", func(obj client.Object) []string {
-			return []string{string(obj.GetUID())}
-		}))
+type GetPodByUIDFunc func(ctx context.Context, uid string) (*corev1.Pod, error)
+
+type GetPodUIDAndContainerNameByUUIDFunc func(ctx context.Context, uuid string) (string, string, error)
+
+func NewDeviceRegistryServer(containerPath string, getPodByUIDFn GetPodByUIDFunc, getUidByUUIDFn GetPodUIDAndContainerNameByUUIDFunc) *DeviceRegistryServerImpl {
 	return &DeviceRegistryServerImpl{
-		contPath: containerPath,
-		cache:    cache,
+		contPath:       containerPath,
+		getPodByUIDFn:  getPodByUIDFn,
+		getUidByUUIDFn: getUidByUUIDFn,
 	}
 }
 
 type DeviceRegistryServerImpl struct {
 	registry.UnimplementedVDeviceRegistryServer
-	mutex    sync.Mutex
-	contPath string
-	cache    cache.Cache
-	server   *grpc.Server
-	listener net.Listener
-	running  bool
+	mutex          sync.Mutex
+	contPath       string
+	getPodByUIDFn  GetPodByUIDFunc
+	getUidByUUIDFn GetPodUIDAndContainerNameByUUIDFunc
+	server         *grpc.Server
+	listener       net.Listener
+	running        bool
 }
 
 func (s *DeviceRegistryServerImpl) IsRunning() bool {
@@ -98,74 +97,80 @@ func (s *DeviceRegistryServerImpl) IsRunning() bool {
 	return s.running
 }
 
-func (s *DeviceRegistryServerImpl) getPodNoCopyByUID(ctx context.Context, uid string) (*corev1.Pod, error) {
-	podList := corev1.PodList{}
-	if err := s.cache.List(ctx, &podList,
-		client.MatchingFields{"metadata.uid": uid},
-		client.UnsafeDisableDeepCopyOption(true)); err != nil {
-		return nil, err
-	}
-	if len(podList.Items) != 1 {
-		return nil, fmt.Errorf("unable to find pod %s", uid)
-	}
-	return &podList.Items[0], nil
-}
-
 func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, req *registry.ContainerDeviceRequest) (resp *registry.ContainerDeviceResponse, err error) {
 	klog.V(4).InfoS("RegisterContainerDevice", "podUid", req.GetPodUid(), "containerName", req.GetContainerName())
 	defer func() {
 		if r := recover(); r != nil {
 			stack := string(debug.Stack())
 			klog.ErrorS(fmt.Errorf("Unexpected panic in handler: %v\n%s", r, stack), "RegisterContainerDevice panicked",
-				"podUid", req.GetPodUid(), "containerName", req.GetContainerName())
+				"podUid", req.GetPodUid(), "containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid())
 			err = fmt.Errorf("internal exception: %v", r)
 		}
 		if err != nil {
-			klog.V(4).ErrorS(err, "RegisterContainerDevice failed", "podUid", req.GetPodUid(), "containerName", req.GetContainerName())
+			klog.V(4).ErrorS(err, "RegisterContainerDevice failed", "podUid", req.GetPodUid(),
+				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid())
 		}
 	}()
 
+	var (
+		podUid        = req.GetPodUid()
+		containerName = req.GetContainerName()
+		registerUuid  = req.GetRegisterUuid()
+	)
+
 	resp = &registry.ContainerDeviceResponse{}
-	if len(req.PodUid) == 0 {
+	if len(registerUuid) != 0 {
+		if s.getUidByUUIDFn == nil {
+			err = fmt.Errorf("does not support registering uuid")
+			return resp, err
+		}
+		podUid, containerName, err = s.getUidByUUIDFn(ctx, registerUuid)
+		if err != nil {
+			err = fmt.Errorf("failed to obtain registration information for the manager: %v", err)
+			return resp, err
+		}
+	}
+
+	if len(podUid) == 0 {
 		err = fmt.Errorf("pod uid cannot be empty")
 		return resp, err
 	}
-	if len(req.ContainerName) == 0 {
+	if len(containerName) == 0 {
 		err = fmt.Errorf("container name cannot be empty")
 		return resp, err
 	}
 
-	pod, err := s.getPodNoCopyByUID(ctx, req.PodUid)
+	pod, err := s.getPodByUIDFn(ctx, podUid)
 	if err != nil {
 		return resp, err
 	}
 	contIndex := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
-		return container.Name == req.ContainerName
+		return container.Name == containerName
 	})
 	if contIndex < 0 {
-		err = fmt.Errorf("unable to find container %s in pod", req.ContainerName)
+		err = fmt.Errorf("unable to find container %s in pod", containerName)
 		return resp, err
 	}
 	if !util.IsVGPURequiredContainer(&pod.Spec.Containers[contIndex]) {
-		err = fmt.Errorf("container %s does not have vGPU", req.ContainerName)
+		err = fmt.Errorf("container %s does not have vGPU", containerName)
 		return resp, err
 	}
 	if util.PodIsTerminated(pod) {
 		err = fmt.Errorf("terminated pod %s", klog.KObj(pod).String())
 		return resp, err
 	}
-	if status, ok := cgroup.GetContainerStatus(pod, req.ContainerName); !ok || status.State.Running == nil {
+	if status, ok := cgroup.GetContainerStatus(pod, containerName); !ok || status.State.Running == nil {
 		containerID := ""
 		if ok {
 			containerID = status.ContainerID
 		}
 		klog.V(4).InfoS("Container is not ready, waiting for running state",
-			"podUid", req.PodUid,
-			"containerName", req.ContainerName,
+			"podUid", podUid,
+			"containerName", containerName,
 			"resourceVersion", pod.ResourceVersion,
 			"containerID", containerID)
 		err = wait.PollUntilContextCancel(ctx, 40*time.Millisecond, false, func(ctx context.Context) (bool, error) {
-			newPod, err := s.getPodNoCopyByUID(ctx, req.PodUid)
+			newPod, err := s.getPodByUIDFn(ctx, podUid)
 			if err != nil {
 				return false, err
 			}
@@ -177,10 +182,10 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 			if util.PodIsTerminated(pod) {
 				return false, fmt.Errorf("terminated pod %s", klog.KObj(pod).String())
 			}
-			if status, ok = cgroup.GetContainerStatus(pod, req.ContainerName); ok && status.State.Running != nil {
+			if status, ok = cgroup.GetContainerStatus(pod, containerName); ok && status.State.Running != nil {
 				klog.V(4).InfoS("Container entered running state",
-					"podUid", req.PodUid,
-					"containerName", req.ContainerName,
+					"podUid", podUid,
+					"containerName", containerName,
 					"resourceVersion", pod.ResourceVersion,
 					"containerID", status.ContainerID,
 					"startedAt", status.State.Running.StartedAt)
@@ -193,7 +198,7 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 		}
 	}
 
-	runtimeName, containerID := cgroup.GetContainerRuntime(pod, req.ContainerName)
+	runtimeName, containerID := cgroup.GetContainerRuntime(pod, containerName)
 	var (
 		getFullPath    func(string) string
 		cgroupPathMode string
@@ -215,22 +220,22 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 		cgroupPathMode = "cgroupv1-device"
 	}
 	klog.V(4).InfoS("Preparing to resolve container pids",
-		"podUid", req.PodUid,
-		"containerName", req.ContainerName,
+		"podUid", podUid,
+		"containerName", containerName,
 		"resourceVersion", pod.ResourceVersion,
 		"runtime", runtimeName,
 		"containerID", containerID,
 		"cgroupPathMode", cgroupPathMode)
-	contPids := cgroup.GetContainerPidsFunc(pod, req.ContainerName, getFullPath)
+	contPids := cgroup.GetContainerPidsFunc(pod, containerName, getFullPath)
 	if len(contPids) == 0 {
 		klog.V(4).InfoS("Container pid resolution returned empty result",
-			"podUid", req.PodUid,
-			"containerName", req.ContainerName,
+			"podUid", podUid,
+			"containerName", containerName,
 			"resourceVersion", pod.ResourceVersion,
 			"runtime", runtimeName,
 			"containerID", containerID,
 			"cgroupPathMode", cgroupPathMode)
-		err = fmt.Errorf("unable to find the process ID of the container %s", req.ContainerName)
+		err = fmt.Errorf("unable to find the process ID of the container %s", containerName)
 		return resp, err
 	}
 
@@ -240,7 +245,7 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 		buf.WriteString(strconv.Itoa(pid))
 		buf.WriteByte('\n')
 	}
-	containerFilePath := util.GetPodContainerManagerPath(s.contPath, pod.UID, req.ContainerName)
+	containerFilePath := util.GetPodContainerManagerPath(s.contPath, pod.UID, containerName)
 	cFileName := C.CString(filepath.Join(containerFilePath, util.Config, PidsConfig))
 	cData := C.CString(buf.String())
 	defer func() {
@@ -282,7 +287,7 @@ func (s *DeviceRegistryServerImpl) Start() error {
 		return fmt.Errorf("failed to set socket permissions: %v", err)
 	}
 	s.listener = listener
-	s.server = grpc.NewServer(grpc.MaxConcurrentStreams(1000))
+	s.server = grpc.NewServer(grpc.MaxConcurrentStreams(1024))
 
 	registry.RegisterVDeviceRegistryServer(s.server, s)
 	s.running = true

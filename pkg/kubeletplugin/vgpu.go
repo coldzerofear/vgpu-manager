@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	draclient "k8s.io/dynamic-resource-allocation/client"
+	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 	"k8s.io/utils/ptr"
@@ -325,7 +326,34 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 	}, nil
 }
 
-func (m *VGPUManager) Unprepare(claimUID string, _ PreparedDeviceList) error {
-	_ = os.RemoveAll(filepath.Join(m.hostManagerPath, util.Claims, claimUID))
+func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, devices PreparedDeviceList) error {
+	_ = os.RemoveAll(filepath.Join(m.hostManagerPath, util.Claims, string(claimRef.UID)))
+
+	if !featuregates.Enabled(featuregates.DevicePluginClientMode) {
+		return nil
+	}
+
+	claim, err := m.draClient.ResourceClaims(claimRef.Namespace).
+		Get(context.Background(), claimRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	metadata := client.PatchMetadata{Annotations: map[string]*string{}}
+	for key := range claim.GetAnnotations() {
+		if strings.HasPrefix(key, util.DRADriverName+"/") {
+			metadata.Annotations[key] = nil
+		}
+	}
+	if len(metadata.Annotations) > 0 {
+		data, err := metadata.MarshalJSON()
+		if err != nil {
+			return err
+		}
+		_, err = m.draClient.ResourceClaims(claim.Namespace).
+			Patch(context.Background(), claim.Name, metadata.PatchType(), data, metav1.PatchOptions{})
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }

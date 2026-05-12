@@ -1,18 +1,18 @@
 /*
- * Copyright 2024 NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+Copyright The Kubernetes Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package featuregates
 
@@ -23,11 +23,20 @@ import (
 	"github.com/stretchr/testify/require"
 	utilversion "k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/component-base/featuregate"
+	logsapi "k8s.io/component-base/logs/api/v1"
 )
 
 // TestVersion is a high version used in tests to ensure all feature gates are visible
 // regardless of the actual project version being tested.
 var TestVersion = utilversion.MajorMinor(999, 999)
+
+func TestNewFeatureGatesWithKubeEmulationDoesNotPanic(t *testing.T) {
+	require.NotPanics(t, func() {
+		_ = newFeatureGates(featureGateEmulationVersion)
+	})
+	fg := newFeatureGates(featureGateEmulationVersion)
+	require.True(t, fg.Enabled(logsapi.ContextualLogging))
+}
 
 // Test feature gates covering all lifecycle stages
 // These are completely fake features used only for testing - no real feature gate values are used.
@@ -414,4 +423,125 @@ func TestFeatureGateErrorHandling(t *testing.T) {
 		// Original state should be preserved
 		require.False(t, fg.Enabled(TestAlphaFeature1), "Feature state should be unchanged after failed mixed operation")
 	})
+}
+
+// =============================================================================
+// Feature Gate Validation Tests
+// =============================================================================
+
+func TestValidateFeatureGates(t *testing.T) {
+	tests := []struct {
+		name         string
+		fgMap        map[featuregate.Feature]bool
+		expectError  bool
+		errorMessage string
+		description  string
+	}{
+		{
+			name:        "No features enabled",
+			fgMap:       map[featuregate.Feature]bool{},
+			expectError: false,
+			description: "should be valid when no features are enabled",
+		},
+		//{
+		//	name:        "CDCliques enabled with DNSNames enabled",
+		//	fgMap:       map[featuregate.Feature]bool{ComputeDomainCliques: true, IMEXDaemonsWithDNSNames: true},
+		//	expectError: false,
+		//	description: "should be valid when both ComputeDomainCliques and IMEXDaemonsWithDNSNames are enabled",
+		//},
+		//{
+		//	name:         "CDCliques enabled without DNSNames",
+		//	fgMap:        map[featuregate.Feature]bool{ComputeDomainCliques: true, IMEXDaemonsWithDNSNames: false},
+		//	expectError:  true,
+		//	errorMessage: "feature gate ComputeDomainCliques requires IMEXDaemonsWithDNSNames to also be enabled",
+		//	description:  "should fail when ComputeDomainCliques is enabled but IMEXDaemonsWithDNSNames is not",
+		//},
+		//{
+		//	name:        "DNSNames enabled without CDCliques",
+		//	fgMap:       map[featuregate.Feature]bool{IMEXDaemonsWithDNSNames: true, ComputeDomainCliques: false},
+		//	expectError: false,
+		//	description: "should be valid when IMEXDaemonsWithDNSNames is enabled but ComputeDomainCliques is not",
+		//},
+		{
+			name:         "DynamicMIG enabled with PassthroughSupport",
+			fgMap:        map[featuregate.Feature]bool{DynamicMIG: true, PassthroughSupport: true},
+			expectError:  true,
+			errorMessage: "feature gate DynamicMIG is currently mutually exclusive with PassthroughSupport",
+			description:  "should fail when both DynamicMIG and PassthroughSupport are enabled",
+		},
+		{
+			name:         "DynamicMIG enabled with NVMLDeviceHealthCheck",
+			fgMap:        map[featuregate.Feature]bool{DynamicMIG: true, NVMLDeviceHealthCheck: true},
+			expectError:  true,
+			errorMessage: "feature gate DynamicMIG is currently mutually exclusive with NVMLDeviceHealthCheck",
+			description:  "should fail when both DynamicMIG and NVMLDeviceHealthCheck are enabled",
+		},
+		{
+			name:         "DynamicMIG enabled with MPSSupport",
+			fgMap:        map[featuregate.Feature]bool{DynamicMIG: true, MPSSupport: true},
+			expectError:  true,
+			errorMessage: "feature gate DynamicMIG is currently mutually exclusive with MPSSupport",
+			description:  "should fail when both DynamicMIG and MPSSupport are enabled",
+		},
+		{
+			name:        "Only DynamicMIG enabled",
+			fgMap:       map[featuregate.Feature]bool{DynamicMIG: true, PassthroughSupport: false, NVMLDeviceHealthCheck: false, MPSSupport: false},
+			expectError: false,
+			description: "should be valid when only DynamicMIG is enabled",
+		},
+		{
+			name:         "PassthroughSupport enabled with NVMLDeviceHealthCheck",
+			fgMap:        map[featuregate.Feature]bool{PassthroughSupport: true, NVMLDeviceHealthCheck: true},
+			expectError:  true,
+			errorMessage: "feature gate PassthroughSupport is currently mutually exclusive with NVMLDeviceHealthCheck",
+			description:  "should fail when both PassthroughSupport and NVMLDeviceHealthCheck are enabled",
+		},
+		{
+			name:        "Only PassthroughSupport enabled",
+			fgMap:       map[featuregate.Feature]bool{PassthroughSupport: true, DynamicMIG: false, NVMLDeviceHealthCheck: false, DeviceMetadata: false},
+			expectError: false,
+			description: "should be valid when only PassthroughSupport is enabled",
+		},
+		{
+			name:         "DeviceMetadata enabled without PassthroughSupport",
+			fgMap:        map[featuregate.Feature]bool{DeviceMetadata: true, PassthroughSupport: false},
+			expectError:  true,
+			errorMessage: "feature gate DeviceMetadata requires PassthroughSupport to also be enabled",
+			description:  "should fail when DeviceMetadata is enabled but PassthroughSupport is not",
+		},
+		{
+			name:        "DeviceMetadata enabled with PassthroughSupport",
+			fgMap:       map[featuregate.Feature]bool{DeviceMetadata: true, PassthroughSupport: true},
+			expectError: false,
+			description: "should be valid when both DeviceMetadata and PassthroughSupport are enabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create feature gates with test configuration
+			fg := newFeatureGates(TestVersion)
+			fgMap := make(map[string]bool)
+			for feature, state := range tt.fgMap {
+				fgMap[string(feature)] = state
+			}
+			err := fg.SetFromMap(fgMap)
+			require.NoError(t, err, "SetFromMap should not fail")
+
+			// Temporarily replace global feature gates for validation
+			oldGates := featureGates
+			featureGates = fg
+			defer func() { featureGates = oldGates }()
+
+			// Validate feature gates
+			err = ValidateFeatureGates()
+
+			if tt.expectError {
+				require.Error(t, err, tt.description)
+				require.Contains(t, err.Error(), tt.errorMessage, "expected error message %q but got %q", tt.errorMessage, err.Error())
+			} else {
+				require.NoError(t, err, tt.description)
+			}
+		})
+	}
 }

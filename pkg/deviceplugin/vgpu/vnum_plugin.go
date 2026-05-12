@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/component-base/featuregate"
@@ -54,15 +55,20 @@ var _ base.DevicePlugin = &vNumberDevicePlugin{}
 // NewVNumberDevicePlugin returns an initialized vNumberDevicePlugin.
 func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.DeviceManager,
 	kubeClient *kubernetes.Clientset, cache cache.Cache) base.DevicePlugin {
-	server := registry.NewDeviceRegistryServer(cache, ContManagerDirectoryPath)
+	runtime.Must(cache.IndexField(context.Background(), &corev1.Pod{}, "metadata.uid",
+		func(obj client2.Object) []string { return []string{string(obj.GetUID())} }))
 	podResource := client.NewPodResource(client.WithCallTimeoutSecond(5))
-	return &vNumberDevicePlugin{
+	plugin := &vNumberDevicePlugin{
 		baseServer:  base.NewBasePluginServer(resourceName, socket, manager),
 		podResource: podResource,
 		kubeClient:  kubeClient,
-		server:      server,
 		cache:       cache,
 	}
+	fn := func(ctx context.Context, uid string) (*corev1.Pod, error) {
+		return plugin.getPodByUid(ctx, uid, false)
+	}
+	plugin.server = registry.NewDeviceRegistryServer(ContManagerDirectoryPath, fn, nil)
+	return plugin
 }
 
 func (m *vNumberDevicePlugin) Name() string {
@@ -749,6 +755,29 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	return resp, nil
 }
 
+func (m *vNumberDevicePlugin) getPodByUid(ctx context.Context, uid string, deepCopy bool) (*corev1.Pod, error) {
+	if uid == "" {
+		return nil, fmt.Errorf("uid cannot be empty")
+	}
+	var opts []client2.ListOption
+	if deepCopy {
+		opts = []client2.ListOption{client2.MatchingFields{"metadata.uid": uid}}
+	} else {
+		opts = []client2.ListOption{
+			client2.MatchingFields{"metadata.uid": uid},
+			client2.UnsafeDisableDeepCopy,
+		}
+	}
+	podList := corev1.PodList{}
+	if err := m.cache.List(ctx, &podList, opts...); err != nil {
+		return nil, err
+	}
+	if len(podList.Items) != 1 {
+		return nil, fmt.Errorf("unable to find pod %s", uid)
+	}
+	return &podList.Items[0], nil
+}
+
 // GetPodInfoByCheckpoint find relevant pod information for devicesIDs in kubelet checkpoint
 func (m *vNumberDevicePlugin) GetPodInfoByCheckpoint(ctx context.Context, devicesIDs []string) (*client.PodInfo, error) {
 	klog.V(3).Infoln("Attempt to retrieve pod information from the device plugin checkpoint")
@@ -763,24 +792,18 @@ func (m *vNumberDevicePlugin) GetPodInfoByCheckpoint(ctx context.Context, device
 		if entry.ResourceName != util.VGPUNumberResourceName || !deviceSet.HasAll(entry.DeviceIDs...) {
 			continue
 		}
-		podList := corev1.PodList{}
-		if err = m.cache.List(
-			ctx, &podList,
-			client2.MatchingFields{"metadata.uid": entry.PodUID},
-			client2.UnsafeDisableDeepCopy); err != nil {
-			return nil, err
+		pod, err := m.getPodByUid(ctx, entry.PodUID, false)
+		if err != nil {
+			return nil, fmt.Errorf("getPodByUid failed: %v", err)
 		}
-		for _, pod := range podList.Items {
-			if pod.Spec.NodeName != nodeName || util.PodIsTerminated(&pod) || !util.IsVGPUResourcePod(&pod) {
-				continue
-			}
-			return &client.PodInfo{
-				PodName:       pod.Name,
-				PodNamespace:  pod.Namespace,
-				ContainerName: entry.ContainerName,
-			}, nil
+		if pod.Spec.NodeName != nodeName || util.PodIsTerminated(pod) || !util.IsVGPUResourcePod(pod) {
+			continue
 		}
-		break
+		return &client.PodInfo{
+			PodName:       pod.Name,
+			PodNamespace:  pod.Namespace,
+			ContainerName: entry.ContainerName,
+		}, nil
 	}
 	return nil, fmt.Errorf("pod info not found")
 }

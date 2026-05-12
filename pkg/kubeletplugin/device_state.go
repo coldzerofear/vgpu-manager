@@ -468,7 +468,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 			return fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", claimRef.String(), err)
 		}
 	case ClaimCheckpointStatePrepareCompleted:
-		if err := s.unprepareDevices(ctx, claimUID, pc.PreparedDevices); err != nil {
+		if err := s.unprepareDevices(ctx, claimRef, pc.PreparedDevices); err != nil {
 			return fmt.Errorf("unprepare devices failed for claim %s: %w", claimRef.String(), err)
 		}
 	default:
@@ -834,7 +834,23 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				ShareID:      result.ShareID,
 			}
 
-			preparedDevice := PreparedDevice{Request: result.Request, CDIDeviceID: cdiDeviceID}
+			// KEP-5304: Add device metadata to the prepared devices.
+			if featuregates.Enabled(featuregates.DeviceMetadata) {
+				if allocatableDevice.Type() == VfioDeviceType {
+					attrs := make(map[string]resourceapi.DeviceAttribute)
+					for k, v := range allocatableDevice.Vfio.GetDevice().Attributes {
+						attrs[string(k)] = v
+					}
+					device.Metadata = &kubeletplugin.DeviceMetadata{
+						Attributes: attrs,
+					}
+				}
+			}
+
+			preparedDevice := PreparedDevice{
+				Request:     result.Request,
+				CDIDeviceID: cdiDeviceID,
+			}
 
 			switch allocatableDevice.Type() {
 			case VGpuDeviceType:
@@ -961,8 +977,9 @@ func mergeContainerEdits(base *cdiapi.ContainerEdits, extra *cdiapi.ContainerEdi
 	return base.Append(extra)
 }
 
-func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, devices PreparedDevices) error {
-	klog.V(6).Infof("Unpreparing claim '%s', previously prepared devices from checkpoint: %v", claimUID, devices.GetDeviceNames())
+func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplugin.NamespacedObject, devices PreparedDevices) error {
+	klog.V(6).Infof("Unpreparing claim '%s', previously prepared devices from checkpoint: %v", claimRef.UID, devices.GetDeviceNames())
+	var vGpuDevices PreparedDeviceList
 	for _, group := range devices {
 		// Unconfigure the vfio-pci devices.
 		if featuregates.Enabled(featuregates.PassthroughSupport) {
@@ -982,7 +999,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 			case PreparedMigDeviceType:
 				if featuregates.Enabled(featuregates.DynamicMIG) {
 					mig := device.Mig.Concrete
-					klog.V(4).Infof("Unprepare: tear down MIG device '%s' for claim '%s'", mig.MigUUID, claimUID)
+					klog.V(4).Infof("Unprepare: tear down MIG device '%s' for claim '%s'", mig.MigUUID, claimRef.UID)
 					// Errors during MIG device deletion are generally rare but
 					// have to be expected, and should fail the
 					// NodeUnprepareResources() operation. This may for example
@@ -1001,13 +1018,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 			}
 		}
 
-		// Clean up configuration files
-		if featuregates.Enabled(featuregates.VGPUSupport) {
-			err := s.vgpuManager.Unprepare(claimUID, group.Devices.VGpus())
-			if err != nil {
-				return fmt.Errorf("error cleanup hami devices: %w", err)
-			}
-		}
+		vGpuDevices = append(vGpuDevices, group.Devices.VGpus()...)
 
 		// Stop any MPS control daemons started for each group of prepared devices.
 		//if featuregates.Enabled(featuregates.MPSSupport) {
@@ -1024,8 +1035,17 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 				return fmt.Errorf("error setting timeslice for devices: %w", err)
 			}
 		}
-
 	}
+
+	// Clean up configuration files
+	if featuregates.Enabled(featuregates.VGPUSupport) {
+		if len(vGpuDevices) > 0 {
+			if err := s.vgpuManager.Unprepare(claimRef, vGpuDevices); err != nil {
+				return fmt.Errorf("error cleanup vgpu devices: %w", err)
+			}
+		}
+	}
+
 	return nil
 }
 

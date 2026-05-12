@@ -22,20 +22,30 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/informers"
 	coreclientset "k8s.io/client-go/kubernetes"
+	cache2 "k8s.io/client-go/tools/cache"
+	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
@@ -61,6 +71,7 @@ type driver struct {
 	pulock              *flock.Flock
 	healthcheck         *healthcheck
 	deviceHealthMonitor deviceHealthMonitor
+	deviceRegistry      *registry.DeviceRegistryServerImpl
 	wg                  sync.WaitGroup
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
@@ -137,7 +148,12 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.RegistrarDirectoryPath(config.KubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
 	}
-
+	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
+	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
+	if featuregates.Enabled(featuregates.DeviceMetadata) {
+		opts = append(opts, kubeletplugin.EnableDeviceMetadata(true))
+		opts = append(opts, kubeletplugin.MetadataVersions(drametadatav1alpha1.SchemeGroupVersion))
+	}
 	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
 		return nil, err
@@ -185,6 +201,84 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, gpuDeviceMap, filePath)
 			klog.V(4).Info("stopping extended shared SM utilization watcher")
 		})
+	}
+
+	if featuregates.Enabled(featuregates.DevicePluginClientMode) {
+		// trim managedFields to reduce cache memory usage.
+		option := informers.WithTransform(cache.TransformStripManagedFields())
+		factory := informers.NewSharedInformerFactoryWithOptions(config.ClientSets.Core, 10*time.Hour, option)
+		podInformer := factory.InformerFor(&corev1.Pod{}, func(k coreclientset.Interface, d time.Duration) cache2.SharedIndexInformer {
+			watcher := cache2.NewListWatchFromClient(k.CoreV1().RESTClient(), "pods",
+				corev1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", config.NodeName))
+			return cache2.NewSharedIndexInformer(watcher, &corev1.Pod{}, d, cache2.Indexers{
+				cache2.NamespaceIndex: cache2.MetaNamespaceIndexFunc,
+				"metadata.uid": func(obj interface{}) ([]string, error) {
+					meta, err := meta.Accessor(obj)
+					if err != nil {
+						return []string{""}, fmt.Errorf("object has no meta: %v", err)
+					}
+					return []string{string(meta.GetUID())}, nil
+				},
+			})
+		})
+
+		claimInformer := factory.InformerFor(&resourceapi.ResourceClaim{}, func(k coreclientset.Interface, d time.Duration) cache2.SharedIndexInformer {
+			watcher := cache2.NewListWatchFromClient(config.ClientSets.Resource.RESTClient(), "resourceclaims",
+				corev1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", config.NodeName))
+			return cache2.NewSharedIndexInformer(watcher, &resourceapi.ResourceClaim{}, d, cache2.Indexers{
+				cache2.NamespaceIndex: cache2.MetaNamespaceIndexFunc,
+				"manager.register.uuid": func(obj interface{}) ([]string, error) {
+					indexedValues := []string{}
+					meta, err := meta.Accessor(obj)
+					if err != nil {
+						return indexedValues, fmt.Errorf("object has no meta: %v", err)
+					}
+					for key := range meta.GetAnnotations() {
+						if prefix, found := strings.CutPrefix(key, util.DRADriverName+"/"); found {
+							indexedValues = append(indexedValues, prefix)
+						}
+					}
+					return indexedValues, nil
+				},
+			})
+		})
+		driver.wg.Go(func() {
+			klog.V(5).Infoln("Starting to informer factory")
+			factory.StartWithContext(ctx)
+		})
+		podLister := client.NewPodLister(podInformer.GetIndexer())
+		claimIndexer := claimInformer.GetIndexer()
+		driver.deviceRegistry = registry.NewDeviceRegistryServer(util.ManagerRootPath, func(ctx context.Context, uid string) (*corev1.Pod, error) {
+			pods, err := podLister.ListByIndexValue("metadata.uid", uid)
+			if err != nil {
+				return nil, err
+			}
+			if len(pods) != 1 {
+				return nil, fmt.Errorf("unable to find pod %s", uid)
+			}
+			return pods[0], nil
+		}, func(ctx context.Context, uuid string) (string, string, error) {
+			objs, err := claimIndexer.ByIndex("manager.register.uuid", uuid)
+			if err != nil {
+				return "", "", err
+			}
+			if len(objs) != 1 {
+				return "", "", fmt.Errorf("unable to find resourceClaim %s", uuid)
+			}
+			claim, ok := objs[0].(*resourceapi.ResourceClaim)
+			if !ok {
+				return "", "", fmt.Errorf("unexpected object type: %T", objs[0])
+			}
+			parititionKey := claim.Annotations[fmt.Sprintf("%s/%s", util.DRADriverName, uuid)]
+
+		})
+		driver.wg.Go(func() {
+			klog.V(4).Info("Starting to container device registry server")
+			driver.deviceRegistry.Start()
+			//klog.V(4).Info("stopping container device registry server")
+		})
+		factory.WaitForCacheSync(ctx.Done())
+		klog.V(5).Infoln("informer cache synchronization successful")
 	}
 
 	// Pass `nodeUnprepareResource` function to the cleanup manager.
@@ -341,6 +435,10 @@ func (d *driver) Shutdown() error {
 
 	if d.deviceHealthMonitor != nil {
 		d.deviceHealthMonitor.Stop()
+	}
+
+	if d.deviceRegistry != nil {
+		d.deviceRegistry.Stop()
 	}
 
 	d.wg.Wait()

@@ -4,7 +4,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG APT_MIRROR
 
-ARG GOLANG_VERSION=1.25.3
+ARG GOLANG_VERSION=1.26.0
 
 RUN echo "Asia/Shanghai" > /etc/timezone && ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 
@@ -43,7 +43,7 @@ ARG GIT_COMMIT="unknown"
 ARG GIT_TREE_STATE="dirty"
 ARG BUILD_DATE="1970-01-01T00:00:00Z"
 ARG BUILD_VERSION="N/A"
-ARG BUILD_NVVERSION="v25.12.0"
+ARG BUILD_NVVERSION="v0.4.0"
 
 LABEL io.k8s.display-name="VGPU-Manager Base Builder"
 LABEL name="VGPU-Manager Base Builder"
