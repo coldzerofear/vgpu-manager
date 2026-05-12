@@ -22,7 +22,6 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	coreclientset "k8s.io/client-go/kubernetes"
-	cache2 "k8s.io/client-go/tools/cache"
+	kcache "k8s.io/client-go/tools/cache"
 	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
@@ -204,81 +203,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 
 	if featuregates.Enabled(featuregates.DevicePluginClientMode) {
-		// trim managedFields to reduce cache memory usage.
-		option := informers.WithTransform(cache.TransformStripManagedFields())
-		factory := informers.NewSharedInformerFactoryWithOptions(config.ClientSets.Core, 10*time.Hour, option)
-		podInformer := factory.InformerFor(&corev1.Pod{}, func(k coreclientset.Interface, d time.Duration) cache2.SharedIndexInformer {
-			watcher := cache2.NewListWatchFromClient(k.CoreV1().RESTClient(), "pods",
-				corev1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", config.NodeName))
-			return cache2.NewSharedIndexInformer(watcher, &corev1.Pod{}, d, cache2.Indexers{
-				cache2.NamespaceIndex: cache2.MetaNamespaceIndexFunc,
-				"metadata.uid": func(obj interface{}) ([]string, error) {
-					meta, err := meta.Accessor(obj)
-					if err != nil {
-						return []string{""}, fmt.Errorf("object has no meta: %v", err)
-					}
-					return []string{string(meta.GetUID())}, nil
-				},
-			})
-		})
-
-		claimInformer := factory.InformerFor(&resourceapi.ResourceClaim{}, func(k coreclientset.Interface, d time.Duration) cache2.SharedIndexInformer {
-			watcher := cache2.NewListWatchFromClient(config.ClientSets.Resource.RESTClient(), "resourceclaims",
-				corev1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", config.NodeName))
-			return cache2.NewSharedIndexInformer(watcher, &resourceapi.ResourceClaim{}, d, cache2.Indexers{
-				cache2.NamespaceIndex: cache2.MetaNamespaceIndexFunc,
-				"manager.register.uuid": func(obj interface{}) ([]string, error) {
-					indexedValues := []string{}
-					meta, err := meta.Accessor(obj)
-					if err != nil {
-						return indexedValues, fmt.Errorf("object has no meta: %v", err)
-					}
-					for key := range meta.GetAnnotations() {
-						if prefix, found := strings.CutPrefix(key, util.DRADriverName+"/"); found {
-							indexedValues = append(indexedValues, prefix)
-						}
-					}
-					return indexedValues, nil
-				},
-			})
-		})
-		driver.wg.Go(func() {
-			klog.V(5).Infoln("Starting to informer factory")
-			factory.StartWithContext(ctx)
-		})
-		podLister := client.NewPodLister(podInformer.GetIndexer())
-		claimIndexer := claimInformer.GetIndexer()
-		driver.deviceRegistry = registry.NewDeviceRegistryServer(util.ManagerRootPath, func(ctx context.Context, uid string) (*corev1.Pod, error) {
-			pods, err := podLister.ListByIndexValue("metadata.uid", uid)
-			if err != nil {
-				return nil, err
-			}
-			if len(pods) != 1 {
-				return nil, fmt.Errorf("unable to find pod %s", uid)
-			}
-			return pods[0], nil
-		}, func(ctx context.Context, uuid string) (string, string, error) {
-			objs, err := claimIndexer.ByIndex("manager.register.uuid", uuid)
-			if err != nil {
-				return "", "", err
-			}
-			if len(objs) != 1 {
-				return "", "", fmt.Errorf("unable to find resourceClaim %s", uuid)
-			}
-			claim, ok := objs[0].(*resourceapi.ResourceClaim)
-			if !ok {
-				return "", "", fmt.Errorf("unexpected object type: %T", objs[0])
-			}
-			parititionKey := claim.Annotations[fmt.Sprintf("%s/%s", util.DRADriverName, uuid)]
-
-		})
-		driver.wg.Go(func() {
-			klog.V(4).Info("Starting to container device registry server")
-			driver.deviceRegistry.Start()
-			//klog.V(4).Info("stopping container device registry server")
-		})
-		factory.WaitForCacheSync(ctx.Done())
-		klog.V(5).Infoln("informer cache synchronization successful")
+		if err := driver.startClientRegistry(ctx, config, state); err != nil {
+			return nil, fmt.Errorf("start client-register registry: %w", err)
+		}
 	}
 
 	// Pass `nodeUnprepareResource` function to the cleanup manager.
@@ -703,6 +630,83 @@ func getAPIServerVersion(client coreclientset.Interface) (*semver.Version, error
 	}
 
 	return semver, nil
+}
+
+// startClientRegistry wires up the on-host gRPC server that the in-container
+// vGPU library calls into to register itself. It owns the pod and claim
+// informers that feed the resolver: pods are scoped to the local node via the
+// API-server field selector; ResourceClaims are watched cluster-wide because
+// the type has no nodeName field — narrowing happens at the resolver level via
+// the per-claim register-uuid annotation index.
+func (d *driver) startClientRegistry(ctx context.Context, config *Config, state *DeviceState) error {
+	// Strip managedFields entries from cached objects — they're large and
+	// irrelevant to anything the resolver does.
+	factory := informers.NewSharedInformerFactoryWithOptions(
+		config.ClientSets.Core, 10*time.Hour,
+		informers.WithTransform(cache.TransformStripManagedFields()),
+	)
+
+	podInformer := factory.InformerFor(&corev1.Pod{}, func(k coreclientset.Interface, resync time.Duration) kcache.SharedIndexInformer {
+		lw := kcache.NewListWatchFromClient(
+			k.CoreV1().RESTClient(), "pods",
+			corev1.NamespaceAll,
+			fields.OneTermEqualSelector("spec.nodeName", config.Flags.NodeName),
+		)
+		return kcache.NewSharedIndexInformer(lw, &corev1.Pod{}, resync, kcache.Indexers{
+			kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc,
+			"metadata.uid": func(obj interface{}) ([]string, error) {
+				accessor, err := meta.Accessor(obj)
+				if err != nil {
+					return nil, fmt.Errorf("object has no meta: %w", err)
+				}
+				return []string{string(accessor.GetUID())}, nil
+			},
+		})
+	})
+
+	claimInformer := factory.InformerFor(&resourceapi.ResourceClaim{}, func(_ coreclientset.Interface, resync time.Duration) kcache.SharedIndexInformer {
+		// ResourceClaim has no spec.nodeName, so we don't apply a field
+		// selector; the resolver filters per-claim via the UUID index.
+		lw := kcache.NewListWatchFromClient(
+			config.ClientSets.Resource.RESTClient(), "resourceclaims",
+			corev1.NamespaceAll, fields.Everything(),
+		)
+		return kcache.NewSharedIndexInformer(lw, &resourceapi.ResourceClaim{}, resync, kcache.Indexers{
+			kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc,
+			ClaimUUIDIndex:        MakeClaimUUIDIndexFunc(util.DRADriverName),
+		})
+	})
+
+	factory.Start(ctx.Done())
+	for typ, ok := range factory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return fmt.Errorf("informer for %v did not sync before context closed", typ)
+		}
+	}
+	klog.V(5).InfoS("client-register informer caches synced")
+
+	podLister := client.NewPodLister(podInformer.GetIndexer())
+	resolver := NewClientRegisterResolver(
+		podLister,
+		claimInformer.GetIndexer(),
+		util.ManagerRootPath,
+		util.DRADriverName,
+		state.AllocatedVGPURequestsForClaim,
+	)
+
+	d.deviceRegistry = registry.NewDeviceRegistryServer(
+		util.ManagerRootPath,
+		resolver.PodByUID,
+		resolver.TargetByUUID,
+	)
+
+	d.wg.Go(func() {
+		klog.V(4).Info("Starting container device registry server")
+		if err := d.deviceRegistry.Start(); err != nil {
+			klog.ErrorS(err, "device registry server start failed")
+		}
+	})
+	return nil
 }
 
 // TODO: implement loop to remove CDI files from the CDI path for claimUIDs

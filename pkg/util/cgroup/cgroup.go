@@ -425,7 +425,18 @@ func convertSystemdFullPath(runtimeName, containerId string,
 	return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
 }
 
+// GetContainerStatus returns the ContainerStatus entry for the named container
+// in the pod. Init containers and regular containers are both searched; init
+// containers are checked first so that a name shared between an init container
+// and a sidecar (legal under K8s sidecar semantics) resolves to the init entry
+// while it is still in flight, then naturally rolls over to the regular entry
+// once the init container has completed and the regular container is up.
 func GetContainerStatus(pod *corev1.Pod, containerName string) (*corev1.ContainerStatus, bool) {
+	for i := range pod.Status.InitContainerStatuses {
+		if pod.Status.InitContainerStatuses[i].Name == containerName {
+			return &pod.Status.InitContainerStatuses[i], true
+		}
+	}
 	for i := range pod.Status.ContainerStatuses {
 		if pod.Status.ContainerStatuses[i].Name == containerName {
 			return &pod.Status.ContainerStatuses[i], true

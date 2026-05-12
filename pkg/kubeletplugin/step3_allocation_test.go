@@ -108,7 +108,9 @@ func TestVGPURequestMountEdits_AreRequestScopedForMounts(t *testing.T) {
 	}}}}
 
 	edits := manager.GetAllocationEnvContainerEdits(claim, result, device)
-	edits = edits.Append(manager.GetPartitionMountContainerEdits(claim, partitionKey))
+	partitionEdits, err := manager.GetPartitionMountContainerEdits(claim, partitionKey)
+	require.NoError(t, err)
+	edits = edits.Append(partitionEdits)
 	require.NotNil(t, edits)
 	require.NotNil(t, edits.ContainerEdits)
 

@@ -35,7 +35,20 @@ func (r *kubeClaimResolveReader) GetResourceClaim(ctx context.Context, key clien
 }
 
 func (s *DeviceState) resolveVGPUClaimPartitions(ctx context.Context, claim *resourceapi.ResourceClaim) (*claimresolve.PartitionInfo, error) {
+	return claimresolve.ResolveClaimVGPUPartitionsFromAllocatedRequests(
+		ctx, &kubeClaimResolveReader{state: s}, claim, s.AllocatedVGPURequestsForClaim(claim))
+}
+
+// AllocatedVGPURequestsForClaim returns the set of mainRequest names in the
+// claim that were allocated to a vGPU device owned by this driver. This is
+// a pure function over the claim's status combined with the local device
+// inventory — it performs no API calls and is safe to invoke from hot paths
+// such as the client-register resolver.
+func (s *DeviceState) AllocatedVGPURequestsForClaim(claim *resourceapi.ResourceClaim) sets.Set[string] {
 	allocatedRequests := sets.New[string]()
+	if claim == nil || claim.Status.Allocation == nil {
+		return allocatedRequests
+	}
 	for _, result := range claim.Status.Allocation.Devices.Results {
 		if result.Driver != util.DRADriverName {
 			continue
@@ -49,7 +62,7 @@ func (s *DeviceState) resolveVGPUClaimPartitions(ctx context.Context, claim *res
 			allocatedRequests.Insert(mainRequest)
 		}
 	}
-	return claimresolve.ResolveClaimVGPUPartitionsFromAllocatedRequests(ctx, &kubeClaimResolveReader{state: s}, claim, allocatedRequests)
+	return allocatedRequests
 }
 
 func resolveMainRequestName(claim *resourceapi.ResourceClaim, requestName string) string {
