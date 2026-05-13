@@ -164,7 +164,7 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 			"containerName", req.ContainerName,
 			"resourceVersion", pod.ResourceVersion,
 			"containerID", containerID)
-		err = wait.PollUntilContextCancel(ctx, 40*time.Millisecond, true, func(ctx context.Context) (bool, error) {
+		err = wait.PollUntilContextCancel(ctx, 40*time.Millisecond, false, func(ctx context.Context) (bool, error) {
 			newPod, err := s.getPodNoCopyByUID(ctx, req.PodUid)
 			if err != nil {
 				return false, err

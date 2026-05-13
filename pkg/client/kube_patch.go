@@ -129,14 +129,25 @@ func PatchPodAllocationFailed(kubeClient kubernetes.Interface, pod *corev1.Pod) 
 	})
 }
 
-// PatchPodVGPUAnnotation patch pod vGPU scheduling and allocation metadata.
-func PatchPodVGPUAnnotation(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
-	patchData := PatchMetadata{Annotations: map[string]*string{}}
+// PatchPodPreAllocatedMetadata patch vGPU pre allocated metadata annotations
+func PatchPodPreAllocatedMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
+	patchData := PatchMetadata{
+		Labels:      map[string]*string{},
+		Annotations: map[string]*string{},
+	}
+	// Proactively clean labels to prevent device plugin misjudgment
+	patchData.Labels[util.PodAssignedPhaseLabel] = nil
 	nodeName := pod.Annotations[util.PodPredicateNodeAnnotation]
 	patchData.Annotations[util.PodPredicateNodeAnnotation] = pointer.String(nodeName)
 	preAlloc := pod.Annotations[util.PodVGPUPreAllocAnnotation]
 	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = pointer.String(preAlloc)
 	patchData.Annotations[util.PodVGPURealAllocAnnotation] = pointer.String("")
+	// Stamp the current Filter time. PodStatusUnschedulable compares this
+	// against PodScheduled.LastTransitionTime to tell a stale Unschedulable
+	// condition (left by a previous failed cycle) from one written after
+	// this Filter pass.
+	patchData.Annotations[util.PodPredicateTimeAnnotation] = pointer.String(
+		fmt.Sprintf("%d", uint64(metav1.NowMicro().UnixNano())))
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		return PatchPodMetadata(kubeClient, pod, patchData)
 	})

@@ -58,6 +58,16 @@ scheduler:
 #      limits:
 #        cpu: 1000m
 #        memory: 1Gi
+    # Profiles are scheduling profiles that kube-scheduler supports.
+    # It only takes effect when the scheduler version is greater than 1.22
+    profile:
+      # PercentageOfNodesToScore is the percentage of all nodes that once found feasible for running a pod,
+      # the scheduler stops its search for more feasible nodes in the cluster. This helps improve scheduler's performance.
+      # When the value is 0, default percentage (5%--50% based on the size of the cluster) of the nodes will be scored.
+      percentageOfNodesToScore: 0
+      # Define to overwrite the default configuration of the plugin
+      plugins: {}
+      pluginConfig: []
   schedulerExtender:
     tls:
       # Enable TLS for the device monitor endpoint.
@@ -85,8 +95,8 @@ scheduler:
       pprofBindPort: 0
       # Supported feature gates:
       # - SerialBindNode (default: true)
+      # - SerialFilterNode (default: true)
       # - GPUTopology
-      # - SerialFilterNode
       featureGates: ""
       # Certificate refresh interval in seconds (TLS only works when enabled)
       certRefreshInterval: 5

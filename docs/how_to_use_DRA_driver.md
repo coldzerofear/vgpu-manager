@@ -4,6 +4,8 @@ vgpu-manager supports providing vGPU to POD through Kubernetes' latest dynamic r
 
 Using DRA requires the independent installation of the DRA driver for the vgpu-manager, which cannot work simultaneously with the vgpu-manager-device-plugin
 
+> Warning: The combination of (DRA driver+webhook) and (scheduler+device plugin+webgook) can only be chosen one or the other and cannot be deployed simultaneously, which may cause some unknown error conflicts.
+
 ## Prerequisite
 
 * NVIDIA drivers >= 440
@@ -38,7 +40,7 @@ kubectl apply -f  example/dra/pod-multi-vgpu.yaml
 
 ## Install DRA webhook
 
-DRA Webhook supports converting the traditional vGPU resource request format of vgpu-manager into DRA request format, and is compatible with some annotations supported by vgpu-manager.
+DRA Webhook supports converting the traditional vGPU resource request format of vGPU Manager into DRA request format, and is compatible with converting some of the control scheduling annotations supported by vGPU Manager, providing admission verification for DRA type resource requests.
 
 You can deploy a webhook using the following command
 

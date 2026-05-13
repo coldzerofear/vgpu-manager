@@ -22,6 +22,7 @@ type Options struct {
 	DefaultTopologyMode   string
 	DefaultRuntimeClass   string
 	VGPUDeviceClassName   string
+	DRAAdmissionEnabled   bool
 	DefaultConvertToDRA   bool
 	CombinedResourceClaim bool
 }
@@ -63,6 +64,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.DefaultTopologyMode, "default-topology-mode", "", "Default device list topology mode. (supported values: \"numa\" | \"link\")")
 	pflag.StringVar(&o.DefaultRuntimeClass, "default-runtime-class", "", "Specify the default container runtimeClassName for the vGPU pod.")
 	pflag.StringVar(&o.VGPUDeviceClassName, "vgpu-device-class-name", o.VGPUDeviceClassName, "Specify the name of the vGPU device class for DRA conversion.")
+	pflag.BoolVar(&o.DRAAdmissionEnabled, "dra-admission-enabled", false, "Enable access verification for requests related to DRA resources.")
 	pflag.BoolVar(&o.DefaultConvertToDRA, "default-convert2-dra", false, "Enable the conversion of vGPU extended resources into DRA requests.")
 	pflag.BoolVar(&o.CombinedResourceClaim, "combined-resource-claim", false, "combine multiple claim requests into one resource claim. (need to enable `default-convert2-dra`)")
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")

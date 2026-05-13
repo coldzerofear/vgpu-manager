@@ -4,7 +4,7 @@ vgpu-manager deploy in namespace: {{ .Release.Namespace | quote }}
 {{- if .Values.scheduler.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed successfully!
   - ReplicaCount  :  {{ .Values.scheduler.replicas }}
-  - SchedulerName :  {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
+  - SchedulerName :  {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" | quote }}
   - ServerBindPort:  {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
   - PprofBindPort :  {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
   - EnableTLS     :  {{ .Values.scheduler.schedulerExtender.tls.enabled | default false }}

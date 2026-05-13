@@ -19,10 +19,22 @@ data:
     kind: KubeSchedulerConfiguration
     leaderElection:
       leaderElect: true
-      resourceName: {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
+      resourceName: {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" | quote }}
       resourceNamespace: {{ .Release.Namespace | quote }}
+    {{- with .Values.scheduler.kubeScheduler.profile }}
+    {{- $scorePercent := .percentageOfNodesToScore | default 0 | int }}
+    {{- if and (hasKey . "percentageOfNodesToScore") (ge $scorePercent 1) (le $scorePercent 100) }}
+    percentageOfNodesToScore: {{ $scorePercent }}
+    {{- end }}
     profiles:
-    - schedulerName: {{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
+    - schedulerName: {{ $.Values.scheduler.schedulerName | default "vgpu-scheduler" | quote }}
+      {{- if hasKey . "plugins" }}
+      plugins: {{ toYaml .plugins | nindent 8 }}
+      {{- end }}
+      {{- if hasKey . "pluginConfig" }}
+      pluginConfig: {{ toYaml .pluginConfig | nindent 8 }}
+      {{- end }}
+    {{- end }}
     extenders:
     {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
     - urlPrefix: "https://127.0.0.1:{{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}/scheduler"

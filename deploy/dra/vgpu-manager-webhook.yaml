@@ -239,6 +239,7 @@ webhooks:
         resources:
           - resourceclaims
           - resourceclaimtemplates
+        scope: "Namespaced"
       - apiGroups:
           - "resource.k8s.io"
         apiVersions:
@@ -324,6 +325,7 @@ spec:
             - device-webhook
             - --server-bind-port=9443
             - --default-topology-mode=link
+            - --dra-admission-enabled
             - --default-convert2-dra
             - --v=4
           livenessProbe:

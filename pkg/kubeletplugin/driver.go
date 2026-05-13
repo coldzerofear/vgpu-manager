@@ -77,42 +77,46 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	useSplitSlices := false
 
 	if featuregates.Enabled(featuregates.DynamicMIG) {
-		// Could be done in NewDeviceState, but I want to make sure that the
-		// checkpoint machinery is ready to use -- that's more obvious here.
-		//
-		// Generally, when `featuregates.DynamicMIG` is enabled, we have to make
-		// difficult but good decisions about incarnated MIG devices found
-		// during program startup. We could
-		//
-		// 1) assume they are under control of an external entity, and not
-		// announce them. That's likely not true. As hard as we try, as part of
-		// dynamic MIG device management, given enough time and circumstances,
-		// we might actually leave a MIG device behind where we shouldn't (as of
-		// bugs, as of aggressive operations / admin intervention, ...).
-		//
-		// 2) not do anythin special: not good; we would still announce the
-		// corresponding abstract MIG device and once the scheduler assigns a
-		// job, a relevant NodePrepareResources() call will try to create that
-		// specific MIG device. And that will fail, because that MIG device
-		// already exists -- users see something like "prepare devices failed:
-		// error creating MIG device: error creating GPU instance for
-		// 'gpu-0-mig-1g24gb-0': Insufficient Resources.
-		//
-		// 3) Use the node-local checkpoint as the source of truth. Any MIG
-		// device that corresponds to "partially prepared" claims should be
-		// destroyed, and any MIG device that is not mentioned in the checkpoint
-		// at all must be destroyed). Both is done below. Only those of
-		// completely prepared claims can stay; assuming that the central
-		// scheduler state is equivalent. TODO: review if this logic is correct;
-		// or if it potentially is too invasive for certain edge cases.
-		state.DestroyUnknownMIGDevices(ctx)
+		if !state.IsMigCapable() {
+			klog.Warningf("DynamicMIG enabled but no MIG capable GPU found on this node; falling back to legacy Full GPU support")
+		} else {
+			// Could be done in NewDeviceState, but I want to make sure that the
+			// checkpoint machinery is ready to use -- that's more obvious here.
+			//
+			// Generally, when `featuregates.DynamicMIG` is enabled, we have to make
+			// difficult but good decisions about incarnated MIG devices found
+			// during program startup. We could
+			//
+			// 1) assume they are under control of an external entity, and not
+			// announce them. That's likely not true. As hard as we try, as part of
+			// dynamic MIG device management, given enough time and circumstances,
+			// we might actually leave a MIG device behind where we shouldn't (as of
+			// bugs, as of aggressive operations / admin intervention, ...).
+			//
+			// 2) not do anythin special: not good; we would still announce the
+			// corresponding abstract MIG device and once the scheduler assigns a
+			// job, a relevant NodePrepareResources() call will try to create that
+			// specific MIG device. And that will fail, because that MIG device
+			// already exists -- users see something like "prepare devices failed:
+			// error creating MIG device: error creating GPU instance for
+			// 'gpu-0-mig-1g24gb-0': Insufficient Resources.
+			//
+			// 3) Use the node-local checkpoint as the source of truth. Any MIG
+			// device that corresponds to "partially prepared" claims should be
+			// destroyed, and any MIG device that is not mentioned in the checkpoint
+			// at all must be destroyed). Both is done below. Only those of
+			// completely prepared claims can stay; assuming that the central
+			// scheduler state is equivalent. TODO: review if this logic is correct;
+			// or if it potentially is too invasive for certain edge cases.
+			state.DestroyUnknownMIGDevices(ctx)
 
-		// Read Kubernetes API server version to determine which ResourceSlice
-		// model to use.
-		var err error
-		useSplitSlices, err = shouldUseSplitResourceSlices(config.ClientSets.Core)
-		if err != nil {
-			return nil, fmt.Errorf("failed to determine ResourceSlice model: %w", err)
+			// Read Kubernetes API server version to determine which ResourceSlice
+			// model to use.
+			var err error
+			useSplitSlices, err = shouldUseSplitResourceSlices(config.ClientSets.Core)
+			if err != nil {
+				return nil, fmt.Errorf("failed to determine ResourceSlice model: %w", err)
+			}
 		}
 	}
 
@@ -218,22 +222,35 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 	for _, pciBusID := range slices.Sorted(maps.Keys(d.state.perGPUAllocatable.allocatablesMap)) {
 		allocatable := d.state.perGPUAllocatable.allocatablesMap[pciBusID]
 		var deviceSlice resourceslice.Slice
+		var gpuInfo *GpuDeviceInfo
 
 		// Stable sort order by devicename
 		for _, devname := range slices.Sorted(maps.Keys(allocatable)) {
 			device := allocatable[devname]
 			klog.V(4).Infof("About to announce device %s", devname)
 
-			// Full GPU: collect its counter sets for the `sharedCountersSlice`.
-			if device.Gpu != nil {
-				allCounterSets = append(allCounterSets, device.Gpu.PartSharedCounterSets()...)
-			}
-			if device.VGpu != nil {
-				allCounterSets = append(allCounterSets, device.VGpu.PartSharedCounterSets()...)
+			// Remember this GPU so we can emit exactly one shared counter
+			// set for it below. MIG partitions reference the parent GPU's
+			// counter set by name, so the counter set must be emitted even
+			// when the full GPU itself is not announced (e.g. on Ampere
+			// with MIG mode enabled, where MIG cannot be toggled without a
+			// GPU reset and so only MIG partitions are allocatable).
+			if gpuInfo == nil {
+				switch {
+				case device.Gpu != nil:
+					gpuInfo = device.Gpu
+				case device.MigDynamic != nil:
+					gpuInfo = device.MigDynamic.Parent
+				case device.VGpu != nil:
+					gpuInfo = device.VGpu.GpuDeviceInfo
+				}
 			}
 
 			// Add device/partition to the device-only slice for this GPU.
 			deviceSlice.Devices = append(deviceSlice.Devices, device.PartGetDevice())
+		}
+		if gpuInfo != nil {
+			allCounterSets = append(allCounterSets, gpuInfo.PartSharedCounterSets()...)
 		}
 		gpuslices = append(gpuslices, deviceSlice)
 	}
@@ -263,7 +280,7 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 	for _, pciBusID := range slices.Sorted(maps.Keys(d.state.perGPUAllocatable.allocatablesMap)) {
 		allocatable := d.state.perGPUAllocatable.allocatablesMap[pciBusID]
 		var slice resourceslice.Slice
-		countersets := []resourceapi.CounterSet{}
+		var gpuInfo *GpuDeviceInfo
 
 		// Stable sort order by devicename -- makes the order of devices
 		// presented in a resource slice reproducible. Good for debuggability /
@@ -273,13 +290,21 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 			device := allocatable[devname]
 			klog.V(4).Infof("About to announce device %s", devname)
 
-			// Full GPU: take note of countersets, indicating absolute capacity.
-			// For now this is expected to be one counter set.
-			if device.Gpu != nil {
-				countersets = append(countersets, device.Gpu.PartSharedCounterSets()...)
-			}
-			if device.VGpu != nil {
-				countersets = append(countersets, device.VGpu.PartSharedCounterSets()...)
+			// Remember this GPU so we can emit exactly one shared counter
+			// set for it below. MIG partitions reference the parent GPU's
+			// counter set by name, so the counter set must be emitted even
+			// when the full GPU itself is not announced (e.g. on Ampere
+			// with MIG mode enabled, where MIG cannot be toggled without a
+			// GPU reset and so only MIG partitions are allocatable).
+			if gpuInfo == nil {
+				switch {
+				case device.Gpu != nil:
+					gpuInfo = device.Gpu
+				case device.MigDynamic != nil:
+					gpuInfo = device.MigDynamic.Parent
+				case device.VGpu != nil:
+					gpuInfo = device.VGpu.GpuDeviceInfo
+				}
 			}
 
 			// Add all allocatable devices for this physical GPU to this slice.
@@ -287,7 +312,9 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 			// GPU itself.
 			slice.Devices = append(slice.Devices, device.PartGetDevice())
 		}
-		slice.SharedCounters = countersets
+		if gpuInfo != nil {
+			slice.SharedCounters = gpuInfo.PartSharedCounterSets()
+		}
 		gpuslices = append(gpuslices, slice)
 	}
 

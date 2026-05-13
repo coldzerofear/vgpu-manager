@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -19,6 +20,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
+	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
@@ -26,7 +28,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/sets"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-base/featuregate"
@@ -39,14 +41,16 @@ type nodeGPUCollector struct {
 	*nvidia.DeviceLib
 	nodeName    string
 	nodeLister  listerv1.NodeLister
-	podLister   listerv1.PodLister
+	podLister   client.PodLister
 	contLister  *lister.ContainerLister
 	podResource *client.PodResource
 	featureGate featuregate.FeatureGate
 }
 
-func NewNodeGPUCollector(nodeName string, nodeLister listerv1.NodeLister, podLister listerv1.PodLister,
-	contLister *lister.ContainerLister, featureGate featuregate.FeatureGate) (prometheus.Collector, error) {
+func NewNodeGPUCollector(
+	nodeName string, nodeLister listerv1.NodeLister, podLister client.PodLister,
+	contLister *lister.ContainerLister, featureGate featuregate.FeatureGate,
+) (prometheus.Collector, error) {
 	deviceLib, err := nvidia.InitDeviceLib("/")
 	if err != nil {
 		return nil, err
@@ -483,8 +487,11 @@ skipNvml:
 			strconv.Itoa(nodeConfigInfo.MemoryFactor))
 	}
 
-	// Get all pods.
-	pods, err := c.podLister.List(labels.Everything())
+	// Get all pods on the current node.
+	pods, err := c.podLister.ListByIndexFiledSet(fields.Set{
+		metrics.IndexerKeyPodPlanSchedulingNode:  c.nodeName,
+		metrics.IndexerKeyPodStatusUnschedulable: "false",
+	})
 	if err != nil {
 		klog.Errorf("pod lister list error: %v", err)
 		return
@@ -520,7 +527,7 @@ skipNvml:
 				continue
 			}
 
-			klog.V(4).Infoln("Container matching: using resource data", "ContainerName", container.Name)
+			klog.V(4).Infoln("Container matching: using resource data", "pod", klog.KObj(pod), "container", container.Name)
 			var getFullPath func(string) string
 			switch {
 			case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
@@ -547,7 +554,12 @@ skipNvml:
 					continue
 				}
 				deviceUUID := string(containerDevice.UUID[0:40])
-				vHostIndex, exists := devIndexMap[deviceUUID]
+				if !utf8.ValidString(deviceUUID) {
+					klog.InfoS("Invalid UTF-8 device uuid, skip current device", "pod", klog.KObj(pod),
+						"container", container.Name, "deviceUuid", deviceUUID, "deviceIndex", i)
+					continue
+				}
+				devHostIndex, exists := devIndexMap[deviceUUID]
 				if !exists {
 					continue
 				}
@@ -602,13 +614,13 @@ skipNvml:
 						if !exists {
 							return
 						}
-						if err = vMemory.RLock(vHostIndex); err != nil {
-							klog.V(3).ErrorS(err, "virtual memory RLock failed", "vHostIndex", vHostIndex)
+						if err = vMemory.RLock(devHostIndex); err != nil {
+							klog.V(3).ErrorS(err, "virtual memory RLock failed", "devHostIndex", devHostIndex)
 							return
 						}
-						defer func() { _ = vMemory.Unlock(vHostIndex) }()
-						for index := uint32(0); index < vMemory.GetVMem().Devices[vHostIndex].ProcessesSize; index++ {
-							deviceVMemUsage += vMemory.GetVMem().Devices[vHostIndex].Processes[index].Used
+						defer func() { _ = vMemory.Unlock(devHostIndex) }()
+						for index := uint32(0); index < vMemory.GetVMem().Devices[devHostIndex].ProcessesSize; index++ {
+							deviceVMemUsage += vMemory.GetVMem().Devices[devHostIndex].Processes[index].Used
 						}
 					}()
 				}

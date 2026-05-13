@@ -83,6 +83,10 @@ func GetAllocatedVGPURequests(
 	return result
 }
 
+// ResolveActualAllocatedRequestsForClaimRef unfold a container's reference to a certain claimRef as 'the current allocated vGPU mainRequest for this actual claim'.
+// rules：
+// - claimRef.Request != "": If the mainRequest has actually completed the vGPU, only it will be returned
+// - claimRef.Request == "": Return all currently allocated vGPU mainRequests for this claim
 func ResolveActualAllocatedRequestsForClaimRef(
 	claimRef corev1.ResourceClaim,
 	allocatedVGPUReqs sets.Set[string],

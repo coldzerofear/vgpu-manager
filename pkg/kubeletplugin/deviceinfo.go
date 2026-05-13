@@ -158,15 +158,10 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 }
 
 func (d *GpuDeviceInfo) GetDevice() resourceapi.Device {
-	// TODO: Consume GetPCIBusIDAttribute from https://github.com/kubernetes/kubernetes/blob/4c5746c0bc529439f78af458f8131b5def4dbe5d/staging/src/k8s.io/dynamic-resource-allocation/deviceattribute/attribute.go#L39
 	device := resourceapi.Device{
 		Name:       d.CanonicalName(),
 		Attributes: d.Attributes(),
-		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
-			"memory": {
-				Value: *resource.NewQuantity(int64(d.Memory.Total), resource.BinarySI),
-			},
-		},
+		Capacity:   d.fullGpuCapacity(),
 	}
 	return device
 }

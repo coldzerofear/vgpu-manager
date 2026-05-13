@@ -152,18 +152,24 @@ func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) 
 func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceClaim) *cdiapi.ContainerEdits {
 	_, _ = m.ensureClaimDirectories(string(claim.UID))
 
-	envMode := util.HostMode
+	compMode := util.HostMode
 	if cgroups.IsCgroup2UnifiedMode() || cgroups.IsCgroup2HybridMode() {
-		envMode |= util.CGroupv2Mode
+		compMode |= util.CGroupv2Mode
 	} else {
-		envMode |= util.CGroupv1Mode
+		compMode |= util.CGroupv1Mode
 	}
-	envMode |= util.OpenKernelMode
+	compMode |= util.OpenKernelMode
 	containerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
-	vGpuEnvs := []string{
-		fmt.Sprintf("%s=", util.ManagerVisibleDevices),
+	envs := []string{
 		fmt.Sprintf("%s=%s", util.LdPreloadEnv, containerDriverFile),
-		fmt.Sprintf("%s=%v", util.ManagerCompatibilityMode, envMode),
+		fmt.Sprintf("%s=%v", util.ManagerCompatibilityMode, compMode),
+		// TODO Overcover possible environmental variable interference that may already exist in the container.
+		fmt.Sprintf("%s=", util.ManagerVisibleDevices),
+		fmt.Sprintf("%s=%v", util.CudaMemoryRatioEnv, 1),
+		fmt.Sprintf("%s=", util.CudaCoreLimitEnv),
+		fmt.Sprintf("%s=", util.CudaSoftCoreLimitEnv),
+		fmt.Sprintf("%s=", util.CudaMemoryLimitEnv),
+		fmt.Sprintf("%s=FALSE", util.CudaMemoryOversoldEnv),
 	}
 	mounts := []*cdispec.Mount{
 		// TODO mount /etc/vgpu-manager/registry dir
@@ -183,19 +189,19 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 			Options:       []string{"ro", "nosuid", "nodev", "bind"},
 		},
 	}
+	smWatcherEnabled := "FALSE"
 	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
-		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=TRUE", util.ExternalSmWatcherEnabled))
+		smWatcherEnabled = "TRUE"
 		mounts = append(mounts, &cdispec.Mount{
 			ContainerPath: filepath.Join(m.contManagerPath, util.Watcher),
 			HostPath:      filepath.Join(m.hostManagerPath, util.Watcher),
 			Options:       []string{"ro", "nosuid", "nodev", "bind"},
 		})
-	} else {
-		vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=FALSE", util.ExternalSmWatcherEnabled))
 	}
+	envs = append(envs, fmt.Sprintf("%s=%s", util.ExternalSmWatcherEnabled, smWatcherEnabled))
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			Env:    vGpuEnvs,
+			Env:    envs,
 			Mounts: mounts,
 		},
 	}
@@ -209,28 +215,27 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	computePolicy := m.getComputePolicy(claim)
 	idx := device.VGpu.Index
 	totalMemoryMB := device.VGpu.Memory.Total / units.MiB
-	vGpuEnvs := []string{
+	envs := []string{
 		fmt.Sprintf("%s_%d=%v", util.CudaMemoryRatioEnv, idx, 1),
 		fmt.Sprintf("%s_%d=FALSE", util.CudaMemoryOversoldEnv, idx),
 		fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.VGpu.UUID),
 	}
 
 	if quantity, ok := result.ConsumedCapacity[CoresResourceName]; ok {
-		if val, ok := quantity.AsInt64(); ok {
-			vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaCoreLimitEnv))
-			vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaSoftCoreLimitEnv))
-			softVal := val
+		if hardVal, ok := quantity.AsInt64(); ok {
+			softVal := hardVal
 			if computePolicy == util.BalanceComputePolicy {
 				softVal = util.HundredCore
 			} else if computePolicy == util.NoneComputePolicy {
-				val = util.HundredCore
+				hardVal = util.HundredCore
 			}
-			if val < util.HundredCore {
-				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, val))
-				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, softVal))
+			if hardVal < util.HundredCore {
+				envs = append(envs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, hardVal))
+				envs = append(envs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, softVal))
 			} else {
-				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaCoreLimitEnv, idx))
-				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaSoftCoreLimitEnv, idx))
+				// unlimited
+				envs = append(envs, fmt.Sprintf("%s_%d=", util.CudaCoreLimitEnv, idx))
+				envs = append(envs, fmt.Sprintf("%s_%d=", util.CudaSoftCoreLimitEnv, idx))
 			}
 		}
 	}
@@ -238,18 +243,18 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	if quantity, ok := result.ConsumedCapacity[MemoryResourceName]; ok {
 		if val, ok := quantity.AsInt64(); ok {
 			requestMB := uint64(val / units.MiB)
-			vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s=", util.CudaMemoryLimitEnv))
 			if requestMB < totalMemoryMB {
-				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
+				envs = append(envs, fmt.Sprintf("%s_%d=%vm", util.CudaMemoryLimitEnv, idx, requestMB))
 			} else {
-				vGpuEnvs = append(vGpuEnvs, fmt.Sprintf("%s_%d=", util.CudaMemoryLimitEnv, idx))
+				// unlimited
+				envs = append(envs, fmt.Sprintf("%s_%d=", util.CudaMemoryLimitEnv, idx))
 			}
 		}
 	}
 
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			Env: vGpuEnvs,
+			Env: envs,
 		},
 	}
 }

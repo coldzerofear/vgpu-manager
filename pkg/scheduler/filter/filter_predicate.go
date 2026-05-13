@@ -39,7 +39,6 @@ type gpuFilter struct {
 const (
 	Name                     = "FilterPredicate"
 	indexerKeyPodRequestVGPU = "pod.requestVGPU"
-	//indexerKeyPodPlanSchedulingNode = "pod.planSchedulingNode"
 )
 
 var (
@@ -51,13 +50,6 @@ var (
 			}
 			return []string{"false"}, nil
 		},
-		//indexerKeyPodPlanSchedulingNode: func(obj interface{}) ([]string, error) {
-		//	nodeName := ""
-		//	if pod, ok := obj.(*corev1.Pod); ok {
-		//		nodeName = util.PodPlanSchedulingNode(pod)
-		//	}
-		//	return []string{nodeName}, nil
-		//},
 	}
 )
 
@@ -103,7 +95,7 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 	klog.V(4).InfoS("FilterNode", "ExtenderArgs", args)
 	if args.Pod == nil {
 		return &extenderv1.ExtenderFilterResult{
-			Error: "Parameter Pod is empty",
+			Error: "ExtenderArgs.Pod cannot be empty",
 		}
 	}
 	if !util.IsVGPUResourcePod(args.Pod) {
@@ -179,7 +171,7 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, extende
 		if node, err := f.nodeLister.Get(nodeName); err != nil {
 			errMsg := "get node cache failed"
 			klog.ErrorS(err, errMsg, "node", nodeName)
-			failedNodesMap[nodeName] = errMsg
+			failedNodesMap[nodeName] = fmt.Sprintf("%s: %v", errMsg, err)
 		} else {
 			filteredNodes = append(filteredNodes, *node)
 		}
@@ -323,23 +315,28 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	)
 	// Skip pods that have already been scheduled.
 	if nodeName, ok := IsScheduled(pod); ok {
-		foundNode := false
-		for i, node := range nodes {
-			if !foundNode && node.Name == nodeName {
-				filteredNodes = append(filteredNodes, nodes[i])
-				foundNode = true
-				continue
+		// Allow device filtering and repair scheduling status to be triggered again when the pod is in an unschedulable state
+		if !device.PodStatusUnschedulable(pod) {
+			foundNode := false
+			for i, node := range nodes {
+				if !foundNode && node.Name == nodeName {
+					filteredNodes = append(filteredNodes, nodes[i])
+					foundNode = true
+					continue
+				}
+				failedNodesMap[node.Name] = fmt.Sprintf("pod has been scheduled to node %s", node.Name)
 			}
-			failedNodesMap[node.Name] = fmt.Sprintf("pod has been scheduled to node %s", node.Name)
+			if foundNode {
+				return filteredNodes, failedNodesMap, nil
+			}
+
+			return nil, nil, fmt.Errorf("pod %s had been predicated", pod.UID)
 		}
-		if foundNode {
-			return filteredNodes, failedNodesMap, nil
-		}
-		return nil, nil, fmt.Errorf("pod %s had been predicated", pod.UID)
+		klog.V(3).InfoS("Pod scheduled condition is unschedulable, Re trigger device pre allocation", "pod", klog.KObj(pod))
 	}
 
 	if err := f.CheckDeviceRequest(pod); err != nil {
-		klog.ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
+		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
 		return filteredNodes, failedNodesMap, err
 	}
 
@@ -373,7 +370,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				batchNodeOrigPosition[node.Name] = index
 				nodeInfo, err := device.NewNodeInfo(node, pods)
 				if err != nil {
-					klog.ErrorS(err, "new node info failed, skipping node", "node", node.Name)
+					klog.V(3).ErrorS(err, "new node info failed, skipping node", "node", node.Name)
 					batchFailedNodes[node.Name] = err.Error()
 					continue
 				}
@@ -435,12 +432,16 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			failedNodesMap[node.Name] = err.Error()
 			continue
 		}
-		if err = client.PatchPodVGPUAnnotation(f.kubeClient, newPod); err != nil {
+		if err = client.PatchPodPreAllocatedMetadata(f.kubeClient, newPod); err != nil {
 			errMsg := fmt.Sprintf("patch vGPU metadata failed")
 			klog.ErrorS(err, errMsg, "pod", klog.KObj(pod))
 			failedNodesMap[node.Name] = errMsg
 			continue
 		}
+		// Cache the patched Pod locally to bridge the informer watch lag.
+		// Concurrent Filter calls on neighbouring pods would otherwise rebuild
+		// NodeInfo from a stale informer view (without our pre-allocated
+		// annotation) and miscount free GPU.
 		f.podLister.Mutation(newPod)
 		filteredNodes = append(filteredNodes, *node)
 		success = true

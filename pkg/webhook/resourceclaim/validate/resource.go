@@ -67,14 +67,15 @@ var (
 )
 
 // extractResourceClaim extracts and converts a ResourceClaim from an AdmissionReview to v1 format.
-func (rw *resourceClaimWebhook) extractResourceClaim(ar admissionv1.AdmissionReview, raw []byte) (*resourcev1.ResourceClaim, error) {
+func (rw *validateHandle) extractResourceClaim(req admissionv1.AdmissionRequest) (*resourcev1.ResourceClaim, error) {
+	raw := req.Object.Raw
 	deserializer := rw.codecs.UniversalDeserializer()
 
 	// Decode to the appropriate version first
 	var obj runtime.Object
 	var err error
 
-	switch ar.Request.Resource {
+	switch req.Resource {
 	case resourceClaimResourceV1:
 		// Decode as v1
 		obj = &resourcev1.ResourceClaim{}
@@ -85,7 +86,7 @@ func (rw *resourceClaimWebhook) extractResourceClaim(ar admissionv1.AdmissionRev
 		// Decode as v1beta2
 		obj = &resourcev1beta2.ResourceClaim{}
 	default:
-		return nil, fmt.Errorf("unsupported resource version: %s", ar.Request.Resource)
+		return nil, fmt.Errorf("unsupported resource version: %s", req.Resource)
 	}
 
 	if _, _, err = deserializer.Decode(raw, nil, obj); err != nil {
@@ -102,15 +103,15 @@ func (rw *resourceClaimWebhook) extractResourceClaim(ar admissionv1.AdmissionRev
 }
 
 // extractResourceClaimTemplate extracts and converts a ResourceClaimTemplate from an AdmissionReview to v1 format.
-func (rw *resourceClaimWebhook) extractResourceClaimTemplate(ar admissionv1.AdmissionReview) (*resourcev1.ResourceClaimTemplate, error) {
-	raw := ar.Request.Object.Raw
+func (rw *validateHandle) extractResourceClaimTemplate(req admissionv1.AdmissionRequest) (*resourcev1.ResourceClaimTemplate, error) {
+	raw := req.Object.Raw
 	deserializer := rw.codecs.UniversalDeserializer()
 
 	// Decode to the appropriate version first
 	var obj runtime.Object
 	var err error
 
-	switch ar.Request.Resource {
+	switch req.Resource {
 	case resourceClaimTemplateResourceV1:
 		// Decode as v1
 		obj = &resourcev1.ResourceClaimTemplate{}
@@ -121,7 +122,7 @@ func (rw *resourceClaimWebhook) extractResourceClaimTemplate(ar admissionv1.Admi
 		// Decode as v1beta2
 		obj = &resourcev1beta2.ResourceClaimTemplate{}
 	default:
-		return nil, fmt.Errorf("unsupported resource version: %s", ar.Request.Resource)
+		return nil, fmt.Errorf("unsupported resource version: %s", req.Resource)
 	}
 
 	if _, _, err = deserializer.Decode(raw, nil, obj); err != nil {

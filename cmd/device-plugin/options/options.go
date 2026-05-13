@@ -20,8 +20,9 @@ import (
 type Options struct {
 	KubeConfigFile string
 	MasterURL      string
-	QPS            float64
+	QPS            float32
 	Burst          int
+	Timeout        uint
 
 	Domain              string
 	NodeName            string
@@ -46,8 +47,9 @@ type Options struct {
 }
 
 const (
-	defaultQPS   = 20.0
-	defaultBurst = 30
+	defaultQPS     = 20.0
+	defaultBurst   = 30
+	defaultTimeout = 0 // seconds, 0 means no timeout, follow the default behavior of kubernetes client.
 
 	defaultDeviceListStrategy  = util.DeviceListStrategyEnvvar
 	defaultDeviceSplitCount    = 10
@@ -112,6 +114,7 @@ func NewOptions() *Options {
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
+		Timeout:             defaultTimeout,
 		Domain:              util.GetGlobalDomain(),
 		NodeName:            os.Getenv("NODE_NAME"),
 		CGroupDriver:        os.Getenv("CGROUP_DRIVER"),
@@ -142,8 +145,9 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.CommandLine.SortFlags = false
 	pflag.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
 	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
-	pflag.Float64Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
+	pflag.Float32Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
 	pflag.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
+	pflag.UintVar(&o.Timeout, "kube-timeout", o.Timeout, "Timeout to use while talking with kube-apiserver.")
 	pflag.StringVar(&o.Domain, "domain", o.Domain, "Set global domain name to replace all resource and annotation domains.")
 	pflag.StringVar(&o.NodeName, "node-name", o.NodeName, "If non-empty, will use this string as identification instead of the actual node name.")
 	pflag.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (supported values: \"cgroupfs\" | \"system\")")

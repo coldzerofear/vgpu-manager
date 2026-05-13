@@ -30,7 +30,6 @@ func Test_BindPredicate(t *testing.T) {
 		t.Fatalf("failed to create new bindPredicate due to %v", err)
 	}
 	poduid := uuid.NewUUID()
-	argsuid := uuid.NewUUID()
 	testCases := []struct {
 		name   string
 		pod    *corev1.Pod
@@ -63,12 +62,11 @@ func Test_BindPredicate(t *testing.T) {
 			args: extenderv1.ExtenderBindingArgs{
 				PodName:      "test1",
 				PodNamespace: "default",
-				PodUID:       argsuid,
+				PodUID:       uuid.NewUUID(),
 				Node:         "node1",
 			},
 			result: &extenderv1.ExtenderBindingResult{
-				Error: fmt.Sprintf("different UID from the target pod: "+
-					"current: %s, target: %s", poduid, argsuid),
+				Error: "different UID from the target pod",
 			},
 		}, {
 			name: "example2: pod not found",
@@ -84,7 +82,42 @@ func Test_BindPredicate(t *testing.T) {
 			},
 		},
 		{
-			name: "example3: bind success",
+			name: "example3: mismatch of predicate node",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test2",
+					Namespace: "default",
+					UID:       poduid,
+					Annotations: map[string]string{
+						util.PodPredicateNodeAnnotation: "node1",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: "cont1",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 1)),
+							},
+						},
+					}},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+				},
+			},
+			args: extenderv1.ExtenderBindingArgs{
+				PodName:      "test2",
+				PodNamespace: "default",
+				PodUID:       poduid,
+				Node:         "node2",
+			},
+			result: &extenderv1.ExtenderBindingResult{
+				Error: "predicate node is different from the node to be bound",
+			},
+		},
+		{
+			name: "example4: binding success",
 			pod:  nil,
 			args: extenderv1.ExtenderBindingArgs{
 				PodName:      "test1",
