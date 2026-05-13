@@ -128,6 +128,26 @@ func (r *ClientRegisterResolver) PodByUID(_ context.Context, uid string) (*corev
 }
 
 // TargetByUUID implements registry.GetTargetByUUIDFunc.
+//
+// It returns every (pod, container) pair the UUID could plausibly refer to,
+// so the server can iterate them and pick the one whose cgroup is actually
+// alive. This tolerates two flavors of staleness:
+//
+//   - the partition key baked into the claim annotation at Prepare time may
+//     be a per-request fallback that no longer matches the current partition
+//     graph (e.g. another pod has since joined reservedFor and consumed that
+//     request);
+//   - within a single partition shared by an init+app pair, only one of the
+//     two will be Running at a time, and the informer may briefly disagree
+//     with the kernel on which one.
+//
+// TODO(bug-2): when a future pod's container references multiple requests
+// that were emitted as separate fallback partitions at Prepare time, the
+// container will receive multiple Devices, whose env vars collide on
+// MANAGER_CLIENT_REGISTER_UUID and whose mounts collide on the partition
+// directory path. Fixing this requires deferring UUID assignment from Prepare
+// (eager) to first-register (lazy). The candidate-list machinery here does
+// not address that case.
 func (r *ClientRegisterResolver) TargetByUUID(ctx context.Context, uuid string) (*registry.Target, error) {
 	claim, partitionKey, err := r.lookupClaim(uuid)
 	if err != nil {
@@ -145,25 +165,26 @@ func (r *ClientRegisterResolver) TargetByUUID(ctx context.Context, uuid string) 
 		return nil, fmt.Errorf("resolve partitions for claim %s/%s: %w",
 			claim.Namespace, claim.Name, err)
 	}
-	detail, ok := info.Partitions[partitionKey]
-	if !ok {
-		return nil, fmt.Errorf("partition %q not present in claim %s/%s (have %d partitions)",
-			partitionKey, claim.Namespace, claim.Name, len(info.Partitions))
+
+	cands := info.CandidatesByKey[partitionKey]
+	if len(cands) == 0 {
+		return nil, fmt.Errorf("partition %q has no candidate containers in claim %s/%s (real keys: %d, fallback keys: %d)",
+			partitionKey, claim.Namespace, claim.Name, len(info.Partitions), len(info.CandidatesByKey))
 	}
 
-	pod, containerName, err := r.pickRunningContainer(detail)
-	if err != nil {
-		return nil, fmt.Errorf("partition %q in claim %s/%s: %w",
-			partitionKey, claim.Namespace, claim.Name, err)
-	}
-
-	return &registry.Target{
-		Pod:           pod,
-		ContainerName: containerName,
+	target := &registry.Target{
+		Candidates: make([]registry.TargetCandidate, 0, len(cands)),
 		ConfigDir: filepath.Join(
 			r.contPath, util.Claims, string(claim.UID), partitionKey, util.Config,
 		),
-	}, nil
+	}
+	for _, c := range cands {
+		target.Candidates = append(target.Candidates, registry.TargetCandidate{
+			Pod:           c.Pod,
+			ContainerName: c.ContainerName,
+		})
+	}
+	return target, nil
 }
 
 // lookupClaim resolves a UUID to its single owning claim plus the partition
@@ -190,62 +211,6 @@ func (r *ClientRegisterResolver) lookupClaim(uuid string) (*resourceapi.Resource
 			claim.Namespace, claim.Name, annotationKey)
 	}
 	return claim, partitionKey, nil
-}
-
-// pickRunningContainer walks the partition's container list (entries of the
-// form "<podUID>/<kind>/<containerName>" produced by claimresolve) and returns
-// the first one whose container is in the Running state.
-//
-// Pod admission rules guarantee a partition contains at most one init and one
-// app container; K8s lifecycle guarantees they don't run concurrently. So the
-// "first Running" container is well-defined whenever a register call is in
-// flight.
-func (r *ClientRegisterResolver) pickRunningContainer(detail claimresolve.PartitionDetail) (*corev1.Pod, string, error) {
-	if len(detail.Containers) == 0 {
-		return nil, "", fmt.Errorf("partition contains no containers")
-	}
-	var seen []string
-	for _, key := range detail.Containers {
-		parts := strings.SplitN(key, "/", 3)
-		if len(parts) != 3 {
-			return nil, "", fmt.Errorf("malformed container key %q", key)
-		}
-		podUID, _, containerName := parts[0], parts[1], parts[2]
-		seen = append(seen, podUID+":"+containerName)
-
-		pod, err := r.PodByUID(context.Background(), podUID)
-		if err != nil {
-			continue // pod might not be in the cache yet; try next candidate
-		}
-		if util.PodIsTerminated(pod) {
-			continue
-		}
-		status, ok := findContainerStatus(pod, containerName)
-		if !ok {
-			continue
-		}
-		if status.State.Running != nil {
-			return pod, containerName, nil
-		}
-	}
-
-	return nil, "", fmt.Errorf("no candidate container is currently running (candidates: %v)", seen)
-}
-
-// findContainerStatus searches both InitContainerStatuses and
-// ContainerStatuses for the named container.
-func findContainerStatus(pod *corev1.Pod, name string) (*corev1.ContainerStatus, bool) {
-	for i := range pod.Status.InitContainerStatuses {
-		if pod.Status.InitContainerStatuses[i].Name == name {
-			return &pod.Status.InitContainerStatuses[i], true
-		}
-	}
-	for i := range pod.Status.ContainerStatuses {
-		if pod.Status.ContainerStatuses[i].Name == name {
-			return &pod.Status.ContainerStatuses[i], true
-		}
-	}
-	return nil, false
 }
 
 // informerCacheReader adapts the resolver's pod lister and claim indexer to

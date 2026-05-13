@@ -74,11 +74,20 @@ const (
 	resolveBackoff = 40 * time.Millisecond
 )
 
-// Target describes the container that a register request resolves to and the
-// directory the server should drop pids.config into.
-type Target struct {
+// TargetCandidate is one (pod, container) pair the server may try to attribute
+// a register request to. The DRA path can return multiple candidates per
+// register UUID — the server iterates them and accepts the first one whose
+// cgroup yields live PIDs.
+type TargetCandidate struct {
 	Pod           *corev1.Pod
 	ContainerName string
+}
+
+// Target carries the resolution result for a register request. Candidates are
+// tried in order. ConfigDir is the same for every candidate of the same
+// request because Prepare creates one directory per partition annotation.
+type Target struct {
+	Candidates []TargetCandidate
 
 	// ConfigDir is the absolute path of the directory that will hold
 	// pids.config. The directory is created on demand if it doesn't exist.
@@ -89,9 +98,11 @@ type Target struct {
 // path where the calling library already knows its own (pod, container) pair.
 type GetPodByUIDFunc func(ctx context.Context, uid string) (*corev1.Pod, error)
 
-// GetTargetByUUIDFunc resolves a register UUID minted by the DRA driver into a
-// concrete Target. It encapsulates the partition-aware lookup that maps
-// uuid → claim → partition → currently-running container.
+// GetTargetByUUIDFunc resolves a register UUID minted by the DRA driver into
+// the set of (pod, container) candidates that could be the caller plus the
+// shared on-disk directory for pids.config. Returning multiple candidates is
+// the contract that lets the server tolerate stale informer views and
+// fallback partition keys baked into claim annotations at Prepare time.
 type GetTargetByUUIDFunc func(ctx context.Context, uuid string) (*Target, error)
 
 func NewDeviceRegistryServer(containerPath string, getPodByUIDFn GetPodByUIDFunc, getTargetByUUIDFn GetTargetByUUIDFunc) *DeviceRegistryServerImpl {
@@ -123,14 +134,17 @@ func (s *DeviceRegistryServerImpl) IsRunning() bool {
 // vGPU library. It supports two request shapes:
 //
 //   - register_uuid set: DRA path. The server hands the UUID to the configured
-//     uuid resolver, which walks the partition graph to find the running
-//     container and the on-disk partition directory.
+//     uuid resolver, which returns every (pod, container) the UUID could
+//     legitimately refer to plus the partition directory. The server then
+//     tries each candidate and writes pids.config under the directory for the
+//     first one whose cgroup is alive.
 //   - pod_uid + container_name set: legacy device-plugin path. The library
 //     tells us its identity directly; we look up the pod and write to the
 //     classic per-(pod, container) manager directory.
 //
 // In either case the call retries transient failures (informer not yet synced,
-// container not yet Running) until the request context is canceled.
+// container not yet Running, cgroup still ramping up) until the request
+// context is canceled.
 func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, req *registry.ContainerDeviceRequest) (resp *registry.ContainerDeviceResponse, err error) {
 	klog.V(4).InfoS("RegisterContainerDevice",
 		"podUid", req.GetPodUid(),
@@ -156,39 +170,47 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 
 	resp = &registry.ContainerDeviceResponse{}
 
-	target, pids, err := s.resolveTarget(ctx, req)
+	configDir, pids, err := s.resolveTarget(ctx, req)
 	if err != nil {
 		return resp, err
 	}
-	if err = s.persistPids(target.ConfigDir, pids); err != nil {
+	if err = s.persistPids(configDir, pids); err != nil {
 		return resp, err
 	}
 	return resp, nil
 }
 
-// resolveTarget loops until either (a) the request resolves to a running
+// resolveTarget loops until either (a) some candidate resolves to a running
 // container whose cgroup yields a non-empty PID set, (b) a hard error
-// (terminated pod, vGPU policy violation) surfaces, or (c) the context is
-// canceled.
+// (terminated pod in legacy mode, vGPU policy violation, uuid not minted by
+// us) surfaces, or (c) the context is canceled.
 //
-// Soft failures — informer hasn't caught up, container not yet Running, cgroup
-// not yet populated, or a stale informer view that points at an already-exited
-// container — all keep the poll going. The cgroup PID readback is the
-// authoritative cross-check: the kernel cannot lie about whether a container
-// has live processes, so an "informer says Running but cgroup is empty" state
-// is treated as a transient stale view and we keep polling until a fresher
-// snapshot lands.
-func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *registry.ContainerDeviceRequest) (*Target, []int, error) {
+// The cgroup PID readback is the authoritative cross-check: the kernel cannot
+// lie about whether a container has live processes, so an "informer says
+// Running but cgroup is empty" state is treated as a transient stale view and
+// we keep polling until a fresher snapshot lands.
+//
+// On the DRA path the resolver may return multiple candidates per UUID (to
+// handle stale partition keys baked into annotations at Prepare time, and
+// init+app pairs sharing a partition). The candidate list is tried in order;
+// the first viable one wins. If none are viable we wait one backoff tick and
+// re-query the resolver — by then either the informer has caught up or the
+// runtime has progressed enough for a different candidate to be Running.
+func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *registry.ContainerDeviceRequest) (string, []int, error) {
 	useUUID := req.GetRegisterUuid() != ""
+	cgroupResolver := cgroupFullPathResolver()
 
 	var (
-		target  *Target
-		pids    []int
-		lastErr error
+		configDir string
+		winPids   []int
+		lastErr   error
 	)
 	pollErr := wait.PollUntilContextCancel(ctx, resolveBackoff, true, func(ctx context.Context) (bool, error) {
-		t, err := s.lookupTarget(ctx, req)
+		target, err := s.lookupTarget(ctx, req)
 		if err != nil {
+			// "Not minted by us / never patched" is unrecoverable — bail out
+			// instead of looping forever (also forecloses a cheap DoS vector
+			// where junk UUIDs would otherwise pin a goroutine indefinitely).
 			if apierrors.IsNotFound(err) {
 				return false, err
 			}
@@ -196,60 +218,75 @@ func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *regis
 			klog.V(5).InfoS("register target lookup failed; retrying", "err", err)
 			return false, nil
 		}
-
-		if util.PodIsTerminated(t.Pod) {
-			return false, fmt.Errorf("pod %s is terminated", klog.KObj(t.Pod))
+		if len(target.Candidates) == 0 {
+			lastErr = errors.New("resolver returned no candidates")
+			return false, nil
 		}
 
-		// Legacy device-plugin path applies the spec-level vGPU policy check.
-		// DRA path's resolver has already vetted that the container belongs
-		// to a vGPU partition.
-		if !useUUID {
-			if err := validateLegacyContainer(t.Pod, t.ContainerName); err != nil {
-				return false, err
+		// Legacy device-plugin path has exactly one candidate; validation
+		// failures are hard errors (no other candidate could rescue them).
+		// DRA path iterates candidates, accepting the first viable one and
+		// continuing on per-candidate soft failures.
+		for i, cand := range target.Candidates {
+			if !useUUID {
+				if util.PodIsTerminated(cand.Pod) {
+					return false, fmt.Errorf("pod %s is terminated", klog.KObj(cand.Pod))
+				}
+				if err := validateLegacyContainer(cand.Pod, cand.ContainerName); err != nil {
+					return false, err
+				}
+			} else if util.PodIsTerminated(cand.Pod) {
+				continue
 			}
-		}
 
-		status, ok := cgroup.GetContainerStatus(t.Pod, t.ContainerName)
-		if !ok || status.State.Running == nil {
-			lastErr = fmt.Errorf("container %q not yet running", t.ContainerName)
-			klog.V(4).InfoS("waiting for container to enter Running state",
-				"pod", klog.KObj(t.Pod),
-				"containerName", t.ContainerName,
-				"resourceVersion", t.Pod.ResourceVersion)
-			return false, nil
+			pids, ok := isCandidateAlive(cand, cgroupResolver, &lastErr)
+			if !ok {
+				continue
+			}
+			configDir = target.ConfigDir
+			winPids = pids
+			klog.V(5).InfoS("register candidate accepted",
+				"pod", klog.KObj(cand.Pod),
+				"containerName", cand.ContainerName,
+				"candidateIndex", i,
+				"pids", len(pids))
+			return true, nil
 		}
-
-		// Cgroup cross-check. If the informer view is stale (e.g. an init
-		// container was just replaced by an app container in the same
-		// partition), the cgroup for the container the informer still calls
-		// "Running" will be empty or gone, and we keep polling until the
-		// informer catches up and the resolver picks the real running
-		// container.
-		candidatePids := cgroup.GetContainerPidsFunc(t.Pod, t.ContainerName, cgroupFullPathResolver())
-		if len(candidatePids) == 0 {
-			lastErr = fmt.Errorf("container %q reports Running but its cgroup has no live PIDs (likely stale informer)", t.ContainerName)
-			klog.V(4).InfoS("cgroup cross-check failed; retrying",
-				"pod", klog.KObj(t.Pod),
-				"containerName", t.ContainerName,
-				"resourceVersion", t.Pod.ResourceVersion)
-			return false, nil
-		}
-
-		target = t
-		pids = candidatePids
-		return true, nil
+		return false, nil
 	})
 
 	if pollErr != nil {
 		if errors.Is(pollErr, context.Canceled) || errors.Is(pollErr, context.DeadlineExceeded) {
 			if lastErr != nil {
-				return nil, nil, fmt.Errorf("%w: last attempt: %v", pollErr, lastErr)
+				return "", nil, fmt.Errorf("%w: last attempt: %v", pollErr, lastErr)
 			}
 		}
-		return nil, nil, pollErr
+		return "", nil, pollErr
 	}
-	return target, pids, nil
+	return configDir, winPids, nil
+}
+
+// isCandidateAlive runs the per-candidate viability check. Returns (pids,
+// true) when the candidate is in Running state and its cgroup has live
+// processes; otherwise (nil, false) with *lastErr updated for the eventual
+// context-cancel error message.
+func isCandidateAlive(cand TargetCandidate, cgroupResolver func(string) string, lastErr *error) ([]int, bool) {
+	if util.PodIsTerminated(cand.Pod) {
+		return nil, false
+	}
+	status, ok := cgroup.GetContainerStatus(cand.Pod, cand.ContainerName)
+	if !ok || status.State.Running == nil {
+		*lastErr = fmt.Errorf("candidate container %q in pod %s not yet running",
+			cand.ContainerName, klog.KObj(cand.Pod))
+		return nil, false
+	}
+	pids := cgroup.GetContainerPidsFunc(cand.Pod, cand.ContainerName, cgroupResolver)
+	if len(pids) == 0 {
+		*lastErr = fmt.Errorf("candidate container %q in pod %s reports Running but its cgroup has no live PIDs (likely stale informer)",
+			cand.ContainerName, klog.KObj(cand.Pod))
+		return nil, false
+	}
+	return pids, true
 }
 
 // cgroupFullPathResolver picks the right cgroup hierarchy walker based on the
@@ -269,7 +306,8 @@ func cgroupFullPathResolver() func(string) string {
 }
 
 // lookupTarget performs a single (non-retrying) resolution attempt. It picks
-// the right resolver based on the request shape and synthesizes a Target.
+// the right resolver based on the request shape and synthesizes a Target. For
+// the legacy path the Target carries exactly one candidate.
 func (s *DeviceRegistryServerImpl) lookupTarget(ctx context.Context, req *registry.ContainerDeviceRequest) (*Target, error) {
 	if uuid := req.GetRegisterUuid(); uuid != "" {
 		if s.getTargetByUUIDFn == nil {
@@ -279,11 +317,11 @@ func (s *DeviceRegistryServerImpl) lookupTarget(ctx context.Context, req *regist
 		if err != nil {
 			return nil, err
 		}
-		if t == nil || t.Pod == nil {
-			return nil, fmt.Errorf("uuid %s did not resolve to any pod", uuid)
+		if t == nil {
+			return nil, fmt.Errorf("uuid %s did not resolve to a target", uuid)
 		}
-		if t.ContainerName == "" {
-			return nil, fmt.Errorf("uuid %s resolver returned empty containerName", uuid)
+		if len(t.Candidates) == 0 {
+			return nil, fmt.Errorf("uuid %s resolver returned no candidates", uuid)
 		}
 		if t.ConfigDir == "" {
 			return nil, fmt.Errorf("uuid %s resolver returned empty ConfigDir", uuid)
@@ -310,8 +348,10 @@ func (s *DeviceRegistryServerImpl) lookupTarget(ctx context.Context, req *regist
 		return nil, fmt.Errorf("pod %s not found", podUID)
 	}
 	return &Target{
-		Pod:           pod,
-		ContainerName: containerName,
+		Candidates: []TargetCandidate{{
+			Pod:           pod,
+			ContainerName: containerName,
+		}},
 		ConfigDir: filepath.Join(
 			util.GetPodContainerManagerPath(s.contPath, pod.UID, containerName),
 			util.Config,

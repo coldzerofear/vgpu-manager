@@ -13,16 +13,63 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
+// PartitionDetail describes one connected component of the
+// container <-> mainRequest graph: the containers that share at least one
+// vGPU mainRequest, and the set of vGPU mainRequests they collectively use.
 type PartitionDetail struct {
 	Key        string
 	Containers []string
 	Requests   []string
 }
 
+// PartitionCandidate names a single container that could be the caller of a
+// register request keyed to a given partition. Multiple candidates may exist
+// for the same key (e.g. an init+app pair sharing a request, or a stale
+// fallback key still in a claim annotation from an earlier Prepare).
+type PartitionCandidate struct {
+	Pod           *corev1.Pod
+	ContainerName string
+	Kind          string // "init" or "app"
+}
+
+// PartitionInfo is the output of partition resolution.
+//
+// CandidatesByKey is the field the register-resolve path actually uses:
+// it maps every plausible partition key — both the real key computed by
+// buildPartitionKey for the CURRENT reservedFor snapshot and the per-request
+// fallback key that an earlier Prepare may have baked into a claim annotation
+// — to the set of containers that key could refer to. The server iterates
+// candidates and picks the one with live cgroup PIDs.
+//
+// This makes the resolve robust to the common case where Prepare runs while
+// the claim is only partially reserved (so unused requests fall back to
+// per-request keys) and another pod later joins reservedFor to consume those
+// requests.
+//
+// Known limitation (bug-2, multi-request container w/ eager Prepare):
+// if a future pod's single container references multiple requests that were
+// emitted as separate per-request fallback partitions at Prepare time, that
+// container will receive multiple Devices whose env vars collide on
+// MANAGER_CLIENT_REGISTER_UUID and whose mounts collide on the partition
+// directory. The CandidatesByKey machinery here lets register succeed for
+// whichever UUID happens to win the env collision, but the other partitions'
+// pids files will never be written. Properly fixing this requires deferring
+// UUID assignment from Prepare (eager) to first-register (lazy), which is a
+// larger refactor than the current pass.
 type PartitionInfo struct {
 	RequestToPartition map[string]string
 	Partitions         map[string]PartitionDetail
+	CandidatesByKey    map[string][]PartitionCandidate
 	Fallback           bool
+}
+
+// FallbackPartitionKey returns the partition key Prepare emits for a vGPU
+// request when no container in the current reservedFor snapshot uses it.
+// Exposed so resolver code can register the same key as an alias in
+// CandidatesByKey and so any other consumer that needs the prepare-time
+// fallback name can avoid drift.
+func FallbackPartitionKey(request string) string {
+	return sanitizePartitionToken(request)
 }
 
 func ResolveClaimVGPUPartitions(
@@ -37,14 +84,6 @@ func ResolveClaimVGPUPartitions(
 	return ResolveClaimVGPUPartitionsFromAllocatedRequests(ctx, reader, claim, allocatedRequests)
 }
 
-type PartitionMap struct {
-	RequestPodsMap        map[string]*corev1.Pod
-	PartitionPodMap       map[string]*corev1.Pod
-	PodContainerMap       map[*corev1.Pod][]string
-	ContainerPartitionMap map[*corev1.Pod][]string
-	ContainerRequestsMap  map[*corev1.Pod][]string
-}
-
 func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 	ctx context.Context,
 	reader Reader,
@@ -54,6 +93,7 @@ func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 	info := &PartitionInfo{
 		RequestToPartition: map[string]string{},
 		Partitions:         map[string]PartitionDetail{},
+		CandidatesByKey:    map[string][]PartitionCandidate{},
 	}
 	if claim == nil {
 		info.Fallback = true
@@ -72,15 +112,21 @@ func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 		return info, nil
 	}
 
-	partitionPodMap := PartitionMap{
-		RequestPodsMap:  map[string]*corev1.Pod{},
-		PartitionPodMap: map[string]*corev1.Pod{},
-	}
+	// containerCands maps the synthetic containerKey used by the graph back
+	// to the (pod, container) pair that produced it. Used after the graph
+	// walk to attach candidates to real partition keys.
+	containerCands := map[string]PartitionCandidate{}
+
 	graph := map[string]sets.Set[string]{}
 	resolvedEdges := 0
 	for _, pod := range reservedPods {
 		for _, container := range common.GetAllPodContainers(pod) {
 			containerKey := buildContainerKey(pod, string(container.Kind), container.Name)
+			cand := PartitionCandidate{
+				Pod:           pod,
+				ContainerName: container.Name,
+				Kind:          string(container.Kind),
+			}
 			for _, claimRef := range container.Claims {
 				actualClaimName, ok, err := ResolveActualClaimNameForPodClaim(pod, claimRef.Name)
 				if err != nil {
@@ -94,11 +140,17 @@ func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 				for _, request := range actualRequests {
 					requestNode := buildRequestNode(request)
 					linkGraph(graph, containerKey, requestNode)
-
-					partitionPodMap.RequestPodsMap[request] = pod
-					partitionPodMap.PartitionPodMap[containerKey] = pod
-
 					resolvedEdges++
+
+					// Fallback alias: a previous Prepare that ran before this
+					// pod joined reservedFor may have baked the sanitized
+					// request name into the claim annotation as the
+					// partitionKey. Register that name as an alias here so the
+					// resolver still finds this candidate.
+					fallbackKey := FallbackPartitionKey(request)
+					info.CandidatesByKey[fallbackKey] = appendUniqueCandidate(info.CandidatesByKey[fallbackKey], cand)
+
+					containerCands[containerKey] = cand
 				}
 			}
 		}
@@ -123,12 +175,30 @@ func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 		for _, request := range partition.Requests {
 			info.RequestToPartition[request] = partition.Key
 		}
+		// Real-key aliases. The same candidate may already be present under
+		// the fallback key; appendUniqueCandidate dedupes by identity.
+		for _, ck := range partition.Containers {
+			if cand, ok := containerCands[ck]; ok {
+				info.CandidatesByKey[partition.Key] = appendUniqueCandidate(info.CandidatesByKey[partition.Key], cand)
+			}
+		}
 	}
 
 	if len(info.RequestToPartition) == 0 {
 		info.Fallback = true
 	}
 	return info, nil
+}
+
+// appendUniqueCandidate appends cand to the slice unless an entry referring to
+// the same (pod uid, container name) is already present.
+func appendUniqueCandidate(list []PartitionCandidate, cand PartitionCandidate) []PartitionCandidate {
+	for _, c := range list {
+		if c.Pod.UID == cand.Pod.UID && c.ContainerName == cand.ContainerName {
+			return list
+		}
+	}
+	return append(list, cand)
 }
 
 func buildContainerKey(pod *corev1.Pod, kind, containerName string) string {
@@ -199,4 +269,33 @@ func buildPartitionKey(containers, requests []string) string {
 func shortHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+// sanitizePartitionToken normalizes a string so it's safe to use as a path
+// component / partition key. Lowercase letters, digits, '-', '_', '.' are
+// kept; everything else collapses to '-'.
+func sanitizePartitionToken(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
