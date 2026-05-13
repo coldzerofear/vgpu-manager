@@ -25,7 +25,7 @@ func (p PatchMetadata) PatchType() k8stypes.PatchType {
 	return k8stypes.MergePatchType
 }
 
-func (p PatchMetadata) MarshalJSON() ([]byte, error) {
+func (p PatchMetadata) JSONBytes() ([]byte, error) {
 	type patchPod struct {
 		Metadata PatchMetadata `json:"metadata"`
 	}
@@ -36,7 +36,7 @@ func (p PatchMetadata) MarshalJSON() ([]byte, error) {
 }
 
 func PatchPodMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod, patchMetadata PatchMetadata) error {
-	bytes, err := patchMetadata.MarshalJSON()
+	bytes, err := patchMetadata.JSONBytes()
 	if err != nil {
 		return err
 	}
@@ -49,7 +49,7 @@ func PatchPodMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod, patchMet
 }
 
 func PatchNodeMetadata(kubeClient kubernetes.Interface, nodeName string, patchMetadata PatchMetadata) error {
-	bytes, err := patchMetadata.MarshalJSON()
+	bytes, err := patchMetadata.JSONBytes()
 	if err != nil {
 		return err
 	}

@@ -293,7 +293,7 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 		metadata := client.PatchMetadata{Annotations: map[string]*string{
 			fmt.Sprintf("%s/%s", util.DRADriverName, partitionUuid): &partitionKey,
 		}}
-		data, err := metadata.MarshalJSON()
+		data, err := metadata.JSONBytes()
 		if err != nil {
 			return nil, err
 		}
@@ -347,7 +347,7 @@ func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, devices
 		}
 	}
 	if len(metadata.Annotations) > 0 {
-		data, err := metadata.MarshalJSON()
+		data, err := metadata.JSONBytes()
 		if err != nil {
 			return err
 		}

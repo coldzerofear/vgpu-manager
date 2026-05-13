@@ -378,7 +378,7 @@ func validateLegacyContainer(pod *corev1.Pod, containerName string) error {
 // persistPids writes the sorted PID list to <configDir>/pids.config atomically
 // (flock + truncate+write) via the in-tree cgo helper.
 func (s *DeviceRegistryServerImpl) persistPids(configDir string, pids []int) error {
-	_ = os.MkdirAll(configDir, 0o777)
+	_ = util.EnsureDir(configDir, 0o777)
 	var buf bytes.Buffer
 	sort.Ints(pids)
 	for _, pid := range pids {

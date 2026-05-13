@@ -25,6 +25,7 @@ type Flags struct {
 	KlogVerbosity                 int
 	AdditionalXidsToIgnore        string
 	HostManagerDir                string
+	CGroupDriver                  string
 }
 
 type Config struct {

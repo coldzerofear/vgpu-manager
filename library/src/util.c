@@ -20,7 +20,7 @@
 #define VMEM_NODE_ENABLED_ENV "VMEMORY_NODE_ENABLED"
 #define MANAGER_VISIBLE_DEVICE_ENV "MANAGER_VISIBLE_DEVICE"
 #define MANAGER_VISIBLE_DEVICES_ENV (MANAGER_VISIBLE_DEVICE_ENV "S")
-//#define NVIDIA_VISIBLE_DEVICES_ENV "NVIDIA_VISIBLE_DEVICES"
+#define NVIDIA_VISIBLE_DEVICES_ENV "NVIDIA_VISIBLE_DEVICES"
 #define MANAGER_COMPATIBILITY_MODE_ENV "MANAGER_COMPATIBILITY_MODE"
 #define EXTERNAL_SM_WATCHER_ENABLED_ENV "EXTERNAL_SM_WATCHER_ENABLED"
 
@@ -129,7 +129,7 @@ int get_core_soft_limit(uint32_t index, int *limit) {
   return 0;
 }
 
-int get_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
+int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", MANAGER_VISIBLE_DEVICE_ENV, index);
   char *str = getenv(env);
@@ -143,7 +143,20 @@ int get_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
   return 0;
 }
 
-int get_device_uuids(char *uuids, size_t uuids_size) {
+int get_nvidia_device_uuids(char *uuids, size_t uuids_size) {
+  char *str = NULL;
+  str = getenv(NVIDIA_VISIBLE_DEVICES_ENV);
+  if (!str || str[0] == '\0') {
+    return -1;
+  }
+  if (snprintf(uuids, uuids_size, "%s", str) >= uuids_size) {
+    LOGGER(WARNING, "device uuids env %s truncated", NVIDIA_VISIBLE_DEVICES_ENV);
+    return -1;
+  }
+  return 0;
+}
+
+int get_manager_device_uuids(char *uuids, size_t uuids_size) {
   char *str = NULL;
   str = getenv(MANAGER_VISIBLE_DEVICES_ENV);
   if (!str || str[0] == '\0') {

@@ -236,7 +236,7 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 		return nil
 	}
 
-	allContainers := common.GetAllPodContainers(pod)
+	allContainers := util.GetAllPodContainers(pod)
 	claimsMap := h.getConvertedContainerClaimsMap(pod)
 
 	// key format: "<podClaimName>/<mainRequest>"
@@ -265,7 +265,7 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 				var err error
 				requestKeys, err = h.resolveDefiniteVGPURequestsFromContainerClaim(ctx, pod, claimRef, requestCache)
 				if err != nil {
-					return fmt.Errorf("%s %q claim %q validation failed: %w", c.Kind, c.Name, claimRef.Name, err)
+					return fmt.Errorf("%s container %q claim %q validation failed: %w", c.Kind, c.Name, claimRef.Name, err)
 				}
 			}
 
@@ -280,7 +280,7 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 		// A container can hit a maximum of 1 vGPU claim
 		if containerVGPUClaims.Len() > 1 {
 			return fmt.Errorf(
-				"%s %q references multiple vgpu claims %v; one container can use at most one vgpu claim",
+				"%s container %q references multiple vgpu claims %v; one container can use at most one vgpu claim",
 				c.Kind, c.Name, sets.List(containerVGPUClaims),
 			)
 		}
@@ -296,7 +296,7 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 			}
 
 			switch c.Kind {
-			case common.ContainerKindInit:
+			case util.ContainerKindInit:
 				usage.InitContainers.Insert(c.Name)
 				if usage.InitContainers.Len() > 1 {
 					return fmt.Errorf(
@@ -304,7 +304,7 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 						reqKey, sets.List(usage.InitContainers),
 					)
 				}
-			case common.ContainerKindApp:
+			case util.ContainerKindApp:
 				usage.AppContainers.Insert(c.Name)
 				if usage.AppContainers.Len() > 1 {
 					return fmt.Errorf(
@@ -903,7 +903,7 @@ func (h *validateHandle) collectPodClaimVGPURefs(
 	requestIndex map[string]podRequestMeta,
 ) sets.Set[string] {
 	result := sets.New[string]()
-	for _, c := range common.GetAllPodContainers(pod) {
+	for _, c := range util.GetAllPodContainers(pod) {
 		for _, claimRef := range c.Claims {
 			if claimRef.Name != podClaimName {
 				continue

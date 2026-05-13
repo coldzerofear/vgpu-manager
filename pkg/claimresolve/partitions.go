@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -63,15 +63,6 @@ type PartitionInfo struct {
 	Fallback           bool
 }
 
-// FallbackPartitionKey returns the partition key Prepare emits for a vGPU
-// request when no container in the current reservedFor snapshot uses it.
-// Exposed so resolver code can register the same key as an alias in
-// CandidatesByKey and so any other consumer that needs the prepare-time
-// fallback name can avoid drift.
-func FallbackPartitionKey(request string) string {
-	return sanitizePartitionToken(request)
-}
-
 func ResolveClaimVGPUPartitions(
 	ctx context.Context,
 	reader Reader,
@@ -120,7 +111,7 @@ func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 	graph := map[string]sets.Set[string]{}
 	resolvedEdges := 0
 	for _, pod := range reservedPods {
-		for _, container := range common.GetAllPodContainers(pod) {
+		for _, container := range util.GetAllPodContainers(pod) {
 			containerKey := buildContainerKey(pod, string(container.Kind), container.Name)
 			cand := PartitionCandidate{
 				Pod:           pod,
@@ -142,14 +133,7 @@ func ResolveClaimVGPUPartitionsFromAllocatedRequests(
 					linkGraph(graph, containerKey, requestNode)
 					resolvedEdges++
 
-					// Fallback alias: a previous Prepare that ran before this
-					// pod joined reservedFor may have baked the sanitized
-					// request name into the claim annotation as the
-					// partitionKey. Register that name as an alias here so the
-					// resolver still finds this candidate.
-					fallbackKey := FallbackPartitionKey(request)
-					info.CandidatesByKey[fallbackKey] = appendUniqueCandidate(info.CandidatesByKey[fallbackKey], cand)
-
+					info.CandidatesByKey[request] = appendUniqueCandidate(info.CandidatesByKey[request], cand)
 					containerCands[containerKey] = cand
 				}
 			}
@@ -269,33 +253,4 @@ func buildPartitionKey(containers, requests []string) string {
 func shortHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])[:12]
-}
-
-// sanitizePartitionToken normalizes a string so it's safe to use as a path
-// component / partition key. Lowercase letters, digits, '-', '_', '.' are
-// kept; everything else collapses to '-'.
-func sanitizePartitionToken(value string) string {
-	if value == "" {
-		return "unknown"
-	}
-	var b strings.Builder
-	b.Grow(len(value))
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-' || r == '_' || r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteRune('-')
-		}
-	}
-	if b.Len() == 0 {
-		return "unknown"
-	}
-	return b.String()
 }

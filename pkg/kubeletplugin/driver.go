@@ -31,6 +31,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -203,6 +204,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 
 	if featuregates.Enabled(featuregates.DevicePluginClientMode) {
+		cgroup.MustInitCGroupDriver(config.Flags.CGroupDriver)
 		if err := driver.startClientRegistry(ctx, config, state); err != nil {
 			return nil, fmt.Errorf("start client-register registry: %w", err)
 		}

@@ -136,6 +136,13 @@ func newApp() *cli.App {
 			Destination: &flags.HostManagerDir,
 			EnvVars:     []string{"HOST_MANAGER_DIR"},
 		},
+		&cli.StringFlag{
+			Name:        "cgroup-driver",
+			Usage:       "Configure the cgroup driver for the current container environment",
+			Value:       "",
+			Destination: &flags.CGroupDriver,
+			EnvVars:     []string{"CGROUP_DRIVER"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.KubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)

@@ -130,7 +130,7 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 	usages map[string]actualRequestUsage,
 	claimCache map[string]*resourceapi.ResourceClaim,
 ) error {
-	allContainers := common.GetAllPodContainers(pod)
+	allContainers := util.GetAllPodContainers(pod)
 
 	for _, c := range allContainers {
 		containerActualVGPUClaims := sets.New[string]()
@@ -176,7 +176,7 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 		// A container can only hit a maximum of 1 "claim that has actually been allocated to vGPU"
 		if containerActualVGPUClaims.Len() > 1 {
 			return fmt.Errorf(
-				"pod %s/%s %s %q uses multiple allocated vgpu claims %v; one container can use at most one vgpu claim",
+				"pod %s/%s %s container %q uses multiple allocated vgpu claims %v; one container can use at most one vgpu claim",
 				pod.Namespace, pod.Name, c.Kind, c.Name, sets.List(containerActualVGPUClaims),
 			)
 		}
@@ -201,7 +201,7 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 
 			usage.Pods.Insert(thisPodID)
 			switch c.Kind {
-			case common.ContainerKindInit:
+			case util.ContainerKindInit:
 				usage.InitContainers.Insert(thisContainerID)
 				if usage.InitContainers.Len() > 1 {
 					return fmt.Errorf(
@@ -209,7 +209,7 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 						mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.InitContainers),
 					)
 				}
-			case common.ContainerKindApp:
+			case util.ContainerKindApp:
 				usage.AppContainers.Insert(thisContainerID)
 				if usage.AppContainers.Len() > 1 {
 					return fmt.Errorf(

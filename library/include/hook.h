@@ -185,6 +185,7 @@ typedef struct {
   int compatibility_mode;
   int sm_watcher;
   int vmem_node;
+  char reg_uuid[UUID_BUFFER_SIZE];
 } resource_data_t;
 
 /**
@@ -355,7 +356,7 @@ int get_host_device_index_by_cuda_device(CUdevice device);
 
 int get_host_device_index_by_nvml_device(nvmlDevice_t device);
 
-void register_to_remote_with_data(const char* pod_uid, const char* container);
+void register_to_remote_with_data(const char* pod_uid, const char* container, const char* reg_uuid);
 
 #ifdef __cplusplus
 }
