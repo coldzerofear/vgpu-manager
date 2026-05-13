@@ -145,7 +145,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	)
 
 	if featuregates.Enabled(featuregates.VGPUSupport) {
-		vgpuManager = NewVGPUManager(nvdevlib, config.Flags.HostManagerDir, config.ClientSets.Resource)
+		vgpuManager = NewVGPUManager(nvdevlib, config.Flags.HostManagerDir, config.ClientSets)
 	}
 
 	if featuregates.Enabled(featuregates.TimeSlicingSettings) {

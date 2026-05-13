@@ -18,11 +18,11 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	draclient "k8s.io/dynamic-resource-allocation/client"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 	"k8s.io/utils/ptr"
+	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 )
@@ -89,15 +89,15 @@ type VGPUManager struct {
 	hostManagerPath string
 	contManagerPath string
 	nvdevlib        *deviceLib
-	draClient       *draclient.Client
+	clientSets      pkgflags.ClientSets
 }
 
-func NewVGPUManager(deviceLib *deviceLib, hostManagerPath string, draClient *draclient.Client) *VGPUManager {
+func NewVGPUManager(deviceLib *deviceLib, hostManagerPath string, clientSets pkgflags.ClientSets) *VGPUManager {
 	return &VGPUManager{
 		nvdevlib:        deviceLib,
 		contManagerPath: util.ManagerRootPath,
 		hostManagerPath: hostManagerPath,
-		draClient:       draClient,
+		clientSets:      clientSets,
 	}
 }
 
@@ -297,7 +297,7 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 		if err != nil {
 			return nil, err
 		}
-		_, err = m.draClient.ResourceClaims(claim.Namespace).
+		_, err = m.clientSets.Core.ResourceV1().ResourceClaims(claim.Namespace).
 			Patch(context.Background(), claim.Name, metadata.PatchType(), data, metav1.PatchOptions{})
 		if err != nil {
 			return nil, err
@@ -335,7 +335,7 @@ func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, devices
 		return nil
 	}
 
-	claim, err := m.draClient.ResourceClaims(claimRef.Namespace).
+	claim, err := m.clientSets.Resource.ResourceClaims(claimRef.Namespace).
 		Get(context.Background(), claimRef.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -351,7 +351,7 @@ func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, devices
 		if err != nil {
 			return err
 		}
-		_, err = m.draClient.ResourceClaims(claim.Namespace).
+		_, err = m.clientSets.Core.ResourceV1().ResourceClaims(claim.Namespace).
 			Patch(context.Background(), claim.Name, metadata.PatchType(), data, metav1.PatchOptions{})
 		if err != nil {
 			return err

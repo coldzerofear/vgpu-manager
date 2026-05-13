@@ -18,9 +18,6 @@ rules:
       - get
       - list
       - watch
-      - create
-      - update
-      - delete
   - apiGroups:
       - resource.k8s.io
     resources:
@@ -67,9 +64,10 @@ rules:
       - ""
     resources:
       - pods
-      - pods/status
     verbs:
       - get
+      - list
+      - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -259,6 +257,8 @@ spec:
               name: manager
             - name: cgroup
               mountPath: /sys/fs/cgroup
+            - mountPath: /var/lib/kubelet
+              name: kubelet
       dnsPolicy: ClusterFirst
       # Mark this pod as a critical add-on; when enabled, the critical add-on
       # scheduler reserves resources for critical add-on pods so that they can
@@ -297,6 +297,11 @@ spec:
         - name: cgroup
           hostPath:
             path: /sys/fs/cgroup
+            type: ""
+        - name: kubelet
+          hostPath:
+            path: /var/lib/kubelet
+            type: ""
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
