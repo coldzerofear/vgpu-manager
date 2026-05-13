@@ -132,12 +132,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 	var fullGPUuuids []string
 	for _, devices := range perGPUAllocatable.allocatablesMap {
-		devices.GpuUUIDs()
-		for _, dev := range devices {
-			if dev.Gpu != nil {
-				fullGPUuuids = append(fullGPUuuids, dev.Gpu.UUID)
-			}
-		}
+		fullGPUuuids = append(fullGPUuuids, devices.GpuUUIDs()...)
 	}
 	klog.V(2).Infof("Warming up CDI device spec cache for GPUs %v", fullGPUuuids)
 	cdi.WarmupDevSpecCache(fullGPUuuids)
