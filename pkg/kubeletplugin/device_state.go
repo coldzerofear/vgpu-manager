@@ -17,9 +17,13 @@
 package kubeletplugin
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,12 +34,14 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/bootid"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/pmezard/go-difflib/difflib"
 	"github.com/sirupsen/logrus"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
+	cperrors "k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 
@@ -612,11 +618,45 @@ func (s *DeviceState) getCheckpoint(ctx context.Context) (*Checkpoint, error) {
 
 	checkpoint := &Checkpoint{}
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFileBasename, checkpoint); err != nil {
+		if errors.Is(err, cperrors.CorruptCheckpointError{}) {
+			logCheckpointDiff(s.config.DriverPluginPath(), checkpoint)
+		}
 		return nil, err
 	}
 
 	klog.V(7).Info("checkpoint read")
 	return checkpoint.ToLatestVersion(), nil
+}
+
+// logCheckpointDiff is invoked when GetCheckpoint returns
+// CorruptCheckpointError: the on-disk JSON deserialized cleanly but the
+// checksum recomputed at verification time disagrees with the one encoded in
+// the file. The typical cause is a backward-incompatible field addition
+// somewhere in the checkpoint type graph (see issue 1080). Emit a unified diff
+// between the on-disk bytes and what the current binary would re-marshal, so an
+// operator can spot the offending fields immediately.
+func logCheckpointDiff(driverPluginPath string, deserialized *Checkpoint) {
+	ondisk, rerr := os.ReadFile(filepath.Join(driverPluginPath, DriverPluginCheckpointFileBasename))
+	remarshaled, merr := json.Marshal(deserialized)
+	if rerr != nil || merr != nil {
+		klog.Errorf("checkpoint failed checksum verification; diagnostic dump unavailable (readErr=%v, marshalErr=%v)", rerr, merr)
+		return
+	}
+	var a, b bytes.Buffer
+	_ = json.Indent(&a, ondisk, "", "  ")
+	_ = json.Indent(&b, remarshaled, "", "  ")
+	diff, derr := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
+		A:        strings.SplitAfter(a.String(), "\n"),
+		B:        strings.SplitAfter(b.String(), "\n"),
+		FromFile: "on-disk",
+		ToFile:   "re-marshaled",
+		Context:  3,
+	})
+	if derr != nil {
+		klog.Errorf("checkpoint failed checksum verification; diff computation failed: %v. on-disk: %s. re-marshaled: %s", derr, ondisk, remarshaled)
+		return
+	}
+	klog.Errorf("checkpoint failed checksum verification; unified diff (on-disk vs re-marshaled by current binary):\n%s", diff)
 }
 
 // Read checkpoint from store, perform mutation, and write checkpoint back. Any
@@ -826,7 +866,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				cdiDevices = append(cdiDevices, d)
 			}
 
-			device := &kubeletplugin.Device{
+			device := &CheckpointedDevice{
 				Requests:     []string{result.Request},
 				PoolName:     result.Pool,
 				DeviceName:   result.Device,

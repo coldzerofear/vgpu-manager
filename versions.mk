@@ -35,7 +35,7 @@ GOLANG_VERSION := $(shell grep -E '^go [0-9]' go.mod | grep -oE '[0-9][0-9.]*')
 TOOLKIT_CONTAINER_IMAGE := $(shell chmod +x ./scripts/toolkit-container-image.sh && ./scripts/toolkit-container-image.sh)
 
 # nvVersion represents the version of dra-driver-nvidia-gpu that this project is based on
-NVVERSION := 0.4.0-dev
+NVVERSION := v0.4.0-rc.1
 
 print-%:
 	@echo $($*)
