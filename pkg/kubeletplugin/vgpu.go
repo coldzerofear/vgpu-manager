@@ -22,6 +22,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 	"k8s.io/utils/ptr"
+	client2 "sigs.k8s.io/controller-runtime/pkg/client"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
@@ -338,7 +339,11 @@ func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, devices
 	claim, err := m.clientSets.Resource.ResourceClaims(claimRef.Namespace).
 		Get(context.Background(), claimRef.Name, metav1.GetOptions{})
 	if err != nil {
-		return err
+		return client2.IgnoreNotFound(err)
+	}
+	// claim marked for deletion, fast return
+	if !claim.DeletionTimestamp.IsZero() {
+		return nil
 	}
 	metadata := client.PatchMetadata{Annotations: map[string]*string{}}
 	for key := range claim.GetAnnotations() {
@@ -354,7 +359,7 @@ func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, devices
 		_, err = m.clientSets.Core.ResourceV1().ResourceClaims(claim.Namespace).
 			Patch(context.Background(), claim.Name, metadata.PatchType(), data, metav1.PatchOptions{})
 		if err != nil {
-			return err
+			return client2.IgnoreNotFound(err)
 		}
 	}
 	return nil
