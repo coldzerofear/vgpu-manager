@@ -27,12 +27,14 @@ import (
 	pkgkubeletplugin "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/urfave/cli/v2"
 	"k8s.io/component-base/logs"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 )
 
 func main() {
@@ -127,6 +129,19 @@ func newApp() *cli.App {
 			Value:       "",
 			Destination: &flags.AdditionalXidsToIgnore,
 			EnvVars:     []string{"ADDITIONAL_XIDS_TO_IGNORE"},
+		},
+		&cli.StringFlag{
+			Name:        "http-endpoint",
+			Usage:       "The TCP network `address` where the metrics HTTP server will listen (example: `:8080`). The default is the empty string, which means the server is disabled.",
+			Destination: &flags.HttpEndpoint,
+			EnvVars:     []string{"HTTP_ENDPOINT"},
+		},
+		&cli.StringFlag{
+			Name:        "metrics-path",
+			Usage:       "The HTTP `path` where Prometheus metrics are exposed, disabled if empty.",
+			Value:       "/metrics",
+			Destination: &flags.MetricsPath,
+			EnvVars:     []string{"METRICS_PATH"},
 		},
 		&cli.StringFlag{
 			Name:        "host-manager-dir",
@@ -236,6 +251,14 @@ func RunPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error {
 
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	defer cancel()
+
+	metrics.InitializeDRARequestMetrics(util.DRADriverName)
+
+	if config.Flags.HttpEndpoint != "" {
+		if err := metrics.RunPrometheusMetricsServer(ctx, config.Flags.HttpEndpoint, config.Flags.MetricsPath); err != nil {
+			return fmt.Errorf("setup metrics endpoint: %w", err)
+		}
+	}
 
 	// Create and start the driver
 	driver, err := pkgkubeletplugin.NewDriver(ctx, config)

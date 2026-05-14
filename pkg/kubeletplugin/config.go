@@ -14,6 +14,8 @@ type Flags struct {
 
 	//Namespace                     string
 	//ImageName                     string
+	HttpEndpoint                  string
+	MetricsPath                   string
 	NodeName                      string
 	CdiRoot                       string
 	ContainerDriverRoot           string

@@ -43,6 +43,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	cperrors "k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
+	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
@@ -212,10 +213,10 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 				if err != nil {
 					return nil, fmt.Errorf("unable to update checkpoint: %w", err)
 				}
-				//syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
+				syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
 				return state, nil
 			} else if storedBootID == currentBootID {
-				//syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
+				syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
 				return state, nil
 			} else {
 				klog.Infof("Invalidating checkpoint: checkpoint nodeBootID %q != current %q", storedBootID, currentBootID)
@@ -598,7 +599,7 @@ func (s *DeviceState) createCheckpoint(ctx context.Context, cp *Checkpoint) erro
 	if err != nil {
 		return err
 	}
-	//syncPreparedDevicesGaugeFromCheckpoint(s.config.flags.nodeName, cp)
+	syncPreparedDevicesGaugeFromCheckpoint(s.config.Flags.NodeName, cp)
 	return err
 }
 
@@ -686,6 +687,7 @@ func (s *DeviceState) updateCheckpoint(ctx context.Context, mutate func(*Checkpo
 		return fmt.Errorf("unable to create checkpoint: %w", err)
 	}
 	klog.V(6).Infof("t_checkpoint_update_total %.3f s", time.Since(tucp0).Seconds())
+	syncPreparedDevicesGaugeFromCheckpoint(s.config.Flags.NodeName, cp)
 	return nil
 }
 
@@ -1410,6 +1412,37 @@ func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpec
 	}
 
 	return nil
+}
+
+func syncPreparedDevicesGaugeFromCheckpoint(nodeName string, cp *Checkpoint) {
+	counts := make(map[string]int) // map of device type to count of devices of that type
+	if cp == nil {
+		return
+	}
+	lv := cp.ToLatestVersion()
+	if lv != nil && lv.V2 != nil {
+		for _, pc := range lv.V2.PreparedClaims {
+			if pc.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+				continue
+			}
+			for _, g := range pc.PreparedDevices {
+				for _, dev := range g.Devices {
+					if _, ok := counts[dev.Type()]; !ok {
+						counts[dev.Type()] = 0
+					}
+					counts[dev.Type()]++
+				}
+			}
+		}
+	}
+
+	for _, dt := range []string{VGpuDeviceType, GpuDeviceType, PreparedMigDeviceType, VfioDeviceType, UnknownDeviceType} {
+		if count, ok := counts[dt]; !ok {
+			drametrics.SetPreparedDevicesCounts(nodeName, util.DRADriverName, dt, 0)
+		} else {
+			drametrics.SetPreparedDevicesCounts(nodeName, util.DRADriverName, dt, count)
+		}
+	}
 }
 
 // AddDeviceTaint adds or updates a DRA device taint on the given device under
