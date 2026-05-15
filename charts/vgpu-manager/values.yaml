@@ -151,13 +151,14 @@ devicePlugin:
     capabilities:
       drop: ["ALL"]
       add: ["SYS_ADMIN"]
+  # Configure the runtime class name for running GPU containers. If the default container runtime is Nvidia, there is no need to configure it.
   runtimeClassName: ""
   # The root directory configured in the start command of kubelet (default: /var/lib/kubelet)
   kubeletRootDir: "/var/lib/kubelet"
   # Configure the host path used by vgpu manager (default: /etc/vgpu-manager)
   vgpuManagerDir: "/etc/vgpu-manager"
   # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
-  cgroupDriver: ""
+  cgroupDriver: "auto"
   devicePlugin:
     env:
       - name: DP_ENABLE_HEALTHCHECKS

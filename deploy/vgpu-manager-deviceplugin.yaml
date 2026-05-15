@@ -136,7 +136,7 @@ spec:
           securityContext:
             privileged: true
           volumeMounts:
-            - name: manager
+            - name: manager-root
               mountPath: /etc/vgpu-manager
               mountPropagation: Bidirectional
       containers:
@@ -169,21 +169,30 @@ spec:
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
           securityContext:
-            #privileged: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-              add: ["SYS_ADMIN"]
+            privileged: true
+#            allowPrivilegeEscalation: false
+#            capabilities:
+#              drop: ["ALL"]
+#              add: ["SYS_ADMIN"]
           resources: {}
           volumeMounts:
-            - name: kubelet
+            - name: kubelet-root
               mountPath: /var/lib/kubelet
-            - name: manager
+              readOnly: true
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+              mountPropagation: Bidirectional
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            - name: manager-root
               mountPath: /etc/vgpu-manager
-            - name: cgroup
+            - name: cgroup-root
               mountPath: /sys/fs/cgroup
+              readOnly: true
             - name: node-config
               mountPath: /config
+              readOnly: true
         - name: device-monitor
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
@@ -211,11 +220,11 @@ spec:
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
           securityContext:
-            #privileged: true
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-              add: ["SYS_ADMIN"]
+            privileged: true
+#            allowPrivilegeEscalation: false
+#            capabilities:
+#              drop: ["ALL"]
+#              add: ["SYS_ADMIN"]
           resources: {}
           livenessProbe:
             httpGet:
@@ -232,23 +241,35 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           volumeMounts:
-            - name: kubelet
+            - name: kubelet-root
               mountPath: /var/lib/kubelet
-            - name: manager
+              readOnly: true
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            - name: manager-root
               mountPath: /etc/vgpu-manager
-            - name: cgroup
+            - name: cgroup-root
               mountPath: /sys/fs/cgroup
+              readOnly: true
             - name: node-config
               mountPath: /config
+              readOnly: true
       volumes:
-        - name: kubelet
+        - name: kubelet-root
           hostPath:
             path: /var/lib/kubelet
-        - name: manager
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+        - name: manager-root
           hostPath:
             path: /etc/vgpu-manager
             type: DirectoryOrCreate
-        - name: cgroup
+        - name: cgroup-root
           hostPath:
             path: /sys/fs/cgroup
         - name: node-config

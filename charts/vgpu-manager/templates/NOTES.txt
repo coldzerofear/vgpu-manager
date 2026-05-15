@@ -1,4 +1,4 @@
-vgpu-manager use global domain: {{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" | quote }}
+vgpu-manager use global domain: {{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" | quote }}
 vgpu-manager deploy in namespace: {{ .Release.Namespace | quote }}
 
 {{- if .Values.scheduler.enabled }}

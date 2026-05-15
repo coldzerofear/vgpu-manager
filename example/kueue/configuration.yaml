@@ -1,0 +1,14 @@
+apiVersion: config.kueue.x-k8s.io/v1beta2
+kind: Configuration
+resources:
+  transformations:
+    - input: nvidia.com/vgpu-cores
+      strategy: Replace
+      multiplyBy: nvidia.com/vgpu-number
+      outputs:
+        nvidia.com/total-vgpu-cores: "1"
+    - input: nvidia.com/vgpu-memory
+      strategy: Replace
+      multiplyBy: nvidia.com/vgpu-number
+      outputs:
+        nvidia.com/total-vgpu-memory: "1"

@@ -51,11 +51,11 @@ data:
       weight: 1
       httpTimeout: 30s
       managedResources:
-      - name: "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-number"
+      - name: "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-number"
         ignoredByScheduler: true
-      - name: "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-cores"
+      - name: "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-cores"
         ignoredByScheduler: true
-      - name: "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-memory"
+      - name: "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-memory"
         ignoredByScheduler: true
   {{- else }}
   {{/* K8s < 1.22: Use legacy Policy API */}}
@@ -82,15 +82,15 @@ data:
           "httpTimeout": 30000000000,
           "managedResources": [
             {
-              "name": "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-number",
+              "name": "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-number",
               "ignoredByScheduler": true
             },
             {
-              "name": "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-cores",
+              "name": "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-cores",
               "ignoredByScheduler": true
             },
             {
-              "name": "{{ default "nvidia.com" .Values.globalDomain | trimSuffix "/" }}/vgpu-memory",
+              "name": "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-memory",
               "ignoredByScheduler": true
             }
           ],

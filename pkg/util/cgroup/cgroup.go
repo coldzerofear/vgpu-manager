@@ -45,7 +45,7 @@ const (
 	CGROUPFS CGroupDriver = "cgroupfs"
 )
 
-func MustInitCGroupDriver(cgroupDriver string) {
+func MustInitCGroupDriver(cgroupDriver string) CGroupDriver {
 	initCGroupOnce.Do(func() {
 		switch strings.ToLower(cgroupDriver) {
 		case string(SYSTEMD):
@@ -73,6 +73,7 @@ func MustInitCGroupDriver(cgroupDriver string) {
 		}
 	})
 	klog.Infof("Current environment cgroup driver is '%s'", currentCGroupDriver)
+	return currentCGroupDriver
 }
 
 // readKubeletConfigCgroupDriver Extract cgroup driver from kubelet configuration file

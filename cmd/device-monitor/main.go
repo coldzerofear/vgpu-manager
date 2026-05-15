@@ -61,15 +61,15 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Create kubeClient failed: %v", err)
 	}
+	cgroupDriver := cgroup.MustInitCGroupDriver(opt.CGroupDriver)
 	nodeConfig, err := node.NewNodeConfig(
 		node.WithNodeNameOption(opt.NodeName),
 		node.WithConfigPathOption(opt.NodeConfigPath),
-		node.WithCGroupDriverOption(opt.CGroupDriver))
+		node.WithCGroupDriverOption(string(cgroupDriver)))
 	if err != nil {
 		klog.Fatalf("Initialization of node config failed: %v", err)
 	}
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
-	cgroup.MustInitCGroupDriver(nodeConfig.GetCGroupDriver())
 
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())
