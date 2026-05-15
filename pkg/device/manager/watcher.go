@@ -73,10 +73,10 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 
 		gpuDevices := make([]*GPUDevice, 0, len(gpuDeviceMap))
 		deviceHandlers := make([]device.Device, 0, len(gpuDeviceMap))
-		for uuid, dev := range gpuDeviceMap {
-			handle, ret := deviceLib.DeviceGetHandleByUUID(uuid)
+		for _, dev := range gpuDeviceMap {
+			handle, ret := deviceLib.DeviceGetHandleByUUID(dev.UUID)
 			if ret != nvml.SUCCESS {
-				klog.Errorf("error getting device handle for uuid '%v': %v", uuid, ret)
+				klog.Errorf("error getting device handle for uuid '%v': %v", dev.UUID, ret)
 				return
 			}
 			gpuDevices = append(gpuDevices, dev)

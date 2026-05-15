@@ -167,6 +167,29 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.healthcheck = healthcheck
 
+	healthDeviceMap := make(map[string]*manager.GPUDevice)
+	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
+		driver.wg.Go(func() {
+			klog.V(4).Info("Starting to extended shared SM utilization watcher")
+			for _, device := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
+				gpuInfo := device.VGpu.GpuDeviceInfo.GpuInfo
+				numaNode, _ := gpuInfo.GetNumaNode()
+				paths, _ := gpuInfo.GetPaths()
+				gpuDevice := &manager.GPUDevice{
+					GpuInfo:  gpuInfo,
+					NumaNode: int(numaNode),
+					Paths:    paths,
+					Healthy:  true,
+					Links:    map[int][]links.P2PLinkType{},
+				}
+				healthDeviceMap[device.CanonicalName()] = gpuDevice
+			}
+			filePath := filepath.Join(manager.WatcherDir, manager.SMUtilFile)
+			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, healthDeviceMap, filePath)
+			klog.V(4).Info("stopping extended shared SM utilization watcher")
+		})
+	}
+
 	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
 		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
 		if err != nil {
@@ -178,29 +201,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		driver.deviceHealthMonitor = deviceHealthMonitor
 
 		driver.wg.Go(func() {
-			driver.deviceHealthEvents(ctx, config.Flags.NodeName)
-		})
-	}
-
-	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
-		driver.wg.Go(func() {
-			klog.V(4).Info("Starting to extended shared SM utilization watcher")
-			gpuDeviceMap := make(map[string]*manager.GPUDevice)
-			for _, vgpuDevice := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
-				gpuInfo := vgpuDevice.VGpu.GpuDeviceInfo.GpuInfo
-				numaNode, _ := gpuInfo.GetNumaNode()
-				paths, _ := gpuInfo.GetPaths()
-				gpuDeviceMap[gpuInfo.UUID] = &manager.GPUDevice{
-					GpuInfo:  gpuInfo,
-					NumaNode: int(numaNode),
-					Paths:    paths,
-					Healthy:  true,
-					Links:    map[int][]links.P2PLinkType{},
-				}
-			}
-			filePath := filepath.Join(manager.WatcherDir, manager.SMUtilFile)
-			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, gpuDeviceMap, filePath)
-			klog.V(4).Info("stopping extended shared SM utilization watcher")
+			driver.deviceHealthEvents(ctx, config.Flags.NodeName, healthDeviceMap)
 		})
 	}
 
@@ -539,7 +540,16 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 	return nil
 }
 
-func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
+func isHealthy(taints []resourceapi.DeviceTaint) bool {
+	for _, taint := range taints {
+		if taint.Effect == resourceapi.DeviceTaintEffectNoSchedule {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string, healthDeviceMap map[string]*manager.GPUDevice) {
 	klog.V(4).Info("Starting to watch for device health notifications")
 	for {
 		select {
@@ -573,6 +583,9 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 					taints := dev.Taints()
 					if len(taints) > 0 {
 						d.Taints = taints
+					}
+					if device, ok := healthDeviceMap[dev.CanonicalName()]; ok {
+						device.Healthy = isHealthy(d.Taints)
 					}
 					resourceSlice.Devices = append(resourceSlice.Devices, d)
 				}
