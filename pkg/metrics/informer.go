@@ -21,8 +21,8 @@ func GetNodeInformer(factory informers.SharedInformerFactory, nodeName string) (
 }
 
 const (
-	IndexerKeyPodPlanSchedulingNode  = "pod.planSchedulingNode"
-	IndexerKeyPodStatusUnschedulable = "pod.status.unschedulable"
+	IndexerKeyPodPlanSchedulingNode        = "pod.planSchedulingNode"
+	IndexerKeyPodDeviceAllocationCountable = "pod.device.allocation.countable"
 )
 
 func GetPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
@@ -35,10 +35,10 @@ func GetPodInformer(factory informers.SharedInformerFactory, nodeName string) (c
 			}
 			return []string{indexerValue}, nil
 		},
-		IndexerKeyPodStatusUnschedulable: func(obj interface{}) ([]string, error) {
+		IndexerKeyPodDeviceAllocationCountable: func(obj interface{}) ([]string, error) {
 			indexerValue := "false"
 			if pod, ok := obj.(*corev1.Pod); ok {
-				if device.PodStatusUnschedulable(pod) {
+				if device.ShouldCountPodDeviceAllocation(pod) {
 					indexerValue = "true"
 				}
 			}

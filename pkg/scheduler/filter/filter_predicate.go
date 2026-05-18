@@ -315,8 +315,8 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	)
 	// Skip pods that have already been scheduled.
 	if nodeName, ok := IsScheduled(pod); ok {
-		// Allow device filtering and repair scheduling status to be triggered again when the pod is in an unschedulable state
-		if !device.PodStatusUnschedulable(pod) {
+		if device.ShouldCountPodDeviceAllocation(pod) {
+			// Pre-allocation is current; steer the pod back to its predicated node.
 			foundNode := false
 			for i, node := range nodes {
 				if !foundNode && node.Name == nodeName {
@@ -324,15 +324,15 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 					foundNode = true
 					continue
 				}
-				failedNodesMap[node.Name] = fmt.Sprintf("pod has been scheduled to node %s", node.Name)
+				failedNodesMap[node.Name] = fmt.Sprintf("pod has been scheduled to node %s", nodeName)
 			}
 			if foundNode {
 				return filteredNodes, failedNodesMap, nil
 			}
-
 			return nil, nil, fmt.Errorf("pod %s had been predicated", pod.UID)
 		}
-		klog.V(3).InfoS("Pod scheduled condition is unschedulable, Re trigger device pre allocation", "pod", klog.KObj(pod))
+		// Pre-allocation is stale or stuck — re-trigger device pre-allocation.
+		klog.V(3).InfoS("Re-triggering device pre allocation for pod", "pod", klog.KObj(pod))
 	}
 
 	if err := f.CheckDeviceRequest(pod); err != nil {

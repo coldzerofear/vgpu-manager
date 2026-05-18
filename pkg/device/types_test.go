@@ -281,14 +281,21 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 	}
 }
 
-func Test_PodStatusUnschedulable(t *testing.T) {
-	base := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+func Test_ShouldCountPodDeviceAllocation(t *testing.T) {
+	// Anchor time-sensitive cases to wall clock; the function consults
+	// time.Since(predicateTime) for the stuck-vs-bind-window distinction, so
+	// tests must position predicateTime relative to "now".
+	now := time.Now()
+	// recent = inside StuckGracePeriod (treat as bind window)
+	// aged   = outside StuckGracePeriod (treat as stuck)
+	recent := now.Add(-1 * time.Second)
+	aged := now.Add(-2 * StuckGracePeriod)
 
 	type podOpts struct {
-		nodeName       string
-		condition      *corev1.PodCondition
-		predicateTime  string // empty = annotation absent
-		assignedPhase  string // empty = label absent
+		nodeName      string
+		condition     *corev1.PodCondition
+		predicateTime string // empty = annotation absent
+		assignedPhase string // empty = label absent
 	}
 	makePod := func(o podOpts) *corev1.Pod {
 		pod := &corev1.Pod{
@@ -327,121 +334,123 @@ func Test_PodStatusUnschedulable(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "already bound to a node returns false regardless of condition",
+			name: "already bound to a node: count regardless of condition",
 			pod: makePod(podOpts{
 				nodeName:      "node-1",
-				condition:     unschedulableCond(base),
-				predicateTime: nanos(base),
+				condition:     unschedulableCond(aged),
+				predicateTime: nanos(aged),
+			}),
+			want: true,
+		},
+		{
+			name: "bind failed last cycle (phase=failed): do not count",
+			pod: makePod(podOpts{
+				assignedPhase: string(util.AssignPhaseFailed),
+				// MaxUint64 sentinel written by PatchPodAllocationFailed;
+				// the phase=failed check must fire before the timestamp branch.
+				predicateTime: fmt.Sprintf("%d", uint64(^uint64(0))),
+				condition:     unschedulableCond(aged),
 			}),
 			want: false,
 		},
 		{
-			name: "bind failed last cycle (phase=failed) is treated as unschedulable",
-			pod: makePod(podOpts{
-				assignedPhase: string(util.AssignPhaseFailed),
-				// MaxUint64 sentinel is what PatchPodAllocationFailed writes;
-				// without the phase=failed early return the time-stamp branch
-				// would erroneously return false.
-				predicateTime: fmt.Sprintf("%d", uint64(^uint64(0))),
-				condition:     unschedulableCond(base),
-			}),
-			want: true,
-		},
-		{
-			name: "phase=failed bypass works even without PodScheduled condition",
+			name: "phase=failed without PodScheduled condition: do not count",
 			pod: makePod(podOpts{
 				assignedPhase: string(util.AssignPhaseFailed),
 			}),
-			want: true,
+			want: false,
 		},
 		{
-			name: "phase=allocating does not trigger the bind-failure bypass",
+			name: "phase=allocating within bind grace: count",
 			pod: makePod(podOpts{
 				assignedPhase: string(util.AssignPhaseAllocating),
-				condition:     unschedulableCond(base),
-				predicateTime: nanos(base.Add(2 * time.Second)),
+				condition:     unschedulableCond(recent.Add(-1 * time.Second)),
+				predicateTime: nanos(recent),
 			}),
-			want: false,
+			want: true,
 		},
 		{
-			name: "no PodScheduled condition (first scheduling attempt)",
+			name: "no PodScheduled condition (first scheduling attempt): count",
 			pod:  makePod(podOpts{}),
-			want: false,
+			want: true,
 		},
 		{
-			name: "condition is False but reason is not Unschedulable",
+			name: "condition False but reason not Unschedulable: count",
 			pod: makePod(podOpts{
 				condition: &corev1.PodCondition{
 					Type:               corev1.PodScheduled,
 					Status:             corev1.ConditionFalse,
 					Reason:             "SchedulerError",
-					LastTransitionTime: metav1.NewTime(base),
+					LastTransitionTime: metav1.NewTime(aged),
 				},
 			}),
-			want: false,
+			want: true,
 		},
 		{
-			name: "condition Status True is never Unschedulable",
+			name: "condition Status True: count",
 			pod: makePod(podOpts{
 				condition: &corev1.PodCondition{
 					Type:               corev1.PodScheduled,
 					Status:             corev1.ConditionTrue,
-					LastTransitionTime: metav1.NewTime(base),
+					LastTransitionTime: metav1.NewTime(aged),
 				},
 			}),
-			want: false,
-		},
-		{
-			name: "Unschedulable condition with no predicate-time annotation falls back to condition-only logic",
-			pod: makePod(podOpts{
-				condition: unschedulableCond(base),
-			}),
 			want: true,
 		},
 		{
-			name: "predicate-time strictly newer than condition: Filter passed in current cycle",
+			name: "Unschedulable condition without predicate-time: do not count",
 			pod: makePod(podOpts{
-				condition:     unschedulableCond(base),
-				predicateTime: nanos(base.Add(2 * time.Second)),
+				condition: unschedulableCond(aged),
 			}),
 			want: false,
 		},
 		{
-			name: "predicate-time older than condition: current cycle rejected after Filter",
+			name: "predicate-time recent and newer than condition: bind window, count",
 			pod: makePod(podOpts{
-				condition:     unschedulableCond(base.Add(2 * time.Second)),
-				predicateTime: nanos(base),
+				condition:     unschedulableCond(recent.Add(-1 * time.Second)),
+				predicateTime: nanos(recent),
 			}),
 			want: true,
 		},
 		{
-			name: "same-second boundary is conservatively treated as condition newer",
+			name: "predicate-time older than condition: cycle rejected after Filter, do not count",
 			pod: makePod(podOpts{
-				condition:     unschedulableCond(base),
-				predicateTime: nanos(base.Add(500 * time.Millisecond)),
+				condition:     unschedulableCond(recent),
+				predicateTime: nanos(aged),
 			}),
-			want: true,
+			want: false,
 		},
 		{
-			name: "malformed predicate-time falls back to condition-only logic",
+			name: "same-second boundary conservatively treated as condition newer: do not count",
 			pod: makePod(podOpts{
-				condition:     unschedulableCond(base),
+				condition:     unschedulableCond(recent),
+				predicateTime: nanos(recent.Add(500 * time.Millisecond)),
+			}),
+			want: false,
+		},
+		{
+			name: "malformed predicate-time: do not count",
+			pod: makePod(podOpts{
+				condition:     unschedulableCond(aged),
 				predicateTime: "not-a-number",
 			}),
-			want: true,
+			want: false,
 		},
 		{
-			name: "empty predicate-time string falls back to condition-only logic",
+			name: "predicate-time newer than LTT but older than bind grace: stuck, do not count",
 			pod: makePod(podOpts{
-				condition:     unschedulableCond(base),
-				predicateTime: "",
+				// predicateTime > LTT (Filter ran after the condition was set),
+				// yet StuckGracePeriod has elapsed without LTT advancing — bind
+				// would have completed by now, so the pre-allocation is stale.
+				condition:     unschedulableCond(aged.Add(-1 * time.Second)),
+				predicateTime: nanos(aged),
 			}),
-			want: true,
+			want: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, PodStatusUnschedulable(tt.pod))
+			assert.Equal(t, tt.want, ShouldCountPodDeviceAllocation(tt.pod))
 		})
 	}
 }

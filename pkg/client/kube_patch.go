@@ -142,10 +142,17 @@ func PatchPodPreAllocatedMetadata(kubeClient kubernetes.Interface, pod *corev1.P
 	preAlloc := pod.Annotations[util.PodVGPUPreAllocAnnotation]
 	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = pointer.String(preAlloc)
 	patchData.Annotations[util.PodVGPURealAllocAnnotation] = pointer.String("")
-	// Stamp the current Filter time. PodStatusUnschedulable compares this
-	// against PodScheduled.LastTransitionTime to tell a stale Unschedulable
-	// condition (left by a previous failed cycle) from one written after
-	// this Filter pass.
+	// Stamp the current Filter wall-clock time. ShouldCountPodDeviceAllocation
+	// uses this as both:
+	//   - the "filter ran after condition was set" signal (compared against
+	//     PodScheduled.LastTransitionTime), to ignore stale Unschedulable
+	//     conditions left by a previous failed cycle, and
+	//   - the bind-window grace input (compared against time.Now()), to free
+	//     the GPU once a pod has been stuck for longer than a bind could
+	//     plausibly take. Kubernetes does NOT advance LastTransitionTime on
+	//     repeated same-status failures, so the wall-clock difference is what
+	//     lets us distinguish "just pre-allocated, bind in progress" from
+	//     "stuck across many failed cycles".
 	patchData.Annotations[util.PodPredicateTimeAnnotation] = pointer.String(
 		fmt.Sprintf("%d", uint64(metav1.NowMicro().UnixNano())))
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
