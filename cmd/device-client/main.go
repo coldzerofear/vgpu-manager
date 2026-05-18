@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/registry"
@@ -19,6 +20,7 @@ var (
 	address        string
 	podUid         string
 	containerName  string
+	registerUuid   string
 	timeoutSeconds = 12
 	version        bool
 )
@@ -29,6 +31,7 @@ func main() {
 	cmdFlags.StringVar(&address, "address", "", "RPC address location for dial.")
 	cmdFlags.StringVar(&podUid, "pod-uid", "", "Pod UID of caller.")
 	cmdFlags.StringVar(&containerName, "container-name", "", "Container name of caller.")
+	cmdFlags.StringVar(&registerUuid, "register-uuid", "", "UUID registered on the manager client.")
 	cmdFlags.IntVar(&timeoutSeconds, "timeout", timeoutSeconds, "Set RPC connection timeout seconds.")
 	cmdFlags.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.Parse()
@@ -40,11 +43,14 @@ func main() {
 	if len(address) == 0 {
 		klog.Fatal("The rpc address cannot be empty")
 	}
-	if len(podUid) == 0 {
-		klog.Fatal("The pod uid cannot be empty")
-	}
-	if len(containerName) == 0 {
-		klog.Fatal("The container name cannot be empty")
+	registerUuid = strings.TrimSpace(registerUuid)
+	if len(registerUuid) == 0 {
+		if len(podUid) == 0 {
+			klog.Fatal("The pod uid cannot be empty")
+		}
+		if len(containerName) == 0 {
+			klog.Fatal("The container name cannot be empty")
+		}
 	}
 	if timeoutSeconds <= 0 {
 		klog.Fatal("The timeout must be greater than 0 seconds")
@@ -69,6 +75,7 @@ func main() {
 	req := &registry.ContainerDeviceRequest{
 		PodUid:        podUid,
 		ContainerName: containerName,
+		RegisterUuid:  registerUuid,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

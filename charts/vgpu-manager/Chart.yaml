@@ -22,7 +22,7 @@ version: v1.0.0
 # follow Semantic Versioning. They should reflect the version the application is using.
 # It is recommended to use it with quotes.
 appVersion: "v1.0.0"
-kubeVersion: ">= 1.17.0"
+kubeVersion: ">= 1.18.0"
 
 maintainers:
   - name: coldzerofear

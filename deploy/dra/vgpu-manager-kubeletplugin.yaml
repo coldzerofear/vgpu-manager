@@ -13,22 +13,11 @@ rules:
   - apiGroups:
       - resource.k8s.io
     resources:
-      - resourceclaims
-    verbs:
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - resource.k8s.io
-    resources:
       - resourceclaimtemplates
     verbs:
       - get
       - list
       - watch
-      - create
-      - update
-      - delete
   - apiGroups:
       - resource.k8s.io
     resources:
@@ -40,6 +29,15 @@ rules:
       - create
       - update
       - delete
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
   - apiGroups:
       - resource.k8s.io
     resources:
@@ -66,9 +64,10 @@ rules:
       - ""
     resources:
       - pods
-      - pods/status
     verbs:
       - get
+      - list
+      - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -99,10 +98,53 @@ spec:
         app: vgpu-manager-kubelet-plugin
         vgpu-manager.io/ignore-webhook: "true"
     spec:
+#      affinity:
+#        nodeAffinity:
+#          requiredDuringSchedulingIgnoredDuringExecution:
+#            nodeSelectorTerms:
+#              - matchExpressions:
+#                  # NFD: On discrete-GPU based systems NFD adds the following label where 10de is the NVIDIA PCI vendor ID
+#                  - key: feature.node.kubernetes.io/pci-10de.present
+#                    operator: In
+#                    values:
+#                      - "true"
+#              - matchExpressions:
+#                  # NFD: NVIDIA PCI 3D controller (class 0302) present
+#                  - key: feature.node.kubernetes.io/pci-0302_10de.present
+#                    operator: In
+#                    values:
+#                      - "true"
+#              - matchExpressions:
+#                  # NFD: NVIDIA PCI VGA compatible controller (class 0300) present
+#                  - key: feature.node.kubernetes.io/pci-0300_10de.present
+#                    operator: In
+#                    values:
+#                      - "true"
+#              - matchExpressions:
+#                  # NFD: On some Tegra-based systems NFD detects the CPU vendor ID as NVIDIA
+#                  - key: feature.node.kubernetes.io/cpu-model.vendor_id
+#                    operator: In
+#                    values:
+#                      - "NVIDIA"
+#              - matchExpressions:
+#                  # GPU Operator: Label added by NVIDIA GPU Operator when it detects a GPU
+#                  - key: "nvidia.com/gpu.present"
+#                    operator: In
+#                    values:
+#                      - "true"
       tolerations:
+        # This toleration is deprecated. Kept here for backward compatibility
+        # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
+      hostPID: true
       initContainers:
         - name: init-container
           image: coldzerofear/vgpu-manager-dra:latest
@@ -213,6 +255,10 @@ spec:
               readOnly: true
             - mountPath: /etc/vgpu-manager
               name: manager
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+            - mountPath: /var/lib/kubelet
+              name: kubelet
       dnsPolicy: ClusterFirst
       # Mark this pod as a critical add-on; when enabled, the critical add-on
       # scheduler reserves resources for critical add-on pods so that they can
@@ -248,6 +294,14 @@ spec:
             path: /etc/vgpu-manager
             type: DirectoryOrCreate
           name: manager
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: ""
+        - name: kubelet
+          hostPath:
+            path: /var/lib/kubelet
+            type: ""
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass

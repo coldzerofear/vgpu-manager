@@ -1013,8 +1013,9 @@ extern int get_mem_ratio(uint32_t index, double *ratio);
 extern int get_mem_limit(uint32_t index, size_t *limit);
 extern int get_core_limit(uint32_t index, int *limit);
 extern int get_core_soft_limit(uint32_t index, int *limit);
-extern int get_device_uuid(uint32_t index, char *uuid, size_t uuid_size);
-extern int get_device_uuids(char *uuids, size_t uuids_size);
+extern int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size);
+extern int get_manager_device_uuids(char *uuids, size_t uuids_size);
+extern int get_nvidia_device_uuids(char *uuids, size_t uuids_size);
 extern int get_mem_oversold(uint32_t index, int *limit);
 extern int get_vmem_node_enabled(int *enabled);
 extern int file_exist(const char *file_path);
@@ -1423,6 +1424,9 @@ void print_global_vgpu_config() {
   }
   if (g_vgpu_config->container_name[0] != '\0') {
     LOGGER(VERBOSE, "Container Name   : %s", g_vgpu_config->container_name);
+  }
+  if (g_vgpu_config->reg_uuid[0] != '\0') {
+    LOGGER(VERBOSE, "Register Uuid    : %s", g_vgpu_config->reg_uuid);
   }
   LOGGER(VERBOSE, "CompatibilityMode: %d", g_vgpu_config->compatibility_mode);
   LOGGER(VERBOSE, "Ext SM Watcher   : %s", g_vgpu_config->sm_watcher ? "enabled" : "disabled");
@@ -1946,17 +1950,31 @@ int init_g_vgpu_config_by_env() {
     strncpy(g_vgpu_config->container_name, container_name, sizeof(g_vgpu_config->container_name)-1);
     g_vgpu_config->container_name[sizeof(g_vgpu_config->container_name) - 1] = '\0';
   }
+  char *reg_uuid = getenv("MANAGER_CLIENT_REGISTER_UUID");
+  if (reg_uuid != NULL){
+    strncpy(g_vgpu_config->reg_uuid, reg_uuid, sizeof(g_vgpu_config->reg_uuid)-1);
+    g_vgpu_config->reg_uuid[sizeof(g_vgpu_config->reg_uuid) - 1] = '\0';
+  }
   int i;
   char uuids[UUID_BUFFER_SIZE * MAX_DEVICE_COUNT];
-  ret = get_device_uuids(uuids, sizeof(uuids));
+  ret = get_manager_device_uuids(uuids, sizeof(uuids));
   if (unlikely(ret)) {
+    ret = 0;
     for (i = 0; i < MAX_DEVICE_COUNT; i++) {
       char *uuid = &uuids[i * UUID_BUFFER_SIZE];
       memset(uuid, 0, UUID_BUFFER_SIZE);
-      if (get_device_uuid(i, uuid, UUID_BUFFER_SIZE) != 0) {
+      if (get_manager_device_uuid(i, uuid, UUID_BUFFER_SIZE)) {
         strncpy(uuid, FAKE_GPU_UUID, UUID_BUFFER_SIZE - 1);
         uuid[UUID_BUFFER_SIZE - 1] = '\0';
+      } else {
+        ret++;  // success
       }
+    }
+    // When the manager's environment variables are not successful (undefined),
+    // fallback to using Nvidia's environment variables to identify the GPU UUID list
+    if (!ret) {
+      memset(uuids, 0, sizeof(uuids));
+      ret = get_nvidia_device_uuids(uuids, sizeof(uuids));
     }
   }
 
@@ -2088,8 +2106,8 @@ int load_controller_configuration() {
   }
 
   if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
-    LOGGER(VERBOSE, "register to remote manager: uid: %s", g_vgpu_config->pod_uid);
-    register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name);
+    LOGGER(VERBOSE, "register to remote manager: uid: %s, uuid: %s", g_vgpu_config->pod_uid, g_vgpu_config->reg_uuid);
+    register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name, g_vgpu_config->reg_uuid);
   }
   ret = 0;
   init_config_changed_pid = pid;

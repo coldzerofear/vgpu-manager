@@ -71,6 +71,7 @@ import (
 //  int compatibility_mode;
 //  int sm_watcher;
 //  int vmem_node;
+//  char reg_uuid[UUID_BUFFER_SIZE];
 //};
 //
 //int setting_to_disk(const char* filename, struct resource_data_t* data) {
@@ -130,6 +131,7 @@ type ResourceDataT struct {
 	CompatibilityMode int32
 	SMWatcher         int32
 	VMemoryNode       int32
+	RegisterUUID      [UuidBufferSize]byte
 }
 
 type ResourceData struct {
@@ -327,6 +329,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		CompatibilityMode: int32(compMode),
 		SMWatcher:         int32(smWatcher),
 		VMemoryNode:       int32(vMemoryNode),
+		RegisterUUID:      convert48Bytes(""),
 	}
 	return data
 }
@@ -393,6 +396,10 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		containerName := C.CString(containerClaim.Name)
 		defer C.free(unsafe.Pointer(containerName))
 		C.strcpy(&vgpuConfig.container_name[0], (*C.char)(unsafe.Pointer(containerName)))
+
+		registerUuid := C.CString("")
+		defer C.free(unsafe.Pointer(registerUuid))
+		C.strcpy(&vgpuConfig.reg_uuid[0], (*C.char)(unsafe.Pointer(registerUuid)))
 
 		computePolicy := GetDefaultComputePolicy(pod, node)
 

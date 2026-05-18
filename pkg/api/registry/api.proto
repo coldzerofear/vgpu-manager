@@ -11,6 +11,7 @@ service VDeviceRegistry {
 message ContainerDeviceRequest {
   string pod_uid        = 1;
   string container_name = 2;
+  string register_uuid  = 3;
 }
 
 message ContainerDeviceResponse {}

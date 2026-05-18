@@ -14,6 +14,8 @@ type Flags struct {
 
 	//Namespace                     string
 	//ImageName                     string
+	HttpEndpoint                  string
+	MetricsPath                   string
 	NodeName                      string
 	CdiRoot                       string
 	ContainerDriverRoot           string
@@ -25,6 +27,7 @@ type Flags struct {
 	KlogVerbosity                 int
 	AdditionalXidsToIgnore        string
 	HostManagerDir                string
+	CGroupDriver                  string
 }
 
 type Config struct {

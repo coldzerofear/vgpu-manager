@@ -10,15 +10,16 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get","list","watch","create","update","delete"]
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get","list","watch"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resourceNames: [{{ .Values.scheduler.schedulerName | default "vgpu-scheduler" | quote }}]
+    resources: ["leases"]
+    verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "vgpu-manager.scheduler" . }}:node-role
+  name: {{ include "vgpu-manager.scheduler" . }}:role
   labels:
     app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
     {{- include "vgpu-manager.labels" . | nindent 4 }}
@@ -29,4 +30,26 @@ rules:
   - apiGroups: [""]
     resources: ["nodes/status"]
     verbs: ["patch","update"]
+{{- /* Here are some resources that scheduling plugins may use */}}
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["deviceclasses", "resourceclaims", "resourceslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["topology.node.k8s.io"]
+    resources: ["noderesourcetopologies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.x-k8s.io"]
+    resources: ["podgroups", "elasticquotas", "podgroups/status", "elasticquotas/status"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: [ "appgroup.diktyo.x-k8s.io" ]
+    resources: [ "appgroups" ]
+    verbs: [ "get", "list", "watch", "create", "delete", "update", "patch" ]
+  - apiGroups: [ "networktopology.diktyo.x-k8s.io" ]
+    resources: [ "networktopologies" ]
+    verbs: [ "get", "list", "watch", "create", "delete", "update", "patch" ]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["security-profiles-operator.x-k8s.io"]
+    resources: ["seccompprofiles", "profilebindings"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
 {{- end }}

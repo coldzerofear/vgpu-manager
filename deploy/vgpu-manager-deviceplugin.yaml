@@ -119,10 +119,9 @@ spec:
       priorityClassName: system-node-critical
       nodeSelector:
         vgpu-manager-enable: enable
-      serviceAccount: vgpu-manager-device-plugin
+      serviceAccountName: vgpu-manager-device-plugin
       terminationGracePeriodSeconds: 30
       restartPolicy: Always
-      hostNetwork: true
       hostPID: true
       initContainers:
         - name: install

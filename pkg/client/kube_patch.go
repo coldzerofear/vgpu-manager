@@ -21,20 +21,27 @@ type PatchMetadata struct {
 	Labels      map[string]*string `json:"labels,omitempty"`
 }
 
-func PatchPodMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod, patchMetadata PatchMetadata) error {
+func (p PatchMetadata) PatchType() k8stypes.PatchType {
+	return k8stypes.MergePatchType
+}
+
+func (p PatchMetadata) JSONBytes() ([]byte, error) {
 	type patchPod struct {
 		Metadata PatchMetadata `json:"metadata"`
 	}
-	p := patchPod{
-		Metadata: patchMetadata,
+	patch := patchPod{
+		Metadata: p,
 	}
+	return json.Marshal(patch)
+}
 
-	bytes, err := json.Marshal(p)
+func PatchPodMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod, patchMetadata PatchMetadata) error {
+	bytes, err := patchMetadata.JSONBytes()
 	if err != nil {
 		return err
 	}
 	rsPod, err := kubeClient.CoreV1().Pods(pod.Namespace).
-		Patch(context.Background(), pod.Name, k8stypes.MergePatchType, bytes, metav1.PatchOptions{})
+		Patch(context.Background(), pod.Name, patchMetadata.PatchType(), bytes, metav1.PatchOptions{})
 	if err == nil {
 		rsPod.DeepCopyInto(pod)
 	}
@@ -42,19 +49,12 @@ func PatchPodMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod, patchMet
 }
 
 func PatchNodeMetadata(kubeClient kubernetes.Interface, nodeName string, patchMetadata PatchMetadata) error {
-	type patchNode struct {
-		Metadata PatchMetadata `json:"metadata"`
-	}
-	p := patchNode{
-		Metadata: patchMetadata,
-	}
-
-	bytes, err := json.Marshal(p)
+	bytes, err := patchMetadata.JSONBytes()
 	if err != nil {
 		return err
 	}
 	_, err = kubeClient.CoreV1().Nodes().
-		Patch(context.Background(), nodeName, k8stypes.MergePatchType, bytes, metav1.PatchOptions{})
+		Patch(context.Background(), nodeName, patchMetadata.PatchType(), bytes, metav1.PatchOptions{})
 	return err
 }
 

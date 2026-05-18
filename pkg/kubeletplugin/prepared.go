@@ -48,13 +48,13 @@ type PreparedDevice struct {
 }
 
 type PreparedVGpuDevice struct {
-	Info   *VGpuDeviceInfo       `json:"info"`
-	Device *kubeletplugin.Device `json:"device"`
+	Info   *VGpuDeviceInfo     `json:"info"`
+	Device *CheckpointedDevice `json:"device"`
 }
 
 type PreparedGpuDevice struct {
-	Info   *GpuDeviceInfo        `json:"info"`
-	Device *kubeletplugin.Device `json:"device"`
+	Info   *GpuDeviceInfo      `json:"info"`
+	Device *CheckpointedDevice `json:"device"`
 }
 
 type PreparedMigDevice struct {
@@ -62,13 +62,13 @@ type PreparedMigDevice struct {
 	// Note that this is either created via the 'static MIG' flow or the
 	// 'dynamic MIG' flow -- in any case, it represents a MIG device that
 	// currently exists (incarnated, concrete).
-	Concrete *MigLiveTuple         `json:"concrete"`
-	Device   *kubeletplugin.Device `json:"device"`
+	Concrete *MigLiveTuple       `json:"concrete"`
+	Device   *CheckpointedDevice `json:"device"`
 }
 
 type PreparedVfioDevice struct {
-	Info   *VfioDeviceInfo       `json:"info"`
-	Device *kubeletplugin.Device `json:"device"`
+	Info   *VfioDeviceInfo     `json:"info"`
+	Device *CheckpointedDevice `json:"device"`
 }
 
 type PreparedDeviceGroup struct {
@@ -168,13 +168,13 @@ func (g *PreparedDeviceGroup) GetDevices() []kubeletplugin.Device {
 	for _, device := range g.Devices {
 		switch device.Type() {
 		case VGpuDeviceType:
-			devices = append(devices, *device.VGpu.Device)
+			devices = append(devices, kubeletplugin.Device(*device.VGpu.Device))
 		case GpuDeviceType:
-			devices = append(devices, *device.Gpu.Device)
+			devices = append(devices, kubeletplugin.Device(*device.Gpu.Device))
 		case PreparedMigDeviceType:
-			devices = append(devices, *device.Mig.Device)
+			devices = append(devices, kubeletplugin.Device(*device.Mig.Device))
 		case VfioDeviceType:
-			devices = append(devices, *device.Vfio.Device)
+			devices = append(devices, kubeletplugin.Device(*device.Vfio.Device))
 		}
 	}
 	return devices

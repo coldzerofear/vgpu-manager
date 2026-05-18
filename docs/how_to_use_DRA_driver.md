@@ -123,6 +123,10 @@ spec:
       name: vgpu
 ```
 
+## about NVMLDeviceHealthCheck
+
+If the kubelet plugin wants to enable `NVMLDeviceHealthCheck` and take effect, the Kubernetes version needs to be greater than or equal to 1.35 and the `DRADeviceTaints` feature door needs to be enabled
+
 ## about DRAExtendedResource
 
 DRAExtendedResource is the ability of DRA to extend resources, allowing Pods to use DRA like requesting extended resources from device plugins.
