@@ -7,7 +7,19 @@ FROM ${BASE_BUILD_IMAGE} AS builder
 
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /ld.so.preload
 
-FROM ghcr.io/nvidia/k8s-dra-driver-gpu:v25.12.0-dev-839e966a AS bash
+# FROM ghcr.io/nvidia/k8s-dra-driver-gpu:v25.12.0-dev-839e966a AS bash
+
+# Static bash binary, sourced from the Debian 'bash-static' package on
+# trixie. Replaces a from-source build that was flaky in CI (autoconf
+# availability, GNU mirror instability, cross-compile segfaults; see
+# issues/502 and issues/743) and dominated CI duration on the happy
+# path. Pinned by image digest for reproducibility; bash version follows
+# the trixie suite. Currently delivers bash 5.2.37, statically linked.
+FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b AS bash
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bash-static \
+ && rm -rf /var/lib/apt/lists/* \
+ && /bin/bash-static --version
 
 # Pull the nvidia-cdi-hook binary out of the relevant toolkit container
 # (arch: TARGETPLATFORM, set via --platform).
@@ -46,7 +58,8 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=builder /LICENSE /LICENSE
 # RUN mkdir -p /installed/registry
 
-COPY --from=bash       /bin/bash                                 /bin/bash
+# COPY --from=bash       /bin/bash                                 /bin/bash
+COPY --from=bash       /bin/bash-static                          /bin/bash
 COPY --from=toolkit    /artifacts/rpm/usr/bin/nvidia-cdi-hook    /usr/bin/nvidia-cdi-hook
 COPY --from=builder    /ld.so.preload                            /installed/ld.so.preload
 COPY --from=builder    /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so

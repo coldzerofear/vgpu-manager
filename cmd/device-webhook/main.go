@@ -152,44 +152,6 @@ func startCacheAsync(
 	return nil
 }
 
-func newMirrorIndexer(informer cache.Informer) (k8scache.Indexer, error) {
-	indexer := k8scache.NewIndexer(k8scache.MetaNamespaceKeyFunc, k8scache.Indexers{})
-	_, err := informer.AddEventHandler(k8scache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			if err := indexer.Add(obj); err != nil {
-				utilruntime.HandleErrorWithLogger(klog.Background(), err, "add object to mirror indexer")
-			}
-		},
-		UpdateFunc: func(_, newObj interface{}) {
-			if err := indexer.Update(newObj); err != nil {
-				utilruntime.HandleErrorWithLogger(klog.Background(), err, "update object in mirror indexer")
-			}
-		},
-		DeleteFunc: func(obj interface{}) {
-			key, err := k8scache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			if err != nil {
-				utilruntime.HandleErrorWithLogger(klog.Background(), err, "build delete key for mirror indexer")
-				return
-			}
-			storedObj, exists, err := indexer.GetByKey(key)
-			if err != nil {
-				utilruntime.HandleErrorWithLogger(klog.Background(), err, "get object from mirror indexer by key")
-				return
-			}
-			if !exists {
-				return
-			}
-			if err := indexer.Delete(storedObj); err != nil {
-				utilruntime.HandleErrorWithLogger(klog.Background(), err, "delete object from mirror indexer")
-			}
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	return indexer, nil
-}
-
 func main() {
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
@@ -329,19 +291,19 @@ func main() {
 		if err != nil {
 			klog.Fatalf("Get Pod informer failed: %v", err)
 		}
-		claimIndexer, err = newMirrorIndexer(claimInformer)
+		claimIndexer, _, err = util.NewMirrorIndexer(claimInformer)
 		if err != nil {
 			klog.Fatalf("Create ResourceClaim mirror indexer failed: %v", err)
 		}
-		templateIndexer, err = newMirrorIndexer(templateInformer)
+		templateIndexer, _, err = util.NewMirrorIndexer(templateInformer)
 		if err != nil {
 			klog.Fatalf("Create ResourceClaimTemplate mirror indexer failed: %v", err)
 		}
-		classIndexer, err = newMirrorIndexer(classInformer)
+		classIndexer, _, err = util.NewMirrorIndexer(classInformer)
 		if err != nil {
 			klog.Fatalf("Create DeviceClass mirror indexer failed: %v", err)
 		}
-		podIndexer, err = newMirrorIndexer(podInformer)
+		podIndexer, _, err = util.NewMirrorIndexer(podInformer)
 		if err != nil {
 			klog.Fatalf("Create Pod mirror indexer failed: %v", err)
 		}

@@ -74,8 +74,10 @@ type MigLiveTuple struct {
 	MigUUID     string   `json:"migUUID"`
 
 	// Not orthogonal to `ParentMinor`, but convenient for consumers.
-	ParentUUID     string   `json:"parentUUID"`
-	ParentPCIBusID PCIBusID `json:"parentPCIBusID"`
+	ParentUUID string `json:"parentUUID"`
+	// `omitempty`: postdates 25.12.0; emitting "parentPCIBusID":"" would
+	// trip CorruptCheckpointError on upgrade. See issue 1080.
+	ParentPCIBusID PCIBusID `json:"parentPCIBusID,omitempty"`
 }
 
 // MigSpec is similar to `MigSpecTuple` as it also fundamentally encodes the

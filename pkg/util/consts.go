@@ -157,8 +157,9 @@ const (
 	// ManagerVisibleDevices List of GPU UUIDs visible to container
 	ManagerVisibleDevices = "MANAGER_VISIBLE_DEVICES"
 	// ManagerCompatibilityMode Indicate the compatibility mode of the environment
-	ManagerCompatibilityMode = "MANAGER_COMPATIBILITY_MODE"
-	ExternalSmWatcherEnabled = "EXTERNAL_SM_WATCHER_ENABLED"
+	ManagerCompatibilityMode  = "MANAGER_COMPATIBILITY_MODE"
+	ExternalSmWatcherEnabled  = "EXTERNAL_SM_WATCHER_ENABLED"
+	ManagerClientRegisterUuid = "MANAGER_CLIENT_REGISTER_UUID"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"

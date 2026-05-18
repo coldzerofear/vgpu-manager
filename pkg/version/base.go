@@ -1,5 +1,7 @@
 package version
 
+import _ "unsafe"
+
 // Base version information.
 //
 // This is the fallback data used when version information from git is not
@@ -22,5 +24,8 @@ var (
 	gitTreeState string = "Not a git tree"
 	// build date in ISO8601 format, output of $(date -u +'%Y-%m-%dT%H:%M:%SZ')
 	buildDate string = "1970-01-01T00:00:00Z"
+	//go:linkname NvVersion sigs.k8s.io/dra-driver-nvidia-gpu/internal/info.version
 	NvVersion string
+	//go:linkname NvGitCommit sigs.k8s.io/dra-driver-nvidia-gpu/internal/info.gitCommit
+	NvGitCommit = gitCommit
 )

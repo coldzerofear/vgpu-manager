@@ -11,12 +11,12 @@
 #define RPC_SOCKET_FILE_NAME "socket.sock"
 #define RPC_ADDRESS (VGPU_MANAGER_PATH "/registry/" RPC_SOCKET_FILE_NAME)
 
-void register_to_remote_with_data(const char* pod_uid, const char* container) {
+void register_to_remote_with_data(const char* pod_uid, const char* container, const char* reg_uuid) {
   int ret = -1, wstatus = 0, wret = 0;
   pid_t child_pid = fork();
   if (child_pid == 0) {
-    ret = execl(RPC_CLIENT_FILE_PATH, RPC_CLIENT_FILE_NAME, "--address", RPC_ADDRESS,
-                "--pod-uid", pod_uid, "--container-name", container, (char*)NULL);
+    ret = execl(RPC_CLIENT_FILE_PATH, RPC_CLIENT_FILE_NAME, "--address", RPC_ADDRESS, "--pod-uid",
+                pod_uid, "--container-name", container, "--register-uuid", reg_uuid, (char*)NULL);
     if (unlikely(ret == -1)) {
       LOGGER(FATAL, "can't register to manager, error %s", strerror(errno));
     }

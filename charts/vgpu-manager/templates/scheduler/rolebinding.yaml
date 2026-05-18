@@ -50,7 +50,7 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "vgpu-manager.scheduler" . }}-as-node-role
+  name: {{ include "vgpu-manager.scheduler" . }}-as-role
   labels:
     app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
     {{- include "vgpu-manager.labels" . | nindent 4 }}
@@ -60,7 +60,7 @@ subjects:
     namespace: {{ .Release.Namespace | quote }}
 roleRef:
   kind: ClusterRole
-  name: {{ include "vgpu-manager.scheduler" . }}:node-role
+  name: {{ include "vgpu-manager.scheduler" . }}:role
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: rbac.authorization.k8s.io/v1

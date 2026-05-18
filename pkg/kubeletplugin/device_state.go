@@ -17,9 +17,13 @@
 package kubeletplugin
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,13 +34,16 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/bootid"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/pmezard/go-difflib/difflib"
 	"github.com/sirupsen/logrus"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
+	cperrors "k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
+	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
@@ -126,12 +133,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 	var fullGPUuuids []string
 	for _, devices := range perGPUAllocatable.allocatablesMap {
-		devices.GpuUUIDs()
-		for _, dev := range devices {
-			if dev.Gpu != nil {
-				fullGPUuuids = append(fullGPUuuids, dev.Gpu.UUID)
-			}
-		}
+		fullGPUuuids = append(fullGPUuuids, devices.GpuUUIDs()...)
 	}
 	klog.V(2).Infof("Warming up CDI device spec cache for GPUs %v", fullGPUuuids)
 	cdi.WarmupDevSpecCache(fullGPUuuids)
@@ -144,7 +146,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	)
 
 	if featuregates.Enabled(featuregates.VGPUSupport) {
-		vgpuManager = NewVGPUManager(nvdevlib, config.Flags.HostManagerDir)
+		vgpuManager = NewVGPUManager(nvdevlib, config.Flags.HostManagerDir, config.ClientSets)
 	}
 
 	if featuregates.Enabled(featuregates.TimeSlicingSettings) {
@@ -211,10 +213,10 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 				if err != nil {
 					return nil, fmt.Errorf("unable to update checkpoint: %w", err)
 				}
-				//syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
+				syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
 				return state, nil
 			} else if storedBootID == currentBootID {
-				//syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
+				syncPreparedDevicesGaugeFromCheckpoint(config.Flags.NodeName, cp)
 				return state, nil
 			} else {
 				klog.Infof("Invalidating checkpoint: checkpoint nodeBootID %q != current %q", storedBootID, currentBootID)
@@ -468,7 +470,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 			return fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", claimRef.String(), err)
 		}
 	case ClaimCheckpointStatePrepareCompleted:
-		if err := s.unprepareDevices(ctx, claimUID, pc.PreparedDevices); err != nil {
+		if err := s.unprepareDevices(ctx, claimRef, pc.PreparedDevices); err != nil {
 			return fmt.Errorf("unprepare devices failed for claim %s: %w", claimRef.String(), err)
 		}
 	default:
@@ -597,7 +599,7 @@ func (s *DeviceState) createCheckpoint(ctx context.Context, cp *Checkpoint) erro
 	if err != nil {
 		return err
 	}
-	//syncPreparedDevicesGaugeFromCheckpoint(s.config.flags.nodeName, cp)
+	syncPreparedDevicesGaugeFromCheckpoint(s.config.Flags.NodeName, cp)
 	return err
 }
 
@@ -612,11 +614,45 @@ func (s *DeviceState) getCheckpoint(ctx context.Context) (*Checkpoint, error) {
 
 	checkpoint := &Checkpoint{}
 	if err := s.checkpointManager.GetCheckpoint(DriverPluginCheckpointFileBasename, checkpoint); err != nil {
+		if errors.Is(err, cperrors.CorruptCheckpointError{}) {
+			logCheckpointDiff(s.config.DriverPluginPath(), checkpoint)
+		}
 		return nil, err
 	}
 
 	klog.V(7).Info("checkpoint read")
 	return checkpoint.ToLatestVersion(), nil
+}
+
+// logCheckpointDiff is invoked when GetCheckpoint returns
+// CorruptCheckpointError: the on-disk JSON deserialized cleanly but the
+// checksum recomputed at verification time disagrees with the one encoded in
+// the file. The typical cause is a backward-incompatible field addition
+// somewhere in the checkpoint type graph (see issue 1080). Emit a unified diff
+// between the on-disk bytes and what the current binary would re-marshal, so an
+// operator can spot the offending fields immediately.
+func logCheckpointDiff(driverPluginPath string, deserialized *Checkpoint) {
+	ondisk, rerr := os.ReadFile(filepath.Join(driverPluginPath, DriverPluginCheckpointFileBasename))
+	remarshaled, merr := json.Marshal(deserialized)
+	if rerr != nil || merr != nil {
+		klog.Errorf("checkpoint failed checksum verification; diagnostic dump unavailable (readErr=%v, marshalErr=%v)", rerr, merr)
+		return
+	}
+	var a, b bytes.Buffer
+	_ = json.Indent(&a, ondisk, "", "  ")
+	_ = json.Indent(&b, remarshaled, "", "  ")
+	diff, derr := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
+		A:        strings.SplitAfter(a.String(), "\n"),
+		B:        strings.SplitAfter(b.String(), "\n"),
+		FromFile: "on-disk",
+		ToFile:   "re-marshaled",
+		Context:  3,
+	})
+	if derr != nil {
+		klog.Errorf("checkpoint failed checksum verification; diff computation failed: %v. on-disk: %s. re-marshaled: %s", derr, ondisk, remarshaled)
+		return
+	}
+	klog.Errorf("checkpoint failed checksum verification; unified diff (on-disk vs re-marshaled by current binary):\n%s", diff)
 }
 
 // Read checkpoint from store, perform mutation, and write checkpoint back. Any
@@ -651,6 +687,7 @@ func (s *DeviceState) updateCheckpoint(ctx context.Context, mutate func(*Checkpo
 		return fmt.Errorf("unable to create checkpoint: %w", err)
 	}
 	klog.V(6).Infof("t_checkpoint_update_total %.3f s", time.Since(tucp0).Seconds())
+	syncPreparedDevicesGaugeFromCheckpoint(s.config.Flags.NodeName, cp)
 	return nil
 }
 
@@ -826,7 +863,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				cdiDevices = append(cdiDevices, d)
 			}
 
-			device := &kubeletplugin.Device{
+			device := &CheckpointedDevice{
 				Requests:     []string{result.Request},
 				PoolName:     result.Pool,
 				DeviceName:   result.Device,
@@ -834,13 +871,33 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				ShareID:      result.ShareID,
 			}
 
-			preparedDevice := PreparedDevice{Request: result.Request, CDIDeviceID: cdiDeviceID}
+			// KEP-5304: Add device metadata to the prepared devices.
+			if featuregates.Enabled(featuregates.DeviceMetadata) {
+				if allocatableDevice.Type() == VfioDeviceType {
+					attrs := make(map[string]resourceapi.DeviceAttribute)
+					for k, v := range allocatableDevice.Vfio.GetDevice().Attributes {
+						attrs[string(k)] = v
+					}
+					device.Metadata = &kubeletplugin.DeviceMetadata{
+						Attributes: attrs,
+					}
+				}
+			}
+
+			preparedDevice := PreparedDevice{
+				Request:     result.Request,
+				CDIDeviceID: cdiDeviceID,
+			}
 
 			switch allocatableDevice.Type() {
 			case VGpuDeviceType:
 				preparedDevice.containerEdits = s.vgpuManager.GetAllocationEnvContainerEdits(claim, result, allocatableDevice)
 				if !partitionMountEditsApplied[partitionKey] {
-					preparedDevice.containerEdits = mergeContainerEdits(preparedDevice.containerEdits, s.vgpuManager.GetPartitionMountContainerEdits(claim, partitionKey))
+					edits, err := s.vgpuManager.GetPartitionMountContainerEdits(claim, partitionKey)
+					if err != nil {
+						return nil, fmt.Errorf("error getting vgpu partition container edits: %w", err)
+					}
+					preparedDevice.containerEdits = mergeContainerEdits(preparedDevice.containerEdits, edits)
 					partitionMountEditsApplied[partitionKey] = true
 				}
 				preparedDevice.VGpu = &PreparedVGpuDevice{
@@ -957,8 +1014,9 @@ func mergeContainerEdits(base *cdiapi.ContainerEdits, extra *cdiapi.ContainerEdi
 	return base.Append(extra)
 }
 
-func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, devices PreparedDevices) error {
-	klog.V(6).Infof("Unpreparing claim '%s', previously prepared devices from checkpoint: %v", claimUID, devices.GetDeviceNames())
+func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplugin.NamespacedObject, devices PreparedDevices) error {
+	klog.V(6).Infof("Unpreparing claim '%s', previously prepared devices from checkpoint: %v", claimRef.UID, devices.GetDeviceNames())
+	var vGpuDevices PreparedDeviceList
 	for _, group := range devices {
 		// Unconfigure the vfio-pci devices.
 		if featuregates.Enabled(featuregates.PassthroughSupport) {
@@ -973,12 +1031,13 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 			switch device.Type() {
 			case VGpuDeviceType:
 				klog.V(4).Infof("Unprepare: vGPU: clean up temporary files for vGPU (GPU %s)", device.VGpu.Info.String())
+				vGpuDevices = append(vGpuDevices, device)
 			case GpuDeviceType:
 				klog.V(4).Infof("Unprepare: regular GPU: noop (GPU %s)", device.Gpu.Info.String())
 			case PreparedMigDeviceType:
 				if featuregates.Enabled(featuregates.DynamicMIG) {
 					mig := device.Mig.Concrete
-					klog.V(4).Infof("Unprepare: tear down MIG device '%s' for claim '%s'", mig.MigUUID, claimUID)
+					klog.V(4).Infof("Unprepare: tear down MIG device '%s' for claim '%s'", mig.MigUUID, claimRef.UID)
 					// Errors during MIG device deletion are generally rare but
 					// have to be expected, and should fail the
 					// NodeUnprepareResources() operation. This may for example
@@ -997,14 +1056,6 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 			}
 		}
 
-		// Clean up configuration files
-		if featuregates.Enabled(featuregates.VGPUSupport) {
-			err := s.vgpuManager.Unprepare(claimUID, group.Devices.VGpus())
-			if err != nil {
-				return fmt.Errorf("error cleanup hami devices: %w", err)
-			}
-		}
-
 		// Stop any MPS control daemons started for each group of prepared devices.
 		//if featuregates.Enabled(featuregates.MPSSupport) {
 		//	mpsControlDaemon := s.mpsManager.NewMpsControlDaemon(claimUID, group)
@@ -1020,8 +1071,17 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 				return fmt.Errorf("error setting timeslice for devices: %w", err)
 			}
 		}
-
 	}
+
+	// Clean up configuration files
+	if featuregates.Enabled(featuregates.VGPUSupport) {
+		if len(vGpuDevices) > 0 {
+			if err := s.vgpuManager.Unprepare(claimRef, vGpuDevices); err != nil {
+				return fmt.Errorf("error cleanup vgpu devices: %w", err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -1352,6 +1412,37 @@ func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpec
 	}
 
 	return nil
+}
+
+func syncPreparedDevicesGaugeFromCheckpoint(nodeName string, cp *Checkpoint) {
+	counts := make(map[string]int) // map of device type to count of devices of that type
+	if cp == nil {
+		return
+	}
+	lv := cp.ToLatestVersion()
+	if lv != nil && lv.V2 != nil {
+		for _, pc := range lv.V2.PreparedClaims {
+			if pc.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+				continue
+			}
+			for _, g := range pc.PreparedDevices {
+				for _, dev := range g.Devices {
+					if _, ok := counts[dev.Type()]; !ok {
+						counts[dev.Type()] = 0
+					}
+					counts[dev.Type()]++
+				}
+			}
+		}
+	}
+
+	for _, dt := range []string{VGpuDeviceType, GpuDeviceType, PreparedMigDeviceType, VfioDeviceType, UnknownDeviceType} {
+		if count, ok := counts[dt]; !ok {
+			drametrics.SetPreparedDevicesCounts(nodeName, util.DRADriverName, dt, 0)
+		} else {
+			drametrics.SetPreparedDevicesCounts(nodeName, util.DRADriverName, dt, count)
+		}
+	}
 }
 
 // AddDeviceTaint adds or updates a DRA device taint on the given device under

@@ -26,16 +26,27 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
+	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/informers"
 	coreclientset "k8s.io/client-go/kubernetes"
+	kcache "k8s.io/client-go/tools/cache"
+	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
@@ -61,6 +72,7 @@ type driver struct {
 	pulock              *flock.Flock
 	healthcheck         *healthcheck
 	deviceHealthMonitor deviceHealthMonitor
+	deviceRegistry      *registry.DeviceRegistryServerImpl
 	wg                  sync.WaitGroup
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
@@ -137,7 +149,12 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.RegistrarDirectoryPath(config.KubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
 	}
-
+	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
+	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
+	if featuregates.Enabled(featuregates.DeviceMetadata) {
+		opts = append(opts, kubeletplugin.EnableDeviceMetadata(true))
+		opts = append(opts, kubeletplugin.MetadataVersions(drametadatav1alpha1.SchemeGroupVersion))
+	}
 	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
 		return nil, err
@@ -150,6 +167,29 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.healthcheck = healthcheck
 
+	healthDeviceMap := make(map[string]*manager.GPUDevice)
+	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
+		driver.wg.Go(func() {
+			klog.V(4).Info("Starting to extended shared SM utilization watcher")
+			for _, device := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
+				gpuInfo := device.VGpu.GpuDeviceInfo.GpuInfo
+				numaNode, _ := gpuInfo.GetNumaNode()
+				paths, _ := gpuInfo.GetPaths()
+				gpuDevice := &manager.GPUDevice{
+					GpuInfo:  gpuInfo,
+					NumaNode: int(numaNode),
+					Paths:    paths,
+					Healthy:  true,
+					Links:    map[int][]links.P2PLinkType{},
+				}
+				healthDeviceMap[device.CanonicalName()] = gpuDevice
+			}
+			filePath := filepath.Join(manager.WatcherDir, manager.SMUtilFile)
+			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, healthDeviceMap, filePath)
+			klog.V(4).Info("stopping extended shared SM utilization watcher")
+		})
+	}
+
 	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
 		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
 		if err != nil {
@@ -161,30 +201,15 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		driver.deviceHealthMonitor = deviceHealthMonitor
 
 		driver.wg.Go(func() {
-			driver.deviceHealthEvents(ctx, config.Flags.NodeName)
+			driver.deviceHealthEvents(ctx, config.Flags.NodeName, healthDeviceMap)
 		})
 	}
 
-	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
-		driver.wg.Go(func() {
-			klog.V(4).Info("Starting to extended shared SM utilization watcher")
-			gpuDeviceMap := make(map[string]*manager.GPUDevice)
-			for _, vgpuDevice := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
-				gpuInfo := vgpuDevice.VGpu.GpuDeviceInfo.GpuInfo
-				numaNode, _ := gpuInfo.GetNumaNode()
-				paths, _ := gpuInfo.GetPaths()
-				gpuDeviceMap[gpuInfo.UUID] = &manager.GPUDevice{
-					GpuInfo:  gpuInfo,
-					NumaNode: int(numaNode),
-					Paths:    paths,
-					Healthy:  true,
-					Links:    map[int][]links.P2PLinkType{},
-				}
-			}
-			filePath := filepath.Join(manager.WatcherDir, manager.SMUtilFile)
-			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, gpuDeviceMap, filePath)
-			klog.V(4).Info("stopping extended shared SM utilization watcher")
-		})
+	if featuregates.Enabled(featuregates.DevicePluginClientMode) {
+		cgroup.MustInitCGroupDriver(config.Flags.CGroupDriver)
+		if err := driver.startClientRegistry(ctx, config, state); err != nil {
+			return nil, fmt.Errorf("start client-register registry: %w", err)
+		}
 	}
 
 	// Pass `nodeUnprepareResource` function to the cleanup manager.
@@ -343,6 +368,10 @@ func (d *driver) Shutdown() error {
 		d.deviceHealthMonitor.Stop()
 	}
 
+	if d.deviceRegistry != nil {
+		d.deviceRegistry.Stop()
+	}
+
 	d.wg.Wait()
 
 	if err := d.state.checkpointCleanupManager.Stop(); err != nil {
@@ -390,19 +419,23 @@ func (d *driver) HandleError(ctx context.Context, err error, msg string) {
 }
 
 func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
+	t0 := time.Now()
 	// Instead of a global prepare/unprepare (PU) lock, we could rely on
 	// fine-grained checkpoint locking, which was proven to work correctly in
 	// case of DynamicMIG mode. However, out of caution, retain this global PU
 	// lock for now in all modes (re-evaluate the performance impact at a later
 	// time).
-	t0 := time.Now()
+
 	release, err := d.pulock.Acquire(ctx, flock.WithTimeout(10*time.Second))
 	if err != nil {
+		drametrics.IncNodePrepareError(util.DRADriverName, "lock_acquire")
 		return kubeletplugin.PrepareResult{
 			Err: fmt.Errorf("error acquiring prep/unprep lock: %w", err),
 		}
 	}
 	defer release()
+	doneInFlight := drametrics.TrackInFlight(util.DRADriverName, "prepare")
+	defer doneInFlight()
 	klog.V(6).Infof("t_prep_lock_acq %.3f s", time.Since(t0).Seconds())
 
 	cs := ResourceClaimToString(claim)
@@ -411,6 +444,7 @@ func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.Res
 	klog.V(6).Infof("t_prep %.3f s (claim %s)", time.Since(tprep0).Seconds(), cs)
 
 	if err != nil {
+		drametrics.IncNodePrepareError(util.DRADriverName, "prepare_devices")
 		return kubeletplugin.PrepareResult{
 			Err: fmt.Errorf("error preparing devices for claim %s: %w", cs, err),
 		}
@@ -419,6 +453,7 @@ func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.Res
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		// Re-advertise updated resourceslice after preparing devices.
 		if err = d.publishResources(ctx, d.state.config); err != nil {
+			drametrics.IncNodePrepareError(util.DRADriverName, "publish_resources")
 			return kubeletplugin.PrepareResult{
 				Err: fmt.Errorf("error preparing devices for claim %v: %w", claim.UID, err),
 			}
@@ -426,6 +461,7 @@ func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.Res
 	}
 
 	klog.Infof("Returning newly prepared devices for claim '%s': %v", cs, devs)
+	drametrics.ObserveRequest(util.DRADriverName, "prepare", time.Since(t0))
 	return kubeletplugin.PrepareResult{Devices: devs}
 }
 
@@ -434,9 +470,12 @@ func (d *driver) nodeUnprepareResource(ctx context.Context, claimRef kubeletplug
 
 	release, err := d.pulock.Acquire(ctx, flock.WithTimeout(10*time.Second))
 	if err != nil {
+		drametrics.IncNodeUnprepareError(util.DRADriverName, "lock_acquire")
 		return fmt.Errorf("error acquiring prep/unprep lock: %w", err)
 	}
 	defer release()
+	doneInFlight := drametrics.TrackInFlight(util.DRADriverName, "unprepare")
+	defer doneInFlight()
 	klog.V(6).Infof("t_unprep_lock_acq %.3f s", time.Since(t0).Seconds())
 
 	cs := claimRef.String()
@@ -445,16 +484,19 @@ func (d *driver) nodeUnprepareResource(ctx context.Context, claimRef kubeletplug
 	klog.V(6).Infof("t_unprep %.3f s (claim %s)", time.Since(tunprep0).Seconds(), cs)
 
 	if err != nil {
+		drametrics.IncNodeUnprepareError(util.DRADriverName, "unprepare_devices")
 		return fmt.Errorf("error unpreparing devices for claim %v: %w", claimRef.String(), err)
 	}
 
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		// Re-advertise updated resourceslice after unpreparing devices.
 		if err = d.publishResources(ctx, d.state.config); err != nil {
+			drametrics.IncNodeUnprepareError(util.DRADriverName, "publish_resources")
 			return fmt.Errorf("error publishing resources: %w", err)
 		}
 	}
 
+	drametrics.ObserveRequest(util.DRADriverName, "unprepare", time.Since(t0))
 	return nil
 }
 
@@ -498,7 +540,16 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 	return nil
 }
 
-func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
+func isHealthy(taints []resourceapi.DeviceTaint) bool {
+	for _, taint := range taints {
+		if taint.Effect == resourceapi.DeviceTaintEffectNoSchedule {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string, healthDeviceMap map[string]*manager.GPUDevice) {
 	klog.V(4).Info("Starting to watch for device health notifications")
 	for {
 		select {
@@ -532,6 +583,9 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 					taints := dev.Taints()
 					if len(taints) > 0 {
 						d.Taints = taints
+					}
+					if device, ok := healthDeviceMap[dev.CanonicalName()]; ok {
+						device.Healthy = isHealthy(d.Taints)
 					}
 					resourceSlice.Devices = append(resourceSlice.Devices, d)
 				}
@@ -605,6 +659,87 @@ func getAPIServerVersion(client coreclientset.Interface) (*semver.Version, error
 	}
 
 	return semver, nil
+}
+
+// startClientRegistry wires up the on-host gRPC server that the in-container
+// vGPU library calls into to register itself. It owns the pod and claim
+// informers that feed the resolver: pods are scoped to the local node via the
+// API-server field selector; ResourceClaims are watched cluster-wide because
+// the type has no nodeName field — narrowing happens at the resolver level via
+// the per-claim register-uuid annotation index.
+func (d *driver) startClientRegistry(ctx context.Context, config *Config, state *DeviceState) error {
+	// Strip managedFields entries from cached objects — they're large and
+	// irrelevant to anything the resolver does.
+	factory := informers.NewSharedInformerFactoryWithOptions(
+		config.ClientSets.Core, 10*time.Hour,
+		informers.WithTransform(cache.TransformStripManagedFields()),
+	)
+
+	podInformer := factory.InformerFor(&corev1.Pod{}, func(k coreclientset.Interface, resync time.Duration) kcache.SharedIndexInformer {
+		lw := kcache.NewListWatchFromClient(
+			k.CoreV1().RESTClient(), "pods",
+			corev1.NamespaceAll,
+			fields.OneTermEqualSelector("spec.nodeName", config.Flags.NodeName),
+		)
+		return kcache.NewSharedIndexInformer(lw, &corev1.Pod{}, resync, kcache.Indexers{
+			kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc,
+			"metadata.uid": func(obj interface{}) ([]string, error) {
+				accessor, err := meta.Accessor(obj)
+				if err != nil {
+					return nil, fmt.Errorf("object has no meta: %w", err)
+				}
+				return []string{string(accessor.GetUID())}, nil
+			},
+		})
+	})
+
+	claimInformer := factory.InformerFor(&resourceapi.ResourceClaim{}, func(_ coreclientset.Interface, resync time.Duration) kcache.SharedIndexInformer {
+		// ResourceClaim has no spec.nodeName, so we don't apply a field
+		// selector; the resolver filters per-claim via the UUID index.
+		lw := kcache.NewListWatchFromClient(
+			config.ClientSets.Resource.RESTClient(), "resourceclaims",
+			corev1.NamespaceAll, fields.Everything(),
+		)
+		return kcache.NewSharedIndexInformer(lw, &resourceapi.ResourceClaim{}, resync, kcache.Indexers{
+			kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc,
+			ClaimUUIDIndex:        MakeClaimUUIDIndexFunc(util.DRADriverName),
+		})
+	})
+
+	factory.StartWithContext(ctx)
+
+	timeoutCtx, cancelFunc := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancelFunc()
+
+	for typ, ok := range factory.WaitForCacheSyncWithContext(timeoutCtx).Synced {
+		if !ok {
+			return fmt.Errorf("informer for %v did not sync before context closed", typ)
+		}
+	}
+	klog.V(5).InfoS("client-register informer caches synced")
+
+	podLister := client.NewPodLister(podInformer.GetIndexer())
+	resolver := NewClientRegisterResolver(
+		podLister,
+		claimInformer.GetIndexer(),
+		util.ManagerRootPath,
+		util.DRADriverName,
+		state.AllocatedVGPURequestsForClaim,
+	)
+
+	d.deviceRegistry = registry.NewDeviceRegistryServer(
+		util.ManagerRootPath,
+		resolver.PodByUID,
+		resolver.TargetByUUID,
+	)
+
+	d.wg.Go(func() {
+		klog.V(4).Info("Starting container device registry server")
+		if err := d.deviceRegistry.Start(); err != nil {
+			klog.ErrorS(err, "device registry server start failed")
+		}
+	})
+	return nil
 }
 
 // TODO: implement loop to remove CDI files from the CDI path for claimUIDs

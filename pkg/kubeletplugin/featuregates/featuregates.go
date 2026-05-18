@@ -18,18 +18,34 @@ package featuregates
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	_ "unsafe"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/component-base/featuregate"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	//"sigs.k8s.io/dra-driver-nvidia-gpu/internal/info"
 )
+
+// featureGateEmulationVersion is the version passed to component-base's versioned
+// feature gate. It must use Kubernetes-style versions (major.minor matching the
+// Kubernetes release line), not the driver SemVer from VERSION.
+//
+// k8s.io/component-base/logs registers gates such as ContextualLogging at v1.24+
+// / v1.30+. If emulation were driver v0.4, those specs compare as "newer than"
+// emulation and the gate falls through to PreAlpha, which makes SetFromMap panic.
+//
+// Driver-local gates below use 0.x Version fields, they remain visible because
+// 0.x < 1.y under apimachinery version ordering.
+//
+// Keep this major.minor aligned with the Kubernetes release we vendor in go.mod
+// (k8s.io/* modules) and bump it whenever those dependencies move to a new kube minor.
+//
+// TODO: optionally isolate driver-only gates in their own registry so emulation can
+// stay purely on driver SemVer without sharing a single version stream with component-base.
+var featureGateEmulationVersion = version.MajorMinor(1, 36)
 
 const (
 	// VGPUSupport allows vgpu-control to be mounted into containers for GPU device sharing
@@ -53,7 +69,13 @@ const (
 	// DynamicMIG Enable dynamic MIG device management.
 	DynamicMIG featuregate.Feature = "DynamicMIG"
 
+	// DeviceMetadata allows the kubelet plugin to generate device metadata files
+	// in the workloads for prepared devices.
+	DeviceMetadata featuregate.Feature = "DeviceMetadata"
+
 	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
+
+	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
 
 	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
 	// storing daemon info directly in ComputeDomainStatus.Nodes.
@@ -64,6 +86,12 @@ const (
 	//CrashOnNVLinkFabricErrors featuregate.Feature = "CrashOnNVLinkFabricErrors"
 )
 
+// Feature gate Version fields use driver SemVer major.minor.
+// Former calendar-based release lines map to SemVer minors for reference when
+// adding new VersionedSpecs or backport notes:
+//   ~25.3 -> 0.1, ~25.8 -> 0.2, ~25.12 -> 0.3, ~26.4 -> 0.4
+//
+
 // defaultFeatureGates contains the default settings for all project-specific feature gates.
 // These will be registered with the standard Kubernetes feature gate system.
 var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
@@ -71,70 +99,84 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		{
 			Default:    true,
 			PreRelease: featuregate.Alpha,
-			Version:    version.MajorMinor(25, 8),
+			Version:    version.MajorMinor(0, 3),
 		},
 	},
 	TimeSlicingSettings: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
-			Version:    version.MajorMinor(25, 8),
+			Version:    version.MajorMinor(0, 2),
 		},
 	},
 	MPSSupport: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
-			Version:    version.MajorMinor(25, 8),
+			Version:    version.MajorMinor(0, 2),
 		},
 	},
 	IMEXDaemonsWithDNSNames: {
 		{
 			Default:    true,
 			PreRelease: featuregate.Beta,
-			Version:    version.MajorMinor(25, 8),
+			Version:    version.MajorMinor(0, 2),
 		},
 	},
 	PassthroughSupport: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
-			Version:    version.MajorMinor(25, 12),
+			Version:    version.MajorMinor(0, 3),
 		},
 	},
 	DynamicMIG: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
-			Version:    version.MajorMinor(25, 12),
+			Version:    version.MajorMinor(0, 3),
 		},
 	},
 	NVMLDeviceHealthCheck: {
 		{
 			Default:    true,
 			PreRelease: featuregate.Alpha,
-			Version:    version.MajorMinor(25, 12),
+			Version:    version.MajorMinor(0, 3),
 		},
 	},
 	SharedSMUtilizationWatcher: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
-			Version:    version.MajorMinor(25, 12),
+			Version:    version.MajorMinor(0, 3),
+		},
+	},
+	DevicePluginClientMode: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 4),
+		},
+	},
+	DeviceMetadata: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 4),
 		},
 	},
 	//ComputeDomainCliques: {
 	//	{
 	//		Default:    true,
 	//		PreRelease: featuregate.Beta,
-	//		Version:    version.MajorMinor(25, 12),
+	//		Version:    version.MajorMinor(0, 3),
 	//	},
 	//},
 	//CrashOnNVLinkFabricErrors: {
 	//	{
 	//		Default:    true,
 	//		PreRelease: featuregate.Beta,
-	//		Version:    version.MajorMinor(25, 12),
+	//		Version:    version.MajorMinor(0, 3),
 	//	},
 	//},
 }
@@ -151,17 +193,10 @@ var (
 func FeatureGates() featuregate.MutableVersionedFeatureGate {
 	if featureGates == nil {
 		featureGatesOnce.Do(func() {
-			featureGates = newFeatureGates(parseProjectVersion())
+			featureGates = newFeatureGates(featureGateEmulationVersion)
 		})
 	}
 	return featureGates
-}
-
-// parseProjectVersion parses the project version string and returns major.minor version.
-func parseProjectVersion() *version.Version {
-	versionStr := pkgversion.NvVersion
-	v := version.MustParse(strings.TrimPrefix(versionStr, "v"))
-	return version.MajorMinor(v.Major(), v.Minor())
 }
 
 // newFeatureGates instantiates a new set of feature gates with both standard Kubernetes
@@ -214,6 +249,9 @@ func ValidateFeatureGates() error {
 	if Enabled(SharedSMUtilizationWatcher) && !Enabled(VGPUSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", SharedSMUtilizationWatcher, VGPUSupport)
 	}
+	if Enabled(DevicePluginClientMode) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", DevicePluginClientMode, VGPUSupport)
+	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, PassthroughSupport)
@@ -229,6 +267,10 @@ func ValidateFeatureGates() error {
 
 	if Enabled(PassthroughSupport) && Enabled(NVMLDeviceHealthCheck) {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", PassthroughSupport, NVMLDeviceHealthCheck)
+	}
+
+	if Enabled(DeviceMetadata) && !Enabled(PassthroughSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", DeviceMetadata, PassthroughSupport)
 	}
 
 	return nil

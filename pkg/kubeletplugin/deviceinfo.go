@@ -45,13 +45,15 @@ type MigDeviceInfo struct {
 }
 
 type VfioDeviceInfo struct {
-	UUID                   string `json:"uuid"`
-	deviceID               string
-	vendorID               string
-	index                  int
-	parent                 *GpuDeviceInfo
-	productName            string
-	PciBusID               string `json:"pciBusID"`
+	UUID        string `json:"uuid"`
+	deviceID    string
+	vendorID    string
+	index       int
+	parent      *GpuDeviceInfo
+	productName string
+	// `omitempty`: postdates 25.12.0; emitting "pciBusID":"" would trip
+	// CorruptCheckpointError on upgrade. See issue 1080.
+	PciBusID               string `json:"pciBusID,omitempty"`
 	pciBusIDAttr           *deviceattribute.DeviceAttribute
 	pcieRootAttr           *deviceattribute.DeviceAttribute
 	numaNode               int
