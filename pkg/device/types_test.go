@@ -284,8 +284,10 @@ func Test_GetCurrentContainerDevice(t *testing.T) {
 func Test_ShouldCountPodDeviceAllocation(t *testing.T) {
 	// Anchor time-sensitive cases to wall clock; the function consults
 	// time.Since(predicateTime) for the stuck-vs-bind-window distinction, so
-	// tests must position predicateTime relative to "now".
-	now := time.Now()
+	// tests must position predicateTime relative to "now". Truncate to a whole
+	// second so adding sub-second offsets stays in a deterministic Unix-second
+	// bucket — the same-second-boundary case below depends on it.
+	now := time.Now().Truncate(time.Second)
 	// recent = inside StuckGracePeriod (treat as bind window)
 	// aged   = outside StuckGracePeriod (treat as stuck)
 	recent := now.Add(-1 * time.Second)

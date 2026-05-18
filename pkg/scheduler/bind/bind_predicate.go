@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/serial"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -20,6 +21,7 @@ import (
 type nodeBinding struct {
 	locker     *serial.Locker
 	kubeClient kubernetes.Interface
+	podLister  client.PodLister
 	recorder   record.EventRecorder
 }
 
@@ -27,7 +29,7 @@ const Name = "BindPredicate"
 
 var _ predicate.BindPredicate = &nodeBinding{}
 
-func New(client kubernetes.Interface, recorder record.EventRecorder, serialBindNode bool) (*nodeBinding, error) {
+func New(client kubernetes.Interface, recorder record.EventRecorder, podLister client.PodLister, serialBindNode bool) (*nodeBinding, error) {
 	minLockingDuration := 30 * time.Millisecond
 	locker := serial.NewLocker(serial.WithName(Name),
 		serial.WithEnabled(serialBindNode),
@@ -35,6 +37,7 @@ func New(client kubernetes.Interface, recorder record.EventRecorder, serialBindN
 	return &nodeBinding{
 		locker:     locker,
 		kubeClient: client,
+		podLister:  podLister,
 		recorder:   recorder,
 	}, nil
 }
@@ -53,7 +56,17 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 
 	klog.V(4).InfoS("BindingNode", "ExtenderBindingArgs", args)
 
-	pod, err := b.kubeClient.CoreV1().Pods(args.PodNamespace).Get(ctx, args.PodName, metav1.GetOptions{})
+	var (
+		pod *corev1.Pod
+		err error
+	)
+
+	defer func() {
+		if pod != nil && b.podLister != nil {
+			b.podLister.Mutation(pod)
+		}
+	}()
+	pod, err = b.kubeClient.CoreV1().Pods(args.PodNamespace).Get(ctx, args.PodName, metav1.GetOptions{})
 	if err != nil {
 		klog.ErrorS(err, "kubeClient get target pod failed", "targetPod",
 			fmt.Sprintf("%s/%s", args.PodNamespace, args.PodName))
@@ -64,16 +77,25 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 		klog.InfoS(msg, "pod", klog.KObj(pod), "current", pod.UID, "target", args.PodUID)
 		return &extenderv1.ExtenderBindingResult{Error: msg}
 	}
-	nodeName, ok := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
-	if ok && nodeName != args.Node {
-		err = fmt.Errorf("predicate node is different from the node to be bound")
-		klog.ErrorS(err, "", "pod", klog.KObj(pod))
-		b.recorder.Event(pod, corev1.EventTypeWarning, "BindingFailed", err.Error())
-		// patch failed metadata
-		if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
-			klog.ErrorS(patchErr, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
+	if util.IsVGPUResourcePod(pod) {
+		nodeName, _ := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
+		if nodeName != args.Node {
+			err = fmt.Errorf("predicate node and binding node do not match")
+			klog.ErrorS(err, "", "pod", klog.KObj(pod), "predicateNode", nodeName, "binding node", args.Node)
+			b.recorder.Event(pod, corev1.EventTypeWarning, "BindingFailed", err.Error())
+			// patch failed metadata
+			if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
+				klog.ErrorS(patchErr, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
+			}
+			return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 		}
-		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
+		// Check to prevent node overallocation
+		if !device.ShouldCountPodDeviceAllocation(pod) {
+			err = fmt.Errorf("device pre allocation failed, unable to bind to node <%s>", nodeName)
+			klog.ErrorS(err, "", "pod", klog.KObj(pod))
+			b.recorder.Event(pod, corev1.EventTypeWarning, "BindingFailed", err.Error())
+			return &extenderv1.ExtenderBindingResult{Error: err.Error()}
+		}
 	}
 
 	if err = client.PatchPodAllocationAllocating(b.kubeClient, pod); err != nil {

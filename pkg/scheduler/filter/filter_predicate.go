@@ -85,6 +85,10 @@ func (f *gpuFilter) Name() string {
 	return Name
 }
 
+func (f *gpuFilter) GetPodLister() client.PodLister {
+	return f.podLister
+}
+
 type filterFunc func(*corev1.Pod, []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error)
 
 func (f *gpuFilter) IsReady(ctx context.Context) bool {
@@ -313,6 +317,12 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		failedNodesMap = make(extenderv1.FailedNodesMap, len(nodes)) // Failed nodes
 		success        bool
 	)
+
+	if err := f.CheckDeviceRequest(pod); err != nil {
+		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
+		return filteredNodes, failedNodesMap, err
+	}
+
 	// Skip pods that have already been scheduled.
 	if nodeName, ok := IsScheduled(pod); ok {
 		if device.ShouldCountPodDeviceAllocation(pod) {
@@ -333,11 +343,6 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		}
 		// Pre-allocation is stale or stuck — re-trigger device pre-allocation.
 		klog.V(3).InfoS("Re-triggering device pre allocation for pod", "pod", klog.KObj(pod))
-	}
-
-	if err := f.CheckDeviceRequest(pod); err != nil {
-		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
-		return filteredNodes, failedNodesMap, err
 	}
 
 	f.locker.Lock()
@@ -362,13 +367,14 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		waitGroup.Add(1)
 		go func(startIndex, endIndex, count int) {
 			defer waitGroup.Done()
+
 			batchNodeInfos := make([]*device.NodeInfo, 0, count)
 			batchFailedNodes := make(map[string]string, count)
 			batchNodeOrigPosition := make(map[string]int, count)
 			for index := startIndex; index <= endIndex; index++ {
 				node := &nodes[index]
 				batchNodeOrigPosition[node.Name] = index
-				nodeInfo, err := device.NewNodeInfo(node, pods)
+				nodeInfo, err := device.NewNodeInfo(node, pods, pod.UID)
 				if err != nil {
 					klog.V(3).ErrorS(err, "new node info failed, skipping node", "node", node.Name)
 					batchFailedNodes[node.Name] = err.Error()

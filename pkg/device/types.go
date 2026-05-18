@@ -16,6 +16,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/klog/v2"
@@ -632,7 +633,7 @@ type NodeInfo struct {
 	numaTopology   bool
 }
 
-func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
+func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UID) (*NodeInfo, error) {
 	klog.V(4).Infof("new nodeInfo for %s", node.Name)
 	gatherInfo, err := NewNodeDeviceGatherInfo(node)
 	if err != nil {
@@ -648,7 +649,11 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 		numaTopology:   gatherInfo.EnabledNumaAffinity,
 	}
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
-		ret.addPodUsedResources(pod)
+		if !slices.ContainsFunc(excludedPods, func(uid types.UID) bool {
+			return pod.UID == uid
+		}) {
+			ret.addPodUsedResources(pod)
+		}
 	})
 	ret.ResetResourceUsage()
 	return ret, nil
