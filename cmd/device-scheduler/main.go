@@ -96,14 +96,13 @@ func main() {
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
-
-	bindPlugin, err := bind.New(kubeClient, recorder, opt.FeatureGate.Enabled(options.SerialBindNode))
-	if err != nil {
-		klog.Fatalf("Initialization of scheduler BindPlugin failed: %v", err)
-	}
 	filterPlugin, err := filter.New(kubeClient, factory, recorder, opt.FeatureGate.Enabled(options.SerialFilterNode))
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler FilterPlugin failed: %v", err)
+	}
+	bindPlugin, err := bind.New(kubeClient, recorder, filterPlugin.GetPodLister(), opt.FeatureGate.Enabled(options.SerialBindNode))
+	if err != nil {
+		klog.Fatalf("Initialization of scheduler BindPlugin failed: %v", err)
 	}
 
 	handler := httprouter.New()

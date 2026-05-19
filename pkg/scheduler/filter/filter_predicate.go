@@ -85,6 +85,10 @@ func (f *gpuFilter) Name() string {
 	return Name
 }
 
+func (f *gpuFilter) GetPodLister() client.PodLister {
+	return f.podLister
+}
+
 type filterFunc func(*corev1.Pod, []corev1.Node) ([]corev1.Node, extenderv1.FailedNodesMap, error)
 
 func (f *gpuFilter) IsReady(ctx context.Context) bool {
@@ -313,10 +317,16 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		failedNodesMap = make(extenderv1.FailedNodesMap, len(nodes)) // Failed nodes
 		success        bool
 	)
+
+	if err := f.CheckDeviceRequest(pod); err != nil {
+		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
+		return filteredNodes, failedNodesMap, err
+	}
+
 	// Skip pods that have already been scheduled.
 	if nodeName, ok := IsScheduled(pod); ok {
-		// Allow device filtering and repair scheduling status to be triggered again when the pod is in an unschedulable state
-		if !device.PodStatusUnschedulable(pod) {
+		if device.ShouldCountPodDeviceAllocation(pod) {
+			// Pre-allocation is current; steer the pod back to its predicated node.
 			foundNode := false
 			for i, node := range nodes {
 				if !foundNode && node.Name == nodeName {
@@ -324,20 +334,15 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 					foundNode = true
 					continue
 				}
-				failedNodesMap[node.Name] = fmt.Sprintf("pod has been scheduled to node %s", node.Name)
+				failedNodesMap[node.Name] = fmt.Sprintf("pod has been scheduled to node %s", nodeName)
 			}
 			if foundNode {
 				return filteredNodes, failedNodesMap, nil
 			}
-
 			return nil, nil, fmt.Errorf("pod %s had been predicated", pod.UID)
 		}
-		klog.V(3).InfoS("Pod scheduled condition is unschedulable, Re trigger device pre allocation", "pod", klog.KObj(pod))
-	}
-
-	if err := f.CheckDeviceRequest(pod); err != nil {
-		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
-		return filteredNodes, failedNodesMap, err
+		// Pre-allocation is stale or stuck — re-trigger device pre-allocation.
+		klog.V(3).InfoS("Re-triggering device pre allocation for pod", "pod", klog.KObj(pod))
 	}
 
 	f.locker.Lock()
@@ -362,13 +367,14 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		waitGroup.Add(1)
 		go func(startIndex, endIndex, count int) {
 			defer waitGroup.Done()
+
 			batchNodeInfos := make([]*device.NodeInfo, 0, count)
 			batchFailedNodes := make(map[string]string, count)
 			batchNodeOrigPosition := make(map[string]int, count)
 			for index := startIndex; index <= endIndex; index++ {
 				node := &nodes[index]
 				batchNodeOrigPosition[node.Name] = index
-				nodeInfo, err := device.NewNodeInfo(node, pods)
+				nodeInfo, err := device.NewNodeInfo(node, pods, pod.UID)
 				if err != nil {
 					klog.V(3).ErrorS(err, "new node info failed, skipping node", "node", node.Name)
 					batchFailedNodes[node.Name] = err.Error()

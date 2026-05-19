@@ -25,7 +25,7 @@ func Test_BindPredicate(t *testing.T) {
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
 	defer broadcaster.Shutdown()
 
-	bindPredicate, err := New(k8sClient, recorder, true)
+	bindPredicate, err := New(k8sClient, recorder, nil, true)
 	if err != nil {
 		t.Fatalf("failed to create new bindPredicate due to %v", err)
 	}
@@ -43,7 +43,9 @@ func Test_BindPredicate(t *testing.T) {
 					Name:      "test1",
 					Namespace: "default",
 					UID:       poduid,
-					//Annotations: testCase.annotations,
+					Annotations: map[string]string{
+						util.PodPredicateNodeAnnotation: "node1",
+					},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
@@ -113,11 +115,49 @@ func Test_BindPredicate(t *testing.T) {
 				Node:         "node2",
 			},
 			result: &extenderv1.ExtenderBindingResult{
-				Error: "predicate node is different from the node to be bound",
+				Error: "predicate node and binding node do not match",
 			},
 		},
 		{
-			name: "example4: binding success",
+			name: "example4: devices pre allocation failure",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test3",
+					Namespace: "default",
+					UID:       poduid,
+					Annotations: map[string]string{
+						util.PodPredicateNodeAnnotation: "node1",
+					},
+					Labels: map[string]string{
+						util.PodAssignedPhaseLabel: string(util.AssignPhaseFailed),
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: "cont1",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprintf("%d", 1)),
+							},
+						},
+					}},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+				},
+			},
+			args: extenderv1.ExtenderBindingArgs{
+				PodName:      "test3",
+				PodNamespace: "default",
+				PodUID:       poduid,
+				Node:         "node1",
+			},
+			result: &extenderv1.ExtenderBindingResult{
+				Error: fmt.Sprintf("device pre allocation failed, unable to bind to node <%s>", "node1"),
+			},
+		},
+		{
+			name: "example5: binding success",
 			pod:  nil,
 			args: extenderv1.ExtenderBindingArgs{
 				PodName:      "test1",

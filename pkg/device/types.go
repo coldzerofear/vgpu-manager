@@ -16,6 +16,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/klog/v2"
@@ -632,7 +633,7 @@ type NodeInfo struct {
 	numaTopology   bool
 }
 
-func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
+func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UID) (*NodeInfo, error) {
 	klog.V(4).Infof("new nodeInfo for %s", node.Name)
 	gatherInfo, err := NewNodeDeviceGatherInfo(node)
 	if err != nil {
@@ -648,7 +649,11 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod) (*NodeInfo, error) {
 		numaTopology:   gatherInfo.EnabledNumaAffinity,
 	}
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
-		ret.addPodUsedResources(pod)
+		if !slices.ContainsFunc(excludedPods, func(uid types.UID) bool {
+			return pod.UID == uid
+		}) {
+			ret.addPodUsedResources(pod)
+		}
 	})
 	ret.ResetResourceUsage()
 	return ret, nil
@@ -671,51 +676,78 @@ func (n *NodeInfo) Clone() framework.StateData {
 	return n.DeepCopy()
 }
 
-// PodStatusUnschedulable reports whether the scheduler has marked the pod
-// unschedulable for the *current* scheduling cycle. The PodScheduled=False
-// condition can persist across cycles, so a stale Unschedulable from a
-// previous failed cycle would falsely exclude the pod's GPU usage from
-// NodeInfo. To disambiguate, compare against PodPredicateTimeAnnotation
-// (stamped by Filter on every pass): if the predicate-time is newer than
-// condition.LastTransitionTime, the current cycle has already passed Filter
-// and the pod is occupying GPU resources regardless of the stale condition.
-func PodStatusUnschedulable(pod *corev1.Pod) bool {
+// StuckGracePeriod bounds how long after Filter writes the pre-allocation
+// the pod's GPU is still considered "current" without further evidence.
+//
+// The grace must distinguish two states that look identical in the pod's
+// annotations: "just pre-allocated, bind in progress" vs "stuck for many
+// cycles with LastTransitionTime frozen". Kubernetes does NOT advance LTT on
+// repeated same-status condition writes, so the annotation alone cannot tell
+// them apart; wall-clock elapsed time since Filter is the one signal that is
+// consistent across leader-elected scheduler replicas (annotation + clock,
+// no in-memory state to lose on leader change).
+//
+// The grace must comfortably exceed the cluster's worst-case bind latency.
+// Typical Kubernetes binding completes in seconds; 30s gives ~6x margin.
+// Operators in pathologically slow clusters may need to raise this.
+const StuckGracePeriod = 30 * time.Second
+
+// ShouldCountPodDeviceAllocation reports whether the pod's GPU pre-allocation
+// should be included in NodeInfo resource accounting.
+// Returns true  = the allocation is current and should be counted as used.
+// Returns false = the allocation is stale or void and must be skipped.
+//
+// We skip (return false) in three situations:
+//  1. The previous bind cycle failed (AssignPhaseFailed label): the prior
+//     allocation is void; skip it so NodeInfo shows true free capacity and
+//     Filter can re-trigger a fresh pre-allocation.
+//  2. The PodScheduled condition flipped to Unschedulable on or after Filter
+//     last ran (predicateTime <= LastTransitionTime): if LTT advanced past
+//     our predicateTime the current cycle was rejected; if it equals (same
+//     second) we conservatively assume the condition is newer to avoid the
+//     ordering ambiguity.
+//  3. Stuck cycle: predicateTime > LTT but more than StuckGracePeriod has
+//     elapsed since Filter wrote it. Bind should have completed long ago;
+//     the absence of a transition (LTT did not advance) means repeated
+//     same-status failures, so the allocation is stale and must be freed.
+func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 	if pod.Spec.NodeName != "" {
-		return false
+		return true
 	}
-	// The previous bind cycle failed; the prior allocation is void. Treat
-	// the pod as unschedulable so NodeInfo skips its stale GPU claim during
-	// re-allocation (avoiding the pod squeezing itself out of its origin
-	// node) and Filter re-triggers device pre-allocation instead of forcing
-	// the pod back to a possibly broken predicate-node.
+	// The previous bind cycle failed; the prior allocation is void.
 	if phase, ok := util.HasLabel(pod, util.PodAssignedPhaseLabel); ok &&
 		phase == string(util.AssignPhaseFailed) {
-		return true
+		return false
 	}
 	_, condition := podutil.GetPodCondition(&pod.Status, corev1.PodScheduled)
 	if condition == nil {
-		return false
+		return true
 	}
 	if condition.Status != corev1.ConditionFalse ||
 		condition.Reason != corev1.PodReasonUnschedulable {
-		return false
+		return true
 	}
 	predicateTimeStr, ok := util.HasAnnotation(pod, util.PodPredicateTimeAnnotation)
 	if !ok || predicateTimeStr == "" {
-		return true
+		return false
 	}
 	predicateTimeNanos, err := strconv.ParseUint(predicateTimeStr, 10, 64)
 	if err != nil {
-		return true
+		return false
 	}
 	// LastTransitionTime is persisted at second precision (RFC3339), so
 	// compare in seconds. Same-second is conservatively treated as
-	// "condition newer" to avoid double-allocation when ordering is
-	// ambiguous.
-	if int64(predicateTimeNanos/uint64(time.Second)) > condition.LastTransitionTime.Unix() {
+	// "condition newer" to avoid double-allocation when ordering is ambiguous.
+	if int64(predicateTimeNanos/uint64(time.Second)) <= condition.LastTransitionTime.Unix() {
 		return false
 	}
-	return true
+	// predicateTime > LTT: filter ran after the condition was set. The
+	// allocation is current iff it is still within the bind grace; otherwise
+	// LTT did not advance despite enough time having passed for bind to
+	// complete — the pod is genuinely stuck and its GPU must be released.
+	// predicateTime in nanoseconds fits in int64 for any realistic wall-clock
+	// time, so the cast is safe.
+	return time.Since(time.Unix(0, int64(predicateTimeNanos))) <= StuckGracePeriod
 }
 
 func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
@@ -723,8 +755,8 @@ func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
 		return
 	}
 
-	// Ignore pods marked as unschedulable by the scheduler
-	if PodStatusUnschedulable(pod) {
+	// Skip pods whose GPU pre-allocation should not be counted.
+	if !ShouldCountPodDeviceAllocation(pod) {
 		return
 	}
 	// According to the pods' annotations, construct the node allocation state

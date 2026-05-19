@@ -487,10 +487,10 @@ skipNvml:
 			strconv.Itoa(nodeConfigInfo.MemoryFactor))
 	}
 
-	// Get all pods on the current node.
+	// Get all pods on the current node whose device allocation should be counted.
 	pods, err := c.podLister.ListByIndexFiledSet(fields.Set{
-		metrics.IndexerKeyPodPlanSchedulingNode:  c.nodeName,
-		metrics.IndexerKeyPodStatusUnschedulable: "false",
+		metrics.IndexerKeyPodPlanSchedulingNode:        c.nodeName,
+		metrics.IndexerKeyPodDeviceAllocationCountable: "true",
 	})
 	if err != nil {
 		klog.Errorf("pod lister list error: %v", err)
