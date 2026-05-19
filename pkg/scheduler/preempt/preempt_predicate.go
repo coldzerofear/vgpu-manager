@@ -21,6 +21,7 @@ package preempt
 import (
 	"context"
 	"sort"
+	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -29,8 +30,8 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -42,7 +43,10 @@ import (
 	kubelettypes "k8s.io/kubernetes/pkg/kubelet/types"
 )
 
-const Name = "PreemptPredicate"
+const (
+	Name                     = "PreemptPredicate"
+	IndexerKeyPodMetadataUid = "pod.metadata.uid"
+)
 
 type vgpuPreempt struct {
 	nodeLister  listerv1.NodeLister
@@ -51,7 +55,17 @@ type vgpuPreempt struct {
 	hasSyncFunc func(ctx context.Context) bool
 }
 
-var _ predicate.PreemptPredicate = &vgpuPreempt{}
+var (
+	_           predicate.PreemptPredicate = &vgpuPreempt{}
+	podIndexers                            = cache.Indexers{
+		IndexerKeyPodMetadataUid: func(obj interface{}) ([]string, error) {
+			if accessor, err := meta.Accessor(obj); err == nil {
+				return []string{string(accessor.GetUID())}, nil
+			}
+			return []string{""}, nil
+		},
+	}
+)
 
 // New wires the preempt plugin to the same informer-backed pod lister that
 // the filter plugin uses, so per-node pod lookups go through the indexer that
@@ -60,6 +74,9 @@ func New(factory informers.SharedInformerFactory, recorder record.EventRecorder,
 	podLister client.PodLister) (*vgpuPreempt, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
+	if err := podInformer.AddIndexers(podIndexers); err != nil {
+		return nil, err
+	}
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
 	hasSyncFunc := func(ctx context.Context) bool {
 		return cache.WaitForCacheSync(
@@ -90,9 +107,6 @@ func (p *vgpuPreempt) IsReady(ctx context.Context) bool {
 // search for additional lower-priority victims on that node until the
 // allocator accepts; if no such set exists, we drop the node.
 func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreemptionArgs) *extenderv1.ExtenderPreemptionResult {
-	result := &extenderv1.ExtenderPreemptionResult{
-		NodeNameToMetaVictims: map[string]*extenderv1.MetaVictims{},
-	}
 	pod := args.Pod
 	if pod == nil {
 		klog.V(4).InfoS("Preempt called with nil pod, passing input through")
@@ -109,6 +123,11 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 		klog.ErrorS(err, "Preempt: failed to resolve victims, passing input through")
 		return passthrough(args)
 	}
+
+	result := &extenderv1.ExtenderPreemptionResult{
+		NodeNameToMetaVictims: map[string]*extenderv1.MetaVictims{},
+	}
+
 	if len(victimsMap) == 0 {
 		return result
 	}
@@ -118,30 +137,38 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 		klog.ErrorS(err, "PodLister list vGPU pods failed in preempt")
 		return passthrough(args)
 	}
-
+	mu := sync.Mutex{}
+	wg := sync.WaitGroup{}
 	for nodeName, victims := range victimsMap {
-		if victims == nil {
-			continue
-		}
-		refined, pdbViolations, ok := p.refineForNode(pod, nodeName, victims, allVGPUPods)
-		if !ok {
-			klog.V(3).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
-				"pod", klog.KObj(pod), "node", nodeName)
-			continue
-		}
-		if len(refined) == 0 {
-			// Should not happen — in-tree gave us at least one and we never empty the list.
-			continue
-		}
-		meta := &extenderv1.MetaVictims{
-			Pods:             make([]*extenderv1.MetaPod, 0, len(refined)),
-			NumPDBViolations: pdbViolations,
-		}
-		for _, vp := range refined {
-			meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
-		}
-		result.NodeNameToMetaVictims[nodeName] = meta
+		wg.Add(1)
+		go func(nodeName string, victims *extenderv1.Victims) {
+			defer wg.Done()
+			if victims == nil {
+				return
+			}
+			refined, pdbViolations, ok := p.refineForNode(pod, nodeName, victims, allVGPUPods)
+			if !ok {
+				klog.V(3).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
+					"pod", klog.KObj(pod), "node", nodeName)
+				return
+			}
+			if len(refined) == 0 {
+				// Should not happen — in-tree gave us at least one and we never empty the list.
+				return
+			}
+			meta := &extenderv1.MetaVictims{
+				Pods:             make([]*extenderv1.MetaPod, 0, len(refined)),
+				NumPDBViolations: pdbViolations,
+			}
+			for _, vp := range refined {
+				meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
+			}
+			mu.Lock()
+			result.NodeNameToMetaVictims[nodeName] = meta
+			mu.Unlock()
+		}(nodeName, victims)
 	}
+	wg.Wait()
 	return result
 }
 
@@ -170,14 +197,6 @@ func (p *vgpuPreempt) resolveVictimsMap(args extenderv1.ExtenderPreemptionArgs) 
 	if len(args.NodeNameToMetaVictims) == 0 {
 		return nil, nil
 	}
-	allPods, err := p.podLister.List(labels.Everything())
-	if err != nil {
-		return nil, err
-	}
-	byUID := make(map[k8stypes.UID]*corev1.Pod, len(allPods))
-	for _, pod := range allPods {
-		byUID[pod.UID] = pod
-	}
 	resolved := make(map[string]*extenderv1.Victims, len(args.NodeNameToMetaVictims))
 	for nodeName, meta := range args.NodeNameToMetaVictims {
 		if meta == nil {
@@ -188,13 +207,13 @@ func (p *vgpuPreempt) resolveVictimsMap(args extenderv1.ExtenderPreemptionArgs) 
 			if mp == nil {
 				continue
 			}
-			pod, ok := byUID[k8stypes.UID(mp.UID)]
-			if !ok {
+			objs, err := p.podLister.ListByIndexValue(IndexerKeyPodMetadataUid, mp.UID)
+			if err != nil || len(objs) == 0 {
 				klog.V(3).InfoS("Preempt: victim UID not found in cache, skipping",
-					"uid", mp.UID, "node", nodeName)
+					"uid", mp.UID, "node", nodeName, "err", err)
 				continue
 			}
-			pods = append(pods, pod)
+			pods = append(pods, objs[0])
 		}
 		if len(pods) == 0 {
 			// in-tree proposed victims but we lost track of them; drop the node
@@ -438,13 +457,13 @@ func passthrough(args extenderv1.ExtenderPreemptionArgs) *extenderv1.ExtenderPre
 //     pod objects haven't been garbage-collected. Evicting them surfaces
 //     as confusing operator noise without freeing anything real.
 //  3. Critical pods (kubelettypes.IsCriticalPod): covers
-//       - Static pods (kubernetes.io/config.source != "api"),
-//       - Mirror pods (kubernetes.io/config.mirror annotation present) —
-//         kubelet immediately recreates them from local files after
-//         deletion, so eviction is a no-op at best and noise at worst,
-//       - system-cluster-critical / system-node-critical priority (≥ 2B)
-//         which priority comparison already excludes in the common case,
-//         but adds defense for the unusual "critical preemptor" scenario.
+//     - Static pods (kubernetes.io/config.source != "api"),
+//     - Mirror pods (kubernetes.io/config.mirror annotation present) —
+//     kubelet immediately recreates them from local files after
+//     deletion, so eviction is a no-op at best and noise at worst,
+//     - system-cluster-critical / system-node-critical priority (≥ 2B)
+//     which priority comparison already excludes in the common case,
+//     but adds defense for the unusual "critical preemptor" scenario.
 //     Reuses the same helper used by pkg/client/eviction.go and the
 //     reschedule controller for project-wide consistency.
 //  4. DaemonSet-owned pods: the DaemonSet controller recreates on the same
