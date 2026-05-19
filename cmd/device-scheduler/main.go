@@ -24,6 +24,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/bind"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	tlsconfig "github.com/grepplabs/cert-source/config"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
 	tlsserverconfig "github.com/grepplabs/cert-source/tls/server/config"
@@ -104,6 +105,10 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler BindPlugin failed: %v", err)
 	}
+	preemptPlugin, err := preempt.New(factory, recorder, filterPlugin.GetPodLister())
+	if err != nil {
+		klog.Fatalf("Initialization of scheduler PreemptPlugin failed: %v", err)
+	}
 
 	handler := httprouter.New()
 	route.AddVersion(handler)
@@ -116,6 +121,7 @@ func main() {
 	})
 	route.AddFilterPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
+	route.AddPreemptPredicate(handler, preemptPlugin)
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	factory.Start(ctx.Done())

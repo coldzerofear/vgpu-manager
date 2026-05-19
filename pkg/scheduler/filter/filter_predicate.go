@@ -38,13 +38,13 @@ type gpuFilter struct {
 
 const (
 	Name                     = "FilterPredicate"
-	indexerKeyPodRequestVGPU = "pod.requestVGPU"
+	IndexerKeyPodRequestVGPU = "pod.requestVGPU"
 )
 
 var (
 	_           predicate.FilterPredicate = &gpuFilter{}
 	podIndexers                           = cache.Indexers{
-		indexerKeyPodRequestVGPU: func(obj interface{}) ([]string, error) {
+		IndexerKeyPodRequestVGPU: func(obj interface{}) ([]string, error) {
 			if pod, ok := obj.(*corev1.Pod); ok && util.IsVGPUResourcePod(pod) {
 				return []string{"true"}, nil
 			}
@@ -348,7 +348,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	f.locker.Lock()
 	defer f.locker.Unlock()
 
-	pods, err := f.podLister.ListByIndexValue(indexerKeyPodRequestVGPU, "true")
+	pods, err := f.podLister.ListByIndexValue(IndexerKeyPodRequestVGPU, "true")
 	if err != nil {
 		klog.ErrorS(err, "PodLister list all vGPU Pods failed")
 		return filteredNodes, failedNodesMap, err
