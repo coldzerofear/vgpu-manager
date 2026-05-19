@@ -20,15 +20,18 @@ package preempt
 
 import (
 	"context"
+	"runtime"
 	"sort"
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,10 +62,11 @@ var (
 	_           predicate.PreemptPredicate = &vgpuPreempt{}
 	podIndexers                            = cache.Indexers{
 		IndexerKeyPodMetadataUid: func(obj interface{}) ([]string, error) {
+			var indexerValues []string
 			if accessor, err := meta.Accessor(obj); err == nil {
-				return []string{string(accessor.GetUID())}, nil
+				indexerValues = append(indexerValues, string(accessor.GetUID()))
 			}
-			return []string{""}, nil
+			return indexerValues, nil
 		},
 	}
 )
@@ -139,34 +143,44 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 	}
 	mu := sync.Mutex{}
 	wg := sync.WaitGroup{}
-	for nodeName, victims := range victimsMap {
+
+	keys := maps.Keys(victimsMap)
+	maxGoroutines := runtime.NumCPU() * 2
+	batchSize := (len(keys) + maxGoroutines - 1) / maxGoroutines
+	batches := watcher.BalanceBatches(len(keys), batchSize)
+	for _, batch := range batches {
 		wg.Add(1)
-		go func(nodeName string, victims *extenderv1.Victims) {
+		go func(victimKeys []string) {
 			defer wg.Done()
-			if victims == nil {
-				return
+
+			for _, nodeName := range victimKeys {
+				victims := victimsMap[nodeName]
+				if victims == nil {
+					continue
+				}
+				refined, pdbViolations, ok := p.refineForNode(pod, nodeName, victims, allVGPUPods)
+				if !ok {
+					klog.V(3).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
+						"pod", klog.KObj(pod), "node", nodeName)
+					continue
+				}
+				if len(refined) == 0 {
+					// Should not happen — in-tree gave us at least one and we never empty the list.
+					continue
+				}
+				meta := &extenderv1.MetaVictims{
+					Pods:             make([]*extenderv1.MetaPod, 0, len(refined)),
+					NumPDBViolations: pdbViolations,
+				}
+				for _, vp := range refined {
+					meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
+				}
+
+				mu.Lock()
+				result.NodeNameToMetaVictims[nodeName] = meta
+				mu.Unlock()
 			}
-			refined, pdbViolations, ok := p.refineForNode(pod, nodeName, victims, allVGPUPods)
-			if !ok {
-				klog.V(3).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
-					"pod", klog.KObj(pod), "node", nodeName)
-				return
-			}
-			if len(refined) == 0 {
-				// Should not happen — in-tree gave us at least one and we never empty the list.
-				return
-			}
-			meta := &extenderv1.MetaVictims{
-				Pods:             make([]*extenderv1.MetaPod, 0, len(refined)),
-				NumPDBViolations: pdbViolations,
-			}
-			for _, vp := range refined {
-				meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
-			}
-			mu.Lock()
-			result.NodeNameToMetaVictims[nodeName] = meta
-			mu.Unlock()
-		}(nodeName, victims)
+		}(keys[batch.StartIndex : batch.EndIndex+1])
 	}
 	wg.Wait()
 	return result
@@ -250,6 +264,12 @@ func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
 		return nil, 0, false
 	}
 
+	// check node fast return
+	if err = filter.CheckNode(node, filter.GetMemoryPolicyFunc(pod)); err != nil {
+		klog.V(3).ErrorS(err, "Preempt: check node failed", "node", nodeName)
+		return nil, 0, false
+	}
+
 	// Strip protected pods from in-tree's proposal — never evict them.
 	keep := make([]*corev1.Pod, 0, len(victims.Pods))
 	excluded := make(map[k8stypes.UID]struct{}, len(victims.Pods))
@@ -327,10 +347,7 @@ func pdbViolationsUpperBound(originalCount int64, keptLen, addedLen int) int64 {
 func (p *vgpuPreempt) canAllocate(pod *corev1.Pod, node *corev1.Node,
 	allVGPUPods []*corev1.Pod, excluded map[k8stypes.UID]struct{}) bool {
 
-	uids := make([]k8stypes.UID, 0, len(excluded))
-	for uid := range excluded {
-		uids = append(uids, uid)
-	}
+	uids := maps.Keys(excluded)
 	nodeInfo, err := device.NewNodeInfo(node, allVGPUPods, uids...)
 	if err != nil {
 		klog.V(3).ErrorS(err, "Preempt: NewNodeInfo failed", "node", node.Name)

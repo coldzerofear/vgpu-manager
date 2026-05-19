@@ -142,7 +142,7 @@ data:
       nodeCacheCapable: true
       weight: 1
       httpTimeout: 30s
-      ignorable: true
+      ignorable: false
       managedResources:
       - name: "nvidia.com/vgpu-number"
         ignoredByScheduler: false

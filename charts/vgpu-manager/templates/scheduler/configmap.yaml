@@ -51,7 +51,7 @@ data:
       nodeCacheCapable: true
       weight: 1
       httpTimeout: 30s
-      ignorable: true
+      ignorable: false
       managedResources:
       # vgpu-number participates in in-tree NodeResourcesFit so default
       # preemption's SelectVictimsOnNode can identify candidate victims by
@@ -103,7 +103,7 @@ data:
               "ignoredByScheduler": true
             }
           ],
-          "ignoreable": true
+          "ignoreable": false
         }
       ]
     }
