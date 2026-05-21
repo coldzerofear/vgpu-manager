@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func Test_CheckDeviceType(t *testing.T) {
@@ -262,6 +264,118 @@ func Test_MakeDNS1123Compatible(t *testing.T) {
 
 			assert.Equal(t, example.expected, name)
 			assertDNS1123Compatibility(t, name)
+		})
+	}
+}
+
+// Test_PodIsGangMember covers every signal PodIsGangMember consults to
+// recognize a pod as part of a gang/PodGroup. Each subtest isolates one
+// signal so a regression on any single detection path surfaces as a single
+// failed case, not a confused composite.
+//
+// NOTE: the pod.Spec.SchedulingGroup path (native upstream gang scheduling
+// API) is intentionally NOT exercised as a positive case here because the
+// surrounding helper struct's exported name has not been pinned in this
+// test environment. The negative coverage (default empty PodSpec → no
+// SchedulingGroup → recognized as non-gang via the other-signal cases)
+// still validates the branch isn't accidentally true. Add a positive case
+// once the upstream type is locally available; the production code already
+// guards with `pod.Spec.SchedulingGroup != nil &&
+// pod.Spec.SchedulingGroup.PodGroupName != nil`.
+func Test_PodIsGangMember(t *testing.T) {
+	mkPodWithLabel := func(key, value string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Labels: map[string]string{key: value},
+			},
+		}
+	}
+	mkPodWithAnnotation := func(key, value string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{key: value},
+			},
+		}
+	}
+	mkPodWithOwner := func(kind string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind: kind, Name: "owner", APIVersion: "v1",
+				}},
+			},
+		}
+	}
+
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{
+			name: "nil pod is not a gang member",
+			pod:  nil,
+			want: false,
+		},
+		{
+			name: "bare pod (no labels/annotations/owner) is not a gang member",
+			pod:  &corev1.Pod{},
+			want: false,
+		},
+		{
+			name: "coscheduling label (scheduler-plugins v1alpha1) marks pod as gang member",
+			pod:  mkPodWithLabel(CoschedulingPodGroupLabel, "my-group"),
+			want: true,
+		},
+		{
+			name: "legacy coscheduling label (lightweight-coscheduling) marks pod as gang member",
+			pod:  mkPodWithLabel(CoschedulingPodGroupNameLabel, "legacy-group"),
+			want: true,
+		},
+		{
+			name: "Volcano group annotation marks pod as gang member",
+			pod:  mkPodWithAnnotation(VolcanoGroupNameAnnotation, "volcano-group"),
+			want: true,
+		},
+		{
+			name: "Koordinator gang annotation marks pod as gang member",
+			pod:  mkPodWithAnnotation(KoordinatorGangNameAnnotation, "koord-gang"),
+			want: true,
+		},
+		{
+			name: "ownerReference Kind=PodGroup marks pod as gang member",
+			pod:  mkPodWithOwner("PodGroup"),
+			want: true,
+		},
+		{
+			name: "ownerReference Kind=ReplicaSet is NOT a gang member",
+			pod:  mkPodWithOwner("ReplicaSet"),
+			want: false,
+		},
+		{
+			name: "gang label present but empty value is NOT recognized as a member",
+			pod:  mkPodWithLabel(CoschedulingPodGroupLabel, ""),
+			want: false,
+		},
+		{
+			name: "gang annotation present but empty value is NOT recognized as a member",
+			pod:  mkPodWithAnnotation(VolcanoGroupNameAnnotation, ""),
+			want: false,
+		},
+		{
+			name: "unrelated label is NOT a gang signal",
+			pod:  mkPodWithLabel("app", "frontend"),
+			want: false,
+		},
+		{
+			name: "unrelated annotation is NOT a gang signal",
+			pod:  mkPodWithAnnotation("kubernetes.io/some-other", "value"),
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, PodIsGangMember(tt.pod))
 		})
 	}
 }

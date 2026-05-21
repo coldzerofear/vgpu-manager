@@ -365,6 +365,55 @@ func Test_sortVictimsByPreference(t *testing.T) {
 		var pods []*corev1.Pod
 		assert.NotPanics(t, func() { sortVictimsByPreference(pods) })
 	})
+
+	// Gang membership bias: non-gang pods sort before gang pods so the
+	// greedy victim accumulator in findAdditionalVictims exhausts non-gang
+	// candidates first. Gang members are only touched as last resort,
+	// minimizing the risk of breaking a whole gang for one preemption.
+	t.Run("non-gang pod sorted before gang pod when priorities are equal", func(t *testing.T) {
+		// withOwner("PodGroup") triggers util.PodIsGangMember via the
+		// ownerReference Kind branch — no need to add labels/annotations.
+		gang := mkPod("gang", 10, time.Minute)
+		gang.OwnerReferences = []metav1.OwnerReference{{
+			Kind: "PodGroup", Name: "g", APIVersion: "scheduling.x-k8s.io/v1alpha1",
+		}}
+		plain := mkPod("plain", 10, time.Minute)
+		pods := []*corev1.Pod{gang, plain}
+		sortVictimsByPreference(pods)
+		assert.Equal(t, "plain", pods[0].Name, "non-gang pod must be selected first")
+		assert.Equal(t, "gang", pods[1].Name)
+	})
+
+	t.Run("gang bias is dominant over priority and creation-time tiebreakers", func(t *testing.T) {
+		// Stack the deck against the non-gang pod on the OTHER tiebreakers
+		// (higher priority, older creation) — the gang bias must still keep
+		// it ahead of the gang member.
+		gang := mkPod("gang-low-pri-new", 1, time.Second) // lowest priority, newest → would otherwise rank first
+		gang.OwnerReferences = []metav1.OwnerReference{{
+			Kind: "PodGroup", Name: "g", APIVersion: "scheduling.x-k8s.io/v1alpha1",
+		}}
+		plain := mkPod("plain-hi-pri-old", 100, time.Hour) // highest priority, oldest
+		pods := []*corev1.Pod{gang, plain}
+		sortVictimsByPreference(pods)
+		assert.Equal(t, "plain-hi-pri-old", pods[0].Name,
+			"gang bias overrides priority/creation tiebreakers")
+	})
+
+	t.Run("within same gang status: priority and creation tiebreakers still apply", func(t *testing.T) {
+		// Two gang members — gang bias is a tie; fall through to priority
+		// then creation. Lower priority wins, then newer creation wins.
+		gangA := mkPod("gang-pri-10", 10, time.Hour)
+		gangA.OwnerReferences = []metav1.OwnerReference{{
+			Kind: "PodGroup", Name: "g", APIVersion: "scheduling.x-k8s.io/v1alpha1",
+		}}
+		gangB := mkPod("gang-pri-5", 5, time.Hour)
+		gangB.OwnerReferences = []metav1.OwnerReference{{
+			Kind: "PodGroup", Name: "g", APIVersion: "scheduling.x-k8s.io/v1alpha1",
+		}}
+		pods := []*corev1.Pod{gangA, gangB}
+		sortVictimsByPreference(pods)
+		assert.Equal(t, "gang-pri-5", pods[0].Name, "lower-priority gang member preferred for eviction")
+	})
 }
 
 // ---------------------------------------------------------------------------

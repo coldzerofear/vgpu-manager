@@ -294,10 +294,11 @@ func Test_ShouldCountPodDeviceAllocation(t *testing.T) {
 	aged := now.Add(-2 * StuckGracePeriod)
 
 	type podOpts struct {
-		nodeName      string
-		condition     *corev1.PodCondition
-		predicateTime string // empty = annotation absent
-		assignedPhase string // empty = label absent
+		nodeName       string
+		condition      *corev1.PodCondition
+		predicateTime  string // empty = annotation absent
+		assignedPhase  string // empty = label absent
+		stuckGraceAnno string // empty = annotation absent (per-pod override)
 	}
 	makePod := func(o podOpts) *corev1.Pod {
 		pod := &corev1.Pod{
@@ -315,6 +316,9 @@ func Test_ShouldCountPodDeviceAllocation(t *testing.T) {
 		}
 		if o.assignedPhase != "" {
 			pod.Labels[util.PodAssignedPhaseLabel] = o.assignedPhase
+		}
+		if o.stuckGraceAnno != "" {
+			pod.Annotations[util.SchedulerStuckGracePeriodAnnotation] = o.stuckGraceAnno
 		}
 		return pod
 	}
@@ -448,6 +452,67 @@ func Test_ShouldCountPodDeviceAllocation(t *testing.T) {
 				predicateTime: nanos(aged),
 			}),
 			want: false,
+		},
+		// Per-pod stuck-grace-period annotation override.
+		// The gang-scheduling motivation: a gang pod can carry an annotation
+		// whose duration exceeds the gang's Permit timeout so legitimate
+		// Permit-wait does not get misclassified as stuck.
+		{
+			name: "annotation extends grace beyond default: aged but still within custom grace → count",
+			pod: makePod(podOpts{
+				// Same shape as the "stuck" case above (predicateTime ~ 2*default
+				// grace ago) but with a per-pod annotation of 10× the default.
+				// time.Since(aged) ≈ 60s; 10×default = 300s; 60 < 300 → counted.
+				condition:      unschedulableCond(aged.Add(-1 * time.Second)),
+				predicateTime:  nanos(aged),
+				stuckGraceAnno: (10 * StuckGracePeriod).String(),
+			}),
+			want: true,
+		},
+		{
+			name: "annotation below 1s minimum is rejected, default grace applies → recent allocation counted",
+			pod: makePod(podOpts{
+				// recent ≈ 1s ago. With default 30s grace → counted.
+				// Annotation 500ms is below the helper's 1-second minimum
+				// (enforced in ShouldCountPodDeviceAllocation), so the
+				// override is rejected and default 30s applies → counted.
+				condition:      unschedulableCond(recent.Add(-1 * time.Second)),
+				predicateTime:  nanos(recent),
+				stuckGraceAnno: "500ms",
+			}),
+			want: true,
+		},
+		{
+			name: "annotation override exactly at 1s minimum is honored",
+			pod: makePod(podOpts{
+				// predicateTime aged ~60s ago, override = 1s → 60s > 1s → stuck.
+				condition:      unschedulableCond(aged.Add(-1 * time.Second)),
+				predicateTime:  nanos(aged),
+				stuckGraceAnno: "1s",
+			}),
+			want: false,
+		},
+		{
+			name: "malformed annotation falls back to default grace",
+			pod: makePod(podOpts{
+				// Same as "stuck" baseline (aged → would be stuck under default).
+				// Bad annotation must NOT silently extend grace — fall back to
+				// default → stuck classification preserved.
+				condition:      unschedulableCond(aged.Add(-1 * time.Second)),
+				predicateTime:  nanos(aged),
+				stuckGraceAnno: "not-a-duration",
+			}),
+			want: false,
+		},
+		{
+			name: "annotation set but pod is bound: NodeName check short-circuits, override never consulted",
+			pod: makePod(podOpts{
+				nodeName:       "node-1",
+				condition:      unschedulableCond(aged),
+				predicateTime:  nanos(aged),
+				stuckGraceAnno: "1ms", // would normally force stuck, but NodeName wins
+			}),
+			want: true,
 		},
 	}
 	for _, tt := range tests {
