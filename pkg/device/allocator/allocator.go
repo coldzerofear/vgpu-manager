@@ -92,12 +92,9 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	}
 	// Calculate the actual requested memory size based on the node memory factor.
 	if needMemory > 0 {
-		nodeConfigInfo := device.NodeConfigInfo{}
-		if err := nodeConfigInfo.Decode(node.Annotations[util.NodeConfigInfoAnnotation]); err != nil {
-			klog.V(3).ErrorS(err, "decoding node configuration information failed")
-			return nil, errors.New("incorrect GPU configuration")
+		if memoryFactor := alloc.nodeInfo.NodeConfigInfo.MemoryFactor; memoryFactor > 0 {
+			needMemory *= int64(memoryFactor)
 		}
-		needMemory *= int64(nodeConfigInfo.MemoryFactor)
 	}
 	if needCores == 0 && needMemory == 0 {
 		needCores = util.HundredCore

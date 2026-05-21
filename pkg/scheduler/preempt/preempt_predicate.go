@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -149,6 +150,7 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 	maxGoroutines := runtime.NumCPU() * 2
 	batchSize := (len(keys) + maxGoroutines - 1) / maxGoroutines
 	batches := watcher.BalanceBatches(len(keys), batchSize)
+	gangNameSet := sets.Set[string]{}
 	for _, batch := range batches {
 		wg.Add(1)
 		go func(victimKeys []string) {
@@ -173,17 +175,28 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 					Pods:             make([]*extenderv1.MetaPod, 0, len(refined)),
 					NumPDBViolations: pdbViolations,
 				}
+				var gangNames []string
 				for _, vp := range refined {
+					if gangName, ok := util.PodHasGangName(vp); ok {
+						gangNames = append(gangNames, gangName)
+					}
 					meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
 				}
 
 				mu.Lock()
+				gangNameSet.Insert(gangNames...)
 				result.NodeNameToMetaVictims[nodeName] = meta
 				mu.Unlock()
 			}
 		}(keys[batch.StartIndex : batch.EndIndex+1])
 	}
 	wg.Wait()
+
+	if gangNameSet.Len() > 0 {
+		p.recorder.Eventf(pod, corev1.EventTypeWarning, "GangDisruptedByPreemption",
+			"evicted as preemption victim; this may trigger rescheduling of these pod groups %v", sets.List(gangNameSet))
+	}
+
 	return result
 }
 
@@ -347,9 +360,7 @@ func pdbViolationsUpperBound(originalCount int64, keptLen, addedLen int) int64 {
 // excludedPods mechanism already used during the filter re-allocation path.
 func (p *vgpuPreempt) canAllocate(pod *corev1.Pod, node *corev1.Node,
 	allVGPUPods []*corev1.Pod, excluded map[k8stypes.UID]struct{}) bool {
-
-	uids := maps.Keys(excluded)
-	nodeInfo, err := device.NewNodeInfo(node, allVGPUPods, uids...)
+	nodeInfo, err := device.NewNodeInfo(node, allVGPUPods, maps.Keys(excluded)...)
 	if err != nil {
 		klog.V(3).ErrorS(err, "Preempt: NewNodeInfo failed", "node", node.Name)
 		return false
@@ -526,7 +537,8 @@ func sortVictimsByPreference(pods []*corev1.Pod) {
 	sort.SliceStable(pods, func(i, j int) bool {
 		a, b := pods[i], pods[j]
 		// Non gang members are preferred for selection.
-		aGang, bGang := util.PodIsGangMember(a), util.PodIsGangMember(b)
+		_, aGang := util.PodHasGangName(a)
+		_, bGang := util.PodHasGangName(b)
 		if aGang != bGang {
 			return !aGang
 		}

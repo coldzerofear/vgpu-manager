@@ -619,28 +619,28 @@ func ObjectKeys[T client.Object](objects ...T) []string {
 	return keys
 }
 
-func PodIsGangMember(pod *corev1.Pod) bool {
+func PodHasGangName(pod *corev1.Pod) (string, bool) {
 	if pod == nil {
-		return false
+		return "", false
 	}
 	// Native Gang Scheduling
 	if pod.Spec.SchedulingGroup != nil && pod.Spec.SchedulingGroup.PodGroupName != nil {
-		return true
+		return *pod.Spec.SchedulingGroup.PodGroupName, true
 	}
 	for _, labelKey := range []string{CoschedulingPodGroupLabel, CoschedulingPodGroupNameLabel} {
 		if val, ok := HasLabel(pod, labelKey); ok && val != "" {
-			return true
+			return val, true
 		}
 	}
 	for _, annoKey := range []string{VolcanoGroupNameAnnotation, KoordinatorGangNameAnnotation} {
 		if val, ok := HasAnnotation(pod, annoKey); ok && val != "" {
-			return true
+			return val, true
 		}
 	}
 	for _, ref := range pod.OwnerReferences {
 		if ref.Kind == "PodGroup" {
-			return true
+			return ref.Name, true
 		}
 	}
-	return false
+	return "", false
 }

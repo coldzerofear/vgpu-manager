@@ -420,6 +420,7 @@ type DeviceGatherInfo struct {
 	DeviceIndexMap      map[string]int
 	EnabledGPUTopology  bool
 	EnabledNumaAffinity bool
+	NodeConfigInfo
 }
 
 func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
@@ -429,10 +430,17 @@ func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
 		klog.V(2).ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
 		return nil, errors.New("incorrect GPU registry")
 	}
+	nodeConfigInfo := NodeConfigInfo{}
+	nodeConfig, _ := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
+	if err = nodeConfigInfo.Decode(nodeConfig); err != nil {
+		klog.V(2).ErrorS(err, "parse node config information failed", "node", node.Name, "value", nodeConfig)
+		return nil, errors.New("incorrect GPU configuration")
+	}
 	deviceGatherInfo := DeviceGatherInfo{
 		DeviceMap:      make(map[int]*Device, len(nodeDeviceInfo)),
 		DeviceList:     make(gpuallocator.DeviceList, len(nodeDeviceInfo)),
 		DeviceIndexMap: make(map[string]int, len(nodeDeviceInfo)),
+		NodeConfigInfo: nodeConfigInfo,
 	}
 	numaSet := sets.NewInt()
 	for _, device := range nodeDeviceInfo {
@@ -631,6 +639,7 @@ type NodeInfo struct {
 	maxCapability  float32
 	gpuTopology    bool
 	numaTopology   bool
+	NodeConfigInfo
 }
 
 func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UID) (*NodeInfo, error) {
@@ -647,6 +656,7 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UI
 		deviceIndexMap: gatherInfo.DeviceIndexMap,
 		gpuTopology:    gatherInfo.EnabledGPUTopology,
 		numaTopology:   gatherInfo.EnabledNumaAffinity,
+		NodeConfigInfo: gatherInfo.NodeConfigInfo,
 	}
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
 		if !slices.ContainsFunc(excludedPods, func(uid types.UID) bool {

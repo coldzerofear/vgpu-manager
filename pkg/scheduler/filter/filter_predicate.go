@@ -382,7 +382,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				batchNodeOrigPosition[node.Name] = index
 				nodeInfo, err := device.NewNodeInfo(node, pods, pod.UID)
 				if err != nil {
-					klog.V(3).ErrorS(err, "new node info failed, skipping node", "node", node.Name)
+					klog.V(3).ErrorS(err, "new NodeInfo failed, skipping node", "node", node.Name)
 					batchFailedNodes[node.Name] = err.Error()
 					continue
 				}
