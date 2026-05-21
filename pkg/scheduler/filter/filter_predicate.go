@@ -97,13 +97,19 @@ func (f *gpuFilter) IsReady(ctx context.Context) bool {
 
 func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
 	klog.V(4).InfoS("FilterNode", "ExtenderArgs", args)
-	if args.Pod == nil {
+	pod := args.Pod
+	if pod == nil {
 		return &extenderv1.ExtenderFilterResult{
 			Error: "ExtenderArgs.Pod cannot be empty",
 		}
 	}
-	if !util.IsVGPUResourcePod(args.Pod) {
-		klog.V(5).InfoS("Skip pods that do not request vGPU", "pod", klog.KObj(args.Pod))
+	if pod.Spec.NodeName != "" {
+		return &extenderv1.ExtenderFilterResult{
+			Error: "Pod has specified nodes to " + pod.Spec.NodeName,
+		}
+	}
+	if !util.IsVGPUResourcePod(pod) {
+		klog.V(5).InfoS("Skip pods that do not request vGPU", "pod", klog.KObj(pod))
 		return &extenderv1.ExtenderFilterResult{
 			Nodes:     args.Nodes,
 			NodeNames: args.NodeNames,
@@ -136,7 +142,7 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 	}
 
 	for i, filter := range filters {
-		passedNodes, failedNodes, err := filter(args.Pod, filteredNodes)
+		passedNodes, failedNodes, err := filter(pod, filteredNodes)
 		if err != nil {
 			klog.Errorf("Filter %d (%T) call failed: %v", i, filter, err)
 			return &extenderv1.ExtenderFilterResult{Error: err.Error()}

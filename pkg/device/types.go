@@ -690,7 +690,25 @@ func (n *NodeInfo) Clone() framework.StateData {
 // The grace must comfortably exceed the cluster's worst-case bind latency.
 // Typical Kubernetes binding completes in seconds; 30s gives ~6x margin.
 // Operators in pathologically slow clusters may need to raise this.
-const StuckGracePeriod = 30 * time.Second
+var (
+	StuckGracePeriod = 30 * time.Second
+	initOnce         sync.Once
+)
+
+func MustInitGlobalStuckGracePeriod(stuckGracePeriod string) {
+	initOnce.Do(func() {
+		if stuckGracePeriod != "" {
+			duration, err := time.ParseDuration(stuckGracePeriod)
+			if err != nil {
+				klog.Fatalf("parse stuck-grace-period failed: %v", err)
+			}
+			if duration < time.Second {
+				klog.Fatalf("stuck-grace-period not less than 1 second, current: %s", stuckGracePeriod)
+			}
+			StuckGracePeriod = duration
+		}
+	})
+}
 
 // ShouldCountPodDeviceAllocation reports whether the pod's GPU pre-allocation
 // should be included in NodeInfo resource accounting.
@@ -741,13 +759,27 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 	if int64(predicateTimeNanos/uint64(time.Second)) <= condition.LastTransitionTime.Unix() {
 		return false
 	}
+	stuckGracePeriod := StuckGracePeriod
+	stuckDuration := time.Since(time.Unix(0, int64(predicateTimeNanos)))
+	// support custom stuck grace period annotations
+	if val, ok := util.HasAnnotation(pod, util.SchedulerStuckGracePeriodAnnotation); ok && val != "" {
+		if gracePeriod, err := time.ParseDuration(val); err != nil {
+			klog.V(5).ErrorS(err, "parse stuck grace period annotation failed, fallback to default values",
+				"pod", klog.KObj(pod), "annotationValue", val, "defaultValue", stuckGracePeriod.String())
+		} else if gracePeriod < time.Second {
+			klog.V(5).ErrorS(nil, "custom stuck grace period not less than 1 second, fallback to default values",
+				"pod", klog.KObj(pod), "annotationValue", val, "defaultValue", stuckGracePeriod.String())
+		} else {
+			stuckGracePeriod = gracePeriod
+		}
+	}
 	// predicateTime > LTT: filter ran after the condition was set. The
 	// allocation is current iff it is still within the bind grace; otherwise
 	// LTT did not advance despite enough time having passed for bind to
 	// complete — the pod is genuinely stuck and its GPU must be released.
 	// predicateTime in nanoseconds fits in int64 for any realistic wall-clock
 	// time, so the cast is safe.
-	return time.Since(time.Unix(0, int64(predicateTimeNanos))) <= StuckGracePeriod
+	return stuckDuration <= stuckGracePeriod
 }
 
 func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {

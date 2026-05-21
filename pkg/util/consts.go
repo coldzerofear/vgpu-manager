@@ -24,6 +24,12 @@ const (
 	DRAGenNameAnnotation    = "vgpu-manager.io/generate-name"
 	DRAOwnerPodLabel        = "vgpu-manager.io/owner-pod"
 	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
+
+	VolcanoGroupNameAnnotation    = "scheduling.k8s.io/group-name"
+	CoschedulingPodGroupLabel     = "scheduling.x-k8s.io/pod-group"
+	KoordinatorGangNameAnnotation = "gang.scheduling.koordinator.sh/name"
+	// Deprecated: kubernetes-sigs/scheduler-plugins/lightweight-coscheduling
+	CoschedulingPodGroupNameLabel = "pod-group.scheduling.sigs.k8s.io/name"
 )
 
 var (
@@ -51,9 +57,10 @@ var (
 	PodExcludeGpuTypeAnnotation = globalDomainName + "/exclude-gpu-type"
 
 	// Scheduling strategies at the node and device levels
-	NodeSchedulerPolicyAnnotation   = globalDomainName + "/node-scheduler-policy"
-	DeviceSchedulerPolicyAnnotation = globalDomainName + "/device-scheduler-policy"
-	MemorySchedulerPolicyAnnotation = globalDomainName + "/memory-scheduler-policy"
+	NodeSchedulerPolicyAnnotation       = globalDomainName + "/node-scheduler-policy"
+	DeviceSchedulerPolicyAnnotation     = globalDomainName + "/device-scheduler-policy"
+	MemorySchedulerPolicyAnnotation     = globalDomainName + "/memory-scheduler-policy"
+	SchedulerStuckGracePeriodAnnotation = globalDomainName + "/stuck-grace-period"
 
 	// DeviceTopologyModeAnnotation Specify device topology mode
 	DeviceTopologyModeAnnotation = globalDomainName + "/device-topology-mode"
@@ -88,6 +95,7 @@ func initConstants() {
 	NodeSchedulerPolicyAnnotation = globalDomainName + "/node-scheduler-policy"
 	DeviceSchedulerPolicyAnnotation = globalDomainName + "/device-scheduler-policy"
 	MemorySchedulerPolicyAnnotation = globalDomainName + "/memory-scheduler-policy"
+	SchedulerStuckGracePeriodAnnotation = globalDomainName + "/stuck-grace-period"
 	DeviceTopologyModeAnnotation = globalDomainName + "/device-topology-mode"
 	PodIncludeGPUUUIDAnnotation = globalDomainName + "/include-gpu-uuid"
 	PodExcludeGPUUUIDAnnotation = globalDomainName + "/exclude-gpu-uuid"

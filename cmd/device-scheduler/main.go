@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/component-base/logs"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -53,6 +54,7 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 	util.MustInitGlobalDomain(opt.Domain)
+	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {

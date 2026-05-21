@@ -33,6 +33,7 @@ type Options struct {
 	TlsCertFile         string
 	CertRefreshInterval int
 	MinScrapeInterval   int
+	StuckGracePeriod    string
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -43,6 +44,7 @@ const (
 	defaultPprofBindPort       = 0
 	defaultCertRefreshInterval = 5
 	defaultMinScrapeInterval   = 1
+	defaultStuckGracePeriod    = "30s"
 
 	Component = "deviceMonitor"
 	// SMWatcher feature gate will obtain shared utilization data aggregation corresponding indicators from external observers.
@@ -77,6 +79,7 @@ func NewOptions() *Options {
 		PprofBindPort:       defaultPprofBindPort,
 		CertRefreshInterval: defaultCertRefreshInterval,
 		MinScrapeInterval:   defaultMinScrapeInterval,
+		StuckGracePeriod:    defaultStuckGracePeriod,
 		FeatureGate:         featureGate,
 	}
 }
@@ -105,6 +108,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
 	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
 	pflag.IntVar(&o.MinScrapeInterval, "min-scrape-interval", o.MinScrapeInterval, "Minimum grasping interval in seconds.")
+	pflag.StringVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

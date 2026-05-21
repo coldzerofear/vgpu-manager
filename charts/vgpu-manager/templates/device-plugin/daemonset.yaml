@@ -156,6 +156,9 @@ spec:
             - --cert-refresh-interval={{ .Values.devicePlugin.deviceMonitor.commands.certRefreshInterval | default 5 }}
             {{- end }}
             - --min-scrape-interval={{ .Values.devicePlugin.deviceMonitor.commands.minScrapeInterval | default 1 }}
+            {{- if .Values.scheduler.enabled }}
+            - --stuck-grace-period={{ .Values.scheduler.schedulerExtender.commands.stuckGracePeriod | default "30s" }}
+            {{- end }}
             - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
           ports:
             - name: metrics

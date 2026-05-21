@@ -29,6 +29,7 @@ type Options struct {
 	TlsKeyFile          string
 	TlsCertFile         string
 	CertRefreshInterval int
+	StuckGracePeriod    string
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -39,6 +40,7 @@ const (
 	defaultServerBindPort      = 3456
 	defaultPprofBindPort       = 0
 	defaultCertRefreshInterval = 5
+	defaultStuckGracePeriod    = "30s"
 
 	Component = "scheduler"
 
@@ -75,6 +77,7 @@ func NewOptions() *Options {
 		Domain:              util.GetGlobalDomain(),
 		SchedulerName:       defaultSchedulerName,
 		CertRefreshInterval: defaultCertRefreshInterval,
+		StuckGracePeriod:    defaultStuckGracePeriod,
 		FeatureGate:         featureGate,
 	}
 }
@@ -99,6 +102,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need --enable-tls)")
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
 	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
+	pflag.StringVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

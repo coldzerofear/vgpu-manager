@@ -9,6 +9,7 @@ vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed succe
   - PprofBindPort :  {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
   - EnableTLS     :  {{ .Values.scheduler.schedulerExtender.tls.enabled | default false }}
   - FeatureGates  :  {{ .Values.scheduler.schedulerExtender.commands.featureGates }}
+  - StuckPeriod   :  {{ .Values.scheduler.schedulerExtender.commands.stuckGracePeriod | default "30s" }}
   - LoggerLevel   :  {{ .Values.scheduler.schedulerExtender.commands.logLevel }}
 {{- end }}
 

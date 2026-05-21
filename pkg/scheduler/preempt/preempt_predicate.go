@@ -111,6 +111,7 @@ func (p *vgpuPreempt) IsReady(ctx context.Context) bool {
 // search for additional lower-priority victims on that node until the
 // allocator accepts; if no such set exists, we drop the node.
 func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreemptionArgs) *extenderv1.ExtenderPreemptionResult {
+	klog.V(4).InfoS("PreemptPod", "ExtenderPreemptionArgs", args)
 	pod := args.Pod
 	if pod == nil {
 		klog.V(4).InfoS("Preempt called with nil pod, passing input through")
@@ -524,6 +525,11 @@ func isProtectedFromPreemption(pod *corev1.Pod) bool {
 func sortVictimsByPreference(pods []*corev1.Pod) {
 	sort.SliceStable(pods, func(i, j int) bool {
 		a, b := pods[i], pods[j]
+		// Non gang members are preferred for selection.
+		aGang, bGang := util.PodIsGangMember(a), util.PodIsGangMember(b)
+		if aGang != bGang {
+			return !aGang
+		}
 		ap, bp := corev1helpers.PodPriority(a), corev1helpers.PodPriority(b)
 		if ap != bp {
 			return ap < bp

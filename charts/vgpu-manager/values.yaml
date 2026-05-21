@@ -100,6 +100,8 @@ scheduler:
       featureGates: ""
       # Certificate refresh interval in seconds (TLS only works when enabled)
       certRefreshInterval: 5
+      # Scheduling stuck grace period, filtering the maximum delay time to the binding stage.
+      stuckGracePeriod: 30s
       logLevel: 3
     # Scheduler extender container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.

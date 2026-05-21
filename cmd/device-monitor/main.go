@@ -14,6 +14,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/device-monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
@@ -46,6 +47,7 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 	util.MustInitGlobalDomain(opt.Domain)
+	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {
