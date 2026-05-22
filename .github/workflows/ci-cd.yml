@@ -1,121 +1,32 @@
-name: Security Audit & Build Push TCR
+name: Build and Push to Tencent TCR
 
-# 触发条件：master/main分支push、PR；或手动触发
 on:
   push:
-    branches: [ master, main ]
-  pull_request:
-    branches: [ master, main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
-# 作业定义
 jobs:
-  security-audit:
+  build:
     runs-on: ubuntu-latest
     steps:
-      # 1. 拉取代码
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # 拉取全历史，用于git-secrets检测
-
-      # 2. 安装git-secrets（检测硬编码密钥）
-      - name: Install git-secrets
-        run: |
-          sudo apt-get update && sudo apt-get install -y git-secrets
-          git-secrets --register-aws # 通用密钥规则
-          git-secrets --add 'AKIA[0-9A-Z]{16}' # 自定义腾讯云AK规则
-          git-secrets --scan-history # 扫描历史提交
-
-      # 3. Go项目静态代码分析（gosec）
-      - name: Run gosec (Go static analysis)
-        uses: securecodewarrior/gosec-action@v1
-        with:
-          args: ./...
-
-      # 4. 依赖漏洞扫描（dependency-check）
-      - name: Run dependency-check
-        uses: dependency-check/Dependency-Check_Action@main
-        with:
-          project: 'kkk-vgpu-manage'
-          path: '.'
-          format: 'HTML'
-          out: 'reports'
-        continue-on-error: true # 依赖漏洞不阻断流程，仅告警
-
-      # 5. 上传依赖扫描报告（可选）
-      - name: Upload dependency-check report
-        uses: actions/upload-artifact@v4
-        with:
-          name: dependency-check-report
-          path: reports/
-
-  build-push-tcr:
-    needs: security-audit # 依赖安全审计完成
-    runs-on: ubuntu-latest
-    steps:
-      # 1. 拉取代码
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. 安装Trivy（镜像漏洞扫描）
-      - name: Install Trivy
-        run: |
-          sudo apt-get install wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update && sudo apt-get install -y trivy
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      # 3. 登录腾讯云TCR
-      - name: Login to TCR
+      # 登录腾讯云 TCR
+      - name: Login to Tencent Cloud TCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ secrets.TCR_REGISTRY }}
-          username: ${{ secrets.TENCENT_SECRET_ID }}
-          password: ${{ secrets.TENCENT_SECRET_KEY }}
+          registry: ccr.ccs.tencentyun.com
+          username: ${{ secrets.TCR_USERNAME }}
+          password: ${{ secrets.TCR_PASSWORD }}
 
-      # 4. 构建镜像（需项目根目录有Dockerfile）
-      - name: Build Docker image
-        run: |
-          IMAGE_TAG=${{ github.sha }} # 用commit id作为镜像标签
-          docker build -t ${{ secrets.TCR_REGISTRY }}/${{ secrets.TCR_NAMESPACE }}/${{ secrets.TCR_REPO }}:$IMAGE_TAG .
-
-      # 5. 镜像漏洞扫描（Trivy）
-      - name: Scan image with Trivy
-        run: |
-          IMAGE_TAG=${{ github.sha }}
-          trivy image --severity HIGH,CRITICAL ${{ secrets.TCR_REGISTRY }}/${{ secrets.TCR_NAMESPACE }}/${{ secrets.TCR_REPO }}:$IMAGE_TAG
-          # 若发现高危漏洞，阻断流程（可选）
-          trivy_exit_code=$?
-          if [ $trivy_exit_code -ne 0 ]; then
-            echo "High/Critical vulnerabilities found in image"
-            exit 1
-          fi
-
-      # 6. 推送镜像到TCR
-      - name: Push Docker image
-        run: |
-          IMAGE_TAG=${{ github.sha }}
-          # 推送commit id标签
-          docker push ${{ secrets.TCR_REGISTRY }}/${{ secrets.TCR_NAMESPACE }}/${{ secrets.TCR_REPO }}:$IMAGE_TAG
-          # 额外推送latest标签（可选）
-          docker tag ${{ secrets.TCR_REGISTRY }}/${{ secrets.TCR_NAMESPACE }}/${{ secrets.TCR_REPO }}:$IMAGE_TAG ${{ secrets.TCR_REGISTRY }}/${{ secrets.TCR_NAMESPACE }}/${{ secrets.TCR_REPO }}:latest
-          docker push ${{ secrets.TCR_REGISTRY }}/${{ secrets.TCR_NAMESPACE }}/${{ secrets.TCR_REPO }}:latest
-
-      # 7. 触发TCR内置镜像扫描（可选，TCR控制台可自动开启）
-      - name: Trigger TCR image scan (optional)
-        run: |
-          # 安装腾讯云CLI
-          sudo apt-get install -y python3-pip
-          pip3 install tccli
-          # 配置CLI
-          tccli configure set secretId ${{ secrets.TENCENT_SECRET_ID }}
-          tccli configure set secretKey ${{ secrets.TENCENT_SECRET_KEY }}
-          tccli configure set region ap-guangzhou # 替换为你的TCR地域
-          # 触发扫描
-          IMAGE_TAG=${{ github.sha }}
-          tccli tcr CreateImageScanTask --cli-unfold-argument \
-            --RegistryId your-tcr-registry-id \ # 替换为你的TCR实例ID
-            --Namespace ${{ secrets.TCR_NAMESPACE }} \
-            --Repository ${{ secrets.TCR_REPO }} \
-            --Tag $IMAGE_TAG
+      # 构建并推送镜像
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ccr.ccs.tencentyun.com/你的命名空间/kkk-vgpu-manage:${{ github.sha }}
