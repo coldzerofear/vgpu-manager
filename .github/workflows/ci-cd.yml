@@ -1,9 +1,9 @@
-name: Build and Push to Tencent TCR
+name: Build and Push to Tencent CCR
 
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:
+  workflow_dispatch
 
 jobs:
   build:
@@ -12,23 +12,33 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Install Tencent Cloud CLI
+        run: |
+          curl -o tccli https://github.com/TencentCloud/tccli/releases/download/v3.0.0/tccli-linux-amd64
+          chmod +x tccli
+          sudo mv tccli /usr/local/bin/
 
-      # 关键修改：这里换成你配置的密钥名
-      - name: Login to Tencent Cloud TCR
+      - name: Get CCR Login Token
+        run: |
+          tccli configure set secretId ${{ secrets.TENCENT_SECRET_ID }}
+          tccli configure set secretKey ${{ secrets.TENCENT_SECRET_KEY }}
+          tccli configure set region ap-beijing
+          
+          # 获取 CCR 登录密码
+          PASSWORD=$(tccli ccr GetAuthorizationToken --query 'AuthorizationToken' --output text)
+          echo "::add-mask::$PASSWORD"
+          echo "CCR_PASSWORD=$PASSWORD" >> $GITHUB_ENV
+
+      - name: Login to Tencent CCR
         uses: docker/login-action@v3
         with:
-          registry: ccr.ccs.tencentyun.com  # 注意：替换成你的TCR实际域名（比如xxx.tencentcloudcr.com）
-          username: ${{ secrets.TENCENT_SECRET_ID }}   # 对应你配置的SecretId
-          password: ${{ secrets.TENCENT_SECRET_KEY }}  # 对应你配置的SecretKey
+          registry: ccr.ccs.tencentyun.com
+          username: 100010001000      # 固定（不需要改）
+          password: ${{ env.CCR_PASSWORD }}
 
-      # 构建并推送镜像（注意替换成你的TCR命名空间）
-      - name: Build and push
+      - name: Build and Push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          # 格式：你的TCR域名/命名空间/仓库名:标签
-          tags: ccr.ccs.tencentyun.com/你的命名空间/kkk-vgpu-manage:${{ github.sha }}
-          
+          tags: ccr.ccs.tencentyun.com/kingderliu/vgpu-manage
