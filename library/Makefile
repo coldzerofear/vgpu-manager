@@ -22,7 +22,7 @@ PYTHON          ?= python3
 BASH            ?= bash
 CMAKE_BUILD_TYPE ?= Release
 J               ?= $(shell nproc 2>/dev/null | awk '{print int(($$0+1)/2)}')
-IMG             ?= vgpu-control:dev
+IMG             ?= coldzerofear/vgpu-control:dev
 CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
 TEST_DEVICE_ID  ?= 0
 
@@ -67,7 +67,7 @@ clean: ## Remove the build tree.
 
 .PHONY: docker-build
 docker-build: ## Build libvgpu-control.so inside $(IMG) using the local Dockerfile.
-	$(DOCKER) build -t $(IMG) $(LIBRARY_DIR)
+	$(DOCKER) build --build-arg NVIDIA_CUDA_IMAGE=$(CUDA_BASE_IMAGE) -t $(IMG) $(LIBRARY_DIR)
 
 .PHONY: build-in-docker
 build-in-docker: ## Build the .so in an ephemeral CUDA container (no local toolkit required).
