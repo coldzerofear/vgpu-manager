@@ -759,14 +759,14 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 	if !ok || predicateTimeStr == "" {
 		return false
 	}
-	predicateTimeNanos, err := strconv.ParseUint(predicateTimeStr, 10, 64)
-	if err != nil {
+	predicateTimeNanos, err := strconv.ParseInt(predicateTimeStr, 10, 64)
+	if err != nil || predicateTimeNanos <= 0 {
 		return false
 	}
 	// LastTransitionTime is persisted at second precision (RFC3339), so
 	// compare in seconds. Same-second is conservatively treated as
 	// "condition newer" to avoid double-allocation when ordering is ambiguous.
-	if int64(predicateTimeNanos/uint64(time.Second)) <= condition.LastTransitionTime.Unix() {
+	if predicateTimeNanos/int64(time.Second) <= condition.LastTransitionTime.Unix() {
 		return false
 	}
 	stuckGracePeriod := StuckGracePeriod
