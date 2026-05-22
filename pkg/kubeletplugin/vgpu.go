@@ -12,6 +12,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/docker/go-units"
 	"github.com/google/uuid"
 	"github.com/opencontainers/cgroups"
@@ -183,6 +184,8 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 		fmt.Sprintf("%s=", util.CudaMemoryLimitEnv),
 		fmt.Sprintf("%s=FALSE", util.CudaMemoryOversoldEnv),
 	}
+	hostLibraryPath := filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName)
+	hostLibraryPath = fmt.Sprintf("%s.%s", hostLibraryPath, version.Get().Version)
 	mounts := []*cdispec.Mount{
 		{
 			ContainerPath: filepath.Join(m.contManagerPath, util.Registry),
@@ -191,7 +194,7 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 		},
 		{
 			ContainerPath: containerDriverFile,
-			HostPath:      filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName),
+			HostPath:      hostLibraryPath,
 			Options:       []string{"ro", "nosuid", "nodev", "bind"},
 		},
 		{
