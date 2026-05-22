@@ -73,6 +73,7 @@ var (
 	PodPredicateNodeAnnotation = globalDomainName + "/predicate-node"
 	PodPredicateTimeAnnotation = globalDomainName + "/predicate-time"
 	PodAssignedPhaseLabel      = globalDomainName + "/assigned-phase"
+	PodMetricsNodeLabel        = globalDomainName + "/metrics-node"
 
 	// PodVGPUPreAllocAnnotation Pre allocated device information by the scheduler
 	PodVGPUPreAllocAnnotation = globalDomainName + "/pre-allocated"
@@ -102,6 +103,7 @@ func initConstants() {
 	PodPredicateNodeAnnotation = globalDomainName + "/predicate-node"
 	PodPredicateTimeAnnotation = globalDomainName + "/predicate-time"
 	PodAssignedPhaseLabel = globalDomainName + "/assigned-phase"
+	PodMetricsNodeLabel = globalDomainName + "/metrics-node"
 	PodVGPUPreAllocAnnotation = globalDomainName + "/pre-allocated"
 	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
 }

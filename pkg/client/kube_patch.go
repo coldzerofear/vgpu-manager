@@ -88,6 +88,10 @@ func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod)
 			util.PodPredicateTimeAnnotation: pointer.String(predicateTime),
 		},
 	}
+	if len(pod.Spec.NodeName) > 0 {
+		// Covering to correct certain possible errors
+		patchData.Labels[util.PodMetricsNodeLabel] = &pod.Spec.NodeName
+	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		return PatchPodMetadata(kubeClient, pod, patchData)
 	})
@@ -95,19 +99,26 @@ func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod)
 
 // PatchPodAllocationAllocating patch pod metadata marking device allocation allocating.
 func PatchPodAllocationAllocating(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
+	var nodeName string
 	assignedPhase := util.AssignPhaseSucceed
 	predicateTime := fmt.Sprintf("%d", uint64(math.MaxUint64))
 	if util.IsVGPUResourcePod(pod) {
 		assignedPhase = util.AssignPhaseAllocating
 		predicateTime = fmt.Sprintf("%d", metav1.NowMicro().UnixNano())
+		nodeName, _ = util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
 	}
 	patchData := PatchMetadata{
 		Labels: map[string]*string{
+			util.PodMetricsNodeLabel:   nil,
 			util.PodAssignedPhaseLabel: pointer.String(string(assignedPhase)),
 		},
 		Annotations: map[string]*string{
 			util.PodPredicateTimeAnnotation: pointer.String(predicateTime),
 		},
+	}
+	if len(nodeName) > 0 {
+		// Covering to correct certain possible errors
+		patchData.Labels[util.PodMetricsNodeLabel] = &nodeName
 	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		return PatchPodMetadata(kubeClient, pod, patchData)
@@ -138,9 +149,11 @@ func PatchPodPreAllocatedMetadata(kubeClient kubernetes.Interface, pod *corev1.P
 	// Proactively clean labels to prevent device plugin misjudgment
 	patchData.Labels[util.PodAssignedPhaseLabel] = nil
 	nodeName := pod.Annotations[util.PodPredicateNodeAnnotation]
-	patchData.Annotations[util.PodPredicateNodeAnnotation] = pointer.String(nodeName)
+	// Enable monitoring to identify this pod
+	patchData.Labels[util.PodMetricsNodeLabel] = &nodeName
+	patchData.Annotations[util.PodPredicateNodeAnnotation] = &nodeName
 	preAlloc := pod.Annotations[util.PodVGPUPreAllocAnnotation]
-	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = pointer.String(preAlloc)
+	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = &preAlloc
 	patchData.Annotations[util.PodVGPURealAllocAnnotation] = pointer.String("")
 	// Stamp the current Filter wall-clock time. ShouldCountPodDeviceAllocation
 	// uses this as both:
