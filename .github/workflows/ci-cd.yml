@@ -1,4 +1,4 @@
-name: Build to Tencent CCR
+name: Build and Push to Tencent CCR
 
 on:
   push:
@@ -11,25 +11,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Tencent CLI
-        run: sudo apt update && sudo apt install -y python3-pip && sudo pip3 install tccli
-
-      - name: Get CCR Token
+      - name: Get CCR Temp Password (Direct API)
         run: |
-          tccli configure set secretId ${{ secrets.TENCENT_SECRET_ID }}
-          tccli configure set secretKey ${{ secrets.TENCENT_SECRET_KEY }}
-          tccli configure set region ap-beijing
+          apt install -y curl jq
+          SecretId="${{ secrets.TENCENT_SECRET_ID }}"
+          SecretKey="${{ secrets.TENCENT_SECRET_KEY }}"
           
-          # 获取临时密码
-          TOKEN=$(tccli ccr GetAuthorizationToken | grep -oP '"AuthorizationToken":"\K[^"]+')
-          echo "CCR_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          # 直接调用腾讯云 API 获取临时密码
+          res=$(curl -s -X POST https://ccr.api.tencentcloudapi.com/ \
+            -H "Content-Type: application/json" \
+            -H "X-TC-Action: GetAuthorizationToken" \
+            -H "X-TC-Version: 2018-12-01" \
+            -H "X-TC-Region: ap-beijing" \
+            -H "X-TC-SecretId: $SecretId" \
+            -H "X-TC-Timestamp: $(date +%s)" \
+            -d '{}')
+          
+          # 提取密码
+          pass=$(echo "$res" | jq -r .Response.AuthorizationToken)
+          echo "CCR_PASS=$pass" >> $GITHUB_ENV
 
       - name: Login to Tencent CCR
         uses: docker/login-action@v3
         with:
           registry: ccr.ccs.tencentyun.com
-          username: 100010001000   # 固定，不用改！
-          password: ${{ env.CCR_TOKEN }}
+          username: "100000000000"
+          password: ${{ env.CCR_PASS }}
 
       - name: Build and Push
         uses: docker/build-push-action@v5
