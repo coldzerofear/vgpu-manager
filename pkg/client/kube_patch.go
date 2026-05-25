@@ -77,7 +77,7 @@ func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod)
 	// All containers have been allocated.
 	if len(realDevices) >= len(preDevices) {
 		assignedPhase = util.AssignPhaseSucceed
-		predicateTime = fmt.Sprintf("%d", uint64(math.MaxUint64))
+		predicateTime = fmt.Sprintf("%d", uint64(math.MaxInt64))
 	}
 	patchData := PatchMetadata{
 		Labels: map[string]*string{
@@ -101,7 +101,7 @@ func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod)
 func PatchPodAllocationAllocating(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
 	var nodeName string
 	assignedPhase := util.AssignPhaseSucceed
-	predicateTime := fmt.Sprintf("%d", uint64(math.MaxUint64))
+	predicateTime := fmt.Sprintf("%d", uint64(math.MaxInt64))
 	if util.IsVGPUResourcePod(pod) {
 		assignedPhase = util.AssignPhaseAllocating
 		predicateTime = fmt.Sprintf("%d", metav1.NowMicro().UnixNano())
@@ -132,7 +132,7 @@ func PatchPodAllocationFailed(kubeClient kubernetes.Interface, pod *corev1.Pod) 
 			util.PodAssignedPhaseLabel: pointer.String(string(util.AssignPhaseFailed)),
 		},
 		Annotations: map[string]*string{
-			util.PodPredicateTimeAnnotation: pointer.String(fmt.Sprintf("%d", uint64(math.MaxUint64))),
+			util.PodPredicateTimeAnnotation: pointer.String(fmt.Sprintf("%d", uint64(math.MaxInt64))),
 		},
 	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
