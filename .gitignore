@@ -5,5 +5,7 @@ bin/
 build/
 library/build/
 library/build_test/
+library/build_baseline_off/
+library/build_baseline_on/
 library/.vscode/
 library/hack/__pycache__/

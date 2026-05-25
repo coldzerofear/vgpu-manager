@@ -156,3 +156,7 @@ test-vulkan-unit: ## Build + run the Vulkan layer unit tests under test/vulkan/.
 check-vulkan-layer: $(SO_FILE) ## Sanity-check the built .so for Vulkan-layer hygiene.
 	$(BASH) $(LIBRARY_DIR)hack/check_vulkan_layer.sh \
 	    $(SO_FILE) $(LIBRARY_DIR)deploy/vgpu_manager_implicit_layer.json
+
+.PHONY: check-vulkan-baseline
+check-vulkan-baseline: ## Build OFF + ON variants and diff symbol surface / load-time behaviour.
+	$(BASH) $(LIBRARY_DIR)test/vulkan/run_baseline.sh $(LIBRARY_DIR)
