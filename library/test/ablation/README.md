@@ -81,25 +81,33 @@ All passed via env to `run_ablation.sh` (which forwards to `collect.sh`):
 | Env | Default | Effect |
 |---|---|---|
 | `VGPU_SO` | (required) | absolute path to libvgpu-control.so |
-| `CUDA_DEVICE_SM_LIMIT` | 30 | `hard_core` target percent |
+| `CUDA_CORE_LIMIT` | 30 | **vgpu-manager's** hard_core target percent (the library reads this name; HAMi-core's `CUDA_DEVICE_SM_LIMIT` is **not** recognized) |
 | `ABLATION_DURATION_S` | 30 | wall time per variant |
-| `ABLATION_GPU_ID` | 0 | GPU index for both workload + sampler |
+| `ABLATION_GPU_ID` | 0 | GPU index for sampling + UUID lookup |
 | `ABLATION_SAMPLE_MS` | 100 | nvidia-smi sample interval |
 | `VARIANTS` | "delta aimd" | space-separated list of variant labels |
-| `AIMD_MD_DIVISOR` | (library default 3) | only when variant=aimd |
-| `AIMD_EFF_RATIO` | (library default 875) | only when variant=aimd |
-| `AIMD_AI_BASE_DIV` | (library default 400) | only when variant=aimd |
+| `CUDA_SM_AIMD_MD_DIVISOR` | (library default 3) | only used when controller=aimd |
+| `CUDA_SM_AIMD_EFF_RATIO` | (library default 875) | only used when controller=aimd |
+| `CUDA_SM_AIMD_AI_BASE_DIV` | (library default 400) | only used when controller=aimd |
 | `NVCC_ARCH` | (nvcc default) | e.g. `-arch=sm_80` for A100, `-arch=sm_90` for H100 |
 | `OUT_BASE` | `./data` | where the dated output dir is created |
 
+`NVIDIA_VISIBLE_DEVICES` is set automatically by `collect.sh` from the GPU's
+UUID (looked up via `nvidia-smi -i $ABLATION_GPU_ID`). Without it the library
+activates no device and the controller is never invoked, so every variant
+would report identical unthrottled samples -- the script fails fast if the
+UUID cannot be read.
+
 ### Parameter sweeps
 
-Free-form variant names work; the script passes the parent shell's env through:
+Free-form variant names work; `run_ablation.sh` forwards the parent shell's
+env to `collect.sh` unchanged, and the library reads its own `CUDA_SM_AIMD_*`
+envs only when `controller=aimd`. Use the library's actual env names:
 
 ```bash
 # Compare three MD factors on the same hardware
 for md in 2 3 4; do
-  AIMD_MD_DIVISOR=$md CUDA_SM_CONTROLLER=aimd \
+  CUDA_SM_AIMD_MD_DIVISOR=$md CUDA_SM_CONTROLLER=aimd \
     ./collect.sh "aimd_md$md" data/sweep-$(date +%Y%m%d)/aimd_md$md
 done
 python3 plot_compare.py data/sweep-$(date +%Y%m%d)/
@@ -114,7 +122,7 @@ Midokura calibrated AIMD v5 on RTX 4080 (consumer, SM=76, 1536/SM). For
 datacenter GPUs the SM count and thread granularity are larger by ~1.4-1.7x,
 so the default `÷3` MD can over-cut. Starting points worth measuring:
 
-| GPU | `AIMD_MD_DIVISOR` | `AIMD_AI_BASE_DIV` | Why |
+| GPU | `CUDA_SM_AIMD_MD_DIVISOR` | `CUDA_SM_AIMD_AI_BASE_DIV` | Why |
 |---|---|---|---|
 | RTX 4080 | 3 | 400 | Midokura defaults (validated) |
 | A100 | 2 or 3 | 800 | larger SM grid → smaller AI step |

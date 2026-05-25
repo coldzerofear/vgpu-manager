@@ -12,13 +12,13 @@
 # Required (no defaults guessed -- you want to know which .so you measured):
 #   VGPU_SO=/abs/path/to/libvgpu-control.so
 #
-# Optional knobs (forwarded to collect.sh):
-#   CUDA_DEVICE_SM_LIMIT=30
+# Optional knobs (all forwarded to collect.sh via env inheritance):
+#   CUDA_CORE_LIMIT=30                          # target SM percent (the lib env)
 #   ABLATION_DURATION_S=30
 #   ABLATION_GPU_ID=0
 #   ABLATION_SAMPLE_MS=100
-#   AIMD_MD_DIVISOR / AIMD_EFF_RATIO / AIMD_AI_BASE_DIV  (only used when the
-#                                                        active variant is aimd)
+#   CUDA_SM_AIMD_MD_DIVISOR / _EFF_RATIO / _AI_BASE_DIV    only read by the lib
+#                                                          when controller=aimd
 #   OUT_BASE=./data                             # where the dated dir is created
 
 set -o errexit
@@ -83,26 +83,20 @@ for variant in $VARIANTS; do
   VAR_OUT="$OUT_DIR/$variant"
   mkdir -p "$VAR_OUT"
 
-  # Each variant sets its own env. Anything not set here falls through to
-  # collect.sh's defaults.
+  # The library only reads CUDA_SM_AIMD_* when controller=aimd, so we don't
+  # need to scrub them on the delta path -- they're harmless. For free-form
+  # variants the parent shell's env is forwarded as-is, which is exactly
+  # what parameter sweeps want.
   case "$variant" in
     delta)
-      env -u CUDA_SM_AIMD_MD_DIVISOR \
-          -u CUDA_SM_AIMD_EFF_RATIO \
-          -u CUDA_SM_AIMD_AI_BASE_DIV \
-        CUDA_SM_CONTROLLER=delta \
+      CUDA_SM_CONTROLLER=delta \
         "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
       ;;
     aimd)
       CUDA_SM_CONTROLLER=aimd \
-      CUDA_SM_AIMD_MD_DIVISOR="${AIMD_MD_DIVISOR:-}" \
-      CUDA_SM_AIMD_EFF_RATIO="${AIMD_EFF_RATIO:-}" \
-      CUDA_SM_AIMD_AI_BASE_DIV="${AIMD_AI_BASE_DIV:-}" \
         "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
       ;;
     *)
-      # Free-form variant: caller controls env via the parent shell. Useful
-      # for parameter sweeps (e.g. variant="aimd_md2" with AIMD_MD_DIVISOR=2).
       "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
       ;;
   esac

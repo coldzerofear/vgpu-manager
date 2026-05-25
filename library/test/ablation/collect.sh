@@ -16,7 +16,11 @@
 #   WORKLOAD_BIN       absolute path to the built workload binary
 #
 # Optional env (caller chooses the variant by setting these):
-#   CUDA_DEVICE_SM_LIMIT       target SM utilization, percent (default 30)
+#   CUDA_CORE_LIMIT            target SM utilization, percent (default 30).
+#                              NOTE: this is the env name vgpu-manager's
+#                              library reads (util.c:17); the HAMi-core
+#                              upstream name CUDA_DEVICE_SM_LIMIT is NOT
+#                              recognized here.
 #   CUDA_SM_CONTROLLER         delta (default) | aimd
 #   CUDA_SM_AIMD_MD_DIVISOR    AIMD MD factor (only if controller=aimd)
 #   CUDA_SM_AIMD_EFF_RATIO     AIMD buffer / 1000
@@ -55,7 +59,7 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
   exit 2
 fi
 
-CUDA_DEVICE_SM_LIMIT="${CUDA_DEVICE_SM_LIMIT:-30}"
+CUDA_CORE_LIMIT="${CUDA_CORE_LIMIT:-30}"
 CUDA_SM_CONTROLLER="${CUDA_SM_CONTROLLER:-delta}"
 ABLATION_DURATION_S="${ABLATION_DURATION_S:-30}"
 ABLATION_GPU_ID="${ABLATION_GPU_ID:-0}"
@@ -66,8 +70,17 @@ SAMPLES="$OUT_DIR/samples.csv"
 WORKLOAD_LOG="$OUT_DIR/workload.log"
 META="$OUT_DIR/meta.json"
 
-# Capture GPU model name once (needed for meta + sanity).
+# Capture GPU identity. The UUID is mandatory: vgpu-manager's library only
+# virtualizes a device when its UUID appears in NVIDIA_VISIBLE_DEVICES (or
+# MANAGER_VISIBLE_DEVICES) -- without it core_limit stays off, the controller
+# is never invoked, and delta/aimd variants produce identical (unthrottled)
+# samples. See loader.c:1960 (get_manager_device_uuids -> get_nvidia_device_uuids).
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$ABLATION_GPU_ID" | head -1 | sed 's/^ *//;s/ *$//')
+GPU_UUID=$(nvidia-smi --query-gpu=uuid --format=csv,noheader -i "$ABLATION_GPU_ID" | head -1 | tr -d ' ')
+if [[ -z "$GPU_UUID" ]]; then
+  echo "error: could not read UUID for GPU $ABLATION_GPU_ID via nvidia-smi" >&2
+  exit 2
+fi
 
 # Sampler: nvidia-smi -lms emits one util value per cycle from a single long-
 # lived process (no per-sample fork overhead). We synthesize elapsed_ms from
@@ -85,13 +98,20 @@ trap 'kill "$SAMPLER_PID" 2>/dev/null || true; wait "$SAMPLER_PID" 2>/dev/null |
 # visible idle baseline at the start of the time series).
 sleep 0.5
 
-# Run the workload. CUDA_VISIBLE_DEVICES pins it to the same GPU we're sampling.
+# Run the workload.
+#   CUDA_VISIBLE_DEVICES   filters libcuda to a single physical GPU
+#                          (the workload then sees it as device 0).
+#   NVIDIA_VISIBLE_DEVICES tells vgpu-manager's library which GPU UUID to
+#                          virtualize -- without this the library activates
+#                          no device and core_limit stays off.
+#   CUDA_CORE_LIMIT        target percent (vgpu-manager's hard_core).
 START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 START_NS=$(date +%s%N)
 set +e
 CUDA_VISIBLE_DEVICES="$ABLATION_GPU_ID" \
+  NVIDIA_VISIBLE_DEVICES="$GPU_UUID" \
   LD_PRELOAD="$VGPU_SO" \
-  CUDA_DEVICE_SM_LIMIT="$CUDA_DEVICE_SM_LIMIT" \
+  CUDA_CORE_LIMIT="$CUDA_CORE_LIMIT" \
   CUDA_SM_CONTROLLER="$CUDA_SM_CONTROLLER" \
   CUDA_SM_AIMD_MD_DIVISOR="${CUDA_SM_AIMD_MD_DIVISOR:-}" \
   CUDA_SM_AIMD_EFF_RATIO="${CUDA_SM_AIMD_EFF_RATIO:-}" \
@@ -118,11 +138,12 @@ cat > "$META" <<JSON
 {
   "variant": "$VARIANT",
   "controller": "$CUDA_SM_CONTROLLER",
-  "target_sm_pct": $CUDA_DEVICE_SM_LIMIT,
+  "target_sm_pct": $CUDA_CORE_LIMIT,
   "duration_s_requested": $ABLATION_DURATION_S,
   "wall_ms_actual": $WALL_MS,
   "gpu_id": $ABLATION_GPU_ID,
   "gpu_name": "$GPU_NAME",
+  "gpu_uuid": "$GPU_UUID",
   "sample_interval_ms": $ABLATION_SAMPLE_MS,
   "aimd_md_divisor": "${CUDA_SM_AIMD_MD_DIVISOR:-default}",
   "aimd_eff_ratio": "${CUDA_SM_AIMD_EFF_RATIO:-default}",
@@ -135,6 +156,6 @@ cat > "$META" <<JSON
 }
 JSON
 
-echo "[$VARIANT] gpu=$GPU_NAME target=${CUDA_DEVICE_SM_LIMIT}% controller=$CUDA_SM_CONTROLLER duration=${ABLATION_DURATION_S}s rc=$WORKLOAD_RC samples=$(wc -l < "$SAMPLES")"
+echo "[$VARIANT] gpu=$GPU_NAME target=${CUDA_CORE_LIMIT}% controller=$CUDA_SM_CONTROLLER duration=${ABLATION_DURATION_S}s rc=$WORKLOAD_RC samples=$(wc -l < "$SAMPLES")"
 
 exit "$WORKLOAD_RC"
