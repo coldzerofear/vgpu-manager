@@ -24,6 +24,8 @@
 #include <sys/wait.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <time.h>
+#include <pthread.h>
 
 #include "include/hook.h"
 #include "include/cuda-helper.h"
@@ -77,6 +79,31 @@ static const struct timespec g_cycle = {
   .tv_sec = 0,
   .tv_nsec = TIME_TICK * MILLISEC,
 };
+
+/* ---- GAP-path SM throttle (event-timed duty cycle) -------------------- *
+ * A large kernel whose grid fits under the token budget slips past
+ * rate_limiter() and runs unthrottled until the NVML watcher reacts ~80ms
+ * later. For a launch that follows a >GAP_THRESHOLD_NS idle gap (the
+ * synchronize-heavy pattern) we instead time the kernel with cuEvents and
+ * inject a duty-cycle sleep. The target percentage follows the watcher's
+ * live limit (gap_effective_dc), so this cooperates with both hard_limit and
+ * soft (elastic) modes. The whole path is gated by per-device core_limit, so
+ * it costs a couple of comparisons when limiting is off.
+ * Design: docs/sm_core_limit_gap_throttle_design.md  (esp. §8 on locking). */
+#define GAP_THRESHOLD_NS   (200LL * 1000000LL)   /* idle > 200ms => a "gap"   */
+#define GAP_MAX_SLEEP_MS   500.0                 /* clamp pathological spikes */
+
+/* Per-device thread mutex: protects the process-private cuEvent pair and the
+ * g_gap_dc snapshot from concurrent launcher threads. NOT a cross-process
+ * lock by design (see §8) -- the events are process-local CUDA objects. */
+static pthread_mutex_t g_gap_lock[MAX_DEVICE_COUNT] = {
+  [0 ... MAX_DEVICE_COUNT - 1] = PTHREAD_MUTEX_INITIALIZER,
+};
+static CUevent          g_gap_start[MAX_DEVICE_COUNT]      = {0};
+static CUevent          g_gap_end[MAX_DEVICE_COUNT]        = {0};
+static int              g_gap_evt_ready[MAX_DEVICE_COUNT]  = {0};
+static int              g_gap_dc[MAX_DEVICE_COUNT]         = {0};
+static volatile int64_t g_last_launch_ns[MAX_DEVICE_COUNT] = {0};
 
 typedef enum {
   MEMORY_PATH_GPU = 0,
@@ -374,7 +401,10 @@ static int is[MAX_DEVICE_COUNT]             = {0};
  * not trigger the "new process detected, reset limits" branch at line 431. */
 static int pre_sys_process_nums[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
-static int up_limits[MAX_DEVICE_COUNT]      = {0};
+/* volatile: written by the watcher thread, read cross-thread by the GAP path
+ * (gap_effective_dc). Matches g_cur_cuda_cores' convention -- forces a real
+ * load (no register caching) of this single aligned int. */
+static volatile int up_limits[MAX_DEVICE_COUNT] = {0};
 static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
 
 static void *utilization_watcher(void *arg) {
@@ -468,6 +498,125 @@ static void *utilization_watcher(void *arg) {
              top_results[host_index].user_current, up_limits[host_index], shares[host_index], g_cur_cuda_cores[host_index]);
     }
   }
+}
+
+/* ====================================================================== *
+ *  GAP-path SM throttle helpers                                           *
+ *  See docs/sm_core_limit_gap_throttle_design.md                          *
+ * ====================================================================== */
+
+static inline int64_t monotonic_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/* Current effective duty-cycle target (percent) for the GAP path:
+ *   0      -> limiting disabled, no throttle
+ *   1..99  -> throttle to this percentage
+ *   >=100  -> currently allowed to burst at full speed, no throttle
+ * In soft mode it follows the watcher's live elastic limit (up_limits[]), so
+ * the GAP path inherits soft_core burst/back-off behaviour; in hard mode it
+ * is the static hard_core. Lock-free read of an int snapshot is intentional. */
+static int gap_effective_dc(int host_index) {
+  device_t *d = &g_vgpu_config->devices[host_index];
+  if (!d->core_limit) return 0;
+  if (d->hard_limit)  return d->hard_core;
+  int t = up_limits[host_index];
+  if (t <= 0) t = d->hard_core;   /* watcher not warmed up yet -> guarantee floor */
+  return t;
+}
+
+/* Lazily create the per-device cuEvent pair. Requires a current context
+ * (guaranteed at a launch site, cuCtxGetDevice has succeeded). Caller holds
+ * g_gap_lock[host_index]. */
+static int gap_events_ensure(int host_index) {
+  if (g_gap_evt_ready[host_index]) return 1;
+  CUresult r1 = CUDA_INTERNAL_CALL(cuda_library_entry, cuEventCreate,
+                                   &g_gap_start[host_index], CU_EVENT_DEFAULT);
+  CUresult r2 = CUDA_INTERNAL_CALL(cuda_library_entry, cuEventCreate,
+                                   &g_gap_end[host_index], CU_EVENT_DEFAULT);
+  if (r1 != CUDA_SUCCESS || r2 != CUDA_SUCCESS) {
+    LOGGER(VERBOSE, "host device %d: gap cuEventCreate failed (%d/%d)",
+           host_index, r1, r2);
+    return 0;
+  }
+  g_gap_evt_ready[host_index] = 1;
+  return 1;
+}
+
+/* Returns 1 if this launch enters the GAP path -- the caller MUST then call
+ * gap_end() after the real launch (it now owns g_gap_lock[host_index]).
+ * Returns 0 to fall through to the token bucket only. */
+static int gap_begin(int host_index, CUstream stream) {
+  if (host_index < 0) return 0;
+
+  int dc = gap_effective_dc(host_index);
+  if (dc <= 0 || dc >= 100) return 0;          /* disabled or full-speed burst */
+
+  int64_t now  = monotonic_ns();
+  int64_t last = g_last_launch_ns[host_index];
+  if (last != 0 && (now - last) < GAP_THRESHOLD_NS) {
+    g_last_launch_ns[host_index] = now;        /* BATCH region: token bucket handles it */
+    return 0;
+  }
+
+  /* Concurrent gap on the same device: don't stack -- let the other thread
+   * own the measurement, this launch falls back to the token bucket. */
+  if (pthread_mutex_trylock(&g_gap_lock[host_index]) != 0) return 0;
+
+  dc = gap_effective_dc(host_index);           /* re-snapshot under lock */
+  if (dc <= 0 || dc >= 100) {
+    pthread_mutex_unlock(&g_gap_lock[host_index]);
+    return 0;
+  }
+
+  /* Never inject events into a stream capturing a CUDA graph: cuEventRecord
+   * would be captured (deferred) and the cuEventSynchronize/ElapsedTime in
+   * gap_end would fail or corrupt the capture. Captured launches are normally
+   * back-to-back (no gap, never reach here), but a >200ms mid-capture pause
+   * could -- fall back to the token bucket. */
+  CUstreamCaptureStatus cap = CU_STREAM_CAPTURE_STATUS_NONE;
+  if (CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing)) &&
+      (CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing),
+                          stream, &cap) != CUDA_SUCCESS ||
+       cap != CU_STREAM_CAPTURE_STATUS_NONE)) {
+    /* capturing (or query failed) -> don't inject events; if the symbol is
+     * absent the driver predates CUDA graphs, so there is nothing to guard. */
+    pthread_mutex_unlock(&g_gap_lock[host_index]);
+    return 0;
+  }
+  g_gap_dc[host_index] = dc;
+
+  if (!gap_events_ensure(host_index) ||
+      CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuEventRecord),
+                         g_gap_start[host_index], stream) != CUDA_SUCCESS) {
+    pthread_mutex_unlock(&g_gap_lock[host_index]);
+    return 0;
+  }
+  return 1;
+}
+
+/* Records the end marker, measures GPU time, injects the duty-cycle sleep.
+ * Always stamps last-launch and releases the lock. delay = gpu_ms*(100/dc-1). */
+static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
+  if (launch_ret == CUDA_SUCCESS &&
+      CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuEventRecord),
+                         g_gap_end[host_index], stream) == CUDA_SUCCESS &&
+      CUDA_INTERNAL_CALL(cuda_library_entry, cuEventSynchronize,
+                         g_gap_end[host_index]) == CUDA_SUCCESS) {
+    float gpu_ms = 0.0f;
+    if (CUDA_INTERNAL_CALL(cuda_library_entry, cuEventElapsedTime, &gpu_ms,
+                           g_gap_start[host_index], g_gap_end[host_index]) == CUDA_SUCCESS
+        && gpu_ms > 0.0f) {
+      int dc = g_gap_dc[host_index];
+      double sleep_ms = (double)gpu_ms * (100.0 / (double)dc - 1.0);
+      if (sleep_ms > GAP_MAX_SLEEP_MS) sleep_ms = GAP_MAX_SLEEP_MS;
+      if (sleep_ms > 0.0) usleep((useconds_t)(sleep_ms * 1000.0));
+    }
+  }
+  g_last_launch_ns[host_index] = monotonic_ns();
+  pthread_mutex_unlock(&g_gap_lock[host_index]);
 }
 
 static batch_t batches[MAX_DEVICE_COUNT / DEVICE_BATCH_SIZE] = {};
@@ -1819,11 +1968,14 @@ CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX,
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
+  int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
               blockDimX * blockDimY * blockDimZ, device);
+  int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernel_ptsz, f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
                          sharedMemBytes, hStream, kernelParams, extra);
+  if (gap) gap_end(host_index, hStream, ret);
 DONE:
   return ret;
 }
@@ -1839,11 +1991,14 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
+  int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
               blockDimX * blockDimY * blockDimZ, device);
+  int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernel), f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
                          sharedMemBytes, hStream, kernelParams, extra);
+  if (gap) gap_end(host_index, hStream, ret);
 DONE:
   return ret;
 }
@@ -1856,10 +2011,13 @@ CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
+  int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(config->gridDimX * config->gridDimY * config->gridDimZ,
                config->blockDimX * config->blockDimY * config->blockDimZ, device);
+  int gap = gap_begin(host_index, config->hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernelEx),
                          config, f, kernelParams, extra);
+  if (gap) gap_end(host_index, config->hStream, ret);
 DONE:
   return ret;
 }
@@ -1872,15 +2030,19 @@ CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f,
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
+  int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(config->gridDimX *config->gridDimY * config->gridDimZ,
                config->blockDimX * config->blockDimY * config->blockDimZ, device);
-  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernelEx_ptsz, 
+  int gap = gap_begin(host_index, config->hStream);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernelEx_ptsz,
                          config, f, kernelParams, extra);
+  if (gap) gap_end(host_index, config->hStream, ret);
 DONE:
   return ret;
 }
 
 CUresult cuLaunch(CUfunction f) {
+  int gap = 0;
   CUresult ret; 
   CUdevice device;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
@@ -1892,8 +2054,10 @@ CUresult cuLaunch(CUfunction f) {
     goto CALL;
   }
   rate_limiter(1, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
+  gap = gap_begin(host_index, CU_STREAM_LEGACY);
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunch, f);
+  if (gap) gap_end(host_index, CU_STREAM_LEGACY, ret);
 DONE:
   return ret;
 }
@@ -1909,11 +2073,14 @@ CUresult cuLaunchCooperativeKernel_ptsz(
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
+  int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
                blockDimX * blockDimY * blockDimZ, device);
+  int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchCooperativeKernel_ptsz, f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
                          blockDimZ, sharedMemBytes, hStream, kernelParams);
+  if (gap) gap_end(host_index, hStream, ret);
 DONE:
   return ret;
 }
@@ -1928,16 +2095,20 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }    
+  int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
                blockDimX * blockDimY * blockDimZ, device);
+  int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchCooperativeKernel), f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
                          blockDimZ, sharedMemBytes, hStream, kernelParams);
+  if (gap) gap_end(host_index, hStream, ret);
 DONE:
   return ret;
 }
 
 CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
+  int gap = 0;
   CUresult ret;  
   CUdevice device;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
@@ -1949,13 +2120,16 @@ CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
     goto CALL;
   }
   rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
+  gap = gap_begin(host_index, CU_STREAM_LEGACY);
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGrid, f, grid_width,grid_height);
+  if (gap) gap_end(host_index, CU_STREAM_LEGACY, ret);
 DONE:
   return ret;
 }
 
 CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstream hStream) {
+  int gap = 0;
   CUresult ret;  
   CUdevice device;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
@@ -1967,8 +2141,10 @@ CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstre
     goto CALL;
   }
   rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
+  gap = gap_begin(host_index, hStream);
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGridAsync, f, grid_width, grid_height, hStream);
+  if (gap) gap_end(host_index, hStream, ret);
 DONE:
   return ret;
 }
