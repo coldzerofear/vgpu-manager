@@ -246,7 +246,7 @@ int get_sm_controller_kind(int *kind) {
  * sees a usable value rather than a silent zero. */
 static int get_positive_int_env(const char *name, int dflt, int *out) {
   char *str = getenv(name);
-  if (!str) {
+  if (!str || !*str) {            /* unset OR set-to-empty -> use default */
     *out = dflt;
     return -1;
   }
