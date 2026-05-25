@@ -20,4 +20,9 @@ void metrics_record_rate_limit_hit(int host_index);
 void metrics_record_watcher_miss(int host_index, metrics_watcher_reason_t reason);
 void metrics_record_nvml_fallback(int host_index);
 
+/* Set the SM controller label included in rate_limit_hit emissions. Called
+ * once at init from cuda_hook.c's sm_controller_init(). The pointer is
+ * captured as-is (caller keeps the string literal alive). Unset => "delta". */
+void metrics_set_controller_label(const char *name);
+
 #endif

@@ -58,6 +58,13 @@ extern int device_pid_in_same_container(unsigned int pid);
 extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
 extern int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size);
 
+/* SM throttle controller selection (see util.c). Defaults preserve stock
+ * behaviour when env is unset. */
+extern int get_sm_controller_kind(int *kind);
+extern int get_aimd_md_divisor(int *out);
+extern int get_aimd_eff_ratio(int *out);
+extern int get_aimd_ai_base_div(int *out);
+
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 
 /* `= {0}` relies on C's rule that any explicit initializer zero-fills the
@@ -393,6 +400,104 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   return share;
 }
 
+/* ====================================================================== *
+ *  Pluggable SM throttle controller                                       *
+ *                                                                         *
+ *  The per-cycle share update in the watcher loop is delegated to a       *
+ *  controller selected once at init by CUDA_SM_CONTROLLER:                *
+ *                                                                         *
+ *    "delta" (default)  -- the stock symmetric proportional controller    *
+ *                          (function `delta` above), keeps behaviour      *
+ *                          identical to the pre-AIMD build.               *
+ *    "aimd"             -- additive-increase / multiplicative-decrease,   *
+ *                          ported from midokura/HAMi-core branch          *
+ *                          ablation/orig-aimd-v5 (Stock MAE ~20% ->       *
+ *                          AIMD MAE ~3% on RTX 4080 measurements).        *
+ *                                                                         *
+ *  The controller is a drop-in for delta(): same signature, same call     *
+ *  sites, no change to the watcher's soft/hard mode logic or to the      *
+ *  GAP path (which reads up_limits[], not shares[]).                      *
+ * ====================================================================== */
+
+typedef int64_t (*sm_controller_fn)(int up_limit, int user_current,
+                                    int64_t share, int host_index);
+
+enum { SM_CONTROLLER_DELTA = 0, SM_CONTROLLER_AIMD = 1 };
+
+static int g_sm_controller_kind = SM_CONTROLLER_DELTA;
+static int g_aimd_md_divisor    = 3;     /* share /= div on overshoot     */
+static int g_aimd_eff_ratio     = 875;   /* eff_limit = up * 875 / 1000   */
+static int g_aimd_ai_base_div   = 400;   /* ai_step base divisor          */
+
+static int64_t aimd_controller(int up_limit, int user_current,
+                               int64_t share, int host_index);
+
+/* Function pointer set at init. Stays at delta if env is unset, so an
+ * uninitialised call before sm_controller_init() runs is still safe. */
+static sm_controller_fn g_sm_controller = delta;
+
+/* AIMD v5: additive increase (gap-proportional) when under the buffered
+ * limit, fast multiplicative cut otherwise. Asymmetric response is what
+ * pulls down the steady-state MAE compared to delta()'s symmetric step.
+ * Algorithm shape matches midokura's ablation; constants are env-tunable
+ * because the original was calibrated on RTX 4080 and big datacenter
+ * GPUs (A100/H100) likely need a less aggressive MD factor. */
+static int64_t aimd_controller(int up_limit, int user_current,
+                               int64_t share, int host_index) {
+  /* Effective cap below the real target -- start backing off early so we
+   * don't overshoot before the MD branch fires. */
+  int eff_limit = (int)((int64_t)up_limit * g_aimd_eff_ratio / 1000);
+  if (eff_limit < 1) eff_limit = 1;
+
+  if (user_current <= eff_limit) {
+    /* AI: gap-proportional step. The 'gap > 5 ? gap : 5' guard prevents
+     * stalling when we are already at/just above the target. Scaling base
+     * uses sm_num * max_thread_per_sm (matching delta()'s order of mag
+     * minus one sm_num factor, since AIMD doesn't need the diff^2 burst).
+     */
+    int64_t sm_num     = (int64_t)g_sm_num[host_index];
+    int64_t max_thread = (int64_t)g_max_thread_per_sm[host_index];
+    int gap = up_limit - user_current;
+    if (gap < 5) gap = 5;
+    int64_t ai_step = sm_num * max_thread * (int64_t)eff_limit
+                      / (int64_t)g_aimd_ai_base_div;
+    int64_t step = ai_step * (int64_t)gap / 5;
+    share += step;
+    if (share > g_total_cuda_cores[host_index]) {
+      share = g_total_cuda_cores[host_index];
+    }
+  } else {
+    /* MD: aggressive cut. Caller already clamps non-negative; we still
+     * guard to be defensive. */
+    share /= g_aimd_md_divisor;
+    if (share < 0) share = 0;
+  }
+  return share;
+}
+
+/* Called once from initialization() before watcher threads spawn. Reads
+ * env, picks the controller, logs the choice, and labels metrics. */
+static void sm_controller_init(void) {
+  int kind = SM_CONTROLLER_DELTA;
+  (void)get_sm_controller_kind(&kind);
+  g_sm_controller_kind = kind;
+
+  if (kind == SM_CONTROLLER_AIMD) {
+    (void)get_aimd_md_divisor(&g_aimd_md_divisor);
+    (void)get_aimd_eff_ratio(&g_aimd_eff_ratio);
+    (void)get_aimd_ai_base_div(&g_aimd_ai_base_div);
+    if (g_aimd_md_divisor < 2) g_aimd_md_divisor = 2;     /* /1 = no-op   */
+    g_sm_controller = aimd_controller;
+    LOGGER(INFO, "+ SmController   : aimd (md_div=%d eff_ratio=%d/1000 ai_base_div=%d)",
+           g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_ai_base_div);
+    metrics_set_controller_label("aimd");
+  } else {
+    g_sm_controller = delta;
+    LOGGER(INFO, "+ SmController   : delta (stock)");
+    metrics_set_controller_label("delta");
+  }
+}
+
 static int64_t shares[MAX_DEVICE_COUNT]    = {0};
 static int sys_frees[MAX_DEVICE_COUNT]      = {0};
 static int avg_sys_frees[MAX_DEVICE_COUNT]  = {0};
@@ -453,10 +558,10 @@ static void *utilization_watcher(void *arg) {
         /* Avoid usage jitter when application is initialized*/
         if (top_results[host_index].sys_process_num == 1 && top_results[host_index].user_current < up_limits[host_index] / 10) {
           g_cur_cuda_cores[host_index] =
-              delta(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+              g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
           continue;
         }
-        shares[host_index] = delta(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+        shares[host_index] = g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
       } else {
         if (pre_sys_process_nums[host_index] != top_results[host_index].sys_process_num) {
           /* When a new process comes, all processes are reset to initial value*/
@@ -478,7 +583,7 @@ static void *utilization_watcher(void *arg) {
          * cores according to the changed limit value.*/
         if (top_results[host_index].sys_process_num == 1) {
           up_limits[host_index] = g_vgpu_config->devices[host_index].soft_core;
-          shares[host_index] = delta(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
+          shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         } else {
           is[host_index]++;
           avg_sys_frees[host_index] += sys_frees[host_index];
@@ -490,7 +595,7 @@ static void *utilization_watcher(void *arg) {
             is[host_index] = 0;
           }
           avg_sys_frees[host_index] = is[host_index] % (g_dynamic_config.change_limit_interval / 2) == 0 ? 0 : avg_sys_frees[host_index];
-          shares[host_index] = delta(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
+          shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         }
       }
       change_token(shares[host_index], host_index);
@@ -722,6 +827,11 @@ static void initialization() {
   }
   int device_count;
   init_device_cuda_cores(&device_count);
+  /* Select the SM throttle controller (delta/aimd) before watcher threads
+   * start so the function pointer is already pointing at the right impl by
+   * the time they hit the dispatch. Safe to run on every initialization()
+   * call because pthread_once guards the whole function. */
+  sm_controller_init();
   balance_batches(device_count);
 }
 

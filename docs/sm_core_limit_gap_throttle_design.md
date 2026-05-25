@@ -408,6 +408,7 @@ GAP 路径在跨进程之间**没有共享可变状态**(events、`g_gap_dc`、`
 
 ## 11. 后续路线
 
+- **✅ 已落地 — AIMD watcher 控制器**(详见 [sm_controller_aimd.md](sm_controller_aimd.md)):与 GAP 路径**正交、互补** —— GAP 解大 kernel 同步模式下的瞬时偏差,AIMD 解 watcher 稳态围绕目标的高方差(参考 Midokura 实测数据:Stock MAE ~20% → AIMD MAE ~3%)。`CUDA_SM_CONTROLLER=aimd` 启用,默认 `delta`(stock)。
 - **P1 — BATCH 路径**：对密集小 kernel 按批次摊销 event 计时，替代纯令牌桶，提升小 kernel 场景的占比精度。
 - **P2 — 多进程协同**：复用已有的 `device_util_t` mmap 共享内存 + `F_SETLKW` 字节范围锁（参见 §8.5；对标 HAMi 商业版 `cudevshr.cache`），各进程发布 `(目标占比, 最近忙时)` 到共享账本，据聚合需求各算 sleep，使同卡合计 duty cycle 收敛到目标。注意：这是**账本协同**而非整卡互斥（§8.3）。
 - **P3 — 反馈融合**：将 GAP 实测的真实 GPU 用时回灌给 watcher，减少其对 NVML 采样的依赖与抖动。

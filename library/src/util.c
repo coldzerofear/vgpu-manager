@@ -24,6 +24,21 @@
 #define MANAGER_COMPATIBILITY_MODE_ENV "MANAGER_COMPATIBILITY_MODE"
 #define EXTERNAL_SM_WATCHER_ENABLED_ENV "EXTERNAL_SM_WATCHER_ENABLED"
 
+/* SM throttle controller selection + AIMD parameters. The watcher's per-cycle
+ * share update is delegated to a controller. Default keeps stock behaviour.
+ * AIMD ("aimd") implements the Midokura ablation/orig-aimd-v5 algorithm: slow
+ * additive increase (gap-proportional) + fast multiplicative decrease.
+ *
+ *   CUDA_SM_CONTROLLER       = "delta" (default) | "aimd"
+ *   CUDA_SM_AIMD_MD_DIVISOR  = MD factor (share /= div) - default 3
+ *   CUDA_SM_AIMD_EFF_RATIO   = effective-limit buffer / 1000 - default 875 (87.5%)
+ *   CUDA_SM_AIMD_AI_BASE_DIV = AI step base divisor - default 400
+ */
+#define CUDA_SM_CONTROLLER_ENV       "CUDA_SM_CONTROLLER"
+#define CUDA_SM_AIMD_MD_DIVISOR_ENV  "CUDA_SM_AIMD_MD_DIVISOR"
+#define CUDA_SM_AIMD_EFF_RATIO_ENV   "CUDA_SM_AIMD_EFF_RATIO"
+#define CUDA_SM_AIMD_AI_BASE_DIV_ENV "CUDA_SM_AIMD_AI_BASE_DIV"
+
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
   double value = 0.0;
@@ -210,6 +225,63 @@ int get_sm_watcher_enabled(int *i) {
   }
   value_enabled(str, i);
   return 0;
+}
+
+/* Returns 0 for the stock "delta" controller (default), 1 for "aimd".
+ * Anything not matching the AIMD spelling stays on delta. */
+int get_sm_controller_kind(int *kind) {
+  *kind = 0;
+  char *str = getenv(CUDA_SM_CONTROLLER_ENV);
+  if (!str) return -1;
+  if (strcasecmp(str, "aimd") == 0) {
+    *kind = 1;
+    return 0;
+  }
+  return 0;
+}
+
+/* Generic positive-int env getter with a fallback. Returns 0 if env was set
+ * and parsed; -1 if env unset (caller keeps its default). Parse failure or a
+ * non-positive value falls back to `dflt` and still returns 0 so the caller
+ * sees a usable value rather than a silent zero. */
+static int get_positive_int_env(const char *name, int dflt, int *out) {
+  char *str = getenv(name);
+  if (!str) {
+    *out = dflt;
+    return -1;
+  }
+  char *endp = NULL;
+  long v = strtol(str, &endp, 10);
+  if (endp == str || v <= 0 || v > INT_MAX) {
+    LOGGER(WARNING, "%s=\"%s\" is not a positive int, using default %d",
+           name, str, dflt);
+    *out = dflt;
+    return 0;
+  }
+  *out = (int)v;
+  return 0;
+}
+
+int get_aimd_md_divisor(int *out) {
+  return get_positive_int_env(CUDA_SM_AIMD_MD_DIVISOR_ENV, 3, out);
+}
+
+/* Effective-limit ratio expressed as parts-per-thousand (875 = 87.5%) so the
+ * env can be a plain integer. Clamped to (0, 1000]. */
+int get_aimd_eff_ratio(int *out) {
+  int v = 875;
+  int rc = get_positive_int_env(CUDA_SM_AIMD_EFF_RATIO_ENV, 875, &v);
+  if (v > 1000) {
+    LOGGER(WARNING, "%s=%d > 1000, clamped to 1000",
+           CUDA_SM_AIMD_EFF_RATIO_ENV, v);
+    v = 1000;
+  }
+  *out = v;
+  return rc;
+}
+
+int get_aimd_ai_base_div(int *out) {
+  return get_positive_int_env(CUDA_SM_AIMD_AI_BASE_DIV_ENV, 400, out);
 }
 
 static int compare_pids(const void *a, const void *b) {

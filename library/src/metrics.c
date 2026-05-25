@@ -12,6 +12,15 @@ static volatile uint64_t g_nvml_fallback_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_oom_total_limit_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_oom_driver_return_total[MAX_DEVICE_COUNT] = {0};
 
+/* SM controller label included in rate_limit_hit emissions. Set once at
+ * init by sm_controller_init() in cuda_hook.c; "delta" is the safe default
+ * if init is delayed (counter still increments, label is just the default). */
+static const char *g_sm_controller_label = "delta";
+
+void metrics_set_controller_label(const char *name) {
+  if (name && *name) g_sm_controller_label = name;
+}
+
 static int is_valid_metric_index(int index) {
   return index >= 0 && index < MAX_DEVICE_COUNT;
 }
@@ -80,8 +89,21 @@ void metrics_record_uva_fallback(int host_index) {
 }
 
 void metrics_record_rate_limit_hit(int host_index) {
-  maybe_log_counter_metric("kernel_rate_limit_hit", host_index,
-                           &g_kernel_rate_limit_hit_total[host_index]);
+  uint64_t total;
+  if (!should_collect_metrics() || !is_valid_metric_index(host_index)) {
+    return;
+  }
+  total = __sync_add_and_fetch(&g_kernel_rate_limit_hit_total[host_index], 1);
+  /* Power-of-two sampling matches maybe_log_counter_metric. The controller
+   * label lets operators distinguish hit-rate distribution shifts caused by
+   * switching CUDA_SM_CONTROLLER (e.g. delta -> aimd) from real workload
+   * changes. AIMD typically increases the hit count (tighter control => more
+   * frequent shorter rate_limiter sleeps) which would otherwise look like a
+   * regression on dashboards. */
+  if ((total & (total - 1)) == 0) {
+    LOGGER(INFO, "metric=kernel_rate_limit_hit host_device=%d controller=%s total=%" PRIu64,
+           host_index, g_sm_controller_label, total);
+  }
 }
 
 void metrics_record_watcher_miss(int host_index, metrics_watcher_reason_t reason) {
