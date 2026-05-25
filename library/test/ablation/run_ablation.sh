@@ -62,6 +62,7 @@ if [[ ! -x "$WORKLOAD_BIN" || "$SCRIPT_DIR/workload.cu" -nt "$WORKLOAD_BIN" ]]; 
   echo "==> Building workload"
   # -O2 is enough; we want sustained compute, not micro-benchmark precision.
   # No -arch flag -> nvcc picks a default; override with NVCC_ARCH=-arch=sm_80 etc.
+  # shellcheck disable=SC2086  # intentional: empty NVCC_ARCH must produce 0 args, not 1 empty arg
   nvcc ${NVCC_ARCH:-} -O2 "$SCRIPT_DIR/workload.cu" -o "$WORKLOAD_BIN"
 fi
 export WORKLOAD_BIN
@@ -89,12 +90,10 @@ for variant in $VARIANTS; do
   # what parameter sweeps want.
   case "$variant" in
     delta)
-      CUDA_SM_CONTROLLER=delta \
-        "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
+      env CUDA_SM_CONTROLLER=delta "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
       ;;
     aimd)
-      CUDA_SM_CONTROLLER=aimd \
-        "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
+      env CUDA_SM_CONTROLLER=aimd "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
       ;;
     *)
       "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"

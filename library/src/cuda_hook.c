@@ -682,6 +682,10 @@ static int gap_begin(int host_index, CUstream stream) {
    * back-to-back (no gap, never reach here), but a >200ms mid-capture pause
    * could -- fall back to the token bucket. */
   CUstreamCaptureStatus cap = CU_STREAM_CAPTURE_STATUS_NONE;
+  /* cppcheck-suppress knownConditionTrueFalse
+   * (cppcheck cannot see through CUDA_INTERNAL_CALL's macro-expanded function
+   *  pointer that writes to &cap, so it thinks cap is unchanged from its
+   *  initializer -- it is not, cuStreamIsCapturing populates it.) */
   if (CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing)) &&
       (CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing),
                           stream, &cap) != CUDA_SUCCESS ||
