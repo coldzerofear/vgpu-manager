@@ -121,7 +121,9 @@ func (r *recoveryController) processNextItem() bool {
 }
 
 var (
-	removedLabels      = []string{util.PodAssignedPhaseLabel}
+	removedLabels = []string{
+		util.PodAssignedPhaseLabel, util.PodMetricsNodeLabel,
+	}
 	removedAnnotations = []string{
 		util.PodVGPUPreAllocAnnotation, util.PodVGPURealAllocAnnotation,
 		util.PodPredicateNodeAnnotation, util.PodPredicateTimeAnnotation,

@@ -203,6 +203,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: FEATURE_GATES
+              value: SharedSMUtilizationWatcher=true,DevicePluginClientMode=false
             - name: MASK_NVIDIA_DRIVER_PARAMS
               value: ""
             - name: NVIDIA_DRIVER_ROOT

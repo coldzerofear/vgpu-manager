@@ -6,7 +6,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -26,14 +28,21 @@ const (
 )
 
 func GetPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
-	informer := factory.Core().V1().Pods().Informer()
+	informer := factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
+		watcher := cache.NewFilteredListWatchFromClient(k.CoreV1().RESTClient(),
+			"pods", corev1.NamespaceAll, func(options *metav1.ListOptions) {
+				options.LabelSelector = labels.Set{util.PodMetricsNodeLabel: nodeName}.String()
+			})
+		indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
+		return cache.NewSharedIndexInformer(watcher, &corev1.Pod{}, d, indexers)
+	})
 	return informer, informer.AddIndexers(map[string]cache.IndexFunc{
 		IndexerKeyPodPlanSchedulingNode: func(obj interface{}) ([]string, error) {
-			indexerValue := ""
+			var indexerValues []string
 			if pod, ok := obj.(*corev1.Pod); ok {
-				indexerValue = util.PodPlanSchedulingNode(pod)
+				indexerValues = []string{util.PodPlanSchedulingNode(pod)}
 			}
-			return []string{indexerValue}, nil
+			return indexerValues, nil
 		},
 		IndexerKeyPodDeviceAllocationCountable: func(obj interface{}) ([]string, error) {
 			indexerValue := "false"

@@ -7,7 +7,7 @@ FROM quay.io/jitesoft/ubuntu:20.04
 
 ENV NVIDIA_DISABLE_REQUIRE="true"
 
-ARG BUILD_VERSION="N/A"
+ARG BUILD_VERSION="v1.0.0"
 ARG GIT_COMMIT="unknown"
 ARG BUILD_DATE="1970-01-01T00:00:00Z"
 
@@ -36,7 +36,7 @@ COPY --from=builder /go/src/vgpu-manager/bin/device-webhook   /usr/local/bin/dev
 COPY --from=builder /LICENSE /LICENSE
 COPY --chmod=755 scripts/install_files.sh scripts/install_files.sh
 
-COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
+COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so.$BUILD_VERSION
 COPY --from=builder /vgpu-controller/build/mem_occupy_tool    /installed/tools/mem_occupy_tool
 COPY --from=builder /vgpu-controller/build/mem_managed_tool   /installed/tools/mem_managed_tool
 COPY --from=builder /vgpu-controller/build/mem_view_tool      /installed/tools/mem_view_tool

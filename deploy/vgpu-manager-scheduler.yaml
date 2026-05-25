@@ -137,13 +137,15 @@ data:
     - urlPrefix: "http://127.0.0.1:3456/scheduler"
       filterVerb: filter
       bindVerb: bind
+      preemptVerb: preempt
       enableHTTPS: false
       nodeCacheCapable: true
       weight: 1
       httpTimeout: 30s
+      ignorable: false
       managedResources:
       - name: "nvidia.com/vgpu-number"
-        ignoredByScheduler: true
+        ignoredByScheduler: false
       - name: "nvidia.com/vgpu-cores"
         ignoredByScheduler: true
       - name: "nvidia.com/vgpu-memory"

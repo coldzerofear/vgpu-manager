@@ -51,10 +51,13 @@ func (b *nodeBinding) IsReady(ctx context.Context) bool {
 }
 
 func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingArgs) *extenderv1.ExtenderBindingResult {
+	klog.V(4).InfoS("BindingNode", "ExtenderBindingArgs", args)
+	if len(args.Node) == 0 {
+		return &extenderv1.ExtenderBindingResult{Error: "ExtenderBindingArgs.Node cannot be empty"}
+	}
+
 	b.locker.Lock(args.Node)
 	defer b.locker.Unlock(args.Node)
-
-	klog.V(4).InfoS("BindingNode", "ExtenderBindingArgs", args)
 
 	var (
 		pod *corev1.Pod

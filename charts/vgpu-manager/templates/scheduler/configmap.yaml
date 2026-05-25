@@ -47,12 +47,20 @@ data:
     {{- end }}
       filterVerb: filter
       bindVerb: bind
+      preemptVerb: preempt
       nodeCacheCapable: true
       weight: 1
       httpTimeout: 30s
+      ignorable: false
       managedResources:
+      # vgpu-number participates in in-tree NodeResourcesFit so default
+      # preemption's SelectVictimsOnNode can identify candidate victims by
+      # count. Our preempt extender then refines the set against the full
+      # vGPU view (per-device packing, UUID/type/NUMA). cores/memory remain
+      # extender-owned because their per-device aggregation cannot be
+      # expressed via standard extended resources.
       - name: "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-number"
-        ignoredByScheduler: true
+        ignoredByScheduler: false
       - name: "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-cores"
         ignoredByScheduler: true
       - name: "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-memory"
@@ -77,13 +85,14 @@ data:
           {{- end }}
           "filterVerb": "filter",
           "bindVerb": "bind",
+          "preemptVerb": "preempt",
           "weight": 1,
           "nodeCacheCapable": true,
           "httpTimeout": 30000000000,
           "managedResources": [
             {
               "name": "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-number",
-              "ignoredByScheduler": true
+              "ignoredByScheduler": false
             },
             {
               "name": "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-cores",

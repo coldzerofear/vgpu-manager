@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/component-base/logs"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -24,6 +25,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/bind"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	tlsconfig "github.com/grepplabs/cert-source/config"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
 	tlsserverconfig "github.com/grepplabs/cert-source/tls/server/config"
@@ -52,6 +54,7 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 	util.MustInitGlobalDomain(opt.Domain)
+	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {
@@ -104,6 +107,10 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler BindPlugin failed: %v", err)
 	}
+	preemptPlugin, err := preempt.New(factory, recorder, filterPlugin.GetPodLister())
+	if err != nil {
+		klog.Fatalf("Initialization of scheduler PreemptPlugin failed: %v", err)
+	}
 
 	handler := httprouter.New()
 	route.AddVersion(handler)
@@ -116,6 +123,7 @@ func main() {
 	})
 	route.AddFilterPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
+	route.AddPreemptPredicate(handler, preemptPlugin)
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	factory.Start(ctx.Done())

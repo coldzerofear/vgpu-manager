@@ -22,6 +22,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/checkpoint"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -457,7 +458,7 @@ const (
 var (
 	HostManagerDirectoryPath = os.Getenv("HOST_MANAGER_DIR")
 	HostPreLoadFilePath      = filepath.Join(HostManagerDirectoryPath, LdPreLoadFileName)
-	HostVGPUControlFilePath  = filepath.Join(HostManagerDirectoryPath, VGPUControlFileName)
+	HostVGPUControlFilePath  = fmt.Sprintf("%s.%s", filepath.Join(HostManagerDirectoryPath, VGPUControlFileName), version.Get().Version)
 	HostWatcherDirectoryPath = filepath.Join(HostManagerDirectoryPath, util.Watcher)
 	HostDeviceRegistryPath   = filepath.Join(HostManagerDirectoryPath, util.Registry)
 )
@@ -964,15 +965,17 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 			"pod", klog.KObj(pod), "container", podInfo.ContainerName)
 		return resp, fmt.Errorf("write vGPU config failed: %w", err)
 	}
-	// Extra check the size of the VGPU configuration file.
-	// When a version upgrade causes a change in the configuration structure,
-	// the controller can reschedule these pods that cannot be started
-	if err = vgpu.CheckResourceDataSize(configFilePath); err != nil {
-		klog.ErrorS(err, "check resource data size failed", "pod",
-			klog.KObj(pod), "container", podInfo.ContainerName, "filePath", configFilePath)
-		return resp, fmt.Errorf("check resource data size failed: %w", err)
-	}
 
+	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.Reschedule) {
+		// Extra check the size of the vGPU configuration file.
+		// When a version upgrade causes a change in the configuration structure,
+		// the controller can reschedule these pods that cannot be started
+		if err = vgpu.CheckResourceDataSize(configFilePath); err != nil {
+			klog.ErrorS(err, "check resource data size failed", "pod",
+				klog.KObj(pod), "container", podInfo.ContainerName, "filePath", configFilePath)
+			return resp, fmt.Errorf("check resource data size failed: %w", err)
+		}
+	}
 	return resp, nil
 }
 

@@ -38,13 +38,13 @@ type gpuFilter struct {
 
 const (
 	Name                     = "FilterPredicate"
-	indexerKeyPodRequestVGPU = "pod.requestVGPU"
+	IndexerKeyPodRequestVGPU = "pod.requestVGPU"
 )
 
 var (
 	_           predicate.FilterPredicate = &gpuFilter{}
 	podIndexers                           = cache.Indexers{
-		indexerKeyPodRequestVGPU: func(obj interface{}) ([]string, error) {
+		IndexerKeyPodRequestVGPU: func(obj interface{}) ([]string, error) {
 			if pod, ok := obj.(*corev1.Pod); ok && util.IsVGPUResourcePod(pod) {
 				return []string{"true"}, nil
 			}
@@ -97,13 +97,19 @@ func (f *gpuFilter) IsReady(ctx context.Context) bool {
 
 func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
 	klog.V(4).InfoS("FilterNode", "ExtenderArgs", args)
-	if args.Pod == nil {
+	pod := args.Pod
+	if pod == nil {
 		return &extenderv1.ExtenderFilterResult{
 			Error: "ExtenderArgs.Pod cannot be empty",
 		}
 	}
-	if !util.IsVGPUResourcePod(args.Pod) {
-		klog.V(5).InfoS("Skip pods that do not request vGPU", "pod", klog.KObj(args.Pod))
+	if pod.Spec.NodeName != "" {
+		return &extenderv1.ExtenderFilterResult{
+			Error: "Pod has specified nodes to " + pod.Spec.NodeName,
+		}
+	}
+	if !util.IsVGPUResourcePod(pod) {
+		klog.V(5).InfoS("Skip pods that do not request vGPU", "pod", klog.KObj(pod))
 		return &extenderv1.ExtenderFilterResult{
 			Nodes:     args.Nodes,
 			NodeNames: args.NodeNames,
@@ -136,7 +142,7 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 	}
 
 	for i, filter := range filters {
-		passedNodes, failedNodes, err := filter(args.Pod, filteredNodes)
+		passedNodes, failedNodes, err := filter(pod, filteredNodes)
 		if err != nil {
 			klog.Errorf("Filter %d (%T) call failed: %v", i, filter, err)
 			return &extenderv1.ExtenderFilterResult{Error: err.Error()}
@@ -348,7 +354,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	f.locker.Lock()
 	defer f.locker.Unlock()
 
-	pods, err := f.podLister.ListByIndexValue(indexerKeyPodRequestVGPU, "true")
+	pods, err := f.podLister.ListByIndexValue(IndexerKeyPodRequestVGPU, "true")
 	if err != nil {
 		klog.ErrorS(err, "PodLister list all vGPU Pods failed")
 		return filteredNodes, failedNodesMap, err
@@ -376,7 +382,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				batchNodeOrigPosition[node.Name] = index
 				nodeInfo, err := device.NewNodeInfo(node, pods, pod.UID)
 				if err != nil {
-					klog.V(3).ErrorS(err, "new node info failed, skipping node", "node", node.Name)
+					klog.V(3).ErrorS(err, "new NodeInfo failed, skipping node", "node", node.Name)
 					batchFailedNodes[node.Name] = err.Error()
 					continue
 				}

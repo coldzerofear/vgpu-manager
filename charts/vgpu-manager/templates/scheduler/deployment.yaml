@@ -112,6 +112,7 @@ spec:
             - --tls-cert-file={{ .Values.scheduler.schedulerExtender.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.crt
             - --cert-refresh-interval={{ .Values.scheduler.schedulerExtender.commands.certRefreshInterval | default 5 }}
             {{- end }}
+            - --stuck-grace-period={{ .Values.scheduler.schedulerExtender.commands.stuckGracePeriod | default "30s" }}
             - --v={{ .Values.scheduler.schedulerExtender.commands.logLevel }}
           ports:
             {{- if .Values.scheduler.schedulerExtender.tls.enabled }}

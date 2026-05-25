@@ -167,6 +167,19 @@ func Test_BindPredicate(t *testing.T) {
 			},
 			result: &extenderv1.ExtenderBindingResult{},
 		},
+		{
+			name: "example6: node is empty",
+			pod:  nil,
+			args: extenderv1.ExtenderBindingArgs{
+				PodName:      "test1",
+				PodNamespace: "default",
+				PodUID:       poduid,
+				Node:         "",
+			},
+			result: &extenderv1.ExtenderBindingResult{
+				Error: "ExtenderBindingArgs.Node cannot be empty",
+			},
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
