@@ -195,7 +195,7 @@ static void init_device_cuda_cores(int *device_count);
 
 static void initialization();
 
-static void rate_limiter(int grids, int blocks, CUdevice device);
+static void rate_limiter(int grids, int blocks, int host_index);
 
 static void change_token(int64_t, int);
 
@@ -339,9 +339,8 @@ static void change_token(int64_t delta, int host_index) {
   } while (!CAS(&g_cur_cuda_cores[host_index], cuda_cores_before, cuda_cores_after));
 }
 
-static void rate_limiter(int grids, int blocks, CUdevice device) {
+static void rate_limiter(int grids, int blocks, int host_index) {
   (void)blocks;
-  int host_index = get_host_device_index_by_cuda_device(device);
   if (host_index < 0) {
     return;
   }
@@ -2084,7 +2083,7 @@ CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX,
   }
   int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, device);
+              blockDimX * blockDimY * blockDimZ, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernel_ptsz, f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
@@ -2107,7 +2106,7 @@ CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX,
   }
   int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
-              blockDimX * blockDimY * blockDimZ, device);
+              blockDimX * blockDimY * blockDimZ, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernel), f, gridDimX,
                          gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
@@ -2127,7 +2126,7 @@ CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
   }
   int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(config->gridDimX * config->gridDimY * config->gridDimZ,
-               config->blockDimX * config->blockDimY * config->blockDimZ, device);
+               config->blockDimX * config->blockDimY * config->blockDimZ, host_index);
   int gap = gap_begin(host_index, config->hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernelEx),
                          config, f, kernelParams, extra);
@@ -2146,7 +2145,7 @@ CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f,
   }
   int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(config->gridDimX *config->gridDimY * config->gridDimZ,
-               config->blockDimX * config->blockDimY * config->blockDimZ, device);
+               config->blockDimX * config->blockDimY * config->blockDimZ, host_index);
   int gap = gap_begin(host_index, config->hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernelEx_ptsz,
                          config, f, kernelParams, extra);
@@ -2156,7 +2155,6 @@ DONE:
 }
 
 CUresult cuLaunch(CUfunction f) {
-  int gap = 0;
   CUresult ret; 
   CUdevice device;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
@@ -2164,12 +2162,8 @@ CUresult cuLaunch(CUfunction f) {
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  if (host_index < 0) {
-    goto CALL;
-  }
-  rate_limiter(1, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
-  gap = gap_begin(host_index, CU_STREAM_LEGACY);
-CALL:
+  rate_limiter(1, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], host_index);
+  int gap = gap_begin(host_index, CU_STREAM_LEGACY);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunch, f);
   if (gap) gap_end(host_index, CU_STREAM_LEGACY, ret);
 DONE:
@@ -2189,7 +2183,7 @@ CUresult cuLaunchCooperativeKernel_ptsz(
   }
   int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
-               blockDimX * blockDimY * blockDimZ, device);
+               blockDimX * blockDimY * blockDimZ, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchCooperativeKernel_ptsz, f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
@@ -2211,7 +2205,7 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
   }    
   int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
-               blockDimX * blockDimY * blockDimZ, device);
+               blockDimX * blockDimY * blockDimZ, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchCooperativeKernel), f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
@@ -2222,7 +2216,6 @@ DONE:
 }
 
 CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
-  int gap = 0;
   CUresult ret;  
   CUdevice device;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
@@ -2230,12 +2223,8 @@ CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height) {
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  if (host_index < 0) {
-    goto CALL;
-  }
-  rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
-  gap = gap_begin(host_index, CU_STREAM_LEGACY);
-CALL:
+  rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], host_index);
+  int gap = gap_begin(host_index, CU_STREAM_LEGACY);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGrid, f, grid_width,grid_height);
   if (gap) gap_end(host_index, CU_STREAM_LEGACY, ret);
 DONE:
@@ -2243,7 +2232,6 @@ DONE:
 }
 
 CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstream hStream) {
-  int gap = 0;
   CUresult ret;  
   CUdevice device;
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
@@ -2251,12 +2239,8 @@ CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstre
     goto DONE;
   }
   int host_index = get_host_device_index_by_cuda_device(device);
-  if (host_index < 0) {
-    goto CALL;
-  }
-  rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], device);
-  gap = gap_begin(host_index, hStream);
-CALL:
+  rate_limiter(grid_width * grid_height, g_block_x[host_index] * g_block_y[host_index] * g_block_z[host_index], host_index);
+  int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGridAsync, f, grid_width, grid_height, hStream);
   if (gap) gap_end(host_index, hStream, ret);
 DONE:
