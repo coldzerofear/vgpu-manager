@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
@@ -37,34 +36,28 @@ func (alloc *allocator) addAllocateOne(contDevices *device.ContainerDeviceClaim)
 	return nil
 }
 
-// Allocate tries to find a suitable GPU device for containers
-// and records some data in pod's annotation
-func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
+// Allocate runs the per-container allocation loop and writes the result
+// onto the returned pod's annotations. The request is pre-parsed (see
+// BuildAllocationRequest) so this function — and everything it calls —
+// reads scheduling annotations off req instead of re-parsing them per
+// container iteration. The C2 follow-up adds a dispatch in front that
+// can route topology-mode multi-container pods through a pod-level path.
+func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, error) {
+	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
 	newPod := pod.DeepCopy()
-	// One profile per pod: weights are derived purely from the pod's own
-	// container requests (see NewRequestProfile for why no node info
-	// reaches this call). Filter and allocator compute identical weights
-	// for the same pod, so cross-node ranking and per-node device-policy
-	// tie-breaking stay coherent without threading any node-specific
-	// normalisation through.
-	profile := NewRequestProfile(pod)
 	var podAssignDevices device.PodDeviceClaim
-	for i := range newPod.Spec.Containers {
-		container := &pod.Spec.Containers[i]
-		// Skip containers that do not request vGPU.
-		if !util.IsVGPURequiredContainer(container) {
-			continue
-		}
-		assignDevices, err := alloc.allocateOne(newPod, container, profile)
+	for i := range req.Containers {
+		need := req.Containers[i]
+		assignDevices, err := alloc.allocateOne(req, need)
 		if err != nil {
 			klog.V(4).InfoS(err.Error(), "node", alloc.nodeInfo.GetName(),
-				"pod", klog.KObj(pod), "container", container.Name)
+				"pod", klog.KObj(pod), "container", need.Name)
 			return nil, err
 		}
 		if err = alloc.addAllocateOne(assignDevices); err != nil {
 			klog.V(3).ErrorS(err, "Failed to add assigned resources", "node",
-				alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", container.Name)
+				alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
 			return nil, fmt.Errorf("internal device scheduling error")
 		}
 		podAssignDevices = append(podAssignDevices, *assignDevices)
@@ -88,12 +81,13 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 	return uuids
 }
 
-func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container, profile RequestProfile) (*device.ContainerDeviceClaim, error) {
-	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", container.Name, alloc.nodeInfo.GetName())
+func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) (*device.ContainerDeviceClaim, error) {
+	pod := req.Pod
+	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", need.Name, alloc.nodeInfo.GetName())
 	node := alloc.nodeInfo.GetNode()
-	needNumber := int(util.GetResourceOfContainer(container, util.VGPUNumberResourceName))
-	needCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
-	needMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
+	needNumber := need.Number
+	needCores := need.Cores
+	needMemory := need.Memory
 	if needNumber > alloc.nodeInfo.GetDeviceCount() {
 		return nil, errors.New("insufficient GPU cards")
 	}
@@ -109,7 +103,6 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	var (
 		deviceClaims []device.DeviceClaim
 		topoErr      error
-		devicePolicy string
 	)
 	deviceStore, reasonStore := alloc.filterDevices(pod, needCores, needMemory)
 	if needNumber > len(deviceStore) {
@@ -124,7 +117,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		// (e.g. 4 GPUs across two NUMA nodes would falsely succeed for
 		// numa-strict). Non-strict requests keep the fast path because their
 		// result would be identical either way.
-		if _, strict := parseTopologyMode(pod); !strict || needNumber <= 1 {
+		if !req.TopologyStrict || needNumber <= 1 {
 			deviceClaims = allocateByNumbers(deviceStore, needNumber, needCores, needMemory)
 			goto DONE
 		}
@@ -133,27 +126,31 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 		// violation. The downstream sort is harmless: with needNumber == len
 		// there is only one possible set, so order does not change the result.
 	}
-	// Sort the devices according to the device scheduling strategy.
-	devicePolicy, _ = util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation)
-	switch policy := strings.ToLower(devicePolicy); policy {
-	case string(util.BinpackPolicy):
-		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, policy)
+	// Sort the devices according to the device scheduling strategy. The
+	// policy was normalised at BuildAllocationRequest time, so the switch
+	// here is over the enum directly — unrecognised user input collapsed
+	// to NonePolicy and surfaces as the default branch's "unsupported"
+	// event, keyed on req.rawDevicePolicy to preserve the original wording.
+	switch req.DevicePolicy {
+	case util.BinpackPolicy:
+		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
 		NewDeviceBinpackPriority().Sort(deviceStore)
-		deviceClaims, topoErr = alloc.allocateByTopologyMode(pod, deviceStore, profile, util.BinpackPolicy, needNumber, needCores, needMemory)
-	case string(util.SpreadPolicy):
-		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, policy)
+		deviceClaims, topoErr = alloc.allocateByTopologyMode(req, deviceStore, util.BinpackPolicy, needNumber, needCores, needMemory)
+	case util.SpreadPolicy:
+		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
 		NewDeviceSpreadPriority().Sort(deviceStore)
-		deviceClaims, topoErr = alloc.allocateByTopologyMode(pod, deviceStore, profile, util.SpreadPolicy, needNumber, needCores, needMemory)
+		deviceClaims, topoErr = alloc.allocateByTopologyMode(req, deviceStore, util.SpreadPolicy, needNumber, needCores, needMemory)
 	default:
-		if policy == "" || policy == string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
-		} else {
-			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s", pod.Namespace, pod.Name, devicePolicy)
+		if req.rawDevicePolicy != "" && req.rawDevicePolicy != string(util.NonePolicy) {
+			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s",
+				pod.Namespace, pod.Name, req.rawDevicePolicy)
 			alloc.sendEventf(pod, corev1.EventTypeWarning, "DevicePolicy",
-				"Unsupported device scheduling policy '%s'", devicePolicy)
+				"Unsupported device scheduling policy '%s'", req.rawDevicePolicy)
+		} else {
+			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
 		}
 		NewSortPriority(ByNuma, ByDeviceIdAsc).Sort(deviceStore)
-		deviceClaims, topoErr = alloc.allocateByTopologyMode(pod, deviceStore, profile, util.NonePolicy, needNumber, needCores, needMemory)
+		deviceClaims, topoErr = alloc.allocateByTopologyMode(req, deviceStore, util.NonePolicy, needNumber, needCores, needMemory)
 	}
 	// Strict topology rejection propagates as-is so the Filter loop can
 	// drop just this node (instead of treating it as a generic resource
@@ -164,11 +161,11 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 DONE:
 	if len(deviceClaims) != needNumber {
 		klog.V(5).InfoS("Insufficient node resources", "node", node.GetName(),
-			"pod", klog.KObj(pod), "container", container.Name, "reason", reasonStore)
+			"pod", klog.KObj(pod), "container", need.Name, "reason", reasonStore)
 		return nil, errors.New("insufficient GPU resources")
 	}
 	containerClaim := &device.ContainerDeviceClaim{
-		Name:         container.Name,
+		Name:         need.Name,
 		DeviceClaims: deviceClaims,
 	}
 	sort.Slice(containerClaim.DeviceClaims, func(i, j int) bool {
@@ -208,32 +205,27 @@ func IsTopologyUnsatisfied(err error) bool {
 	return ok
 }
 
-// parseTopologyMode reads DeviceTopologyModeAnnotation and returns the base
-// mode (numa / link / none) together with the strict flag derived from the
-// "-strict" suffix variants.
-func parseTopologyMode(pod *corev1.Pod) (mode util.TopologyMode, strict bool) {
-	raw, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
-	tm := util.TopologyMode(strings.ToLower(raw))
-	return tm.BaseTopology(), tm.IsStrictTopology()
-}
-
 // allocateByTopologyMode dispatches to topology-aware allocation. Strict
 // failures return a *TopologyUnsatisfiedError; best-effort failures fall
 // back to allocateByNumbers (and emit an event so operators can see the
 // downgrade in `kubectl describe pod`).
-func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*device.Device,
-	profile RequestProfile, policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
+//
+// req carries Topology / TopologyStrict / Profile pre-parsed; the Pod
+// reference is used only for events and log keys.
+func (alloc *allocator) allocateByTopologyMode(req *AllocationRequest, deviceStore []*device.Device,
+	policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, error) {
 	if needNumber <= 1 {
 		return allocateByNumbers(deviceStore, needNumber, needCores, needMemory), nil
 	}
-	mode, strict := parseTopologyMode(pod)
+	pod := req.Pod
+	strict := req.TopologyStrict
 
-	switch mode {
+	switch req.Topology {
 	case util.LinkTopology:
 		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v)",
 			pod.Namespace, pod.Name, strict)
-		if claims, ok := alloc.allocateLink(deviceStore, profile, policy, strict, needNumber, needCores, needMemory); ok {
+		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, policy, strict, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
 		reason := alloc.linkFallbackReason(needNumber)
@@ -249,7 +241,7 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 	case util.NUMATopology:
 		klog.V(4).Infof("Pod <%s/%s> use NUMA topology mode (strict=%v)",
 			pod.Namespace, pod.Name, strict)
-		if claims, ok := alloc.allocateNUMA(deviceStore, profile, policy, needNumber, needCores, needMemory); ok {
+		if claims, ok := alloc.allocateNUMA(deviceStore, req.Profile, policy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
 		reason := alloc.numaFallbackReason(needNumber, deviceStore)
@@ -267,9 +259,9 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 
 	default:
 		klog.V(4).Infof("Pod <%s/%s> not supported topology mode: %s",
-			pod.Namespace, pod.Name, mode)
+			pod.Namespace, pod.Name, req.Topology)
 		alloc.sendEventf(pod, corev1.EventTypeWarning, "DeviceTopologyMode",
-			"Unsupported device topology mode '%s'", mode)
+			"Unsupported device topology mode '%s'", req.Topology)
 	}
 	return allocateByNumbers(deviceStore, needNumber, needCores, needMemory), nil
 }

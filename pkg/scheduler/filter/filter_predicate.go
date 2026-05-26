@@ -404,37 +404,30 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		return filteredNodes, failedNodesMap, nil
 	}
 
-	// Sort nodes according to node scheduling strategy. The topology mode +
-	// needNumber pair gates the fitness-aware comparator that ranks nodes by
-	// whether they can ACTUALLY host the requested topology group (not just
-	// whether they reported topology metadata).
-	topoMode := PodUsedGPUTopologyMode(pod)
+	// Parse pod-level scheduling inputs ONCE — req feeds both the node-
+	// ranking comparators here and the per-node allocator below, so they
+	// share annotation-parse cost and never disagree about what the pod
+	// asked for.
+	req := allocator.BuildAllocationRequest(pod)
 	topoNeedNumber := PodTopologyNeedNumber(pod)
-	// Build a single RequestProfile for this filter pass from the pod's
-	// own request only — no reference node, no mem-per-card, no factor.
-	// Earlier iterations used nodeInfoList[0] as a reference, which biased
-	// weights toward whichever node happened to sort first; see profile.go
-	// for the full rationale and trade-offs.
-	profile := allocator.NewRequestProfile(pod)
-	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
-	switch policy := strings.ToLower(nodePolicy); policy {
-	case string(util.BinpackPolicy):
-		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), policy)
-		allocator.NewNodeBinpackPriority(profile, topoMode, topoNeedNumber).Sort(nodeInfoList)
-	case string(util.SpreadPolicy):
-		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), policy)
-		allocator.NewNodeSpreadPriority(profile, topoMode, topoNeedNumber).Sort(nodeInfoList)
+	switch req.NodePolicy {
+	case util.BinpackPolicy:
+		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
+		allocator.NewNodeBinpackPriority(req.Profile, req.Topology, topoNeedNumber).Sort(nodeInfoList)
+	case util.SpreadPolicy:
+		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
+		allocator.NewNodeSpreadPriority(req.Profile, req.Topology, topoNeedNumber).Sort(nodeInfoList)
 	default:
-		if policy == "" || policy == string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
+		if raw := req.RawNodePolicy(); raw != "" && raw != string(util.NonePolicy) {
+			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), raw)
+			f.recorder.Eventf(pod, corev1.EventTypeWarning, "NodePolicy", "Unsupported node scheduling policy '%s'", raw)
 		} else {
-			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), nodePolicy)
-			f.recorder.Eventf(pod, corev1.EventTypeWarning, "NodePolicy", "Unsupported node scheduling policy '%s'", nodePolicy)
+			klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
 		}
 		less := []allocator.LessFunc[*device.NodeInfo]{func(p1, p2 *device.NodeInfo) bool {
 			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
 		}}
-		less = allocator.ApplyTopologyMode(topoMode, topoNeedNumber, less)
+		less = allocator.ApplyTopologyMode(req.Topology, topoNeedNumber, less)
 		allocator.NewSortPriority[*device.NodeInfo](less...).Sort(nodeInfoList)
 	}
 	recorder := f.recorder
@@ -449,7 +442,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 			recorder = nil
 		}
 		// Attempt to allocate devices for pods on this node.
-		newPod, err := allocator.NewAllocator(nodeInfo, recorder).Allocate(pod)
+		newPod, err := allocator.NewAllocator(nodeInfo, recorder).Allocate(req)
 		if err != nil {
 			klog.V(1).ErrorS(err, "node device allocate failed", "node", node.Name, "pod", klog.KObj(pod))
 			failedNodesMap[node.Name] = err.Error()

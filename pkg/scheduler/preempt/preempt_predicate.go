@@ -365,7 +365,7 @@ func (p *vgpuPreempt) canAllocate(pod *corev1.Pod, node *corev1.Node,
 		klog.V(3).ErrorS(err, "Preempt: NewNodeInfo failed", "node", node.Name)
 		return false
 	}
-	if _, err := allocator.NewAllocator(nodeInfo, nil).Allocate(pod); err != nil {
+	if _, err := allocator.NewAllocator(nodeInfo, nil).Allocate(allocator.BuildAllocationRequest(pod)); err != nil {
 		klog.V(5).InfoS("Preempt: allocator rejects pod after excluding victims",
 			"pod", klog.KObj(pod), "node", node.Name, "reason", err)
 		return false
