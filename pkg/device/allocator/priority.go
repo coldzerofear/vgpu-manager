@@ -235,6 +235,46 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
+// WeightedBinpackNodeLess returns a comparator that ranks nodes higher
+// when their request-weighted USED fraction is higher (the binpack rule).
+// The profile is captured once; the per-name cache reuses the computed
+// score across the O(n log n) comparisons in a single sort pass, so each
+// node's Score is evaluated at most once per priority instantiation.
+//
+// Why a closure-captured cache: NodeUtilization is cheap but Score with a
+// weighted profile is invoked O(n log n) times during sort.Sort; caching
+// keeps the cost O(n) without exposing a mutex (each priority instance is
+// confined to one filter goroutine).
+func WeightedBinpackNodeLess(profile RequestProfile) LessFunc[*device.NodeInfo] {
+	cache := make(map[string]float64)
+	return func(p1, p2 *device.NodeInfo) bool {
+		return cachedNodeScore(cache, p1, profile, util.BinpackPolicy) >
+			cachedNodeScore(cache, p2, profile, util.BinpackPolicy)
+	}
+}
+
+// WeightedSpreadNodeLess mirrors WeightedBinpackNodeLess but for spread —
+// ranks higher the nodes whose request-weighted FREE fraction is higher.
+func WeightedSpreadNodeLess(profile RequestProfile) LessFunc[*device.NodeInfo] {
+	cache := make(map[string]float64)
+	return func(p1, p2 *device.NodeInfo) bool {
+		return cachedNodeScore(cache, p1, profile, util.SpreadPolicy) >
+			cachedNodeScore(cache, p2, profile, util.SpreadPolicy)
+	}
+}
+
+func cachedNodeScore(cache map[string]float64, info *device.NodeInfo,
+	profile RequestProfile, mode util.SchedulerPolicy,
+) float64 {
+	name := info.GetName()
+	if s, ok := cache[name]; ok {
+		return s
+	}
+	s := Score(NodeUtilization(info), profile, mode)
+	cache[name] = s
+	return s
+}
+
 // ApplyTopologyMode prepends a topology-fitness comparator at the highest
 // priority of the sort chain when the pod requested a topology mode. The
 // fitness comparator returns true when the candidate node can ACTUALLY host
