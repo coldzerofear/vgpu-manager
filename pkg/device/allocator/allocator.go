@@ -46,8 +46,10 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 	// container demand, normalized against THIS node's mem-per-card so that
 	// the device-level binpack/spread choices in allocateOne are consistent
 	// with the node-level ranking the filter already performed (which used
-	// the candidate node's mem-per-card for the same purpose).
-	profile := NewRequestProfile(pod, MemoryPerCard(alloc.nodeInfo))
+	// the candidate node's mem-per-card for the same purpose). MemoryFactor
+	// converts user-typed vgpu-memory into MB (the unit nodes report),
+	// matching what allocateOne does before any memory comparison.
+	profile := NewRequestProfile(pod, MemoryPerCard(alloc.nodeInfo), alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
 	var podAssignDevices device.PodDeviceClaim
 	for i := range newPod.Spec.Containers {
 		container := &pod.Spec.Containers[i]

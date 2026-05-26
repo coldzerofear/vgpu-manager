@@ -32,9 +32,32 @@ type RequestProfile struct {
 }
 
 // NewRequestProfile builds the profile from a pod's aggregated container
-// requests. memPerCard is used as the unit for normalizing the memory
-// request to "fraction of a single GPU's memory" so the three dimensions
-// land on comparable scales before they're weighted.
+// requests. The weights MUST reflect what the pod ACTUALLY consumes at
+// allocation time, not just what the user typed — vgpu-manager's allocator
+// applies two implicit-fill rules that turn sparse user input into full-
+// card consumption, and the profile mirrors both so a single-line
+// "vgpu-number: 1" pod doesn't end up with weights that say "only the
+// slot dimension matters".
+//
+// Implicit-fill rules being mirrored (see allocator.allocateOne and
+// allocator.allocateByNumbers):
+//
+//   - vgpu-memory == 0 → reqMemory becomes the whole card's memory at
+//     allocation time. Profile treats this as the pod consuming
+//     'vgpu-number cards' worth' of memory.
+//
+//   - vgpu-cores == 0 AND vgpu-memory == 0 → needCores is promoted to
+//     util.HundredCore. Profile treats this as 'vgpu-number cards' worth'
+//     of cores. NB: when the user explicitly typed vgpu-memory but left
+//     cores at 0 ("memory-only" pod), cores stays 0 and the dimension
+//     correctly drops out of the weights.
+//
+// Unit handling: node-reported memory is in MB; the user-typed
+// vgpu-memory value is also in MB but only AFTER multiplying by the
+// node's memoryFactor — that's the same conversion allocator.allocateOne
+// applies before any memory comparison. memPerCard arrives already in MB
+// (via MemoryPerCard); we apply the factor to user input here so both
+// sides of the rMem ratio are on the same scale.
 //
 // memPerCard should be derived from a representative candidate node (see
 // MemoryPerCard); a single value is used across all candidates in one
@@ -43,23 +66,48 @@ type RequestProfile struct {
 // different mem/card, but a per-node profile would mean different
 // dimension weights per node and the comparison would no longer be a
 // well-defined ranking.
-func NewRequestProfile(pod *corev1.Pod, memPerCard int64) RequestProfile {
-	var totalNum, totalCore, totalMem int64
+func NewRequestProfile(pod *corev1.Pod, memPerCard int64, memoryFactor int) RequestProfile {
+	var rNum, rMem, rCore float64
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
 		if !util.IsVGPURequiredContainer(c) {
 			continue
 		}
-		totalNum += util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
-		totalCore += util.GetResourceOfContainer(c, util.VGPUCoreResourceName)
-		totalMem += util.GetResourceOfContainer(c, util.VGPUMemoryResourceName)
+		cNum := util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
+		cCore := util.GetResourceOfContainer(c, util.VGPUCoreResourceName)
+		cMem := util.GetResourceOfContainer(c, util.VGPUMemoryResourceName)
+
+		rNum += float64(cNum)
+
+		// allocateByNumbers writes the same (needCores, reqMemory) into EACH
+		// of the cNum claims it produces, so per-container consumption is
+		// cNum * per-vGPU. Without the cNum multiplier the profile would
+		// under-count multi-vGPU containers.
+
+		// Memory: implicit-full-memory wins when the user typed nothing.
+		// Whole card per requested vGPU; ratio simplifies to cNum.
+		if cMem == 0 {
+			rMem += float64(cNum)
+		} else if memPerCard > 0 {
+			effMem := cMem
+			if memoryFactor > 0 {
+				effMem *= int64(memoryFactor)
+			}
+			rMem += float64(cNum) * float64(effMem) / float64(memPerCard)
+		}
+
+		// Cores: implicit-full-cores only fires when BOTH cores AND memory
+		// are unset — the allocator's "if needCores == 0 && needMemory == 0"
+		// test reads user-typed values, so we test the same. Explicit-cores
+		// is independent; the "memory only" case (cMem>0, cCore==0) lets
+		// cores drop out entirely, which is what the user asked for.
+		switch {
+		case cCore == 0 && cMem == 0:
+			rCore += float64(cNum)
+		case cCore > 0:
+			rCore += float64(cNum) * float64(cCore) / float64(util.HundredCore)
+		}
 	}
-	rNum := float64(totalNum)
-	rMem := 0.0
-	if memPerCard > 0 {
-		rMem = float64(totalMem) / float64(memPerCard)
-	}
-	rCore := float64(totalCore) / float64(util.HundredCore)
 	sum := rNum + rMem + rCore
 	if sum == 0 {
 		return RequestProfile{1.0 / 3, 1.0 / 3, 1.0 / 3}

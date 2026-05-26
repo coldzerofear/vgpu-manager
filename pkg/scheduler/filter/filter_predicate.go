@@ -416,8 +416,12 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	// heterogeneous cluster the choice of reference node is an acknowledged
 	// approximation. nodeInfoList[0] is the natural choice — it's already in
 	// scope, costs nothing to read, and is deterministic for a given pod +
-	// filter call. See profile.go for the wider rationale.
-	profile := allocator.NewRequestProfile(pod, allocator.MemoryPerCard(nodeInfoList[0]))
+	// filter call. memoryFactor is read from the same reference node so the
+	// MB-unit conversion lines up with the mem-per-card denominator; in
+	// heterogeneous clusters this is the same approximation as memPerCard.
+	// See profile.go for the wider rationale.
+	refNode := nodeInfoList[0]
+	profile := allocator.NewRequestProfile(pod, allocator.MemoryPerCard(refNode), refNode.NodeConfigInfo.MemoryFactor)
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
 	switch policy := strings.ToLower(nodePolicy); policy {
 	case string(util.BinpackPolicy):
