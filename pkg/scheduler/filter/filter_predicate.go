@@ -410,18 +410,12 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	// whether they reported topology metadata).
 	topoMode := PodUsedGPUTopologyMode(pod)
 	topoNeedNumber := PodTopologyNeedNumber(pod)
-	// Build a single RequestProfile for this filter pass, normalised against
-	// the first candidate node's mem-per-card. A single profile across all
-	// candidates is what makes the cross-node ranking well-defined; in a
-	// heterogeneous cluster the choice of reference node is an acknowledged
-	// approximation. nodeInfoList[0] is the natural choice — it's already in
-	// scope, costs nothing to read, and is deterministic for a given pod +
-	// filter call. memoryFactor is read from the same reference node so the
-	// MB-unit conversion lines up with the mem-per-card denominator; in
-	// heterogeneous clusters this is the same approximation as memPerCard.
-	// See profile.go for the wider rationale.
-	refNode := nodeInfoList[0]
-	profile := allocator.NewRequestProfile(pod, allocator.MemoryPerCard(refNode), refNode.NodeConfigInfo.MemoryFactor)
+	// Build a single RequestProfile for this filter pass from the pod's
+	// own request only — no reference node, no mem-per-card, no factor.
+	// Earlier iterations used nodeInfoList[0] as a reference, which biased
+	// weights toward whichever node happened to sort first; see profile.go
+	// for the full rationale and trade-offs.
+	profile := allocator.NewRequestProfile(pod)
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
 	switch policy := strings.ToLower(nodePolicy); policy {
 	case string(util.BinpackPolicy):

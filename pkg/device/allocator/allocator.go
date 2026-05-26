@@ -42,14 +42,13 @@ func (alloc *allocator) addAllocateOne(contDevices *device.ContainerDeviceClaim)
 func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
 	newPod := pod.DeepCopy()
-	// One profile per pod: weights are derived from the pod's aggregated
-	// container demand, normalized against THIS node's mem-per-card so that
-	// the device-level binpack/spread choices in allocateOne are consistent
-	// with the node-level ranking the filter already performed (which used
-	// the candidate node's mem-per-card for the same purpose). MemoryFactor
-	// converts user-typed vgpu-memory into MB (the unit nodes report),
-	// matching what allocateOne does before any memory comparison.
-	profile := NewRequestProfile(pod, MemoryPerCard(alloc.nodeInfo), alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
+	// One profile per pod: weights are derived purely from the pod's own
+	// container requests (see NewRequestProfile for why no node info
+	// reaches this call). Filter and allocator compute identical weights
+	// for the same pod, so cross-node ranking and per-node device-policy
+	// tie-breaking stay coherent without threading any node-specific
+	// normalisation through.
+	profile := NewRequestProfile(pod)
 	var podAssignDevices device.PodDeviceClaim
 	for i := range newPod.Spec.Containers {
 		container := &pod.Spec.Containers[i]

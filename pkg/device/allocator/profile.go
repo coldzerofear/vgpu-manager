@@ -31,42 +31,44 @@ type RequestProfile struct {
 	CoreWeight float64
 }
 
-// NewRequestProfile builds the profile from a pod's aggregated container
-// requests. The weights MUST reflect what the pod ACTUALLY consumes at
-// allocation time, not just what the user typed — vgpu-manager's allocator
-// applies two implicit-fill rules that turn sparse user input into full-
-// card consumption, and the profile mirrors both so a single-line
-// "vgpu-number: 1" pod doesn't end up with weights that say "only the
-// slot dimension matters".
+// NewRequestProfile builds the profile from a pod's container requests.
+// Deliberately NODE-INDEPENDENT — no candidate node, no mem-per-card, no
+// memoryFactor reaches this function. Earlier iterations passed a
+// "representative node" for memory normalisation, which was wrong:
 //
-// Implicit-fill rules being mirrored (see allocator.allocateOne and
-// allocator.allocateByNumbers):
+//   - Heterogeneous clusters can mix 16 / 24 / 80 GB cards, so any single
+//     reference node biases the cross-node ranking toward that node's
+//     hardware view of "what's heavy".
+//   - The natural reference (nodeInfoList[0]) is non-deterministic for a
+//     given pod — it shifts whenever upstream filtering or kube-scheduler
+//     reorders the candidate list.
+//   - memoryFactor is per-node too (device-plugin --device-memory-factor
+//     flag); reading it from any single node has the same bias.
+//
+// Trade-off: explicit-vgpu-memory weights are now in the user-typed unit
+// rather than card-fractions. Within one cluster admins typically pick a
+// single factor cluster-wide so users consistently type one unit and the
+// weights stay coherent. The implicit-full-card branches below cover the
+// dominant "give me a card" case and are unit-independent — a single-line
+// "vgpu-number: 1" pod gets (1/3, 1/3, 1/3) regardless of cluster shape.
+//
+// Implicit-fill rules mirrored from allocator.allocateOne and
+// allocator.allocateByNumbers:
 //
 //   - vgpu-memory == 0 → reqMemory becomes the whole card's memory at
-//     allocation time. Profile treats this as the pod consuming
-//     'vgpu-number cards' worth' of memory.
+//     allocation time. Profile records this as cNum "cards' worth" of
+//     memory (the unit cancels, so no node info needed).
 //
 //   - vgpu-cores == 0 AND vgpu-memory == 0 → needCores is promoted to
-//     util.HundredCore. Profile treats this as 'vgpu-number cards' worth'
-//     of cores. NB: when the user explicitly typed vgpu-memory but left
-//     cores at 0 ("memory-only" pod), cores stays 0 and the dimension
-//     correctly drops out of the weights.
+//     util.HundredCore. Profile records cNum "cards' worth" of cores.
+//     When the user explicitly typed vgpu-memory but left cores at 0
+//     ("memory-only" pod), cores correctly stays 0 and drops out of the
+//     weights — matching the allocator's per-claim Cores=0 behaviour.
 //
-// Unit handling: node-reported memory is in MB; the user-typed
-// vgpu-memory value is also in MB but only AFTER multiplying by the
-// node's memoryFactor — that's the same conversion allocator.allocateOne
-// applies before any memory comparison. memPerCard arrives already in MB
-// (via MemoryPerCard); we apply the factor to user input here so both
-// sides of the rMem ratio are on the same scale.
-//
-// memPerCard should be derived from a representative candidate node (see
-// MemoryPerCard); a single value is used across all candidates in one
-// filter pass to keep the cross-node ranking consistent. In heterogeneous
-// clusters this is an acknowledged approximation — different nodes have
-// different mem/card, but a per-node profile would mean different
-// dimension weights per node and the comparison would no longer be a
-// well-defined ranking.
-func NewRequestProfile(pod *corev1.Pod, memPerCard int64, memoryFactor int) RequestProfile {
+// Per-container values multiply by cNum because allocateByNumbers writes
+// the same (needCores, reqMemory) into EACH of the cNum claims it
+// produces, so per-container consumption is cNum * per-vGPU.
+func NewRequestProfile(pod *corev1.Pod) RequestProfile {
 	var rNum, rMem, rCore float64
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
@@ -79,28 +81,19 @@ func NewRequestProfile(pod *corev1.Pod, memPerCard int64, memoryFactor int) Requ
 
 		rNum += float64(cNum)
 
-		// allocateByNumbers writes the same (needCores, reqMemory) into EACH
-		// of the cNum claims it produces, so per-container consumption is
-		// cNum * per-vGPU. Without the cNum multiplier the profile would
-		// under-count multi-vGPU containers.
-
-		// Memory: implicit-full-memory wins when the user typed nothing.
-		// Whole card per requested vGPU; ratio simplifies to cNum.
+		// Memory: implicit-full-card collapses to "cNum cards' worth";
+		// explicit uses raw user-typed value (no factor, no per-card
+		// normalisation — see the trade-off discussion above).
 		if cMem == 0 {
 			rMem += float64(cNum)
-		} else if memPerCard > 0 {
-			effMem := cMem
-			if memoryFactor > 0 {
-				effMem *= int64(memoryFactor)
-			}
-			rMem += float64(cNum) * float64(effMem) / float64(memPerCard)
+		} else {
+			rMem += float64(cNum) * float64(cMem)
 		}
 
 		// Cores: implicit-full-cores only fires when BOTH cores AND memory
 		// are unset — the allocator's "if needCores == 0 && needMemory == 0"
 		// test reads user-typed values, so we test the same. Explicit-cores
-		// is independent; the "memory only" case (cMem>0, cCore==0) lets
-		// cores drop out entirely, which is what the user asked for.
+		// uses cCore's well-defined "100 = full card" convention.
 		switch {
 		case cCore == 0 && cMem == 0:
 			rCore += float64(cNum)
@@ -125,22 +118,6 @@ func NewRequestProfile(pod *corev1.Pod, memPerCard int64, memoryFactor int) Requ
 // scoring without a pod (e.g. the NUMA callback tests) pass this so the
 // expected ordering matches the pre-Phase-B math.
 var UniformProfile = RequestProfile{NumWeight: 1.0 / 3, MemWeight: 1.0 / 3, CoreWeight: 1.0 / 3}
-
-// MemoryPerCard returns the average memory-per-GPU on a node, used as the
-// normalization unit for RequestProfile.MemWeight. Falls back to 1 (i.e.
-// every byte counts equally as one card) when device count is zero so
-// callers never have to special-case empty nodes.
-func MemoryPerCard(info *device.NodeInfo) int64 {
-	total := info.GetTotalNumber()
-	if total <= 0 {
-		return 1
-	}
-	mem := info.GetTotalMemory() / int64(total)
-	if mem <= 0 {
-		return 1
-	}
-	return mem
-}
 
 // ResourceUtilization is the 0..1 used-fraction of each of the three vGPU
 // dimensions on some resource container (a node, a device, or a NUMA
