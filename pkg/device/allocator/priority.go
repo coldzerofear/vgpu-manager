@@ -87,7 +87,11 @@ var (
 			return p1Score > p2Score
 		}
 	}
-	// ByNodeGPUTopology Nodes with GPU Link topology information will be ranked first.
+	// ByNodeGPUTopology Nodes with GPU Link topology information will be
+	// ranked first. Coarse "has topology?" comparator kept for backward
+	// compatibility; new call sites should prefer ByNodeGPUTopologyFitness
+	// which additionally checks whether the topology can actually host the
+	// requested group size (max connected component ≥ needNumber).
 	ByNodeGPUTopology = func(p1, p2 *device.NodeInfo) bool {
 		hasTopo1 := p1.HasGPUTopology()
 		hasTopo2 := p2.HasGPUTopology()
@@ -100,7 +104,9 @@ var (
 			return false // both are the same: continue to compare in the future
 		}
 	}
-	// ByNodeNUMATopology Nodes with GPU NUMA topology information will be ranked first.
+	// ByNodeNUMATopology Nodes with GPU NUMA topology information will be
+	// ranked first. See ByNodeGPUTopology comment — prefer the fitness-aware
+	// ByNodeNUMATopologyFitness for new call sites.
 	ByNodeNUMATopology = func(p1, p2 *device.NodeInfo) bool {
 		hasTopo1 := p1.HasNUMATopology()
 		hasTopo2 := p2.HasNUMATopology()
@@ -114,6 +120,53 @@ var (
 		}
 	}
 )
+
+// ByNodeGPUTopologyFitness ranks nodes by their actual ability to satisfy a
+// link-topology group of needNumber GPUs:
+//
+//	fitness 2 = has topology AND max connected component >= needNumber
+//	fitness 1 = has topology BUT max component too small (will fall back)
+//	fitness 0 = no topology info
+//
+// Without this fitness check the old ByNodeGPUTopology just orders by
+// "has-topology vs has-not", so a node that publishes topology info but
+// physically can't host the request can still beat a node that would
+// actually allocate fine via non-topology fallback.
+func ByNodeGPUTopologyFitness(needNumber int) LessFunc[*device.NodeInfo] {
+	return func(p1, p2 *device.NodeInfo) bool {
+		return gpuTopologyFitness(p1, needNumber) > gpuTopologyFitness(p2, needNumber)
+	}
+}
+
+func gpuTopologyFitness(n *device.NodeInfo, needNumber int) int {
+	if !n.HasGPUTopology() {
+		return 0
+	}
+	if n.MaxLinkComponentSize() >= needNumber {
+		return 2
+	}
+	return 1
+}
+
+// ByNodeNUMATopologyFitness is the NUMA-aware counterpart to
+// ByNodeGPUTopologyFitness: it ranks higher the nodes that have a single
+// NUMA domain large enough to host the request, avoiding nodes that publish
+// NUMA info but force cross-NUMA fallback.
+func ByNodeNUMATopologyFitness(needNumber int) LessFunc[*device.NodeInfo] {
+	return func(p1, p2 *device.NodeInfo) bool {
+		return numaTopologyFitness(p1, needNumber) > numaTopologyFitness(p2, needNumber)
+	}
+}
+
+func numaTopologyFitness(n *device.NodeInfo, needNumber int) int {
+	if !n.HasNUMATopology() {
+		return 0
+	}
+	if n.MaxNUMAGroupSize() >= needNumber {
+		return 2
+	}
+	return 1
+}
 
 type sortPriority[T any] struct {
 	data []T
@@ -182,40 +235,50 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
-// ApplyTopologyMode prepends a topology-aware comparator at the highest
-// priority of the sort chain when the pod requested a topology mode. Both
-// strict and non-strict variants get the same comparator — strictness only
-// changes ALLOCATION fallback behaviour (handled inside the allocator), not
-// node ranking, so we collapse via BaseTopology().
-func ApplyTopologyMode(mode util.TopologyMode, less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
+// ApplyTopologyMode prepends a topology-fitness comparator at the highest
+// priority of the sort chain when the pod requested a topology mode. The
+// fitness comparator returns true when the candidate node can ACTUALLY host
+// the requested topology group of needNumber GPUs (max component / max NUMA
+// group ≥ needNumber), strictly stronger than the prior "just has topology
+// metadata" check.
+//
+// needNumber is the total per-pod GPU count (single-container multi-GPU pods
+// pass the container's vgpu-number; multi-container pods pass the sum). For
+// none-topology or single-GPU requests this is a no-op.
+//
+// Both strict and non-strict topology variants get the same prepended
+// comparator — strictness only changes ALLOCATION fallback behaviour
+// (handled inside allocateByTopologyMode), not node ranking.
+func ApplyTopologyMode(mode util.TopologyMode, needNumber int,
+	less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
 	switch mode.BaseTopology() {
 	case util.LinkTopology:
 		less = slices.Insert[[]LessFunc[*device.NodeInfo],
-			LessFunc[*device.NodeInfo]](less, 0, ByNodeGPUTopology)
+			LessFunc[*device.NodeInfo]](less, 0, ByNodeGPUTopologyFitness(needNumber))
 	case util.NUMATopology:
 		less = slices.Insert[[]LessFunc[*device.NodeInfo],
-			LessFunc[*device.NodeInfo]](less, 0, ByNodeNUMATopology)
+			LessFunc[*device.NodeInfo]](less, 0, ByNodeNUMATopologyFitness(needNumber))
 	}
 	return less
 }
 
-func NewNodeBinpackPriority(mode util.TopologyMode) *sortPriority[*device.NodeInfo] {
+func NewNodeBinpackPriority(mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
 		ByBinpackNodeScore(),
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*device.NodeInfo]{
-		less: ApplyTopologyMode(mode, less),
+		less: ApplyTopologyMode(mode, needNumber, less),
 	}
 }
 
-func NewNodeSpreadPriority(mode util.TopologyMode) *sortPriority[*device.NodeInfo] {
+func NewNodeSpreadPriority(mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
 		BySpreadNodeScore(),
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*device.NodeInfo]{
-		less: ApplyTopologyMode(mode, less),
+		less: ApplyTopologyMode(mode, needNumber, less),
 	}
 }
 

@@ -620,6 +620,24 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 		ret.deviceList[device.GetID()] = gpuallocator.NewDevice(
 			device.GetID(), device.GetUUID(), device.GetBusID())
 	}
+	// Recompute topology fitness for the fake NodeInfo — tests that exercise
+	// ByNodeGPUTopologyFitness etc. need these populated to make meaningful
+	// assertions. computeMax* are no-ops when gpuTopology/numaTopology is
+	// false, so the existing zero-value path still works for non-topology
+	// tests.
+	if ret.gpuTopology {
+		ret.maxLinkComponentSize = computeMaxLinkComponentSize(ret.deviceList)
+	}
+	ret.numaTopology = false
+	for _, d := range devices {
+		if d != nil && d.GetNUMA() >= 0 {
+			ret.numaTopology = true
+			break
+		}
+	}
+	if ret.numaTopology {
+		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(ret.deviceMap)
+	}
 	ret.ResetResourceUsage()
 	return ret
 }
@@ -639,6 +657,17 @@ type NodeInfo struct {
 	maxCapability  float32
 	gpuTopology    bool
 	numaTopology   bool
+	// maxLinkComponentSize is the largest set of GPUs connected to each
+	// other via at least one P2P link (computed once at NodeInfo construction
+	// time via union-find over deviceList). Used by ByNodeGPUTopologyFitness
+	// so the node-level sort knows whether this node CAN actually satisfy a
+	// requested link-topology group, not just whether it has topology info.
+	// Zero when gpuTopology is false.
+	maxLinkComponentSize int
+	// maxNUMAGroupSize is the largest count of GPUs sharing a single NUMA
+	// node. Equivalent role to maxLinkComponentSize for NUMA-mode sorting.
+	// Zero when numaTopology is false.
+	maxNUMAGroupSize int
 	NodeConfigInfo
 }
 
@@ -658,6 +687,15 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UI
 		numaTopology:   gatherInfo.EnabledNumaAffinity,
 		NodeConfigInfo: gatherInfo.NodeConfigInfo,
 	}
+	// Precompute topology fitness signals so the node-level sort can ask
+	// "can this node fit a group of N GPUs?" in O(1). These are constants for
+	// the lifetime of the NodeInfo snapshot.
+	if ret.gpuTopology {
+		ret.maxLinkComponentSize = computeMaxLinkComponentSize(gatherInfo.DeviceList)
+	}
+	if ret.numaTopology {
+		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(gatherInfo.DeviceMap)
+	}
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
 		if !slices.ContainsFunc(excludedPods, func(uid types.UID) bool {
 			return pod.UID == uid
@@ -667,6 +705,97 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UI
 	})
 	ret.ResetResourceUsage()
 	return ret, nil
+}
+
+// computeMaxLinkComponentSize finds the largest connected component in the
+// GPU link graph using union-find (Weighted Quick Union with path
+// compression). Two GPUs are connected if their Links slice has at least
+// one P2P link entry, regardless of link type — even a PCIe-cross-CPU edge
+// counts, because the goal here is only to confirm "this node has enough
+// LINKED GPUs to satisfy the request"; link QUALITY ranking happens later
+// inside the bestEffort policy.
+//
+// Complexity O((V + E)·α(V)) ≈ O(V + E) which is negligible compared to the
+// existing topology parsing cost.
+func computeMaxLinkComponentSize(devices gpuallocator.DeviceList) int {
+	n := len(devices)
+	if n == 0 {
+		return 0
+	}
+	parent := make([]int, n)
+	rank := make([]int, n)
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(x int) int {
+		if parent[x] != x {
+			parent[x] = find(parent[x])
+		}
+		return parent[x]
+	}
+	union := func(a, b int) {
+		ra, rb := find(a), find(b)
+		if ra == rb {
+			return
+		}
+		if rank[ra] < rank[rb] {
+			ra, rb = rb, ra
+		}
+		parent[rb] = ra
+		if rank[ra] == rank[rb] {
+			rank[ra]++
+		}
+	}
+	for i, d := range devices {
+		if d == nil {
+			continue
+		}
+		for j, links := range d.Links {
+			if i == j || len(links) == 0 {
+				continue
+			}
+			if j < 0 || j >= n {
+				continue
+			}
+			union(i, j)
+		}
+	}
+	counts := make(map[int]int, n)
+	for i := range parent {
+		counts[find(i)]++
+	}
+	max := 0
+	for _, c := range counts {
+		if c > max {
+			max = c
+		}
+	}
+	return max
+}
+
+// computeMaxNUMAGroupSize returns the largest count of GPUs sharing one NUMA
+// node. Devices with NUMA index < 0 (unknown) are not grouped — they don't
+// contribute to any NUMA-locality guarantee.
+func computeMaxNUMAGroupSize(deviceMap map[int]*Device) int {
+	groups := make(map[int]int)
+	for _, d := range deviceMap {
+		if d == nil {
+			continue
+		}
+		numa := d.GetNUMA()
+		if numa < 0 {
+			continue
+		}
+		groups[numa]++
+	}
+	max := 0
+	for _, c := range groups {
+		if c > max {
+			max = c
+		}
+	}
+	return max
 }
 
 func (n *NodeInfo) DeepCopy() *NodeInfo {
@@ -947,4 +1076,21 @@ func (n *NodeInfo) HasGPUTopology() bool {
 // HasNUMATopology Return whether there is GPU numa topology information
 func (n *NodeInfo) HasNUMATopology() bool {
 	return n.numaTopology
+}
+
+// MaxLinkComponentSize returns the largest number of GPUs mutually reachable
+// via P2P links on this node. A node-level sort can use this to determine
+// whether the node CAN host a topology-aware group of size N (component
+// size >= N) — strictly stronger than HasGPUTopology() which only confirms
+// link metadata was reported.
+func (n *NodeInfo) MaxLinkComponentSize() int {
+	return n.maxLinkComponentSize
+}
+
+// MaxNUMAGroupSize returns the largest number of GPUs sharing a single NUMA
+// node. NUMA-mode sorting checks this against the pod's request so we avoid
+// ranking nodes high that "have NUMA topology" but couldn't actually fit a
+// same-NUMA group.
+func (n *NodeInfo) MaxNUMAGroupSize() int {
+	return n.maxNUMAGroupSize
 }

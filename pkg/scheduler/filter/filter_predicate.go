@@ -404,15 +404,20 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		return filteredNodes, failedNodesMap, nil
 	}
 
-	// Sort nodes according to node scheduling strategy.
+	// Sort nodes according to node scheduling strategy. The topology mode +
+	// needNumber pair gates the fitness-aware comparator that ranks nodes by
+	// whether they can ACTUALLY host the requested topology group (not just
+	// whether they reported topology metadata).
+	topoMode := PodUsedGPUTopologyMode(pod)
+	topoNeedNumber := PodTopologyNeedNumber(pod)
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
 	switch policy := strings.ToLower(nodePolicy); policy {
 	case string(util.BinpackPolicy):
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), policy)
-		allocator.NewNodeBinpackPriority(PodUsedGPUTopologyMode(pod)).Sort(nodeInfoList)
+		allocator.NewNodeBinpackPriority(topoMode, topoNeedNumber).Sort(nodeInfoList)
 	case string(util.SpreadPolicy):
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), policy)
-		allocator.NewNodeSpreadPriority(PodUsedGPUTopologyMode(pod)).Sort(nodeInfoList)
+		allocator.NewNodeSpreadPriority(topoMode, topoNeedNumber).Sort(nodeInfoList)
 	default:
 		if policy == "" || policy == string(util.NonePolicy) {
 			klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
@@ -423,7 +428,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		less := []allocator.LessFunc[*device.NodeInfo]{func(p1, p2 *device.NodeInfo) bool {
 			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
 		}}
-		less = allocator.ApplyTopologyMode(PodUsedGPUTopologyMode(pod), less)
+		less = allocator.ApplyTopologyMode(topoMode, topoNeedNumber, less)
 		allocator.NewSortPriority[*device.NodeInfo](less...).Sort(nodeInfoList)
 	}
 	recorder := f.recorder
@@ -484,4 +489,23 @@ func PodUsedGPUTopologyMode(pod *corev1.Pod) util.TopologyMode {
 		}
 	}
 	return util.NoneTopology
+}
+
+// PodTopologyNeedNumber returns the largest single-container vGPU request in
+// the pod. This is the value passed to ByNodeGPUTopologyFitness so the
+// node-level sort knows the minimum group size the node has to be able to
+// host topology-locally. Returns 0 when no container requests a vGPU group
+// > 1, which makes the fitness comparator a no-op.
+func PodTopologyNeedNumber(pod *corev1.Pod) int {
+	if pod == nil {
+		return 0
+	}
+	max := int64(0)
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		if n := util.GetResourceOfContainer(c, util.VGPUNumberResourceName); n > max {
+			max = n
+		}
+	}
+	return int(max)
 }

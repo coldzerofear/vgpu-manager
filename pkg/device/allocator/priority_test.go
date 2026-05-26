@@ -33,11 +33,11 @@ func Test_NodePriority(t *testing.T) {
 		)
 	}
 	start := time.Now()
-	NewNodeBinpackPriority(util.NoneTopology).Sort(nodeInfoList)
+	NewNodeBinpackPriority(util.NoneTopology, 0).Sort(nodeInfoList)
 	since := time.Since(start)
 	fmt.Printf("call NewNodeBinpackPriority took %d Milliseconds\n", since.Milliseconds())
 	start = time.Now()
-	NewNodeSpreadPriority(util.NoneTopology).Sort(nodeInfoList)
+	NewNodeSpreadPriority(util.NoneTopology, 0).Sort(nodeInfoList)
 	since = time.Since(start)
 	fmt.Printf("call NewNodeSpreadPriority took %d Milliseconds\n", since.Milliseconds())
 }
@@ -90,7 +90,7 @@ func Test_NodeSorting(t *testing.T) {
 		),
 	}
 
-	NewNodeBinpackPriority(util.LinkTopology).Sort(nodes)
+	NewNodeBinpackPriority(util.LinkTopology, 2).Sort(nodes)
 	wantNodeNames := []string{nodeC.Name, nodeD.Name, nodeB.Name, nodeA.Name}
 	binpackNodeNames := make([]string, len(nodes))
 	for i, node := range nodes {
@@ -98,7 +98,7 @@ func Test_NodeSorting(t *testing.T) {
 	}
 	assert.Equal(t, wantNodeNames, binpackNodeNames)
 
-	NewNodeSpreadPriority(util.LinkTopology).Sort(nodes)
+	NewNodeSpreadPriority(util.LinkTopology, 2).Sort(nodes)
 	wantNodeNames = []string{nodeB.Name, nodeC.Name, nodeD.Name, nodeA.Name}
 	spreadNodeNames := make([]string, len(nodes))
 	for i, node := range nodes {
@@ -106,7 +106,7 @@ func Test_NodeSorting(t *testing.T) {
 	}
 	assert.Equal(t, wantNodeNames, spreadNodeNames)
 
-	NewNodeSpreadPriority(util.NoneTopology).Sort(nodes)
+	NewNodeSpreadPriority(util.NoneTopology, 0).Sort(nodes)
 	wantNodeNames = []string{nodeA.Name, nodeB.Name, nodeC.Name, nodeD.Name}
 	spreadNodeNames = make([]string, len(nodes))
 	for i, node := range nodes {
