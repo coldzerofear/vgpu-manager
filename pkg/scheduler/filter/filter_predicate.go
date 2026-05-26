@@ -410,14 +410,22 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	// whether they reported topology metadata).
 	topoMode := PodUsedGPUTopologyMode(pod)
 	topoNeedNumber := PodTopologyNeedNumber(pod)
+	// Build a single RequestProfile for this filter pass, normalised against
+	// the first candidate node's mem-per-card. A single profile across all
+	// candidates is what makes the cross-node ranking well-defined; in a
+	// heterogeneous cluster the choice of reference node is an acknowledged
+	// approximation. nodeInfoList[0] is the natural choice — it's already in
+	// scope, costs nothing to read, and is deterministic for a given pod +
+	// filter call. See profile.go for the wider rationale.
+	profile := allocator.NewRequestProfile(pod, allocator.MemoryPerCard(nodeInfoList[0]))
 	nodePolicy, _ := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation)
 	switch policy := strings.ToLower(nodePolicy); policy {
 	case string(util.BinpackPolicy):
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), policy)
-		allocator.NewNodeBinpackPriority(topoMode, topoNeedNumber).Sort(nodeInfoList)
+		allocator.NewNodeBinpackPriority(profile, topoMode, topoNeedNumber).Sort(nodeInfoList)
 	case string(util.SpreadPolicy):
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), policy)
-		allocator.NewNodeSpreadPriority(topoMode, topoNeedNumber).Sort(nodeInfoList)
+		allocator.NewNodeSpreadPriority(profile, topoMode, topoNeedNumber).Sort(nodeInfoList)
 	default:
 		if policy == "" || policy == string(util.NonePolicy) {
 			klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))

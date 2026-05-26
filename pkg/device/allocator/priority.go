@@ -6,7 +6,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/slices"
-	"k8s.io/klog/v2"
 )
 
 // LessFunc represents function to compare two DeviceInfo or NodeInfo
@@ -50,42 +49,6 @@ var (
 	}
 	ByNodeNameAsc = func(p1, p2 *device.NodeInfo) bool {
 		return p1.GetName() < p2.GetName()
-	}
-	// BySpreadNodeScore Sort in descending order based on spread node scores,
-	// to avoid double counting scores, a score cache was used.
-	BySpreadNodeScore = func() func(p1, p2 *device.NodeInfo) bool {
-		nodeScoreMap := map[string]float64{}
-		return func(p1, p2 *device.NodeInfo) bool {
-			p1Score, ok := nodeScoreMap[p1.GetName()]
-			if !ok {
-				p1Score = GetSpreadNodeScore(p1, util.HundredCore)
-				nodeScoreMap[p1.GetName()] = p1Score
-			}
-			p2Score, ok := nodeScoreMap[p2.GetName()]
-			if !ok {
-				p2Score = GetSpreadNodeScore(p2, util.HundredCore)
-				nodeScoreMap[p2.GetName()] = p2Score
-			}
-			return p1Score > p2Score
-		}
-	}
-	// ByBinpackNodeScore Sort in descending order based on binpack node scores,
-	// to avoid double counting scores, a score cache was used.
-	ByBinpackNodeScore = func() func(p1, p2 *device.NodeInfo) bool {
-		nodeScoreMap := map[string]float64{}
-		return func(p1, p2 *device.NodeInfo) bool {
-			p1Score, ok := nodeScoreMap[p1.GetName()]
-			if !ok {
-				p1Score = GetBinpackNodeScore(p1, util.HundredCore)
-				nodeScoreMap[p1.GetName()] = p1Score
-			}
-			p2Score, ok := nodeScoreMap[p2.GetName()]
-			if !ok {
-				p2Score = GetBinpackNodeScore(p2, util.HundredCore)
-				nodeScoreMap[p2.GetName()] = p2Score
-			}
-			return p1Score > p2Score
-		}
 	}
 	// ByNodeGPUTopology Nodes with GPU Link topology information will be
 	// ranked first. Coarse "has topology?" comparator kept for backward
@@ -208,26 +171,6 @@ func (sp *sortPriority[T]) Less(i, j int) bool {
 	return sp.less[k](sp.data[i], sp.data[j])
 }
 
-// GetSpreadNodeScore Calculate node score: freeResource / totalResource = scorePercentage
-func GetSpreadNodeScore(info *device.NodeInfo, multiplier float64) float64 {
-	numFreePercentage := safeDiv(float64(info.GetAvailableNumber()), float64(info.GetTotalNumber()))
-	memFreePercentage := safeDiv(float64(info.GetAvailableMemory()), float64(info.GetTotalMemory()))
-	coreFreePercentage := safeDiv(float64(info.GetAvailableCores()), float64(info.GetTotalCores()))
-	score := multiplier * (numFreePercentage + memFreePercentage + coreFreePercentage) / 3.0
-	klog.V(5).Infof("Spread Node <%s> resource score is <%.2f>", info.GetName(), score)
-	return score
-}
-
-// GetBinpackNodeScore Calculate node score: usedResource / totalResource = scorePercentage
-func GetBinpackNodeScore(info *device.NodeInfo, multiplier float64) float64 {
-	numUsedPercentage := 1 - safeDiv(float64(info.GetAvailableNumber()), float64(info.GetTotalNumber()))
-	memUsedPercentage := 1 - safeDiv(float64(info.GetAvailableMemory()), float64(info.GetTotalMemory()))
-	coreUsedPercentage := 1 - safeDiv(float64(info.GetAvailableCores()), float64(info.GetTotalCores()))
-	score := multiplier * (numUsedPercentage + memUsedPercentage + coreUsedPercentage) / 3.0
-	klog.V(5).Infof("Binpack Node <%s> resource score is <%.2f>", info.GetName(), score)
-	return score
-}
-
 func safeDiv(a, b float64) float64 {
 	if b == 0 {
 		return 0
@@ -302,9 +245,9 @@ func ApplyTopologyMode(mode util.TopologyMode, needNumber int,
 	return less
 }
 
-func NewNodeBinpackPriority(mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
+func NewNodeBinpackPriority(profile RequestProfile, mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
-		ByBinpackNodeScore(),
+		WeightedBinpackNodeLess(profile),
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*device.NodeInfo]{
@@ -312,9 +255,9 @@ func NewNodeBinpackPriority(mode util.TopologyMode, needNumber int) *sortPriorit
 	}
 }
 
-func NewNodeSpreadPriority(mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
+func NewNodeSpreadPriority(profile RequestProfile, mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
-		BySpreadNodeScore(),
+		WeightedSpreadNodeLess(profile),
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*device.NodeInfo]{

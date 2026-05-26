@@ -71,6 +71,13 @@ func NewRequestProfile(pod *corev1.Pod, memPerCard int64) RequestProfile {
 	}
 }
 
+// UniformProfile is the fallback profile used when no pod is available to
+// derive weights from — every dimension weighted equally, reproducing the
+// legacy "(num + mem + core) / 3" behaviour. Test fixtures that exercise
+// scoring without a pod (e.g. the NUMA callback tests) pass this so the
+// expected ordering matches the pre-Phase-B math.
+var UniformProfile = RequestProfile{NumWeight: 1.0 / 3, MemWeight: 1.0 / 3, CoreWeight: 1.0 / 3}
+
 // MemoryPerCard returns the average memory-per-GPU on a node, used as the
 // normalization unit for RequestProfile.MemWeight. Falls back to 1 (i.e.
 // every byte counts equally as one card) when device count is zero so

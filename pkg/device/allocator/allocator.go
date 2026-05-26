@@ -42,6 +42,12 @@ func (alloc *allocator) addAllocateOne(contDevices *device.ContainerDeviceClaim)
 func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
 	newPod := pod.DeepCopy()
+	// One profile per pod: weights are derived from the pod's aggregated
+	// container demand, normalized against THIS node's mem-per-card so that
+	// the device-level binpack/spread choices in allocateOne are consistent
+	// with the node-level ranking the filter already performed (which used
+	// the candidate node's mem-per-card for the same purpose).
+	profile := NewRequestProfile(pod, MemoryPerCard(alloc.nodeInfo))
 	var podAssignDevices device.PodDeviceClaim
 	for i := range newPod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
@@ -49,7 +55,7 @@ func (alloc *allocator) Allocate(pod *corev1.Pod) (*corev1.Pod, error) {
 		if !util.IsVGPURequiredContainer(container) {
 			continue
 		}
-		assignDevices, err := alloc.allocateOne(newPod, container)
+		assignDevices, err := alloc.allocateOne(newPod, container, profile)
 		if err != nil {
 			klog.V(4).InfoS(err.Error(), "node", alloc.nodeInfo.GetName(),
 				"pod", klog.KObj(pod), "container", container.Name)
@@ -81,7 +87,7 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 	return uuids
 }
 
-func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container) (*device.ContainerDeviceClaim, error) {
+func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container, profile RequestProfile) (*device.ContainerDeviceClaim, error) {
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", container.Name, alloc.nodeInfo.GetName())
 	node := alloc.nodeInfo.GetNode()
 	needNumber := int(util.GetResourceOfContainer(container, util.VGPUNumberResourceName))
@@ -132,11 +138,11 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	case string(util.BinpackPolicy):
 		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, policy)
 		NewDeviceBinpackPriority().Sort(deviceStore)
-		deviceClaims, topoErr = alloc.allocateByTopologyMode(pod, deviceStore, util.BinpackPolicy, needNumber, needCores, needMemory)
+		deviceClaims, topoErr = alloc.allocateByTopologyMode(pod, deviceStore, profile, util.BinpackPolicy, needNumber, needCores, needMemory)
 	case string(util.SpreadPolicy):
 		klog.V(4).Infof("Pod <%s/%s> use <%s> node scheduling policy", pod.Namespace, pod.Name, policy)
 		NewDeviceSpreadPriority().Sort(deviceStore)
-		deviceClaims, topoErr = alloc.allocateByTopologyMode(pod, deviceStore, util.SpreadPolicy, needNumber, needCores, needMemory)
+		deviceClaims, topoErr = alloc.allocateByTopologyMode(pod, deviceStore, profile, util.SpreadPolicy, needNumber, needCores, needMemory)
 	default:
 		if policy == "" || policy == string(util.NonePolicy) {
 			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
@@ -146,7 +152,7 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 				"Unsupported device scheduling policy '%s'", devicePolicy)
 		}
 		NewSortPriority(ByNuma, ByDeviceIdAsc).Sort(deviceStore)
-		deviceClaims, topoErr = alloc.allocateByTopologyMode(pod, deviceStore, util.NonePolicy, needNumber, needCores, needMemory)
+		deviceClaims, topoErr = alloc.allocateByTopologyMode(pod, deviceStore, profile, util.NonePolicy, needNumber, needCores, needMemory)
 	}
 	// Strict topology rejection propagates as-is so the Filter loop can
 	// drop just this node (instead of treating it as a generic resource
@@ -215,7 +221,7 @@ func parseTopologyMode(pod *corev1.Pod) (mode util.TopologyMode, strict bool) {
 // back to allocateByNumbers (and emit an event so operators can see the
 // downgrade in `kubectl describe pod`).
 func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*device.Device,
-	policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
+	profile RequestProfile, policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, error) {
 	if needNumber <= 1 {
 		return allocateByNumbers(deviceStore, needNumber, needCores, needMemory), nil
@@ -226,7 +232,7 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 	case util.LinkTopology:
 		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v)",
 			pod.Namespace, pod.Name, strict)
-		if claims, ok := alloc.allocateLink(deviceStore, policy, strict, needNumber, needCores, needMemory); ok {
+		if claims, ok := alloc.allocateLink(deviceStore, profile, policy, strict, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
 		reason := alloc.linkFallbackReason(needNumber)
@@ -242,7 +248,7 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 	case util.NUMATopology:
 		klog.V(4).Infof("Pod <%s/%s> use NUMA topology mode (strict=%v)",
 			pod.Namespace, pod.Name, strict)
-		if claims, ok := alloc.allocateNUMA(deviceStore, policy, needNumber, needCores, needMemory); ok {
+		if claims, ok := alloc.allocateNUMA(deviceStore, profile, policy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
 		reason := alloc.numaFallbackReason(needNumber, deviceStore)
@@ -280,7 +286,7 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 const linkTopKCandidates = 5
 
 func (alloc *allocator) allocateLink(deviceStore []*device.Device,
-	policy util.SchedulerPolicy, strict bool, needNumber int, needCores, needMemory int64,
+	profile RequestProfile, policy util.SchedulerPolicy, strict bool, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
@@ -330,7 +336,7 @@ func (alloc *allocator) allocateLink(deviceStore []*device.Device,
 		}
 		candidates = filtered
 	}
-	chosen := selectLinkCandidateByDevicePolicy(candidates, deviceStore, policy)
+	chosen := selectLinkCandidateByDevicePolicy(candidates, deviceStore, profile, policy)
 	if len(chosen) != needNumber {
 		return nil, false
 	}
@@ -350,54 +356,54 @@ func gpuallocatorUUIDs(devices []*gpuallocator.Device) []string {
 
 // selectLinkCandidateByDevicePolicy picks among link-equivalent candidate
 // sets using the device-level binpack/spread policy. Candidates arrive
-// already sorted by link score (highest first) so when scores tie or are
-// very close, the secondary key is the average device utilisation of the
-// set's members:
-//
-//   - Binpack: prefer sets whose members already have higher utilisation
-//     (continue packing into already-warm devices).
-//   - Spread:  prefer sets whose members have lower utilisation (avoid
-//     concentrating new load on already-busy devices).
+// already sorted by link score (highest first); the secondary key is the
+// average per-device Score under the pod's RequestProfile + policy mode,
+// which encodes the binpack-vs-spread direction directly (higher score is
+// always the more-preferred candidate, regardless of mode). This replaces
+// the legacy dimension-averaged deviceUsedRatio + per-mode sort comparator
+// pair — same intent, request-aware, and one fewer place to read the
+// policy direction off of.
 //
 // Note that link score still dominates: a strictly-worse link score will
 // not be picked unless the better candidate falls outside the top-K window.
 func selectLinkCandidateByDevicePolicy(
 	candidates [][]*gpuallocator.Device,
 	deviceStore []*device.Device,
+	profile RequestProfile,
 	policy util.SchedulerPolicy,
 ) []*gpuallocator.Device {
 	if len(candidates) <= 1 {
 		return candidates[0]
 	}
-	// Index deviceStore by UUID once so the per-candidate lookup is O(1).
+	// NonePolicy callers don't reach this function (the no-policy branch of
+	// allocateLink takes the fast path), so policy is always Binpack or
+	// Spread here and Score returns a meaningful directional value.
 	byUUID := make(map[string]*device.Device, len(deviceStore))
 	for _, d := range deviceStore {
 		byUUID[d.GetUUID()] = d
 	}
 	type scored struct {
-		idx  int
-		util float64
+		idx   int
+		score float64
 	}
 	scoredCands := make([]scored, len(candidates))
 	for i, set := range candidates {
-		scoredCands[i] = scored{i, candidateSetUtilization(set, byUUID)}
+		scoredCands[i] = scored{i, candidateSetScore(set, byUUID, profile, policy)}
 	}
 	sort.SliceStable(scoredCands, func(i, j int) bool {
-		if policy == util.BinpackPolicy {
-			return scoredCands[i].util > scoredCands[j].util
-		}
-		return scoredCands[i].util < scoredCands[j].util
+		return scoredCands[i].score > scoredCands[j].score
 	})
 	return candidates[scoredCands[0].idx]
 }
 
-// candidateSetUtilization returns the average per-device utilisation across
-// a candidate set, averaged over the three vGPU dimensions (number, memory,
-// core). Used solely as a secondary key for binpack/spread tie-breaking
-// among link-topology-equivalent sets; the same dimension-averaging
-// simplification as the current node-level scoring (acknowledged limitation,
-// see scheduler refactor design doc Phase B for the request-aware fix).
-func candidateSetUtilization(set []*gpuallocator.Device, byUUID map[string]*device.Device) float64 {
+// candidateSetScore returns the average per-device Score across a candidate
+// set under the given profile + policy mode. Devices not found in byUUID
+// (shouldn't happen — candidates are built from deviceStore) are skipped
+// rather than scored as zero, so a stale candidate can't artificially
+// depress an otherwise-good set's average.
+func candidateSetScore(set []*gpuallocator.Device, byUUID map[string]*device.Device,
+	profile RequestProfile, policy util.SchedulerPolicy,
+) float64 {
 	if len(set) == 0 {
 		return 0
 	}
@@ -408,7 +414,7 @@ func candidateSetUtilization(set []*gpuallocator.Device, byUUID map[string]*devi
 		if !ok {
 			continue
 		}
-		sum += deviceUsedRatio(dev)
+		sum += Score(DeviceUtilization(dev), profile, policy)
 		count++
 	}
 	if count == 0 {
@@ -417,22 +423,11 @@ func candidateSetUtilization(set []*gpuallocator.Device, byUUID map[string]*devi
 	return sum / float64(count)
 }
 
-// deviceUsedRatio returns the (num + mem + core) utilisation average for one
-// device, on a 0..1 scale. Mirrors the existing dimension-averaging used by
-// node and NUMA scores; will be replaced by request-weighted scoring in
-// Phase B but kept consistent here so behaviour is predictable cluster-wide.
-func deviceUsedRatio(d *device.Device) float64 {
-	num := 1 - safeDiv(float64(d.AllocatableNumber()), float64(d.GetTotalNumber()))
-	mem := 1 - safeDiv(float64(d.AllocatableMemory()), float64(d.GetTotalMemory()))
-	core := 1 - safeDiv(float64(d.AllocatableCores()), float64(d.GetTotalCores()))
-	return (num + mem + core) / 3.0
-}
-
 // allocateNUMA attempts to satisfy the request within a single NUMA node,
 // applying the binpack/spread policy to choose which NUMA node to consume.
 // Returns (claims, false) when no NUMA node alone can hold needNumber devices.
 func (alloc *allocator) allocateNUMA(deviceStore []*device.Device,
-	policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
+	profile RequestProfile, policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasNUMATopology() {
 		return nil, false
@@ -442,7 +437,7 @@ func (alloc *allocator) allocateNUMA(deviceStore []*device.Device,
 		return nil, false
 	}
 	var claims []device.DeviceClaim
-	numaNode.SchedulerPolicyCallback(policy, func(_ int, devices []*device.Device) bool {
+	numaNode.SchedulerPolicyCallback(profile, policy, func(_ int, devices []*device.Device) bool {
 		if needNumber > len(devices) {
 			return false
 		}
