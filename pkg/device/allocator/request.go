@@ -136,11 +136,11 @@ func (r *AllocationRequest) RawDevicePolicy() string {
 	return r.rawDevicePolicy
 }
 
-// parseSchedulerPolicy reads a SchedulerPolicy annotation, returning both
-// the recognised enum value and the raw lowercased string. Unrecognised
-// values map to NonePolicy so callers only need to handle the three known
-// cases (binpack / spread / none) in their switches; the raw string is
-// available for diagnostics.
+// parseSchedulerPolicy reads a SchedulerPolicy annotation and returns
+// both the recognised enum value and the raw lowercased string.
+// Unrecognised input (including empty and "none") maps to NonePolicy so
+// downstream switches only have to handle the three known cases; the
+// raw string is preserved for diagnostic events.
 func parseSchedulerPolicy(pod *corev1.Pod, annotation string) (util.SchedulerPolicy, string) {
 	raw, _ := util.HasAnnotation(pod, annotation)
 	lower := strings.ToLower(raw)
@@ -149,8 +149,6 @@ func parseSchedulerPolicy(pod *corev1.Pod, annotation string) (util.SchedulerPol
 		return util.BinpackPolicy, lower
 	case util.SpreadPolicy:
 		return util.SpreadPolicy, lower
-	case util.NonePolicy, "":
-		return util.NonePolicy, lower
 	default:
 		return util.NonePolicy, lower
 	}

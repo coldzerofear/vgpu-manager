@@ -3,7 +3,6 @@ package allocator
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -40,8 +39,14 @@ func (alloc *allocator) addAllocateOne(contDevices *device.ContainerDeviceClaim)
 // onto the returned pod's annotations. The request is pre-parsed (see
 // BuildAllocationRequest) so this function — and everything it calls —
 // reads scheduling annotations off req instead of re-parsing them per
-// container iteration. The C2 follow-up adds a dispatch in front that
-// can route topology-mode multi-container pods through a pod-level path.
+// container iteration.
+//
+// Containers are allocated in declaration order. addAllocateOne updates
+// node-side accounting between iterations so the next container's
+// filterDevices sees the live AllocatableX values — which is how
+// cross-container GPU sharing works (one physical card serving vGPUs
+// from multiple containers, as long as each container's per-card
+// resource needs fit in what the previous containers left behind).
 func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, error) {
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
@@ -84,94 +89,100 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) (*device.ContainerDeviceClaim, error) {
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", need.Name, alloc.nodeInfo.GetName())
-	node := alloc.nodeInfo.GetNode()
-	needNumber := need.Number
-	needCores := need.Cores
-	needMemory := need.Memory
-	if needNumber > alloc.nodeInfo.GetDeviceCount() {
+	if need.Number > alloc.nodeInfo.GetDeviceCount() {
 		return nil, errors.New("insufficient GPU cards")
 	}
-	// Calculate the actual requested memory size based on the node memory factor.
-	if needMemory > 0 {
-		if memoryFactor := alloc.nodeInfo.NodeConfigInfo.MemoryFactor; memoryFactor > 0 {
-			needMemory *= int64(memoryFactor)
-		}
-	}
-	if needCores == 0 && needMemory == 0 {
-		needCores = util.HundredCore
-	}
-	var (
-		deviceClaims []device.DeviceClaim
-		topoErr      error
-	)
+	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
+
 	deviceStore, reasonStore := alloc.filterDevices(pod, needCores, needMemory)
-	if needNumber > len(deviceStore) {
-		goto DONE
-	} else if needNumber == len(deviceStore) {
-		// When the request happens to consume every filterable device on this
-		// node there is no per-device choice to make. The fast path skips the
-		// policy sort and topology dispatch, but ONLY when no strict-topology
-		// constraint is in effect — a numa-strict (or link-strict) pod still
-		// needs us to verify the forced "take all" set actually satisfies the
-		// constraint, otherwise A1's no-fallback semantics break silently
-		// (e.g. 4 GPUs across two NUMA nodes would falsely succeed for
-		// numa-strict). Non-strict requests keep the fast path because their
-		// result would be identical either way.
-		if !req.TopologyStrict || needNumber <= 1 {
-			deviceClaims = allocateByNumbers(deviceStore, needNumber, needCores, needMemory)
-			goto DONE
-		}
-		// Fall through to the policy switch so allocateByTopologyMode can run
-		// the topology validation and surface TopologyUnsatisfiedError on
-		// violation. The downstream sort is harmless: with needNumber == len
-		// there is only one possible set, so order does not change the result.
+	claims, err := alloc.pickDeviceClaims(req, deviceStore, need.Number, needCores, needMemory)
+	if err != nil {
+		return nil, err
 	}
-	// Sort the devices according to the device scheduling strategy. The
-	// policy was normalised at BuildAllocationRequest time, so the switch
-	// here is over the enum directly — unrecognised user input collapsed
-	// to NonePolicy and surfaces as the default branch's "unsupported"
-	// event, keyed on req.rawDevicePolicy to preserve the original wording.
+	if len(claims) != need.Number {
+		klog.V(5).InfoS("Insufficient node resources", "node", alloc.nodeInfo.GetName(),
+			"pod", klog.KObj(pod), "container", need.Name, "reason", reasonStore)
+		return nil, errors.New("insufficient GPU resources")
+	}
+	sort.Slice(claims, func(i, j int) bool { return claims[i].Id < claims[j].Id })
+	return &device.ContainerDeviceClaim{Name: need.Name, DeviceClaims: claims}, nil
+}
+
+// resolveContainerNeeds applies the two implicit-fill rules from the
+// pre-allocation semantics:
+//
+//   - vgpu-memory > 0 multiplies by the node's memoryFactor (user typing
+//     gets converted to MB, matching what filterDevices and accounting
+//     downstream both expect).
+//   - vgpu-cores == 0 AND vgpu-memory == 0 promotes cores to HundredCore
+//     so a "give me a whole card" pod actually reserves the full slice.
+//
+// vgpu-memory == 0 stays 0 here; buildClaims expands it to the device's
+// total memory at claim-construction time so each picked device gets the
+// right per-card value (which may differ on heterogeneous nodes).
+func resolveContainerNeeds(need ContainerNeed, memoryFactor int) (cores, memory int64) {
+	cores, memory = need.Cores, need.Memory
+	if memory > 0 && memoryFactor > 0 {
+		memory *= int64(memoryFactor)
+	}
+	if cores == 0 && memory == 0 {
+		cores = util.HundredCore
+	}
+	return cores, memory
+}
+
+// pickDeviceClaims walks the shortest path that satisfies the request:
+//
+//   - len(deviceStore) < needNumber  — bail with (nil, nil); the caller
+//     surfaces the "insufficient" error using reasonStore for diagnostics.
+//
+//   - len(deviceStore) == needNumber and the pod isn't strict-topology —
+//     the chosen set is forced (only one possible selection), so skip the
+//     policy sort and topology dispatch entirely. Strict-topology pods
+//     intentionally fall through so allocateByTopologyMode can validate
+//     the forced set against the topology constraint (numa-strict on
+//     scattered cards, link-strict on disconnected ones).
+//
+//   - otherwise — device-policy sort followed by topology-aware
+//     selection. Non-strict topology failures fall back inside
+//     allocateByTopologyMode and emit a TopologyFallback event.
+func (alloc *allocator) pickDeviceClaims(req *AllocationRequest, deviceStore []*device.Device,
+	needNumber int, needCores, needMemory int64,
+) ([]device.DeviceClaim, error) {
+	switch {
+	case needNumber > len(deviceStore):
+		return nil, nil
+	case needNumber == len(deviceStore) && (!req.TopologyStrict || needNumber <= 1):
+		return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
+	}
+	alloc.sortDeviceStore(req, deviceStore)
+	return alloc.allocateByTopologyMode(req, deviceStore, req.DevicePolicy, needNumber, needCores, needMemory)
+}
+
+// sortDeviceStore applies the device-level binpack/spread sort and emits
+// the once-per-call diagnostic (info log for recognised policies, warning
+// event for unrecognised user input). The policy enum is pre-normalised
+// by BuildAllocationRequest, so the unrecognised case is detected via
+// the preserved raw string.
+func (alloc *allocator) sortDeviceStore(req *AllocationRequest, deviceStore []*device.Device) {
+	pod := req.Pod
 	switch req.DevicePolicy {
 	case util.BinpackPolicy:
 		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
 		NewDeviceBinpackPriority().Sort(deviceStore)
-		deviceClaims, topoErr = alloc.allocateByTopologyMode(req, deviceStore, util.BinpackPolicy, needNumber, needCores, needMemory)
 	case util.SpreadPolicy:
 		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
 		NewDeviceSpreadPriority().Sort(deviceStore)
-		deviceClaims, topoErr = alloc.allocateByTopologyMode(req, deviceStore, util.SpreadPolicy, needNumber, needCores, needMemory)
 	default:
-		if req.rawDevicePolicy != "" && req.rawDevicePolicy != string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s",
-				pod.Namespace, pod.Name, req.rawDevicePolicy)
+		if raw := req.rawDevicePolicy; raw != "" && raw != string(util.NonePolicy) {
+			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s", pod.Namespace, pod.Name, raw)
 			alloc.sendEventf(pod, corev1.EventTypeWarning, "DevicePolicy",
-				"Unsupported device scheduling policy '%s'", req.rawDevicePolicy)
+				"Unsupported device scheduling policy '%s'", raw)
 		} else {
 			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
 		}
 		NewSortPriority(ByNuma, ByDeviceIdAsc).Sort(deviceStore)
-		deviceClaims, topoErr = alloc.allocateByTopologyMode(req, deviceStore, util.NonePolicy, needNumber, needCores, needMemory)
 	}
-	// Strict topology rejection propagates as-is so the Filter loop can
-	// drop just this node (instead of treating it as a generic resource
-	// failure that would burn the entire scheduling cycle).
-	if topoErr != nil {
-		return nil, topoErr
-	}
-DONE:
-	if len(deviceClaims) != needNumber {
-		klog.V(5).InfoS("Insufficient node resources", "node", node.GetName(),
-			"pod", klog.KObj(pod), "container", need.Name, "reason", reasonStore)
-		return nil, errors.New("insufficient GPU resources")
-	}
-	containerClaim := &device.ContainerDeviceClaim{
-		Name:         need.Name,
-		DeviceClaims: deviceClaims,
-	}
-	sort.Slice(containerClaim.DeviceClaims, func(i, j int) bool {
-		return containerClaim.DeviceClaims[i].Id < containerClaim.DeviceClaims[j].Id
-	})
-	return containerClaim, nil
 }
 
 func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
@@ -207,8 +218,8 @@ func IsTopologyUnsatisfied(err error) bool {
 
 // allocateByTopologyMode dispatches to topology-aware allocation. Strict
 // failures return a *TopologyUnsatisfiedError; best-effort failures fall
-// back to allocateByNumbers (and emit an event so operators can see the
-// downgrade in `kubectl describe pod`).
+// back to non-topology allocation (and emit an event so operators can see
+// the downgrade in `kubectl describe pod`).
 //
 // req carries Topology / TopologyStrict / Profile pre-parsed; the Pod
 // reference is used only for events and log keys.
@@ -216,43 +227,33 @@ func (alloc *allocator) allocateByTopologyMode(req *AllocationRequest, deviceSto
 	policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, error) {
 	if needNumber <= 1 {
-		return allocateByNumbers(deviceStore, needNumber, needCores, needMemory), nil
+		return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
 	}
 	pod := req.Pod
 	strict := req.TopologyStrict
 
 	switch req.Topology {
 	case util.LinkTopology:
-		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v)",
-			pod.Namespace, pod.Name, strict)
+		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v)", pod.Namespace, pod.Name, strict)
 		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, policy, strict, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		reason := alloc.linkFallbackReason(needNumber)
-		if strict {
-			return nil, &TopologyUnsatisfiedError{
-				Mode: util.LinkTopologyStrict, Node: alloc.nodeInfo.GetName(), Reason: reason,
-			}
+		if err := alloc.handleTopologyFallback(pod, strict, util.LinkTopologyStrict,
+			"link topology", "non-topology allocation",
+			alloc.linkFallbackReason(needNumber)); err != nil {
+			return nil, err
 		}
-		alloc.sendEventf(pod, corev1.EventTypeWarning, "TopologyFallback",
-			"link topology unsatisfiable on %s (%s); falling back to non-topology allocation",
-			alloc.nodeInfo.GetName(), reason)
 
 	case util.NUMATopology:
-		klog.V(4).Infof("Pod <%s/%s> use NUMA topology mode (strict=%v)",
-			pod.Namespace, pod.Name, strict)
+		klog.V(4).Infof("Pod <%s/%s> use NUMA topology mode (strict=%v)", pod.Namespace, pod.Name, strict)
 		if claims, ok := alloc.allocateNUMA(deviceStore, req.Profile, policy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		reason := alloc.numaFallbackReason(needNumber, deviceStore)
-		if strict {
-			return nil, &TopologyUnsatisfiedError{
-				Mode: util.NUMATopologyStrict, Node: alloc.nodeInfo.GetName(), Reason: reason,
-			}
+		if err := alloc.handleTopologyFallback(pod, strict, util.NUMATopologyStrict,
+			"NUMA topology", "cross-NUMA allocation",
+			alloc.numaFallbackReason(needNumber, deviceStore)); err != nil {
+			return nil, err
 		}
-		alloc.sendEventf(pod, corev1.EventTypeWarning, "TopologyFallback",
-			"NUMA topology unsatisfiable on %s (%s); falling back to cross-NUMA allocation",
-			alloc.nodeInfo.GetName(), reason)
 
 	case util.NoneTopology, "":
 		klog.V(4).Infof("Pod <%s/%s> none topology mode", pod.Namespace, pod.Name)
@@ -263,7 +264,34 @@ func (alloc *allocator) allocateByTopologyMode(req *AllocationRequest, deviceSto
 		alloc.sendEventf(pod, corev1.EventTypeWarning, "DeviceTopologyMode",
 			"Unsupported device topology mode '%s'", req.Topology)
 	}
-	return allocateByNumbers(deviceStore, needNumber, needCores, needMemory), nil
+	return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
+}
+
+// handleTopologyFallback centralises the "strict → error / non-strict →
+// event" tail that previously sat duplicated under each topology arm. On
+// strict mode it returns a *TopologyUnsatisfiedError (caller propagates
+// to drop this node from the filter cycle); on non-strict it emits a
+// TopologyFallback event so operators see the downgrade in
+// `kubectl describe pod` and returns nil so the caller can continue with
+// the non-topology fallback path.
+//
+// attemptKind / fallbackKind are the human-readable phrases that vary
+// between modes: ("link topology", "non-topology allocation") vs
+// ("NUMA topology", "cross-NUMA allocation"). strictMode is the *Strict
+// enum variant that goes into the error so the receiving code can
+// distinguish link-strict from numa-strict failures.
+func (alloc *allocator) handleTopologyFallback(pod *corev1.Pod, strict bool,
+	strictMode util.TopologyMode, attemptKind, fallbackKind, reason string,
+) error {
+	if strict {
+		return &TopologyUnsatisfiedError{
+			Mode: strictMode, Node: alloc.nodeInfo.GetName(), Reason: reason,
+		}
+	}
+	alloc.sendEventf(pod, corev1.EventTypeWarning, "TopologyFallback",
+		"%s unsatisfiable on %s (%s); falling back to %s",
+		attemptKind, alloc.nodeInfo.GetName(), reason, fallbackKind)
+	return nil
 }
 
 // allocateLink runs the NVIDIA bestEffort algorithm over the link-aware
@@ -303,7 +331,7 @@ func (alloc *allocator) allocateLink(deviceStore []*device.Device,
 		if strict && !alloc.nodeInfo.AreDevicesLinked(gpuallocatorUUIDs(got)) {
 			return nil, false
 		}
-		return allocateByDevices(deviceStore, got, needCores, needMemory), true
+		return buildClaims(resolveLinkDevices(got, deviceStore), needCores, needMemory), true
 	}
 
 	// Compose path: keep top-K topology-equivalent candidates, then apply
@@ -333,7 +361,7 @@ func (alloc *allocator) allocateLink(deviceStore []*device.Device,
 	if len(chosen) != needNumber {
 		return nil, false
 	}
-	return allocateByDevices(deviceStore, chosen, needCores, needMemory), true
+	return buildClaims(resolveLinkDevices(chosen, deviceStore), needCores, needMemory), true
 }
 
 // gpuallocatorUUIDs extracts UUIDs from a gpuallocator.Device slice. The
@@ -359,6 +387,10 @@ func gpuallocatorUUIDs(devices []*gpuallocator.Device) []string {
 //
 // Note that link score still dominates: a strictly-worse link score will
 // not be picked unless the better candidate falls outside the top-K window.
+//
+// NonePolicy callers don't reach this function (the no-policy branch of
+// allocateLink takes the fast path), so policy is always Binpack or
+// Spread here and Score returns a meaningful directional value.
 func selectLinkCandidateByDevicePolicy(
 	candidates [][]*gpuallocator.Device,
 	deviceStore []*device.Device,
@@ -368,25 +400,22 @@ func selectLinkCandidateByDevicePolicy(
 	if len(candidates) <= 1 {
 		return candidates[0]
 	}
-	// NonePolicy callers don't reach this function (the no-policy branch of
-	// allocateLink takes the fast path), so policy is always Binpack or
-	// Spread here and Score returns a meaningful directional value.
 	byUUID := make(map[string]*device.Device, len(deviceStore))
 	for _, d := range deviceStore {
 		byUUID[d.GetUUID()] = d
 	}
-	type scored struct {
-		idx   int
-		score float64
+	// Single-pass argmax — we only want the best candidate, not a full
+	// ordering, so a sort would do O(n log n) work for an O(n) decision.
+	// Ties resolve to the lower-index candidate (preserves the link-score
+	// ordering that AllocateLinkTopK established).
+	bestIdx := 0
+	bestScore := candidateSetScore(candidates[0], byUUID, profile, policy)
+	for i := 1; i < len(candidates); i++ {
+		if s := candidateSetScore(candidates[i], byUUID, profile, policy); s > bestScore {
+			bestIdx, bestScore = i, s
+		}
 	}
-	scoredCands := make([]scored, len(candidates))
-	for i, set := range candidates {
-		scoredCands[i] = scored{i, candidateSetScore(set, byUUID, profile, policy)}
-	}
-	sort.SliceStable(scoredCands, func(i, j int) bool {
-		return scoredCands[i].score > scoredCands[j].score
-	})
-	return candidates[scoredCands[0].idx]
+	return candidates[bestIdx]
 }
 
 // candidateSetScore returns the average per-device Score across a candidate
@@ -434,7 +463,7 @@ func (alloc *allocator) allocateNUMA(deviceStore []*device.Device,
 		if needNumber > len(devices) {
 			return false
 		}
-		claims = allocateByNumbers(devices, needNumber, needCores, needMemory)
+		claims = buildClaims(devices[:needNumber], needCores, needMemory)
 		return true
 	})
 	if len(claims) != needNumber {
@@ -459,54 +488,54 @@ func (alloc *allocator) numaFallbackReason(needNumber int, deviceStore []*device
 	if !alloc.nodeInfo.HasNUMATopology() {
 		return "node has no NUMA topology"
 	}
-	max := 0
-	for _, devs := range NewNumaNodeDevice(deviceStore) {
-		if len(devs) > max {
-			max = len(devs)
-		}
-	}
-	return fmt.Sprintf("no NUMA node has %d GPUs (max single-NUMA capacity %d)", needNumber, max)
+	return fmt.Sprintf("no NUMA node has %d GPUs (max single-NUMA capacity %d)",
+		needNumber, NewNumaNodeDevice(deviceStore).MaxDeviceNumberForNumaNode())
 }
 
-func allocateByDevices(deviceStore []*device.Device, devices []*gpuallocator.Device, needCores, needMemory int64) []device.DeviceClaim {
-	claimDevices := make([]device.DeviceClaim, len(devices))
-	for i, dev := range devices {
-		reqMemory := needMemory
-		// When there is no defined request for memory,
-		// it occupies the entire card memory.
-		if reqMemory == 0 {
-			index := slices.IndexFunc(deviceStore, func(d *device.Device) bool {
-				return d.GetUUID() == dev.UUID
-			})
-			reqMemory = deviceStore[index].GetTotalMemory()
-		}
-		claimDevices[i] = device.DeviceClaim{
-			Id:     dev.Index,
-			Uuid:   dev.UUID,
-			Cores:  needCores,
-			Memory: needMemory,
-		}
-	}
-	return claimDevices
-}
-
-func allocateByNumbers(deviceStore []*device.Device, needNumber int, needCores, needMemory int64) []device.DeviceClaim {
-	claims := make([]device.DeviceClaim, needNumber)
-	for i, deviceInfo := range deviceStore[0:needNumber] {
-		reqMemory := needMemory
-		// When there is no defined request for memory,
-		// it occupies the entire card memory.
-		if reqMemory == 0 {
-			reqMemory = deviceInfo.GetTotalMemory()
+// buildClaims turns each picked device into a DeviceClaim, applying the
+// implicit-full-memory rule (needMemory == 0 → device's whole card memory).
+// Single entry point for both the per-device-numbers fast path and the
+// post-topology link path so the implicit-full rule lives in exactly one
+// place — the link path previously had its own copy that silently
+// dropped `reqMemory` and wrote `needMemory` (0), leaving link-topology
+// pods that omit vgpu-memory with Memory=0 claims.
+func buildClaims(picked []*device.Device, needCores, needMemory int64) []device.DeviceClaim {
+	claims := make([]device.DeviceClaim, len(picked))
+	for i, d := range picked {
+		mem := needMemory
+		if mem == 0 {
+			mem = d.GetTotalMemory()
 		}
 		claims[i] = device.DeviceClaim{
-			Id:     deviceInfo.GetID(),
-			Uuid:   deviceInfo.GetUUID(),
+			Id:     d.GetID(),
+			Uuid:   d.GetUUID(),
 			Cores:  needCores,
-			Memory: reqMemory,
+			Memory: mem,
 		}
 	}
 	return claims
+}
+
+// resolveLinkDevices maps each gpuallocator.Device back to its *device.Device
+// counterpart in store. The gpuallocator package operates on its own Device
+// shape (Index / UUID / Links) and doesn't carry the allocatable-resource
+// accounting we need at claim time; UUID is the stable join key. Missing
+// UUIDs are skipped rather than panicking — should never happen in practice
+// because the topology selector picks from devices we passed in, but a
+// defensive skip keeps a single stale entry from poisoning a whole claim
+// list.
+func resolveLinkDevices(picked []*gpuallocator.Device, store []*device.Device) []*device.Device {
+	byUUID := make(map[string]*device.Device, len(store))
+	for _, d := range store {
+		byUUID[d.GetUUID()] = d
+	}
+	out := make([]*device.Device, 0, len(picked))
+	for _, p := range picked {
+		if d, ok := byUUID[p.UUID]; ok {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 type FailedReason string

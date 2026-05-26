@@ -52,12 +52,12 @@ type RequestProfile struct {
 // dominant "give me a card" case and are unit-independent — a single-line
 // "vgpu-number: 1" pod gets (1/3, 1/3, 1/3) regardless of cluster shape.
 //
-// Implicit-fill rules mirrored from allocator.allocateOne and
-// allocator.allocateByNumbers:
+// Implicit-fill rules mirrored from allocator.resolveContainerNeeds and
+// allocator.buildClaims:
 //
 //   - vgpu-memory == 0 → reqMemory becomes the whole card's memory at
-//     allocation time. Profile records this as cNum "cards' worth" of
-//     memory (the unit cancels, so no node info needed).
+//     claim-construction time. Profile records this as cNum "cards'
+//     worth" of memory (the unit cancels, so no node info needed).
 //
 //   - vgpu-cores == 0 AND vgpu-memory == 0 → needCores is promoted to
 //     util.HundredCore. Profile records cNum "cards' worth" of cores.
@@ -65,9 +65,9 @@ type RequestProfile struct {
 //     ("memory-only" pod), cores correctly stays 0 and drops out of the
 //     weights — matching the allocator's per-claim Cores=0 behaviour.
 //
-// Per-container values multiply by cNum because allocateByNumbers writes
-// the same (needCores, reqMemory) into EACH of the cNum claims it
-// produces, so per-container consumption is cNum * per-vGPU.
+// Per-container values multiply by cNum because buildClaims writes the
+// same (needCores, reqMemory) into EACH of the cNum claims it produces,
+// so per-container consumption is cNum * per-vGPU.
 func NewRequestProfile(pod *corev1.Pod) RequestProfile {
 	var rNum, rMem, rCore float64
 	for i := range pod.Spec.Containers {

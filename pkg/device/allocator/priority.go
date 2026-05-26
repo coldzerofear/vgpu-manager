@@ -5,7 +5,6 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	"golang.org/x/exp/slices"
 )
 
 // LessFunc represents function to compare two DeviceInfo or NodeInfo
@@ -50,38 +49,6 @@ var (
 	ByNodeNameAsc = func(p1, p2 *device.NodeInfo) bool {
 		return p1.GetName() < p2.GetName()
 	}
-	// ByNodeGPUTopology Nodes with GPU Link topology information will be
-	// ranked first. Coarse "has topology?" comparator kept for backward
-	// compatibility; new call sites should prefer ByNodeGPUTopologyFitness
-	// which additionally checks whether the topology can actually host the
-	// requested group size (max connected component ≥ needNumber).
-	ByNodeGPUTopology = func(p1, p2 *device.NodeInfo) bool {
-		hasTopo1 := p1.HasGPUTopology()
-		hasTopo2 := p2.HasGPUTopology()
-		switch {
-		case hasTopo1 && !hasTopo2:
-			return true // p1 has topology, p2 does not → p1 ranks first
-		case !hasTopo1 && hasTopo2:
-			return false // p2 has topology, p1 does not → p2 ranks first
-		default:
-			return false // both are the same: continue to compare in the future
-		}
-	}
-	// ByNodeNUMATopology Nodes with GPU NUMA topology information will be
-	// ranked first. See ByNodeGPUTopology comment — prefer the fitness-aware
-	// ByNodeNUMATopologyFitness for new call sites.
-	ByNodeNUMATopology = func(p1, p2 *device.NodeInfo) bool {
-		hasTopo1 := p1.HasNUMATopology()
-		hasTopo2 := p2.HasNUMATopology()
-		switch {
-		case hasTopo1 && !hasTopo2:
-			return true // p1 has topology, p2 does not → p1 ranks first
-		case !hasTopo1 && hasTopo2:
-			return false // p2 has topology, p1 does not → p2 ranks first
-		default:
-			return false // both are the same: continue to compare in the future
-		}
-	}
 )
 
 // ByNodeGPUTopologyFitness ranks nodes by their actual ability to satisfy a
@@ -91,10 +58,10 @@ var (
 //	fitness 1 = has topology BUT max component too small (will fall back)
 //	fitness 0 = no topology info
 //
-// Without this fitness check the old ByNodeGPUTopology just orders by
-// "has-topology vs has-not", so a node that publishes topology info but
-// physically can't host the request can still beat a node that would
-// actually allocate fine via non-topology fallback.
+// The fitness check is strictly stronger than a bare "has topology?" test:
+// a node that publishes link metadata but physically can't host the
+// requested group size ranks BELOW a node that would actually allocate
+// fine via the non-topology fallback.
 func ByNodeGPUTopologyFitness(needNumber int) LessFunc[*device.NodeInfo] {
 	return func(p1, p2 *device.NodeInfo) bool {
 		return gpuTopologyFitness(p1, needNumber) > gpuTopologyFitness(p2, needNumber)
@@ -178,31 +145,22 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
-// WeightedBinpackNodeLess returns a comparator that ranks nodes higher
-// when their request-weighted USED fraction is higher (the binpack rule).
-// The profile is captured once; the per-name cache reuses the computed
-// score across the O(n log n) comparisons in a single sort pass, so each
-// node's Score is evaluated at most once per priority instantiation.
+// WeightedNodeLess returns a comparator that ranks nodes by their
+// request-weighted score under the given policy mode. Binpack ranks
+// higher-utilisation nodes first; Spread ranks lower-utilisation nodes
+// first (Score encodes the direction — higher score is always more
+// preferred regardless of mode).
 //
-// Why a closure-captured cache: NodeUtilization is cheap but Score with a
-// weighted profile is invoked O(n log n) times during sort.Sort; caching
-// keeps the cost O(n) without exposing a mutex (each priority instance is
-// confined to one filter goroutine).
-func WeightedBinpackNodeLess(profile RequestProfile) LessFunc[*device.NodeInfo] {
+// The closure captures a per-name cache so the O(n log n) comparisons
+// in one sort pass each evaluate Score at most once per node — keeps
+// the total work O(n) and the cache lives only for the lifetime of the
+// returned LessFunc (confined to a single filter goroutine, so no
+// mutex is needed).
+func WeightedNodeLess(profile RequestProfile, mode util.SchedulerPolicy) LessFunc[*device.NodeInfo] {
 	cache := make(map[string]float64)
 	return func(p1, p2 *device.NodeInfo) bool {
-		return cachedNodeScore(cache, p1, profile, util.BinpackPolicy) >
-			cachedNodeScore(cache, p2, profile, util.BinpackPolicy)
-	}
-}
-
-// WeightedSpreadNodeLess mirrors WeightedBinpackNodeLess but for spread —
-// ranks higher the nodes whose request-weighted FREE fraction is higher.
-func WeightedSpreadNodeLess(profile RequestProfile) LessFunc[*device.NodeInfo] {
-	cache := make(map[string]float64)
-	return func(p1, p2 *device.NodeInfo) bool {
-		return cachedNodeScore(cache, p1, profile, util.SpreadPolicy) >
-			cachedNodeScore(cache, p2, profile, util.SpreadPolicy)
+		return cachedNodeScore(cache, p1, profile, mode) >
+			cachedNodeScore(cache, p2, profile, mode)
 	}
 }
 
@@ -222,42 +180,49 @@ func cachedNodeScore(cache map[string]float64, info *device.NodeInfo,
 // priority of the sort chain when the pod requested a topology mode. The
 // fitness comparator returns true when the candidate node can ACTUALLY host
 // the requested topology group of needNumber GPUs (max component / max NUMA
-// group ≥ needNumber), strictly stronger than the prior "just has topology
+// group ≥ needNumber), strictly stronger than a bare "just has topology
 // metadata" check.
 //
-// needNumber is the total per-pod GPU count (single-container multi-GPU pods
-// pass the container's vgpu-number; multi-container pods pass the sum). For
-// none-topology or single-GPU requests this is a no-op.
+// needNumber is the per-pod GPU count whose locality the user wants. For
+// none-topology requests, single-GPU requests, or unrecognised modes, the
+// input slice is returned unchanged.
 //
 // Both strict and non-strict topology variants get the same prepended
 // comparator — strictness only changes ALLOCATION fallback behaviour
 // (handled inside allocateByTopologyMode), not node ranking.
 func ApplyTopologyMode(mode util.TopologyMode, needNumber int,
-	less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
+	less []LessFunc[*device.NodeInfo],
+) []LessFunc[*device.NodeInfo] {
+	var fitness LessFunc[*device.NodeInfo]
 	switch mode.BaseTopology() {
 	case util.LinkTopology:
-		less = slices.Insert[[]LessFunc[*device.NodeInfo],
-			LessFunc[*device.NodeInfo]](less, 0, ByNodeGPUTopologyFitness(needNumber))
+		fitness = ByNodeGPUTopologyFitness(needNumber)
 	case util.NUMATopology:
-		less = slices.Insert[[]LessFunc[*device.NodeInfo],
-			LessFunc[*device.NodeInfo]](less, 0, ByNodeNUMATopologyFitness(needNumber))
+		fitness = ByNodeNUMATopologyFitness(needNumber)
+	default:
+		return less
 	}
-	return less
+	return append([]LessFunc[*device.NodeInfo]{fitness}, less...)
 }
 
+// NewNodeBinpackPriority builds the node-level binpack ranking chain:
+// request-weighted score first, name as deterministic tiebreaker, and a
+// topology fitness comparator prepended when a topology mode applies.
 func NewNodeBinpackPriority(profile RequestProfile, mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
-	less := []LessFunc[*device.NodeInfo]{
-		WeightedBinpackNodeLess(profile),
-		ByNodeNameAsc,
-	}
-	return &sortPriority[*device.NodeInfo]{
-		less: ApplyTopologyMode(mode, needNumber, less),
-	}
+	return newNodePriority(profile, util.BinpackPolicy, mode, needNumber)
 }
 
+// NewNodeSpreadPriority is the spread-policy counterpart of
+// NewNodeBinpackPriority — same shape, just inverts the score direction.
 func NewNodeSpreadPriority(profile RequestProfile, mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
+	return newNodePriority(profile, util.SpreadPolicy, mode, needNumber)
+}
+
+func newNodePriority(profile RequestProfile, policy util.SchedulerPolicy,
+	mode util.TopologyMode, needNumber int,
+) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
-		WeightedSpreadNodeLess(profile),
+		WeightedNodeLess(profile, policy),
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*device.NodeInfo]{

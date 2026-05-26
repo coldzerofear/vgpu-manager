@@ -370,6 +370,17 @@ func NewFakeDevice(id, usedNum, totalNum int, usedCore, totalCore, usedMem, tota
 	}
 }
 
+// NewFakeDeviceWithUUID is NewFakeDevice with an explicit UUID. Use this
+// in tests that need to round-trip devices through any UUID-keyed map
+// (the link-topology allocation path, AreDevicesLinked, etc.) — plain
+// NewFakeDevice leaves uuid as "" which collapses every fake device to
+// the same map entry.
+func NewFakeDeviceWithUUID(uuid string, id, usedNum, totalNum int, usedCore, totalCore, usedMem, totalMem int64, numa int) *Device {
+	d := NewFakeDevice(id, usedNum, totalNum, usedCore, totalCore, usedMem, totalMem, numa)
+	d.uuid = uuid
+	return d
+}
+
 func NewDevice(dev DeviceInfo) *Device {
 	return &Device{
 		id:          dev.Id,
