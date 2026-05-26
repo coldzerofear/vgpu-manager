@@ -108,8 +108,23 @@ func (alloc *allocator) allocateOne(pod *corev1.Pod, container *corev1.Container
 	if needNumber > len(deviceStore) {
 		goto DONE
 	} else if needNumber == len(deviceStore) {
-		deviceClaims = allocateByNumbers(deviceStore, needNumber, needCores, needMemory)
-		goto DONE
+		// When the request happens to consume every filterable device on this
+		// node there is no per-device choice to make. The fast path skips the
+		// policy sort and topology dispatch, but ONLY when no strict-topology
+		// constraint is in effect — a numa-strict (or link-strict) pod still
+		// needs us to verify the forced "take all" set actually satisfies the
+		// constraint, otherwise A1's no-fallback semantics break silently
+		// (e.g. 4 GPUs across two NUMA nodes would falsely succeed for
+		// numa-strict). Non-strict requests keep the fast path because their
+		// result would be identical either way.
+		if _, strict := parseTopologyMode(pod); !strict || needNumber <= 1 {
+			deviceClaims = allocateByNumbers(deviceStore, needNumber, needCores, needMemory)
+			goto DONE
+		}
+		// Fall through to the policy switch so allocateByTopologyMode can run
+		// the topology validation and surface TopologyUnsatisfiedError on
+		// violation. The downstream sort is harmless: with needNumber == len
+		// there is only one possible set, so order does not change the result.
 	}
 	// Sort the devices according to the device scheduling strategy.
 	devicePolicy, _ = util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation)
