@@ -47,6 +47,38 @@ func AllocateLink(devices []*Device, size int) []*Device {
 	return NewBestEffortPolicy().Allocate(devices, nil, size)
 }
 
+// AllocateLinkTopK returns up to k topology-best candidate sets. Above the
+// bestEffortMaxGPUs threshold only the single greedy result is returned
+// (wrapped in a 1-element slice) — top-K exhaustive enumeration would
+// reintroduce the combinatorial cost we are trying to avoid.
+//
+// Callers that want link+binpack/spread composition should request a small k
+// (3-5 is typical) so the secondary policy can break ties among
+// link-equivalent sets without paying for full enumeration.
+func AllocateLinkTopK(devices []*Device, size, k int) [][]*Device {
+	if size <= 0 || size > len(devices) {
+		return nil
+	}
+	if k <= 0 {
+		k = 1
+	}
+	if len(devices) > GetBestEffortMaxGPUs() {
+		// Greedy path doesn't enumerate alternatives. Returning the single
+		// best set is a degraded but safe behaviour: the caller's secondary
+		// ranking simply has one candidate to choose from.
+		got := greedyLinkAllocate(devices, size)
+		if len(got) != size {
+			return nil
+		}
+		return [][]*Device{got}
+	}
+	return bestEffortPolicyInstance.AllocateTopK(devices, nil, size, k)
+}
+
+// bestEffortPolicyInstance is a process-wide pointer reused across calls so
+// we don't reallocate on every Filter pass. The policy itself is stateless.
+var bestEffortPolicyInstance = &bestEffortPolicy{}
+
 // greedyLinkAllocate is an O(n²·k) replacement for the exhaustive
 // bestEffortPolicy when the candidate device count exceeds a configurable
 // threshold (see DefaultBestEffortMaxGPUs). The exhaustive algorithm

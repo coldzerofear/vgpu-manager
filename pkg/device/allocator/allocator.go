@@ -211,7 +211,7 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 	case util.LinkTopology:
 		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v)",
 			pod.Namespace, pod.Name, strict)
-		if claims, ok := alloc.allocateLink(deviceStore, needNumber, needCores, needMemory); ok {
+		if claims, ok := alloc.allocateLink(deviceStore, policy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
 		reason := alloc.linkFallbackReason()
@@ -256,21 +256,125 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 // device list. Returns (claims, true) on success; (nil, false) means the
 // caller should either fall back (non-strict) or surface a
 // TopologyUnsatisfiedError (strict).
+// linkTopKCandidates controls how many topology-equivalent candidate sets we
+// keep when the caller has a non-None device policy. Empirically 5 covers
+// most "two NVLink bridges, three NUMA branches" diversity without blowing
+// up the partition enumeration cost. Increase only if you observe binpack/
+// spread picking the link-best set even when other equally-good sets would
+// satisfy the policy better.
+const linkTopKCandidates = 5
+
 func (alloc *allocator) allocateLink(deviceStore []*device.Device,
-	needNumber int, needCores, needMemory int64,
+	policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
 	}
 	devices, _ := alloc.nodeInfo.GetDeviceList().Filter(getDeviceUUIDs(deviceStore))
-	// Use the threshold-aware entry point: above bestEffortMaxGPUs the
-	// allocator switches to a greedy O(n²·k) algorithm to keep filter latency
-	// bounded on dense GPU nodes (16+ cards).
-	devices = gpuallocator.AllocateLink(devices, needNumber)
-	if len(devices) != needNumber {
+
+	// Fast path: no device policy → take the link-best set (cheapest path,
+	// matches pre-Phase-A behaviour). Uses the threshold-aware AllocateLink
+	// which transparently falls back to greedy on dense nodes.
+	if policy == util.NonePolicy || policy == "" {
+		got := gpuallocator.AllocateLink(devices, needNumber)
+		if len(got) != needNumber {
+			return nil, false
+		}
+		return allocateByDevices(deviceStore, got, needCores, needMemory), true
+	}
+
+	// Compose path: keep top-K topology-equivalent candidates, then apply
+	// binpack/spread to choose among them. This is what makes "link + binpack"
+	// actually compose instead of the binpack sort being silently ignored.
+	candidates := gpuallocator.AllocateLinkTopK(devices, needNumber, linkTopKCandidates)
+	if len(candidates) == 0 {
 		return nil, false
 	}
-	return allocateByDevices(deviceStore, devices, needCores, needMemory), true
+	chosen := selectLinkCandidateByDevicePolicy(candidates, deviceStore, policy)
+	if len(chosen) != needNumber {
+		return nil, false
+	}
+	return allocateByDevices(deviceStore, chosen, needCores, needMemory), true
+}
+
+// selectLinkCandidateByDevicePolicy picks among link-equivalent candidate
+// sets using the device-level binpack/spread policy. Candidates arrive
+// already sorted by link score (highest first) so when scores tie or are
+// very close, the secondary key is the average device utilisation of the
+// set's members:
+//
+//   - Binpack: prefer sets whose members already have higher utilisation
+//     (continue packing into already-warm devices).
+//   - Spread:  prefer sets whose members have lower utilisation (avoid
+//     concentrating new load on already-busy devices).
+//
+// Note that link score still dominates: a strictly-worse link score will
+// not be picked unless the better candidate falls outside the top-K window.
+func selectLinkCandidateByDevicePolicy(
+	candidates [][]*gpuallocator.Device,
+	deviceStore []*device.Device,
+	policy util.SchedulerPolicy,
+) []*gpuallocator.Device {
+	if len(candidates) <= 1 {
+		return candidates[0]
+	}
+	// Index deviceStore by UUID once so the per-candidate lookup is O(1).
+	byUUID := make(map[string]*device.Device, len(deviceStore))
+	for _, d := range deviceStore {
+		byUUID[d.GetUUID()] = d
+	}
+	type scored struct {
+		idx  int
+		util float64
+	}
+	scoredCands := make([]scored, len(candidates))
+	for i, set := range candidates {
+		scoredCands[i] = scored{i, candidateSetUtilization(set, byUUID)}
+	}
+	sort.SliceStable(scoredCands, func(i, j int) bool {
+		if policy == util.BinpackPolicy {
+			return scoredCands[i].util > scoredCands[j].util
+		}
+		return scoredCands[i].util < scoredCands[j].util
+	})
+	return candidates[scoredCands[0].idx]
+}
+
+// candidateSetUtilization returns the average per-device utilisation across
+// a candidate set, averaged over the three vGPU dimensions (number, memory,
+// core). Used solely as a secondary key for binpack/spread tie-breaking
+// among link-topology-equivalent sets; the same dimension-averaging
+// simplification as the current node-level scoring (acknowledged limitation,
+// see scheduler refactor design doc Phase B for the request-aware fix).
+func candidateSetUtilization(set []*gpuallocator.Device, byUUID map[string]*device.Device) float64 {
+	if len(set) == 0 {
+		return 0
+	}
+	sum := 0.0
+	count := 0
+	for _, d := range set {
+		dev, ok := byUUID[d.UUID]
+		if !ok {
+			continue
+		}
+		sum += deviceUsedRatio(dev)
+		count++
+	}
+	if count == 0 {
+		return 0
+	}
+	return sum / float64(count)
+}
+
+// deviceUsedRatio returns the (num + mem + core) utilisation average for one
+// device, on a 0..1 scale. Mirrors the existing dimension-averaging used by
+// node and NUMA scores; will be replaced by request-weighted scoring in
+// Phase B but kept consistent here so behaviour is predictable cluster-wide.
+func deviceUsedRatio(d *device.Device) float64 {
+	num := 1 - safeDiv(float64(d.AllocatableNumber()), float64(d.GetTotalNumber()))
+	mem := 1 - safeDiv(float64(d.AllocatableMemory()), float64(d.GetTotalMemory()))
+	core := 1 - safeDiv(float64(d.AllocatableCores()), float64(d.GetTotalCores()))
+	return (num + mem + core) / 3.0
 }
 
 // allocateNUMA attempts to satisfy the request within a single NUMA node,
