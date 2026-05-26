@@ -464,15 +464,24 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	return filteredNodes, failedNodesMap, nil
 }
 
+// PodUsedGPUTopologyMode returns the EFFECTIVE topology mode for the given
+// pod, taking into account both the user annotation and the runtime
+// preconditions (GPUTopology feature gate for link mode; at least one
+// container requesting >1 GPU). Both the regular and the *-strict variants
+// of each mode are recognised; the strict suffix is preserved on the return
+// value so downstream allocation paths can apply the no-fallback policy.
 func PodUsedGPUTopologyMode(pod *corev1.Pod) util.TopologyMode {
-	topoMode, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
-	topoMode = strings.ToLower(topoMode)
-	switch {
-	case topoMode == string(util.LinkTopology) && device.IsGPUTopologyEnabled() && util.IsSingleContainerMultiGPUs(pod):
-		return util.LinkTopology
-	case topoMode == string(util.NUMATopology) && util.IsSingleContainerMultiGPUs(pod):
-		return util.NUMATopology
-	default:
-		return util.NoneTopology
+	raw, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
+	mode := util.TopologyMode(strings.ToLower(raw))
+	switch mode {
+	case util.LinkTopology, util.LinkTopologyStrict:
+		if device.IsGPUTopologyEnabled() && util.IsSingleContainerMultiGPUs(pod) {
+			return mode
+		}
+	case util.NUMATopology, util.NUMATopologyStrict:
+		if util.IsSingleContainerMultiGPUs(pod) {
+			return mode
+		}
 	}
+	return util.NoneTopology
 }

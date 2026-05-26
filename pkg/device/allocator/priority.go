@@ -182,8 +182,13 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
+// ApplyTopologyMode prepends a topology-aware comparator at the highest
+// priority of the sort chain when the pod requested a topology mode. Both
+// strict and non-strict variants get the same comparator — strictness only
+// changes ALLOCATION fallback behaviour (handled inside the allocator), not
+// node ranking, so we collapse via BaseTopology().
 func ApplyTopologyMode(mode util.TopologyMode, less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
-	switch mode {
+	switch mode.BaseTopology() {
 	case util.LinkTopology:
 		less = slices.Insert[[]LessFunc[*device.NodeInfo],
 			LessFunc[*device.NodeInfo]](less, 0, ByNodeGPUTopology)

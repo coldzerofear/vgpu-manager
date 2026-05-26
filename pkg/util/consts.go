@@ -224,10 +224,44 @@ const (
 	// NoneTopology Do not use any topology mode to allocate devices.
 	NoneTopology TopologyMode = "none"
 	// NUMATopology aligns the allocated devices according to numa nodes.
+	// Best-effort: if no single NUMA node can hold the requested device count,
+	// the allocator silently falls back to cross-NUMA allocation.
 	NUMATopology TopologyMode = "numa"
+	// NUMATopologyStrict same as NUMATopology but does NOT fall back. If no
+	// single NUMA node can hold the request, the node is rejected and the pod
+	// stays Unschedulable until either a satisfying node appears or the user
+	// relaxes the constraint. Use this for latency-sensitive workloads that
+	// would rather wait than be silently scheduled across NUMA boundaries.
+	NUMATopologyStrict TopologyMode = "numa-strict"
 	// LinkTopology find the best device set based on link topology.
+	// Best-effort: if the link-topology allocator cannot find a satisfying
+	// set, allocation falls back to non-topology-aware selection.
 	LinkTopology TopologyMode = "link"
+	// LinkTopologyStrict same as LinkTopology but does NOT fall back. The
+	// node is rejected if a topology-satisfying set cannot be found. Use
+	// this when NVLink-tier interconnect is a hard requirement (e.g. NCCL
+	// performance contracts).
+	LinkTopologyStrict TopologyMode = "link-strict"
 )
+
+// IsStrictTopology reports whether the topology mode requires hard
+// satisfaction (no silent fallback to non-topology allocation).
+func (m TopologyMode) IsStrictTopology() bool {
+	return m == NUMATopologyStrict || m == LinkTopologyStrict
+}
+
+// BaseTopology returns the underlying topology mode without the strict
+// suffix. Useful when downstream logic only needs to switch on
+// "numa vs link vs none" regardless of strictness.
+func (m TopologyMode) BaseTopology() TopologyMode {
+	switch m {
+	case NUMATopologyStrict:
+		return NUMATopology
+	case LinkTopologyStrict:
+		return LinkTopology
+	}
+	return m
+}
 
 // Constants representing the various MIG strategies
 const (
