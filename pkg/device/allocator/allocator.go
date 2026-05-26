@@ -263,7 +263,10 @@ func (alloc *allocator) allocateLink(deviceStore []*device.Device,
 		return nil, false
 	}
 	devices, _ := alloc.nodeInfo.GetDeviceList().Filter(getDeviceUUIDs(deviceStore))
-	devices = gpuallocator.NewBestEffortPolicy().Allocate(devices, nil, needNumber)
+	// Use the threshold-aware entry point: above bestEffortMaxGPUs the
+	// allocator switches to a greedy O(n²·k) algorithm to keep filter latency
+	// bounded on dense GPU nodes (16+ cards).
+	devices = gpuallocator.AllocateLink(devices, needNumber)
 	if len(devices) != needNumber {
 		return nil, false
 	}
