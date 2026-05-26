@@ -226,10 +226,10 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 	case util.LinkTopology:
 		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v)",
 			pod.Namespace, pod.Name, strict)
-		if claims, ok := alloc.allocateLink(deviceStore, policy, needNumber, needCores, needMemory); ok {
+		if claims, ok := alloc.allocateLink(deviceStore, policy, strict, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		reason := alloc.linkFallbackReason()
+		reason := alloc.linkFallbackReason(needNumber)
 		if strict {
 			return nil, &TopologyUnsatisfiedError{
 				Mode: util.LinkTopologyStrict, Node: alloc.nodeInfo.GetName(), Reason: reason,
@@ -280,7 +280,7 @@ func (alloc *allocator) allocateByTopologyMode(pod *corev1.Pod, deviceStore []*d
 const linkTopKCandidates = 5
 
 func (alloc *allocator) allocateLink(deviceStore []*device.Device,
-	policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
+	policy util.SchedulerPolicy, strict bool, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
@@ -295,6 +295,15 @@ func (alloc *allocator) allocateLink(deviceStore []*device.Device,
 		if len(got) != needNumber {
 			return nil, false
 		}
+		// bestEffort returns the highest-scoring partition but does NOT reject
+		// score-zero results, so on nodes with partial NVLink (some pairs
+		// connected, others not) we can get back a set whose chosen GPUs sit
+		// in disjoint connectivity islands. For strict-link the caller's
+		// contract is "fail rather than admit a disconnected set"; verify via
+		// the precomputed per-UUID component map.
+		if strict && !alloc.nodeInfo.AreDevicesLinked(gpuallocatorUUIDs(got)) {
+			return nil, false
+		}
 		return allocateByDevices(deviceStore, got, needCores, needMemory), true
 	}
 
@@ -305,11 +314,38 @@ func (alloc *allocator) allocateLink(deviceStore []*device.Device,
 	if len(candidates) == 0 {
 		return nil, false
 	}
+	if strict {
+		// Drop disconnected candidates BEFORE the binpack/spread tie-break so
+		// a perfectly utilised-but-disconnected set never beats a worse-
+		// utilised-but-connected one. If every top-K candidate is
+		// disconnected, treat the node as strict-unsatisfiable.
+		filtered := candidates[:0]
+		for _, c := range candidates {
+			if alloc.nodeInfo.AreDevicesLinked(gpuallocatorUUIDs(c)) {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, false
+		}
+		candidates = filtered
+	}
 	chosen := selectLinkCandidateByDevicePolicy(candidates, deviceStore, policy)
 	if len(chosen) != needNumber {
 		return nil, false
 	}
 	return allocateByDevices(deviceStore, chosen, needCores, needMemory), true
+}
+
+// gpuallocatorUUIDs extracts UUIDs from a gpuallocator.Device slice. The
+// existing getDeviceUUIDs takes []*device.Device, so this is a sibling
+// helper for the post-AllocateLink validation path.
+func gpuallocatorUUIDs(devices []*gpuallocator.Device) []string {
+	uuids := make([]string, len(devices))
+	for i, d := range devices {
+		uuids[i] = d.UUID
+	}
+	return uuids
 }
 
 // selectLinkCandidateByDevicePolicy picks among link-equivalent candidate
@@ -419,11 +455,16 @@ func (alloc *allocator) allocateNUMA(deviceStore []*device.Device,
 	return claims, true
 }
 
-func (alloc *allocator) linkFallbackReason() string {
+func (alloc *allocator) linkFallbackReason(needNumber int) string {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return "node has no GPU link topology"
 	}
-	return "no link-topology satisfying set found"
+	// HasGPUTopology was true → fall-through cause is connectivity: bestEffort
+	// returned a candidate set but no candidate had all N GPUs in a single
+	// NVLink component. Report the largest component so operators can see how
+	// far short the node fell.
+	return fmt.Sprintf("no NVLink-connected set of %d GPUs (largest component %d)",
+		needNumber, alloc.nodeInfo.MaxLinkComponentSize())
 }
 
 func (alloc *allocator) numaFallbackReason(needNumber int, deviceStore []*device.Device) string {
