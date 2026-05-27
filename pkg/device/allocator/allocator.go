@@ -7,6 +7,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -41,26 +42,46 @@ func (alloc *allocator) addContainerAllocate(contDevices *device.ContainerDevice
 // reads scheduling annotations off req instead of re-parsing them per
 // container iteration.
 //
+// Three return values, exactly one non-nil:
+//
+//   - (pod, nil, nil)        — success.
+//   - (nil, reason, nil)     — node rejected the pod (insufficient
+//                              resources, strict topology unsatisfiable,
+//                              etc.); caller should try the next node
+//                              and bucket the reason into the aggregate
+//                              FilteringFailed event.
+//   - (nil, nil, err)        — internal/programmer error (annotation
+//                              encoding failed, accounting bug, ...);
+//                              the filter loop should abort, NOT just
+//                              skip the node — these signal real bugs.
+//
 // Containers are allocated in declaration order. addContainerAllocate
 // updates node-side accounting between iterations so the next
 // container's filterDevices sees the live AllocatableX values — which
 // is how cross-container GPU sharing works (one physical card serving
 // vGPUs from multiple containers, as long as each container's per-card
 // resource needs fit in what the previous containers left behind).
-func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, error) {
+func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.FilterReason, error) {
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
 	newPod := pod.DeepCopy()
 	var deviceClaims device.PodDeviceClaim
 	for _, need := range req.Containers {
-		containerClaims, err := alloc.allocateOne(req, need)
+		containerClaims, rsn, err := alloc.allocateOne(req, need)
 		if err != nil {
-			klog.V(4).InfoS(err.Error(), "node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
-			return nil, err
+			klog.V(3).ErrorS(err, "container allocation internal error",
+				"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
+			return nil, nil, err
+		}
+		if rsn != nil {
+			klog.V(4).InfoS("container allocation rejected", "node", alloc.nodeInfo.GetName(),
+				"pod", klog.KObj(pod), "container", need.Name, "reason", rsn.Detailed())
+			return nil, rsn, nil
 		}
 		if err = alloc.addContainerAllocate(containerClaims); err != nil {
-			klog.V(3).ErrorS(err, "adding container resource allocation failed", "node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
-			return nil, errors.New("internal device scheduling error")
+			klog.V(3).ErrorS(err, "adding container resource allocation failed",
+				"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
+			return nil, nil, errors.New("internal device scheduling error")
 		}
 		deviceClaims = append(deviceClaims, *containerClaims)
 	}
@@ -68,11 +89,11 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, error) {
 	if err != nil {
 		returnErr := errors.New("pod device claim encoding failed")
 		klog.V(2).ErrorS(err, returnErr.Error(), "node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod))
-		return nil, returnErr
+		return nil, nil, returnErr
 	}
 	util.InsertAnnotation(newPod, util.PodVGPUPreAllocAnnotation, preAllocated)
 	util.InsertAnnotation(newPod, util.PodPredicateNodeAnnotation, alloc.nodeInfo.GetName())
-	return newPod, nil
+	return newPod, nil, nil
 }
 
 func getDeviceUUIDs(devices []*device.Device) []string {
@@ -83,27 +104,54 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 	return uuids
 }
 
-func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) (*device.ContainerDeviceClaim, error) {
+// allocateOne picks devices for a single container.
+//
+// Three return values, same convention as Allocate:
+//   - (claim, nil, nil)     — success.
+//   - (nil, reason, nil)    — this container can't be placed on this node;
+//                             reason carries the structured cause (with
+//                             per-device counts when applicable).
+//   - (nil, nil, err)       — internal error (shouldn't happen).
+func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", need.Name, alloc.nodeInfo.GetName())
 	if need.Number > alloc.nodeInfo.GetDeviceCount() {
-		return nil, errors.New("insufficient GPU cards")
+		return nil, reason.New(reason.InsufficientGPUCards).
+			WithDetail("need %d, node has %d", need.Number, alloc.nodeInfo.GetDeviceCount()), nil
 	}
 	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
 
-	deviceStore, reasonStore := alloc.filterDevices(pod, needCores, needMemory)
-	claims, err := alloc.pickDeviceClaims(req, deviceStore, need.Number, needCores, needMemory)
-	if err != nil {
-		return nil, err
+	deviceStore, deviceCounts := alloc.filterDevices(pod, needCores, needMemory)
+	totalDevices := alloc.nodeInfo.GetDeviceCount()
+	claims, rsn := alloc.pickDeviceClaims(req, deviceStore, need.Number, needCores, needMemory)
+	if rsn != nil {
+		// pickDeviceClaims surfaced its own structured reason (currently
+		// only strict-topology rejection). Forward as-is so the original
+		// Code (LinkTopologyUnsatisfied / NUMATopologyUnsatisfied) bubbles
+		// up; the per-device counts from filterDevices are NOT relevant
+		// here — topology unsatisfiable means the device count was fine,
+		// just the connectivity / NUMA layout wasn't.
+		return nil, rsn, nil
 	}
 	if len(claims) != need.Number {
-		err = errors.New("insufficient GPU resources")
-		klog.V(5).InfoS(err.Error(), "node", alloc.nodeInfo.GetName(),
-			"pod", klog.KObj(pod), "container", need.Name, "reason", reasonStore)
-		return nil, err
+		// Generic insufficient-resources path. Promote the per-device
+		// counts from filterDevices into a node-level reason so the
+		// aggregate event can bucket this node under the dominant cause
+		// (Insufficient vGPU memory vs GPU type mismatch vs ...).
+		// When counts is empty (e.g. zero devices on the node) fall back
+		// to the generic "Insufficient GPU resources" code so the event
+		// still says something useful.
+		nodeReason := reason.FromCounts(deviceCounts, totalDevices)
+		if nodeReason == nil {
+			nodeReason = reason.New(reason.InsufficientGPUResources).
+				WithDetail("need %d devices, none qualify", need.Number)
+		}
+		klog.V(5).InfoS("Insufficient node resources", "node", alloc.nodeInfo.GetName(),
+			"pod", klog.KObj(pod), "container", need.Name, "reason", nodeReason.Detailed())
+		return nil, nodeReason, nil
 	}
 	sort.Slice(claims, func(i, j int) bool { return claims[i].Id < claims[j].Id })
-	return &device.ContainerDeviceClaim{Name: need.Name, DeviceClaims: claims}, nil
+	return &device.ContainerDeviceClaim{Name: need.Name, DeviceClaims: claims}, nil, nil
 }
 
 // resolveContainerNeeds applies the two implicit-fill rules from the
@@ -131,8 +179,9 @@ func resolveContainerNeeds(need ContainerNeed, memoryFactor int) (cores, memory 
 
 // pickDeviceClaims walks the shortest path that satisfies the request:
 //
-//   - len(deviceStore) < needNumber  — bail with (nil, nil); the caller
-//     surfaces the "insufficient" error using reasonStore for diagnostics.
+//   - len(deviceStore) < needNumber — bail with (nil, nil); the caller
+//     promotes filterDevices' per-Code counts into a FilterReason for
+//     the aggregate event.
 //
 //   - len(deviceStore) == needNumber and the pod isn't strict-topology —
 //     the chosen set is forced (only one possible selection), so skip the
@@ -142,12 +191,19 @@ func resolveContainerNeeds(need ContainerNeed, memoryFactor int) (cores, memory 
 //     scattered cards, link-strict on disconnected ones).
 //
 //   - otherwise — device-policy sort followed by topology-aware
-//     selection. Non-strict topology failures fall back inside
-//     allocateByTopologyMode and emit a TopologyFallback event.
+//     selection. Strict topology rejections bubble up as a non-nil
+//     *reason.FilterReason; non-strict topology failures fall back
+//     internally and only emit a TopologyFallback event.
+//
+// Return shape:
+//   - (claims, nil)        — picked successfully (or insufficient, with
+//                            len(claims) < needNumber so caller falls to
+//                            the count-promotion path).
+//   - (nil, reason)        — strict topology rejected this node.
 func (alloc *allocator) pickDeviceClaims(
 	req *AllocationRequest, deviceStore []*device.Device,
 	needNumber int, needCores, needMemory int64,
-) ([]device.DeviceClaim, error) {
+) ([]device.DeviceClaim, *reason.FilterReason) {
 	switch {
 	case needNumber > len(deviceStore):
 		return nil, nil
@@ -189,34 +245,22 @@ func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, mes
 	}
 }
 
-// TopologyUnsatisfiedError signals that a topology-strict pod request could
-// not be satisfied on the current node and the node must therefore be
-// rejected (no silent fallback). The Filter loop treats this as a per-node
-// rejection — other candidate nodes will still be tried; only when ALL
-// strict-eligible nodes return this error does the pod stay Pending.
-type TopologyUnsatisfiedError struct {
-	Mode util.TopologyMode
-	Node string
-	// Reason is a short human-readable phrase used in events and logs,
-	// e.g. "no NUMA node has 4 GPUs" or "no link-topology satisfying set".
-	Reason string
-}
-
-func (e *TopologyUnsatisfiedError) Error() string {
-	return fmt.Sprintf("%s topology unsatisfiable on node %s: %s", e.Mode, e.Node, e.Reason)
-}
-
-// allocateByTopologyMode dispatches to topology-aware allocation. Strict
-// failures return a *TopologyUnsatisfiedError; best-effort failures fall
-// back to non-topology allocation (and emit an event so operators can see
-// the downgrade in `kubectl describe pod`).
+// allocateByTopologyMode dispatches to topology-aware allocation.
+//
+// Returns:
+//   - (claims, nil)        — topology succeeded, or non-strict fallback
+//                            took the non-topology path (a TopologyFallback
+//                            event is emitted in that case for visibility).
+//   - (nil, *FilterReason) — strict topology unsatisfiable on this node;
+//                            the caller should propagate the reason up so
+//                            the filter loop drops just this node.
 //
 // req carries Topology / TopologyStrict / Profile pre-parsed; the Pod
 // reference is used only for events and log keys.
 func (alloc *allocator) allocateByTopologyMode(
 	req *AllocationRequest, deviceStore []*device.Device,
 	needNumber int, needCores, needMemory int64,
-) ([]device.DeviceClaim, error) {
+) ([]device.DeviceClaim, *reason.FilterReason) {
 	if needNumber <= 1 {
 		return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
 	}
@@ -229,18 +273,20 @@ func (alloc *allocator) allocateByTopologyMode(
 		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, req.DevicePolicy, strict, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if err := alloc.handleTopologyFallback(pod, strict, util.LinkTopologyStrict, "Link topology",
-			"non-topology allocation", alloc.linkFallbackReason(needNumber)); err != nil {
-			return nil, err
+		if rsn := alloc.handleTopologyFallback(pod, strict,
+			reason.LinkTopologyUnsatisfied, "Link topology", "non-topology allocation",
+			alloc.linkFallbackReason(needNumber)); rsn != nil {
+			return nil, rsn
 		}
 	case util.NUMATopology:
 		klog.V(4).Infof("Pod <%s/%s> use NUMA topology mode (strict=%v)", pod.Namespace, pod.Name, strict)
 		if claims, ok := alloc.allocateNUMA(deviceStore, req.Profile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if err := alloc.handleTopologyFallback(pod, strict, util.NUMATopologyStrict, "NUMA topology",
-			"cross-NUMA allocation", alloc.numaFallbackReason(needNumber, deviceStore)); err != nil {
-			return nil, err
+		if rsn := alloc.handleTopologyFallback(pod, strict,
+			reason.NUMATopologyUnsatisfied, "NUMA topology", "cross-NUMA allocation",
+			alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
+			return nil, rsn
 		}
 	case util.NoneTopology, "":
 		klog.V(4).Infof("Pod <%s/%s> none topology mode", pod.Namespace, pod.Name)
@@ -251,31 +297,30 @@ func (alloc *allocator) allocateByTopologyMode(
 	return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
 }
 
-// handleTopologyFallback centralises the "strict → error / non-strict →
-// event" tail that previously sat duplicated under each topology arm. On
-// strict mode it returns a *TopologyUnsatisfiedError (caller propagates
-// to drop this node from the filter cycle); on non-strict it emits a
-// TopologyFallback event so operators see the downgrade in
-// `kubectl describe pod` and returns nil so the caller can continue with
-// the non-topology fallback path.
+// handleTopologyFallback centralises the "strict → reject node / non-strict
+// → emit TopologyFallback event" tail. On strict mode it returns a
+// *reason.FilterReason carrying the unsatisfied-topology code so the
+// filter loop drops only this node (other candidates still tried). On
+// non-strict it emits a TopologyFallback event so operators see the
+// downgrade in `kubectl describe pod` and returns nil — the caller then
+// continues with the non-topology fallback path.
 //
+// strictCode is the reason.Code that goes into FilterReason on strict
+// rejection (one of LinkTopologyUnsatisfied / NUMATopologyUnsatisfied).
 // attemptKind / fallbackKind are the human-readable phrases that vary
-// between modes: ("link topology", "non-topology allocation") vs
-// ("NUMA topology", "cross-NUMA allocation"). strictMode is the *Strict
-// enum variant that goes into the error so the receiving code can
-// distinguish link-strict from numa-strict failures.
+// between modes ("Link topology" / "non-topology allocation" vs
+// "NUMA topology" / "cross-NUMA allocation"); they appear only in the
+// non-strict TopologyFallback event message.
 func (alloc *allocator) handleTopologyFallback(
-	pod *corev1.Pod, strict bool, strictMode util.TopologyMode,
-	attemptKind, fallbackKind, reason string,
-) error {
+	pod *corev1.Pod, strict bool, strictCode reason.Code,
+	attemptKind, fallbackKind, detail string,
+) *reason.FilterReason {
 	if strict {
-		return &TopologyUnsatisfiedError{
-			Mode: strictMode, Node: alloc.nodeInfo.GetName(), Reason: reason,
-		}
+		return reason.New(strictCode).WithDetail("%s", detail)
 	}
 	alloc.sendEventf(pod, corev1.EventTypeWarning, "TopologyFallback",
 		"%s unsatisfiable on %s (%s); falling back to %s",
-		attemptKind, alloc.nodeInfo.GetName(), reason, fallbackKind)
+		attemptKind, alloc.nodeInfo.GetName(), detail, fallbackKind)
 	return nil
 }
 
@@ -524,42 +569,42 @@ func resolveLinkDevices(picked []*gpuallocator.Device, store []*device.Device) [
 	return out
 }
 
-type FailedReason string
-
-const (
-	DeviceUnhealthy    FailedReason = "DeviceUnhealthy"
-	DeviceEnableMig    FailedReason = "DeviceEnableMig"
-	InsufficientNumber FailedReason = "InsufficientNumber"
-	InsufficientMemory FailedReason = "InsufficientMemory"
-	InsufficientSMCore FailedReason = "InsufficientSMCore"
-	DeviceTypeMismatch FailedReason = "DeviceTypeMismatch"
-	DeviceUuidMismatch FailedReason = "DeviceUuidMismatch"
-)
-
-func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int64) ([]*device.Device, map[FailedReason]int) {
+// filterDevices walks every GPU on the node and produces:
+//   - the subset that survives every per-device gate (healthy, not in
+//     MIG mode, has free vGPU slot / memory / cores, passes type / UUID
+//     filters), in the order GetDeviceMap returns them;
+//   - a per-Code count of HOW MANY devices each gate rejected, so the
+//     caller can promote the dominant cause into a *reason.FilterReason
+//     when no device survives.
+//
+// The Code keys come straight from the centralised vocabulary in
+// pkg/scheduler/reason — no parallel enum here. That keeps the counts
+// directly bucketable by the FilteringFailed aggregator without any
+// translation table.
+func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int64) ([]*device.Device, map[reason.Code]int) {
 	nodeName := alloc.nodeInfo.GetName()
-	reasonMap := make(map[FailedReason]int)
+	counts := make(map[reason.Code]int)
 	devices := make([]*device.Device, 0, alloc.nodeInfo.GetDeviceCount())
 	for i, deviceInfo := range alloc.nodeInfo.GetDeviceMap() {
 		// Filter unhealthy device.
 		if !deviceInfo.Healthy() {
 			klog.V(4).InfoS("Filter unhealthy devices on the node", "node", nodeName,
 				"deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
-			reasonMap[DeviceUnhealthy]++
+			counts[reason.DeviceUnhealthy]++
 			continue
 		}
 		// Filter MIG enabled device.
 		if deviceInfo.IsMIG() {
 			klog.V(4).InfoS("Filter devices with MIG enabled on the node", "node",
 				nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
-			reasonMap[DeviceEnableMig]++
+			counts[reason.DeviceMIGEnabled]++
 			continue
 		}
 		// Filter for insufficient number of virtual devices.
 		if deviceInfo.AllocatableNumber() == 0 {
 			klog.V(4).InfoS("Filter devices with insufficient available number on the node",
 				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID())
-			reasonMap[InsufficientNumber]++
+			counts[reason.InsufficientVGPUSlot]++
 			continue
 		}
 		reqMemory := needMemory
@@ -572,14 +617,14 @@ func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int
 			klog.V(4).InfoS("Filter devices with insufficient available memory on the node",
 				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
 				"availableMemory", deviceInfo.AllocatableMemory(), "requestedMemory", reqMemory)
-			reasonMap[InsufficientMemory]++
+			counts[reason.InsufficientVGPUMemory]++
 			continue
 		}
 		if needCores > deviceInfo.AllocatableCores() || deviceInfo.AllocatableCores() == 0 {
 			klog.V(4).InfoS("Filter devices with insufficient available cores on the node",
 				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
 				"availableCores", deviceInfo.AllocatableCores(), "requestedCores", needCores)
-			reasonMap[InsufficientSMCore]++
+			counts[reason.InsufficientVGPUCore]++
 			continue
 		}
 		// Filter device type.
@@ -588,7 +633,7 @@ func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int
 				"node", nodeName, "deviceIndex", i, "deviceType", deviceInfo.GetType(),
 				"includeTypes", pod.Annotations[util.PodIncludeGpuTypeAnnotation],
 				"excludeTypes", pod.Annotations[util.PodExcludeGpuTypeAnnotation])
-			reasonMap[DeviceTypeMismatch]++
+			counts[reason.DeviceTypeMismatch]++
 			continue
 		}
 		// Filter device uuid.
@@ -597,10 +642,10 @@ func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int
 				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
 				"includeUuids", pod.Annotations[util.PodIncludeGPUUUIDAnnotation],
 				"excludeUuids", pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
-			reasonMap[DeviceUuidMismatch]++
+			counts[reason.DeviceUUIDMismatch]++
 			continue
 		}
 		devices = append(devices, deviceInfo)
 	}
-	return devices, reasonMap
+	return devices, counts
 }

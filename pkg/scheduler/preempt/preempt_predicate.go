@@ -278,9 +278,10 @@ func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
 		return nil, 0, false
 	}
 
-	// check node fast return
-	if err = filter.CheckNode(node, filter.GetMemoryPolicyFunc(pod)); err != nil {
-		klog.V(3).ErrorS(err, "Preempt: check node failed", "node", nodeName)
+	// Fast-reject: if the node itself doesn't meet vGPU prerequisites,
+	// preempting any pod on it won't help.
+	if r := filter.CheckNode(node, filter.GetMemoryPolicyFunc(pod)); r != nil {
+		klog.V(3).InfoS("Preempt: check node failed", "node", nodeName, "reason", r.Detailed())
 		return nil, 0, false
 	}
 
@@ -366,11 +367,23 @@ func (p *vgpuPreempt) canAllocate(pod *corev1.Pod, node *corev1.Node,
 		return false
 	}
 	req := allocator.BuildAllocationRequest(pod)
-	if _, err := allocator.NewAllocator(nodeInfo, nil).Allocate(req); err != nil {
+	// Preempt only cares about "would this pod fit?", not why it might
+	// not. Both a structured reason (node would still reject) and a real
+	// internal error answer the same question: "no". Log at V(5) for
+	// debugging; the verb-level Preempt event captures the user-facing
+	// outcome.
+	newPod, rsn, err := allocator.NewAllocator(nodeInfo, nil).Allocate(req)
+	switch {
+	case err != nil:
+		klog.V(3).ErrorS(err, "Preempt: allocator internal error",
+			"pod", klog.KObj(pod), "node", node.Name)
+		return false
+	case rsn != nil:
 		klog.V(5).InfoS("Preempt: allocator rejects pod after excluding victims",
-			"pod", klog.KObj(pod), "node", node.Name, "reason", err)
+			"pod", klog.KObj(pod), "node", node.Name, "reason", rsn.Detailed())
 		return false
 	}
+	_ = newPod
 	return true
 }
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/google/uuid"
@@ -529,9 +530,15 @@ func Test_NodeFilter(t *testing.T) {
 		name  string
 		pod   *corev1.Pod
 		nodes []corev1.Node
-		// result
-		filterNodes    []corev1.Node
-		failedNodesMap extenderv1.FailedNodesMap
+		// result: filterNodes is the surviving node list; wantPrimary
+		// is the Primary code we expect in the per-node FilterReason
+		// returned by nodeFilter. Comparing Primary (not the whole
+		// *FilterReason) sidesteps brittleness around the Detail field —
+		// some failure paths embed variable substrings like JSON decode
+		// errors, and we don't want a JSON wording change to break the
+		// test.
+		filterNodes []corev1.Node
+		wantPrimary map[string]reason.Code
 	}{
 		{
 			name: "example1, no node config info",
@@ -555,8 +562,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": NoGPUConfigInfo,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeNoGPUConfig,
 			},
 		},
 		{
@@ -581,8 +588,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": IncorrectGPUConfigInfo,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeBadGPUConfig,
 			},
 		},
 		{
@@ -610,8 +617,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": NoGPUDevice,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeNotVGPUEnabled,
 			},
 		},
 		{
@@ -639,8 +646,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": NoGPURegister,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeNoVGPURegister,
 			},
 		},
 		{
@@ -669,8 +676,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": IncorrectGPUMemFactory,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeBadMemoryFactor,
 			},
 		},
 		{
@@ -705,8 +712,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": GPUMemTypeMismatch,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeMemoryTypeMismatch,
 			},
 		},
 		{
@@ -741,8 +748,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": GPUMemTypeMismatch,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeMemoryTypeMismatch,
 			},
 		},
 		{
@@ -796,14 +803,18 @@ func Test_NodeFilter(t *testing.T) {
 					Status: nodeStatus,
 				},
 			},
-			failedNodesMap: map[string]string{},
+			wantPrimary: map[string]reason.Code{},
 		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			filterNodes, failedNodesMap, _ := filterPredicate.nodeFilter(testCase.pod, testCase.nodes)
+			filterNodes, gotReasons, _ := filterPredicate.nodeFilter(testCase.pod, testCase.nodes)
 			assert.Equal(t, testCase.filterNodes, filterNodes)
-			assert.Equal(t, testCase.failedNodesMap, failedNodesMap)
+			gotPrimary := make(map[string]reason.Code, len(gotReasons))
+			for n, r := range gotReasons {
+				gotPrimary[n] = r.Primary
+			}
+			assert.Equal(t, testCase.wantPrimary, gotPrimary)
 		})
 	}
 }
