@@ -231,7 +231,8 @@ func (alloc *allocator) sortDeviceStore(req *AllocationRequest, deviceStore []*d
 	default:
 		if req.rawDevicePolicy != "" && req.rawDevicePolicy != string(util.NonePolicy) {
 			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s", pod.Namespace, pod.Name, req.rawDevicePolicy)
-			alloc.sendEventf(pod, corev1.EventTypeWarning, "DevicePolicy", "Unsupported device scheduling policy '%s'", req.rawDevicePolicy)
+			alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
+				"unsupported device scheduling policy %q", req.rawDevicePolicy)
 		} else {
 			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
 		}
@@ -292,7 +293,8 @@ func (alloc *allocator) allocateByTopologyMode(
 		klog.V(4).Infof("Pod <%s/%s> none topology mode", pod.Namespace, pod.Name)
 	default:
 		klog.V(4).Infof("Pod <%s/%s> not supported topology mode: %s", pod.Namespace, pod.Name, req.Topology)
-		alloc.sendEventf(pod, corev1.EventTypeWarning, "DeviceTopologyMode", "Unsupported device topology mode '%s'", req.Topology)
+		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
+			"unsupported device topology mode %q", req.Topology)
 	}
 	return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
 }
@@ -318,8 +320,8 @@ func (alloc *allocator) handleTopologyFallback(
 	if strict {
 		return reason.New(strictCode).WithDetail("%s", detail)
 	}
-	alloc.sendEventf(pod, corev1.EventTypeWarning, "TopologyFallback",
-		"%s unsatisfiable on %s (%s); falling back to %s",
+	alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
+		"%s unsatisfiable on node %q (%s); falling back to %s",
 		attemptKind, alloc.nodeInfo.GetName(), detail, fallbackKind)
 	return nil
 }

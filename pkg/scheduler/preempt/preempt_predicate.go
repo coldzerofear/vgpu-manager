@@ -30,6 +30,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
@@ -50,13 +51,6 @@ import (
 const (
 	Name                     = "PreemptPredicate"
 	IndexerKeyPodMetadataUid = "pod.metadata.uid"
-
-	// Event Reason vocabulary. EventReasonGangDisrupted mirrors the
-	// existing GangDisruptedByPreemption literal that's already part of
-	// the diagnostic contract; new constants stick to the upstream-style
-	// CamelCase verbs.
-	EventReasonPreemptionFailed = "PreemptionFailed"
-	EventReasonGangDisrupted    = "GangDisruptedByPreemption"
 )
 
 type vgpuPreempt struct {
@@ -200,7 +194,7 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 	wg.Wait()
 
 	if gangNameSet.Len() > 0 {
-		p.recorder.Eventf(pod, corev1.EventTypeWarning, EventReasonGangDisrupted,
+		p.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventGangDisrupted,
 			"evicted as preemption victim; this may trigger rescheduling of these pod groups %v", sets.List(gangNameSet))
 	}
 
@@ -211,7 +205,7 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 	// user only sees the in-tree "no preemption victims found" message
 	// and has no signal that vgpu-manager itself vetoed every option.
 	if len(result.NodeNameToMetaVictims) == 0 && len(victimsMap) > 0 && p.recorder != nil {
-		p.recorder.Eventf(pod, corev1.EventTypeWarning, EventReasonPreemptionFailed,
+		p.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPreemptionFailed,
 			"preemption: 0/%d nodes are available: vgpu-manager rejects allocation on every candidate after victim removal",
 			len(victimsMap))
 	}

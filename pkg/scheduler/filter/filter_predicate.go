@@ -40,15 +40,6 @@ const (
 	Name                     = "FilterPredicate"
 	IndexerKeyPodRequestVGPU = "pod.requestVGPU"
 
-	// Event Reason vocabulary. Names are CamelCase verbs/states the
-	// way kube-scheduler and other extenders do it (FailedScheduling,
-	// FilteringSucceed, BindingFailed) — operators grep on these.
-	EventReasonFilteringFailed  = "FilteringFailed"
-	EventReasonFilteringSucceed = "FilteringSucceed"
-	EventReasonResourceInvalid  = "ResourceInvalid"
-	EventReasonPolicyInvalid    = "PolicyInvalid"
-	EventReasonTopologyFallback = "TopologyFallback"
-
 	// aggregateBucketNodeLimit caps how many node names appear inside
 	// each "(...)" clause of the FilteringFailed aggregate event message.
 	// On clusters with many nodes failing for the same reason the full
@@ -211,7 +202,7 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 	// scheduling debugging.
 	if len(filteredNodes) == 0 && totalCandidates > 0 && f.recorder != nil {
 		msg := reason.FormatAggregate(totalCandidates, nodeReasons, aggregateBucketNodeLimit)
-		f.recorder.Event(pod, corev1.EventTypeWarning, EventReasonFilteringFailed, msg)
+		f.recorder.Event(pod, corev1.EventTypeWarning, reason.EventFilteringFailed, msg)
 		klog.V(2).InfoS("FilteringFailed",
 			"pod", klog.KObj(pod), "totalCandidates", totalCandidates,
 			"failedReasons", failureBreakdown(nodeReasons))
@@ -356,11 +347,11 @@ func (f *gpuFilter) nodeFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.N
 func (f *gpuFilter) CheckDeviceRequest(pod *corev1.Pod) error {
 	for _, container := range pod.Spec.Containers {
 		if err := checkCoreRequest(&container); err != nil {
-			f.recorder.Event(pod, corev1.EventTypeWarning, "ResourceError", err.Error())
+			f.recorder.Event(pod, corev1.EventTypeWarning, reason.EventResourceInvalid, err.Error())
 			return err
 		}
 		if err := checkNumberRequest(&container); err != nil {
-			f.recorder.Event(pod, corev1.EventTypeWarning, "ResourceError", err.Error())
+			f.recorder.Event(pod, corev1.EventTypeWarning, reason.EventResourceInvalid, err.Error())
 			return err
 		}
 	}
@@ -499,7 +490,8 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	default:
 		if req.RawNodePolicy() != "" && req.RawNodePolicy() != string(util.NonePolicy) {
 			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), req.RawNodePolicy())
-			f.recorder.Eventf(pod, corev1.EventTypeWarning, "NodePolicy", "Unsupported node scheduling policy '%s'", req.RawNodePolicy())
+			f.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
+				"unsupported node scheduling policy %q", req.RawNodePolicy())
 		} else {
 			klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
 		}
@@ -556,7 +548,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		success = true
 	}
 	if success {
-		f.recorder.Eventf(pod, corev1.EventTypeNormal, "FilteringSucceed",
+		f.recorder.Eventf(pod, corev1.EventTypeNormal, reason.EventFilteringSucceed,
 			"Successfully matched node %q", filteredNodes[0].Name)
 	}
 	return filteredNodes, failed, nil

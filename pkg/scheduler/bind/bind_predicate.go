@@ -8,6 +8,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/serial"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -85,7 +86,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 		if nodeName != args.Node {
 			err = fmt.Errorf("predicate node and binding node do not match")
 			klog.ErrorS(err, "", "pod", klog.KObj(pod), "predicateNode", nodeName, "binding node", args.Node)
-			b.recorder.Event(pod, corev1.EventTypeWarning, "BindingFailed", err.Error())
+			b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
 			// patch failed metadata
 			if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
 				klog.ErrorS(patchErr, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
@@ -96,7 +97,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 		if !device.ShouldCountPodDeviceAllocation(pod) {
 			err = fmt.Errorf("device pre allocation failed, unable to bind to node <%s>", nodeName)
 			klog.ErrorS(err, "", "pod", klog.KObj(pod))
-			b.recorder.Event(pod, corev1.EventTypeWarning, "BindingFailed", err.Error())
+			b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
 			return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 		}
 	}
@@ -122,7 +123,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	err = b.kubeClient.CoreV1().Pods(args.PodNamespace).Bind(ctx, binding, metav1.CreateOptions{})
 	if err != nil {
 		klog.Errorf("Pod <%s/%s> binding Node <%s> failed: %v", args.PodNamespace, args.PodName, args.Node, err)
-		b.recorder.Event(pod, corev1.EventTypeWarning, "BindingFailed", err.Error())
+		b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
 		// patch failed metadata
 		if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
 			klog.ErrorS(patchErr, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
@@ -130,8 +131,8 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 
-	b.recorder.Eventf(pod, corev1.EventTypeNormal, "BindingSucceed",
-		"Successfully binding <%s> to node <%s>", klog.KObj(pod), args.Node)
+	b.recorder.Eventf(pod, corev1.EventTypeNormal, reason.EventBindingSucceed,
+		"Successfully bound pod %q to node %q", klog.KObj(pod), args.Node)
 	klog.V(3).Infof("Pod <%s> binding Node <%s> successful", klog.KObj(pod), args.Node)
 	return &extenderv1.ExtenderBindingResult{}
 }

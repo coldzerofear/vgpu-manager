@@ -321,6 +321,56 @@ func renderCounts(counts map[Code]int, total int) string {
 	return strings.Join(parts, ", ")
 }
 
+// Event Reason vocabulary used across the scheduler. Centralised here
+// alongside Code so the diagnostic surface (Codes that go into per-node
+// messages, EventReasons that key the Event objects) lives in one
+// importable package — every emitter (filter, allocator, preempt, bind)
+// uses these constants instead of bare string literals.
+//
+// Names follow upstream kube-scheduler conventions: CamelCase verbs or
+// states (FilteringSucceed, BindingFailed, FailedScheduling). Operators
+// grep / alert on these strings, so renaming a constant is a breaking
+// change to that contract.
+const (
+	// EventFilteringSucceed — Filter() found a matching node.
+	EventFilteringSucceed = "FilteringSucceed"
+	// EventFilteringFailed — Filter() found no matching node; the
+	// message carries the FormatAggregate "0/N nodes are available: ..."
+	// summary.
+	EventFilteringFailed = "FilteringFailed"
+
+	// EventBindingSucceed / EventBindingFailed — Bind verb outcome.
+	EventBindingSucceed = "BindingSucceed"
+	EventBindingFailed  = "BindingFailed"
+
+	// EventPreemptionFailed — Preempt verb returned an empty victim
+	// set (vgpu-manager rejected every candidate even after victim
+	// removal).
+	EventPreemptionFailed = "PreemptionFailed"
+	// EventGangDisrupted preserves the existing
+	// "GangDisruptedByPreemption" reason literal — operators already
+	// monitor this name.
+	EventGangDisrupted = "GangDisruptedByPreemption"
+
+	// EventResourceInvalid — a container's own resource request was
+	// ill-formed (cores > 100, vgpu-number over the per-pod cap).
+	// This is a pod-level reject, not a per-node one — the pod cannot
+	// be scheduled anywhere until the request is corrected.
+	EventResourceInvalid = "ResourceInvalid"
+
+	// EventPolicyInvalid — the pod set a scheduling annotation
+	// (node-scheduler-policy / device-scheduler-policy /
+	// device-topology-mode) to an unrecognised value. We continue with
+	// the default and emit this so operators see the typo.
+	EventPolicyInvalid = "PolicyInvalid"
+
+	// EventTopologyFallback — non-strict topology mode couldn't be
+	// satisfied and the allocator fell back to non-topology placement.
+	// Surfaced so operators notice the downgrade in
+	// `kubectl describe pod`.
+	EventTopologyFallback = "TopologyFallback"
+)
+
 func formatClause(c Code, nodes []string, limit int) string {
 	count := len(nodes)
 	p := Phrase(c)
