@@ -50,6 +50,13 @@ import (
 const (
 	Name                     = "PreemptPredicate"
 	IndexerKeyPodMetadataUid = "pod.metadata.uid"
+
+	// Event Reason vocabulary. EventReasonGangDisrupted mirrors the
+	// existing GangDisruptedByPreemption literal that's already part of
+	// the diagnostic contract; new constants stick to the upstream-style
+	// CamelCase verbs.
+	EventReasonPreemptionFailed = "PreemptionFailed"
+	EventReasonGangDisrupted    = "GangDisruptedByPreemption"
 )
 
 type vgpuPreempt struct {
@@ -193,8 +200,20 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 	wg.Wait()
 
 	if gangNameSet.Len() > 0 {
-		p.recorder.Eventf(pod, corev1.EventTypeWarning, "GangDisruptedByPreemption",
+		p.recorder.Eventf(pod, corev1.EventTypeWarning, EventReasonGangDisrupted,
 			"evicted as preemption victim; this may trigger rescheduling of these pod groups %v", sets.List(gangNameSet))
+	}
+
+	// If every candidate node was dropped (the allocator rejected the
+	// pod even with the proposed victims removed), surface a
+	// kube-scheduler-style "preemption: 0/N nodes are available" event
+	// so operators see WHY preemption didn't help. Without this, the
+	// user only sees the in-tree "no preemption victims found" message
+	// and has no signal that vgpu-manager itself vetoed every option.
+	if len(result.NodeNameToMetaVictims) == 0 && len(victimsMap) > 0 && p.recorder != nil {
+		p.recorder.Eventf(pod, corev1.EventTypeWarning, EventReasonPreemptionFailed,
+			"preemption: 0/%d nodes are available: vgpu-manager rejects allocation on every candidate after victim removal",
+			len(victimsMap))
 	}
 
 	return result

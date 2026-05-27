@@ -39,6 +39,23 @@ type gpuFilter struct {
 const (
 	Name                     = "FilterPredicate"
 	IndexerKeyPodRequestVGPU = "pod.requestVGPU"
+
+	// Event Reason vocabulary. Names are CamelCase verbs/states the
+	// way kube-scheduler and other extenders do it (FailedScheduling,
+	// FilteringSucceed, BindingFailed) — operators grep on these.
+	EventReasonFilteringFailed  = "FilteringFailed"
+	EventReasonFilteringSucceed = "FilteringSucceed"
+	EventReasonResourceInvalid  = "ResourceInvalid"
+	EventReasonPolicyInvalid    = "PolicyInvalid"
+	EventReasonTopologyFallback = "TopologyFallback"
+
+	// aggregateBucketNodeLimit caps how many node names appear inside
+	// each "(...)" clause of the FilteringFailed aggregate event message.
+	// On clusters with many nodes failing for the same reason the full
+	// list pushes the Event past the typical 1024-char message budget;
+	// truncating to a handful keeps the event readable while the full
+	// list is still available in klog at V(5).
+	aggregateBucketNodeLimit = 5
 )
 
 var (
@@ -130,7 +147,7 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 		// node across BOTH the in-process filter chain (nodeFilter,
 		// deviceFilter) and the initial cache-miss pass. We convert to
 		// kube-scheduler's plain-string FailedNodesMap at the response
-		// boundary; keeping the *FilterReason shape internally lets P3
+		// boundary; keeping the *FilterReason shape internally lets us
 		// emit one aggregate FilteringFailed event with k8s-style
 		// "0/N nodes are available: ..." text bucketed by Primary code.
 		nodeReasons = make(map[string]*reason.FilterReason)
@@ -148,6 +165,11 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 			Error:     "No schedulable nodes",
 		}
 	}
+
+	// Snapshot the candidate count BEFORE the filter chain runs so the
+	// "0/N nodes are available:" header reflects what kube-scheduler
+	// asked us about, regardless of how many drop out at each stage.
+	totalCandidates := len(filteredNodes) + len(nodeReasons)
 
 	filters := []filterFunc{
 		f.nodeFilter,
@@ -180,11 +202,41 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 		nodes = &corev1.NodeList{Items: filteredNodes}
 	}
 
+	// If no node survived, emit the aggregate FilteringFailed event so
+	// operators see a single k8s-native-style summary in
+	// `kubectl describe pod` ALONGSIDE kube-scheduler's own
+	// FailedScheduling line. The two are consistent because they read
+	// the same per-node Short() phrases — ours is more detailed (carries
+	// node names in parentheses) and is the place to look first for
+	// scheduling debugging.
+	if len(filteredNodes) == 0 && totalCandidates > 0 && f.recorder != nil {
+		msg := reason.FormatAggregate(totalCandidates, nodeReasons, aggregateBucketNodeLimit)
+		f.recorder.Event(pod, corev1.EventTypeWarning, EventReasonFilteringFailed, msg)
+		klog.V(2).InfoS("FilteringFailed",
+			"pod", klog.KObj(pod), "totalCandidates", totalCandidates,
+			"failedReasons", failureBreakdown(nodeReasons))
+	}
+
 	return &extenderv1.ExtenderFilterResult{
 		Nodes:       nodes,
 		NodeNames:   nodeNames,
 		FailedNodes: reasonsToFailedNodesMap(nodeReasons),
 	}
+}
+
+// failureBreakdown reduces per-node reasons to a Code → count map for
+// klog. The full per-node detail lives in V(5) traces emitted by the
+// filter functions themselves; this is the compact summary that pairs
+// with the FilteringFailed event message.
+func failureBreakdown(reasons map[string]*reason.FilterReason) map[reason.Code]int {
+	counts := make(map[reason.Code]int, len(reasons))
+	for _, r := range reasons {
+		if r == nil {
+			continue
+		}
+		counts[r.Primary]++
+	}
+	return counts
 }
 
 // reasonsToFailedNodesMap converts the in-process *FilterReason map to
