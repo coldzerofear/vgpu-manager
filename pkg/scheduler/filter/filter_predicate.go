@@ -409,25 +409,25 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	// share annotation-parse cost and never disagree about what the pod
 	// asked for.
 	req := allocator.BuildAllocationRequest(pod)
-	topoNeedNumber := PodTopologyNeedNumber(pod)
+
 	switch req.NodePolicy {
 	case util.BinpackPolicy:
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
-		allocator.NewNodeBinpackPriority(req.Profile, req.Topology, topoNeedNumber).Sort(nodeInfoList)
+		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
 	case util.SpreadPolicy:
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
-		allocator.NewNodeSpreadPriority(req.Profile, req.Topology, topoNeedNumber).Sort(nodeInfoList)
+		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
 	default:
-		if raw := req.RawNodePolicy(); raw != "" && raw != string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), raw)
-			f.recorder.Eventf(pod, corev1.EventTypeWarning, "NodePolicy", "Unsupported node scheduling policy '%s'", raw)
+		if req.RawNodePolicy() != "" && req.RawNodePolicy() != string(util.NonePolicy) {
+			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), req.RawNodePolicy())
+			f.recorder.Eventf(pod, corev1.EventTypeWarning, "NodePolicy", "Unsupported node scheduling policy '%s'", req.RawNodePolicy())
 		} else {
 			klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
 		}
 		less := []allocator.LessFunc[*device.NodeInfo]{func(p1, p2 *device.NodeInfo) bool {
 			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
 		}}
-		less = allocator.ApplyTopologyMode(req.Topology, topoNeedNumber, less)
+		less = allocator.ApplyTopologyMode(*req, less)
 		allocator.NewSortPriority[*device.NodeInfo](less...).Sort(nodeInfoList)
 	}
 	recorder := f.recorder
@@ -466,45 +466,4 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		f.recorder.Eventf(pod, corev1.EventTypeNormal, "FilteringSucceed", "Successfully matched to node <%s>", filteredNodes[0].Name)
 	}
 	return filteredNodes, failedNodesMap, nil
-}
-
-// PodUsedGPUTopologyMode returns the EFFECTIVE topology mode for the given
-// pod, taking into account both the user annotation and the runtime
-// preconditions (GPUTopology feature gate for link mode; at least one
-// container requesting >1 GPU). Both the regular and the *-strict variants
-// of each mode are recognised; the strict suffix is preserved on the return
-// value so downstream allocation paths can apply the no-fallback policy.
-func PodUsedGPUTopologyMode(pod *corev1.Pod) util.TopologyMode {
-	raw, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
-	mode := util.TopologyMode(strings.ToLower(raw))
-	switch mode {
-	case util.LinkTopology, util.LinkTopologyStrict:
-		if device.IsGPUTopologyEnabled() && util.IsSingleContainerMultiGPUs(pod) {
-			return mode
-		}
-	case util.NUMATopology, util.NUMATopologyStrict:
-		if util.IsSingleContainerMultiGPUs(pod) {
-			return mode
-		}
-	}
-	return util.NoneTopology
-}
-
-// PodTopologyNeedNumber returns the largest single-container vGPU request in
-// the pod. This is the value passed to ByNodeGPUTopologyFitness so the
-// node-level sort knows the minimum group size the node has to be able to
-// host topology-locally. Returns 0 when no container requests a vGPU group
-// > 1, which makes the fitness comparator a no-op.
-func PodTopologyNeedNumber(pod *corev1.Pod) int {
-	if pod == nil {
-		return 0
-	}
-	max := int64(0)
-	for i := range pod.Spec.Containers {
-		c := &pod.Spec.Containers[i]
-		if n := util.GetResourceOfContainer(c, util.VGPUNumberResourceName); n > max {
-			max = n
-		}
-	}
-	return int(max)
 }

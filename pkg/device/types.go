@@ -22,7 +22,6 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kube-scheduler/framework"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	"k8s.io/utils/pointer"
 )
 
 type NodeConfigInfo struct {
@@ -81,7 +80,7 @@ func (nti *NodeTopologyInfo) Decode(val string) error {
 }
 
 func ParseNodeTopology(val string) (NodeTopologyInfo, error) {
-	if strings.TrimSpace(val) == "" {
+	if val = strings.TrimSpace(val); val == "" {
 		return nil, fmt.Errorf("input value is empty")
 	}
 	var nodeTopoInfo NodeTopologyInfo
@@ -404,25 +403,23 @@ func (dev *Device) DeepCopy() *Device {
 
 var (
 	gpuTopoEnabledOnce sync.Once
-	gpuTopologyEnabled *bool
+	gpuTopologyEnabled bool
 )
 
 func SetGPUTopologyEnabled(flag bool) {
-	gpuTopologyEnabled = &flag
+	gpuTopoEnabledOnce.Do(func() {
+		gpuTopologyEnabled = flag
+		klog.InfoS(fmt.Sprintf("Feature Gates[%s]", util.GPUTopology), "enabled", flag)
+	})
 }
 
 func IsGPUTopologyEnabled() bool {
-	if gpuTopologyEnabled == nil {
-		gpuTopoEnabledOnce.Do(func() {
-			featureGate := compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-			gpuTopologyEnabled = pointer.Bool(featureGate != nil && featureGate.Enabled(options.GPUTopology))
-			klog.InfoS("Feature Gates[GPUTopology]", "enabled", gpuTopologyEnabled)
-		})
-		if gpuTopologyEnabled == nil {
-			gpuTopologyEnabled = pointer.Bool(false)
-		}
-	}
-	return *gpuTopologyEnabled
+	gpuTopoEnabledOnce.Do(func() {
+		featureGate := compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
+		gpuTopologyEnabled = featureGate != nil && featureGate.Enabled(util.GPUTopology)
+		klog.InfoS(fmt.Sprintf("Feature Gates[%s]", util.GPUTopology), "enabled", gpuTopologyEnabled)
+	})
+	return gpuTopologyEnabled
 }
 
 type DeviceGatherInfo struct {
@@ -462,7 +459,7 @@ func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
 		deviceGatherInfo.DeviceMap[device.Id] = NewDevice(device)
 		deviceGatherInfo.DeviceList[device.Id] = gpuallocator.NewDevice(device.Id, device.Uuid, device.BusId)
 	}
-	deviceGatherInfo.EnabledNumaAffinity = numaSet.Len() != 0
+	deviceGatherInfo.EnabledNumaAffinity = numaSet.Len() > 0
 	if IsGPUTopologyEnabled() {
 		topoValue, ok := util.HasAnnotation(node, util.NodeDeviceTopologyAnnotation)
 		if !ok || len(topoValue) == 0 {
@@ -471,7 +468,7 @@ func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
 		}
 		nodeTopology, err := ParseNodeTopology(topoValue)
 		if err != nil {
-			klog.V(3).ErrorS(err, "parse node device topology failed", "node", node.Name)
+			klog.V(3).ErrorS(err, "parse node device topology info failed", "node", node.Name, "topologyVal", topoValue)
 		}
 		for _, deviceTopoInfo := range nodeTopology {
 			for toIdx, p2pLinks := range deviceTopoInfo.Links {

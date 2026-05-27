@@ -100,12 +100,13 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
-		if !util.IsVGPURequiredContainer(c) {
+		number := util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
+		if number <= 0 {
 			continue
 		}
 		need := ContainerNeed{
 			Name:   c.Name,
-			Number: int(util.GetResourceOfContainer(c, util.VGPUNumberResourceName)),
+			Number: int(number),
 			Cores:  util.GetResourceOfContainer(c, util.VGPUCoreResourceName),
 			Memory: util.GetResourceOfContainer(c, util.VGPUMemoryResourceName),
 		}

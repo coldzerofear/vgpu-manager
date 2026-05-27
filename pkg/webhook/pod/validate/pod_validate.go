@@ -12,8 +12,8 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
-	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
@@ -480,8 +480,8 @@ func buildVGPURequestKey(podClaimName, mainRequest string) string {
 // buildResourceClaim Build vGPU resource claims based on container requests.
 func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, resourceClaimName, ownerPod, timestamp string) *resourceapi.ResourceClaim {
 	var deviceConstraints []resourceapi.DeviceConstraint
-
-	//// Handling multiple request device allocation constraints
+	req := allocator.BuildAllocationRequest(pod)
+	// Handling multiple request device allocation constraints
 	//if len(requests) > 1 {
 	//	// All requests are mutually exclusive by device UUID to ensure that multiple requests are not assigned the same device
 	//	deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
@@ -489,7 +489,7 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, requests []resource
 	//		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
 	//	})
 	//
-	//	switch filter.PodUsedGPUTopologyMode(pod) {
+	//	switch req.Topology.BaseTopology() {
 	//	case util.LinkTopology:
 	//		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 	//			Requests:       []string{}, // match all requests
@@ -516,7 +516,7 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, requests []resource
 			})
 
 			// Multiple devices are matched and allocated according to defined topology patterns to ensure optimal performance.
-			switch filter.PodUsedGPUTopologyMode(pod) {
+			switch req.Topology.BaseTopology() {
 			case util.LinkTopology:
 				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 					Requests:       []string{request.Name},

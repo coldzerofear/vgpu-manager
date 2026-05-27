@@ -72,10 +72,10 @@ func NewRequestProfile(pod *corev1.Pod) RequestProfile {
 	var rNum, rMem, rCore float64
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
-		if !util.IsVGPURequiredContainer(c) {
+		cNum := util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
+		if cNum <= 0 {
 			continue
 		}
-		cNum := util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
 		cCore := util.GetResourceOfContainer(c, util.VGPUCoreResourceName)
 		cMem := util.GetResourceOfContainer(c, util.VGPUMemoryResourceName)
 

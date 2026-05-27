@@ -5,6 +5,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // LessFunc represents function to compare two DeviceInfo or NodeInfo
@@ -190,14 +191,14 @@ func cachedNodeScore(cache map[string]float64, info *device.NodeInfo,
 // Both strict and non-strict topology variants get the same prepended
 // comparator — strictness only changes ALLOCATION fallback behaviour
 // (handled inside allocateByTopologyMode), not node ranking.
-func ApplyTopologyMode(mode util.TopologyMode, needNumber int,
-	less []LessFunc[*device.NodeInfo],
-) []LessFunc[*device.NodeInfo] {
+func ApplyTopologyMode(req AllocationRequest, less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
 	var fitness LessFunc[*device.NodeInfo]
-	switch mode.BaseTopology() {
+	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
+		needNumber := PodTopologyNeedNumber(req.Pod)
 		fitness = ByNodeGPUTopologyFitness(needNumber)
 	case util.NUMATopology:
+		needNumber := PodTopologyNeedNumber(req.Pod)
 		fitness = ByNodeNUMATopologyFitness(needNumber)
 	default:
 		return less
@@ -205,28 +206,32 @@ func ApplyTopologyMode(mode util.TopologyMode, needNumber int,
 	return append([]LessFunc[*device.NodeInfo]{fitness}, less...)
 }
 
-// NewNodeBinpackPriority builds the node-level binpack ranking chain:
-// request-weighted score first, name as deterministic tiebreaker, and a
-// topology fitness comparator prepended when a topology mode applies.
-func NewNodeBinpackPriority(profile RequestProfile, mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
-	return newNodePriority(profile, util.BinpackPolicy, mode, needNumber)
+// PodTopologyNeedNumber returns the largest single-container vGPU request in
+// the pod. This is the value passed to ByNodeGPUTopologyFitness so the
+// node-level sort knows the minimum group size the node has to be able to
+// host topology-locally. Returns 0 when no container requests a vGPU group
+// > 1, which makes the fitness comparator a no-op.
+func PodTopologyNeedNumber(pod *corev1.Pod) int {
+	if pod == nil {
+		return 0
+	}
+	max := int64(0)
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		if n := util.GetResourceOfContainer(c, util.VGPUNumberResourceName); n > max {
+			max = n
+		}
+	}
+	return int(max)
 }
 
-// NewNodeSpreadPriority is the spread-policy counterpart of
-// NewNodeBinpackPriority — same shape, just inverts the score direction.
-func NewNodeSpreadPriority(profile RequestProfile, mode util.TopologyMode, needNumber int) *sortPriority[*device.NodeInfo] {
-	return newNodePriority(profile, util.SpreadPolicy, mode, needNumber)
-}
-
-func newNodePriority(profile RequestProfile, policy util.SchedulerPolicy,
-	mode util.TopologyMode, needNumber int,
-) *sortPriority[*device.NodeInfo] {
+func NewNodePolicyPriority(req AllocationRequest) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
-		WeightedNodeLess(profile, policy),
+		WeightedNodeLess(req.Profile, req.NodePolicy),
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*device.NodeInfo]{
-		less: ApplyTopologyMode(mode, needNumber, less),
+		less: ApplyTopologyMode(req, less),
 	}
 }
 
