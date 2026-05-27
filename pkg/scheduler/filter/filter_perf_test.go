@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -23,6 +24,20 @@ import (
 	"k8s.io/client-go/tools/record"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
+
+// init force-enables the GPUTopology feature for this test package so
+// link-topology rows actually exercise the topology path. SetGPU... is
+// guarded by a sync.Once shared with IsGPUTopologyEnabled(); call sites
+// elsewhere (and ESPECIALLY the lazy default-false IsGPUTopologyEnabled
+// invocation from NewNodeInfo) MUST NOT fire before this init runs, or
+// the Once gets consumed with false. Package init() ordering ensures
+// that's the case here — test functions can't run before init.
+//
+// Other tests in this package don't assert on topology behaviour, so
+// flipping the global to true for the whole package is safe.
+func init() {
+	device.SetGPUTopologyEnabled(true)
+}
 
 // Test_FilterPerf is a perf-tracking benchmark, NOT a correctness test.
 // Skipped unless VGPU_PERF=1. Reports per-pod and aggregate filter
@@ -241,10 +256,27 @@ func runFilterPerfScenario(t *testing.T, nodeCount, podCount int, pv perfPolicy)
 
 // buildPerfNodes mints `count` synthetic vGPU nodes, all identical in
 // shape (4 GPUs, two 12GB + two 20GB, deviceSplit=10 ⇒ 40 vGPU slots,
-// NUMA={0,0,1,1}, two on each NUMA domain so link / numa topology
-// scoring has work to do but never fails). Names are
-// "perfnode-<i>" zero-padded so lexicographic sort matches numeric
-// order — handy when the ByNodeNameAsc tie-breaker fires.
+// NUMA={0,0,1,1}). Each node also carries the GPU topology annotation
+// so the link-topology code path actually engages — without it
+// allocateLink short-circuits at `if !HasGPUTopology() { return false }`
+// and the topology rows of the perf matrix degenerate into the
+// no-topology fallback.
+//
+// Topology mesh:
+//
+//	   GPU0 ─NVL─ GPU1       (same NUMA 0, same board pair)
+//	    │    ╲   ╱  │
+//	   PCIe   ╲ ╱  PCIe       (cross-NUMA via single PCIe switch)
+//	    │    ╱ ╲   │
+//	   GPU2 ─NVL─ GPU3       (same NUMA 1, same board pair)
+//
+// That gives binpack/spread a real choice (two NVLink-connected pairs
+// vs. four single-switch-only options) and lets link-strict succeed
+// for a 2-vGPU request (the connected pair) while numa-strict succeeds
+// for the same request (any same-NUMA pair).
+//
+// Names are "perfnode-<i>" zero-padded so lexicographic sort matches
+// numeric order — handy when the ByNodeNameAsc tie-breaker fires.
 func buildPerfNodes(count int) []corev1.Node {
 	nodeConfig := device.NodeConfigInfo{
 		DeviceSplit:   10,
@@ -253,6 +285,7 @@ func buildPerfNodes(count int) []corev1.Node {
 		MemoryScaling: 1,
 	}
 	encodedCfg, _ := nodeConfig.Encode()
+	encodedTopo := buildPerfTopologyAnnotation()
 
 	nodes := make([]corev1.Node, count)
 	for i := 0; i < count; i++ {
@@ -273,6 +306,7 @@ func buildPerfNodes(count int) []corev1.Node {
 				Annotations: map[string]string{
 					util.NodeDeviceRegisterAnnotation: registerNode,
 					util.NodeConfigInfoAnnotation:     encodedCfg,
+					util.NodeDeviceTopologyAnnotation: encodedTopo,
 				},
 			},
 			Status: corev1.NodeStatus{
@@ -288,11 +322,47 @@ func buildPerfNodes(count int) []corev1.Node {
 	return nodes
 }
 
-// buildPerfPod mints a tiny vGPU pod: one container, 1 vGPU, 20 cores,
-// 2048 MB memory. The "tiny" footprint matters because the perf test
-// loops up to 100000 pods through the same cluster — a fatter request
-// would fail past a few thousand pods and we'd be measuring the
-// rejection path instead of steady-state allocation.
+// buildPerfTopologyAnnotation hand-builds the 4-GPU mesh described on
+// buildPerfNodes. NodeTopologyInfo is the raw shape NewNodeDeviceGatherInfo
+// parses; we encode it once at startup since every test node is
+// identical.
+//
+// Encoding goes through NodeTopologyInfo.Encode (JSON); the
+// links.P2PLinkType enum serialises as its uint value, which is what
+// the parser expects on the read side.
+func buildPerfTopologyAnnotation() string {
+	pair := []links.P2PLinkType{links.SingleNVLINKLink}
+	sw := []links.P2PLinkType{links.P2PLinkSingleSwitch}
+	topo := device.NodeTopologyInfo{
+		{Index: 0, Links: map[int][]links.P2PLinkType{1: pair, 2: sw, 3: sw}},
+		{Index: 1, Links: map[int][]links.P2PLinkType{0: pair, 2: sw, 3: sw}},
+		{Index: 2, Links: map[int][]links.P2PLinkType{0: sw, 1: sw, 3: pair}},
+		{Index: 3, Links: map[int][]links.P2PLinkType{0: sw, 1: sw, 2: pair}},
+	}
+	encoded, err := topo.Encode()
+	if err != nil {
+		panic(fmt.Sprintf("encode perf topology annotation: %v", err))
+	}
+	return encoded
+}
+
+// buildPerfPod mints a small multi-vGPU pod: one container, 2 vGPUs,
+// 20 cores / 2048 MB per vGPU. Two vGPUs is the SMALLEST footprint
+// that still engages the topology code path:
+//
+//   - allocateByTopologyMode bypasses the dispatch when needNumber <= 1
+//     and just returns buildClaims(deviceStore[:needNumber], ...).
+//     One-vGPU pods never see allocateLink / allocateNUMA at all, so
+//     measuring "link" or "numa" mode with a 1-vGPU pod is identical
+//     to measuring "none".
+//   - CanNotCrossNumaNode similarly requires gpuNumber > 1.
+//
+// Two vGPUs × 20 cores = 40 cores per pod (each vGPU consumes 20 of
+// its host card's 100). On a 4-GPU node with 100 cores each, a single
+// node can host up to 5 such pods before running out of cores; on a
+// 40-vGPU-slot node it can host 20 before running out of slots. Slot
+// pressure is the binding constraint, so a 100-node cluster fits ~2000
+// pods before nodes start refusing new ones.
 //
 // pv.nodePolicy / pv.topology are written onto the pod annotations
 // when non-empty; an empty value means "leave the annotation off"
@@ -319,7 +389,7 @@ func buildPerfPod(i int, pv perfPolicy) *corev1.Pod {
 				Name: "c0",
 				Resources: corev1.ResourceRequirements{
 					Limits: corev1.ResourceList{
-						corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("1"),
+						corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("2"),
 						corev1.ResourceName(util.VGPUCoreResourceName):   resource.MustParse("20"),
 						corev1.ResourceName(util.VGPUMemoryResourceName): resource.MustParse("2048"),
 					},
