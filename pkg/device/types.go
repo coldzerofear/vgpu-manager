@@ -52,6 +52,11 @@ func (nci *NodeConfigInfo) Decode(val string) error {
 	return nil
 }
 
+func (nci *NodeConfigInfo) Clone() framework.StateData {
+	config := *nci
+	return &config
+}
+
 type TopologyInfo struct {
 	Index int                         `json:"index"`
 	Links map[int][]links.P2PLinkType `json:"links"`
@@ -431,18 +436,22 @@ type DeviceGatherInfo struct {
 	NodeConfigInfo
 }
 
-func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
+func NewNodeDeviceGatherInfo(node *corev1.Node, option *NodeInfoOption) (*DeviceGatherInfo, error) {
 	deviceRegister, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 	nodeDeviceInfo, err := ParseNodeDeviceInfo(deviceRegister)
 	if err != nil || len(nodeDeviceInfo) == 0 {
 		klog.V(2).ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
 		return nil, errors.New("incorrect GPU registry")
 	}
-	nodeConfigInfo := NodeConfigInfo{}
-	nodeConfig, _ := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
-	if err = nodeConfigInfo.Decode(nodeConfig); err != nil {
-		klog.V(2).ErrorS(err, "parse node config information failed", "node", node.Name, "value", nodeConfig)
-		return nil, errors.New("incorrect GPU configuration")
+	var nodeConfigInfo NodeConfigInfo
+	if option != nil && option.nodeConfig != nil {
+		nodeConfigInfo = *option.nodeConfig
+	} else {
+		nodeConfig, _ := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
+		if err = nodeConfigInfo.Decode(nodeConfig); err != nil {
+			klog.V(2).ErrorS(err, "parse node config information failed", "node", node.Name, "value", nodeConfig)
+			return nil, errors.New("incorrect GPU configuration")
+		}
 	}
 	deviceGatherInfo := DeviceGatherInfo{
 		DeviceMap:      make(map[int]*Device, len(nodeDeviceInfo)),
@@ -686,9 +695,60 @@ type NodeInfo struct {
 	NodeConfigInfo
 }
 
-func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UID) (*NodeInfo, error) {
+type NodeInfoOption struct {
+	excludedUidSet sets.Set[types.UID]
+	nodePods       []*corev1.Pod
+	nodeConfig     *NodeConfigInfo
+}
+
+type NodeInfoOptionFn func(*NodeInfoOption)
+
+func WithNodeConfig(config *NodeConfigInfo) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		o.nodeConfig = config
+	}
+}
+
+func WithExcludedUidSet(uidSet sets.Set[types.UID]) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		if o.excludedUidSet == nil {
+			o.excludedUidSet = uidSet
+		} else if uidSet != nil {
+			o.excludedUidSet.Insert(uidSet.UnsortedList()...)
+		}
+	}
+}
+
+func WithExcludedPods(uids ...types.UID) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		if o.excludedUidSet == nil {
+			o.excludedUidSet = sets.New[types.UID](uids...)
+		} else {
+			o.excludedUidSet.Insert(uids...)
+		}
+	}
+}
+
+func WithNodePods(pods ...*corev1.Pod) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		if o.nodePods == nil {
+			o.nodePods = pods
+		} else {
+			o.nodePods = append(o.nodePods, pods...)
+		}
+	}
+}
+
+func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error) {
 	klog.V(4).Infof("new nodeInfo for %s", node.Name)
-	gatherInfo, err := NewNodeDeviceGatherInfo(node)
+	infoOption := &NodeInfoOption{}
+	for _, opt := range opts {
+		opt(infoOption)
+	}
+	if infoOption.excludedUidSet == nil {
+		infoOption.excludedUidSet = sets.New[types.UID]()
+	}
+	gatherInfo, err := NewNodeDeviceGatherInfo(node, infoOption)
 	if err != nil {
 		return nil, err
 	}
@@ -711,13 +771,15 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UI
 	if ret.numaTopology {
 		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(gatherInfo.DeviceMap)
 	}
-	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
-		if !slices.ContainsFunc(excludedPods, func(uid types.UID) bool {
-			return pod.UID == uid
-		}) {
-			ret.addPodUsedResources(pod)
-		}
-	})
+
+	if len(infoOption.nodePods) > 0 {
+		util.PodsOnNodeCallback(infoOption.nodePods, node, func(pod *corev1.Pod) {
+			if !infoOption.excludedUidSet.Has(pod.UID) {
+				ret.addPodUsedResources(pod)
+			}
+		})
+	}
+
 	ret.ResetResourceUsage()
 	return ret, nil
 }
@@ -948,9 +1010,9 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 }
 
 func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
-	if !util.IsVGPUResourcePod(pod) {
-		return
-	}
+	//if !util.IsVGPUResourcePod(pod) {
+	//	return
+	//}
 
 	// Skip pods whose GPU pre-allocation should not be counted.
 	if !ShouldCountPodDeviceAllocation(pod) {
@@ -959,7 +1021,7 @@ func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
 	// According to the pods' annotations, construct the node allocation state
 	podDeviceClaim := GetPodDeviceClaim(pod)
 	if len(podDeviceClaim) == 0 {
-		klog.InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
+		//klog.InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
 		return
 	}
 	for _, containerClaim := range podDeviceClaim {

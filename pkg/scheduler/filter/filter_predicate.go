@@ -25,6 +25,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	"k8s.io/kube-scheduler/framework"
+	framework2 "k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 type gpuFilter struct {
@@ -104,13 +106,19 @@ func (f *gpuFilter) GetPodLister() client.PodLister {
 //     bucketing nodes by Primary code, and
 //   - hand kube-scheduler a clean short-phrase FailedNodesMap for its
 //     own FailedScheduling line.
-type filterFunc func(*corev1.Pod, []corev1.Node) ([]corev1.Node, map[string]*reason.FilterReason, error)
+type filterFunc func(context.Context, *corev1.Pod, []corev1.Node, CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error)
 
 func (f *gpuFilter) IsReady(ctx context.Context) bool {
 	return f.hasSyncFunc(ctx)
 }
 
-func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
+type CycleState interface {
+	Read(key framework.StateKey) (framework.StateData, error)
+	Write(key framework.StateKey, val framework.StateData)
+	Delete(key framework.StateKey)
+}
+
+func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
 	klog.V(4).InfoS("FilterNode", "ExtenderArgs", args)
 	pod := args.Pod
 	if pod == nil {
@@ -141,7 +149,7 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 		// boundary; keeping the *FilterReason shape internally lets us
 		// emit one aggregate FilteringFailed event with k8s-style
 		// "0/N nodes are available: ..." text bucketed by Primary code.
-		nodeReasons = make(map[string]*reason.FilterReason)
+		nodeReasons map[string]*reason.FilterReason
 	)
 	switch {
 	case args.NodeNames != nil && len(*args.NodeNames) > 0:
@@ -149,6 +157,7 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 		filteredNodes, nodeReasons = f.getNodesOnCache(*args.NodeNames...)
 	case args.Nodes != nil && len(args.Nodes.Items) > 0:
 		filteredNodes = args.Nodes.Items
+		nodeReasons = make(map[string]*reason.FilterReason, len(filteredNodes))
 	default:
 		return &extenderv1.ExtenderFilterResult{
 			Nodes:     args.Nodes,
@@ -166,29 +175,30 @@ func (f *gpuFilter) Filter(_ context.Context, args extenderv1.ExtenderArgs) *ext
 		f.nodeFilter,
 		f.deviceFilter,
 	}
-
+	state := framework2.NewCycleState()
 	for i, filter := range filters {
-		passedNodes, stageReasons, err := filter(pod, filteredNodes)
+		if len(filteredNodes) == 0 {
+			break
+		}
+		passedNodes, stageReasons, err := filter(ctx, pod, filteredNodes, state)
 		if err != nil {
 			klog.Errorf("Filter %d (%T) call failed: %v", i, filter, err)
 			return &extenderv1.ExtenderFilterResult{Error: err.Error()}
 		}
 		// Change the latest node filtering list for the next round of filtering.
 		filteredNodes = passedNodes
-		for name, r := range stageReasons {
-			nodeReasons[name] = r
-		}
+		maps.Copy(nodeReasons, stageReasons)
 	}
 	var (
 		nodes     *corev1.NodeList
 		nodeNames *[]string
 	)
 	if nodeCache {
-		temp := make([]string, len(filteredNodes))
+		names := make([]string, len(filteredNodes))
 		for i, node := range filteredNodes {
-			temp[i] = node.Name
+			names[i] = node.GetName()
 		}
-		nodeNames = &temp
+		nodeNames = &names
 	} else {
 		nodes = &corev1.NodeList{Items: filteredNodes}
 	}
@@ -328,16 +338,21 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 // GPU registered, bad config, wrong memory scaling for the requested
 // policy). Per-node reasons feed both kube-scheduler's FailedNodesMap
 // (via Short()) and vgpu-manager's own aggregate FilteringFailed event.
-func (f *gpuFilter) nodeFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, map[string]*reason.FilterReason, error) {
+func (f *gpuFilter) nodeFilter(ctx context.Context, pod *corev1.Pod, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
 	var (
 		filteredNodes = make([]corev1.Node, 0, len(nodes))
 		failed        = make(map[string]*reason.FilterReason, len(nodes))
 	)
 	memoryPolicyFunc := GetMemoryPolicyFunc(pod)
 	for i, node := range nodes {
-		if r := CheckNode(&node, memoryPolicyFunc); r != nil {
+		var nodeConfig *device.NodeConfigInfo
+		if r := CheckNode(&node, memoryPolicyFunc, func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
+			nodeConfig = info
+			return nil
+		}); r != nil {
 			failed[node.Name] = r
 		} else {
+			state.Write(framework.StateKey(node.Name), nodeConfig)
 			filteredNodes = append(filteredNodes, nodes[i])
 		}
 	}
@@ -387,7 +402,7 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 }
 
 // deviceFilter will choose one and only one node fullfil the request, so it should always be the last filter of gpuFilter
-func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1.Node, map[string]*reason.FilterReason, error) {
+func (f *gpuFilter) deviceFilter(ctx context.Context, pod *corev1.Pod, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
 	var (
 		filteredNodes = make([]corev1.Node, 0, 1)
 		failed        = make(map[string]*reason.FilterReason, len(nodes))
@@ -425,6 +440,11 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	f.locker.Lock()
 	defer f.locker.Unlock()
 
+	// Ensure that the context has not timed out
+	if err := ctx.Err(); err != nil {
+		return filteredNodes, failed, err
+	}
+
 	nodePodsMap, err := f.podLister.NodeMapByIndexValue(IndexerKeyPodRequestVGPU, "true")
 	if err != nil {
 		klog.ErrorS(err, "PodLister list all vGPU Pods failed")
@@ -446,7 +466,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	maxGoroutines := runtime.GOMAXPROCS(0) * 2
 	batchSize := (len(nodes) + maxGoroutines - 1) / maxGoroutines
 	parallel := watcher.NewBatchParallel(len(nodes), batchSize)
-	parallel.Execute(func(config watcher.BatchConfig) {
+	parallel.Execute(func(_ int, config watcher.BatchConfig) {
 		startIndex, endIndex, count := config.StartIndex, config.EndIndex, config.Count
 		batchNodeInfos := make([]*device.NodeInfo, 0, count)
 		batchFailed := make(map[string]*reason.FilterReason, count)
@@ -454,7 +474,18 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		for index := startIndex; index <= endIndex; index++ {
 			node := &nodes[index]
 			batchNodeOrigPosition[node.Name] = index
-			nodeInfo, err := device.NewNodeInfo(node, nodePodsMap[node.Name], pod.UID)
+
+			opts := []device.NodeInfoOptionFn{
+				device.WithNodePods(nodePodsMap[node.Name]...),
+				device.WithExcludedPods(pod.UID),
+			}
+			read, _ := state.Read(framework.StateKey(node.Name))
+			if read != nil {
+				if nodeConfig, ok := read.(*device.NodeConfigInfo); ok {
+					opts = append(opts, device.WithNodeConfig(nodeConfig))
+				}
+			}
+			nodeInfo, err := device.NewNodeInfo(node, opts...)
 			if err != nil {
 				klog.V(3).ErrorS(err, "new NodeInfo failed, skipping node", "node", node.Name)
 				batchFailed[node.Name] = reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
@@ -496,6 +527,10 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				batchFailed[node.Name] = reason.New(reason.InsufficientGPUResources).
 					WithDetail("need %d number, available %d", req.Total.Number, nodeInfo.GetAvailableNumber())
 				continue
+			}
+			if req.Total.Cores > nodeInfo.GetAvailableCores() {
+				batchFailed[node.Name] = reason.New(reason.InsufficientGPUResources).
+					WithDetail("need %d cores, available %d", req.Total.Cores, nodeInfo.GetAvailableCores())
 			}
 			batchNodeInfos = append(batchNodeInfos, nodeInfo)
 		}
@@ -560,6 +595,10 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				"pod", klog.KObj(pod), "reason", rsn.Detailed())
 			failed[node.Name] = rsn
 			continue
+		}
+		// Ensure that the context has not timed out
+		if err := ctx.Err(); err != nil {
+			return filteredNodes, failed, err
 		}
 		if err = client.PatchPodPreAllocatedMetadata(f.kubeClient, newPod); err != nil {
 			klog.ErrorS(err, "patch vGPU metadata failed", "pod", klog.KObj(pod), "node", node.Name)

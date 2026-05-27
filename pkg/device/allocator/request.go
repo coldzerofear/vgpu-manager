@@ -111,9 +111,10 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 			Memory: util.GetResourceOfContainer(c, util.VGPUMemoryResourceName),
 		}
 		req.Containers = append(req.Containers, need)
+		cores, memory := resolveContainerNeeds(need, 0)
 		req.Total.Number += need.Number
-		req.Total.Cores += need.Cores
-		req.Total.Memory += need.Memory
+		req.Total.Cores += cores
+		req.Total.Memory += memory
 	}
 
 	req.NodePolicy, req.rawNodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)

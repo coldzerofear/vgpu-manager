@@ -151,7 +151,7 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 	maxGoroutines := runtime.GOMAXPROCS(0) * 2
 	batchSize := (len(keys) + maxGoroutines - 1) / maxGoroutines
 	parallel := watcher.NewBatchParallel(len(keys), batchSize)
-	parallel.Execute(func(config watcher.BatchConfig) {
+	parallel.Execute(func(_ int, config watcher.BatchConfig) {
 		victimKeys := keys[config.StartIndex : config.EndIndex+1]
 		for _, nodeName := range victimKeys {
 			victims := victimsMap[nodeName]
@@ -295,7 +295,7 @@ func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
 
 	// Strip protected pods from in-tree's proposal — never evict them.
 	keep := make([]*corev1.Pod, 0, len(victims.Pods))
-	excluded := make(map[k8stypes.UID]struct{}, len(victims.Pods))
+	excludedUidSet := sets.New[k8stypes.UID]()
 	for _, v := range victims.Pods {
 		if v == nil {
 			continue
@@ -306,25 +306,25 @@ func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
 			continue
 		}
 		keep = append(keep, v)
-		excluded[v.UID] = struct{}{}
+		excludedUidSet.Insert(v.UID)
 	}
 	// Snapshot the post-protection length so pdbViolationsUpperBound can
 	// distinguish "carried over from input" from "newly appended below".
 	keptFromInput := len(keep)
 
 	// First pass: does the pending pod fit after removing the kept victims?
-	if p.canAllocate(pod, node, allVGPUPods, excluded) {
+	if p.canAllocate(pod, node, allVGPUPods, excludedUidSet) {
 		return keep, pdbViolationsUpperBound(victims.NumPDBViolations, keptFromInput, 0), true
 	}
 
 	// Second pass: in-tree under-selected (likely because per-device or
 	// annotation constraints invisible to it require more victims). Walk the
 	// remaining lower-priority pods on this node and greedily add until fit.
-	additional := p.findAdditionalVictims(pod, node, allVGPUPods, excluded)
+	additional := p.findAdditionalVictims(pod, node, allVGPUPods, excludedUidSet)
 	for _, cand := range additional {
-		excluded[cand.UID] = struct{}{}
+		excludedUidSet.Insert(cand.UID)
 		keep = append(keep, cand)
-		if p.canAllocate(pod, node, allVGPUPods, excluded) {
+		if p.canAllocate(pod, node, allVGPUPods, excludedUidSet) {
 			added := len(keep) - keptFromInput
 			return keep, pdbViolationsUpperBound(victims.NumPDBViolations, keptFromInput, added), true
 		}
@@ -368,8 +368,10 @@ func pdbViolationsUpperBound(originalCount int64, keptLen, addedLen int) int64 {
 // allocator whether the pending pod fits. Reuses the same NewNodeInfo
 // excludedPods mechanism already used during the filter re-allocation path.
 func (p *vgpuPreempt) canAllocate(pod *corev1.Pod, node *corev1.Node,
-	allVGPUPods []*corev1.Pod, excluded map[k8stypes.UID]struct{}) bool {
-	nodeInfo, err := device.NewNodeInfo(node, allVGPUPods, maps.Keys(excluded)...)
+	allVGPUPods []*corev1.Pod, excludedUidSet sets.Set[k8stypes.UID]) bool {
+	nodeInfo, err := device.NewNodeInfo(node,
+		device.WithNodePods(allVGPUPods...),
+		device.WithExcludedUidSet(excludedUidSet))
 	if err != nil {
 		klog.V(3).ErrorS(err, "Preempt: NewNodeInfo failed", "node", node.Name)
 		return false
@@ -425,7 +427,7 @@ func (p *vgpuPreempt) canAllocate(pod *corev1.Pod, node *corev1.Node,
 // binding cannot be evicted through this path — they must be reclaimed by a
 // separate controller or by the existing fresh-window grace mechanism.
 func (p *vgpuPreempt) findAdditionalVictims(pod *corev1.Pod, node *corev1.Node,
-	allVGPUPods []*corev1.Pod, excluded map[k8stypes.UID]struct{}) []*corev1.Pod {
+	allVGPUPods []*corev1.Pod, excludedUidSet sets.Set[k8stypes.UID]) []*corev1.Pod {
 
 	preemptorPriority := corev1helpers.PodPriority(pod)
 	out := make([]*corev1.Pod, 0)
@@ -433,7 +435,7 @@ func (p *vgpuPreempt) findAdditionalVictims(pod *corev1.Pod, node *corev1.Node,
 		if candidate.UID == pod.UID {
 			continue
 		}
-		if _, dup := excluded[candidate.UID]; dup {
+		if excludedUidSet.Has(candidate.UID) {
 			continue
 		}
 		// Must be actually bound to this node — see function doc.

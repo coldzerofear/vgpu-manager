@@ -27,6 +27,7 @@ import (
 	testing2 "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 const (
@@ -154,7 +155,7 @@ func Test_Parallel_Scheduling(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, node := range nodes {
-		nodeInfo, err := device.NewNodeInfo(&node, list)
+		nodeInfo, err := device.NewNodeInfo(&node, device.WithNodePods(list...))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -488,8 +489,8 @@ func Test_DeviceFilter(t *testing.T) {
 
 			// wait for podLister to sync
 			//time.Sleep(time.Second)
-
-			nodes, _, err := filterPredicate.deviceFilter(pod, nodeList)
+			state := framework.NewCycleState()
+			nodes, _, err := filterPredicate.deviceFilter(context.Background(), pod, nodeList, state)
 			assert.Equal(t, testCase.err, err)
 			if err != nil {
 				return
@@ -808,7 +809,8 @@ func Test_NodeFilter(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			filterNodes, gotReasons, _ := filterPredicate.nodeFilter(testCase.pod, testCase.nodes)
+			state := framework.NewCycleState()
+			filterNodes, gotReasons, _ := filterPredicate.nodeFilter(context.Background(), testCase.pod, testCase.nodes, state)
 			assert.Equal(t, testCase.filterNodes, filterNodes)
 			gotPrimary := make(map[string]reason.Code, len(gotReasons))
 			for n, r := range gotReasons {

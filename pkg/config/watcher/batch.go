@@ -19,17 +19,17 @@ func NewBatchParallel(totalCards, maxPerBatch int) BatchParallel {
 	}
 }
 
-func (b *BatchParallel) Execute(fn func(BatchConfig)) {
+func (b *BatchParallel) Execute(fn func(int, BatchConfig)) {
 	if len(b.configs) == 1 {
-		fn(b.configs[0])
+		fn(0, b.configs[0])
 		return
 	}
-	for _, config := range b.configs {
+	for i, config := range b.configs {
 		b.wg.Add(1)
-		go func(config BatchConfig) {
+		go func(i int, config BatchConfig) {
 			defer b.wg.Done()
-			fn(config)
-		}(config)
+			fn(i, config)
+		}(i, config)
 	}
 }
 
