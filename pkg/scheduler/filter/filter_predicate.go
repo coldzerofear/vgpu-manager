@@ -460,7 +460,33 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 				batchFailed[node.Name] = reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
 				continue
 			}
-			// fast return
+			// Pre-allocator capacity gate: reject nodes that obviously
+			// can't fit the pod BEFORE letting them into the sorted
+			// candidate list. NodeInfo is already built (annotation
+			// decode is the dominant cost there and we needed it for
+			// the GetAvailableNumber call anyway); what we save is the
+			// downstream allocator pass — sort comparators,
+			// pickDeviceClaims, topology dispatch, per-container
+			// Allocate — which would otherwise iterate every node in
+			// nodeInfoList. On saturated clusters this is the
+			// difference between scanning 5000 NodeInfos or just the
+			// 50 that still have room.
+			//
+			// Two checks, in order from cheapest/strictest to broadest:
+			//
+			//   maxNumber > GetDeviceCount() — the largest single
+			//   container needs more cards than the node has TOTAL,
+			//   even ignoring current usage. Each container's vGPUs
+			//   must land on distinct cards, so this is a hard
+			//   structural reject (allocator would reach the same
+			//   verdict via allocateOne but only after parsing the
+			//   per-container loop).
+			//
+			//   req.Total.Number > GetAvailableNumber() — sum of all
+			//   containers' vGPU slots exceeds what's free on this
+			//   node right now. Caught later anyway, but allocator's
+			//   per-container greedy may waste cycles before
+			//   discovering it.
 			if maxNumber > nodeInfo.GetDeviceCount() {
 				batchFailed[node.Name] = reason.New(reason.InsufficientGPUCards).
 					WithDetail("need %d devices, node has %d", maxNumber, nodeInfo.GetDeviceCount())

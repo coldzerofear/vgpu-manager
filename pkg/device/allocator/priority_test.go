@@ -14,10 +14,11 @@ import (
 )
 
 // makeRequestPod builds a pod whose single container requests `vgpuNumber`
-// vGPUs. The pod is the input ApplyTopologyMode reads via
-// PodTopologyNeedNumber to size the fitness comparator's needNumber; for
-// NoneTopology tests pass 0 (PodTopologyNeedNumber isn't consulted in that
-// branch, but a benign pod keeps the AllocationRequest well-formed).
+// vGPUs. The pod is the input ApplyTopologyMode reads (via the explicit
+// needNumber arg the caller passes in alongside the request) to size the
+// fitness comparator's needNumber; for NoneTopology tests pass 0
+// (needNumber isn't consulted in that branch, but a benign pod keeps the
+// AllocationRequest well-formed).
 func makeRequestPod(vgpuNumber int64) *corev1.Pod {
 	limits := corev1.ResourceList{}
 	if vgpuNumber > 0 {
@@ -66,11 +67,11 @@ func Test_NodePriority(t *testing.T) {
 		)
 	}
 	start := time.Now()
-	NewNodePolicyPriority(makeSortRequest(util.BinpackPolicy, util.NoneTopology, 0)).Sort(nodeInfoList)
+	NewNodePolicyPriority(makeSortRequest(util.BinpackPolicy, util.NoneTopology, 0), 0).Sort(nodeInfoList)
 	since := time.Since(start)
 	fmt.Printf("call NewNodePolicyPriority(binpack) took %d Milliseconds\n", since.Milliseconds())
 	start = time.Now()
-	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.NoneTopology, 0)).Sort(nodeInfoList)
+	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.NoneTopology, 0), 0).Sort(nodeInfoList)
 	since = time.Since(start)
 	fmt.Printf("call NewNodePolicyPriority(spread) took %d Milliseconds\n", since.Milliseconds())
 }
@@ -107,12 +108,11 @@ func Test_NodeSorting(t *testing.T) {
 		),
 	}
 
-	// Link-topology + binpack: 2-vGPU request, so PodTopologyNeedNumber
-	// returns 2 → fitness comparator prefers nodes whose max link
-	// component is ≥ 2. nodeA has no topology → fitness 0 (last).
-	// Binpack score then orders the topology-capable nodes by highest
-	// utilisation first.
-	NewNodePolicyPriority(makeSortRequest(util.BinpackPolicy, util.LinkTopology, 2)).Sort(nodes)
+	// Link-topology + binpack: 2-vGPU request, so needNumber=2 →
+	// fitness comparator prefers nodes whose max link component is ≥ 2.
+	// nodeA has no topology → fitness 0 (last). Binpack score then orders
+	// the topology-capable nodes by highest utilisation first.
+	NewNodePolicyPriority(makeSortRequest(util.BinpackPolicy, util.LinkTopology, 2), 2).Sort(nodes)
 	wantNodeNames := []string{nodeC.Name, nodeD.Name, nodeB.Name, nodeA.Name}
 	binpackNodeNames := make([]string, len(nodes))
 	for i, node := range nodes {
@@ -120,7 +120,7 @@ func Test_NodeSorting(t *testing.T) {
 	}
 	assert.Equal(t, wantNodeNames, binpackNodeNames)
 
-	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.LinkTopology, 2)).Sort(nodes)
+	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.LinkTopology, 2), 2).Sort(nodes)
 	wantNodeNames = []string{nodeB.Name, nodeC.Name, nodeD.Name, nodeA.Name}
 	spreadNodeNames := make([]string, len(nodes))
 	for i, node := range nodes {
@@ -130,7 +130,7 @@ func Test_NodeSorting(t *testing.T) {
 
 	// NoneTopology spread: fitness comparator is a no-op, falls back to
 	// pure spread ordering — least-used (nodeA, all zero) first.
-	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.NoneTopology, 0)).Sort(nodes)
+	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.NoneTopology, 0), 0).Sort(nodes)
 	wantNodeNames = []string{nodeA.Name, nodeB.Name, nodeC.Name, nodeD.Name}
 	spreadNodeNames = make([]string, len(nodes))
 	for i, node := range nodes {
