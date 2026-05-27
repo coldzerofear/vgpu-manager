@@ -180,13 +180,14 @@ func cachedNodeScore(cache map[string]float64, info *device.NodeInfo,
 // ApplyTopologyMode prepends a topology-fitness comparator at the highest
 // priority of the sort chain when the pod requested a topology mode. The
 // fitness comparator returns true when the candidate node can ACTUALLY host
-// the requested topology group of needNumber GPUs (max component / max NUMA
-// group ≥ needNumber), strictly stronger than a bare "just has topology
-// metadata" check.
+// the requested topology group (max link-component or max NUMA group ≥
+// PodTopologyNeedNumber(req.Pod)) — strictly stronger than a bare "just
+// has topology metadata" check.
 //
-// needNumber is the per-pod GPU count whose locality the user wants. For
-// none-topology requests, single-GPU requests, or unrecognised modes, the
-// input slice is returned unchanged.
+// req carries both inputs the fitness comparator needs: req.Topology
+// selects link- vs NUMA-aware ranking, and req.Pod is consulted via
+// PodTopologyNeedNumber to size the required group. For none-topology
+// requests or unrecognised modes, the input slice is returned unchanged.
 //
 // Both strict and non-strict topology variants get the same prepended
 // comparator — strictness only changes ALLOCATION fallback behaviour
@@ -225,6 +226,18 @@ func PodTopologyNeedNumber(pod *corev1.Pod) int {
 	return int(max)
 }
 
+// NewNodePolicyPriority builds the node-level ranking chain for a pod:
+// request-weighted Score under req.NodePolicy first, node name as the
+// deterministic tiebreaker, and a topology-fitness comparator prepended
+// when req.Topology asks for one.
+//
+// req.NodePolicy drives the score direction (Binpack ranks high-use
+// first; Spread ranks low-use first); req.Profile carries the
+// per-dimension weights; req.Topology + req.Pod feed ApplyTopologyMode.
+// Unrecognised NodePolicy values were normalised to NonePolicy by
+// BuildAllocationRequest, in which case Score returns 0 for every
+// candidate and the comparator collapses to "all equal", letting
+// ByNodeNameAsc decide.
 func NewNodePolicyPriority(req AllocationRequest) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
 		WeightedNodeLess(req.Profile, req.NodePolicy),

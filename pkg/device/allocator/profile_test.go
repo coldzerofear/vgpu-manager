@@ -22,7 +22,8 @@ type containerSpec struct {
 }
 
 // nonVGPU is a marker for a container that requests no vGPU at all — the
-// loop in NewRequestProfile must skip it via IsVGPURequiredContainer.
+// loop in NewRequestProfile skips containers whose vGPU-number resource is
+// missing or zero, treating them as non-vGPU.
 var nonVGPU = containerSpec{num: 0}
 
 // makePod builds a *corev1.Pod with one container per spec. Resources go

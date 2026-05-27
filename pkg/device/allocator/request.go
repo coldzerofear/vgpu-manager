@@ -9,21 +9,20 @@ import (
 
 // AllocationRequest captures everything the allocator needs to decide a
 // pod's GPU placement, parsed once from the pod's containers and
-// annotations. Before Phase C the allocator re-read these scattered
-// across allocateOne / allocateByTopologyMode / filterDevices — each
-// container iteration paid for another util.HasAnnotation lookup, and
-// pod-level decisions were impossible because the parsing happened mid-
-// per-container-loop.
+// annotations. Without this abstraction the allocator would re-read
+// scattered annotations across allocateOne / allocateByTopologyMode /
+// filterDevices — each container iteration paid for another
+// util.HasAnnotation lookup and the filter / preempt / allocator paths
+// were free to disagree on what the pod asked for.
 //
-// Centralising the parse here gives two things:
+// Centralising the parse here gives:
 //
-//   - Per-container hot loops just read fields (req.Topology vs a fresh
-//     annotation lookup), so the per-container path's CPU profile drops
-//     a little.
-//   - Multi-container topology pods become expressible: req.Total has
-//     the pod-wide GPU count, and req.Containers preserves the per-
-//     container split, so allocatePodLevel can pick one topology domain
-//     covering all containers and distributeToContainers slices it back.
+//   - One source of truth for "what did this pod ask for". The filter
+//     uses req for node ranking; the allocator (per node) uses the same
+//     req for per-container device selection. Both see the same
+//     normalised NodePolicy / DevicePolicy / Topology / Profile.
+//   - A predictable hot path: per-container loops just read fields off
+//     req instead of re-parsing strings.
 type AllocationRequest struct {
 	// Pod is the input pod. Kept on the request because allocator
 	// internals still need it for annotation writes (PodVGPUPreAllocAnnotation),
@@ -36,13 +35,14 @@ type AllocationRequest struct {
 	// when non-vGPU containers are interleaved.
 	Containers []ContainerNeed
 
-	// Total aggregates Number / Cores / Memory across Containers. Used by
-	// the pod-level dispatch gate (Allocate) to decide between the
-	// per-container and pod-level paths, and by selectByTopology to size
-	// the single allocation that covers the whole pod.
+	// Total aggregates Number / Cores / Memory across Containers. Carried
+	// for completeness — current callers (per-container Allocate loop)
+	// don't consult it, but downstream code that needs a pod-wide GPU
+	// count (e.g. capacity probes, future pod-level paths) can read it
+	// without re-walking pod.Spec.Containers.
 	//
-	// Total.Name is unset (no container owns the aggregate) and ContainerNeed
-	// consumers should not read it.
+	// Total.Name is unset (no container owns the aggregate) and
+	// ContainerNeed consumers should not read it.
 	Total ContainerNeed
 
 	// NodePolicy / DevicePolicy are the two binpack/spread choices the

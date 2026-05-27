@@ -41,11 +41,11 @@ func (alloc *allocator) addContainerAllocate(contDevices *device.ContainerDevice
 // reads scheduling annotations off req instead of re-parsing them per
 // container iteration.
 //
-// Containers are allocated in declaration order. addAllocateOne updates
-// node-side accounting between iterations so the next container's
-// filterDevices sees the live AllocatableX values — which is how
-// cross-container GPU sharing works (one physical card serving vGPUs
-// from multiple containers, as long as each container's per-card
+// Containers are allocated in declaration order. addContainerAllocate
+// updates node-side accounting between iterations so the next
+// container's filterDevices sees the live AllocatableX values — which
+// is how cross-container GPU sharing works (one physical card serving
+// vGPUs from multiple containers, as long as each container's per-card
 // resource needs fit in what the previous containers left behind).
 func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, error) {
 	pod := req.Pod

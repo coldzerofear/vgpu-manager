@@ -404,17 +404,14 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		return filteredNodes, failedNodesMap, nil
 	}
 
-	// Parse pod-level scheduling inputs ONCE — req feeds both the node-
+	// Parse pod-wide scheduling inputs ONCE — req feeds both the node-
 	// ranking comparators here and the per-node allocator below, so they
 	// share annotation-parse cost and never disagree about what the pod
 	// asked for.
 	req := allocator.BuildAllocationRequest(pod)
 
 	switch req.NodePolicy {
-	case util.BinpackPolicy:
-		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
-		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
-	case util.SpreadPolicy:
+	case util.BinpackPolicy, util.SpreadPolicy:
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
 		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
 	default:
