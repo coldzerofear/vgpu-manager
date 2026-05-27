@@ -192,14 +192,12 @@ func cachedNodeScore(cache map[string]float64, info *device.NodeInfo,
 // Both strict and non-strict topology variants get the same prepended
 // comparator — strictness only changes ALLOCATION fallback behaviour
 // (handled inside allocateByTopologyMode), not node ranking.
-func ApplyTopologyMode(req AllocationRequest, less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
+func ApplyTopologyMode(req AllocationRequest, needNumber int, less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
 	var fitness LessFunc[*device.NodeInfo]
 	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
-		needNumber := PodTopologyNeedNumber(req.Pod)
 		fitness = ByNodeGPUTopologyFitness(needNumber)
 	case util.NUMATopology:
-		needNumber := PodTopologyNeedNumber(req.Pod)
 		fitness = ByNodeNUMATopologyFitness(needNumber)
 	default:
 		return less
@@ -238,13 +236,13 @@ func PodTopologyNeedNumber(pod *corev1.Pod) int {
 // BuildAllocationRequest, in which case Score returns 0 for every
 // candidate and the comparator collapses to "all equal", letting
 // ByNodeNameAsc decide.
-func NewNodePolicyPriority(req AllocationRequest) *sortPriority[*device.NodeInfo] {
+func NewNodePolicyPriority(req AllocationRequest, needNumber int) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
 		WeightedNodeLess(req.Profile, req.NodePolicy),
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*device.NodeInfo]{
-		less: ApplyTopologyMode(req, less),
+		less: ApplyTopologyMode(req, needNumber, less),
 	}
 }
 

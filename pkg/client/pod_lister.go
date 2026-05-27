@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -20,6 +21,7 @@ type PodLister interface {
 	listerv1.PodLister
 	ListByIndexValue(indexName, indexedValue string) ([]*corev1.Pod, error)
 	ListByIndexFiledSet(fieldSet fields.Set) ([]*corev1.Pod, error)
+	NodeMapByIndexValue(indexName, indexedValue string) (map[string][]*corev1.Pod, error)
 	Mutation(*corev1.Pod)
 }
 
@@ -52,9 +54,26 @@ func (s *podLister) ListByIndexValue(indexName, indexedValue string) ([]*corev1.
 	}
 	ret := make([]*corev1.Pod, 0, len(objs))
 	for _, obj := range objs {
-		ret = append(ret, obj.(*corev1.Pod))
+		if pod, ok := obj.(*corev1.Pod); ok {
+			ret = append(ret, pod)
+		}
 	}
 	return ret, nil
+}
+
+func (s *podLister) NodeMapByIndexValue(indexName, indexedValue string) (map[string][]*corev1.Pod, error) {
+	objs, err := s.cache.ByIndex(indexName, indexedValue)
+	if err != nil {
+		return nil, err
+	}
+	nodePodsMap := make(map[string][]*corev1.Pod, len(objs))
+	for _, obj := range objs {
+		if pod, ok := obj.(*corev1.Pod); ok {
+			nodeName := util.PodPlanSchedulingNode(pod)
+			nodePodsMap[nodeName] = append(nodePodsMap[nodeName], pod)
+		}
+	}
+	return nodePodsMap, nil
 }
 
 func (s *podLister) ListByIndexFiledSet(fieldSet fields.Set) ([]*corev1.Pod, error) {

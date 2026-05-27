@@ -46,14 +46,14 @@ func (alloc *allocator) addContainerAllocate(contDevices *device.ContainerDevice
 //
 //   - (pod, nil, nil)        — success.
 //   - (nil, reason, nil)     — node rejected the pod (insufficient
-//                              resources, strict topology unsatisfiable,
-//                              etc.); caller should try the next node
-//                              and bucket the reason into the aggregate
-//                              FilteringFailed event.
+//     resources, strict topology unsatisfiable,
+//     etc.); caller should try the next node
+//     and bucket the reason into the aggregate
+//     FilteringFailed event.
 //   - (nil, nil, err)        — internal/programmer error (annotation
-//                              encoding failed, accounting bug, ...);
-//                              the filter loop should abort, NOT just
-//                              skip the node — these signal real bugs.
+//     encoding failed, accounting bug, ...);
+//     the filter loop should abort, NOT just
+//     skip the node — these signal real bugs.
 //
 // Containers are allocated in declaration order. addContainerAllocate
 // updates node-side accounting between iterations so the next
@@ -109,15 +109,15 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 // Three return values, same convention as Allocate:
 //   - (claim, nil, nil)     — success.
 //   - (nil, reason, nil)    — this container can't be placed on this node;
-//                             reason carries the structured cause (with
-//                             per-device counts when applicable).
+//     reason carries the structured cause (with
+//     per-device counts when applicable).
 //   - (nil, nil, err)       — internal error (shouldn't happen).
 func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", need.Name, alloc.nodeInfo.GetName())
 	if need.Number > alloc.nodeInfo.GetDeviceCount() {
 		return nil, reason.New(reason.InsufficientGPUCards).
-			WithDetail("need %d, node has %d", need.Number, alloc.nodeInfo.GetDeviceCount()), nil
+			WithDetail("need %d devices, node has %d", need.Number, alloc.nodeInfo.GetDeviceCount()), nil
 	}
 	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
 
@@ -197,8 +197,8 @@ func resolveContainerNeeds(need ContainerNeed, memoryFactor int) (cores, memory 
 //
 // Return shape:
 //   - (claims, nil)        — picked successfully (or insufficient, with
-//                            len(claims) < needNumber so caller falls to
-//                            the count-promotion path).
+//     len(claims) < needNumber so caller falls to
+//     the count-promotion path).
 //   - (nil, reason)        — strict topology rejected this node.
 func (alloc *allocator) pickDeviceClaims(
 	req *AllocationRequest, deviceStore []*device.Device,
@@ -250,11 +250,11 @@ func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, mes
 //
 // Returns:
 //   - (claims, nil)        — topology succeeded, or non-strict fallback
-//                            took the non-topology path (a TopologyFallback
-//                            event is emitted in that case for visibility).
+//     took the non-topology path (a TopologyFallback
+//     event is emitted in that case for visibility).
 //   - (nil, *FilterReason) — strict topology unsatisfiable on this node;
-//                            the caller should propagate the reason up so
-//                            the filter loop drops just this node.
+//     the caller should propagate the reason up so
+//     the filter loop drops just this node.
 //
 // req carries Topology / TopologyStrict / Profile pre-parsed; the Pod
 // reference is used only for events and log keys.

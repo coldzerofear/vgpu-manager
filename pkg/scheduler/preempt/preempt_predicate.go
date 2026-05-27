@@ -139,59 +139,54 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 		return result
 	}
 
-	allVGPUPods, err := p.podLister.ListByIndexValue(filter.IndexerKeyPodRequestVGPU, "true")
+	nodePodsMap, err := p.podLister.NodeMapByIndexValue(filter.IndexerKeyPodRequestVGPU, "true")
 	if err != nil {
 		klog.ErrorS(err, "PodLister list vGPU pods failed in preempt")
 		return passthrough(args)
 	}
 	mu := sync.Mutex{}
-	wg := sync.WaitGroup{}
+	gangNameSet := sets.Set[string]{}
 
 	keys := maps.Keys(victimsMap)
-	maxGoroutines := runtime.NumCPU() * 2
+	maxGoroutines := runtime.GOMAXPROCS(0) * 2
 	batchSize := (len(keys) + maxGoroutines - 1) / maxGoroutines
-	batches := watcher.BalanceBatches(len(keys), batchSize)
-	gangNameSet := sets.Set[string]{}
-	for _, batch := range batches {
-		wg.Add(1)
-		go func(victimKeys []string) {
-			defer wg.Done()
-
-			for _, nodeName := range victimKeys {
-				victims := victimsMap[nodeName]
-				if victims == nil {
-					continue
-				}
-				refined, pdbViolations, ok := p.refineForNode(pod, nodeName, victims, allVGPUPods)
-				if !ok {
-					klog.V(3).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
-						"pod", klog.KObj(pod), "node", nodeName)
-					continue
-				}
-				if len(refined) == 0 {
-					// Should not happen — in-tree gave us at least one and we never empty the list.
-					continue
-				}
-				meta := &extenderv1.MetaVictims{
-					Pods:             make([]*extenderv1.MetaPod, 0, len(refined)),
-					NumPDBViolations: pdbViolations,
-				}
-				var gangNames []string
-				for _, vp := range refined {
-					if gangName, ok := util.PodHasGangName(vp); ok {
-						gangNames = append(gangNames, gangName)
-					}
-					meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
-				}
-
-				mu.Lock()
-				gangNameSet.Insert(gangNames...)
-				result.NodeNameToMetaVictims[nodeName] = meta
-				mu.Unlock()
+	parallel := watcher.NewBatchParallel(len(keys), batchSize)
+	parallel.Execute(func(config watcher.BatchConfig) {
+		victimKeys := keys[config.StartIndex : config.EndIndex+1]
+		for _, nodeName := range victimKeys {
+			victims := victimsMap[nodeName]
+			if victims == nil {
+				continue
 			}
-		}(keys[batch.StartIndex : batch.EndIndex+1])
-	}
-	wg.Wait()
+			refined, pdbViolations, ok := p.refineForNode(pod, nodeName, victims, nodePodsMap[nodeName])
+			if !ok {
+				klog.V(3).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
+					"pod", klog.KObj(pod), "node", nodeName)
+				continue
+			}
+			if len(refined) == 0 {
+				// Should not happen — in-tree gave us at least one and we never empty the list.
+				continue
+			}
+			meta := &extenderv1.MetaVictims{
+				Pods:             make([]*extenderv1.MetaPod, 0, len(refined)),
+				NumPDBViolations: pdbViolations,
+			}
+			var gangNames []string
+			for _, vp := range refined {
+				if gangName, ok := util.PodHasGangName(vp); ok {
+					gangNames = append(gangNames, gangName)
+				}
+				meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
+			}
+
+			mu.Lock()
+			gangNameSet.Insert(gangNames...)
+			result.NodeNameToMetaVictims[nodeName] = meta
+			mu.Unlock()
+		}
+	})
+	parallel.WaitDone()
 
 	if gangNameSet.Len() > 0 {
 		p.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventGangDisrupted,

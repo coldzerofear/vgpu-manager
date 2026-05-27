@@ -425,7 +425,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 	f.locker.Lock()
 	defer f.locker.Unlock()
 
-	pods, err := f.podLister.ListByIndexValue(IndexerKeyPodRequestVGPU, "true")
+	nodePodsMap, err := f.podLister.NodeMapByIndexValue(IndexerKeyPodRequestVGPU, "true")
 	if err != nil {
 		klog.ErrorS(err, "PodLister list all vGPU Pods failed")
 		return filteredNodes, failed, err
@@ -433,60 +433,66 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 
 	var (
 		mutex                = sync.Mutex{}
-		waitGroup            = sync.WaitGroup{}
 		nodeInfoList         = make([]*device.NodeInfo, 0, len(nodes))
 		nodeOriginalPosition = make(map[string]int, len(nodes))
+		// Parse pod-wide scheduling inputs ONCE — req feeds both the node-
+		// ranking comparators here and the per-node allocator below, so they
+		// share annotation-parse cost and never disagree about what the pod
+		// asked for.
+		req       = allocator.BuildAllocationRequest(pod)
+		maxNumber = allocator.PodTopologyNeedNumber(pod)
 	)
-	maxGoroutines := runtime.NumCPU() * 2
+
+	maxGoroutines := runtime.GOMAXPROCS(0) * 2
 	batchSize := (len(nodes) + maxGoroutines - 1) / maxGoroutines
-	batches := watcher.BalanceBatches(len(nodes), batchSize)
-	for _, batch := range batches {
-		waitGroup.Add(1)
-		go func(startIndex, endIndex, count int) {
-			defer waitGroup.Done()
+	parallel := watcher.NewBatchParallel(len(nodes), batchSize)
+	parallel.Execute(func(config watcher.BatchConfig) {
+		startIndex, endIndex, count := config.StartIndex, config.EndIndex, config.Count
+		batchNodeInfos := make([]*device.NodeInfo, 0, count)
+		batchFailed := make(map[string]*reason.FilterReason, count)
+		batchNodeOrigPosition := make(map[string]int, count)
+		for index := startIndex; index <= endIndex; index++ {
+			node := &nodes[index]
+			batchNodeOrigPosition[node.Name] = index
+			nodeInfo, err := device.NewNodeInfo(node, nodePodsMap[node.Name], pod.UID)
+			if err != nil {
+				klog.V(3).ErrorS(err, "new NodeInfo failed, skipping node", "node", node.Name)
+				batchFailed[node.Name] = reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
+				continue
+			}
+			// fast return
+			if maxNumber > nodeInfo.GetDeviceCount() {
+				batchFailed[node.Name] = reason.New(reason.InsufficientGPUCards).
+					WithDetail("need %d devices, node has %d", maxNumber, nodeInfo.GetDeviceCount())
+				continue
+			}
+			if req.Total.Number > nodeInfo.GetAvailableNumber() {
+				batchFailed[node.Name] = reason.New(reason.InsufficientGPUResources).
+					WithDetail("need %d number, available %d", req.Total.Number, nodeInfo.GetAvailableNumber())
+				continue
+			}
+			batchNodeInfos = append(batchNodeInfos, nodeInfo)
+		}
 
-			batchNodeInfos := make([]*device.NodeInfo, 0, count)
-			batchFailed := make(map[string]*reason.FilterReason, count)
-			batchNodeOrigPosition := make(map[string]int, count)
-			for index := startIndex; index <= endIndex; index++ {
-				node := &nodes[index]
-				batchNodeOrigPosition[node.Name] = index
-				nodeInfo, err := device.NewNodeInfo(node, pods, pod.UID)
-				if err != nil {
-					klog.V(3).ErrorS(err, "new NodeInfo failed, skipping node", "node", node.Name)
-					batchFailed[node.Name] = reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
-					continue
-				}
-				batchNodeInfos = append(batchNodeInfos, nodeInfo)
-			}
+		mutex.Lock()
+		maps.Copy(failed, batchFailed)
+		for index := range batchNodeInfos {
+			nodeInfoList = append(nodeInfoList, batchNodeInfos[index])
+		}
+		maps.Copy(nodeOriginalPosition, batchNodeOrigPosition)
+		mutex.Unlock()
+	})
+	parallel.WaitDone()
 
-			mutex.Lock()
-			for name, r := range batchFailed {
-				failed[name] = r
-			}
-			for index := range batchNodeInfos {
-				nodeInfoList = append(nodeInfoList, batchNodeInfos[index])
-			}
-			maps.Copy(nodeOriginalPosition, batchNodeOrigPosition)
-			mutex.Unlock()
-		}(batch.StartIndex, batch.EndIndex, batch.Count)
-	}
-	waitGroup.Wait()
 	// Quickly return results
 	if len(nodeInfoList) == 0 {
 		return filteredNodes, failed, nil
 	}
 
-	// Parse pod-wide scheduling inputs ONCE — req feeds both the node-
-	// ranking comparators here and the per-node allocator below, so they
-	// share annotation-parse cost and never disagree about what the pod
-	// asked for.
-	req := allocator.BuildAllocationRequest(pod)
-
 	switch req.NodePolicy {
 	case util.BinpackPolicy, util.SpreadPolicy:
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
-		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
+		allocator.NewNodePolicyPriority(*req, maxNumber).Sort(nodeInfoList)
 	default:
 		if req.RawNodePolicy() != "" && req.RawNodePolicy() != string(util.NonePolicy) {
 			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), req.RawNodePolicy())
@@ -498,7 +504,7 @@ func (f *gpuFilter) deviceFilter(pod *corev1.Pod, nodes []corev1.Node) ([]corev1
 		less := []allocator.LessFunc[*device.NodeInfo]{func(p1, p2 *device.NodeInfo) bool {
 			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
 		}}
-		less = allocator.ApplyTopologyMode(*req, less)
+		less = allocator.ApplyTopologyMode(*req, maxNumber, less)
 		allocator.NewSortPriority[*device.NodeInfo](less...).Sort(nodeInfoList)
 	}
 	recorder := f.recorder
