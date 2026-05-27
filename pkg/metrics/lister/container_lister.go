@@ -23,19 +23,24 @@ import (
 
 type ContainerKey string
 
-func (key ContainerKey) SpiltUIDAndContainerName() (types.UID, string) {
-	split := strings.Split(strings.TrimSpace(string(key)), "_")
-	return types.UID(split[0]), split[1]
+func NewContainerKey(key string) (ContainerKey, error) {
+	split := strings.SplitN(key, "_", 2)
+	switch len(split) {
+	case 2:
+		return ContainerKey(key), nil
+	default:
+		return "", fmt.Errorf("key format error: %s", key)
+	}
 }
 
 func (key ContainerKey) String() string {
-	uid, contName := key.SpiltUIDAndContainerName()
-	return fmt.Sprintf("%s/%s", uid, contName)
+	return strings.Replace(string(key), "_", "/", 1)
 }
 
 func GetContainerKey(uid types.UID, containerName string) ContainerKey {
 	key := fmt.Sprintf("%s_%s", uid, containerName)
-	return ContainerKey(key)
+	contKey, _ := NewContainerKey(key)
+	return contKey
 }
 
 type ContainerLister struct {
@@ -133,13 +138,16 @@ func (c *ContainerLister) update() error {
 		if excludedFolders[entry.Name()] {
 			continue
 		}
+		containerKey, err := NewContainerKey(entry.Name())
+		if err != nil {
+			continue
+		}
 		filePath := filepath.Join(c.basePath, entry.Name())
 		fileInfo, err := os.Stat(filePath)
 		if err != nil {
 			klog.Warningf("File path <%s> detection failed: %v", filePath, err)
 			continue
 		}
-		containerKey := ContainerKey(entry.Name())
 		matched := keySet.Has(containerKey)
 		_, existCfg := c.GetResourceDataT(containerKey)
 		_, existVMem := c.GetResourceVMem(containerKey)
