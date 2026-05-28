@@ -98,6 +98,10 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 			err = fmt.Errorf("device pre allocation failed, unable to bind to node <%s>", nodeName)
 			klog.ErrorS(err, "", "pod", klog.KObj(pod))
 			b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
+			// patch failed metadata
+			if patchErr := client.PatchPodAllocationFailed(b.kubeClient, pod); patchErr != nil {
+				klog.ErrorS(patchErr, "PatchPodAllocationFailed", "pod", klog.KObj(pod))
+			}
 			return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 		}
 	}

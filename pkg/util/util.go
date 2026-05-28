@@ -274,15 +274,15 @@ func (pods PodsOrderedByPredicateTime) Swap(i, j int) {
 	pods[i], pods[j] = pods[j], pods[i]
 }
 
-func GetPredicateTimeOfPod(pod corev1.Pod) uint64 {
-	assumeTimeStr, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation)
-	if !ok || len(assumeTimeStr) > PodAnnotationMaxLength {
-		return math.MaxUint64
+func GetPredicateTimeOfPod(pod corev1.Pod) int64 {
+	predicateTimeVal, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation)
+	if !ok || len(predicateTimeVal) > PodAnnotationMaxLength {
+		return math.MaxInt64
 	}
-	predicateTime, err := strconv.ParseUint(assumeTimeStr, 10, 64)
-	if err != nil {
-		klog.Warningf("failed to parse predicate timestamp %s due to %v", assumeTimeStr, err)
-		return math.MaxUint64
+	predicateTime, err := strconv.ParseInt(predicateTimeVal, 10, 64)
+	if err != nil || predicateTime <= 0 {
+		klog.Warningf("failed to parse predicate timestamp %s due to %v", predicateTimeVal, err)
+		return math.MaxInt64
 	}
 	return predicateTime
 }
