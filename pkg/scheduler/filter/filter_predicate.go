@@ -554,17 +554,35 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 				continue
 			}
 
-			// Quickly filter node device matching
+			// Reject nodes that can't satisfy the pod's include/exclude
+			// GPU UUID / type constraints. CheckDeviceUuid/Type return
+			// true when a device is ALLOWED by the annotations, so a node
+			// is viable only if it has at least req.Max.Number devices
+			// passing every requested check (the largest container needs
+			// that many distinct allowed cards). Reject only when too few
+			// qualify — NOT when any single device fails, since an
+			// include filter naturally excludes most of a node's cards.
+			// Necessary-condition pre-check; the allocator's filterDevices
+			// re-verifies exactly.
 			if req.CheckDeviceUuid || req.CheckDeviceType {
+				matched := 0
 				for _, dev := range nodeInfo.GetDeviceMap() {
 					if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, dev.GetUUID()) {
-						batchFailed[node.Name] = reason.New(reason.DeviceUUIDMismatch)
 						continue
 					}
 					if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, dev.GetType()) {
-						batchFailed[node.Name] = reason.New(reason.DeviceTypeMismatch)
 						continue
 					}
+					matched++
+				}
+				if matched < req.Max.Number {
+					rc := reason.DeviceTypeMismatch
+					if req.CheckDeviceUuid {
+						rc = reason.DeviceUUIDMismatch
+					}
+					batchFailed[node.Name] = reason.New(rc).
+						WithDetail("only %d of %d required devices match the requested GPU uuid/type", matched, req.Max.Number)
+					continue
 				}
 			}
 

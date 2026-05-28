@@ -309,16 +309,31 @@ func (p *vgpuPreempt) refineForNode(req *allocator.AllocationRequest, nodeName s
 		return nil, 0, false
 	}
 
+	// CheckDeviceUuid/Type return true when a device is ALLOWED by the
+	// pod's include/exclude annotations. The node can host the pod only if
+	// at least req.Max.Number devices pass every requested check (the
+	// largest container needs that many allowed cards). Reject only when
+	// too few qualify — NOT on the first non-matching device, since an
+	// include filter naturally excludes most of a node's cards.
 	if req.CheckDeviceUuid || req.CheckDeviceType {
+		matched := 0
 		for _, dev := range nodeInfo.GetDeviceMap() {
 			if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, dev.GetUUID()) {
-				klog.V(3).InfoS("Preempt: "+string(reason.DeviceUUIDMismatch), "node", nodeName, "pod", klog.KObj(req.Pod))
-				return nil, 0, false
+				continue
 			}
 			if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, dev.GetType()) {
-				klog.V(3).InfoS("Preempt: "+string(reason.DeviceTypeMismatch), "node", nodeName, "pod", klog.KObj(req.Pod))
-				return nil, 0, false
+				continue
 			}
+			matched++
+		}
+		if matched < req.Max.Number {
+			rc := reason.DeviceTypeMismatch
+			if req.CheckDeviceUuid {
+				rc = reason.DeviceUUIDMismatch
+			}
+			klog.V(3).InfoS("Preempt: "+string(rc), "node", nodeName, "pod", klog.KObj(req.Pod),
+				"matched", matched, "need", req.Max.Number)
+			return nil, 0, false
 		}
 	}
 
