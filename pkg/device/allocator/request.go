@@ -35,17 +35,30 @@ type AllocationRequest struct {
 	// when non-vGPU containers are interleaved.
 	Containers []ContainerNeed
 
-	// Total aggregates Number / Cores / Memory across Containers. Carried
-	// for completeness — current callers (per-container Allocate loop)
-	// don't consult it, but downstream code that needs a pod-wide GPU
-	// count (e.g. capacity probes, future pod-level paths) can read it
-	// without re-walking pod.Spec.Containers.
+	// Total is the pod-wide demand: Σ (per-container vGPU count) for Number,
+	// and Σ (Number × per-vGPU cores/memory) for Cores/Memory — i.e. the
+	// true aggregate consumption across every vGPU the pod will reserve.
+	// Used by the deviceFilter node-wide capacity gate (req.Total vs
+	// GetAvailable*). Two caveats keep it a necessary-condition lower bound
+	// rather than an exact fit test:
+	//   - Memory is the UN-scaled request; the node MemoryFactor is applied
+	//     later in the allocator, so on factor>1 nodes the real demand is
+	//     higher than Total.Memory.
+	//   - a whole-card memory request (user memory==0) contributes 0 here,
+	//     so memory is undercounted for those pods.
+	// Both only make the gate looser (never false-reject); the allocator
+	// re-verifies exactly.
 	//
 	// Total.Name is unset (no container owns the aggregate) and
 	// ContainerNeed consumers should not read it.
 	Total ContainerNeed
 
-	// Maximum aggregation Number / Cores / Memory for a single container.
+	// Max is the per-field MAXIMUM across Containers (the largest single
+	// container's Number, Cores, Memory — each field maxed independently).
+	// Used by the deviceFilter per-single-device structural gate (req.Max
+	// vs GetSchedulableDeviceCount / GetMaxDevice*) and by the topology
+	// fitness comparator (Max.Number = minimum link/NUMA group size the
+	// node must host). Memory is UN-scaled, same caveat as Total.
 	//
 	// Max.Name is unset (no container owns the aggregate) and
 	// ContainerNeed consumers should not read it.
@@ -118,10 +131,14 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		}
 		req.Containers = append(req.Containers, need)
 
+		// cores/memory are PER-VGPU (each of need.Number vGPUs lands on a
+		// distinct card and consumes this much). Total tracks the pod-wide
+		// demand, so multiply by Number; Max tracks the single-device
+		// requirement, so it does NOT.
 		cores, memory := resolveContainerNeeds(need, 0)
 		req.Total.Number += need.Number
-		req.Total.Cores += cores
-		req.Total.Memory += memory
+		req.Total.Cores += cores * number
+		req.Total.Memory += memory * number
 
 		req.Max.Number = max(req.Max.Number, need.Number)
 		req.Max.Cores = max(req.Max.Cores, cores)

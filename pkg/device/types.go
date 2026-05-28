@@ -672,14 +672,19 @@ type NodeInfo struct {
 	totalCores     int64
 	usedCores      int64
 	maxCapability  float32
-	// Maximum number of available devices for a node
-	maxAvailDevices int
-	// Maximum number of cores available for a single device
-	maxAvailCores int64
-	// Maximum number of memory available for a single device
-	maxAvailMemory int64
-	gpuTopology    bool
-	numaTopology   bool
+	// schedulableDevices is the count of healthy, non-MIG devices on the
+	// node — i.e. cards that COULD host a vGPU, regardless of how many
+	// slots are currently free. NOT a measure of current availability.
+	schedulableDevices int
+	// maxDeviceCores / maxDeviceMemory are the largest single-device TOTAL
+	// core / memory CAPACITY across the node's schedulable devices (again
+	// capacity, not current remaining). Used by the deviceFilter structural
+	// pre-check "can any single card on this node ever hold the largest
+	// container's per-vGPU request?".
+	maxDeviceCores  int64
+	maxDeviceMemory int64
+	gpuTopology     bool
+	numaTopology    bool
 	// maxLinkComponentSize is the largest set of GPUs connected to each
 	// other via at least one P2P link (computed once at NodeInfo construction
 	// time via union-find over deviceList). Used by ByNodeGPUTopologyFitness
@@ -1042,11 +1047,11 @@ func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
 func (n *NodeInfo) ResetResourceUsage() {
 	n.totalNumber, n.totalCores, n.totalMemory = 0, 0, 0
 	n.usedNumber, n.usedCores, n.usedMemory, n.maxCapability = 0, 0, 0, 0
-	n.maxAvailDevices, n.maxAvailCores, n.maxAvailMemory = 0, 0, 0
+	n.schedulableDevices, n.maxDeviceCores, n.maxDeviceMemory = 0, 0, 0
 	for _, deviceInfo := range n.deviceMap {
 		// Do not include MIG enabled devices and unhealthy devices in the assignable resources.
 		if !deviceInfo.IsMIG() && deviceInfo.Healthy() {
-			n.maxAvailDevices++
+			n.schedulableDevices++
 			n.totalNumber += deviceInfo.GetTotalNumber()
 			n.usedNumber += deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
 			n.totalMemory += deviceInfo.GetTotalMemory()
@@ -1054,8 +1059,8 @@ func (n *NodeInfo) ResetResourceUsage() {
 			n.totalCores += deviceInfo.GetTotalCores()
 			n.usedCores += deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
 			n.maxCapability = max(n.maxCapability, deviceInfo.GetComputeCapability())
-			n.maxAvailCores = max(n.maxAvailCores, deviceInfo.GetTotalCores())
-			n.maxAvailMemory = max(n.maxAvailMemory, deviceInfo.GetTotalMemory())
+			n.maxDeviceCores = max(n.maxDeviceCores, deviceInfo.GetTotalCores())
+			n.maxDeviceMemory = max(n.maxDeviceMemory, deviceInfo.GetTotalMemory())
 		}
 	}
 }
@@ -1089,19 +1094,23 @@ func (n *NodeInfo) GetDeviceCount() int {
 	return len(n.deviceMap)
 }
 
-// GetMaxAvailableDevices returns the maximum number of available devices for a node
-func (n *NodeInfo) GetMaxAvailableDevices() int {
-	return n.maxAvailDevices
+// GetSchedulableDeviceCount returns the count of healthy, non-MIG devices
+// on the node — cards that COULD host a vGPU. This is capacity, not current
+// availability: a fully-allocated card still counts.
+func (n *NodeInfo) GetSchedulableDeviceCount() int {
+	return n.schedulableDevices
 }
 
-// GetMaxAvailableMemory returns the maximum number of memory available for a single device
-func (n *NodeInfo) GetMaxAvailableMemory() int64 {
-	return n.maxAvailMemory
+// GetMaxDeviceMemory returns the largest single-device TOTAL memory CAPACITY
+// across the node's schedulable devices (not the remaining/free memory).
+func (n *NodeInfo) GetMaxDeviceMemory() int64 {
+	return n.maxDeviceMemory
 }
 
-// GetMaxAvailableCores returns the maximum number of cores available for a single device
-func (n *NodeInfo) GetMaxAvailableCores() int64 {
-	return n.maxAvailCores
+// GetMaxDeviceCores returns the largest single-device TOTAL core CAPACITY
+// across the node's schedulable devices (not the remaining/free cores).
+func (n *NodeInfo) GetMaxDeviceCores() int64 {
+	return n.maxDeviceCores
 }
 
 // GetDeviceMap returns each GPU device map structure

@@ -492,43 +492,50 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 			// Pre-allocator capacity gate: reject nodes that obviously
 			// can't fit the pod BEFORE letting them into the sorted
 			// candidate list. NodeInfo is already built (annotation
-			// decode is the dominant cost there and we needed it for
-			// the GetAvailableNumber call anyway); what we save is the
-			// downstream allocator pass — sort comparators,
-			// pickDeviceClaims, topology dispatch, per-container
-			// Allocate — which would otherwise iterate every node in
-			// nodeInfoList. On saturated clusters this is the
-			// difference between scanning 5000 NodeInfos or just the
-			// 50 that still have room.
+			// decode is the dominant cost there and we needed it for the
+			// GetAvailable* calls anyway); what we save is the downstream
+			// allocator pass — sort comparators, pickDeviceClaims,
+			// topology dispatch, per-container Allocate — which would
+			// otherwise iterate every node in nodeInfoList. On saturated
+			// clusters this is the difference between scanning 5000
+			// NodeInfos or just the 50 that still have room.
 			//
-			// Two checks, in order from cheapest/strictest to broadest:
+			// Every check below is a NECESSARY condition only (passing
+			// the gate does NOT guarantee the allocator will succeed);
+			// the allocator re-verifies exactly, so a too-loose gate just
+			// costs wasted work, never a wrong placement. They run in two
+			// tiers:
 			//
-			//   maxNumber > GetDeviceCount() — the largest single
-			//   container needs more cards than the node has TOTAL,
-			//   even ignoring current usage. Each container's vGPUs
-			//   must land on distinct cards, so this is a hard
-			//   structural reject (allocator would reach the same
-			//   verdict via allocateOne but only after parsing the
-			//   per-container loop).
+			// Tier 1 — per-single-device CAPACITY (req.Max vs
+			// GetMaxDevice* / GetSchedulableDeviceCount). The largest
+			// single container needs req.Max.Number distinct cards, each
+			// vGPU wanting req.Max.Cores / req.Max.Memory. If even the
+			// biggest card on the node can't hold one such vGPU, or the
+			// node has fewer schedulable cards than req.Max.Number, no
+			// arrangement can ever work — hard structural reject.
 			//
-			//   req.Total.Number > GetAvailableNumber() — sum of all
-			//   containers' vGPU slots exceeds what's free on this
-			//   node right now. Caught later anyway, but allocator's
-			//   per-container greedy may waste cycles before
-			//   discovering it.
-			if req.Max.Number > nodeInfo.GetMaxAvailableDevices() {
+			// Tier 2 — node-wide REMAINING totals (req.Total vs
+			// GetAvailable*). req.Total is the true pod-wide demand
+			// (per-vGPU cores/memory already multiplied by each
+			// container's Number), so this fires whenever the pod's total
+			// ask exceeds the node's free pool. It stays a necessary
+			// condition only because req.*.Memory is UN-scaled (node
+			// MemoryFactor applied later) and whole-card memory requests
+			// count as 0 — so it never false-rejects; the allocator
+			// re-verifies exactly.
+			if req.Max.Number > nodeInfo.GetSchedulableDeviceCount() {
 				batchFailed[node.Name] = reason.New(reason.InsufficientGPUCards).
-					WithDetail("max %d devices, node available %d", req.Max.Number, nodeInfo.GetMaxAvailableDevices())
+					WithDetail("max %d devices, node has %d schedulable", req.Max.Number, nodeInfo.GetSchedulableDeviceCount())
 				continue
 			}
-			if req.Max.Cores > nodeInfo.GetMaxAvailableCores() {
+			if req.Max.Cores > nodeInfo.GetMaxDeviceCores() {
 				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUCore).
-					WithDetail("max %d cores, max available %d", req.Max.Number, nodeInfo.GetMaxAvailableCores())
+					WithDetail("max %d cores, largest device has %d", req.Max.Cores, nodeInfo.GetMaxDeviceCores())
 				continue
 			}
-			if req.Max.Memory > nodeInfo.GetMaxAvailableMemory() {
+			if req.Max.Memory > nodeInfo.GetMaxDeviceMemory() {
 				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUMemory).
-					WithDetail("max %d memory, max available %d", req.Max.Number, nodeInfo.GetMaxAvailableMemory())
+					WithDetail("max %d memory, largest device has %d", req.Max.Memory, nodeInfo.GetMaxDeviceMemory())
 				continue
 			}
 			if req.Total.Number > nodeInfo.GetAvailableNumber() {
@@ -537,12 +544,14 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 				continue
 			}
 			if req.Total.Cores > nodeInfo.GetAvailableCores() {
-				batchFailed[node.Name] = reason.New(reason.InsufficientGPUResources).
+				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUCore).
 					WithDetail("need %d cores, available %d", req.Total.Cores, nodeInfo.GetAvailableCores())
+				continue
 			}
 			if req.Total.Memory > nodeInfo.GetAvailableMemory() {
-				batchFailed[node.Name] = reason.New(reason.InsufficientGPUResources).
-					WithDetail("need %d memory, available %d", req.Total.Cores, nodeInfo.GetAvailableCores())
+				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUMemory).
+					WithDetail("need %d memory, available %d", req.Total.Memory, nodeInfo.GetAvailableMemory())
+				continue
 			}
 			batchNodeInfos = append(batchNodeInfos, nodeInfo)
 		}
