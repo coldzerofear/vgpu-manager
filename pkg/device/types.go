@@ -991,7 +991,7 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 		return false
 	}
 	predicateTimeNanos, err := strconv.ParseInt(predicateTimeStr, 10, 64)
-	if err != nil || predicateTimeNanos <= 0 || predicateTimeNanos == math.MaxInt64 {
+	if err != nil || predicateTimeNanos <= 0 || predicateTimeNanos >= math.MaxInt64 {
 		return false
 	}
 	// LastTransitionTime is persisted at second precision (RFC3339), so
