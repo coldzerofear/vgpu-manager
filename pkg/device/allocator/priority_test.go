@@ -43,6 +43,9 @@ func makeSortRequest(policy util.SchedulerPolicy, topology util.TopologyMode, vg
 		NodePolicy: policy,
 		Topology:   topology,
 		Profile:    UniformProfile,
+		Max: ContainerNeed{
+			Number: int(vgpuNumber),
+		},
 	}
 }
 
@@ -67,11 +70,11 @@ func Test_NodePriority(t *testing.T) {
 		)
 	}
 	start := time.Now()
-	NewNodePolicyPriority(makeSortRequest(util.BinpackPolicy, util.NoneTopology, 0), 0).Sort(nodeInfoList)
+	NewNodePolicyPriority(makeSortRequest(util.BinpackPolicy, util.NoneTopology, 0)).Sort(nodeInfoList)
 	since := time.Since(start)
 	fmt.Printf("call NewNodePolicyPriority(binpack) took %d Milliseconds\n", since.Milliseconds())
 	start = time.Now()
-	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.NoneTopology, 0), 0).Sort(nodeInfoList)
+	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.NoneTopology, 0)).Sort(nodeInfoList)
 	since = time.Since(start)
 	fmt.Printf("call NewNodePolicyPriority(spread) took %d Milliseconds\n", since.Milliseconds())
 }
@@ -112,7 +115,7 @@ func Test_NodeSorting(t *testing.T) {
 	// fitness comparator prefers nodes whose max link component is ≥ 2.
 	// nodeA has no topology → fitness 0 (last). Binpack score then orders
 	// the topology-capable nodes by highest utilisation first.
-	NewNodePolicyPriority(makeSortRequest(util.BinpackPolicy, util.LinkTopology, 2), 2).Sort(nodes)
+	NewNodePolicyPriority(makeSortRequest(util.BinpackPolicy, util.LinkTopology, 2)).Sort(nodes)
 	wantNodeNames := []string{nodeC.Name, nodeD.Name, nodeB.Name, nodeA.Name}
 	binpackNodeNames := make([]string, len(nodes))
 	for i, node := range nodes {
@@ -120,7 +123,7 @@ func Test_NodeSorting(t *testing.T) {
 	}
 	assert.Equal(t, wantNodeNames, binpackNodeNames)
 
-	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.LinkTopology, 2), 2).Sort(nodes)
+	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.LinkTopology, 2)).Sort(nodes)
 	wantNodeNames = []string{nodeB.Name, nodeC.Name, nodeD.Name, nodeA.Name}
 	spreadNodeNames := make([]string, len(nodes))
 	for i, node := range nodes {
@@ -130,7 +133,7 @@ func Test_NodeSorting(t *testing.T) {
 
 	// NoneTopology spread: fitness comparator is a no-op, falls back to
 	// pure spread ordering — least-used (nodeA, all zero) first.
-	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.NoneTopology, 0), 0).Sort(nodes)
+	NewNodePolicyPriority(makeSortRequest(util.SpreadPolicy, util.NoneTopology, 0)).Sort(nodes)
 	wantNodeNames = []string{nodeA.Name, nodeB.Name, nodeC.Name, nodeD.Name}
 	spreadNodeNames = make([]string, len(nodes))
 	for i, node := range nodes {

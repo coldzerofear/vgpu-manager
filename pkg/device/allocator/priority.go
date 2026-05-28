@@ -5,7 +5,6 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	corev1 "k8s.io/api/core/v1"
 )
 
 // LessFunc represents function to compare two DeviceInfo or NodeInfo
@@ -192,36 +191,17 @@ func cachedNodeScore(cache map[string]float64, info *device.NodeInfo,
 // Both strict and non-strict topology variants get the same prepended
 // comparator — strictness only changes ALLOCATION fallback behaviour
 // (handled inside allocateByTopologyMode), not node ranking.
-func ApplyTopologyMode(req AllocationRequest, needNumber int, less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
+func ApplyTopologyMode(req AllocationRequest, less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
 	var fitness LessFunc[*device.NodeInfo]
 	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
-		fitness = ByNodeGPUTopologyFitness(needNumber)
+		fitness = ByNodeGPUTopologyFitness(req.Max.Number)
 	case util.NUMATopology:
-		fitness = ByNodeNUMATopologyFitness(needNumber)
+		fitness = ByNodeNUMATopologyFitness(req.Max.Number)
 	default:
 		return less
 	}
 	return append([]LessFunc[*device.NodeInfo]{fitness}, less...)
-}
-
-// PodTopologyNeedNumber returns the largest single-container vGPU request in
-// the pod. This is the value passed to ByNodeGPUTopologyFitness so the
-// node-level sort knows the minimum group size the node has to be able to
-// host topology-locally. Returns 0 when no container requests a vGPU group
-// > 1, which makes the fitness comparator a no-op.
-func PodTopologyNeedNumber(pod *corev1.Pod) int {
-	if pod == nil {
-		return 0
-	}
-	max := int64(0)
-	for i := range pod.Spec.Containers {
-		c := &pod.Spec.Containers[i]
-		if n := util.GetResourceOfContainer(c, util.VGPUNumberResourceName); n > max {
-			max = n
-		}
-	}
-	return int(max)
 }
 
 // NewNodePolicyPriority builds the node-level ranking chain for a pod:
@@ -236,13 +216,13 @@ func PodTopologyNeedNumber(pod *corev1.Pod) int {
 // BuildAllocationRequest, in which case Score returns 0 for every
 // candidate and the comparator collapses to "all equal", letting
 // ByNodeNameAsc decide.
-func NewNodePolicyPriority(req AllocationRequest, needNumber int) *sortPriority[*device.NodeInfo] {
+func NewNodePolicyPriority(req AllocationRequest) *sortPriority[*device.NodeInfo] {
 	less := []LessFunc[*device.NodeInfo]{
 		WeightedNodeLess(req.Profile, req.NodePolicy),
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*device.NodeInfo]{
-		less: ApplyTopologyMode(req, needNumber, less),
+		less: ApplyTopologyMode(req, less),
 	}
 }
 

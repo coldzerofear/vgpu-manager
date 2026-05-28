@@ -45,6 +45,12 @@ type AllocationRequest struct {
 	// ContainerNeed consumers should not read it.
 	Total ContainerNeed
 
+	// Maximum aggregation Number / Cores / Memory for a single container.
+	//
+	// Max.Name is unset (no container owns the aggregate) and
+	// ContainerNeed consumers should not read it.
+	Max ContainerNeed
+
 	// NodePolicy / DevicePolicy are the two binpack/spread choices the
 	// user expressed via annotations. NonePolicy means "use the default
 	// ordering"; the dispatch in deviceFilter / allocateOne reads these
@@ -111,16 +117,23 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 			Memory: util.GetResourceOfContainer(c, util.VGPUMemoryResourceName),
 		}
 		req.Containers = append(req.Containers, need)
+
 		cores, memory := resolveContainerNeeds(need, 0)
 		req.Total.Number += need.Number
 		req.Total.Cores += cores
 		req.Total.Memory += memory
+
+		req.Max.Number = max(req.Max.Number, need.Number)
+		req.Max.Cores = max(req.Max.Cores, cores)
+		req.Max.Memory = max(req.Max.Memory, memory)
 	}
 
-	req.NodePolicy, req.rawNodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
-	req.DevicePolicy, req.rawDevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
-	req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
-	req.Profile = NewRequestProfile(pod)
+	if len(req.Containers) > 0 {
+		req.NodePolicy, req.rawNodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
+		req.DevicePolicy, req.rawDevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
+		req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
+		req.Profile = NewRequestProfile(pod)
+	}
 
 	return req
 }

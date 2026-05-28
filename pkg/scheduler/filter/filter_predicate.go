@@ -106,7 +106,7 @@ func (f *gpuFilter) GetPodLister() client.PodLister {
 //     bucketing nodes by Primary code, and
 //   - hand kube-scheduler a clean short-phrase FailedNodesMap for its
 //     own FailedScheduling line.
-type filterFunc func(context.Context, *corev1.Pod, []corev1.Node, CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error)
+type filterFunc func(context.Context, *allocator.AllocationRequest, []corev1.Node, CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error)
 
 func (f *gpuFilter) IsReady(ctx context.Context) bool {
 	return f.hasSyncFunc(ctx)
@@ -131,7 +131,12 @@ func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *e
 			Error: "Pod has specified nodes to " + pod.Spec.NodeName,
 		}
 	}
-	if !util.IsVGPUResourcePod(pod) {
+	// Parse pod-wide scheduling inputs ONCE — req feeds both the node-
+	// ranking comparators here and the per-node allocator below, so they
+	// share annotation-parse cost and never disagree about what the pod
+	// asked for.
+	req := allocator.BuildAllocationRequest(pod)
+	if len(req.Containers) == 0 {
 		klog.V(5).InfoS("Skip pods that do not request vGPU", "pod", klog.KObj(pod))
 		return &extenderv1.ExtenderFilterResult{
 			Nodes:     args.Nodes,
@@ -180,7 +185,7 @@ func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *e
 		if len(filteredNodes) == 0 {
 			break
 		}
-		passedNodes, stageReasons, err := filter(ctx, pod, filteredNodes, state)
+		passedNodes, stageReasons, err := filter(ctx, req, filteredNodes, state)
 		if err != nil {
 			klog.Errorf("Filter %d (%T) call failed: %v", i, filter, err)
 			return &extenderv1.ExtenderFilterResult{Error: err.Error()}
@@ -338,12 +343,12 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 // GPU registered, bad config, wrong memory scaling for the requested
 // policy). Per-node reasons feed both kube-scheduler's FailedNodesMap
 // (via Short()) and vgpu-manager's own aggregate FilteringFailed event.
-func (f *gpuFilter) nodeFilter(ctx context.Context, pod *corev1.Pod, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
+func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
 	var (
 		filteredNodes = make([]corev1.Node, 0, len(nodes))
 		failed        = make(map[string]*reason.FilterReason, len(nodes))
 	)
-	memoryPolicyFunc := GetMemoryPolicyFunc(pod)
+	memoryPolicyFunc := GetMemoryPolicyFunc(req.Pod)
 	for i, node := range nodes {
 		var nodeConfig *device.NodeConfigInfo
 		if r := CheckNode(&node, memoryPolicyFunc, func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
@@ -359,29 +364,27 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, pod *corev1.Pod, nodes []cor
 	return filteredNodes, failed, nil
 }
 
-func (f *gpuFilter) CheckDeviceRequest(pod *corev1.Pod) error {
-	for _, container := range pod.Spec.Containers {
-		if err := checkCoreRequest(&container); err != nil {
-			f.recorder.Event(pod, corev1.EventTypeWarning, reason.EventResourceInvalid, err.Error())
-			return err
-		}
-		if err := checkNumberRequest(&container); err != nil {
-			f.recorder.Event(pod, corev1.EventTypeWarning, reason.EventResourceInvalid, err.Error())
-			return err
+func (f *gpuFilter) CheckDeviceRequest(req *allocator.AllocationRequest) error {
+	for _, container := range req.Containers {
+		for _, fn := range []func(allocator.ContainerNeed) error{checkCoreRequest, checkNumberRequest} {
+			if err := fn(container); err != nil {
+				f.recorder.Event(req.Pod, corev1.EventTypeWarning, reason.EventResourceInvalid, err.Error())
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func checkNumberRequest(container *corev1.Container) error {
-	if util.GetResourceOfContainer(container, util.VGPUNumberResourceName) > vgpu.MaxDeviceCount {
+func checkNumberRequest(container allocator.ContainerNeed) error {
+	if container.Number > vgpu.MaxDeviceCount {
 		return fmt.Errorf("container %s requests vGPU number exceeding limit", container.Name)
 	}
 	return nil
 }
 
-func checkCoreRequest(container *corev1.Container) error {
-	if util.GetResourceOfContainer(container, util.VGPUCoreResourceName) > util.HundredCore {
+func checkCoreRequest(container allocator.ContainerNeed) error {
+	if container.Cores > util.HundredCore {
 		return fmt.Errorf("container %s requests vGPU core exceeding limit", container.Name)
 	}
 	return nil
@@ -402,14 +405,15 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 }
 
 // deviceFilter will choose one and only one node fullfil the request, so it should always be the last filter of gpuFilter
-func (f *gpuFilter) deviceFilter(ctx context.Context, pod *corev1.Pod, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
+func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
 	var (
+		pod           = req.Pod
 		filteredNodes = make([]corev1.Node, 0, 1)
 		failed        = make(map[string]*reason.FilterReason, len(nodes))
 		success       bool
 	)
 
-	if err := f.CheckDeviceRequest(pod); err != nil {
+	if err := f.CheckDeviceRequest(req); err != nil {
 		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
 		return filteredNodes, failed, err
 	}
@@ -455,12 +459,6 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, pod *corev1.Pod, nodes []c
 		mutex                = sync.Mutex{}
 		nodeInfoList         = make([]*device.NodeInfo, 0, len(nodes))
 		nodeOriginalPosition = make(map[string]int, len(nodes))
-		// Parse pod-wide scheduling inputs ONCE — req feeds both the node-
-		// ranking comparators here and the per-node allocator below, so they
-		// share annotation-parse cost and never disagree about what the pod
-		// asked for.
-		req       = allocator.BuildAllocationRequest(pod)
-		maxNumber = allocator.PodTopologyNeedNumber(pod)
 	)
 
 	maxGoroutines := runtime.GOMAXPROCS(0) * 2
@@ -518,9 +516,19 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, pod *corev1.Pod, nodes []c
 			//   node right now. Caught later anyway, but allocator's
 			//   per-container greedy may waste cycles before
 			//   discovering it.
-			if maxNumber > nodeInfo.GetDeviceCount() {
+			if req.Max.Number > nodeInfo.GetMaxAvailableDevices() {
 				batchFailed[node.Name] = reason.New(reason.InsufficientGPUCards).
-					WithDetail("need %d devices, node has %d", maxNumber, nodeInfo.GetDeviceCount())
+					WithDetail("max %d devices, node available %d", req.Max.Number, nodeInfo.GetMaxAvailableDevices())
+				continue
+			}
+			if req.Max.Cores > nodeInfo.GetMaxAvailableCores() {
+				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUCore).
+					WithDetail("max %d cores, max available %d", req.Max.Number, nodeInfo.GetMaxAvailableCores())
+				continue
+			}
+			if req.Max.Memory > nodeInfo.GetMaxAvailableMemory() {
+				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUMemory).
+					WithDetail("max %d memory, max available %d", req.Max.Number, nodeInfo.GetMaxAvailableMemory())
 				continue
 			}
 			if req.Total.Number > nodeInfo.GetAvailableNumber() {
@@ -531,6 +539,10 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, pod *corev1.Pod, nodes []c
 			if req.Total.Cores > nodeInfo.GetAvailableCores() {
 				batchFailed[node.Name] = reason.New(reason.InsufficientGPUResources).
 					WithDetail("need %d cores, available %d", req.Total.Cores, nodeInfo.GetAvailableCores())
+			}
+			if req.Total.Memory > nodeInfo.GetAvailableMemory() {
+				batchFailed[node.Name] = reason.New(reason.InsufficientGPUResources).
+					WithDetail("need %d memory, available %d", req.Total.Cores, nodeInfo.GetAvailableCores())
 			}
 			batchNodeInfos = append(batchNodeInfos, nodeInfo)
 		}
@@ -553,7 +565,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, pod *corev1.Pod, nodes []c
 	switch req.NodePolicy {
 	case util.BinpackPolicy, util.SpreadPolicy:
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
-		allocator.NewNodePolicyPriority(*req, maxNumber).Sort(nodeInfoList)
+		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
 	default:
 		if req.RawNodePolicy() != "" && req.RawNodePolicy() != string(util.NonePolicy) {
 			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), req.RawNodePolicy())
@@ -565,7 +577,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, pod *corev1.Pod, nodes []c
 		less := []allocator.LessFunc[*device.NodeInfo]{func(p1, p2 *device.NodeInfo) bool {
 			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
 		}}
-		less = allocator.ApplyTopologyMode(*req, maxNumber, less)
+		less = allocator.ApplyTopologyMode(*req, less)
 		allocator.NewSortPriority[*device.NodeInfo](less...).Sort(nodeInfoList)
 	}
 	recorder := f.recorder

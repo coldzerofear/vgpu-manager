@@ -115,9 +115,9 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", need.Name, alloc.nodeInfo.GetName())
-	if need.Number > alloc.nodeInfo.GetDeviceCount() {
+	if need.Number > alloc.nodeInfo.GetMaxAvailableDevices() {
 		return nil, reason.New(reason.InsufficientGPUCards).
-			WithDetail("need %d devices, node has %d", need.Number, alloc.nodeInfo.GetDeviceCount()), nil
+			WithDetail("need %d devices, node available %d", need.Number, alloc.nodeInfo.GetMaxAvailableDevices()), nil
 	}
 	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
 

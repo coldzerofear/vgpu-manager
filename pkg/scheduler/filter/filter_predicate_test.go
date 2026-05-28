@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	jsonpatch "github.com/evanphx/json-patch"
@@ -486,11 +487,11 @@ func Test_DeviceFilter(t *testing.T) {
 				pod.UID = *testCase.uid
 			}
 			pod, _ = k8sClient.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{})
-
+			req := allocator.BuildAllocationRequest(pod)
 			// wait for podLister to sync
 			//time.Sleep(time.Second)
 			state := framework.NewCycleState()
-			nodes, _, err := filterPredicate.deviceFilter(context.Background(), pod, nodeList, state)
+			nodes, _, err := filterPredicate.deviceFilter(context.Background(), req, nodeList, state)
 			assert.Equal(t, testCase.err, err)
 			if err != nil {
 				return
@@ -809,8 +810,9 @@ func Test_NodeFilter(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
+			req := allocator.BuildAllocationRequest(testCase.pod)
 			state := framework.NewCycleState()
-			filterNodes, gotReasons, _ := filterPredicate.nodeFilter(context.Background(), testCase.pod, testCase.nodes, state)
+			filterNodes, gotReasons, _ := filterPredicate.nodeFilter(context.Background(), req, testCase.nodes, state)
 			assert.Equal(t, testCase.filterNodes, filterNodes)
 			gotPrimary := make(map[string]reason.Code, len(gotReasons))
 			for n, r := range gotReasons {
