@@ -120,11 +120,13 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 		return passthrough(args)
 	}
 	// Non-vGPU pods are out of our scope; let the in-tree decision stand.
-	if !util.IsVGPUResourcePod(pod) {
+	req := allocator.BuildAllocationRequest(pod)
+	if len(req.Containers) == 0 {
 		klog.V(5).InfoS("Preempt: pod is not a vGPU pod, passing input through",
 			"pod", klog.KObj(pod))
 		return passthrough(args)
 	}
+
 	victimsMap, err := p.resolveVictimsMap(args)
 	if err != nil {
 		klog.ErrorS(err, "Preempt: failed to resolve victims, passing input through")
@@ -158,9 +160,9 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 			if victims == nil {
 				continue
 			}
-			refined, pdbViolations, ok := p.refineForNode(pod, nodeName, victims, nodePodsMap[nodeName])
+			refined, pdbViolations, ok := p.refineForNode(req, nodeName, victims, nodePodsMap[nodeName])
 			if !ok {
-				klog.V(3).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
+				klog.V(2).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
 					"pod", klog.KObj(pod), "node", nodeName)
 				continue
 			}
@@ -277,7 +279,7 @@ func (p *vgpuPreempt) resolveVictimsMap(args extenderv1.ExtenderPreemptionArgs) 
 // luring it into inflicting more real disruption than necessary. If a
 // workload must be protected from vGPU preemption, the only mechanism that
 // works is giving it sufficient priority.
-func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
+func (p *vgpuPreempt) refineForNode(req *allocator.AllocationRequest, nodeName string,
 	victims *extenderv1.Victims, allVGPUPods []*corev1.Pod) ([]*corev1.Pod, int64, bool) {
 
 	node, err := p.nodeLister.Get(nodeName)
@@ -288,9 +290,36 @@ func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
 
 	// Fast-reject: if the node itself doesn't meet vGPU prerequisites,
 	// preempting any pod on it won't help.
-	if r := filter.CheckNode(node, filter.GetMemoryPolicyFunc(pod)); r != nil {
-		klog.V(3).InfoS("Preempt: check node failed", "node", nodeName, "reason", r.Detailed())
+	if r := filter.CheckNode(node, filter.GetMemoryPolicyFunc(req.Pod)); r != nil {
+		klog.V(3).InfoS("Preempt: check node failed", "node", nodeName, "pod", klog.KObj(req.Pod), "reason", r.Detailed())
 		return nil, 0, false
+	}
+
+	nodeInfo, err := device.NewNodeInfo(node)
+	if err != nil {
+		filterReason := reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
+		klog.V(3).ErrorS(err, "Preempt: "+string(filterReason.Primary), "node", node.Name, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
+		return nil, 0, false
+	}
+
+	if req.Max.Number > nodeInfo.GetSchedulableDeviceCount() {
+		filterReason := reason.New(reason.InsufficientGPUCards).
+			WithDetail("max %d devices, node has %d schedulable", req.Max.Number, nodeInfo.GetSchedulableDeviceCount())
+		klog.V(3).InfoS("Preempt: "+string(filterReason.Primary), "node", nodeName, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
+		return nil, 0, false
+	}
+
+	if req.CheckDeviceUuid || req.CheckDeviceType {
+		for _, dev := range nodeInfo.GetDeviceMap() {
+			if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, dev.GetUUID()) {
+				klog.V(3).InfoS("Preempt: "+string(reason.DeviceUUIDMismatch), "node", nodeName, "pod", klog.KObj(req.Pod))
+				return nil, 0, false
+			}
+			if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, dev.GetType()) {
+				klog.V(3).InfoS("Preempt: "+string(reason.DeviceTypeMismatch), "node", nodeName, "pod", klog.KObj(req.Pod))
+				return nil, 0, false
+			}
+		}
 	}
 
 	// Strip protected pods from in-tree's proposal — never evict them.
@@ -301,8 +330,7 @@ func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
 			continue
 		}
 		if isProtectedFromPreemption(v) {
-			klog.V(4).InfoS("Preempt: refusing to evict protected pod proposed by in-tree",
-				"pod", klog.KObj(v), "node", nodeName)
+			klog.V(4).InfoS("Preempt: refusing to evict protected pod proposed by in-tree", "pod", klog.KObj(v), "node", nodeName)
 			continue
 		}
 		keep = append(keep, v)
@@ -313,18 +341,18 @@ func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
 	keptFromInput := len(keep)
 
 	// First pass: does the pending pod fit after removing the kept victims?
-	if p.canAllocate(pod, node, allVGPUPods, excludedUidSet) {
+	if p.canAllocate(req, nodeInfo, allVGPUPods, excludedUidSet) {
 		return keep, pdbViolationsUpperBound(victims.NumPDBViolations, keptFromInput, 0), true
 	}
 
 	// Second pass: in-tree under-selected (likely because per-device or
 	// annotation constraints invisible to it require more victims). Walk the
 	// remaining lower-priority pods on this node and greedily add until fit.
-	additional := p.findAdditionalVictims(pod, node, allVGPUPods, excludedUidSet)
+	additional := p.findAdditionalVictims(req.Pod, node, allVGPUPods, excludedUidSet)
 	for _, cand := range additional {
 		excludedUidSet.Insert(cand.UID)
 		keep = append(keep, cand)
-		if p.canAllocate(pod, node, allVGPUPods, excludedUidSet) {
+		if p.canAllocate(req, nodeInfo, allVGPUPods, excludedUidSet) {
 			added := len(keep) - keptFromInput
 			return keep, pdbViolationsUpperBound(victims.NumPDBViolations, keptFromInput, added), true
 		}
@@ -367,33 +395,27 @@ func pdbViolationsUpperBound(originalCount int64, keptLen, addedLen int) int64 {
 // canAllocate constructs a NodeInfo with excluded pods removed and asks the
 // allocator whether the pending pod fits. Reuses the same NewNodeInfo
 // excludedPods mechanism already used during the filter re-allocation path.
-func (p *vgpuPreempt) canAllocate(pod *corev1.Pod, node *corev1.Node,
+func (p *vgpuPreempt) canAllocate(req *allocator.AllocationRequest, nodeInfo *device.NodeInfo,
 	allVGPUPods []*corev1.Pod, excludedUidSet sets.Set[k8stypes.UID]) bool {
-	nodeInfo, err := device.NewNodeInfo(node,
-		device.WithNodePods(allVGPUPods...),
-		device.WithExcludedUidSet(excludedUidSet))
-	if err != nil {
-		klog.V(3).ErrorS(err, "Preempt: NewNodeInfo failed", "node", node.Name)
-		return false
-	}
-	req := allocator.BuildAllocationRequest(pod)
+	nodeInfo.ResetResourceUsage()
+	nodeInfo.AddPodsUsedResources(allVGPUPods, device.WithExcludedUidSet(excludedUidSet))
+
 	// Preempt only cares about "would this pod fit?", not why it might
 	// not. Both a structured reason (node would still reject) and a real
 	// internal error answer the same question: "no". Log at V(5) for
 	// debugging; the verb-level Preempt event captures the user-facing
 	// outcome.
-	newPod, rsn, err := allocator.NewAllocator(nodeInfo, nil).Allocate(req)
+	_, rsn, err := allocator.NewAllocator(nodeInfo, nil).Allocate(req)
 	switch {
 	case err != nil:
 		klog.V(3).ErrorS(err, "Preempt: allocator internal error",
-			"pod", klog.KObj(pod), "node", node.Name)
+			"pod", klog.KObj(req.Pod), "node", nodeInfo.GetName())
 		return false
 	case rsn != nil:
 		klog.V(5).InfoS("Preempt: allocator rejects pod after excluding victims",
-			"pod", klog.KObj(pod), "node", node.Name, "reason", rsn.Detailed())
+			"pod", klog.KObj(req.Pod), "node", nodeInfo.GetName(), "reason", rsn.Detailed())
 		return false
 	}
-	_ = newPod
 	return true
 }
 

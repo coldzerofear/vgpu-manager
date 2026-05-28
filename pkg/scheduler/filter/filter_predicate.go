@@ -553,6 +553,21 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 					WithDetail("need %d memory, available %d", req.Total.Memory, nodeInfo.GetAvailableMemory())
 				continue
 			}
+
+			// Quickly filter node device matching
+			if req.CheckDeviceUuid || req.CheckDeviceType {
+				for _, dev := range nodeInfo.GetDeviceMap() {
+					if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, dev.GetUUID()) {
+						batchFailed[node.Name] = reason.New(reason.DeviceUUIDMismatch)
+						continue
+					}
+					if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, dev.GetType()) {
+						batchFailed[node.Name] = reason.New(reason.DeviceTypeMismatch)
+						continue
+					}
+				}
+			}
+
 			batchNodeInfos = append(batchNodeInfos, nodeInfo)
 		}
 

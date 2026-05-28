@@ -92,6 +92,10 @@ type AllocationRequest struct {
 	rawDevicePolicy string
 	// rawNodePolicy is the analogue for the node policy.
 	rawNodePolicy string
+
+	// Check if the pod requires additional verification of the device's uuid or type
+	CheckDeviceUuid bool
+	CheckDeviceType bool
 }
 
 // ContainerNeed is one container's vGPU-resource request, copied verbatim
@@ -150,6 +154,14 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		req.DevicePolicy, req.rawDevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
 		req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
 		req.Profile = NewRequestProfile(pod)
+
+		_, ok1 := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation)
+		_, ok2 := util.HasAnnotation(pod, util.PodExcludeGPUUUIDAnnotation)
+		req.CheckDeviceUuid = ok1 || ok2
+
+		_, ok1 = util.HasAnnotation(pod, util.PodIncludeGpuTypeAnnotation)
+		_, ok2 = util.HasAnnotation(pod, util.PodExcludeGpuTypeAnnotation)
+		req.CheckDeviceType = ok1 || ok2
 	}
 
 	return req

@@ -47,7 +47,7 @@ func (b *nodeBinding) Name() string {
 	return Name
 }
 
-func (b *nodeBinding) IsReady(ctx context.Context) bool {
+func (b *nodeBinding) IsReady(_ context.Context) bool {
 	return true
 }
 

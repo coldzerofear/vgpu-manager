@@ -29,7 +29,7 @@ func NewAllocator(nodeInfo *device.NodeInfo, recorder record.EventRecorder) *all
 
 func (alloc *allocator) addContainerAllocate(contDevices *device.ContainerDeviceClaim) error {
 	for _, claim := range contDevices.DeviceClaims {
-		if err := alloc.nodeInfo.AddUsedResources(claim, true); err != nil {
+		if err := alloc.nodeInfo.AddUsedResources(claim); err != nil {
 			return err
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,12 +136,17 @@ func ParseNodeDeviceInfo(val string) (NodeDeviceInfo, error) {
 	if strings.TrimSpace(val) == "" {
 		return nil, fmt.Errorf("input value is empty")
 	}
-	var nodeDevice NodeDeviceInfo
-	err := json.Unmarshal([]byte(val), &nodeDevice)
+	var nodeDevices NodeDeviceInfo
+	err := json.Unmarshal([]byte(val), &nodeDevices)
 	if err != nil {
 		return nil, err
 	}
-	return nodeDevice, nil
+	if len(nodeDevices) > 0 {
+		sort.Slice(nodeDevices, func(i, j int) bool {
+			return nodeDevices[i].Id < nodeDevices[j].Id
+		})
+	}
+	return nodeDevices, nil
 }
 
 type ContainerDeviceClaim struct {
@@ -594,6 +600,13 @@ func (dev *Device) AllocatableNumber() int {
 	return 0
 }
 
+// ResetUsed Data reset has been used
+func (dev *Device) ResetUsed() {
+	dev.usedNumber = 0
+	dev.usedCores = 0
+	dev.usedMemory = 0
+}
+
 // GetPodDeviceClaim Retrieve device claim information for a pod,
 // return it if there is actual allocated device claim,
 // otherwise revert back to the device claims pre allocated by the scheduler.
@@ -655,7 +668,7 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 	if ret.numaTopology {
 		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(ret.deviceMap)
 	}
-	ret.ResetResourceUsage()
+	ret.RefreshResourcesData()
 	return ret
 }
 
@@ -756,9 +769,6 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 	for _, opt := range opts {
 		opt(infoOption)
 	}
-	if infoOption.excludedUidSet == nil {
-		infoOption.excludedUidSet = sets.New[types.UID]()
-	}
 	gatherInfo, err := NewNodeDeviceGatherInfo(node, infoOption)
 	if err != nil {
 		return nil, err
@@ -782,16 +792,8 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 	if ret.numaTopology {
 		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(gatherInfo.DeviceMap)
 	}
-
-	if len(infoOption.nodePods) > 0 {
-		util.PodsOnNodeCallback(infoOption.nodePods, node, func(pod *corev1.Pod) {
-			if !infoOption.excludedUidSet.Has(pod.UID) {
-				ret.addPodUsedResources(pod)
-			}
-		})
-	}
-
-	ret.ResetResourceUsage()
+	ret.AddPodsUsedResources(infoOption.nodePods, opts...)
+	ret.RefreshResourcesData()
 	return ret, nil
 }
 
@@ -1020,7 +1022,24 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 	return stuckDuration <= stuckGracePeriod
 }
 
-func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
+func (n *NodeInfo) AddPodsUsedResources(pods []*corev1.Pod, opts ...NodeInfoOptionFn) {
+	if len(pods) > 0 {
+		infoOption := &NodeInfoOption{}
+		for _, opt := range opts {
+			opt(infoOption)
+		}
+		if infoOption.excludedUidSet == nil {
+			infoOption.excludedUidSet = sets.New[types.UID]()
+		}
+		util.PodsOnNodeCallback(pods, n.node, func(pod *corev1.Pod) {
+			if !infoOption.excludedUidSet.Has(pod.UID) {
+				n.AddPodUsedResources(pod)
+			}
+		})
+	}
+}
+
+func (n *NodeInfo) AddPodUsedResources(pod *corev1.Pod) {
 	//if !util.IsVGPUResourcePod(pod) {
 	//	return
 	//}
@@ -1037,7 +1056,7 @@ func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
 	}
 	for _, containerClaim := range podDeviceClaim {
 		for _, claim := range containerClaim.DeviceClaims {
-			if err := n.AddUsedResources(claim, false); err != nil {
+			if err := n.AddUsedResources(claim); err != nil {
 				klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, claim.Id, err)
 			}
 		}
@@ -1045,6 +1064,13 @@ func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
 }
 
 func (n *NodeInfo) ResetResourceUsage() {
+	n.usedNumber, n.usedCores, n.usedMemory = 0, 0, 0
+	for _, deviceInfo := range n.deviceMap {
+		deviceInfo.ResetUsed()
+	}
+}
+
+func (n *NodeInfo) RefreshResourcesData() {
 	n.totalNumber, n.totalCores, n.totalMemory = 0, 0, 0
 	n.usedNumber, n.usedCores, n.usedMemory, n.maxCapability = 0, 0, 0, 0
 	n.schedulableDevices, n.maxDeviceCores, n.maxDeviceMemory = 0, 0, 0
@@ -1066,7 +1092,7 @@ func (n *NodeInfo) ResetResourceUsage() {
 }
 
 // AddUsedResources records the used GPU core and memory
-func (n *NodeInfo) AddUsedResources(claim DeviceClaim, updateUsage bool) error {
+func (n *NodeInfo) AddUsedResources(claim DeviceClaim) error {
 	deviceId, ok := n.deviceIndexMap[claim.Uuid]
 	if !ok {
 		return fmt.Errorf("device UUID <%s> does not exist in the NodeInfo <%s>", claim.Uuid, n.name)
@@ -1076,7 +1102,7 @@ func (n *NodeInfo) AddUsedResources(claim DeviceClaim, updateUsage bool) error {
 		return fmt.Errorf("device ID <%d> does not exist in the NodeInfo <%s>", deviceId, n.name)
 	}
 	device.addUsedResources(claim.Cores, claim.Memory)
-	if updateUsage && !device.IsMIG() && device.Healthy() {
+	if !device.IsMIG() && device.Healthy() {
 		n.usedNumber++
 		n.usedCores += claim.Cores
 		n.usedMemory += claim.Memory
@@ -1092,6 +1118,11 @@ func (n *NodeInfo) GetName() string {
 // GetDeviceCount returns the number of GPU devices
 func (n *NodeInfo) GetDeviceCount() int {
 	return len(n.deviceMap)
+}
+
+// GetDeviceIndexMap returns the uuid and index mapping of the devices
+func (n *NodeInfo) GetDeviceIndexMap() map[string]int {
+	return n.deviceIndexMap
 }
 
 // GetSchedulableDeviceCount returns the count of healthy, non-MIG devices
