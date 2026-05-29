@@ -44,6 +44,7 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 * MANAGER_VISIBLE_DEVICE_<index>: Single GPU UUID visible to the container
 * MANAGER_COMPATIBILITY_MODE: Environment compatibility mode
 * EXTERNAL_SM_WATCHER_ENABLED: Enable external SM util watcher
+* CUDA_SM_CONTROLLER: Specify the core limit algorithm (delta/aimd, default: delta)
 
 ## Log level
 
