@@ -128,6 +128,10 @@ static volatile int64_t g_last_launch_ns[MAX_DEVICE_COUNT] = {0};
  * set), so a plain int needs no atomics. */
 #define WATCHER_UTIL_LOG_STRIDE 64
 static unsigned int g_util_log_tick[MAX_DEVICE_COUNT] = {0};
+/* Separate tick for the watcher main-loop DETAIL line (share/up_limit/curr
+ * core). Same cadence and stride as the util log, but its own counter so
+ * the two lines decimate independently. Single-writer per index too. */
+static unsigned int g_share_log_tick[MAX_DEVICE_COUNT] = {0};
 
 /* ---- fork() child handler ------------------------------------------------ *
  * Python multiprocessing / torch.multiprocessing / subprocess+fork patterns
@@ -684,8 +688,10 @@ static void *utilization_watcher(void *arg) {
         }
       }
       change_token(shares[host_index], host_index);
-      LOGGER(DETAIL, "cuda device: %d, host device: %d, user util: %d, up_limit: %d, share: %ld, curr core: %ld", cuda_index, host_index,
-             top_results[host_index].user_current, up_limits[host_index], shares[host_index], g_cur_cuda_cores[host_index]);
+      if ((g_share_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
+        LOGGER(DETAIL, "cuda device: %d, host device: %d, user util: %d, up_limit: %d, share: %ld, curr core: %ld (1/%d sampled)", cuda_index, host_index,
+               top_results[host_index].user_current, up_limits[host_index], shares[host_index], g_cur_cuda_cores[host_index], WATCHER_UTIL_LOG_STRIDE);
+      }
     }
   }
 }
