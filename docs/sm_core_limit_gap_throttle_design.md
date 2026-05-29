@@ -330,7 +330,7 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
 - **启动失败**：`gap_end` 在 `launch_ret!=CUDA_SUCCESS` 时跳过测量，仍释放锁、刷新时间戳。
 - **尖峰钳制**：`GAP_MAX_SLEEP_MS` 防止误测导致长时间卡死。
 - **内存可见性**：跨线程共享量按职责分两类 ——（1）`up_limits`、`g_last_launch_ns` 用 `volatile`(watcher/launch 跨线程、对齐标量、无锁、与 `g_cur_cuda_cores` 同约定)；（2）`g_gap_dc`、`g_gap_evt_ready`、`g_gap_start/end` **始终在 `g_gap_lock` 内访问**,由互斥锁的 acquire/release 保证可见性,无需 `volatile`。详见上文与 §8。
-- **fork() 子进程安全**:GAP 路径全局(`g_gap_evt_ready`/`g_gap_start/end`/`g_gap_lock`/`g_last_launch_ns`)以及外层的 `g_init_set` `pthread_once_t` 都通过 `pthread_atfork(NULL, NULL, child_after_fork)` 在子进程中复位,详见 §7.1。**注册位置**:`initialization()` 函数内(由 `pthread_once` 保证一次性),**故意不用 `__attribute__((constructor))`** —— 库加载期(`.init_array`)与 libvulkan/libGLX_nvidia/libcuda 的动态链接器初始化同窗口,在那里碰 pthread/glibc 内部锁是已知崩溃模式(参见 [HAMi-core PR #182](https://github.com/Project-HAMi/HAMi-core/pull/182) Step C 的 ICD init 崩溃,以及本仓 `check_no_constructors.sh` 在 CI 强制禁止)。这与 [HAMi-core PR #199](https://github.com/Project-HAMi/HAMi-core/pull/199) 处理的是同一类继承问题,我们的修复额外覆盖 GAP 路径特有的 cuEvent 句柄(父 CUcontext 失效)与 mutex 状态(父线程持锁瞬间 fork → 子永久 EBUSY)。回归用例:[test/test_fork_inherit.cu](../library/test/test_fork_inherit.cu)。
+- **fork() 子进程安全**:GAP 路径全局(`g_gap_evt_ready`/`g_gap_start/end`/`g_gap_lock`/`g_last_launch_ns`)以及外层的 `g_init_set` `pthread_once_t` 都通过 `pthread_atfork(NULL, NULL, child_after_fork)` 在子进程中复位,详见 §7.1。**注册位置**:[`load_necessary_data()`(loader.c)](../library/src/loader.c) 第一行,由专用 `g_atfork_init` `pthread_once` 守护。**故意不用 `__attribute__((constructor))`** —— 库加载期(`.init_array`)与 libvulkan/libGLX_nvidia/libcuda 的动态链接器初始化同窗口,在那里碰 pthread/glibc 内部锁是已知崩溃模式(参见 [HAMi-core PR #182](https://github.com/Project-HAMi/HAMi-core/pull/182) Step C 的 ICD init 崩溃,以及本仓 `check_no_constructors.sh` 在 CI 强制禁止)。这与 [HAMi-core PR #199](https://github.com/Project-HAMi/HAMi-core/pull/199) 处理的是同一类继承问题,我们的修复额外覆盖 GAP 路径特有的 cuEvent 句柄(父 CUcontext 失效)与 mutex 状态(父线程持锁瞬间 fork → 子永久 EBUSY)。回归用例:[test/test_fork_inherit.cu](../library/test/test_fork_inherit.cu)。
 
 ### 7.1 fork() 后的状态重置详解
 
@@ -348,6 +348,22 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
 - `g_sm_controller`(函数指针):父子地址空间布局同(同代码段),指针有效
 - `g_sm_controller_kind` / AIMD 参数:从 env 读,父子同 env → 同值
 - watcher 内部数组 `shares/sys_frees/up_limits/...`:子进程重启 watcher 时,watcher 自己 init 循环里全部清零
+- **`g_atfork_init`(loader.c 里守护 `pthread_atfork` 注册的 `pthread_once_t`)**:**故意不重置**。`pthread_atfork` 注册的 handler 由 glibc 维护在进程内一个链表里,fork 时通过 COW 自然继承到子进程 —— 子进程**已经拥有**这个 handler。重置会导致子进程下次 `load_necessary_data()` 再注册一遍,每代 fork 累加一个冗余 registration。
+
+**规则总结**(`pthread_once` flag 在子进程要不要重置,看它守护的"动作"产生的副作用是什么):
+
+| 副作用类别 | 例子 | fork 后是否需重置 once flag |
+|---|---|---|
+| 进程内**可继承**的数据(全局变量、glibc 内部链表) | `pthread_atfork` 注册 → atfork 链表 | **不重置**(COW 继承) |
+| 进程内**不可继承**的状态(线程、有 owner 的锁、CUDA context 句柄) | `initialization()` → 启 watcher 线程 + 创建 cuEvent | **必须重置**(否则拿到僵尸引用) |
+
+### 7.1.1 注册位置:为什么是 `load_necessary_data()` 而不是 `initialization()`
+
+| | `initialization()` | `load_necessary_data()`(当前选择) |
+|---|---|---|
+| 调用源 | 仅 3 个 `cuLaunchKernel*` hook | 8 处:3 launch hook + 3 NVML hook + 2 loader/dlsym 入口 |
+| 父进程只做 NVML 探测就 fork 的场景 | ❌ 漏覆盖 | ✅ 覆盖 |
+| `pthread_once` race 窗口大小 | `cuInit` 等几 ms | 仅 `pthread_atfork` 几条 glibc 指令(μs 级) |
 
 ### 7.2 loader.c 的 fork 危害
 

@@ -1000,6 +1000,13 @@ static pthread_once_t g_cuda_lib_init = PTHREAD_ONCE_INIT;
 static pthread_once_t g_nvml_lib_init = PTHREAD_ONCE_INIT;
 static pthread_once_t init_dlsym_flag = PTHREAD_ONCE_INIT;
 static pthread_once_t init_nvml_host_index = PTHREAD_ONCE_INIT;
+/* Guards the one-time pthread_atfork(NULL, NULL, child_after_fork) call.
+ * Intentionally NOT reset by child_after_fork() in the child -- glibc's
+ * atfork handler list is process-local data, inherited via COW at fork,
+ * so the child already has the handler registered. Resetting would cause
+ * load_necessary_data() in the child to call pthread_atfork again,
+ * accumulating an extra registration per fork generation. */
+static pthread_once_t g_atfork_init = PTHREAD_ONCE_INIT;
 
 //static int host_device_indexes[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
@@ -2201,7 +2208,30 @@ void loader_child_after_fork(void) {
   tid_dlsym_count = 0;
 }
 
+/* fork() child handler implemented in cuda_hook.c. Registered lazily
+ * via the g_atfork_init pthread_once below; see the block comment
+ * above child_after_fork() in cuda_hook.c for the full rationale. */
+extern void child_after_fork(void);
+
+static void register_atfork_handler(void) {
+  /* Tiny dedicated init function. Kept minimal so the pthread_once race
+   * window (any thread that calls load_necessary_data before this returns
+   * could fork into a broken pthread_once state) is just a few glibc
+   * instructions wide instead of the milliseconds it would be if we
+   * piggybacked on cuInit or library load. */
+  (void)pthread_atfork(NULL, NULL, child_after_fork);
+}
+
 void load_necessary_data() {
+  /* Register the fork-child handler before anything else. Placed here
+   * rather than in initialization() because load_necessary_data() is
+   * called from every CUDA, NVML and dlsym hook entry -- so a parent
+   * process that uses only NVML/dlsym (and never cuLaunchKernel) before
+   * fork() also has the handler in place. See child_after_fork()'s
+   * block comment in cuda_hook.c for why we are not allowed to use a
+   * library-load constructor. */
+  pthread_once(&g_atfork_init, register_atfork_handler);
+
   // First, determine the driver version
   pthread_once(&g_cuda_ver_init, read_version_from_proc);
   load_cuda_single_library(CUDA_ENTRY_ENUM(cuDriverGetVersion));

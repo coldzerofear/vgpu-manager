@@ -140,24 +140,33 @@ static volatile int64_t g_last_launch_ns[MAX_DEVICE_COUNT] = {0};
  *     in the child returns EBUSY forever).
  *
  * The fix: pthread_atfork(NULL, NULL, child_after_fork) registered lazily
- * the first time initialization() runs (i.e. inside the pthread_once that
- * the launch hooks fire). We deliberately do NOT use a constructor
- * attribute -- the build-time check_no_constructors.sh forbids it, since
- * .init_array entries fire during dynamic-linker setup of the host
- * process, in the same window where libvulkan/libGLX/libEGL are being
- * initialized; pthread_atfork / glibc-internal-lock activity there is a
- * known crash vector (cf. HAMi-core PR #182 Step C).
+ * from loader.c's load_necessary_data() entry path (which is called by
+ * every CUDA/NVML/dlsym hook -- much broader coverage than initialization()
+ * which only fires on cuLaunchKernel*). We deliberately do NOT use a
+ * constructor attribute -- the build-time check_no_constructors.sh forbids
+ * it, since .init_array entries fire during dynamic-linker setup of the
+ * host process, in the same window where libvulkan/libGLX/libEGL are being
+ * initialized; activity there is a known crash vector (cf. HAMi-core PR
+ * #182 Step C).
  *
- * Lazy registration is still complete: any fork in a process that has
- * ever called cuLaunchKernel will have the handler registered; a fork in
- * a process that hasn't called cuLaunchKernel inherits an unmodified
- * g_init_set (still PTHREAD_ONCE_INIT) so the child runs initialization()
- * normally on its first launch -- no atfork handler needed for that path.
+ * Coverage is complete: any fork in a process that has ever called any
+ * vgpu-hooked API has the handler registered; a fork before any hook call
+ * inherits an unmodified g_init_set (still PTHREAD_ONCE_INIT) so the child
+ * runs initialization() normally on its first launch -- no atfork handler
+ * needed for that path (nothing to reset).
+ *
+ * Made extern (not static) so loader.c's register_atfork_handler can take
+ * its address. Linker version script (libvgpu-control.exports.ld) keeps
+ * this symbol out of .dynsym so no NVIDIA-ICD/loader collision risk.
  *
  * The child handler reverts every fork-unsafe piece of process-local
- * state we own; the next launch wrapper then sees g_init_set fresh and
- * re-runs initialization() naturally. */
-static void child_after_fork(void) {
+ * state we own; the next hook caller then sees g_init_set fresh and
+ * re-runs initialization() naturally. Note we intentionally do NOT
+ * reset loader.c's g_atfork_init flag: the pthread_atfork registration
+ * itself survives fork via COW of glibc's internal atfork handler list,
+ * so the child already has the handler; resetting would multiply-register
+ * on every fork generation. */
+void child_after_fork(void) {
   g_init_set = (pthread_once_t)PTHREAD_ONCE_INIT;
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
     g_gap_evt_ready[i]  = 0;
@@ -894,13 +903,11 @@ static void initialization() {
     LOGGER(ERROR, "initialization of sm watcher failed");
     return;
   }
-  /* Register the fork-child handler lazily here (no library-load
-   * constructor allowed -- see the block comment above child_after_fork()
-   * for why). pthread_once guarantees one-time registration per process,
-   * and we run it before init_device_cuda_cores / balance_batches so the
-   * handler is in place before any thread we create can race with a fork. */
-  (void)pthread_atfork(NULL, NULL, child_after_fork);
-
+  /* Note: pthread_atfork(child_after_fork) is no longer registered here.
+   * It moved to loader.c's load_necessary_data() so that NVML-only and
+   * dlsym-only entry paths also register the handler -- covering parent
+   * processes that fork before any cuLaunchKernel*. See the block comment
+   * above child_after_fork() in this file for the full rationale. */
   int device_count;
   init_device_cuda_cores(&device_count);
   /* Select the SM throttle controller (delta/aimd) before watcher threads
