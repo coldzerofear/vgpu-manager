@@ -118,6 +118,17 @@ static int              g_gap_evt_ready[MAX_DEVICE_COUNT]  = {0};
 static int              g_gap_dc[MAX_DEVICE_COUNT]         = {0};
 static volatile int64_t g_last_launch_ns[MAX_DEVICE_COUNT] = {0};
 
+/* Per-device decimation tick for the periodic watcher utilization log.
+ * The SM watcher samples each device ~every 80ms (~12 lines/s/device); at
+ * VERBOSE that floods the log. Emit only 1 in WATCHER_UTIL_LOG_STRIDE
+ * samples (~once per 5s/device) -- same "sample, don't spam" spirit as
+ * metrics.c, but fixed-stride rather than power-of-two so a long-running
+ * watcher keeps a steady cadence instead of going silent over time.
+ * Single-writer per index (each watcher thread owns a disjoint device
+ * set), so a plain int needs no atomics. */
+#define WATCHER_UTIL_LOG_STRIDE 64
+static unsigned int g_util_log_tick[MAX_DEVICE_COUNT] = {0};
+
 /* ---- fork() child handler ------------------------------------------------ *
  * Python multiprocessing / torch.multiprocessing / subprocess+fork patterns
  * fork() after the parent has already triggered initialization(). Without a
@@ -1505,8 +1516,11 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
     LOGGER(FATAL, "unknown environment compatibility mode: %d", g_vgpu_config->compatibility_mode);
   }
 
-  LOGGER(VERBOSE, "cuda device: %d, host device: %d, sys util: %d, user util: %d",
-         cuda_index, host_index, top_result->sys_current, top_result->user_current);
+  if ((g_util_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
+    LOGGER(VERBOSE, "cuda device: %d, host device: %d, sys util: %d, user util: %d (1/%d sampled)",
+           cuda_index, host_index, top_result->sys_current, top_result->user_current,
+           WATCHER_UTIL_LOG_STRIDE);
+  }
 }
 
 /** hook entrypoint */
