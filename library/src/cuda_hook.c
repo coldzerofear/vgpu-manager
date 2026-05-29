@@ -783,6 +783,7 @@ static int gap_begin(int host_index, CUstream stream) {
 /* Records the end marker, measures GPU time, injects the duty-cycle sleep.
  * Always stamps last-launch and releases the lock. delay = gpu_ms*(100/dc-1). */
 static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
+  uint64_t gpu_us = 0, sleep_us = 0;   /* stay 0 if measurement fails */
   if (launch_ret == CUDA_SUCCESS &&
       CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuEventRecord),
                          g_gap_end[host_index], stream) == CUDA_SUCCESS &&
@@ -795,9 +796,17 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
       int dc = g_gap_dc[host_index];
       double sleep_ms = (double)gpu_ms * (100.0 / (double)dc - 1.0);
       if (sleep_ms > GAP_MAX_SLEEP_MS) sleep_ms = GAP_MAX_SLEEP_MS;
-      if (sleep_ms > 0.0) usleep((useconds_t)(sleep_ms * 1000.0));
+      gpu_us = (uint64_t)((double)gpu_ms * 1000.0);
+      if (sleep_ms > 0.0) {
+        sleep_us = (uint64_t)(sleep_ms * 1000.0);
+        usleep((useconds_t)sleep_us);
+      }
     }
   }
+  /* Record before unlocking so the metric reflects this device's gap event.
+   * Called unconditionally: count == number of GAP-path entries, even the
+   * ones where the cuEvent measurement failed (gpu_us == sleep_us == 0). */
+  metrics_record_gap_throttle(host_index, gpu_us, sleep_us);
   g_last_launch_ns[host_index] = monotonic_ns();
   pthread_mutex_unlock(&g_gap_lock[host_index]);
 }

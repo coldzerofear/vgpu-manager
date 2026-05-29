@@ -12,6 +12,12 @@ static volatile uint64_t g_nvml_fallback_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_oom_total_limit_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_oom_driver_return_total[MAX_DEVICE_COUNT] = {0};
 
+/* GAP-path SM-throttle observability. count = number of GAP-path entries
+ * (gap_begin returned 1 and gap_end ran); sleep_us_total = cumulative host
+ * sleep injected to hold the duty cycle. */
+static volatile uint64_t g_gap_throttle_total[MAX_DEVICE_COUNT] = {0};
+static volatile uint64_t g_gap_sleep_us_total[MAX_DEVICE_COUNT] = {0};
+
 /* SM controller label included in rate_limit_hit emissions. Set once at
  * init by sm_controller_init() in cuda_hook.c; "delta" is the safe default
  * if init is delayed (counter still increments, label is just the default). */
@@ -126,4 +132,30 @@ void metrics_record_watcher_miss(int host_index, metrics_watcher_reason_t reason
 void metrics_record_nvml_fallback(int host_index) {
   maybe_log_counter_metric("nvml_fallback", host_index,
                            &g_nvml_fallback_total[host_index]);
+}
+
+void metrics_record_gap_throttle(int host_index, uint64_t gpu_us, uint64_t sleep_us) {
+  uint64_t total;
+
+  if (!should_collect_metrics() || !is_valid_metric_index(host_index)) {
+    return;
+  }
+
+  total = __sync_add_and_fetch(&g_gap_throttle_total[host_index], 1);
+  __sync_add_and_fetch(&g_gap_sleep_us_total[host_index], sleep_us);
+
+  /* Per-event line: lets operators confirm the GAP path fired and see each
+   * sleep, at VERBOSE level. Suppressed by the logger when level < VERBOSE,
+   * so it adds no cost on the default INFO path. */
+  LOGGER(VERBOSE, "gap throttle host_device=%d gpu_us=%" PRIu64 " sleep_us=%" PRIu64,
+         host_index, gpu_us, sleep_us);
+
+  /* Aggregate line: power-of-two sampled like the other counters (INFO). */
+  if ((total & (total - 1)) == 0) {
+    LOGGER(INFO,
+           "metric=gap_throttle host_device=%d count=%" PRIu64 " total_sleep_ms=%" PRIu64 " last_gpu_us=%" PRIu64 " last_sleep_us=%" PRIu64,
+           host_index, total,
+           (uint64_t)(g_gap_sleep_us_total[host_index] / 1000),
+           gpu_us, sleep_us);
+  }
 }
