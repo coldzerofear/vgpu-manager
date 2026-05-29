@@ -95,7 +95,7 @@ static const struct timespec g_cycle = {
 
 /* ---- GAP-path SM throttle (event-timed duty cycle) -------------------- *
  * A large kernel whose grid fits under the token budget slips past
- * rate_limiter() and runs unthrottled until the NVML watcher reacts ~80ms
+ * rate_limiter() and runs unthrottled until the NVML watcher reacts ~100ms
  * later. For a launch that follows a >GAP_THRESHOLD_NS idle gap (the
  * synchronize-heavy pattern) we instead time the kernel with cuEvents and
  * inject a duty-cycle sleep. The target percentage follows the watcher's
@@ -612,7 +612,7 @@ static void *utilization_watcher(void *arg) {
   int dev_count = batch->end_index - batch->start_index;
   struct timespec wait = {
     .tv_sec = 0,
-    .tv_nsec = 80 / dev_count * MILLISEC,
+    .tv_nsec = 100 / dev_count * MILLISEC,
   };
   while (1) {
     for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
