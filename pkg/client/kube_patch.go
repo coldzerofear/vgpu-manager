@@ -63,13 +63,13 @@ func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod)
 	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
 	preDevices := device.PodDeviceClaim{}
 	if err := preDevices.UnmarshalText(preAlloc); err != nil {
-		return fmt.Errorf("parse pre assign devices failed: %v", err)
+		return fmt.Errorf("parse pod pre device claims failed: %v", err)
 	}
 
 	realAlloc, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
 	realDevices := device.PodDeviceClaim{}
 	if err := realDevices.UnmarshalText(realAlloc); err != nil {
-		return fmt.Errorf("parse real assign devices failed: %v", err)
+		return fmt.Errorf("parse pod real device claims failed: %v", err)
 	}
 
 	assignedPhase := util.AssignPhaseAllocating
@@ -99,62 +99,83 @@ func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod)
 
 // PatchPodAllocationAllocating patch pod metadata marking device allocation allocating.
 func PatchPodAllocationAllocating(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
-	var nodeName string
-	assignedPhase := util.AssignPhaseSucceed
-	predicateTime := fmt.Sprintf("%d", uint64(math.MaxInt64))
+	var (
+		nodeName      *string
+		assignedPhase *string
+		predicateTime *string
+		needPatch     bool
+	)
 	if util.IsVGPUResourcePod(pod) {
-		assignedPhase = util.AssignPhaseAllocating
-		predicateTime = fmt.Sprintf("%d", metav1.NowMicro().UnixNano())
-		nodeName, _ = util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
+		needPatch = true
+		assignedPhase = pointer.String(string(util.AssignPhaseAllocating))
+		predicateTime = pointer.String(fmt.Sprintf("%d", metav1.NowMicro().UnixNano()))
+		if node, _ := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation); len(node) > 0 {
+			nodeName = &node // Covering to correct certain possible errors
+		}
+	} else {
+		// If a non vGPU Pod carries this metadata, it needs to be cleaned up
+		_, ok1 := util.HasLabel(pod, util.PodMetricsNodeLabel)
+		_, ok2 := util.HasLabel(pod, util.PodAssignedPhaseLabel)
+		_, ok3 := util.HasAnnotation(pod, util.PodPredicateTimeAnnotation)
+		needPatch = ok1 || ok2 || ok3
 	}
-	patchData := PatchMetadata{
-		Labels: map[string]*string{
-			util.PodMetricsNodeLabel:   nil,
-			util.PodAssignedPhaseLabel: pointer.String(string(assignedPhase)),
-		},
-		Annotations: map[string]*string{
-			util.PodPredicateTimeAnnotation: pointer.String(predicateTime),
-		},
+	if needPatch {
+		patchData := PatchMetadata{
+			Labels: map[string]*string{
+				util.PodMetricsNodeLabel:   nodeName,
+				util.PodAssignedPhaseLabel: assignedPhase,
+			},
+			Annotations: map[string]*string{
+				util.PodPredicateTimeAnnotation: predicateTime,
+			},
+		}
+		return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
+			return PatchPodMetadata(kubeClient, pod, patchData)
+		})
 	}
-	if len(nodeName) > 0 {
-		// Covering to correct certain possible errors
-		patchData.Labels[util.PodMetricsNodeLabel] = &nodeName
-	}
-	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-		return PatchPodMetadata(kubeClient, pod, patchData)
-	})
+	return nil
 }
 
 // PatchPodAllocationFailed patch pod metadata marking device allocation failed.
 func PatchPodAllocationFailed(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
-	patchData := PatchMetadata{
-		Labels: map[string]*string{
-			util.PodAssignedPhaseLabel: pointer.String(string(util.AssignPhaseFailed)),
-		},
-		Annotations: map[string]*string{
-			util.PodPredicateTimeAnnotation: pointer.String(fmt.Sprintf("%d", uint64(math.MaxInt64))),
-		},
+	var (
+		assignedPhase *string
+		predicateTime *string
+		needPatch     bool
+	)
+	if util.IsVGPUResourcePod(pod) {
+		needPatch = true
+		assignedPhase = pointer.String(string(util.AssignPhaseFailed))
+		predicateTime = pointer.String(fmt.Sprintf("%d", uint64(math.MaxInt64)))
+	} else {
+		// If a non vGPU Pod carries this metadata, it needs to be cleaned up
+		_, ok1 := util.HasLabel(pod, util.PodMetricsNodeLabel)
+		_, ok2 := util.HasLabel(pod, util.PodAssignedPhaseLabel)
+		_, ok3 := util.HasAnnotation(pod, util.PodPredicateTimeAnnotation)
+		needPatch = ok1 || ok2 || ok3
 	}
-	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-		return PatchPodMetadata(kubeClient, pod, patchData)
-	})
+	if needPatch {
+		patchData := PatchMetadata{
+			Labels: map[string]*string{
+				// Device allocation failed, the tag should be deleted to prevent the monitoring from scanning it again
+				util.PodMetricsNodeLabel:   nil,
+				util.PodAssignedPhaseLabel: assignedPhase,
+			},
+			Annotations: map[string]*string{
+				util.PodPredicateTimeAnnotation: predicateTime,
+			},
+		}
+		return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
+			return PatchPodMetadata(kubeClient, pod, patchData)
+		})
+	}
+	return nil
 }
 
 // PatchPodPreAllocatedMetadata patch vGPU pre allocated metadata annotations
 func PatchPodPreAllocatedMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
-	patchData := PatchMetadata{
-		Labels:      map[string]*string{},
-		Annotations: map[string]*string{},
-	}
-	// Proactively clean labels to prevent device plugin misjudgment
-	patchData.Labels[util.PodAssignedPhaseLabel] = nil
 	nodeName := pod.Annotations[util.PodPredicateNodeAnnotation]
-	// Enable monitoring to identify this pod
-	patchData.Labels[util.PodMetricsNodeLabel] = &nodeName
-	patchData.Annotations[util.PodPredicateNodeAnnotation] = &nodeName
 	preAlloc := pod.Annotations[util.PodVGPUPreAllocAnnotation]
-	patchData.Annotations[util.PodVGPUPreAllocAnnotation] = &preAlloc
-	patchData.Annotations[util.PodVGPURealAllocAnnotation] = pointer.String("")
 	// Stamp the current Filter wall-clock time. ShouldCountPodDeviceAllocation
 	// uses this as both:
 	//   - the "filter ran after condition was set" signal (compared against
@@ -166,8 +187,20 @@ func PatchPodPreAllocatedMetadata(kubeClient kubernetes.Interface, pod *corev1.P
 	//     repeated same-status failures, so the wall-clock difference is what
 	//     lets us distinguish "just pre-allocated, bind in progress" from
 	//     "stuck across many failed cycles".
-	patchData.Annotations[util.PodPredicateTimeAnnotation] = pointer.String(
-		fmt.Sprintf("%d", uint64(metav1.NowMicro().UnixNano())))
+	predicateTime := fmt.Sprintf("%d", uint64(metav1.NowMicro().UnixNano()))
+	patchData := PatchMetadata{
+		Labels: map[string]*string{
+			// Enable monitoring to identify this pod
+			util.PodMetricsNodeLabel:   &nodeName,
+			util.PodAssignedPhaseLabel: pointer.String(string(util.AssignPhaseFiltering)),
+		},
+		Annotations: map[string]*string{
+			util.PodPredicateNodeAnnotation: &nodeName,
+			util.PodVGPUPreAllocAnnotation:  &preAlloc,
+			util.PodVGPURealAllocAnnotation: pointer.String(""),
+			util.PodPredicateTimeAnnotation: &predicateTime,
+		},
+	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		return PatchPodMetadata(kubeClient, pod, patchData)
 	})

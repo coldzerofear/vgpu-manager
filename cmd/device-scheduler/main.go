@@ -22,6 +22,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/bind"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
@@ -54,6 +55,7 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 	util.MustInitGlobalDomain(opt.Domain)
+	gpuallocator.SetBestEffortMaxGPUs(opt.BestEffortMaxGPUs)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)

@@ -30,6 +30,7 @@ type Options struct {
 	TlsCertFile         string
 	CertRefreshInterval int
 	StuckGracePeriod    string
+	BestEffortMaxGPUs   int
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -41,6 +42,12 @@ const (
 	defaultPprofBindPort       = 0
 	defaultCertRefreshInterval = 5
 	defaultStuckGracePeriod    = "30s"
+	// defaultBestEffortMaxGPUs caps the exhaustive bestEffort link-allocation
+	// search. Beyond this candidate count we fall back to a greedy O(n²·k)
+	// allocator to keep filter latency bounded on dense GPU nodes (16+ cards).
+	// Empirically 12 leaves the exhaustive search around the ~100k partitions
+	// range; 16 partitioning into 8 sets is already ~2M and noticeably slow.
+	defaultBestEffortMaxGPUs = 12
 
 	Component = "scheduler"
 
@@ -78,6 +85,7 @@ func NewOptions() *Options {
 		SchedulerName:       defaultSchedulerName,
 		CertRefreshInterval: defaultCertRefreshInterval,
 		StuckGracePeriod:    defaultStuckGracePeriod,
+		BestEffortMaxGPUs:   defaultBestEffortMaxGPUs,
 		FeatureGate:         featureGate,
 	}
 }
@@ -103,6 +111,10 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
 	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
 	pflag.StringVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
+	pflag.IntVar(&o.BestEffortMaxGPUs, "best-effort-max-gpus", o.BestEffortMaxGPUs,
+		"When the candidate GPU count on a node exceeds this threshold, the link-topology "+
+			"allocator falls back to an O(n²·k) greedy algorithm instead of the exhaustive "+
+			"bestEffort partition search, keeping filter latency bounded on dense nodes.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

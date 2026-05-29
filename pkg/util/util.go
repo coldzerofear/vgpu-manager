@@ -290,32 +290,41 @@ func GetPredicateTimeOfPod(pod corev1.Pod) int64 {
 // GetCurrentPodByAllocatingPods find the oldest Pod from the allocating Pods
 // to be allocated as the current Pod to be allocated.
 func GetCurrentPodByAllocatingPods(allocatingPods []corev1.Pod) (*corev1.Pod, error) {
-	if len(allocatingPods) == 0 {
+	switch len(allocatingPods) {
+	case 0:
 		return nil, fmt.Errorf("unable to find the current pod to be allocated")
-	}
-	pods := PodsOrderedByPredicateTime(allocatingPods)
-	if len(allocatingPods) > 1 {
+	case 1:
+		return &allocatingPods[0], nil
+	default:
+		pods := PodsOrderedByPredicateTime(allocatingPods)
 		sort.Sort(pods)
+		return &pods[0], nil
 	}
-	return &pods[0], nil
 }
 
 // FilterAllocatingPods filter out the list of pods to be allocated.
 func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 	var allocatingPods []corev1.Pod
-	requiredAnnoKeys := []string{
-		PodPredicateTimeAnnotation, PodPredicateNodeAnnotation, PodVGPUPreAllocAnnotation,
-	}
 	for i, pod := range activePods {
 		klog.V(5).Infof("FilterPod <%s/%s> %s", pod.Namespace, pod.Name, pod.Status.Phase)
 		if !IsVGPUResourcePod(&pod) || IsShouldDeletePod(&pod) {
 			continue
 		}
-		if slices.ContainsFunc(requiredAnnoKeys, func(key string) bool {
-			_, exists := HasAnnotation(&pod, key)
-			return !exists
-		}) {
+		if _, ok := HasAnnotation(&pod, PodVGPUPreAllocAnnotation); !ok {
 			continue
+		}
+		if nodeName, ok := HasAnnotation(&pod, PodPredicateNodeAnnotation); !ok {
+			continue
+		} else if pod.Spec.NodeName != nodeName {
+			continue
+		}
+		if val, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation); !ok {
+			continue
+		} else {
+			predicateTime, err := strconv.ParseInt(val, 10, 64)
+			if err != nil || predicateTime <= 0 || predicateTime >= math.MaxInt64 {
+				continue
+			}
 		}
 		allocatingPods = append(allocatingPods, activePods[i])
 	}

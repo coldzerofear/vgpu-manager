@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/google/uuid"
@@ -26,6 +28,7 @@ import (
 	testing2 "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 const (
@@ -153,7 +156,7 @@ func Test_Parallel_Scheduling(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, node := range nodes {
-		nodeInfo, err := device.NewNodeInfo(&node, list)
+		nodeInfo, err := device.NewNodeInfo(&node, device.WithNodePods(list...))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -484,11 +487,11 @@ func Test_DeviceFilter(t *testing.T) {
 				pod.UID = *testCase.uid
 			}
 			pod, _ = k8sClient.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{})
-
+			req := allocator.BuildAllocationRequest(pod)
 			// wait for podLister to sync
 			//time.Sleep(time.Second)
-
-			nodes, _, err := filterPredicate.deviceFilter(pod, nodeList)
+			state := framework.NewCycleState()
+			nodes, _, err := filterPredicate.deviceFilter(context.Background(), req, nodeList, state)
 			assert.Equal(t, testCase.err, err)
 			if err != nil {
 				return
@@ -529,9 +532,15 @@ func Test_NodeFilter(t *testing.T) {
 		name  string
 		pod   *corev1.Pod
 		nodes []corev1.Node
-		// result
-		filterNodes    []corev1.Node
-		failedNodesMap extenderv1.FailedNodesMap
+		// result: filterNodes is the surviving node list; wantPrimary
+		// is the Primary code we expect in the per-node FilterReason
+		// returned by nodeFilter. Comparing Primary (not the whole
+		// *FilterReason) sidesteps brittleness around the Detail field —
+		// some failure paths embed variable substrings like JSON decode
+		// errors, and we don't want a JSON wording change to break the
+		// test.
+		filterNodes []corev1.Node
+		wantPrimary map[string]reason.Code
 	}{
 		{
 			name: "example1, no node config info",
@@ -555,8 +564,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": NoGPUConfigInfo,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeNoGPUConfig,
 			},
 		},
 		{
@@ -581,8 +590,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": IncorrectGPUConfigInfo,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeBadGPUConfig,
 			},
 		},
 		{
@@ -610,8 +619,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": NoGPUDevice,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeNotVGPUEnabled,
 			},
 		},
 		{
@@ -639,8 +648,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": NoGPURegister,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeNoVGPURegister,
 			},
 		},
 		{
@@ -669,8 +678,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": IncorrectGPUMemFactory,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeBadMemoryFactor,
 			},
 		},
 		{
@@ -705,8 +714,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": GPUMemTypeMismatch,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeMemoryTypeMismatch,
 			},
 		},
 		{
@@ -741,8 +750,8 @@ func Test_NodeFilter(t *testing.T) {
 				},
 			},
 			filterNodes: []corev1.Node{},
-			failedNodesMap: map[string]string{
-				"testnode": GPUMemTypeMismatch,
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeMemoryTypeMismatch,
 			},
 		},
 		{
@@ -796,14 +805,20 @@ func Test_NodeFilter(t *testing.T) {
 					Status: nodeStatus,
 				},
 			},
-			failedNodesMap: map[string]string{},
+			wantPrimary: map[string]reason.Code{},
 		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			filterNodes, failedNodesMap, _ := filterPredicate.nodeFilter(testCase.pod, testCase.nodes)
+			req := allocator.BuildAllocationRequest(testCase.pod)
+			state := framework.NewCycleState()
+			filterNodes, gotReasons, _ := filterPredicate.nodeFilter(context.Background(), req, testCase.nodes, state)
 			assert.Equal(t, testCase.filterNodes, filterNodes)
-			assert.Equal(t, testCase.failedNodesMap, failedNodesMap)
+			gotPrimary := make(map[string]reason.Code, len(gotReasons))
+			for n, r := range gotReasons {
+				gotPrimary[n] = r.Primary
+			}
+			assert.Equal(t, testCase.wantPrimary, gotPrimary)
 		})
 	}
 }
