@@ -330,7 +330,7 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
 - **启动失败**：`gap_end` 在 `launch_ret!=CUDA_SUCCESS` 时跳过测量，仍释放锁、刷新时间戳。
 - **尖峰钳制**：`GAP_MAX_SLEEP_MS` 防止误测导致长时间卡死。
 - **内存可见性**：跨线程共享量按职责分两类 ——（1）`up_limits`、`g_last_launch_ns` 用 `volatile`(watcher/launch 跨线程、对齐标量、无锁、与 `g_cur_cuda_cores` 同约定)；（2）`g_gap_dc`、`g_gap_evt_ready`、`g_gap_start/end` **始终在 `g_gap_lock` 内访问**,由互斥锁的 acquire/release 保证可见性,无需 `volatile`。详见上文与 §8。
-- **fork() 子进程安全**:GAP 路径全局(`g_gap_evt_ready`/`g_gap_start/end`/`g_gap_lock`/`g_last_launch_ns`)以及外层的 `g_init_set` `pthread_once_t` 都通过库构造函数注册的 `pthread_atfork(NULL, NULL, child_after_fork)` 在子进程中复位,详见 §7.1。这与 [HAMi-core PR #199](https://github.com/Project-HAMi/HAMi-core/pull/199) 处理的是同一类继承问题,我们的修复额外覆盖 GAP 路径特有的 cuEvent 句柄(父 CUcontext 失效)与 mutex 状态(父线程持锁瞬间 fork → 子永久 EBUSY)。回归用例:[test/test_fork_inherit.cu](../library/test/test_fork_inherit.cu)。
+- **fork() 子进程安全**:GAP 路径全局(`g_gap_evt_ready`/`g_gap_start/end`/`g_gap_lock`/`g_last_launch_ns`)以及外层的 `g_init_set` `pthread_once_t` 都通过 `pthread_atfork(NULL, NULL, child_after_fork)` 在子进程中复位,详见 §7.1。**注册位置**:`initialization()` 函数内(由 `pthread_once` 保证一次性),**故意不用 `__attribute__((constructor))`** —— 库加载期(`.init_array`)与 libvulkan/libGLX_nvidia/libcuda 的动态链接器初始化同窗口,在那里碰 pthread/glibc 内部锁是已知崩溃模式(参见 [HAMi-core PR #182](https://github.com/Project-HAMi/HAMi-core/pull/182) Step C 的 ICD init 崩溃,以及本仓 `check_no_constructors.sh` 在 CI 强制禁止)。这与 [HAMi-core PR #199](https://github.com/Project-HAMi/HAMi-core/pull/199) 处理的是同一类继承问题,我们的修复额外覆盖 GAP 路径特有的 cuEvent 句柄(父 CUcontext 失效)与 mutex 状态(父线程持锁瞬间 fork → 子永久 EBUSY)。回归用例:[test/test_fork_inherit.cu](../library/test/test_fork_inherit.cu)。
 
 ### 7.1 fork() 后的状态重置详解
 
