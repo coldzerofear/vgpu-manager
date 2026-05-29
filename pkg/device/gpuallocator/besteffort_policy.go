@@ -4,6 +4,8 @@ package gpuallocator
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	nvml "github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 )
@@ -90,6 +92,75 @@ func (p *bestEffortPolicy) Allocate(available []*Device, required []*Device, siz
 
 	// Return the highest scoring GPU set.
 	return bestSet
+}
+
+// AllocateTopK returns up to k distinct candidate sets of size `size`,
+// sorted by link score (highest first). It enumerates the same partition
+// space as Allocate but instead of collapsing to a single winner it keeps
+// the top k unique sets so the caller can apply a secondary ordering
+// (binpack/spread on device utilisation, for example) when multiple sets are
+// topology-equivalent.
+//
+// Use this when you want link topology AND a tie-breaker policy to compose
+// cleanly. When k <= 1 this is functionally identical to Allocate but wrapped
+// in a slice for a uniform return type.
+func (p *bestEffortPolicy) AllocateTopK(available, required []*Device, size, k int) [][]*Device {
+	if size <= 0 || len(available) < size || len(required) > size || len(required) > len(available) {
+		return nil
+	}
+	if k <= 0 {
+		k = 1
+	}
+	type scoredSet struct {
+		set   []*Device
+		score int
+	}
+	seen := make(map[string]bool)
+	var candidates []scoredSet
+
+	iterateGPUPartitions(available, size, func(partition [][]*Device) {
+		if !gpuPartitionContainsSetWithAll(partition, required) {
+			return
+		}
+		for _, set := range partition {
+			if !gpuSetContainsAll(set, required) || gpuSetCountPadding(set) > 0 {
+				continue
+			}
+			key := canonicalSetKey(set)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			candidates = append(candidates, scoredSet{set, calculateGPUSetScore(set)})
+		}
+	})
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
+	if len(candidates) > k {
+		candidates = candidates[:k]
+	}
+	out := make([][]*Device, len(candidates))
+	for i, c := range candidates {
+		out[i] = c.set
+	}
+	return out
+}
+
+// canonicalSetKey returns a deterministic identifier for a GPU set so that
+// AllocateTopK can dedupe sets that the partition iterator visits via
+// different paths (e.g. partition [[A,B],[C,D]] and [[A,B],[D,C]] yield the
+// same {A,B} set on different walks).
+func canonicalSetKey(set []*Device) string {
+	uuids := make([]string, 0, len(set))
+	for _, d := range set {
+		if d == nil {
+			continue
+		}
+		uuids = append(uuids, d.UUID)
+	}
+	sort.Strings(uuids)
+	return strings.Join(uuids, "\x00")
 }
 
 // Check to see if a specific GPU is contained in a GPU set.

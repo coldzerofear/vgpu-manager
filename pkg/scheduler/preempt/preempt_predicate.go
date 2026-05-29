@@ -30,6 +30,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
@@ -119,11 +120,13 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 		return passthrough(args)
 	}
 	// Non-vGPU pods are out of our scope; let the in-tree decision stand.
-	if !util.IsVGPUResourcePod(pod) {
+	req := allocator.BuildAllocationRequest(pod)
+	if len(req.Containers) == 0 {
 		klog.V(5).InfoS("Preempt: pod is not a vGPU pod, passing input through",
 			"pod", klog.KObj(pod))
 		return passthrough(args)
 	}
+
 	victimsMap, err := p.resolveVictimsMap(args)
 	if err != nil {
 		klog.ErrorS(err, "Preempt: failed to resolve victims, passing input through")
@@ -138,63 +141,70 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 		return result
 	}
 
-	allVGPUPods, err := p.podLister.ListByIndexValue(filter.IndexerKeyPodRequestVGPU, "true")
+	nodePodsMap, err := p.podLister.NodeMapByIndexValue(filter.IndexerKeyPodRequestVGPU, "true")
 	if err != nil {
 		klog.ErrorS(err, "PodLister list vGPU pods failed in preempt")
 		return passthrough(args)
 	}
 	mu := sync.Mutex{}
-	wg := sync.WaitGroup{}
+	gangNameSet := sets.Set[string]{}
 
 	keys := maps.Keys(victimsMap)
-	maxGoroutines := runtime.NumCPU() * 2
+	maxGoroutines := runtime.GOMAXPROCS(0) * 2
 	batchSize := (len(keys) + maxGoroutines - 1) / maxGoroutines
-	batches := watcher.BalanceBatches(len(keys), batchSize)
-	gangNameSet := sets.Set[string]{}
-	for _, batch := range batches {
-		wg.Add(1)
-		go func(victimKeys []string) {
-			defer wg.Done()
-
-			for _, nodeName := range victimKeys {
-				victims := victimsMap[nodeName]
-				if victims == nil {
-					continue
-				}
-				refined, pdbViolations, ok := p.refineForNode(pod, nodeName, victims, allVGPUPods)
-				if !ok {
-					klog.V(3).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
-						"pod", klog.KObj(pod), "node", nodeName)
-					continue
-				}
-				if len(refined) == 0 {
-					// Should not happen — in-tree gave us at least one and we never empty the list.
-					continue
-				}
-				meta := &extenderv1.MetaVictims{
-					Pods:             make([]*extenderv1.MetaPod, 0, len(refined)),
-					NumPDBViolations: pdbViolations,
-				}
-				var gangNames []string
-				for _, vp := range refined {
-					if gangName, ok := util.PodHasGangName(vp); ok {
-						gangNames = append(gangNames, gangName)
-					}
-					meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
-				}
-
-				mu.Lock()
-				gangNameSet.Insert(gangNames...)
-				result.NodeNameToMetaVictims[nodeName] = meta
-				mu.Unlock()
+	parallel := watcher.NewBatchParallel(len(keys), batchSize)
+	parallel.Execute(func(_ int, config watcher.BatchConfig) {
+		victimKeys := keys[config.StartIndex : config.EndIndex+1]
+		for _, nodeName := range victimKeys {
+			victims := victimsMap[nodeName]
+			if victims == nil {
+				continue
 			}
-		}(keys[batch.StartIndex : batch.EndIndex+1])
-	}
-	wg.Wait()
+			refined, pdbViolations, ok := p.refineForNode(req, nodeName, victims, nodePodsMap[nodeName])
+			if !ok {
+				klog.V(2).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
+					"pod", klog.KObj(pod), "node", nodeName)
+				continue
+			}
+			if len(refined) == 0 {
+				// Should not happen — in-tree gave us at least one and we never empty the list.
+				continue
+			}
+			meta := &extenderv1.MetaVictims{
+				Pods:             make([]*extenderv1.MetaPod, 0, len(refined)),
+				NumPDBViolations: pdbViolations,
+			}
+			var gangNames []string
+			for _, vp := range refined {
+				if gangName, ok := util.PodHasGangName(vp); ok {
+					gangNames = append(gangNames, gangName)
+				}
+				meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
+			}
+
+			mu.Lock()
+			gangNameSet.Insert(gangNames...)
+			result.NodeNameToMetaVictims[nodeName] = meta
+			mu.Unlock()
+		}
+	})
+	parallel.WaitDone()
 
 	if gangNameSet.Len() > 0 {
-		p.recorder.Eventf(pod, corev1.EventTypeWarning, "GangDisruptedByPreemption",
+		p.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventGangDisrupted,
 			"evicted as preemption victim; this may trigger rescheduling of these pod groups %v", sets.List(gangNameSet))
+	}
+
+	// If every candidate node was dropped (the allocator rejected the
+	// pod even with the proposed victims removed), surface a
+	// kube-scheduler-style "preemption: 0/N nodes are available" event
+	// so operators see WHY preemption didn't help. Without this, the
+	// user only sees the in-tree "no preemption victims found" message
+	// and has no signal that vgpu-manager itself vetoed every option.
+	if len(result.NodeNameToMetaVictims) == 0 && len(victimsMap) > 0 && p.recorder != nil {
+		p.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPreemptionFailed,
+			"preemption: 0/%d nodes are available: vgpu-manager rejects allocation on every candidate after victim removal",
+			len(victimsMap))
 	}
 
 	return result
@@ -269,7 +279,7 @@ func (p *vgpuPreempt) resolveVictimsMap(args extenderv1.ExtenderPreemptionArgs) 
 // luring it into inflicting more real disruption than necessary. If a
 // workload must be protected from vGPU preemption, the only mechanism that
 // works is giving it sufficient priority.
-func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
+func (p *vgpuPreempt) refineForNode(req *allocator.AllocationRequest, nodeName string,
 	victims *extenderv1.Victims, allVGPUPods []*corev1.Pod) ([]*corev1.Pod, int64, bool) {
 
 	node, err := p.nodeLister.Get(nodeName)
@@ -278,44 +288,86 @@ func (p *vgpuPreempt) refineForNode(pod *corev1.Pod, nodeName string,
 		return nil, 0, false
 	}
 
-	// check node fast return
-	if err = filter.CheckNode(node, filter.GetMemoryPolicyFunc(pod)); err != nil {
-		klog.V(3).ErrorS(err, "Preempt: check node failed", "node", nodeName)
+	// Fast-reject: if the node itself doesn't meet vGPU prerequisites,
+	// preempting any pod on it won't help.
+	if r := filter.CheckNode(node, filter.GetMemoryPolicyFunc(req.Pod)); r != nil {
+		klog.V(3).InfoS("Preempt: check node failed", "node", nodeName, "pod", klog.KObj(req.Pod), "reason", r.Detailed())
 		return nil, 0, false
+	}
+
+	nodeInfo, err := device.NewNodeInfo(node)
+	if err != nil {
+		filterReason := reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
+		klog.V(3).ErrorS(err, "Preempt: "+string(filterReason.Primary), "node", node.Name, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
+		return nil, 0, false
+	}
+
+	if req.Max.Number > nodeInfo.GetSchedulableDeviceCount() {
+		filterReason := reason.New(reason.InsufficientGPUCards).
+			WithDetail("max %d devices, node has %d schedulable", req.Max.Number, nodeInfo.GetSchedulableDeviceCount())
+		klog.V(3).InfoS("Preempt: "+string(filterReason.Primary), "node", nodeName, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
+		return nil, 0, false
+	}
+
+	// CheckDeviceUuid/Type return true when a device is ALLOWED by the
+	// pod's include/exclude annotations. The node can host the pod only if
+	// at least req.Max.Number devices pass every requested check (the
+	// largest container needs that many allowed cards). Reject only when
+	// too few qualify — NOT on the first non-matching device, since an
+	// include filter naturally excludes most of a node's cards.
+	if req.CheckDeviceUuid || req.CheckDeviceType {
+		matched := 0
+		for _, dev := range nodeInfo.GetDeviceMap() {
+			if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, dev.GetUUID()) {
+				continue
+			}
+			if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, dev.GetType()) {
+				continue
+			}
+			matched++
+		}
+		if matched < req.Max.Number {
+			rc := reason.DeviceTypeMismatch
+			if req.CheckDeviceUuid {
+				rc = reason.DeviceUUIDMismatch
+			}
+			klog.V(3).InfoS("Preempt: "+string(rc), "node", nodeName, "pod", klog.KObj(req.Pod),
+				"matched", matched, "need", req.Max.Number)
+			return nil, 0, false
+		}
 	}
 
 	// Strip protected pods from in-tree's proposal — never evict them.
 	keep := make([]*corev1.Pod, 0, len(victims.Pods))
-	excluded := make(map[k8stypes.UID]struct{}, len(victims.Pods))
+	excludedUidSet := sets.New[k8stypes.UID]()
 	for _, v := range victims.Pods {
 		if v == nil {
 			continue
 		}
 		if isProtectedFromPreemption(v) {
-			klog.V(4).InfoS("Preempt: refusing to evict protected pod proposed by in-tree",
-				"pod", klog.KObj(v), "node", nodeName)
+			klog.V(4).InfoS("Preempt: refusing to evict protected pod proposed by in-tree", "pod", klog.KObj(v), "node", nodeName)
 			continue
 		}
 		keep = append(keep, v)
-		excluded[v.UID] = struct{}{}
+		excludedUidSet.Insert(v.UID)
 	}
 	// Snapshot the post-protection length so pdbViolationsUpperBound can
 	// distinguish "carried over from input" from "newly appended below".
 	keptFromInput := len(keep)
 
 	// First pass: does the pending pod fit after removing the kept victims?
-	if p.canAllocate(pod, node, allVGPUPods, excluded) {
+	if p.canAllocate(req, nodeInfo, allVGPUPods, excludedUidSet) {
 		return keep, pdbViolationsUpperBound(victims.NumPDBViolations, keptFromInput, 0), true
 	}
 
 	// Second pass: in-tree under-selected (likely because per-device or
 	// annotation constraints invisible to it require more victims). Walk the
 	// remaining lower-priority pods on this node and greedily add until fit.
-	additional := p.findAdditionalVictims(pod, node, allVGPUPods, excluded)
+	additional := p.findAdditionalVictims(req.Pod, node, allVGPUPods, excludedUidSet)
 	for _, cand := range additional {
-		excluded[cand.UID] = struct{}{}
+		excludedUidSet.Insert(cand.UID)
 		keep = append(keep, cand)
-		if p.canAllocate(pod, node, allVGPUPods, excluded) {
+		if p.canAllocate(req, nodeInfo, allVGPUPods, excludedUidSet) {
 			added := len(keep) - keptFromInput
 			return keep, pdbViolationsUpperBound(victims.NumPDBViolations, keptFromInput, added), true
 		}
@@ -358,16 +410,25 @@ func pdbViolationsUpperBound(originalCount int64, keptLen, addedLen int) int64 {
 // canAllocate constructs a NodeInfo with excluded pods removed and asks the
 // allocator whether the pending pod fits. Reuses the same NewNodeInfo
 // excludedPods mechanism already used during the filter re-allocation path.
-func (p *vgpuPreempt) canAllocate(pod *corev1.Pod, node *corev1.Node,
-	allVGPUPods []*corev1.Pod, excluded map[k8stypes.UID]struct{}) bool {
-	nodeInfo, err := device.NewNodeInfo(node, allVGPUPods, maps.Keys(excluded)...)
-	if err != nil {
-		klog.V(3).ErrorS(err, "Preempt: NewNodeInfo failed", "node", node.Name)
+func (p *vgpuPreempt) canAllocate(req *allocator.AllocationRequest, nodeInfo *device.NodeInfo,
+	allVGPUPods []*corev1.Pod, excludedUidSet sets.Set[k8stypes.UID]) bool {
+	nodeInfo.ResetResourceUsage()
+	nodeInfo.AddPodsUsedResources(allVGPUPods, device.WithExcludedUidSet(excludedUidSet))
+
+	// Preempt only cares about "would this pod fit?", not why it might
+	// not. Both a structured reason (node would still reject) and a real
+	// internal error answer the same question: "no". Log at V(5) for
+	// debugging; the verb-level Preempt event captures the user-facing
+	// outcome.
+	_, rsn, err := allocator.NewAllocator(nodeInfo, nil).Allocate(req)
+	switch {
+	case err != nil:
+		klog.V(3).ErrorS(err, "Preempt: allocator internal error",
+			"pod", klog.KObj(req.Pod), "node", nodeInfo.GetName())
 		return false
-	}
-	if _, err := allocator.NewAllocator(nodeInfo, nil).Allocate(pod); err != nil {
+	case rsn != nil:
 		klog.V(5).InfoS("Preempt: allocator rejects pod after excluding victims",
-			"pod", klog.KObj(pod), "node", node.Name, "reason", err)
+			"pod", klog.KObj(req.Pod), "node", nodeInfo.GetName(), "reason", rsn.Detailed())
 		return false
 	}
 	return true
@@ -403,7 +464,7 @@ func (p *vgpuPreempt) canAllocate(pod *corev1.Pod, node *corev1.Node,
 // binding cannot be evicted through this path — they must be reclaimed by a
 // separate controller or by the existing fresh-window grace mechanism.
 func (p *vgpuPreempt) findAdditionalVictims(pod *corev1.Pod, node *corev1.Node,
-	allVGPUPods []*corev1.Pod, excluded map[k8stypes.UID]struct{}) []*corev1.Pod {
+	allVGPUPods []*corev1.Pod, excludedUidSet sets.Set[k8stypes.UID]) []*corev1.Pod {
 
 	preemptorPriority := corev1helpers.PodPriority(pod)
 	out := make([]*corev1.Pod, 0)
@@ -411,7 +472,7 @@ func (p *vgpuPreempt) findAdditionalVictims(pod *corev1.Pod, node *corev1.Node,
 		if candidate.UID == pod.UID {
 			continue
 		}
-		if _, dup := excluded[candidate.UID]; dup {
+		if excludedUidSet.Has(candidate.UID) {
 			continue
 		}
 		// Must be actually bound to this node — see function doc.

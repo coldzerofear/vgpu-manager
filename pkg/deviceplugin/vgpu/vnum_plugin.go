@@ -965,15 +965,17 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 			"pod", klog.KObj(pod), "container", podInfo.ContainerName)
 		return resp, fmt.Errorf("write vGPU config failed: %w", err)
 	}
-	// Extra check the size of the vGPU configuration file.
-	// When a version upgrade causes a change in the configuration structure,
-	// the controller can reschedule these pods that cannot be started
-	if err = vgpu.CheckResourceDataSize(configFilePath); err != nil {
-		klog.ErrorS(err, "check resource data size failed", "pod",
-			klog.KObj(pod), "container", podInfo.ContainerName, "filePath", configFilePath)
-		return resp, fmt.Errorf("check resource data size failed: %w", err)
-	}
 
+	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.Reschedule) {
+		// Extra check the size of the vGPU configuration file.
+		// When a version upgrade causes a change in the configuration structure,
+		// the controller can reschedule these pods that cannot be started
+		if err = vgpu.CheckResourceDataSize(configFilePath); err != nil {
+			klog.ErrorS(err, "check resource data size failed", "pod",
+				klog.KObj(pod), "container", podInfo.ContainerName, "filePath", configFilePath)
+			return resp, fmt.Errorf("check resource data size failed: %w", err)
+		}
+	}
 	return resp, nil
 }
 

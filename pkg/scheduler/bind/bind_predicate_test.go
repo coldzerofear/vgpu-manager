@@ -30,6 +30,7 @@ func Test_BindPredicate(t *testing.T) {
 		t.Fatalf("failed to create new bindPredicate due to %v", err)
 	}
 	poduid := uuid.NewUUID()
+	targetuid := uuid.NewUUID()
 	testCases := []struct {
 		name   string
 		pod    *corev1.Pod
@@ -64,11 +65,11 @@ func Test_BindPredicate(t *testing.T) {
 			args: extenderv1.ExtenderBindingArgs{
 				PodName:      "test1",
 				PodNamespace: "default",
-				PodUID:       uuid.NewUUID(),
+				PodUID:       targetuid,
 				Node:         "node1",
 			},
 			result: &extenderv1.ExtenderBindingResult{
-				Error: "different UID from the target pod",
+				Error: fmt.Sprintf("different uid %q from the target pod", targetuid),
 			},
 		}, {
 			name: "example2: pod not found",
@@ -115,7 +116,7 @@ func Test_BindPredicate(t *testing.T) {
 				Node:         "node2",
 			},
 			result: &extenderv1.ExtenderBindingResult{
-				Error: "predicate node and binding node do not match",
+				Error: fmt.Sprintf("predicate node %q does not match the bound node %q", "node1", "node2"),
 			},
 		},
 		{
@@ -153,7 +154,7 @@ func Test_BindPredicate(t *testing.T) {
 				Node:         "node1",
 			},
 			result: &extenderv1.ExtenderBindingResult{
-				Error: fmt.Sprintf("device pre allocation failed, unable to bind to node <%s>", "node1"),
+				Error: fmt.Sprintf("device pre allocation check failed, unable to bind to node %q", "node1"),
 			},
 		},
 		{

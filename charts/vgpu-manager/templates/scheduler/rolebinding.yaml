@@ -79,4 +79,21 @@ roleRef:
   kind: Role
   name: {{ include "vgpu-manager.scheduler" . }}:leader-election-role
   apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "vgpu-manager.scheduler" . }}-as-authentication-reader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vgpu-manager.scheduler" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  kind: Role
+  name: extension-apiserver-authentication-reader
+  apiGroup: rbac.authorization.k8s.io
 {{- end }}

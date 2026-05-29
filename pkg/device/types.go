@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +24,6 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kube-scheduler/framework"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	"k8s.io/utils/pointer"
 )
 
 type NodeConfigInfo struct {
@@ -53,6 +54,11 @@ func (nci *NodeConfigInfo) Decode(val string) error {
 	return nil
 }
 
+func (nci *NodeConfigInfo) Clone() framework.StateData {
+	config := *nci
+	return &config
+}
+
 type TopologyInfo struct {
 	Index int                         `json:"index"`
 	Links map[int][]links.P2PLinkType `json:"links"`
@@ -81,7 +87,7 @@ func (nti *NodeTopologyInfo) Decode(val string) error {
 }
 
 func ParseNodeTopology(val string) (NodeTopologyInfo, error) {
-	if strings.TrimSpace(val) == "" {
+	if val = strings.TrimSpace(val); val == "" {
 		return nil, fmt.Errorf("input value is empty")
 	}
 	var nodeTopoInfo NodeTopologyInfo
@@ -131,12 +137,17 @@ func ParseNodeDeviceInfo(val string) (NodeDeviceInfo, error) {
 	if strings.TrimSpace(val) == "" {
 		return nil, fmt.Errorf("input value is empty")
 	}
-	var nodeDevice NodeDeviceInfo
-	err := json.Unmarshal([]byte(val), &nodeDevice)
+	var nodeDevices NodeDeviceInfo
+	err := json.Unmarshal([]byte(val), &nodeDevices)
 	if err != nil {
 		return nil, err
 	}
-	return nodeDevice, nil
+	if len(nodeDevices) > 0 {
+		sort.Slice(nodeDevices, func(i, j int) bool {
+			return nodeDevices[i].Id < nodeDevices[j].Id
+		})
+	}
+	return nodeDevices, nil
 }
 
 type ContainerDeviceClaim struct {
@@ -370,6 +381,17 @@ func NewFakeDevice(id, usedNum, totalNum int, usedCore, totalCore, usedMem, tota
 	}
 }
 
+// NewFakeDeviceWithUUID is NewFakeDevice with an explicit UUID. Use this
+// in tests that need to round-trip devices through any UUID-keyed map
+// (the link-topology allocation path, AreDevicesLinked, etc.) — plain
+// NewFakeDevice leaves uuid as "" which collapses every fake device to
+// the same map entry.
+func NewFakeDeviceWithUUID(uuid string, id, usedNum, totalNum int, usedCore, totalCore, usedMem, totalMem int64, numa int) *Device {
+	d := NewFakeDevice(id, usedNum, totalNum, usedCore, totalCore, usedMem, totalMem, numa)
+	d.uuid = uuid
+	return d
+}
+
 func NewDevice(dev DeviceInfo) *Device {
 	return &Device{
 		id:          dev.Id,
@@ -393,25 +415,23 @@ func (dev *Device) DeepCopy() *Device {
 
 var (
 	gpuTopoEnabledOnce sync.Once
-	gpuTopologyEnabled *bool
+	gpuTopologyEnabled bool
 )
 
 func SetGPUTopologyEnabled(flag bool) {
-	gpuTopologyEnabled = &flag
+	gpuTopoEnabledOnce.Do(func() {
+		gpuTopologyEnabled = flag
+		klog.InfoS(fmt.Sprintf("Feature Gates[%s]", util.GPUTopology), "enabled", flag)
+	})
 }
 
 func IsGPUTopologyEnabled() bool {
-	if gpuTopologyEnabled == nil {
-		gpuTopoEnabledOnce.Do(func() {
-			featureGate := compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-			gpuTopologyEnabled = pointer.Bool(featureGate != nil && featureGate.Enabled(options.GPUTopology))
-			klog.InfoS("Feature Gates[GPUTopology]", "enabled", gpuTopologyEnabled)
-		})
-		if gpuTopologyEnabled == nil {
-			gpuTopologyEnabled = pointer.Bool(false)
-		}
-	}
-	return *gpuTopologyEnabled
+	gpuTopoEnabledOnce.Do(func() {
+		featureGate := compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
+		gpuTopologyEnabled = featureGate != nil && featureGate.Enabled(util.GPUTopology)
+		klog.InfoS(fmt.Sprintf("Feature Gates[%s]", util.GPUTopology), "enabled", gpuTopologyEnabled)
+	})
+	return gpuTopologyEnabled
 }
 
 type DeviceGatherInfo struct {
@@ -423,18 +443,22 @@ type DeviceGatherInfo struct {
 	NodeConfigInfo
 }
 
-func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
+func NewNodeDeviceGatherInfo(node *corev1.Node, option *NodeInfoOption) (*DeviceGatherInfo, error) {
 	deviceRegister, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
 	nodeDeviceInfo, err := ParseNodeDeviceInfo(deviceRegister)
 	if err != nil || len(nodeDeviceInfo) == 0 {
 		klog.V(2).ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
 		return nil, errors.New("incorrect GPU registry")
 	}
-	nodeConfigInfo := NodeConfigInfo{}
-	nodeConfig, _ := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
-	if err = nodeConfigInfo.Decode(nodeConfig); err != nil {
-		klog.V(2).ErrorS(err, "parse node config information failed", "node", node.Name, "value", nodeConfig)
-		return nil, errors.New("incorrect GPU configuration")
+	var nodeConfigInfo NodeConfigInfo
+	if option != nil && option.nodeConfig != nil {
+		nodeConfigInfo = *option.nodeConfig
+	} else {
+		nodeConfig, _ := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
+		if err = nodeConfigInfo.Decode(nodeConfig); err != nil {
+			klog.V(2).ErrorS(err, "parse node config information failed", "node", node.Name, "value", nodeConfig)
+			return nil, errors.New("incorrect GPU configuration")
+		}
 	}
 	deviceGatherInfo := DeviceGatherInfo{
 		DeviceMap:      make(map[int]*Device, len(nodeDeviceInfo)),
@@ -451,7 +475,7 @@ func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
 		deviceGatherInfo.DeviceMap[device.Id] = NewDevice(device)
 		deviceGatherInfo.DeviceList[device.Id] = gpuallocator.NewDevice(device.Id, device.Uuid, device.BusId)
 	}
-	deviceGatherInfo.EnabledNumaAffinity = numaSet.Len() != 0
+	deviceGatherInfo.EnabledNumaAffinity = numaSet.Len() > 0
 	if IsGPUTopologyEnabled() {
 		topoValue, ok := util.HasAnnotation(node, util.NodeDeviceTopologyAnnotation)
 		if !ok || len(topoValue) == 0 {
@@ -460,7 +484,7 @@ func NewNodeDeviceGatherInfo(node *corev1.Node) (*DeviceGatherInfo, error) {
 		}
 		nodeTopology, err := ParseNodeTopology(topoValue)
 		if err != nil {
-			klog.V(3).ErrorS(err, "parse node device topology failed", "node", node.Name)
+			klog.V(3).ErrorS(err, "parse node device topology info failed", "node", node.Name, "topologyVal", topoValue)
 		}
 		for _, deviceTopoInfo := range nodeTopology {
 			for toIdx, p2pLinks := range deviceTopoInfo.Links {
@@ -577,6 +601,13 @@ func (dev *Device) AllocatableNumber() int {
 	return 0
 }
 
+// ResetUsed Data reset has been used
+func (dev *Device) ResetUsed() {
+	dev.usedNumber = 0
+	dev.usedCores = 0
+	dev.usedMemory = 0
+}
+
 // GetPodDeviceClaim Retrieve device claim information for a pod,
 // return it if there is actual allocated device claim,
 // otherwise revert back to the device claims pre allocated by the scheduler.
@@ -620,7 +651,25 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 		ret.deviceList[device.GetID()] = gpuallocator.NewDevice(
 			device.GetID(), device.GetUUID(), device.GetBusID())
 	}
-	ret.ResetResourceUsage()
+	// Recompute topology fitness for the fake NodeInfo — tests that exercise
+	// ByNodeGPUTopologyFitness etc. need these populated to make meaningful
+	// assertions. computeMax* are no-ops when gpuTopology/numaTopology is
+	// false, so the existing zero-value path still works for non-topology
+	// tests.
+	if ret.gpuTopology {
+		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(ret.deviceList)
+	}
+	ret.numaTopology = false
+	for _, d := range devices {
+		if d != nil && d.GetNUMA() >= 0 {
+			ret.numaTopology = true
+			break
+		}
+	}
+	if ret.numaTopology {
+		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(ret.deviceMap)
+	}
+	ret.RefreshResourcesData()
 	return ret
 }
 
@@ -637,14 +686,91 @@ type NodeInfo struct {
 	totalCores     int64
 	usedCores      int64
 	maxCapability  float32
-	gpuTopology    bool
-	numaTopology   bool
+	// schedulableDevices is the count of healthy, non-MIG devices on the
+	// node — i.e. cards that COULD host a vGPU, regardless of how many
+	// slots are currently free. NOT a measure of current availability.
+	schedulableDevices int
+	// maxDeviceCores / maxDeviceMemory are the largest single-device TOTAL
+	// core / memory CAPACITY across the node's schedulable devices (again
+	// capacity, not current remaining). Used by the deviceFilter structural
+	// pre-check "can any single card on this node ever hold the largest
+	// container's per-vGPU request?".
+	maxDeviceCores  int64
+	maxDeviceMemory int64
+	gpuTopology     bool
+	numaTopology    bool
+	// maxLinkComponentSize is the largest set of GPUs connected to each
+	// other via at least one P2P link (computed once at NodeInfo construction
+	// time via union-find over deviceList). Used by ByNodeGPUTopologyFitness
+	// so the node-level sort knows whether this node CAN actually satisfy a
+	// requested link-topology group, not just whether it has topology info.
+	// Zero when gpuTopology is false.
+	maxLinkComponentSize int
+	// linkComponentByUUID maps each GPU's UUID to the component-root index it
+	// belongs to in the same union-find that produced maxLinkComponentSize.
+	// Two UUIDs with the same value are reachable via a chain of P2P links;
+	// different values mean they sit in disjoint connectivity islands. Used
+	// by AreDevicesLinked for strict-link allocation validation. Nil/empty
+	// when gpuTopology is false.
+	linkComponentByUUID map[string]int
+	// maxNUMAGroupSize is the largest count of GPUs sharing a single NUMA
+	// node. Equivalent role to maxLinkComponentSize for NUMA-mode sorting.
+	// Zero when numaTopology is false.
+	maxNUMAGroupSize int
 	NodeConfigInfo
 }
 
-func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UID) (*NodeInfo, error) {
+type NodeInfoOption struct {
+	excludedUidSet sets.Set[types.UID]
+	nodePods       []*corev1.Pod
+	nodeConfig     *NodeConfigInfo
+}
+
+type NodeInfoOptionFn func(*NodeInfoOption)
+
+func WithNodeConfig(config *NodeConfigInfo) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		o.nodeConfig = config
+	}
+}
+
+func WithExcludedUidSet(uidSet sets.Set[types.UID]) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		if o.excludedUidSet == nil {
+			o.excludedUidSet = uidSet
+		} else if uidSet != nil {
+			o.excludedUidSet.Insert(uidSet.UnsortedList()...)
+		}
+	}
+}
+
+func WithExcludedPods(uids ...types.UID) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		if o.excludedUidSet == nil {
+			o.excludedUidSet = sets.New[types.UID](uids...)
+		} else {
+			o.excludedUidSet.Insert(uids...)
+		}
+	}
+}
+
+func WithNodePods(pods ...*corev1.Pod) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		if o.nodePods == nil {
+			o.nodePods = pods
+		} else {
+			o.nodePods = append(o.nodePods, pods...)
+		}
+	}
+}
+
+func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error) {
 	klog.V(4).Infof("new nodeInfo for %s", node.Name)
-	gatherInfo, err := NewNodeDeviceGatherInfo(node)
+	infoOption := &NodeInfoOption{}
+	for _, opt := range opts {
+		opt(infoOption)
+	}
+	gatherInfo, err := NewNodeDeviceGatherInfo(node, infoOption)
 	if err != nil {
 		return nil, err
 	}
@@ -658,15 +784,119 @@ func NewNodeInfo(node *corev1.Node, pods []*corev1.Pod, excludedPods ...types.UI
 		numaTopology:   gatherInfo.EnabledNumaAffinity,
 		NodeConfigInfo: gatherInfo.NodeConfigInfo,
 	}
-	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
-		if !slices.ContainsFunc(excludedPods, func(uid types.UID) bool {
-			return pod.UID == uid
-		}) {
-			ret.addPodUsedResources(pod)
-		}
-	})
-	ret.ResetResourceUsage()
+	// Precompute topology fitness signals so the node-level sort can ask
+	// "can this node fit a group of N GPUs?" in O(1). These are constants for
+	// the lifetime of the NodeInfo snapshot.
+	if ret.gpuTopology {
+		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(gatherInfo.DeviceList)
+	}
+	if ret.numaTopology {
+		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(gatherInfo.DeviceMap)
+	}
+	ret.AddPodsUsedResources(infoOption.nodePods, opts...)
+	ret.RefreshResourcesData()
 	return ret, nil
+}
+
+// computeLinkComponents runs union-find (Weighted Quick Union with path
+// compression) over the GPU link graph and returns both the largest
+// connected component size AND a per-UUID component-root map. Two GPUs are
+// connected if their Links slice has at least one P2P link entry, regardless
+// of link type — even a PCIe-cross-CPU edge counts, because membership here
+// only answers "are these GPUs reachable from each other"; link QUALITY
+// ranking happens later inside the bestEffort policy.
+//
+// The byUUID map lets allocateLink verify that the bestEffort-chosen set
+// actually forms a single connected component (bestEffort returns the
+// highest-scoring partition without rejecting score-zero results, so the
+// strict-link contract needs this independent check).
+//
+// Complexity O((V + E)·α(V)) ≈ O(V + E) which is negligible compared to the
+// existing topology parsing cost.
+func computeLinkComponents(devices gpuallocator.DeviceList) (max int, byUUID map[string]int) {
+	n := len(devices)
+	byUUID = make(map[string]int, n)
+	if n == 0 {
+		return 0, byUUID
+	}
+	parent := make([]int, n)
+	rank := make([]int, n)
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(int) int
+	find = func(x int) int {
+		if parent[x] != x {
+			parent[x] = find(parent[x])
+		}
+		return parent[x]
+	}
+	union := func(a, b int) {
+		ra, rb := find(a), find(b)
+		if ra == rb {
+			return
+		}
+		if rank[ra] < rank[rb] {
+			ra, rb = rb, ra
+		}
+		parent[rb] = ra
+		if rank[ra] == rank[rb] {
+			rank[ra]++
+		}
+	}
+	for i, d := range devices {
+		if d == nil {
+			continue
+		}
+		for j, links := range d.Links {
+			if i == j || len(links) == 0 {
+				continue
+			}
+			if j < 0 || j >= n {
+				continue
+			}
+			union(i, j)
+		}
+	}
+	counts := make(map[int]int, n)
+	for i, d := range devices {
+		if d == nil {
+			continue
+		}
+		root := find(i)
+		counts[root]++
+		byUUID[d.UUID] = root
+	}
+	for _, c := range counts {
+		if c > max {
+			max = c
+		}
+	}
+	return max, byUUID
+}
+
+// computeMaxNUMAGroupSize returns the largest count of GPUs sharing one NUMA
+// node. Devices with NUMA index < 0 (unknown) are not grouped — they don't
+// contribute to any NUMA-locality guarantee.
+func computeMaxNUMAGroupSize(deviceMap map[int]*Device) int {
+	groups := make(map[int]int)
+	for _, d := range deviceMap {
+		if d == nil {
+			continue
+		}
+		numa := d.GetNUMA()
+		if numa < 0 {
+			continue
+		}
+		groups[numa]++
+	}
+	max := 0
+	for _, c := range groups {
+		if c > max {
+			max = c
+		}
+	}
+	return max
 }
 
 func (n *NodeInfo) DeepCopy() *NodeInfo {
@@ -679,6 +909,7 @@ func (n *NodeInfo) DeepCopy() *NodeInfo {
 	nodeInfo.deviceMap = deviceMap
 	nodeInfo.deviceIndexMap = maps.Clone(n.deviceIndexMap)
 	nodeInfo.deviceList = slices.Clone(n.deviceList)
+	nodeInfo.linkComponentByUUID = maps.Clone(n.linkComponentByUUID)
 	return &nodeInfo
 }
 
@@ -760,7 +991,7 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 		return false
 	}
 	predicateTimeNanos, err := strconv.ParseInt(predicateTimeStr, 10, 64)
-	if err != nil || predicateTimeNanos <= 0 {
+	if err != nil || predicateTimeNanos <= 0 || predicateTimeNanos >= math.MaxInt64 {
 		return false
 	}
 	// LastTransitionTime is persisted at second precision (RFC3339), so
@@ -770,7 +1001,7 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 		return false
 	}
 	stuckGracePeriod := StuckGracePeriod
-	stuckDuration := time.Since(time.Unix(0, int64(predicateTimeNanos)))
+	stuckDuration := time.Since(time.Unix(0, predicateTimeNanos))
 	// support custom stuck grace period annotations
 	if val, ok := util.HasAnnotation(pod, util.SchedulerStuckGracePeriodAnnotation); ok && val != "" {
 		if gracePeriod, err := time.ParseDuration(val); err != nil {
@@ -792,10 +1023,27 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 	return stuckDuration <= stuckGracePeriod
 }
 
-func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
-	if !util.IsVGPUResourcePod(pod) {
-		return
+func (n *NodeInfo) AddPodsUsedResources(pods []*corev1.Pod, opts ...NodeInfoOptionFn) {
+	if len(pods) > 0 {
+		infoOption := &NodeInfoOption{}
+		for _, opt := range opts {
+			opt(infoOption)
+		}
+		if infoOption.excludedUidSet == nil {
+			infoOption.excludedUidSet = sets.New[types.UID]()
+		}
+		util.PodsOnNodeCallback(pods, n.node, func(pod *corev1.Pod) {
+			if !infoOption.excludedUidSet.Has(pod.UID) {
+				n.AddPodUsedResources(pod)
+			}
+		})
 	}
+}
+
+func (n *NodeInfo) AddPodUsedResources(pod *corev1.Pod) {
+	//if !util.IsVGPUResourcePod(pod) {
+	//	return
+	//}
 
 	// Skip pods whose GPU pre-allocation should not be counted.
 	if !ShouldCountPodDeviceAllocation(pod) {
@@ -804,12 +1052,12 @@ func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
 	// According to the pods' annotations, construct the node allocation state
 	podDeviceClaim := GetPodDeviceClaim(pod)
 	if len(podDeviceClaim) == 0 {
-		klog.InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
+		//klog.InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
 		return
 	}
 	for _, containerClaim := range podDeviceClaim {
 		for _, claim := range containerClaim.DeviceClaims {
-			if err := n.AddUsedResources(claim, false); err != nil {
+			if err := n.AddUsedResources(claim); err != nil {
 				klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, claim.Id, err)
 			}
 		}
@@ -817,24 +1065,35 @@ func (n *NodeInfo) addPodUsedResources(pod *corev1.Pod) {
 }
 
 func (n *NodeInfo) ResetResourceUsage() {
-	n.totalNumber, n.usedNumber, n.totalMemory = 0, 0, 0
-	n.usedMemory, n.totalCores, n.usedCores, n.maxCapability = 0, 0, 0, 0
+	n.usedNumber, n.usedCores, n.usedMemory = 0, 0, 0
+	for _, deviceInfo := range n.deviceMap {
+		deviceInfo.ResetUsed()
+	}
+}
+
+func (n *NodeInfo) RefreshResourcesData() {
+	n.totalNumber, n.totalCores, n.totalMemory = 0, 0, 0
+	n.usedNumber, n.usedCores, n.usedMemory, n.maxCapability = 0, 0, 0, 0
+	n.schedulableDevices, n.maxDeviceCores, n.maxDeviceMemory = 0, 0, 0
 	for _, deviceInfo := range n.deviceMap {
 		// Do not include MIG enabled devices and unhealthy devices in the assignable resources.
 		if !deviceInfo.IsMIG() && deviceInfo.Healthy() {
+			n.schedulableDevices++
 			n.totalNumber += deviceInfo.GetTotalNumber()
 			n.usedNumber += deviceInfo.GetTotalNumber() - deviceInfo.AllocatableNumber()
 			n.totalMemory += deviceInfo.GetTotalMemory()
 			n.usedMemory += deviceInfo.GetTotalMemory() - deviceInfo.AllocatableMemory()
 			n.totalCores += deviceInfo.GetTotalCores()
 			n.usedCores += deviceInfo.GetTotalCores() - deviceInfo.AllocatableCores()
-			n.maxCapability = max(n.maxCapability, deviceInfo.capability)
+			n.maxCapability = max(n.maxCapability, deviceInfo.GetComputeCapability())
+			n.maxDeviceCores = max(n.maxDeviceCores, deviceInfo.GetTotalCores())
+			n.maxDeviceMemory = max(n.maxDeviceMemory, deviceInfo.GetTotalMemory())
 		}
 	}
 }
 
 // AddUsedResources records the used GPU core and memory
-func (n *NodeInfo) AddUsedResources(claim DeviceClaim, updateUsage bool) error {
+func (n *NodeInfo) AddUsedResources(claim DeviceClaim) error {
 	deviceId, ok := n.deviceIndexMap[claim.Uuid]
 	if !ok {
 		return fmt.Errorf("device UUID <%s> does not exist in the NodeInfo <%s>", claim.Uuid, n.name)
@@ -844,7 +1103,7 @@ func (n *NodeInfo) AddUsedResources(claim DeviceClaim, updateUsage bool) error {
 		return fmt.Errorf("device ID <%d> does not exist in the NodeInfo <%s>", deviceId, n.name)
 	}
 	device.addUsedResources(claim.Cores, claim.Memory)
-	if updateUsage && !device.IsMIG() && device.Healthy() {
+	if !device.IsMIG() && device.Healthy() {
 		n.usedNumber++
 		n.usedCores += claim.Cores
 		n.usedMemory += claim.Memory
@@ -860,6 +1119,30 @@ func (n *NodeInfo) GetName() string {
 // GetDeviceCount returns the number of GPU devices
 func (n *NodeInfo) GetDeviceCount() int {
 	return len(n.deviceMap)
+}
+
+// GetDeviceIndexMap returns the uuid and index mapping of the devices
+func (n *NodeInfo) GetDeviceIndexMap() map[string]int {
+	return n.deviceIndexMap
+}
+
+// GetSchedulableDeviceCount returns the count of healthy, non-MIG devices
+// on the node — cards that COULD host a vGPU. This is capacity, not current
+// availability: a fully-allocated card still counts.
+func (n *NodeInfo) GetSchedulableDeviceCount() int {
+	return n.schedulableDevices
+}
+
+// GetMaxDeviceMemory returns the largest single-device TOTAL memory CAPACITY
+// across the node's schedulable devices (not the remaining/free memory).
+func (n *NodeInfo) GetMaxDeviceMemory() int64 {
+	return n.maxDeviceMemory
+}
+
+// GetMaxDeviceCores returns the largest single-device TOTAL core CAPACITY
+// across the node's schedulable devices (not the remaining/free cores).
+func (n *NodeInfo) GetMaxDeviceCores() int64 {
+	return n.maxDeviceCores
 }
 
 // GetDeviceMap returns each GPU device map structure
@@ -947,4 +1230,48 @@ func (n *NodeInfo) HasGPUTopology() bool {
 // HasNUMATopology Return whether there is GPU numa topology information
 func (n *NodeInfo) HasNUMATopology() bool {
 	return n.numaTopology
+}
+
+// MaxLinkComponentSize returns the largest number of GPUs mutually reachable
+// via P2P links on this node. A node-level sort can use this to determine
+// whether the node CAN host a topology-aware group of size N (component
+// size >= N) — strictly stronger than HasGPUTopology() which only confirms
+// link metadata was reported.
+func (n *NodeInfo) MaxLinkComponentSize() int {
+	return n.maxLinkComponentSize
+}
+
+// AreDevicesLinked reports whether every UUID in the set belongs to the same
+// NVLink-connected component. Used by strict-link allocation to reject sets
+// that bestEffort returned as "highest-scoring" even though their actual link
+// score is zero (i.e. the chosen GPUs sit in disjoint connectivity islands).
+//
+// Sets of size <= 1 are trivially connected. An unknown UUID counts as a
+// failure (we cannot certify what we don't know about). Returns true on
+// nodes without GPU topology only for the trivial-size case — any multi-GPU
+// set on a non-topology node correctly returns false, since "no link
+// metadata" means we cannot prove connectivity.
+func (n *NodeInfo) AreDevicesLinked(uuids []string) bool {
+	if len(uuids) <= 1 {
+		return true
+	}
+	first, ok := n.linkComponentByUUID[uuids[0]]
+	if !ok {
+		return false
+	}
+	for _, u := range uuids[1:] {
+		comp, ok := n.linkComponentByUUID[u]
+		if !ok || comp != first {
+			return false
+		}
+	}
+	return true
+}
+
+// MaxNUMAGroupSize returns the largest number of GPUs sharing a single NUMA
+// node. NUMA-mode sorting checks this against the pod's request so we avoid
+// ranking nodes high that "have NUMA topology" but couldn't actually fit a
+// same-NUMA group.
+func (n *NodeInfo) MaxNUMAGroupSize() int {
+	return n.maxNUMAGroupSize
 }

@@ -11,7 +11,6 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	pkgclient "github.com/coldzerofear/vgpu-manager/pkg/client"
-	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgwebhook "github.com/coldzerofear/vgpu-manager/pkg/webhook"
@@ -218,8 +217,6 @@ func main() {
 		if opt.VGPUDeviceClassName == "" {
 			klog.Fatalln("When DRA resource conversion is enabled, an available vgpu device class must be specified")
 		}
-		// DRA defaults to enabling multi card GPU topology management.
-		device.SetGPUTopologyEnabled(true)
 	}
 
 	if opt.CombinedResourceClaim && !opt.DefaultConvertToDRA {
