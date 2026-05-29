@@ -2163,6 +2163,44 @@ void init_nvml_to_host_device_index() {
   }
 }
 
+/* fork() child handler: re-initialise the four file-scope mutexes that
+ * protect loader.c hot paths. Without this, if a parent thread was inside
+ * any of these critical sections at the instant of fork(), the child
+ * inherits the mutex bit as 'locked' but the owning thread has vanished
+ * -- every subsequent pthread_mutex_lock in the child blocks forever.
+ *
+ *   - g_memory_node_lock  (vmem alloc/free accounting)
+ *   - tid_dlsym_lock      (dlsym recursion-guard cache — touched on every
+ *                          dlsym call from any thread)
+ *   - device_index_mutex  (cuda<->nvml<->host index lookup, frequent)
+ *   - init_config_mutex   (taken on every load_necessary_data() call,
+ *                          which runs at every cuLaunchKernel entry --
+ *                          this is the highest-probability deadlock path)
+ *
+ * pthread_mutex_init() on an already-initialised mutex is technically UB
+ * per POSIX but is safe in practice on glibc/musl when no one currently
+ * holds it -- which is exactly the post-fork child case (only one thread
+ * exists and it is this handler).
+ *
+ * tid_dlsyms[] is a recursion-guard cache keyed by pthread_t; parent's
+ * pthread_t values are stale in the child. Stale entries are functionally
+ * safe (they miss in check_tid_dlsyms() and fall through to a real
+ * dlsym), but pthread_t value recycling could in theory produce a false
+ * positive that mis-flags a child dlsym as recursive. Clear it.
+ *
+ * Called from cuda_hook.c's child_after_fork() (registered via
+ * pthread_atfork in a library-load constructor). See also HAMi-core PR
+ * #199 which addresses the related-but-not-identical pthread_once
+ * post-init flag issue. */
+void loader_child_after_fork(void) {
+  pthread_mutex_init(&g_memory_node_lock, NULL);
+  pthread_mutex_init(&tid_dlsym_lock,     NULL);
+  pthread_mutex_init(&device_index_mutex, NULL);
+  pthread_mutex_init(&init_config_mutex,  NULL);
+  memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
+  tid_dlsym_count = 0;
+}
+
 void load_necessary_data() {
   // First, determine the driver version
   pthread_once(&g_cuda_ver_init, read_version_from_proc);

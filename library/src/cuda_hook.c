@@ -65,6 +65,12 @@ extern int get_aimd_md_divisor(int *out);
 extern int get_aimd_eff_ratio(int *out);
 extern int get_aimd_ai_base_div(int *out);
 
+/* fork() child handler implemented in loader.c -- re-inits the four
+ * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
+ * device_index_mutex, init_config_mutex) and clears the tid_dlsyms
+ * recursion-guard cache. Called from this file's child_after_fork(). */
+extern void loader_child_after_fork(void);
+
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 
 /* `= {0}` relies on C's rule that any explicit initializer zero-fills the
@@ -150,6 +156,12 @@ static void child_after_fork(void) {
      * default mutex) and clears any phantom held-state. */
     pthread_mutex_init(&g_gap_lock[i], NULL);
   }
+  /* Loader-level mutexes have the exact same held-at-fork hazard --
+   * delegated since those mutexes are file-scope static in loader.c. The
+   * most dangerous one is init_config_mutex (taken from load_necessary_data
+   * on every launch hook entry); the others (tid_dlsym_lock, device_index_
+   * mutex, g_memory_node_lock) are also hot enough to warrant the reset. */
+  loader_child_after_fork();
 }
 
 __attribute__((constructor))

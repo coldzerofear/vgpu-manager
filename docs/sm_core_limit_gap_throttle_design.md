@@ -348,6 +348,25 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
 - `g_sm_controller`(函数指针):父子地址空间布局同(同代码段),指针有效
 - `g_sm_controller_kind` / AIMD 参数:从 env 读,父子同 env → 同值
 - watcher 内部数组 `shares/sys_frees/up_limits/...`:子进程重启 watcher 时,watcher 自己 init 循环里全部清零
+
+### 7.2 loader.c 的 fork 危害
+
+`child_after_fork()` 还会调用 `loader_child_after_fork()`(定义在 loader.c)处理 4 个 loader 级 mutex 与一个线程键值缓存,它们都有相同的"父持锁瞬间 fork → 子永久 EBUSY"问题:
+
+| 资源 | 用途 | 风险等级 |
+|---|---|---|
+| `init_config_mutex` | 保护 `load_controller_configuration` —— **每次 launch hook 入口都会跑到这里**(经 `load_necessary_data`) | **最高**:绝对会触及,父持锁瞬间 fork 必死锁 |
+| `tid_dlsym_lock` | 保护 `tid_dlsyms` 缓存,每次 dlsym 拦截都要拿 | 高:worker 线程频繁触发 |
+| `device_index_mutex` | 保护 `cuda↔nvml↔host` 设备索引查找,被多处调用 | 中:每次需要做索引转换都要拿 |
+| `g_memory_node_lock` | 保护 vmem 节点账本 | 中:仅 vmem 路径触及 |
+| `tid_dlsyms[]` 缓存 | 按 `pthread_t` 键值的 dlsym 递归保护表 | 低:陈旧条目仅是 cache miss,但理论上 `pthread_t` 复用可能假阳性匹配 |
+
+`loader_child_after_fork()` 用 `pthread_mutex_init` 对 4 个 mutex 重新初始化,清空 `tid_dlsyms[]` 数组。被 `pthread_atfork` 通过 cuda_hook.c 的统一入口调用。
+
+**注意不重置的 loader.c 内部状态**:
+- `g_cuda_ver_init`/`g_cuda_lib_init`/`g_nvml_lib_init`/`init_nvml_host_index`(loader 的 4 个 `pthread_once_t`):它们守护的是**库加载/版本探测**这类系统级幂等结果,通过 mmap/dlopen 父子共享,跳过等价于"复用已有结果",**正确**。
+- `init_config_changed_pid`(`static volatile pid_t`):`load_controller_configuration` 用它做 PID-比对去重(`init_config_changed_pid == getpid()`),fork 后子进程的 `getpid()` 自然不等于父的值 → 自动触发重 init,**设计上已 fork-safe**。
+- signal/atexit handler:每次 init 重注册,父子各自处理自己的 PID 清理,**正确**。
 - **与令牌桶共存**:GAP kernel 仍经 `rate_limiter` 扣减令牌(只是不阻塞);watcher 照常补充。`core_limit` 关闭时 GAP 路径在首行短路,BATCH 行为零变化。两条路径有清晰分工(见下"双重节流分析"):令牌桶 = 累积消费率控制;GAP = 单发占比控制。
 - **双重节流分析**(单次启动是否会同时被 rate_limiter 睡眠 + GAP sleep):
   - **单线程稳态(常见):基本不会**。GAP 一旦触发,`gap_end` 戳 `last_launch_ns = now`,下一次启动若马上来,`now - last < 200ms` → BATCH 路径不再进 GAP。期间 sync + sleep(~百毫秒级)足够 watcher 把令牌补满,`rate_limiter` 也不睡。GAP 在"第一次空闲后"触发一次,后续靠令牌桶兜底,**两者时间维度上接力,不在同一次启动叠加**。
