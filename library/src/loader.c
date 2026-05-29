@@ -1466,7 +1466,7 @@ int write_file_to_config_path(resource_data_t* data) {
   if (unlikely(file_exist(VGPU_CONFIG_PATH) != 0)) {
     mkdir(VGPU_CONFIG_PATH, 0755);
   }
-  int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+  int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
   if (unlikely(fd == -1)) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     ret = 1;
