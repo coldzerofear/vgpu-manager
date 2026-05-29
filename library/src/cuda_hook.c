@@ -139,10 +139,24 @@ static volatile int64_t g_last_launch_ns[MAX_DEVICE_COUNT] = {0};
  *     vanishes in the child but the mutex bit stays set, so every trylock
  *     in the child returns EBUSY forever).
  *
- * The fix: pthread_atfork(NULL, NULL, child_after_fork) registered in a
- * library-load constructor. The child handler reverts every fork-unsafe
- * piece of process-local state we own; the next launch wrapper then sees
- * g_init_set fresh and re-runs initialization() naturally. */
+ * The fix: pthread_atfork(NULL, NULL, child_after_fork) registered lazily
+ * the first time initialization() runs (i.e. inside the pthread_once that
+ * the launch hooks fire). We deliberately do NOT use a constructor
+ * attribute -- the build-time check_no_constructors.sh forbids it, since
+ * .init_array entries fire during dynamic-linker setup of the host
+ * process, in the same window where libvulkan/libGLX/libEGL are being
+ * initialized; pthread_atfork / glibc-internal-lock activity there is a
+ * known crash vector (cf. HAMi-core PR #182 Step C).
+ *
+ * Lazy registration is still complete: any fork in a process that has
+ * ever called cuLaunchKernel will have the handler registered; a fork in
+ * a process that hasn't called cuLaunchKernel inherits an unmodified
+ * g_init_set (still PTHREAD_ONCE_INIT) so the child runs initialization()
+ * normally on its first launch -- no atfork handler needed for that path.
+ *
+ * The child handler reverts every fork-unsafe piece of process-local
+ * state we own; the next launch wrapper then sees g_init_set fresh and
+ * re-runs initialization() naturally. */
 static void child_after_fork(void) {
   g_init_set = (pthread_once_t)PTHREAD_ONCE_INIT;
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
@@ -162,14 +176,6 @@ static void child_after_fork(void) {
    * on every launch hook entry); the others (tid_dlsym_lock, device_index_
    * mutex, g_memory_node_lock) are also hot enough to warrant the reset. */
   loader_child_after_fork();
-}
-
-__attribute__((constructor))
-static void register_fork_handler(void) {
-  /* Registered before any user code (and any fork) can run. The handler
-   * itself is idempotent, so re-registration in nested-fork scenarios is
-   * harmless -- but pthread_atfork only registers once per dlopen anyway. */
-  (void)pthread_atfork(NULL, NULL, child_after_fork);
 }
 
 typedef enum {
@@ -888,6 +894,13 @@ static void initialization() {
     LOGGER(ERROR, "initialization of sm watcher failed");
     return;
   }
+  /* Register the fork-child handler lazily here (no library-load
+   * constructor allowed -- see the block comment above child_after_fork()
+   * for why). pthread_once guarantees one-time registration per process,
+   * and we run it before init_device_cuda_cores / balance_batches so the
+   * handler is in place before any thread we create can race with a fork. */
+  (void)pthread_atfork(NULL, NULL, child_after_fork);
+
   int device_count;
   init_device_cuda_cores(&device_count);
   /* Select the SM throttle controller (delta/aimd) before watcher threads
