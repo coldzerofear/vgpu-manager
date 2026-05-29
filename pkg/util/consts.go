@@ -213,8 +213,9 @@ const (
 type AssignedPhase string
 
 const (
-	AssignPhaseSucceed    AssignedPhase = "succeed"
+	AssignPhaseFiltering  AssignedPhase = "filtering"
 	AssignPhaseAllocating AssignedPhase = "allocating"
+	AssignPhaseSucceed    AssignedPhase = "succeed"
 	AssignPhaseFailed     AssignedPhase = "failed"
 )
 

@@ -128,7 +128,7 @@ func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *e
 	}
 	if pod.Spec.NodeName != "" {
 		return &extenderv1.ExtenderFilterResult{
-			Error: "Pod has specified nodes to " + pod.Spec.NodeName,
+			Error: fmt.Sprintf("Pod has been bound to node %q", pod.Spec.NodeName),
 		}
 	}
 	// Parse pod-wide scheduling inputs ONCE — req feeds both the node-
