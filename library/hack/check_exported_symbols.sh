@@ -50,9 +50,19 @@ FAMILIES=(
   # cuda_hook.c rather than via is_abi_conflict_base().
 )
 
-# Snapshot exported defined text symbols.
+# Snapshot exported defined text symbols (functions only — used by the
+# ABI-conflict family pair check below, which is meaningless for data).
 EXPORTED=$(nm --defined-only --extern-only "${SO_PATH}" \
            | awk '$2 == "T" || $2 == "W" { print $3 }' | sort -u)
+
+# Snapshot ALL defined external symbols (functions + data). Used by the
+# leak / bulk-pattern checks: internal data tables such as cuda_hooks_entry
+# (nm type D), cuda_hook_nums (R), nvml_library_entry (D) leak via .dynsym
+# just like internal helper functions do, and they collide / are dlsym-
+# observable the same way. Filtering to T/W would miss the entire data
+# class — that is exactly the regression that prompted adding this set.
+EXPORTED_ALL=$(nm --defined-only --extern-only "${SO_PATH}" \
+               | awk '{ print $3 }' | sort -u)
 
 errors=0
 missing_list=()
@@ -131,11 +141,24 @@ FORBIDDEN_HELPERS=(
   malloc_gpu_virt_memory
   free_gpu_virt_memory
   print_global_vgpu_config
+  # Internal data tables shared between cuda_hook.c / nvml_hook.c / loader.c
+  # via extern declarations. They must be linker-global at static-link time
+  # but MUST NOT leak into .dynsym — the broad "cu*"/"nvml*" globs in the
+  # version script previously caught them by accident (they start with
+  # cu/nvml but use snake_case rather than CUDA's PascalCase). The script
+  # now uses cu[A-Z]*/nvml[A-Z]* to discriminate; these entries are the
+  # explicit regression guards that fail loudly if anyone loosens the glob.
+  cuda_hooks_entry
+  cuda_library_entry
+  cuda_hook_nums
+  nvml_hooks_entry
+  nvml_library_entry
+  nvml_hook_nums
 )
 
 leaked_list=()
 for sym in "${FORBIDDEN_HELPERS[@]}"; do
-  if grep -qxF "${sym}" <<< "${EXPORTED}"; then
+  if grep -qxF "${sym}" <<< "${EXPORTED_ALL}"; then
     leaked_list+=("${sym}")
   fi
 done
@@ -154,13 +177,18 @@ if (( ${#leaked_list[@]} > 0 )); then
   exit 1
 fi
 
-# Bulk pattern: anything outside the four allowed export families is
-# also a regression. Report (don't fail) so a deliberate addition can
-# be triaged.
+# Bulk pattern: anything outside the allowed export families is also
+# a regression. The regex mirrors the version script's globs — only
+# cu[A-Z]* / cudbg* (CUDA debugger API, lowercase dbg) / nvml[A-Z]* /
+# _cu[A-Z]* (defensive — _cu trampolines should never reach .dynsym
+# but if they did, they are at least CUDA-related) / dlsym /
+# vkNegotiateLoaderLayerInterfaceVersion are allowed. Runs against
+# EXPORTED_ALL so leaked data symbols (cuda_hooks_entry & friends)
+# are caught too.
 unexpected=$(comm -23 \
-  <(printf '%s\n' "${EXPORTED}" | sort -u) \
-  <(printf '%s\n' "${EXPORTED}" \
-      | grep -E '^(cu|_cu|nvml)' \
+  <(printf '%s\n' "${EXPORTED_ALL}" | sort -u) \
+  <(printf '%s\n' "${EXPORTED_ALL}" \
+      | grep -E '^(cu[A-Z]|cudbg|_cu[A-Z]|nvml[A-Z])' \
       | sort -u))
 unexpected=$(printf '%s\n' "${unexpected}" \
               | grep -vxE 'dlsym|vkNegotiateLoaderLayerInterfaceVersion' \
@@ -168,8 +196,8 @@ unexpected=$(printf '%s\n' "${unexpected}" \
 
 if [[ -n "${unexpected}" ]]; then
   echo "[FAIL] $(basename "${SO_PATH}") exports symbol(s) outside the"
-  echo "       documented ABI surface (cu* / _cu* / nvml* / dlsym /"
-  echo "       vkNegotiateLoaderLayerInterfaceVersion):"
+  echo "       documented ABI surface (cu[A-Z]* / cudbg* / _cu[A-Z]* /"
+  echo "       nvml[A-Z]* / dlsym / vkNegotiateLoaderLayerInterfaceVersion):"
   while IFS= read -r s; do echo "         - ${s}"; done <<< "${unexpected}"
   echo "       extend deploy/libvgpu-control.exports.ld global: list"
   echo "       AND this script's allow-list if intentional."
@@ -177,5 +205,5 @@ if [[ -n "${unexpected}" ]]; then
 fi
 
 echo "[PASS] internal-symbol leak check: ${#FORBIDDEN_HELPERS[@]} known internal" \
-     "helpers absent from .dynsym; export surface confined to" \
-     "cu* / nvml* / dlsym / vkNegotiateLoaderLayerInterfaceVersion."
+     "helpers/tables absent from .dynsym; export surface confined to" \
+     "cu[A-Z]* / cudbg* / nvml[A-Z]* / dlsym / vkNegotiateLoaderLayerInterfaceVersion."

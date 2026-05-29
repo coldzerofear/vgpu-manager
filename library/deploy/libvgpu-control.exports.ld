@@ -20,17 +20,33 @@
  * tighter visibility discipline).
  *
  * Conventions:
- *   - cu*    matches every CUDA driver entry point we hook. NOT prefixed
- *            with underscore: _cu* helpers in cuda_originals.c (e.g.
- *            _cuCtxCreate, _cuMemAlloc) are intentional INTERNAL
- *            multi-ABI fallback trampolines and MUST stay hidden.
- *   - nvml*  every NVML hook entry point we publish.
- *   - dlsym  the LD_PRELOAD dlsym(3) interceptor in loader.c. Required
- *            for the LD_PRELOAD CUDA-hook mechanism to work at all.
+ *   - cu[A-Z]*   matches every CUDA driver entry point we hook. The
+ *                explicit [A-Z] enforces CUDA's PascalCase function naming
+ *                (cuInit, cuMemAlloc, cuGetProcAddress, ...). NOT prefixed
+ *                with underscore: _cu* helpers in cuda_originals.c (e.g.
+ *                _cuCtxCreate, _cuMemAlloc) are intentional INTERNAL
+ *                multi-ABI fallback trampolines and MUST stay hidden.
+ *                The [A-Z] discriminator is what keeps internal globals
+ *                whose names share the "cu" prefix but use snake_case —
+ *                cuda_hooks_entry, cuda_library_entry, cuda_hook_nums —
+ *                from being accidentally promoted to .dynsym by the
+ *                broader "cu*" glob (regression caught via nm -D).
+ *   - cudbg*     the CUDA debugger API family (cudbgApiInit, cudbgGetAPI,
+ *                ...). NVIDIA names these with a lowercase "dbg" rather
+ *                than PascalCase, so cu[A-Z]* would miss them. Listed
+ *                explicitly because they ARE legitimate hooks our loader
+ *                registers in cuda_library_entry[]; verified that no
+ *                internal symbol uses a cudbg_ snake_case prefix.
+ *   - nvml[A-Z]* mirror of cu[A-Z]*, for NVML PascalCase entry points
+ *                (nvmlInit, nvmlDeviceGetMemoryInfo, ...). Same
+ *                discriminator excludes nvml_hooks_entry /
+ *                nvml_library_entry / nvml_hook_nums.
+ *   - dlsym      the LD_PRELOAD dlsym(3) interceptor in loader.c. Required
+ *                for the LD_PRELOAD CUDA-hook mechanism to work at all.
  *   - vkNegotiateLoaderLayerInterfaceVersion is the only Vulkan symbol
- *            that ever appears in our .dynsym. We deliberately do NOT
- *            expose v1-fallback names (vkGetInstanceProcAddr,
- *            vkGetDeviceProcAddr) — see commentary in src/vulkan/layer.c.
+ *                that ever appears in our .dynsym. We deliberately do NOT
+ *                expose v1-fallback names (vkGetInstanceProcAddr,
+ *                vkGetDeviceProcAddr) — see commentary in src/vulkan/layer.c.
  *
  * Adding a new public symbol means adding it here AND ideally extending
  * hack/check_exported_symbols.sh's positive/negative assertions.
@@ -41,8 +57,9 @@
  */
 {
   global:
-    cu*;
-    nvml*;
+    cu[A-Z]*;
+    cudbg*;
+    nvml[A-Z]*;
     dlsym;
     vkNegotiateLoaderLayerInterfaceVersion;
 
