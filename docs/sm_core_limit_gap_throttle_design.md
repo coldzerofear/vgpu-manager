@@ -330,6 +330,24 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
 - **启动失败**：`gap_end` 在 `launch_ret!=CUDA_SUCCESS` 时跳过测量，仍释放锁、刷新时间戳。
 - **尖峰钳制**：`GAP_MAX_SLEEP_MS` 防止误测导致长时间卡死。
 - **内存可见性**：跨线程共享量按职责分两类 ——（1）`up_limits`、`g_last_launch_ns` 用 `volatile`(watcher/launch 跨线程、对齐标量、无锁、与 `g_cur_cuda_cores` 同约定)；（2）`g_gap_dc`、`g_gap_evt_ready`、`g_gap_start/end` **始终在 `g_gap_lock` 内访问**,由互斥锁的 acquire/release 保证可见性,无需 `volatile`。详见上文与 §8。
+- **fork() 子进程安全**:GAP 路径全局(`g_gap_evt_ready`/`g_gap_start/end`/`g_gap_lock`/`g_last_launch_ns`)以及外层的 `g_init_set` `pthread_once_t` 都通过库构造函数注册的 `pthread_atfork(NULL, NULL, child_after_fork)` 在子进程中复位,详见 §7.1。这与 [HAMi-core PR #199](https://github.com/Project-HAMi/HAMi-core/pull/199) 处理的是同一类继承问题,我们的修复额外覆盖 GAP 路径特有的 cuEvent 句柄(父 CUcontext 失效)与 mutex 状态(父线程持锁瞬间 fork → 子永久 EBUSY)。回归用例:[test/test_fork_inherit.cu](../library/test/test_fork_inherit.cu)。
+
+### 7.1 fork() 后的状态重置详解
+
+`pthread_atfork` 的 child handler 在子进程里(此刻只有调用 fork 的那一个线程)执行:
+
+| 重置项 | 父继承值 | 不重置的后果 | 重置后效果 |
+|---|---|---|---|
+| `g_init_set = PTHREAD_ONCE_INIT` | DONE | 子进程下次 launch 跳过 `initialization()` → watcher 线程不会重新 `pthread_create`(fork 只复制调用线程)→ 控制器永远不再运行 | 下次 launch 触发 `pthread_once` → 重跑 `initialization()` → 重新启 watcher |
+| `g_gap_evt_ready[i] = 0` | 1 | `gap_events_ensure` 跳过懒创建 → 用父 CUcontext 失效的 CUevent 句柄 → `cuEventRecord` 失败 | 重新懒创建子进程自己的 event 对 |
+| `g_gap_start/end[i] = NULL` | 父 CUcontext 句柄 | 同上 | 干净起点 |
+| `pthread_mutex_init(&g_gap_lock[i])` | 任意(可能"已加锁") | 若 fork 时父线程正持锁 → 子永久 `EBUSY` → GAP 路径永久跳过(沉默退化) | 锁清零 |
+| `g_last_launch_ns[i] = 0` | 父时间戳 | 仅 gap 检测时序略偏 | 无害,清掉求一致 |
+
+不需要重置的:
+- `g_sm_controller`(函数指针):父子地址空间布局同(同代码段),指针有效
+- `g_sm_controller_kind` / AIMD 参数:从 env 读,父子同 env → 同值
+- watcher 内部数组 `shares/sys_frees/up_limits/...`:子进程重启 watcher 时,watcher 自己 init 循环里全部清零
 - **与令牌桶共存**:GAP kernel 仍经 `rate_limiter` 扣减令牌(只是不阻塞);watcher 照常补充。`core_limit` 关闭时 GAP 路径在首行短路,BATCH 行为零变化。两条路径有清晰分工(见下"双重节流分析"):令牌桶 = 累积消费率控制;GAP = 单发占比控制。
 - **双重节流分析**(单次启动是否会同时被 rate_limiter 睡眠 + GAP sleep):
   - **单线程稳态(常见):基本不会**。GAP 一旦触发,`gap_end` 戳 `last_launch_ns = now`,下一次启动若马上来,`now - last < 200ms` → BATCH 路径不再进 GAP。期间 sync + sleep(~百毫秒级)足够 watcher 把令牌补满,`rate_limiter` 也不睡。GAP 在"第一次空闲后"触发一次,后续靠令牌桶兜底,**两者时间维度上接力,不在同一次启动叠加**。

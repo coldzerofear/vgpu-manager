@@ -112,6 +112,54 @@ static int              g_gap_evt_ready[MAX_DEVICE_COUNT]  = {0};
 static int              g_gap_dc[MAX_DEVICE_COUNT]         = {0};
 static volatile int64_t g_last_launch_ns[MAX_DEVICE_COUNT] = {0};
 
+/* ---- fork() child handler ------------------------------------------------ *
+ * Python multiprocessing / torch.multiprocessing / subprocess+fork patterns
+ * fork() after the parent has already triggered initialization(). Without a
+ * handler, the child inherits:
+ *
+ *   - g_init_set marked as completed -> pthread_once() in launch wrappers
+ *     skips initialization() entirely. balance_batches() never re-spawns
+ *     the watcher threads (fork() only copies the calling thread), so the
+ *     SM controller stops running in the child -- no throttling at all.
+ *     Same bug shape as Project-HAMi/HAMi-core PR #199.
+ *
+ *   - GAP-path cuEvent handles (g_gap_start/end[]) from the parent's CUDA
+ *     context, which are invalid in the child's context. g_gap_evt_ready=1
+ *     means gap_events_ensure() skips lazy re-creation, so the first
+ *     gap_begin() in the child records into a stale handle and fails.
+ *
+ *   - g_gap_lock[] possibly in the "held" state if a parent thread was
+ *     inside the critical section at the instant of fork (the owner thread
+ *     vanishes in the child but the mutex bit stays set, so every trylock
+ *     in the child returns EBUSY forever).
+ *
+ * The fix: pthread_atfork(NULL, NULL, child_after_fork) registered in a
+ * library-load constructor. The child handler reverts every fork-unsafe
+ * piece of process-local state we own; the next launch wrapper then sees
+ * g_init_set fresh and re-runs initialization() naturally. */
+static void child_after_fork(void) {
+  g_init_set = (pthread_once_t)PTHREAD_ONCE_INIT;
+  for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
+    g_gap_evt_ready[i]  = 0;
+    g_gap_start[i]      = NULL;
+    g_gap_end[i]        = NULL;
+    g_last_launch_ns[i] = 0;
+    /* Re-init in case a parent thread held the lock at the moment of fork.
+     * POSIX leaves the inherited mutex state undefined; glibc re-init on a
+     * never-destroyed mutex is safe (no resource leak for a non-robust
+     * default mutex) and clears any phantom held-state. */
+    pthread_mutex_init(&g_gap_lock[i], NULL);
+  }
+}
+
+__attribute__((constructor))
+static void register_fork_handler(void) {
+  /* Registered before any user code (and any fork) can run. The handler
+   * itself is idempotent, so re-registration in nested-fork scenarios is
+   * harmless -- but pthread_atfork only registers once per dlopen anyway. */
+  (void)pthread_atfork(NULL, NULL, child_after_fork);
+}
+
 typedef enum {
   MEMORY_PATH_GPU = 0,
   MEMORY_PATH_UVA = 1,
@@ -878,7 +926,7 @@ int split_str(char *line, char *key, char *value, char d) {
 
 int read_cgroup(char *pid_path, char *cgroup_key, char *cgroup_value) {
   int ret = -1;
-  FILE *f = fopen(pid_path, "r");
+  FILE *f = fopen(pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (f == NULL) {
     return ret;
   }
@@ -936,7 +984,7 @@ int check_device_pid_in_cgroupv2_container(unsigned int device_pid) {
     return ret;
   }
 
-  FILE *fp = fopen(host_pid_path, "r");
+  FILE *fp = fopen(host_pid_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (!fp) {
     LOGGER(VERBOSE, "read host pid path %s failed: %s", host_pid_path, strerror(errno));
     return ret;

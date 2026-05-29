@@ -302,7 +302,7 @@ int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size) {
     return -1;
   }
 
-  FILE *fp = fopen(file_path, "r");
+  FILE *fp = fopen(file_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (!fp) {
     LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
     *pids_size = 0;
@@ -354,7 +354,7 @@ int library_exists_in_process_maps(char const *libName, unsigned int pid) {
   char fileName[512];
   snprintf(fileName, sizeof(fileName), "/proc/%d/maps", pid);
 
-  FILE *fMaps = fopen(fileName, "r");
+  FILE *fMaps = fopen(fileName, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (NULL == fMaps) {
     return ret;
   }
@@ -432,7 +432,7 @@ int is_zombie_proc(int pid) {
   char path[64];
   snprintf(path, sizeof(path), "/proc/%d/stat", pid);
 
-  FILE *fp = fopen(path, "r");
+  FILE *fp = fopen(path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (fp == NULL) return -1;
 
   int unused_pid;

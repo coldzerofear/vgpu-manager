@@ -1251,7 +1251,7 @@ static void read_version_from_proc(void) {
   char *line = NULL;
   size_t len = 0;
 
-  FILE *fp = fopen(DRIVER_VERSION_PATH, "r");
+  FILE *fp = fopen(DRIVER_VERSION_PATH, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (fp == NULL) {
     LOGGER(VERBOSE, "can't open %s, error %s", DRIVER_VERSION_PATH, strerror(errno));
     return;
