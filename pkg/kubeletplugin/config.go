@@ -28,6 +28,8 @@ type Flags struct {
 	AdditionalXidsToIgnore        string
 	HostManagerDir                string
 	CGroupDriver                  string
+	DeviceCoresRatio              uint
+	DeviceMemoryRatio             uint
 }
 
 type Config struct {

@@ -158,6 +158,20 @@ func newApp() *cli.App {
 			Destination: &flags.CGroupDriver,
 			EnvVars:     []string{"CGROUP_DRIVER"},
 		},
+		&cli.UintFlag{
+			Name:        "device-cores-ratio",
+			Usage:       "Nvidia vGPU device cores oversold ratio",
+			Value:       100,
+			Destination: &flags.DeviceCoresRatio,
+			EnvVars:     []string{"DEVICE_CORES_RATIO"},
+		},
+		&cli.UintFlag{
+			Name:        "device-memory-ratio",
+			Usage:       "Nvidia vGPU device memory oversold ratio",
+			Value:       100,
+			Destination: &flags.DeviceMemoryRatio,
+			EnvVars:     []string{"DEVICE_MEMORY_RATIO"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.KubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)

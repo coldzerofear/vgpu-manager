@@ -42,11 +42,21 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 	attr["type"] = resourceapi.DeviceAttribute{
 		StringValue: ptr.To(VGpuDeviceType),
 	}
+
+	deviceCoresRatio := uint(100)
+	deviceMemoryRatio := uint(100)
+	if globalConfig != nil {
+		deviceCoresRatio = globalConfig.DeviceCoresRatio
+		deviceMemoryRatio = globalConfig.DeviceMemoryRatio
+	}
+
+	totalMemory := float64(d.Memory.Total) * (float64(deviceMemoryRatio) / float64(util.HundredCore))
+
 	attr["coreRatio"] = resourceapi.DeviceAttribute{
-		IntValue: ptr.To[int64](100),
+		IntValue: ptr.To[int64](int64(deviceCoresRatio)),
 	}
 	attr["memoryRatio"] = resourceapi.DeviceAttribute{
-		IntValue: ptr.To[int64](100),
+		IntValue: ptr.To[int64](int64(deviceMemoryRatio)),
 	}
 	if numaNode, ok := d.GetNumaNode(); ok {
 		attr["numa"] = resourceapi.DeviceAttribute{
@@ -70,12 +80,12 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 				},
 			},
 			MemoryResourceName: {
-				Value: *resource.NewQuantity(int64(d.Memory.Total), resource.BinarySI),
+				Value: *resource.NewQuantity(int64(totalMemory), resource.BinarySI),
 				RequestPolicy: &resourceapi.CapacityRequestPolicy{
-					Default: resource.NewQuantity(int64(d.Memory.Total), resource.BinarySI),
+					Default: resource.NewQuantity(int64(totalMemory), resource.BinarySI),
 					ValidRange: &resourceapi.CapacityRequestPolicyRange{
 						Min:  resource.NewQuantity(int64(units.MiB), resource.BinarySI),
-						Max:  resource.NewQuantity(int64(d.Memory.Total), resource.BinarySI),
+						Max:  resource.NewQuantity(int64(totalMemory), resource.BinarySI),
 						Step: resource.NewQuantity(int64(units.MiB), resource.BinarySI),
 					},
 				},
@@ -94,12 +104,15 @@ type VGPUManager struct {
 	clientSets      pkgflags.ClientSets
 }
 
-func NewVGPUManager(deviceLib *deviceLib, hostManagerPath string, clientSets pkgflags.ClientSets) *VGPUManager {
+var globalConfig *Config
+
+func NewVGPUManager(deviceLib *deviceLib, config *Config) *VGPUManager {
+	globalConfig = config
 	return &VGPUManager{
 		nvdevlib:        deviceLib,
 		contManagerPath: util.ManagerRootPath,
-		hostManagerPath: hostManagerPath,
-		clientSets:      clientSets,
+		hostManagerPath: config.Flags.HostManagerDir,
+		clientSets:      config.ClientSets,
 	}
 }
 
@@ -173,16 +186,28 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	}
 	compMode |= util.OpenKernelMode
 	containerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
+
+	deviceMemoryRatio := uint(100)
+	if globalConfig != nil {
+		deviceMemoryRatio = globalConfig.DeviceMemoryRatio
+	}
+	oversold := "FALSE"
+	ratio := float64(deviceMemoryRatio) / float64(util.HundredCore)
+	if ratio > 1 {
+		oversold = "TRUE"
+	}
+	ratioVal := fmt.Sprintf("%.2f", ratio)
+
 	envs := []string{
 		fmt.Sprintf("%s=%s", util.LdPreloadEnv, containerDriverFile),
 		fmt.Sprintf("%s=%v", util.ManagerCompatibilityMode, compMode),
 		// TODO Overcover possible environmental variable interference that may already exist in the container.
 		fmt.Sprintf("%s=", util.ManagerVisibleDevices),
-		fmt.Sprintf("%s=%v", util.CudaMemoryRatioEnv, 1),
+		fmt.Sprintf("%s=%v", util.CudaMemoryRatioEnv, ratioVal),
 		fmt.Sprintf("%s=", util.CudaCoreLimitEnv),
 		fmt.Sprintf("%s=", util.CudaSoftCoreLimitEnv),
 		fmt.Sprintf("%s=", util.CudaMemoryLimitEnv),
-		fmt.Sprintf("%s=FALSE", util.CudaMemoryOversoldEnv),
+		fmt.Sprintf("%s=%s", util.CudaMemoryOversoldEnv, oversold),
 	}
 	hostLibraryPath := filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName)
 	hostLibraryPath = fmt.Sprintf("%s.%s", hostLibraryPath, version.Get().Version)
@@ -235,10 +260,24 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 
 	computePolicy := m.getComputePolicy(claim)
 	idx := device.VGpu.Index
-	totalMemoryMB := device.VGpu.Memory.Total / units.MiB
+
+	deviceMemoryRatio := uint(100)
+	if globalConfig != nil {
+		deviceMemoryRatio = globalConfig.DeviceMemoryRatio
+	}
+	totalMemory := float64(device.VGpu.Memory.Total) * (float64(deviceMemoryRatio) / float64(util.HundredCore))
+	totalMemoryMB := uint64(totalMemory) / units.MiB
+
+	oversold := "FALSE"
+	ratio := float64(deviceMemoryRatio) / float64(util.HundredCore)
+	if ratio > 1 {
+		oversold = "TRUE"
+	}
+	ratioVal := fmt.Sprintf("%.2f", ratio)
+
 	envs := []string{
-		fmt.Sprintf("%s_%d=%v", util.CudaMemoryRatioEnv, idx, 1),
-		fmt.Sprintf("%s_%d=FALSE", util.CudaMemoryOversoldEnv, idx),
+		fmt.Sprintf("%s_%d=%s", util.CudaMemoryRatioEnv, idx, ratioVal),
+		fmt.Sprintf("%s_%d=%s", util.CudaMemoryOversoldEnv, idx, oversold),
 		fmt.Sprintf("%s_%d=%s", util.ManagerVisibleDevice, idx, device.VGpu.UUID),
 	}
 
