@@ -539,16 +539,69 @@ static int g_aimd_ai_base_div   = 400;   /* ai_step base divisor          */
  *   AIMD after `g_auto_debounce_cycles` consecutive observations of
  *   sys_process_num >= 2. Same threshold for the flip back. */
 static int g_auto_debounce_cycles                   = 5;
-static int g_auto_current[MAX_DEVICE_COUNT]         = {0};  /* 0 DELTA / 1 AIMD */
-static int g_auto_pending_streak[MAX_DEVICE_COUNT]  = {0};  /* cycles seeing the OTHER target */
 
-/* Threshold for host_index_is_exclusive() -- if (sys_current - user_current)
+/* Threshold for host_index_is_exclusive_raw() -- if (sys_current - user_current)
  * < this value, treat the device as exclusively used by us. Initialised
- * to 1 to match the default in get_sm_auto_external_util_threshold(), so
- * AUTO behaves correctly even if init runs before sm_controller_init()
- * (which only re-reads env when MODE=AUTO). Reads from this variable in
- * the watcher path also use this default until init runs. */
+ * to 1 to match the default in get_sm_auto_external_util_threshold(); the
+ * watcher's soft_core burst judgement reads this value in EVERY controller
+ * mode (not just AUTO), so initialising to a sane default keeps things
+ * safe even if init runs before sm_controller_init() picks env up. */
 static int g_auto_external_util_threshold           = 1;
+
+/* ---- Shared exclusivity FSM (V2.1) -------------------------------------- *
+ * The watcher's "are we exclusively using this device" decision is needed
+ * in three places:
+ *
+ *   1. soft_core burst gate         (watcher main loop, soft mode)
+ *   2. hard_limit jitter-init gate  (watcher main loop, hard_limit mode)
+ *   3. AUTO controller routing      (auto_routed_controller via g_sm_controller)
+ *
+ * Pre-V2.1 these called host_index_is_exclusive() (raw, no smoothing),
+ * which caused two problems:
+ *   - soft_core burst could be triggered by a single-cycle dip in
+ *     external util (NVML jitter / external Pod inter-batch idle),
+ *     wrongly grabbing soft_core and squeezing the real competing Pod.
+ *   - AUTO routing kept its own private FSM (g_auto_current /
+ *     g_auto_pending_streak) duplicating the same debounce idea, with
+ *     a separate code path that could drift from the watcher's view.
+ *
+ * V2.1 introduces a SINGLE debounced FSM shared by all three callers:
+ *
+ *   raw       observation        -> host_index_is_exclusive_raw()
+ *   debounced (state machine)    -> host_index_is_exclusive() (was renamed,
+ *                                   keeps same public-call shape)
+ *
+ * The debounced FSM is updated at most ONCE per watcher cycle via a memo
+ * (g_excl_memo_cycle), so when the watcher main loop calls the predicate
+ * twice in the same iteration (jitter-init then burst), the second call
+ * is O(1) and the streak counter doesn't double-update.
+ *
+ * Initial value g_is_exclusive_debounced[i] = 0 ("not exclusive") is
+ * intentionally conservative: at startup we wait g_auto_debounce_cycles
+ * (~400ms) of observed exclusivity before allowing soft_core burst. The
+ * cost is at most ~400ms of slower ramp-up; the benefit is never
+ * accidentally squeezing an external Pod that briefly happened to be at
+ * 0% util during our first watcher cycles.
+ *
+ * Threading: every field below is written and read exclusively by the
+ * watcher thread that owns the corresponding host_index (each watcher
+ * thread owns a disjoint slice via balance_batches()). No cross-thread
+ * read; no volatile needed. fork() safety: see child_after_fork() --
+ * post-fork the watcher restarts and the file-scope zero-init defaults
+ * apply on its next entry to the main loop. */
+static int      g_is_exclusive_debounced[MAX_DEVICE_COUNT] = {0};
+static int      g_exclusive_pending_streak[MAX_DEVICE_COUNT] = {0};
+/* One-shot flag set by the debounced FSM when it flips true->false; the
+ * watcher main loop consumes it to perform a "lost exclusivity" reset
+ * (down to hard_core) on the next cycle. */
+static int      g_lost_exclusivity_pending[MAX_DEVICE_COUNT] = {0};
+/* Per-cycle memoization so multiple calls in the same watcher iteration
+ * don't double-advance the streak. The watcher main loop sets memo_valid=0
+ * at the top of each per-device iteration; the first call to the
+ * debounced predicate that cycle advances the FSM and stores its answer +
+ * sets memo_valid=1; subsequent calls return the memoized value. */
+static int      g_excl_memo_valid[MAX_DEVICE_COUNT] = {0};
+static int      g_excl_memo_value[MAX_DEVICE_COUNT] = {0};
 
 static int64_t aimd_controller(int up_limit, int user_current,
                                int64_t share, int host_index);
@@ -659,59 +712,71 @@ static utilization_t top_results[MAX_DEVICE_COUNT];
  * Threading: only the watcher thread that owns host_index reads
  * top_results[host_index] (where it was written upstream this same
  * cycle). No cross-thread access; no atomics needed. */
-static int host_index_is_exclusive(int host_index) {
+/* Raw observation: a single watcher cycle's view of "are we exclusive".
+ * No smoothing. Used directly by hard_limit jitter-init bypass (which
+ * MUST react instantly to a freshly-started workload's util ramp) and
+ * read by the debounced FSM as its input. */
+static int host_index_is_exclusive_raw(int host_index) {
   int sys  = top_results[host_index].sys_current;
   int user = top_results[host_index].user_current;
   int external = sys - user;
-  if (external < 0) external = 0;   /* defensive: clamp to 0 if user > sys (NVML noise) */
+  if (external < 0) external = 0;   /* defensive: NVML race may leave user > sys briefly */
   return external < g_auto_external_util_threshold;
 }
 
-/* AUTO mode: per-device, per-cycle router between delta (single Pod, for
- * throughput) and aimd (multi Pod, for fairness). Reads the watcher's
- * current per-device sys_process_num snapshot (top_results[h].sys_process_num,
- * written upstream this same cycle by get_used_gpu_utilization), runs a
- * symmetric debounce of g_auto_debounce_cycles consecutive disagreements,
- * then flips g_auto_current[h]. Logs each flip at INFO so operators can
- * correlate behaviour changes with Pod arrivals/exits.
+/* Debounced exclusivity FSM. Reads top_results for the host_index,
+ * updates the streak / flip state, returns the smoothed answer.
  *
- * Same-thread invariant: this function runs on the watcher thread that
- * owns host_index; the g_auto_* arrays are touched only by that thread.
- * No volatile / atomics needed. */
-static int64_t auto_routed_controller(int up_limit, int user_current,
-                                      int64_t share, int host_index) {
-  /* Decide routing target via the shared "is this device exclusively ours"
-   * predicate. Replaces an earlier sys_process_num >= 2 check that was
-   * fooled by both nvidia-persistenced/MPS driver threads (raising the
-   * count without actually consuming SM) and intra-container fork (a
-   * single Pod's DataLoader workers being counted as multiple Pods). */
-  int exclusive = host_index_is_exclusive(host_index);
-  int target = exclusive ? SM_CONTROLLER_DELTA : SM_CONTROLLER_AIMD;
-
-  if (target == g_auto_current[host_index]) {
-    /* Steady state: zero out any pending counter accumulated by a brief
-     * burst that did not survive debounce. */
-    g_auto_pending_streak[host_index] = 0;
-  } else if (++g_auto_pending_streak[host_index] >= g_auto_debounce_cycles) {
-    /* Streak survived debounce -- flip. */
-    LOGGER(INFO, "sm controller auto: host_device=%d sys=%d user=%d ext=%d switch %s -> %s",
+ * Idempotent within a watcher cycle: the watcher main loop clears
+ * g_excl_memo_valid[host_index] at the top of each per-device iteration;
+ * the first call inside that iteration advances the FSM and caches the
+ * result; subsequent calls in the same iteration return the cached value
+ * without touching the streak. */
+static int host_index_is_exclusive_debounced(int host_index) {
+  if (g_excl_memo_valid[host_index]) {
+    return g_excl_memo_value[host_index];
+  }
+  int observed = host_index_is_exclusive_raw(host_index);
+  int current  = g_is_exclusive_debounced[host_index];
+  if (observed == current) {
+    g_exclusive_pending_streak[host_index] = 0;
+  } else if (++g_exclusive_pending_streak[host_index] >= g_auto_debounce_cycles) {
+    /* Flip survived debounce -- commit. */
+    LOGGER(INFO, "exclusivity changed: host_device=%d sys=%d user=%d ext=%d %s -> %s",
            host_index,
            top_results[host_index].sys_current,
            top_results[host_index].user_current,
            top_results[host_index].sys_current - top_results[host_index].user_current,
-           g_auto_current[host_index] == SM_CONTROLLER_AIMD ? "aimd" : "delta",
-           target == SM_CONTROLLER_AIMD ? "aimd" : "delta");
-    g_auto_current[host_index] = target;
-    g_auto_pending_streak[host_index] = 0;
+           current  ? "exclusive" : "shared",
+           observed ? "exclusive" : "shared");
+    if (current == 1 && observed == 0) {
+      /* Lost exclusivity: signal the watcher loop's else-branch to reset
+       * up_limits back to hard_core on its next pass through (so we
+       * return the soft_core burst headroom we'd grabbed). One-shot --
+       * the watcher clears the flag after consuming it. */
+      g_lost_exclusivity_pending[host_index] = 1;
+    }
+    g_is_exclusive_debounced[host_index] = observed;
+    g_exclusive_pending_streak[host_index] = 0;
+    current = observed;
   }
+  g_excl_memo_valid[host_index] = 1;
+  g_excl_memo_value[host_index] = current;
+  return current;
+}
 
-  /* Dispatch. share[] is shared with whichever controller was active last
-   * cycle -- both algorithms are iterators on shares[host_index], so the
-   * value carries over correctly; no warm-up artifact at the flip. */
-  if (g_auto_current[host_index] == SM_CONTROLLER_AIMD) {
-    return aimd_controller(up_limit, user_current, share, host_index);
+/* AUTO mode: per-device router between delta (single Pod, throughput) and
+ * aimd (multi-Pod, fairness). Reads the SHARED debounced exclusivity FSM
+ * (host_index_is_exclusive_debounced) so AUTO routing and the watcher's
+ * burst gating always agree -- there is no second private FSM to drift
+ * out of sync. shares[host_index] is shared across both controllers and
+ * both algorithms are iterators on it, so flips carry over cleanly. */
+static int64_t auto_routed_controller(int up_limit, int user_current,
+                                      int64_t share, int host_index) {
+  if (host_index_is_exclusive_debounced(host_index)) {
+    return delta(up_limit, user_current, share, host_index);
   }
-  return delta(up_limit, user_current, share, host_index);
+  return aimd_controller(up_limit, user_current, share, host_index);
 }
 
 /* Called once from initialization() before watcher threads spawn. Reads
@@ -721,13 +786,15 @@ static void sm_controller_init(void) {
   (void)get_sm_controller_kind(&kind);
   g_sm_controller_kind = kind;
 
-  /* host_index_is_exclusive() is used by the watcher's soft_core burst
-   * judgment regardless of the selected controller -- it replaces the old
-   * sys_process_num==1 check in EVERY controller mode, not just AUTO.
-   * Therefore read its env unconditionally so delta and aimd users also
-   * get the more accurate predicate. */
+  /* The shared exclusivity FSM (host_index_is_exclusive_debounced) is
+   * consulted by the watcher's burst gate / jitter-init in EVERY
+   * controller mode, plus auto_routed_controller's routing decision.
+   * Read its tunables unconditionally so delta and aimd users also
+   * benefit from the more accurate predicate. */
   (void)get_sm_auto_external_util_threshold(&g_auto_external_util_threshold);
   if (g_auto_external_util_threshold < 1) g_auto_external_util_threshold = 1;
+  (void)get_sm_auto_debounce_cycles(&g_auto_debounce_cycles);
+  if (g_auto_debounce_cycles < 1) g_auto_debounce_cycles = 1;
 
   if (kind == SM_CONTROLLER_AIMD || kind == SM_CONTROLLER_AUTO) {
     /* AIMD params are also needed by AUTO because AUTO dispatches to
@@ -739,10 +806,10 @@ static void sm_controller_init(void) {
   }
 
   if (kind == SM_CONTROLLER_AUTO) {
-    (void)get_sm_auto_debounce_cycles(&g_auto_debounce_cycles);
-    if (g_auto_debounce_cycles < 1) g_auto_debounce_cycles = 1;
-    /* g_auto_current[] starts all-DELTA so a process that never sees a
-     * second Pod behaves indistinguishably from CUDA_SM_CONTROLLER=delta. */
+    /* AUTO consults the shared debounced FSM via auto_routed_controller;
+     * its tunables (debounce_cycles, external_util_threshold) were read
+     * unconditionally above so delta/aimd also benefit from the same
+     * exclusivity predicate in the watcher's burst gate. */
     g_sm_controller = auto_routed_controller;
     LOGGER(INFO, "+ SmController   : auto (debounce=%d cycles, ext_util_threshold=%d%%; aimd params: md_div=%d eff_ratio=%d/1000 ai_base_div=%d)",
            g_auto_debounce_cycles, g_auto_external_util_threshold,
@@ -750,12 +817,14 @@ static void sm_controller_init(void) {
     metrics_set_controller_label("auto");
   } else if (kind == SM_CONTROLLER_AIMD) {
     g_sm_controller = aimd_controller;
-    LOGGER(INFO, "+ SmController   : aimd (md_div=%d eff_ratio=%d/1000 ai_base_div=%d)",
-           g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_ai_base_div);
+    LOGGER(INFO, "+ SmController   : aimd (md_div=%d eff_ratio=%d/1000 ai_base_div=%d, exclusivity ext_util_threshold=%d%% debounce=%d)",
+           g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_ai_base_div,
+           g_auto_external_util_threshold, g_auto_debounce_cycles);
     metrics_set_controller_label("aimd");
   } else {
     g_sm_controller = delta;
-    LOGGER(INFO, "+ SmController   : delta (stock)");
+    LOGGER(INFO, "+ SmController   : delta (stock; exclusivity ext_util_threshold=%d%% debounce=%d)",
+           g_auto_external_util_threshold, g_auto_debounce_cycles);
     metrics_set_controller_label("delta");
   }
 }
@@ -764,9 +833,20 @@ static int64_t shares[MAX_DEVICE_COUNT]    = {0};
 static int sys_frees[MAX_DEVICE_COUNT]      = {0};
 static int avg_sys_frees[MAX_DEVICE_COUNT]  = {0};
 static int is[MAX_DEVICE_COUNT]             = {0};
-/* pre_sys_process_nums starts at 1 so the first observed "real" count does
- * not trigger the "new process detected, reset limits" branch at line 431. */
-static int pre_sys_process_nums[MAX_DEVICE_COUNT] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+/* pre_external_process_nums tracks the previously-observed count of
+ * processes on this device that are NOT in our container. The watcher
+ * uses it to decide whether the cycle's `external_process_num` indicates
+ * a new EXTERNAL Pod has joined (in which case it resets up_limits to
+ * hard_core). Pre-V2.1 this tracked total sys_process_num, which was
+ * fooled by our own intra-container fork (e.g. DataLoader workers) and
+ * by NVIDIA driver threads coming and going from the NVML process list.
+ *
+ * Initial value 0: at process start we have observed no external PIDs
+ * yet, so the first "real" cycle's value -- whatever it is -- becomes
+ * the reference. Subsequent cycles see no change (driver threads stay
+ * resident, our own fork doesn't move this number) unless a genuinely
+ * new external process arrives. */
+static int pre_external_process_nums[MAX_DEVICE_COUNT] = {0};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
 /* volatile: written by the watcher thread, read cross-thread by the GAP path
  * (gap_effective_dc). Matches g_cur_cuda_cores' convention -- forces a real
@@ -790,12 +870,13 @@ static void *utilization_watcher(void *arg) {
     shares[host_index] = 0;
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
-    pre_sys_process_nums[host_index] = 1;
+    pre_external_process_nums[host_index] = 0;
     up_limits[host_index] = g_vgpu_config->devices[host_index].hard_core;
     top_results[host_index].user_current = 0;
     top_results[host_index].sys_current = 0;
     top_results[host_index].valid = 0;
     top_results[host_index].sys_process_num = 0;
+    top_results[host_index].external_process_num = 0;
   }
   int dev_count = batch->end_index - batch->start_index;
   struct timespec wait = {
@@ -814,29 +895,46 @@ static void *utilization_watcher(void *arg) {
 
       if (unlikely(!top_results[host_index].valid)) continue;
 
+      /* Invalidate per-cycle exclusivity memo so the FIRST debounced
+       * predicate call this iteration recomputes from fresh sampling
+       * data (and advances the streak / flip FSM at most once per
+       * watcher cycle, regardless of how many code paths consult it). */
+      g_excl_memo_valid[host_index] = 0;
+
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
       if (g_vgpu_config->devices[host_index].hard_limit) {
-        /* Avoid usage jitter when application is initialized. host_index_is_exclusive
-         * replaces sys_process_num==1 so the jitter-init bypass is not missed when
-         * NVIDIA driver threads (which never burn SM) are present, or when our own
-         * container has multiple PIDs (DataLoader workers). */
-        if (host_index_is_exclusive(host_index) && top_results[host_index].user_current < up_limits[host_index] / 10) {
+        /* Avoid usage jitter when application is initialized. Use the RAW
+         * predicate (no debounce) here: this bypass must respond instantly
+         * to a freshly-started workload's util ramp, and the hard_limit
+         * controller cannot exceed hard_core anyway so a misfire here is
+         * not a safety hazard (worst case: a few cycles of slightly
+         * different share computation). */
+        if (host_index_is_exclusive_raw(host_index) && top_results[host_index].user_current < up_limits[host_index] / 10) {
           g_cur_cuda_cores[host_index] =
               g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
           continue;
         }
         shares[host_index] = g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
       } else {
-        if (pre_sys_process_nums[host_index] != top_results[host_index].sys_process_num) {
-          /* When a new process comes, all processes are reset to initial value*/
-          if (pre_sys_process_nums[host_index] < top_results[host_index].sys_process_num) {
+        if (pre_external_process_nums[host_index] != top_results[host_index].external_process_num) {
+          /* A NEW external process arrived (count grew) -> reset to
+           * hard_core so all competitors negotiate from the same floor.
+           * V2.1: compare external_process_num instead of sys_process_num
+           * so our own intra-container fork (DataLoader workers,
+           * torch.distributed ranks) does NOT trigger a reset against
+           * ourselves. Strict counting in get_used_gpu_utilization means
+           * NVIDIA driver threads ARE counted as external -- but they
+           * appear once at startup and stay, so they only ever trigger
+           * a single initial reset (which is harmless: we'd just been
+           * at hard_core anyway). */
+          if (pre_external_process_nums[host_index] < top_results[host_index].external_process_num) {
             shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
             up_limits[host_index] = g_vgpu_config->devices[host_index].hard_core;
             is[host_index] = 0;
             avg_sys_frees[host_index] = 0;
           }
-          pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
+          pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
         }
 
         /* 1. Device is exclusively used by us (no external Pod competing).
@@ -847,20 +945,55 @@ static void *utilization_watcher(void *arg) {
          *    resource utilization. Second, allocate cuda cores according
          *    to the changed limit value.
          *
-         * "Exclusive" is determined via host_index_is_exclusive() which
-         * filters NVIDIA driver threads (0% SM) and treats intra-container
-         * fork (DataLoader workers etc.) as the same user. Replaces an
-         * earlier sys_process_num == 1 check that was fooled by both. */
-        if (host_index_is_exclusive(host_index)) {
+         * Use the DEBOUNCED predicate: the burst grants exclusive access
+         * to all of soft_core which directly squeezes any external Pod,
+         * so we MUST be confident (g_auto_debounce_cycles consecutive
+         * agreeing observations) before flipping into burst mode. The
+         * debounced FSM also drops g_lost_exclusivity_pending when it
+         * flips back, which the else branch consumes to give the burst
+         * headroom back via reset. */
+        if (host_index_is_exclusive_debounced(host_index)) {
           up_limits[host_index] = g_vgpu_config->devices[host_index].soft_core;
           shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         } else {
+          /* Lost-exclusivity reset (V2.1 option ①). When the debounced
+           * FSM flipped true->false (we no longer have the card to
+           * ourselves), give back any soft_core burst headroom we'd
+           * grabbed by resetting up_limits to hard_core and re-starting
+           * the elastic ramp. One-shot: consume the flag. */
+          if (g_lost_exclusivity_pending[host_index]) {
+            shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
+            up_limits[host_index] = g_vgpu_config->devices[host_index].hard_core;
+            is[host_index] = 0;
+            avg_sys_frees[host_index] = 0;
+            g_lost_exclusivity_pending[host_index] = 0;
+          }
           is[host_index]++;
           avg_sys_frees[host_index] += sys_frees[host_index];
           if (is[host_index] % g_dynamic_config.change_limit_interval == 0) {
-            if (avg_sys_frees[host_index] * 2 / g_dynamic_config.change_limit_interval > g_dynamic_config.usage_threshold) {
-              up_limits[host_index] = up_limits[host_index] + g_vgpu_config->devices[host_index].hard_core / 10 > g_vgpu_config->devices[host_index].soft_core ?
-                         g_vgpu_config->devices[host_index].soft_core : up_limits[host_index] + g_vgpu_config->devices[host_index].hard_core / 10;
+            /* Symmetric ramp: if we've been seeing headroom, climb toward
+             * soft_core (V1 behaviour, kept); if we've been seeing pressure
+             * AND we previously climbed past hard_core, give some back. */
+            int avg = avg_sys_frees[host_index] * 2 / g_dynamic_config.change_limit_interval;
+            int step = g_vgpu_config->devices[host_index].hard_core / 10;
+            int soft = g_vgpu_config->devices[host_index].soft_core;
+            int hard = g_vgpu_config->devices[host_index].hard_core;
+            if (avg > g_dynamic_config.usage_threshold) {
+              /* Headroom available -> climb (capped at soft_core). */
+              up_limits[host_index] = up_limits[host_index] + step > soft
+                                      ? soft
+                                      : up_limits[host_index] + step;
+            } else if (avg < g_dynamic_config.usage_threshold
+                       && up_limits[host_index] > hard) {
+              /* Sustained pressure AND we'd previously climbed past
+               * hard_core -> step back down. Strictly floored at
+               * hard_core: never go below the user's guaranteed share,
+               * even briefly. The "> hard" gate matters because before
+               * V2.1 there was no down path, so up_limits is always
+               * >= hard_core; we keep that invariant explicit. */
+              up_limits[host_index] = up_limits[host_index] - step < hard
+                                      ? hard
+                                      : up_limits[host_index] - step;
             }
             is[host_index] = 0;
           }
@@ -1605,6 +1738,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
 
   top_result->user_current = 0;
   top_result->sys_current = 0;
+  top_result->external_process_num = 0;
 
   int sm_util = 0;
   int codec_util = 0;
@@ -1634,6 +1768,9 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
           } else if (!matchClientMode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
             matchOpenKernel = 1;
             top_result->user_current += sm_util + codec_util;
+          } else {
+            /* PID failed every "in our container" test -> external. */
+            top_result->external_process_num++;
           }
         }
       }
@@ -1653,6 +1790,8 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
         } else if (!matchCGroupV2Mode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
           matchOpenKernel = 1;
           top_result->user_current += sm_util + codec_util;
+        } else {
+          top_result->external_process_num++;
         }
       }
     }
@@ -1671,6 +1810,8 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
         } else if (!matchCGroupV1Mode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
           matchOpenKernel = 1;
           top_result->user_current += sm_util + codec_util;
+        } else {
+          top_result->external_process_num++;
         }
       }
     }
@@ -1685,6 +1826,8 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
         if (check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
           matchOpenKernel = 1;
           top_result->user_current += sm_util + codec_util;
+        } else {
+          top_result->external_process_num++;
         }
       }
     }

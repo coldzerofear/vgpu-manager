@@ -67,7 +67,14 @@ if (user_current <= eff_limit) {
 | `CUDA_SM_AUTO_DEBOUNCE_CYCLES` | `5` | (仅 `auto`)切换前要观察到目标算法连续多少个 watcher 周期才执行翻转;最小 1。N=5 对应 ~400ms,够吸收 NVML 的单周期抖动 |
 | `CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD` | `1` | "外部容器占用 ≥ 此值(%) 才算非独占"。**对所有 controller 都生效**,因为 watcher 主循环的 soft_core 突发判定也用这同一个谓词。默认 1 仅过滤 0% 的 NVIDIA 驱动常驻线程;真有需要(比如卡上有别的低占用工具)可调高 |
 
-### 4.1 `auto` 模式(实验性,见 [sawtooth 分析 §3 方案 ⑤ V2](sm_controller_aimd_sawtooth_analysis.md))
+### 4.1 `auto` 模式(实验性,见 [sawtooth 分析 §3 方案 ⑤ V2.1](sm_controller_aimd_sawtooth_analysis.md))
+
+> **V2.1 关键升级**:除了 `auto` 路由本身,**watcher 主循环的 soft 突发判定 + jitter init + 进程加入回退**也都升级了,**对 `delta` / `aimd` / `auto` 三种 controller 全部生效**。详见 sawtooth 分析 §3 方案 ⑤ V2.1 一节。要点:
+> - soft 突发用 `host_index_is_exclusive_debounced`(N 周期一致才翻转,防 NVML 抖动误突发)
+> - hard_limit jitter init 用 `host_index_is_exclusive_raw`(实时,启动期不延迟)
+> - 翻转 true→false 时**强制回退** up_limits 至 hard_core(归还突发拿到的份额)
+> - 弹性爬升**对称化**:有空闲爬升 ✓ 有压力下降 ✓,**严格不低于 hard_core**
+> - 进程加入回退判定改用 `external_process_num`(本容器 fork 不再误触发)
 
 `auto` 在每个 watcher 周期按 **"是否本容器独占当卡"** 路由:
 
