@@ -530,7 +530,21 @@ static sm_controller_fn g_sm_controller = delta;
  * pulls down the steady-state MAE compared to delta()'s symmetric step.
  * Algorithm shape matches midokura's ablation; constants are env-tunable
  * because the original was calibrated on RTX 4080 and big datacenter
- * GPUs (A100/H100) likely need a less aggressive MD factor. */
+ * GPUs (A100/H100) likely need a less aggressive MD factor.
+ *
+ * Two fidelity fixes vs. the initial port (had broken small-hard_core
+ * cases -- utilization stuck at 0-1 against hard_core=5 because share
+ * could not recover after MD):
+ *
+ *   - base now multiplies by 3 to match Midokura. The original port
+ *     omitted this and ran with 1/3 the AI step.
+ *   - ai_step floor: after MD divides share by g_aimd_md_divisor (default
+ *     3), the next cycle could be left with a share so small that AI
+ *     would need many cycles to recover. Midokura clamps `if (share <
+ *     ai_step) share = ai_step;` so MD only ever cuts to a "current AI
+ *     unit" floor, keeping utilization tracking the target instead of
+ *     drifting to a fraction of it. This floor was the load-bearing
+ *     piece in their small-setpoint behaviour. */
 static int64_t aimd_controller(int up_limit, int user_current,
                                int64_t share, int host_index) {
   /* Effective cap below the real target -- start backing off early so we
@@ -538,18 +552,18 @@ static int64_t aimd_controller(int up_limit, int user_current,
   int eff_limit = (int)((int64_t)up_limit * g_aimd_eff_ratio / 1000);
   if (eff_limit < 1) eff_limit = 1;
 
+  int64_t sm_num     = (int64_t)g_sm_num[host_index];
+  int64_t max_thread = (int64_t)g_max_thread_per_sm[host_index];
+  /* base * 3: matches Midokura's `g_sm_num * g_max_thread_per_sm * 3`.
+   * ai_step is computed unconditionally because we need it for both the
+   * AI step itself and the post-MD floor below. */
+  int64_t ai_step = sm_num * max_thread * 3 * (int64_t)eff_limit
+                    / (int64_t)g_aimd_ai_base_div;
+  if (ai_step < 1) ai_step = 1;
+
   if (user_current <= eff_limit) {
-    /* AI: gap-proportional step. The 'gap > 5 ? gap : 5' guard prevents
-     * stalling when we are already at/just above the target. Scaling base
-     * uses sm_num * max_thread_per_sm (matching delta()'s order of mag
-     * minus one sm_num factor, since AIMD doesn't need the diff^2 burst).
-     */
-    int64_t sm_num     = (int64_t)g_sm_num[host_index];
-    int64_t max_thread = (int64_t)g_max_thread_per_sm[host_index];
     int gap = up_limit - user_current;
     if (gap < 5) gap = 5;
-    int64_t ai_step = sm_num * max_thread * (int64_t)eff_limit
-                      / (int64_t)g_aimd_ai_base_div;
     int64_t step = ai_step * (int64_t)gap / 5;
     share += step;
     if (share > g_total_cuda_cores[host_index]) {
@@ -561,6 +575,12 @@ static int64_t aimd_controller(int up_limit, int user_current,
     share /= g_aimd_md_divisor;
     if (share < 0) share = 0;
   }
+  /* Floor: never let share fall below one AI step. Without this, after
+   * MD the next AI would need many cycles to bring share back into the
+   * useful range, especially when up_limit (and therefore ai_step) is
+   * small. This is the line that fixes the "utilization stuck near 0
+   * against hard_core=5" regression. */
+  if (share < ai_step) share = ai_step;
   return share;
 }
 
