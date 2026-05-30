@@ -60,10 +60,28 @@ if (user_current <= eff_limit) {
 
 | Env | 默认 | 含义 |
 |---|---|---|
-| `CUDA_SM_CONTROLLER` | `delta` | `delta`(stock)或 `aimd` |
+| `CUDA_SM_CONTROLLER` | `delta` | `delta`(stock)/ `aimd` / `auto`(实验,仅 `experiment/aimd-sawtooth` 分支提供) |
 | `CUDA_SM_AIMD_MD_DIVISOR` | `3` | MD 因子,`share /= div`;最小 2 |
 | `CUDA_SM_AIMD_EFF_RATIO` | `875` | 缓冲比例(千分制),875 = 87.5%;上界 1000 |
 | `CUDA_SM_AIMD_AI_BASE_DIV` | `400` | AI 步长基数除数,越大步长越小 |
+| `CUDA_SM_AUTO_DEBOUNCE_CYCLES` | `5` | (仅 `auto`)切换前要观察到目标算法连续多少个 watcher 周期才执行翻转;最小 1。N=5 对应 ~400ms,够吸收 NVML 的单周期抖动 |
+
+### 4.1 `auto` 模式(实验性,见 [sawtooth 分析 §3 方案 ⑤](sm_controller_aimd_sawtooth_analysis.md))
+
+`auto` 在每个 watcher 周期按当卡 `sys_process_num` 路由:
+
+- `sys_process_num == 1` → 走 delta(单 Pod 要吞吐)
+- `sys_process_num >= 2` → 走 aimd(多 Pod 要公平)
+
+带 `g_auto_debounce_cycles` 对称去抖:连续 N 个周期看到与当前算法相反的目标才翻转,期间任一周期回到同向则计数清零。**完全规避 NVML 单周期抖动导致的乒乓**。翻转时打 INFO 日志:
+
+```
+sm controller auto: host_device=0 sys_process_num=2 switch delta -> aimd
+```
+
+`aimd` 时的所有参数(`CUDA_SM_AIMD_*`)在 `auto` 模式下同样有效,因为 `auto` 在 aimd 路径直接调用 `aimd_controller`。
+
+**为什么是实验性**:只在 `experiment/aimd-sawtooth` 分支提供,因为它属于"算法形态级"改动,需要在多种真实 GPU + 多 Pod 工作负载下验证后才合并回主分支。在 `fix/library` 上设 `CUDA_SM_CONTROLLER=auto` 等同于 `delta`(env 不识别,落回 default)。
 
 启动时一次性读取,**不支持运行时切换**(会涉及 share 历史状态重置的边界条件)。
 

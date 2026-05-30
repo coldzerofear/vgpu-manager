@@ -39,6 +39,12 @@
 #define CUDA_SM_AIMD_EFF_RATIO_ENV   "CUDA_SM_AIMD_EFF_RATIO"
 #define CUDA_SM_AIMD_AI_BASE_DIV_ENV "CUDA_SM_AIMD_AI_BASE_DIV"
 
+/* "auto" controller mode (experimental): switch between delta (single-Pod,
+ * for throughput) and aimd (multi-Pod, for fairness) based on per-device
+ * sys_process_num observed by the watcher. Debounced to avoid pingponging
+ * on NVML's process-count jitter. */
+#define CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV "CUDA_SM_AUTO_DEBOUNCE_CYCLES"
+
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
   double value = 0.0;
@@ -227,14 +233,19 @@ int get_sm_watcher_enabled(int *i) {
   return 0;
 }
 
-/* Returns 0 for the stock "delta" controller (default), 1 for "aimd".
- * Anything not matching the AIMD spelling stays on delta. */
+/* Returns 0 for the stock "delta" controller (default), 1 for "aimd",
+ * 2 for the experimental "auto" mode (debounced sys_process_num-based
+ * routing between delta and aimd). Anything else stays on delta. */
 int get_sm_controller_kind(int *kind) {
   *kind = 0;
   char *str = getenv(CUDA_SM_CONTROLLER_ENV);
   if (!str) return -1;
   if (strcasecmp(str, "aimd") == 0) {
     *kind = 1;
+    return 0;
+  }
+  if (strcasecmp(str, "auto") == 0) {
+    *kind = 2;
     return 0;
   }
   return 0;
@@ -282,6 +293,14 @@ int get_aimd_eff_ratio(int *out) {
 
 int get_aimd_ai_base_div(int *out) {
   return get_positive_int_env(CUDA_SM_AIMD_AI_BASE_DIV_ENV, 400, out);
+}
+
+/* Number of consecutive observed-different watcher cycles required before
+ * the "auto" mode flips between delta and aimd. Default 5 ~ 400ms, which
+ * absorbs typical single-cycle NVML jitter in sys_process_num without
+ * adding meaningful Pod start/exit latency (Pod start dominates anyway). */
+int get_sm_auto_debounce_cycles(int *out) {
+  return get_positive_int_env(CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV, 5, out);
 }
 
 static int compare_pids(const void *a, const void *b) {
