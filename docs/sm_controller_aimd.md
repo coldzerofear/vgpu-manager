@@ -115,6 +115,8 @@ Midokura v5 的 `÷3` / `7/8` / `ai_base_div=400` 是在 **RTX 4080**(消费卡,
 
 ## 9. 后续路线
 
+> **重要补充**:实测发现 AIMD 在单 Pod 下耗时比 delta 高约 1/3,根因与解法全文档详见 [sm_controller_aimd_sawtooth_analysis.md](sm_controller_aimd_sawtooth_analysis.md)。下面列出的 P1/P2/P3 仅为原始路线图,真正的优化路径请优先参考 sawtooth 分析文档的 P0~P3 推荐(尤其 P0 sys_process_num 自动路由)。
+
 - **P1 — 多 Pod 公平性测量**:借用 Midokura 的 `plot_multi_single.py` 等脚本(参见 [GAP 路径设计 §11](sm_core_limit_gap_throttle_design.md)),验证 AIMD 在 N Pod 间是否收敛到 `1/N · hard_core` 公平点。
 - **P2 — 自动参数标定**:把参数扫描集成到 CI 跑,按 GPU 型号建一份推荐默认。
-- **P3 — 与 GAP 路径联调**:GAP 实测的真实 GPU 用时回灌给 AIMD,减少其对 NVML 采样的依赖。
+- ~~P3 — 与 GAP 路径联调~~:**已评估,不实施**。GAP 路径派生的瞬时 util 与 AIMD 形成自循环(GAP sleep 本就是为达成目标 dc 而注入,反馈进 AIMD 等于告诉它"目标达成了别动")。详见 [sawtooth 分析 §5.3](sm_controller_aimd_sawtooth_analysis.md)。
