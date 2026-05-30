@@ -43,7 +43,14 @@
  * for throughput) and aimd (multi-Pod, for fairness) based on per-device
  * sys_process_num observed by the watcher. Debounced to avoid pingponging
  * on NVML's process-count jitter. */
-#define CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV "CUDA_SM_AUTO_DEBOUNCE_CYCLES"
+#define CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV         "CUDA_SM_AUTO_DEBOUNCE_CYCLES"
+/* SM-utilization threshold (percent) above which a non-self-container
+ * process is considered to actually compete with us. Default 1: just
+ * enough to filter the always-on driver/persistenced threads (which
+ * report ~0%) while still recognising the smallest real Pod activity.
+ * Used by both the AUTO controller and the watcher's soft_core burst
+ * decision to identify "real exclusive use" of the GPU. */
+#define CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD_ENV "CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD"
 
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
@@ -301,6 +308,16 @@ int get_aimd_ai_base_div(int *out) {
  * adding meaningful Pod start/exit latency (Pod start dominates anyway). */
 int get_sm_auto_debounce_cycles(int *out) {
   return get_positive_int_env(CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV, 5, out);
+}
+
+/* External-utilization threshold (percent) for the "is_exclusive" predicate
+ * shared by AUTO routing and the watcher's soft_core burst path. Default 1:
+ * filters out always-on driver / persistenced threads (which sit at ~0%
+ * SM) while still recognising the smallest real Pod activity. Caller can
+ * raise it (env) if their host has other low-utilization tools touching
+ * the GPU that should be ignored. Clamped >= 1 by get_positive_int_env. */
+int get_sm_auto_external_util_threshold(int *out) {
+  return get_positive_int_env(CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD_ENV, 1, out);
 }
 
 static int compare_pids(const void *a, const void *b) {

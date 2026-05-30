@@ -65,6 +65,7 @@ extern int get_aimd_md_divisor(int *out);
 extern int get_aimd_eff_ratio(int *out);
 extern int get_aimd_ai_base_div(int *out);
 extern int get_sm_auto_debounce_cycles(int *out);
+extern int get_sm_auto_external_util_threshold(int *out);
 
 /* fork() child handler implemented in loader.c -- re-inits the four
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
@@ -541,6 +542,14 @@ static int g_auto_debounce_cycles                   = 5;
 static int g_auto_current[MAX_DEVICE_COUNT]         = {0};  /* 0 DELTA / 1 AIMD */
 static int g_auto_pending_streak[MAX_DEVICE_COUNT]  = {0};  /* cycles seeing the OTHER target */
 
+/* Threshold for host_index_is_exclusive() -- if (sys_current - user_current)
+ * < this value, treat the device as exclusively used by us. Initialised
+ * to 1 to match the default in get_sm_auto_external_util_threshold(), so
+ * AUTO behaves correctly even if init runs before sm_controller_init()
+ * (which only re-reads env when MODE=AUTO). Reads from this variable in
+ * the watcher path also use this default until init runs. */
+static int g_auto_external_util_threshold           = 1;
+
 static int64_t aimd_controller(int up_limit, int user_current,
                                int64_t share, int host_index);
 
@@ -607,11 +616,56 @@ static int64_t aimd_controller(int up_limit, int user_current,
   return share;
 }
 
-/* Tentative declaration so auto_routed_controller can reference the watcher's
- * top_results[] which is fully defined ~70 lines below alongside the other
- * watcher state arrays. C merges multiple tentative defs of the same static
- * object into a single allocation; the only one with an initializer wins. */
+/* Tentative declaration so auto_routed_controller / host_index_is_exclusive
+ * can reference the watcher's top_results[] which is fully defined ~80 lines
+ * below alongside the other watcher state arrays. C merges multiple tentative
+ * defs of the same static object into a single allocation; the only one with
+ * an initializer wins. */
 static utilization_t top_results[MAX_DEVICE_COUNT];
+
+/* "Is this device exclusively used by our container?" predicate, shared by
+ * AUTO routing and the watcher's soft_core burst path.
+ *
+ * Returns true (= exclusive) when no NON-self-container process is actually
+ * burning SM cycles on this card. Built on the existing user/sys split
+ * already computed by get_used_gpu_utilization():
+ *
+ *   user_current = sum of SM util for PIDs identified as in-our-container
+ *                  (using whichever discriminator the active compatibility
+ *                  mode provides -- CLIENT PID file, cgroup v1/v2 membership,
+ *                  or OPEN_KERNEL PID-namespace match);
+ *   sys_current  = sum of SM util across ALL PIDs on the device.
+ *
+ * external_util = max(0, sys_current - user_current) is therefore the SM
+ * util attributable strictly to processes outside our container. A real
+ * competing Pod will report >= a few percent here; the NVIDIA driver's
+ * always-resident threads (nvidia-persistenced, MPS server, X server)
+ * report 0% because they never launch kernels.
+ *
+ * Why util-based and not PID-count-based: counting "external PIDs"
+ * (sys_process_num - matched-self-PIDs) would still be tricked by the
+ * driver threads (they ARE non-self PIDs); util filtering naturally
+ * ignores them. Same predicate also correctly handles intra-container
+ * fork (e.g. torch.distributed N workers) -- all child PIDs belong to
+ * our container, so user_current absorbs them and external_util stays 0.
+ *
+ * HOST_COMPATIBILITY_MODE special case: no container isolation exists,
+ * so get_used_gpu_utilization sets user_current = sys_current. The
+ * subtraction is always 0 -> the predicate always reports "exclusive".
+ * That matches the historical sys_process_num==1 behaviour for this mode
+ * (the old check was meaningless there too, but defaulted to "exclusive"
+ * whenever the operator was the sole CUDA user). No regression.
+ *
+ * Threading: only the watcher thread that owns host_index reads
+ * top_results[host_index] (where it was written upstream this same
+ * cycle). No cross-thread access; no atomics needed. */
+static int host_index_is_exclusive(int host_index) {
+  int sys  = top_results[host_index].sys_current;
+  int user = top_results[host_index].user_current;
+  int external = sys - user;
+  if (external < 0) external = 0;   /* defensive: clamp to 0 if user > sys (NVML noise) */
+  return external < g_auto_external_util_threshold;
+}
 
 /* AUTO mode: per-device, per-cycle router between delta (single Pod, for
  * throughput) and aimd (multi Pod, for fairness). Reads the watcher's
@@ -626,8 +680,13 @@ static utilization_t top_results[MAX_DEVICE_COUNT];
  * No volatile / atomics needed. */
 static int64_t auto_routed_controller(int up_limit, int user_current,
                                       int64_t share, int host_index) {
-  int procs = top_results[host_index].sys_process_num;
-  int target = (procs >= 2) ? SM_CONTROLLER_AIMD : SM_CONTROLLER_DELTA;
+  /* Decide routing target via the shared "is this device exclusively ours"
+   * predicate. Replaces an earlier sys_process_num >= 2 check that was
+   * fooled by both nvidia-persistenced/MPS driver threads (raising the
+   * count without actually consuming SM) and intra-container fork (a
+   * single Pod's DataLoader workers being counted as multiple Pods). */
+  int exclusive = host_index_is_exclusive(host_index);
+  int target = exclusive ? SM_CONTROLLER_DELTA : SM_CONTROLLER_AIMD;
 
   if (target == g_auto_current[host_index]) {
     /* Steady state: zero out any pending counter accumulated by a brief
@@ -635,8 +694,11 @@ static int64_t auto_routed_controller(int up_limit, int user_current,
     g_auto_pending_streak[host_index] = 0;
   } else if (++g_auto_pending_streak[host_index] >= g_auto_debounce_cycles) {
     /* Streak survived debounce -- flip. */
-    LOGGER(INFO, "sm controller auto: host_device=%d sys_process_num=%d switch %s -> %s",
-           host_index, procs,
+    LOGGER(INFO, "sm controller auto: host_device=%d sys=%d user=%d ext=%d switch %s -> %s",
+           host_index,
+           top_results[host_index].sys_current,
+           top_results[host_index].user_current,
+           top_results[host_index].sys_current - top_results[host_index].user_current,
            g_auto_current[host_index] == SM_CONTROLLER_AIMD ? "aimd" : "delta",
            target == SM_CONTROLLER_AIMD ? "aimd" : "delta");
     g_auto_current[host_index] = target;
@@ -659,6 +721,14 @@ static void sm_controller_init(void) {
   (void)get_sm_controller_kind(&kind);
   g_sm_controller_kind = kind;
 
+  /* host_index_is_exclusive() is used by the watcher's soft_core burst
+   * judgment regardless of the selected controller -- it replaces the old
+   * sys_process_num==1 check in EVERY controller mode, not just AUTO.
+   * Therefore read its env unconditionally so delta and aimd users also
+   * get the more accurate predicate. */
+  (void)get_sm_auto_external_util_threshold(&g_auto_external_util_threshold);
+  if (g_auto_external_util_threshold < 1) g_auto_external_util_threshold = 1;
+
   if (kind == SM_CONTROLLER_AIMD || kind == SM_CONTROLLER_AUTO) {
     /* AIMD params are also needed by AUTO because AUTO dispatches to
      * aimd_controller when sys_process_num >= 2. */
@@ -674,8 +744,9 @@ static void sm_controller_init(void) {
     /* g_auto_current[] starts all-DELTA so a process that never sees a
      * second Pod behaves indistinguishably from CUDA_SM_CONTROLLER=delta. */
     g_sm_controller = auto_routed_controller;
-    LOGGER(INFO, "+ SmController   : auto (debounce=%d cycles; aimd params: md_div=%d eff_ratio=%d/1000 ai_base_div=%d)",
-           g_auto_debounce_cycles, g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_ai_base_div);
+    LOGGER(INFO, "+ SmController   : auto (debounce=%d cycles, ext_util_threshold=%d%%; aimd params: md_div=%d eff_ratio=%d/1000 ai_base_div=%d)",
+           g_auto_debounce_cycles, g_auto_external_util_threshold,
+           g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_ai_base_div);
     metrics_set_controller_label("auto");
   } else if (kind == SM_CONTROLLER_AIMD) {
     g_sm_controller = aimd_controller;
@@ -746,8 +817,11 @@ static void *utilization_watcher(void *arg) {
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
       if (g_vgpu_config->devices[host_index].hard_limit) {
-        /* Avoid usage jitter when application is initialized*/
-        if (top_results[host_index].sys_process_num == 1 && top_results[host_index].user_current < up_limits[host_index] / 10) {
+        /* Avoid usage jitter when application is initialized. host_index_is_exclusive
+         * replaces sys_process_num==1 so the jitter-init bypass is not missed when
+         * NVIDIA driver threads (which never burn SM) are present, or when our own
+         * container has multiple PIDs (DataLoader workers). */
+        if (host_index_is_exclusive(host_index) && top_results[host_index].user_current < up_limits[host_index] / 10) {
           g_cur_cuda_cores[host_index] =
               g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
           continue;
@@ -765,14 +839,19 @@ static void *utilization_watcher(void *arg) {
           pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
         }
 
-        /* 1.Only one process on the GPU
-         * Allocate cuda cores according to the limit value.
+        /* 1. Device is exclusively used by us (no external Pod competing).
+         *    Allocate cuda cores up to soft_core for burst headroom.
          *
-         * 2.Multiple processes on the GPU
-         * First, change the up_limit of the process according to the
-         * historical resource utilization. Second, allocate the cuda
-         * cores according to the changed limit value.*/
-        if (top_results[host_index].sys_process_num == 1) {
+         * 2. Another Pod is actively burning SM on this device. First,
+         *    change up_limit of this process according to historical
+         *    resource utilization. Second, allocate cuda cores according
+         *    to the changed limit value.
+         *
+         * "Exclusive" is determined via host_index_is_exclusive() which
+         * filters NVIDIA driver threads (0% SM) and treats intra-container
+         * fork (DataLoader workers etc.) as the same user. Replaces an
+         * earlier sys_process_num == 1 check that was fooled by both. */
+        if (host_index_is_exclusive(host_index)) {
           up_limits[host_index] = g_vgpu_config->devices[host_index].soft_core;
           shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         } else {
