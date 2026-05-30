@@ -146,21 +146,52 @@ AI 时,按 share 在 W_max 区间的位置选不同步长:
 
 ### 方案 ⑤:按 `sys_process_num` 自动路由 —— 架构级,推荐先做
 
-```pseudo
-watcher 已经知道 sys_process_num(当前 GPU 上的进程数)
+#### V1:`sys_process_num` 路由(已落地,后被 V2 取代)
 
+```pseudo
 sys_process_num == 1 → 用 delta   (单 Pod,要吞吐)
 sys_process_num >= 2 → 用 AIMD    (多 Pod,要公平)
 ```
 
+**V1 实测发现两类误判**:
+1. **NVIDIA 驱动常驻线程**(nvidia-persistenced/MPS server 等)永远存在 → `sys_process_num` 恒 ≥ 2 → auto 永远走 aimd → 单 Pod 训练永远慢 1/3,等同于直接用 `aimd`
+2. **本容器内 fork 多个子进程**(torch.distributed worker / DataLoader 等)→ `sys_process_num` ≥ 2 → 同样误判
+
+#### V2:`host_index_is_exclusive` 谓词(当前实现)
+
+```pseudo
+host_index_is_exclusive(h):
+    external_util = max(0, sys_current - user_current)
+    return external_util < CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD   # 默认 1%
+
+host_index_is_exclusive(h) == true  → 用 delta   (本容器独占,要吞吐)
+host_index_is_exclusive(h) == false → 用 AIMD    (有真实外部容器,要公平)
+```
+
+利用 `get_used_gpu_utilization` 已经在 5 种 compatibility mode 下都做好的 user / sys 分离:
+
+| compatibility mode | user_current 的来源 |
+|---|---|
+| `CLIENT` | `CONTAINER_PIDS_CONFIG_FILE_PATH` 文件里列出的 PID |
+| `CGROUPV1` | 每个 PID 的 cgroup v1 路径与本容器 cgroup 对比 |
+| `CGROUPV2` | 同上 cgroup v2 |
+| `OPEN_KERNEL` | `/proc/self/ns/pid` 命名空间匹配 |
+| `HOST` | 没有容器隔离,user_current == sys_current,external 恒 0,**总是 delta** |
+
+**关键洞察**:用 util 阈值而非 PID 数,**用一招同时干掉两类误判**:
+- NVIDIA 驱动常驻线程虽然算 1 个 PID,但它们 SM 占用 0% → external_util = 0 → 不影响判决
+- 本容器 fork 子进程虽然 PID 数 ≥ 2,但全部计入 user_current → external_util = 0 → 正确判为独占
+
+**同一谓词同时应用到 watcher 主循环的 soft_core 突发判定**(原本的 `sys_process_num == 1` 也是同样的判决意图,V2 一起修了)。
+
 | 维度 | 评估 |
 |---|---|
-| 收益 | 两种工况下都拿到最优算法的最优行为。**用户报告的"单 Pod 训练慢 1/3" 直接消失** |
-| 代价 | watcher 主循环加一个分支,函数指针动态切换;处理切换瞬间 share 状态过渡(两者输入同为 `g_cur_cuda_cores`,可直接交接) |
-| 适配场景 | **通用,所有场景都正向收益** |
+| 收益 | (V2)两类常见误判全消,实测"单 Pod 慢 1/3" 直接解;watcher 的 soft_core 突发判定也同时受益 |
+| 代价 | watcher 主循环改 1 处判决,加一个谓词函数和 1 个新 env;**没有新数据采集**(复用已经算好的 user / sys) |
+| 适配场景 | **5 种 compatibility mode 全部支持** |
 | 实施难度 | ⭐⭐ |
-| 最大风险 | 多 Pod 进入/退出瞬间,sys_process_num 抖动导致算法乒乓切换 → 用 N 个周期一致才切换的简单去抖即可解决 |
-| 为什么强烈推荐 | **利用已有信息的最聪明做法**,不需要新数据采集,不需要 ML 调参,行为可预测 |
+| 最大风险 | NVML 整数 % 量化下 external 可能在 0/1 之间抖动 → debounce N=5 周期(~400ms)已能吸收,12/12 simulator 场景验证通过 |
+| 为什么强烈推荐 | 用 util 而不数 PID,**结构上回避了所有 PID-counting 类方案的失败模式** |
 
 ---
 

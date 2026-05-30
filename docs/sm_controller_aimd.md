@@ -65,23 +65,52 @@ if (user_current <= eff_limit) {
 | `CUDA_SM_AIMD_EFF_RATIO` | `875` | 缓冲比例(千分制),875 = 87.5%;上界 1000 |
 | `CUDA_SM_AIMD_AI_BASE_DIV` | `400` | AI 步长基数除数,越大步长越小 |
 | `CUDA_SM_AUTO_DEBOUNCE_CYCLES` | `5` | (仅 `auto`)切换前要观察到目标算法连续多少个 watcher 周期才执行翻转;最小 1。N=5 对应 ~400ms,够吸收 NVML 的单周期抖动 |
+| `CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD` | `1` | "外部容器占用 ≥ 此值(%) 才算非独占"。**对所有 controller 都生效**,因为 watcher 主循环的 soft_core 突发判定也用这同一个谓词。默认 1 仅过滤 0% 的 NVIDIA 驱动常驻线程;真有需要(比如卡上有别的低占用工具)可调高 |
 
-### 4.1 `auto` 模式(实验性,见 [sawtooth 分析 §3 方案 ⑤](sm_controller_aimd_sawtooth_analysis.md))
+### 4.1 `auto` 模式(实验性,见 [sawtooth 分析 §3 方案 ⑤ V2](sm_controller_aimd_sawtooth_analysis.md))
 
-`auto` 在每个 watcher 周期按当卡 `sys_process_num` 路由:
+`auto` 在每个 watcher 周期按 **"是否本容器独占当卡"** 路由:
 
-- `sys_process_num == 1` → 走 delta(单 Pod 要吞吐)
-- `sys_process_num >= 2` → 走 aimd(多 Pod 要公平)
+- 独占 → 走 delta(单 Pod 要吞吐,可突发 soft_core)
+- 非独占 → 走 aimd(多 Pod 要公平)
 
-带 `g_auto_debounce_cycles` 对称去抖:连续 N 个周期看到与当前算法相反的目标才翻转,期间任一周期回到同向则计数清零。**完全规避 NVML 单周期抖动导致的乒乓**。翻转时打 INFO 日志:
+"独占" 由 [`host_index_is_exclusive(host_index)`](../library/src/cuda_hook.c) 这一统一谓词判定。**注意:此谓词同时被 watcher 主循环的 soft_core 突发判定使用**(替换了原本的 `sys_process_num == 1` 检查),因此 V2 的逻辑修正对 **所有 controller 都生效**,不只是 `auto`。
+
+#### V2 判决逻辑
+
+```c
+exclusive = (sys_current - user_current) < CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD
+```
+
+其中:
+- `sys_current` = 当卡所有进程的 SM 利用率之和(NVML 全局视角)
+- `user_current` = 本容器内进程的 SM 利用率之和(已通过 PID 文件 / cgroup / PID 命名空间识别)
+- 二者之差就是"外部容器占用",阈值默认 1% 仅过滤 0% 的 NVIDIA 常驻线程
+
+#### V1 → V2 修正了哪些误判
+
+| 场景 | V1(`sys_process_num` 判) | V2(`host_index_is_exclusive` 判) |
+|---|---|---|
+| 单 Pod + nvidia-persistenced/MPS 常驻线程在 | ❌ 误判为多 Pod → 永远 aimd → 单 Pod 永远慢 1/3 | ✅ 外部 0% < 1% → 独占 → delta |
+| 单 Pod 内 fork 多 worker(DataLoader/torch.distributed) | ❌ 进程数 >= 2 → aimd → 慢 1/3 | ✅ 全在本容器 → user 吸收 → 外部 = 0 → delta |
+| 真实 2 个 vgpu Pod 同时跑 | ✅ aimd | ✅ aimd |
+| 另一 Pod 刚启动还没下发 kernel | ✅ aimd(但靠的是错原因) | ✅ delta(暂时);对方一开始算就翻 aimd |
+| CLIENT 模式 PID 文件读不到 | 行为不确定 | ✅ user=0,ext=sys → aimd(失败方向安全:不会错误地突发) |
+| HOST 模式(无容器隔离) | 进程数语义模糊 | ✅ user==sys → ext=0 → 总是 delta(无可比的 V1 行为可言) |
+
+#### 翻转日志
 
 ```
-sm controller auto: host_device=0 sys_process_num=2 switch delta -> aimd
+sm controller auto: host_device=0 sys=70 user=40 ext=30 switch delta -> aimd
 ```
+
+包含 sys/user/ext 三个数字,运维可以直接据此排查"为什么翻转"。
 
 `aimd` 时的所有参数(`CUDA_SM_AIMD_*`)在 `auto` 模式下同样有效,因为 `auto` 在 aimd 路径直接调用 `aimd_controller`。
 
 **为什么是实验性**:只在 `experiment/aimd-sawtooth` 分支提供,因为它属于"算法形态级"改动,需要在多种真实 GPU + 多 Pod 工作负载下验证后才合并回主分支。在 `fix/library` 上设 `CUDA_SM_CONTROLLER=auto` 等同于 `delta`(env 不识别,落回 default)。
+
+> **重要**:`CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD` 影响 **所有 controller**(delta/aimd/auto),因为 watcher 主循环的 soft_core 突发判定也用同一个 `host_index_is_exclusive` 谓词。即使用户保持默认 `CUDA_SM_CONTROLLER=delta`,本次改动也修正了 V1 中"NVIDIA 驱动线程在 → soft_core 突发被错误剥夺"的隐患。
 
 启动时一次性读取,**不支持运行时切换**(会涉及 share 历史状态重置的边界条件)。
 
