@@ -1825,7 +1825,11 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
 
   top_result->user_current = 0;
   top_result->sys_current = 0;
-  top_result->external_process_num = 0;
+  // In some versions of the driver, it is not possible to rely on nvmlDeviceGetComputeRunningProcesses
+  // to obtain the number of processes in the entire namespace. Therefore, it is necessary to aggregate
+  // the current container process number and calculate the difference with the global process number
+  // top_result ->sys_process_num to obtain the accurate number of external processes.
+  unsigned int current_processes_num = 0;
 
   int sm_util = 0;
   int codec_util = 0;
@@ -1852,12 +1856,11 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
           if (!matchOpenKernel && check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
             matchClientMode = 1;
             top_result->user_current += sm_util + codec_util;
+            current_processes_num++;
           } else if (!matchClientMode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
             matchOpenKernel = 1;
             top_result->user_current += sm_util + codec_util;
-          } else {
-            /* PID failed every "in our container" test -> external. */
-            top_result->external_process_num++;
+            current_processes_num++;
           }
         }
       }
@@ -1874,11 +1877,11 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
         if (!matchOpenKernel && check_device_pid_in_cgroupv2_container(processes_sample[i].pid) == 0) {
           matchCGroupV2Mode = 1;
           top_result->user_current += sm_util + codec_util;
+          current_processes_num++;
         } else if (!matchCGroupV2Mode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
           matchOpenKernel = 1;
           top_result->user_current += sm_util + codec_util;
-        } else {
-          top_result->external_process_num++;
+          current_processes_num++;
         }
       }
     }
@@ -1894,11 +1897,11 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
         if (!matchOpenKernel && check_device_pid_in_cgroupv1_container(processes_sample[i].pid) == 0) {
           matchCGroupV1Mode = 1;
           top_result->user_current += sm_util + codec_util;
+          current_processes_num++;
         } else if (!matchCGroupV1Mode && openKernelMode && check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
           matchOpenKernel = 1;
           top_result->user_current += sm_util + codec_util;
-        } else {
-          top_result->external_process_num++;
+          current_processes_num++;
         }
       }
     }
@@ -1913,8 +1916,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
         if (check_device_pid_in_local_container_pid(processes_sample[i].pid) == 0) {
           matchOpenKernel = 1;
           top_result->user_current += sm_util + codec_util;
-        } else {
-          top_result->external_process_num++;
+          current_processes_num++;
         }
       }
     }
@@ -1927,12 +1929,14 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
         codec_util = CODEC_NORMALIZE(codec_util);
         top_result->sys_current += sm_util + codec_util;
         top_result->user_current += sm_util + codec_util;
+        current_processes_num++;
       }
     }
   } else {
     LOGGER(FATAL, "unknown environment compatibility mode: %d", g_vgpu_config->compatibility_mode);
   }
 
+  top_result->external_process_num = current_processes_num >= top_result->sys_process_num ? 0 : top_result->sys_process_num - current_processes_num;
   if ((g_util_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
     LOGGER(VERBOSE, "cuda device: %d, host device: %d, sys util: %d, user util: %d (1/%d sampled)",
            cuda_index, host_index, top_result->sys_current, top_result->user_current,
