@@ -284,6 +284,16 @@ typedef struct {
   uint64_t checktime;
   int valid;
   int sys_process_num;
+  /* Count of PIDs on this device that are NOT in our container. Updated
+   * by get_used_gpu_utilization in lockstep with user/sys per the active
+   * compatibility mode. Used by the watcher to decide whether to reset
+   * up_limits on new-process arrival without being fooled by our own
+   * intra-container fork (DataLoader workers, etc). Strict counting:
+   * NVIDIA driver always-resident threads (nvidia-persistenced, MPS)
+   * DO count as external -- but they appear once and stay forever, so
+   * they don't cause repeated resets. HOST_COMPATIBILITY_MODE has no
+   * container boundary -> this field stays 0. */
+  int external_process_num;
 } utilization_t;
 
 typedef struct {
