@@ -64,6 +64,7 @@ extern int get_sm_controller_kind(int *kind);
 extern int get_aimd_md_divisor(int *out);
 extern int get_aimd_eff_ratio(int *out);
 extern int get_aimd_ai_base_div(int *out);
+extern int get_sm_auto_debounce_cycles(int *out);
 
 /* fork() child handler implemented in loader.c -- re-inits the four
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
@@ -511,12 +512,34 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
 typedef int64_t (*sm_controller_fn)(int up_limit, int user_current,
                                     int64_t share, int host_index);
 
-enum { SM_CONTROLLER_DELTA = 0, SM_CONTROLLER_AIMD = 1 };
+enum {
+  SM_CONTROLLER_DELTA = 0,
+  SM_CONTROLLER_AIMD  = 1,
+  SM_CONTROLLER_AUTO  = 2,   /* experimental: route per device per cycle */
+};
 
 static int g_sm_controller_kind = SM_CONTROLLER_DELTA;
 static int g_aimd_md_divisor    = 3;     /* share /= div on overshoot     */
 static int g_aimd_eff_ratio     = 875;   /* eff_limit = up * 875 / 1000   */
 static int g_aimd_ai_base_div   = 400;   /* ai_step base divisor          */
+
+/* ---- AUTO mode (debounced sys_process_num routing) ------------------- *
+ * Plain int (not volatile, no atomics) because:
+ *   - Every entry of these arrays is exclusively touched by the SINGLE
+ *     watcher thread that owns that host_index (see balance_batches: each
+ *     watcher thread owns a disjoint device range).
+ *   - The controller call site is also that same watcher thread.
+ * So there is no cross-thread access on per-device state.
+ *
+ * Initial values:
+ *   g_auto_current = DELTA so a process that hasn't yet seen multi-Pod
+ *   activity behaves identically to CUDA_SM_CONTROLLER=delta -- the safe
+ *   default for single-Pod (the common case). The router only flips to
+ *   AIMD after `g_auto_debounce_cycles` consecutive observations of
+ *   sys_process_num >= 2. Same threshold for the flip back. */
+static int g_auto_debounce_cycles                   = 5;
+static int g_auto_current[MAX_DEVICE_COUNT]         = {0};  /* 0 DELTA / 1 AIMD */
+static int g_auto_pending_streak[MAX_DEVICE_COUNT]  = {0};  /* cycles seeing the OTHER target */
 
 static int64_t aimd_controller(int up_limit, int user_current,
                                int64_t share, int host_index);
@@ -584,6 +607,51 @@ static int64_t aimd_controller(int up_limit, int user_current,
   return share;
 }
 
+/* Tentative declaration so auto_routed_controller can reference the watcher's
+ * top_results[] which is fully defined ~70 lines below alongside the other
+ * watcher state arrays. C merges multiple tentative defs of the same static
+ * object into a single allocation; the only one with an initializer wins. */
+static utilization_t top_results[MAX_DEVICE_COUNT];
+
+/* AUTO mode: per-device, per-cycle router between delta (single Pod, for
+ * throughput) and aimd (multi Pod, for fairness). Reads the watcher's
+ * current per-device sys_process_num snapshot (top_results[h].sys_process_num,
+ * written upstream this same cycle by get_used_gpu_utilization), runs a
+ * symmetric debounce of g_auto_debounce_cycles consecutive disagreements,
+ * then flips g_auto_current[h]. Logs each flip at INFO so operators can
+ * correlate behaviour changes with Pod arrivals/exits.
+ *
+ * Same-thread invariant: this function runs on the watcher thread that
+ * owns host_index; the g_auto_* arrays are touched only by that thread.
+ * No volatile / atomics needed. */
+static int64_t auto_routed_controller(int up_limit, int user_current,
+                                      int64_t share, int host_index) {
+  int procs = top_results[host_index].sys_process_num;
+  int target = (procs >= 2) ? SM_CONTROLLER_AIMD : SM_CONTROLLER_DELTA;
+
+  if (target == g_auto_current[host_index]) {
+    /* Steady state: zero out any pending counter accumulated by a brief
+     * burst that did not survive debounce. */
+    g_auto_pending_streak[host_index] = 0;
+  } else if (++g_auto_pending_streak[host_index] >= g_auto_debounce_cycles) {
+    /* Streak survived debounce -- flip. */
+    LOGGER(INFO, "sm controller auto: host_device=%d sys_process_num=%d switch %s -> %s",
+           host_index, procs,
+           g_auto_current[host_index] == SM_CONTROLLER_AIMD ? "aimd" : "delta",
+           target == SM_CONTROLLER_AIMD ? "aimd" : "delta");
+    g_auto_current[host_index] = target;
+    g_auto_pending_streak[host_index] = 0;
+  }
+
+  /* Dispatch. share[] is shared with whichever controller was active last
+   * cycle -- both algorithms are iterators on shares[host_index], so the
+   * value carries over correctly; no warm-up artifact at the flip. */
+  if (g_auto_current[host_index] == SM_CONTROLLER_AIMD) {
+    return aimd_controller(up_limit, user_current, share, host_index);
+  }
+  return delta(up_limit, user_current, share, host_index);
+}
+
 /* Called once from initialization() before watcher threads spawn. Reads
  * env, picks the controller, logs the choice, and labels metrics. */
 static void sm_controller_init(void) {
@@ -591,11 +659,25 @@ static void sm_controller_init(void) {
   (void)get_sm_controller_kind(&kind);
   g_sm_controller_kind = kind;
 
-  if (kind == SM_CONTROLLER_AIMD) {
+  if (kind == SM_CONTROLLER_AIMD || kind == SM_CONTROLLER_AUTO) {
+    /* AIMD params are also needed by AUTO because AUTO dispatches to
+     * aimd_controller when sys_process_num >= 2. */
     (void)get_aimd_md_divisor(&g_aimd_md_divisor);
     (void)get_aimd_eff_ratio(&g_aimd_eff_ratio);
     (void)get_aimd_ai_base_div(&g_aimd_ai_base_div);
     if (g_aimd_md_divisor < 2) g_aimd_md_divisor = 2;     /* /1 = no-op   */
+  }
+
+  if (kind == SM_CONTROLLER_AUTO) {
+    (void)get_sm_auto_debounce_cycles(&g_auto_debounce_cycles);
+    if (g_auto_debounce_cycles < 1) g_auto_debounce_cycles = 1;
+    /* g_auto_current[] starts all-DELTA so a process that never sees a
+     * second Pod behaves indistinguishably from CUDA_SM_CONTROLLER=delta. */
+    g_sm_controller = auto_routed_controller;
+    LOGGER(INFO, "+ SmController   : auto (debounce=%d cycles; aimd params: md_div=%d eff_ratio=%d/1000 ai_base_div=%d)",
+           g_auto_debounce_cycles, g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_ai_base_div);
+    metrics_set_controller_label("auto");
+  } else if (kind == SM_CONTROLLER_AIMD) {
     g_sm_controller = aimd_controller;
     LOGGER(INFO, "+ SmController   : aimd (md_div=%d eff_ratio=%d/1000 ai_base_div=%d)",
            g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_ai_base_div);
