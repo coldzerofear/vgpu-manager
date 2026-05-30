@@ -52,6 +52,23 @@
  * decision to identify "real exclusive use" of the GPU. */
 #define CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD_ENV "CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD"
 
+/* AIMD anti-sawtooth tunables (P1, see sm_controller_aimd_sawtooth_analysis.md).
+ *
+ *   DEADBAND_RATIO  -- per-thousand. Defines the AI lower edge of the
+ *                      hysteresis band around eff_limit. Default 800 means
+ *                      AI fires only when user_current < up_limit*0.80
+ *                      (i.e. below 80% of target), MD fires above eff_limit
+ *                      (up_limit*0.875 by default). Inside the band the
+ *                      controller leaves share alone. Must be < EFF_RATIO.
+ *
+ *   MD_COOLDOWN_CYCLES -- how many watcher cycles after an MD the controller
+ *                         will NOT MD again, even if user_current still
+ *                         exceeds eff_limit. Default 3 (~240ms at 80ms
+ *                         watcher cadence). Set 0 to disable cooldown
+ *                         entirely (retain V2.1 behaviour). */
+#define CUDA_SM_AIMD_DEADBAND_RATIO_ENV     "CUDA_SM_AIMD_DEADBAND_RATIO"
+#define CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV "CUDA_SM_AIMD_MD_COOLDOWN_CYCLES"
+
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
   double value = 0.0;
@@ -262,6 +279,26 @@ int get_sm_controller_kind(int *kind) {
  * and parsed; -1 if env unset (caller keeps its default). Parse failure or a
  * non-positive value falls back to `dflt` and still returns 0 so the caller
  * sees a usable value rather than a silent zero. */
+/* Non-negative variant: accepts 0 (some knobs use 0 as the "disable" value).
+ * Same parse + fallback semantics as get_positive_int_env otherwise. */
+static int get_nonneg_int_env(const char *name, int dflt, int *out) {
+  char *str = getenv(name);
+  if (!str || !*str) {
+    *out = dflt;
+    return -1;
+  }
+  char *endp = NULL;
+  long v = strtol(str, &endp, 10);
+  if (endp == str || v < 0 || v > INT_MAX) {
+    LOGGER(WARNING, "%s=\"%s\" is not a non-negative int, using default %d",
+           name, str, dflt);
+    *out = dflt;
+    return 0;
+  }
+  *out = (int)v;
+  return 0;
+}
+
 static int get_positive_int_env(const char *name, int dflt, int *out) {
   char *str = getenv(name);
   if (!str || !*str) {            /* unset OR set-to-empty -> use default */
@@ -318,6 +355,17 @@ int get_sm_auto_debounce_cycles(int *out) {
  * the GPU that should be ignored. Clamped >= 1 by get_positive_int_env. */
 int get_sm_auto_external_util_threshold(int *out) {
   return get_positive_int_env(CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD_ENV, 1, out);
+}
+
+/* AIMD deadband lower edge / 1000. Caller MUST additionally check
+ * deadband_ratio < eff_ratio to keep AI/deadband/MD regions well-ordered. */
+int get_aimd_deadband_ratio(int *out) {
+  return get_positive_int_env(CUDA_SM_AIMD_DEADBAND_RATIO_ENV, 800, out);
+}
+
+/* AIMD post-MD cooldown in watcher cycles. 0 = disabled (V2.1 behaviour). */
+int get_aimd_md_cooldown_cycles(int *out) {
+  return get_nonneg_int_env(CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV, 3, out);
 }
 
 static int compare_pids(const void *a, const void *b) {

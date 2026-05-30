@@ -66,6 +66,8 @@ extern int get_aimd_eff_ratio(int *out);
 extern int get_aimd_ai_base_div(int *out);
 extern int get_sm_auto_debounce_cycles(int *out);
 extern int get_sm_auto_external_util_threshold(int *out);
+extern int get_aimd_deadband_ratio(int *out);
+extern int get_aimd_md_cooldown_cycles(int *out);
 
 /* fork() child handler implemented in loader.c -- re-inits the four
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
@@ -524,6 +526,29 @@ static int g_aimd_md_divisor    = 3;     /* share /= div on overshoot     */
 static int g_aimd_eff_ratio     = 875;   /* eff_limit = up * 875 / 1000   */
 static int g_aimd_ai_base_div   = 400;   /* ai_step base divisor          */
 
+/* ---- P1 anti-sawtooth tunables (sm_controller_aimd_sawtooth_analysis.md) -
+ *
+ * Deadband (hysteresis): inside [up_limit*deadband_ratio/1000,
+ * up_limit*eff_ratio/1000] the controller holds share steady. Removes the
+ * "every cycle alternates AI/MD around the threshold" sawtooth that
+ * single-threshold AIMD produces. Default 800 means AI fires when util
+ * drops below 80% of target, MD fires above 87.5%; in between we hold.
+ *
+ * MD cooldown: after MD fires, do not fire MD again for this many watcher
+ * cycles even if util still exceeds eff_limit. NVML util reflects share
+ * changes with ~200-400ms lag; without cooldown a controller hitting MD
+ * for N consecutive cycles cuts share by md_divisor^N (e.g. 3^N = 81x
+ * for N=4) before NVML can register that the first cut already worked.
+ * Default 3 cycles ~ 240ms at 80ms watcher cadence. 0 disables. */
+static int g_aimd_deadband_ratio        = 800;
+static int g_aimd_md_cooldown_cycles    = 3;
+/* Per-device remaining cooldown counter. Watcher-thread-only access
+ * (each watcher thread owns a disjoint host_index slice via
+ * balance_batches; auto_routed_controller runs in the same watcher
+ * thread). No volatile / atomics needed. fork() safety: child watcher
+ * restarts and the static-zero initializer applies on first dispatch. */
+static int g_aimd_md_cooldown[MAX_DEVICE_COUNT] = {0};
+
 /* ---- AUTO mode (debounced sys_process_num routing) ------------------- *
  * Plain int (not volatile, no atomics) because:
  *   - Every entry of these arrays is exclusively touched by the SINGLE
@@ -632,10 +657,30 @@ static sm_controller_fn g_sm_controller = delta;
  *     piece in their small-setpoint behaviour. */
 static int64_t aimd_controller(int up_limit, int user_current,
                                int64_t share, int host_index) {
-  /* Effective cap below the real target -- start backing off early so we
-   * don't overshoot before the MD branch fires. */
+  /* Three regions around the target (P1 hysteresis, see
+   * sm_controller_aimd_sawtooth_analysis.md):
+   *
+   *      user_current
+   *   0 +------ AI ------+---- deadband ----+------ MD ------+ 100
+   *                  deadband_low        eff_limit
+   *
+   *   AI region        : share += gap-proportional step (grow)
+   *   deadband region  : hold share (kills sawtooth)
+   *   MD region        : share /= md_divisor, then arm cooldown (cut)
+   *
+   * Defaults: deadband_ratio=800 (low=80% of up_limit), eff_ratio=875
+   * (high=87.5%); so deadband width = 7.5% of up_limit (scales with
+   * setpoint, no manual tuning per workload).
+   *
+   * sm_controller_init clamps deadband_ratio < eff_ratio so deadband_low
+   * < eff_limit always; we still guard at runtime as a defence in depth
+   * (g_total_cuda_cores etc. live in shared memory and could theoretically
+   * be perturbed by future code). */
   int eff_limit = (int)((int64_t)up_limit * g_aimd_eff_ratio / 1000);
   if (eff_limit < 1) eff_limit = 1;
+  int deadband_low = (int)((int64_t)up_limit * g_aimd_deadband_ratio / 1000);
+  if (deadband_low < 0) deadband_low = 0;
+  if (deadband_low >= eff_limit) deadband_low = eff_limit - 1;   /* defence */
 
   int64_t sm_num     = (int64_t)g_sm_num[host_index];
   int64_t max_thread = (int64_t)g_max_thread_per_sm[host_index];
@@ -646,7 +691,21 @@ static int64_t aimd_controller(int up_limit, int user_current,
                     / (int64_t)g_aimd_ai_base_div;
   if (ai_step < 1) ai_step = 1;
 
-  if (user_current <= eff_limit) {
+  /* Cooldown drains every cycle (TCP Reno time-based semantics, not
+   * event-based: an AI run shouldn't keep a stale cooldown alive). The
+   * counter is bumped to (cycles + 1) when MD fires below, then this
+   * decrement immediately knocks it down to `cycles`, so the post-MD
+   * cycles 1..N all see counter > 0 and stay blocked, then cycle N+1
+   * sees 0 and is free to MD again. This +1/decrement-first dance is
+   * the cheapest way to make "cooldown=N" gate exactly N post-MD
+   * cycles with a single integer of state. */
+  if (g_aimd_md_cooldown[host_index] > 0) {
+    g_aimd_md_cooldown[host_index]--;
+  }
+
+  if (user_current < deadband_low) {
+    /* AI: gap-proportional step (gap >= 5 floor to keep moving when very
+     * close to target). */
     int gap = up_limit - user_current;
     if (gap < 5) gap = 5;
     int64_t step = ai_step * (int64_t)gap / 5;
@@ -654,17 +713,28 @@ static int64_t aimd_controller(int up_limit, int user_current,
     if (share > g_total_cuda_cores[host_index]) {
       share = g_total_cuda_cores[host_index];
     }
-  } else {
-    /* MD: aggressive cut. Caller already clamps non-negative; we still
-     * guard to be defensive. */
-    share /= g_aimd_md_divisor;
-    if (share < 0) share = 0;
+  } else if (user_current > eff_limit) {
+    /* MD region. Honour cooldown: a cycle right after an MD must NOT
+     * MD again, even if util still over-shoots -- NVML's ~80ms sample
+     * + share-take-effect lag (~200-400ms total) means consecutive
+     * MD cuts share by md_divisor^N before the first cut's effect
+     * surfaces, hence "MD avalanche". Cooldown breaks the chain. */
+    if (g_aimd_md_cooldown[host_index] == 0) {
+      share /= g_aimd_md_divisor;
+      if (share < 0) share = 0;
+      /* +1 because the decrement at the top of NEXT cycle takes us
+       * from cycles+1 to cycles, then cycles..1 = N cycles blocked. */
+      g_aimd_md_cooldown[host_index] = g_aimd_md_cooldown_cycles + 1;
+    }
+    /* else: in cooldown, hold share, do not MD. */
   }
+  /* else: deadband region, hold share (no change). */
+
   /* Floor: never let share fall below one AI step. Without this, after
    * MD the next AI would need many cycles to bring share back into the
    * useful range, especially when up_limit (and therefore ai_step) is
-   * small. This is the line that fixes the "utilization stuck near 0
-   * against hard_core=5" regression. */
+   * small. This fixes the "utilization stuck near 0 against
+   * hard_core=5" regression. */
   if (share < ai_step) share = ai_step;
   return share;
 }
@@ -803,6 +873,21 @@ static void sm_controller_init(void) {
     (void)get_aimd_eff_ratio(&g_aimd_eff_ratio);
     (void)get_aimd_ai_base_div(&g_aimd_ai_base_div);
     if (g_aimd_md_divisor < 2) g_aimd_md_divisor = 2;     /* /1 = no-op   */
+
+    /* P1 anti-sawtooth tunables */
+    (void)get_aimd_deadband_ratio(&g_aimd_deadband_ratio);
+    (void)get_aimd_md_cooldown_cycles(&g_aimd_md_cooldown_cycles);
+    /* Clamp: deadband must sit strictly below eff so the AI/deadband/MD
+     * regions stay well-ordered. Reject silly user inputs early instead
+     * of running with a self-overlapping band. */
+    if (g_aimd_deadband_ratio < 0) {
+      g_aimd_deadband_ratio = 0;
+    } else if (g_aimd_deadband_ratio >= g_aimd_eff_ratio) {
+      LOGGER(WARNING, "AIMD deadband_ratio (%d) must be < eff_ratio (%d); clamping to eff_ratio-1",
+             g_aimd_deadband_ratio, g_aimd_eff_ratio);
+      g_aimd_deadband_ratio = g_aimd_eff_ratio - 1;
+    }
+    if (g_aimd_md_cooldown_cycles < 0) g_aimd_md_cooldown_cycles = 0;
   }
 
   if (kind == SM_CONTROLLER_AUTO) {
@@ -811,14 +896,16 @@ static void sm_controller_init(void) {
      * unconditionally above so delta/aimd also benefit from the same
      * exclusivity predicate in the watcher's burst gate. */
     g_sm_controller = auto_routed_controller;
-    LOGGER(INFO, "+ SmController   : auto (debounce=%d cycles, ext_util_threshold=%d%%; aimd params: md_div=%d eff_ratio=%d/1000 ai_base_div=%d)",
+    LOGGER(INFO, "+ SmController   : auto (debounce=%d cycles, ext_util_threshold=%d%%; aimd params: md_div=%d eff_ratio=%d/1000 deadband_ratio=%d/1000 ai_base_div=%d md_cooldown=%d)",
            g_auto_debounce_cycles, g_auto_external_util_threshold,
-           g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_ai_base_div);
+           g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_deadband_ratio,
+           g_aimd_ai_base_div, g_aimd_md_cooldown_cycles);
     metrics_set_controller_label("auto");
   } else if (kind == SM_CONTROLLER_AIMD) {
     g_sm_controller = aimd_controller;
-    LOGGER(INFO, "+ SmController   : aimd (md_div=%d eff_ratio=%d/1000 ai_base_div=%d, exclusivity ext_util_threshold=%d%% debounce=%d)",
-           g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_ai_base_div,
+    LOGGER(INFO, "+ SmController   : aimd (md_div=%d eff_ratio=%d/1000 deadband_ratio=%d/1000 ai_base_div=%d md_cooldown=%d, exclusivity ext_util_threshold=%d%% debounce=%d)",
+           g_aimd_md_divisor, g_aimd_eff_ratio, g_aimd_deadband_ratio,
+           g_aimd_ai_base_div, g_aimd_md_cooldown_cycles,
            g_auto_external_util_threshold, g_auto_debounce_cycles);
     metrics_set_controller_label("aimd");
   } else {

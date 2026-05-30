@@ -64,6 +64,8 @@ if (user_current <= eff_limit) {
 | `CUDA_SM_AIMD_MD_DIVISOR` | `3` | MD 因子,`share /= div`;最小 2 |
 | `CUDA_SM_AIMD_EFF_RATIO` | `875` | 缓冲比例(千分制),875 = 87.5%;上界 1000 |
 | `CUDA_SM_AIMD_AI_BASE_DIV` | `400` | AI 步长基数除数,越大步长越小 |
+| `CUDA_SM_AIMD_DEADBAND_RATIO` | `800` | (P1)死区下界(千分制),800 = 80%。`user_current < up_limit × 80%` 走 AI;`up_limit × 80% ≤ user_current ≤ up_limit × 87.5%` 死区,share 不变。**必须 < EFF_RATIO**,init 时 clamp |
+| `CUDA_SM_AIMD_MD_COOLDOWN_CYCLES` | `3` | (P1)MD 触发后多少个 watcher 周期内禁止再次 MD,杜绝 NVML 滞后期内连续砍导致的 share 雪崩。0 = 关闭(回退到 V2.1 行为) |
 | `CUDA_SM_AUTO_DEBOUNCE_CYCLES` | `5` | (仅 `auto`)切换前要观察到目标算法连续多少个 watcher 周期才执行翻转;最小 1。N=5 对应 ~400ms,够吸收 NVML 的单周期抖动 |
 | `CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD` | `1` | "外部容器占用 ≥ 此值(%) 才算非独占"。**对所有 controller 都生效**,因为 watcher 主循环的 soft_core 突发判定也用这同一个谓词。默认 1 仅过滤 0% 的 NVIDIA 驱动常驻线程;真有需要(比如卡上有别的低占用工具)可调高 |
 
