@@ -725,10 +725,15 @@ static int64_t aimd_controller(int up_limit, int user_current,
       /* +1 because the decrement at the top of NEXT cycle takes us
        * from cycles+1 to cycles, then cycles..1 = N cycles blocked. */
       g_aimd_md_cooldown[host_index] = g_aimd_md_cooldown_cycles + 1;
+      metrics_record_aimd_event(host_index, METRICS_AIMD_MD_FIRED);
+    } else {
+      /* In cooldown, hold share, do not MD. */
+      metrics_record_aimd_event(host_index, METRICS_AIMD_MD_BLOCKED);
     }
-    /* else: in cooldown, hold share, do not MD. */
+  } else {
+    /* Deadband region, hold share (no change). */
+    metrics_record_aimd_event(host_index, METRICS_AIMD_DEADBAND_HIT);
   }
-  /* else: deadband region, hold share (no change). */
 
   /* Floor: never let share fall below one AI step. Without this, after
    * MD the next AI would need many cycles to bring share back into the
@@ -825,6 +830,10 @@ static int host_index_is_exclusive_debounced(int host_index) {
        * return the soft_core burst headroom we'd grabbed). One-shot --
        * the watcher clears the flag after consuming it. */
       g_lost_exclusivity_pending[host_index] = 1;
+      metrics_record_exclusivity_flip(host_index, METRICS_EXCLUSIVITY_FLIP_LOST);
+    } else {
+      /* current == 0 && observed == 1: shared -> exclusive (gained). */
+      metrics_record_exclusivity_flip(host_index, METRICS_EXCLUSIVITY_FLIP_GAINED);
     }
     g_is_exclusive_debounced[host_index] = observed;
     g_exclusive_pending_streak[host_index] = 0;

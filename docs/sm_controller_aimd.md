@@ -150,6 +150,30 @@ metric=kernel_rate_limit_hit host_device=0 controller=aimd total=1024
 
 **为什么重要**:AIMD 把 MAE 从 ~20% 压到 ~3%,代价是 `g_cur_cuda_cores` 在 0 附近"小步多次"波动,**`rate_limit_hit` 计数预期上升**(更频繁但每次更短)。如果运维看板用此指标做"算力被节流频繁度"告警,切到 AIMD 后会误报 —— controller 标签让看板可按算法分组,避免误读。
 
+### 6.1 V2.1 + P1 观测性 metrics(P2 引入)
+
+V2.1 引入 exclusivity FSM、P1 引入 deadband + cooldown,这些机制在日志里没有可量化体现。P2 加了 5 个 counter,**完全不引入新参数**,只是把已有机制的真实触发频率暴露出来,**用于真实 GPU 实测期的"机制是否在做它该做的事"验证**。
+
+| metric | 触发位置 | 解读 |
+|---|---|---|
+| `exclusivity_flip_gained` | `host_index_is_exclusive_debounced` 翻转 shared→exclusive | 频次反映外部 Pod 撤退节奏。0 = 一直与外部共享 / 一直独占,**正常**。频繁(几秒一次)= 外部 Pod 抖动剧烈,可能要调大 `CUDA_SM_AUTO_DEBOUNCE_CYCLES` |
+| `exclusivity_flip_lost` | 同上 exclusive→shared | 必然伴随一次 lost-reset(up_limits 回到 hard_core)。频次应与 gained 约等,长期失衡说明上下游有问题 |
+| `aimd_md` | aimd_controller MD 实际触发 | 与 `aimd_md_blocked` 配对评估 cooldown 效果:`md / (md + md_blocked)` ≈ 1/(cooldown+1) 在持续过载场景下,显著偏离说明 cooldown 起效有限 |
+| `aimd_md_blocked` | aimd_controller MD 路径被 cooldown 拦截 | 高值 = cooldown 在频繁工作 = P1 防雪崩有效。0 = 工作负载平稳,cooldown 没用上 |
+| `aimd_deadband_hit` | aimd_controller 死区分支(不动 share) | 高值 = util 频繁稳态于死区 = P1 deadband 在频繁工作。稳态训练时这个值应该 >> aimd_md(死区是常态,MD 是例外) |
+
+日志格式与现有 metric 一致(power-of-two 采样,INFO 级别):
+
+```
+metric=exclusivity_flip_gained host_device=0 total=4
+metric=exclusivity_flip_lost host_device=0 total=2
+metric=aimd_md host_device=0 total=128
+metric=aimd_md_blocked host_device=0 total=384
+metric=aimd_deadband_hit host_device=0 total=2048
+```
+
+**性能**:每次 aimd_controller / 翻转事件多 1 个原子加 + 偶发 LOGGER。INFO 级别关闭时函数立即 return,零开销。详见 [src/metrics.c](../library/src/metrics.c) 内的 `metrics_record_aimd_event` / `metrics_record_exclusivity_flip`。
+
 ## 7. 必须主动提醒的参数标定问题
 
 Midokura v5 的 `÷3` / `7/8` / `ai_base_div=400` 是在 **RTX 4080**(消费卡,SM=76,每 SM 1536 线程)上调出来的。我们的 A100(SM=108,2048/SM)/ H100(SM=132,2048/SM)的 SM 数量级与线程粒度不同:

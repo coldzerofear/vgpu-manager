@@ -18,6 +18,15 @@ static volatile uint64_t g_oom_driver_return_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_gap_throttle_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_gap_sleep_us_total[MAX_DEVICE_COUNT] = {0};
 
+/* V2.1 + P1 observability counters. Together they let an operator confirm
+ * the new anti-sawtooth + exclusivity-FSM machinery is actually firing in
+ * production -- without these, those code paths are invisible from logs. */
+static volatile uint64_t g_exclusivity_flip_gained_total[MAX_DEVICE_COUNT] = {0};
+static volatile uint64_t g_exclusivity_flip_lost_total[MAX_DEVICE_COUNT]   = {0};
+static volatile uint64_t g_aimd_md_total[MAX_DEVICE_COUNT]                 = {0};
+static volatile uint64_t g_aimd_md_blocked_total[MAX_DEVICE_COUNT]         = {0};
+static volatile uint64_t g_aimd_deadband_hit_total[MAX_DEVICE_COUNT]       = {0};
+
 /* SM controller label included in rate_limit_hit emissions. Set once at
  * init by sm_controller_init() in cuda_hook.c; "delta" is the safe default
  * if init is delayed (counter still increments, label is just the default). */
@@ -157,5 +166,42 @@ void metrics_record_gap_throttle(int host_index, uint64_t gpu_us, uint64_t sleep
            host_index, total,
            (uint64_t)(g_gap_sleep_us_total[host_index] / 1000),
            gpu_us, sleep_us);
+  }
+}
+
+void metrics_record_exclusivity_flip(int host_index,
+                                     metrics_exclusivity_flip_direction_t direction) {
+  if (!should_collect_metrics() || !is_valid_metric_index(host_index)) {
+    return;
+  }
+  if (direction == METRICS_EXCLUSIVITY_FLIP_GAINED) {
+    maybe_log_counter_metric("exclusivity_flip_gained", host_index,
+                             &g_exclusivity_flip_gained_total[host_index]);
+    return;
+  }
+  if (direction == METRICS_EXCLUSIVITY_FLIP_LOST) {
+    maybe_log_counter_metric("exclusivity_flip_lost", host_index,
+                             &g_exclusivity_flip_lost_total[host_index]);
+    return;
+  }
+}
+
+void metrics_record_aimd_event(int host_index, metrics_aimd_event_t event) {
+  if (!should_collect_metrics() || !is_valid_metric_index(host_index)) {
+    return;
+  }
+  switch (event) {
+    case METRICS_AIMD_MD_FIRED:
+      maybe_log_counter_metric("aimd_md", host_index,
+                               &g_aimd_md_total[host_index]);
+      return;
+    case METRICS_AIMD_MD_BLOCKED:
+      maybe_log_counter_metric("aimd_md_blocked", host_index,
+                               &g_aimd_md_blocked_total[host_index]);
+      return;
+    case METRICS_AIMD_DEADBAND_HIT:
+      maybe_log_counter_metric("aimd_deadband_hit", host_index,
+                               &g_aimd_deadband_hit_total[host_index]);
+      return;
   }
 }
