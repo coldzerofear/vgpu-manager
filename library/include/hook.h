@@ -226,12 +226,51 @@ typedef struct {
 } resource_data_t;
 
 /**
- * Dynamic computing power limit configuration
+ * Dynamic SM controller configuration. All tunables that affect runtime
+ * algorithm behaviour live here so the boot log can dump them with a
+ * single line and operators have one place to look.
+ *
+ * Field ordering NOTE: this struct is part of the .so internal layout
+ * (g_dynamic_config is non-static but hidden via the linker version
+ * script). Reorganising field order across a build that other parts of
+ * the codebase already link against would shift offsets; keep
+ * usage_threshold at its original position and APPEND new fields to the
+ * tail. New fields must be POD with explicit sized types so the dump
+ * line in sm_controller_init() stays trivial to write.
+ *
+ * Loaded once at sm_controller_init() (under pthread_once g_init_set).
+ * After init this struct is read-only at runtime by the watcher thread,
+ * so no volatile / atomics needed; init runs before any watcher thread
+ * is spawned, and fork() re-runs init in the child via the pthread_once
+ * reset in child_after_fork() if the child needs it.
+ *
+ * usage_threshold:    avg-free-headroom threshold for soft-mode up_limit
+ *                     periodic adjust. >= 0; env CUDA_SM_USAGE_THRESHOLD.
+ * sm_controller_kind: 0=delta (stock), 1=aimd, 2=auto.
+ * aimd_md_divisor:    AIMD MD factor as a double so users can pick 1.5
+ *                     for a softer cut than 2 or 3. Clamped >= 1.01 at
+ *                     load time so we never accidentally /1 (no-op) or
+ *                     /<=0 (UB).
+ * aimd_eff_ratio:     parts-per-thousand, eff_limit = up * x / 1000.
+ * aimd_ai_base_div:   AI step base divisor.
+ * aimd_deadband_ratio: parts-per-thousand, deadband lower edge.
+ * aimd_md_cooldown_cycles: post-MD watcher-cycle cooldown (0 disables).
+ * auto_debounce_cycles: N consecutive observations to flip exclusivity FSM.
+ * auto_external_util_threshold: external util percent above which the
+ *                     device is considered "shared with other Pods".
  */
 typedef struct {
-  int change_limit_interval;
-  int usage_threshold;
-  int error_recovery_step;
+  /* Preserved: was already in this struct in earlier versions. */
+  int    usage_threshold;
+  /* Appended for V2.1/P1/P2: consolidates 8 prior file-static globals. */
+  int    sm_controller_kind;
+  double aimd_md_divisor;
+  int    aimd_eff_ratio;
+  int    aimd_ai_base_div;
+  int    aimd_deadband_ratio;
+  int    aimd_md_cooldown_cycles;
+  int    auto_debounce_cycles;
+  int    auto_external_util_threshold;
 } dynamic_config_t;
 
 typedef struct {

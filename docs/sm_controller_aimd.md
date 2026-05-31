@@ -61,7 +61,8 @@ if (user_current <= eff_limit) {
 | Env | 默认 | 含义 |
 |---|---|---|
 | `CUDA_SM_CONTROLLER` | `delta` | `delta`(stock)/ `aimd` / `auto`(实验,仅 `experiment/aimd-sawtooth` 分支提供) |
-| `CUDA_SM_AIMD_MD_DIVISOR` | `3` | MD 因子,`share /= div`;最小 2 |
+| `CUDA_SM_AIMD_MD_DIVISOR` | `3` | MD 因子,`share /= div`;**支持浮点**(例如 `1.5` 实现比整数 2 更软的回退),最小 1.01 |
+| `CUDA_SM_USAGE_THRESHOLD` | `5` | soft 模式 up_limit 周期性调整的"剩余空闲"阈值(%)。`avg > x` 升档,`avg < x` 降档,`avg == x` 维持。最小 0 |
 | `CUDA_SM_AIMD_EFF_RATIO` | `875` | 缓冲比例(千分制),875 = 87.5%;上界 1000 |
 | `CUDA_SM_AIMD_AI_BASE_DIV` | `400` | AI 步长基数除数,越大步长越小 |
 | `CUDA_SM_AIMD_DEADBAND_RATIO` | `800` | (P1)死区下界(千分制),800 = 80%。`user_current < up_limit × 80%` 走 AI;`up_limit × 80% ≤ user_current ≤ up_limit × 87.5%` 死区,share 不变。**必须 < EFF_RATIO**,init 时 clamp |
@@ -149,6 +150,16 @@ metric=kernel_rate_limit_hit host_device=0 controller=aimd total=1024
 ```
 
 **为什么重要**:AIMD 把 MAE 从 ~20% 压到 ~3%,代价是 `g_cur_cuda_cores` 在 0 附近"小步多次"波动,**`rate_limit_hit` 计数预期上升**(更频繁但每次更短)。如果运维看板用此指标做"算力被节流频繁度"告警,切到 AIMD 后会误报 —— controller 标签让看板可按算法分组,避免误读。
+
+### 6.0.1 启动期配置 dump(P2.1 引入)
+
+P2.1 把所有算法相关参数收编到 `g_dynamic_config`(`hook.h`),并在 `sm_controller_init` 末尾**用一行 INFO 日志 dump 全部生效值**。这是真实生效的值(env 加载 + clamp 之后),而不是文档默认值,运维排查时 grep 一行就够:
+
+```
++ DynamicConfig  : controller=auto usage_threshold=5 aimd[md_div=3.000 eff_ratio=875/1000 ai_base_div=400 deadband_ratio=800/1000 md_cooldown=3] auto[debounce=5 ext_util_threshold=1%] internal[soft_adjust_interval=30 delta_recovery_step=10]
+```
+
+其中 `internal[...]` 是编译期常量(原 `change_limit_interval` 和 `error_recovery_step`),不可调,但 dump 出来便于核对生效值。
 
 ### 6.1 V2.1 + P1 观测性 metrics(P2 引入)
 

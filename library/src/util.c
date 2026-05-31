@@ -69,6 +69,13 @@
 #define CUDA_SM_AIMD_DEADBAND_RATIO_ENV     "CUDA_SM_AIMD_DEADBAND_RATIO"
 #define CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV "CUDA_SM_AIMD_MD_COOLDOWN_CYCLES"
 
+/* Avg-free-headroom threshold (percent) used by the soft-mode periodic
+ * up_limit adjuster. avg > x -> climb, avg < x -> step back down,
+ * avg == x -> hold. Range: non-negative integer. 0 means "any headroom
+ * triggers climb" (use with care, can cause up_limits oscillation in
+ * mostly-idle workloads). */
+#define CUDA_SM_USAGE_THRESHOLD_ENV         "CUDA_SM_USAGE_THRESHOLD"
+
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
   double value = 0.0;
@@ -279,6 +286,31 @@ int get_sm_controller_kind(int *kind) {
  * and parsed; -1 if env unset (caller keeps its default). Parse failure or a
  * non-positive value falls back to `dflt` and still returns 0 so the caller
  * sees a usable value rather than a silent zero. */
+/* Positive double getter: accepts decimals like "1.5" so users can dial in
+ * finer-grained MD softness than the integer-divisor flavour. The min
+ * argument is a hard floor enforced after parsing; values <= min produce
+ * a WARNING and fall back to dflt. Returns 0 if env was set and parsed
+ * to a usable value (whether or not it had to fall back to dflt due to
+ * range violation); -1 if env was unset (caller's dflt is used). */
+static int get_positive_double_env(const char *name, double dflt, double min,
+                                   double *out) {
+  char *str = getenv(name);
+  if (!str || !*str) {
+    *out = dflt;
+    return -1;
+  }
+  char *endp = NULL;
+  double v = strtod(str, &endp);
+  if (endp == str || !(v > 0) || v < min || v != v /* NaN */) {
+    LOGGER(WARNING, "%s=\"%s\" is not a positive double (>= %.3f), using default %.3f",
+           name, str, min, dflt);
+    *out = dflt;
+    return 0;
+  }
+  *out = v;
+  return 0;
+}
+
 /* Non-negative variant: accepts 0 (some knobs use 0 as the "disable" value).
  * Same parse + fallback semantics as get_positive_int_env otherwise. */
 static int get_nonneg_int_env(const char *name, int dflt, int *out) {
@@ -317,8 +349,17 @@ static int get_positive_int_env(const char *name, int dflt, int *out) {
   return 0;
 }
 
-int get_aimd_md_divisor(int *out) {
-  return get_positive_int_env(CUDA_SM_AIMD_MD_DIVISOR_ENV, 3, out);
+/* MD divisor is a double so users can dial in 1.5 or 2.5 for softer cuts
+ * than integer 2/3. Floor 1.01 -- /1 is a no-op, /<1 would AMPLIFY share
+ * on overshoot which inverts the algorithm. The 0.01 margin avoids
+ * pathological behaviour from floating-point rounding near 1.0. */
+int get_aimd_md_divisor(double *out) {
+  return get_positive_double_env(CUDA_SM_AIMD_MD_DIVISOR_ENV, 3.0, 1.01, out);
+}
+
+/* Usage threshold (percent) for soft-mode up_limit periodic adjust. */
+int get_usage_threshold(int *out) {
+  return get_nonneg_int_env(CUDA_SM_USAGE_THRESHOLD_ENV, 5, out);
 }
 
 /* Effective-limit ratio expressed as parts-per-thousand (875 = 87.5%) so the
