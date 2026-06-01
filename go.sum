@@ -10,8 +10,8 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/NVIDIA/go-nvlib v0.10.0 h1:2jbAFmvLBntIc/4iUChI9DzxyYNI92pohXU4kFuNrg0=
 github.com/NVIDIA/go-nvlib v0.10.0/go.mod h1:7mzx9FSdO9fXWP9NKuZmWkCwhkEcSWQFe2tmFwtLb9c=
-github.com/NVIDIA/nvidia-container-toolkit v1.19.0 h1:iuttW93jclh0+y3RdBw8DR7v6Gfv6h+HjjY87cTyn9M=
-github.com/NVIDIA/nvidia-container-toolkit v1.19.0/go.mod h1:4aDFESAMdSDUGqFD6q3CBRaScL1ZNbMVDifD67cPxUw=
+github.com/NVIDIA/nvidia-container-toolkit v1.19.1-0.20260515194426-db3eab6e775b h1:41nL4Cqw6WvzwrP5U1IVLHSBTIrS1J0ryaqdbr4ZnvA=
+github.com/NVIDIA/nvidia-container-toolkit v1.19.1-0.20260515194426-db3eab6e775b/go.mod h1:WMJdrwb3QWMjua4xAEg9n0NjyWCRKMSfCXF7lpPsdjg=
 github.com/adhocore/jsonc v0.10.0 h1:YjNX9TojBfxQJ4kuoiNqVR5SFqu1YBEMsm+HxWnxbOI=
 github.com/adhocore/jsonc v0.10.0/go.mod h1:Ar4gd3i83+1Z+5M5SG6Vrfw9q3TO544OwLXH4+ZhWTE=
 github.com/antlr4-go/antlr/v4 v4.13.1 h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=
