@@ -25,9 +25,10 @@ const (
 	DRAOwnerPodLabel        = "vgpu-manager.io/owner-pod"
 	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
 
-	VolcanoGroupNameAnnotation    = "scheduling.k8s.io/group-name"
-	CoschedulingPodGroupLabel     = "scheduling.x-k8s.io/pod-group"
+	KubeGroupNameAnnotation       = "scheduling.k8s.io/group-name"
+	VolcanoGroupNameAnnotation    = "scheduling.volcano.sh/group-name"
 	KoordinatorGangNameAnnotation = "gang.scheduling.koordinator.sh/name"
+	CoschedulingPodGroupLabel     = "scheduling.x-k8s.io/pod-group"
 	// Deprecated: kubernetes-sigs/scheduler-plugins/lightweight-coscheduling
 	CoschedulingPodGroupNameLabel = "pod-group.scheduling.sigs.k8s.io/name"
 )

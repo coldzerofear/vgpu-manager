@@ -641,7 +641,7 @@ func PodHasGangName(pod *corev1.Pod) (string, bool) {
 			return val, true
 		}
 	}
-	for _, annoKey := range []string{VolcanoGroupNameAnnotation, KoordinatorGangNameAnnotation} {
+	for _, annoKey := range []string{KubeGroupNameAnnotation, VolcanoGroupNameAnnotation, KoordinatorGangNameAnnotation} {
 		if val, ok := HasAnnotation(pod, annoKey); ok && val != "" {
 			return val, true
 		}
