@@ -70,7 +70,7 @@ rules:
     verbs: ["patch","update"]
   # Here are some resources that scheduling plugins may use
   - apiGroups: ["resource.k8s.io"]
-    resources: ["deviceclasses", "resourceclaims", "resourceslices"]
+    resources: ["deviceclasses", "resourceclaims", "resourceslices", "resourceclaimtemplates"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["topology.node.k8s.io"]
     resources: ["noderesourcetopologies"]
