@@ -1008,13 +1008,6 @@ static pthread_once_t init_nvml_host_index = PTHREAD_ONCE_INIT;
  * accumulating an extra registration per fork generation. */
 static pthread_once_t g_atfork_init = PTHREAD_ONCE_INIT;
 
-//static int host_device_indexes[MAX_DEVICE_COUNT] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-
-extern void* _dl_sym(void*, const char*, void*);
-/* This is the symbol search function */
-fp_dlsym real_dlsym = NULL;
-void *lib_control;
-
 extern int get_compatibility_mode(int *mode);
 extern int get_mem_ratio(uint32_t index, double *ratio);
 extern int get_mem_limit(uint32_t index, size_t *limit);
@@ -1029,13 +1022,17 @@ extern int file_exist(const char *file_path);
 extern int pid_exist(int pid);
 extern int is_zombie_proc(int pid);
 extern int get_sm_watcher_enabled(int *i);
+extern void* _dl_sym(void*, const char*, void*);
+/* This is the symbol search function */
+fp_dlsym real_dlsym = NULL;
+void *lib_control;
 
-// vmemory node lock
+// virtual memory node lock
 extern int device_vmem_write_lock(int ordinal);
 extern int device_vmem_read_lock(int ordinal);
 extern void device_vmem_unlock(int fd, int ordinal);
 
-resource_data_t vgpu_config_temp = {
+resource_data_t vgpu_config_init = {
     .driver_version = {},
     .pod_uid = "",
     .pod_name = "",
@@ -1045,6 +1042,7 @@ resource_data_t vgpu_config_temp = {
     .compatibility_mode = 0,
     .sm_watcher = 0,
     .vmem_node = 0,
+    .reg_uuid = "",
 };
 
 resource_data_t* g_vgpu_config = NULL;
@@ -1295,71 +1293,64 @@ static int is_valid_device_index(int index, const char *kind) {
 }
 
 int mmap_file_to_config_path(resource_data_t** data) {
-  const char* filename = CONTROLLER_CONFIG_FILE_PATH;
-  if (unlikely(file_exist(filename) != 0)) {
-    return 1;
+  int ret = 1;
+  if (unlikely(file_exist(CONTROLLER_CONFIG_FILE_PATH) != 0)) {
+    return ret;
   }
-  int fd;
-  int ret = 0;
-  fd = open(filename, O_RDONLY | O_CLOEXEC);
+  int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_RDONLY | O_CLOEXEC);
   if (unlikely(fd == -1)) {
-    LOGGER(ERROR, "can't open %s, error %s", filename, strerror(errno));
-    return 1;
+    LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
+    return ret;
   }
   struct stat sb;
   if (fstat(fd, &sb) == -1) {
     LOGGER(ERROR, "fstat failed: %s", strerror(errno));
-    ret = 1;
     goto DONE;
   }
   if (sb.st_size != sizeof(resource_data_t)) {
     LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
                   sizeof(resource_data_t), (long long)sb.st_size);
-    ret = 1;
     goto DONE;
   }
   *data = (resource_data_t*)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (*data == MAP_FAILED) {
     LOGGER(ERROR, "mmap global config failed: %s", strerror(errno));
-    ret = 1;
+    *data = NULL;
     goto DONE;
   }
-
+  ret = 0;
 DONE:
   close(fd);
   return ret;
 }
 
-int mmap_file_to_util_path(const char* filename, device_util_t** data) {
-  if (unlikely(file_exist(filename) != 0)) {
-    return 1;
+int mmap_file_to_util_path(device_util_t** data) {
+  int ret = 1;
+  if (unlikely(file_exist(CONTROLLER_SM_UTIL_FILE_PATH) != 0)) {
+    return ret;
   }
-  int fd;
-  int ret = 0;
-  fd = open(filename, O_RDONLY | O_CLOEXEC);
+  int fd = open(CONTROLLER_SM_UTIL_FILE_PATH, O_RDONLY | O_CLOEXEC);
   if (unlikely(fd == -1)) {
-    LOGGER(ERROR, "can't open %s, error %s", filename, strerror(errno));
-    return 1;
+    LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_SM_UTIL_FILE_PATH, strerror(errno));
+    return ret;
   }
   struct stat sb;
   if (fstat(fd, &sb) == -1) {
     LOGGER(ERROR, "fstat failed: %s", strerror(errno));
-    ret = 1;
     goto DONE;
   }
   if (sb.st_size != sizeof(device_util_t)) {
     LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
                     sizeof(device_util_t), (long long)sb.st_size);
-    ret = 1;
     goto DONE;
   }
   *data = (device_util_t*)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
   if (*data == MAP_FAILED) {
     LOGGER(ERROR, "mmap sm watcher failed: %s", strerror(errno));
-    ret = 1;
+    *data = NULL;
     goto DONE;
   }
-
+  ret = 0;
 DONE:
   close(fd);
   return ret;
@@ -1408,6 +1399,7 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
   if (*data == MAP_FAILED) {
     LOGGER(ERROR, "mmap vmemory node failed: %s", strerror(errno));
     ret = 1;
+    *data = NULL;
     goto DONE;
   }
   if (created) {
@@ -1458,8 +1450,7 @@ void print_global_vgpu_config() {
 }
 
 int write_file_to_config_path(resource_data_t* data) {
-  int wsize = 0;
-  int ret = 0;
+  int ret = 1;
   if (unlikely(file_exist(VGPU_MANAGER_PATH) != 0)) {
     mkdir(VGPU_MANAGER_PATH, 0755);
   }
@@ -1469,22 +1460,14 @@ int write_file_to_config_path(resource_data_t* data) {
   int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
   if (unlikely(fd == -1)) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
-    ret = 1;
     goto DONE;
   }
-  wsize = (int)write(fd, (void*)data, sizeof(resource_data_t));
+  int wsize = (int)write(fd, (void*)data, sizeof(resource_data_t));
   if (wsize != sizeof(resource_data_t)) {
     LOGGER(ERROR, "can't write data to %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
-    ret = 1;
     goto DONE;
   }
-
-  ret = mmap_file_to_config_path(&data);
-  if (unlikely(ret)) {
-    ret = 1;
-    goto DONE;
-  }
-
+  ret = 0;
 DONE:
   close(fd);
   return ret;
@@ -1931,36 +1914,35 @@ DONE:
 static volatile pid_t init_config_changed_pid = 0;
 static pthread_mutex_t init_config_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-int init_g_vgpu_config_by_env() {
-  g_vgpu_config = &vgpu_config_temp;
-  int ret = get_compatibility_mode(&g_vgpu_config->compatibility_mode);
+void init_g_vgpu_config_by_env(resource_data_t** data) {
+  int ret = get_compatibility_mode(&vgpu_config_init.compatibility_mode);
   if (unlikely(ret)) {
     LOGGER(WARNING, "not defined env compatibility mode");
   }
   char *pod_name = getenv("VGPU_POD_NAME");
   if (likely(pod_name != NULL)){
-    strncpy(g_vgpu_config->pod_name, pod_name, sizeof(g_vgpu_config->pod_name)-1);
-    g_vgpu_config->pod_name[sizeof(g_vgpu_config->pod_name) - 1] = '\0';
+    strncpy(vgpu_config_init.pod_name, pod_name, sizeof(vgpu_config_init.pod_name)-1);
+    vgpu_config_init.pod_name[sizeof(vgpu_config_init.pod_name) - 1] = '\0';
   }
   char *pod_namespace = getenv("VGPU_POD_NAMESPACE");
   if (likely(pod_namespace != NULL)){
-    strncpy(g_vgpu_config->pod_namespace, pod_namespace, sizeof(g_vgpu_config->pod_namespace)-1);
-    g_vgpu_config->pod_namespace[sizeof(g_vgpu_config->pod_namespace) - 1] = '\0';
+    strncpy(vgpu_config_init.pod_namespace, pod_namespace, sizeof(vgpu_config_init.pod_namespace)-1);
+    vgpu_config_init.pod_namespace[sizeof(vgpu_config_init.pod_namespace) - 1] = '\0';
   }
   char *pod_uid = getenv("VGPU_POD_UID");
   if (likely(pod_uid != NULL)){
-    strncpy(g_vgpu_config->pod_uid, pod_uid, sizeof(g_vgpu_config->pod_uid)-1);
-    g_vgpu_config->pod_uid[sizeof(g_vgpu_config->pod_uid) - 1] = '\0';
+    strncpy(vgpu_config_init.pod_uid, pod_uid, sizeof(vgpu_config_init.pod_uid)-1);
+    vgpu_config_init.pod_uid[sizeof(vgpu_config_init.pod_uid) - 1] = '\0';
   }
   char *container_name = getenv("VGPU_CONTAINER_NAME");
   if (likely(container_name != NULL)){
-    strncpy(g_vgpu_config->container_name, container_name, sizeof(g_vgpu_config->container_name)-1);
-    g_vgpu_config->container_name[sizeof(g_vgpu_config->container_name) - 1] = '\0';
+    strncpy(vgpu_config_init.container_name, container_name, sizeof(vgpu_config_init.container_name)-1);
+    vgpu_config_init.container_name[sizeof(vgpu_config_init.container_name) - 1] = '\0';
   }
   char *reg_uuid = getenv("MANAGER_CLIENT_REGISTER_UUID");
   if (reg_uuid != NULL){
-    strncpy(g_vgpu_config->reg_uuid, reg_uuid, sizeof(g_vgpu_config->reg_uuid)-1);
-    g_vgpu_config->reg_uuid[sizeof(g_vgpu_config->reg_uuid) - 1] = '\0';
+    strncpy(vgpu_config_init.reg_uuid, reg_uuid, sizeof(vgpu_config_init.reg_uuid)-1);
+    vgpu_config_init.reg_uuid[sizeof(vgpu_config_init.reg_uuid) - 1] = '\0';
   }
   int i;
   char uuids[UUID_BUFFER_SIZE * MAX_DEVICE_COUNT];
@@ -1992,24 +1974,24 @@ int init_g_vgpu_config_by_env() {
   size_t real_memory = 0;
   char *gpu_uuids[MAX_DEVICE_COUNT];
   int device_count = strsplit(uuids, gpu_uuids, ",");
-  get_vmem_node_enabled(&g_vgpu_config->vmem_node);
-  get_sm_watcher_enabled(&g_vgpu_config->sm_watcher);
+  get_vmem_node_enabled(&vgpu_config_init.vmem_node);
+  get_sm_watcher_enabled(&vgpu_config_init.sm_watcher);
   for (i = 0; i < device_count; i++) {
     // skip fake uuid
     if (strcmp(gpu_uuids[i], FAKE_GPU_UUID) == 0) {
       continue;
     }
-    if (snprintf(g_vgpu_config->devices[i].uuid, UUID_BUFFER_SIZE, "%s", gpu_uuids[i]) >= UUID_BUFFER_SIZE) {
+    if (snprintf(vgpu_config_init.devices[i].uuid, UUID_BUFFER_SIZE, "%s", gpu_uuids[i]) >= UUID_BUFFER_SIZE) {
       LOGGER(WARNING, "gpu uuid at index %d truncated", i);
       continue;
     }
-    g_vgpu_config->devices[i].activate = 1;
-    ret = get_mem_limit(i, &g_vgpu_config->devices[i].total_memory);
+    vgpu_config_init.devices[i].activate = 1;
+    ret = get_mem_limit(i, &vgpu_config_init.devices[i].total_memory);
     if (unlikely(ret)) {
       LOGGER(VERBOSE, "gpu device %d turn off memory limit", i);
-      g_vgpu_config->devices[i].memory_limit = 0;
+      vgpu_config_init.devices[i].memory_limit = 0;
     } else {
-      g_vgpu_config->devices[i].memory_limit = 1;
+      vgpu_config_init.devices[i].memory_limit = 1;
     }
     ret = get_mem_oversold(i, &oversold);
     if (unlikely(ret)) {
@@ -2021,14 +2003,14 @@ int init_g_vgpu_config_by_env() {
       LOGGER(ERROR, "get device %d memory ratio failed", i);
       ratio = 1; // default ratio = 1
     }
-    real_memory = g_vgpu_config->devices[i].total_memory;
+    real_memory = vgpu_config_init.devices[i].total_memory;
     if (ratio > 1) {
       real_memory /= ratio;
-      g_vgpu_config->devices[i].memory_oversold = 1;
+      vgpu_config_init.devices[i].memory_oversold = 1;
     } else {
-      g_vgpu_config->devices[i].memory_oversold = oversold;
+      vgpu_config_init.devices[i].memory_oversold = oversold;
     }
-    g_vgpu_config->devices[i].real_memory = real_memory;
+    vgpu_config_init.devices[i].real_memory = real_memory;
 
     ret = get_core_limit(i, &hard_cores);
     if (unlikely(ret)) {
@@ -2036,9 +2018,9 @@ int init_g_vgpu_config_by_env() {
       hard_cores = 0;
     }
     if (hard_cores > 0) {
-      g_vgpu_config->devices[i].core_limit = 1;
-      g_vgpu_config->devices[i].hard_limit = 1;
-      g_vgpu_config->devices[i].hard_core = hard_cores;
+      vgpu_config_init.devices[i].core_limit = 1;
+      vgpu_config_init.devices[i].hard_limit = 1;
+      vgpu_config_init.devices[i].hard_core = hard_cores;
       ret = get_core_soft_limit(i, &soft_cores);
       if (unlikely(ret)) {
         LOGGER(VERBOSE, "get device %d core soft limit failed", i);
@@ -2046,16 +2028,16 @@ int init_g_vgpu_config_by_env() {
       }
       if (soft_cores > 0 && soft_cores > hard_cores) {
         LOGGER(VERBOSE, "gpu device %d turn up core soft limit", i);
-        g_vgpu_config->devices[i].hard_limit = 0;
-        g_vgpu_config->devices[i].soft_core = soft_cores;
+        vgpu_config_init.devices[i].hard_limit = 0;
+        vgpu_config_init.devices[i].soft_core = soft_cores;
       }
     } else {
       LOGGER(VERBOSE, "gpu device %d turn off core limit", i);
-      g_vgpu_config->devices[i].core_limit = 0;
-      g_vgpu_config->devices[i].hard_limit = 0;
+      vgpu_config_init.devices[i].core_limit = 0;
+      vgpu_config_init.devices[i].hard_limit = 0;
     }
   }
-  return 0;
+  *data = &vgpu_config_init;
 }
 
 int load_controller_configuration() {
@@ -2072,22 +2054,22 @@ int load_controller_configuration() {
   }
   if (g_vgpu_config == NULL) {
     ret = mmap_file_to_config_path(&g_vgpu_config);
-    if (unlikely(ret != 0)) {
-      ret = init_g_vgpu_config_by_env();
-      if (unlikely(ret != 0)) {
-        g_vgpu_config = NULL;
+    if (unlikely(ret)) {
+      init_g_vgpu_config_by_env(&g_vgpu_config);
+      ret = write_file_to_config_path(g_vgpu_config);
+      if (unlikely(ret)) {
+        LOGGER(ERROR, "failed to write vgpu config file %s", CONTROLLER_CONFIG_FILE_PATH);
         goto DONE;
       }
-      ret = write_file_to_config_path(g_vgpu_config);
-      if (unlikely(ret != 0)) {
-        LOGGER(ERROR, "failed to write vgpu config file %s", CONTROLLER_CONFIG_FILE_PATH);
+      ret = mmap_file_to_config_path(&g_vgpu_config);
+      if (unlikely(ret)) {
         goto DONE;
       }
     }
     print_global_vgpu_config();
   }
   if (g_vgpu_config->sm_watcher && g_device_util == NULL) {
-    ret = mmap_file_to_util_path(CONTROLLER_SM_UTIL_FILE_PATH, &g_device_util);
+    ret = mmap_file_to_util_path(&g_device_util);
     if (ret) {
       pthread_mutex_unlock(&init_config_mutex);
       LOGGER(FATAL, "mmap sm watcher file failed");

@@ -1,10 +1,9 @@
 #!/usr/bin/bash
-rm -rf build
-mkdir -p build
+set -euo pipefail
 
-cd build
+rm -rf build && mkdir -p build
 
 # cmake -D CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-10. ..
-cmake -DCMAKE_BUILD_TYPE=Release ..
+cd build && cmake -DCMAKE_BUILD_TYPE=Release ..
 
 make
