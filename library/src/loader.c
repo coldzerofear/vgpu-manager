@@ -1462,8 +1462,8 @@ int write_file_to_config_path(resource_data_t* data) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     goto DONE;
   }
-  int wsize = (int)write(fd, (void*)data, sizeof(resource_data_t));
-  if (wsize != sizeof(resource_data_t)) {
+  ssize_t wsize = write(fd, (void*)data, sizeof(resource_data_t));
+  if (wsize != (ssize_t)sizeof(resource_data_t)) {
     LOGGER(ERROR, "can't write data to %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     goto DONE;
   }
@@ -1636,11 +1636,47 @@ void exit_cleanup_handler() {
  cleanup_vmem_nodes(pid);
 }
 
-// Signal handler for cleanup
-void signal_cleanup_handler(int signum) {
+/* Saved host sigaction state so we can chain to JVM shutdown hooks, the
+ * JVM hs_err_pid writer, Go signal package, Python KeyboardInterrupt, etc.
+ * Without chaining, LD_PRELOAD'ing into those runtimes clobbers their
+ * handlers and breaks graceful shutdown / crash diagnostics. */
+static struct sigaction g_old_sigterm_sa;
+static struct sigaction g_old_sigint_sa;
+static struct sigaction g_old_sighup_sa;
+static struct sigaction g_old_sigabrt_sa;
+
+static struct sigaction* get_old_sa_slot(int signum) {
+  switch (signum) {
+    case SIGTERM: return &g_old_sigterm_sa;
+    case SIGINT:  return &g_old_sigint_sa;
+    case SIGHUP:  return &g_old_sighup_sa;
+    case SIGABRT: return &g_old_sigabrt_sa;
+    default:      return NULL;
+  }
+}
+
+/* SIGHUP intentionally skips exit_cleanup_handler(): host SIGHUP semantics
+ * is typically "reload config and keep running"; cleaning up vmem nodes
+ * here would orphan tracking while the process continues allocating. */
+static void signal_cleanup_handler_sa(int signum, siginfo_t *info, void *ucontext) {
   LOGGER(INFO, "caught signal %d, cleaning up", signum);
-  exit_cleanup_handler();
-  // Re-raise signal with default handler to ensure proper exit code
+  if (signum != SIGHUP) {
+    exit_cleanup_handler();
+  }
+
+  struct sigaction *old = get_old_sa_slot(signum);
+  if (old != NULL) {
+    if ((old->sa_flags & SA_SIGINFO) && old->sa_sigaction != NULL) {
+      old->sa_sigaction(signum, info, ucontext);
+      return;
+    }
+    if (old->sa_handler != SIG_DFL && old->sa_handler != SIG_IGN) {
+      old->sa_handler(signum);
+      return;
+    }
+  }
+  /* No host handler -- restore default and re-raise to preserve original
+   * exit semantics (128+signum, or core dump for SIGABRT). */
   signal(signum, SIG_DFL);
   raise(signum);
 }
@@ -2085,11 +2121,18 @@ int load_controller_configuration() {
     if (atexit(exit_cleanup_handler) != 0) {
       LOGGER(ERROR ,"register exit handler failed: %d", errno);
     }
-    // Register signal handlers for cleanup on crashes
-    signal(SIGTERM, signal_cleanup_handler);
-    signal(SIGINT, signal_cleanup_handler);
-    signal(SIGHUP, signal_cleanup_handler);
-    signal(SIGABRT, signal_cleanup_handler);
+    /* sigaction (not signal()) so we can capture and chain to any host
+     * handler -- the alternative is silently clobbering JVM/Go/Python signal
+     * handling. SA_SIGINFO lets us forward siginfo_t/ucontext_t verbatim. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_SIGINFO;
+    sa.sa_sigaction = signal_cleanup_handler_sa;
+    sigaction(SIGTERM, &sa, &g_old_sigterm_sa);
+    sigaction(SIGINT,  &sa, &g_old_sigint_sa);
+    sigaction(SIGHUP,  &sa, &g_old_sighup_sa);
+    sigaction(SIGABRT, &sa, &g_old_sigabrt_sa);
     // Note: SIGKILL and SIGSTOP cannot be caught
     LOGGER(VERBOSE, "registered cleanup handlers for signals");
   }
