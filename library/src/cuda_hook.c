@@ -3124,6 +3124,8 @@ static void graph_cost_after_fork(void) {
   g_graph_cost_full_warned = 0;
 }
 
+extern CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode, CUDA_KERNEL_NODE_PARAMS *nodeParams);
+
 static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks) {
   if (unlikely(!graph)) return;
   /* Driver-availability guard: CUDA_INTERNAL_CHECK calls fn_ptr directly
@@ -3132,7 +3134,8 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
    * cuGraphGetNodes is loaded in our cuda_library_entry. */
   if (unlikely(!CUDA_FIND_ENTRY(cuda_library_entry, cuGraphGetNodes) ||
                !CUDA_FIND_ENTRY(cuda_library_entry, cuGraphNodeGetType) ||
-               !CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeGetParams))) {
+               (!CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeGetParams) ||
+               !CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeGetParams_v2))) {
     return;
   }
   size_t num_nodes = 0;
@@ -3152,8 +3155,7 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
       }
       if (type == CU_GRAPH_NODE_TYPE_KERNEL) {
         CUDA_KERNEL_NODE_PARAMS params = {0};
-        if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphKernelNodeGetParams,
-                                nodes[i], &params) != CUDA_SUCCESS) continue;
+        if (_cuGraphKernelNodeGetParams(nodes[i], &params) != CUDA_SUCCESS) continue;
         *total_grids += (int64_t)params.gridDimX * params.gridDimY * params.gridDimZ;
         int b = params.blockDimX * params.blockDimY * params.blockDimZ;
         if (b > *max_blocks) *max_blocks = b;
