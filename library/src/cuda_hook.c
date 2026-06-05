@@ -3032,6 +3032,9 @@ DONE:
   return ret;
 }
 
+extern CUresult _cuCtxPushCurrent(CUcontext ctx);
+extern CUresult _cuCtxPopCurrent(CUcontext *pctx);
+
 /* Multi-device cooperative launch: applies the per-device throttle by
  * extracting host_index from each entry's stream context. Rare API; we keep
  * the simple approach of throttling per entry rather than aggregating, so
@@ -3048,7 +3051,7 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
         continue;
       }
       CUcontext prev = NULL;
-      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxPushCurrent_v2, sctx) != CUDA_SUCCESS) {
+      if (_cuCtxPushCurrent(prev) != CUDA_SUCCESS) {
         continue;
       }
       CUdevice device;
@@ -3057,7 +3060,7 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
         rate_limiter(p->gridDimX * p->gridDimY * p->gridDimZ,
                      p->blockDimX * p->blockDimY * p->blockDimZ, host_index);
       }
-      CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxPopCurrent_v2, &prev);
+      _cuCtxPopCurrent(&prev);
     }
   }
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchCooperativeKernelMultiDevice,
@@ -3142,8 +3145,9 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
   if (r == CUDA_SUCCESS) {
     for (size_t i = 0; i < num_nodes; i++) {
       CUgraphNodeType type;
-      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphNodeGetType,
-                              nodes[i], &type) != CUDA_SUCCESS) continue;
+      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphNodeGetType, nodes[i], &type) != CUDA_SUCCESS) {
+        continue;
+      }
       if (type == CU_GRAPH_NODE_TYPE_KERNEL) {
         CUDA_KERNEL_NODE_PARAMS params = {0};
         if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphKernelNodeGetParams,

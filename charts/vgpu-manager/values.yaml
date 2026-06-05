@@ -130,7 +130,7 @@ devicePlugin:
   terminationGracePeriodSeconds: 30
   # Node labels to be deployed
   nodeSelector:
-    vgpu-manager-enable: enable
+    vgpu-manager: device-plugin
   tolerations:
     # This toleration is deprecated. Kept here for backward compatibility
     # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/

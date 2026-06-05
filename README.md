@@ -54,10 +54,10 @@ make docker-build-base docker-build docker-push REGISTRY=<your-image-registry> T
 
 precondition: `nvidia-container-toolkit` must be installed and correctly configure the default container runtime
 
-Label the node where the device plugin will be deployed: `vgpu-manager-enable=enable`
+Label the node where the device plugin will be deployed: `vgpu-manager=device-plugin`
 
 ```shell
-kubectl label node <nodename> vgpu-manager-enable=enable
+kubectl label node <nodename> vgpu-manager=device-plugin
 ```
 
 ### Helm chart (Recommended)
