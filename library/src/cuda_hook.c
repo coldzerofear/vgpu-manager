@@ -3053,7 +3053,7 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
         continue;
       }
       CUcontext prev = NULL;
-      if (_cuCtxPushCurrent(prev) != CUDA_SUCCESS) {
+      if (_cuCtxPushCurrent(sctx) != CUDA_SUCCESS) {
         continue;
       }
       CUdevice device;

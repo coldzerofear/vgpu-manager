@@ -42,8 +42,12 @@ int main(void) {
   const int N = 1 << 20;       /* 1M elements */
   const int tpb = 256;
   const int blocks = (N + tpb - 1) / tpb;
+  /* iters_per_graph * num_launches must stay <= ~127 so x = 2^total - 1
+   * does not overflow float32 (max ~3.4e38 ~= 2^128). 4*16 = 64 gives
+   * 2^64 ~= 1.84e19, plenty of headroom and still meaningful exercise
+   * of the cache + cuGraphLaunch rate-limit path. */
   const int iters_per_graph = 4;
-  const int num_launches = 64;
+  const int num_launches = 16;
 
   float *d_x;
   CHECK_RUNTIME_API(cudaMalloc(&d_x, N * sizeof(float)));

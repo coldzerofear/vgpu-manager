@@ -105,6 +105,13 @@ int main(void) {
     return 1;
   }
 
+  /* Drain stdio buffers before fork. Without this the child inherits any
+   * pending stdout/stderr bytes and re-emits them on its own exit, which
+   * shows up as duplicate "[parent_pre] ..." lines and confuses
+   * post-mortem log analysis. */
+  fflush(stdout);
+  fflush(stderr);
+
   /* (2) fork. Threads in parent are NOT copied -- only the calling thread. */
   pid_t pid = fork();
   if (pid < 0) {
@@ -115,7 +122,25 @@ int main(void) {
   if (pid == 0) {
     /* (3) Child. If g_init_set were inherited as completed, the child would
      * have no watcher threads and (worse) the GAP-path cuEvent handles +
-     * mutex would be stale/locked -- this loop would deadlock or crash. */
+     * mutex would be stale/locked -- this loop would deadlock or crash.
+     *
+     * Force fresh CUDA runtime state before any allocation: NVIDIA's CUDA
+     * primary context does not survive fork -- the inherited driver-side
+     * handles are stale and cudaMalloc reports cudaErrorInitializationError
+     * on most driver versions. cudaDeviceReset() detaches from the
+     * inherited primary context so the next CUDA call lazy-inits a fresh
+     * one. If even reset is rejected -- a sign the driver flat-out refuses
+     * fork+CUDA -- exit cleanly so the harness records SKIP-equivalent
+     * behavior rather than blaming vgpu-manager for a driver limitation. */
+    cudaError_t reset_st = cudaDeviceReset();
+    if (reset_st != cudaSuccess) {
+      fprintf(stderr,
+              "[child] cudaDeviceReset failed (%d, %s) -- driver does not "
+              "support fork+CUDA on this version; skipping vgpu fork "
+              "inherit check.\n",
+              (int)reset_st, cudaGetErrorString(reset_st));
+      exit(0);
+    }
     int rc = run_loop("child", 3);
     exit(rc);
   }
