@@ -3132,10 +3132,15 @@ static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks
    * without a NULL check, so an old driver lacking these graph APIs would
    * SEGV here. cuGraphInstantiate having succeeded does not guarantee
    * cuGraphGetNodes is loaded in our cuda_library_entry. */
+  /* Bail if cuGraphGetNodes or cuGraphNodeGetType is absent, OR if BOTH
+   * KernelNodeGetParams variants are absent. _cuGraphKernelNodeGetParams
+   * dispatches v2-preferred-v1 internally, so we only need at least one
+   * of the two to be loaded. Old driver: only v1 -> pass. CUDA 12+: both
+   * present -> pass. Pre-CUDA-10 graphless driver: neither -> bail. */
   if (unlikely(!CUDA_FIND_ENTRY(cuda_library_entry, cuGraphGetNodes) ||
                !CUDA_FIND_ENTRY(cuda_library_entry, cuGraphNodeGetType) ||
-               (!CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeGetParams) ||
-               !CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeGetParams_v2))) {
+               (!CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeGetParams) &&
+                !CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeGetParams_v2)))) {
     return;
   }
   size_t num_nodes = 0;
