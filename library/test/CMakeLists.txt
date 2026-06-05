@@ -93,5 +93,7 @@ add_custom_target(vgpu_copy_test_scripts ALL
             ${TEST_SRC_DIR}/python ${TEST_BIN_DIR}/python
     COMMAND ${CMAKE_COMMAND} -E copy
             ${TEST_SRC_DIR}/run_all_tests.sh ${TEST_BIN_DIR}/run_all_tests.sh
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${TEST_SRC_DIR}/run_tests_with_env.sh ${TEST_BIN_DIR}/run_tests_with_env.sh
     COMMENT "[vgpu] stage python/ + run_all_tests.sh into test build dir"
     VERBATIM)

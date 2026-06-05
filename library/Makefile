@@ -117,7 +117,7 @@ build-tests: ## Compile smoke tests under test/.
 .PHONY: test
 test: build-tests ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
-	    $(BASH) $(BUILD_DIR)/test/run_all_tests.sh $(BUILD_DIR)/test $(SO_FILE)
+	    $(BASH) $(BUILD_DIR)/test/run_tests_with_env.sh $(BUILD_DIR)/test $(SO_FILE)
 
 .PHONY: test-cuda13-abi
 test-cuda13-abi: build-tests ## Run just the CUDA 13 ABI-conflict smoke test.

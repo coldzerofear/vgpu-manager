@@ -1175,6 +1175,7 @@ static void *utilization_watcher(void *arg) {
       }
       change_token(shares[host_index], host_index);
       if ((g_share_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
+        g_share_log_tick[host_index] = 1;
         LOGGER(DETAIL, "cuda device: %d, host device: %d, user util: %d, up_limit: %d, share: %ld, curr core: %ld (1/%d sampled)", cuda_index, host_index,
                top_results[host_index].user_current, up_limits[host_index], shares[host_index], g_cur_cuda_cores[host_index], WATCHER_UTIL_LOG_STRIDE);
       }
@@ -2033,6 +2034,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
 
   top_result->external_process_num = current_processes_num >= top_result->sys_process_num ? 0 : top_result->sys_process_num - current_processes_num;
   if ((g_util_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
+    g_util_log_tick[host_index] = 1;
     LOGGER(VERBOSE, "cuda device: %d, host device: %d, sys util: %d, user util: %d (1/%d sampled)",
            cuda_index, host_index, top_result->sys_current, top_result->user_current,
            WATCHER_UTIL_LOG_STRIDE);
