@@ -834,6 +834,7 @@ static utilization_t top_results[MAX_DEVICE_COUNT];
  * MUST react instantly to a freshly-started workload's util ramp) and
  * read by the debounced FSM as its input. */
 static int host_index_is_exclusive_raw(int host_index) {
+  if (top_results[host_index].external_process_num <= 0) return 1;
   int sys  = top_results[host_index].sys_current;
   int user = top_results[host_index].user_current;
   int external = sys - user;
