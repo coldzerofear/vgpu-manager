@@ -3280,6 +3280,17 @@ typedef enum CUgraphExecUpdateResult_enum {
 } CUgraphExecUpdateResult;
 
 /**
+ * Result information returned by cuGraphExecUpdate_v2 (CUDA 12.0+).
+ * Packs what v1 returned via two separate out-params into a single struct.
+ */
+typedef struct CUgraphExecUpdateResultInfo_st {
+    CUgraphExecUpdateResult result;  /**< Same enum as v1, more specific failure reason */
+    CUgraphNode errorNode;           /**< The error node when the failure is associated with a specific node, otherwise NULL */
+    CUgraphNode errorFromNode;       /**< The from-node of the error edge when topology mismatch, otherwise NULL */
+} CUgraphExecUpdateResultInfo_v1;
+typedef CUgraphExecUpdateResultInfo_v1 CUgraphExecUpdateResultInfo;
+
+/**
  * CUDA memory pool attributes
  */
 typedef enum CUmemPool_attribute_enum {

@@ -76,6 +76,8 @@ extern int get_usage_threshold(int *out);
  * recursion-guard cache. Called from this file's child_after_fork(). */
 extern void loader_child_after_fork(void);
 
+static void graph_cost_after_fork(void);
+
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 
 /* `= {0}` relies on C's rule that any explicit initializer zero-fills the
@@ -199,6 +201,13 @@ void child_after_fork(void) {
      * default mutex) and clears any phantom held-state. */
     pthread_mutex_init(&g_gap_lock[i], NULL);
   }
+  /* Same held-at-fork hazard for the graph cost cache lock; parent CUgraph
+   * Exec handles are also invalid in the child (CUDA contexts don't survive
+   * fork) so the helper also wipes the cache to prevent stale-pointer
+   * collisions with newly allocated execs that happen to hit the same
+   * address. Forward-declared because the cache statics are defined later
+   * (near the CUDA Graph hooks) to keep that subsystem co-located. */
+  graph_cost_after_fork();
   /* Loader-level mutexes have the exact same held-at-fork hazard --
    * delegated since those mutexes are file-scope static in loader.c. The
    * most dangerous one is init_config_mutex (taken from load_necessary_data
@@ -355,6 +364,29 @@ CUresult cuLaunchCooperativeKernel(CUfunction f, unsigned int gridDimX,
 CUresult cuLaunchGrid(CUfunction f, int grid_width, int grid_height);
 CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height,
                            CUstream hStream);
+CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsList,
+                                              unsigned int numDevices,
+                                              unsigned int flags);
+CUresult cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
+                            CUgraphNode *phErrorNode, char *logBuffer,
+                            size_t bufferSize);
+CUresult cuGraphInstantiate_v2(CUgraphExec *phGraphExec, CUgraph hGraph,
+                               CUgraphNode *phErrorNode, char *logBuffer,
+                               size_t bufferSize);
+CUresult cuGraphInstantiateWithFlags(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                     unsigned long long flags);
+CUresult cuGraphInstantiateWithParams(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                      CUDA_GRAPH_INSTANTIATE_PARAMS *instantiateParams);
+CUresult cuGraphInstantiateWithParams_ptsz(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                           CUDA_GRAPH_INSTANTIATE_PARAMS *instantiateParams);
+CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream);
+CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream);
+CUresult cuGraphExecDestroy(CUgraphExec hGraphExec);
+CUresult cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
+                           CUgraphNode *hErrorNode_out,
+                           CUgraphExecUpdateResult *updateResult_out);
+CUresult cuGraphExecUpdate_v2(CUgraphExec hGraphExec, CUgraph hGraph,
+                              CUgraphExecUpdateResultInfo *resultInfo);
 CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z);
 CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
 CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
@@ -397,6 +429,17 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuLaunchCooperativeKernel", .fn_ptr = cuLaunchCooperativeKernel},
     {.name = "cuLaunchGrid", .fn_ptr = cuLaunchGrid},
     {.name = "cuLaunchGridAsync", .fn_ptr = cuLaunchGridAsync},
+    {.name = "cuLaunchCooperativeKernelMultiDevice", .fn_ptr = cuLaunchCooperativeKernelMultiDevice},
+    {.name = "cuGraphInstantiate", .fn_ptr = cuGraphInstantiate},
+    {.name = "cuGraphInstantiate_v2", .fn_ptr = cuGraphInstantiate_v2},
+    {.name = "cuGraphInstantiateWithFlags", .fn_ptr = cuGraphInstantiateWithFlags},
+    {.name = "cuGraphInstantiateWithParams", .fn_ptr = cuGraphInstantiateWithParams},
+    {.name = "cuGraphInstantiateWithParams_ptsz", .fn_ptr = cuGraphInstantiateWithParams_ptsz},
+    {.name = "cuGraphLaunch", .fn_ptr = cuGraphLaunch},
+    {.name = "cuGraphLaunch_ptsz", .fn_ptr = cuGraphLaunch_ptsz},
+    {.name = "cuGraphExecDestroy", .fn_ptr = cuGraphExecDestroy},
+    {.name = "cuGraphExecUpdate", .fn_ptr = cuGraphExecUpdate},
+    {.name = "cuGraphExecUpdate_v2", .fn_ptr = cuGraphExecUpdate_v2},
     {.name = "cuFuncSetBlockShape", .fn_ptr = cuFuncSetBlockShape},
     {.name = "cuMemAllocAsync", .fn_ptr = cuMemAllocAsync},
     {.name = "cuMemAllocAsync_ptsz", .fn_ptr = cuMemAllocAsync_ptsz},
@@ -1275,7 +1318,17 @@ static batch_t batches[MAX_DEVICE_COUNT / DEVICE_BATCH_SIZE] = {};
 
 static void active_utilization_notifier(int batch_code) {
   pthread_t tid;
-  pthread_create(&tid, NULL, utilization_watcher, &batches[batch_code]);
+  /* If pthread_create fails (typical case: glibc 2.35+ rseq registration
+   * blocked by container seccomp profile) the watcher silently never runs,
+   * tokens are never replenished, every rate_limiter() goes to sleep, and
+   * the symptom looks like "vgpu hangs all CUDA calls". Surface it. */
+  int rc = pthread_create(&tid, NULL, utilization_watcher, &batches[batch_code]);
+  if (unlikely(rc != 0)) {
+    LOGGER(ERROR, "failed to spawn SM watcher for batch %d: %s -- "
+                  "compute isolation will not work for devices in this batch",
+                  batches[batch_code].batch_code, strerror(rc));
+    return;
+  }
   char thread_name[32] = {0};
   sprintf(thread_name, "watch_util_bt_%d", batches[batch_code].batch_code);
 #ifdef __APPLE__
@@ -2067,6 +2120,27 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
       goto DONE;
     }
 
+    /*
+     * Version-aware substitution: cuGraphExecUpdate has two ABIs (4-arg v1
+     * pre-12.0, 3-arg _v2 from 12.0+). The real cuGetProcAddress picked the
+     * caller-appropriate variant based on cudaVersion; we MUST substitute
+     * the matching ABI's hook so the frame the caller pushes lines up with
+     * what our hook pops. Substituting the wrong ABI hook would corrupt the
+     * stack on the very next call. Unlike is_abi_conflict_base() (which
+     * gives up and keeps the libcuda pointer), here we WANT interception so
+     * the cache-refresh logic runs -- we just route to the right hook.
+     */
+    if (strcmp(symbol, "cuGraphExecUpdate") == 0) {
+      *pfn = (cudaVersion >= 12000)
+               ? (void *)cuGraphExecUpdate_v2
+               : (void *)cuGraphExecUpdate;
+      LOGGER(VERBOSE, "cuGetProcAddress: cuGraphExecUpdate -> %s hook "
+                      "(cudaVersion=%d)",
+                      (cudaVersion >= 12000) ? "v2(3-arg)" : "v1(4-arg)",
+                      cudaVersion);
+      goto DONE;
+    }
+
     if (lib_control) {
       void *f = real_dlsym(lib_control, symbol);
       if (likely(f)) {
@@ -2118,6 +2192,21 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     if (is_abi_conflict_base(symbol)) {
       LOGGER(VERBOSE, "cuGetProcAddress_v2: keep libcuda pointer for "
                       "ABI-conflict family %s (cudaVersion=%d)", symbol, cudaVersion);
+      goto DONE;
+    }
+
+    /* Same version-aware substitution as in cuGetProcAddress above -- see
+     * the comment there for the full rationale. cuGraphExecUpdate's v1/v2
+     * ABIs differ in arity (4 vs 3), so the substituted hook must match
+     * the variant the real cuGetProcAddress_v2 selected by cudaVersion. */
+    if (strcmp(symbol, "cuGraphExecUpdate") == 0) {
+      *pfn = (cudaVersion >= 12000)
+               ? (void *)cuGraphExecUpdate_v2
+               : (void *)cuGraphExecUpdate;
+      LOGGER(VERBOSE, "cuGetProcAddress_v2: cuGraphExecUpdate -> %s hook "
+                      "(cudaVersion=%d)",
+                      (cudaVersion >= 12000) ? "v2(3-arg)" : "v1(4-arg)",
+                      cudaVersion);
       goto DONE;
     }
 
@@ -2879,7 +2968,7 @@ CUresult cuLaunchCooperativeKernel_ptsz(
   }
   int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
-               blockDimX * blockDimY * blockDimZ, host_index);
+              blockDimX * blockDimY * blockDimZ, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchCooperativeKernel_ptsz, f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
@@ -2901,7 +2990,7 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
   }    
   int host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(gridDimX * gridDimY * gridDimZ,
-               blockDimX * blockDimY * blockDimZ, host_index);
+              blockDimX * blockDimY * blockDimZ, host_index);
   int gap = gap_begin(host_index, hStream);
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchCooperativeKernel), f,
                          gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
@@ -2940,6 +3029,356 @@ CUresult cuLaunchGridAsync(CUfunction f, int grid_width, int grid_height, CUstre
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchGridAsync, f, grid_width, grid_height, hStream);
   if (gap) gap_end(host_index, hStream, ret);
 DONE:
+  return ret;
+}
+
+/* Multi-device cooperative launch: applies the per-device throttle by
+ * extracting host_index from each entry's stream context. Rare API; we keep
+ * the simple approach of throttling per entry rather than aggregating, so
+ * each per-device token bucket sees its own portion of the work. */
+CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsList,
+                                              unsigned int numDevices,
+                                              unsigned int flags) {
+  if (likely(launchParamsList != NULL)) {
+    for (unsigned int i = 0; i < numDevices; i++) {
+      CUDA_LAUNCH_PARAMS *p = &launchParamsList[i];
+      CUcontext sctx = NULL;
+      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamGetCtx,
+                              p->hStream, &sctx) != CUDA_SUCCESS || sctx == NULL) {
+        continue;
+      }
+      CUcontext prev = NULL;
+      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxPushCurrent_v2, sctx) != CUDA_SUCCESS) {
+        continue;
+      }
+      CUdevice device;
+      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device) == CUDA_SUCCESS) {
+        int host_index = get_host_device_index_by_cuda_device(device);
+        rate_limiter(p->gridDimX * p->gridDimY * p->gridDimZ,
+                     p->blockDimX * p->blockDimY * p->blockDimZ, host_index);
+      }
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxPopCurrent_v2, &prev);
+    }
+  }
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchCooperativeKernelMultiDevice,
+                          launchParamsList, numDevices, flags);
+}
+
+/* =========================================================================
+ * CUDA Graph throttling
+ *
+ * cuLaunchKernel-style hooks consult rate_limiter per launch. CUDA Graphs
+ * batch many kernels into one cuGraphLaunch call -- without intercepting
+ * them, every kernel inside a graph bypasses our token bucket. Walking the
+ * graph on every launch would defeat the latency win that motivates graphs
+ * in the first place (PyTorch 2.x replays graphs hundreds of times per sec).
+ *
+ * Strategy: walk the source graph once at cuGraphInstantiate time, sum the
+ * gridDim products across every kernel node (recursing into child graphs),
+ * cache it keyed by the resulting CUgraphExec. cuGraphLaunch then consults
+ * the cache in O(1) and calls rate_limiter once. cuGraphExecDestroy frees
+ * the cache slot.
+ *
+ * cuGraphExecUpdate AND cuGraphExecUpdate_v2 are both hooked (rewalk +
+ * replace cache entry) because PyTorch dynamic-shape inference relies on
+ * Update; CUDA 12+ headers redirect callers from v1 to v2 at compile time,
+ * so both ABIs surface in practice.
+ *
+ * Edge cases left intentionally as imprecision (KNOWN LIMITATIONS):
+ *   - cuGraphExecKernelNodeSetParams / _v2 replaces a kernel node's
+ *     grid/block after instantiation. We DO NOT hook these -- correctly
+ *     delta-updating the cached cost would require either (a) maintaining
+ *     a per-exec shadow copy of every node's params (~1KB per exec, complex
+ *     concurrency), or (b) invalidating the entry which silently disables
+ *     throttling for that exec. Neither is appealing. Frameworks that use
+ *     SetParams (rare; mainly low-level CUDA Graph users, not PyTorch's
+ *     typical path) will see the cached cost age. Accepted.
+ *   - cuGraphExecChildGraphNodeSetParams (replaces a subgraph node) and
+ *     cuGraphExecMemcpy/Memset/HostNodeSetParams (do not affect kernel
+ *     cost) similarly not hooked.
+ *   - Conditional nodes (CUDA 12.4+) and batched memop nodes don't
+ *     contribute to walk cost so changes to them don't matter.
+ * ========================================================================= */
+
+#define GRAPH_COST_CACHE_SIZE 256
+typedef struct {
+  CUgraphExec exec;       /* NULL = unused slot */
+  int total_grids;        /* sum of gridDimX*Y*Z over all kernel nodes */
+  int max_blocks;         /* max blockDim product across kernel nodes */
+} graph_cost_entry_t;
+static graph_cost_entry_t g_graph_cost_cache[GRAPH_COST_CACHE_SIZE];
+static pthread_mutex_t g_graph_cost_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_graph_cost_full_warned = 0;
+
+/* Called from child_after_fork. Reinit the lock (POSIX leaves inherited
+ * mutex state undefined) and wipe the cache -- parent CUgraphExec handles
+ * are invalid here because CUDA contexts don't survive fork. */
+static void graph_cost_after_fork(void) {
+  pthread_mutex_init(&g_graph_cost_lock, NULL);
+  memset(g_graph_cost_cache, 0, sizeof(g_graph_cost_cache));
+  g_graph_cost_full_warned = 0;
+}
+
+static void walk_graph_cost(CUgraph graph, int64_t *total_grids, int *max_blocks) {
+  if (unlikely(!graph)) return;
+  /* Driver-availability guard: CUDA_INTERNAL_CHECK calls fn_ptr directly
+   * without a NULL check, so an old driver lacking these graph APIs would
+   * SEGV here. cuGraphInstantiate having succeeded does not guarantee
+   * cuGraphGetNodes is loaded in our cuda_library_entry. */
+  if (unlikely(!CUDA_FIND_ENTRY(cuda_library_entry, cuGraphGetNodes) ||
+               !CUDA_FIND_ENTRY(cuda_library_entry, cuGraphNodeGetType) ||
+               !CUDA_FIND_ENTRY(cuda_library_entry, cuGraphKernelNodeGetParams))) {
+    return;
+  }
+  size_t num_nodes = 0;
+  CUresult r = CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphGetNodes,
+                                   graph, NULL, &num_nodes);
+  if (r != CUDA_SUCCESS || num_nodes == 0) return;
+  CUgraphNode *nodes = (CUgraphNode*)malloc(num_nodes * sizeof(CUgraphNode));
+  /* cppcheck-suppress memleak ; false positive: nodes is NULL on this path */
+  if (unlikely(!nodes)) return;
+  r = CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphGetNodes,
+                          graph, nodes, &num_nodes);
+  if (r == CUDA_SUCCESS) {
+    for (size_t i = 0; i < num_nodes; i++) {
+      CUgraphNodeType type;
+      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphNodeGetType,
+                              nodes[i], &type) != CUDA_SUCCESS) continue;
+      if (type == CU_GRAPH_NODE_TYPE_KERNEL) {
+        CUDA_KERNEL_NODE_PARAMS params = {0};
+        if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphKernelNodeGetParams,
+                                nodes[i], &params) != CUDA_SUCCESS) continue;
+        *total_grids += (int64_t)params.gridDimX * params.gridDimY * params.gridDimZ;
+        int b = params.blockDimX * params.blockDimY * params.blockDimZ;
+        if (b > *max_blocks) *max_blocks = b;
+      } else if (type == CU_GRAPH_NODE_TYPE_GRAPH) {
+        if (unlikely(!CUDA_FIND_ENTRY(cuda_library_entry, cuGraphChildGraphNodeGetGraph))) {
+          continue;
+        }
+        CUgraph child = NULL;
+        if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuGraphChildGraphNodeGetGraph,
+                                nodes[i], &child) == CUDA_SUCCESS) {
+          walk_graph_cost(child, total_grids, max_blocks);
+        }
+      }
+    }
+  }
+  free(nodes);
+}
+
+static void graph_cost_remember(CUgraphExec exec, int grids, int blocks) {
+  if (unlikely(!exec) || grids <= 0) return;
+  pthread_mutex_lock(&g_graph_cost_lock);
+  int free_slot = -1;
+  for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
+    if (g_graph_cost_cache[i].exec == exec) {
+      g_graph_cost_cache[i].total_grids = grids;
+      g_graph_cost_cache[i].max_blocks  = blocks;
+      pthread_mutex_unlock(&g_graph_cost_lock);
+      return;
+    }
+    if (g_graph_cost_cache[i].exec == NULL && free_slot < 0) free_slot = i;
+  }
+  if (free_slot >= 0) {
+    g_graph_cost_cache[free_slot].exec        = exec;
+    g_graph_cost_cache[free_slot].total_grids = grids;
+    g_graph_cost_cache[free_slot].max_blocks  = blocks;
+  } else if (!g_graph_cost_full_warned) {
+    g_graph_cost_full_warned = 1;
+    LOGGER(WARNING, "graph cost cache full (%d entries); newly-instantiated "
+                    "graphs will not be throttled at cuGraphLaunch",
+                    GRAPH_COST_CACHE_SIZE);
+  }
+  pthread_mutex_unlock(&g_graph_cost_lock);
+}
+
+static int graph_cost_lookup(CUgraphExec exec, int *grids, int *blocks) {
+  if (unlikely(!exec)) return 0;
+  pthread_mutex_lock(&g_graph_cost_lock);
+  for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
+    if (g_graph_cost_cache[i].exec == exec) {
+      *grids  = g_graph_cost_cache[i].total_grids;
+      *blocks = g_graph_cost_cache[i].max_blocks;
+      pthread_mutex_unlock(&g_graph_cost_lock);
+      return 1;
+    }
+  }
+  pthread_mutex_unlock(&g_graph_cost_lock);
+  return 0;
+}
+
+static void graph_cost_forget(CUgraphExec exec) {
+  if (unlikely(!exec)) return;
+  pthread_mutex_lock(&g_graph_cost_lock);
+  for (int i = 0; i < GRAPH_COST_CACHE_SIZE; i++) {
+    if (g_graph_cost_cache[i].exec == exec) {
+      g_graph_cost_cache[i].exec        = NULL;
+      g_graph_cost_cache[i].total_grids = 0;
+      g_graph_cost_cache[i].max_blocks  = 0;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_graph_cost_lock);
+}
+
+static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph) {
+  if (unlikely(!exec || !src_graph)) return;
+  int64_t total = 0;
+  int max_blocks = 1;
+  walk_graph_cost(src_graph, &total, &max_blocks);
+  if (total <= 0) return;
+  if (total > INT_MAX) total = INT_MAX;
+  graph_cost_remember(exec, (int)total, max_blocks);
+}
+
+/* cuGraphInstantiate and cuGraphInstantiate_v2 share an identical body:
+ * dispatch via the internal _cuGraphInstantiate helper in cuda_originals.c
+ * (which already does the "_v2 preferred, fall back to v1" probe), then
+ * capture the graph cost on success. We keep two distinct exported symbols
+ * because the dynamic linker treats them as separate dlsym targets -- a
+ * framework calling either name has to be intercepted on the right symbol. */
+extern CUresult _cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                    CUgraphNode *phErrorNode, char *logBuffer,
+                                    size_t bufferSize);
+
+static CUresult instantiate_and_capture(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                        CUgraphNode *phErrorNode, char *logBuffer,
+                                        size_t bufferSize) {
+  CUresult ret = _cuGraphInstantiate(phGraphExec, hGraph, phErrorNode,
+                                     logBuffer, bufferSize);
+  if (ret == CUDA_SUCCESS && phGraphExec) {
+    capture_graph_cost(*phGraphExec, hGraph);
+  }
+  return ret;
+}
+
+CUresult cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
+                            CUgraphNode *phErrorNode, char *logBuffer,
+                            size_t bufferSize) {
+  return instantiate_and_capture(phGraphExec, hGraph, phErrorNode,
+                                 logBuffer, bufferSize);
+}
+
+CUresult cuGraphInstantiate_v2(CUgraphExec *phGraphExec, CUgraph hGraph,
+                               CUgraphNode *phErrorNode, char *logBuffer,
+                               size_t bufferSize) {
+  return instantiate_and_capture(phGraphExec, hGraph, phErrorNode,
+                                 logBuffer, bufferSize);
+}
+
+CUresult cuGraphInstantiateWithFlags(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                     unsigned long long flags) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphInstantiateWithFlags,
+                                  phGraphExec, hGraph, flags);
+  if (ret == CUDA_SUCCESS && phGraphExec) {
+    capture_graph_cost(*phGraphExec, hGraph);
+  }
+  return ret;
+}
+
+CUresult cuGraphInstantiateWithParams(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                      CUDA_GRAPH_INSTANTIATE_PARAMS *instantiateParams) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry,
+                                  __CUDA_API_PTSZ(cuGraphInstantiateWithParams),
+                                  phGraphExec, hGraph, instantiateParams);
+  if (ret == CUDA_SUCCESS && phGraphExec) {
+    capture_graph_cost(*phGraphExec, hGraph);
+  }
+  return ret;
+}
+
+CUresult cuGraphInstantiateWithParams_ptsz(CUgraphExec *phGraphExec, CUgraph hGraph,
+                                           CUDA_GRAPH_INSTANTIATE_PARAMS *instantiateParams) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphInstantiateWithParams_ptsz,
+                                  phGraphExec, hGraph, instantiateParams);
+  if (ret == CUDA_SUCCESS && phGraphExec) {
+    capture_graph_cost(*phGraphExec, hGraph);
+  }
+  return ret;
+}
+
+CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
+  CUresult ret;
+  CUdevice device;
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
+  int host_index = get_host_device_index_by_cuda_device(device);
+  int grids = 1, blocks = 1;
+  graph_cost_lookup(hGraphExec, &grids, &blocks);
+  rate_limiter(grids, blocks, host_index);
+  int gap = gap_begin(host_index, hStream);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphLaunch),
+                         hGraphExec, hStream);
+  if (gap) gap_end(host_index, hStream, ret);
+DONE:
+  return ret;
+}
+
+CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
+  CUresult ret;
+  CUdevice device;
+  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
+  int host_index = get_host_device_index_by_cuda_device(device);
+  int grids = 1, blocks = 1;
+  graph_cost_lookup(hGraphExec, &grids, &blocks);
+  rate_limiter(grids, blocks, host_index);
+  int gap = gap_begin(host_index, hStream);
+  ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphLaunch_ptsz,
+                         hGraphExec, hStream);
+  if (gap) gap_end(host_index, hStream, ret);
+DONE:
+  return ret;
+}
+
+CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
+  graph_cost_forget(hGraphExec);
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecDestroy, hGraphExec);
+}
+
+/* cuGraphExecUpdate / _v2 replace an existing exec's contents with a new
+ * source graph (PyTorch dynamic-shape inference is the canonical caller).
+ * Without a refresh, our cached cost for `hGraphExec` would describe the
+ * OLD graph forever. We get the new graph as the second arg, so re-walk
+ * and overwrite the cache entry.
+ *
+ * Two ABIs intercepted independently:
+ *   - v1 (CUDA 11.2-11.7): 4 args, errNode_out + result_out as separate
+ *     output pointers.
+ *   - _v2 (CUDA 12.0+): 3 args, both outputs packed into CUgraphExecUpdate
+ *     ResultInfo*. Same exec + graph at positions 1,2 so the cache refresh
+ *     is identical -- the helper below absorbs the common tail.
+ *
+ * cuGetProcAddress("cuGraphExecUpdate", ..., cudaVersion, ...) routes
+ * version-by-version to the right ABI's hook -- see substitute_version_aware
+ * in cuGetProcAddress / cuGetProcAddress_v2.
+ *
+ * Note we deliberately do NOT call graph_cost_forget() before the walk:
+ * graph_cost_remember() overwrites an existing entry in place, and dropping
+ * the entry first would create a ~100µs window (covering the new graph's
+ * walk) during which concurrent cuGraphLaunch on this exec would miss the
+ * cache and degrade to grids=1 (effectively unthrottled). cuGraphExecUpdate
+ * only succeeds when the topology is unchanged, so the OLD cost is a close
+ * approximation to the NEW cost -- much better than grids=1 for that window. */
+static void refresh_cost_on_update(CUresult ret, CUgraphExec hGraphExec, CUgraph hGraph) {
+  if (ret == CUDA_SUCCESS) capture_graph_cost(hGraphExec, hGraph);
+}
+
+CUresult cuGraphExecUpdate(CUgraphExec hGraphExec, CUgraph hGraph,
+                           CUgraphNode *hErrorNode_out,
+                           CUgraphExecUpdateResult *updateResult_out) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecUpdate,
+                                  hGraphExec, hGraph, hErrorNode_out,
+                                  updateResult_out);
+  refresh_cost_on_update(ret, hGraphExec, hGraph);
+  return ret;
+}
+
+CUresult cuGraphExecUpdate_v2(CUgraphExec hGraphExec, CUgraph hGraph,
+                              CUgraphExecUpdateResultInfo *resultInfo) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecUpdate_v2,
+                                  hGraphExec, hGraph, resultInfo);
+  refresh_cost_on_update(ret, hGraphExec, hGraph);
   return ret;
 }
 

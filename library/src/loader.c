@@ -485,8 +485,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuGraphExecHostNodeSetParams"},
     {.name = "cuGraphExecMemcpyNodeSetParams"},
     {.name = "cuGraphExecMemsetNodeSetParams"},
-//    {.name = "cuGraphExecUpdate"},
-//    {.name = "cuGraphExecUpdate_v2"},
+    {.name = "cuGraphExecUpdate"},
+    {.name = "cuGraphExecUpdate_v2"},
     {.name = "cuMemAddressFree"},
     {.name = "cuMemAddressReserve"},
     {.name = "cuMemCreate"},
@@ -1022,7 +1022,6 @@ extern int file_exist(const char *file_path);
 extern int pid_exist(int pid);
 extern int is_zombie_proc(int pid);
 extern int get_sm_watcher_enabled(int *i);
-extern void* _dl_sym(void*, const char*, void*);
 /* This is the symbol search function */
 fp_dlsym real_dlsym = NULL;
 void *lib_control;
@@ -1063,15 +1062,21 @@ char driver_version[FILENAME_MAX] = "1";
 
 void init_real_dlsym() {
   if (real_dlsym == NULL) {
+    /* Probe newest-first. CUDA 12 / PyTorch 2.x toolchains link against
+     * dlsym@GLIBC_2.34 (libdl merge), so a 2.22-capped list misses them
+     * and falls back to whatever libc.so.6 hands us -- which may be the
+     * compat dlsym whose RTLD_NEXT walk differs from the version the
+     * framework actually invokes. See HAMi #1190. */
     const char* glibc_versions[] = {
-      "GLIBC_2.2.5",  // for amd64
-      "GLIBC_2.17",   // for arm64
-      "GLIBC_2.3",
-      "GLIBC_2.4",
-      "GLIBC_2.10",
-      "GLIBC_2.18",
+      "GLIBC_2.34",   // glibc 2.34+ (libdl merged into libc)
       "GLIBC_2.22",
-       NULL
+      "GLIBC_2.18",
+      "GLIBC_2.17",   // arm64 baseline
+      "GLIBC_2.10",
+      "GLIBC_2.4",
+      "GLIBC_2.3",
+      "GLIBC_2.2.5",  // amd64 baseline
+      NULL
     };
     for (int i = 0; glibc_versions[i] != NULL; i++) {
       real_dlsym = dlvsym(RTLD_NEXT, "dlsym", glibc_versions[i]);
@@ -1081,12 +1086,13 @@ void init_real_dlsym() {
       }
     }
     if (unlikely(!real_dlsym)) {
+      /* Last resort: pull dlsym out of libc.so.6 directly. We deliberately
+       * do NOT fall back to _dl_sym(GLIBC_PRIVATE) -- it was effectively
+       * removed by the glibc 2.34 libdl/libpthread merge and depending on
+       * it breaks library load on modern distributions (Ubuntu 22.04+). */
       void *libc_handle = dlopen("libc.so.6", RTLD_LAZY);
       if (libc_handle) {
         real_dlsym = dlsym(libc_handle, "dlsym");
-      }
-      if (unlikely(!real_dlsym)) {
-        real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", dlsym);
       }
       if (!real_dlsym) {
         LOGGER(FATAL, "unable to find the real dlsym");

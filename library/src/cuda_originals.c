@@ -2055,12 +2055,15 @@ CUresult cuGraphicsResourceGetMappedEglFrame(CUeglFrame *eglFrame,
 }
 
 
-CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsList,
-                                      unsigned int numDevices,  unsigned int flags) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry,
-                         cuLaunchCooperativeKernelMultiDevice, launchParamsList,
-                         numDevices, flags);
-}
+/* cuLaunchCooperativeKernelMultiDevice: public symbol now provided by the
+ * throttled hook in cuda_hook.c (P3, HAMi #1190 hardening). Trampoline
+ * disabled to avoid multiple-definition link errors. */
+//CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsList,
+//                                      unsigned int numDevices,  unsigned int flags) {
+//  return CUDA_ENTRY_CHECK(cuda_library_entry,
+//                         cuLaunchCooperativeKernelMultiDevice, launchParamsList,
+//                         numDevices, flags);
+//}
 
 CUresult _cuMemAllocHost(void **pp, size_t bytesize) {
   CUresult ret;
@@ -2910,9 +2913,11 @@ CUresult cuGraphDestroyNode(CUgraphNode hNode) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphDestroyNode, hNode);
 }
 
-CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecDestroy, hGraphExec);
-}
+/* cuGraphExecDestroy: public symbol now provided by the cache-cleanup hook
+ * in cuda_hook.c (P2 CUDA Graph throttling). */
+//CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecDestroy, hGraphExec);
+//}
 
 CUresult cuGraphGetEdges(CUgraph hGraph, CUgraphNode *from, CUgraphNode *to,
                          size_t *numEdges) {
@@ -2966,18 +2971,21 @@ CUresult _cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
   return ret;
 }
 
-CUresult cuGraphInstantiate_v2(CUgraphExec *phGraphExec, CUgraph hGraph,
-                               CUgraphNode *phErrorNode, char *logBuffer,
-                               size_t bufferSize) {
-  return _cuGraphInstantiate(phGraphExec, hGraph, phErrorNode, logBuffer, bufferSize);
-}
-
-
-CUresult cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
-                            CUgraphNode *phErrorNode, char *logBuffer,
-                            size_t bufferSize) {
-  return _cuGraphInstantiate(phGraphExec, hGraph, phErrorNode, logBuffer, bufferSize);
-}
+/* cuGraphInstantiate / _v2: public symbols now provided by the cost-capturing
+ * hooks in cuda_hook.c (P2 CUDA Graph throttling). Both hooks reuse the
+ * internal _cuGraphInstantiate dispatcher above for the v2-prefer-v1 logic. */
+//CUresult cuGraphInstantiate_v2(CUgraphExec *phGraphExec, CUgraph hGraph,
+//                               CUgraphNode *phErrorNode, char *logBuffer,
+//                               size_t bufferSize) {
+//  return _cuGraphInstantiate(phGraphExec, hGraph, phErrorNode, logBuffer, bufferSize);
+//}
+//
+//
+//CUresult cuGraphInstantiate(CUgraphExec *phGraphExec, CUgraph hGraph,
+//                            CUgraphNode *phErrorNode, char *logBuffer,
+//                            size_t bufferSize) {
+//  return _cuGraphInstantiate(phGraphExec, hGraph, phErrorNode, logBuffer, bufferSize);
+//}
 
 CUresult _cuGraphKernelNodeGetParams(CUgraphNode hNode,
                                     CUDA_KERNEL_NODE_PARAMS *nodeParams) {
@@ -3030,15 +3038,17 @@ CUresult cuGraphKernelNodeSetParams_v2(CUgraphNode hNode,
   return _cuGraphKernelNodeSetParams(hNode, nodeParams);
 }
 
-CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphLaunch), hGraphExec,
-                         hStream);
-}
-
-CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphLaunch_ptsz, hGraphExec,
-                         hStream);
-}
+/* cuGraphLaunch / _ptsz: public symbols now provided by the throttled hooks
+ * in cuda_hook.c (P2 CUDA Graph throttling: consults graph cost cache). */
+//CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphLaunch), hGraphExec,
+//                         hStream);
+//}
+//
+//CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphLaunch_ptsz, hGraphExec,
+//                         hStream);
+//}
 
 CUresult cuGraphMemcpyNodeGetParams(CUgraphNode hNode,
                                     CUDA_MEMCPY3D *nodeParams) {
@@ -3748,11 +3758,13 @@ CUresult cuGraphDebugDotPrint(CUgraph hGraph, const char *path,
                          path, flags);
 }
 
-CUresult cuGraphInstantiateWithFlags(CUgraphExec *phGraphExec, CUgraph hGraph,
-                                      unsigned long long flags) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphInstantiateWithFlags,
-                         phGraphExec, hGraph, flags);
-}
+/* cuGraphInstantiateWithFlags: public symbol now provided by the cost-capturing
+ * hook in cuda_hook.c (P2 CUDA Graph throttling). */
+//CUresult cuGraphInstantiateWithFlags(CUgraphExec *phGraphExec, CUgraph hGraph,
+//                                      unsigned long long flags) {
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphInstantiateWithFlags,
+//                         phGraphExec, hGraph, flags);
+//}
 
 CUresult cuGraphMemAllocNodeGetParams(CUgraphNode hNode,
                                       CUDA_MEM_ALLOC_NODE_PARAMS *params_out) {
@@ -3885,17 +3897,19 @@ CUresult cuGraphExecNodeSetParams(CUgraphExec hGraphExec, CUgraphNode hNode, CUg
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecNodeSetParams, hGraphExec, hNode, nodeParams);
 }
 
-CUresult cuGraphInstantiateWithParams (CUgraphExec* phGraphExec, CUgraph hGraph,
-                                       CUDA_GRAPH_INSTANTIATE_PARAMS* instantiateParams ){
-  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphInstantiateWithParams),
-                          phGraphExec, hGraph, instantiateParams);
-}
-
-CUresult cuGraphInstantiateWithParams_ptsz (CUgraphExec* phGraphExec, CUgraph hGraph,
-                                            CUDA_GRAPH_INSTANTIATE_PARAMS* instantiateParams ){
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphInstantiateWithParams_ptsz,
-                                        phGraphExec, hGraph, instantiateParams);
-}
+/* cuGraphInstantiateWithParams / _ptsz: public symbols now provided by the
+ * cost-capturing hooks in cuda_hook.c (P2 CUDA Graph throttling). */
+//CUresult cuGraphInstantiateWithParams (CUgraphExec* phGraphExec, CUgraph hGraph,
+//                                       CUDA_GRAPH_INSTANTIATE_PARAMS* instantiateParams ){
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphInstantiateWithParams),
+//                          phGraphExec, hGraph, instantiateParams);
+//}
+//
+//CUresult cuGraphInstantiateWithParams_ptsz (CUgraphExec* phGraphExec, CUgraph hGraph,
+//                                            CUDA_GRAPH_INSTANTIATE_PARAMS* instantiateParams ){
+//  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphInstantiateWithParams_ptsz,
+//                                        phGraphExec, hGraph, instantiateParams);
+//}
 
 CUresult cuGraphNodeSetParams(CUgraphNode hNode, CUgraphNodeParams* nodeParams){
     return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphNodeSetParams, hNode, nodeParams);
