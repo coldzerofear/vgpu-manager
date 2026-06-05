@@ -3226,9 +3226,21 @@ static void capture_graph_cost(CUgraphExec exec, CUgraph src_graph) {
   int64_t total = 0;
   int max_blocks = 1;
   walk_graph_cost(src_graph, &total, &max_blocks);
-  if (total <= 0) return;
-  if (total > INT_MAX) total = INT_MAX;
-  graph_cost_remember(exec, (int)total, max_blocks);
+  if (total > 0) {
+    if (total > INT_MAX) total = INT_MAX;
+    graph_cost_remember(exec, (int)total, max_blocks);
+    return;
+  }
+  /* Walk found no kernel work in this graph. For cuGraphInstantiate this
+   * is a no-op (no prior entry to clear). For cuGraphExecUpdate / _v2,
+   * leaving any prior entry in place would lock the exec to the OLD
+   * graph's cost forever -- a strict regression vs the previous
+   * forget-then-remember design when the update degenerates the graph
+   * to zero kernel work. Explicit forget keeps graph_cost_remember's
+   * in-place overwrite contract complete: every successful instantiate /
+   * update path settles the cache to a state that reflects the current
+   * graph. */
+  graph_cost_forget(exec);
 }
 
 /* cuGraphInstantiate and cuGraphInstantiate_v2 share an identical body:
