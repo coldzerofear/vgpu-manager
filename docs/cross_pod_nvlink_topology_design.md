@@ -242,10 +242,20 @@ vgpu-manager 这边专心做:
 ### 7.6 测试覆盖
 
 - 现有 `Test_FilterPerf` 和 `Test_DeviceFilter` 均无多 Pod 同 Gang 链路连通场景。
-- 需要新增:
-  - 单元测试:`Test_CrossPodLink_Anchor`(阶段 1)、`Test_CrossPodLink_Lookahead`(阶段 2)、`Test_CrossPodLink_Strict`(阶段 3)。
-  - 集成测试:多 Pod 同 Gang 顺序调度,断言所选 UUID 全部在同一 `linkComponentByUUID` 根。
-  - 性能基线:`Test_FilterPerf` 新增 Gang 维度,确认 anchor 解析成本可忽略(预期 < 5%)。
+- 需要新增的测试矩阵(参考第 10 节 Volcano #5049 的覆盖结构,把"亲和" / "反亲和"翻译成本设计语义):
+
+  | 用例 | 场景 | 期望 |
+  |---|---|---|
+  | `Test_CrossPodLink_Anchor` | 同 Gang 两 Pod 顺序到达,阶段 1 | Pod-2 落在 Pod-1 所选 UUID 同 `linkComponentByUUID` 根的卡上 |
+  | `Test_CrossPodLink_DifferentGangsIsolated` | 不同 Gang 两 Pod 同节点 | 各自独立选,不强制同分量 |
+  | `Test_CrossPodLink_NoRoomFalls`(non-strict) | 锚定分量内空 slot 不够 | 退回单 Pod bestEffort,不拒绝节点 |
+  | `Test_CrossPodLink_NoRoomFails`(strict) | 同上但 strict | 拒绝节点,触发抢占路径 |
+  | `Test_CrossPodLink_Lookahead` | 多分量节点,首 Pod 只需 2 张但 Gang 总共要 8 张 | 首 Pod 选 ≥ 8 张容量的分量,不被"局部最优分量"卡 |
+  | `Test_CrossPodLink_MixedGangAndNonGang` | Gang Pod + 非 Gang Pod 同节点 | 非 Gang Pod 完全走原路径,Gang 内 anchor 解析不污染 |
+  | `Test_CrossPodLink_AnchorSplit` | 兄弟 anchor 跨多个分量(违反约束) | non-strict 走多数派分量并记 V(3) 告警;strict 拒绝 |
+
+- 集成测试:多 Pod 同 Gang 顺序调度,断言所选 UUID 全部在同一 `linkComponentByUUID` 根。
+- 性能基线:`Test_FilterPerf` 新增 Gang 维度,确认 anchor 解析成本可忽略(预期 < 5%)。
 
 ## 8. 工作量与里程碑
 
@@ -264,9 +274,76 @@ vgpu-manager 这边专心做:
 2. **阶段 2 在 PodGroup 集成验证后上线**:lookahead 是关键收益点,阶段 1 单独价值有限。
 3. **阶段 3 作为可选硬保证**:严格模式与抢占同分量逻辑较复杂,等阶段 1+2 在生产稳态运行后再上。
 
+每个阶段都建议**包在 feature gate 后**(类似 `GPUTopology` feature gate 的模式,参见 [`pkg/device/types.go`](../pkg/device/types.go) 里 `IsGPUTopologyEnabled` 的现成结构)。灰度开关默认关,小集群验证后再放量。借鉴自第 10 节 Volcano #5049 的发布节奏。
+
 ## 9. 不在本设计范围内
 
 - Gang 调度本身(Pod 同节点、连续出队、原子提交):依赖外层。
 - NUMA 跨 Pod 拓扑(类比但不在本次)。
 - 跨节点 NVLink(NVLink 不跨主机)。
 - DRA 模式下的等价能力:DRA 的设备分配是声明式 ResourceClaim,跨 Pod 拓扑需要在 ResourceClaim 级别做,设计路径不同,作为独立 follow-up。
+
+## 10. 借鉴:与 Volcano PR #5049 的对比与启发
+
+[Volcano PR #5049](https://github.com/volcano-sh/volcano/pull/5049)(已合并)新增 `volcano.sh/vgpu-podgroup-policy: spread` 注解,**禁止同 PodGroup 的两个 Pod 共用同一张物理 GPU**,理由是同卡跨 Pod 的 NCCL 通信失败。
+
+### 10.1 解决的是不同的问题,但语义互补
+
+| 维度 | Volcano #5049(spread) | 本设计(link 亲和) |
+|---|---|---|
+| 方向 | **反共置**:Gang 兄弟必须落在**不同**物理卡 | **亲和**:Gang 兄弟必须落在**同一 NVLink 连通分量** |
+| 粒度 | 设备级(per-GPU) | 拓扑级(per-component) |
+| 触发 | per-Pod 注解 `volcano.sh/vgpu-podgroup-policy: spread` | Gang 检测 + topology mode = link |
+| Lookahead | 无 | 阶段 2 有 |
+| 失败处理 | 第二 Pod 找不到不同卡 → 拒绝节点 | non-strict 降级到单 Pod bestEffort;strict 拒绝并抢占 |
+
+**关键认知:两个语义可以同时启用且彼此正交**。一个 Gang 同时打开"分量内亲和 + 卡级反共置",意味着 Pod 兄弟落在同一 NVLink mesh 的**不同卡**上 — 这恰好是分布式训练的理想分布(NCCL 内每 rank 独占一张卡 + rank 间走 NVLink)。
+
+### 10.2 直接可借鉴的实现细节
+
+1. **PodGroup key 反向索引到设备**
+   Volcano 在 [`GPUUsage`](https://github.com/volcano-sh/volcano/blob/master/pkg/scheduler/api/devices/nvidia/vgpu/device_info.go) 里加了 `PodGroupKey string` 字段,挂在 per-device-per-pod 的 usage 映射上。每次问"这张卡上有没有同 Gang 兄弟",直接遍历该卡的 PodMap 看 key 即可,**避免反向扫描整集群 Pod 列表**。
+   - 我们当前设计是"per-Filter 时扫 `nodePodsMap[node]` 找同 Gang 兄弟,解析 `PodVGPUPreAllocAnnotation`",对每个 Pod 都要解析一次。
+   - **建议借鉴**:阶段 1 实现时,可以在 NodeInfo 构建阶段顺手维护 `componentToGangs map[componentRoot]map[gangName]struct{}` 或更细的 `componentToGangAnchors map[componentRoot]map[gangName][]uuid`。这样在 `allocateLink` 内直接 O(1) 查询"本分量是否已被某 Gang 锁定",省掉每节点的 sibling 扫描成本。
+   - 代价是 NodeInfo 构建多一遍 PodMap 遍历;但已经在 `addPodUsedResources` 里遍历过,可以顺手填。
+
+2. **per-Pod 注解 vs PodGroup-level 注解**
+   Volcano 把策略注解贴在 **Pod** 上(`volcano.sh/vgpu-podgroup-policy`),不在 PodGroup 上。优点:无 PodGroup CRD 强依赖,Volcano scheduler 也不强制读 PodGroup spec。缺点:用户必须保证 Gang 内**每个** Pod 都贴上注解,漏一个就降级。
+   - 我们当前设计的 `gpu-cross-pod-link-strict` 也是 per-Pod。问题同。
+   - **建议借鉴 + 改进**:阶段 3 strict 模式同时支持两个位置 — 优先读 PodGroup spec(更可靠),回落到首 Pod 注解。这样既保留 Volcano 的轻量路径,也提供更稳的覆盖。
+
+3. **Snapshot 必须 deep-copy**
+   Volcano 在该 PR 里同步修了一个**潜在 bug**:`getGPUDeviceSnapShot` 原本浅拷贝 `PodMap`,导致 snapshot 与原对象共享;Volcano 调度的 try-and-rollback 模型下会污染。改为深拷贝 PodMap。
+   - 提醒:**我们要新增的任何 per-device gang 状态(componentToGangs / componentToGangAnchors)在 NodeInfo Clone 时必须随之深拷贝**。当前 [`pkg/device/types.go:911-912`](../pkg/device/types.go#L911) 的 `Clone` 已经处理 `deviceList` 和 `linkComponentByUUID`,新增字段记得同步加进去。
+
+4. **测试矩阵结构**
+   Volcano PR 的测试覆盖结构清晰且最小化,见 PR 描述里的 5 行表(spread-prevents-co-location / binpack-allows-co-location / different-groups-can-share / no-room-fails / mixed-annotations)。
+   - 我们的测试矩阵(第 7.6 节)已经按这个模板重写,加上 lookahead 与 anchor-split 两个本设计独有的场景。
+
+5. **Feature flag 渐进上线**
+   Volcano 的说明里明确:"This feature is behind a feature flag and have been tested with a local minikube instance"。
+   - 我们也照办:每个阶段进一个 feature gate,默认关,验证再放量。第 8 节末已加该约定。
+
+### 10.3 启发但不照搬的部分
+
+- **设备使用率累加方式**:Volcano 的 `addToPodMap` / `addResource` 走的是 device-info 抽象,与我们 [`pkg/device/types.go`](../pkg/device/types.go) 的 `AddUsedResources` 路径架构不一样,**不直接复用**。我们维持现有 [`AddPodUsedResources`](../pkg/device/types.go#L1043) 流水,在它已经遍历 PodDeviceClaim 的循环里**顺手累计 Gang → 分量映射**即可,代码侵入面小。
+- **per-Pod annotation 命名**:Volcano 用 `volcano.sh/vgpu-podgroup-policy`,我们走 `nvidia.com/` 域名(项目历史约定,见 [`pkg/util/consts.go`](../pkg/util/consts.go) 里其他注解),不跟随。
+
+### 10.4 是否要并入 Volcano-style spread?
+
+**强烈建议作为本设计的第 4 个阶段或独立 PR 加入**:
+
+- 名义注解:`nvidia.com/cross-pod-device-spread`(沿用项目域名)。
+- 语义:与 link 亲和**完全正交**,可单独启用,可同时启用。
+- 实现成本:~80 LOC(主要是在 `allocator.filterDevices` 阶段加一个新的 per-device 过滤函数,判断"该卡上是否已有同 Gang 兄弟")。
+
+加入后,跨 Pod 调度策略矩阵变成:
+
+| Mode | 含义 |
+|---|---|
+| `cross-pod-link`(本设计 1-3 阶段) | Gang 兄弟落同一 NVLink 分量 |
+| `cross-pod-link-strict`(本设计 3 阶段) | 同上,失败拒绝 + 抢占 |
+| `cross-pod-device-spread`(借鉴 #5049) | Gang 兄弟不共卡 |
+| 三者组合 | 同分量 + 不共卡 + 装不下就拒绝 = 训练任务最优分布 |
+
+这个第 4 阶段建议放在阶段 1+2 完成后立即跟进,作为同一个特性簇的收尾。
