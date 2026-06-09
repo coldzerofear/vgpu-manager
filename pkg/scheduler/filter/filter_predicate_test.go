@@ -83,7 +83,7 @@ func Test_Parallel_Scheduling(t *testing.T) {
 	defer broadcaster.Shutdown()
 
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
-	filterPredicate, err := New(k8sClient, factory, recorder, true)
+	filterPredicate, err := New(k8sClient, factory, recorder, true, true)
 	if err != nil {
 		t.Fatalf("failed to create new filterPredicate due to %v", err)
 	}
@@ -274,7 +274,7 @@ func Test_DeviceFilter(t *testing.T) {
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
 	defer broadcaster.Shutdown()
 
-	filterPredicate, err := New(k8sClient, factory, recorder, false)
+	filterPredicate, err := New(k8sClient, factory, recorder, false, true)
 	if err != nil {
 		t.Fatalf("failed to create new filterPredicate due to %v", err)
 	}

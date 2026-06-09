@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/component-base/logs"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -54,6 +55,8 @@ func main() {
 	opt.PrintAndExitIfRequested()
 	logs.InitLogs()
 	defer logs.FlushLogs()
+	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
+
 	util.MustInitGlobalDomain(opt.Domain)
 	gpuallocator.SetBestEffortMaxGPUs(opt.BestEffortMaxGPUs)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
@@ -101,15 +104,24 @@ func main() {
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
-	filterPlugin, err := filter.New(kubeClient, factory, recorder, opt.FeatureGate.Enabled(options.SerialFilterNode))
+	filterPlugin, err := filter.New(
+		kubeClient, factory, recorder,
+		opt.FeatureGate.Enabled(options.SerialFilterNode),
+		opt.FeatureGate.Enabled(options.GPUTopology))
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler FilterPlugin failed: %v", err)
 	}
-	bindPlugin, err := bind.New(kubeClient, recorder, filterPlugin.GetPodLister(), opt.FeatureGate.Enabled(options.SerialBindNode))
+
+	bindPlugin, err := bind.New(
+		kubeClient, recorder, filterPlugin.GetPodLister(),
+		opt.FeatureGate.Enabled(options.SerialBindNode))
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler BindPlugin failed: %v", err)
 	}
-	preemptPlugin, err := preempt.New(factory, recorder, filterPlugin.GetPodLister())
+
+	preemptPlugin, err := preempt.New(
+		factory, recorder, filterPlugin.GetPodLister(),
+		opt.FeatureGate.Enabled(options.GPUTopology))
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler PreemptPlugin failed: %v", err)
 	}

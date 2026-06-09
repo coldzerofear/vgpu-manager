@@ -35,6 +35,7 @@ type gpuFilter struct {
 	nodeLister  listerv1.NodeLister
 	podLister   client.PodLister
 	recorder    record.EventRecorder
+	gpuTopology bool
 	hasSyncFunc func(ctx context.Context) bool
 }
 
@@ -64,7 +65,7 @@ var (
 )
 
 func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactory,
-	recorder record.EventRecorder, serialFilterNode bool) (*gpuFilter, error) {
+	recorder record.EventRecorder, serialFilterNode bool, gpuTopology bool) (*gpuFilter, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 	if err := podInformer.AddIndexers(podIndexers); err != nil {
@@ -87,6 +88,7 @@ func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactor
 		nodeLister:  nodeLister,
 		podLister:   podLister,
 		recorder:    recorder,
+		gpuTopology: gpuTopology,
 		hasSyncFunc: hasSyncFunc,
 	}, nil
 }
@@ -476,6 +478,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 			opts := []device.NodeInfoOptionFn{
 				device.WithNodePods(nodePodsMap[node.Name]...),
 				device.WithExcludedPods(pod.UID),
+				device.WithGPUTopologyEnabled(f.gpuTopology),
 			}
 			read, _ := state.Read(framework.StateKey(node.Name))
 			if read != nil {

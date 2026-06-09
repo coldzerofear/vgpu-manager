@@ -57,6 +57,7 @@ type vgpuPreempt struct {
 	nodeLister  listerv1.NodeLister
 	podLister   client.PodLister
 	recorder    record.EventRecorder
+	gpuTopology bool
 	hasSyncFunc func(ctx context.Context) bool
 }
 
@@ -77,7 +78,7 @@ var (
 // the filter plugin uses, so per-node pod lookups go through the indexer that
 // already filters by vGPU resource requests.
 func New(factory informers.SharedInformerFactory, recorder record.EventRecorder,
-	podLister client.PodLister) (*vgpuPreempt, error) {
+	podLister client.PodLister, gpuTopology bool) (*vgpuPreempt, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 	if err := podInformer.AddIndexers(podIndexers); err != nil {
@@ -95,6 +96,7 @@ func New(factory informers.SharedInformerFactory, recorder record.EventRecorder,
 		nodeLister:  nodeLister,
 		podLister:   podLister,
 		recorder:    recorder,
+		gpuTopology: gpuTopology,
 		hasSyncFunc: hasSyncFunc,
 	}, nil
 }
@@ -295,7 +297,7 @@ func (p *vgpuPreempt) refineForNode(req *allocator.AllocationRequest, nodeName s
 		return nil, 0, false
 	}
 
-	nodeInfo, err := device.NewNodeInfo(node)
+	nodeInfo, err := device.NewNodeInfo(node, device.WithGPUTopologyEnabled(p.gpuTopology))
 	if err != nil {
 		filterReason := reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
 		klog.V(3).ErrorS(err, "Preempt: "+string(filterReason.Primary), "node", node.Name, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())

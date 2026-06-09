@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/component-base/logs"
@@ -44,6 +45,8 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 	log.SetLogger(klog.NewKlogr())
+
+	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)

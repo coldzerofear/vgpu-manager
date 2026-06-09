@@ -290,10 +290,10 @@ func KnownFeatures() []string {
 // ToMap returns all known feature gates as a map[string]bool suitable for
 // template rendering (e.g., {"FeatureA": true, "FeatureB": false}).
 // Returns an empty map if no feature gates are configured.
-func ToMap() map[string]bool {
+func ToMap(featureGate featuregate.MutableFeatureGate) map[string]bool {
 	result := make(map[string]bool)
-	for feature := range FeatureGates().GetAll() {
-		result[string(feature)] = FeatureGates().Enabled(feature)
+	for feature := range featureGate.GetAll() {
+		result[string(feature)] = featureGate.Enabled(feature)
 	}
 	return result
 }

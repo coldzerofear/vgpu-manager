@@ -225,11 +225,11 @@ func newPreemptPluginWithSync(t *testing.T, pods []*corev1.Pod, nodes []*corev1.
 
 	// We need the filter plugin's PodLister so the indexer
 	// IndexerKeyPodRequestVGPU is registered on the shared informer.
-	filterPlugin, err := filter.New(k8sClient, factory, recorder, false)
+	filterPlugin, err := filter.New(k8sClient, factory, recorder, false, true)
 	if err != nil {
 		t.Fatalf("filter.New: %v", err)
 	}
-	plugin, err := New(factory, recorder, filterPlugin.GetPodLister())
+	plugin, err := New(factory, recorder, filterPlugin.GetPodLister(), true)
 	if err != nil {
 		t.Fatalf("preempt.New: %v", err)
 	}
@@ -690,11 +690,11 @@ func Test_Preempt_ProtectedVictim_AddsAdditional(t *testing.T) {
 // changes.
 func Test_pdbViolationsUpperBound(t *testing.T) {
 	tests := []struct {
-		name      string
-		original  int64
-		keptLen   int
-		addedLen  int
-		want      int64
+		name     string
+		original int64
+		keptLen  int
+		addedLen int
+		want     int64
 	}{
 		{
 			name:     "no change passes through",

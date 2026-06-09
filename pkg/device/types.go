@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/device-scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -20,7 +19,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-scheduler/framework"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
@@ -413,27 +411,6 @@ func (dev *Device) DeepCopy() *Device {
 	return &device
 }
 
-var (
-	gpuTopoEnabledOnce sync.Once
-	gpuTopologyEnabled bool
-)
-
-func SetGPUTopologyEnabled(flag bool) {
-	gpuTopoEnabledOnce.Do(func() {
-		gpuTopologyEnabled = flag
-		klog.InfoS(fmt.Sprintf("Feature Gates[%s]", util.GPUTopology), "enabled", flag)
-	})
-}
-
-func IsGPUTopologyEnabled() bool {
-	gpuTopoEnabledOnce.Do(func() {
-		featureGate := compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-		gpuTopologyEnabled = featureGate != nil && featureGate.Enabled(util.GPUTopology)
-		klog.InfoS(fmt.Sprintf("Feature Gates[%s]", util.GPUTopology), "enabled", gpuTopologyEnabled)
-	})
-	return gpuTopologyEnabled
-}
-
 type DeviceGatherInfo struct {
 	DeviceMap           map[int]*Device
 	DeviceList          gpuallocator.DeviceList
@@ -476,7 +453,7 @@ func NewNodeDeviceGatherInfo(node *corev1.Node, option *NodeInfoOption) (*Device
 		deviceGatherInfo.DeviceList[device.Id] = gpuallocator.NewDevice(device.Id, device.Uuid, device.BusId)
 	}
 	deviceGatherInfo.EnabledNumaAffinity = numaSet.Len() > 0
-	if IsGPUTopologyEnabled() {
+	if option != nil && option.gpuTopologyEnabled {
 		topoValue, ok := util.HasAnnotation(node, util.NodeDeviceTopologyAnnotation)
 		if !ok || len(topoValue) == 0 {
 			klog.V(3).InfoS("node does not have device topology information", "node", node.Name)
@@ -721,12 +698,19 @@ type NodeInfo struct {
 }
 
 type NodeInfoOption struct {
-	excludedUidSet sets.Set[types.UID]
-	nodePods       []*corev1.Pod
-	nodeConfig     *NodeConfigInfo
+	excludedUidSet     sets.Set[types.UID]
+	nodePods           []*corev1.Pod
+	nodeConfig         *NodeConfigInfo
+	gpuTopologyEnabled bool
 }
 
 type NodeInfoOptionFn func(*NodeInfoOption)
+
+func WithGPUTopologyEnabled(flag bool) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		o.gpuTopologyEnabled = flag
+	}
+}
 
 func WithNodeConfig(config *NodeConfigInfo) NodeInfoOptionFn {
 	return func(o *NodeInfoOption) {

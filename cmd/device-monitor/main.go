@@ -15,6 +15,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
@@ -46,6 +47,8 @@ func main() {
 	opt.PrintAndExitIfRequested()
 	logs.InitLogs()
 	defer logs.FlushLogs()
+
+	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
