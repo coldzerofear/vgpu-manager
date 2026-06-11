@@ -170,6 +170,27 @@ func IsVGPUResourcePod(pod *corev1.Pod) bool {
 	return false
 }
 
+// IsContainerRunning reports whether the named container is currently in the
+// Running state. It searches both init and regular container statuses (names
+// are unique pod-wide), so a completed/terminated container — e.g. a finished
+// sequential init container — returns false.
+func IsContainerRunning(pod *corev1.Pod, containerName string) bool {
+	if pod == nil {
+		return false
+	}
+	for i := range pod.Status.InitContainerStatuses {
+		if pod.Status.InitContainerStatuses[i].Name == containerName {
+			return pod.Status.InitContainerStatuses[i].State.Running != nil
+		}
+	}
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == containerName {
+			return pod.Status.ContainerStatuses[i].State.Running != nil
+		}
+	}
+	return false
+}
+
 // CheckDeviceType Check if the device type meets expectations.
 func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 	deviceType = strings.ToUpper(strings.TrimSpace(deviceType))

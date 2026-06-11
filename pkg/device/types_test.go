@@ -711,3 +711,93 @@ func Test_ReducePodFootprint(t *testing.T) {
 		})
 	}
 }
+
+func Test_CurrentSharedContainers(t *testing.T) {
+	const g0, g1 = "GPU-0000", "GPU-1111"
+	running := func(name string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{Name: name, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
+	}
+	terminated := func(name string) corev1.ContainerStatus {
+		return corev1.ContainerStatus{Name: name, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}}
+	}
+	// podStatus builds a pod carrying the given init/app container statuses.
+	podStatus := func(inits, apps []corev1.ContainerStatus) *corev1.Pod {
+		return &corev1.Pod{Status: corev1.PodStatus{
+			InitContainerStatuses: inits,
+			ContainerStatuses:     apps,
+		}}
+	}
+
+	tests := []struct {
+		name  string
+		pod   *corev1.Pod
+		claim PodDeviceClaim
+		want  map[string]int
+	}{
+		{
+			name: "single running app container",
+			pod:  podStatus(nil, []corev1.ContainerStatus{running("app")}),
+			claim: PodDeviceClaim{
+				{Name: "app", DeviceClaims: []DeviceClaim{{Uuid: g0}}},
+			},
+			want: map[string]int{g0: 1},
+		},
+		{
+			name: "completed sequential init is excluded; only running app counts",
+			pod:  podStatus([]corev1.ContainerStatus{terminated("init")}, []corev1.ContainerStatus{running("app")}),
+			claim: PodDeviceClaim{
+				{Name: "init", DeviceClaims: []DeviceClaim{{Uuid: g0}}},
+				{Name: "app", DeviceClaims: []DeviceClaim{{Uuid: g0}}},
+			},
+			want: map[string]int{g0: 1},
+		},
+		{
+			name: "init phase: init running, app not started yet",
+			pod:  podStatus([]corev1.ContainerStatus{running("init")}, []corev1.ContainerStatus{terminated("app")}),
+			claim: PodDeviceClaim{
+				{Name: "init", DeviceClaims: []DeviceClaim{{Uuid: g0}}},
+				{Name: "app", DeviceClaims: []DeviceClaim{{Uuid: g0}}},
+			},
+			want: map[string]int{g0: 1},
+		},
+		{
+			name: "running sidecar + running app share a GPU -> 2",
+			pod:  podStatus([]corev1.ContainerStatus{running("side")}, []corev1.ContainerStatus{running("app")}),
+			claim: PodDeviceClaim{
+				{Name: "side", DeviceClaims: []DeviceClaim{{Uuid: g0}}},
+				{Name: "app", DeviceClaims: []DeviceClaim{{Uuid: g0}}},
+			},
+			want: map[string]int{g0: 2},
+		},
+		{
+			name: "container with no status is not counted",
+			pod:  podStatus(nil, nil),
+			claim: PodDeviceClaim{
+				{Name: "app", DeviceClaims: []DeviceClaim{{Uuid: g0}}},
+			},
+			want: map[string]int{},
+		},
+		{
+			name: "two running apps on different GPUs",
+			pod:  podStatus(nil, []corev1.ContainerStatus{running("app1"), running("app2")}),
+			claim: PodDeviceClaim{
+				{Name: "app1", DeviceClaims: []DeviceClaim{{Uuid: g0}}},
+				{Name: "app2", DeviceClaims: []DeviceClaim{{Uuid: g1}}},
+			},
+			want: map[string]int{g0: 1, g1: 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CurrentSharedContainers(tt.pod, tt.claim)
+			assert.Equal(t, tt.want, got)
+			// Invariant: current sharing never exceeds the peak footprint.
+			peak := ReducePodFootprint(tt.pod, tt.claim)
+			for uuid, cur := range got {
+				assert.LessOrEqualf(t, cur, peak[uuid].Number,
+					"current shared containers (%d) on %s must be <= peak (%d)", cur, uuid, peak[uuid].Number)
+			}
+		})
+	}
+}

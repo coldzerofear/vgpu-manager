@@ -1160,6 +1160,33 @@ func ReducePodFootprint(pod *corev1.Pod, podDeviceClaim PodDeviceClaim) map[stri
 	return result
 }
 
+// CurrentSharedContainers counts, per physical GPU UUID, the containers that
+// currently hold a device claim on it AND are running right now. Unlike the
+// peak count derived from ReducePodFootprint, a terminated container (e.g. a
+// completed sequential init container) is excluded, so this reflects the
+// instantaneous sharing and is always <= the peak. A container is counted at
+// most once per GPU.
+func CurrentSharedContainers(pod *corev1.Pod, podDeviceClaim PodDeviceClaim) map[string]int {
+	counts := map[string]int{}
+	for _, containerClaim := range podDeviceClaim {
+		if !util.IsContainerRunning(pod, containerClaim.Name) {
+			continue
+		}
+		var seen map[string]struct{}
+		for _, claim := range containerClaim.DeviceClaims {
+			if _, ok := seen[claim.Uuid]; ok {
+				continue
+			}
+			if seen == nil {
+				seen = make(map[string]struct{}, len(containerClaim.DeviceClaims))
+			}
+			seen[claim.Uuid] = struct{}{}
+			counts[claim.Uuid]++
+		}
+	}
+	return counts
+}
+
 func inNameSet(m map[string]struct{}, name string) bool {
 	_, ok := m[name]
 	return ok

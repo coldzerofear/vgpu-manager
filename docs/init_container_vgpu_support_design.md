@@ -319,8 +319,11 @@ func ReducePodFootprint(pod *corev1.Pod, claim device.PodDeviceClaim) map[string
      b. **按 `pod.Status.InitContainerStatuses` 状态门控**:顺序 init 仅在 `Running` 时纳入 keySet/上报,
         `Terminated` 即移出→目录回收→usage 自然停止(避免上报已退出 init 容器的陈旧"幽灵使用值");
         sidecar(可重启 init)按 app 处理、全程上报。
-     c. 明确 `vgpu_device_shared_containers_number` 语义为"物理卡峰值并发共享数"(P1 后累加 `fp.Number`,
-        对带 init 的 pod 已非"容器实例数"),并在 help text 注明。
+     c. **(已实施)** 共享容器数拆为两个指标:`vgpu_device_peak_shared_containers_number`(峰值=
+        全生命周期并发共享峰值,源自 `ReducePodFootprint` 的 `fp.Number`,原 `..._shared_containers_number` 重命名而来)
+        + `vgpu_device_current_shared_containers_number`(当前=此刻 Running 且持 claim 的容器数,源自
+        `device.CurrentSharedContainers`,按 `IsContainerRunning` 门控,顺序 init 退出即不计)。保证 peak ≥ current;
+        二者均带 help text。app-only 时 current==peak,init 落地(P2)后才分化。配套 `Test_CurrentSharedContainers`。
      d. help text 注明 assigned≥used 的背离属正常(预留含 init 峰值,app 阶段 used 仅 app)。
    - 依赖:used 侧 init 数据只有 P2(allocator 产出 init claim + deviceplugin 向 init 容器注入拦截库/`vgpu.config`)
      之后才存在,故 P3 排在 P2 之后;在此之前该路径休眠。

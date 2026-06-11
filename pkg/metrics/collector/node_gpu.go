@@ -136,9 +136,14 @@ var (
 		"Virtual GPU device assigned cores number",
 		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
 	)
-	vGPUSharedContainersNumber = prometheus.NewDesc(
-		"vgpu_device_shared_containers_number",
-		"Virtual GPU device shared containers number",
+	vGPUPeakSharedContainersNumber = prometheus.NewDesc(
+		"vgpu_device_peak_shared_containers_number",
+		"Peak number of containers that may concurrently share the vGPU device across the pods' lifecycle (reserved view; >= the current value)",
+		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+	)
+	vGPUCurrentSharedContainersNumber = prometheus.NewDesc(
+		"vgpu_device_current_shared_containers_number",
+		"Number of currently running containers sharing the vGPU device right now (a completed sequential init container is excluded; <= the peak value)",
 		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
 	)
 	vGPUTotalMemory = prometheus.NewDesc(
@@ -234,7 +239,8 @@ func (c nodeGPUCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- nodeVGPUAssignedPhysicalMemory
 	ch <- vGPUTotalCoresNumber
 	ch <- vGPUAssignedCoresNumber
-	ch <- vGPUSharedContainersNumber
+	ch <- vGPUPeakSharedContainersNumber
+	ch <- vGPUCurrentSharedContainersNumber
 	ch <- vGPUTotalMemory
 	ch <- vGPUTotalPhysicalMemory
 	ch <- vGPUAssignedMemory
@@ -498,7 +504,8 @@ skipNvml:
 	nodeVGpuAssignedMemBytes := uint64(0)
 	vGpuAssignedCoresMap := make(map[string]int64)
 	vGpuAssignedNumberMap := make(map[string]int)
-	sharedContainersMap := make(map[string]int)
+	peakSharedContainersMap := make(map[string]int)
+	currentSharedContainersMap := make(map[string]int)
 	// Filter out some useless pods.
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
 		// Aggregate the allocated memory size on the node, collapsing each
@@ -513,7 +520,13 @@ skipNvml:
 			memoryBytes := uint64(fp.Memory) << 20
 			nodeVGpuAssignedMemBytes += memoryBytes
 			vGpuAssignedMemMap[fp.Uuid] += memoryBytes
-			sharedContainersMap[fp.Uuid] += fp.Number
+			// Peak (reserved) concurrent sharing: per-GPU lifecycle peak count.
+			peakSharedContainersMap[fp.Uuid] += fp.Number
+		}
+		// Current sharing: only containers running right now, so a completed
+		// sequential init container drops out (always <= the peak above).
+		for uuid, n := range device.CurrentSharedContainers(pod, podDeviceClaim) {
+			currentSharedContainersMap[uuid] += n
 		}
 		for _, container := range pod.Spec.Containers {
 			contKey := lister.GetContainerKey(pod.UID, container.Name)
@@ -719,9 +732,15 @@ skipNvml:
 			c.nodeName, deviceIndex, uuid,
 			devTypeMap[uuid])
 		ch <- prometheus.MustNewConstMetric(
-			vGPUSharedContainersNumber,
+			vGPUPeakSharedContainersNumber,
 			prometheus.GaugeValue,
-			float64(sharedContainersMap[uuid]),
+			float64(peakSharedContainersMap[uuid]),
+			c.nodeName, deviceIndex, uuid,
+			devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(
+			vGPUCurrentSharedContainersNumber,
+			prometheus.GaugeValue,
+			float64(currentSharedContainersMap[uuid]),
 			c.nodeName, deviceIndex, uuid,
 			devTypeMap[uuid])
 	}
@@ -914,4 +933,3 @@ func FlattenMigInfosMapEach(migInfosMap map[string][]*nvidia.MigInfo,
 		}
 	}
 }
-
