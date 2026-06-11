@@ -111,6 +111,7 @@ type actualRequestUsage struct {
 	Pods           sets.Set[string]
 	InitContainers sets.Set[string] // "<ns>/<pod>/<container>"
 	AppContainers  sets.Set[string] // "<ns>/<pod>/<container>"
+	Sidecars       sets.Set[string] // "<ns>/<pod>/<container>"
 }
 
 // validateOneReservedPodAgainstAllocatedClaim make the final decision on a reserved pod for the current claim.
@@ -195,35 +196,50 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 			if usage.AppContainers == nil {
 				usage.AppContainers = sets.New[string]()
 			}
+			if usage.Sidecars == nil {
+				usage.Sidecars = sets.New[string]()
+			}
 
 			thisPodID := podID(pod)
 			thisContainerID := containerID(pod, c.Name)
 
 			usage.Pods.Insert(thisPodID)
-			// A sidecar (restartable init) runs concurrently with the app
-			// containers, so it must be treated like an app container for
-			// request sharing rather than getting the init/app cross-phase
-			// reuse allowance.
-			kind := c.Kind
-			if c.Restartable {
-				kind = util.ContainerKindApp
-			}
-			switch kind {
-			case util.ContainerKindInit:
-				// Non-restartable init containers run strictly sequentially and
-				// never overlap each other or the app phase, so any number of
-				// them may share (sequentially reuse) the same vGPU request.
+			// Three lifecycle classes decide who may share (reuse) a request —
+			// i.e. whose lifecycles never overlap: non-restartable init
+			// containers are strictly sequential (any number may share); app
+			// containers run concurrently (at most one); a sidecar (restartable
+			// init) runs through the whole app phase and overlaps the app
+			// containers and every later init container, so it must be the SOLE
+			// user of its request.
+			switch {
+			case c.Restartable:
+				usage.Sidecars.Insert(thisContainerID)
+			case c.Kind == util.ContainerKindInit:
 				usage.InitContainers.Insert(thisContainerID)
-			case util.ContainerKindApp:
+			case c.Kind == util.ContainerKindApp:
 				usage.AppContainers.Insert(thisContainerID)
-				if usage.AppContainers.Len() > 1 {
-					return fmt.Errorf(
-						"allocated vgpu request %q in claim %s/%s is referenced by multiple app containers %v",
-						mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.AppContainers),
-					)
-				}
 			default:
 				return fmt.Errorf("unknown container kind %q for container %q", c.Kind, c.Name)
+			}
+
+			if usage.AppContainers.Len() > 1 {
+				return fmt.Errorf(
+					"allocated vgpu request %q in claim %s/%s is referenced by multiple app containers %v",
+					mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.AppContainers),
+				)
+			}
+			if usage.Sidecars.Len() > 1 {
+				return fmt.Errorf(
+					"allocated vgpu request %q in claim %s/%s is referenced by multiple sidecar containers %v",
+					mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.Sidecars),
+				)
+			}
+			if usage.Sidecars.Len() == 1 && (usage.InitContainers.Len() > 0 || usage.AppContainers.Len() > 0) {
+				return fmt.Errorf(
+					"allocated vgpu request %q in claim %s/%s is referenced by sidecar %v together with other containers; "+
+						"a sidecar must be the sole user of a vgpu request",
+					mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.Sidecars),
+				)
 			}
 
 			// Cross Pod sharing of the same mainRequest is strictly prohibited

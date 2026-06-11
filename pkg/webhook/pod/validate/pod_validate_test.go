@@ -199,7 +199,7 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 					cont("app-b", claimRef("pc-x", "")),
 				},
 			),
-			wantErr: "referenced by multiple concurrent containers",
+			wantErr: "referenced by multiple app containers",
 		},
 
 		// ---------------------------------------------------------------
@@ -216,9 +216,9 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 		},
 
 		// ---------------------------------------------------------------
-		// Sidecar (restartable init) overlaps the app phase, so sharing a
-		// vGPU request with an app container is a concurrent conflict, NOT the
-		// allowed init/app cross-phase reuse → error.
+		// A sidecar (restartable init) overlaps the app phase and every later
+		// init container, so it must be the SOLE user of its vGPU request.
+		// Sharing with an app container → error.
 		// ---------------------------------------------------------------
 		{
 			name: "sidecar and app containers share one vGPU request: error",
@@ -228,7 +228,36 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 				[]corev1.Container{sidecarCont("side-a", claimRef("pc-x", ""))},
 				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
 			),
-			wantErr: "referenced by multiple concurrent containers",
+			wantErr: "must be the sole user",
+		},
+		// Sharing with an init container → error (the sidecar may overlap that
+		// init, so strict non-overlap forbids it).
+		{
+			name: "sidecar and init container share one vGPU request: error",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{
+					sidecarCont("side-a", claimRef("pc-x", "")),
+					cont("init-a", claimRef("pc-x", "")),
+				},
+				nil,
+			),
+			wantErr: "must be the sole user",
+		},
+		// Two sidecars sharing one request → error (concurrent).
+		{
+			name: "two sidecars share one vGPU request: error",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{
+					sidecarCont("side-a", claimRef("pc-x", "")),
+					sidecarCont("side-b", claimRef("pc-x", "")),
+				},
+				nil,
+			),
+			wantErr: "multiple sidecar containers",
 		},
 		// ---------------------------------------------------------------
 		// A non-restartable init container may still share with an app
