@@ -120,7 +120,8 @@ func main() {
 	}
 
 	preemptPlugin, err := preempt.New(
-		factory, recorder, filterPlugin.GetPodLister(),
+		kubeClient, factory, recorder,
+		filterPlugin.GetPodLister(),
 		opt.FeatureGate.Enabled(options.GPUTopology))
 	if err != nil {
 		klog.Fatalf("Initialization of scheduler PreemptPlugin failed: %v", err)

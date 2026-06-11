@@ -232,13 +232,7 @@ func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *regis
 				if util.PodIsTerminated(cand.Pod) {
 					return false, fmt.Errorf("pod %s is terminated", klog.KObj(cand.Pod))
 				}
-				if err := validateLegacyContainer(cand.Pod, cand.ContainerName); err != nil {
-					return false, err
-				}
-			} else if util.PodIsTerminated(cand.Pod) {
-				continue
 			}
-
 			pids, ok := isCandidateAlive(cand, cgroupResolver, &lastErr)
 			if !ok {
 				continue
@@ -357,22 +351,6 @@ func (s *DeviceRegistryServerImpl) lookupTarget(ctx context.Context, req *regist
 			util.Config,
 		),
 	}, nil
-}
-
-// validateLegacyContainer enforces the policy used by the device-plugin path:
-// the container must exist in pod.Spec.Containers (init containers are not
-// supported under device-plugin) and must request vGPU resources.
-func validateLegacyContainer(pod *corev1.Pod, containerName string) error {
-	for i := range pod.Spec.Containers {
-		if pod.Spec.Containers[i].Name != containerName {
-			continue
-		}
-		if !util.IsVGPURequiredContainer(&pod.Spec.Containers[i]) {
-			return fmt.Errorf("container %s does not have vGPU", containerName)
-		}
-		return nil
-	}
-	return fmt.Errorf("unable to find container %s in pod %s", containerName, klog.KObj(pod))
 }
 
 // persistPids writes the sorted PID list to <configDir>/pids.config atomically

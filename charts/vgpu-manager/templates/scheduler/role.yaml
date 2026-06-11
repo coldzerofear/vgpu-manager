@@ -26,10 +26,13 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get","list","watch","update","patch"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: [""]
     resources: ["nodes/status"]
-    verbs: ["patch","update"]
+    verbs: ["patch", "update"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
 {{- /* Here are some resources that scheduling plugins may use */}}
   - apiGroups: ["resource.k8s.io"]
     resources: ["deviceclasses", "resourceclaims", "resourceslices", "resourceclaimtemplates"]

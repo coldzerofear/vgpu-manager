@@ -700,14 +700,13 @@ func (h *validateHandle) createCombinedResourceClaim(ctx context.Context, pod *c
 
 	resourceRequests := make([]resourceapi.DeviceRequest, len(resourceInfos))
 	for i, info := range resourceInfos {
-		containerIndex, err := checkResourceInfo(pod, i, info)
+		container, err := checkResourceInfo(pod, i, info)
 		if err != nil {
 			logger.V(3).Error(err, "")
 			return err
 		}
-		container := &pod.Spec.Containers[containerIndex]
-		resourceRequestName := util.GenerateK8sSafeResourceName(container.Name, kubeletplugin.VGpuDeviceType)
 
+		resourceRequestName := util.GenerateK8sSafeResourceName(container.Name, kubeletplugin.VGpuDeviceType)
 		request := buildDeviceRequest(pod, resourceRequestName, h.options.VGPUDeviceClassName, info)
 		resourceRequests[i] = request
 	}
@@ -728,37 +727,51 @@ func (h *validateHandle) createCombinedResourceClaim(ctx context.Context, pod *c
 	return nil
 }
 
-func checkResourceInfo(pod *corev1.Pod, infoIndex int, resourceInfo common.ResourceInfo) (containerIndex int, err error) {
-	containerIndex = slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
-		return container.Name == resourceInfo.Name
-	})
-	if containerIndex < 0 {
-		err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
-			field.Invalid(field.NewPath("metadata").Child("annotations").
-				Child(util.DRAOriResAnnotation).Index(infoIndex).Child("containerName"),
-				resourceInfo.Name, "container not found")})
-		return containerIndex, err
-	}
-
+func validateContainerResources(resourceInfo common.ResourceInfo, containerPath *field.Path) field.ErrorList {
 	var errs field.ErrorList
+
 	quantity, ok := resourceInfo.Resources[corev1.ResourceName(util.VGPUCoreResourceName)]
 	if ok && quantity.Value() > util.HundredCore {
-		msg := fmt.Sprintf("container %s requests vGPU core exceeding limit", resourceInfo.Name)
-		errs = append(errs, field.Invalid(field.NewPath("spec").Child("containers").Index(containerIndex).
-			Child("resources").Child("limits").Key(util.VGPUCoreResourceName), quantity.Value(), msg))
+		errs = append(errs, field.Invalid(
+			containerPath.Child("resources").Child("limits").Key(util.VGPUCoreResourceName),
+			quantity.Value(), fmt.Sprintf("request exceeds limit, maximum: %v", util.HundredCore)))
 	}
 
 	quantity, ok = resourceInfo.Resources[corev1.ResourceName(util.VGPUNumberResourceName)]
 	if ok && quantity.Value() > vgpu.MaxDeviceCount {
-		msg := fmt.Sprintf("container %s requests vGPU number exceeding limit", resourceInfo.Name)
-		errs = append(errs, field.Invalid(field.NewPath("spec").Child("containers").Index(containerIndex).
-			Child("resources").Child("limits").Key(util.VGPUNumberResourceName), quantity.Value(), msg))
+		errs = append(errs, field.Invalid(
+			containerPath.Child("resources").Child("limits").Key(util.VGPUNumberResourceName),
+			quantity.Value(), fmt.Sprintf("request exceeds limit, maximum: %v", vgpu.MaxDeviceCount)))
 	}
-	if len(errs) > 0 {
-		err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, errs)
+	return errs
+}
+
+func checkResourceInfo(pod *corev1.Pod, infoIndex int, resourceInfo common.ResourceInfo) (*corev1.Container, error) {
+	if initContainerIndex := slices.IndexFunc(pod.Spec.InitContainers, func(c corev1.Container) bool {
+		return c.Name == resourceInfo.Name
+	}); initContainerIndex >= 0 {
+		container := &pod.Spec.InitContainers[initContainerIndex]
+		basePath := field.NewPath("spec").Child("initContainers").Index(initContainerIndex)
+		if errs := validateContainerResources(resourceInfo, basePath); len(errs) > 0 {
+			return nil, apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, errs)
+		}
+		return container, nil
 	}
 
-	return containerIndex, err
+	if containerIndex := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool {
+		return c.Name == resourceInfo.Name
+	}); containerIndex >= 0 {
+		container := &pod.Spec.Containers[containerIndex]
+		basePath := field.NewPath("spec").Child("containers").Index(containerIndex)
+		if errs := validateContainerResources(resourceInfo, basePath); len(errs) > 0 {
+			return nil, apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, errs)
+		}
+		return container, nil
+	}
+	return nil, apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+		field.Invalid(field.NewPath("metadata").Child("annotations").
+			Child(util.DRAOriResAnnotation).Index(infoIndex).Child("containerName"),
+			resourceInfo.Name, "container not found")})
 }
 
 func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos) (err error) {
@@ -794,13 +807,12 @@ func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *cor
 	}()
 
 	for i, info := range resourceInfos {
-		containerIndex, err := checkResourceInfo(pod, i, info)
+		container, err := checkResourceInfo(pod, i, info)
 		if err != nil {
 			logger.V(3).Error(err, "")
 			return err
 		}
 
-		container := &pod.Spec.Containers[containerIndex]
 		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
@@ -1058,7 +1070,7 @@ func (h *validateHandle) deleteResourceClaims(ctx context.Context, pod *corev1.P
 	if h.options.CombinedResourceClaim {
 		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
 		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
-		if slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
+		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 		}) {
 			logger.V(1).Info("ResourceClaimName not found, skip ResourceClaim delete",
@@ -1082,17 +1094,7 @@ func (h *validateHandle) deleteResourceClaims(ctx context.Context, pod *corev1.P
 
 	// try delete MultiResourceClaims
 	for _, info := range infos {
-
-		containerIndex := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
-			return container.Name == info.Name
-		})
-		if containerIndex < 0 {
-			logger.V(1).Info("Container not found, skip ResourceClaim delete", "container", info.Name)
-			continue
-		}
-
-		container := &pod.Spec.Containers[containerIndex]
-		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
+		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, info.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 		}) {
