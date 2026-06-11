@@ -77,23 +77,28 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 		}
 	}
 
-	// claimByName collects each container's claim regardless of which pass
-	// produced it; the annotation is assembled in req.Containers order below.
-	claimByName := make(map[string]*device.ContainerDeviceClaim, len(req.Containers))
+	var deviceClaims device.PodDeviceClaim
 
 	if !hasSequentialInit {
 		// Fast path: every vGPU container runs concurrently (regular app +
-		// optional sidecars), so allocate in order with cross-container
-		// accumulation. For a pod without init containers this is byte-for-byte
-		// the historical behavior.
+		// optional sidecars), so allocate in req.Containers order with
+		// cross-container accumulation and append directly — allocation order
+		// already equals the annotation order, so no reordering buffer is
+		// needed. For a pod without init containers this is byte-for-byte the
+		// historical behavior (no extra allocation).
+		deviceClaims = make(device.PodDeviceClaim, 0, len(req.Containers))
 		for i := range req.Containers {
 			claim, rsn, err := alloc.allocateAndAccumulate(req, req.Containers[i], nil)
 			if rsn != nil || err != nil {
 				return nil, rsn, err
 			}
-			claimByName[req.Containers[i].Name] = claim
+			deviceClaims = append(deviceClaims, *claim)
 		}
 	} else {
+		// claimByName collects each container's claim regardless of which pass
+		// produced it (the two-pass allocates out of req.Containers order); the
+		// annotation is assembled back in req.Containers order afterwards.
+		claimByName := make(map[string]*device.ContainerDeviceClaim, len(req.Containers))
 		// Two-pass, lifecycle-aware (see the design doc):
 		//   reserve(g) = sidecarSum(g) + max(regularSum(g), maxInit(g))
 		// Pass 1a/1b allocate the concurrent group (sidecars then regular app)
@@ -179,13 +184,13 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 			}
 			claimByName[n.Name] = claim
 		}
-	}
-
-	// Assemble per-container claims in req.Containers order (init-first), which
-	// matches kubelet's Allocate call order and the device-plugin PreAlloc cursor.
-	deviceClaims := make(device.PodDeviceClaim, 0, len(req.Containers))
-	for i := range req.Containers {
-		deviceClaims = append(deviceClaims, *claimByName[req.Containers[i].Name])
+		// Assemble per-container claims in req.Containers order (init-first),
+		// which matches kubelet's Allocate call order and the device-plugin
+		// PreAlloc cursor.
+		deviceClaims = make(device.PodDeviceClaim, 0, len(req.Containers))
+		for i := range req.Containers {
+			deviceClaims = append(deviceClaims, *claimByName[req.Containers[i].Name])
+		}
 	}
 
 	preAllocated, err := deviceClaims.MarshalText()
