@@ -305,10 +305,18 @@ func ReducePodFootprint(pod *corev1.Pod, claim device.PodDeviceClaim) map[string
    把 sidecar 按 app 类(并发)处理 —— sidecar↔app / sidecar↔sidecar 共享同一 vGPU request 现按 app-app 冲突**拒绝**,
    仅非重启 init↔app 仍允许跨相位复用。配套 webhook 测试 2 例。`GetAllPodContainers` 的 `Kind` 不变
    (sidecar 仍标 `init`),`claimresolve/partitions.go` 等不读 `Restartable` 的消费者不受影响。
-4. **P2 — 分配算法两遍法 + 识别同步**:`request.go` 聚合量与容器遍历(6.1/6.2)+ `allocator.go` 两遍复用放置(6.3)
-   + **同步**把 `IsVGPUResourcePod`(及必要的 Pod 级判定)改为含 init,保持上述不变量。配套不变量单测。
-   这是密度收益的核心,风险最高,最后做。**allocator 的 footprint 必须等于 `ReducePodFootprint(annotation)`**
-   (含 §P1 的 sidecar 保守叠加语义),否则核算漂移。
+4. **P2 — 分配算法两遍法 + 识别同步(已实施)**:
+   - `request.go`:`BuildAllocationRequest` 遍历 init+app,`ContainerNeed` 增 `Kind`/`Restartable`;
+     `Total` 改为有效峰值 `sidecarAgg + max(regularAgg, initMaxAgg)`(逐维),`Max` 纳入 init。无 init 时与历史逐位一致。
+   - `allocator.go`:`Allocate` 两遍法。无顺序 init → **快路径**(单遍累加,与历史一致,含 sidecar)。有顺序 init →
+     Pass 1a sidecar(累加)→ 快照 base+sidecar → Pass 1b 业务 app(累加)→ `RestoreUsage` 释放 app → Pass 2
+     顺序 init **逐个独立分配**(不累加),先 `allocateOne(restrict=已用GPU集)` 尝试复用、失败回退 `allocateOne(nil)` 整节点。
+     init 比 app 大的所有情形都退化为整体重新分配,无补差额;峰值由 `ReducePodFootprint` 事后取 max。
+   - `NodeInfo.SnapshotUsage/RestoreUsage`(`types.go`):轻量回滚 used 计数,支撑 Pass 2 的 app 释放视图。
+   - `IsVGPUResourcePod`/`NewRequestProfile` 同步含 init,保持 filter↔bind 不变量。
+   - **核心安全不变量(已测)**:`base + ReducePodFootprint(annotation) ≤ 每卡容量`(无超分),由
+     `assertNoOvercommit` 在 7 个用例覆盖(复用 / 多 app 合计覆盖 init / init 需更多卡回退 / init-only /
+     sidecar 并发 / sidecar+init 组合 / app-only 回归)。
 5. **P3 — metrics 实时使用指标 + 生命周期(排在 P2 之后)**:监控分两套指标,生命周期语义相反:
    - **assigned/预留**(`*_assigned_*`、`vgpu_device_shared_containers_number`,源自 annotation→`ReducePodFootprint`):
      已 init-aware 去重(P1),是 pod 全生命周期**静态峰值预留**,**不随容器运行态变化**,无需再改。

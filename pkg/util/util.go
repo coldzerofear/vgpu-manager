@@ -157,10 +157,19 @@ func GetResourceOfPod(pod *corev1.Pod, resourceName string) int64 {
 	return total
 }
 
-// IsVGPUResourcePod Determine if a pod has vGPU resource request.
+// IsVGPUResourcePod Determine if a pod has vGPU resource request. Init
+// containers (including sidecars) are checked alongside regular containers so
+// an init-only vGPU pod is recognised; this is kept in lockstep with
+// allocator.BuildAllocationRequest (which builds req.Containers from the same
+// init+app set) so the filter↔bind predicate-node invariant holds.
 func IsVGPUResourcePod(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
+	}
+	for i := range pod.Spec.InitContainers {
+		if GetResourceOfContainer(&pod.Spec.InitContainers[i], VGPUNumberResourceName) > 0 {
+			return true
+		}
 	}
 	for i := range pod.Spec.Containers {
 		if GetResourceOfContainer(&pod.Spec.Containers[i], VGPUNumberResourceName) > 0 {

@@ -35,9 +35,12 @@ type AllocationRequest struct {
 	// when non-vGPU containers are interleaved.
 	Containers []ContainerNeed
 
-	// Total is the pod-wide demand: Σ (per-container vGPU count) for Number,
-	// and Σ (Number × per-vGPU cores/memory) for Cores/Memory — i.e. the
-	// true aggregate consumption across every vGPU the pod will reserve.
+	// Total is the pod-wide PEAK demand across its lifecycle:
+	// sidecarAgg + max(regularAgg, initMaxAgg) per dimension, where each
+	// aggregate is Σ/max of (per-container Number, Number × per-vGPU
+	// cores/memory). Init and app containers never run concurrently, so this
+	// is the K8s-style effective request (not a naive sum across phases); for
+	// a pod without init containers it collapses to the historical plain sum.
 	// Used by the deviceFilter node-wide capacity gate (req.Total vs
 	// GetAvailable*). Two caveats keep it a necessary-condition lower bound
 	// rather than an exact fit test:
@@ -106,10 +109,18 @@ type AllocationRequest struct {
 // the raw values lets the per-container allocator path apply the rules
 // against the right node's MemoryFactor.
 type ContainerNeed struct {
-	Name   string
-	Number int
-	Cores  int64
-	Memory int64
+	Name string
+	// Kind is init or app; Restartable marks a sidecar (restartPolicy: Always)
+	// init container. Together they drive the allocator's lifecycle-aware
+	// placement — sequential (non-restartable) init containers run before and
+	// never overlap the app phase, so they reuse the app phase's GPUs, while
+	// sidecars run concurrently with the app containers. Empty/false on the
+	// aggregate Total/Max (no container owns those).
+	Kind        util.ContainerKind
+	Restartable bool
+	Number      int
+	Cores       int64
+	Memory      int64
 }
 
 // BuildAllocationRequest parses one pod into an AllocationRequest, doing
@@ -121,33 +132,76 @@ type ContainerNeed struct {
 func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 	req := &AllocationRequest{Pod: pod}
 
-	for i := range pod.Spec.Containers {
-		c := &pod.Spec.Containers[i]
+	// Aggregate demand bucketed by lifecycle group so Total reflects the
+	// pod's PEAK concurrent demand (not a naive sum across non-overlapping
+	// phases). Concurrent group = regular app + sidecars (sum); sequential
+	// init containers each take the per-dimension max. cores/memory are
+	// per-vGPU, so aggregates multiply by Number. Mirrors device.ReducePodFootprint
+	// at the node-aggregate level.
+	var sidecarAgg, regularAgg, initMaxAgg ContainerNeed
+
+	addContainer := func(c *corev1.Container, kind util.ContainerKind, restartable bool) {
 		number := util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
 		if number <= 0 {
-			continue
+			return
 		}
 		need := ContainerNeed{
-			Name:   c.Name,
-			Number: int(number),
-			Cores:  util.GetResourceOfContainer(c, util.VGPUCoreResourceName),
-			Memory: util.GetResourceOfContainer(c, util.VGPUMemoryResourceName),
+			Name:        c.Name,
+			Kind:        kind,
+			Restartable: restartable,
+			Number:      int(number),
+			Cores:       util.GetResourceOfContainer(c, util.VGPUCoreResourceName),
+			Memory:      util.GetResourceOfContainer(c, util.VGPUMemoryResourceName),
 		}
 		req.Containers = append(req.Containers, need)
 
 		// cores/memory are PER-VGPU (each of need.Number vGPUs lands on a
-		// distinct card and consumes this much). Total tracks the pod-wide
-		// demand, so multiply by Number; Max tracks the single-device
-		// requirement, so it does NOT.
+		// distinct card and consumes this much). Max tracks the single largest
+		// device requirement across ALL containers (init included), so it does
+		// NOT multiply by Number; the per-group aggregates below do.
 		cores, memory := resolveContainerNeeds(need, 0)
-		req.Total.Number += need.Number
-		req.Total.Cores += cores * number
-		req.Total.Memory += memory * number
-
 		req.Max.Number = max(req.Max.Number, need.Number)
 		req.Max.Cores = max(req.Max.Cores, cores)
 		req.Max.Memory = max(req.Max.Memory, memory)
+
+		aggCores, aggMemory := cores*number, memory*number
+		switch {
+		case kind == util.ContainerKindInit && !restartable:
+			// Sequential init: runs alone, take the per-dimension max.
+			initMaxAgg.Number = max(initMaxAgg.Number, need.Number)
+			initMaxAgg.Cores = max(initMaxAgg.Cores, aggCores)
+			initMaxAgg.Memory = max(initMaxAgg.Memory, aggMemory)
+		case restartable:
+			// Sidecar: runs throughout, sum into the concurrent group.
+			sidecarAgg.Number += need.Number
+			sidecarAgg.Cores += aggCores
+			sidecarAgg.Memory += aggMemory
+		default:
+			// Regular app container: sum into the concurrent group.
+			regularAgg.Number += need.Number
+			regularAgg.Cores += aggCores
+			regularAgg.Memory += aggMemory
+		}
 	}
+
+	// init containers first (matches kubelet's Allocate call order and the
+	// device-plugin PreAlloc cursor), then regular app containers.
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		addContainer(c, util.ContainerKindInit, util.IsRestartableInitContainer(c))
+	}
+	for i := range pod.Spec.Containers {
+		addContainer(&pod.Spec.Containers[i], util.ContainerKindApp, false)
+	}
+
+	// Effective peak demand: sidecars run for the whole pod life (constant
+	// addend present in both the app phase and every sequential-init phase);
+	// the variable part is whichever peaks higher — the app phase (regularAgg)
+	// or the heaviest single sequential init phase (initMaxAgg). For a pod
+	// without init containers this collapses to the historical plain sum.
+	req.Total.Number = sidecarAgg.Number + max(regularAgg.Number, initMaxAgg.Number)
+	req.Total.Cores = sidecarAgg.Cores + max(regularAgg.Cores, initMaxAgg.Cores)
+	req.Total.Memory = sidecarAgg.Memory + max(regularAgg.Memory, initMaxAgg.Memory)
 
 	if len(req.Containers) > 0 {
 		req.NodePolicy, req.rawNodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)

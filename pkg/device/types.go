@@ -1280,6 +1280,59 @@ func (n *NodeInfo) ResetResourceUsage() {
 	}
 }
 
+type deviceUsage struct {
+	number int
+	cores  int64
+	memory int64
+}
+
+// UsageSnapshot captures a NodeInfo's mutable used-resource counters (node
+// aggregate + per-device) so a transient allocation pass can be rolled back.
+// Opaque to callers. Used by the allocator's init-container pass to release
+// the app-phase reservation before placing sequential init containers (which
+// run after the app phase and may reuse its GPUs).
+type UsageSnapshot struct {
+	nodeNumber int
+	nodeCores  int64
+	nodeMemory int64
+	devices    map[int]deviceUsage
+}
+
+// SnapshotUsage captures the current used-resource counters for a later
+// RestoreUsage. It does not copy the device list itself (capacities/health
+// are immutable here), only the mutable usage counters.
+func (n *NodeInfo) SnapshotUsage() *UsageSnapshot {
+	snap := &UsageSnapshot{
+		nodeNumber: n.usedNumber,
+		nodeCores:  n.usedCores,
+		nodeMemory: n.usedMemory,
+		devices:    make(map[int]deviceUsage, len(n.deviceMap)),
+	}
+	for id, deviceInfo := range n.deviceMap {
+		snap.devices[id] = deviceUsage{
+			number: deviceInfo.usedNumber,
+			cores:  deviceInfo.usedCores,
+			memory: deviceInfo.usedMemory,
+		}
+	}
+	return snap
+}
+
+// RestoreUsage rolls the used-resource counters back to a SnapshotUsage value.
+// Devices absent from the snapshot are left untouched (the device set is
+// stable within a single allocation, so this never happens in practice).
+func (n *NodeInfo) RestoreUsage(snap *UsageSnapshot) {
+	if snap == nil {
+		return
+	}
+	n.usedNumber, n.usedCores, n.usedMemory = snap.nodeNumber, snap.nodeCores, snap.nodeMemory
+	for id, deviceInfo := range n.deviceMap {
+		if u, ok := snap.devices[id]; ok {
+			deviceInfo.usedNumber, deviceInfo.usedCores, deviceInfo.usedMemory = u.number, u.cores, u.memory
+		}
+	}
+}
+
 func (n *NodeInfo) RefreshResourcesData() {
 	n.totalNumber, n.totalCores, n.totalMemory = 0, 0, 0
 	n.usedNumber, n.usedCores, n.usedMemory, n.maxCapability = 0, 0, 0, 0
