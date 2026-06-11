@@ -822,3 +822,183 @@ func Test_NodeFilter(t *testing.T) {
 		})
 	}
 }
+
+func Test_DeviceFilter_InitContainers(t *testing.T) {
+	k8sClient := fake.NewClientset()
+	// Apply patches to the tracker so the allocator's PreAlloc annotation is
+	// readable back (same reactor as Test_Parallel_Scheduling).
+	k8sClient.PrependReactor("patch", "pods", func(a testing2.Action) (bool, runtime.Object, error) {
+		action := a.(testing2.PatchAction)
+		obj, err := k8sClient.Tracker().Get(action.GetResource(), action.GetNamespace(), action.GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		pod := obj.(*corev1.Pod)
+		pod.ResourceVersion += "1"
+		currentBytes, _ := json.Marshal(pod)
+		var patchedBytes []byte
+		switch action.GetPatchType() {
+		case k8stypes.JSONPatchType:
+			patch, perr := jsonpatch.DecodePatch(action.GetPatch())
+			if perr != nil {
+				return true, nil, perr
+			}
+			patchedBytes, err = patch.Apply(currentBytes)
+		default:
+			patchedBytes, err = jsonpatch.MergePatch(currentBytes, action.GetPatch())
+		}
+		if err != nil {
+			return true, nil, err
+		}
+		newPod := &corev1.Pod{}
+		if err = json.Unmarshal(patchedBytes, newPod); err != nil {
+			return true, nil, err
+		}
+		newPod.DeepCopyInto(pod)
+		return true, pod, nil
+	})
+	broadcaster := record.NewBroadcaster()
+	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
+	defer broadcaster.Shutdown()
+	filterPredicate, err := New(k8sClient, factory(k8sClient), recorder, false, true)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	nodeList, nodeGPUMap := buildNodeList()
+	// capacity per physical GPU UUID across all nodes.
+	type cap struct {
+		number int
+		cores  int64
+		memory int64
+	}
+	capByUUID := map[string]cap{}
+	for _, devs := range nodeGPUMap {
+		for _, d := range devs {
+			capByUUID[d.Uuid] = cap{number: d.Number, cores: d.Core, memory: d.Memory}
+		}
+	}
+
+	vc := func(name string, number, cores, memory int64) corev1.Container {
+		limits := corev1.ResourceList{
+			corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse(fmt.Sprint(number)),
+		}
+		if cores > 0 {
+			limits[corev1.ResourceName(util.VGPUCoreResourceName)] = resource.MustParse(fmt.Sprint(cores))
+		}
+		if memory > 0 {
+			limits[corev1.ResourceName(util.VGPUMemoryResourceName)] = resource.MustParse(fmt.Sprint(memory))
+		}
+		return corev1.Container{Name: name, Resources: corev1.ResourceRequirements{Limits: limits}}
+	}
+	sidecar := func(name string, number, cores, memory int64) corev1.Container {
+		c := vc(name, number, cores, memory)
+		always := corev1.ContainerRestartPolicyAlways
+		c.RestartPolicy = &always
+		return c
+	}
+
+	cases := []struct {
+		name          string
+		inits, apps   []corev1.Container
+		wantScheduled bool
+	}{
+		{
+			name:          "init bigger than app reuses one card",
+			inits:         []corev1.Container{vc("init", 1, 80, 8000)},
+			apps:          []corev1.Container{vc("app", 1, 40, 4000)},
+			wantScheduled: true,
+		},
+		{
+			name:          "init-only pod",
+			inits:         []corev1.Container{vc("init", 1, 60, 6000)},
+			wantScheduled: true,
+		},
+		{
+			name:          "sidecar plus app (fast path)",
+			inits:         []corev1.Container{sidecar("side", 1, 20, 2000)},
+			apps:          []corev1.Container{vc("app", 1, 40, 4000)},
+			wantScheduled: true,
+		},
+		{
+			name:          "init needs two cards, app one (imperfect reuse, must still fit)",
+			inits:         []corev1.Container{vc("init", 2, 50, 5000)},
+			apps:          []corev1.Container{vc("app", 1, 40, 4000)},
+			wantScheduled: true,
+		},
+		{
+			name:          "init memory exceeds the largest card -> rejected by Tier-1",
+			inits:         []corev1.Container{vc("init", 1, 10, 24000)}, // > 20480 max card mem
+			apps:          []corev1.Container{vc("app", 1, 10, 1000)},
+			wantScheduled: false,
+		},
+		{
+			name:          "init needs more cards than the node has -> rejected by Tier-1",
+			inits:         []corev1.Container{vc("init", 5, 10, 1000)}, // node has 4 cards
+			wantScheduled: false,
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: fmt.Sprintf("init-pod-%d", i), Namespace: namespace,
+					UID: k8stypes.UID(uuid.NewString()), ResourceVersion: "1",
+				},
+				Spec:   corev1.PodSpec{InitContainers: tc.inits, Containers: tc.apps},
+				Status: corev1.PodStatus{Phase: corev1.PodPending},
+			}
+			pod, _ = k8sClient.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
+			req := allocator.BuildAllocationRequest(pod)
+			state := framework.NewCycleState()
+			nodes, _, err := filterPredicate.deviceFilter(ctx, req, nodeList, state)
+			assert.NoError(t, err)
+
+			if !tc.wantScheduled {
+				assert.Empty(t, nodes, "expected no schedulable node")
+				return
+			}
+			if !assert.Len(t, nodes, 1, "expected exactly one schedulable node") {
+				return
+			}
+			// Validate the gate->allocate chain end to end: run the allocator on
+			// a fresh NodeInfo for the chosen node and assert the per-GPU
+			// footprint never oversubscribes a card (deterministic; independent
+			// of the fake apiserver's patch handling).
+			chosen := nodes[0]
+			nodeInfo, nerr := device.NewNodeInfo(&chosen, device.WithGPUTopologyEnabled(false))
+			if !assert.NoError(t, nerr) {
+				return
+			}
+			newPod, rsn, aerr := allocator.NewAllocator(nodeInfo, nil).Allocate(req)
+			assert.NoError(t, aerr)
+			if !assert.Nil(t, rsn, "allocator unexpectedly rejected the chosen node") {
+				return
+			}
+			pre, ok := util.HasAnnotation(newPod, util.PodVGPUPreAllocAnnotation)
+			if !assert.True(t, ok, "pre-allocated annotation missing") {
+				return
+			}
+			claim := device.PodDeviceClaim{}
+			assert.NoError(t, claim.UnmarshalText(pre))
+			for uuid, fp := range device.ReducePodFootprint(pod, claim) {
+				c := capByUUID[uuid]
+				assert.LessOrEqualf(t, fp.Number, c.number, "GPU %s slot oversubscribe", uuid)
+				assert.LessOrEqualf(t, fp.Cores, c.cores, "GPU %s cores oversubscribe", uuid)
+				assert.LessOrEqualf(t, fp.Memory, c.memory, "GPU %s memory oversubscribe", uuid)
+			}
+		})
+	}
+}
+
+// factory builds a started+synced informer factory for the filter under test.
+func factory(c *fake.Clientset) informers.SharedInformerFactory {
+	f := informers.NewSharedInformerFactory(c, 0)
+	stop := make(chan struct{})
+	f.Start(stop)
+	f.WaitForCacheSync(stop)
+	return f
+}
