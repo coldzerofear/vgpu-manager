@@ -309,6 +309,20 @@ func ReducePodFootprint(pod *corev1.Pod, claim device.PodDeviceClaim) map[string
    + **同步**把 `IsVGPUResourcePod`(及必要的 Pod 级判定)改为含 init,保持上述不变量。配套不变量单测。
    这是密度收益的核心,风险最高,最后做。**allocator 的 footprint 必须等于 `ReducePodFootprint(annotation)`**
    (含 §P1 的 sidecar 保守叠加语义),否则核算漂移。
-5. **P3 — metrics 目录与实时统计**:`collectContainerKey` 纳入 init(6.7),清理误删修复。
+5. **P3 — metrics 实时使用指标 + 生命周期(排在 P2 之后)**:监控分两套指标,生命周期语义相反:
+   - **assigned/预留**(`*_assigned_*`、`vgpu_device_shared_containers_number`,源自 annotation→`ReducePodFootprint`):
+     已 init-aware 去重(P1),是 pod 全生命周期**静态峰值预留**,**不随容器运行态变化**,无需再改。
+   - **used/实时使用**(6 个 `container_vgpu_*` usage/util,源自 libvgpu 共享内存+cgroup PID+NVML):当前
+     `node_gpu.go:518` 与 `container_lister.go:115`(`collectContainerKey`)**只遍历 `pod.Spec.Containers`,完全忽略 init**。
+   - 改造(两处必须配套,否则"加载了不读 / 要读已被孤儿清理"不一致):
+     a. 采集与 keySet 都纳入 init 容器(可用 `util.GetAllPodContainers`)。
+     b. **按 `pod.Status.InitContainerStatuses` 状态门控**:顺序 init 仅在 `Running` 时纳入 keySet/上报,
+        `Terminated` 即移出→目录回收→usage 自然停止(避免上报已退出 init 容器的陈旧"幽灵使用值");
+        sidecar(可重启 init)按 app 处理、全程上报。
+     c. 明确 `vgpu_device_shared_containers_number` 语义为"物理卡峰值并发共享数"(P1 后累加 `fp.Number`,
+        对带 init 的 pod 已非"容器实例数"),并在 help text 注明。
+     d. help text 注明 assigned≥used 的背离属正常(预留含 init 峰值,app 阶段 used 仅 app)。
+   - 依赖:used 侧 init 数据只有 P2(allocator 产出 init claim + deviceplugin 向 init 容器注入拦截库/`vgpu.config`)
+     之后才存在,故 P3 排在 P2 之后;在此之前该路径休眠。
 
 > 落地顺序遵循"先让 init 不被忽略且不出错(P0/P1),再追求 K8s 级密度(P2)",每步独立可回归。
