@@ -454,10 +454,7 @@ func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool
 	if pod == nil {
 		return false
 	}
-	for _, cont := range pod.Spec.Containers {
-		if cont.Name != containerName {
-			continue
-		}
+	envEnabled := func(cont *corev1.Container) bool {
 		for _, env := range cont.Env {
 			if env.Name != envName {
 				continue
@@ -466,6 +463,20 @@ func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool
 			if val == "1" || strings.EqualFold(val, "true") {
 				return true
 			}
+		}
+		return false
+	}
+	// Container names are unique across init and regular containers; search
+	// init containers too so the toggle works for an init container once it
+	// gets devices allocated. For app containers the result is unchanged.
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == containerName {
+			return envEnabled(&pod.Spec.InitContainers[i])
+		}
+	}
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == containerName {
+			return envEnabled(&pod.Spec.Containers[i])
 		}
 	}
 	return false

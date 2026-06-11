@@ -314,9 +314,15 @@ func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClai
 		return nil, errors.New("current pre assign devices is empty")
 	}
 	checkExistCont := func(contName string) error {
-		exist := slices.ContainsFunc(pod.Spec.Containers, func(container corev1.Container) bool {
+		matchName := func(container corev1.Container) bool {
 			return container.Name == contName
-		})
+		}
+		// Container names are unique across init and regular containers, so a
+		// pre-allocated entry may legitimately reference an init container.
+		// Searching both lists keeps validation correct once the allocator
+		// emits init-container claims; for app-only pre-alloc it is a no-op.
+		exist := slices.ContainsFunc(pod.Spec.InitContainers, matchName) ||
+			slices.ContainsFunc(pod.Spec.Containers, matchName)
 		if !exist {
 			return fmt.Errorf("container <%s> does not exist in pod <%s/%s>",
 				contName, pod.Namespace, pod.Name)
