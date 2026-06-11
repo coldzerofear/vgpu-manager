@@ -284,8 +284,11 @@ func ReducePodFootprint(pod *corev1.Pod, claim device.PodDeviceClaim) map[string
    - `PodContainerEnvEnabled`(`util.go`,6.6):按名检索 env 开关时同时检索 `InitContainers`。
    - **不在 P0 改** `IsVGPUResourcePod`(受上述不变量约束,移至 P2);**不动** `GetResourceOfPod` /
      `IsSingleContainerMultiGPUs`(当前无调用方的求和语义死代码,真正需要时随 P1/P2 处理)。
-2. **P1 — 核算层 reduce**:落地 `ReducePodFootprint`,改 `AddPodUsedResources` 与 metrics(6.4/6.7)。
-   先保证"即便 init 进入 annotation 也不双重计数"。
+2. **P1 — 核算层 reduce(已实施)**:落地 `ReducePodFootprint` + `PodDeviceFootprint`(`pkg/device/types.go`),
+   改 `AddPodUsedResources`(加 `podHasVGPUInitContainer` 门控:无 vGPU init 容器走原逐-claim 快路径不变,
+   否则走 reduce 路径)与 metrics 累加段(6.4/6.7)。共享 helper 对 app-only 退化为纯求和,行为逐位一致;
+   配套 `Test_ReducePodFootprint` 9 例。**已知近似**:sidecar(可重启 init)与顺序 init 在同卡重叠时按"sidecar 归并发组"
+   近似处理,精确的 init/sidecar 叠加顺序留待 P2 与 allocator 一并确定(代码注释已标注,P2 前不可达)。
 3. **P2 — 分配算法两遍法 + 识别同步**:`request.go` 聚合量与容器遍历(6.1/6.2)+ `allocator.go` 两遍复用放置(6.3)
    + **同步**把 `IsVGPUResourcePod`(及必要的 Pod 级判定)改为含 init,保持上述不变量。配套不变量单测。
    这是密度收益的核心,风险最高,最后做。

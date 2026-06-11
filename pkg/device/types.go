@@ -547,7 +547,13 @@ func (dev *Device) GetUsedNumber() int {
 
 // addUsedResources records the used GPU core and memory
 func (dev *Device) addUsedResources(usedCores, usedMemory int64) {
-	dev.usedNumber++
+	dev.addUsedResourcesN(1, usedCores, usedMemory)
+}
+
+// addUsedResourcesN records an already-aggregated occupancy on this device.
+// addUsedResources is the number==1 (single vGPU claim) special case.
+func (dev *Device) addUsedResourcesN(usedNumber int, usedCores, usedMemory int64) {
+	dev.usedNumber += usedNumber
 	dev.usedCores += usedCores
 	dev.usedMemory += usedMemory
 }
@@ -1030,6 +1036,128 @@ func (n *NodeInfo) AddPodsUsedResources(pods []*corev1.Pod, opts ...NodeInfoOpti
 	}
 }
 
+// PodDeviceFootprint is the peak occupancy a pod imposes on a SINGLE physical
+// GPU across its whole lifecycle. Regular containers and restartable init
+// containers (sidecars) run concurrently, so their claims on a GPU SUM;
+// non-restartable init containers run sequentially and never overlap the
+// regular containers, so the init group contributes its per-dimension MAX,
+// and the two groups then combine by MAX. For a pod whose init containers do
+// not request vGPU this collapses to the historical plain per-GPU sum.
+type PodDeviceFootprint struct {
+	Id     int
+	Uuid   string
+	Number int
+	Cores  int64
+	Memory int64
+}
+
+// ReducePodFootprint collapses a pod's per-container device claims into the
+// per-physical-GPU peak occupancy, keyed by GPU UUID, honoring the
+// non-overlapping lifecycle of sequential init containers (see
+// PodDeviceFootprint).
+//
+// NOTE (sidecar ordering, dormant until P2): a non-restartable init container
+// that runs while a vGPU sidecar is already started actually peaks at its own
+// claim plus the earlier sidecars' claims. This reducer folds sidecars into
+// the concurrent-sum group only and does not add them onto the init max. The
+// precise init/sidecar overlap is deferred to the allocator phase (P2), where
+// this footprint must match how devices are physically placed. It is
+// unreachable today because the allocator does not yet emit init-container
+// claims into the annotation.
+func ReducePodFootprint(pod *corev1.Pod, podDeviceClaim PodDeviceClaim) map[string]PodDeviceFootprint {
+	// Names of non-restartable init containers, whose claims take the max
+	// rather than the sum. Restartable init containers (sidecars) are NOT
+	// collected here so they fall into the concurrent-sum group below.
+	var sequentialInit map[string]struct{}
+	for i := range pod.Spec.InitContainers {
+		ic := &pod.Spec.InitContainers[i]
+		if ic.RestartPolicy != nil && *ic.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			continue
+		}
+		if sequentialInit == nil {
+			sequentialInit = make(map[string]struct{}, len(pod.Spec.InitContainers))
+		}
+		sequentialInit[ic.Name] = struct{}{}
+	}
+
+	footprint := make(map[string]PodDeviceFootprint, len(podDeviceClaim))
+	// Fast path: no sequential init container, so every claim is concurrent
+	// and the footprint is a plain per-GPU sum (historical behavior).
+	if len(sequentialInit) == 0 {
+		for _, containerClaim := range podDeviceClaim {
+			for _, claim := range containerClaim.DeviceClaims {
+				sumConcurrentFootprint(footprint, claim)
+			}
+		}
+		return footprint
+	}
+
+	// General path: SUM the concurrent group, MAX the sequential-init group,
+	// then combine the two per dimension by MAX.
+	var initMax map[string]PodDeviceFootprint
+	for _, containerClaim := range podDeviceClaim {
+		if _, ok := sequentialInit[containerClaim.Name]; ok {
+			if initMax == nil {
+				initMax = make(map[string]PodDeviceFootprint)
+			}
+			for _, claim := range containerClaim.DeviceClaims {
+				maxSequentialInitFootprint(initMax, claim)
+			}
+			continue
+		}
+		for _, claim := range containerClaim.DeviceClaims {
+			sumConcurrentFootprint(footprint, claim)
+		}
+	}
+	for uuid, im := range initMax {
+		f, ok := footprint[uuid]
+		if !ok {
+			f.Id, f.Uuid = im.Id, im.Uuid
+		}
+		f.Number = max(f.Number, im.Number)
+		f.Cores = max(f.Cores, im.Cores)
+		f.Memory = max(f.Memory, im.Memory)
+		footprint[uuid] = f
+	}
+	return footprint
+}
+
+// sumConcurrentFootprint adds one concurrent (regular/sidecar) claim onto the
+// running per-GPU sum.
+func sumConcurrentFootprint(m map[string]PodDeviceFootprint, claim DeviceClaim) {
+	f := m[claim.Uuid]
+	f.Id, f.Uuid = claim.Id, claim.Uuid
+	f.Number++
+	f.Cores += claim.Cores
+	f.Memory += claim.Memory
+	m[claim.Uuid] = f
+}
+
+// maxSequentialInitFootprint folds one sequential-init claim into the per-GPU
+// max. A single sequential init container occupies at most one vGPU slot on a
+// given card, and sequential inits never overlap each other, so the slot count
+// saturates at one.
+func maxSequentialInitFootprint(m map[string]PodDeviceFootprint, claim DeviceClaim) {
+	f := m[claim.Uuid]
+	f.Id, f.Uuid = claim.Id, claim.Uuid
+	f.Number = max(f.Number, 1)
+	f.Cores = max(f.Cores, claim.Cores)
+	f.Memory = max(f.Memory, claim.Memory)
+	m[claim.Uuid] = f
+}
+
+// podHasVGPUInitContainer reports whether any init container requests vGPU.
+// It gates the init-aware reduce path so the common pod (no vGPU init
+// container) keeps the historical per-claim accounting with no extra cost.
+func podHasVGPUInitContainer(pod *corev1.Pod) bool {
+	for i := range pod.Spec.InitContainers {
+		if util.IsVGPURequiredContainer(&pod.Spec.InitContainers[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 func (n *NodeInfo) AddPodUsedResources(pod *corev1.Pod) {
 	//if !util.IsVGPUResourcePod(pod) {
 	//	return
@@ -1045,11 +1173,23 @@ func (n *NodeInfo) AddPodUsedResources(pod *corev1.Pod) {
 		//klog.InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
 		return
 	}
-	for _, containerClaim := range podDeviceClaim {
-		for _, claim := range containerClaim.DeviceClaims {
-			if err := n.AddUsedResources(claim); err != nil {
-				klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, claim.Id, err)
+	if !podHasVGPUInitContainer(pod) {
+		// Fast path (historical): without a vGPU init container the per-GPU
+		// peak equals the plain per-claim sum, so account claim by claim.
+		for _, containerClaim := range podDeviceClaim {
+			for _, claim := range containerClaim.DeviceClaims {
+				if err := n.AddUsedResources(claim); err != nil {
+					klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, claim.Id, err)
+				}
 			}
+		}
+		return
+	}
+	// Init-aware path: collapse to the per-GPU lifecycle peak so a sequential
+	// init container reusing a regular container's GPU is not double-counted.
+	for _, fp := range ReducePodFootprint(pod, podDeviceClaim) {
+		if err := n.addFootprintResources(fp); err != nil {
+			klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, fp.Id, err)
 		}
 	}
 }
@@ -1097,6 +1237,28 @@ func (n *NodeInfo) AddUsedResources(claim DeviceClaim) error {
 		n.usedNumber++
 		n.usedCores += claim.Cores
 		n.usedMemory += claim.Memory
+	}
+	return nil
+}
+
+// addFootprintResources records an already-reduced per-GPU peak footprint.
+// It mirrors AddUsedResources exactly (same UUID lookup, same MIG/healthy
+// gate on the node-level aggregate) but adds the aggregated number/cores/
+// memory in one shot instead of a single vGPU claim.
+func (n *NodeInfo) addFootprintResources(fp PodDeviceFootprint) error {
+	deviceId, ok := n.deviceIndexMap[fp.Uuid]
+	if !ok {
+		return fmt.Errorf("device UUID <%s> does not exist in the NodeInfo <%s>", fp.Uuid, n.name)
+	}
+	device, ok := n.deviceMap[deviceId]
+	if !ok {
+		return fmt.Errorf("device ID <%d> does not exist in the NodeInfo <%s>", deviceId, n.name)
+	}
+	device.addUsedResourcesN(fp.Number, fp.Cores, fp.Memory)
+	if !device.IsMIG() && device.Healthy() {
+		n.usedNumber += fp.Number
+		n.usedCores += fp.Cores
+		n.usedMemory += fp.Memory
 	}
 	return nil
 }

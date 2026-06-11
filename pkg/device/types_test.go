@@ -521,3 +521,173 @@ func Test_ShouldCountPodDeviceAllocation(t *testing.T) {
 		})
 	}
 }
+
+// naivePerClaimSum is the historical accounting: every container claim sums
+// onto its GPU regardless of container lifecycle. ReducePodFootprint must
+// equal this for any pod without a vGPU init container.
+func naivePerClaimSum(claim PodDeviceClaim) map[string]PodDeviceFootprint {
+	m := make(map[string]PodDeviceFootprint)
+	for _, cc := range claim {
+		for _, dc := range cc.DeviceClaims {
+			f := m[dc.Uuid]
+			f.Id, f.Uuid = dc.Id, dc.Uuid
+			f.Number++
+			f.Cores += dc.Cores
+			f.Memory += dc.Memory
+			m[dc.Uuid] = f
+		}
+	}
+	return m
+}
+
+func Test_ReducePodFootprint(t *testing.T) {
+	const g0, g1 = "GPU-0000", "GPU-1111"
+	restartAlways := corev1.ContainerRestartPolicyAlways
+
+	// initContainers builds a pod whose InitContainers carry only the names
+	// (and optional restart policy) ReducePodFootprint needs for classifying
+	// claims; regular containers are implicit (any claim whose container name
+	// is not a sequential init container counts as concurrent).
+	type initSpec struct {
+		name        string
+		restartable bool
+	}
+	makePodWithInit := func(inits ...initSpec) *corev1.Pod {
+		pod := &corev1.Pod{}
+		for _, is := range inits {
+			c := corev1.Container{Name: is.name}
+			if is.restartable {
+				c.RestartPolicy = &restartAlways
+			}
+			pod.Spec.InitContainers = append(pod.Spec.InitContainers, c)
+		}
+		return pod
+	}
+
+	tests := []struct {
+		name      string
+		pod       *corev1.Pod
+		claim     PodDeviceClaim
+		want      map[string]PodDeviceFootprint
+		appOnlyEq bool // also assert equality with naive per-claim sum
+	}{
+		{
+			name: "app-only single container single device == sum",
+			pod:  &corev1.Pod{},
+			claim: PodDeviceClaim{
+				{Name: "app", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 50, Memory: 1000}}},
+			},
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 1, Cores: 50, Memory: 1000},
+			},
+			appOnlyEq: true,
+		},
+		{
+			name: "app-only two containers share one GPU == sum",
+			pod:  &corev1.Pod{},
+			claim: PodDeviceClaim{
+				{Name: "app1", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 30, Memory: 1000}}},
+				{Name: "app2", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 40, Memory: 2000}}},
+			},
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 2, Cores: 70, Memory: 3000},
+			},
+			appOnlyEq: true,
+		},
+		{
+			name: "sequential init reuses app GPU, init smaller -> app sum wins",
+			pod:  makePodWithInit(initSpec{name: "init"}),
+			claim: PodDeviceClaim{
+				{Name: "init", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 20, Memory: 500}}},
+				{Name: "app", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 60, Memory: 4000}}},
+			},
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 1, Cores: 60, Memory: 4000},
+			},
+		},
+		{
+			name: "sequential init reuses app GPU, init bigger memory -> per-dim max",
+			pod:  makePodWithInit(initSpec{name: "init"}),
+			claim: PodDeviceClaim{
+				{Name: "init", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 20, Memory: 8000}}},
+				{Name: "app", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 60, Memory: 4000}}},
+			},
+			// number=max(1,1)=1, cores=max(60,20)=60, memory=max(4000,8000)=8000
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 1, Cores: 60, Memory: 8000},
+			},
+		},
+		{
+			name: "sequential init on a different GPU than app -> both reserved",
+			pod:  makePodWithInit(initSpec{name: "init"}),
+			claim: PodDeviceClaim{
+				{Name: "init", DeviceClaims: []DeviceClaim{{Id: 1, Uuid: g1, Cores: 100, Memory: 16000}}},
+				{Name: "app", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 50, Memory: 4000}}},
+			},
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 1, Cores: 50, Memory: 4000},
+				g1: {Id: 1, Uuid: g1, Number: 1, Cores: 100, Memory: 16000},
+			},
+		},
+		{
+			name: "init-only pod -> footprint is the init claim",
+			pod:  makePodWithInit(initSpec{name: "init"}),
+			claim: PodDeviceClaim{
+				{Name: "init", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 30, Memory: 2000}}},
+			},
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 1, Cores: 30, Memory: 2000},
+			},
+		},
+		{
+			name: "two sequential init containers share one GPU -> max, slot saturates at 1",
+			pod:  makePodWithInit(initSpec{name: "init1"}, initSpec{name: "init2"}),
+			claim: PodDeviceClaim{
+				{Name: "init1", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 30, Memory: 2000}}},
+				{Name: "init2", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 70, Memory: 1000}}},
+			},
+			// sequential inits never overlap: number=1, cores=max(30,70)=70, memory=max(2000,1000)=2000
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 1, Cores: 70, Memory: 2000},
+			},
+		},
+		{
+			name: "restartable init (sidecar) counts as concurrent -> sums with app",
+			pod:  makePodWithInit(initSpec{name: "sidecar", restartable: true}),
+			claim: PodDeviceClaim{
+				{Name: "sidecar", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 20, Memory: 1000}}},
+				{Name: "app", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 50, Memory: 4000}}},
+			},
+			// sidecar is concurrent: number=2, cores=70, memory=5000
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 2, Cores: 70, Memory: 5000},
+			},
+		},
+		{
+			name: "sidecar + sequential init: sidecar sums, init maxes",
+			pod:  makePodWithInit(initSpec{name: "sidecar", restartable: true}, initSpec{name: "init"}),
+			claim: PodDeviceClaim{
+				{Name: "sidecar", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 20, Memory: 1000}}},
+				{Name: "init", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 90, Memory: 3000}}},
+				{Name: "app", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 50, Memory: 4000}}},
+			},
+			// concurrent(sidecar+app): number=2, cores=70, memory=5000
+			// init max: number=1, cores=90, memory=3000
+			// combine per-dim max: number=2, cores=90, memory=5000
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 2, Cores: 90, Memory: 5000},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ReducePodFootprint(tt.pod, tt.claim)
+			assert.Equal(t, tt.want, got)
+			if tt.appOnlyEq {
+				assert.Equal(t, naivePerClaimSum(tt.claim), got,
+					"app-only footprint must equal the historical per-claim sum")
+			}
+		})
+	}
+}

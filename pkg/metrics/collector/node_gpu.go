@@ -29,7 +29,6 @@ import (
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/util/sets"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
@@ -502,23 +501,19 @@ skipNvml:
 	sharedContainersMap := make(map[string]int)
 	// Filter out some useless pods.
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
-		// Aggregate the allocated memory size on the node.
+		// Aggregate the allocated memory size on the node, collapsing each
+		// pod's claims to the per-GPU lifecycle peak so a sequential init
+		// container reusing a regular container's GPU is not double-counted.
+		// For a pod without a vGPU init container this is the plain per-GPU
+		// sum, identical to the historical per-claim accounting.
 		podDeviceClaim := device.GetPodDeviceClaim(pod)
-		devContainersMap := make(map[string]sets.Set[string])
-		FlattenDevicesEach(podDeviceClaim, func(ctrName string, claimDevice device.DeviceClaim) {
-			if ctrNameSet, ok := devContainersMap[claimDevice.Uuid]; ok {
-				ctrNameSet.Insert(ctrName)
-			} else {
-				devContainersMap[claimDevice.Uuid] = sets.New[string](ctrName)
-			}
-			vGpuAssignedNumberMap[claimDevice.Uuid]++
-			vGpuAssignedCoresMap[claimDevice.Uuid] += claimDevice.Cores
-			memoryBytes := uint64(claimDevice.Memory) << 20
+		for _, fp := range device.ReducePodFootprint(pod, podDeviceClaim) {
+			vGpuAssignedNumberMap[fp.Uuid] += fp.Number
+			vGpuAssignedCoresMap[fp.Uuid] += fp.Cores
+			memoryBytes := uint64(fp.Memory) << 20
 			nodeVGpuAssignedMemBytes += memoryBytes
-			vGpuAssignedMemMap[claimDevice.Uuid] += memoryBytes
-		})
-		for uuid, crtNameSet := range devContainersMap {
-			sharedContainersMap[uuid] += crtNameSet.Len()
+			vGpuAssignedMemMap[fp.Uuid] += memoryBytes
+			sharedContainersMap[fp.Uuid] += fp.Number
 		}
 		for _, container := range pod.Spec.Containers {
 			contKey := lister.GetContainerKey(pod.UID, container.Name)
@@ -920,14 +915,3 @@ func FlattenMigInfosMapEach(migInfosMap map[string][]*nvidia.MigInfo,
 	}
 }
 
-func FlattenDevicesEach(podDeviceClaim device.PodDeviceClaim,
-	fn func(ctrName string, claim device.DeviceClaim)) {
-	if fn == nil {
-		return
-	}
-	for _, containerClaim := range podDeviceClaim {
-		for _, claim := range containerClaim.DeviceClaims {
-			fn(containerClaim.Name, claim)
-		}
-	}
-}
