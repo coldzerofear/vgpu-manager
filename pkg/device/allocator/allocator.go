@@ -246,7 +246,6 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 //     per-device counts when applicable).
 //   - (nil, nil, err)       — internal error (shouldn't happen).
 func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed, restrictUUIDs map[string]struct{}) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
-	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", need.Name, alloc.nodeInfo.GetName())
 	if need.Number > alloc.nodeInfo.GetSchedulableDeviceCount() {
 		return nil, reason.New(reason.InsufficientGPUCards).
@@ -254,7 +253,7 @@ func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed, 
 	}
 	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
 
-	deviceStore, deviceCounts := alloc.filterDevices(pod, needCores, needMemory, restrictUUIDs)
+	deviceStore, deviceCounts := alloc.filterDevices(req, needCores, needMemory, restrictUUIDs)
 	totalDevices := alloc.nodeInfo.GetDeviceCount()
 	claims, rsn := alloc.pickDeviceClaims(req, deviceStore, need.Number, needCores, needMemory)
 	if rsn != nil {
@@ -280,7 +279,7 @@ func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed, 
 				WithDetail("need %d devices, none qualify", need.Number)
 		}
 		klog.V(5).InfoS("Insufficient node resources", "node", alloc.nodeInfo.GetName(),
-			"pod", klog.KObj(pod), "container", need.Name, "reason", nodeReason.Detailed())
+			"pod", klog.KObj(req.Pod), "container", need.Name, "reason", nodeReason.Detailed())
 		return nil, nodeReason, nil
 	}
 	sort.Slice(claims, func(i, j int) bool { return claims[i].Id < claims[j].Id })
@@ -716,7 +715,7 @@ func resolveLinkDevices(picked []*gpuallocator.Device, store []*device.Device) [
 // pkg/scheduler/reason — no parallel enum here. That keeps the counts
 // directly bucketable by the FilteringFailed aggregator without any
 // translation table.
-func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int64, restrictUUIDs map[string]struct{}) ([]*device.Device, map[reason.Code]int) {
+func (alloc *allocator) filterDevices(req *AllocationRequest, needCores, needMemory int64, restrictUUIDs map[string]struct{}) ([]*device.Device, map[reason.Code]int) {
 	nodeName := alloc.nodeInfo.GetName()
 	counts := make(map[reason.Code]int)
 	devices := make([]*device.Device, 0, alloc.nodeInfo.GetDeviceCount())
@@ -773,20 +772,20 @@ func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int
 			continue
 		}
 		// Filter device type.
-		if !util.CheckDeviceType(pod.Annotations, deviceInfo.GetType()) {
+		if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, deviceInfo.GetType()) {
 			klog.V(4).InfoS("Filter devices with type mismatches on the node",
 				"node", nodeName, "deviceIndex", i, "deviceType", deviceInfo.GetType(),
-				"includeTypes", pod.Annotations[util.PodIncludeGpuTypeAnnotation],
-				"excludeTypes", pod.Annotations[util.PodExcludeGpuTypeAnnotation])
+				"includeTypes", req.Pod.Annotations[util.PodIncludeGpuTypeAnnotation],
+				"excludeTypes", req.Pod.Annotations[util.PodExcludeGpuTypeAnnotation])
 			counts[reason.DeviceTypeMismatch]++
 			continue
 		}
 		// Filter device uuid.
-		if !util.CheckDeviceUuid(pod.Annotations, deviceInfo.GetUUID()) {
+		if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, deviceInfo.GetUUID()) {
 			klog.V(4).InfoS("Filter devices with uuid mismatches on the node",
 				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
-				"includeUuids", pod.Annotations[util.PodIncludeGPUUUIDAnnotation],
-				"excludeUuids", pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
+				"includeUuids", req.Pod.Annotations[util.PodIncludeGPUUUIDAnnotation],
+				"excludeUuids", req.Pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
 			counts[reason.DeviceUUIDMismatch]++
 			continue
 		}

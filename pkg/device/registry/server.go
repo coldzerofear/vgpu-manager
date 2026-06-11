@@ -205,6 +205,9 @@ func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *regis
 		winPids   []int
 		lastErr   error
 	)
+	// TODO When malicious requests are constantly being sent within a container,
+	// such as non-existent UUIDs or container names, the retry logic here may continuously
+	// retry and consume resources during the timeout period. How to identify and respond quickly?
 	pollErr := wait.PollUntilContextCancel(ctx, resolveBackoff, true, func(ctx context.Context) (bool, error) {
 		target, err := s.lookupTarget(ctx, req)
 		if err != nil {
@@ -405,6 +408,8 @@ func (s *DeviceRegistryServerImpl) Start() error {
 		return fmt.Errorf("failed to set socket permissions: %v", err)
 	}
 	s.listener = listener
+	// TODO How to prevent DDoS attacks from interrupting our services through a series of
+	// effective flow limiting strategies when a large number of malicious requests suddenly appear
 	s.server = grpc.NewServer(grpc.MaxConcurrentStreams(1024))
 
 	registry.RegisterVDeviceRegistryServer(s.server, s)
@@ -427,6 +432,13 @@ func (s *DeviceRegistryServerImpl) Stop() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	// Immediately close the listener and reject new connections
+	if s.listener != nil {
+		_ = s.listener.Close()
+		s.listener = nil
+	}
+
+	// Elegantly stop existing requests
 	if s.server != nil {
 		stopped := make(chan struct{})
 		go func() {
@@ -442,11 +454,6 @@ func (s *DeviceRegistryServerImpl) Stop() {
 			s.server.Stop()
 		}
 		s.server = nil
-	}
-
-	if s.listener != nil {
-		_ = s.listener.Close()
-		s.listener = nil
 	}
 
 	s.running = false

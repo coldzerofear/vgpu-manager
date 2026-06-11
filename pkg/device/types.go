@@ -1225,12 +1225,13 @@ func footprintId(fs ...PodDeviceFootprint) int {
 	return 0
 }
 
-// podHasVGPUInitContainer reports whether any init container requests vGPU.
+// podHasVGPUInitContainer report whether there are any non sidecar type init containers requesting vGPU.
 // It gates the init-aware reduce path so the common pod (no vGPU init
 // container) keeps the historical per-claim accounting with no extra cost.
 func podHasVGPUInitContainer(pod *corev1.Pod) bool {
 	for i := range pod.Spec.InitContainers {
-		if util.IsVGPURequiredContainer(&pod.Spec.InitContainers[i]) {
+		if util.IsVGPURequiredContainer(&pod.Spec.InitContainers[i]) &&
+			!util.IsRestartableInitContainer(&pod.Spec.InitContainers[i]) {
 			return true
 		}
 	}
