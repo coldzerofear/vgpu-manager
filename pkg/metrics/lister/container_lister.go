@@ -112,9 +112,12 @@ func (c *ContainerLister) collectContainerKey(pods []*corev1.Pod) sets.Set[Conta
 		if pod.Spec.NodeName != c.nodeName {
 			continue
 		}
-		for _, container := range pod.Spec.Containers {
-			key := GetContainerKey(pod.UID, container.Name)
-			setKeys.Insert(key)
+		// Include regular containers, sidecars, and currently-running
+		// sequential init containers. A completed sequential init container is
+		// intentionally excluded so its directory becomes an orphan and is
+		// reclaimed (and its stale usage stops being reported).
+		for _, name := range util.CollectableContainerNames(pod) {
+			setKeys.Insert(GetContainerKey(pod.UID, name))
 		}
 	}
 	return setKeys

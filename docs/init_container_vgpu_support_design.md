@@ -322,18 +322,16 @@ func ReducePodFootprint(pod *corev1.Pod, claim device.PodDeviceClaim) map[string
      已 init-aware 去重(P1),是 pod 全生命周期**静态峰值预留**,**不随容器运行态变化**,无需再改。
    - **used/实时使用**(6 个 `container_vgpu_*` usage/util,源自 libvgpu 共享内存+cgroup PID+NVML):当前
      `node_gpu.go:518` 与 `container_lister.go:115`(`collectContainerKey`)**只遍历 `pod.Spec.Containers`,完全忽略 init**。
-   - 改造(两处必须配套,否则"加载了不读 / 要读已被孤儿清理"不一致):
-     a. 采集与 keySet 都纳入 init 容器(可用 `util.GetAllPodContainers`)。
-     b. **按 `pod.Status.InitContainerStatuses` 状态门控**:顺序 init 仅在 `Running` 时纳入 keySet/上报,
-        `Terminated` 即移出→目录回收→usage 自然停止(避免上报已退出 init 容器的陈旧"幽灵使用值");
-        sidecar(可重启 init)按 app 处理、全程上报。
-     c. **(已实施)** 共享容器数拆为两个指标:`vgpu_device_peak_shared_containers_number`(峰值=
-        全生命周期并发共享峰值,源自 `ReducePodFootprint` 的 `fp.Number`,原 `..._shared_containers_number` 重命名而来)
-        + `vgpu_device_current_shared_containers_number`(当前=此刻 Running 且持 claim 的容器数,源自
-        `device.CurrentSharedContainers`,按 `IsContainerRunning` 门控,顺序 init 退出即不计)。保证 peak ≥ current;
-        二者均带 help text。app-only 时 current==peak,init 落地(P2)后才分化。配套 `Test_CurrentSharedContainers`。
-     d. help text 注明 assigned≥used 的背离属正常(预留含 init 峰值,app 阶段 used 仅 app)。
-   - 依赖:used 侧 init 数据只有 P2(allocator 产出 init claim + deviceplugin 向 init 容器注入拦截库/`vgpu.config`)
-     之后才存在,故 P3 排在 P2 之后;在此之前该路径休眠。
+   - 改造(已实施;两处共用同一门控,杜绝"加载了不读 / 要读已被孤儿清理"不一致):
+     a. **(已实施)** 新增 `util.CollectableContainerNames(pod)`:返回此刻应采集 used 指标的容器名 ——
+        app 全收、sidecar 全收、**顺序 init 仅 `IsContainerRunning` 时收**(init 在前)。
+     b. **(已实施)** `container_lister.collectContainerKey` 与 `node_gpu` 采集循环都改用该 helper:
+        顺序 init `Terminated` → 不进 keySet → 目录按 TTL 回收 + ResourceData 卸载;采集侧同样门控,
+        消除"终止后到 TTL 清理前"的陈旧上报窗口。app/sidecar 不做状态门控,行为与历史一致。配套 `Test_CollectableContainerNames`。
+     c. **(已实施于上一提交)** 共享容器数拆为 `vgpu_device_peak_/current_shared_containers_number` 双指标
+        (peak ≥ current,`device.CurrentSharedContainers` 按 `IsContainerRunning` 门控)。
+     d. (可选,未做)在 `container_vgpu_*` help text 注明 assigned≥used 背离属正常 —— 留作后续文档增强。
+   - 依赖:used 侧 init 真实数据需 deviceplugin 向 init 容器注入拦截库/`vgpu.config`(P0 已铺好
+     `checkExistCont`/`PodContainerEnvEnabled`,属运行时端到端集成范畴);在此之前该路径正确但休眠。
 
 > 落地顺序遵循"先让 init 不被忽略且不出错(P0/P1),再追求 K8s 级密度(P2)",每步独立可回归。

@@ -528,14 +528,17 @@ skipNvml:
 		for uuid, n := range device.CurrentSharedContainers(pod, podDeviceClaim) {
 			currentSharedContainersMap[uuid] += n
 		}
-		for _, container := range pod.Spec.Containers {
-			contKey := lister.GetContainerKey(pod.UID, container.Name)
+		// Real-time per-container usage: regular containers, sidecars, and
+		// currently-running sequential init containers (a completed init
+		// container is excluded so its stale usage stops being reported).
+		for _, containerName := range util.CollectableContainerNames(pod) {
+			contKey := lister.GetContainerKey(pod.UID, containerName)
 			resData, exist := c.contLister.GetResourceDataT(contKey)
 			if !exist {
 				continue
 			}
 
-			klog.V(4).Infoln("Container matching: using resource data", "pod", klog.KObj(pod), "container", container.Name)
+			klog.V(4).Infoln("Container matching: using resource data", "pod", klog.KObj(pod), "container", containerName)
 			var getFullPath func(string) string
 			switch {
 			case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
@@ -550,10 +553,10 @@ skipNvml:
 				getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
 			}
 			var containerPids []uint32
-			_ = cgroup.GetContainerPidsFunc(pod, container.Name, getFullPath, func(pid int) {
+			_ = cgroup.GetContainerPidsFunc(pod, containerName, getFullPath, func(pid int) {
 				containerPids = append(containerPids, uint32(pid))
 			})
-			//_, containerId := cgroup.GetContainerRuntime(pod, container.Name)
+			//_, containerId := cgroup.GetContainerRuntime(pod, containerName)
 
 			deviceCount := 0
 			for i := int32(0); i < vgpu.MaxDeviceCount; i++ {
@@ -564,7 +567,7 @@ skipNvml:
 				deviceUUID := string(containerDevice.UUID[0:40])
 				if !utf8.ValidString(deviceUUID) {
 					klog.InfoS("Invalid UTF-8 device uuid, skip current device", "pod", klog.KObj(pod),
-						"container", container.Name, "deviceUuid", deviceUUID, "deviceIndex", i)
+						"container", containerName, "deviceUuid", deviceUUID, "deviceIndex", i)
 					continue
 				}
 				devHostIndex, exists := devIndexMap[deviceUUID]
@@ -601,13 +604,13 @@ skipNvml:
 					containerVGPUMemoryLimit,
 					prometheus.GaugeValue,
 					float64(deviceMemLimit),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUPhysicalMemoryLimit,
 					prometheus.GaugeValue,
 					float64(realMemBytes),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 
 				// TODO handler Virtual Memory Cache node.
@@ -637,13 +640,13 @@ skipNvml:
 					containerVGPUMemoryUsage,
 					prometheus.GaugeValue,
 					float64(deviceMemUsage+deviceVMemUsage),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUPhysicalMemoryUsage,
 					prometheus.GaugeValue,
 					float64(deviceMemUsage),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 
 				deviceMemUsage += deviceVMemUsage
@@ -657,13 +660,13 @@ skipNvml:
 					containerVGPUMemoryUtilRate,
 					prometheus.GaugeValue,
 					float64(memoryUtilRate),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUCoreUtilRate,
 					prometheus.GaugeValue,
 					float64(util.GetPercentageValue(deviceSMUtil)),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 			}
 		}

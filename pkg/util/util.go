@@ -200,6 +200,31 @@ func IsContainerRunning(pod *corev1.Pod, containerName string) bool {
 	return false
 }
 
+// CollectableContainerNames returns the names of the pod's containers whose
+// real-time vGPU usage metrics should be collected right now. Regular
+// containers and sidecars (restartable init) run for the app phase and follow
+// the pod lifecycle, so they are always included; a sequential
+// (non-restartable) init container runs only transiently, so it is included
+// only while it is actually Running — once it terminates its (stale) usage
+// must stop being reported and its working directory may be reclaimed.
+// Init containers come first, matching the device-plugin's per-container layout.
+func CollectableContainerNames(pod *corev1.Pod) []string {
+	if pod == nil {
+		return nil
+	}
+	names := make([]string, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		if IsRestartableInitContainer(c) || IsContainerRunning(pod, c.Name) {
+			names = append(names, c.Name)
+		}
+	}
+	for i := range pod.Spec.Containers {
+		names = append(names, pod.Spec.Containers[i].Name)
+	}
+	return names
+}
+
 // CheckDeviceType Check if the device type meets expectations.
 func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 	deviceType = strings.ToUpper(strings.TrimSpace(deviceType))
