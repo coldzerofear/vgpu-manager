@@ -157,10 +157,11 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 		},
 
 		// ---------------------------------------------------------------
-		// Rule 3: two init containers share the same vGPU request → error
+		// Sequential (non-restartable) init containers never overlap, so any
+		// number of them may share (sequentially reuse) one vGPU request.
 		// ---------------------------------------------------------------
 		{
-			name: "rule3: two init containers share one vGPU request: error",
+			name: "two sequential init containers share one vGPU request: pass",
 			objs: []client.Object{vgpuClaim("claim-x", "req1")},
 			pod: pod(
 				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
@@ -170,7 +171,18 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 				},
 				nil,
 			),
-			wantErr: "referenced by multiple init containers",
+		},
+		{
+			name: "multiple sequential init containers and one app share one vGPU request: pass",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{
+					cont("init-a", claimRef("pc-x", "")),
+					cont("init-b", claimRef("pc-x", "")),
+				},
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
 		},
 
 		// ---------------------------------------------------------------
@@ -187,7 +199,7 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 					cont("app-b", claimRef("pc-x", "")),
 				},
 			),
-			wantErr: "referenced by multiple app containers",
+			wantErr: "referenced by multiple concurrent containers",
 		},
 
 		// ---------------------------------------------------------------
@@ -216,7 +228,7 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 				[]corev1.Container{sidecarCont("side-a", claimRef("pc-x", ""))},
 				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
 			),
-			wantErr: "referenced by multiple app containers",
+			wantErr: "referenced by multiple concurrent containers",
 		},
 		// ---------------------------------------------------------------
 		// A non-restartable init container may still share with an app

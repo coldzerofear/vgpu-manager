@@ -210,13 +210,10 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 			}
 			switch kind {
 			case util.ContainerKindInit:
+				// Non-restartable init containers run strictly sequentially and
+				// never overlap each other or the app phase, so any number of
+				// them may share (sequentially reuse) the same vGPU request.
 				usage.InitContainers.Insert(thisContainerID)
-				if usage.InitContainers.Len() > 1 {
-					return fmt.Errorf(
-						"allocated vgpu request %q in claim %s/%s is referenced by multiple init containers %v",
-						mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.InitContainers),
-					)
-				}
 			case util.ContainerKindApp:
 				usage.AppContainers.Insert(thisContainerID)
 				if usage.AppContainers.Len() > 1 {

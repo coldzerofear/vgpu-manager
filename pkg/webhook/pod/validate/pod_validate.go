@@ -306,18 +306,16 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 			}
 			switch kind {
 			case util.ContainerKindInit:
+				// Non-restartable init containers run strictly sequentially and
+				// never overlap each other or the app phase, so any number of
+				// them may share (sequentially reuse) the same vGPU request.
 				usage.InitContainers.Insert(c.Name)
-				if usage.InitContainers.Len() > 1 {
-					return fmt.Errorf(
-						"vgpu request %q is referenced by multiple init containers %v; sharing is only allowed between init and app containers",
-						reqKey, sets.List(usage.InitContainers),
-					)
-				}
 			case util.ContainerKindApp:
 				usage.AppContainers.Insert(c.Name)
 				if usage.AppContainers.Len() > 1 {
 					return fmt.Errorf(
-						"vgpu request %q is referenced by multiple app containers %v; sharing is only allowed between init and app containers",
+						"vgpu request %q is referenced by multiple concurrent containers %v; "+
+							"app containers (and sidecars) run concurrently and cannot share a vgpu request",
 						reqKey, sets.List(usage.AppContainers),
 					)
 				}

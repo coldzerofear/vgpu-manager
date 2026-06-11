@@ -203,3 +203,29 @@ func Test_Allocate_SidecarAndSequentialInit(t *testing.T) {
 	assert.Equal(t, device.PodDeviceFootprint{Id: 0, Uuid: uuids[0], Number: 2, Cores: 70, Memory: 7000}, fp[uuids[0]])
 	assertNoOvercommit(t, pod, claim, 10, 100, 24000)
 }
+
+func Test_Allocate_TwoSequentialInitsReuseSameCard(t *testing.T) {
+	// Two sequential (non-restartable) init containers never overlap, so the
+	// allocator must reuse ONE physical card for both (footprint = per-dim max),
+	// leaving the second card free — packing GPU utilization tighter. They are
+	// allocated against the same app-released view, so the deterministic device
+	// sort lands both on the same card.
+	nodeInfo, uuids := fakeNode(2, 10, 100, 24000)
+	pod := &corev1.Pod{Spec: corev1.PodSpec{
+		InitContainers: []corev1.Container{
+			vgpuContainer("init1", 1, 50, 5000),
+			vgpuContainer("init2", 1, 60, 6000),
+		},
+	}}
+	claim := runAllocate(t, nodeInfo, pod)
+
+	// Both inits on the same single card; the other card stays unused.
+	assert.Equal(t, containerUUIDs(claim, "init1"), containerUUIDs(claim, "init2"))
+	fp := device.ReducePodFootprint(pod, claim)
+	assert.Len(t, fp, 1, "two sequential inits must reuse one card, not span two")
+	for _, f := range fp { // the single shared card
+		assert.Equal(t, device.PodDeviceFootprint{Id: f.Id, Uuid: f.Uuid, Number: 1, Cores: 60, Memory: 6000}, f)
+	}
+	_ = uuids
+	assertNoOvercommit(t, pod, claim, 10, 100, 24000)
+}
