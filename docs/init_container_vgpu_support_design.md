@@ -287,11 +287,28 @@ func ReducePodFootprint(pod *corev1.Pod, claim device.PodDeviceClaim) map[string
 2. **P1 — 核算层 reduce(已实施)**:落地 `ReducePodFootprint` + `PodDeviceFootprint`(`pkg/device/types.go`),
    改 `AddPodUsedResources`(加 `podHasVGPUInitContainer` 门控:无 vGPU init 容器走原逐-claim 快路径不变,
    否则走 reduce 路径)与 metrics 累加段(6.4/6.7)。共享 helper 对 app-only 退化为纯求和,行为逐位一致;
-   配套 `Test_ReducePodFootprint` 9 例。**已知近似**:sidecar(可重启 init)与顺序 init 在同卡重叠时按"sidecar 归并发组"
-   近似处理,精确的 init/sidecar 叠加顺序留待 P2 与 allocator 一并确定(代码注释已标注,P2 前不可达)。
-3. **P2 — 分配算法两遍法 + 识别同步**:`request.go` 聚合量与容器遍历(6.1/6.2)+ `allocator.go` 两遍复用放置(6.3)
+   配套 `Test_ReducePodFootprint` 10 例。
+
+   **每物理 GPU 峰值公式(逐维)**:`reserve(g) = sidecarSum(g) + max(regularSum(g), initMax(g))`。
+   - `regularSum`/`sidecarSum`:业务容器 / sidecar(可重启 init)的逐卡求和;
+   - `initMax`:对每个**顺序 init 容器自身的逐卡求和**再跨容器取 max(顺序 init 互不重叠;"先容器内 sum、
+     再容器间 max",不再 per-claim 硬编码 number=1,消除对"单容器多 vGPU 必落不同卡"不变量的隐式依赖);
+   - sidecar 全程运行,作为常数加项叠加到两个相位上 —— 这修正了早期"sidecar 仅归并发组"会在
+     sidecar 与顺序 init 同卡重叠时**少算**的问题(永不少算)。
+   - 保守简化:认为 sidecar 与**每个**顺序 init 相位都重叠(实际只与其之前启动的 sidecar 重叠),
+     在"sidecar 声明于 vGPU init 之后"的罕见顺序下会**略微多算**(安全方向)。
+
+3. **P1.5 — sidecar 共享校验修复(已实施)**:webhook 的 vGPU request 共享校验矩阵原先把**所有** init 容器
+   按"与 app 不重叠"放行 init↔app 共享,**漏了 sidecar**(可重启 init 与 app **并发**)。新增
+   `util.IsRestartableInitContainer` + `ContainerRef.Restartable`;两处校验矩阵
+   (`pkg/webhook/pod/validate/pod_validate.go`、`pkg/webhook/resourceclaim/validate/resourceclaim.go`)
+   把 sidecar 按 app 类(并发)处理 —— sidecar↔app / sidecar↔sidecar 共享同一 vGPU request 现按 app-app 冲突**拒绝**,
+   仅非重启 init↔app 仍允许跨相位复用。配套 webhook 测试 2 例。`GetAllPodContainers` 的 `Kind` 不变
+   (sidecar 仍标 `init`),`claimresolve/partitions.go` 等不读 `Restartable` 的消费者不受影响。
+4. **P2 — 分配算法两遍法 + 识别同步**:`request.go` 聚合量与容器遍历(6.1/6.2)+ `allocator.go` 两遍复用放置(6.3)
    + **同步**把 `IsVGPUResourcePod`(及必要的 Pod 级判定)改为含 init,保持上述不变量。配套不变量单测。
-   这是密度收益的核心,风险最高,最后做。
-4. **P3 — metrics 目录与实时统计**:`collectContainerKey` 纳入 init(6.7),清理误删修复。
+   这是密度收益的核心,风险最高,最后做。**allocator 的 footprint 必须等于 `ReducePodFootprint(annotation)`**
+   (含 §P1 的 sidecar 保守叠加语义),否则核算漂移。
+5. **P3 — metrics 目录与实时统计**:`collectContainerKey` 纳入 init(6.7),清理误删修复。
 
 > 落地顺序遵循"先让 init 不被忽略且不出错(P0/P1),再追求 K8s 级密度(P2)",每步独立可回归。

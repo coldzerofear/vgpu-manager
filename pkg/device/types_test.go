@@ -671,11 +671,31 @@ func Test_ReducePodFootprint(t *testing.T) {
 				{Name: "init", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 90, Memory: 3000}}},
 				{Name: "app", DeviceClaims: []DeviceClaim{{Id: 0, Uuid: g0, Cores: 50, Memory: 4000}}},
 			},
-			// concurrent(sidecar+app): number=2, cores=70, memory=5000
-			// init max: number=1, cores=90, memory=3000
-			// combine per-dim max: number=2, cores=90, memory=5000
+			// reserve = sidecarSum + max(regularSum, initMax), per dimension.
+			// sidecarSum={1,20,1000} regularSum(app)={1,50,4000} initMax={1,90,3000}
+			// number = 1 + max(1,1) = 2
+			// cores  = 20 + max(50,90) = 110  (init phase sidecar+init=110 > app phase 70)
+			// memory = 1000 + max(4000,3000) = 5000
 			want: map[string]PodDeviceFootprint{
-				g0: {Id: 0, Uuid: g0, Number: 2, Cores: 90, Memory: 5000},
+				g0: {Id: 0, Uuid: g0, Number: 2, Cores: 110, Memory: 5000},
+			},
+		},
+		{
+			// Robustness: a single sequential init container's own claims SUM
+			// per GPU (within one running container), they are not max'd. The
+			// allocator's distinct-card rule makes two same-UUID claims from one
+			// container not happen today, but the reducer must not silently
+			// undercount if it ever does (the old per-claim cap-at-1 would).
+			name: "one sequential init container, two claims on same GPU -> within-container sum",
+			pod:  makePodWithInit(initSpec{name: "init"}),
+			claim: PodDeviceClaim{
+				{Name: "init", DeviceClaims: []DeviceClaim{
+					{Id: 0, Uuid: g0, Cores: 30, Memory: 1000},
+					{Id: 0, Uuid: g0, Cores: 40, Memory: 2000},
+				}},
+			},
+			want: map[string]PodDeviceFootprint{
+				g0: {Id: 0, Uuid: g0, Number: 2, Cores: 70, Memory: 3000},
 			},
 		},
 	}

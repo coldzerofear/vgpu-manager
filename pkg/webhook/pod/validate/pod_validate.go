@@ -295,7 +295,16 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 				usage.AppContainers = sets.New[string]()
 			}
 
-			switch c.Kind {
+			// A sidecar (restartable init) runs concurrently with the app
+			// containers, so for vGPU-request sharing it must be treated like an
+			// app container: it does NOT get the init/app cross-phase reuse
+			// allowance. Only a non-restartable init container, which completes
+			// before the app phase, may share a request with an app container.
+			kind := c.Kind
+			if c.Restartable {
+				kind = util.ContainerKindApp
+			}
+			switch kind {
 			case util.ContainerKindInit:
 				usage.InitContainers.Insert(c.Name)
 				if usage.InitContainers.Len() > 1 {

@@ -1037,12 +1037,8 @@ func (n *NodeInfo) AddPodsUsedResources(pods []*corev1.Pod, opts ...NodeInfoOpti
 }
 
 // PodDeviceFootprint is the peak occupancy a pod imposes on a SINGLE physical
-// GPU across its whole lifecycle. Regular containers and restartable init
-// containers (sidecars) run concurrently, so their claims on a GPU SUM;
-// non-restartable init containers run sequentially and never overlap the
-// regular containers, so the init group contributes its per-dimension MAX,
-// and the two groups then combine by MAX. For a pod whose init containers do
-// not request vGPU this collapses to the historical plain per-GPU sum.
+// GPU across its whole lifecycle. See ReducePodFootprint for how container
+// lifecycles combine into it.
 type PodDeviceFootprint struct {
 	Id     int
 	Uuid   string
@@ -1053,25 +1049,42 @@ type PodDeviceFootprint struct {
 
 // ReducePodFootprint collapses a pod's per-container device claims into the
 // per-physical-GPU peak occupancy, keyed by GPU UUID, honoring the
-// non-overlapping lifecycle of sequential init containers (see
-// PodDeviceFootprint).
+// non-overlapping lifecycle of init containers.
 //
-// NOTE (sidecar ordering, dormant until P2): a non-restartable init container
-// that runs while a vGPU sidecar is already started actually peaks at its own
-// claim plus the earlier sidecars' claims. This reducer folds sidecars into
-// the concurrent-sum group only and does not add them onto the init max. The
-// precise init/sidecar overlap is deferred to the allocator phase (P2), where
-// this footprint must match how devices are physically placed. It is
-// unreachable today because the allocator does not yet emit init-container
-// claims into the annotation.
+// Containers fall into three groups by lifecycle:
+//   - regular (app) containers: run concurrently in the main phase.
+//   - sidecars (restartable init containers): start during the init sequence
+//     and keep running for the rest of the pod's life, so they overlap BOTH
+//     the main phase and the sequential-init phases.
+//   - sequential init containers (non-restartable): run one at a time, before
+//     the main phase, never overlapping each other or the app containers.
+//
+// Per GPU g, with regularSum(g)/sidecarSum(g) the plain per-claim sums of the
+// regular and sidecar groups, and initMax(g) the per-dimension max over each
+// sequential init container's OWN per-GPU sum, the reserved peak is:
+//
+//	reserve(g) = sidecarSum(g) + max(regularSum(g), initMax(g))   // per dimension
+//
+// Sidecars run throughout, so they are a constant addend; the variable part is
+// whichever peaks higher — the app phase or the heaviest single sequential
+// init phase. This never under-reserves a GPU. (Conservative simplification:
+// sidecars are treated as overlapping EVERY sequential-init phase even though
+// only those started earlier in the init order truly do; this can slightly
+// over-reserve in the unusual "sidecar declared after a vGPU init container"
+// ordering, which is safe.) For a pod without a sequential init container this
+// collapses to the historical plain per-GPU sum.
 func ReducePodFootprint(pod *corev1.Pod, podDeviceClaim PodDeviceClaim) map[string]PodDeviceFootprint {
-	// Names of non-restartable init containers, whose claims take the max
-	// rather than the sum. Restartable init containers (sidecars) are NOT
-	// collected here so they fall into the concurrent-sum group below.
-	var sequentialInit map[string]struct{}
+	// Classify init containers. Sidecars overlap the app phase; the remaining
+	// init containers are sequential. Regular containers are everything not in
+	// either set.
+	var sequentialInit, sidecar map[string]struct{}
 	for i := range pod.Spec.InitContainers {
 		ic := &pod.Spec.InitContainers[i]
-		if ic.RestartPolicy != nil && *ic.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+		if util.IsRestartableInitContainer(ic) {
+			if sidecar == nil {
+				sidecar = make(map[string]struct{})
+			}
+			sidecar[ic.Name] = struct{}{}
 			continue
 		}
 		if sequentialInit == nil {
@@ -1080,51 +1093,80 @@ func ReducePodFootprint(pod *corev1.Pod, podDeviceClaim PodDeviceClaim) map[stri
 		sequentialInit[ic.Name] = struct{}{}
 	}
 
-	footprint := make(map[string]PodDeviceFootprint, len(podDeviceClaim))
-	// Fast path: no sequential init container, so every claim is concurrent
-	// and the footprint is a plain per-GPU sum (historical behavior).
+	// Fast path: without a sequential init container every claim is concurrent
+	// (regular containers and sidecars all run together), so the footprint is
+	// the plain per-GPU sum — identical to the historical per-claim accounting.
 	if len(sequentialInit) == 0 {
+		footprint := make(map[string]PodDeviceFootprint, len(podDeviceClaim))
 		for _, containerClaim := range podDeviceClaim {
 			for _, claim := range containerClaim.DeviceClaims {
-				sumConcurrentFootprint(footprint, claim)
+				sumClaimFootprint(footprint, claim)
 			}
 		}
 		return footprint
 	}
 
-	// General path: SUM the concurrent group, MAX the sequential-init group,
-	// then combine the two per dimension by MAX.
-	var initMax map[string]PodDeviceFootprint
+	// General path: bucket claims into the three groups, then combine.
+	regularSum := map[string]PodDeviceFootprint{}
+	sidecarSum := map[string]PodDeviceFootprint{}
+	initMax := map[string]PodDeviceFootprint{}
 	for _, containerClaim := range podDeviceClaim {
-		if _, ok := sequentialInit[containerClaim.Name]; ok {
-			if initMax == nil {
-				initMax = make(map[string]PodDeviceFootprint)
-			}
+		switch {
+		case inNameSet(sequentialInit, containerClaim.Name):
+			// One sequential init container's footprint is the SUM of ITS OWN
+			// claims per GPU (a single running container); take the per-GPU max
+			// across sequential init containers since they never overlap.
+			perInit := map[string]PodDeviceFootprint{}
 			for _, claim := range containerClaim.DeviceClaims {
-				maxSequentialInitFootprint(initMax, claim)
+				sumClaimFootprint(perInit, claim)
 			}
-			continue
-		}
-		for _, claim := range containerClaim.DeviceClaims {
-			sumConcurrentFootprint(footprint, claim)
+			for _, pf := range perInit {
+				maxFootprintInto(initMax, pf)
+			}
+		case inNameSet(sidecar, containerClaim.Name):
+			for _, claim := range containerClaim.DeviceClaims {
+				sumClaimFootprint(sidecarSum, claim)
+			}
+		default:
+			for _, claim := range containerClaim.DeviceClaims {
+				sumClaimFootprint(regularSum, claim)
+			}
 		}
 	}
-	for uuid, im := range initMax {
-		f, ok := footprint[uuid]
-		if !ok {
-			f.Id, f.Uuid = im.Id, im.Uuid
+
+	result := make(map[string]PodDeviceFootprint, len(regularSum)+len(sidecarSum)+len(initMax))
+	combine := func(uuid string) {
+		if _, done := result[uuid]; done {
+			return
 		}
-		f.Number = max(f.Number, im.Number)
-		f.Cores = max(f.Cores, im.Cores)
-		f.Memory = max(f.Memory, im.Memory)
-		footprint[uuid] = f
+		sc, rg, im := sidecarSum[uuid], regularSum[uuid], initMax[uuid]
+		result[uuid] = PodDeviceFootprint{
+			Id:     footprintId(rg, im, sc),
+			Uuid:   uuid,
+			Number: sc.Number + max(rg.Number, im.Number),
+			Cores:  sc.Cores + max(rg.Cores, im.Cores),
+			Memory: sc.Memory + max(rg.Memory, im.Memory),
+		}
 	}
-	return footprint
+	for uuid := range regularSum {
+		combine(uuid)
+	}
+	for uuid := range sidecarSum {
+		combine(uuid)
+	}
+	for uuid := range initMax {
+		combine(uuid)
+	}
+	return result
 }
 
-// sumConcurrentFootprint adds one concurrent (regular/sidecar) claim onto the
-// running per-GPU sum.
-func sumConcurrentFootprint(m map[string]PodDeviceFootprint, claim DeviceClaim) {
+func inNameSet(m map[string]struct{}, name string) bool {
+	_, ok := m[name]
+	return ok
+}
+
+// sumClaimFootprint adds one device claim onto the running per-GPU sum.
+func sumClaimFootprint(m map[string]PodDeviceFootprint, claim DeviceClaim) {
 	f := m[claim.Uuid]
 	f.Id, f.Uuid = claim.Id, claim.Uuid
 	f.Number++
@@ -1133,17 +1175,27 @@ func sumConcurrentFootprint(m map[string]PodDeviceFootprint, claim DeviceClaim) 
 	m[claim.Uuid] = f
 }
 
-// maxSequentialInitFootprint folds one sequential-init claim into the per-GPU
-// max. A single sequential init container occupies at most one vGPU slot on a
-// given card, and sequential inits never overlap each other, so the slot count
-// saturates at one.
-func maxSequentialInitFootprint(m map[string]PodDeviceFootprint, claim DeviceClaim) {
-	f := m[claim.Uuid]
-	f.Id, f.Uuid = claim.Id, claim.Uuid
-	f.Number = max(f.Number, 1)
-	f.Cores = max(f.Cores, claim.Cores)
-	f.Memory = max(f.Memory, claim.Memory)
-	m[claim.Uuid] = f
+// maxFootprintInto folds one per-GPU footprint into the running per-GPU max.
+func maxFootprintInto(m map[string]PodDeviceFootprint, pf PodDeviceFootprint) {
+	f, ok := m[pf.Uuid]
+	if !ok {
+		f.Id, f.Uuid = pf.Id, pf.Uuid
+	}
+	f.Number = max(f.Number, pf.Number)
+	f.Cores = max(f.Cores, pf.Cores)
+	f.Memory = max(f.Memory, pf.Memory)
+	m[pf.Uuid] = f
+}
+
+// footprintId returns the GPU index from the first present footprint (all
+// claims on the same UUID carry the same Id).
+func footprintId(fs ...PodDeviceFootprint) int {
+	for _, f := range fs {
+		if f.Uuid != "" {
+			return f.Id
+		}
+	}
+	return 0
 }
 
 // podHasVGPUInitContainer reports whether any init container requests vGPU.

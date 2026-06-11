@@ -82,6 +82,15 @@ func cont(name string, refs ...corev1.ResourceClaim) corev1.Container {
 	}
 }
 
+// sidecarCont is an init container with restartPolicy: Always (a sidecar),
+// which runs concurrently with the app containers.
+func sidecarCont(name string, refs ...corev1.ResourceClaim) corev1.Container {
+	c := cont(name, refs...)
+	always := corev1.ContainerRestartPolicyAlways
+	c.RestartPolicy = &always
+	return c
+}
+
 // pod assembles a Pod from the given pod-level claims and init/app containers.
 func pod(podClaims []corev1.PodResourceClaim, inits, apps []corev1.Container) *corev1.Pod {
 	return &corev1.Pod{
@@ -190,6 +199,38 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 			pod: pod(
 				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
 				[]corev1.Container{cont("init-a", claimRef("pc-x", ""))},
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+		},
+
+		// ---------------------------------------------------------------
+		// Sidecar (restartable init) overlaps the app phase, so sharing a
+		// vGPU request with an app container is a concurrent conflict, NOT the
+		// allowed init/app cross-phase reuse → error.
+		// ---------------------------------------------------------------
+		{
+			name: "sidecar and app containers share one vGPU request: error",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{sidecarCont("side-a", claimRef("pc-x", ""))},
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+			wantErr: "referenced by multiple app containers",
+		},
+		// ---------------------------------------------------------------
+		// A non-restartable init container may still share with an app
+		// container even when an unrelated sidecar exists on the pod.
+		// ---------------------------------------------------------------
+		{
+			name: "non-restartable init shares with app; unrelated sidecar present: pass",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{
+					sidecarCont("side-a"),
+					cont("init-a", claimRef("pc-x", "")),
+				},
 				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
 			),
 		},

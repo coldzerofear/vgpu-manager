@@ -200,7 +200,15 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 			thisContainerID := containerID(pod, c.Name)
 
 			usage.Pods.Insert(thisPodID)
-			switch c.Kind {
+			// A sidecar (restartable init) runs concurrently with the app
+			// containers, so it must be treated like an app container for
+			// request sharing rather than getting the init/app cross-phase
+			// reuse allowance.
+			kind := c.Kind
+			if c.Restartable {
+				kind = util.ContainerKindApp
+			}
+			switch kind {
 			case util.ContainerKindInit:
 				usage.InitContainers.Insert(thisContainerID)
 				if usage.InitContainers.Len() > 1 {
