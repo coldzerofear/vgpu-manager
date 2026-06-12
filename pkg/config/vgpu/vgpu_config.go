@@ -182,7 +182,7 @@ func (r *ResourceDataT) DeepCopy() *ResourceDataT {
 	return data
 }
 
-func getCompatibilityMode(devManager *manager.DeviceManager) util.CompatibilityMode {
+func GetCompatibilityMode(devManager *manager.DeviceManager) util.CompatibilityMode {
 	mode := util.HostMode
 	switch {
 	case devManager.GetFeatureGate().Enabled(util.ClientMode):
@@ -315,7 +315,7 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		}
 		devices[gpuDevice.Id] = dev
 	}
-	compMode := getCompatibilityMode(devManager)
+	compMode := GetCompatibilityMode(devManager)
 	data := &ResourceDataT{
 		DriverVersion: VersionT{
 			Major: int32(major),
@@ -369,7 +369,7 @@ func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod
 		driverVersion.major = C.int(major)
 		driverVersion.minor = C.int(minor)
 		vgpuConfig.driver_version = driverVersion
-		compMode := getCompatibilityMode(devManager)
+		compMode := GetCompatibilityMode(devManager)
 		vgpuConfig.compatibility_mode = C.int(compMode)
 		if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
 			vgpuConfig.sm_watcher = C.int(1)

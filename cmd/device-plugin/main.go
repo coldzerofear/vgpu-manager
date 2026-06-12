@@ -99,7 +99,6 @@ func main() {
 		klog.Fatalf("Create device manager failed: %v", err)
 	}
 
-	klog.V(3).Info("Starting FS watcher.")
 	devicePluginSocket := filepath.Join(opt.DevicePluginPath, "kubelet.sock")
 	watcher, err := NewFSWatcher(opt.DevicePluginPath)
 	if err != nil {
@@ -107,9 +106,8 @@ func main() {
 	}
 	defer watcher.Close()
 	clusterCtx, cancelFunc := context.WithCancel(context.Background())
-	klog.V(3).Info("Starting OS watcher.")
-	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
+	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	manager, err := ctrm.New(kubeConfig, ctrm.Options{
 		HealthProbeBindAddress: "0", // Disable manager health probe service
 		PprofBindAddress: func() string {
@@ -125,8 +123,13 @@ func main() {
 			// Enable bookmark event adaptation WatchListClient feature.
 			DefaultEnableWatchBookmarks: ptr.To[bool](true),
 			ByObject: map[rtclient.Object]rtcache.ByObject{
+				// Preheat cache in advance.
 				&corev1.Pod{}: {
 					Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
+					Transform: rtcache.TransformStripManagedFields(),
+				},
+				&corev1.Node{}: {
+					Field:     fields.OneTermEqualSelector("metadata.name", opt.NodeName),
 					Transform: rtcache.TransformStripManagedFields(),
 				},
 			},

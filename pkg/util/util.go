@@ -386,18 +386,6 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 	return allocatingPods
 }
 
-func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-	for _, container := range pod.Spec.Containers {
-		if GetResourceOfContainer(&container, VGPUNumberResourceName) > 1 {
-			return true
-		}
-	}
-	return false
-}
-
 func PodPlanSchedulingNode(pod *corev1.Pod) string {
 	if pod == nil {
 		return ""

@@ -123,7 +123,7 @@ func MustInitGlobalDomain(domain string) {
 			globalDomainName = domain
 			initConstants()
 		}
-		klog.Infof("Successfully set the domain name to %s", domain)
+		klog.Infof("Successfully set the domain name to %q", domain)
 	})
 }
 

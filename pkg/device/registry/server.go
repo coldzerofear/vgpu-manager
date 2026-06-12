@@ -342,7 +342,7 @@ func (s *DeviceRegistryServerImpl) lookupTarget(ctx context.Context, req *regist
 		return nil, err
 	}
 	if pod == nil {
-		return nil, fmt.Errorf("pod %s not found", podUID)
+		return nil, fmt.Errorf("pod %q not found", podUID)
 	}
 	return &Target{
 		Candidates: []TargetCandidate{{

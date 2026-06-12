@@ -67,11 +67,11 @@ type vgpuPreempt struct {
 
 var (
 	_           predicate.PreemptPredicate = &vgpuPreempt{}
-	podIndexers                            = cache.Indexers{
+	PodIndexers                            = cache.Indexers{
 		IndexerKeyPodMetadataUid: func(obj interface{}) ([]string, error) {
 			var indexerValues []string
 			if accessor, err := meta.Accessor(obj); err == nil {
-				indexerValues = append(indexerValues, string(accessor.GetUID()))
+				indexerValues = []string{string(accessor.GetUID())}
 			}
 			return indexerValues, nil
 		},
@@ -85,7 +85,7 @@ func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactor
 	podLister client.PodLister, gpuTopology bool) (*vgpuPreempt, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
-	if err := podInformer.AddIndexers(podIndexers); err != nil {
+	if err := podInformer.AddIndexers(PodIndexers); err != nil {
 		return nil, err
 	}
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
