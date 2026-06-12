@@ -88,11 +88,11 @@ const (
 	// maxInFlightResolves caps the total number of register requests resolving
 	// concurrently across all callers; excess requests are rejected fast with
 	// ResourceExhausted instead of queueing (which would hold connections open).
-	maxInFlightResolves = 128
+	maxInFlightResolves = 256
 	// maxPerCallerResolves caps the concurrent register requests from a single
 	// caller (keyed by its real pod UID, or PID when that can't be derived) so
 	// one hijacked container cannot monopolise the global budget.
-	maxPerCallerResolves = 4
+	maxPerCallerResolves = 8
 
 	// gRPC server hardening: the request body is tiny (a few identifiers), and
 	// each container legitimately opens a single short-lived stream.
@@ -212,25 +212,37 @@ func (s *DeviceRegistryServerImpl) IsRunning() bool {
 // container not yet Running, cgroup still ramping up) until the request
 // context is canceled.
 func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, req *registry.ContainerDeviceRequest) (resp *registry.ContainerDeviceResponse, err error) {
-	klog.V(4).InfoS("RegisterContainerDevice",
-		"podUid", req.GetPodUid(),
-		"containerName", req.GetContainerName(),
-		"registerUuid", req.GetRegisterUuid())
+	klog.V(3).InfoS("RegisterContainerDevice", "podUid", req.GetPodUid(),
+		"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid())
+
+	var (
+		release      func()
+		peerPid      int32
+		callerPodUID string
+		callerKey    string
+		pids         []int
+		configDir    string
+	)
+
 	defer func() {
 		if r := recover(); r != nil {
 			stack := string(debug.Stack())
-			klog.ErrorS(fmt.Errorf("unexpected panic in handler: %v\n%s", r, stack),
-				"RegisterContainerDevice panicked",
-				"podUid", req.GetPodUid(),
-				"containerName", req.GetContainerName(),
-				"registerUuid", req.GetRegisterUuid())
+			klog.V(1).ErrorS(fmt.Errorf("unexpected panic in handler: %v\n%s", r, stack),
+				"RegisterContainerDevice panicked", "podUid", req.GetPodUid(),
+				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid())
 			err = fmt.Errorf("internal exception: %v", r)
 		}
+		if release != nil {
+			release()
+		}
 		if err != nil {
-			klog.V(4).ErrorS(err, "RegisterContainerDevice failed",
-				"podUid", req.GetPodUid(),
-				"containerName", req.GetContainerName(),
-				"registerUuid", req.GetRegisterUuid())
+			klog.V(3).ErrorS(err, "RegisterContainerDevice failed", "podUid", req.GetPodUid(),
+				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
+				"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
+		} else {
+			klog.V(4).InfoS("RegisterContainerDevice success", "podUid", req.GetPodUid(),
+				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(), "peerPid", peerPid,
+				"callerPodUID", callerPodUID, "callerKey", callerKey, "configDir", configDir, "pids", pids)
 		}
 	}()
 
@@ -239,23 +251,24 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 	// Authenticate the caller by its kernel-supplied SO_PEERCRED PID and the
 	// pod UID derived from its cgroup. Both may be empty in environments where
 	// they cannot be obtained, in which case the checks downstream fail open.
-	peerPid := peerPidFromContext(ctx)
-	callerPodUID, _ := callerPodUIDFromPid(peerPid)
+	peerPid = peerPidFromContext(ctx)
+	callerPodUID, _ = callerPodUIDFromPid(peerPid)
 
 	// Concurrency budget keyed by caller identity (real pod UID, else PID).
-	callerKey := callerPodUID
+	callerKey = callerPodUID
 	if callerKey == "" {
 		callerKey = fmt.Sprintf("pid:%d", peerPid)
 	}
-	release, ok := s.acquireSlot(callerKey)
+
+	var ok bool
+	release, ok = s.acquireSlot(callerKey)
 	if !ok {
 		klog.V(4).InfoS("register request rejected: concurrency budget exhausted",
 			"callerKey", callerKey, "peerPid", peerPid)
 		return resp, status.Error(codes.ResourceExhausted, "register concurrency budget exhausted, retry later")
 	}
-	defer release()
 
-	configDir, pids, err := s.resolveTarget(ctx, req, peerPid, callerPodUID)
+	configDir, pids, err = s.resolveTarget(ctx, req, peerPid, callerPodUID)
 	if err != nil {
 		return resp, err
 	}
