@@ -590,21 +590,23 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	// When an error occurs, return a fixed format error message
 	// and patch the failed metadata allocation.
 	defer func() {
-		if err == nil {
+		switch {
+		case err == nil:
 			// Last update of cache to ensure timeliness
-			m.podCache.Mutation(currentPod)
+			if currentPod != nil {
+				m.podCache.Mutation(currentPod)
+			}
 			return
-		}
-		if currentPod == nil {
+		case currentPod == nil:
 			klog.V(4).ErrorS(err, util.AllocateCheckErrMsg)
-		} else {
+		default:
 			klog.V(4).ErrorS(err, util.AllocateCheckErrMsg, "pod", klog.KObj(currentPod))
 			if patchErr := client.PatchPodAllocationFailed(m.kubeClient, currentPod); patchErr != nil {
 				klog.ErrorS(patchErr, "Error calling PatchPodAllocationFailed", "pod", klog.KObj(currentPod))
 			}
+			// Last update of cache to ensure timeliness
+			m.podCache.Mutation(currentPod)
 		}
-		// Last update of cache to ensure timeliness
-		m.podCache.Mutation(currentPod)
 		err = fmt.Errorf("%s: %s", util.AllocateCheckErrMsg, err.Error())
 	}()
 
