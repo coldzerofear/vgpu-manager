@@ -335,3 +335,40 @@ func ReducePodFootprint(pod *corev1.Pod, claim device.PodDeviceClaim) map[string
      `checkExistCont`/`PodContainerEnvEnabled`,属运行时端到端集成范畴);在此之前该路径正确但休眠。
 
 > 落地顺序遵循"先让 init 不被忽略且不出错(P0/P1),再追求 K8s 级密度(P2)",每步独立可回归。
+
+---
+
+## 10. 已知限制 / 运行时注意事项(init 容器)
+
+### 10.1 vgpu.config 写入:Allocate 直写为主、PreStartContainer 兜底
+
+kubelet 对**普通(非 sidecar)init 容器**会把其设备 id 放进 `devicesToReuse`,**后续 app 容器复用同一个 kubelet 设备 id**
+(kubelet `devicemanager.Allocate` → `addContainerAllocatedResources`;sidecar 走 `removeContainerAllocatedResources`,**不复用**)。
+
+而设备插件的 `PreStartContainerRequest` **只带设备 id、不带容器名**,旧实现靠 `GetPodByDeviceIDs`(pod-resources/checkpoint)
+**反查容器**——init 与 app 复用同一 id 时反查**有歧义**,导致 init 的 `vgpu.config` 被写到 app 目录、init 目录为空。
+
+**修复**:在 **device-plugin `Allocate` 阶段直接写 `vgpu.config`**——此时通过 PreAlloc 游标(`GetCurrentPreAllocateContainerDevice`,
+init-first 顺序)拿到的**容器名无歧义**,写入 `<podUID>_<containerName>/config/vgpu.config`;`PreStartContainer` 保留为
+**兜底重试**(它写入"反查到的容器"自己的正确配置,即使反查到另一个容器也只是幂等重写、不会污染 Allocate 已写好的目录)。
+> 注意:`GetPreferredAllocation` 与 `Allocate` 都靠**游标(容器顺序)**识别容器,**不受复用歧义影响**;歧义只存在于
+> 靠"设备 id 反查"的 `PreStartContainer`,因此把权威写入点移到 Allocate 即根治。
+
+### 10.2 DCGM 指标归因:仅在 init 与 app 同物理卡时严格对齐(方案 A:接受并文档化)
+
+`GetPreferredAllocation` 的目的是让 kubelet 分配的虚拟设备 id(`uuid::index`)对齐真实物理 GPU UUID,
+便于 **DCGM/dcgm-exporter** 经 kubelet pod-resources 正确归因。但 kubelet 对**完全复用**的 app 容器
+**不回调 `GetPreferredAllocation`**(`devicesToAllocate` 在 `allocateRemainingFrom(reusableDevices)` 处提前返回),
+app 直接**继承 init 的虚拟 id(= init 的物理 UUID)**。因此:
+
+| 情形 | init 卡 vs app 卡 | DCGM 归因 |
+|---|---|---|
+| **常见**(P2 复用偏好命中,init 复用 app 的卡) | **同一张** | **正确** ✓ |
+| **不完美复用**(init 需更多卡 / 装不下 app 的卡 → 落到不同卡) | **不同卡** | app 用量被归到 init 的卡 ✗;且 app 真实卡上无 kubelet slot,DCGM 看不到 |
+
+根因是 **kubelet 的"1 个复用 slot"max 语义无法表达跨物理卡的 Pod**,且对复用 app 不回调 GPA,**无法在插件侧修正**。
+**结论(方案 A)**:接受此限制并文档化——
+- **P2 的复用偏好(init 优先复用 app 的卡)不仅是密度优化,也是 DCGM 对齐的前提**,常见场景下对齐成立;
+- 仅当 init 被迫落到与 app **不同物理卡**(init 比 app 大到装不下、或需要更多卡)的少见场景,app 的 DCGM 归因可能偏差;
+- 容器实际使用的物理卡始终正确(`Allocate` 按 claim UUID 注入 `NVIDIA_VISIBLE_DEVICES`),**仅监控归因受影响,不影响隔离与正确性**。
+- 若 DCGM 准确性为硬指标,后续可考虑让 exporter 改用 vgpu-manager 自有的"容器→物理卡"映射(registry/annotation)作为归因源(方案 C),不在本期范围。

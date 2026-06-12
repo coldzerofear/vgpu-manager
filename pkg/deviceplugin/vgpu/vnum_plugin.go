@@ -890,7 +890,7 @@ func (m *vNumberDevicePlugin) GetPodByDeviceIDs(ctx context.Context, devicesIDs 
 		klog.ErrorS(err, "podCache.GetByKey failed, fallback to checkpoint")
 		return m.GetPodByCheckpoint(ctx, devicesIDs)
 	}
-	if exist {
+	if !exist {
 		return nil, "", apierrors.NewNotFound(corev1.Resource("pods"), podKey.String())
 	}
 	return obj.(*corev1.Pod), podInfo.ContainerName, nil
