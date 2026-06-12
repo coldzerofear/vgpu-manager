@@ -219,6 +219,17 @@ func newPreemptPluginWithSync(t *testing.T, pods []*corev1.Pod, nodes []*corev1.
 		objs = append(objs, n)
 	}
 	k8sClient := fake.NewClientset(objs...)
+	// Advertise the policy/v1 PodDisruptionBudget API so NewPDBLister's version
+	// discovery succeeds, matching any real cluster (>=1.21). Without this the
+	// fake discovery returns nothing and preempt.New fails.
+	k8sClient.Resources = []*metav1.APIResourceList{
+		{
+			GroupVersion: "policy/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "poddisruptionbudgets", Kind: "PodDisruptionBudget", Namespaced: true},
+			},
+		},
+	}
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
 	broadcaster := record.NewBroadcaster()
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
@@ -229,7 +240,7 @@ func newPreemptPluginWithSync(t *testing.T, pods []*corev1.Pod, nodes []*corev1.
 	if err != nil {
 		t.Fatalf("filter.New: %v", err)
 	}
-	plugin, err := New(factory, recorder, filterPlugin.GetPodLister(), true)
+	plugin, err := New(k8sClient, factory, recorder, filterPlugin.GetPodLister(), true)
 	if err != nil {
 		t.Fatalf("preempt.New: %v", err)
 	}

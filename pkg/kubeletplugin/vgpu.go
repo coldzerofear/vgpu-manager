@@ -250,7 +250,7 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 			} else if computePolicy == util.NoneComputePolicy {
 				hardVal = util.HundredCore
 			}
-			if hardVal < util.HundredCore {
+			if hardVal > 0 && hardVal < util.HundredCore {
 				envs = append(envs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, hardVal))
 				envs = append(envs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, softVal))
 			} else {

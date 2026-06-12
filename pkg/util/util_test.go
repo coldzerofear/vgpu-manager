@@ -386,3 +386,68 @@ func assertDNS1123Compatibility(t *testing.T, name string) {
 	assert.True(t, len(name) <= DNS1123NameMaximumLength, "Name length needs to be shorter than %d", DNS1123NameMaximumLength)
 	assert.Regexp(t, dns1123FormatRegexp, name, "Name needs to be in DNS-1123 allowed format")
 }
+
+func Test_CollectableContainerNames(t *testing.T) {
+	always := corev1.ContainerRestartPolicyAlways
+	running := corev1.ContainerStatus{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
+	terminated := corev1.ContainerStatus{State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}}
+	withName := func(s corev1.ContainerStatus, name string) corev1.ContainerStatus { s.Name = name; return s }
+
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+		want []string
+	}{
+		{name: "nil pod", pod: nil, want: nil},
+		{
+			name: "app only",
+			pod: &corev1.Pod{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "app"}},
+			}},
+			want: []string{"app"},
+		},
+		{
+			name: "completed sequential init is excluded",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{{Name: "init"}},
+					Containers:     []corev1.Container{{Name: "app"}},
+				},
+				Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{withName(terminated, "init")}},
+			},
+			want: []string{"app"},
+		},
+		{
+			name: "running sequential init is included, init-first",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{{Name: "init"}},
+					Containers:     []corev1.Container{{Name: "app"}},
+				},
+				Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{withName(running, "init")}},
+			},
+			want: []string{"init", "app"},
+		},
+		{
+			name: "sidecar always included regardless of status",
+			pod: &corev1.Pod{Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{{Name: "side", RestartPolicy: &always}},
+				Containers:     []corev1.Container{{Name: "app"}},
+			}},
+			want: []string{"side", "app"},
+		},
+		{
+			name: "running init-only pod",
+			pod: &corev1.Pod{
+				Spec:   corev1.PodSpec{InitContainers: []corev1.Container{{Name: "init"}}},
+				Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{withName(running, "init")}},
+			},
+			want: []string{"init"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, CollectableContainerNames(tt.pod))
+		})
+	}
+}

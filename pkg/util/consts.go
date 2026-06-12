@@ -52,11 +52,6 @@ var (
 	NodeDeviceTopologyAnnotation  = globalDomainName + "/node-device-topology"
 	NodeConfigInfoAnnotation      = globalDomainName + "/node-config-info"
 
-	// PodIncludeGpuTypeAnnotation Specify the GPU type to be used
-	PodIncludeGpuTypeAnnotation = globalDomainName + "/include-gpu-type"
-	// PodExcludeGpuTypeAnnotation Specify the GPU type to exclude
-	PodExcludeGpuTypeAnnotation = globalDomainName + "/exclude-gpu-type"
-
 	// Scheduling strategies at the node and device levels
 	NodeSchedulerPolicyAnnotation       = globalDomainName + "/node-scheduler-policy"
 	DeviceSchedulerPolicyAnnotation     = globalDomainName + "/device-scheduler-policy"
@@ -70,6 +65,11 @@ var (
 	PodIncludeGPUUUIDAnnotation = globalDomainName + "/include-gpu-uuid"
 	// PodExcludeGPUUUIDAnnotation Specify the GPU UUID to be excluded
 	PodExcludeGPUUUIDAnnotation = globalDomainName + "/exclude-gpu-uuid"
+
+	// PodIncludeGpuTypeAnnotation Specify the GPU type to be used
+	PodIncludeGpuTypeAnnotation = globalDomainName + "/include-gpu-type"
+	// PodExcludeGpuTypeAnnotation Specify the GPU type to exclude
+	PodExcludeGpuTypeAnnotation = globalDomainName + "/exclude-gpu-type"
 
 	PodPredicateNodeAnnotation = globalDomainName + "/predicate-node"
 	PodPredicateTimeAnnotation = globalDomainName + "/predicate-time"
@@ -123,7 +123,7 @@ func MustInitGlobalDomain(domain string) {
 			globalDomainName = domain
 			initConstants()
 		}
-		klog.Infof("Successfully set the domain name to %s", domain)
+		klog.Infof("Successfully set the domain name to %q", domain)
 	})
 }
 

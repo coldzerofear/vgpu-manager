@@ -34,12 +34,15 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
+	policy "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	policyv1 "k8s.io/client-go/listers/policy/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	corev1helpers "k8s.io/component-helpers/scheduling/corev1"
@@ -56,6 +59,7 @@ const (
 type vgpuPreempt struct {
 	nodeLister  listerv1.NodeLister
 	podLister   client.PodLister
+	pdbLister   policyv1.PodDisruptionBudgetLister
 	recorder    record.EventRecorder
 	gpuTopology bool
 	hasSyncFunc func(ctx context.Context) bool
@@ -63,11 +67,11 @@ type vgpuPreempt struct {
 
 var (
 	_           predicate.PreemptPredicate = &vgpuPreempt{}
-	podIndexers                            = cache.Indexers{
+	PodIndexers                            = cache.Indexers{
 		IndexerKeyPodMetadataUid: func(obj interface{}) ([]string, error) {
 			var indexerValues []string
 			if accessor, err := meta.Accessor(obj); err == nil {
-				indexerValues = append(indexerValues, string(accessor.GetUID()))
+				indexerValues = []string{string(accessor.GetUID())}
 			}
 			return indexerValues, nil
 		},
@@ -77,24 +81,30 @@ var (
 // New wires the preempt plugin to the same informer-backed pod lister that
 // the filter plugin uses, so per-node pod lookups go through the indexer that
 // already filters by vGPU resource requests.
-func New(factory informers.SharedInformerFactory, recorder record.EventRecorder,
+func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactory, recorder record.EventRecorder,
 	podLister client.PodLister, gpuTopology bool) (*vgpuPreempt, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
-	if err := podInformer.AddIndexers(podIndexers); err != nil {
+	if err := podInformer.AddIndexers(PodIndexers); err != nil {
 		return nil, err
 	}
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
+	pdbLister, pdbInformer, err := client.NewPDBLister(kubeClient, factory)
+	if err != nil {
+		return nil, err
+	}
 	hasSyncFunc := func(ctx context.Context) bool {
 		return cache.WaitForCacheSync(
 			ctx.Done(),
 			podInformer.HasSynced,
 			nodeInformer.HasSynced,
+			pdbInformer.HasSynced,
 		)
 	}
 	return &vgpuPreempt{
 		nodeLister:  nodeLister,
 		podLister:   podLister,
+		pdbLister:   pdbLister,
 		recorder:    recorder,
 		gpuTopology: gpuTopology,
 		hasSyncFunc: hasSyncFunc,
@@ -487,10 +497,53 @@ func (p *vgpuPreempt) findAdditionalVictims(pod *corev1.Pod, node *corev1.Node,
 		if isProtectedFromPreemption(candidate) {
 			continue
 		}
+
+		if p.violationOfPDBs(candidate) {
+			continue
+		}
+
 		out = append(out, candidate)
 	}
 	sortVictimsByPreference(out)
 	return out
+}
+
+// Check if the pod has been recorded as allowing interrupts
+func isPodAlreadyDisrupted(pod *corev1.Pod, pdb *policy.PodDisruptionBudget) bool {
+	if pod == nil || pdb == nil || pdb.Status.DisruptedPods == nil {
+		return false
+	}
+	_, exists := pdb.Status.DisruptedPods[pod.Name]
+	return exists
+}
+
+// violationOfPDBs Check if the pod violates PDBs constraints
+func (p *vgpuPreempt) violationOfPDBs(pod *corev1.Pod) bool {
+	if p.pdbLister == nil {
+		return false
+	}
+	budgets, err := p.pdbLister.GetPodPodDisruptionBudgets(pod)
+	if err != nil {
+		klog.V(4).ErrorS(err, "Failed to list PDBs; assuming no PDB violation", "pod", klog.KObj(pod))
+		return false
+	}
+
+	for _, pdb := range budgets {
+		if pdb == nil || !pdb.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if isPodAlreadyDisrupted(pod, pdb) {
+			klog.V(5).InfoS("Pod already disrupted, no PDB violation",
+				"pod", klog.KObj(pod), "pdb", klog.KObj(pdb))
+			continue
+		}
+		if pdb.Status.DisruptionsAllowed <= 0 {
+			klog.V(4).InfoS("Preempt: pod matches PDB with zero disruptions allowed",
+				"pod", klog.KObj(pod), "pdb", klog.KObj(pdb))
+			return true
+		}
+	}
+	return false
 }
 
 // passthrough returns the input victim map unchanged. Used when the pod is

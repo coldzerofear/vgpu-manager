@@ -70,11 +70,14 @@ type RequestProfile struct {
 // so per-container consumption is cNum * per-vGPU.
 func NewRequestProfile(pod *corev1.Pod) RequestProfile {
 	var rNum, rMem, rCore float64
-	for i := range pod.Spec.Containers {
-		c := &pod.Spec.Containers[i]
+	// Weights are a ranking heuristic over the pod's overall vGPU shape, so
+	// init containers are folded in alongside app containers (a sum across
+	// both groups). For a pod without init containers this is identical to
+	// the historical app-only weighting.
+	addContainer := func(c *corev1.Container) {
 		cNum := util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
 		if cNum <= 0 {
-			continue
+			return
 		}
 		cCore := util.GetResourceOfContainer(c, util.VGPUCoreResourceName)
 		cMem := util.GetResourceOfContainer(c, util.VGPUMemoryResourceName)
@@ -100,6 +103,12 @@ func NewRequestProfile(pod *corev1.Pod) RequestProfile {
 		case cCore > 0:
 			rCore += float64(cNum) * float64(cCore) / float64(util.HundredCore)
 		}
+	}
+	for i := range pod.Spec.InitContainers {
+		addContainer(&pod.Spec.InitContainers[i])
+	}
+	for i := range pod.Spec.Containers {
+		addContainer(&pod.Spec.Containers[i])
 	}
 	sum := rNum + rMem + rCore
 	if sum == 0 {

@@ -72,7 +72,7 @@ func MustInitCGroupDriver(cgroupDriver string) CGroupDriver {
 			}
 		}
 	})
-	klog.Infof("Current environment cgroup driver is '%s'", currentCGroupDriver)
+	klog.Infof("Current environment recognition cgroup driver is %q", currentCGroupDriver)
 	return currentCGroupDriver
 }
 

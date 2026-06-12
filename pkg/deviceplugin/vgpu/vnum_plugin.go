@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
@@ -21,25 +22,22 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/checkpoint"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
+	cache2 "k8s.io/client-go/tools/cache"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
+	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
 	"k8s.io/utils/pointer"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	client2 "sigs.k8s.io/controller-runtime/pkg/client"
-
-	"k8s.io/client-go/util/retry"
-	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
 type vNumberDevicePlugin struct {
@@ -49,28 +47,43 @@ type vNumberDevicePlugin struct {
 	kubeClient  *kubernetes.Clientset
 	podResource *client.PodResource
 	server      *registry.DeviceRegistryServerImpl
-	cache       cache.Cache
+	kubeCache   cache.Cache
+	podCache    cache2.MutationCache
 }
 
 var _ base.DevicePlugin = &vNumberDevicePlugin{}
 
 // NewVNumberDevicePlugin returns an initialized vNumberDevicePlugin.
 func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.DeviceManager,
-	kubeClient *kubernetes.Clientset, cache cache.Cache) base.DevicePlugin {
-	runtime.Must(cache.IndexField(context.Background(), &corev1.Pod{}, "metadata.uid",
-		func(obj client2.Object) []string { return []string{string(obj.GetUID())} }))
+	kubeClient *kubernetes.Clientset, kubeCache cache.Cache) (base.DevicePlugin, error) {
+	podInformer, err := kubeCache.GetInformer(context.TODO(), &corev1.Pod{}, cache.BlockUntilSynced(false))
+	if err != nil {
+		return nil, fmt.Errorf("get pod informer failed: %v", err)
+	}
+	podIndexer, _, err := util.NewMirrorIndexer(podInformer)
+	if err != nil {
+		return nil, fmt.Errorf("create pod mirror indexer failed: %v", err)
+	}
+	if err = podIndexer.AddIndexers(preempt.PodIndexers); err != nil {
+		return nil, fmt.Errorf("add pod indexers failed: %v", err)
+	}
+	podCache := cache2.NewIntegerResourceVersionMutationCache(
+		klog.Background(), podIndexer, podIndexer, time.Minute, true,
+	)
 	podResource := client.NewPodResource(client.WithCallTimeoutSecond(5))
 	plugin := &vNumberDevicePlugin{
 		baseServer:  base.NewBasePluginServer(resourceName, socket, manager),
 		podResource: podResource,
 		kubeClient:  kubeClient,
-		cache:       cache,
+		kubeCache:   kubeCache,
+		podCache:    podCache,
 	}
+
 	fn := func(ctx context.Context, uid string) (*corev1.Pod, error) {
 		return plugin.getPodByUid(ctx, uid, false)
 	}
 	plugin.server = registry.NewDeviceRegistryServer(ContManagerDirectoryPath, fn, nil)
-	return plugin
+	return plugin, nil
 }
 
 func (m *vNumberDevicePlugin) Name() string {
@@ -578,6 +591,8 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	// and patch the failed metadata allocation.
 	defer func() {
 		if err == nil {
+			// Last update of cache to ensure timeliness
+			m.podCache.Mutation(currentPod)
 			return
 		}
 		if currentPod == nil {
@@ -588,10 +603,21 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 				klog.ErrorS(patchErr, "Error calling PatchPodAllocationFailed", "pod", klog.KObj(currentPod))
 			}
 		}
+		// Last update of cache to ensure timeliness
+		m.podCache.Mutation(currentPod)
 		err = fmt.Errorf("%s: %s", util.AllocateCheckErrMsg, err.Error())
 	}()
 
+	// Real time query of pod results from apiserver
 	if currentPod, err = m.getCurrentPod(ctx); err != nil {
+		return resp, err
+	}
+	// Update cache immediately
+	m.podCache.Mutation(currentPod)
+
+	// Retrieve the current node from the cache
+	currentNode, err := m.getCurrentNode(ctx)
+	if err != nil {
 		return resp, err
 	}
 
@@ -638,9 +664,15 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		response.Envs[util.ContNameEnv] = contClaim.Name
 		response.Envs[util.CudaMemoryRatioEnv] = fmt.Sprintf("%.2f", memoryRatio)
 		response.Envs[util.ExternalSmWatcherEnabled] = "false"
+		response.Envs[util.CudaCoreLimitEnv] = ""
+		response.Envs[util.CudaSoftCoreLimitEnv] = ""
+		response.Envs[util.ManagerClientRegisterUuid] = ""
+		mode := vgpu.GetCompatibilityMode(m.baseServer.GetDeviceManager())
+		response.Envs[util.ManagerCompatibilityMode] = fmt.Sprintf("%v", mode)
 		sort.Slice(contClaim.DeviceClaims, func(i, j int) bool {
 			return contClaim.DeviceClaims[i].Id < contClaim.DeviceClaims[j].Id
 		})
+		policy := vgpu.GetDefaultComputePolicy(currentPod, currentNode)
 		for _, deviceClaim := range contClaim.DeviceClaims {
 			gpuDevice, exists := deviceMap[deviceClaim.Uuid]
 			if !exists {
@@ -653,11 +685,25 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			gpuDevices = append(gpuDevices, manager.Device{GPU: &gpuDevice})
 			memoryLimitEnv := fmt.Sprintf("%s_%d", util.CudaMemoryLimitEnv, gpuDevice.Index)
 			response.Envs[memoryLimitEnv] = fmt.Sprintf("%dm", deviceClaim.Memory)
-			if deviceClaim.Cores > 0 && deviceClaim.Cores < util.HundredCore {
-				coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, gpuDevice.Index)
-				response.Envs[coreLimitEnv] = strconv.FormatInt(deviceClaim.Cores, 10)
+
+			coreLimitEnv := fmt.Sprintf("%s_%d", util.CudaCoreLimitEnv, gpuDevice.Index)
+			softCoreLimitEnv := fmt.Sprintf("%s_%d", util.CudaSoftCoreLimitEnv, gpuDevice.Index)
+			response.Envs[coreLimitEnv] = ""
+			response.Envs[softCoreLimitEnv] = ""
+			switch policy {
+			case util.BalanceComputePolicy:
+				if deviceClaim.Cores > 0 && deviceClaim.Cores < util.HundredCore {
+					response.Envs[coreLimitEnv] = strconv.FormatInt(deviceClaim.Cores, 10)
+					response.Envs[softCoreLimitEnv] = fmt.Sprintf("%v", util.HundredCore)
+				}
+			case util.FixedComputePolicy:
+				if deviceClaim.Cores > 0 && deviceClaim.Cores < util.HundredCore {
+					response.Envs[coreLimitEnv] = strconv.FormatInt(deviceClaim.Cores, 10)
+					response.Envs[softCoreLimitEnv] = response.Envs[coreLimitEnv]
+				}
 			}
 		}
+
 		response.Envs[util.ManagerVisibleDevices] = strings.Join(deviceUuids, ",")
 		UpdateResponseForNodeConfig(response, m.baseServer.GetDeviceManager(), deviceIds...)
 		response.Devices = append(response.Devices, PassDeviceSpecs(gpuDevices, imexChannels)...)
@@ -693,8 +739,8 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		devicesJsonFilePath := filepath.Join(contDir, DeviceListFileName)
 		if err = writeJSONFile(devicesJsonFilePath, containerRequest.GetDevicesIds(), 0o664); err != nil {
 			klog.V(3).ErrorS(err, fmt.Sprintf("write %s failed", DeviceListFileName),
-				"pod", klog.KObj(currentPod), "filePath", devicesJsonFilePath,
-				"container", contClaim.Name, "reqIndex", i, "deviceIDs", containerRequest.GetDevicesIds())
+				"pod", klog.KObj(currentPod), "filePath", devicesJsonFilePath, "container",
+				contClaim.Name, "reqIndex", i, "deviceIDs", containerRequest.GetDevicesIds())
 			return resp, fmt.Errorf("write %s failed: %w", DeviceListFileName, err)
 		}
 
@@ -741,6 +787,27 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			})
 		}
 
+		configDirPath := filepath.Join(contDir, util.Config)
+		configFilePath := filepath.Join(configDirPath, VGPUConfigFileName)
+		// Clean up invalid configuration files that may have been written to the wrong location
+		_ = os.RemoveAll(configFilePath)
+		_ = util.EnsureDir(configDirPath, 0o777)
+		klog.V(4).InfoS(
+			"vGPU config path resolved",
+			"pod", klog.KObj(currentPod),
+			"container", contClaim.Name,
+			"path", configFilePath,
+		)
+
+		// Attempt to write the vgpu configuration file during the Allocate phase,
+		// and if unsuccessful, retry during the PreStartContainer phase
+		oversold := util.PodContainerEnvEnabled(currentPod, contClaim.Name, util.CudaMemoryOversoldEnv)
+		err = vgpu.WriteVGPUConfigFile(configFilePath, m.baseServer.GetDeviceManager(), currentPod, *contClaim, oversold, currentNode)
+		if err != nil {
+			klog.V(3).ErrorS(err, "write vGPU config failed, fallback to the PreStartContainer stage and retry",
+				"pod", klog.KObj(currentPod), "container", contClaim.Name)
+		}
+
 		if err = device.UpdatePodRealContainerDeviceClaim(currentPod, *contClaim); err != nil {
 			klog.V(3).ErrorS(err, "update pod real-allocate device claim failed", "pod",
 				klog.KObj(currentPod), "container", contClaim.Name, "reqIndex", i, "deviceIDs", containerRequest.GetDevicesIds())
@@ -757,102 +824,83 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	return resp, nil
 }
 
-func (m *vNumberDevicePlugin) getPodByUid(ctx context.Context, uid string, deepCopy bool) (*corev1.Pod, error) {
-	var opts []client2.ListOption
-	if deepCopy {
-		opts = []client2.ListOption{client2.MatchingFields{"metadata.uid": uid}}
-	} else {
-		opts = []client2.ListOption{
-			client2.MatchingFields{"metadata.uid": uid},
-			client2.UnsafeDisableDeepCopy,
-		}
-	}
-	podList := corev1.PodList{}
-	if err := m.cache.List(ctx, &podList, opts...); err != nil {
+func (m *vNumberDevicePlugin) getPodByUid(_ context.Context, uid string, deepCopy bool) (*corev1.Pod, error) {
+	objs, err := m.podCache.ByIndex(preempt.IndexerKeyPodMetadataUid, uid)
+	if err != nil {
 		return nil, err
 	}
-	if len(podList.Items) != 1 {
+	if len(objs) != 1 {
 		return nil, apierrors.NewNotFound(corev1.Resource("pods"), "uid "+uid)
 	}
-	return &podList.Items[0], nil
-}
-
-// GetPodInfoByCheckpoint find relevant pod information for devicesIDs in kubelet checkpoint
-func (m *vNumberDevicePlugin) GetPodInfoByCheckpoint(ctx context.Context, devicesIDs []string) (*client.PodInfo, error) {
-	klog.V(3).Infoln("Attempt to retrieve pod information from the device plugin checkpoint")
-	devicePluginPath := m.baseServer.GetDeviceManager().GetNodeConfig().GetDevicePluginPath()
-	checkpointData, err := checkpoint.GetDevicePluginCheckpointData(devicePluginPath)
-	if err != nil {
-		return nil, err
-	}
-	deviceSet := sets.NewString(devicesIDs...)
-	nodeName := m.baseServer.GetDeviceManager().GetNodeConfig().GetNodeName()
-	for _, entry := range checkpointData.PodDeviceEntries {
-		if entry.ResourceName != util.VGPUNumberResourceName || !deviceSet.HasAll(entry.DeviceIDs...) {
-			continue
-		}
-		pod, err := m.getPodByUid(ctx, entry.PodUID, false)
-		if err != nil {
-			return nil, fmt.Errorf("getPodByUid failed: %v", err)
-		}
-		if pod.Spec.NodeName != nodeName || util.PodIsTerminated(pod) || !util.IsVGPUResourcePod(pod) {
-			continue
-		}
-		return &client.PodInfo{
-			PodName:       pod.Name,
-			PodNamespace:  pod.Namespace,
-			ContainerName: entry.ContainerName,
-		}, nil
-	}
-	return nil, fmt.Errorf("pod info not found")
-}
-
-func (m *vNumberDevicePlugin) GetPodInfoByDeviceIDs(ctx context.Context, devicesIDs ...string) (*client.PodInfo, error) {
-	if len(devicesIDs) == 0 {
-		return nil, errors.New("deviceIDs cannot be empty")
-	}
-	resp, err := m.podResource.ListPodResource(ctx)
-	if err != nil {
-		klog.ErrorS(err, "ListPodResource failed, fallback to checkpoint")
-		return m.GetPodInfoByCheckpoint(ctx, devicesIDs)
-	}
-	deviceSet := sets.NewString(devicesIDs...)
-	podInfo, err := m.podResource.GetPodInfoByMatchFunc(resp, func(devices *v1alpha1.ContainerDevices) bool {
-		return devices.GetResourceName() == util.VGPUNumberResourceName && deviceSet.HasAll(devices.GetDeviceIds()...)
-	})
-	if err != nil {
-		klog.ErrorS(err, "GetPodInfoByMatchFunc failed, fallback to checkpoint")
-		return m.GetPodInfoByCheckpoint(ctx, devicesIDs)
-	}
-	return podInfo, nil
-}
-
-func (m *vNumberDevicePlugin) getPodWithRetry(ctx context.Context, namespace, name, rv string) (*corev1.Pod, error) {
-	var (
-		pod *corev1.Pod
-		err error
-	)
-	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-		pod, err = m.kubeClient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{ResourceVersion: rv})
-		return err
-	})
-	if err != nil {
-		return nil, err
+	pod := objs[0].(*corev1.Pod)
+	if deepCopy {
+		return pod.DeepCopy(), nil
 	}
 	return pod, nil
 }
 
-func (m *vNumberDevicePlugin) getNodeWithRetry(ctx context.Context, nodeName, rv string) (*corev1.Node, error) {
-	var (
-		node *corev1.Node
-		err  error
-	)
-	err = retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
-		node, err = m.kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{ResourceVersion: rv})
-		return err
+// GetPodByCheckpoint find relevant pod information for devicesIDs in kubelet checkpoint
+func (m *vNumberDevicePlugin) GetPodByCheckpoint(ctx context.Context, devicesIDs []string) (*corev1.Pod, string, error) {
+	klog.V(3).Infoln("Attempt to retrieve pod information from the device plugin checkpoint")
+	devicePluginPath := m.baseServer.GetDeviceManager().GetNodeConfig().GetDevicePluginPath()
+	checkpointData, err := checkpoint.GetDevicePluginCheckpointData(devicePluginPath)
+	if err != nil {
+		return nil, "", err
+	}
+	deviceSet := sets.NewString(devicesIDs...)
+	nodeName := m.baseServer.GetDeviceManager().GetNodeConfig().GetNodeName()
+	for _, entry := range checkpointData.PodDeviceEntries {
+		if entry.ResourceName != util.VGPUNumberResourceName ||
+			deviceSet.Len() != len(entry.DeviceIDs) || !deviceSet.HasAll(entry.DeviceIDs...) {
+			continue
+		}
+		pod, err := m.getPodByUid(ctx, entry.PodUID, false)
+		if err != nil {
+			return nil, "", fmt.Errorf("GetPodByCheckpoint failed: %v", err)
+		}
+		if pod.Spec.NodeName != nodeName || util.PodIsTerminated(pod) {
+			continue
+		}
+		return pod, entry.ContainerName, nil
+	}
+	return nil, "", fmt.Errorf("pod not found")
+}
+
+func (m *vNumberDevicePlugin) GetPodByDeviceIDs(ctx context.Context, devicesIDs ...string) (*corev1.Pod, string, error) {
+	if len(devicesIDs) == 0 {
+		return nil, "", errors.New("deviceIDs cannot be empty")
+	}
+	resp, err := m.podResource.ListPodResource(ctx)
+	if err != nil {
+		klog.ErrorS(err, "ListPodResource failed, fallback to checkpoint")
+		return m.GetPodByCheckpoint(ctx, devicesIDs)
+	}
+	deviceSet := sets.NewString(devicesIDs...)
+	podInfo, err := m.podResource.GetPodInfoByMatchFunc(resp, func(devices *v1alpha1.ContainerDevices) bool {
+		return devices.GetResourceName() == util.VGPUNumberResourceName &&
+			deviceSet.Len() == len(devices.GetDeviceIds()) && deviceSet.HasAll(devices.GetDeviceIds()...)
 	})
 	if err != nil {
-		return nil, err
+		klog.ErrorS(err, "GetPodInfoByMatchFunc failed, fallback to checkpoint")
+		return m.GetPodByCheckpoint(ctx, devicesIDs)
+	}
+	podKey := cache2.ObjectName{Name: podInfo.PodName, Namespace: podInfo.PodNamespace}
+	obj, exist, err := m.podCache.GetByKey(podKey.String())
+	if err != nil {
+		klog.ErrorS(err, "podCache.GetByKey failed, fallback to checkpoint")
+		return m.GetPodByCheckpoint(ctx, devicesIDs)
+	}
+	if !exist {
+		return nil, "", apierrors.NewNotFound(corev1.Resource("pods"), podKey.String())
+	}
+	return obj.(*corev1.Pod), podInfo.ContainerName, nil
+}
+
+func (m *vNumberDevicePlugin) getCurrentNode(ctx context.Context) (*corev1.Node, error) {
+	node := &corev1.Node{}
+	nodeName := m.baseServer.GetDeviceManager().GetNodeConfig().GetNodeName()
+	if err := m.kubeCache.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+		return nil, fmt.Errorf("get node %q by cache failed: %v", nodeName, err)
 	}
 	return node, nil
 }
@@ -910,59 +958,54 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		}
 	}()
 
-	nodeName := m.baseServer.GetDeviceManager().GetNodeConfig().GetNodeName()
-	// Node does not require timeliness, search from API server cache.
-	node, err := m.getNodeWithRetry(ctx, nodeName, "0")
+	pod, containerName, err := m.GetPodByDeviceIDs(ctx, req.GetDevicesIds()...)
 	if err != nil {
-		klog.ErrorS(err, "get node failed", "node", nodeName)
-		return resp, fmt.Errorf("get node %s failed: %w", nodeName, err)
-	}
-	podInfo, err := m.GetPodInfoByDeviceIDs(ctx, req.GetDevicesIds()...)
-	if err != nil {
-		klog.ErrorS(err, "get pod info failed", "deviceIDs", req.GetDevicesIds())
+		klog.ErrorS(err, "get pod by devices failed", "deviceIDs", req.GetDevicesIds())
 		return resp, err
 	}
-	// Pod ensures timeliness, query from etcd.
-	pod, err := m.getPodWithRetry(ctx, podInfo.PodNamespace, podInfo.PodName, "")
+
+	realClaim, err := getRealContainerDeviceClaim(pod, containerName)
 	if err != nil {
-		klog.ErrorS(err, "get pod failed", "podInfo", podInfo)
-		return resp, fmt.Errorf("get pod %s/%s failed: %w", podInfo.PodNamespace, podInfo.PodName, err)
+		klog.ErrorS(err, "get container real-allocate device claim failed", klog.KObj(pod), "container", containerName)
+		return resp, err
 	}
-	contDir, _ := getContainerManagerPaths(pod.UID, podInfo.ContainerName)
-	devicesFilePath := filepath.Join(contDir, DeviceListFileName)
+
+	contDir, _ := getContainerManagerPaths(pod.GetUID(), containerName)
+	devicesJsonFilePath := filepath.Join(contDir, DeviceListFileName)
 
 	var allocatedDeviceIDs []string
-	if err = readJSONFile(devicesFilePath, &allocatedDeviceIDs); err != nil {
+	if err = readJSONFile(devicesJsonFilePath, &allocatedDeviceIDs); err != nil {
 		klog.V(3).ErrorS(err, fmt.Sprintf("read %s failed", DeviceListFileName),
-			"pod", klog.KObj(pod), "filePath", devicesFilePath)
+			"pod", klog.KObj(pod), "filePath", devicesJsonFilePath)
 		return resp, fmt.Errorf("read %s failed: %w", DeviceListFileName, err)
 	}
 	// Verify if there are any errors in the allocation of container equipment.
 	if !sets.NewString(allocatedDeviceIDs...).Equal(sets.NewString(req.GetDevicesIds()...)) {
 		klog.ErrorS(nil, "inconsistent allocation results of container equipment", "pod", klog.KObj(pod),
-			"container", podInfo.ContainerName, "reqDeviceIDs", req.GetDevicesIds(), "allocatedDeviceIDs", allocatedDeviceIDs)
+			"container", containerName, "reqDeviceIDs", req.GetDevicesIds(), "allocatedDeviceIDs", allocatedDeviceIDs)
 		return resp, fmt.Errorf("inconsistent allocation results of container equipment")
 	}
+
+	// Retrieve the current node from the cache
+	node, err := m.getCurrentNode(ctx)
+	if err != nil {
+		klog.ErrorS(err, "get current node failed")
+		return resp, err
+	}
+
 	configDirPath := filepath.Join(contDir, util.Config)
 	_ = util.EnsureDir(configDirPath, 0o777)
 	configFilePath := filepath.Join(configDirPath, VGPUConfigFileName)
-	klog.V(4).InfoS(
-		"vGPU config path resolved",
+	klog.V(4).InfoS("vGPU config path resolved",
 		"pod", klog.KObj(pod),
-		"container", podInfo.ContainerName,
+		"container", containerName,
 		"path", configFilePath,
 	)
 
-	realClaim, err := getRealContainerDeviceClaim(pod, podInfo.ContainerName)
-	if err != nil {
-		klog.ErrorS(err, "get container real-allocate device claim failed", klog.KObj(pod), "container", podInfo.ContainerName)
-		return resp, err
-	}
-	oversold := util.PodContainerEnvEnabled(pod, podInfo.ContainerName, util.CudaMemoryOversoldEnv)
+	oversold := util.PodContainerEnvEnabled(pod, containerName, util.CudaMemoryOversoldEnv)
 	err = vgpu.WriteVGPUConfigFile(configFilePath, m.baseServer.GetDeviceManager(), pod, *realClaim, oversold, node)
 	if err != nil {
-		klog.V(3).ErrorS(err, "write vGPU config failed",
-			"pod", klog.KObj(pod), "container", podInfo.ContainerName)
+		klog.V(3).ErrorS(err, "write vGPU config failed", "pod", klog.KObj(pod), "container", containerName)
 		return resp, fmt.Errorf("write vGPU config failed: %w", err)
 	}
 
@@ -972,7 +1015,7 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		// the controller can reschedule these pods that cannot be started
 		if err = vgpu.CheckResourceDataSize(configFilePath); err != nil {
 			klog.ErrorS(err, "check resource data size failed", "pod",
-				klog.KObj(pod), "container", podInfo.ContainerName, "filePath", configFilePath)
+				klog.KObj(pod), "container", containerName, "filePath", configFilePath)
 			return resp, fmt.Errorf("check resource data size failed: %w", err)
 		}
 	}
