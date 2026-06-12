@@ -25,13 +25,31 @@ endif()
 
 if(CUDAToolkit_FOUND)
     set(_CUDA_INCLUDE ${CUDAToolkit_INCLUDE_DIRS})
-    set(_CUDA_LIBDIR  ${CUDAToolkit_LIBRARY_DIR})
+    # CUDAToolkit_LIBRARY_DIR may not exist in CUDA 13; derive from known libs
+    if(CUDAToolkit_LIBRARY_DIR)
+        set(_CUDA_LIBDIR ${CUDAToolkit_LIBRARY_DIR})
+    elseif(CUDAToolkit_rt_LIBRARY)
+        get_filename_component(_CUDA_LIBDIR ${CUDAToolkit_rt_LIBRARY} DIRECTORY)
+    elseif(CUDAToolkit_CUDART_LIBRARY)
+        get_filename_component(_CUDA_LIBDIR ${CUDAToolkit_CUDART_LIBRARY} DIRECTORY)
+    else()
+        # Fallback: try common CUDA 12/13 paths
+        if(EXISTS "/usr/local/cuda/targets/x86_64-linux/lib")
+            set(_CUDA_LIBDIR "/usr/local/cuda/targets/x86_64-linux/lib")
+        elseif(EXISTS "/usr/local/cuda/lib64")
+            set(_CUDA_LIBDIR "/usr/local/cuda/lib64")
+        endif()
+    endif()
+    # CUDA 12/13: cudart is found via CUDAToolkit_CUDART_LIBRARY
+    if(CUDAToolkit_CUDART_LIBRARY)
+        set(_CUDART_LIBRARY ${CUDAToolkit_CUDART_LIBRARY})
+    endif()
 else()
     set(_CUDA_INCLUDE ${CUDA_INCLUDE_DIRS})
     set(_CUDA_LIBDIR  ${CUDA_TOOLKIT_ROOT_DIR}/lib64)
 endif()
 
-message(STATUS "[vgpu] test/ using CUDA include=${_CUDA_INCLUDE}")
+message(STATUS "[vgpu] test/ using CUDA include=${_CUDA_INCLUDE} libdir=${_CUDA_LIBDIR}")
 
 # ---- TEST_DEVICE_ID passthrough -------------------------------------------
 if(DEFINED TEST_DEVICE_ID)
@@ -45,7 +63,13 @@ foreach(src ${C_TESTS})
     add_executable(${name} ${src})
     target_include_directories(${name} PRIVATE ${_CUDA_INCLUDE} ${TEST_SRC_DIR})
     target_link_directories(${name} PRIVATE ${_CUDA_LIBDIR})
-    target_link_libraries(${name} PRIVATE cuda nvidia-ml pthread rt)
+    # Link cuda (driver) and cudart (runtime) explicitly since CUDA 12/13
+    # cmake packages may not correctly resolve cudart from 'cuda' target
+    if(_CUDART_LIBRARY)
+        target_link_libraries(${name} PRIVATE cuda "${_CUDART_LIBRARY}" nvidia-ml pthread rt)
+    else()
+        target_link_libraries(${name} PRIVATE cuda cudart nvidia-ml pthread rt)
+    endif()
 endforeach()
 
 # ---- CUDA tests (kernel launches) -----------------------------------------
@@ -69,5 +93,7 @@ add_custom_target(vgpu_copy_test_scripts ALL
             ${TEST_SRC_DIR}/python ${TEST_BIN_DIR}/python
     COMMAND ${CMAKE_COMMAND} -E copy
             ${TEST_SRC_DIR}/run_all_tests.sh ${TEST_BIN_DIR}/run_all_tests.sh
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${TEST_SRC_DIR}/run_tests_with_env.sh ${TEST_BIN_DIR}/run_tests_with_env.sh
     COMMENT "[vgpu] stage python/ + run_all_tests.sh into test build dir"
     VERBATIM)

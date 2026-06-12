@@ -268,7 +268,7 @@ spec:
       # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
       priorityClassName: system-node-critical
       nodeSelector:
-        vgpu-manager-enable: enable
+        vgpu-manager: dra-driver
       serviceAccountName: vgpu-manager-kubelet-plugin
       securityContext: {}
       volumes:

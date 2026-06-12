@@ -21,6 +21,8 @@ BASE_IMG = $(REGISTRY)/vgpu-manager-base:$(TAG)
 APT_MIRROR ?= https://mirrors.aliyun.com
 VERSION ?= $(shell cat VERSION)
 
+CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
+
 # Git info
 GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "Not a git repo")
 GIT_COMMIT := $(shell git rev-parse HEAD 2>/dev/null || echo "Not a git tree")

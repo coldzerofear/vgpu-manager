@@ -27,7 +27,6 @@ static const struct timespec sleep_time = {
   .tv_nsec = SPIN_INTERVAL_MS * MILLISEC,
 };
 
-static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t elapsed_time_ns(const struct timeval *start,
                                 const struct timeval *end) {
   int64_t sec = (int64_t)(end->tv_sec - start->tv_sec);
@@ -35,12 +34,30 @@ static uint64_t elapsed_time_ns(const struct timeval *start,
   return (uint64_t)(sec * 1000000000LL + usec * 1000LL);
 }
 
-static void ensure_create_lock_dir() {
-  pthread_mutex_lock(&mutex);
-  if (access(VGPU_LOCK_PATH, F_OK) != 0) {
-    mkdir(VGPU_LOCK_PATH, 0755);
-  }
-  pthread_mutex_unlock(&mutex);
+/* Idempotent directory create. mkdir(2) is an atomic kernel syscall, so
+ * multiple threads or processes racing on the same path resolve cleanly:
+ * at most one wins with 0, the rest get EEXIST. Treating EEXIST as success
+ * gives the same effect as the previous mutex-guarded access()+mkdir()
+ * pair, with three side benefits:
+ *
+ *   1. Removes a mutex from a hot path (lock_gpu_device runs on every
+ *      memory hook, which fires from every cuLaunch* indirectly).
+ *   2. Removes a held-at-fork hazard -- the old `mutex` had the same
+ *      "parent thread holds it at fork -> child deadlocks forever"
+ *      shape as the four loader.c mutexes already covered by
+ *      loader_child_after_fork(). Eliminating the mutex eliminates
+ *      the hazard rather than papering over it with re-init.
+ *   3. Drops one syscall per call (the access() probe).
+ *
+ * Any errno other than EEXIST (EACCES / ENOSPC / ENOENT on parent dir,
+ * etc.) is propagated implicitly: the open(O_RDWR|O_CREAT) in
+ * try_acquire_lock() below will return -1 with a related errno and
+ * lock_gpu_device's standard failure path handles it -- so no extra
+ * error reporting is needed here. */
+static void ensure_create_lock_dir(void) {
+  if (mkdir(VGPU_LOCK_PATH, 0755) == 0) return;
+  if (errno == EEXIST) return;
+  /* fall through; try_acquire_lock's open() will surface the real error */
 }
 
 static int try_acquire_lock(const char *path) {

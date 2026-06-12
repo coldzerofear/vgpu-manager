@@ -1873,6 +1873,11 @@ typedef struct CUlaunchConfig_st {
   unsigned int blockDimX;
   unsigned int blockDimY;
   unsigned int blockDimZ;
+  unsigned int sharedMemBytes;
+  /* `struct CUstream_st *` is the underlying type of CUstream (cuda-subset.h);
+   * spelled with the tag here because hook.h includes nvml-subset.h before
+   * cuda-subset.h. sharedMemBytes above keeps hStream at the real CUDA offset. */
+  struct CUstream_st *hStream;
 } CUlaunchConfig;
 
 
