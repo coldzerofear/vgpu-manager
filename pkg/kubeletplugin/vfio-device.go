@@ -129,10 +129,18 @@ func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceIn
 }
 
 // Verify there are no VFs on the GPU.
-func (vm *VfioPciManager) verifyDisabledVFs(pcieBusID string) error {
-	gpu, err := vm.nvlib.GetGPUByPciBusID(pcieBusID)
+func (vm *VfioPciManager) verifyDisabledVFs(pciBusID string) error {
+	gpu, err := vm.nvlib.GetGPUByPciBusID(pciBusID)
 	if err != nil {
 		return err
+	}
+	if gpu == nil {
+		return fmt.Errorf("no GPU found at PCI bus ID %q", pciBusID)
+	}
+	// PhysicalFunction is nil for GPUs that do not support SR-IOV (e.g. T400).
+	// A nil PhysicalFunction means no VFs can exist, so it is safe to proceed.
+	if gpu.SriovInfo.PhysicalFunction == nil {
+		return nil
 	}
 	numVFs := gpu.SriovInfo.PhysicalFunction.NumVFs
 	if numVFs > 0 {
