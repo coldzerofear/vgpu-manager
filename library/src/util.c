@@ -415,10 +415,10 @@ static int compare_pids(const void *a, const void *b) {
   return (pid1 > pid2) - (pid1 < pid2);
 }
 
-int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size) {
+int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids) {
   if (!file_path || !pids || !pids_size) {
     LOGGER(ERROR, "invalid NULL parameter");
-    *pids_size = 0;
+    if (pids_size) *pids_size = 0;
     return -1;
   }
 
@@ -427,7 +427,8 @@ int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size) {
     return -1;
   }
 
-  FILE *fp = fopen(file_path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  FILE *fp = fopen(file_path, "re");
   if (!fp) {
     LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
     *pids_size = 0;
@@ -452,14 +453,16 @@ int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size) {
     pids[actual_count++] = (int)pid;
   }
 
-  if (actual_count > 0) {
-    qsort(pids, actual_count, sizeof(int), compare_pids);
+  if (sort_pids && actual_count > 0) {
+    qsort(pids, (size_t)actual_count, sizeof(int), compare_pids);
   }
 
   *pids_size = actual_count;
+
   if (!feof(fp) && actual_count >= max_size) {
-    LOGGER(WARNING, "PID array full, only stored %d PIDs", max_size);
+    LOGGER(WARNING, "PID array full, only stored %d PIDs from %s", max_size, file_path);
   }
+
   fclose(fp);
   return 0;
 }

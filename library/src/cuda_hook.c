@@ -56,7 +56,7 @@ extern int pid_exist(int pid);
 extern int file_exist(const char *);
 extern int device_pid_in_same_container(unsigned int pid);
 extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
-extern int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size);
+extern int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids);
 
 /* SM throttle controller selection (see util.c). Defaults preserve stock
  * behaviour when env is unset. */
@@ -1567,15 +1567,28 @@ static int int_compare(const void *a, const void *b) {
   return (*pa > *pb) - (*pa < *pb);
 }
 
-int check_device_pid_in_ordered_container_pids(unsigned int device_pid, int *container_pids, int pids_size) {
-  int ret = -1;
+#define PID_LINEAR_SEARCH_THRESHOLD 20
+
+static inline int pid_linear_search(unsigned int key, const int *arr, int size) {
+  for (int i = 0; i < size; i++) {
+    if ((unsigned int)arr[i] == key) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int check_device_pid_in_ordered_container_pids(unsigned int device_pid, const int *container_pids, int pids_size) {
   if (device_pid == 0 || !container_pids || pids_size <= 0) {
-    return ret;
+    return -1;
   }
-  if (bsearch(&device_pid, container_pids, (size_t)pids_size, sizeof(int), int_compare)) {
-    ret = 0;
+  int found;
+  if (pids_size <= PID_LINEAR_SEARCH_THRESHOLD) {
+    found = pid_linear_search(device_pid, container_pids, pids_size);
+  } else {
+    found = (bsearch(&device_pid, container_pids, (size_t)pids_size, sizeof(int), int_compare) != NULL);
   }
-  return ret;
+  return found ? 0 : -1;
 }
 
 int check_device_pid_in_local_container_pid(unsigned int device_pid) {
@@ -1608,7 +1621,8 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
     int pids_on_container[pids_size];
-    get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size);
+    // Normally, the server has already sorted the PID list during device registration, so there is no need to sort it again here.
+    get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size, 0);
     if (unlikely(pids_size == 0)) {
       LOGGER(FATAL, "unable to find registered container process");
     }
@@ -1940,7 +1954,8 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
     int pids_on_container[MAX_PIDS];
-    get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size);
+    // Normally, the server has already sorted the PID list during device registration, so there is no need to sort it again here.
+    get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size, 0);
     if (likely(pids_size > 0)) {
       int matchClientMode = 0;
       for (i = 0; i < processes_num; i++) {
