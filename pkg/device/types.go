@@ -14,6 +14,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
@@ -41,15 +42,12 @@ func (nci NodeConfigInfo) Encode() (string, error) {
 
 func (nci *NodeConfigInfo) Decode(val string) error {
 	if nci == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	if strings.TrimSpace(val) == "" {
 		return fmt.Errorf("input value is empty")
 	}
-	if err := json.Unmarshal([]byte(val), nci); err != nil {
-		return err
-	}
-	return nil
+	return json.Unmarshal([]byte(val), nci)
 }
 
 func (nci *NodeConfigInfo) Clone() framework.StateData {
@@ -74,7 +72,7 @@ func (nti NodeTopologyInfo) Encode() (string, error) {
 
 func (nti *NodeTopologyInfo) Decode(val string) error {
 	if nti == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	nodeTopoInfo, err := ParseNodeTopology(val)
 	if err != nil {
@@ -121,13 +119,13 @@ func (n NodeDeviceInfo) Encode() (string, error) {
 
 func (n *NodeDeviceInfo) Decode(val string) error {
 	if n == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
-	nodeDevice, err := ParseNodeDeviceInfo(val)
+	parsed, err := ParseNodeDeviceInfo(val)
 	if err != nil {
 		return err
 	}
-	*n = nodeDevice
+	*n = parsed
 	return nil
 }
 
@@ -140,7 +138,7 @@ func ParseNodeDeviceInfo(val string) (NodeDeviceInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(nodeDevices) > 0 {
+	if len(nodeDevices) > 1 {
 		sort.Slice(nodeDevices, func(i, j int) bool {
 			return nodeDevices[i].Id < nodeDevices[j].Id
 		})
@@ -148,12 +146,22 @@ func ParseNodeDeviceInfo(val string) (NodeDeviceInfo, error) {
 	return nodeDevices, nil
 }
 
+// Clone returns a shallow copy of the slice.
+// NOTE: DeviceInfo contains only value types and strings,
+// so this is effectively a deep copy. If pointer/slice/map
+// fields are added to DeviceInfo in the future, this method
+// must be updated to perform a true deep copy.
+func (n *NodeDeviceInfo) Clone() framework.StateData {
+	device := slices.Clone(*n)
+	return &device
+}
+
 type ContainerDeviceClaim struct {
 	Name         string        `json:"name"`
 	DeviceClaims []DeviceClaim `json:"deviceClaims"`
 }
 
-func (cdc *ContainerDeviceClaim) MarshalText() (string, error) {
+func (cdc ContainerDeviceClaim) MarshalText() (string, error) {
 	var devs []string
 	for _, deviceClaim := range cdc.DeviceClaims {
 		text, err := deviceClaim.MarshalText()
@@ -168,7 +176,7 @@ func (cdc *ContainerDeviceClaim) MarshalText() (string, error) {
 
 func (cdc *ContainerDeviceClaim) UnmarshalText(text string) error {
 	if cdc == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
@@ -182,12 +190,13 @@ func (cdc *ContainerDeviceClaim) UnmarshalText(text string) error {
 	if endIndex < 0 || endIndex != len(text)-1 {
 		return fmt.Errorf("decoding format error")
 	}
-	dcs := make([]DeviceClaim, 0)
-	for _, subText := range strings.Split(text[startIndex+1:len(text)-1], ",") {
+	split := strings.Split(text[startIndex+1:endIndex], ",")
+	dcs := make([]DeviceClaim, 0, len(split))
+	for _, subText := range split {
 		if len(subText) == 0 {
 			continue
 		}
-		dc := DeviceClaim{}
+		var dc DeviceClaim
 		if err := dc.UnmarshalText(subText); err != nil {
 			return err
 		}
@@ -205,17 +214,13 @@ type DeviceClaim struct {
 	Memory int64  `json:"memory"`
 }
 
-func (dc *DeviceClaim) MarshalText() (string, error) {
-	if dc == nil {
-		return "", fmt.Errorf("self is empty")
-	}
-	return fmt.Sprintf("%d_%s_%d_%d",
-		dc.Id, dc.Uuid, dc.Cores, dc.Memory), nil
+func (dc DeviceClaim) MarshalText() (string, error) {
+	return fmt.Sprintf("%d_%s_%d_%d", dc.Id, dc.Uuid, dc.Cores, dc.Memory), nil
 }
 
 func (dc *DeviceClaim) UnmarshalText(text string) error {
 	if dc == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
@@ -246,13 +251,10 @@ func (dc *DeviceClaim) UnmarshalText(text string) error {
 
 type PodDeviceClaim []ContainerDeviceClaim
 
-func (pdc *PodDeviceClaim) MarshalText() (string, error) {
+func (pdc PodDeviceClaim) MarshalText() (string, error) {
 	// "cont1['%d_%s_%d_%d','%d_%s_%d_%d'];cont2[]"
-	if pdc == nil || len(*pdc) == 0 {
-		return "", fmt.Errorf("self is empty")
-	}
-	texts := make([]string, len(*pdc))
-	for i, contClaim := range *pdc {
+	texts := make([]string, len(pdc))
+	for i, contClaim := range pdc {
 		text, err := contClaim.MarshalText()
 		if err != nil {
 			return "", err
@@ -264,7 +266,7 @@ func (pdc *PodDeviceClaim) MarshalText() (string, error) {
 
 func (pdc *PodDeviceClaim) UnmarshalText(text string) error {
 	if pdc == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
@@ -287,26 +289,25 @@ func (pdc *PodDeviceClaim) UnmarshalText(text string) error {
 }
 
 func UpdatePodRealContainerDeviceClaim(pod *corev1.Pod, cdc ContainerDeviceClaim) error {
-	pdc := PodDeviceClaim{}
-	val, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
-	if val != "" {
+	var pdc PodDeviceClaim
+	if val, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation); len(val) > 0 {
 		if err := pdc.UnmarshalText(val); err != nil {
 			klog.Warningf("decoding pod real container device claim failed: %v", err)
 		}
 	}
 	pdc = append(pdc, cdc)
-	val, err := pdc.MarshalText()
-	if err != nil {
+	if val, err := pdc.MarshalText(); err != nil {
 		return fmt.Errorf("encoding pod real container device claim failed: %v", err)
+	} else {
+		util.InsertAnnotation(pod, util.PodVGPURealAllocAnnotation, val)
+		return nil
 	}
-	util.InsertAnnotation(pod, util.PodVGPURealAllocAnnotation, val)
-	return nil
 }
 
 // GetCurrentPreAllocateContainerDevice find the device information pre allocated to the current container.
 func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClaim, error) {
 	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
-	preAllocPodDevices := PodDeviceClaim{}
+	var preAllocPodDevices PodDeviceClaim
 	if err := preAllocPodDevices.UnmarshalText(preAlloc); err != nil {
 		return nil, fmt.Errorf("parse pre assign devices failed: %v", err)
 	}
@@ -324,8 +325,7 @@ func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClai
 		exist := slices.ContainsFunc(pod.Spec.InitContainers, matchName) ||
 			slices.ContainsFunc(pod.Spec.Containers, matchName)
 		if !exist {
-			return fmt.Errorf("container <%s> does not exist in pod <%s/%s>",
-				contName, pod.Namespace, pod.Name)
+			return fmt.Errorf("container %q does not exist in pod %s", contName, klog.KObj(pod))
 		}
 		return nil
 	}
@@ -336,7 +336,7 @@ func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClai
 		}
 		return &preAllocPodDevices[0], nil
 	}
-	realAllocPodDevices := PodDeviceClaim{}
+	var realAllocPodDevices PodDeviceClaim
 	if err := realAllocPodDevices.UnmarshalText(realAlloc); err != nil {
 		return nil, fmt.Errorf("parse real assign devices failed: %v", err)
 	}
@@ -427,20 +427,30 @@ type DeviceGatherInfo struct {
 }
 
 func NewNodeDeviceGatherInfo(node *corev1.Node, option *NodeInfoOption) (*DeviceGatherInfo, error) {
-	deviceRegister, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
-	nodeDeviceInfo, err := ParseNodeDeviceInfo(deviceRegister)
-	if err != nil || len(nodeDeviceInfo) == 0 {
-		klog.V(2).ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
-		return nil, errors.New("incorrect GPU registry")
+	var nodeDeviceInfo NodeDeviceInfo
+	if option != nil && option.nodeDevice != nil {
+		nodeDeviceInfo = *option.nodeDevice
+	} else {
+		deviceRegister, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
+		if !ok || len(deviceRegister) == 0 {
+			return nil, errors.New(reason.New(reason.NodeNoVGPURegister).Short())
+		}
+		if err := nodeDeviceInfo.Decode(deviceRegister); err != nil {
+			klog.V(2).ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
+			return nil, errors.New(reason.New(reason.NodeBadVGPURegister).Short())
+		}
 	}
 	var nodeConfigInfo NodeConfigInfo
 	if option != nil && option.nodeConfig != nil {
 		nodeConfigInfo = *option.nodeConfig
 	} else {
-		nodeConfig, _ := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
-		if err = nodeConfigInfo.Decode(nodeConfig); err != nil {
+		nodeConfig, ok := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
+		if !ok || len(nodeConfig) == 0 {
+			return nil, errors.New(reason.New(reason.NodeNoVGPUConfig).Short())
+		}
+		if err := nodeConfigInfo.Decode(nodeConfig); err != nil {
 			klog.V(2).ErrorS(err, "parse node config information failed", "node", node.Name, "value", nodeConfig)
-			return nil, errors.New("incorrect GPU configuration")
+			return nil, errors.New(reason.New(reason.NodeBadVGPUConfig).Short())
 		}
 	}
 	deviceGatherInfo := DeviceGatherInfo{
@@ -465,8 +475,8 @@ func NewNodeDeviceGatherInfo(node *corev1.Node, option *NodeInfoOption) (*Device
 			klog.V(3).InfoS("node does not have device topology information", "node", node.Name)
 			return &deviceGatherInfo, nil
 		}
-		nodeTopology, err := ParseNodeTopology(topoValue)
-		if err != nil {
+		var nodeTopology NodeTopologyInfo
+		if err := nodeTopology.Decode(topoValue); err != nil {
 			klog.V(3).ErrorS(err, "parse node device topology info failed", "node", node.Name, "topologyVal", topoValue)
 		}
 		for _, deviceTopoInfo := range nodeTopology {
@@ -713,6 +723,7 @@ type NodeInfoOption struct {
 	excludedUidSet     sets.Set[types.UID]
 	nodePods           []*corev1.Pod
 	nodeConfig         *NodeConfigInfo
+	nodeDevice         *NodeDeviceInfo
 	gpuTopologyEnabled bool
 }
 
@@ -724,9 +735,15 @@ func WithGPUTopologyEnabled(flag bool) NodeInfoOptionFn {
 	}
 }
 
-func WithNodeConfig(config *NodeConfigInfo) NodeInfoOptionFn {
+func WithNodeDevice(info *NodeDeviceInfo) NodeInfoOptionFn {
 	return func(o *NodeInfoOption) {
-		o.nodeConfig = config
+		o.nodeDevice = info
+	}
+}
+
+func WithNodeConfig(info *NodeConfigInfo) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		o.nodeConfig = info
 	}
 }
 
