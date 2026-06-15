@@ -2092,7 +2092,6 @@ int load_controller_configuration() {
       pthread_mutex_unlock(&init_config_mutex);
       LOGGER(FATAL, "mmap vmem nodes file failed");
     }
-    check_cleanup_vmem_nodes();
     if (atexit(exit_cleanup_handler) != 0) {
       LOGGER(ERROR ,"register exit handler failed: %d", errno);
     }
@@ -2104,6 +2103,8 @@ int load_controller_configuration() {
     // Note: SIGKILL and SIGSTOP cannot be caught
     LOGGER(VERBOSE, "registered cleanup handlers for signals");
   }
+  // Ensure that the cleaning function can be called once every time the child process is forked.
+  check_cleanup_vmem_nodes();
 
   if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     LOGGER(VERBOSE, "register to remote manager: uid: %s, uuid: %s", g_vgpu_config->pod_uid, g_vgpu_config->reg_uuid);

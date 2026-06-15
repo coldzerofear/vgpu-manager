@@ -279,25 +279,25 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 	policy = strings.ToLower(strings.TrimSpace(policy))
 	if policy == util.VirtualMemoryPolicy.String() || strings.HasPrefix(policy, "virt") {
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.VirtualMemoryPolicy)
-		return func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
-			if info.MemoryScaling <= 1 {
+		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
+			if config.MemoryScaling <= 1 {
 				return reason.New(reason.NodeMemoryTypeMismatch).
-					WithDetail("requires virtual memory but node memoryScaling=%v", info.MemoryScaling)
+					WithDetail("requires virtual memory but node memoryScaling=%v", config.MemoryScaling)
 			}
 			return nil
 		}
 	}
 	if policy == util.PhysicalMemoryPolicy.String() || strings.HasPrefix(policy, "phy") {
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.PhysicalMemoryPolicy)
-		return func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
-			if info.MemoryScaling > 1 {
+		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
+			if config.MemoryScaling > 1 {
 				return reason.New(reason.NodeMemoryTypeMismatch).
-					WithDetail("requires physical memory but node memoryScaling=%v", info.MemoryScaling)
+					WithDetail("requires physical memory but node memoryScaling=%v", config.MemoryScaling)
 			}
 			return nil
 		}
 	}
-	return func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
+	return func(_ *corev1.Node, _ *device.NodeDeviceInfo, _ *device.NodeConfigInfo) *reason.FilterReason {
 		return nil
 	}
 }
@@ -305,7 +305,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 // CheckNodeFunc is one node-level gate. Returning nil means the gate
 // accepted the node; returning a non-nil *reason.FilterReason means the
 // node fails the gate with the given structured cause.
-type CheckNodeFunc func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason
+type CheckNodeFunc func(node *corev1.Node, device *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason
 
 // CheckNode runs the built-in node prerequisites plus any caller-
 // supplied gates. Returns the first failing reason, or nil if every
@@ -314,18 +314,24 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 	if !util.IsVGPUEnabledNode(node) {
 		return reason.New(reason.NodeNotVGPUEnabled)
 	}
-	if val, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation); !ok || len(val) == 0 {
+	devRegister, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
+	if !ok || len(devRegister) == 0 {
 		klog.V(3).InfoS("node has not registered any GPU devices", "node", node.Name)
 		return reason.New(reason.NodeNoVGPURegister)
 	}
+	var nodeDeviceInfo device.NodeDeviceInfo
+	if err := nodeDeviceInfo.Decode(devRegister); err != nil {
+		klog.V(3).ErrorS(err, "decoding node device information failed", "node", node.Name)
+		return reason.New(reason.NodeBadVGPURegister).WithDetail("%v", err)
+	}
 	devConfigInfo, ok := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
 	if !ok || len(devConfigInfo) == 0 {
-		return reason.New(reason.NodeNoGPUConfig)
+		return reason.New(reason.NodeNoVGPUConfig)
 	}
-	nodeConfigInfo := device.NodeConfigInfo{}
+	var nodeConfigInfo device.NodeConfigInfo
 	if err := nodeConfigInfo.Decode(devConfigInfo); err != nil {
 		klog.V(3).ErrorS(err, "decoding node configuration information failed", "node", node.Name)
-		return reason.New(reason.NodeBadGPUConfig).WithDetail("%v", err)
+		return reason.New(reason.NodeBadVGPUConfig).WithDetail("%v", err)
 	}
 	if nodeConfigInfo.DeviceSplit <= 0 {
 		return reason.New(reason.NodeNotVGPUEnabled).WithDetail("deviceSplit=%d", nodeConfigInfo.DeviceSplit)
@@ -334,7 +340,7 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 		return reason.New(reason.NodeBadMemoryFactor).WithDetail("memoryFactor=%d", nodeConfigInfo.MemoryFactor)
 	}
 	for _, checkFunc := range checkNodeFuncs {
-		if r := checkFunc(node, &nodeConfigInfo); r != nil {
+		if r := checkFunc(node, &nodeDeviceInfo, &nodeConfigInfo); r != nil {
 			return r
 		}
 	}
@@ -353,17 +359,31 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationReq
 	memoryPolicyFunc := GetMemoryPolicyFunc(req.Pod)
 	for i, node := range nodes {
 		var nodeConfig *device.NodeConfigInfo
-		if r := CheckNode(&node, memoryPolicyFunc, func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
-			nodeConfig = info
+		var nodeDevice *device.NodeDeviceInfo
+		if r := CheckNode(&node, memoryPolicyFunc, func(
+			node *corev1.Node,
+			device *device.NodeDeviceInfo,
+			config *device.NodeConfigInfo) *reason.FilterReason {
+			nodeConfig = config
+			nodeDevice = device
 			return nil
 		}); r != nil {
 			failed[node.Name] = r
 		} else {
-			state.Write(framework.StateKey(node.Name), nodeConfig)
+			state.Write(nodeDeviceKey(node.Name), nodeDevice)
+			state.Write(nodeConfigKey(node.Name), nodeConfig)
 			filteredNodes = append(filteredNodes, nodes[i])
 		}
 	}
 	return filteredNodes, failed, nil
+}
+
+func nodeDeviceKey(nodeName string) framework.StateKey {
+	return framework.StateKey(nodeName + "-device")
+}
+
+func nodeConfigKey(nodeName string) framework.StateKey {
+	return framework.StateKey(nodeName + "-config")
 }
 
 func (f *gpuFilter) CheckDeviceRequest(req *allocator.AllocationRequest) error {
@@ -480,10 +500,14 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 				device.WithExcludedPods(pod.UID),
 				device.WithGPUTopologyEnabled(f.gpuTopology),
 			}
-			read, _ := state.Read(framework.StateKey(node.Name))
-			if read != nil {
+			if read, _ := state.Read(nodeConfigKey(node.Name)); read != nil {
 				if nodeConfig, ok := read.(*device.NodeConfigInfo); ok {
 					opts = append(opts, device.WithNodeConfig(nodeConfig))
+				}
+			}
+			if read, _ := state.Read(nodeDeviceKey(node.Name)); read != nil {
+				if nodeDevice, ok := read.(*device.NodeDeviceInfo); ok {
+					opts = append(opts, device.WithNodeDevice(nodeDevice))
 				}
 			}
 			nodeInfo, err := device.NewNodeInfo(node, opts...)

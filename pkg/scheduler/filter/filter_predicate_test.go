@@ -565,7 +565,7 @@ func Test_NodeFilter(t *testing.T) {
 			},
 			filterNodes: []corev1.Node{},
 			wantPrimary: map[string]reason.Code{
-				"testnode": reason.NodeNoGPUConfig,
+				"testnode": reason.NodeNoVGPUConfig,
 			},
 		},
 		{
@@ -591,7 +591,7 @@ func Test_NodeFilter(t *testing.T) {
 			},
 			filterNodes: []corev1.Node{},
 			wantPrimary: map[string]reason.Code{
-				"testnode": reason.NodeBadGPUConfig,
+				"testnode": reason.NodeBadVGPUConfig,
 			},
 		},
 		{
@@ -653,7 +653,37 @@ func Test_NodeFilter(t *testing.T) {
 			},
 		},
 		{
-			name: "example5, incorrect GPU memory factor",
+			name: "example5, incorrect node vGPU device registry",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{},
+					Name:        "testpod",
+					Namespace:   namespace,
+				},
+			},
+			nodes: []corev1.Node{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "testnode",
+						Annotations: map[string]string{
+							util.NodeConfigInfoAnnotation: func() string {
+								config := device.NodeConfigInfo{}
+								encode, _ := config.Encode()
+								return encode
+							}(),
+							util.NodeDeviceRegisterAnnotation: "xxx",
+						},
+					},
+					Status: nodeStatus,
+				},
+			},
+			filterNodes: []corev1.Node{},
+			wantPrimary: map[string]reason.Code{
+				"testnode": reason.NodeBadVGPURegister,
+			},
+		},
+		{
+			name: "example6, incorrect GPU memory factor",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{},
@@ -683,7 +713,7 @@ func Test_NodeFilter(t *testing.T) {
 			},
 		},
 		{
-			name: "example6, no gpu virtual memory nodes",
+			name: "example7, no gpu virtual memory nodes",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -719,7 +749,7 @@ func Test_NodeFilter(t *testing.T) {
 			},
 		},
 		{
-			name: "example7, no gpu physical memory nodes",
+			name: "example8, no gpu physical memory nodes",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -755,7 +785,7 @@ func Test_NodeFilter(t *testing.T) {
 			},
 		},
 		{
-			name: "example8, success",
+			name: "example9, success",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{},
