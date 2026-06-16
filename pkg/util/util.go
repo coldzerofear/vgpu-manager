@@ -282,7 +282,7 @@ func IsShouldDeletePod(pod *corev1.Pod) bool {
 		return true
 	}
 	if len(pod.Status.ContainerStatuses) > MaxContainerLimit {
-		klog.Error("The number of container exceeds the upper limit")
+		klog.ErrorS(nil, "The number of container exceeds the upper limit", "pod", klog.KObj(pod))
 		return true
 	}
 	for _, status := range pod.Status.ContainerStatuses {

@@ -176,6 +176,9 @@ func PatchPodAllocationFailed(kubeClient kubernetes.Interface, pod *corev1.Pod) 
 func PatchPodPreAllocatedMetadata(kubeClient kubernetes.Interface, pod *corev1.Pod) error {
 	nodeName := pod.Annotations[util.PodPredicateNodeAnnotation]
 	preAlloc := pod.Annotations[util.PodVGPUPreAllocAnnotation]
+	if len(preAlloc) > util.PodAnnotationMaxLength {
+		return fmt.Errorf("pre allocated device value is too long")
+	}
 	// Stamp the current Filter wall-clock time. ShouldCountPodDeviceAllocation
 	// uses this as both:
 	//   - the "filter ran after condition was set" signal (compared against

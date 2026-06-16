@@ -120,8 +120,21 @@ type CycleState interface {
 	Delete(key framework.StateKey)
 }
 
+func NodeNames(args extenderv1.ExtenderArgs) []string {
+	var names []string
+	if args.Nodes != nil {
+		names = make([]string, len(args.Nodes.Items))
+		for i, item := range args.Nodes.Items {
+			names[i] = item.GetName()
+		}
+	} else if args.NodeNames != nil {
+		names = *args.NodeNames
+	}
+	return names
+}
+
 func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
-	klog.V(4).InfoS("FilterNode", "ExtenderArgs", args)
+	klog.V(4).InfoS("FilterNode", "pod", klog.KObj(args.Pod), "nodeNames", NodeNames(args))
 	pod := args.Pod
 	if pod == nil {
 		return &extenderv1.ExtenderFilterResult{
@@ -468,6 +481,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 
 	// Ensure that the context has not timed out
 	if err := ctx.Err(); err != nil {
+		klog.V(3).ErrorS(err, "Context error", "pod", klog.KObj(pod))
 		return filteredNodes, failed, err
 	}
 
@@ -679,17 +693,12 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		}
 		// Ensure that the context has not timed out
 		if err := ctx.Err(); err != nil {
+			klog.V(3).ErrorS(err, "Context error", "pod", klog.KObj(pod))
 			return filteredNodes, failed, err
 		}
 		if err = client.PatchPodPreAllocatedMetadata(f.kubeClient, newPod); err != nil {
 			klog.ErrorS(err, "patch vGPU metadata failed", "pod", klog.KObj(pod), "node", node.Name)
-			// Treat as a node-level rejection rather than an aborted Filter:
-			// other nodes may still succeed. Use NodeInfoBuildFailed as the
-			// closest existing code (it's "the node side broke") with the
-			// underlying error in Detail for klog/debug.
-			failed[node.Name] = reason.New(reason.NodeInfoBuildFailed).
-				WithDetail("patch vGPU metadata failed: %v", err)
-			continue
+			return filteredNodes, failed, err
 		}
 		// Cache the patched Pod locally to bridge the informer watch lag.
 		// Concurrent Filter calls on neighbouring pods would otherwise rebuild

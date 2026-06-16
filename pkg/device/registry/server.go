@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime/debug"
 	"slices"
 	"sort"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	"unsafe"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/registry"
@@ -225,20 +225,21 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 	)
 
 	defer func() {
-		if r := recover(); r != nil {
-			stack := string(debug.Stack())
-			klog.V(1).ErrorS(fmt.Errorf("unexpected panic in handler: %v\n%s", r, stack),
-				"RegisterContainerDevice panicked", "podUid", req.GetPodUid(),
-				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid())
-			err = fmt.Errorf("internal exception: %v", r)
-		}
+		runtime.RecoverFromPanic(&err)
 		if release != nil {
 			release()
 		}
 		if err != nil {
-			klog.V(3).ErrorS(err, "RegisterContainerDevice failed", "podUid", req.GetPodUid(),
-				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
-				"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
+			if strings.HasPrefix(err.Error(), "recovered from panic") {
+				klog.ErrorS(err, "RegisterContainerDevice panicked", "podUid", req.GetPodUid(),
+					"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
+					"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
+				err = fmt.Errorf("an internal error has occurred")
+			} else {
+				klog.V(3).ErrorS(err, "RegisterContainerDevice failed", "podUid", req.GetPodUid(),
+					"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
+					"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
+			}
 		} else {
 			klog.V(4).InfoS("RegisterContainerDevice success", "podUid", req.GetPodUid(),
 				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(), "peerPid", peerPid,

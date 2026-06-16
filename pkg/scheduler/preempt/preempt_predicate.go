@@ -119,13 +119,36 @@ func (p *vgpuPreempt) IsReady(ctx context.Context) bool {
 	return p.hasSyncFunc(ctx)
 }
 
+func NodeVictims(args extenderv1.ExtenderPreemptionArgs) map[string]*extenderv1.MetaVictims {
+	if len(args.NodeNameToMetaVictims) > 0 {
+		return args.NodeNameToMetaVictims
+	}
+	nodeVictims := make(map[string]*extenderv1.MetaVictims, len(args.NodeNameToVictims))
+	for node, victims := range args.NodeNameToVictims {
+		if victims == nil {
+			continue
+		}
+		metaVictims := extenderv1.MetaVictims{
+			Pods:             make([]*extenderv1.MetaPod, len(victims.Pods)),
+			NumPDBViolations: victims.NumPDBViolations,
+		}
+		for i, pod := range victims.Pods {
+			metaVictims.Pods[i] = &extenderv1.MetaPod{
+				UID: string(pod.GetUID()),
+			}
+		}
+		nodeVictims[node] = &metaVictims
+	}
+	return nodeVictims
+}
+
 // Preempt iterates the candidate nodes in-tree proposed and, for each, asks
 // our allocator whether the pending pod can fit after the proposed victims
 // are removed. If yes, we keep the set (modulo protected pods). If not, we
 // search for additional lower-priority victims on that node until the
 // allocator accepts; if no such set exists, we drop the node.
 func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreemptionArgs) *extenderv1.ExtenderPreemptionResult {
-	klog.V(4).InfoS("PreemptPod", "ExtenderPreemptionArgs", args)
+	klog.V(4).InfoS("PreemptPod", "pod", klog.KObj(args.Pod), "nodeVictims", NodeVictims(args))
 	pod := args.Pod
 	if pod == nil {
 		klog.V(4).InfoS("Preempt called with nil pod, passing input through")
