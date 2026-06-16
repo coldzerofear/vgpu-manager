@@ -379,7 +379,7 @@ func (p *vgpuPreempt) refineForNode(req *allocator.AllocationRequest, nodeName s
 		if v == nil {
 			continue
 		}
-		if isProtectedFromPreemption(v) {
+		if isProtectedFromPreemption(v, req.GangName) {
 			klog.V(4).InfoS("Preempt: refusing to evict protected pod proposed by in-tree", "pod", klog.KObj(v), "node", nodeName)
 			continue
 		}
@@ -398,7 +398,7 @@ func (p *vgpuPreempt) refineForNode(req *allocator.AllocationRequest, nodeName s
 	// Second pass: in-tree under-selected (likely because per-device or
 	// annotation constraints invisible to it require more victims). Walk the
 	// remaining lower-priority pods on this node and greedily add until fit.
-	additional := p.findAdditionalVictims(req.Pod, node, allVGPUPods, excludedUidSet)
+	additional := p.findAdditionalVictims(req, node, allVGPUPods, excludedUidSet)
 	for _, cand := range additional {
 		excludedUidSet.Insert(cand.UID)
 		keep = append(keep, cand)
@@ -447,8 +447,8 @@ func pdbViolationsUpperBound(originalCount int64, keptLen, addedLen int) int64 {
 // excludedPods mechanism already used during the filter re-allocation path.
 func (p *vgpuPreempt) canAllocate(req *allocator.AllocationRequest, nodeInfo *device.NodeInfo,
 	allVGPUPods []*corev1.Pod, excludedUidSet sets.Set[k8stypes.UID]) bool {
-	nodeInfo.ResetResourceUsage()
-	nodeInfo.AddPodsUsedResources(allVGPUPods, device.WithExcludedUidSet(excludedUidSet))
+	nodeInfo.AddPodsUsedResources(allVGPUPods, device.WithExcludedUidSet(excludedUidSet),
+		device.WithResetPods(true), device.WithResetUsed(true))
 
 	// Preempt only cares about "would this pod fit?", not why it might
 	// not. Both a structured reason (node would still reject) and a real
@@ -498,13 +498,13 @@ func (p *vgpuPreempt) canAllocate(req *allocator.AllocationRequest, nodeInfo *de
 // preemption response. Stuck pods that occupy predicate-node without ever
 // binding cannot be evicted through this path — they must be reclaimed by a
 // separate controller or by the existing fresh-window grace mechanism.
-func (p *vgpuPreempt) findAdditionalVictims(pod *corev1.Pod, node *corev1.Node,
+func (p *vgpuPreempt) findAdditionalVictims(req *allocator.AllocationRequest, node *corev1.Node,
 	allVGPUPods []*corev1.Pod, excludedUidSet sets.Set[k8stypes.UID]) []*corev1.Pod {
 
-	preemptorPriority := corev1helpers.PodPriority(pod)
+	preemptorPriority := corev1helpers.PodPriority(req.Pod)
 	out := make([]*corev1.Pod, 0)
 	for _, candidate := range allVGPUPods {
-		if candidate.UID == pod.UID {
+		if candidate.UID == req.Pod.UID {
 			continue
 		}
 		if excludedUidSet.Has(candidate.UID) {
@@ -517,7 +517,7 @@ func (p *vgpuPreempt) findAdditionalVictims(pod *corev1.Pod, node *corev1.Node,
 		if corev1helpers.PodPriority(candidate) >= preemptorPriority {
 			continue
 		}
-		if isProtectedFromPreemption(candidate) {
+		if isProtectedFromPreemption(candidate, req.GangName) {
 			continue
 		}
 
@@ -646,7 +646,7 @@ func passthrough(args extenderv1.ExtenderPreemptionArgs) *extenderv1.ExtenderPre
 //     additional victims anyway; this check still defends against a race
 //     where in-tree's proposed victims include a pod that just entered
 //     bind state during our processing.
-func isProtectedFromPreemption(pod *corev1.Pod) bool {
+func isProtectedFromPreemption(pod *corev1.Pod, gangName string) bool {
 	if pod.DeletionTimestamp != nil {
 		return true
 	}
@@ -661,6 +661,12 @@ func isProtectedFromPreemption(pod *corev1.Pod) bool {
 	}
 	if pod.Spec.NodeName == "" && device.ShouldCountPodDeviceAllocation(pod) {
 		return true
+	}
+	// Avoid seizing resources from brother pods
+	if gangName != "" {
+		if name, _ := util.PodHasGangName(pod); gangName == name {
+			return true
+		}
 	}
 	return false
 }

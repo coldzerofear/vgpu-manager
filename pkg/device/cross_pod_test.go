@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // gangPod builds a pod that PodHasGangName recognises (via the coscheduling
@@ -137,7 +138,7 @@ func Test_GangAnchorComponent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			n := twoComponentNode(tc.pods...)
-			root, ok := n.GangAnchorComponent(tc.gang, self)
+			root, ok := n.GangAnchorComponent(tc.gang, sets.New(self))
 			if ok != tc.wantOK || root != tc.wantRoot {
 				t.Fatalf("GangAnchorComponent(%q) = (%d, %v), want (%d, %v)",
 					tc.gang, root, ok, tc.wantRoot, tc.wantOK)
@@ -150,7 +151,7 @@ func Test_GangAnchorComponent_UnknownUUIDIgnored(t *testing.T) {
 	// A sibling pre-allocated a card the node doesn't know about (UUID not in
 	// linkComponentByUUID) contributes no vote and must not anchor.
 	n := twoComponentNode(gangPod("sib", "gangA", "node1", claimText("ghost")))
-	if root, ok := n.GangAnchorComponent("gangA", types.UID("self")); ok || root != -1 {
+	if root, ok := n.GangAnchorComponent("gangA", sets.New(types.UID("self"))); ok || root != -1 {
 		t.Fatalf("unknown-uuid sibling: got (%d, %v), want (-1, false)", root, ok)
 	}
 }

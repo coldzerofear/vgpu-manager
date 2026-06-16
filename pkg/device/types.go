@@ -737,14 +737,28 @@ type NodeInfoOption struct {
 	nodePods           []*corev1.Pod
 	nodeConfig         *NodeConfigInfo
 	nodeDevice         *NodeDeviceInfo
+	resetUsed          bool
+	resetPods          bool
 	gpuTopologyEnabled bool
 }
 
 type NodeInfoOptionFn func(*NodeInfoOption)
 
-func WithGPUTopologyEnabled(flag bool) NodeInfoOptionFn {
+func WithGPUTopologyEnabled(b bool) NodeInfoOptionFn {
 	return func(o *NodeInfoOption) {
-		o.gpuTopologyEnabled = flag
+		o.gpuTopologyEnabled = b
+	}
+}
+
+func WithResetUsed(b bool) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		o.resetUsed = b
+	}
+}
+
+func WithResetPods(b bool) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		o.resetPods = b
 	}
 }
 
@@ -809,7 +823,7 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 		gpuTopology:    gatherInfo.EnabledGPUTopology,
 		numaTopology:   gatherInfo.EnabledNumaAffinity,
 		NodeConfigInfo: gatherInfo.NodeConfigInfo,
-		nodePods:       infoOption.nodePods,
+		nodePods:       make([]*corev1.Pod, 0, len(infoOption.nodePods)),
 	}
 	// Precompute topology fitness signals so the node-level sort can ask
 	// "can this node fit a group of N GPUs?" in O(1). These are constants for
@@ -1073,20 +1087,25 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 }
 
 func (n *NodeInfo) AddPodsUsedResources(pods []*corev1.Pod, opts ...NodeInfoOptionFn) {
-	if len(pods) > 0 {
-		infoOption := &NodeInfoOption{}
-		for _, opt := range opts {
-			opt(infoOption)
-		}
-		if infoOption.excludedUidSet == nil {
-			infoOption.excludedUidSet = sets.New[types.UID]()
-		}
-		util.PodsOnNodeCallback(pods, n.node, func(pod *corev1.Pod) {
-			if !infoOption.excludedUidSet.Has(pod.UID) {
-				n.AddPodUsedResources(pod)
-			}
-		})
+	infoOption := &NodeInfoOption{}
+	for _, opt := range opts {
+		opt(infoOption)
 	}
+	if infoOption.excludedUidSet == nil {
+		infoOption.excludedUidSet = sets.New[types.UID]()
+	}
+	if infoOption.resetPods {
+		n.nodePods = make([]*corev1.Pod, 0, len(pods))
+	}
+	if infoOption.resetUsed {
+		n.resetResourceUsage()
+	}
+	util.PodsOnNodeCallback(pods, n.node, func(pod *corev1.Pod) {
+		if !infoOption.excludedUidSet.Has(pod.UID) {
+			n.nodePods = append(n.nodePods, pod)
+			n.AddPodUsedResources(pod)
+		}
+	})
 }
 
 // PodDeviceFootprint is the peak occupancy a pod imposes on a SINGLE physical
@@ -1327,7 +1346,7 @@ func (n *NodeInfo) AddPodUsedResources(pod *corev1.Pod) {
 	}
 }
 
-func (n *NodeInfo) ResetResourceUsage() {
+func (n *NodeInfo) resetResourceUsage() {
 	n.usedNumber, n.usedCores, n.usedMemory = 0, 0, 0
 	for _, deviceInfo := range n.deviceMap {
 		deviceInfo.ResetUsed()
@@ -1625,13 +1644,13 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string {
 // more than one component (connectivity already degraded — e.g. an earlier
 // sibling fell back across components), the majority component is chosen and the
 // split is logged at V(3) rather than failing here.
-func (n *NodeInfo) GangAnchorComponent(gangName string, self types.UID) (int, bool) {
+func (n *NodeInfo) GangAnchorComponent(gangName string, excludedSet sets.Set[types.UID]) (int, bool) {
 	if gangName == "" || len(n.linkComponentByUUID) == 0 || len(n.nodePods) == 0 {
 		return -1, false
 	}
 	votes := make(map[int]int)
 	for _, p := range n.nodePods {
-		if p == nil || p.UID == self {
+		if p == nil || excludedSet.Has(p.UID) {
 			continue
 		}
 		if name, ok := util.PodHasGangName(p); !ok || name != gangName {

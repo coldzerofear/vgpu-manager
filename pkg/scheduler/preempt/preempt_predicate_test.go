@@ -113,6 +113,14 @@ func allocatePodOn(pod *corev1.Pod, nodeName string, deviceID int, deviceUUID st
 
 type podOpt func(*corev1.Pod)
 
+func withPodGroupName(name string) podOpt {
+	return func(pod *corev1.Pod) {
+		pod.Spec.SchedulingGroup = &corev1.PodSchedulingGroup{
+			PodGroupName: &name,
+		}
+	}
+}
+
 func withPriority(p int32) podOpt {
 	return func(pod *corev1.Pod) {
 		v := p
@@ -332,10 +340,16 @@ func Test_isProtectedFromPreemption(t *testing.T) {
 			}(),
 			want: true,
 		},
+		{
+			name: "Brother pods in the same group are protected",
+			pod:  newVGPUPod("p", "ns", 1, withPriority(10), withNodeName("node1"), withPodGroupName("group1")),
+			want: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isProtectedFromPreemption(tt.pod))
+			groupName, _ := util.PodHasGangName(tt.pod)
+			assert.Equal(t, tt.want, isProtectedFromPreemption(tt.pod, groupName))
 		})
 	}
 }

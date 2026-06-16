@@ -11,6 +11,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
@@ -408,7 +409,7 @@ func (alloc *allocator) allocateByTopologyMode(
 		// or this is the gang's first pod here) → unchanged single-pod link path.
 		anchorRoot := -1
 		if CrossPodLinkTopologyEnabled() && req.GangName != "" {
-			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, req.Pod.UID); ok {
+			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, sets.New(req.Pod.UID)); ok {
 				anchorRoot = root
 			}
 		}
