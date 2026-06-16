@@ -83,6 +83,15 @@ type AllocationRequest struct {
 	Topology       util.TopologyMode
 	TopologyStrict bool
 
+	// GangName is the gang/pod-group identifier this pod belongs to, parsed
+	// once via util.PodHasGangName (which understands coscheduling / Volcano /
+	// Koordinator / native dialects). Empty for non-gang pods. Node-independent
+	// (same for every candidate node), so it lives on the shared request rather
+	// than per-node context. Used by cross-pod NVLink allocation to resolve the
+	// component a gang's sibling pods already occupy on a node; non-gang pods
+	// (empty value) never enter the anchor path, so their behaviour is unchanged.
+	GangName string
+
 	// Profile is the pod's request-weighted scoring profile. Captured
 	// here so the filter and the allocator score with identical weights
 	// for the same pod — see profile.go for the rationale.
@@ -207,6 +216,7 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		req.NodePolicy, req.rawNodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
 		req.DevicePolicy, req.rawDevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
 		req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
+		req.GangName, _ = util.PodHasGangName(pod)
 		req.Profile = NewRequestProfile(pod)
 
 		_, ok1 := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation)

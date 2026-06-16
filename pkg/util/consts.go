@@ -295,15 +295,16 @@ func (p MemorySchedulerPolicy) String() string {
 
 // FeatureGates
 const (
-	CorePlugin       = "CorePlugin"       // GPUCoreResourcePlugin
-	MemoryPlugin     = "MemoryPlugin"     // GPUMemoryResourcePlugin
-	Reschedule       = "Reschedule"       // AllocationFailureReschedule
-	GPUTopology      = "GPUTopology"      // GPUTopologyAwareAllocation
-	SMWatcher        = "SMWatcher"        // SharedSMUtilizationWatcher
-	SerialBindNode   = "SerialBindNode"   // SerializedNodeBind
-	SerialFilterNode = "SerialFilterNode" // SerializedNodeFilter
-	VMemoryNode      = "VMemoryNode"      // VGPUMemoryTracking
-	ClientMode       = "ClientMode"       // DevicePluginClientMode
+	CorePlugin           = "CorePlugin"           // GPUCoreResourcePlugin
+	MemoryPlugin         = "MemoryPlugin"         // GPUMemoryResourcePlugin
+	Reschedule           = "Reschedule"           // AllocationFailureReschedule
+	GPUTopology          = "GPUTopology"          // GPUTopologyAwareAllocation
+	CrossPodLinkTopology = "CrossPodLinkTopology" // CrossPodNVLinkAffinity
+	SMWatcher            = "SMWatcher"            // SharedSMUtilizationWatcher
+	SerialBindNode       = "SerialBindNode"       // SerializedNodeBind
+	SerialFilterNode     = "SerialFilterNode"     // SerializedNodeFilter
+	VMemoryNode          = "VMemoryNode"          // VGPUMemoryTracking
+	ClientMode           = "ClientMode"           // DevicePluginClientMode
 )
 
 const (

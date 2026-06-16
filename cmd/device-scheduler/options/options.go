@@ -57,14 +57,19 @@ const (
 	SerialFilterNode featuregate.Feature = util.SerialFilterNode
 	// GPUTopology feature gate will consider topology structure when allocating devices.
 	GPUTopology featuregate.Feature = util.GPUTopology
+	// CrossPodLinkTopology feature gate keeps same-gang pods within one NVLink
+	// connected component on a node (cross-pod NVLink affinity). Requires
+	// GPUTopology; off by default and only affects gang pods using link topology.
+	CrossPodLinkTopology featuregate.Feature = util.CrossPodLinkTopology
 )
 
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		SerialBindNode:   {Default: true, PreRelease: featuregate.Beta},
-		SerialFilterNode: {Default: true, PreRelease: featuregate.Beta},
-		GPUTopology:      {Default: false, PreRelease: featuregate.Alpha},
+		SerialBindNode:       {Default: true, PreRelease: featuregate.Beta},
+		SerialFilterNode:     {Default: true, PreRelease: featuregate.Beta},
+		GPUTopology:          {Default: false, PreRelease: featuregate.Alpha},
+		CrossPodLinkTopology: {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 

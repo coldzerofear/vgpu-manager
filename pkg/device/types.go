@@ -657,6 +657,7 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 	// tests.
 	if ret.gpuTopology {
 		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(ret.deviceList)
+		ret.componentToUUIDs = buildComponentIndex(ret.linkComponentByUUID)
 	}
 	ret.numaTopology = false
 	for _, d := range devices {
@@ -716,6 +717,18 @@ type NodeInfo struct {
 	// node. Equivalent role to maxLinkComponentSize for NUMA-mode sorting.
 	// Zero when numaTopology is false.
 	maxNUMAGroupSize int
+	// componentToUUIDs is the reverse of linkComponentByUUID: component-root
+	// index → the UUIDs of every GPU in that NVLink-connected component. Built
+	// alongside linkComponentByUUID; lets cross-pod anchor logic enumerate
+	// "which cards live in component C" without scanning the whole map.
+	// Nil/empty when gpuTopology is false.
+	componentToUUIDs map[int][]string
+	// nodePods is the set of pods scheduled (or pre-allocated) to this node,
+	// as injected via WithNodePods. Retained — not just consumed for usage
+	// accounting in AddPodsUsedResources — so cross-pod allocation can resolve
+	// a gang's already-chosen NVLink component on this node. Read-only after
+	// construction.
+	nodePods []*corev1.Pod
 	NodeConfigInfo
 }
 
@@ -796,12 +809,14 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 		gpuTopology:    gatherInfo.EnabledGPUTopology,
 		numaTopology:   gatherInfo.EnabledNumaAffinity,
 		NodeConfigInfo: gatherInfo.NodeConfigInfo,
+		nodePods:       infoOption.nodePods,
 	}
 	// Precompute topology fitness signals so the node-level sort can ask
 	// "can this node fit a group of N GPUs?" in O(1). These are constants for
 	// the lifetime of the NodeInfo snapshot.
 	if ret.gpuTopology {
 		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(gatherInfo.DeviceList)
+		ret.componentToUUIDs = buildComponentIndex(ret.linkComponentByUUID)
 	}
 	if ret.numaTopology {
 		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(gatherInfo.DeviceMap)
@@ -888,6 +903,22 @@ func computeLinkComponents(devices gpuallocator.DeviceList) (max int, byUUID map
 	return max, byUUID
 }
 
+// buildComponentIndex inverts linkComponentByUUID (UUID → component root) into
+// componentToUUIDs (component root → member UUIDs). Built once at NodeInfo
+// construction so cross-pod anchor logic can enumerate a component's cards in
+// O(component size) instead of scanning the whole node. Returns nil for an
+// empty/nil input so the field stays nil on non-topology nodes.
+func buildComponentIndex(byUUID map[string]int) map[int][]string {
+	if len(byUUID) == 0 {
+		return nil
+	}
+	byComponent := make(map[int][]string, len(byUUID))
+	for uuid, root := range byUUID {
+		byComponent[root] = append(byComponent[root], uuid)
+	}
+	return byComponent
+}
+
 // computeMaxNUMAGroupSize returns the largest count of GPUs sharing one NUMA
 // node. Devices with NUMA index < 0 (unknown) are not grouped — they don't
 // contribute to any NUMA-locality guarantee.
@@ -923,6 +954,11 @@ func (n *NodeInfo) DeepCopy() *NodeInfo {
 	nodeInfo.deviceIndexMap = maps.Clone(n.deviceIndexMap)
 	nodeInfo.deviceList = slices.Clone(n.deviceList)
 	nodeInfo.linkComponentByUUID = maps.Clone(n.linkComponentByUUID)
+	// componentToUUIDs and nodePods are read-only snapshots; clone the top-level
+	// container (consistent with linkComponentByUUID above) while sharing the
+	// immutable member slices / pod pointers.
+	nodeInfo.componentToUUIDs = maps.Clone(n.componentToUUIDs)
+	nodeInfo.nodePods = slices.Clone(n.nodePods)
 	return &nodeInfo
 }
 
@@ -1568,6 +1604,86 @@ func (n *NodeInfo) AreDevicesLinked(uuids []string) bool {
 		}
 	}
 	return true
+}
+
+// ComponentUUIDs returns the UUIDs of every GPU in the given NVLink component
+// (root index from linkComponentByUUID), or nil for an unknown root. Used by
+// cross-pod allocation to window the candidate set to an anchored component.
+func (n *NodeInfo) ComponentUUIDs(root int) []string {
+	return n.componentToUUIDs[root]
+}
+
+// GangAnchorComponent resolves the NVLink component that this gang's sibling
+// pods have already pre-allocated on this node, so a later sibling can keep its
+// GPUs in the same connected component. Returns (root, true) when at least one
+// live sibling pre-allocation maps to a known component; (-1, false) for the
+// gang's first pod on the node, for non-gang pods, or on non-topology nodes —
+// in which case the caller takes the unchanged, non-anchored path.
+//
+// Only siblings whose pre-allocation still counts (ShouldCountPodDeviceAllocation)
+// vote, matching the usage accounting that built this NodeInfo. If siblings span
+// more than one component (connectivity already degraded — e.g. an earlier
+// sibling fell back across components), the majority component is chosen and the
+// split is logged at V(3) rather than failing here.
+func (n *NodeInfo) GangAnchorComponent(gangName string, self types.UID) (int, bool) {
+	if gangName == "" || len(n.linkComponentByUUID) == 0 || len(n.nodePods) == 0 {
+		return -1, false
+	}
+	votes := make(map[int]int)
+	for _, p := range n.nodePods {
+		if p == nil || p.UID == self {
+			continue
+		}
+		if name, ok := util.PodHasGangName(p); !ok || name != gangName {
+			continue
+		}
+		if !ShouldCountPodDeviceAllocation(p) {
+			continue
+		}
+		for _, uuid := range podPreAllocatedUUIDs(p) {
+			if root, ok := n.linkComponentByUUID[uuid]; ok {
+				votes[root]++
+			}
+		}
+	}
+	if len(votes) == 0 {
+		return -1, false
+	}
+	bestRoot, bestVotes := -1, 0
+	for root, v := range votes {
+		if v > bestVotes || (v == bestVotes && (bestRoot == -1 || root < bestRoot)) {
+			bestRoot, bestVotes = root, v
+		}
+	}
+	if len(votes) > 1 {
+		klog.V(3).Infof("gang %q anchor split across %d NVLink components on node %s; using majority root %d",
+			gangName, len(votes), n.name, bestRoot)
+	}
+	return bestRoot, true
+}
+
+// podPreAllocatedUUIDs extracts the GPU UUIDs from a pod's pre-allocated device
+// annotation. Returns nil when the annotation is absent or unparsable (a
+// malformed sibling simply doesn't vote — never an error that blocks the pod
+// being scheduled).
+func podPreAllocatedUUIDs(pod *corev1.Pod) []string {
+	val, ok := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
+	if !ok || len(val) == 0 {
+		return nil
+	}
+	var pdc PodDeviceClaim
+	if err := pdc.UnmarshalText(val); err != nil {
+		return nil
+	}
+	var uuids []string
+	for _, cdc := range pdc {
+		for _, dc := range cdc.DeviceClaims {
+			if dc.Uuid != "" {
+				uuids = append(uuids, dc.Uuid)
+			}
+		}
+	}
+	return uuids
 }
 
 // MaxNUMAGroupSize returns the largest number of GPUs sharing a single NUMA

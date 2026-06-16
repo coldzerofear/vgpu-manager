@@ -402,8 +402,18 @@ func (alloc *allocator) allocateByTopologyMode(
 
 	switch req.Topology {
 	case util.LinkTopology:
-		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v)", pod.Namespace, pod.Name, strict)
-		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, req.DevicePolicy, strict, needNumber, needCores, needMemory); ok {
+		// Cross-pod anchor: when enabled and this pod belongs to a gang, find the
+		// NVLink component a sibling already pre-allocated on this node so we keep
+		// this pod's GPUs connected to them. -1 = no anchor (non-gang, gate off,
+		// or this is the gang's first pod here) → unchanged single-pod link path.
+		anchorRoot := -1
+		if CrossPodLinkTopologyEnabled() && req.GangName != "" {
+			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, req.Pod.UID); ok {
+				anchorRoot = root
+			}
+		}
+		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v, anchorComponent=%d)", pod.Namespace, pod.Name, strict, anchorRoot)
+		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, req.DevicePolicy, strict, anchorRoot, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
 		if rsn := alloc.handleTopologyFallback(pod, strict,
@@ -472,12 +482,26 @@ const linkTopKCandidates = 5
 
 func (alloc *allocator) allocateLink(
 	deviceStore []*device.Device, profile RequestProfile, policy util.SchedulerPolicy,
-	strict bool, needNumber int, needCores, needMemory int64,
+	strict bool, anchorRoot int, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
 	}
 	devices, _ := alloc.nodeInfo.GetDeviceList().Filter(getDeviceUUIDs(deviceStore))
+
+	// Cross-pod anchor windowing: restrict candidates to the NVLink component a
+	// gang sibling already occupies on this node, so this pod stays connected to
+	// them. If the window holds enough cards, select within it; if not, strict
+	// rejects the node (can't keep the gang connected) while non-strict falls
+	// back to the full candidate set — byte-for-byte the single-pod behaviour.
+	// anchorRoot < 0 (non-gang, first sibling, or gate off) skips this entirely.
+	if anchorRoot >= 0 {
+		if windowed := alloc.windowToComponent(devices, anchorRoot); len(windowed) >= needNumber {
+			devices = windowed
+		} else if strict {
+			return nil, false
+		}
+	}
 
 	// Fast path: no device policy → take the link-best set (cheapest path,
 	// matches pre-Phase-A behaviour). Uses the threshold-aware AllocateLink
@@ -538,6 +562,28 @@ func gpuallocatorUUIDs(devices []*gpuallocator.Device) []string {
 		uuids[i] = d.UUID
 	}
 	return uuids
+}
+
+// windowToComponent keeps only the devices whose UUID belongs to the given
+// NVLink component root (from the NodeInfo's precomputed component index).
+// Returns a new slice; nil for an unknown/empty component. Used by allocateLink
+// to narrow the candidate set to a gang's anchored component.
+func (alloc *allocator) windowToComponent(devices gpuallocator.DeviceList, root int) gpuallocator.DeviceList {
+	members := alloc.nodeInfo.ComponentUUIDs(root)
+	if len(members) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(members))
+	for _, u := range members {
+		set[u] = struct{}{}
+	}
+	out := make(gpuallocator.DeviceList, 0, len(devices))
+	for _, d := range devices {
+		if _, ok := set[d.UUID]; ok {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // selectLinkCandidateByDevicePolicy picks among link-equivalent candidate
