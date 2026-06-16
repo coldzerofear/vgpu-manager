@@ -923,10 +923,10 @@ func computeLinkComponents(devices gpuallocator.DeviceList) (max int, byUUID map
 // O(component size) instead of scanning the whole node. Returns nil for an
 // empty/nil input so the field stays nil on non-topology nodes.
 func buildComponentIndex(byUUID map[string]int) map[int][]string {
-	if len(byUUID) == 0 {
-		return nil
-	}
 	byComponent := make(map[int][]string, len(byUUID))
+	if len(byUUID) == 0 {
+		return byComponent
+	}
 	for uuid, root := range byUUID {
 		byComponent[root] = append(byComponent[root], uuid)
 	}
