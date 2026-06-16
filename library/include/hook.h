@@ -33,6 +33,43 @@ extern "C" {
 #include <unistd.h>
 #include <pthread.h>
 
+/* Toolchain assumption gate.
+ *
+ * libvgpu-control.so is a glibc-only, GCC-compatible-only build target.
+ * Hard-failing here gives a clear error instead of letting the build
+ * limp on until linker errors point at obscure undefined references
+ * like `_dl_sym`. Concrete dependencies that have no portable fallback:
+ *
+ *   loader.c       — extern void* _dl_sym(...) is a glibc PRIVATE
+ *                    symbol used as the last-resort fallback in
+ *                    init_real_dlsym(). musl / Bionic do not export it.
+ *   loader.c       — dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.X") is glibc
+ *                    versioned-symbol lookup. POSIX has dlsym, not
+ *                    dlvsym; the GLIBC_* version strings are also
+ *                    glibc-internal.
+ *   hook.h         — FUNC_ATTR_VISIBLE, UNUSED, likely / unlikely use
+ *                    GCC __attribute__ / __builtin_expect extensions.
+ *   cuda_hook.c    — CAS uses __sync_bool_compare_and_swap (GCC builtin).
+ *   src/vulkan/    — __atomic_compare_exchange_n / __atomic_load_n
+ *                    (GCC C11 atomics).
+ *
+ * Note that __GNUC__ is also defined by Clang for GCC-compat — the
+ * gate accepts Clang on glibc, which works in practice (Clang
+ * implements all the GCC extensions we use). What we reject is musl
+ * (Alpine), Bionic (Android), MSVC, and other non-GNU/non-glibc
+ * toolchains where the LD_PRELOAD dlsym-interception mechanism cannot
+ * be assembled.
+ */
+#if !defined(__GNUC__) || !defined(__GLIBC__)
+#  error "libvgpu-control.so requires a GCC-compatible compiler "        \
+         "(GCC or Clang) AND glibc. The library uses _dl_sym, dlvsym "   \
+         "with GLIBC_* versions, __attribute__((visibility/alias/used)), "\
+         "__builtin_expect / __builtin_return_address, and "             \
+         "__sync_bool_compare_and_swap / __atomic_* builtins, none of "  \
+         "which have portable fallbacks. musl libc (Alpine), Bionic "    \
+         "(Android), and MSVC are out of scope."
+#endif
+
 #include "list.h"
 #include "nvml-subset.h"
 #include "cuda-subset.h"
@@ -189,12 +226,51 @@ typedef struct {
 } resource_data_t;
 
 /**
- * Dynamic computing power limit configuration
+ * Dynamic SM controller configuration. All tunables that affect runtime
+ * algorithm behaviour live here so the boot log can dump them with a
+ * single line and operators have one place to look.
+ *
+ * Field ordering NOTE: this struct is part of the .so internal layout
+ * (g_dynamic_config is non-static but hidden via the linker version
+ * script). Reorganising field order across a build that other parts of
+ * the codebase already link against would shift offsets; keep
+ * usage_threshold at its original position and APPEND new fields to the
+ * tail. New fields must be POD with explicit sized types so the dump
+ * line in sm_controller_init() stays trivial to write.
+ *
+ * Loaded once at sm_controller_init() (under pthread_once g_init_set).
+ * After init this struct is read-only at runtime by the watcher thread,
+ * so no volatile / atomics needed; init runs before any watcher thread
+ * is spawned, and fork() re-runs init in the child via the pthread_once
+ * reset in child_after_fork() if the child needs it.
+ *
+ * usage_threshold:    avg-free-headroom threshold for soft-mode up_limit
+ *                     periodic adjust. >= 0; env CUDA_SM_USAGE_THRESHOLD.
+ * sm_controller_kind: 0=delta (stock), 1=aimd, 2=auto.
+ * aimd_md_divisor:    AIMD MD factor as a double so users can pick 1.5
+ *                     for a softer cut than 2 or 3. Clamped >= 1.01 at
+ *                     load time so we never accidentally /1 (no-op) or
+ *                     /<=0 (UB).
+ * aimd_eff_ratio:     parts-per-thousand, eff_limit = up * x / 1000.
+ * aimd_ai_base_div:   AI step base divisor.
+ * aimd_deadband_ratio: parts-per-thousand, deadband lower edge.
+ * aimd_md_cooldown_cycles: post-MD watcher-cycle cooldown (0 disables).
+ * auto_debounce_cycles: N consecutive observations to flip exclusivity FSM.
+ * auto_external_util_threshold: external util percent above which the
+ *                     device is considered "shared with other Pods".
  */
 typedef struct {
-  int change_limit_interval;
-  int usage_threshold;
-  int error_recovery_step;
+  /* Preserved: was already in this struct in earlier versions. */
+  int    usage_threshold;
+  /* Appended for V2.1/P1/P2: consolidates 8 prior file-static globals. */
+  int    sm_controller_kind;
+  double aimd_md_divisor;
+  int    aimd_eff_ratio;
+  int    aimd_ai_base_div;
+  int    aimd_deadband_ratio;
+  int    aimd_md_cooldown_cycles;
+  int    auto_debounce_cycles;
+  int    auto_external_util_threshold;
 } dynamic_config_t;
 
 typedef struct {
@@ -247,6 +323,16 @@ typedef struct {
   uint64_t checktime;
   int valid;
   int sys_process_num;
+  /* Count of PIDs on this device that are NOT in our container. Updated
+   * by get_used_gpu_utilization in lockstep with user/sys per the active
+   * compatibility mode. Used by the watcher to decide whether to reset
+   * up_limits on new-process arrival without being fooled by our own
+   * intra-container fork (DataLoader workers, etc). Strict counting:
+   * NVIDIA driver always-resident threads (nvidia-persistenced, MPS)
+   * DO count as external -- but they appear once and stay forever, so
+   * they don't cause repeated resets. HOST_COMPATIBILITY_MODE has no
+   * container boundary -> this field stays 0. */
+  int external_process_num;
 } utilization_t;
 
 typedef struct {

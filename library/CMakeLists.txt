@@ -48,6 +48,41 @@ add_library(vgpu-control SHARED
 target_link_libraries(vgpu-control ${STATIC_C_LIBRARIES})
 target_compile_options(vgpu-control PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
+# Tighten the dynamic-symbol surface of libvgpu-control.so.
+#
+# Without this, every non-static C function in the .so (~80 internal
+# helpers like formatUuid / cleanup_vmem_nodes / accumulate_used_memory)
+# leaks into .dynsym, where they are available for NVIDIA-ICD /
+# loader-side global-symbol resolution to collide with. That is the
+# exact class of risk that drove HAMi-core PR #182's libvgpu_vk.so
+# split — a much heavier remediation we deliberately avoid by keeping
+# the export surface narrow at the source.
+#
+# Implementation: linker version script alone. We deliberately do NOT
+# pair it with -fvisibility=hidden — the compile-time hidden attribute
+# forces STV_HIDDEN on every symbol, which the linker cannot promote
+# back to global through `global:` patterns. Result of trying both: the
+# .so ends up with only the explicitly tagged symbols (dlsym +
+# vkNegotiate) and every cu*/nvml* hook becomes invisible — totally
+# breaks LD_PRELOAD.
+#
+# Version-script-only is the standard approach: every symbol stays at
+# default visibility through compilation, and the linker's `local: *;`
+# below hides everything not matched by `global:`. This produces the
+# desired narrow .dynsym (only cu* + nvml* + dlsym + vkNegotiate) AND
+# preserves the LD_PRELOAD intercept path.
+#
+# Applied only to the vgpu-control library — the mem_*_tool /
+# virt_mem_tool executables below are unaffected (they contain main()
+# which must stay externally visible regardless).
+set(VGPU_EXPORTS_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/deploy/libvgpu-control.exports.ld)
+target_link_options(vgpu-control PRIVATE
+    "LINKER:--version-script=${VGPU_EXPORTS_SCRIPT}")
+# Re-link if the version script changes — CMake does not infer this
+# dependency from -Wl,--version-script.
+set_property(TARGET vgpu-control APPEND PROPERTY
+    LINK_DEPENDS ${VGPU_EXPORTS_SCRIPT})
+
 # ---------------------------------------------------------------------------
 # Build-time integrity checks for the CUDA hook layer.
 #
@@ -97,6 +132,22 @@ if(VGPU_RUN_HOOK_CHECKS)
                 $<TARGET_FILE:vgpu-control>
         COMMENT "[vgpu] check ABI-conflict symbol exports in libvgpu-control.so"
         VERBATIM)
+
+    # Pre-build: forbid __attribute__((constructor)) / ((destructor)) in
+    # library/src/. .init_array entries run at .so load time inside every
+    # LD_PRELOAD'd process — concurrent with NVIDIA ICD bringup — and are
+    # the prime root-cause candidate for the unsolved Step C regression
+    # documented in HAMi-core PR #182. We rely on (no constructors + no
+    # NVIDIA DT_NEEDED + narrow .dynsym + manifest gating) to neutralize
+    # that risk class without splitting the .so. This guard preserves
+    # the no-constructors invariant.
+    add_custom_target(vgpu_check_no_constructors ALL
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/hack/check_no_constructors.sh
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "[vgpu] check no constructor/destructor attributes in src/"
+        VERBATIM)
+    add_dependencies(vgpu-control vgpu_check_no_constructors)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -26,20 +26,6 @@ import (
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
-// init force-enables the GPUTopology feature for this test package so
-// link-topology rows actually exercise the topology path. SetGPU... is
-// guarded by a sync.Once shared with IsGPUTopologyEnabled(); call sites
-// elsewhere (and ESPECIALLY the lazy default-false IsGPUTopologyEnabled
-// invocation from NewNodeInfo) MUST NOT fire before this init runs, or
-// the Once gets consumed with false. Package init() ordering ensures
-// that's the case here — test functions can't run before init.
-//
-// Other tests in this package don't assert on topology behaviour, so
-// flipping the global to true for the whole package is safe.
-func init() {
-	device.SetGPUTopologyEnabled(true)
-}
-
 // Test_FilterPerf is a perf-tracking benchmark, NOT a correctness test.
 // Skipped unless VGPU_PERF=1. Reports per-pod and aggregate filter
 // latency across a matrix of (node count, pod count, policy combination)
@@ -146,16 +132,16 @@ func Test_FilterPerf(t *testing.T) {
 // row of the perf matrix. Each field maps to a real pod annotation;
 // leaving a field empty means the annotation is OMITTED from the pod
 // (NOT set to ""), which routes the pod through the no-policy code
-// path instead of the "unsupported policy ''" event branch.
+// path instead of the "unsupported policy ”" event branch.
 //
 // The matrix is bigger than it looks because three independent axes
 // interact with three different code paths:
 //
 //   - nodePolicy   drives the node ranking comparator
-//                  (WeightedNodeLess) in deviceFilter.
+//     (WeightedNodeLess) in deviceFilter.
 //   - devicePolicy drives the device-level sort
-//                  (NewDeviceBinpackPriority / NewDeviceSpreadPriority)
-//                  AND the topology compose-vs-fast-path branch.
+//     (NewDeviceBinpackPriority / NewDeviceSpreadPriority)
+//     AND the topology compose-vs-fast-path branch.
 //   - topology     drives allocateLink / allocateNUMA dispatch.
 //
 // The topology × devicePolicy interaction is the one that's easy to
@@ -282,7 +268,7 @@ func runFilterPerfScenario(t *testing.T, nodeCount, podCount int, pv perfPolicy)
 
 	// serialFilterNode=true to match the production-like setting the
 	// user wanted us to measure under.
-	fp, err := New(k8sClient, factory, recorder, true)
+	fp, err := New(k8sClient, factory, recorder, true, true)
 	if err != nil {
 		t.Fatalf("filter New: %v", err)
 	}
@@ -618,7 +604,7 @@ func buildPerfTopologyAnnotation() string {
 //   - With 4 vGPUs out of 8 cards, link allocation has real combinatorial
 //     work: C(8,4)=70 candidate sets, each with a topology score derived
 //     from the per-edge link-type table. The compose-path (AllocateLinkTopK
-//     + per-K device-policy sort) cost ratio over the fast-path
+//   - per-K device-policy sort) cost ratio over the fast-path
 //     (single bestEffort call) is visible at this size, where it wasn't
 //     at 2-vGPU/4-GPU.
 //   - 4 vGPUs also matches the worst-case numa-strict ask: must fit all 4
@@ -634,7 +620,7 @@ func buildPerfTopologyAnnotation() string {
 // pv.nodePolicy / pv.devicePolicy / pv.topology are written onto the
 // pod annotations when non-empty; an empty value means "leave the
 // annotation off" (NOT "set it to empty string"), so the pod hits the
-// no-policy code path rather than the "unsupported policy '' " event.
+// no-policy code path rather than the "unsupported policy ” " event.
 func buildPerfPod(i int, pv perfPolicy) *corev1.Pod {
 	annos := map[string]string{}
 	if pv.nodePolicy != "" {

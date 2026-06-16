@@ -6,7 +6,7 @@ require (
 	github.com/Masterminds/semver v1.5.0
 	github.com/NVIDIA/go-nvlib v0.10.0
 	github.com/NVIDIA/go-nvml v0.13.0-1.0.20260212130905-92cf8c963449
-	github.com/NVIDIA/nvidia-container-toolkit v1.19.0
+	github.com/NVIDIA/nvidia-container-toolkit v1.19.1-0.20260515194426-db3eab6e775b
 	github.com/adhocore/jsonc v0.10.0
 	github.com/docker/go-units v0.5.0
 	github.com/evanphx/json-patch v0.5.2
@@ -25,7 +25,7 @@ require (
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
 	golang.org/x/time v0.15.0
 	gomodules.xyz/jsonpatch/v2 v2.5.0
-	google.golang.org/grpc v1.80.0
+	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.36.0
@@ -43,7 +43,7 @@ require (
 	k8s.io/kubernetes v1.36.0
 	k8s.io/utils v0.0.0-20260319190234-28399d86e0b5
 	sigs.k8s.io/controller-runtime v0.24.0
-	sigs.k8s.io/dra-driver-nvidia-gpu v0.0.0-20260501153326-b77ab3ca37c7
+	sigs.k8s.io/dra-driver-nvidia-gpu v0.4.0
 	tags.cncf.io/container-device-interface v1.1.0
 	tags.cncf.io/container-device-interface/specs-go v1.1.0
 )

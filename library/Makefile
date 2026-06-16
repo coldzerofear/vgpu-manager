@@ -24,6 +24,7 @@ CMAKE_BUILD_TYPE ?= Release
 J               ?= $(shell nproc 2>/dev/null | awk '{print int(($$0+1)/2)}')
 IMG             ?= coldzerofear/vgpu-control:dev
 CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
+APT_MIRROR      ?= https://mirrors.aliyun.com
 TEST_DEVICE_ID  ?= 0
 
 SO_FILE         := $(BUILD_DIR)/libvgpu-control.so
@@ -67,7 +68,7 @@ clean: ## Remove the build tree.
 
 .PHONY: docker-build
 docker-build: ## Build libvgpu-control.so inside $(IMG) using the local Dockerfile.
-	$(DOCKER) build --build-arg NVIDIA_CUDA_IMAGE=$(CUDA_BASE_IMAGE) -t $(IMG) $(LIBRARY_DIR)
+	$(DOCKER) build --build-arg NVIDIA_CUDA_IMAGE=$(CUDA_BASE_IMAGE) --build-arg APT_MIRROR=$(APT_MIRROR) -t $(IMG) $(LIBRARY_DIR)
 
 .PHONY: build-in-docker
 build-in-docker: ## Build the .so in an ephemeral CUDA container (no local toolkit required).
@@ -116,7 +117,7 @@ build-tests: ## Compile smoke tests under test/.
 .PHONY: test
 test: build-tests ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
-	    $(BASH) $(BUILD_DIR)/test/run_all_tests.sh $(BUILD_DIR)/test $(SO_FILE)
+	    $(BASH) $(BUILD_DIR)/test/run_tests_with_env.sh $(BUILD_DIR)/test $(SO_FILE)
 
 .PHONY: test-cuda13-abi
 test-cuda13-abi: build-tests ## Run just the CUDA 13 ABI-conflict smoke test.

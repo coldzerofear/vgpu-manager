@@ -35,6 +35,7 @@ type gpuFilter struct {
 	nodeLister  listerv1.NodeLister
 	podLister   client.PodLister
 	recorder    record.EventRecorder
+	gpuTopology bool
 	hasSyncFunc func(ctx context.Context) bool
 }
 
@@ -64,7 +65,7 @@ var (
 )
 
 func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactory,
-	recorder record.EventRecorder, serialFilterNode bool) (*gpuFilter, error) {
+	recorder record.EventRecorder, serialFilterNode bool, gpuTopology bool) (*gpuFilter, error) {
 	podInformer := factory.Core().V1().Pods().Informer()
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 	if err := podInformer.AddIndexers(podIndexers); err != nil {
@@ -87,6 +88,7 @@ func New(kubeClient kubernetes.Interface, factory informers.SharedInformerFactor
 		nodeLister:  nodeLister,
 		podLister:   podLister,
 		recorder:    recorder,
+		gpuTopology: gpuTopology,
 		hasSyncFunc: hasSyncFunc,
 	}, nil
 }
@@ -118,8 +120,21 @@ type CycleState interface {
 	Delete(key framework.StateKey)
 }
 
+func NodeNames(args extenderv1.ExtenderArgs) []string {
+	var names []string
+	if args.Nodes != nil {
+		names = make([]string, len(args.Nodes.Items))
+		for i, item := range args.Nodes.Items {
+			names[i] = item.GetName()
+		}
+	} else if args.NodeNames != nil {
+		names = *args.NodeNames
+	}
+	return names
+}
+
 func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
-	klog.V(4).InfoS("FilterNode", "ExtenderArgs", args)
+	klog.V(4).InfoS("FilterNode", "pod", klog.KObj(args.Pod), "nodeNames", NodeNames(args))
 	pod := args.Pod
 	if pod == nil {
 		return &extenderv1.ExtenderFilterResult{
@@ -277,25 +292,25 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 	policy = strings.ToLower(strings.TrimSpace(policy))
 	if policy == util.VirtualMemoryPolicy.String() || strings.HasPrefix(policy, "virt") {
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.VirtualMemoryPolicy)
-		return func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
-			if info.MemoryScaling <= 1 {
+		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
+			if config.MemoryScaling <= 1 {
 				return reason.New(reason.NodeMemoryTypeMismatch).
-					WithDetail("requires virtual memory but node memoryScaling=%v", info.MemoryScaling)
+					WithDetail("requires virtual memory but node memoryScaling=%v", config.MemoryScaling)
 			}
 			return nil
 		}
 	}
 	if policy == util.PhysicalMemoryPolicy.String() || strings.HasPrefix(policy, "phy") {
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.PhysicalMemoryPolicy)
-		return func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
-			if info.MemoryScaling > 1 {
+		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
+			if config.MemoryScaling > 1 {
 				return reason.New(reason.NodeMemoryTypeMismatch).
-					WithDetail("requires physical memory but node memoryScaling=%v", info.MemoryScaling)
+					WithDetail("requires physical memory but node memoryScaling=%v", config.MemoryScaling)
 			}
 			return nil
 		}
 	}
-	return func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
+	return func(_ *corev1.Node, _ *device.NodeDeviceInfo, _ *device.NodeConfigInfo) *reason.FilterReason {
 		return nil
 	}
 }
@@ -303,7 +318,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 // CheckNodeFunc is one node-level gate. Returning nil means the gate
 // accepted the node; returning a non-nil *reason.FilterReason means the
 // node fails the gate with the given structured cause.
-type CheckNodeFunc func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason
+type CheckNodeFunc func(node *corev1.Node, device *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason
 
 // CheckNode runs the built-in node prerequisites plus any caller-
 // supplied gates. Returns the first failing reason, or nil if every
@@ -312,18 +327,24 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 	if !util.IsVGPUEnabledNode(node) {
 		return reason.New(reason.NodeNotVGPUEnabled)
 	}
-	if val, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation); !ok || len(val) == 0 {
+	devRegister, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
+	if !ok || len(devRegister) == 0 {
 		klog.V(3).InfoS("node has not registered any GPU devices", "node", node.Name)
 		return reason.New(reason.NodeNoVGPURegister)
 	}
+	var nodeDeviceInfo device.NodeDeviceInfo
+	if err := nodeDeviceInfo.Decode(devRegister); err != nil {
+		klog.V(3).ErrorS(err, "decoding node device information failed", "node", node.Name)
+		return reason.New(reason.NodeBadVGPURegister).WithDetail("%v", err)
+	}
 	devConfigInfo, ok := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
 	if !ok || len(devConfigInfo) == 0 {
-		return reason.New(reason.NodeNoGPUConfig)
+		return reason.New(reason.NodeNoVGPUConfig)
 	}
-	nodeConfigInfo := device.NodeConfigInfo{}
+	var nodeConfigInfo device.NodeConfigInfo
 	if err := nodeConfigInfo.Decode(devConfigInfo); err != nil {
 		klog.V(3).ErrorS(err, "decoding node configuration information failed", "node", node.Name)
-		return reason.New(reason.NodeBadGPUConfig).WithDetail("%v", err)
+		return reason.New(reason.NodeBadVGPUConfig).WithDetail("%v", err)
 	}
 	if nodeConfigInfo.DeviceSplit <= 0 {
 		return reason.New(reason.NodeNotVGPUEnabled).WithDetail("deviceSplit=%d", nodeConfigInfo.DeviceSplit)
@@ -332,7 +353,7 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 		return reason.New(reason.NodeBadMemoryFactor).WithDetail("memoryFactor=%d", nodeConfigInfo.MemoryFactor)
 	}
 	for _, checkFunc := range checkNodeFuncs {
-		if r := checkFunc(node, &nodeConfigInfo); r != nil {
+		if r := checkFunc(node, &nodeDeviceInfo, &nodeConfigInfo); r != nil {
 			return r
 		}
 	}
@@ -351,17 +372,31 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationReq
 	memoryPolicyFunc := GetMemoryPolicyFunc(req.Pod)
 	for i, node := range nodes {
 		var nodeConfig *device.NodeConfigInfo
-		if r := CheckNode(&node, memoryPolicyFunc, func(node *corev1.Node, info *device.NodeConfigInfo) *reason.FilterReason {
-			nodeConfig = info
+		var nodeDevice *device.NodeDeviceInfo
+		if r := CheckNode(&node, memoryPolicyFunc, func(
+			node *corev1.Node,
+			device *device.NodeDeviceInfo,
+			config *device.NodeConfigInfo) *reason.FilterReason {
+			nodeConfig = config
+			nodeDevice = device
 			return nil
 		}); r != nil {
 			failed[node.Name] = r
 		} else {
-			state.Write(framework.StateKey(node.Name), nodeConfig)
+			state.Write(nodeDeviceKey(node.Name), nodeDevice)
+			state.Write(nodeConfigKey(node.Name), nodeConfig)
 			filteredNodes = append(filteredNodes, nodes[i])
 		}
 	}
 	return filteredNodes, failed, nil
+}
+
+func nodeDeviceKey(nodeName string) framework.StateKey {
+	return framework.StateKey(nodeName + "-device")
+}
+
+func nodeConfigKey(nodeName string) framework.StateKey {
+	return framework.StateKey(nodeName + "-config")
 }
 
 func (f *gpuFilter) CheckDeviceRequest(req *allocator.AllocationRequest) error {
@@ -446,6 +481,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 
 	// Ensure that the context has not timed out
 	if err := ctx.Err(); err != nil {
+		klog.V(3).ErrorS(err, "Context error", "pod", klog.KObj(pod))
 		return filteredNodes, failed, err
 	}
 
@@ -476,11 +512,16 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 			opts := []device.NodeInfoOptionFn{
 				device.WithNodePods(nodePodsMap[node.Name]...),
 				device.WithExcludedPods(pod.UID),
+				device.WithGPUTopologyEnabled(f.gpuTopology),
 			}
-			read, _ := state.Read(framework.StateKey(node.Name))
-			if read != nil {
+			if read, _ := state.Read(nodeConfigKey(node.Name)); read != nil {
 				if nodeConfig, ok := read.(*device.NodeConfigInfo); ok {
 					opts = append(opts, device.WithNodeConfig(nodeConfig))
+				}
+			}
+			if read, _ := state.Read(nodeDeviceKey(node.Name)); read != nil {
+				if nodeDevice, ok := read.(*device.NodeDeviceInfo); ok {
+					opts = append(opts, device.WithNodeDevice(nodeDevice))
 				}
 			}
 			nodeInfo, err := device.NewNodeInfo(node, opts...)
@@ -652,17 +693,12 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		}
 		// Ensure that the context has not timed out
 		if err := ctx.Err(); err != nil {
+			klog.V(3).ErrorS(err, "Context error", "pod", klog.KObj(pod))
 			return filteredNodes, failed, err
 		}
 		if err = client.PatchPodPreAllocatedMetadata(f.kubeClient, newPod); err != nil {
 			klog.ErrorS(err, "patch vGPU metadata failed", "pod", klog.KObj(pod), "node", node.Name)
-			// Treat as a node-level rejection rather than an aborted Filter:
-			// other nodes may still succeed. Use NodeInfoBuildFailed as the
-			// closest existing code (it's "the node side broke") with the
-			// underlying error in Detail for klog/debug.
-			failed[node.Name] = reason.New(reason.NodeInfoBuildFailed).
-				WithDetail("patch vGPU metadata failed: %v", err)
-			continue
+			return filteredNodes, failed, err
 		}
 		// Cache the patched Pod locally to bridge the informer watch lag.
 		// Concurrent Filter calls on neighbouring pods would otherwise rebuild

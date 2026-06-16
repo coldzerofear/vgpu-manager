@@ -219,17 +219,28 @@ func newPreemptPluginWithSync(t *testing.T, pods []*corev1.Pod, nodes []*corev1.
 		objs = append(objs, n)
 	}
 	k8sClient := fake.NewClientset(objs...)
+	// Advertise the policy/v1 PodDisruptionBudget API so NewPDBLister's version
+	// discovery succeeds, matching any real cluster (>=1.21). Without this the
+	// fake discovery returns nothing and preempt.New fails.
+	k8sClient.Resources = []*metav1.APIResourceList{
+		{
+			GroupVersion: "policy/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "poddisruptionbudgets", Kind: "PodDisruptionBudget", Namespaced: true},
+			},
+		},
+	}
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
 	broadcaster := record.NewBroadcaster()
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
 
 	// We need the filter plugin's PodLister so the indexer
 	// IndexerKeyPodRequestVGPU is registered on the shared informer.
-	filterPlugin, err := filter.New(k8sClient, factory, recorder, false)
+	filterPlugin, err := filter.New(k8sClient, factory, recorder, false, true)
 	if err != nil {
 		t.Fatalf("filter.New: %v", err)
 	}
-	plugin, err := New(factory, recorder, filterPlugin.GetPodLister())
+	plugin, err := New(k8sClient, factory, recorder, filterPlugin.GetPodLister(), true)
 	if err != nil {
 		t.Fatalf("preempt.New: %v", err)
 	}
@@ -690,11 +701,11 @@ func Test_Preempt_ProtectedVictim_AddsAdditional(t *testing.T) {
 // changes.
 func Test_pdbViolationsUpperBound(t *testing.T) {
 	tests := []struct {
-		name      string
-		original  int64
-		keptLen   int
-		addedLen  int
-		want      int64
+		name     string
+		original int64
+		keptLen  int
+		addedLen int
+		want     int64
 	}{
 		{
 			name:     "no change passes through",

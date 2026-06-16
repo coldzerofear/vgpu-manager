@@ -130,7 +130,7 @@ devicePlugin:
   terminationGracePeriodSeconds: 30
   # Node labels to be deployed
   nodeSelector:
-    vgpu-manager-enable: enable
+    vgpu-manager: device-plugin
   tolerations:
     # This toleration is deprecated. Kept here for backward compatibility
     # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
@@ -145,11 +145,11 @@ devicePlugin:
       effect: NoSchedule
   # Define container security context
   securityContext:
-    # If the container encounters the following errors, try using privileged mode
+    # By default, privileged mode is enabled to prevent the following errors from occurring
     # - error initializing NVML: Unknown Error
     # - error locating "libnvidia-ml.so.1
-    # privileged: true
-    allowPrivilegeEscalation: false
+    privileged: true
+    allowPrivilegeEscalation: true
     capabilities:
       drop: ["ALL"]
       add: ["SYS_ADMIN"]
@@ -159,7 +159,7 @@ devicePlugin:
   kubeletRootDir: "/var/lib/kubelet"
   # Configure the host path used by vgpu manager (default: /etc/vgpu-manager)
   vgpuManagerDir: "/etc/vgpu-manager"
-  # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
+  # Cgroup driver for container environment, default program automatic detection (Supported values: systemd | cgroupfs)
   cgroupDriver: "auto"
   devicePlugin:
     env:

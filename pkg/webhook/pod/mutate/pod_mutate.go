@@ -152,12 +152,15 @@ func fixSpecifiedNodeName(pod *corev1.Pod, logger logr.Logger) {
 	}
 }
 
-func cleanupSchedulerPolicyAnnotation(pod *corev1.Pod) {
+func cleanupInvalidSchedulerAnnotation(pod *corev1.Pod) {
 	if _, ok := util.HasAnnotation(pod, util.NodeSchedulerPolicyAnnotation); ok {
 		delete(pod.Annotations, util.NodeSchedulerPolicyAnnotation)
 	}
 	if _, ok := util.HasAnnotation(pod, util.DeviceSchedulerPolicyAnnotation); ok {
 		delete(pod.Annotations, util.DeviceSchedulerPolicyAnnotation)
+	}
+	if _, ok := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation); ok {
+		delete(pod.Annotations, util.MemorySchedulerPolicyAnnotation)
 	}
 }
 
@@ -172,8 +175,7 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 
 	isVGPUPod := false
 	isMultiGPUs := false
-	for i := range pod.Spec.Containers {
-		container := &pod.Spec.Containers[i]
+	setDefaultResource := func(container *corev1.Container) {
 		number := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
 		cores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
 		memory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
@@ -198,6 +200,12 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 			isMultiGPUs = true
 		}
 	}
+	for i := range pod.Spec.InitContainers {
+		setDefaultResource(&pod.Spec.InitContainers[i])
+	}
+	for i := range pod.Spec.Containers {
+		setDefaultResource(&pod.Spec.Containers[i])
+	}
 	// Cleaning metadata to prevent impact on scheduling.
 	reschedule.CleanupMetadata(pod)
 	if isVGPUPod {
@@ -206,8 +214,7 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)
 		setDefaultRuntimeClassName(pod, h.options, logger)
 	} else {
-		// Clean up invalid scheduling policy annotations.
-		cleanupSchedulerPolicyAnnotation(pod)
+		cleanupInvalidSchedulerAnnotation(pod)
 	}
 	if isMultiGPUs {
 		// Setting topology mode only makes sense when requesting multiple GPUs.
@@ -240,10 +247,10 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) e
 	} else if h.options.CombinedResourceClaim {
 		resourceName = fmt.Sprintf("%s-%s", pod.Name, rand.String(5))
 	}
-	for i := range pod.Spec.Containers {
-		container := &pod.Spec.Containers[i]
+
+	convertContainerRequest := func(pod *corev1.Pod, container *corev1.Container) {
 		if !util.IsVGPURequiredContainer(container) {
-			continue
+			return
 		}
 
 		deviceCount := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
@@ -292,6 +299,13 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) e
 		logger.V(2).Info("Successfully convert vGPU requests to resourceClaims", "container", container.Name,
 			"vGPUNumber", deviceCount, "vGPUCores", deviceCores, "vGPUMemory", deviceMemory)
 	}
+	for i := range pod.Spec.InitContainers {
+		convertContainerRequest(pod, &pod.Spec.InitContainers[i])
+	}
+	for i := range pod.Spec.Containers {
+		convertContainerRequest(pod, &pod.Spec.Containers[i])
+	}
+
 	if len(resourceInfos) > 0 {
 		encode, err := resourceInfos.Encode()
 		if err != nil {
@@ -341,15 +355,7 @@ func (h *mutateHandle) updateMultiResourceClaims(ctx context.Context, pod *corev
 
 	updatedInfos := make(common.ResourceInfos, 0, len(infos))
 	for i, info := range infos {
-		index := slices.IndexFunc(pod.Spec.Containers, func(container corev1.Container) bool {
-			return container.Name == info.Name
-		})
-		if index < 0 {
-			logger.V(1).Info("Container not found, skip ResourceClaim update", "container", info.Name)
-			continue
-		}
-		container := &pod.Spec.Containers[index]
-		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
+		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, info.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 		}) {

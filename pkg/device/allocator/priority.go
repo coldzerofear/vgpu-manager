@@ -5,6 +5,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/klog/v2"
 )
 
 // LessFunc represents function to compare two DeviceInfo or NodeInfo
@@ -171,7 +172,8 @@ func cachedNodeScore(cache map[string]float64, info *device.NodeInfo,
 	if s, ok := cache[name]; ok {
 		return s
 	}
-	s := Score(NodeUtilization(info), profile, mode)
+	s := Score(NodeUtilization(info), profile, mode) * util.HundredCore
+	klog.V(5).Infof("Policy %s node <%s> resource score is <%.2f>", mode, info.GetName(), s)
 	cache[name] = s
 	return s
 }

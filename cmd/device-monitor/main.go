@@ -15,6 +15,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
@@ -40,28 +41,30 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
-func main() {
-	opt := options.NewOptions()
-	opt.InitFlags(flag.CommandLine)
-	opt.PrintAndExitIfRequested()
-	logs.InitLogs()
-	defer logs.FlushLogs()
+func runApp(opt *options.Options) (exitCode int) {
+	exitCode = 1
+
+	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {
-		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
+		klog.Errorf("Initialization of kubeConfig failed: %v", err)
+		return exitCode
 	}
 	kubeConfig, err := client.NewKubeConfig(
 		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithDefaultUserAgent())
 	if err != nil {
-		klog.Fatalf("Create kubeConfig failed: %v", err)
+		klog.Errorf("Create kubeConfig failed: %v", err)
+		return exitCode
 	}
+
 	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
-		klog.Fatalf("Create kubeClient failed: %v", err)
+		klog.Errorf("Create kubeClient failed: %v", err)
+		return exitCode
 	}
 	cgroupDriver := cgroup.MustInitCGroupDriver(opt.CGroupDriver)
 	nodeConfig, err := node.NewNodeConfig(
@@ -69,7 +72,8 @@ func main() {
 		node.WithConfigPathOption(opt.NodeConfigPath),
 		node.WithCGroupDriverOption(string(cgroupDriver)))
 	if err != nil {
-		klog.Fatalf("Initialization of node config failed: %v", err)
+		klog.Errorf("Initialization of node config failed: %v", err)
+		return exitCode
 	}
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
 
@@ -79,11 +83,13 @@ func main() {
 
 	nodeInformer, err := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
 	if err != nil {
-		klog.Fatalf("GetNodeInformer failed: %v", err)
+		klog.Errorf("GetNodeInformer failed: %v", err)
+		return exitCode
 	}
 	podInformer, err := metrics.GetPodInformer(factory, nodeConfig.GetNodeName())
 	if err != nil {
-		klog.Fatalf("GetPodInformer failed: %v", err)
+		klog.Errorf("GetPodInformer failed: %v", err)
+		return exitCode
 	}
 	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
 	podLister := client.NewPodLister(podInformer.GetIndexer())
@@ -92,7 +98,8 @@ func main() {
 	nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig.GetNodeName(),
 		nodeLister, podLister, containerLister, opt.FeatureGate)
 	if err != nil {
-		klog.Fatalf("Create node gpu collector failed: %v", err)
+		klog.Errorf("Create node gpu collector failed: %v", err)
+		return exitCode
 	}
 	minScrapeIntervalDuration := time.Second
 	if opt.MinScrapeInterval > 1 {
@@ -116,8 +123,9 @@ func main() {
 	}
 	if opt.EnableTls {
 		if len(opt.TlsKeyFile) == 0 || len(opt.TlsCertFile) == 0 {
-			klog.Fatalf("Enable Tls but did not specify a certificate file: "+
-				"tlsKeyFile: '%s', tlsCertFile: '%s'", opt.TlsKeyFile, opt.TlsCertFile)
+			klog.Errorf("Enable Tls but did not specify a certificate file: "+
+				"tlsKeyFile: %q, tlsCertFile: %q", opt.TlsKeyFile, opt.TlsCertFile)
+			return exitCode
 		}
 
 		tlsConfig, err := tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
@@ -133,7 +141,8 @@ func main() {
 			// - https://github.com/advisories/GHSA-4374-p667-p6c8
 		}, tlsserver.WithTLSServerNextProtos([]string{"http/1.1"}))
 		if err != nil {
-			klog.Fatalf("GetServerTLSConfig failed: %v", err)
+			klog.Errorf("GetServerTLSConfig failed: %v", err)
+			return exitCode
 		}
 		opts = append(opts, server.WithTLSConfig(tlsConfig))
 	}
@@ -141,11 +150,13 @@ func main() {
 	if opt.EnableRBAC {
 		httpClient, err := rest.HTTPClientFor(kubeConfig)
 		if err != nil {
-			klog.Fatalf("Create httpClient failed: %v", err)
+			klog.Errorf("Create httpClient failed: %v", err)
+			return exitCode
 		}
 		authorization, err := filters.WithAuthenticationAndAuthorization(kubeConfig, httpClient)
 		if err != nil {
-			klog.Fatalf("Create authClient failed: %v", err)
+			klog.Errorf("Create authClient failed: %v", err)
+			return exitCode
 		}
 		opts = append(opts, server.WithMiddleware(func(handler http.Handler) (http.Handler, error) {
 			return authorization(klog.NewKlogr(), handler)
@@ -177,8 +188,23 @@ func main() {
 	case s := <-sigChan:
 		klog.Infof("Received signal %v, shutting down...", s)
 		cancelCtx()
+		exitCode = 0
 	case <-ctx.Done():
 		klog.Errorln("Internal error, service abnormal stop")
-		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		exitCode = 1
+	}
+
+	return exitCode
+}
+
+func main() {
+	opt := options.NewOptions()
+	opt.InitFlags(flag.CommandLine)
+	opt.PrintAndExitIfRequested()
+	logs.InitLogs()
+	defer logs.FlushLogs()
+
+	if exitCode := runApp(opt); exitCode != 0 {
+		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
 }

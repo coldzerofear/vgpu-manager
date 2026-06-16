@@ -29,7 +29,6 @@ import (
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/util/sets"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
@@ -137,9 +136,14 @@ var (
 		"Virtual GPU device assigned cores number",
 		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
 	)
-	vGPUSharedContainersNumber = prometheus.NewDesc(
-		"vgpu_device_shared_containers_number",
-		"Virtual GPU device shared containers number",
+	vGPUPeakSharedContainersNumber = prometheus.NewDesc(
+		"vgpu_device_peak_shared_containers_number",
+		"Peak number of containers that may concurrently share the vGPU device across the pods' lifecycle (reserved view; >= the current value)",
+		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+	)
+	vGPUCurrentSharedContainersNumber = prometheus.NewDesc(
+		"vgpu_device_current_shared_containers_number",
+		"Number of currently running containers sharing the vGPU device right now (a completed sequential init container is excluded; <= the peak value)",
 		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
 	)
 	vGPUTotalMemory = prometheus.NewDesc(
@@ -235,7 +239,8 @@ func (c nodeGPUCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- nodeVGPUAssignedPhysicalMemory
 	ch <- vGPUTotalCoresNumber
 	ch <- vGPUAssignedCoresNumber
-	ch <- vGPUSharedContainersNumber
+	ch <- vGPUPeakSharedContainersNumber
+	ch <- vGPUCurrentSharedContainersNumber
 	ch <- vGPUTotalMemory
 	ch <- vGPUTotalPhysicalMemory
 	ch <- vGPUAssignedMemory
@@ -499,35 +504,41 @@ skipNvml:
 	nodeVGpuAssignedMemBytes := uint64(0)
 	vGpuAssignedCoresMap := make(map[string]int64)
 	vGpuAssignedNumberMap := make(map[string]int)
-	sharedContainersMap := make(map[string]int)
+	peakSharedContainersMap := make(map[string]int)
+	currentSharedContainersMap := make(map[string]int)
 	// Filter out some useless pods.
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
-		// Aggregate the allocated memory size on the node.
+		// Aggregate the allocated memory size on the node, collapsing each
+		// pod's claims to the per-GPU lifecycle peak so a sequential init
+		// container reusing a regular container's GPU is not double-counted.
+		// For a pod without a vGPU init container this is the plain per-GPU
+		// sum, identical to the historical per-claim accounting.
 		podDeviceClaim := device.GetPodDeviceClaim(pod)
-		devContainersMap := make(map[string]sets.Set[string])
-		FlattenDevicesEach(podDeviceClaim, func(ctrName string, claimDevice device.DeviceClaim) {
-			if ctrNameSet, ok := devContainersMap[claimDevice.Uuid]; ok {
-				ctrNameSet.Insert(ctrName)
-			} else {
-				devContainersMap[claimDevice.Uuid] = sets.New[string](ctrName)
-			}
-			vGpuAssignedNumberMap[claimDevice.Uuid]++
-			vGpuAssignedCoresMap[claimDevice.Uuid] += claimDevice.Cores
-			memoryBytes := uint64(claimDevice.Memory) << 20
+		for _, fp := range device.ReducePodFootprint(pod, podDeviceClaim) {
+			vGpuAssignedNumberMap[fp.Uuid] += fp.Number
+			vGpuAssignedCoresMap[fp.Uuid] += fp.Cores
+			memoryBytes := uint64(fp.Memory) << 20
 			nodeVGpuAssignedMemBytes += memoryBytes
-			vGpuAssignedMemMap[claimDevice.Uuid] += memoryBytes
-		})
-		for uuid, crtNameSet := range devContainersMap {
-			sharedContainersMap[uuid] += crtNameSet.Len()
+			vGpuAssignedMemMap[fp.Uuid] += memoryBytes
+			// Peak (reserved) concurrent sharing: per-GPU lifecycle peak count.
+			peakSharedContainersMap[fp.Uuid] += fp.Number
 		}
-		for _, container := range pod.Spec.Containers {
-			contKey := lister.GetContainerKey(pod.UID, container.Name)
+		// Current sharing: only containers running right now, so a completed
+		// sequential init container drops out (always <= the peak above).
+		for uuid, n := range device.CurrentSharedContainers(pod, podDeviceClaim) {
+			currentSharedContainersMap[uuid] += n
+		}
+		// Real-time per-container usage: regular containers, sidecars, and
+		// currently-running sequential init containers (a completed init
+		// container is excluded so its stale usage stops being reported).
+		for _, containerName := range util.CollectableContainerNames(pod) {
+			contKey := lister.GetContainerKey(pod.UID, containerName)
 			resData, exist := c.contLister.GetResourceDataT(contKey)
 			if !exist {
 				continue
 			}
 
-			klog.V(4).Infoln("Container matching: using resource data", "pod", klog.KObj(pod), "container", container.Name)
+			klog.V(4).Infoln("Container matching: using resource data", "pod", klog.KObj(pod), "container", containerName)
 			var getFullPath func(string) string
 			switch {
 			case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
@@ -542,10 +553,10 @@ skipNvml:
 				getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
 			}
 			var containerPids []uint32
-			_ = cgroup.GetContainerPidsFunc(pod, container.Name, getFullPath, func(pid int) {
+			_ = cgroup.GetContainerPidsFunc(pod, containerName, getFullPath, func(pid int) {
 				containerPids = append(containerPids, uint32(pid))
 			})
-			//_, containerId := cgroup.GetContainerRuntime(pod, container.Name)
+			//_, containerId := cgroup.GetContainerRuntime(pod, containerName)
 
 			deviceCount := 0
 			for i := int32(0); i < vgpu.MaxDeviceCount; i++ {
@@ -556,7 +567,7 @@ skipNvml:
 				deviceUUID := string(containerDevice.UUID[0:40])
 				if !utf8.ValidString(deviceUUID) {
 					klog.InfoS("Invalid UTF-8 device uuid, skip current device", "pod", klog.KObj(pod),
-						"container", container.Name, "deviceUuid", deviceUUID, "deviceIndex", i)
+						"container", containerName, "deviceUuid", deviceUUID, "deviceIndex", i)
 					continue
 				}
 				devHostIndex, exists := devIndexMap[deviceUUID]
@@ -593,13 +604,13 @@ skipNvml:
 					containerVGPUMemoryLimit,
 					prometheus.GaugeValue,
 					float64(deviceMemLimit),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUPhysicalMemoryLimit,
 					prometheus.GaugeValue,
 					float64(realMemBytes),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 
 				// TODO handler Virtual Memory Cache node.
@@ -629,13 +640,13 @@ skipNvml:
 					containerVGPUMemoryUsage,
 					prometheus.GaugeValue,
 					float64(deviceMemUsage+deviceVMemUsage),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUPhysicalMemoryUsage,
 					prometheus.GaugeValue,
 					float64(deviceMemUsage),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 
 				deviceMemUsage += deviceVMemUsage
@@ -649,13 +660,13 @@ skipNvml:
 					containerVGPUMemoryUtilRate,
 					prometheus.GaugeValue,
 					float64(memoryUtilRate),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUCoreUtilRate,
 					prometheus.GaugeValue,
 					float64(util.GetPercentageValue(deviceSMUtil)),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 			}
 		}
@@ -724,9 +735,15 @@ skipNvml:
 			c.nodeName, deviceIndex, uuid,
 			devTypeMap[uuid])
 		ch <- prometheus.MustNewConstMetric(
-			vGPUSharedContainersNumber,
+			vGPUPeakSharedContainersNumber,
 			prometheus.GaugeValue,
-			float64(sharedContainersMap[uuid]),
+			float64(peakSharedContainersMap[uuid]),
+			c.nodeName, deviceIndex, uuid,
+			devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(
+			vGPUCurrentSharedContainersNumber,
+			prometheus.GaugeValue,
+			float64(currentSharedContainersMap[uuid]),
 			c.nodeName, deviceIndex, uuid,
 			devTypeMap[uuid])
 	}
@@ -916,18 +933,6 @@ func FlattenMigInfosMapEach(migInfosMap map[string][]*nvidia.MigInfo,
 				continue
 			}
 			fn(parentUUID, migInfo)
-		}
-	}
-}
-
-func FlattenDevicesEach(podDeviceClaim device.PodDeviceClaim,
-	fn func(ctrName string, claim device.DeviceClaim)) {
-	if fn == nil {
-		return
-	}
-	for _, containerClaim := range podDeviceClaim {
-		for _, claim := range containerClaim.DeviceClaims {
-			fn(containerClaim.Name, claim)
 		}
 	}
 }

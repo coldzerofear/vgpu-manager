@@ -157,10 +157,19 @@ func GetResourceOfPod(pod *corev1.Pod, resourceName string) int64 {
 	return total
 }
 
-// IsVGPUResourcePod Determine if a pod has vGPU resource request.
+// IsVGPUResourcePod Determine if a pod has vGPU resource request. Init
+// containers (including sidecars) are checked alongside regular containers so
+// an init-only vGPU pod is recognised; this is kept in lockstep with
+// allocator.BuildAllocationRequest (which builds req.Containers from the same
+// init+app set) so the filter↔bind predicate-node invariant holds.
 func IsVGPUResourcePod(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
+	}
+	for i := range pod.Spec.InitContainers {
+		if GetResourceOfContainer(&pod.Spec.InitContainers[i], VGPUNumberResourceName) > 0 {
+			return true
+		}
 	}
 	for i := range pod.Spec.Containers {
 		if GetResourceOfContainer(&pod.Spec.Containers[i], VGPUNumberResourceName) > 0 {
@@ -168,6 +177,52 @@ func IsVGPUResourcePod(pod *corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// IsContainerRunning reports whether the named container is currently in the
+// Running state. It searches both init and regular container statuses (names
+// are unique pod-wide), so a completed/terminated container — e.g. a finished
+// sequential init container — returns false.
+func IsContainerRunning(pod *corev1.Pod, containerName string) bool {
+	if pod == nil {
+		return false
+	}
+	for i := range pod.Status.InitContainerStatuses {
+		if pod.Status.InitContainerStatuses[i].Name == containerName {
+			return pod.Status.InitContainerStatuses[i].State.Running != nil
+		}
+	}
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == containerName {
+			return pod.Status.ContainerStatuses[i].State.Running != nil
+		}
+	}
+	return false
+}
+
+// CollectableContainerNames returns the names of the pod's containers whose
+// real-time vGPU usage metrics should be collected right now. Regular
+// containers and sidecars (restartable init) run for the app phase and follow
+// the pod lifecycle, so they are always included; a sequential
+// (non-restartable) init container runs only transiently, so it is included
+// only while it is actually Running — once it terminates its (stale) usage
+// must stop being reported and its working directory may be reclaimed.
+// Init containers come first, matching the device-plugin's per-container layout.
+func CollectableContainerNames(pod *corev1.Pod) []string {
+	if pod == nil {
+		return nil
+	}
+	names := make([]string, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		if IsRestartableInitContainer(c) || IsContainerRunning(pod, c.Name) {
+			names = append(names, c.Name)
+		}
+	}
+	for i := range pod.Spec.Containers {
+		names = append(names, pod.Spec.Containers[i].Name)
+	}
+	return names
 }
 
 // CheckDeviceType Check if the device type meets expectations.
@@ -227,7 +282,7 @@ func IsShouldDeletePod(pod *corev1.Pod) bool {
 		return true
 	}
 	if len(pod.Status.ContainerStatuses) > MaxContainerLimit {
-		klog.Error("The number of container exceeds the upper limit")
+		klog.ErrorS(nil, "The number of container exceeds the upper limit", "pod", klog.KObj(pod))
 		return true
 	}
 	for _, status := range pod.Status.ContainerStatuses {
@@ -329,18 +384,6 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 		allocatingPods = append(allocatingPods, activePods[i])
 	}
 	return allocatingPods
-}
-
-func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-	for _, container := range pod.Spec.Containers {
-		if GetResourceOfContainer(&container, VGPUNumberResourceName) > 1 {
-			return true
-		}
-	}
-	return false
 }
 
 func PodPlanSchedulingNode(pod *corev1.Pod) string {
@@ -454,10 +497,7 @@ func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool
 	if pod == nil {
 		return false
 	}
-	for _, cont := range pod.Spec.Containers {
-		if cont.Name != containerName {
-			continue
-		}
+	envEnabled := func(cont *corev1.Container) bool {
 		for _, env := range cont.Env {
 			if env.Name != envName {
 				continue
@@ -466,6 +506,20 @@ func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool
 			if val == "1" || strings.EqualFold(val, "true") {
 				return true
 			}
+		}
+		return false
+	}
+	// Container names are unique across init and regular containers; search
+	// init containers too so the toggle works for an init container once it
+	// gets devices allocated. For app containers the result is unchanged.
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == containerName {
+			return envEnabled(&pod.Spec.InitContainers[i])
+		}
+	}
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == containerName {
+			return envEnabled(&pod.Spec.Containers[i])
 		}
 	}
 	return false
@@ -641,7 +695,7 @@ func PodHasGangName(pod *corev1.Pod) (string, bool) {
 			return val, true
 		}
 	}
-	for _, annoKey := range []string{VolcanoGroupNameAnnotation, KoordinatorGangNameAnnotation} {
+	for _, annoKey := range []string{KubeGroupNameAnnotation, VolcanoGroupNameAnnotation, KoordinatorGangNameAnnotation} {
 		if val, ok := HasAnnotation(pod, annoKey); ok && val != "" {
 			return val, true
 		}

@@ -151,20 +151,15 @@ func startCacheAsync(
 	return nil
 }
 
-func main() {
-	opt := options.NewOptions()
-	opt.InitFlags(flag.CommandLine)
-	opt.PrintAndExitIfRequested()
+func runApp(opt *options.Options) (exitCode int) {
+	exitCode = 1
 
-	logs.InitLogs()
-	defer logs.FlushLogs()
-
-	log.SetLogger(klog.NewKlogr())
 	util.MustInitGlobalDomain(opt.Domain)
 
 	config, err := pkgclient.NewKubeConfig(pkgclient.WithDefaultUserAgent())
 	if err != nil {
-		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
+		klog.Errorf("Initialization of kubeConfig failed: %v", err)
+		return exitCode
 	}
 
 	// Start pprof debug debugging service.
@@ -204,23 +199,26 @@ func main() {
 	}
 
 	var (
-		resourceReader  resourcereader.ResourceAPIReader
-		claimIndexer    k8scache.Indexer
-		templateIndexer k8scache.Indexer
-		classIndexer    k8scache.Indexer
-		podIndexer      k8scache.Indexer
-		liveClient      rtclient.Client
-		recorder        events.EventRecorderLogger
+		resourceReader     resourcereader.ResourceAPIReader
+		claimObjectType    = &resourcev1.ResourceClaim{}
+		templateObjectType = &resourcev1.ResourceClaimTemplate{}
+		classObjectType    = &resourcev1.DeviceClass{}
+		podObjectType      = &corev1.Pod{}
+		liveClient         rtclient.Client
+		recorder           events.EventRecorderLogger
+		objIndexerMap      map[rtclient.Object]k8scache.Indexer
 	)
 
 	if opt.DefaultConvertToDRA {
 		if opt.VGPUDeviceClassName == "" {
-			klog.Fatalln("When DRA resource conversion is enabled, an available vgpu device class must be specified")
+			klog.Errorf("When DRA resource conversion is enabled, an available vgpu device class must be specified")
+			return exitCode
 		}
 	}
 
 	if opt.CombinedResourceClaim && !opt.DefaultConvertToDRA {
-		klog.Fatalln("The prerequisite for enabling combination resource declaration is to enable default conversion to DRA")
+		klog.Errorf("The prerequisite for enabling combination resource declaration is to enable default conversion to DRA")
+		return exitCode
 	}
 
 	needInitClient := opt.DRAAdmissionEnabled || opt.DefaultConvertToDRA
@@ -228,21 +226,25 @@ func main() {
 	if needInitClient {
 		liveClient, err = rtclient.New(config, rtclient.Options{Scheme: Scheme})
 		if err != nil {
-			klog.Fatalf("Create live kubeClient failed: %v", err)
+			klog.Errorf("Create live kubeClient failed: %v", err)
+			return exitCode
 		}
 
 		kubeClient, err := kubernetes.NewForConfig(config)
 		if err != nil {
-			klog.Fatalf("Create kubeClient failed: %v", err)
+			klog.Errorf("Create kubeClient failed: %v", err)
+			return exitCode
 		}
 
 		broadcaster := events.NewBroadcaster(&events.EventSinkImpl{Interface: kubeClient.EventsV1()})
 		if err = broadcaster.StartRecordingToSinkWithContext(ctx); err != nil {
-			klog.Fatalf("Failed to start Sink: %v", err)
+			klog.Errorf("Failed to start Sink: %v", err)
+			return exitCode
 		}
 		stopLog, err := broadcaster.StartLogging(klog.Background())
 		if err != nil {
-			klog.Fatalf("Failed to start Logging: %v", err)
+			klog.Errorf("Failed to start Logging: %v", err)
+			return exitCode
 		}
 		defer func() {
 			stopLog()
@@ -258,73 +260,81 @@ func main() {
 			DefaultTransform: cache.TransformStripManagedFields(),
 		})
 		if err != nil {
-			klog.Fatalf("Create clientCache failed: %v", err)
+			klog.Errorf("Create clientCache failed: %v", err)
+			return exitCode
 		}
+
 		warmupObjects := []rtclient.Object{
-			&resourcev1.ResourceClaim{},
-			&resourcev1.ResourceClaimTemplate{},
-			&resourcev1.DeviceClass{},
-			&corev1.Pod{},
+			claimObjectType,
+			templateObjectType,
+			classObjectType,
+			podObjectType,
 		}
 		if err := startCacheAsync(ctx, cancel, c, warmupObjects, cacheGate); err != nil {
-			klog.Fatalf("Start clientCache failed: %v", err)
+			klog.Errorf("Start clientCache failed: %v", err)
+			return exitCode
 		}
-
+		objIndexerMap = make(map[rtclient.Object]k8scache.Indexer)
 		clientOptions.Cache = &rtclient.CacheOptions{Reader: c}
 
-		claimInformer, err := c.GetInformer(ctx, &resourcev1.ResourceClaim{}, cache.BlockUntilSynced(false))
-		if err != nil {
-			klog.Fatalf("Get ResourceClaim informer failed: %v", err)
+		for _, object := range warmupObjects {
+			informer, err := c.GetInformer(ctx, object, cache.BlockUntilSynced(false))
+			if err != nil {
+				klog.Errorf("Get %T informer failed: %v", object, err)
+				return exitCode
+			}
+			indexer, _, err := util.NewMirrorIndexer(informer)
+			if err != nil {
+				klog.Errorf("Create %T mirror indexer failed: %v", object, err)
+				return exitCode
+			}
+			objIndexerMap[object] = indexer
 		}
-		templateInformer, err := c.GetInformer(ctx, &resourcev1.ResourceClaimTemplate{}, cache.BlockUntilSynced(false))
-		if err != nil {
-			klog.Fatalf("Get ResourceClaimTemplate informer failed: %v", err)
-		}
-		classInformer, err := c.GetInformer(ctx, &resourcev1.DeviceClass{}, cache.BlockUntilSynced(false))
-		if err != nil {
-			klog.Fatalf("Get DeviceClass informer failed: %v", err)
-		}
-		podInformer, err := c.GetInformer(ctx, &corev1.Pod{}, cache.BlockUntilSynced(false))
-		if err != nil {
-			klog.Fatalf("Get Pod informer failed: %v", err)
-		}
-		claimIndexer, _, err = util.NewMirrorIndexer(claimInformer)
-		if err != nil {
-			klog.Fatalf("Create ResourceClaim mirror indexer failed: %v", err)
-		}
-		templateIndexer, _, err = util.NewMirrorIndexer(templateInformer)
-		if err != nil {
-			klog.Fatalf("Create ResourceClaimTemplate mirror indexer failed: %v", err)
-		}
-		classIndexer, _, err = util.NewMirrorIndexer(classInformer)
-		if err != nil {
-			klog.Fatalf("Create DeviceClass mirror indexer failed: %v", err)
-		}
-		podIndexer, _, err = util.NewMirrorIndexer(podInformer)
-		if err != nil {
-			klog.Fatalf("Create Pod mirror indexer failed: %v", err)
-		}
+
 	} else {
 		cacheGate.MarkReady()
 	}
 
 	client, err := rtclient.New(config, clientOptions)
 	if err != nil {
-		klog.Fatalf("Create kubeClient failed: %v", err)
+		klog.Errorf("Create kubeClient failed: %v", err)
+		return exitCode
 	}
 	if needInitClient {
 		// The mutation cache overlays informer snapshots with fresher write-through
 		// updates and live-API fallback results.
-		resourceReader = resourcereader.NewResourceAPIReader(liveClient, claimIndexer, templateIndexer, classIndexer, podIndexer, 30*time.Second)
+		resourceReader = resourcereader.NewResourceAPIReader(liveClient,
+			objIndexerMap[claimObjectType], objIndexerMap[templateObjectType],
+			objIndexerMap[classObjectType], objIndexerMap[podObjectType],
+			30*time.Second)
 	}
 
 	if err := pkgwebhook.RegisterWebhookToServer(server, cacheGate, client, opt, resourceReader, recorder); err != nil {
-		klog.Fatalf("Register webhook to server failed: %v", err)
+		klog.Errorf("Register webhook to server failed: %v", err)
+		return exitCode
 	}
 
 	klog.Infoln("Starting webhook server")
 	if err := server.Start(ctx); err != nil {
 		klog.ErrorS(err, "problem running webhook server")
-		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		exitCode = 1
+	} else {
+		exitCode = 0
+	}
+
+	return exitCode
+}
+
+func main() {
+	opt := options.NewOptions()
+	opt.InitFlags(flag.CommandLine)
+	opt.PrintAndExitIfRequested()
+
+	logs.InitLogs()
+	defer logs.FlushLogs()
+	log.SetLogger(klog.NewKlogr())
+
+	if exitCode := runApp(opt); exitCode != 0 {
+		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
 }

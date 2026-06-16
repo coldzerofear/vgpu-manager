@@ -38,6 +38,7 @@ spec:
       {{- end }}
       {{- if .Values.webhook.tolerations }}
       tolerations: {{ toYaml .Values.webhook.tolerations | nindent 8 }}
+      {{- end }}
       affinity:
         nodeAffinity:
           # Pod should run as much as possible on control plane nodes.
@@ -59,7 +60,6 @@ spec:
                       values:
                         - {{ include "vgpu-manager.webhook" . }}
                 topologyKey: kubernetes.io/hostname
-      {{- end }}
       containers:
         - name: device-webhook
           image: {{ include "vgpu-manager.fullimage" . }}

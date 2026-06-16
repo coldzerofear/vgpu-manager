@@ -12,15 +12,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/device-scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-scheduler/framework"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
@@ -43,15 +42,12 @@ func (nci NodeConfigInfo) Encode() (string, error) {
 
 func (nci *NodeConfigInfo) Decode(val string) error {
 	if nci == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	if strings.TrimSpace(val) == "" {
 		return fmt.Errorf("input value is empty")
 	}
-	if err := json.Unmarshal([]byte(val), nci); err != nil {
-		return err
-	}
-	return nil
+	return json.Unmarshal([]byte(val), nci)
 }
 
 func (nci *NodeConfigInfo) Clone() framework.StateData {
@@ -76,7 +72,7 @@ func (nti NodeTopologyInfo) Encode() (string, error) {
 
 func (nti *NodeTopologyInfo) Decode(val string) error {
 	if nti == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	nodeTopoInfo, err := ParseNodeTopology(val)
 	if err != nil {
@@ -123,13 +119,13 @@ func (n NodeDeviceInfo) Encode() (string, error) {
 
 func (n *NodeDeviceInfo) Decode(val string) error {
 	if n == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
-	nodeDevice, err := ParseNodeDeviceInfo(val)
+	parsed, err := ParseNodeDeviceInfo(val)
 	if err != nil {
 		return err
 	}
-	*n = nodeDevice
+	*n = parsed
 	return nil
 }
 
@@ -142,7 +138,7 @@ func ParseNodeDeviceInfo(val string) (NodeDeviceInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(nodeDevices) > 0 {
+	if len(nodeDevices) > 1 {
 		sort.Slice(nodeDevices, func(i, j int) bool {
 			return nodeDevices[i].Id < nodeDevices[j].Id
 		})
@@ -150,12 +146,22 @@ func ParseNodeDeviceInfo(val string) (NodeDeviceInfo, error) {
 	return nodeDevices, nil
 }
 
+// Clone returns a shallow copy of the slice.
+// NOTE: DeviceInfo contains only value types and strings,
+// so this is effectively a deep copy. If pointer/slice/map
+// fields are added to DeviceInfo in the future, this method
+// must be updated to perform a true deep copy.
+func (n *NodeDeviceInfo) Clone() framework.StateData {
+	device := slices.Clone(*n)
+	return &device
+}
+
 type ContainerDeviceClaim struct {
 	Name         string        `json:"name"`
 	DeviceClaims []DeviceClaim `json:"deviceClaims"`
 }
 
-func (cdc *ContainerDeviceClaim) MarshalText() (string, error) {
+func (cdc ContainerDeviceClaim) MarshalText() (string, error) {
 	var devs []string
 	for _, deviceClaim := range cdc.DeviceClaims {
 		text, err := deviceClaim.MarshalText()
@@ -170,7 +176,7 @@ func (cdc *ContainerDeviceClaim) MarshalText() (string, error) {
 
 func (cdc *ContainerDeviceClaim) UnmarshalText(text string) error {
 	if cdc == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
@@ -184,12 +190,13 @@ func (cdc *ContainerDeviceClaim) UnmarshalText(text string) error {
 	if endIndex < 0 || endIndex != len(text)-1 {
 		return fmt.Errorf("decoding format error")
 	}
-	dcs := make([]DeviceClaim, 0)
-	for _, subText := range strings.Split(text[startIndex+1:len(text)-1], ",") {
+	split := strings.Split(text[startIndex+1:endIndex], ",")
+	dcs := make([]DeviceClaim, 0, len(split))
+	for _, subText := range split {
 		if len(subText) == 0 {
 			continue
 		}
-		dc := DeviceClaim{}
+		var dc DeviceClaim
 		if err := dc.UnmarshalText(subText); err != nil {
 			return err
 		}
@@ -207,17 +214,13 @@ type DeviceClaim struct {
 	Memory int64  `json:"memory"`
 }
 
-func (dc *DeviceClaim) MarshalText() (string, error) {
-	if dc == nil {
-		return "", fmt.Errorf("self is empty")
-	}
-	return fmt.Sprintf("%d_%s_%d_%d",
-		dc.Id, dc.Uuid, dc.Cores, dc.Memory), nil
+func (dc DeviceClaim) MarshalText() (string, error) {
+	return fmt.Sprintf("%d_%s_%d_%d", dc.Id, dc.Uuid, dc.Cores, dc.Memory), nil
 }
 
 func (dc *DeviceClaim) UnmarshalText(text string) error {
 	if dc == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
@@ -248,13 +251,10 @@ func (dc *DeviceClaim) UnmarshalText(text string) error {
 
 type PodDeviceClaim []ContainerDeviceClaim
 
-func (pdc *PodDeviceClaim) MarshalText() (string, error) {
+func (pdc PodDeviceClaim) MarshalText() (string, error) {
 	// "cont1['%d_%s_%d_%d','%d_%s_%d_%d'];cont2[]"
-	if pdc == nil || len(*pdc) == 0 {
-		return "", fmt.Errorf("self is empty")
-	}
-	texts := make([]string, len(*pdc))
-	for i, contClaim := range *pdc {
+	texts := make([]string, len(pdc))
+	for i, contClaim := range pdc {
 		text, err := contClaim.MarshalText()
 		if err != nil {
 			return "", err
@@ -266,7 +266,7 @@ func (pdc *PodDeviceClaim) MarshalText() (string, error) {
 
 func (pdc *PodDeviceClaim) UnmarshalText(text string) error {
 	if pdc == nil {
-		return fmt.Errorf("self is empty")
+		return fmt.Errorf("receiver is nil")
 	}
 	text = strings.ReplaceAll(text, " ", "")
 	if len(text) == 0 {
@@ -289,26 +289,25 @@ func (pdc *PodDeviceClaim) UnmarshalText(text string) error {
 }
 
 func UpdatePodRealContainerDeviceClaim(pod *corev1.Pod, cdc ContainerDeviceClaim) error {
-	pdc := PodDeviceClaim{}
-	val, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation)
-	if val != "" {
+	var pdc PodDeviceClaim
+	if val, _ := util.HasAnnotation(pod, util.PodVGPURealAllocAnnotation); len(val) > 0 {
 		if err := pdc.UnmarshalText(val); err != nil {
 			klog.Warningf("decoding pod real container device claim failed: %v", err)
 		}
 	}
 	pdc = append(pdc, cdc)
-	val, err := pdc.MarshalText()
-	if err != nil {
+	if val, err := pdc.MarshalText(); err != nil {
 		return fmt.Errorf("encoding pod real container device claim failed: %v", err)
+	} else {
+		util.InsertAnnotation(pod, util.PodVGPURealAllocAnnotation, val)
+		return nil
 	}
-	util.InsertAnnotation(pod, util.PodVGPURealAllocAnnotation, val)
-	return nil
 }
 
 // GetCurrentPreAllocateContainerDevice find the device information pre allocated to the current container.
 func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClaim, error) {
 	preAlloc, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
-	preAllocPodDevices := PodDeviceClaim{}
+	var preAllocPodDevices PodDeviceClaim
 	if err := preAllocPodDevices.UnmarshalText(preAlloc); err != nil {
 		return nil, fmt.Errorf("parse pre assign devices failed: %v", err)
 	}
@@ -316,12 +315,17 @@ func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClai
 		return nil, errors.New("current pre assign devices is empty")
 	}
 	checkExistCont := func(contName string) error {
-		exist := slices.ContainsFunc(pod.Spec.Containers, func(container corev1.Container) bool {
+		matchName := func(container corev1.Container) bool {
 			return container.Name == contName
-		})
+		}
+		// Container names are unique across init and regular containers, so a
+		// pre-allocated entry may legitimately reference an init container.
+		// Searching both lists keeps validation correct once the allocator
+		// emits init-container claims; for app-only pre-alloc it is a no-op.
+		exist := slices.ContainsFunc(pod.Spec.InitContainers, matchName) ||
+			slices.ContainsFunc(pod.Spec.Containers, matchName)
 		if !exist {
-			return fmt.Errorf("container <%s> does not exist in pod <%s/%s>",
-				contName, pod.Namespace, pod.Name)
+			return fmt.Errorf("container %q does not exist in pod %s", contName, klog.KObj(pod))
 		}
 		return nil
 	}
@@ -332,7 +336,7 @@ func GetCurrentPreAllocateContainerDevice(pod *corev1.Pod) (*ContainerDeviceClai
 		}
 		return &preAllocPodDevices[0], nil
 	}
-	realAllocPodDevices := PodDeviceClaim{}
+	var realAllocPodDevices PodDeviceClaim
 	if err := realAllocPodDevices.UnmarshalText(realAlloc); err != nil {
 		return nil, fmt.Errorf("parse real assign devices failed: %v", err)
 	}
@@ -413,27 +417,6 @@ func (dev *Device) DeepCopy() *Device {
 	return &device
 }
 
-var (
-	gpuTopoEnabledOnce sync.Once
-	gpuTopologyEnabled bool
-)
-
-func SetGPUTopologyEnabled(flag bool) {
-	gpuTopoEnabledOnce.Do(func() {
-		gpuTopologyEnabled = flag
-		klog.InfoS(fmt.Sprintf("Feature Gates[%s]", util.GPUTopology), "enabled", flag)
-	})
-}
-
-func IsGPUTopologyEnabled() bool {
-	gpuTopoEnabledOnce.Do(func() {
-		featureGate := compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component)
-		gpuTopologyEnabled = featureGate != nil && featureGate.Enabled(util.GPUTopology)
-		klog.InfoS(fmt.Sprintf("Feature Gates[%s]", util.GPUTopology), "enabled", gpuTopologyEnabled)
-	})
-	return gpuTopologyEnabled
-}
-
 type DeviceGatherInfo struct {
 	DeviceMap           map[int]*Device
 	DeviceList          gpuallocator.DeviceList
@@ -444,20 +427,30 @@ type DeviceGatherInfo struct {
 }
 
 func NewNodeDeviceGatherInfo(node *corev1.Node, option *NodeInfoOption) (*DeviceGatherInfo, error) {
-	deviceRegister, _ := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
-	nodeDeviceInfo, err := ParseNodeDeviceInfo(deviceRegister)
-	if err != nil || len(nodeDeviceInfo) == 0 {
-		klog.V(2).ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
-		return nil, errors.New("incorrect GPU registry")
+	var nodeDeviceInfo NodeDeviceInfo
+	if option != nil && option.nodeDevice != nil {
+		nodeDeviceInfo = *option.nodeDevice
+	} else {
+		deviceRegister, ok := util.HasAnnotation(node, util.NodeDeviceRegisterAnnotation)
+		if !ok || len(deviceRegister) == 0 {
+			return nil, errors.New(reason.New(reason.NodeNoVGPURegister).Short())
+		}
+		if err := nodeDeviceInfo.Decode(deviceRegister); err != nil {
+			klog.V(2).ErrorS(err, "parse node device registry failed", "node", node.Name, "value", deviceRegister)
+			return nil, errors.New(reason.New(reason.NodeBadVGPURegister).Short())
+		}
 	}
 	var nodeConfigInfo NodeConfigInfo
 	if option != nil && option.nodeConfig != nil {
 		nodeConfigInfo = *option.nodeConfig
 	} else {
-		nodeConfig, _ := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
-		if err = nodeConfigInfo.Decode(nodeConfig); err != nil {
+		nodeConfig, ok := util.HasAnnotation(node, util.NodeConfigInfoAnnotation)
+		if !ok || len(nodeConfig) == 0 {
+			return nil, errors.New(reason.New(reason.NodeNoVGPUConfig).Short())
+		}
+		if err := nodeConfigInfo.Decode(nodeConfig); err != nil {
 			klog.V(2).ErrorS(err, "parse node config information failed", "node", node.Name, "value", nodeConfig)
-			return nil, errors.New("incorrect GPU configuration")
+			return nil, errors.New(reason.New(reason.NodeBadVGPUConfig).Short())
 		}
 	}
 	deviceGatherInfo := DeviceGatherInfo{
@@ -476,14 +469,14 @@ func NewNodeDeviceGatherInfo(node *corev1.Node, option *NodeInfoOption) (*Device
 		deviceGatherInfo.DeviceList[device.Id] = gpuallocator.NewDevice(device.Id, device.Uuid, device.BusId)
 	}
 	deviceGatherInfo.EnabledNumaAffinity = numaSet.Len() > 0
-	if IsGPUTopologyEnabled() {
+	if option != nil && option.gpuTopologyEnabled {
 		topoValue, ok := util.HasAnnotation(node, util.NodeDeviceTopologyAnnotation)
 		if !ok || len(topoValue) == 0 {
 			klog.V(3).InfoS("node does not have device topology information", "node", node.Name)
 			return &deviceGatherInfo, nil
 		}
-		nodeTopology, err := ParseNodeTopology(topoValue)
-		if err != nil {
+		var nodeTopology NodeTopologyInfo
+		if err := nodeTopology.Decode(topoValue); err != nil {
 			klog.V(3).ErrorS(err, "parse node device topology info failed", "node", node.Name, "topologyVal", topoValue)
 		}
 		for _, deviceTopoInfo := range nodeTopology {
@@ -564,7 +557,13 @@ func (dev *Device) GetUsedNumber() int {
 
 // addUsedResources records the used GPU core and memory
 func (dev *Device) addUsedResources(usedCores, usedMemory int64) {
-	dev.usedNumber++
+	dev.addUsedResourcesN(1, usedCores, usedMemory)
+}
+
+// addUsedResourcesN records an already-aggregated occupancy on this device.
+// addUsedResources is the number==1 (single vGPU claim) special case.
+func (dev *Device) addUsedResourcesN(usedNumber int, usedCores, usedMemory int64) {
+	dev.usedNumber += usedNumber
 	dev.usedCores += usedCores
 	dev.usedMemory += usedMemory
 }
@@ -721,16 +720,30 @@ type NodeInfo struct {
 }
 
 type NodeInfoOption struct {
-	excludedUidSet sets.Set[types.UID]
-	nodePods       []*corev1.Pod
-	nodeConfig     *NodeConfigInfo
+	excludedUidSet     sets.Set[types.UID]
+	nodePods           []*corev1.Pod
+	nodeConfig         *NodeConfigInfo
+	nodeDevice         *NodeDeviceInfo
+	gpuTopologyEnabled bool
 }
 
 type NodeInfoOptionFn func(*NodeInfoOption)
 
-func WithNodeConfig(config *NodeConfigInfo) NodeInfoOptionFn {
+func WithGPUTopologyEnabled(flag bool) NodeInfoOptionFn {
 	return func(o *NodeInfoOption) {
-		o.nodeConfig = config
+		o.gpuTopologyEnabled = flag
+	}
+}
+
+func WithNodeDevice(info *NodeDeviceInfo) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		o.nodeDevice = info
+	}
+}
+
+func WithNodeConfig(info *NodeConfigInfo) NodeInfoOptionFn {
+	return func(o *NodeInfoOption) {
+		o.nodeConfig = info
 	}
 }
 
@@ -1040,6 +1053,208 @@ func (n *NodeInfo) AddPodsUsedResources(pods []*corev1.Pod, opts ...NodeInfoOpti
 	}
 }
 
+// PodDeviceFootprint is the peak occupancy a pod imposes on a SINGLE physical
+// GPU across its whole lifecycle. See ReducePodFootprint for how container
+// lifecycles combine into it.
+type PodDeviceFootprint struct {
+	Id     int
+	Uuid   string
+	Number int
+	Cores  int64
+	Memory int64
+}
+
+// ReducePodFootprint collapses a pod's per-container device claims into the
+// per-physical-GPU peak occupancy, keyed by GPU UUID, honoring the
+// non-overlapping lifecycle of init containers.
+//
+// Containers fall into three groups by lifecycle:
+//   - regular (app) containers: run concurrently in the main phase.
+//   - sidecars (restartable init containers): start during the init sequence
+//     and keep running for the rest of the pod's life, so they overlap BOTH
+//     the main phase and the sequential-init phases.
+//   - sequential init containers (non-restartable): run one at a time, before
+//     the main phase, never overlapping each other or the app containers.
+//
+// Per GPU g, with regularSum(g)/sidecarSum(g) the plain per-claim sums of the
+// regular and sidecar groups, and initMax(g) the per-dimension max over each
+// sequential init container's OWN per-GPU sum, the reserved peak is:
+//
+//	reserve(g) = sidecarSum(g) + max(regularSum(g), initMax(g))   // per dimension
+//
+// Sidecars run throughout, so they are a constant addend; the variable part is
+// whichever peaks higher — the app phase or the heaviest single sequential
+// init phase. This never under-reserves a GPU. (Conservative simplification:
+// sidecars are treated as overlapping EVERY sequential-init phase even though
+// only those started earlier in the init order truly do; this can slightly
+// over-reserve in the unusual "sidecar declared after a vGPU init container"
+// ordering, which is safe.) For a pod without a sequential init container this
+// collapses to the historical plain per-GPU sum.
+func ReducePodFootprint(pod *corev1.Pod, podDeviceClaim PodDeviceClaim) map[string]PodDeviceFootprint {
+	// Classify init containers. Sidecars overlap the app phase; the remaining
+	// init containers are sequential. Regular containers are everything not in
+	// either set.
+	var sequentialInit, sidecar map[string]struct{}
+	for i := range pod.Spec.InitContainers {
+		ic := &pod.Spec.InitContainers[i]
+		if util.IsRestartableInitContainer(ic) {
+			if sidecar == nil {
+				sidecar = make(map[string]struct{})
+			}
+			sidecar[ic.Name] = struct{}{}
+			continue
+		}
+		if sequentialInit == nil {
+			sequentialInit = make(map[string]struct{}, len(pod.Spec.InitContainers))
+		}
+		sequentialInit[ic.Name] = struct{}{}
+	}
+
+	// Fast path: without a sequential init container every claim is concurrent
+	// (regular containers and sidecars all run together), so the footprint is
+	// the plain per-GPU sum — identical to the historical per-claim accounting.
+	if len(sequentialInit) == 0 {
+		footprint := make(map[string]PodDeviceFootprint, len(podDeviceClaim))
+		for _, containerClaim := range podDeviceClaim {
+			for _, claim := range containerClaim.DeviceClaims {
+				sumClaimFootprint(footprint, claim)
+			}
+		}
+		return footprint
+	}
+
+	// General path: bucket claims into the three groups, then combine.
+	regularSum := map[string]PodDeviceFootprint{}
+	sidecarSum := map[string]PodDeviceFootprint{}
+	initMax := map[string]PodDeviceFootprint{}
+	for _, containerClaim := range podDeviceClaim {
+		switch {
+		case inNameSet(sequentialInit, containerClaim.Name):
+			// One sequential init container's footprint is the SUM of ITS OWN
+			// claims per GPU (a single running container); take the per-GPU max
+			// across sequential init containers since they never overlap.
+			perInit := map[string]PodDeviceFootprint{}
+			for _, claim := range containerClaim.DeviceClaims {
+				sumClaimFootprint(perInit, claim)
+			}
+			for _, pf := range perInit {
+				maxFootprintInto(initMax, pf)
+			}
+		case inNameSet(sidecar, containerClaim.Name):
+			for _, claim := range containerClaim.DeviceClaims {
+				sumClaimFootprint(sidecarSum, claim)
+			}
+		default:
+			for _, claim := range containerClaim.DeviceClaims {
+				sumClaimFootprint(regularSum, claim)
+			}
+		}
+	}
+
+	result := make(map[string]PodDeviceFootprint, len(regularSum)+len(sidecarSum)+len(initMax))
+	combine := func(uuid string) {
+		if _, done := result[uuid]; done {
+			return
+		}
+		sc, rg, im := sidecarSum[uuid], regularSum[uuid], initMax[uuid]
+		result[uuid] = PodDeviceFootprint{
+			Id:     footprintId(rg, im, sc),
+			Uuid:   uuid,
+			Number: sc.Number + max(rg.Number, im.Number),
+			Cores:  sc.Cores + max(rg.Cores, im.Cores),
+			Memory: sc.Memory + max(rg.Memory, im.Memory),
+		}
+	}
+	for uuid := range regularSum {
+		combine(uuid)
+	}
+	for uuid := range sidecarSum {
+		combine(uuid)
+	}
+	for uuid := range initMax {
+		combine(uuid)
+	}
+	return result
+}
+
+// CurrentSharedContainers counts, per physical GPU UUID, the containers that
+// currently hold a device claim on it AND are running right now. Unlike the
+// peak count derived from ReducePodFootprint, a terminated container (e.g. a
+// completed sequential init container) is excluded, so this reflects the
+// instantaneous sharing and is always <= the peak. A container is counted at
+// most once per GPU.
+func CurrentSharedContainers(pod *corev1.Pod, podDeviceClaim PodDeviceClaim) map[string]int {
+	counts := map[string]int{}
+	for _, containerClaim := range podDeviceClaim {
+		if !util.IsContainerRunning(pod, containerClaim.Name) {
+			continue
+		}
+		var seen map[string]struct{}
+		for _, claim := range containerClaim.DeviceClaims {
+			if _, ok := seen[claim.Uuid]; ok {
+				continue
+			}
+			if seen == nil {
+				seen = make(map[string]struct{}, len(containerClaim.DeviceClaims))
+			}
+			seen[claim.Uuid] = struct{}{}
+			counts[claim.Uuid]++
+		}
+	}
+	return counts
+}
+
+func inNameSet(m map[string]struct{}, name string) bool {
+	_, ok := m[name]
+	return ok
+}
+
+// sumClaimFootprint adds one device claim onto the running per-GPU sum.
+func sumClaimFootprint(m map[string]PodDeviceFootprint, claim DeviceClaim) {
+	f := m[claim.Uuid]
+	f.Id, f.Uuid = claim.Id, claim.Uuid
+	f.Number++
+	f.Cores += claim.Cores
+	f.Memory += claim.Memory
+	m[claim.Uuid] = f
+}
+
+// maxFootprintInto folds one per-GPU footprint into the running per-GPU max.
+func maxFootprintInto(m map[string]PodDeviceFootprint, pf PodDeviceFootprint) {
+	f, ok := m[pf.Uuid]
+	if !ok {
+		f.Id, f.Uuid = pf.Id, pf.Uuid
+	}
+	f.Number = max(f.Number, pf.Number)
+	f.Cores = max(f.Cores, pf.Cores)
+	f.Memory = max(f.Memory, pf.Memory)
+	m[pf.Uuid] = f
+}
+
+// footprintId returns the GPU index from the first present footprint (all
+// claims on the same UUID carry the same Id).
+func footprintId(fs ...PodDeviceFootprint) int {
+	for _, f := range fs {
+		if f.Uuid != "" {
+			return f.Id
+		}
+	}
+	return 0
+}
+
+// podHasVGPUInitContainer report whether there are any non sidecar type init containers requesting vGPU.
+// It gates the init-aware reduce path so the common pod (no vGPU init
+// container) keeps the historical per-claim accounting with no extra cost.
+func podHasVGPUInitContainer(pod *corev1.Pod) bool {
+	for i := range pod.Spec.InitContainers {
+		if util.IsVGPURequiredContainer(&pod.Spec.InitContainers[i]) &&
+			!util.IsRestartableInitContainer(&pod.Spec.InitContainers[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 func (n *NodeInfo) AddPodUsedResources(pod *corev1.Pod) {
 	//if !util.IsVGPUResourcePod(pod) {
 	//	return
@@ -1055,11 +1270,23 @@ func (n *NodeInfo) AddPodUsedResources(pod *corev1.Pod) {
 		//klog.InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
 		return
 	}
-	for _, containerClaim := range podDeviceClaim {
-		for _, claim := range containerClaim.DeviceClaims {
-			if err := n.AddUsedResources(claim); err != nil {
-				klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, claim.Id, err)
+	if !podHasVGPUInitContainer(pod) {
+		// Fast path (historical): without a vGPU init container the per-GPU
+		// peak equals the plain per-claim sum, so account claim by claim.
+		for _, containerClaim := range podDeviceClaim {
+			for _, claim := range containerClaim.DeviceClaims {
+				if err := n.AddUsedResources(claim); err != nil {
+					klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, claim.Id, err)
+				}
 			}
+		}
+		return
+	}
+	// Init-aware path: collapse to the per-GPU lifecycle peak so a sequential
+	// init container reusing a regular container's GPU is not double-counted.
+	for _, fp := range ReducePodFootprint(pod, podDeviceClaim) {
+		if err := n.addFootprintResources(fp); err != nil {
+			klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, fp.Id, err)
 		}
 	}
 }
@@ -1068,6 +1295,59 @@ func (n *NodeInfo) ResetResourceUsage() {
 	n.usedNumber, n.usedCores, n.usedMemory = 0, 0, 0
 	for _, deviceInfo := range n.deviceMap {
 		deviceInfo.ResetUsed()
+	}
+}
+
+type deviceUsage struct {
+	number int
+	cores  int64
+	memory int64
+}
+
+// UsageSnapshot captures a NodeInfo's mutable used-resource counters (node
+// aggregate + per-device) so a transient allocation pass can be rolled back.
+// Opaque to callers. Used by the allocator's init-container pass to release
+// the app-phase reservation before placing sequential init containers (which
+// run after the app phase and may reuse its GPUs).
+type UsageSnapshot struct {
+	nodeNumber int
+	nodeCores  int64
+	nodeMemory int64
+	devices    map[int]deviceUsage
+}
+
+// SnapshotUsage captures the current used-resource counters for a later
+// RestoreUsage. It does not copy the device list itself (capacities/health
+// are immutable here), only the mutable usage counters.
+func (n *NodeInfo) SnapshotUsage() *UsageSnapshot {
+	snap := &UsageSnapshot{
+		nodeNumber: n.usedNumber,
+		nodeCores:  n.usedCores,
+		nodeMemory: n.usedMemory,
+		devices:    make(map[int]deviceUsage, len(n.deviceMap)),
+	}
+	for id, deviceInfo := range n.deviceMap {
+		snap.devices[id] = deviceUsage{
+			number: deviceInfo.usedNumber,
+			cores:  deviceInfo.usedCores,
+			memory: deviceInfo.usedMemory,
+		}
+	}
+	return snap
+}
+
+// RestoreUsage rolls the used-resource counters back to a SnapshotUsage value.
+// Devices absent from the snapshot are left untouched (the device set is
+// stable within a single allocation, so this never happens in practice).
+func (n *NodeInfo) RestoreUsage(snap *UsageSnapshot) {
+	if snap == nil {
+		return
+	}
+	n.usedNumber, n.usedCores, n.usedMemory = snap.nodeNumber, snap.nodeCores, snap.nodeMemory
+	for id, deviceInfo := range n.deviceMap {
+		if u, ok := snap.devices[id]; ok {
+			deviceInfo.usedNumber, deviceInfo.usedCores, deviceInfo.usedMemory = u.number, u.cores, u.memory
+		}
 	}
 }
 
@@ -1107,6 +1387,28 @@ func (n *NodeInfo) AddUsedResources(claim DeviceClaim) error {
 		n.usedNumber++
 		n.usedCores += claim.Cores
 		n.usedMemory += claim.Memory
+	}
+	return nil
+}
+
+// addFootprintResources records an already-reduced per-GPU peak footprint.
+// It mirrors AddUsedResources exactly (same UUID lookup, same MIG/healthy
+// gate on the node-level aggregate) but adds the aggregated number/cores/
+// memory in one shot instead of a single vGPU claim.
+func (n *NodeInfo) addFootprintResources(fp PodDeviceFootprint) error {
+	deviceId, ok := n.deviceIndexMap[fp.Uuid]
+	if !ok {
+		return fmt.Errorf("device UUID <%s> does not exist in the NodeInfo <%s>", fp.Uuid, n.name)
+	}
+	device, ok := n.deviceMap[deviceId]
+	if !ok {
+		return fmt.Errorf("device ID <%d> does not exist in the NodeInfo <%s>", deviceId, n.name)
+	}
+	device.addUsedResourcesN(fp.Number, fp.Cores, fp.Memory)
+	if !device.IsMIG() && device.Healthy() {
+		n.usedNumber += fp.Number
+		n.usedCores += fp.Cores
+		n.usedMemory += fp.Memory
 	}
 	return nil
 }

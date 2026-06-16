@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/component-base/logs"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -48,32 +49,33 @@ func init() {
 	utilruntime.Must(scheme.AddToScheme(Scheme))
 }
 
-func main() {
-	opt := options.NewOptions()
-	opt.InitFlags(flag.CommandLine)
-	opt.PrintAndExitIfRequested()
-	logs.InitLogs()
-	defer logs.FlushLogs()
+func runApp(opt *options.Options) (exitCode int) {
+	exitCode = 1
+
+	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
 	gpuallocator.SetBestEffortMaxGPUs(opt.BestEffortMaxGPUs)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
 	if err != nil {
-		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
+		klog.Errorf("Initialization of kubeConfig failed: %v", err)
+		return exitCode
 	}
 	kubeClient, err := client.NewClientSet(
 		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithDefaultUserAgent())
 	if err != nil {
-		klog.Fatalf("Create kubeClient failed: %v", err)
+		klog.Errorf("Create kubeClient failed: %v", err)
+		return exitCode
 	}
 
 	var tlsConfig *tls.Config
 	if opt.EnableTls {
 		if len(opt.TlsKeyFile) == 0 || len(opt.TlsCertFile) == 0 {
-			klog.Fatalf("Enable Tls but did not specify a certificate file: "+
-				"tlsKeyFile: '%s', tlsCertFile: '%s'", opt.TlsKeyFile, opt.TlsCertFile)
+			klog.Errorf("Enable Tls but did not specify a certificate file: "+
+				"tlsKeyFile: %q, tlsCertFile: %q", opt.TlsKeyFile, opt.TlsCertFile)
+			return exitCode
 		}
 
 		tlsConfig, err = tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
@@ -89,7 +91,8 @@ func main() {
 			// - https://github.com/advisories/GHSA-4374-p667-p6c8
 		}, tlsserver.WithTLSServerNextProtos([]string{"http/1.1"}))
 		if err != nil {
-			klog.Fatalf("GetServerTLSConfig failed: %v", err)
+			klog.Errorf("GetServerTLSConfig failed: %v", err)
+			return exitCode
 		}
 	}
 
@@ -101,17 +104,30 @@ func main() {
 	// trim managedFields to reduce cache memory usage.
 	option := informers.WithTransform(cache.TransformStripManagedFields())
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
-	filterPlugin, err := filter.New(kubeClient, factory, recorder, opt.FeatureGate.Enabled(options.SerialFilterNode))
+	filterPlugin, err := filter.New(
+		kubeClient, factory, recorder,
+		opt.FeatureGate.Enabled(options.SerialFilterNode),
+		opt.FeatureGate.Enabled(options.GPUTopology))
 	if err != nil {
-		klog.Fatalf("Initialization of scheduler FilterPlugin failed: %v", err)
+		klog.Errorf("Initialization of scheduler FilterPlugin failed: %v", err)
+		return exitCode
 	}
-	bindPlugin, err := bind.New(kubeClient, recorder, filterPlugin.GetPodLister(), opt.FeatureGate.Enabled(options.SerialBindNode))
+
+	bindPlugin, err := bind.New(
+		kubeClient, recorder, filterPlugin.GetPodLister(),
+		opt.FeatureGate.Enabled(options.SerialBindNode))
 	if err != nil {
-		klog.Fatalf("Initialization of scheduler BindPlugin failed: %v", err)
+		klog.Errorf("Initialization of scheduler BindPlugin failed: %v", err)
+		return exitCode
 	}
-	preemptPlugin, err := preempt.New(factory, recorder, filterPlugin.GetPodLister())
+
+	preemptPlugin, err := preempt.New(
+		kubeClient, factory, recorder,
+		filterPlugin.GetPodLister(),
+		opt.FeatureGate.Enabled(options.GPUTopology))
 	if err != nil {
-		klog.Fatalf("Initialization of scheduler PreemptPlugin failed: %v", err)
+		klog.Errorf("Initialization of scheduler PreemptPlugin failed: %v", err)
+		return exitCode
 	}
 
 	handler := httprouter.New()
@@ -153,7 +169,7 @@ func main() {
 			klog.Infof("Server starting on <0.0.0.0:%d>", opt.ServerBindPort)
 			err = server.ListenAndServe()
 		}
-		if err != nil && err != http.ErrServerClosed {
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			klog.Errorf("Server error occurred: %v", err)
 			cancelFunc()
 		}
@@ -168,8 +184,23 @@ func main() {
 			klog.Errorf("Error while stopping extender service: %s", err.Error())
 		}
 		cancelFunc()
+		exitCode = 0
 	case <-ctx.Done():
 		klog.Errorln("Internal error, service abnormal stop")
-		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		exitCode = 1
+	}
+
+	return exitCode
+}
+
+func main() {
+	opt := options.NewOptions()
+	opt.InitFlags(flag.CommandLine)
+	opt.PrintAndExitIfRequested()
+	logs.InitLogs()
+	defer logs.FlushLogs()
+
+	if exitCode := runApp(opt); exitCode != 0 {
+		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
 }

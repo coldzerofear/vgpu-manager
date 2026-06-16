@@ -65,26 +65,134 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
 	newPod := pod.DeepCopy()
-	var deviceClaims device.PodDeviceClaim
-	for _, need := range req.Containers {
-		containerClaims, rsn, err := alloc.allocateOne(req, need)
-		if err != nil {
-			klog.V(3).ErrorS(err, "container allocation internal error",
-				"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
-			return nil, nil, err
+
+	// Does the pod have a sequential (non-restartable) init container that
+	// requests vGPU? Only then do we need the lifecycle-aware two-pass; the
+	// common case (and sidecar-only pods) stays on the single-pass fast path.
+	hasSequentialInit := false
+	for i := range req.Containers {
+		if req.Containers[i].Kind == util.ContainerKindInit && !req.Containers[i].Restartable {
+			hasSequentialInit = true
+			break
 		}
-		if rsn != nil {
-			klog.V(4).InfoS("container allocation rejected", "node", alloc.nodeInfo.GetName(),
-				"pod", klog.KObj(pod), "container", need.Name, "reason", rsn.Detailed())
-			return nil, rsn, nil
-		}
-		if err = alloc.addContainerAllocate(containerClaims); err != nil {
-			klog.V(3).ErrorS(err, "adding container resource allocation failed",
-				"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
-			return nil, nil, errors.New("internal device scheduling error")
-		}
-		deviceClaims = append(deviceClaims, *containerClaims)
 	}
+
+	var deviceClaims device.PodDeviceClaim
+
+	if !hasSequentialInit {
+		// Fast path: every vGPU container runs concurrently (regular app +
+		// optional sidecars), so allocate in req.Containers order with
+		// cross-container accumulation and append directly — allocation order
+		// already equals the annotation order, so no reordering buffer is
+		// needed. For a pod without init containers this is byte-for-byte the
+		// historical behavior (no extra allocation).
+		deviceClaims = make(device.PodDeviceClaim, 0, len(req.Containers))
+		for i := range req.Containers {
+			claim, rsn, err := alloc.allocateAndAccumulate(req, req.Containers[i], nil)
+			if rsn != nil || err != nil {
+				return nil, rsn, err
+			}
+			deviceClaims = append(deviceClaims, *claim)
+		}
+	} else {
+		// claimByName collects each container's claim regardless of which pass
+		// produced it (the two-pass allocates out of req.Containers order); the
+		// annotation is assembled back in req.Containers order afterwards.
+		claimByName := make(map[string]*device.ContainerDeviceClaim, len(req.Containers))
+		// Two-pass, lifecycle-aware (see the design doc):
+		//   reserve(g) = sidecarSum(g) + max(regularSum(g), maxInit(g))
+		// Pass 1a/1b allocate the concurrent group (sidecars then regular app)
+		// with accumulation. Pass 2 releases the regular-app reservation and
+		// places each sequential init container against base+sidecars — they
+		// run after the app phase and so reuse its GPUs. Each init is placed
+		// independently (no inter-init accumulation; sequential inits never
+		// overlap), preferring the pod's already-used GPUs to minimise the
+		// reserved card set; the per-GPU max is realised at accounting time
+		// via device.ReducePodFootprint.
+		preferred := make(map[string]struct{})
+		recordPreferred := func(claim *device.ContainerDeviceClaim) {
+			for _, dc := range claim.DeviceClaims {
+				preferred[dc.Uuid] = struct{}{}
+			}
+		}
+		// Pass 1a: sidecars (concurrent, accumulate).
+		for i := range req.Containers {
+			n := &req.Containers[i]
+			if n.Kind != util.ContainerKindInit || !n.Restartable {
+				continue
+			}
+			claim, rsn, err := alloc.allocateAndAccumulate(req, *n, nil)
+			if rsn != nil || err != nil {
+				return nil, rsn, err
+			}
+			claimByName[n.Name] = claim
+			recordPreferred(claim)
+		}
+		// Snapshot base+sidecars; the regular-app reservation added next is
+		// released before the init pass.
+		viewBaseSidecar := alloc.nodeInfo.SnapshotUsage()
+		// Pass 1b: regular app containers (concurrent, accumulate).
+		for i := range req.Containers {
+			n := &req.Containers[i]
+			if n.Kind != util.ContainerKindApp {
+				continue
+			}
+			claim, rsn, err := alloc.allocateAndAccumulate(req, *n, nil)
+			if rsn != nil || err != nil {
+				return nil, rsn, err
+			}
+			claimByName[n.Name] = claim
+			recordPreferred(claim)
+		}
+		// Release the regular-app reservation: init containers run after the
+		// app phase, so they see base+sidecars only.
+		alloc.nodeInfo.RestoreUsage(viewBaseSidecar)
+		// Pass 2: sequential init containers (no accumulation between them).
+		for i := range req.Containers {
+			n := &req.Containers[i]
+			if n.Kind != util.ContainerKindInit || n.Restartable {
+				continue
+			}
+			var claim *device.ContainerDeviceClaim
+			var rsn *reason.FilterReason
+			var err error
+			// Attempt 1: reuse the pod's already-used GPUs (densest). Skipped
+			// when there are none (e.g. an init-only pod).
+			if len(preferred) > 0 {
+				claim, rsn, err = alloc.allocateOne(req, *n, preferred)
+				if err != nil {
+					klog.V(3).ErrorS(err, "init container reuse allocation internal error",
+						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", n.Name)
+					return nil, nil, err
+				}
+			}
+			// Attempt 2: fall back to the whole node when reuse didn't fit
+			// (claim == nil ⟺ attempt 1 was skipped or rejected). Still correct,
+			// just reserves more cards.
+			if claim == nil {
+				claim, rsn, err = alloc.allocateOne(req, *n, nil)
+				if err != nil {
+					klog.V(3).ErrorS(err, "init container allocation internal error",
+						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", n.Name)
+					return nil, nil, err
+				}
+				if rsn != nil {
+					klog.V(4).InfoS("init container allocation rejected", "node", alloc.nodeInfo.GetName(),
+						"pod", klog.KObj(pod), "container", n.Name, "reason", rsn.Detailed())
+					return nil, rsn, nil
+				}
+			}
+			claimByName[n.Name] = claim
+		}
+		// Assemble per-container claims in req.Containers order (init-first),
+		// which matches kubelet's Allocate call order and the device-plugin
+		// PreAlloc cursor.
+		deviceClaims = make(device.PodDeviceClaim, 0, len(req.Containers))
+		for i := range req.Containers {
+			deviceClaims = append(deviceClaims, *claimByName[req.Containers[i].Name])
+		}
+	}
+
 	preAllocated, err := deviceClaims.MarshalText()
 	if err != nil {
 		returnErr := errors.New("pod device claim encoding failed")
@@ -94,6 +202,31 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 	util.InsertAnnotation(newPod, util.PodVGPUPreAllocAnnotation, preAllocated)
 	util.InsertAnnotation(newPod, util.PodPredicateNodeAnnotation, alloc.nodeInfo.GetName())
 	return newPod, nil, nil
+}
+
+// allocateAndAccumulate places one container and folds its claim into the node
+// accounting so the next concurrent container sees the reduced availability —
+// this is how cross-container GPU sharing within a single phase works. Used for
+// the concurrent group (regular app + sidecars); sequential init containers are
+// placed without accumulation (they never overlap).
+func (alloc *allocator) allocateAndAccumulate(req *AllocationRequest, need ContainerNeed, restrictUUIDs map[string]struct{}) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
+	claim, rsn, err := alloc.allocateOne(req, need, restrictUUIDs)
+	if err != nil {
+		klog.V(3).ErrorS(err, "container allocation internal error",
+			"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(req.Pod), "container", need.Name)
+		return nil, nil, err
+	}
+	if rsn != nil {
+		klog.V(4).InfoS("container allocation rejected", "node", alloc.nodeInfo.GetName(),
+			"pod", klog.KObj(req.Pod), "container", need.Name, "reason", rsn.Detailed())
+		return nil, rsn, nil
+	}
+	if err = alloc.addContainerAllocate(claim); err != nil {
+		klog.V(3).ErrorS(err, "adding container resource allocation failed",
+			"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(req.Pod), "container", need.Name)
+		return nil, nil, errors.New("internal device scheduling error")
+	}
+	return claim, nil, nil
 }
 
 func getDeviceUUIDs(devices []*device.Device) []string {
@@ -112,8 +245,7 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 //     reason carries the structured cause (with
 //     per-device counts when applicable).
 //   - (nil, nil, err)       — internal error (shouldn't happen).
-func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
-	pod := req.Pod
+func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed, restrictUUIDs map[string]struct{}) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", need.Name, alloc.nodeInfo.GetName())
 	if need.Number > alloc.nodeInfo.GetSchedulableDeviceCount() {
 		return nil, reason.New(reason.InsufficientGPUCards).
@@ -121,7 +253,7 @@ func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) 
 	}
 	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
 
-	deviceStore, deviceCounts := alloc.filterDevices(pod, needCores, needMemory)
+	deviceStore, deviceCounts := alloc.filterDevices(req, needCores, needMemory, restrictUUIDs)
 	totalDevices := alloc.nodeInfo.GetDeviceCount()
 	claims, rsn := alloc.pickDeviceClaims(req, deviceStore, need.Number, needCores, needMemory)
 	if rsn != nil {
@@ -147,7 +279,7 @@ func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) 
 				WithDetail("need %d devices, none qualify", need.Number)
 		}
 		klog.V(5).InfoS("Insufficient node resources", "node", alloc.nodeInfo.GetName(),
-			"pod", klog.KObj(pod), "container", need.Name, "reason", nodeReason.Detailed())
+			"pod", klog.KObj(req.Pod), "container", need.Name, "reason", nodeReason.Detailed())
 		return nil, nodeReason, nil
 	}
 	sort.Slice(claims, func(i, j int) bool { return claims[i].Id < claims[j].Id })
@@ -583,11 +715,21 @@ func resolveLinkDevices(picked []*gpuallocator.Device, store []*device.Device) [
 // pkg/scheduler/reason — no parallel enum here. That keeps the counts
 // directly bucketable by the FilteringFailed aggregator without any
 // translation table.
-func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int64) ([]*device.Device, map[reason.Code]int) {
+func (alloc *allocator) filterDevices(req *AllocationRequest, needCores, needMemory int64, restrictUUIDs map[string]struct{}) ([]*device.Device, map[reason.Code]int) {
 	nodeName := alloc.nodeInfo.GetName()
 	counts := make(map[reason.Code]int)
 	devices := make([]*device.Device, 0, alloc.nodeInfo.GetDeviceCount())
 	for i, deviceInfo := range alloc.nodeInfo.GetDeviceMap() {
+		// Restrict to a preferred device set when requested. Used by the
+		// init-container reuse pass to first try placing a sequential init
+		// container only on the pod's already-chosen GPUs; on failure the
+		// caller retries with no restriction. Skipped silently (not counted)
+		// because it is an internal preference, not a user-facing rejection.
+		if restrictUUIDs != nil {
+			if _, ok := restrictUUIDs[deviceInfo.GetUUID()]; !ok {
+				continue
+			}
+		}
 		// Filter unhealthy device.
 		if !deviceInfo.Healthy() {
 			klog.V(4).InfoS("Filter unhealthy devices on the node", "node", nodeName,
@@ -630,20 +772,20 @@ func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int
 			continue
 		}
 		// Filter device type.
-		if !util.CheckDeviceType(pod.Annotations, deviceInfo.GetType()) {
+		if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, deviceInfo.GetType()) {
 			klog.V(4).InfoS("Filter devices with type mismatches on the node",
 				"node", nodeName, "deviceIndex", i, "deviceType", deviceInfo.GetType(),
-				"includeTypes", pod.Annotations[util.PodIncludeGpuTypeAnnotation],
-				"excludeTypes", pod.Annotations[util.PodExcludeGpuTypeAnnotation])
+				"includeTypes", req.Pod.Annotations[util.PodIncludeGpuTypeAnnotation],
+				"excludeTypes", req.Pod.Annotations[util.PodExcludeGpuTypeAnnotation])
 			counts[reason.DeviceTypeMismatch]++
 			continue
 		}
 		// Filter device uuid.
-		if !util.CheckDeviceUuid(pod.Annotations, deviceInfo.GetUUID()) {
+		if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, deviceInfo.GetUUID()) {
 			klog.V(4).InfoS("Filter devices with uuid mismatches on the node",
 				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
-				"includeUuids", pod.Annotations[util.PodIncludeGPUUUIDAnnotation],
-				"excludeUuids", pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
+				"includeUuids", req.Pod.Annotations[util.PodIncludeGPUUUIDAnnotation],
+				"excludeUuids", req.Pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
 			counts[reason.DeviceUUIDMismatch]++
 			continue
 		}

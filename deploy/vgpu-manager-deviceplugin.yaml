@@ -118,7 +118,7 @@ spec:
       # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
       priorityClassName: system-node-critical
       nodeSelector:
-        vgpu-manager-enable: enable
+        vgpu-manager: device-plugin
       serviceAccountName: vgpu-manager-device-plugin
       terminationGracePeriodSeconds: 30
       restartPolicy: Always

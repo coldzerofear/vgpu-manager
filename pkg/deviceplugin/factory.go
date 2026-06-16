@@ -31,8 +31,12 @@ func GetDevicePlugins(devicePluginPath string, devManager *manager.DeviceManager
 	migStrategy := devManager.GetNodeConfig().GetMigStrategy()
 	if migStrategy != util.MigStrategySingle {
 		socket := filepath.Join(devicePluginPath, "nvidia-vgpu.sock")
-		plugins = append(plugins, vgpu.NewVNumberDevicePlugin(util.VGPUNumberResourceName,
-			socket, devManager, kubeClient, clusterManager.GetCache()))
+		plugin, err := vgpu.NewVNumberDevicePlugin(util.VGPUNumberResourceName,
+			socket, devManager, kubeClient, clusterManager.GetCache())
+		if err != nil {
+			return nil, fmt.Errorf("create vnumber plugin failed: %v", err)
+		}
+		plugins = append(plugins, plugin)
 	}
 
 	var deleteResources []string

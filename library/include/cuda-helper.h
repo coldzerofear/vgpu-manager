@@ -1020,9 +1020,14 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphExecMemcpyNodeSetParams),
   /** cuGraphExecMemsetNodeSetParams */
   CUDA_ENTRY_ENUM(cuGraphExecMemsetNodeSetParams),
-  /** cuGraphExecUpdate */
-//  CUDA_ENTRY_ENUM(cuGraphExecUpdate),
-//  CUDA_ENTRY_ENUM(cuGraphExecUpdate_v2),
+  /** cuGraphExecUpdate (v1: 4 args, exec/graph/errNode_out/result_out) and
+   *  _v2 (3 args, exec/graph/resultInfo*). Both ABIs are hooked separately
+   *  in cuda_hook.c with their own override functions; cuGetProcAddress
+   *  routes "cuGraphExecUpdate" lookups by cudaVersion (<12000 -> v1,
+   *  >=12000 -> v2) to keep the parameter frame matching what the caller's
+   *  compile-time header expected. */
+  CUDA_ENTRY_ENUM(cuGraphExecUpdate),
+  CUDA_ENTRY_ENUM(cuGraphExecUpdate_v2),
   /** cuMemAddressFree */
   CUDA_ENTRY_ENUM(cuMemAddressFree),
   /** cuMemAddressReserve */
