@@ -1,349 +1,169 @@
-# 跨 Pod NVLink 拓扑分配设计
+# 跨 Pod NVLink 拓扑亲和设计(轻量版)
 
-> 本文为 vgpu-manager 在 **跨 Pod 边界保持 NVLink 连通** 的设计稿。当前实现的链路拓扑分配仅在单 Pod 内生效;本文档分析典型分布式训练场景下的跨 Pod 需求、现有基础设施、设计方案与实施风险,作为后续实施的依据。**本文档不包含已落地代码**。
+> 本文为 vgpu-manager 在 **同节点跨 Pod 边界保持 NVLink 连通** 的设计。单 Pod 内的链路分配已落地;本文在**不影响现有功能**的前提下,给出让"同 Gang 的多个 Pod 落在同一 NVLink 连通分量"的**最小改造方案**。**本文档不包含已落地代码。**
+>
+> 本文是 [`multinode_topology_aware_scheduling_analysis.md`](./multinode_topology_aware_scheduling_analysis.md) 中 **L0 层**(节点内)的详细设计;跨节点聚拢(L2/L3)见该文。底座见 [`scheduler_strategy_topology_refactor_design.md`](./scheduler_strategy_topology_refactor_design.md)。
 
-## 1. 背景与目标
+## 0. 适用边界(先划清楚,避免过度设计)
 
-### 1.1 场景
+**跨 Pod NVLink 只在"单节点上跑了同 Gang 的多个 Pod"时才有意义。** 两种部署形态:
 
-分布式训练作业(NCCL all-reduce / pipeline parallel)通常由 Gang(PodGroup)拆成 N 个 Pod,每个 Pod 申请若干张 GPU。当 Pod 之间的 GPU **不在同一 NVLink 连通域**时,Pod 间集合通信会退化到 PCIe(典型 32 GB/s)甚至跨 NUMA(更慢),NCCL 训练吞吐受限于此。
+| 形态 | L0 是否需要 |
+|---|---|
+| **1 节点 = 1 Pod = 整机 8 卡**(典型多机数据并行) | ❌ **不需要**。节点内只有一个 Pod 独占所有卡,现有「单 Pod link 拓扑」已覆盖;跨节点聚拢交给 L2/L3 |
+| **1 节点 = 多个 Gang Pod**(MPI 风格 / 每 rank 一卡一 Pod / 小作业打包) | ✅ **需要**。否则 Pod-A 选 GPU0-1、Pod-B 选 GPU4-5,二者不连通,Pod 间 NCCL 退化到 PCIe |
 
-现状:vgpu-manager 仅在**单 Pod 内**调度多张 GPU 时通过 [`pkg/device/allocator/allocator.go:341`](../pkg/device/allocator/allocator.go#L341) 的 `allocateLink` 让 bestEffort 算法选 NVLink 连通最好的子集。一个 Pod 选完后,**下一个 Pod 进入 Filter 时不知道前一个 Pod 选了哪些卡**,只能在剩余资源里再做一次"局部最优",彼此连不连通完全是运气。
+所以本设计是**面向"多 Pod 共节点"场景的增量增强**,默认关闭、按需开启,对最常见的整机整卡形态零影响。
 
-### 1.2 目标
+## 1. 现状盘点(对齐最新代码)
 
-- **跨 Pod 优先连通**:同 Gang 后续 Pod 优先选择与已分配兄弟 Pod 处于同一 NVLink 连通分量的 GPU。
-- **首 Pod 前瞻**:Gang 第一个 Pod 选定连通分量时,考虑后续兄弟 Pod 的总卡数需求,挑选能装下整组的分量。
-- **严格模式**:提供 `gpu-cross-pod-link-strict` 注解,强制 Gang 全程必须在同一连通分量,否则拒绝并触发抢占。
+> ⚠️ 本节修订自旧版:`scheduler_strategy_topology_refactor` 的 strict 模式 / greedy 降级 / TopK / `AllocationRequest` 抽象**均已落地**,行号与 API 已变。下表为当前真实状态。
 
-### 1.3 非目标
+### 1.1 已具备、可直接复用的基础设施
 
-- 不在本项目内实现 Gang 调度本身。外层(scheduler-plugins / Volcano / Koordinator)负责保证 Gang 兄弟 Pod **同节点 + 连续出队**,vgpu-manager 在已 Gang 化的前提下做卡级最优。
-- 不考虑跨节点 NVLink(NVLink 不跨主机)。
-- 不动 NUMA 拓扑模式(`numa` / `numa-strict`)的语义,后续可类比扩展但不在本设计范围。
-
-## 2. 现状盘点
-
-### 2.1 已具备的基础设施
-
-| 能力 | 位置 | 说明 |
+| 能力 | 当前位置 | 说明 |
 |---|---|---|
-| Gang 身份识别 | [`pkg/util/util.go:631`](../pkg/util/util.go) `PodHasGangName` | 同时支持 scheduler-plugins / Volcano / Koordinator 三套注解 |
-| Gang 注解常量 | [`pkg/util/consts.go:29-32`](../pkg/util/consts.go#L29) | `CoschedulingPodGroupLabel` / `KoordinatorGangNameAnnotation` 等 |
-| 节点连通分量地图 | [`pkg/device/types.go:660,791`](../pkg/device/types.go#L660) `computeLinkComponents` | NodeInfo 构建时跑 union-find,产出 `linkComponentByUUID map[string]int` 与 `maxLinkComponentSize int` |
-| 连通分量校验 | [`pkg/device/types.go:1254`](../pkg/device/types.go#L1254) `AreDevicesLinked(uuids)` | O(K) 判断一组 UUID 是否同分量 |
-| 最大分量大小 | [`pkg/device/types.go:1240`](../pkg/device/types.go#L1240) `MaxLinkComponentSize()` | 当前仅供 link 模式的节点级 fitness 排序使用,未参与分配决策 |
-| 跨 Pod 资源视图 | [`pkg/client/pod_lister.go:64`](../pkg/client/pod_lister.go) `NodeMapByIndexValue` | 按"Pod 计划落到的节点"分桶 vGPU Pod;`PodPlanSchedulingNode` 优先用 `Spec.NodeName`,否则用 `PodPredicateNodeAnnotation` |
-| 预分配 UUID 持久化 | [`pkg/util/consts.go:79`](../pkg/util/consts.go) `PodVGPUPreAllocAnnotation` | Filter 末尾 `PatchPodPreAllocatedMetadata` 写入,内含每容器 `[id_uuid_cores_memory]` 列表 |
-| MutationCache 实时可见 | [`pkg/client/pod_lister.go`](../pkg/client/pod_lister.go) | 同 Filter 调用之间 patch 的 pod 立刻被下一个 Pod 的 `ListByIndexValue` 看到,无须等 informer watch |
-| bestEffort 链路分配 | [`pkg/device/gpuallocator/greedy_policy.go:40,58`](../pkg/device/gpuallocator/greedy_policy.go) `AllocateLink` / `AllocateLinkTopK` | 在给定候选集内挑连通分最高的子集;Top-K 用于和 binpack/spread 组合 |
-| 节点级抢占识别 Gang | [`pkg/scheduler/preempt/preempt_predicate.go:179`](../pkg/scheduler/preempt/preempt_predicate.go) | 抢占时已会聚合 Gang 名作为受影响指标 |
+| Gang 身份识别 | [`pkg/util/util.go:685`](../pkg/util/util.go#L685) `PodHasGangName` | 已支持 coscheduling/Volcano/Koordinator/原生四套方言,返回 `(gangName, bool)` |
+| 连通分量地图 | [`pkg/device/types.go:829`](../pkg/device/types.go#L829) `computeLinkComponents` | union-find,产出 `maxLinkComponentSize` + `linkComponentByUUID map[string]int`,`NewNodeInfo` 构建时算好 |
+| 连通校验 | [`pkg/device/types.go:1556`](../pkg/device/types.go#L1556) `AreDevicesLinked(uuids)` | O(K) 判断一组 UUID 是否同分量,strict-link 已在用 |
+| 最大分量大小 | [`pkg/device/types.go:1542`](../pkg/device/types.go#L1542) `MaxLinkComponentSize()` | 已用于节点级拓扑 fitness 排序 |
+| 跨 Pod 资源视图 | [`filter_predicate.go:488`](../pkg/scheduler/filter/filter_predicate.go#L488) `NodeMapByIndexValue` | 按计划落点分桶全部 vGPU Pod,经 `WithNodePods` 注入每个 NodeInfo |
+| 预分配持久化 | [`consts.go:80`](../pkg/util/consts.go#L80) `PodVGPUPreAllocAnnotation` | Filter 末尾 `PatchPodPreAllocatedMetadata` 写入([:699](../pkg/scheduler/filter/filter_predicate.go#L699)) |
+| 预分配解析 | [`types.go:267`](../pkg/device/types.go#L267) `PodDeviceClaim.UnmarshalText` / [`:985`](../pkg/device/types.go#L985) `ShouldCountPodDeviceAllocation` | 解析兄弟 UUID + 判断其预分配是否仍有效 |
+| MutationCache 实时可见 | [`filter_predicate.go:707`](../pkg/scheduler/filter/filter_predicate.go#L707) `podLister.Mutation` | 前一个 Pod 的预分配立刻对下一个 Pod 的 Filter 可见 |
+| **全局串行锁** | [`filter_predicate.go:479`](../pkg/scheduler/filter/filter_predicate.go#L479) `f.locker.Lock()` | 整个 `deviceFilter` 串行,**同 Gang 兄弟不会并发进入分配**,跨 Pod 状态无竞态 |
+| strict + 回退骨架 | [`allocator.go:393`](../pkg/device/allocator/allocator.go#L393) `allocateByTopologyMode` / [`:448`](../pkg/device/allocator/allocator.go#L448) `handleTopologyFallback` | strict→拒绝节点、非 strict→发 `TopologyFallback` 事件,**cross-pod 可直接挂这套** |
+| link 分配本体 | [`allocator.go:473`](../pkg/device/allocator/allocator.go#L473) `allocateLink` | 已含 `AllocateLink`(快路径)+ `AllocateLinkTopK`+`selectLinkCandidateByDevicePolicy`(组合 binpack/spread)+ greedy 降级 |
 
-### 2.2 还缺什么
+### 1.2 与旧文档的关键差异(影响方案)
 
-- **Filter 路径没有 Gang 感知**:`deviceFilter` 不区分 Gang 与非 Gang Pod,`allocateLink` 不接受"anchor / 已锁定连通分量"输入。
-- **没有 Gang 总卡数信息**:首 Pod 无法判断当前分量够不够装整组。需要 PodGroup CRD 的 `MinResources` 或对同 Gang 兄弟 Pod 卡数求和。
-- **没有 Gang 级共享状态**:严格模式需要把"已选定分量 ID"持久化到 Gang 维度,目前没有承载位置。
-- **测试覆盖**:[`pkg/scheduler/filter/filter_perf_test.go`](../pkg/scheduler/filter/filter_perf_test.go) 与现有功能测试均无多 Pod 同 Gang 的链路连通场景。
+1. **`BuildAllocationRequest(pod)` 只吃 pod、不吃 node**([request.go:132](../pkg/device/allocator/request.go#L132))。`req` 是**节点无关、一次解析、所有节点共用**的,**不能**往 `req` 上挂 per-node 的 anchor。→ anchor 必须在 per-node 的 `NodeInfo` 或 per-node 的 allocator 上算。
+2. **`NodeInfo` 当前不保留 `nodePods`**:`nodePods` 只是 `NodeInfoOption` 的字段([types.go:724](../pkg/device/types.go#L724)),`NewNodeInfo` 用它累加用量后即弃,没存进结构体。→ 要让 NodeInfo 自解析 anchor,需**补一行**把它留下。
+3. **strict / greedy / TopK 已落地**:旧文档"阶段 2 做 greedy 降级、阶段 3 自建 strict"已无必要,**直接复用**。cross-pod 改造量因此大幅缩小。
 
-## 3. 关键概念
+## 2. 核心思路:anchor 自解析,filter 零改动
 
-- **Gang**:由 `PodHasGangName` 识别的同名 Pod 组,本文档假设外层调度器已保证它们**同节点 + 连续出队**。
-- **连通分量(link component)**:节点上 GPU 经 NVLink 连接形成的等价类。`linkComponentByUUID[uuid] = root`,union-find 的根 ID 唯一标识分量;同 root ⇔ 任意两两 NVLink 可达(强度由 P2P 边权决定)。
-- **Anchor**:同 Gang 已通过 Filter 的兄弟 Pod 在本节点上已经预分配(`PodVGPUPreAllocAnnotation`)的 UUID 集合。后续 Pod 应在 anchor 所在分量内选卡。
-- **Anchor 分量**:`linkComponentByUUID[anchorUUID0]`,即 anchor 锁定的连通分量根 ID;通常整个 Gang 应该收敛到唯一一个 anchor 分量(否则前序兄弟已经裂开,语义降级)。
-- **Lookahead 总需求**:同 Gang 所有 Pod 加起来需要的 vGPU 总数(`Σ container.VGPUNumber × replicas`)。
-
-## 4. 设计方案
-
-### 4.1 总体思路
-
-把"已分配给同 Gang 兄弟 Pod 的 UUID"作为 anchor 传给 `allocateLink`,让 bestEffort 算法在**anchor 所在连通分量**的窗口内选卡;首 Pod 在没有 anchor 的情况下,用 lookahead 信息挑能装下整组的最大分量。
-
-整体流程:
+把"同 Gang 兄弟在本节点已预分配的连通分量"作为 **anchor**,让 `allocateLink` 在 **anchor 分量窗口内**选卡。关键洞察:**`NodeInfo` 既持有 `linkComponentByUUID`,又(补一行后)持有本节点 pod 列表——anchor 可完全在 NodeInfo 内部自解析,`deviceFilter` 一行都不用改。**
 
 ```
-deviceFilter (调度第 N 个 Gang 兄弟 Pod):
-  1. 取 nodePodsMap[node] 中同 Gang 兄弟 Pod
-  2. 解析其 PodVGPUPreAllocAnnotation → anchorUUIDs
-  3. 若 anchorUUIDs 非空:
-       anchorComponent = linkComponentByUUID[anchorUUIDs[0]]
-       (校验所有 anchor 都在同一分量,否则退化)
-     若空(首 Pod):
-       gangTotal = lookahead(同 Gang 总卡数)
-       anchorComponent = 选满足 size(c) >= gangTotal 的最优分量
-  4. allocateLink 时,把候选 deviceStore 过滤到只剩 anchorComponent 内的卡
-  5. 在该窗口内跑 AllocateLink / AllocateLinkTopK
-  6. strict 模式下若窗口装不下当前 Pod 需求 → 拒绝节点
-     non-strict 下退回原 allocateLink 行为(分量内尽力,装不下回到全节点)
+deviceFilter (现有, 不改) → 串行循环, 每节点 NewAllocator(nodeInfo).Allocate(req)
+        │  nodeInfo 已含: linkComponentByUUID + 本节点同 Gang 兄弟(已 Mutation 的预分配)
+        ▼
+allocateByTopologyMode (req.Topology==link)
+        │  若 req.GangName != "" && HasGPUTopology:
+        │     anchorRoot, ok := nodeInfo.GangAnchorComponent(req.GangName, req.Pod.UID)
+        ▼
+allocateLink(anchorRoot 窗口)
+        ├─ ok(有兄弟): 候选 devices 过滤到 linkComponentByUUID==anchorRoot, 再跑 AllocateLink/TopK
+        │     装得下 → 选卡;装不下 → 非 strict 回退全节点(现有行为) / strict 拒绝(现有 handleTopologyFallback)
+        └─ !ok(首 Pod): 走现有 allocateLink(为自己选最优分量) [+ 可选 lookahead, 见 §4]
 ```
 
-### 4.2 分三个阶段落地
+## 3. 阶段一:Anchor-Aware(推荐先落地,filter 零改动)
 
-| 阶段 | 内容 | 必要性 |
+### 3.1 改动清单(最小集)
+
+| 文件 | 改动 | 量 |
 |---|---|---|
-| **阶段 1** | Anchor-aware allocateLink + 同 Gang 兄弟查询 | 基础能力 |
-| **阶段 2** | Lookahead:首 Pod 按 Gang 总卡数挑分量 | **关键**,无 lookahead 会大量失败 |
-| **阶段 3** | Strict 模式:Gang 级共享分量 ID + 严格回退 | 高保证场景 |
+| [`request.go`](../pkg/device/allocator/request.go) | `AllocationRequest` 加 `GangName string`;`BuildAllocationRequest` 里 `req.GangName, _ = util.PodHasGangName(pod)` | ~3 行 |
+| [`types.go`](../pkg/device/types.go) | ① `NodeInfo` 加字段 `nodePods []*corev1.Pod`,`NewNodeInfo` 补 `ret.nodePods = infoOption.nodePods`<br>② `computeLinkComponents` 顺手产出 `componentToUUIDs map[int][]string` 并存到 NodeInfo<br>③ 新增方法 `GangAnchorComponent`、`ComponentUUIDs`<br>④ `DeepCopy` 同步浅拷 `nodePods`、克隆 `componentToUUIDs` | ~70 行 |
+| [`allocator.go`](../pkg/device/allocator/allocator.go) | `allocateByTopologyMode` 解析 anchorRoot 传入;`allocateLink` 增 `anchorRoot int`(-1=无)参数并按分量过滤候选 | ~40 行 |
+| feature gate | 新增 `CrossPodLinkTopology`(默认 **off**),仅在开启 + `req.GangName!=""` + `Topology==link` 时启用 anchor 逻辑 | ~5 行 |
 
-#### 阶段 1:Anchor-Aware Allocation
+**filter_predicate.go 不改。** 这是相比旧文档(要改 filter 加 `collectGangAnchors`、clone req)的最大简化——因为 NodeInfo 已被 `WithNodePods` 注入了本节点的同 Gang 兄弟。
 
-**改动点**:
+### 3.2 NodeInfo 新方法
 
-1. **`AllocationRequest` 扩展**:在 [`pkg/device/allocator/request.go`](../pkg/device/allocator/request.go) 的 `AllocationRequest` 上新增字段:
+```go
+// GangAnchorComponent 返回同 Gang 兄弟 Pod 在本节点已预分配的 NVLink 连通分量根。
+// 遍历 nodePods,筛 PodHasGangName==gangName && UID!=self && ShouldCountPodDeviceAllocation,
+// 解析其 PodVGPUPreAllocAnnotation 的 UUID,经 linkComponentByUUID 映射到分量根。
+// 多兄弟分属不同分量时(语义已降级)取多数派根并记 V(3) 告警。
+// 无有效兄弟(首 Pod)返回 (-1, false)。
+func (n *NodeInfo) GangAnchorComponent(gangName string, self types.UID) (root int, ok bool)
 
-   - `GangName string` — `PodHasGangName(pod)` 解析结果,空表示非 Gang。
-   - `GangAnchorUUIDs []string` — 同 Gang 兄弟在本节点已预分配的 UUID 列表。**注意**:本字段是 per-node 上下文,不在 `BuildAllocationRequest` 里计算,而在 deviceFilter 的 per-node 循环里填,然后克隆 `req` 传给 `NewAllocator`。或者另起一个 `AllocationContext` per-node struct,避免污染 `AllocationRequest`(更干净的做法)。
-
-2. **同 Gang 兄弟扫描**:在 [`filter_predicate.go:452`](../pkg/scheduler/filter/filter_predicate.go) 拿到 `nodePodsMap` 之后,新增辅助函数 `collectGangAnchors(gangName, nodePods, selfUID) []string`:
-
-   - 遍历 `nodePods`,筛 `PodHasGangName(p) == gangName && p.UID != selfUID`。
-   - 解析每个兄弟的 `PodVGPUPreAllocAnnotation`(已有 `PodDeviceClaim.UnmarshalText`),抽出所有 UUID。
-   - 去重返回。
-
-3. **`allocateLink` 接受 anchor**:[`allocator.go:341`](../pkg/device/allocator/allocator.go#L341) 签名扩展为接收 `anchorUUIDs []string`:
-
-   - 若 `anchorUUIDs` 非空,根据 `nodeInfo.linkComponentByUUID` 拿到 anchor 分量 root。
-   - 把 `devices` 过滤到只剩同 root 的卡,再调 `gpuallocator.AllocateLink` / `AllocateLinkTopK`。
-   - 若过滤后 `< needNumber`,non-strict 下退回过滤前的 `devices` 继续走(降级到当前行为),strict 下返回 `(nil, false)` 让上层拒绝。
-
-4. **Anchor 分量一致性校验**:若 anchor 内 UUID 分属多个分量(意味着前序兄弟已经裂开,Gang 已经"破损"),记录 `klog.V(3)` 告警并选 anchor 中**多数派分量**作为本 Pod 的目标。
-
-**特性**:
-
-- 非 Gang Pod 路径完全不变(`anchorUUIDs` 为空,`allocateLink` 走原分支)。
-- 不引入新 informer。Gang 兄弟查询直接复用 podLister 的 `nodePodsMap[node.Name]`,基本零额外成本(分桶天然限定到本节点)。
-- MutationCache 保证刚预分配的兄弟在下一个兄弟进 Filter 时立刻可见;无须额外同步。
-
-**失败场景(阶段 1 已知不足)**:首 Pod 没有 anchor 时退回单 Pod bestEffort,可能选到只够自己的小分量,后续兄弟装不下 → 退到其他节点或失败。**阶段 2 解决**。
-
-#### 阶段 2:首 Pod Lookahead
-
-**目标**:首 Pod 进 Filter 时,知道整个 Gang 一共要多少张卡,挑能装下所有 Gang GPU 的连通分量。
-
-**Gang 总卡数获取(两条路径)**:
-
-- **路径 A:PodGroup CRD**(推荐)
-  - 新增 PodGroup informer(scheduler-plugins 的 `scheduling.x-k8s.io/v1alpha1`)。
-  - 从 PodGroup spec 的 `MinResources[VGPUNumberResourceName]` 直接拿总数。
-  - **优点**:权威、稳定、不依赖 Pod 是否已经创建。
-  - **缺点**:多引入一个 CRD 依赖;只覆盖标准 PodGroup,Volcano / Koordinator 各自的 CRD 需要分别适配。
-- **路径 B:Pod 求和**(备选)
-  - 从 podLister 查所有同 Gang Pod(无论是否在本节点、是否已调度),对每个 Pod 求 `Σ container.VGPUNumber × max(1, replicaCount)`,得到 Gang 总数。
-  - **优点**:无 CRD 依赖,降级路径。
-  - **缺点**:若部分 Gang Pod 尚未创建出来,会漏算;首 Pod 来得过早时尤其不准。
-  - **缓解**:对漏算敏感的部署,要求用户**先创建满 PodGroup 再放 Pod 调度**。
-
-**实现建议**:优先走路径 A;若读不到 PodGroup(注解里只有 Volcano / Koordinator 风格,而项目暂未集成对应 informer),退回路径 B。
-
-**节点级新增 fast-skip**(在 [`filter_predicate.go`](../pkg/scheduler/filter/filter_predicate.go) Tier-1 容量门附近):
-
-- 首 Pod 进入 Gang 拓扑路径时,若 `nodeInfo.MaxLinkComponentSize() < gangTotal`,直接拒绝节点,Reason 用 `LinkTopologyUnsatisfied` + Detail `gang needs %d in one component, node max is %d`。
-- 现成的 `MaxLinkComponentSize()` 字段在阶段 2 前只用于排序,本阶段把它从"排序提示"提升到"硬约束"。
-
-**分量挑选(首 Pod)**:
-
-- 在 `linkComponentByUUID` 上反向索引出 `componentToUUIDs map[int][]string`(可在 `NewNodeInfo` 时顺手算并缓存)。
-- 筛 `len(componentUUIDs) >= gangTotal && 该分量内可用 vGPU slot >= 自己当前 Pod 需求` 的分量集合。
-- 若多个候选分量满足:
-  - **链路最优**:沿用 `gpuallocator.AllocateLink` 但限制在每个候选分量内分别跑,取分数最高的。
-  - **policy 兼容**:与 binpack/spread 组合时,走 `AllocateLinkTopK` 在多个候选分量上分别产出 Top-K,统一交给 `selectLinkCandidateByDevicePolicy` 排序选优。
-
-#### 阶段 3:Strict 模式与 Gang 级状态
-
-**新增注解**:`gpu-cross-pod-link-strict`(在 `pkg/util/consts.go` 加常量),布尔语义,贴在 Pod 上(整个 Gang 应保持一致)。
-
-**语义**:
-
-- 整个 Gang 必须落在同一连通分量。
-- 首 Pod 选定分量后,把分量 ID 写到 Gang 级共享状态:
-  - **路径 A(若有 PodGroup informer)**:写在 PodGroup CR 的状态字段或注解(`vgpu-manager/gang-link-component`)。
-  - **路径 B**:写在首 Pod 自己的注解,后续 Pod 通过 `PodHasGangName + 同 Gang 兄弟查询` 找到首 Pod,读分量 ID。
-- 后续 Pod 进入 Filter 时:
-  - 在 anchor 解析阶段先尝试读 Gang 级共享状态;若读到分量 ID,**强制**只用该分量,装不下就拒绝。
-  - 若读不到(首 Pod 还没完成 Filter,或写入未同步),阶段 2 的 lookahead 兜底:同样按 gangTotal 选分量。
-
-**抢占交互**:
-
-- Strict 失败时,触发 vgpu-manager 自身的 preempt 路径([`pkg/scheduler/preempt/preempt_predicate.go`](../pkg/scheduler/preempt/preempt_predicate.go))。
-- 优先抢占**目标分量内**优先级低于本 Gang 的 Pod;若仍不够,放弃节点而非抢占其他分量(防止把好不容易腾出的 GPU 又分散到不连通的分量)。
-- `refineForNode` 里 `findAdditionalVictims` 候选挑选阶段加 link-component 维度过滤。
-
-## 5. 跨 Pod 状态传递与数据流
-
-### 5.1 状态传递路径
-
-```
-Pod-1 (Gang 首 Pod) 进入 deviceFilter
-  ├─ 无 anchor → lookahead 选分量 C
-  ├─ NewAllocator(req with anchorComponent=C).Allocate(req)
-  ├─ 选出 N1 张卡,UUID 写入 PodVGPUPreAllocAnnotation
-  └─ PatchPodPreAllocatedMetadata → podLister.Mutation(newPod)
-                                       │
-                                       ▼  立刻对下一个 Filter 调用可见
-Pod-2 (Gang 兄弟) 进入 deviceFilter
-  ├─ NodeMapByIndexValue 拿到本节点 Pod,含 Pod-1
-  ├─ collectGangAnchors → 解出 Pod-1 的 N1 个 UUID
-  ├─ anchorComponent = linkComponentByUUID[anchorUUIDs[0]] = C
-  ├─ NewAllocator(req with anchor=C).Allocate(req)
-  └─ allocateLink 内把 devices 过滤到 C,再选 N2 张
-  ...
+// ComponentUUIDs 返回某连通分量根下的全部 GPU UUID(供窗口过滤 / lookahead 选分量)。
+func (n *NodeInfo) ComponentUUIDs(root int) []string
 ```
 
-### 5.2 同一 Filter 调用内不存在并发
+### 3.3 allocateLink 的窗口过滤
 
-- `serialFilterNode` 锁保证同一节点的 Filter 串行,不存在两个 Gang 兄弟"同时进入 Filter"的竞态。
-- MutationCache 是 in-process overlay,Mutation 调用后下一次 `ListByIndexValue` 立刻反映,无 informer watch 延迟。
+在 [`allocateLink`](../pkg/device/allocator/allocator.go#L473) 取得 `devices` 后,若 `anchorRoot >= 0`:把 `devices` 与对应 `deviceStore` 过滤到 `linkComponentByUUID[uuid]==anchorRoot` 的子集,再跑现有的 `AllocateLink` / `AllocateLinkTopK`。
 
-### 5.3 跨节点不传状态
+- 窗口内卡数 `>= needNumber`:正常在窗口内选,后续兄弟自然收敛同分量。
+- 窗口内不足:
+  - **非 strict**:回退到过滤前的全节点 `devices`(= 完全等同现有行为),不拒绝节点。
+  - **strict**:返回 `(nil, false)` → 现有 `handleTopologyFallback` 以 `LinkTopologyUnsatisfied` 拒绝本节点(复用,无新代码)。
 
-跨 Pod NVLink 的前提是 Gang 同节点;不同节点上的 Gang 兄弟从对方 anchor 读出的分量 ID 在自己的 union-find 里无意义,所以本设计**只在同节点 anchor 情况下生效**。这要求外层 gang scheduling 保证同节点。
+### 3.4 为什么不影响现有功能
 
-## 6. 与外层 gang scheduling 的协同
+- `req.GangName==""`(非 Gang Pod)→ anchorRoot 永远 -1 → `allocateLink` 走原分支,**逐字节等同现状**。
+- feature gate 默认关 → 即便 Gang Pod 也走原路径。
+- 有 anchor 但装不下时,非 strict 回退到原 `devices`,行为不变。
+- 不新增 informer;anchor 解析复用已注入 NodeInfo 的 `nodePods` + 已有 `linkComponentByUUID`,**热路径零额外网络/缓存开销**。
 
-vgpu-manager 单独搞不定 Gang 调度。这套设计假设外层提供以下保证:
+## 4. 阶段二(可选):首 Pod Lookahead
 
-| 外层职责 | 谁来做 | 失败后果 |
+**问题**:首 Pod 无 anchor,现有 `allocateLink` 只为自己挑最优分量,可能选了只够自己的小分量,后续兄弟挤不进 → 散开(非 strict)/失败(strict)。
+
+**轻量实现**(仅在"多 Pod 共节点"且需要硬收敛时才值得做):
+
+1. `deviceFilter` 在构建 `nodePodsMap` 后,对 `req.GangName` 求和同 Gang 各 Pod 的 vGPU 总数,写入**节点无关**的 `req.GangTotalNumber`(放 `req` 上合理,Gang 总数与节点无关)。这是本阶段**唯一**的 filter 改动(~10 行)。
+   - 来源用 podLister 现有视图(同 Gang 所有 Pod 求和),无需新 informer;**缺陷**:部分 Gang Pod 尚未创建时会漏算 → 文档要求"先建满 PodGroup 再放 Pod 调度"。更稳的 PodGroup CRD informer 作为后续可选项,不在轻量范围。
+2. 首 Pod 的 `allocateLink`(anchor 不存在)改为:在 `MaxLinkComponentSize() >= req.GangTotalNumber` 的前提下,用 `ComponentUUIDs` 枚举满足 `size >= GangTotalNumber` 的分量,在其中分别跑 link 选优,取最佳。
+3. 节点级 fast-skip:`MaxLinkComponentSize() < GangTotalNumber` 时直接拒绝(把现有"仅排序提示"的 `MaxLinkComponentSize` 提升为硬约束),Reason 复用 `LinkTopologyUnsatisfied`。
+
+## 5. 阶段三(可选):strict 跨 Pod
+
+复用已落地的 strict 机制,几乎无新代码:
+
+- 语义:整个 Gang 必须同一连通分量。通过现有 `LinkTopologyStrict`(`device-topology-mode: link-strict`)叠加 `CrossPodLinkTopology` gate 表达,无需新注解。
+- 后续 Pod:anchor 存在但窗口装不下 → strict 下 `allocateLink` 返回 false → `handleTopologyFallback` 拒绝节点(现成)。
+- 与抢占协同(进阶,非必须):`preempt_predicate` 的 `findAdditionalVictims` 增加"只抢 anchor 分量内低优先级 Pod"的过滤,避免抢占后仍分散。**留作后续**,不在轻量范围。
+
+## 6. 与 Volcano #5049(反共置)正交互补
+
+[Volcano PR #5049](https://github.com/volcano-sh/volcano/pull/5049) 的 `vgpu-podgroup-policy: spread` 让**同 PodGroup 的 Pod 不共用同一物理卡**。它与本设计**方向相反但正交**:
+
+| | #5049 spread(反共置) | 本设计(link 亲和) |
 |---|---|---|
-| Gang 兄弟同节点 | scheduler-plugins Coscheduling / Volcano / Koordinator | 跨节点 NVLink 无意义,本设计退化为单 Pod link |
-| Gang 兄弟连续出队 | 同上 | 非 Gang Pod 抢占分量内空 slot 概率上升;部分 Gang 失败 |
-| Gang 兄弟原子提交(全部成功或全部回滚) | 同上 | 部分 Pod 卡分配成功、部分失败时,vgpu-manager 已 patch 的预分配不会自动撤销;但 [`pkg/device/types.go:972`](../pkg/device/types.go#L972) 的 `ShouldCountPodDeviceAllocation` 通过 `PodPredicateTimeAnnotation` 的 grace 窗口会自动释放卡 |
+| 方向 | 兄弟落**不同**卡 | 兄弟落**同一** NVLink 分量 |
+| 粒度 | 设备级 | 拓扑级 |
 
-vgpu-manager 这边专心做:
+**二者可同时启用** → 兄弟落同一 NVLink mesh 的**不同卡**上,正是分布式训练理想分布(每 rank 独占一卡 + rank 间走 NVLink)。建议作为本设计完成后的独立小特性跟进(~80 LOC,在 `filterDevices` 加"该卡是否已有同 Gang 兄弟"过滤)。
 
-- "假设兄弟连续来,我把它们装到同一连通分量里"。
-- 不假设兄弟必然全部来;若中途 Gang 取消、外层抛弃部分 Pod,vgpu-manager 通过 stuck-pod grace 机制自动放卡(参见 `ShouldCountPodDeviceAllocation` 的失败/超时分支),Gang 级状态(若存在)在 PodGroup 删除时跟随消失。
+## 7. 测试矩阵
 
-## 7. 失败模式与边界
+| 用例 | 场景 | 期望 |
+|---|---|---|
+| `Anchor_FollowSibling` | 同 Gang 两 Pod 顺序到同节点(阶段一) | Pod-2 落在 Pod-1 所选 UUID 同 `linkComponentByUUID` 根的卡上 |
+| `DifferentGangs_Isolated` | 不同 Gang 同节点 | 各自独立选,不强制同分量 |
+| `NonGang_Unchanged` | 非 Gang Pod | 完全走原路径,逐字节等同现状 |
+| `NoRoom_NonStrict_Fallback` | 锚定分量空 slot 不足,非 strict | 回退全节点,不拒绝节点 |
+| `NoRoom_Strict_Reject` | 同上但 strict | 拒绝节点,走 `handleTopologyFallback` |
+| `Lookahead_PicksBigComponent` | 多分量节点,首 Pod 只需 2 卡但 Gang 共需 8(阶段二) | 首 Pod 选 ≥8 卡容量的分量 |
+| `AnchorSplit_Majority` | 兄弟 anchor 跨多分量 | 非 strict 取多数派 + V(3);strict 拒绝 |
+| `FeatureGateOff_Noop` | gate 关闭 | 即便 Gang Pod 也走原路径 |
 
-### 7.1 首 Pod 选错分量
-
-- **症状**:首 Pod 选了某分量 C1,但 C1 在阶段 1 还没 lookahead,只够装首 Pod 自己;Pod-2 进 Filter 时 C1 已无空 slot,被迫挑别的分量或退节点。
-- **缓解**:**阶段 2 必须做**。阶段 1 单独上线会导致 Gang 成功率不达预期。
-
-### 7.2 Anchor 分量 split
-
-- **症状**:Pod-1 在 C1 选 2 张,Pod-2 因为 C1 满了,被迫(non-strict 降级)从 C2 选 2 张;Pod-3 进 Filter 时 anchor 内 UUID 分属 C1 与 C2。
-- **处理**:`collectGangAnchors` 后做分量一致性检查,选**多数派分量**作为本 Pod 目标;同时记录 V(3) 告警。strict 模式下直接拒绝本 Pod(并触发 Gang 级抢占)。
-
-### 7.3 Gang 总卡数误判
-
-- 路径 A(PodGroup):若用户提交 PodGroup 后又改了 `MinResources`,可能与实际 Pod 数对不上。设计上以 PodGroup spec 为准;实际超出能力时 lookahead 失败 + 拒绝节点,触发外层重新调度。
-- 路径 B(Pod 求和):若部分 Gang Pod 尚未创建,首 Pod 选了不够大的分量。**已知缺陷**,文档显式声明用户需"先 PodGroup 后 Pod"。
-
-### 7.4 与抢占的交互
-
-- vgpu-manager 现有抢占模块在 [`pkg/scheduler/preempt/preempt_predicate.go`](../pkg/scheduler/preempt/preempt_predicate.go) 已能识别 Gang 名作为受影响指标(`gangNameSet`),用于聚合事件。本设计要求扩展 `findAdditionalVictims`,在 strict 失败的回退路径上**只抢占目标连通分量内的低优先级 Pod**,避免抢占跨分量导致后续 Pod 仍然分散。
-
-### 7.5 跨 Pod link + 单 Pod numa 组合
-
-- 单 Pod 内若同时指定 `link-strict + numa-strict`,要求同时在同分量同 NUMA。该 Pod 的候选窗口先按 anchor 分量过滤,再按 NUMA 过滤,最后跑 bestEffort。通常会进一步缩小候选,无新风险。
-
-### 7.6 测试覆盖
-
-- 现有 `Test_FilterPerf` 和 `Test_DeviceFilter` 均无多 Pod 同 Gang 链路连通场景。
-- 需要新增的测试矩阵(参考第 10 节 Volcano #5049 的覆盖结构,把"亲和" / "反亲和"翻译成本设计语义):
-
-  | 用例 | 场景 | 期望 |
-  |---|---|---|
-  | `Test_CrossPodLink_Anchor` | 同 Gang 两 Pod 顺序到达,阶段 1 | Pod-2 落在 Pod-1 所选 UUID 同 `linkComponentByUUID` 根的卡上 |
-  | `Test_CrossPodLink_DifferentGangsIsolated` | 不同 Gang 两 Pod 同节点 | 各自独立选,不强制同分量 |
-  | `Test_CrossPodLink_NoRoomFalls`(non-strict) | 锚定分量内空 slot 不够 | 退回单 Pod bestEffort,不拒绝节点 |
-  | `Test_CrossPodLink_NoRoomFails`(strict) | 同上但 strict | 拒绝节点,触发抢占路径 |
-  | `Test_CrossPodLink_Lookahead` | 多分量节点,首 Pod 只需 2 张但 Gang 总共要 8 张 | 首 Pod 选 ≥ 8 张容量的分量,不被"局部最优分量"卡 |
-  | `Test_CrossPodLink_MixedGangAndNonGang` | Gang Pod + 非 Gang Pod 同节点 | 非 Gang Pod 完全走原路径,Gang 内 anchor 解析不污染 |
-  | `Test_CrossPodLink_AnchorSplit` | 兄弟 anchor 跨多个分量(违反约束) | non-strict 走多数派分量并记 V(3) 告警;strict 拒绝 |
-
-- 集成测试:多 Pod 同 Gang 顺序调度,断言所选 UUID 全部在同一 `linkComponentByUUID` 根。
-- 性能基线:`Test_FilterPerf` 新增 Gang 维度,确认 anchor 解析成本可忽略(预期 < 5%)。
+性能:在 `filter_perf_test` 增 Gang 维度,确认 anchor 解析(遍历本节点 pod + map 查询)成本 < 5%。
 
 ## 8. 工作量与里程碑
 
-| 阶段 | 改动量(估算) | 主要文件 | 风险 |
+| 阶段 | 量(估) | 风险 | 价值 |
 |---|---|---|---|
-| 阶段 1 | ~200 LOC | `request.go`, `allocator.go`, `filter_predicate.go`, `util.go`(`collectGangAnchors`) | 低 |
-| 阶段 2 | ~250 LOC + PodGroup informer 接入(若走路径 A) | 上 + `pkg/scheduler/`(informer)+ 节点级 fast-skip | 中(新依赖)|
-| 阶段 3 | ~200 LOC | 上 + `consts.go`(注解)+ `preempt_predicate.go`(同分量抢占) | 中 |
-| 测试 | ~400 LOC | `*_test.go` + `filter_perf_test.go` | 低 |
+| 阶段一 Anchor | ~120 LOC(**filter 不改**) | 低 | ★★★★ 多 Pod 共节点场景核心收益 |
+| 阶段二 Lookahead | ~60 LOC(filter +10) | 中(漏算缺陷) | ★★★ 提升首 Pod 选分量正确率 |
+| 阶段三 strict | ~30 LOC(复用) | 低 | ★★ 硬保证场景 |
+| 反共置(#5049) | ~80 LOC | 低 | ★★ 与亲和叠加=训练理想分布 |
 
-总计 ~1050 LOC + 1 个 informer + 测试。
+**节奏**:阶段一独立上线(feature gate 默认关,灰度验证),阶段二在"多 Pod 共节点"客户场景确认后跟进,阶段三/反共置按需。
 
-里程碑建议:
+## 9. 不在本设计范围
 
-1. **阶段 1 独立上线**:仅做 anchor-aware,默认行为不变(无 anchor 时走原逻辑)。可灰度,不需要外层联动。
-2. **阶段 2 在 PodGroup 集成验证后上线**:lookahead 是关键收益点,阶段 1 单独价值有限。
-3. **阶段 3 作为可选硬保证**:严格模式与抢占同分量逻辑较复杂,等阶段 1+2 在生产稳态运行后再上。
+- Gang 调度本身(同节点 + 连续出队 + 原子提交):依赖外层(见 multinode 文档 L2/L3);本设计假设外层已保证同节点。
+- 跨节点 NVLink(NVLink 不跨主机;GB200 IMEX 例外,走 DRA 路线,见 multinode 文档 §7)。
+- DRA 模式下的等价能力:DRA 设备分配是声明式 ResourceClaim,跨 Pod 拓扑需在 claim 级别做,独立 follow-up。
 
-每个阶段都建议**包在 feature gate 后**(类似 `GPUTopology` feature gate 的模式,参见 [`pkg/device/types.go`](../pkg/device/types.go) 里 `IsGPUTopologyEnabled` 的现成结构)。灰度开关默认关,小集群验证后再放量。借鉴自第 10 节 Volcano #5049 的发布节奏。
+## 10. 一句话总结
 
-## 9. 不在本设计范围内
-
-- Gang 调度本身(Pod 同节点、连续出队、原子提交):依赖外层。
-- NUMA 跨 Pod 拓扑(类比但不在本次)。
-- 跨节点 NVLink(NVLink 不跨主机)。
-- DRA 模式下的等价能力:DRA 的设备分配是声明式 ResourceClaim,跨 Pod 拓扑需要在 ResourceClaim 级别做,设计路径不同,作为独立 follow-up。
-
-## 10. 借鉴:与 Volcano PR #5049 的对比与启发
-
-[Volcano PR #5049](https://github.com/volcano-sh/volcano/pull/5049)(已合并)新增 `volcano.sh/vgpu-podgroup-policy: spread` 注解,**禁止同 PodGroup 的两个 Pod 共用同一张物理 GPU**,理由是同卡跨 Pod 的 NCCL 通信失败。
-
-### 10.1 解决的是不同的问题,但语义互补
-
-| 维度 | Volcano #5049(spread) | 本设计(link 亲和) |
-|---|---|---|
-| 方向 | **反共置**:Gang 兄弟必须落在**不同**物理卡 | **亲和**:Gang 兄弟必须落在**同一 NVLink 连通分量** |
-| 粒度 | 设备级(per-GPU) | 拓扑级(per-component) |
-| 触发 | per-Pod 注解 `volcano.sh/vgpu-podgroup-policy: spread` | Gang 检测 + topology mode = link |
-| Lookahead | 无 | 阶段 2 有 |
-| 失败处理 | 第二 Pod 找不到不同卡 → 拒绝节点 | non-strict 降级到单 Pod bestEffort;strict 拒绝并抢占 |
-
-**关键认知:两个语义可以同时启用且彼此正交**。一个 Gang 同时打开"分量内亲和 + 卡级反共置",意味着 Pod 兄弟落在同一 NVLink mesh 的**不同卡**上 — 这恰好是分布式训练的理想分布(NCCL 内每 rank 独占一张卡 + rank 间走 NVLink)。
-
-### 10.2 直接可借鉴的实现细节
-
-1. **PodGroup key 反向索引到设备**
-   Volcano 在 [`GPUUsage`](https://github.com/volcano-sh/volcano/blob/master/pkg/scheduler/api/devices/nvidia/vgpu/device_info.go) 里加了 `PodGroupKey string` 字段,挂在 per-device-per-pod 的 usage 映射上。每次问"这张卡上有没有同 Gang 兄弟",直接遍历该卡的 PodMap 看 key 即可,**避免反向扫描整集群 Pod 列表**。
-   - 我们当前设计是"per-Filter 时扫 `nodePodsMap[node]` 找同 Gang 兄弟,解析 `PodVGPUPreAllocAnnotation`",对每个 Pod 都要解析一次。
-   - **建议借鉴**:阶段 1 实现时,可以在 NodeInfo 构建阶段顺手维护 `componentToGangs map[componentRoot]map[gangName]struct{}` 或更细的 `componentToGangAnchors map[componentRoot]map[gangName][]uuid`。这样在 `allocateLink` 内直接 O(1) 查询"本分量是否已被某 Gang 锁定",省掉每节点的 sibling 扫描成本。
-   - 代价是 NodeInfo 构建多一遍 PodMap 遍历;但已经在 `addPodUsedResources` 里遍历过,可以顺手填。
-
-2. **per-Pod 注解 vs PodGroup-level 注解**
-   Volcano 把策略注解贴在 **Pod** 上(`volcano.sh/vgpu-podgroup-policy`),不在 PodGroup 上。优点:无 PodGroup CRD 强依赖,Volcano scheduler 也不强制读 PodGroup spec。缺点:用户必须保证 Gang 内**每个** Pod 都贴上注解,漏一个就降级。
-   - 我们当前设计的 `gpu-cross-pod-link-strict` 也是 per-Pod。问题同。
-   - **建议借鉴 + 改进**:阶段 3 strict 模式同时支持两个位置 — 优先读 PodGroup spec(更可靠),回落到首 Pod 注解。这样既保留 Volcano 的轻量路径,也提供更稳的覆盖。
-
-3. **Snapshot 必须 deep-copy**
-   Volcano 在该 PR 里同步修了一个**潜在 bug**:`getGPUDeviceSnapShot` 原本浅拷贝 `PodMap`,导致 snapshot 与原对象共享;Volcano 调度的 try-and-rollback 模型下会污染。改为深拷贝 PodMap。
-   - 提醒:**我们要新增的任何 per-device gang 状态(componentToGangs / componentToGangAnchors)在 NodeInfo Clone 时必须随之深拷贝**。当前 [`pkg/device/types.go:911-912`](../pkg/device/types.go#L911) 的 `Clone` 已经处理 `deviceList` 和 `linkComponentByUUID`,新增字段记得同步加进去。
-
-4. **测试矩阵结构**
-   Volcano PR 的测试覆盖结构清晰且最小化,见 PR 描述里的 5 行表(spread-prevents-co-location / binpack-allows-co-location / different-groups-can-share / no-room-fails / mixed-annotations)。
-   - 我们的测试矩阵(第 7.6 节)已经按这个模板重写,加上 lookahead 与 anchor-split 两个本设计独有的场景。
-
-5. **Feature flag 渐进上线**
-   Volcano 的说明里明确:"This feature is behind a feature flag and have been tested with a local minikube instance"。
-   - 我们也照办:每个阶段进一个 feature gate,默认关,验证再放量。第 8 节末已加该约定。
-
-### 10.3 启发但不照搬的部分
-
-- **设备使用率累加方式**:Volcano 的 `addToPodMap` / `addResource` 走的是 device-info 抽象,与我们 [`pkg/device/types.go`](../pkg/device/types.go) 的 `AddUsedResources` 路径架构不一样,**不直接复用**。我们维持现有 [`AddPodUsedResources`](../pkg/device/types.go#L1043) 流水,在它已经遍历 PodDeviceClaim 的循环里**顺手累计 Gang → 分量映射**即可,代码侵入面小。
-- **per-Pod annotation 命名**:Volcano 用 `volcano.sh/vgpu-podgroup-policy`,我们走 `nvidia.com/` 域名(项目历史约定,见 [`pkg/util/consts.go`](../pkg/util/consts.go) 里其他注解),不跟随。
-
-### 10.4 是否要并入 Volcano-style spread?
-
-**强烈建议作为本设计的第 4 个阶段或独立 PR 加入**:
-
-- 名义注解:`nvidia.com/cross-pod-device-spread`(沿用项目域名)。
-- 语义:与 link 亲和**完全正交**,可单独启用,可同时启用。
-- 实现成本:~80 LOC(主要是在 `allocator.filterDevices` 阶段加一个新的 per-device 过滤函数,判断"该卡上是否已有同 Gang 兄弟")。
-
-加入后,跨 Pod 调度策略矩阵变成:
-
-| Mode | 含义 |
-|---|---|
-| `cross-pod-link`(本设计 1-3 阶段) | Gang 兄弟落同一 NVLink 分量 |
-| `cross-pod-link-strict`(本设计 3 阶段) | 同上,失败拒绝 + 抢占 |
-| `cross-pod-device-spread`(借鉴 #5049) | Gang 兄弟不共卡 |
-| 三者组合 | 同分量 + 不共卡 + 装不下就拒绝 = 训练任务最优分布 |
-
-这个第 4 阶段建议放在阶段 1+2 完成后立即跟进,作为同一个特性簇的收尾。
+> 借助 NodeInfo 已持有连通分量地图、并(补一行后)持有本节点同 Gang 兄弟,**anchor 可在 allocateLink 内自解析、filter 零改动**;strict/回退/greedy/TopK 已落地可直接复用。阶段一 ~120 LOC、默认关、对非 Gang 与整机整卡形态零影响,即可让"同 Gang 多 Pod 共节点"收敛到同一 NVLink 分量。
