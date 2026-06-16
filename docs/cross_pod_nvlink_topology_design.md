@@ -104,6 +104,8 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 
 ## 4. 阶段二(可选):首 Pod Lookahead
 
+> **状态(2026-06-16):已决定暂缓,不实现。** 原因:获取 Gang 总卡数要么引入 PodGroup CRD informer,要么按 Pod 求和(部分 Pod 未创建时漏算);团队明确不想为此引入更多 CRD 解析。当前首 Pod 走现有单 Pod 选最优分量逻辑——可能选到偏小分量,后续兄弟在非 strict 下降级、strict 下拒绝节点(由阶段一/三覆盖)。若将来要做,优先非 CRD 的轻量来源。以下为保留的设计备忘,非待办。
+
 **问题**:首 Pod 无 anchor,现有 `allocateLink` 只为自己挑最优分量,可能选了只够自己的小分量,后续兄弟挤不进 → 散开(非 strict)/失败(strict)。
 
 **轻量实现**(仅在"多 Pod 共节点"且需要硬收敛时才值得做):
@@ -156,7 +158,7 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 | 阶段三 strict | ~30 LOC(复用) | 低 | ★★ 硬保证场景 |
 | 反共置(#5049) | ~80 LOC | 低 | ★★ 与亲和叠加=训练理想分布 |
 
-**节奏**:阶段一独立上线(feature gate 默认关,灰度验证),阶段二在"多 Pod 共节点"客户场景确认后跟进,阶段三/反共置按需。
+**节奏(2026-06-16)**:阶段一已落地(提交 `28cf038` + 边界修复 `d2e0f88`);阶段三 strict 随阶段一已具备(复用 `handleTopologyFallback`);**阶段二 Lookahead 已决定暂缓**(避免引入 CRD 解析,见 §4);反共置(#5049)未实现,按需跟进。
 
 ## 9. 不在本设计范围
 
