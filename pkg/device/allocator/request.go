@@ -299,5 +299,5 @@ func parseSchedulerPolicy(pod *corev1.Pod, annotation string) (util.SchedulerPol
 func parsePodTopologyMode(pod *corev1.Pod) (mode util.TopologyMode, strict bool) {
 	raw, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
 	tm := util.TopologyMode(strings.ToLower(raw))
-	return tm.BaseTopology(), tm.IsStrictTopology()
+	return tm, tm.IsStrictTopology()
 }

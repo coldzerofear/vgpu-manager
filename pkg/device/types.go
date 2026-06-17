@@ -18,6 +18,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
@@ -1030,7 +1031,7 @@ func computeMaxNUMAGroupSize(deviceMap map[int]*Device) int {
 		}
 		groups[numa]++
 	}
-	max := 0
+	var max int
 	for _, c := range groups {
 		if c > max {
 			max = c
@@ -1817,8 +1818,11 @@ func (n *NodeInfo) OrdinalOfUUIDs(uuids []string) (int, bool) {
 // more than one component (connectivity already degraded — e.g. an earlier
 // sibling fell back across components), the majority component is chosen and the
 // split is logged at V(3) rather than failing here.
-func (n *NodeInfo) GangAnchorComponent(gangName string, excludedSet sets.Set[types.UID]) (int, bool) {
-	if gangName == "" || len(n.nvlinkComponentByUUID) == 0 || len(n.nodePods) == 0 {
+func (n *NodeInfo) GangAnchorComponent(gangName string, owner *v1.OwnerReference, excludedSet sets.Set[types.UID]) (int, bool) {
+	if len(n.nvlinkComponentByUUID) == 0 || len(n.nodePods) == 0 {
+		return -1, false
+	}
+	if gangName == "" && owner == nil {
 		return -1, false
 	}
 	votes := make(map[int]int)
@@ -1826,8 +1830,16 @@ func (n *NodeInfo) GangAnchorComponent(gangName string, excludedSet sets.Set[typ
 		if p == nil || excludedSet.Has(p.UID) {
 			continue
 		}
-		if name, ok := util.PodHasGangName(p); !ok || name != gangName {
-			continue
+		if gangName != "" {
+			if name, ok := util.PodHasGangName(p); !ok || name != gangName {
+				continue
+			}
+		} else if owner != nil {
+			if ownerRef := v1.GetControllerOfNoCopy(p); ownerRef == nil {
+				continue
+			} else if owner.UID != ownerRef.UID {
+				continue
+			}
 		}
 		if !ShouldCountPodDeviceAllocation(p) {
 			continue
@@ -1847,7 +1859,7 @@ func (n *NodeInfo) GangAnchorComponent(gangName string, excludedSet sets.Set[typ
 			bestRoot, bestVotes = root, v
 		}
 	}
-	if len(votes) > 1 {
+	if len(votes) > 1 && gangName != "" {
 		klog.V(3).Infof("gang %q anchor split across %d NVLink components on node %s; using majority root %d",
 			gangName, len(votes), n.name, bestRoot)
 	}

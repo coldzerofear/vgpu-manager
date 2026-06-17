@@ -401,15 +401,15 @@ func (alloc *allocator) allocateByTopologyMode(
 	pod := req.Pod
 	strict := req.TopologyStrict
 
-	switch req.Topology {
+	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
 		// Cross-pod anchor: when enabled and this pod belongs to a gang, find the
 		// NVLink component a sibling already pre-allocated on this node so we keep
 		// this pod's GPUs connected to them. -1 = no anchor (non-gang, gate off,
 		// or this is the gang's first pod here) → unchanged single-pod link path.
 		anchorRoot := -1
-		if req.CrossPodTopology && req.GangName != "" {
-			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, sets.New(req.Pod.UID)); ok {
+		if req.CrossPodTopology && (req.GangName != "" || req.ControllerOwner != nil) {
+			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, req.ControllerOwner, sets.New(req.Pod.UID)); ok {
 				// Priority 1: same-node sibling → exact NVLink component (UUID-based).
 				// Intra-node connectivity is a hard requirement (NVLink doesn't cross
 				// hosts), so an on-node sibling pins the component directly.

@@ -269,8 +269,9 @@ func (m TopologyMode) BaseTopology() TopologyMode {
 		return NUMATopology
 	case LinkTopologyStrict:
 		return LinkTopology
+	default:
+		return NoneTopology
 	}
-	return m
 }
 
 // Constants representing the various MIG strategies
