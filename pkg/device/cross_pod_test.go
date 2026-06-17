@@ -194,6 +194,36 @@ func Test_buildComponentOrdinals(t *testing.T) {
 	}
 }
 
+func Test_buildComponentOrdinals_UnresolvableSortsLast(t *testing.T) {
+	// Defensive: a component whose UUIDs are absent from deviceIndexMap (min stays
+	// MaxInt) must sort LAST, not steal ordinal 0 from a real component.
+	componentToUUIDs := map[int][]string{
+		5: {"ghostA", "ghostB"}, // no index → MaxInt → last
+		0: {"gpu0", "gpu1"},     // min 0 → ordinal 0
+	}
+	deviceIndexMap := map[string]int{"gpu0": 0, "gpu1": 1}
+	rootByOrdinal, componentOrdinal := buildComponentOrdinals(componentToUUIDs, deviceIndexMap)
+	if rootByOrdinal[0] != 0 {
+		t.Fatalf("ordinal 0 = root %d, want real component root 0", rootByOrdinal[0])
+	}
+	if componentOrdinal[5] != 1 {
+		t.Fatalf("unresolvable component root 5 = ordinal %d, want last (1)", componentOrdinal[5])
+	}
+}
+
+func Test_buildComponentOrdinals_Deterministic(t *testing.T) {
+	// Equal min is impossible for disjoint components, but the root tiebreak must
+	// keep ordinals deterministic across runs regardless of map iteration order.
+	componentToUUIDs := map[int][]string{2: {"a"}, 9: {"b"}, 4: {"c"}}
+	deviceIndexMap := map[string]int{"a": 10, "b": 30, "c": 20}
+	for i := 0; i < 8; i++ {
+		rbo, _ := buildComponentOrdinals(componentToUUIDs, deviceIndexMap)
+		if rbo[0] != 2 || rbo[1] != 4 || rbo[2] != 9 {
+			t.Fatalf("non-deterministic ordinals: %v", rbo)
+		}
+	}
+}
+
 // twoOrdinalNode builds a NodeInfo with stable ordinals: ordinal 0 = component
 // root 0 (gpu0/gpu1, ids 0/1), ordinal 1 = component root 2 (gpu2/gpu3, ids 2/3).
 func twoOrdinalNode() *NodeInfo {

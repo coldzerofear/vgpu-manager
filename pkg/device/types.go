@@ -959,23 +959,30 @@ func buildComponentOrdinals(componentToUUIDs map[int][]string, deviceIndexMap ma
 	if len(componentToUUIDs) == 0 {
 		return rootByOrdinal, componentOrdinal
 	}
-	// minIndex(component) = smallest Device.Index among its members.
+	// minIndex(component) = smallest Device.Index among its members. A component
+	// whose UUIDs are all absent from deviceIndexMap (defensive — both maps derive
+	// from the same node device set, so this should not happen) keeps minIdx at
+	// MaxInt so it sorts LAST and never steals a low ordinal from a real component.
 	type rootMin struct{ root, min int }
 	mins := make([]rootMin, 0, len(componentToUUIDs))
 	for root, uuids := range componentToUUIDs {
-		minIdx := -1
+		minIdx := math.MaxInt
 		for _, uuid := range uuids {
-			id, ok := deviceIndexMap[uuid]
-			if !ok {
-				continue
-			}
-			if minIdx < 0 || id < minIdx {
+			if id, ok := deviceIndexMap[uuid]; ok && id < minIdx {
 				minIdx = id
 			}
 		}
 		mins = append(mins, rootMin{root: root, min: minIdx})
 	}
-	sort.Slice(mins, func(i, j int) bool { return mins[i].min < mins[j].min })
+	// Rank by min index ascending; break ties by root so ordinals are fully
+	// deterministic. (Disjoint components can't share a device, so equal min is
+	// impossible in practice — the root tiebreak only guards the degenerate case.)
+	sort.Slice(mins, func(i, j int) bool {
+		if mins[i].min != mins[j].min {
+			return mins[i].min < mins[j].min
+		}
+		return mins[i].root < mins[j].root
+	})
 	for ordinal, rm := range mins {
 		rootByOrdinal[ordinal] = rm.root
 		componentOrdinal[rm.root] = ordinal
