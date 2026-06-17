@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -18,7 +19,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
-	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -450,7 +450,7 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 	return nodeName, err == nil
 }
 
-// findGangSiblingLinkOrdinal scans all vGPU pods (bucketed by their planned node)
+// FindGangSiblingLinkOrdinal scans all vGPU pods (bucketed by their planned node)
 // for a same-gang sibling that already has a live pre-allocation, and resolves
 // that sibling's cross-node-stable sub-domain (rail) ORDINAL on the sibling's OWN
 // node — by UUID, so it is identity-based and independent of the possibly-stale
@@ -459,14 +459,16 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 // have its UUIDs resolved here and is skipped (best-effort: alignment is an
 // optimization, never a correctness gate). Returns the first resolvable sibling's
 // ordinal; (-1, false) when none is found.
-func findGangSiblingLinkOrdinal(pods []*corev1.Pod,
+func FindGangSiblingLinkOrdinal(pods []*corev1.Pod,
 	nodeInfoByName map[string]*device.NodeInfo,
-	gangName string, self k8stypes.UID) (int, bool) {
+	nodeLister listerv1.NodeLister,
+	req *allocator.AllocationRequest) (int, bool) {
+	ordinalMap := make(map[int]int, len(pods))
 	for _, p := range pods {
-		if p == nil || p.UID == self {
+		if p == nil || p.UID == req.Pod.UID {
 			continue
 		}
-		if name, ok := util.PodHasGangName(p); !ok || name != gangName {
+		if name, ok := util.PodHasGangName(p); !ok || name != req.GangName {
 			continue
 		}
 		if !device.ShouldCountPodDeviceAllocation(p) {
@@ -475,17 +477,36 @@ func findGangSiblingLinkOrdinal(pods []*corev1.Pod,
 		nodeName := util.PodPlanSchedulingNode(p)
 		nodeInfo, ok := nodeInfoByName[nodeName]
 		if !ok {
-			continue // sibling node not a candidate this cycle → UUIDs don't resolve here
+			node, err := nodeLister.Get(nodeName)
+			if err != nil {
+				// sibling node not a candidate this cycle → UUIDs don't resolve here
+				continue
+			}
+			nodeInfo, err = device.NewNodeInfo(node, device.WithGPUTopologyEnabled(true))
+			if err != nil {
+				continue
+			}
 		}
 		uuids := device.PodPreAllocatedUUIDs(p)
 		if len(uuids) == 0 {
 			continue
 		}
-		if ord, ok := nodeInfo.OrdinalOfUUIDs(uuids); ok {
-			return ord, true
+		if ordinal, ok := nodeInfo.OrdinalOfUUIDs(uuids); ok {
+			ordinalMap[ordinal]++
 		}
 	}
-	return -1, false
+	ordinals := maps.Keys(ordinalMap)
+	switch len(ordinals) {
+	case 0:
+		return -1, false
+	case 1:
+		return ordinals[0], true
+	default:
+		sort.Slice(ordinals, func(i, j int) bool {
+			return ordinalMap[ordinals[i]] > ordinalMap[ordinals[j]]
+		})
+		return ordinals[0], true
+	}
 }
 
 // deviceFilter will choose one and only one node fullfil the request, so it should always be the last filter of gpuFilter
@@ -536,7 +557,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 
 	nodePodsMap, err := f.podLister.NodeMapByIndexValue(IndexerKeyPodRequestVGPU, "true")
 	if err != nil {
-		klog.ErrorS(err, "PodLister list all vGPU Pods failed")
+		klog.ErrorS(err, "PodLister list all vGPU pods failed")
 		return filteredNodes, failed, err
 	}
 
@@ -709,11 +730,11 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	if req.CrossPodTopology && req.GangName != "" && topologyEnabled {
 		gangPods, err := f.podLister.ListByIndexValue(IndexerKeyPodGangName, req.GangName)
 		if err != nil {
-			klog.ErrorS(err, "PodLister list gang Pods failed", "gangName", req.GangName)
+			klog.ErrorS(err, "PodLister list gang pods failed", "gangName", req.GangName)
 			return filteredNodes, failed, err
 		}
-		if ord, ok := findGangSiblingLinkOrdinal(gangPods, nodeInfoByName, req.GangName, pod.UID); ok {
-			req.GangLinkOrdinal = ord
+		if ordinal, ok := FindGangSiblingLinkOrdinal(gangPods, nodeInfoByName, f.nodeLister, req); ok {
+			req.GangLinkOrdinal = ordinal
 		}
 	}
 

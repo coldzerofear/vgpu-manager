@@ -181,6 +181,19 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 		klog.ErrorS(err, "PodLister list vGPU pods failed in preempt")
 		return passthrough(args)
 	}
+
+	topologyEnabled := p.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
+	if req.CrossPodTopology && req.GangName != "" && topologyEnabled {
+		gangPods, err := p.podLister.ListByIndexValue(filter.IndexerKeyPodGangName, req.GangName)
+		if err != nil {
+			klog.ErrorS(err, "PodLister list gang pods failed", "gangName", req.GangName)
+			return passthrough(args)
+		}
+		if ordinal, ok := filter.FindGangSiblingLinkOrdinal(gangPods, map[string]*device.NodeInfo{}, p.nodeLister, req); ok {
+			req.GangLinkOrdinal = ordinal
+		}
+	}
+
 	mu := sync.Mutex{}
 	gangNameSet := sets.Set[string]{}
 
@@ -329,8 +342,8 @@ func (p *vgpuPreempt) refineForNode(req *allocator.AllocationRequest, nodeName s
 		klog.V(3).InfoS("Preempt: check node failed", "node", nodeName, "pod", klog.KObj(req.Pod), "reason", r.Detailed())
 		return nil, 0, false
 	}
-
-	nodeInfo, err := device.NewNodeInfo(node, device.WithGPUTopologyEnabled(p.gpuTopology))
+	topologyEnabled := p.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
+	nodeInfo, err := device.NewNodeInfo(node, device.WithGPUTopologyEnabled(topologyEnabled))
 	if err != nil {
 		filterReason := reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
 		klog.V(3).ErrorS(err, "Preempt: "+string(filterReason.Primary), "node", node.Name, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
