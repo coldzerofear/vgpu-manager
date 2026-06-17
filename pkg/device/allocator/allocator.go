@@ -409,19 +409,17 @@ func (alloc *allocator) allocateByTopologyMode(
 		// or this is the gang's first pod here) → unchanged single-pod link path.
 		anchorRoot := -1
 		if req.CrossPodTopology && req.GangName != "" {
-			// Priority 1: same-node sibling → exact NVLink component (UUID-based).
-			// Intra-node connectivity is a hard requirement (NVLink doesn't cross
-			// hosts), so an on-node sibling pins the component directly.
 			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, sets.New(req.Pod.UID)); ok {
+				// Priority 1: same-node sibling → exact NVLink component (UUID-based).
+				// Intra-node connectivity is a hard requirement (NVLink doesn't cross
+				// hosts), so an on-node sibling pins the component directly.
 				anchorRoot = root
-			} else if req.GangLinkOrdinal >= 0 {
+			} else if root, ok = alloc.nodeInfo.ComponentByOrdinal(req.GangLinkOrdinal); ok {
 				// Priority 2: cross-node sibling → align to the same sub-domain
 				// (rail) ordinal. The ordinal was resolved by the filter on the
 				// sibling's own node (UUID-based); here we map it to THIS node's
 				// component. Missing on this node (different shape) → no anchor.
-				if root, ok := alloc.nodeInfo.ComponentByOrdinal(req.GangLinkOrdinal); ok {
-					anchorRoot = root
-				}
+				anchorRoot = root
 			}
 		}
 		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v, anchorComponent=%d)", pod.Namespace, pod.Name, strict, anchorRoot)

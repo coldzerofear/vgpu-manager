@@ -43,6 +43,7 @@ type gpuFilter struct {
 const (
 	Name                     = "FilterPredicate"
 	IndexerKeyPodRequestVGPU = "pod.requestVGPU"
+	IndexerKeyPodGangName    = "pod.gangName"
 
 	// aggregateBucketNodeLimit caps how many node names appear inside
 	// each "(...)" clause of the FilteringFailed aggregate event message.
@@ -61,6 +62,15 @@ var (
 				return []string{"true"}, nil
 			}
 			return []string{"false"}, nil
+		},
+		IndexerKeyPodGangName: func(obj interface{}) ([]string, error) {
+			var indexerValue []string
+			if pod, ok := obj.(*corev1.Pod); ok {
+				if name, ok := util.PodHasGangName(pod); ok {
+					indexerValue = []string{name}
+				}
+			}
+			return indexerValue, nil
 		},
 	}
 )
@@ -449,30 +459,30 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 // have its UUIDs resolved here and is skipped (best-effort: alignment is an
 // optimization, never a correctness gate). Returns the first resolvable sibling's
 // ordinal; (-1, false) when none is found.
-func findGangSiblingLinkOrdinal(nodePodsMap map[string][]*corev1.Pod,
-	nodeInfoByName map[string]*device.NodeInfo, gangName string, self k8stypes.UID) (int, bool) {
-	for nodeName, pods := range nodePodsMap {
-		ni := nodeInfoByName[nodeName]
-		if ni == nil {
+func findGangSiblingLinkOrdinal(pods []*corev1.Pod,
+	nodeInfoByName map[string]*device.NodeInfo,
+	gangName string, self k8stypes.UID) (int, bool) {
+	for _, p := range pods {
+		if p == nil || p.UID == self {
+			continue
+		}
+		if name, ok := util.PodHasGangName(p); !ok || name != gangName {
+			continue
+		}
+		if !device.ShouldCountPodDeviceAllocation(p) {
+			continue
+		}
+		nodeName := util.PodPlanSchedulingNode(p)
+		nodeInfo, ok := nodeInfoByName[nodeName]
+		if !ok {
 			continue // sibling node not a candidate this cycle → UUIDs don't resolve here
 		}
-		for _, p := range pods {
-			if p == nil || p.UID == self {
-				continue
-			}
-			if name, ok := util.PodHasGangName(p); !ok || name != gangName {
-				continue
-			}
-			if !device.ShouldCountPodDeviceAllocation(p) {
-				continue
-			}
-			uuids := device.PodPreAllocatedUUIDs(p)
-			if len(uuids) == 0 {
-				continue
-			}
-			if ord, ok := ni.OrdinalOfUUIDs(uuids); ok {
-				return ord, true
-			}
+		uuids := device.PodPreAllocatedUUIDs(p)
+		if len(uuids) == 0 {
+			continue
+		}
+		if ord, ok := nodeInfo.OrdinalOfUUIDs(uuids); ok {
+			return ord, true
 		}
 	}
 	return -1, false
@@ -534,8 +544,10 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		mutex                = sync.Mutex{}
 		nodeInfoList         = make([]*device.NodeInfo, 0, len(nodes))
 		nodeOriginalPosition = make(map[string]int, len(nodes))
+		nodeInfoByName       = make(map[string]*device.NodeInfo, len(nodes))
 	)
 
+	topologyEnabled := f.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
 	maxGoroutines := runtime.GOMAXPROCS(0) * 2
 	batchSize := (len(nodes) + maxGoroutines - 1) / maxGoroutines
 	parallel := watcher.NewBatchParallel(len(nodes), batchSize)
@@ -551,7 +563,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 			opts := []device.NodeInfoOptionFn{
 				device.WithNodePods(nodePodsMap[node.Name]...),
 				device.WithExcludedPods(pod.UID),
-				device.WithGPUTopologyEnabled(f.gpuTopology),
+				device.WithGPUTopologyEnabled(topologyEnabled),
 			}
 			if read, _ := state.Read(nodeConfigKey(node.Name)); read != nil {
 				if nodeConfig, ok := read.(*device.NodeConfigInfo); ok {
@@ -671,8 +683,9 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 
 		mutex.Lock()
 		maps.Copy(failed, batchFailed)
-		for index := range batchNodeInfos {
-			nodeInfoList = append(nodeInfoList, batchNodeInfos[index])
+		for _, nodeInfo := range batchNodeInfos {
+			nodeInfoByName[nodeInfo.GetName()] = nodeInfo
+			nodeInfoList = append(nodeInfoList, nodeInfo)
 		}
 		maps.Copy(nodeOriginalPosition, batchNodeOrigPosition)
 		mutex.Unlock()
@@ -693,12 +706,13 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	// annotation; we only need the sibling's node to be among the built candidates
 	// (the common case under Kueue rack-pinning). Reuses nodePodsMap + nodeInfoList
 	// (no extra List / NodeInfo build). Gang-only; others skip it.
-	if req.CrossPodTopology && req.GangName != "" && req.Topology == util.LinkTopology {
-		nodeInfoByName := make(map[string]*device.NodeInfo, len(nodeInfoList))
-		for _, ni := range nodeInfoList {
-			nodeInfoByName[ni.GetName()] = ni
+	if req.CrossPodTopology && req.GangName != "" && topologyEnabled {
+		gangPods, err := f.podLister.ListByIndexValue(IndexerKeyPodGangName, req.GangName)
+		if err != nil {
+			klog.ErrorS(err, "PodLister list gang Pods failed", "gangName", req.GangName)
+			return filteredNodes, failed, err
 		}
-		if ord, ok := findGangSiblingLinkOrdinal(nodePodsMap, nodeInfoByName, req.GangName, pod.UID); ok {
+		if ord, ok := findGangSiblingLinkOrdinal(gangPods, nodeInfoByName, req.GangName, pod.UID); ok {
 			req.GangLinkOrdinal = ord
 		}
 	}
