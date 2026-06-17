@@ -18,6 +18,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -440,6 +441,31 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 }
 
 // deviceFilter will choose one and only one node fullfil the request, so it should always be the last filter of gpuFilter
+// findGangSiblingDeviceIDs scans all vGPU pods (bucketed by node) for a same-gang
+// sibling that already has a live pre-allocation, and returns the device IDs it
+// chose — the cross-node anchor for sub-domain (rail) alignment. Returns the
+// first match's IDs (siblings should already be aligned to one another); nil when
+// none is found (this is the gang's first pod, or none has pre-allocated yet).
+func findGangSiblingDeviceIDs(nodePodsMap map[string][]*corev1.Pod, gangName string, self k8stypes.UID) []int {
+	for _, pods := range nodePodsMap {
+		for _, p := range pods {
+			if p == nil || p.UID == self {
+				continue
+			}
+			if name, ok := util.PodHasGangName(p); !ok || name != gangName {
+				continue
+			}
+			if !device.ShouldCountPodDeviceAllocation(p) {
+				continue
+			}
+			if ids := device.PodPreAllocatedDeviceIDs(p); len(ids) > 0 {
+				return ids
+			}
+		}
+	}
+	return nil
+}
+
 func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
 	var (
 		pod           = req.Pod
@@ -489,6 +515,18 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	if err != nil {
 		klog.ErrorS(err, "PodLister list all vGPU Pods failed")
 		return filteredNodes, failed, err
+	}
+
+	// Cross-node sub-domain (rail) alignment: when this pod opts into cross-pod
+	// link topology and belongs to a gang, find any same-gang sibling already
+	// pre-allocated ANYWHERE in the cluster and carry its chosen device IDs on
+	// the request. The per-node allocator maps those IDs to a component ordinal
+	// to keep this pod in the rail-aligned sub-domain. Reuses the nodePodsMap we
+	// already built (no extra List); cross-node lookup is why this lives in the
+	// filter rather than the per-node allocator (which only sees its own node's
+	// pods). Cheap and gang-only; non-gang / opt-out pods skip it entirely.
+	if req.CrossPodTopology && req.GangName != "" && req.Topology == util.LinkTopology {
+		req.GangSiblingDeviceIDs = findGangSiblingDeviceIDs(nodePodsMap, req.GangName, pod.UID)
 	}
 
 	var (

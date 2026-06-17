@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/component-base/logs"
@@ -56,7 +55,6 @@ func runApp(opt *options.Options) (exitCode int) {
 	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
 	gpuallocator.SetBestEffortMaxGPUs(opt.BestEffortMaxGPUs)
-	allocator.SetCrossPodLinkTopology(opt.FeatureGate.Enabled(options.CrossPodLinkTopology))
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
 	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)

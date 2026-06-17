@@ -167,11 +167,87 @@ func Test_ComponentUUIDs(t *testing.T) {
 }
 
 func Test_buildComponentIndex(t *testing.T) {
-	if got := buildComponentIndex(nil); got != nil {
-		t.Fatalf("buildComponentIndex(nil) = %v, want nil", got)
+	if got := buildComponentIndex(nil); len(got) != 0 {
+		t.Fatalf("buildComponentIndex(nil) = %v, want empty", got)
 	}
 	idx := buildComponentIndex(map[string]int{"a": 1, "b": 1, "c": 3})
 	if len(idx[1]) != 2 || len(idx[3]) != 1 {
 		t.Fatalf("buildComponentIndex produced %v", idx)
+	}
+}
+
+func Test_buildComponentOrdinals(t *testing.T) {
+	// Two components: root 7 = {gpu4(id4),gpu5(id5)}, root 0 = {gpu0(id0),gpu1(id1)}.
+	// Ranked by min Device.Index: root 0 (min 0) → ordinal 0; root 7 (min 4) → ordinal 1.
+	componentToUUIDs := map[int][]string{
+		7: {"gpu4", "gpu5"},
+		0: {"gpu0", "gpu1"},
+	}
+	deviceIndexMap := map[string]int{"gpu0": 0, "gpu1": 1, "gpu4": 4, "gpu5": 5}
+	rootByOrdinal, ordinalByDeviceID := buildComponentOrdinals(componentToUUIDs, deviceIndexMap)
+	if rootByOrdinal[0] != 0 || rootByOrdinal[1] != 7 {
+		t.Fatalf("rootByOrdinal = %v, want {0:0, 1:7}", rootByOrdinal)
+	}
+	for id, wantOrd := range map[int]int{0: 0, 1: 0, 4: 1, 5: 1} {
+		if ordinalByDeviceID[id] != wantOrd {
+			t.Fatalf("ordinalByDeviceID[%d] = %d, want %d", id, ordinalByDeviceID[id], wantOrd)
+		}
+	}
+}
+
+// twoOrdinalNode builds a NodeInfo with stable ordinals: ordinal 0 = component
+// root 0 (gpu0/gpu1, ids 0/1), ordinal 1 = component root 2 (gpu2/gpu3, ids 2/3).
+func twoOrdinalNode() *NodeInfo {
+	n := twoComponentNode()
+	n.deviceIndexMap = map[string]int{"gpu0": 0, "gpu1": 1, "gpu2": 2, "gpu3": 3}
+	n.rootByOrdinal, n.ordinalByDeviceID = buildComponentOrdinals(n.componentToUUIDs, n.deviceIndexMap)
+	return n
+}
+
+func Test_ComponentByOrdinal(t *testing.T) {
+	n := twoOrdinalNode()
+	if root, ok := n.ComponentByOrdinal(0); !ok || root != 0 {
+		t.Fatalf("ComponentByOrdinal(0) = (%d,%v), want (0,true)", root, ok)
+	}
+	if root, ok := n.ComponentByOrdinal(1); !ok || root != 2 {
+		t.Fatalf("ComponentByOrdinal(1) = (%d,%v), want (2,true)", root, ok)
+	}
+	if _, ok := n.ComponentByOrdinal(5); ok {
+		t.Fatalf("ComponentByOrdinal(5) should be absent")
+	}
+}
+
+func Test_AlignedComponentRoot(t *testing.T) {
+	n := twoOrdinalNode()
+	// Cross-node sibling chose device ids {2,3} → ordinal 1 → this node's root 2.
+	if root, ok := n.AlignedComponentRoot([]int{2, 3}); !ok || root != 2 {
+		t.Fatalf("AlignedComponentRoot([2,3]) = (%d,%v), want (2,true)", root, ok)
+	}
+	// Sibling chose {0,1} → ordinal 0 → root 0.
+	if root, ok := n.AlignedComponentRoot([]int{0, 1}); !ok || root != 0 {
+		t.Fatalf("AlignedComponentRoot([0,1]) = (%d,%v), want (0,true)", root, ok)
+	}
+	// Majority wins when ids span ordinals (degraded sibling): {2,3,3}→ord1 majority.
+	if root, ok := n.AlignedComponentRoot([]int{0, 2, 3}); !ok || (root != 0 && root != 2) {
+		t.Fatalf("AlignedComponentRoot(tie/spanning) = (%d,%v)", root, ok)
+	}
+	// Empty / unknown ids → no alignment.
+	if _, ok := n.AlignedComponentRoot(nil); ok {
+		t.Fatalf("AlignedComponentRoot(nil) should be false")
+	}
+	if _, ok := n.AlignedComponentRoot([]int{99}); ok {
+		t.Fatalf("AlignedComponentRoot(unknown) should be false")
+	}
+}
+
+func Test_PodPreAllocatedDeviceIDs(t *testing.T) {
+	// claimText uses index i as the device id: claimText("gpu2","gpu3") → ids 0,1.
+	p := gangPod("sib", "gangA", "node1", claimText("gpu2", "gpu3"))
+	ids := PodPreAllocatedDeviceIDs(p)
+	if len(ids) != 2 || ids[0] != 0 || ids[1] != 1 {
+		t.Fatalf("PodPreAllocatedDeviceIDs = %v, want [0 1]", ids)
+	}
+	if got := PodPreAllocatedDeviceIDs(&corev1.Pod{}); got != nil {
+		t.Fatalf("no-annotation pod = %v, want nil", got)
 	}
 }

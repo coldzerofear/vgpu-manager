@@ -92,6 +92,24 @@ type AllocationRequest struct {
 	// (empty value) never enter the anchor path, so their behaviour is unchanged.
 	GangName string
 
+	// CrossPodTopology opts this pod into cross-pod topology affinity (parsed
+	// from CrossPodTopologyAnnotation). When true AND the pod is in a gang AND
+	// topology mode is link, the allocator keeps the pod's GPUs in the same
+	// NVLink component as same-node gang siblings, and aligns to the same
+	// component ordinal as cross-node siblings (rail alignment). Replaces the
+	// former cluster-wide feature gate with a per-pod, webhook-defaultable switch.
+	// False (default) = unchanged single-pod behaviour.
+	CrossPodTopology bool
+
+	// GangSiblingDeviceIDs carries the device IDs (Device.Index) that one
+	// already-pre-allocated cross-node gang sibling chose, extracted by the
+	// filter from that sibling's PodVGPUPreAllocAnnotation. Node-independent
+	// (it's the gang's chosen sub-domain, same for every candidate node), so it
+	// lives on the shared request. The allocator maps these IDs to a component
+	// ordinal on the current node to align this pod to the same sub-domain.
+	// Empty = no cross-node sibling yet (first pod) or cross-pod topology off.
+	GangSiblingDeviceIDs []int
+
 	// Profile is the pod's request-weighted scoring profile. Captured
 	// here so the filter and the allocator score with identical weights
 	// for the same pod — see profile.go for the rationale.
@@ -217,6 +235,9 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		req.DevicePolicy, req.rawDevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
 		req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
 		req.GangName, _ = util.PodHasGangName(pod)
+		if v, ok := util.HasAnnotation(pod, util.CrossPodTopologyAnnotation); ok {
+			req.CrossPodTopology = strings.EqualFold(v, "true")
+		}
 		req.Profile = NewRequestProfile(pod)
 
 		_, ok1 := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation)

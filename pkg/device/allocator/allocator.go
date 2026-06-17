@@ -408,8 +408,15 @@ func (alloc *allocator) allocateByTopologyMode(
 		// this pod's GPUs connected to them. -1 = no anchor (non-gang, gate off,
 		// or this is the gang's first pod here) → unchanged single-pod link path.
 		anchorRoot := -1
-		if CrossPodLinkTopologyEnabled() && req.GangName != "" {
+		if req.CrossPodTopology && req.GangName != "" {
+			// Priority 1: same-node sibling → exact NVLink component. Intra-node
+			// connectivity is a hard requirement (NVLink doesn't cross hosts).
 			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, sets.New(req.Pod.UID)); ok {
+				anchorRoot = root
+			} else if root, ok := alloc.nodeInfo.AlignedComponentRoot(req.GangSiblingDeviceIDs); ok {
+				// Priority 2: cross-node sibling → align to the same sub-domain
+				// ordinal (rail) as a sibling already placed on another node, by
+				// mapping that sibling's chosen device IDs to this node's ordinal.
 				anchorRoot = root
 			}
 		}

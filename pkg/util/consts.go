@@ -61,6 +61,13 @@ var (
 	// DeviceTopologyModeAnnotation Specify device topology mode
 	DeviceTopologyModeAnnotation = globalDomainName + "/device-topology-mode"
 
+	// CrossPodTopologyAnnotation opts a pod into cross-pod topology affinity:
+	// same-gang pods keep their GPUs in one NVLink connected component on a node
+	// and align to the same component ordinal across nodes (cross-node sub-domain
+	// / rail alignment). Boolean ("true"); absent/false = unchanged single-pod
+	// behaviour. Only takes effect together with device-topology-mode: link.
+	CrossPodTopologyAnnotation = globalDomainName + "/cross-pod-topology"
+
 	// PodIncludeGPUUUIDAnnotation Specify the GPU UUID to be used
 	PodIncludeGPUUUIDAnnotation = globalDomainName + "/include-gpu-uuid"
 	// PodExcludeGPUUUIDAnnotation Specify the GPU UUID to be excluded
@@ -99,6 +106,7 @@ func initConstants() {
 	MemorySchedulerPolicyAnnotation = globalDomainName + "/memory-scheduler-policy"
 	SchedulerStuckGracePeriodAnnotation = globalDomainName + "/stuck-grace-period"
 	DeviceTopologyModeAnnotation = globalDomainName + "/device-topology-mode"
+	CrossPodTopologyAnnotation = globalDomainName + "/cross-pod-topology"
 	PodIncludeGPUUUIDAnnotation = globalDomainName + "/include-gpu-uuid"
 	PodExcludeGPUUUIDAnnotation = globalDomainName + "/exclude-gpu-uuid"
 	PodPredicateNodeAnnotation = globalDomainName + "/predicate-node"
@@ -295,16 +303,15 @@ func (p MemorySchedulerPolicy) String() string {
 
 // FeatureGates
 const (
-	CorePlugin           = "CorePlugin"           // GPUCoreResourcePlugin
-	MemoryPlugin         = "MemoryPlugin"         // GPUMemoryResourcePlugin
-	Reschedule           = "Reschedule"           // AllocationFailureReschedule
-	GPUTopology          = "GPUTopology"          // GPUTopologyAwareAllocation
-	CrossPodLinkTopology = "CrossPodLinkTopology" // CrossPodNVLinkAffinity
-	SMWatcher            = "SMWatcher"            // SharedSMUtilizationWatcher
-	SerialBindNode       = "SerialBindNode"       // SerializedNodeBind
-	SerialFilterNode     = "SerialFilterNode"     // SerializedNodeFilter
-	VMemoryNode          = "VMemoryNode"          // VGPUMemoryTracking
-	ClientMode           = "ClientMode"           // DevicePluginClientMode
+	CorePlugin       = "CorePlugin"       // GPUCoreResourcePlugin
+	MemoryPlugin     = "MemoryPlugin"     // GPUMemoryResourcePlugin
+	Reschedule       = "Reschedule"       // AllocationFailureReschedule
+	GPUTopology      = "GPUTopology"      // GPUTopologyAwareAllocation
+	SMWatcher        = "SMWatcher"        // SharedSMUtilizationWatcher
+	SerialBindNode   = "SerialBindNode"   // SerializedNodeBind
+	SerialFilterNode = "SerialFilterNode" // SerializedNodeFilter
+	VMemoryNode      = "VMemoryNode"      // VGPUMemoryTracking
+	ClientMode       = "ClientMode"       // DevicePluginClientMode
 )
 
 const (
