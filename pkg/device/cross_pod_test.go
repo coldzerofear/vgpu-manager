@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,18 +49,19 @@ func claimText(uuids ...string) string {
 	return out + "]"
 }
 
-// twoComponentNode is a NodeInfo with cards gpu0/gpu1 in component 0 and
-// gpu2/gpu3 in component 2 — directly constructed so the test controls the
-// link components precisely (NewFakeNodeInfo rebuilds the device list without
-// links, which would make every card its own singleton component).
+// twoComponentNode is a NodeInfo with cards gpu0/gpu1 in NVLink component 0 and
+// gpu2/gpu3 in NVLink component 2 — directly constructed so the test controls the
+// NVLink components precisely (NewFakeNodeInfo rebuilds the device list without
+// links, which would make every card its own singleton component). Cross-pod
+// methods read the nvlink* fields.
 func twoComponentNode(pods ...*corev1.Pod) *NodeInfo {
 	return &NodeInfo{
 		name: "node1",
-		linkComponentByUUID: map[string]int{
+		nvlinkComponentByUUID: map[string]int{
 			"gpu0": 0, "gpu1": 0,
 			"gpu2": 2, "gpu3": 2,
 		},
-		componentToUUIDs: map[int][]string{
+		nvlinkComponentToUUIDs: map[int][]string{
 			0: {"gpu0", "gpu1"},
 			2: {"gpu2", "gpu3"},
 		},
@@ -211,6 +214,44 @@ func Test_buildComponentOrdinals_UnresolvableSortsLast(t *testing.T) {
 	}
 }
 
+func Test_computeLinkComponents_NVLinkVsAnyP2P(t *testing.T) {
+	// 4 GPUs: 0-1 and 2-3 are NVLinked islands, but ALL pairs are at least PCIe
+	// (cross-CPU) connected — the normal case for a multi-GPU node. The fix hinges
+	// on these two views differing.
+	dl := make(gpuallocator.DeviceList, 4)
+	for i := 0; i < 4; i++ {
+		dl[i] = gpuallocator.NewDevice(i, fmt.Sprintf("gpu%d", i), "")
+	}
+	for i := 0; i < 4; i++ {
+		for j := 0; j < 4; j++ {
+			if i != j {
+				dl.AddLink(i, j, links.P2PLinkCrossCPU) // PCIe between every pair
+			}
+		}
+	}
+	dl.AddLink(0, 1, links.SingleNVLINKLink)
+	dl.AddLink(1, 0, links.SingleNVLINKLink)
+	dl.AddLink(2, 3, links.SingleNVLINKLink)
+	dl.AddLink(3, 2, links.SingleNVLINKLink)
+
+	// any-P2P: the whole node is ONE reachability component (PCIe connects all).
+	maxAny, byAny := computeLinkComponents(dl, anyLinkEdge)
+	if maxAny != 4 || byAny["gpu0"] != byAny["gpu3"] {
+		t.Fatalf("anyP2P: max=%d, want one component of 4 connecting all GPUs", maxAny)
+	}
+	// NVLink-only: two islands {0,1} and {2,3} — what cross-pod affinity needs.
+	maxNV, byNV := computeLinkComponents(dl, nvlinkEdge)
+	if maxNV != 2 {
+		t.Fatalf("nvlink: max=%d, want islands of size 2", maxNV)
+	}
+	if byNV["gpu0"] != byNV["gpu1"] || byNV["gpu2"] != byNV["gpu3"] {
+		t.Fatalf("nvlink: gpu0/1 and gpu2/3 must each share an island")
+	}
+	if byNV["gpu0"] == byNV["gpu2"] {
+		t.Fatalf("nvlink: gpu0 and gpu2 must be in DIFFERENT islands")
+	}
+}
+
 func Test_buildComponentOrdinals_Deterministic(t *testing.T) {
 	// Equal min is impossible for disjoint components, but the root tiebreak must
 	// keep ordinals deterministic across runs regardless of map iteration order.
@@ -229,7 +270,7 @@ func Test_buildComponentOrdinals_Deterministic(t *testing.T) {
 func twoOrdinalNode() *NodeInfo {
 	n := twoComponentNode()
 	n.deviceIndexMap = map[string]int{"gpu0": 0, "gpu1": 1, "gpu2": 2, "gpu3": 3}
-	n.rootByOrdinal, n.componentOrdinal = buildComponentOrdinals(n.componentToUUIDs, n.deviceIndexMap)
+	n.nvlinkRootByOrdinal, n.nvlinkComponentOrdinal = buildComponentOrdinals(n.nvlinkComponentToUUIDs, n.deviceIndexMap)
 	return n
 }
 

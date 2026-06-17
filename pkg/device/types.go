@@ -656,9 +656,10 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 	// false, so the existing zero-value path still works for non-topology
 	// tests.
 	if ret.gpuTopology {
-		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(ret.deviceList)
-		ret.componentToUUIDs = buildComponentIndex(ret.linkComponentByUUID)
-		ret.rootByOrdinal, ret.componentOrdinal = buildComponentOrdinals(ret.componentToUUIDs, ret.deviceIndexMap)
+		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(ret.deviceList, anyLinkEdge)
+		_, ret.nvlinkComponentByUUID = computeLinkComponents(ret.deviceList, nvlinkEdge)
+		ret.nvlinkComponentToUUIDs = buildComponentIndex(ret.nvlinkComponentByUUID)
+		ret.nvlinkRootByOrdinal, ret.nvlinkComponentOrdinal = buildComponentOrdinals(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap)
 	}
 	ret.numaTopology = false
 	for _, d := range devices {
@@ -707,34 +708,29 @@ type NodeInfo struct {
 	// requested link-topology group, not just whether it has topology info.
 	// Zero when gpuTopology is false.
 	maxLinkComponentSize int
-	// linkComponentByUUID maps each GPU's UUID to the component-root index it
-	// belongs to in the same union-find that produced maxLinkComponentSize.
-	// Two UUIDs with the same value are reachable via a chain of P2P links;
-	// different values mean they sit in disjoint connectivity islands. Used
-	// by AreDevicesLinked for strict-link allocation validation. Nil/empty
-	// when gpuTopology is false.
+	// linkComponentByUUID maps each GPU's UUID to its ANY-P2P (reachability)
+	// component root — two UUIDs share a value iff reachable via any P2P link
+	// (PCIe included). Used only by AreDevicesLinked (strict-link reachability
+	// safety). Coarse on purpose; NVLink-quality grouping is nvlinkComponentByUUID
+	// below. Nil/empty when gpuTopology is false.
 	linkComponentByUUID map[string]int
 	// maxNUMAGroupSize is the largest count of GPUs sharing a single NUMA
 	// node. Equivalent role to maxLinkComponentSize for NUMA-mode sorting.
 	// Zero when numaTopology is false.
 	maxNUMAGroupSize int
-	// componentToUUIDs is the reverse of linkComponentByUUID: component-root
-	// index → the UUIDs of every GPU in that NVLink-connected component. Built
-	// alongside linkComponentByUUID; lets cross-pod anchor logic enumerate
-	// "which cards live in component C" without scanning the whole map.
-	// Nil/empty when gpuTopology is false.
-	componentToUUIDs map[int][]string
-	// rootByOrdinal / componentOrdinal give each NVLink component a
-	// cross-node-STABLE ordinal: components are ranked by their minimum
-	// Device.Index, so on homogeneous nodes ordinal-k denotes the same physical
-	// sub-domain (rail) on every node. This lets cross-NODE gang alignment work
-	// despite union-find roots being node-local: a sibling's ordinal is resolved
-	// (by UUID) on the SIBLING's own NodeInfo, carried as a single int, then
-	// mapped back to THIS node's component via rootByOrdinal. Nil when
-	// gpuTopology is false. rootByOrdinal: ordinal → component root (consume
-	// side); componentOrdinal: component root → ordinal (source side).
-	rootByOrdinal    map[int]int
-	componentOrdinal map[int]int
+	// nvlink* describe the NVLink-FABRIC components (union over NVLink edges only,
+	// see nvlinkEdge), which is the grouping cross-pod affinity needs: on a full
+	// NVSwitch node all GPUs are one component (no narrowing needed); on a 2x4
+	// island node the two islands are distinct (so a sibling's GPUs pin the island
+	// its peers stay in). nvlinkComponentByUUID: UUID → NVLink-component root;
+	// nvlinkComponentToUUIDs: root → member UUIDs; nvlinkRootByOrdinal /
+	// nvlinkComponentOrdinal: the cross-node-stable ordinal maps (ranked by min
+	// Device.Index — ordinal-k denotes the same NVLink sub-domain on homogeneous
+	// nodes). Nil/empty when gpuTopology is false.
+	nvlinkComponentByUUID  map[string]int
+	nvlinkComponentToUUIDs map[int][]string
+	nvlinkRootByOrdinal    map[int]int
+	nvlinkComponentOrdinal map[int]int
 	// nodePods is the set of pods scheduled (or pre-allocated) to this node,
 	// as injected via WithNodePods. Retained — not just consumed for usage
 	// accounting in AddPodsUsedResources — so cross-pod allocation can resolve
@@ -841,9 +837,10 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 	// "can this node fit a group of N GPUs?" in O(1). These are constants for
 	// the lifetime of the NodeInfo snapshot.
 	if ret.gpuTopology {
-		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(gatherInfo.DeviceList)
-		ret.componentToUUIDs = buildComponentIndex(ret.linkComponentByUUID)
-		ret.rootByOrdinal, ret.componentOrdinal = buildComponentOrdinals(ret.componentToUUIDs, ret.deviceIndexMap)
+		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(gatherInfo.DeviceList, anyLinkEdge)
+		_, ret.nvlinkComponentByUUID = computeLinkComponents(gatherInfo.DeviceList, nvlinkEdge)
+		ret.nvlinkComponentToUUIDs = buildComponentIndex(ret.nvlinkComponentByUUID)
+		ret.nvlinkRootByOrdinal, ret.nvlinkComponentOrdinal = buildComponentOrdinals(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap)
 	}
 	if ret.numaTopology {
 		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(gatherInfo.DeviceMap)
@@ -853,22 +850,37 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 	return ret, nil
 }
 
+// anyLinkEdge treats any P2P link entry (PCIe-cross-CPU included) as an edge —
+// the coarse "are these GPUs reachable at all" relation used for the strict-link
+// reachability check (AreDevicesLinked) and node fitness (MaxLinkComponentSize).
+func anyLinkEdge(ls []gpuallocator.P2PLink) bool { return len(ls) > 0 }
+
+// nvlinkEdge treats only NVLink links (>= SingleNVLINKLink) as an edge, so the
+// resulting components are the NVLink fabrics (NVSwitch domain / NVLink island)
+// — the grouping NCCL actually cares about for fast intra-node P2P. This is what
+// cross-pod affinity needs: on a full-NVSwitch node all GPUs form one NVLink
+// component (any subset is connected → no narrowing needed, correctly), while on
+// a 2x4-island node the two islands are distinct components (so a sibling's GPUs
+// pin the island its peers must stay in). PCIe-only pairs are NOT edges here.
+func nvlinkEdge(ls []gpuallocator.P2PLink) bool {
+	for _, l := range ls {
+		if l.Type >= links.SingleNVLINKLink {
+			return true
+		}
+	}
+	return false
+}
+
 // computeLinkComponents runs union-find (Weighted Quick Union with path
-// compression) over the GPU link graph and returns both the largest
-// connected component size AND a per-UUID component-root map. Two GPUs are
-// connected if their Links slice has at least one P2P link entry, regardless
-// of link type — even a PCIe-cross-CPU edge counts, because membership here
-// only answers "are these GPUs reachable from each other"; link QUALITY
-// ranking happens later inside the bestEffort policy.
-//
-// The byUUID map lets allocateLink verify that the bestEffort-chosen set
-// actually forms a single connected component (bestEffort returns the
-// highest-scoring partition without rejecting score-zero results, so the
-// strict-link contract needs this independent check).
+// compression) over the GPU link graph and returns both the largest connected
+// component size AND a per-UUID component-root map. Two GPUs are unioned when
+// isEdge reports an edge between them — pass anyLinkEdge for coarse reachability
+// (strict-link / fitness) or nvlinkEdge for NVLink-fabric grouping (cross-pod
+// affinity). Link QUALITY ranking still happens inside the bestEffort policy.
 //
 // Complexity O((V + E)·α(V)) ≈ O(V + E) which is negligible compared to the
 // existing topology parsing cost.
-func computeLinkComponents(devices gpuallocator.DeviceList) (max int, byUUID map[string]int) {
+func computeLinkComponents(devices gpuallocator.DeviceList, isEdge func([]gpuallocator.P2PLink) bool) (max int, byUUID map[string]int) {
 	n := len(devices)
 	byUUID = make(map[string]int, n)
 	if n == 0 {
@@ -903,8 +915,8 @@ func computeLinkComponents(devices gpuallocator.DeviceList) (max int, byUUID map
 		if d == nil {
 			continue
 		}
-		for j, links := range d.Links {
-			if i == j || len(links) == 0 {
+		for j, edges := range d.Links {
+			if i == j || !isEdge(edges) {
 				continue
 			}
 			if j < 0 || j >= n {
@@ -1024,13 +1036,13 @@ func (n *NodeInfo) DeepCopy() *NodeInfo {
 	nodeInfo.deviceMap = deviceMap
 	nodeInfo.deviceIndexMap = maps.Clone(n.deviceIndexMap)
 	nodeInfo.deviceList = slices.Clone(n.deviceList)
+	// Component/ordinal maps and nodePods are read-only snapshots; clone the
+	// top-level containers while sharing the immutable member slices / pod ptrs.
 	nodeInfo.linkComponentByUUID = maps.Clone(n.linkComponentByUUID)
-	// componentToUUIDs and nodePods are read-only snapshots; clone the top-level
-	// container (consistent with linkComponentByUUID above) while sharing the
-	// immutable member slices / pod pointers.
-	nodeInfo.componentToUUIDs = maps.Clone(n.componentToUUIDs)
-	nodeInfo.rootByOrdinal = maps.Clone(n.rootByOrdinal)
-	nodeInfo.componentOrdinal = maps.Clone(n.componentOrdinal)
+	nodeInfo.nvlinkComponentByUUID = maps.Clone(n.nvlinkComponentByUUID)
+	nodeInfo.nvlinkComponentToUUIDs = maps.Clone(n.nvlinkComponentToUUIDs)
+	nodeInfo.nvlinkRootByOrdinal = maps.Clone(n.nvlinkRootByOrdinal)
+	nodeInfo.nvlinkComponentOrdinal = maps.Clone(n.nvlinkComponentOrdinal)
 	nodeInfo.nodePods = slices.Clone(n.nodePods)
 	return &nodeInfo
 }
@@ -1684,21 +1696,22 @@ func (n *NodeInfo) AreDevicesLinked(uuids []string) bool {
 	return true
 }
 
-// ComponentUUIDs returns the UUIDs of every GPU in the given NVLink component
-// (root index from linkComponentByUUID), or nil for an unknown root. Used by
-// cross-pod allocation to window the candidate set to an anchored component.
+// ComponentUUIDs returns the UUIDs of every GPU in the given NVLink-fabric
+// component (root index from nvlinkComponentByUUID), or nil for an unknown root.
+// Used by cross-pod allocation to window the candidate set to an anchored
+// NVLink island.
 func (n *NodeInfo) ComponentUUIDs(root int) []string {
-	return n.componentToUUIDs[root]
+	return n.nvlinkComponentToUUIDs[root]
 }
 
-// ComponentByOrdinal returns the component root that has the given cross-node
-// ordinal on this node, or (-1, false) when this node has no such ordinal (e.g.
-// fewer sub-domains than the requested ordinal). See rootByOrdinal.
+// ComponentByOrdinal returns the NVLink-component root that has the given
+// cross-node ordinal on this node, or (-1, false) when this node has no such
+// ordinal (e.g. fewer NVLink sub-domains than the requested ordinal).
 func (n *NodeInfo) ComponentByOrdinal(ordinal int) (int, bool) {
 	if ordinal < 0 {
 		return -1, false
 	}
-	root, ok := n.rootByOrdinal[ordinal]
+	root, ok := n.nvlinkRootByOrdinal[ordinal]
 	if !ok {
 		return -1, false
 	}
@@ -1708,13 +1721,13 @@ func (n *NodeInfo) ComponentByOrdinal(ordinal int) (int, bool) {
 // OrdinalOfUUIDs resolves the cross-node-stable ordinal (rail) of a set of GPU
 // UUIDs **on this node**, i.e. it must be called on the NodeInfo of the node the
 // UUIDs actually live on (the sibling's own node). Each UUID maps to its
-// component root via linkComponentByUUID and then to that root's ordinal; the
-// majority ordinal is returned. This is identity-based (UUID), so it does NOT
-// depend on the possibly-stale Device.Index recorded in a pre-alloc annotation.
-// Duplicate UUIDs (a pod's multiple containers sharing one card) are collapsed.
-// Returns (-1, false) when no UUID is known here or this node has no topology.
+// NVLink-fabric component root via nvlinkComponentByUUID and then to that root's
+// ordinal; the majority ordinal is returned. This is identity-based (UUID), so
+// it does NOT depend on the possibly-stale Device.Index recorded in a pre-alloc
+// annotation. Duplicate UUIDs (a pod's multiple containers sharing one card) are
+// collapsed. Returns (-1, false) when no UUID is known here or no NVLink topology.
 func (n *NodeInfo) OrdinalOfUUIDs(uuids []string) (int, bool) {
-	if len(uuids) == 0 || len(n.linkComponentByUUID) == 0 {
+	if len(uuids) == 0 || len(n.nvlinkComponentByUUID) == 0 {
 		return -1, false
 	}
 	seen := make(map[string]struct{}, len(uuids))
@@ -1724,11 +1737,11 @@ func (n *NodeInfo) OrdinalOfUUIDs(uuids []string) (int, bool) {
 			continue
 		}
 		seen[uuid] = struct{}{}
-		root, ok := n.linkComponentByUUID[uuid]
+		root, ok := n.nvlinkComponentByUUID[uuid]
 		if !ok {
 			continue
 		}
-		if ord, ok := n.componentOrdinal[root]; ok {
+		if ord, ok := n.nvlinkComponentOrdinal[root]; ok {
 			votes[ord]++
 		}
 	}
@@ -1757,7 +1770,7 @@ func (n *NodeInfo) OrdinalOfUUIDs(uuids []string) (int, bool) {
 // sibling fell back across components), the majority component is chosen and the
 // split is logged at V(3) rather than failing here.
 func (n *NodeInfo) GangAnchorComponent(gangName string, excludedSet sets.Set[types.UID]) (int, bool) {
-	if gangName == "" || len(n.linkComponentByUUID) == 0 || len(n.nodePods) == 0 {
+	if gangName == "" || len(n.nvlinkComponentByUUID) == 0 || len(n.nodePods) == 0 {
 		return -1, false
 	}
 	votes := make(map[int]int)
@@ -1772,7 +1785,7 @@ func (n *NodeInfo) GangAnchorComponent(gangName string, excludedSet sets.Set[typ
 			continue
 		}
 		for _, uuid := range PodPreAllocatedUUIDs(p) {
-			if root, ok := n.linkComponentByUUID[uuid]; ok {
+			if root, ok := n.nvlinkComponentByUUID[uuid]; ok {
 				votes[root]++
 			}
 		}
