@@ -127,9 +127,11 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 
 **场景**:每 Pod 取节点子集(如 4/8)且节点有多个不连通 NVLink 域时,跨节点的兄弟 Pod 应落到**各节点对应的同一子域(rail)**,否则跨节点 NCCL 走错 rail 掉档。这超出同节点 anchor(union-find root 节点本地、不可跨节点比)与 Kueue(只到节点粒度)的能力,由本阶段在 extender 内解决。详细配合见 [`kueue_tas_integration.md`](./kueue_tas_integration.md) §7.2。
 
+> **重要前提:分量必须是 NVLink-only 的(提交 `523d66a`)。** `computeLinkComponents` 默认按"任意 P2P 链路(含 PCIe 跨 CPU)"union,而正常节点任意两卡至少 PCIe 互通 → 全节点恒为一个分量,cross-pod 收窄不到 NVLink 子组(空转)。所以 cross-pod 用 **`nvlinkEdge`(仅 `Type>=SingleNVLINKLink`)** 算的 `nvlink*` 分量:NVSwitch 全互联节点=一个 NVLink 分量(正确空转,任意子集都互通),2×4 岛节点=两个岛(正确收敛)。any-P2P 的 `linkComponentByUUID` 仅留给单 Pod strict 的 `AreDevicesLinked`(可达性)与节点 fitness,行为不变。
+
 **机制(不引入新注解)**:
-- **稳定 ordinal**:`NodeInfo` 按"分量最小 `Device.Index`"给每个连通分量赋 ordinal(`rootByOrdinal` 与 `componentOrdinal` 两个互逆映射);同构节点 ordinal-k = 同 rail。
-- **用 UUID(非 device id)反查兄弟 ordinal**:兄弟的 `PodVGPUPreAllocAnnotation` 里 device id 可能过时,**UUID 才是稳定身份**。但跨节点兄弟的 UUID 只在它**自己那台节点**有效,所以在**兄弟所在节点的 NodeInfo** 上 `OrdinalOfUUIDs`(`PodPreAllocatedUUIDs` 去重 → `linkComponentByUUID` → `componentOrdinal`,多数派)解析出它的 ordinal。**零新注解、零额外 List**。
+- **稳定 ordinal**:`NodeInfo` 按"NVLink 分量最小 `Device.Index`"给每个分量赋 ordinal(`nvlinkRootByOrdinal` 与 `nvlinkComponentOrdinal` 两个互逆映射);同构节点 ordinal-k = 同 rail。
+- **用 UUID(非 device id)反查兄弟 ordinal**:兄弟的 `PodVGPUPreAllocAnnotation` 里 device id 可能过时,**UUID 才是稳定身份**。但跨节点兄弟的 UUID 只在它**自己那台节点**有效,所以在**兄弟所在节点的 NodeInfo** 上 `OrdinalOfUUIDs`(`PodPreAllocatedUUIDs` 去重 → `nvlinkComponentByUUID` → `nvlinkComponentOrdinal`,多数派)解析出它的 ordinal。**零新注解、零额外 List**。
 - **跨节点兄弟查询**:`filter` 在 `nodeInfoList` 就绪后,复用 `nodePodsMap` 找同 Gang 已分配兄弟,用其**所在候选节点**的 NodeInfo 解析 ordinal → 写入跨节点稳定的单值 `req.GangLinkOrdinal`(节点无关,默认 -1);兄弟节点非本轮候选则跳过(best-effort)。
 - **对齐(消费端节点特化)**:`allocateLink` 解析优先级 = 同节点 anchor(UUID,连通硬约束)> 跨节点 `ComponentByOrdinal(req.GangLinkOrdinal)`(各节点把同一 ordinal 映射到**自己的** root)> 首 Pod 不约束。
 
