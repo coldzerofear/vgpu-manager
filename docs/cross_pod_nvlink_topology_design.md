@@ -68,7 +68,7 @@ allocateLink(anchorRoot 窗口)
 | [`request.go`](../pkg/device/allocator/request.go) | `AllocationRequest` 加 `GangName string`;`BuildAllocationRequest` 里 `req.GangName, _ = util.PodHasGangName(pod)` | ~3 行 |
 | [`types.go`](../pkg/device/types.go) | ① `NodeInfo` 加字段 `nodePods []*corev1.Pod`,`NewNodeInfo` 补 `ret.nodePods = infoOption.nodePods`<br>② `computeLinkComponents` 顺手产出 `componentToUUIDs map[int][]string` 并存到 NodeInfo<br>③ 新增方法 `GangAnchorComponent`、`ComponentUUIDs`<br>④ `DeepCopy` 同步浅拷 `nodePods`、克隆 `componentToUUIDs` | ~70 行 |
 | [`allocator.go`](../pkg/device/allocator/allocator.go) | `allocateByTopologyMode` 解析 anchorRoot 传入;`allocateLink` 增 `anchorRoot int`(-1=无)参数并按分量过滤候选 | ~40 行 |
-| feature gate | 新增 `CrossPodLinkTopology`(默认 **off**),仅在开启 + `req.GangName!=""` + `Topology==link` 时启用 anchor 逻辑 | ~5 行 |
+| 开关 | per-pod 注解 `nvidia.com/cross-pod-topology: "true"`(默认 off,可被 webhook 设默认),仅在开启 + `req.GangName!=""` + `Topology==link` 时启用 anchor 逻辑。**已用注解取代早期的 `CrossPodLinkTopology` feature gate**(per-pod 更灵活、免重启) | ~5 行 |
 
 **filter_predicate.go 不改。** 这是相比旧文档(要改 filter 加 `collectGangAnchors`、clone req)的最大简化——因为 NodeInfo 已被 `WithNodePods` 注入了本节点的同 Gang 兄弟。
 
@@ -98,7 +98,7 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 ### 3.4 为什么不影响现有功能
 
 - `req.GangName==""`(非 Gang Pod)→ anchorRoot 永远 -1 → `allocateLink` 走原分支,**逐字节等同现状**。
-- feature gate 默认关 → 即便 Gang Pod 也走原路径。
+- 注解 `cross-pod-topology` 未设(默认)→ 即便 Gang Pod 也走原路径。
 - 有 anchor 但装不下时,非 strict 回退到原 `devices`,行为不变。
 - 不新增 informer;anchor 解析复用已注入 NodeInfo 的 `nodePods` + 已有 `linkComponentByUUID`,**热路径零额外网络/缓存开销**。
 
@@ -119,9 +119,21 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 
 复用已落地的 strict 机制,几乎无新代码:
 
-- 语义:整个 Gang 必须同一连通分量。通过现有 `LinkTopologyStrict`(`device-topology-mode: link-strict`)叠加 `CrossPodLinkTopology` gate 表达,无需新注解。
+- 语义:整个 Gang 必须同一连通分量。通过现有 `LinkTopologyStrict`(`device-topology-mode: link-strict`)叠加 `cross-pod-topology` 注解表达,无需额外注解。
 - 后续 Pod:anchor 存在但窗口装不下 → strict 下 `allocateLink` 返回 false → `handleTopologyFallback` 拒绝节点(现成)。
 - 与抢占协同(进阶,非必须):`preempt_predicate` 的 `findAdditionalVictims` 增加"只抢 anchor 分量内低优先级 Pod"的过滤,避免抢占后仍分散。**留作后续**,不在轻量范围。
+
+## 5.5 阶段四:跨节点子域对齐(rail 对齐,已落地)
+
+**场景**:每 Pod 取节点子集(如 4/8)且节点有多个不连通 NVLink 域时,跨节点的兄弟 Pod 应落到**各节点对应的同一子域(rail)**,否则跨节点 NCCL 走错 rail 掉档。这超出同节点 anchor(union-find root 节点本地、不可跨节点比)与 Kueue(只到节点粒度)的能力,由本阶段在 extender 内解决。详细配合见 [`kueue_tas_integration.md`](./kueue_tas_integration.md) §7.2。
+
+**机制(不引入新注解)**:
+- **稳定 ordinal**:`NodeInfo` 按"分量最小 `Device.Index`"给每个连通分量赋 ordinal(`rootByOrdinal` / `ordinalByDeviceID`);同构节点 ordinal-k = 同 rail。
+- **反查兄弟 ordinal**:兄弟的 `PodVGPUPreAllocAnnotation` **已编码所选卡的 device id**;`PodPreAllocatedDeviceIDs` 取出,经本节点 `ordinalByDeviceID` 反查 ordinal(同构假设下成立;异构由 Kueue TAS 节点级保证)。**零新注解、零额外 List**。
+- **跨节点兄弟查询**:`filter` 复用已有 `nodePodsMap`(全节点桶)找同 Gang 已分配兄弟,装入 `req.GangSiblingDeviceIDs`(节点无关)。
+- **对齐**:`allocateLink` 解析优先级 = 同节点 anchor(连通硬约束)> 跨节点 `AlignedComponentRoot`(按 ordinal 对齐)> 首 Pod 不约束。
+
+**落地**:`types.go`(ordinal 字段/构建/`ComponentByOrdinal`/`AlignedComponentRoot`/`PodPreAllocatedDeviceIDs`)、`request.go`(`GangSiblingDeviceIDs`)、`filter_predicate.go`(`findGangSiblingDeviceIDs`,~15 行)、`allocator.go`(对齐分支)。同 `cross-pod-topology` 注解开关;整机整卡(单分量)= ordinal 恒 0、窗口=全节点,无副作用。
 
 ## 6. 与 Volcano #5049(反共置)正交互补
 
@@ -145,7 +157,7 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 | `NoRoom_Strict_Reject` | 同上但 strict | 拒绝节点,走 `handleTopologyFallback` |
 | `Lookahead_PicksBigComponent` | 多分量节点,首 Pod 只需 2 卡但 Gang 共需 8(阶段二) | 首 Pod 选 ≥8 卡容量的分量 |
 | `AnchorSplit_Majority` | 兄弟 anchor 跨多分量 | 非 strict 取多数派 + V(3);strict 拒绝 |
-| `FeatureGateOff_Noop` | gate 关闭 | 即便 Gang Pod 也走原路径 |
+| `AnnotationOff_Noop` | 未设 cross-pod-topology 注解 | 即便 Gang Pod 也走原路径 |
 
 性能:在 `filter_perf_test` 增 Gang 维度,确认 anchor 解析(遍历本节点 pod + map 查询)成本 < 5%。
 
@@ -158,7 +170,7 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 | 阶段三 strict | ~30 LOC(复用) | 低 | ★★ 硬保证场景 |
 | 反共置(#5049) | ~80 LOC | 低 | ★★ 与亲和叠加=训练理想分布 |
 
-**节奏(2026-06-16)**:阶段一已落地(提交 `28cf038` + 边界修复 `d2e0f88`);阶段三 strict 随阶段一已具备(复用 `handleTopologyFallback`);**阶段二 Lookahead 已决定暂缓**(避免引入 CRD 解析,见 §4);反共置(#5049)未实现,按需跟进。
+**节奏(2026-06-16)**:阶段一已落地(`28cf038` + 边界修复 `d2e0f88`);开关已由 feature gate 改为 per-pod 注解 `nvidia.com/cross-pod-topology`、并落地**阶段四跨节点子域对齐**(`6462ae6`,见 §5.5);阶段三 strict 随阶段一已具备(复用 `handleTopologyFallback`);**阶段二 Lookahead 已决定暂缓**(避免引入 CRD 解析,见 §4);反共置(#5049)决定不自研,改用 `link + device spread` 间接实现(spread 在 anchor 分量窗口内优先选空闲卡)。
 
 ## 9. 不在本设计范围
 
