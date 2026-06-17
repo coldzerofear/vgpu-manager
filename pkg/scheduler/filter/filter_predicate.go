@@ -450,46 +450,54 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 	return nodeName, err == nil
 }
 
-// FindGangSiblingLinkOrdinal scans all vGPU pods (bucketed by their planned node)
-// for a same-gang sibling that already has a live pre-allocation, and resolves
-// that sibling's cross-node-stable sub-domain (rail) ORDINAL on the sibling's OWN
-// node — by UUID, so it is identity-based and independent of the possibly-stale
-// Device.Index recorded in the annotation. nodeInfoByName must hold the built
-// candidate NodeInfos; a sibling whose node is not a candidate this cycle can't
-// have its UUIDs resolved here and is skipped (best-effort: alignment is an
-// optimization, never a correctness gate). Returns the first resolvable sibling's
-// ordinal; (-1, false) when none is found.
+// FindGangSiblingLinkOrdinal resolves the gang's cross-node-stable sub-domain
+// (rail) ORDINAL by tallying it across the gang's already-placed siblings and
+// returning the majority. Each sibling's ordinal is resolved on the sibling's OWN
+// node by UUID — identity-based, independent of the possibly-stale Device.Index
+// recorded in the annotation. `pods` MUST come from the gang-name index (so gang
+// membership is already guaranteed — not re-checked here). A sibling on a
+// candidate node uses its prebuilt NodeInfo (free); otherwise the node is built
+// on demand from nodeLister and CACHED so a node hosting several siblings is
+// built at most once. Returns (-1, false) when no sibling resolves (e.g. the
+// gang's first pod). Best-effort: alignment is an optimization, never a
+// correctness gate.
 func FindGangSiblingLinkOrdinal(pods []*corev1.Pod,
 	nodeInfoByName map[string]*device.NodeInfo,
 	nodeLister listerv1.NodeLister,
 	req *allocator.AllocationRequest) (int, bool) {
-	ordinalMap := make(map[int]int, len(pods))
+	ordinalMap := make(map[int]int)
+	// built caches NodeInfos constructed on demand for non-candidate sibling
+	// nodes, so multiple siblings on one node trigger a single (expensive) build.
+	var built map[string]*device.NodeInfo
 	for _, p := range pods {
-		if p == nil || p.UID == req.Pod.UID {
+		// Gang membership is guaranteed by the IndexerKeyPodGangName query; only
+		// self-exclusion and a live pre-allocation remain to be checked.
+		if p == nil || p.UID == req.Pod.UID || !device.ShouldCountPodDeviceAllocation(p) {
 			continue
 		}
-		if name, ok := util.PodHasGangName(p); !ok || name != req.GangName {
-			continue
-		}
-		if !device.ShouldCountPodDeviceAllocation(p) {
+		// Resolve the chosen UUIDs first: a sibling without a live pre-allocation
+		// contributes nothing, so skip it before paying for any NodeInfo build.
+		uuids := device.PodPreAllocatedUUIDs(p)
+		if len(uuids) == 0 {
 			continue
 		}
 		nodeName := util.PodPlanSchedulingNode(p)
 		nodeInfo, ok := nodeInfoByName[nodeName]
 		if !ok {
-			node, err := nodeLister.Get(nodeName)
-			if err != nil {
-				// sibling node not a candidate this cycle → UUIDs don't resolve here
-				continue
+			if nodeInfo, ok = built[nodeName]; !ok {
+				node, err := nodeLister.Get(nodeName)
+				if err != nil {
+					continue // sibling node unknown → its UUIDs can't be resolved here
+				}
+				nodeInfo, err = device.NewNodeInfo(node, device.WithGPUTopologyEnabled(true))
+				if err != nil {
+					continue
+				}
+				if built == nil {
+					built = make(map[string]*device.NodeInfo)
+				}
+				built[nodeName] = nodeInfo
 			}
-			nodeInfo, err = device.NewNodeInfo(node, device.WithGPUTopologyEnabled(true))
-			if err != nil {
-				continue
-			}
-		}
-		uuids := device.PodPreAllocatedUUIDs(p)
-		if len(uuids) == 0 {
-			continue
 		}
 		if ordinal, ok := nodeInfo.OrdinalOfUUIDs(uuids); ok {
 			ordinalMap[ordinal]++
@@ -502,8 +510,12 @@ func FindGangSiblingLinkOrdinal(pods []*corev1.Pod,
 	case 1:
 		return ordinals[0], true
 	default:
+		// Majority wins; ties break to the lower ordinal for determinism.
 		sort.Slice(ordinals, func(i, j int) bool {
-			return ordinalMap[ordinals[i]] > ordinalMap[ordinals[j]]
+			if ci, cj := ordinalMap[ordinals[i]], ordinalMap[ordinals[j]]; ci != cj {
+				return ci > cj
+			}
+			return ordinals[i] < ordinals[j]
 		})
 		return ordinals[0], true
 	}
