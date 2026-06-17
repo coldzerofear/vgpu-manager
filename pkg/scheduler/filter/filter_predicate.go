@@ -440,14 +440,22 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 	return nodeName, err == nil
 }
 
-// deviceFilter will choose one and only one node fullfil the request, so it should always be the last filter of gpuFilter
-// findGangSiblingDeviceIDs scans all vGPU pods (bucketed by node) for a same-gang
-// sibling that already has a live pre-allocation, and returns the device IDs it
-// chose — the cross-node anchor for sub-domain (rail) alignment. Returns the
-// first match's IDs (siblings should already be aligned to one another); nil when
-// none is found (this is the gang's first pod, or none has pre-allocated yet).
-func findGangSiblingDeviceIDs(nodePodsMap map[string][]*corev1.Pod, gangName string, self k8stypes.UID) []int {
-	for _, pods := range nodePodsMap {
+// findGangSiblingLinkOrdinal scans all vGPU pods (bucketed by their planned node)
+// for a same-gang sibling that already has a live pre-allocation, and resolves
+// that sibling's cross-node-stable sub-domain (rail) ORDINAL on the sibling's OWN
+// node — by UUID, so it is identity-based and independent of the possibly-stale
+// Device.Index recorded in the annotation. nodeInfoByName must hold the built
+// candidate NodeInfos; a sibling whose node is not a candidate this cycle can't
+// have its UUIDs resolved here and is skipped (best-effort: alignment is an
+// optimization, never a correctness gate). Returns the first resolvable sibling's
+// ordinal; (-1, false) when none is found.
+func findGangSiblingLinkOrdinal(nodePodsMap map[string][]*corev1.Pod,
+	nodeInfoByName map[string]*device.NodeInfo, gangName string, self k8stypes.UID) (int, bool) {
+	for nodeName, pods := range nodePodsMap {
+		ni := nodeInfoByName[nodeName]
+		if ni == nil {
+			continue // sibling node not a candidate this cycle → UUIDs don't resolve here
+		}
 		for _, p := range pods {
 			if p == nil || p.UID == self {
 				continue
@@ -458,14 +466,19 @@ func findGangSiblingDeviceIDs(nodePodsMap map[string][]*corev1.Pod, gangName str
 			if !device.ShouldCountPodDeviceAllocation(p) {
 				continue
 			}
-			if ids := device.PodPreAllocatedDeviceIDs(p); len(ids) > 0 {
-				return ids
+			uuids := device.PodPreAllocatedUUIDs(p)
+			if len(uuids) == 0 {
+				continue
+			}
+			if ord, ok := ni.OrdinalOfUUIDs(uuids); ok {
+				return ord, true
 			}
 		}
 	}
-	return nil
+	return -1, false
 }
 
+// deviceFilter will choose one and only one node fullfil the request, so it should always be the last filter of gpuFilter
 func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
 	var (
 		pod           = req.Pod
@@ -515,18 +528,6 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	if err != nil {
 		klog.ErrorS(err, "PodLister list all vGPU Pods failed")
 		return filteredNodes, failed, err
-	}
-
-	// Cross-node sub-domain (rail) alignment: when this pod opts into cross-pod
-	// link topology and belongs to a gang, find any same-gang sibling already
-	// pre-allocated ANYWHERE in the cluster and carry its chosen device IDs on
-	// the request. The per-node allocator maps those IDs to a component ordinal
-	// to keep this pod in the rail-aligned sub-domain. Reuses the nodePodsMap we
-	// already built (no extra List); cross-node lookup is why this lives in the
-	// filter rather than the per-node allocator (which only sees its own node's
-	// pods). Cheap and gang-only; non-gang / opt-out pods skip it entirely.
-	if req.CrossPodTopology && req.GangName != "" && req.Topology == util.LinkTopology {
-		req.GangSiblingDeviceIDs = findGangSiblingDeviceIDs(nodePodsMap, req.GangName, pod.UID)
 	}
 
 	var (
@@ -681,6 +682,25 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	// Quickly return results
 	if len(nodeInfoList) == 0 {
 		return filteredNodes, failed, nil
+	}
+
+	// Cross-node sub-domain (rail) alignment: when this pod opts into cross-pod
+	// link topology and is in a gang, resolve the gang's chosen sub-domain ordinal
+	// from any already-placed sibling and carry it (node-independent) on req. Each
+	// node later maps it back to its own component via ComponentByOrdinal. The
+	// ordinal is resolved on the SIBLING's own NodeInfo by UUID (identity-based,
+	// dedup'd), so it does not depend on the possibly-stale Device.Index in the
+	// annotation; we only need the sibling's node to be among the built candidates
+	// (the common case under Kueue rack-pinning). Reuses nodePodsMap + nodeInfoList
+	// (no extra List / NodeInfo build). Gang-only; others skip it.
+	if req.CrossPodTopology && req.GangName != "" && req.Topology == util.LinkTopology {
+		nodeInfoByName := make(map[string]*device.NodeInfo, len(nodeInfoList))
+		for _, ni := range nodeInfoList {
+			nodeInfoByName[ni.GetName()] = ni
+		}
+		if ord, ok := findGangSiblingLinkOrdinal(nodePodsMap, nodeInfoByName, req.GangName, pod.UID); ok {
+			req.GangLinkOrdinal = ord
+		}
 	}
 
 	switch req.NodePolicy {

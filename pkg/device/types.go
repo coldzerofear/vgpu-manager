@@ -658,7 +658,7 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 	if ret.gpuTopology {
 		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(ret.deviceList)
 		ret.componentToUUIDs = buildComponentIndex(ret.linkComponentByUUID)
-		ret.rootByOrdinal, ret.ordinalByDeviceID = buildComponentOrdinals(ret.componentToUUIDs, ret.deviceIndexMap)
+		ret.rootByOrdinal, ret.componentOrdinal = buildComponentOrdinals(ret.componentToUUIDs, ret.deviceIndexMap)
 	}
 	ret.numaTopology = false
 	for _, d := range devices {
@@ -724,17 +724,17 @@ type NodeInfo struct {
 	// "which cards live in component C" without scanning the whole map.
 	// Nil/empty when gpuTopology is false.
 	componentToUUIDs map[int][]string
-	// rootByOrdinal / ordinalByDeviceID give each NVLink component a
+	// rootByOrdinal / componentOrdinal give each NVLink component a
 	// cross-node-STABLE ordinal: components are ranked by their minimum
 	// Device.Index, so on homogeneous nodes ordinal-k denotes the same physical
 	// sub-domain (rail) on every node. This lets cross-NODE gang alignment work
-	// despite union-find roots being node-local: a sibling's chosen device IDs
-	// (carried in its pre-alloc annotation) are mapped to an ordinal here, then
-	// back to THIS node's component with the same ordinal. Nil when gpuTopology
-	// is false. rootByOrdinal: ordinal → component root; ordinalByDeviceID:
-	// Device.Index → ordinal.
-	rootByOrdinal     map[int]int
-	ordinalByDeviceID map[int]int
+	// despite union-find roots being node-local: a sibling's ordinal is resolved
+	// (by UUID) on the SIBLING's own NodeInfo, carried as a single int, then
+	// mapped back to THIS node's component via rootByOrdinal. Nil when
+	// gpuTopology is false. rootByOrdinal: ordinal → component root (consume
+	// side); componentOrdinal: component root → ordinal (source side).
+	rootByOrdinal    map[int]int
+	componentOrdinal map[int]int
 	// nodePods is the set of pods scheduled (or pre-allocated) to this node,
 	// as injected via WithNodePods. Retained — not just consumed for usage
 	// accounting in AddPodsUsedResources — so cross-pod allocation can resolve
@@ -843,7 +843,7 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 	if ret.gpuTopology {
 		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(gatherInfo.DeviceList)
 		ret.componentToUUIDs = buildComponentIndex(ret.linkComponentByUUID)
-		ret.rootByOrdinal, ret.ordinalByDeviceID = buildComponentOrdinals(ret.componentToUUIDs, ret.deviceIndexMap)
+		ret.rootByOrdinal, ret.componentOrdinal = buildComponentOrdinals(ret.componentToUUIDs, ret.deviceIndexMap)
 	}
 	if ret.numaTopology {
 		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(gatherInfo.DeviceMap)
@@ -948,15 +948,16 @@ func buildComponentIndex(byUUID map[string]int) map[int][]string {
 
 // buildComponentOrdinals assigns each NVLink component a cross-node-STABLE
 // ordinal by ranking components by their minimum Device.Index, then returns
-// (rootByOrdinal, ordinalByDeviceID). On homogeneous nodes (identical GPU↔rail
-// layout) ordinal-k denotes the same physical sub-domain on every node, which is
-// what lets cross-node gang alignment compare sub-domains across nodes even
-// though union-find roots are node-local. Returns empty maps for an empty input.
-func buildComponentOrdinals(componentToUUIDs map[int][]string, deviceIndexMap map[string]int) (rootByOrdinal, ordinalByDeviceID map[int]int) {
+// (rootByOrdinal, componentOrdinal) — the two inverse maps (ordinal→root and
+// root→ordinal). On homogeneous nodes (identical GPU↔rail layout) ordinal-k
+// denotes the same physical sub-domain on every node, which is what lets
+// cross-node gang alignment compare sub-domains across nodes even though
+// union-find roots are node-local. Returns empty maps for an empty input.
+func buildComponentOrdinals(componentToUUIDs map[int][]string, deviceIndexMap map[string]int) (rootByOrdinal, componentOrdinal map[int]int) {
 	rootByOrdinal = make(map[int]int, len(componentToUUIDs))
-	ordinalByDeviceID = make(map[int]int)
+	componentOrdinal = make(map[int]int, len(componentToUUIDs))
 	if len(componentToUUIDs) == 0 {
-		return rootByOrdinal, ordinalByDeviceID
+		return rootByOrdinal, componentOrdinal
 	}
 	// minIndex(component) = smallest Device.Index among its members.
 	type rootMin struct{ root, min int }
@@ -977,13 +978,9 @@ func buildComponentOrdinals(componentToUUIDs map[int][]string, deviceIndexMap ma
 	sort.Slice(mins, func(i, j int) bool { return mins[i].min < mins[j].min })
 	for ordinal, rm := range mins {
 		rootByOrdinal[ordinal] = rm.root
-		for _, uuid := range componentToUUIDs[rm.root] {
-			if id, ok := deviceIndexMap[uuid]; ok {
-				ordinalByDeviceID[id] = ordinal
-			}
-		}
+		componentOrdinal[rm.root] = ordinal
 	}
-	return rootByOrdinal, ordinalByDeviceID
+	return rootByOrdinal, componentOrdinal
 }
 
 // computeMaxNUMAGroupSize returns the largest count of GPUs sharing one NUMA
@@ -1026,7 +1023,7 @@ func (n *NodeInfo) DeepCopy() *NodeInfo {
 	// immutable member slices / pod pointers.
 	nodeInfo.componentToUUIDs = maps.Clone(n.componentToUUIDs)
 	nodeInfo.rootByOrdinal = maps.Clone(n.rootByOrdinal)
-	nodeInfo.ordinalByDeviceID = maps.Clone(n.ordinalByDeviceID)
+	nodeInfo.componentOrdinal = maps.Clone(n.componentOrdinal)
 	nodeInfo.nodePods = slices.Clone(n.nodePods)
 	return &nodeInfo
 }
@@ -1698,21 +1695,30 @@ func (n *NodeInfo) ComponentByOrdinal(ordinal int) (int, bool) {
 	return root, true
 }
 
-// AlignedComponentRoot maps a cross-node gang sibling's chosen device IDs to the
-// component root ON THIS NODE that carries the same ordinal (rail). The sibling's
-// IDs come from its pre-alloc annotation; each is translated to an ordinal via
-// this node's ordinalByDeviceID (valid under the homogeneous-layout assumption,
-// since heterogeneity is delegated to the node-level scheduler / Kueue TAS), and
-// the majority ordinal is resolved back to a local component root. Returns
-// (-1, false) when no ID maps to a known ordinal or this node lacks that
-// component — the caller then falls back (non-strict) or rejects (strict).
-func (n *NodeInfo) AlignedComponentRoot(siblingDeviceIDs []int) (int, bool) {
-	if len(siblingDeviceIDs) == 0 || len(n.ordinalByDeviceID) == 0 {
+// OrdinalOfUUIDs resolves the cross-node-stable ordinal (rail) of a set of GPU
+// UUIDs **on this node**, i.e. it must be called on the NodeInfo of the node the
+// UUIDs actually live on (the sibling's own node). Each UUID maps to its
+// component root via linkComponentByUUID and then to that root's ordinal; the
+// majority ordinal is returned. This is identity-based (UUID), so it does NOT
+// depend on the possibly-stale Device.Index recorded in a pre-alloc annotation.
+// Duplicate UUIDs (a pod's multiple containers sharing one card) are collapsed.
+// Returns (-1, false) when no UUID is known here or this node has no topology.
+func (n *NodeInfo) OrdinalOfUUIDs(uuids []string) (int, bool) {
+	if len(uuids) == 0 || len(n.linkComponentByUUID) == 0 {
 		return -1, false
 	}
+	seen := make(map[string]struct{}, len(uuids))
 	votes := make(map[int]int)
-	for _, id := range siblingDeviceIDs {
-		if ord, ok := n.ordinalByDeviceID[id]; ok {
+	for _, uuid := range uuids {
+		if _, dup := seen[uuid]; dup {
+			continue
+		}
+		seen[uuid] = struct{}{}
+		root, ok := n.linkComponentByUUID[uuid]
+		if !ok {
+			continue
+		}
+		if ord, ok := n.componentOrdinal[root]; ok {
 			votes[ord]++
 		}
 	}
@@ -1725,7 +1731,7 @@ func (n *NodeInfo) AlignedComponentRoot(siblingDeviceIDs []int) (int, bool) {
 			bestOrd, bestVotes = ord, v
 		}
 	}
-	return n.ComponentByOrdinal(bestOrd)
+	return bestOrd, true
 }
 
 // GangAnchorComponent resolves the NVLink component that this gang's sibling
@@ -1755,7 +1761,7 @@ func (n *NodeInfo) GangAnchorComponent(gangName string, excludedSet sets.Set[typ
 		if !ShouldCountPodDeviceAllocation(p) {
 			continue
 		}
-		for _, uuid := range podPreAllocatedUUIDs(p) {
+		for _, uuid := range PodPreAllocatedUUIDs(p) {
 			if root, ok := n.linkComponentByUUID[uuid]; ok {
 				votes[root]++
 			}
@@ -1777,11 +1783,13 @@ func (n *NodeInfo) GangAnchorComponent(gangName string, excludedSet sets.Set[typ
 	return bestRoot, true
 }
 
-// podPreAllocatedUUIDs extracts the GPU UUIDs from a pod's pre-allocated device
-// annotation. Returns nil when the annotation is absent or unparsable (a
-// malformed sibling simply doesn't vote — never an error that blocks the pod
-// being scheduled).
-func podPreAllocatedUUIDs(pod *corev1.Pod) []string {
+// PodPreAllocatedUUIDs extracts the DEDUPLICATED GPU UUIDs from a pod's
+// pre-allocated device annotation. UUID (not the possibly-stale Device.Index) is
+// the stable device identity; duplicates appear when a pod's multiple containers
+// share one card, so they are collapsed. Returns nil when the annotation is
+// absent or unparsable (a malformed sibling simply doesn't vote — never an error
+// that blocks the pod being scheduled).
+func PodPreAllocatedUUIDs(pod *corev1.Pod) []string {
 	val, ok := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
 	if !ok || len(val) == 0 {
 		return nil
@@ -1790,38 +1798,21 @@ func podPreAllocatedUUIDs(pod *corev1.Pod) []string {
 	if err := pdc.UnmarshalText(val); err != nil {
 		return nil
 	}
+	seen := make(map[string]struct{})
 	var uuids []string
 	for _, cdc := range pdc {
 		for _, dc := range cdc.DeviceClaims {
-			if dc.Uuid != "" {
-				uuids = append(uuids, dc.Uuid)
+			if dc.Uuid == "" {
+				continue
 			}
+			if _, dup := seen[dc.Uuid]; dup {
+				continue
+			}
+			seen[dc.Uuid] = struct{}{}
+			uuids = append(uuids, dc.Uuid)
 		}
 	}
 	return uuids
-}
-
-// PodPreAllocatedDeviceIDs extracts the device IDs (Device.Index) a pod chose
-// from its pre-alloc annotation. Used by cross-node sub-domain alignment to read
-// a gang sibling's chosen sub-domain without any new annotation — the device IDs
-// are already encoded in PodVGPUPreAllocAnnotation. Returns nil when absent or
-// unparsable (a malformed sibling simply doesn't anchor).
-func PodPreAllocatedDeviceIDs(pod *corev1.Pod) []int {
-	val, ok := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
-	if !ok || len(val) == 0 {
-		return nil
-	}
-	var pdc PodDeviceClaim
-	if err := pdc.UnmarshalText(val); err != nil {
-		return nil
-	}
-	var ids []int
-	for _, cdc := range pdc {
-		for _, dc := range cdc.DeviceClaims {
-			ids = append(ids, dc.Id)
-		}
-	}
-	return ids
 }
 
 // MaxNUMAGroupSize returns the largest number of GPUs sharing a single NUMA

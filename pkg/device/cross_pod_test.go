@@ -184,14 +184,13 @@ func Test_buildComponentOrdinals(t *testing.T) {
 		0: {"gpu0", "gpu1"},
 	}
 	deviceIndexMap := map[string]int{"gpu0": 0, "gpu1": 1, "gpu4": 4, "gpu5": 5}
-	rootByOrdinal, ordinalByDeviceID := buildComponentOrdinals(componentToUUIDs, deviceIndexMap)
+	rootByOrdinal, componentOrdinal := buildComponentOrdinals(componentToUUIDs, deviceIndexMap)
 	if rootByOrdinal[0] != 0 || rootByOrdinal[1] != 7 {
 		t.Fatalf("rootByOrdinal = %v, want {0:0, 1:7}", rootByOrdinal)
 	}
-	for id, wantOrd := range map[int]int{0: 0, 1: 0, 4: 1, 5: 1} {
-		if ordinalByDeviceID[id] != wantOrd {
-			t.Fatalf("ordinalByDeviceID[%d] = %d, want %d", id, ordinalByDeviceID[id], wantOrd)
-		}
+	// componentOrdinal is the inverse: root 0 → ordinal 0, root 7 → ordinal 1.
+	if componentOrdinal[0] != 0 || componentOrdinal[7] != 1 {
+		t.Fatalf("componentOrdinal = %v, want {0:0, 7:1}", componentOrdinal)
 	}
 }
 
@@ -200,7 +199,7 @@ func Test_buildComponentOrdinals(t *testing.T) {
 func twoOrdinalNode() *NodeInfo {
 	n := twoComponentNode()
 	n.deviceIndexMap = map[string]int{"gpu0": 0, "gpu1": 1, "gpu2": 2, "gpu3": 3}
-	n.rootByOrdinal, n.ordinalByDeviceID = buildComponentOrdinals(n.componentToUUIDs, n.deviceIndexMap)
+	n.rootByOrdinal, n.componentOrdinal = buildComponentOrdinals(n.componentToUUIDs, n.deviceIndexMap)
 	return n
 }
 
@@ -217,37 +216,48 @@ func Test_ComponentByOrdinal(t *testing.T) {
 	}
 }
 
-func Test_AlignedComponentRoot(t *testing.T) {
+func Test_OrdinalOfUUIDs(t *testing.T) {
 	n := twoOrdinalNode()
-	// Cross-node sibling chose device ids {2,3} → ordinal 1 → this node's root 2.
-	if root, ok := n.AlignedComponentRoot([]int{2, 3}); !ok || root != 2 {
-		t.Fatalf("AlignedComponentRoot([2,3]) = (%d,%v), want (2,true)", root, ok)
+	// Sibling's UUIDs {gpu2,gpu3} live in component root 2 → ordinal 1.
+	if ord, ok := n.OrdinalOfUUIDs([]string{"gpu2", "gpu3"}); !ok || ord != 1 {
+		t.Fatalf("OrdinalOfUUIDs([gpu2,gpu3]) = (%d,%v), want (1,true)", ord, ok)
 	}
-	// Sibling chose {0,1} → ordinal 0 → root 0.
-	if root, ok := n.AlignedComponentRoot([]int{0, 1}); !ok || root != 0 {
-		t.Fatalf("AlignedComponentRoot([0,1]) = (%d,%v), want (0,true)", root, ok)
+	// {gpu0,gpu1} → ordinal 0.
+	if ord, ok := n.OrdinalOfUUIDs([]string{"gpu0", "gpu1"}); !ok || ord != 0 {
+		t.Fatalf("OrdinalOfUUIDs([gpu0,gpu1]) = (%d,%v), want (0,true)", ord, ok)
 	}
-	// Majority wins when ids span ordinals (degraded sibling): {2,3,3}→ord1 majority.
-	if root, ok := n.AlignedComponentRoot([]int{0, 2, 3}); !ok || (root != 0 && root != 2) {
-		t.Fatalf("AlignedComponentRoot(tie/spanning) = (%d,%v)", root, ok)
+	// Duplicate UUIDs (multi-container sharing a card) collapse, don't skew.
+	if ord, ok := n.OrdinalOfUUIDs([]string{"gpu2", "gpu2", "gpu3"}); !ok || ord != 1 {
+		t.Fatalf("OrdinalOfUUIDs(dup) = (%d,%v), want (1,true)", ord, ok)
 	}
-	// Empty / unknown ids → no alignment.
-	if _, ok := n.AlignedComponentRoot(nil); ok {
-		t.Fatalf("AlignedComponentRoot(nil) should be false")
+	// Majority wins when UUIDs span ordinals (degraded sibling): 1×ord0 + 2×ord1.
+	if ord, ok := n.OrdinalOfUUIDs([]string{"gpu0", "gpu2", "gpu3"}); !ok || ord != 1 {
+		t.Fatalf("OrdinalOfUUIDs(spanning) = (%d,%v), want (1,true)", ord, ok)
 	}
-	if _, ok := n.AlignedComponentRoot([]int{99}); ok {
-		t.Fatalf("AlignedComponentRoot(unknown) should be false")
+	// Empty / unknown UUIDs → no ordinal.
+	if _, ok := n.OrdinalOfUUIDs(nil); ok {
+		t.Fatalf("OrdinalOfUUIDs(nil) should be false")
+	}
+	if _, ok := n.OrdinalOfUUIDs([]string{"ghost"}); ok {
+		t.Fatalf("OrdinalOfUUIDs(unknown) should be false")
 	}
 }
 
-func Test_PodPreAllocatedDeviceIDs(t *testing.T) {
-	// claimText uses index i as the device id: claimText("gpu2","gpu3") → ids 0,1.
+func Test_PodPreAllocatedUUIDs(t *testing.T) {
 	p := gangPod("sib", "gangA", "node1", claimText("gpu2", "gpu3"))
-	ids := PodPreAllocatedDeviceIDs(p)
-	if len(ids) != 2 || ids[0] != 0 || ids[1] != 1 {
-		t.Fatalf("PodPreAllocatedDeviceIDs = %v, want [0 1]", ids)
+	uuids := PodPreAllocatedUUIDs(p)
+	if len(uuids) != 2 || uuids[0] != "gpu2" || uuids[1] != "gpu3" {
+		t.Fatalf("PodPreAllocatedUUIDs = %v, want [gpu2 gpu3]", uuids)
 	}
-	if got := PodPreAllocatedDeviceIDs(&corev1.Pod{}); got != nil {
+	// Multi-container sharing the same card → UUID deduplicated.
+	dup := &corev1.Pod{}
+	dup.Annotations = map[string]string{
+		util.PodVGPUPreAllocAnnotation: "cont1[0_gpu2_10_1024];cont2[0_gpu2_10_1024]",
+	}
+	if got := PodPreAllocatedUUIDs(dup); len(got) != 1 || got[0] != "gpu2" {
+		t.Fatalf("dedup PodPreAllocatedUUIDs = %v, want [gpu2]", got)
+	}
+	if got := PodPreAllocatedUUIDs(&corev1.Pod{}); got != nil {
 		t.Fatalf("no-annotation pod = %v, want nil", got)
 	}
 }

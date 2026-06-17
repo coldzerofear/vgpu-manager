@@ -101,14 +101,15 @@ type AllocationRequest struct {
 	// False (default) = unchanged single-pod behaviour.
 	CrossPodTopology bool
 
-	// GangSiblingDeviceIDs carries the device IDs (Device.Index) that one
-	// already-pre-allocated cross-node gang sibling chose, extracted by the
-	// filter from that sibling's PodVGPUPreAllocAnnotation. Node-independent
-	// (it's the gang's chosen sub-domain, same for every candidate node), so it
-	// lives on the shared request. The allocator maps these IDs to a component
-	// ordinal on the current node to align this pod to the same sub-domain.
-	// Empty = no cross-node sibling yet (first pod) or cross-pod topology off.
-	GangSiblingDeviceIDs []int
+	// GangLinkOrdinal is the cross-node-STABLE sub-domain (rail) ordinal that an
+	// already-placed gang sibling occupies, computed ONCE by the filter by
+	// resolving the sibling's UUIDs on the sibling's OWN NodeInfo (so it does not
+	// depend on the possibly-stale Device.Index in the annotation). It is a single
+	// node-independent integer (the gang's chosen rail); each candidate node maps
+	// it back to its OWN component via NodeInfo.ComponentByOrdinal — that is where
+	// the per-node specialization happens. -1 (default) = no cross-node sibling
+	// resolved yet (first pod, sibling node not a candidate, or cross-pod off).
+	GangLinkOrdinal int
 
 	// Profile is the pod's request-weighted scoring profile. Captured
 	// here so the filter and the allocator score with identical weights
@@ -157,7 +158,7 @@ type ContainerNeed struct {
 // against memoryFactor stays inside allocateOne where the relevant node
 // is unambiguous.
 func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
-	req := &AllocationRequest{Pod: pod}
+	req := &AllocationRequest{Pod: pod, GangLinkOrdinal: -1}
 
 	// Aggregate demand bucketed by lifecycle group so Total reflects the
 	// pod's PEAK concurrent demand (not a naive sum across non-overlapping
