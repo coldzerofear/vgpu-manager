@@ -657,7 +657,7 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 	// tests.
 	if ret.gpuTopology {
 		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(ret.deviceList, anyLinkEdge)
-		_, ret.nvlinkComponentByUUID = computeLinkComponents(ret.deviceList, nvlinkEdge)
+		ret.maxNVLinkComponentSize, ret.nvlinkComponentByUUID = computeLinkComponents(ret.deviceList, nvlinkEdge)
 		ret.nvlinkComponentToUUIDs = buildComponentIndex(ret.nvlinkComponentByUUID)
 		ret.nvlinkRootByOrdinal, ret.nvlinkComponentOrdinal = buildComponentOrdinals(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap)
 	}
@@ -731,6 +731,12 @@ type NodeInfo struct {
 	nvlinkComponentToUUIDs map[int][]string
 	nvlinkRootByOrdinal    map[int]int
 	nvlinkComponentOrdinal map[int]int
+	// maxNVLinkComponentSize is the largest NVLink-fabric component size (the
+	// most GPUs mutually reachable over NVLink only). Node fitness uses it to
+	// rank a node that can host the request fully NVLink-connected above one that
+	// could only do so by spanning NVLink islands over PCIe. Zero when gpuTopology
+	// is false.
+	maxNVLinkComponentSize int
 	// nodePods is the set of pods scheduled (or pre-allocated) to this node,
 	// as injected via WithNodePods. Retained — not just consumed for usage
 	// accounting in AddPodsUsedResources — so cross-pod allocation can resolve
@@ -838,7 +844,7 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 	// the lifetime of the NodeInfo snapshot.
 	if ret.gpuTopology {
 		ret.maxLinkComponentSize, ret.linkComponentByUUID = computeLinkComponents(gatherInfo.DeviceList, anyLinkEdge)
-		_, ret.nvlinkComponentByUUID = computeLinkComponents(gatherInfo.DeviceList, nvlinkEdge)
+		ret.maxNVLinkComponentSize, ret.nvlinkComponentByUUID = computeLinkComponents(gatherInfo.DeviceList, nvlinkEdge)
 		ret.nvlinkComponentToUUIDs = buildComponentIndex(ret.nvlinkComponentByUUID)
 		ret.nvlinkRootByOrdinal, ret.nvlinkComponentOrdinal = buildComponentOrdinals(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap)
 	}
@@ -1667,6 +1673,42 @@ func (n *NodeInfo) HasNUMATopology() bool {
 // link metadata was reported.
 func (n *NodeInfo) MaxLinkComponentSize() int {
 	return n.maxLinkComponentSize
+}
+
+// MaxNVLinkComponentSize returns the largest number of GPUs mutually reachable
+// over NVLink ONLY (the biggest NVLink fabric / island). Node fitness ranks a
+// node that can host the requested group entirely within one NVLink fabric
+// (MaxNVLinkComponentSize >= N) above one that can only reach N over PCIe
+// (MaxLinkComponentSize >= N > MaxNVLinkComponentSize). Equals
+// MaxLinkComponentSize on a fully NVSwitch-connected node.
+func (n *NodeInfo) MaxNVLinkComponentSize() int {
+	return n.maxNVLinkComponentSize
+}
+
+// LinkTopologyFitness scores how well this node can host a link-topology group
+// of needNumber GPUs, higher = better NCCL performance:
+//
+//	3 = fits within ONE NVLink fabric (MaxNVLinkComponentSize >= N) — best
+//	2 = fits within a P2P-reachable group but spans NVLink islands over PCIe
+//	1 = has topology but can't fit even a P2P group (allocator will fall back)
+//	0 = no GPU topology info
+//
+// Tiers 0/1/2 preserve the prior ranking (topology-capable above non-topology);
+// tier 3 is the finer split that pulls fully-NVLink-connectable nodes to the
+// front. On a homogeneous NVSwitch cluster every candidate is tier 3 (== the old
+// uniform "fits" tier), so downstream binpack/spread ordering is unchanged.
+func (n *NodeInfo) LinkTopologyFitness(needNumber int) int {
+	if !n.gpuTopology {
+		return 0
+	}
+	switch {
+	case n.maxNVLinkComponentSize >= needNumber:
+		return 3
+	case n.maxLinkComponentSize >= needNumber:
+		return 2
+	default:
+		return 1
+	}
 }
 
 // AreDevicesLinked reports whether every UUID in the set belongs to the same

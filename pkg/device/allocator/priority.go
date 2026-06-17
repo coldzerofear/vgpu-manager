@@ -53,16 +53,20 @@ var (
 )
 
 // ByNodeGPUTopologyFitness ranks nodes by their actual ability to satisfy a
-// link-topology group of needNumber GPUs:
+// link-topology group of needNumber GPUs, preferring the best NCCL performance:
 //
-//	fitness 2 = has topology AND max connected component >= needNumber
-//	fitness 1 = has topology BUT max component too small (will fall back)
+//	fitness 3 = fits within ONE NVLink fabric (MaxNVLinkComponentSize >= N) — best
+//	fitness 2 = fits within a P2P-reachable group but spans NVLink islands
+//	            (MaxLinkComponentSize >= N > MaxNVLinkComponentSize) — works, PCIe
+//	fitness 1 = has topology BUT can't fit even a P2P group (will fall back)
 //	fitness 0 = no topology info
 //
-// The fitness check is strictly stronger than a bare "has topology?" test:
-// a node that publishes link metadata but physically can't host the
-// requested group size ranks BELOW a node that would actually allocate
-// fine via the non-topology fallback.
+// Tiers 0/1/2 preserve the previous ordering (topology-capable nodes rank above
+// non-topology ones); tier 3 is the new finer split that pulls fully
+// NVLink-connectable nodes to the front. On a homogeneous NVSwitch cluster every
+// candidate is tier 3 (== the old "all tier 2"), so the downstream binpack/
+// spread order is unchanged; the new distinction only bites on mixed/island
+// clusters or when N exceeds a single NVLink island.
 func ByNodeGPUTopologyFitness(needNumber int) LessFunc[*device.NodeInfo] {
 	return func(p1, p2 *device.NodeInfo) bool {
 		return gpuTopologyFitness(p1, needNumber) > gpuTopologyFitness(p2, needNumber)
@@ -70,13 +74,7 @@ func ByNodeGPUTopologyFitness(needNumber int) LessFunc[*device.NodeInfo] {
 }
 
 func gpuTopologyFitness(n *device.NodeInfo, needNumber int) int {
-	if !n.HasGPUTopology() {
-		return 0
-	}
-	if n.MaxLinkComponentSize() >= needNumber {
-		return 2
-	}
-	return 1
+	return n.LinkTopologyFitness(needNumber)
 }
 
 // ByNodeNUMATopologyFitness is the NUMA-aware counterpart to

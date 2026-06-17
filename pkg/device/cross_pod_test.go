@@ -214,6 +214,39 @@ func Test_buildComponentOrdinals_UnresolvableSortsLast(t *testing.T) {
 	}
 }
 
+func Test_LinkTopologyFitness(t *testing.T) {
+	// Island node: NVLink islands of 4, whole node (P2P) of 8.
+	island := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 4, maxLinkComponentSize: 8}
+	// Full-NVSwitch node: one NVLink fabric of 8.
+	nvswitch := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 8, maxLinkComponentSize: 8}
+	noTopo := &NodeInfo{gpuTopology: false}
+
+	for _, tc := range []struct {
+		name string
+		n    *NodeInfo
+		need int
+		want int
+	}{
+		{"island fits NVLink island", island, 4, 3},
+		{"island needs 8 -> only P2P", island, 8, 2},
+		{"island needs 9 -> cannot fit", island, 9, 1},
+		{"nvswitch fits 8 NVLink", nvswitch, 8, 3},
+		{"no topology", noTopo, 4, 0},
+	} {
+		if got := tc.n.LinkTopologyFitness(tc.need); got != tc.want {
+			t.Fatalf("%s: LinkTopologyFitness(%d) = %d, want %d", tc.name, tc.need, got, tc.want)
+		}
+	}
+	// Ranking invariant: NVLink-fit (8 cards) beats P2P-only on a mixed cluster.
+	if !(nvswitch.LinkTopologyFitness(8) > island.LinkTopologyFitness(8)) {
+		t.Fatalf("NVSwitch node must rank above island node for an 8-card group")
+	}
+	// Preserved invariant: any topology-capable node beats a non-topology node.
+	if !(island.LinkTopologyFitness(4) > noTopo.LinkTopologyFitness(4)) {
+		t.Fatalf("topology node must rank above non-topology node")
+	}
+}
+
 func Test_computeLinkComponents_NVLinkVsAnyP2P(t *testing.T) {
 	// 4 GPUs: 0-1 and 2-3 are NVLinked islands, but ALL pairs are at least PCIe
 	// (cross-CPU) connected — the normal case for a multi-GPU node. The fix hinges
