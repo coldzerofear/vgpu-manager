@@ -69,7 +69,7 @@ kubectl label node gpu-node-3 topology.example.com/spine=spine-1 topology.exampl
 ### 4.2 Topology CRD(层级从粗到细;最细层 = rack,不用 hostname)
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: Topology
 metadata:
   name: gpu-topology
@@ -88,23 +88,29 @@ spec:
 
 本文按"我们做节点选择"的设计取 **rack 为最细层**。⚠️ **代价**:Kueue 只核对 rack 级总容量,不保证节点级可放(节点碎片可能使某 Pod 装不下 → Pending,参见 Kueue issue #5243)。缓解:**整卡申请**让 rack 总量÷8≈可用节点数、碎片小;或对碎片敏感的作业改用 hostname 最细层(让 Kueue 兜底精确放置,放弃我们的节点策略)。
 
-### 4.3 ResourceFlavor 绑定 Topology + 选 GPU 节点
+### 4.3 ResourceFlavor 绑定 Topology + 选 GPU 节点(含同构精确筛选)
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
   name: gpu-flavor
 spec:
   topologyName: gpu-topology               # ← 不设此字段则该 flavor 不启用 TAS
   nodeLabels:
-    node-role.kubernetes.io/gpu: "true"    # 选中 vgpu-manager 管理的 GPU 节点
+    vgpu-manager: device-plugin            # 选中 vgpu-manager GPU 节点(= device-plugin DaemonSet 的 nodeSelector)
+    # —— 同构精确筛选(让第一层筛选更准)——
+    # 跨节点 rail(ordinal)对齐假设 gang 落在 GPU↔rail 布局一致的节点;混代际还会
+    # 引发 NCCL/CUDA 版本错配。用 device-plugin 自动发布的标签把 flavor 锁到单一代际,
+    # 并按代际拆多个 flavor 在 queue 里并列。
+    # nvidia.com/node-cuda-version: "12080"
+    # nvidia.com/node-driver-version: "570.86.15"
 ```
 
 ### 4.4 ClusterQueue / LocalQueue(把 vgpu-number 纳入配额)
 
 ```yaml
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: gpu-cq
@@ -118,7 +124,7 @@ spec:
       - name: nvidia.com/vgpu-number
         nominalQuota: 64                             # 全集群 vGPU 配额
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
+apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
   name: gpu-lq
@@ -165,6 +171,24 @@ spec:
 - `podset-required-topology: <rack>` —— **硬**:必须整组同一个 rack,装不下就一直等(**不回退到 spine**),适合性能敏感、宁等勿散的训练。
 - `podset-unconstrained-topology: "true"` —— 不约束拓扑,仅看容量(最小碎片)。
 - 多 PodSet(如 LWS 的 leader+worker)要求同域:`podset-group-name`。
+
+### 4.6 仓库示例与"让第一层筛选更准"的三个抓手
+
+仓库 [`example/kueue/`](../example/kueue/) 已提供可直接套用的配置:
+
+| 文件 | 作用 |
+|---|---|
+| [`configuration.yaml`](../example/kueue/configuration.yaml) | Kueue `Configuration` 的 **resource transformation**:把 per-vGPU 的 `vgpu-cores`/`vgpu-memory` ×`vgpu-number` 折算成 `total-vgpu-cores`/`total-vgpu-memory`。**这让 Kueue 的配额/域容量计数对"分片"语义也准确**(否则按 per-vGPU 值算会偏小)。 |
+| [`sample.yaml`](../example/kueue/sample.yaml) | 基础配额示例(无 TAS):ResourceFlavor(`vgpu-manager: device-plugin`)+ ClusterQueue/LocalQueue + 一个 gpu-burn Deployment。 |
+| [`topology-aware.yaml`](../example/kueue/topology-aware.yaml) | **拓扑感知示例(本文方案)**:Topology(spine/rack)+ `topologyName` flavor + 整卡 gang Job(`preferred-topology` + `device-topology-mode: link` + `cross-pod-topology`)。 |
+
+**让 Kueue 第一层(节点)筛选更准,vgpu-manager 这边能贡献的三点**:
+
+1. **精确选中 GPU 节点**:flavor 用 `vgpu-manager: device-plugin`(device-plugin DaemonSet 的 nodeSelector)选节点——**恰好就是装了 vgpu-manager 的那批节点**,不多不少。
+2. **同构精确化(§4.3)**:device-plugin **自动**给节点打 `nvidia.com/node-driver-version`、`nvidia.com/node-cuda-version`。把它们加进 flavor 的 `nodeLabels`(或按代际拆多个 flavor),让 Kueue 只在**同构**节点里选域——既满足跨节点 rail 对齐的同构前提,又避免 NCCL/CUDA 版本错配。
+3. **容量计数准确**:`vgpu-number` 是真实 allocatable 扩展资源(Kueue 直接按域统计);`configuration.yaml` 的 transformation 让 cores/memory 维度也准确。整卡作业仅申请 `vgpu-number`,计数与实际占用一一对应。
+
+> 这三点都是"喂给 Kueue 更准的输入"(节点集、同构性、容量),Kueue 的第一层筛选随之更准;**vgpu-manager 调度器本身无需为此改代码**(标签是 device-plugin 现成发布的)。
 
 ## 5. 运行时交互时序
 
