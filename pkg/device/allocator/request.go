@@ -5,6 +5,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // AllocationRequest captures everything the allocator needs to decide a
@@ -28,6 +29,8 @@ type AllocationRequest struct {
 	// internals still need it for annotation writes (PodVGPUPreAllocAnnotation),
 	// type/UUID filter checks against pod.Annotations, and event recording.
 	Pod *corev1.Pod
+
+	ControllerOwner *metav1.OwnerReference
 
 	// Containers is the per-container vGPU need list, in declaration order
 	// from pod.Spec.Containers, filtered to vGPU-requesting containers
@@ -158,7 +161,11 @@ type ContainerNeed struct {
 // against memoryFactor stays inside allocateOne where the relevant node
 // is unambiguous.
 func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
-	req := &AllocationRequest{Pod: pod, GangLinkOrdinal: -1}
+	req := &AllocationRequest{
+		Pod:             pod,
+		ControllerOwner: metav1.GetControllerOf(pod),
+		GangLinkOrdinal: -1,
+	}
 
 	// Aggregate demand bucketed by lifecycle group so Total reflects the
 	// pod's PEAK concurrent demand (not a naive sum across non-overlapping

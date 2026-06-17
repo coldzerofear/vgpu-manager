@@ -212,11 +212,21 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 	})
 	parallel.WaitDone()
 
-	if req.CrossPodTopology && req.GangName != "" && topologyEnabled {
-		gangPods, err := p.podLister.ListByIndexValue(filter.IndexerKeyPodGangName, req.GangName)
-		if err != nil {
-			klog.ErrorS(err, "PodLister list gang pods failed", "gangName", req.GangName)
-			return passthrough(args)
+	if req.CrossPodTopology && topologyEnabled && (req.GangName != "" || req.ControllerOwner != nil) {
+		var gangPods []*corev1.Pod
+		switch {
+		case req.GangName != "":
+			gangPods, err = p.podLister.ListByIndexValue(filter.IndexerKeyPodGangName, req.GangName)
+			if err != nil {
+				klog.ErrorS(err, "PodLister list same gang pods failed", "gangName", req.GangName)
+				return passthrough(args)
+			}
+		case req.ControllerOwner != nil:
+			gangPods, err = p.podLister.ListByIndexValue(filter.IndexerKeyControlOwnerUID, string(req.ControllerOwner.UID))
+			if err != nil {
+				klog.ErrorS(err, "PodLister list same controller owner reference pods failed", "controllerOwner", *req.ControllerOwner)
+				return passthrough(args)
+			}
 		}
 		if ordinal, ok := filter.FindGangSiblingLinkOrdinal(gangPods, nodeInfoByName, p.nodeLister, req); ok {
 			req.GangLinkOrdinal = ordinal

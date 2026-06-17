@@ -19,6 +19,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -41,9 +42,10 @@ type gpuFilter struct {
 }
 
 const (
-	Name                     = "FilterPredicate"
-	IndexerKeyPodRequestVGPU = "pod.requestVGPU"
-	IndexerKeyPodGangName    = "pod.gangName"
+	Name                      = "FilterPredicate"
+	IndexerKeyPodRequestVGPU  = "pod.requestVGPU"
+	IndexerKeyPodGangName     = "pod.gangName"
+	IndexerKeyControlOwnerUID = "pod.controllerOwner.UID"
 
 	// aggregateBucketNodeLimit caps how many node names appear inside
 	// each "(...)" clause of the FilteringFailed aggregate event message.
@@ -68,6 +70,15 @@ var (
 			if pod, ok := obj.(*corev1.Pod); ok {
 				if name, ok := util.PodHasGangName(pod); ok {
 					indexerValue = []string{name}
+				}
+			}
+			return indexerValue, nil
+		},
+		IndexerKeyControlOwnerUID: func(obj interface{}) ([]string, error) {
+			var indexerValue []string
+			if pod, ok := obj.(*corev1.Pod); ok {
+				if owner := metav1.GetControllerOfNoCopy(pod); owner != nil {
+					indexerValue = []string{string(owner.UID)}
 				}
 			}
 			return indexerValue, nil
@@ -577,7 +588,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	// nodeInfoByName is consumed only by the cross-pod gang ordinal lookup below.
 	// Build and populate it solely when that path will run so the common
 	// (non-gang / non-cross-pod) scheduling pays nothing for it.
-	needGangOrdinal := req.CrossPodTopology && req.GangName != "" && topologyEnabled
+	needGangOrdinal := req.CrossPodTopology && topologyEnabled && (req.GangName != "" || req.ControllerOwner != nil)
 
 	var (
 		mutex                = sync.Mutex{}
@@ -750,10 +761,20 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	// (the common case under Kueue rack-pinning). Reuses nodePodsMap + nodeInfoList
 	// (no extra List / NodeInfo build). Gang-only; others skip it.
 	if needGangOrdinal {
-		gangPods, err := f.podLister.ListByIndexValue(IndexerKeyPodGangName, req.GangName)
-		if err != nil {
-			klog.ErrorS(err, "PodLister list gang pods failed", "gangName", req.GangName)
-			return filteredNodes, failed, err
+		var gangPods []*corev1.Pod
+		switch {
+		case req.GangName != "":
+			gangPods, err = f.podLister.ListByIndexValue(IndexerKeyPodGangName, req.GangName)
+			if err != nil {
+				klog.ErrorS(err, "PodLister list same gang pods failed", "gangName", req.GangName)
+				return filteredNodes, failed, err
+			}
+		case req.ControllerOwner != nil:
+			gangPods, err = f.podLister.ListByIndexValue(IndexerKeyControlOwnerUID, string(req.ControllerOwner.UID))
+			if err != nil {
+				klog.ErrorS(err, "PodLister list same controller owner reference pods failed", "controllerOwner", *req.ControllerOwner)
+				return filteredNodes, failed, err
+			}
 		}
 		if ordinal, ok := FindGangSiblingLinkOrdinal(gangPods, nodeInfoByName, f.nodeLister, req); ok {
 			req.GangLinkOrdinal = ordinal

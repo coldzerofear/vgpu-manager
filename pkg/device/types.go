@@ -917,6 +917,7 @@ func computeLinkComponents(devices gpuallocator.DeviceList, isEdge func([]gpuall
 			rank[ra]++
 		}
 	}
+	counts := make(map[int]int, n)
 	for i, d := range devices {
 		if d == nil {
 			continue
@@ -929,12 +930,6 @@ func computeLinkComponents(devices gpuallocator.DeviceList, isEdge func([]gpuall
 				continue
 			}
 			union(i, j)
-		}
-	}
-	counts := make(map[int]int, n)
-	for i, d := range devices {
-		if d == nil {
-			continue
 		}
 		root := find(i)
 		counts[root]++
@@ -1750,7 +1745,7 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string {
 // cross-node ordinal on this node, or (-1, false) when this node has no such
 // ordinal (e.g. fewer NVLink sub-domains than the requested ordinal).
 func (n *NodeInfo) ComponentByOrdinal(ordinal int) (int, bool) {
-	if ordinal < 0 {
+	if ordinal < 0 || len(n.nvlinkRootByOrdinal) == 0 {
 		return -1, false
 	}
 	root, ok := n.nvlinkRootByOrdinal[ordinal]
