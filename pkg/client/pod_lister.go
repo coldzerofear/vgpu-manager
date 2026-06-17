@@ -66,7 +66,7 @@ func (s *podLister) NodeMapByIndexValue(indexName, indexedValue string) (map[str
 	if err != nil {
 		return nil, err
 	}
-	nodePodsMap := make(map[string][]*corev1.Pod, len(objs))
+	nodePodsMap := make(map[string][]*corev1.Pod)
 	for _, obj := range objs {
 		if pod, ok := obj.(*corev1.Pod); ok {
 			nodeName := util.PodPlanSchedulingNode(pod)
