@@ -859,7 +859,14 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 // anyLinkEdge treats any P2P link entry (PCIe-cross-CPU included) as an edge —
 // the coarse "are these GPUs reachable at all" relation used for the strict-link
 // reachability check (AreDevicesLinked) and node fitness (MaxLinkComponentSize).
-func anyLinkEdge(ls []gpuallocator.P2PLink) bool { return len(ls) > 0 }
+func anyLinkEdge(ls []gpuallocator.P2PLink) bool {
+	for _, l := range ls {
+		if l.Type > links.P2PLinkUnknown {
+			return true
+		}
+	}
+	return false
+}
 
 // nvlinkEdge treats only NVLink links (>= SingleNVLINKLink) as an edge, so the
 // resulting components are the NVLink fabrics (NVSwitch domain / NVLink island)
@@ -917,7 +924,6 @@ func computeLinkComponents(devices gpuallocator.DeviceList, isEdge func([]gpuall
 			rank[ra]++
 		}
 	}
-	counts := make(map[int]int, n)
 	for i, d := range devices {
 		if d == nil {
 			continue
@@ -930,6 +936,12 @@ func computeLinkComponents(devices gpuallocator.DeviceList, isEdge func([]gpuall
 				continue
 			}
 			union(i, j)
+		}
+	}
+	counts := make(map[int]int, n)
+	for i, d := range devices {
+		if d == nil {
+			continue
 		}
 		root := find(i)
 		counts[root]++
@@ -1693,10 +1705,9 @@ func (n *NodeInfo) MaxNVLinkComponentSize() int {
 // front. On a homogeneous NVSwitch cluster every candidate is tier 3 (== the old
 // uniform "fits" tier), so downstream binpack/spread ordering is unchanged.
 func (n *NodeInfo) LinkTopologyFitness(needNumber int) int {
-	if !n.gpuTopology {
-		return 0
-	}
 	switch {
+	case !n.gpuTopology:
+		return 0
 	case n.maxNVLinkComponentSize >= needNumber:
 		return 3
 	case n.maxLinkComponentSize >= needNumber:

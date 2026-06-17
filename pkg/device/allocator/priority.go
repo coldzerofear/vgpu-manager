@@ -88,13 +88,14 @@ func ByNodeNUMATopologyFitness(needNumber int) LessFunc[*device.NodeInfo] {
 }
 
 func numaTopologyFitness(n *device.NodeInfo, needNumber int) int {
-	if !n.HasNUMATopology() {
+	switch {
+	case !n.HasNUMATopology():
 		return 0
-	}
-	if n.MaxNUMAGroupSize() >= needNumber {
+	case n.MaxNUMAGroupSize() >= needNumber:
 		return 2
+	default:
+		return 1
 	}
-	return 1
 }
 
 type sortPriority[T any] struct {
