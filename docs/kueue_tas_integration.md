@@ -228,7 +228,7 @@ Kueue 的统计是**节点级、按 vgpu-number 整数**,它**看不到节点内
 
 ### 7.2 跨节点子域对齐(rail 对齐)——子卡分配场景的解法
 
-> **状态(2026-06-16):已实现**(提交 `6462ae6`)。由 per-pod 注解 `nvidia.com/cross-pod-topology: "true"` + `device-topology-mode: link` 开启;**未引入任何新注解**——直接反查兄弟现有 `PodVGPUPreAllocAnnotation` 里已编码的 device id。
+> **状态(2026-06-16):已实现**(提交 `6462ae6`,`0fedd19` 改用 UUID 解析)。由 per-pod 注解 `nvidia.com/cross-pod-topology: "true"` + `device-topology-mode: link` 开启;**未引入任何新注解**——用兄弟现有 `PodVGPUPreAllocAnnotation` 里的 **UUID**(稳定身份,非可能过时的 device id)在兄弟所在节点解析其 ordinal。
 
 **这是和 §7.1 不同的、更精细的问题。** §7.1 是"装不下"(节点 8 卡分两域,Pod 要 8 连通卡 → 拒绝);本节是"**装得下、但选错域**":
 
@@ -242,11 +242,11 @@ Kueue 的统计是**节点级、按 vgpu-number 整数**,它**看不到节点内
 
 1. **稳定域序号(NodeInfo)**:给每个 NVLink 连通分量一个**确定性序号**——按"分量内最小 `Device.Index`"排序,含 GPU index 0 的分量 = ordinal 0,依此类推。复用现成的 `componentToUUIDs` + `Device.Index`(已确认存在),**无需新数据**。在**同构节点**(同型号、同 GPU↔rail 物理布局)上,ordinal-k 在每台节点都指向**同一条 rail**。
 
-2. **反查兄弟 ordinal(无新注解)**:兄弟的 `PodVGPUPreAllocAnnotation` 编码为 `id_uuid_cores_memory`,**已包含它所选卡的 `Device.Index`**。`PodPreAllocatedDeviceIDs` 取出这些 id,经本节点 `ordinalByDeviceID` 反查 ordinal——**在同构假设下**(异构甩给 Kueue),本节点的 index→ordinal 映射可解释任何兄弟的 device id。**因此无需写/读任何新注解**(回应"能少维护一个注解最好");后续兄弟也无需重建别人节点的拓扑。
+2. **用 UUID 反查兄弟 ordinal(无新注解、严谨)**:`PodVGPUPreAllocAnnotation` 编码 `id_uuid_cores_memory`,里面的 `id`(`Device.Index`)可能因驱动重载/枚举变化而过时,**UUID 才是稳定身份**。`PodPreAllocatedUUIDs` 取出并**去重**(多容器可共卡 → UUID 会重复),再用 `OrdinalOfUUIDs` 解析 ordinal。但跨节点兄弟的 UUID **只在它自己那台节点有效**(当前候选节点的 `deviceIndexMap` 里没有它),所以必须在**兄弟所在节点的 NodeInfo** 上解析(`linkComponentByUUID`→`componentOrdinal`,多数派)。**因此无需写/读任何新注解**;ordinal 是跨节点稳定抽象。
 
-3. **跨节点 anchor 解析**:
-   - `filter`(`findGangSiblingDeviceIDs`):**复用已构建的 `nodePodsMap`**(全节点桶,**不额外 List**)找任一同 gang 已分配兄弟 → 取其 device id → 装入 `req.GangSiblingDeviceIDs`(节点无关,设一次)。
-   - `allocateLink` 解析优先级:**同节点** anchor(`GangAnchorComponent`,连通是硬约束)> **跨节点** `AlignedComponentRoot(req.GangSiblingDeviceIDs)`(把兄弟 id 映射为 ordinal 多数派 → 本节点同 ordinal 分量)> **首 Pod** 不约束(走现有最优选择)。
+3. **跨节点 anchor 解析(携带通用值、消费时节点特化)**:
+   - `filter`(`findGangSiblingLinkOrdinal`):在 `nodeInfoList` 就绪后,**复用 `nodePodsMap`**(全节点桶,**不额外 List**)找同 gang 已分配兄弟,用其**所在候选节点**的 NodeInfo 解析出 ordinal → 写入**单个**节点无关值 `req.GangLinkOrdinal`(默认 -1)。兄弟节点非本轮候选则跳过(best-effort,对齐是优化不是正确性闸门)。
+   - `allocateLink` 解析优先级:**同节点** anchor(`GangAnchorComponent`,UUID,连通是硬约束)> **跨节点** `ComponentByOrdinal(req.GangLinkOrdinal)`(各节点把同一 ordinal 映射到**自己的** root)> **首 Pod** 不约束(走现有最优选择)。
    - **首 Pod**:无兄弟 → 现有 allocateLink 选最优集,其分量 ordinal 自然成为全组目标(后续兄弟反查它的预分配 id 即可对齐),无需显式记录。
 
 **正确性条件与边界**:
@@ -256,7 +256,7 @@ Kueue 的统计是**节点级、按 vgpu-number 整数**,它**看不到节点内
 - **best-effort / strict**:目标 ordinal 的分量空闲卡不足时,非 strict 降级到其它域(回到次优但能跑),strict 拒绝节点。
 - **首 Pod 选域**:任意一致的 ordinal 都能对齐;若还想选**最大**域(容量),首 Pod 应挑最大分量——这点与已暂缓的 Lookahead 相关。
 
-**落地定位**:把已落地的跨 Pod anchor(阶段一)**从同节点扩展到跨节点**,复用 `nodePodsMap` + 兄弟现有预分配注解里的 device id,**不引入新注解、不额外 List、不引入 CRD**。改动:`types.go`(ordinal 构建 + `ComponentByOrdinal`/`AlignedComponentRoot`/`PodPreAllocatedDeviceIDs`)、`request.go`(`GangSiblingDeviceIDs`)、`filter_predicate.go`(`findGangSiblingDeviceIDs` ~15 行)、`allocator.go`(对齐分支)。详见 [`cross_pod_nvlink_topology_design.md`](./cross_pod_nvlink_topology_design.md) §5.5。
+**落地定位**:把已落地的跨 Pod anchor(阶段一)**从同节点扩展到跨节点**,复用 `nodePodsMap` + 兄弟现有预分配注解里的 **UUID**,**不引入新注解、不额外 List、不引入 CRD**。改动:`types.go`(ordinal 双映射 + `ComponentByOrdinal`/`OrdinalOfUUIDs`/`PodPreAllocatedUUIDs` 去重)、`request.go`(`GangLinkOrdinal`)、`filter_predicate.go`(`findGangSiblingLinkOrdinal`)、`allocator.go`(对齐分支)。详见 [`cross_pod_nvlink_topology_design.md`](./cross_pod_nvlink_topology_design.md) §5.5。
 
 **建议**:
 - 默认/常见:**整机整卡**,本节不需要任何开发。
@@ -298,7 +298,7 @@ kubectl get pod <p> -o jsonpath='{.metadata.annotations.nvidia\.com/pre-allocate
 
 1. **Kueue TAS 管跨节点 rack 域 + gang 准入;vgpu-manager extender 管节点内具体 NVLink 卡。** 二者正交,Kueue 不替换调度器,extender 原样存活。
 2. **能配合的命门已验证**:`nvidia.com/vgpu-number` 是真实 allocatable 扩展资源,Kueue 能按域统计。
-3. **常见场景(整机整卡)零额外开发**;两个边界都源于"Kueue 节点级计数看不到节点内 NVLink 域":§7.1 装不下(用整机整域 + 非 strict link + 整卡申请规避);§7.2 子卡分配时的跨节点子域对齐**已实现**(跨节点稳定 ordinal + 反查兄弟预分配 device id,无新注解、不加 CRD;同构集群可行,严格 rail 对齐由 Kueue TAS 节点级保证)。整机整卡可同时绕过这两个边界。
+3. **常见场景(整机整卡)零额外开发**;两个边界都源于"Kueue 节点级计数看不到节点内 NVLink 域":§7.1 装不下(用整机整域 + 非 strict link + 整卡申请规避);§7.2 子卡分配时的跨节点子域对齐**已实现**(跨节点稳定 ordinal,用兄弟 UUID 在其所在节点解析、去重,携带单值 ordinal、消费时各节点特化;无新注解、不加 CRD;同构集群可行,严格 rail 对齐由 Kueue TAS 节点级保证)。整机整卡可同时绕过这两个边界。
 
 ---
 

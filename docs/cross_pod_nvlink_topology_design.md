@@ -128,12 +128,12 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 **场景**:每 Pod 取节点子集(如 4/8)且节点有多个不连通 NVLink 域时,跨节点的兄弟 Pod 应落到**各节点对应的同一子域(rail)**,否则跨节点 NCCL 走错 rail 掉档。这超出同节点 anchor(union-find root 节点本地、不可跨节点比)与 Kueue(只到节点粒度)的能力,由本阶段在 extender 内解决。详细配合见 [`kueue_tas_integration.md`](./kueue_tas_integration.md) §7.2。
 
 **机制(不引入新注解)**:
-- **稳定 ordinal**:`NodeInfo` 按"分量最小 `Device.Index`"给每个连通分量赋 ordinal(`rootByOrdinal` / `ordinalByDeviceID`);同构节点 ordinal-k = 同 rail。
-- **反查兄弟 ordinal**:兄弟的 `PodVGPUPreAllocAnnotation` **已编码所选卡的 device id**;`PodPreAllocatedDeviceIDs` 取出,经本节点 `ordinalByDeviceID` 反查 ordinal(同构假设下成立;异构由 Kueue TAS 节点级保证)。**零新注解、零额外 List**。
-- **跨节点兄弟查询**:`filter` 复用已有 `nodePodsMap`(全节点桶)找同 Gang 已分配兄弟,装入 `req.GangSiblingDeviceIDs`(节点无关)。
-- **对齐**:`allocateLink` 解析优先级 = 同节点 anchor(连通硬约束)> 跨节点 `AlignedComponentRoot`(按 ordinal 对齐)> 首 Pod 不约束。
+- **稳定 ordinal**:`NodeInfo` 按"分量最小 `Device.Index`"给每个连通分量赋 ordinal(`rootByOrdinal` 与 `componentOrdinal` 两个互逆映射);同构节点 ordinal-k = 同 rail。
+- **用 UUID(非 device id)反查兄弟 ordinal**:兄弟的 `PodVGPUPreAllocAnnotation` 里 device id 可能过时,**UUID 才是稳定身份**。但跨节点兄弟的 UUID 只在它**自己那台节点**有效,所以在**兄弟所在节点的 NodeInfo** 上 `OrdinalOfUUIDs`(`PodPreAllocatedUUIDs` 去重 → `linkComponentByUUID` → `componentOrdinal`,多数派)解析出它的 ordinal。**零新注解、零额外 List**。
+- **跨节点兄弟查询**:`filter` 在 `nodeInfoList` 就绪后,复用 `nodePodsMap` 找同 Gang 已分配兄弟,用其**所在候选节点**的 NodeInfo 解析 ordinal → 写入跨节点稳定的单值 `req.GangLinkOrdinal`(节点无关,默认 -1);兄弟节点非本轮候选则跳过(best-effort)。
+- **对齐(消费端节点特化)**:`allocateLink` 解析优先级 = 同节点 anchor(UUID,连通硬约束)> 跨节点 `ComponentByOrdinal(req.GangLinkOrdinal)`(各节点把同一 ordinal 映射到**自己的** root)> 首 Pod 不约束。
 
-**落地**:`types.go`(ordinal 字段/构建/`ComponentByOrdinal`/`AlignedComponentRoot`/`PodPreAllocatedDeviceIDs`)、`request.go`(`GangSiblingDeviceIDs`)、`filter_predicate.go`(`findGangSiblingDeviceIDs`,~15 行)、`allocator.go`(对齐分支)。同 `cross-pod-topology` 注解开关;整机整卡(单分量)= ordinal 恒 0、窗口=全节点,无副作用。
+**落地**:`types.go`(ordinal 双映射/`ComponentByOrdinal`/`OrdinalOfUUIDs`/`PodPreAllocatedUUIDs` 去重)、`request.go`(`GangLinkOrdinal`)、`filter_predicate.go`(`findGangSiblingLinkOrdinal`)、`allocator.go`(对齐分支)。同 `cross-pod-topology` 注解开关;整机整卡(单分量)= ordinal 恒 0、窗口=全节点,无副作用。**去重 + UUID 身份 + 单值 ordinal** 三点见提交 `0fedd19`。
 
 ## 6. 与 Volcano #5049(反共置)正交互补
 
