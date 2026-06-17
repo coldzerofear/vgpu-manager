@@ -573,14 +573,22 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		return filteredNodes, failed, err
 	}
 
+	topologyEnabled := f.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
+	// nodeInfoByName is consumed only by the cross-pod gang ordinal lookup below.
+	// Build and populate it solely when that path will run so the common
+	// (non-gang / non-cross-pod) scheduling pays nothing for it.
+	needGangOrdinal := req.CrossPodTopology && req.GangName != "" && topologyEnabled
+
 	var (
 		mutex                = sync.Mutex{}
 		nodeInfoList         = make([]*device.NodeInfo, 0, len(nodes))
 		nodeOriginalPosition = make(map[string]int, len(nodes))
-		nodeInfoByName       = make(map[string]*device.NodeInfo, len(nodes))
+		nodeInfoByName       map[string]*device.NodeInfo
 	)
+	if needGangOrdinal {
+		nodeInfoByName = make(map[string]*device.NodeInfo, len(nodes))
+	}
 
-	topologyEnabled := f.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
 	maxGoroutines := runtime.GOMAXPROCS(0) * 2
 	batchSize := (len(nodes) + maxGoroutines - 1) / maxGoroutines
 	parallel := watcher.NewBatchParallel(len(nodes), batchSize)
@@ -717,7 +725,9 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		mutex.Lock()
 		maps.Copy(failed, batchFailed)
 		for _, nodeInfo := range batchNodeInfos {
-			nodeInfoByName[nodeInfo.GetName()] = nodeInfo
+			if needGangOrdinal {
+				nodeInfoByName[nodeInfo.GetName()] = nodeInfo
+			}
 			nodeInfoList = append(nodeInfoList, nodeInfo)
 		}
 		maps.Copy(nodeOriginalPosition, batchNodeOrigPosition)
@@ -739,7 +749,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	// annotation; we only need the sibling's node to be among the built candidates
 	// (the common case under Kueue rack-pinning). Reuses nodePodsMap + nodeInfoList
 	// (no extra List / NodeInfo build). Gang-only; others skip it.
-	if req.CrossPodTopology && req.GangName != "" && topologyEnabled {
+	if needGangOrdinal {
 		gangPods, err := f.podLister.ListByIndexValue(IndexerKeyPodGangName, req.GangName)
 		if err != nil {
 			klog.ErrorS(err, "PodLister list gang pods failed", "gangName", req.GangName)
