@@ -356,18 +356,18 @@ func (alloc *allocator) sortDeviceStore(req *AllocationRequest, deviceStore []*d
 	pod := req.Pod
 	switch req.DevicePolicy {
 	case util.BinpackPolicy:
-		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
+		klog.V(4).Infof("Pod <%s> use <%s> device scheduling policy", klog.KObj(pod), req.DevicePolicy)
 		NewDeviceBinpackPriority().Sort(deviceStore)
 	case util.SpreadPolicy:
-		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
+		klog.V(4).Infof("Pod <%s> use <%s> device scheduling policy", klog.KObj(pod), req.DevicePolicy)
 		NewDeviceSpreadPriority().Sort(deviceStore)
 	default:
 		if req.rawDevicePolicy != "" && req.rawDevicePolicy != string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s", pod.Namespace, pod.Name, req.rawDevicePolicy)
+			klog.V(4).Infof("Pod <%s> not supported device scheduling policy: %q", klog.KObj(pod), req.rawDevicePolicy)
 			alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
 				"unsupported device scheduling policy %q", req.rawDevicePolicy)
 		} else {
-			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
+			klog.V(4).Infof("Pod <%s> none device scheduling policy", klog.KObj(pod))
 		}
 		NewSortPriority(ByNuma, ByDeviceIdAsc).Sort(deviceStore)
 	}
@@ -422,29 +422,33 @@ func (alloc *allocator) allocateByTopologyMode(
 				anchorRoot = root
 			}
 		}
-		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v, anchorComponent=%d)", pod.Namespace, pod.Name, strict, anchorRoot)
+		klog.V(4).Infof("Pod <%s> use Links topology mode (strict=%v, anchorComponent=%d)", klog.KObj(pod), strict, anchorRoot)
 		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, req.DevicePolicy, strict, anchorRoot, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if rsn := alloc.handleTopologyFallback(pod, strict,
-			reason.LinkTopologyUnsatisfied, "Link topology", "non-topology allocation",
+		if rsn := alloc.handleTopologyFallback(
+			pod, strict,
+			reason.LinkTopologyUnsatisfied,
+			"Link topology", "non-topology allocation",
 			alloc.linkFallbackReason(needNumber)); rsn != nil {
 			return nil, rsn
 		}
 	case util.NUMATopology:
-		klog.V(4).Infof("Pod <%s/%s> use NUMA topology mode (strict=%v)", pod.Namespace, pod.Name, strict)
+		klog.V(4).Infof("Pod <%s> use NUMA topology mode (strict=%v)", klog.KObj(pod), strict)
 		if claims, ok := alloc.allocateNUMA(deviceStore, req.Profile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if rsn := alloc.handleTopologyFallback(pod, strict,
-			reason.NUMATopologyUnsatisfied, "NUMA topology", "cross-NUMA allocation",
+		if rsn := alloc.handleTopologyFallback(
+			pod, strict,
+			reason.NUMATopologyUnsatisfied,
+			"NUMA topology", "cross-NUMA allocation",
 			alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
 			return nil, rsn
 		}
 	case util.NoneTopology, "":
-		klog.V(4).Infof("Pod <%s/%s> none topology mode", pod.Namespace, pod.Name)
+		klog.V(4).Infof("Pod <%s> none topology mode", klog.KObj(pod))
 	default:
-		klog.V(4).Infof("Pod <%s/%s> not supported topology mode: %s", pod.Namespace, pod.Name, req.Topology)
+		klog.V(4).Infof("Pod <%s> not supported topology mode: %q", klog.KObj(pod), req.Topology)
 		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
 			"unsupported device topology mode %q", req.Topology)
 	}
