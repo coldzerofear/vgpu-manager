@@ -208,7 +208,7 @@ func Test_GangAnchorComponent_TieBreakByOrdinal(t *testing.T) {
 
 func Test_GangAnchorComponent_UnknownUUIDIgnored(t *testing.T) {
 	// A sibling pre-allocated a card the node doesn't know about (UUID not in
-	// linkComponentByUUID) contributes no vote and must not anchor.
+	// nvlinkComponentByUUID) contributes no vote and must not anchor.
 	n := twoComponentNode(gangPod("sib", "gangA", "node1", claimText("ghost")))
 	if root, ok := n.GangAnchorComponent("gangA", nil, sets.New(types.UID("self"))); ok || root != -1 {
 		t.Fatalf("unknown-uuid sibling: got (%d, %v), want (-1, false)", root, ok)
@@ -271,10 +271,19 @@ func Test_buildComponentOrdinals_UnresolvableSortsLast(t *testing.T) {
 }
 
 func Test_LinkTopologyFitness(t *testing.T) {
-	// Island node: NVLink islands of 4, whole node (P2P) of 8.
-	island := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 4, maxLinkComponentSize: 8}
+	// Island node: NVLink islands of 4; the two islands are only cross-CPU
+	// reachable, so the node fits 8 GPUs at the any-P2P tier only.
+	island := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 4,
+		maxSwitchComponentSize: 4, maxNUMAComponentSize: 4, maxLinkComponentSize: 8}
+	// Same islands, but bridged within one NUMA node (HostBridge) → NUMA tier of 8.
+	numaIsland := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 4,
+		maxSwitchComponentSize: 4, maxNUMAComponentSize: 8, maxLinkComponentSize: 8}
+	// Same islands, but bridged across PCIe switches → switch tier of 8.
+	switchIsland := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 4,
+		maxSwitchComponentSize: 8, maxNUMAComponentSize: 8, maxLinkComponentSize: 8}
 	// Full-NVSwitch node: one NVLink fabric of 8.
-	nvswitch := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 8, maxLinkComponentSize: 8}
+	nvswitch := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 8,
+		maxSwitchComponentSize: 8, maxNUMAComponentSize: 8, maxLinkComponentSize: 8}
 	noTopo := &NodeInfo{gpuTopology: false}
 
 	for _, tc := range []struct {
@@ -283,19 +292,23 @@ func Test_LinkTopologyFitness(t *testing.T) {
 		need int
 		want int
 	}{
-		{"island fits NVLink island", island, 4, 3},
-		{"island needs 8 -> only P2P", island, 8, 2},
+		{"island fits NVLink island", island, 4, 5},
+		{"island needs 8 -> cross-CPU only", island, 8, 2},
 		{"island needs 9 -> cannot fit", island, 9, 1},
-		{"nvswitch fits 8 NVLink", nvswitch, 8, 3},
+		{"numaIsland needs 8 -> NUMA tier", numaIsland, 8, 3},
+		{"switchIsland needs 8 -> switch tier", switchIsland, 8, 4},
+		{"nvswitch fits 8 NVLink", nvswitch, 8, 5},
 		{"no topology", noTopo, 4, 0},
 	} {
 		if got := tc.n.LinkTopologyFitness(tc.need); got != tc.want {
 			t.Fatalf("%s: LinkTopologyFitness(%d) = %d, want %d", tc.name, tc.need, got, tc.want)
 		}
 	}
-	// Ranking invariant: NVLink-fit (8 cards) beats P2P-only on a mixed cluster.
-	if !(nvswitch.LinkTopologyFitness(8) > island.LinkTopologyFitness(8)) {
-		t.Fatalf("NVSwitch node must rank above island node for an 8-card group")
+	// Gradient invariant for an 8-card group: NVLink > switch > NUMA > cross-CPU.
+	if !(nvswitch.LinkTopologyFitness(8) > switchIsland.LinkTopologyFitness(8) &&
+		switchIsland.LinkTopologyFitness(8) > numaIsland.LinkTopologyFitness(8) &&
+		numaIsland.LinkTopologyFitness(8) > island.LinkTopologyFitness(8)) {
+		t.Fatalf("fitness must strictly decrease NVLink > switch > NUMA > cross-CPU")
 	}
 	// Preserved invariant: any topology-capable node beats a non-topology node.
 	if !(island.LinkTopologyFitness(4) > noTopo.LinkTopologyFitness(4)) {
@@ -303,41 +316,33 @@ func Test_LinkTopologyFitness(t *testing.T) {
 	}
 }
 
-func Test_computeLinkComponents_NVLinkVsAnyP2P(t *testing.T) {
-	// 4 GPUs: 0-1 and 2-3 are NVLinked islands, but ALL pairs are at least PCIe
-	// (cross-CPU) connected — the normal case for a multi-GPU node. The fix hinges
-	// on these two views differing.
+func Test_computeTieredComponents(t *testing.T) {
+	// 4 GPUs with deliberately distinct tier links so every tier differs:
+	//   0-1 NVLink(7), 1-2 HostBridge(3), 2-3 CrossCPU(1).
+	// NVLink island {0,1}; NUMA adds 2 via host bridge; any adds 3 via cross-CPU.
 	dl := make(gpuallocator.DeviceList, 4)
 	for i := 0; i < 4; i++ {
 		dl[i] = gpuallocator.NewDevice(i, fmt.Sprintf("gpu%d", i), "")
 	}
-	for i := 0; i < 4; i++ {
-		for j := 0; j < 4; j++ {
-			if i != j {
-				dl.AddLink(i, j, links.P2PLinkCrossCPU) // PCIe between every pair
-			}
-		}
+	addBoth := func(a, b int, t links.P2PLinkType) {
+		dl.AddLink(a, b, t)
+		dl.AddLink(b, a, t)
 	}
-	dl.AddLink(0, 1, links.SingleNVLINKLink)
-	dl.AddLink(1, 0, links.SingleNVLINKLink)
-	dl.AddLink(2, 3, links.SingleNVLINKLink)
-	dl.AddLink(3, 2, links.SingleNVLINKLink)
+	addBoth(0, 1, links.SingleNVLINKLink)
+	addBoth(1, 2, links.P2PLinkHostBridge)
+	addBoth(2, 3, links.P2PLinkCrossCPU)
 
-	// any-P2P: the whole node is ONE reachability component (PCIe connects all).
-	maxAny, byAny := computeLinkComponents(dl, anyLinkEdge)
-	if maxAny != 4 || byAny["gpu0"] != byAny["gpu3"] {
-		t.Fatalf("anyP2P: max=%d, want one component of 4 connecting all GPUs", maxAny)
+	byNV, maxNV, maxSw, maxNUMA, maxAny := computeTieredComponents(dl)
+	if maxNV != 2 || maxSw != 2 || maxNUMA != 3 || maxAny != 4 {
+		t.Fatalf("sizes = NVLink %d, switch %d, NUMA %d, any %d; want 2,2,3,4",
+			maxNV, maxSw, maxNUMA, maxAny)
 	}
-	// NVLink-only: two islands {0,1} and {2,3} — what cross-pod affinity needs.
-	maxNV, byNV := computeLinkComponents(dl, nvlinkEdge)
-	if maxNV != 2 {
-		t.Fatalf("nvlink: max=%d, want islands of size 2", maxNV)
+	// NVLink map: gpu0/gpu1 share the island; gpu2/gpu3 are their own singletons.
+	if byNV["gpu0"] != byNV["gpu1"] {
+		t.Fatalf("nvlink: gpu0/gpu1 must share an island")
 	}
-	if byNV["gpu0"] != byNV["gpu1"] || byNV["gpu2"] != byNV["gpu3"] {
-		t.Fatalf("nvlink: gpu0/1 and gpu2/3 must each share an island")
-	}
-	if byNV["gpu0"] == byNV["gpu2"] {
-		t.Fatalf("nvlink: gpu0 and gpu2 must be in DIFFERENT islands")
+	if byNV["gpu0"] == byNV["gpu2"] || byNV["gpu2"] == byNV["gpu3"] {
+		t.Fatalf("nvlink: gpu2 and gpu3 must each be their own singleton")
 	}
 }
 

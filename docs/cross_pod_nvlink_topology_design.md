@@ -180,6 +180,18 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 - 跨节点 NVLink(NVLink 不跨主机;GB200 IMEX 例外,走 DRA 路线,见 multinode 文档 §7)。
 - DRA 模式下的等价能力:DRA 设备分配是声明式 ResourceClaim,跨 Pod 拓扑需在 claim 级别做,独立 follow-up。
 
+## 9.5 多级 fitness + strict 改用 NVLink(2026-06-18)
+
+**动机**:节点级 fitness 此前只分 NVLink(any-P2P=tier 2)两档;而 `anyLinkEdge`(任意 P2P,含 CrossCPU)过宽——正常节点恒为一个可达分量,tier 2 几乎对所有拓扑节点恒真,选不出"性能更好的节点"。直接把 `anyLinkEdge` 抬到 `>SameCPU` 是钝刀:会把"跨 CPU 能跑"误判成"装不下"(丢梯度)、且和 strict 判定耦合。
+
+**落地**:
+
+1. **`computeTieredComponents`(替代两次 `computeLinkComponents`)**:一次 union-find,边集合一次、按 tightest→loosest 4 档(NVLink≥7 / Switch≥MultiSwitch4 / NUMA≥SameCPU2 / Any≥CrossCPU1)增量 union,各档快照 `maxSize`,NVLink 档额外快照 per-UUID 根。组件天然嵌套(NVLink⊆Switch⊆NUMA⊆Any),重加更松的边是 O(1) no-op,**开销低于原先的两次 union-find**。
+2. **`LinkTopologyFitness` 5 级**:NVLink(5)>Switch(4)>NUMA(3)>跨CPU(2)>有拓扑装不下(1)>无拓扑(0)。给出性能梯度,又保留"跨 CPU 仍可用(tier 2)"而非误判装不下。同构 NVSwitch 集群全 tier 5 → 下游 binpack/spread 顺序不变,**零行为变化**。
+3. **`AreDevicesLinked` 改用 `nvlinkComponentByUUID`(NVLink 分量)**:strict-link 语义从"任意可达"收紧为"必须 NVLink 连通"。后果:纯 PCIe(无 NVLink)节点上 link-strict 一律拒(每卡自成 NVLink 单点),2×4 岛节点上 N>4 的 link-strict 拒(跨岛);非 strict link 仍回退分配。`linkComponentByUUID`(any-P2P 映射)已无消费方,删除。
+
+> 设备级"选哪几张卡"早有完整 PCIe 梯度(`calculateGPUPairScore`:CrossCPU 10→SameBoard 60→NVLink 100+),本次补的是**节点级选择**这一层。
+
 ## 10. 一句话总结
 
 > 借助 NodeInfo 已持有连通分量地图、并(补一行后)持有本节点同 Gang 兄弟,**anchor 可在 allocateLink 内自解析、filter 零改动**;strict/回退/greedy/TopK 已落地可直接复用。阶段一 ~120 LOC、默认关、对非 Gang 与整机整卡形态零影响,即可让"同 Gang 多 Pod 共节点"收敛到同一 NVLink 分量。
