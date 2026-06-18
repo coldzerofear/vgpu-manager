@@ -1853,10 +1853,19 @@ func (n *NodeInfo) GangAnchorComponent(gangName string, owner *v1.OwnerReference
 	if len(votes) == 0 {
 		return -1, false
 	}
-	bestRoot, bestVotes := -1, 0
+	// Majority component wins. On a tie (degraded: siblings split across multiple
+	// NVLink components) break by the lower cross-node ORDINAL rather than the
+	// union-find root, so the choice is physically meaningful (lowest min
+	// Device.Index = "first rail") and consistent with cross-node ordinal
+	// alignment. An unknown ordinal sorts last.
+	bestRoot, bestVotes, bestOrd := -1, 0, math.MaxInt
 	for root, v := range votes {
-		if v > bestVotes || (v == bestVotes && (bestRoot == -1 || root < bestRoot)) {
-			bestRoot, bestVotes = root, v
+		ord, ok := n.nvlinkComponentOrdinal[root]
+		if !ok {
+			ord = math.MaxInt
+		}
+		if v > bestVotes || (v == bestVotes && ord < bestOrd) {
+			bestRoot, bestVotes, bestOrd = root, v, ord
 		}
 	}
 	if len(votes) > 1 && gangName != "" {

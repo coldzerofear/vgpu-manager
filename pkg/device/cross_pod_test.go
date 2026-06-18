@@ -186,6 +186,26 @@ func Test_GangAnchorComponent_ControllerOwner(t *testing.T) {
 	}
 }
 
+func Test_GangAnchorComponent_TieBreakByOrdinal(t *testing.T) {
+	// Two NVLink components: root 5 has ordinal 0 ("first rail"), root 0 has
+	// ordinal 1. The LOWER root (0) has the HIGHER ordinal, so a root-based and an
+	// ordinal-based tie-break disagree — this asserts we use the ordinal.
+	n := &NodeInfo{
+		name:                   "node1",
+		nvlinkComponentByUUID:  map[string]int{"gpuX": 5, "gpuY": 0},
+		nvlinkComponentToUUIDs: map[int][]string{5: {"gpuX"}, 0: {"gpuY"}},
+		nvlinkComponentOrdinal: map[int]int{5: 0, 0: 1},
+		nodePods: []*corev1.Pod{
+			gangPod("sibA", "gangA", "node1", claimText("gpuX")), // 1 vote → root 5 (ord 0)
+			gangPod("sibB", "gangA", "node1", claimText("gpuY")), // 1 vote → root 0 (ord 1)
+		},
+	}
+	root, ok := n.GangAnchorComponent("gangA", nil, sets.New(types.UID("self")))
+	if !ok || root != 5 {
+		t.Fatalf("tie-break = root %d (ok=%v), want root 5 (lower ordinal), not lower root 0", root, ok)
+	}
+}
+
 func Test_GangAnchorComponent_UnknownUUIDIgnored(t *testing.T) {
 	// A sibling pre-allocated a card the node doesn't know about (UUID not in
 	// linkComponentByUUID) contributes no vote and must not anchor.
