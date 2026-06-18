@@ -150,6 +150,42 @@ func Test_GangAnchorComponent(t *testing.T) {
 	}
 }
 
+func Test_GangAnchorComponent_ControllerOwner(t *testing.T) {
+	ctrlTrue := true
+	ownerA := &metav1.OwnerReference{UID: types.UID("rsA")}
+	self := sets.New(types.UID("self"))
+	// mkPod: a pod with NO gang label but a controller owner (like a
+	// Deployment/Job replica) referencing ownerUID.
+	mkPod := func(uid, ownerUID, claim string) *corev1.Pod {
+		p := gangPod(uid, "", "node1", claim)
+		p.OwnerReferences = []metav1.OwnerReference{
+			{Kind: "ReplicaSet", Name: "rs", UID: types.UID(ownerUID), Controller: &ctrlTrue},
+		}
+		return p
+	}
+
+	// Same controller owner → anchor to the sibling's component.
+	n := twoComponentNode(mkPod("sib", "rsA", claimText("gpu2")))
+	if root, ok := n.GangAnchorComponent("", ownerA, self); !ok || root != 2 {
+		t.Fatalf("same-controller sibling: (%d,%v), want (2,true)", root, ok)
+	}
+	// Different controller owner → ignored.
+	n = twoComponentNode(mkPod("sib", "rsB", claimText("gpu2")))
+	if root, ok := n.GangAnchorComponent("", ownerA, self); ok || root != -1 {
+		t.Fatalf("different controller: (%d,%v), want (-1,false)", root, ok)
+	}
+	// No gang name AND no owner → never anchors.
+	n = twoComponentNode(mkPod("sib", "rsA", claimText("gpu2")))
+	if root, ok := n.GangAnchorComponent("", nil, self); ok || root != -1 {
+		t.Fatalf("nil owner + empty gang: (%d,%v), want (-1,false)", root, ok)
+	}
+	// gangName takes precedence over owner: a controller-only sibling (no gang
+	// label) is NOT matched when a gangName is given.
+	if root, ok := n.GangAnchorComponent("gangA", ownerA, self); ok || root != -1 {
+		t.Fatalf("gangName set, controller-only sibling: (%d,%v), want (-1,false)", root, ok)
+	}
+}
+
 func Test_GangAnchorComponent_UnknownUUIDIgnored(t *testing.T) {
 	// A sibling pre-allocated a card the node doesn't know about (UUID not in
 	// linkComponentByUUID) contributes no vote and must not anchor.

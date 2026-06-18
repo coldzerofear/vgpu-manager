@@ -265,11 +265,12 @@ func (m TopologyMode) IsStrictTopology() bool {
 // "numa vs link vs none" regardless of strictness.
 func (m TopologyMode) BaseTopology() TopologyMode {
 	switch m {
-	case NUMATopologyStrict:
+	case NUMATopology, NUMATopologyStrict:
 		return NUMATopology
-	case LinkTopologyStrict:
+	case LinkTopology, LinkTopologyStrict:
 		return LinkTopology
 	default:
+		// none + any unrecognised value collapse to none.
 		return NoneTopology
 	}
 }
