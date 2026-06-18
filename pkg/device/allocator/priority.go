@@ -53,20 +53,15 @@ var (
 )
 
 // ByNodeGPUTopologyFitness ranks nodes by their actual ability to satisfy a
-// link-topology group of needNumber GPUs, preferring the best NCCL performance:
+// link-topology group of needNumber GPUs, preferring the best NCCL performance.
+// It delegates to NodeInfo.LinkTopologyFitness, whose tiers are (high→low):
+// NVLink fabric (5) > PCIe switch fabric (4) > one NUMA (3) > cross-CPU
+// reachable (2) > has-topology-can't-fit (1) > no-topology (0).
 //
-//	fitness 3 = fits within ONE NVLink fabric (MaxNVLinkComponentSize >= N) — best
-//	fitness 2 = fits within a P2P-reachable group but spans NVLink islands
-//	            (MaxLinkComponentSize >= N > MaxNVLinkComponentSize) — works, PCIe
-//	fitness 1 = has topology BUT can't fit even a P2P group (will fall back)
-//	fitness 0 = no topology info
-//
-// Tiers 0/1/2 preserve the previous ordering (topology-capable nodes rank above
-// non-topology ones); tier 3 is the new finer split that pulls fully
-// NVLink-connectable nodes to the front. On a homogeneous NVSwitch cluster every
-// candidate is tier 3 (== the old "all tier 2"), so the downstream binpack/
-// spread order is unchanged; the new distinction only bites on mixed/island
-// clusters or when N exceeds a single NVLink island.
+// On a homogeneous NVSwitch cluster every candidate is tier 5 (== the old
+// uniform "fits" tier), so the downstream binpack/spread order is unchanged; the
+// finer tiers only bite on mixed/island clusters or when N exceeds a single
+// NVLink island, pulling tighter-coupled placements to the front.
 func ByNodeGPUTopologyFitness(needNumber int) LessFunc[*device.NodeInfo] {
 	return func(p1, p2 *device.NodeInfo) bool {
 		return gpuTopologyFitness(p1, needNumber) > gpuTopologyFitness(p2, needNumber)
