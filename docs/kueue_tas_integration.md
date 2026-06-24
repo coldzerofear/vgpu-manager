@@ -40,7 +40,7 @@ vgpu-manager(节点级策略 + extender)
   - 设备级:在该节点上选具体物理卡(节点内拓扑):
     · 单 Pod 整机多卡 → 现有单 Pod link 拓扑
     · 多 Pod 共节点   → 跨 Pod NVLink anchor(已落地,注解 nvidia.com/cross-pod-topology)
-    · 跨节点子域对齐  → 按兄弟 ordinal 对齐(已落地,§7.2)
+    · 跨节点子域对齐  → 按兄弟域签名对齐(rail-set 或 ordinal 回退,已落地,§7.2)
   - device-scheduler-policy: spread → 在连通分量内优先选空闲卡(间接反共置)
 ```
 
@@ -100,9 +100,9 @@ spec:
   nodeLabels:
     vgpu-manager: device-plugin            # 选中 vgpu-manager GPU 节点(= device-plugin DaemonSet 的 nodeSelector)
     # —— 同构精确筛选(让第一层筛选更准)——
-    # 跨节点 rail(ordinal)对齐假设 gang 落在 GPU↔rail 布局一致的节点;混代际还会
-    # 引发 NCCL/CUDA 版本错配。用 device-plugin 自动发布的标签把 flavor 锁到单一代际,
-    # 并按代际拆多个 flavor 在 queue 里并列。
+    # 跨节点对齐:同构(GPU↔rail 布局一致)走 ordinal 回退即可;异构布线需发布
+    # node-gpu-domain rail 注解(§7.2.1)。混代际还会引发 NCCL/CUDA 版本错配,
+    # 故仍建议用 device-plugin 自动发布的标签把 flavor 锁到单一代际、按代际拆多个 flavor。
     # nvidia.com/node-cuda-version: "12080"
     # nvidia.com/node-driver-version: "570.86.15"
 ```
@@ -228,7 +228,7 @@ Kueue 的统计是**节点级、按 vgpu-number 整数**,它**看不到节点内
 
 ### 7.2 跨节点子域对齐(rail 对齐)——子卡分配场景的解法
 
-> **状态(2026-06-16):已实现**(提交 `6462ae6`,`0fedd19` 改用 UUID 解析)。由 per-pod 注解 `nvidia.com/cross-pod-topology: "true"` + `device-topology-mode: link` 开启;**未引入任何新注解**——用兄弟现有 `PodVGPUPreAllocAnnotation` 里的 **UUID**(稳定身份,非可能过时的 device id)在兄弟所在节点解析其 ordinal。
+> **状态(2026-06-24):已实现并泛化为 domain key(Phase A,提交 `53e5486`)。** 由 per-pod 注解 `nvidia.com/cross-pod-topology: "true"` + `device-topology-mode: link` 开启。对齐 key 从"位置 ordinal"泛化为 **domain 签名(string)**:节点发布可选的 GPU→rail 映射(`nvidia.com/node-gpu-domain`)时按**物理 rail-set** 精确对齐(异构正确);**不发布时自动退回位置 ordinal**(同构集群行为不变)。兄弟的子域仍用其 `PodVGPUPreAllocAnnotation` 里的 **UUID** 在兄弟所在节点解析(稳定身份,非可能过时的 device id)。数据源配置见 **§7.2.1**。
 
 **这是和 §7.1 不同的、更精细的问题。** §7.1 是"装不下"(节点 8 卡分两域,Pod 要 8 连通卡 → 拒绝);本节是"**装得下、但选错域**":
 
@@ -238,30 +238,88 @@ Kueue 的统计是**节点级、按 vgpu-number 整数**,它**看不到节点内
 - **Kueue 只到节点/机架粒度**:它注入 rack(或 host)级 `NodeSelector`,**对"节点内是哪个子域"完全无感**——k8s 调度本就是节点粒度,子卡域选择天然是设备分配器(vgpu-manager)的职责。Kueue 无解。
 - **现有跨 Pod anchor 只管同节点**:[`GangAnchorComponent`](../pkg/device/types.go) 只扫**本节点** `nodePods`,返回的是 union-find 的**节点本地 root**;跨节点兄弟在别的节点,其 root 在本节点的 union-find 里**无意义**(不同节点的本地索引不可比)。
 
-**解法:把 anchor 从"同节点 root"升级为"跨节点稳定的域序号(ordinal)"。** 三个构件,均可在现有架构落地(已验证):
+**解法:把 anchor 从"同节点 root"升级为"跨节点稳定的域签名(domain key)"。** 三个构件,均已落地(Phase A 把签名从纯位置 ordinal 泛化为"有 rail 用 rail-set、无 rail 退回 ordinal"):
 
-1. **稳定域序号(NodeInfo)**:给每个 NVLink 连通分量一个**确定性序号**——按"分量内最小 `Device.Index`"排序,含 GPU index 0 的分量 = ordinal 0,依此类推。复用现成的 `componentToUUIDs` + `Device.Index`(已确认存在),**无需新数据**。在**同构节点**(同型号、同 GPU↔rail 物理布局)上,ordinal-k 在每台节点都指向**同一条 rail**。
+1. **稳定域签名(NodeInfo)**:给每个 NVLink 连通分量一个**确定性签名**。有 `node-gpu-domain`(§7.2.1)时 = `"rail:<排序 rail 集>"`(全局可比);无时 = `"ord:N"`,N 按"分量内最小 `Device.Index`"排序(含 GPU index 0 的分量 = `ord:0`)。复用现成 `componentToUUIDs` + `Device.Index`。同构节点上 `ord:k` 每台都指同一条 rail;异构需 rail 数据。
 
-2. **用 UUID 反查兄弟 ordinal(无新注解、严谨)**:`PodVGPUPreAllocAnnotation` 编码 `id_uuid_cores_memory`,里面的 `id`(`Device.Index`)可能因驱动重载/枚举变化而过时,**UUID 才是稳定身份**。`PodPreAllocatedUUIDs` 取出并**去重**(多容器可共卡 → UUID 会重复),再用 `OrdinalOfUUIDs` 解析 ordinal。但跨节点兄弟的 UUID **只在它自己那台节点有效**(当前候选节点的 `deviceIndexMap` 里没有它),所以必须在**兄弟所在节点的 NodeInfo** 上解析(`linkComponentByUUID`→`componentOrdinal`,多数派)。**因此无需写/读任何新注解**;ordinal 是跨节点稳定抽象。
+2. **用 UUID 反查兄弟域(无新 per-pod 注解、严谨)**:`PodVGPUPreAllocAnnotation` 编码 `id_uuid_cores_memory`,里面的 `id`(`Device.Index`)可能因驱动重载/枚举变化而过时,**UUID 才是稳定身份**。`PodPreAllocatedUUIDs` 取出并**去重**(多容器可共卡 → UUID 会重复),再用 `DomainOfUUIDs` 解析签名。但跨节点兄弟的 UUID **只在它自己那台节点有效**,所以必须在**兄弟所在节点的 NodeInfo** 上解析(`nvlinkComponentByUUID`→`nvlinkComponentDomain`,多数派)。
 
 3. **跨节点 anchor 解析(携带通用值、消费时节点特化)**:
-   - `filter`(`findGangSiblingLinkOrdinal`):在 `nodeInfoList` 就绪后,**复用 `nodePodsMap`**(全节点桶,**不额外 List**)找同 gang 已分配兄弟,用其**所在候选节点**的 NodeInfo 解析出 ordinal → 写入**单个**节点无关值 `req.GangLinkOrdinal`(默认 -1)。兄弟节点非本轮候选则跳过(best-effort,对齐是优化不是正确性闸门)。
-   - `allocateLink` 解析优先级:**同节点** anchor(`GangAnchorComponent`,UUID,连通是硬约束)> **跨节点** `ComponentByOrdinal(req.GangLinkOrdinal)`(各节点把同一 ordinal 映射到**自己的** root)> **首 Pod** 不约束(走现有最优选择)。
-   - **首 Pod**:无兄弟 → 现有 allocateLink 选最优集,其分量 ordinal 自然成为全组目标(后续兄弟反查它的预分配 id 即可对齐),无需显式记录。
+   - `filter`(`FindGangSiblingDomain`):在 `nodeInfoList` 就绪后,**复用 `nodePodsMap`**(全节点桶,**不额外 List**)找同 gang 已分配兄弟,用其**所在候选节点**的 NodeInfo 解析出域签名 → 写入**单个**节点无关值 `req.GangDomainKey`(默认 `""`)。兄弟节点非本轮候选则跳过(best-effort,对齐是优化不是正确性闸门)。
+   - `allocateLink` 解析优先级:**同节点** anchor(`GangAnchorComponent`,UUID,连通是硬约束)> **跨节点** `ComponentByDomain(req.GangDomainKey)`(各节点把同一签名映射到**自己的** root;签名在本节点不存在 → 无匹配,安全跳过)> **首 Pod** 不约束(走现有最优选择)。
+   - **首 Pod**:无兄弟 → 现有 allocateLink 选最优集,其分量签名自然成为全组目标(后续兄弟反查它的预分配 UUID 即可对齐),无需显式记录。
 
 **正确性条件与边界**:
-- **同构假设**:序号法"ordinal=同 rail"**仅在节点 GPU↔rail 物理布局一致时成立**(同构 DGX/HGX 集群即如此,是常态)。异构集群上 node1 的 ordinal-0 与 node2 的 ordinal-0 可能不是同一条 rail。
-- **严格 rail 对齐(需新增数据)**:要在异构上严格正确,需让 device-plugin 在 `node-device-topology` 里发布 **GPU↔NIC/rail 映射**(从 PCIe 树推导;**当前没有**,已确认)。届时域 key = 真实 rail id(全局有意义),而非位置序号。这条同时也能解锁节点内 GPU-NIC 亲和(见 multinode 文档 §6 的 L1)。
+- **同构(无 rail 数据,默认回退)**:不发布 `node-gpu-domain` 时,域签名 = 位置 `"ord:N"`,"ordinal=同 rail"**仅在节点 GPU↔rail 物理布局一致时成立**(同构 DGX/HGX 集群即如此,是常态)。异构上 node1 的 `ord:0` 与 node2 的 `ord:0` 可能不是同一条 rail。
+- **异构严格对齐(发布 rail 数据,Phase A 已支持消费)**:发布 `node-gpu-domain`(GPU→rail)后,域签名 = `"rail:<排序 rail 集>"`,**全局有意义**——同一组 rail 在任何节点产生相同签名,枚举顺序/布线差异不影响;若某节点根本没有该 rail-set,`ComponentByDomain` 返回无匹配→**安全跳过对齐(不强行错落到错误域)**。数据来源:device-plugin 自动发现(Phase B,未做)或运维/网络组件声明(§7.2.1)。
 - **整机整卡直接绕过**:每 Pod 取满 8 卡时,两条 rail 都用上,NCCL 按 GPU 各走各 rail 自动对齐,**没有子域选择问题** → 本节整套机制都不需要。**这是最强且零成本的规避**。
 - **best-effort / strict**:目标 ordinal 的分量空闲卡不足时,非 strict 降级到其它域(回到次优但能跑),strict 拒绝节点。
 - **首 Pod 选域**:任意一致的 ordinal 都能对齐;若还想选**最大**域(容量),首 Pod 应挑最大分量——这点与已暂缓的 Lookahead 相关。
 
-**落地定位**:把已落地的跨 Pod anchor(阶段一)**从同节点扩展到跨节点**,复用 `nodePodsMap` + 兄弟现有预分配注解里的 **UUID**,**不引入新注解、不额外 List、不引入 CRD**。改动:`types.go`(ordinal 双映射 + `ComponentByOrdinal`/`OrdinalOfUUIDs`/`PodPreAllocatedUUIDs` 去重)、`request.go`(`GangLinkOrdinal`)、`filter_predicate.go`(`findGangSiblingLinkOrdinal`)、`allocator.go`(对齐分支)。详见 [`cross_pod_nvlink_topology_design.md`](./cross_pod_nvlink_topology_design.md) §5.5。
+**落地定位**:跨 Pod anchor 从同节点扩展到跨节点,复用 `nodePodsMap` + 兄弟预分配注解里的 **UUID**,**不额外 List、不引入 CRD**;rail 数据走**可选** `node-gpu-domain` 节点注解(无则回退 ordinal)。改动:`types.go`(`buildComponentDomains` 出 ordinal+domain 双映射、`ComponentByDomain`/`DomainOfUUIDs`、gather 解析 rail)、`request.go`(`GangDomainKey`)、`filter_predicate.go`(`FindGangSiblingDomain`)、`allocator.go`(对齐分支)、`consts.go`(`NodeGPUDomainAnnotation`)。详见 [`cross_pod_nvlink_topology_design.md`](./cross_pod_nvlink_topology_design.md) §5.5。
 
 **建议**:
-- 默认/常见:**整机整卡**,本节不需要任何开发。
-- 确有"子卡分配 + 单节点多 NVLink 域 + 要跨节点对齐"需求:实现上面的 **ordinal-anchor 扩展(同构集群)**;严格 rail-key 版本待 GPU-NIC 拓扑发布后再做。
-- 所以对"调度器是否需要额外开发"的完整回答:**整机整卡=否;子卡多域对齐=是(一个跨节点 ordinal-anchor 扩展),但属 opt-in,非训练通用必需。**
+- 默认/常见:**整机整卡**,本节不需要任何开发,也不用配 rail。
+- 同构集群 + 子卡跨节点对齐:开 `cross-pod-topology` 即可,**走 ordinal 回退**,无需 rail 数据。
+- 异构集群 + 子卡跨节点对齐:**额外发布 `node-gpu-domain`(§7.2.1)**,按 rail-set 精确对齐。
+- 所以对"调度器是否需要额外开发"的完整回答:**整机整卡=否;子卡多域对齐=是(已落地 opt-in 的 domain-anchor);异构精确=再发布一份 rail 节点注解,无需改调度器。**
+
+### 7.2.1 数据源(source②):节点注解 `node-gpu-domain` 配置详解
+
+> 仅当你的集群是**异构布线**(各节点 GPU↔rail 物理布局不一致,例如枚举顺序反转、不同代际混布)且要做**子卡跨节点对齐**时才需要。**同构集群什么都不用配**,调度器自动用位置 ordinal。
+
+**注解键**:`nvidia.com/node-gpu-domain`(`util.NodeGPUDomainAnnotation`),打在 **Node 对象**上。
+
+**取值**:一个 JSON 对象,把**本节点每张 GPU 的 UUID** 映射到一个 **rail key 字符串**:
+
+```json
+{
+  "GPU-3a1b...": "rail-0",
+  "GPU-7c2d...": "rail-1",
+  "GPU-9e4f...": "rail-2",
+  "GPU-5b8a...": "rail-3",
+  "GPU-1f6c...": "rail-4",
+  "GPU-2d9e...": "rail-5",
+  "GPU-8a3b...": "rail-6",
+  "GPU-4c7d...": "rail-7"
+}
+```
+
+设置示例:
+```bash
+kubectl annotate node <node> \
+  'nvidia.com/node-gpu-domain={"GPU-3a1b...":"rail-0","GPU-7c2d...":"rail-1", ... }'
+```
+
+**rail key 的语义(最关键)**:它必须是**全局可比的物理子域标识**——
+
+- **跨节点一致性是唯一要求**:连到**同一条物理 rail / 同一个 leaf 交换机**的 GPU,在**每台节点**都必须写**相同的 rail key**。`rail-0` 在 node1 和 node2 必须指同一条 rail。
+- **节点内只需区分不同 rail**:同节点不同 rail 用不同 key 即可。
+- 调度器**不解析 key 的内容**,只做字符串相等比较:一个 NVLink 岛的"域签名" = 其成员 GPU 的 rail key **排序去重后拼接**(`rail:rail-0,rail-1,rail-2,rail-3`)。两个岛"同子域" ⟺ **rail-set 签名相等**。
+
+**key 怎么取(任选其一,只要全局一致)**:
+- **leaf 交换机 GUID / 名称**:最严谨,直接用 GPU 所连 NIC 上联交换机的 GUID(`rail-<switch-guid>`)。
+- **rail 序号约定**:rail-optimized 集群通常 GPU_i→NIC_i→leaf_i,直接用 `rail-<i>`(i = 该 GPU 在 rail 平面里的序号,**按物理 rail 而非本地 GPU index**)。
+- **IB**:`<子网前缀>-<端口/LID 推导的 rail>`。
+
+**全 or 无(重要约束)**:注解必须**覆盖本节点每一张 GPU**。只要有一张 GPU 缺 rail key(或注解缺失/JSON 非法),该节点**整体回退**到位置 ordinal(`ord:N`),不会"部分 rail 部分 ordinal"——保证一个节点的所有岛在**同一基准**上比较。
+
+**生效条件**:还需 `device-topology-mode: link`(否则没有 NVLink 岛的概念)。注解在 `NewNodeInfo` 解析拓扑时一并读取(仅 `gpuTopologyEnabled` 时)。
+
+**谁来写这个注解**:
+- **运维/网络组件(现在就能用)**:同型号节点布线一致 → **按硬件 flavor 写一份 `index→rail` 映射**,用脚本/控制器展开成各节点的 `uuid→rail`(UUID 从 `node-device-register` 注解读)。也可直接消费已有 network-operator / Topograph 打的 rail 标签转译。
+- **device-plugin 自动(Phase B,未做)**:自动发现 GPU→NIC(PCIe sysfs)→ rail(IB SM / LLDP),写**同一个注解**。届时消费侧零改动。
+- **优先级**:运维声明与自动发现写同一键时以实际写入为准;如需运维覆盖自动值,可约定一个 override 注解(尚未实现,需要再加)。
+
+**验证生效**:
+```bash
+# 看注解是否在
+kubectl get node <node> -o jsonpath='{.metadata.annotations.nvidia\.com/node-gpu-domain}'
+# 调度日志(V>=4)里跨节点对齐分支会用 domain 签名;
+# 也可在 e2e 测试 Test_CrossPod_NVLink_HeterogeneousRail 看到 "rail:rA,rB,rC,rD" 形态。
+```
+
+**异构正确性回顾**(为什么 rail key 比 ordinal 强):node1 岛a 与 node2 岛b 若物理同 rail,二者 rail-set 签名相同 → 对齐到正确的岛;**位置 ordinal 会因 index 位置不同而错配**。详见 `cross_pod_nvlink_topology_design.md` §9.5/§5.5 与 `Test_CrossPod_NVLink_HeterogeneousRail`。
 
 ### 7.3 其它兼容性注意
 
@@ -298,7 +356,7 @@ kubectl get pod <p> -o jsonpath='{.metadata.annotations.nvidia\.com/pre-allocate
 
 1. **Kueue TAS 管跨节点 rack 域 + gang 准入;vgpu-manager extender 管节点内具体 NVLink 卡。** 二者正交,Kueue 不替换调度器,extender 原样存活。
 2. **能配合的命门已验证**:`nvidia.com/vgpu-number` 是真实 allocatable 扩展资源,Kueue 能按域统计。
-3. **常见场景(整机整卡)零额外开发**;两个边界都源于"Kueue 节点级计数看不到节点内 NVLink 域":§7.1 装不下(用整机整域 + 非 strict link + 整卡申请规避);§7.2 子卡分配时的跨节点子域对齐**已实现**(跨节点稳定 ordinal,用兄弟 UUID 在其所在节点解析、去重,携带单值 ordinal、消费时各节点特化;无新注解、不加 CRD;同构集群可行,严格 rail 对齐由 Kueue TAS 节点级保证)。整机整卡可同时绕过这两个边界。
+3. **常见场景(整机整卡)零额外开发**;两个边界都源于"Kueue 节点级计数看不到节点内 NVLink 域":§7.1 装不下(用整机整域 + 非 strict link + 整卡申请规避);§7.2 子卡分配时的跨节点子域对齐**已实现**(跨节点稳定**域签名**,用兄弟 UUID 在其所在节点解析、去重,携带单值、消费时各节点特化,不加 CRD;同构走 ordinal 回退、异构发布可选 `node-gpu-domain` 节点注解走 rail-set 精确对齐,见 §7.2.1)。整机整卡可同时绕过这两个边界。
 
 ---
 
