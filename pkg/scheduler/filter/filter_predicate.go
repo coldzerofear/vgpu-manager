@@ -472,10 +472,11 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 // built at most once. Returns (-1, false) when no sibling resolves (e.g. the
 // gang's first pod). Best-effort: alignment is an optimization, never a
 // correctness gate.
-func FindGangSiblingLinkOrdinal(pods []*corev1.Pod,
-	nodeInfoByName map[string]*device.NodeInfo,
-	nodeLister listerv1.NodeLister,
-	req *allocator.AllocationRequest) (int, bool) {
+func FindGangSiblingLinkOrdinal(
+	pods []*corev1.Pod, nodeInfoByName map[string]*device.NodeInfo,
+	nodeLister listerv1.NodeLister, req *allocator.AllocationRequest,
+) (int, bool) {
+
 	ordinalMap := make(map[int]int)
 	// built caches NodeInfos constructed on demand for non-candidate sibling
 	// nodes, so multiple siblings on one node trigger a single (expensive) build.
@@ -493,8 +494,10 @@ func FindGangSiblingLinkOrdinal(pods []*corev1.Pod,
 			continue
 		}
 		nodeName := util.PodPlanSchedulingNode(p)
-		nodeInfo, ok := nodeInfoByName[nodeName]
-		if !ok {
+		if nodeInfo, ok := nodeInfoByName[nodeName]; !ok {
+			if built == nil {
+				built = make(map[string]*device.NodeInfo)
+			}
 			if nodeInfo, ok = built[nodeName]; !ok {
 				node, err := nodeLister.Get(nodeName)
 				if err != nil {
@@ -504,13 +507,9 @@ func FindGangSiblingLinkOrdinal(pods []*corev1.Pod,
 				if err != nil {
 					continue
 				}
-				if built == nil {
-					built = make(map[string]*device.NodeInfo)
-				}
 				built[nodeName] = nodeInfo
 			}
-		}
-		if ordinal, ok := nodeInfo.OrdinalOfUUIDs(uuids); ok {
+		} else if ordinal, ok := nodeInfo.OrdinalOfUUIDs(uuids); ok {
 			ordinalMap[ordinal]++
 		}
 	}

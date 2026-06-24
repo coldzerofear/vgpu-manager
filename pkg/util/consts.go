@@ -269,9 +269,10 @@ func (m TopologyMode) BaseTopology() TopologyMode {
 		return NUMATopology
 	case LinkTopology, LinkTopologyStrict:
 		return LinkTopology
-	default:
-		// none + any unrecognised value collapse to none.
+	case NoneTopology, "":
 		return NoneTopology
+	default:
+		return m
 	}
 }
 

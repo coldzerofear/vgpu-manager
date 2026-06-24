@@ -429,7 +429,8 @@ func (alloc *allocator) allocateByTopologyMode(
 		if rsn := alloc.handleTopologyFallback(
 			pod, strict,
 			reason.LinkTopologyUnsatisfied,
-			"Link topology", "non-topology allocation",
+			"Link topology",
+			"non-topology allocation",
 			alloc.linkFallbackReason(needNumber)); rsn != nil {
 			return nil, rsn
 		}
@@ -441,16 +442,16 @@ func (alloc *allocator) allocateByTopologyMode(
 		if rsn := alloc.handleTopologyFallback(
 			pod, strict,
 			reason.NUMATopologyUnsatisfied,
-			"NUMA topology", "cross-NUMA allocation",
+			"NUMA topology",
+			"cross-NUMA allocation",
 			alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
 			return nil, rsn
 		}
-	case util.NoneTopology, "":
+	case util.NoneTopology:
 		klog.V(4).Infof("Pod <%s> none topology mode", klog.KObj(pod))
 	default:
 		klog.V(4).Infof("Pod <%s> not supported topology mode: %q", klog.KObj(pod), req.Topology)
-		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
-			"unsupported device topology mode %q", req.Topology)
+		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported device topology mode %q", req.Topology)
 	}
 	return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
 }

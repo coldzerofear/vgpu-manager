@@ -458,11 +458,12 @@ func Test_BaseTopology(t *testing.T) {
 	// topology scheduling while link-strict kept working).
 	cases := map[TopologyMode]TopologyMode{
 		NoneTopology:          NoneTopology,
+		"":                    NoneTopology,
 		NUMATopology:          NUMATopology,
 		NUMATopologyStrict:    NUMATopology,
 		LinkTopology:          LinkTopology,
 		LinkTopologyStrict:    LinkTopology,
-		TopologyMode("bogus"): NoneTopology, // unrecognised collapses to none
+		TopologyMode("bogus"): TopologyMode("bogus"),
 	}
 	for mode, want := range cases {
 		if got := mode.BaseTopology(); got != want {

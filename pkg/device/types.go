@@ -648,8 +648,7 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 	for _, device := range devices {
 		ret.deviceMap[device.GetID()] = device
 		ret.deviceIndexMap[device.GetUUID()] = device.GetID()
-		ret.deviceList[device.GetID()] = gpuallocator.NewDevice(
-			device.GetID(), device.GetUUID(), device.GetBusID())
+		ret.deviceList[device.GetID()] = gpuallocator.NewDevice(device.GetID(), device.GetUUID(), device.GetBusID())
 	}
 	// Recompute topology fitness for the fake NodeInfo — tests that exercise
 	// ByNodeGPUTopologyFitness etc. need these populated to make meaningful
@@ -657,7 +656,8 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 	// false, so the existing zero-value path still works for non-topology
 	// tests.
 	if ret.gpuTopology {
-		ret.nvlinkComponentByUUID, ret.maxNVLinkComponentSize, ret.maxSwitchComponentSize, ret.maxNUMAComponentSize, ret.maxLinkComponentSize = computeTieredComponents(ret.deviceList)
+		ret.nvlinkComponentByUUID, ret.maxNVLinkComponentSize, ret.maxSwitchComponentSize,
+			ret.maxNUMAComponentSize, ret.maxLinkComponentSize = computeTieredComponents(ret.deviceList)
 		ret.nvlinkComponentToUUIDs = buildComponentIndex(ret.nvlinkComponentByUUID)
 		ret.nvlinkRootByOrdinal, ret.nvlinkComponentOrdinal = buildComponentOrdinals(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap)
 	}
@@ -871,7 +871,8 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 //	NUMA    >= SameCPU            — same NUMA node
 //	Any     >= CrossCPU           — reachable at all (cross-socket included)
 func computeTieredComponents(devices gpuallocator.DeviceList) (
-	nvlinkByUUID map[string]int, maxNVLink, maxSwitch, maxNUMA, maxAny int,
+	nvlinkByUUID map[string]int,
+	maxNVLink, maxSwitch, maxNUMA, maxAny int,
 ) {
 	n := len(devices)
 	nvlinkByUUID = make(map[string]int, n)
