@@ -494,7 +494,11 @@ func FindGangSiblingLinkOrdinal(
 			continue
 		}
 		nodeName := util.PodPlanSchedulingNode(p)
-		if nodeInfo, ok := nodeInfoByName[nodeName]; !ok {
+		nodeInfo, ok := nodeInfoByName[nodeName]
+		if !ok {
+			// Sibling on a NON-candidate node (the common cross-node case): build
+			// its NodeInfo on demand and cache it. The resolved nodeInfo MUST still
+			// fall through to the vote below — that is the whole point of the build.
 			if built == nil {
 				built = make(map[string]*device.NodeInfo)
 			}
@@ -509,7 +513,8 @@ func FindGangSiblingLinkOrdinal(
 				}
 				built[nodeName] = nodeInfo
 			}
-		} else if ordinal, ok := nodeInfo.OrdinalOfUUIDs(uuids); ok {
+		}
+		if ordinal, ok := nodeInfo.OrdinalOfUUIDs(uuids); ok {
 			ordinalMap[ordinal]++
 		}
 	}
