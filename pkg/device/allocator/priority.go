@@ -12,28 +12,41 @@ import (
 type LessFunc[T any] func(p1, p2 T) bool
 
 var (
-	// ByAllocatableMemoryAsc Compare the assignable memory of two devices in ascending order
-	ByAllocatableMemoryAsc = func(p1, p2 *device.Device) bool {
-		return p1.AllocatableMemory() < p2.AllocatableMemory()
+	// ByMemoryScoreAsc Compare the memory scores of two devices in ascending order
+	ByMemoryScoreAsc = func(p1, p2 *device.Device) bool {
+		p1Score := safeDiv(float64(p1.AllocatableMemory()), float64(p1.GetTotalMemory()))
+		p2Score := safeDiv(float64(p2.AllocatableMemory()), float64(p2.GetTotalMemory()))
+		return p1Score < p2Score
 	}
-	// ByAllocatableMemoryDes Compare the assignable memory of two devices in descending order
-	ByAllocatableMemoryDes = func(p1, p2 *device.Device) bool {
-		return p1.AllocatableMemory() > p2.AllocatableMemory()
+	// ByMemoryScoreDes Compare the memory scores of two devices in descending order
+	ByMemoryScoreDes = func(p1, p2 *device.Device) bool {
+		p1Score := safeDiv(float64(p1.AllocatableMemory()), float64(p1.GetTotalMemory()))
+		p2Score := safeDiv(float64(p2.AllocatableMemory()), float64(p2.GetTotalMemory()))
+		return p1Score > p2Score
 	}
-	// ByAllocatableCoresAsc Compare the assignable cores of two devices in ascending order
-	ByAllocatableCoresAsc = func(p1, p2 *device.Device) bool {
-		return p1.AllocatableCores() < p2.AllocatableCores()
+
+	// ByCoreScoreAsc Compare the core scores of two devices in ascending order
+	ByCoreScoreAsc = func(p1, p2 *device.Device) bool {
+		p1Score := safeDiv(float64(p1.AllocatableCores()), float64(p1.GetTotalCores()))
+		p2Score := safeDiv(float64(p2.AllocatableCores()), float64(p2.GetTotalCores()))
+		return p1Score < p2Score
 	}
-	// ByAllocatableCoresDes Compare the assignable cores of two devices in descending order
-	ByAllocatableCoresDes = func(p1, p2 *device.Device) bool {
-		return p1.AllocatableCores() > p2.AllocatableCores()
+	// ByCoreScoreDes Compare the core scores of two devices in descending order
+	ByCoreScoreDes = func(p1, p2 *device.Device) bool {
+		p1Score := safeDiv(float64(p1.AllocatableCores()), float64(p1.GetTotalCores()))
+		p2Score := safeDiv(float64(p2.AllocatableCores()), float64(p2.GetTotalCores()))
+		return p1Score > p2Score
+	}
+
+	// ByNumberScoreDes Compare the number scores of two devices in descending order
+	ByNumberScoreDes = func(p1, p2 *device.Device) bool {
+		p1Score := safeDiv(float64(p1.AllocatableNumber()), float64(p1.GetTotalNumber()))
+		p2Score := safeDiv(float64(p2.AllocatableNumber()), float64(p2.GetTotalNumber()))
+		return p1Score > p2Score
 	}
 	// ByDeviceIdAsc Compare the device id of two devices in ascending order
 	ByDeviceIdAsc = func(p1, p2 *device.Device) bool {
 		return p1.GetID() < p2.GetID()
-	}
-	ByAllocatableNumberDes = func(p1, p2 *device.Device) bool {
-		return p1.AllocatableNumber() > p2.AllocatableNumber()
 	}
 	ByNuma = func(p1, p2 *device.Device) bool {
 		switch {
@@ -159,7 +172,8 @@ func WeightedNodeLess(profile RequestProfile, mode util.SchedulerPolicy) LessFun
 	}
 }
 
-func cachedNodeScore(cache map[string]float64, info *device.NodeInfo,
+func cachedNodeScore(
+	cache map[string]float64, info *device.NodeInfo,
 	profile RequestProfile, mode util.SchedulerPolicy,
 ) float64 {
 	name := info.GetName()
@@ -225,8 +239,8 @@ func NewNodePolicyPriority(req AllocationRequest) *sortPriority[*device.NodeInfo
 func NewDeviceBinpackPriority() *sortPriority[*device.Device] {
 	return &sortPriority[*device.Device]{
 		less: []LessFunc[*device.Device]{
-			ByAllocatableMemoryAsc,
-			ByAllocatableCoresAsc,
+			ByMemoryScoreAsc,
+			ByCoreScoreAsc,
 			ByDeviceIdAsc,
 		},
 	}
@@ -235,9 +249,9 @@ func NewDeviceBinpackPriority() *sortPriority[*device.Device] {
 func NewDeviceSpreadPriority() *sortPriority[*device.Device] {
 	return &sortPriority[*device.Device]{
 		less: []LessFunc[*device.Device]{
-			ByAllocatableMemoryDes,
-			ByAllocatableNumberDes,
-			ByAllocatableCoresDes,
+			ByMemoryScoreDes,
+			ByNumberScoreDes,
+			ByCoreScoreDes,
 			ByDeviceIdAsc,
 		},
 	}
