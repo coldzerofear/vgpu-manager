@@ -355,22 +355,13 @@ func (alloc *allocator) pickDeviceClaims(
 func (alloc *allocator) sortDeviceStore(req *AllocationRequest, deviceStore []*device.Device) {
 	pod := req.Pod
 	switch req.DevicePolicy {
-	case util.BinpackPolicy:
+	case util.BinpackPolicy, util.SpreadPolicy, util.NonePolicy:
 		klog.V(4).Infof("Pod <%s> use <%s> device scheduling policy", klog.KObj(pod), req.DevicePolicy)
-		NewDeviceBinpackPriority().Sort(deviceStore)
-	case util.SpreadPolicy:
-		klog.V(4).Infof("Pod <%s> use <%s> device scheduling policy", klog.KObj(pod), req.DevicePolicy)
-		NewDeviceSpreadPriority().Sort(deviceStore)
 	default:
-		if req.rawDevicePolicy != "" && req.rawDevicePolicy != string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s> not supported device scheduling policy: %q", klog.KObj(pod), req.rawDevicePolicy)
-			alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
-				"unsupported device scheduling policy %q", req.rawDevicePolicy)
-		} else {
-			klog.V(4).Infof("Pod <%s> none device scheduling policy", klog.KObj(pod))
-		}
-		NewSortPriority(ByNuma, ByDeviceIdAsc).Sort(deviceStore)
+		klog.V(4).Infof("Pod <%s> not supported device scheduling policy: %q", klog.KObj(pod), req.DevicePolicy)
+		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported device scheduling policy %q", req.DevicePolicy)
 	}
+	NewDevicePolicyPriority(*req).Sort(deviceStore)
 }
 
 func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {

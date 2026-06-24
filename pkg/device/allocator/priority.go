@@ -12,37 +12,13 @@ import (
 type LessFunc[T any] func(p1, p2 T) bool
 
 var (
-	// ByMemoryScoreAsc Compare the memory scores of two devices in ascending order
-	ByMemoryScoreAsc = func(p1, p2 *device.Device) bool {
-		p1Score := safeDiv(float64(p1.AllocatableMemory()), float64(p1.GetTotalMemory()))
-		p2Score := safeDiv(float64(p2.AllocatableMemory()), float64(p2.GetTotalMemory()))
-		return p1Score < p2Score
+	// ByDeviceScoreAsc Compare the device scores of two devices in ascending order
+	ByDeviceScoreAsc = func(p1, p2 *device.Device) bool {
+		return p1.Score() < p2.Score()
 	}
-	// ByMemoryScoreDes Compare the memory scores of two devices in descending order
-	ByMemoryScoreDes = func(p1, p2 *device.Device) bool {
-		p1Score := safeDiv(float64(p1.AllocatableMemory()), float64(p1.GetTotalMemory()))
-		p2Score := safeDiv(float64(p2.AllocatableMemory()), float64(p2.GetTotalMemory()))
-		return p1Score > p2Score
-	}
-
-	// ByCoreScoreAsc Compare the core scores of two devices in ascending order
-	ByCoreScoreAsc = func(p1, p2 *device.Device) bool {
-		p1Score := safeDiv(float64(p1.AllocatableCores()), float64(p1.GetTotalCores()))
-		p2Score := safeDiv(float64(p2.AllocatableCores()), float64(p2.GetTotalCores()))
-		return p1Score < p2Score
-	}
-	// ByCoreScoreDes Compare the core scores of two devices in descending order
-	ByCoreScoreDes = func(p1, p2 *device.Device) bool {
-		p1Score := safeDiv(float64(p1.AllocatableCores()), float64(p1.GetTotalCores()))
-		p2Score := safeDiv(float64(p2.AllocatableCores()), float64(p2.GetTotalCores()))
-		return p1Score > p2Score
-	}
-
-	// ByNumberScoreDes Compare the number scores of two devices in descending order
-	ByNumberScoreDes = func(p1, p2 *device.Device) bool {
-		p1Score := safeDiv(float64(p1.AllocatableNumber()), float64(p1.GetTotalNumber()))
-		p2Score := safeDiv(float64(p2.AllocatableNumber()), float64(p2.GetTotalNumber()))
-		return p1Score > p2Score
+	// ByDeviceScoreDes Compare the device scores of two devices in descending order
+	ByDeviceScoreDes = func(p1, p2 *device.Device) bool {
+		return p1.Score() > p2.Score()
 	}
 	// ByDeviceIdAsc Compare the device id of two devices in ascending order
 	ByDeviceIdAsc = func(p1, p2 *device.Device) bool {
@@ -146,13 +122,6 @@ func (sp *sortPriority[T]) Less(i, j int) bool {
 	return sp.less[k](sp.data[i], sp.data[j])
 }
 
-func safeDiv(a, b float64) float64 {
-	if b == 0 {
-		return 0
-	}
-	return a / b
-}
-
 // WeightedNodeLess returns a comparator that ranks nodes by their
 // request-weighted score under the given policy mode. Binpack ranks
 // higher-utilisation nodes first; Spread ranks lower-utilisation nodes
@@ -201,7 +170,7 @@ func cachedNodeScore(
 // Both strict and non-strict topology variants get the same prepended
 // comparator — strictness only changes ALLOCATION fallback behaviour
 // (handled inside allocateByTopologyMode), not node ranking.
-func ApplyTopologyMode(req AllocationRequest, less []LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
+func ApplyTopologyMode(req AllocationRequest, less ...LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
 	var fitness LessFunc[*device.NodeInfo]
 	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
@@ -232,27 +201,17 @@ func NewNodePolicyPriority(req AllocationRequest) *sortPriority[*device.NodeInfo
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*device.NodeInfo]{
-		less: ApplyTopologyMode(req, less),
+		less: ApplyTopologyMode(req, less...),
 	}
 }
 
-func NewDeviceBinpackPriority() *sortPriority[*device.Device] {
-	return &sortPriority[*device.Device]{
-		less: []LessFunc[*device.Device]{
-			ByMemoryScoreAsc,
-			ByCoreScoreAsc,
-			ByDeviceIdAsc,
-		},
-	}
-}
-
-func NewDeviceSpreadPriority() *sortPriority[*device.Device] {
-	return &sortPriority[*device.Device]{
-		less: []LessFunc[*device.Device]{
-			ByMemoryScoreDes,
-			ByNumberScoreDes,
-			ByCoreScoreDes,
-			ByDeviceIdAsc,
-		},
+func NewDevicePolicyPriority(req AllocationRequest) *sortPriority[*device.Device] {
+	switch req.DevicePolicy {
+	case util.BinpackPolicy:
+		return NewSortPriority[*device.Device](ByDeviceScoreAsc, ByDeviceIdAsc)
+	case util.SpreadPolicy:
+		return NewSortPriority[*device.Device](ByDeviceScoreDes, ByDeviceIdAsc)
+	default:
+		return NewSortPriority[*device.Device](ByNuma, ByDeviceIdAsc)
 	}
 }

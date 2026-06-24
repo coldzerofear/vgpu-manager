@@ -608,6 +608,13 @@ func (dev *Device) ResetUsed() {
 	dev.usedMemory = 0
 }
 
+func (dev *Device) Score() float64 {
+	numRatio := util.SafeDiv(float64(dev.AllocatableNumber()), float64(dev.GetTotalNumber()))
+	memRatio := util.SafeDiv(float64(dev.AllocatableMemory()), float64(dev.GetTotalMemory()))
+	coreRatio := util.SafeDiv(float64(dev.AllocatableCores()), float64(dev.GetTotalCores()))
+	return (numRatio + memRatio + coreRatio) / 3.0 * util.HundredCore
+}
+
 // GetPodDeviceClaim Retrieve device claim information for a pod,
 // return it if there is actual allocated device claim,
 // otherwise revert back to the device claims pre allocated by the scheduler.

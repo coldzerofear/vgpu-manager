@@ -707,3 +707,10 @@ func PodHasGangName(pod *corev1.Pod) (string, bool) {
 	}
 	return "", false
 }
+
+func SafeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
+}

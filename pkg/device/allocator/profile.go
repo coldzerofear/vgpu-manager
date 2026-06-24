@@ -151,9 +151,9 @@ func NodeUtilization(info *device.NodeInfo) ResourceUtilization {
 	availMem := float64(info.GetAvailableMemory())
 	availCore := float64(info.GetAvailableCores())
 	return ResourceUtilization{
-		Num:  1 - safeDiv(availNum, totalNum),
-		Mem:  1 - safeDiv(availMem, totalMem),
-		Core: 1 - safeDiv(availCore, totalCore),
+		Num:  1 - util.SafeDiv(availNum, totalNum),
+		Mem:  1 - util.SafeDiv(availMem, totalMem),
+		Core: 1 - util.SafeDiv(availCore, totalCore),
 	}
 }
 
@@ -166,9 +166,9 @@ func DeviceUtilization(d *device.Device) ResourceUtilization {
 	totalMem := float64(d.GetTotalMemory())
 	totalCore := float64(d.GetTotalCores())
 	return ResourceUtilization{
-		Num:  1 - safeDiv(float64(d.AllocatableNumber()), totalNum),
-		Mem:  1 - safeDiv(float64(d.AllocatableMemory()), totalMem),
-		Core: 1 - safeDiv(float64(d.AllocatableCores()), totalCore),
+		Num:  1 - util.SafeDiv(float64(d.AllocatableNumber()), totalNum),
+		Mem:  1 - util.SafeDiv(float64(d.AllocatableMemory()), totalMem),
+		Core: 1 - util.SafeDiv(float64(d.AllocatableCores()), totalCore),
 	}
 }
 

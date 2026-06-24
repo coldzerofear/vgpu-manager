@@ -780,24 +780,26 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		}
 	}
 
+	defaultNodePriority := false
 	switch req.NodePolicy {
 	case util.BinpackPolicy, util.SpreadPolicy:
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
 		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
+	case util.NonePolicy:
+		defaultNodePriority = true
+		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
 	default:
-		if req.RawNodePolicy() != "" && req.RawNodePolicy() != string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), req.RawNodePolicy())
-			f.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
-				"unsupported node scheduling policy %q", req.RawNodePolicy())
-		} else {
-			klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
-		}
-		less := []allocator.LessFunc[*device.NodeInfo]{func(p1, p2 *device.NodeInfo) bool {
+		defaultNodePriority = true
+		klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), req.NodePolicy)
+		f.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported node scheduling policy %q", req.NodePolicy)
+	}
+	if defaultNodePriority {
+		less := allocator.ApplyTopologyMode(*req, func(p1, p2 *device.NodeInfo) bool {
 			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
-		}}
-		less = allocator.ApplyTopologyMode(*req, less)
+		})
 		allocator.NewSortPriority[*device.NodeInfo](less...).Sort(nodeInfoList)
 	}
+
 	recorder := f.recorder
 	for i, nodeInfo := range nodeInfoList {
 		node := nodeInfo.GetNode()

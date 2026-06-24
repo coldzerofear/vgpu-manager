@@ -119,14 +119,6 @@ type AllocationRequest struct {
 	// for the same pod — see profile.go for the rationale.
 	Profile RequestProfile
 
-	// rawDevicePolicy is the unrecognised device policy string (if any),
-	// preserved so allocateOne can emit the "Unsupported device scheduling
-	// policy" event with the same wording as the pre-refactor code. Empty
-	// when DevicePolicy was recognised (or unset) cleanly.
-	rawDevicePolicy string
-	// rawNodePolicy is the analogue for the node policy.
-	rawNodePolicy string
-
 	// Check if the pod requires additional verification of the device's uuid or type
 	CheckDeviceUuid bool
 	CheckDeviceType bool
@@ -239,8 +231,8 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 	req.Total.Memory = sidecarAgg.Memory + max(regularAgg.Memory, initMaxAgg.Memory)
 
 	if len(req.Containers) > 0 {
-		req.NodePolicy, req.rawNodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
-		req.DevicePolicy, req.rawDevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
+		req.NodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
+		req.DevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
 		req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
 		req.GangName, _ = util.PodHasGangName(pod)
 		if v, ok := util.HasAnnotation(pod, util.CrossPodTopologyAnnotation); ok {
@@ -260,34 +252,23 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 	return req
 }
 
-// RawNodePolicy returns the user-typed node-scheduler-policy string. Used
-// by the filter to emit the "Unsupported node scheduling policy" event
-// with the unrecognised value verbatim — the parsed NodePolicy collapses
-// unknown values to NonePolicy, which would lose the original string.
-func (r *AllocationRequest) RawNodePolicy() string {
-	return r.rawNodePolicy
-}
-
-// RawDevicePolicy is the device-scheduler-policy analogue of RawNodePolicy.
-func (r *AllocationRequest) RawDevicePolicy() string {
-	return r.rawDevicePolicy
-}
-
 // parseSchedulerPolicy reads a SchedulerPolicy annotation and returns
 // both the recognised enum value and the raw lowercased string.
 // Unrecognised input (including empty and "none") maps to NonePolicy so
 // downstream switches only have to handle the three known cases; the
 // raw string is preserved for diagnostic events.
-func parseSchedulerPolicy(pod *corev1.Pod, annotation string) (util.SchedulerPolicy, string) {
+func parseSchedulerPolicy(pod *corev1.Pod, annotation string) util.SchedulerPolicy {
 	raw, _ := util.HasAnnotation(pod, annotation)
 	lower := strings.ToLower(raw)
 	switch util.SchedulerPolicy(lower) {
 	case util.BinpackPolicy:
-		return util.BinpackPolicy, lower
+		return util.BinpackPolicy
 	case util.SpreadPolicy:
-		return util.SpreadPolicy, lower
+		return util.SpreadPolicy
+	case util.NonePolicy, "":
+		return util.NonePolicy
 	default:
-		return util.NonePolicy, lower
+		return util.SchedulerPolicy(lower)
 	}
 }
 
