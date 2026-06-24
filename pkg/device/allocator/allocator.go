@@ -405,11 +405,11 @@ func (alloc *allocator) allocateByTopologyMode(
 				// Intra-node connectivity is a hard requirement (NVLink doesn't cross
 				// hosts), so an on-node sibling pins the component directly.
 				anchorRoot = root
-			} else if root, ok = alloc.nodeInfo.ComponentByOrdinal(req.GangLinkOrdinal); ok {
+			} else if root, ok = alloc.nodeInfo.ComponentByDomain(req.GangDomainKey); ok {
 				// Priority 2: cross-node sibling → align to the same sub-domain
-				// (rail) ordinal. The ordinal was resolved by the filter on the
+				// (rail) signature. The domain key was resolved by the filter on the
 				// sibling's own node (UUID-based); here we map it to THIS node's
-				// component. Missing on this node (different shape) → no anchor.
+				// component. Missing on this node (rail-set absent) → no anchor.
 				anchorRoot = root
 			}
 		}

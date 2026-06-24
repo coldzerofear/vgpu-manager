@@ -98,10 +98,10 @@ func ordinalSibling(uid, gang, node string, uuids ...string) *corev1.Pod {
 	}
 }
 
-// Test_FindGangSiblingLinkOrdinal covers both resolution paths, in particular the
+// Test_FindGangSiblingDomain covers both resolution paths, in particular the
 // regression where a sibling on a NON-candidate node (built on demand) must still
-// contribute its ordinal — the primary cross-node alignment scenario.
-func Test_FindGangSiblingLinkOrdinal(t *testing.T) {
+// contribute its domain — the primary cross-node alignment scenario.
+func Test_FindGangSiblingDomain(t *testing.T) {
 	node := islandNode(t, "node2")
 	candidateInfo, err := device.NewNodeInfo(node, device.WithGPUTopologyEnabled(true))
 	require.NoError(t, err)
@@ -122,17 +122,17 @@ func Test_FindGangSiblingLinkOrdinal(t *testing.T) {
 	sibling := ordinalSibling("sib", "gangX", "node2", "node2-4", "node2-5")
 
 	t.Run("candidate-node sibling votes", func(t *testing.T) {
-		ord, ok := FindGangSiblingLinkOrdinal([]*corev1.Pod{sibling},
+		dom, ok := FindGangSiblingDomain([]*corev1.Pod{sibling},
 			map[string]*device.NodeInfo{"node2": candidateInfo}, nodeLister, req)
 		require.True(t, ok)
-		require.Equal(t, 1, ord)
+		require.Equal(t, "ord:1", dom)
 	})
 
 	t.Run("non-candidate sibling built on demand still votes (regression)", func(t *testing.T) {
-		ord, ok := FindGangSiblingLinkOrdinal([]*corev1.Pod{sibling},
+		dom, ok := FindGangSiblingDomain([]*corev1.Pod{sibling},
 			map[string]*device.NodeInfo{}, nodeLister, req) // empty candidate map
-		require.True(t, ok, "sibling on a non-candidate node must contribute its ordinal")
-		require.Equal(t, 1, ord)
+		require.True(t, ok, "sibling on a non-candidate node must contribute its domain")
+		require.Equal(t, "ord:1", dom)
 	})
 
 	t.Run("self and no-prealloc are ignored", func(t *testing.T) {
@@ -144,7 +144,7 @@ func Test_FindGangSiblingLinkOrdinal(t *testing.T) {
 			},
 			Spec: corev1.PodSpec{NodeName: "node2"},
 		}
-		_, ok := FindGangSiblingLinkOrdinal([]*corev1.Pod{self, noPre},
+		_, ok := FindGangSiblingDomain([]*corev1.Pod{self, noPre},
 			map[string]*device.NodeInfo{"node2": candidateInfo}, nodeLister, req)
 		require.False(t, ok)
 	})

@@ -424,6 +424,9 @@ type DeviceGatherInfo struct {
 	DeviceIndexMap      map[string]int
 	EnabledGPUTopology  bool
 	EnabledNumaAffinity bool
+	// GPURail optionally maps GPU UUID → sub-domain/rail key (from
+	// NodeGPUDomainAnnotation). Nil/empty when the node does not publish it.
+	GPURail map[string]string
 	NodeConfigInfo
 }
 
@@ -486,6 +489,16 @@ func NewNodeDeviceGatherInfo(node *corev1.Node, option *NodeInfoOption) (*Device
 					deviceGatherInfo.EnabledGPUTopology = true
 					deviceGatherInfo.DeviceList.AddLink(deviceTopoInfo.Index, toIdx, p2pLinkType)
 				}
+			}
+		}
+		// Optional GPU→rail map enabling heterogeneity-correct cross-node
+		// sub-domain alignment (see NodeGPUDomainAnnotation). Absent → ordinal.
+		if railValue, ok := util.HasAnnotation(node, util.NodeGPUDomainAnnotation); ok && len(railValue) > 0 {
+			rail := map[string]string{}
+			if err := json.Unmarshal([]byte(railValue), &rail); err != nil {
+				klog.V(3).ErrorS(err, "parse node gpu domain map failed", "node", node.Name, "value", railValue)
+			} else {
+				deviceGatherInfo.GPURail = rail
 			}
 		}
 	}
@@ -666,7 +679,8 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 		ret.nvlinkComponentByUUID, ret.maxNVLinkComponentSize, ret.maxSwitchComponentSize,
 			ret.maxNUMAComponentSize, ret.maxLinkComponentSize = computeTieredComponents(ret.deviceList)
 		ret.nvlinkComponentToUUIDs = buildComponentIndex(ret.nvlinkComponentByUUID)
-		ret.nvlinkRootByOrdinal, ret.nvlinkComponentOrdinal = buildComponentOrdinals(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap)
+		// Fake nodes have no rail-map source → positional-ordinal domain keys.
+		ret.nvlinkComponentOrdinal, ret.nvlinkComponentDomain, ret.nvlinkRootByDomain = buildComponentDomains(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap, nil)
 	}
 	ret.numaTopology = false
 	for _, d := range devices {
@@ -725,13 +739,17 @@ type NodeInfo struct {
 	// NVSwitch node all GPUs are one component (no narrowing needed); on a 2x4
 	// island node the two islands are distinct (so a sibling's GPUs pin the island
 	// its peers stay in). nvlinkComponentByUUID: UUID → NVLink-component root;
-	// nvlinkComponentToUUIDs: root → member UUIDs; nvlinkRootByOrdinal /
-	// nvlinkComponentOrdinal: the cross-node-stable ordinal maps (ranked by min
-	// Device.Index — ordinal-k denotes the same NVLink sub-domain on homogeneous
-	// nodes). Nil/empty when gpuTopology is false.
+	// nvlinkComponentToUUIDs: root → member UUIDs. nvlinkComponentDomain /
+	// nvlinkRootByDomain: the cross-node-stable DOMAIN-KEY maps (root↔signature)
+	// used for cross-node sub-domain alignment — a rail-set signature when the
+	// node publishes a GPU→rail map (heterogeneity-correct), else the positional
+	// "ord:N" ordinal (homogeneous fallback). nvlinkComponentOrdinal keeps the
+	// numeric positional ordinal for GangAnchorComponent's deterministic tie-break.
+	// Nil/empty when gpuTopology is false.
 	nvlinkComponentByUUID  map[string]int
 	nvlinkComponentToUUIDs map[int][]string
-	nvlinkRootByOrdinal    map[int]int
+	nvlinkComponentDomain  map[int]string
+	nvlinkRootByDomain     map[string]int
 	nvlinkComponentOrdinal map[int]int
 	// maxNVLinkComponentSize is the largest NVLink-fabric component size (the
 	// most GPUs mutually reachable over NVLink only). Node fitness uses it to
@@ -848,7 +866,7 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 		ret.nvlinkComponentByUUID, ret.maxNVLinkComponentSize, ret.maxSwitchComponentSize,
 			ret.maxNUMAComponentSize, ret.maxLinkComponentSize = computeTieredComponents(gatherInfo.DeviceList)
 		ret.nvlinkComponentToUUIDs = buildComponentIndex(ret.nvlinkComponentByUUID)
-		ret.nvlinkRootByOrdinal, ret.nvlinkComponentOrdinal = buildComponentOrdinals(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap)
+		ret.nvlinkComponentOrdinal, ret.nvlinkComponentDomain, ret.nvlinkRootByDomain = buildComponentDomains(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap, gatherInfo.GPURail)
 	}
 	if ret.numaTopology {
 		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(gatherInfo.DeviceMap)
@@ -985,18 +1003,24 @@ func buildComponentIndex(byUUID map[string]int) map[int][]string {
 	return byComponent
 }
 
-// buildComponentOrdinals assigns each NVLink component a cross-node-STABLE
-// ordinal by ranking components by their minimum Device.Index, then returns
-// (rootByOrdinal, componentOrdinal) — the two inverse maps (ordinal→root and
-// root→ordinal). On homogeneous nodes (identical GPU↔rail layout) ordinal-k
-// denotes the same physical sub-domain on every node, which is what lets
-// cross-node gang alignment compare sub-domains across nodes even though
-// union-find roots are node-local. Returns empty maps for an empty input.
-func buildComponentOrdinals(componentToUUIDs map[int][]string, deviceIndexMap map[string]int) (rootByOrdinal, componentOrdinal map[int]int) {
-	rootByOrdinal = make(map[int]int, len(componentToUUIDs))
+// buildComponentDomains assigns each NVLink component:
+//   - a numeric positional ordinal (rank by minimum Device.Index) → componentOrdinal,
+//     kept for GangAnchorComponent's deterministic tie-break.
+//   - a cross-node-stable DOMAIN SIGNATURE → componentDomain (root→sig) and its
+//     inverse rootByDomain (sig→root), used for cross-node sub-domain alignment.
+//
+// The signature is rail-based when gpuRail covers EVERY GPU on the node
+// ("rail:" + sorted rail keys of the island) — globally meaningful, so the SAME
+// physical rail-set yields the SAME signature on any node regardless of GPU
+// enumeration order (heterogeneity-correct). Otherwise it falls back to the
+// positional "ord:N", which is the historical behaviour and stays correct on
+// homogeneous clusters. Returns empty maps for an empty input.
+func buildComponentDomains(componentToUUIDs map[int][]string, deviceIndexMap map[string]int, gpuRail map[string]string) (componentOrdinal map[int]int, componentDomain map[int]string, rootByDomain map[string]int) {
 	componentOrdinal = make(map[int]int, len(componentToUUIDs))
+	componentDomain = make(map[int]string, len(componentToUUIDs))
+	rootByDomain = make(map[string]int, len(componentToUUIDs))
 	if len(componentToUUIDs) == 0 {
-		return rootByOrdinal, componentOrdinal
+		return componentOrdinal, componentDomain, rootByDomain
 	}
 	// minIndex(component) = smallest Device.Index among its members. A component
 	// whose UUIDs are all absent from deviceIndexMap (defensive — both maps derive
@@ -1022,11 +1046,39 @@ func buildComponentOrdinals(componentToUUIDs map[int][]string, deviceIndexMap ma
 		}
 		return mins[i].root < mins[j].root
 	})
-	for ordinal, rm := range mins {
-		rootByOrdinal[ordinal] = rm.root
-		componentOrdinal[rm.root] = ordinal
+	// All-or-nothing rail keying: only trust rail signatures when EVERY GPU on the
+	// node carries one, so a node's islands are compared on a single consistent
+	// basis. A partial map (misconfig) falls back to positional ordinals.
+	railKeyed := len(gpuRail) > 0
+	if railKeyed {
+		for uuid := range deviceIndexMap {
+			if _, ok := gpuRail[uuid]; !ok {
+				railKeyed = false
+				break
+			}
+		}
 	}
-	return rootByOrdinal, componentOrdinal
+	for ordinal, rm := range mins {
+		componentOrdinal[rm.root] = ordinal
+		var sig string
+		if railKeyed {
+			rails := make([]string, 0, len(componentToUUIDs[rm.root]))
+			for _, u := range componentToUUIDs[rm.root] {
+				rails = append(rails, gpuRail[u])
+			}
+			sort.Strings(rails)
+			sig = "rail:" + strings.Join(rails, ",")
+		} else {
+			sig = "ord:" + strconv.Itoa(ordinal)
+		}
+		componentDomain[rm.root] = sig
+		// Iterate in ordinal order, so on the (rare) event two islands share a
+		// rail-set the lower-ordinal one deterministically owns the signature.
+		if _, exists := rootByDomain[sig]; !exists {
+			rootByDomain[sig] = rm.root
+		}
+	}
+	return componentOrdinal, componentDomain, rootByDomain
 }
 
 // computeMaxNUMAGroupSize returns the largest count of GPUs sharing one NUMA
@@ -1067,7 +1119,8 @@ func (n *NodeInfo) DeepCopy() *NodeInfo {
 	// top-level containers while sharing the immutable member slices / pod ptrs.
 	nodeInfo.nvlinkComponentByUUID = maps.Clone(n.nvlinkComponentByUUID)
 	nodeInfo.nvlinkComponentToUUIDs = maps.Clone(n.nvlinkComponentToUUIDs)
-	nodeInfo.nvlinkRootByOrdinal = maps.Clone(n.nvlinkRootByOrdinal)
+	nodeInfo.nvlinkComponentDomain = maps.Clone(n.nvlinkComponentDomain)
+	nodeInfo.nvlinkRootByDomain = maps.Clone(n.nvlinkRootByDomain)
 	nodeInfo.nvlinkComponentOrdinal = maps.Clone(n.nvlinkComponentOrdinal)
 	nodeInfo.nodePods = slices.Clone(n.nodePods)
 	return &nodeInfo
@@ -1771,34 +1824,36 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string {
 	return n.nvlinkComponentToUUIDs[root]
 }
 
-// ComponentByOrdinal returns the NVLink-component root that has the given
-// cross-node ordinal on this node, or (-1, false) when this node has no such
-// ordinal (e.g. fewer NVLink sub-domains than the requested ordinal).
-func (n *NodeInfo) ComponentByOrdinal(ordinal int) (int, bool) {
-	if ordinal < 0 || len(n.nvlinkRootByOrdinal) == 0 {
+// ComponentByDomain returns the NVLink-component root whose cross-node domain
+// signature matches `domain` on this node, or (-1, false) when this node has no
+// matching sub-domain. A genuine no-match (the sibling's rail-set does not exist
+// here) correctly yields false — alignment is then skipped rather than forced
+// onto a wrong island, which is the heterogeneity-correct behaviour.
+func (n *NodeInfo) ComponentByDomain(domain string) (int, bool) {
+	if domain == "" || len(n.nvlinkRootByDomain) == 0 {
 		return -1, false
 	}
-	root, ok := n.nvlinkRootByOrdinal[ordinal]
+	root, ok := n.nvlinkRootByDomain[domain]
 	if !ok {
 		return -1, false
 	}
 	return root, true
 }
 
-// OrdinalOfUUIDs resolves the cross-node-stable ordinal (rail) of a set of GPU
-// UUIDs **on this node**, i.e. it must be called on the NodeInfo of the node the
-// UUIDs actually live on (the sibling's own node). Each UUID maps to its
+// DomainOfUUIDs resolves the cross-node-stable sub-domain SIGNATURE of a set of
+// GPU UUIDs **on this node**, i.e. it must be called on the NodeInfo of the node
+// the UUIDs actually live on (the sibling's own node). Each UUID maps to its
 // NVLink-fabric component root via nvlinkComponentByUUID and then to that root's
-// ordinal; the majority ordinal is returned. This is identity-based (UUID), so
+// domain signature; the majority signature is returned. Identity-based (UUID), so
 // it does NOT depend on the possibly-stale Device.Index recorded in a pre-alloc
 // annotation. Duplicate UUIDs (a pod's multiple containers sharing one card) are
-// collapsed. Returns (-1, false) when no UUID is known here or no NVLink topology.
-func (n *NodeInfo) OrdinalOfUUIDs(uuids []string) (int, bool) {
+// collapsed. Returns ("", false) when no UUID is known here or no NVLink topology.
+func (n *NodeInfo) DomainOfUUIDs(uuids []string) (string, bool) {
 	if len(uuids) == 0 || len(n.nvlinkComponentByUUID) == 0 {
-		return -1, false
+		return "", false
 	}
 	seen := make(map[string]struct{}, len(uuids))
-	votes := make(map[int]int)
+	votes := make(map[string]int)
 	for _, uuid := range uuids {
 		if _, dup := seen[uuid]; dup {
 			continue
@@ -1808,20 +1863,20 @@ func (n *NodeInfo) OrdinalOfUUIDs(uuids []string) (int, bool) {
 		if !ok {
 			continue
 		}
-		if ord, ok := n.nvlinkComponentOrdinal[root]; ok {
-			votes[ord]++
+		if dom, ok := n.nvlinkComponentDomain[root]; ok {
+			votes[dom]++
 		}
 	}
 	if len(votes) == 0 {
-		return -1, false
+		return "", false
 	}
-	bestOrd, bestVotes := -1, 0
-	for ord, v := range votes {
-		if v > bestVotes || (v == bestVotes && (bestOrd == -1 || ord < bestOrd)) {
-			bestOrd, bestVotes = ord, v
+	bestDom, bestVotes := "", 0
+	for dom, v := range votes {
+		if v > bestVotes || (v == bestVotes && (bestDom == "" || dom < bestDom)) {
+			bestDom, bestVotes = dom, v
 		}
 	}
-	return bestOrd, true
+	return bestDom, true
 }
 
 // GangAnchorComponent resolves the NVLink component that this gang's sibling

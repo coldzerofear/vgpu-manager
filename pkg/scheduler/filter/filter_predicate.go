@@ -461,23 +461,23 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 	return nodeName, err == nil
 }
 
-// FindGangSiblingLinkOrdinal resolves the gang's cross-node-stable sub-domain
-// (rail) ORDINAL by tallying it across the gang's already-placed siblings and
-// returning the majority. Each sibling's ordinal is resolved on the sibling's OWN
-// node by UUID — identity-based, independent of the possibly-stale Device.Index
-// recorded in the annotation. `pods` MUST come from the gang-name index (so gang
-// membership is already guaranteed — not re-checked here). A sibling on a
-// candidate node uses its prebuilt NodeInfo (free); otherwise the node is built
-// on demand from nodeLister and CACHED so a node hosting several siblings is
-// built at most once. Returns (-1, false) when no sibling resolves (e.g. the
-// gang's first pod). Best-effort: alignment is an optimization, never a
+// FindGangSiblingDomain resolves the gang's cross-node-stable sub-domain (rail)
+// SIGNATURE by tallying it across the gang's already-placed siblings and
+// returning the majority. Each sibling's signature is resolved on the sibling's
+// OWN node by UUID — identity-based, independent of the possibly-stale
+// Device.Index recorded in the annotation. `pods` MUST come from the gang-name
+// index (so gang membership is already guaranteed — not re-checked here). A
+// sibling on a candidate node uses its prebuilt NodeInfo (free); otherwise the
+// node is built on demand from nodeLister and CACHED so a node hosting several
+// siblings is built at most once. Returns ("", false) when no sibling resolves
+// (e.g. the gang's first pod). Best-effort: alignment is an optimization, never a
 // correctness gate.
-func FindGangSiblingLinkOrdinal(
+func FindGangSiblingDomain(
 	pods []*corev1.Pod, nodeInfoByName map[string]*device.NodeInfo,
 	nodeLister listerv1.NodeLister, req *allocator.AllocationRequest,
-) (int, bool) {
+) (string, bool) {
 
-	ordinalMap := make(map[int]int)
+	domainMap := make(map[string]int)
 	// built caches NodeInfos constructed on demand for non-candidate sibling
 	// nodes, so multiple siblings on one node trigger a single (expensive) build.
 	var built map[string]*device.NodeInfo
@@ -514,25 +514,25 @@ func FindGangSiblingLinkOrdinal(
 				built[nodeName] = nodeInfo
 			}
 		}
-		if ordinal, ok := nodeInfo.OrdinalOfUUIDs(uuids); ok {
-			ordinalMap[ordinal]++
+		if domain, ok := nodeInfo.DomainOfUUIDs(uuids); ok {
+			domainMap[domain]++
 		}
 	}
-	ordinals := maps.Keys(ordinalMap)
-	switch len(ordinals) {
+	domains := maps.Keys(domainMap)
+	switch len(domains) {
 	case 0:
-		return -1, false
+		return "", false
 	case 1:
-		return ordinals[0], true
+		return domains[0], true
 	default:
-		// Majority wins; ties break to the lower ordinal for determinism.
-		sort.Slice(ordinals, func(i, j int) bool {
-			if ci, cj := ordinalMap[ordinals[i]], ordinalMap[ordinals[j]]; ci != cj {
+		// Majority wins; ties break to the lower signature for determinism.
+		sort.Slice(domains, func(i, j int) bool {
+			if ci, cj := domainMap[domains[i]], domainMap[domains[j]]; ci != cj {
 				return ci > cj
 			}
-			return ordinals[i] < ordinals[j]
+			return domains[i] < domains[j]
 		})
-		return ordinals[0], true
+		return domains[0], true
 	}
 }
 
@@ -756,14 +756,14 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	}
 
 	// Cross-node sub-domain (rail) alignment: when this pod opts into cross-pod
-	// link topology and is in a gang, resolve the gang's chosen sub-domain ordinal
-	// from any already-placed sibling and carry it (node-independent) on req. Each
-	// node later maps it back to its own component via ComponentByOrdinal. The
-	// ordinal is resolved on the SIBLING's own NodeInfo by UUID (identity-based,
-	// dedup'd), so it does not depend on the possibly-stale Device.Index in the
-	// annotation; we only need the sibling's node to be among the built candidates
-	// (the common case under Kueue rack-pinning). Reuses nodePodsMap + nodeInfoList
-	// (no extra List / NodeInfo build). Gang-only; others skip it.
+	// link topology and is in a gang, resolve the gang's chosen sub-domain
+	// signature from any already-placed sibling and carry it (node-independent) on
+	// req. Each node later maps it back to its own component via ComponentByDomain.
+	// The signature is resolved on the SIBLING's own NodeInfo by UUID (identity-
+	// based, dedup'd), so it does not depend on the possibly-stale Device.Index in
+	// the annotation; we only need the sibling's node to be among the built
+	// candidates (the common case under Kueue rack-pinning). Reuses nodePodsMap +
+	// nodeInfoList (no extra List / NodeInfo build). Gang-only; others skip it.
 	if needGangOrdinal {
 		var gangPods []*corev1.Pod
 		switch {
@@ -780,8 +780,8 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 				return filteredNodes, failed, err
 			}
 		}
-		if ordinal, ok := FindGangSiblingLinkOrdinal(gangPods, nodeInfoByName, f.nodeLister, req); ok {
-			req.GangLinkOrdinal = ordinal
+		if domain, ok := FindGangSiblingDomain(gangPods, nodeInfoByName, f.nodeLister, req); ok {
+			req.GangDomainKey = domain
 		}
 	}
 

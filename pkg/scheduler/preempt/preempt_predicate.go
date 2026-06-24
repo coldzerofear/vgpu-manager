@@ -228,8 +228,8 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 				return passthrough(args)
 			}
 		}
-		if ordinal, ok := filter.FindGangSiblingLinkOrdinal(gangPods, nodeInfoByName, p.nodeLister, req); ok {
-			req.GangLinkOrdinal = ordinal
+		if domain, ok := filter.FindGangSiblingDomain(gangPods, nodeInfoByName, p.nodeLister, req); ok {
+			req.GangDomainKey = domain
 		}
 	}
 

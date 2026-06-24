@@ -104,15 +104,16 @@ type AllocationRequest struct {
 	// False (default) = unchanged single-pod behaviour.
 	CrossPodTopology bool
 
-	// GangLinkOrdinal is the cross-node-STABLE sub-domain (rail) ordinal that an
+	// GangDomainKey is the cross-node-STABLE sub-domain SIGNATURE that an
 	// already-placed gang sibling occupies, computed ONCE by the filter by
 	// resolving the sibling's UUIDs on the sibling's OWN NodeInfo (so it does not
 	// depend on the possibly-stale Device.Index in the annotation). It is a single
-	// node-independent integer (the gang's chosen rail); each candidate node maps
-	// it back to its OWN component via NodeInfo.ComponentByOrdinal — that is where
-	// the per-node specialization happens. -1 (default) = no cross-node sibling
-	// resolved yet (first pod, sibling node not a candidate, or cross-pod off).
-	GangLinkOrdinal int
+	// node-independent string (the gang's chosen rail-set, or "ord:N" fallback);
+	// each candidate node maps it back to its OWN component via
+	// NodeInfo.ComponentByDomain — that is where the per-node specialization
+	// happens. "" (default) = no cross-node sibling resolved yet (first pod,
+	// sibling node not a candidate, or cross-pod off).
+	GangDomainKey string
 
 	// Profile is the pod's request-weighted scoring profile. Captured
 	// here so the filter and the allocator score with identical weights
@@ -156,7 +157,7 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 	req := &AllocationRequest{
 		Pod:             pod,
 		ControllerOwner: metav1.GetControllerOf(pod),
-		GangLinkOrdinal: -1,
+		// GangDomainKey defaults to "" (no cross-node sibling resolved yet).
 	}
 
 	// Aggregate demand bucketed by lifecycle group so Total reflects the

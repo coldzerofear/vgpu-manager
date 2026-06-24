@@ -51,6 +51,14 @@ var (
 	NodeDeviceRegisterAnnotation  = globalDomainName + "/node-device-register"
 	NodeDeviceTopologyAnnotation  = globalDomainName + "/node-device-topology"
 	NodeConfigInfoAnnotation      = globalDomainName + "/node-config-info"
+	// NodeGPUDomainAnnotation OPTIONALLY maps each GPU UUID to a globally-meaningful
+	// sub-domain / rail key (JSON {"<uuid>":"<rail>", ...}). Supplied by the device
+	// plugin (auto-discovered GPU→NIC→rail) or declared by an operator/network
+	// component. When present and covering every GPU, cross-node sub-domain
+	// alignment matches NVLink islands by their rail-set instead of by positional
+	// ordinal — correct on heterogeneous layouts. Absent → positional-ordinal
+	// fallback (unchanged homogeneous behaviour).
+	NodeGPUDomainAnnotation = globalDomainName + "/node-gpu-domain"
 
 	// Scheduling strategies at the node and device levels
 	NodeSchedulerPolicyAnnotation       = globalDomainName + "/node-scheduler-policy"
@@ -99,6 +107,7 @@ func initConstants() {
 	NodeDeviceRegisterAnnotation = globalDomainName + "/node-device-register"
 	NodeDeviceTopologyAnnotation = globalDomainName + "/node-device-topology"
 	NodeConfigInfoAnnotation = globalDomainName + "/node-config-info"
+	NodeGPUDomainAnnotation = globalDomainName + "/node-gpu-domain"
 	PodIncludeGpuTypeAnnotation = globalDomainName + "/include-gpu-type"
 	PodExcludeGpuTypeAnnotation = globalDomainName + "/exclude-gpu-type"
 	NodeSchedulerPolicyAnnotation = globalDomainName + "/node-scheduler-policy"

@@ -1,6 +1,7 @@
 package allocator
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -87,6 +88,66 @@ func crossPodNode(t *testing.T, name, prefix string) (*corev1.Node, device.NodeD
 		},
 	}
 	return node, devs
+}
+
+// withRails attaches a NodeGPUDomainAnnotation mapping <prefix>-i → rails[i],
+// so the node's NVLink islands are keyed by physical rail-set instead of by
+// positional ordinal.
+func withRails(t *testing.T, node *corev1.Node, prefix string, rails [8]string) {
+	m := map[string]string{}
+	for i, r := range rails {
+		m[fmt.Sprintf("%s-%d", prefix, i)] = r
+	}
+	b, err := json.Marshal(m)
+	require.NoError(t, err)
+	node.Annotations[util.NodeGPUDomainAnnotation] = string(b)
+}
+
+// Test_CrossPod_NVLink_HeterogeneousRail is the crux of the rail-keyed design:
+// node1's island A and node2's island B physically share the SAME rails (node2 is
+// "reverse-wired"). Positional ordinal would mis-align (ordinal 0 → island A on
+// both); rail keying resolves the sibling's rail-SET and lands the new pod on
+// node2's island B — the truly rail-aligned island.
+func Test_CrossPod_NVLink_HeterogeneousRail(t *testing.T) {
+	// node1: island A (idx 0-3) = rails rA..rD; island B (idx 4-7) = rE..rH.
+	node1, devs1 := crossPodNode(t, "node1", "N1")
+	withRails(t, node1, "N1", [8]string{"rA", "rB", "rC", "rD", "rE", "rF", "rG", "rH"})
+	// node2: REVERSED — island A (idx 0-3) = rE..rH; island B (idx 4-7) = rA..rD.
+	node2, devs2 := crossPodNode(t, "node2", "N2")
+	withRails(t, node2, "N2", [8]string{"rE", "rF", "rG", "rH", "rA", "rB", "rC", "rD"})
+
+	// Sibling holds node1's island A (rails rA..rD).
+	sibling := crossPodSibling("sib", "gangX", "node1", "N1-0", "N1-1")
+	node1Info, err := device.NewNodeInfo(node1,
+		device.WithGPUTopologyEnabled(true), device.WithNodeDevice(&devs1),
+		device.WithNodePods(sibling))
+	require.NoError(t, err)
+
+	domain, ok := node1Info.DomainOfUUIDs([]string{"N1-0", "N1-1"})
+	require.True(t, ok)
+	require.Equal(t, "rail:rA,rB,rC,rD", domain, "sibling island keyed by its rail-set")
+
+	// Allocate on node2 with the rail-set domain → must land on island B (rA..rD),
+	// i.e. N2-4..7, NOT the positionally-equal island A.
+	node2Info, err := device.NewNodeInfo(node2,
+		device.WithGPUTopologyEnabled(true), device.WithNodeDevice(&devs2))
+	require.NoError(t, err)
+	req := BuildAllocationRequest(crossPodGangPod("main", "gangX", true, 2))
+	req.GangDomainKey = domain
+	newPod, rsn, err := NewAllocator(node2Info, nil).Allocate(req)
+	require.NoError(t, err)
+	require.Nil(t, rsn)
+	claim := device.PodDeviceClaim{}
+	pre, _ := util.HasAnnotation(newPod, util.PodVGPUPreAllocAnnotation)
+	require.NoError(t, claim.UnmarshalText(pre))
+
+	got := containerUUIDs(claim, "app")
+	t.Logf("heterogeneous cross-node landed on: %v", keys(got))
+	node2IslandB := map[string]bool{"N2-4": true, "N2-5": true, "N2-6": true, "N2-7": true}
+	require.Len(t, got, 2)
+	for u := range got {
+		require.Truef(t, node2IslandB[u], "rail alignment must pick node2 island B (rA..rD), got %s", u)
+	}
 }
 
 // crossPodGangPod builds a link-topology gang member requesting `number` cards.
@@ -181,11 +242,12 @@ func Test_CrossPod_NVLink_CrossNodeOrdinal(t *testing.T) {
 		device.WithNodePods(sibling))
 	require.NoError(t, err)
 
-	// Resolve the sibling's rail ordinal ON ITS OWN NODE (what the filter does).
-	ordinal, ok := node2Info.OrdinalOfUUIDs([]string{"N2-4", "N2-5"})
-	require.True(t, ok, "sibling ordinal must resolve on node2")
-	require.Equal(t, 1, ordinal, "island B (min index 4) is ordinal 1")
-	t.Logf("sibling on node2 island B resolved to ordinal %d", ordinal)
+	// Resolve the sibling's rail domain ON ITS OWN NODE (what the filter does).
+	// No rail map → positional "ord:1" (island B is the 2nd by min index).
+	domain, ok := node2Info.DomainOfUUIDs([]string{"N2-4", "N2-5"})
+	require.True(t, ok, "sibling domain must resolve on node2")
+	require.Equal(t, "ord:1", domain, "island B (min index 4) is ordinal 1")
+	t.Logf("sibling on node2 island B resolved to domain %q", domain)
 
 	// node1: a DIFFERENT node (distinct UUIDs), no same-node sibling.
 	node1, devs1 := crossPodNode(t, "node1", "N1")
@@ -194,9 +256,9 @@ func Test_CrossPod_NVLink_CrossNodeOrdinal(t *testing.T) {
 		device.WithNodeDevice(&devs1))
 	require.NoError(t, err)
 
-	// Build the request and inject the cross-node ordinal the filter resolved.
+	// Build the request and inject the cross-node domain the filter resolved.
 	req := BuildAllocationRequest(crossPodGangPod("main", "gangX", true, 2))
-	req.GangLinkOrdinal = ordinal
+	req.GangDomainKey = domain
 	newPod, rsn, err := NewAllocator(node1Info, nil).Allocate(req)
 	require.NoError(t, err)
 	require.Nil(t, rsn, "allocation unexpectedly rejected: %v", rsn)

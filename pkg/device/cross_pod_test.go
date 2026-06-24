@@ -235,25 +235,53 @@ func Test_buildComponentIndex(t *testing.T) {
 	}
 }
 
-func Test_buildComponentOrdinals(t *testing.T) {
-	// Two components: root 7 = {gpu4(id4),gpu5(id5)}, root 0 = {gpu0(id0),gpu1(id1)}.
-	// Ranked by min Device.Index: root 0 (min 0) → ordinal 0; root 7 (min 4) → ordinal 1.
+func Test_buildComponentDomains_OrdinalFallback(t *testing.T) {
+	// No rail map → positional "ord:N" signatures. Two components: root 7 =
+	// {gpu4,gpu5}, root 0 = {gpu0,gpu1}. Ranked by min index: root 0 → ord 0,
+	// root 7 → ord 1.
 	componentToUUIDs := map[int][]string{
 		7: {"gpu4", "gpu5"},
 		0: {"gpu0", "gpu1"},
 	}
 	deviceIndexMap := map[string]int{"gpu0": 0, "gpu1": 1, "gpu4": 4, "gpu5": 5}
-	rootByOrdinal, componentOrdinal := buildComponentOrdinals(componentToUUIDs, deviceIndexMap)
-	if rootByOrdinal[0] != 0 || rootByOrdinal[1] != 7 {
-		t.Fatalf("rootByOrdinal = %v, want {0:0, 1:7}", rootByOrdinal)
-	}
-	// componentOrdinal is the inverse: root 0 → ordinal 0, root 7 → ordinal 1.
+	componentOrdinal, componentDomain, rootByDomain := buildComponentDomains(componentToUUIDs, deviceIndexMap, nil)
 	if componentOrdinal[0] != 0 || componentOrdinal[7] != 1 {
 		t.Fatalf("componentOrdinal = %v, want {0:0, 7:1}", componentOrdinal)
 	}
+	if componentDomain[0] != "ord:0" || componentDomain[7] != "ord:1" {
+		t.Fatalf("componentDomain = %v, want {0:ord:0, 7:ord:1}", componentDomain)
+	}
+	if rootByDomain["ord:0"] != 0 || rootByDomain["ord:1"] != 7 {
+		t.Fatalf("rootByDomain = %v, want {ord:0:0, ord:1:7}", rootByDomain)
+	}
 }
 
-func Test_buildComponentOrdinals_UnresolvableSortsLast(t *testing.T) {
+func Test_buildComponentDomains_RailKeyed(t *testing.T) {
+	// With a full rail map, signatures are rail-sets — NOT positional. This is the
+	// heterogeneity-correct path: the SAME rail-set yields the SAME signature
+	// regardless of which index range it occupies.
+	componentToUUIDs := map[int][]string{
+		7: {"gpu4", "gpu5"}, // rails rA,rB
+		0: {"gpu0", "gpu1"}, // rails rC,rD
+	}
+	deviceIndexMap := map[string]int{"gpu0": 0, "gpu1": 1, "gpu4": 4, "gpu5": 5}
+	rail := map[string]string{"gpu0": "rC", "gpu1": "rD", "gpu4": "rA", "gpu5": "rB"}
+	_, componentDomain, rootByDomain := buildComponentDomains(componentToUUIDs, deviceIndexMap, rail)
+	if componentDomain[7] != "rail:rA,rB" || componentDomain[0] != "rail:rC,rD" {
+		t.Fatalf("componentDomain = %v, want rail-set signatures", componentDomain)
+	}
+	if rootByDomain["rail:rA,rB"] != 7 || rootByDomain["rail:rC,rD"] != 0 {
+		t.Fatalf("rootByDomain = %v, want rail→root", rootByDomain)
+	}
+	// Partial rail map (gpu5 missing) → all-or-nothing falls back to ordinals.
+	partial := map[string]string{"gpu0": "rC", "gpu1": "rD", "gpu4": "rA"}
+	_, dom2, _ := buildComponentDomains(componentToUUIDs, deviceIndexMap, partial)
+	if dom2[0] != "ord:0" || dom2[7] != "ord:1" {
+		t.Fatalf("partial rail map must fall back to ordinals, got %v", dom2)
+	}
+}
+
+func Test_buildComponentDomains_UnresolvableSortsLast(t *testing.T) {
 	// Defensive: a component whose UUIDs are absent from deviceIndexMap (min stays
 	// MaxInt) must sort LAST, not steal ordinal 0 from a real component.
 	componentToUUIDs := map[int][]string{
@@ -261,9 +289,9 @@ func Test_buildComponentOrdinals_UnresolvableSortsLast(t *testing.T) {
 		0: {"gpu0", "gpu1"},     // min 0 → ordinal 0
 	}
 	deviceIndexMap := map[string]int{"gpu0": 0, "gpu1": 1}
-	rootByOrdinal, componentOrdinal := buildComponentOrdinals(componentToUUIDs, deviceIndexMap)
-	if rootByOrdinal[0] != 0 {
-		t.Fatalf("ordinal 0 = root %d, want real component root 0", rootByOrdinal[0])
+	componentOrdinal, _, rootByDomain := buildComponentDomains(componentToUUIDs, deviceIndexMap, nil)
+	if rootByDomain["ord:0"] != 0 {
+		t.Fatalf("ord:0 = root %d, want real component root 0", rootByDomain["ord:0"])
 	}
 	if componentOrdinal[5] != 1 {
 		t.Fatalf("unresolvable component root 5 = ordinal %d, want last (1)", componentOrdinal[5])
@@ -346,65 +374,69 @@ func Test_computeTieredComponents(t *testing.T) {
 	}
 }
 
-func Test_buildComponentOrdinals_Deterministic(t *testing.T) {
+func Test_buildComponentDomains_Deterministic(t *testing.T) {
 	// Equal min is impossible for disjoint components, but the root tiebreak must
 	// keep ordinals deterministic across runs regardless of map iteration order.
 	componentToUUIDs := map[int][]string{2: {"a"}, 9: {"b"}, 4: {"c"}}
 	deviceIndexMap := map[string]int{"a": 10, "b": 30, "c": 20}
 	for i := 0; i < 8; i++ {
-		rbo, _ := buildComponentOrdinals(componentToUUIDs, deviceIndexMap)
-		if rbo[0] != 2 || rbo[1] != 4 || rbo[2] != 9 {
-			t.Fatalf("non-deterministic ordinals: %v", rbo)
+		_, _, rbd := buildComponentDomains(componentToUUIDs, deviceIndexMap, nil)
+		if rbd["ord:0"] != 2 || rbd["ord:1"] != 4 || rbd["ord:2"] != 9 {
+			t.Fatalf("non-deterministic domains: %v", rbd)
 		}
 	}
 }
 
-// twoOrdinalNode builds a NodeInfo with stable ordinals: ordinal 0 = component
-// root 0 (gpu0/gpu1, ids 0/1), ordinal 1 = component root 2 (gpu2/gpu3, ids 2/3).
-func twoOrdinalNode() *NodeInfo {
+// twoDomainNode builds a NodeInfo with stable domains: ord:0 = component root 0
+// (gpu0/gpu1, ids 0/1), ord:1 = component root 2 (gpu2/gpu3, ids 2/3).
+func twoDomainNode() *NodeInfo {
 	n := twoComponentNode()
 	n.deviceIndexMap = map[string]int{"gpu0": 0, "gpu1": 1, "gpu2": 2, "gpu3": 3}
-	n.nvlinkRootByOrdinal, n.nvlinkComponentOrdinal = buildComponentOrdinals(n.nvlinkComponentToUUIDs, n.deviceIndexMap)
+	n.nvlinkComponentOrdinal, n.nvlinkComponentDomain, n.nvlinkRootByDomain =
+		buildComponentDomains(n.nvlinkComponentToUUIDs, n.deviceIndexMap, nil)
 	return n
 }
 
-func Test_ComponentByOrdinal(t *testing.T) {
-	n := twoOrdinalNode()
-	if root, ok := n.ComponentByOrdinal(0); !ok || root != 0 {
-		t.Fatalf("ComponentByOrdinal(0) = (%d,%v), want (0,true)", root, ok)
+func Test_ComponentByDomain(t *testing.T) {
+	n := twoDomainNode()
+	if root, ok := n.ComponentByDomain("ord:0"); !ok || root != 0 {
+		t.Fatalf("ComponentByDomain(ord:0) = (%d,%v), want (0,true)", root, ok)
 	}
-	if root, ok := n.ComponentByOrdinal(1); !ok || root != 2 {
-		t.Fatalf("ComponentByOrdinal(1) = (%d,%v), want (2,true)", root, ok)
+	if root, ok := n.ComponentByDomain("ord:1"); !ok || root != 2 {
+		t.Fatalf("ComponentByDomain(ord:1) = (%d,%v), want (2,true)", root, ok)
 	}
-	if _, ok := n.ComponentByOrdinal(5); ok {
-		t.Fatalf("ComponentByOrdinal(5) should be absent")
+	if _, ok := n.ComponentByDomain("ord:5"); ok {
+		t.Fatalf("ComponentByDomain(ord:5) should be absent")
+	}
+	if _, ok := n.ComponentByDomain(""); ok {
+		t.Fatalf("ComponentByDomain(empty) should be absent")
 	}
 }
 
-func Test_OrdinalOfUUIDs(t *testing.T) {
-	n := twoOrdinalNode()
-	// Sibling's UUIDs {gpu2,gpu3} live in component root 2 → ordinal 1.
-	if ord, ok := n.OrdinalOfUUIDs([]string{"gpu2", "gpu3"}); !ok || ord != 1 {
-		t.Fatalf("OrdinalOfUUIDs([gpu2,gpu3]) = (%d,%v), want (1,true)", ord, ok)
+func Test_DomainOfUUIDs(t *testing.T) {
+	n := twoDomainNode()
+	// Sibling's UUIDs {gpu2,gpu3} live in component root 2 → ord:1.
+	if dom, ok := n.DomainOfUUIDs([]string{"gpu2", "gpu3"}); !ok || dom != "ord:1" {
+		t.Fatalf("DomainOfUUIDs([gpu2,gpu3]) = (%q,%v), want (ord:1,true)", dom, ok)
 	}
-	// {gpu0,gpu1} → ordinal 0.
-	if ord, ok := n.OrdinalOfUUIDs([]string{"gpu0", "gpu1"}); !ok || ord != 0 {
-		t.Fatalf("OrdinalOfUUIDs([gpu0,gpu1]) = (%d,%v), want (0,true)", ord, ok)
+	// {gpu0,gpu1} → ord:0.
+	if dom, ok := n.DomainOfUUIDs([]string{"gpu0", "gpu1"}); !ok || dom != "ord:0" {
+		t.Fatalf("DomainOfUUIDs([gpu0,gpu1]) = (%q,%v), want (ord:0,true)", dom, ok)
 	}
 	// Duplicate UUIDs (multi-container sharing a card) collapse, don't skew.
-	if ord, ok := n.OrdinalOfUUIDs([]string{"gpu2", "gpu2", "gpu3"}); !ok || ord != 1 {
-		t.Fatalf("OrdinalOfUUIDs(dup) = (%d,%v), want (1,true)", ord, ok)
+	if dom, ok := n.DomainOfUUIDs([]string{"gpu2", "gpu2", "gpu3"}); !ok || dom != "ord:1" {
+		t.Fatalf("DomainOfUUIDs(dup) = (%q,%v), want (ord:1,true)", dom, ok)
 	}
-	// Majority wins when UUIDs span ordinals (degraded sibling): 1×ord0 + 2×ord1.
-	if ord, ok := n.OrdinalOfUUIDs([]string{"gpu0", "gpu2", "gpu3"}); !ok || ord != 1 {
-		t.Fatalf("OrdinalOfUUIDs(spanning) = (%d,%v), want (1,true)", ord, ok)
+	// Majority wins when UUIDs span domains (degraded sibling): 1×ord:0 + 2×ord:1.
+	if dom, ok := n.DomainOfUUIDs([]string{"gpu0", "gpu2", "gpu3"}); !ok || dom != "ord:1" {
+		t.Fatalf("DomainOfUUIDs(spanning) = (%q,%v), want (ord:1,true)", dom, ok)
 	}
-	// Empty / unknown UUIDs → no ordinal.
-	if _, ok := n.OrdinalOfUUIDs(nil); ok {
-		t.Fatalf("OrdinalOfUUIDs(nil) should be false")
+	// Empty / unknown UUIDs → no domain.
+	if _, ok := n.DomainOfUUIDs(nil); ok {
+		t.Fatalf("DomainOfUUIDs(nil) should be false")
 	}
-	if _, ok := n.OrdinalOfUUIDs([]string{"ghost"}); ok {
-		t.Fatalf("OrdinalOfUUIDs(unknown) should be false")
+	if _, ok := n.DomainOfUUIDs([]string{"ghost"}); ok {
+		t.Fatalf("DomainOfUUIDs(unknown) should be false")
 	}
 }
 
