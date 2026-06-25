@@ -680,7 +680,8 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 			ret.maxNUMAComponentSize, ret.maxLinkComponentSize = computeTieredComponents(ret.deviceList)
 		ret.nvlinkComponentToUUIDs = buildComponentIndex(ret.nvlinkComponentByUUID)
 		// Fake nodes have no rail-map source → positional-ordinal domain keys.
-		ret.nvlinkComponentOrdinal, ret.nvlinkComponentDomain, ret.nvlinkRootByDomain = buildComponentDomains(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap, nil)
+		ret.nvlinkComponentOrdinal, ret.nvlinkComponentDomain, ret.nvlinkRootByDomain =
+			buildComponentDomains(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap, nil)
 	}
 	ret.numaTopology = false
 	for _, d := range devices {
@@ -866,7 +867,8 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 		ret.nvlinkComponentByUUID, ret.maxNVLinkComponentSize, ret.maxSwitchComponentSize,
 			ret.maxNUMAComponentSize, ret.maxLinkComponentSize = computeTieredComponents(gatherInfo.DeviceList)
 		ret.nvlinkComponentToUUIDs = buildComponentIndex(ret.nvlinkComponentByUUID)
-		ret.nvlinkComponentOrdinal, ret.nvlinkComponentDomain, ret.nvlinkRootByDomain = buildComponentDomains(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap, gatherInfo.GPURail)
+		ret.nvlinkComponentOrdinal, ret.nvlinkComponentDomain, ret.nvlinkRootByDomain =
+			buildComponentDomains(ret.nvlinkComponentToUUIDs, ret.deviceIndexMap, gatherInfo.GPURail)
 	}
 	if ret.numaTopology {
 		ret.maxNUMAGroupSize = computeMaxNUMAGroupSize(gatherInfo.DeviceMap)
@@ -1955,17 +1957,9 @@ func (n *NodeInfo) GangAnchorComponent(gangName string, owner *v1.OwnerReference
 // absent or unparsable (a malformed sibling simply doesn't vote — never an error
 // that blocks the pod being scheduled).
 func PodPreAllocatedUUIDs(pod *corev1.Pod) []string {
-	val, ok := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
-	if !ok || len(val) == 0 {
-		return nil
-	}
-	var pdc PodDeviceClaim
-	if err := pdc.UnmarshalText(val); err != nil {
-		return nil
-	}
 	seen := make(map[string]struct{})
 	var uuids []string
-	for _, cdc := range pdc {
+	for _, cdc := range GetPodDeviceClaim(pod) {
 		for _, dc := range cdc.DeviceClaims {
 			if dc.Uuid == "" {
 				continue
