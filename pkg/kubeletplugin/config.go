@@ -10,16 +10,14 @@ import (
 )
 
 type Flags struct {
-	KubeClientConfig pkgflags.KubeClientConfig
-
-	//Namespace                     string
-	//ImageName                     string
+	KubeClientConfig              pkgflags.KubeClientConfig
 	HttpEndpoint                  string
 	MetricsPath                   string
 	NodeName                      string
 	CdiRoot                       string
 	ContainerDriverRoot           string
 	HostDriverRoot                string
+	HostRoot                      string
 	NvidiaCDIHookPath             string
 	KubeletRegistrarDirectoryPath string
 	KubeletPluginsDirectoryPath   string

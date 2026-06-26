@@ -213,6 +213,8 @@ spec:
               value: void
             - name: CDI_ROOT
               value: /var/run/cdi
+            - name: HOST_ROOT
+              value: /host-root
             - name: HEALTHCHECK_PORT
               value: "4567"
             - name: NVIDIA_DRIVER_CAPABILITIES
@@ -261,6 +263,21 @@ spec:
               mountPath: /sys/fs/cgroup
             - mountPath: /var/lib/kubelet
               name: kubelet
+            # PassthroughSupport
+            - name: host-root
+              mountPath: /host-root
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules/
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: sysfs
+              mountPath: /sys/
+              mountPropagation: Bidirectional
+            - name: procfs
+              mountPath: /proc/
+              mountPropagation: Bidirectional
       dnsPolicy: ClusterFirst
       # Mark this pod as a critical add-on; when enabled, the critical add-on
       # scheduler reserves resources for critical add-on pods so that they can
@@ -304,6 +321,27 @@ spec:
           hostPath:
             path: /var/lib/kubelet
             type: ""
+        # PassthroughSupport
+        # system commands against the host FS. For example, to test and load the vfio-pci
+        # module variant for a GPU.
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        # This is needed by `https://github.com/NVIDIA/go-nvlib/pkg/nvpassthrough` pkg
+        # to detect the vfio-pci driver variant to use with a GPU.
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules/
+            type: Directory
+        - name: sysfs
+          hostPath:
+            path: /sys/
+            type: Directory
+        - name: procfs
+          hostPath:
+            path: /proc/
+            type: Directory
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
