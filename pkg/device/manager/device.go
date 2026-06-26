@@ -283,7 +283,6 @@ func (m *DeviceManager) initDevices() (err error) {
 		if err != nil {
 			return fmt.Errorf("error getting info for GPU %d: %w", i, err)
 		}
-		numaNode, _ := gpuInfo.GetNumaNode()
 
 		healthy := true
 		if excludeDevices.HasIntID(i) {
@@ -310,7 +309,7 @@ func (m *DeviceManager) initDevices() (err error) {
 		}
 		gpuDevice := &Device{GPU: &GPUDevice{
 			GpuInfo:  gpuInfo,
-			NumaNode: int(numaNode),
+			NumaNode: int(gpuInfo.GetNumaNode()),
 			Paths:    paths,
 			Healthy:  healthy,
 			Links:    p2pLinks,

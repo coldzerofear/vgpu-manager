@@ -12,13 +12,13 @@ import (
 	"github.com/NVIDIA/go-nvlib/pkg/nvpassthrough"
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/google/uuid"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 )
 
 type GPUMinor = int
@@ -120,7 +120,6 @@ func (l deviceLib) GetGpuDeviceInfo(index int, device nvdev.Device) (*GpuDeviceI
 	return &GpuDeviceInfo{
 		GpuInfo:     gpuInfo,
 		vfioEnabled: false,
-		pciBusID:    links.PciInfo(gpuInfo.PciInfo).BusID(),
 	}, nil
 }
 
@@ -150,7 +149,7 @@ func (l deviceLib) GetMigDeviceInfos(gpuInfo *GpuDeviceInfo) (map[string]*MigDev
 			GIID:           int(info.GiInfo.Id),
 			PlacementStart: int(info.Placement.Start),
 			PlacementSize:  int(info.Placement.Size),
-			pciBusID:       gpuInfo.pciBusID,
+			pciBusID:       gpuInfo.PciBusID,
 			pcieRootAttr:   gpuInfo.PcieRootAttr,
 		}
 	}
@@ -192,7 +191,7 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 		}
 		// Store gpuInfo object for later re-use (lookup by UUID).
 		l.gpuInfosByUUID[gpuInfo.UUID] = gpuInfo
-		l.gpuUUIDbyPCIBusID[gpuInfo.pciBusID] = gpuInfo.UUID
+		l.gpuUUIDbyPCIBusID[gpuInfo.PciBusID] = gpuInfo.UUID
 
 		if featuregates.Enabled(featuregates.DynamicMIG) {
 			dynamicMIGCapable, err := isDynamicMIGCapable(gpuInfo, d)
@@ -400,6 +399,14 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 		klog.Warningf("error getting PCIe root for device %q, continuing without attribute: %v", device.Address, err)
 	}
 
+	var numaNodeAttr *deviceattribute.DeviceAttribute
+	if device.NumaNode >= 0 {
+		numaNodeAttr = &deviceattribute.DeviceAttribute{
+			Name:  nvidia.StandardDeviceAttributeNumaNode,
+			Value: resourceapi.DeviceAttribute{IntValue: ptr.To(int64(device.NumaNode))},
+		}
+	}
+
 	_, memoryBytes := device.Resources.GetTotalAddressableMemory(true)
 
 	vfioModule, err := l.nvpasst.FindBestVFIOVariant(device.Address)
@@ -417,6 +424,7 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 		PciBusID:               device.Address,
 		pciBusIDAttr:           pciBusIDAttr,
 		pcieRootAttr:           pcieRootAttr,
+		numaNodeAttr:           numaNodeAttr,
 		deviceID:               fmt.Sprintf("0x%04x", device.Device),
 		vendorID:               fmt.Sprintf("0x%04x", device.Vendor),
 		numaNode:               device.NumaNode,
@@ -474,7 +482,7 @@ func (l deviceLib) discoverVfioDevice(gpuInfo *GpuDeviceInfo) (*AllocatableDevic
 		return nil, fmt.Errorf("error getting GPU PCI devices: %w", err)
 	}
 	for idx, gpu := range gpus {
-		if gpu.Address != gpuInfo.pciBusID {
+		if gpu.Address != gpuInfo.PciBusID {
 			continue
 		}
 		vfioDeviceInfo, err := l.getVfioDeviceInfo(idx, gpu)
@@ -486,7 +494,7 @@ func (l deviceLib) discoverVfioDevice(gpuInfo *GpuDeviceInfo) (*AllocatableDevic
 			Vfio: vfioDeviceInfo,
 		}, nil
 	}
-	return nil, fmt.Errorf("error discovering VFIO device by PCIe bus ID: %s", gpuInfo.pciBusID)
+	return nil, fmt.Errorf("error discovering VFIO device by PCIe bus ID: %s", gpuInfo.PciBusID)
 }
 
 // Tear down any MIG devices that are present and don't belong to completed

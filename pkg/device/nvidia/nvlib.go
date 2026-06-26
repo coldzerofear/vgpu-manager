@@ -29,6 +29,7 @@ import (
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/klog/v2"
 )
@@ -57,6 +58,7 @@ type GpuInfo struct {
 	MigCapable            bool                             `json:"-"`
 	MigEnabled            bool                             `json:"-"`
 	PciInfo               nvml.PciInfo                     `json:"-"`
+	PciBusID              string                           `json:"-"`
 	Memory                nvml.Memory                      `json:"-"`
 	ProductName           string                           `json:"-"`
 	Brand                 string                           `json:"-"`
@@ -66,6 +68,7 @@ type GpuInfo struct {
 	DriverVersion         DriverVersion                    `json:"-"`
 	PciBusIDAttr          *deviceattribute.DeviceAttribute `json:"-"`
 	PcieRootAttr          *deviceattribute.DeviceAttribute `json:"-"`
+	NumaNodeAttr          *deviceattribute.DeviceAttribute `json:"-"`
 	AddressingMode        *string                          `json:"-"`
 }
 
@@ -84,9 +87,8 @@ func (g *GpuInfo) GetPaths() ([]string, error) {
 }
 
 // GetNumaNode returns the NUMA node associated with the GPU device
-func (g GpuInfo) GetNumaNode() (int32, bool) {
-	node := links.PciInfo(g.PciInfo).NumaNode()
-	return node, node >= 0
+func (g GpuInfo) GetNumaNode() int32 {
+	return links.PciInfo(g.PciInfo).NumaNode()
 }
 
 type MigInfo struct {
@@ -287,6 +289,8 @@ func (l DeviceLib) GetDriverVersion() (DriverVersion, error) {
 	return driverVersion, nil
 }
 
+const StandardDeviceAttributeNumaNode resourceapi.QualifiedName = deviceattribute.StandardDeviceAttributePrefix + "numaNode"
+
 func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) {
 	//if err := l.NvmlInit(); err != nil {
 	//	return nil, err
@@ -344,7 +348,6 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	if err != nil {
 		return nil, err
 	}
-	pciBusID := links.PciInfo(pciInfo).BusID()
 
 	// Get the memory-addressing mode supported by the device.
 	// On coherent-memory systems, the possible modes are:
@@ -359,6 +362,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		addressingMode = &mode
 	}
 
+	pciBusID := links.PciInfo(pciInfo).BusID()
 	var pciBusIDAttr *deviceattribute.DeviceAttribute
 	attr, err := deviceattribute.GetPCIBusIDAttribute(pciBusID)
 	if err != nil {
@@ -433,6 +437,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		MigCapable:            migCapable,
 		MigEnabled:            migEnabled,
 		PciInfo:               pciInfo,
+		PciBusID:              pciBusID,
 		Memory:                memory,
 		ProductName:           productName,
 		Brand:                 brand,
@@ -443,6 +448,21 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		PcieRootAttr:          pcieRootAttr,
 		DriverVersion:         driverVersion,
 		AddressingMode:        addressingMode,
+	}
+
+	var numaNodeId = int64(-1)
+	if numaId, ret := device.GetNumaNodeId(); ret == nvml.SUCCESS {
+		if numaId >= 0 {
+			numaNodeId = int64(numaId)
+		}
+	} else if numaId := gpuInfo.GetNumaNode(); numaId >= 0 {
+		numaNodeId = int64(numaId)
+	}
+	if numaNodeId >= 0 {
+		gpuInfo.NumaNodeAttr = &deviceattribute.DeviceAttribute{
+			Name:  StandardDeviceAttributeNumaNode,
+			Value: resourceapi.DeviceAttribute{IntValue: &numaNodeId},
+		}
 	}
 
 	return gpuInfo, nil
