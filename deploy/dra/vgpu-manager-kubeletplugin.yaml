@@ -151,7 +151,7 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
-          command: [bash, -c, /usr/bin/kubelet-plugin-prestart.sh]
+          command: [bash, /usr/bin/kubelet-plugin-prestart.sh]
           env:
             - name: NVIDIA_DRIVER_ROOT
               value: /
