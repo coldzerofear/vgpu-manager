@@ -135,9 +135,14 @@ kubeletPlugin:
       # Positive = literal port, 0 = random port, negative = healthcheck disabled.
       healthcheckPort: 4567
       # Feature gates of the kubelet-plugin, rendered into the FEATURE_GATES env var.
+      # Enabling PassthroughSupport (vfio-pci) additionally mounts the host root, lib-modules,
+      # sysfs and procfs into the plugin and sets the HOST_ROOT env var. Note PassthroughSupport
+      # is mutually exclusive with VGPUSupport (default on), DynamicMIG and NVMLDeviceHealthCheck,
+      # so disable those when turning it on.
       featureGates:
         SharedSMUtilizationWatcher: true
         DevicePluginClientMode: false
+        # PassthroughSupport: false
       # Additional environment variables appended to the kubelet-plugin container.
       env: []
       logLevel: 6

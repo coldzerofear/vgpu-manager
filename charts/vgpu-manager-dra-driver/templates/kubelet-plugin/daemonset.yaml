@@ -8,9 +8,12 @@
 {{- $managerDir := .Values.kubeletPlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
 {{- $cdiRoot := .Values.kubeletPlugin.cdiRoot | default "/var/run/cdi" }}
 {{- $healthPort := $plugin.healthcheckPort | default 4567 }}
+{{- $fg := $plugin.featureGates | default dict }}
 {{- $gates := list }}
-{{- range $k, $v := $plugin.featureGates }}{{ $gates = append $gates (printf "%s=%v" $k $v) }}{{- end }}
+{{- range $k, $v := $fg }}{{ $gates = append $gates (printf "%s=%v" $k $v) }}{{- end }}
 {{- $featureGates := sortAlpha $gates | join "," }}
+{{- /* PassthroughSupport (vfio-pci) requires extra host mounts and the HOST_ROOT env. */}}
+{{- $passthrough := and (hasKey $fg "PassthroughSupport") (index $fg "PassthroughSupport") }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -126,8 +129,10 @@ spec:
               value: void
             - name: CDI_ROOT
               value: {{ $cdiRoot | quote }}
+            {{- if $passthrough }}
             - name: HOST_ROOT
               value: /host-root
+            {{- end }}
             - name: HEALTHCHECK_PORT
               value: {{ $healthPort | quote }}
             - name: NVIDIA_DRIVER_CAPABILITIES
@@ -201,6 +206,7 @@ spec:
               mountPath: /sys/fs/cgroup
             - name: kubelet
               mountPath: /var/lib/kubelet
+            {{- if $passthrough }}
             # PassthroughSupport: detect/load the vfio-pci module variant for a GPU.
             - name: host-root
               mountPath: /host-root
@@ -216,6 +222,7 @@ spec:
             - name: procfs
               mountPath: /proc/
               mountPropagation: Bidirectional
+            {{- end }}
       volumes:
         - name: plugins-registry
           hostPath:
@@ -250,6 +257,7 @@ spec:
         - name: kubelet
           hostPath:
             path: {{ $kubeletRoot }}
+        {{- if $passthrough }}
         # PassthroughSupport: the root filesystem of the host, used to execute system commands
         # against the host FS (e.g. to test and load the vfio-pci module variant for a GPU).
         - name: host-root
@@ -270,4 +278,5 @@ spec:
           hostPath:
             path: /proc/
             type: Directory
+        {{- end }}
 {{- end }}
