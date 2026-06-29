@@ -1,11 +1,16 @@
 {{- if .Values.kubeletPlugin.enabled -}}
+{{- $init := .Values.kubeletPlugin.containers.init }}
+{{- $plugin := .Values.kubeletPlugin.containers.plugin }}
 {{- $driverRoot := .Values.kubeletPlugin.nvidiaDriverRoot | default "/" }}
 {{- $kubeletRoot := .Values.kubeletPlugin.kubeletRootDir | default "/var/lib/kubelet" | trimSuffix "/" }}
 {{- $registrarDir := .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | default "/var/lib/kubelet/plugins_registry" }}
 {{- $pluginsDir := .Values.kubeletPlugin.kubeletPluginsDirectoryPath | default "/var/lib/kubelet/plugins" }}
 {{- $managerDir := .Values.kubeletPlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
 {{- $cdiRoot := .Values.kubeletPlugin.cdiRoot | default "/var/run/cdi" }}
-{{- $healthPort := .Values.kubeletPlugin.kubeletPlugin.healthcheckPort | default 4567 }}
+{{- $healthPort := $plugin.healthcheckPort | default 4567 }}
+{{- $gates := list }}
+{{- range $k, $v := $plugin.featureGates }}{{ $gates = append $gates (printf "%s=%v" $k $v) }}{{- end }}
+{{- $featureGates := sortAlpha $gates | join "," }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -16,8 +21,9 @@ metadata:
     {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
 spec:
   revisionHistoryLimit: 10
-  updateStrategy:
-    type: RollingUpdate
+  {{- with .Values.kubeletPlugin.updateStrategy }}
+  updateStrategy: {{ toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
@@ -43,7 +49,7 @@ spec:
       terminationGracePeriodSeconds: {{ .Values.kubeletPlugin.terminationGracePeriodSeconds }}
       hostPID: true
       dnsPolicy: ClusterFirst
-      securityContext: {}
+      securityContext: {{ toYaml .Values.kubeletPlugin.podSecurityContext | nindent 8 }}
       {{- with .Values.kubeletPlugin.nodeSelector }}
       nodeSelector: {{ toYaml . | nindent 8 }}
       {{- end }}
@@ -57,8 +63,7 @@ spec:
         - name: init-container
           image: {{ include "vgpu-manager-dra-driver.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
-          securityContext:
-            privileged: true
+          securityContext: {{ toYaml $init.securityContext | nindent 12 }}
           command: [bash, /usr/bin/kubelet-plugin-prestart.sh]
           env:
             - name: NVIDIA_DRIVER_ROOT
@@ -83,9 +88,8 @@ spec:
           image: {{ include "vgpu-manager-dra-driver.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command: [bash, -c, /usr/bin/install_files.sh]
-          resources: {{ toYaml .Values.kubeletPlugin.init.resources | nindent 12 }}
-          securityContext:
-            privileged: true
+          resources: {{ toYaml $init.resources | nindent 12 }}
+          securityContext: {{ toYaml $init.securityContext | nindent 12 }}
           volumeMounts:
             - name: manager
               mountPath: /etc/vgpu-manager
@@ -106,14 +110,14 @@ spec:
                 sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
-              kubelet-plugin -v {{ .Values.kubeletPlugin.kubeletPlugin.logLevel | default 6 }}
+              kubelet-plugin -v {{ $plugin.logLevel | default 6 }}
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: FEATURE_GATES
-              value: {{ .Values.kubeletPlugin.kubeletPlugin.featureGates | quote }}
+              value: {{ $featureGates | quote }}
             - name: MASK_NVIDIA_DRIVER_PARAMS
               value: {{ .Values.kubeletPlugin.maskNvidiaDriverParams | quote }}
             - name: NVIDIA_DRIVER_ROOT
@@ -138,11 +142,25 @@ spec:
               value: {{ $registrarDir | quote }}
             - name: KUBELET_PLUGINS_DIRECTORY_PATH
               value: {{ $pluginsDir | quote }}
-          {{- with .Values.kubeletPlugin.kubeletPlugin.env }}
+            {{- if .Values.kubeletPlugin.nvidiaCDIHookPath }}
+            - name: NVIDIA_CDI_HOOK_PATH
+              value: {{ .Values.kubeletPlugin.nvidiaCDIHookPath | quote }}
+            {{- end }}
+            {{- if .Values.kubeletPlugin.cgroupDriver }}
+            - name: CGROUP_DRIVER
+              value: {{ .Values.kubeletPlugin.cgroupDriver | quote }}
+            {{- end }}
+            {{- if .Values.kubeletPlugin.metrics.enabled }}
+            - name: HTTP_ENDPOINT
+              value: {{ .Values.kubeletPlugin.metrics.httpEndpoint | quote }}
+            - name: METRICS_PATH
+              value: {{ .Values.kubeletPlugin.metrics.metricsPath | quote }}
+            {{- end }}
+          {{- with $plugin.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          securityContext: {{ toYaml .Values.kubeletPlugin.kubeletPlugin.securityContext | nindent 12 }}
-          resources: {{ toYaml .Values.kubeletPlugin.kubeletPlugin.resources | nindent 12 }}
+          securityContext: {{ toYaml $plugin.securityContext | nindent 12 }}
+          resources: {{ toYaml $plugin.resources | nindent 12 }}
           {{- if gt (int $healthPort) 0 }}
           startupProbe:
             grpc:

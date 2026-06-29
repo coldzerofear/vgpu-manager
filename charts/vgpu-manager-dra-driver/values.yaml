@@ -56,6 +56,15 @@ kubeletPlugin:
     - key: nvidia.com/gpu
       operator: Exists
       effect: NoSchedule
+  # Rollout strategy for the DaemonSet. As with the NVIDIA DRA driver, a node-critical GPU
+  # driver is rolled out with maxUnavailable 100% so all nodes update at once.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
+  # Pod-level security context for the kubelet-plugin pods.
+  podSecurityContext: {}
+  # Node labels used to select the nodes the DRA driver runs on. (see nodeSelector above)
   # Additional affinity rules for the kubelet-plugin pods. Empty by default; uncomment the
   # NFD / GPU Operator expressions below to only run on detected NVIDIA GPU nodes.
   affinity: {}
@@ -73,6 +82,9 @@ kubeletPlugin:
   # If the NVIDIA GPU driver is managed using the NVIDIA GPU Driver Container, this is
   # typically /run/nvidia/driver. For a driver installed directly on the host, use "/".
   nvidiaDriverRoot: "/"
+  # Optional absolute path to the nvidia-cdi-hook executable on the host, used in the generated
+  # CDI specification. Empty lets the plugin copy the bundled nvidia-cdi-hook binary. (code default: "")
+  nvidiaCDIHookPath: ""
   # The root directory configured in the start command of kubelet (default: /var/lib/kubelet)
   kubeletRootDir: "/var/lib/kubelet"
   # The kubelet plugin registration socket directory on the host.
@@ -83,36 +95,51 @@ kubeletPlugin:
   vgpuManagerDir: "/etc/vgpu-manager"
   # CDI specification directory on the host.
   cdiRoot: "/var/run/cdi"
+  # Cgroup driver for the container environment. Empty lets the plugin auto-detect. (supported values: systemd | cgroupfs)
+  cgroupDriver: ""
   # Conditionally mask /proc/driver/nvidia/params to prevent the plugin from recreating
   # missing GPU device nodes (needed under nvkind). Set to "true" to enable.
   maskNvidiaDriverParams: ""
-  # init container responsible for installing the host-side helper files.
-  init:
-    resources:
-      requests:
-        cpu: 10m
-        memory: 15Mi
-  # main kubelet-plugin container.
-  kubeletPlugin:
-    # gRPC health service port checked by the startup/liveness probes.
-    healthcheckPort: 4567
-    # Supported feature gates of the kubelet-plugin.
-    featureGates: "SharedSMUtilizationWatcher=true,DevicePluginClientMode=false"
-    # Additional environment variables appended to the kubelet-plugin container.
-    env: []
-    logLevel: 6
-    # Container security context. Privileged mode is required to manage GPU device nodes.
-    securityContext:
-      privileged: true
-    # kubelet-plugin container requests resources.
-    # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
-    resources: {}
-#      requests:
-#        cpu: 200m
-#        memory: 256Mi
-#      limits:
-#        cpu: 2000m
-#        memory: 2Gi
+  # Prometheus metrics HTTP server for the kubelet-plugin (disabled by default).
+  metrics:
+    enabled: false
+    # The TCP address the metrics HTTP server listens on (HTTP_ENDPOINT).
+    httpEndpoint: ":8080"
+    # The HTTP path where Prometheus metrics are exposed (METRICS_PATH).
+    metricsPath: "/metrics"
+  containers:
+    # init containers (driver prestart + host-side file install). Privileged is required.
+    init:
+      securityContext:
+        privileged: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 15Mi
+    # main kubelet-plugin container.
+    plugin:
+      # gRPC health service port checked by the startup/liveness probes.
+      # Positive = literal port, 0 = random port, negative = healthcheck disabled.
+      healthcheckPort: 4567
+      # Feature gates of the kubelet-plugin, rendered into the FEATURE_GATES env var.
+      featureGates:
+        SharedSMUtilizationWatcher: true
+        DevicePluginClientMode: false
+      # Additional environment variables appended to the kubelet-plugin container.
+      env: []
+      logLevel: 6
+      # Container security context. Privileged mode is required to manage GPU device nodes.
+      securityContext:
+        privileged: true
+      # kubelet-plugin container requests resources.
+      # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
+      resources: {}
+#        requests:
+#          cpu: 200m
+#          memory: 256Mi
+#        limits:
+#          cpu: 2000m
+#          memory: 2Gi
 
 # DeviceClass objects published by the DRA driver. The driver advertises devices under the
 # `driverName` driver; each DeviceClass selects a device `type` via a CEL expression.
