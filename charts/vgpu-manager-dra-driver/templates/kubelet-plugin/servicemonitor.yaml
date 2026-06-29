@@ -1,0 +1,37 @@
+{{- if and .Values.kubeletPlugin.enabled .Values.kubeletPlugin.metrics.enabled .Values.kubeletPlugin.metrics.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") -}}
+{{- $sm := .Values.kubeletPlugin.metrics.serviceMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+    {{- with $sm.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  endpoints:
+    - path: {{ .Values.kubeletPlugin.metrics.metricsPath | default "/metrics" }}
+      port: metrics
+      {{- with $sm.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with $sm.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with $sm.relabelings }}
+      relabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $sm.metricRelabelings }}
+      metricRelabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+      {{- include "vgpu-manager-dra-driver.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -103,10 +103,23 @@ kubeletPlugin:
   # Prometheus metrics HTTP server for the kubelet-plugin (disabled by default).
   metrics:
     enabled: false
-    # The TCP address the metrics HTTP server listens on (HTTP_ENDPOINT).
+    # The TCP address the metrics HTTP server listens on (HTTP_ENDPOINT). The port is reused for
+    # the metrics Service and the named container port.
     httpEndpoint: ":8080"
     # The HTTP path where Prometheus metrics are exposed (METRICS_PATH).
     metricsPath: "/metrics"
+    # Prometheus Operator ServiceMonitor. Only created when metrics.enabled is true and the
+    # monitoring.coreos.com/v1 ServiceMonitor CRD is present in the cluster.
+    serviceMonitor:
+      enabled: true
+      # Scrape interval and timeout. Empty uses the Prometheus default.
+      interval: ""
+      scrapeTimeout: ""
+      # Extra labels added to the ServiceMonitor (e.g. to match the Prometheus release selector).
+      additionalLabels: {}
+      # Prometheus relabeling rules applied before / after scraping.
+      relabelings: []
+      metricRelabelings: []
   containers:
     # init containers (driver prestart + host-side file install). Privileged is required.
     init:

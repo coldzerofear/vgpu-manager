@@ -161,6 +161,12 @@ spec:
           {{- end }}
           securityContext: {{ toYaml $plugin.securityContext | nindent 12 }}
           resources: {{ toYaml $plugin.resources | nindent 12 }}
+          {{- if .Values.kubeletPlugin.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ include "vgpu-manager-dra-driver.metricsPort" . | int }}
+              protocol: TCP
+          {{- end }}
           {{- if gt (int $healthPort) 0 }}
           startupProbe:
             grpc:

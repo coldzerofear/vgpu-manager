@@ -252,6 +252,15 @@ webhooks:
 {{- end -}}
 
 {{/*
+Extract the numeric port from the kubelet-plugin metrics httpEndpoint (e.g. ":8080" -> "8080",
+"0.0.0.0:8080" -> "8080"). Used by the metrics Service and the named container port.
+*/}}
+{{- define "vgpu-manager-dra-driver.metricsPort" -}}
+{{- $ep := .Values.kubeletPlugin.metrics.httpEndpoint | default ":8080" -}}
+{{- splitList ":" $ep | last -}}
+{{- end -}}
+
+{{/*
 Get the resource.k8s.io API version used by DRA resources (DeviceClass, ...).
 
 Priority:
