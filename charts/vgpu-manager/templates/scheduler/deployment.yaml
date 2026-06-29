@@ -105,7 +105,7 @@ spec:
             - --kube-api-burst={{ .Values.scheduler.schedulerExtender.commands.kubeApiBurst }}
             - --server-bind-port={{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
             - --pprof-bind-port={{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
-            - --feature-gates={{ .Values.scheduler.schedulerExtender.commands.featureGates }}
+            - --feature-gates={{ include "vgpu-manager.featureGates" .Values.scheduler.schedulerExtender.commands.featureGates }}
             {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
             - --enable-tls=true
             - --tls-key-file={{ .Values.scheduler.schedulerExtender.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.key

@@ -8,7 +8,7 @@ vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed succe
   - ServerBindPort:  {{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
   - PprofBindPort :  {{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
   - EnableTLS     :  {{ .Values.scheduler.schedulerExtender.tls.enabled | default false }}
-  - FeatureGates  :  {{ .Values.scheduler.schedulerExtender.commands.featureGates }}
+  - FeatureGates  :  {{ include "vgpu-manager.featureGates" .Values.scheduler.schedulerExtender.commands.featureGates | quote }}
   - StuckPeriod   :  {{ .Values.scheduler.schedulerExtender.commands.stuckGracePeriod | default "30s" }}
   - LoggerLevel   :  {{ .Values.scheduler.schedulerExtender.commands.logLevel }}
 {{- end }}
@@ -23,7 +23,7 @@ device-plugin:
   - MemoryScaling :  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryScaling | default 1.0 }}
   - MemoryFactor  :  {{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor | default 1 }}
   - PprofBindPort :  {{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
-  - FeatureGates  :  {{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
+  - FeatureGates  :  {{ include "vgpu-manager.featureGates" .Values.devicePlugin.devicePlugin.commands.featureGates | quote }}
   - LoggerLevel   :  {{ .Values.devicePlugin.devicePlugin.commands.logLevel }}
 device-monitor:
   - ServerBindPort:  {{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
@@ -31,7 +31,7 @@ device-monitor:
   - EnableTLS     :  {{ .Values.devicePlugin.deviceMonitor.tls.enabled | default false }}
   - EnableRBAC    :  {{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
   - ScrapeInterval:  {{ .Values.devicePlugin.deviceMonitor.commands.minScrapeInterval | default 1 }}
-  - FeatureGates  :  {{ .Values.devicePlugin.deviceMonitor.commands.featureGates }}
+  - FeatureGates  :  {{ include "vgpu-manager.featureGates" .Values.devicePlugin.deviceMonitor.commands.featureGates | quote }}
   - LoggerLevel   :  {{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
 {{- end }}
 

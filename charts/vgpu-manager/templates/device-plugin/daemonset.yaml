@@ -77,7 +77,7 @@ spec:
             - --device-memory-factor={{ .Values.devicePlugin.devicePlugin.commands.deviceMemoryFactor | default 1 }}
             - --pprof-bind-port={{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
-            - --feature-gates={{ .Values.devicePlugin.devicePlugin.commands.featureGates }}
+            - --feature-gates={{ include "vgpu-manager.featureGates" .Values.devicePlugin.devicePlugin.commands.featureGates }}
             - --mofed-enabled={{ .Values.devicePlugin.devicePlugin.commands.mofedEnabled }}
             - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
             - --open-kernel-modules={{ .Values.devicePlugin.devicePlugin.commands.openKernelModules }}
@@ -142,7 +142,7 @@ spec:
             - --server-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.serverBindPort | default 3456 }}
             - --pprof-bind-port={{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
-            - --feature-gates={{ .Values.devicePlugin.deviceMonitor.commands.featureGates }}
+            - --feature-gates={{ include "vgpu-manager.featureGates" .Values.devicePlugin.deviceMonitor.commands.featureGates }}
             {{- if $nc.yaml }}
             - --node-config-path=/config/nodeConfig.yaml
             {{- else if $nc.json }}
