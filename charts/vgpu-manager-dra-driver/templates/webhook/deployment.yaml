@@ -1,4 +1,15 @@
 {{- if .Values.webhook.enabled -}}
+{{/*
+Validate the webhook flag combinations that the device-webhook binary rejects at startup
+(see cmd/device-webhook/options). Fail fast at render time with a clear message instead of
+letting the webhook pod crash-loop on klog.Fatalln.
+*/}}
+{{- if and .Values.webhook.commands.defaultConvert2Dra (not .Values.webhook.commands.vgpuDeviceClassName) }}
+{{- fail "webhook.commands.vgpuDeviceClassName must be set when webhook.commands.defaultConvert2Dra is enabled" }}
+{{- end }}
+{{- if and .Values.webhook.commands.combinedResourceClaim (not .Values.webhook.commands.defaultConvert2Dra) }}
+{{- fail "webhook.commands.defaultConvert2Dra must be enabled when webhook.commands.combinedResourceClaim is enabled" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
