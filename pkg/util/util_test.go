@@ -451,3 +451,34 @@ func Test_CollectableContainerNames(t *testing.T) {
 		})
 	}
 }
+
+func Test_BaseTopology(t *testing.T) {
+	// Regression guard: the non-strict link/numa modes MUST map to themselves,
+	// not collapse to none (a default-case bug once broke all plain link/numa
+	// topology scheduling while link-strict kept working).
+	cases := map[TopologyMode]TopologyMode{
+		NoneTopology:          NoneTopology,
+		"":                    NoneTopology,
+		NUMATopology:          NUMATopology,
+		NUMATopologyStrict:    NUMATopology,
+		LinkTopology:          LinkTopology,
+		LinkTopologyStrict:    LinkTopology,
+		TopologyMode("bogus"): TopologyMode("bogus"),
+	}
+	for mode, want := range cases {
+		if got := mode.BaseTopology(); got != want {
+			t.Fatalf("(%q).BaseTopology() = %q, want %q", mode, got, want)
+		}
+	}
+	// IsStrictTopology pairs with the -strict variants only.
+	for _, m := range []TopologyMode{NUMATopologyStrict, LinkTopologyStrict} {
+		if !m.IsStrictTopology() {
+			t.Fatalf("(%q).IsStrictTopology() = false, want true", m)
+		}
+	}
+	for _, m := range []TopologyMode{NoneTopology, NUMATopology, LinkTopology, "bogus"} {
+		if m.IsStrictTopology() {
+			t.Fatalf("(%q).IsStrictTopology() = true, want false", m)
+		}
+	}
+}

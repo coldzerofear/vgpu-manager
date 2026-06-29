@@ -38,25 +38,20 @@ func (d *VGpuDeviceInfo) CanonicalName() string {
 }
 
 func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
-	attr := d.GpuDeviceInfo.Attributes()
-	attr["type"] = resourceapi.DeviceAttribute{
+	attributes := d.GpuDeviceInfo.Attributes()
+	attributes["type"] = resourceapi.DeviceAttribute{
 		StringValue: ptr.To(VGpuDeviceType),
 	}
-	attr["coreRatio"] = resourceapi.DeviceAttribute{
+	attributes["coreRatio"] = resourceapi.DeviceAttribute{
 		IntValue: ptr.To[int64](100),
 	}
-	attr["memoryRatio"] = resourceapi.DeviceAttribute{
+	attributes["memoryRatio"] = resourceapi.DeviceAttribute{
 		IntValue: ptr.To[int64](100),
-	}
-	if numaNode, ok := d.GetNumaNode(); ok {
-		attr["numa"] = resourceapi.DeviceAttribute{
-			IntValue: ptr.To(int64(numaNode)),
-		}
 	}
 
 	device := resourceapi.Device{
 		Name:       d.CanonicalName(),
-		Attributes: attr,
+		Attributes: attributes,
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			CoresResourceName: {
 				Value: *resource.NewQuantity(int64(util.HundredCore), resource.DecimalSI),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -40,8 +42,10 @@ type gpuFilter struct {
 }
 
 const (
-	Name                     = "FilterPredicate"
-	IndexerKeyPodRequestVGPU = "pod.requestVGPU"
+	Name                      = "FilterPredicate"
+	IndexerKeyPodRequestVGPU  = "pod.requestVGPU"
+	IndexerKeyPodGangName     = "pod.gangName"
+	IndexerKeyControlOwnerUID = "pod.controllerOwner.UID"
 
 	// aggregateBucketNodeLimit caps how many node names appear inside
 	// each "(...)" clause of the FilteringFailed aggregate event message.
@@ -60,6 +64,24 @@ var (
 				return []string{"true"}, nil
 			}
 			return []string{"false"}, nil
+		},
+		IndexerKeyPodGangName: func(obj interface{}) ([]string, error) {
+			var indexerValue []string
+			if pod, ok := obj.(*corev1.Pod); ok {
+				if name, ok := util.PodHasGangName(pod); ok {
+					indexerValue = []string{name}
+				}
+			}
+			return indexerValue, nil
+		},
+		IndexerKeyControlOwnerUID: func(obj interface{}) ([]string, error) {
+			var indexerValue []string
+			if pod, ok := obj.(*corev1.Pod); ok {
+				if owner := metav1.GetControllerOfNoCopy(pod); owner != nil {
+					indexerValue = []string{string(owner.UID)}
+				}
+			}
+			return indexerValue, nil
 		},
 	}
 )
@@ -439,6 +461,81 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 	return nodeName, err == nil
 }
 
+// FindGangSiblingDomain resolves the gang's cross-node-stable sub-domain (rail)
+// SIGNATURE by tallying it across the gang's already-placed siblings and
+// returning the majority. Each sibling's signature is resolved on the sibling's
+// OWN node by UUID — identity-based, independent of the possibly-stale
+// Device.Index recorded in the annotation. `pods` MUST come from the gang-name
+// index (so gang membership is already guaranteed — not re-checked here). A
+// sibling on a candidate node uses its prebuilt NodeInfo (free); otherwise the
+// node is built on demand from nodeLister and CACHED so a node hosting several
+// siblings is built at most once. Returns ("", false) when no sibling resolves
+// (e.g. the gang's first pod). Best-effort: alignment is an optimization, never a
+// correctness gate.
+func FindGangSiblingDomain(
+	pods []*corev1.Pod, nodeInfoByName map[string]*device.NodeInfo,
+	nodeLister listerv1.NodeLister, req *allocator.AllocationRequest,
+) (string, bool) {
+
+	domainMap := make(map[string]int)
+	// built caches NodeInfos constructed on demand for non-candidate sibling
+	// nodes, so multiple siblings on one node trigger a single (expensive) build.
+	var built map[string]*device.NodeInfo
+	for _, p := range pods {
+		// Gang membership is guaranteed by the IndexerKeyPodGangName query; only
+		// self-exclusion and a live pre-allocation remain to be checked.
+		if p == nil || p.UID == req.Pod.UID || !device.ShouldCountPodDeviceAllocation(p) {
+			continue
+		}
+		// Resolve the chosen UUIDs first: a sibling without a live pre-allocation
+		// contributes nothing, so skip it before paying for any NodeInfo build.
+		uuids := device.PodPreAllocatedUUIDs(p)
+		if len(uuids) == 0 {
+			continue
+		}
+		nodeName := util.PodPlanSchedulingNode(p)
+		nodeInfo, ok := nodeInfoByName[nodeName]
+		if !ok {
+			// Sibling on a NON-candidate node (the common cross-node case): build
+			// its NodeInfo on demand and cache it. The resolved nodeInfo MUST still
+			// fall through to the vote below — that is the whole point of the build.
+			if built == nil {
+				built = make(map[string]*device.NodeInfo)
+			}
+			if nodeInfo, ok = built[nodeName]; !ok {
+				node, err := nodeLister.Get(nodeName)
+				if err != nil {
+					continue // sibling node unknown → its UUIDs can't be resolved here
+				}
+				nodeInfo, err = device.NewNodeInfo(node, device.WithGPUTopologyEnabled(true))
+				if err != nil {
+					continue
+				}
+				built[nodeName] = nodeInfo
+			}
+		}
+		if domain, ok := nodeInfo.DomainOfUUIDs(uuids); ok {
+			domainMap[domain]++
+		}
+	}
+	domains := maps.Keys(domainMap)
+	switch len(domains) {
+	case 0:
+		return "", false
+	case 1:
+		return domains[0], true
+	default:
+		// Majority wins; ties break to the lower signature for determinism.
+		sort.Slice(domains, func(i, j int) bool {
+			if ci, cj := domainMap[domains[i]], domainMap[domains[j]]; ci != cj {
+				return ci > cj
+			}
+			return domains[i] < domains[j]
+		})
+		return domains[0], true
+	}
+}
+
 // deviceFilter will choose one and only one node fullfil the request, so it should always be the last filter of gpuFilter
 func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
 	var (
@@ -487,15 +584,25 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 
 	nodePodsMap, err := f.podLister.NodeMapByIndexValue(IndexerKeyPodRequestVGPU, "true")
 	if err != nil {
-		klog.ErrorS(err, "PodLister list all vGPU Pods failed")
+		klog.ErrorS(err, "PodLister list all vGPU pods failed")
 		return filteredNodes, failed, err
 	}
+
+	topologyEnabled := f.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
+	// nodeInfoByName is consumed only by the cross-pod gang ordinal lookup below.
+	// Build and populate it solely when that path will run so the common
+	// (non-gang / non-cross-pod) scheduling pays nothing for it.
+	needGangOrdinal := req.CrossPodTopology && topologyEnabled && (req.GangName != "" || req.ControllerOwner != nil)
 
 	var (
 		mutex                = sync.Mutex{}
 		nodeInfoList         = make([]*device.NodeInfo, 0, len(nodes))
 		nodeOriginalPosition = make(map[string]int, len(nodes))
+		nodeInfoByName       map[string]*device.NodeInfo
 	)
+	if needGangOrdinal {
+		nodeInfoByName = make(map[string]*device.NodeInfo, len(nodes))
+	}
 
 	maxGoroutines := runtime.GOMAXPROCS(0) * 2
 	batchSize := (len(nodes) + maxGoroutines - 1) / maxGoroutines
@@ -512,7 +619,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 			opts := []device.NodeInfoOptionFn{
 				device.WithNodePods(nodePodsMap[node.Name]...),
 				device.WithExcludedPods(pod.UID),
-				device.WithGPUTopologyEnabled(f.gpuTopology),
+				device.WithGPUTopologyEnabled(topologyEnabled),
 			}
 			if read, _ := state.Read(nodeConfigKey(node.Name)); read != nil {
 				if nodeConfig, ok := read.(*device.NodeConfigInfo); ok {
@@ -632,8 +739,11 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 
 		mutex.Lock()
 		maps.Copy(failed, batchFailed)
-		for index := range batchNodeInfos {
-			nodeInfoList = append(nodeInfoList, batchNodeInfos[index])
+		for _, nodeInfo := range batchNodeInfos {
+			if needGangOrdinal {
+				nodeInfoByName[nodeInfo.GetName()] = nodeInfo
+			}
+			nodeInfoList = append(nodeInfoList, nodeInfo)
 		}
 		maps.Copy(nodeOriginalPosition, batchNodeOrigPosition)
 		mutex.Unlock()
@@ -645,24 +755,56 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		return filteredNodes, failed, nil
 	}
 
+	// Cross-node sub-domain (rail) alignment: when this pod opts into cross-pod
+	// link topology and is in a gang, resolve the gang's chosen sub-domain
+	// signature from any already-placed sibling and carry it (node-independent) on
+	// req. Each node later maps it back to its own component via ComponentByDomain.
+	// The signature is resolved on the SIBLING's own NodeInfo by UUID (identity-
+	// based, dedup'd), so it does not depend on the possibly-stale Device.Index in
+	// the annotation; we only need the sibling's node to be among the built
+	// candidates (the common case under Kueue rack-pinning). Reuses nodePodsMap +
+	// nodeInfoList (no extra List / NodeInfo build). Gang-only; others skip it.
+	if needGangOrdinal {
+		var gangPods []*corev1.Pod
+		switch {
+		case req.GangName != "":
+			gangPods, err = f.podLister.ListByIndexValue(IndexerKeyPodGangName, req.GangName)
+			if err != nil {
+				klog.ErrorS(err, "PodLister list same gang pods failed", "gangName", req.GangName)
+				return filteredNodes, failed, err
+			}
+		case req.ControllerOwner != nil:
+			gangPods, err = f.podLister.ListByIndexValue(IndexerKeyControlOwnerUID, string(req.ControllerOwner.UID))
+			if err != nil {
+				klog.ErrorS(err, "PodLister list same controller owner reference pods failed", "controllerOwner", *req.ControllerOwner)
+				return filteredNodes, failed, err
+			}
+		}
+		if domain, ok := FindGangSiblingDomain(gangPods, nodeInfoByName, f.nodeLister, req); ok {
+			req.GangDomainKey = domain
+		}
+	}
+
+	defaultNodePriority := false
 	switch req.NodePolicy {
 	case util.BinpackPolicy, util.SpreadPolicy:
 		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
 		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
+	case util.NonePolicy:
+		defaultNodePriority = true
+		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
 	default:
-		if req.RawNodePolicy() != "" && req.RawNodePolicy() != string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), req.RawNodePolicy())
-			f.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
-				"unsupported node scheduling policy %q", req.RawNodePolicy())
-		} else {
-			klog.V(4).Infof("Pod <%s> no node scheduling policy", klog.KObj(pod))
-		}
-		less := []allocator.LessFunc[*device.NodeInfo]{func(p1, p2 *device.NodeInfo) bool {
+		defaultNodePriority = true
+		klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), req.NodePolicy)
+		f.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported node scheduling policy %q", req.NodePolicy)
+	}
+	if defaultNodePriority {
+		less := allocator.ApplyTopologyMode(*req, func(p1, p2 *device.NodeInfo) bool {
 			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
-		}}
-		less = allocator.ApplyTopologyMode(*req, less)
+		})
 		allocator.NewSortPriority[*device.NodeInfo](less...).Sort(nodeInfoList)
 	}
+
 	recorder := f.recorder
 	for i, nodeInfo := range nodeInfoList {
 		node := nodeInfo.GetNode()

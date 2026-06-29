@@ -5,6 +5,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // AllocationRequest captures everything the allocator needs to decide a
@@ -28,6 +29,8 @@ type AllocationRequest struct {
 	// internals still need it for annotation writes (PodVGPUPreAllocAnnotation),
 	// type/UUID filter checks against pod.Annotations, and event recording.
 	Pod *corev1.Pod
+
+	ControllerOwner *metav1.OwnerReference
 
 	// Containers is the per-container vGPU need list, in declaration order
 	// from pod.Spec.Containers, filtered to vGPU-requesting containers
@@ -83,18 +86,39 @@ type AllocationRequest struct {
 	Topology       util.TopologyMode
 	TopologyStrict bool
 
+	// GangName is the gang/pod-group identifier this pod belongs to, parsed
+	// once via util.PodHasGangName (which understands coscheduling / Volcano /
+	// Koordinator / native dialects). Empty for non-gang pods. Node-independent
+	// (same for every candidate node), so it lives on the shared request rather
+	// than per-node context. Used by cross-pod NVLink allocation to resolve the
+	// component a gang's sibling pods already occupy on a node; non-gang pods
+	// (empty value) never enter the anchor path, so their behaviour is unchanged.
+	GangName string
+
+	// CrossPodTopology opts this pod into cross-pod topology affinity (parsed
+	// from CrossPodTopologyAnnotation). When true AND the pod is in a gang AND
+	// topology mode is link, the allocator keeps the pod's GPUs in the same
+	// NVLink component as same-node gang siblings, and aligns to the same
+	// component ordinal as cross-node siblings (rail alignment). Replaces the
+	// former cluster-wide feature gate with a per-pod, webhook-defaultable switch.
+	// False (default) = unchanged single-pod behaviour.
+	CrossPodTopology bool
+
+	// GangDomainKey is the cross-node-STABLE sub-domain SIGNATURE that an
+	// already-placed gang sibling occupies, computed ONCE by the filter by
+	// resolving the sibling's UUIDs on the sibling's OWN NodeInfo (so it does not
+	// depend on the possibly-stale Device.Index in the annotation). It is a single
+	// node-independent string (the gang's chosen rail-set, or "ord:N" fallback);
+	// each candidate node maps it back to its OWN component via
+	// NodeInfo.ComponentByDomain — that is where the per-node specialization
+	// happens. "" (default) = no cross-node sibling resolved yet (first pod,
+	// sibling node not a candidate, or cross-pod off).
+	GangDomainKey string
+
 	// Profile is the pod's request-weighted scoring profile. Captured
 	// here so the filter and the allocator score with identical weights
 	// for the same pod — see profile.go for the rationale.
 	Profile RequestProfile
-
-	// rawDevicePolicy is the unrecognised device policy string (if any),
-	// preserved so allocateOne can emit the "Unsupported device scheduling
-	// policy" event with the same wording as the pre-refactor code. Empty
-	// when DevicePolicy was recognised (or unset) cleanly.
-	rawDevicePolicy string
-	// rawNodePolicy is the analogue for the node policy.
-	rawNodePolicy string
 
 	// Check if the pod requires additional verification of the device's uuid or type
 	CheckDeviceUuid bool
@@ -130,7 +154,11 @@ type ContainerNeed struct {
 // against memoryFactor stays inside allocateOne where the relevant node
 // is unambiguous.
 func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
-	req := &AllocationRequest{Pod: pod}
+	req := &AllocationRequest{
+		Pod:             pod,
+		ControllerOwner: metav1.GetControllerOf(pod),
+		// GangDomainKey defaults to "" (no cross-node sibling resolved yet).
+	}
 
 	// Aggregate demand bucketed by lifecycle group so Total reflects the
 	// pod's PEAK concurrent demand (not a naive sum across non-overlapping
@@ -204,9 +232,13 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 	req.Total.Memory = sidecarAgg.Memory + max(regularAgg.Memory, initMaxAgg.Memory)
 
 	if len(req.Containers) > 0 {
-		req.NodePolicy, req.rawNodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
-		req.DevicePolicy, req.rawDevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
+		req.NodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
+		req.DevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
 		req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
+		req.GangName, _ = util.PodHasGangName(pod)
+		if v, ok := util.HasAnnotation(pod, util.CrossPodTopologyAnnotation); ok {
+			req.CrossPodTopology = strings.EqualFold(v, "true")
+		}
 		req.Profile = NewRequestProfile(pod)
 
 		_, ok1 := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation)
@@ -221,34 +253,23 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 	return req
 }
 
-// RawNodePolicy returns the user-typed node-scheduler-policy string. Used
-// by the filter to emit the "Unsupported node scheduling policy" event
-// with the unrecognised value verbatim — the parsed NodePolicy collapses
-// unknown values to NonePolicy, which would lose the original string.
-func (r *AllocationRequest) RawNodePolicy() string {
-	return r.rawNodePolicy
-}
-
-// RawDevicePolicy is the device-scheduler-policy analogue of RawNodePolicy.
-func (r *AllocationRequest) RawDevicePolicy() string {
-	return r.rawDevicePolicy
-}
-
 // parseSchedulerPolicy reads a SchedulerPolicy annotation and returns
 // both the recognised enum value and the raw lowercased string.
 // Unrecognised input (including empty and "none") maps to NonePolicy so
 // downstream switches only have to handle the three known cases; the
 // raw string is preserved for diagnostic events.
-func parseSchedulerPolicy(pod *corev1.Pod, annotation string) (util.SchedulerPolicy, string) {
+func parseSchedulerPolicy(pod *corev1.Pod, annotation string) util.SchedulerPolicy {
 	raw, _ := util.HasAnnotation(pod, annotation)
 	lower := strings.ToLower(raw)
 	switch util.SchedulerPolicy(lower) {
 	case util.BinpackPolicy:
-		return util.BinpackPolicy, lower
+		return util.BinpackPolicy
 	case util.SpreadPolicy:
-		return util.SpreadPolicy, lower
+		return util.SpreadPolicy
+	case util.NonePolicy, "":
+		return util.NonePolicy
 	default:
-		return util.NonePolicy, lower
+		return util.SchedulerPolicy(lower)
 	}
 }
 
@@ -260,5 +281,5 @@ func parseSchedulerPolicy(pod *corev1.Pod, annotation string) (util.SchedulerPol
 func parsePodTopologyMode(pod *corev1.Pod) (mode util.TopologyMode, strict bool) {
 	raw, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
 	tm := util.TopologyMode(strings.ToLower(raw))
-	return tm.BaseTopology(), tm.IsStrictTopology()
+	return tm, tm.IsStrictTopology()
 }

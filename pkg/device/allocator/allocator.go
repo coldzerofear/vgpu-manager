@@ -11,6 +11,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
@@ -354,22 +355,13 @@ func (alloc *allocator) pickDeviceClaims(
 func (alloc *allocator) sortDeviceStore(req *AllocationRequest, deviceStore []*device.Device) {
 	pod := req.Pod
 	switch req.DevicePolicy {
-	case util.BinpackPolicy:
-		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
-		NewDeviceBinpackPriority().Sort(deviceStore)
-	case util.SpreadPolicy:
-		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
-		NewDeviceSpreadPriority().Sort(deviceStore)
+	case util.BinpackPolicy, util.SpreadPolicy, util.NonePolicy:
+		klog.V(4).Infof("Pod <%s> use <%s> device scheduling policy", klog.KObj(pod), req.DevicePolicy)
 	default:
-		if req.rawDevicePolicy != "" && req.rawDevicePolicy != string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s", pod.Namespace, pod.Name, req.rawDevicePolicy)
-			alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
-				"unsupported device scheduling policy %q", req.rawDevicePolicy)
-		} else {
-			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
-		}
-		NewSortPriority(ByNuma, ByDeviceIdAsc).Sort(deviceStore)
+		klog.V(4).Infof("Pod <%s> not supported device scheduling policy: %q", klog.KObj(pod), req.DevicePolicy)
+		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported device scheduling policy %q", req.DevicePolicy)
 	}
+	NewDevicePolicyPriority(*req).Sort(deviceStore)
 }
 
 func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
@@ -400,33 +392,57 @@ func (alloc *allocator) allocateByTopologyMode(
 	pod := req.Pod
 	strict := req.TopologyStrict
 
-	switch req.Topology {
+	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
-		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v)", pod.Namespace, pod.Name, strict)
-		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, req.DevicePolicy, strict, needNumber, needCores, needMemory); ok {
+		// Cross-pod anchor: when enabled and this pod belongs to a gang, find the
+		// NVLink component a sibling already pre-allocated on this node so we keep
+		// this pod's GPUs connected to them. -1 = no anchor (non-gang, gate off,
+		// or this is the gang's first pod here) → unchanged single-pod link path.
+		anchorRoot := -1
+		if req.CrossPodTopology && (req.GangName != "" || req.ControllerOwner != nil) {
+			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, req.ControllerOwner, sets.New(req.Pod.UID)); ok {
+				// Priority 1: same-node sibling → exact NVLink component (UUID-based).
+				// Intra-node connectivity is a hard requirement (NVLink doesn't cross
+				// hosts), so an on-node sibling pins the component directly.
+				anchorRoot = root
+			} else if root, ok = alloc.nodeInfo.ComponentByDomain(req.GangDomainKey); ok {
+				// Priority 2: cross-node sibling → align to the same sub-domain
+				// (rail) signature. The domain key was resolved by the filter on the
+				// sibling's own node (UUID-based); here we map it to THIS node's
+				// component. Missing on this node (rail-set absent) → no anchor.
+				anchorRoot = root
+			}
+		}
+		klog.V(4).Infof("Pod <%s> use Links topology mode (strict=%v, anchorComponent=%d)", klog.KObj(pod), strict, anchorRoot)
+		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, req.DevicePolicy, strict, anchorRoot, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if rsn := alloc.handleTopologyFallback(pod, strict,
-			reason.LinkTopologyUnsatisfied, "Link topology", "non-topology allocation",
+		if rsn := alloc.handleTopologyFallback(
+			pod, strict,
+			reason.LinkTopologyUnsatisfied,
+			"Link topology",
+			"non-topology allocation",
 			alloc.linkFallbackReason(needNumber)); rsn != nil {
 			return nil, rsn
 		}
 	case util.NUMATopology:
-		klog.V(4).Infof("Pod <%s/%s> use NUMA topology mode (strict=%v)", pod.Namespace, pod.Name, strict)
+		klog.V(4).Infof("Pod <%s> use NUMA topology mode (strict=%v)", klog.KObj(pod), strict)
 		if claims, ok := alloc.allocateNUMA(deviceStore, req.Profile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if rsn := alloc.handleTopologyFallback(pod, strict,
-			reason.NUMATopologyUnsatisfied, "NUMA topology", "cross-NUMA allocation",
+		if rsn := alloc.handleTopologyFallback(
+			pod, strict,
+			reason.NUMATopologyUnsatisfied,
+			"NUMA topology",
+			"cross-NUMA allocation",
 			alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
 			return nil, rsn
 		}
-	case util.NoneTopology, "":
-		klog.V(4).Infof("Pod <%s/%s> none topology mode", pod.Namespace, pod.Name)
+	case util.NoneTopology:
+		klog.V(4).Infof("Pod <%s> none topology mode", klog.KObj(pod))
 	default:
-		klog.V(4).Infof("Pod <%s/%s> not supported topology mode: %s", pod.Namespace, pod.Name, req.Topology)
-		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
-			"unsupported device topology mode %q", req.Topology)
+		klog.V(4).Infof("Pod <%s> not supported topology mode: %q", klog.KObj(pod), req.Topology)
+		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported device topology mode %q", req.Topology)
 	}
 	return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
 }
@@ -472,12 +488,26 @@ const linkTopKCandidates = 5
 
 func (alloc *allocator) allocateLink(
 	deviceStore []*device.Device, profile RequestProfile, policy util.SchedulerPolicy,
-	strict bool, needNumber int, needCores, needMemory int64,
+	strict bool, anchorRoot int, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
 	}
 	devices, _ := alloc.nodeInfo.GetDeviceList().Filter(getDeviceUUIDs(deviceStore))
+
+	// Cross-pod anchor windowing: restrict candidates to the NVLink component a
+	// gang sibling already occupies on this node, so this pod stays connected to
+	// them. If the window holds enough cards, select within it; if not, strict
+	// rejects the node (can't keep the gang connected) while non-strict falls
+	// back to the full candidate set — byte-for-byte the single-pod behaviour.
+	// anchorRoot < 0 (non-gang, first sibling, or gate off) skips this entirely.
+	if anchorRoot >= 0 {
+		if windowed := alloc.windowToComponent(devices, anchorRoot); len(windowed) >= needNumber {
+			devices = windowed
+		} else if strict {
+			return nil, false
+		}
+	}
 
 	// Fast path: no device policy → take the link-best set (cheapest path,
 	// matches pre-Phase-A behaviour). Uses the threshold-aware AllocateLink
@@ -538,6 +568,28 @@ func gpuallocatorUUIDs(devices []*gpuallocator.Device) []string {
 		uuids[i] = d.UUID
 	}
 	return uuids
+}
+
+// windowToComponent keeps only the devices whose UUID belongs to the given
+// NVLink component root (from the NodeInfo's precomputed component index).
+// Returns a new slice; nil for an unknown/empty component. Used by allocateLink
+// to narrow the candidate set to a gang's anchored component.
+func (alloc *allocator) windowToComponent(devices gpuallocator.DeviceList, root int) gpuallocator.DeviceList {
+	members := alloc.nodeInfo.ComponentUUIDs(root)
+	if len(members) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(members))
+	for _, u := range members {
+		set[u] = struct{}{}
+	}
+	out := make(gpuallocator.DeviceList, 0, len(devices))
+	for _, d := range devices {
+		if _, ok := set[d.UUID]; ok {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // selectLinkCandidateByDevicePolicy picks among link-equivalent candidate

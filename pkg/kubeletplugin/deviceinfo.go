@@ -15,7 +15,6 @@ import (
 type GpuDeviceInfo struct {
 	*nvidia.GpuInfo `json:",inline"`
 	vfioEnabled     bool
-	pciBusID        string
 
 	// The following properties that can only be known after inspecting MIG
 	// profiles.
@@ -56,10 +55,12 @@ type VfioDeviceInfo struct {
 	PciBusID               string `json:"pciBusID,omitempty"`
 	pciBusIDAttr           *deviceattribute.DeviceAttribute
 	pcieRootAttr           *deviceattribute.DeviceAttribute
+	numaNodeAttr           *deviceattribute.DeviceAttribute
 	numaNode               int
 	iommuGroup             int
 	iommuFDEnabled         bool
 	addressableMemoryBytes uint64
+	vfioModule             string
 }
 
 // CanonicalName returns the nameused for device announcement (in ResourceSlice
@@ -123,6 +124,9 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		"minor": {
 			IntValue: ptr.To(int64(d.Minor)),
 		},
+		"numa": {
+			IntValue: ptr.To(int64(d.GetNumaNode())),
+		},
 		"productName": {
 			StringValue: &d.ProductName,
 		},
@@ -148,6 +152,9 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 	}
 	if d.PcieRootAttr != nil {
 		attrs[d.PcieRootAttr.Name] = d.PcieRootAttr.Value
+	}
+	if d.NumaNodeAttr != nil {
+		attrs[d.NumaNodeAttr.Name] = d.NumaNodeAttr.Value
 	}
 
 	if d.AddressingMode != nil {
@@ -203,14 +210,14 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 			"uuid": {
 				StringValue: ptr.To(strings.ToLower(d.UUID)),
 			},
+			"numa": {
+				IntValue: ptr.To(int64(d.numaNode)),
+			},
 			"deviceID": {
 				StringValue: &d.deviceID,
 			},
 			"vendorID": {
 				StringValue: &d.vendorID,
-			},
-			"numa": {
-				IntValue: ptr.To(int64(d.numaNode)),
 			},
 			"productName": {
 				StringValue: &d.productName,
@@ -231,6 +238,9 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 	}
 	if d.pcieRootAttr != nil {
 		device.Attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
+	}
+	if d.numaNodeAttr != nil {
+		device.Attributes[d.numaNodeAttr.Name] = d.numaNodeAttr.Value
 	}
 	return device
 }

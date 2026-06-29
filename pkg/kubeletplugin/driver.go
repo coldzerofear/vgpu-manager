@@ -173,11 +173,10 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			klog.V(4).Info("Starting to extended shared SM utilization watcher")
 			for _, device := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
 				gpuInfo := device.VGpu.GpuDeviceInfo.GpuInfo
-				numaNode, _ := gpuInfo.GetNumaNode()
 				paths, _ := gpuInfo.GetPaths()
 				gpuDevice := &manager.GPUDevice{
 					GpuInfo:  gpuInfo,
-					NumaNode: int(numaNode),
+					NumaNode: int(gpuInfo.GetNumaNode()),
 					Paths:    paths,
 					Healthy:  true,
 					Links:    map[int][]links.P2PLinkType{},

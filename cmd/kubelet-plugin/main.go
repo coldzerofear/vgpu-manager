@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
 	"syscall"
@@ -59,13 +60,6 @@ func newApp() *cli.App {
 			Destination: &flags.NodeName,
 			EnvVars:     []string{"NODE_NAME"},
 		},
-		//&cli.StringFlag{
-		//	Name:        "namespace",
-		//	Usage:       "The namespace used for the custom resources.",
-		//	Value:       "default",
-		//	Destination: &flags.Namespace,
-		//	EnvVars:     []string{"NAMESPACE"},
-		//},
 		&cli.StringFlag{
 			Name:        "cdi-root",
 			Usage:       "Absolute path to the directory where CDI files will be generated.",
@@ -89,18 +83,18 @@ func newApp() *cli.App {
 			EnvVars:     []string{"DRIVER_ROOT_CTR_PATH"},
 		},
 		&cli.StringFlag{
+			Name:        "host-root",
+			Value:       "/host-root",
+			Destination: &flags.HostRoot,
+			EnvVars:     []string{"HOST_ROOT"},
+			Usage:       "the path where the root path of the host file system is mounted in the container (required when PassthroughSupport feature gate is enabled)",
+		},
+		&cli.StringFlag{
 			Name:        "nvidia-cdi-hook-path",
 			Usage:       "Absolute path to the nvidia-cdi-hook executable in the host file system. Used in the generated CDI specification.",
 			Destination: &flags.NvidiaCDIHookPath,
 			EnvVars:     []string{"NVIDIA_CDI_HOOK_PATH"},
 		},
-		//&cli.StringFlag{
-		//	Name:        "image-name",
-		//	Usage:       "The full image name to use for rendering templates.",
-		//	Required:    true,
-		//	Destination: &flags.ImageName,
-		//	EnvVars:     []string{"IMAGE_NAME"},
-		//},
 		&cli.StringFlag{
 			Name:        "kubelet-registrar-directory-path",
 			Usage:       "Absolute path to the directory where kubelet stores plugin registrations.",
@@ -188,6 +182,10 @@ func newApp() *cli.App {
 				return fmt.Errorf("feature gate validation failed: %w", err)
 			}
 
+			if err := validateCLIFlags(flags); err != nil {
+				return fmt.Errorf("invalid CLI flags: %w", err)
+			}
+
 			clientSets, err := flags.KubeClientConfig.NewClientSets()
 			if err != nil {
 				return fmt.Errorf("create client: %w", err)
@@ -218,6 +216,27 @@ func newApp() *cli.App {
 	}
 
 	return app
+}
+
+// Input validation of CLI flags.
+func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		if flags.HostRoot == "" {
+			return fmt.Errorf("host root is required when PassthroughSupport feature gate is enabled")
+		}
+		// Host root FS must be mounted in the container for passthrough support to work.
+		// vsekar: This requirement is for being able to run `modprobe` to load the vfio driver.
+		// This mount would also be a duplicate if the nvidia driver is installed to the host rootFS.
+		// TODO: Reduce scope of the host mounts for least access.
+		if _, err := os.Stat(flags.HostRoot); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("host root is not mounted at %q", flags.HostRoot)
+			}
+			return fmt.Errorf("error checking if host root is mounted at %q: %w", flags.HostRoot, err)
+		}
+	}
+
+	return nil
 }
 
 // RunPlugin initializes and runs the GPU kubelet plugin.

@@ -95,7 +95,7 @@ type MigSpec struct {
 func (m *MigSpec) Tuple() *MigSpecTuple {
 	return &MigSpecTuple{
 		ParentMinor:    m.Parent.Minor,
-		ParentPCIBusID: m.Parent.pciBusID,
+		ParentPCIBusID: m.Parent.PciBusID,
 		ProfileID:      int(m.GIProfileInfo.Id),
 		PlacementStart: int(m.Placement.Start),
 	}
@@ -155,6 +155,9 @@ func CommonAttributesMig(parent *nvidia.GpuInfo, profileName string) map[resourc
 		"brand": {
 			StringValue: &parent.Brand,
 		},
+		"numa": {
+			IntValue: ptr.To(int64(parent.GetNumaNode())),
+		},
 		"architecture": {
 			StringValue: &parent.Architecture,
 		},
@@ -181,6 +184,10 @@ func CommonAttributesMig(parent *nvidia.GpuInfo, profileName string) map[resourc
 
 	if parent.PcieRootAttr != nil {
 		attrs[parent.PcieRootAttr.Name] = parent.PcieRootAttr.Value
+	}
+
+	if parent.NumaNodeAttr != nil {
+		attrs[parent.NumaNodeAttr.Name] = parent.NumaNodeAttr.Value
 	}
 
 	return attrs

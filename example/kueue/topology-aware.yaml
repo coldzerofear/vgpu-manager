@@ -1,0 +1,122 @@
+# Topology-Aware Scheduling (TAS) example: give Kueue an accurate FIRST-LAYER
+# (node/rack) filter, then let vgpu-manager pick the connected GPUs on each node.
+#
+# Layering:
+#   Kueue TAS  -> picks a rack that can hold the whole gang (cross-node L2/L3)
+#                 + atomic gang admission
+#   vgpu-manager (vgpu-scheduler extender) -> picks the node within the rack
+#                 (node binpack/spread) + the specific NVLink-connected GPUs
+#                 (cross-pod anchor + cross-node sub-domain/rail alignment)
+#
+# Prereqs:
+#   - Kueue v0.14+ (TopologyAwareScheduling feature gate on by default)
+#   - GPU nodes labeled with topology levels (Kueue consumes labels, does NOT
+#     discover them) — here topology.example.com/{spine,rack}. The hostname level
+#     is intentionally OMITTED so Kueue only constrains to rack and leaves node
+#     choice to vgpu-manager. See docs/kueue_tas_integration.md §4.2.
+#   - example/kueue/configuration.yaml applied (resource transformation that turns
+#     per-vGPU cores/memory into accurate total-* quota; harmless for whole-card).
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: Topology
+metadata:
+  name: gpu-topology
+spec:
+  # Coarse -> fine. rack is the finest (most-local, highest-bandwidth) domain.
+  # No kubernetes.io/hostname level on purpose: rack-lowest lets vgpu-manager
+  # pick the node inside the rack (its node binpack/spread stays in effect).
+  levels:
+    - nodeLabel: topology.example.com/spine   # fallback domain when one rack can't fit the gang
+    - nodeLabel: topology.example.com/rack    # finest schedulable domain
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: vgpu-manager-flavor
+spec:
+  topologyName: gpu-topology                  # <- enables TAS for this flavor
+  nodeLabels:
+    vgpu-manager: device-plugin               # select vgpu-manager GPU nodes (the device-plugin DaemonSet nodeSelector)
+    # --- Homogeneity = more accurate first-layer filtering --------------------
+    # Cross-node rail (ordinal) alignment assumes a HOMOGENEOUS GPU<->rail layout
+    # across the gang's nodes; mixing GPU generations also risks NCCL/CUDA version
+    # skew. Pin the flavor to one generation using labels vgpu-manager publishes
+    # automatically, and define one flavor per generation (list them in the queue).
+    # nvidia.com/node-cuda-version: "12080"
+    # nvidia.com/node-driver-version: "570.86.15"
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: vgpu-manager-cluster-queue
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+    # vgpu-number is the binding dimension for whole-card training and is what
+    # Kueue counts per topology domain (it is a real node-allocatable extended
+    # resource). total-vgpu-cores/memory come from configuration.yaml and matter
+    # only for fractional (shared) workloads; whole-card pods leave them at 0.
+    - coveredResources:
+        - nvidia.com/vgpu-number
+        - nvidia.com/total-vgpu-cores
+        - nvidia.com/total-vgpu-memory
+      flavors:
+        - name: vgpu-manager-flavor
+          resources:
+            - name: nvidia.com/vgpu-number
+              nominalQuota: 64
+            - name: nvidia.com/total-vgpu-cores
+              nominalQuota: 6400
+            - name: nvidia.com/total-vgpu-memory
+              nominalQuota: 5242880
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kueue-test
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: vgpu-manager-queue
+  namespace: kueue-test
+spec:
+  clusterQueue: vgpu-manager-cluster-queue
+---
+# Gang training job: 4 pods x 8 whole cards = 32 cards, kept within one rack.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nccl-train
+  namespace: kueue-test
+  labels:
+    kueue.x-k8s.io/queue-name: vgpu-manager-queue   # (1) enter the Kueue queue -> admission + TAS
+spec:
+  parallelism: 4
+  completions: 4
+  suspend: true                                     # (2) Kueue resumes after admission
+  template:
+    metadata:
+      annotations:
+        # (3) rack first; if one rack can't fit the gang, fall back up to spine.
+        #     Use podset-required-topology to forbid the fallback (wait instead).
+        kueue.x-k8s.io/podset-preferred-topology: topology.example.com/rack
+        # (4) node-internal NVLink topology + cross-pod / cross-node alignment.
+        nvidia.com/device-topology-mode: link
+        nvidia.com/cross-pod-topology: "true"
+      labels:
+        # (5) gang identity recognized by vgpu-manager (coscheduling dialect here;
+        #     Volcano / Koordinator / native PodGroup also supported).
+        scheduling.x-k8s.io/pod-group: nccl-train
+    spec:
+      schedulerName: vgpu-scheduler                 # (6) still routed through the vgpu-manager extender
+      restartPolicy: Never
+      containers:
+        - name: trainer
+          image: <your-nccl-image>
+          command: ["/bin/sh", "-lc", "sleep 36000"]
+          resources:
+            limits:
+              # Whole-card request: only vgpu-number (no cores/memory) so the card
+              # is dedicated and Kueue's per-domain counting matches reality.
+              nvidia.com/vgpu-number: "8"
