@@ -21,10 +21,12 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/checkpoint"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
+	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,13 +51,14 @@ type vNumberDevicePlugin struct {
 	server      *registry.DeviceRegistryServerImpl
 	kubeCache   cache.Cache
 	podCache    cache2.MutationCache
+	cdiHandler  cdi.Handler
 }
 
 var _ base.DevicePlugin = &vNumberDevicePlugin{}
 
 // NewVNumberDevicePlugin returns an initialized vNumberDevicePlugin.
 func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.DeviceManager,
-	kubeClient *kubernetes.Clientset, kubeCache cache.Cache) (base.DevicePlugin, error) {
+	kubeClient *kubernetes.Clientset, kubeCache cache.Cache, cdiHandler cdi.Handler) (base.DevicePlugin, error) {
 	podInformer, err := kubeCache.GetInformer(context.TODO(), &corev1.Pod{}, cache.BlockUntilSynced(false))
 	if err != nil {
 		return nil, fmt.Errorf("get pod informer failed: %v", err)
@@ -77,6 +80,7 @@ func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.Device
 		kubeClient:  kubeClient,
 		kubeCache:   kubeCache,
 		podCache:    podCache,
+		cdiHandler:  cdiHandler,
 	}
 
 	fn := func(ctx context.Context, uid string) (*corev1.Pod, error) {
@@ -529,8 +533,8 @@ func PassDeviceSpecs(devices []manager.Device, imexChannels imex.Channels) []*pl
 }
 
 func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, devManager *manager.DeviceManager, deviceIDs ...string) {
-	switch devManager.GetNodeConfig().GetDeviceListStrategy() {
-	case util.DeviceListStrategyEnvvar:
+	strategies := devManager.GetNodeConfig().GetDeviceListStrategy()
+	if strategies.Includes(util.DeviceListStrategyEnvvar) {
 		response.Envs[deviceListEnvVar] = strings.Join(deviceIDs, ",")
 		var channelIDs []string
 		for _, channel := range devManager.GetImexChannels() {
@@ -539,7 +543,8 @@ func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, 
 		if len(channelIDs) > 0 {
 			response.Envs[imex.ImexChannelEnvVar] = strings.Join(channelIDs, ",")
 		}
-	case util.DeviceListStrategyVolumeMounts:
+	}
+	if strategies.Includes(util.DeviceListStrategyVolumeMounts) {
 		response.Envs[deviceListEnvVar] = deviceListAsVolumeMountsContainerPathRoot
 		for _, id := range deviceIDs {
 			mount := &pluginapi.Mount{
@@ -565,6 +570,39 @@ func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, 
 	if devManager.GetNodeConfig().GetGDRCopyEnabled() {
 		response.Envs["NVIDIA_GDRCOPY"] = "enabled"
 	}
+}
+
+// UpdateResponseForCDI injects CDI device references into the allocate response
+// according to the configured CDI strategies. cdiClass is the CDI device class
+// (e.g. "gpu") and deviceIDs are the device UUIDs to expose. It is a no-op when
+// no CDI strategy is enabled.
+func UpdateResponseForCDI(response *pluginapi.ContainerAllocateResponse,
+	strategies util.DeviceListStrategies, handler cdi.Handler, cdiClass string, deviceIDs ...string) error {
+	if !strategies.AnyCDIEnabled() {
+		return nil
+	}
+	qualifiedNames := make([]string, 0, len(deviceIDs))
+	for _, id := range deviceIDs {
+		qualifiedNames = append(qualifiedNames, handler.QualifiedName(cdiClass, id))
+	}
+	if strategies.Includes(util.DeviceListStrategyCDIAnnotations) {
+		annotations, err := handler.GetDeviceAnnotations(uuid.New().String(), qualifiedNames)
+		if err != nil {
+			return err
+		}
+		if response.Annotations == nil {
+			response.Annotations = make(map[string]string, len(annotations))
+		}
+		for k, v := range annotations {
+			response.Annotations[k] = v
+		}
+	}
+	if strategies.Includes(util.DeviceListStrategyCDICRI) {
+		for _, name := range qualifiedNames {
+			response.CdiDevices = append(response.CdiDevices, &pluginapi.CDIDevice{Name: name})
+		}
+	}
+	return nil
 }
 
 func (m *vNumberDevicePlugin) getCurrentPod(ctx context.Context) (*corev1.Pod, error) {
@@ -709,6 +747,12 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		response.Envs[util.ManagerVisibleDevices] = strings.Join(deviceUuids, ",")
 		UpdateResponseForNodeConfig(response, m.baseServer.GetDeviceManager(), deviceIds...)
 		response.Devices = append(response.Devices, PassDeviceSpecs(gpuDevices, imexChannels)...)
+		if err = UpdateResponseForCDI(response, m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceListStrategy(),
+			m.cdiHandler, util.CDIClass, deviceIds...); err != nil {
+			klog.V(3).ErrorS(err, "failed to update allocate response for CDI", "pod",
+				klog.KObj(currentPod), "container", contClaim.Name, "reqIndex", i)
+			return resp, err
+		}
 
 		if enabledClientMode {
 			// mount /etc/vgpu-manager/registry dir

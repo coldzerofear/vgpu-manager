@@ -11,6 +11,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -25,14 +26,14 @@ import (
 )
 
 func GetDevicePlugins(devicePluginPath string, devManager *manager.DeviceManager,
-	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) ([]base.DevicePlugin, error) {
+	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset, cdiHandler cdi.Handler) ([]base.DevicePlugin, error) {
 
 	var plugins []base.DevicePlugin
 	migStrategy := devManager.GetNodeConfig().GetMigStrategy()
 	if migStrategy != util.MigStrategySingle {
 		socket := filepath.Join(devicePluginPath, "nvidia-vgpu.sock")
 		plugin, err := vgpu.NewVNumberDevicePlugin(util.VGPUNumberResourceName,
-			socket, devManager, kubeClient, clusterManager.GetCache())
+			socket, devManager, kubeClient, clusterManager.GetCache(), cdiHandler)
 		if err != nil {
 			return nil, fmt.Errorf("create vnumber plugin failed: %v", err)
 		}
@@ -78,7 +79,7 @@ func GetDevicePlugins(devicePluginPath string, devManager *manager.DeviceManager
 		for resource := range resourceSet {
 			resourceName := util.MIGDeviceResourceNamePrefix + resource
 			socket := filepath.Join(devicePluginPath, fmt.Sprintf("nvidia-mig-%s.sock", resource))
-			plugins = append(plugins, mig.NewMigDevicePlugin(resourceName, socket, devManager))
+			plugins = append(plugins, mig.NewMigDevicePlugin(resourceName, socket, devManager, cdiHandler))
 		}
 	}
 

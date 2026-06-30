@@ -1,4 +1,6 @@
 {{- $nc := .Values.devicePlugin.nodeConfig | default dict }}
+{{- $cdiEnabled := contains "cdi" (.Values.devicePlugin.devicePlugin.commands.deviceListStrategy | default "envvar") }}
+{{- $cdiRoot := .Values.devicePlugin.devicePlugin.commands.cdiRoot | default "/var/run/cdi" }}
 {{- if .Values.devicePlugin.enabled -}}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -82,6 +84,21 @@ spec:
             - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
             - --open-kernel-modules={{ .Values.devicePlugin.devicePlugin.commands.openKernelModules }}
             - --mig-strategy={{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
+            {{- with .Values.devicePlugin.devicePlugin.commands.cdiAnnotationPrefix }}
+            - --cdi-annotation-prefix={{ . }}
+            {{- end }}
+            {{- with .Values.devicePlugin.devicePlugin.commands.driverRoot }}
+            - --driver-root={{ . }}
+            {{- end }}
+            {{- with .Values.devicePlugin.devicePlugin.commands.devRoot }}
+            - --dev-root={{ . }}
+            {{- end }}
+            {{- with .Values.devicePlugin.devicePlugin.commands.targetDriverRoot }}
+            - --target-driver-root={{ . }}
+            {{- end }}
+            {{- with .Values.devicePlugin.devicePlugin.commands.targetDevRoot }}
+            - --target-dev-root={{ . }}
+            {{- end }}
             {{- if $nc.yaml }}
             - --node-config-path=/config/nodeConfig.yaml
             {{- else if $nc.json }}
@@ -130,6 +147,10 @@ spec:
             - name: node-config
               mountPath: /config
               readOnly: true
+            {{- end }}
+            {{- if $cdiEnabled }}
+            - name: cdi-root
+              mountPath: /var/run/cdi
             {{- end }}
         - name: device-monitor
           image: {{ include "vgpu-manager.fullimage" . }}
@@ -244,6 +265,12 @@ spec:
         - name: cgroup-root
           hostPath:
             path: /sys/fs/cgroup
+        {{- if $cdiEnabled }}
+        - name: cdi-root
+          hostPath:
+            path: {{ $cdiRoot }}
+            type: DirectoryOrCreate
+        {{- end }}
         {{- if or $nc.yaml $nc.json }}
         - name: node-config
           configMap:

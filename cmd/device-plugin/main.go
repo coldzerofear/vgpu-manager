@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/fsnotify/fsnotify"
 	corev1 "k8s.io/api/core/v1"
@@ -100,6 +102,40 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 
+	// Build the CDI handler (a null no-op handler is returned when no CDI
+	// strategy is configured) and generate the node CDI specification so that
+	// CDI device references emitted during Allocate can be resolved.
+	// The NVIDIA CDI hook binary is bundled in the image and installed onto the
+	// host (under HOST_MANAGER_DIR) by the install init container; the CDI spec
+	// references that host path. It is executed by the host container runtime,
+	// not by this plugin, so no flag is exposed for it.
+	hostManagerDir := os.Getenv("HOST_MANAGER_DIR")
+	if hostManagerDir == "" {
+		hostManagerDir = util.ManagerRootPath
+	}
+	cdiHandler, err := cdi.New(
+		deviceManager.DeviceLib, deviceManager.DeviceLib, deviceManager.DeviceLib,
+		cdi.Config{
+			Strategies:        nodeConfig.GetDeviceListStrategy(),
+			Vendor:            util.CDIVendor,
+			Class:             util.CDIClass,
+			DeviceIDStrategy:  util.CDIDeviceIDStrategy,
+			AnnotationPrefix:  opt.CDIAnnotationPrefix,
+			NvidiaCDIHookPath: filepath.Join(hostManagerDir, "nvidia-cdi-hook"),
+			DriverRoot:        opt.DriverRoot,
+			DevRoot:           opt.DevRoot,
+			TargetDriverRoot:  opt.TargetDriverRoot,
+			TargetDevRoot:     opt.TargetDevRoot,
+		})
+	if err != nil {
+		klog.Errorf("Create CDI handler failed: %v", err)
+		return exitCode
+	}
+	if err = cdiHandler.CreateSpecFile(); err != nil {
+		klog.Errorf("Generate CDI spec file failed: %v", err)
+		return exitCode
+	}
+
 	devicePluginSocket := filepath.Join(opt.DevicePluginPath, "kubelet.sock")
 	watcher, err := NewFSWatcher(opt.DevicePluginPath)
 	if err != nil {
@@ -149,7 +185,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		klog.Errorf("Register controller to manager failed: %v", err)
 		return exitCode
 	}
-	plugins, err := deviceplugin.GetDevicePlugins(opt.DevicePluginPath, deviceManager, manager, kubeClient)
+	plugins, err := deviceplugin.GetDevicePlugins(opt.DevicePluginPath, deviceManager, manager, kubeClient, cdiHandler)
 	if err != nil {
 		klog.Errorf("Get device plugins failed: %v", err)
 		return exitCode

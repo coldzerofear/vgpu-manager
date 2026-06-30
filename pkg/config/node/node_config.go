@@ -24,20 +24,20 @@ type ConfigTemplate struct {
 }
 
 type ConfigSpec struct {
-	NodeName            string     `json:"nodeName"                      yaml:"nodeName"`
-	CGroupDriver        *string    `json:"cgroupDriver,omitempty"        yaml:"cgroupDriver,omitempty"`
-	DeviceListStrategy  *string    `json:"deviceListStrategy,omitempty"  yaml:"deviceListStrategy,omitempty"`
-	DeviceSplitCount    *int       `json:"deviceSplitCount,omitempty"    yaml:"deviceSplitCount,omitempty"`
-	DeviceMemoryScaling *float64   `json:"deviceMemoryScaling,omitempty" yaml:"deviceMemoryScaling,omitempty"`
-	DeviceMemoryFactor  *int       `json:"deviceMemoryFactor,omitempty"  yaml:"deviceMemoryFactor,omitempty"`
-	DeviceCoresScaling  *float64   `json:"deviceCoresScaling,omitempty"  yaml:"deviceCoresScaling,omitempty"`
-	ExcludeDevices      *IDStore   `json:"excludeDevices,omitempty"      yaml:"excludeDevices,omitempty"`
-	GDSEnabled          *bool      `json:"gdsEnabled,omitempty"          yaml:"gdsEnabled,omitempty"`
-	MOFEDEnabled        *bool      `json:"mofedEnabled,omitempty"        yaml:"mofedEnabled,omitempty"`
-	GDRCopyEnabled      *bool      `json:"gdrcopyEnabled,omitempty"      yaml:"gdrcopyEnabled,omitempty"`
-	MigStrategy         *string    `json:"migStrategy,omitempty"         yaml:"migStrategy,omitempty"`
-	OpenKernelModules   *bool      `json:"openKernelModules,omitempty"   yaml:"openKernelModules,omitempty"`
-	Imex                *imex.Imex `json:"imex,omitempty"                yaml:"imex,omitempty"`
+	NodeName            string                     `json:"nodeName"                      yaml:"nodeName"`
+	CGroupDriver        *string                    `json:"cgroupDriver,omitempty"        yaml:"cgroupDriver,omitempty"`
+	DeviceListStrategy  *util.DeviceListStrategies `json:"deviceListStrategy,omitempty"  yaml:"deviceListStrategy,omitempty"`
+	DeviceSplitCount    *int                       `json:"deviceSplitCount,omitempty"    yaml:"deviceSplitCount,omitempty"`
+	DeviceMemoryScaling *float64                   `json:"deviceMemoryScaling,omitempty" yaml:"deviceMemoryScaling,omitempty"`
+	DeviceMemoryFactor  *int                       `json:"deviceMemoryFactor,omitempty"  yaml:"deviceMemoryFactor,omitempty"`
+	DeviceCoresScaling  *float64                   `json:"deviceCoresScaling,omitempty"  yaml:"deviceCoresScaling,omitempty"`
+	ExcludeDevices      *IDStore                   `json:"excludeDevices,omitempty"      yaml:"excludeDevices,omitempty"`
+	GDSEnabled          *bool                      `json:"gdsEnabled,omitempty"          yaml:"gdsEnabled,omitempty"`
+	MOFEDEnabled        *bool                      `json:"mofedEnabled,omitempty"        yaml:"mofedEnabled,omitempty"`
+	GDRCopyEnabled      *bool                      `json:"gdrcopyEnabled,omitempty"      yaml:"gdrcopyEnabled,omitempty"`
+	MigStrategy         *string                    `json:"migStrategy,omitempty"         yaml:"migStrategy,omitempty"`
+	OpenKernelModules   *bool                      `json:"openKernelModules,omitempty"   yaml:"openKernelModules,omitempty"`
+	Imex                *imex.Imex                 `json:"imex,omitempty"                yaml:"imex,omitempty"`
 }
 
 type NodeConfigSpec struct {
@@ -58,9 +58,9 @@ func (nc NodeConfigSpec) GetCGroupDriver() string {
 	return *nc.CGroupDriver
 }
 
-func (nc NodeConfigSpec) GetDeviceListStrategy() string {
+func (nc NodeConfigSpec) GetDeviceListStrategy() util.DeviceListStrategies {
 	if nc.DeviceListStrategy == nil {
-		return ""
+		return nil
 	}
 	return *nc.DeviceListStrategy
 }
@@ -190,11 +190,8 @@ func (nc NodeConfigSpec) String() string {
 }
 
 func (nc NodeConfigSpec) checkNodeConfig() (errs []error) {
-	switch nc.GetDeviceListStrategy() {
-	case util.DeviceListStrategyEnvvar:
-	case util.DeviceListStrategyVolumeMounts:
-	default:
-		errs = append(errs, fmt.Errorf("unknown deviceListStrategy value: \"%s\"", nc.GetDeviceListStrategy()))
+	if err := nc.GetDeviceListStrategy().Validate(); err != nil {
+		errs = append(errs, err)
 	}
 	switch nc.GetMigStrategy() {
 	case util.MigStrategyNone:
@@ -407,9 +404,9 @@ func WithDeviceSplitCountOption(deviceSplitCount int) Option {
 	}
 }
 
-func WithDeviceListStrategyOption(deviceListStrategy string) Option {
+func WithDeviceListStrategyOption(deviceListStrategy []string) Option {
 	return func(spec *NodeConfigSpec) {
-		spec.DeviceListStrategy = ptr.To[string](deviceListStrategy)
+		spec.DeviceListStrategy = ptr.To[util.DeviceListStrategies](util.DeviceListStrategies(deviceListStrategy))
 	}
 }
 

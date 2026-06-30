@@ -144,12 +144,21 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-plugin
+            - --device-list-strategy=envvar
             - --device-split-count=10
             - --device-cores-scaling=1
             - --device-memory-scaling=1
             - --node-config-path=/config/nodeConfig.json
             - --open-kernel-modules=false
             - --v=4
+            # CDI device injection (set deviceListStrategy to cdi-annotations and/or
+            # cdi-cri in the node config to enable). The nvidia-cdi-hook binary is
+            # bundled in the image and installed to $HOST_MANAGER_DIR/nvidia-cdi-hook
+            # on the host by the install init container, and referenced automatically.
+            # Tune the spec generation below if needed:
+#            - --cdi-annotation-prefix=cdi.k8s.io/
+#            - --driver-root=/
+#            - --target-driver-root=/
           env:
             - name: NODE_NAME
               valueFrom:
@@ -192,6 +201,11 @@ spec:
             - name: node-config
               mountPath: /config
               readOnly: true
+            # Required when a CDI device-list-strategy (cdi-annotations / cdi-cri)
+            # is enabled: the plugin writes the generated CDI spec here so the
+            # container runtime on the host can resolve the qualified devices.
+            - name: cdi-root
+              mountPath: /var/run/cdi
         - name: device-monitor
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
@@ -271,6 +285,10 @@ spec:
         - name: cgroup-root
           hostPath:
             path: /sys/fs/cgroup
+        - name: cdi-root
+          hostPath:
+            path: /var/run/cdi
+            type: DirectoryOrCreate
         - name: node-config
           configMap:
             name: vgpu-manager-device-plugin-config

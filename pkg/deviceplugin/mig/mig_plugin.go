@@ -8,6 +8,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/klog/v2"
@@ -17,14 +18,16 @@ import (
 type migDevicePlugin struct {
 	pluginapi.UnimplementedDevicePluginServer
 	baseServer base.PluginServer
+	cdiHandler cdi.Handler
 }
 
 var _ base.DevicePlugin = &migDevicePlugin{}
 
 // NewMigDevicePlugin returns an initialized migDevicePlugin.
-func NewMigDevicePlugin(resourceName, socket string, manager *manager.DeviceManager) base.DevicePlugin {
+func NewMigDevicePlugin(resourceName, socket string, manager *manager.DeviceManager, cdiHandler cdi.Handler) base.DevicePlugin {
 	return &migDevicePlugin{
 		baseServer: base.NewBasePluginServer(resourceName, socket, manager),
+		cdiHandler: cdiHandler,
 	}
 }
 
@@ -114,6 +117,11 @@ func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReq
 			devices = append(devices, manager.Device{MIG: &migDevice})
 		}
 		responses[i].Devices = append(responses[i].Devices, vgpu.PassDeviceSpecs(devices, imexChannels)...)
+		if err := vgpu.UpdateResponseForCDI(responses[i], m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceListStrategy(),
+			m.cdiHandler, util.CDIClass, containerRequest.GetDevicesIds()...); err != nil {
+			klog.Errorln(err)
+			return nil, err
+		}
 	}
 	return &pluginapi.AllocateResponse{ContainerResponses: responses}, nil
 }

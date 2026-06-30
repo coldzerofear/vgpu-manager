@@ -10,7 +10,7 @@ NodeConfig is array, with each array element having the following structural par
 |---------------------|--------------------------------------------|----------------------------------------------------------------------------------------|
 | nodeName            | string (support regular matching)          | K8s node name, Specify the nodes for configuring the application (required)            |
 | cgroupDriver        | string (support: "cgroupfs"/"systemd")     | Specify the cgroup driver used on the specified node (optional)                        |
-| deviceListStrategy  | string (support: "envvar"/"volume-mounts") | The desired strategy for passing the device list to the underlying runtime (optional)  |
+| deviceListStrategy  | string or list (support: "envvar"/"volume-mounts"/"cdi-annotations"/"cdi-cri") | The desired strategy (or strategies) for passing the device list to the underlying runtime; accepts a single value or a list to combine strategies (optional). See [CDI device injection](how_to_use_cdi_device_injection.md). |
 | deviceSplitCount    | int                                        | The maximum number of VGPU that can be split per physical GPU (optional)               |
 | deviceMemoryScaling | float                                      | The ratio for NVIDIA device memory scaling (optional)                                  |
 | deviceMemoryFactor  | int                                        | The default gpu memory block size is 1MB (optional)                                    |

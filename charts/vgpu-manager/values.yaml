@@ -173,8 +173,24 @@ devicePlugin:
     commands:
       kubeApiQps: 20.0
       kubeApiBurst: 30
-      # The desired strategy for passing the device list to the underlying runtime. (supported values: "envvar" | "volume-mounts")
+      # The desired strategy for passing the device list to the underlying runtime.
+      # (supported values: "envvar" | "volume-mounts" | "cdi-annotations" | "cdi-cri")
+      # Multiple comma-separated values may be combined, e.g. "envvar,cdi-annotations".
+      # When a cdi-* strategy is enabled the plugin generates a CDI spec under the host
+      # CDI dir (cdiRoot) and the container runtime must have CDI support enabled.
       deviceListStrategy: "envvar"
+      # CDI options (only used when deviceListStrategy contains a cdi-* value).
+      # Host CDI spec directory; mounted into the plugin so the generated spec is
+      # visible to the container runtime on the host.
+      cdiRoot: "/var/run/cdi"
+      # Prefix used for CDI container annotation keys. (default: "cdi.k8s.io/")
+      cdiAnnotationPrefix: ""
+      # Driver root used for CDI spec generation. driverRoot is the path as seen by the
+      # plugin; targetDriverRoot is the corresponding path on the host. (default: "/")
+      driverRoot: ""
+      devRoot: ""
+      targetDriverRoot: ""
+      targetDevRoot: ""
       # The number for NVIDIA device split. (default: 10)
       deviceSplitCount: 10
       # The ratio for NVIDIA device cores scaling. (default: 1.0)
