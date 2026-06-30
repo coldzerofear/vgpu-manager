@@ -189,18 +189,15 @@ devicePlugin:
       # installed directly on the host (e.g. the GPU-Operator driver container). Leave
       # empty (or "/") for the host-installed-driver case — nothing extra is mounted.
       #
-      # When driverRoot is set to a non-"/" value, the host driver root (targetDriverRoot,
-      # default "/") is mounted into the plugin container at driverRoot so the spec can be
-      # generated from it, and the same paths are passed to the plugin. Example for the
-      # GPU-Operator driver container:
-      #   driverRoot: "/driver-root"
-      #   targetDriverRoot: "/run/nvidia/driver"
-      # devRoot / targetDevRoot are only needed when the device-node root differs from the
-      # driver root (an extra mount is added for them when set).
+      # When set to a non-"/" value, the host path is mounted into BOTH the device-plugin
+      # and device-monitor containers at the SAME path, so it is both the in-container read
+      # path and the host path written into the CDI spec. Example for the GPU-Operator
+      # driver container:
+      #   driverRoot: "/run/nvidia/driver"
+      # devRoot is only needed when the device-node root differs from the driver root
+      # (an extra same-path mount is added for it when set).
       driverRoot: ""
       devRoot: ""
-      targetDriverRoot: ""
-      targetDevRoot: ""
       # The number for NVIDIA device split. (default: 10)
       deviceSplitCount: 10
       # The ratio for NVIDIA device cores scaling. (default: 1.0)

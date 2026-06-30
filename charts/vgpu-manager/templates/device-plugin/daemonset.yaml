@@ -97,10 +97,8 @@ spec:
             {{- end }}
             {{- if $mountDriverRoot }}
             - --driver-root={{ $driverRoot }}
-            - --target-driver-root={{ $dpCmds.targetDriverRoot | default "/" }}
             {{- if $mountDevRoot }}
             - --dev-root={{ $devRoot }}
-            - --target-dev-root={{ $dpCmds.targetDevRoot | default "/dev" }}
             {{- end }}
             {{- end }}
             {{- if $nc.yaml }}
@@ -263,6 +261,16 @@ spec:
               mountPath: {{ .Values.devicePlugin.deviceMonitor.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
               readOnly: true
           {{- end }}
+            {{- if $mountDriverRoot }}
+            - name: driver-root
+              mountPath: {{ $driverRoot }}
+              readOnly: true
+            {{- end }}
+            {{- if $mountDevRoot }}
+            - name: dev-root
+              mountPath: {{ $devRoot }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: kubelet-root
           hostPath:
@@ -289,12 +297,12 @@ spec:
         {{- if $mountDriverRoot }}
         - name: driver-root
           hostPath:
-            path: {{ $dpCmds.targetDriverRoot | default "/" }}
+            path: {{ $driverRoot }}
         {{- end }}
         {{- if $mountDevRoot }}
         - name: dev-root
           hostPath:
-            path: {{ $dpCmds.targetDevRoot | default "/dev" }}
+            path: {{ $devRoot }}
         {{- end }}
         {{- if or $nc.yaml $nc.json }}
         - name: node-config

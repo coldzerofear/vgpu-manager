@@ -158,10 +158,10 @@ spec:
             # Tune the spec generation below if needed:
 #            - --cdi-annotation-prefix=cdi.k8s.io/
             # Only when the driver is NOT installed on the host (e.g. GPU-Operator
-            # driver container): set the container-side read path and host path, AND
-            # uncomment the matching driver-root volume + volumeMount below.
-#            - --driver-root=/driver-root
-#            - --target-driver-root=/run/nvidia/driver
+            # driver container): point at the driver root. The same host path must be
+            # mounted into the plugin (and monitor) at the SAME path — uncomment the
+            # driver-root volume + volumeMounts below.
+#            - --driver-root=/run/nvidia/driver
           env:
             - name: NODE_NAME
               valueFrom:
@@ -209,10 +209,10 @@ spec:
             # container runtime on the host can resolve the qualified devices.
             - name: cdi-root
               mountPath: /var/run/cdi
-            # Uncomment together with --driver-root/--target-driver-root above when
-            # the driver lives in a driver container instead of on the host.
+            # Uncomment together with --driver-root above when the driver lives in a
+            # driver container instead of on the host (mountPath must equal --driver-root).
 #            - name: driver-root
-#              mountPath: /driver-root
+#              mountPath: /run/nvidia/driver
 #              readOnly: true
         - name: device-monitor
           image: coldzerofear/vgpu-manager:latest
@@ -276,6 +276,11 @@ spec:
             - name: node-config
               mountPath: /config
               readOnly: true
+            # Uncomment together with the driver-root volume when using a driver
+            # container (mountPath must equal --driver-root).
+#            - name: driver-root
+#              mountPath: /run/nvidia/driver
+#              readOnly: true
       volumes:
         - name: kubelet-root
           hostPath:
@@ -298,7 +303,8 @@ spec:
             path: /var/run/cdi
             type: DirectoryOrCreate
         # Driver-container case only (see --driver-root above): mount the host driver
-        # root into the plugin so the CDI spec can be generated from it.
+        # root into the plugin & monitor at the same path so the CDI spec can be
+        # generated from it. hostPath must equal --driver-root / the mountPaths above.
 #        - name: driver-root
 #          hostPath:
 #            path: /run/nvidia/driver

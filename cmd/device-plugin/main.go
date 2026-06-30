@@ -122,10 +122,11 @@ func runApp(opt *options.Options) (exitCode int) {
 			DeviceIDStrategy:  util.CDIDeviceIDStrategy,
 			AnnotationPrefix:  opt.CDIAnnotationPrefix,
 			NvidiaCDIHookPath: filepath.Join(hostManagerDir, "nvidia-cdi-hook"),
-			DriverRoot:        opt.DriverRoot,
-			DevRoot:           opt.DevRoot,
-			TargetDriverRoot:  opt.TargetDriverRoot,
-			TargetDevRoot:     opt.TargetDevRoot,
+			// The host driver/dev root is mounted into the plugin at the same path,
+			// so the in-container read path equals the host path written into the
+			// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
+			DriverRoot: opt.DriverRoot,
+			DevRoot:    opt.DevRoot,
 		})
 	if err != nil {
 		klog.Errorf("Create CDI handler failed: %v", err)
