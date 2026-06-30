@@ -1,6 +1,14 @@
 {{- $nc := .Values.devicePlugin.nodeConfig | default dict }}
-{{- $cdiEnabled := contains "cdi" (.Values.devicePlugin.devicePlugin.commands.deviceListStrategy | default "envvar") }}
-{{- $cdiRoot := .Values.devicePlugin.devicePlugin.commands.cdiRoot | default "/var/run/cdi" }}
+{{- $dpCmds := .Values.devicePlugin.devicePlugin.commands }}
+{{- $cdiEnabled := contains "cdi" ($dpCmds.deviceListStrategy | default "envvar") }}
+{{- $cdiRoot := $dpCmds.cdiRoot | default "/var/run/cdi" }}
+{{- /* A custom (non-"/") driver root is generated from inside the plugin container,
+       so the host driver root must be mounted in. Flag defaults and mount host paths
+       are kept in sync below. */ -}}
+{{- $driverRoot := $dpCmds.driverRoot | default "" }}
+{{- $mountDriverRoot := and (ne $driverRoot "") (ne $driverRoot "/") }}
+{{- $devRoot := $dpCmds.devRoot | default "" }}
+{{- $mountDevRoot := and $mountDriverRoot (ne $devRoot "") (ne $devRoot $driverRoot) }}
 {{- if .Values.devicePlugin.enabled -}}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -84,20 +92,16 @@ spec:
             - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
             - --open-kernel-modules={{ .Values.devicePlugin.devicePlugin.commands.openKernelModules }}
             - --mig-strategy={{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
-            {{- with .Values.devicePlugin.devicePlugin.commands.cdiAnnotationPrefix }}
+            {{- with $dpCmds.cdiAnnotationPrefix }}
             - --cdi-annotation-prefix={{ . }}
             {{- end }}
-            {{- with .Values.devicePlugin.devicePlugin.commands.driverRoot }}
-            - --driver-root={{ . }}
+            {{- if $mountDriverRoot }}
+            - --driver-root={{ $driverRoot }}
+            - --target-driver-root={{ $dpCmds.targetDriverRoot | default "/" }}
+            {{- if $mountDevRoot }}
+            - --dev-root={{ $devRoot }}
+            - --target-dev-root={{ $dpCmds.targetDevRoot | default "/dev" }}
             {{- end }}
-            {{- with .Values.devicePlugin.devicePlugin.commands.devRoot }}
-            - --dev-root={{ . }}
-            {{- end }}
-            {{- with .Values.devicePlugin.devicePlugin.commands.targetDriverRoot }}
-            - --target-driver-root={{ . }}
-            {{- end }}
-            {{- with .Values.devicePlugin.devicePlugin.commands.targetDevRoot }}
-            - --target-dev-root={{ . }}
             {{- end }}
             {{- if $nc.yaml }}
             - --node-config-path=/config/nodeConfig.yaml
@@ -151,6 +155,17 @@ spec:
             {{- if $cdiEnabled }}
             - name: cdi-root
               mountPath: /var/run/cdi
+            {{- end }}
+            {{- if $mountDriverRoot }}
+            # Host driver root mounted in so the CDI spec can be generated from it.
+            - name: driver-root
+              mountPath: {{ $driverRoot }}
+              readOnly: true
+            {{- end }}
+            {{- if $mountDevRoot }}
+            - name: dev-root
+              mountPath: {{ $devRoot }}
+              readOnly: true
             {{- end }}
         - name: device-monitor
           image: {{ include "vgpu-manager.fullimage" . }}
@@ -270,6 +285,16 @@ spec:
           hostPath:
             path: {{ $cdiRoot }}
             type: DirectoryOrCreate
+        {{- end }}
+        {{- if $mountDriverRoot }}
+        - name: driver-root
+          hostPath:
+            path: {{ $dpCmds.targetDriverRoot | default "/" }}
+        {{- end }}
+        {{- if $mountDevRoot }}
+        - name: dev-root
+          hostPath:
+            path: {{ $dpCmds.targetDevRoot | default "/dev" }}
         {{- end }}
         {{- if or $nc.yaml $nc.json }}
         - name: node-config

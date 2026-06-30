@@ -185,8 +185,18 @@ devicePlugin:
       cdiRoot: "/var/run/cdi"
       # Prefix used for CDI container annotation keys. (default: "cdi.k8s.io/")
       cdiAnnotationPrefix: ""
-      # Driver root used for CDI spec generation. driverRoot is the path as seen by the
-      # plugin; targetDriverRoot is the corresponding path on the host. (default: "/")
+      # Driver root for CDI spec generation. Only needed when the NVIDIA driver is NOT
+      # installed directly on the host (e.g. the GPU-Operator driver container). Leave
+      # empty (or "/") for the host-installed-driver case — nothing extra is mounted.
+      #
+      # When driverRoot is set to a non-"/" value, the host driver root (targetDriverRoot,
+      # default "/") is mounted into the plugin container at driverRoot so the spec can be
+      # generated from it, and the same paths are passed to the plugin. Example for the
+      # GPU-Operator driver container:
+      #   driverRoot: "/driver-root"
+      #   targetDriverRoot: "/run/nvidia/driver"
+      # devRoot / targetDevRoot are only needed when the device-node root differs from the
+      # driver root (an extra mount is added for them when set).
       driverRoot: ""
       devRoot: ""
       targetDriverRoot: ""

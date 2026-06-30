@@ -157,8 +157,11 @@ spec:
             # on the host by the install init container, and referenced automatically.
             # Tune the spec generation below if needed:
 #            - --cdi-annotation-prefix=cdi.k8s.io/
-#            - --driver-root=/
-#            - --target-driver-root=/
+            # Only when the driver is NOT installed on the host (e.g. GPU-Operator
+            # driver container): set the container-side read path and host path, AND
+            # uncomment the matching driver-root volume + volumeMount below.
+#            - --driver-root=/driver-root
+#            - --target-driver-root=/run/nvidia/driver
           env:
             - name: NODE_NAME
               valueFrom:
@@ -206,6 +209,11 @@ spec:
             # container runtime on the host can resolve the qualified devices.
             - name: cdi-root
               mountPath: /var/run/cdi
+            # Uncomment together with --driver-root/--target-driver-root above when
+            # the driver lives in a driver container instead of on the host.
+#            - name: driver-root
+#              mountPath: /driver-root
+#              readOnly: true
         - name: device-monitor
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
@@ -289,6 +297,11 @@ spec:
           hostPath:
             path: /var/run/cdi
             type: DirectoryOrCreate
+        # Driver-container case only (see --driver-root above): mount the host driver
+        # root into the plugin so the CDI spec can be generated from it.
+#        - name: driver-root
+#          hostPath:
+#            path: /run/nvidia/driver
         - name: node-config
           configMap:
             name: vgpu-manager-device-plugin-config
