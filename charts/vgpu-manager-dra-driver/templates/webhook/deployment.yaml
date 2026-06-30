@@ -1,0 +1,152 @@
+{{- if .Values.webhook.enabled -}}
+{{/*
+Validate the webhook flag combinations that the device-webhook binary rejects at startup
+(see cmd/device-webhook/options). Fail fast at render time with a clear message instead of
+letting the webhook pod crash-loop on klog.Fatalln.
+*/}}
+{{- if and .Values.webhook.commands.defaultConvert2Dra (not .Values.webhook.commands.vgpuDeviceClassName) }}
+{{- fail "webhook.commands.vgpuDeviceClassName must be set when webhook.commands.defaultConvert2Dra is enabled" }}
+{{- end }}
+{{- if and .Values.webhook.commands.combinedResourceClaim (not .Values.webhook.commands.defaultConvert2Dra) }}
+{{- fail "webhook.commands.defaultConvert2Dra must be enabled when webhook.commands.combinedResourceClaim is enabled" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.webhook.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+      {{- include "vgpu-manager-dra-driver.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+        vgpu-manager.io/ignore-webhook: "true"
+        {{- include "vgpu-manager-dra-driver.selectorLabels" . | nindent 8 }}
+        {{- with .Values.webhook.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.webhook.annotations }}
+      annotations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "vgpu-manager-dra-driver.imagePullSecrets" . | nindent 6 }}
+      restartPolicy: Always
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      priorityClassName: system-node-critical
+      serviceAccountName: {{ include "vgpu-manager-dra-driver.webhook" . }}
+      terminationGracePeriodSeconds: {{ .Values.webhook.terminationGracePeriodSeconds }}
+      {{- with .Values.webhook.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webhook.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        nodeAffinity:
+          # Pod should run as much as possible on control plane nodes.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+        podAntiAffinity:
+          # When there are multiple replicas, try to disperse pods on different nodes as much as possible.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values:
+                        - {{ include "vgpu-manager-dra-driver.webhook" . }}
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: device-webhook
+          image: {{ include "vgpu-manager-dra-driver.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          env: {{ toYaml .Values.webhook.env | nindent 12 }}
+          command:
+            - device-webhook
+            {{- if .Values.webhook.commands.schedulerName }}
+            - --scheduler-name={{ .Values.webhook.commands.schedulerName }}
+            {{- end }}
+            - --domain={{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}
+            - --server-bind-port={{ .Values.webhook.commands.serverBindPort | default 9443 }}
+            - --pprof-bind-port={{ .Values.webhook.commands.pprofBindPort }}
+            - --cert-dir={{ .Values.webhook.commands.certDir }}
+            {{- if .Values.webhook.commands.defaultNodePolicy }}
+            - --default-node-policy={{ .Values.webhook.commands.defaultNodePolicy }}
+            {{- end }}
+            {{- if .Values.webhook.commands.defaultDevicePolicy }}
+            - --default-device-policy={{ .Values.webhook.commands.defaultDevicePolicy }}
+            {{- end }}
+            - --default-topology-mode={{ .Values.webhook.commands.defaultTopologyMode }}
+            {{- if .Values.webhook.commands.defaultRuntimeClass }}
+            - --default-runtime-class={{ .Values.webhook.commands.defaultRuntimeClass }}
+            {{- end }}
+            {{- if .Values.webhook.commands.vgpuDeviceClassName }}
+            - --vgpu-device-class-name={{ .Values.webhook.commands.vgpuDeviceClassName }}
+            {{- end }}
+            # The DRA admission path is mandatory for this driver and is always enabled.
+            - --dra-admission-enabled
+            {{- if .Values.webhook.commands.defaultConvert2Dra }}
+            - --default-convert2-dra
+            {{- end }}
+            {{- if .Values.webhook.commands.combinedResourceClaim }}
+            - --combined-resource-claim
+            {{- end }}
+            - --v={{ .Values.webhook.commands.logLevel }}
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /readyz
+              port: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          ports:
+            - name: https
+              containerPort: {{ .Values.webhook.commands.serverBindPort | default 9443 }}
+            {{- if gt (int .Values.webhook.commands.pprofBindPort) 0 }}
+            - name: pprof
+              containerPort: {{ .Values.webhook.commands.pprofBindPort }}
+            {{- end }}
+          resources: {{ toYaml .Values.webhook.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: cert-dir
+              mountPath: {{ .Values.webhook.commands.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
+              readOnly: true
+      volumes:
+        - name: cert-dir
+          secret:
+            secretName: {{ include "vgpu-manager-dra-driver.webhook" . }}-secret
+{{- end }}

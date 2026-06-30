@@ -1,0 +1,72 @@
+{{- if .Values.webhook.enabled -}}
+{{- if .Values.webhook.certManager.enabled -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}-cert
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ include "vgpu-manager-dra-driver.webhook" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "vgpu-manager-dra-driver.webhook" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "vgpu-manager-dra-driver.webhook" . }}-issuer
+  secretName: {{ include "vgpu-manager-dra-driver.webhook" . }}-secret
+  duration: {{ printf "%dh" (mul .Values.webhook.certDuration 24) }}
+  renewBefore: {{ printf "%dh" (mul .Values.webhook.certManager.certRenewBefore 24) }}
+{{- else }}
+{{- $webhookSvcName := include "vgpu-manager-dra-driver.webhook" . }}
+{{- $webhookSvcAltNames := list (printf "%s.%s.svc" $webhookSvcName .Release.Namespace) (printf "%s.%s.svc.cluster.local" $webhookSvcName .Release.Namespace) }}
+{{- $certName := printf "%s-cert" (include "vgpu-manager-dra-driver.webhook" .) }}
+{{- $duration := int .Values.webhook.certDuration }}
+{{- $ca := genCA $certName $duration }}
+{{- $cert := genSignedCert (printf "%s.%s" $webhookSvcName .Release.Namespace) nil $webhookSvcAltNames $duration $ca }}
+{{- $caBundle := $ca.Cert | b64enc }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}-secret
+  namespace: {{ .Release.Namespace | quote }}
+  annotations:
+    "helm.sh/hook": "pre-install,pre-upgrade"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $caBundle }}
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  annotations:
+    "helm.sh/hook": "pre-install,pre-upgrade"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
+    "helm.sh/hook-weight": "5"
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}-mutate
+{{ include "vgpu-manager-dra-driver.mutatingWebhooks" (dict "ctx" . "caBundle" $caBundle) }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  annotations:
+    "helm.sh/hook": "pre-install,pre-upgrade"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
+    "helm.sh/hook-weight": "5"
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}-validate
+{{ include "vgpu-manager-dra-driver.validatingWebhooks" (dict "ctx" . "caBundle" $caBundle) }}
+{{- end }}
+{{- end }}

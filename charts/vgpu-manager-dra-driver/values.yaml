@@ -1,0 +1,266 @@
+# Default values for vgpu-manager-dra-driver.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# This is to override the chart name.
+nameOverride: ""
+fullnameOverride: ""
+# This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
+imagePullSecrets: []
+
+# Set up the image repository for the vgpu-manager DRA driver.
+image: coldzerofear/vgpu-manager-dra
+# Overrides the image tag whose default is the chart appVersion.
+imageTag: ""
+imagePullPolicy: IfNotPresent
+
+# Set global domain name to replace all resource and annotation domains used by the webhook.
+globalDomain: nvidia.com
+
+# resourceApiVersion sets the resource.k8s.io API version used for the DRA resources
+# rendered by this chart (currently the DeviceClass objects).
+#
+# By default, the chart auto-detects the highest version served by the cluster via
+# .Capabilities.APIVersions (v1 > v1beta2 > v1beta1). Some environments may report an
+# unsupported version, causing Helm to render an API version that the API server does not
+# actually serve. Set this to pin it explicitly, for example:
+#   resourceApiVersion: "resource.k8s.io/v1beta1"
+# Leave empty to use auto-detection.
+resourceApiVersion: ""
+
+# Deployment configuration of the DRA kubelet-plugin (DaemonSet).
+kubeletPlugin:
+  # Should the kubelet-plugin be deployed? (default: true)
+  enabled: true
+  # pod labels
+  labels: {}
+  # pod annotations
+  annotations: {}
+  # The priority class assigned to the kubelet-plugin pods.
+  priorityClassName: system-node-critical
+  # Grace period for container recycling.
+  terminationGracePeriodSeconds: 30
+  # Node labels used to select the nodes the DRA driver runs on. By default the driver only
+  # runs on nodes explicitly labelled with `vgpu-manager: dra-driver`.
+  nodeSelector:
+    vgpu-manager: dra-driver
+  tolerations:
+    # This toleration is deprecated. Kept here for backward compatibility
+    # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
+    - key: CriticalAddonsOnly
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+    - effect: NoSchedule
+      operator: Exists
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  # Rollout strategy for the DaemonSet. As with the NVIDIA DRA driver, a node-critical GPU
+  # driver is rolled out with maxUnavailable 100% so all nodes update at once.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "100%"
+  # Pod-level security context for the kubelet-plugin pods.
+  podSecurityContext: {}
+  # Node labels used to select the nodes the DRA driver runs on. (see nodeSelector above)
+  # Additional affinity rules for the kubelet-plugin pods. Empty by default; uncomment the
+  # NFD / GPU Operator expressions below to only run on detected NVIDIA GPU nodes.
+  affinity: {}
+#    nodeAffinity:
+#      requiredDuringSchedulingIgnoredDuringExecution:
+#        nodeSelectorTerms:
+#          - matchExpressions:
+#              # NFD: On discrete-GPU based systems NFD adds the following label where 10de is the NVIDIA PCI vendor ID
+#              - key: feature.node.kubernetes.io/pci-10de.present
+#                operator: In
+#                values:
+#                  - "true"
+
+  # The driver root on the host.
+  # If the NVIDIA GPU driver is managed using the NVIDIA GPU Driver Container, this is
+  # typically /run/nvidia/driver. For a driver installed directly on the host, use "/".
+  nvidiaDriverRoot: "/"
+  # Optional absolute path to the nvidia-cdi-hook executable on the host, used in the generated
+  # CDI specification. Empty lets the plugin copy the bundled nvidia-cdi-hook binary. (code default: "")
+  nvidiaCDIHookPath: ""
+  # The root directory configured in the start command of kubelet (default: /var/lib/kubelet)
+  kubeletRootDir: "/var/lib/kubelet"
+  # The kubelet plugin registration socket directory on the host.
+  kubeletRegistrarDirectoryPath: "/var/lib/kubelet/plugins_registry"
+  # The kubelet plugins socket directory on the host.
+  kubeletPluginsDirectoryPath: "/var/lib/kubelet/plugins"
+  # Configure the host path used by vgpu manager (default: /etc/vgpu-manager)
+  vgpuManagerDir: "/etc/vgpu-manager"
+  # CDI specification directory on the host.
+  cdiRoot: "/var/run/cdi"
+  # Cgroup driver for the container environment. Empty lets the plugin auto-detect. (supported values: systemd | cgroupfs)
+  cgroupDriver: ""
+  # Conditionally mask /proc/driver/nvidia/params to prevent the plugin from recreating
+  # missing GPU device nodes (needed under nvkind). Set to "true" to enable.
+  maskNvidiaDriverParams: ""
+  # Prometheus metrics HTTP server for the kubelet-plugin (disabled by default).
+  metrics:
+    enabled: false
+    # The TCP address the metrics HTTP server listens on (HTTP_ENDPOINT). The port is reused for
+    # the metrics Service and the named container port.
+    httpEndpoint: ":8080"
+    # The HTTP path where Prometheus metrics are exposed (METRICS_PATH).
+    metricsPath: "/metrics"
+    # Prometheus Operator ServiceMonitor. Only created when metrics.enabled is true and the
+    # monitoring.coreos.com/v1 ServiceMonitor CRD is present in the cluster.
+    serviceMonitor:
+      enabled: true
+      # Scrape interval and timeout. Empty uses the Prometheus default.
+      interval: ""
+      scrapeTimeout: ""
+      # Extra labels added to the ServiceMonitor (e.g. to match the Prometheus release selector).
+      additionalLabels: {}
+      # Prometheus relabeling rules applied before / after scraping.
+      relabelings: []
+      metricRelabelings: []
+  containers:
+    # init containers (driver prestart + host-side file install). Privileged is required.
+    init:
+      securityContext:
+        privileged: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 15Mi
+    # main kubelet-plugin container.
+    plugin:
+      # gRPC health service port checked by the startup/liveness probes.
+      # Positive = literal port, 0 = random port, negative = healthcheck disabled.
+      healthcheckPort: 4567
+      # Feature gates of the kubelet-plugin, rendered into the FEATURE_GATES env var.
+      # Enabling PassthroughSupport (vfio-pci) additionally mounts the host root, lib-modules,
+      # sysfs and procfs into the plugin and sets the HOST_ROOT env var. Note PassthroughSupport
+      # is mutually exclusive with VGPUSupport (default on), DynamicMIG and NVMLDeviceHealthCheck,
+      # so disable those when turning it on.
+      featureGates:
+        SharedSMUtilizationWatcher: true
+        DevicePluginClientMode: false
+        # PassthroughSupport: false
+      # Additional environment variables appended to the kubelet-plugin container.
+      env: []
+      logLevel: 6
+      # Container security context. Privileged mode is required to manage GPU device nodes.
+      securityContext:
+        privileged: true
+      # kubelet-plugin container requests resources.
+      # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
+      resources: {}
+#        requests:
+#          cpu: 200m
+#          memory: 256Mi
+#        limits:
+#          cpu: 2000m
+#          memory: 2Gi
+
+# DeviceClass objects published by the DRA driver. The driver advertises devices under the
+# `driverName` driver; each DeviceClass selects a device `type` via a CEL expression.
+deviceClasses:
+  # Should the DeviceClass objects be created? (default: true)
+  enabled: true
+  # Driver name the DRA kubelet-plugin registers as (must match the kubelet-plugin binary).
+  driverName: manager.nvidia.com
+  # Whole-GPU device class. `extendedResourceName` is only rendered when the served
+  # resource.k8s.io version is v1 (the field does not exist in v1beta*).
+  gpu:
+    enabled: true
+    name: gpu-manager
+    extendedResourceName: nvidia.com/gpu
+  # vGPU (shared) device class.
+  vgpu:
+    enabled: true
+    name: vgpu-manager
+  # MIG device class.
+  mig:
+    enabled: true
+    name: mig-manager
+  # VFIO (passthrough) device class.
+  vfio:
+    enabled: true
+    name: vfio-manager
+
+# Installing the Webhook service requires installing the Cert-Manager component in advance, or
+# letting the chart generate a self-signed certificate (default).
+webhook:
+  # Should the webhook be deployed? (default: true)
+  enabled: true
+  # Certificate validity period. (Unit day, default: 10 year)
+  certDuration: 3650
+
+  # If enabled, certificate distribution will be done using Cert Manager,
+  # which will take over the automatic renewal of certificates.
+  certManager:
+    enabled: false
+    # The last refresh time of the certificate. (Unit day, default: 30 day)
+    certRenewBefore: 30
+
+  # webhook failure Policy (Supported values: Ignore | Fail)
+  failurePolicy: Fail
+  # pod labels
+  labels: {}
+  # pod annotations
+  annotations: {}
+  # Number of deployed replicas (default: 1)
+  replicas: 1
+  # Grace period for container recycling (default: 10s)
+  terminationGracePeriodSeconds: 10
+  # Node labels to be deployed
+  nodeSelector: {}
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: CriticalAddonsOnly
+      operator: Exists
+  # Webhook will not be effective for resources under these namespaces.
+  excludeNamespaces:
+    - kube-system
+    - cert-manager
+#    - istio-system
+#    - volcano-system
+  env: []
+  commands:
+    # Scheduler name automatically set on vGPU pods. Empty disables it. (code default: "")
+    schedulerName: ""
+    # webhook service port (default: 9443)
+    serverBindPort: 9443
+    # The pprof service port used for debugging (default disable: 0)
+    pprofBindPort: 0
+    # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
+    certDir: /tmp/k8s-webhook-server/serving-certs
+    # Default node scheduling policy. Empty uses the binary default. (supported values: binpack | spread)
+    defaultNodePolicy: ""
+    # Default device scheduling policy. Empty uses the binary default. (supported values: binpack | spread)
+    defaultDevicePolicy: ""
+    # Default device list topology mode. (supported values: numa | link)
+    defaultTopologyMode: link
+    # Default container runtimeClassName set on vGPU pods. Empty disables it. (code default: "")
+    defaultRuntimeClass: ""
+    # Name of the vGPU device class used for DRA conversion. (code default: "vgpu-manager")
+    # Keep this in sync with deviceClasses.vgpu.name.
+    vgpuDeviceClassName: vgpu-manager
+    # Note: the DRA admission path (--dra-admission-enabled) is mandatory for this driver and is
+    # always enabled by the chart, so it is intentionally not exposed as a configurable value.
+    # Convert legacy vGPU extended-resource requests into DRA ResourceClaims by default.
+    defaultConvert2Dra: true
+    # Combine multiple claim requests into a single ResourceClaim. Requires defaultConvert2Dra=true. (code default: false)
+    combinedResourceClaim: false
+    logLevel: 4
+  # Webhook container requests resources.
+  # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
+  resources: {}
+#    requests:
+#      cpu: 20m
+#      memory: 32Mi
+#    limits:
+#      cpu: 200m
+#      memory: 256Mi

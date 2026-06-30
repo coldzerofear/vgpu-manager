@@ -1,6 +1,6 @@
 apiVersion: v2
-name: vgpu-manager
-description: A k8s device plugin for scheduling and allocating vGPU devices.
+name: vgpu-manager-dra-driver
+description: A Dynamic Resource Allocation (DRA) driver for scheduling and allocating vGPU devices.
 
 # A chart can be either an 'application' or a 'library' chart.
 #
@@ -22,7 +22,11 @@ version: 1.0.0
 # follow Semantic Versioning. They should reflect the version the application is using.
 # It is recommended to use it with quotes.
 appVersion: "v1.0.0"
-kubeVersion: ">= 1.18.0"
+
+# DRA (the resource.k8s.io API group) requires a recent Kubernetes version. The chart
+# auto-detects the served resource.k8s.io version (v1 > v1beta2 > v1beta1), but the structured
+# parameters / DeviceClass machinery is only available from 1.32 onwards.
+kubeVersion: ">= 1.32.0-0"
 
 maintainers:
   - name: coldzerofear
@@ -31,6 +35,8 @@ maintainers:
 keywords:
   - vgpu
   - gpu
+  - dra
+  - dynamic-resource-allocation
 
 sources:
   - https://github.com/coldzerofear/vgpu-manager

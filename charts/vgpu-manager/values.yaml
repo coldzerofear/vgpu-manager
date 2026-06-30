@@ -97,7 +97,8 @@ scheduler:
       # - SerialBindNode (default: true)
       # - SerialFilterNode (default: true)
       # - GPUTopology
-      featureGates: ""
+      # Configure as a map of gate name -> bool, e.g. { GPUTopology: true }.
+      featureGates: {}
       # Certificate refresh interval in seconds (TLS only works when enabled)
       certRefreshInterval: 5
       # Scheduling stuck grace period, filtering the maximum delay time to the binding stage.
@@ -198,7 +199,8 @@ devicePlugin:
       # - SMWatcher
       # - VMemoryNode
       # - ClientMode
-      featureGates: ""
+      # Configure as a map of gate name -> bool, e.g. { GPUTopology: true }.
+      featureGates: {}
       logLevel: 3
     # Device plugin container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
@@ -237,7 +239,8 @@ devicePlugin:
       # Supported feature gates:
       # - SMWatcher
       # - VMemoryNode
-      featureGates: ""
+      # Configure as a map of gate name -> bool, e.g. { SMWatcher: true }.
+      featureGates: {}
       # Enable RBAC authentication for metrics service
       enableRBAC: false
       # Certificate refresh interval in seconds (TLS only works when enabled)

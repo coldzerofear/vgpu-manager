@@ -1,0 +1,282 @@
+{{- if .Values.kubeletPlugin.enabled -}}
+{{- $init := .Values.kubeletPlugin.containers.init }}
+{{- $plugin := .Values.kubeletPlugin.containers.plugin }}
+{{- $driverRoot := .Values.kubeletPlugin.nvidiaDriverRoot | default "/" }}
+{{- $kubeletRoot := .Values.kubeletPlugin.kubeletRootDir | default "/var/lib/kubelet" | trimSuffix "/" }}
+{{- $registrarDir := .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | default "/var/lib/kubelet/plugins_registry" }}
+{{- $pluginsDir := .Values.kubeletPlugin.kubeletPluginsDirectoryPath | default "/var/lib/kubelet/plugins" }}
+{{- $managerDir := .Values.kubeletPlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
+{{- $cdiRoot := .Values.kubeletPlugin.cdiRoot | default "/var/run/cdi" }}
+{{- $healthPort := $plugin.healthcheckPort | default 4567 }}
+{{- $fg := $plugin.featureGates | default dict }}
+{{- $gates := list }}
+{{- range $k, $v := $fg }}{{ $gates = append $gates (printf "%s=%v" $k $v) }}{{- end }}
+{{- $featureGates := sortAlpha $gates | join "," }}
+{{- /* PassthroughSupport (vfio-pci) requires extra host mounts and the HOST_ROOT env. */}}
+{{- $passthrough := and (hasKey $fg "PassthroughSupport") (index $fg "PassthroughSupport") }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+spec:
+  revisionHistoryLimit: 10
+  {{- with .Values.kubeletPlugin.updateStrategy }}
+  updateStrategy: {{ toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+      {{- include "vgpu-manager-dra-driver.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+        vgpu-manager.io/ignore-webhook: "true"
+        {{- include "vgpu-manager-dra-driver.selectorLabels" . | nindent 8 }}
+        {{- with .Values.kubeletPlugin.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.kubeletPlugin.annotations }}
+      annotations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "vgpu-manager-dra-driver.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.kubeletPlugin.priorityClassName }}
+      priorityClassName: {{ .Values.kubeletPlugin.priorityClassName }}
+      {{- end }}
+      serviceAccountName: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+      terminationGracePeriodSeconds: {{ .Values.kubeletPlugin.terminationGracePeriodSeconds }}
+      hostPID: true
+      dnsPolicy: ClusterFirst
+      securityContext: {{ toYaml .Values.kubeletPlugin.podSecurityContext | nindent 8 }}
+      {{- with .Values.kubeletPlugin.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.kubeletPlugin.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.kubeletPlugin.affinity }}
+      affinity: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: init-container
+          image: {{ include "vgpu-manager-dra-driver.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          securityContext: {{ toYaml $init.securityContext | nindent 12 }}
+          command: [bash, /usr/bin/kubelet-plugin-prestart.sh]
+          env:
+            - name: NVIDIA_DRIVER_ROOT
+              value: {{ $driverRoot | quote }}
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+            - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+              value: {{ $registrarDir | quote }}
+            - name: KUBELET_PLUGINS_DIRECTORY_PATH
+              value: {{ $pluginsDir | quote }}
+          volumeMounts:
+            - name: driver-root-parent
+              mountPath: /driver-root-parent
+              {{- if eq "/" $driverRoot }}
+              readOnly: true
+              {{- else }}
+              mountPropagation: HostToContainer
+              {{- end }}
+        - name: init-install
+          image: {{ include "vgpu-manager-dra-driver.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          command: [bash, -c, /usr/bin/install_files.sh]
+          resources: {{ toYaml $init.resources | nindent 12 }}
+          securityContext: {{ toYaml $init.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: manager
+              mountPath: /etc/vgpu-manager
+              mountPropagation: Bidirectional
+      containers:
+        - name: kubelet-plugin
+          image: {{ include "vgpu-manager-dra-driver.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          command: [bash, -c]
+          args:
+            - |-
+              # Conditionally mask the params file to prevent this container from
+              # recreating any missing GPU device nodes. This is necessary, for
+              # example, when running under nvkind to limit the set GPUs governed
+              # by the plugin even though it has cgroup access to all of them.
+              if [ "${MASK_NVIDIA_DRIVER_PARAMS}" = "true" ]; then
+                cp /proc/driver/nvidia/params root/gpu-params
+                sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
+                mount --bind root/gpu-params /proc/driver/nvidia/params
+              fi
+              kubelet-plugin -v {{ $plugin.logLevel | default 6 }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: FEATURE_GATES
+              value: {{ $featureGates | quote }}
+            - name: MASK_NVIDIA_DRIVER_PARAMS
+              value: {{ .Values.kubeletPlugin.maskNvidiaDriverParams | quote }}
+            - name: NVIDIA_DRIVER_ROOT
+              value: {{ $driverRoot | quote }}
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: CDI_ROOT
+              value: {{ $cdiRoot | quote }}
+            {{- if $passthrough }}
+            - name: HOST_ROOT
+              value: /host-root
+            {{- end }}
+            - name: HEALTHCHECK_PORT
+              value: {{ $healthPort | quote }}
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+            - name: NVIDIA_MIG_CONFIG_DEVICES
+              value: all
+            - name: DRIVER_ROOT_CTR_PATH
+              value: /driver-root
+            - name: HOST_MANAGER_DIR
+              value: {{ $managerDir | quote }}
+            - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+              value: {{ $registrarDir | quote }}
+            - name: KUBELET_PLUGINS_DIRECTORY_PATH
+              value: {{ $pluginsDir | quote }}
+            {{- if .Values.kubeletPlugin.nvidiaCDIHookPath }}
+            - name: NVIDIA_CDI_HOOK_PATH
+              value: {{ .Values.kubeletPlugin.nvidiaCDIHookPath | quote }}
+            {{- end }}
+            {{- if .Values.kubeletPlugin.cgroupDriver }}
+            - name: CGROUP_DRIVER
+              value: {{ .Values.kubeletPlugin.cgroupDriver | quote }}
+            {{- end }}
+            {{- if .Values.kubeletPlugin.metrics.enabled }}
+            - name: HTTP_ENDPOINT
+              value: {{ .Values.kubeletPlugin.metrics.httpEndpoint | quote }}
+            - name: METRICS_PATH
+              value: {{ .Values.kubeletPlugin.metrics.metricsPath | quote }}
+            {{- end }}
+          {{- with $plugin.env }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext: {{ toYaml $plugin.securityContext | nindent 12 }}
+          resources: {{ toYaml $plugin.resources | nindent 12 }}
+          {{- if .Values.kubeletPlugin.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ include "vgpu-manager-dra-driver.metricsPort" . | int }}
+              protocol: TCP
+          {{- end }}
+          {{- if gt (int $healthPort) 0 }}
+          startupProbe:
+            grpc:
+              port: {{ $healthPort }}
+              service: liveness
+            failureThreshold: 60
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            grpc:
+              port: {{ $healthPort }}
+              service: liveness
+            failureThreshold: 3
+            periodSeconds: 30
+            timeoutSeconds: 10
+          {{- end }}
+          volumeMounts:
+            - name: plugins-registry
+              mountPath: {{ $registrarDir | quote }}
+            - name: plugins
+              mountPath: {{ $pluginsDir | quote }}
+              mountPropagation: Bidirectional
+            - name: cdi
+              mountPath: {{ $cdiRoot | quote }}
+            - name: driver-root
+              mountPath: /driver-root
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: manager
+              mountPath: /etc/vgpu-manager
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+            {{- if $passthrough }}
+            # PassthroughSupport: detect/load the vfio-pci module variant for a GPU.
+            - name: host-root
+              mountPath: /host-root
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules/
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: sysfs
+              mountPath: /sys/
+              mountPropagation: Bidirectional
+            - name: procfs
+              mountPath: /proc/
+              mountPropagation: Bidirectional
+            {{- end }}
+      volumes:
+        - name: plugins-registry
+          hostPath:
+            path: {{ $registrarDir | quote }}
+        - name: plugins
+          hostPath:
+            path: {{ $pluginsDir | quote }}
+        - name: cdi
+          hostPath:
+            path: {{ $cdiRoot | quote }}
+        - name: driver-root-parent
+          hostPath:
+            # If nvidiaDriverRoot == "/" then its parent is itself. Otherwise its parent is
+            # obtained by stripping the last path element with the sprig `dir` function.
+            {{- if eq "/" $driverRoot }}
+            path: "/"
+            {{- else }}
+            path: {{ dir (trimSuffix "/" $driverRoot) | quote }}
+            {{- end }}
+            type: DirectoryOrCreate
+        - name: driver-root
+          hostPath:
+            path: {{ $driverRoot | quote }}
+            type: DirectoryOrCreate
+        - name: manager
+          hostPath:
+            path: {{ $managerDir | quote }}
+            type: DirectoryOrCreate
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: kubelet
+          hostPath:
+            path: {{ $kubeletRoot }}
+        {{- if $passthrough }}
+        # PassthroughSupport: the root filesystem of the host, used to execute system commands
+        # against the host FS (e.g. to test and load the vfio-pci module variant for a GPU).
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        # Needed by `https://github.com/NVIDIA/go-nvlib/pkg/nvpassthrough` to detect the
+        # vfio-pci driver variant to use with a GPU.
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules/
+            type: Directory
+        - name: sysfs
+          hostPath:
+            path: /sys/
+            type: Directory
+        - name: procfs
+          hostPath:
+            path: /proc/
+            type: Directory
+        {{- end }}
+{{- end }}

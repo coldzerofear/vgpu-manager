@@ -1,0 +1,26 @@
+{{- if .Values.webhook.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+    {{- if gt (int .Values.webhook.commands.pprofBindPort) 0 }}
+    - name: pprof
+      port: {{ .Values.webhook.commands.pprofBindPort }}
+      targetPort: pprof
+      protocol: TCP
+    {{- end }}
+  selector:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.selectorLabels" . | nindent 4 }}
+{{- end }}
