@@ -10,8 +10,8 @@ github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERo
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/NVIDIA/go-nvlib v0.11.0 h1:J6c9deWGJ1x4yY7fKg+aOdm2v5+WmCIeCLsuaO3tRtA=
 github.com/NVIDIA/go-nvlib v0.11.0/go.mod h1:uQNH63NoDuSfn/1lixD1D1Hvhko/xdnBHmc4H1mFUlY=
-github.com/NVIDIA/nvidia-container-toolkit v1.19.1-0.20260515194426-db3eab6e775b h1:41nL4Cqw6WvzwrP5U1IVLHSBTIrS1J0ryaqdbr4ZnvA=
-github.com/NVIDIA/nvidia-container-toolkit v1.19.1-0.20260515194426-db3eab6e775b/go.mod h1:WMJdrwb3QWMjua4xAEg9n0NjyWCRKMSfCXF7lpPsdjg=
+github.com/NVIDIA/nvidia-container-toolkit v1.19.1 h1:1sV4ddFrBccqL9Lbzcdu50w2j5FhyNJpN5hXTfCsjps=
+github.com/NVIDIA/nvidia-container-toolkit v1.19.1/go.mod h1:yGsZ4s2lMjfE4r8/DMUPVpaFhRGkWvo2H++/Dy84nVc=
 github.com/adhocore/jsonc v0.10.0 h1:YjNX9TojBfxQJ4kuoiNqVR5SFqu1YBEMsm+HxWnxbOI=
 github.com/adhocore/jsonc v0.10.0/go.mod h1:Ar4gd3i83+1Z+5M5SG6Vrfw9q3TO544OwLXH4+ZhWTE=
 github.com/antlr4-go/antlr/v4 v4.13.1 h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=
@@ -325,8 +325,8 @@ sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.34.0 h1:hSfpvjjTQXQY2
 sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.34.0/go.mod h1:Ve9uj1L+deCXFrPOk1LpFXqTg7LCFzFso6PA48q/XZw=
 sigs.k8s.io/controller-runtime v0.24.0 h1:Ck6N2LdS8Lovy1o25BB4r1xjvLEKUl1s2o9kU+KWDE4=
 sigs.k8s.io/controller-runtime v0.24.0/go.mod h1:vFkfY5fGt5xAC/sKb8IBFKgWPNKG9OUG29dR8Y2wImw=
-sigs.k8s.io/dra-driver-nvidia-gpu v0.4.0 h1:QS2y9IhdTz7NgivH0K0Y22q2B0c0QPZU7gUec07cvYA=
-sigs.k8s.io/dra-driver-nvidia-gpu v0.4.0/go.mod h1:Pyeswy2WUsli5MXaKiQustDa8LJ3rNuuoPI+iB15rOw=
+sigs.k8s.io/dra-driver-nvidia-gpu v0.4.1 h1:up4wTyW4UxLDB8I+pDOhQ1+F3Ol2f/qHgN4v6vlcPEc=
+sigs.k8s.io/dra-driver-nvidia-gpu v0.4.1/go.mod h1:9UjEMp43N0Sr7DiCfHiDHYt5gp+dz8NUZA9DQcPJWpM=
 sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 h1:IpInykpT6ceI+QxKBbEflcR5EXP7sU1kvOlxwZh5txg=
 sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730/go.mod h1:mdzfpAEoE6DHQEN0uh9ZbOCuHbLK5wOm7dK4ctXE9Tg=
 sigs.k8s.io/randfill v1.0.0 h1:JfjMILfT8A6RbawdsK2JXGBR5AQVfd+9TbzrlneTyrU=

@@ -6,7 +6,7 @@ require (
 	github.com/Masterminds/semver v1.5.0
 	github.com/NVIDIA/go-nvlib v0.11.0
 	github.com/NVIDIA/go-nvml v0.13.2-0
-	github.com/NVIDIA/nvidia-container-toolkit v1.19.1-0.20260515194426-db3eab6e775b
+	github.com/NVIDIA/nvidia-container-toolkit v1.19.1
 	github.com/adhocore/jsonc v0.10.0
 	github.com/docker/go-units v0.5.0
 	github.com/evanphx/json-patch v0.5.2
@@ -44,7 +44,7 @@ require (
 	k8s.io/kubernetes v1.36.0
 	k8s.io/utils v0.0.0-20260319190234-28399d86e0b5
 	sigs.k8s.io/controller-runtime v0.24.0
-	sigs.k8s.io/dra-driver-nvidia-gpu v0.4.0
+	sigs.k8s.io/dra-driver-nvidia-gpu v0.4.1
 	tags.cncf.io/container-device-interface v1.1.0
 	tags.cncf.io/container-device-interface/specs-go v1.1.0
 )
