@@ -5,10 +5,8 @@
 {{- /* A custom (non-"/") driver root is generated from inside the plugin container,
        so the host driver root must be mounted in. Flag defaults and mount host paths
        are kept in sync below. */ -}}
-{{- $driverRoot := $dpCmds.driverRoot | default "" }}
-{{- $mountDriverRoot := and (ne $driverRoot "") (ne $driverRoot "/") }}
-{{- $devRoot := $dpCmds.devRoot | default "" }}
-{{- $mountDevRoot := and $mountDriverRoot (ne $devRoot "") (ne $devRoot $driverRoot) }}
+{{- $hostDriverRoot := $dpCmds.hostDriverRoot | default "/" }}
+{{- $contDriverRoot := $dpCmds.containerDriverRoot | default "/driver-root" }}
 {{- if .Values.devicePlugin.enabled -}}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -61,6 +59,9 @@ spec:
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          env:
+            - name: HOST_MANAGER_DIR
+              value: {{ .Values.devicePlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
           resources:
             requests:
               cpu: 10m
@@ -69,7 +70,7 @@ spec:
             privileged: true
           volumeMounts:
             - name: manager-root
-              mountPath: /etc/vgpu-manager
+              mountPath: {{ .Values.devicePlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
               mountPropagation: Bidirectional
       containers:
         - name: device-plugin
@@ -95,12 +96,8 @@ spec:
             {{- with $dpCmds.cdiAnnotationPrefix }}
             - --cdi-annotation-prefix={{ . }}
             {{- end }}
-            {{- if $mountDriverRoot }}
-            - --driver-root={{ $driverRoot }}
-            {{- if $mountDevRoot }}
-            - --dev-root={{ $devRoot }}
-            {{- end }}
-            {{- end }}
+            - --host-driver-root={{ $hostDriverRoot }}
+            - --container-driver-root={{ $contDriverRoot }}
             {{- if $nc.yaml }}
             - --node-config-path=/config/nodeConfig.yaml
             {{- else if $nc.json }}
@@ -154,17 +151,10 @@ spec:
             - name: cdi-root
               mountPath: /var/run/cdi
             {{- end }}
-            {{- if $mountDriverRoot }}
             # Host driver root mounted in so the CDI spec can be generated from it.
             - name: driver-root
-              mountPath: {{ $driverRoot }}
+              mountPath: {{ $contDriverRoot }}
               readOnly: true
-            {{- end }}
-            {{- if $mountDevRoot }}
-            - name: dev-root
-              mountPath: {{ $devRoot }}
-              readOnly: true
-            {{- end }}
         - name: device-monitor
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
@@ -193,6 +183,7 @@ spec:
             {{- if .Values.scheduler.enabled }}
             - --stuck-grace-period={{ .Values.scheduler.schedulerExtender.commands.stuckGracePeriod | default "30s" }}
             {{- end }}
+            - --container-driver-root={{ $contDriverRoot }}
             - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
           ports:
             - name: metrics
@@ -256,21 +247,14 @@ spec:
               mountPath: /config
               readOnly: true
             {{- end }}
-          {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
+            {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
             - name: cert-dir
               mountPath: {{ .Values.devicePlugin.deviceMonitor.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
               readOnly: true
-          {{- end }}
-            {{- if $mountDriverRoot }}
+            {{- end }}
             - name: driver-root
-              mountPath: {{ $driverRoot }}
+              mountPath: {{ $contDriverRoot }}
               readOnly: true
-            {{- end }}
-            {{- if $mountDevRoot }}
-            - name: dev-root
-              mountPath: {{ $devRoot }}
-              readOnly: true
-            {{- end }}
       volumes:
         - name: kubelet-root
           hostPath:
@@ -294,16 +278,9 @@ spec:
             path: {{ $cdiRoot }}
             type: DirectoryOrCreate
         {{- end }}
-        {{- if $mountDriverRoot }}
         - name: driver-root
           hostPath:
-            path: {{ $driverRoot }}
-        {{- end }}
-        {{- if $mountDevRoot }}
-        - name: dev-root
-          hostPath:
-            path: {{ $devRoot }}
-        {{- end }}
+            path: {{ $hostDriverRoot }}
         {{- if or $nc.yaml $nc.json }}
         - name: node-config
           configMap:

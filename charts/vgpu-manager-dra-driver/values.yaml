@@ -62,8 +62,6 @@ kubeletPlugin:
     type: RollingUpdate
     rollingUpdate:
       maxUnavailable: "100%"
-  # Pod-level security context for the kubelet-plugin pods.
-  podSecurityContext: {}
   # Node labels used to select the nodes the DRA driver runs on. (see nodeSelector above)
   # Additional affinity rules for the kubelet-plugin pods. Empty by default; uncomment the
   # NFD / GPU Operator expressions below to only run on detected NVIDIA GPU nodes.
@@ -145,7 +143,7 @@ kubeletPlugin:
         # PassthroughSupport: false
       # Additional environment variables appended to the kubelet-plugin container.
       env: []
-      logLevel: 6
+      logLevel: 5
       # Container security context. Privileged mode is required to manage GPU device nodes.
       securityContext:
         privileged: true

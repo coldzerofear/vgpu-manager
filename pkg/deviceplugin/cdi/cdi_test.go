@@ -17,7 +17,7 @@ func Test_New_NoCDIStrategy(t *testing.T) {
 		{util.DeviceListStrategyEnvvar},
 		{util.DeviceListStrategyEnvvar, util.DeviceListStrategyVolumeMounts},
 	} {
-		h, err := New(nil, nil, nil, Config{Strategies: strategies})
+		h, err := New(nil, Config{Strategies: strategies})
 		assert.NoError(t, err)
 		// null handler: no-op behavior.
 		assert.NoError(t, h.CreateSpecFile())

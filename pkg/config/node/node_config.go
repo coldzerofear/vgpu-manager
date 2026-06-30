@@ -10,6 +10,7 @@ import (
 
 	"github.com/adhocore/jsonc"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gopkg.in/yaml.v3"
 	"k8s.io/klog/v2"
@@ -44,6 +45,7 @@ type NodeConfigSpec struct {
 	ConfigSpec       `json:",inline" yaml:",inline"`
 	devicePluginPath *string
 	nodeConfigPath   string
+	driverRoot       *nvidia.RootPath
 	checkFields      bool
 }
 
@@ -147,6 +149,13 @@ func (nc NodeConfigSpec) GetIMEX() imex.Imex {
 		return imex.Imex{}
 	}
 	return *nc.Imex
+}
+
+func (nc NodeConfigSpec) GetDriverRoot() nvidia.RootPath {
+	if nc.driverRoot == nil {
+		return "/"
+	}
+	return *nc.driverRoot
 }
 
 func (nc NodeConfigSpec) YamlString() string {
@@ -332,6 +341,12 @@ func loadConfigSpec(nodeConfig *NodeConfigSpec) error {
 }
 
 type Option func(*NodeConfigSpec)
+
+func WithDriverRootOption(driverRoot nvidia.RootPath) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.driverRoot = &driverRoot
+	}
+}
 
 func WithIMEXOption(imexChannelIDs []int, imexRequired bool) Option {
 	return func(spec *NodeConfigSpec) {

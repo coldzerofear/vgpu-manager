@@ -613,6 +613,13 @@ func GetEnvEnabled(env string) bool {
 	return false
 }
 
+func GetEnvDefault(env, defaultValue string) string {
+	if val, ok := os.LookupEnv(env); ok {
+		return strings.TrimSpace(val)
+	}
+	return defaultValue
+}
+
 func EnsureDir(path string, perm os.FileMode) error {
 	if err := os.MkdirAll(path, perm); err != nil {
 		return err

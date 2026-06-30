@@ -32,7 +32,7 @@ func newResp() *pluginapi.ContainerAllocateResponse {
 func Test_UpdateResponseForCDI_NoCDIStrategy(t *testing.T) {
 	resp := newResp()
 	err := UpdateResponseForCDI(resp, util.DeviceListStrategies{util.DeviceListStrategyEnvvar},
-		fakeCDIHandler{}, util.CDIClass, "GPU-1", "GPU-2")
+		fakeCDIHandler{}, "GPU-1", "GPU-2")
 	assert.NoError(t, err)
 	assert.Empty(t, resp.Annotations)
 	assert.Empty(t, resp.CdiDevices)
@@ -41,7 +41,7 @@ func Test_UpdateResponseForCDI_NoCDIStrategy(t *testing.T) {
 func Test_UpdateResponseForCDI_Annotations(t *testing.T) {
 	resp := newResp()
 	err := UpdateResponseForCDI(resp, util.DeviceListStrategies{util.DeviceListStrategyCDIAnnotations},
-		fakeCDIHandler{}, util.CDIClass, "GPU-1", "GPU-2")
+		fakeCDIHandler{}, "GPU-1", "GPU-2")
 	assert.NoError(t, err)
 	assert.Len(t, resp.Annotations, 1)
 	assert.Empty(t, resp.CdiDevices)
@@ -54,7 +54,7 @@ func Test_UpdateResponseForCDI_Annotations(t *testing.T) {
 func Test_UpdateResponseForCDI_CRI(t *testing.T) {
 	resp := newResp()
 	err := UpdateResponseForCDI(resp, util.DeviceListStrategies{util.DeviceListStrategyCDICRI},
-		fakeCDIHandler{}, util.CDIClass, "GPU-1", "GPU-2")
+		fakeCDIHandler{}, "GPU-1", "GPU-2")
 	assert.NoError(t, err)
 	assert.Empty(t, resp.Annotations)
 	assert.Len(t, resp.CdiDevices, 2)
@@ -66,7 +66,7 @@ func Test_UpdateResponseForCDI_Combined(t *testing.T) {
 	resp := newResp()
 	err := UpdateResponseForCDI(resp,
 		util.DeviceListStrategies{util.DeviceListStrategyCDIAnnotations, util.DeviceListStrategyCDICRI},
-		fakeCDIHandler{}, util.CDIClass, "GPU-1")
+		fakeCDIHandler{}, "GPU-1")
 	assert.NoError(t, err)
 	assert.Len(t, resp.Annotations, 1)
 	assert.Len(t, resp.CdiDevices, 1)

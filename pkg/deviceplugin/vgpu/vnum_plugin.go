@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -473,7 +474,7 @@ const (
 )
 
 var (
-	HostManagerDirectoryPath = os.Getenv("HOST_MANAGER_DIR")
+	HostManagerDirectoryPath = util.GetEnvDefault("HOST_MANAGER_DIR", util.ManagerRootPath)
 	HostPreLoadFilePath      = filepath.Join(HostManagerDirectoryPath, LdPreLoadFileName)
 	HostVGPUControlFilePath  = fmt.Sprintf("%s.%s", filepath.Join(HostManagerDirectoryPath, VGPUControlFileName), version.Get().Version)
 	HostWatcherDirectoryPath = filepath.Join(HostManagerDirectoryPath, util.Watcher)
@@ -576,14 +577,16 @@ func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, 
 // according to the configured CDI strategies. cdiClass is the CDI device class
 // (e.g. "gpu") and deviceIDs are the device UUIDs to expose. It is a no-op when
 // no CDI strategy is enabled.
-func UpdateResponseForCDI(response *pluginapi.ContainerAllocateResponse,
-	strategies util.DeviceListStrategies, handler cdi.Handler, cdiClass string, deviceIDs ...string) error {
+func UpdateResponseForCDI(
+	response *pluginapi.ContainerAllocateResponse,
+	strategies util.DeviceListStrategies, handler cdi.Handler, deviceIDs ...string,
+) error {
 	if !strategies.AnyCDIEnabled() {
 		return nil
 	}
-	qualifiedNames := make([]string, 0, len(deviceIDs))
-	for _, id := range deviceIDs {
-		qualifiedNames = append(qualifiedNames, handler.QualifiedName(cdiClass, id))
+	qualifiedNames := make([]string, len(deviceIDs))
+	for i, id := range deviceIDs {
+		qualifiedNames[i] = handler.QualifiedName(util.CDIClass, id)
 	}
 	if strategies.Includes(util.DeviceListStrategyCDIAnnotations) {
 		annotations, err := handler.GetDeviceAnnotations(uuid.New().String(), qualifiedNames)
@@ -593,9 +596,7 @@ func UpdateResponseForCDI(response *pluginapi.ContainerAllocateResponse,
 		if response.Annotations == nil {
 			response.Annotations = make(map[string]string, len(annotations))
 		}
-		for k, v := range annotations {
-			response.Annotations[k] = v
-		}
+		maps.Copy(response.Annotations, annotations)
 	}
 	if strategies.Includes(util.DeviceListStrategyCDICRI) {
 		for _, name := range qualifiedNames {
@@ -678,7 +679,8 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 				klog.KObj(currentPod), "reqIndex", i, "deviceIDs", containerRequest.GetDevicesIds())
 			return resp, err
 		}
-		if len(containerRequest.GetDevicesIds()) != len(contClaim.DeviceClaims) {
+		deviceCount := len(containerRequest.GetDevicesIds())
+		if deviceCount != len(contClaim.DeviceClaims) {
 			klog.V(3).ErrorS(nil, "requested number of devices does not match", "pod",
 				klog.KObj(currentPod), "container", contClaim.Name, "reqIndex", i, "deviceIDs", containerRequest.GetDevicesIds())
 			return resp, fmt.Errorf("requested number of devices does not match")
@@ -688,8 +690,8 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			"container", contClaim.Name, "reqIndex", i, "deviceIDs", containerRequest.GetDevicesIds())
 
 		var (
-			deviceIds   []string
-			gpuDevices  []manager.Device
+			deviceIds   = make([]string, 0, deviceCount)
+			gpuDevices  = make([]manager.Device, 0, deviceCount)
 			deviceUuids = make([]string, vgpu.MaxDeviceCount)
 			response    = &pluginapi.ContainerAllocateResponse{
 				Envs: make(map[string]string),
@@ -748,7 +750,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		UpdateResponseForNodeConfig(response, m.baseServer.GetDeviceManager(), deviceIds...)
 		response.Devices = append(response.Devices, PassDeviceSpecs(gpuDevices, imexChannels)...)
 		if err = UpdateResponseForCDI(response, m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceListStrategy(),
-			m.cdiHandler, util.CDIClass, deviceIds...); err != nil {
+			m.cdiHandler, deviceIds...); err != nil {
 			klog.V(3).ErrorS(err, "failed to update allocate response for CDI", "pod",
 				klog.KObj(currentPod), "container", contClaim.Name, "reqIndex", i)
 			return resp, err

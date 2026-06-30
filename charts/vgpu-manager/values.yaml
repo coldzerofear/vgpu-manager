@@ -193,11 +193,11 @@ devicePlugin:
       # and device-monitor containers at the SAME path, so it is both the in-container read
       # path and the host path written into the CDI spec. Example for the GPU-Operator
       # driver container:
-      #   driverRoot: "/run/nvidia/driver"
+      #   hostDriverRoot: "/run/nvidia/driver"
       # devRoot is only needed when the device-node root differs from the driver root
       # (an extra same-path mount is added for it when set).
-      driverRoot: ""
-      devRoot: ""
+      hostDriverRoot: "/"
+      containerDriverRoot: "/driver-root"
       # The number for NVIDIA device split. (default: 10)
       deviceSplitCount: 10
       # The ratio for NVIDIA device cores scaling. (default: 1.0)

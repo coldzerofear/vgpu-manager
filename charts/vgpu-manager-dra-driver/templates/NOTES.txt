@@ -9,7 +9,7 @@ vgpu-manager-dra-driver {{ .Chart.AppVersion }} kubelet-plugin (DaemonSet) has b
   - HealthcheckPort:  {{ .Values.kubeletPlugin.containers.plugin.healthcheckPort | default 4567 }}
   - FeatureGates   :  {{ .Values.kubeletPlugin.containers.plugin.featureGates | toJson }}
   - Metrics        :  {{ .Values.kubeletPlugin.metrics.enabled }}
-  - LoggerLevel    :  {{ .Values.kubeletPlugin.containers.plugin.logLevel | default 6 }}
+  - LoggerLevel    :  {{ .Values.kubeletPlugin.containers.plugin.logLevel | default 5 }}
 
   NOTE: nodes are only scheduled by the DRA driver once labelled to match the nodeSelector above, e.g.:
     kubectl label node <node> vgpu-manager=dra-driver

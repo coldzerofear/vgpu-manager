@@ -105,7 +105,8 @@ func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReq
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	for i, containerRequest := range req.ContainerRequests {
 		responses[i] = &pluginapi.ContainerAllocateResponse{Envs: make(map[string]string)}
-		vgpu.UpdateResponseForNodeConfig(responses[i], m.baseServer.GetDeviceManager(), containerRequest.GetDevicesIds()...)
+		deviceManager := m.baseServer.GetDeviceManager()
+		vgpu.UpdateResponseForNodeConfig(responses[i], deviceManager, containerRequest.GetDevicesIds()...)
 		devices := make([]manager.Device, 0, len(containerRequest.GetDevicesIds()))
 		for _, uuid := range containerRequest.GetDevicesIds() {
 			migDevice, exists := deviceMap[uuid]
@@ -117,8 +118,9 @@ func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReq
 			devices = append(devices, manager.Device{MIG: &migDevice})
 		}
 		responses[i].Devices = append(responses[i].Devices, vgpu.PassDeviceSpecs(devices, imexChannels)...)
-		if err := vgpu.UpdateResponseForCDI(responses[i], m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceListStrategy(),
-			m.cdiHandler, util.CDIClass, containerRequest.GetDevicesIds()...); err != nil {
+		if err := vgpu.UpdateResponseForCDI(responses[i],
+			deviceManager.GetNodeConfig().GetDeviceListStrategy(),
+			m.cdiHandler, containerRequest.GetDevicesIds()...); err != nil {
 			klog.Errorln(err)
 			return nil, err
 		}

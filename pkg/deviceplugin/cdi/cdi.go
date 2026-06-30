@@ -2,15 +2,15 @@ package cdi
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
-	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
-	nvinfo "github.com/NVIDIA/go-nvlib/pkg/nvlib/info"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi"
-	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/transform"
+	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/spec"
 	transformroot "github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/transform/root"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/sirupsen/logrus"
 	"k8s.io/klog/v2"
@@ -47,8 +47,6 @@ type Config struct {
 	DevRoot string
 	// TargetDriverRoot is the driver root on the host (written into the spec).
 	TargetDriverRoot string
-	// TargetDevRoot is the device-node root on the host (written into the spec).
-	TargetDevRoot string
 }
 
 type handler struct {
@@ -60,12 +58,11 @@ type handler struct {
 	driverRoot       string
 	devRoot          string
 	targetDriverRoot string
-	targetDevRoot    string
 }
 
 // New builds a CDI Handler. When no CDI strategy is enabled a null Handler is
 // returned so callers can use it unconditionally.
-func New(nvmllib nvml.Interface, devicelib nvdev.Interface, infolib nvinfo.Interface, cfg Config) (Handler, error) {
+func New(devicelib *nvidia.DeviceLib, cfg Config) (Handler, error) {
 	if !cfg.Strategies.AnyCDIEnabled() {
 		return NewNullHandler(), nil
 	}
@@ -94,20 +91,24 @@ func New(nvmllib nvml.Interface, devicelib nvdev.Interface, infolib nvinfo.Inter
 	if cfg.TargetDriverRoot == "" {
 		cfg.TargetDriverRoot = cfg.DriverRoot
 	}
-	if cfg.TargetDevRoot == "" {
-		cfg.TargetDevRoot = cfg.DevRoot
-	}
 
 	deviceNamer, err := nvcdi.NewDeviceNamer(cfg.DeviceIDStrategy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CDI device namer: %w", err)
 	}
 
+	// Let nvcdi logs see the light of day (emit to standard streams) when we've
+	// been configured with verbosity level 5 or higher.
+	cdilogger := logrus.New()
+	if klog.V(5).Enabled() {
+		cdilogger.SetOutput(io.Discard)
+	}
+
 	cdilib, err := nvcdi.New(
 		nvcdi.WithDeviceLib(devicelib),
-		nvcdi.WithInfoLib(infolib),
-		nvcdi.WithNvmlLib(nvmllib),
-		nvcdi.WithLogger(logrus.StandardLogger()),
+		nvcdi.WithInfoLib(devicelib),
+		nvcdi.WithNvmlLib(devicelib),
+		nvcdi.WithLogger(cdilogger),
 		nvcdi.WithDeviceNamers(deviceNamer),
 		nvcdi.WithDriverRoot(cfg.DriverRoot),
 		nvcdi.WithDevRoot(cfg.DevRoot),
@@ -120,7 +121,7 @@ func New(nvmllib nvml.Interface, devicelib nvdev.Interface, infolib nvinfo.Inter
 	}
 
 	return &handler{
-		nvmllib:          nvmllib,
+		nvmllib:          devicelib,
 		cdilib:           cdilib,
 		vendor:           cfg.Vendor,
 		class:            cfg.Class,
@@ -128,7 +129,6 @@ func New(nvmllib nvml.Interface, devicelib nvdev.Interface, infolib nvinfo.Inter
 		driverRoot:       cfg.DriverRoot,
 		devRoot:          cfg.DevRoot,
 		targetDriverRoot: cfg.TargetDriverRoot,
-		targetDevRoot:    cfg.TargetDevRoot,
 	}, nil
 }
 
@@ -169,42 +169,31 @@ func (h *handler) CreateSpecFile() error {
 	if err != nil {
 		return fmt.Errorf("failed to get CDI spec: %w", err)
 	}
-	if err = h.getRootTransformer().Transform(spec.Raw()); err != nil {
+	if err = h.writeSpec(spec); err != nil {
+		return fmt.Errorf("failed to write spec: %w", err)
+	}
+	return nil
+}
+
+func (h *handler) writeSpec(spec spec.Interface) error {
+	// Transform the spec to make it aware that it is running inside a container.
+	err := transformroot.New(
+		transformroot.WithRoot(h.driverRoot),
+		transformroot.WithTargetRoot(h.targetDriverRoot),
+		transformroot.WithRelativeTo("host"),
+	).Transform(spec.Raw())
+	if err != nil {
 		return fmt.Errorf("failed to transform driver root in CDI spec: %w", err)
 	}
 	specName, err := cdiapi.GenerateNameForSpec(spec.Raw())
 	if err != nil {
 		return fmt.Errorf("failed to generate CDI spec name: %w", err)
 	}
-	if err = util.EnsureDir(cdiRoot, 0o755); err != nil {
-		return fmt.Errorf("failed to ensure CDI spec dir %q: %w", cdiRoot, err)
-	}
-	specPath := filepath.Join(cdiRoot, specName+".json")
+	klog.V(5).Infof("Write CDI spec: %s", specName)
+	specPath := filepath.Join(cdiRoot, specName+".yaml")
 	if err = spec.Save(specPath); err != nil {
 		return fmt.Errorf("failed to save CDI spec %q: %w", specPath, err)
 	}
 	klog.InfoS("Generated CDI specification", "path", specPath)
 	return nil
-}
-
-// getRootTransformer rewrites the driver/dev root paths in the generated spec
-// from the plugin's view to the host's view. Mirrors the NVIDIA device plugin.
-func (h *handler) getRootTransformer() transform.Transformer {
-	driverRootTransformer := transformroot.New(
-		transformroot.WithRoot(h.driverRoot),
-		transformroot.WithTargetRoot(h.targetDriverRoot),
-		transformroot.WithRelativeTo("host"),
-	)
-	if h.devRoot == h.driverRoot || h.devRoot == "" {
-		return driverRootTransformer
-	}
-	ensureDev := func(p string) string {
-		return filepath.Join(strings.TrimSuffix(filepath.Clean(p), "/dev"), "/dev")
-	}
-	devRootTransformer := transformroot.New(
-		transformroot.WithRoot(ensureDev(h.devRoot)),
-		transformroot.WithTargetRoot(ensureDev(h.targetDevRoot)),
-		transformroot.WithRelativeTo("host"),
-	)
-	return transform.Merge(driverRootTransformer, devRootTransformer)
 }

@@ -128,6 +128,9 @@ spec:
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
           resources:
             requests:
               cpu: 10m
@@ -150,7 +153,6 @@ spec:
             - --device-memory-scaling=1
             - --node-config-path=/config/nodeConfig.json
             - --open-kernel-modules=false
-            - --v=4
             # CDI device injection (set deviceListStrategy to cdi-annotations and/or
             # cdi-cri in the node config to enable). The nvidia-cdi-hook binary is
             # bundled in the image and installed to $HOST_MANAGER_DIR/nvidia-cdi-hook
@@ -161,7 +163,9 @@ spec:
             # driver container): point at the driver root. The same host path must be
             # mounted into the plugin (and monitor) at the SAME path — uncomment the
             # driver-root volume + volumeMounts below.
-#            - --driver-root=/run/nvidia/driver
+            - --host-driver-root=/
+            - --container-driver-root=/driver-root
+            - --v=4
           env:
             - name: NODE_NAME
               valueFrom:
@@ -181,10 +185,10 @@ spec:
               value: utility,compute
           securityContext:
             privileged: true
-#            allowPrivilegeEscalation: false
-#            capabilities:
-#              drop: ["ALL"]
-#              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
           resources: {}
           volumeMounts:
             - name: kubelet-root
@@ -209,11 +213,9 @@ spec:
             # container runtime on the host can resolve the qualified devices.
             - name: cdi-root
               mountPath: /var/run/cdi
-            # Uncomment together with --driver-root above when the driver lives in a
-            # driver container instead of on the host (mountPath must equal --driver-root).
-#            - name: driver-root
-#              mountPath: /run/nvidia/driver
-#              readOnly: true
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
         - name: device-monitor
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
@@ -221,6 +223,7 @@ spec:
             - device-monitor
             - --server-bind-port=3456
             - --node-config-path=/config/nodeConfig.json
+            - --container-driver-root=/driver-root
             - --v=4
           ports:
             - name: http
@@ -242,10 +245,10 @@ spec:
               value: utility,compute
           securityContext:
             privileged: true
-#            allowPrivilegeEscalation: false
-#            capabilities:
-#              drop: ["ALL"]
-#              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
           resources: {}
           livenessProbe:
             httpGet:
@@ -276,11 +279,9 @@ spec:
             - name: node-config
               mountPath: /config
               readOnly: true
-            # Uncomment together with the driver-root volume when using a driver
-            # container (mountPath must equal --driver-root).
-#            - name: driver-root
-#              mountPath: /run/nvidia/driver
-#              readOnly: true
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
       volumes:
         - name: kubelet-root
           hostPath:
@@ -302,12 +303,9 @@ spec:
           hostPath:
             path: /var/run/cdi
             type: DirectoryOrCreate
-        # Driver-container case only (see --driver-root above): mount the host driver
-        # root into the plugin & monitor at the same path so the CDI spec can be
-        # generated from it. hostPath must equal --driver-root / the mountPaths above.
-#        - name: driver-root
-#          hostPath:
-#            path: /run/nvidia/driver
+        - name: driver-root
+          hostPath:
+            path: /
         - name: node-config
           configMap:
             name: vgpu-manager-device-plugin-config

@@ -4,11 +4,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
@@ -27,7 +27,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
-	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/fsnotify/fsnotify"
 	corev1 "k8s.io/api/core/v1"
@@ -66,6 +65,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 
+	driverRoot := nvidia.RootPath(opt.ContainerDriverRoot)
 	cgroupDriver := cgroup.MustInitCGroupDriver(opt.CGroupDriver)
 	nodeConfig, err := node.NewNodeConfig(
 		node.WithNodeNameOption(opt.NodeName),
@@ -84,6 +84,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		node.WithGDRCopyEnabledOption(opt.GDRCopyEnabled),
 		node.WithOpenKernelModulesOption(opt.OpenKernelModules),
 		node.WithIMEXOption(opt.ImexChannelIDs, opt.ImexRequired),
+		node.WithDriverRootOption(driverRoot),
 		node.WithCheckFieldsOption(true))
 	if err != nil {
 		klog.Errorf("Initialization of node config failed: %v", err)
@@ -99,41 +100,6 @@ func runApp(opt *options.Options) (exitCode int) {
 		devm.WithFeatureGate(opt.FeatureGate))
 	if err != nil {
 		klog.Errorf("Create device manager failed: %v", err)
-		return exitCode
-	}
-
-	// Build the CDI handler (a null no-op handler is returned when no CDI
-	// strategy is configured) and generate the node CDI specification so that
-	// CDI device references emitted during Allocate can be resolved.
-	// The NVIDIA CDI hook binary is bundled in the image and installed onto the
-	// host (under HOST_MANAGER_DIR) by the install init container; the CDI spec
-	// references that host path. It is executed by the host container runtime,
-	// not by this plugin, so no flag is exposed for it.
-	hostManagerDir := os.Getenv("HOST_MANAGER_DIR")
-	if hostManagerDir == "" {
-		hostManagerDir = util.ManagerRootPath
-	}
-	cdiHandler, err := cdi.New(
-		deviceManager.DeviceLib, deviceManager.DeviceLib, deviceManager.DeviceLib,
-		cdi.Config{
-			Strategies:        nodeConfig.GetDeviceListStrategy(),
-			Vendor:            util.CDIVendor,
-			Class:             util.CDIClass,
-			DeviceIDStrategy:  util.CDIDeviceIDStrategy,
-			AnnotationPrefix:  opt.CDIAnnotationPrefix,
-			NvidiaCDIHookPath: filepath.Join(hostManagerDir, "nvidia-cdi-hook"),
-			// The host driver/dev root is mounted into the plugin at the same path,
-			// so the in-container read path equals the host path written into the
-			// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
-			DriverRoot: opt.DriverRoot,
-			DevRoot:    opt.DevRoot,
-		})
-	if err != nil {
-		klog.Errorf("Create CDI handler failed: %v", err)
-		return exitCode
-	}
-	if err = cdiHandler.CreateSpecFile(); err != nil {
-		klog.Errorf("Generate CDI spec file failed: %v", err)
 		return exitCode
 	}
 
@@ -186,7 +152,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		klog.Errorf("Register controller to manager failed: %v", err)
 		return exitCode
 	}
-	plugins, err := deviceplugin.GetDevicePlugins(opt.DevicePluginPath, deviceManager, manager, kubeClient, cdiHandler)
+	plugins, err := deviceplugin.GetDevicePlugins(opt, deviceManager, manager, kubeClient)
 	if err != nil {
 		klog.Errorf("Get device plugins failed: %v", err)
 		return exitCode

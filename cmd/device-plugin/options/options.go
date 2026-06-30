@@ -44,8 +44,8 @@ type Options struct {
 	ImexChannelIDs      []int
 	ImexRequired        bool
 	CDIAnnotationPrefix string
-	DriverRoot          string
-	DevRoot             string
+	HostDriverRoot      string
+	ContainerDriverRoot string
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -135,10 +135,11 @@ func NewOptions() *Options {
 		GDRCopyEnabled:      util.GetEnvEnabled("NVIDIA_GDRCOPY"),
 		MigStrategy:         defaultMigStrategy,
 		CDIAnnotationPrefix: defaultCDIAnnotationPrefix,
-		DriverRoot:          defaultDriverRoot,
 		FeatureGate:         featureGate,
 		ImexChannelIDs:      imexChannelIDs,
 		ImexRequired:        util.GetEnvEnabled("IMEX_REQUIRED"),
+		HostDriverRoot:      util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
+		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
 	}
 }
 
@@ -175,8 +176,8 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")
 	pflag.BoolVar(&o.ImexRequired, "imex-required", o.ImexRequired, "The specified IMEX channels are required.")
 	pflag.StringVar(&o.CDIAnnotationPrefix, "cdi-annotation-prefix", o.CDIAnnotationPrefix, "The prefix to use for CDI container annotation keys. (only used with the \"cdi-annotations\" strategy)")
-	pflag.StringVar(&o.DriverRoot, "driver-root", o.DriverRoot, "The NVIDIA driver root used for CDI spec generation. The host path is mounted into the plugin at the same path, so it is both the in-container read path and the host path written into the spec. (default: \"/\", host-installed driver)")
-	pflag.StringVar(&o.DevRoot, "dev-root", o.DevRoot, "The device-node root used for CDI spec generation, mounted at the same host/container path. (defaults to the driver root)")
+	pflag.StringVar(&o.HostDriverRoot, "host-driver-root", o.HostDriverRoot, "The root path for the NVIDIA driver installation on the host (typical values are '/' or '/run/nvidia/driver')")
+	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
