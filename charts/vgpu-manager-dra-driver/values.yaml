@@ -79,22 +79,22 @@ kubeletPlugin:
   # The driver root on the host.
   # If the NVIDIA GPU driver is managed using the NVIDIA GPU Driver Container, this is
   # typically /run/nvidia/driver. For a driver installed directly on the host, use "/".
-  nvidiaDriverRoot: "/"
+  driverRoot: "/"
   # Optional absolute path to the nvidia-cdi-hook executable on the host, used in the generated
   # CDI specification. Empty lets the plugin copy the bundled nvidia-cdi-hook binary. (code default: "")
   nvidiaCDIHookPath: ""
-  # The root directory configured in the start command of kubelet (default: /var/lib/kubelet)
-  kubeletRootDir: "/var/lib/kubelet"
-  # The kubelet plugin registration socket directory on the host.
-  kubeletRegistrarDirectoryPath: "/var/lib/kubelet/plugins_registry"
-  # The kubelet plugins socket directory on the host.
-  kubeletPluginsDirectoryPath: "/var/lib/kubelet/plugins"
-  # Configure the host path used by vgpu manager (default: /etc/vgpu-manager)
-  vgpuManagerDir: "/etc/vgpu-manager"
+  # Kubelet root directory on the host (default: /var/lib/kubelet)
+  kubeletRoot: "/var/lib/kubelet"
+  # The kubelet plugin registration socket directory on the host (default: /var/lib/kubelet/plugins_registry)
+  kubeletRegistrarPath: "/var/lib/kubelet/plugins_registry"
+  # The kubelet plugins socket directory on the host (default: /var/lib/kubelet/plugins)
+  kubeletPluginsPath: "/var/lib/kubelet/plugins"
+  # Installation directory of vgpu-manager on the host (default: /etc/vgpu-manager)
+  managerRoot: "/etc/vgpu-manager"
   # CDI specification directory on the host.
   cdiRoot: "/var/run/cdi"
   # Cgroup driver for the container environment. Empty lets the plugin auto-detect. (supported values: systemd | cgroupfs)
-  cgroupDriver: ""
+  cgroupDriver: "auto"
   # Conditionally mask /proc/driver/nvidia/params to prevent the plugin from recreating
   # missing GPU device nodes (needed under nvkind). Set to "true" to enable.
   maskNvidiaDriverParams: ""
@@ -233,8 +233,6 @@ webhook:
     serverBindPort: 9443
     # The pprof service port used for debugging (default disable: 0)
     pprofBindPort: 0
-    # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
-    certDir: /tmp/k8s-webhook-server/serving-certs
     # Default node scheduling policy. Empty uses the binary default. (supported values: binpack | spread)
     defaultNodePolicy: ""
     # Default device scheduling policy. Empty uses the binary default. (supported values: binpack | spread)

@@ -73,8 +73,6 @@ scheduler:
       # Enable TLS for the device monitor endpoint.
       # When enabled, the endpoint will be served over HTTPS instead of HTTP.
       enabled: false
-      # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
-      certDir: /tmp/k8s-webhook-server/serving-certs
       # Certificate validity period. (Unit day, default: 10 year)
       certDuration: 3650
       # If enabled, certificate distribution will be done using Cert Manager,
@@ -156,12 +154,24 @@ devicePlugin:
       add: ["SYS_ADMIN"]
   # Configure the runtime class name for running GPU containers. If the default container runtime is Nvidia, there is no need to configure it.
   runtimeClassName: ""
-  # The root directory configured in the start command of kubelet (default: /var/lib/kubelet)
-  kubeletRootDir: "/var/lib/kubelet"
-  # Configure the host path used by vgpu manager (default: /etc/vgpu-manager)
-  vgpuManagerDir: "/etc/vgpu-manager"
+  # Kubelet root directory on the host (default: /var/lib/kubelet)
+  kubeletRoot: "/var/lib/kubelet"
+  # Installation directory of vgpu-manager on the host (default: /etc/vgpu-manager)
+  managerRoot: "/etc/vgpu-manager"
   # Cgroup driver for container environment, default program automatic detection (Supported values: systemd | cgroupfs)
   cgroupDriver: "auto"
+  # Driver root for CDI spec generation. Only needed when the NVIDIA driver is NOT
+  # installed directly on the host (e.g. the GPU-Operator driver container). Leave
+  # empty (or "/") for the host-installed-driver case — nothing extra is mounted.
+  #
+  # When set to a non-"/" value, the host path is mounted into BOTH the device-plugin
+  # and device-monitor containers at the SAME path, so it is both the in-container read
+  # path and the host path written into the CDI spec. Example for the GPU-Operator
+  # driver container:
+  #   driverRoot: "/run/nvidia/driver"
+  # devRoot is only needed when the device-node root differs from the driver root
+  # (an extra same-path mount is added for it when set).
+  driverRoot: "/"
   devicePlugin:
     env:
       - name: DP_ENABLE_HEALTHCHECKS
@@ -185,19 +195,6 @@ devicePlugin:
       cdiRoot: "/var/run/cdi"
       # Prefix used for CDI container annotation keys. (default: "cdi.k8s.io/")
       cdiAnnotationPrefix: ""
-      # Driver root for CDI spec generation. Only needed when the NVIDIA driver is NOT
-      # installed directly on the host (e.g. the GPU-Operator driver container). Leave
-      # empty (or "/") for the host-installed-driver case — nothing extra is mounted.
-      #
-      # When set to a non-"/" value, the host path is mounted into BOTH the device-plugin
-      # and device-monitor containers at the SAME path, so it is both the in-container read
-      # path and the host path written into the CDI spec. Example for the GPU-Operator
-      # driver container:
-      #   hostDriverRoot: "/run/nvidia/driver"
-      # devRoot is only needed when the device-node root differs from the driver root
-      # (an extra same-path mount is added for it when set).
-      hostDriverRoot: "/"
-      containerDriverRoot: "/driver-root"
       # The number for NVIDIA device split. (default: 10)
       deviceSplitCount: 10
       # The ratio for NVIDIA device cores scaling. (default: 1.0)
@@ -239,8 +236,6 @@ devicePlugin:
       # Enable TLS for the device monitor endpoint.
       # When enabled, the endpoint will be served over HTTPS instead of HTTP.
       enabled: false
-      # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
-      certDir: /tmp/k8s-webhook-server/serving-certs
       # Certificate validity period. (Unit day, default: 10 year)
       certDuration: 3650
       # If enabled, certificate distribution will be done using Cert Manager,
@@ -268,7 +263,7 @@ devicePlugin:
       enableRBAC: false
       # Certificate refresh interval in seconds (TLS only works when enabled)
       certRefreshInterval: 5
-      # Minimum grasping interval in seconds.
+      # Minimum grasping interval in seconds. (must be greater than or equal to 1)
       minScrapeInterval: 1
       logLevel: 3
     # Device monitor container requests resources.
@@ -361,8 +356,6 @@ webhook:
     serverBindPort: 9443
     # The pprof service port used for debugging (default disable: 0)
     pprofBindPort: 0
-    # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
-    certDir: /tmp/k8s-webhook-server/serving-certs
     # Default node scheduling policy. (supported values: binpack | spread)
     defaultNodePolicy: binpack
     # Default device scheduling policy. (supported values: binpack | spread)

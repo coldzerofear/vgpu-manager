@@ -5,7 +5,7 @@ DRA resource API version in use: {{ include "vgpu-manager-dra-driver.resourceApi
 
 vgpu-manager-dra-driver {{ .Chart.AppVersion }} kubelet-plugin (DaemonSet) has been deployed successfully!
   - NodeSelector   :  {{ .Values.kubeletPlugin.nodeSelector | toJson }}
-  - DriverRoot     :  {{ .Values.kubeletPlugin.nvidiaDriverRoot | default "/" | quote }}
+  - DriverRoot     :  {{ .Values.kubeletPlugin.driverRoot | default "/" | quote }}
   - HealthcheckPort:  {{ .Values.kubeletPlugin.containers.plugin.healthcheckPort | default 4567 }}
   - FeatureGates   :  {{ .Values.kubeletPlugin.containers.plugin.featureGates | toJson }}
   - Metrics        :  {{ .Values.kubeletPlugin.metrics.enabled }}
@@ -36,11 +36,15 @@ vgpu-manager-dra-driver {{ .Chart.AppVersion }} DeviceClasses (driver: {{ .Value
 
 vgpu-manager-dra-driver {{ .Chart.AppVersion }} webhook has been deployed successfully!
   - ReplicaCount   :  {{ .Values.webhook.replicas }}
+  - DraAdmission   :  enabled (always)
   - ServerBindPort :  {{ .Values.webhook.commands.serverBindPort | default 9443 }}
+  - PprofBindPort  :  {{ .Values.webhook.commands.pprofBindPort | default 0 }}
+  - RuntimeClass   :  {{ .Values.webhook.commands.defaultRuntimeClass | quote }}
+  - NodePolicy     :  {{ .Values.webhook.commands.defaultNodePolicy | quote }}
+  - DevicePolicy   :  {{ .Values.webhook.commands.defaultDevicePolicy | quote }}
   - TopologyMode   :  {{ .Values.webhook.commands.defaultTopologyMode | quote }}
   - VGPUClassName  :  {{ .Values.webhook.commands.vgpuDeviceClassName | quote }}
-  - DraAdmission   :  enabled (always)
-  - Convert2Dra    :  {{ .Values.webhook.commands.defaultConvert2Dra }}
+  - Convert2DRA    :  {{ .Values.webhook.commands.defaultConvert2Dra }}
   - CombinedClaim  :  {{ .Values.webhook.commands.combinedResourceClaim }}
   - CertManager    :  {{ .Values.webhook.certManager.enabled }}
   - LoggerLevel    :  {{ .Values.webhook.commands.logLevel }}

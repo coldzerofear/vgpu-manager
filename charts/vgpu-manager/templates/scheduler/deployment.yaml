@@ -108,8 +108,8 @@ spec:
             - --feature-gates={{ include "vgpu-manager.featureGates" .Values.scheduler.schedulerExtender.commands.featureGates }}
             {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
             - --enable-tls=true
-            - --tls-key-file={{ .Values.scheduler.schedulerExtender.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.key
-            - --tls-cert-file={{ .Values.scheduler.schedulerExtender.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.crt
+            - --tls-key-file=/tmp/k8s-webhook-server/serving-certs/tls.key
+            - --tls-cert-file=/tmp/k8s-webhook-server/serving-certs/tls.crt
             - --cert-refresh-interval={{ .Values.scheduler.schedulerExtender.commands.certRefreshInterval | default 5 }}
             {{- end }}
             - --stuck-grace-period={{ .Values.scheduler.schedulerExtender.commands.stuckGracePeriod | default "30s" }}
@@ -153,7 +153,7 @@ spec:
           {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
           volumeMounts:
             - name: cert-dir
-              mountPath: {{ .Values.scheduler.schedulerExtender.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
+              mountPath: /tmp/k8s-webhook-server/serving-certs
               readOnly: true
           {{- end }}
       volumes:
