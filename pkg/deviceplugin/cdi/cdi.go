@@ -100,7 +100,7 @@ func New(devicelib *nvidia.DeviceLib, cfg Config) (Handler, error) {
 	// Let nvcdi logs see the light of day (emit to standard streams) when we've
 	// been configured with verbosity level 5 or higher.
 	cdilogger := logrus.New()
-	if klog.V(5).Enabled() {
+	if !klog.V(5).Enabled() {
 		cdilogger.SetOutput(io.Discard)
 	}
 
@@ -189,7 +189,7 @@ func (h *handler) writeSpec(spec spec.Interface) error {
 	if err != nil {
 		return fmt.Errorf("failed to generate CDI spec name: %w", err)
 	}
-	klog.V(5).Infof("Write CDI spec: %s", specName)
+	klog.V(3).Infof("Write CDI spec: %s", specName)
 	specPath := filepath.Join(cdiRoot, specName+".yaml")
 	if err = spec.Save(specPath); err != nil {
 		return fmt.Errorf("failed to save CDI spec %q: %w", specPath, err)

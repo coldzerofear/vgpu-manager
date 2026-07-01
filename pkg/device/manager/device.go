@@ -263,8 +263,7 @@ func (m *DeviceManager) initDevices() (err error) {
 			devLinksMap[dev.UUID] = devLinklist
 		}
 	}
-	devRoot := m.config.GetDriverRoot().GetDevRoot()
-	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), devRoot)
+	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), m.DevRoot)
 	if err != nil {
 		return fmt.Errorf("error querying IMEX channels: %w", err)
 	}

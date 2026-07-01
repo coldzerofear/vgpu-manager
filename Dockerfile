@@ -10,7 +10,7 @@ FROM ${BASE_BUILD_IMAGE} AS builder
 # (via install_files.sh) and referenced from the generated CDI specification when
 # a cdi-* device-list-strategy is enabled. The explicit --platform keeps the
 # binary matching the target node arch (and makes Dockerfile.cross skip it).
-FROM ${TOOLKIT_CONTAINER_IMAGE} AS toolkit
+FROM --platform=$TARGETPLATFORM ${TOOLKIT_CONTAINER_IMAGE} AS toolkit
 
 FROM quay.io/jitesoft/ubuntu:20.04
 
