@@ -473,14 +473,14 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 // (e.g. the gang's first pod). Best-effort: alignment is an optimization, never a
 // correctness gate.
 func FindGangSiblingDomain(
-	pods []*corev1.Pod, nodeInfoByName map[string]*device.NodeInfo,
+	pods []*corev1.Pod, nodeInfoByName map[string]*allocator.NodeInfo,
 	nodeLister listerv1.NodeLister, req *allocator.AllocationRequest,
 ) (string, bool) {
 
 	domainMap := make(map[string]int)
 	// built caches NodeInfos constructed on demand for non-candidate sibling
 	// nodes, so multiple siblings on one node trigger a single (expensive) build.
-	var built map[string]*device.NodeInfo
+	var built map[string]*allocator.NodeInfo
 	for _, p := range pods {
 		// Gang membership is guaranteed by the IndexerKeyPodGangName query; only
 		// self-exclusion and a live pre-allocation remain to be checked.
@@ -494,27 +494,28 @@ func FindGangSiblingDomain(
 			continue
 		}
 		nodeName := util.PodPlanSchedulingNode(p)
-		nodeInfo, ok := nodeInfoByName[nodeName]
-		if !ok {
+		nodeInfoW, ok := nodeInfoByName[nodeName]
+		if !ok || nodeInfoW == nil {
 			// Sibling on a NON-candidate node (the common cross-node case): build
 			// its NodeInfo on demand and cache it. The resolved nodeInfo MUST still
 			// fall through to the vote below — that is the whole point of the build.
 			if built == nil {
-				built = make(map[string]*device.NodeInfo)
+				built = make(map[string]*allocator.NodeInfo)
 			}
-			if nodeInfo, ok = built[nodeName]; !ok {
+			if nodeInfoW, ok = built[nodeName]; !ok {
 				node, err := nodeLister.Get(nodeName)
 				if err != nil {
 					continue // sibling node unknown → its UUIDs can't be resolved here
 				}
-				nodeInfo, err = device.NewNodeInfo(node, device.WithGPUTopologyEnabled(true))
+				nodeInfo, err := device.NewNodeInfo(node, device.WithGPUTopologyEnabled(true))
 				if err != nil {
 					continue
 				}
-				built[nodeName] = nodeInfo
+				nodeInfoW = &allocator.NodeInfo{NodeInfo: nodeInfo}
+				built[nodeName] = nodeInfoW
 			}
 		}
-		if domain, ok := nodeInfo.DomainOfUUIDs(uuids); ok {
+		if domain, ok := nodeInfoW.DomainOfUUIDs(uuids); ok {
 			domainMap[domain]++
 		}
 	}
@@ -596,12 +597,12 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 
 	var (
 		mutex                = sync.Mutex{}
-		nodeInfoList         = make([]*device.NodeInfo, 0, len(nodes))
+		nodeInfoList         = make([]*allocator.NodeInfo, 0, len(nodes))
 		nodeOriginalPosition = make(map[string]int, len(nodes))
-		nodeInfoByName       map[string]*device.NodeInfo
+		nodeInfoByName       map[string]*allocator.NodeInfo
 	)
 	if needGangOrdinal {
-		nodeInfoByName = make(map[string]*device.NodeInfo, len(nodes))
+		nodeInfoByName = make(map[string]*allocator.NodeInfo, len(nodes))
 	}
 
 	maxGoroutines := runtime.GOMAXPROCS(0) * 2
@@ -609,10 +610,9 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 	parallel := watcher.NewBatchParallel(len(nodes), batchSize)
 	parallel.Execute(func(_ int, config watcher.BatchConfig) {
 		startIndex, endIndex, count := config.StartIndex, config.EndIndex, config.Count
-		batchNodeInfos := make([]*device.NodeInfo, 0, count)
+		batchNodeInfos := make([]*allocator.NodeInfo, 0, count)
 		batchFailed := make(map[string]*reason.FilterReason, count)
 		batchNodeOrigPosition := make(map[string]int, count)
-		req := req.GetSnapshot()
 		for index := startIndex; index <= endIndex; index++ {
 			node := &nodes[index]
 			batchNodeOrigPosition[node.Name] = index
@@ -632,13 +632,19 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 					opts = append(opts, device.WithNodeDevice(nodeDevice))
 				}
 			}
+
 			nodeInfo, err := device.NewNodeInfo(node, opts...)
 			if err != nil {
 				klog.V(3).ErrorS(err, "new NodeInfo failed, skipping node", "node", node.Name)
 				batchFailed[node.Name] = reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
 				continue
 			}
-			req.ResetStatistics(nodeInfo)
+			req := req.GetSnapshot().ResetStatistics(nodeInfo)
+			nodeInfoW := &allocator.NodeInfo{
+				NodeInfo:          nodeInfo,
+				AllocationRequest: req,
+			}
+
 			// Pre-allocator capacity gate: reject nodes that obviously
 			// can't fit the pod BEFORE letting them into the sorted
 			// candidate list. NodeInfo is already built (annotation
@@ -736,7 +742,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 				}
 			}
 
-			batchNodeInfos = append(batchNodeInfos, nodeInfo)
+			batchNodeInfos = append(batchNodeInfos, nodeInfoW)
 		}
 
 		mutex.Lock()
@@ -801,10 +807,10 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		f.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported node scheduling policy %q", req.NodePolicy)
 	}
 	if defaultNodePriority {
-		less := allocator.ApplyTopologyMode(*req, func(p1, p2 *device.NodeInfo) bool {
+		less := allocator.ApplyTopologyMode(*req, func(p1, p2 *allocator.NodeInfo) bool {
 			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
 		})
-		allocator.NewSortPriority[*device.NodeInfo](less...).Sort(nodeInfoList)
+		allocator.NewSortPriority[*allocator.NodeInfo](less...).Sort(nodeInfoList)
 	}
 
 	recorder := f.recorder
@@ -820,7 +826,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 			recorder = nil
 		}
 		// Attempt to allocate devices for pods on this node.
-		newPod, rsn, err := allocator.NewAllocator(nodeInfo, recorder).Allocate(req)
+		newPod, rsn, err := allocator.NewAllocator(nodeInfo.NodeInfo, recorder).Allocate(req)
 		if err != nil {
 			// Internal/programmer error (annotation encoding, accounting
 			// bug). Don't just skip the node — bubble up so the whole

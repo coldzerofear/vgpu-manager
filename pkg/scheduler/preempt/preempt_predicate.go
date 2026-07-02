@@ -189,8 +189,7 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 	batchSize := (len(victimKeys) + maxGoroutines - 1) / maxGoroutines
 	parallel := watcher.NewBatchParallel(len(victimKeys), batchSize)
 
-	nodeInfoByName := make(map[string]*device.NodeInfo, len(victimsMap))
-	nodeRequestMap := make(map[string]*allocator.AllocationRequest, len(victimsMap))
+	nodeInfoByName := make(map[string]*allocator.NodeInfo, len(victimsMap))
 	topologyEnabled := p.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
 
 	parallel.Execute(func(_ int, config watcher.BatchConfig) {
@@ -206,12 +205,13 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 				klog.V(3).ErrorS(err, "Preempt: "+string(filterReason.Primary), "node", node.Name, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
 				continue
 			}
-			snapshot := req.GetSnapshot()
-			snapshot.ResetStatistics(nodeInfo)
+			snapshot := req.GetSnapshot().ResetStatistics(nodeInfo)
 
 			mu.Lock()
-			nodeInfoByName[nodeName] = nodeInfo
-			nodeRequestMap[nodeName] = snapshot
+			nodeInfoByName[nodeName] = &allocator.NodeInfo{
+				NodeInfo:          nodeInfo,
+				AllocationRequest: snapshot,
+			}
 			mu.Unlock()
 		}
 	})
@@ -248,7 +248,7 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 			if !ok {
 				continue
 			}
-			refined, pdbViolations, ok := p.refineForNode(nodeRequestMap[nodeName], nodeInfo, victims, nodePodsMap[nodeName])
+			refined, pdbViolations, ok := p.refineForNode(nodeInfo, victims, nodePodsMap[nodeName])
 			if !ok {
 				klog.V(2).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
 					"pod", klog.KObj(pod), "node", nodeName)
@@ -367,8 +367,9 @@ func (p *vgpuPreempt) resolveVictimsMap(args extenderv1.ExtenderPreemptionArgs) 
 // luring it into inflicting more real disruption than necessary. If a
 // workload must be protected from vGPU preemption, the only mechanism that
 // works is giving it sufficient priority.
-func (p *vgpuPreempt) refineForNode(req *allocator.AllocationRequest, nodeInfo *device.NodeInfo,
-	victims *extenderv1.Victims, allVGPUPods []*corev1.Pod) ([]*corev1.Pod, int64, bool) {
+func (p *vgpuPreempt) refineForNode(info *allocator.NodeInfo, victims *extenderv1.Victims, allVGPUPods []*corev1.Pod) ([]*corev1.Pod, int64, bool) {
+	req := info.AllocationRequest
+	nodeInfo := info.NodeInfo
 	node := nodeInfo.GetNode()
 	nodeName := nodeInfo.GetName()
 

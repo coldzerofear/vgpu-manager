@@ -162,9 +162,9 @@ func (req *AllocationRequest) GetSnapshot() *AllocationRequest {
 }
 
 // ResetStatistics Reset the statistics of max and total based on node device information
-func (req *AllocationRequest) ResetStatistics(nodeInfo *device.NodeInfo) {
+func (req *AllocationRequest) ResetStatistics(nodeInfo *device.NodeInfo) *AllocationRequest {
 	if req == nil || nodeInfo == nil {
-		return
+		return req
 	}
 	req.Max.Number, req.Max.Cores, req.Max.Memory = 0, 0, 0
 
@@ -220,6 +220,9 @@ func (req *AllocationRequest) ResetStatistics(nodeInfo *device.NodeInfo) {
 	req.Total.Number = sidecarAgg.Number + max(regularAgg.Number, initMaxAgg.Number)
 	req.Total.Cores = sidecarAgg.Cores + max(regularAgg.Cores, initMaxAgg.Cores)
 	req.Total.Memory = sidecarAgg.Memory + max(regularAgg.Memory, initMaxAgg.Memory)
+
+	req.Profile = NewRequestProfile(req)
+	return req
 }
 
 // BuildAllocationRequest parses one pod into an AllocationRequest, doing
@@ -315,7 +318,6 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		if v, ok := util.HasAnnotation(pod, util.CrossPodTopologyAnnotation); ok {
 			req.CrossPodTopology = strings.EqualFold(v, "true")
 		}
-		req.Profile = NewRequestProfile(pod)
 
 		_, ok1 := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation)
 		_, ok2 := util.HasAnnotation(pod, util.PodExcludeGPUUUIDAnnotation)
@@ -324,6 +326,9 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		_, ok1 = util.HasAnnotation(pod, util.PodIncludeGpuTypeAnnotation)
 		_, ok2 = util.HasAnnotation(pod, util.PodExcludeGpuTypeAnnotation)
 		req.CheckDeviceType = ok1 || ok2
+
+		req.Profile = UniformProfile
+		//req.Profile = NewRequestProfile(pod)
 	}
 
 	return req

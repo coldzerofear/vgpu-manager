@@ -123,14 +123,14 @@ func Test_FindGangSiblingDomain(t *testing.T) {
 
 	t.Run("candidate-node sibling votes", func(t *testing.T) {
 		dom, ok := FindGangSiblingDomain([]*corev1.Pod{sibling},
-			map[string]*device.NodeInfo{"node2": candidateInfo}, nodeLister, req)
+			map[string]*allocator.NodeInfo{"node2": {NodeInfo: candidateInfo}}, nodeLister, req)
 		require.True(t, ok)
 		require.Equal(t, "ord:1", dom)
 	})
 
 	t.Run("non-candidate sibling built on demand still votes (regression)", func(t *testing.T) {
 		dom, ok := FindGangSiblingDomain([]*corev1.Pod{sibling},
-			map[string]*device.NodeInfo{}, nodeLister, req) // empty candidate map
+			map[string]*allocator.NodeInfo{}, nodeLister, req) // empty candidate map
 		require.True(t, ok, "sibling on a non-candidate node must contribute its domain")
 		require.Equal(t, "ord:1", dom)
 	})
@@ -145,7 +145,7 @@ func Test_FindGangSiblingDomain(t *testing.T) {
 			Spec: corev1.PodSpec{NodeName: "node2"},
 		}
 		_, ok := FindGangSiblingDomain([]*corev1.Pod{self, noPre},
-			map[string]*device.NodeInfo{"node2": candidateInfo}, nodeLister, req)
+			map[string]*allocator.NodeInfo{"node2": {NodeInfo: candidateInfo}}, nodeLister, req)
 		require.False(t, ok)
 	})
 }

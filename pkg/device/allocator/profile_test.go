@@ -237,7 +237,7 @@ func Test_NewRequestProfile(t *testing.T) {
 			if delta == 0 {
 				delta = 1e-9
 			}
-			profile := NewRequestProfile(makePod(tc.specs...))
+			profile := NewRequestProfile(BuildAllocationRequest(makePod(tc.specs...)))
 			assert.InDelta(t, tc.wantNum, profile.NumWeight, delta, "NumWeight")
 			assert.InDelta(t, tc.wantMem, profile.MemWeight, delta, "MemWeight")
 			assert.InDelta(t, tc.wantCore, profile.CoreWeight, delta, "CoreWeight")
@@ -271,7 +271,7 @@ func Test_NewRequestProfile_DocTable(t *testing.T) {
 		{"vgpu-number: 2 + cores: 100 + memory: 4", []containerSpec{{num: 2, cores: 100, mem: 4}}},
 	}
 	for _, r := range rows {
-		p := NewRequestProfile(makePod(r.specs...))
+		p := NewRequestProfile(BuildAllocationRequest(makePod(r.specs...)))
 		t.Logf("%-50s -> (Num=%.3f, Mem=%.3f, Core=%.3f)",
 			r.label, p.NumWeight, p.MemWeight, p.CoreWeight)
 	}
