@@ -1,6 +1,8 @@
 package allocator
 
 import (
+	"math"
+
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
@@ -73,42 +75,38 @@ func NewRequestProfile(req *AllocationRequest) RequestProfile {
 	}
 
 	var rNum, rMem, rCore float64
-	// Weights are a ranking heuristic over the pod's overall vGPU shape, so
-	// init containers are folded in alongside app containers (a sum across
-	// both groups). For a pod without init containers this is identical to
-	// the historical app-only weighting.
-	addContainer := func(need *ContainerNeed) {
-		number := float64(need.Number)
-		if number <= 0 {
-			return
-		}
-		rNum += number
-		cores := float64(need.Cores)
-		memory := float64(need.Memory)
 
-		// Memory: implicit-full-card collapses to "cNum cards' worth";
-		// explicit uses raw user-typed value (no factor, no per-card
-		// normalisation — see the trade-off discussion above).
-		if memory == 0 {
-			rMem += number
-		} else {
-			rMem += number * memory
-		}
-
-		// Cores: implicit-full-cores only fires when BOTH cores AND memory
-		// are unset — the allocator's "if needCores == 0 && needMemory == 0"
-		// test reads user-typed values, so we test the same. Explicit-cores
-		// uses cCore's well-defined "100 = full card" convention.
-		switch {
-		case cores == 0 && memory == 0:
-			rCore += number
-		case cores > 0:
-			rCore += number * cores / float64(util.HundredCore)
-		}
+	number := float64(req.Total.Number)
+	if number <= 0 {
+		return UniformProfile
 	}
 
-	for i := range req.Containers {
-		addContainer(&req.Containers[i])
+	rNum += number
+
+	cores := float64(req.Total.Cores)
+	memory := float64(req.Total.Memory)
+
+	// Cores: implicit-full-cores only fires when BOTH cores AND memory
+	// are unset — the allocator's "if needCores == 0 && needMemory == 0"
+	// test reads user-typed values, so we test the same. Explicit-cores
+	// uses cCore's well-defined "100 = full card" convention.
+	if memory <= 0 && cores <= 0 {
+		rCore += number
+	} else if cores > 0 {
+		rCore += number * cores / float64(util.HundredCore)
+	}
+
+	// Memory: implicit-full-card collapses to "cNum cards' worth";
+	// explicit uses raw user-typed value (no factor, no per-card
+	// normalisation — see the trade-off discussion above).
+	if memory <= 0 && cores <= 0 {
+		rMem += number
+	} else if memory <= 0 {
+		rMem += number * 1.2
+	} else {
+		// To prevent overwhelming memory values, use single card GB units.
+		count := math.Ceil(memory / float64(1024))
+		rMem += max(count, number)
 	}
 
 	sum := rNum + rMem + rCore
@@ -149,9 +147,6 @@ type ResourceUtilization struct {
 // the same utilization snapshot can feed either a binpack or a spread
 // score depending on what the caller asks for.
 func NodeUtilization(info *NodeInfo) ResourceUtilization {
-	totalNum := float64(info.GetTotalNumber())
-	totalMem := float64(info.GetTotalMemory())
-	totalCore := float64(info.GetTotalCores())
 	availNum := float64(info.GetAvailableNumber())
 	availMem := float64(info.GetAvailableMemory())
 	availCore := float64(info.GetAvailableCores())
@@ -159,18 +154,25 @@ func NodeUtilization(info *NodeInfo) ResourceUtilization {
 		reqNumber := float64(info.AllocationRequest.Total.Number)
 		reqCores := float64(info.AllocationRequest.Total.Cores)
 		reqMemory := float64(info.AllocationRequest.Total.Memory)
-		// If the resources are not met, return 0
+		// When resources are insufficient, adjust the final node score to 0 according to the node strategy
 		if availNum < reqNumber || availCore < reqCores || availMem < reqMemory {
+			if info.AllocationRequest.NodePolicy == util.SpreadPolicy {
+				return ResourceUtilization{Num: 1, Core: 1, Mem: 1}
+			}
+			// If the resources are not met, return 0
 			return ResourceUtilization{}
 		}
-		availNum = availNum - reqNumber
-		availMem = availMem - reqMemory
-		availCore = availCore - reqCores
+		// Improve the score of binpack
+		if info.AllocationRequest.NodePolicy == util.BinpackPolicy {
+			availNum = availNum - reqNumber
+			availMem = availMem - reqMemory
+			availCore = availCore - reqCores
+		}
 	}
 	return ResourceUtilization{
-		Num:  1 - util.SafeDiv(availNum, totalNum),
-		Mem:  1 - util.SafeDiv(availMem, totalMem),
-		Core: 1 - util.SafeDiv(availCore, totalCore),
+		Num:  1 - util.SafeDiv(availNum, float64(info.GetTotalNumber())),
+		Mem:  1 - util.SafeDiv(availMem, float64(info.GetTotalMemory())),
+		Core: 1 - util.SafeDiv(availCore, float64(info.GetTotalCores())),
 	}
 }
 
@@ -223,8 +225,8 @@ func NumaUtilization(devices []*device.Device) ResourceUtilization {
 // applied; the legacy ×100 was just for log-readable percentages and the
 // new code drops the multiplier since we're comparing scores, not
 // reporting them.
-func Score(u ResourceUtilization, p RequestProfile, mode util.SchedulerPolicy) float64 {
-	switch mode {
+func Score(u ResourceUtilization, p RequestProfile, policy util.SchedulerPolicy) float64 {
+	switch policy {
 	case util.BinpackPolicy:
 		return p.NumWeight*u.Num + p.MemWeight*u.Mem + p.CoreWeight*u.Core
 	case util.SpreadPolicy:

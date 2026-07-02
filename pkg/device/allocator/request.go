@@ -221,7 +221,6 @@ func (req *AllocationRequest) ResetStatistics(nodeInfo *device.NodeInfo) *Alloca
 	req.Total.Cores = sidecarAgg.Cores + max(regularAgg.Cores, initMaxAgg.Cores)
 	req.Total.Memory = sidecarAgg.Memory + max(regularAgg.Memory, initMaxAgg.Memory)
 
-	req.Profile = NewRequestProfile(req)
 	return req
 }
 
@@ -327,8 +326,8 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		_, ok2 = util.HasAnnotation(pod, util.PodExcludeGpuTypeAnnotation)
 		req.CheckDeviceType = ok1 || ok2
 
-		req.Profile = UniformProfile
-		//req.Profile = NewRequestProfile(pod)
+		//req.Profile = UniformProfile
+		req.Profile = NewRequestProfile(req)
 	}
 
 	return req

@@ -133,28 +133,25 @@ func (sp *sortPriority[T]) Less(i, j int) bool {
 // the total work O(n) and the cache lives only for the lifetime of the
 // returned LessFunc (confined to a single filter goroutine, so no
 // mutex is needed).
-func WeightedNodeLess(profile RequestProfile, mode util.SchedulerPolicy) LessFunc[*NodeInfo] {
+func WeightedNodeLess(req AllocationRequest) LessFunc[*NodeInfo] {
 	cache := make(map[string]float64)
 	return func(p1, p2 *NodeInfo) bool {
-		return cachedNodeScore(cache, p1, profile, mode) >
-			cachedNodeScore(cache, p2, profile, mode)
+		return cachedNodeScore(cache, p1, req) > cachedNodeScore(cache, p2, req)
 	}
 }
 
-func cachedNodeScore(
-	cache map[string]float64, info *NodeInfo,
-	profile RequestProfile, mode util.SchedulerPolicy,
-) float64 {
+func cachedNodeScore(cache map[string]float64, info *NodeInfo, req AllocationRequest) float64 {
 	name := info.GetName()
 	if s, ok := cache[name]; ok {
 		return s
 	}
-	if info.AllocationRequest != nil {
-		mode = info.NodePolicy
-		profile = info.AllocationRequest.Profile
+	if info.AllocationRequest == nil {
+		info.AllocationRequest = &req
 	}
-	s := Score(NodeUtilization(info), profile, mode) * util.HundredCore
-	klog.V(5).Infof("Policy %s node <%s> resource score is <%.2f>", mode, info.GetName(), s)
+	profile := info.AllocationRequest.Profile
+	policy := info.AllocationRequest.NodePolicy
+	s := Score(NodeUtilization(info), profile, policy) * util.HundredCore
+	klog.V(5).Infof("Policy %s node <%s> resource score is <%.2f>", policy, info.GetName(), s)
 	cache[name] = s
 	return s
 }
@@ -206,7 +203,7 @@ type NodeInfo struct {
 // ByNodeNameAsc decide.
 func NewNodePolicyPriority(req AllocationRequest) *sortPriority[*NodeInfo] {
 	less := []LessFunc[*NodeInfo]{
-		WeightedNodeLess(req.Profile, req.NodePolicy),
+		WeightedNodeLess(req),
 		ByNodeNameAsc,
 	}
 	return &sortPriority[*NodeInfo]{
