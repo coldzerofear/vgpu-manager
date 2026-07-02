@@ -1,6 +1,8 @@
 package allocator
 
 import (
+	"math"
+
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
@@ -89,10 +91,11 @@ func NewRequestProfile(req *AllocationRequest) RequestProfile {
 		// Memory: implicit-full-card collapses to "cNum cards' worth";
 		// explicit uses raw user-typed value (no factor, no per-card
 		// normalisation — see the trade-off discussion above).
-		if memory == 0 {
+		if memory <= 0 {
 			rMem += number
 		} else {
-			rMem += number * memory
+			// To prevent overwhelming memory values, use single card GB units.
+			rMem += math.Ceil(memory / float64(1024))
 		}
 
 		// Cores: implicit-full-cores only fires when BOTH cores AND memory
@@ -159,13 +162,20 @@ func NodeUtilization(info *NodeInfo) ResourceUtilization {
 		reqNumber := float64(info.AllocationRequest.Total.Number)
 		reqCores := float64(info.AllocationRequest.Total.Cores)
 		reqMemory := float64(info.AllocationRequest.Total.Memory)
-		// If the resources are not met, return 0
+		// When resources are insufficient, adjust the final node score to 0 according to the node strategy
 		if availNum < reqNumber || availCore < reqCores || availMem < reqMemory {
+			if info.AllocationRequest.NodePolicy == util.SpreadPolicy {
+				return ResourceUtilization{Num: 1, Core: 1, Mem: 1}
+			}
+			// If the resources are not met, return 0
 			return ResourceUtilization{}
 		}
-		availNum = availNum - reqNumber
-		availMem = availMem - reqMemory
-		availCore = availCore - reqCores
+		// Improve the score of binpack
+		if info.AllocationRequest.NodePolicy == util.BinpackPolicy {
+			availNum = availNum - reqNumber
+			availMem = availMem - reqMemory
+			availCore = availCore - reqCores
+		}
 	}
 	return ResourceUtilization{
 		Num:  1 - util.SafeDiv(availNum, totalNum),
