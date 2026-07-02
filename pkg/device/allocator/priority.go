@@ -149,6 +149,10 @@ func cachedNodeScore(
 	if s, ok := cache[name]; ok {
 		return s
 	}
+	if info.AllocationRequest != nil {
+		mode = info.NodePolicy
+		profile = info.AllocationRequest.Profile
+	}
 	s := Score(NodeUtilization(info), profile, mode) * util.HundredCore
 	klog.V(5).Infof("Policy %s node <%s> resource score is <%.2f>", mode, info.GetName(), s)
 	cache[name] = s
