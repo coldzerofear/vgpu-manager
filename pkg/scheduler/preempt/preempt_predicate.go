@@ -190,6 +190,7 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 	parallel := watcher.NewBatchParallel(len(victimKeys), batchSize)
 
 	nodeInfoByName := make(map[string]*device.NodeInfo, len(victimsMap))
+	nodeRequestMap := make(map[string]*allocator.AllocationRequest, len(victimsMap))
 	topologyEnabled := p.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
 
 	parallel.Execute(func(_ int, config watcher.BatchConfig) {
@@ -205,8 +206,12 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 				klog.V(3).ErrorS(err, "Preempt: "+string(filterReason.Primary), "node", node.Name, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
 				continue
 			}
+			snapshot := req.GetSnapshot()
+			snapshot.ResetStatistics(nodeInfo)
+
 			mu.Lock()
 			nodeInfoByName[nodeName] = nodeInfo
+			nodeRequestMap[nodeName] = snapshot
 			mu.Unlock()
 		}
 	})
@@ -243,7 +248,7 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 			if !ok {
 				continue
 			}
-			refined, pdbViolations, ok := p.refineForNode(req, nodeInfo, victims, nodePodsMap[nodeName])
+			refined, pdbViolations, ok := p.refineForNode(nodeRequestMap[nodeName], nodeInfo, victims, nodePodsMap[nodeName])
 			if !ok {
 				klog.V(2).InfoS("Preempt: node cannot fit pod even after preemption, dropping",
 					"pod", klog.KObj(pod), "node", nodeName)
@@ -373,14 +378,24 @@ func (p *vgpuPreempt) refineForNode(req *allocator.AllocationRequest, nodeInfo *
 		klog.V(3).InfoS("Preempt: check node failed", "node", nodeName, "pod", klog.KObj(req.Pod), "reason", r.Detailed())
 		return nil, 0, false
 	}
-
 	if req.Max.Number > nodeInfo.GetSchedulableDeviceCount() {
 		filterReason := reason.New(reason.InsufficientGPUCards).
 			WithDetail("max %d devices, node has %d schedulable", req.Max.Number, nodeInfo.GetSchedulableDeviceCount())
 		klog.V(3).InfoS("Preempt: "+string(filterReason.Primary), "node", nodeName, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
 		return nil, 0, false
 	}
-
+	if req.Max.Cores > nodeInfo.GetMaxDeviceCores() {
+		filterReason := reason.New(reason.InsufficientVGPUCore).
+			WithDetail("max %d cores, largest device has %d", req.Max.Cores, nodeInfo.GetMaxDeviceCores())
+		klog.V(3).InfoS("Preempt: "+string(filterReason.Primary), "node", nodeName, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
+		return nil, 0, false
+	}
+	if req.Max.Memory > nodeInfo.GetMaxDeviceMemory() {
+		filterReason := reason.New(reason.InsufficientVGPUMemory).
+			WithDetail("max %d memory, largest device has %d", req.Max.Memory, nodeInfo.GetMaxDeviceMemory())
+		klog.V(3).InfoS("Preempt: "+string(filterReason.Primary), "node", nodeName, "pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
+		return nil, 0, false
+	}
 	// CheckDeviceUuid/Type return true when a device is ALLOWED by the
 	// pod's include/exclude annotations. The node can host the pod only if
 	// at least req.Max.Number devices pass every requested check (the

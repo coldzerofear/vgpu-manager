@@ -612,6 +612,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		batchNodeInfos := make([]*device.NodeInfo, 0, count)
 		batchFailed := make(map[string]*reason.FilterReason, count)
 		batchNodeOrigPosition := make(map[string]int, count)
+		req := req.GetSnapshot()
 		for index := startIndex; index <= endIndex; index++ {
 			node := &nodes[index]
 			batchNodeOrigPosition[node.Name] = index
@@ -637,6 +638,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 				batchFailed[node.Name] = reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
 				continue
 			}
+			req.ResetStatistics(nodeInfo)
 			// Pre-allocator capacity gate: reject nodes that obviously
 			// can't fit the pod BEFORE letting them into the sorted
 			// candidate list. NodeInfo is already built (annotation

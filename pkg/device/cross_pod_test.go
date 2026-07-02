@@ -56,7 +56,7 @@ func claimText(uuids ...string) string {
 // methods read the nvlink* fields.
 func twoComponentNode(pods ...*corev1.Pod) *NodeInfo {
 	return &NodeInfo{
-		name: "node1",
+		node: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1"}},
 		nvlinkComponentByUUID: map[string]int{
 			"gpu0": 0, "gpu1": 0,
 			"gpu2": 2, "gpu3": 2,
@@ -191,7 +191,7 @@ func Test_GangAnchorComponent_TieBreakByOrdinal(t *testing.T) {
 	// ordinal 1. The LOWER root (0) has the HIGHER ordinal, so a root-based and an
 	// ordinal-based tie-break disagree — this asserts we use the ordinal.
 	n := &NodeInfo{
-		name:                   "node1",
+		node:                   &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1"}},
 		nvlinkComponentByUUID:  map[string]int{"gpuX": 5, "gpuY": 0},
 		nvlinkComponentToUUIDs: map[int][]string{5: {"gpuX"}, 0: {"gpuY"}},
 		nvlinkComponentOrdinal: map[int]int{5: 0, 0: 1},
