@@ -1,8 +1,10 @@
 package allocator
 
 import (
+	"slices"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -123,6 +125,9 @@ type AllocationRequest struct {
 	// Check if the pod requires additional verification of the device's uuid or type
 	CheckDeviceUuid bool
 	CheckDeviceType bool
+
+	// HasSequentialInit Refers to a pod having at least one initialization container that is not a sidecar container
+	HasSequentialInit bool
 }
 
 // ContainerNeed is one container's vGPU-resource request, copied verbatim
@@ -145,6 +150,79 @@ type ContainerNeed struct {
 	Number      int
 	Cores       int64
 	Memory      int64
+}
+
+func (req *AllocationRequest) GetSnapshot() *AllocationRequest {
+	if req == nil {
+		return nil
+	}
+	allocationRequest := *req
+	allocationRequest.Containers = slices.Clone(req.Containers)
+	return &allocationRequest
+}
+
+// ResetStatistics Reset the statistics of max and total based on node device information
+func (req *AllocationRequest) ResetStatistics(nodeInfo *device.NodeInfo) *AllocationRequest {
+	if req == nil || nodeInfo == nil {
+		return req
+	}
+	req.Max.Number, req.Max.Cores, req.Max.Memory = 0, 0, 0
+
+	// Aggregate demand bucketed by lifecycle group so Total reflects the
+	// pod's PEAK concurrent demand (not a naive sum across non-overlapping
+	// phases). Concurrent group = regular app + sidecars (sum); sequential
+	// init containers each take the per-dimension max. cores/memory are
+	// per-vGPU, so aggregates multiply by Number. Mirrors device.ReducePodFootprint
+	// at the node-aggregate level.
+	var sidecarAgg, regularAgg, initMaxAgg ContainerNeed
+	for i := range req.Containers {
+		need := &req.Containers[i]
+
+		number := int64(need.Number)
+		// cores/memory are PER-VGPU (each of need.Number vGPUs lands on a
+		// distinct card and consumes this much). Max tracks the single largest
+		// device requirement across ALL containers (init included), so it does
+		// NOT multiply by Number; the per-group aggregates below do.
+		cores, memory := resolveContainerNeeds(*need, nodeInfo.MemoryFactor,
+			nodeInfo.HasSameCapacity(), nodeInfo.GetMaxDeviceMemory())
+		need.Cores = cores
+		need.Memory = memory
+
+		req.Max.Number = max(req.Max.Number, need.Number)
+		req.Max.Cores = max(req.Max.Cores, cores)
+		req.Max.Memory = max(req.Max.Memory, memory)
+
+		aggCores, aggMemory := cores*number, memory*number
+		switch {
+		case need.Kind == util.ContainerKindInit && !need.Restartable:
+			// Sequential init: runs alone, take the per-dimension max.
+			initMaxAgg.Number = max(initMaxAgg.Number, need.Number)
+			initMaxAgg.Cores = max(initMaxAgg.Cores, aggCores)
+			initMaxAgg.Memory = max(initMaxAgg.Memory, aggMemory)
+		case need.Restartable:
+			// Sidecar: runs throughout, sum into the concurrent group.
+			sidecarAgg.Number += need.Number
+			sidecarAgg.Cores += aggCores
+			sidecarAgg.Memory += aggMemory
+		default:
+			// Regular app container: sum into the concurrent group.
+			regularAgg.Number += need.Number
+			regularAgg.Cores += aggCores
+			regularAgg.Memory += aggMemory
+		}
+	}
+
+	// Effective peak demand: sidecars run for the whole pod life (constant
+	// addend present in both the app phase and every sequential-init phase);
+	// the variable part is whichever peaks higher — the app phase (regularAgg)
+	// or the heaviest single sequential init phase (initMaxAgg). For a pod
+	// without init containers this collapses to the historical plain sum.
+	req.Total.Number = sidecarAgg.Number + max(regularAgg.Number, initMaxAgg.Number)
+	req.Total.Cores = sidecarAgg.Cores + max(regularAgg.Cores, initMaxAgg.Cores)
+	req.Total.Memory = sidecarAgg.Memory + max(regularAgg.Memory, initMaxAgg.Memory)
+
+	req.Profile = NewRequestProfile(req)
+	return req
 }
 
 // BuildAllocationRequest parses one pod into an AllocationRequest, doing
@@ -187,7 +265,7 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		// distinct card and consumes this much). Max tracks the single largest
 		// device requirement across ALL containers (init included), so it does
 		// NOT multiply by Number; the per-group aggregates below do.
-		cores, memory := resolveContainerNeeds(need, 0)
+		cores, memory := resolveContainerNeeds(need, 0, false, 0)
 		req.Max.Number = max(req.Max.Number, need.Number)
 		req.Max.Cores = max(req.Max.Cores, cores)
 		req.Max.Memory = max(req.Max.Memory, memory)
@@ -199,6 +277,7 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 			initMaxAgg.Number = max(initMaxAgg.Number, need.Number)
 			initMaxAgg.Cores = max(initMaxAgg.Cores, aggCores)
 			initMaxAgg.Memory = max(initMaxAgg.Memory, aggMemory)
+			req.HasSequentialInit = true
 		case restartable:
 			// Sidecar: runs throughout, sum into the concurrent group.
 			sidecarAgg.Number += need.Number
@@ -239,7 +318,6 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		if v, ok := util.HasAnnotation(pod, util.CrossPodTopologyAnnotation); ok {
 			req.CrossPodTopology = strings.EqualFold(v, "true")
 		}
-		req.Profile = NewRequestProfile(pod)
 
 		_, ok1 := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation)
 		_, ok2 := util.HasAnnotation(pod, util.PodExcludeGPUUUIDAnnotation)
@@ -248,6 +326,9 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		_, ok1 = util.HasAnnotation(pod, util.PodIncludeGpuTypeAnnotation)
 		_, ok2 = util.HasAnnotation(pod, util.PodExcludeGpuTypeAnnotation)
 		req.CheckDeviceType = ok1 || ok2
+
+		req.Profile = UniformProfile
+		//req.Profile = NewRequestProfile(pod)
 	}
 
 	return req

@@ -11,6 +11,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -24,15 +25,49 @@ import (
 	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-func GetDevicePlugins(devicePluginPath string, devManager *manager.DeviceManager,
-	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset) ([]base.DevicePlugin, error) {
+func GetDevicePlugins(
+	option *options.Options, devManager *manager.DeviceManager,
+	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset,
+) ([]base.DevicePlugin, error) {
+	// Build the CDI handler (a null no-op handler is returned when no CDI
+	// strategy is configured) and generate the node CDI specification so that
+	// CDI device references emitted during Allocate can be resolved.
+	// The NVIDIA CDI hook binary is bundled in the image and installed onto the
+	// host (under HOST_MANAGER_DIR) by the install init container; the CDI spec
+	// references that host path. It is executed by the host container runtime,
+	// not by this plugin, so no flag is exposed for it.
+	nodeConfig := devManager.GetNodeConfig()
+	cdiHandler, err := cdi.New(
+		devManager.DeviceLib,
+		cdi.Config{
+			Strategies:        nodeConfig.GetDeviceListStrategy(),
+			Vendor:            util.CDIVendor,
+			Class:             util.CDIClass,
+			DeviceIDStrategy:  util.CDIDeviceIDStrategy,
+			AnnotationPrefix:  option.CDIAnnotationPrefix,
+			NvidiaCDIHookPath: filepath.Join(vgpu.HostManagerDirectoryPath, util.Tools, "nvidia-cdi-hook"),
+			// The host driver/dev root is mounted into the plugin at the same path,
+			// so the in-container read path equals the host path written into the
+			// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
+			DriverRoot:       option.ContainerDriverRoot,
+			TargetDriverRoot: option.HostDriverRoot,
+			DevRoot:          nodeConfig.GetDriverRoot().GetDevRoot(),
+		})
+	if err != nil {
+		klog.Errorf("Create CDI handler failed: %v", err)
+		return nil, err
+	}
+	if err = cdiHandler.CreateSpecFile(); err != nil {
+		klog.Errorf("Generate CDI spec file failed: %v", err)
+		return nil, err
+	}
 
 	var plugins []base.DevicePlugin
 	migStrategy := devManager.GetNodeConfig().GetMigStrategy()
 	if migStrategy != util.MigStrategySingle {
-		socket := filepath.Join(devicePluginPath, "nvidia-vgpu.sock")
+		socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu.sock")
 		plugin, err := vgpu.NewVNumberDevicePlugin(util.VGPUNumberResourceName,
-			socket, devManager, kubeClient, clusterManager.GetCache())
+			socket, devManager, kubeClient, clusterManager.GetCache(), cdiHandler)
 		if err != nil {
 			return nil, fmt.Errorf("create vnumber plugin failed: %v", err)
 		}
@@ -41,14 +76,14 @@ func GetDevicePlugins(devicePluginPath string, devManager *manager.DeviceManager
 
 	var deleteResources []string
 	if devManager.GetFeatureGate().Enabled(options.CorePlugin) {
-		socket := filepath.Join(devicePluginPath, "nvidia-vgpu-core.sock")
+		socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-core.sock")
 		plugins = append(plugins, vgpu.NewVCoreDevicePlugin(util.VGPUCoreResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUCoreResourceName)
 	}
 
 	if devManager.GetFeatureGate().Enabled(options.MemoryPlugin) {
-		socket := filepath.Join(devicePluginPath, "nvidia-vgpu-memory.sock")
+		socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-memory.sock")
 		plugins = append(plugins, vgpu.NewVMemoryDevicePlugin(util.VGPUMemoryResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUMemoryResourceName)
@@ -77,8 +112,8 @@ func GetDevicePlugins(devicePluginPath string, devManager *manager.DeviceManager
 		}
 		for resource := range resourceSet {
 			resourceName := util.MIGDeviceResourceNamePrefix + resource
-			socket := filepath.Join(devicePluginPath, fmt.Sprintf("nvidia-mig-%s.sock", resource))
-			plugins = append(plugins, mig.NewMigDevicePlugin(resourceName, socket, devManager))
+			socket := filepath.Join(nodeConfig.GetDevicePluginPath(), fmt.Sprintf("nvidia-mig-%s.sock", resource))
+			plugins = append(plugins, mig.NewMigDevicePlugin(resourceName, socket, devManager, cdiHandler))
 		}
 	}
 

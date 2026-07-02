@@ -8,6 +8,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/klog/v2"
@@ -17,14 +18,16 @@ import (
 type migDevicePlugin struct {
 	pluginapi.UnimplementedDevicePluginServer
 	baseServer base.PluginServer
+	cdiHandler cdi.Handler
 }
 
 var _ base.DevicePlugin = &migDevicePlugin{}
 
 // NewMigDevicePlugin returns an initialized migDevicePlugin.
-func NewMigDevicePlugin(resourceName, socket string, manager *manager.DeviceManager) base.DevicePlugin {
+func NewMigDevicePlugin(resourceName, socket string, manager *manager.DeviceManager, cdiHandler cdi.Handler) base.DevicePlugin {
 	return &migDevicePlugin{
 		baseServer: base.NewBasePluginServer(resourceName, socket, manager),
+		cdiHandler: cdiHandler,
 	}
 }
 
@@ -102,7 +105,8 @@ func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReq
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	for i, containerRequest := range req.ContainerRequests {
 		responses[i] = &pluginapi.ContainerAllocateResponse{Envs: make(map[string]string)}
-		vgpu.UpdateResponseForNodeConfig(responses[i], m.baseServer.GetDeviceManager(), containerRequest.GetDevicesIds()...)
+		deviceManager := m.baseServer.GetDeviceManager()
+		vgpu.UpdateResponseForNodeConfig(responses[i], deviceManager, containerRequest.GetDevicesIds()...)
 		devices := make([]manager.Device, 0, len(containerRequest.GetDevicesIds()))
 		for _, uuid := range containerRequest.GetDevicesIds() {
 			migDevice, exists := deviceMap[uuid]
@@ -114,6 +118,12 @@ func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReq
 			devices = append(devices, manager.Device{MIG: &migDevice})
 		}
 		responses[i].Devices = append(responses[i].Devices, vgpu.PassDeviceSpecs(devices, imexChannels)...)
+		if err := vgpu.UpdateResponseForCDI(responses[i],
+			deviceManager.GetNodeConfig().GetDeviceListStrategy(),
+			m.cdiHandler, containerRequest.GetDevicesIds()...); err != nil {
+			klog.Errorln(err)
+			return nil, err
+		}
 	}
 	return &pluginapi.AllocateResponse{ContainerResponses: responses}, nil
 }

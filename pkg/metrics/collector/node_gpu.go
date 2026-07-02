@@ -14,6 +14,7 @@ import (
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -47,16 +48,17 @@ type nodeGPUCollector struct {
 }
 
 func NewNodeGPUCollector(
-	nodeName string, nodeLister listerv1.NodeLister, podLister client.PodLister,
+	config *node.NodeConfigSpec, nodeLister listerv1.NodeLister, podLister client.PodLister,
 	contLister *lister.ContainerLister, featureGate featuregate.FeatureGate,
 ) (prometheus.Collector, error) {
-	deviceLib, err := nvidia.InitDeviceLib("/")
+	driverRoot := config.GetDriverRoot()
+	deviceLib, err := nvidia.InitDeviceLib(driverRoot)
 	if err != nil {
 		return nil, err
 	}
 	return &nodeGPUCollector{
 		DeviceLib:   deviceLib,
-		nodeName:    nodeName,
+		nodeName:    config.GetNodeName(),
 		nodeLister:  nodeLister,
 		podLister:   podLister,
 		contLister:  contLister,

@@ -300,6 +300,30 @@ const (
 	DeviceListStrategyCDICRI         = "cdi-cri"
 )
 
+// Constants for Container Device Interface (CDI) device injection.
+const (
+	// CDIVendor is the vendor part of the CDI qualified device names generated
+	// by the device plugin (e.g. "k8s.device-plugin.nvidia.com/gpu=<uuid>").
+	// It must match the vendor used when generating the CDI specification.
+	CDIVendor = "k8s.device-plugin.nvidia.com"
+	// CDIClass is the CDI device class used for GPU (and MIG) devices.
+	CDIClass = "gpu"
+	// CDIDeviceIDStrategy is the strategy used to name devices inside the
+	// generated CDI specification. "uuid" keeps the qualified names aligned
+	// with the device UUIDs allocated by the plugin.
+	CDIDeviceIDStrategy = "uuid"
+	// CDIDefaultAnnotationPrefix is the default prefix for CDI container
+	// annotation keys (matches tags.cncf.io/container-device-interface).
+	CDIDefaultAnnotationPrefix = "cdi.k8s.io/"
+	// CDIDefaultHookPath is the fallback host path to the NVIDIA CDI hook binary
+	// referenced from the generated CDI specification. The binary is bundled in
+	// the image and installed to the host manager dir by the install init
+	// container; the device plugin resolves the actual path from HOST_MANAGER_DIR.
+	CDIDefaultHookPath = ManagerRootPath + "/nvidia-cdi-hook"
+	// CDIDefaultDriverRoot is the default driver root used for CDI spec generation.
+	CDIDefaultDriverRoot = "/"
+)
+
 type MemorySchedulerPolicy string
 
 const (

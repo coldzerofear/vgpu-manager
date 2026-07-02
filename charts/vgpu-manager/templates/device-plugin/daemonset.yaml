@@ -1,4 +1,12 @@
 {{- $nc := .Values.devicePlugin.nodeConfig | default dict }}
+{{- $dpCmds := .Values.devicePlugin.devicePlugin.commands }}
+{{- $cdiEnabled := contains "cdi" ($dpCmds.deviceListStrategy | default "envvar") }}
+{{- $cdiRoot := $dpCmds.cdiRoot | default "/var/run/cdi" }}
+{{- /* A custom (non-"/") driver root is generated from inside the plugin container,
+       so the host driver root must be mounted in. Flag defaults and mount host paths
+       are kept in sync below. */ -}}
+{{- $hostDriverRoot := .Values.devicePlugin.driverRoot | default "/" }}
+{{- $managerRoot := .Values.devicePlugin.managerRoot | default "/etc/vgpu-manager" }}
 {{- if .Values.devicePlugin.enabled -}}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -51,6 +59,9 @@ spec:
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          env:
+            - name: HOST_MANAGER_DIR
+              value: {{ $managerRoot | quote }}
           resources:
             requests:
               cpu: 10m
@@ -59,7 +70,7 @@ spec:
             privileged: true
           volumeMounts:
             - name: manager-root
-              mountPath: /etc/vgpu-manager
+              mountPath: {{ $managerRoot | quote }}
               mountPropagation: Bidirectional
       containers:
         - name: device-plugin
@@ -82,6 +93,11 @@ spec:
             - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
             - --open-kernel-modules={{ .Values.devicePlugin.devicePlugin.commands.openKernelModules }}
             - --mig-strategy={{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
+            {{- with $dpCmds.cdiAnnotationPrefix }}
+            - --cdi-annotation-prefix={{ . }}
+            {{- end }}
+            - --host-driver-root={{ $hostDriverRoot }}
+            - --container-driver-root=/driver-root
             {{- if $nc.yaml }}
             - --node-config-path=/config/nodeConfig.yaml
             {{- else if $nc.json }}
@@ -94,7 +110,7 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: HOST_MANAGER_DIR
-              value: {{ .Values.devicePlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
+              value: {{ $managerRoot | quote }}
             - name: NVIDIA_VISIBLE_DEVICES
               value: all
             - name: NVIDIA_MIG_MONITOR_DEVICES
@@ -131,6 +147,14 @@ spec:
               mountPath: /config
               readOnly: true
             {{- end }}
+            {{- if $cdiEnabled }}
+            - name: cdi-root
+              mountPath: /var/run/cdi
+            {{- end }}
+            # Host driver root mounted in so the CDI spec can be generated from it.
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
         - name: device-monitor
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
@@ -151,14 +175,15 @@ spec:
             - --enable-rbac={{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
             {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
             - --enable-tls=true
-            - --tls-key-file={{ .Values.devicePlugin.deviceMonitor.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.key
-            - --tls-cert-file={{ .Values.devicePlugin.deviceMonitor.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}/tls.crt
+            - --tls-key-file=/tmp/k8s-webhook-server/serving-certs/tls.key
+            - --tls-cert-file=/tmp/k8s-webhook-server/serving-certs/tls.crt
             - --cert-refresh-interval={{ .Values.devicePlugin.deviceMonitor.commands.certRefreshInterval | default 5 }}
             {{- end }}
             - --min-scrape-interval={{ .Values.devicePlugin.deviceMonitor.commands.minScrapeInterval | default 1 }}
             {{- if .Values.scheduler.enabled }}
             - --stuck-grace-period={{ .Values.scheduler.schedulerExtender.commands.stuckGracePeriod | default "30s" }}
             {{- end }}
+            - --container-driver-root=/driver-root
             - --v={{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
           ports:
             - name: metrics
@@ -222,28 +247,40 @@ spec:
               mountPath: /config
               readOnly: true
             {{- end }}
-          {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
+            {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
             - name: cert-dir
-              mountPath: {{ .Values.devicePlugin.deviceMonitor.tls.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
+              mountPath: /tmp/k8s-webhook-server/serving-certs
               readOnly: true
-          {{- end }}
+            {{- end }}
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
       volumes:
         - name: kubelet-root
           hostPath:
-            path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRootDir) | trimSuffix "/" }}
+            path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}
         - name: device-plugins
           hostPath:
-            path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRootDir) | trimSuffix "/" }}/device-plugins
+            path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}/device-plugins
         - name: pod-resources
           hostPath:
-            path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRootDir) | trimSuffix "/" }}/pod-resources
+            path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}/pod-resources
         - name: manager-root
           hostPath:
-            path: {{ .Values.devicePlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
+            path: {{ $managerRoot | quote }}
             type: DirectoryOrCreate
         - name: cgroup-root
           hostPath:
             path: /sys/fs/cgroup
+        {{- if $cdiEnabled }}
+        - name: cdi-root
+          hostPath:
+            path: {{ $cdiRoot | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
+        - name: driver-root
+          hostPath:
+            path: {{ $hostDriverRoot | quote }}
         {{- if or $nc.yaml $nc.json }}
         - name: node-config
           configMap:

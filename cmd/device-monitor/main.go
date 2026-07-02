@@ -15,6 +15,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
@@ -67,10 +68,13 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 	cgroupDriver := cgroup.MustInitCGroupDriver(opt.CGroupDriver)
+
+	driverRoot := nvidia.RootPath(opt.ContainerDriverRoot)
 	nodeConfig, err := node.NewNodeConfig(
 		node.WithNodeNameOption(opt.NodeName),
 		node.WithConfigPathOption(opt.NodeConfigPath),
-		node.WithCGroupDriverOption(string(cgroupDriver)))
+		node.WithCGroupDriverOption(string(cgroupDriver)),
+		node.WithDriverRootOption(driverRoot))
 	if err != nil {
 		klog.Errorf("Initialization of node config failed: %v", err)
 		return exitCode
@@ -95,7 +99,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	podLister := client.NewPodLister(podInformer.GetIndexer())
 
 	containerLister := lister.NewContainerLister(util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
-	nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig.GetNodeName(),
+	nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig,
 		nodeLister, podLister, containerLister, opt.FeatureGate)
 	if err != nil {
 		klog.Errorf("Create node gpu collector failed: %v", err)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/imex"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/utils/ptr"
 )
@@ -120,7 +121,7 @@ configs:
 		configs: []ConfigSpec{{
 			NodeName:            "testNode",
 			CGroupDriver:        ptr.To[string]("systemd"),
-			DeviceListStrategy:  ptr.To[string]("envvar"),
+			DeviceListStrategy:  ptr.To[util.DeviceListStrategies](util.DeviceListStrategies{"envvar"}),
 			DeviceSplitCount:    ptr.To[int](10),
 			DeviceMemoryScaling: ptr.To[float64](1),
 			DeviceMemoryFactor:  ptr.To[int](1),
@@ -163,7 +164,7 @@ configs:
 		configs: []ConfigSpec{{
 			NodeName:            "testNode",
 			CGroupDriver:        ptr.To[string]("systemd"),
-			DeviceListStrategy:  ptr.To[string]("envvar"),
+			DeviceListStrategy:  ptr.To[util.DeviceListStrategies](util.DeviceListStrategies{"envvar"}),
 			DeviceSplitCount:    ptr.To[int](10),
 			DeviceMemoryScaling: ptr.To[float64](1),
 			DeviceMemoryFactor:  ptr.To[int](1),
@@ -234,7 +235,7 @@ config: []
 		configs: []ConfigSpec{{
 			NodeName:            "testNode",
 			CGroupDriver:        ptr.To[string]("systemd"),
-			DeviceListStrategy:  ptr.To[string]("envvar"),
+			DeviceListStrategy:  ptr.To[util.DeviceListStrategies](util.DeviceListStrategies{"envvar"}),
 			DeviceSplitCount:    ptr.To[int](10),
 			DeviceMemoryScaling: ptr.To[float64](1),
 			DeviceMemoryFactor:  ptr.To[int](1),
@@ -274,7 +275,7 @@ func Test_NodeConfigToString(t *testing.T) {
 	config, err := NewNodeConfig(
 		WithNodeNameOption("testNode"),
 		WithCGroupDriverOption("systemd"),
-		WithDeviceListStrategyOption("envvar"),
+		WithDeviceListStrategyOption([]string{"envvar"}),
 		WithDeviceSplitCountOption(10),
 		WithDeviceMemoryScalingOption(1),
 		WithDeviceMemoryFactorOption(1),

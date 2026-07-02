@@ -1,9 +1,10 @@
 package allocator
 
 import (
+	"math"
+
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	corev1 "k8s.io/api/core/v1"
 )
 
 // RequestProfile is the normalized resource-demand profile of a pod. Its
@@ -68,29 +69,33 @@ type RequestProfile struct {
 // Per-container values multiply by cNum because buildClaims writes the
 // same (needCores, reqMemory) into EACH of the cNum claims it produces,
 // so per-container consumption is cNum * per-vGPU.
-func NewRequestProfile(pod *corev1.Pod) RequestProfile {
+func NewRequestProfile(req *AllocationRequest) RequestProfile {
+	if req == nil {
+		return UniformProfile
+	}
+
 	var rNum, rMem, rCore float64
 	// Weights are a ranking heuristic over the pod's overall vGPU shape, so
 	// init containers are folded in alongside app containers (a sum across
 	// both groups). For a pod without init containers this is identical to
 	// the historical app-only weighting.
-	addContainer := func(c *corev1.Container) {
-		cNum := util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
-		if cNum <= 0 {
+	addContainer := func(need *ContainerNeed) {
+		number := float64(need.Number)
+		if number <= 0 {
 			return
 		}
-		cCore := util.GetResourceOfContainer(c, util.VGPUCoreResourceName)
-		cMem := util.GetResourceOfContainer(c, util.VGPUMemoryResourceName)
-
-		rNum += float64(cNum)
+		rNum += number
+		cores := float64(need.Cores)
+		memory := float64(need.Memory)
 
 		// Memory: implicit-full-card collapses to "cNum cards' worth";
 		// explicit uses raw user-typed value (no factor, no per-card
 		// normalisation — see the trade-off discussion above).
-		if cMem == 0 {
-			rMem += float64(cNum)
+		if memory <= 0 {
+			rMem += number
 		} else {
-			rMem += float64(cNum) * float64(cMem)
+			// To prevent overwhelming memory values, use single card GB units.
+			rMem += math.Ceil(memory / float64(1024))
 		}
 
 		// Cores: implicit-full-cores only fires when BOTH cores AND memory
@@ -98,21 +103,20 @@ func NewRequestProfile(pod *corev1.Pod) RequestProfile {
 		// test reads user-typed values, so we test the same. Explicit-cores
 		// uses cCore's well-defined "100 = full card" convention.
 		switch {
-		case cCore == 0 && cMem == 0:
-			rCore += float64(cNum)
-		case cCore > 0:
-			rCore += float64(cNum) * float64(cCore) / float64(util.HundredCore)
+		case cores == 0 && memory == 0:
+			rCore += number
+		case cores > 0:
+			rCore += number * cores / float64(util.HundredCore)
 		}
 	}
-	for i := range pod.Spec.InitContainers {
-		addContainer(&pod.Spec.InitContainers[i])
+
+	for i := range req.Containers {
+		addContainer(&req.Containers[i])
 	}
-	for i := range pod.Spec.Containers {
-		addContainer(&pod.Spec.Containers[i])
-	}
+
 	sum := rNum + rMem + rCore
 	if sum == 0 {
-		return RequestProfile{1.0 / 3, 1.0 / 3, 1.0 / 3}
+		return UniformProfile
 	}
 	return RequestProfile{
 		NumWeight:  rNum / sum,
@@ -126,7 +130,11 @@ func NewRequestProfile(pod *corev1.Pod) RequestProfile {
 // legacy "(num + mem + core) / 3" behaviour. Test fixtures that exercise
 // scoring without a pod (e.g. the NUMA callback tests) pass this so the
 // expected ordering matches the pre-Phase-B math.
-var UniformProfile = RequestProfile{NumWeight: 1.0 / 3, MemWeight: 1.0 / 3, CoreWeight: 1.0 / 3}
+var UniformProfile = RequestProfile{
+	NumWeight:  1.0 / float64(3),
+	MemWeight:  1.0 / float64(3),
+	CoreWeight: 1.0 / float64(3),
+}
 
 // ResourceUtilization is the 0..1 used-fraction of each of the three vGPU
 // dimensions on some resource container (a node, a device, or a NUMA
@@ -143,13 +151,32 @@ type ResourceUtilization struct {
 // the raw used-fraction instead of pre-collapsing to a single number, so
 // the same utilization snapshot can feed either a binpack or a spread
 // score depending on what the caller asks for.
-func NodeUtilization(info *device.NodeInfo) ResourceUtilization {
+func NodeUtilization(info *NodeInfo) ResourceUtilization {
 	totalNum := float64(info.GetTotalNumber())
 	totalMem := float64(info.GetTotalMemory())
 	totalCore := float64(info.GetTotalCores())
 	availNum := float64(info.GetAvailableNumber())
 	availMem := float64(info.GetAvailableMemory())
 	availCore := float64(info.GetAvailableCores())
+	if info.AllocationRequest != nil {
+		reqNumber := float64(info.AllocationRequest.Total.Number)
+		reqCores := float64(info.AllocationRequest.Total.Cores)
+		reqMemory := float64(info.AllocationRequest.Total.Memory)
+		// When resources are insufficient, adjust the final node score to 0 according to the node strategy
+		if availNum < reqNumber || availCore < reqCores || availMem < reqMemory {
+			if info.AllocationRequest.NodePolicy == util.SpreadPolicy {
+				return ResourceUtilization{Num: 1, Core: 1, Mem: 1}
+			}
+			// If the resources are not met, return 0
+			return ResourceUtilization{}
+		}
+		// Improve the score of binpack
+		if info.AllocationRequest.NodePolicy == util.BinpackPolicy {
+			availNum = availNum - reqNumber
+			availMem = availMem - reqMemory
+			availCore = availCore - reqCores
+		}
+	}
 	return ResourceUtilization{
 		Num:  1 - util.SafeDiv(availNum, totalNum),
 		Mem:  1 - util.SafeDiv(availMem, totalMem),
