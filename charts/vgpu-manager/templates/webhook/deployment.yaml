@@ -73,7 +73,7 @@ spec:
             - --domain={{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}
             - --server-bind-port={{ .Values.webhook.commands.serverBindPort | default 9443 }}
             - --pprof-bind-port={{ .Values.webhook.commands.pprofBindPort }}
-            - --cert-dir={{ .Values.webhook.commands.certDir }}
+            - --cert-dir=/tmp/k8s-webhook-server/serving-certs
             - --default-node-policy={{ .Values.webhook.commands.defaultNodePolicy }}
             - --default-device-policy={{ .Values.webhook.commands.defaultDevicePolicy }}
             - --default-topology-mode={{ .Values.webhook.commands.defaultTopologyMode }}
@@ -116,7 +116,7 @@ spec:
                 - ALL
           volumeMounts:
             - name: cert-dir
-              mountPath: {{ .Values.webhook.commands.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
+              mountPath: /tmp/k8s-webhook-server/serving-certs
               readOnly: true
       volumes:
         - name: cert-dir

@@ -1,9 +1,10 @@
 package allocator
 
 import (
+	"math"
+
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	corev1 "k8s.io/api/core/v1"
 )
 
 // RequestProfile is the normalized resource-demand profile of a pod. Its
@@ -31,88 +32,76 @@ type RequestProfile struct {
 	CoreWeight float64
 }
 
-// NewRequestProfile builds the profile from a pod's container requests.
-// Deliberately NODE-INDEPENDENT — no candidate node, no mem-per-card, no
-// memoryFactor reaches this function. Earlier iterations passed a
-// "representative node" for memory normalisation, which was wrong:
+// NewRequestProfile builds the pod's request-weighted scoring profile from
+// the pod-wide aggregate req.Total (Σ over containers of Number, Number×cores,
+// Number×memory — the same peak-demand figure the capacity gate uses). It is
+// deliberately NODE-INDEPENDENT — the raw card capacity and per-node
+// MemoryFactor never reach it — so every candidate node is ranked with the
+// SAME weights (a per-node profile would compare scores computed from
+// different weight vectors, which is ill-defined for a cross-node sort).
 //
-//   - Heterogeneous clusters can mix 16 / 24 / 80 GB cards, so any single
-//     reference node biases the cross-node ranking toward that node's
-//     hardware view of "what's heavy".
-//   - The natural reference (nodeInfoList[0]) is non-deterministic for a
-//     given pod — it shifts whenever upstream filtering or kube-scheduler
-//     reorders the candidate list.
-//   - memoryFactor is per-node too (device-plugin --device-memory-factor
-//     flag); reading it from any single node has the same bias.
+// The three terms are put on a comparable "cards' worth" scale so none
+// dominates purely because of its unit:
 //
-// Trade-off: explicit-vgpu-memory weights are now in the user-typed unit
-// rather than card-fractions. Within one cluster admins typically pick a
-// single factor cluster-wide so users consistently type one unit and the
-// weights stay coherent. The implicit-full-card branches below cover the
-// dominant "give me a card" case and are unit-independent — a single-line
-// "vgpu-number: 1" pod gets (1/3, 1/3, 1/3) regardless of cluster shape.
+//   - rNum  = Total.Number.
+//   - rCore = Total.Cores / HundredCore. Total.Cores is already Σ(per-vGPU
+//     cores × Number) and HundredCore == one whole card's cores, so this is
+//     the pod's total card-equivalents of compute. A whole-card request
+//     (per-vGPU cores resolved to HundredCore) yields exactly Total.Number,
+//     matching rNum; a memory-only pod (Total.Cores == 0) drops out.
+//   - rMem  = whole-card (Total.Memory == 0) → Total.Number (balanced with
+//     num/core, so a plain "give me N cards" pod scores 1/3 each); explicit
+//     memory → single-card GB units (ceil(Total.Memory/1024)), floored at
+//     Total.Number so a multi-card pod never weighs memory below the cards
+//     it spans. GB units (not raw MB) keep an 8 GB request from swamping the
+//     num/core dimensions.
 //
-// Implicit-fill rules mirrored from allocator.resolveContainerNeeds and
-// allocator.buildClaims:
-//
-//   - vgpu-memory == 0 → reqMemory becomes the whole card's memory at
-//     claim-construction time. Profile records this as cNum "cards'
-//     worth" of memory (the unit cancels, so no node info needed).
-//
-//   - vgpu-cores == 0 AND vgpu-memory == 0 → needCores is promoted to
-//     util.HundredCore. Profile records cNum "cards' worth" of cores.
-//     When the user explicitly typed vgpu-memory but left cores at 0
-//     ("memory-only" pod), cores correctly stays 0 and drops out of the
-//     weights — matching the allocator's per-claim Cores=0 behaviour.
-//
-// Per-container values multiply by cNum because buildClaims writes the
-// same (needCores, reqMemory) into EACH of the cNum claims it produces,
-// so per-container consumption is cNum * per-vGPU.
-func NewRequestProfile(pod *corev1.Pod) RequestProfile {
+// The card capacity would let memory be a true fraction of a card, but that
+// is node-specific; keeping the profile node-independent is the deliberate
+// trade-off for a coherent cross-node ranking.
+func NewRequestProfile(req *AllocationRequest) RequestProfile {
+	if req == nil {
+		return UniformProfile
+	}
+
 	var rNum, rMem, rCore float64
-	// Weights are a ranking heuristic over the pod's overall vGPU shape, so
-	// init containers are folded in alongside app containers (a sum across
-	// both groups). For a pod without init containers this is identical to
-	// the historical app-only weighting.
-	addContainer := func(c *corev1.Container) {
-		cNum := util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
-		if cNum <= 0 {
-			return
-		}
-		cCore := util.GetResourceOfContainer(c, util.VGPUCoreResourceName)
-		cMem := util.GetResourceOfContainer(c, util.VGPUMemoryResourceName)
 
-		rNum += float64(cNum)
+	number := float64(req.Total.Number)
+	if number <= 0 {
+		return UniformProfile
+	}
+	rNum += number
 
-		// Memory: implicit-full-card collapses to "cNum cards' worth";
-		// explicit uses raw user-typed value (no factor, no per-card
-		// normalisation — see the trade-off discussion above).
-		if cMem == 0 {
-			rMem += float64(cNum)
-		} else {
-			rMem += float64(cNum) * float64(cMem)
-		}
+	// req.Total already sums (per-vGPU value × Number) across the pod's
+	// containers, so cores/memory here are POD-WIDE magnitudes — do NOT
+	// multiply by Number again (that would make the term grow with Number²).
+	cores := float64(req.Total.Cores)
+	memory := float64(req.Total.Memory)
 
-		// Cores: implicit-full-cores only fires when BOTH cores AND memory
-		// are unset — the allocator's "if needCores == 0 && needMemory == 0"
-		// test reads user-typed values, so we test the same. Explicit-cores
-		// uses cCore's well-defined "100 = full card" convention.
-		switch {
-		case cCore == 0 && cMem == 0:
-			rCore += float64(cNum)
-		case cCore > 0:
-			rCore += float64(cNum) * float64(cCore) / float64(util.HundredCore)
-		}
+	// Cores in "cards' worth": HundredCore == one whole card's cores, so
+	// Total.Cores / HundredCore is the pod's total card-equivalents of
+	// compute. A whole-card request (per-vGPU cores resolved to HundredCore)
+	// yields exactly `number`, matching rNum; a memory-only pod
+	// (Total.Cores == 0) contributes nothing and drops out of the weights.
+	if cores > 0 {
+		rCore += cores / float64(util.HundredCore)
 	}
-	for i := range pod.Spec.InitContainers {
-		addContainer(&pod.Spec.InitContainers[i])
+
+	// Memory: a whole-card request (Total.Memory == 0) counts as `number`
+	// cards' worth, keeping it balanced with num/core (a plain "give me N
+	// cards" pod scores 1/3 each). Explicit memory uses single-card GB units
+	// — the profile is node-independent, so the real card capacity isn't
+	// available here — floored at `number` so a multi-card pod never weighs
+	// memory below the cards it spans.
+	if memory <= 0 {
+		rMem += number
+	} else {
+		rMem += max(math.Ceil(memory/float64(1024)), number)
 	}
-	for i := range pod.Spec.Containers {
-		addContainer(&pod.Spec.Containers[i])
-	}
+
 	sum := rNum + rMem + rCore
 	if sum == 0 {
-		return RequestProfile{1.0 / 3, 1.0 / 3, 1.0 / 3}
+		return UniformProfile
 	}
 	return RequestProfile{
 		NumWeight:  rNum / sum,
@@ -126,7 +115,11 @@ func NewRequestProfile(pod *corev1.Pod) RequestProfile {
 // legacy "(num + mem + core) / 3" behaviour. Test fixtures that exercise
 // scoring without a pod (e.g. the NUMA callback tests) pass this so the
 // expected ordering matches the pre-Phase-B math.
-var UniformProfile = RequestProfile{NumWeight: 1.0 / 3, MemWeight: 1.0 / 3, CoreWeight: 1.0 / 3}
+var UniformProfile = RequestProfile{
+	NumWeight:  1.0 / float64(3),
+	MemWeight:  1.0 / float64(3),
+	CoreWeight: 1.0 / float64(3),
+}
 
 // ResourceUtilization is the 0..1 used-fraction of each of the three vGPU
 // dimensions on some resource container (a node, a device, or a NUMA
@@ -143,17 +136,39 @@ type ResourceUtilization struct {
 // the raw used-fraction instead of pre-collapsing to a single number, so
 // the same utilization snapshot can feed either a binpack or a spread
 // score depending on what the caller asks for.
-func NodeUtilization(info *device.NodeInfo) ResourceUtilization {
-	totalNum := float64(info.GetTotalNumber())
-	totalMem := float64(info.GetTotalMemory())
-	totalCore := float64(info.GetTotalCores())
+func NodeUtilization(info *device.NodeInfo, req *AllocationRequest) ResourceUtilization {
 	availNum := float64(info.GetAvailableNumber())
 	availMem := float64(info.GetAvailableMemory())
 	availCore := float64(info.GetAvailableCores())
+	if req != nil {
+		reqNumber := float64(req.Total.Number)
+		reqCores := float64(req.Total.Cores)
+		reqMemory := float64(req.Total.Memory)
+		// A node that cannot fit the pod must never rank first. A single
+		// utilization value can't say "worst" for both policies (binpack
+		// prefers high utilization, spread prefers low), so report per
+		// policy: spread sees "fully used" (score 0), binpack sees "fully
+		// empty" (score 0). Unreachable for candidates that passed the
+		// deviceFilter capacity gate; defensive.
+		if availNum < reqNumber || availCore < reqCores || availMem < reqMemory {
+			if req.NodePolicy == util.SpreadPolicy {
+				return ResourceUtilization{Num: 1, Core: 1, Mem: 1}
+			}
+			return ResourceUtilization{}
+		}
+		// Binpack scores by POST-placement fullness: subtract this pod's
+		// peak demand so a node that would become fuller ranks higher.
+		// Spread keeps current (pre-placement) freeness.
+		if req.NodePolicy == util.BinpackPolicy {
+			availNum -= reqNumber
+			availMem -= reqMemory
+			availCore -= reqCores
+		}
+	}
 	return ResourceUtilization{
-		Num:  1 - util.SafeDiv(availNum, totalNum),
-		Mem:  1 - util.SafeDiv(availMem, totalMem),
-		Core: 1 - util.SafeDiv(availCore, totalCore),
+		Num:  1 - util.SafeDiv(availNum, float64(info.GetTotalNumber())),
+		Mem:  1 - util.SafeDiv(availMem, float64(info.GetTotalMemory())),
+		Core: 1 - util.SafeDiv(availCore, float64(info.GetTotalCores())),
 	}
 }
 
@@ -206,8 +221,8 @@ func NumaUtilization(devices []*device.Device) ResourceUtilization {
 // applied; the legacy ×100 was just for log-readable percentages and the
 // new code drops the multiplier since we're comparing scores, not
 // reporting them.
-func Score(u ResourceUtilization, p RequestProfile, mode util.SchedulerPolicy) float64 {
-	switch mode {
+func Score(u ResourceUtilization, p RequestProfile, policy util.SchedulerPolicy) float64 {
+	switch policy {
 	case util.BinpackPolicy:
 		return p.NumWeight*u.Num + p.MemWeight*u.Mem + p.CoreWeight*u.Core
 	case util.SpreadPolicy:

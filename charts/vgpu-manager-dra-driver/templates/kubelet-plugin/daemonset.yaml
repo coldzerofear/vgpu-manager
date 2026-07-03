@@ -1,11 +1,11 @@
 {{- if .Values.kubeletPlugin.enabled -}}
 {{- $init := .Values.kubeletPlugin.containers.init }}
 {{- $plugin := .Values.kubeletPlugin.containers.plugin }}
-{{- $driverRoot := .Values.kubeletPlugin.nvidiaDriverRoot | default "/" }}
-{{- $kubeletRoot := .Values.kubeletPlugin.kubeletRootDir | default "/var/lib/kubelet" | trimSuffix "/" }}
-{{- $registrarDir := .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | default "/var/lib/kubelet/plugins_registry" }}
-{{- $pluginsDir := .Values.kubeletPlugin.kubeletPluginsDirectoryPath | default "/var/lib/kubelet/plugins" }}
-{{- $managerDir := .Values.kubeletPlugin.vgpuManagerDir | default "/etc/vgpu-manager" }}
+{{- $driverRoot := .Values.kubeletPlugin.driverRoot | default "/" }}
+{{- $kubeletRoot := .Values.kubeletPlugin.kubeletRoot | default "/var/lib/kubelet" | trimSuffix "/" }}
+{{- $registrarDir := .Values.kubeletPlugin.kubeletRegistrarPath | default "/var/lib/kubelet/plugins_registry" }}
+{{- $pluginsDir := .Values.kubeletPlugin.kubeletPluginsPath | default "/var/lib/kubelet/plugins" }}
+{{- $managerDir := .Values.kubeletPlugin.managerRoot | default "/etc/vgpu-manager" }}
 {{- $cdiRoot := .Values.kubeletPlugin.cdiRoot | default "/var/run/cdi" }}
 {{- $healthPort := $plugin.healthcheckPort | default 4567 }}
 {{- $fg := $plugin.featureGates | default dict }}
@@ -52,7 +52,7 @@ spec:
       terminationGracePeriodSeconds: {{ .Values.kubeletPlugin.terminationGracePeriodSeconds }}
       hostPID: true
       dnsPolicy: ClusterFirst
-      securityContext: {{ toYaml .Values.kubeletPlugin.podSecurityContext | nindent 8 }}
+      securityContext: {}
       {{- with .Values.kubeletPlugin.nodeSelector }}
       nodeSelector: {{ toYaml . | nindent 8 }}
       {{- end }}
@@ -91,11 +91,14 @@ spec:
           image: {{ include "vgpu-manager-dra-driver.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
           command: [bash, -c, /usr/bin/install_files.sh]
+          env:
+            - name: HOST_MANAGER_DIR
+              value: {{ $managerDir | quote }}
           resources: {{ toYaml $init.resources | nindent 12 }}
           securityContext: {{ toYaml $init.securityContext | nindent 12 }}
           volumeMounts:
             - name: manager
-              mountPath: /etc/vgpu-manager
+              mountPath: {{ $managerDir | quote }}
               mountPropagation: Bidirectional
       containers:
         - name: kubelet-plugin
@@ -113,7 +116,7 @@ spec:
                 sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
-              kubelet-plugin -v {{ $plugin.logLevel | default 6 }}
+              kubelet-plugin -v {{ $plugin.logLevel | default 5 }}
           env:
             - name: NODE_NAME
               valueFrom:

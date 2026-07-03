@@ -65,22 +65,13 @@ func (alloc *allocator) addContainerAllocate(contDevices *device.ContainerDevice
 func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.FilterReason, error) {
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
-	newPod := pod.DeepCopy()
+	var newPod = pod.DeepCopy()
+	var deviceClaims device.PodDeviceClaim
 
 	// Does the pod have a sequential (non-restartable) init container that
 	// requests vGPU? Only then do we need the lifecycle-aware two-pass; the
 	// common case (and sidecar-only pods) stays on the single-pass fast path.
-	hasSequentialInit := false
-	for i := range req.Containers {
-		if req.Containers[i].Kind == util.ContainerKindInit && !req.Containers[i].Restartable {
-			hasSequentialInit = true
-			break
-		}
-	}
-
-	var deviceClaims device.PodDeviceClaim
-
-	if !hasSequentialInit {
+	if !req.HasSequentialInit {
 		// Fast path: every vGPU container runs concurrently (regular app +
 		// optional sidecars), so allocate in req.Containers order with
 		// cross-container accumulation and append directly — allocation order
@@ -117,41 +108,38 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 			}
 		}
 		// Pass 1a: sidecars (concurrent, accumulate).
-		for i := range req.Containers {
-			n := &req.Containers[i]
-			if n.Kind != util.ContainerKindInit || !n.Restartable {
+		for _, need := range req.Containers {
+			if need.Kind != util.ContainerKindInit || !need.Restartable {
 				continue
 			}
-			claim, rsn, err := alloc.allocateAndAccumulate(req, *n, nil)
+			claim, rsn, err := alloc.allocateAndAccumulate(req, need, nil)
 			if rsn != nil || err != nil {
 				return nil, rsn, err
 			}
-			claimByName[n.Name] = claim
+			claimByName[need.Name] = claim
 			recordPreferred(claim)
 		}
 		// Snapshot base+sidecars; the regular-app reservation added next is
 		// released before the init pass.
 		viewBaseSidecar := alloc.nodeInfo.SnapshotUsage()
 		// Pass 1b: regular app containers (concurrent, accumulate).
-		for i := range req.Containers {
-			n := &req.Containers[i]
-			if n.Kind != util.ContainerKindApp {
+		for _, need := range req.Containers {
+			if need.Kind != util.ContainerKindApp {
 				continue
 			}
-			claim, rsn, err := alloc.allocateAndAccumulate(req, *n, nil)
+			claim, rsn, err := alloc.allocateAndAccumulate(req, need, nil)
 			if rsn != nil || err != nil {
 				return nil, rsn, err
 			}
-			claimByName[n.Name] = claim
+			claimByName[need.Name] = claim
 			recordPreferred(claim)
 		}
 		// Release the regular-app reservation: init containers run after the
 		// app phase, so they see base+sidecars only.
 		alloc.nodeInfo.RestoreUsage(viewBaseSidecar)
 		// Pass 2: sequential init containers (no accumulation between them).
-		for i := range req.Containers {
-			n := &req.Containers[i]
-			if n.Kind != util.ContainerKindInit || n.Restartable {
+		for _, need := range req.Containers {
+			if need.Kind != util.ContainerKindInit || need.Restartable {
 				continue
 			}
 			var claim *device.ContainerDeviceClaim
@@ -160,10 +148,10 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 			// Attempt 1: reuse the pod's already-used GPUs (densest). Skipped
 			// when there are none (e.g. an init-only pod).
 			if len(preferred) > 0 {
-				claim, rsn, err = alloc.allocateOne(req, *n, preferred)
+				claim, rsn, err = alloc.allocateOne(req, need, preferred)
 				if err != nil {
 					klog.V(3).ErrorS(err, "init container reuse allocation internal error",
-						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", n.Name)
+						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
 					return nil, nil, err
 				}
 			}
@@ -171,19 +159,19 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 			// (claim == nil ⟺ attempt 1 was skipped or rejected). Still correct,
 			// just reserves more cards.
 			if claim == nil {
-				claim, rsn, err = alloc.allocateOne(req, *n, nil)
+				claim, rsn, err = alloc.allocateOne(req, need, nil)
 				if err != nil {
 					klog.V(3).ErrorS(err, "init container allocation internal error",
-						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", n.Name)
+						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
 					return nil, nil, err
 				}
 				if rsn != nil {
-					klog.V(4).InfoS("init container allocation rejected", "node", alloc.nodeInfo.GetName(),
-						"pod", klog.KObj(pod), "container", n.Name, "reason", rsn.Detailed())
+					klog.V(4).InfoS("init container allocation rejected", "node",
+						alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name, "reason", rsn.Detailed())
 					return nil, rsn, nil
 				}
 			}
-			claimByName[n.Name] = claim
+			claimByName[need.Name] = claim
 		}
 		// Assemble per-container claims in req.Containers order (init-first),
 		// which matches kubelet's Allocate call order and the device-plugin
@@ -252,7 +240,7 @@ func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed, 
 		return nil, reason.New(reason.InsufficientGPUCards).
 			WithDetail("need %d devices, node has %d schedulable", need.Number, alloc.nodeInfo.GetSchedulableDeviceCount()), nil
 	}
-	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
+	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.MemoryFactor, alloc.nodeInfo.HasSameCapacity(), alloc.nodeInfo.GetMaxDeviceMemory())
 
 	deviceStore, deviceCounts := alloc.filterDevices(req, needCores, needMemory, restrictUUIDs)
 	totalDevices := alloc.nodeInfo.GetDeviceCount()
@@ -299,13 +287,19 @@ func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed, 
 // vgpu-memory == 0 stays 0 here; buildClaims expands it to the device's
 // total memory at claim-construction time so each picked device gets the
 // right per-card value (which may differ on heterogeneous nodes).
-func resolveContainerNeeds(need ContainerNeed, memoryFactor int) (cores, memory int64) {
+func resolveContainerNeeds(
+	need ContainerNeed, memoryFactor int,
+	allSameCapacity bool, memoryCapacity int64,
+) (cores, memory int64) {
 	cores, memory = need.Cores, need.Memory
 	if memory > 0 && memoryFactor > 0 {
 		memory *= int64(memoryFactor)
 	}
 	if cores == 0 && memory == 0 {
 		cores = util.HundredCore
+	}
+	if memory == 0 && allSameCapacity {
+		memory = memoryCapacity
 	}
 	return cores, memory
 }

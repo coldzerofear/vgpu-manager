@@ -34,6 +34,7 @@ type Options struct {
 	CertRefreshInterval int
 	MinScrapeInterval   int
 	StuckGracePeriod    string
+	ContainerDriverRoot string
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -80,6 +81,7 @@ func NewOptions() *Options {
 		CertRefreshInterval: defaultCertRefreshInterval,
 		MinScrapeInterval:   defaultMinScrapeInterval,
 		StuckGracePeriod:    defaultStuckGracePeriod,
+		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
 		FeatureGate:         featureGate,
 	}
 }
@@ -107,8 +109,9 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need --enable-tls)")
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
 	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
-	pflag.IntVar(&o.MinScrapeInterval, "min-scrape-interval", o.MinScrapeInterval, "Minimum grasping interval in seconds.")
+	pflag.IntVar(&o.MinScrapeInterval, "min-scrape-interval", o.MinScrapeInterval, "Minimum grasping interval in seconds. (must be greater than or equal to 1)")
 	pflag.StringVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
+	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

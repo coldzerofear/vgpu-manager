@@ -16,6 +16,8 @@ vgpu-manager {{ .Chart.AppVersion }} scheduler component has been deployed succe
 {{- if .Values.devicePlugin.enabled }}
 vgpu-manager {{ .Chart.AppVersion }} device-plugin has been deployed successfully!
 device-plugin:
+  - ManagerRoot   :  {{ .Values.devicePlugin.managerRoot | default "/etc/vgpu-manager" }}
+  - KubeletRoot   :  {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}
   - ListStrategy  :  {{ .Values.devicePlugin.devicePlugin.commands.deviceListStrategy | default "envvar" }}
   - MigStrategy   :  {{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
   - SplitCount    :  {{ .Values.devicePlugin.devicePlugin.commands.deviceSplitCount | default 10 }}
@@ -39,10 +41,10 @@ device-monitor:
 vgpu-manager {{ .Chart.AppVersion }} webhook component has been deployed successfully!
   - ReplicaCount  :  {{ .Values.webhook.replicas }}
   - ServerBindPort:  {{ .Values.webhook.commands.serverBindPort | default 9443 }}
-  - PprofBindPort :  {{ .Values.webhook.commands.pprofBindPort }}
-  - CertDirectory :  {{ .Values.webhook.commands.certDir | default "/tmp/k8s-webhook-server/serving-certs" }}
-  - NodePolicy    :  {{ .Values.webhook.commands.defaultNodePolicy }}
-  - DevicePolicy  :  {{ .Values.webhook.commands.defaultDevicePolicy }}
+  - PprofBindPort :  {{ .Values.webhook.commands.pprofBindPort | default 0 }}
+  - NodePolicy    :  {{ .Values.webhook.commands.defaultNodePolicy | quote }}
+  - DevicePolicy  :  {{ .Values.webhook.commands.defaultDevicePolicy | quote }}
+  - TopologyMode  :  {{ .Values.webhook.commands.defaultTopologyMode | quote }}
   - LoggerLevel   :  {{ .Values.webhook.commands.logLevel }}
 {{- end }}
 

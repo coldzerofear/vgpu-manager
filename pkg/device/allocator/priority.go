@@ -36,7 +36,7 @@ var (
 			return p1.GetNUMA() < p2.GetNUMA()
 		}
 	}
-	ByNodeNameAsc = func(p1, p2 *device.NodeInfo) bool {
+	ByNodeNameAsc = func(p1, p2 *NodeInfo) bool {
 		return p1.GetName() < p2.GetName()
 	}
 )
@@ -51,13 +51,13 @@ var (
 // uniform "fits" tier), so the downstream binpack/spread order is unchanged; the
 // finer tiers only bite on mixed/island clusters or when N exceeds a single
 // NVLink island, pulling tighter-coupled placements to the front.
-func ByNodeGPUTopologyFitness(needNumber int) LessFunc[*device.NodeInfo] {
-	return func(p1, p2 *device.NodeInfo) bool {
+func ByNodeGPUTopologyFitness(needNumber int) LessFunc[*NodeInfo] {
+	return func(p1, p2 *NodeInfo) bool {
 		return gpuTopologyFitness(p1, needNumber) > gpuTopologyFitness(p2, needNumber)
 	}
 }
 
-func gpuTopologyFitness(n *device.NodeInfo, needNumber int) int {
+func gpuTopologyFitness(n *NodeInfo, needNumber int) int {
 	return n.LinkTopologyFitness(needNumber)
 }
 
@@ -65,13 +65,13 @@ func gpuTopologyFitness(n *device.NodeInfo, needNumber int) int {
 // ByNodeGPUTopologyFitness: it ranks higher the nodes that have a single
 // NUMA domain large enough to host the request, avoiding nodes that publish
 // NUMA info but force cross-NUMA fallback.
-func ByNodeNUMATopologyFitness(needNumber int) LessFunc[*device.NodeInfo] {
-	return func(p1, p2 *device.NodeInfo) bool {
+func ByNodeNUMATopologyFitness(needNumber int) LessFunc[*NodeInfo] {
+	return func(p1, p2 *NodeInfo) bool {
 		return numaTopologyFitness(p1, needNumber) > numaTopologyFitness(p2, needNumber)
 	}
 }
 
-func numaTopologyFitness(n *device.NodeInfo, needNumber int) int {
+func numaTopologyFitness(n *NodeInfo, needNumber int) int {
 	switch {
 	case !n.HasNUMATopology():
 		return 0
@@ -133,24 +133,30 @@ func (sp *sortPriority[T]) Less(i, j int) bool {
 // the total work O(n) and the cache lives only for the lifetime of the
 // returned LessFunc (confined to a single filter goroutine, so no
 // mutex is needed).
-func WeightedNodeLess(profile RequestProfile, mode util.SchedulerPolicy) LessFunc[*device.NodeInfo] {
+func WeightedNodeLess(req AllocationRequest) LessFunc[*NodeInfo] {
 	cache := make(map[string]float64)
-	return func(p1, p2 *device.NodeInfo) bool {
-		return cachedNodeScore(cache, p1, profile, mode) >
-			cachedNodeScore(cache, p2, profile, mode)
+	return func(p1, p2 *NodeInfo) bool {
+		return cachedNodeScore(cache, p1, req) > cachedNodeScore(cache, p2, req)
 	}
 }
 
-func cachedNodeScore(
-	cache map[string]float64, info *device.NodeInfo,
-	profile RequestProfile, mode util.SchedulerPolicy,
-) float64 {
+func cachedNodeScore(cache map[string]float64, info *NodeInfo, req AllocationRequest) float64 {
 	name := info.GetName()
 	if s, ok := cache[name]; ok {
 		return s
 	}
-	s := Score(NodeUtilization(info), profile, mode) * util.HundredCore
-	klog.V(5).Infof("Policy %s node <%s> resource score is <%.2f>", mode, info.GetName(), s)
+	// Prefer the per-node request (the ResetStatistics snapshot the filter
+	// attached, carrying that node's resolved Total) for post-placement
+	// scoring; fall back to the pod-level req when no snapshot is present
+	// (e.g. unit tests). Do NOT mutate info.AllocationRequest: a shared
+	// NodeInfo may be re-scored under a different policy (binpack then
+	// spread), and a cached request would leak the previous policy/Total.
+	nodeReq := info.AllocationRequest
+	if nodeReq == nil {
+		nodeReq = &req
+	}
+	s := Score(NodeUtilization(info.NodeInfo, nodeReq), nodeReq.Profile, nodeReq.NodePolicy) * float64(util.HundredCore)
+	klog.V(5).Infof("Policy %s node <%s> resource score is <%.2f>", nodeReq.NodePolicy, info.GetName(), s)
 	cache[name] = s
 	return s
 }
@@ -170,8 +176,8 @@ func cachedNodeScore(
 // Both strict and non-strict topology variants get the same prepended
 // comparator — strictness only changes ALLOCATION fallback behaviour
 // (handled inside allocateByTopologyMode), not node ranking.
-func ApplyTopologyMode(req AllocationRequest, less ...LessFunc[*device.NodeInfo]) []LessFunc[*device.NodeInfo] {
-	var fitness LessFunc[*device.NodeInfo]
+func ApplyTopologyMode(req AllocationRequest, less ...LessFunc[*NodeInfo]) []LessFunc[*NodeInfo] {
+	var fitness LessFunc[*NodeInfo]
 	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
 		fitness = ByNodeGPUTopologyFitness(req.Max.Number)
@@ -180,7 +186,12 @@ func ApplyTopologyMode(req AllocationRequest, less ...LessFunc[*device.NodeInfo]
 	default:
 		return less
 	}
-	return append([]LessFunc[*device.NodeInfo]{fitness}, less...)
+	return append([]LessFunc[*NodeInfo]{fitness}, less...)
+}
+
+type NodeInfo struct {
+	*device.NodeInfo
+	*AllocationRequest
 }
 
 // NewNodePolicyPriority builds the node-level ranking chain for a pod:
@@ -195,12 +206,12 @@ func ApplyTopologyMode(req AllocationRequest, less ...LessFunc[*device.NodeInfo]
 // BuildAllocationRequest, in which case Score returns 0 for every
 // candidate and the comparator collapses to "all equal", letting
 // ByNodeNameAsc decide.
-func NewNodePolicyPriority(req AllocationRequest) *sortPriority[*device.NodeInfo] {
-	less := []LessFunc[*device.NodeInfo]{
-		WeightedNodeLess(req.Profile, req.NodePolicy),
+func NewNodePolicyPriority(req AllocationRequest) *sortPriority[*NodeInfo] {
+	less := []LessFunc[*NodeInfo]{
+		WeightedNodeLess(req),
 		ByNodeNameAsc,
 	}
-	return &sortPriority[*device.NodeInfo]{
+	return &sortPriority[*NodeInfo]{
 		less: ApplyTopologyMode(req, less...),
 	}
 }

@@ -213,7 +213,8 @@ func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceM
 		manager.featureGate = featuregate.NewFeatureGate()
 	}
 	if manager.DeviceLib == nil {
-		deviceLib, err := nvidia.InitDeviceLib("/")
+		driverRoot := config.GetDriverRoot()
+		deviceLib, err := nvidia.InitDeviceLib(driverRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -262,7 +263,7 @@ func (m *DeviceManager) initDevices() (err error) {
 			devLinksMap[dev.UUID] = devLinklist
 		}
 	}
-	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), "/")
+	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), m.DevRoot)
 	if err != nil {
 		return fmt.Errorf("error querying IMEX channels: %w", err)
 	}

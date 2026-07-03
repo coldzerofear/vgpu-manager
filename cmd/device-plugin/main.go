@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
@@ -64,6 +65,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 
+	driverRoot := nvidia.RootPath(opt.ContainerDriverRoot)
 	cgroupDriver := cgroup.MustInitCGroupDriver(opt.CGroupDriver)
 	nodeConfig, err := node.NewNodeConfig(
 		node.WithNodeNameOption(opt.NodeName),
@@ -82,6 +84,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		node.WithGDRCopyEnabledOption(opt.GDRCopyEnabled),
 		node.WithOpenKernelModulesOption(opt.OpenKernelModules),
 		node.WithIMEXOption(opt.ImexChannelIDs, opt.ImexRequired),
+		node.WithDriverRootOption(driverRoot),
 		node.WithCheckFieldsOption(true))
 	if err != nil {
 		klog.Errorf("Initialization of node config failed: %v", err)
@@ -149,7 +152,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		klog.Errorf("Register controller to manager failed: %v", err)
 		return exitCode
 	}
-	plugins, err := deviceplugin.GetDevicePlugins(opt.DevicePluginPath, deviceManager, manager, kubeClient)
+	plugins, err := deviceplugin.GetDevicePlugins(opt, deviceManager, manager, kubeClient)
 	if err != nil {
 		klog.Errorf("Get device plugins failed: %v", err)
 		return exitCode

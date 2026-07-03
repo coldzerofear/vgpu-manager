@@ -541,6 +541,9 @@ func (dev *Device) GetType() string {
 
 // GetTotalMemory returns the totalMemory of this device
 func (dev *Device) GetTotalMemory() int64 {
+	if dev.totalMemory < 0 {
+		return 0
+	}
 	return dev.totalMemory
 }
 
@@ -551,6 +554,9 @@ func (dev *Device) GetUsedMemory() int64 {
 
 // GetTotalCores returns the totalCores of this device
 func (dev *Device) GetTotalCores() int64 {
+	if dev.totalCores < 0 {
+		return 0
+	}
 	return dev.totalCores
 }
 
@@ -561,6 +567,9 @@ func (dev *Device) GetUsedCores() int64 {
 
 // GetTotalNumber returns the totalNum of this device
 func (dev *Device) GetTotalNumber() int {
+	if dev.totalNumber < 0 {
+		return 0
+	}
 	return dev.totalNumber
 }
 
@@ -625,7 +634,7 @@ func (dev *Device) Score() float64 {
 	numRatio := util.SafeDiv(float64(dev.AllocatableNumber()), float64(dev.GetTotalNumber()))
 	memRatio := util.SafeDiv(float64(dev.AllocatableMemory()), float64(dev.GetTotalMemory()))
 	coreRatio := util.SafeDiv(float64(dev.AllocatableCores()), float64(dev.GetTotalCores()))
-	return (numRatio + memRatio + coreRatio) / 3.0 * util.HundredCore
+	return (numRatio + memRatio + coreRatio) / 3.0 * float64(util.HundredCore)
 }
 
 // GetPodDeviceClaim Retrieve device claim information for a pod,
@@ -658,7 +667,6 @@ func GetPodDeviceClaim(pod *corev1.Pod) PodDeviceClaim {
 
 func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *NodeInfo {
 	ret := &NodeInfo{
-		name:           node.Name,
 		node:           node,
 		gpuTopology:    gpuTopology,
 		deviceMap:      make(map[int]*Device, len(devices)),
@@ -698,18 +706,19 @@ func NewFakeNodeInfo(node *corev1.Node, gpuTopology bool, devices ...*Device) *N
 }
 
 type NodeInfo struct {
-	name           string
 	node           *corev1.Node
 	deviceMap      map[int]*Device
 	deviceIndexMap map[string]int
 	deviceList     gpuallocator.DeviceList
-	totalNumber    int
-	usedNumber     int
-	totalMemory    int64
-	usedMemory     int64
-	totalCores     int64
-	usedCores      int64
-	maxCapability  float32
+	// All devices on the node have the same memory capacity
+	allSameCapacity bool
+	totalNumber     int
+	usedNumber      int
+	totalMemory     int64
+	usedMemory      int64
+	totalCores      int64
+	usedCores       int64
+	maxCapability   float32
 	// schedulableDevices is the count of healthy, non-MIG devices on the
 	// node — i.e. cards that COULD host a vGPU, regardless of how many
 	// slots are currently free. NOT a measure of current availability.
@@ -851,7 +860,6 @@ func NewNodeInfo(node *corev1.Node, opts ...NodeInfoOptionFn) (*NodeInfo, error)
 	}
 	ret := &NodeInfo{
 		node:           node,
-		name:           node.Name,
 		deviceMap:      gatherInfo.DeviceMap,
 		deviceList:     gatherInfo.DeviceList,
 		deviceIndexMap: gatherInfo.DeviceIndexMap,
@@ -1098,13 +1106,13 @@ func computeMaxNUMAGroupSize(deviceMap map[int]*Device) int {
 		}
 		groups[numa]++
 	}
-	var max int
+	var maxCount int
 	for _, c := range groups {
-		if c > max {
-			max = c
+		if c > maxCount {
+			maxCount = c
 		}
 	}
-	return max
+	return maxCount
 }
 
 func (n *NodeInfo) DeepCopy() *NodeInfo {
@@ -1473,27 +1481,29 @@ func (n *NodeInfo) AddPodUsedResources(pod *corev1.Pod) {
 	}
 	// According to the pods' annotations, construct the node allocation state
 	podDeviceClaim := GetPodDeviceClaim(pod)
+
 	if len(podDeviceClaim) == 0 {
 		//klog.InfoS("discovery of possible damage to pod device metadata", "pod", klog.KObj(pod))
 		return
 	}
-	if !podHasVGPUInitContainer(pod) {
+
+	if podHasVGPUInitContainer(pod) {
+		// Init-aware path: collapse to the per-GPU lifecycle peak so a sequential
+		// init container reusing a regular container's GPU is not double-counted.
+		for _, fp := range ReducePodFootprint(pod, podDeviceClaim) {
+			if err := n.addFootprintResources(fp); err != nil {
+				klog.Warningf("failed to update used resource for node %q dev %d due to %v", n.GetName(), fp.Id, err)
+			}
+		}
+	} else {
 		// Fast path (historical): without a vGPU init container the per-GPU
 		// peak equals the plain per-claim sum, so account claim by claim.
 		for _, containerClaim := range podDeviceClaim {
 			for _, claim := range containerClaim.DeviceClaims {
 				if err := n.AddUsedResources(claim); err != nil {
-					klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, claim.Id, err)
+					klog.Warningf("failed to update used resource for node %q dev %d due to %v", n.GetName(), claim.Id, err)
 				}
 			}
-		}
-		return
-	}
-	// Init-aware path: collapse to the per-GPU lifecycle peak so a sequential
-	// init container reusing a regular container's GPU is not double-counted.
-	for _, fp := range ReducePodFootprint(pod, podDeviceClaim) {
-		if err := n.addFootprintResources(fp); err != nil {
-			klog.Warningf("failed to update used resource for node %s dev %d due to %v", n.name, fp.Id, err)
 		}
 	}
 }
@@ -1562,6 +1572,7 @@ func (n *NodeInfo) RefreshResourcesData() {
 	n.totalNumber, n.totalCores, n.totalMemory = 0, 0, 0
 	n.usedNumber, n.usedCores, n.usedMemory, n.maxCapability = 0, 0, 0, 0
 	n.schedulableDevices, n.maxDeviceCores, n.maxDeviceMemory = 0, 0, 0
+	first, sameCapacity, memoryCapacity := true, true, int64(0)
 	for _, deviceInfo := range n.deviceMap {
 		// Do not include MIG enabled devices and unhealthy devices in the assignable resources.
 		if !deviceInfo.IsMIG() && deviceInfo.Healthy() {
@@ -1575,19 +1586,26 @@ func (n *NodeInfo) RefreshResourcesData() {
 			n.maxCapability = max(n.maxCapability, deviceInfo.GetComputeCapability())
 			n.maxDeviceCores = max(n.maxDeviceCores, deviceInfo.GetTotalCores())
 			n.maxDeviceMemory = max(n.maxDeviceMemory, deviceInfo.GetTotalMemory())
+			if first {
+				memoryCapacity = deviceInfo.GetTotalMemory()
+				first = false
+			} else if deviceInfo.GetTotalMemory() != memoryCapacity {
+				sameCapacity = false
+			}
 		}
 	}
+	n.allSameCapacity = sameCapacity
 }
 
 // AddUsedResources records the used GPU core and memory
 func (n *NodeInfo) AddUsedResources(claim DeviceClaim) error {
 	deviceId, ok := n.deviceIndexMap[claim.Uuid]
 	if !ok {
-		return fmt.Errorf("device UUID <%s> does not exist in the NodeInfo <%s>", claim.Uuid, n.name)
+		return fmt.Errorf("device UUID %q does not exist in the NodeInfo %q", claim.Uuid, n.GetName())
 	}
 	device, ok := n.deviceMap[deviceId]
 	if !ok {
-		return fmt.Errorf("device ID <%d> does not exist in the NodeInfo <%s>", deviceId, n.name)
+		return fmt.Errorf("device ID %d does not exist in the NodeInfo %q", deviceId, n.GetName())
 	}
 	device.addUsedResources(claim.Cores, claim.Memory)
 	if !device.IsMIG() && device.Healthy() {
@@ -1605,11 +1623,11 @@ func (n *NodeInfo) AddUsedResources(claim DeviceClaim) error {
 func (n *NodeInfo) addFootprintResources(fp PodDeviceFootprint) error {
 	deviceId, ok := n.deviceIndexMap[fp.Uuid]
 	if !ok {
-		return fmt.Errorf("device UUID <%s> does not exist in the NodeInfo <%s>", fp.Uuid, n.name)
+		return fmt.Errorf("device UUID %q does not exist in the NodeInfo %q", fp.Uuid, n.GetName())
 	}
 	device, ok := n.deviceMap[deviceId]
 	if !ok {
-		return fmt.Errorf("device ID <%d> does not exist in the NodeInfo <%s>", deviceId, n.name)
+		return fmt.Errorf("device ID %d does not exist in the NodeInfo %q", deviceId, n.GetName())
 	}
 	device.addUsedResourcesN(fp.Number, fp.Cores, fp.Memory)
 	if !device.IsMIG() && device.Healthy() {
@@ -1622,7 +1640,12 @@ func (n *NodeInfo) addFootprintResources(fp PodDeviceFootprint) error {
 
 // GetName returns node name
 func (n *NodeInfo) GetName() string {
-	return n.name
+	return n.node.GetName()
+}
+
+// HasSameCapacity Return whether the node has all devices with the same memory capacity
+func (n *NodeInfo) HasSameCapacity() bool {
+	return n.allSameCapacity
 }
 
 // GetDeviceCount returns the number of GPU devices
@@ -1944,8 +1967,8 @@ func (n *NodeInfo) GangAnchorComponent(gangName string, owner *v1.OwnerReference
 		}
 	}
 	if len(votes) > 1 && gangName != "" {
-		klog.V(3).Infof("gang %q anchor split across %d NVLink components on node %s; using majority root %d",
-			gangName, len(votes), n.name, bestRoot)
+		klog.V(3).Infof("Gang %q anchor split across %d NVLink components on node %q; using majority root %d",
+			gangName, len(votes), n.GetName(), bestRoot)
 	}
 	return bestRoot, true
 }

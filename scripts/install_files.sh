@@ -2,7 +2,7 @@
 set -eo pipefail
 
 SRC_DIR="/installed"
-DEST_DIR="/etc/vgpu-manager"
+DEST_DIR="${HOST_MANAGER_DIR:-/etc/vgpu-manager}"
 
 if [[ ! -d "$SRC_DIR" ]]; then
     echo "error: source dir $SRC_DIR non-existent"
