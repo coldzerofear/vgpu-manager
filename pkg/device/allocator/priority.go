@@ -155,10 +155,8 @@ func cachedNodeScore(cache map[string]float64, info *NodeInfo, req AllocationReq
 	if nodeReq == nil {
 		nodeReq = &req
 	}
-	profile := nodeReq.Profile
-	policy := nodeReq.NodePolicy
-	s := Score(NodeUtilization(info, nodeReq), profile, policy) * util.HundredCore
-	klog.V(5).Infof("Policy %s node <%s> resource score is <%.2f>", policy, info.GetName(), s)
+	s := Score(NodeUtilization(info.NodeInfo, nodeReq), nodeReq.Profile, nodeReq.NodePolicy) * float64(util.HundredCore)
+	klog.V(5).Infof("Policy %s node <%s> resource score is <%.2f>", nodeReq.NodePolicy, info.GetName(), s)
 	cache[name] = s
 	return s
 }

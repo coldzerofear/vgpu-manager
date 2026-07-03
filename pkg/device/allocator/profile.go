@@ -136,7 +136,7 @@ type ResourceUtilization struct {
 // the raw used-fraction instead of pre-collapsing to a single number, so
 // the same utilization snapshot can feed either a binpack or a spread
 // score depending on what the caller asks for.
-func NodeUtilization(info *NodeInfo, req *AllocationRequest) ResourceUtilization {
+func NodeUtilization(info *device.NodeInfo, req *AllocationRequest) ResourceUtilization {
 	availNum := float64(info.GetAvailableNumber())
 	availMem := float64(info.GetAvailableMemory())
 	availCore := float64(info.GetAvailableCores())

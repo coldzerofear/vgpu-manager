@@ -188,8 +188,6 @@ func (req *AllocationRequest) ResetStatistics(nodeInfo *device.NodeInfo) *Alloca
 		// NOT multiply by Number; the per-group aggregates below do.
 		cores, memory := resolveContainerNeeds(*need, nodeInfo.MemoryFactor,
 			nodeInfo.HasSameCapacity(), nodeInfo.GetMaxDeviceMemory())
-		need.Cores = cores
-		need.Memory = memory
 
 		req.Max.Number = max(req.Max.Number, need.Number)
 		req.Max.Cores = max(req.Max.Cores, cores)
