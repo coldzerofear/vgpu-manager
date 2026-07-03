@@ -46,16 +46,18 @@ type AllocationRequest struct {
 	// cores/memory). Init and app containers never run concurrently, so this
 	// is the K8s-style effective request (not a naive sum across phases); for
 	// a pod without init containers it collapses to the historical plain sum.
-	// Used by the deviceFilter node-wide capacity gate (req.Total vs
-	// GetAvailable*). Two caveats keep it a necessary-condition lower bound
-	// rather than an exact fit test:
-	//   - Memory is the UN-scaled request; the node MemoryFactor is applied
-	//     later in the allocator, so on factor>1 nodes the real demand is
-	//     higher than Total.Memory.
-	//   - a whole-card memory request (user memory==0) contributes 0 here,
-	//     so memory is undercounted for those pods.
-	// Both only make the gate looser (never false-reject); the allocator
-	// re-verifies exactly.
+	//
+	// It is filled TWICE. BuildAllocationRequest fills it from RAW user values
+	// (memory un-scaled, whole-card memory == 0) — this build-time value only
+	// feeds the node-independent Profile. Before the deviceFilter capacity
+	// gate reads it, ResetStatistics(nodeInfo) RECOMPUTES it PER NODE, applying
+	// that node's MemoryFactor and expanding whole-card memory to the card
+	// capacity on same-capacity nodes. So at gate time (req.Total vs
+	// GetAvailable*) it is node-aware and does not over-estimate, hence never
+	// false-rejects; it stays a NECESSARY condition only because a node passing
+	// it may still fail on per-card fragmentation (the allocator re-verifies
+	// exactly). On heterogeneous nodes whole-card memory stays 0 — a looser but
+	// still non-false-rejecting bound.
 	//
 	// Total.Name is unset (no container owns the aggregate) and
 	// ContainerNeed consumers should not read it.
@@ -66,7 +68,8 @@ type AllocationRequest struct {
 	// Used by the deviceFilter per-single-device structural gate (req.Max
 	// vs GetSchedulableDeviceCount / GetMaxDevice*) and by the topology
 	// fitness comparator (Max.Number = minimum link/NUMA group size the
-	// node must host). Memory is UN-scaled, same caveat as Total.
+	// node must host). Like Total, Max is recomputed per node by
+	// ResetStatistics (scaled memory, whole-card → card capacity).
 	//
 	// Max.Name is unset (no container owns the aggregate) and
 	// ContainerNeed consumers should not read it.

@@ -145,12 +145,19 @@ func cachedNodeScore(cache map[string]float64, info *NodeInfo, req AllocationReq
 	if s, ok := cache[name]; ok {
 		return s
 	}
-	if info.AllocationRequest == nil {
-		info.AllocationRequest = &req
+	// Prefer the per-node request (the ResetStatistics snapshot the filter
+	// attached, carrying that node's resolved Total) for post-placement
+	// scoring; fall back to the pod-level req when no snapshot is present
+	// (e.g. unit tests). Do NOT mutate info.AllocationRequest: a shared
+	// NodeInfo may be re-scored under a different policy (binpack then
+	// spread), and a cached request would leak the previous policy/Total.
+	nodeReq := info.AllocationRequest
+	if nodeReq == nil {
+		nodeReq = &req
 	}
-	profile := info.AllocationRequest.Profile
-	policy := info.AllocationRequest.NodePolicy
-	s := Score(NodeUtilization(info), profile, policy) * util.HundredCore
+	profile := nodeReq.Profile
+	policy := nodeReq.NodePolicy
+	s := Score(NodeUtilization(info, nodeReq), profile, policy) * util.HundredCore
 	klog.V(5).Infof("Policy %s node <%s> resource score is <%.2f>", policy, info.GetName(), s)
 	cache[name] = s
 	return s

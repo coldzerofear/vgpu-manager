@@ -54,22 +54,23 @@ func makePod(specs ...containerSpec) *corev1.Pod {
 // readers can predict the scoring impact at a glance without re-deriving
 // the math from profile.go.
 //
-// Weights printed in the wantNum/wantMem/wantCore columns use the
-// per-container raw expansion:
+// Weights are derived from the pod-wide aggregate req.Total (Number, Cores,
+// Memory), which BuildAllocationRequest fills as Σ over containers of
+// (Number, Number×perVGPUcores, Number×perVGPUmemory). The profile then uses:
 //
-//	rNum  = sum cNum
-//	rMem  = sum (cMem == 0 ? cNum : cNum * cMem)
-//	rCore = sum (cCore == 0 && cMem == 0 ? cNum :
-//	             cCore  > 0              ? cNum * cCore / 100 :
-//	                                       0)
+//	N     = Total.Number
+//	rNum  = N
+//	rCore = Total.Cores / 100                 (0 when Total.Cores == 0)
+//	rMem  = Total.Memory<=0 ? N               (whole-card → balanced)
+//	                        : max(ceil(Total.Memory/1024), N)   (GB units, floored at N)
 //
 // Then weights = each / (rNum + rMem + rCore), with a uniform 1/3 each
-// fallback when the sum is zero.
+// fallback when the sum is zero. (Note memory is in single-card GB units, so
+// a whole-card request scores balanced 1/3 and small MB requests round up to
+// 1 GB-unit — the raw-MB domination the old formula had is gone.)
 func Test_NewRequestProfile(t *testing.T) {
 	// One-third constant kept here so test rows read 0.333 / 0.333 / 0.333
-	// instead of inline arithmetic; tolerance defaults to 1e-9 unless a
-	// row sets its own (used for "huge MB-typed memory" rows where the
-	// num/core dimensions round to effectively zero).
+	// instead of inline arithmetic; tolerance defaults to 1e-9.
 	const third = 1.0 / 3
 
 	testCases := []struct {
@@ -128,50 +129,54 @@ func Test_NewRequestProfile(t *testing.T) {
 
 		// ---------- explicit memory only (cores stays at 0, memory-only pod) ----------
 		{
-			// rNum=1, rMem=4, rCore=0 -> sum=5
-			name:    "1 vGPU + 4 memory (GB-typed) -> mem dominates 4:1",
+			// Total.Memory=4 -> ceil(4/1024)=1, floored at N=1 -> rMem=1.
+			// rNum=1, rMem=1, rCore=0 -> sum=2.
+			name:    "1 vGPU + 4 MB memory -> rounds up to 1 GB-unit, 1:1",
 			specs:   []containerSpec{{num: 1, mem: 4}},
-			wantNum: 0.2, wantMem: 0.8, wantCore: 0,
+			wantNum: 0.5, wantMem: 0.5, wantCore: 0,
 		},
 		{
-			// rNum=1, rMem=1, rCore=0 -> sum=2; minimal memory request
+			// Total.Memory=1 -> ceil=1, floored at N=1 -> rMem=1.
 			name:    "1 vGPU + 1 memory -> still 1:1 split",
 			specs:   []containerSpec{{num: 1, mem: 1}},
 			wantNum: 0.5, wantMem: 0.5, wantCore: 0,
 		},
 		{
-			// rNum=2, rMem=8, rCore=0 -> sum=10
-			name:    "2 vGPUs + 4 memory each -> total 8 memory units",
+			// Total.Memory=8 -> ceil(8/1024)=1, floored at N=2 -> rMem=2.
+			// rNum=2, rMem=2, rCore=0 -> sum=4.
+			name:    "2 vGPUs + 4 MB memory each -> floored at card count, 1:1",
 			specs:   []containerSpec{{num: 2, mem: 4}},
-			wantNum: 0.2, wantMem: 0.8, wantCore: 0,
+			wantNum: 0.5, wantMem: 0.5, wantCore: 0,
 		},
 		{
-			// MB-typed huge value: rNum=1, rMem=4096, rCore=0; mem swamps everything
-			name:    "1 vGPU + 4096 memory (MB-typed) -> memory nearly 1.0",
+			// Total.Memory=4096 -> ceil(4096/1024)=4, max(4,1)=4 GB-units.
+			// rNum=1, rMem=4, rCore=0 -> sum=5.
+			name:    "1 vGPU + 4096 MB (4 GB) memory -> 4 GB-units, mem 4:1",
 			specs:   []containerSpec{{num: 1, mem: 4096}},
-			wantNum: 1.0 / 4097, wantMem: 4096.0 / 4097, wantCore: 0,
-			delta: 1e-6,
+			wantNum: 0.2, wantMem: 0.8, wantCore: 0,
 		},
 
 		// ---------- all three explicit ----------
 		{
-			// rNum=1, rMem=4, rCore=0.5 -> sum=5.5
-			name:    "1 vGPU + 50 cores + 4 memory",
+			// Total={1,50,4}: rNum=1, rCore=50/100=0.5, rMem=max(ceil(4/1024),1)=1
+			// -> sum=2.5; weights (0.4, 0.4, 0.2).
+			name:    "1 vGPU + 50 cores + 4 MB memory",
 			specs:   []containerSpec{{num: 1, cores: 50, mem: 4}},
-			wantNum: 1.0 / 5.5, wantMem: 4.0 / 5.5, wantCore: 0.5 / 5.5,
+			wantNum: 0.4, wantMem: 0.4, wantCore: 0.2,
 		},
 		{
-			// rNum=2, rMem=8, rCore=2 -> sum=12; weights (1/6, 4/6, 1/6)
-			name:    "2 vGPUs + 100 cores + 4 memory",
+			// Total={2,200,8}: rNum=2, rCore=200/100=2, rMem=max(ceil(8/1024),2)=2
+			// -> sum=6; uniform.
+			name:    "2 vGPUs + 100 cores + 4 MB memory -> uniform",
 			specs:   []containerSpec{{num: 2, cores: 100, mem: 4}},
-			wantNum: 1.0 / 6, wantMem: 4.0 / 6, wantCore: 1.0 / 6,
+			wantNum: third, wantMem: third, wantCore: third,
 		},
 		{
-			// rNum=1, rMem=4096, rCore=0.5 -> mem swamps
-			name:    "1 vGPU + 50 cores + 4096 memory (MB-typed) -> mem still dominates",
+			// Total={1,50,4096}: rNum=1, rCore=0.5, rMem=max(ceil(4096/1024),1)=4
+			// -> sum=5.5; mem dominates via 4 GB-units.
+			name:    "1 vGPU + 50 cores + 4 GB memory -> mem dominates",
 			specs:   []containerSpec{{num: 1, cores: 50, mem: 4096}},
-			wantNum: 1.0 / 4097.5, wantMem: 4096.0 / 4097.5, wantCore: 0.5 / 4097.5,
-			delta: 1e-6,
+			wantNum: 1.0 / 5.5, wantMem: 4.0 / 5.5, wantCore: 0.5 / 5.5,
 		},
 
 		// ---------- multi-container ----------
@@ -198,22 +203,18 @@ func Test_NewRequestProfile(t *testing.T) {
 			wantNum: 3.0 / 8.5, wantMem: 3.0 / 8.5, wantCore: 2.5 / 8.5,
 		},
 		{
-			// c1=(1, mem:4):  rNum+=1, rMem+=4,  rCore+=0    (memory-only)
-			// c2=(2, cores:50): rNum+=2, rMem+=2, rCore+=1    (implicit-mem)
-			// totals (3, 6, 1) -> sum=10; weights (0.3, 0.6, 0.1)
-			name:    "Multi-container: (1 vGPU + 4 memory) + (2 vGPUs + 50 cores)",
+			// Total = {Number:3, Cores:100, Memory:4}.
+			// rNum=3, rCore=100/100=1, rMem=max(ceil(4/1024),3)=3 -> sum=7.
+			name:    "Multi-container: (1 vGPU + 4 MB memory) + (2 vGPUs + 50 cores)",
 			specs:   []containerSpec{{num: 1, mem: 4}, {num: 2, cores: 50}},
-			wantNum: 0.3, wantMem: 0.6, wantCore: 0.1,
+			wantNum: 3.0 / 7, wantMem: 3.0 / 7, wantCore: 1.0 / 7,
 		},
 		{
-			// Three containers, mix of shapes:
-			// c1=(1,0,0):     (1, 1, 1)
-			// c2=(1,0,4):     (1, 4, 0)
-			// c3=(2,50,0):    (2, 2, 1)
-			// totals (4, 7, 2) -> sum=13
+			// Three containers -> Total = {Number:4, Cores:200, Memory:4}.
+			// rNum=4, rCore=200/100=2, rMem=max(ceil(4/1024),4)=4 -> sum=10.
 			name:    "Multi-container: implicit-full + memory-only + cores-partial",
 			specs:   []containerSpec{{num: 1}, {num: 1, mem: 4}, {num: 2, cores: 50}},
-			wantNum: 4.0 / 13, wantMem: 7.0 / 13, wantCore: 2.0 / 13,
+			wantNum: 0.4, wantMem: 0.4, wantCore: 0.2,
 		},
 
 		// ---------- edge / fallback cases ----------
