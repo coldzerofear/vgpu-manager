@@ -488,35 +488,34 @@ var deviceMountOptional = map[string]bool{
 	NvidiaModeSetFilePath:  true,
 }
 
-func PassDeviceSpecs(devices []manager.Device, imexChannels imex.Channels) []*pluginapi.DeviceSpec {
-	devPaths := sets.NewString()
+func apiDeviceSpecs(devManager *manager.DeviceManager, devices []manager.Device) []*pluginapi.DeviceSpec {
+	pathOptional := maps.Clone(deviceMountOptional)
 	for _, dev := range devices {
 		if dev.GPU != nil {
-			devPaths.Insert(dev.GPU.Paths...)
+			for _, path := range dev.GPU.Paths {
+				pathOptional[path] = false
+			}
 		}
 		if dev.MIG != nil {
-			devPaths.Insert(dev.MIG.Paths...)
+			for _, path := range dev.MIG.Paths {
+				pathOptional[path] = false
+			}
 		}
 	}
+
 	var specs []*pluginapi.DeviceSpec
-	for devPath := range devPaths {
-		specs = append(specs, &pluginapi.DeviceSpec{
-			ContainerPath: devPath,
-			HostPath:      devPath,
-			Permissions:   "rw",
-		})
-	}
-	for devPath, enabled := range deviceMountOptional {
-		if !enabled || util.PathIsNotExist(devPath) {
+	devRoot := devManager.GetNodeConfig().GetHostDriverRoot().GetDevRoot()
+	for devPath, optional := range pathOptional {
+		if optional && util.PathIsNotExist(devPath) {
 			continue
 		}
 		specs = append(specs, &pluginapi.DeviceSpec{
 			ContainerPath: devPath,
-			HostPath:      devPath,
+			HostPath:      filepath.Join(devRoot, devPath),
 			Permissions:   "rw",
 		})
 	}
-	for _, channel := range imexChannels {
+	for _, channel := range devManager.GetImexChannels() {
 		spec := &pluginapi.DeviceSpec{
 			ContainerPath: channel.Path,
 			// TODO: The HostPath property for a channel is not the correct value to use here.
@@ -525,16 +524,27 @@ func PassDeviceSpecs(devices []manager.Device, imexChannels imex.Channels) []*pl
 			// The devRoot in this context is the {{ .config.Flags.NvidiaDevRoot }} and defines the
 			// root for device nodes on the host. This is usually / or /run/nvidia/driver when the
 			// driver container is used.
-			HostPath:    channel.HostPath,
+			HostPath:    filepath.Join(devRoot, channel.Path),
 			Permissions: "rw",
 		}
 		specs = append(specs, spec)
 	}
+
 	return specs
 }
 
-func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, devManager *manager.DeviceManager, deviceIDs ...string) {
+func UpdateResponseForNodeConfig(
+	devManager *manager.DeviceManager,
+	response *pluginapi.ContainerAllocateResponse,
+	devices []manager.Device, deviceIDs ...string,
+) {
+	// The following modifications are only made if at least one non-CDI device
+	// list strategy is selected.
 	strategies := devManager.GetNodeConfig().GetDeviceListStrategy()
+	if strategies.AllCDIEnabled() {
+		return
+	}
+
 	if strategies.Includes(util.DeviceListStrategyEnvvar) {
 		response.Envs[deviceListEnvVar] = strings.Join(deviceIDs, ",")
 		var channelIDs []string
@@ -562,6 +572,8 @@ func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, 
 			response.Mounts = append(response.Mounts, mount)
 		}
 	}
+	// PassDeviceSpecs
+	response.Devices = append(response.Devices, apiDeviceSpecs(devManager, devices)...)
 	if devManager.GetNodeConfig().GetGDSEnabled() {
 		response.Envs["NVIDIA_GDS"] = "enabled"
 	}
@@ -579,7 +591,8 @@ func UpdateResponseForNodeConfig(response *pluginapi.ContainerAllocateResponse, 
 // no CDI strategy is enabled.
 func UpdateResponseForCDI(
 	response *pluginapi.ContainerAllocateResponse,
-	strategies util.DeviceListStrategies, handler cdi.Handler, deviceIDs ...string,
+	strategies util.DeviceListStrategies,
+	handler cdi.Handler, deviceIDs ...string,
 ) error {
 	if !strategies.AnyCDIEnabled() {
 		return nil
@@ -666,11 +679,12 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 
 	var contClaim *device.ContainerDeviceClaim
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
-	deviceMap := m.baseServer.GetDeviceManager().GetGPUDeviceMap()
-	imexChannels := m.baseServer.GetDeviceManager().GetImexChannels()
-	memoryRatio := m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceMemoryScaling()
-	enabledSMWatcher := m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.SMWatcher)
-	enabledClientMode := m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.ClientMode)
+	deviceManager := m.baseServer.GetDeviceManager()
+	deviceMap := deviceManager.GetGPUDeviceMap()
+	strategies := deviceManager.GetNodeConfig().GetDeviceListStrategy()
+	memoryRatio := deviceManager.GetNodeConfig().GetDeviceMemoryScaling()
+	enabledSMWatcher := deviceManager.GetFeatureGate().Enabled(util.SMWatcher)
+	enabledClientMode := deviceManager.GetFeatureGate().Enabled(util.ClientMode)
 
 	for i, containerRequest := range req.ContainerRequests {
 		contClaim, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -709,7 +723,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		response.Envs[util.CudaCoreLimitEnv] = ""
 		response.Envs[util.CudaSoftCoreLimitEnv] = ""
 		response.Envs[util.ManagerClientRegisterUuid] = ""
-		mode := vgpu.GetCompatibilityMode(m.baseServer.GetDeviceManager())
+		mode := vgpu.GetCompatibilityMode(deviceManager)
 		response.Envs[util.ManagerCompatibilityMode] = fmt.Sprintf("%v", mode)
 		sort.Slice(contClaim.DeviceClaims, func(i, j int) bool {
 			return contClaim.DeviceClaims[i].Id < contClaim.DeviceClaims[j].Id
@@ -745,17 +759,13 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 				}
 			}
 		}
-
 		response.Envs[util.ManagerVisibleDevices] = strings.Join(deviceUuids, ",")
-		UpdateResponseForNodeConfig(response, m.baseServer.GetDeviceManager(), deviceIds...)
-		response.Devices = append(response.Devices, PassDeviceSpecs(gpuDevices, imexChannels)...)
-		if err = UpdateResponseForCDI(response, m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceListStrategy(),
-			m.cdiHandler, deviceIds...); err != nil {
-			klog.V(3).ErrorS(err, "failed to update allocate response for CDI", "pod",
-				klog.KObj(currentPod), "container", contClaim.Name, "reqIndex", i)
+		if err = UpdateResponseForCDI(response, strategies, m.cdiHandler, deviceIds...); err != nil {
+			klog.V(3).ErrorS(err, "failed to update allocate response for CDI",
+				"pod", klog.KObj(currentPod), "container", contClaim.Name, "reqIndex", i)
 			return resp, err
 		}
-
+		UpdateResponseForNodeConfig(deviceManager, response, gpuDevices, deviceIds...)
 		if enabledClientMode {
 			// mount /etc/vgpu-manager/registry dir
 			response.Mounts = append(response.Mounts, &pluginapi.Mount{

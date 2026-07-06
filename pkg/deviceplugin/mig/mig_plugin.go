@@ -100,30 +100,31 @@ func (m *migDevicePlugin) GetPreferredAllocation(_ context.Context, _ *pluginapi
 // of the steps to make the Device available in the container.
 func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateRequest) (*pluginapi.AllocateResponse, error) {
 	klog.V(4).InfoS("Allocate", "pluginName", m.Name(), "request", req.GetContainerRequests())
-	deviceMap := m.baseServer.GetDeviceManager().GetMIGDeviceMap()
-	imexChannels := m.baseServer.GetDeviceManager().GetImexChannels()
+	deviceManager := m.baseServer.GetDeviceManager()
+	deviceMap := deviceManager.GetMIGDeviceMap()
+	strategies := deviceManager.GetNodeConfig().GetDeviceListStrategy()
 	responses := make([]*pluginapi.ContainerAllocateResponse, len(req.ContainerRequests))
 	for i, containerRequest := range req.ContainerRequests {
 		responses[i] = &pluginapi.ContainerAllocateResponse{Envs: make(map[string]string)}
-		deviceManager := m.baseServer.GetDeviceManager()
-		vgpu.UpdateResponseForNodeConfig(responses[i], deviceManager, containerRequest.GetDevicesIds()...)
-		devices := make([]manager.Device, 0, len(containerRequest.GetDevicesIds()))
-		for _, uuid := range containerRequest.GetDevicesIds() {
-			migDevice, exists := deviceMap[uuid]
-			if !exists {
-				err := fmt.Errorf("MIG device %s does not exist", uuid)
+		deviceIds := containerRequest.GetDevicesIds()
+		devices := make([]manager.Device, 0, len(deviceIds))
+		for _, devUuid := range deviceIds {
+			if migDevice, exists := deviceMap[devUuid]; !exists {
+				err := fmt.Errorf("MIG device %q does not exist", devUuid)
 				klog.Errorln(err)
 				return nil, err
+			} else {
+				devices = append(devices, manager.Device{
+					MIG: &migDevice,
+				})
 			}
-			devices = append(devices, manager.Device{MIG: &migDevice})
 		}
-		responses[i].Devices = append(responses[i].Devices, vgpu.PassDeviceSpecs(devices, imexChannels)...)
-		if err := vgpu.UpdateResponseForCDI(responses[i],
-			deviceManager.GetNodeConfig().GetDeviceListStrategy(),
-			m.cdiHandler, containerRequest.GetDevicesIds()...); err != nil {
+		if err := vgpu.UpdateResponseForCDI(responses[i], strategies, m.cdiHandler, deviceIds...); err != nil {
+			err = fmt.Errorf("failed to get allocate response for CDI: %v", err)
 			klog.Errorln(err)
 			return nil, err
 		}
+		vgpu.UpdateResponseForNodeConfig(deviceManager, responses[i], devices, deviceIds...)
 	}
 	return &pluginapi.AllocateResponse{ContainerResponses: responses}, nil
 }

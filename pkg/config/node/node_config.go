@@ -46,6 +46,7 @@ type NodeConfigSpec struct {
 	devicePluginPath *string
 	nodeConfigPath   string
 	driverRoot       *nvidia.RootPath
+	hostDriverRoot   *nvidia.RootPath
 	checkFields      bool
 }
 
@@ -156,6 +157,13 @@ func (nc NodeConfigSpec) GetDriverRoot() nvidia.RootPath {
 		return "/"
 	}
 	return *nc.driverRoot
+}
+
+func (nc NodeConfigSpec) GetHostDriverRoot() nvidia.RootPath {
+	if nc.hostDriverRoot == nil {
+		return "/"
+	}
+	return *nc.hostDriverRoot
 }
 
 func (nc NodeConfigSpec) YamlString() string {
@@ -345,6 +353,12 @@ type Option func(*NodeConfigSpec)
 func WithDriverRootOption(driverRoot nvidia.RootPath) Option {
 	return func(spec *NodeConfigSpec) {
 		spec.driverRoot = &driverRoot
+	}
+}
+
+func WithHostDriverRootOption(driverRoot nvidia.RootPath) Option {
+	return func(spec *NodeConfigSpec) {
+		spec.hostDriverRoot = &driverRoot
 	}
 }
 

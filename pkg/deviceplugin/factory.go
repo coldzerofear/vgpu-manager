@@ -51,7 +51,7 @@ func GetDevicePlugins(
 			// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
 			DriverRoot:       option.ContainerDriverRoot,
 			TargetDriverRoot: option.HostDriverRoot,
-			DevRoot:          nodeConfig.GetDriverRoot().GetDevRoot(),
+			DevRoot:          devManager.DevRoot,
 		})
 	if err != nil {
 		klog.Errorf("Create CDI handler failed: %v", err)

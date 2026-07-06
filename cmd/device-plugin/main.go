@@ -66,6 +66,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	}
 
 	driverRoot := nvidia.RootPath(opt.ContainerDriverRoot)
+	hostDriverRoot := nvidia.RootPath(opt.HostDriverRoot)
 	cgroupDriver := cgroup.MustInitCGroupDriver(opt.CGroupDriver)
 	nodeConfig, err := node.NewNodeConfig(
 		node.WithNodeNameOption(opt.NodeName),
@@ -85,6 +86,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		node.WithOpenKernelModulesOption(opt.OpenKernelModules),
 		node.WithIMEXOption(opt.ImexChannelIDs, opt.ImexRequired),
 		node.WithDriverRootOption(driverRoot),
+		node.WithHostDriverRootOption(hostDriverRoot),
 		node.WithCheckFieldsOption(true))
 	if err != nil {
 		klog.Errorf("Initialization of node config failed: %v", err)
