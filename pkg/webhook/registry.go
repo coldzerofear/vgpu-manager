@@ -17,19 +17,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
-type NewWebhookHandlerFunc func(rtclient.Client, *options.Options, resourcereader.ResourceAPIReader, events.EventRecorderLogger) (http.Handler, error)
+type NewHandlerFunc func(rtclient.Client, *options.Options, resourcereader.ResourceAPIReader, events.EventRecorderLogger) (http.Handler, error)
 
 var (
-	registerOnce             sync.Once
-	registerErr              error
-	newWebhookHandlerFuncMap map[string]NewWebhookHandlerFunc
+	registerOnce    sync.Once
+	registerErr     error
+	handlerRegistry map[string]NewHandlerFunc
 )
 
 func init() {
-	newWebhookHandlerFuncMap = make(map[string]NewWebhookHandlerFunc)
-	newWebhookHandlerFuncMap[podmutate.Path] = podmutate.NewMutateWebhook
-	newWebhookHandlerFuncMap[podvalidate.Path] = podvalidate.NewValidateWebhook
-	newWebhookHandlerFuncMap[resvalidate.Path] = resvalidate.NewValidateWebhook
+	handlerRegistry = make(map[string]NewHandlerFunc)
+	handlerRegistry[podmutate.Path] = podmutate.NewMutateWebhook
+	handlerRegistry[podvalidate.Path] = podvalidate.NewValidateWebhook
+	handlerRegistry[resvalidate.Path] = resvalidate.NewValidateWebhook
 }
 
 func healthCheckMiddleware(healthChecker healthz.UnnamedHealthChecker, next http.Handler) http.Handler {
@@ -50,8 +50,8 @@ func RegisterWebhookToServer(
 ) error {
 	registerOnce.Do(func() {
 		var webhookHandler http.Handler
-		for path, newWebhookFunc := range newWebhookHandlerFuncMap {
-			webhookHandler, registerErr = newWebhookFunc(client, opt, reader, recorder)
+		for path, newHandler := range handlerRegistry {
+			webhookHandler, registerErr = newHandler(client, opt, reader, recorder)
 			if registerErr != nil {
 				klog.ErrorS(registerErr, "unable to create webhook", "path", path)
 				return

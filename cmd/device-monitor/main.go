@@ -49,12 +49,9 @@ func runApp(opt *options.Options) (exitCode int) {
 	util.MustInitGlobalDomain(opt.Domain)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
-	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
-	if err != nil {
-		klog.Errorf("Initialization of kubeConfig failed: %v", err)
-		return exitCode
-	}
 	kubeConfig, err := client.NewKubeConfig(
+		client.WithConfigMasterURL(opt.MasterURL),
+		client.WithKubeConfigPath(opt.KubeConfigFile),
 		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithDefaultUserAgent())
 	if err != nil {

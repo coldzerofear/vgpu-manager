@@ -40,8 +40,10 @@ import (
 
 const Path = "/pods/validate"
 
-func NewValidateWebhook(client client.Client, options *options.Options,
-	reader resourcereader.ResourceAPIReader, _ events.EventRecorderLogger,
+func NewValidateWebhook(
+	client client.Client, options *options.Options,
+	reader resourcereader.ResourceAPIReader,
+	_ events.EventRecorderLogger,
 ) (http.Handler, error) {
 	return &admission.Webhook{
 		Handler: &validateHandle{

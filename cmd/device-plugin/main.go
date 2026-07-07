@@ -45,13 +45,9 @@ func runApp(opt *options.Options) (exitCode int) {
 	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
 
-	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
-	if err != nil {
-		klog.Errorf("Initialization of kubeConfig failed: %v", err)
-		return exitCode
-	}
-
 	kubeConfig, err := client.NewKubeConfig(
+		client.WithConfigMasterURL(opt.MasterURL),
+		client.WithKubeConfigPath(opt.KubeConfigFile),
 		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithTimeoutSecond(opt.Timeout),
 		client.WithDefaultUserAgent())
@@ -115,6 +111,7 @@ func runApp(opt *options.Options) (exitCode int) {
 
 	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	manager, err := ctrm.New(kubeConfig, ctrm.Options{
+		LeaderElection:         false,
 		HealthProbeBindAddress: "0", // Disable manager health probe service
 		PprofBindAddress: func() string {
 			if opt.PprofBindPort > 0 {
@@ -146,11 +143,10 @@ func runApp(opt *options.Options) (exitCode int) {
 		klog.Errorf("Create cluster manager failed: %v", err)
 		return exitCode
 	}
-	controllerSwitch := map[string]bool{
+
+	if err = controller.RegisterControllerToManager(manager, nodeConfig, map[string]bool{
 		reschedule.Name: opt.FeatureGate.Enabled(options.Reschedule),
-	}
-	err = controller.RegisterControllerToManager(manager, nodeConfig, controllerSwitch)
-	if err != nil {
+	}); err != nil {
 		klog.Errorf("Register controller to manager failed: %v", err)
 		return exitCode
 	}

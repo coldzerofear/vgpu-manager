@@ -34,8 +34,10 @@ import (
 
 const Path = "/pods/mutate"
 
-func NewMutateWebhook(client client.Client, options *options.Options,
-	reader resourcereader.ResourceAPIReader, _ events.EventRecorderLogger,
+func NewMutateWebhook(
+	client client.Client, options *options.Options,
+	reader resourcereader.ResourceAPIReader,
+	_ events.EventRecorderLogger,
 ) (http.Handler, error) {
 	return &admission.Webhook{
 		Handler: &mutateHandle{

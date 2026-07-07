@@ -6,6 +6,7 @@ import (
 
 	client2 "github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
+	"github.com/coldzerofear/vgpu-manager/pkg/controller"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +30,14 @@ type RescheduleController struct {
 	recorder events.EventRecorder
 }
 
-func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) (reconcile.Reconciler, error) {
+// Ensure that the controller is implemented.
+var _ controller.Controller = &RescheduleController{}
+
+func init() {
+	controller.RegisterController(Name, NewRescheduleController)
+}
+
+func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) (controller.Controller, error) {
 	recorder := manager.GetEventRecorder("re-schedule")
 	recovery, err := newRecoveryController(manager.GetClient(), recorder)
 	if err != nil {
@@ -110,8 +118,7 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 }
 
 func (r *RescheduleController) RegisterToManager(manager ctrm.Manager) error {
-	err := builder.ControllerManagedBy(manager).
-		For(&corev1.Pod{}).Named(Name).Complete(r)
+	err := builder.ControllerManagedBy(manager).For(&corev1.Pod{}).Named(Name).Complete(r)
 	if err == nil {
 		err = manager.Add(r.recovery)
 	}

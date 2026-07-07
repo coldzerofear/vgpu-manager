@@ -11,7 +11,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
-	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -21,7 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -31,8 +29,10 @@ import (
 
 const Path = "/resourceclaim/validate"
 
-func NewValidateWebhook(client client.Client, options *options.Options,
-	reader resourcereader.ResourceAPIReader, recorder events.EventRecorderLogger,
+func NewValidateWebhook(
+	client client.Client, options *options.Options,
+	reader resourcereader.ResourceAPIReader,
+	recorder events.EventRecorderLogger,
 ) (http.Handler, error) {
 	if !options.DRAAdmissionEnabled {
 		return nil, nil
@@ -43,7 +43,6 @@ func NewValidateWebhook(client client.Client, options *options.Options,
 		Handler: &validateHandle{
 			options:  options,
 			scheme:   scheme,
-			logger:   klog.NewKlogr(),
 			reader:   reader,
 			recorder: recorder,
 			codecs:   codecs,
@@ -55,7 +54,6 @@ func NewValidateWebhook(client client.Client, options *options.Options,
 type validateHandle struct {
 	options  *options.Options
 	scheme   *runtime.Scheme
-	logger   logr.Logger
 	reader   resourcereader.ResourceAPIReader
 	recorder events.EventRecorderLogger
 	codecs   serializer.CodecFactory

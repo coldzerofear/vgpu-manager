@@ -57,12 +57,9 @@ func runApp(opt *options.Options) (exitCode int) {
 	gpuallocator.SetBestEffortMaxGPUs(opt.BestEffortMaxGPUs)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
-	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
-	if err != nil {
-		klog.Errorf("Initialization of kubeConfig failed: %v", err)
-		return exitCode
-	}
 	kubeClient, err := client.NewClientSet(
+		client.WithConfigMasterURL(opt.MasterURL),
+		client.WithKubeConfigPath(opt.KubeConfigFile),
 		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithDefaultUserAgent())
 	if err != nil {

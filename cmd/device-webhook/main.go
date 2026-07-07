@@ -155,10 +155,14 @@ func runApp(opt *options.Options) (exitCode int) {
 	exitCode = 1
 
 	util.MustInitGlobalDomain(opt.Domain)
-
 	config, err := pkgclient.NewKubeConfig(pkgclient.WithDefaultUserAgent())
 	if err != nil {
-		klog.Errorf("Initialization of kubeConfig failed: %v", err)
+		klog.Errorf("Create kubeConfig failed: %v", err)
+		return exitCode
+	}
+
+	if opt.ServerBindPort <= 0 {
+		klog.Errorf("The service binding port range should be between 1-65535, current: %d", opt.ServerBindPort)
 		return exitCode
 	}
 
@@ -166,8 +170,10 @@ func runApp(opt *options.Options) (exitCode int) {
 	route.StartDebugServer(opt.PprofBindPort)
 	klog.Infoln("Create webhook server")
 	server := webhook.NewServer(webhook.Options{
-		Port:    opt.ServerBindPort,
-		CertDir: opt.CertDir,
+		Port:     opt.ServerBindPort,
+		CertDir:  opt.CertDir,
+		CertName: opt.TlsCertName,
+		KeyName:  opt.TlsKeyName,
 		TLSOpts: []func(*tls.Config){
 			// Using http/1.1 will prevent from being vulnerable to the HTTP/2 Stream Cancellation and Rapid Reset CVEs.
 			// For more information see:
