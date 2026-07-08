@@ -2431,7 +2431,10 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   if (unlikely(dptr == NULL)) {
     return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
   }
-  // TODO cuMemAllocAsync cannot be included in the graph capture window, so the call must be non captured.
+  // Direct pass through function during stream capture
+  if (unlikely(streamIsCapturing(hStream))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -2477,7 +2480,10 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   if (unlikely(dptr == NULL)) {
     return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
   }
-  // TODO cuMemAllocAsync cannot be included in the graph capture window, so the call must be non captured.
+  // Direct pass through function during stream capture
+  if (unlikely(streamIsCapturing(hStream))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -3371,14 +3377,20 @@ CUresult cuGraphInstantiateWithParams_ptsz(CUgraphExec *phGraphExec, CUgraph hGr
 CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
   CUresult ret;
   CUdevice device;
-  // TODO cuGraphLaunch cannot be included in the graph capture window, so the call must be non captured.
+  int gap = 0;
+  int host_index = -1;
+  // Direct pass through function during stream capture
+  if (unlikely(streamIsCapturing(hStream))) {
+    goto CALL;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
-  int host_index = get_host_device_index_by_cuda_device(device);
+  host_index = get_host_device_index_by_cuda_device(device);
   int grids = 1, blocks = 1;
   graph_cost_lookup(hGraphExec, &grids, &blocks);
   rate_limiter(grids, blocks, host_index);
-  int gap = gap_begin(host_index, hStream);
+  gap = gap_begin(host_index, hStream);
+CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuGraphLaunch),
                          hGraphExec, hStream);
   if (gap) gap_end(host_index, hStream, ret);
@@ -3389,14 +3401,20 @@ DONE:
 CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
   CUresult ret;
   CUdevice device;
-  // TODO cuGraphLaunch cannot be included in the graph capture window, so the call must be non captured.
+  int gap = 0;
+  int host_index = -1;
+  // Direct pass through function during stream capture
+  if (unlikely(streamIsCapturing(hStream))) {
+    goto CALL;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) goto DONE;
-  int host_index = get_host_device_index_by_cuda_device(device);
+  host_index = get_host_device_index_by_cuda_device(device);
   int grids = 1, blocks = 1;
   graph_cost_lookup(hGraphExec, &grids, &blocks);
   rate_limiter(grids, blocks, host_index);
-  int gap = gap_begin(host_index, hStream);
+  gap = gap_begin(host_index, hStream);
+CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphLaunch_ptsz,
                          hGraphExec, hStream);
   if (gap) gap_end(host_index, hStream, ret);
@@ -3496,7 +3514,10 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   if (unlikely(dptr == NULL)) {
     goto CALL;
   }
-  // TODO cuMemAllocFromPoolAsync cannot be included in the graph capture window, so the call must be non captured.
+  // Direct pass through function during stream capture
+  if (unlikely(streamIsCapturing(hStream))) {
+    goto CALL;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -3526,7 +3547,10 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   if (unlikely(dptr == NULL)) {
     goto CALL;
   }
-  // TODO cuMemAllocFromPoolAsync cannot be included in the graph capture window, so the call must be non captured.
+  // Direct pass through function during stream capture
+  if (unlikely(streamIsCapturing(hStream))) {
+    goto CALL;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -3578,7 +3602,10 @@ CUresult cuMemFree(CUdeviceptr dptr) {
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
-  // TODO cuMemFreeAsync cannot be included in the graph capture window, so the call must be non captured.
+  // Direct pass through function during stream capture
+  if (unlikely(streamIsCapturing(hStream))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemFreeAsync), dptr, hStream);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -3594,7 +3621,10 @@ DONE:
 CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
-  // TODO cuMemFreeAsync cannot be included in the graph capture window, so the call must be non captured.
+  // Direct pass through function during stream capture
+  if (unlikely(streamIsCapturing(hStream))) {
+    return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemFreeAsync), dptr, hStream);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
