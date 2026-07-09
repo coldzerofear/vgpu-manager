@@ -133,8 +133,9 @@ func NewMmapDeviceVMemory(filePath string) (*MmapDeviceVMemory, error) {
 	}
 	dataSize := int64(unsafe.Sizeof(DeviceVMemoryT{}))
 	size := mmapFile.FileInfo.Size()
-	if mmapFile.FileInfo.Size() != dataSize {
+	if size != dataSize {
 		klog.Errorf("File size mismatch, expected: %d, actual: %d", dataSize, size)
+		_ = mmapFile.Close()
 		return nil, fmt.Errorf("file size mismatch")
 	}
 	data := (*DeviceVMemoryT)(unsafe.Pointer(&mmapFile.Data[0]))

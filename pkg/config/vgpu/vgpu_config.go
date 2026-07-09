@@ -218,6 +218,14 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		} else {
 			dev.MemoryOversold = 0
 		}
+		// gpuDevice.Id is the host device index; the shared-memory layout only
+		// has MaxDeviceCount slots. Guard the write so a node with more GPUs than
+		// that cannot index out of range (the old cgo path did a silent OOB
+		// memcpy here instead).
+		if gpuDevice.Id < 0 || gpuDevice.Id >= MaxDeviceCount {
+			klog.Warningf("Device host index %d out of range [0, %d), skip", gpuDevice.Id, MaxDeviceCount)
+			continue
+		}
 		devices[gpuDevice.Id] = dev
 	}
 	compMode := GetCompatibilityMode(devManager)
