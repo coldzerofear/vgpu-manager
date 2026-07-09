@@ -42,6 +42,18 @@
 #define F_OFD_SETLKW 38
 #endif
 
+/* Prefer OFD locks (Linux >= 3.15); fall back to classic POSIX locks at runtime
+ * when the kernel rejects them with EINVAL. On modern kernels the OFD call
+ * succeeds on the first try, so there is no extra syscall. A classic F_UNLCK
+ * does not release an OFD lock and vice versa, but that never mixes here: a
+ * kernel either supports OFD (every call, lock and unlock, uses it) or does not
+ * (every call falls back), so acquire and release always stay in one family. */
+static int ofd_fcntl(int fd, int wait, struct flock *fl) {
+  int ret = fcntl(fd, wait ? F_OFD_SETLKW : F_OFD_SETLK, fl);
+  if (ret != -1 || errno != EINVAL) return ret;
+  return fcntl(fd, wait ? F_SETLKW : F_SETLK, fl); /* legacy kernels */
+}
+
 static const struct timespec sleep_time = {
   .tv_sec = 0,
   .tv_nsec = SPIN_INTERVAL_MS * MILLISEC,
@@ -158,7 +170,7 @@ int device_util_read_lock(int device_index) {
   lock.l_start = GET_DEVICE_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  if (fcntl(fd, F_OFD_SETLKW, &lock) == -1) {
+  if (ofd_fcntl(fd, 1, &lock) == -1) {
     LOGGER(ERROR, "(SMWatcher) fcntl read lock failed for device %d: %s",
                device_index, strerror(errno));
     close(fd);
@@ -183,7 +195,7 @@ int device_util_write_lock(int device_index) {
   lock.l_start = GET_DEVICE_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  if (fcntl(fd, F_OFD_SETLKW, &lock) == -1) {
+  if (ofd_fcntl(fd, 1, &lock) == -1) {
     LOGGER(ERROR, "(SMWatcher) fcntl write lock failed for device %d: %s",
            device_index, strerror(errno));
     close(fd);
@@ -201,7 +213,7 @@ void device_util_unlock(int fd, int device_index) {
   lock.l_start = GET_DEVICE_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  fcntl(fd, F_OFD_SETLK, &lock);
+  ofd_fcntl(fd, 0, &lock);
   close(fd);
 }
 
@@ -221,7 +233,7 @@ int device_vmem_read_lock(int device_index) {
   lock.l_start = GET_VMEMORY_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  if (fcntl(fd, F_OFD_SETLKW, &lock) == -1) {
+  if (ofd_fcntl(fd, 1, &lock) == -1) {
     LOGGER(ERROR, "(VMemNode) fcntl read lock failed for device %d: %s",
                device_index, strerror(errno));
     close(fd);
@@ -246,7 +258,7 @@ int device_vmem_write_lock(int device_index) {
   lock.l_start = GET_VMEMORY_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  if (fcntl(fd, F_OFD_SETLKW, &lock) == -1) {
+  if (ofd_fcntl(fd, 1, &lock) == -1) {
     LOGGER(ERROR, "(VMemNode) fcntl write lock failed for device %d: %s",
            device_index, strerror(errno));
     close(fd);
@@ -264,6 +276,6 @@ void device_vmem_unlock(int fd, int device_index) {
   lock.l_start = GET_VMEMORY_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  fcntl(fd, F_OFD_SETLK, &lock);
+  ofd_fcntl(fd, 0, &lock);
   close(fd);
 }

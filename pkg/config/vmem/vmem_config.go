@@ -49,24 +49,39 @@ func (m *MmapDeviceVMemory) Close() error {
 var nilUnlock = func() error { return nil }
 
 func (m *MmapDeviceVMemory) RLock(deviceIndex int) (Unlock func() error, err error) {
-	// Hold a shared read lock so concurrent readers of different devices can
-	// proceed, while Reload/Close (which swap/unmap the mapping) take the
-	// exclusive lock and wait for all readers to release.
+	if deviceIndex < 0 || deviceIndex >= util.MaxDeviceCount {
+		return nilUnlock, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
+	}
+	// The RWMutex read lock only guards the mmap lifetime: it keeps Reload/Close
+	// (which take the exclusive lock) from unmapping m.vMemory while a reader is
+	// dereferencing it. It does NOT stand in for the fcntl lock.
 	m.mutex.RLock()
 
-	file := m.mmapFile.File
-	if err = deviceReadLock(file, deviceIndex); err != nil {
+	// Open a dedicated fd per reader for the cross-process fcntl lock. fcntl
+	// record locks are not refcounted per open-file-description, so a shared fd
+	// would let one reader's F_UNLCK drop a concurrent same-device reader's lock
+	// and expose it to a torn read from the writer. A private fd gives each
+	// reader an independent OFD lock; with OFD, closing it never disturbs others.
+	file, err := os.Open(m.mmapFile.Path)
+	if err != nil {
 		m.mutex.RUnlock()
 		return nilUnlock, err
+	}
+	offset := getVmemoryLockOffset(deviceIndex)
+	if err = util.FcntlRecordLock(file.Fd(), syscall.F_RDLCK, true, offset); err != nil {
+		_ = file.Close()
+		m.mutex.RUnlock()
+		return nilUnlock, fmt.Errorf("fcntl read lock device %d at offset %d: %w", deviceIndex, offset, err)
 	}
 
 	var unlockOnce sync.Once
 	var unlockErr error
 	return func() error {
-		// Guard both the fcntl unlock and the mutex release with Once so a
-		// second call is a no-op instead of unlocking an unlocked mutex.
+		// Guard the whole teardown with Once so a second call is a no-op instead
+		// of double-closing the fd or unlocking an unlocked mutex.
 		unlockOnce.Do(func() {
-			unlockErr = deviceUnlock(file, deviceIndex)
+			unlockErr = util.FcntlRecordLock(file.Fd(), syscall.F_UNLCK, false, offset)
+			_ = file.Close()
 			m.mutex.RUnlock()
 		})
 		return unlockErr
@@ -129,32 +144,3 @@ func NewMmapDeviceVMemory(filePath string) (*MmapDeviceVMemory, error) {
 	}, nil
 }
 
-func deviceReadLock(file *os.File, deviceIndex int) error {
-	if file == nil {
-		return fmt.Errorf("device file is nil")
-	}
-	if deviceIndex >= util.MaxDeviceCount || deviceIndex < 0 {
-		return fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
-	}
-
-	offset := getVmemoryLockOffset(deviceIndex)
-	if err := util.FcntlRecordLock(file.Fd(), syscall.F_RDLCK, true, offset); err != nil {
-		return fmt.Errorf("fcntl F_SETLKW at offset %d: %w", offset, err)
-	}
-	return nil
-}
-
-func deviceUnlock(file *os.File, deviceIndex int) error {
-	if file == nil {
-		return fmt.Errorf("device file is nil")
-	}
-	if deviceIndex >= util.MaxDeviceCount || deviceIndex < 0 {
-		return fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
-	}
-
-	offset := getVmemoryLockOffset(deviceIndex)
-	if err := util.FcntlRecordLock(file.Fd(), syscall.F_UNLCK, false, offset); err != nil {
-		return fmt.Errorf("fcntl F_SETLK at offset %d: %w", offset, err)
-	}
-	return nil
-}

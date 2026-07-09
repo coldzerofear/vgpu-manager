@@ -65,3 +65,58 @@ func TestFcntlRecordLockOFD(t *testing.T) {
 		t.Fatalf("offset 100 should be free after fd2 unlock: %v", err)
 	}
 }
+
+// TestFcntlPerFdReadLockIndependent validates the guarantee the vmem
+// per-reader-fd model depends on: two readers holding a read lock on the SAME
+// byte via SEPARATE fds are independent, so one reader unlocking (and closing)
+// does not expose the byte while the other is still reading. A shared fd would
+// fail this (see TestFcntlNotRefcountedSameFd logic, proven separately).
+func TestFcntlPerFdReadLockIndependent(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "perfd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := f.Name()
+	if err = f.Truncate(64); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	open := func() *os.File {
+		fd, err := os.OpenFile(path, os.O_RDWR, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fd
+	}
+
+	readerA := open()
+	readerB := open()
+	defer readerB.Close()
+	if err = FcntlRecordLock(readerA.Fd(), unix.F_RDLCK, false, 0); err != nil {
+		t.Fatalf("reader A lock: %v", err)
+	}
+	if err = FcntlRecordLock(readerB.Fd(), unix.F_RDLCK, false, 0); err != nil {
+		t.Fatalf("reader B lock: %v", err)
+	}
+
+	// Reader A finishes: unlock then close its fd.
+	if err = FcntlRecordLock(readerA.Fd(), unix.F_UNLCK, false, 0); err != nil {
+		t.Fatalf("reader A unlock: %v", err)
+	}
+	_ = readerA.Close()
+
+	// A writer must STILL be blocked by reader B's independent lock.
+	w := open()
+	defer w.Close()
+	if err = FcntlRecordLock(w.Fd(), unix.F_WRLCK, false, 0); err == nil {
+		t.Fatal("writer acquired while reader B still holds its own-fd read lock")
+	}
+
+	// Once reader B releases, the writer can proceed.
+	if err = FcntlRecordLock(readerB.Fd(), unix.F_UNLCK, false, 0); err != nil {
+		t.Fatalf("reader B unlock: %v", err)
+	}
+	if err = FcntlRecordLock(w.Fd(), unix.F_WRLCK, false, 0); err != nil {
+		t.Fatalf("writer should acquire after reader B unlock: %v", err)
+	}
+}
