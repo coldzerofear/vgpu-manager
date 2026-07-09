@@ -871,27 +871,27 @@ func CollectorDeviceProcesses(deviceUtil *watcher.MmapDeviceUtil, index int, hde
 		klog.V(4).InfoS("collector device processes from sm watcher", "device", index)
 		if unlock, err := deviceUtil.RLock(index); err != nil {
 			klog.V(3).ErrorS(err, "SM Watcher lock failed, fallback to nvml driver call", "device", index)
-		} else if util, err := deviceUtil.GetDeviceUtil(index); err != nil {
+		} else if devUtil, err := deviceUtil.GetDeviceUtil(index); err != nil {
 			klog.V(3).ErrorS(err, "get device util failed", "device", index)
 		} else {
-			micro := time.UnixMicro(int64(util.LastSeenTimeStamp))
+			micro := time.UnixMicro(int64(devUtil.LastSeenTimeStamp))
 			if time.Now().Sub(micro) > 5*time.Second {
 				_ = unlock()
 				klog.V(3).InfoS("Process utilization time window timeout detected, rollback using nvml driver to obtain utilization", "device", index)
 				nvmlProcessInfoFunc()
 				goto nvmlProcessUtil
 			}
-			if util.ComputeProcessesSize > 0 {
-				processInfos = append(processInfos, util.ComputeProcesses[:util.ComputeProcessesSize]...)
+			if devUtil.ComputeProcessesSize > 0 {
+				processInfos = append(processInfos, devUtil.ComputeProcesses[:devUtil.ComputeProcessesSize]...)
 			}
-			if util.GraphicsProcessesSize > 0 {
-				processInfos = append(processInfos, util.GraphicsProcesses[:util.GraphicsProcessesSize]...)
+			if devUtil.GraphicsProcessesSize > 0 {
+				processInfos = append(processInfos, devUtil.GraphicsProcesses[:devUtil.GraphicsProcessesSize]...)
 			}
 			if len(processInfos) == 0 {
 				nvmlProcessInfoFunc()
 			}
-			if util.ProcessUtilSamplesSize > 0 {
-				processUtilizationSamples = append(processUtilizationSamples, util.ProcessUtilSamples[:util.ProcessUtilSamplesSize]...)
+			if devUtil.ProcessUtilSamplesSize > 0 {
+				processUtilizationSamples = append(processUtilizationSamples, devUtil.ProcessUtilSamples[:devUtil.ProcessUtilSamplesSize]...)
 			}
 			_ = unlock()
 			goto collecProcessInfo

@@ -102,7 +102,7 @@ func (c *ContainerLister) GetResourceDataT(key ContainerKey) (*vgpu.ResourceData
 	if data, ok := c.containerDatas[key]; !ok {
 		return nil, false
 	} else {
-		return data.GetResource().DeepCopy(), true
+		return data.CopyResource(), true
 	}
 }
 

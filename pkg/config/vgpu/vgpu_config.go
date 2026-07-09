@@ -68,6 +68,17 @@ func (r *MmapResourceData) GetResource() *ResourceDataT {
 	return r.resource
 }
 
+// CopyResource returns a deep copy taken while holding the lock, so the read is
+// safe against a concurrent Reload/Close munmapping the mapping. Callers that
+// only need a snapshot (not the live pointer) must use this, not GetResource:
+// GetResource hands out a pointer into the mmap and releases the lock, so
+// dereferencing it afterwards races with Reload's munmap.
+func (r *MmapResourceData) CopyResource() *ResourceDataT {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.resource.DeepCopy()
+}
+
 func (r *MmapResourceData) Close() error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()

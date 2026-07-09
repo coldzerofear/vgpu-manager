@@ -66,7 +66,7 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 				klog.V(3).ErrorS(err, "failed to sync mmap", "filepath", filePath)
 			}
 			if err := deviceUtil.Close(); err != nil {
-				klog.V(3).ErrorS(err, "failed to sync mmap", "filepath", filePath)
+				klog.V(3).ErrorS(err, "failed to close mmap", "filepath", filePath)
 			}
 		}()
 
@@ -166,30 +166,30 @@ func smWatcherSingleDevice(deviceUtil *watcher.MmapDeviceUtil, info *GPUDevice, 
 		_ = unlock()
 	}()
 
-	util, err := deviceUtil.GetDeviceUtil(i)
+	devUtil, err := deviceUtil.GetDeviceUtil(i)
 	if err != nil {
 		klog.V(3).ErrorS(err, "get device util failed", "device", i)
 		return err
 	}
 
 	computeProcessesSize := min(len(computeProcesses), watcher.MaxPids)
-	util.ComputeProcessesSize = uint32(computeProcessesSize)
+	devUtil.ComputeProcessesSize = uint32(computeProcessesSize)
 	for index, process := range computeProcesses[:computeProcessesSize] {
-		util.ComputeProcesses[index] = process
+		devUtil.ComputeProcesses[index] = process
 	}
 
 	graphicsProcessesSize := min(len(graphicsProcesses), watcher.MaxPids)
-	util.GraphicsProcessesSize = uint32(graphicsProcessesSize)
+	devUtil.GraphicsProcessesSize = uint32(graphicsProcessesSize)
 	for index, process := range graphicsProcesses[:graphicsProcessesSize] {
-		util.GraphicsProcesses[index] = process
+		devUtil.GraphicsProcesses[index] = process
 	}
 
-	util.LastSeenTimeStamp = uint64(lastTs)
+	devUtil.LastSeenTimeStamp = uint64(lastTs)
 	if rt == nvml.SUCCESS {
 		processUtilSamplesSize := min(len(procUtilSamples), watcher.MaxPids)
-		util.ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
+		devUtil.ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
 		for index, sample := range procUtilSamples[:processUtilSamplesSize] {
-			util.ProcessUtilSamples[index] = sample
+			devUtil.ProcessUtilSamples[index] = sample
 		}
 	}
 	return nil
