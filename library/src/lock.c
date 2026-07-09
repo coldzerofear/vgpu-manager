@@ -32,9 +32,11 @@
  * across fds and cross-process. Requires Linux >= 3.15; the build defines
  * _GNU_SOURCE (see CMakeLists.txt), and the fallbacks below cover builds that
  * do not (the values are fixed across all Linux architectures).
- * NOTE: lock_gpu_device() below intentionally stays on classic F_SETLK -- it
- * locks a separate per-device file, so it is not exposed to the sibling-drop
- * problem. */
+ * lock_gpu_device()'s per-device file lock also uses OFD: those files are not
+ * exposed to the sibling-drop problem (one inode per device), but OFD gives it
+ * intra-process mutual exclusion, which a classic per-process lock cannot (fds
+ * of one process never conflict), closing a TOCTOU race between threads of the
+ * same container allocating on the same device. */
 #ifndef F_OFD_SETLK
 #define F_OFD_SETLK 37
 #endif
@@ -101,7 +103,11 @@ static int try_acquire_lock(const char *path) {
     .l_start = 0,
     .l_len = 0, // lock entire file
   };
-  if (fcntl(fd, F_SETLK, &fl) == -1) {
+  // OFD lock (non-blocking): gives intra-process mutual exclusion too, which a
+  // classic per-process lock on this per-device file would not (same-process
+  // fds never conflict). lock_gpu_device() spins on EAGAIN with a timeout.
+  // .l_pid is zero-initialized above, as OFD requires.
+  if (ofd_fcntl(fd, 0, &fl) == -1) {
     close(fd);
     return -1;
   }
@@ -150,7 +156,7 @@ void unlock_gpu_device(int fd) {
     .l_start = 0,
     .l_len = 0,
   };
-  fcntl(fd, F_SETLK, &fl);
+  ofd_fcntl(fd, 0, &fl);
   close(fd);
 }
 
