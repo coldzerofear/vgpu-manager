@@ -657,6 +657,7 @@ entry_t nvml_library_entry[] = {
     {.name = "nvmlDeviceGetComputeRunningProcesses"},
     {.name = "nvmlDeviceGetPciInfo"},
     {.name = "nvmlDeviceGetProcessUtilization"},
+    {.name = "nvmlDeviceGetProcessesUtilizationInfo"},
     {.name = "nvmlDeviceGetCount"},
     {.name = "nvmlDeviceClearAccountingPids"},
     {.name = "nvmlDeviceClearCpuAffinity"},

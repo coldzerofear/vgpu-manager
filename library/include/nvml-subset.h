@@ -505,6 +505,35 @@ typedef struct nvmlProcessUtilizationSample_st {
 } nvmlProcessUtilizationSample_t;
 
 /**
+ * Structure to store utilization value and process Id -- version 1
+ */
+typedef struct nvmlProcessUtilizationInfo_v1_st {
+  uint64_t timeStamp;  //!< CPU Timestamp in microseconds
+  unsigned int pid;              //!< PID of process
+  unsigned int smUtil;           //!< SM (3D/Compute) Util Value
+  unsigned int memUtil;          //!< Frame Buffer Memory Util Value
+  unsigned int encUtil;          //!< Encoder Util Value
+  unsigned int decUtil;          //!< Decoder Util Value
+  unsigned int jpgUtil;          //!< Jpeg Util Value
+  unsigned int ofaUtil;          //!< Ofa Util Value
+} nvmlProcessUtilizationInfo_v1_t;
+
+/**
+ * Structure to store utilization and process ID for each running process -- version 1
+ */
+typedef struct nvmlProcessesUtilizationInfo_v1_st {
+  unsigned int version;            //!< The version number of this struct
+  unsigned int processSamplesCount;  //!< Caller array size / returned count
+  uint64_t lastSeenTimeStamp;  //!< Min timestamp for returned samples
+  nvmlProcessUtilizationInfo_v1_t *procUtilArray;  //!< Caller-allocated samples
+} nvmlProcessesUtilizationInfo_v1_t;
+
+typedef nvmlProcessesUtilizationInfo_v1_t nvmlProcessesUtilizationInfo_t;
+
+#define nvmlProcessesUtilizationInfo_v1 \
+    ((unsigned int)(sizeof(nvmlProcessesUtilizationInfo_v1_t) | (1U << 24U)))
+
+/**
  * ECC counter types.
  *
  * Note: Volatile counts are reset each time the driver loads. On Windows this

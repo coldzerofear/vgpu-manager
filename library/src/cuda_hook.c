@@ -289,6 +289,8 @@ static void active_utilization_notifier(int);
 
 static void *utilization_watcher(void *);
 
+static nvmlReturn_t get_process_utilization_samples(nvmlDevice_t, nvmlProcessUtilizationSample_t *, unsigned int *, uint64_t);
+
 static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *, nvmlProcessUtilizationSample_t *, unsigned int *, int, int, nvmlDevice_t);
 
 static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *, nvmlProcessUtilizationSample_t *, unsigned int *, int, nvmlDevice_t);
@@ -1799,7 +1801,61 @@ void get_used_gpu_memory(void *arg, CUdevice device) {
   get_used_gpu_memory_by_device((void *)used_memory, dev);
 }
 
-static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample, unsigned int *processes_size, int cuda_index, nvmlDevice_t dev) {
+static nvmlReturn_t get_process_utilization_samples(
+  nvmlDevice_t device, nvmlProcessUtilizationSample_t *processes_sample,
+  unsigned int *out_count, uint64_t last_seen) {
+
+  unsigned int processes_num = *out_count;
+  nvmlReturn_t res = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetProcessUtilization,
+                                        device, processes_sample, &processes_num, last_seen);
+  if (res == NVML_SUCCESS) {
+    *out_count = processes_num;
+    return NVML_SUCCESS;
+  }
+  if (res != NVML_ERROR_NOT_SUPPORTED) {
+    return res;
+  }
+  // Try using nvmlDeviceGetProcessesUtilizationInfo when nvmlDeviceGetProcessUtilization is not supported to improve compatibility.
+  if (!NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetProcessesUtilizationInfo)){
+    return res;
+  }
+
+  nvmlProcessUtilizationInfo_v1_t local_samples[*out_count];
+  nvmlProcessesUtilizationInfo_v1_t info;
+  info.version = nvmlProcessesUtilizationInfo_v1;
+  info.processSamplesCount = 0;
+  info.lastSeenTimeStamp = last_seen;
+  info.procUtilArray = NULL;
+
+  res = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetProcessesUtilizationInfo, device, (nvmlProcessesUtilizationInfo_t *)&info);
+  if (res == NVML_ERROR_INSUFFICIENT_SIZE) {
+    info.procUtilArray = local_samples;
+    info.processSamplesCount = *out_count;
+    res = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetProcessesUtilizationInfo, device, (nvmlProcessesUtilizationInfo_t *)&info);
+  }
+  if (res != NVML_SUCCESS) {
+    return res;
+  }
+
+  if (info.processSamplesCount > *out_count) {
+    info.processSamplesCount = *out_count;
+  }
+  int i;
+  for (i = 0; i < (int)info.processSamplesCount; i++) {
+    processes_sample[i].pid = local_samples[i].pid;
+    processes_sample[i].timeStamp = local_samples[i].timeStamp;
+    processes_sample[i].smUtil = local_samples[i].smUtil;
+    processes_sample[i].memUtil = local_samples[i].memUtil;
+    processes_sample[i].encUtil = local_samples[i].encUtil;
+    processes_sample[i].decUtil = local_samples[i].decUtil;
+  }
+  *out_count = info.processSamplesCount;
+  return NVML_SUCCESS;
+}
+
+static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
+  utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample,
+  unsigned int *processes_size, int cuda_index, nvmlDevice_t dev) {
   nvmlReturn_t ret;
   struct timeval cur, prev;
   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
@@ -1855,8 +1911,7 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(utilization_t *top_re
   uint64_t microsec = (uint64_t)prev.tv_sec * 1000000ULL + prev.tv_usec;
   top_result->checktime = microsec;
 
-  ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetProcessUtilization,
-                           dev, processes_sample, processes_size, microsec);
+  ret = get_process_utilization_samples(dev, processes_sample, processes_size, microsec);
   if (unlikely(ret)) {
     // Frequent calls to nvmlDeviceGetProcessUtilization may result in the return of NVML_ERROR_NOT_FOUND,
     // which is a normal phenomenon and should be avoided from printing these invalid logs.
@@ -1886,7 +1941,9 @@ int is_expired(unsigned long long lastTs) {
     return (cur_us - lastTs) >= 5000000; // 5,000,000 microsecond
 }
 
-static nvmlReturn_t get_gpu_process_from_external_watcher(utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample, unsigned int *processes_size, int cuda_index, int host_index, nvmlDevice_t dev) {
+static nvmlReturn_t get_gpu_process_from_external_watcher(
+  utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample,
+  unsigned int *processes_size, int cuda_index, int host_index, nvmlDevice_t dev) {
   int fd = device_util_read_lock(host_index);
   if (fd < 0) {
     metrics_record_watcher_miss(host_index, METRICS_WATCHER_LOCK_MISS);

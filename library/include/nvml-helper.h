@@ -109,6 +109,7 @@ typedef enum {
   NVML_ENTRY_ENUM(nvmlDeviceGetPciInfo),
   /** nvmlDeviceGetProcessUtilization */
   NVML_ENTRY_ENUM(nvmlDeviceGetProcessUtilization),
+  NVML_ENTRY_ENUM(nvmlDeviceGetProcessesUtilizationInfo),
   /** nvmlDeviceGetCount */
   NVML_ENTRY_ENUM(nvmlDeviceGetCount),
   /** nvmlDeviceClearAccountingPids */
