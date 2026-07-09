@@ -74,7 +74,7 @@ spec:
             - --server-bind-port={{ .Values.webhook.commands.serverBindPort | default 9443 }}
             - --pprof-bind-port={{ .Values.webhook.commands.pprofBindPort }}
             - --cert-dir=/tmp/k8s-webhook-server/serving-certs
-            - --tls-cert-name=tls.cert
+            - --tls-cert-name=tls.crt
             - --tls-key-name=tls.key
             - --default-node-policy={{ .Values.webhook.commands.defaultNodePolicy }}
             - --default-device-policy={{ .Values.webhook.commands.defaultDevicePolicy }}

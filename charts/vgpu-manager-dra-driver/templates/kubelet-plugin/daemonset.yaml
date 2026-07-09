@@ -116,7 +116,10 @@ spec:
                 sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
-              kubelet-plugin -v {{ $plugin.logLevel | default 5 }}
+              kubelet-plugin
+            - --kube-api-qps={{ $plugin.commands.kubeApiQps | default 20 }}
+            - --kube-api-burst={{ $plugin.commands.kubeApiBurst | default 30 }}
+            - -v {{ $plugin.commands.logLevel | default 5 }}
           env:
             - name: NODE_NAME
               valueFrom:

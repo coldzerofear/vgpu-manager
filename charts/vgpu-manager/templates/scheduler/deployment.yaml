@@ -101,8 +101,8 @@ spec:
           command:
             - device-scheduler
             - --domain={{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}
-            - --kube-api-qps={{ .Values.scheduler.schedulerExtender.commands.kubeApiQps }}
-            - --kube-api-burst={{ .Values.scheduler.schedulerExtender.commands.kubeApiBurst }}
+            - --kube-api-qps={{ .Values.scheduler.schedulerExtender.commands.kubeApiQps | default 20 }}
+            - --kube-api-burst={{ .Values.scheduler.schedulerExtender.commands.kubeApiBurst | default 30 }}
             - --server-bind-port={{ .Values.scheduler.schedulerExtender.commands.serverBindPort | default 3456 }}
             - --pprof-bind-port={{ .Values.scheduler.schedulerExtender.commands.pprofBindPort }}
             - --feature-gates={{ include "vgpu-manager.featureGates" .Values.scheduler.schedulerExtender.commands.featureGates }}

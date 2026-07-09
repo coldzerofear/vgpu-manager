@@ -82,11 +82,13 @@ spec:
             {{- if .Values.webhook.commands.schedulerName }}
             - --scheduler-name={{ .Values.webhook.commands.schedulerName }}
             {{- end }}
+            - --kube-api-qps={{ .Values.webhook.commands.kubeApiQps | default 20 }}
+            - --kube-api-burst={{ .Values.webhook.commands.kubeApiBurst | default 30 }}
             - --domain={{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}
             - --server-bind-port={{ .Values.webhook.commands.serverBindPort | default 9443 }}
             - --pprof-bind-port={{ .Values.webhook.commands.pprofBindPort }}
             - --cert-dir=/tmp/k8s-webhook-server/serving-certs
-            - --tls-cert-name=tls.cert
+            - --tls-cert-name=tls.crt
             - --tls-key-name=tls.key
             {{- if .Values.webhook.commands.defaultNodePolicy }}
             - --default-node-policy={{ .Values.webhook.commands.defaultNodePolicy }}

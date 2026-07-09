@@ -12,6 +12,11 @@ import (
 )
 
 type Options struct {
+	KubeConfigFile string
+	MasterURL      string
+	QPS            float32
+	Burst          int
+
 	ServerBindPort        int
 	PprofBindPort         int
 	Domain                string
@@ -30,6 +35,8 @@ type Options struct {
 }
 
 const (
+	defaultQPS             = 20.0
+	defaultBurst           = 30
 	defaultServerBindPort  = 9443
 	defaultPprofBindPort   = 0
 	defaultCertDir         = "/tmp/k8s-webhook-server/serving-certs"
@@ -40,6 +47,8 @@ const (
 
 func NewOptions() *Options {
 	return &Options{
+		QPS:                 defaultQPS,
+		Burst:               defaultBurst,
 		ServerBindPort:      defaultServerBindPort,
 		PprofBindPort:       defaultPprofBindPort,
 		Domain:              util.GetGlobalDomain(),
@@ -60,6 +69,10 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	_ = fs.Set("legacy_stderr_threshold_behavior", "false")
 	_ = fs.Set("stderrthreshold", "INFO")
 	pflag.CommandLine.SortFlags = false
+	pflag.StringVar(&o.KubeConfigFile, "kubeconfig", o.KubeConfigFile, "Path to a kubeconfig. Only required if out-of-cluster.")
+	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
+	pflag.Float32Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
+	pflag.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
 	pflag.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name and automatically set it to vGPU pod.")
 	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable)")

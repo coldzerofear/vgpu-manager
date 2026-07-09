@@ -14,7 +14,7 @@
 #define LOCK_PATH_FORMAT (TMP_DIR VGPU_LOCK_DIR "/vgpu_%d.lock")
 #define LOCK_PATH_SIZE   32
 #define SPIN_INTERVAL_MS 10
-#define LOCK_TIMEOUT_MS  5000
+#define LOCK_TIMEOUT_MS  10000
 
 #define GET_DEVICE_LOCK_OFFSET(device_index) \
   offsetof(device_util_t, devices[device_index].lock_byte)
