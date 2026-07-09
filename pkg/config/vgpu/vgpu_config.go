@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -55,21 +56,43 @@ type ResourceDataT struct {
 	RegisterUUID      [UuidBufferSize]byte
 }
 
-type ResourceData struct {
-	resourceCfg *ResourceDataT
-	mmapFile    *util.MmapFile
-	filePath    string
+type MmapResourceData struct {
+	resource *ResourceDataT
+	mmapFile *util.MmapFile
+	mutex    sync.Mutex
 }
 
-func (r *ResourceData) GetCfg() *ResourceDataT {
-	return r.resourceCfg
+func (r *MmapResourceData) GetResource() *ResourceDataT {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.resource
 }
 
-func (r *ResourceData) Munmap() error {
-	if r == nil {
-		return fmt.Errorf("ResourceData is nil")
-	}
+func (r *MmapResourceData) Close() error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 	return r.mmapFile.Close()
+}
+
+func (r *MmapResourceData) NeedsReload() (reload bool, err error) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	return r.mmapFile.NeedsReload()
+}
+
+func (r *MmapResourceData) Reload() error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	data, err := NewMmapResourceData(r.mmapFile.Path)
+	if err != nil {
+		return fmt.Errorf("reload %q failed: %w", r.mmapFile.Path, err)
+	}
+	_ = r.mmapFile.Close()
+	r.resource = data.resource
+	r.mmapFile = data.mmapFile
+	return nil
 }
 
 func CheckResourceDataSize(filePath string) error {
@@ -84,7 +107,7 @@ func CheckResourceDataSize(filePath string) error {
 	return nil
 }
 
-func NewResourceData(filePath string) (*ResourceData, error) {
+func NewMmapResourceData(filePath string) (*MmapResourceData, error) {
 	mmapFile, err := util.OpenMmap(filePath, util.DefaultReadWriteMmap)
 	if err != nil {
 		return nil, err
@@ -95,11 +118,10 @@ func NewResourceData(filePath string) (*ResourceData, error) {
 		_ = mmapFile.Close()
 		return nil, fmt.Errorf("vGPU config file size mismatch")
 	}
-	resourceCfg := (*ResourceDataT)(unsafe.Pointer(&mmapFile.Data[0]))
-	return &ResourceData{
-		resourceCfg: resourceCfg,
-		mmapFile:    mmapFile,
-		filePath:    filePath,
+	data := (*ResourceDataT)(unsafe.Pointer(&mmapFile.Data[0]))
+	return &MmapResourceData{
+		resource: data,
+		mmapFile: mmapFile,
 	}, nil
 }
 
@@ -128,8 +150,11 @@ func GetCompatibilityMode(devManager *manager.DeviceManager) util.CompatibilityM
 	return mode
 }
 
-func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
-	containerClaim device.ContainerDeviceClaim, memoryOversold bool, node *corev1.Node) *ResourceDataT {
+func NewResourceDataT(
+	devManager *manager.DeviceManager, pod *corev1.Pod,
+	containerClaim device.ContainerDeviceClaim,
+	memoryOversold bool, node *corev1.Node,
+) *ResourceDataT {
 	major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
 	ratio := devManager.GetNodeConfig().GetDeviceMemoryScaling()
 	convert48Bytes := func(val string) [UuidBufferSize]byte {

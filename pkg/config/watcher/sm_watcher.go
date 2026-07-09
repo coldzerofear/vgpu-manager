@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -38,31 +39,17 @@ type DeviceUtilT struct {
 	Devices [MaxDeviceCount]DeviceProcessT
 }
 
-type DeviceUtil struct {
+type MmapDeviceUtil struct {
 	deviceUtil *DeviceUtilT
 	mmapFile   *util.MmapFile
-	filePath   string
 }
 
-type DeviceUtilWrap struct {
-	deviceUtil *DeviceUtilT
-	filePath   string
-	// lockFile holds the open file backing the currently-held POSIX record
-	// lock. It must be kept alive for the lock's lifetime: if it were dropped,
-	// the runtime finalizer would close the fd and silently release the lock.
-	lockFile *os.File
-}
-
-func (d *DeviceUtil) GetWrap() *DeviceUtilWrap {
-	return &DeviceUtilWrap{
-		deviceUtil: d.deviceUtil,
-		filePath:   d.filePath,
+// GetDeviceUtil Lock access should be added during use
+func (d *MmapDeviceUtil) GetDeviceUtil(deviceIndex int) (*DeviceProcessT, error) {
+	if deviceIndex >= util.MaxDeviceCount || deviceIndex < 0 {
+		return nil, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
 	}
-}
-
-// GetUtil Lock access should be added during use
-func (d *DeviceUtilWrap) GetUtil() *DeviceUtilT {
-	return d.deviceUtil
+	return &d.deviceUtil.Devices[deviceIndex], nil
 }
 
 // getDeviceLockOffset mirrors the writer side (library/src/lock.c
@@ -76,68 +63,81 @@ func getDeviceLockOffset(deviceIndex int) int64 {
 	return int64(deviceIndex)*deviceSize + lockByteOffset
 }
 
-func (d *DeviceUtilWrap) lock(ordinal int, lockType int16, flags int) error {
-	if d == nil {
-		return fmt.Errorf("DeviceUtilWrap is nil")
+func (d *MmapDeviceUtil) lock(deviceIndex int, lockType int16, flags int) (*os.File, error) {
+	if deviceIndex < 0 || deviceIndex >= util.MaxDeviceCount {
+		return nil, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
 	}
-	if d.lockFile != nil {
-		return fmt.Errorf("lock already exists")
-	}
-	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
-		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
-	}
-	f, err := os.OpenFile(d.filePath, flags, 0644)
+	f, err := os.OpenFile(d.mmapFile.Path, flags, 0644)
 	if err != nil {
-		return fmt.Errorf("open %q failed: %w", d.filePath, err)
+		return nil, fmt.Errorf("open %q failed: %w", d.mmapFile.Path, err)
 	}
-	offset := getDeviceLockOffset(ordinal)
+	offset := getDeviceLockOffset(deviceIndex)
 	if err = util.FcntlRecordLock(f.Fd(), lockType, true, offset); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("fcntl lock device %d at offset %d: %w", ordinal, offset, err)
+		return nil, fmt.Errorf("fcntl lock device %d at offset %d: %w", deviceIndex, offset, err)
 	}
-	d.lockFile = f
-	return nil
+	return f, nil
 }
 
-func (d *DeviceUtilWrap) RLock(ordinal int) error {
-	return d.lock(ordinal, syscall.F_RDLCK, os.O_RDONLY)
-}
-
-func (d *DeviceUtilWrap) WLock(ordinal int) error {
-	return d.lock(ordinal, syscall.F_WRLCK, os.O_RDWR|os.O_CREATE)
-}
-
-func (d *DeviceUtilWrap) Unlock(ordinal int) error {
-	if d == nil {
-		return fmt.Errorf("DeviceUtilWrap is nil")
-	}
-	if d.lockFile == nil || ordinal < 0 || ordinal >= MaxDeviceCount {
-		return fmt.Errorf("invalid parameter, locked=%v, device=%d", d.lockFile != nil, ordinal)
-	}
-	offset := getDeviceLockOffset(ordinal)
-	err := util.FcntlRecordLock(d.lockFile.Fd(), syscall.F_UNLCK, false, offset)
-	// Closing the fd releases the POSIX record lock regardless; always close.
-	_ = d.lockFile.Close()
-	d.lockFile = nil
+func (d *MmapDeviceUtil) RLock(deviceIndex int) (unlock func() error, err error) {
+	file, err := d.lock(deviceIndex, syscall.F_RDLCK, os.O_RDONLY)
 	if err != nil {
-		return fmt.Errorf("fcntl F_UNLCK device %d at offset %d: %w", ordinal, offset, err)
+		return util.NilUnlock, err
 	}
-	return nil
+	var unlockOnce sync.Once
+	var unlockErr error
+	return func() error {
+		// Guard the whole teardown with Once so a second call is a no-op instead
+		// of double-closing the fd or unlocking an unlocked mutex.
+		unlockOnce.Do(func() {
+			offset := getDeviceLockOffset(deviceIndex)
+			unlockErr = util.FcntlRecordLock(file.Fd(), syscall.F_UNLCK, false, offset)
+			_ = file.Close()
+		})
+		return unlockErr
+	}, nil
 }
 
-func (d *DeviceUtil) Munmap(msync bool) error {
-	if d == nil {
-		return fmt.Errorf("DeviceUtil is nil")
+func (d *MmapDeviceUtil) WLock(deviceIndex int) (unlock func() error, err error) {
+	file, err := d.lock(deviceIndex, syscall.F_WRLCK, os.O_RDWR|os.O_CREATE)
+	if err != nil {
+		return util.NilUnlock, err
 	}
-	if msync {
-		if err := d.mmapFile.Sync(); err != nil {
-			klog.V(3).ErrorS(err, "failed to sync mmap", "filepath", d.filePath)
-		}
-	}
+	var unlockOnce sync.Once
+	var unlockErr error
+	return func() error {
+		// Guard the whole teardown with Once so a second call is a no-op instead
+		// of double-closing the fd or unlocking an unlocked mutex.
+		unlockOnce.Do(func() {
+			offset := getDeviceLockOffset(deviceIndex)
+			unlockErr = util.FcntlRecordLock(file.Fd(), syscall.F_UNLCK, false, offset)
+			_ = file.Close()
+		})
+		return unlockErr
+	}, nil
+}
+
+//func (d *MmapDeviceUtil) Munmap(msync bool) error {
+//	if d == nil {
+//		return fmt.Errorf("DeviceUtil is nil")
+//	}
+//	if msync {
+//		if err := d.mmapFile.Sync(); err != nil {
+//			klog.V(3).ErrorS(err, "failed to sync mmap", "filepath", d.filePath)
+//		}
+//	}
+//	return d.mmapFile.Close()
+//}
+
+func (d *MmapDeviceUtil) Sync() error {
+	return d.mmapFile.Sync()
+}
+
+func (d *MmapDeviceUtil) Close() error {
 	return d.mmapFile.Close()
 }
 
-func NewDeviceUtil(filePath string) (*DeviceUtil, error) {
+func NewMmapDeviceUtil(filePath string) (*MmapDeviceUtil, error) {
 	mmapFile, err := util.OpenMmap(filePath, util.DefaultReadWriteMmap)
 	if err != nil {
 		return nil, err
@@ -149,10 +149,9 @@ func NewDeviceUtil(filePath string) (*DeviceUtil, error) {
 		return nil, fmt.Errorf("file size mismatch")
 	}
 	deviceUtil := (*DeviceUtilT)(unsafe.Pointer(&mmapFile.Data[0]))
-	return &DeviceUtil{
+	return &MmapDeviceUtil{
 		deviceUtil: deviceUtil,
 		mmapFile:   mmapFile,
-		filePath:   filePath,
 	}, nil
 }
 

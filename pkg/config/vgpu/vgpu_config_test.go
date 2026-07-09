@@ -204,15 +204,15 @@ func Test_WriDriverConfigFile(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					resourceData1, err := NewResourceData(test.path)
+					resourceData1, err := NewMmapResourceData(test.path)
 					if err != nil {
 						t.Fatal(err)
 					}
-					defer func() { _ = resourceData1.Munmap() }()
+					defer func() { _ = resourceData1.Close() }()
 					resourceData2 := NewResourceDataT(devManager, test.pod, test.devices, false, node)
 					// Round-trip: bytes written to disk, mmap'd back, must equal
 					// the in-memory builder output (byte-compatible with C reader).
-					assert.Equal(t, *resourceData1.GetCfg(), *resourceData2)
+					assert.Equal(t, *resourceData1.GetResource(), *resourceData2)
 					if err = os.RemoveAll(test.path); err != nil {
 						t.Error(err)
 					}

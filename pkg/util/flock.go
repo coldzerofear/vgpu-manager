@@ -13,6 +13,8 @@ import (
 // lock family (a classic F_UNLCK does not release an OFD lock and vice versa).
 var ofdUnsupported atomic.Bool
 
+var NilUnlock = func() error { return nil }
+
 // FcntlRecordLock places or removes a single-byte record lock at the given
 // absolute file offset. It is the shared low-level primitive behind the
 // per-device read/write locks on the vmem and sm-watcher shared-memory files.

@@ -46,11 +46,9 @@ func (m *MmapDeviceVMemory) Close() error {
 	return m.mmapFile.Close()
 }
 
-var nilUnlock = func() error { return nil }
-
-func (m *MmapDeviceVMemory) RLock(deviceIndex int) (Unlock func() error, err error) {
+func (m *MmapDeviceVMemory) RLock(deviceIndex int) (unlock func() error, err error) {
 	if deviceIndex < 0 || deviceIndex >= util.MaxDeviceCount {
-		return nilUnlock, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
+		return util.NilUnlock, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
 	}
 	// The RWMutex read lock only guards the mmap lifetime: it keeps Reload/Close
 	// (which take the exclusive lock) from unmapping m.vMemory while a reader is
@@ -65,13 +63,13 @@ func (m *MmapDeviceVMemory) RLock(deviceIndex int) (Unlock func() error, err err
 	file, err := os.Open(m.mmapFile.Path)
 	if err != nil {
 		m.mutex.RUnlock()
-		return nilUnlock, err
+		return util.NilUnlock, err
 	}
 	offset := getVmemoryLockOffset(deviceIndex)
 	if err = util.FcntlRecordLock(file.Fd(), syscall.F_RDLCK, true, offset); err != nil {
 		_ = file.Close()
 		m.mutex.RUnlock()
-		return nilUnlock, fmt.Errorf("fcntl read lock device %d at offset %d: %w", deviceIndex, offset, err)
+		return util.NilUnlock, fmt.Errorf("fcntl read lock device %d at offset %d: %w", deviceIndex, offset, err)
 	}
 
 	var unlockOnce sync.Once
@@ -144,4 +142,3 @@ func NewMmapDeviceVMemory(filePath string) (*MmapDeviceVMemory, error) {
 		mmapFile: mmapFile,
 	}, nil
 }
-

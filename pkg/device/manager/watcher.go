@@ -56,13 +56,18 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 			klog.ErrorS(err, "PrepareDeviceUtilFile failed")
 			return
 		}
-		deviceUtil, err := watcher.NewDeviceUtil(filePath)
+		deviceUtil, err := watcher.NewMmapDeviceUtil(filePath)
 		if err != nil {
 			klog.ErrorS(err, "WatchDeviceUtilFile failed")
 			return
 		}
 		defer func() {
-			_ = deviceUtil.Munmap(true)
+			if err := deviceUtil.Sync(); err != nil {
+				klog.V(3).ErrorS(err, "failed to sync mmap", "filepath", filePath)
+			}
+			if err := deviceUtil.Close(); err != nil {
+				klog.V(3).ErrorS(err, "failed to sync mmap", "filepath", filePath)
+			}
 		}()
 
 		if err = deviceLib.NvmlInit(); err != nil {
@@ -108,7 +113,7 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 	}, time.Second)
 }
 
-func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) error {
+func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.MmapDeviceUtil, batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
 	for {
 		for i := batch.StartIndex; i <= batch.EndIndex; i++ {
@@ -121,7 +126,7 @@ func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.DeviceUt
 			gpuDevice := devices[i]
 			gpuHandle := handles[i]
 
-			if err := smWatcherSingleDevice(deviceUtil.GetWrap(), gpuDevice, gpuHandle); err != nil {
+			if err := smWatcherSingleDevice(deviceUtil, gpuDevice, gpuHandle); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
@@ -130,7 +135,7 @@ func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.DeviceUt
 	}
 }
 
-func smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, info *GPUDevice, d device.Device) error {
+func smWatcherSingleDevice(deviceUtil *watcher.MmapDeviceUtil, info *GPUDevice, d device.Device) error {
 	if !info.Healthy || info.MigEnabled {
 		return nil
 	}
@@ -152,32 +157,39 @@ func smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, info *GPUDevice, 
 	lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
 	procUtilSamples, rt := d.GetProcessUtilizationBySize(uint64(lastTs), watcher.MaxPids)
 
-	if err := deviceUtil.WLock(i); err != nil {
-		klog.V(3).ErrorS(err, "DeviceUtilWLock failed", "device", i)
+	unlock, err := deviceUtil.WLock(i)
+	if err != nil {
+		klog.V(3).ErrorS(err, "DeviceUtil WLock failed", "device", i)
 		return err
 	}
 	defer func() {
-		_ = deviceUtil.Unlock(i)
+		_ = unlock()
 	}()
 
+	util, err := deviceUtil.GetDeviceUtil(i)
+	if err != nil {
+		klog.V(3).ErrorS(err, "get device util failed", "device", i)
+		return err
+	}
+
 	computeProcessesSize := min(len(computeProcesses), watcher.MaxPids)
-	deviceUtil.GetUtil().Devices[i].ComputeProcessesSize = uint32(computeProcessesSize)
+	util.ComputeProcessesSize = uint32(computeProcessesSize)
 	for index, process := range computeProcesses[:computeProcessesSize] {
-		deviceUtil.GetUtil().Devices[i].ComputeProcesses[index] = process
+		util.ComputeProcesses[index] = process
 	}
 
 	graphicsProcessesSize := min(len(graphicsProcesses), watcher.MaxPids)
-	deviceUtil.GetUtil().Devices[i].GraphicsProcessesSize = uint32(graphicsProcessesSize)
+	util.GraphicsProcessesSize = uint32(graphicsProcessesSize)
 	for index, process := range graphicsProcesses[:graphicsProcessesSize] {
-		deviceUtil.GetUtil().Devices[i].GraphicsProcesses[index] = process
+		util.GraphicsProcesses[index] = process
 	}
 
-	deviceUtil.GetUtil().Devices[i].LastSeenTimeStamp = uint64(lastTs)
+	util.LastSeenTimeStamp = uint64(lastTs)
 	if rt == nvml.SUCCESS {
 		processUtilSamplesSize := min(len(procUtilSamples), watcher.MaxPids)
-		deviceUtil.GetUtil().Devices[i].ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
+		util.ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
 		for index, sample := range procUtilSamples[:processUtilSamplesSize] {
-			deviceUtil.GetUtil().Devices[i].ProcessUtilSamples[index] = sample
+			util.ProcessUtilSamples[index] = sample
 		}
 	}
 	return nil
