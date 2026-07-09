@@ -1,6 +1,5 @@
 package vmem
 
-import "C"
 import (
 	"fmt"
 	"os"
@@ -8,7 +7,6 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/klog/v2"
 )
@@ -19,13 +17,13 @@ type ProcessUsedT struct {
 }
 
 type DeviceVMemUsedT struct {
-	Processes     [watcher.MaxPids]ProcessUsedT
+	Processes     [util.MaxDevicePids]ProcessUsedT
 	ProcessesSize uint32
 	LockByte      uint8
 }
 
 type DeviceVMemoryT struct {
-	Devices [watcher.MaxDeviceCount]DeviceVMemUsedT
+	Devices [util.MaxDeviceCount]DeviceVMemUsedT
 }
 
 func (d *DeviceVMemUsedT) GetTotalUsed() uint64 {
@@ -37,7 +35,7 @@ func (d *DeviceVMemUsedT) GetTotalUsed() uint64 {
 }
 
 type MmapDeviceVMemory struct {
-	mutex    sync.Mutex
+	mutex    sync.RWMutex
 	vMemory  *DeviceVMemoryT
 	mmapFile *util.MmapFile
 }
@@ -51,35 +49,40 @@ func (m *MmapDeviceVMemory) Close() error {
 var nilUnlock = func() error { return nil }
 
 func (m *MmapDeviceVMemory) RLock(deviceIndex int) (Unlock func() error, err error) {
-	m.mutex.Lock()
+	// Hold a shared read lock so concurrent readers of different devices can
+	// proceed, while Reload/Close (which swap/unmap the mapping) take the
+	// exclusive lock and wait for all readers to release.
+	m.mutex.RLock()
 
 	file := m.mmapFile.File
 	if err = deviceReadLock(file, deviceIndex); err != nil {
-		m.mutex.Unlock()
+		m.mutex.RUnlock()
 		return nilUnlock, err
 	}
 
 	var unlockOnce sync.Once
 	var unlockErr error
 	return func() error {
-		defer m.mutex.Unlock()
+		// Guard both the fcntl unlock and the mutex release with Once so a
+		// second call is a no-op instead of unlocking an unlocked mutex.
 		unlockOnce.Do(func() {
 			unlockErr = deviceUnlock(file, deviceIndex)
+			m.mutex.RUnlock()
 		})
 		return unlockErr
 	}, nil
 }
 
 func (m *MmapDeviceVMemory) GetDeviceMemory(deviceIndex int) (*DeviceVMemUsedT, error) {
-	if deviceIndex >= watcher.MaxDeviceCount || deviceIndex < 0 {
-		return nil, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, watcher.MaxDeviceCount)
+	if deviceIndex >= util.MaxDeviceCount || deviceIndex < 0 {
+		return nil, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
 	}
 	return &m.vMemory.Devices[deviceIndex], nil
 }
 
 func (m *MmapDeviceVMemory) NeedsReload() (reload bool, err error) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
 	return m.mmapFile.NeedsReload()
 }
 
@@ -98,8 +101,14 @@ func (m *MmapDeviceVMemory) Reload() error {
 }
 
 func getVmemoryLockOffset(deviceIndex int) int64 {
-	var dv DeviceVMemoryT
-	return int64(unsafe.Offsetof(dv.Devices[deviceIndex].LockByte))
+	// Must mirror the writer side (library/src/lock.c GET_VMEMORY_LOCK_OFFSET):
+	// offsetof(device_vmemory_t, devices[deviceIndex].lock_byte).
+	// unsafe.Offsetof only yields the field offset within a single
+	// DeviceVMemUsedT (the array index is ignored, it is a compile-time
+	// constant), so the per-device stride must be added explicitly.
+	deviceSize := int64(unsafe.Sizeof(DeviceVMemUsedT{}))
+	lockByteOffset := int64(unsafe.Offsetof(DeviceVMemUsedT{}.LockByte))
+	return int64(deviceIndex)*deviceSize + lockByteOffset
 }
 
 func NewMmapDeviceVMemory(filePath string) (*MmapDeviceVMemory, error) {
@@ -124,19 +133,12 @@ func deviceReadLock(file *os.File, deviceIndex int) error {
 	if file == nil {
 		return fmt.Errorf("device file is nil")
 	}
-	if deviceIndex >= watcher.MaxDeviceCount || deviceIndex < 0 {
-		return fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, watcher.MaxDeviceCount)
+	if deviceIndex >= util.MaxDeviceCount || deviceIndex < 0 {
+		return fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
 	}
 
 	offset := getVmemoryLockOffset(deviceIndex)
-	lock := syscall.Flock_t{
-		Type:   syscall.F_RDLCK,
-		Whence: 0, // SEEK_SET
-		Start:  offset,
-		Len:    1,
-		Pid:    0,
-	}
-	if err := syscall.FcntlFlock(file.Fd(), syscall.F_SETLKW, &lock); err != nil {
+	if err := util.FcntlRecordLock(file.Fd(), syscall.F_RDLCK, true, offset); err != nil {
 		return fmt.Errorf("fcntl F_SETLKW at offset %d: %w", offset, err)
 	}
 	return nil
@@ -146,20 +148,12 @@ func deviceUnlock(file *os.File, deviceIndex int) error {
 	if file == nil {
 		return fmt.Errorf("device file is nil")
 	}
-	if deviceIndex >= watcher.MaxDeviceCount || deviceIndex < 0 {
-		return fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, watcher.MaxDeviceCount)
+	if deviceIndex >= util.MaxDeviceCount || deviceIndex < 0 {
+		return fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
 	}
 
 	offset := getVmemoryLockOffset(deviceIndex)
-	lock := syscall.Flock_t{
-		Type:   syscall.F_UNLCK,
-		Whence: 0, // SEEK_SET
-		Start:  offset,
-		Len:    1,
-		Pid:    0,
-	}
-
-	if err := syscall.FcntlFlock(file.Fd(), syscall.F_SETLK, &lock); err != nil {
+	if err := util.FcntlRecordLock(file.Fd(), syscall.F_UNLCK, false, offset); err != nil {
 		return fmt.Errorf("fcntl F_SETLK at offset %d: %w", offset, err)
 	}
 	return nil

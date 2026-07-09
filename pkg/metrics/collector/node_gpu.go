@@ -638,7 +638,11 @@ skipNvml:
 								klog.ErrorS(err, "vMemory unlock failed", "devHostIndex", devHostIndex)
 							}
 						}()
-						deviceUsed, _ := vMemory.GetDeviceMemory(devHostIndex)
+						deviceUsed, err := vMemory.GetDeviceMemory(devHostIndex)
+						if err != nil {
+							klog.V(3).ErrorS(err, "get device vMemory failed", "devHostIndex", devHostIndex)
+							return
+						}
 						deviceVMemUsage += deviceUsed.GetTotalUsed()
 					}()
 				}

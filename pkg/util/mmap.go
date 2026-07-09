@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"syscall"
+	"unsafe"
 )
 
 type MmapFile struct {
@@ -45,10 +46,19 @@ var DefaultReadOnlyMmap = MmapOption{
 	Flags: syscall.MAP_SHARED,
 }
 
+var DefaultReadWriteMmap = MmapOption{
+	Prot:  syscall.PROT_READ | syscall.PROT_WRITE,
+	Flags: syscall.MAP_SHARED,
+}
+
 func OpenMmap(path string, opt MmapOption) (*MmapFile, error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("OpenFile %q failed: %w", path, err)
+		// Return the *fs.PathError unwrapped: callers branch on os.IsNotExist
+		// (e.g. a container config/vmem file that has not been written yet),
+		// and os.IsNotExist does not see through a fmt.Errorf %w wrap. The
+		// PathError already carries the path in its message.
+		return nil, err
 	}
 	fi, err := f.Stat()
 	if err != nil {
@@ -106,6 +116,24 @@ func (mf *MmapFile) NeedsReload() (reload bool, err error) {
 //	}
 //	return nil
 //}
+
+// Sync flushes dirty pages of a writable mapping back to the backing file.
+// It is a no-op for an already-closed mapping.
+func (mf *MmapFile) Sync() error {
+	if len(mf.Data) == 0 {
+		return nil
+	}
+	_, _, errno := syscall.Syscall(
+		syscall.SYS_MSYNC,
+		uintptr(unsafe.Pointer(&mf.Data[0])),
+		uintptr(len(mf.Data)),
+		uintptr(syscall.MS_SYNC),
+	)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
 
 func (mf *MmapFile) Close() error {
 	if mf.Data != nil {

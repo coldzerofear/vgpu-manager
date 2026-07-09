@@ -52,6 +52,8 @@ type ContainerLister struct {
 	containerVMems map[ContainerKey]*vmem.MmapDeviceVMemory
 }
 
+// removeResourceData and removeResourceVMem mutate the underlying maps and must
+// be called with c.mutex held for writing.
 func (c *ContainerLister) removeResourceData(key ContainerKey) {
 	if d, ok := c.containerDatas[key]; ok {
 		_ = d.Munmap()
@@ -190,7 +192,9 @@ func (c *ContainerLister) update() error {
 				if err != nil {
 					if os.IsNotExist(err) {
 						klog.V(3).InfoS("Detected that the vMemory file has been deleted", "containerKey", containerKey.String())
+						c.mutex.Lock()
 						c.removeResourceVMem(containerKey)
+						c.mutex.Unlock()
 					} else {
 						klog.V(2).ErrorS(err, "vMemory NeedsReload failed", "containerKey", containerKey.String())
 					}

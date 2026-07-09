@@ -2,8 +2,8 @@ package vgpu
 
 import (
 	"os"
-	"syscall"
 	"testing"
+	"unsafe"
 
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/component-base/featuregate"
@@ -19,6 +19,26 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 )
+
+// TestResourceDataStructLayout pins the config-file ABI to the C side
+// (library resource_data_t / device_t). Since WriteVGPUConfigFile now writes
+// the Go struct's raw bytes directly, any drift in size/padding here would
+// silently corrupt what the C reader parses.
+func TestResourceDataStructLayout(t *testing.T) {
+	if got := unsafe.Sizeof(VersionT{}); got != 8 {
+		t.Fatalf("sizeof(VersionT) = %d, want 8", got)
+	}
+	if got := unsafe.Sizeof(DeviceT{}); got != 96 {
+		t.Fatalf("sizeof(DeviceT) = %d, want 96", got)
+	}
+	if got := unsafe.Sizeof(ResourceDataT{}); got != 1848 {
+		t.Fatalf("sizeof(ResourceDataT) = %d, want 1848", got)
+	}
+	if MaxDeviceCount != 16 || UuidBufferSize != 48 || NameBufferSize != 64 {
+		t.Fatalf("ABI constants drifted: MaxDeviceCount=%d UuidBufferSize=%d NameBufferSize=%d",
+			MaxDeviceCount, UuidBufferSize, NameBufferSize)
+	}
+}
 
 func Test_WriDriverConfigFile(t *testing.T) {
 	driverVersion := nvidia.DriverVersion{
@@ -184,13 +204,15 @@ func Test_WriDriverConfigFile(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					resourceData1, data, err := MmapResourceDataT(test.path)
+					resourceData1, err := NewResourceData(test.path)
 					if err != nil {
 						t.Fatal(err)
 					}
-					defer syscall.Munmap(data)
+					defer func() { _ = resourceData1.Munmap() }()
 					resourceData2 := NewResourceDataT(devManager, test.pod, test.devices, false, node)
-					assert.Equal(t, *resourceData1, *resourceData2)
+					// Round-trip: bytes written to disk, mmap'd back, must equal
+					// the in-memory builder output (byte-compatible with C reader).
+					assert.Equal(t, *resourceData1.GetCfg(), *resourceData2)
 					if err = os.RemoveAll(test.path); err != nil {
 						t.Error(err)
 					}
