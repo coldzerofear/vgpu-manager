@@ -49,41 +49,49 @@ type ContainerLister struct {
 	nodeName       string
 	podLister      listerv1.PodLister
 	containerDatas map[ContainerKey]*vgpu.ResourceData
-	containerVMems map[ContainerKey]*vmem.DeviceVMemory
+	containerVMems map[ContainerKey]*vmem.MmapDeviceVMemory
+}
+
+func (c *ContainerLister) removeResourceData(key ContainerKey) {
+	if d, ok := c.containerDatas[key]; ok {
+		_ = d.Munmap()
+		delete(c.containerDatas, key)
+	}
+}
+
+func (c *ContainerLister) removeResourceVMem(key ContainerKey) {
+	if n, ok := c.containerVMems[key]; ok {
+		_ = n.Close()
+		delete(c.containerVMems, key)
+	}
 }
 
 func (c *ContainerLister) addResourceData(key ContainerKey, data *vgpu.ResourceData) {
 	c.mutex.Lock()
+	c.removeResourceData(key)
 	c.containerDatas[key] = data
 	c.mutex.Unlock()
 }
 
 func (c *ContainerLister) removeContainer(key ContainerKey) {
 	c.mutex.Lock()
-	if data, ok := c.containerDatas[key]; ok {
-		_ = data.Munmap()
-		delete(c.containerDatas, key)
-	}
-	if node, ok := c.containerVMems[key]; ok {
-		_ = node.Munmap()
-		delete(c.containerVMems, key)
-	}
+	c.removeResourceData(key)
+	c.removeResourceVMem(key)
 	c.mutex.Unlock()
 }
 
-func (c *ContainerLister) addResourceVMem(key ContainerKey, data *vmem.DeviceVMemory) {
+func (c *ContainerLister) addResourceVMem(key ContainerKey, data *vmem.MmapDeviceVMemory) {
 	c.mutex.Lock()
+	c.removeResourceVMem(key)
 	c.containerVMems[key] = data
 	c.mutex.Unlock()
 }
 
-func (c *ContainerLister) GetResourceVMem(key ContainerKey) (*vmem.DeviceVMemoryWrap, bool) {
+func (c *ContainerLister) GetResourceVMem(key ContainerKey) (*vmem.MmapDeviceVMemory, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	if data, ok := c.containerVMems[key]; ok {
-		return data.GetWrap(), ok
-	}
-	return nil, false
+	data, ok := c.containerVMems[key]
+	return data, ok
 }
 
 func (c *ContainerLister) GetResourceDataT(key ContainerKey) (*vgpu.ResourceDataT, bool) {
@@ -153,34 +161,48 @@ func (c *ContainerLister) update() error {
 		}
 		matched := keySet.Has(containerKey)
 		_, existCfg := c.GetResourceDataT(containerKey)
-		_, existVMem := c.GetResourceVMem(containerKey)
+		resourceVMem, existVMem := c.GetResourceVMem(containerKey)
 		switch {
-		case matched && !existCfg:
-			configFile := filepath.Join(filePath, util.Config, dpvgpu.VGPUConfigFileName)
-			resourceData, err := vgpu.NewResourceData(configFile)
-			if err != nil && os.IsNotExist(err) {
-				// TODO Retaining the old directory is to adapt to the old pods.
-				configFile = filepath.Join(filePath, dpvgpu.VGPUConfigFileName)
-				resourceData, err = vgpu.NewResourceData(configFile)
+		case matched:
+			if !existCfg {
+				configFile := filepath.Join(filePath, util.Config, dpvgpu.VGPUConfigFileName)
+				resourceData, err := vgpu.NewResourceData(configFile)
+				if err != nil && !os.IsNotExist(err) {
+					klog.V(4).ErrorS(err, "Failed to new device config", "filePath", configFile)
+				}
+				if err == nil && resourceData != nil {
+					klog.V(3).InfoS("Add vGPU config file", "filePath", configFile)
+					c.addResourceData(containerKey, resourceData)
+				}
 			}
-			if err != nil {
-				klog.V(4).ErrorS(err, "Failed to new device config", "filePath", configFile)
-				continue
-			}
-			klog.V(3).Infoln("Add vGPU config file:", configFile)
-			c.addResourceData(containerKey, resourceData)
-		case matched && !existVMem:
-			configFile := filepath.Join(filePath, util.VMemNode, util.VMemNodeFile)
-			resourceVMem, err := vmem.NewDeviceVMemory(configFile)
-			if err != nil {
-				if !os.IsNotExist(err) {
+			if !existVMem {
+				configFile := filepath.Join(filePath, util.VMemNode, util.VMemNodeFile)
+				resourceVMem, err = vmem.NewMmapDeviceVMemory(configFile)
+				if err != nil && !os.IsNotExist(err) {
 					klog.V(4).ErrorS(err, "Failed to new device vMemory", "filePath", configFile)
 				}
-				continue
+				if err == nil && resourceVMem != nil {
+					klog.V(3).InfoS("Add vGPU vMemory file", "filePath", configFile)
+					c.addResourceVMem(containerKey, resourceVMem)
+				}
+			} else {
+				reload, err := resourceVMem.NeedsReload()
+				if err != nil {
+					if os.IsNotExist(err) {
+						klog.V(3).InfoS("Detected that the vMemory file has been deleted", "containerKey", containerKey.String())
+						c.removeResourceVMem(containerKey)
+					} else {
+						klog.V(2).ErrorS(err, "vMemory NeedsReload failed", "containerKey", containerKey.String())
+					}
+				}
+				if reload {
+					klog.V(3).InfoS("Detected that vMemory file has been changed", "containerKey", containerKey.String())
+					if err = resourceVMem.Reload(); err != nil {
+						klog.V(1).ErrorS(err, "", "containerKey", containerKey.String())
+					}
+				}
 			}
-			klog.V(3).Infoln("Add vGPU vMemory file:", configFile)
-			c.addResourceVMem(containerKey, resourceVMem)
-		case !matched && fileInfo.ModTime().Add(time.Minute).Before(time.Now()):
+		case !matched && fileInfo.ModTime().Add(2*time.Minute).Before(time.Now()):
 			klog.V(3).Infoln("Remove vGPU container:", containerKey.String())
 			c.removeContainer(containerKey)
 			_ = os.RemoveAll(filePath)
@@ -211,6 +233,6 @@ func NewContainerLister(basePath, nodeName string, podLister listerv1.PodLister)
 		nodeName:       nodeName,
 		podLister:      podLister,
 		containerDatas: make(map[ContainerKey]*vgpu.ResourceData),
-		containerVMems: make(map[ContainerKey]*vmem.DeviceVMemory),
+		containerVMems: make(map[ContainerKey]*vmem.MmapDeviceVMemory),
 	}
 }

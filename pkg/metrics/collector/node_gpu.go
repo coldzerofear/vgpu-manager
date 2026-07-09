@@ -628,14 +628,18 @@ skipNvml:
 						if !exists {
 							return
 						}
-						if err = vMemory.RLock(devHostIndex); err != nil {
+						unlock, err := vMemory.RLock(devHostIndex)
+						if err != nil {
 							klog.V(3).ErrorS(err, "virtual memory RLock failed", "devHostIndex", devHostIndex)
 							return
 						}
-						defer func() { _ = vMemory.Unlock(devHostIndex) }()
-						for index := uint32(0); index < vMemory.GetVMem().Devices[devHostIndex].ProcessesSize; index++ {
-							deviceVMemUsage += vMemory.GetVMem().Devices[devHostIndex].Processes[index].Used
-						}
+						defer func() {
+							if err := unlock(); err != nil {
+								klog.ErrorS(err, "vMemory unlock failed", "devHostIndex", devHostIndex)
+							}
+						}()
+						deviceUsed, _ := vMemory.GetDeviceMemory(devHostIndex)
+						deviceVMemUsage += deviceUsed.GetTotalUsed()
 					}()
 				}
 
