@@ -4,128 +4,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"unsafe"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/klog/v2"
 )
 
-//#include <stdio.h>
-//#include <stdint.h>
-//#include <sys/types.h>
-//#include <sys/stat.h>
-//#include <fcntl.h>
-//#include <string.h>
-//#include <sys/file.h>
-//#include <time.h>
-//#include <stdlib.h>
-//#include <unistd.h>
-//#include <sys/mman.h>
-//
-//#ifndef MAX_DEVICE_COUNT
-//#define MAX_DEVICE_COUNT 16
-//#endif
-//
-//#ifndef MAX_PIDS
-//#define MAX_PIDS 1024
-//#endif
-//
-//struct nvmlProcessUtilizationSample_t {
-//  unsigned int pid;             //!< PID of process
-//  unsigned long long timeStamp; //!< CPU Timestamp in microseconds
-//  unsigned int smUtil;          //!< SM (3D/Compute) Util Value
-//  unsigned int memUtil;         //!< Frame Buffer Memory Util Value
-//  unsigned int encUtil;         //!< Encoder Util Value
-//  unsigned int decUtil;         //!< Decoder Util Value
-//};
-//
-//struct nvmlProcessInfoV2_t {
-//  unsigned int pid;
-//  unsigned long long usedGpuMemory;
-//  unsigned int  gpuInstanceId;
-//  unsigned int  computeInstanceId;
-//};
-//
-//struct device_process_t {
-//  struct nvmlProcessUtilizationSample_t process_util_samples[MAX_PIDS];
-//  unsigned int process_util_samples_size;
-//  unsigned long long lastSeenTimeStamp;
-//  struct nvmlProcessInfoV2_t compute_processes[MAX_PIDS];
-//  unsigned int compute_processes_size;
-//  struct nvmlProcessInfoV2_t graphics_processes[MAX_PIDS];
-//  unsigned int graphics_processes_size;
-//  unsigned char lock_byte;
-//};
-//
-//struct device_util_t {
-//  struct device_process_t devices[MAX_DEVICE_COUNT];
-//};
-//
-//#define GET_DEVICE_LOCK_OFFSET(device_index) \
-//  offsetof(struct device_util_t, devices[device_index].lock_byte)
-//
-//int device_util_read_lock(int ordinal, const char* filepath) {
-//  if (ordinal >= MAX_DEVICE_COUNT) {
-//    return -1;
-//  }
-//  int fd = open(filepath, O_RDONLY | O_CLOEXEC);
-//  if (fd == -1) {
-//    return -1;
-//  }
-//  struct flock lock;
-//  lock.l_type = F_RDLCK;
-//  lock.l_whence = SEEK_SET;
-//  lock.l_start = GET_DEVICE_LOCK_OFFSET(ordinal);
-//  lock.l_len = 1;
-//  lock.l_pid = 0;
-//  if (fcntl(fd, F_SETLKW, &lock) == -1) {
-//    close(fd);
-//    return -1;
-//  }
-//  return fd;
-//}
-//
-//int device_util_write_lock(int ordinal, const char* filepath) {
-//  if (ordinal >= MAX_DEVICE_COUNT) {
-//    return -1;
-//  }
-//  int fd = open(filepath, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-//  if (fd == -1) {
-//    return -1;
-//  }
-//  struct flock lock;
-//  lock.l_type = F_WRLCK;
-//  lock.l_whence = SEEK_SET;
-//  lock.l_start = GET_DEVICE_LOCK_OFFSET(ordinal);
-//  lock.l_len = 1;
-//  lock.l_pid = 0;
-//  if (fcntl(fd, F_SETLKW, &lock) == -1) {
-//    close(fd);
-//    return -1;
-//  }
-//  return fd;
-//}
-//
-//void device_util_unlock(int fd, int ordinal) {
-//  if (fd < 0) return;
-//  struct flock lock;
-//  lock.l_type = F_UNLCK;
-//  lock.l_whence = SEEK_SET;
-//  lock.l_start = GET_DEVICE_LOCK_OFFSET(ordinal);
-//  lock.l_len = 1;
-//  lock.l_pid = 0;
-//  fcntl(fd, F_SETLK, &lock);
-//  close(fd);
-//}
-//
-import "C"
-
+// MaxPids / MaxDeviceCount must stay identical to the writer/reader C side
+// (library MAX_PIDS / MAX_DEVICE_COUNT). They are the shared-memory ABI and are
+// asserted against the struct layout in sm_watcher_test.go.
 const (
-	MaxPids        = C.MAX_PIDS
-	MaxDeviceCount = C.MAX_DEVICE_COUNT
+	MaxPids        = util.MaxDevicePids
+	MaxDeviceCount = util.MaxDeviceCount
 )
 
+// DeviceProcessT mirrors C device_process_t. Field order, types and padding
+// must match the writer/reader on the C side byte-for-byte.
 type DeviceProcessT struct {
 	ProcessUtilSamples     [MaxPids]nvml.ProcessUtilizationSample
 	ProcessUtilSamplesSize uint32
@@ -137,110 +34,124 @@ type DeviceProcessT struct {
 	LockByte               uint8
 }
 
+// DeviceUtilT mirrors C device_util_t.
 type DeviceUtilT struct {
 	Devices [MaxDeviceCount]DeviceProcessT
 }
 
-type DeviceUtil struct {
+type MmapDeviceUtil struct {
 	deviceUtil *DeviceUtilT
-	deviceData []byte
-	filePath   string
+	mmapFile   *util.MmapFile
 }
 
-type DeviceUtilWrap struct {
-	deviceUtil *DeviceUtilT
-	filePath   string
-	fd         int
+// GetDeviceUtil Lock access should be added during use
+func (d *MmapDeviceUtil) GetDeviceUtil(deviceIndex int) (*DeviceProcessT, error) {
+	if deviceIndex >= util.MaxDeviceCount || deviceIndex < 0 {
+		return nil, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
+	}
+	return &d.deviceUtil.Devices[deviceIndex], nil
 }
 
-func (d *DeviceUtil) GetWrap() *DeviceUtilWrap {
-	return &DeviceUtilWrap{
-		deviceUtil: d.deviceUtil,
-		filePath:   d.filePath,
-		fd:         -1,
-	}
+// getDeviceLockOffset mirrors the writer side (library/src/lock.c
+// GET_DEVICE_LOCK_OFFSET): offsetof(device_util_t, devices[deviceIndex].lock_byte).
+// unsafe.Offsetof only yields the field offset within a single DeviceProcessT
+// (the array index is a compile-time constant and is ignored), so the per-device
+// stride must be added explicitly.
+func getDeviceLockOffset(deviceIndex int) int64 {
+	deviceSize := int64(unsafe.Sizeof(DeviceProcessT{}))
+	lockByteOffset := int64(unsafe.Offsetof(DeviceProcessT{}.LockByte))
+	return int64(deviceIndex)*deviceSize + lockByteOffset
 }
 
-// GetUtil Lock access should be added during use
-func (d *DeviceUtilWrap) GetUtil() *DeviceUtilT {
-	return d.deviceUtil
-}
-
-func (d *DeviceUtilWrap) RLock(ordinal int) error {
-	if d == nil {
-		return fmt.Errorf("DeviceUtilWrap is nil")
+func (d *MmapDeviceUtil) lock(deviceIndex int, lockType int16, flags int) (*os.File, error) {
+	if deviceIndex < 0 || deviceIndex >= util.MaxDeviceCount {
+		return nil, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
 	}
-	if d.fd >= 0 {
-		return fmt.Errorf("lock already exists")
-	}
-	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
-		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
-	}
-	fd, err := DeviceUtilRLock(ordinal, d.filePath)
+	f, err := os.OpenFile(d.mmapFile.Path, flags, 0644)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("open %q failed: %w", d.mmapFile.Path, err)
 	}
-	d.fd = fd
-	return nil
+	offset := getDeviceLockOffset(deviceIndex)
+	if err = util.FcntlRecordLock(f.Fd(), lockType, true, offset); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("fcntl lock device %d at offset %d: %w", deviceIndex, offset, err)
+	}
+	return f, nil
 }
 
-func (d *DeviceUtilWrap) WLock(ordinal int) error {
-	if d == nil {
-		return fmt.Errorf("DeviceUtilWrap is nil")
-	}
-	if d.fd >= 0 {
-		return fmt.Errorf("lock already exists")
-	}
-	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
-		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
-	}
-	fd, err := DeviceUtilWLock(ordinal, d.filePath)
+func (d *MmapDeviceUtil) RLock(deviceIndex int) (unlock func() error, err error) {
+	file, err := d.lock(deviceIndex, syscall.F_RDLCK, os.O_RDONLY)
 	if err != nil {
-		return err
+		return util.NilUnlock, err
 	}
-	d.fd = fd
-	return nil
+	var unlockOnce sync.Once
+	var unlockErr error
+	return func() error {
+		// Guard the whole teardown with Once so a second call is a no-op instead
+		// of double-closing the fd or unlocking an unlocked mutex.
+		unlockOnce.Do(func() {
+			offset := getDeviceLockOffset(deviceIndex)
+			unlockErr = util.FcntlRecordLock(file.Fd(), syscall.F_UNLCK, false, offset)
+			_ = file.Close()
+		})
+		return unlockErr
+	}, nil
 }
 
-func (d *DeviceUtilWrap) Unlock(ordinal int) error {
-	if d == nil {
-		return fmt.Errorf("DeviceUtilWrap is nil")
+func (d *MmapDeviceUtil) WLock(deviceIndex int) (unlock func() error, err error) {
+	file, err := d.lock(deviceIndex, syscall.F_WRLCK, os.O_RDWR|os.O_CREATE)
+	if err != nil {
+		return util.NilUnlock, err
 	}
-	if d.fd < 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
-		return fmt.Errorf("invalid parameter, fd=%d, device=%d", d.fd, ordinal)
-	}
-	DeviceUtilUnlock(d.fd, ordinal)
-	d.fd = -1
-	return nil
+	var unlockOnce sync.Once
+	var unlockErr error
+	return func() error {
+		// Guard the whole teardown with Once so a second call is a no-op instead
+		// of double-closing the fd or unlocking an unlocked mutex.
+		unlockOnce.Do(func() {
+			offset := getDeviceLockOffset(deviceIndex)
+			unlockErr = util.FcntlRecordLock(file.Fd(), syscall.F_UNLCK, false, offset)
+			_ = file.Close()
+		})
+		return unlockErr
+	}, nil
 }
 
-func (d *DeviceUtil) Munmap(msync bool) error {
-	if d == nil {
-		return fmt.Errorf("DeviceUtil is nil")
-	}
-	if msync {
-		_, _, errno := syscall.Syscall(
-			syscall.SYS_MSYNC,
-			uintptr(unsafe.Pointer(&d.deviceData[0])),
-			uintptr(len(d.deviceData)),
-			uintptr(syscall.MS_SYNC),
-		)
-		if errno != 0 {
-			klog.V(3).ErrorS(errno, "failed to sync mmap", "filepath", d.filePath)
-		}
-	}
-	return syscall.Munmap(d.deviceData)
+//func (d *MmapDeviceUtil) Munmap(msync bool) error {
+//	if d == nil {
+//		return fmt.Errorf("DeviceUtil is nil")
+//	}
+//	if msync {
+//		if err := d.mmapFile.Sync(); err != nil {
+//			klog.V(3).ErrorS(err, "failed to sync mmap", "filepath", d.filePath)
+//		}
+//	}
+//	return d.mmapFile.Close()
+//}
+
+func (d *MmapDeviceUtil) Sync() error {
+	return d.mmapFile.Sync()
 }
 
-func NewDeviceUtil(filePath string) (*DeviceUtil, error) {
-	util, data, err := MmapDeviceUtilT(filePath)
+func (d *MmapDeviceUtil) Close() error {
+	return d.mmapFile.Close()
+}
+
+func NewMmapDeviceUtil(filePath string) (*MmapDeviceUtil, error) {
+	mmapFile, err := util.OpenMmap(filePath, util.DefaultReadWriteMmap)
 	if err != nil {
 		return nil, err
 	}
-	return &DeviceUtil{
-		deviceUtil: util,
-		deviceData: data,
-		filePath:   filePath,
+	dataSize := int64(unsafe.Sizeof(DeviceUtilT{}))
+	if mmapFile.FileInfo.Size() != dataSize {
+		klog.Errorf("File size mismatch, expected: %d, actual: %d", dataSize, mmapFile.FileInfo.Size())
+		_ = mmapFile.Close()
+		return nil, fmt.Errorf("file size mismatch")
+	}
+	deviceUtil := (*DeviceUtilT)(unsafe.Pointer(&mmapFile.Data[0]))
+	return &MmapDeviceUtil{
+		deviceUtil: deviceUtil,
+		mmapFile:   mmapFile,
 	}, nil
 }
 
@@ -296,61 +207,4 @@ func PrepareDeviceUtilFile(filePath string) error {
 		return err
 	}
 	return CreateDeviceUtilFile(filePath)
-}
-
-func MmapDeviceUtilT(filePath string) (*DeviceUtilT, []byte, error) {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		klog.Errorf("Failed to stat file: %s, error: %v", filePath, err)
-		return nil, nil, err
-	}
-	dataSize := int64(unsafe.Sizeof(DeviceUtilT{}))
-	if fileInfo.Size() != dataSize {
-		klog.Errorf("File size mismatch, expected: %d, actual: %d", dataSize, fileInfo.Size())
-		return nil, nil, fmt.Errorf("file size mismatch")
-	}
-	f, err := os.OpenFile(filePath, os.O_RDWR, 0666)
-	if err != nil {
-		klog.ErrorS(err, "Failed to open file", "filepath", filePath)
-		return nil, nil, err
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-	data, err := syscall.Mmap(int(f.Fd()), 0, int(dataSize), syscall.PROT_WRITE|syscall.PROT_READ, syscall.MAP_SHARED)
-	if err != nil {
-		klog.ErrorS(err, "Failed to mmap file", "filepath", filePath)
-		return nil, nil, err
-	}
-	resourceData := (*DeviceUtilT)(unsafe.Pointer(&data[0]))
-	return resourceData, data, nil
-}
-
-// DeviceUtilRLock get device util file read lock
-func DeviceUtilRLock(ordinal int, filepath string) (int, error) {
-	cFilePath := C.CString(filepath)
-	defer C.free(unsafe.Pointer(cFilePath))
-
-	fd := C.device_util_read_lock(C.int(ordinal), cFilePath)
-	if fd == -1 {
-		return -1, fmt.Errorf("failed to acquire lock for device %d at path %s", ordinal, filepath)
-	}
-	return int(fd), nil
-}
-
-// DeviceUtilWLock get device util file write lock
-func DeviceUtilWLock(ordinal int, filepath string) (int, error) {
-	cFilePath := C.CString(filepath)
-	defer C.free(unsafe.Pointer(cFilePath))
-
-	fd := C.device_util_write_lock(C.int(ordinal), cFilePath)
-	if fd == -1 {
-		return -1, fmt.Errorf("failed to acquire lock for device %d at path %s", ordinal, filepath)
-	}
-	return int(fd), nil
-}
-
-// DeviceUtilUnlock unlock device util file
-func DeviceUtilUnlock(fd int, ordinal int) {
-	C.device_util_unlock(C.int(fd), C.int(ordinal))
 }

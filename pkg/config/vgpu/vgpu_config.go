@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
+	"sync"
 	"unsafe"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -16,91 +16,13 @@ import (
 	"k8s.io/klog/v2"
 )
 
-//#cgo CFLAGS: -D_GNU_SOURCE
-//#include <stdint.h>
-//#include <sys/types.h>
-//#include <sys/stat.h>
-//#include <fcntl.h>
-//#include <string.h>
-//#include <sys/file.h>
-//#include <time.h>
-//#include <stdlib.h>
-//#include <unistd.h>
-//
-//#ifndef MAX_DEVICE_COUNT
-//#define MAX_DEVICE_COUNT 16
-//#endif
-//
-//#ifndef UUID_BUFFER_SIZE
-//#define UUID_BUFFER_SIZE 48
-//#endif
-//
-//#ifndef NAME_BUFFER_SIZE
-//#define NAME_BUFFER_SIZE 64
-//#endif
-//
-//#ifndef FILENAME_MAX
-//#define FILENAME_MAX 260
-//#endif
-//
-//struct version_t {
-//  int major;
-//  int minor;
-//};
-//
-//struct device_t {
-//  char uuid[UUID_BUFFER_SIZE];
-//  uint64_t total_memory;
-//  uint64_t real_memory;
-//  int hard_core;
-//  int soft_core;
-//  int core_limit;
-//  int hard_limit;
-//  int memory_limit;
-//  int memory_oversold;
-//  int activate;
-//};
-//
-//struct resource_data_t {
-//  struct version_t driver_version;
-//  char pod_uid[UUID_BUFFER_SIZE];
-//  char pod_name[NAME_BUFFER_SIZE];
-//  char pod_namespace[NAME_BUFFER_SIZE];
-//  char container_name[NAME_BUFFER_SIZE];
-//  struct device_t devices[MAX_DEVICE_COUNT];
-//  int compatibility_mode;
-//  int sm_watcher;
-//  int vmem_node;
-//  char reg_uuid[UUID_BUFFER_SIZE];
-//};
-//
-//int setting_to_disk(const char* filename, struct resource_data_t* data) {
-//  int fd = 0;
-//  int wsize = 0;
-//  int ret = 0;
-//
-//  fd = open(filename, O_CREAT | O_TRUNC | O_WRONLY, 00777);
-//  if (fd == -1) {
-//    return 1;
-//  }
-//
-//  wsize = (int)write(fd, (void*)data, sizeof(struct resource_data_t));
-//  if (wsize != sizeof(struct resource_data_t)) {
-//    ret = 1;
-//	  goto DONE;
-//  }
-//
-//DONE:
-//  close(fd);
-//
-//  return ret;
-//}
-import "C"
-
+// These sizes are the shared config-file ABI mirrored from the C side
+// (library resource_data_t / device_t). MaxDeviceCount is the shared
+// MAX_DEVICE_COUNT; the struct layout is asserted in vgpu_config_test.go.
 const (
-	MaxDeviceCount = C.MAX_DEVICE_COUNT
-	NameBufferSize = C.NAME_BUFFER_SIZE
-	UuidBufferSize = C.UUID_BUFFER_SIZE
+	MaxDeviceCount = util.MaxDeviceCount
+	NameBufferSize = 64
+	UuidBufferSize = 48
 )
 
 type VersionT struct {
@@ -134,21 +56,54 @@ type ResourceDataT struct {
 	RegisterUUID      [UuidBufferSize]byte
 }
 
-type ResourceData struct {
-	resourceCfg  *ResourceDataT
-	resourceData []byte
-	filePath     string
+type MmapResourceData struct {
+	resource *ResourceDataT
+	mmapFile *util.MmapFile
+	mutex    sync.Mutex
 }
 
-func (r *ResourceData) GetCfg() *ResourceDataT {
-	return r.resourceCfg
+func (r *MmapResourceData) GetResource() *ResourceDataT {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.resource
 }
 
-func (r *ResourceData) Munmap() error {
-	if r == nil {
-		return fmt.Errorf("ResourceData is nil")
+// CopyResource returns a deep copy taken while holding the lock, so the read is
+// safe against a concurrent Reload/Close munmapping the mapping. Callers that
+// only need a snapshot (not the live pointer) must use this, not GetResource:
+// GetResource hands out a pointer into the mmap and releases the lock, so
+// dereferencing it afterwards races with Reload's munmap.
+func (r *MmapResourceData) CopyResource() *ResourceDataT {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.resource.DeepCopy()
+}
+
+func (r *MmapResourceData) Close() error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return r.mmapFile.Close()
+}
+
+func (r *MmapResourceData) NeedsReload() (reload bool, err error) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	return r.mmapFile.NeedsReload()
+}
+
+func (r *MmapResourceData) Reload() error {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	data, err := NewMmapResourceData(r.mmapFile.Path)
+	if err != nil {
+		return fmt.Errorf("reload %q failed: %w", r.mmapFile.Path, err)
 	}
-	return syscall.Munmap(r.resourceData)
+	_ = r.mmapFile.Close()
+	r.resource = data.resource
+	r.mmapFile = data.mmapFile
+	return nil
 }
 
 func CheckResourceDataSize(filePath string) error {
@@ -163,15 +118,21 @@ func CheckResourceDataSize(filePath string) error {
 	return nil
 }
 
-func NewResourceData(filePath string) (*ResourceData, error) {
-	cfg, data, err := MmapResourceDataT(filePath)
+func NewMmapResourceData(filePath string) (*MmapResourceData, error) {
+	mmapFile, err := util.OpenMmap(filePath, util.DefaultReadWriteMmap)
 	if err != nil {
 		return nil, err
 	}
-	return &ResourceData{
-		resourceCfg:  cfg,
-		resourceData: data,
-		filePath:     filePath,
+	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
+	if mmapFile.FileInfo.Size() != dataSize {
+		klog.Errorf("File size mismatch, expected: %d, actual: %d", dataSize, mmapFile.FileInfo.Size())
+		_ = mmapFile.Close()
+		return nil, fmt.Errorf("vGPU config file size mismatch")
+	}
+	data := (*ResourceDataT)(unsafe.Pointer(&mmapFile.Data[0]))
+	return &MmapResourceData{
+		resource: data,
+		mmapFile: mmapFile,
 	}, nil
 }
 
@@ -200,31 +161,11 @@ func GetCompatibilityMode(devManager *manager.DeviceManager) util.CompatibilityM
 	return mode
 }
 
-func MmapResourceDataT(filePath string) (*ResourceDataT, []byte, error) {
-	if err := CheckResourceDataSize(filePath); err != nil {
-		klog.Errorln(err)
-		return nil, nil, err
-	}
-	f, err := os.OpenFile(filePath, os.O_RDWR, 0666)
-	if err != nil {
-		klog.Errorf("Failed to open file: %s, error: %v", filePath, err)
-		return nil, nil, err
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
-	data, err := syscall.Mmap(int(f.Fd()), 0, int(dataSize), syscall.PROT_WRITE|syscall.PROT_READ, syscall.MAP_SHARED)
-	if err != nil {
-		klog.Errorf("Failed to mmap file: %s, error: %v", filePath, err)
-		return nil, nil, err
-	}
-	resourceData := (*ResourceDataT)(unsafe.Pointer(&data[0]))
-	return resourceData, data, nil
-}
-
-func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
-	containerClaim device.ContainerDeviceClaim, memoryOversold bool, node *corev1.Node) *ResourceDataT {
+func NewResourceDataT(
+	devManager *manager.DeviceManager, pod *corev1.Pod,
+	containerClaim device.ContainerDeviceClaim,
+	memoryOversold bool, node *corev1.Node,
+) *ResourceDataT {
 	major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
 	ratio := devManager.GetNodeConfig().GetDeviceMemoryScaling()
 	convert48Bytes := func(val string) [UuidBufferSize]byte {
@@ -313,6 +254,14 @@ func NewResourceDataT(devManager *manager.DeviceManager, pod *corev1.Pod,
 		} else {
 			dev.MemoryOversold = 0
 		}
+		// gpuDevice.Id is the host device index; the shared-memory layout only
+		// has MaxDeviceCount slots. Guard the write so a node with more GPUs than
+		// that cannot index out of range (the old cgo path did a silent OOB
+		// memcpy here instead).
+		if gpuDevice.Id < 0 || gpuDevice.Id >= MaxDeviceCount {
+			klog.Warningf("Device host index %d out of range [0, %d), skip", gpuDevice.Id, MaxDeviceCount)
+			continue
+		}
 		devices[gpuDevice.Id] = dev
 	}
 	compMode := GetCompatibilityMode(devManager)
@@ -355,138 +304,40 @@ func GetComputePolicy(policy string) util.ComputePolicy {
 	}
 }
 
+// writeResourceDataToDisk writes the fixed-size ResourceDataT to filePath as a
+// raw byte image, matching the C setting_to_disk (O_CREAT|O_TRUNC|O_WRONLY,
+// mode 0777). The Go struct layout is byte-for-byte identical to the C
+// resource_data_t (asserted by CheckResourceDataSize and the mmap round-trip
+// test), so the bytes are interchangeable with the C reader.
+func writeResourceDataToDisk(filePath string, data *ResourceDataT) error {
+	size := int(unsafe.Sizeof(ResourceDataT{}))
+	buf := unsafe.Slice((*byte)(unsafe.Pointer(data)), size)
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0777)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = f.Close()
+	}()
+	n, err := f.Write(buf)
+	if err != nil {
+		return err
+	}
+	if n != size {
+		return fmt.Errorf("short write for config %s: wrote %d of %d bytes", filePath, n, size)
+	}
+	return nil
+}
+
 func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod *corev1.Pod,
 	containerClaim device.ContainerDeviceClaim, memoryOversold bool, node *corev1.Node) error {
 	if _, err := os.Stat(filePath); err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		var vgpuConfig C.struct_resource_data_t
-		var driverVersion C.struct_version_t
-		major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
-		ratio := devManager.GetNodeConfig().GetDeviceMemoryScaling()
-
-		driverVersion.major = C.int(major)
-		driverVersion.minor = C.int(minor)
-		vgpuConfig.driver_version = driverVersion
-		compMode := GetCompatibilityMode(devManager)
-		vgpuConfig.compatibility_mode = C.int(compMode)
-		if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
-			vgpuConfig.sm_watcher = C.int(1)
-		} else {
-			vgpuConfig.sm_watcher = C.int(0)
-		}
-		if devManager.GetFeatureGate().Enabled(util.VMemoryNode) {
-			vgpuConfig.vmem_node = C.int(1)
-		} else {
-			vgpuConfig.vmem_node = C.int(0)
-		}
-		podUID := C.CString(string(pod.UID))
-		defer C.free(unsafe.Pointer(podUID))
-		C.strcpy(&vgpuConfig.pod_uid[0], (*C.char)(unsafe.Pointer(podUID)))
-
-		podName := C.CString(pod.Name)
-		defer C.free(unsafe.Pointer(podName))
-		C.strcpy(&vgpuConfig.pod_name[0], (*C.char)(unsafe.Pointer(podName)))
-
-		podNamespace := C.CString(pod.Namespace)
-		defer C.free(unsafe.Pointer(podNamespace))
-		C.strcpy(&vgpuConfig.pod_namespace[0], (*C.char)(unsafe.Pointer(podNamespace)))
-
-		containerName := C.CString(containerClaim.Name)
-		defer C.free(unsafe.Pointer(containerName))
-		C.strcpy(&vgpuConfig.container_name[0], (*C.char)(unsafe.Pointer(containerName)))
-
-		registerUuid := C.CString("")
-		defer C.free(unsafe.Pointer(registerUuid))
-		C.strcpy(&vgpuConfig.reg_uuid[0], (*C.char)(unsafe.Pointer(registerUuid)))
-
-		computePolicy := GetDefaultComputePolicy(pod, node)
-
-		deviceInfos := devManager.GetNodeDeviceInfo()
-		deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))
-		for i := range deviceInfos[:min(MaxDeviceCount, len(deviceInfos))] {
-			deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
-		}
-
-		for i, claim := range containerClaim.DeviceClaims {
-			if i >= C.MAX_DEVICE_COUNT {
-				break
-			}
-
-			func() {
-				var cDevice C.struct_device_t
-				devUuid := C.CString(claim.Uuid)
-				defer C.free(unsafe.Pointer(devUuid))
-				C.strcpy((*C.char)(unsafe.Pointer(&cDevice.uuid[0])), (*C.char)(unsafe.Pointer(devUuid)))
-				totalMemoryBytes := uint64(claim.Memory) << 20
-				realMemoryBytes := totalMemoryBytes
-				//  uint64_t total_memory;
-				cDevice.total_memory = C.uint64_t(totalMemoryBytes)
-				if ratio > 1 {
-					memoryOversold = true
-					realMemoryBytes = uint64(float64(realMemoryBytes) / ratio)
-				}
-				//  uint64_t real_memory;
-				cDevice.real_memory = C.uint64_t(realMemoryBytes)
-				gpuDevice := deviceInfoMap[claim.Uuid]
-				//  int hard_core;
-				cDevice.hard_core = C.int(claim.Cores)
-				//  int soft_core;
-				cDevice.soft_core = C.int(claim.Cores)
-				//  int core_limit;
-				cDevice.core_limit = 0
-				//  int hard_limit;
-				cDevice.hard_limit = 0
-				cDevice.activate = 1
-				switch computePolicy {
-				case util.BalanceComputePolicy:
-					//  int soft_core;
-					cDevice.soft_core = C.int(gpuDevice.Core)
-					// need limit core
-					if claim.Cores > 0 && claim.Cores < util.HundredCore {
-						//  int core_limit;
-						cDevice.core_limit = 1
-						if claim.Cores >= gpuDevice.Core {
-							//  int hard_limit;
-							cDevice.hard_limit = 1
-						}
-					}
-				case util.FixedComputePolicy:
-					// need limit core
-					if claim.Cores > 0 && claim.Cores < util.HundredCore {
-						//  int core_limit;
-						cDevice.core_limit = 1
-						//  int hard_limit;
-						cDevice.hard_limit = 1
-					}
-				case util.NoneComputePolicy:
-				}
-
-				//  int memory_limit;
-				if claim.Memory == gpuDevice.Memory && ratio == 1 {
-					cDevice.memory_limit = 0
-				} else {
-					cDevice.memory_limit = 1
-				}
-				//  int memory_oversold
-				if memoryOversold {
-					cDevice.memory_oversold = 1
-				} else {
-					cDevice.memory_oversold = 0
-				}
-				C.memcpy(
-					unsafe.Pointer(&vgpuConfig.devices[gpuDevice.Id]),
-					unsafe.Pointer(&cDevice),
-					C.size_t(unsafe.Sizeof(cDevice)),
-				)
-			}()
-		}
-
-		cFileName := C.CString(filePath)
-		defer C.free(unsafe.Pointer(cFileName))
-		if C.setting_to_disk(cFileName, &vgpuConfig) != 0 {
-			return fmt.Errorf("can't sink config %s", filePath)
+		data := NewResourceDataT(devManager, pod, containerClaim, memoryOversold, node)
+		if err = writeResourceDataToDisk(filePath, data); err != nil {
+			return fmt.Errorf("can't sink config %s: %w", filePath, err)
 		}
 	}
 	return nil

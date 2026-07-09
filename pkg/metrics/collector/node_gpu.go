@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -301,7 +302,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devProcInfoMap = make(map[string]procInfoList)
 		devProcUtilMap = make(map[string]procUtilList)
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
-		deviceUtil     *watcher.DeviceUtil
+		deviceUtil     *watcher.MmapDeviceUtil
 	)
 	err := c.NvmlInit()
 	if err != nil {
@@ -310,7 +311,9 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	defer func() {
 		c.NvmlShutdown()
-		_ = deviceUtil.Munmap(false)
+		if deviceUtil != nil {
+			_ = deviceUtil.Close()
+		}
 	}()
 
 	func() {
@@ -340,7 +343,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	}()
 
 	if c.featureGate.Enabled(util.SMWatcher) {
-		if deviceUtil, err = watcher.NewDeviceUtil(smFilePath); err != nil {
+		if deviceUtil, err = watcher.NewMmapDeviceUtil(smFilePath); err != nil && !os.IsNotExist(err) {
 			klog.V(3).ErrorS(err, "Failed to read manager SM util file")
 		}
 	}
@@ -638,7 +641,11 @@ skipNvml:
 								klog.ErrorS(err, "vMemory unlock failed", "devHostIndex", devHostIndex)
 							}
 						}()
-						deviceUsed, _ := vMemory.GetDeviceMemory(devHostIndex)
+						deviceUsed, err := vMemory.GetDeviceMemory(devHostIndex)
+						if err != nil {
+							klog.V(3).ErrorS(err, "get device vMemory failed", "devHostIndex", devHostIndex)
+							return
+						}
 						deviceVMemUsage += deviceUsed.GetTotalUsed()
 					}()
 				}
@@ -835,7 +842,7 @@ skipNvml:
 
 }
 
-func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtil, index int, hdev nvml.Device, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList) {
+func CollectorDeviceProcesses(deviceUtil *watcher.MmapDeviceUtil, index int, hdev nvml.Device, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList) {
 	uuid, rt := hdev.GetUUID()
 	if rt != nvml.SUCCESS {
 		err := fmt.Errorf("error getting pci info for device %d: %v", index, rt)
@@ -861,32 +868,33 @@ func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtil, index int, hdev nv
 	}
 
 	if deviceUtil != nil {
-		deviceUtilWrap := deviceUtil.GetWrap()
 		klog.V(4).InfoS("collector device processes from sm watcher", "device", index)
-		if err := deviceUtilWrap.RLock(index); err == nil {
-			micro := time.UnixMicro(int64(deviceUtilWrap.GetUtil().Devices[index].LastSeenTimeStamp))
+		if unlock, err := deviceUtil.RLock(index); err != nil {
+			klog.V(3).ErrorS(err, "SM Watcher lock failed, fallback to nvml driver call", "device", index)
+		} else if devUtil, err := deviceUtil.GetDeviceUtil(index); err != nil {
+			klog.V(3).ErrorS(err, "get device util failed", "device", index)
+		} else {
+			micro := time.UnixMicro(int64(devUtil.LastSeenTimeStamp))
 			if time.Now().Sub(micro) > 5*time.Second {
-				_ = deviceUtilWrap.Unlock(index)
+				_ = unlock()
 				klog.V(3).InfoS("Process utilization time window timeout detected, rollback using nvml driver to obtain utilization", "device", index)
 				nvmlProcessInfoFunc()
 				goto nvmlProcessUtil
 			}
-			if deviceUtilWrap.GetUtil().Devices[index].ComputeProcessesSize > 0 {
-				processInfos = append(processInfos, deviceUtilWrap.GetUtil().Devices[index].ComputeProcesses[:deviceUtilWrap.GetUtil().Devices[index].ComputeProcessesSize]...)
+			if devUtil.ComputeProcessesSize > 0 {
+				processInfos = append(processInfos, devUtil.ComputeProcesses[:devUtil.ComputeProcessesSize]...)
 			}
-			if deviceUtilWrap.GetUtil().Devices[index].GraphicsProcessesSize > 0 {
-				processInfos = append(processInfos, deviceUtilWrap.GetUtil().Devices[index].GraphicsProcesses[:deviceUtilWrap.GetUtil().Devices[index].GraphicsProcessesSize]...)
+			if devUtil.GraphicsProcessesSize > 0 {
+				processInfos = append(processInfos, devUtil.GraphicsProcesses[:devUtil.GraphicsProcessesSize]...)
 			}
 			if len(processInfos) == 0 {
 				nvmlProcessInfoFunc()
 			}
-			if deviceUtilWrap.GetUtil().Devices[index].ProcessUtilSamplesSize > 0 {
-				processUtilizationSamples = append(processUtilizationSamples, deviceUtilWrap.GetUtil().Devices[index].ProcessUtilSamples[:deviceUtilWrap.GetUtil().Devices[index].ProcessUtilSamplesSize]...)
+			if devUtil.ProcessUtilSamplesSize > 0 {
+				processUtilizationSamples = append(processUtilizationSamples, devUtil.ProcessUtilSamples[:devUtil.ProcessUtilSamplesSize]...)
 			}
-			_ = deviceUtilWrap.Unlock(index)
+			_ = unlock()
 			goto collecProcessInfo
-		} else {
-			klog.V(3).ErrorS(err, "SM Watcher lock failed, fallback to nvml driver call", "device", index)
 		}
 	}
 

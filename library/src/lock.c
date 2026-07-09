@@ -14,13 +14,47 @@
 #define LOCK_PATH_FORMAT (TMP_DIR VGPU_LOCK_DIR "/vgpu_%d.lock")
 #define LOCK_PATH_SIZE   32
 #define SPIN_INTERVAL_MS 10
-#define LOCK_TIMEOUT_MS  5000
+#define LOCK_TIMEOUT_MS  10000
 
 #define GET_DEVICE_LOCK_OFFSET(device_index) \
   offsetof(device_util_t, devices[device_index].lock_byte)
 
 #define GET_VMEMORY_LOCK_OFFSET(device_index) \
   offsetof(device_vmemory_t, devices[device_index].lock_byte)
+
+/* The per-device byte-range locks on the shared sm-util / vmem files use OFD
+ * (Open File Description) locks instead of classic process-associated locks.
+ * Classic POSIX locks are released when the process closes ANY fd on the inode,
+ * so a fresh-fd-per-lock caller that holds locks on several device bytes (or
+ * also keeps the file mmap'd) would have one unlock/close silently drop a
+ * sibling device's still-held lock. OFD locks are owned by the open file
+ * description, so an unrelated close never touches them, while still conflicting
+ * across fds and cross-process. Requires Linux >= 3.15; the build defines
+ * _GNU_SOURCE (see CMakeLists.txt), and the fallbacks below cover builds that
+ * do not (the values are fixed across all Linux architectures).
+ * lock_gpu_device()'s per-device file lock also uses OFD: those files are not
+ * exposed to the sibling-drop problem (one inode per device), but OFD gives it
+ * intra-process mutual exclusion, which a classic per-process lock cannot (fds
+ * of one process never conflict), closing a TOCTOU race between threads of the
+ * same container allocating on the same device. */
+#ifndef F_OFD_SETLK
+#define F_OFD_SETLK 37
+#endif
+#ifndef F_OFD_SETLKW
+#define F_OFD_SETLKW 38
+#endif
+
+/* Prefer OFD locks (Linux >= 3.15); fall back to classic POSIX locks at runtime
+ * when the kernel rejects them with EINVAL. On modern kernels the OFD call
+ * succeeds on the first try, so there is no extra syscall. A classic F_UNLCK
+ * does not release an OFD lock and vice versa, but that never mixes here: a
+ * kernel either supports OFD (every call, lock and unlock, uses it) or does not
+ * (every call falls back), so acquire and release always stay in one family. */
+static int ofd_fcntl(int fd, int wait, struct flock *fl) {
+  int ret = fcntl(fd, wait ? F_OFD_SETLKW : F_OFD_SETLK, fl);
+  if (ret != -1 || errno != EINVAL) return ret;
+  return fcntl(fd, wait ? F_SETLKW : F_SETLK, fl); /* legacy kernels */
+}
 
 static const struct timespec sleep_time = {
   .tv_sec = 0,
@@ -69,7 +103,11 @@ static int try_acquire_lock(const char *path) {
     .l_start = 0,
     .l_len = 0, // lock entire file
   };
-  if (fcntl(fd, F_SETLK, &fl) == -1) {
+  // OFD lock (non-blocking): gives intra-process mutual exclusion too, which a
+  // classic per-process lock on this per-device file would not (same-process
+  // fds never conflict). lock_gpu_device() spins on EAGAIN with a timeout.
+  // .l_pid is zero-initialized above, as OFD requires.
+  if (ofd_fcntl(fd, 0, &fl) == -1) {
     close(fd);
     return -1;
   }
@@ -118,7 +156,7 @@ void unlock_gpu_device(int fd) {
     .l_start = 0,
     .l_len = 0,
   };
-  fcntl(fd, F_SETLK, &fl);
+  ofd_fcntl(fd, 0, &fl);
   close(fd);
 }
 
@@ -138,7 +176,7 @@ int device_util_read_lock(int device_index) {
   lock.l_start = GET_DEVICE_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  if (fcntl(fd, F_SETLKW, &lock) == -1) {
+  if (ofd_fcntl(fd, 1, &lock) == -1) {
     LOGGER(ERROR, "(SMWatcher) fcntl read lock failed for device %d: %s",
                device_index, strerror(errno));
     close(fd);
@@ -163,7 +201,7 @@ int device_util_write_lock(int device_index) {
   lock.l_start = GET_DEVICE_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  if (fcntl(fd, F_SETLKW, &lock) == -1) {
+  if (ofd_fcntl(fd, 1, &lock) == -1) {
     LOGGER(ERROR, "(SMWatcher) fcntl write lock failed for device %d: %s",
            device_index, strerror(errno));
     close(fd);
@@ -181,7 +219,7 @@ void device_util_unlock(int fd, int device_index) {
   lock.l_start = GET_DEVICE_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  fcntl(fd, F_SETLK, &lock);
+  ofd_fcntl(fd, 0, &lock);
   close(fd);
 }
 
@@ -201,7 +239,7 @@ int device_vmem_read_lock(int device_index) {
   lock.l_start = GET_VMEMORY_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  if (fcntl(fd, F_SETLKW, &lock) == -1) {
+  if (ofd_fcntl(fd, 1, &lock) == -1) {
     LOGGER(ERROR, "(VMemNode) fcntl read lock failed for device %d: %s",
                device_index, strerror(errno));
     close(fd);
@@ -226,7 +264,7 @@ int device_vmem_write_lock(int device_index) {
   lock.l_start = GET_VMEMORY_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  if (fcntl(fd, F_SETLKW, &lock) == -1) {
+  if (ofd_fcntl(fd, 1, &lock) == -1) {
     LOGGER(ERROR, "(VMemNode) fcntl write lock failed for device %d: %s",
            device_index, strerror(errno));
     close(fd);
@@ -244,6 +282,6 @@ void device_vmem_unlock(int fd, int device_index) {
   lock.l_start = GET_VMEMORY_LOCK_OFFSET(device_index);
   lock.l_len = 1;
   lock.l_pid = 0;
-  fcntl(fd, F_SETLK, &lock);
+  ofd_fcntl(fd, 0, &lock);
   close(fd);
 }

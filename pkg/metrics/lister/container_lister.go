@@ -48,13 +48,15 @@ type ContainerLister struct {
 	basePath       string
 	nodeName       string
 	podLister      listerv1.PodLister
-	containerDatas map[ContainerKey]*vgpu.ResourceData
+	containerDatas map[ContainerKey]*vgpu.MmapResourceData
 	containerVMems map[ContainerKey]*vmem.MmapDeviceVMemory
 }
 
+// removeResourceData and removeResourceVMem mutate the underlying maps and must
+// be called with c.mutex held for writing.
 func (c *ContainerLister) removeResourceData(key ContainerKey) {
 	if d, ok := c.containerDatas[key]; ok {
-		_ = d.Munmap()
+		_ = d.Close()
 		delete(c.containerDatas, key)
 	}
 }
@@ -66,7 +68,7 @@ func (c *ContainerLister) removeResourceVMem(key ContainerKey) {
 	}
 }
 
-func (c *ContainerLister) addResourceData(key ContainerKey, data *vgpu.ResourceData) {
+func (c *ContainerLister) addResourceData(key ContainerKey, data *vgpu.MmapResourceData) {
 	c.mutex.Lock()
 	c.removeResourceData(key)
 	c.containerDatas[key] = data
@@ -97,12 +99,18 @@ func (c *ContainerLister) GetResourceVMem(key ContainerKey) (*vmem.MmapDeviceVMe
 func (c *ContainerLister) GetResourceDataT(key ContainerKey) (*vgpu.ResourceDataT, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-
 	if data, ok := c.containerDatas[key]; !ok {
 		return nil, false
 	} else {
-		return data.GetCfg().DeepCopy(), true
+		return data.CopyResource(), true
 	}
+}
+
+func (c *ContainerLister) getResourceData(key ContainerKey) (*vgpu.MmapResourceData, bool) {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	data, ok := c.containerDatas[key]
+	return data, ok
 }
 
 var excludedFolders = map[string]bool{
@@ -160,19 +168,37 @@ func (c *ContainerLister) update() error {
 			continue
 		}
 		matched := keySet.Has(containerKey)
-		_, existCfg := c.GetResourceDataT(containerKey)
+		resourceData, existCfg := c.getResourceData(containerKey)
 		resourceVMem, existVMem := c.GetResourceVMem(containerKey)
 		switch {
 		case matched:
 			if !existCfg {
 				configFile := filepath.Join(filePath, util.Config, dpvgpu.VGPUConfigFileName)
-				resourceData, err := vgpu.NewResourceData(configFile)
+				resourceData, err = vgpu.NewMmapResourceData(configFile)
 				if err != nil && !os.IsNotExist(err) {
 					klog.V(4).ErrorS(err, "Failed to new device config", "filePath", configFile)
 				}
 				if err == nil && resourceData != nil {
 					klog.V(3).InfoS("Add vGPU config file", "filePath", configFile)
 					c.addResourceData(containerKey, resourceData)
+				}
+			} else {
+				reload, err := resourceData.NeedsReload()
+				if err != nil {
+					if os.IsNotExist(err) {
+						klog.V(3).InfoS("Detected that the Resource file has been deleted", "containerKey", containerKey.String())
+						c.mutex.Lock()
+						c.removeResourceData(containerKey)
+						c.mutex.Unlock()
+					} else {
+						klog.V(2).ErrorS(err, "Resource file NeedsReload failed", "containerKey", containerKey.String())
+					}
+				}
+				if reload {
+					klog.V(3).InfoS("Detected that Resource file has been changed", "containerKey", containerKey.String())
+					if err = resourceData.Reload(); err != nil {
+						klog.V(1).ErrorS(err, "", "containerKey", containerKey.String())
+					}
 				}
 			}
 			if !existVMem {
@@ -190,9 +216,11 @@ func (c *ContainerLister) update() error {
 				if err != nil {
 					if os.IsNotExist(err) {
 						klog.V(3).InfoS("Detected that the vMemory file has been deleted", "containerKey", containerKey.String())
+						c.mutex.Lock()
 						c.removeResourceVMem(containerKey)
+						c.mutex.Unlock()
 					} else {
-						klog.V(2).ErrorS(err, "vMemory NeedsReload failed", "containerKey", containerKey.String())
+						klog.V(2).ErrorS(err, "vMemory file NeedsReload failed", "containerKey", containerKey.String())
 					}
 				}
 				if reload {
@@ -232,7 +260,7 @@ func NewContainerLister(basePath, nodeName string, podLister listerv1.PodLister)
 		basePath:       basePath,
 		nodeName:       nodeName,
 		podLister:      podLister,
-		containerDatas: make(map[ContainerKey]*vgpu.ResourceData),
+		containerDatas: make(map[ContainerKey]*vgpu.MmapResourceData),
 		containerVMems: make(map[ContainerKey]*vmem.MmapDeviceVMemory),
 	}
 }

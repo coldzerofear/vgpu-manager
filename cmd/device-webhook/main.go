@@ -155,13 +155,16 @@ func runApp(opt *options.Options) (exitCode int) {
 	exitCode = 1
 
 	util.MustInitGlobalDomain(opt.Domain)
-	config, err := pkgclient.NewKubeConfig(pkgclient.WithDefaultUserAgent())
+	config, err := pkgclient.NewKubeConfig(
+		pkgclient.WithConfigMasterURL(opt.MasterURL),
+		pkgclient.WithKubeConfigPath(opt.KubeConfigFile),
+		pkgclient.WithQPSBurst(opt.QPS, opt.Burst),
+		pkgclient.WithDefaultUserAgent())
 	if err != nil {
 		klog.Errorf("Create kubeConfig failed: %v", err)
 		return exitCode
 	}
-
-	if opt.ServerBindPort <= 0 {
+	if opt.ServerBindPort <= 0 || opt.ServerBindPort > 65535 {
 		klog.Errorf("The service binding port range should be between 1-65535, current: %d", opt.ServerBindPort)
 		return exitCode
 	}

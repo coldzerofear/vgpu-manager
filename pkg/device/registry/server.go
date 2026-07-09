@@ -212,7 +212,7 @@ func (s *DeviceRegistryServerImpl) IsRunning() bool {
 // container not yet Running, cgroup still ramping up) until the request
 // context is canceled.
 func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, req *registry.ContainerDeviceRequest) (resp *registry.ContainerDeviceResponse, err error) {
-	klog.V(3).InfoS("RegisterContainerDevice", "podUid", req.GetPodUid(),
+	klog.V(4).InfoS("RegisterContainerDevice", "podUid", req.GetPodUid(),
 		"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid())
 
 	var (
