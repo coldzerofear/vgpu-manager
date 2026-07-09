@@ -2557,12 +2557,7 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
    * HAMi PR #182 commit 88143ab4 / 275ba3db / 01a58f13 patterns.
    * Keeps the CUDA-side semantics (NULL -> INVALID_VALUE) intact. */
   if (unlikely(pAllocateArray == NULL)) {
-    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate_v2))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate_v2, pHandle, pAllocateArray);
-    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate, pHandle, pAllocateArray);
-    }
-    return CUDA_ERROR_NOT_FOUND;
+    goto CALL;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
@@ -2576,6 +2571,7 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
+CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArrayCreate_v2, pHandle, pAllocateArray);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArrayCreate))) {
@@ -2603,12 +2599,7 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
   memory_path_t path;
   /* NULL-arg fast path; same rationale as _cuArrayCreate above. */
   if (unlikely(pAllocateArray == NULL)) {
-    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate_v2))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate_v2, pHandle, pAllocateArray);
-    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate, pHandle, pAllocateArray);
-    }
-    return CUDA_ERROR_NOT_FOUND;
+    goto CALL;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
@@ -2622,6 +2613,7 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
+CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuArray3DCreate_v2, pHandle, pAllocateArray);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuArray3DCreate))) {
@@ -2651,8 +2643,7 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   memory_path_t path;
   /* NULL-arg fast path; same rationale as _cuArrayCreate above. */
   if (unlikely(pMipmappedArrayDesc == NULL)) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMipmappedArrayCreate,
-                             pHandle, pMipmappedArrayDesc, numMipmapLevels);
+    goto CALL;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
@@ -2666,6 +2657,7 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
+CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMipmappedArrayCreate, pHandle,
                          pMipmappedArrayDesc, numMipmapLevels);
 DONE:
@@ -2683,7 +2675,7 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
    * to driver so the caller sees its canonical INVALID_VALUE instead
    * of crashing inside our hook). */
   if (unlikely(handle == NULL)) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
+    goto CALL;
   }
 
   /* Skip budget bookkeeping entirely for non-DEVICE allocations.
@@ -2708,7 +2700,7 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
    * caller sees the canonical INVALID_VALUE error instead of us
    * silently treating it as DEVICE. */
   if (prop == NULL || prop->location.type != CU_MEM_LOCATION_TYPE_DEVICE) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
+    goto CALL;
   }
 
   /* Use prop->location.id (the VMM target device) rather than the
@@ -2732,6 +2724,7 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
+CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
 DONE:
   unlock_gpu_device(lock_fd);
@@ -2744,12 +2737,7 @@ CUresult _cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
    * dereference *bytes) and forward to the driver, matching
    * un-hooked CUDA semantics (driver returns CUDA_ERROR_INVALID_VALUE). */
   if (unlikely(bytes == NULL)) {
-    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem_v2))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
-    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem, bytes, dev);
-    }
-    return CUDA_ERROR_NOT_FOUND;
+    goto CALL;
   }
   int host_index = get_host_device_index_by_cuda_device(dev);
   if (host_index < 0) {
@@ -2788,12 +2776,7 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
    * HAMi PR #182 commit 03f99d70 — OptiX's cuMemGetInfo probes hit
    * this path during init. */
   if (unlikely(free == NULL || total == NULL)) {
-    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, free, total);
-    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, free, total);
-    }
-    return CUDA_ERROR_NOT_FOUND;
+    goto CALL;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
@@ -2801,8 +2784,7 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
   }
   int host_index = -1;
   size_t used = 0, vmem_used = 0;
-  has_limited_view = load_limited_memory_view(device, &host_index, &lock_fd,
-                                              &used, &vmem_used);
+  has_limited_view = load_limited_memory_view(device, &host_index, &lock_fd, &used, &vmem_used);
   if (has_limited_view) {
     size_t configured = g_vgpu_config->devices[host_index].total_memory;
     size_t actual_total;
@@ -2835,23 +2817,19 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
       size_t real_total = 0, real_free_unused = 0;
       CUresult sub = CUDA_ERROR_NOT_FOUND;
       if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
-        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2,
-                               &real_free_unused, &real_total);
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, &real_free_unused, &real_total);
       } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
-        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo,
-                               &real_free_unused, &real_total);
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, &real_free_unused, &real_total);
       }
-      actual_total = (sub == CUDA_SUCCESS && real_total > 0
-                      && real_total < configured)
-                     ? real_total : configured;
+      actual_total = (sub == CUDA_SUCCESS && real_total > 0 && real_total < configured) ? real_total : configured;
     }
 
     *total = actual_total;
-    *free  = (used + vmem_used) >= actual_total
-             ? 0 : (actual_total - used - vmem_used);
+    *free  = (used + vmem_used) >= actual_total ? 0 : (actual_total - used - vmem_used);
     ret = CUDA_SUCCESS;
     goto DONE;
   }
+CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, free, total);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
@@ -2923,14 +2901,20 @@ CUresult cuLaunchKernelEx(CUlaunchConfig *config, CUfunction f,
                           void **kernelParams, void **extra) {
   CUresult ret;
   CUdevice device;
+  int gap = 0;
+  int host_index = -1;
+  if (unlikely(config == NULL)) {
+    goto CALL;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = get_host_device_index_by_cuda_device(device);
+  host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(config->gridDimX * config->gridDimY * config->gridDimZ,
                config->blockDimX * config->blockDimY * config->blockDimZ, host_index);
-  int gap = gap_begin(host_index, config->hStream);
+  gap = gap_begin(host_index, config->hStream);
+CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuLaunchKernelEx),
                          config, f, kernelParams, extra);
   if (gap) gap_end(host_index, config->hStream, ret);
@@ -2942,14 +2926,20 @@ CUresult cuLaunchKernelEx_ptsz(CUlaunchConfig *config, CUfunction f,
                                void **kernelParams, void **extra) {
   CUresult ret; 
   CUdevice device;
+  int gap = 0;
+  int host_index = -1;
+  if (unlikely(config == NULL)) {
+    goto CALL;
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = get_host_device_index_by_cuda_device(device);
+  host_index = get_host_device_index_by_cuda_device(device);
   rate_limiter(config->gridDimX *config->gridDimY * config->gridDimZ,
                config->blockDimX * config->blockDimY * config->blockDimZ, host_index);
-  int gap = gap_begin(host_index, config->hStream);
+  gap = gap_begin(host_index, config->hStream);
+CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuLaunchKernelEx_ptsz,
                          config, f, kernelParams, extra);
   if (gap) gap_end(host_index, config->hStream, ret);
@@ -3373,8 +3363,11 @@ DONE:
 }
 
 CUresult cuGraphExecDestroy(CUgraphExec hGraphExec) {
-  graph_cost_forget(hGraphExec);
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecDestroy, hGraphExec);
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphExecDestroy, hGraphExec);
+  if (ret == CUDA_SUCCESS) {
+    graph_cost_forget(hGraphExec);
+  }
+  return ret;
 }
 
 /* cuGraphExecUpdate / _v2 replace an existing exec's contents with a new
@@ -3459,8 +3452,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   memory_path_t path;
   /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
   if (unlikely(dptr == NULL)) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync),
-                             dptr, bytesize, pool, hStream);
+    goto CALL;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
@@ -3474,6 +3466,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
+CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
 DONE:
   unlock_gpu_device(lock_fd);
@@ -3488,8 +3481,7 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   memory_path_t path;
   /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
   if (unlikely(dptr == NULL)) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz,
-                             dptr, bytesize, pool, hStream);
+    goto CALL;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
@@ -3503,6 +3495,7 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
+CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
 DONE:
   unlock_gpu_device(lock_fd);
