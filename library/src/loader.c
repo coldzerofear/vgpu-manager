@@ -1900,6 +1900,27 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
   }
 }
 
+/* Reports whether dptr was handed out by the oversold UVA fallback, i.e. it
+ * came from cuMemAllocManaged rather than the allocator the caller asked for.
+ * Such a pointer is only valid for the synchronous cuMemFree; the driver's
+ * cuMemFreeAsync rejects it. */
+int is_gpu_virt_memory(CUdeviceptr dptr) {
+  int found = 0;
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter;
+  pthread_mutex_lock(&g_memory_node_lock);
+  list_for_each(iter, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    if (entry_tmp == NULL) continue;
+    if (entry_tmp->dptr == dptr) {
+      found = 1;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_memory_node_lock);
+  return found;
+}
+
 void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
   int found = 0;
   memory_node_t *entry_tmp = NULL;

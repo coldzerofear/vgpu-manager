@@ -32,9 +32,13 @@ extern "C" {
   #define __CUDA_API_PER_THREAD_DEFAULT_STREAM
   #define __CUDA_API_PTDS(api) api##_ptds
   #define __CUDA_API_PTSZ(api) api##_ptsz
+  /* Whether __CUDA_API_PTSZ() redirects the unversioned entry points, i.e. which
+   * default stream hStream==0 denotes for hooks that forward through it. */
+  #define __CUDA_API_IS_PTSZ 1
 #else
   #define __CUDA_API_PTDS(api) api
   #define __CUDA_API_PTSZ(api) api
+  #define __CUDA_API_IS_PTSZ 0
 #endif
 
 /**

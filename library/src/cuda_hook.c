@@ -3588,9 +3588,34 @@ CUresult cuMemFree(CUdeviceptr dptr) {
   return _cuMemFree(dptr);
 }
 
+/* Release a pointer that the oversold UVA fallback allocated with
+ * cuMemAllocManaged: the driver's async free rejects it, which would leave both
+ * the device allocation and our virtual-memory accounting leaked. cuMemFree is
+ * not stream-ordered, so drain the stream first to preserve the ordering the
+ * caller asked cuMemFreeAsync for. */
+/* ptsz selects which default stream hStream==0 denotes, so the synchronize must
+ * come from the same family as the cuMemFreeAsync entry point we intercepted. */
+static CUresult free_virt_memory_on_stream(CUdeviceptr dptr, CUstream hStream, int ptsz) {
+  CUresult ret;
+  if (ptsz) {
+    ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+  } else {
+    ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize, hStream);
+  }
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  LOGGER(VERBOSE, "cuMemFreeAsync on unified memory (oversold), dptr %lld, "
+                  "falling back to cuMemFree", dptr);
+  return _cuMemFree(dptr);
+}
+
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
+  if (unlikely(is_gpu_virt_memory(dptr))) {
+    return free_virt_memory_on_stream(dptr, hStream, __CUDA_API_IS_PTSZ);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
@@ -3606,6 +3631,9 @@ DONE:
 CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
+  if (unlikely(is_gpu_virt_memory(dptr))) {
+    return free_virt_memory_on_stream(dptr, hStream, 1);
+  }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;

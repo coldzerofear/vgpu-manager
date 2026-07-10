@@ -436,6 +436,12 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int device_id);
 
 void free_gpu_virt_memory(CUdeviceptr dptr, int device_id);
 
+/**
+ * Reports whether dptr was allocated through the oversold UVA fallback
+ * (cuMemAllocManaged) and therefore must be released with cuMemFree.
+ */
+int is_gpu_virt_memory(CUdeviceptr dptr);
+
 int get_nvml_device_index_by_cuda_device(CUdevice device);
 
 int get_host_device_index_by_cuda_device(CUdevice device);
