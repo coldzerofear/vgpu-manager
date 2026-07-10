@@ -18,6 +18,7 @@ const (
 	GPUDeviceClassName  = "gpu-manager"
 	VGPUDeviceClassName = "vgpu-manager"
 	MIGDeviceClassName  = "mig-manager"
+	VFIODeviceClassName = "vfio-manager"
 
 	IgnoreWebhookAnnotation = "vgpu-manager.io/ignore-webhook"
 	DRAOriResAnnotation     = "vgpu-manager.io/original-resources"

@@ -6,7 +6,6 @@ A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) device
 
 - [x] Ensure the correctness of scheduling performance and device allocation
 - [x] Ensure the security of container resource isolation
-- [x] Do not obtain host PID through gRPC to device plugin
 - [x] Support the latest CUDA 13.x driver version
 - [x] Compatible with both cgroupv1 and cgroupv2 container environments
 - [x] Dual-layer scheduling policies (node-level and device-level)
@@ -31,38 +30,42 @@ A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) device
 
 ## Prerequisite
 
-* Kubernetes v1.17+ (Install using helm chart method)
+* Kubernetes v1.18+ (Install using helm chart method)
 * Container runtime (docker / containerd / cri-o - others untested)
 * Nvidia Container Toolkit (with NVIDIA container runtime configured)
 
 ## Build
 
-**Compile binaries:**
+**Compile Binaries:**
 
 ```shell
 make build
 ```
 > Note: The compiled file is stored in the bin directory
 
-**Build and push Docker image:**
+**Build and Push container image:**
 
 ```shell
 make docker-build-base docker-build docker-push REGISTRY=<your-image-registry> TAG=<your-image-tag>
 ```
 
-## Deployment
+## Installation and Uninstallation
 
-precondition: `nvidia-container-toolkit` must be installed and correctly configure the default container runtime
+> Currently, DRA driver based GPU allocation is supported. For installation and usage details, please refer to [how_to_use_DRA_driver.md](./docs/how_to_use_DRA_driver.md)
 
-Label the node where the device plugin will be deployed: `vgpu-manager=device-plugin`
+Label GPU nodes that require vgpu-manager management: `vgpu-manager=device-plugin`
 
 ```shell
 kubectl label node <nodename> vgpu-manager=device-plugin
 ```
 
-### Helm chart (Recommended)
+Provide two methods for installing helm charts and YAML files, and recommend the helm charts method
 
-Modify `values.yaml` according to your environment requirements
+### Helm charts (Recommended)
+
+**Installation:**
+
+Modify `charts/vgpu-manager/values.yaml` according to your environment requirements
 
 ```shell
 helm install vgpu-manager ./charts/vgpu-manager -n kube-system
@@ -77,7 +80,19 @@ vgpu-manager-scheduler-6949f5d645-g57fj                2/2     Running   0      
 vgpu-manager-webhook-854c56bb97-5f4lm                  1/1     Running   0          10s
 ```
 
-### Deploy directly using YAML files
+**Uninstallation**
+
+Execute the following command to uninstall
+
+```shell
+helm uninstall vgpu-manager -n kube-system 
+```
+
+### YAML files
+
+**Installation:**
+
+Deploy the scheduler and device plugin using the following command
 
 ```bash
 kubectl apply -f deploy/vgpu-manager-scheduler.yaml
@@ -103,15 +118,7 @@ The Webhook service requires the use of [cert-manager](https://github.com/cert-m
 kubectl apply -f deploy/vgpu-manager-webhook.yaml
 ```
 
-## Uninstall
-
-### Helm charts uninstallation
-
-```shell
-helm uninstall vgpu-manager -n kube-system 
-```
-
-### Uninstall directly according to YAML
+**Installation:**
 
 ```shell
 kubectl delete -f deploy/vgpu-manager-scheduler.yaml

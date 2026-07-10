@@ -127,9 +127,19 @@ var (
 	removedAnnotations = []string{
 		util.PodVGPUPreAllocAnnotation, util.PodVGPURealAllocAnnotation,
 		util.PodPredicateNodeAnnotation, util.PodPredicateTimeAnnotation,
+	}
+	removedDRAAnnotations = []string{
 		util.DRAOriResAnnotation, util.DRAGenNameAnnotation,
 	}
 )
+
+func CleanupDRAMetadata(pod *corev1.Pod) {
+	for _, anno := range removedDRAAnnotations {
+		if _, ok := util.HasAnnotation(pod, anno); ok {
+			delete(pod.Annotations, anno)
+		}
+	}
+}
 
 // CleanupMetadata Clean up metadata that affects scheduling and allocation.
 func CleanupMetadata(pod *corev1.Pod) {
@@ -153,6 +163,7 @@ func (r *recoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod
 	case errors.IsNotFound(err):
 		newPod := pod.DeepCopy()
 		CleanupMetadata(newPod)
+		CleanupDRAMetadata(newPod)
 		newPod.UID = ""
 		newPod.DeletionTimestamp = nil
 		newPod.ResourceVersion = ""

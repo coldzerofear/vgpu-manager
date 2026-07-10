@@ -234,6 +234,7 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 	}
 
 	if h.options.DefaultConvertToDRA {
+		reschedule.CleanupDRAMetadata(pod)
 		return h.convertDRARequest(ctx, pod)
 	}
 	return nil
