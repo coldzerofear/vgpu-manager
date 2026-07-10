@@ -3676,17 +3676,25 @@ CUresult cuMemFree(CUdeviceptr dptr) {
  * cuMemFreeAsync entry point we intercepted. */
 static CUresult free_virt_memory_on_stream(CUdeviceptr dptr, CUstream hStream, int ptsz) {
   CUresult ret;
-  /* Synchronizing a stream that is capturing a CUDA graph is illegal and
-   * invalidates the capture. The pointer reached us from the oversold UVA
-   * fallback, so the only way to release it is the non-stream-ordered
-   * cuMemFree, which needs that synchronize -- there is nothing we can record
-   * into the graph instead. Refuse explicitly rather than corrupt the capture
-   * or silently leak: oversold UVA and graph capture are incompatible here.
-   * The alloc side already declines to hand out UVA pointers mid-capture, so
-   * this only fires for a pointer allocated before the capture began. */
+  /* The pointer reached us from the oversold UVA fallback, so the only way to
+   * release it is the non-stream-ordered cuMemFree, which has to drain the
+   * stream first -- and there is nothing equivalent to record into a graph.
+   *
+   * Draining a capturing stream does not merely fail: measured against the
+   * driver, cuStreamSynchronize returns CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED
+   * *and* invalidates the capture, so the app's later cuStreamEndCapture fails
+   * with CUDA_ERROR_STREAM_CAPTURE_INVALIDATED and it loses the graph. Bailing
+   * out before touching the stream is therefore what saves the capture; the
+   * status code below is the same one the driver would have produced anyway.
+   *
+   * The allocation is left live. Nothing can free it here, so the caller gets a
+   * status that names the reason instead of a corrupted capture or the driver's
+   * bare CUDA_ERROR_INVALID_VALUE: oversold UVA and graph capture are simply
+   * incompatible. The alloc side already declines to hand out UVA pointers
+   * mid-capture, so this only fires for one allocated before capture began. */
   if (unlikely(stream_is_capturing(hStream, ptsz))) {
     LOGGER(ERROR, "cuMemFreeAsync on unified memory (oversold) inside a graph "
-                  "capture is not supported, dptr %lld", dptr);
+                  "capture is not supported, dptr %lld (allocation retained)", dptr);
     return CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED;
   }
   if (ptsz) {

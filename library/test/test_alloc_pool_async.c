@@ -135,7 +135,8 @@ static int explicit_pool_limit_test(CUdevice dev, CUstream stream) {
  * Under memory oversubscription cuMemAllocAsync silently serves the request
  * with cuMemAllocManaged (cuda_hook.c, ALLOCATED_TO_UVA). The caller has no way
  * to know, so it frees with cuMemFreeAsync -- which the driver rejects for a
- * managed pointer, leaking both the allocation and our vmem accounting.
+ * managed pointer with CUDA_ERROR_NOT_SUPPORTED, leaking both the allocation and
+ * our vmem accounting (the hook only reconciles the accounting on success).
  *
  * Reaching that fallback needs an oversold config plus a request larger than the
  * physical slice, which a test cannot size portably. cuMemAllocManaged with
@@ -167,12 +168,21 @@ static int uva_pointer_async_free_test(CUstream stream) {
 /* [E] The same free, but issued while the stream is capturing a CUDA graph.
  *
  * Releasing a UVA pointer needs the non-stream-ordered cuMemFree, which in turn
- * needs a stream synchronize -- illegal mid-capture. There is nothing valid to
- * record into the graph, so the hook must refuse with
- * CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED rather than invalidate the capture or
- * silently leak. The pointer is allocated before capture begins, which is the
- * only way one can exist: the alloc path declines to hand out UVA pointers
- * mid-capture. */
+ * has to drain the stream -- and draining a capturing stream invalidates the
+ * capture. So the hook must bail out before touching the stream. The pointer is
+ * allocated before capture begins, which is the only way one can exist: the
+ * alloc path declines to hand out UVA pointers mid-capture.
+ *
+ * Both assertions below are needed, and the second is the one with teeth. A hook
+ * that drains the stream anyway *also* ends up returning 900, because that is
+ * what the driver's own cuStreamSynchronize reports for a capturing stream -- so
+ * checking the status alone cannot tell the two apart. What separates them is
+ * that the driver has by then invalidated the capture, which surfaces as
+ * CUDA_ERROR_STREAM_CAPTURE_INVALIDATED from cuStreamEndCapture.
+ *
+ * Note the allocation stays live either way: refusing the free is not releasing
+ * it. This case pins the capture's survival and the accuracy of the status, not
+ * the absence of a leak. */
 static int uva_pointer_free_during_capture_test(CUstream stream) {
   const char *preload = getenv("LD_PRELOAD");
   if (preload == NULL || strstr(preload, "libvgpu-control") == NULL) {
@@ -187,9 +197,10 @@ static int uva_pointer_free_during_capture_test(CUstream stream) {
   CUresult f = cuMemFreeAsync(dptr, stream);
   describe("cuMemFreeAsync (UVA, mid-capture)", f);
 
-  /* Tear the capture down either way. Once cuMemFreeAsync has invalidated it,
-   * cuStreamEndCapture reports CUDA_ERROR_STREAM_CAPTURE_INVALIDATED and yields
-   * no graph -- which is exactly the outcome the refusal is meant to avoid. */
+  /* Tear the capture down either way. If cuMemFreeAsync drained the stream, the
+   * capture is already invalidated: cuStreamEndCapture then reports
+   * CUDA_ERROR_STREAM_CAPTURE_INVALIDATED and yields no graph -- exactly the
+   * outcome the early bail-out exists to avoid. */
   CUgraph graph = NULL;
   CUresult e = cuStreamEndCapture(stream, &graph);
   describe("cuStreamEndCapture", e);
