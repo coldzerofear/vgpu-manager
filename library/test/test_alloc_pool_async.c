@@ -21,13 +21,15 @@
  *       pointer is a silent no-op (loader.c, free_gpu_virt_memory). We are
  *       structurally immune, and cases [A]/[B] keep it that way.
  *
- * Case [D] covers a defect of the same family that is ours alone: the oversold
- * UVA fallback hands the caller a cuMemAllocManaged pointer that the driver's
- * cuMemFreeAsync refuses.
+ * Cases [D] and [E] cover a defect of the same family that is ours alone: the
+ * oversold UVA fallback hands the caller a cuMemAllocManaged pointer that the
+ * driver's cuMemFreeAsync refuses. [D] pins the ordinary release path; [E] pins
+ * the mid-capture one, where the release cannot be performed at all and must be
+ * reported rather than corrupt the graph capture.
  *
  * Cases [A]-[C] pass with or without LD_PRELOAD, so they double as a baseline
- * check against stock CUDA; [D] asserts vgpu-manager behaviour and self-skips
- * when the library is not preloaded.
+ * check against stock CUDA; [D] and [E] assert vgpu-manager behaviour and
+ * self-skip when the library is not preloaded.
  *
  * Run:
  *   ./test_alloc_pool_async
@@ -162,6 +164,53 @@ static int uva_pointer_async_free_test(CUstream stream) {
   return 0;
 }
 
+/* [E] The same free, but issued while the stream is capturing a CUDA graph.
+ *
+ * Releasing a UVA pointer needs the non-stream-ordered cuMemFree, which in turn
+ * needs a stream synchronize -- illegal mid-capture. There is nothing valid to
+ * record into the graph, so the hook must refuse with
+ * CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED rather than invalidate the capture or
+ * silently leak. The pointer is allocated before capture begins, which is the
+ * only way one can exist: the alloc path declines to hand out UVA pointers
+ * mid-capture. */
+static int uva_pointer_free_during_capture_test(CUstream stream) {
+  const char *preload = getenv("LD_PRELOAD");
+  if (preload == NULL || strstr(preload, "libvgpu-control") == NULL) {
+    printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n");
+    return 0;
+  }
+
+  CUdeviceptr dptr = 0;
+  CHECK_DRV_API(cuMemAllocManaged(&dptr, ALLOC_BYTES, CU_MEM_ATTACH_GLOBAL));
+  CHECK_DRV_API(cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_GLOBAL));
+
+  CUresult f = cuMemFreeAsync(dptr, stream);
+  describe("cuMemFreeAsync (UVA, mid-capture)", f);
+
+  /* Tear the capture down either way. Once cuMemFreeAsync has invalidated it,
+   * cuStreamEndCapture reports CUDA_ERROR_STREAM_CAPTURE_INVALIDATED and yields
+   * no graph -- which is exactly the outcome the refusal is meant to avoid. */
+  CUgraph graph = NULL;
+  CUresult e = cuStreamEndCapture(stream, &graph);
+  describe("cuStreamEndCapture", e);
+  if (graph != NULL) cuGraphDestroy(graph);
+
+  int failed = 0;
+  if (f != CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED) {
+    printf("  expected CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED (%d)\n",
+           (int)CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED);
+    failed = 1;
+  }
+  if (e != CUDA_SUCCESS) {
+    printf("  the capture did not survive the rejected free\n");
+    failed = 1;
+  }
+
+  cuStreamSynchronize(stream);
+  cuMemFree(dptr); /* refused above, so it is still live */
+  return failed;
+}
+
 int main(void) {
   CHECK_DRV_API(cuInit(0));
   CUdevice device;
@@ -184,6 +233,9 @@ int main(void) {
 
   printf("[D] cuMemFreeAsync accepts an oversold UVA pointer\n");
   failures += uva_pointer_async_free_test(stream);
+
+  printf("[E] cuMemFreeAsync refuses a UVA pointer mid-capture\n");
+  failures += uva_pointer_free_during_capture_test(stream);
 
   printf("\nResult: %s\n", failures ? "FAIL" : "PASS");
 

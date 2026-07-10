@@ -1231,14 +1231,31 @@ static int gap_events_ensure(int host_index) {
   return 1;
 }
 
-// Determine whether the stream is in capture, return 1 if yes, return 0 if no
-static int stream_is_capturing(CUstream stream) {
+/* Determine whether the stream is in capture, return 1 if yes, return 0 if no.
+ *
+ * `ptsz` selects which cuStreamIsCapturing entry point to query through, and
+ * must match the family of the hook that received hStream: the two disagree on
+ * which default stream hStream==0 denotes, so a _ptsz hook querying through the
+ * legacy entry point would inspect the wrong stream. Callers that are compiled
+ * per-build pass __CUDA_API_IS_PTSZ; the fixed _ptsz hooks pass 1. */
+static int stream_is_capturing(CUstream stream, int ptsz) {
+  cuda_entry_enum_t sym = ptsz ? CUDA_ENTRY_ENUM(cuStreamIsCapturing_ptsz)
+                               : CUDA_ENTRY_ENUM(cuStreamIsCapturing);
+  /* Prefer the matching family, but fall back to its sibling if the driver only
+   * exports one: the two differ solely in how hStream==0 is resolved, so an
+   * imprecise answer still beats assuming "not capturing" and injecting a UVA
+   * allocation into a live capture. */
+  if (!cuda_library_entry[sym].fn_ptr) {
+    sym = ptsz ? CUDA_ENTRY_ENUM(cuStreamIsCapturing)
+               : CUDA_ENTRY_ENUM(cuStreamIsCapturing_ptsz);
+  }
   // The old driver cuStreamIsCapturing does not exist, and there is no capture function at this time.
-  if (!CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing))) {
+  if (!cuda_library_entry[sym].fn_ptr) {
     return 0;
   }
   CUstreamCaptureStatus cap = CU_STREAM_CAPTURE_STATUS_NONE;
-  CUresult ret = CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing), stream, &cap);
+  CUresult ret = ((CUresult (*)(CUstream, CUstreamCaptureStatus *))
+                  cuda_library_entry[sym].fn_ptr)(stream, &cap);
   if (ret != CUDA_SUCCESS) {
     // When the call result is unsuccessful, it is conservatively judged as being in capture
     return 1;
@@ -1272,7 +1289,7 @@ static int gap_begin(int host_index, CUstream stream) {
     return 0;
   }
 
-  if (stream_is_capturing(stream)) {
+  if (stream_is_capturing(stream, __CUDA_API_IS_PTSZ)) {
     /* capturing (or query failed) -> don't inject events; if the symbol is
      * absent the driver predates CUDA graphs, so there is nothing to guard. */
     pthread_mutex_unlock(&g_gap_lock[host_index]);
@@ -2332,7 +2349,7 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
   if (likely(ret == CUDA_SUCCESS)) {
-    if (flag == CU_MEM_ATTACH_GLOBAL) malloc_gpu_virt_memory(*dptr, bytesize, host_index);
+    if (flags == CU_MEM_ATTACH_GLOBAL) malloc_gpu_virt_memory(*dptr, bytesize, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2522,14 +2539,14 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
     goto DONE;
   }
   // TODO Do not disrupt graph capture due to UVA path destruction
-  if (path == MEMORY_PATH_UVA && !stream_is_capturing(hStream)) {
+  if (path == MEMORY_PATH_UVA && !stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
     goto ALLOCATED_TO_UVA;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
     // TODO Do not disrupt graph capture due to UVA path destruction
-    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold && !stream_is_capturing(hStream)) {
+    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold && !stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAllocAsync OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -2574,13 +2591,15 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-  if (path == MEMORY_PATH_UVA && !stream_is_capturing(hStream)) {
+  if (path == MEMORY_PATH_UVA && !stream_is_capturing(hStream, 1)) {
     goto ALLOCATED_TO_UVA;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
-    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold) {
+    // TODO Do not disrupt graph capture due to UVA path destruction
+    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold &&
+        !stream_is_capturing(hStream, 1)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -2635,6 +2654,10 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
   CUdevice device;
   int lock_fd = -1;
   memory_path_t path;
+  /* Declared before the NULL-arg `goto CALL` below: that jump skips any
+   * initializer between it and the label, and the driver-OOM metric at CALL
+   * reads host_index. */
+  int host_index = -1;
   /* NULL-arg fast path: forward to the driver so the caller sees the
    * canonical CUDA_ERROR_INVALID_VALUE instead of a SegFault inside
    * get_array_request_size (which dereferences pAllocateArray->Format
@@ -2650,7 +2673,6 @@ CUresult _cuArrayCreate(CUarray *pHandle, const CUDA_ARRAY_DESCRIPTOR *pAllocate
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = -1;
   size_t request_size = get_array_request_size(pAllocateArray);
   path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
@@ -2687,6 +2709,8 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
   CUdevice device;
   int lock_fd = -1;
   memory_path_t path;
+  /* Declared before `goto CALL`; see _cuArrayCreate. */
+  int host_index = -1;
   /* NULL-arg fast path; same rationale as _cuArrayCreate above. */
   if (unlikely(pAllocateArray == NULL)) {
     goto CALL;
@@ -2695,7 +2719,6 @@ CUresult _cuArray3DCreate(CUarray *pHandle, const CUDA_ARRAY3D_DESCRIPTOR *pAllo
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = -1;
   size_t request_size = get_array3d_request_size(pAllocateArray);
   path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
@@ -2734,6 +2757,8 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   CUdevice device;
   int lock_fd = -1;
   memory_path_t path;
+  /* Declared before `goto CALL`; see _cuArrayCreate. */
+  int host_index = -1;
   /* NULL-arg fast path; same rationale as _cuArrayCreate above. */
   if (unlikely(pMipmappedArrayDesc == NULL)) {
     goto CALL;
@@ -2742,7 +2767,6 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = -1;
   size_t request_size = get_array3d_request_size(pMipmappedArrayDesc);
   path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
@@ -2766,6 +2790,11 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
   CUresult ret;
   int lock_fd = -1;
   memory_path_t path;
+  /* Declared before the `goto CALL`s below: a jump skips any initializer
+   * between it and the label, and the driver-OOM metric at CALL reads
+   * host_index. Both bypasses (NULL handle, host-typed allocation) leave it
+   * at -1, which metrics_record_oom() correctly ignores as out-of-range. */
+  int host_index = -1;
 
   /* NULL-arg fast path: same rationale as _cuMemAlloc above (forward
    * to driver so the caller sees its canonical INVALID_VALUE instead
@@ -2812,7 +2841,6 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
    * that main commit 43a7bae had to guard against. */
   CUdevice device = (CUdevice)prop->location.id;
 
-  int host_index = -1;
   size_t request_size = size;
   path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
@@ -3549,6 +3577,8 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   CUdevice device;
   int lock_fd = -1;
   memory_path_t path;
+  /* Declared before `goto CALL`; see _cuArrayCreate. */
+  int host_index = -1;
   /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
   if (unlikely(dptr == NULL)) {
     goto CALL;
@@ -3557,7 +3587,6 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = -1;
   size_t request_size = bytesize;
   path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
@@ -3581,6 +3610,8 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   CUdevice device;
   int lock_fd = -1;
   memory_path_t path;
+  /* Declared before `goto CALL`; see _cuArrayCreate. */
+  int host_index = -1;
   /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
   if (unlikely(dptr == NULL)) {
     goto CALL;
@@ -3589,7 +3620,6 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = -1;
   size_t request_size = bytesize;
   path = prepare_memory_allocation(device, request_size, 0, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
@@ -3641,10 +3671,24 @@ CUresult cuMemFree(CUdeviceptr dptr) {
  * the device allocation and our virtual-memory accounting leaked. cuMemFree is
  * not stream-ordered, so drain the stream first to preserve the ordering the
  * caller asked cuMemFreeAsync for. */
-/* ptsz selects which default stream hStream==0 denotes, so the synchronize must
- * come from the same family as the cuMemFreeAsync entry point we intercepted. */
+/* ptsz selects which default stream hStream==0 denotes, so both the capture
+ * query and the synchronize must come from the same family as the
+ * cuMemFreeAsync entry point we intercepted. */
 static CUresult free_virt_memory_on_stream(CUdeviceptr dptr, CUstream hStream, int ptsz) {
   CUresult ret;
+  /* Synchronizing a stream that is capturing a CUDA graph is illegal and
+   * invalidates the capture. The pointer reached us from the oversold UVA
+   * fallback, so the only way to release it is the non-stream-ordered
+   * cuMemFree, which needs that synchronize -- there is nothing we can record
+   * into the graph instead. Refuse explicitly rather than corrupt the capture
+   * or silently leak: oversold UVA and graph capture are incompatible here.
+   * The alloc side already declines to hand out UVA pointers mid-capture, so
+   * this only fires for a pointer allocated before the capture began. */
+  if (unlikely(stream_is_capturing(hStream, ptsz))) {
+    LOGGER(ERROR, "cuMemFreeAsync on unified memory (oversold) inside a graph "
+                  "capture is not supported, dptr %lld", dptr);
+    return CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED;
+  }
   if (ptsz) {
     ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
   } else {
