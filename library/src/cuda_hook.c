@@ -1231,6 +1231,21 @@ static int gap_events_ensure(int host_index) {
   return 1;
 }
 
+// Determine whether the stream is in capture, return 1 if yes, return 0 if no
+static int stream_is_capturing(CUstream stream) {
+  // The old driver cuStreamIsCapturing does not exist, and there is no capture function at this time.
+  if (!CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing))) {
+    return 0;
+  }
+  CUstreamCaptureStatus cap = CU_STREAM_CAPTURE_STATUS_NONE;
+  CUresult ret = CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing), stream, &cap);
+  if (ret != CUDA_SUCCESS) {
+    // When the call result is unsuccessful, it is conservatively judged as being in capture
+    return 1;
+  }
+  return (cap != CU_STREAM_CAPTURE_STATUS_NONE) ? 1 : 0;
+}
+
 /* Returns 1 if this launch enters the GAP path -- the caller MUST then call
  * gap_end() after the real launch (it now owns g_gap_lock[host_index]).
  * Returns 0 to fall through to the token bucket only. */
@@ -1257,20 +1272,7 @@ static int gap_begin(int host_index, CUstream stream) {
     return 0;
   }
 
-  /* Never inject events into a stream capturing a CUDA graph: cuEventRecord
-   * would be captured (deferred) and the cuEventSynchronize/ElapsedTime in
-   * gap_end would fail or corrupt the capture. Captured launches are normally
-   * back-to-back (no gap, never reach here), but a >200ms mid-capture pause
-   * could -- fall back to the token bucket. */
-  CUstreamCaptureStatus cap = CU_STREAM_CAPTURE_STATUS_NONE;
-  /* cppcheck-suppress knownConditionTrueFalse
-   * (cppcheck cannot see through CUDA_INTERNAL_CALL's macro-expanded function
-   *  pointer that writes to &cap, so it thinks cap is unchanged from its
-   *  initializer -- it is not, cuStreamIsCapturing populates it.) */
-  if (CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing)) &&
-      (CUDA_INTERNAL_CALL(cuda_library_entry, __CUDA_API_PTSZ(cuStreamIsCapturing),
-                          stream, &cap) != CUDA_SUCCESS ||
-       cap != CU_STREAM_CAPTURE_STATUS_NONE)) {
+  if (stream_is_capturing(stream)) {
     /* capturing (or query failed) -> don't inject events; if the symbol is
      * absent the driver predates CUDA graphs, so there is nothing to guard. */
     pthread_mutex_unlock(&g_gap_lock[host_index]);
@@ -2329,8 +2331,10 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
     flags = CU_MEM_ATTACH_GLOBAL;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
-  if (ret == CUDA_SUCCESS && flags == CU_MEM_ATTACH_GLOBAL) {
-    malloc_gpu_virt_memory(*dptr, bytesize, host_index);
+  if (likely(ret == CUDA_SUCCESS)) {
+    if (flag == CU_MEM_ATTACH_GLOBAL) malloc_gpu_virt_memory(*dptr, bytesize, host_index);
+  } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -2379,11 +2383,15 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   } else {
     ret = CUDA_ERROR_NOT_FOUND;
   }
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
+  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
-    metrics_record_uva_fallback(host_index);
-    LOGGER(VERBOSE, "cuMemAlloc OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
-                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
+    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold) {
+      metrics_record_uva_fallback(host_index);
+      LOGGER(VERBOSE, "cuMemAlloc OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
+                       request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
+    } else {
+      goto DONE;
+    }
   } else {
     goto DONE;
   }
@@ -2393,6 +2401,8 @@ ALLOCATED_TO_UVA:
                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, bytesize, host_index);
+  } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -2452,11 +2462,15 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   } else {
     ret = CUDA_ERROR_NOT_FOUND;
   }
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
+  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
-    metrics_record_uva_fallback(host_index);
-    LOGGER(VERBOSE, "cuMemAllocPitch OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
-                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
+    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold) {
+      metrics_record_uva_fallback(host_index);
+      LOGGER(VERBOSE, "cuMemAllocPitch OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
+                       request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
+    } else {
+      goto DONE;
+    }
   } else {
     goto DONE;
   }
@@ -2467,6 +2481,8 @@ ALLOCATED_TO_UVA:
   if (likely(ret == CUDA_SUCCESS)) {
     *pPitch = guess_pitch;
     malloc_gpu_virt_memory(*dptr, request_size, host_index);
+  } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -2505,15 +2521,21 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-  if (path == MEMORY_PATH_UVA) {
+  // TODO Do not disrupt graph capture due to UVA path destruction
+  if (path == MEMORY_PATH_UVA && !stream_is_capturing(hStream)) {
     goto ALLOCATED_TO_UVA;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
+  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
-    metrics_record_uva_fallback(host_index);
-    LOGGER(VERBOSE, "cuMemAllocAsync OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
+    // TODO Do not disrupt graph capture due to UVA path destruction
+    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold && !stream_is_capturing(hStream)) {
+      metrics_record_uva_fallback(host_index);
+      LOGGER(VERBOSE, "cuMemAllocAsync OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
+    } else {
+      goto DONE;
+    }
   } else {
     goto DONE;
   }
@@ -2523,6 +2545,8 @@ ALLOCATED_TO_UVA:
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, bytesize, host_index);
+  } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -2550,15 +2574,19 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
     ret = CUDA_ERROR_OUT_OF_MEMORY;
     goto DONE;
   }
-  if (path == MEMORY_PATH_UVA) {
+  if (path == MEMORY_PATH_UVA && !stream_is_capturing(hStream)) {
     goto ALLOCATED_TO_UVA;
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
-  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY && host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold)) {
+  if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
-    metrics_record_uva_fallback(host_index);
-    LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
+    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold) {
+      metrics_record_uva_fallback(host_index);
+      LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
+    } else {
+      goto DONE;
+    }
   } else {
     goto DONE;
   }
@@ -2568,6 +2596,8 @@ ALLOCATED_TO_UVA:
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, request_size, host_index);
+  } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -2636,6 +2666,9 @@ CALL:
   } else {
     ret = CUDA_ERROR_NOT_FOUND;
   }
+  if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
+  }
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -2678,6 +2711,9 @@ CALL:
   } else {
     ret = CUDA_ERROR_NOT_FOUND;
   }
+  if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
+  }
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -2717,6 +2753,9 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray *pHandle,
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMipmappedArrayCreate, pHandle,
                          pMipmappedArrayDesc, numMipmapLevels);
+  if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
+  }
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -2783,6 +2822,9 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size,
   }
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemCreate, handle, size, prop, flags);
+  if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
+  }
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -3525,6 +3567,9 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   }
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
+  if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
+  }
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
@@ -3554,6 +3599,9 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   }
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
+  if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+    metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
+  }
 DONE:
   unlock_gpu_device(lock_fd);
   return ret;
