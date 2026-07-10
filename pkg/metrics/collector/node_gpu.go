@@ -45,6 +45,7 @@ type nodeGPUCollector struct {
 	podLister   client.PodLister
 	contLister  *lister.ContainerLister
 	podResource *client.PodResource
+	deviceUtil  watcher.DeviceUtilInterface
 	featureGate featuregate.FeatureGate
 }
 
@@ -64,6 +65,7 @@ func NewNodeGPUCollector(
 		podLister:   podLister,
 		contLister:  contLister,
 		featureGate: featureGate,
+		deviceUtil:  watcher.NewDeviceUtilCache(),
 		podResource: client.NewPodResource(
 			client.WithCallTimeoutSecond(5)),
 	}, nil
@@ -419,7 +421,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				devHealthLvs[gpuInfo.UUID]...)
 		}
 
-		CollectorDeviceProcesses(deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
+		CollectorDeviceProcesses(c.deviceUtil, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
 		return nil
 	})
 	if err != nil {
@@ -842,7 +844,13 @@ skipNvml:
 
 }
 
-func CollectorDeviceProcesses(deviceUtil *watcher.MmapDeviceUtil, index int, hdev nvml.Device, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList) {
+func CollectorDeviceProcesses(
+	deviceUtil watcher.DeviceUtilInterface,
+	mmapUtil *watcher.MmapDeviceUtil,
+	index int, hdev nvml.Device,
+	devProcInfoMap map[string]procInfoList,
+	devProcUtilMap map[string]procUtilList,
+) {
 	uuid, rt := hdev.GetUUID()
 	if rt != nvml.SUCCESS {
 		err := fmt.Errorf("error getting pci info for device %d: %v", index, rt)
@@ -867,11 +875,11 @@ func CollectorDeviceProcesses(deviceUtil *watcher.MmapDeviceUtil, index int, hde
 		}
 	}
 
-	if deviceUtil != nil {
+	if mmapUtil != nil {
 		klog.V(4).InfoS("collector device processes from sm watcher", "device", index)
-		if unlock, err := deviceUtil.RLock(index); err != nil {
+		if unlock, err := mmapUtil.RLock(index); err != nil {
 			klog.V(3).ErrorS(err, "SM Watcher lock failed, fallback to nvml driver call", "device", index)
-		} else if devUtil, err := deviceUtil.GetDeviceUtil(index); err != nil {
+		} else if devUtil, err := mmapUtil.GetDeviceUtil(index); err != nil {
 			klog.V(3).ErrorS(err, "get device util failed", "device", index)
 		} else {
 			micro := time.UnixMicro(int64(devUtil.LastSeenTimeStamp))
@@ -902,7 +910,7 @@ func CollectorDeviceProcesses(deviceUtil *watcher.MmapDeviceUtil, index int, hde
 
 nvmlProcessUtil:
 	// On MIG-enabled GPUs, querying process utilization is not currently supported.
-	processUtilizationSamples, rt = hdev.GetProcessUtilization(uint64(time.Now().Add(-1 * time.Second).UnixMicro()))
+	processUtilizationSamples, _, rt = deviceUtil.DeviceGetProcessUtilSamples(hdev)
 	if rt != nvml.SUCCESS {
 		klog.V(4).Infof("error getting process utilization for device %d: %s", index, nvml.ErrorString(rt))
 		processUtilizationSamples = nil

@@ -98,12 +98,13 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 
 		wg := sync.WaitGroup{}
 		batches := watcher.BalanceBatches(len(deviceHandlers), MaxBatchSize)
+		utilCache := watcher.NewDeviceUtilCache()
 
 		for _, batch := range batches {
 			wg.Add(1)
 			go func(config watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) {
 				defer wg.Done()
-				err := smWatcherBatchWithContext(subCtx, deviceUtil, config, devices, handles)
+				err := smWatcherBatchWithContext(subCtx, utilCache, deviceUtil, config, devices, handles)
 				if err != nil {
 					subCancelFunc()
 				}
@@ -113,7 +114,10 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 	}, time.Second)
 }
 
-func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.MmapDeviceUtil, batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) error {
+func smWatcherBatchWithContext(
+	ctx context.Context, deviceUtil watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil,
+	batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device,
+) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
 	for {
 		for i := batch.StartIndex; i <= batch.EndIndex; i++ {
@@ -126,7 +130,7 @@ func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.MmapDevi
 			gpuDevice := devices[i]
 			gpuHandle := handles[i]
 
-			if err := smWatcherSingleDevice(deviceUtil, gpuDevice, gpuHandle); err != nil {
+			if err := smWatcherSingleDevice(deviceUtil, mmapUtil, gpuDevice, gpuHandle); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
@@ -135,7 +139,11 @@ func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.MmapDevi
 	}
 }
 
-func smWatcherSingleDevice(deviceUtil *watcher.MmapDeviceUtil, info *GPUDevice, d device.Device) error {
+func smWatcherSingleDevice(
+	deviceUtil watcher.DeviceUtilInterface,
+	mmapUtil *watcher.MmapDeviceUtil,
+	info *GPUDevice, d device.Device,
+) error {
 	if !info.Healthy || info.MigEnabled {
 		return nil
 	}
@@ -143,30 +151,30 @@ func smWatcherSingleDevice(deviceUtil *watcher.MmapDeviceUtil, info *GPUDevice, 
 		return nil
 	}
 	i := info.Index
-	computeProcesses, rt := d.GetComputeRunningProcessesBySize(watcher.MaxPids)
+	computeProcesses, rt := d.GetComputeRunningProcesses()
 	if rt != nvml.SUCCESS {
 		klog.ErrorS(errors.New(rt.Error()), "GetComputeRunningProcesses failed", "device", i)
 		return nil
 	}
-	graphicsProcesses, rt := d.GetGraphicsRunningProcessesBySize(watcher.MaxPids)
+	graphicsProcesses, rt := d.GetGraphicsRunningProcesses()
 	if rt != nvml.SUCCESS {
 		klog.ErrorS(errors.New(rt.Error()), "GetGraphicsRunningProcesses failed", "device", i)
 		return nil
 	}
 
-	lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
-	procUtilSamples, rt := d.GetProcessUtilizationBySize(uint64(lastTs), watcher.MaxPids)
+	procUtilSamples, lastTs, rt := deviceUtil.DeviceGetProcessUtilSamples(d)
+	if rt == nvml.ERROR_NOT_SUPPORTED {
+		klog.V(3).ErrorS(errors.New(rt.Error()), "DeviceGetProcessUtilSamples failed", "device", i)
+	}
 
-	unlock, err := deviceUtil.WLock(i)
+	unlock, err := mmapUtil.WLock(i)
 	if err != nil {
 		klog.V(3).ErrorS(err, "DeviceUtil WLock failed", "device", i)
 		return err
 	}
-	defer func() {
-		_ = unlock()
-	}()
+	defer func() { _ = unlock() }()
 
-	devUtil, err := deviceUtil.GetDeviceUtil(i)
+	devUtil, err := mmapUtil.GetDeviceUtil(i)
 	if err != nil {
 		klog.V(3).ErrorS(err, "get device util failed", "device", i)
 		return err
@@ -184,7 +192,7 @@ func smWatcherSingleDevice(deviceUtil *watcher.MmapDeviceUtil, info *GPUDevice, 
 		devUtil.GraphicsProcesses[index] = process
 	}
 
-	devUtil.LastSeenTimeStamp = uint64(lastTs)
+	devUtil.LastSeenTimeStamp = lastTs
 	if rt == nvml.SUCCESS {
 		processUtilSamplesSize := min(len(procUtilSamples), watcher.MaxPids)
 		devUtil.ProcessUtilSamplesSize = uint32(processUtilSamplesSize)

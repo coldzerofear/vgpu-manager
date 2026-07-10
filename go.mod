@@ -4,8 +4,8 @@ go 1.26.0
 
 require (
 	github.com/Masterminds/semver v1.5.0
-	github.com/NVIDIA/go-nvlib v0.11.0
-	github.com/NVIDIA/go-nvml v0.13.2-0
+	github.com/NVIDIA/go-nvlib v0.12.0
+	github.com/NVIDIA/go-nvml v0.13.3-1
 	github.com/NVIDIA/nvidia-container-toolkit v1.19.1
 	github.com/adhocore/jsonc v0.10.0
 	github.com/docker/go-units v0.5.0
@@ -23,7 +23,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/urfave/cli/v2 v2.27.7
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
-	golang.org/x/sys v0.46.0
+	golang.org/x/sys v0.47.0
 	golang.org/x/time v0.15.0
 	gomodules.xyz/jsonpatch/v2 v2.5.0
 	google.golang.org/grpc v1.81.1
@@ -145,7 +145,7 @@ require (
 )
 
 replace (
-	github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20250919193215-e435d1485517
+	//github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20250919193215-e435d1485517
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.36.2
 	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.36.2
 	k8s.io/cri-streaming => k8s.io/cri-streaming v0.36.2
