@@ -13,8 +13,8 @@ const sampleWindow = time.Second
 // Indirection over the driver-backed entry points so the fallback can be
 // exercised without a GPU. Never reassigned outside tests.
 var (
-	fetchExtended = getProcessesUtilizationSamples
-	lookupSymbol  = func(name string) error { return nvml.Extensions().LookupSymbol(name) }
+	fetchExtended  = getProcessesUtilizationSamples
+	extendedExists = processesUtilizationInfoAvailable
 )
 
 type DeviceUtilInterface interface {
@@ -51,9 +51,9 @@ func (c *deviceUtilCache) DeviceGetProcessUtilSamples(d nvml.Device) ([]nvml.Pro
 		if ret != nvml.ERROR_NOT_SUPPORTED {
 			return samples, lastTs, ret
 		}
-		// LookupSymbol reports success by returning a nil error. Without the symbol
-		// there is no fallback, so report the driver's NOT_SUPPORTED as-is.
-		if err := lookupSymbol(symProcessesUtilizationInfo); err != nil {
+		// An older driver exports no extended entry point, so there is no fallback
+		// to take: report the driver's own NOT_SUPPORTED and never call into it.
+		if !extendedExists() {
 			return nil, lastTs, ret
 		}
 		c.useExtended.Store(true)

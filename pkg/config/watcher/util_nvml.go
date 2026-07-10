@@ -1,38 +1,61 @@
 package watcher
 
 /*
-#cgo linux LDFLAGS: -Wl,--unresolved-symbols=ignore-in-object-files
+#cgo CFLAGS: -D_GNU_SOURCE
+#cgo LDFLAGS: -ldl
 
+#include <dlfcn.h>
 #include <stdlib.h>
 
 // nvmlDeviceGetProcessesUtilizationInfo() requires a caller-allocated sample
-// array: it returns NVML_ERROR_INSUFFICIENT_SIZE whenever procUtilArray is NULL,
-// and NVML_SUCCESS only once the array has been populated. go-nvml's
-// Device.GetProcessesUtilizationInfo() always passes a zero-valued struct, so it
-// can never return NVML_SUCCESS and never yields samples, and it exposes no entry
-// point that accepts a caller-filled struct. Hence this shim -- it is the only
-// part go-nvml does not already provide; the struct layouts and the version
-// constant are reused from it rather than restated here.
+// array: per nvml.h it returns NVML_ERROR_INSUFFICIENT_SIZE whenever
+// procUtilArray is NULL, and NVML_SUCCESS only once that array has been
+// populated. go-nvml's Device.GetProcessesUtilizationInfo() hands the driver a
+// zero-valued struct and never calls back, so it can never return NVML_SUCCESS,
+// and it exposes no entry point that accepts a caller-filled struct. Hence this
+// shim; the struct layouts and the version constant are reused from go-nvml
+// rather than restated here.
 //
-// The symbols are declared extern and left unresolved at link time; go-nvml
-// dlopen()s libnvidia-ml.so.1 with RTLD_GLOBAL during nvml.Init(), which is what
-// binds them (the same mechanism go-nvml's own cgo bindings rely on).
+// The symbols are resolved with dlsym() instead of being declared extern, the
+// way the in-container library does it (NVML_FIND_ENTRY in library/src). An
+// extern reference would link fine but bind to address 0 on a driver that does
+// not export it, turning the guarded-off path into a SIGSEGV the moment anything
+// reached it. A NULL function pointer is checkable. go-nvml dlopen()s
+// libnvidia-ml.so.1 with RTLD_GLOBAL, so RTLD_DEFAULT finds the symbols.
 
 typedef unsigned int vgpuNvmlReturn_t;
 typedef void *vgpuNvmlDevice_t;
 
-extern vgpuNvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index, vgpuNvmlDevice_t *device);
-extern vgpuNvmlReturn_t nvmlDeviceGetProcessesUtilizationInfo(vgpuNvmlDevice_t device, void *info);
+typedef vgpuNvmlReturn_t (*vgpuFnHandleByIndex)(unsigned int index, vgpuNvmlDevice_t *device);
+typedef vgpuNvmlReturn_t (*vgpuFnProcsUtilInfo)(vgpuNvmlDevice_t device, void *info);
+
+static vgpuFnHandleByIndex vgpuHandleByIndex;
+static vgpuFnProcsUtilInfo vgpuProcsUtilInfo;
+
+// Reports whether both entry points exist in the loaded driver. Re-resolves while
+// unresolved: the first attempt may land before libnvidia-ml.so.1 is dlopen()ed.
+static int vgpuResolveProcessesUtilizationInfo(void) {
+  if (vgpuHandleByIndex == NULL) {
+    vgpuHandleByIndex = (vgpuFnHandleByIndex)dlsym(RTLD_DEFAULT, "nvmlDeviceGetHandleByIndex_v2");
+  }
+  if (vgpuProcsUtilInfo == NULL) {
+    vgpuProcsUtilInfo = (vgpuFnProcsUtilInfo)dlsym(RTLD_DEFAULT, "nvmlDeviceGetProcessesUtilizationInfo");
+  }
+  return vgpuHandleByIndex != NULL && vgpuProcsUtilInfo != NULL;
+}
 
 // The device handle is resolved here from its index, so the opaque nvml.Device
 // that go-nvml keeps private never has to be unwrapped.
 static vgpuNvmlReturn_t vgpuDeviceGetProcessesUtilizationInfo(unsigned int index, void *info) {
+  if (!vgpuResolveProcessesUtilizationInfo()) {
+    return 3; // NVML_ERROR_NOT_SUPPORTED
+  }
   vgpuNvmlDevice_t dev = NULL;
-  vgpuNvmlReturn_t ret = nvmlDeviceGetHandleByIndex_v2(index, &dev);
+  vgpuNvmlReturn_t ret = vgpuHandleByIndex(index, &dev);
   if (ret != 0) { // NVML_SUCCESS
     return ret;
   }
-  return nvmlDeviceGetProcessesUtilizationInfo(dev, info);
+  return vgpuProcsUtilInfo(dev, info);
 }
 */
 import "C"
@@ -43,8 +66,16 @@ import (
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 )
 
-// symProcessesUtilizationInfo is the driver symbol backing the extended entry point.
-const symProcessesUtilizationInfo = "nvmlDeviceGetProcessesUtilizationInfo"
+// processesUtilizationInfoAvailable reports whether the driver exports the
+// extended entry point.
+//
+// The check goes through dlsym rather than nvml.Extensions().LookupSymbol():
+// that one interrogates go-nvml's package-level library singleton, which this
+// project never initializes -- it builds its own instance with nvml.New() -- so
+// it would answer "absent" on every driver.
+func processesUtilizationInfoAvailable() bool {
+	return C.vgpuResolveProcessesUtilizationInfo() != 0
+}
 
 // getProcessesUtilizationSamples is the Go counterpart of the library's
 // get_process_utilization_samples() fallback (library/src/cuda_hook.c): size the

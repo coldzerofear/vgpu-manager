@@ -1,7 +1,6 @@
 package watcher
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -26,16 +25,16 @@ func stubDevice(index int, legacy []nvml.ProcessUtilizationSample, legacyRet nvm
 // withStubs swaps the driver-backed seams for the duration of a test.
 func withStubs(t *testing.T,
 	fetch func(int, uint64) ([]nvml.ProcessUtilizationSample, nvml.Return),
-	lookup func(string) error,
+	exists func() bool,
 ) {
 	t.Helper()
-	oldFetch, oldLookup := fetchExtended, lookupSymbol
-	fetchExtended, lookupSymbol = fetch, lookup
-	t.Cleanup(func() { fetchExtended, lookupSymbol = oldFetch, oldLookup })
+	oldFetch, oldExists := fetchExtended, extendedExists
+	fetchExtended, extendedExists = fetch, exists
+	t.Cleanup(func() { fetchExtended, extendedExists = oldFetch, oldExists })
 }
 
-func symbolFound(string) error   { return nil }
-func symbolMissing(string) error { return errors.New("no such symbol") }
+func symbolFound() bool   { return true }
+func symbolMissing() bool { return false }
 
 func neverFetch(t *testing.T) func(int, uint64) ([]nvml.ProcessUtilizationSample, nvml.Return) {
 	return func(int, uint64) ([]nvml.ProcessUtilizationSample, nvml.Return) {
@@ -198,5 +197,49 @@ func TestTransientErrorDoesNotLatch(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("legacy called %d times, want 2", calls)
+	}
+}
+
+// The real guard, unstubbed, against a driver that does not export the extended
+// entry point. dlsym returns NULL, so the symbol must report absent and the
+// fallback must never be entered.
+//
+// An extern declaration would instead bind to address 0 here and jump to NULL the
+// moment the extended path was taken, so this also pins the dlsym approach.
+func TestMissingSymbolIsDetectedForReal(t *testing.T) {
+	if processesUtilizationInfoAvailable() {
+		t.Skip("libnvidia-ml.so.1 exports the symbol on this host")
+	}
+
+	legacyCalls := 0
+	// Only fetchExtended is stubbed; extendedExists stays wired to the real dlsym.
+	oldFetch := fetchExtended
+	fetchExtended = neverFetch(t)
+	t.Cleanup(func() { fetchExtended = oldFetch })
+
+	d := stubDevice(0, nil, nvml.ERROR_NOT_SUPPORTED, &legacyCalls)
+	c := NewDeviceUtilCache()
+	got, _, rt := c.DeviceGetProcessUtilSamples(d)
+	if rt != nvml.ERROR_NOT_SUPPORTED {
+		t.Fatalf("ret = %v, want ERROR_NOT_SUPPORTED", rt)
+	}
+	if got != nil {
+		t.Fatalf("samples = %+v, want none", got)
+	}
+}
+
+// And a legacy-capable device on such a driver is unaffected: the extended entry
+// point is never consulted at all.
+func TestOldDriverLegacyPathUnaffected(t *testing.T) {
+	want := []nvml.ProcessUtilizationSample{{Pid: 9, SmUtil: 3}}
+	oldFetch := fetchExtended
+	fetchExtended = neverFetch(t)
+	t.Cleanup(func() { fetchExtended = oldFetch })
+
+	d := stubDevice(0, want, nvml.SUCCESS, nil)
+	c := NewDeviceUtilCache()
+	got, _, rt := c.DeviceGetProcessUtilSamples(d)
+	if rt != nvml.SUCCESS || len(got) != 1 || got[0].Pid != 9 {
+		t.Fatalf("ret = %v samples = %+v, want SUCCESS with pid 9", rt, got)
 	}
 }
