@@ -163,7 +163,10 @@ func smWatcherSingleDevice(
 	}
 
 	procUtilSamples, lastTs, rt := deviceUtil.DeviceGetProcessUtilSamples(d)
-	if rt == nvml.ERROR_NOT_SUPPORTED {
+	if rt != nvml.SUCCESS && rt != nvml.ERROR_NOT_FOUND {
+		// NOT_FOUND just means the driver holds no samples newer than lastTs. At
+		// this poll rate that is the common answer even for a busy GPU, so it stays
+		// silent; anything else is worth a line.
 		klog.V(3).ErrorS(errors.New(rt.Error()), "DeviceGetProcessUtilSamples failed", "device", i)
 	}
 
@@ -192,6 +195,13 @@ func smWatcherSingleDevice(
 		devUtil.GraphicsProcesses[index] = process
 	}
 
+	// Refreshed on every tick, including the NOT_FOUND ones. Readers take this as
+	// the cutoff to filter the cached samples against, so advancing it is what
+	// ages stale samples out (~1s, the sample window); it also proves the watcher
+	// is alive, which is what their 5s expiry check is really looking for. The
+	// samples themselves are only replaced when the driver actually produced a
+	// fresh batch -- clearing them on NOT_FOUND would collapse utilization to zero
+	// on the majority of ticks.
 	devUtil.LastSeenTimeStamp = lastTs
 	if rt == nvml.SUCCESS {
 		processUtilSamplesSize := min(len(procUtilSamples), watcher.MaxPids)

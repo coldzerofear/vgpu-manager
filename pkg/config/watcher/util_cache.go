@@ -1,95 +1,68 @@
 package watcher
 
 import (
-	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 )
 
-type utilizationStrategy int32
+// sampleWindow bounds how far back utilization samples are collected.
+const sampleWindow = time.Second
 
-const (
-	strategyUninitialized utilizationStrategy = iota
-	strategyUseLegacy
-	strategyUseExtended
-	strategyUnsupported
+// Indirection over the driver-backed entry points so the fallback can be
+// exercised without a GPU. Never reassigned outside tests.
+var (
+	fetchExtended = getProcessesUtilizationSamples
+	lookupSymbol  = func(name string) error { return nvml.Extensions().LookupSymbol(name) }
 )
 
 type DeviceUtilInterface interface {
 	DeviceGetProcessUtilSamples(nvml.Device) ([]nvml.ProcessUtilizationSample, uint64, nvml.Return)
 }
 
+// deviceUtilCache remembers whether the legacy nvmlDeviceGetProcessUtilization
+// entry point is usable. Support for it is a property of the driver and the
+// hardware generation, not of an individual device, so the answer is learned once
+// and reused: Blackwell and newer answer NOT_SUPPORTED and are served through
+// nvmlDeviceGetProcessesUtilizationInfo instead.
 type deviceUtilCache struct {
-	once     sync.Once
-	strategy atomic.Int32
+	useExtended atomic.Bool
 }
 
-func NewDeviceUtilCache() *deviceUtilCache {
+func NewDeviceUtilCache() DeviceUtilInterface {
 	return &deviceUtilCache{}
 }
 
-func (c *deviceUtilCache) probe(d nvml.Device) {
-	c.once.Do(func() {
-		strat := c.detectStrategy(d)
-		c.strategy.Store(int32(strat))
-	})
-}
-
-func (c *deviceUtilCache) detectStrategy(d nvml.Device) utilizationStrategy {
-	lastTs := uint64(time.Now().Add(-1 * time.Second).UnixMicro())
-	_, rt := d.GetProcessUtilization(lastTs)
-	// High frequency calls to GetProcessUtilization may return NVML_ERROR_NOT_FOUND, which is a normal phenomenon
-	if rt == nvml.SUCCESS || rt == nvml.ERROR_INSUFFICIENT_SIZE || rt == nvml.ERROR_NOT_FOUND {
-		return strategyUseLegacy
-	}
-
-	if rt == nvml.ERROR_NOT_SUPPORTED {
-		if nvml.Extensions().LookupSymbol("nvmlDeviceGetProcessesUtilizationInfo") != nil {
-			if _, rt = d.GetProcessesUtilizationInfo(); rt == nvml.SUCCESS {
-				return strategyUseExtended
-			}
-		}
-	}
-	return strategyUnsupported
-}
-
+// DeviceGetProcessUtilSamples returns the device's process utilization samples
+// along with the timestamp they were filtered against. It mirrors the library's
+// get_process_utilization_samples(): try the legacy entry point, and only when it
+// reports NOT_SUPPORTED fall back to the extended one.
+//
+// NVML return codes are passed through untouched. NOT_FOUND in particular means
+// "no samples newer than lastTs" and is the common answer at the watcher's poll
+// rate even for a busy GPU; callers rely on a non-SUCCESS reply to keep their
+// cached samples until a fresh batch arrives.
 func (c *deviceUtilCache) DeviceGetProcessUtilSamples(d nvml.Device) ([]nvml.ProcessUtilizationSample, uint64, nvml.Return) {
-	s := utilizationStrategy(c.strategy.Load())
-	if s == strategyUninitialized {
-		c.probe(d)
-		s = utilizationStrategy(c.strategy.Load())
+	lastTs := uint64(time.Now().Add(-sampleWindow).UnixMicro())
+
+	if !c.useExtended.Load() {
+		samples, ret := d.GetProcessUtilization(lastTs)
+		if ret != nvml.ERROR_NOT_SUPPORTED {
+			return samples, lastTs, ret
+		}
+		// LookupSymbol reports success by returning a nil error. Without the symbol
+		// there is no fallback, so report the driver's NOT_SUPPORTED as-is.
+		if err := lookupSymbol(symProcessesUtilizationInfo); err != nil {
+			return nil, lastTs, ret
+		}
+		c.useExtended.Store(true)
 	}
 
-	lastTs := uint64(time.Now().Add(-1 * time.Second).UnixMicro())
-	switch s {
-	case strategyUseLegacy:
-		samples, rt := d.GetProcessUtilization(lastTs)
-		if rt != nvml.SUCCESS {
-			return nil, lastTs, rt
-		}
-		return samples, lastTs, rt
-	case strategyUseExtended:
-		utilInfo, rt := d.GetProcessesUtilizationInfo()
-		if rt != nvml.SUCCESS {
-			return nil, lastTs, rt
-		}
-		lastTs = utilInfo.LastSeenTimeStamp
-		samples := make([]nvml.ProcessUtilizationSample, utilInfo.ProcessSamplesCount)
-		for index, sample := range unsafe.Slice(utilInfo.ProcUtilArray, utilInfo.ProcessSamplesCount) {
-			samples[index] = nvml.ProcessUtilizationSample{
-				Pid:       sample.Pid,
-				TimeStamp: sample.TimeStamp,
-				SmUtil:    sample.SmUtil,
-				MemUtil:   sample.MemUtil,
-				EncUtil:   sample.EncUtil,
-				DecUtil:   sample.DecUtil,
-			}
-		}
-		return samples, lastTs, rt
-	default:
-		return nil, lastTs, nvml.ERROR_NOT_SUPPORTED
+	index, ret := d.GetIndex()
+	if ret != nvml.SUCCESS {
+		return nil, lastTs, ret
 	}
+	samples, ret := fetchExtended(index, lastTs)
+	return samples, lastTs, ret
 }
