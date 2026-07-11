@@ -581,18 +581,26 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
     increment = DELTA_ERROR_RECOVERY_STEP;
   }
 
-  /* Ramp-speed floor, applied SYMMETRICALLY to both grow and cut. `increment` is
-   * sm^2-scaled while the distance the share must travel to track the limit is
-   * ~g_total (∝ sm), so the raw step ∝ 1/sm: on small-SM GPUs / MIG slices the
-   * ramp -- and, crucially, the cut when util overshoots -- crawl for minutes.
-   * Flooring only the grow step (an earlier mistake) makes the step asymmetric
-   * around the setpoint: grow >> cut ratchets share upward, so util blows past
-   * hard_core and the tiny raw cut cannot pull it back (observed: hard_core=8 but
-   * util pinned at 15). Flooring both keeps the controller symmetric -- share
-   * oscillates within ~g_total/DIVISOR of the setpoint (≈ that fraction of util:
-   * negligible for grid-heavy workloads, raise the divisor for tighter tracking)
-   * -- and lets an overshoot be cut back in ~DIVISOR cycles instead of thousands. */
-  int64_t ramp_floor = g_total_cuda_cores[host_index] / DELTA_RAMP_FLOOR_DIVISOR;
+  /* Ramp-speed floor, applied SYMMETRICALLY (before the grow/cut split) and
+   * scaled by the distance from the setpoint. `increment` is sm^2-scaled while
+   * the share must travel ~g_total (∝ sm) to track the limit, so the raw step
+   * ∝ 1/sm -- on small-SM GPUs / MIG slices the ramp and the cut-back on an
+   * overshoot both crawl for minutes.
+   *
+   * The floor is g_total * diff / (up_limit * DIVISOR): at cold start (diff ==
+   * up_limit) it is g_total/DIVISOR so the bulk ramp completes in ~DIVISOR
+   * cycles regardless of SM count, and it shrinks to ~0 as util approaches the
+   * limit so the fine control near the setpoint reverts to delta's proportional
+   * step -- keeping the tight limit tracking that large GPUs already had (a flat
+   * floor would coarsen it to +/- g_total/DIVISOR everywhere). Symmetric so it
+   * cannot ratchet: flooring only grow made grow >> cut and pushed util far past
+   * the limit (observed: hard_core=8 pinned at 15, hard_core=50 at 65-89). Uses
+   * the MIN_INCREMENT-floored utilization_diff, which conveniently keeps a small
+   * residual floor near the setpoint on tiny slices (where even the near-limit
+   * raw step is too small) while staying below the raw step on large GPUs. */
+  int64_t floor_up_limit = up_limit > 0 ? up_limit : 1; /* guard integer div-by-zero */
+  int64_t ramp_floor = g_total_cuda_cores[host_index] * (int64_t)utilization_diff
+                       / (floor_up_limit * DELTA_RAMP_FLOOR_DIVISOR);
   if (increment < ramp_floor) {
     increment = ramp_floor;
   }
