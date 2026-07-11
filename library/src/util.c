@@ -381,11 +381,12 @@ int get_aimd_ai_base_div(int *out) {
 }
 
 /* Number of consecutive observed-different watcher cycles required before
- * the "auto" mode flips between delta and aimd. Default 5 ~ 400ms, which
- * absorbs typical single-cycle NVML jitter in sys_process_num without
- * adding meaningful Pod start/exit latency (Pod start dominates anyway). */
+ * the "auto" mode flips between delta and aimd. Default 10 ~ 800ms, which
+ * absorbs multi-cycle NVML jitter in sys_process_num (the extra margin over
+ * the old 5 further suppresses exclusivity flapping) without adding meaningful
+ * Pod start/exit latency (Pod start dominates anyway). */
 int get_sm_auto_debounce_cycles(int *out) {
-  return get_positive_int_env(CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV, 5, out);
+  return get_positive_int_env(CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV, 10, out);
 }
 
 /* External-utilization threshold (percent) for the "is_exclusive" predicate

@@ -85,6 +85,17 @@ static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 static volatile int64_t g_cur_cuda_cores[MAX_DEVICE_COUNT]   = {0};
 static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0};
 
+/* Set by rate_limiter() (any app thread) whenever it actually throttles a
+ * launch (bucket ran negative), read-and-cleared once per cycle by the watcher.
+ * Lets the watcher's hard-limit anti-jitter bypass tell "util is low because
+ * the workload is idle" (no throttle -> keep the clamp) from "util is low
+ * because the clamp is starving a workload that wants more" (throttled -> fall
+ * through to the accumulating path so the bucket recovers -- otherwise a
+ * small-SM GPU stays pinned near 0% util forever). Cross-thread, so accessed
+ * with __atomic; RELAXED suffices -- it is a plain demand flag with no ordering
+ * dependency on other state. */
+static int g_throttled_since_watch[MAX_DEVICE_COUNT] = {0};
+
 static int g_sm_num[MAX_DEVICE_COUNT]            = {0};
 static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0};
 
@@ -489,7 +500,7 @@ dynamic_config_t g_dynamic_config = {
   .aimd_ai_base_div             = 400,
   .aimd_deadband_ratio          = 800,
   .aimd_md_cooldown_cycles      = 3,
-  .auto_debounce_cycles         = 5,
+  .auto_debounce_cycles         = 10,
   .auto_external_util_threshold = 1,
 };
 
@@ -524,6 +535,10 @@ static void rate_limiter(int grids, int blocks, int host_index) {
       before_cuda_cores = g_cur_cuda_cores[host_index];
       if (before_cuda_cores < 0) {
         metrics_record_rate_limit_hit(host_index);
+        /* Signal the watcher that this workload wanted more than its current
+         * bucket allowed -- this is genuine demand, not idleness. Slow path
+         * (we are about to sleep), so the atomic store is free. */
+        __atomic_store_n(&g_throttled_since_watch[host_index], 1, __ATOMIC_RELAXED);
         nanosleep(&g_cycle, NULL);
         goto CHECK;
       }
@@ -1078,14 +1093,30 @@ static void *utilization_watcher(void *arg) {
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
+      /* Read-and-clear once per cycle (before either branch, so it never goes
+       * stale): did any launch on this device throttle since we last looked? */
+      int throttled = __atomic_exchange_n(&g_throttled_since_watch[host_index], 0, __ATOMIC_RELAXED);
+
       if (g_vgpu_config->devices[host_index].hard_limit) {
-        /* Avoid usage jitter when application is initialized. Use the RAW
-         * predicate (no debounce) here: this bypass must respond instantly
-         * to a freshly-started workload's util ramp, and the hard_limit
-         * controller cannot exceed hard_core anyway so a misfire here is
-         * not a safety hazard (worst case: a few cycles of slightly
-         * different share computation). */
-        if (host_index_is_exclusive_raw(host_index) && top_results[host_index].user_current < up_limits[host_index] / 10) {
+        /* Anti-jitter soft-start. Use the RAW predicate (no debounce) here: this
+         * bypass must respond instantly to a freshly-started workload's util
+         * ramp, and the hard_limit controller cannot exceed hard_core anyway so
+         * a misfire here is not a safety hazard (worst case: a few cycles of
+         * slightly different share computation).
+         *
+         * The bypass SETs g_cur to a single controller step and freezes shares[]
+         * (via continue, skipping change_token) so the bucket does NOT
+         * pre-accumulate to a full g_total during an idle/model-load phase --
+         * otherwise the first heavy kernels would burst from a full bucket to
+         * ~100% and get cut, causing startup jitter. But gate it on `!throttled`:
+         * if the workload is actually hitting the throttle, its low util is
+         * starvation, not idleness, and clamping would pin it near zero forever
+         * (fatal on small-SM GPUs where the sm^2-scaled clamp is a fraction of a
+         * percent -- observed util stuck <1%). In that case fall through to the
+         * accumulating path so the bucket ramps up to serve the demand. */
+        if (host_index_is_exclusive_raw(host_index)
+            && top_results[host_index].user_current < up_limits[host_index] / 10
+            && !throttled) {
           g_cur_cuda_cores[host_index] =
               g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
           continue;
@@ -1151,6 +1182,10 @@ static void *utilization_watcher(void *arg) {
              * AND we previously climbed past hard_core, give some back. */
             int avg = avg_sys_frees[host_index] * 2 / SOFT_ADJUST_INTERVAL;
             int step = g_vgpu_config->devices[host_index].hard_core / 10;
+            /* Integer division truncates to 0 for hard_core < 10, which would
+             * freeze up_limits (never climbs to soft_core, never steps back).
+             * Floor at 1 so the elastic ramp still moves for small limits. */
+            if (step < 1) step = 1;
             int soft = g_vgpu_config->devices[host_index].soft_core;
             int hard = g_vgpu_config->devices[host_index].hard_core;
             if (avg > g_dynamic_config.usage_threshold) {
