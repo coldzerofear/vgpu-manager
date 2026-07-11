@@ -45,7 +45,7 @@ type nodeGPUCollector struct {
 	podLister   client.PodLister
 	contLister  *lister.ContainerLister
 	podResource *client.PodResource
-	deviceUtil  watcher.DeviceUtilInterface
+	utilAdapter watcher.DeviceUtilInterface
 	featureGate featuregate.FeatureGate
 }
 
@@ -65,7 +65,7 @@ func NewNodeGPUCollector(
 		podLister:   podLister,
 		contLister:  contLister,
 		featureGate: featureGate,
-		deviceUtil:  watcher.NewDeviceUtilCache(),
+		utilAdapter: watcher.NewDeviceUtilAdapter(),
 		podResource: client.NewPodResource(
 			client.WithCallTimeoutSecond(5)),
 	}, nil
@@ -421,7 +421,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				devHealthLvs[gpuInfo.UUID]...)
 		}
 
-		CollectorDeviceProcesses(c.deviceUtil, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
+		CollectorDeviceProcesses(c.utilAdapter, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
 		return nil
 	})
 	if err != nil {
@@ -845,7 +845,7 @@ skipNvml:
 }
 
 func CollectorDeviceProcesses(
-	deviceUtil watcher.DeviceUtilInterface,
+	utilAdapter watcher.DeviceUtilInterface,
 	mmapUtil *watcher.MmapDeviceUtil,
 	index int, hdev nvml.Device,
 	devProcInfoMap map[string]procInfoList,
@@ -910,10 +910,9 @@ func CollectorDeviceProcesses(
 
 nvmlProcessUtil:
 	// On MIG-enabled GPUs, querying process utilization is not currently supported.
-	processUtilizationSamples, _, rt = deviceUtil.DeviceGetProcessUtilSamples(hdev)
+	processUtilizationSamples, _, rt = utilAdapter.DeviceGetEnhanceCompatibilityProcessUtilSamples(hdev)
 	if rt != nvml.SUCCESS {
 		klog.V(4).Infof("error getting process utilization for device %d: %s", index, nvml.ErrorString(rt))
-		processUtilizationSamples = nil
 	}
 
 collecProcessInfo:

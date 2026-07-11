@@ -98,13 +98,13 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 
 		wg := sync.WaitGroup{}
 		batches := watcher.BalanceBatches(len(deviceHandlers), MaxBatchSize)
-		utilCache := watcher.NewDeviceUtilCache()
+		utilAdapter := watcher.NewDeviceUtilAdapter()
 
 		for _, batch := range batches {
 			wg.Add(1)
 			go func(config watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) {
 				defer wg.Done()
-				err := smWatcherBatchWithContext(subCtx, utilCache, deviceUtil, config, devices, handles)
+				err := smWatcherBatchWithContext(subCtx, utilAdapter, deviceUtil, config, devices, handles)
 				if err != nil {
 					subCancelFunc()
 				}
@@ -115,7 +115,7 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 }
 
 func smWatcherBatchWithContext(
-	ctx context.Context, deviceUtil watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil,
+	ctx context.Context, utilAdapter watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil,
 	batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device,
 ) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
@@ -130,7 +130,7 @@ func smWatcherBatchWithContext(
 			gpuDevice := devices[i]
 			gpuHandle := handles[i]
 
-			if err := smWatcherSingleDevice(deviceUtil, mmapUtil, gpuDevice, gpuHandle); err != nil {
+			if err := smWatcherSingleDevice(utilAdapter, mmapUtil, gpuDevice, gpuHandle); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
@@ -140,7 +140,7 @@ func smWatcherBatchWithContext(
 }
 
 func smWatcherSingleDevice(
-	deviceUtil watcher.DeviceUtilInterface,
+	utilAdapter watcher.DeviceUtilInterface,
 	mmapUtil *watcher.MmapDeviceUtil,
 	info *GPUDevice, d device.Device,
 ) error {
@@ -151,18 +151,20 @@ func smWatcherSingleDevice(
 		return nil
 	}
 	i := info.Index
-	computeProcesses, rt := d.GetComputeRunningProcesses()
+
+	computeProcesses, rt := utilAdapter.DeviceGetComputeRunningProcessesByCount(d, watcher.MaxPids)
 	if rt != nvml.SUCCESS {
 		klog.ErrorS(errors.New(rt.Error()), "GetComputeRunningProcesses failed", "device", i)
 		return nil
 	}
-	graphicsProcesses, rt := d.GetGraphicsRunningProcesses()
+
+	graphicsProcesses, rt := utilAdapter.DeviceGetGraphicsRunningProcessesByCount(d, watcher.MaxPids)
 	if rt != nvml.SUCCESS {
 		klog.ErrorS(errors.New(rt.Error()), "GetGraphicsRunningProcesses failed", "device", i)
 		return nil
 	}
 
-	procUtilSamples, lastTs, rt := deviceUtil.DeviceGetProcessUtilSamples(d)
+	procUtilSamples, lastTs, rt := utilAdapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, watcher.MaxPids)
 	if rt != nvml.SUCCESS && rt != nvml.ERROR_NOT_FOUND {
 		// NOT_FOUND just means the driver holds no samples newer than lastTs. At
 		// this poll rate that is the common answer even for a busy GPU, so it stays

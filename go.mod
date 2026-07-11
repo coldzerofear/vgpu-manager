@@ -145,7 +145,7 @@ require (
 )
 
 replace (
-	//github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20250919193215-e435d1485517
+	github.com/NVIDIA/go-nvml => github.com/coldzerofear/go-nvml v0.0.0-20260711051505-98fc2cd74264
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.36.2
 	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.36.2
 	k8s.io/cri-streaming => k8s.io/cri-streaming v0.36.2

@@ -15,7 +15,7 @@ else
 endif
 
 VERSION_PKG = github.com/coldzerofear/vgpu-manager/pkg
-CGO_CFLAGS = -D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv
+CGO_CFLAGS = -D_FORTIFY_SOURCE=2 -O2 -ftrapv -Wno-deprecated-declarations
 CGO_LDFLAGS_ALLOW = -Wl,--unresolved-symbols=ignore-in-object-files
 GO_BUILD_LDFLAGS = -X $(VERSION_PKG)/version.version=${VERSION} \
                    -X $(VERSION_PKG)/version.NvVersion=${NVVERSION} \
