@@ -486,6 +486,13 @@ const int cuda_hook_nums =
  * the overflow path. */
 #define DELTA_ERROR_RECOVERY_STEP   10
 
+/* Lower bound on delta()'s per-cycle GROW step, expressed as g_total/N: the
+ * share ramps to the limit in at most ~N watcher cycles (~N*100ms) regardless of
+ * SM count, instead of the sm^2-scaled increment that made small slices crawl
+ * for minutes. Trades a little limit-tracking tightness for ramp speed; raise N
+ * to favour tightness. See the block comment at the use site in delta(). */
+#define DELTA_RAMP_FLOOR_DIVISOR    64
+
 /* Defaults match the prior file-static initialisers; each field is
  * re-loaded from its env in sm_controller_init() under pthread_once.
  * The initialiser exists so a read before init still produces sane
@@ -575,6 +582,21 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   }
 
   if (user_current <= up_limit) {
+    /* Ramp-speed floor. `increment` above is sm^2-scaled while the distance the
+     * share must climb to reach the limit is ~g_total (∝ sm), so ramp time
+     * ~ g_total/increment ∝ 1/sm: on small-SM GPUs / MIG slices it takes
+     * thousands of cycles (minutes) to ramp -- measured ~3.4min on an 8-SM slice
+     * at hard_core=15. Floor the GROW step at a fixed fraction of the bucket so
+     * ramp time is bounded to ~DELTA_RAMP_FLOOR_DIVISOR cycles regardless of SM
+     * count. Only the grow branch is floored; the cut branch keeps delta's
+     * proportional step so an over-the-limit sample is not over-cut. Cost: up to
+     * g_total/DIVISOR of share overshoot at the limit (≈ that fraction of util),
+     * negligible for grid-heavy workloads; raise the divisor to trade ramp speed
+     * for tighter limit tracking. */
+    int64_t ramp_floor = g_total_cuda_cores[host_index] / DELTA_RAMP_FLOOR_DIVISOR;
+    if (increment < ramp_floor) {
+      increment = ramp_floor;
+    }
     share = (share + increment) > g_total_cuda_cores[host_index] ?
             g_total_cuda_cores[host_index] : (share + increment);
   } else {
@@ -1073,9 +1095,43 @@ static void *utilization_watcher(void *arg) {
     .tv_sec = 0,
     .tv_nsec = 100 / dev_count * MILLISEC,
   };
+  /* Minimum sleep when the abstime deadline has already passed (overrun), to
+   * stop a busy loop. Kept below `wait` (dev_count <= MaxBatchSize=4 => wait >=
+   * 25ms) so it never throttles the normal cadence; matches TIME_TICK. */
+  const int64_t MIN_WATCHER_SLEEP_NS = 10 * (int64_t)MILLISEC;
+  /* Absolute-time cadence: clock_nanosleep(TIMER_ABSTIME) against a monotonic
+   * grid keeps the sampling period drift-free -- a relative nanosleep(&wait)
+   * silently adds each cycle's processing time to the period. first_cycle runs
+   * the whole batch immediately (no sleep) so a freshly-started watcher
+   * publishes its first sample without a startup delay; the grid is anchored to
+   * "now" right after that first pass. */
+  struct timespec next_wakeup;
+  int first_cycle = 1;
   while (1) {
     for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
-      nanosleep(&wait, NULL);
+      if (likely(!first_cycle)) {
+        struct timespec now_ts;
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        int64_t remaining_ns = (int64_t)(next_wakeup.tv_sec - now_ts.tv_sec) * 1000000000LL
+                             + (next_wakeup.tv_nsec - now_ts.tv_nsec);
+        if (unlikely(remaining_ns < MIN_WATCHER_SLEEP_NS)) {
+          /* At/behind the deadline: sleep a fixed minimum instead of letting
+           * clock_nanosleep(TIMER_ABSTIME) return immediately on a past deadline
+           * -- a persistently overrunning watcher would otherwise busy-loop and
+           * burn CPU. next_wakeup stays on the grid, so once processing catches
+           * up remaining_ns goes positive again and the drift-free cadence
+           * re-syncs on its own (no one-shot catch-up burst). */
+          struct timespec floor_ts = { .tv_sec = 0, .tv_nsec = MIN_WATCHER_SLEEP_NS };
+          nanosleep(&floor_ts, NULL);
+        } else {
+          clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_wakeup, NULL);
+        }
+        next_wakeup.tv_nsec += wait.tv_nsec;
+        if (next_wakeup.tv_nsec >= 1000000000L) {
+          next_wakeup.tv_sec += next_wakeup.tv_nsec / 1000000000L;
+          next_wakeup.tv_nsec %= 1000000000L;
+        }
+      }
       host_index = host_indexes[cuda_index];
 
       // Skip GPU without core limit enabled
@@ -1216,6 +1272,17 @@ static void *utilization_watcher(void *arg) {
         g_share_log_tick[host_index] = 1;
         LOGGER(DETAIL, "cuda device: %d, host device: %d, user util: %d, up_limit: %d, share: %ld, curr core: %ld (1/%d sampled)", cuda_index, host_index,
                top_results[host_index].user_current, up_limits[host_index], shares[host_index], g_cur_cuda_cores[host_index], WATCHER_UTIL_LOG_STRIDE);
+      }
+    }
+    if (unlikely(first_cycle)) {
+      /* First pass ran with no sleeps; anchor the steady-state grid to now so
+       * the next pass sleeps a whole interval rather than racing to catch up. */
+      first_cycle = 0;
+      clock_gettime(CLOCK_MONOTONIC, &next_wakeup);
+      next_wakeup.tv_nsec += wait.tv_nsec;
+      if (next_wakeup.tv_nsec >= 1000000000L) {
+        next_wakeup.tv_sec += next_wakeup.tv_nsec / 1000000000L;
+        next_wakeup.tv_nsec %= 1000000000L;
       }
     }
   }
