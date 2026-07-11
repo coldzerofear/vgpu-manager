@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"runtime"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -127,6 +128,15 @@ func (c *deviceUtilAdapter) DeviceGetProcessesUtilization(d nvml.Device, lastTs 
 		ProcessSamplesCount: 0,
 		LastSeenTimeStamp:   lastTs,
 	}
+	// ProcUtilArray is a Go pointer stored inside a struct that the go-nvml
+	// binding passes straight to C by unsafe.Pointer cast. Handing C a Go pointer
+	// whose target holds another Go pointer trips the cgo pointer checker
+	// ("argument has Go pointer to unpinned Go pointer") and panics -- and the
+	// watcher goroutines have no recover(). Pin the backing array for the
+	// duration of the call so the checker accepts it; the pin is released once
+	// this function returns and the caller has copied what it needs out.
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
 	for {
 		ret := d.GetProcessesUtilizationByInfo(&processesUtilInfo)
 		if ret == nvml.SUCCESS {
@@ -134,7 +144,11 @@ func (c *deviceUtilAdapter) DeviceGetProcessesUtilization(d nvml.Device, lastTs 
 				return []nvml.ProcessUtilizationInfo_v1{}, ret
 			}
 			infos := unsafe.Slice(processesUtilInfo.ProcUtilArray, processesUtilInfo.ProcessSamplesCount)
-			return infos, ret
+			// Copy out of the pinned buffer: the returned slice must outlive the
+			// pin, and callers convert it into ProcessUtilizationSample anyway.
+			out := make([]nvml.ProcessUtilizationInfo_v1, len(infos))
+			copy(out, infos)
+			return out, ret
 		}
 		if ret != nvml.ERROR_INSUFFICIENT_SIZE {
 			return nil, ret
@@ -145,6 +159,7 @@ func (c *deviceUtilAdapter) DeviceGetProcessesUtilization(d nvml.Device, lastTs 
 		}
 		// Build capacity using the results returned above
 		array := make([]nvml.ProcessUtilizationInfo_v1, count)
+		pinner.Pin(&array[0])
 		processesUtilInfo.ProcUtilArray = &array[0]
 	}
 }
