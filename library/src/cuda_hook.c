@@ -581,22 +581,22 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
     increment = DELTA_ERROR_RECOVERY_STEP;
   }
 
+  /* Ramp-speed floor, applied SYMMETRICALLY to both grow and cut. `increment` is
+   * sm^2-scaled while the distance the share must travel to track the limit is
+   * ~g_total (∝ sm), so the raw step ∝ 1/sm: on small-SM GPUs / MIG slices the
+   * ramp -- and, crucially, the cut when util overshoots -- crawl for minutes.
+   * Flooring only the grow step (an earlier mistake) makes the step asymmetric
+   * around the setpoint: grow >> cut ratchets share upward, so util blows past
+   * hard_core and the tiny raw cut cannot pull it back (observed: hard_core=8 but
+   * util pinned at 15). Flooring both keeps the controller symmetric -- share
+   * oscillates within ~g_total/DIVISOR of the setpoint (≈ that fraction of util:
+   * negligible for grid-heavy workloads, raise the divisor for tighter tracking)
+   * -- and lets an overshoot be cut back in ~DIVISOR cycles instead of thousands. */
+  int64_t ramp_floor = g_total_cuda_cores[host_index] / DELTA_RAMP_FLOOR_DIVISOR;
+  if (increment < ramp_floor) {
+    increment = ramp_floor;
+  }
   if (user_current <= up_limit) {
-    /* Ramp-speed floor. `increment` above is sm^2-scaled while the distance the
-     * share must climb to reach the limit is ~g_total (∝ sm), so ramp time
-     * ~ g_total/increment ∝ 1/sm: on small-SM GPUs / MIG slices it takes
-     * thousands of cycles (minutes) to ramp -- measured ~3.4min on an 8-SM slice
-     * at hard_core=15. Floor the GROW step at a fixed fraction of the bucket so
-     * ramp time is bounded to ~DELTA_RAMP_FLOOR_DIVISOR cycles regardless of SM
-     * count. Only the grow branch is floored; the cut branch keeps delta's
-     * proportional step so an over-the-limit sample is not over-cut. Cost: up to
-     * g_total/DIVISOR of share overshoot at the limit (≈ that fraction of util),
-     * negligible for grid-heavy workloads; raise the divisor to trade ramp speed
-     * for tighter limit tracking. */
-    int64_t ramp_floor = g_total_cuda_cores[host_index] / DELTA_RAMP_FLOOR_DIVISOR;
-    if (increment < ramp_floor) {
-      increment = ramp_floor;
-    }
     share = (share + increment) > g_total_cuda_cores[host_index] ?
             g_total_cuda_cores[host_index] : (share + increment);
   } else {
@@ -1169,9 +1169,19 @@ static void *utilization_watcher(void *arg) {
          * starvation, not idleness, and clamping would pin it near zero forever
          * (fatal on small-SM GPUs where the sm^2-scaled clamp is a fraction of a
          * percent -- observed util stuck <1%). In that case fall through to the
-         * accumulating path so the bucket ramps up to serve the demand. */
+         * accumulating path so the bucket ramps up to serve the demand.
+         *
+         * Threshold floored at 1: up_limit/10 truncates to 0 for hard_core < 10,
+         * which would disable the bypass entirely -- and then the idle-phase
+         * accumulate path (util 0 <= hard_core, so delta keeps growing) fills the
+         * bucket to g_total before any demand arrives, so the first kernels burst
+         * far past the limit (observed: hard_core=8, util jumps to ~15 from a
+         * pre-filled bucket). Keeping the clamp alive for small limits stops the
+         * idle pre-fill. */
+        int low_util_thr = up_limits[host_index] / 10;
+        if (low_util_thr < 1) low_util_thr = 1;
         if (host_index_is_exclusive_raw(host_index)
-            && top_results[host_index].user_current < up_limits[host_index] / 10
+            && top_results[host_index].user_current < low_util_thr
             && !throttled) {
           g_cur_cuda_cores[host_index] =
               g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
