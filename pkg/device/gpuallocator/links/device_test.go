@@ -44,7 +44,7 @@ func (t *testDevice) GetNvLinkRemotePciInfo(i int) (nvml.PciInfo, nvml.Return) {
 func pciInfoWithBusID(busID string) nvml.PciInfo {
 	var info nvml.PciInfo
 	for i := 0; i < len(busID) && i < len(info.BusId); i++ {
-		info.BusId[i] = busID[i]
+		info.BusId[i] = int8(busID[i])
 	}
 	return info
 }

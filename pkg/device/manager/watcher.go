@@ -98,12 +98,15 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 
 		wg := sync.WaitGroup{}
 		batches := watcher.BalanceBatches(len(deviceHandlers), MaxBatchSize)
+		utilAdapter := watcher.NewDeviceUtilAdapter(
+			watcher.WithExtendedInterface(deviceLib.Extensions()),
+		)
 
 		for _, batch := range batches {
 			wg.Add(1)
 			go func(config watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) {
 				defer wg.Done()
-				err := smWatcherBatchWithContext(subCtx, deviceUtil, config, devices, handles)
+				err := smWatcherBatchWithContext(subCtx, utilAdapter, deviceUtil, config, devices, handles)
 				if err != nil {
 					subCancelFunc()
 				}
@@ -113,7 +116,10 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 	}, time.Second)
 }
 
-func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.MmapDeviceUtil, batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) error {
+func smWatcherBatchWithContext(
+	ctx context.Context, utilAdapter watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil,
+	batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device,
+) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
 	for {
 		for i := batch.StartIndex; i <= batch.EndIndex; i++ {
@@ -126,7 +132,7 @@ func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.MmapDevi
 			gpuDevice := devices[i]
 			gpuHandle := handles[i]
 
-			if err := smWatcherSingleDevice(deviceUtil, gpuDevice, gpuHandle); err != nil {
+			if err := smWatcherSingleDevice(utilAdapter, mmapUtil, gpuDevice, gpuHandle); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
@@ -135,7 +141,11 @@ func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.MmapDevi
 	}
 }
 
-func smWatcherSingleDevice(deviceUtil *watcher.MmapDeviceUtil, info *GPUDevice, d device.Device) error {
+func smWatcherSingleDevice(
+	utilAdapter watcher.DeviceUtilInterface,
+	mmapUtil *watcher.MmapDeviceUtil,
+	info *GPUDevice, d device.Device,
+) error {
 	if !info.Healthy || info.MigEnabled {
 		return nil
 	}
@@ -143,30 +153,35 @@ func smWatcherSingleDevice(deviceUtil *watcher.MmapDeviceUtil, info *GPUDevice, 
 		return nil
 	}
 	i := info.Index
-	computeProcesses, rt := d.GetComputeRunningProcessesBySize(watcher.MaxPids)
+
+	computeProcesses, rt := utilAdapter.DeviceGetComputeRunningProcessesByCount(d, watcher.MaxPids)
 	if rt != nvml.SUCCESS {
 		klog.ErrorS(errors.New(rt.Error()), "GetComputeRunningProcesses failed", "device", i)
 		return nil
 	}
-	graphicsProcesses, rt := d.GetGraphicsRunningProcessesBySize(watcher.MaxPids)
+
+	graphicsProcesses, rt := utilAdapter.DeviceGetGraphicsRunningProcessesByCount(d, watcher.MaxPids)
 	if rt != nvml.SUCCESS {
 		klog.ErrorS(errors.New(rt.Error()), "GetGraphicsRunningProcesses failed", "device", i)
 		return nil
 	}
 
-	lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
-	procUtilSamples, rt := d.GetProcessUtilizationBySize(uint64(lastTs), watcher.MaxPids)
+	procUtilSamples, lastTs, rt := utilAdapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, watcher.MaxPids)
+	if rt != nvml.SUCCESS && rt != nvml.ERROR_NOT_FOUND {
+		// NOT_FOUND just means the driver holds no samples newer than lastTs. At
+		// this poll rate that is the common answer even for a busy GPU, so it stays
+		// silent; anything else is worth a line.
+		klog.V(3).ErrorS(errors.New(rt.Error()), "DeviceGetProcessUtilSamples failed", "device", i)
+	}
 
-	unlock, err := deviceUtil.WLock(i)
+	unlock, err := mmapUtil.WLock(i)
 	if err != nil {
 		klog.V(3).ErrorS(err, "DeviceUtil WLock failed", "device", i)
 		return err
 	}
-	defer func() {
-		_ = unlock()
-	}()
+	defer func() { _ = unlock() }()
 
-	devUtil, err := deviceUtil.GetDeviceUtil(i)
+	devUtil, err := mmapUtil.GetDeviceUtil(i)
 	if err != nil {
 		klog.V(3).ErrorS(err, "get device util failed", "device", i)
 		return err
@@ -184,7 +199,14 @@ func smWatcherSingleDevice(deviceUtil *watcher.MmapDeviceUtil, info *GPUDevice, 
 		devUtil.GraphicsProcesses[index] = process
 	}
 
-	devUtil.LastSeenTimeStamp = uint64(lastTs)
+	// Refreshed on every tick, including the NOT_FOUND ones. Readers take this as
+	// the cutoff to filter the cached samples against, so advancing it is what
+	// ages stale samples out (~1s, the sample window); it also proves the watcher
+	// is alive, which is what their 5s expiry check is really looking for. The
+	// samples themselves are only replaced when the driver actually produced a
+	// fresh batch -- clearing them on NOT_FOUND would collapse utilization to zero
+	// on the majority of ticks.
+	devUtil.LastSeenTimeStamp = lastTs
 	if rt == nvml.SUCCESS {
 		processUtilSamplesSize := min(len(procUtilSamples), watcher.MaxPids)
 		devUtil.ProcessUtilSamplesSize = uint32(processUtilSamplesSize)

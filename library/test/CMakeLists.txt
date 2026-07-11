@@ -57,10 +57,7 @@ if(DEFINED TEST_DEVICE_ID)
 endif()
 
 # ---- C tests --------------------------------------------------------------
-file(GLOB C_TESTS "${TEST_SRC_DIR}/test_*.c")
-foreach(src ${C_TESTS})
-    get_filename_component(name ${src} NAME_WE)
-    add_executable(${name} ${src})
+function(vgpu_configure_c_test name)
     target_include_directories(${name} PRIVATE ${_CUDA_INCLUDE} ${TEST_SRC_DIR})
     target_link_directories(${name} PRIVATE ${_CUDA_LIBDIR})
     # Link cuda (driver) and cudart (runtime) explicitly since CUDA 12/13
@@ -70,7 +67,28 @@ foreach(src ${C_TESTS})
     else()
         target_link_libraries(${name} PRIVATE cuda cudart nvidia-ml pthread rt)
     endif()
+endfunction()
+
+file(GLOB C_TESTS "${TEST_SRC_DIR}/test_*.c")
+foreach(src ${C_TESTS})
+    get_filename_component(name ${src} NAME_WE)
+    add_executable(${name} ${src})
+    vgpu_configure_c_test(${name})
 endforeach()
+
+# ---- per-thread-default-stream variant ------------------------------------
+# cuda_hook.c implements cuMemAllocFromPoolAsync/cuMemAllocAsync/cuMemFreeAsync
+# and their _ptsz twins as separate copies, so the default build never reaches
+# the _ptsz half. Defining CUDA_API_PER_THREAD_DEFAULT_STREAM makes cuda.h
+# redirect the unversioned names to the _ptsz entry points, giving that copy the
+# same coverage from one source file.
+set(_POOL_ASYNC_SRC ${TEST_SRC_DIR}/test_alloc_pool_async.c)
+if(EXISTS ${_POOL_ASYNC_SRC})
+    add_executable(test_alloc_pool_async_ptsz ${_POOL_ASYNC_SRC})
+    target_compile_definitions(test_alloc_pool_async_ptsz
+                               PRIVATE CUDA_API_PER_THREAD_DEFAULT_STREAM)
+    vgpu_configure_c_test(test_alloc_pool_async_ptsz)
+endif()
 
 # ---- CUDA tests (kernel launches) -----------------------------------------
 file(GLOB CU_TESTS "${TEST_SRC_DIR}/test_*.cu")
