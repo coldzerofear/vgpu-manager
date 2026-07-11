@@ -71,10 +71,6 @@ func (c *deviceUtilAdapter) detectStrategy(d nvml.Device) utilizationStrategy {
 	if ret == nvml.SUCCESS || ret == nvml.ERROR_INSUFFICIENT_SIZE || ret == nvml.ERROR_NOT_FOUND {
 		return strategyUseLegacy
 	}
-	// if an instantaneous error occurs, the next call will be re checked
-	if ret == nvml.ERROR_GPU_IS_LOST || ret == nvml.ERROR_UNKNOWN {
-		return strategyUninitialized
-	}
 
 	if ret == nvml.ERROR_NOT_SUPPORTED {
 		if err := c.extended.LookupSymbol("nvmlDeviceGetProcessesUtilizationInfo"); err == nil {
@@ -83,17 +79,22 @@ func (c *deviceUtilAdapter) detectStrategy(d nvml.Device) utilizationStrategy {
 			if ret == nvml.SUCCESS || ret == nvml.ERROR_INSUFFICIENT_SIZE || ret == nvml.ERROR_NOT_FOUND {
 				return strategyUseExtended
 			}
-			// if an instantaneous error occurs, the next call will be re checked
-			if ret == nvml.ERROR_GPU_IS_LOST || ret == nvml.ERROR_UNKNOWN {
-				return strategyUninitialized
-			}
 		}
 	}
+
+	// if an instantaneous error occurs, the next call will be re checked
+	if ret == nvml.ERROR_GPU_IS_LOST || ret == nvml.ERROR_UNKNOWN {
+		return strategyUninitialized
+	}
+
 	return strategyUnsupported
 }
 
 // DeviceGetComputeRunningProcessesByCount When the actual result set returned by nvml exceeds infoCount, it will be truncated to infoCount instead of returning ERROR_INSUFFICIENT_SIZE
 func (c *deviceUtilAdapter) DeviceGetComputeRunningProcessesByCount(d nvml.Device, infoCount uint32) ([]nvml.ProcessInfo, nvml.Return) {
+	if infoCount == 0 {
+		return []nvml.ProcessInfo{}, nvml.SUCCESS
+	}
 	count := infoCount
 	for {
 		infos, ret := d.GetComputeRunningProcessesByCount(count)
@@ -109,6 +110,9 @@ func (c *deviceUtilAdapter) DeviceGetComputeRunningProcessesByCount(d nvml.Devic
 
 // DeviceGetGraphicsRunningProcessesByCount When the actual result set returned by nvml exceeds infoCount, it will be truncated to infoCount instead of returning ERROR_INSUFFICIENT_SIZE
 func (c *deviceUtilAdapter) DeviceGetGraphicsRunningProcessesByCount(d nvml.Device, infoCount uint32) ([]nvml.ProcessInfo, nvml.Return) {
+	if infoCount == 0 {
+		return []nvml.ProcessInfo{}, nvml.SUCCESS
+	}
 	count := infoCount
 	for {
 		infos, ret := d.GetGraphicsRunningProcessesByCount(count)
@@ -166,6 +170,9 @@ func (c *deviceUtilAdapter) DeviceGetProcessesUtilization(d nvml.Device, lastTs 
 
 // DeviceGetProcessesUtilizationByCount When the actual result set returned by nvml exceeds infoCount, it will be truncated to infoCount instead of returning ERROR_INSUFFICIENT_SIZE
 func (c *deviceUtilAdapter) DeviceGetProcessesUtilizationByCount(d nvml.Device, lastTs uint64, infoCount uint32) ([]nvml.ProcessUtilizationInfo_v1, nvml.Return) {
+	if infoCount == 0 {
+		return []nvml.ProcessUtilizationInfo_v1{}, nvml.SUCCESS
+	}
 	infos, ret := c.DeviceGetProcessesUtilization(d, lastTs)
 	if ret != nvml.SUCCESS {
 		return nil, ret
@@ -175,6 +182,9 @@ func (c *deviceUtilAdapter) DeviceGetProcessesUtilizationByCount(d nvml.Device, 
 
 // DeviceGetProcessUtilizationByCount When the actual result set returned by nvml exceeds sampleCount, it will be truncated to sampleCount instead of returning ERROR_INSUFFICIENT_SIZE
 func (c *deviceUtilAdapter) DeviceGetProcessUtilizationByCount(d nvml.Device, lastTs uint64, sampleCount uint32) ([]nvml.ProcessUtilizationSample, nvml.Return) {
+	if sampleCount == 0 {
+		return []nvml.ProcessUtilizationSample{}, nvml.SUCCESS
+	}
 	processSamplesCount := sampleCount
 	for {
 		utilSamples, ret := d.GetProcessUtilizationByCount(lastTs, processSamplesCount)
