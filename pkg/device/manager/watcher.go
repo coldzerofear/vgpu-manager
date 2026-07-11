@@ -98,7 +98,9 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 
 		wg := sync.WaitGroup{}
 		batches := watcher.BalanceBatches(len(deviceHandlers), MaxBatchSize)
-		utilAdapter := watcher.NewDeviceUtilAdapter()
+		utilAdapter := watcher.NewDeviceUtilAdapter(
+			watcher.WithExtendedInterface(deviceLib.Extensions()),
+		)
 
 		for _, batch := range batches {
 			wg.Add(1)

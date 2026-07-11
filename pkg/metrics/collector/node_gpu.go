@@ -58,6 +58,9 @@ func NewNodeGPUCollector(
 	if err != nil {
 		return nil, err
 	}
+	adapter := watcher.NewDeviceUtilAdapter(
+		watcher.WithExtendedInterface(deviceLib.Extensions()),
+	)
 	return &nodeGPUCollector{
 		DeviceLib:   deviceLib,
 		nodeName:    config.GetNodeName(),
@@ -65,7 +68,7 @@ func NewNodeGPUCollector(
 		podLister:   podLister,
 		contLister:  contLister,
 		featureGate: featureGate,
-		utilAdapter: watcher.NewDeviceUtilAdapter(),
+		utilAdapter: adapter,
 		podResource: client.NewPodResource(
 			client.WithCallTimeoutSecond(5)),
 	}, nil

@@ -28,6 +28,7 @@ type DeviceUtilInterface interface {
 }
 
 type deviceUtilAdapter struct {
+	extended nvml.ExtendedInterface
 	strategy atomic.Int32
 }
 
@@ -44,8 +45,21 @@ func (c *deviceUtilAdapter) getStrategy(d nvml.Device) utilizationStrategy {
 	return strategy
 }
 
-func NewDeviceUtilAdapter() DeviceUtilInterface {
-	adapter := &deviceUtilAdapter{}
+type Option func(*deviceUtilAdapter)
+
+func WithExtendedInterface(extended nvml.ExtendedInterface) Option {
+	return func(adapter *deviceUtilAdapter) {
+		adapter.extended = extended
+	}
+}
+
+func NewDeviceUtilAdapter(opts ...Option) DeviceUtilInterface {
+	adapter := &deviceUtilAdapter{
+		extended: nvml.Extensions(),
+	}
+	for _, opt := range opts {
+		opt(adapter)
+	}
 	adapter.strategy.Store(int32(strategyUninitialized))
 	return adapter
 }
@@ -56,13 +70,21 @@ func (c *deviceUtilAdapter) detectStrategy(d nvml.Device) utilizationStrategy {
 	if ret == nvml.SUCCESS || ret == nvml.ERROR_INSUFFICIENT_SIZE || ret == nvml.ERROR_NOT_FOUND {
 		return strategyUseLegacy
 	}
+	// if an instantaneous error occurs, the next call will be re checked
+	if ret == nvml.ERROR_GPU_IS_LOST || ret == nvml.ERROR_UNKNOWN {
+		return strategyUninitialized
+	}
 
 	if ret == nvml.ERROR_NOT_SUPPORTED {
-		if err := nvml.Extensions().LookupSymbol("nvmlDeviceGetProcessesUtilizationInfo"); err == nil {
+		if err := c.extended.LookupSymbol("nvmlDeviceGetProcessesUtilizationInfo"); err == nil {
 			_, ret = d.GetProcessesUtilizationInfo()
 			// High frequency calls to GetProcessesUtilizationInfo may return NVML_ERROR_NOT_FOUND, which is a normal phenomenon
 			if ret == nvml.SUCCESS || ret == nvml.ERROR_INSUFFICIENT_SIZE || ret == nvml.ERROR_NOT_FOUND {
 				return strategyUseExtended
+			}
+			// if an instantaneous error occurs, the next call will be re checked
+			if ret == nvml.ERROR_GPU_IS_LOST || ret == nvml.ERROR_UNKNOWN {
+				return strategyUninitialized
 			}
 		}
 	}
@@ -117,8 +139,11 @@ func (c *deviceUtilAdapter) DeviceGetProcessesUtilization(d nvml.Device, lastTs 
 		if ret != nvml.ERROR_INSUFFICIENT_SIZE {
 			return nil, ret
 		}
-		// Build capacity using the results returned above
 		count := processesUtilInfo.ProcessSamplesCount
+		if count == 0 {
+			return nil, ret
+		}
+		// Build capacity using the results returned above
 		array := make([]nvml.ProcessUtilizationInfo_v1, count)
 		processesUtilInfo.ProcUtilArray = &array[0]
 	}
