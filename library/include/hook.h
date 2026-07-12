@@ -258,6 +258,11 @@ typedef struct {
  * auto_debounce_cycles: N consecutive observations to flip exclusivity FSM.
  * auto_external_util_threshold: external util percent above which the
  *                     device is considered "shared with other Pods".
+ * delta_ramp_floor_divisor: delta()'s grow/cut step is floored at
+ *                     g_total*diff/(up_limit*N); N sets the bulk-ramp length in
+ *                     watcher cycles (~N cycles, SM-independent). Smaller = faster
+ *                     ramp / coarser near-limit tracking on tiny slices. Clamped
+ *                     >= 1 at load (0 would divide by zero in delta()). Default 64.
  */
 typedef struct {
   /* Preserved: was already in this struct in earlier versions. */
@@ -271,6 +276,7 @@ typedef struct {
   int    aimd_md_cooldown_cycles;
   int    auto_debounce_cycles;
   int    auto_external_util_threshold;
+  int    delta_ramp_floor_divisor;
 } dynamic_config_t;
 
 typedef struct {

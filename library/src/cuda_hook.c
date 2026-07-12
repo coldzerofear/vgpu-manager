@@ -69,6 +69,7 @@ extern int get_sm_auto_external_util_threshold(int *out);
 extern int get_aimd_deadband_ratio(int *out);
 extern int get_aimd_md_cooldown_cycles(int *out);
 extern int get_usage_threshold(int *out);
+extern int get_delta_ramp_floor_divisor(int *out);
 
 /* fork() child handler implemented in loader.c -- re-inits the four
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
@@ -486,12 +487,10 @@ const int cuda_hook_nums =
  * the overflow path. */
 #define DELTA_ERROR_RECOVERY_STEP   10
 
-/* Lower bound on delta()'s per-cycle GROW step, expressed as g_total/N: the
- * share ramps to the limit in at most ~N watcher cycles (~N*100ms) regardless of
- * SM count, instead of the sm^2-scaled increment that made small slices crawl
- * for minutes. Trades a little limit-tracking tightness for ramp speed; raise N
- * to favour tightness. See the block comment at the use site in delta(). */
-#define DELTA_RAMP_FLOOR_DIVISOR    64
+/* delta()'s ramp-floor divisor is env-tunable via g_dynamic_config
+ * .delta_ramp_floor_divisor (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR, default 64);
+ * see the block comment at the use site in delta() and the loader in
+ * sm_controller_init(). */
 
 /* Defaults match the prior file-static initialisers; each field is
  * re-loaded from its env in sm_controller_init() under pthread_once.
@@ -509,6 +508,7 @@ dynamic_config_t g_dynamic_config = {
   .aimd_md_cooldown_cycles      = 3,
   .auto_debounce_cycles         = 10,
   .auto_external_util_threshold = 1,
+  .delta_ramp_floor_divisor     = 64,
 };
 
 static void change_token(int64_t delta, int host_index) {
@@ -600,7 +600,7 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
    * raw step is too small) while staying below the raw step on large GPUs. */
   int64_t floor_up_limit = up_limit > 0 ? up_limit : 1; /* guard integer div-by-zero */
   int64_t ramp_floor = g_total_cuda_cores[host_index] * (int64_t)utilization_diff
-                       / (floor_up_limit * DELTA_RAMP_FLOOR_DIVISOR);
+                       / (floor_up_limit * g_dynamic_config.delta_ramp_floor_divisor);
   if (increment < ramp_floor) {
     increment = ramp_floor;
   }
@@ -1004,6 +1004,14 @@ static void sm_controller_init(void) {
   if (g_dynamic_config.auto_external_util_threshold < 1) g_dynamic_config.auto_external_util_threshold = 1;
   (void)get_sm_auto_debounce_cycles(&g_dynamic_config.auto_debounce_cycles);
   if (g_dynamic_config.auto_debounce_cycles < 1) g_dynamic_config.auto_debounce_cycles = 1;
+
+  /* delta ramp-floor divisor. Loaded unconditionally: delta runs as the default
+   * controller and as an AUTO dispatch target. get_positive_int_env already
+   * guarantees >= 1; the explicit clamp is defence-in-depth so delta()'s
+   * (up_limit * divisor) can never become a zero divisor if a future edit
+   * changes the getter. */
+  (void)get_delta_ramp_floor_divisor(&g_dynamic_config.delta_ramp_floor_divisor);
+  if (g_dynamic_config.delta_ramp_floor_divisor < 1) g_dynamic_config.delta_ramp_floor_divisor = 1;
 
   /* AIMD tunables. Loaded unconditionally because AUTO can dispatch to
    * aimd_controller when the device becomes shared, even if the user
