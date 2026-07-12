@@ -261,8 +261,10 @@ typedef struct {
  * delta_ramp_floor_divisor: delta()'s grow/cut step is floored at
  *                     g_total*diff/(up_limit*N); N sets the bulk-ramp length in
  *                     watcher cycles (~N cycles, SM-independent). Smaller = faster
- *                     ramp / coarser near-limit tracking on tiny slices. Clamped
- *                     >= 1 at load (0 would divide by zero in delta()). Default 64.
+ *                     ramp / coarser near-limit tracking on tiny slices. Default
+ *                     64. N <= 0 disables the floor (delta reverts to its raw
+ *                     sm^2-scaled step); delta() guards the division on N > 0, so
+ *                     a non-positive value is not loaded-clamped.
  */
 typedef struct {
   /* Preserved: was already in this struct in earlier versions. */

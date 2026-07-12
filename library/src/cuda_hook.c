@@ -597,12 +597,19 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
    * the limit (observed: hard_core=8 pinned at 15, hard_core=50 at 65-89). Uses
    * the MIN_INCREMENT-floored utilization_diff, which conveniently keeps a small
    * residual floor near the setpoint on tiny slices (where even the near-limit
-   * raw step is too small) while staying below the raw step on large GPUs. */
-  int64_t floor_up_limit = up_limit > 0 ? up_limit : 1; /* guard integer div-by-zero */
-  int64_t ramp_floor = g_total_cuda_cores[host_index] * (int64_t)utilization_diff
-                       / (floor_up_limit * g_dynamic_config.delta_ramp_floor_divisor);
-  if (increment < ramp_floor) {
-    increment = ramp_floor;
+   * raw step is too small) while staying below the raw step on large GPUs.
+   *
+   * divisor <= 0 is the "disable" sentinel (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR set
+   * to 0 or less): skip the floor -- and its division -- so delta uses its raw
+   * sm^2-scaled step, exactly the pre-floor behaviour. */
+  int ramp_divisor = g_dynamic_config.delta_ramp_floor_divisor;
+  if (ramp_divisor > 0) {
+    int64_t floor_up_limit = up_limit > 0 ? up_limit : 1; /* guard integer div-by-zero */
+    int64_t ramp_floor = g_total_cuda_cores[host_index] * (int64_t)utilization_diff
+                         / (floor_up_limit * ramp_divisor);
+    if (increment < ramp_floor) {
+      increment = ramp_floor;
+    }
   }
   if (user_current <= up_limit) {
     share = (share + increment) > g_total_cuda_cores[host_index] ?
@@ -1006,12 +1013,10 @@ static void sm_controller_init(void) {
   if (g_dynamic_config.auto_debounce_cycles < 1) g_dynamic_config.auto_debounce_cycles = 1;
 
   /* delta ramp-floor divisor. Loaded unconditionally: delta runs as the default
-   * controller and as an AUTO dispatch target. get_positive_int_env already
-   * guarantees >= 1; the explicit clamp is defence-in-depth so delta()'s
-   * (up_limit * divisor) can never become a zero divisor if a future edit
-   * changes the getter. */
+   * controller and as an AUTO dispatch target. NO clamp here on purpose: a value
+   * <= 0 is the user's explicit "disable the floor" sentinel, which delta()
+   * honours by skipping the floor (and its division) entirely. */
   (void)get_delta_ramp_floor_divisor(&g_dynamic_config.delta_ramp_floor_divisor);
-  if (g_dynamic_config.delta_ramp_floor_divisor < 1) g_dynamic_config.delta_ramp_floor_divisor = 1;
 
   /* AIMD tunables. Loaded unconditionally because AUTO can dispatch to
    * aimd_controller when the device becomes shared, even if the user
