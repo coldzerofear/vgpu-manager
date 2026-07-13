@@ -1769,9 +1769,6 @@ void formatUuid(CUuuid uuid, char* uuid_str, int len) {
 
 int _get_host_device_index_by_cuda_device(CUdevice device) {
   int cuda_index = (int) device;
-  if (unlikely(!is_valid_device_index(cuda_index, "cuda"))) {
-    return -1;
-  }
   int host_index = cuda_to_host_device_index[cuda_index];
   if (host_index < 0) {
     CUuuid cu_uuid;
@@ -1800,7 +1797,14 @@ int _get_host_device_index_by_cuda_device(CUdevice device) {
 }
 
 int get_host_device_index_by_cuda_device(CUdevice device) {
-  int host_index = -1;
+  int cuda_index = (int) device;
+  if (unlikely(!is_valid_device_index(cuda_index, "cuda"))) {
+    return -1;
+  }
+  int host_index = cuda_to_host_device_index[cuda_index];
+  if (host_index >= 0) {
+    return host_index;
+  }
   pthread_mutex_lock(&device_index_mutex);
   host_index = _get_host_device_index_by_cuda_device(device);
   pthread_mutex_unlock(&device_index_mutex);
@@ -1812,7 +1816,10 @@ int get_nvml_device_index_by_cuda_device(CUdevice device) {
   if (unlikely(!is_valid_device_index(cuda_index, "cuda"))) {
     return -1;
   }
-  int nvml_index = -1;
+  int nvml_index = cuda_to_nvml_device_index[cuda_index];
+  if (nvml_index >= 0) {
+    return nvml_index;
+  }
   pthread_mutex_lock(&device_index_mutex);
   nvml_index = cuda_to_nvml_device_index[cuda_index];
   if (nvml_index < 0) {
