@@ -80,9 +80,45 @@ static void graph_cost_after_fork(void);
 
 static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
 
+/* Per-device state that application threads write on *every* kernel launch while
+ * SM limiting is on: rate_limiter() CASes cur_cuda_cores, gap_begin() stamps
+ * last_launch_ns. Both are gated on the same devices[].core_limit flag, so they
+ * are touched together or not at all -- which is why they belong in one line.
+ *
+ * These used to be two plain int64_t[MAX_DEVICE_COUNT] arrays. At 16 * 8 = 128
+ * bytes, devices 0-7 sat in one 64B cache line and 8-15 in the next. An atomic
+ * RMW needs *exclusive* ownership of its line, so a thread launching on GPU 0 and
+ * a thread launching on GPU 3 -- different devices, different counters, no
+ * logical sharing at all -- ping-ponged the same line between cores on every
+ * launch. Textbook false sharing, and vgpu-manager does hand one container
+ * several GPUs. Giving each device its own aligned slot removes it, and
+ * co-locating the two fields makes a launch touch one line instead of two.
+ *
+ * Padded to 128 rather than 64: Intel's L2 adjacent-line prefetcher pulls lines
+ * in 128B-aligned pairs, so 64B padding can still leave two devices effectively
+ * sharing, and some ARM64 parts use a 128B granule. 16 * 128 = 2KB total.
+ *
+ * This does NOT address *true* sharing: N threads on the SAME device still
+ * contend on that device's counter, which is inherent to a shared token bucket.
+ * Fixing that needs thread-local token batching, tracked separately.
+ */
+#define CACHELINE_SIZE 128
+
+typedef struct {
+  volatile int64_t cur_cuda_cores;  /* token bucket, CAS'd per launch    */
+  volatile int64_t last_launch_ns;  /* gap detector, stamped per launch  */
+} __attribute__((aligned(CACHELINE_SIZE))) dev_hot_t;
+
+/* Zero-initialized as a static, matching the old `= {0}` arrays. */
+static dev_hot_t g_dev_hot[MAX_DEVICE_COUNT];
+
+_Static_assert(sizeof(dev_hot_t) == CACHELINE_SIZE,
+               "dev_hot_t must occupy exactly one padded cache line");
+_Static_assert(_Alignof(dev_hot_t) == CACHELINE_SIZE,
+               "dev_hot_t must be cache-line aligned or false sharing returns");
+
 /* `= {0}` relies on C's rule that any explicit initializer zero-fills the
  * remainder, so these scale automatically with MAX_DEVICE_COUNT. */
-static volatile int64_t g_cur_cuda_cores[MAX_DEVICE_COUNT]   = {0};
 static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0};
 
 /* Set by rate_limiter() (any app thread) whenever it actually throttles a
@@ -134,7 +170,6 @@ static CUevent          g_gap_start[MAX_DEVICE_COUNT]      = {0};
 static CUevent          g_gap_end[MAX_DEVICE_COUNT]        = {0};
 static int              g_gap_evt_ready[MAX_DEVICE_COUNT]  = {0};
 static int              g_gap_dc[MAX_DEVICE_COUNT]         = {0};
-static volatile int64_t g_last_launch_ns[MAX_DEVICE_COUNT] = {0};
 
 /* Per-device decimation tick for the periodic watcher utilization log.
  * The SM watcher samples each device ~every 80ms (~12 lines/s/device); at
@@ -205,7 +240,7 @@ void child_after_fork(void) {
     g_gap_evt_ready[i]  = 0;
     g_gap_start[i]      = NULL;
     g_gap_end[i]        = NULL;
-    g_last_launch_ns[i] = 0;
+    g_dev_hot[i].last_launch_ns = 0;
     /* Re-init in case a parent thread held the lock at the moment of fork.
      * POSIX leaves the inherited mutex state undefined; glibc re-init on a
      * never-destroyed mutex is safe (no resource leak for a non-robust
@@ -507,9 +542,9 @@ dynamic_config_t g_dynamic_config = {
 static void change_token(int64_t delta, int host_index) {
   int64_t cuda_cores_before = 0, cuda_cores_after = 0;
 
-  LOGGER(DETAIL, "host device: %d, delta: %ld, curr: %ld", host_index, delta, g_cur_cuda_cores[host_index]);
+  LOGGER(DETAIL, "host device: %d, delta: %ld, curr: %ld", host_index, delta, g_dev_hot[host_index].cur_cuda_cores);
   do {
-    cuda_cores_before = g_cur_cuda_cores[host_index];
+    cuda_cores_before = g_dev_hot[host_index].cur_cuda_cores;
     cuda_cores_after = cuda_cores_before + delta;
 
     if (unlikely(cuda_cores_after > g_total_cuda_cores[host_index])) {
@@ -517,7 +552,7 @@ static void change_token(int64_t delta, int host_index) {
     } else if (unlikely(cuda_cores_after < 0)) {
       cuda_cores_after = 0;
     }
-  } while (!CAS(&g_cur_cuda_cores[host_index], cuda_cores_before, cuda_cores_after));
+  } while (!CAS(&g_dev_hot[host_index].cur_cuda_cores, cuda_cores_before, cuda_cores_after));
 }
 
 static void rate_limiter(int grids, int blocks, int host_index) {
@@ -532,7 +567,7 @@ static void rate_limiter(int grids, int blocks, int host_index) {
 
     do {
     CHECK:
-      before_cuda_cores = g_cur_cuda_cores[host_index];
+      before_cuda_cores = g_dev_hot[host_index].cur_cuda_cores;
       if (before_cuda_cores < 0) {
         metrics_record_rate_limit_hit(host_index);
         /* Signal the watcher that this workload wanted more than its current
@@ -543,7 +578,7 @@ static void rate_limiter(int grids, int blocks, int host_index) {
         goto CHECK;
       }
       after_cuda_cores = before_cuda_cores - kernel_size;
-    } while (!CAS(&g_cur_cuda_cores[host_index], before_cuda_cores, after_cuda_cores));
+    } while (!CAS(&g_dev_hot[host_index].cur_cuda_cores, before_cuda_cores, after_cuda_cores));
   }
 }
 
@@ -1039,7 +1074,7 @@ static int is[MAX_DEVICE_COUNT]             = {0};
 static int pre_external_process_nums[MAX_DEVICE_COUNT] = {0};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
 /* volatile: written by the watcher thread, read cross-thread by the GAP path
- * (gap_effective_dc). Matches g_cur_cuda_cores' convention -- forces a real
+ * (gap_effective_dc). Matches g_dev_hot[].cur_cuda_cores' convention -- forces a real
  * load (no register caching) of this single aligned int. */
 static volatile int up_limits[MAX_DEVICE_COUNT] = {0};
 static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
@@ -1117,7 +1152,7 @@ static void *utilization_watcher(void *arg) {
         if (host_index_is_exclusive_raw(host_index)
             && top_results[host_index].user_current < up_limits[host_index] / 10
             && !throttled) {
-          g_cur_cuda_cores[host_index] =
+          g_dev_hot[host_index].cur_cuda_cores =
               g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
           continue;
         }
@@ -1215,7 +1250,7 @@ static void *utilization_watcher(void *arg) {
       if ((g_share_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
         g_share_log_tick[host_index] = 1;
         LOGGER(DETAIL, "cuda device: %d, host device: %d, user util: %d, up_limit: %d, share: %ld, curr core: %ld (1/%d sampled)", cuda_index, host_index,
-               top_results[host_index].user_current, up_limits[host_index], shares[host_index], g_cur_cuda_cores[host_index], WATCHER_UTIL_LOG_STRIDE);
+               top_results[host_index].user_current, up_limits[host_index], shares[host_index], g_dev_hot[host_index].cur_cuda_cores, WATCHER_UTIL_LOG_STRIDE);
       }
     }
   }
@@ -1228,6 +1263,14 @@ static void *utilization_watcher(void *arg) {
 
 static inline int64_t monotonic_ns(void) {
   struct timespec ts;
+#ifdef CLOCK_MONOTONIC_COARSE
+  // Compile time: Only attempt COARSE on platforms with defined macros
+  // Runtime: Very old kernel may have defined macros but syscall returns EINVAL
+  if (__builtin_expect(clock_gettime(CLOCK_MONOTONIC_COARSE, &ts) == 0, 1)) {
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+  }
+#endif
+  // Fallback path: COARSE unavailable or failed
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
@@ -1308,9 +1351,9 @@ static int gap_begin(int host_index, CUstream stream) {
   if (dc <= 0 || dc >= 100) return 0;          /* disabled or full-speed burst */
 
   int64_t now  = monotonic_ns();
-  int64_t last = g_last_launch_ns[host_index];
+  int64_t last = g_dev_hot[host_index].last_launch_ns;
   if (last != 0 && (now - last) < GAP_THRESHOLD_NS) {
-    g_last_launch_ns[host_index] = now;        /* BATCH region: token bucket handles it */
+    g_dev_hot[host_index].last_launch_ns = now;        /* BATCH region: token bucket handles it */
     return 0;
   }
 
@@ -1368,7 +1411,7 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
    * Called unconditionally: count == number of GAP-path entries, even the
    * ones where the cuEvent measurement failed (gpu_us == sleep_us == 0). */
   metrics_record_gap_throttle(host_index, gpu_us, sleep_us);
-  g_last_launch_ns[host_index] = monotonic_ns();
+  g_dev_hot[host_index].last_launch_ns = monotonic_ns();
   pthread_mutex_unlock(&g_gap_lock[host_index]);
 }
 
@@ -1446,7 +1489,6 @@ static void init_device_cuda_cores(int *device_count) {
     g_total_cuda_cores[host_index] = (int64_t)g_max_thread_per_sm[host_index] * (int64_t)(g_sm_num[host_index]) * FACTOR;
 
     LOGGER(VERBOSE, "cuda device %d total cuda cores: %ld", cuda_index, g_total_cuda_cores[host_index]);
-
   }
 }
 
@@ -1744,7 +1786,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
   size_t *used_memory = arg;
   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
   unsigned int size_on_device = MAX_PIDS;
-  nvmlReturn_t ret;
+  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
 
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
@@ -1755,8 +1797,6 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
                              device, &size_on_device, pids_on_device);
-  } else {
-    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
   }
   if (unlikely(ret)) {
     *used_memory = 0;
@@ -1837,13 +1877,11 @@ void get_used_gpu_memory(void *arg, CUdevice device) {
   }
 
   nvmlDevice_t dev;
-  nvmlReturn_t ret;
+  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, nvml_index, &dev);
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, nvml_index, &dev);
-  } else {
-    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
   }
   if (unlikely(ret)) {
     *used_memory = 0;
@@ -1910,7 +1948,6 @@ static nvmlReturn_t get_process_utilization_samples(
 static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
   utilization_t *top_result, nvmlProcessUtilizationSample_t *processes_sample,
   unsigned int *processes_size, int cuda_index, nvmlDevice_t dev) {
-  nvmlReturn_t ret;
   struct timeval cur, prev;
   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
   unsigned int running_processes = MAX_PIDS;
@@ -1918,6 +1955,7 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
 
   metrics_record_nvml_fallback(host_index);
 
+  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
                              dev, &running_processes, pids_on_device);
@@ -1927,8 +1965,6 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
   } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
                              dev, &running_processes, pids_on_device);
-  } else {
-    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
   }
   if (unlikely(ret)) {
     LOGGER(VERBOSE, "nvmlDeviceGetComputeRunningProcesses can't get pids on cuda device %d, "
@@ -1941,7 +1977,6 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
   if (running_processes == 0) {
     running_processes = MAX_PIDS;
     nvmlProcessInfo_t graphic_pids_on_device[MAX_PIDS];
-
     if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
       ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses,
                                dev, &running_processes, graphic_pids_on_device);
@@ -1992,7 +2027,8 @@ int is_expired(unsigned long long lastTs) {
     struct timeval cur;
     gettimeofday(&cur, NULL);
     unsigned long long cur_us = cur.tv_sec * 1000000 + cur.tv_usec;
-    return (cur_us - lastTs) >= 5000000; // 5,000,000 microsecond
+    if (cur_us <= lastTs) return 0;
+    return (cur_us - lastTs) >= 5000000ULL; // 5,000,000 microsecond
 }
 
 static nvmlReturn_t get_gpu_process_from_external_watcher(

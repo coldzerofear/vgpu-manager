@@ -1767,18 +1767,16 @@ void formatUuid(CUuuid uuid, char* uuid_str, int len) {
                             b[0x8], b[0x9], b[0xA], b[0xB], b[0xC], b[0xD], b[0xE], b[0xF]);
 }
 
-int _get_host_device_index_by_cuda_device(CUdevice device) {
+static int _get_host_device_index_by_cuda_device(CUdevice device) {
   int cuda_index = (int) device;
   int host_index = cuda_to_host_device_index[cuda_index];
   if (host_index < 0) {
     CUuuid cu_uuid;
-    CUresult ret;
+    CUresult ret = CUDA_ERROR_NOT_FOUND;
     if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetUuid_v2))) {
       ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetUuid_v2, &cu_uuid, device);
     } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetUuid))){
       ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuDeviceGetUuid, &cu_uuid, device);
-    } else {
-      ret = CUDA_ERROR_NOT_FOUND;
     }
     if (unlikely(ret)) {
       LOGGER(VERBOSE, "cuDeviceGetUuid can't get uuid on cuda device %d, return %d, str: %s",
