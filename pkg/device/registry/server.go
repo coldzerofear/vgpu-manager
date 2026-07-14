@@ -122,36 +122,52 @@ type Target struct {
 	ConfigDir string
 }
 
-// GetPodByUIDFunc resolves a pod by its UID. Used by the legacy device-plugin
-// path where the calling library already knows its own (pod, container) pair.
-type GetPodByUIDFunc func(ctx context.Context, uid string) (*corev1.Pod, error)
+func (t *Target) Validate() error {
+	if t == nil {
+		return fmt.Errorf("cannot parse empty targets")
+	}
+	if len(t.Candidates) == 0 {
+		return fmt.Errorf("resolver returned no Candidates")
+	}
+	if t.ConfigDir == "" {
+		return fmt.Errorf("resolver returned empty ConfigDir")
+	}
+	return nil
+}
 
-// GetTargetByUUIDFunc resolves a register UUID minted by the DRA driver into
+// GetTargetByPodUidFunc resolve targets through pod UID and container name.
+type GetTargetByPodUidFunc func(ctx context.Context, podUid, contName string) (*Target, error)
+
+// GetTargetByRegisterUuidFunc resolves a register UUID minted by the DRA driver into
 // the set of (pod, container) candidates that could be the caller plus the
 // shared on-disk directory for pids.config. Returning multiple candidates is
 // the contract that lets the server tolerate stale informer views and
 // fallback partition keys baked into claim annotations at Prepare time.
-type GetTargetByUUIDFunc func(ctx context.Context, uuid string) (*Target, error)
+type GetTargetByRegisterUuidFunc func(ctx context.Context, uuid string) (*Target, error)
 
-func NewDeviceRegistryServer(containerPath string, getPodByUIDFn GetPodByUIDFunc, getTargetByUUIDFn GetTargetByUUIDFunc) *DeviceRegistryServerImpl {
+func NewDeviceRegistryServer(
+	containerPath string,
+	getTargetByPodUidFunc GetTargetByPodUidFunc,
+	getTargetByRegisterUuidFunc GetTargetByRegisterUuidFunc,
+) *DeviceRegistryServerImpl {
 	return &DeviceRegistryServerImpl{
-		contPath:          containerPath,
-		getPodByUIDFn:     getPodByUIDFn,
-		getTargetByUUIDFn: getTargetByUUIDFn,
-		inFlight:          make(chan struct{}, maxInFlightResolves),
-		perCaller:         make(map[string]int),
+		contPath:           containerPath,
+		getTargetByPodUid:  getTargetByPodUidFunc,
+		getTargetByRegUuid: getTargetByRegisterUuidFunc,
+		inFlight:           make(chan struct{}, maxInFlightResolves),
+		perCaller:          make(map[string]int),
 	}
 }
 
 type DeviceRegistryServerImpl struct {
 	registry.UnimplementedVDeviceRegistryServer
-	mutex             sync.Mutex
-	contPath          string
-	getPodByUIDFn     GetPodByUIDFunc
-	getTargetByUUIDFn GetTargetByUUIDFunc
-	server            *grpc.Server
-	listener          net.Listener
-	running           bool
+	mutex              sync.Mutex
+	contPath           string
+	getTargetByPodUid  GetTargetByPodUidFunc
+	getTargetByRegUuid GetTargetByRegisterUuidFunc
+	server             *grpc.Server
+	listener           net.Listener
+	running            bool
 
 	// inFlight is a global concurrency budget for resolveTarget; perCaller
 	// tracks the in-flight count keyed by caller identity (guarded by
@@ -168,13 +184,13 @@ func (s *DeviceRegistryServerImpl) acquireSlot(callerKey string) (release func()
 	select {
 	case s.inFlight <- struct{}{}:
 	default:
-		return nil, false
+		return func() {}, false
 	}
 	s.perCallerMu.Lock()
 	if s.perCaller[callerKey] >= maxPerCallerResolves {
 		s.perCallerMu.Unlock()
 		<-s.inFlight
-		return nil, false
+		return func() {}, false
 	}
 	s.perCaller[callerKey]++
 	s.perCallerMu.Unlock()
@@ -211,12 +227,14 @@ func (s *DeviceRegistryServerImpl) IsRunning() bool {
 // In either case the call retries transient failures (informer not yet synced,
 // container not yet Running, cgroup still ramping up) until the request
 // context is canceled.
-func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, req *registry.ContainerDeviceRequest) (resp *registry.ContainerDeviceResponse, err error) {
+func (s *DeviceRegistryServerImpl) RegisterContainerDevice(
+	ctx context.Context, req *registry.ContainerDeviceRequest,
+) (resp *registry.ContainerDeviceResponse, err error) {
 	klog.V(4).InfoS("RegisterContainerDevice", "podUid", req.GetPodUid(),
 		"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid())
 
 	var (
-		release      func()
+		release      = func() {}
 		peerPid      int32
 		callerPodUID string
 		callerKey    string
@@ -225,25 +243,22 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 	)
 
 	defer func() {
+		release()
 		runtime.RecoverFromPanic(&err)
-		if release != nil {
-			release()
-		}
-		if err != nil {
-			if strings.HasPrefix(err.Error(), "recovered from panic") {
-				klog.ErrorS(err, "RegisterContainerDevice panicked", "podUid", req.GetPodUid(),
-					"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
-					"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
-				err = fmt.Errorf("an internal error has occurred")
-			} else {
-				klog.V(3).ErrorS(err, "RegisterContainerDevice failed", "podUid", req.GetPodUid(),
-					"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
-					"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
-			}
-		} else {
+		switch {
+		case err == nil:
 			klog.V(4).InfoS("RegisterContainerDevice success", "podUid", req.GetPodUid(),
 				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(), "peerPid", peerPid,
 				"callerPodUID", callerPodUID, "callerKey", callerKey, "configDir", configDir, "pids", pids)
+		case strings.HasPrefix(err.Error(), "recovered from panic"):
+			klog.ErrorS(err, "RegisterContainerDevice panicked", "podUid", req.GetPodUid(),
+				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
+				"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
+			err = fmt.Errorf("an internal error has occurred")
+		default:
+			klog.V(3).ErrorS(err, "RegisterContainerDevice failed", "podUid", req.GetPodUid(),
+				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
+				"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
 		}
 	}()
 
@@ -256,26 +271,24 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 	callerPodUID, _ = callerPodUIDFromPid(peerPid)
 
 	// Concurrency budget keyed by caller identity (real pod UID, else PID).
-	callerKey = callerPodUID
-	if callerKey == "" {
+	if callerKey = callerPodUID; callerKey == "" {
 		callerKey = fmt.Sprintf("pid:%d", peerPid)
 	}
 
 	var ok bool
-	release, ok = s.acquireSlot(callerKey)
-	if !ok {
-		klog.V(4).InfoS("register request rejected: concurrency budget exhausted",
-			"callerKey", callerKey, "peerPid", peerPid)
+	if release, ok = s.acquireSlot(callerKey); !ok {
+		klog.V(4).InfoS("register request rejected: concurrency budget exhausted", "callerKey", callerKey, "peerPid", peerPid)
 		return resp, status.Error(codes.ResourceExhausted, "register concurrency budget exhausted, retry later")
 	}
 
-	configDir, pids, err = s.resolveTarget(ctx, req, peerPid, callerPodUID)
-	if err != nil {
+	if configDir, pids, err = s.resolveTarget(ctx, req, peerPid, callerPodUID); err != nil {
 		return resp, err
 	}
+
 	if err = s.persistPids(configDir, pids); err != nil {
 		return resp, err
 	}
+
 	return resp, nil
 }
 
@@ -295,20 +308,22 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 // the first viable one wins. If none are viable we wait one backoff tick and
 // re-query the resolver — by then either the informer has caught up or the
 // runtime has progressed enough for a different candidate to be Running.
-func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *registry.ContainerDeviceRequest, peerPid int32, callerPodUID string) (string, []int, error) {
+func (s *DeviceRegistryServerImpl) resolveTarget(
+	ctx context.Context,
+	req *registry.ContainerDeviceRequest,
+	peerPid int32, callerPodUID string,
+) (string, []int, error) {
 	// Server-side deadline: never poll longer than resolveTimeout regardless of
 	// the client's context, so a caller that never sets a deadline (or never
 	// disconnects) cannot pin this goroutine forever.
 	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
 	defer cancel()
 
-	useUUID := req.GetRegisterUuid() != ""
-	cgroupResolver := cgroupFullPathResolver()
-
 	var (
-		configDir string
-		winPids   []int
-		lastErr   error
+		cgroupResolver = cgroupFullPathResolver()
+		configDir      string
+		winPids        []int
+		lastErr        error
 	)
 	pollErr := wait.PollUntilContextCancel(ctx, resolveBackoff, true, func(ctx context.Context) (bool, error) {
 		target, err := s.lookupTarget(ctx, req)
@@ -337,27 +352,26 @@ func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *regis
 			return false, fmt.Errorf("caller pod %q is not authorized for this register request", callerPodUID)
 		}
 
+		if len(target.Candidates) == 1 {
+			pod := target.Candidates[0].Pod
+			if util.PodIsTerminated(pod) {
+				return false, fmt.Errorf("pod %s is terminated", klog.KObj(pod))
+			}
+		}
+
 		// Legacy device-plugin path has exactly one candidate; validation
 		// failures are hard errors (no other candidate could rescue them).
 		// DRA path iterates candidates, accepting the first viable one and
 		// continuing on per-candidate soft failures.
 		for i, cand := range target.Candidates {
-			if !useUUID {
-				if util.PodIsTerminated(cand.Pod) {
-					return false, fmt.Errorf("pod %s is terminated", klog.KObj(cand.Pod))
-				}
-			}
 			pids, ok := isCandidateAlive(cand, cgroupResolver, peerPid, &lastErr)
 			if !ok {
 				continue
 			}
 			configDir = target.ConfigDir
 			winPids = pids
-			klog.V(5).InfoS("register candidate accepted",
-				"pod", klog.KObj(cand.Pod),
-				"containerName", cand.ContainerName,
-				"candidateIndex", i,
-				"pids", len(pids))
+			klog.V(5).InfoS("register candidate accepted", "pod", klog.KObj(cand.Pod),
+				"containerName", cand.ContainerName, "candidateIndex", i, "pids", len(pids))
 			return true, nil
 		}
 		return false, nil
@@ -436,54 +450,47 @@ func cgroupFullPathResolver() func(string) string {
 // the right resolver based on the request shape and synthesizes a Target. For
 // the legacy path the Target carries exactly one candidate.
 func (s *DeviceRegistryServerImpl) lookupTarget(ctx context.Context, req *registry.ContainerDeviceRequest) (*Target, error) {
-	if uuid := req.GetRegisterUuid(); uuid != "" {
-		if s.getTargetByUUIDFn == nil {
+	var (
+		uuid          string
+		podUID        string
+		containerName string
+	)
+
+	if uuid = req.GetRegisterUuid(); uuid != "" {
+		if s.getTargetByRegUuid == nil {
 			return nil, errors.New("uuid registration is not supported by this server")
 		}
-		t, err := s.getTargetByUUIDFn(ctx, uuid)
+		target, err := s.getTargetByRegUuid(ctx, uuid)
 		if err != nil {
 			return nil, err
 		}
-		if t == nil {
+		if target == nil {
 			return nil, fmt.Errorf("uuid %s did not resolve to a target", uuid)
 		}
-		if len(t.Candidates) == 0 {
+		if len(target.Candidates) == 0 {
 			return nil, fmt.Errorf("uuid %s resolver returned no candidates", uuid)
 		}
-		if t.ConfigDir == "" {
+		if target.ConfigDir == "" {
 			return nil, fmt.Errorf("uuid %s resolver returned empty ConfigDir", uuid)
 		}
-		return t, nil
+		return target, nil
 	}
 
-	if s.getPodByUIDFn == nil {
-		return nil, errors.New("pod-uid registration is not supported by this server")
-	}
-	podUID := req.GetPodUid()
-	containerName := req.GetContainerName()
-	if podUID == "" {
+	if podUID = req.GetPodUid(); podUID == "" {
 		return nil, errors.New("pod_uid is empty")
 	}
-	if containerName == "" {
+	if containerName = req.GetContainerName(); containerName == "" {
 		return nil, errors.New("container_name is empty")
 	}
-	pod, err := s.getPodByUIDFn(ctx, podUID)
+	if s.getTargetByPodUid == nil {
+		return nil, errors.New("pod-uid registration is not supported by this server")
+	}
+	target, err := s.getTargetByPodUid(ctx, podUID, containerName)
 	if err != nil {
 		return nil, err
 	}
-	if pod == nil {
-		return nil, fmt.Errorf("pod %q not found", podUID)
-	}
-	return &Target{
-		Candidates: []TargetCandidate{{
-			Pod:           pod,
-			ContainerName: containerName,
-		}},
-		ConfigDir: filepath.Join(
-			util.GetPodContainerManagerPath(s.contPath, pod.UID, containerName),
-			util.Config,
-		),
-	}, nil
+
+	return target, target.Validate()
 }
 
 // persistPids writes the sorted PID list to <configDir>/pids.config atomically

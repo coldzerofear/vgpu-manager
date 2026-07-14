@@ -15,6 +15,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -32,6 +33,7 @@ import (
 // register UUID — embedded in the claim annotation "<driver>/<uuid>" — back
 // to its owning claim.
 const ClaimUUIDIndex = "manager.register.uuid"
+const ClaimReservedForUid = "claim.status.reservedFor.uid"
 
 // MakeClaimUUIDIndexFunc returns an IndexFunc that emits every register UUID
 // previously assigned by the driver. The annotation prefix is the driver name
@@ -48,6 +50,26 @@ func MakeClaimUUIDIndexFunc(driverName string) kcache.IndexFunc {
 		for key := range annotations {
 			if uuid, found := strings.CutPrefix(key, prefix); found && uuid != "" {
 				out = append(out, uuid)
+			}
+		}
+		return out, nil
+	}
+}
+
+func MakeClaimReservedForUidIndexFunc() kcache.IndexFunc {
+	return func(obj interface{}) ([]string, error) {
+		accessor, err := meta.Accessor(obj)
+		if err != nil {
+			return nil, fmt.Errorf("object has no meta: %w", err)
+		}
+		claim, ok := accessor.(*resourceapi.ResourceClaim)
+		if !ok {
+			return nil, fmt.Errorf("expected *resourceapi.ResourceClaim, got %T", accessor)
+		}
+		out := make([]string, 0, len(claim.Status.ReservedFor))
+		for _, reference := range claim.Status.ReservedFor {
+			if reference.APIGroup == "" && reference.Resource == "pods" {
+				out = append(out, string(reference.UID))
 			}
 		}
 		return out, nil
@@ -114,7 +136,7 @@ func NewClientRegisterResolver(
 // PodByUID is the legacy device-plugin lookup: the calling library already
 // knows its pod UID and we just hand back the cached pod object.
 func (r *ClientRegisterResolver) PodByUID(_ context.Context, uid string) (*corev1.Pod, error) {
-	pods, err := r.podLister.ListByIndexValue("metadata.uid", uid)
+	pods, err := r.podLister.ListByIndexValue(preempt.IndexerKeyPodMetadataUid, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +147,28 @@ func (r *ClientRegisterResolver) PodByUID(_ context.Context, uid string) (*corev
 		return nil, apierrors.NewNotFound(corev1.Resource("pods"), "uid "+uid)
 	}
 	return pods[0], nil
+}
+
+func (r *ClientRegisterResolver) TargetByPodUID(ctx context.Context, uid, contName string) (*registry.Target, error) {
+	pod, err := r.PodByUID(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	// TODO Multiple matching claims may be found simultaneously, and a better way may be needed to determine the corresponding claims
+	claims, err := r.lookupClaimByIndex(ClaimReservedForUid, uid)
+	if err != nil {
+		return nil, err
+	}
+	containerKey := fmt.Sprintf("%s_%s", uid, contName)
+	return &registry.Target{
+		ConfigDir: filepath.Join(
+			r.contPath, util.Claims, string(claims[0].UID), containerKey, util.Config,
+		),
+		Candidates: []registry.TargetCandidate{{
+			Pod:           pod,
+			ContainerName: contName,
+		}},
+	}, nil
 }
 
 // TargetByUUID implements registry.GetTargetByUUIDFunc.
@@ -187,23 +231,35 @@ func (r *ClientRegisterResolver) TargetByUUID(ctx context.Context, uuid string) 
 	return target, nil
 }
 
+func (r *ClientRegisterResolver) lookupClaimByIndex(indexName, indexedValue string) ([]*resourceapi.ResourceClaim, error) {
+	objs, err := r.claimIndexer.ByIndex(indexName, indexedValue)
+	if err != nil {
+		return nil, fmt.Errorf("claim by index %s failed: %w", indexName, err)
+	}
+	claims := make([]*resourceapi.ResourceClaim, 0, len(objs))
+	for _, obj := range objs {
+		if claim, ok := obj.(*resourceapi.ResourceClaim); ok {
+			claims = append(claims, claim)
+		}
+	}
+	if len(claims) == 0 {
+		return nil, apierrors.NewNotFound(resourceapi.Resource("resourceclaims"), fmt.Sprintf("%s %s", indexName, indexedValue))
+	}
+	return claims, nil
+}
+
 // lookupClaim resolves a UUID to its single owning claim plus the partition
 // key recorded for that UUID.
 func (r *ClientRegisterResolver) lookupClaim(uuid string) (*resourceapi.ResourceClaim, string, error) {
-	objs, err := r.claimIndexer.ByIndex(ClaimUUIDIndex, uuid)
+	claims, err := r.lookupClaimByIndex(ClaimUUIDIndex, uuid)
 	if err != nil {
-		return nil, "", fmt.Errorf("index lookup for uuid %s: %w", uuid, err)
+		return nil, "", err
 	}
-	if len(objs) != 1 {
-		if len(objs) > 1 {
-			klog.ErrorS(nil, "find multiple claims matching uuid", "uuid", uuid, "claims", objs)
-		}
-		return nil, "", apierrors.NewNotFound(resourceapi.Resource("resourceclaims"), "register uuid "+uuid)
+	if len(claims) > 1 {
+		klog.ErrorS(nil, "multiple matching claims were found", ClaimUUIDIndex, uuid)
+		return nil, "", apierrors.NewNotFound(resourceapi.Resource("resourceclaims"), fmt.Sprintf("%s %s", ClaimUUIDIndex, uuid))
 	}
-	claim, ok := objs[0].(*resourceapi.ResourceClaim)
-	if !ok {
-		return nil, "", fmt.Errorf("unexpected indexer entry type %T", objs[0])
-	}
+	claim := claims[0]
 	annotationKey := r.driverName + "/" + uuid
 	partitionKey, ok := claim.Annotations[annotationKey]
 	if !ok || partitionKey == "" {

@@ -30,11 +30,11 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -676,20 +676,12 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 
 	podInformer := factory.InformerFor(&corev1.Pod{}, func(k coreclientset.Interface, resync time.Duration) kcache.SharedIndexInformer {
 		lw := kcache.NewListWatchFromClient(
-			k.CoreV1().RESTClient(), "pods",
-			corev1.NamespaceAll,
+			k.CoreV1().RESTClient(), "pods", corev1.NamespaceAll,
 			fields.OneTermEqualSelector("spec.nodeName", config.Flags.NodeName),
 		)
-		return kcache.NewSharedIndexInformer(lw, &corev1.Pod{}, resync, kcache.Indexers{
-			kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc,
-			"metadata.uid": func(obj interface{}) ([]string, error) {
-				accessor, err := meta.Accessor(obj)
-				if err != nil {
-					return nil, fmt.Errorf("object has no meta: %w", err)
-				}
-				return []string{string(accessor.GetUID())}, nil
-			},
-		})
+		indexers := kcache.Indexers{kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc}
+		maps.Copy(indexers, preempt.PodIndexers)
+		return kcache.NewSharedIndexInformer(lw, &corev1.Pod{}, resync, indexers)
 	})
 
 	claimInformer := factory.InformerFor(&resourceapi.ResourceClaim{}, func(_ coreclientset.Interface, resync time.Duration) kcache.SharedIndexInformer {
@@ -702,6 +694,7 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 		return kcache.NewSharedIndexInformer(lw, &resourceapi.ResourceClaim{}, resync, kcache.Indexers{
 			kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc,
 			ClaimUUIDIndex:        MakeClaimUUIDIndexFunc(util.DRADriverName),
+			ClaimReservedForUid:   MakeClaimReservedForUidIndexFunc(),
 		})
 	})
 
@@ -728,7 +721,7 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 
 	d.deviceRegistry = registry.NewDeviceRegistryServer(
 		util.ManagerRootPath,
-		resolver.PodByUID,
+		resolver.TargetByPodUID,
 		resolver.TargetByUUID,
 	)
 

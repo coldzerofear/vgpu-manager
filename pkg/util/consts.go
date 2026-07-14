@@ -189,6 +189,7 @@ const (
 	ManagerCompatibilityMode  = "MANAGER_COMPATIBILITY_MODE"
 	ExternalSmWatcherEnabled  = "EXTERNAL_SM_WATCHER_ENABLED"
 	ManagerClientRegisterUuid = "MANAGER_CLIENT_REGISTER_UUID"
+	ManagerVGpuClaimUid       = "MANAGER_VGPU_CLAIM_UID"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"

@@ -84,8 +84,21 @@ func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.Device
 		cdiHandler:  cdiHandler,
 	}
 
-	fn := func(ctx context.Context, uid string) (*corev1.Pod, error) {
-		return plugin.getPodByUid(ctx, uid, false)
+	fn := func(ctx context.Context, podUid, contName string) (*registry.Target, error) {
+		pod, err := plugin.getPodByUid(ctx, podUid, false)
+		if err != nil {
+			return nil, err
+		}
+		return &registry.Target{
+			ConfigDir: filepath.Join(
+				util.GetPodContainerManagerPath(ContManagerDirectoryPath, pod.UID, contName),
+				util.Config,
+			),
+			Candidates: []registry.TargetCandidate{{
+				Pod:           pod,
+				ContainerName: contName,
+			}},
+		}, nil
 	}
 	plugin.server = registry.NewDeviceRegistryServer(ContManagerDirectoryPath, fn, nil)
 	return plugin, nil
@@ -1077,6 +1090,13 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 			return resp, fmt.Errorf("check resource data size failed: %w", err)
 		}
 	}
+
+	// Clean up old cache files before each startup
+	pidsConfigPath := filepath.Join(configDirPath, registry.PidsConfig)
+	vmemNodeConfigPath := filepath.Join(configDirPath, util.VMemNode, util.VMemNodeFile)
+	_ = os.RemoveAll(pidsConfigPath)
+	_ = os.RemoveAll(vmemNodeConfigPath)
+
 	return resp, nil
 }
 
