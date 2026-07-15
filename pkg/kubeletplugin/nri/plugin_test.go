@@ -140,6 +140,19 @@ func TestConfigDirFor(t *testing.T) {
 	}
 }
 
+func TestValidatePluginIdx(t *testing.T) {
+	for _, idx := range []string{"00", "05", "99"} {
+		if err := ValidatePluginIdx(idx); err != nil {
+			t.Errorf("ValidatePluginIdx(%q) = %v, want nil", idx, err)
+		}
+	}
+	for _, idx := range []string{"", "0", "5", "100", "0a", "ab"} {
+		if err := ValidatePluginIdx(idx); err == nil {
+			t.Errorf("ValidatePluginIdx(%q) = nil, want error", idx)
+		}
+	}
+}
+
 func TestSplitEnv(t *testing.T) {
 	if k, v, ok := splitEnv("A=b=c"); !ok || k != "A" || v != "b=c" {
 		t.Fatalf("splitEnv(A=b=c) = %q,%q,%v", k, v, ok)

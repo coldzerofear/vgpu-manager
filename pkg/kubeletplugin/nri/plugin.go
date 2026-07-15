@@ -139,6 +139,13 @@ type Plugin struct {
 	failed         bool
 }
 
+// ValidatePluginIdx reports whether idx is a valid NRI plugin index (exactly two
+// digits). containerd only rejects a bad index at registration time, which
+// surfaces as an obscure reconnect-loop failure — validate it early instead.
+func ValidatePluginIdx(idx string) error {
+	return api.CheckPluginIndex(idx)
+}
+
 // NewPlugin builds the plugin and its NRI stub (does not connect yet).
 func NewPlugin(cfg Config) (*Plugin, error) {
 	if cfg.Cache == nil {

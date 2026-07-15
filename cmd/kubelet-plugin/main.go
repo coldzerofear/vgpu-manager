@@ -28,6 +28,7 @@ import (
 	pkgkubeletplugin "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/urfave/cli/v2"
@@ -234,6 +235,15 @@ func newApp() *cli.App {
 
 // Input validation of CLI flags.
 func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
+	// Validate the NRI plugin index format early (only when set): containerd
+	// otherwise rejects a bad index at registration time, which surfaces as an
+	// obscure reconnect-loop failure rather than a clear startup error.
+	if flags.NRIPluginIdx != "" {
+		if err := nri.ValidatePluginIdx(flags.NRIPluginIdx); err != nil {
+			return fmt.Errorf("invalid --nri-plugin-idx %q: %w", flags.NRIPluginIdx, err)
+		}
+	}
+
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		if flags.HostRoot == "" {
 			return fmt.Errorf("host root is required when PassthroughSupport feature gate is enabled")
