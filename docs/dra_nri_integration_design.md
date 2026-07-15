@@ -302,7 +302,9 @@ Plugin/library 视图: /etc/vgpu-manager/claims/<claim-uid>/<pod-uid>_<container
 2. ✅ **`NRISupport` featuregate + Prepare 分支**：`GetClaimCommonContainerEdits` 在 NRI 模式加注 `MANAGER_VGPU_CLAIM_UID`；`device_state.go` 的 partition-mount 注入在 NRI 模式跳过（连带跳过 UUID 铸造/annotation）。旧路径不变。
 3. ✅ **NRI CreateContainer 真注入**：读 `MANAGER_VGPU_CLAIM_UID` → **对照 `DeviceState.IsVGPUClaimPrepared` 校验（§12.12.1）** → `VGPUManager.GetNRIPartitionInjection` 建目录 + 返回三个 rw mount + `VGPU_POD_UID`/`VGPU_CONTAINER_NAME` env → 注入并写缓存。fail-closed（resolve 失败阻断容器创建）。
 4. ✅ **NRI 缓存 + `Synchronize`**：进程内缓存,`Synchronize` 从回放容器 env 重建（同样经 `IsVGPUClaimPrepared` 校验）。
-5. ⏳ **`TargetByPodUID` 收敛为"缓存命中 / device-plugin 回退" + 就绪门**（见 §12.8/§12.13.5），取代 interim 的 `ClaimReservedForUid` + `claims[0]`。**未做**：当前 NRI 模式的 pod-uid register 仍由 interim `TargetByPodUID`（reservedFor 索引 + `claims[0]`）解析——对**单 claim pod 正确**（算出的 configDir 与 NRI 建的目录一致），多 claim pod 才有歧义。缓存已在填充,待接线。
+5. ✅ **`TargetByPodUID` 接入 NRI 缓存 + 就绪门**（见 §12.8/§12.13.5）：NRISupport 开时缓存为权威源（命中→NRI 目录；未命中未就绪→可重试；未命中已就绪→NotFound），取代并删除了 interim 的 `ClaimReservedForUid` 索引 + `claims[0]`。配套：`GetClaimCommonContainerEdits` 在非 NRI 模式也注入空 `MANAGER_VGPU_CLAIM_UID=`（防伪造），NRI 插件用 `claimUID == ""` 守卫跳过；library 侧将 SM watcher 共享缓存改为可选（缺失回退 nvml，不再 FATAL）。
+
+**特性主体已闭环**（NRISupport off 默认走旧 partition 路径，on 走 NRI 每容器路径）。剩余为 Phase 2 清理（webhook 放宽）与集群实测（p99 延迟）。
 
 ### 12.7 register 模式切换机制（env 驱动）
 
@@ -311,20 +313,23 @@ library 从 env 读 `VGPU_POD_UID` / `VGPU_CONTAINER_NAME` / `MANAGER_CLIENT_REG
 - **NRI 模式**：Prepare 不注入 `MANAGER_CLIENT_REGISTER_UUID`，NRI 注入 `VGPU_POD_UID`+`VGPU_CONTAINER_NAME` → library 发空 uuid → server 走 pod-uid 分支 → `TargetByPodUID` → `claims/<claim-uid>/...` 目录。
 - **旧模式**：Prepare 注入 `MANAGER_CLIENT_REGISTER_UUID` → server 走 UUID 分支（`CandidatesByKey` + 逐候选试活 PID）。
 
-### 12.8 `TargetByPodUID` 收敛设计：NRI 缓存命中 / device-plugin 回退（方案 A）
+### 12.8 `TargetByPodUID` 收敛设计（方案 A，已落地）
 
-**背景缺口**：register 时服务端只拿到 `(pod-uid, container-name)`，缺"该容器引用哪个 claim"这一维。interim 版用 `ClaimReservedForUid` 索引把 pod-uid 反查为 claims，但**多 claim pod**（一个 pod 的不同容器各挂不同 vGPU claim —— webhook 只禁"单容器多 claim"，pod 级多 claim 是允许且应当允许的）会命中多个 claim，取 `claims[0]` 可能给错目录。reservedFor 索引只能定位到 **pod**、定位不到 **"该容器用哪个 claim"**。
+**背景缺口**：register 时服务端只拿到 `(pod-uid, container-name)`，缺"该容器引用哪个 claim"这一维。interim 版用 `ClaimReservedForUid` 索引把 pod-uid 反查为 claims，但**多 claim pod**（一个 pod 的不同容器各挂不同 vGPU claim —— webhook 只禁"单容器多 claim"，pod 级多 claim 允许）会命中多个 claim，取 `claims[0]` 可能给错目录。
 
-**收敛方案（A）**：NRI 在 CreateContainer 时已知每容器**确切** claim-uid（来自 CDI 注入的 `MANAGER_VGPU_CLAIM_UID`），写入进程内 NRI 缓存 `(pod-uid, container-name) → (claim-uid, configDir)`。`TargetByPodUID(podUid, contName)` 逻辑变为：
+**落地方案（A）**：NRI 在 CreateContainer 时已知每容器**确切** claim-uid（来自 CDI 注入的 `MANAGER_VGPU_CLAIM_UID`），写入进程内 NRI 缓存 `(pod-uid, container-name) → (claim-uid, configDir)`。`TargetByPodUID(podUid, contName)` 实际逻辑（`clientregistry.go`）：
 
-1. **查 NRI 缓存**：命中 → 直接返回该 target（`ConfigDir = <ManagerRootPath>/claims/<claim-uid>/<pod-uid>_<container-name>/config`）。这是 NRI-DRA 容器的权威解析，无索引猜测、无 `claims[0]` 歧义。
-2. **未命中 → 回退 device-plugin 式 target**：`ConfigDir = GetPodContainerManagerPath(ManagerRootPath, podUid, contName)/config` = `/etc/vgpu-manager/<pod-uid>_<container-name>/config`。用于**兼容一个节点同时安装 device-plugin 与 kubelet-plugin** 的情形 —— device-plugin 管理的 pod 其 library 若走到 kubelet-plugin 的注册服务，也能被正确服务（落点与 device-plugin 自身一致，见 §12.5 第 6 条）。
+- **`nriCache == nil`（NRISupport 关）**：直接返回 device-plugin 式 target `ConfigDir = GetPodContainerManagerPath(ManagerRootPath, podUid, contName)/config`。覆盖非 NRI 场景下 pod-uid 请求撞到本服务的情况（落点与 device-plugin 一致）。
+- **`nriCache != nil`（NRISupport 开）**，NRI 缓存是**权威源**：
+  1. **命中** → 返回 `entry.ConfigDir`（`claims/<claim-uid>/<pod-uid>_<container-name>/config`），无索引猜测、无 `claims[0]` 歧义。
+  2. **未命中 + 未就绪（`!Synced()`）** → 返回普通 error（`"NRI cache not successfully ready"`，**非 NotFound**）→ `resolveTarget` 在 60s 超时窗口内轮询重试（§12.13.5）。
+  3. **未命中 + 已就绪** → 返回 `apierrors.NewNotFound`（**硬失败**）。
 
-此设计**取代** interim 的 `ClaimReservedForUid` + `claims[0]`，并关掉其 TODO；`register` proto 不变（无需 `claim_uid` 字段），library/C 不改，NRI 本就是权威来源。
+> **与早期草案的差异（更安全）**：早期草案在"已就绪 + 未命中"时回退 device-plugin 目录。实际实现改为 **NotFound 硬失败**——因为 NRI `CreateContainer` 早于容器进程启动（早于 `StartContainer`），而 library register 在进程启动后，故合法 NRI 容器 register 时缓存**必已写入**；"已就绪仍未命中"只可能是非 NRI 容器（garbage/spoof），此时静默回退 device-plugin 目录反而会把 pids 写到与 library 实际挂载目录不符的位置。硬失败更干净。**重启窗口**由第 2 分支（未就绪 → 可重试）闭合，不会误回退。
 
-**缓存未命中的安全性**：NRI `CreateContainer` 在容器进程启动**之前**回调（早于 `StartContainer`），而 library 的 register 发生在进程启动 + CUDA 初始化**之后**。因此一个 NRI-DRA 容器发起 register 时，其缓存条目**必已写入** —— 未命中可可靠地判定为"非 NRI 容器" → 回退 device-plugin 目录是安全的。
+此设计**取代** interim 的 `ClaimReservedForUid` + `claims[0]`（索引已删除）；`register` proto 不变，library/C 不改，NRI 本就是权威来源。
 
-**已知边界**：NRI 插件**运行中重启**的窗口内，缓存尚未由 `Synchronize` 重建时若有 register 到达，会误判未命中而回退到错误目录。缓解：`resolveTarget` 的轮询重试给 `Synchronize` 争取时间；且 library 对每个新进程都会重新 register，窗口过后自愈。此风险与 §12.11 的 fail 策略一并在 Phase 0 评估。
+**server 端 `goto retry` 兜底**（`server.go lookupTarget`）：当请求带 reg_uuid 但 UUID 解析器缺失/报错、且同时携带 pod-uid + container-name 时，回退走 pod-uid 路径。防御性设计，覆盖 UUID/pod-uid 混合携带的过渡态。
 
 ### 12.9 Synchronize（重建几乎免费）
 
@@ -366,6 +371,15 @@ NRI 重启后 runtime 回放全部容器，`container.Env` 里的 `MANAGER_VGPU_
 #### 12.13.1 组件放置与启动顺序
 
 新增 `pkg/kubeletplugin/nri`，由 `driver.Start` 在 **`NRISupport` 开启**时（独立于 `DevicePluginClientMode`）拉起。NRI 插件本身**不需要 informer** —— claim-uid 直接来自 `container.Env`（`MANAGER_VGPU_CLAIM_UID`），它只需 socket + 共享 `Cache`。当 `DevicePluginClientMode` 也开启时，NRI 启动放在 `startClientRegistry` **之后**，以保证读缓存的 registry server 先于写缓存的 NRI 就绪；`Cache` 在两个门控块之前创建，供二者共享（`podLister` 是 registry server / resolver 的依赖，不是 NRI 的）。关闭 `NRISupport` 时整个 NRI 组件不初始化，走旧 partition 路径。
+
+#### 12.13.1.1 PluginName / PluginIdx 语义（已从 NRI/containerd 源码确认）
+
+注册身份是 `<idx>-<name>`（如 `00-manager.nvidia.com`），二者经 `WithPluginName`/`WithPluginIdx` 显式设置。
+
+- **`PluginIdx` 格式**：必须恰好 **2 位数字 `[0-9][0-9]`**（`api.CheckPluginIndex`），否则注册报错。`"00"` 合法。
+- **语义 = 排序键，不是唯一 ID**：runtime 侧 `sortPlugins()` 按 idx **升序**排列（`adaptation.go:768` `plugins[i].idx < plugins[j].idx`），**idx 越小越先**被调用。插件唯一身份是完整的 `idx-name`。
+- **同 idx 不冲突**：多个插件用同一 idx（如 dranet=`00-dranet`、本插件=`00-manager.nvidia.com`）都会正常运行，runtime **不拒绝**重复 idx，只是它们之间的相对顺序不确定（`sort.Slice` 非稳定排序）。真正冲突只会是 `idx` **且** `name` 都相同（同一插件双实例）。
+- **`"00"` 对本插件合理**：dranet 与 dra-driver-cpu 均用 `"00"`（同 idx 共存是常态）；且本插件只**新增** mount/env，与网络/CPU 插件操作正交，而 **CDI 在所有 NRI 插件之前应用**（§12.12），故本插件相对其他插件的先后无所谓。保留 `"00"`（早执行）即可。若未来需相对其他插件定序，可把 idx 提为 flag（当前硬编码，参考实现亦然）。
 
 ```
 driver.Start:
