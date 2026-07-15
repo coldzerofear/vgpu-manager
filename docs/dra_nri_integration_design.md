@@ -296,13 +296,13 @@ Plugin/library 视图: /etc/vgpu-manager/claims/<claim-uid>/<pod-uid>_<container
 5. device-plugin 侧 resolver 仍返回旧目录 `<pod>_<container>/config`，两路径正确分岔；并在 `PreStartContainer` 增加了启动前清理旧 `pids.config` / `vmem_node.config`。
 6. **contPath 一致性**：device-plugin 与 kubelet-plugin 的 registry server 都以 `util.ManagerRootPath`（`/etc/vgpu-manager`）为 contPath（`ContManagerDirectoryPath == ManagerRootPath`）。因此 §12.8 中"未命中回退到 device-plugin 式目录"落点与 device-plugin 自身完全一致，回退安全。
 
-### 12.6 剩余待实现清单
+### 12.6 实现进度
 
-1. **NRI 插件本体**：stub 注册 + `Configure`/`Synchronize`/`CreateContainer`/`RemoveContainer`/`StopPodSandbox`。参考 containerd `plugins/device-injector` 与 dranet `nri_hooks.go`。建议与 kubeletplugin **同进程**（复用现成 informer/registry server，dranet 路线）。
-2. **`NRISupport` featuregate** 及 Prepare 分支：NRI 模式跳过 UUID 铸造 + partition mount，改经 CDI 注 `MANAGER_VGPU_CLAIM_UID`。旧路径（含 register UUID 机制）一行不改。
-3. **NRI CreateContainer**：读 `MANAGER_VGPU_CLAIM_UID` → 建目录 + 注入三个 rw mount + `VGPU_POD_UID` + `VGPU_CONTAINER_NAME`（使 library 走 pod-uid 模式）→ 写 NRI 缓存。
-4. **NRI 缓存 + `Synchronize`**：进程内 `(pod-uid, container-name) → (claim-uid, configDir)` 缓存，供 `TargetByPodUID` 查询；`Synchronize` 时从回放容器的 env 重建（见 §12.9）。
-5. **`TargetByPodUID` 收敛为"缓存命中 / device-plugin 回退"**（见 §12.8），取代 interim 的 `ClaimReservedForUid` + `claims[0]`，同时关掉该 TODO。
+1. ✅ **NRI 插件本体**（`pkg/kubeletplugin/nri`）：stub + `Configure`/`Synchronize`/`CreateContainer`/`StartContainer`/`RemoveContainer`/`StopPodSandbox`，同进程，两级失败模型 + healthcheck 接线。
+2. ✅ **`NRISupport` featuregate + Prepare 分支**：`GetClaimCommonContainerEdits` 在 NRI 模式加注 `MANAGER_VGPU_CLAIM_UID`；`device_state.go` 的 partition-mount 注入在 NRI 模式跳过（连带跳过 UUID 铸造/annotation）。旧路径不变。
+3. ✅ **NRI CreateContainer 真注入**：读 `MANAGER_VGPU_CLAIM_UID` → **对照 `DeviceState.IsVGPUClaimPrepared` 校验（§12.12.1）** → `VGPUManager.GetNRIPartitionInjection` 建目录 + 返回三个 rw mount + `VGPU_POD_UID`/`VGPU_CONTAINER_NAME` env → 注入并写缓存。fail-closed（resolve 失败阻断容器创建）。
+4. ✅ **NRI 缓存 + `Synchronize`**：进程内缓存,`Synchronize` 从回放容器 env 重建（同样经 `IsVGPUClaimPrepared` 校验）。
+5. ⏳ **`TargetByPodUID` 收敛为"缓存命中 / device-plugin 回退" + 就绪门**（见 §12.8/§12.13.5），取代 interim 的 `ClaimReservedForUid` + `claims[0]`。**未做**：当前 NRI 模式的 pod-uid register 仍由 interim `TargetByPodUID`（reservedFor 索引 + `claims[0]`）解析——对**单 claim pod 正确**（算出的 configDir 与 NRI 建的目录一致），多 claim pod 才有歧义。缓存已在填充,待接线。
 
 ### 12.7 register 模式切换机制（env 驱动）
 
@@ -335,17 +335,27 @@ NRI 重启后 runtime 回放全部容器，`container.Env` 里的 `MANAGER_VGPU_
 - NRI `RemoveContainer` / `StopPodSandbox`：删该容器 `claims/<claim-uid>/<pod>_<container>/` 子目录。
 - DRA `Unprepare`：`rm -rf claims/<claim-uid>/` 兜底。注意 Prepare 的 `ensureClaimDirectories` 每次会 `RemoveAll` + 重建 `claims/<claim-uid>`；顺序上 Prepare 早于 CreateContainer，且 checkpoint 幂等保证不中途重跑，不会误删 NRI 子目录。
 
-### 12.11 待决策：fail-open vs fail-closed（vGPU 必须先验证）
+### 12.11 fail-open vs fail-closed（已定，见 §12.13.6）
 
-§7.2 假设 NRI 失败时 fail-open"容器先起来、mount 缺失由 library 报错"。**这必须在 Phase 0 验证**：partition 目录没挂上时，library 是 FATAL 退出还是**静默跑成无限制**。若是后者，fail-open 等于放一个不受显存/算力约束的容器压垮同卡邻居 —— 那对 vGPU 容器就必须 **fail-closed**。此判断决定整个失败模型。
+原为待验证项:partition 目录没挂上时 library 是 FATAL 还是静默无限制。**已由作者确认 + 源码分析定案**(详见 §12.13.6):client 模式 → FATAL(fail-closed 可见);cgroup 模式 → 自建目录继续跑、**限额照常执行**,仅失监控。故 NRI 未就绪不会导致限额逃逸,治理重心是"插件持续不可用"(§12.13.3 两级失败模型)。
 
-### 12.12 Phase 0 验证清单（收敛版）
+### 12.12 Phase 0 验证结论（已从 containerd 源码确认，无需集群实测）
 
-1. containerd 是否在 **CDI 注入之后**才回调 `CreateContainer`（决定 NRI 能否看到 CDI 注入的 env，如 `MANAGER_VGPU_CLAIM_UID`）。
-2. NRI 是否能从 `container.Env` 稳定读到 CDI 注入的 env（而非仅 pod spec 的 env）。
-3. `CreateContainer` 时容器进程尚未启动 → 确认 pids 仍靠 library 后续 register 写入（NRI 此刻拿不到 PID，不能自写 pids.config）。
-4. §12.11 的 fail-open/closed 行为实测。
-5. `CreateContainer` 回调 p99 延迟预算（在容器创建关键路径上）。
+对 containerd main(v2.x)+ release/1.7 源码分析,并与 `dra-driver-cpu`(k8s-sigs 已发布驱动)的实现交叉验证,前 4 条**全部证实与预想一致**:
+
+1. **CDI 先于 NRI CreateContainer ✅**。`(c *criService) createContainer` 里 `opts` 有序:`containerd.WithSpec(spec, specOpts...)`(CDI 经 `customopts.WithCDI` 混在 `specOpts`,`container_create_linux.go:104`)在前,`c.nri.WithContainerAdjustment()` 在后(`container_create.go:430/438`);`Client.NewContainer` `for _, o := range opts` 按序应用(`client/client.go:360`)。`WithContainerAdjustment` 内部先 unmarshal 已注入 CDI 的 `c.Spec` 再调 NRI 钩子。**1.7 结构同理**(CDI 是 `WithSpec` 的 SpecOpt、NRI 是更晚的 NewContainerOpt)。
+2. **NRI 能读到 CDI 注入的容器 env ✅**。`criContainer.GetEnv()` 返回 `c.spec.Process.Env`、`GetMounts()` 返回 `c.spec.Mounts`(`nri_api_linux.go:887/894`)——来自**生成后的 OCI spec**,非 CRI config。→ `MANAGER_VGPU_CLAIM_UID` 方案成立。**已发布先例**:`dra-driver-cpu` 的 `CreateContainer` 即 `parseDRAEnvToClaimAllocations(ctr.Env)`,读它自己 Prepare 时经 CDI 注入的 `DRA_CPUSET_<claimUID>`。
+3. **CreateContainer 时无 PID ✅**。该路径用 `withContainerSpec(spec)` 构造、不设 pid → `GetPid()=0`;只有已启动容器走 store 路径才 `pid=task.Pid()`(`nri_api_linux.go:741/1017`)。→ NRI 此刻不能自写 pids.config,register 保留正确。
+4. **Synchronize 重放带 env ✅**。重连时 `ListContainers` 对 `*cstore.Container` 走 `ctrd.Spec(ctx)` 取持久化 OCI spec → env 完整。→ "env 即事实源、重连后重建缓存"成立。
+5. **p99 延迟**:唯一仍需集群实测项(在容器创建关键路径上),但只读/轻量注入,风险低。
+
+### 12.12.1 安全约束：env 是"关联键"而非事实源（必须落地）
+
+**关键**:容器 env 是攻击者可控的(pod 可在自己 spec 里塞 `MANAGER_VGPU_CLAIM_UID=<任意claim>`)。`dra-driver-cpu` 的做法值得照搬:**env 只回答"这个容器引用哪个 claim"(Prepare 无法按容器知道的信息),payload 与合法性一律以驱动自己的 Prepare 内存/checkpoint 态为准**——claim UID 不在"本节点已 Prepare 的 claim"集合里就拒绝注入(`nri_hooks.go:133-142` `validatePreparedClaimAllocation`)。
+
+**本设计的落地要求**(§12.6 第 2/3 项):NRI `CreateContainer` 读到 `MANAGER_VGPU_CLAIM_UID` 后,**先对照 DRA 侧"本节点已 Prepare 的 vGPU claim UID 集合"校验**(checkpoint 已持久化该集合,或由 Prepare 写一个共享 set),不匹配则**不注入、不写缓存**。本项目 blast radius 本就有限(伪造 claimUID 只在攻击者自身 `<podUID>_<contName>` 路径下建空目录,且无真 claim 就无 lib 挂载与限额 env),但该校验是纵深防御,且能同时防"claim 归属混淆"。
+
+> 注:本设计的 NRI 缓存**只存关联**((claimUID, configDir),全部可从 env 推导),rich 态(限额值)在设备级 CDI env + DRA checkpoint 里、不入缓存。故 env 重建缓存对本设计足够,**无需** dranet 式 boltdb 持久化(那是为 rich 态准备的)。
 
 ### 12.13 进程内部署形态、生命周期与故障恢复（生产级）
 

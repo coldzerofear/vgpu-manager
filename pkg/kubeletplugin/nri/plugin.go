@@ -29,6 +29,7 @@ package nri
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -88,6 +89,32 @@ type Config struct {
 	// FailureGracePeriod bounds the recovery tier before the plugin reports
 	// unhealthy. Zero uses defaultFailureGracePeriod.
 	FailureGracePeriod time.Duration
+	// IsClaimPrepared validates that a claim UID read from (attacker-controllable)
+	// container env was actually prepared on this node (§12.12.1). nil disables
+	// the check. Injected by the driver (backed by the DRA checkpoint) to avoid
+	// an import cycle.
+	IsClaimPrepared func(claimUID string) bool
+	// ResolveMounts ensures the per-container partition directories exist and
+	// returns the mounts + env to inject. Returning (nil, nil) skips injection.
+	// When nil, the plugin runs observe-only regardless of DryRun. Injected by
+	// the driver.
+	ResolveMounts func(claimUID, podUID, containerName string) (*Injection, error)
+}
+
+// Mount is one partition bind mount the plugin injects at CreateContainer.
+type Mount struct {
+	ContainerPath string
+	HostPath      string
+	Options       []string
+}
+
+// Injection is what ResolveMounts returns: the mounts + env to add to a vGPU
+// container, plus the ConfigDir (in the plugin's filesystem view) recorded in
+// the cache for the register server's pod-uid path.
+type Injection struct {
+	Mounts    []Mount
+	Env       []string // "KEY=VALUE"
+	ConfigDir string
 }
 
 // Plugin is the in-process NRI plugin.
@@ -96,6 +123,8 @@ type Plugin struct {
 	cache              *Cache
 	dryRun             bool
 	failureGracePeriod time.Duration
+	isClaimPrepared    func(claimUID string) bool
+	resolveMounts      func(claimUID, podUID, containerName string) (*Injection, error)
 
 	// createdAt tracks CreateContainer timestamps so StartContainer can report
 	// the create→start delta (validates ordering; §12.12 item 3).
@@ -131,6 +160,8 @@ func NewPlugin(cfg Config) (*Plugin, error) {
 		cache:              cfg.Cache,
 		dryRun:             cfg.DryRun,
 		failureGracePeriod: grace,
+		isClaimPrepared:    cfg.IsClaimPrepared,
+		resolveMounts:      cfg.ResolveMounts,
 		createdAt:          make(map[string]time.Time),
 	}
 	opts := []stub.Option{
@@ -255,6 +286,11 @@ func (p *Plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containe
 		if !ok || podUID == "" {
 			continue
 		}
+		// Validate against node prepared state — env is attacker-controllable
+		// (§12.12.1), so never rebuild a cache entry for an unprepared claim.
+		if p.isClaimPrepared != nil && !p.isClaimPrepared(claimUID) {
+			continue
+		}
 		vgpuCount++
 		entry := Entry{ClaimUID: claimUID, ConfigDir: ConfigDirFor(claimUID, podUID, c.GetName())}
 		rebuilt[Key(podUID, c.GetName())] = entry
@@ -270,35 +306,77 @@ func (p *Plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containe
 	return nil, nil
 }
 
-// CreateContainer is the hook that will (in a later stage) inject the partition
-// mounts + register env. In DRY-RUN it only observes: it logs the CDI-injected
-// env/mounts/pid/state the runtime built (validating that CDI ran first, §12.12
-// items 1-2, and that no PID exists yet, item 3), records the intended cache
-// entry when the claim-uid env is present, and returns no adjustment.
+// CreateContainer injects the per-container partition mounts + register env for
+// a vGPU container. A container is ours iff it carries MANAGER_VGPU_CLAIM_UID
+// (injected by DRA Prepare via CDI). The claim UID is validated against the
+// node's prepared claims (§12.12.1) before anything is injected — env is
+// attacker-controllable, so it is only a correlation key, never trusted.
+//
+// In observe-only mode (DryRun or no ResolveMounts wired) it logs and injects
+// nothing (the §12.12 validation mode).
 func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	p.mu.Lock()
 	p.createdAt[c.GetId()] = time.Now()
 	p.mu.Unlock()
 
 	claimUID, hasClaim := lookupEnv(c.GetEnv(), util.ManagerVGpuClaimUid)
-	_, hasCompat := lookupEnv(c.GetEnv(), util.ManagerCompatibilityMode)
 
-	var configDir string
-	if hasClaim {
-		configDir = ConfigDirFor(claimUID, pod.GetUid(), c.GetName())
-		// Record for observation even in dry-run; the register path is not yet
-		// wired to this cache, so this is purely to validate the mapping.
-		p.cache.Set(pod.GetUid(), c.GetName(), Entry{ClaimUID: claimUID, ConfigDir: configDir})
+	// Observe-only: log what the runtime built (validates CDI-before-NRI + no
+	// PID yet), inject nothing.
+	if p.dryRun || p.resolveMounts == nil {
+		_, hasCompat := lookupEnv(c.GetEnv(), util.ManagerCompatibilityMode)
+		klog.InfoS("NRI CreateContainer (observe-only)",
+			"pod", pod.GetName(), "podUID", pod.GetUid(), "namespace", pod.GetNamespace(),
+			"container", c.GetName(), "state", c.GetState().String(), "pid", c.GetPid(),
+			"isVGPUContainer", hasCompat, "hasClaimUIDEnv", hasClaim, "claimUID", claimUID,
+			"envOfInterest", filterEnv(c.GetEnv()), "mountsOfInterest", filterMounts(c.GetMounts()),
+			"dryRun", p.dryRun)
+		return nil, nil, nil
 	}
 
-	klog.InfoS("NRI CreateContainer",
-		"pod", pod.GetName(), "podUID", pod.GetUid(), "namespace", pod.GetNamespace(),
-		"container", c.GetName(), "state", c.GetState().String(), "pid", c.GetPid(),
-		"isVGPUContainer", hasCompat, "hasClaimUIDEnv", hasClaim, "claimUID", claimUID,
-		"intendedConfigDir", configDir,
-		"envOfInterest", filterEnv(c.GetEnv()), "mountsOfInterest", filterMounts(c.GetMounts()),
-		"dryRun", p.dryRun)
-	return nil, nil, nil
+	// Not a vGPU container of ours: leave it untouched.
+	if !hasClaim {
+		return nil, nil, nil
+	}
+
+	// Validate the (attacker-controllable) claim UID against node prepared state.
+	if p.isClaimPrepared != nil && !p.isClaimPrepared(claimUID) {
+		klog.InfoS("NRI CreateContainer: claim not prepared on this node; skipping injection (possible spoofed env)",
+			"pod", pod.GetName(), "podUID", pod.GetUid(), "container", c.GetName(), "claimUID", claimUID)
+		return nil, nil, nil
+	}
+
+	inj, err := p.resolveMounts(claimUID, pod.GetUid(), c.GetName())
+	if err != nil {
+		// Fail-closed: a container starting without its vGPU isolation is worse
+		// than not starting. containerd aborts container creation on this error.
+		return nil, nil, fmt.Errorf("NRI resolve partition mounts (claim %s, pod %s, container %s): %w",
+			claimUID, pod.GetUid(), c.GetName(), err)
+	}
+	if inj == nil {
+		return nil, nil, nil
+	}
+
+	adjust := &api.ContainerAdjustment{}
+	for _, m := range inj.Mounts {
+		adjust.AddMount(&api.Mount{
+			Destination: m.ContainerPath,
+			Source:      m.HostPath,
+			Type:        "none",
+			Options:     m.Options,
+		})
+	}
+	for _, e := range inj.Env {
+		if k, v, ok := splitEnv(e); ok {
+			adjust.AddEnv(k, v)
+		}
+	}
+	p.cache.Set(pod.GetUid(), c.GetName(), Entry{ClaimUID: claimUID, ConfigDir: inj.ConfigDir})
+
+	klog.InfoS("NRI CreateContainer injected",
+		"pod", pod.GetName(), "podUID", pod.GetUid(), "container", c.GetName(),
+		"claimUID", claimUID, "configDir", inj.ConfigDir, "mounts", len(inj.Mounts))
+	return adjust, nil, nil
 }
 
 // StartContainer fires after the process starts; logging pid (now non-zero) and
@@ -332,6 +410,15 @@ func (p *Plugin) RemoveContainer(_ context.Context, pod *api.PodSandbox, c *api.
 func (p *Plugin) StopPodSandbox(_ context.Context, pod *api.PodSandbox) error {
 	klog.V(4).InfoS("NRI StopPodSandbox", "pod", pod.GetName(), "podUID", pod.GetUid())
 	return nil
+}
+
+// splitEnv splits a "KEY=VALUE" entry. ok is false if there is no '='.
+func splitEnv(e string) (key, value string, ok bool) {
+	i := strings.IndexByte(e, '=')
+	if i < 0 {
+		return "", "", false
+	}
+	return e[:i], e[i+1:], true
 }
 
 // lookupEnv finds KEY in a []string of "KEY=VALUE" entries.

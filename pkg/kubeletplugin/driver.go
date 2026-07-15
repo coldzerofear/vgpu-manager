@@ -774,11 +774,14 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 		socketPath = filepath.Join(config.Flags.NRIRoot, "nri.sock")
 	}
 	plugin, err := nri.NewPlugin(nri.Config{
-		SocketPath: socketPath,
-		PluginName: util.DRADriverName,
-		PluginIdx:  "00",
-		DryRun:     true,
-		Cache:      d.nriCache,
+		SocketPath:      socketPath,
+		PluginName:      util.DRADriverName,
+		PluginIdx:       "00",
+		Cache:           d.nriCache,
+		IsClaimPrepared: d.state.IsVGPUClaimPrepared,
+		ResolveMounts: func(claimUID, podUID, containerName string) (*nri.Injection, error) {
+			return d.state.vgpuManager.GetNRIPartitionInjection(claimUID, podUID, containerName)
+		},
 	})
 	if err != nil {
 		return err
@@ -788,7 +791,7 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 	nriCtx, cancel := context.WithCancel(ctx)
 	d.nriCancel = cancel
 	d.wg.Go(func() {
-		klog.V(4).InfoS("Starting in-process NRI plugin", "socket", socketPath, "dryRun", true)
+		klog.V(4).InfoS("Starting in-process NRI plugin", "socket", socketPath)
 		plugin.Run(nriCtx)
 	})
 	return nil

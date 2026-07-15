@@ -628,6 +628,33 @@ func (s *DeviceState) getCheckpoint(ctx context.Context) (*Checkpoint, error) {
 	return checkpoint.ToLatestVersion(), nil
 }
 
+// IsVGPUClaimPrepared reports whether claimUID names a claim this node has
+// finished preparing AND that holds at least one vGPU device. It is the
+// authoritative check the NRI plugin uses to validate the
+// (attacker-controllable) MANAGER_VGPU_CLAIM_UID env before injecting
+// per-container partition mounts (design §12.12.1). It reads the checkpoint
+// under cplock only and takes no other lock, so it is safe to call from the NRI
+// hook goroutine concurrently with Prepare/Unprepare.
+func (s *DeviceState) IsVGPUClaimPrepared(claimUID string) bool {
+	cp, err := s.getCheckpoint(context.Background())
+	if err != nil {
+		klog.V(4).ErrorS(err, "IsVGPUClaimPrepared: failed to read checkpoint", "claimUID", claimUID)
+		return false
+	}
+	pc, ok := cp.V2.PreparedClaims[claimUID]
+	if !ok || pc.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+		return false
+	}
+	for _, group := range pc.PreparedDevices {
+		for _, dev := range group.Devices {
+			if dev.VGpu != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // logCheckpointDiff is invoked when GetCheckpoint returns
 // CorruptCheckpointError: the on-disk JSON deserialized cleanly but the
 // checksum recomputed at verification time disagrees with the one encoded in
@@ -896,7 +923,11 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			switch allocatableDevice.Type() {
 			case VGpuDeviceType:
 				preparedDevice.containerEdits = s.vgpuManager.GetAllocationEnvContainerEdits(claim, result, allocatableDevice)
-				if !partitionMountEditsApplied[partitionKey] {
+				// In NRI mode the partition directory mounts + register wiring are
+				// applied per-container by the NRI plugin at CreateContainer, not
+				// baked into CDI here (design §12.3/§12.4). Prepare only carries
+				// the claim UID via the common CDI env for correlation.
+				if !featuregates.Enabled(featuregates.NRISupport) && !partitionMountEditsApplied[partitionKey] {
 					edits, err := s.vgpuManager.GetPartitionMountContainerEdits(claim, partitionKey)
 					if err != nil {
 						return nil, fmt.Errorf("error getting vgpu partition container edits: %w", err)
