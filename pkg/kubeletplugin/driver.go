@@ -773,10 +773,14 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 	if config.Flags.NRIRoot != "" {
 		socketPath = filepath.Join(config.Flags.NRIRoot, "nri.sock")
 	}
+	var pluginIdx = "00"
+	if config.Flags.NRIRoot != "" {
+		pluginIdx = config.Flags.NRIPluginIdx
+	}
 	plugin, err := nri.NewPlugin(nri.Config{
 		SocketPath:      socketPath,
 		PluginName:      util.DRADriverName,
-		PluginIdx:       "00",
+		PluginIdx:       pluginIdx,
 		Cache:           d.nriCache,
 		IsClaimPrepared: d.state.IsVGPUClaimPrepared,
 		ResolveMounts:   d.state.vgpuManager.GetNRIPartitionInjection,

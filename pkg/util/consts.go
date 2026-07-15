@@ -350,7 +350,6 @@ const (
 	SerialFilterNode = "SerialFilterNode" // SerializedNodeFilter
 	VMemoryNode      = "VMemoryNode"      // VGPUMemoryTracking
 	ClientMode       = "ClientMode"       // DevicePluginClientMode
-	NRIMode          = "NRIMode"          // NRISupport
 )
 
 const (

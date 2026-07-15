@@ -85,14 +85,12 @@ kubeletPlugin:
   nvidiaCDIHookPath: ""
   # Kubelet root directory on the host (default: /var/lib/kubelet)
   kubeletRoot: "/var/lib/kubelet"
-  # The kubelet plugin registration socket directory on the host (default: /var/lib/kubelet/plugins_registry)
-  kubeletRegistrarPath: "/var/lib/kubelet/plugins_registry"
-  # The kubelet plugins socket directory on the host (default: /var/lib/kubelet/plugins)
-  kubeletPluginsPath: "/var/lib/kubelet/plugins"
   # Installation directory of vgpu-manager on the host (default: /etc/vgpu-manager)
   managerRoot: "/etc/vgpu-manager"
   # CDI specification directory on the host.
   cdiRoot: "/var/run/cdi"
+  # After enabling the NRISupport feature, it is necessary to configure the NRI root directory to the DRA driver.
+  nriRoot: "/var/run/nri"
   # Cgroup driver for the container environment. Empty lets the plugin auto-detect. (supported values: systemd | cgroupfs)
   cgroupDriver: "auto"
   # Conditionally mask /proc/driver/nvidia/params to prevent the plugin from recreating
@@ -141,12 +139,14 @@ kubeletPlugin:
         SharedSMUtilizationWatcher: true
         DevicePluginClientMode: false
         # PassthroughSupport: false
+        # NRISupport: true
       # Additional environment variables appended to the kubelet-plugin container.
       env: []
       commands:
         logLevel: 5
         kubeApiQps: 20.0
         kubeApiBurst: 30
+        nriPluginIdx: "00"
       # Container security context. Privileged mode is required to manage GPU device nodes.
       securityContext:
         privileged: true
@@ -170,7 +170,7 @@ deviceClasses:
   # Whole-GPU device class. `extendedResourceName` is only rendered when the served
   # resource.k8s.io version is v1 (the field does not exist in v1beta*).
   gpu:
-    enabled: true
+    enabled: false
     name: gpu-manager
     extendedResourceName: nvidia.com/gpu
   # vGPU (shared) device class.
@@ -179,11 +179,11 @@ deviceClasses:
     name: vgpu-manager
   # MIG device class.
   mig:
-    enabled: true
+    enabled: false
     name: mig-manager
   # VFIO (passthrough) device class.
   vfio:
-    enabled: true
+    enabled: false
     name: vfio-manager
 
 # Installing the Webhook service requires installing the Cert-Manager component in advance, or

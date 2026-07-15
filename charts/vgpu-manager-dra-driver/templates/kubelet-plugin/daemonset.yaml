@@ -3,10 +3,11 @@
 {{- $plugin := .Values.kubeletPlugin.containers.plugin }}
 {{- $driverRoot := .Values.kubeletPlugin.driverRoot | default "/" }}
 {{- $kubeletRoot := .Values.kubeletPlugin.kubeletRoot | default "/var/lib/kubelet" | trimSuffix "/" }}
-{{- $registrarDir := .Values.kubeletPlugin.kubeletRegistrarPath | default "/var/lib/kubelet/plugins_registry" }}
-{{- $pluginsDir := .Values.kubeletPlugin.kubeletPluginsPath | default "/var/lib/kubelet/plugins" }}
+{{- $registrarDir := printf "%s/plugins_registry" $kubeletRoot }}
+{{- $pluginsDir := printf "%s/plugins" $kubeletRoot }}
 {{- $managerDir := .Values.kubeletPlugin.managerRoot | default "/etc/vgpu-manager" }}
 {{- $cdiRoot := .Values.kubeletPlugin.cdiRoot | default "/var/run/cdi" }}
+{{- $nriRoot := .Values.kubeletPlugin.nriRoot | default "/var/run/nri" }}
 {{- $healthPort := $plugin.healthcheckPort | default 4567 }}
 {{- $fg := $plugin.featureGates | default dict }}
 {{- $gates := list }}
@@ -14,6 +15,8 @@
 {{- $featureGates := sortAlpha $gates | join "," }}
 {{- /* PassthroughSupport (vfio-pci) requires extra host mounts and the HOST_ROOT env. */}}
 {{- $passthrough := and (hasKey $fg "PassthroughSupport") (index $fg "PassthroughSupport") }}
+{{- /* NRISupport Additional nri directory mounting is required */}}
+{{- $nri := and (hasKey $fg "NRISupport") (index $fg "NRISupport") }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -119,6 +122,7 @@ spec:
               kubelet-plugin
             - --kube-api-qps={{ $plugin.commands.kubeApiQps | default 20 }}
             - --kube-api-burst={{ $plugin.commands.kubeApiBurst | default 30 }}
+            - --nri-plugin-idx={{ $plugin.commands.nriPluginIdx | default "00" }}
             - -v {{ $plugin.commands.logLevel | default 5 }}
           env:
             - name: NODE_NAME
@@ -138,6 +142,10 @@ spec:
             {{- if $passthrough }}
             - name: HOST_ROOT
               value: /host-root
+            {{- end }}
+            {{- if $nri }}
+            - name: NRI_ROOT
+              value: /var/run/nri
             {{- end }}
             - name: HEALTHCHECK_PORT
               value: {{ $healthPort | quote }}
@@ -229,16 +237,25 @@ spec:
               mountPath: /proc/
               mountPropagation: Bidirectional
             {{- end }}
+            {{- if $nri }}
+            - name: nri-root
+              mountPath: /var/run/nri
+              mountPropagation: HostToContainer
+              readOnly: true
+            {{- end }}
       volumes:
         - name: plugins-registry
           hostPath:
             path: {{ $registrarDir | quote }}
+            type: Directory
         - name: plugins
           hostPath:
             path: {{ $pluginsDir | quote }}
+            type: Directory
         - name: cdi
           hostPath:
             path: {{ $cdiRoot | quote }}
+            type: Directory
         - name: driver-root-parent
           hostPath:
             # If nvidiaDriverRoot == "/" then its parent is itself. Otherwise its parent is
@@ -260,9 +277,11 @@ spec:
         - name: cgroup
           hostPath:
             path: /sys/fs/cgroup
+            type: Directory
         - name: kubelet
           hostPath:
             path: {{ $kubeletRoot }}
+            type: Directory
         {{- if $passthrough }}
         # PassthroughSupport: the root filesystem of the host, used to execute system commands
         # against the host FS (e.g. to test and load the vfio-pci module variant for a GPU).
@@ -283,6 +302,12 @@ spec:
         - name: procfs
           hostPath:
             path: /proc/
+            type: Directory
+        {{- end }}
+        {{- if $nri }}
+        - name: nri-root
+          hostPath:
+            path: {{ $nriRoot }}
             type: Directory
         {{- end }}
 {{- end }}
