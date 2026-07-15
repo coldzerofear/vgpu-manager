@@ -152,6 +152,13 @@ func newApp() *cli.App {
 			Destination: &flags.CGroupDriver,
 			EnvVars:     []string{"CGROUP_DRIVER"},
 		},
+		&cli.StringFlag{
+			Name:        "nri-root",
+			Usage:       "Directory (mounted from the host) holding the runtime NRI socket; the in-process NRI plugin dials <nri-root>/nri.sock. Only used when the NRISupport feature gate is enabled",
+			Value:       "/var/run/nri",
+			Destination: &flags.NRIRoot,
+			EnvVars:     []string{"NRI_ROOT"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.KubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)

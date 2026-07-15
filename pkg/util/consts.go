@@ -350,6 +350,7 @@ const (
 	SerialFilterNode = "SerialFilterNode" // SerializedNodeFilter
 	VMemoryNode      = "VMemoryNode"      // VGPUMemoryTracking
 	ClientMode       = "ClientMode"       // DevicePluginClientMode
+	NRIMode          = "NRIMode"          // NRISupport
 )
 
 const (
@@ -386,6 +387,13 @@ const (
 	// DevicePluginClientMode enables Unix gRPC client mode for communication
 	// between allocated containers and the device plugin.
 	DevicePluginClientMode = "DevicePluginClientMode"
+
+	// NRISupport enables the in-process NRI plugin path: per-container partition
+	// directory mounts move from DRA Prepare/CDI to the NRI CreateContainer
+	// hook. Requires VGPUSupport. When DevicePluginClientMode is also enabled,
+	// the NRI cache is shared with the register server to drive its pod-uid
+	// resolution path; NRISupport does not require DevicePluginClientMode.
+	NRISupport = "NRISupport"
 
 	// HonorPreAllocatedDeviceIDs makes preferred allocation follow
 	// pre-allocated device IDs whenever possible.
