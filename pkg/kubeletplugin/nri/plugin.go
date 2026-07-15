@@ -57,7 +57,7 @@ const (
 	// the window are exhausted), it flips to an unhealthy state that the
 	// healthcheck surfaces to kubelet (design §12.13.3/§12.13.6). The reconnect
 	// loop keeps trying, so a later recovery clears it.
-	defaultFailureGracePeriod = 3 * time.Minute
+	defaultFailureGracePeriod = 2 * time.Minute
 )
 
 // envPrefixesOfInterest are the env keys the plugin highlights in logs; the vGPU
@@ -283,7 +283,7 @@ func (p *Plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containe
 	for _, c := range containers {
 		podUID := podUIDByID[c.GetPodSandboxId()]
 		claimUID, ok := lookupEnv(c.GetEnv(), util.ManagerVGpuClaimUid)
-		if !ok || podUID == "" {
+		if !ok || podUID == "" || claimUID == "" {
 			continue
 		}
 		// Validate against node prepared state — env is attacker-controllable
@@ -335,7 +335,7 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 	}
 
 	// Not a vGPU container of ours: leave it untouched.
-	if !hasClaim {
+	if !hasClaim || claimUID == "" {
 		return nil, nil, nil
 	}
 

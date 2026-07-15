@@ -1334,7 +1334,7 @@ DONE:
 int mmap_file_to_util_path(device_util_t** data) {
   int ret = 1;
   if (unlikely(file_exist(CONTROLLER_SM_UTIL_FILE_PATH) != 0)) {
-    return ret;
+    return 0;
   }
   int fd = open(CONTROLLER_SM_UTIL_FILE_PATH, O_RDONLY | O_CLOEXEC);
   if (unlikely(fd == -1)) {
@@ -2142,6 +2142,9 @@ int load_controller_configuration() {
     if (ret) {
       pthread_mutex_unlock(&init_config_mutex);
       LOGGER(FATAL, "mmap sm watcher file failed");
+    }
+    if (g_device_util == NULL) {
+      LOGGER(WARNING, "unable to find external SM Watcher shared cache, will roll back to nvml driver");
     }
   }
   if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {

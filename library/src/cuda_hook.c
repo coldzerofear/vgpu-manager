@@ -2074,7 +2074,7 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
   unsigned int processes_num = MAX_PIDS;
 
   nvmlReturn_t ret;
-  if (g_vgpu_config->sm_watcher) {
+  if (g_vgpu_config->sm_watcher && g_device_util != NULL) {
     ret = get_gpu_process_from_external_watcher(top_result, processes_sample, &processes_num, cuda_index, host_index, dev);
   } else {
     ret = get_gpu_process_from_local_nvml_driver(top_result, processes_sample, &processes_num, cuda_index, dev);

@@ -451,45 +451,42 @@ func cgroupFullPathResolver() func(string) string {
 // the legacy path the Target carries exactly one candidate.
 func (s *DeviceRegistryServerImpl) lookupTarget(ctx context.Context, req *registry.ContainerDeviceRequest) (*Target, error) {
 	var (
-		uuid          string
-		podUID        string
-		containerName string
+		uuid          = req.GetRegisterUuid()
+		podUID        = req.GetPodUid()
+		containerName = req.GetContainerName()
 	)
 
-	if uuid = req.GetRegisterUuid(); uuid != "" {
+	if uuid != "" {
 		if s.getTargetByRegUuid == nil {
-			return nil, errors.New("uuid registration is not supported by this server")
+			if podUID == "" || containerName == "" || s.getTargetByPodUid == nil {
+				return nil, errors.New("uuid registration is not supported by this server")
+			}
+			goto retry
 		}
 		target, err := s.getTargetByRegUuid(ctx, uuid)
 		if err != nil {
-			return nil, err
+			if podUID == "" || containerName == "" || s.getTargetByPodUid == nil {
+				return nil, err
+			}
+			goto retry
 		}
-		if target == nil {
-			return nil, fmt.Errorf("uuid %s did not resolve to a target", uuid)
-		}
-		if len(target.Candidates) == 0 {
-			return nil, fmt.Errorf("uuid %s resolver returned no candidates", uuid)
-		}
-		if target.ConfigDir == "" {
-			return nil, fmt.Errorf("uuid %s resolver returned empty ConfigDir", uuid)
-		}
-		return target, nil
+		return target, target.Validate()
 	}
 
-	if podUID = req.GetPodUid(); podUID == "" {
+	if podUID == "" {
 		return nil, errors.New("pod_uid is empty")
 	}
-	if containerName = req.GetContainerName(); containerName == "" {
+	if containerName == "" {
 		return nil, errors.New("container_name is empty")
 	}
 	if s.getTargetByPodUid == nil {
 		return nil, errors.New("pod-uid registration is not supported by this server")
 	}
+retry:
 	target, err := s.getTargetByPodUid(ctx, podUID, containerName)
 	if err != nil {
 		return nil, err
 	}
-
 	return target, target.Validate()
 }
 

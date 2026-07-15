@@ -724,7 +724,6 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 		return kcache.NewSharedIndexInformer(lw, &resourceapi.ResourceClaim{}, resync, kcache.Indexers{
 			kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc,
 			ClaimUUIDIndex:        MakeClaimUUIDIndexFunc(util.DRADriverName),
-			ClaimReservedForUid:   MakeClaimReservedForUidIndexFunc(),
 		})
 	})
 
@@ -746,6 +745,7 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 		claimInformer.GetIndexer(),
 		util.ManagerRootPath,
 		util.DRADriverName,
+		d.nriCache,
 		state.AllocatedVGPURequestsForClaim,
 	)
 
@@ -779,9 +779,7 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 		PluginIdx:       "00",
 		Cache:           d.nriCache,
 		IsClaimPrepared: d.state.IsVGPUClaimPrepared,
-		ResolveMounts: func(claimUID, podUID, containerName string) (*nri.Injection, error) {
-			return d.state.vgpuManager.GetNRIPartitionInjection(claimUID, podUID, containerName)
-		},
+		ResolveMounts:   d.state.vgpuManager.GetNRIPartitionInjection,
 	})
 	if err != nil {
 		return err

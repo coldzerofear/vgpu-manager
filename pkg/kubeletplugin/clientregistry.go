@@ -15,6 +15,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -33,7 +34,6 @@ import (
 // register UUID — embedded in the claim annotation "<driver>/<uuid>" — back
 // to its owning claim.
 const ClaimUUIDIndex = "manager.register.uuid"
-const ClaimReservedForUid = "claim.status.reservedFor.uid"
 
 // MakeClaimUUIDIndexFunc returns an IndexFunc that emits every register UUID
 // previously assigned by the driver. The annotation prefix is the driver name
@@ -50,26 +50,6 @@ func MakeClaimUUIDIndexFunc(driverName string) kcache.IndexFunc {
 		for key := range annotations {
 			if uuid, found := strings.CutPrefix(key, prefix); found && uuid != "" {
 				out = append(out, uuid)
-			}
-		}
-		return out, nil
-	}
-}
-
-func MakeClaimReservedForUidIndexFunc() kcache.IndexFunc {
-	return func(obj interface{}) ([]string, error) {
-		accessor, err := meta.Accessor(obj)
-		if err != nil {
-			return nil, fmt.Errorf("object has no meta: %w", err)
-		}
-		claim, ok := accessor.(*resourceapi.ResourceClaim)
-		if !ok {
-			return nil, fmt.Errorf("expected *resourceapi.ResourceClaim, got %T", accessor)
-		}
-		out := make([]string, 0, len(claim.Status.ReservedFor))
-		for _, reference := range claim.Status.ReservedFor {
-			if reference.APIGroup == "" && reference.Resource == "pods" {
-				out = append(out, string(reference.UID))
 			}
 		}
 		return out, nil
@@ -104,6 +84,7 @@ type ClientRegisterResolver struct {
 	claimIndexer          kcache.Indexer
 	contPath              string
 	driverName            string
+	nriCache              *nri.Cache
 	allocatedVGPURequests AllocatedVGPURequestsFunc
 
 	reader claimresolve.Reader
@@ -116,6 +97,7 @@ func NewClientRegisterResolver(
 	podLister client.PodLister,
 	claimIndexer kcache.Indexer,
 	contPath, driverName string,
+	nriCache *nri.Cache,
 	allocatedVGPURequests AllocatedVGPURequestsFunc,
 ) *ClientRegisterResolver {
 	r := &ClientRegisterResolver{
@@ -123,6 +105,7 @@ func NewClientRegisterResolver(
 		claimIndexer:          claimIndexer,
 		contPath:              contPath,
 		driverName:            driverName,
+		nriCache:              nriCache,
 		allocatedVGPURequests: allocatedVGPURequests,
 	}
 	claimLister := resourcev1.NewResourceClaimLister(claimIndexer)
@@ -154,16 +137,22 @@ func (r *ClientRegisterResolver) TargetByPodUID(ctx context.Context, uid, contNa
 	if err != nil {
 		return nil, err
 	}
-	// TODO Multiple matching claims may be found simultaneously, and a better way may be needed to determine the corresponding claims
-	claims, err := r.lookupClaimByIndex(ClaimReservedForUid, uid)
-	if err != nil {
-		return nil, err
+	configDir := filepath.Join(
+		util.GetPodContainerManagerPath(r.contPath, pod.UID, contName),
+		util.Config,
+	)
+	if r.nriCache != nil {
+		entry, ok := r.nriCache.Get(uid, contName)
+		if !ok {
+			if !r.nriCache.Synced() {
+				return nil, fmt.Errorf("NRI cache not successfully ready")
+			}
+			return nil, apierrors.NewNotFound(corev1.Resource("pods"), "uid "+uid)
+		}
+		configDir = entry.ConfigDir
 	}
-	containerKey := fmt.Sprintf("%s_%s", uid, contName)
 	return &registry.Target{
-		ConfigDir: filepath.Join(
-			r.contPath, util.Claims, string(claims[0].UID), containerKey, util.Config,
-		),
+		ConfigDir: configDir,
 		Candidates: []registry.TargetCandidate{{
 			Pod:           pod,
 			ContainerName: contName,

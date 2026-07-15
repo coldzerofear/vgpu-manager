@@ -243,19 +243,19 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	defer s.Unlock()
 	klog.V(6).Infof("t_prep_state_lock_acq %.3f s", time.Since(tplock0).Seconds())
 
-	if featuregates.Enabled(featuregates.VGPUSupport) && util.CountReservedPods(claim) > 1 {
-		for _, result := range claim.Status.Allocation.Devices.Results {
-			if result.Driver != util.DRADriverName {
-				continue
-			}
-			device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
-			if device != nil && device.Type() == VGpuDeviceType {
-				klog.ErrorS(nil, "vGPU claim cannot be applied to multiple Pods simultaneously",
-					"resourceClaim", klog.KObj(claim), "claimUid", claim.UID)
-				return nil, fmt.Errorf("claim cannot be used for multiple Pods simultaneously")
-			}
-		}
-	}
+	//if featuregates.Enabled(featuregates.VGPUSupport) && util.CountReservedPods(claim) > 1 {
+	//	for _, result := range claim.Status.Allocation.Devices.Results {
+	//		if result.Driver != util.DRADriverName {
+	//			continue
+	//		}
+	//		device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
+	//		if device != nil && device.Type() == VGpuDeviceType {
+	//			klog.ErrorS(nil, "vGPU claim cannot be applied to multiple Pods simultaneously",
+	//				"resourceClaim", klog.KObj(claim), "claimUid", claim.UID)
+	//			return nil, fmt.Errorf("claim cannot be used for multiple Pods simultaneously")
+	//		}
+	//	}
+	//}
 
 	claimUID := string(claim.UID)
 
@@ -848,13 +848,17 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		preparedDeviceGroupConfigState[c] = configState
 	}
 
-	// Walk through each config and its associated device allocation results
-	// and construct the list of prepared devices to return.
-	var preparedDevices PreparedDevices
-	vgpuClaimCommonEditsApplied := false
-	partitionMountEditsApplied := map[string]bool{}
-	var vgpuPartitionInfo *claimresolve.PartitionInfo
-	vgpuSupportEnabled := featuregates.Enabled(featuregates.VGPUSupport)
+	var (
+		// Walk through each config and its associated device allocation results
+		// and construct the list of prepared devices to return.
+		preparedDevices             PreparedDevices
+		vgpuClaimCommonEditsApplied bool
+		partitionMountEditsApplied  = map[string]bool{}
+		vgpuPartitionInfo           *claimresolve.PartitionInfo
+		vgpuSupportEnabled          = featuregates.Enabled(featuregates.VGPUSupport)
+		nriSupportEnabled           = featuregates.Enabled(featuregates.NRISupport)
+	)
+
 	if vgpuSupportEnabled {
 		vgpuPartitionInfo, err = s.resolveVGPUClaimPartitions(ctx, claim)
 		if err != nil {
@@ -873,8 +877,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				return nil, fmt.Errorf("allocatable not found for device %q", result.Device)
 			}
 
-			partitionKey := ""
-			cdiDeviceID := ""
+			partitionKey, cdiDeviceID := "", ""
 			if vgpuSupportEnabled && allocatableDevice.Type() == VGpuDeviceType {
 				mainRequest := resolveMainRequestName(claim, result.Request)
 				if mainRequest == "" {
@@ -883,7 +886,10 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				partitionKey = resolveVGPUResultPartitionKey(mainRequest, vgpuPartitionInfo)
 				cdiDeviceID = buildCDIDeviceID(*result, idx, allocatableDevice)
 				if !vgpuClaimCommonEditsApplied {
-					preparedDeviceGroup.ConfigState.containerEdits = mergeContainerEdits(preparedDeviceGroup.ConfigState.containerEdits, s.vgpuManager.GetClaimCommonContainerEdits(claim))
+					preparedDeviceGroup.ConfigState.containerEdits = mergeContainerEdits(
+						preparedDeviceGroup.ConfigState.containerEdits,
+						s.vgpuManager.GetClaimCommonContainerEdits(claim),
+					)
 					vgpuClaimCommonEditsApplied = true
 				}
 			}
@@ -927,7 +933,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				// applied per-container by the NRI plugin at CreateContainer, not
 				// baked into CDI here (design §12.3/§12.4). Prepare only carries
 				// the claim UID via the common CDI env for correlation.
-				if !featuregates.Enabled(featuregates.NRISupport) && !partitionMountEditsApplied[partitionKey] {
+				if !nriSupportEnabled && !partitionMountEditsApplied[partitionKey] {
 					edits, err := s.vgpuManager.GetPartitionMountContainerEdits(claim, partitionKey)
 					if err != nil {
 						return nil, fmt.Errorf("error getting vgpu partition container edits: %w", err)

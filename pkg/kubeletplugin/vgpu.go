@@ -186,6 +186,8 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	// against node prepared state; see §12.12.1 in dra_nri_integration_design.md).
 	if featuregates.Enabled(featuregates.NRISupport) {
 		envs = append(envs, fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, string(claim.UID)))
+	} else {
+		envs = append(envs, fmt.Sprintf("%s=", util.ManagerVGpuClaimUid))
 	}
 	hostLibraryPath := filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName)
 	hostLibraryPath = fmt.Sprintf("%s.%s", hostLibraryPath, version.Get().Version)
@@ -284,9 +286,6 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 }
 
 func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.ResourceClaim, partitionKey string) (*cdiapi.ContainerEdits, error) {
-	if claim == nil {
-		return nil, nil
-	}
 	if partitionKey == "" {
 		// TODO It's unlikely to run up to this point
 		partitionKey = "default"
