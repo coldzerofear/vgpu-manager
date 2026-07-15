@@ -26,7 +26,7 @@ import (
 
 const claimUIDEnv = "MANAGER_VGPU_CLAIM_UID"
 
-func testPlugin(prepared map[string]bool, resolve func(claimUID, podUID, cn string) (*Injection, error)) *Plugin {
+func testPlugin(prepared map[string]bool, resolve func(claimUID, podName, podNamespace, podUID, cn string) (*Injection, error)) *Plugin {
 	return &Plugin{
 		cache:           NewCache(),
 		createdAt:       make(map[string]time.Time),
@@ -35,10 +35,15 @@ func testPlugin(prepared map[string]bool, resolve func(claimUID, podUID, cn stri
 	}
 }
 
-func vgpuInjection(claimUID, podUID, cn string) (*Injection, error) {
+func vgpuInjection(claimUID, podName, podNamespace, podUID, cn string) (*Injection, error) {
 	return &Injection{
 		ConfigDir: ConfigDirFor(claimUID, podUID, cn),
-		Env:       []string{"VGPU_POD_UID=" + podUID, "VGPU_CONTAINER_NAME=" + cn},
+		Env: []string{
+			"VGPU_POD_NAME=" + podName,
+			"VGPU_POD_NAMESPACE=" + podNamespace,
+			"VGPU_POD_UID=" + podUID,
+			"VGPU_CONTAINER_NAME=" + cn,
+		},
 		Mounts: []Mount{
 			{ContainerPath: "/etc/vgpu-manager/config", HostPath: "/host/config", Options: []string{"rw", "bind"}},
 		},
@@ -60,7 +65,7 @@ func TestCreateContainer_InjectsForPreparedClaim(t *testing.T) {
 	if len(adjust.Mounts) != 1 {
 		t.Fatalf("expected 1 mount, got %d", len(adjust.Mounts))
 	}
-	if len(adjust.Env) != 2 {
+	if len(adjust.Env) != 4 {
 		t.Fatalf("expected 2 env, got %d", len(adjust.Env))
 	}
 	if _, ok := p.cache.Get("pod-1", "app"); !ok {

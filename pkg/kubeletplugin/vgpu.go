@@ -342,14 +342,17 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 // Prepare-time GetPartitionMountContainerEdits, this mints no register UUID and
 // patches no claim annotation: in NRI mode the library registers via the pod-uid
 // path using the VGPU_POD_UID / VGPU_CONTAINER_NAME env injected here.
-func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podUID, containerName string) (*nri.Injection, error) {
+func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
 	partitionKey := fmt.Sprintf("%s_%s", podUID, containerName)
 	contBase, hostBase := m.ensurePartitionDirectories(claimUID, partitionKey)
 	return &nri.Injection{
 		ConfigDir: filepath.Join(contBase, util.Config),
 		Env: []string{
+			fmt.Sprintf("%s=%s", util.PodNameEnv, podName),
+			fmt.Sprintf("%s=%s", util.PodNamespaceEnv, podNamespace),
 			fmt.Sprintf("%s=%s", util.PodUIDEnv, podUID),
 			fmt.Sprintf("%s=%s", util.ContNameEnv, containerName),
+			fmt.Sprintf("%s=", util.ManagerClientRegisterUuid),
 		},
 		Mounts: []nri.Mount{
 			{

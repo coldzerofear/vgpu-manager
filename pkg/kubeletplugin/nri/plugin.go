@@ -30,10 +30,13 @@ package nri
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
@@ -98,7 +101,7 @@ type Config struct {
 	// returns the mounts + env to inject. Returning (nil, nil) skips injection.
 	// When nil, the plugin runs observe-only regardless of DryRun. Injected by
 	// the driver.
-	ResolveMounts func(claimUID, podUID, containerName string) (*Injection, error)
+	ResolveMounts func(claimUID, podName, podNamespace, podUID, containerName string) (*Injection, error)
 }
 
 // Mount is one partition bind mount the plugin injects at CreateContainer.
@@ -124,7 +127,7 @@ type Plugin struct {
 	dryRun             bool
 	failureGracePeriod time.Duration
 	isClaimPrepared    func(claimUID string) bool
-	resolveMounts      func(claimUID, podUID, containerName string) (*Injection, error)
+	resolveMounts      func(claimUID, podName, podNamespace, podUID, containerName string) (*Injection, error)
 
 	// createdAt tracks CreateContainer timestamps so StartContainer can report
 	// the create→start delta (validates ordering; §12.12 item 3).
@@ -353,7 +356,7 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 		return nil, nil, nil
 	}
 
-	inj, err := p.resolveMounts(claimUID, pod.GetUid(), c.GetName())
+	inj, err := p.resolveMounts(claimUID, pod.GetName(), pod.GetNamespace(), pod.GetUid(), c.GetName())
 	if err != nil {
 		// Fail-closed: a container starting without its vGPU isolation is worse
 		// than not starting. containerd aborts container creation on this error.
@@ -378,6 +381,14 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 			adjust.AddEnv(k, v)
 		}
 	}
+
+	// Clean up old cache files (if any)
+	pidsConfigPath := filepath.Join(inj.ConfigDir, registry.PidsConfig)
+	basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
+	vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
+	_ = os.RemoveAll(pidsConfigPath)
+	_ = os.RemoveAll(vmemNodeConfigPath)
+
 	p.cache.Set(pod.GetUid(), c.GetName(), Entry{ClaimUID: claimUID, ConfigDir: inj.ConfigDir})
 
 	klog.InfoS("NRI CreateContainer injected",
