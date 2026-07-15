@@ -142,14 +142,11 @@ func (r *ClientRegisterResolver) TargetByPodUID(ctx context.Context, uid, contNa
 		util.Config,
 	)
 	if r.nriCache != nil {
-		entry, ok := r.nriCache.Get(uid, contName)
-		if !ok {
-			if !r.nriCache.Synced() {
-				return nil, fmt.Errorf("NRI cache not successfully ready")
-			}
-			return nil, apierrors.NewNotFound(corev1.Resource("pods"), "uid "+uid)
+		if entry, ok := r.nriCache.Get(uid, contName); ok {
+			configDir = entry.ConfigDir
+		} else if !r.nriCache.Synced() {
+			return nil, fmt.Errorf("NRI cache not successfully ready")
 		}
-		configDir = entry.ConfigDir
 	}
 	return &registry.Target{
 		ConfigDir: configDir,
