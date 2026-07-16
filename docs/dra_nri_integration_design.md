@@ -299,7 +299,7 @@ Plugin/library 视图: /etc/vgpu-manager/claims/<claim-uid>/<pod-uid>_<container
 ### 12.6 实现进度
 
 1. ✅ **NRI 插件本体**（`pkg/kubeletplugin/nri`）：stub + `Configure`/`Synchronize`/`CreateContainer`/`StartContainer`/`RemoveContainer`/`StopPodSandbox`，同进程，两级失败模型 + healthcheck 接线。
-2. ✅ **`NRISupport` featuregate + Prepare 分支**：`GetClaimCommonContainerEdits` 在 NRI 模式加注 `MANAGER_VGPU_CLAIM_UID`；`device_state.go` 的 partition-mount 注入在 NRI 模式跳过（连带跳过 UUID 铸造/annotation）。旧路径不变。
+2. ✅ **`NRISupport` featuregate + Prepare 分支**：`GetClaimCommonContainerEdits` 在 NRI 模式加注 `MANAGER_VGPU_CLAIM_UID`；`device_state.go` 的 partition-mount 注入在 NRI 模式跳过（连带跳过 UUID 铸造/annotation）。旧路径不变。**另**：Prepare 里"vGPU claim 不能被多 pod 同时使用"（`CountReservedPods > 1`）的守卫改为**仅非 NRI 模式生效**（commit 8111507）——该守卫是旧 partition 设计的算法约束；NRI 每容器独立目录天然支持"多 pod 各用同 claim 的不同 request"（webhook 只禁同 request 跨 pod），故 NRI 模式跳过它，与 webhook 对齐。属 §5.4 语义放宽的一部分，需集群实测该场景。
 3. ✅ **NRI CreateContainer 真注入**：读 `MANAGER_VGPU_CLAIM_UID` → **对照 `DeviceState.IsVGPUClaimPrepared` 校验（§12.12.1）** → `VGPUManager.GetNRIPartitionInjection` 建目录 + 返回三个 rw mount + `VGPU_POD_UID`/`VGPU_CONTAINER_NAME` env → 注入并写缓存。fail-closed（resolve 失败阻断容器创建）。
 4. ✅ **NRI 缓存 + `Synchronize`**：进程内缓存,`Synchronize` 从回放容器 env 重建（同样经 `IsVGPUClaimPrepared` 校验）。
 5. ✅ **`TargetByPodUID` 接入 NRI 缓存 + 就绪门**（见 §12.8/§12.13.5）：NRISupport 开时缓存为权威源（命中→NRI 目录；未命中未就绪→可重试；未命中已就绪→NotFound），取代并删除了 interim 的 `ClaimReservedForUid` 索引 + `claims[0]`。配套：`GetClaimCommonContainerEdits` 在非 NRI 模式也注入空 `MANAGER_VGPU_CLAIM_UID=`（防伪造），NRI 插件用 `claimUID == ""` 守卫跳过；library 侧将 SM watcher 共享缓存改为可选（缺失回退 nvml，不再 FATAL）。
@@ -322,10 +322,10 @@ library 从 env 读 `VGPU_POD_UID` / `VGPU_CONTAINER_NAME` / `MANAGER_CLIENT_REG
 - **`nriCache == nil`（NRISupport 关）**：直接返回 device-plugin 式 target `ConfigDir = GetPodContainerManagerPath(ManagerRootPath, podUid, contName)/config`。覆盖非 NRI 场景下 pod-uid 请求撞到本服务的情况（落点与 device-plugin 一致）。
 - **`nriCache != nil`（NRISupport 开）**，NRI 缓存是**权威源**：
   1. **命中** → 返回 `entry.ConfigDir`（`claims/<claim-uid>/<pod-uid>_<container-name>/config`），无索引猜测、无 `claims[0]` 歧义。
-  2. **未命中 + 未就绪（`!Synced()`）** → 返回普通 error（`"NRI cache not successfully ready"`，**非 NotFound**）→ `resolveTarget` 在 60s 超时窗口内轮询重试（§12.13.5）。
-  3. **未命中 + 已就绪** → 返回 `apierrors.NewNotFound`（**硬失败**）。
+  2. **未命中 + 未就绪（`!Synced()`）** → 返回普通 error（`"NRI cache not successfully ready"`，**非 NotFound**）→ `resolveTarget` 在 60s 超时窗口内轮询重试（§12.13.5）。这道就绪门闭合了插件重启窗口（缓存尚未由 `Synchronize` 重建）。
+  3. **未命中 + 已就绪** → **回退 device-plugin 式目录**（同 `nriCache == nil` 分支，`configDir` 保持默认值不变）。
 
-> **与早期草案的差异（更安全）**：早期草案在"已就绪 + 未命中"时回退 device-plugin 目录。实际实现改为 **NotFound 硬失败**——因为 NRI `CreateContainer` 早于容器进程启动（早于 `StartContainer`），而 library register 在进程启动后，故合法 NRI 容器 register 时缓存**必已写入**；"已就绪仍未命中"只可能是非 NRI 容器（garbage/spoof），此时静默回退 device-plugin 目录反而会把 pids 写到与 library 实际挂载目录不符的位置。硬失败更干净。**重启窗口**由第 2 分支（未就绪 → 可重试）闭合，不会误回退。
+> **为何已就绪+未命中回退而非硬失败**：曾一度改成 `NotFound` 硬失败，现回退到 device-plugin 目录（commit 856a572）。权衡如下：NRI `CreateContainer` 早于容器进程启动、library register 在进程启动后，故**合法 NRI 容器 register 时缓存必已写入**（缓存在 CreateContainer 写、RemoveContainer 才删，运行中容器 miss 几乎不可能）。因此"已就绪+未命中"基本只发生在**非 NRI 容器**（如 co-install 的 device-plugin pod 撞到本服务）——回退 device-plugin 目录对它们是**正确**的。极端情况下若合法 NRI 容器真的 miss，回退写到 device-plugin 目录、而 library 从 NRI 挂载的 `claims/...` 读 → FATAL —— 但这与 `NotFound`（pids.config 根本不写 → 同样 FATAL）**结局一致**，回退不劣，只多留一个错位文件。故回退 ≥ NotFound，且照顾了 co-install。就绪门（分支 2）不受影响，重启窗口仍闭合。
 
 此设计**取代** interim 的 `ClaimReservedForUid` + `claims[0]`（索引已删除）；`register` proto 不变，library/C 不改，NRI 本就是权威来源。
 

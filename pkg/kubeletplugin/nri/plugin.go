@@ -21,10 +21,12 @@
 // socket over ttrpc, and on every (re)connect rebuilds a per-container cache
 // from container env via Synchronize.
 //
-// This file is the SKELETON + DRY-RUN stage (§12.6 item 1): every hook only
-// observes and logs; CreateContainer returns no adjustment. Actual mount/env
-// injection is a later stage, gated on the §12.12 validation this dry-run mode
-// produces.
+// At CreateContainer the plugin injects the per-container partition mounts +
+// register env for a vGPU container, after validating the claim UID (read from
+// attacker-controllable container env) against the node's prepared claims
+// (§12.12.1). A dry-run / observe-only mode is retained (DryRun, or no
+// ResolveMounts wired): every hook only logs and injects nothing — used for the
+// §12.12 validation and as a safe default.
 package nri
 
 import (
