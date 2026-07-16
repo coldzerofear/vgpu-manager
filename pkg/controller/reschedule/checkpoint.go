@@ -52,14 +52,14 @@ func (c *recoveryCheckpoint) ListPod() ([]*corev1.Pod, error) {
 	if err != nil {
 		return nil, err
 	}
-	pods := make([]*corev1.Pod, 0)
+	pods := make([]*corev1.Pod, 0, len(checkpoint.V1.RecoveryPods))
 	for _, pod := range checkpoint.V1.RecoveryPods {
 		pods = append(pods, pod.DeepCopy())
 	}
 	return pods, nil
 }
 
-func (c *recoveryCheckpoint) AddPod(pod *corev1.Pod) error {
+func (c *recoveryCheckpoint) AddOrUpdatePod(pod *corev1.Pod) error {
 	c.mut.Lock()
 	defer c.mut.Unlock()
 
