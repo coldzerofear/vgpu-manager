@@ -243,19 +243,22 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	defer s.Unlock()
 	klog.V(6).Infof("t_prep_state_lock_acq %.3f s", time.Since(tplock0).Seconds())
 
-	//if featuregates.Enabled(featuregates.VGPUSupport) && util.CountReservedPods(claim) > 1 {
-	//	for _, result := range claim.Status.Allocation.Devices.Results {
-	//		if result.Driver != util.DRADriverName {
-	//			continue
-	//		}
-	//		device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
-	//		if device != nil && device.Type() == VGpuDeviceType {
-	//			klog.ErrorS(nil, "vGPU claim cannot be applied to multiple Pods simultaneously",
-	//				"resourceClaim", klog.KObj(claim), "claimUid", claim.UID)
-	//			return nil, fmt.Errorf("claim cannot be used for multiple Pods simultaneously")
-	//		}
-	//	}
-	//}
+	if featuregates.Enabled(featuregates.VGPUSupport) && !featuregates.Enabled(featuregates.NRISupport) {
+		// Verification is only required when NRI is not enabled to avoid disrupting the connected partition design
+		if util.CountReservedPods(claim) > 1 {
+			for _, result := range claim.Status.Allocation.Devices.Results {
+				if result.Driver != util.DRADriverName {
+					continue
+				}
+				device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
+				if device != nil && device.Type() == VGpuDeviceType {
+					klog.ErrorS(nil, "vGPU claim cannot be applied to multiple Pods simultaneously",
+						"resourceClaim", klog.KObj(claim), "claimUid", claim.UID)
+					return nil, fmt.Errorf("claim cannot be used for multiple Pods simultaneously")
+				}
+			}
+		}
+	}
 
 	claimUID := string(claim.UID)
 

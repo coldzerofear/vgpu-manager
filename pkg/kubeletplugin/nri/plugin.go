@@ -351,7 +351,7 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 
 	// Validate the (attacker-controllable) claim UID against node prepared state.
 	if p.isClaimPrepared != nil && !p.isClaimPrepared(claimUID) {
-		klog.InfoS("NRI CreateContainer: claim not prepared on this node; skipping injection (possible spoofed env)",
+		klog.V(3).InfoS("NRI CreateContainer: claim not prepared on this node; skipping injection (possible spoofed env)",
 			"pod", pod.GetName(), "podUID", pod.GetUid(), "container", c.GetName(), "claimUID", claimUID)
 		return nil, nil, nil
 	}
@@ -391,7 +391,7 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 
 	p.cache.Set(pod.GetUid(), c.GetName(), Entry{ClaimUID: claimUID, ConfigDir: inj.ConfigDir})
 
-	klog.InfoS("NRI CreateContainer injected",
+	klog.V(3).InfoS("NRI CreateContainer injected",
 		"pod", pod.GetName(), "podUID", pod.GetUid(), "container", c.GetName(),
 		"claimUID", claimUID, "configDir", inj.ConfigDir, "mounts", len(inj.Mounts))
 	return adjust, nil, nil
