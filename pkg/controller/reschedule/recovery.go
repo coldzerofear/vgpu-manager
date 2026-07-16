@@ -40,10 +40,24 @@ func newRecoveryController(client client.Client, recorder events.EventRecorder) 
 	}, nil
 }
 
-func (r *recoveryController) AddPodToRecoveryQueue(pod *corev1.Pod, d time.Duration) {
-	if err := r.recoveryCheckpoint.AddPod(pod); err != nil {
-		klog.ErrorS(err, "add pod to recovery checkpoint failed")
+func (r *recoveryController) AddPodToCheckpoint(pod *corev1.Pod) error {
+	if r.recoveryCheckpoint != nil {
+		return r.recoveryCheckpoint.AddOrUpdatePod(pod)
 	}
+	return nil
+}
+
+func (r *recoveryController) RemovePodCheckpoint(pod *corev1.Pod) error {
+	if r.recoveryCheckpoint != nil {
+		podKey := client.ObjectKeyFromObject(pod).String()
+		return r.recoveryCheckpoint.RemovePod(podKey)
+	}
+	return nil
+}
+
+func (r *recoveryController) AddPodToRecoveryQueue(pod *corev1.Pod, d time.Duration) {
+	// update checkpoint
+	_ = r.AddPodToCheckpoint(pod)
 	r.queue.AddAfter(pod, d)
 }
 
@@ -105,12 +119,11 @@ func (r *recoveryController) processNextItem() bool {
 	case result.Requeue:
 		r.queue.AddRateLimited(pod)
 	default:
-		obj := klog.KObj(pod)
-		if err = r.recoveryCheckpoint.RemovePod(obj.String()); err != nil {
-			klog.ErrorS(err, "remove pod for recovery checkpoint failed", "pod", obj)
+		if err = r.RemovePodCheckpoint(pod); err != nil {
+			klog.ErrorS(err, "remove pod for recovery checkpoint failed", "pod", klog.KObj(pod))
 			r.queue.AddRateLimited(pod)
 		} else {
-			klog.V(5).InfoS("Recovery successful", "pod", obj)
+			klog.V(5).InfoS("Recovery successful", "pod", klog.KObj(pod))
 			// Finally, if no error occurs we Forget this item so it does not
 			// get queued again until another change happens.
 			r.queue.Forget(pod)
@@ -155,10 +168,19 @@ func CleanupMetadata(pod *corev1.Pod) {
 	}
 }
 
+const maxRequeueAfter = 5 * time.Second
+
 func (r *recoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod) (reconcile.Result, error) {
-	podKey := client.ObjectKeyFromObject(pod)
+	// Only pods that have been marked for deletion are necessary for recovery
+	if pod.DeletionTimestamp.IsZero() {
+		return reconcile.Result{}, nil
+	}
+	if metav1.Now().Sub(pod.DeletionTimestamp.Time) > 24*time.Hour {
+		klog.InfoS("The pod waiting for recovery has been deleted for more than 24 hours, skip the timeout pod", "pod", klog.KObj(pod))
+		return reconcile.Result{}, nil
+	}
 	currentPod := corev1.Pod{}
-	err := r.client.Get(ctx, podKey, &currentPod)
+	err := r.client.Get(ctx, client.ObjectKeyFromObject(pod), &currentPod)
 	switch {
 	case errors.IsNotFound(err):
 		newPod := pod.DeepCopy()
@@ -191,8 +213,8 @@ func (r *recoveryController) recoveryWorker(ctx context.Context, pod *corev1.Pod
 		}
 		requeueAfter := time.Duration(0)
 		remaining := deleteTime.Sub(nowTime)
-		if remaining > 5*time.Second {
-			requeueAfter = 5 * time.Second
+		if remaining > maxRequeueAfter {
+			requeueAfter = maxRequeueAfter
 		} else if remaining > 0 {
 			requeueAfter = remaining
 		}

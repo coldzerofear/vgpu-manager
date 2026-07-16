@@ -77,6 +77,13 @@ const (
 
 	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
 
+	// NRISupport enables the in-process NRI plugin path (per-container partition
+	// mounts injected at the NRI CreateContainer hook). Requires VGPUSupport.
+	// When DevicePluginClientMode is ALSO enabled, the NRI cache is shared with
+	// the register server to drive its pod-uid resolution; NRISupport does not
+	// require DevicePluginClientMode.
+	NRISupport featuregate.Feature = util.NRISupport
+
 	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
 	// storing daemon info directly in ComputeDomainStatus.Nodes.
 	//ComputeDomainCliques featuregate.Feature = "ComputeDomainCliques"
@@ -159,6 +166,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	DeviceMetadata: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 4),
+		},
+	},
+	NRISupport: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
@@ -251,6 +265,9 @@ func ValidateFeatureGates() error {
 	}
 	if Enabled(DevicePluginClientMode) && !Enabled(VGPUSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", DevicePluginClientMode, VGPUSupport)
+	}
+	if Enabled(NRISupport) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", NRISupport, VGPUSupport)
 	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {

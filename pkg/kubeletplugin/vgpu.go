@@ -11,6 +11,7 @@ import (
 	vgpu2 "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/docker/go-units"
@@ -179,6 +180,15 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 		fmt.Sprintf("%s=", util.CudaMemoryLimitEnv),
 		fmt.Sprintf("%s=FALSE", util.CudaMemoryOversoldEnv),
 	}
+	// In NRI mode the partition mounts + register wiring are applied per-container
+	// by the NRI plugin at CreateContainer, not here. Carry the claim UID via CDI
+	// env so the NRI hook can correlate the container to its claim (validated
+	// against node prepared state; see §12.12.1 in dra_nri_integration_design.md).
+	if featuregates.Enabled(featuregates.NRISupport) {
+		envs = append(envs, fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, string(claim.UID)))
+	} else {
+		envs = append(envs, fmt.Sprintf("%s=", util.ManagerVGpuClaimUid))
+	}
 	hostLibraryPath := filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName)
 	hostLibraryPath = fmt.Sprintf("%s.%s", hostLibraryPath, version.Get().Version)
 	mounts := []*cdispec.Mount{
@@ -276,9 +286,6 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 }
 
 func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.ResourceClaim, partitionKey string) (*cdiapi.ContainerEdits, error) {
-	if claim == nil {
-		return nil, nil
-	}
 	if partitionKey == "" {
 		// TODO It's unlikely to run up to this point
 		partitionKey = "default"
@@ -322,6 +329,46 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 					HostPath:      filepath.Join(partitionHostPath, util.VMemNode),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
+			},
+		},
+	}, nil
+}
+
+// GetNRIPartitionInjection ensures the per-container partition directories for a
+// vGPU container in NRI mode and returns the mounts + register env for the NRI
+// CreateContainer hook to inject. partitionKey is the per-container scope
+// "<podUID>_<containerName>", matching the register server's pod-uid path
+// (util.GetPodContainerManagerPath under claims/<claimUID>/). Unlike the
+// Prepare-time GetPartitionMountContainerEdits, this mints no register UUID and
+// patches no claim annotation: in NRI mode the library registers via the pod-uid
+// path using the VGPU_POD_UID / VGPU_CONTAINER_NAME env injected here.
+func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
+	partitionKey := fmt.Sprintf("%s_%s", podUID, containerName)
+	contBase, hostBase := m.ensurePartitionDirectories(claimUID, partitionKey)
+	return &nri.Injection{
+		ConfigDir: filepath.Join(contBase, util.Config),
+		Env: []string{
+			fmt.Sprintf("%s=%s", util.PodNameEnv, podName),
+			fmt.Sprintf("%s=%s", util.PodNamespaceEnv, podNamespace),
+			fmt.Sprintf("%s=%s", util.PodUIDEnv, podUID),
+			fmt.Sprintf("%s=%s", util.ContNameEnv, containerName),
+			fmt.Sprintf("%s=", util.ManagerClientRegisterUuid),
+		},
+		Mounts: []nri.Mount{
+			{
+				ContainerPath: filepath.Join(m.contManagerPath, util.Config),
+				HostPath:      filepath.Join(hostBase, util.Config),
+				Options:       []string{"rw", "nosuid", "nodev", "bind"},
+			},
+			{
+				ContainerPath: vgpu.ContVGPULockPath,
+				HostPath:      filepath.Join(hostBase, vgpu.VGPULockDirName),
+				Options:       []string{"rw", "nosuid", "nodev", "bind"},
+			},
+			{
+				ContainerPath: vgpu.ContVMemoryNodePath,
+				HostPath:      filepath.Join(hostBase, util.VMemNode),
+				Options:       []string{"rw", "nosuid", "nodev", "bind"},
 			},
 		},
 	}, nil

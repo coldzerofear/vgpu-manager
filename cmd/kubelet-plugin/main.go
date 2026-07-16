@@ -28,6 +28,7 @@ import (
 	pkgkubeletplugin "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/urfave/cli/v2"
@@ -71,14 +72,14 @@ func newApp() *cli.App {
 			Name:        "nvidia-driver-root",
 			Aliases:     []string{"host_driver-root"},
 			Value:       "/",
-			Usage:       "the root path for the NVIDIA driver installation on the host (typical values are '/' or '/run/nvidia/driver')",
+			Usage:       "the root path for the NVIDIA driver installation on the host (typical values are '/' or '/run/nvidia/driver').",
 			Destination: &flags.HostDriverRoot,
 			EnvVars:     []string{"NVIDIA_DRIVER_ROOT", "HOST_DRIVER_ROOT"},
 		},
 		&cli.StringFlag{
 			Name:        "container-driver-root",
 			Value:       "/driver-root",
-			Usage:       "the path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications",
+			Usage:       "the path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.",
 			Destination: &flags.ContainerDriverRoot,
 			EnvVars:     []string{"DRIVER_ROOT_CTR_PATH"},
 		},
@@ -139,7 +140,7 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "host-manager-dir",
-			Usage:       "Configure the host path used by vgpu-manager",
+			Usage:       "Configure the host path used by vgpu-manager.",
 			Value:       "/etc/vgpu-manager",
 			Required:    true,
 			Destination: &flags.HostManagerDir,
@@ -147,10 +148,24 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "cgroup-driver",
-			Usage:       "Configure the cgroup driver for the current container environment",
+			Usage:       "Configure the cgroup driver for the current container environment.",
 			Value:       "",
 			Destination: &flags.CGroupDriver,
 			EnvVars:     []string{"CGROUP_DRIVER"},
+		},
+		&cli.StringFlag{
+			Name:        "nri-root",
+			Usage:       "Directory (mounted from the host) holding the runtime NRI socket; the in-process NRI plugin dials <nri-root>/nri.sock. Only used when the NRISupport feature gate is enabled.",
+			Value:       "/var/run/nri",
+			Destination: &flags.NRIRoot,
+			EnvVars:     []string{"NRI_ROOT"},
+		},
+		&cli.StringFlag{
+			Name:        "nri-plugin-idx",
+			Usage:       "Configure nri plugin idx to ensure plugin execution order.",
+			Value:       "00",
+			Destination: &flags.NRIPluginIdx,
+			EnvVars:     []string{"NRI_PLUGIN_IDX"},
 		},
 	}
 	cliFlags = append(cliFlags, flags.KubeClientConfig.Flags()...)
@@ -220,6 +235,15 @@ func newApp() *cli.App {
 
 // Input validation of CLI flags.
 func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
+	// Validate the NRI plugin index format early (only when set): containerd
+	// otherwise rejects a bad index at registration time, which surfaces as an
+	// obscure reconnect-loop failure rather than a clear startup error.
+	if flags.NRIPluginIdx != "" {
+		if err := nri.ValidatePluginIdx(flags.NRIPluginIdx); err != nil {
+			return fmt.Errorf("invalid --nri-plugin-idx %q: %w", flags.NRIPluginIdx, err)
+		}
+	}
+
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		if flags.HostRoot == "" {
 			return fmt.Errorf("host root is required when PassthroughSupport feature gate is enabled")

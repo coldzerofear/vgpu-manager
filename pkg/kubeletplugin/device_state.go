@@ -243,16 +243,19 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	defer s.Unlock()
 	klog.V(6).Infof("t_prep_state_lock_acq %.3f s", time.Since(tplock0).Seconds())
 
-	if featuregates.Enabled(featuregates.VGPUSupport) && util.CountReservedPods(claim) > 1 {
-		for _, result := range claim.Status.Allocation.Devices.Results {
-			if result.Driver != util.DRADriverName {
-				continue
-			}
-			device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
-			if device != nil && device.Type() == VGpuDeviceType {
-				klog.ErrorS(nil, "vGPU claim cannot be applied to multiple Pods simultaneously",
-					"resourceClaim", klog.KObj(claim), "claimUid", claim.UID)
-				return nil, fmt.Errorf("claim cannot be used for multiple Pods simultaneously")
+	if featuregates.Enabled(featuregates.VGPUSupport) && !featuregates.Enabled(featuregates.NRISupport) {
+		// Verification is only required when NRI is not enabled to avoid disrupting the connected partition design
+		if util.CountReservedPods(claim) > 1 {
+			for _, result := range claim.Status.Allocation.Devices.Results {
+				if result.Driver != util.DRADriverName {
+					continue
+				}
+				device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
+				if device != nil && device.Type() == VGpuDeviceType {
+					klog.ErrorS(nil, "vGPU claim cannot be applied to multiple Pods simultaneously",
+						"resourceClaim", klog.KObj(claim), "claimUid", claim.UID)
+					return nil, fmt.Errorf("claim cannot be used for multiple Pods simultaneously")
+				}
 			}
 		}
 	}
@@ -628,6 +631,33 @@ func (s *DeviceState) getCheckpoint(ctx context.Context) (*Checkpoint, error) {
 	return checkpoint.ToLatestVersion(), nil
 }
 
+// IsVGPUClaimPrepared reports whether claimUID names a claim this node has
+// finished preparing AND that holds at least one vGPU device. It is the
+// authoritative check the NRI plugin uses to validate the
+// (attacker-controllable) MANAGER_VGPU_CLAIM_UID env before injecting
+// per-container partition mounts (design §12.12.1). It reads the checkpoint
+// under cplock only and takes no other lock, so it is safe to call from the NRI
+// hook goroutine concurrently with Prepare/Unprepare.
+func (s *DeviceState) IsVGPUClaimPrepared(claimUID string) bool {
+	cp, err := s.getCheckpoint(context.Background())
+	if err != nil {
+		klog.V(4).ErrorS(err, "IsVGPUClaimPrepared: failed to read checkpoint", "claimUID", claimUID)
+		return false
+	}
+	pc, ok := cp.V2.PreparedClaims[claimUID]
+	if !ok || pc.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+		return false
+	}
+	for _, group := range pc.PreparedDevices {
+		for _, dev := range group.Devices {
+			if dev.VGpu != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // logCheckpointDiff is invoked when GetCheckpoint returns
 // CorruptCheckpointError: the on-disk JSON deserialized cleanly but the
 // checksum recomputed at verification time disagrees with the one encoded in
@@ -821,13 +851,17 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		preparedDeviceGroupConfigState[c] = configState
 	}
 
-	// Walk through each config and its associated device allocation results
-	// and construct the list of prepared devices to return.
-	var preparedDevices PreparedDevices
-	vgpuClaimCommonEditsApplied := false
-	partitionMountEditsApplied := map[string]bool{}
-	var vgpuPartitionInfo *claimresolve.PartitionInfo
-	vgpuSupportEnabled := featuregates.Enabled(featuregates.VGPUSupport)
+	var (
+		// Walk through each config and its associated device allocation results
+		// and construct the list of prepared devices to return.
+		preparedDevices             PreparedDevices
+		vgpuClaimCommonEditsApplied bool
+		partitionMountEditsApplied  = map[string]bool{}
+		vgpuPartitionInfo           *claimresolve.PartitionInfo
+		vgpuSupportEnabled          = featuregates.Enabled(featuregates.VGPUSupport)
+		nriSupportEnabled           = featuregates.Enabled(featuregates.NRISupport)
+	)
+
 	if vgpuSupportEnabled {
 		vgpuPartitionInfo, err = s.resolveVGPUClaimPartitions(ctx, claim)
 		if err != nil {
@@ -846,8 +880,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				return nil, fmt.Errorf("allocatable not found for device %q", result.Device)
 			}
 
-			partitionKey := ""
-			cdiDeviceID := ""
+			partitionKey, cdiDeviceID := "", ""
 			if vgpuSupportEnabled && allocatableDevice.Type() == VGpuDeviceType {
 				mainRequest := resolveMainRequestName(claim, result.Request)
 				if mainRequest == "" {
@@ -856,7 +889,10 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				partitionKey = resolveVGPUResultPartitionKey(mainRequest, vgpuPartitionInfo)
 				cdiDeviceID = buildCDIDeviceID(*result, idx, allocatableDevice)
 				if !vgpuClaimCommonEditsApplied {
-					preparedDeviceGroup.ConfigState.containerEdits = mergeContainerEdits(preparedDeviceGroup.ConfigState.containerEdits, s.vgpuManager.GetClaimCommonContainerEdits(claim))
+					preparedDeviceGroup.ConfigState.containerEdits = mergeContainerEdits(
+						preparedDeviceGroup.ConfigState.containerEdits,
+						s.vgpuManager.GetClaimCommonContainerEdits(claim),
+					)
 					vgpuClaimCommonEditsApplied = true
 				}
 			}
@@ -896,7 +932,11 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			switch allocatableDevice.Type() {
 			case VGpuDeviceType:
 				preparedDevice.containerEdits = s.vgpuManager.GetAllocationEnvContainerEdits(claim, result, allocatableDevice)
-				if !partitionMountEditsApplied[partitionKey] {
+				// In NRI mode the partition directory mounts + register wiring are
+				// applied per-container by the NRI plugin at CreateContainer, not
+				// baked into CDI here (design §12.3/§12.4). Prepare only carries
+				// the claim UID via the common CDI env for correlation.
+				if !nriSupportEnabled && !partitionMountEditsApplied[partitionKey] {
 					edits, err := s.vgpuManager.GetPartitionMountContainerEdits(claim, partitionKey)
 					if err != nil {
 						return nil, fmt.Errorf("error getting vgpu partition container edits: %w", err)

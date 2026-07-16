@@ -92,10 +92,15 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 				break
 			}
 			klog.V(4).InfoS("Try to recovery pod", "pod", klog.KObj(pod), "uid", pod.UID)
+			if err := r.recovery.AddPodToCheckpoint(pod); err != nil {
+				klog.ErrorS(err, "Adding pod to recovery checkpoint failed", "pod", klog.KObj(pod))
+				return reconcile.Result{}, err
+			}
 			// Attempt to delete pod
 			if err := r.client.Delete(ctx, pod, &client.DeleteOptions{
 				Preconditions: metav1.NewUIDPreconditions(string(pod.UID)),
 			}); err != nil {
+				_ = r.recovery.RemovePodCheckpoint(pod)
 				klog.ErrorS(err, "Failed to delete pod", "pod", klog.KObj(pod))
 				return reconcile.Result{}, err
 			}
