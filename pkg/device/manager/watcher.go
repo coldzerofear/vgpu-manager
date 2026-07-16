@@ -20,6 +20,11 @@ const (
 	WatcherDir   = util.ManagerRootPath + "/" + util.Watcher
 	SMUtilFile   = util.SMUtilFile
 	MaxBatchSize = 4
+	// minWatcherSleep floors the per-device sleep so an overrunning batch loop
+	// cannot busy-loop. Kept below the interval (80ms / batch.Count, and
+	// batch.Count <= MaxBatchSize=4 => interval >= 20ms) so the normal cadence
+	// is unaffected.
+	minWatcherSleep = 10 * time.Millisecond
 )
 
 func WrapChannelWithContext[T any](ch <-chan T) (context.Context, context.CancelFunc) {
@@ -121,12 +126,38 @@ func smWatcherBatchWithContext(
 	batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device,
 ) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
+	// Absolute-time cadence, mirroring the in-container watcher: sleep until a
+	// fixed monotonic grid instead of time.Sleep(interval) after each device, so
+	// the sampling period does not drift by each device's processing time. The
+	// first pass runs immediately (no sleep) so a freshly-(re)started watcher
+	// publishes util without a startup delay; the grid is anchored after it.
+	var next time.Time
+	firstCycle := true
 	for {
 		for i := batch.StartIndex; i <= batch.EndIndex; i++ {
 			select {
 			case <-ctx.Done():
 				return nil
 			default:
+			}
+
+			if !firstCycle {
+				next = next.Add(interval)
+				// Floor the sleep: if processing overran and the grid deadline is
+				// already at/behind now, still sleep a minimum so a persistently
+				// slow watcher does not busy-loop. next stays on the grid, so the
+				// drift-free cadence re-syncs once processing catches up.
+				d := time.Until(next)
+				if d < minWatcherSleep {
+					d = minWatcherSleep
+				}
+				t := time.NewTimer(d)
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return nil
+				case <-t.C:
+				}
 			}
 
 			gpuDevice := devices[i]
@@ -136,7 +167,10 @@ func smWatcherBatchWithContext(
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
-			time.Sleep(interval)
+		}
+		if firstCycle {
+			firstCycle = false
+			next = time.Now()
 		}
 	}
 }

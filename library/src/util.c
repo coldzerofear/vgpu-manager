@@ -76,6 +76,14 @@
  * mostly-idle workloads). */
 #define CUDA_SM_USAGE_THRESHOLD_ENV         "CUDA_SM_USAGE_THRESHOLD"
 
+/* delta() ramp-floor divisor N: the grow/cut step is floored at
+ * g_total*diff/(up_limit*N), so the bulk ramp to the limit takes ~N watcher
+ * cycles regardless of SM count. Smaller N = faster ramp (and, on tiny slices,
+ * coarser near-limit tracking); larger N = gentler. Default 64. Set to 0 (or any
+ * value <= 0) to DISABLE the floor entirely and revert to delta's raw
+ * sm^2-scaled step (the pre-floor behaviour). */
+#define CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV "CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR"
+
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
   double value = 0.0;
@@ -331,6 +339,26 @@ static int get_nonneg_int_env(const char *name, int dflt, int *out) {
   return 0;
 }
 
+/* Like the above but accepts ANY parseable int (including 0 and negatives);
+ * only an unset/empty value or non-numeric garbage falls back to the default.
+ * Used where a non-positive value is a meaningful sentinel (e.g. "disable"). */
+static int get_int_env(const char *name, int dflt, int *out) {
+  char *str = getenv(name);
+  if (!str || !*str) {            /* unset OR set-to-empty -> use default */
+    *out = dflt;
+    return -1;
+  }
+  char *endp = NULL;
+  long v = strtol(str, &endp, 10);
+  if (endp == str || v < INT_MIN || v > INT_MAX) {
+    LOGGER(WARNING, "%s=\"%s\" is not an int, using default %d", name, str, dflt);
+    *out = dflt;
+    return 0;
+  }
+  *out = (int)v;
+  return 0;
+}
+
 static int get_positive_int_env(const char *name, int dflt, int *out) {
   char *str = getenv(name);
   if (!str || !*str) {            /* unset OR set-to-empty -> use default */
@@ -397,6 +425,14 @@ int get_sm_auto_debounce_cycles(int *out) {
  * the GPU that should be ignored. Clamped >= 1 by get_positive_int_env. */
 int get_sm_auto_external_util_threshold(int *out) {
   return get_positive_int_env(CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD_ENV, 1, out);
+}
+
+/* delta() ramp-floor divisor. Accepts any int: a value <= 0 is the explicit
+ * "disable the ramp floor" sentinel (delta reverts to its raw sm^2-scaled step,
+ * i.e. the pre-floor behaviour); > 0 is the active divisor. Unset -> default 64.
+ * delta() guards the division on divisor > 0, so a non-positive value is safe. */
+int get_delta_ramp_floor_divisor(int *out) {
+  return get_int_env(CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV, 64, out);
 }
 
 /* AIMD deadband lower edge / 1000. Caller MUST additionally check

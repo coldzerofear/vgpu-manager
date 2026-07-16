@@ -69,6 +69,7 @@ extern int get_sm_auto_external_util_threshold(int *out);
 extern int get_aimd_deadband_ratio(int *out);
 extern int get_aimd_md_cooldown_cycles(int *out);
 extern int get_usage_threshold(int *out);
+extern int get_delta_ramp_floor_divisor(int *out);
 
 /* fork() child handler implemented in loader.c -- re-inits the four
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
@@ -521,6 +522,11 @@ const int cuda_hook_nums =
  * the overflow path. */
 #define DELTA_ERROR_RECOVERY_STEP   10
 
+/* delta()'s ramp-floor divisor is env-tunable via g_dynamic_config
+ * .delta_ramp_floor_divisor (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR, default 64);
+ * see the block comment at the use site in delta() and the loader in
+ * sm_controller_init(). */
+
 /* Defaults match the prior file-static initialisers; each field is
  * re-loaded from its env in sm_controller_init() under pthread_once.
  * The initialiser exists so a read before init still produces sane
@@ -537,6 +543,7 @@ dynamic_config_t g_dynamic_config = {
   .aimd_md_cooldown_cycles      = 3,
   .auto_debounce_cycles         = 10,
   .auto_external_util_threshold = 1,
+  .delta_ramp_floor_divisor     = 64,
 };
 
 static void change_token(int64_t delta, int host_index) {
@@ -609,6 +616,36 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
     increment = DELTA_ERROR_RECOVERY_STEP;
   }
 
+  /* Ramp-speed floor, applied SYMMETRICALLY (before the grow/cut split) and
+   * scaled by the distance from the setpoint. `increment` is sm^2-scaled while
+   * the share must travel ~g_total (∝ sm) to track the limit, so the raw step
+   * ∝ 1/sm -- on small-SM GPUs / MIG slices the ramp and the cut-back on an
+   * overshoot both crawl for minutes.
+   *
+   * The floor is g_total * diff / (up_limit * DIVISOR): at cold start (diff ==
+   * up_limit) it is g_total/DIVISOR so the bulk ramp completes in ~DIVISOR
+   * cycles regardless of SM count, and it shrinks to ~0 as util approaches the
+   * limit so the fine control near the setpoint reverts to delta's proportional
+   * step -- keeping the tight limit tracking that large GPUs already had (a flat
+   * floor would coarsen it to +/- g_total/DIVISOR everywhere). Symmetric so it
+   * cannot ratchet: flooring only grow made grow >> cut and pushed util far past
+   * the limit (observed: hard_core=8 pinned at 15, hard_core=50 at 65-89). Uses
+   * the MIN_INCREMENT-floored utilization_diff, which conveniently keeps a small
+   * residual floor near the setpoint on tiny slices (where even the near-limit
+   * raw step is too small) while staying below the raw step on large GPUs.
+   *
+   * divisor <= 0 is the "disable" sentinel (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR set
+   * to 0 or less): skip the floor -- and its division -- so delta uses its raw
+   * sm^2-scaled step, exactly the pre-floor behaviour. */
+  int ramp_divisor = g_dynamic_config.delta_ramp_floor_divisor;
+  if (ramp_divisor > 0) {
+    int64_t floor_up_limit = up_limit > 0 ? up_limit : 1; /* guard integer div-by-zero */
+    int64_t ramp_floor = g_total_cuda_cores[host_index] * (int64_t)utilization_diff
+                         / (floor_up_limit * ramp_divisor);
+    if (increment < ramp_floor) {
+      increment = ramp_floor;
+    }
+  }
   if (user_current <= up_limit) {
     share = (share + increment) > g_total_cuda_cores[host_index] ?
             g_total_cuda_cores[host_index] : (share + increment);
@@ -1010,6 +1047,12 @@ static void sm_controller_init(void) {
   (void)get_sm_auto_debounce_cycles(&g_dynamic_config.auto_debounce_cycles);
   if (g_dynamic_config.auto_debounce_cycles < 1) g_dynamic_config.auto_debounce_cycles = 1;
 
+  /* delta ramp-floor divisor. Loaded unconditionally: delta runs as the default
+   * controller and as an AUTO dispatch target. NO clamp here on purpose: a value
+   * <= 0 is the user's explicit "disable the floor" sentinel, which delta()
+   * honours by skipping the floor (and its division) entirely. */
+  (void)get_delta_ramp_floor_divisor(&g_dynamic_config.delta_ramp_floor_divisor);
+
   /* AIMD tunables. Loaded unconditionally because AUTO can dispatch to
    * aimd_controller when the device becomes shared, even if the user
    * picked CUDA_SM_CONTROLLER=auto without setting AIMD env vars. */
@@ -1108,9 +1151,43 @@ static void *utilization_watcher(void *arg) {
     .tv_sec = 0,
     .tv_nsec = 100 / dev_count * MILLISEC,
   };
+  /* Minimum sleep when the abstime deadline has already passed (overrun), to
+   * stop a busy loop. Kept below `wait` (dev_count <= MaxBatchSize=4 => wait >=
+   * 25ms) so it never throttles the normal cadence; matches TIME_TICK. */
+  const int64_t MIN_WATCHER_SLEEP_NS = 10 * (int64_t)MILLISEC;
+  /* Absolute-time cadence: clock_nanosleep(TIMER_ABSTIME) against a monotonic
+   * grid keeps the sampling period drift-free -- a relative nanosleep(&wait)
+   * silently adds each cycle's processing time to the period. first_cycle runs
+   * the whole batch immediately (no sleep) so a freshly-started watcher
+   * publishes its first sample without a startup delay; the grid is anchored to
+   * "now" right after that first pass. */
+  struct timespec next_wakeup;
+  int first_cycle = 1;
   while (1) {
     for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
-      nanosleep(&wait, NULL);
+      if (likely(!first_cycle)) {
+        struct timespec now_ts;
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        int64_t remaining_ns = (int64_t)(next_wakeup.tv_sec - now_ts.tv_sec) * 1000000000LL
+                             + (next_wakeup.tv_nsec - now_ts.tv_nsec);
+        if (unlikely(remaining_ns < MIN_WATCHER_SLEEP_NS)) {
+          /* At/behind the deadline: sleep a fixed minimum instead of letting
+           * clock_nanosleep(TIMER_ABSTIME) return immediately on a past deadline
+           * -- a persistently overrunning watcher would otherwise busy-loop and
+           * burn CPU. next_wakeup stays on the grid, so once processing catches
+           * up remaining_ns goes positive again and the drift-free cadence
+           * re-syncs on its own (no one-shot catch-up burst). */
+          struct timespec floor_ts = { .tv_sec = 0, .tv_nsec = MIN_WATCHER_SLEEP_NS };
+          nanosleep(&floor_ts, NULL);
+        } else {
+          clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_wakeup, NULL);
+        }
+        next_wakeup.tv_nsec += wait.tv_nsec;
+        if (next_wakeup.tv_nsec >= 1000000000L) {
+          next_wakeup.tv_sec += next_wakeup.tv_nsec / 1000000000L;
+          next_wakeup.tv_nsec %= 1000000000L;
+        }
+      }
       host_index = host_indexes[cuda_index];
 
       // Skip GPU without core limit enabled
@@ -1148,9 +1225,19 @@ static void *utilization_watcher(void *arg) {
          * starvation, not idleness, and clamping would pin it near zero forever
          * (fatal on small-SM GPUs where the sm^2-scaled clamp is a fraction of a
          * percent -- observed util stuck <1%). In that case fall through to the
-         * accumulating path so the bucket ramps up to serve the demand. */
+         * accumulating path so the bucket ramps up to serve the demand.
+         *
+         * Threshold floored at 1: up_limit/10 truncates to 0 for hard_core < 10,
+         * which would disable the bypass entirely -- and then the idle-phase
+         * accumulate path (util 0 <= hard_core, so delta keeps growing) fills the
+         * bucket to g_total before any demand arrives, so the first kernels burst
+         * far past the limit (observed: hard_core=8, util jumps to ~15 from a
+         * pre-filled bucket). Keeping the clamp alive for small limits stops the
+         * idle pre-fill. */
+        int low_util_thr = up_limits[host_index] / 10;
+        if (low_util_thr < 1) low_util_thr = 1;
         if (host_index_is_exclusive_raw(host_index)
-            && top_results[host_index].user_current < up_limits[host_index] / 10
+            && top_results[host_index].user_current < low_util_thr
             && !throttled) {
           g_dev_hot[host_index].cur_cuda_cores =
               g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
@@ -1251,6 +1338,17 @@ static void *utilization_watcher(void *arg) {
         g_share_log_tick[host_index] = 1;
         LOGGER(DETAIL, "cuda device: %d, host device: %d, user util: %d, up_limit: %d, share: %ld, curr core: %ld (1/%d sampled)", cuda_index, host_index,
                top_results[host_index].user_current, up_limits[host_index], shares[host_index], g_dev_hot[host_index].cur_cuda_cores, WATCHER_UTIL_LOG_STRIDE);
+      }
+    }
+    if (unlikely(first_cycle)) {
+      /* First pass ran with no sleeps; anchor the steady-state grid to now so
+       * the next pass sleeps a whole interval rather than racing to catch up. */
+      first_cycle = 0;
+      clock_gettime(CLOCK_MONOTONIC, &next_wakeup);
+      next_wakeup.tv_nsec += wait.tv_nsec;
+      if (next_wakeup.tv_nsec >= 1000000000L) {
+        next_wakeup.tv_sec += next_wakeup.tv_nsec / 1000000000L;
+        next_wakeup.tv_nsec %= 1000000000L;
       }
     }
   }
