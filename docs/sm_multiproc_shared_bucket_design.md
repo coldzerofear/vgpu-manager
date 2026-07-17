@@ -278,6 +278,14 @@ static int ofd_fcntl(int fd, int wait, struct flock *fl) {
 
 > 对照仓库：`lock.c` 里 `ofd_fcntl(fd, 1, ...)`（阻塞）已用于 [vmem/sm-util 的记录锁](../library/src/lock.c#L245)（读者/写者应等待而非放弃），`ofd_fcntl(fd, 0, ...)`（非阻塞）用于 `lock_gpu_device` 的自旋。本设计的初始化锁归入前者，**与既有惯例一致**。
 
+#### 4.4.2b 锁打在 config 文件本身，不新建锁文件、不锁目录
+
+初始化锁的载体是 **`sm_node.config` 这个文件自身**——同一个 fd 既建区、又加锁、又 `mmap`。**不引入任何独立的 `.lock` 文件**（零额外 inode、零清理负担），与 `vmem_node.config` 的既有做法一致（记录锁打在共享文件内，无独立锁文件）。
+
+**为什么不能拿父目录 `/tmp/.sm_node` 当锁**：仓库用的是 `fcntl` 记录锁（`ofd_fcntl`），而 `F_WRLCK`（排他）**要求 fd 可写打开**，目录无法以写方式打开（`open(dir, O_RDWR)` → `EISDIR`），只能 `O_RDONLY` + `F_RDLCK`（共享读锁，给不了互斥）。`flock(2)` 虽能锁 `O_RDONLY` 的目录 fd，但那是**新原语**（违背 §4.4.2 / §4.11 的"复用 `ofd_fcntl`、不引入新依赖"），且 flock 与 fcntl 混用是经典坑，换不来任何好处。
+
+**锁整个文件**（`l_start=0, l_len=0`）即可：`sm_node` 运行期是纯 CAS、**没有按设备的记录锁**（它没有 Go 读者，不像 vmem 需要一致快照），所以初始化时锁全文件不会与任何其它锁范围冲突。
+
 #### 4.4.3 建区/重建流程
 
 ```c
