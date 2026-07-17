@@ -1,0 +1,318 @@
+# 容器内多进程算力隔离：共享令牌桶设计
+
+> 作用范围：`library/`（LD_PRELOAD 运行时库）。
+> 目标：修复"同容器多进程各自持有私有令牌桶、瞬时叠加突破算力限额"的问题，做到**聚合限额严格**且**不引入锁 / 不串行化 kernel 发射**。
+> 状态：设计稿（未实现；默认关闭，环境变量灰度开启）。
+> 关联：[GAP 路径节流](./sm_core_limit_gap_throttle_design.md)、[AIMD 控制器](./sm_controller_aimd.md)。
+
+---
+
+## 1. 背景与问题
+
+### 1.1 现状：令牌桶是进程私有的
+
+运行时库通过 LD_PRELOAD 劫持 `cuLaunchKernel` 系列入口，对每次 kernel 下发做令牌桶节流：
+
+```c
+rate_limiter(grids, blocks, host_index);   // 扣令牌，桶为负则 nanosleep
+ret = REAL_LAUNCH(...);
+```
+
+令牌桶与配套热态放在 [`g_dev_hot[]`](../library/src/cuda_hook.c#L114)：
+
+```c
+typedef struct {
+  volatile int64_t cur_cuda_cores;  /* 令牌桶，每次发射 CAS 扣减 */
+  volatile int64_t last_launch_ns;  /* gap 检测，每次发射打戳     */
+} __attribute__((aligned(CACHELINE_SIZE))) dev_hot_t;
+
+static dev_hot_t g_dev_hot[MAX_DEVICE_COUNT];   // ← static：每个进程一份
+```
+
+`rate_limiter` 用 CAS 扣减（[cuda_hook.c#L588](../library/src/cuda_hook.c#L588)），watcher 每 ~80ms/设备用 NVML 采样、经 `delta()`/`aimd()` 反馈后用 `change_token()` 补充。控制器积分态同样是进程私有的 static：[`shares[]`](../library/src/cuda_hook.c#L1100)、[`up_limits[]`](../library/src/cuda_hook.c#L1122)、`is[]`、`avg_sys_frees[]`。
+
+### 1.2 核心问题：N 个私有桶瞬时叠加突破限额
+
+容器里启动 N 个计算进程时，每个进程有**自己的** `g_dev_hot[]`。同一时刻 N 个 `rate_limiter` 各自看自己的桶，都可能判定"令牌够，放行"，于是 N 份令牌被同时消费、N 批 kernel 被同时发射 —— GPU 上实际叠加，**瞬时利用率可达单进程限额的 ~N 倍**。
+
+需要澄清一个**容易被夸大的点**：watcher 采样的 `user_current` 是**容器聚合利用率**（把容器内所有 PID 的 util 累加，见 `get_used_gpu_utilization` 里的 `check_device_pid_in_ordered_container_pids` 聚合逻辑）。这意味着 N 个控制器**观测的是同一个共享反馈信号**：聚合 util 一旦超限，每个进程的 `delta` 都会砍自己的 share，总吞吐随之下降。所以：
+
+- **稳态均值仍收敛到限额**（不是"完全失效"）；
+- 真正的损害是 **N 个相同控制器盯同一信号、同步涨同步砍 → 等效增益放大 ~N 倍**，叠加"N 个桶可被同时抽干"，表现为**瞬时突发放大 ~N 倍、限额附近振荡幅度 ~N 倍**。
+
+准确结论：**多进程下限流"变松、变抖"，而非失效。** 这决定了本设计是"按需的严格化"，不是"救火"。
+
+### 1.3 触发条件（决定要不要做）
+
+- **单进程容器（ollama / llama-server / 单个训练进程）**：问题**不存在**，本设计**收益为零**。
+- **多进程容器**（多路并发推理、DataLoader 多 worker 真正各开 CUDA context、多进程训练）：问题存在，程度取决于 N 与突发性。
+
+**实施前必须先做 §7 的量化验证**，确认聚合超限是系统性的，才动手。
+
+---
+
+## 2. 设计目标与非目标
+
+### 2.1 目标
+
+1. **聚合限额严格**：让"容器还能发多少 kernel"成为一个**物理不变量**（一个共享计数器），而非 N 个私有桶的统计平均。
+2. **低开销**：热路径（每次发射）维持"一条 CAS"的量级，**不引入锁、不串行化发射**。
+3. **鲁棒**：任一进程崩溃不得卡住其它进程；无临界区可持有。
+4. **fork 安全**：不新增会"父持锁 fork → 子死锁"的隐患。
+5. **可灰度**：环境变量开关，默认关闭（保持现有进程私有桶行为）。
+
+### 2.2 非目标
+
+- **不做每进程独立限额**（HAMi 商业版 Event 模式那种"A、B 各限 50%、合计 100%"语义）。我们是**容器聚合**语义，见 §3.3 的对比。
+- **不引入 Event/占空比模式**（cuEvent 计时 + duty-cycle）。那是另一条正交路线，需要同步、伤异步流水线，单独评估。
+- 本设计**不改变控制算法**（delta/aimd 不动），只改"桶与积分态的存储位置 + 谁来补充"。
+
+---
+
+## 3. 方案：共享令牌桶 + CAS 消费 + 每周期选举补充
+
+### 3.1 一句话
+
+把 `g_dev_hot[]`（桶）与控制器积分态搬进**容器内 `MAP_SHARED` 共享内存**，消费端 CAS 扣减**保持不变**，补充端用**每周期 CAS 抢权**保证"每周期恰好一个进程补充"。
+
+### 3.2 为什么这是对的手段
+
+- **CAS 是 CPU 指令、与地址空间无关**：桶从 `static` 变成 `MAP_SHARED`，[rate_limiter 的 CAS](../library/src/cuda_hook.c#L588) **一个字都不用改**就变成跨进程原子扣减。这是本方案最省力、也最关键的支点。
+- **"聚合限额"变成物理不变量**：N 个进程抢同一个 `cur_cuda_cores`，桶里有多少令牌就是全容器还能发多少 kernel。不需要瓜分限额、不需要回收空闲配额 —— 桶本身就是聚合。
+- **无锁、不串行化**：消费仍是无阻塞 CAS；只有"桶为负"时各进程各自 `nanosleep`（现有逻辑），不是互相排队。
+
+### 3.3 与 HAMi 商业版两种做法的对比
+
+| 维度 | HAMi 锁串行化 | HAMi Event + `sleeping` 协调 | **本方案（共享桶 + CAS）** |
+|---|---|---|---|
+| 限额语义 | 聚合 | **每进程**（合计 = N×限额） | 聚合 |
+| 每次发射开销 | 锁/解锁，争用陷内核 ~μs | 无（但要 cuEvent 同步） | **1 条 CAS（≈现状）** |
+| 并行性 | **串行化，吞吐塌** | 并行 | 全并行 |
+| 崩溃语义 | 持锁猝死 → **全容器死锁** | 标记残留 → 可自愈 | 无临界区 → **自愈** |
+| 抗空转（配额回收） | 无 | 靠 `sleeping` 广播主动回收 | **共享桶天然回收**（A 不取、B 自然取走） |
+
+关于 HAMi 的 `sleeping` 字段：它**不是锁、不串行化发射**，而是**抗空转**——每进程独立限额下，A 睡时 GPU 会空，于是广播"我睡了、你们上"让 B 错峰填充。**在聚合语义 + 共享桶下，这个协调是白送的**：A 不消费令牌，B 自然就消费走了，无需 `sleeping` 字段、无需扫描兄弟。故本方案**不移植** `sleeping`。
+
+---
+
+## 4. 详细设计
+
+### 4.1 共享内存布局
+
+复用仓库已有的跨进程共享范式（[`mmap_file_to_vmem_node`](../library/src/loader.c#L1372)：`open(O_CREAT)` + `ftruncate` + 首建者 `memset` + `mmap(MAP_SHARED)`），新增一个 SM 令牌桶共享区：
+
+```c
+/* 文件放在 /tmp 下 → k8s 里每容器独立 /tmp → 天然"容器内共享、跨容器隔离"。 */
+#define SM_BUCKET_DIR       "/.sm_bucket"
+#define SM_BUCKET_FILE_PATH (TMP_DIR SM_BUCKET_DIR "/sm_bucket.config")
+
+typedef struct {
+  /* 每设备一格，缓存行对齐防伪共享（沿用 dev_hot_t 的 128B 对齐约定）。 */
+  volatile int64_t cur_cuda_cores;    /* 令牌桶：消费者 CAS 扣，补充者累加       */
+  volatile int64_t total_cuda_cores;  /* g_total（= thread*sm*FACTOR），首建者写   */
+  volatile int64_t last_refill_ns;    /* 补充选举戳：CAS 抢每周期补充权            */
+  /* 控制器积分态（只有当周期补充选举赢家读写 → 天然被选举串行化）：              */
+  volatile int64_t share;             /* 对应现 shares[]                          */
+  volatile int32_t up_limit;          /* 对应现 up_limits[]（soft 弹性）           */
+  volatile int32_t is_cnt;            /* 对应现 is[]                             */
+  volatile int32_t avg_sys_free;      /* 对应现 avg_sys_frees[]                   */
+  volatile uint32_t generation;       /* 容器实例代号，见 §4.5 陈旧重置           */
+  volatile int32_t initialized;       /* 首建者初始化完成标志（见 §4.4 建区竞争） */
+  /* padding 到 CACHELINE_SIZE 的整数倍 */
+} __attribute__((aligned(CACHELINE_SIZE))) sm_bucket_dev_t;
+
+typedef struct {
+  sm_bucket_dev_t devices[MAX_DEVICE_COUNT];
+} sm_bucket_region_t;
+```
+
+> **注意**：`cur_cuda_cores`、`last_launch_ns`（gap 检测，见 §4.6）、控制器积分态放在同一格里；`last_launch_ns` 是否共享见 §4.6。`total_cuda_cores` 各进程算出的值相同（由设备属性决定），放共享区只是为了"首建者算一次、其余读"，也避免各进程重复 NVML 查询。
+
+### 4.2 消费端（rate_limiter）：几乎零改动
+
+现有 [rate_limiter](../library/src/cuda_hook.c#L565) 的 CAS 循环逻辑**不变**，只把操作对象从 `g_dev_hot[host_index].cur_cuda_cores` 换成共享区 `g_sm_bucket->devices[host_index].cur_cuda_cores`（开启共享模式时）：
+
+```c
+before = g_sm_bucket->devices[host_index].cur_cuda_cores;  // 跨进程原子读
+if (before < 0) { metrics_record_rate_limit_hit; nanosleep(&g_cycle); goto CHECK; }
+after = before - kernel_size;
+while (!CAS(&g_sm_bucket->devices[host_index].cur_cuda_cores, before, after));
+```
+
+- N 个进程并发 CAS 扣同一计数器 → **物理串行的原子扣减**，不会超发。
+- 桶为负 → 各进程各自 `nanosleep` 重试（现有逻辑），**不是互相排队**。
+
+### 4.3 补充端（watcher）：每周期 CAS 抢补充权（核心正确性）
+
+**问题**：N 个进程各有一个 watcher，若都补充 → **N 倍过量供给 → 限额松 N 倍**，比现状更糟。
+
+**解法**：不选 leader（要处理选举、失效检测、故障转移），而是**每周期靠 CAS 抢权**——谁抢到谁补充：
+
+```c
+/* watcher 每周期，对每个 host_index： */
+int64_t now  = monotonic_ns();
+int64_t last = region->last_refill_ns;
+if (now - last >= REFILL_PERIOD_NS &&
+    CAS(&region->last_refill_ns, last, now)) {
+    /* 本周期补充权归我：读积分态 → 跑 delta/aimd → 累加 change_token */
+    region->share = g_sm_controller(up_limit, user_current, region->share, host_index);
+    change_token_shared(region, region->share);   // 累加到 cur_cuda_cores，见 §4.7
+    /* up_limit/is_cnt/avg_sys_free 的 soft 弹性更新也在此块内 */
+} else {
+    /* 没抢到 → 本周期不补充，只做本进程自己的采样/日志 */
+}
+```
+
+- **无 leader、无失效检测、自愈**：谁先到谁补；补充者本周期后崩溃，下周期 `now - last` 再次超阈值，别的进程自然抢到。
+- **积分态只有赢家读写** → 天然被选举串行化，无需额外锁；仅需 acquire/release 内存序（`__atomic_load_n`/`__atomic_store_n` with `__ATOMIC_ACQUIRE`/`RELEASE`）。
+- `REFILL_PERIOD_NS` ≈ 现有 watcher 单设备周期（~80–100ms）。多个 watcher 采样节奏可能错开，抢权只保证"每 period 至多补一次"，采样值用赢家自己的（聚合 util 与采样进程无关，见 §4.9）。
+
+### 4.4 建区竞争（谁建文件、谁初始化）
+
+沿用 vmem 区的处理，但要防"文件已建、内容未初始化"的窗口：
+
+1. `open(O_CREAT)`：多进程并发，内核保证至多一个真正创建。
+2. 首建者 `ftruncate(sizeof(region))`（`ftruncate` 出的空洞读作 0）。
+3. `mmap(MAP_SHARED)`。
+4. **初始化用 CAS 选举 + `initialized` 标志**：
+   ```c
+   if (CAS(&region->devices[i].initialized, 0, 1) 抢到初始化权) {
+       region->devices[i].total_cuda_cores = thread*sm*FACTOR;
+       region->devices[i].share = 0;
+       region->devices[i].up_limit = hard_core;
+       ...
+       region->devices[i].generation = <本容器实例代号>;
+       __atomic_store_n(&region->devices[i].initialized, 2, __ATOMIC_RELEASE); // 2=完成
+   } else {
+       while (__atomic_load_n(&region->devices[i].initialized, __ATOMIC_ACQUIRE) != 2)
+           sched_yield();   // 等首建者初始化完成
+   }
+   ```
+   > 用三态 `initialized`（0 未建 / 1 建设中 / 2 完成）避免"抢到 CAS 但内容还没写完就被别人读"的窗口。
+
+### 4.5 陈旧状态重置（跨容器重启）
+
+`/tmp` 下的共享文件在容器重启后可能残留（我们在 vmem 记账上踩过这个坑）。令牌桶只是计数器、无锁可清，但**上一世的 share/total 不能被继承**：
+
+- 用 `generation`（容器实例代号，如 pod UID 的哈希、或启动时间戳）标识"本世"。
+- 每个进程 attach 后比对 `region->devices[i].generation`；不一致 → 说明是上一世残留 → **重新走 §4.4 初始化**（CAS 抢重置权，写入本世 generation）。
+- 或更简单：库初始化时若判定自己是"容器内第一个进程"（可借助现有 `mmap_file_to_vmem_node` 已有的实例判定），则无条件重置该区。
+
+> **待定**：generation 的来源（pod UID env？首个进程的启动 ns？）需要与现有 vmem 区的实例判定对齐，避免两套机制。
+
+### 4.6 gap 检测的 `last_launch_ns`：**保持进程私有**
+
+[GAP 路径](./sm_core_limit_gap_throttle_design.md) 的 `last_launch_ns`（[cuda_hook.c#L110](../library/src/cuda_hook.c#L110)）语义是"**本进程**上次发射到现在的空闲间隔"，用于判断"本进程是否刚从 >200ms 空闲醒来"。这是**进程本地**的时序，**不应共享**：
+
+- 若共享 → A 频繁发射会一直刷新 `last_launch_ns` → B 即使真的空闲很久也检测不到自己的 gap，GAP 路径失效。
+- 故 `last_launch_ns` 留在**进程私有的 `g_dev_hot[]`**，只把 `cur_cuda_cores` 及控制器态迁到共享区。
+
+> 结论：`g_dev_hot[]` 拆成"共享的桶+积分态"和"私有的 gap 时序"两部分。
+
+### 4.7 bypass 的 SET → 必须改（最易踩的坑）
+
+现有防抖 bypass 是**直接赋值**（[cuda_hook.c#L1242](../library/src/cuda_hook.c#L1242)）：
+
+```c
+g_dev_hot[host_index].cur_cuda_cores = g_sm_controller(...);   // SET，非累加
+```
+
+共享桶下，一个进程的 SET 会**抹掉**并发消费者刚 CAS 扣掉的令牌 → 令牌凭空多出来 → 超发。**必须改**：
+
+1. bypass 只在**补充选举赢家**里执行（和 §4.3 补充同属"赢家专属"块）；
+2. 且改成**累加语义**（`change_token` 加）而非 SET，或用 CAS 把"目标值"安全地写入而不覆盖并发扣减。
+   - 推荐：把 bypass 的"钳制到单步"语义重写为"补充到目标水位"的**增量**（`delta_tokens = target - current`，再 `change_token(delta_tokens)`），使其与消费者的 CAS 扣减可交换、不丢账。
+
+> 这是共享化改造里语义最微妙的一处，需单独单测（并发扣减 + bypass 补充不丢令牌）。
+
+### 4.8 change_token 的累加也要跨进程原子
+
+现有 [`change_token`](../library/src/cuda_hook.c#L562) 已经是 CAS 循环（`before + delta`，钳制 `[0, total]`）。迁到共享区后 CAS 目标换成共享计数器即可，**逻辑不变**。补充者（选举赢家）用它累加，消费者用 rate_limiter 扣减，两者都是对同一 `cur_cuda_cores` 的 CAS → 天然并发安全。
+
+### 4.9 反馈信号：无需改
+
+`user_current` 已是**容器聚合** util（跨进程无关的量）。补充选举赢家用**它自己的**那次 NVML 采样即可，值与"哪个进程采的"无关。所以反馈侧零改动。
+
+---
+
+## 5. 开关与灰度
+
+```c
+CUDA_SM_SHARED_BUCKET = 0(默认，进程私有桶，现有行为) | 1(容器内共享桶)
+```
+
+- 默认 0：`g_dev_hot[]` 仍 static，行为与今日完全一致，风险为零。
+- 开启 1：走共享区。集成进 `g_dynamic_config`（沿用 `CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR` 等的 env→struct 加载模式，见现有 `sm_controller_init`），fork 边界自动继承（见 §6）。
+
+---
+
+## 6. 正确性与 fork 边界
+
+### 6.1 fork 语义（白送的好处）
+
+- `MAP_SHARED` 映射**跨 fork 保留** → 子进程自动 attach 同一个桶，无需额外处理，天然参与聚合限流。
+- 现有 [`child_after_fork`](../library/src/cuda_hook.c#L238) 重置 `g_dev_hot[].last_launch_ns=0`：迁移后 `last_launch_ns` 仍在私有 `g_dev_hot[]`，此重置**保持不变**（正确：子进程的 gap 时序应重新计）。
+- 共享区里的 `cur_cuda_cores`/`share` **不应**在 child_after_fork 重置（那是全容器共享状态，子进程只是新加入的消费者/候选补充者）。
+
+### 6.2 不新增锁 → 不新增 fork 死锁面
+
+本方案**刻意不引入任何 mutex**（全用 CAS + 选举），因此**无需**动 [`loader_child_after_fork`](../library/src/loader.c#L2264) 的 mutex 重init 列表，规避了"父持锁 fork → 子死锁"这一整类隐患。这是相对 HAMi 锁方案的结构性优势。
+
+### 6.3 崩溃语义
+
+- 消费者崩溃：无临界区、无持有物，桶计数器不受影响。
+- 补充选举赢家崩溃：本周期没补上 → 下周期 `now-last` 超阈值 → 别人接手。最坏损失一个周期的补充（~80ms 少补一次），自愈。
+- 无 robust-futex/一致性恢复负担（因为根本没有锁）。
+
+### 6.4 内存序
+
+- 桶计数器：CAS（`__sync_bool_compare_and_swap` 或 `__atomic_compare_exchange`）自带全序，够用。
+- 积分态（share/up_limit/...）：只有选举赢家读写，跨周期可能换进程 → 用 `__ATOMIC_ACQUIRE`（读）/`__ATOMIC_RELEASE`（写）配对，保证赢家看到上个赢家写的最新积分态。
+
+---
+
+## 7. 实施前必须做的量化验证（阶段 0）
+
+**没有这一步不写实现代码。** 目的：证明问题对目标负载真实且系统性。
+
+1. 起一个 **N 进程并发计算**的容器（如 N=4 个并发推理/训练进程），设 `hard_core`。
+2. `LOGGER_LEVEL=5` + `nvidia-smi pmon`，记录：
+   - **聚合 util**（容器内所有 PID 之和）相对 `hard_core` 的**超出幅度**与**振荡幅度**；
+   - 对比单进程同负载的曲线。
+3. 判据：
+   - 若"均值贴 `hard_core`、仅瞬时冲高" → 现状够用，**不做**本设计；
+   - 若"稳态系统性超出 ~N 倍" → 值得做。
+
+> **我（设计者）无 GPU，无法执行本步，需要你在真机采集。**
+
+---
+
+## 8. 分阶段实施计划
+
+| 阶段 | 内容 | 前置 |
+|---|---|---|
+| **0** | §7 量化验证，确认多进程系统性超限 | —— |
+| **1** | 共享区建立/初始化/陈旧重置（§4.1/4.4/4.5）；消费端切共享桶（§4.2）；补充选举（§4.3）；bypass 累加改造（§4.7）；env 开关（§5） | 阶段 0 通过 |
+| **2** | 压争用：进程/线程本地**批量取令牌**（一次 CAS 取一批、本地花完再取），把 CAS 频率降 ~N 倍。**仅当 profiling 证明跨进程 cacheline 弹跳是真开销时做** | 阶段 1 稳定 |
+
+> 阶段 2 的方向，代码注释早已点名——[dev_hot_t 上方注释](../library/src/cuda_hook.c#L86)："**Fixing that needs thread-local token batching, tracked separately.**" 本设计与之一致。
+
+---
+
+## 9. 风险与待办清单
+
+- **[高] 并发正确性无法静态穷尽**：CAS 选举、bypass 累加、建区/重置竞态，必须**真机多进程压测**（并发扣减 + 补充不丢账、N 进程聚合不超限、补充者崩溃自愈）。
+- **[高] bypass 语义改写**（§4.7）：SET→增量累加，是最易引入超发/欠发的一处，需专门单测。
+- **[中] 陈旧重置 generation 来源**（§4.5）：需与现有 vmem 实例判定对齐，避免两套机制。
+- **[中] 补充周期与多 watcher 采样错峰**：`REFILL_PERIOD_NS` 选取需真机调，避免"抢权成功但采样过旧"。
+- **[低] `/tmp` 权限/inode**：与 vmem 区同源问题，复用其处理。
+- **[前提] 收益依赖真多进程**：单进程容器零收益，阶段 0 未通过则不实施。
+
+---
+
+## 10. 决策摘要
+
+- **手段**：容器内 `MAP_SHARED` 共享令牌桶 + 消费端原有 CAS（不改）+ 补充端每周期 CAS 抢权。
+- **不做**：锁串行化（钝、贵、死锁）、`sleeping` 协调（每进程语义、共享桶已天然覆盖）、Event 占空比（伤流水线，正交路线）。
+- **同时满足**"严格"（物理共享桶）与"低开销"（一条 CAS、不串行化），且崩溃自愈、fork 安全。
+- **先量化再实施**；单进程场景不做。
