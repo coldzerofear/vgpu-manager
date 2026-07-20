@@ -306,6 +306,10 @@ typedef struct {
 typedef struct {
   CUdeviceptr dptr;
   size_t bytes;
+  // 1: Synchronize UVA memory records
+  // 2: Asynchronous UVA memory recording
+  // 3: Asynchronous memory recording
+  int type;
   struct list_head node;
 } memory_node_t;
 
@@ -440,15 +444,11 @@ void get_used_gpu_memory_by_device(void *, nvmlDevice_t);
  */
 void get_used_gpu_virt_memory(void *, int device_id);
 
-void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int device_id);
+void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device_id);
 
 void free_gpu_virt_memory(CUdeviceptr dptr, int device_id);
 
-/**
- * Reports whether dptr was allocated through the oversold UVA fallback
- * (cuMemAllocManaged) and therefore must be released with cuMemFree.
- */
-int is_gpu_virt_memory(CUdeviceptr dptr);
+int get_gpu_virt_memory_type(CUdeviceptr dptr);
 
 int get_nvml_device_index_by_cuda_device(CUdevice device);
 

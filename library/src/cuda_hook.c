@@ -2497,16 +2497,16 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
+  int host_index = -1;
   memory_path_t path;
   /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
   if (unlikely(dptr == NULL)) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
+    goto CALL;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = -1;
   path = prepare_memory_allocation(device, bytesize, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
@@ -2516,9 +2516,12 @@ CUresult cuMemAllocManaged(CUdeviceptr *dptr, size_t bytesize, unsigned int flag
   if (path == MEMORY_PATH_UVA) {
     flags = CU_MEM_ATTACH_GLOBAL;
   }
+CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
   if (likely(ret == CUDA_SUCCESS)) {
-    if (flags == CU_MEM_ATTACH_GLOBAL) malloc_gpu_virt_memory(*dptr, bytesize, host_index);
+    if (flags == CU_MEM_ATTACH_GLOBAL) {
+      malloc_gpu_virt_memory(*dptr, bytesize, 1, host_index);
+    }
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2531,6 +2534,8 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
+  int host_index = -1;
+  size_t request_size = bytesize;
   memory_path_t path;
   /* NULL-arg fast path: defensive early return matching HAMi PR #182
    * commit 88143ab4. Existing logic is already structurally safe
@@ -2539,19 +2544,12 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
    * forwarding immediately avoids the budget check + lock acquisition
    * for what is always a probe / fallback / invalid call. */
   if (unlikely(dptr == NULL)) {
-    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc_v2))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
-    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc, dptr, bytesize);
-    }
-    return CUDA_ERROR_NOT_FOUND;
+    goto ALLOCATED_TO_GPU;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  size_t request_size = bytesize;
-  int host_index = -1;
   path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
@@ -2561,7 +2559,7 @@ CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   if (path == MEMORY_PATH_UVA) {
     goto ALLOCATED_TO_UVA;
   }
-
+ALLOCATED_TO_GPU:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAlloc_v2, dptr, bytesize);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAlloc))) {
@@ -2586,7 +2584,7 @@ ALLOCATED_TO_UVA:
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
-    malloc_gpu_virt_memory(*dptr, bytesize, host_index);
+    malloc_gpu_virt_memory(*dptr, bytesize, 1, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2608,29 +2606,21 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
+  int host_index = -1;
+  // size_t request_size = ROUND_UP(WidthInBytes * Height, ElementSizeBytes);
+  size_t guess_pitch = (((WidthInBytes - 1) / ElementSizeBytes) + 1) * ElementSizeBytes;
+  size_t request_size = guess_pitch * Height;
   memory_path_t path;
   /* NULL-arg fast path. The UVA fallback below dereferences *pPitch
    * unconditionally; *dptr deref is guarded by ret==SUCCESS but cheap
    * to short-circuit anyway. Forward to driver for INVALID_VALUE. */
   if (unlikely(dptr == NULL || pPitch == NULL)) {
-    if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch_v2))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch_v2,
-                               dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
-    } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch))) {
-      return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch,
-                               dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
-    }
-    return CUDA_ERROR_NOT_FOUND;
+    goto ALLOCATED_TO_GPU;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  // size_t request_size = ROUND_UP(WidthInBytes * Height, ElementSizeBytes);
-  size_t guess_pitch = (((WidthInBytes - 1) / ElementSizeBytes) + 1) * ElementSizeBytes;
-  size_t request_size = guess_pitch * Height;
-
-  int host_index = -1;
   path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
@@ -2640,7 +2630,7 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   if (path == MEMORY_PATH_UVA) {
     goto ALLOCATED_TO_UVA;
   }
-
+ALLOCATED_TO_GPU:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAllocPitch))) {
@@ -2666,7 +2656,7 @@ ALLOCATED_TO_UVA:
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     *pPitch = guess_pitch;
-    malloc_gpu_virt_memory(*dptr, request_size, host_index);
+    malloc_gpu_virt_memory(*dptr, request_size, 1, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2690,17 +2680,17 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
+  int host_index = -1;
+  size_t request_size = bytesize;
   memory_path_t path;
   /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
   if (unlikely(dptr == NULL)) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
+    goto ALLOCATED_TO_GPU;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  size_t request_size = bytesize;
-  int host_index = -1;
   path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
@@ -2711,6 +2701,7 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
   if (path == MEMORY_PATH_UVA && !stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
     goto ALLOCATED_TO_UVA;
   }
+ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocAsync), dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
@@ -2722,6 +2713,15 @@ CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
     } else {
       goto DONE;
     }
+  } else if (ret == CUDA_SUCCESS) {
+    if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
+      // Switching from capture to synchronous operation
+      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
+    } else {
+      // Recorded as virtual memory count during capture
+      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
+    }
+    goto DONE;
   } else {
     goto DONE;
   }
@@ -2730,7 +2730,7 @@ ALLOCATED_TO_UVA:
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
-    malloc_gpu_virt_memory(*dptr, bytesize, host_index);
+    malloc_gpu_virt_memory(*dptr, bytesize, 2, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2743,17 +2743,17 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
+  int host_index = -1;
+  size_t request_size = bytesize;
   memory_path_t path;
   /* NULL-arg fast path; same rationale as _cuMemAlloc above. */
   if (unlikely(dptr == NULL)) {
-    return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
+    goto ALLOCATED_TO_GPU;
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  size_t request_size = bytesize;
-  int host_index = -1;
   path = prepare_memory_allocation(device, request_size, 1, &host_index, &lock_fd);
   if (path == MEMORY_PATH_OOM) {
     metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
@@ -2763,18 +2763,27 @@ CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStre
   if (path == MEMORY_PATH_UVA && !stream_is_capturing(hStream, 1)) {
     goto ALLOCATED_TO_UVA;
   }
+ALLOCATED_TO_GPU:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocAsync_ptsz, dptr, bytesize, hStream);
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
     // TODO Do not disrupt graph capture due to UVA path destruction
-    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold &&
-        !stream_is_capturing(hStream, 1)) {
+    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold && !stream_is_capturing(hStream, 1)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
     } else {
       goto DONE;
     }
+  } else if (ret == CUDA_SUCCESS) {
+    if (!stream_is_capturing(hStream, 1)) {
+      // Switching from capture to synchronous operation
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+    } else {
+      // Recorded as virtual memory count during capture
+      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
+    }
+    goto DONE;
   } else {
     goto DONE;
   }
@@ -2783,7 +2792,7 @@ ALLOCATED_TO_UVA:
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
-    malloc_gpu_virt_memory(*dptr, request_size, host_index);
+    malloc_gpu_virt_memory(*dptr, request_size, 2, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -3765,7 +3774,15 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   }
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
-  if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+  if (ret == CUDA_SUCCESS) {
+    if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
+      // Switching from capture to synchronous operation
+      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
+    } else {
+      // Recorded as virtual memory count during capture
+      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
+    }
+  } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
@@ -3798,7 +3815,15 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   }
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
-  if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
+  if (ret == CUDA_SUCCESS) {
+    if (!stream_is_capturing(hStream, 1)) {
+      // Switching from capture to synchronous operation
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+    } else {
+      // Recorded as virtual memory count during capture
+      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
+    }
+  } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
@@ -3843,7 +3868,7 @@ CUresult cuMemFree(CUdeviceptr dptr) {
 /* ptsz selects which default stream hStream==0 denotes, so both the capture
  * query and the synchronize must come from the same family as the
  * cuMemFreeAsync entry point we intercepted. */
-static CUresult free_virt_memory_on_stream(CUdeviceptr dptr, CUstream hStream, int ptsz) {
+static CUresult free_virt_memory_uva_on_stream(CUdeviceptr dptr, CUstream hStream, int ptsz) {
   CUresult ret;
   /* The pointer reached us from the oversold UVA fallback, so the only way to
    * release it is the non-stream-ordered cuMemFree, which has to drain the
@@ -3882,8 +3907,10 @@ static CUresult free_virt_memory_on_stream(CUdeviceptr dptr, CUstream hStream, i
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
-  if (unlikely(is_gpu_virt_memory(dptr))) {
-    return free_virt_memory_on_stream(dptr, hStream, __CUDA_API_IS_PTSZ);
+  int type = get_gpu_virt_memory_type(dptr);
+  if (type == 2) {
+    // If the memory type is asynchronous UVA memory record, go this branch
+    return free_virt_memory_uva_on_stream(dptr, hStream, 1);
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
@@ -3891,7 +3918,9 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemFreeAsync), dptr, hStream);
   if (likely(ret == CUDA_SUCCESS)) {
-    free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));
+    if (type > 0) {
+      free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));
+    }
   }
 DONE:
   return ret;
@@ -3900,8 +3929,10 @@ DONE:
 CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
-  if (unlikely(is_gpu_virt_memory(dptr))) {
-    return free_virt_memory_on_stream(dptr, hStream, 1);
+  int type = get_gpu_virt_memory_type(dptr);
+  if (type == 2) {
+    // If the memory type is asynchronous UVA memory record, go this branch
+    return free_virt_memory_uva_on_stream(dptr, hStream, 1);
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
@@ -3909,7 +3940,9 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFreeAsync_ptsz, dptr, hStream);
   if (likely(ret == CUDA_SUCCESS)) {
-    free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));
+    if (type > 0) {
+      free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));
+    }
   }
 DONE:
   return ret;

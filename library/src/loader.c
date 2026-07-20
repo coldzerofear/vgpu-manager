@@ -1859,7 +1859,7 @@ void reset_cuda_index_mapping() {
   pthread_mutex_unlock(&device_index_mutex);
 }
 
-void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
+void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_index) {
   memory_node_t *new_node = NULL;
   new_node = (memory_node_t*) malloc(sizeof(memory_node_t));
   if (unlikely(!new_node)) {
@@ -1869,6 +1869,7 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
 
   new_node->dptr = dptr;
   new_node->bytes = bytes;
+  new_node->type = type;
   INIT_LIST_HEAD(&new_node->node);
 
   pthread_mutex_lock(&g_memory_node_lock);
@@ -1905,12 +1906,8 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
   }
 }
 
-/* Reports whether dptr was handed out by the oversold UVA fallback, i.e. it
- * came from cuMemAllocManaged rather than the allocator the caller asked for.
- * Such a pointer is only valid for the synchronous cuMemFree; the driver's
- * cuMemFreeAsync rejects it. */
-int is_gpu_virt_memory(CUdeviceptr dptr) {
-  int found = 0;
+int get_gpu_virt_memory_type(CUdeviceptr dptr) {
+  int type = 0;
   memory_node_t *entry_tmp = NULL;
   struct list_head *iter;
   pthread_mutex_lock(&g_memory_node_lock);
@@ -1918,12 +1915,12 @@ int is_gpu_virt_memory(CUdeviceptr dptr) {
     entry_tmp = container_of(iter, memory_node_t, node);
     if (entry_tmp == NULL) continue;
     if (entry_tmp->dptr == dptr) {
-      found = 1;
+      type = entry_tmp->type;
       break;
     }
   }
   pthread_mutex_unlock(&g_memory_node_lock);
-  return found;
+  return type;
 }
 
 void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
