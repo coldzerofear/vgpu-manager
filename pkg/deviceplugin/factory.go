@@ -52,6 +52,10 @@ func GetDevicePlugins(
 			DriverRoot:       option.ContainerDriverRoot,
 			TargetDriverRoot: option.HostDriverRoot,
 			DevRoot:          devManager.DevRoot,
+			GDSEnabled:       nodeConfig.GetGDSEnabled(),
+			MOFEDEnabled:     nodeConfig.GetMOFEDEnabled(),
+			GDRCopyEnabled:   nodeConfig.GetGDRCopyEnabled(),
+			ImexChannels:     devManager.GetImexChannels(),
 		})
 	if err != nil {
 		klog.Errorf("Create CDI handler failed: %v", err)
