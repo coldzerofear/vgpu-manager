@@ -49,9 +49,10 @@ func GetDevicePlugins(
 			// The host driver/dev root is mounted into the plugin at the same path,
 			// so the in-container read path equals the host path written into the
 			// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
-			DriverRoot:       option.ContainerDriverRoot,
-			TargetDriverRoot: option.HostDriverRoot,
-			DevRoot:          devManager.DevRoot,
+			DriverRoot:       string(nodeConfig.GetDriverRoot()),
+			TargetDriverRoot: string(nodeConfig.GetHostDriverRoot()),
+			DevRoot:          nodeConfig.GetDriverRoot().GetDevRoot(),
+			TargetDevRoot:    string(nodeConfig.GetHostDevRoot()),
 			GDSEnabled:       nodeConfig.GetGDSEnabled(),
 			MOFEDEnabled:     nodeConfig.GetMOFEDEnabled(),
 			GDRCopyEnabled:   nodeConfig.GetGDRCopyEnabled(),

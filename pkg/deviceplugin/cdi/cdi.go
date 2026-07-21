@@ -63,7 +63,6 @@ type handler struct {
 	infolib          info.Interface
 	nvmllib          nvml.Interface
 	devicelib        device.Interface
-	logger           *logrus.Logger
 	vendor           string
 	class            string
 	annotationPrefix string
@@ -186,7 +185,6 @@ func New(devicelib *nvidia.DeviceLib, cfg Config) (Handler, error) {
 		cdilibs:          cdilibs,
 		vendor:           cfg.Vendor,
 		class:            cfg.Class,
-		logger:           cdilogger,
 		annotationPrefix: cfg.AnnotationPrefix,
 		driverRoot:       cfg.DriverRoot,
 		devRoot:          cfg.DevRoot,
@@ -226,14 +224,20 @@ func (h *handler) GetDeviceAnnotations(responseID string, qualifiedNames []strin
 // It manages its own NVML lifecycle so it is safe to call regardless of whether
 // NVML has been initialized elsewhere.
 func (h *handler) CreateSpecFile() error {
-	if ret := h.nvmllib.Init(); ret != nvml.SUCCESS {
-		return fmt.Errorf("failed to initialize NVML for CDI spec generation: %v", ret)
-	}
-	defer func() { _ = h.nvmllib.Shutdown() }()
-
 	var emptySpecs []string
 	for class, cdilib := range h.cdilibs {
-		h.logger.Infof("Generating CDI spec for resource: %s/%s", h.vendor, class)
+		klog.V(3).Infof("Generating CDI spec for resource: %s/%s", h.vendor, class)
+
+		if class == "gpu" {
+			ret := h.nvmllib.Init()
+			if ret != nvml.SUCCESS {
+				return fmt.Errorf("failed to initialize NVML: %v", ret)
+			}
+			defer func() {
+				_ = h.nvmllib.Shutdown()
+			}()
+		}
+
 		spec, err := cdilib.GetSpec()
 		if err != nil {
 			return fmt.Errorf("failed to get CDI spec: %v", err)
@@ -248,7 +252,7 @@ func (h *handler) CreateSpecFile() error {
 		if err != nil {
 			return fmt.Errorf("failed to generate CDI spec name: %w", err)
 		}
-		h.logger.Infof("Write CDI spec: %s", specName)
+		klog.V(3).Infof("Write CDI spec: %s", specName)
 		specPath := filepath.Join(cdiRoot, specName+".json")
 		if err = spec.Save(specPath); err != nil {
 			// TODO: This is a brittle check since it relies on exact string matches.
@@ -260,7 +264,7 @@ func (h *handler) CreateSpecFile() error {
 			}
 			return fmt.Errorf("failed to save CDI spec %q: %w", specPath, err)
 		}
-		h.logger.Infoln("Generated CDI specification", "path", specPath)
+		klog.V(3).Infoln("Generated CDI specification", "path", specPath)
 	}
 	// Remove the classes with empty specs from the supported types.
 	for _, emptySpec := range emptySpecs {

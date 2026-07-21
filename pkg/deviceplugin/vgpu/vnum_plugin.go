@@ -517,7 +517,7 @@ func apiDeviceSpecs(devManager *manager.DeviceManager, devices []manager.Device)
 	}
 
 	var specs []*pluginapi.DeviceSpec
-	devRoot := devManager.GetNodeConfig().GetHostDriverRoot().GetDevRoot()
+	devRoot := devManager.GetNodeConfig().GetHostDevRoot().GetDevRoot()
 	for devPath, optional := range pathOptional {
 		if optional && util.PathIsNotExist(devPath) {
 			continue
