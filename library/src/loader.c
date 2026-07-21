@@ -1894,8 +1894,11 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_i
   if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
   LOGGER(VERBOSE, "malloc virt memory to host device %d, dptr %lld, size %ld", host_index, dptr, bytes);
 
-  // Calculate increment
-  ssize_t delta = found ? (ssize_t)(bytes - old_bytes) : (ssize_t)bytes;
+  /* Calculate increment. Re-recording a known dptr with a smaller size yields a
+   * NEGATIVE delta, so the shared counter has to be adjusted with the same
+   * saturation free_gpu_virt_memory() applies: `used` is size_t, and letting it
+   * wrap would leave a ~2^64 usage that fails every later allocation. */
+  ssize_t delta = found ? (ssize_t)bytes - (ssize_t)old_bytes : (ssize_t)bytes;
 
   if (g_device_vmem != NULL) {
     int fd = device_vmem_write_lock(host_index);
@@ -1905,7 +1908,14 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_i
     unsigned int processes_size = g_device_vmem->devices[host_index].processes_size;
     for (int i = 0; i < processes_size; i++) {
       if (g_device_vmem->devices[host_index].processes[i].pid == pid) {
-        g_device_vmem->devices[host_index].processes[i].used += delta;
+        size_t cur = g_device_vmem->devices[host_index].processes[i].used;
+        if (delta >= 0) {
+          g_device_vmem->devices[host_index].processes[i].used = cur + (size_t)delta;
+        } else {
+          size_t dec = (size_t)(-delta);
+          g_device_vmem->devices[host_index].processes[i].used =
+              (cur >= dec) ? (cur - dec) : 0;
+        }
         found = 1;
         break;
       }

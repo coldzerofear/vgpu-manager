@@ -2520,7 +2520,7 @@ CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocManaged, dptr, bytesize, flags);
   if (likely(ret == CUDA_SUCCESS)) {
     if (flags == CU_MEM_ATTACH_GLOBAL) {
-      malloc_gpu_virt_memory(*dptr, bytesize, 1, host_index);
+      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_UVA_SYNC, host_index);
     }
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
@@ -2584,7 +2584,7 @@ ALLOCATED_TO_UVA:
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
-    malloc_gpu_virt_memory(*dptr, bytesize, 1, host_index);
+    malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_UVA_SYNC, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2656,7 +2656,7 @@ ALLOCATED_TO_UVA:
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     *pPitch = guess_pitch;
-    malloc_gpu_virt_memory(*dptr, request_size, 1, host_index);
+    malloc_gpu_virt_memory(*dptr, request_size, MEMORY_TYPE_UVA_SYNC, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2715,15 +2715,20 @@ ALLOCATED_TO_GPU:
     }
   } else if (ret == CUDA_SUCCESS && lock_fd >= 0) {
     if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
-      // Internal bookkeeping before synchronization is completed
-      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
-      // Switching from capture to synchronous operation
-      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
-      // Release internal accounting after synchronization is completed
-      free_gpu_virt_memory(*dptr, host_index);
+      /* Bridge the allocation into the shared view before the lock is dropped,
+       * so a concurrent allocator counts it while it is still in flight. */
+      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
+      unlock_gpu_device(lock_fd);
+      lock_fd = -1;
+      /* Switching from capture to synchronous operation, off the device lock. */
+      CUresult sync_ret = CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
+      /* Release internal accounting only once NVML is guaranteed to see it. */
+      if (likely(sync_ret == CUDA_SUCCESS)) {
+        free_gpu_virt_memory(*dptr, host_index);
+      }
     } else {
       // Recorded as virtual memory count during capture
-      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
+      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
     }
     goto DONE;
   } else {
@@ -2734,7 +2739,7 @@ ALLOCATED_TO_UVA:
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
-    malloc_gpu_virt_memory(*dptr, bytesize, 2, host_index);
+    malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_UVA_ASYNC, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2781,15 +2786,20 @@ ALLOCATED_TO_GPU:
     }
   } else if (ret == CUDA_SUCCESS && lock_fd >= 0) {
     if (!stream_is_capturing(hStream, 1)) {
-      // Internal bookkeeping before synchronization is completed
-      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
-      // Switching from capture to synchronous operation
-      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
-      // Release internal accounting after synchronization is completed
-      free_gpu_virt_memory(*dptr, host_index);
+      /* Bridge the allocation into the shared view before the lock is dropped,
+       * so a concurrent allocator counts it while it is still in flight. */
+      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
+      unlock_gpu_device(lock_fd);
+      lock_fd = -1;
+      /* Switching from capture to synchronous operation, off the device lock. */
+      CUresult sync_ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+      /* Release internal accounting only once NVML is guaranteed to see it. */
+      if (likely(sync_ret == CUDA_SUCCESS)) {
+        free_gpu_virt_memory(*dptr, host_index);
+      }
     } else {
       // Recorded as virtual memory count during capture
-      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
+      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
     }
     goto DONE;
   } else {
@@ -2800,7 +2810,7 @@ ALLOCATED_TO_UVA:
   LOGGER(VERBOSE, "cuMemAllocManaged to allocate unified memory (oversold), size: %zu, ret: %d, str: %s",
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
-    malloc_gpu_virt_memory(*dptr, request_size, 2, host_index);
+    malloc_gpu_virt_memory(*dptr, request_size, MEMORY_TYPE_UVA_ASYNC, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -3784,15 +3794,20 @@ CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
   if (ret == CUDA_SUCCESS && lock_fd >= 0) {
     if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
-      // Internal bookkeeping before synchronization is completed
-      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
-      // Switching from capture to synchronous operation
-      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
-      // Release internal accounting after synchronization is completed
-      free_gpu_virt_memory(*dptr, host_index);
+      /* Bridge the allocation into the shared view before the lock is dropped,
+       * so a concurrent allocator counts it while it is still in flight. */
+      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
+      unlock_gpu_device(lock_fd);
+      lock_fd = -1;
+      /* Switching from capture to synchronous operation, off the device lock. */
+      CUresult sync_ret = CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
+      /* Release internal accounting only once NVML is guaranteed to see it. */
+      if (likely(sync_ret == CUDA_SUCCESS)) {
+        free_gpu_virt_memory(*dptr, host_index);
+      }
     } else {
       // Recorded as virtual memory count during capture
-      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
+      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
     }
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
@@ -3830,15 +3845,20 @@ CALL:
   // Confirm successful locking and waive the cost of unopened containers
   if (ret == CUDA_SUCCESS && lock_fd >= 0) {
     if (!stream_is_capturing(hStream, 1)) {
-      // Internal bookkeeping before synchronization is completed
-      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
-      // Switching from capture to synchronous operation
-      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
-      // Release internal accounting after synchronization is completed
-      free_gpu_virt_memory(*dptr, host_index);
+      /* Bridge the allocation into the shared view before the lock is dropped,
+       * so a concurrent allocator counts it while it is still in flight. */
+      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_ASYNC_BRIDGE, host_index);
+      unlock_gpu_device(lock_fd);
+      lock_fd = -1;
+      /* Switching from capture to synchronous operation, off the device lock. */
+      CUresult sync_ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+      /* Release internal accounting only once NVML is guaranteed to see it. */
+      if (likely(sync_ret == CUDA_SUCCESS)) {
+        free_gpu_virt_memory(*dptr, host_index);
+      }
     } else {
       // Recorded as virtual memory count during capture
-      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
+      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
     }
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
@@ -3925,7 +3945,7 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
   int type = get_gpu_virt_memory_type(dptr);
-  if (type == 2) {
+  if (type == MEMORY_TYPE_UVA_ASYNC) {
     // If the memory type is asynchronous UVA memory record, go this branch
     return free_virt_memory_uva_on_stream(dptr, hStream, __CUDA_API_IS_PTSZ);
   }
@@ -3935,7 +3955,7 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemFreeAsync), dptr, hStream);
   if (likely(ret == CUDA_SUCCESS)) {
-    if (type > 0) {
+    if (type != 0) {
       free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));
     }
   }
@@ -3947,7 +3967,7 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   CUresult ret;
   CUdevice device;
   int type = get_gpu_virt_memory_type(dptr);
-  if (type == 2) {
+  if (type == MEMORY_TYPE_UVA_ASYNC) {
     // If the memory type is asynchronous UVA memory record, go this branch
     return free_virt_memory_uva_on_stream(dptr, hStream, 1);
   }
@@ -3957,7 +3977,7 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   }
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFreeAsync_ptsz, dptr, hStream);
   if (likely(ret == CUDA_SUCCESS)) {
-    if (type > 0) {
+    if (type != 0) {
       free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));
     }
   }

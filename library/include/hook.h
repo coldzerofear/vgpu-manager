@@ -303,12 +303,25 @@ typedef struct {
   device_process_t devices[MAX_DEVICE_COUNT];
 } device_util_t;
 
+/* memory_node_t.type -- what a virtual-memory record stands for, and therefore
+ * how cuMemFreeAsync must retire it (see cuda_hook.c).
+ *
+ * UVA_SYNC / UVA_ASYNC name memory the oversold path handed out as managed
+ * memory; only UVA_ASYNC has to drain the stream and fall back to cuMemFree.
+ * CAPTURE and ASYNC_BRIDGE both name ordinary device memory that is merely
+ * being ACCOUNTED for, and differ in lifetime: a CAPTURE record lives until the
+ * application frees the pointer, while an ASYNC_BRIDGE record only covers the
+ * window between the driver call and the stream synchronize that makes the
+ * allocation visible to NVML -- the allocating hook retires it itself. */
+#define MEMORY_TYPE_UVA_SYNC     1
+#define MEMORY_TYPE_UVA_ASYNC    2
+#define MEMORY_TYPE_CAPTURE      3
+#define MEMORY_TYPE_ASYNC_BRIDGE 4
+
 typedef struct {
   CUdeviceptr dptr;
   size_t bytes;
-  // 1: Synchronize UVA memory records
-  // 2: Asynchronous UVA memory recording
-  // 3: Asynchronous memory recording
+  /* One of MEMORY_TYPE_* above. */
   int type;
   struct list_head node;
 } memory_node_t;
