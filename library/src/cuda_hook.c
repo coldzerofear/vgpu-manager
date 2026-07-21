@@ -2715,8 +2715,12 @@ ALLOCATED_TO_GPU:
     }
   } else if (ret == CUDA_SUCCESS) {
     if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
+      // Internal bookkeeping before synchronization is completed
+      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
       // Switching from capture to synchronous operation
       CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
+      // Release internal accounting after synchronization is completed
+      free_gpu_virt_memory(*dptr, host_index);
     } else {
       // Recorded as virtual memory count during capture
       malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
@@ -2777,8 +2781,12 @@ ALLOCATED_TO_GPU:
     }
   } else if (ret == CUDA_SUCCESS) {
     if (!stream_is_capturing(hStream, 1)) {
+      // Internal bookkeeping before synchronization is completed
+      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
       // Switching from capture to synchronous operation
       CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+      // Release internal accounting after synchronization is completed
+      free_gpu_virt_memory(*dptr, host_index);
     } else {
       // Recorded as virtual memory count during capture
       malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
@@ -3776,8 +3784,12 @@ CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
   if (ret == CUDA_SUCCESS) {
     if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
+      // Internal bookkeeping before synchronization is completed
+      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
       // Switching from capture to synchronous operation
       CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
+      // Release internal accounting after synchronization is completed
+      free_gpu_virt_memory(*dptr, host_index);
     } else {
       // Recorded as virtual memory count during capture
       malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
@@ -3817,8 +3829,12 @@ CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
   if (ret == CUDA_SUCCESS) {
     if (!stream_is_capturing(hStream, 1)) {
+      // Internal bookkeeping before synchronization is completed
+      malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
       // Switching from capture to synchronous operation
       CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+      // Release internal accounting after synchronization is completed
+      free_gpu_virt_memory(*dptr, host_index);
     } else {
       // Recorded as virtual memory count during capture
       malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
@@ -3910,7 +3926,7 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   int type = get_gpu_virt_memory_type(dptr);
   if (type == 2) {
     // If the memory type is asynchronous UVA memory record, go this branch
-    return free_virt_memory_uva_on_stream(dptr, hStream, 1);
+    return free_virt_memory_uva_on_stream(dptr, hStream, __CUDA_API_IS_PTSZ);
   }
   ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
