@@ -2713,7 +2713,7 @@ ALLOCATED_TO_GPU:
     } else {
       goto DONE;
     }
-  } else if (ret == CUDA_SUCCESS) {
+  } else if (ret == CUDA_SUCCESS && lock_fd >= 0) {
     if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
       // Internal bookkeeping before synchronization is completed
       malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
@@ -2779,7 +2779,7 @@ ALLOCATED_TO_GPU:
     } else {
       goto DONE;
     }
-  } else if (ret == CUDA_SUCCESS) {
+  } else if (ret == CUDA_SUCCESS && lock_fd >= 0) {
     if (!stream_is_capturing(hStream, 1)) {
       // Internal bookkeeping before synchronization is completed
       malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
@@ -3782,7 +3782,7 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize,
   }
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemAllocFromPoolAsync), dptr, bytesize, pool, hStream);
-  if (ret == CUDA_SUCCESS) {
+  if (ret == CUDA_SUCCESS && lock_fd >= 0) {
     if (!stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
       // Internal bookkeeping before synchronization is completed
       malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);
@@ -3827,7 +3827,8 @@ CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
   }
 CALL:
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemAllocFromPoolAsync_ptsz, dptr, bytesize, pool, hStream);
-  if (ret == CUDA_SUCCESS) {
+  // Confirm successful locking and waive the cost of unopened containers
+  if (ret == CUDA_SUCCESS && lock_fd >= 0) {
     if (!stream_is_capturing(hStream, 1)) {
       // Internal bookkeeping before synchronization is completed
       malloc_gpu_virt_memory(*dptr, bytesize, 3, host_index);

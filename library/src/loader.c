@@ -1860,34 +1860,52 @@ void reset_cuda_index_mapping() {
 }
 
 void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_index) {
-  memory_node_t *new_node = NULL;
-  new_node = (memory_node_t*) malloc(sizeof(memory_node_t));
-  if (unlikely(!new_node)) {
-    LOGGER(ERROR, "failed to allocate virt memory node");
-    return;
-  }
-
-  new_node->dptr = dptr;
-  new_node->bytes = bytes;
-  new_node->type = type;
-  INIT_LIST_HEAD(&new_node->node);
+  int found = 0;
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter;
+  size_t old_bytes = 0;
 
   pthread_mutex_lock(&g_memory_node_lock);
-  list_add(&new_node->node, &g_memory_node->node);
+  list_for_each(iter, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    if (entry_tmp != NULL && entry_tmp->dptr == dptr) {
+      old_bytes = entry_tmp->bytes;
+      entry_tmp->bytes = bytes;
+      entry_tmp->type = type;
+      found = 1;
+      break;
+    }
+  }
+  if (!found) {
+    memory_node_t *new_node = (memory_node_t *)malloc(sizeof(memory_node_t));
+    if (unlikely(!new_node)) {
+      pthread_mutex_unlock(&g_memory_node_lock);
+      LOGGER(ERROR, "failed to allocate virt memory node");
+      return;
+    }
+    new_node->dptr = dptr;
+    new_node->bytes = bytes;
+    new_node->type = type;
+    INIT_LIST_HEAD(&new_node->node);
+    list_add(&new_node->node, &g_memory_node->node);
+  }
   pthread_mutex_unlock(&g_memory_node_lock);
 
   if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
   LOGGER(VERBOSE, "malloc virt memory to host device %d, dptr %lld, size %ld", host_index, dptr, bytes);
 
+  // Calculate increment
+  ssize_t delta = found ? (ssize_t)(bytes - old_bytes) : (ssize_t)bytes;
+
   if (g_device_vmem != NULL) {
     int fd = device_vmem_write_lock(host_index);
     if (fd < 0) return;
     int pid = getpid();
-    int found = 0;
+    found = 0;
     unsigned int processes_size = g_device_vmem->devices[host_index].processes_size;
     for (int i = 0; i < processes_size; i++) {
       if (g_device_vmem->devices[host_index].processes[i].pid == pid) {
-        g_device_vmem->devices[host_index].processes[i].used += bytes;
+        g_device_vmem->devices[host_index].processes[i].used += delta;
         found = 1;
         break;
       }
@@ -1899,7 +1917,7 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_i
         return;
       }
       g_device_vmem->devices[host_index].processes[processes_size].pid = pid;
-      g_device_vmem->devices[host_index].processes[processes_size].used = bytes;
+      g_device_vmem->devices[host_index].processes[processes_size].used = (delta > 0) ? delta : 0;
       g_device_vmem->devices[host_index].processes_size++;
     }
     device_vmem_unlock(fd, host_index);
