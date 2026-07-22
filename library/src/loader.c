@@ -2041,8 +2041,16 @@ int get_gpu_virt_memory_type(CUdeviceptr dptr) {
   return type;
 }
 
-void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
+/* Retire the record for dptr, discharging whatever it was charged.
+ *
+ * The device comes from the record, not from the caller and not from the
+ * current context: a charge and its discharge must land on the same account.
+ * Deriving it at free time instead lets a context switch between allocation and
+ * free (or a cuCtxGetDevice that no longer works) credit the wrong device,
+ * leaving one understated and another overstated for the life of the process. */
+void free_gpu_virt_memory(CUdeviceptr dptr) {
   int found = 0;
+  int host_index = -1;
   memory_node_t *entry_tmp = NULL;
   struct list_head *iter;
   size_t size = 0;
@@ -2053,6 +2061,7 @@ void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
     if (entry_tmp->dptr == dptr) {
       found = 1;
       size = entry_tmp->bytes;
+      host_index = entry_tmp->host_index;
       list_del(&entry_tmp->node);
       free(entry_tmp);
       break;
@@ -2384,6 +2393,32 @@ void loader_child_after_fork(void) {
   pthread_mutex_init(&init_config_mutex,  NULL);
   memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
   tid_dlsym_count = 0;
+
+  /* Drop the inherited virtual-memory records. Every one of them describes an
+   * allocation of the PARENT: CUDA contexts do not survive fork, so none of the
+   * pointers or graph handles mean anything here, and the charges they stand for
+   * sit in the shared counter under the parent's pid, where they still belong.
+   *
+   * Keeping them is actively harmful once the child starts allocating, because
+   * the driver reuses addresses: a new dptr landing on a stale record makes
+   * malloc_gpu_virt_memory() charge the difference against a phantom size, a new
+   * CUgraph landing on a stale one makes free_gpu_virt_memory_by_graph() retire
+   * records it does not own, and get_gpu_virt_memory_type() can report a plain
+   * pointer as oversold UVA and send cuMemFreeAsync down the cuMemFree path.
+   * graph_cost_after_fork() wipes its cache for exactly this reason.
+   *
+   * Freeing (rather than just re-heading the list) matters because forked
+   * workers commonly run long without exec. glibc resets the malloc lock in the
+   * child via its own atfork handlers, so free() here is safe -- and this
+   * library is glibc-only by construction (see the toolchain gate in hook.h). */
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter, *tmp;
+  list_for_each_safe(iter, tmp, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    list_del(iter);
+    free(entry_tmp);
+  }
+  INIT_LIST_HEAD(&g_memory_node->node);
 }
 
 /* fork() child handler implemented in cuda_hook.c. Registered lazily

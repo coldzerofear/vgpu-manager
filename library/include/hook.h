@@ -485,7 +485,7 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device
 void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
                                      CUgraph graph, int device_id);
 
-void free_gpu_virt_memory(CUdeviceptr dptr, int device_id);
+void free_gpu_virt_memory(CUdeviceptr dptr);
 
 /**
  * Retire every capture record belonging to graph, discharging the shared

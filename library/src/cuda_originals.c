@@ -2905,9 +2905,8 @@ CUresult cuGraphCreate(CUgraph *phGraph, unsigned int flags) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphCreate, phGraph, flags);
 }
 
-CUresult cuGraphDestroy(CUgraph hGraph) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphDestroy, hGraph);
-}
+/* cuGraphDestroy is hooked in cuda_hook.c: destroying the graph is the second
+ * point at which a capture charge has to come off. */
 
 CUresult cuGraphDestroyNode(CUgraphNode hNode) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphDestroyNode, hNode);

@@ -457,6 +457,7 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream);
 CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream);
 CUresult cuStreamEndCapture(CUstream hStream, CUgraph *phGraph);
 CUresult cuStreamEndCapture_ptsz(CUstream hStream, CUgraph *phGraph);
+CUresult cuGraphDestroy(CUgraph hGraph);
 
 entry_t cuda_hooks_entry[] = {
     {.name = "cuDriverGetVersion", .fn_ptr = cuDriverGetVersion},
@@ -509,6 +510,7 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuMemFreeAsync_ptsz", .fn_ptr = cuMemFreeAsync_ptsz},
     {.name = "cuStreamEndCapture", .fn_ptr = cuStreamEndCapture},
     {.name = "cuStreamEndCapture_ptsz", .fn_ptr = cuStreamEndCapture_ptsz},
+    {.name = "cuGraphDestroy", .fn_ptr = cuGraphDestroy},
 };
 
 const int cuda_hook_nums =
@@ -1453,13 +1455,24 @@ static int stream_is_capturing(CUstream stream, int ptsz) {
  * established. `ptsz` selects the entry-point family, for the same reason as in
  * stream_is_capturing().
  *
- * Only _v2 and _v3 report the graph; the original cuStreamGetCaptureInfo yields
- * a status and an id only, so a driver that exports nothing newer leaves us
- * unable to identify the capture. NULL is returned in that case, and the caller
- * MUST then decline to charge the allocation: a charge we cannot attribute to a
- * graph is a charge cuStreamEndCapture can never retire, which would accumulate
- * into a permanent overstatement of usage and eventually fail every allocation.
- * Losing the charge only costs accumulation within that one capture. */
+ * The graph IS available mid-capture: cuStreamGetCaptureInfo documents graph_out
+ * as "the graph being captured into ... while the capture sequence is in
+ * progress", and the documented way to splice a node into a running capture
+ * (get info -> cuGraphAddNode -> cuStreamUpdateCaptureDependencies) depends on
+ * exactly that. Only _v2 and _v3 report it; the original entry point yields a
+ * status and an id only, so a driver exporting nothing newer leaves the capture
+ * unidentifiable. NULL is returned then, and the caller MUST decline to charge
+ * the allocation: a charge that cannot be attributed to a graph is one
+ * cuStreamEndCapture can never retire, and a permanently overstated usage fails
+ * every later allocation. Losing the charge only costs accumulation within that
+ * one capture.
+ *
+ * The status is accepted as anything but NONE, though the API only guarantees
+ * graph_out for CU_STREAM_CAPTURE_STATUS_ACTIVE. That is deliberate: this handle
+ * is used purely as an identity key to match records and is never dereferenced,
+ * and a capture that has gone INVALIDATED still has to have its charge retired.
+ * Tightening this to ACTIVE would strand the charge of every capture that failed
+ * before its cuStreamEndCapture. */
 static CUgraph stream_capture_graph(CUstream stream, int ptsz) {
   CUstreamCaptureStatus cap = CU_STREAM_CAPTURE_STATUS_NONE;
   cuuint64_t id = 0;
@@ -2778,7 +2791,7 @@ ALLOCATED_TO_GPU:
       /* Switching from capture to synchronous operation, off the device lock. */
       CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
       /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr, host_index);
+      free_gpu_virt_memory(*dptr);
     } else {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
@@ -2852,7 +2865,7 @@ ALLOCATED_TO_GPU:
       /* Switching from capture to synchronous operation, off the device lock. */
       CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
       /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr, host_index);
+      free_gpu_virt_memory(*dptr);
     } else {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
@@ -3863,7 +3876,7 @@ CALL:
       /* Switching from capture to synchronous operation, off the device lock. */
       CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
       /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr, host_index);
+      free_gpu_virt_memory(*dptr);
     } else {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
@@ -3917,7 +3930,7 @@ CALL:
       /* Switching from capture to synchronous operation, off the device lock. */
       CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
       /* Release internal accounting only once NVML is guaranteed to see it. */
-      free_gpu_virt_memory(*dptr, host_index);
+      free_gpu_virt_memory(*dptr);
     } else {
       /* Charge the capture so that several allocations inside one capture
        * accumulate against the limit. Chargeable only while the owning graph is
@@ -3950,7 +3963,7 @@ CUresult _cuMemFree(CUdeviceptr dptr) {
     ret = CUDA_ERROR_NOT_FOUND;
   }
   if (likely(ret == CUDA_SUCCESS)) {
-    free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));
+    free_gpu_virt_memory(dptr);
   }
 DONE:
   return ret;
@@ -4023,7 +4036,7 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuMemFreeAsync), dptr, hStream);
   if (likely(ret == CUDA_SUCCESS)) {
     if (type != 0) {
-      free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));
+      free_gpu_virt_memory(dptr);
     }
   }
 DONE:
@@ -4045,7 +4058,7 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFreeAsync_ptsz, dptr, hStream);
   if (likely(ret == CUDA_SUCCESS)) {
     if (type != 0) {
-      free_gpu_virt_memory(dptr, get_host_device_index_by_cuda_device(device));
+      free_gpu_virt_memory(dptr);
     }
   }
 DONE:
@@ -4083,4 +4096,20 @@ CUresult cuStreamEndCapture(CUstream hStream, CUgraph *phGraph) {
 
 CUresult cuStreamEndCapture_ptsz(CUstream hStream, CUgraph *phGraph) {
   return end_capture_and_discharge(hStream, phGraph, 1);
+}
+
+/* Second, deterministic discharge point for capture charges.
+ *
+ * cuStreamEndCapture retires the normal case, but a capture that was
+ * invalidated may not report its graph any more, and CUDA offers no way to test
+ * whether a CUgraph is still alive -- handles are recycled and probing a
+ * destroyed one is undefined. Destruction, on the other hand, is something the
+ * application tells us, and it names the graph exactly. Discharging here as well
+ * is safe because free_gpu_virt_memory_by_graph() is idempotent: the normal path
+ * has already emptied the graph's records by the time it is destroyed, so this
+ * only ever fires for charges nothing else claimed. */
+CUresult cuGraphDestroy(CUgraph hGraph) {
+  CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphDestroy, hGraph);
+  free_gpu_virt_memory_by_graph(hGraph);
+  return ret;
 }
