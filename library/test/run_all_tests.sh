@@ -45,15 +45,12 @@ export TEST_DEVICE_ID="${TEST_DEVICE_ID:-0}"
 #            (rc=77). Those preconditions -- LD_PRELOAD, the vmem ledger -- are
 #            things this harness is supposed to provide, so a skip here means
 #            the setup is wrong and the assertions silently did not run.
-#   ABSENT   an optional dependency is not installed (no torch, no tensorflow).
-#            Nothing is misconfigured; there is simply nothing to run against.
 #
 # Keeping them apart is what lets VGPU_TEST_STRICT fail on the first without
 # also failing every machine that happens not to have a framework installed.
-declare -i TOTAL=0 PASSED=0 FAILED=0 SKIPPED=0 ABSENT=0
+declare -i TOTAL=0 PASSED=0 FAILED=0 SKIPPED=0
 FAILED_NAMES=()
 SKIPPED_NAMES=()
-ABSENT_NAMES=()
 
 # Exit status a test uses to say "I did not actually run" (the autotools
 # convention). A test whose preconditions were not met must NOT report success:
@@ -115,9 +112,9 @@ if [[ "${SKIP_PYTHON:-0}" == "0" && -d "${PY_DIR}" ]]; then
       *)                     mod= ;;
     esac
     if [[ -n "${mod}" ]] && ! python3 -c "import ${mod}" >/dev/null 2>&1; then
-      printf "=== %-36s ABSENT (module '%s' not installed)\n" "${name}" "${mod}"
-      ABSENT=$((ABSENT + 1))
-      ABSENT_NAMES+=("${name} (no ${mod})")
+      printf "=== %-36s SKIP (module '%s' not installed)\n" "${name}" "${mod}"
+      SKIPPED=$((SKIPPED + 1))
+      SKIPPED_NAMES+=("${name} (no ${mod})")
       continue
     fi
     run_one "${name}" env LD_PRELOAD="${VGPU_SO}" python3 "${py}" \
@@ -127,11 +124,7 @@ fi
 
 echo
 echo "============================================================"
-echo "Summary: total=${TOTAL} pass=${PASSED} fail=${FAILED} skip=${SKIPPED} absent=${ABSENT}"
-if (( ABSENT > 0 )); then
-  echo "Not runnable here (optional dependency missing):"
-  for n in "${ABSENT_NAMES[@]}"; do echo "  - ${n}"; done
-fi
+echo "Summary: total=${TOTAL} pass=${PASSED} fail=${FAILED} skip=${SKIPPED}"
 if (( FAILED > 0 )); then
   echo "Failed tests:"
   for n in "${FAILED_NAMES[@]}"; do echo "  - ${n}"; done
@@ -143,8 +136,7 @@ if (( SKIPPED > 0 )); then
   # These preconditions are ours to provide, so a skip means the harness did
   # not deliver what the test was promised and a green result would overstate
   # what was verified. run_tests_with_env.sh sets everything up and turns this
-  # on. Absent optional dependencies are deliberately NOT counted here: nothing
-  # is misconfigured when a machine simply has no torch installed.
+  # on.
   if [[ "${VGPU_TEST_STRICT:-0}" != "0" ]]; then
     echo "[FAIL] VGPU_TEST_STRICT is set: these tests were expected to run."
     exit 1
