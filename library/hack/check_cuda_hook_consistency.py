@@ -65,6 +65,7 @@ ABI_CONFLICT_FAMILIES = {
     "cuGraphAddDependencies":        ("cuGraphAddDependencies",          "cuGraphAddDependencies_v2"),
     "cuGraphRemoveDependencies":     ("cuGraphRemoveDependencies",       "cuGraphRemoveDependencies_v2"),
     "cuGraphAddNode":                ("cuGraphAddNode",                  "cuGraphAddNode_v2"),
+    "cuStreamGetCaptureInfo":        ("cuStreamGetCaptureInfo_v2",       "cuStreamGetCaptureInfo_v3"),
     # cuGetProcAddress is handled inline in cuGetProcAddress() and
     # cuGetProcAddress_v2() rather than via is_abi_conflict_base(), so
     # it is intentionally NOT in this table.

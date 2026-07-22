@@ -478,8 +478,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuGraphExecKernelNodeSetParams"},
 //    {.name = "cuStreamBeginCapture_v2"},
 //    {.name = "cuStreamBeginCapture_v2_ptsz"},
-//    {.name = "cuStreamGetCaptureInfo"},
-//    {.name = "cuStreamGetCaptureInfo_ptsz"},
+    {.name = "cuStreamGetCaptureInfo"},
+    {.name = "cuStreamGetCaptureInfo_ptsz"},
     {.name = "cuThreadExchangeStreamCaptureMode"},
     {.name = "cuDeviceGetNvSciSyncAttributes"},
     {.name = "cuGraphExecHostNodeSetParams"},
@@ -584,8 +584,10 @@ entry_t cuda_library_entry[] = {
     {.name = "cuGraphMemFreeNodeGetParams"},
     {.name = "cuGraphReleaseUserObject"},
     {.name = "cuGraphRetainUserObject"},
-//    {.name = "cuStreamGetCaptureInfo_v2"},
-//    {.name = "cuStreamGetCaptureInfo_v2_ptsz"},
+    {.name = "cuStreamGetCaptureInfo_v2"},
+    {.name = "cuStreamGetCaptureInfo_v2_ptsz"},
+    {.name = "cuStreamGetCaptureInfo_v3"},
+    {.name = "cuStreamGetCaptureInfo_v3_ptsz"},
     {.name = "cuStreamUpdateCaptureDependencies"},
     {.name = "cuStreamUpdateCaptureDependencies_ptsz"},
     {.name = "cuUserObjectCreate"},
@@ -1688,6 +1690,21 @@ static void signal_cleanup_handler_sa(int signum, siginfo_t *info, void *ucontex
   raise(signum);
 }
 
+// Cleaning up invalid virtual memory nodes on the device.
+void check_cleanup_vmem_nodes_by_device(int host_index) {
+  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
+  if (g_device_vmem != NULL) {
+    if (g_device_vmem->devices[host_index].processes_size == 0) {
+      return;
+    }
+    int fd = device_vmem_write_lock(host_index);
+    if (fd < 0) return;
+    rm_vmem_node_by_non_existent_device_pid(host_index, -1);
+//    __sync_synchronize();
+    device_vmem_unlock(fd, host_index);
+  }
+}
+
 // check and clean up any unreleased virtual memory records.
 void check_cleanup_vmem_nodes() {
   if (g_device_vmem != NULL) {
@@ -1993,6 +2010,7 @@ void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
 void get_used_gpu_virt_memory(void *arg, int host_index) {
   size_t count = 0;
   size_t *used_memory = arg;
+  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) goto DONE;
   if (g_vgpu_config->vmem_node && g_device_vmem != NULL) {
     int fd = device_vmem_read_lock(host_index);
     if (fd < 0) goto DONE;

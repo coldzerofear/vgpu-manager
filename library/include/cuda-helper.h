@@ -1011,9 +1011,9 @@ typedef enum {
   /** cuStreamBeginCapture_v2_ptsz */
 //  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2_ptsz),
   /** cuStreamGetCaptureInfo */
-//  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo),
   /** cuStreamGetCaptureInfo_ptsz */
-//  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_ptsz),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_ptsz),
   /** cuThreadExchangeStreamCaptureMode */
   CUDA_ENTRY_ENUM(cuThreadExchangeStreamCaptureMode),
   /** cuDeviceGetNvSciSyncAttributes */
@@ -1209,8 +1209,10 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphMemFreeNodeGetParams),
   CUDA_ENTRY_ENUM(cuGraphReleaseUserObject),
   CUDA_ENTRY_ENUM(cuGraphRetainUserObject),
-//  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2),
-//  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2_ptsz),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2_ptsz),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v3),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v3_ptsz),
   CUDA_ENTRY_ENUM(cuStreamUpdateCaptureDependencies),
   CUDA_ENTRY_ENUM(cuStreamUpdateCaptureDependencies_ptsz),
   CUDA_ENTRY_ENUM(cuUserObjectCreate),
@@ -1327,6 +1329,7 @@ static inline int is_abi_conflict_base(const char *sym) {
     "cuGraphAddDependencies",
     "cuGraphRemoveDependencies",
     "cuGraphAddNode",
+    "cuStreamGetCaptureInfo",
     /*
      * Note: cuGetProcAddress is intentionally NOT listed here even though
      * its unversioned form also has cross-major ABI drift (v1 4-arg vs _v2

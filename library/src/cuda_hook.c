@@ -287,9 +287,15 @@ static memory_path_t prepare_memory_allocation(CUdevice device,
     return MEMORY_PATH_GPU;
   }
 
-  if ((used + vmem_used + request_size) >
-      g_vgpu_config->devices[*host_index].total_memory) {
-    return MEMORY_PATH_OOM;
+  if ((used + vmem_used + request_size) > g_vgpu_config->devices[*host_index].total_memory) {
+    // It is necessary to check and clean up virtual memory usage
+    if (vmem_used > 0 && (used + request_size) <= g_vgpu_config->devices[*host_index].total_memory) {
+      check_cleanup_vmem_nodes_by_device(*host_index);
+      get_used_gpu_virt_memory((void *)&vmem_used, *host_index);
+    }
+    if ((used + vmem_used + request_size) > g_vgpu_config->devices[*host_index].total_memory) {
+      return MEMORY_PATH_OOM;
+    }
   }
 
   if (allow_uva && g_vgpu_config->devices[*host_index].memory_oversold &&
@@ -2721,11 +2727,9 @@ ALLOCATED_TO_GPU:
       unlock_gpu_device(lock_fd);
       lock_fd = -1;
       /* Switching from capture to synchronous operation, off the device lock. */
-      CUresult sync_ret = CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
+      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
       /* Release internal accounting only once NVML is guaranteed to see it. */
-      if (likely(sync_ret == CUDA_SUCCESS)) {
-        free_gpu_virt_memory(*dptr, host_index);
-      }
+      free_gpu_virt_memory(*dptr, host_index);
     } else {
       // Recorded as virtual memory count during capture
       malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
@@ -2792,11 +2796,9 @@ ALLOCATED_TO_GPU:
       unlock_gpu_device(lock_fd);
       lock_fd = -1;
       /* Switching from capture to synchronous operation, off the device lock. */
-      CUresult sync_ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
       /* Release internal accounting only once NVML is guaranteed to see it. */
-      if (likely(sync_ret == CUDA_SUCCESS)) {
-        free_gpu_virt_memory(*dptr, host_index);
-      }
+      free_gpu_virt_memory(*dptr, host_index);
     } else {
       // Recorded as virtual memory count during capture
       malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
@@ -3800,11 +3802,9 @@ CALL:
       unlock_gpu_device(lock_fd);
       lock_fd = -1;
       /* Switching from capture to synchronous operation, off the device lock. */
-      CUresult sync_ret = CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
+      CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamSynchronize), hStream);
       /* Release internal accounting only once NVML is guaranteed to see it. */
-      if (likely(sync_ret == CUDA_SUCCESS)) {
-        free_gpu_virt_memory(*dptr, host_index);
-      }
+      free_gpu_virt_memory(*dptr, host_index);
     } else {
       // Recorded as virtual memory count during capture
       malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
@@ -3851,11 +3851,9 @@ CALL:
       unlock_gpu_device(lock_fd);
       lock_fd = -1;
       /* Switching from capture to synchronous operation, off the device lock. */
-      CUresult sync_ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamSynchronize_ptsz, hStream);
       /* Release internal accounting only once NVML is guaranteed to see it. */
-      if (likely(sync_ret == CUDA_SUCCESS)) {
-        free_gpu_virt_memory(*dptr, host_index);
-      }
+      free_gpu_virt_memory(*dptr, host_index);
     } else {
       // Recorded as virtual memory count during capture
       malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);

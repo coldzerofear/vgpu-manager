@@ -457,6 +457,8 @@ void get_used_gpu_memory_by_device(void *, nvmlDevice_t);
  */
 void get_used_gpu_virt_memory(void *, int device_id);
 
+void check_cleanup_vmem_nodes_by_device(int host_index);
+
 void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device_id);
 
 void free_gpu_virt_memory(CUdeviceptr dptr, int device_id);
