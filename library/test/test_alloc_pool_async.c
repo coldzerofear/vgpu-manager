@@ -130,6 +130,48 @@ static int explicit_pool_limit_test(CUdevice dev, CUstream stream) {
   return failed;
 }
 
+/* Allocate through the oversold UVA fallback and return the pointer it handed
+ * out, or 0 if the fallback was not reached.
+ *
+ * The fallback fires when the request would push past the PHYSICAL slice while
+ * still fitting the configured total (cuda_hook.c, MEMORY_PATH_UVA). main()
+ * arranges that window by setting CUDA_MEM_RATIO, which halves real_memory
+ * against the configured total; asking for 60% of the total therefore lands
+ * inside it. Requesting via cuMemAllocAsync is what makes the record an ASYNC
+ * one, which is what cuMemFreeAsync is paired with -- see the note in main().
+ *
+ * Whether the fallback actually fired is checked rather than assumed:
+ * CU_POINTER_ATTRIBUTE_IS_MANAGED distinguishes the managed pointer it returns
+ * from ordinary device memory, so a case built on the wrong kind of pointer
+ * reports that instead of asserting something unrelated. */
+static CUdeviceptr alloc_via_uva_fallback(CUstream stream) {
+  size_t freeb = 0, total = 0;
+  if (cuMemGetInfo(&freeb, &total) != CUDA_SUCCESS || total == 0) return 0;
+
+  size_t want = total / 10 * 6;
+  CUdeviceptr dptr = 0;
+  CUresult r = cuMemAllocAsync(&dptr, want, stream);
+  if (r != CUDA_SUCCESS) {
+    describe("cuMemAllocAsync (want UVA fallback)", r);
+    printf("  could not allocate %zu MiB of a %zu MiB total\n",
+           want / (1024 * 1024), total / (1024 * 1024));
+    return 0;
+  }
+
+  int managed = 0;
+  CUresult q = cuPointerGetAttribute(&managed, CU_POINTER_ATTRIBUTE_IS_MANAGED, dptr);
+  if (q != CUDA_SUCCESS || !managed) {
+    printf("  allocation of %zu MiB (total %zu MiB) came back as ordinary device\n"
+           "  memory, so the oversold UVA fallback was not reached -- is\n"
+           "  CUDA_MEM_RATIO still being applied?\n",
+           want / (1024 * 1024), total / (1024 * 1024));
+    cuMemFreeAsync(dptr, stream);
+    cuStreamSynchronize(stream);
+    return 0;
+  }
+  return dptr;
+}
+
 /* [D] Async-freeing a pointer that came from the oversold UVA fallback.
  *
  * Under memory oversubscription cuMemAllocAsync silently serves the request
@@ -138,22 +180,17 @@ static int explicit_pool_limit_test(CUdevice dev, CUstream stream) {
  * managed pointer with CUDA_ERROR_NOT_SUPPORTED, leaking both the allocation and
  * our vmem accounting (the hook only reconciles the accounting on success).
  *
- * Reaching that fallback needs an oversold config plus a request larger than the
- * physical slice, which a test cannot size portably. cuMemAllocManaged with
- * CU_MEM_ATTACH_GLOBAL registers the pointer in exactly the same virtual-memory
- * list, so it is a faithful stand-in for the pointer the fallback hands out.
- *
  * vgpu-manager specific: unhooked, cuMemFreeAsync on a managed pointer is simply
  * invalid, so this case only asserts under LD_PRELOAD. */
 static int uva_pointer_async_free_test(CUstream stream) {
   const char *preload = getenv("LD_PRELOAD");
   if (preload == NULL || strstr(preload, "libvgpu-control") == NULL) {
     printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n");
-    return 0;
+    return -1;
   }
 
-  CUdeviceptr dptr = 0;
-  CHECK_DRV_API(cuMemAllocManaged(&dptr, ALLOC_BYTES, CU_MEM_ATTACH_GLOBAL));
+  CUdeviceptr dptr = alloc_via_uva_fallback(stream);
+  if (dptr == 0) return 1;
   CUresult f = cuMemFreeAsync(dptr, stream);
   describe("cuMemFreeAsync (managed/UVA pointer)", f);
   if (f != CUDA_SUCCESS) {
@@ -187,11 +224,11 @@ static int uva_pointer_free_during_capture_test(CUstream stream) {
   const char *preload = getenv("LD_PRELOAD");
   if (preload == NULL || strstr(preload, "libvgpu-control") == NULL) {
     printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n");
-    return 0;
+    return -1;
   }
 
-  CUdeviceptr dptr = 0;
-  CHECK_DRV_API(cuMemAllocManaged(&dptr, ALLOC_BYTES, CU_MEM_ATTACH_GLOBAL));
+  CUdeviceptr dptr = alloc_via_uva_fallback(stream);
+  if (dptr == 0) return 1;
   CHECK_DRV_API(cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_GLOBAL));
 
   CUresult f = cuMemFreeAsync(dptr, stream);
@@ -223,6 +260,29 @@ static int uva_pointer_free_during_capture_test(CUstream stream) {
 }
 
 int main(void) {
+  /* Open the oversold window that [D] and [E] need, before the first CUDA call.
+   *
+   * A ratio above 1 makes real_memory = total / ratio and turns oversubscription
+   * on (loader.c), so requests between real_memory and the configured total are
+   * served by the UVA fallback instead of being refused. Setting it here rather
+   * than in the runner keeps the effect to this binary; doing it before cuInit()
+   * is what makes it visible at all, since the library reads its configuration
+   * lazily on the first hooked call and deliberately installs no constructors
+   * (enforced by hack/check_no_constructors.sh).
+   *
+   * [A]-[C] are unaffected: they allocate far below real_memory, and the
+   * explicit-pool path passes allow_uva=0 so it still refuses rather than
+   * diverting to UVA.
+   *
+   * WHY the fallback has to be reached for real: the pointer's record type is
+   * what routes cuMemFreeAsync (MEMORY_TYPE_UVA_ASYNC -> the drain-and-cuMemFree
+   * path). cuMemAllocManaged, which these cases used to stand in with, records a
+   * SYNC pointer instead -- the type paired with cuMemFree -- so it stopped
+   * exercising the async release path once those types were introduced. That
+   * pairing mirrors CUDA's own rule that cuMemFreeAsync only accepts memory from
+   * cuMemAllocAsync, so the stand-in was the stale part, not the library. */
+  setenv("CUDA_MEM_RATIO", "2", 1);
+
   CHECK_DRV_API(cuInit(0));
   CUdevice device;
   CHECK_DRV_API(cuDeviceGet(&device, TEST_DEVICE_ID));
@@ -231,26 +291,32 @@ int main(void) {
   CUstream stream;
   CHECK_DRV_API(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING));
 
-  int failures = 0;
+  int failures = 0, skipped = 0;
+  /* Cases return 0 (passed), 1 (failed) or -1 (did not run); skips are counted
+   * apart from passes so the verdict cannot overstate what was checked. */
+  int rc;
+  #define RUN_CASE(title, call)                                               \
+    do {                                                                      \
+      printf(title "\n");                                                     \
+      rc = (call);                                                            \
+      if (rc < 0) skipped++; else failures += rc;                             \
+    } while (0)
 
-  printf("[A] cuMemAllocAsync + cuMemFreeAsync (default pool)\n");
-  failures += default_pool_async_test(stream);
+  RUN_CASE("[A] cuMemAllocAsync + cuMemFreeAsync (default pool)",
+           default_pool_async_test(stream));
+  RUN_CASE("[B] cuMemAllocFromPoolAsync + cuMemFreeAsync (explicit pool)",
+           explicit_pool_async_test(device, stream));
+  RUN_CASE("[C] cuMemAllocFromPoolAsync honours the memory limit",
+           explicit_pool_limit_test(device, stream));
+  RUN_CASE("[D] cuMemFreeAsync accepts an oversold UVA pointer",
+           uva_pointer_async_free_test(stream));
+  RUN_CASE("[E] cuMemFreeAsync refuses a UVA pointer mid-capture",
+           uva_pointer_free_during_capture_test(stream));
+  #undef RUN_CASE
 
-  printf("[B] cuMemAllocFromPoolAsync + cuMemFreeAsync (explicit pool)\n");
-  failures += explicit_pool_async_test(device, stream);
-
-  printf("[C] cuMemAllocFromPoolAsync honours the memory limit\n");
-  failures += explicit_pool_limit_test(device, stream);
-
-  printf("[D] cuMemFreeAsync accepts an oversold UVA pointer\n");
-  failures += uva_pointer_async_free_test(stream);
-
-  printf("[E] cuMemFreeAsync refuses a UVA pointer mid-capture\n");
-  failures += uva_pointer_free_during_capture_test(stream);
-
-  printf("\nResult: %s\n", failures ? "FAIL" : "PASS");
+  int verdict = vgpu_test_verdict(failures, skipped);
 
   cuStreamDestroy(stream);
   CHECK_DRV_API(cuCtxDestroy(ctx));
-  return failures ? 1 : 0;
+  return verdict;
 }

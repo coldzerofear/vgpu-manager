@@ -91,15 +91,15 @@ static CUresult headroom(size_t *out) {
 /* [A] A burst of stream-ordered allocations must stop at the limit rather than
  * overrunning it while NVML lags behind. */
 static int async_burst_honours_limit(CUstream stream) {
-  if (!preloaded()) { printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n"); return 0; }
+  if (!preloaded()) { printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n"); return -1; }
 
   size_t freeb = 0;
   if (headroom(&freeb) != CUDA_SUCCESS) return 1;
-  if (freeb == 0) { printf("  SKIP (no headroom reported)\n"); return 0; }
+  if (freeb == 0) { printf("  SKIP (no headroom reported)\n"); return -1; }
 
   /* Chunks sized so the limit is reached well inside MAX_CHUNKS. */
   size_t chunk = freeb / 8;
-  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return 0; }
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
 
   CUdeviceptr held[MAX_CHUNKS];
   int n = 0, oom = 0;
@@ -168,13 +168,13 @@ static capture_result_t capture_until_refused(CUstream stream, size_t chunk,
 /* [B] Several allocations inside ONE capture have to accumulate, or the check
  * can never fire and a capture can reserve without bound. */
 static int capture_allocations_accumulate(CUstream stream) {
-  if (!preloaded()) { printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n"); return 0; }
-  if (!ledger_enabled()) { printf("  SKIP (needs VMEMORY_NODE_ENABLED=1)\n"); return 0; }
+  if (!preloaded()) { printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n"); return -1; }
+  if (!ledger_enabled()) { printf("  SKIP (needs VMEMORY_NODE_ENABLED=1)\n"); return -1; }
 
   size_t freeb = 0;
   if (headroom(&freeb) != CUDA_SUCCESS) return 1;
   size_t chunk = freeb / 8;
-  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return 0; }
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
 
   int granted = 0;
   capture_result_t outcome = capture_until_refused(stream, chunk, MAX_CHUNKS, &granted);
@@ -194,13 +194,13 @@ static int capture_allocations_accumulate(CUstream stream) {
  * in one pass, so drive many: each cycle charges a quarter of the limit, and a
  * charge that is never retired starves the fourth cycle onwards. */
 static int capture_charge_is_retired(CUstream stream) {
-  if (!preloaded()) { printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n"); return 0; }
-  if (!ledger_enabled()) { printf("  SKIP (needs VMEMORY_NODE_ENABLED=1)\n"); return 0; }
+  if (!preloaded()) { printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n"); return -1; }
+  if (!ledger_enabled()) { printf("  SKIP (needs VMEMORY_NODE_ENABLED=1)\n"); return -1; }
 
   size_t freeb = 0;
   if (headroom(&freeb) != CUDA_SUCCESS) return 1;
   size_t chunk = freeb / 4;
-  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return 0; }
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
 
   for (int cycle = 1; cycle <= CAPTURE_CYCLES; cycle++) {
     CUresult r = cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_RELAXED);
@@ -230,13 +230,13 @@ static int capture_charge_is_retired(CUstream stream) {
 /* [D] Retiring the same charge at both cuStreamEndCapture and cuGraphDestroy
  * must not credit it twice: the limit has to survive the round trip. */
 static int double_discharge_does_not_over_credit(CUstream stream) {
-  if (!preloaded()) { printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n"); return 0; }
-  if (!ledger_enabled()) { printf("  SKIP (needs VMEMORY_NODE_ENABLED=1)\n"); return 0; }
+  if (!preloaded()) { printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n"); return -1; }
+  if (!ledger_enabled()) { printf("  SKIP (needs VMEMORY_NODE_ENABLED=1)\n"); return -1; }
 
   size_t freeb = 0;
   if (headroom(&freeb) != CUDA_SUCCESS) return 1;
   size_t chunk = freeb / 4;
-  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return 0; }
+  if (chunk == 0) { printf("  SKIP (limit too small to subdivide)\n"); return -1; }
 
   /* One capture that goes through BOTH discharge points. */
   CUresult r = cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_RELAXED);
@@ -283,23 +283,31 @@ int main(void) {
   CUstream stream;
   CHECK_DRV_API(cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING));
 
-  int failures = 0;
+  int failures = 0, skipped = 0;
+  /* Each case returns 0 (passed), 1 (failed) or -1 (did not run). Skips are
+   * counted rather than folded into "passed" so the verdict cannot claim a
+   * coverage it never had -- see vgpu_test_verdict(). */
+  int rc;
+  #define RUN_CASE(title, call)                                               \
+    do {                                                                      \
+      printf(title "\n");                                                     \
+      rc = (call);                                                            \
+      if (rc < 0) skipped++; else failures += rc;                             \
+    } while (0)
 
-  printf("[A] a cuMemAllocAsync burst stops at the memory limit\n");
-  failures += async_burst_honours_limit(stream);
+  RUN_CASE("[A] a cuMemAllocAsync burst stops at the memory limit",
+           async_burst_honours_limit(stream));
+  RUN_CASE("[B] allocations inside one capture accumulate against the limit",
+           capture_allocations_accumulate(stream));
+  RUN_CASE("[C] the capture charge is retired at cuStreamEndCapture",
+           capture_charge_is_retired(stream));
+  RUN_CASE("[D] discharging at both end-of-capture and destroy does not over-credit",
+           double_discharge_does_not_over_credit(stream));
+  #undef RUN_CASE
 
-  printf("[B] allocations inside one capture accumulate against the limit\n");
-  failures += capture_allocations_accumulate(stream);
-
-  printf("[C] the capture charge is retired at cuStreamEndCapture\n");
-  failures += capture_charge_is_retired(stream);
-
-  printf("[D] discharging at both end-of-capture and destroy does not over-credit\n");
-  failures += double_discharge_does_not_over_credit(stream);
-
-  printf("\nResult: %s\n", failures ? "FAIL" : "PASS");
+  int verdict = vgpu_test_verdict(failures, skipped);
 
   cuStreamDestroy(stream);
   CHECK_DRV_API(cuCtxDestroy(ctx));
-  return failures ? 1 : 0;
+  return verdict;
 }

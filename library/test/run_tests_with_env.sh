@@ -41,9 +41,13 @@ export CUDA_CORE_LIMIT=30
 export CUDA_MEM_LIMIT=2048m
 # Turn on the virtual-memory ledger. The limit check only consults it when this
 # is set, and the graph-capture accounting in test_alloc_async_accounting lives
-# entirely in that ledger -- with it off those cases have nothing to assert and
-# report SKIP.
+# entirely in that ledger -- with it off those cases have nothing to assert.
 export VMEMORY_NODE_ENABLED=1
+
+# Everything the tests need is configured above, so a test that reports SKIP
+# here did not find what it was promised: treat that as a failure rather than
+# letting a green summary hide assertions that never ran.
+export VGPU_TEST_STRICT=1
 
 rm -f /etc/vgpu-manager/config/vgpu.config
 
