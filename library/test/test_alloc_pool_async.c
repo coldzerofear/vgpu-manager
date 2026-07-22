@@ -39,8 +39,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>    /* unlink */
+#include <errno.h>
 
 #include "test_utils.h"
+
+/* The library caches its configuration here and only falls back to the
+ * environment when the file is absent (loader.c, load_controller_configuration:
+ * mmap the file, else build from env and write it back). Cases [D]/[E] depend
+ * on that fallback running, see main(). */
+#define VGPU_CONFIG_FILE "/etc/vgpu-manager/config/vgpu.config"
 
 #define ALLOC_BYTES  (32ull * 1024 * 1024)  /* 32 MiB */
 #define OVER_LIMIT   (1024ull * 1024 * 1024) /* how far past `free` case [C] asks */
@@ -162,8 +170,11 @@ static CUdeviceptr alloc_via_uva_fallback(CUstream stream) {
   CUresult q = cuPointerGetAttribute(&managed, CU_POINTER_ATTRIBUTE_IS_MANAGED, dptr);
   if (q != CUDA_SUCCESS || !managed) {
     printf("  allocation of %zu MiB (total %zu MiB) came back as ordinary device\n"
-           "  memory, so the oversold UVA fallback was not reached -- is\n"
-           "  CUDA_MEM_RATIO still being applied?\n",
+           "  memory, so the oversold UVA fallback was not reached.\n"
+           "  The window is real_memory..total, and CUDA_MEM_RATIO=2 is what\n"
+           "  halves real_memory -- check that " VGPU_CONFIG_FILE "\n"
+           "  was removed before cuInit(), since a config file left by an\n"
+           "  earlier test makes the library ignore the environment entirely.\n",
            want / (1024 * 1024), total / (1024 * 1024));
     cuMemFreeAsync(dptr, stream);
     cuStreamSynchronize(stream);
@@ -259,16 +270,31 @@ static int uva_pointer_free_during_capture_test(CUstream stream) {
   return failed;
 }
 
+/* Leave no ratio behind: the next test binary must build its configuration from
+ * the runner's environment, not from ours. A failure here is worth reporting --
+ * it means [D]/[E] are about to run against somebody else's configuration. */
+static void drop_cached_config(void) {
+  if (unlink(VGPU_CONFIG_FILE) != 0 && errno != ENOENT) {
+    printf("  [warn] could not remove %s: %s\n", VGPU_CONFIG_FILE, strerror(errno));
+  }
+}
+
 int main(void) {
   /* Open the oversold window that [D] and [E] need, before the first CUDA call.
    *
    * A ratio above 1 makes real_memory = total / ratio and turns oversubscription
    * on (loader.c), so requests between real_memory and the configured total are
-   * served by the UVA fallback instead of being refused. Setting it here rather
-   * than in the runner keeps the effect to this binary; doing it before cuInit()
-   * is what makes it visible at all, since the library reads its configuration
-   * lazily on the first hooked call and deliberately installs no constructors
-   * (enforced by hack/check_no_constructors.sh).
+   * served by the UVA fallback instead of being refused.
+   *
+   * Both steps below are required. Setting the variable alone does nothing:
+   * tests run in sequence, and by the time this binary starts an earlier one has
+   * already written the config file from the runner's environment, after which
+   * the environment is never consulted again. Removing the file first is what
+   * sends this process down the env path; the library reads it lazily on the
+   * first hooked call and installs no constructors (enforced by
+   * hack/check_no_constructors.sh), so doing this before cuInit() is in time.
+   * The file is removed again on exit so the ratio does not leak into the tests
+   * that run after this one.
    *
    * [A]-[C] are unaffected: they allocate far below real_memory, and the
    * explicit-pool path passes allow_uva=0 so it still refuses rather than
@@ -281,7 +307,9 @@ int main(void) {
    * exercising the async release path once those types were introduced. That
    * pairing mirrors CUDA's own rule that cuMemFreeAsync only accepts memory from
    * cuMemAllocAsync, so the stand-in was the stale part, not the library. */
+  drop_cached_config();
   setenv("CUDA_MEM_RATIO", "2", 1);
+  atexit(drop_cached_config);
 
   CHECK_DRV_API(cuInit(0));
   CUdevice device;
