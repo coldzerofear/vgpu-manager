@@ -464,8 +464,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuSignalExternalSemaphoresAsync_ptsz"},
 //    {.name = "cuStreamBeginCapture"},
 //    {.name = "cuStreamBeginCapture_ptsz"},
-//    {.name = "cuStreamEndCapture"},
-//    {.name = "cuStreamEndCapture_ptsz"},
+    {.name = "cuStreamEndCapture"},
+    {.name = "cuStreamEndCapture_ptsz"},
     {.name = "cuStreamGetCtx"},
     {.name = "cuStreamGetCtx_v2"},
     {.name = "cuStreamGetCtx_ptsz"},
@@ -1876,11 +1876,14 @@ void reset_cuda_index_mapping() {
   pthread_mutex_unlock(&device_index_mutex);
 }
 
-void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_index) {
+static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int type,
+                                         CUgraph graph, int host_index) {
   int found = 0;
   memory_node_t *entry_tmp = NULL;
   struct list_head *iter;
   size_t old_bytes = 0;
+
+  int charged = (host_index >= 0 && host_index < MAX_DEVICE_COUNT) ? host_index : -1;
 
   pthread_mutex_lock(&g_memory_node_lock);
   list_for_each(iter, &g_memory_node->node) {
@@ -1889,6 +1892,8 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_i
       old_bytes = entry_tmp->bytes;
       entry_tmp->bytes = bytes;
       entry_tmp->type = type;
+      entry_tmp->graph = graph;
+      entry_tmp->host_index = charged;
       found = 1;
       break;
     }
@@ -1903,6 +1908,8 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_i
     new_node->dptr = dptr;
     new_node->bytes = bytes;
     new_node->type = type;
+    new_node->graph = graph;
+    new_node->host_index = charged;
     INIT_LIST_HEAD(&new_node->node);
     list_add(&new_node->node, &g_memory_node->node);
   }
@@ -1948,6 +1955,72 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_i
       g_device_vmem->devices[host_index].processes_size++;
     }
     device_vmem_unlock(fd, host_index);
+  }
+}
+
+void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_index) {
+  malloc_gpu_virt_memory_graph(dptr, bytes, type, NULL, host_index);
+}
+
+void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
+                                     CUgraph graph, int host_index) {
+  malloc_gpu_virt_memory_graph(dptr, bytes, MEMORY_TYPE_CAPTURE, graph, host_index);
+}
+
+/* Discharge every capture record owned by graph.
+ *
+ * Each record is discharged against the device recorded when it was charged,
+ * never against a device looked up here: this runs from cuStreamEndCapture,
+ * where the context may already be unusable, and a discharge that gives up
+ * after the nodes are dropped would strand the charge in the shared counter
+ * permanently -- exactly the false-OOM this accounting exists to avoid.
+ *
+ * Nodes are detached under the list mutex first and the shared counter is
+ * updated afterwards, because that update takes the cross-process vmem lock and
+ * must not nest inside the list mutex (free_gpu_virt_memory() orders them the
+ * same way). */
+void free_gpu_virt_memory_by_graph(CUgraph graph) {
+  size_t totals[MAX_DEVICE_COUNT] = {0};
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter, *tmp;
+  int any = 0;
+
+  if (graph == NULL) return;
+
+  pthread_mutex_lock(&g_memory_node_lock);
+  list_for_each_safe(iter, tmp, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    if (entry_tmp == NULL) continue;
+    if (entry_tmp->type == MEMORY_TYPE_CAPTURE && entry_tmp->graph == graph) {
+      int idx = entry_tmp->host_index;
+      if (idx >= 0 && idx < MAX_DEVICE_COUNT) {
+        totals[idx] += entry_tmp->bytes;
+        any = 1;
+      }
+      list_del(&entry_tmp->node);
+      free(entry_tmp);
+    }
+  }
+  pthread_mutex_unlock(&g_memory_node_lock);
+
+  if (!any || g_device_vmem == NULL) return;
+
+  for (int dev = 0; dev < MAX_DEVICE_COUNT; dev++) {
+    if (totals[dev] == 0) continue;
+    LOGGER(VERBOSE, "free captured virt memory to host device %d, graph %p, size %zu",
+           dev, (void *)graph, totals[dev]);
+    int fd = device_vmem_write_lock(dev);
+    if (fd < 0) continue;
+    int pid = getpid();
+    for (int i = 0; i < g_device_vmem->devices[dev].processes_size; i++) {
+      if (g_device_vmem->devices[dev].processes[i].pid == pid) {
+        size_t cur = g_device_vmem->devices[dev].processes[i].used;
+        g_device_vmem->devices[dev].processes[i].used =
+            (cur >= totals[dev]) ? (cur - totals[dev]) : 0;
+        break;
+      }
+    }
+    device_vmem_unlock(fd, dev);
   }
 }
 

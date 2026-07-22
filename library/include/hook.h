@@ -308,11 +308,18 @@ typedef struct {
  *
  * UVA_SYNC / UVA_ASYNC name memory the oversold path handed out as managed
  * memory; only UVA_ASYNC has to drain the stream and fall back to cuMemFree.
- * CAPTURE and ASYNC_BRIDGE both name ordinary device memory that is merely
- * being ACCOUNTED for, and differ in lifetime: a CAPTURE record lives until the
- * application frees the pointer, while an ASYNC_BRIDGE record only covers the
- * window between the driver call and the stream synchronize that makes the
- * allocation visible to NVML -- the allocating hook retires it itself. */
+ *
+ * CAPTURE and ASYNC_BRIDGE both name ordinary device memory that is only being
+ * ACCOUNTED for, and both exist for exactly one reason: to cover a window in
+ * which the allocation is invisible to NVML. They differ in which window.
+ *   ASYNC_BRIDGE spans the driver call to the stream synchronize.
+ *   CAPTURE spans the capture itself. During capture cuMemAllocAsync only
+ *     reserves an address -- no physical memory exists until the graph is
+ *     launched, from which point NVML reports the graph pool. The charge is
+ *     what makes several allocations inside one capture accumulate against the
+ *     limit, and cuStreamEndCapture retires it (see free_gpu_virt_memory_by_graph)
+ *     because holding it past the launch would double-count against NVML and
+ *     leak whenever the graph, rather than the application, owns the pointer. */
 #define MEMORY_TYPE_UVA_SYNC     1
 #define MEMORY_TYPE_UVA_ASYNC    2
 #define MEMORY_TYPE_CAPTURE      3
@@ -323,6 +330,15 @@ typedef struct {
   size_t bytes;
   /* One of MEMORY_TYPE_* above. */
   int type;
+  /* Owning graph, for MEMORY_TYPE_CAPTURE only; NULL otherwise. Records are
+   * only ever charged when this is known, so every charge can be retired at
+   * cuStreamEndCapture. */
+  CUgraph graph;
+  /* Device the record was charged against, or -1 if it was never charged.
+   * Retiring a capture charge must not depend on being able to ask the driver
+   * which device is current -- by then the context may be gone, and failing to
+   * discharge after the node is dropped would strand the charge forever. */
+  int host_index;
   struct list_head node;
 } memory_node_t;
 
@@ -461,7 +477,23 @@ void check_cleanup_vmem_nodes_by_device(int host_index);
 
 void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device_id);
 
+/**
+ * Record a graph-capture allocation. Same as malloc_gpu_virt_memory() with
+ * MEMORY_TYPE_CAPTURE, but ties the record to the capturing graph so
+ * free_gpu_virt_memory_by_graph() can retire it at cuStreamEndCapture.
+ */
+void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
+                                     CUgraph graph, int device_id);
+
 void free_gpu_virt_memory(CUdeviceptr dptr, int device_id);
+
+/**
+ * Retire every capture record belonging to graph, discharging the shared
+ * counter for each. Called when the capture ends -- successfully or not.
+ * Each record carries the device it was charged against, so this needs no
+ * device argument and cannot be defeated by a missing current context.
+ */
+void free_gpu_virt_memory_by_graph(CUgraph graph);
 
 int get_gpu_virt_memory_type(CUdeviceptr dptr);
 

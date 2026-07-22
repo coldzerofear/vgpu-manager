@@ -142,7 +142,9 @@ FORBIDDEN_HELPERS=(
   get_used_gpu_virt_memory
   get_gpu_virt_memory_type
   malloc_gpu_virt_memory
+  malloc_gpu_virt_memory_captured
   free_gpu_virt_memory
+  free_gpu_virt_memory_by_graph
   print_global_vgpu_config
   # Internal data tables shared between cuda_hook.c / nvml_hook.c / loader.c
   # via extern declarations. They must be linker-global at static-link time

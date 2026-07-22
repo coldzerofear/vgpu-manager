@@ -985,10 +985,10 @@ typedef enum {
 //  CUDA_ENTRY_ENUM(cuStreamBeginCapture),
 //  /** cuStreamBeginCapture_ptsz */
 //  CUDA_ENTRY_ENUM(cuStreamBeginCapture_ptsz),
-//  /** cuStreamEndCapture */
-//  CUDA_ENTRY_ENUM(cuStreamEndCapture),
-//  /** cuStreamEndCapture_ptsz */
-//  CUDA_ENTRY_ENUM(cuStreamEndCapture_ptsz),
+  /** cuStreamEndCapture */
+  CUDA_ENTRY_ENUM(cuStreamEndCapture),
+  /** cuStreamEndCapture_ptsz */
+  CUDA_ENTRY_ENUM(cuStreamEndCapture_ptsz),
   /** cuStreamGetCtx */
   CUDA_ENTRY_ENUM(cuStreamGetCtx),
   CUDA_ENTRY_ENUM(cuStreamGetCtx_v2),

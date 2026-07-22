@@ -455,6 +455,8 @@ CUresult cuMemFree_v2(CUdeviceptr dptr);
 CUresult cuMemFree(CUdeviceptr dptr);
 CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream);
 CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream);
+CUresult cuStreamEndCapture(CUstream hStream, CUgraph *phGraph);
+CUresult cuStreamEndCapture_ptsz(CUstream hStream, CUgraph *phGraph);
 
 entry_t cuda_hooks_entry[] = {
     {.name = "cuDriverGetVersion", .fn_ptr = cuDriverGetVersion},
@@ -505,6 +507,8 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuMemFree", .fn_ptr = cuMemFree},
     {.name = "cuMemFreeAsync", .fn_ptr = cuMemFreeAsync},
     {.name = "cuMemFreeAsync_ptsz", .fn_ptr = cuMemFreeAsync_ptsz},
+    {.name = "cuStreamEndCapture", .fn_ptr = cuStreamEndCapture},
+    {.name = "cuStreamEndCapture_ptsz", .fn_ptr = cuStreamEndCapture_ptsz},
 };
 
 const int cuda_hook_nums =
@@ -1443,6 +1447,51 @@ static int stream_is_capturing(CUstream stream, int ptsz) {
     return 1;
   }
   return (cap != CU_STREAM_CAPTURE_STATUS_NONE) ? 1 : 0;
+}
+
+/* Graph currently being captured into by hStream, or NULL if that cannot be
+ * established. `ptsz` selects the entry-point family, for the same reason as in
+ * stream_is_capturing().
+ *
+ * Only _v2 and _v3 report the graph; the original cuStreamGetCaptureInfo yields
+ * a status and an id only, so a driver that exports nothing newer leaves us
+ * unable to identify the capture. NULL is returned in that case, and the caller
+ * MUST then decline to charge the allocation: a charge we cannot attribute to a
+ * graph is a charge cuStreamEndCapture can never retire, which would accumulate
+ * into a permanent overstatement of usage and eventually fail every allocation.
+ * Losing the charge only costs accumulation within that one capture. */
+static CUgraph stream_capture_graph(CUstream stream, int ptsz) {
+  CUstreamCaptureStatus cap = CU_STREAM_CAPTURE_STATUS_NONE;
+  cuuint64_t id = 0;
+  CUgraph graph = NULL;
+  const CUgraphNode *deps = NULL;
+  size_t num_deps = 0;
+  CUresult ret;
+
+  cuda_entry_enum_t v3 = ptsz ? CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v3_ptsz)
+                              : CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v3);
+  if (cuda_library_entry[v3].fn_ptr) {
+    const CUgraphEdgeData *edges = NULL;
+    ret = ((CUresult (*)(CUstream, CUstreamCaptureStatus *, cuuint64_t *, CUgraph *,
+                         const CUgraphNode **, const CUgraphEdgeData **, size_t *))
+           cuda_library_entry[v3].fn_ptr)(stream, &cap, &id, &graph, &deps, &edges, &num_deps);
+    if (ret == CUDA_SUCCESS && cap != CU_STREAM_CAPTURE_STATUS_NONE) {
+      return graph;
+    }
+    return NULL;
+  }
+
+  cuda_entry_enum_t v2 = ptsz ? CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2_ptsz)
+                              : CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2);
+  if (cuda_library_entry[v2].fn_ptr) {
+    ret = ((CUresult (*)(CUstream, CUstreamCaptureStatus *, cuuint64_t *, CUgraph *,
+                         const CUgraphNode **, size_t *))
+           cuda_library_entry[v2].fn_ptr)(stream, &cap, &id, &graph, &deps, &num_deps);
+    if (ret == CUDA_SUCCESS && cap != CU_STREAM_CAPTURE_STATUS_NONE) {
+      return graph;
+    }
+  }
+  return NULL;
 }
 
 /* Returns 1 if this launch enters the GAP path -- the caller MUST then call
@@ -2731,8 +2780,13 @@ ALLOCATED_TO_GPU:
       /* Release internal accounting only once NVML is guaranteed to see it. */
       free_gpu_virt_memory(*dptr, host_index);
     } else {
-      // Recorded as virtual memory count during capture
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
+      /* Charge the capture so that several allocations inside one capture
+       * accumulate against the limit. Chargeable only while the owning graph is
+       * known, because that is what lets cuStreamEndCapture retire it. */
+      CUgraph graph = stream_capture_graph(hStream, __CUDA_API_IS_PTSZ);
+      if (graph != NULL) {
+        malloc_gpu_virt_memory_captured(*dptr, bytesize, graph, host_index);
+      }
     }
     goto DONE;
   } else {
@@ -2800,8 +2854,13 @@ ALLOCATED_TO_GPU:
       /* Release internal accounting only once NVML is guaranteed to see it. */
       free_gpu_virt_memory(*dptr, host_index);
     } else {
-      // Recorded as virtual memory count during capture
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
+      /* Charge the capture so that several allocations inside one capture
+       * accumulate against the limit. Chargeable only while the owning graph is
+       * known, because that is what lets cuStreamEndCapture retire it. */
+      CUgraph graph = stream_capture_graph(hStream, 1);
+      if (graph != NULL) {
+        malloc_gpu_virt_memory_captured(*dptr, bytesize, graph, host_index);
+      }
     }
     goto DONE;
   } else {
@@ -3806,8 +3865,13 @@ CALL:
       /* Release internal accounting only once NVML is guaranteed to see it. */
       free_gpu_virt_memory(*dptr, host_index);
     } else {
-      // Recorded as virtual memory count during capture
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
+      /* Charge the capture so that several allocations inside one capture
+       * accumulate against the limit. Chargeable only while the owning graph is
+       * known, because that is what lets cuStreamEndCapture retire it. */
+      CUgraph graph = stream_capture_graph(hStream, __CUDA_API_IS_PTSZ);
+      if (graph != NULL) {
+        malloc_gpu_virt_memory_captured(*dptr, bytesize, graph, host_index);
+      }
     }
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
@@ -3855,8 +3919,13 @@ CALL:
       /* Release internal accounting only once NVML is guaranteed to see it. */
       free_gpu_virt_memory(*dptr, host_index);
     } else {
-      // Recorded as virtual memory count during capture
-      malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_CAPTURE, host_index);
+      /* Charge the capture so that several allocations inside one capture
+       * accumulate against the limit. Chargeable only while the owning graph is
+       * known, because that is what lets cuStreamEndCapture retire it. */
+      CUgraph graph = stream_capture_graph(hStream, 1);
+      if (graph != NULL) {
+        malloc_gpu_virt_memory_captured(*dptr, bytesize, graph, host_index);
+      }
     }
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
@@ -3981,4 +4050,37 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
   }
 DONE:
   return ret;
+}
+
+/* End of capture is where a capture charge is retired: past this point the
+ * allocations belong to the graph, and once it is launched NVML reports them.
+ *
+ * Two things are deliberately unconditional here.
+ *
+ * The graph is resolved BEFORE ending the capture, because a capture that has
+ * been invalidated makes cuStreamEndCapture fail and leave *phGraph NULL, and
+ * the charge still has to come off in that case.
+ *
+ * The discharge itself ignores the driver's verdict. Whether the graph was
+ * built or thrown away, no memory is held on its behalf yet, so there is
+ * nothing a failure could justify keeping. Any path that skips the discharge
+ * strands the charge in the shared counter for the life of the process, which
+ * is a false OOM waiting to happen -- strictly worse than briefly under-counting
+ * memory that does not exist yet. free_gpu_virt_memory_by_graph() therefore
+ * needs no device argument and cannot fail. */
+static CUresult end_capture_and_discharge(CUstream hStream, CUgraph *phGraph, int ptsz) {
+  CUgraph capturing = stream_capture_graph(hStream, ptsz);
+  CUresult ret = ptsz
+      ? CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamEndCapture_ptsz, hStream, phGraph)
+      : CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamEndCapture, hStream, phGraph);
+  free_gpu_virt_memory_by_graph(capturing);
+  return ret;
+}
+
+CUresult cuStreamEndCapture(CUstream hStream, CUgraph *phGraph) {
+  return end_capture_and_discharge(hStream, phGraph, __CUDA_API_IS_PTSZ);
+}
+
+CUresult cuStreamEndCapture_ptsz(CUstream hStream, CUgraph *phGraph) {
+  return end_capture_and_discharge(hStream, phGraph, 1);
 }
