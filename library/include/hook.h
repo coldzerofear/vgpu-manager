@@ -421,20 +421,13 @@ static inline int get_logger_print_level(void) {
   })
 
 /**
- * Is version detection by driver-pointer identity usable on this driver?
- * Probes once on first call; see getproc_probe() in loader.c. When 0, callers
- * must keep using the legacy ABI-conflict blacklist.
- */
-int getproc_pointer_routing_ready(void);
-
-/**
  * Resolve a pointer the CUDA driver handed out to the symbol it belongs to.
  * Returns 1 when the pointer is a driver entry point this build knows: *hook
  * receives our hook for that exact symbol (NULL when we hook none) and *name
  * its exact symbol name. Returns 0 when the pointer is unknown, which means
  * "cannot route" -- not "do not hook".
  */
-int lookup_driver_route(void *real_fn, void **hook, const char **name);
+void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name);
 
 /**
  * Record, once per symbol and at DETAIL level, a driver symbol that went

@@ -1225,9 +1225,11 @@ static driver_route_t g_routes[CUDA_ENTRY_END];
 static int g_routes_n = 0;
 
 static int route_cmp(const void *a, const void *b) {
-  void *x = ((const driver_route_t *)a)->real_fn;
-  void *y = ((const driver_route_t *)b)->real_fn;
-  return (x > y) - (x < y);
+  const driver_route_t *ra = a, *rb = b;
+  if (ra->real_fn != rb->real_fn) {
+    return (ra->real_fn > rb->real_fn) - (ra->real_fn < rb->real_fn);
+  }
+  return strcmp(ra->name, rb->name);
 }
 
 /* Build the pointer -> hook index. Called once, after the driver table is
@@ -1238,10 +1240,15 @@ static void build_driver_routes(void) {
     void *real = cuda_library_entry[i].fn_ptr;
     if (!real) continue;                      /* symbol absent on this driver */
     void *hook = NULL;
-    for (int j = 0; j < cuda_hook_nums; j++) {
-      if (!strcmp(cuda_library_entry[i].name, cuda_hooks_entry[j].name)) {
-        hook = cuda_hooks_entry[j].fn_ptr;
-        break;
+    if (lib_control) {
+      hook = real_dlsym(lib_control, cuda_library_entry[i].name);
+    }
+    if (!hook) {
+      for (int j = 0; j < cuda_hook_nums; j++) {
+        if (!strcmp(cuda_library_entry[i].name, cuda_hooks_entry[j].name)) {
+          hook = cuda_hooks_entry[j].fn_ptr;
+          break;
+        }
       }
     }
     g_routes[g_routes_n].real_fn = real;
@@ -1272,74 +1279,24 @@ static void build_driver_routes(void) {
  * point we know -- then *hook is our hook for it (NULL if we hook none) and
  * *name its exact symbol. Returns 0 when the pointer is unknown to us, which
  * the caller must treat as "cannot route", not as "do not hook". */
-int lookup_driver_route(void *real_fn, void **hook, const char **name) {
+void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name) {
   int lo = 0, hi = g_routes_n - 1;
   while (lo <= hi) {
     int mid = lo + (hi - lo) / 2;
     void *cur = g_routes[mid].real_fn;
-    if (cur == real_fn) {
-      if (hook) *hook = g_routes[mid].hook_fn;
-      if (name) *name = g_routes[mid].name;
-      return 1;
+
+    if (cur < real_fn) { lo = mid + 1; continue; }
+    if (cur > real_fn) { hi = mid - 1; continue; }
+
+    int cmp = strcmp(g_routes[mid].name, symbol);
+    if (cmp == 0) {
+      *name = g_routes[mid].name;
+      return g_routes[mid].hook_fn;
     }
-    if (cur < real_fn) lo = mid + 1; else hi = mid - 1;
+    if (cmp < 0) lo = mid + 1;
+    else         hi = mid - 1;
   }
-  return 0;
-}
-
-/* Does this driver return, from cuGetProcAddress, the same pointers dlsym gives
- * for the versioned symbols? Everything above depends on it, and NVIDIA does
- * not promise it, so ask rather than assume: resolve two symbols known to have
- * several ABI versions and require both answers to land in the index. A driver
- * that returned trampolines instead would fail this and leave the legacy path
- * in charge rather than silently losing every hook. */
-static pthread_once_t g_getproc_probe_once = PTHREAD_ONCE_INIT;
-static int g_getproc_pointer_mode = 0;
-
-static void getproc_probe(void) {
-  const char *legacy = getenv("CUDA_GETPROC_LEGACY");
-  if (legacy && *legacy && strcmp(legacy, "0") != 0) {
-    LOGGER(INFO, "cuGetProcAddress routing: legacy (forced by CUDA_GETPROC_LEGACY)");
-    return;
-  }
-
-  void *gpa = cuda_library_entry[CUDA_ENTRY_ENUM(cuGetProcAddress)].fn_ptr;
-  void *gdv = cuda_library_entry[CUDA_ENTRY_ENUM(cuDriverGetVersion)].fn_ptr;
-  if (!gpa || !gdv || g_routes_n == 0) {
-    LOGGER(INFO, "cuGetProcAddress routing: legacy (resolver or route index unavailable)");
-    return;
-  }
-
-  int drv = 0;
-  if (((CUresult (*)(int *))gdv)(&drv) != CUDA_SUCCESS || drv <= 0) {
-    LOGGER(INFO, "cuGetProcAddress routing: legacy (driver version unavailable)");
-    return;
-  }
-
-  /* Both have carried several ABIs across CUDA majors, so on any driver new
-   * enough to matter these resolve to a versioned symbol rather than the base. */
-  static const char *const probes[] = { "cuCtxCreate", "cuMemAdvise" };
-  for (unsigned p = 0; p < sizeof(probes) / sizeof(probes[0]); p++) {
-    void *fn = NULL;
-    CUresult r = ((CUresult (*)(const char *, void **, int, cuuint64_t))gpa)(
-                     probes[p], &fn, drv, 0);
-    const char *resolved = NULL;
-    if (r != CUDA_SUCCESS || !fn || !lookup_driver_route(fn, NULL, &resolved)) {
-      LOGGER(INFO, "cuGetProcAddress routing: legacy -- '%s' resolved to a pointer "
-                   "this build cannot name (rc=%d), so version detection by pointer "
-                   "is not reliable on this driver", probes[p], (int)r);
-      return;
-    }
-    LOGGER(VERBOSE, "cuGetProcAddress probe: %s (v=%d) -> %s", probes[p], drv, resolved);
-  }
-
-  g_getproc_pointer_mode = 1;
-  LOGGER(INFO, "cuGetProcAddress routing: pointer-identity (driver %d)", drv);
-}
-
-int getproc_pointer_routing_ready(void) {
-  pthread_once(&g_getproc_probe_once, getproc_probe);
-  return g_getproc_pointer_mode;
+  return NULL;
 }
 
 void load_cuda_libraries() {
@@ -1711,7 +1668,7 @@ static uint32_t symbol_hash(const char *s) {
 }
 
 void note_unhooked_symbol(const char *symbol) {
-  if (!LOGGER_SHOULD_PRINT(DETAIL)) return;
+  if (!LOGGER_SHOULD_PRINT(VERBOSE)) return;
   uint32_t h = symbol_hash(symbol);
   uint32_t i = h & (UNHOOKED_SET_SIZE - 1);
   for (uint32_t p = 0; p < UNHOOKED_PROBES; p++, i = (i + 1) & (UNHOOKED_SET_SIZE - 1)) {
@@ -1719,7 +1676,7 @@ void note_unhooked_symbol(const char *symbol) {
     if (cur == h) return;                           /* already logged */
     if (cur == 0) {
       if (CAS(&g_unhooked_seen[i], 0u, h)) {
-        LOGGER(DETAIL, "unhooked driver symbol '%s'", symbol);
+        LOGGER(VERBOSE, "unhooked driver symbol '%s'", symbol);
         return;
       }
       /* Lost the race for this slot. Re-read before probing on: the winner may
