@@ -1140,7 +1140,7 @@ func (n *NodeInfo) Clone() framework.StateData {
 	return n.DeepCopy()
 }
 
-// StuckGracePeriod bounds how long after Filter writes the pre-allocation
+// stuckGracePeriod bounds how long after Filter writes the pre-allocation
 // the pod's GPU is still considered "current" without further evidence.
 //
 // The grace must distinguish two states that look identical in the pod's
@@ -1155,22 +1155,16 @@ func (n *NodeInfo) Clone() framework.StateData {
 // Typical Kubernetes binding completes in seconds; 30s gives ~6x margin.
 // Operators in pathologically slow clusters may need to raise this.
 var (
-	StuckGracePeriod = 30 * time.Second
+	stuckGracePeriod = 30 * time.Second
 	initOnce         sync.Once
 )
 
-func MustInitGlobalStuckGracePeriod(stuckGracePeriod string) {
+func MustInitGlobalStuckGracePeriod(duration time.Duration) {
 	initOnce.Do(func() {
-		if stuckGracePeriod != "" {
-			duration, err := time.ParseDuration(stuckGracePeriod)
-			if err != nil {
-				klog.Fatalf("parse stuck-grace-period failed: %v", err)
-			}
-			if duration < time.Second {
-				klog.Fatalf("stuck-grace-period not less than 1 second, current: %s", stuckGracePeriod)
-			}
-			StuckGracePeriod = duration
+		if duration < time.Second {
+			klog.Fatalf("stuck-grace-period not less than 1 second, current: %s", stuckGracePeriod.String())
 		}
+		stuckGracePeriod = duration
 	})
 }
 
@@ -1223,18 +1217,18 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 	if predicateTimeNanos/int64(time.Second) <= condition.LastTransitionTime.Unix() {
 		return false
 	}
-	stuckGracePeriod := StuckGracePeriod
+	defaultStuckGracePeriod := stuckGracePeriod
 	stuckDuration := time.Since(time.Unix(0, predicateTimeNanos))
 	// support custom stuck grace period annotations
 	if val, ok := util.HasAnnotation(pod, util.SchedulerStuckGracePeriodAnnotation); ok && val != "" {
 		if gracePeriod, err := time.ParseDuration(val); err != nil {
 			klog.V(5).ErrorS(err, "parse stuck grace period annotation failed, fallback to default values",
-				"pod", klog.KObj(pod), "annotationValue", val, "defaultValue", stuckGracePeriod.String())
+				"pod", klog.KObj(pod), "annotationValue", val, "defaultValue", defaultStuckGracePeriod.String())
 		} else if gracePeriod < time.Second {
 			klog.V(5).ErrorS(nil, "custom stuck grace period not less than 1 second, fallback to default values",
-				"pod", klog.KObj(pod), "annotationValue", val, "defaultValue", stuckGracePeriod.String())
+				"pod", klog.KObj(pod), "annotationValue", val, "defaultValue", defaultStuckGracePeriod.String())
 		} else {
-			stuckGracePeriod = gracePeriod
+			defaultStuckGracePeriod = gracePeriod
 		}
 	}
 	// predicateTime > LTT: filter ran after the condition was set. The
@@ -1243,7 +1237,7 @@ func ShouldCountPodDeviceAllocation(pod *corev1.Pod) bool {
 	// complete — the pod is genuinely stuck and its GPU must be released.
 	// predicateTime in nanoseconds fits in int64 for any realistic wall-clock
 	// time, so the cast is safe.
-	return stuckDuration <= stuckGracePeriod
+	return stuckDuration <= defaultStuckGracePeriod
 }
 
 func (n *NodeInfo) AddPodsUsedResources(pods []*corev1.Pod, opts ...NodeInfoOptionFn) {

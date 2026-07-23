@@ -291,7 +291,7 @@ func Test_ShouldCountPodDeviceAllocation(t *testing.T) {
 	// recent = inside StuckGracePeriod (treat as bind window)
 	// aged   = outside StuckGracePeriod (treat as stuck)
 	recent := now.Add(-1 * time.Second)
-	aged := now.Add(-2 * StuckGracePeriod)
+	aged := now.Add(-2 * stuckGracePeriod)
 
 	type podOpts struct {
 		nodeName       string
@@ -465,7 +465,7 @@ func Test_ShouldCountPodDeviceAllocation(t *testing.T) {
 				// time.Since(aged) ≈ 60s; 10×default = 300s; 60 < 300 → counted.
 				condition:      unschedulableCond(aged.Add(-1 * time.Second)),
 				predicateTime:  nanos(aged),
-				stuckGraceAnno: (10 * StuckGracePeriod).String(),
+				stuckGraceAnno: (10 * stuckGracePeriod).String(),
 			}),
 			want: true,
 		},

@@ -1,4 +1,5 @@
 {{- if .Values.scheduler.enabled -}}
+{{- $schedulerName := .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -71,10 +72,10 @@ spec:
             - --config=/config/config.yaml
             {{- else }}
             - --policy-config-file=/config/config.json
-            - --scheduler-name={{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
+            - --scheduler-name={{ $schedulerName }}
             {{- end }}
             - --leader-elect=true
-            - --leader-elect-resource-name={{ .Values.scheduler.schedulerName | default "vgpu-scheduler" }}
+            - --leader-elect-resource-name={{ $schedulerName }}
             - --leader-elect-resource-namespace={{ .Release.Namespace }}
             {{- range .Values.scheduler.kubeScheduler.args }}
             - {{ . }}
@@ -110,9 +111,12 @@ spec:
             - --enable-tls=true
             - --tls-key-file=/tmp/k8s-webhook-server/serving-certs/tls.key
             - --tls-cert-file=/tmp/k8s-webhook-server/serving-certs/tls.crt
-            - --cert-refresh-interval={{ .Values.scheduler.schedulerExtender.commands.certRefreshInterval | default 5 }}
+            - --cert-refresh-interval={{ .Values.scheduler.schedulerExtender.commands.certRefreshInterval | default "5s" }}
             {{- end }}
             - --stuck-grace-period={{ .Values.scheduler.schedulerExtender.commands.stuckGracePeriod | default "30s" }}
+            - --watch-lease
+            - --leader-elect-resource-name={{ $schedulerName }}
+            - --leader-elect-resource-namespace={{ .Release.Namespace }}
             - --v={{ .Values.scheduler.schedulerExtender.commands.logLevel }}
           ports:
             {{- if .Values.scheduler.schedulerExtender.tls.enabled }}

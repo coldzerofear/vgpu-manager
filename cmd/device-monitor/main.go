@@ -103,8 +103,8 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 	minScrapeIntervalDuration := time.Second
-	if opt.MinScrapeInterval > 1 {
-		minScrapeIntervalDuration *= time.Duration(opt.MinScrapeInterval)
+	if opt.MinScrapeInterval > minScrapeIntervalDuration {
+		minScrapeIntervalDuration = opt.MinScrapeInterval
 	}
 
 	infoCollector := collector.NewBuildInfoCollector(nodeConfig.GetNodeName())

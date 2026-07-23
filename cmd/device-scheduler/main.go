@@ -5,17 +5,23 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/google/uuid"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/component-base/logs"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -74,10 +80,14 @@ func runApp(opt *options.Options) (exitCode int) {
 				"tlsKeyFile: %q, tlsCertFile: %q", opt.TlsKeyFile, opt.TlsCertFile)
 			return exitCode
 		}
+		if opt.CertRefreshInterval <= 0 {
+			klog.Warningf("Certificate refresh interval is less than or equal to 0, " +
+				"and the automatic certificate rotation function will be turned off")
+		}
 
 		tlsConfig, err = tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
 			Enable:  opt.EnableTls,
-			Refresh: time.Duration(opt.CertRefreshInterval) * time.Second,
+			Refresh: opt.CertRefreshInterval,
 			File: tlsconfig.TLSServerFiles{
 				Key:  opt.TlsKeyFile,
 				Cert: opt.TlsCertFile,
@@ -127,6 +137,84 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 
+	if opt.WatchLease && opt.LeaderElect {
+		klog.Errorln("The watch-lease and leader-elect functions are mutually exclusive and cannot be enabled simultaneously")
+		return exitCode
+	}
+	leaseName := strings.TrimSpace(opt.LeaderElectResourceName)
+	leaseNamespace := strings.TrimSpace(opt.LeaderElectResourceNamespace)
+	if opt.WatchLease || opt.LeaderElect {
+		if leaseName == "" {
+			klog.Errorln("Enabling leader-elect or watch-lease requires specifying leader-elect-resource-name")
+			return exitCode
+		}
+		if leaseNamespace == "" {
+			klog.Errorln("Enabling leader-elect or watch-lease requires specifying leader-elect-resource-namespace")
+			return exitCode
+		}
+	}
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	checkIsLeaderFunc := func() bool { return true }
+	if opt.WatchLease {
+		klog.Infoln("Watch lease enabled: Initialize lease detector")
+		leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix)
+		if leaderIdentityPrefix == "" {
+			klog.Errorln("Enabling watch-lease requires specifying leader-identity-prefix")
+			return exitCode
+		}
+		leaseDetector, err := NewLeaseDetector(factory, leaseNamespace, leaseName, leaderIdentityPrefix)
+		if err != nil {
+			klog.Errorf("Initialization of LeaseDetector failed: %v", err)
+			return exitCode
+		}
+		checkIsLeaderFunc = leaseDetector.IsLeader
+	}
+
+	if opt.LeaderElect {
+		klog.Infoln("Leader elect enabled: Initialize leader elect")
+		leaderIdentity := uuid.NewString()
+		leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix)
+		if leaderIdentityPrefix != "" {
+			leaderIdentity = fmt.Sprintf("%s_%s", leaderIdentityPrefix, leaderIdentity)
+		}
+		leaderElector, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
+			Lock: &resourcelock.LeaseLock{
+				LeaseMeta: metav1.ObjectMeta{
+					Name:      leaseName,
+					Namespace: leaseNamespace,
+				},
+				Client: kubeClient.CoordinationV1(),
+				LockConfig: resourcelock.ResourceLockConfig{
+					Identity:      leaderIdentity,
+					EventRecorder: recorder,
+				},
+			},
+			ReleaseOnCancel: false,
+			Callbacks: leaderelection.LeaderCallbacks{
+				OnStartedLeading: func(ctx context.Context) {
+					klog.Infof("started leader identity: %s", leaderIdentity)
+				},
+				OnStoppedLeading: func() {
+					klog.Infoln("stopped leader elect")
+				},
+				OnNewLeader: func(ident string) {
+					if leaderIdentity != ident {
+						klog.Infof("new leader elected: %s", ident)
+					}
+				},
+			},
+		})
+		if err != nil {
+			klog.Errorf("Initialization of LeaderElector failed: %v", err)
+			return exitCode
+		}
+		go leaderElector.Run(ctx)
+		checkIsLeaderFunc = leaderElector.IsLeader
+	}
+
 	handler := httprouter.New()
 	route.AddVersion(handler)
 	route.AddHealthProbe(handler)
@@ -134,13 +222,15 @@ func runApp(opt *options.Options) (exitCode int) {
 		if !util.InformerFactoryHasSynced(factory, req.Context()) {
 			return errors.New("informer has not completed all synchronization")
 		}
+		if !checkIsLeaderFunc() {
+			return errors.New("instance is not a leader")
+		}
 		return nil
 	})
 	route.AddFilterPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
 	route.AddPreemptPredicate(handler, preemptPlugin)
 
-	ctx, cancelFunc := context.WithCancel(context.Background())
 	factory.Start(ctx.Done())
 	if klog.V(4).Enabled() {
 		go func() {

@@ -51,7 +51,7 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["create"]
+    verbs: ["create", "list", "watch"]
   - apiGroups: ["coordination.k8s.io"]
     resourceNames: ["vgpu-manager-scheduler"]
     resources: ["leases"]
@@ -253,10 +253,17 @@ spec:
           command:
             - device-scheduler
             - --server-bind-port=3456
+            - --watch-lease
+            - --leader-elect-resource-name=vgpu-manager-scheduler
+            - --leader-elect-resource-namespace=kube-system
             - --v=4
           env:
             - name: KUBE_FEATURE_WatchListClient
               value: "true"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - name: http
               containerPort: 3456

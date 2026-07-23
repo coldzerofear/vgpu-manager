@@ -97,8 +97,8 @@ scheduler:
       # - GPUTopology
       # Configure as a map of gate name -> bool, e.g. { GPUTopology: true }.
       featureGates: {}
-      # Certificate refresh interval in seconds (TLS only works when enabled)
-      certRefreshInterval: 5
+      # Certificate refresh interval duration (TLS only works when enabled)
+      certRefreshInterval: 5s
       # Scheduling stuck grace period, filtering the maximum delay time to the binding stage.
       stuckGracePeriod: 30s
       logLevel: 3
@@ -261,10 +261,10 @@ devicePlugin:
       featureGates: {}
       # Enable RBAC authentication for metrics service
       enableRBAC: false
-      # Certificate refresh interval in seconds (TLS only works when enabled)
-      certRefreshInterval: 5
-      # Minimum grasping interval in seconds. (must be greater than or equal to 1)
-      minScrapeInterval: 1
+      # Certificate refresh interval duration (TLS only works when enabled)
+      certRefreshInterval: 5s
+      # Minimum grasping interval duration. (must be greater than or equal to 1s)
+      minScrapeInterval: 1s
       logLevel: 3
     # Device monitor container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.

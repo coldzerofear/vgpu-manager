@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -31,9 +32,9 @@ type Options struct {
 	EnableTls           bool
 	TlsKeyFile          string
 	TlsCertFile         string
-	CertRefreshInterval int
-	MinScrapeInterval   int
-	StuckGracePeriod    string
+	CertRefreshInterval time.Duration
+	MinScrapeInterval   time.Duration
+	StuckGracePeriod    time.Duration
 	ContainerDriverRoot string
 	FeatureGate         featuregate.MutableFeatureGate
 }
@@ -43,9 +44,9 @@ const (
 	defaultBurst               = 30
 	defaultServerBindPort      = 3456
 	defaultPprofBindPort       = 0
-	defaultCertRefreshInterval = 5
-	defaultMinScrapeInterval   = 1
-	defaultStuckGracePeriod    = "30s"
+	defaultCertRefreshInterval = 5 * time.Second
+	defaultMinScrapeInterval   = time.Second
+	defaultStuckGracePeriod    = 30 * time.Second
 
 	Component = "deviceMonitor"
 	// SMWatcher feature gate will obtain shared utilization data aggregation corresponding indicators from external observers.
@@ -108,9 +109,9 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.BoolVar(&o.EnableTls, "enable-tls", false, "Open TLS encrypted communication for the server. (default: false)")
 	pflag.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need --enable-tls)")
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
-	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
-	pflag.IntVar(&o.MinScrapeInterval, "min-scrape-interval", o.MinScrapeInterval, "Minimum grasping interval in seconds. (must be greater than or equal to 1)")
-	pflag.StringVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
+	pflag.DurationVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval duration.")
+	pflag.DurationVar(&o.MinScrapeInterval, "min-scrape-interval", o.MinScrapeInterval, "Minimum grasping interval duration. (must be greater than or equal to 1s)")
+	pflag.DurationVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")

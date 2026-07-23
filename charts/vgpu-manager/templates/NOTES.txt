@@ -32,7 +32,7 @@ device-monitor:
   - PprofBindPort :  {{ .Values.devicePlugin.deviceMonitor.commands.pprofBindPort }}
   - EnableTLS     :  {{ .Values.devicePlugin.deviceMonitor.tls.enabled | default false }}
   - EnableRBAC    :  {{ .Values.devicePlugin.deviceMonitor.commands.enableRBAC | default false }}
-  - ScrapeInterval:  {{ .Values.devicePlugin.deviceMonitor.commands.minScrapeInterval | default 1 }}
+  - ScrapeInterval:  {{ .Values.devicePlugin.deviceMonitor.commands.minScrapeInterval | default "1s" }}
   - FeatureGates  :  {{ include "vgpu-manager.featureGates" .Values.devicePlugin.deviceMonitor.commands.featureGates | quote }}
   - LoggerLevel   :  {{ .Values.devicePlugin.deviceMonitor.commands.logLevel }}
 {{- end }}

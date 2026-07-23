@@ -177,9 +177,9 @@ spec:
             - --enable-tls=true
             - --tls-key-file=/tmp/k8s-webhook-server/serving-certs/tls.key
             - --tls-cert-file=/tmp/k8s-webhook-server/serving-certs/tls.crt
-            - --cert-refresh-interval={{ .Values.devicePlugin.deviceMonitor.commands.certRefreshInterval | default 5 }}
+            - --cert-refresh-interval={{ .Values.devicePlugin.deviceMonitor.commands.certRefreshInterval | default "5s" }}
             {{- end }}
-            - --min-scrape-interval={{ .Values.devicePlugin.deviceMonitor.commands.minScrapeInterval | default 1 }}
+            - --min-scrape-interval={{ .Values.devicePlugin.deviceMonitor.commands.minScrapeInterval | default "1s" }}
             {{- if .Values.scheduler.enabled }}
             - --stuck-grace-period={{ .Values.scheduler.schedulerExtender.commands.stuckGracePeriod | default "30s" }}
             {{- end }}
