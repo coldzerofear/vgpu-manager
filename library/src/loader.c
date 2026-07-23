@@ -19,7 +19,6 @@
 //
 // Created by thomas on 6/15/18.
 //
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <dlfcn.h>
@@ -1533,73 +1532,55 @@ static void *resolve_local_hook(const char *symbol, entry_t *entries, int n) {
   return NULL;
 }
 
-/* Strip a trailing _ptsz/_ptds and then a _v<n> from `sym`, giving its base
- * name. "cuStreamGetCaptureInfo_v2_ptsz" -> "cuStreamGetCaptureInfo". */
-static void base_symbol_name(const char *sym, char *out, size_t outn) {
-  size_t len = strlen(sym);
-  if (len > 5 && (strcmp(sym + len - 5, "_ptsz") == 0 ||
-                  strcmp(sym + len - 5, "_ptds") == 0)) {
-    len -= 5;
+/* Record, once, that a cu... / nvml... symbol went through us uninstrumented.
+ *
+ * Reaching here already means the symbol is not one of our hooks, so nothing
+ * further needs deciding -- the point is simply to leave a trail. A driver that
+ * grows a variant we do not intercept (cuFoo_v3 and the like) then shows up in a
+ * DETAIL run instead of being invisible.
+ *
+ * DETAIL because on any real workload this names hundreds of symbols we never
+ * intended to hook; it is a diagnostic, not a warning. The level check comes
+ * first so a normal run pays one comparison and nothing else.
+ *
+ * Dedup is a lock-free open-addressed set of name hashes. A mutex would be
+ * wrong here twice over: it would serialise a path that is otherwise pure
+ * lookup, and it would add another handle-at-fork hazard to a hook the child
+ * calls immediately. Losing a race, or exhausting the probe window, costs at
+ * most a duplicate line -- the right trade for a log. */
+#define UNHOOKED_SET_BITS 11u                       /* 2048 slots, 8 KiB */
+#define UNHOOKED_SET_SIZE (1u << UNHOOKED_SET_BITS)
+#define UNHOOKED_PROBES   8u
+static volatile uint32_t g_unhooked_seen[UNHOOKED_SET_SIZE];
+
+static uint32_t symbol_hash(const char *s) {
+  uint32_t h = 2166136261u;                         /* FNV-1a */
+  while (*s) {
+    h ^= (unsigned char)*s++;
+    h *= 16777619u;
   }
-  size_t i = len;
-  while (i > 0 && isdigit((unsigned char)sym[i - 1])) i--;
-  if (i < len && i >= 2 && sym[i - 1] == 'v' && sym[i - 2] == '_') {
-    len = i - 2;
-  }
-  if (len >= outn) len = outn - 1;
-  memcpy(out, sym, len);
-  out[len] = '\0';
+  return h ? h : 1u;                                /* 0 means "empty slot" */
 }
 
-static int table_has_name(const char *name, entry_t *entries, int n) {
-  for (int i = 0; i < n; i++) {
-    if (!strcmp(name, entries[i].name)) return 1;
+static void note_unhooked_symbol(const char *symbol) {
+  if (!LOGGER_SHOULD_PRINT(DETAIL)) return;
+  uint32_t h = symbol_hash(symbol);
+  uint32_t i = h & (UNHOOKED_SET_SIZE - 1);
+  for (uint32_t p = 0; p < UNHOOKED_PROBES; p++, i = (i + 1) & (UNHOOKED_SET_SIZE - 1)) {
+    uint32_t cur = g_unhooked_seen[i];
+    if (cur == h) return;                           /* already logged */
+    if (cur == 0) {
+      if (CAS(&g_unhooked_seen[i], 0u, h)) {
+        LOGGER(DETAIL, "unhooked driver symbol '%s'", symbol);
+        return;
+      }
+      /* Lost the race for this slot. Re-read before probing on: the winner may
+       * have been another thread recording the SAME symbol, and treating that
+       * as a collision would claim a second slot and log a duplicate. */
+      if (g_unhooked_seen[i] == h) return;
+    }
   }
-  return 0;
-}
-
-/* One-time-per-symbol gate for the drift log below. Returns 1 if `sym` has been
- * seen before; otherwise records it and returns 0. Bounded and best-effort:
- * once full it stops recording, so a symbol seen after the table fills may be
- * re-examined, which only costs a redundant table scan, never a wrong answer. */
-#define DRIFT_SET_MAX  128
-#define DRIFT_NAME_MAX 96
-static char g_drift_seen[DRIFT_SET_MAX][DRIFT_NAME_MAX];
-static int g_drift_seen_n = 0;
-static pthread_mutex_t g_drift_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static int drift_symbol_seen(const char *sym) {
-  int seen = 0;
-  pthread_mutex_lock(&g_drift_lock);
-  for (int i = 0; i < g_drift_seen_n; i++) {
-    if (!strcmp(g_drift_seen[i], sym)) { seen = 1; break; }
-  }
-  if (!seen && g_drift_seen_n < DRIFT_SET_MAX) {
-    snprintf(g_drift_seen[g_drift_seen_n], DRIFT_NAME_MAX, "%s", sym);
-    g_drift_seen_n++;
-  }
-  pthread_mutex_unlock(&g_drift_lock);
-  return seen;
-}
-
-/* Flag the one case worth an operator's attention: a caller resolving a
- * versioned variant we do NOT hook, whose base name we DO hook. That is exactly
- * what a newer driver introducing e.g. cuFoo_v3 looks like -- our instrumentation
- * silently stops covering that call. Logged once per symbol, at WARNING, so a
- * missed function is discoverable from the logs after the fact. A variant whose
- * base we don't hook is intentionally ignored: we never instrumented that family,
- * so there is nothing to have drifted. */
-static void note_unhooked_variant(const char *symbol, entry_t *entries, int n) {
-  char base[DRIFT_NAME_MAX];
-  base_symbol_name(symbol, base, sizeof(base));
-  if (strcmp(base, symbol) == 0) return;          /* not a versioned variant */
-  if (drift_symbol_seen(symbol)) return;          /* already examined once    */
-  if (!table_has_name(base, entries, n)) return;  /* family not hooked at all  */
-  LOGGER(WARNING,
-         "unhooked driver symbol '%s': its base '%s' IS hooked, so a newer "
-         "driver likely added a version variant this library does not intercept "
-         "-- instrumentation is bypassed for callers that resolve it",
-         symbol, base);
+  /* Probe window exhausted: stay quiet rather than repeat on every lookup. */
 }
 
 FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
@@ -1632,14 +1613,14 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
       load_necessary_data();
       goto DONE;
     }
-    note_unhooked_variant(symbol, cuda_hooks_entry, cuda_hook_nums);
+    note_unhooked_symbol(symbol);
   } else if (strncmp(symbol, "nvml", 4) == 0) { // hijack nvml
     result = resolve_local_hook(symbol, nvml_hooks_entry, nvml_hook_nums);
     if (likely(result)) {
       LOGGER(DETAIL, "search found nvml hook %s", symbol);
       goto DONE;
     }
-    note_unhooked_variant(symbol, nvml_hooks_entry, nvml_hook_nums);
+    note_unhooked_symbol(symbol);
   }
   result = real_dlsym(handle, symbol);
 DONE:
@@ -2339,11 +2320,6 @@ void loader_child_after_fork(void) {
   pthread_mutex_init(&tid_dlsym_lock,     NULL);
   pthread_mutex_init(&device_index_mutex, NULL);
   pthread_mutex_init(&init_config_mutex,  NULL);
-  /* Only ever held for the length of a dedup check in the dlsym hook, but
-   * re-init on the same held-at-fork rationale as the others above. The dedup
-   * set is intentionally NOT cleared: the parent's "already warned" record is
-   * still valid in the child and avoids duplicating warnings across a fork. */
-  pthread_mutex_init(&g_drift_lock,       NULL);
   memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
   tid_dlsym_count = 0;
 }

@@ -1,19 +1,21 @@
 /*
- * dlsym hijack: version-drift warning.
+ * dlsym hijack: the unhooked-symbol trail.
  *
- * The dlsym hook (loader.c) warns exactly once when a caller resolves a
- * VERSIONED variant that this library does not hook but whose BASE name it does
- * -- the signature of a newer driver adding e.g. cuFoo_v3 that our
- * instrumentation then silently stops covering. This test drives that path
- * directly; it needs no GPU because every case resolves to "not one of our
- * hooks" and asserts on the warning, not on any device operation.
+ * The dlsym hook (loader.c) records, once per symbol and at DETAIL level, every
+ * cu.../nvml... symbol that passed through it uninstrumented. That trail is what
+ * makes a driver growing a variant we do not intercept -- cuFoo_v3 and the like
+ * -- visible after the fact instead of silent.
  *
- * The warning goes to stderr via LOGGER at WARNING level, which is the default
- * level, so it is visible without LOGGER_LEVEL being set. Each case captures
- * stderr around the dlsym call and inspects it.
+ * Two properties are worth pinning: the note appears at all, and it appears only
+ * once no matter how often the symbol is resolved. The second is what keeps a
+ * DETAIL run readable, and it is the one a naive implementation gets wrong.
  *
- * Only meaningful with the library preloaded (otherwise dlsym is libc's and no
- * hook runs); self-skips otherwise.
+ * No GPU is needed: every symbol used here resolves to "not one of our hooks",
+ * and the assertions are about the log, not about any device operation.
+ *
+ * DETAIL must be active before the library caches its log level, so the test
+ * re-executes itself once with LOGGER_LEVEL set rather than hoping nothing has
+ * logged yet.
  *
  * Run:
  *   LD_PRELOAD=<build>/libvgpu-control.so ./test_dlsym_hijack
@@ -25,17 +27,15 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Run dlsym(RTLD_DEFAULT, symbol) with stderr captured; return whether the
- * captured text contains `needle`. The returned symbol value is irrelevant
- * here -- every symbol used below is deliberately not one of our hooks. */
-static int dlsym_emits(const char *symbol, const char *needle) {
+/* Resolve `symbol` with stderr captured; return 1 if the capture mentions it.
+ * The resolved value is irrelevant -- these symbols are deliberately not ours. */
+static int dlsym_notes(const char *symbol) {
   FILE *cap = tmpfile();
   if (!cap) { perror("tmpfile"); return -1; }
-  int capfd = fileno(cap);
 
   fflush(stderr);
   int saved = dup(STDERR_FILENO);
-  dup2(capfd, STDERR_FILENO);
+  dup2(fileno(cap), STDERR_FILENO);
 
   void *p = dlsym(RTLD_DEFAULT, symbol);
   (void)p;
@@ -44,15 +44,13 @@ static int dlsym_emits(const char *symbol, const char *needle) {
   dup2(saved, STDERR_FILENO);
   close(saved);
 
-  /* Slurp the capture. */
   char buf[8192];
   rewind(cap);
   size_t n = fread(buf, 1, sizeof(buf) - 1, cap);
   buf[n] = '\0';
   fclose(cap);
 
-  int hit = (strstr(buf, needle) != NULL);
-  /* Echo the captured line(s) so a failure shows what actually happened. */
+  int hit = (strstr(buf, symbol) != NULL);
   if (n > 0) {
     char *line = strtok(buf, "\n");
     while (line) { printf("      stderr: %s\n", line); line = strtok(NULL, "\n"); }
@@ -60,43 +58,54 @@ static int dlsym_emits(const char *symbol, const char *needle) {
   return hit;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+  (void)argc;
   const char *preload = getenv("LD_PRELOAD");
   if (preload == NULL || strstr(preload, "libvgpu-control") == NULL) {
     printf("SKIP (needs LD_PRELOAD=libvgpu-control.so)\n");
     return 0;
   }
 
+  /* The library caches its log level on first use, so DETAIL has to be in the
+   * environment from process start. Re-exec once to guarantee that. */
+  if (getenv("LOGGER_LEVEL") == NULL) {
+    setenv("LOGGER_LEVEL", "5", 1);   /* DETAIL */
+    execv("/proc/self/exe", argv);
+    perror("execv");                  /* only reached on failure */
+    return 1;
+  }
+
   int failures = 0;
 
-  /* [A] Versioned variant, hooked base: must warn, and name both the variant
-   * and its base. cuMemAlloc is hooked; _v9 does not exist, so this resolves to
-   * not-a-hook and should trip the drift warning. */
-  printf("[A] unhooked variant of a hooked base warns\n");
-  if (dlsym_emits("cuMemAlloc_v9", "cuMemAlloc_v9") != 1) {
-    printf("  FAIL: expected a warning naming cuMemAlloc_v9\n");
+  /* [A] An unhooked symbol leaves a note. cuMemAlloc_v9 does not exist in any
+   * driver, which keeps the case independent of the CUDA version installed. */
+  printf("[A] an unhooked symbol is recorded\n");
+  if (dlsym_notes("cuMemAlloc_v9") != 1) {
+    printf("  FAIL: expected a DETAIL note naming cuMemAlloc_v9\n");
     failures++;
   }
 
-  /* [B] Dedup: a second resolution of the same symbol must stay silent. */
-  printf("[B] the same variant does not warn twice\n");
-  if (dlsym_emits("cuMemAlloc_v9", "cuMemAlloc_v9") != 0) {
-    printf("  FAIL: the drift warning repeated for the same symbol\n");
+  /* [B] The same symbol stays quiet afterwards. Without dedup a DETAIL run
+   * would repeat a line for every resolution of every unhooked symbol. */
+  printf("[B] the same symbol is not recorded twice\n");
+  if (dlsym_notes("cuMemAlloc_v9") != 0) {
+    printf("  FAIL: the note repeated for a symbol already recorded\n");
     failures++;
   }
 
-  /* [C] Versioned variant whose base we do NOT hook: silent. We never
-   * instrumented that family, so nothing has drifted. */
-  printf("[C] unhooked variant of an unhooked base stays silent\n");
-  if (dlsym_emits("cuNoSuchFamilyXYZ_v2", "cuNoSuchFamilyXYZ") != 0) {
-    printf("  FAIL: warned about a family we never hooked\n");
+  /* [C] A different unhooked symbol still gets its own note -- dedup must be
+   * per symbol, not a one-shot latch. */
+  printf("[C] a different unhooked symbol gets its own note\n");
+  if (dlsym_notes("cuNoSuchFamilyXYZ_v2") != 1) {
+    printf("  FAIL: expected a note naming cuNoSuchFamilyXYZ_v2\n");
     failures++;
   }
 
-  /* [D] A plain base name (not a version variant): silent, even if unhooked. */
-  printf("[D] a plain base symbol does not warn\n");
-  if (dlsym_emits("cuNoSuchFamilyXYZ", "cuNoSuchFamilyXYZ") != 0) {
-    printf("  FAIL: warned about a non-versioned symbol\n");
+  /* [D] A symbol we DO hook is resolved by the hook path and never reaches the
+   * recorder, so it must not appear in the trail. */
+  printf("[D] a hooked symbol leaves no note\n");
+  if (dlsym_notes("cuMemAlloc") != 0) {
+    printf("  FAIL: a hooked symbol was recorded as unhooked\n");
     failures++;
   }
 
