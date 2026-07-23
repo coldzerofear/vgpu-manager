@@ -2342,6 +2342,14 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
     init_devices_mapping();
     pthread_once(&g_init_set, initialization);
 
+    const char *resolved = NULL;
+    void *hook_fn = lookup_cuda_hook_ptr(*pfn, symbol, &resolved);
+    if (hook_fn) {
+      LOGGER(VERBOSE, "cuGetProcAddress: %s (v=%d) -> %s hook", symbol, cudaVersion, resolved);
+      *pfn = hook_fn;
+      goto DONE;
+    }
+
     /*
      * Special case: caller is asking for cuGetProcAddress itself. We MUST
      * return our own wrapper (not real libcuda's pointer) - otherwise the
@@ -2359,40 +2367,6 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
                       "4-arg wrapper to preserve hook coverage");
       *pfn = (void *)cuGetProcAddress;
       goto DONE;
-    }
-
-    /*
-     * Primary routing: let the driver's own choice decide which hook to use.
-     *
-     * *pfn currently holds the ABI-correct pointer real libcuda selected from
-     * `cudaVersion` and `flags`. Naming that pointer tells us the exact symbol
-     * it belongs to -- cuCtxCreate_v4, cuLaunchKernel_ptsz, and so on -- so
-     * substituting the hook registered under that same name cannot mismatch the
-     * ABI. That single rule replaces both the conflict blacklist (a family we
-     * hook no version of simply has no hook to substitute, so the driver
-     * pointer stays) and the hand-written cudaVersion thresholds, which have to
-     * be re-derived every time NVIDIA moves one.
-     *
-     * A pointer we cannot name means we cannot route it, NOT that it should be
-     * left alone: fall through to the legacy path below, which is also what
-     * runs when the probe found this driver's pointers unnameable.
-     */
-    if (getproc_pointer_routing_ready()) {
-      void *hook = NULL;
-      const char *resolved = NULL;
-      if (lookup_driver_route(*pfn, &hook, &resolved)) {
-        if (hook) {
-          LOGGER(VERBOSE, "cuGetProcAddress: %s (v=%d) -> %s hook",
-                          symbol, cudaVersion, resolved);
-          *pfn = hook;
-        } else {
-          /* Known symbol, no hook of ours: leave the driver pointer in place
-           * and leave a trail, since this is how a version we do not intercept
-           * shows up once a driver starts handing it out. */
-          note_unhooked_symbol(resolved);
-        }
-        goto DONE;
-      }
     }
 
     /*
@@ -2443,20 +2417,26 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
     }
 
     if (lib_control) {
-      void *f = real_dlsym(lib_control, symbol);
-      if (likely(f)) {
+      hook_fn = real_dlsym(lib_control, symbol);
+      if (likely(hook_fn)) {
         LOGGER(DETAIL, "cuGetProcAddress matched symbol: %s", symbol);
-        *pfn = f;
+        *pfn = hook_fn;
         goto DONE;
       }
-    }
-    for (int i = 0; i < cuda_hook_nums; i++) {
-      if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
-        LOGGER(VERBOSE, "cuGetProcAddress matched symbol: %s", symbol);
-        *pfn = cuda_hooks_entry[i].fn_ptr;
-        goto DONE;
+    } else {
+      for (int i = 0; i < cuda_hook_nums; i++) {
+        if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
+          LOGGER(VERBOSE, "cuGetProcAddress matched symbol: %s", symbol);
+          *pfn = cuda_hooks_entry[i].fn_ptr;
+          goto DONE;
+        }
       }
     }
+
+    /* Known symbol, no hook of ours: leave the driver pointer in place
+     * and leave a trail, since this is how a version we do not intercept
+     * shows up once a driver starts handing it out. */
+    note_unhooked_symbol(symbol);
   }
 DONE:
   return ret;
@@ -2473,6 +2453,14 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     init_devices_mapping();
     pthread_once(&g_init_set, initialization);
 
+    const char *resolved = NULL;
+    void *hook_fn = lookup_cuda_hook_ptr(*pfn, symbol, &resolved);
+    if (hook_fn) {
+      LOGGER(VERBOSE, "cuGetProcAddress_v2: %s (v=%d) -> %s hook", symbol, cudaVersion, resolved);
+      *pfn = hook_fn;
+      goto DONE;
+    }
+
     /*
      * Self-lookup special case - see cuGetProcAddress (4-arg hook) above
      * for the full rationale. Here the caller is in the 5-arg v2 hook, so
@@ -2485,24 +2473,6 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                       "self-lookup with our 5-arg _v2 wrapper");
       *pfn = (void *)cuGetProcAddress_v2;
       goto DONE;
-    }
-
-    /* Same driver-pointer routing as in cuGetProcAddress above -- see the
-     * comment there for why naming the driver's own choice is what makes the
-     * ABI match by construction. */
-    if (getproc_pointer_routing_ready()) {
-      void *hook = NULL;
-      const char *resolved = NULL;
-      if (lookup_driver_route(*pfn, &hook, &resolved)) {
-        if (hook) {
-          LOGGER(VERBOSE, "cuGetProcAddress_v2: %s (v=%d) -> %s hook",
-                          symbol, cudaVersion, resolved);
-          *pfn = hook;
-        } else {
-          note_unhooked_symbol(resolved);
-        }
-        goto DONE;
-      }
     }
 
     /* Same ABI-conflict defense as in cuGetProcAddress above - must run
@@ -2530,20 +2500,26 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     }
 
     if (lib_control) {
-      void *f = real_dlsym(lib_control, symbol);
-      if (likely(f)) {
+      hook_fn = real_dlsym(lib_control, symbol);
+      if (likely(hook_fn)) {
         LOGGER(DETAIL, "cuGetProcAddress_v2 matched symbol: %s", symbol);
-        *pfn = f;
+        *pfn = hook_fn;
         goto DONE;
       }
-    }
-    for (int i = 0; i < cuda_hook_nums; i++) {
-      if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
-        LOGGER(VERBOSE, "cuGetProcAddress_v2 matched symbol: %s", symbol);
-        *pfn = cuda_hooks_entry[i].fn_ptr;
-        goto DONE;
+    } else {
+      for (int i = 0; i < cuda_hook_nums; i++) {
+        if (!strcmp(symbol, cuda_hooks_entry[i].name)) {
+          LOGGER(VERBOSE, "cuGetProcAddress_v2 matched symbol: %s", symbol);
+          *pfn = cuda_hooks_entry[i].fn_ptr;
+          goto DONE;
+        }
       }
     }
+
+    /* Known symbol, no hook of ours: leave the driver pointer in place
+     * and leave a trail, since this is how a version we do not intercept
+     * shows up once a driver starts handing it out. */
+    note_unhooked_symbol(symbol);
   }
 DONE:
   return ret;

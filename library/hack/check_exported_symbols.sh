@@ -138,8 +138,7 @@ FORBIDDEN_HELPERS=(
   get_compatibility_mode
   get_used_gpu_memory_by_device
   get_used_gpu_virt_memory
-  getproc_pointer_routing_ready
-  lookup_driver_route
+  lookup_cuda_hook_ptr
   note_unhooked_symbol
   malloc_gpu_virt_memory
   free_gpu_virt_memory
