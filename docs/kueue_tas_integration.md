@@ -221,7 +221,7 @@ Kueue 的统计是**节点级、按 vgpu-number 整数**,它**看不到节点内
 > Kueue 按 rack 级总量认为"这个 rack 装得下"→ 注入 rack 级 NodeSelector;但 rack 内每个节点的 8 张卡都分属两个不连通的 4 卡 NVLink 域,Pod 要 8 连通卡时 vgpu-manager 的 **link-strict** 逐个拒绝 → Pod 被限定在该 rack 内、又出不去 → **Pending**。(hostname-最细层时则是钉死到单节点后被拒。)
 
 **缓解(按推荐度)**:
-1. **整机整域**:DGX/HGX 单节点 8 卡本就是一个 NVSwitch 域(不分裂)→ 此问题不存在。绝大多数训练机型如此。
+1. **整机整域**:DGX/HGX 单节点 8 卡本就是一个 NVSwitch 域(不分裂)→ 此问题不存在。绝大多数训练机型如此。**⚠️ 该结论依赖 NVSwitch 上的 NVLink 能被探测到**——修复前 `GetNVLink` 只按"远端 BusID == 对端 GPU"匹配,而 NVSwitch 的远端是交换机,导致这类节点被判成 8 个孤岛(此缓解手段随之失效)。已修复,见 `cross_pod_nvlink_topology_design.md` §9.6;需重新部署 device-plugin 才生效。
 2. **用非 strict link**(`device-topology-mode: link` 而非 `link-strict`):装不下时 vgpu-manager 降级而非拒绝,避免钉死 Pending。
 3. **整卡申请**(§6):让 Kueue 的卡数统计 = 实际占用,消除显存/算力维度的失配。
 4. **(可选未来开发,非必须)** 若要硬保证:vgpu-manager 把"节点最大 NVLink 连通分量可用卡数"暴露为节点 label / 扩展资源,并把 NVLink 域建模为 Kueue Topology 的**最细一层**(替代 hostname)。这样 Kueue 的域统计直接以连通分量为单位,失配消失。**这是唯一可能的额外开发项,且仅在"单节点多 NVLink 域 + 要硬保证"时才需要**——属于进阶,默认不做。
