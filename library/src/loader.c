@@ -19,6 +19,7 @@
 //
 // Created by thomas on 6/15/18.
 //
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <dlfcn.h>
@@ -1511,6 +1512,96 @@ extern const int cuda_hook_nums;
 extern entry_t nvml_hooks_entry[];
 extern const int nvml_hook_nums;
 
+/* Resolve our hook for `symbol` from a hijack table.
+ *
+ * Every hook is exported under its own name (the version script matches
+ * cu[A-Z]* / nvml[A-Z]*), so when lib_control -- a dlopen handle on our own
+ * .so -- is available, the dynamic linker's hash finds any hook in O(1). A miss
+ * there is conclusive: the symbol is not one of our hooks, and the linear table
+ * scan would only reconfirm that. The scan is therefore kept solely for the
+ * degraded case where self-dlopen failed (e.g. tests LD_PRELOAD a build-tree
+ * .so that is not at CONTROLLER_DRIVER_FILE_PATH), where it is the only route. */
+static void *resolve_local_hook(const char *symbol, entry_t *entries, int n) {
+  if (likely(lib_control)) {
+    return real_dlsym(lib_control, symbol);
+  }
+  for (int i = 0; i < n; i++) {
+    if (unlikely(!strcmp(symbol, entries[i].name))) {
+      return entries[i].fn_ptr;
+    }
+  }
+  return NULL;
+}
+
+/* Strip a trailing _ptsz/_ptds and then a _v<n> from `sym`, giving its base
+ * name. "cuStreamGetCaptureInfo_v2_ptsz" -> "cuStreamGetCaptureInfo". */
+static void base_symbol_name(const char *sym, char *out, size_t outn) {
+  size_t len = strlen(sym);
+  if (len > 5 && (strcmp(sym + len - 5, "_ptsz") == 0 ||
+                  strcmp(sym + len - 5, "_ptds") == 0)) {
+    len -= 5;
+  }
+  size_t i = len;
+  while (i > 0 && isdigit((unsigned char)sym[i - 1])) i--;
+  if (i < len && i >= 2 && sym[i - 1] == 'v' && sym[i - 2] == '_') {
+    len = i - 2;
+  }
+  if (len >= outn) len = outn - 1;
+  memcpy(out, sym, len);
+  out[len] = '\0';
+}
+
+static int table_has_name(const char *name, entry_t *entries, int n) {
+  for (int i = 0; i < n; i++) {
+    if (!strcmp(name, entries[i].name)) return 1;
+  }
+  return 0;
+}
+
+/* One-time-per-symbol gate for the drift log below. Returns 1 if `sym` has been
+ * seen before; otherwise records it and returns 0. Bounded and best-effort:
+ * once full it stops recording, so a symbol seen after the table fills may be
+ * re-examined, which only costs a redundant table scan, never a wrong answer. */
+#define DRIFT_SET_MAX  128
+#define DRIFT_NAME_MAX 96
+static char g_drift_seen[DRIFT_SET_MAX][DRIFT_NAME_MAX];
+static int g_drift_seen_n = 0;
+static pthread_mutex_t g_drift_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int drift_symbol_seen(const char *sym) {
+  int seen = 0;
+  pthread_mutex_lock(&g_drift_lock);
+  for (int i = 0; i < g_drift_seen_n; i++) {
+    if (!strcmp(g_drift_seen[i], sym)) { seen = 1; break; }
+  }
+  if (!seen && g_drift_seen_n < DRIFT_SET_MAX) {
+    snprintf(g_drift_seen[g_drift_seen_n], DRIFT_NAME_MAX, "%s", sym);
+    g_drift_seen_n++;
+  }
+  pthread_mutex_unlock(&g_drift_lock);
+  return seen;
+}
+
+/* Flag the one case worth an operator's attention: a caller resolving a
+ * versioned variant we do NOT hook, whose base name we DO hook. That is exactly
+ * what a newer driver introducing e.g. cuFoo_v3 looks like -- our instrumentation
+ * silently stops covering that call. Logged once per symbol, at WARNING, so a
+ * missed function is discoverable from the logs after the fact. A variant whose
+ * base we don't hook is intentionally ignored: we never instrumented that family,
+ * so there is nothing to have drifted. */
+static void note_unhooked_variant(const char *symbol, entry_t *entries, int n) {
+  char base[DRIFT_NAME_MAX];
+  base_symbol_name(symbol, base, sizeof(base));
+  if (strcmp(base, symbol) == 0) return;          /* not a versioned variant */
+  if (drift_symbol_seen(symbol)) return;          /* already examined once    */
+  if (!table_has_name(base, entries, n)) return;  /* family not hooked at all  */
+  LOGGER(WARNING,
+         "unhooked driver symbol '%s': its base '%s' IS hooked, so a newer "
+         "driver likely added a version variant this library does not intercept "
+         "-- instrumentation is bypassed for callers that resolve it",
+         symbol, base);
+}
+
 FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   static __thread int recursion_depth = 0;
   if (recursion_depth > 0) {
@@ -1522,7 +1613,6 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   LOGGER(DETAIL, "into dlsym %s", symbol);
   init_real_dlsym();
 
-  int i;
   void* result = NULL;
   if (handle == RTLD_NEXT) {
     pthread_once(&init_dlsym_flag, init_tid_dlsyms);
@@ -1536,37 +1626,20 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     pthread_mutex_unlock(&tid_dlsym_lock);
     goto DONE;
   } else if (strncmp(symbol, "cu", 2) == 0) { // hijack cuda
-    if (likely(lib_control)) {
-      result = real_dlsym(lib_control, symbol);
-      if (likely(result)) {
-        LOGGER(DETAIL, "search found cuda hook %s", symbol);
-        load_necessary_data();
-        goto DONE;
-      }
+    result = resolve_local_hook(symbol, cuda_hooks_entry, cuda_hook_nums);
+    if (likely(result)) {
+      LOGGER(DETAIL, "search found cuda hook %s", symbol);
+      load_necessary_data();
+      goto DONE;
     }
-    for (i = 0; i < cuda_hook_nums; i++) {
-      if (unlikely(!strcmp(symbol, cuda_hooks_entry[i].name))) {
-        result = cuda_hooks_entry[i].fn_ptr;
-        LOGGER(DETAIL, "search found cuda hook %s", symbol);
-        load_necessary_data();
-        goto DONE;
-      }
-    }
+    note_unhooked_variant(symbol, cuda_hooks_entry, cuda_hook_nums);
   } else if (strncmp(symbol, "nvml", 4) == 0) { // hijack nvml
-    if (likely(lib_control)) {
-      result = real_dlsym(lib_control, symbol);
-      if (likely(result)) {
-        LOGGER(DETAIL, "search found nvml hook %s", symbol);
-        goto DONE;
-      }
+    result = resolve_local_hook(symbol, nvml_hooks_entry, nvml_hook_nums);
+    if (likely(result)) {
+      LOGGER(DETAIL, "search found nvml hook %s", symbol);
+      goto DONE;
     }
-    for (i = 0; i < nvml_hook_nums; i++) {
-      if (unlikely(!strcmp(symbol, nvml_hooks_entry[i].name))) {
-        result = nvml_hooks_entry[i].fn_ptr;
-        LOGGER(DETAIL, "search found nvml hook %s", symbol);
-        goto DONE;
-      }
-    }
+    note_unhooked_variant(symbol, nvml_hooks_entry, nvml_hook_nums);
   }
   result = real_dlsym(handle, symbol);
 DONE:
@@ -2266,6 +2339,11 @@ void loader_child_after_fork(void) {
   pthread_mutex_init(&tid_dlsym_lock,     NULL);
   pthread_mutex_init(&device_index_mutex, NULL);
   pthread_mutex_init(&init_config_mutex,  NULL);
+  /* Only ever held for the length of a dedup check in the dlsym hook, but
+   * re-init on the same held-at-fork rationale as the others above. The dedup
+   * set is intentionally NOT cleared: the parent's "already warned" record is
+   * still valid in the child and avoids duplicating warnings across a fork. */
+  pthread_mutex_init(&g_drift_lock,       NULL);
   memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
   tid_dlsym_count = 0;
 }
