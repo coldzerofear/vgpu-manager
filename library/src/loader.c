@@ -1668,7 +1668,7 @@ static uint32_t symbol_hash(const char *s) {
 }
 
 void note_unhooked_symbol(const char *symbol) {
-  if (!LOGGER_SHOULD_PRINT(DETAIL)) return;
+  if (!LOGGER_SHOULD_PRINT(VERBOSE)) return;
   uint32_t h = symbol_hash(symbol);
   uint32_t i = h & (UNHOOKED_SET_SIZE - 1);
   for (uint32_t p = 0; p < UNHOOKED_PROBES; p++, i = (i + 1) & (UNHOOKED_SET_SIZE - 1)) {
