@@ -1192,6 +1192,156 @@ static void load_nvml_single_library(int idx) {
   dlclose(table);
 }
 
+extern entry_t cuda_hooks_entry[];
+extern const int cuda_hook_nums;
+
+/* ---- driver-pointer routing for cuGetProcAddress ------------------------- *
+ *
+ * cuGetProcAddress hands the caller an ABI-correct pointer chosen from
+ * `cudaVersion` and `flags`: asking for "cuCtxCreate" yields cuCtxCreate_v2,
+ * _v3 or _v4 depending on the version asked for, and asking for a stream
+ * function under CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM yields the _ptsz
+ * twin. Substituting our hook by BASE NAME therefore risks binding a caller to
+ * a hook whose ABI does not match what the driver picked -- the parameter frame
+ * is then wrong on the very next call.
+ *
+ * The driver has already made that choice, and it is legible: on every driver
+ * measured, the pointer it returns is exactly the one dlsym gives for the
+ * corresponding versioned symbol. So instead of guessing the version from
+ * cudaVersion thresholds, we look the pointer up and substitute the hook whose
+ * name matches EXACTLY -- making an ABI mismatch structurally impossible, and
+ * subsuming both the conflict blacklist and the hand-written version routing.
+ *
+ * The equality is not something NVIDIA documents, so it is verified once at
+ * runtime (getproc_probe) and the whole mechanism stays off unless it holds;
+ * the legacy blacklist path remains as the fallback. */
+typedef struct {
+  void       *real_fn;   /* pointer the driver hands out for this exact symbol */
+  void       *hook_fn;   /* our hook of the same name, or NULL if we hook none */
+  const char *name;      /* the exact symbol name, e.g. "cuCtxCreate_v4"       */
+} driver_route_t;
+
+static driver_route_t g_routes[CUDA_ENTRY_END];
+static int g_routes_n = 0;
+
+static int route_cmp(const void *a, const void *b) {
+  void *x = ((const driver_route_t *)a)->real_fn;
+  void *y = ((const driver_route_t *)b)->real_fn;
+  return (x > y) - (x < y);
+}
+
+/* Build the pointer -> hook index. Called once, after the driver table is
+ * resolved; read-only from then on, so lookups need no locking. */
+static void build_driver_routes(void) {
+  g_routes_n = 0;
+  for (int i = 0; i < CUDA_ENTRY_END; i++) {
+    void *real = cuda_library_entry[i].fn_ptr;
+    if (!real) continue;                      /* symbol absent on this driver */
+    void *hook = NULL;
+    for (int j = 0; j < cuda_hook_nums; j++) {
+      if (!strcmp(cuda_library_entry[i].name, cuda_hooks_entry[j].name)) {
+        hook = cuda_hooks_entry[j].fn_ptr;
+        break;
+      }
+    }
+    g_routes[g_routes_n].real_fn = real;
+    g_routes[g_routes_n].hook_fn = hook;
+    g_routes[g_routes_n].name    = cuda_library_entry[i].name;
+    g_routes_n++;
+  }
+  qsort(g_routes, g_routes_n, sizeof(g_routes[0]), route_cmp);
+
+  /* Distinct names can alias to one address (an unversioned name that is just
+   * the current version). Such a run must answer consistently, so give every
+   * entry in it whichever hook the run has: the address IS that function, so a
+   * hook registered under any of its names has its ABI. */
+  for (int i = 0; i < g_routes_n; ) {
+    int j = i;
+    void *hook = NULL;
+    while (j < g_routes_n && g_routes[j].real_fn == g_routes[i].real_fn) {
+      if (!hook && g_routes[j].hook_fn) hook = g_routes[j].hook_fn;
+      j++;
+    }
+    if (hook) for (int k = i; k < j; k++) g_routes[k].hook_fn = hook;
+    i = j;
+  }
+  LOGGER(VERBOSE, "driver route index built: %d entries", g_routes_n);
+}
+
+/* Look up a pointer the driver handed out. Returns 1 when it is a driver entry
+ * point we know -- then *hook is our hook for it (NULL if we hook none) and
+ * *name its exact symbol. Returns 0 when the pointer is unknown to us, which
+ * the caller must treat as "cannot route", not as "do not hook". */
+int lookup_driver_route(void *real_fn, void **hook, const char **name) {
+  int lo = 0, hi = g_routes_n - 1;
+  while (lo <= hi) {
+    int mid = lo + (hi - lo) / 2;
+    void *cur = g_routes[mid].real_fn;
+    if (cur == real_fn) {
+      if (hook) *hook = g_routes[mid].hook_fn;
+      if (name) *name = g_routes[mid].name;
+      return 1;
+    }
+    if (cur < real_fn) lo = mid + 1; else hi = mid - 1;
+  }
+  return 0;
+}
+
+/* Does this driver return, from cuGetProcAddress, the same pointers dlsym gives
+ * for the versioned symbols? Everything above depends on it, and NVIDIA does
+ * not promise it, so ask rather than assume: resolve two symbols known to have
+ * several ABI versions and require both answers to land in the index. A driver
+ * that returned trampolines instead would fail this and leave the legacy path
+ * in charge rather than silently losing every hook. */
+static pthread_once_t g_getproc_probe_once = PTHREAD_ONCE_INIT;
+static int g_getproc_pointer_mode = 0;
+
+static void getproc_probe(void) {
+  const char *legacy = getenv("CUDA_GETPROC_LEGACY");
+  if (legacy && *legacy && strcmp(legacy, "0") != 0) {
+    LOGGER(INFO, "cuGetProcAddress routing: legacy (forced by CUDA_GETPROC_LEGACY)");
+    return;
+  }
+
+  void *gpa = cuda_library_entry[CUDA_ENTRY_ENUM(cuGetProcAddress)].fn_ptr;
+  void *gdv = cuda_library_entry[CUDA_ENTRY_ENUM(cuDriverGetVersion)].fn_ptr;
+  if (!gpa || !gdv || g_routes_n == 0) {
+    LOGGER(INFO, "cuGetProcAddress routing: legacy (resolver or route index unavailable)");
+    return;
+  }
+
+  int drv = 0;
+  if (((CUresult (*)(int *))gdv)(&drv) != CUDA_SUCCESS || drv <= 0) {
+    LOGGER(INFO, "cuGetProcAddress routing: legacy (driver version unavailable)");
+    return;
+  }
+
+  /* Both have carried several ABIs across CUDA majors, so on any driver new
+   * enough to matter these resolve to a versioned symbol rather than the base. */
+  static const char *const probes[] = { "cuCtxCreate", "cuMemAdvise" };
+  for (unsigned p = 0; p < sizeof(probes) / sizeof(probes[0]); p++) {
+    void *fn = NULL;
+    CUresult r = ((CUresult (*)(const char *, void **, int, cuuint64_t))gpa)(
+                     probes[p], &fn, drv, 0);
+    const char *resolved = NULL;
+    if (r != CUDA_SUCCESS || !fn || !lookup_driver_route(fn, NULL, &resolved)) {
+      LOGGER(INFO, "cuGetProcAddress routing: legacy -- '%s' resolved to a pointer "
+                   "this build cannot name (rc=%d), so version detection by pointer "
+                   "is not reliable on this driver", probes[p], (int)r);
+      return;
+    }
+    LOGGER(VERBOSE, "cuGetProcAddress probe: %s (v=%d) -> %s", probes[p], drv, resolved);
+  }
+
+  g_getproc_pointer_mode = 1;
+  LOGGER(INFO, "cuGetProcAddress routing: pointer-identity (driver %d)", drv);
+}
+
+int getproc_pointer_routing_ready(void) {
+  pthread_once(&g_getproc_probe_once, getproc_probe);
+  return g_getproc_pointer_mode;
+}
+
 void load_cuda_libraries() {
   void *table = NULL;
   int i = 0;
@@ -1224,6 +1374,7 @@ void load_cuda_libraries() {
 
   LOGGER(INFO,"loaded cuda libraries");
   dlclose(table);
+  build_driver_routes();
 }
 
 static void matchRegex(const char *pattern, const char *matchString,
@@ -1505,9 +1656,6 @@ int check_tid_dlsyms(pthread_t tid, void *pointer){
   return 0;
 }
 
-extern entry_t cuda_hooks_entry[];
-extern const int cuda_hook_nums;
-
 extern entry_t nvml_hooks_entry[];
 extern const int nvml_hook_nums;
 
@@ -1562,7 +1710,7 @@ static uint32_t symbol_hash(const char *s) {
   return h ? h : 1u;                                /* 0 means "empty slot" */
 }
 
-static void note_unhooked_symbol(const char *symbol) {
+void note_unhooked_symbol(const char *symbol) {
   if (!LOGGER_SHOULD_PRINT(DETAIL)) return;
   uint32_t h = symbol_hash(symbol);
   uint32_t i = h & (UNHOOKED_SET_SIZE - 1);

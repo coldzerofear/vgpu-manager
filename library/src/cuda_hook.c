@@ -2362,6 +2362,44 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
     }
 
     /*
+     * Primary routing: let the driver's own choice decide which hook to use.
+     *
+     * *pfn currently holds the ABI-correct pointer real libcuda selected from
+     * `cudaVersion` and `flags`. Naming that pointer tells us the exact symbol
+     * it belongs to -- cuCtxCreate_v4, cuLaunchKernel_ptsz, and so on -- so
+     * substituting the hook registered under that same name cannot mismatch the
+     * ABI. That single rule replaces both the conflict blacklist (a family we
+     * hook no version of simply has no hook to substitute, so the driver
+     * pointer stays) and the hand-written cudaVersion thresholds, which have to
+     * be re-derived every time NVIDIA moves one.
+     *
+     * A pointer we cannot name means we cannot route it, NOT that it should be
+     * left alone: fall through to the legacy path below, which is also what
+     * runs when the probe found this driver's pointers unnameable.
+     */
+    if (getproc_pointer_routing_ready()) {
+      void *hook = NULL;
+      const char *resolved = NULL;
+      if (lookup_driver_route(*pfn, &hook, &resolved)) {
+        if (hook) {
+          LOGGER(VERBOSE, "cuGetProcAddress: %s (v=%d) -> %s hook",
+                          symbol, cudaVersion, resolved);
+          *pfn = hook;
+        } else {
+          /* Known symbol, no hook of ours: leave the driver pointer in place
+           * and leave a trail, since this is how a version we do not intercept
+           * shows up once a driver starts handing it out. */
+          note_unhooked_symbol(resolved);
+        }
+        goto DONE;
+      }
+    }
+
+    /*
+     * Legacy fallback. Reached when pointer routing is off (probe failed, or
+     * CUDA_GETPROC_LEGACY set) or when the driver returned a pointer this build
+     * cannot name.
+     *
      * ABI-conflict defense (MUST run before the lib_control / hooks_entry
      * substitution below). Real libcuda's cuGetProcAddress has already
      * written an ABI-correct function pointer to *pfn based on `cudaVersion`
@@ -2447,6 +2485,24 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
                       "self-lookup with our 5-arg _v2 wrapper");
       *pfn = (void *)cuGetProcAddress_v2;
       goto DONE;
+    }
+
+    /* Same driver-pointer routing as in cuGetProcAddress above -- see the
+     * comment there for why naming the driver's own choice is what makes the
+     * ABI match by construction. */
+    if (getproc_pointer_routing_ready()) {
+      void *hook = NULL;
+      const char *resolved = NULL;
+      if (lookup_driver_route(*pfn, &hook, &resolved)) {
+        if (hook) {
+          LOGGER(VERBOSE, "cuGetProcAddress_v2: %s (v=%d) -> %s hook",
+                          symbol, cudaVersion, resolved);
+          *pfn = hook;
+        } else {
+          note_unhooked_symbol(resolved);
+        }
+        goto DONE;
+      }
     }
 
     /* Same ABI-conflict defense as in cuGetProcAddress above - must run
