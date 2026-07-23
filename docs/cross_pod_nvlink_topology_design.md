@@ -127,7 +127,7 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 
 **场景**:每 Pod 取节点子集(如 4/8)且节点有多个不连通 NVLink 域时,跨节点的兄弟 Pod 应落到**各节点对应的同一子域(rail)**,否则跨节点 NCCL 走错 rail 掉档。这超出同节点 anchor(union-find root 节点本地、不可跨节点比)与 Kueue(只到节点粒度)的能力,由本阶段在 extender 内解决。详细配合见 [`kueue_tas_integration.md`](./kueue_tas_integration.md) §7.2。
 
-> **重要前提:分量必须是 NVLink-only 的(提交 `523d66a`)。** `computeLinkComponents` 默认按"任意 P2P 链路(含 PCIe 跨 CPU)"union,而正常节点任意两卡至少 PCIe 互通 → 全节点恒为一个分量,cross-pod 收窄不到 NVLink 子组(空转)。所以 cross-pod 用 **`nvlinkEdge`(仅 `Type>=SingleNVLINKLink`)** 算的 `nvlink*` 分量:NVSwitch 全互联节点=一个 NVLink 分量(正确空转,任意子集都互通),2×4 岛节点=两个岛(正确收敛)。any-P2P 的 `linkComponentByUUID` 仅留给单 Pod strict 的 `AreDevicesLinked`(可达性)与节点 fitness,行为不变。
+> **重要前提:分量必须是 NVLink-only 的(提交 `523d66a`)。** `computeLinkComponents` 默认按"任意 P2P 链路(含 PCIe 跨 CPU)"union,而正常节点任意两卡至少 PCIe 互通 → 全节点恒为一个分量,cross-pod 收窄不到 NVLink 子组(空转)。所以 cross-pod 用 **`nvlinkEdge`(仅 `Type>=SingleNVLINKLink`)** 算的 `nvlink*` 分量:NVSwitch 全互联节点=一个 NVLink 分量(正确空转,任意子集都互通),2×4 岛节点=两个岛(正确收敛)。**⚠️ 前提是 NVSwitch 上的 NVLink 能被探测到——修复前并不能,见 §9.6。**any-P2P 的 `linkComponentByUUID` 仅留给单 Pod strict 的 `AreDevicesLinked`(可达性)与节点 fitness,行为不变。
 
 **机制(不引入新注解)**:
 - **稳定 ordinal**:`NodeInfo` 按"NVLink 分量最小 `Device.Index`"给每个分量赋 ordinal(`nvlinkRootByOrdinal` 与 `nvlinkComponentOrdinal` 两个互逆映射);同构节点 ordinal-k = 同 rail。
@@ -187,10 +187,56 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 **落地**:
 
 1. **`computeTieredComponents`(替代两次 `computeLinkComponents`)**:一次 union-find,边集合一次、按 tightest→loosest 4 档(NVLink≥7 / Switch≥MultiSwitch4 / NUMA≥SameCPU2 / Any≥CrossCPU1)增量 union,各档快照 `maxSize`,NVLink 档额外快照 per-UUID 根。组件天然嵌套(NVLink⊆Switch⊆NUMA⊆Any),重加更松的边是 O(1) no-op,**开销低于原先的两次 union-find**。
-2. **`LinkTopologyFitness` 5 级**:NVLink(5)>Switch(4)>NUMA(3)>跨CPU(2)>有拓扑装不下(1)>无拓扑(0)。给出性能梯度,又保留"跨 CPU 仍可用(tier 2)"而非误判装不下。同构 NVSwitch 集群全 tier 5 → 下游 binpack/spread 顺序不变,**零行为变化**。
+2. **`LinkTopologyFitness` 5 级**:NVLink(5)>Switch(4)>NUMA(3)>跨CPU(2)>有拓扑装不下(1)>无拓扑(0)。给出性能梯度,又保留"跨 CPU 仍可用(tier 2)"而非误判装不下。同构 NVSwitch 集群全 tier 5 → 下游 binpack/spread 顺序不变,**零行为变化**(**前提同 §9.6:NVSwitch 的 NVLink 须可探测,否则这类节点全部掉到 tier ≤4**)。
 3. **`AreDevicesLinked` 改用 `nvlinkComponentByUUID`(NVLink 分量)**:strict-link 语义从"任意可达"收紧为"必须 NVLink 连通"。后果:纯 PCIe(无 NVLink)节点上 link-strict 一律拒(每卡自成 NVLink 单点),2×4 岛节点上 N>4 的 link-strict 拒(跨岛);非 strict link 仍回退分配。`linkComponentByUUID`(any-P2P 映射)已无消费方,删除。
 
 > 设备级"选哪几张卡"早有完整 PCIe 梯度(`calculateGPUPairScore`:CrossCPU 10→SameBoard 60→NVLink 100+),本次补的是**节点级选择**这一层。
+
+## 9.6 地基前提:NVSwitch 上的 NVLink 必须能被探测到(2026-06-24)
+
+> **本文 §5/§9.5 里"NVSwitch 全互联节点 = 一个 NVLink 分量"的说法,在修复前的真实 NVSwitch 硬件上恰好相反。** 本节记录这个地基缺陷、影响与修复(提交 `0e19c34`,对齐上游 [HAMi #2103](https://github.com/Project-HAMi/HAMi/pull/2103))。
+
+### 缺陷
+
+`links.GetNVLink(dev1, dev2)` 原本只用一种方式判断两卡是否 NVLink 直连:枚举 dev1 每条 NVLink 的**远端 PCI BusID**,数有几条等于 dev2 的 BusID。
+
+- **直连式 NVLink**(2~4 卡板卡):远端就是对端 GPU → 成立。
+- **NVSwitch fabric**(HGX/DGX 8 卡):**每条链路的远端是交换机,不是对端 GPU** → 匹配恒为 0 → **全互联的 8 卡机器被判定为"任意两卡都无 NVLink"**。
+
+代码里那句继承自上游的 `// TODO(klueska): Handle NVSwitch semantics` 就是这个未处理的口子。
+
+### 为什么对本设计尤其致命
+
+NVLink 分量是本文几乎所有机制的地基。分量退化成"每卡一个孤岛"后:
+
+| 机制 | 退化后的表现 |
+|---|---|
+| `AreDevicesLinked`(§9.5 收紧为 NVLink 连通) | 多卡集合必然跨"孤岛" → **link-strict 拒绝所有 NVSwitch 节点** |
+| 跨 Pod anchor / domain(§5、§7.2) | anchorRoot 只剩 1 卡窗口 → ≥2 卡 Pod 装不下 → 非 strict 静默丢对齐、strict 拒绝;ordinal 变成每卡一个,跨节点对齐对到无意义序号 |
+| `LinkTopologyFitness` tier 5(§9.5) | **永不触发**;混合集群里 4 卡**直连** NVLink 机器会排在 8 卡 NVSwitch 机器**前面**,完全反了 |
+| `calculateGPUPairScore` | 只看到 PCIe 档(10–60)而非 NVLink(100+);全对称节点上多数组合仍等价,混合拓扑下会选错 |
+
+**讽刺的是**:§9.5 写"同构 NVSwitch 集群全 tier 5 → 零行为变化",修复前恰恰是**全 tier ≤4**;§5 的"NVSwitch = 一个分量(正确空转)"实际是 8 个孤岛。
+
+### 修复
+
+```
+直连匹配(远端 BusID == 对端 GPU) → 命中即返回
+        ↓ 未命中(NVSwitch 上恒不命中)
+两端各自统计 GetNvLinkRemoteDeviceType == NVLINK_DEVICE_TYPE_SWITCH 的活跃链路
+        ↓ 两端都接交换机
+判定 NVLink 连通,宽度 = min(links1, links2)
+```
+
+配套:18 分支 switch 抽成 `nvlinkCountToType` 查表;保留本仓对 `ERROR_GPU_IS_LOST` 的容忍(上游未处理);dev1 不在 fabric 时短路不探 dev2(避免无关错误让 `NewDevices` 整节点拓扑发现失败)。
+
+**与上游有意分歧**:计数超出枚举上限(18)时本实现**饱和**到 `EighteenNVLINKLinks`,上游返回 `P2PLinkUnknown`。NVML 允许上报至 `NVLINK_MAX_LINKS`(36),上游自己的 `countNvSwitchLinks` 用例即断言可达 36 —— 一旦真出现 >18 就会重新报成"无 NVLink",正是本节要修的失效类别。**过报链路宽度只影响相对打分,漏报连通性会直接击穿 strict-link 与跨 Pod 亲和**,代价不对等。
+
+### 防御与验证
+
+- **告警**:多卡节点若一条 NVLink 边都没探测到,`NewDevices` 打 warning。否则该类缺陷只表现为"strict 莫名全拒 / 跨 Pod 静默失效",极难排查。
+- **这是设备插件侧改动**:需**重新部署 device-plugin**,`node-device-topology` 注解才会带上 NVLink 边;调度器侧无需改动,注解一变多级 fitness / anchor / strict 自动恢复。
+- **真机验证(唯一能坐实的证据)**:在 HGX/DGX 上 dump 该节点注解,确认出现 `Type >= 7`(NVLink)的边,并对照 `nvidia-smi topo -m` 的 `NV#` 列。单测只到 stub 级。
 
 ## 10. 一句话总结
 

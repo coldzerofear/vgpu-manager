@@ -138,7 +138,17 @@ func GetP2PLink(dev1 device.Device, dev2 device.Device) (P2PLinkType, error) {
 	return P2PLinkUnknown, fmt.Errorf("unknown topology level: %v", level)
 }
 
-// GetNVLink gets the number of NVLinks between the specified devices.
+// GetNVLink gets the number of NVLinks between the specified devices, covering
+// BOTH interconnect topologies:
+//
+//   - Direct GPU<->GPU NVLink (small boards): a link's remote PCI is the peer
+//     GPU, so matching remote BusIDs against dev2 counts the links.
+//   - NVSwitch fabric (HGX/DGX): every link terminates at a switch, so no remote
+//     BusID ever equals the peer GPU. Matching alone therefore reports "no
+//     NVLink" for a fully connected 8-GPU board — which silently degrades every
+//     downstream topology decision (NVLink component/island detection,
+//     strict-link validation, node fitness ranking, bestEffort pair scoring).
+//     We detect the fabric via the remote device TYPE instead.
 func GetNVLink(dev1 device.Device, dev2 device.Device) (P2PLinkType, error) {
 	pciInfos, err := getAllNvLinkRemotePciInfo(dev1)
 	if err != nil {
@@ -151,53 +161,101 @@ func GetNVLink(dev1 device.Device, dev2 device.Device) (P2PLinkType, error) {
 	}
 	dev2BusID := PciInfo(dev2PciInfo).BusID()
 
-	nvlink := P2PLinkUnknown
+	// Direct GPU <-> GPU: each link's remote PCI is the peer GPU itself.
+	matched := 0
 	for _, pciInfo := range pciInfos {
-		if pciInfo.BusID() != dev2BusID {
-			continue
-		}
-		switch nvlink {
-		case P2PLinkUnknown:
-			nvlink = SingleNVLINKLink
-		case SingleNVLINKLink:
-			nvlink = TwoNVLINKLinks
-		case TwoNVLINKLinks:
-			nvlink = ThreeNVLINKLinks
-		case ThreeNVLINKLinks:
-			nvlink = FourNVLINKLinks
-		case FourNVLINKLinks:
-			nvlink = FiveNVLINKLinks
-		case FiveNVLINKLinks:
-			nvlink = SixNVLINKLinks
-		case SixNVLINKLinks:
-			nvlink = SevenNVLINKLinks
-		case SevenNVLINKLinks:
-			nvlink = EightNVLINKLinks
-		case EightNVLINKLinks:
-			nvlink = NineNVLINKLinks
-		case NineNVLINKLinks:
-			nvlink = TenNVLINKLinks
-		case TenNVLINKLinks:
-			nvlink = ElevenNVLINKLinks
-		case ElevenNVLINKLinks:
-			nvlink = TwelveNVLINKLinks
-		case TwelveNVLINKLinks:
-			nvlink = ThirteenNVLINKLinks
-		case ThirteenNVLINKLinks:
-			nvlink = FourteenNVLINKLinks
-		case FourteenNVLINKLinks:
-			nvlink = FifteenNVLINKLinks
-		case FifteenNVLINKLinks:
-			nvlink = SixteenNVLINKLinks
-		case SixteenNVLINKLinks:
-			nvlink = SeventeenNVLINKLinks
-		case SeventeenNVLINKLinks:
-			nvlink = EighteenNVLINKLinks
+		if pciInfo.BusID() == dev2BusID {
+			matched++
 		}
 	}
-	// TODO(klueska): Handle NVSwitch semantics
+	if direct := nvlinkCountToType(matched); direct != P2PLinkUnknown {
+		return direct, nil
+	}
 
-	return nvlink, nil
+	// NVSwitch fabric: every link terminates at a switch, so the remote BusID
+	// NEVER equals the peer GPU and the direct match above always yields zero —
+	// which would report "no NVLink" for a fully connected 8-GPU HGX/DGX board.
+	// Both endpoints must be attached to the fabric; the usable width is the
+	// weaker side's enabled-link count.
+	links1, viaSwitch1, err := countNvSwitchLinks(dev1)
+	if err != nil {
+		return P2PLinkUnknown, fmt.Errorf("failed to check nvswitch links for dev1: %v", err)
+	}
+	if !viaSwitch1 {
+		return P2PLinkUnknown, nil
+	}
+	links2, viaSwitch2, err := countNvSwitchLinks(dev2)
+	if err != nil {
+		return P2PLinkUnknown, fmt.Errorf("failed to check nvswitch links for dev2: %v", err)
+	}
+	if !viaSwitch2 {
+		return P2PLinkUnknown, nil
+	}
+	return nvlinkCountToType(min(links1, links2)), nil
+}
+
+// nvlinkTypes indexes P2PLinkType by (link count - 1).
+var nvlinkTypes = [...]P2PLinkType{
+	SingleNVLINKLink, TwoNVLINKLinks, ThreeNVLINKLinks, FourNVLINKLinks,
+	FiveNVLINKLinks, SixNVLINKLinks, SevenNVLINKLinks, EightNVLINKLinks,
+	NineNVLINKLinks, TenNVLINKLinks, ElevenNVLINKLinks, TwelveNVLINKLinks,
+	ThirteenNVLINKLinks, FourteenNVLINKLinks, FifteenNVLINKLinks,
+	SixteenNVLINKLinks, SeventeenNVLINKLinks, EighteenNVLINKLinks,
+}
+
+// nvlinkCountToType maps an NVLink count to its P2PLinkType. Zero or fewer means
+// "not NVLink-connected".
+//
+// Counts above the largest enumerated tier SATURATE to EighteenNVLINKLinks
+// rather than falling back to P2PLinkUnknown. This is deliberate: the enum tops
+// out at 18 (today's H100/B200 per-GPU maximum) while NVML reports up to
+// NVLINK_MAX_LINKS (36) links, so a future GPU — or a switch-attached count
+// aggregated across links — can legitimately exceed 18. Mapping that to
+// "unknown" would claim the pair has NO NVLink, re-introducing exactly the
+// class of failure this file exists to prevent (isolated islands → strict-link
+// rejects the node, cross-pod affinity degenerates). Over-reporting link WIDTH
+// at the top tier is harmless by comparison: it only affects relative pair
+// scoring, never connectivity.
+func nvlinkCountToType(n int) P2PLinkType {
+	if n <= 0 {
+		return P2PLinkUnknown
+	}
+	if n > len(nvlinkTypes) {
+		n = len(nvlinkTypes)
+	}
+	return nvlinkTypes[n-1]
+}
+
+// countNvSwitchLinks returns how many of the device's ENABLED NVLinks terminate
+// at an NVSwitch, plus whether it has any such link at all. Per-link probe
+// results that merely mean "this link index is not usable" are skipped, matching
+// getAllNvLinkRemotePciInfo's tolerance (ERROR_GPU_IS_LOST included, which a
+// draining node can legitimately return).
+func countNvSwitchLinks(dev device.Device) (int, bool, error) {
+	count := 0
+	for i := 0; i < nvml.NVLINK_MAX_LINKS; i++ {
+		state, ret := dev.GetNvLinkState(i)
+		if ret == nvml.ERROR_NOT_SUPPORTED || ret == nvml.ERROR_INVALID_ARGUMENT || ret == nvml.ERROR_GPU_IS_LOST {
+			continue
+		}
+		if ret != nvml.SUCCESS {
+			return 0, false, fmt.Errorf("failed to get nvlink state: %v", ret)
+		}
+		if state != nvml.FEATURE_ENABLED {
+			continue
+		}
+		deviceType, ret := dev.GetNvLinkRemoteDeviceType(i)
+		if ret == nvml.ERROR_NOT_SUPPORTED || ret == nvml.ERROR_INVALID_ARGUMENT || ret == nvml.ERROR_GPU_IS_LOST {
+			continue
+		}
+		if ret != nvml.SUCCESS {
+			return 0, false, fmt.Errorf("failed to get nvlink remote device type: %v", ret)
+		}
+		if deviceType == nvml.NVLINK_DEVICE_TYPE_SWITCH {
+			count++
+		}
+	}
+	return count, count > 0, nil
 }
 
 // getAllNvLinkRemotePciInfo returns the PCI info for all devices attached to the specified device by an NVLink
