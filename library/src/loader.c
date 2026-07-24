@@ -1275,28 +1275,111 @@ static void build_driver_routes(void) {
   LOGGER(VERBOSE, "driver route index built: %d entries", g_routes_n);
 }
 
-/* Look up a pointer the driver handed out. Returns 1 when it is a driver entry
- * point we know -- then *hook is our hook for it (NULL if we hook none) and
- * *name its exact symbol. Returns 0 when the pointer is unknown to us, which
- * the caller must treat as "cannot route", not as "do not hook". */
+/* Split a CUDA symbol into the three parts its name is built from:
+ *
+ *   cuLaunchKernel_v2_ptsz  ->  base "cuLaunchKernel", version 2, suffix PTSZ
+ *   cuStreamSynchronize_ptds ->  base "cuStreamSynchronize", version 0, PTDS
+ *   cuInit                  ->  base "cuInit", version 0, suffix NONE
+ *
+ * Version 0 and suffix NONE mean "the name does not say", which is the whole
+ * point: those are the components cuGetProcAddress decides for the caller. */
+#define SFX_NONE 0
+#define SFX_PTSZ 1
+#define SFX_PTDS 2
+
+static void split_symbol(const char *s, size_t *base_len, int *ver, int *sfx) {
+  size_t len = strlen(s);
+
+  *sfx = SFX_NONE;
+  if (len > 5) {
+    if      (!strcmp(s + len - 5, "_ptsz")) { *sfx = SFX_PTSZ; len -= 5; }
+    else if (!strcmp(s + len - 5, "_ptds")) { *sfx = SFX_PTDS; len -= 5; }
+  }
+
+  *ver = 0;
+  size_t i = len;
+  while (i > 0 && s[i - 1] >= '0' && s[i - 1] <= '9') i--;
+  if (i < len && i >= 2 && s[i - 1] == 'v' && s[i - 2] == '_') {
+    for (size_t d = i; d < len; d++) *ver = *ver * 10 + (s[d] - '0');
+    len = i - 2;
+  }
+
+  *base_len = len;
+}
+
+/* Could `cand` be what the caller meant when it asked for `req`?
+ *
+ * The base name must be identical -- we never cross families. Beyond that, a
+ * component the request states explicitly pins that component, and a component
+ * it leaves out is one the driver gets to choose:
+ *
+ *   cuMemAlloc               -> cuMemAlloc, _v2, _v3, _v4 ...
+ *   cuMemAlloc_v2            -> cuMemAlloc_v2 only
+ *   cuLaunchKernel_ptsz      -> cuLaunchKernel_ptsz, _v2_ptsz, _v3_ptsz ...
+ *   cuLaunchKernel_v2_ptsz   -> cuLaunchKernel_v2_ptsz only
+ *
+ * Leaving the suffix open is what makes the flags argument work. A caller asks
+ * for "cuLaunchKernel" and passes CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM;
+ * the driver answers with the _ptsz entry point. The request name never carries
+ * that choice, so refusing to consider _ptsz here would hand a per-thread caller
+ * our legacy-stream hook. Which candidate is right is not guessed -- the
+ * driver's own pointer picks it, and this predicate only bounds the search. */
+static int symbol_in_family(const char *cand, const char *req) {
+  size_t cb, rb;
+  int cv, rv, cs, rs;
+
+  split_symbol(cand, &cb, &cv, &cs);
+  split_symbol(req,  &rb, &rv, &rs);
+
+  if (cb != rb || memcmp(cand, req, cb) != 0) return 0;   /* different family */
+  if (rv != 0 && rv != cv) return 0;                      /* version pinned   */
+  if (rs != SFX_NONE && rs != cs) return 0;               /* suffix pinned    */
+  return 1;
+}
+
+/* Resolve the pointer cuGetProcAddress produced for `symbol` to our hook.
+ *
+ * Two independent facts have to agree. The pointer says which function the
+ * driver actually chose -- version and stream variant included -- and the name
+ * check says that function belongs to the family the caller asked for. Together
+ * they identify one entry point exactly, so the hook returned carries its ABI by
+ * construction; nothing is inferred from cudaVersion.
+ *
+ * *name is set whenever the pointer is identified, INCLUDING when we hook no
+ * version of it. That distinction matters to the caller: "identified, not
+ * hooked" means keep the driver's pointer, whereas an unidentified pointer
+ * means fall back to name-based substitution. Collapsing the two would let a
+ * base-named hook be bound to a version whose ABI it does not have -- the exact
+ * failure the ABI-conflict blacklist exists to prevent. */
 void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name) {
-  int lo = 0, hi = g_routes_n - 1;
+  if (name) *name = NULL;
+
+  int lo = 0, hi = g_routes_n - 1, at = -1;
   while (lo <= hi) {
     int mid = lo + (hi - lo) / 2;
     void *cur = g_routes[mid].real_fn;
-
-    if (cur < real_fn) { lo = mid + 1; continue; }
-    if (cur > real_fn) { hi = mid - 1; continue; }
-
-    int cmp = strcmp(g_routes[mid].name, symbol);
-    if (cmp == 0) {
-      *name = g_routes[mid].name;
-      return g_routes[mid].hook_fn;
-    }
-    if (cmp < 0) lo = mid + 1;
-    else         hi = mid - 1;
+    if      (cur < real_fn) lo = mid + 1;
+    else if (cur > real_fn) hi = mid - 1;
+    else { at = mid; break; }
   }
-  return NULL;
+  if (at < 0) return NULL;                    /* not a driver entry point we know */
+
+  /* Widen to the whole run of names sharing this address; aliases put more than
+   * one there. Runs are one or two entries in practice. */
+  int i = at, j = at;
+  while (i > 0 && g_routes[i - 1].real_fn == real_fn) i--;
+  while (j + 1 < g_routes_n && g_routes[j + 1].real_fn == real_fn) j++;
+
+  const driver_route_t *best = NULL;
+  for (int k = i; k <= j; k++) {
+    if (!symbol_in_family(g_routes[k].name, symbol)) continue;
+    if (!strcmp(g_routes[k].name, symbol)) { best = &g_routes[k]; break; }
+    if (!best || (!best->hook_fn && g_routes[k].hook_fn)) best = &g_routes[k];
+  }
+  if (!best) return NULL;                     /* address known, wrong family     */
+
+  if (name) *name = best->name;
+  return best->hook_fn;
 }
 
 void load_cuda_libraries() {

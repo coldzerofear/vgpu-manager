@@ -421,17 +421,23 @@ static inline int get_logger_print_level(void) {
   })
 
 /**
- * Given a pointer the CUDA driver handed out for `symbol`, return our hook for
- * it, or NULL.
+ * Given the pointer cuGetProcAddress produced for `symbol`, return our hook for
+ * that exact entry point, or NULL.
  *
- * Non-NULL only when `real_fn` is the pointer this build resolved under exactly
- * `symbol` -- so the hook returned carries that symbol's ABI by construction,
- * and no version guessing is involved. *name is set to the matched name.
+ * The pointer says which function the driver chose -- version and stream
+ * variant included -- and `symbol` bounds which family that may belong to: a
+ * version or _ptsz/_ptds suffix stated in the request pins that component, one
+ * left out is the driver's to choose. So "cuLaunchKernel" can resolve to
+ * cuLaunchKernel_v2_ptsz, while "cuMemAlloc_v2" resolves to nothing but v2.
  *
- * NULL means "the name alone does not settle the ABI here": the driver chose a
- * different version than the plain name (cuCtxCreate -> _v4), flags selected a
- * variant (_ptsz), or the pointer is not in our table. Callers must fall back
- * to the cautious name-based rules -- NULL is not "do not hook".
+ * Three outcomes, distinguished by BOTH results together:
+ *   return non-NULL             - identified, and this is its hook.
+ *   return NULL, *name non-NULL - identified, we hook no version of it.
+ *                                 Keep the driver's pointer; substituting a
+ *                                 base-named hook here would bind an ABI it
+ *                                 does not have.
+ *   return NULL, *name NULL     - not a driver entry point this build knows.
+ *                                 Fall back to name-based substitution.
  */
 void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name);
 

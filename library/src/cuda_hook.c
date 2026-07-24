@@ -2342,14 +2342,6 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
     init_devices_mapping();
     pthread_once(&g_init_set, initialization);
 
-    const char *resolved = NULL;
-    void *hook_fn = lookup_cuda_hook_ptr(*pfn, symbol, &resolved);
-    if (hook_fn) {
-      LOGGER(VERBOSE, "cuGetProcAddress: %s (v=%d) -> %s hook", symbol, cudaVersion, resolved);
-      *pfn = hook_fn;
-      goto DONE;
-    }
-
     /*
      * Special case: caller is asking for cuGetProcAddress itself. We MUST
      * return our own wrapper (not real libcuda's pointer) - otherwise the
@@ -2361,11 +2353,35 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
      * hook's own signature, so the caller invokes it with the parameter
      * frame we expect. (The 5-arg v2 case is handled inside the 5-arg
      * cuGetProcAddress_v2 hook below.)
+     *
+     * Ahead of the routing below on purpose: the arity here is fixed by the
+     * hook we are standing in, not by anything the driver returned, so this
+     * one case must not be open to a family match landing on _v2.
      */
     if (strcmp(symbol, "cuGetProcAddress") == 0) {
       LOGGER(VERBOSE, "cuGetProcAddress: substitute self-lookup with our "
                       "4-arg wrapper to preserve hook coverage");
       *pfn = (void *)cuGetProcAddress;
+      goto DONE;
+    }
+
+    /*
+     * Primary routing. *pfn is the entry point real libcuda chose from
+     * `cudaVersion` and `flags`; naming it identifies that function exactly, so
+     * the hook we substitute carries its ABI by construction.
+     */
+    const char *resolved = NULL;
+    void *hook_fn = lookup_cuda_hook_ptr(*pfn, symbol, &resolved);
+    if (hook_fn) {
+      LOGGER(VERBOSE, "cuGetProcAddress: %s (v=%d) -> %s hook", symbol, cudaVersion, resolved);
+      *pfn = hook_fn;
+      goto DONE;
+    }
+    if (resolved) {
+      /* Identified, and we hook no version of it. Keep the driver's pointer:
+       * falling through would let a base-named hook be substituted for a
+       * variant whose ABI it does not have. */
+      note_unhooked_symbol(resolved);
       goto DONE;
     }
 
@@ -2456,6 +2472,22 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     init_devices_mapping();
     pthread_once(&g_init_set, initialization);
 
+    /*
+     * Self-lookup special case - see cuGetProcAddress (4-arg hook) above
+     * for the full rationale, including why it precedes the routing. Here the
+     * caller is in the 5-arg v2 hook, so their PFN_cuGetProcAddress type has
+     * the v2 5-arg ABI (or they explicitly declared 5-arg). Substitute our own
+     * v2 entry point so the caller's subsequent indirect lookups re-enter our
+     * hook.
+     */
+    if (strcmp(symbol, "cuGetProcAddress") == 0) {
+      LOGGER(VERBOSE, "cuGetProcAddress_v2: substitute cuGetProcAddress "
+                      "self-lookup with our 5-arg _v2 wrapper");
+      *pfn = (void *)cuGetProcAddress_v2;
+      goto DONE;
+    }
+
+    /* Same driver-pointer routing as in cuGetProcAddress above. */
     const char *resolved = NULL;
     void *hook_fn = lookup_cuda_hook_ptr(*pfn, symbol, &resolved);
     if (hook_fn) {
@@ -2463,18 +2495,8 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
       *pfn = hook_fn;
       goto DONE;
     }
-
-    /*
-     * Self-lookup special case - see cuGetProcAddress (4-arg hook) above
-     * for the full rationale. Here the caller is in the 5-arg v2 hook, so
-     * their PFN_cuGetProcAddress type has the v2 5-arg ABI (or they
-     * explicitly declared 5-arg). Substitute our own v2 entry point so
-     * the caller's subsequent indirect lookups re-enter our hook.
-     */
-    if (strcmp(symbol, "cuGetProcAddress") == 0) {
-      LOGGER(VERBOSE, "cuGetProcAddress_v2: substitute cuGetProcAddress "
-                      "self-lookup with our 5-arg _v2 wrapper");
-      *pfn = (void *)cuGetProcAddress_v2;
+    if (resolved) {
+      note_unhooked_symbol(resolved);
       goto DONE;
     }
 
