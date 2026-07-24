@@ -83,6 +83,9 @@ func runApp(opt *options.Options) (exitCode int) {
 		node.WithIMEXOption(opt.ImexChannelIDs, opt.ImexRequired),
 		node.WithDriverRootOption(driverRoot),
 		node.WithHostDriverRootOption(hostDriverRoot),
+		// If nvidiaDevRoot (the path to the device nodes on the host) is not set,
+		// we default to using the driver root on the host.
+		node.WithHostDevRootOption(hostDriverRoot),
 		node.WithCheckFieldsOption(true))
 	if err != nil {
 		klog.Errorf("Initialization of node config failed: %v", err)

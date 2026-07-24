@@ -464,8 +464,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuSignalExternalSemaphoresAsync_ptsz"},
 //    {.name = "cuStreamBeginCapture"},
 //    {.name = "cuStreamBeginCapture_ptsz"},
-//    {.name = "cuStreamEndCapture"},
-//    {.name = "cuStreamEndCapture_ptsz"},
+    {.name = "cuStreamEndCapture"},
+    {.name = "cuStreamEndCapture_ptsz"},
     {.name = "cuStreamGetCtx"},
     {.name = "cuStreamGetCtx_v2"},
     {.name = "cuStreamGetCtx_ptsz"},
@@ -478,8 +478,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuGraphExecKernelNodeSetParams"},
 //    {.name = "cuStreamBeginCapture_v2"},
 //    {.name = "cuStreamBeginCapture_v2_ptsz"},
-//    {.name = "cuStreamGetCaptureInfo"},
-//    {.name = "cuStreamGetCaptureInfo_ptsz"},
+    {.name = "cuStreamGetCaptureInfo"},
+    {.name = "cuStreamGetCaptureInfo_ptsz"},
     {.name = "cuThreadExchangeStreamCaptureMode"},
     {.name = "cuDeviceGetNvSciSyncAttributes"},
     {.name = "cuGraphExecHostNodeSetParams"},
@@ -584,8 +584,10 @@ entry_t cuda_library_entry[] = {
     {.name = "cuGraphMemFreeNodeGetParams"},
     {.name = "cuGraphReleaseUserObject"},
     {.name = "cuGraphRetainUserObject"},
-//    {.name = "cuStreamGetCaptureInfo_v2"},
-//    {.name = "cuStreamGetCaptureInfo_v2_ptsz"},
+    {.name = "cuStreamGetCaptureInfo_v2"},
+    {.name = "cuStreamGetCaptureInfo_v2_ptsz"},
+    {.name = "cuStreamGetCaptureInfo_v3"},
+    {.name = "cuStreamGetCaptureInfo_v3_ptsz"},
     {.name = "cuStreamUpdateCaptureDependencies"},
     {.name = "cuStreamUpdateCaptureDependencies_ptsz"},
     {.name = "cuUserObjectCreate"},
@@ -1688,6 +1690,21 @@ static void signal_cleanup_handler_sa(int signum, siginfo_t *info, void *ucontex
   raise(signum);
 }
 
+// Cleaning up invalid virtual memory nodes on the device.
+void check_cleanup_vmem_nodes_by_device(int host_index) {
+  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
+  if (g_device_vmem != NULL) {
+    if (g_device_vmem->devices[host_index].processes_size == 0) {
+      return;
+    }
+    int fd = device_vmem_write_lock(host_index);
+    if (fd < 0) return;
+    rm_vmem_node_by_non_existent_device_pid(host_index, -1);
+//    __sync_synchronize();
+    device_vmem_unlock(fd, host_index);
+  }
+}
+
 // check and clean up any unreleased virtual memory records.
 void check_cleanup_vmem_nodes() {
   if (g_device_vmem != NULL) {
@@ -1859,34 +1876,70 @@ void reset_cuda_index_mapping() {
   pthread_mutex_unlock(&device_index_mutex);
 }
 
-void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
-  memory_node_t *new_node = NULL;
-  new_node = (memory_node_t*) malloc(sizeof(memory_node_t));
-  if (unlikely(!new_node)) {
-    LOGGER(ERROR, "failed to allocate virt memory node");
-    return;
-  }
+static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int type,
+                                         CUgraph graph, int host_index) {
+  int found = 0;
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter;
+  size_t old_bytes = 0;
 
-  new_node->dptr = dptr;
-  new_node->bytes = bytes;
-  INIT_LIST_HEAD(&new_node->node);
+  int charged = (host_index >= 0 && host_index < MAX_DEVICE_COUNT) ? host_index : -1;
 
   pthread_mutex_lock(&g_memory_node_lock);
-  list_add(&new_node->node, &g_memory_node->node);
+  list_for_each(iter, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    if (entry_tmp != NULL && entry_tmp->dptr == dptr) {
+      old_bytes = entry_tmp->bytes;
+      entry_tmp->bytes = bytes;
+      entry_tmp->type = type;
+      entry_tmp->graph = graph;
+      entry_tmp->host_index = charged;
+      found = 1;
+      break;
+    }
+  }
+  if (!found) {
+    memory_node_t *new_node = (memory_node_t *)malloc(sizeof(memory_node_t));
+    if (unlikely(!new_node)) {
+      pthread_mutex_unlock(&g_memory_node_lock);
+      LOGGER(ERROR, "failed to allocate virt memory node");
+      return;
+    }
+    new_node->dptr = dptr;
+    new_node->bytes = bytes;
+    new_node->type = type;
+    new_node->graph = graph;
+    new_node->host_index = charged;
+    INIT_LIST_HEAD(&new_node->node);
+    list_add(&new_node->node, &g_memory_node->node);
+  }
   pthread_mutex_unlock(&g_memory_node_lock);
 
   if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
   LOGGER(VERBOSE, "malloc virt memory to host device %d, dptr %lld, size %ld", host_index, dptr, bytes);
 
+  /* Calculate increment. Re-recording a known dptr with a smaller size yields a
+   * NEGATIVE delta, so the shared counter has to be adjusted with the same
+   * saturation free_gpu_virt_memory() applies: `used` is size_t, and letting it
+   * wrap would leave a ~2^64 usage that fails every later allocation. */
+  ssize_t delta = found ? (ssize_t)bytes - (ssize_t)old_bytes : (ssize_t)bytes;
+
   if (g_device_vmem != NULL) {
     int fd = device_vmem_write_lock(host_index);
     if (fd < 0) return;
     int pid = getpid();
-    int found = 0;
+    found = 0;
     unsigned int processes_size = g_device_vmem->devices[host_index].processes_size;
     for (int i = 0; i < processes_size; i++) {
       if (g_device_vmem->devices[host_index].processes[i].pid == pid) {
-        g_device_vmem->devices[host_index].processes[i].used += bytes;
+        size_t cur = g_device_vmem->devices[host_index].processes[i].used;
+        if (delta >= 0) {
+          g_device_vmem->devices[host_index].processes[i].used = cur + (size_t)delta;
+        } else {
+          size_t dec = (size_t)(-delta);
+          g_device_vmem->devices[host_index].processes[i].used =
+              (cur >= dec) ? (cur - dec) : 0;
+        }
         found = 1;
         break;
       }
@@ -1898,19 +1951,81 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
         return;
       }
       g_device_vmem->devices[host_index].processes[processes_size].pid = pid;
-      g_device_vmem->devices[host_index].processes[processes_size].used = bytes;
+      g_device_vmem->devices[host_index].processes[processes_size].used = (delta > 0) ? delta : 0;
       g_device_vmem->devices[host_index].processes_size++;
     }
     device_vmem_unlock(fd, host_index);
   }
 }
 
-/* Reports whether dptr was handed out by the oversold UVA fallback, i.e. it
- * came from cuMemAllocManaged rather than the allocator the caller asked for.
- * Such a pointer is only valid for the synchronous cuMemFree; the driver's
- * cuMemFreeAsync rejects it. */
-int is_gpu_virt_memory(CUdeviceptr dptr) {
-  int found = 0;
+void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_index) {
+  malloc_gpu_virt_memory_graph(dptr, bytes, type, NULL, host_index);
+}
+
+void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
+                                     CUgraph graph, int host_index) {
+  malloc_gpu_virt_memory_graph(dptr, bytes, MEMORY_TYPE_CAPTURE, graph, host_index);
+}
+
+/* Discharge every capture record owned by graph.
+ *
+ * Each record is discharged against the device recorded when it was charged,
+ * never against a device looked up here: this runs from cuStreamEndCapture,
+ * where the context may already be unusable, and a discharge that gives up
+ * after the nodes are dropped would strand the charge in the shared counter
+ * permanently -- exactly the false-OOM this accounting exists to avoid.
+ *
+ * Nodes are detached under the list mutex first and the shared counter is
+ * updated afterwards, because that update takes the cross-process vmem lock and
+ * must not nest inside the list mutex (free_gpu_virt_memory() orders them the
+ * same way). */
+void free_gpu_virt_memory_by_graph(CUgraph graph) {
+  size_t totals[MAX_DEVICE_COUNT] = {0};
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter, *tmp;
+  int any = 0;
+
+  if (graph == NULL) return;
+
+  pthread_mutex_lock(&g_memory_node_lock);
+  list_for_each_safe(iter, tmp, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    if (entry_tmp == NULL) continue;
+    if (entry_tmp->type == MEMORY_TYPE_CAPTURE && entry_tmp->graph == graph) {
+      int idx = entry_tmp->host_index;
+      if (idx >= 0 && idx < MAX_DEVICE_COUNT) {
+        totals[idx] += entry_tmp->bytes;
+        any = 1;
+      }
+      list_del(&entry_tmp->node);
+      free(entry_tmp);
+    }
+  }
+  pthread_mutex_unlock(&g_memory_node_lock);
+
+  if (!any || g_device_vmem == NULL) return;
+
+  for (int dev = 0; dev < MAX_DEVICE_COUNT; dev++) {
+    if (totals[dev] == 0) continue;
+    LOGGER(VERBOSE, "free captured virt memory to host device %d, graph %p, size %zu",
+           dev, (void *)graph, totals[dev]);
+    int fd = device_vmem_write_lock(dev);
+    if (fd < 0) continue;
+    int pid = getpid();
+    for (int i = 0; i < g_device_vmem->devices[dev].processes_size; i++) {
+      if (g_device_vmem->devices[dev].processes[i].pid == pid) {
+        size_t cur = g_device_vmem->devices[dev].processes[i].used;
+        g_device_vmem->devices[dev].processes[i].used =
+            (cur >= totals[dev]) ? (cur - totals[dev]) : 0;
+        break;
+      }
+    }
+    device_vmem_unlock(fd, dev);
+  }
+}
+
+int get_gpu_virt_memory_type(CUdeviceptr dptr) {
+  int type = 0;
   memory_node_t *entry_tmp = NULL;
   struct list_head *iter;
   pthread_mutex_lock(&g_memory_node_lock);
@@ -1918,16 +2033,24 @@ int is_gpu_virt_memory(CUdeviceptr dptr) {
     entry_tmp = container_of(iter, memory_node_t, node);
     if (entry_tmp == NULL) continue;
     if (entry_tmp->dptr == dptr) {
-      found = 1;
+      type = entry_tmp->type;
       break;
     }
   }
   pthread_mutex_unlock(&g_memory_node_lock);
-  return found;
+  return type;
 }
 
-void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
+/* Retire the record for dptr, discharging whatever it was charged.
+ *
+ * The device comes from the record, not from the caller and not from the
+ * current context: a charge and its discharge must land on the same account.
+ * Deriving it at free time instead lets a context switch between allocation and
+ * free (or a cuCtxGetDevice that no longer works) credit the wrong device,
+ * leaving one understated and another overstated for the life of the process. */
+void free_gpu_virt_memory(CUdeviceptr dptr) {
   int found = 0;
+  int host_index = -1;
   memory_node_t *entry_tmp = NULL;
   struct list_head *iter;
   size_t size = 0;
@@ -1938,6 +2061,7 @@ void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
     if (entry_tmp->dptr == dptr) {
       found = 1;
       size = entry_tmp->bytes;
+      host_index = entry_tmp->host_index;
       list_del(&entry_tmp->node);
       free(entry_tmp);
       break;
@@ -1968,6 +2092,7 @@ void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
 void get_used_gpu_virt_memory(void *arg, int host_index) {
   size_t count = 0;
   size_t *used_memory = arg;
+  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) goto DONE;
   if (g_vgpu_config->vmem_node && g_device_vmem != NULL) {
     int fd = device_vmem_read_lock(host_index);
     if (fd < 0) goto DONE;
@@ -2268,6 +2393,32 @@ void loader_child_after_fork(void) {
   pthread_mutex_init(&init_config_mutex,  NULL);
   memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
   tid_dlsym_count = 0;
+
+  /* Drop the inherited virtual-memory records. Every one of them describes an
+   * allocation of the PARENT: CUDA contexts do not survive fork, so none of the
+   * pointers or graph handles mean anything here, and the charges they stand for
+   * sit in the shared counter under the parent's pid, where they still belong.
+   *
+   * Keeping them is actively harmful once the child starts allocating, because
+   * the driver reuses addresses: a new dptr landing on a stale record makes
+   * malloc_gpu_virt_memory() charge the difference against a phantom size, a new
+   * CUgraph landing on a stale one makes free_gpu_virt_memory_by_graph() retire
+   * records it does not own, and get_gpu_virt_memory_type() can report a plain
+   * pointer as oversold UVA and send cuMemFreeAsync down the cuMemFree path.
+   * graph_cost_after_fork() wipes its cache for exactly this reason.
+   *
+   * Freeing (rather than just re-heading the list) matters because forked
+   * workers commonly run long without exec. glibc resets the malloc lock in the
+   * child via its own atfork handlers, so free() here is safe -- and this
+   * library is glibc-only by construction (see the toolchain gate in hook.h). */
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter, *tmp;
+  list_for_each_safe(iter, tmp, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    list_del(iter);
+    free(entry_tmp);
+  }
+  INIT_LIST_HEAD(&g_memory_node->node);
 }
 
 /* fork() child handler implemented in cuda_hook.c. Registered lazily
