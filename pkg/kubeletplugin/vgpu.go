@@ -146,6 +146,7 @@ func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) 
 		filepath.Join(baseContPath, util.Config),
 		filepath.Join(baseContPath, vgpu.VGPULockDirName),
 		filepath.Join(baseContPath, util.VMemNode),
+		filepath.Join(baseContPath, util.SMNode),
 	}
 	for _, dirPath := range preparedDirs {
 		if err := util.EnsureDir(dirPath, 0o777); err != nil {
@@ -330,6 +331,11 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 					HostPath:      filepath.Join(partitionHostPath, util.VMemNode),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
+				{
+					ContainerPath: filepath.Join(vgpu.ContSMNodePath),
+					HostPath:      filepath.Join(partitionHostPath, util.SMNode),
+					Options:       []string{"rw", "nosuid", "nodev", "bind"},
+				},
 			},
 		},
 	}, nil
@@ -369,6 +375,11 @@ func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, 
 			{
 				ContainerPath: vgpu.ContVMemoryNodePath,
 				HostPath:      filepath.Join(hostBase, util.VMemNode),
+				Options:       []string{"rw", "nosuid", "nodev", "bind"},
+			},
+			{
+				ContainerPath: vgpu.ContSMNodePath,
+				HostPath:      filepath.Join(hostBase, util.SMNode),
 				Options:       []string{"rw", "nosuid", "nodev", "bind"},
 			},
 		},

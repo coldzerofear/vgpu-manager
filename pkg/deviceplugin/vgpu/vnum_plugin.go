@@ -465,6 +465,10 @@ const (
 	VGPULockDirName     = "vgpu_lock"
 	ContVGPULockPath    = "/tmp/." + VGPULockDirName
 	ContVMemoryNodePath = "/tmp/." + util.VMemNode
+	// ContSMNodePath is a dedicated read-write directory mounted in by the
+	// plugin, deliberately NOT the container's own /tmp: that may be shadowed
+	// by another hostPath mount, be read-only, or be swept by the workload.
+	ContSMNodePath = "/tmp/." + util.SMNode
 
 	LdPreLoadFileName       = "ld.so.preload"
 	ContPreLoadFilePath     = "/etc/" + LdPreLoadFileName
@@ -843,12 +847,18 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		contVMemoryNodePath := filepath.Join(contDir, util.VMemNode)
 		_ = util.EnsureDir(contVMemoryNodePath, 0o777)
 
+		// /etc/vgpu-manager/<pod-uid>_<cont-name>/sm_node
+		contSMNodePath := filepath.Join(contDir, util.SMNode)
+		_ = util.EnsureDir(contSMNodePath, 0o777)
+
 		// <host_manager_dir>/<pod-uid>_<cont-name>/config
 		hostVGPUConfigPath := filepath.Join(hostDir, util.Config)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/vgpu_lock
 		hostVGPULockPath := filepath.Join(hostDir, VGPULockDirName)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/vmem_node
 		hostVMemNodePath := filepath.Join(hostDir, util.VMemNode)
+		// <host_manager_dir>/<pod-uid>_<cont-name>/sm_node
+		hostSMNodePath := filepath.Join(hostDir, util.SMNode)
 
 		response.Mounts = append(response.Mounts, &pluginapi.Mount{
 			// mount libvgpu-control.so file
@@ -866,6 +876,10 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		}, &pluginapi.Mount{ // mount vmem_node dir
 			ContainerPath: ContVMemoryNodePath,
 			HostPath:      hostVMemNodePath,
+			ReadOnly:      false,
+		}, &pluginapi.Mount{ // mount sm_node dir
+			ContainerPath: ContSMNodePath,
+			HostPath:      hostSMNodePath,
 			ReadOnly:      false,
 		})
 
@@ -1118,8 +1132,13 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 	// from the same place. Joining configDirPath here would name a path that is
 	// never created, making the RemoveAll a silent no-op.
 	vmemNodeConfigPath := filepath.Join(contDir, util.VMemNode, util.VMemNodeFile)
+	// Same sibling-of-config layout as vmem_node. Deleting the file (rather than
+	// zeroing it) is what guarantees the library attaches to a fresh zero region
+	// and re-initialises, instead of inheriting the previous incarnation's state.
+	smNodeConfigPath := filepath.Join(contDir, util.SMNode, util.SMNodeFile)
 	_ = os.RemoveAll(pidsConfigPath)
 	_ = os.RemoveAll(vmemNodeConfigPath)
+	_ = os.RemoveAll(smNodeConfigPath)
 
 	return resp, nil
 }

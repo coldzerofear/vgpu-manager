@@ -403,6 +403,16 @@ _ = os.RemoveAll(vmemNodeConfigPath)      // ← sm_node.config 加在这里
 
 其可靠性由 [vnum_plugin.go#L228](../pkg/deviceplugin/vgpu/vnum_plugin.go#L228) 的 `PreStartRequired: true` 保证——kubelet 在**每次容器启动前**（含重启）调用它，代码注释 "before each startup" 正是此意。
 
+> **⚠️ 实施期发现：这条清理在 device plugin 路径上此前是失效的（已修复，commit `78e8efc`）。**
+>
+> 原代码把路径拼成 `filepath.Join(configDirPath, util.VMemNode, util.VMemNodeFile)`，即 `<cont-dir>/config/vmem_node/vmem_node.config`；而 `Allocate` 挂载的、metrics lister 读回的都是 `<cont-dir>/vmem_node/vmem_node.config`——**`vmem_node` 是 `config/` 的兄弟目录，不是子目录**。被命名的那个路径从不存在，`os.RemoveAll` 恒返回 `nil`，**清理是个静默空操作**。
+>
+> 成因是 `583df02` 复用了上一行 `pidsConfigPath` 的写法（那一行用 `configDirPath` 是对的，`pids.config` 确实在 `config/` 下）。NRI 路径因为显式做了 `strings.TrimSuffix(inj.ConfigDir, util.Config)` 而**没有**这个问题——这也是本设计原先只核对 NRI 侧就误以为两路都健康的原因。
+>
+> **对本设计的影响**：§4.5.3 的覆盖矩阵在修复前实际上是"两条路径都有陈旧风险"，而非表中所写的"仅 DRA 非 NRI 有缺口"。修复后矩阵恢复为表中所述。**这也反过来验证了 §4.5.4 保留库内布局守卫的决定是对的**——控制面清理不仅是 best-effort，它还可能**看起来在跑、实际没跑**，而且这种失效不产生任何日志。
+
+> **这条教训应固化为实施纪律**：`sm_node` 的清理路径必须从 `contDir`（而非 `configDirPath`）拼起，且**必须与挂载路径来自同一个基址表达式**。阶段 1a 的落地已按此执行（两处清理均用 `filepath.Join(contDir, util.SMNode, util.SMNodeFile)` / `filepath.Join(basePath, util.SMNode, util.SMNodeFile)`）。
+
 `CreateContainer`（DRA + NRI 路径，[nri/plugin.go#L387](../pkg/kubeletplugin/nri/plugin.go#L387)）：
 
 ```go
@@ -824,7 +834,7 @@ static inline int64_t *bucket_of(int host_index) {
 
 | 阶段 | 内容 | 前置 |
 |---|---|---|
-| **1a** | **Go 侧挂载 + 清理（可独立先行、风险最低）**：`SMNode`/`SMNodeFile` 常量；5 处功能落点 + 1 处 NRI 观测落点（§4.5.1）；2 处启动前清理落点（§4.5.2）。此时库还没用这个目录 → **纯增量、对现网零影响** | —— |
+| **1a** ✅ **已完成** | **Go 侧挂载 + 清理**：`SMNode`/`SMNodeFile` 常量；5 处功能落点 + 1 处 NRI 观测落点（§4.5.1）；2 处启动前清理落点（§4.5.2）；2 处测试守卫。此时库还没用这个目录 → **纯增量、对现网零影响** | —— |
 | **1b** | **库侧 `sm_node`**：建区/初始化/布局守卫（§4.1/4.4/4.5.4）；消费端切共享桶（§4.2）；补充选举（§4.3）；**全部控制状态入共享区**（§4.13）；bypass 累加改造（§4.7）；env 开关 + 降级（§5） | 1a 已上 |
 | **2** | **`vmem_node` 冻结区头 + 重建**（§10）：C 侧结构体 + `mmap_file_to_vmem_node` 改造 + **`load_controller_configuration` 外层 `FATAL` 降级**（§10.6，两层都要改）；**Go 侧结构体 + `getVmemoryLockOffset` 同步**（§10.3）。**C 与 Go 必须同一个 PR 合并**——分开合会让 fcntl 锁静默失配 | 与 1a/1b 正交，可并行 |
 | **3** | 压争用：进程/线程本地**批量取令牌**（一次 CAS 取一批、本地花完再取），把 CAS 频率降 ~N 倍。**仅当 profiling 证明跨进程 cacheline 弹跳是真开销时做** | 1b 稳定 |
@@ -885,9 +895,12 @@ static inline int64_t *bucket_of(int host_index) {
 ```c
 #define VMEM_NODE_MAGIC          0x564D4E44U   /* "VMND" */
 #define VMEM_NODE_LAYOUT_VERSION 1U
-/* 当前用量 = 128(头) + 16 * 16392 = 262,400B ≈ 256KiB。保留 512KiB。
- * 理由见 §10.4：固定尺寸是为了【永不 resize】，而不只是为了留余量。 */
-#define VMEM_NODE_FILE_SIZE (512 * 1024)
+/* 当前用量 = 128(头) + 16 * 16392 = 262,400B ≈ 256.25KiB。保留 320KiB（~1.25x）。
+ * 理由见 §10.4：固定尺寸是为了【永不 resize】，而不只是为了留余量。
+ * 320KiB 已拍板（§12.1 第 12 项）：节点上容器密度高、page cache 敏感，
+ * 不为用不上的余量付每容器 256KiB 的代价。
+ * 【硬约束】此值一经发版即冻结；要改必须 bump VMEM_NODE_LAYOUT_VERSION。 */
+#define VMEM_NODE_FILE_SIZE (320 * 1024)
 
 typedef struct {
   /* ┌── 冻结区：16 字节永久 ABI，与 sm_node 同构（§4.1）。 */
@@ -1036,19 +1049,22 @@ util.VMemoryNode feature gate (device-plugin/device-monitor 默认 false, Alpha)
 | 3 | **`vmem_node` 一并纳入**，冻结区头 + 重建，含 Go 控制面改造，按需加余量 | 新增 §10；引入唯一跨语言 ABI 面；**我先前的反对已收回**（§10.1） |
 | 4 | **DRA 非 NRI 路径不补清理钩子** | 残留自校正，布局守卫兜底（§4.5.3 结论不变） |
 | 5 | 目录 `sm_node` / 文件 `sm_node.config` | §4.5.1 |
-| 6 | `SM_NODE_FILE_SIZE = 8192` | §4.1；`vmem_node` 同理取 `512KiB`（§10.2） |
+| 6 | `SM_NODE_FILE_SIZE = 8192` | §4.1；`vmem_node` 取 `320KiB`（见第 12 项） |
 | 7 | env `CUDA_SM_SHARED_BUCKET`，默认 `0` | §5 |
 | 8 | `REFILL_PERIOD_NS` = 现 watcher 单设备周期（~80–100ms） | §4.3 |
 | 9 | Go 侧**暂不**读 `sm_node` | `sm_node` 不是跨语言 ABI，冻结约束仅对库内生效。**注意**：第 3 项使 `vmem_node` **是**跨语言 ABI（§10.3） |
 | 10 | **开关走 `g_dynamic_config` + env，不改 `resource_data_t`**（`main` 同步后新增拍板） | §5.1。改 `resource_data_t` 会触发 `CheckResourceDataSize` 重调度；且范式 A 不排斥将来由控制面注入同一个 env |
 | 11 | **不为 `sm_node` 引入任何 PID 回收 / 退出钩子**（`main` 同步后新增拍板） | §4.5.5。判据是"桶不是账本"；该结论绑定在"`sm_node` 无按 PID 归属字段"这一前提上 |
+| 12 | **`VMEM_NODE_FILE_SIZE = 320KiB`**（~1.25x 余量），非 512KiB | §10.2。理由：节点容器密度高、page cache 敏感。**发版即冻结** |
+| 13 | **`vmem_node` 与 `sm_node` 不合并** | 保持两个区。§12.2 第 2 项结论固化：生命周期与读者不同，合并会把 `sm_node` 拖进跨语言 ABI |
+| 14 | **阶段 3（本地批量取令牌）暂不做** | §8。不是"永久不做"，而是**不进入本轮实施范围**；重启条件仍是 §4.12 的 profiling 证据 |
+| 15 | **`vmem_node` 的 `FATAL` 降级拆成独立 PR 先行** | §10.6 / §12.2 第 4 项。与冻结区头正交，可独立回滚 |
 
 ### 12.2 剩余开放项（不阻塞开工，实现期定）
 
-1. **`VMEM_NODE_FILE_SIZE = 512KiB` 的具体取值**：当前用量 256.1KiB，留 ~2x。一旦发版即冻结（改则须 bump `layout_version`）。若你认为节点上容器密度高、page cache 敏感，可收紧到 `320KiB`（~1.2x 余量）。**倾向 512KiB**：一次定死好过将来再动。
-2. **`vmem_node` 与 `sm_node` 是否合并为一个区**：两者都是"库自有的容器级共享区"，合并可省一次挂载 + 一次建区。**倾向不合并**：生命周期与读者不同（`vmem_node` 有宿主 Go 读者、`sm_node` 没有），合并会把 `sm_node` 也拖进跨语言 ABI，与第 9 项拍板相悖。
-3. **阶段 3（本地批量取令牌）是否要做**：仍**仅在 profiling 证明 cacheline 弹跳是真开销后**才做（§4.12）。
-4. **`vmem_node` 的外层 `FATAL` 降级要不要单独先行**（`main` 同步后新增，§10.6）：这一处与冻结区头/重建**技术上正交**——它只是把"共享区不可用"从致命改成降级，不碰任何布局。可以先出一个纯 C 的小 PR，把现网"目录漏挂 → 容器起不来"的风险先摘掉，再合阶段 2 的 ABI 改动。**倾向拆开**：小 PR 风险低、可独立回滚，且不必等 Go 侧同步。
+**§12.2 原有的 4 项已全部拍板结清**（见 §12.1 第 12–15 项）。当前剩余开放项：
+
+1. **阶段 1b 的 `total_cuda_cores` 首建者取值**：`rebuild_region_locked` 要写入 `thread*sm*FACTOR`，但重建发生在**文件锁内、且可能早于 CUDA 设备属性查询完成**。需在实现期确定：是延迟到首次 `rate_limiter` 前补写，还是重建时就地查询。**倾向延迟补写**（重建路径不依赖 CUDA 上下文，更早可用），但要确认 `g_total_cuda_cores[]` 的现有初始化时机（[cuda_hook.c#L1661](../library/src/cuda_hook.c#L1661) 在 `initialization()` 里）。
 
 ### 12.3 我已自行决定的（理由在文档内，不同意直接打）
 

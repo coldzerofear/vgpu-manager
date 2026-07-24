@@ -167,6 +167,12 @@ const (
 	SMUtilFile      = "sm_util.config"
 	VMemNode        = "vmem_node"
 	VMemNodeFile    = "vmem_node.config"
+	// SMNode is the per-container shared region backing container-wide SM
+	// (compute) isolation, named symmetrically with VMemNode: vmem_node holds
+	// the cross-process state of memory isolation, sm_node that of compute
+	// isolation. See docs/sm_multiproc_shared_bucket_design.md.
+	SMNode     = "sm_node"
+	SMNodeFile = "sm_node.config"
 )
 
 const (
