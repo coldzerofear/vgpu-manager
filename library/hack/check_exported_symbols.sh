@@ -44,6 +44,7 @@ FAMILIES=(
   "cuGraphRemoveDependencies     cuGraphRemoveDependencies      cuGraphRemoveDependencies_v2"
   "cuGraphAddNode                cuGraphAddNode                 cuGraphAddNode_v2"
   "cuGetProcAddress              cuGetProcAddress               cuGetProcAddress_v2"
+  "cuStreamGetCaptureInfo        cuStreamGetCaptureInfo_v2      cuStreamGetCaptureInfo_v3"
   # cuGetProcAddress above is listed for export-completeness (we must
   # export both ABI versions of this symbol) even though its substitution
   # logic is handled specially inside cuGetProcAddress() / _v2() in
@@ -116,6 +117,7 @@ FORBIDDEN_HELPERS=(
   formatUuid
   accumulate_used_memory
   cleanup_vmem_nodes
+  check_cleanup_vmem_nodes_by_device
   device_util_read_lock
   device_util_write_lock
   device_util_unlock
@@ -138,10 +140,13 @@ FORBIDDEN_HELPERS=(
   get_compatibility_mode
   get_used_gpu_memory_by_device
   get_used_gpu_virt_memory
+  get_gpu_virt_memory_type
   lookup_cuda_hook_ptr
   note_unhooked_symbol
   malloc_gpu_virt_memory
+  malloc_gpu_virt_memory_captured
   free_gpu_virt_memory
+  free_gpu_virt_memory_by_graph
   print_global_vgpu_config
   # Internal data tables shared between cuda_hook.c / nvml_hook.c / loader.c
   # via extern declarations. They must be linker-global at static-link time

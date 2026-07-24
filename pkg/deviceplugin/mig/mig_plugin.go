@@ -119,7 +119,7 @@ func (m *migDevicePlugin) Allocate(_ context.Context, req *pluginapi.AllocateReq
 				})
 			}
 		}
-		if err := vgpu.UpdateResponseForCDI(responses[i], strategies, m.cdiHandler, deviceIds...); err != nil {
+		if err := vgpu.UpdateResponseForCDI(deviceManager.GetImexChannels(), responses[i], strategies, m.cdiHandler, deviceIds...); err != nil {
 			err = fmt.Errorf("failed to get allocate response for CDI: %v", err)
 			klog.Errorln(err)
 			return nil, err

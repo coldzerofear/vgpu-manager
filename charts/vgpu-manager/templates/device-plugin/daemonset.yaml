@@ -259,12 +259,15 @@ spec:
         - name: kubelet-root
           hostPath:
             path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}
+            type: Directory
         - name: device-plugins
           hostPath:
             path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}/device-plugins
+            type: Directory
         - name: pod-resources
           hostPath:
             path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}/pod-resources
+            type: Directory
         - name: manager-root
           hostPath:
             path: {{ $managerRoot | quote }}
@@ -281,6 +284,7 @@ spec:
         - name: driver-root
           hostPath:
             path: {{ $hostDriverRoot | quote }}
+            type: Directory
         {{- if or $nc.yaml $nc.json }}
         - name: node-config
           configMap:

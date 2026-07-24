@@ -519,12 +519,21 @@ skipNvml:
 	currentSharedContainersMap := make(map[string]int)
 	// Filter out some useless pods.
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
+		// Fast return of pods allocated without counting devices.
+		if !device.ShouldCountPodDeviceAllocation(pod) {
+			return
+		}
 		// Aggregate the allocated memory size on the node, collapsing each
 		// pod's claims to the per-GPU lifecycle peak so a sequential init
 		// container reusing a regular container's GPU is not double-counted.
 		// For a pod without a vGPU init container this is the plain per-GPU
 		// sum, identical to the historical per-claim accounting.
 		podDeviceClaim := device.GetPodDeviceClaim(pod)
+		// Fast return of pods without device claims.
+		if len(podDeviceClaim) == 0 {
+			return
+		}
+
 		for _, fp := range device.ReducePodFootprint(pod, podDeviceClaim) {
 			vGpuAssignedNumberMap[fp.Uuid] += fp.Number
 			vGpuAssignedCoresMap[fp.Uuid] += fp.Cores

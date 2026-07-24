@@ -1,5 +1,7 @@
 package cdi
 
+import "k8s.io/klog/v2"
+
 // Handler generates the node CDI specification and builds the CDI references
 // (annotations / CDI devices) that are returned to kubelet during Allocate.
 type Handler interface {
@@ -12,6 +14,7 @@ type Handler interface {
 	// GetDeviceAnnotations builds the CDI container annotations for the given
 	// qualified device names, honoring the configured annotation prefix.
 	GetDeviceAnnotations(responseID string, qualifiedNames []string) (map[string]string, error)
+	AdditionalDevices() []string
 }
 
 // null is a no-op Handler used when no CDI strategy is enabled.
@@ -27,9 +30,14 @@ func (n *null) CreateSpecFile() error {
 }
 
 func (n *null) QualifiedName(_, _ string) string {
+	klog.Error("cannot return a qualified CDI device name with the null CDI handler")
 	return ""
 }
 
 func (n *null) GetDeviceAnnotations(_ string, _ []string) (map[string]string, error) {
 	return nil, nil
+}
+
+func (n *null) AdditionalDevices() []string {
+	return nil
 }

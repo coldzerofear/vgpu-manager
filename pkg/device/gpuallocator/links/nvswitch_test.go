@@ -140,6 +140,149 @@ func TestGetNVLinkNVSwitch(t *testing.T) {
 			t.Fatal("expected an error, got nil")
 		}
 	})
+
+	t.Run("direct connect at the 18-link maximum", func(t *testing.T) {
+		dev1 := linkDev(18, gpu2Pci, nvml.NVLINK_DEVICE_TYPE_GPU, gpu1Pci)
+		dev2 := linkDev(18, gpu1Pci, nvml.NVLINK_DEVICE_TYPE_GPU, gpu2Pci)
+
+		got, err := GetNVLink(dev1, dev2)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != EighteenNVLINKLinks {
+			t.Fatalf("got %v, want EighteenNVLINKLinks", got)
+		}
+	})
+
+	t.Run("switch-attached count ABOVE the top tier saturates, never Unknown", func(t *testing.T) {
+		// NVML allows up to NVLINK_MAX_LINKS (36) while the enum stops at 18.
+		// Falling back to Unknown here would claim "no NVLink" for a fully
+		// fabric-connected pair — the very failure this file guards against.
+		dev1 := linkDev(nvml.NVLINK_MAX_LINKS, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu1Pci)
+		dev2 := linkDev(nvml.NVLINK_MAX_LINKS, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu2Pci)
+
+		got, err := GetNVLink(dev1, dev2)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != EighteenNVLINKLinks {
+			t.Fatalf("got %v, want EighteenNVLINKLinks (saturated, NOT Unknown)", got)
+		}
+	})
+
+	t.Run("only switch-terminated links are counted when types are mixed", func(t *testing.T) {
+		// 10 links to a switch, the rest to GPUs: the pair width is 10.
+		mixed := func(self nvml.PciInfo) *testDevice {
+			d := linkDev(20, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, self)
+			d.getNvLinkRemoteDeviceType = func(i int) (nvml.IntNvLinkDeviceType, nvml.Return) {
+				if i < 10 {
+					return nvml.NVLINK_DEVICE_TYPE_SWITCH, nvml.SUCCESS
+				}
+				return nvml.NVLINK_DEVICE_TYPE_GPU, nvml.SUCCESS
+			}
+			return d
+		}
+
+		got, err := GetNVLink(mixed(gpu1Pci), mixed(gpu2Pci))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != TenNVLINKLinks {
+			t.Fatalf("got %v, want TenNVLINKLinks (only the 10 switch links count)", got)
+		}
+	})
+
+	t.Run("asymmetric width is symmetric in argument order", func(t *testing.T) {
+		wide := func(self nvml.PciInfo) *testDevice {
+			return linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, self)
+		}
+		narrow := func(self nvml.PciInfo) *testDevice {
+			return linkDev(4, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, self)
+		}
+
+		fwd, err := GetNVLink(wide(gpu1Pci), narrow(gpu2Pci))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		rev, err := GetNVLink(narrow(gpu1Pci), wide(gpu2Pci))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fwd != FourNVLINKLinks || rev != FourNVLINKLinks {
+			t.Fatalf("fwd=%v rev=%v, want both FourNVLINKLinks", fwd, rev)
+		}
+	})
+
+	t.Run("dev2 not on the switch is NOT connected", func(t *testing.T) {
+		dev1 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu1Pci)
+		dev2 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_GPU, gpu2Pci)
+
+		got, err := GetNVLink(dev1, dev2)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != P2PLinkUnknown {
+			t.Fatalf("got %v, want P2PLinkUnknown", got)
+		}
+	})
+
+	t.Run("dev1 state error surfaces", func(t *testing.T) {
+		dev1 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu1Pci)
+		dev1.getNvLinkState = func(int) (nvml.EnableState, nvml.Return) {
+			return nvml.FEATURE_DISABLED, nvml.ERROR_UNKNOWN
+		}
+		dev2 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu2Pci)
+
+		if _, err := GetNVLink(dev1, dev2); err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+	})
+
+	t.Run("dev2 state error surfaces", func(t *testing.T) {
+		dev1 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu1Pci)
+		dev2 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu2Pci)
+		dev2.getNvLinkState = func(int) (nvml.EnableState, nvml.Return) {
+			return nvml.FEATURE_DISABLED, nvml.ERROR_UNKNOWN
+		}
+
+		if _, err := GetNVLink(dev1, dev2); err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+	})
+
+	t.Run("dev2 remote-device-type error surfaces", func(t *testing.T) {
+		dev1 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu1Pci)
+		dev2 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu2Pci)
+		dev2.getNvLinkRemoteDeviceType = func(int) (nvml.IntNvLinkDeviceType, nvml.Return) {
+			return nvml.NVLINK_DEVICE_TYPE_UNKNOWN, nvml.ERROR_UNKNOWN
+		}
+
+		if _, err := GetNVLink(dev1, dev2); err == nil {
+			t.Fatal("expected an error, got nil")
+		}
+	})
+
+	t.Run("dev1 off the fabric short-circuits without consulting dev2", func(t *testing.T) {
+		// Once dev1 is known to have no switch-attached link the pair cannot be
+		// fabric-connected, so dev2 is never probed. That keeps an unrelated NVML
+		// error on dev2 from aborting the WHOLE node's topology discovery
+		// (NewDevices treats any error as fatal). dev2's own health still
+		// surfaces when it is the first argument of another pair.
+		dev1 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_GPU, gpu1Pci)
+		dev2 := linkDev(6, switchPci, nvml.NVLINK_DEVICE_TYPE_SWITCH, gpu2Pci)
+		dev2.getNvLinkState = func(int) (nvml.EnableState, nvml.Return) {
+			t.Fatalf("dev2 must not be probed once dev1 is known to be off the fabric")
+			return nvml.FEATURE_DISABLED, nvml.ERROR_UNKNOWN
+		}
+
+		got, err := GetNVLink(dev1, dev2)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != P2PLinkUnknown {
+			t.Fatalf("got %v, want P2PLinkUnknown", got)
+		}
+	})
 }
 
 func TestNvlinkCountToType(t *testing.T) {

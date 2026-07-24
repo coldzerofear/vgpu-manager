@@ -90,6 +90,18 @@ if(EXISTS ${_POOL_ASYNC_SRC})
     vgpu_configure_c_test(test_alloc_pool_async_ptsz)
 endif()
 
+# Same reason: without this variant the _ptsz copies of the async allocation
+# hooks are never executed, so a defect introduced in one of them passes every
+# test. (Verified the hard way -- commenting the accounting out of
+# cuMemAllocAsync_ptsz left the suite green.)
+set(_ASYNC_ACCT_SRC ${TEST_SRC_DIR}/test_alloc_async_accounting.c)
+if(EXISTS ${_ASYNC_ACCT_SRC})
+    add_executable(test_alloc_async_accounting_ptsz ${_ASYNC_ACCT_SRC})
+    target_compile_definitions(test_alloc_async_accounting_ptsz
+                               PRIVATE CUDA_API_PER_THREAD_DEFAULT_STREAM)
+    vgpu_configure_c_test(test_alloc_async_accounting_ptsz)
+endif()
+
 # ---- CUDA tests (kernel launches) -----------------------------------------
 file(GLOB CU_TESTS "${TEST_SRC_DIR}/test_*.cu")
 if(CU_TESTS)

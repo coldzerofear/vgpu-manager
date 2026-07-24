@@ -27,6 +27,28 @@
 #define TEST_DEVICE_ID 0
 #endif
 
+/* Exit status meaning "this test did not actually run" (the autotools
+ * convention, recognised by run_all_tests.sh).
+ *
+ * A case that cannot meet its preconditions must not return 0. Reporting
+ * success for assertions that never executed makes a skipped test
+ * indistinguishable from a passing one in the summary, which is exactly how a
+ * regression survives a green run. Tests count their skips and exit with this
+ * instead; run_tests_with_env.sh additionally sets VGPU_TEST_STRICT=1, under
+ * which the runner treats any skip as a failure because it configured
+ * everything the tests were promised. */
+#define VGPU_TEST_RC_SKIP 77
+
+/* Final verdict for a test with `failures` failed and `skipped` skipped cases.
+ * Failure wins over skip: a run that both failed and skipped is a failure. */
+static inline int vgpu_test_verdict(int failures, int skipped) {
+  printf("\nResult: %s", failures ? "FAIL" : (skipped ? "SKIP" : "PASS"));
+  if (skipped) printf("  (%d case(s) skipped -- assertions did NOT run)", skipped);
+  printf("\n");
+  if (failures) return 1;
+  return skipped ? VGPU_TEST_RC_SKIP : 0;
+}
+
 #define CHECK_RUNTIME_API(f)                                                  \
   do {                                                                        \
     cudaError_t _status = (f);                                                \

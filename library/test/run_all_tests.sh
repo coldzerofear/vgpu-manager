@@ -39,8 +39,24 @@ fi
 TEST_TIMEOUT="${TEST_TIMEOUT:-120}"
 export TEST_DEVICE_ID="${TEST_DEVICE_ID:-0}"
 
+# Two different things get called "skipped", and only one of them is a problem:
+#
+#   SKIPPED  a test ran and reported that its own preconditions were not met
+#            (rc=77). Those preconditions -- LD_PRELOAD, the vmem ledger -- are
+#            things this harness is supposed to provide, so a skip here means
+#            the setup is wrong and the assertions silently did not run.
+#
+# Keeping them apart is what lets VGPU_TEST_STRICT fail on the first without
+# also failing every machine that happens not to have a framework installed.
 declare -i TOTAL=0 PASSED=0 FAILED=0 SKIPPED=0
 FAILED_NAMES=()
+SKIPPED_NAMES=()
+
+# Exit status a test uses to say "I did not actually run" (the autotools
+# convention). A test whose preconditions were not met must NOT report success:
+# a green run would then be indistinguishable from one where the assertions
+# never executed, which is how a real regression slips through unnoticed.
+readonly RC_SKIP=77
 
 run_one() {
   local name="$1"; shift
@@ -53,6 +69,16 @@ run_one() {
     PASSED=$((PASSED + 1))
   else
     local rc=$?
+    if (( rc == RC_SKIP )); then
+      echo "SKIP"
+      SKIPPED=$((SKIPPED + 1))
+      SKIPPED_NAMES+=("${name}")
+      echo "------- output -------"
+      tail -30 "${log}" | sed 's/^/  /'
+      echo "----------------------"
+      rm -f "${log}"
+      return 0
+    fi
     echo "FAIL (rc=${rc})"
     FAILED=$((FAILED + 1))
     FAILED_NAMES+=("${name}")
@@ -88,6 +114,7 @@ if [[ "${SKIP_PYTHON:-0}" == "0" && -d "${PY_DIR}" ]]; then
     if [[ -n "${mod}" ]] && ! python3 -c "import ${mod}" >/dev/null 2>&1; then
       printf "=== %-36s SKIP (module '%s' not installed)\n" "${name}" "${mod}"
       SKIPPED=$((SKIPPED + 1))
+      SKIPPED_NAMES+=("${name} (no ${mod})")
       continue
     fi
     run_one "${name}" env LD_PRELOAD="${VGPU_SO}" python3 "${py}" \
@@ -102,5 +129,17 @@ if (( FAILED > 0 )); then
   echo "Failed tests:"
   for n in "${FAILED_NAMES[@]}"; do echo "  - ${n}"; done
   exit 1
+fi
+if (( SKIPPED > 0 )); then
+  echo "Skipped tests (preconditions not met -- assertions did NOT run):"
+  for n in "${SKIPPED_NAMES[@]}"; do echo "  - ${n}"; done
+  # These preconditions are ours to provide, so a skip means the harness did
+  # not deliver what the test was promised and a green result would overstate
+  # what was verified. run_tests_with_env.sh sets everything up and turns this
+  # on.
+  if [[ "${VGPU_TEST_STRICT:-0}" != "0" ]]; then
+    echo "[FAIL] VGPU_TEST_STRICT is set: these tests were expected to run."
+    exit 1
+  fi
 fi
 exit 0

@@ -204,7 +204,18 @@ var nvlinkTypes = [...]P2PLinkType{
 }
 
 // nvlinkCountToType maps an NVLink count to its P2PLinkType. Zero or fewer means
-// "not NVLink-connected"; counts beyond the largest enumerated value saturate.
+// "not NVLink-connected".
+//
+// Counts above the largest enumerated tier SATURATE to EighteenNVLINKLinks
+// rather than falling back to P2PLinkUnknown. This is deliberate: the enum tops
+// out at 18 (today's H100/B200 per-GPU maximum) while NVML reports up to
+// NVLINK_MAX_LINKS (36) links, so a future GPU — or a switch-attached count
+// aggregated across links — can legitimately exceed 18. Mapping that to
+// "unknown" would claim the pair has NO NVLink, re-introducing exactly the
+// class of failure this file exists to prevent (isolated islands → strict-link
+// rejects the node, cross-pod affinity degenerates). Over-reporting link WIDTH
+// at the top tier is harmless by comparison: it only affects relative pair
+// scoring, never connectivity.
 func nvlinkCountToType(n int) P2PLinkType {
 	if n <= 0 {
 		return P2PLinkUnknown
