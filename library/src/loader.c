@@ -2521,26 +2521,56 @@ int load_controller_configuration() {
   if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {
     ret = mmap_file_to_vmem_node(&g_device_vmem);
     if (ret) {
-      pthread_mutex_unlock(&init_config_mutex);
-      LOGGER(FATAL, "mmap vmem nodes file failed");
+      /* Degrade, do not die. The region being unavailable -- directory not
+       * mounted, mounted read-only, /tmp shadowed by the workload, an older
+       * plugin paired with a newer library -- says nothing about whether this
+       * process can run correctly. It says only that the extra accounting is
+       * unavailable, and the correct response is to run without it.
+       *
+       * This is not a weaker configuration than we already ship: every
+       * dereference of g_device_vmem is guarded by a NULL check, and
+       * g_device_vmem == NULL is the DEFAULT state, because the VMemoryNode
+       * feature gate defaults to off. Degrading lands the process in the exact
+       * configuration most nodes run in today.
+       *
+       * Memory limiting specifically is NOT lost. The check is
+       *   used + vmem_used + request > total_memory
+       * where `used` comes from NVML and does not depend on this region. Only
+       * vmem_used goes to 0, and that term exists solely to cover oversold/UVA
+       * allocations NVML cannot see. The limit stays enforced; it just stops
+       * counting what it can no longer observe.
+       *
+       * Do NOT unlock here -- unlike the FATAL this replaces, control now
+       * reaches DONE, which unlocks. ret is cleared because a missing optional
+       * region is not a failure to load the configuration. */
+      g_device_vmem = NULL;
+      ret = 0;
+      LOGGER(WARNING, "unable to map vmem nodes file, will roll back to "
+                      "nvml-only memory accounting (virtual memory tracking disabled)");
+    } else {
+      if (atexit(exit_cleanup_handler) != 0) {
+        LOGGER(ERROR ,"register exit handler failed: %d", errno);
+      }
+      /* sigaction (not signal()) so we can capture and chain to any host
+       * handler -- the alternative is silently clobbering JVM/Go/Python signal
+       * handling. SA_SIGINFO lets us forward siginfo_t/ucontext_t verbatim.
+       *
+       * Registered only on success: these handlers exist to hand this process's
+       * ledger records back at exit, so with no ledger there is nothing to hand
+       * back, and installing them would alter the container's signal
+       * disposition for no reason. */
+      struct sigaction sa;
+      memset(&sa, 0, sizeof(sa));
+      sigemptyset(&sa.sa_mask);
+      sa.sa_flags = SA_RESTART | SA_SIGINFO;
+      sa.sa_sigaction = signal_cleanup_handler_sa;
+      sigaction(SIGTERM, &sa, &g_old_sigterm_sa);
+      sigaction(SIGINT,  &sa, &g_old_sigint_sa);
+      sigaction(SIGHUP,  &sa, &g_old_sighup_sa);
+      sigaction(SIGABRT, &sa, &g_old_sigabrt_sa);
+      // Note: SIGKILL and SIGSTOP cannot be caught
+      LOGGER(VERBOSE, "registered cleanup handlers for signals");
     }
-    if (atexit(exit_cleanup_handler) != 0) {
-      LOGGER(ERROR ,"register exit handler failed: %d", errno);
-    }
-    /* sigaction (not signal()) so we can capture and chain to any host
-     * handler -- the alternative is silently clobbering JVM/Go/Python signal
-     * handling. SA_SIGINFO lets us forward siginfo_t/ucontext_t verbatim. */
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_SIGINFO;
-    sa.sa_sigaction = signal_cleanup_handler_sa;
-    sigaction(SIGTERM, &sa, &g_old_sigterm_sa);
-    sigaction(SIGINT,  &sa, &g_old_sigint_sa);
-    sigaction(SIGHUP,  &sa, &g_old_sighup_sa);
-    sigaction(SIGABRT, &sa, &g_old_sigabrt_sa);
-    // Note: SIGKILL and SIGSTOP cannot be caught
-    LOGGER(VERBOSE, "registered cleanup handlers for signals");
   }
   // Ensure that the cleaning function can be called once every time the child process is forked.
   check_cleanup_vmem_nodes();

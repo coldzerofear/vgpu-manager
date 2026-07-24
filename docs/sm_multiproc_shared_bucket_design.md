@@ -836,7 +836,8 @@ static inline int64_t *bucket_of(int host_index) {
 |---|---|---|
 | **1a** ✅ **已完成** | **Go 侧挂载 + 清理**：`SMNode`/`SMNodeFile` 常量；5 处功能落点 + 1 处 NRI 观测落点（§4.5.1）；2 处启动前清理落点（§4.5.2）；2 处测试守卫。此时库还没用这个目录 → **纯增量、对现网零影响** | —— |
 | **1b** | **库侧 `sm_node`**：建区/初始化/布局守卫（§4.1/4.4/4.5.4）；消费端切共享桶（§4.2）；补充选举（§4.3）；**全部控制状态入共享区**（§4.13）；bypass 累加改造（§4.7）；env 开关 + 降级（§5） | 1a 已上 |
-| **2** | **`vmem_node` 冻结区头 + 重建**（§10）：C 侧结构体 + `mmap_file_to_vmem_node` 改造 + **`load_controller_configuration` 外层 `FATAL` 降级**（§10.6，两层都要改）；**Go 侧结构体 + `getVmemoryLockOffset` 同步**（§10.3）。**C 与 Go 必须同一个 PR 合并**——分开合会让 fcntl 锁静默失配 | 与 1a/1b 正交，可并行 |
+| **2-pre** ✅ **已完成** | **外层 `FATAL` 降级**（§10.6），独立先行：`vmem_node` 映射失败 → WARNING + 关闭本进程记账，不再杀容器。与冻结区头正交、可独立回滚 | —— |
+| **2** | **`vmem_node` 冻结区头 + 重建**（§10）：C 侧结构体 + `mmap_file_to_vmem_node` 改造（**外层 `FATAL` 已由 2-pre 处理**）；**Go 侧结构体 + `getVmemoryLockOffset` 同步**（§10.3）。**C 与 Go 必须同一个 PR 合并**——分开合会让 fcntl 锁静默失配 | 与 1a/1b 正交，可并行 |
 | **3** | 压争用：进程/线程本地**批量取令牌**（一次 CAS 取一批、本地花完再取），把 CAS 频率降 ~N 倍。**仅当 profiling 证明跨进程 cacheline 弹跳是真开销时做** | 1b 稳定 |
 
 > **1a / 1b 拆分的价值**：Go 侧改动（挂载 + 清理）不依赖库侧，且在库未使用该目录前**完全无副作用**。先上 1a 可以真机确认"目录挂进去了、每次容器重启前文件确实被删了"，把 §4.5 的控制面假设**验证成事实**，再让库侧依赖它。
@@ -1000,6 +1001,15 @@ if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {
 ```
 
 `LOGGER(FATAL, ...)` 会终止进程。所以 §10.2 的改造**必须两层都动**：内层从"尺寸不符 → `return 1`"改成"布局不符 → 就地重建"；外层的 `FATAL` 应降级为 `WARNING` + 关闭本进程的 vmem_node 记账（与 §5 对 `sm_node` 的降级语义一致）。**只改内层是不够的**——`open`/`mmap` 真失败时（目录只读、插件漏挂）外层照样 FATAL 掉容器。
+
+> **✅ 外层降级已实施**（§12.1 第 15 项，独立先行）。实施前做了两项必须的核查，结论都支持降级：
+>
+> 1. **`g_device_vmem == NULL` 是全库已支持的状态**：所有解引用点（`cleanup_vmem_nodes`、`check_cleanup_vmem_nodes*`、`add/sub_gpu_virt_memory`、`get_used_gpu_virt_memory` 等）**无一例外**都在 `if (g_device_vmem != NULL)` 之下；两个未自带守卫的 `rm_vmem_node_by_*` helper 的全部 3 个调用点也都在守卫内。更强的证据是：**`VMemoryNode` 特性门控默认 `false`**，所以 `NULL` 恰恰是今天绝大多数节点的**默认运行状态**——降级等于落回默认配置，不是落进未测路径。
+> 2. **显存限额不会因此失效**（这是降级前最该问的问题）。限额判据是 `used + vmem_used + request_size > total_memory`（[cuda_hook.c#L289](../library/src/cuda_hook.c#L289)），其中 `used` 来自 NVML、**与本共享区无关**；`vmem_node` 缺失只让 `vmem_used` 归零，而该项存在的意义仅是补上 **NVML 看不见的 oversold/UVA 分配**。⟹ 限额**依然强制执行**，只是不再计入观测不到的那部分。若这一条不成立（例如限额完全依赖该账本），`FATAL` 反而是更安全的选择，就不该降级。
+>
+> 实现要点：`ret` 显式清零（可选区缺失不算配置加载失败）；**不在降级分支里 `pthread_mutex_unlock`**（与被替换的 `FATAL` 不同，控制流现在会走到 `DONE:` 统一解锁，手工再解一次就是双重解锁）；`atexit`/`sigaction` 注册**移入成功分支**——那些处理器的职责是退出时归还本进程的账本记录，没有账本就无事可归还，凭空改动容器的信号处置是多余的副作用。
+>
+> 未一并改动 `sm_watcher` 分支相邻的同类 `FATAL`：那是另一个共享区、另一条判据，不在本次范围内，仅在此记录。
 
 > 注意紧邻的 `sm_watcher` 分支（[loader.c#L2512](../library/src/loader.c#L2512) 附近）有同样的 `FATAL`，但它**紧接着就是一个 `g_device_util == NULL` 的 WARNING 回退分支**，说明作者本来就认可"外部共享区不可用应回退而非致命"。vmem 分支缺的正是这个回退。
 
