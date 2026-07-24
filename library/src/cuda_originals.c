@@ -338,11 +338,6 @@ CUresult cuMemFreeHost(void *p) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFreeHost, p);
 }
 
-CUresult cuMemHostAlloc(void **pp, size_t bytesize, unsigned int Flags) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostAlloc, pp, bytesize,
-                         Flags);
-}
-
 CUresult _cuMemHostGetDevicePointer(CUdeviceptr *pdptr, void *p, unsigned int Flags) {
   CUresult ret;
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostGetDevicePointer_v2))) {
