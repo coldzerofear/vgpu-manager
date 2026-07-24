@@ -73,6 +73,15 @@ const (
 	// in the workloads for prepared devices.
 	DeviceMetadata featuregate.Feature = "DeviceMetadata"
 
+	// FabricManagerPartitioning enables Fabric Manager (NVSwitch) partition
+	// management for Passthrough VFIO devices.
+	FabricManagerPartitioning featuregate.Feature = "FabricManagerPartitioning"
+
+	// DRAListTypeAttributes allows the GPU kubelet plugin to publish list-valued
+	// DRA device attributes. The cluster must have the Kubernetes feature gate
+	// of the same name enabled before enabling this in the driver.
+	DRAListTypeAttributes featuregate.Feature = "DRAListTypeAttributes"
+
 	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
 
 	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
@@ -173,6 +182,20 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	NRISupport: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 4),
+		},
+	},
+	FabricManagerPartitioning: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	DRAListTypeAttributes: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
@@ -288,6 +311,10 @@ func ValidateFeatureGates() error {
 
 	if Enabled(DeviceMetadata) && !Enabled(PassthroughSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", DeviceMetadata, PassthroughSupport)
+	}
+
+	if Enabled(FabricManagerPartitioning) && !Enabled(PassthroughSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", FabricManagerPartitioning, PassthroughSupport)
 	}
 
 	return nil

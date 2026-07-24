@@ -117,10 +117,21 @@ func (l deviceLib) GetGpuDeviceInfo(index int, device nvdev.Device) (*GpuDeviceI
 	if err != nil {
 		return nil, err
 	}
-	return &GpuDeviceInfo{
+
+	gpuDeviceInfo := &GpuDeviceInfo{
 		GpuInfo:     gpuInfo,
 		vfioEnabled: false,
-	}, nil
+	}
+
+	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+		if moduleID, ret := device.GetModuleId(); ret == nvml.SUCCESS {
+			gpuDeviceInfo.gpuModuleID = moduleID
+		} else {
+			klog.V(4).Infof("GPU %s: could not resolve gpuModuleId from NVML: %v", gpuDeviceInfo.CanonicalName(), ret)
+		}
+	}
+
+	return gpuDeviceInfo, nil
 }
 
 func (l deviceLib) GetMigDeviceInfos(gpuInfo *GpuDeviceInfo) (map[string]*MigDeviceInfo, error) {
@@ -572,7 +583,7 @@ func (l deviceLib) maybeDisableMigMode(uuid string, nvmldev nvml.Device) error {
 		// We could also log this as an error and proceed, and hope for the
 		// state machine to clean this up in the future. Probably not a good
 		// idea.
-		return fmt.Errorf("error disabling MIG mode for device %s: %v", gpu.String(), ret)
+		return fmt.Errorf("error disabling MIG mode for device %s: %w", gpu.String(), ret)
 	}
 	// Note: when we're here, disabling MIG mode might still have failed.
 	// `activationStatus` may reflect "in use by another client".
@@ -718,7 +729,7 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	// Without handle caching, I've seen this to take up O(10 s).
 	device, ret := l.DeviceGetHandleByUUID(gpu.UUID)
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting GPU device handle: %v", ret)
+		return nil, fmt.Errorf("error getting GPU device handle: %w", ret)
 	}
 	klog.V(7).Infof("t_prep_create_mig_dev_get_dev_handle %.3f s", time.Since(tdhbu0).Seconds())
 
@@ -750,7 +761,7 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 		if ret != nvml.SUCCESS {
 			// activationStatus would return the appropriate error code upon unsuccessful activation
 			klog.Warningf("%s: SetMigMode activationStatus (device %s): %s", logpfx, gpu.String(), activationStatus)
-			return nil, fmt.Errorf("error enabling MIG mode for device %s: %v", gpu.String(), ret)
+			return nil, fmt.Errorf("error enabling MIG mode for device %s: %w", gpu.String(), ret)
 		}
 		klog.V(1).Infof("%s: MIG mode now enabled for device %s, t_enable_mig %.3f s", logpfx, gpu.String(), time.Since(tem0).Seconds())
 	} else {
@@ -762,7 +773,7 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	tcgigi0 := time.Now()
 	giProfileInfo, ret := device.GetGpuInstanceProfileInfo(profileInfo.GIProfileID)
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting GPU instance profile info for '%v': %v", profile, ret)
+		return nil, fmt.Errorf("error getting GPU instance profile info for '%v': %w", profile, ret)
 	}
 
 	gi, ret := device.CreateGpuInstanceWithPlacement(&giProfileInfo, placement)
@@ -778,7 +789,7 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	// for now, just return an error without distinguishing "already exists"
 	// from any other type of fault.
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error creating GPU instance for '%s': %v", migspec.CanonicalName(), ret)
+		return nil, fmt.Errorf("error creating GPU instance for '%s': %w", migspec.CanonicalName(), ret)
 	}
 
 	//giInfo, ret := gi.GetInfo()
@@ -788,17 +799,17 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 
 	ciProfileInfo, ret := gi.GetComputeInstanceProfileInfo(profileInfo.CIProfileID, profileInfo.CIEngProfileID)
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting Compute instance profile info for '%v': %v", profile, ret)
+		return nil, fmt.Errorf("error getting Compute instance profile info for '%v': %w", profile, ret)
 	}
 
 	ci, ret := gi.CreateComputeInstance(&ciProfileInfo)
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error creating Compute instance for '%v': %v", profile, ret)
+		return nil, fmt.Errorf("error creating Compute instance for '%v': %w", profile, ret)
 	}
 
 	ciInfo, ret := ci.GetInfo()
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting GPU instance info for '%v': %v", profile, ret)
+		return nil, fmt.Errorf("error getting GPU instance info for '%v': %w", profile, ret)
 	}
 	klog.V(6).Infof("t_prep_create_mig_dev_cigi %.3f s", time.Since(tcgigi0).Seconds())
 
@@ -814,7 +825,7 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	// through indices.
 	uuid, ret := ciInfo.Device.GetUUID()
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting UUID from CI info/device for CI %d: %v", ciInfo.Id, ret)
+		return nil, fmt.Errorf("error getting UUID from CI info/device for CI %d: %w", ciInfo.Id, ret)
 	}
 
 	// Convenient access to all Mig device lists to find newly created Mig device information.
@@ -827,7 +838,7 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	// MigSpecTuple. Things get confusing.
 	migDevInfo, ok := migMap[uuid]
 	if !ok {
-		return nil, fmt.Errorf("error getting migInfo from CI info/device for CI %d Uuid %s: %v", ciInfo.Id, uuid, ret)
+		return nil, fmt.Errorf("error getting migInfo from CI info/device for CI %d Uuid %s: %w", ciInfo.Id, uuid, ret)
 	}
 
 	klog.V(6).Infof("%s: MIG device created on %s: %+v", logpfx, gpu.String(), migDevInfo.LiveTuple())
@@ -846,7 +857,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 
 	parentNvmlDev, ret := l.DeviceGetHandleByUUID(parentUUID)
 	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error getting device from UUID '%v': %v", parentUUID, ret)
+		return fmt.Errorf("error getting device from UUID '%v': %w", parentUUID, ret)
 	}
 
 	// The order of destroying 1) compute instance and 2) GPU instance matters.
@@ -865,7 +876,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 
 	// UNINITIALIZED, INVALID_ARGUMENT, NO_PERMISSION
 	if gires != nvml.SUCCESS && gires != nvml.ERROR_NOT_FOUND {
-		return fmt.Errorf("error getting GPU instance handle for MIG device: %v", ret)
+		return fmt.Errorf("error getting GPU instance handle for MIG device: %w", ret)
 	}
 
 	if gires == nvml.ERROR_NOT_FOUND {
@@ -885,12 +896,12 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	// to be extra sure that this we want to proceed with deletion.
 	// ciInfo, res := ci.GetInfo()
 	// if res != nvml.SUCCESS {
-	// 	return fmt.Errorf("error calling ci.GetInfo(): %v", ret)
+	// 	return fmt.Errorf("error calling ci.GetInfo(): %w", ret)
 	// }
 
 	// actualMigUUID, res := nvml.DeviceGetUUID(ciInfo.Device)
 	// if res != nvml.SUCCESS {
-	// 	return fmt.Errorf("nvml.DeviceGetUUID() failed: %v", ret)
+	// 	return fmt.Errorf("nvml.DeviceGetUUID() failed: %w", ret)
 	// }
 	// if actualMigUUID != expectedMigUUID {
 	// 	return fmt.Errorf("UUID mismatch upon deletion: expected: %s actual: %s", expectedMigUUID, actualMigUUID)
@@ -900,7 +911,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	// INVALID_ARGUMENT, NO_PERMISSION: for those three, it's worth erroring out
 	// here (to be retried later).
 	if cires != nvml.SUCCESS && cires != nvml.ERROR_NOT_FOUND {
-		return fmt.Errorf("error getting Compute instance handle for MIG device %s: %v", migStr, ret)
+		return fmt.Errorf("error getting Compute instance handle for MIG device %s: %w", migStr, ret)
 	}
 
 	// A previous, partial cleanup may actually have already deleted that. Seen
@@ -910,7 +921,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	} else {
 		ret := ci.Destroy()
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error destroying Compute instance: %v", ret)
+			return fmt.Errorf("error destroying Compute instance: %w", ret)
 		}
 	}
 
@@ -924,7 +935,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	// out after 10 seconds, when requests pile up.
 	ret = gi.Destroy()
 	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error destroying GPU Instance: %v", ret)
+		return fmt.Errorf("error destroying GPU Instance: %w", ret)
 	}
 	klog.V(6).Infof("t_delete_mig_device %.3f s", time.Since(t0).Seconds())
 
@@ -959,17 +970,17 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 
 		giId, ret := migHandle.GetGpuInstanceId()
 		if ret != nvml.SUCCESS {
-			return nil, fmt.Errorf("failed to get GI ID: %v", ret)
+			return nil, fmt.Errorf("failed to get GI ID: %w", ret)
 		}
 
 		giHandle, ret := parent.GetGpuInstanceById(giId)
 		if ret != nvml.SUCCESS {
-			return nil, fmt.Errorf("failed to get GI handle for ID %d: %v", giId, ret)
+			return nil, fmt.Errorf("failed to get GI handle for ID %d: %w", giId, ret)
 		}
 
 		giInfo, ret := giHandle.GetInfo()
 		if ret != nvml.SUCCESS {
-			return nil, fmt.Errorf("failed to get GI info: %v", ret)
+			return nil, fmt.Errorf("failed to get GI info: %w", ret)
 		}
 
 		klog.V(7).Infof("FindMigDevBySpec: saw MIG dev with profile id %d and placement start %d", giInfo.ProfileId, giInfo.Placement.Start)
@@ -993,13 +1004,13 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 		ciId := 0
 		ciId, ret = migHandle.GetComputeInstanceId()
 		if ret != nvml.SUCCESS {
-			klog.V(4).Infof("FindMigDevBySpec(): failed to get CI ID: %v", ret)
+			klog.V(4).Infof("FindMigDevBySpec(): failed to get CI ID: %s", ret.Error())
 		}
 
 		uuid := ""
 		uuid, ret = migHandle.GetUUID()
 		if ret != nvml.SUCCESS {
-			klog.V(4).Infof("FindMigDevBySpec(): failed to get MIG UUID: %v", ret)
+			klog.V(4).Infof("FindMigDevBySpec(): failed to get MIG UUID: %s", ret.Error())
 		}
 
 		// Found device matching the spec, return handle. For subsequent

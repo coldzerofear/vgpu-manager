@@ -384,6 +384,13 @@ func (d *driver) Shutdown() error {
 		d.state.nvdevlib.NvmlShutdown()
 	}
 
+	// Tear down the Fabric Manager connection, if one was opened.
+	if d.state.fmManager != nil {
+		if err := d.state.fmManager.Close(); err != nil {
+			klog.Warningf("error closing Fabric Manager connection: %v", err)
+		}
+	}
+
 	if d.deviceHealthMonitor != nil {
 		d.deviceHealthMonitor.Stop()
 	}
