@@ -1224,15 +1224,12 @@ typedef struct {
 static driver_route_t g_routes[CUDA_ENTRY_END];
 static int g_routes_n = 0;
 
-/* Address only. The search below binary-searches to the address and then scans
- * that address's run by name, so name order within a run buys nothing. Aliases
- * in one run all end up carrying the same hook anyway (see the collapse loop),
- * so an unstable order there can only change which of several equivalent names
- * gets quoted in a log line. */
 static int route_cmp(const void *a, const void *b) {
-  void *x = ((const driver_route_t *)a)->real_fn;
-  void *y = ((const driver_route_t *)b)->real_fn;
-  return (x > y) - (x < y);
+  const driver_route_t *ra = a, *rb = b;
+  if (ra->real_fn != rb->real_fn) {
+    return (ra->real_fn > rb->real_fn) - (ra->real_fn < rb->real_fn);
+  }
+  return strcmp(ra->name, rb->name);
 }
 
 /* Build the pointer -> hook index. Called once, after the driver table is
