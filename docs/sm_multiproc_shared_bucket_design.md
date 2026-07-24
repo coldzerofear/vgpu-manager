@@ -835,7 +835,7 @@ static inline int64_t *bucket_of(int host_index) {
 | 阶段 | 内容 | 前置 |
 |---|---|---|
 | **1a** ✅ **已完成** | **Go 侧挂载 + 清理**：`SMNode`/`SMNodeFile` 常量；5 处功能落点 + 1 处 NRI 观测落点（§4.5.1）；2 处启动前清理落点（§4.5.2）；2 处测试守卫。此时库还没用这个目录 → **纯增量、对现网零影响** | —— |
-| **1b** | **库侧 `sm_node`**：建区/初始化/布局守卫（§4.1/4.4/4.5.4）；消费端切共享桶（§4.2）；补充选举（§4.3）；**全部控制状态入共享区**（§4.13）；bypass 累加改造（§4.7）；env 开关 + 降级（§5） | 1a 已上 |
+| **1b** ✅ **已完成** | **库侧 `sm_node`**：建区/初始化/布局守卫（§4.1/4.4/4.5.4）；消费端切共享桶（§4.2）；补充选举（§4.3）；**全部控制状态入共享区**（§4.13）；bypass 累加改造（§4.7）；env 开关 + 降级（§5） | 1a 已上 |
 | **2-pre** ✅ **已完成** | **外层 `FATAL` 降级**（§10.6），独立先行：`vmem_node` 映射失败 → WARNING + 关闭本进程记账，不再杀容器。与冻结区头正交、可独立回滚 | —— |
 | **2** | **`vmem_node` 冻结区头 + 重建**（§10）：C 侧结构体 + `mmap_file_to_vmem_node` 改造（**外层 `FATAL` 已由 2-pre 处理**）；**Go 侧结构体 + `getVmemoryLockOffset` 同步**（§10.3）。**C 与 Go 必须同一个 PR 合并**——分开合会让 fcntl 锁静默失配 | 与 1a/1b 正交，可并行 |
 | **3** | 压争用：进程/线程本地**批量取令牌**（一次 CAS 取一批、本地花完再取），把 CAS 频率降 ~N 倍。**仅当 profiling 证明跨进程 cacheline 弹跳是真开销时做** | 1b 稳定 |
@@ -1074,7 +1074,11 @@ util.VMemoryNode feature gate (device-plugin/device-monitor 默认 false, Alpha)
 
 **§12.2 原有的 4 项已全部拍板结清**（见 §12.1 第 12–15 项）。当前剩余开放项：
 
-1. **阶段 1b 的 `total_cuda_cores` 首建者取值**：`rebuild_region_locked` 要写入 `thread*sm*FACTOR`，但重建发生在**文件锁内、且可能早于 CUDA 设备属性查询完成**。需在实现期确定：是延迟到首次 `rate_limiter` 前补写，还是重建时就地查询。**倾向延迟补写**（重建路径不依赖 CUDA 上下文，更早可用），但要确认 `g_total_cuda_cores[]` 的现有初始化时机（[cuda_hook.c#L1661](../library/src/cuda_hook.c#L1661) 在 `initialization()` 里）。
+~~1. 阶段 1b 的 `total_cuda_cores` 首建者取值~~ —— **实施期已解决，两个都不用选**。映射点落在 `initialization()` 内、`init_device_cuda_cores()` 与 `sm_controller_init()` 之后、`balance_batches()` 之前，此时设备几何、`hard_core`、env 开关**全部已知**，watcher 也还没启动。
+
+更重要的是实现期改了一个判断：**`change_token` 的钳制上界仍读进程私有的 `g_total_cuda_cores[]`，而不是共享区的 `total_cuda_cores`。** 理由是消除排序风险——共享值若在某个进程读到的瞬间还是 0，桶会被钳到 0、整容器被节流；而该值由设备属性推出，每个进程算出的完全相同，本地读永远正确。共享区的 `total_cuda_cores` 因此降级为**纯观测字段**（ABI 保留，初始化后发布一次）。
+
+`up_limit` 的初值则相反，必须**在建区时**写（`sm_node_rebuild_locked` 里写 `hard_core`）：若沿用"watcher 线程启动时初始化"，一个晚加入的进程每次启动 watcher 都会把容器**已收敛的** up_limit 打回 hard_core。这是共享化之后才出现的新失效模式，原设计未覆盖。
 
 ### 12.3 我已自行决定的（理由在文档内，不同意直接打）
 

@@ -161,6 +161,26 @@ if(BUILD_TESTS)
     add_subdirectory(test)
 endif()
 
+# ---------------------------------------------------------------------------
+# sm_node shared-bucket checks.
+#
+# Built and run separately from test/ because it needs NEITHER CUDA nor a GPU:
+# it forks processes over a real MAP_SHARED region and asserts the two
+# properties the shared token bucket rests on -- that concurrent cross-process
+# CAS deductions lose nothing, and that the refill election admits at most one
+# winner per period. Both are exactly the kind of thing that cannot be checked
+# by reading the code, and both can run in ordinary CI.
+#
+#   cmake -DBUILD_SM_NODE_TESTS=ON .. && make test_sm_node_shared
+#   ./test_sm_node_shared
+# ---------------------------------------------------------------------------
+option(BUILD_SM_NODE_TESTS "Build the GPU-less sm_node shared-bucket checks" OFF)
+if(BUILD_SM_NODE_TESTS)
+    add_executable(test_sm_node_shared test/test_sm_node_shared.c)
+    target_include_directories(test_sm_node_shared PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+endif()
+
 # find_package(CUDAToolkit REQUIRED)
 add_executable(mem_occupy_tool tools/mem_occupy_tool.c)
 target_include_directories(mem_occupy_tool PUBLIC ${C_INCLUDE_PATH} ${CUDA_HOME}/include)

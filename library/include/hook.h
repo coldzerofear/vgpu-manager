@@ -26,6 +26,7 @@ extern "C" {
 #include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -151,6 +152,15 @@ extern "C" {
 #define DRIVER_VERSION_MATCH_PATTERN "([0-9]+)(\\.[0-9]+)+"
 
 #define MAX_DEVICE_COUNT 16
+
+/* Padding granule for per-device hot state. 128 rather than 64 because Intel's
+ * L2 adjacent-line prefetcher pulls lines in 128B-aligned pairs (so 64B padding
+ * can still leave two devices effectively sharing) and some ARM64 parts use a
+ * 128B granule. Lives here, not in cuda_hook.c, because both the per-process
+ * dev_hot_t and the shared sm_node_dev_t below are built on it -- and the
+ * latter is a cross-version ABI, so the granule must be pinned in one place.
+ * See the false-sharing rationale above dev_hot_t in cuda_hook.c. */
+#define CACHELINE_SIZE 128
 
 /**
  * Max sample pid size
@@ -279,6 +289,10 @@ typedef struct {
   int    auto_debounce_cycles;
   int    auto_external_util_threshold;
   int    delta_ramp_floor_divisor;
+  /* APPENDED (see the field-ordering note above): container-wide shared token
+   * bucket. 0 = per-process bucket, the historical behaviour and the default.
+   * env CUDA_SM_SHARED_BUCKET. */
+  int    sm_shared_bucket;
 } dynamic_config_t;
 
 typedef struct {
@@ -356,6 +370,120 @@ typedef struct {
 typedef struct {
   device_vmem_used_t devices[MAX_DEVICE_COUNT];
 } device_vmemory_t;
+
+/* ---------------------------------------------------------------------- *
+ *  sm_node -- container-wide shared token bucket for SM (compute) limiting
+ *
+ *  Symmetric with vmem_node: that region carries the cross-process state of
+ *  MEMORY isolation, this one the cross-process state of COMPUTE isolation.
+ *  See docs/sm_multiproc_shared_bucket_design.md.
+ *
+ *  Why it exists: g_dev_hot[].cur_cuda_cores is a per-PROCESS static, so N
+ *  processes in one container each hold their own bucket and can each decide
+ *  "tokens available, go" at the same instant. Moving the bucket into
+ *  MAP_SHARED memory makes "how much may this container still launch" a
+ *  physical invariant rather than a statistical average -- and costs nothing
+ *  on the hot path, because a CAS is a CPU instruction that does not care
+ *  which address space the word lives in.
+ *
+ *  THIS STRUCT IS AN ABI. It is written to a file, mapped by several
+ *  processes, and outlives any single library version. Hence fixed-width
+ *  types, explicit padding, and _Static_asserts pinning the layout.
+ *  Unlike vmem_node it has NO host-side Go reader, so the ABI is
+ *  library-internal -- but it still crosses library VERSIONS.
+ * ---------------------------------------------------------------------- */
+
+/* Container-side path. NOT the container's own /tmp: this directory is bind
+ * mounted per container by the device plugin / DRA driver, exactly like
+ * /tmp/.vgpu_lock and /tmp/.vmem_node, because the workload's own /tmp may be
+ * shadowed, read-only, or swept. */
+#define SM_NODE_DIR       "/.sm_node"
+#define SM_NODE_PATH      (TMP_DIR SM_NODE_DIR)
+#define SM_NODE_FILE_PATH (TMP_DIR SM_NODE_DIR "/sm_node.config")
+
+/* The file size is a PERMANENT constant, deliberately decoupled from
+ * sizeof(sm_node_region_t): a later version may grow the struct without
+ * changing the file size, so the region is never resized, so an older process
+ * still holding a mapping can never have its tail fall past EOF (which would
+ * be SIGBUS on access). Current use is 128 + 16*128 = 2176B. */
+#define SM_NODE_FILE_SIZE 8192
+
+#define SM_NODE_MAGIC          0x534D4E44U   /* "SMND" */
+/* BUMP THIS whenever any field below changes type, order, or offset.
+ * The guard compares it and rebuilds the region on mismatch; forgetting to
+ * bump it means a new library silently reads an old layout's bytes. */
+#define SM_NODE_LAYOUT_VERSION 1U
+
+/* No volatile, no _Atomic. volatile provides no concurrency guarantee (today's
+ * correctness comes entirely from the CAS macro), and _Atomic risks a
+ * lock-free downgrade: a non-lock-free _Atomic makes the compiler use
+ * libatomic's address-keyed lock table, which is PER PROCESS -- two processes
+ * mapping the same word would take different locks and the protection would
+ * silently evaporate. Plain fixed-width types plus __atomic_* builtins with an
+ * explicit memory order at each site. */
+typedef struct {
+  /* Hot: CAS'd by every launching thread in every process. */
+  int64_t cur_cuda_cores;       /* the token bucket itself                  */
+  int64_t total_cuda_cores;     /* thread*sm*FACTOR; bucket ceiling         */
+  int64_t last_refill_ns;       /* refill election stamp, CAS'd per cycle   */
+  int64_t share;                /* was shares[]                             */
+  /* Controller integrator state. Only the cycle's election winner reads or
+   * writes these, so the election itself serialises them -- no lock needed,
+   * only acquire/release pairing so each winner sees the previous winner's
+   * writes. Every one of these MUST live here: the election hands the device
+   * to a different PROCESS each cycle, so a per-process copy would advance at
+   * ~1/N rate and fracture into N divergent controllers. */
+  int32_t up_limit;             /* was up_limits[]                          */
+  int32_t is_cnt;               /* was is[]                                 */
+  int32_t avg_sys_free;         /* was avg_sys_frees[]                      */
+  int32_t pre_external_proc;    /* was pre_external_process_nums[]          */
+  int32_t md_cooldown;          /* was g_aimd_md_cooldown[] -- without this
+                                 * AIMD re-fires MD every cycle and cuts
+                                 * share by md_divisor^N ("MD avalanche"),
+                                 * which is the exact thing the cooldown was
+                                 * introduced to prevent.                   */
+  int32_t excl_debounced;       /* was g_is_exclusive_debounced[]      ┐    */
+  int32_t excl_streak;          /* was g_exclusive_pending_streak[]    │FSM */
+  int32_t lost_excl_pending;    /* was g_lost_exclusivity_pending[]    ┘    */
+  /* Written by rate_limiter() on throttle (any thread, any process),
+   * read-and-cleared once per cycle by the election winner. Sharing it
+   * changes the question from "did THIS PROCESS throttle" to "did ANYONE in
+   * the container throttle", which is the correct question once the bucket
+   * is shared. */
+  int32_t throttled_since_watch;
+  uint8_t _pad[CACHELINE_SIZE - 68];
+} __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
+
+typedef struct {
+  /* ---- FROZEN HEADER: these 16 bytes are a PERMANENT ABI. ----
+   * The layout guard has to read them before it knows which version wrote
+   * the file, so they must predate every possible version difference.
+   * Never change their type, order, or offset. */
+  uint32_t magic;
+  uint32_t layout_version;
+  uint32_t region_size;
+  uint32_t device_count;
+  /* ---- end frozen header; everything below may evolve with the version. */
+  uint8_t  _pad[CACHELINE_SIZE - 16];
+  sm_node_dev_t devices[MAX_DEVICE_COUNT];
+} sm_node_region_t;
+
+_Static_assert(sizeof(sm_node_dev_t) == CACHELINE_SIZE,
+               "sm_node_dev_t must occupy exactly one padded cache line");
+_Static_assert(_Alignof(sm_node_dev_t) == CACHELINE_SIZE,
+               "sm_node_dev_t must be cache-line aligned or false sharing returns");
+_Static_assert(offsetof(sm_node_region_t, devices) == CACHELINE_SIZE,
+               "region header must be exactly one cache line");
+_Static_assert(sizeof(sm_node_region_t) <= SM_NODE_FILE_SIZE,
+               "region must fit the permanently reserved file size");
+_Static_assert(offsetof(sm_node_region_t, magic) == 0,
+               "frozen header ABI: magic stays at offset 0");
+_Static_assert(offsetof(sm_node_region_t, layout_version) == 4,
+               "frozen header ABI: layout_version stays at offset 4");
+_Static_assert(offsetof(sm_node_region_t, region_size) == 8,
+               "frozen header ABI: region_size stays at offset 8");
+_Static_assert(offsetof(sm_node_region_t, device_count) == 12,
+               "frozen header ABI: device_count stays at offset 12");
 
 /** dynamic rate control */
 typedef struct {
@@ -502,6 +630,23 @@ void get_used_gpu_memory_by_device(void *, nvmlDevice_t);
 void get_used_gpu_virt_memory(void *, int device_id);
 
 void check_cleanup_vmem_nodes_by_device(int host_index);
+
+/**
+ * Acquire/release an fcntl record lock, preferring OFD locks (Linux >= 3.15)
+ * and falling back to classic POSIX locks when the kernel rejects them.
+ * wait != 0 blocks (F_OFD_SETLKW), wait == 0 does not. Defined in lock.c.
+ */
+struct flock;
+int ofd_fcntl(int fd, int wait, struct flock *fl);
+
+/**
+ * Map the container-wide sm_node shared region, creating or rebuilding it as
+ * needed. Returns 0 and sets *data on success. On ANY failure returns non-zero
+ * and leaves *data NULL: the caller must then fall back to per-process buckets.
+ * This never exits -- shared SM limiting is an optimisation, not a correctness
+ * prerequisite.
+ */
+int map_sm_node_region(sm_node_region_t **data);
 
 void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device_id);
 

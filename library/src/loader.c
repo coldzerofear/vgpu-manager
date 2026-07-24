@@ -1614,6 +1614,139 @@ DONE:
   return ret;
 }
 
+/* Reads only the FROZEN header (hook.h), whose offsets never change, so it is
+ * safe to call before knowing which version wrote the file. */
+static int sm_node_header_valid(const sm_node_region_t *r) {
+  return __atomic_load_n(&r->magic, __ATOMIC_ACQUIRE) == SM_NODE_MAGIC &&
+         r->layout_version == SM_NODE_LAYOUT_VERSION                   &&
+         r->region_size    == (uint32_t)sizeof(sm_node_region_t)       &&
+         r->device_count   == (uint32_t)MAX_DEVICE_COUNT;
+}
+
+/* Called with the file write-locked. Rebuilds in place: the file size is a
+ * permanent constant, so there is never anything to resize, and there is never
+ * an old-version reader to protect -- a layout mismatch means the file was
+ * written by a PREVIOUS incarnation of this container, and a container loads
+ * exactly one .so version for its whole life (the host path is versioned; see
+ * vnum_plugin.go HostVGPUControlFilePath and kubeletplugin/vgpu.go). So no
+ * unlink+recreate and no rename: in-place is simpler AND avoids the far more
+ * dangerous rename race, where two processes end up on different inodes and
+ * the "shared" bucket silently degrades into two private ones.
+ *
+ * magic is published LAST with release ordering. If we are killed midway the
+ * magic is still absent, so the next process simply rebuilds again -- the
+ * rebuild is idempotent and interruptible, with no half-initialised resting
+ * state. */
+static void sm_node_rebuild_locked(sm_node_region_t *r) {
+  LOGGER(WARNING, "sm_node layout mismatch (magic=%#x ver=%u size=%u count=%u), rebuilding",
+         r->magic, r->layout_version, r->region_size, r->device_count);
+
+  memset(r, 0, SM_NODE_FILE_SIZE);
+
+  for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
+    /* Seed up_limit the way a watcher thread used to seed its private
+     * up_limits[] at startup. Doing it HERE rather than in the watcher is what
+     * stops a late-joining process from resetting the container's already
+     * converged limit every time it starts a watcher.
+     *
+     * total_cuda_cores is intentionally left 0: it depends on CUDA device
+     * properties that may not be queried yet. It is published later, purely
+     * for observability -- the authoritative ceiling used by change_token
+     * stays the per-process g_total_cuda_cores[], which every process
+     * computes identically from the same device. */
+    r->devices[i].up_limit = g_vgpu_config->devices[i].hard_core;
+  }
+
+  r->device_count   = (uint32_t)MAX_DEVICE_COUNT;
+  r->region_size    = (uint32_t)sizeof(sm_node_region_t);
+  r->layout_version = SM_NODE_LAYOUT_VERSION;
+  __atomic_store_n(&r->magic, SM_NODE_MAGIC, __ATOMIC_RELEASE);   /* publish */
+}
+
+int map_sm_node_region(sm_node_region_t **data) {
+  *data = NULL;
+  if (unlikely(g_vgpu_config == NULL)) return 1;
+
+  if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
+    mkdir(SM_NODE_PATH, 0755);
+  }
+
+  /* open(O_CREAT) unconditionally -- no file_exist() pre-check. That check is
+   * what makes mmap_file_to_vmem_node racy (two processes can both conclude
+   * they created the file and both memset it, each erasing what the other just
+   * wrote). Here "who created it" is a question we never have to answer: wrong
+   * size gets ftruncate'd, wrong magic gets rebuilt, and both happen under the
+   * lock and are idempotent. */
+  int fd = open(SM_NODE_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (unlikely(fd == -1)) {
+    LOGGER(WARNING, "can't open %s: %s", SM_NODE_FILE_PATH, strerror(errno));
+    return 1;
+  }
+
+  /* Blocking lock, no timeout, deliberately. A late arriver should sleep in the
+   * kernel while the first process builds the region, then wake, see a valid
+   * magic and leave -- burning no CPU. That is safe here in a way it would not
+   * be for lock_gpu_device: this critical section is ftruncate + memset + a few
+   * field stores on an 8KiB file, with no CUDA call, no I/O and nothing that can
+   * block indefinitely, so a lock holder cannot get stuck. And if it dies, the
+   * kernel releases the lock unconditionally. */
+  struct flock fl;
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start = 0;
+  fl.l_len = 0;                       /* whole file */
+  if (unlikely(ofd_fcntl(fd, 1, &fl) == -1)) {
+    LOGGER(WARNING, "can't lock %s: %s", SM_NODE_FILE_PATH, strerror(errno));
+    close(fd);
+    return 1;
+  }
+
+  int ret = 0;
+  struct stat sb;
+  if (unlikely(fstat(fd, &sb) == -1)) {
+    LOGGER(WARNING, "fstat %s failed: %s", SM_NODE_FILE_PATH, strerror(errno));
+    ret = 1;
+    goto UNLOCK;
+  }
+  /* Size is a permanent constant, so this runs for a fresh file (size 0) and
+   * for anything unexpected. Holes read as zero, so magic will not match and
+   * the rebuild below fires. */
+  if (sb.st_size != SM_NODE_FILE_SIZE) {
+    if (unlikely(ftruncate(fd, SM_NODE_FILE_SIZE) == -1)) {
+      LOGGER(WARNING, "ftruncate %s failed: %s", SM_NODE_FILE_PATH, strerror(errno));
+      ret = 1;
+      goto UNLOCK;
+    }
+  }
+
+  sm_node_region_t *region = (sm_node_region_t *)mmap(NULL, SM_NODE_FILE_SIZE,
+                                                      PROT_READ | PROT_WRITE,
+                                                      MAP_SHARED, fd, 0);
+  if (unlikely(region == MAP_FAILED)) {
+    LOGGER(WARNING, "mmap %s failed: %s", SM_NODE_FILE_PATH, strerror(errno));
+    ret = 1;
+    goto UNLOCK;
+  }
+
+  /* A freshly created (all-zero) region takes the same path as a stale one:
+   * magic does not match, so we rebuild. First build and repair are one code
+   * path, so there is no "created" flag and no second branch to get wrong. */
+  if (!sm_node_header_valid(region)) {
+    sm_node_rebuild_locked(region);
+  }
+  *data = region;
+
+UNLOCK:
+  fl.l_type = F_UNLCK;
+  ofd_fcntl(fd, 1, &fl);
+  /* Closing the fd does not disturb the mapping -- it holds its own reference.
+   * So the lock's lifetime ends exactly here, inside initialisation, and
+   * nothing about it survives into steady state or across a fork. */
+  close(fd);
+  return ret;
+}
+
 void print_global_vgpu_config() {
   LOGGER(VERBOSE, "------------------print_global_vgpu_config------------------");
   if (g_vgpu_config->pod_name[0] != '\0') {

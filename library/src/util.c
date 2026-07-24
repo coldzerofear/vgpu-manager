@@ -82,6 +82,11 @@
  * coarser near-limit tracking); larger N = gentler. Default 64. Set to 0 (or any
  * value <= 0) to DISABLE the floor entirely and revert to delta's raw
  * sm^2-scaled step (the pre-floor behaviour). */
+/* Container-wide shared token bucket. Off by default: with it off the bucket
+ * stays the per-process static it has always been and behaviour is unchanged,
+ * so the feature carries no risk for the single-process containers that gain
+ * nothing from it. See docs/sm_multiproc_shared_bucket_design.md. */
+#define CUDA_SM_SHARED_BUCKET_ENV "CUDA_SM_SHARED_BUCKET"
 #define CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV "CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR"
 
 size_t iec_to_bytes(const char *iec_value) {
@@ -444,6 +449,18 @@ int get_aimd_deadband_ratio(int *out) {
 /* AIMD post-MD cooldown in watcher cycles. 0 = disabled (V2.1 behaviour). */
 int get_aimd_md_cooldown_cycles(int *out) {
   return get_nonneg_int_env(CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV, 3, out);
+}
+
+/* Container-wide shared token bucket on/off. Same true/TRUE/1 spelling as the
+ * other boolean envs. Unset leaves *out untouched at the caller's default (0),
+ * so the shared bucket is opt-in. */
+int get_sm_shared_bucket(int *out) {
+  char *str = getenv(CUDA_SM_SHARED_BUCKET_ENV);
+  if (!str) {
+    return -1;
+  }
+  value_enabled(str, out);
+  return 0;
 }
 
 static int compare_pids(const void *a, const void *b) {
