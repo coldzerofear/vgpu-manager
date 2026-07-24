@@ -369,28 +369,6 @@ CUresult cuMemHostGetFlags(unsigned int *pFlags, void *p) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostGetFlags, pFlags, p);
 }
 
-CUresult _cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostRegister_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostRegister_v2,
-                           p, bytesize, Flags);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostRegister))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostRegister,
-                           p, bytesize, Flags);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
-CUresult cuMemHostRegister_v2(void *p, size_t bytesize, unsigned int Flags) {
-  return _cuMemHostRegister(p, bytesize, Flags);
-}
-
-CUresult cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags) {
-  return _cuMemHostRegister(p, bytesize, Flags);
-}
-
 CUresult cuMemHostUnregister(void *p) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostUnregister, p);
 }

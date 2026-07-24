@@ -458,6 +458,8 @@ CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream);
 CUresult cuStreamEndCapture(CUstream hStream, CUgraph *phGraph);
 CUresult cuStreamEndCapture_ptsz(CUstream hStream, CUgraph *phGraph);
 CUresult cuGraphDestroy(CUgraph hGraph);
+CUresult cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags);
+CUresult cuMemHostRegister_v2(void *p, size_t bytesize, unsigned int Flags);
 
 entry_t cuda_hooks_entry[] = {
     {.name = "cuDriverGetVersion", .fn_ptr = cuDriverGetVersion},
@@ -511,6 +513,8 @@ entry_t cuda_hooks_entry[] = {
     {.name = "cuStreamEndCapture", .fn_ptr = cuStreamEndCapture},
     {.name = "cuStreamEndCapture_ptsz", .fn_ptr = cuStreamEndCapture_ptsz},
     {.name = "cuGraphDestroy", .fn_ptr = cuGraphDestroy},
+    {.name = "cuMemHostRegister", .fn_ptr = cuMemHostRegister},
+    {.name = "cuMemHostRegister_v2", .fn_ptr = cuMemHostRegister_v2},
 };
 
 const int cuda_hook_nums =
@@ -4112,4 +4116,38 @@ CUresult cuGraphDestroy(CUgraph hGraph) {
   CUresult ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphDestroy, hGraph);
   free_gpu_virt_memory_by_graph(hGraph);
   return ret;
+}
+
+CUresult _cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags) {
+  int lock_fd = -1;
+  CUresult ret = CUDA_ERROR_NOT_FOUND;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostRegister_v2))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostRegister_v2, p, bytesize, Flags);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostRegister))) {
+    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostRegister, p, bytesize, Flags);
+  }
+  if (likely(ret == CUDA_SUCCESS)) {
+    CUdevice device;
+    if (unlikely(CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device) != CUDA_SUCCESS)) {
+      goto DONE;
+    }
+    // Post check for exceeding memory limit.
+    int host_index = -1;
+    if (prepare_memory_allocation(device, 0, 0, &host_index, &lock_fd) == MEMORY_PATH_OOM) {
+      metrics_record_oom(host_index, METRICS_OOM_TOTAL_LIMIT);
+      CUDA_INTERNAL_CHECK(cuda_library_entry, cuMemHostUnregister, p);
+      ret = CUDA_ERROR_OUT_OF_MEMORY;
+    }
+  }
+DONE:
+  unlock_gpu_device(lock_fd);
+  return ret;
+}
+
+CUresult cuMemHostRegister_v2(void *p, size_t bytesize, unsigned int Flags) {
+  return _cuMemHostRegister(p, bytesize, Flags);
+}
+
+CUresult cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags) {
+  return _cuMemHostRegister(p, bytesize, Flags);
 }
