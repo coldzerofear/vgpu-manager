@@ -2568,7 +2568,7 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
      * declared 5-arg). Substitute our own v2 entry point so the caller's
      * subsequent indirect lookups re-enter our hook.
      */
-    if (strcmp(symbol, "cuGetProcAddress") == 0) {
+    if (strcmp(symbol, "cuGetProcAddress") == 0 && cudaVersion >= 12000) {
       LOGGER(VERBOSE, "cuGetProcAddress_v2: substitute cuGetProcAddress "
                       "self-lookup with our 5-arg _v2 wrapper");
       *pfn = (void *)cuGetProcAddress_v2;

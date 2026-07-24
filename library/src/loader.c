@@ -1121,9 +1121,10 @@ static void load_nvml_libraries() {
   if (unlikely(!table)) {
     LOGGER(FATAL, "can't find library %s", driver_filename);
   }
-
+  int entry_count = 0;
   for (i = 0; i < NVML_ENTRY_END; i++) {
     if (unlikely(nvml_library_entry[i].fn_ptr)) {
+      entry_count++;
       continue;
     }
     LOGGER(DETAIL, "loading %s:%d", nvml_library_entry[i].name, i);
@@ -1131,13 +1132,14 @@ static void load_nvml_libraries() {
     if (unlikely(!nvml_library_entry[i].fn_ptr)) {
       nvml_library_entry[i].fn_ptr = real_dlsym(RTLD_NEXT,nvml_library_entry[i].name);
       if (unlikely(!nvml_library_entry[i].fn_ptr)) {
-        LOGGER(VERBOSE, "can't find function %s in %s", nvml_library_entry[i].name,
-              driver_filename);
+        LOGGER(VERBOSE, "can't find function %s in %s", nvml_library_entry[i].name, driver_filename);
+        continue;
       }
     }
+    entry_count++;
   }
 
-  LOGGER(INFO, "loaded nvml libraries");
+  LOGGER(INFO, "loaded nvml libraries: %d entries", entry_count);
   dlclose(table);
 }
 
@@ -1274,7 +1276,7 @@ static void build_driver_routes(void) {
     if (hook) for (int k = i; k < j; k++) g_routes[k].hook_fn = hook;
     i = j;
   }
-  LOGGER(VERBOSE, "driver route index built: %d entries", g_routes_n);
+  LOGGER(INFO, "driver route index built: %d entries", g_routes_n);
 }
 
 /* Split a CUDA symbol into the three parts its name is built from:
@@ -1398,9 +1400,10 @@ void load_cuda_libraries() {
   if (unlikely(!table)) {
     LOGGER(FATAL, "can't find library %s", cuda_filename);
   }
-
+  int entry_count = 0;
   for (i = 0; i < CUDA_ENTRY_END; i++) {
     if (unlikely(cuda_library_entry[i].fn_ptr)) {
+      entry_count++;
       continue;
     }
     LOGGER(DETAIL, "loading %s:%d", cuda_library_entry[i].name, i);
@@ -1408,13 +1411,14 @@ void load_cuda_libraries() {
     if (unlikely(!cuda_library_entry[i].fn_ptr)) {
       cuda_library_entry[i].fn_ptr = real_dlsym(RTLD_NEXT,cuda_library_entry[i].name);
       if (unlikely(!cuda_library_entry[i].fn_ptr)) {
-        LOGGER(VERBOSE, "can't find function %s in %s", cuda_library_entry[i].name,
-              cuda_filename);
+        LOGGER(VERBOSE, "can't find function %s in %s", cuda_library_entry[i].name, cuda_filename);
+        continue;
       }
     }
+    entry_count++;
   }
 
-  LOGGER(INFO,"loaded cuda libraries");
+  LOGGER(INFO, "loaded cuda libraries: %d entries", entry_count);
   dlclose(table);
   build_driver_routes();
 }
