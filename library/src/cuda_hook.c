@@ -1595,7 +1595,16 @@ static int gap_effective_dc(int host_index) {
   device_t *d = &g_vgpu_config->devices[host_index];
   if (!d->core_limit) return 0;
   if (d->hard_limit)  return d->hard_core;
-  int t = up_limits[host_index];
+  /* With a shared bucket the controller runs in ONE process per cycle, so this
+   * process's private up_limits[] is only as fresh as the last cycle it won --
+   * and a process that keeps losing may never refresh it at all. Reading the
+   * container-wide value keeps every process's GAP throttle on the same limit
+   * the controller actually converged to. Relaxed: a stale-by-one-cycle int is
+   * fine for a duty-cycle target, which is why the private read was already
+   * lock-free. */
+  int t = g_sm_node ? __atomic_load_n(&g_sm_node->devices[host_index].up_limit,
+                                      __ATOMIC_RELAXED)
+                    : up_limits[host_index];
   if (t <= 0) t = d->hard_core;   /* watcher not warmed up yet -> guarantee floor */
   return t;
 }
