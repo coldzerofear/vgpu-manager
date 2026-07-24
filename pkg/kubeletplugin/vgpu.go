@@ -179,6 +179,7 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 		fmt.Sprintf("%s=", util.CudaSoftCoreLimitEnv),
 		fmt.Sprintf("%s=", util.CudaMemoryLimitEnv),
 		fmt.Sprintf("%s=FALSE", util.CudaMemoryOversoldEnv),
+		fmt.Sprintf("%s=TRUE", util.VMemoryNodeEnabled), // default Enabled
 	}
 	// In NRI mode the partition mounts + register wiring are applied per-container
 	// by the NRI plugin at CreateContainer, not here. Carry the claim UID via CDI

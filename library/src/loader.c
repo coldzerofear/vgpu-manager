@@ -464,8 +464,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuSignalExternalSemaphoresAsync_ptsz"},
 //    {.name = "cuStreamBeginCapture"},
 //    {.name = "cuStreamBeginCapture_ptsz"},
-//    {.name = "cuStreamEndCapture"},
-//    {.name = "cuStreamEndCapture_ptsz"},
+    {.name = "cuStreamEndCapture"},
+    {.name = "cuStreamEndCapture_ptsz"},
     {.name = "cuStreamGetCtx"},
     {.name = "cuStreamGetCtx_v2"},
     {.name = "cuStreamGetCtx_ptsz"},
@@ -478,8 +478,8 @@ entry_t cuda_library_entry[] = {
     {.name = "cuGraphExecKernelNodeSetParams"},
 //    {.name = "cuStreamBeginCapture_v2"},
 //    {.name = "cuStreamBeginCapture_v2_ptsz"},
-//    {.name = "cuStreamGetCaptureInfo"},
-//    {.name = "cuStreamGetCaptureInfo_ptsz"},
+    {.name = "cuStreamGetCaptureInfo"},
+    {.name = "cuStreamGetCaptureInfo_ptsz"},
     {.name = "cuThreadExchangeStreamCaptureMode"},
     {.name = "cuDeviceGetNvSciSyncAttributes"},
     {.name = "cuGraphExecHostNodeSetParams"},
@@ -584,8 +584,10 @@ entry_t cuda_library_entry[] = {
     {.name = "cuGraphMemFreeNodeGetParams"},
     {.name = "cuGraphReleaseUserObject"},
     {.name = "cuGraphRetainUserObject"},
-//    {.name = "cuStreamGetCaptureInfo_v2"},
-//    {.name = "cuStreamGetCaptureInfo_v2_ptsz"},
+    {.name = "cuStreamGetCaptureInfo_v2"},
+    {.name = "cuStreamGetCaptureInfo_v2_ptsz"},
+    {.name = "cuStreamGetCaptureInfo_v3"},
+    {.name = "cuStreamGetCaptureInfo_v3_ptsz"},
     {.name = "cuStreamUpdateCaptureDependencies"},
     {.name = "cuStreamUpdateCaptureDependencies_ptsz"},
     {.name = "cuUserObjectCreate"},
@@ -1119,9 +1121,10 @@ static void load_nvml_libraries() {
   if (unlikely(!table)) {
     LOGGER(FATAL, "can't find library %s", driver_filename);
   }
-
+  int entry_count = 0;
   for (i = 0; i < NVML_ENTRY_END; i++) {
     if (unlikely(nvml_library_entry[i].fn_ptr)) {
+      entry_count++;
       continue;
     }
     LOGGER(DETAIL, "loading %s:%d", nvml_library_entry[i].name, i);
@@ -1129,13 +1132,14 @@ static void load_nvml_libraries() {
     if (unlikely(!nvml_library_entry[i].fn_ptr)) {
       nvml_library_entry[i].fn_ptr = real_dlsym(RTLD_NEXT,nvml_library_entry[i].name);
       if (unlikely(!nvml_library_entry[i].fn_ptr)) {
-        LOGGER(VERBOSE, "can't find function %s in %s", nvml_library_entry[i].name,
-              driver_filename);
+        LOGGER(VERBOSE, "can't find function %s in %s", nvml_library_entry[i].name, driver_filename);
+        continue;
       }
     }
+    entry_count++;
   }
 
-  LOGGER(INFO, "loaded nvml libraries");
+  LOGGER(INFO, "loaded nvml libraries: %d entries", entry_count);
   dlclose(table);
 }
 
@@ -1192,6 +1196,196 @@ static void load_nvml_single_library(int idx) {
   dlclose(table);
 }
 
+extern entry_t cuda_hooks_entry[];
+extern const int cuda_hook_nums;
+
+/* ---- driver-pointer routing for cuGetProcAddress ------------------------- *
+ *
+ * cuGetProcAddress hands the caller an ABI-correct pointer chosen from
+ * `cudaVersion` and `flags`: asking for "cuCtxCreate" yields cuCtxCreate_v2,
+ * _v3 or _v4 depending on the version asked for, and asking for a stream
+ * function under CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM yields the _ptsz
+ * twin. Substituting our hook by BASE NAME therefore risks binding a caller to
+ * a hook whose ABI does not match what the driver picked -- the parameter frame
+ * is then wrong on the very next call.
+ *
+ * The driver has already made that choice, and it is legible: on every driver
+ * measured, the pointer it returns is exactly the one dlsym gives for the
+ * corresponding versioned symbol. So instead of guessing the version from
+ * cudaVersion thresholds, we look the pointer up and substitute the hook whose
+ * name matches EXACTLY -- making an ABI mismatch structurally impossible, and
+ * subsuming both the conflict blacklist and the hand-written version routing.
+ *
+ * The equality is not something NVIDIA documents, so it is verified once at
+ * runtime (getproc_probe) and the whole mechanism stays off unless it holds;
+ * the legacy blacklist path remains as the fallback. */
+typedef struct {
+  void       *real_fn;   /* pointer the driver hands out for this exact symbol */
+  void       *hook_fn;   /* our hook of the same name, or NULL if we hook none */
+  const char *name;      /* the exact symbol name, e.g. "cuCtxCreate_v4"       */
+} driver_route_t;
+
+static driver_route_t g_routes[CUDA_ENTRY_END];
+static int g_routes_n = 0;
+
+static int route_cmp(const void *a, const void *b) {
+  const driver_route_t *ra = a, *rb = b;
+  if (ra->real_fn != rb->real_fn) {
+    return (ra->real_fn > rb->real_fn) - (ra->real_fn < rb->real_fn);
+  }
+  return strcmp(ra->name, rb->name);
+}
+
+/* Build the pointer -> hook index. Called once, after the driver table is
+ * resolved; read-only from then on, so lookups need no locking. */
+static void build_driver_routes(void) {
+  g_routes_n = 0;
+  for (int i = 0; i < CUDA_ENTRY_END; i++) {
+    void *real = cuda_library_entry[i].fn_ptr;
+    if (!real) continue;                      /* symbol absent on this driver */
+    void *hook = NULL;
+    if (lib_control) {
+      hook = real_dlsym(lib_control, cuda_library_entry[i].name);
+    }
+    if (!hook) {
+      for (int j = 0; j < cuda_hook_nums; j++) {
+        if (!strcmp(cuda_library_entry[i].name, cuda_hooks_entry[j].name)) {
+          hook = cuda_hooks_entry[j].fn_ptr;
+          break;
+        }
+      }
+    }
+    g_routes[g_routes_n].real_fn = real;
+    g_routes[g_routes_n].hook_fn = hook;
+    g_routes[g_routes_n].name    = cuda_library_entry[i].name;
+    g_routes_n++;
+  }
+  qsort(g_routes, g_routes_n, sizeof(g_routes[0]), route_cmp);
+
+  /* Distinct names can alias to one address (an unversioned name that is just
+   * the current version). Such a run must answer consistently, so give every
+   * entry in it whichever hook the run has: the address IS that function, so a
+   * hook registered under any of its names has its ABI. */
+  for (int i = 0; i < g_routes_n; ) {
+    int j = i;
+    void *hook = NULL;
+    while (j < g_routes_n && g_routes[j].real_fn == g_routes[i].real_fn) {
+      if (!hook && g_routes[j].hook_fn) hook = g_routes[j].hook_fn;
+      j++;
+    }
+    if (hook) for (int k = i; k < j; k++) g_routes[k].hook_fn = hook;
+    i = j;
+  }
+  LOGGER(INFO, "driver route index built: %d entries", g_routes_n);
+}
+
+/* Split a CUDA symbol into the three parts its name is built from:
+ *
+ *   cuLaunchKernel_v2_ptsz  ->  base "cuLaunchKernel", version 2, suffix PTSZ
+ *   cuStreamSynchronize_ptds ->  base "cuStreamSynchronize", version 0, PTDS
+ *   cuInit                  ->  base "cuInit", version 0, suffix NONE
+ *
+ * Version 0 and suffix NONE mean "the name does not say", which is the whole
+ * point: those are the components cuGetProcAddress decides for the caller. */
+#define SFX_NONE 0
+#define SFX_PTSZ 1
+#define SFX_PTDS 2
+
+static void split_symbol(const char *s, size_t *base_len, int *ver, int *sfx) {
+  size_t len = strlen(s);
+
+  *sfx = SFX_NONE;
+  if (len > 5) {
+    if      (!strcmp(s + len - 5, "_ptsz")) { *sfx = SFX_PTSZ; len -= 5; }
+    else if (!strcmp(s + len - 5, "_ptds")) { *sfx = SFX_PTDS; len -= 5; }
+  }
+
+  *ver = 0;
+  size_t i = len;
+  while (i > 0 && s[i - 1] >= '0' && s[i - 1] <= '9') i--;
+  if (i < len && i >= 2 && s[i - 1] == 'v' && s[i - 2] == '_') {
+    for (size_t d = i; d < len; d++) *ver = *ver * 10 + (s[d] - '0');
+    len = i - 2;
+  }
+
+  *base_len = len;
+}
+
+/* Could `cand` be what the caller meant when it asked for `req`?
+ *
+ * The base name must be identical -- we never cross families. Beyond that, a
+ * component the request states explicitly pins that component, and a component
+ * it leaves out is one the driver gets to choose:
+ *
+ *   cuMemAlloc               -> cuMemAlloc, _v2, _v3, _v4 ...
+ *   cuMemAlloc_v2            -> cuMemAlloc_v2 only
+ *   cuLaunchKernel_ptsz      -> cuLaunchKernel_ptsz, _v2_ptsz, _v3_ptsz ...
+ *   cuLaunchKernel_v2_ptsz   -> cuLaunchKernel_v2_ptsz only
+ *
+ * Leaving the suffix open is what makes the flags argument work. A caller asks
+ * for "cuLaunchKernel" and passes CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM;
+ * the driver answers with the _ptsz entry point. The request name never carries
+ * that choice, so refusing to consider _ptsz here would hand a per-thread caller
+ * our legacy-stream hook. Which candidate is right is not guessed -- the
+ * driver's own pointer picks it, and this predicate only bounds the search. */
+static int symbol_in_family(const char *cand, const char *req) {
+  size_t cb, rb;
+  int cv, rv, cs, rs;
+
+  split_symbol(cand, &cb, &cv, &cs);
+  split_symbol(req,  &rb, &rv, &rs);
+
+  if (cb != rb || memcmp(cand, req, cb) != 0) return 0;   /* different family */
+  if (rv != 0 && rv != cv) return 0;                      /* version pinned   */
+  if (rs != SFX_NONE && rs != cs) return 0;               /* suffix pinned    */
+  return 1;
+}
+
+/* Resolve the pointer cuGetProcAddress produced for `symbol` to our hook.
+ *
+ * Two independent facts have to agree. The pointer says which function the
+ * driver actually chose -- version and stream variant included -- and the name
+ * check says that function belongs to the family the caller asked for. Together
+ * they identify one entry point exactly, so the hook returned carries its ABI by
+ * construction; nothing is inferred from cudaVersion.
+ *
+ * *name is set whenever the pointer is identified, INCLUDING when we hook no
+ * version of it. That distinction matters to the caller: "identified, not
+ * hooked" means keep the driver's pointer, whereas an unidentified pointer
+ * means fall back to name-based substitution. Collapsing the two would let a
+ * base-named hook be bound to a version whose ABI it does not have -- the exact
+ * failure the ABI-conflict blacklist exists to prevent. */
+void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name) {
+  if (name) *name = NULL;
+
+  int lo = 0, hi = g_routes_n - 1, at = -1;
+  while (lo <= hi) {
+    int mid = lo + (hi - lo) / 2;
+    void *cur = g_routes[mid].real_fn;
+    if      (cur < real_fn) lo = mid + 1;
+    else if (cur > real_fn) hi = mid - 1;
+    else { at = mid; break; }
+  }
+  if (at < 0) return NULL;                    /* not a driver entry point we know */
+
+  /* Widen to the whole run of names sharing this address; aliases put more than
+   * one there. Runs are one or two entries in practice. */
+  int i = at, j = at;
+  while (i > 0 && g_routes[i - 1].real_fn == real_fn) i--;
+  while (j + 1 < g_routes_n && g_routes[j + 1].real_fn == real_fn) j++;
+
+  const driver_route_t *best = NULL;
+  for (int k = i; k <= j; k++) {
+    if (!symbol_in_family(g_routes[k].name, symbol)) continue;
+    if (!strcmp(g_routes[k].name, symbol)) { best = &g_routes[k]; break; }
+    if (!best || (!best->hook_fn && g_routes[k].hook_fn)) best = &g_routes[k];
+  }
+  if (!best) return NULL;                     /* address known, wrong family     */
+
+  if (name) *name = best->name;
+  return best->hook_fn;
+}
+
 void load_cuda_libraries() {
   void *table = NULL;
   int i = 0;
@@ -1206,9 +1400,10 @@ void load_cuda_libraries() {
   if (unlikely(!table)) {
     LOGGER(FATAL, "can't find library %s", cuda_filename);
   }
-
+  int entry_count = 0;
   for (i = 0; i < CUDA_ENTRY_END; i++) {
     if (unlikely(cuda_library_entry[i].fn_ptr)) {
+      entry_count++;
       continue;
     }
     LOGGER(DETAIL, "loading %s:%d", cuda_library_entry[i].name, i);
@@ -1216,14 +1411,16 @@ void load_cuda_libraries() {
     if (unlikely(!cuda_library_entry[i].fn_ptr)) {
       cuda_library_entry[i].fn_ptr = real_dlsym(RTLD_NEXT,cuda_library_entry[i].name);
       if (unlikely(!cuda_library_entry[i].fn_ptr)) {
-        LOGGER(VERBOSE, "can't find function %s in %s", cuda_library_entry[i].name,
-              cuda_filename);
+        LOGGER(VERBOSE, "can't find function %s in %s", cuda_library_entry[i].name, cuda_filename);
+        continue;
       }
     }
+    entry_count++;
   }
 
-  LOGGER(INFO,"loaded cuda libraries");
+  LOGGER(INFO, "loaded cuda libraries: %d entries", entry_count);
   dlclose(table);
+  build_driver_routes();
 }
 
 static void matchRegex(const char *pattern, const char *matchString,
@@ -1505,11 +1702,80 @@ int check_tid_dlsyms(pthread_t tid, void *pointer){
   return 0;
 }
 
-extern entry_t cuda_hooks_entry[];
-extern const int cuda_hook_nums;
-
 extern entry_t nvml_hooks_entry[];
 extern const int nvml_hook_nums;
+
+/* Resolve our hook for `symbol` from a hijack table.
+ *
+ * Every hook is exported under its own name (the version script matches
+ * cu[A-Z]* / nvml[A-Z]*), so when lib_control -- a dlopen handle on our own
+ * .so -- is available, the dynamic linker's hash finds any hook in O(1). A miss
+ * there is conclusive: the symbol is not one of our hooks, and the linear table
+ * scan would only reconfirm that. The scan is therefore kept solely for the
+ * degraded case where self-dlopen failed (e.g. tests LD_PRELOAD a build-tree
+ * .so that is not at CONTROLLER_DRIVER_FILE_PATH), where it is the only route. */
+static void *resolve_local_hook(const char *symbol, entry_t *entries, int n) {
+  if (likely(lib_control)) {
+    return real_dlsym(lib_control, symbol);
+  }
+  for (int i = 0; i < n; i++) {
+    if (unlikely(!strcmp(symbol, entries[i].name))) {
+      return entries[i].fn_ptr;
+    }
+  }
+  return NULL;
+}
+
+/* Record, once, that a cu... / nvml... symbol went through us uninstrumented.
+ *
+ * Reaching here already means the symbol is not one of our hooks, so nothing
+ * further needs deciding -- the point is simply to leave a trail. A driver that
+ * grows a variant we do not intercept (cuFoo_v3 and the like) then shows up in a
+ * DETAIL run instead of being invisible.
+ *
+ * DETAIL because on any real workload this names hundreds of symbols we never
+ * intended to hook; it is a diagnostic, not a warning. The level check comes
+ * first so a normal run pays one comparison and nothing else.
+ *
+ * Dedup is a lock-free open-addressed set of name hashes. A mutex would be
+ * wrong here twice over: it would serialise a path that is otherwise pure
+ * lookup, and it would add another handle-at-fork hazard to a hook the child
+ * calls immediately. Losing a race, or exhausting the probe window, costs at
+ * most a duplicate line -- the right trade for a log. */
+#define UNHOOKED_SET_BITS 11u                       /* 2048 slots, 8 KiB */
+#define UNHOOKED_SET_SIZE (1u << UNHOOKED_SET_BITS)
+#define UNHOOKED_PROBES   8u
+static volatile uint32_t g_unhooked_seen[UNHOOKED_SET_SIZE];
+
+static uint32_t symbol_hash(const char *s) {
+  uint32_t h = 2166136261u;                         /* FNV-1a */
+  while (*s) {
+    h ^= (unsigned char)*s++;
+    h *= 16777619u;
+  }
+  return h ? h : 1u;                                /* 0 means "empty slot" */
+}
+
+void note_unhooked_symbol(const char *symbol) {
+  if (!LOGGER_SHOULD_PRINT(VERBOSE)) return;
+  uint32_t h = symbol_hash(symbol);
+  uint32_t i = h & (UNHOOKED_SET_SIZE - 1);
+  for (uint32_t p = 0; p < UNHOOKED_PROBES; p++, i = (i + 1) & (UNHOOKED_SET_SIZE - 1)) {
+    uint32_t cur = g_unhooked_seen[i];
+    if (cur == h) return;                           /* already logged */
+    if (cur == 0) {
+      if (CAS(&g_unhooked_seen[i], 0u, h)) {
+        LOGGER(VERBOSE, "unhooked driver symbol '%s'", symbol);
+        return;
+      }
+      /* Lost the race for this slot. Re-read before probing on: the winner may
+       * have been another thread recording the SAME symbol, and treating that
+       * as a collision would claim a second slot and log a duplicate. */
+      if (g_unhooked_seen[i] == h) return;
+    }
+  }
+  /* Probe window exhausted: stay quiet rather than repeat on every lookup. */
+}
 
 FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   static __thread int recursion_depth = 0;
@@ -1522,7 +1788,6 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   LOGGER(DETAIL, "into dlsym %s", symbol);
   init_real_dlsym();
 
-  int i;
   void* result = NULL;
   if (handle == RTLD_NEXT) {
     pthread_once(&init_dlsym_flag, init_tid_dlsyms);
@@ -1536,37 +1801,20 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     pthread_mutex_unlock(&tid_dlsym_lock);
     goto DONE;
   } else if (strncmp(symbol, "cu", 2) == 0) { // hijack cuda
-    if (likely(lib_control)) {
-      result = real_dlsym(lib_control, symbol);
-      if (likely(result)) {
-        LOGGER(DETAIL, "search found cuda hook %s", symbol);
-        load_necessary_data();
-        goto DONE;
-      }
+    result = resolve_local_hook(symbol, cuda_hooks_entry, cuda_hook_nums);
+    if (likely(result)) {
+      LOGGER(DETAIL, "search found cuda hook %s", symbol);
+      load_necessary_data();
+      goto DONE;
     }
-    for (i = 0; i < cuda_hook_nums; i++) {
-      if (unlikely(!strcmp(symbol, cuda_hooks_entry[i].name))) {
-        result = cuda_hooks_entry[i].fn_ptr;
-        LOGGER(DETAIL, "search found cuda hook %s", symbol);
-        load_necessary_data();
-        goto DONE;
-      }
-    }
+    note_unhooked_symbol(symbol);
   } else if (strncmp(symbol, "nvml", 4) == 0) { // hijack nvml
-    if (likely(lib_control)) {
-      result = real_dlsym(lib_control, symbol);
-      if (likely(result)) {
-        LOGGER(DETAIL, "search found nvml hook %s", symbol);
-        goto DONE;
-      }
+    result = resolve_local_hook(symbol, nvml_hooks_entry, nvml_hook_nums);
+    if (likely(result)) {
+      LOGGER(DETAIL, "search found nvml hook %s", symbol);
+      goto DONE;
     }
-    for (i = 0; i < nvml_hook_nums; i++) {
-      if (unlikely(!strcmp(symbol, nvml_hooks_entry[i].name))) {
-        result = nvml_hooks_entry[i].fn_ptr;
-        LOGGER(DETAIL, "search found nvml hook %s", symbol);
-        goto DONE;
-      }
-    }
+    note_unhooked_symbol(symbol);
   }
   result = real_dlsym(handle, symbol);
 DONE:
@@ -1686,6 +1934,21 @@ static void signal_cleanup_handler_sa(int signum, siginfo_t *info, void *ucontex
    * exit semantics (128+signum, or core dump for SIGABRT). */
   signal(signum, SIG_DFL);
   raise(signum);
+}
+
+// Cleaning up invalid virtual memory nodes on the device.
+void check_cleanup_vmem_nodes_by_device(int host_index) {
+  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
+  if (g_device_vmem != NULL) {
+    if (g_device_vmem->devices[host_index].processes_size == 0) {
+      return;
+    }
+    int fd = device_vmem_write_lock(host_index);
+    if (fd < 0) return;
+    rm_vmem_node_by_non_existent_device_pid(host_index, -1);
+//    __sync_synchronize();
+    device_vmem_unlock(fd, host_index);
+  }
 }
 
 // check and clean up any unreleased virtual memory records.
@@ -1859,34 +2122,70 @@ void reset_cuda_index_mapping() {
   pthread_mutex_unlock(&device_index_mutex);
 }
 
-void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
-  memory_node_t *new_node = NULL;
-  new_node = (memory_node_t*) malloc(sizeof(memory_node_t));
-  if (unlikely(!new_node)) {
-    LOGGER(ERROR, "failed to allocate virt memory node");
-    return;
-  }
+static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int type,
+                                         CUgraph graph, int host_index) {
+  int found = 0;
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter;
+  size_t old_bytes = 0;
 
-  new_node->dptr = dptr;
-  new_node->bytes = bytes;
-  INIT_LIST_HEAD(&new_node->node);
+  int charged = (host_index >= 0 && host_index < MAX_DEVICE_COUNT) ? host_index : -1;
 
   pthread_mutex_lock(&g_memory_node_lock);
-  list_add(&new_node->node, &g_memory_node->node);
+  list_for_each(iter, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    if (entry_tmp != NULL && entry_tmp->dptr == dptr) {
+      old_bytes = entry_tmp->bytes;
+      entry_tmp->bytes = bytes;
+      entry_tmp->type = type;
+      entry_tmp->graph = graph;
+      entry_tmp->host_index = charged;
+      found = 1;
+      break;
+    }
+  }
+  if (!found) {
+    memory_node_t *new_node = (memory_node_t *)malloc(sizeof(memory_node_t));
+    if (unlikely(!new_node)) {
+      pthread_mutex_unlock(&g_memory_node_lock);
+      LOGGER(ERROR, "failed to allocate virt memory node");
+      return;
+    }
+    new_node->dptr = dptr;
+    new_node->bytes = bytes;
+    new_node->type = type;
+    new_node->graph = graph;
+    new_node->host_index = charged;
+    INIT_LIST_HEAD(&new_node->node);
+    list_add(&new_node->node, &g_memory_node->node);
+  }
   pthread_mutex_unlock(&g_memory_node_lock);
 
   if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
   LOGGER(VERBOSE, "malloc virt memory to host device %d, dptr %lld, size %ld", host_index, dptr, bytes);
 
+  /* Calculate increment. Re-recording a known dptr with a smaller size yields a
+   * NEGATIVE delta, so the shared counter has to be adjusted with the same
+   * saturation free_gpu_virt_memory() applies: `used` is size_t, and letting it
+   * wrap would leave a ~2^64 usage that fails every later allocation. */
+  ssize_t delta = found ? (ssize_t)bytes - (ssize_t)old_bytes : (ssize_t)bytes;
+
   if (g_device_vmem != NULL) {
     int fd = device_vmem_write_lock(host_index);
     if (fd < 0) return;
     int pid = getpid();
-    int found = 0;
+    found = 0;
     unsigned int processes_size = g_device_vmem->devices[host_index].processes_size;
     for (int i = 0; i < processes_size; i++) {
       if (g_device_vmem->devices[host_index].processes[i].pid == pid) {
-        g_device_vmem->devices[host_index].processes[i].used += bytes;
+        size_t cur = g_device_vmem->devices[host_index].processes[i].used;
+        if (delta >= 0) {
+          g_device_vmem->devices[host_index].processes[i].used = cur + (size_t)delta;
+        } else {
+          size_t dec = (size_t)(-delta);
+          g_device_vmem->devices[host_index].processes[i].used =
+              (cur >= dec) ? (cur - dec) : 0;
+        }
         found = 1;
         break;
       }
@@ -1898,19 +2197,81 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int host_index) {
         return;
       }
       g_device_vmem->devices[host_index].processes[processes_size].pid = pid;
-      g_device_vmem->devices[host_index].processes[processes_size].used = bytes;
+      g_device_vmem->devices[host_index].processes[processes_size].used = (delta > 0) ? delta : 0;
       g_device_vmem->devices[host_index].processes_size++;
     }
     device_vmem_unlock(fd, host_index);
   }
 }
 
-/* Reports whether dptr was handed out by the oversold UVA fallback, i.e. it
- * came from cuMemAllocManaged rather than the allocator the caller asked for.
- * Such a pointer is only valid for the synchronous cuMemFree; the driver's
- * cuMemFreeAsync rejects it. */
-int is_gpu_virt_memory(CUdeviceptr dptr) {
-  int found = 0;
+void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int host_index) {
+  malloc_gpu_virt_memory_graph(dptr, bytes, type, NULL, host_index);
+}
+
+void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
+                                     CUgraph graph, int host_index) {
+  malloc_gpu_virt_memory_graph(dptr, bytes, MEMORY_TYPE_CAPTURE, graph, host_index);
+}
+
+/* Discharge every capture record owned by graph.
+ *
+ * Each record is discharged against the device recorded when it was charged,
+ * never against a device looked up here: this runs from cuStreamEndCapture,
+ * where the context may already be unusable, and a discharge that gives up
+ * after the nodes are dropped would strand the charge in the shared counter
+ * permanently -- exactly the false-OOM this accounting exists to avoid.
+ *
+ * Nodes are detached under the list mutex first and the shared counter is
+ * updated afterwards, because that update takes the cross-process vmem lock and
+ * must not nest inside the list mutex (free_gpu_virt_memory() orders them the
+ * same way). */
+void free_gpu_virt_memory_by_graph(CUgraph graph) {
+  size_t totals[MAX_DEVICE_COUNT] = {0};
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter, *tmp;
+  int any = 0;
+
+  if (graph == NULL) return;
+
+  pthread_mutex_lock(&g_memory_node_lock);
+  list_for_each_safe(iter, tmp, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    if (entry_tmp == NULL) continue;
+    if (entry_tmp->type == MEMORY_TYPE_CAPTURE && entry_tmp->graph == graph) {
+      int idx = entry_tmp->host_index;
+      if (idx >= 0 && idx < MAX_DEVICE_COUNT) {
+        totals[idx] += entry_tmp->bytes;
+        any = 1;
+      }
+      list_del(&entry_tmp->node);
+      free(entry_tmp);
+    }
+  }
+  pthread_mutex_unlock(&g_memory_node_lock);
+
+  if (!any || g_device_vmem == NULL) return;
+
+  for (int dev = 0; dev < MAX_DEVICE_COUNT; dev++) {
+    if (totals[dev] == 0) continue;
+    LOGGER(VERBOSE, "free captured virt memory to host device %d, graph %p, size %zu",
+           dev, (void *)graph, totals[dev]);
+    int fd = device_vmem_write_lock(dev);
+    if (fd < 0) continue;
+    int pid = getpid();
+    for (int i = 0; i < g_device_vmem->devices[dev].processes_size; i++) {
+      if (g_device_vmem->devices[dev].processes[i].pid == pid) {
+        size_t cur = g_device_vmem->devices[dev].processes[i].used;
+        g_device_vmem->devices[dev].processes[i].used =
+            (cur >= totals[dev]) ? (cur - totals[dev]) : 0;
+        break;
+      }
+    }
+    device_vmem_unlock(fd, dev);
+  }
+}
+
+int get_gpu_virt_memory_type(CUdeviceptr dptr) {
+  int type = 0;
   memory_node_t *entry_tmp = NULL;
   struct list_head *iter;
   pthread_mutex_lock(&g_memory_node_lock);
@@ -1918,16 +2279,24 @@ int is_gpu_virt_memory(CUdeviceptr dptr) {
     entry_tmp = container_of(iter, memory_node_t, node);
     if (entry_tmp == NULL) continue;
     if (entry_tmp->dptr == dptr) {
-      found = 1;
+      type = entry_tmp->type;
       break;
     }
   }
   pthread_mutex_unlock(&g_memory_node_lock);
-  return found;
+  return type;
 }
 
-void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
+/* Retire the record for dptr, discharging whatever it was charged.
+ *
+ * The device comes from the record, not from the caller and not from the
+ * current context: a charge and its discharge must land on the same account.
+ * Deriving it at free time instead lets a context switch between allocation and
+ * free (or a cuCtxGetDevice that no longer works) credit the wrong device,
+ * leaving one understated and another overstated for the life of the process. */
+void free_gpu_virt_memory(CUdeviceptr dptr) {
   int found = 0;
+  int host_index = -1;
   memory_node_t *entry_tmp = NULL;
   struct list_head *iter;
   size_t size = 0;
@@ -1938,6 +2307,7 @@ void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
     if (entry_tmp->dptr == dptr) {
       found = 1;
       size = entry_tmp->bytes;
+      host_index = entry_tmp->host_index;
       list_del(&entry_tmp->node);
       free(entry_tmp);
       break;
@@ -1968,6 +2338,7 @@ void free_gpu_virt_memory(CUdeviceptr dptr, int host_index) {
 void get_used_gpu_virt_memory(void *arg, int host_index) {
   size_t count = 0;
   size_t *used_memory = arg;
+  if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) goto DONE;
   if (g_vgpu_config->vmem_node && g_device_vmem != NULL) {
     int fd = device_vmem_read_lock(host_index);
     if (fd < 0) goto DONE;
@@ -2268,6 +2639,32 @@ void loader_child_after_fork(void) {
   pthread_mutex_init(&init_config_mutex,  NULL);
   memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
   tid_dlsym_count = 0;
+
+  /* Drop the inherited virtual-memory records. Every one of them describes an
+   * allocation of the PARENT: CUDA contexts do not survive fork, so none of the
+   * pointers or graph handles mean anything here, and the charges they stand for
+   * sit in the shared counter under the parent's pid, where they still belong.
+   *
+   * Keeping them is actively harmful once the child starts allocating, because
+   * the driver reuses addresses: a new dptr landing on a stale record makes
+   * malloc_gpu_virt_memory() charge the difference against a phantom size, a new
+   * CUgraph landing on a stale one makes free_gpu_virt_memory_by_graph() retire
+   * records it does not own, and get_gpu_virt_memory_type() can report a plain
+   * pointer as oversold UVA and send cuMemFreeAsync down the cuMemFree path.
+   * graph_cost_after_fork() wipes its cache for exactly this reason.
+   *
+   * Freeing (rather than just re-heading the list) matters because forked
+   * workers commonly run long without exec. glibc resets the malloc lock in the
+   * child via its own atfork handlers, so free() here is safe -- and this
+   * library is glibc-only by construction (see the toolchain gate in hook.h). */
+  memory_node_t *entry_tmp = NULL;
+  struct list_head *iter, *tmp;
+  list_for_each_safe(iter, tmp, &g_memory_node->node) {
+    entry_tmp = container_of(iter, memory_node_t, node);
+    list_del(iter);
+    free(entry_tmp);
+  }
+  INIT_LIST_HEAD(&g_memory_node->node);
 }
 
 /* fork() child handler implemented in cuda_hook.c. Registered lazily

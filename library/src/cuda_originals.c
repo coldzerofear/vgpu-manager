@@ -338,11 +338,6 @@ CUresult cuMemFreeHost(void *p) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemFreeHost, p);
 }
 
-CUresult cuMemHostAlloc(void **pp, size_t bytesize, unsigned int Flags) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostAlloc, pp, bytesize,
-                         Flags);
-}
-
 CUresult _cuMemHostGetDevicePointer(CUdeviceptr *pdptr, void *p, unsigned int Flags) {
   CUresult ret;
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostGetDevicePointer_v2))) {
@@ -367,28 +362,6 @@ CUresult cuMemHostGetDevicePointer(CUdeviceptr *pdptr, void *p, unsigned int Fla
 
 CUresult cuMemHostGetFlags(unsigned int *pFlags, void *p) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostGetFlags, pFlags, p);
-}
-
-CUresult _cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags) {
-  CUresult ret;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostRegister_v2))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostRegister_v2,
-                           p, bytesize, Flags);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemHostRegister))) {
-    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemHostRegister,
-                           p, bytesize, Flags);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
-  }
-  return ret;
-}
-
-CUresult cuMemHostRegister_v2(void *p, size_t bytesize, unsigned int Flags) {
-  return _cuMemHostRegister(p, bytesize, Flags);
-}
-
-CUresult cuMemHostRegister(void *p, size_t bytesize, unsigned int Flags) {
-  return _cuMemHostRegister(p, bytesize, Flags);
 }
 
 CUresult cuMemHostUnregister(void *p) {
@@ -2905,9 +2878,8 @@ CUresult cuGraphCreate(CUgraph *phGraph, unsigned int flags) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphCreate, phGraph, flags);
 }
 
-CUresult cuGraphDestroy(CUgraph hGraph) {
-  return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphDestroy, hGraph);
-}
+/* cuGraphDestroy is hooked in cuda_hook.c: destroying the graph is the second
+ * point at which a capture charge has to come off. */
 
 CUresult cuGraphDestroyNode(CUgraphNode hNode) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphDestroyNode, hNode);
@@ -3282,68 +3254,88 @@ CUresult cuGraphExecKernelNodeSetParams(CUgraphExec hGraphExec,
 //}
 
 //CUresult _cuStreamGetCaptureInfo(CUstream hStream,
-//                                CUstreamCaptureStatus *captureStatus,
-//                                cuuint64_t *id) {
-//  CUresult ret;
-//  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo_v2)))) {
+//                                   CUstreamCaptureStatus *captureStatus,
+//                                   cuuint64_t *id, CUgraph *hGraph,
+//                                   const CUgraphNode **dependencies,
+//                                   const CUgraphEdgeData **edgeData,
+//                                   size_t *numDependencies) {
+//  CUresult ret = CUDA_ERROR_NOT_FOUND;
+//  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo_v3)))) {
+//    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo_v3),
+//                           hStream, captureStatus, id, hGraph, dependencies, edgeData, numDependencies);
+//  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo_v2)))) {
+//    if (edgeData != NULL) *edgeData = NULL;
 //    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo_v2),
-//                                                           hStream, captureStatus, id);
+//                           hStream, captureStatus, id, hGraph, dependencies, numDependencies);
 //  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo)))) {
+//    if (hGraph != NULL) *hGraph = NULL;
+//    if (dependencies != NULL) *dependencies = NULL;
+//    if (edgeData != NULL) *edgeData = NULL;
+//    if (numDependencies != NULL) *numDependencies = NULL;
 //    ret = CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo),
-//                                                           hStream, captureStatus, id);
-//  } else {
-//    ret = CUDA_ERROR_NOT_FOUND;
+//                           hStream, captureStatus, id);
 //  }
 //  return ret;
-//}
-//
-//CUresult cuStreamGetCaptureInfo_v2(CUstream hStream,
-//                                   CUstreamCaptureStatus *captureStatus,
-//                                   cuuint64_t *id) {
-//  return _cuStreamGetCaptureInfo(hStream, captureStatus, id);
-//}
-//
-//CUresult cuStreamGetCaptureInfo(CUstream hStream,
-//                                CUstreamCaptureStatus *captureStatus,
-//                                cuuint64_t *id) {
-//  return _cuStreamGetCaptureInfo(hStream, captureStatus, id);
 //}
 
-//CUresult _cuStreamGetCaptureInfo_ptsz(CUstream hStream,
-//                                     CUstreamCaptureStatus *captureStatus,
-//                                     cuuint64_t *id) {
-//  CUresult ret;
-//  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuStreamGetCaptureInfo_v2_ptsz))) {
-//    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCaptureInfo_v2_ptsz,
-//                           hStream, captureStatus, id);
-//  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuStreamGetCaptureInfo_ptsz))) {
-//    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCaptureInfo_ptsz,
-//                           hStream, captureStatus, id);
-//  } else {
-//    ret = CUDA_ERROR_NOT_FOUND;
-//  }
-//  return ret;
-//}
-//
-//CUresult cuStreamGetCaptureInfo_v2_ptsz(CUstream hStream,
-//                                        CUstreamCaptureStatus *captureStatus,
-//                                        cuuint64_t *id) {
-//  return _cuStreamGetCaptureInfo_ptsz(hStream, captureStatus, id);
-//}
-//
-//CUresult cuStreamGetCaptureInfo_ptsz(CUstream hStream,
-//                                     CUstreamCaptureStatus *captureStatus,
-//                                     cuuint64_t *id) {
-//  return _cuStreamGetCaptureInfo_ptsz(hStream, captureStatus, id);
-//}
+CUresult cuStreamGetCaptureInfo(CUstream hStream,
+                                CUstreamCaptureStatus *captureStatus,
+                                cuuint64_t *id) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo),
+                                    hStream, captureStatus, id);
+}
+
+CUresult cuStreamGetCaptureInfo_ptsz(CUstream hStream,
+                                     CUstreamCaptureStatus *captureStatus,
+                                     cuuint64_t *id) {
+  return CUDA_ENTRY_CHECK(cuda_library_entry, cuStreamGetCaptureInfo_ptsz,
+                                    hStream, captureStatus, id);
+}
+
+CUresult cuStreamGetCaptureInfo_v2(CUstream hStream,
+                                   CUstreamCaptureStatus *captureStatus,
+                                   cuuint64_t *id, CUgraph *hGraph,
+                                   const CUgraphNode **dependencies,
+                                   size_t *numDependencies) {
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo_v2),
+                          hStream, captureStatus, id, hGraph, dependencies, numDependencies);
+}
+
+CUresult cuStreamGetCaptureInfo_v2_ptsz(CUstream hStream,
+                                        CUstreamCaptureStatus *captureStatus,
+                                        cuuint64_t *id, CUgraph *hGraph,
+                                        const CUgraphNode **dependencies,
+                                        size_t *numDependencies) {
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamGetCaptureInfo_v2_ptsz,
+                          hStream, captureStatus, id, hGraph, dependencies, numDependencies);
+}
+
+CUresult cuStreamGetCaptureInfo_v3(CUstream hStream,
+                                   CUstreamCaptureStatus *captureStatus,
+                                   cuuint64_t *id, CUgraph *hGraph,
+                                   const CUgraphNode **dependencies,
+                                   const CUgraphEdgeData **edgeData,
+                                   size_t *numDependencies) {
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCaptureInfo_v3),
+                          hStream, captureStatus, id, hGraph, dependencies, edgeData, numDependencies);
+}
+
+CUresult cuStreamGetCaptureInfo_v3_ptsz(CUstream hStream,
+                                   CUstreamCaptureStatus *captureStatus,
+                                   cuuint64_t *id, CUgraph *hGraph,
+                                   const CUgraphNode **dependencies,
+                                   const CUgraphEdgeData **edgeData,
+                                   size_t *numDependencies) {
+  return CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuStreamGetCaptureInfo_v3_ptsz,
+                          hStream, captureStatus, id, hGraph, dependencies, edgeData, numDependencies);
+}
 
 CUresult cuThreadExchangeStreamCaptureMode(CUstreamCaptureMode *mode) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuThreadExchangeStreamCaptureMode,
                          mode);
 }
 
-CUresult cuDeviceGetNvSciSyncAttributes(void *nvSciSyncAttrList, CUdevice dev,
-                                        int flags) {
+CUresult cuDeviceGetNvSciSyncAttributes(void *nvSciSyncAttrList, CUdevice dev, int flags) {
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceGetNvSciSyncAttributes,
                          nvSciSyncAttrList, dev, flags);
 }
@@ -3874,6 +3866,22 @@ CUresult cuMemGetHandleForAddressRange(void *handle, CUdeviceptr dptr, size_t si
   return CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetHandleForAddressRange, handle,
                           dptr, size, handleType, flags);
 }
+
+//CUresult _cuGraphAddNode(CUgraphNode* phGraphNode, CUgraph hGraph,
+//                           const CUgraphNode* dependencies, const CUgraphEdgeData* dependencyData,
+//                           size_t numDependencies, CUgraphNodeParams* nodeParams) {
+//  CUresult ret = CUDA_ERROR_NOT_FOUND;
+//  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphAddNode_v2))) {
+//    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddNode_v2, phGraphNode, hGraph,
+//                             dependencies, dependencyData, numDependencies, nodeParams);
+//  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuGraphAddNode))) {
+//    if (dependencyData != NULL) *dependencyData = NULL;
+//    ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuGraphAddNode, phGraphNode, hGraph,
+//                             dependencies, numDependencies, nodeParams);
+//  }
+//  return ret;
+//}
+
 
 CUresult cuGraphAddNode_v2(CUgraphNode* phGraphNode, CUgraph hGraph,
                            const CUgraphNode* dependencies, const CUgraphEdgeData* dependencyData,

@@ -181,6 +181,7 @@ const (
 	CudaSoftCoreLimitEnv = "CUDA_CORE_SOFT_LIMIT"
 	// CUDA_CORE_SOFT_LIMIT_<index> gpu memory oversold switch
 	CudaMemoryOversoldEnv = "CUDA_MEM_OVERSOLD"
+	VMemoryNodeEnabled    = "VMEMORY_NODE_ENABLED"
 	// ManagerVisibleDevice Single GPU UUID visible to the container
 	ManagerVisibleDevice = "MANAGER_VISIBLE_DEVICE"
 	// ManagerVisibleDevices List of GPU UUIDs visible to container

@@ -303,9 +303,42 @@ typedef struct {
   device_process_t devices[MAX_DEVICE_COUNT];
 } device_util_t;
 
+/* memory_node_t.type -- what a virtual-memory record stands for, and therefore
+ * how cuMemFreeAsync must retire it (see cuda_hook.c).
+ *
+ * UVA_SYNC / UVA_ASYNC name memory the oversold path handed out as managed
+ * memory; only UVA_ASYNC has to drain the stream and fall back to cuMemFree.
+ *
+ * CAPTURE and ASYNC_BRIDGE both name ordinary device memory that is only being
+ * ACCOUNTED for, and both exist for exactly one reason: to cover a window in
+ * which the allocation is invisible to NVML. They differ in which window.
+ *   ASYNC_BRIDGE spans the driver call to the stream synchronize.
+ *   CAPTURE spans the capture itself. During capture cuMemAllocAsync only
+ *     reserves an address -- no physical memory exists until the graph is
+ *     launched, from which point NVML reports the graph pool. The charge is
+ *     what makes several allocations inside one capture accumulate against the
+ *     limit, and cuStreamEndCapture retires it (see free_gpu_virt_memory_by_graph)
+ *     because holding it past the launch would double-count against NVML and
+ *     leak whenever the graph, rather than the application, owns the pointer. */
+#define MEMORY_TYPE_UVA_SYNC     1
+#define MEMORY_TYPE_UVA_ASYNC    2
+#define MEMORY_TYPE_CAPTURE      3
+#define MEMORY_TYPE_ASYNC_BRIDGE 4
+
 typedef struct {
   CUdeviceptr dptr;
   size_t bytes;
+  /* One of MEMORY_TYPE_* above. */
+  int type;
+  /* Owning graph, for MEMORY_TYPE_CAPTURE only; NULL otherwise. Records are
+   * only ever charged when this is known, so every charge can be retired at
+   * cuStreamEndCapture. */
+  CUgraph graph;
+  /* Device the record was charged against, or -1 if it was never charged.
+   * Retiring a capture charge must not depend on being able to ask the driver
+   * which device is current -- by then the context may be gone, and failing to
+   * discharge after the node is dropped would strand the charge forever. */
+  int host_index;
   struct list_head node;
 } memory_node_t;
 
@@ -421,6 +454,34 @@ static inline int get_logger_print_level(void) {
   })
 
 /**
+ * Given the pointer cuGetProcAddress produced for `symbol`, return our hook for
+ * that exact entry point, or NULL.
+ *
+ * The pointer says which function the driver chose -- version and stream
+ * variant included -- and `symbol` bounds which family that may belong to: a
+ * version or _ptsz/_ptds suffix stated in the request pins that component, one
+ * left out is the driver's to choose. So "cuLaunchKernel" can resolve to
+ * cuLaunchKernel_v2_ptsz, while "cuMemAlloc_v2" resolves to nothing but v2.
+ *
+ * Three outcomes, distinguished by BOTH results together:
+ *   return non-NULL             - identified, and this is its hook.
+ *   return NULL, *name non-NULL - identified, we hook no version of it.
+ *                                 Keep the driver's pointer; substituting a
+ *                                 base-named hook here would bind an ABI it
+ *                                 does not have.
+ *   return NULL, *name NULL     - not a driver entry point this build knows.
+ *                                 Fall back to name-based substitution.
+ */
+void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name);
+
+/**
+ * Record, once per symbol and at VERBOSE level, a driver symbol that went
+ * through us uninstrumented. Leaves a trail for versions a newer driver added
+ * that this build does not intercept.
+ */
+void note_unhooked_symbol(const char *symbol);
+
+/**
  * Load library and initialize some data
  */
 void load_necessary_data();
@@ -440,15 +501,29 @@ void get_used_gpu_memory_by_device(void *, nvmlDevice_t);
  */
 void get_used_gpu_virt_memory(void *, int device_id);
 
-void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int device_id);
+void check_cleanup_vmem_nodes_by_device(int host_index);
 
-void free_gpu_virt_memory(CUdeviceptr dptr, int device_id);
+void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device_id);
 
 /**
- * Reports whether dptr was allocated through the oversold UVA fallback
- * (cuMemAllocManaged) and therefore must be released with cuMemFree.
+ * Record a graph-capture allocation. Same as malloc_gpu_virt_memory() with
+ * MEMORY_TYPE_CAPTURE, but ties the record to the capturing graph so
+ * free_gpu_virt_memory_by_graph() can retire it at cuStreamEndCapture.
  */
-int is_gpu_virt_memory(CUdeviceptr dptr);
+void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
+                                     CUgraph graph, int device_id);
+
+void free_gpu_virt_memory(CUdeviceptr dptr);
+
+/**
+ * Retire every capture record belonging to graph, discharging the shared
+ * counter for each. Called when the capture ends -- successfully or not.
+ * Each record carries the device it was charged against, so this needs no
+ * device argument and cannot be defeated by a missing current context.
+ */
+void free_gpu_virt_memory_by_graph(CUgraph graph);
+
+int get_gpu_virt_memory_type(CUdeviceptr dptr);
 
 int get_nvml_device_index_by_cuda_device(CUdevice device);
 

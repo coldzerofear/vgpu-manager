@@ -23,6 +23,10 @@ func (f fakeCDIHandler) GetDeviceAnnotations(responseID string, names []string) 
 	return map[string]string{"cdi.k8s.io/vgpu-manager_" + responseID: strings.Join(names, ",")}, nil
 }
 
+func (f fakeCDIHandler) AdditionalDevices() []string {
+	return nil
+}
+
 var _ cdi.Handler = fakeCDIHandler{}
 
 func newResp() *pluginapi.ContainerAllocateResponse {
@@ -31,7 +35,7 @@ func newResp() *pluginapi.ContainerAllocateResponse {
 
 func Test_UpdateResponseForCDI_NoCDIStrategy(t *testing.T) {
 	resp := newResp()
-	err := UpdateResponseForCDI(resp, util.DeviceListStrategies{util.DeviceListStrategyEnvvar},
+	err := UpdateResponseForCDI(nil, resp, util.DeviceListStrategies{util.DeviceListStrategyEnvvar},
 		fakeCDIHandler{}, "GPU-1", "GPU-2")
 	assert.NoError(t, err)
 	assert.Empty(t, resp.Annotations)
@@ -40,7 +44,7 @@ func Test_UpdateResponseForCDI_NoCDIStrategy(t *testing.T) {
 
 func Test_UpdateResponseForCDI_Annotations(t *testing.T) {
 	resp := newResp()
-	err := UpdateResponseForCDI(resp, util.DeviceListStrategies{util.DeviceListStrategyCDIAnnotations},
+	err := UpdateResponseForCDI(nil, resp, util.DeviceListStrategies{util.DeviceListStrategyCDIAnnotations},
 		fakeCDIHandler{}, "GPU-1", "GPU-2")
 	assert.NoError(t, err)
 	assert.Len(t, resp.Annotations, 1)
@@ -53,7 +57,7 @@ func Test_UpdateResponseForCDI_Annotations(t *testing.T) {
 
 func Test_UpdateResponseForCDI_CRI(t *testing.T) {
 	resp := newResp()
-	err := UpdateResponseForCDI(resp, util.DeviceListStrategies{util.DeviceListStrategyCDICRI},
+	err := UpdateResponseForCDI(nil, resp, util.DeviceListStrategies{util.DeviceListStrategyCDICRI},
 		fakeCDIHandler{}, "GPU-1", "GPU-2")
 	assert.NoError(t, err)
 	assert.Empty(t, resp.Annotations)
@@ -64,7 +68,7 @@ func Test_UpdateResponseForCDI_CRI(t *testing.T) {
 
 func Test_UpdateResponseForCDI_Combined(t *testing.T) {
 	resp := newResp()
-	err := UpdateResponseForCDI(resp,
+	err := UpdateResponseForCDI(nil, resp,
 		util.DeviceListStrategies{util.DeviceListStrategyCDIAnnotations, util.DeviceListStrategyCDICRI},
 		fakeCDIHandler{}, "GPU-1")
 	assert.NoError(t, err)

@@ -517,7 +517,7 @@ func apiDeviceSpecs(devManager *manager.DeviceManager, devices []manager.Device)
 	}
 
 	var specs []*pluginapi.DeviceSpec
-	devRoot := devManager.GetNodeConfig().GetHostDriverRoot().GetDevRoot()
+	devRoot := devManager.GetNodeConfig().GetHostDevRoot().GetDevRoot()
 	for devPath, optional := range pathOptional {
 		if optional && util.PathIsNotExist(devPath) {
 			continue
@@ -603,6 +603,7 @@ func UpdateResponseForNodeConfig(
 // (e.g. "gpu") and deviceIDs are the device UUIDs to expose. It is a no-op when
 // no CDI strategy is enabled.
 func UpdateResponseForCDI(
+	imexChannels imex.Channels,
 	response *pluginapi.ContainerAllocateResponse,
 	strategies util.DeviceListStrategies,
 	handler cdi.Handler, deviceIDs ...string,
@@ -614,8 +615,20 @@ func UpdateResponseForCDI(
 	for i, id := range deviceIDs {
 		qualifiedNames[i] = handler.QualifiedName(util.CDIClass, id)
 	}
+
+	for _, channel := range imexChannels {
+		qualifiedNames = append(qualifiedNames, handler.QualifiedName("imex-channel", channel.ID))
+	}
+
+	qualifiedNames = append(qualifiedNames, handler.AdditionalDevices()...)
+
+	if len(qualifiedNames) == 0 {
+		return nil
+	}
+
 	if strategies.Includes(util.DeviceListStrategyCDIAnnotations) {
-		annotations, err := handler.GetDeviceAnnotations(uuid.New().String(), qualifiedNames)
+		responseID := uuid.New().String()
+		annotations, err := handler.GetDeviceAnnotations(responseID, qualifiedNames)
 		if err != nil {
 			return err
 		}
@@ -625,8 +638,11 @@ func UpdateResponseForCDI(
 		maps.Copy(response.Annotations, annotations)
 	}
 	if strategies.Includes(util.DeviceListStrategyCDICRI) {
-		for _, name := range qualifiedNames {
-			response.CdiDevices = append(response.CdiDevices, &pluginapi.CDIDevice{Name: name})
+		for _, device := range qualifiedNames {
+			cdiDevice := pluginapi.CDIDevice{
+				Name: device,
+			}
+			response.CdiDevices = append(response.CdiDevices, &cdiDevice)
 		}
 	}
 	return nil
@@ -698,6 +714,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	memoryRatio := deviceManager.GetNodeConfig().GetDeviceMemoryScaling()
 	enabledSMWatcher := deviceManager.GetFeatureGate().Enabled(util.SMWatcher)
 	enabledClientMode := deviceManager.GetFeatureGate().Enabled(util.ClientMode)
+	enabledMemoryNode := deviceManager.GetFeatureGate().Enabled(util.VMemoryNode)
 
 	for i, containerRequest := range req.ContainerRequests {
 		contClaim, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -736,8 +753,8 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		response.Envs[util.CudaCoreLimitEnv] = ""
 		response.Envs[util.CudaSoftCoreLimitEnv] = ""
 		response.Envs[util.ManagerClientRegisterUuid] = ""
-		mode := vgpu.GetCompatibilityMode(deviceManager)
-		response.Envs[util.ManagerCompatibilityMode] = fmt.Sprintf("%v", mode)
+		compMode := vgpu.GetCompatibilityMode(deviceManager)
+		response.Envs[util.ManagerCompatibilityMode] = fmt.Sprintf("%v", compMode)
 		sort.Slice(contClaim.DeviceClaims, func(i, j int) bool {
 			return contClaim.DeviceClaims[i].Id < contClaim.DeviceClaims[j].Id
 		})
@@ -773,7 +790,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			}
 		}
 		response.Envs[util.ManagerVisibleDevices] = strings.Join(deviceUuids, ",")
-		if err = UpdateResponseForCDI(response, strategies, m.cdiHandler, deviceIds...); err != nil {
+		if err = UpdateResponseForCDI(deviceManager.GetImexChannels(), response, strategies, m.cdiHandler, deviceIds...); err != nil {
 			klog.V(3).ErrorS(err, "failed to update allocate response for CDI",
 				"pod", klog.KObj(currentPod), "container", contClaim.Name, "reqIndex", i)
 			return resp, err
@@ -802,6 +819,9 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 				HostPath:      HostWatcherDirectoryPath,
 				ReadOnly:      true,
 			})
+		}
+		if enabledMemoryNode {
+			response.Envs[util.VMemoryNodeEnabled] = "true"
 		}
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>
 		// <host_manager_dir>/<pod-uid>_<cont-name>
