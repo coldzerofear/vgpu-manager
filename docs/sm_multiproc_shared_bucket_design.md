@@ -8,7 +8,39 @@
 > 目标：修复"同容器多进程各自持有私有令牌桶、瞬时叠加突破算力限额"的问题，做到**聚合限额严格**且**热路径不引入锁 / 不串行化 kernel 发射**。
 >
 > 状态：**设计定稿**（已拍板，见 §12；未实现；默认关闭，环境变量灰度开启）。
+> 基线：已对齐 `main` @ `2f234ef`（2026-07-24 同步，见 §0）。所有行号引用均按该基线校准。
 > 关联：[GAP 路径节流](./sm_core_limit_gap_throttle_design.md)、[AIMD 控制器](./sm_controller_aimd.md)。
+
+---
+
+## 0. 与 `main` 的同步记录（2026-07-24，基线 `2f234ef`）
+
+本文档初稿写于 `b73f1cb`。此后 `main` 前进了 37 个提交，本节记录**重新核对的结论**：哪些前提仍然成立、哪些需要改写。
+
+### 0.1 结论：核心前提全部成立
+
+`main` 的改动集中在**三块与本设计正交的区域**——显存记账（`cuMemAlloc*`/`cuMemFreeAsync`/graph capture）、`dlsym`/`cuGetProcAddress` 路由、`gpuallocator` NVLink 拓扑。逐一核对：
+
+| 本设计依赖的事实 | 现状 |
+|---|---|
+| `dev_hot_t` / `g_dev_hot[]` 的形状与 `static` 存储（[L109-114](../library/src/cuda_hook.c#L114)） | **未变** |
+| `rate_limiter` 的 CAS 循环（[L606](../library/src/cuda_hook.c#L606)） | **未变** |
+| `change_token` 的 CAS 累加与钳制（[L567](../library/src/cuda_hook.c#L567)） | **未变** |
+| 三种控制器与其跨周期积分态（`md_cooldown`、排他 FSM ×3、`throttled_since_watch`） | **未变**，§4.13 的全部论证原样成立 |
+| watcher 单设备周期 ≈ 100ms（`100 / dev_count * MILLISEC` × `dev_count`） | **未变**，§12 第 8 项的 `REFILL_PERIOD_NS` 取值不需要改 |
+| bypass 的 SET 语义（[L1260](../library/src/cuda_hook.c#L1260)） | **未变**，§4.7 仍是必改项 |
+| `mmap_file_to_vmem_node` 的 TOCTOU + 尺寸不符报错（[L1563](../library/src/loader.c#L1563)/[L1597](../library/src/loader.c#L1597)） | **未变**，§10 的改造目标原样成立 |
+| `device_vmemory_t` 无区头、`lock_byte` 偏移由 `offsetof` 推出 | **未变**，§10.2/§10.3 的改造点不变 |
+| `ofd_fcntl` 的 OFD→经典锁运行时回退（[lock.c#L64](../library/src/lock.c#L64)） | **未变**，`lock.c` 零改动 |
+| `.so` 按版本挂载 ⟹ 一个容器一生只加载一个版本（§4.5.4 的安全论证） | **成立，且两条路径都已核实**：device plugin [vnum_plugin.go#L492](../pkg/deviceplugin/vgpu/vnum_plugin.go#L492)、DRA [vgpu.go#L193-194](../pkg/kubeletplugin/vgpu.go#L193) 都把 `version.Get().Version` 拼进宿主路径 |
+
+⟹ **§1–§9、§11 的技术判断无一被推翻。** 除行号外，仅需补充下面三处新事实。
+
+### 0.2 需要补入的新事实
+
+1. **`vmem_node` 现已 feature-gate 化**：新增 `util.VMemoryNode` 特性门控与 `VMEMORY_NODE_ENABLED` 环境变量，库侧由 `g_vgpu_config->vmem_node` 决定是否建区。这给本设计的开关（§5）提供了一个**可对照的既有范式**，也改变了 §10 的适用条件 —— 详见 §5.1 与 §10.6。
+2. **库内新增了 `vmem_node` 的 PID 存活回收与退出/信号清理钩子**（`rm_vmem_node_by_non_existent_device_pid`、`check_cleanup_vmem_nodes*`、`atexit` + `SIGTERM/SIGINT/SIGHUP`）。这是第三条陈旧清理机制，本设计**一条都不需要**，但必须写清楚"为什么不需要"，否则后人会照抄 —— 详见 §4.5.5。
+3. **`loader_child_after_fork` 现在会释放 fork 继承的显存记账链表**（[loader.c#L2635](../library/src/loader.c#L2635)）。§6.2 "不需要动 fork 处理器" 的结论不变，但理由需要精确化 —— 详见 §6.2。
 
 ---
 
@@ -34,7 +66,7 @@ typedef struct {
 static dev_hot_t g_dev_hot[MAX_DEVICE_COUNT];   // ← static：每个进程一份
 ```
 
-`rate_limiter` 用 CAS 扣减（[cuda_hook.c#L588](../library/src/cuda_hook.c#L588)），watcher 每 ~80ms/设备用 NVML 采样、经 `delta()`/`aimd()` 反馈后用 `change_token()` 补充。控制器积分态同样是进程私有的 static：[`shares[]`](../library/src/cuda_hook.c#L1100)、[`up_limits[]`](../library/src/cuda_hook.c#L1122)、`is[]`、`avg_sys_frees[]`。
+`rate_limiter` 用 CAS 扣减（[cuda_hook.c#L606](../library/src/cuda_hook.c#L606)），watcher 每 ~80ms/设备用 NVML 采样、经 `delta()`/`aimd()` 反馈后用 `change_token()` 补充。控制器积分态同样是进程私有的 static：[`shares[]`](../library/src/cuda_hook.c#L1118)、[`up_limits[]`](../library/src/cuda_hook.c#L1140)、`is[]`、`avg_sys_frees[]`。
 
 ### 1.2 核心问题：N 个私有桶瞬时叠加突破限额
 
@@ -86,7 +118,7 @@ static dev_hot_t g_dev_hot[MAX_DEVICE_COUNT];   // ← static：每个进程一�
 
 ### 3.2 为什么这是对的手段
 
-- **CAS 是 CPU 指令、与地址空间无关**：桶从 `static` 变成 `MAP_SHARED`，[rate_limiter 的 CAS](../library/src/cuda_hook.c#L588) **一个字都不用改**就变成跨进程原子扣减。这是本方案最省力、也最关键的支点。
+- **CAS 是 CPU 指令、与地址空间无关**：桶从 `static` 变成 `MAP_SHARED`，[rate_limiter 的 CAS](../library/src/cuda_hook.c#L606) **一个字都不用改**就变成跨进程原子扣减。这是本方案最省力、也最关键的支点。
 - **"聚合限额"变成物理不变量**：N 个进程抢同一个 `cur_cuda_cores`，桶里有多少令牌就是全容器还能发多少 kernel。不需要瓜分限额、不需要回收空闲配额 —— 桶本身就是聚合。
 - **无锁、不串行化**：消费仍是无阻塞 CAS；只有"桶为负"时各进程各自 `nanosleep`（现有逻辑），不是互相排队。
 
@@ -108,9 +140,9 @@ static dev_hot_t g_dev_hot[MAX_DEVICE_COUNT];   // ← static：每个进程一�
 
 ### 4.1 共享内存布局
 
-复用仓库已有的跨进程共享范式（[`mmap_file_to_vmem_node`](../library/src/loader.c#L1372)：`open(O_CREAT)` + `ftruncate` + 首建者 `memset` + `mmap(MAP_SHARED)`），新增一个 SM 令牌桶共享区。
+复用仓库已有的跨进程共享范式（[`mmap_file_to_vmem_node`](../library/src/loader.c#L1563)：`open(O_CREAT)` + `ftruncate` + 首建者 `memset` + `mmap(MAP_SHARED)`），新增一个 SM 令牌桶共享区。
 
-**这个结构体是一份 ABI**：它落在文件上、被多个进程映射、跨库版本存活（见 §4.5），宿主侧的 Go 代码也已有读取同类结构的先例（[container_lister.go#L205](../pkg/metrics/lister/container_lister.go#L205) 读 vmem_node）。因此字段一律用**定宽类型 + 显式 padding + `_Static_assert` 钉死布局**。
+**这个结构体是一份 ABI**：它落在文件上、被多个进程映射、跨库版本存活（见 §4.5），宿主侧的 Go 代码也已有读取同类结构的先例（[container_lister.go#L206](../pkg/metrics/lister/container_lister.go#L206) 读 vmem_node）。因此字段一律用**定宽类型 + 显式 padding + `_Static_assert` 钉死布局**。
 
 ```c
 /* 容器内路径 /tmp/.sm_node/sm_node.config。
@@ -182,7 +214,7 @@ _Static_assert(offsetof(sm_node_region_t, layout_version) == 4, "frozen header A
 
 ### 4.2 消费端（rate_limiter）：几乎零改动
 
-现有 [rate_limiter](../library/src/cuda_hook.c#L565) 的 CAS 循环逻辑**不变**，只把操作对象从 `g_dev_hot[host_index].cur_cuda_cores` 换成共享区 `g_sm_node->devices[host_index].cur_cuda_cores`（开启共享模式时）：
+现有 [rate_limiter](../library/src/cuda_hook.c#L583) 的 CAS 循环逻辑**不变**，只把操作对象从 `g_dev_hot[host_index].cur_cuda_cores` 换成共享区 `g_sm_node->devices[host_index].cur_cuda_cores`（开启共享模式时）：
 
 ```c
 before = g_sm_node->devices[host_index].cur_cuda_cores;  // 跨进程原子读
@@ -221,10 +253,10 @@ if (now - last >= REFILL_PERIOD_NS &&
 
 ### 4.4 建区 / 重建：初始化路径用内核文件锁串行化
 
-**不照抄 vmem 区的写法**。现有 [`mmap_file_to_vmem_node`](../library/src/loader.c#L1366) 有两个缺陷，本设计都不继承：
+**不照抄 vmem 区的写法**。现有 [`mmap_file_to_vmem_node`](../library/src/loader.c#L1563) 有两个缺陷，本设计都不继承：
 
 1. **TOCTOU 竞态**：`file_exist()` 判断在前、`open(O_CREAT)` 在后，两个进程可能双双认定 `created = 1`，双双 `ftruncate` + `memset` → **互相抹掉对方刚写的内容**。
-2. **尺寸不符即报错退出**（[loader.c#L1399](../library/src/loader.c#L1399)）——正是本节要根治的行为，见 §4.5.4。
+2. **尺寸不符即报错退出**（[loader.c#L1597](../library/src/loader.c#L1597)）——正是本节要根治的行为，见 §4.5.4。
 
 #### 4.4.1 为什么初始化路径可以用锁（而热路径绝不）
 
@@ -346,18 +378,20 @@ ContSMNodePath = "/tmp/." + util.SMNode
 
 | 路径 | 位置 | 动作 |
 |---|---|---|
-| device plugin | [vnum_plugin.go#L846](../pkg/deviceplugin/vgpu/vnum_plugin.go#L846) `Allocate` 的 `response.Mounts` | 加挂 `sm_node` 目录 |
-| device plugin | [vnum_plugin.go#L823](../pkg/deviceplugin/vgpu/vnum_plugin.go#L823) `EnsureDir` | 建 `sm_node` 目录 |
-| DRA（CDI） | [vgpu.go#L288](../pkg/kubeletplugin/vgpu.go#L288) `GetPartitionMountContainerEdits` | 加 CDI mount |
-| DRA（NRI） | [vgpu.go#L345](../pkg/kubeletplugin/vgpu.go#L345) `GetNRIPartitionInjection` | 加 NRI mount |
+| device plugin | [vnum_plugin.go#L853](../pkg/deviceplugin/vgpu/vnum_plugin.go#L853) `Allocate` 的 `response.Mounts` | 加挂 `sm_node` 目录 |
+| device plugin | [vnum_plugin.go#L844](../pkg/deviceplugin/vgpu/vnum_plugin.go#L844) `EnsureDir` | 建 `sm_node` 目录 |
+| DRA（CDI） | [vgpu.go#L289](../pkg/kubeletplugin/vgpu.go#L289) `GetPartitionMountContainerEdits` | 加 CDI mount |
+| DRA（NRI） | [vgpu.go#L346](../pkg/kubeletplugin/vgpu.go#L346) `GetNRIPartitionInjection` | 加 NRI mount |
 | DRA 两路共用 | [vgpu.go#L141](../pkg/kubeletplugin/vgpu.go#L141) `ensurePartitionDirectories` 的 `preparedDirs` | 建 `sm_node` 目录 |
 | NRI 观测 | [nri/plugin.go#L73](../pkg/kubeletplugin/nri/plugin.go#L73) `mountDestsOfInterest` | 加 `/tmp/.sm_node`（仅日志高亮） |
+
+> **`main` 同步补充**：上表 6 行落点（5 处功能 + 1 处观测）在同步后**逐处复核有效**，位置仅有行号漂移。`vnum_plugin.go` 的挂载块现在把 `vgpu.config` / `vgpu_lock` / `vmem_node` 三个 Mount 写在同一个 `append` 里（[L853-870](../pkg/deviceplugin/vgpu/vnum_plugin.go#L853)），`sm_node` 应作为第四项并列加入；对应的 `EnsureDir` 在 [L844](../pkg/deviceplugin/vgpu/vnum_plugin.go#L844) 旁边。DRA 两路（CDI [vgpu.go#L330](../pkg/kubeletplugin/vgpu.go#L330)、NRI [vgpu.go#L371](../pkg/kubeletplugin/vgpu.go#L371)）的 `util.VMemNode` 拼接点同理各加一项。
 
 #### 4.5.2 陈旧清理：复用现成的"每次启动前删缓存"钩子
 
 **关键事实：这套机制已经在跑，不是新发明。** 两处都已经在删 `vmem_node.config`：
 
-`PreStartContainer`（device plugin 路径，[vnum_plugin.go#L1094](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1094)）：
+`PreStartContainer`（device plugin 路径，[vnum_plugin.go#L1116](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1116)）：
 
 ```go
 // Clean up old cache files before each startup
@@ -392,7 +426,7 @@ _ = os.RemoveAll(vmemNodeConfigPath)      // ← sm_node.config 加在这里
 | DRA + NRI | `CreateContainer` | ✅ | 无 |
 | **DRA 不开 NRI（纯 CDI）** | **无** | ❌ | **有** |
 
-**缺口成因**：DRA 非 NRI 路径的挂载由 CDI 注入，而 CDI spec 在 `NodePrepareResources`（**每 claim 一次，Pod 准入时**）生成；容器重启时运行时只是重新套用磁盘上已有的 spec，**没有任何插件代码运行**。`ensurePartitionDirectories`（[vgpu.go#L141](../pkg/kubeletplugin/vgpu.go#L141)）只 `EnsureDir` 不删除；会 `RemoveAll` 的 `ensureClaimDirectories`（[vgpu.go#L132](../pkg/kubeletplugin/vgpu.go#L132)）也只在 Prepare 时跑。
+**缺口成因**：DRA 非 NRI 路径的挂载由 CDI 注入，而 CDI spec 在 `NodePrepareResources`（**每 claim 一次，Pod 准入时**）生成；容器重启时运行时只是重新套用磁盘上已有的 spec，**没有任何插件代码运行**。`ensurePartitionDirectories`（[vgpu.go#L141](../pkg/kubeletplugin/vgpu.go#L141)）只 `EnsureDir` 不删除；会 `RemoveAll` 的 `ensureClaimDirectories`（[vgpu.go#L129](../pkg/kubeletplugin/vgpu.go#L129)）也只在 Prepare 时跑。
 
 **这个缺口不需要新机制来堵**，因为按 §4.5.4 残留是良性的（自校正），唯一的实际危害由布局守卫兜住。故：**不为 DRA 非 NRI 路径引入额外钩子**，只在文档与代码注释中记录该路径依赖库内守卫。
 
@@ -436,7 +470,7 @@ static void rebuild_region_locked(sm_node_region_t *r) {
 
 **行为约定（本节的硬要求）**：
 
-- **布局不符 → 重建，不是报错退出。** 这是本设计与现有 vmem 区的关键分歧：[loader.c#L1399](../library/src/loader.c#L1399) 在尺寸不符时 `LOGGER(ERROR)` + `return 1`，等于**库升级后容器直接不可用**。本区一律重建。
+- **布局不符 → 重建，不是报错退出。** 这是本设计与现有 vmem 区的关键分歧：[loader.c#L1597](../library/src/loader.c#L1597) 在尺寸不符时 `LOGGER(ERROR)` + `return 1`，等于**库升级后容器直接不可用**。本区一律重建。
 - **任何不可恢复的错误（`open`/`mmap` 失败）→ 优雅降级回进程私有桶**，等价于该进程没开这个特性。**绝不 `exit`/`abort`/让 CUDA 调用失败**——多进程算力隔离是一个**优化**，不是正确性前提，不值得为它牺牲可用性。
 - `magic` **最后写、用 RELEASE 序**：重建中途若进程被杀，`magic` 仍是旧值/0 → 下一个进程照样判定不符 → 再次重建。**重建是幂等的、可中断的**，没有"半初始化"稳态。
 
@@ -448,7 +482,7 @@ static void rebuild_region_locked(sm_node_region_t *r) {
 
 > **推论**：不需要 `unlink` + 重建新 inode，也不需要 `rename` 原子发布。那些手法是为了"新旧读者并存"而设计的，而这个前提在此**不成立**。就地 `memset` 严格更简单，且避免了 `rename` 竞态下"两个进程各自映射到不同 inode、共享桶退化成两个私有桶"的**静默失效**——那才是真正危险的失败模式。
 >
-> **唯一的例外**是宿主侧的 Go 读者（[container_lister.go#L205](../pkg/metrics/lister/container_lister.go#L205) 读 vmem_node 的先例）：它不在容器生命周期约束内。若将来给 `sm_node` 加宿主侧读取，**必须让 Go 侧也校验 `magic`/`layout_version` 并容忍读到重建中的区**（读到不符就当作"本周期无数据"，而不是报错）。
+> **唯一的例外**是宿主侧的 Go 读者（[container_lister.go#L206](../pkg/metrics/lister/container_lister.go#L206) 读 vmem_node 的先例）：它不在容器生命周期约束内。若将来给 `sm_node` 加宿主侧读取，**必须让 Go 侧也校验 `magic`/`layout_version` 并容忍读到重建中的区**（读到不符就当作"本周期无数据"，而不是报错）。
 
 - 控制面刚删完文件 → 新建的区全 0 → 天然 `magic != MAGIC` → 走 `rebuild_region_locked`。**"控制面已清理"与"库内兜底重建"是同一条代码路径**，不是两套逻辑。
 - **改结构体必须 bump `SM_NODE_LAYOUT_VERSION`** —— 本设计对未来维护者的硬约束，应写进结构体上方注释。冻结区的 4 个字段**永远不得改动**（§4.1）。
@@ -459,15 +493,32 @@ static void rebuild_region_locked(sm_node_region_t *r) {
 
 | 函数 | 映射方式 | 数据所有者 | 尺寸不符时该怎么办 |
 |---|---|---|---|
-| [`mmap_file_to_config_path`](../library/src/loader.c#L1302)（`resource_data_t`） | `MAP_PRIVATE`/`PROT_READ` | **控制面**（manager 写 `vgpu.config`） | **保持报错**（见下） |
-| [`mmap_file_to_util_path`](../library/src/loader.c#L1334)（`device_util_t`） | `MAP_PRIVATE`/`PROT_READ` | **外部 watcher** | **保持报错** |
-| [`mmap_file_to_vmem_node`](../library/src/loader.c#L1366)（`device_vmemory_t`） | `MAP_SHARED`/读写 | **库自己** | 可以重建（但见下） |
+| [`mmap_file_to_config_path`](../library/src/loader.c#L1499)（`resource_data_t`） | `MAP_PRIVATE`/`PROT_READ` | **控制面**（manager 写 `vgpu.config`） | **保持报错**（见下） |
+| [`mmap_file_to_util_path`](../library/src/loader.c#L1531)（`device_util_t`） | `MAP_PRIVATE`/`PROT_READ` | **外部 watcher** | **保持报错** |
+| [`mmap_file_to_vmem_node`](../library/src/loader.c#L1563)（`device_vmemory_t`） | `MAP_SHARED`/读写 | **库自己** | 可以重建（但见下） |
 
-**前两处必须保持报错，改成"重建"是错的**：它们是**只读消费**控制面产出的文件，库既无权也无力重建自己不拥有的数据——凭空造一份 `vgpu.config` 只会让容器带着错误的配额跑起来，比起不来更糟。而且 `resource_data_t` 的尺寸校验是**被设计成失败的**：[vnum_plugin.go#L1085](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1085) 在 `Reschedule` 门控下调用 `CheckResourceDataSize`，注释写明"When a version upgrade causes a change in the configuration structure, the controller can reschedule these pods that cannot be started"——**升级后起不来是预期行为，由控制器重新调度兜底**。
+**前两处必须保持报错，改成"重建"是错的**：它们是**只读消费**控制面产出的文件，库既无权也无力重建自己不拥有的数据——凭空造一份 `vgpu.config` 只会让容器带着错误的配额跑起来，比起不来更糟。而且 `resource_data_t` 的尺寸校验是**被设计成失败的**：[vnum_plugin.go#L1107](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1107) 在 `Reschedule` 门控下调用 `CheckResourceDataSize`，注释写明"When a version upgrade causes a change in the configuration structure, the controller can reschedule these pods that cannot be started"——**升级后起不来是预期行为，由控制器重新调度兜底**。
 
 > **本设计确立的规则应精确表述为**：*库自己拥有的共享区（`MAP_SHARED` 读写）布局不符 → 重建；只读消费控制面产出的区 → 保持报错，交给上层的重调度机制。* `sm_node` 属于前者。
 
-**`vmem_node` 属于前者，但仍不在本设计范围内**。它确实有同样的缺陷（[loader.c#L1399](../library/src/loader.c#L1399) 尺寸不符即 `return 1`，DRA 非 NRI 路径下库升级会让容器起不来），但 **vmem 区是账本**（§4.5.4 的关键区别）：重建 = 丢失全部显存记账 = 已分配的显存变成"没人认领"，后果比令牌桶重建（几个控制周期收敛）严重得多。"重建 vs 报错 vs 交给重调度"哪个危害最小，需要单独评估，**不应捆绑进本设计**。此处仅记录问题与关联。
+**`vmem_node` 属于前者，但仍不在本设计范围内**。它确实有同样的缺陷（[loader.c#L1597](../library/src/loader.c#L1597) 尺寸不符即 `return 1`，DRA 非 NRI 路径下库升级会让容器起不来），但 **vmem 区是账本**（§4.5.4 的关键区别）：重建 = 丢失全部显存记账 = 已分配的显存变成"没人认领"，后果比令牌桶重建（几个控制周期收敛）严重得多。"重建 vs 报错 vs 交给重调度"哪个危害最小，需要单独评估，**不应捆绑进本设计**。此处仅记录问题与关联。
+
+#### 4.5.5 为什么 `sm_node` 不需要 `vmem_node` 那三套回收机制（`main` 同步补充）
+
+同步 `main` 后发现，库内已为 `vmem_node` 加了**三套**陈旧回收机制，都是本设计**明确不采用**的。这里逐条记录判据，避免后来者"照着 vmem 抄一遍"：
+
+| `vmem_node` 现有机制 | 位置 | `sm_node` 是否需要 | 判据 |
+|---|---|---|---|
+| **PID 存活回收**：遍历记录，`pid_exist`/`is_zombie_proc` 不通过就踢出 | `rm_vmem_node_by_non_existent_device_pid`（[loader.c#L1825](../library/src/loader.c#L1825)） | **不需要** | `sm_node` **没有按 PID 的记录**。令牌桶是一个标量计数器，进程死亡不会在里面留下"属于它的条目" |
+| **周期性体检**：watcher 每轮对本设备做一次回收 | `check_cleanup_vmem_nodes_by_device`（[loader.c#L1940](../library/src/loader.c#L1940)） | **不需要** | 同上；且它要拿**每设备写记录锁**，与本设计"热路径/watcher 路径不引入锁"的约束冲突 |
+| **退出/信号清理**：`atexit` + `sigaction(SIGTERM/SIGINT/SIGHUP)` 归还本进程的记账 | 注册于 [loader.c#L2527](../library/src/loader.c#L2527) 附近（仅在 `vmem_node` 启用时） | **不需要** | 进程猝死时它**未消费的令牌本来就应该留在桶里**——那正是"聚合还能发多少"的正确答案。补充端每周期无条件把桶推向目标水位（§4.3/§4.7），任何偏差在 ~百毫秒内被抹平 |
+
+**这三条其实是同一个判据的三种表现**，即 §4.5.4 已经点明的那个不对称：
+
+> `vmem_node` 是**账本**（记"谁占了多少"，条目与 PID 绑定，陈旧条目永不自愈，所以必须有人来收尸）；
+> `sm_node` 是**自校正的反馈量**（桶里的数字每周期被控制器重写，没有"归属"，因而没有尸体可收）。
+
+**唯一的推论要写死**：将来若有人往 `sm_node` 里加**任何按 PID / 按进程归属的字段**，上面三条结论**同时失效**，必须重新评估 —— 因为那一刻 `sm_node` 就变成账本了。这是本设计对未来维护者的第二条硬约束（第一条是 §4.1 的"改结构体必须 bump `SM_NODE_LAYOUT_VERSION`"）。
 
 ### 4.6 gap 检测的 `last_launch_ns`：**保持进程私有**
 
@@ -480,7 +531,7 @@ static void rebuild_region_locked(sm_node_region_t *r) {
 
 ### 4.7 bypass 的 SET → 必须改（最易踩的坑）
 
-现有防抖 bypass 是**直接赋值**（[cuda_hook.c#L1242](../library/src/cuda_hook.c#L1242)）：
+现有防抖 bypass 是**直接赋值**（[cuda_hook.c#L1260](../library/src/cuda_hook.c#L1260)）：
 
 ```c
 g_dev_hot[host_index].cur_cuda_cores = g_sm_controller(...);   // SET，非累加
@@ -496,7 +547,7 @@ g_dev_hot[host_index].cur_cuda_cores = g_sm_controller(...);   // SET，非累�
 
 ### 4.8 change_token 的累加也要跨进程原子
 
-现有 [`change_token`](../library/src/cuda_hook.c#L562) 已经是 CAS 循环（`before + delta`，钳制 `[0, total]`）。迁到共享区后 CAS 目标换成共享计数器即可，**逻辑不变**。补充者（选举赢家）用它累加，消费者用 rate_limiter 扣减，两者都是对同一 `cur_cuda_cores` 的 CAS → 天然并发安全。
+现有 [`change_token`](../library/src/cuda_hook.c#L567) 已经是 CAS 循环（`before + delta`，钳制 `[0, total]`）。迁到共享区后 CAS 目标换成共享计数器即可，**逻辑不变**。补充者（选举赢家）用它累加，消费者用 rate_limiter 扣减，两者都是对同一 `cur_cuda_cores` 的 CAS → 天然并发安全。
 
 ### 4.9 反馈信号：无需改
 
@@ -512,7 +563,7 @@ g_dev_hot[host_index].cur_cuda_cores = g_sm_controller(...);   // SET，非累�
 
 1. **lock-free 是硬要求，否则跨进程静默失效**。`_Atomic T` 若非 lock-free，编译器退化为 libatomic 中**按地址索引的锁表**，而那张表**每进程一份** → 两个进程映射同一块共享内存会各自用**不同的锁** → 保护形同虚设、且不会报错。
 2. **`_Atomic T` 的 size/alignment 允许与 `T` 不同**。本结构体是落盘的跨进程 ABI（§4.1），且宿主 Go 侧已有读同类结构的先例，多一层由编译器决定的布局变数是净负担。
-3. **不合仓库既定习惯**。[hook.h#L63](../library/include/hook.h#L63) 已硬性要求 GCC/Clang + glibc，全库用的就是 GCC 内建（`CAS` = `__sync_bool_compare_and_swap`；`src/vulkan/` 用 `__atomic_*`；[cuda_hook.c#L583](../library/src/cuda_hook.c#L583) 用 `__atomic_store_n`）。
+3. **不合仓库既定习惯**。[hook.h#L63](../library/include/hook.h#L63) 已硬性要求 GCC/Clang + glibc，全库用的就是 GCC 内建（`CAS` = `__sync_bool_compare_and_swap`；`src/vulkan/` 用 `__atomic_*`；[cuda_hook.c#L601](../library/src/cuda_hook.c#L601) 用 `__atomic_store_n`）。
 
 **结论：普通定宽类型 + `__atomic_*` 内建 + 每处显式内存序。** 它作用在**普通类型**上 → 对共享结构体**零 ABI 歧义**；lock-free 由类型本身保证（`int64_t`/`int32_t` 在 x86-64/aarch64 上均是）；且每个访问点的内存序是显式写出来的，而不是藏在类型限定符里。
 
@@ -582,13 +633,13 @@ g_dev_hot[host_index].cur_cuda_cores = g_sm_controller(...);   // SET，非累�
 
 > **本节修正了本设计一个实质性缺陷。** 前几稿默认"只把令牌桶搬进共享区、控制算法不动"（§2.2 非目标）。核查代码后：**对 `delta` 成立，对 `aimd` 不成立，对 `auto` 也不成立**。必须把**全部跨周期控制状态**一起搬进共享区（§4.1 结构体已相应扩充）。
 
-先明确一件被前几稿忽略的事实：控制器有**三种**，不是两种（[cuda_hook.c#L682](../library/src/cuda_hook.c#L682)）：
+先明确一件被前几稿忽略的事实：控制器有**三种**，不是两种（[cuda_hook.c#L700](../library/src/cuda_hook.c#L700)）：
 
 ```c
 enum { SM_CONTROLLER_DELTA = 0, SM_CONTROLLER_AIMD = 1, SM_CONTROLLER_AUTO = 2 };
 ```
 
-`auto`（[auto_routed_controller](../library/src/cuda_hook.c#L985)）按排他性**逐设备逐周期**在两者间路由，所以它同时继承两者的约束。
+`auto`（[auto_routed_controller](../library/src/cuda_hook.c#L1003)）按排他性**逐设备逐周期**在两者间路由，所以它同时继承两者的约束。
 
 #### 4.13.1 判据：什么状态必须共享
 
@@ -596,17 +647,17 @@ enum { SM_CONTROLLER_DELTA = 0, SM_CONTROLLER_AIMD = 1, SM_CONTROLLER_AUTO = 2 }
 
 > **凡是"只有选举赢家推进"的跨周期状态，都必须放进共享区。** 否则每个进程各存一份、各自只在自己赢的那 1/N 周期推进 → 语义碎裂成 N 份，且每份都以 ~1/N 的速率演进。
 
-反之，**每周期从当周期观测重算的临时量**保持进程私有即可（`top_results[]` 采样、`sys_frees[]`（[写 L1206](../library/src/cuda_hook.c#L1206) → 同周期 [读 L1300](../library/src/cuda_hook.c#L1300)，是 scratch 不是积分态）、排他 memo `g_excl_memo_*`）。所有进程观测的是同一个容器聚合信号，重算结果一致。
+反之，**每周期从当周期观测重算的临时量**保持进程私有即可（`top_results[]` 采样、`sys_frees[]`（[写 L1206](../library/src/cuda_hook.c#L1224) → 同周期 [读 L1300](../library/src/cuda_hook.c#L1318)，是 scratch 不是积分态）、排他 memo `g_excl_memo_*`）。所有进程观测的是同一个容器聚合信号，重算结果一致。
 
 #### 4.13.2 `delta`：无状态，**天然兼容**
 
-[`delta()`](../library/src/cuda_hook.c#L592) 是**纯函数**：输出只取决于入参 `(up_limit, user_current, share)` + 设备几何（`g_sm_num`/`g_max_thread_per_sm`，各进程相同）+ `g_dynamic_config`（只读）。**没有任何跨周期自有状态。**
+[`delta()`](../library/src/cuda_hook.c#L610) 是**纯函数**：输出只取决于入参 `(up_limit, user_current, share)` + 设备几何（`g_sm_num`/`g_max_thread_per_sm`，各进程相同）+ `g_dynamic_config`（只读）。**没有任何跨周期自有状态。**
 
 ⟹ 只要 `share` / `up_limit` 在共享区（已在），谁来跑 `delta` 都得到同一个结果。**选举对 delta 完全透明，零额外改动。**
 
 #### 4.13.3 `aimd`：有 `md_cooldown`，**不改会触发 MD 雪崩**
 
-[`aimd_controller()`](../library/src/cuda_hook.c#L783) 持有一个跨周期积分态 [`g_aimd_md_cooldown[]`](../library/src/cuda_hook.c#L699)，其声明注释写明了它赖以成立的不变量：
+[`aimd_controller()`](../library/src/cuda_hook.c#L801) 持有一个跨周期积分态 [`g_aimd_md_cooldown[]`](../library/src/cuda_hook.c#L717)，其声明注释写明了它赖以成立的不变量：
 
 > *"Per-device remaining cooldown counter. **Watcher-thread-only access** (each watcher thread owns a disjoint host_index slice via balance_batches). No volatile / atomics needed."*
 
@@ -618,7 +669,7 @@ enum { SM_CONTROLLER_DELTA = 0, SM_CONTROLLER_AIMD = 1, SM_CONTROLLER_AUTO = 2 }
 | 2 | B | **0**（B 自己那份从没被推进过） | util 仍超限 → **MD 再次触发** ← 本该被拦住 |
 | 3 | C | **0** | → **MD 第三次触发** |
 
-`share` 被连续砍成 `md_divisor^N`（默认 3^N；N=4 → **81 倍**）。而 cooldown 的存在**正是为了阻止这个**——[代码注释](../library/src/cuda_hook.c#L846)：
+`share` 被连续砍成 `md_divisor^N`（默认 3^N；N=4 → **81 倍**）。而 cooldown 的存在**正是为了阻止这个**——[代码注释](../library/src/cuda_hook.c#L864)：
 
 > *"NVML's ~80ms sample + share-take-effect lag (~200-400ms total) means consecutive MD cuts share by md_divisor^N before the first cut's effect surfaces, hence **"MD avalanche"**. Cooldown breaks the chain."*
 
@@ -626,15 +677,15 @@ enum { SM_CONTROLLER_DELTA = 0, SM_CONTROLLER_AIMD = 1, SM_CONTROLLER_AUTO = 2 }
 
 #### 4.13.4 `auto`：还需要排他 FSM + 节流标志
 
-`auto` 经 [`host_index_is_exclusive_debounced()`](../library/src/cuda_hook.c#L942) 路由，该 FSM 有三个跨周期字段（`g_is_exclusive_debounced` / `g_exclusive_pending_streak` / `g_lost_exclusivity_pending`），其注释同样声明依赖"watcher 线程独占"：
+`auto` 经 [`host_index_is_exclusive_debounced()`](../library/src/cuda_hook.c#L960) 路由，该 FSM 有三个跨周期字段（`g_is_exclusive_debounced` / `g_exclusive_pending_streak` / `g_lost_exclusivity_pending`），其注释同样声明依赖"watcher 线程独占"：
 
 > *"every field below is written and read exclusively by the watcher thread that owns the corresponding host_index. No cross-thread read; no volatile needed."*
 
 FSM 的三个调用点（soft burst 门、hard_limit jitter 门、auto 路由）**全都在赢家的控制块内**，所以把三个字段移入共享区后，FSM 每周期恰好被推进一次（由当周期赢家），**语义与单进程一致**——debounce 计的是全局周期数，正是其本意。
 
-> `g_lost_exclusivity_pending` 尤其**不能**留私有：它是"true→false 翻转"时置位、由后续 reset 分支[消费清零](../library/src/cuda_hook.c#L1297)的**一次性标志**。若各进程各存一份，非赢家的标志会一直悬着，等它某个周期赢了才消费 → **迟到数个周期的、莫名其妙的 reset**。
+> `g_lost_exclusivity_pending` 尤其**不能**留私有：它是"true→false 翻转"时置位、由后续 reset 分支[消费清零](../library/src/cuda_hook.c#L1315)的**一次性标志**。若各进程各存一份，非赢家的标志会一直悬着，等它某个周期赢了才消费 → **迟到数个周期的、莫名其妙的 reset**。
 
-**另一处必须共享的是 `throttled_since_watch`**（不属 FSM，但同类问题）。它由 `rate_limiter` 在节流时置位、watcher 每周期 [read-and-clear](../library/src/cuda_hook.c#L1210)，用于给防抖 bypass 把门（§4.7）。共享桶下：
+**另一处必须共享的是 `throttled_since_watch`**（不属 FSM，但同类问题）。它由 `rate_limiter` 在节流时置位、watcher 每周期 [read-and-clear](../library/src/cuda_hook.c#L1228)，用于给防抖 bypass 把门（§4.7）。共享桶下：
 
 > 进程 A 撞节流 → 置 **A 的**标志；赢家 B 读**自己的**标志 = 0 → 判定"没人节流" → **放行 bypass** → bypass 的 SET 抹掉 A 正在扣的令牌。
 
@@ -653,7 +704,7 @@ FSM 的三个调用点（soft burst 门、hard_limit jitter 门、auto 路由）
 
 > **已拍板：三种控制器全支持**（§12 第 2 项）。曾提出的范围缩减方案（只支持 `delta`、`aimd`/`auto` 降级回私有桶）**已被否决**。因此 §4.1 的结构体保持完整形态，`md_cooldown` 与排他 FSM ×3 都必须搬。
 >
-> 这个选择的直接后果，必须在实现时守住：**`md_cooldown` 和 FSM ×3 的现有注释都写着 "watcher-thread-only access / no volatile / no atomics needed"**（[cuda_hook.c#L699](../library/src/cuda_hook.c#L699)、[#L742](../library/src/cuda_hook.c#L742)）。搬进共享区后这些注释**全部失效且具误导性**——后人照旧注释做"这里不用原子操作"的优化就会引入难查的竞态。**改字段必须同时改注释**，这是 §9 的一条高风险项。
+> 这个选择的直接后果，必须在实现时守住：**`md_cooldown` 和 FSM ×3 的现有注释都写着 "watcher-thread-only access / no volatile / no atomics needed"**（[cuda_hook.c#L717](../library/src/cuda_hook.c#L717)、[#L742](../library/src/cuda_hook.c#L757)）。搬进共享区后这些注释**全部失效且具误导性**——后人照旧注释做"这里不用原子操作"的优化就会引入难查的竞态。**改字段必须同时改注释**，这是 §9 的一条高风险项。
 
 ## 5. 开关与灰度
 
@@ -679,7 +730,24 @@ static inline int64_t *bucket_of(int host_index) {
 }
 ```
 
-这条降级路径覆盖了一整类现实故障：**插件漏挂目录**（§4.5.1 的 5 处落点漏改任一处）、目录只读、`/tmp` 被业务覆盖挂载、老版本插件配新版本库。它们的后果统一是"退回今天的行为"，而**不是容器起不来**——这正是 §4.5.4 "永不致命"约定的落地点。
+这条降级路径覆盖了一整类现实故障：**插件漏挂目录**（§4.5.1 的 5 处功能落点漏改任一处）、目录只读、`/tmp` 被业务覆盖挂载、老版本插件配新版本库。它们的后果统一是"退回今天的行为"，而**不是容器起不来**——这正是 §4.5.4 "永不致命"约定的落地点。
+
+### 5.1 为什么走 `g_dynamic_config` 环境变量，而不是 `resource_data_t` 字段（`main` 同步补充）
+
+同步 `main` 后，仓库里出现了**第二种**开关范式，必须显式选边，否则实现时会摇摆：
+
+| | 范式 A：`g_dynamic_config` + env（**本设计采用**） | 范式 B：`resource_data_t` 字段 + 控制面门控（`vmem_node` 采用） |
+|---|---|---|
+| 谁决定 | 容器内环境变量，`sm_controller_init` 里 env→struct 加载 | 控制面：`util.VMemoryNode` feature gate → `VMEMORY_NODE_ENABLED` env → `vgpu.config` 的 `vmem_node` 字段 |
+| 已有同类 | `CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*`、`CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR`（[dynamic_config_t](../library/include/hook.h#L269)） | `sm_watcher`、`vmem_node`（[resource_data_t](../library/include/hook.h#L214)） |
+| 落点数 | **0 处 Go 改动** | Go 侧至少 4 处：feature gate 定义、`vgpu_config.go` 组装、device plugin `Allocate`、DRA `GetClaimCommonContainerEdits` |
+| ABI 影响 | 无 | **改 `resource_data_t` = 改 `vgpu.config` 的跨语言 ABI** |
+
+**决定：采用范式 A。** 决定性理由是最后一行：`resource_data_t` 的尺寸被 [`CheckResourceDataSize`](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1107) 在 `Reschedule` 门控下校验，**加字段 = 老容器起不来、等控制器重调度**（§4.5.4 附表已论证这是该文件被刻意设计成的行为）。为一个**默认关闭的性能优化**付出一次 `vgpu.config` ABI 变更，代价与收益完全不成比例。
+
+**但要留一条明确的升级路径**：若将来需要让控制面统一开关（例如按 Pod 注解灰度），范式 B 的两个 env 注入点已经现成——[vnum_plugin.go#L823-824](../pkg/deviceplugin/vgpu/vnum_plugin.go#L823)（device plugin，feature gate 门控）与 [vgpu.go#L182](../pkg/kubeletplugin/vgpu.go#L182)（DRA，当前硬编码 `TRUE`）。届时**只需在这两处多注入一个 `CUDA_SM_SHARED_BUCKET=1`，库侧一行不改**——因为范式 A 读的就是环境变量。这正是选范式 A 的附带好处：它不排斥控制面接管，只是不强制。
+
+> **顺带一条实现纪律**：`dynamic_config_t` 的注释（[hook.h#L228-267](../library/include/hook.h#L233) 的 "APPEND new fields to the tail"）写明"字段只能追加到尾部，不得重排"——`sm_shared_bucket` 必须**追加在末尾**。
 
 ---
 
@@ -693,7 +761,11 @@ static inline int64_t *bucket_of(int host_index) {
 
 ### 6.2 不新增锁 → 不新增 fork 死锁面
 
-本方案**不引入任何用户态 mutex**（热路径全是 CAS + 选举；初始化用内核文件锁），因此**无需**动 [`loader_child_after_fork`](../library/src/loader.c#L2264) 的 mutex 重init 列表，规避了"父持锁 fork → 子死锁"这一整类隐患。这是相对 HAMi 锁方案的结构性优势。
+本方案**不引入任何用户态 mutex**（热路径全是 CAS + 选举；初始化用内核文件锁），因此**无需**动 [`loader_child_after_fork`](../library/src/loader.c#L2635) 的 mutex 重init 列表，规避了"父持锁 fork → 子死锁"这一整类隐患。这是相对 HAMi 锁方案的结构性优势。
+
+> **`main` 同步补充（结论不变，理由需精确化）**：`loader_child_after_fork` 现在除了重init 四把 mutex，还会**释放 fork 继承的显存记账链表**（`g_memory_node`）。这不是反例，恰恰是同一判据的另一面：那条链表是**进程私有的、按分配归属的账本**，父进程的条目在子进程里全是垃圾，所以必须丢弃。而 `sm_node` 的共享桶**没有归属**——子进程 fork 后自动 attach 同一个 `MAP_SHARED` 桶，它作为新增消费者参与聚合限流**正是我们要的语义**（§6.1）。
+>
+> ⟹ **在 `loader_child_after_fork` / `child_after_fork` 里对 `g_sm_node` 做任何重置或清理都是错的。** 唯一该保留的 fork 期重置仍是 `g_dev_hot[].last_launch_ns`（私有 gap 时序，§6.1）。这条要写进代码注释，因为紧邻的两个 fork 处理器现在都在"丢弃继承状态"，语义惯性会诱导后人把共享桶也一并清掉。
 
 关于 §4.4 的初始化文件锁与 fork 的关系，逐条核对：
 
@@ -733,6 +805,9 @@ static inline int64_t *bucket_of(int host_index) {
 4. **降级路径可用**（§5）：故意不挂 `/tmp/.sm_node` 目录启动 → 应打印 WARN 并退回私有桶，**容器正常运行**。
 5. **重建路径可用**（§4.5.4 / §10）：手工把 `sm_node.config` / `vmem_node.config` 的 magic 改坏 → 容器重启后应自动重建，**不得报错退出**。
 6. **`vmem_node` 跨语言 ABI 一致**（§10.3）：Go 侧 metrics 报出的显存用量与容器内实际一致（验证 `getVmemoryLockOffset` 没算错——**这一处算错不会报错，只会给出错的数**）。
+   > **前置条件（`main` 同步补充）**：必须显式打开 `util.VMemoryNode` feature gate（device plugin / device-monitor 均默认 `false`，Alpha），否则 `vmem_node` 区不会被创建，本条**看似通过实则未测**（§10.6）。
+7. **`vmem_node` 硬失败不再致命**（§10.6）：故意让 `vmem_node` 目录不可写（或不挂载）并开启 gate 启动 → 应打印 WARNING 并关闭本进程的 vmem 记账，**容器正常运行**；改造前此路径会 `LOGGER(FATAL)` 杀死进程。这条专门验证外层 `FATAL` 已被降级。
+8. **fork 后共享桶不被清空**（§6.2）：容器内 fork 出子进程 → 父子应共享同一个 `cur_cuda_cores`（子进程发射会扣父进程看得见的令牌），且聚合 util 仍不超 `hard_core`。这条同时验证"没有人顺手把 `g_sm_node` 加进 fork 重置列表"。
 
 ### 7.3 必须真机压测的并发用例
 
@@ -749,16 +824,16 @@ static inline int64_t *bucket_of(int host_index) {
 
 | 阶段 | 内容 | 前置 |
 |---|---|---|
-| **1a** | **Go 侧挂载 + 清理（可独立先行、风险最低）**：`SMNode`/`SMNodeFile` 常量；5 处挂载/建目录落点（§4.5.1）；2 处启动前清理落点（§4.5.2）。此时库还没用这个目录 → **纯增量、对现网零影响** | —— |
+| **1a** | **Go 侧挂载 + 清理（可独立先行、风险最低）**：`SMNode`/`SMNodeFile` 常量；5 处功能落点 + 1 处 NRI 观测落点（§4.5.1）；2 处启动前清理落点（§4.5.2）。此时库还没用这个目录 → **纯增量、对现网零影响** | —— |
 | **1b** | **库侧 `sm_node`**：建区/初始化/布局守卫（§4.1/4.4/4.5.4）；消费端切共享桶（§4.2）；补充选举（§4.3）；**全部控制状态入共享区**（§4.13）；bypass 累加改造（§4.7）；env 开关 + 降级（§5） | 1a 已上 |
-| **2** | **`vmem_node` 冻结区头 + 重建**（§10）：C 侧结构体 + `mmap_file_to_vmem_node` 改造；**Go 侧结构体 + `getVmemoryLockOffset` 同步**（§10.3）。**C 与 Go 必须同一个 PR 合并**——分开合会让 fcntl 锁静默失配 | 与 1a/1b 正交，可并行 |
+| **2** | **`vmem_node` 冻结区头 + 重建**（§10）：C 侧结构体 + `mmap_file_to_vmem_node` 改造 + **`load_controller_configuration` 外层 `FATAL` 降级**（§10.6，两层都要改）；**Go 侧结构体 + `getVmemoryLockOffset` 同步**（§10.3）。**C 与 Go 必须同一个 PR 合并**——分开合会让 fcntl 锁静默失配 | 与 1a/1b 正交，可并行 |
 | **3** | 压争用：进程/线程本地**批量取令牌**（一次 CAS 取一批、本地花完再取），把 CAS 频率降 ~N 倍。**仅当 profiling 证明跨进程 cacheline 弹跳是真开销时做** | 1b 稳定 |
 
 > **1a / 1b 拆分的价值**：Go 侧改动（挂载 + 清理）不依赖库侧，且在库未使用该目录前**完全无副作用**。先上 1a 可以真机确认"目录挂进去了、每次容器重启前文件确实被删了"，把 §4.5 的控制面假设**验证成事实**，再让库侧依赖它。
 
 > **阶段 2 为什么必须 C+Go 同 PR**：`getVmemoryLockOffset` 算错**不会报错**，只会让 Go 与 C 锁在不重叠的字节范围上 → 互斥静默失效 → 撕裂读（§10.3）。分两个 PR 合并意味着中间必然存在一个**两侧不一致**的提交。
 
-> 阶段 3 的方向，代码注释早已点名——[dev_hot_t 上方注释](../library/src/cuda_hook.c#L86)："**Fixing that needs thread-local token batching, tracked separately.**" 本设计与之一致。
+> 阶段 3 的方向，代码注释早已点名——[dev_hot_t 上方注释](../library/src/cuda_hook.c#L104)："**Fixing that needs thread-local token batching, tracked separately.**" 本设计与之一致。
 
 ---
 
@@ -768,7 +843,7 @@ static inline int64_t *bucket_of(int host_index) {
 - **[高] bypass 语义改写**（§4.7）：SET→增量累加，是最易引入超发/欠发的一处，需专门单测。
 - **[高，新增] 控制状态块整体入共享区**（§4.13）：改动面比前几稿承诺的大——不只是令牌桶，`md_cooldown`、排他 FSM ×3、`throttled_since_watch` 都要搬。这些字段的注释目前都写着"watcher-thread-only, no atomics needed"，**搬动时必须同步改注释**，否则后人会按旧注释假设做出错误优化。`aimd` 的 MD 雪崩（`md_divisor^N`）是不改就必现的回归，需专门用例覆盖。
 - **[中] 库升级后的布局错位**（§4.5.4）：宿主目录按 `<pod-uid>_<cont-name>` 跨容器重启存活，而 `.so` 按版本挂载 → 新库可能映射到老结构体。控制面清理覆盖了 device plugin / DRA+NRI 两路；**DRA 非 NRI 路径无钩子**，由 `magic`/`layout_version`/`region_size` 守卫兜底。**改结构体必须 bump `SM_NODE_LAYOUT_VERSION`**，需在 review 中把关。
-- **[中] 挂载点漏改**（§4.5.1）：新目录要在 **5 处**并列落点（device plugin Allocate/EnsureDir、DRA CDI、DRA NRI、`ensurePartitionDirectories`）。漏改任一处 → 该路径下 `open` 失败 → 由 §5 的降级兜住（退回私有桶），**绝不可 fatal**。需专门测每条路径。
+- **[中] 挂载点漏改**（§4.5.1）：新目录要在 **5 处功能落点**并列（device plugin Allocate/EnsureDir、DRA CDI、DRA NRI、`ensurePartitionDirectories`），另加 1 处 NRI 观测落点。漏改任一处 → 该路径下 `open` 失败 → 由 §5 的降级兜住（退回私有桶），**绝不可 fatal**。需专门测每条路径。
 - **[中] 热路径不得被守卫污染**（§4.12）：布局校验只能发生在初始化。**任何在 `rate_limiter` 里增加的校验/分支都是性能回归**，需在 review 中明确把关。
 - **[低] 冻结区被误改**（§4.1）：`magic`/`layout_version`/`region_size`/`device_count` 这 16 字节是永久 ABI，改动 = 守卫失效。已用 `_Static_assert` 钉死偏移，但语义靠 review。
 - **[高，新增] `getVmemoryLockOffset` 漏改会静默失效**（§10.3）：这是全设计**唯一一处"错了不报错"**的改动。C 侧 `offsetof` 自动含头、无需改；**Go 侧必须手工加 `unsafe.Offsetof(DeviceVMemoryT{}.Devices)`**。漏改 → Go 与 C 锁在不重叠字节范围 → 互斥失效 → 撕裂读 → **错的 metrics，无任何报错**。缓解：C+Go 同 PR（§8 阶段 2）+ §7.2 第 6 条验收 + 建议加一个断言 `offsetof` 一致性的单测。
@@ -776,6 +851,11 @@ static inline int64_t *bucket_of(int host_index) {
 - **[中] 补充周期与多 watcher 采样错峰**：`REFILL_PERIOD_NS` 已定为现 watcher 单设备周期（~80–100ms，§12 第 8 项），仍需真机确认不会"抢权成功但采样过旧"。
 - **[低] DRA 非 NRI 路径无清理钩子**（§4.5.3）：残留是良性的（自校正），故不补钩子；仅依赖库内守卫。若将来该路径出现非自校正的共享字段，此结论需重审。
 - **[低] 收益依赖真多进程**：单进程容器零收益（但默认关闭 → 零代价）。首要目标场景是 notebook（§1.3）。
+- **[高，`main` 同步新增] `vmem_node` 的 `FATAL` 是两层，只改一层等于没改**（§10.6）：`mmap_file_to_vmem_node` 内的 `return 1` 之外，`load_controller_configuration` 里还有一个 `LOGGER(FATAL, "mmap vmem nodes file failed")`。阶段 2 必须同时把外层降级为 WARNING + 关闭本进程记账，否则 `open`/`mmap` 硬失败仍会杀死容器。
+- **[中，`main` 同步新增] 验收时必须显式开启 `util.VMemoryNode` feature gate**（§10.6）：该 gate 默认 `false`，不开则 `vmem_node` 区根本不建，§7.2 第 6 条会**假通过**。
+- **[中，`main` 同步新增] 别照抄 `vmem_node` 的三套回收机制**（§4.5.5）：库内现有 PID 存活回收、watcher 周期体检、`atexit`/信号清理，全部只对账本成立。`sm_node` 一条都不需要；尤其 `check_cleanup_vmem_nodes_by_device` 要拿每设备写记录锁，抄进来会直接违反"watcher 路径不引入锁"。**若将来给 `sm_node` 加任何按 PID 归属的字段，这三条结论同时失效，必须重审。**
+- **[中，`main` 同步新增] fork 处理器的语义惯性**（§6.2）：`loader_child_after_fork` 现在会释放 fork 继承的显存记账链表，`child_after_fork` 重置 `last_launch_ns`——两个处理器都在"丢弃继承状态"。**共享桶必须原样保留**（子进程作为新消费者参与聚合正是设计意图），需在代码注释里写死，防止后人顺手清掉。
+- **[低，`main` 同步新增] `dynamic_config_t` 只能尾部追加**（§5.1）：`sm_shared_bucket` 字段必须加在结构体末尾，`hook.h` 的注释已声明重排会移动偏移。
 
 ---
 
@@ -793,7 +873,7 @@ static inline int64_t *bucket_of(int host_index) {
 
 对比两种处置：
 
-| | 现状：报错退出（[loader.c#L1399](../library/src/loader.c#L1399)） | 改后：重建 |
+| | 现状：报错退出（[loader.c#L1597](../library/src/loader.c#L1597)） | 改后：重建 |
 |---|---|---|
 | 丢失的信息 | —— | **死 PID 的陈旧记录（零价值）** |
 | 容器能否启动 | **不能**（DRA 非 NRI 路径下升级即挂） | 能 |
@@ -886,7 +966,45 @@ manager 与库**分别版本化**（`.so` 按 manager 版本挂载，但容器�
 
 > **这不是新引入的问题**：今天只要 `device_vmemory_t` 尺寸变化就是同样表现（Go 的尺寸检查已在 [vmem_config.go#L133](../pkg/config/vmem/vmem_config.go#L133) 拒绝）。本改造只是**该行为的一次具体实例**，并额外用 magic 覆盖了"尺寸相同但布局不同"这个尺寸检查抓不到的盲区。
 >
-> **且鲁棒性是净增的**：现状的 `memset` 建区[无任何锁保护](../library/src/loader.c#L1413)，本改造把它放进 OFD 写锁内，反而收窄了与 Go 读者的竞态窗口。
+> **且鲁棒性是净增的**：现状的 `memset` 建区[无任何锁保护](../library/src/loader.c#L1610)，本改造把它放进 OFD 写锁内，反而收窄了与 Go 读者的竞态窗口。
+
+### 10.6 `main` 同步补充：报错退出实为两层，且整个区已 feature-gate 化
+
+同步 `main` 后，§10 的两个前提需要更精确的表述：
+
+**(1) "尺寸不符即容器不可用"是两层，不是一层。** 前文只点了 `mmap_file_to_vmem_node` 内部的 `return 1`（[loader.c#L1597](../library/src/loader.c#L1597)），但真正杀死容器的是**调用方**：
+
+```c
+/* load_controller_configuration()，loader.c#L2522 附近 */
+if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {
+  ret = mmap_file_to_vmem_node(&g_device_vmem);
+  if (ret) {
+    pthread_mutex_unlock(&init_config_mutex);
+    LOGGER(FATAL, "mmap vmem nodes file failed");   /* ← 这一行才是致命点 */
+  }
+  ...
+}
+```
+
+`LOGGER(FATAL, ...)` 会终止进程。所以 §10.2 的改造**必须两层都动**：内层从"尺寸不符 → `return 1`"改成"布局不符 → 就地重建"；外层的 `FATAL` 应降级为 `WARNING` + 关闭本进程的 vmem_node 记账（与 §5 对 `sm_node` 的降级语义一致）。**只改内层是不够的**——`open`/`mmap` 真失败时（目录只读、插件漏挂）外层照样 FATAL 掉容器。
+
+> 注意紧邻的 `sm_watcher` 分支（[loader.c#L2512](../library/src/loader.c#L2512) 附近）有同样的 `FATAL`，但它**紧接着就是一个 `g_device_util == NULL` 的 WARNING 回退分支**，说明作者本来就认可"外部共享区不可用应回退而非致命"。vmem 分支缺的正是这个回退。
+
+**(2) `vmem_node` 区现在是 feature-gate 化的，不是无条件存在。** 门控链路：
+
+```
+util.VMemoryNode feature gate (device-plugin/device-monitor 默认 false, Alpha)
+  → VMEMORY_NODE_ENABLED env（device plugin 按 gate 注入；DRA 路径硬编码 TRUE）
+    → vgpu.config 的 resource_data_t.vmem_node 字段
+      → 库侧 `if (g_vgpu_config->vmem_node)` 才建区
+```
+
+对 §10 的两点影响：
+
+- **验收（§7.2 第 6 条）必须显式开启该 gate**，否则区根本不存在，"Go 侧 metrics 与容器内一致"这条无从验证，会得到一个**假通过**。
+- **§10.5 的升级期矩阵多一格**：`gate=off` 时两侧都没有区，Go 侧走的是"文件不存在"路径而非"布局不符"路径。行为仍是"metrics 暂缺"，结论不变，但排障时要先确认 gate 状态再怀疑布局。
+
+**(3) §10 与 §4.5.5 的关系**：`main` 新增的 PID 回收 / 退出钩子**全部属于 `vmem_node`**，本设计不为它们做任何改动——§10 只加"冻结区头 + 重建 + 降级"，回收逻辑原样保留。两者互不干涉：回收处理的是**区内条目**，重建处理的是**区本身的布局**。
 
 ---
 
@@ -896,7 +1014,7 @@ manager 与库**分别版本化**（`.so` 按 manager 版本挂载，但容器�
 - **不做**：锁串行化（钝、贵、死锁）、`sleeping` 协调（每进程语义、共享桶已天然覆盖）、Event 占空比（伤流水线，正交路线）。
 - **陈旧清理交给控制面**（§4.5）：新增 `/tmp/.sm_node` 专用挂载（与 `/tmp/.vgpu_lock`、`/tmp/.vmem_node` 同构，**不用容器自己的 `/tmp`**——可能被覆盖挂载或只读）；插件在**每次容器启动前删缓存文件**，复用已在为 `vmem_node` 跑的现成钩子（`PreStartContainer` + NRI `CreateContainer`）→ 库 attach 时必然是全新零字节区。**因此删掉了库内 generation 与 ns `st_ino` 探测**：那是在重造一个已存在且更可靠的轮子。库内只留 `magic`/`layout_version`/`region_size` **布局守卫**作第二道防线，防**库升级后新库读老结构体**（`DRA 非 NRI` 路径无启动钩子，且清理本身 best-effort）。
 - **不用 `volatile`、不用 `_Atomic`**（§4.10）：`volatile` 不提供并发保护（现有安全性全来自 CAS）；`_Atomic` 在跨进程共享内存下有 lock-free 退化（libatomic 锁表**每进程一份** → 静默失效）与 size/align ABI 风险。用**普通定宽类型 + `__atomic_*` 内建 + 显式内存序**，合仓库既定习惯（[hook.h#L63](../library/include/hook.h#L63) 已硬性要求 GCC/Clang+glibc）。
-- **布局不符 → 重建，不是报错退出**（§4.5.4）：现有 vmem 区在尺寸不符时 `return 1`（[loader.c#L1399](../library/src/loader.c#L1399)），等于库升级后容器不可用。本区一律**就地 memset 重建**；文件尺寸恒定（`SM_NODE_FILE_SIZE`）使版本升级永不需要 resize。就地重建之所以安全：**布局不符 ⟹ 文件来自上一世容器 ⟹ 无活着的旧版本读者**（容器一生只加载一个 `.so` 版本），故不需要 unlink/rename，也就避开了 rename 竞态下"共享桶静默退化成两个私有桶"的失效模式。
+- **布局不符 → 重建，不是报错退出**（§4.5.4）：现有 vmem 区在尺寸不符时 `return 1`（[loader.c#L1597](../library/src/loader.c#L1597)），等于库升级后容器不可用。本区一律**就地 memset 重建**；文件尺寸恒定（`SM_NODE_FILE_SIZE`）使版本升级永不需要 resize。就地重建之所以安全：**布局不符 ⟹ 文件来自上一世容器 ⟹ 无活着的旧版本读者**（容器一生只加载一个 `.so` 版本），故不需要 unlink/rename，也就避开了 rename 竞态下"共享桶静默退化成两个私有桶"的失效模式。
 - **永不致命**（§2.1/§5）：`open`/`mmap` 失败、插件漏挂目录、目录只读 → 一律**降级回进程私有桶**，绝不 `exit`/让 CUDA 调用失败。多进程隔离是优化，不是正确性前提。
 - **不抬高工具链门槛**（§4.11）：只用仓库已在用的设施；OFD 锁复用 [`lock.c#L64`](../library/src/lock.c#L64) 的**运行时回退**封装（低于 3.15 的内核照样跑）；明确禁用 `memfd_create`/`O_TMPFILE`/`renameat2`/`statx`。
 - **热路径开销不变**（§4.12）：仍是一条 CAS。守卫/文件锁/建区**全部每进程一次**，`pthread_once` 之下；初始化锁是**阻塞锁**（等待者内核睡等、不空转，§4.4.2a）；唯一真实新增开销是共享 cacheline 弹跳，交给阶段 3 且**仅在 profiling 证明后**才压。
@@ -922,12 +1040,15 @@ manager 与库**分别版本化**（`.so` 按 manager 版本挂载，但容器�
 | 7 | env `CUDA_SM_SHARED_BUCKET`，默认 `0` | §5 |
 | 8 | `REFILL_PERIOD_NS` = 现 watcher 单设备周期（~80–100ms） | §4.3 |
 | 9 | Go 侧**暂不**读 `sm_node` | `sm_node` 不是跨语言 ABI，冻结约束仅对库内生效。**注意**：第 3 项使 `vmem_node` **是**跨语言 ABI（§10.3） |
+| 10 | **开关走 `g_dynamic_config` + env，不改 `resource_data_t`**（`main` 同步后新增拍板） | §5.1。改 `resource_data_t` 会触发 `CheckResourceDataSize` 重调度；且范式 A 不排斥将来由控制面注入同一个 env |
+| 11 | **不为 `sm_node` 引入任何 PID 回收 / 退出钩子**（`main` 同步后新增拍板） | §4.5.5。判据是"桶不是账本"；该结论绑定在"`sm_node` 无按 PID 归属字段"这一前提上 |
 
 ### 12.2 剩余开放项（不阻塞开工，实现期定）
 
 1. **`VMEM_NODE_FILE_SIZE = 512KiB` 的具体取值**：当前用量 256.1KiB，留 ~2x。一旦发版即冻结（改则须 bump `layout_version`）。若你认为节点上容器密度高、page cache 敏感，可收紧到 `320KiB`（~1.2x 余量）。**倾向 512KiB**：一次定死好过将来再动。
 2. **`vmem_node` 与 `sm_node` 是否合并为一个区**：两者都是"库自有的容器级共享区"，合并可省一次挂载 + 一次建区。**倾向不合并**：生命周期与读者不同（`vmem_node` 有宿主 Go 读者、`sm_node` 没有），合并会把 `sm_node` 也拖进跨语言 ABI，与第 9 项拍板相悖。
 3. **阶段 3（本地批量取令牌）是否要做**：仍**仅在 profiling 证明 cacheline 弹跳是真开销后**才做（§4.12）。
+4. **`vmem_node` 的外层 `FATAL` 降级要不要单独先行**（`main` 同步后新增，§10.6）：这一处与冻结区头/重建**技术上正交**——它只是把"共享区不可用"从致命改成降级，不碰任何布局。可以先出一个纯 C 的小 PR，把现网"目录漏挂 → 容器起不来"的风险先摘掉，再合阶段 2 的 ABI 改动。**倾向拆开**：小 PR 风险低、可独立回滚，且不必等 Go 侧同步。
 
 ### 12.3 我已自行决定的（理由在文档内，不同意直接打）
 
