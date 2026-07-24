@@ -2370,9 +2370,12 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn, int cudaVersion,
     }
 
     /*
-     * Legacy fallback. Reached when pointer routing is off (probe failed, or
-     * CUDA_GETPROC_LEGACY set) or when the driver returned a pointer this build
-     * cannot name.
+     * Name-based fallback. Reached whenever the driver did NOT hand back the
+     * pointer this build knows under the requested name -- because it picked a
+     * different version (cuCtxCreate -> _v4), because flags selected a variant
+     * (cuLaunchKernel -> _ptsz), or because the pointer is not in our table at
+     * all. Those are exactly the cases where the name alone cannot tell us the
+     * ABI, so the older, more cautious rules below decide.
      *
      * ABI-conflict defense (MUST run before the lib_control / hooks_entry
      * substitution below). Real libcuda's cuGetProcAddress has already

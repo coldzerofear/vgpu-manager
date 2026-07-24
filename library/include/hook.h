@@ -421,16 +421,22 @@ static inline int get_logger_print_level(void) {
   })
 
 /**
- * Resolve a pointer the CUDA driver handed out to the symbol it belongs to.
- * Returns 1 when the pointer is a driver entry point this build knows: *hook
- * receives our hook for that exact symbol (NULL when we hook none) and *name
- * its exact symbol name. Returns 0 when the pointer is unknown, which means
- * "cannot route" -- not "do not hook".
+ * Given a pointer the CUDA driver handed out for `symbol`, return our hook for
+ * it, or NULL.
+ *
+ * Non-NULL only when `real_fn` is the pointer this build resolved under exactly
+ * `symbol` -- so the hook returned carries that symbol's ABI by construction,
+ * and no version guessing is involved. *name is set to the matched name.
+ *
+ * NULL means "the name alone does not settle the ABI here": the driver chose a
+ * different version than the plain name (cuCtxCreate -> _v4), flags selected a
+ * variant (_ptsz), or the pointer is not in our table. Callers must fall back
+ * to the cautious name-based rules -- NULL is not "do not hook".
  */
 void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name);
 
 /**
- * Record, once per symbol and at DETAIL level, a driver symbol that went
+ * Record, once per symbol and at VERBOSE level, a driver symbol that went
  * through us uninstrumented. Leaves a trail for versions a newer driver added
  * that this build does not intercept.
  */

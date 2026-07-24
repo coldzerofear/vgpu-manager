@@ -1,19 +1,19 @@
 /*
  * dlsym hijack: the unhooked-symbol trail.
  *
- * The dlsym hook (loader.c) records, once per symbol and at DETAIL level, every
+ * The dlsym hook (loader.c) records, once per symbol and at VERBOSE level, every
  * cu.../nvml... symbol that passed through it uninstrumented. That trail is what
  * makes a driver growing a variant we do not intercept -- cuFoo_v3 and the like
  * -- visible after the fact instead of silent.
  *
  * Two properties are worth pinning: the note appears at all, and it appears only
  * once no matter how often the symbol is resolved. The second is what keeps a
- * DETAIL run readable, and it is the one a naive implementation gets wrong.
+ * VERBOSE run readable, and it is the one a naive implementation gets wrong.
  *
  * No GPU is needed: every symbol used here resolves to "not one of our hooks",
  * and the assertions are about the log, not about any device operation.
  *
- * DETAIL must be active before the library caches its log level, so the test
+ * The level must be active before the library caches it, so the test
  * re-executes itself once with LOGGER_LEVEL set rather than hoping nothing has
  * logged yet.
  *
@@ -27,9 +27,18 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Resolve `symbol` with stderr captured; return 1 if the capture mentions it.
- * The resolved value is irrelevant -- these symbols are deliberately not ours. */
+/* Resolve `symbol` with stderr captured; return 1 if the capture contains the
+ * unhooked-symbol note for it. The resolved value is irrelevant.
+ *
+ * Matching the full note text rather than the bare symbol name matters: the
+ * library mentions a symbol's name in several unrelated lines -- "loading
+ * cuMemAlloc:12" while it populates the driver table, "search found cuda hook
+ * cuMemAlloc" on the hit path -- and a substring search for the name alone
+ * reports those as if the symbol had been recorded as unhooked. */
 static int dlsym_notes(const char *symbol) {
+  char needle[256];
+  snprintf(needle, sizeof(needle), "unhooked driver symbol '%s'", symbol);
+
   FILE *cap = tmpfile();
   if (!cap) { perror("tmpfile"); return -1; }
 
@@ -44,18 +53,15 @@ static int dlsym_notes(const char *symbol) {
   dup2(saved, STDERR_FILENO);
   close(saved);
 
-  char buf[8192];
+  /* Generous, because the first resolution in the process also drags the whole
+   * driver-table load through this capture. */
+  static char buf[1 << 20];
   rewind(cap);
   size_t n = fread(buf, 1, sizeof(buf) - 1, cap);
   buf[n] = '\0';
   fclose(cap);
 
-  int hit = (strstr(buf, symbol) != NULL);
-  if (n > 0) {
-    char *line = strtok(buf, "\n");
-    while (line) { printf("      stderr: %s\n", line); line = strtok(NULL, "\n"); }
-  }
-  return hit;
+  return strstr(buf, needle) != NULL;
 }
 
 int main(int argc, char **argv) {
@@ -66,10 +72,15 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  /* The library caches its log level on first use, so DETAIL has to be in the
-   * environment from process start. Re-exec once to guarantee that. */
+  /* The library caches its log level on first use, so the level has to be in
+   * the environment from process start. Re-exec once to guarantee that.
+   *
+   * VERBOSE, not DETAIL: the note sits at VERBOSE precisely so it is readable,
+   * and DETAIL additionally turns on a per-symbol line for every entry in the
+   * driver table as it loads -- hundreds of lines that bury what we came to
+   * look at. */
   if (getenv("LOGGER_LEVEL") == NULL) {
-    setenv("LOGGER_LEVEL", "5", 1);   /* DETAIL */
+    setenv("LOGGER_LEVEL", "4", 1);   /* VERBOSE */
     execv("/proc/self/exe", argv);
     perror("execv");                  /* only reached on failure */
     return 1;
