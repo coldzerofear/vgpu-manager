@@ -27,6 +27,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "test_utils.h"  /* VGPU_TEST_RC_SKIP */
+
 /* Resolve `symbol` with stderr captured; return 1 if the capture contains the
  * unhooked-symbol note for it. The resolved value is irrelevant.
  *
@@ -69,7 +71,7 @@ int main(int argc, char **argv) {
   const char *preload = getenv("LD_PRELOAD");
   if (preload == NULL || strstr(preload, "libvgpu-control") == NULL) {
     printf("SKIP (needs LD_PRELOAD=libvgpu-control.so)\n");
-    return 0;
+    return VGPU_TEST_RC_SKIP;
   }
 
   /* The library caches its log level on first use, so the level has to be in

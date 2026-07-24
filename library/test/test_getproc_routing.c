@@ -27,7 +27,10 @@
 #include <cuda.h>
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include "test_utils.h"  /* VGPU_TEST_RC_SKIP */
 
 /* CUDA 12 renamed the 4-arg entry point; cuda.h maps the plain name onto the
  * 5-arg _v2 from 12.0 on. Wrap so the test body reads the same either way. */
@@ -56,14 +59,24 @@ static int is_ours(void *p) {
 int main(void) {
   int failures = 0;
 
+  /* Every assertion here checks that a resolved pointer lives inside
+   * libvgpu-control.so. Without the library injected there is nothing to route
+   * into, so the checks would read as failures rather than what they are --
+   * untestable. Skip instead. */
+  const char *preload = getenv("LD_PRELOAD");
+  if (preload == NULL || strstr(preload, "libvgpu-control") == NULL) {
+    printf("SKIP (needs LD_PRELOAD=libvgpu-control.so)\n");
+    return VGPU_TEST_RC_SKIP;
+  }
+
   if (cuInit(0) != CUDA_SUCCESS) {
     printf("SKIP (no usable CUDA driver)\n");
-    return 0;
+    return VGPU_TEST_RC_SKIP;
   }
   int drv = 0;
   if (cuDriverGetVersion(&drv) != CUDA_SUCCESS) {
     printf("SKIP (cannot read driver version)\n");
-    return 0;
+    return VGPU_TEST_RC_SKIP;
   }
   printf("driver version: %d\n\n", drv);
 
