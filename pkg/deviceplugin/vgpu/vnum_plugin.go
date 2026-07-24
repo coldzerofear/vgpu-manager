@@ -1113,7 +1113,11 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 
 	// Clean up old cache files before each startup
 	pidsConfigPath := filepath.Join(configDirPath, registry.PidsConfig)
-	vmemNodeConfigPath := filepath.Join(configDirPath, util.VMemNode, util.VMemNodeFile)
+	// vmem_node is a SIBLING of config/, not a child: Allocate mounts
+	// filepath.Join(contDir, util.VMemNode) and the metrics lister reads it back
+	// from the same place. Joining configDirPath here would name a path that is
+	// never created, making the RemoveAll a silent no-op.
+	vmemNodeConfigPath := filepath.Join(contDir, util.VMemNode, util.VMemNodeFile)
 	_ = os.RemoveAll(pidsConfigPath)
 	_ = os.RemoveAll(vmemNodeConfigPath)
 
