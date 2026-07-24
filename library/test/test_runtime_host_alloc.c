@@ -20,6 +20,7 @@ static int test_one(size_t bytes) {
 }
 
 int main(void) {
+  VGPU_REQUIRE_PRELOAD();
   CHECK_RUNTIME_API(cudaSetDevice(TEST_DEVICE_ID));
   CHECK_NVML_API(get_current_memory_usage(&usage));
 

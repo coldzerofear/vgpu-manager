@@ -98,6 +98,8 @@ static int run_loop(const char *label, int iters) {
 }
 
 int main(void) {
+  VGPU_REQUIRE_PRELOAD();
+
   /* (1) parent_pre: tiny pre-fork loop to force initialization() / spawn
    * watcher threads. One iter is enough to trip pthread_once. */
   if (run_loop("parent_pre", 1) != 0) {
@@ -139,7 +141,7 @@ int main(void) {
               "support fork+CUDA on this version; skipping vgpu fork "
               "inherit check.\n",
               (int)reset_st, cudaGetErrorString(reset_st));
-      exit(0);
+      exit(VGPU_TEST_RC_SKIP);
     }
     int rc = run_loop("child", 3);
     exit(rc);
@@ -155,5 +157,11 @@ int main(void) {
   }
   int child_rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   printf("parent_rc=%d child_rc=%d\n", parent_rc, child_rc);
+
+  /* The child reports VGPU_TEST_RC_SKIP when the driver refuses fork+CUDA on
+   * this version -- a precondition we do not control, not a vgpu-manager fault.
+   * Propagate that as a skip (provided the parent half was otherwise healthy)
+   * so it is counted honestly instead of being blamed as a failure. */
+  if (parent_rc == 0 && child_rc == VGPU_TEST_RC_SKIP) return VGPU_TEST_RC_SKIP;
   return (parent_rc == 0 && child_rc == 0) ? 0 : 1;
 }

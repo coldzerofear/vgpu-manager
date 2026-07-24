@@ -22,6 +22,8 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #ifndef TEST_DEVICE_ID
 #define TEST_DEVICE_ID 0
@@ -48,6 +50,28 @@ static inline int vgpu_test_verdict(int failures, int skipped) {
   if (failures) return 1;
   return skipped ? VGPU_TEST_RC_SKIP : 0;
 }
+
+/* Is libvgpu-control.so actually injected? Every smoke test here exists to
+ * exercise our hook layer; run without the LD_PRELOAD the runner supplies, it
+ * measures raw CUDA and asserts nothing about vgpu-manager. Reporting PASS in
+ * that state is the misleading-green the skip convention exists to prevent, so
+ * a test that finds the library missing skips instead. The runner always sets
+ * LD_PRELOAD, so this only fires on a standalone invocation. */
+static inline int vgpu_preloaded(void) {
+  const char *p = getenv("LD_PRELOAD");
+  return p != NULL && strstr(p, "libvgpu-control") != NULL;
+}
+
+/* Top-of-main() guard: skip the whole test when the library is not injected.
+ * Returns VGPU_TEST_RC_SKIP from the enclosing function, which the runner
+ * counts as a skip rather than a pass or a failure. */
+#define VGPU_REQUIRE_PRELOAD()                                                \
+  do {                                                                        \
+    if (!vgpu_preloaded()) {                                                  \
+      printf("SKIP (needs LD_PRELOAD=libvgpu-control.so)\n");                 \
+      return VGPU_TEST_RC_SKIP;                                               \
+    }                                                                         \
+  } while (0)
 
 #define CHECK_RUNTIME_API(f)                                                  \
   do {                                                                        \
