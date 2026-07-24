@@ -454,6 +454,34 @@ static inline int get_logger_print_level(void) {
   })
 
 /**
+ * Given the pointer cuGetProcAddress produced for `symbol`, return our hook for
+ * that exact entry point, or NULL.
+ *
+ * The pointer says which function the driver chose -- version and stream
+ * variant included -- and `symbol` bounds which family that may belong to: a
+ * version or _ptsz/_ptds suffix stated in the request pins that component, one
+ * left out is the driver's to choose. So "cuLaunchKernel" can resolve to
+ * cuLaunchKernel_v2_ptsz, while "cuMemAlloc_v2" resolves to nothing but v2.
+ *
+ * Three outcomes, distinguished by BOTH results together:
+ *   return non-NULL             - identified, and this is its hook.
+ *   return NULL, *name non-NULL - identified, we hook no version of it.
+ *                                 Keep the driver's pointer; substituting a
+ *                                 base-named hook here would bind an ABI it
+ *                                 does not have.
+ *   return NULL, *name NULL     - not a driver entry point this build knows.
+ *                                 Fall back to name-based substitution.
+ */
+void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name);
+
+/**
+ * Record, once per symbol and at VERBOSE level, a driver symbol that went
+ * through us uninstrumented. Leaves a trail for versions a newer driver added
+ * that this build does not intercept.
+ */
+void note_unhooked_symbol(const char *symbol);
+
+/**
  * Load library and initialize some data
  */
 void load_necessary_data();

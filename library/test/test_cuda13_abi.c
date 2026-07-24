@@ -141,6 +141,7 @@ static int test_graph_v2_variants(void) {
 }
 
 int main(void) {
+  VGPU_REQUIRE_PRELOAD();
   CHECK_DRV_API(cuInit(0));
 
   CUdevice device;

@@ -141,6 +141,8 @@ FORBIDDEN_HELPERS=(
   get_used_gpu_memory_by_device
   get_used_gpu_virt_memory
   get_gpu_virt_memory_type
+  lookup_cuda_hook_ptr
+  note_unhooked_symbol
   malloc_gpu_virt_memory
   malloc_gpu_virt_memory_captured
   free_gpu_virt_memory
