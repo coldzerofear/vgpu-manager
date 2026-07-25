@@ -36,9 +36,16 @@
  * success for assertions that never executed makes a skipped test
  * indistinguishable from a passing one in the summary, which is exactly how a
  * regression survives a green run. Tests count their skips and exit with this
- * instead; run_tests_with_env.sh additionally sets VGPU_TEST_STRICT=1, under
- * which the runner treats any skip as a failure because it configured
- * everything the tests were promised. */
+ * instead; run_all_tests.sh treats any skip as a failure when VGPU_TEST_STRICT
+ * is set, on the grounds that the runner configured everything the tests were
+ * promised.
+ *
+ * NOTE: run_tests_with_env.sh currently has that export COMMENTED OUT, so the
+ * suite does NOT run strict by default -- this comment used to claim otherwise.
+ * Which means a skip is only as visible as whoever reads the summary, and a
+ * test must not lean on strict mode to surface a genuine defect. Report a
+ * defect as a FAILURE at the point it is detected; reserve skip for a
+ * precondition that is legitimately absent. */
 #define VGPU_TEST_RC_SKIP 77
 
 /* Final verdict for a test with `failures` failed and `skipped` skipped cases.

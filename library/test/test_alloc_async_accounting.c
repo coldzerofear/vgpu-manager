@@ -76,6 +76,15 @@
 #define LEDGER_PATH        "/tmp/.vmem_node/vmem_node.config"
 #define LEDGER_MAX_PIDS    1024
 #define LEDGER_MAX_DEVICES 16
+/* Must track hook.h. The region carries a 16-byte frozen header padded to one
+ * cache line, which shifts devices[] -- and every field read below -- down by
+ * CACHELINE_SIZE. The file size is a separate permanent constant, deliberately
+ * decoupled from sizeof(): the library never resizes the file, so a mapping
+ * held across a container restart can never extend past EOF. */
+#define LEDGER_HEADER_SIZE 128                 /* CACHELINE_SIZE            */
+#define LEDGER_FILE_SIZE   (320 * 1024)        /* VMEM_NODE_FILE_SIZE       */
+#define LEDGER_MAGIC       0x564D4E44U         /* VMEM_NODE_MAGIC, "VMND"   */
+#define LEDGER_VERSION     1U                  /* VMEM_NODE_LAYOUT_VERSION  */
 
 typedef struct { int pid; size_t used; } ledger_proc_t;
 typedef struct {
@@ -83,29 +92,65 @@ typedef struct {
   unsigned int  processes_size;
   unsigned char lock_byte;
 } ledger_dev_t;
-typedef struct { ledger_dev_t devices[LEDGER_MAX_DEVICES]; } ledger_t;
+typedef struct {
+  unsigned int  magic;
+  unsigned int  layout_version;
+  unsigned int  region_size;
+  unsigned int  device_count;
+  unsigned char _pad[LEDGER_HEADER_SIZE - 16];
+  ledger_dev_t  devices[LEDGER_MAX_DEVICES];
+} ledger_t;
 
 static const volatile ledger_t *g_ledger;
+/* Set when the ledger EXISTS but this test cannot interpret it. Kept separate
+ * from "g_ledger == NULL" on purpose: the two states look identical to a
+ * reader of g_ledger but mean opposite things. Absent is a legitimate
+ * configuration (VMEMORY_NODE_ENABLED=0) and skipping is right. Present but
+ * unreadable means this mirror has drifted from hook.h -- a real breakage that
+ * must fail, or an ABI change silently converts every assertion below into a
+ * skip and the suite still looks green. That is exactly what happened when the
+ * frozen header was added. */
+static int g_ledger_broken;
 
 static void ledger_open(void) {
   int fd = open(LEDGER_PATH, O_RDONLY);
   if (fd < 0) return;
   struct stat sb;
   if (fstat(fd, &sb) != 0) { close(fd); return; }
-  /* Exact, not >=. The library sizes this file to its own struct, so a
-   * mismatch means the mirror above has drifted from hook.h -- in which case
-   * every field read here would land at the wrong offset. Refusing to map it
-   * turns that into a visible SKIP instead of assertions on garbage. */
-  if ((size_t)sb.st_size != sizeof(ledger_t)) {
-    printf("  [warn] " LEDGER_PATH " is %lld bytes, expected %zu --\n"
+  /* Against the file's own permanent size, not sizeof(ledger_t): the two are
+   * decoupled by design (see LEDGER_FILE_SIZE). A mismatch means the mirror
+   * above has drifted from hook.h, so every field read here would land at the
+   * wrong offset -- report it as broken rather than mapping it and asserting
+   * on garbage. */
+  if ((size_t)sb.st_size != LEDGER_FILE_SIZE) {
+    printf("  [warn] " LEDGER_PATH " is %lld bytes, expected %d --\n"
            "         the ledger mirror in this test no longer matches hook.h\n",
-           (long long)sb.st_size, sizeof(ledger_t));
+           (long long)sb.st_size, LEDGER_FILE_SIZE);
+    g_ledger_broken = 1;
     close(fd);
     return;
   }
   void *p = mmap(NULL, sizeof(ledger_t), PROT_READ, MAP_SHARED, fd, 0);
-  if (p != MAP_FAILED) g_ledger = (const volatile ledger_t *)p;
   close(fd);
+  if (p == MAP_FAILED) return;
+
+  /* The header catches what a size check cannot: a layout that changed without
+   * changing the file size. It is also how a region caught mid-rebuild is
+   * recognised -- the library publishes magic last, so an incomplete rebuild
+   * reads as "not this layout" rather than as valid data. */
+  const volatile ledger_t *l = (const volatile ledger_t *)p;
+  if (l->magic != LEDGER_MAGIC || l->layout_version != LEDGER_VERSION ||
+      l->region_size != (unsigned int)sizeof(ledger_t) ||
+      l->device_count != (unsigned int)LEDGER_MAX_DEVICES) {
+    printf("  [warn] " LEDGER_PATH " header is magic=%#x ver=%u size=%u count=%u,\n"
+           "         expected magic=%#x ver=%u size=%zu count=%d --\n"
+           "         the ledger mirror in this test no longer matches hook.h\n",
+           l->magic, l->layout_version, l->region_size, l->device_count,
+           LEDGER_MAGIC, LEDGER_VERSION, sizeof(ledger_t), LEDGER_MAX_DEVICES);
+    g_ledger_broken = 1;
+    return;
+  }
+  g_ledger = l;
 }
 
 /* Bytes currently charged to this process, summed over devices, or -1 if the
@@ -157,11 +202,23 @@ static CUresult headroom(size_t *out) {
   return CUDA_SUCCESS;
 }
 
-/* Common preconditions. Returns 0 when the case can meaningfully run. */
+/* Common preconditions. Returns 0 to run, -1 to skip, or 1 to FAIL, matching
+ * the case-function convention the runner counts (rc < 0 skip, rc > 0 fail).
+ *
+ * The distinction between skip and fail is the whole point here. "The ledger is
+ * absent" is a configuration, and skipping is honest. "The ledger is present but
+ * this test cannot read it" is a defect, and skipping would hide it -- which is
+ * precisely how the addition of the frozen header turned eight assertions into
+ * a green-looking SKIP with a warning nobody had to act on. */
 static int can_assert(void) {
   if (!preloaded()) {
     printf("  SKIP (needs LD_PRELOAD=libvgpu-control.so)\n");
     return -1;
+  }
+  if (g_ledger_broken) {
+    printf("  FAIL (ledger at " LEDGER_PATH " exists but its layout does not match\n"
+           "        this test's mirror -- update the mirror to track hook.h)\n");
+    return 1;
   }
   if (g_ledger == NULL) {
     printf("  SKIP (no ledger at " LEDGER_PATH " -- needs VMEMORY_NODE_ENABLED=1)\n");
@@ -226,7 +283,7 @@ static void *gate_observer(void *user) {
 /* [A] An allocation that has not landed yet must still be charged, so that a
  * concurrent allocator counts it. */
 static int inflight_allocation_is_charged(CUstream stream) {
-  if (can_assert() != 0) return -1;
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }   /* -1 skip, 1 fail */
 
   size_t freeb = 0;
   if (headroom(&freeb) != CUDA_SUCCESS) return 1;
@@ -306,7 +363,7 @@ static int inflight_allocation_is_charged(CUstream stream) {
  * [B] An allocation made during capture must be charged, and [C] that charge
  * must be gone once the capture ends. Both are read straight off the ledger. */
 static int capture_allocation_is_charged(CUstream stream) {
-  if (can_assert() != 0) return -1;
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }   /* -1 skip, 1 fail */
 
   size_t freeb = 0;
   if (headroom(&freeb) != CUDA_SUCCESS) return 1;
@@ -355,7 +412,7 @@ static int capture_allocation_is_charged(CUstream stream) {
  * the shape the leak actually takes in production: a service that captures a
  * graph per request slowly starves itself. */
 static int repeated_captures_do_not_accumulate(CUstream stream) {
-  if (can_assert() != 0) return -1;
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }   /* -1 skip, 1 fail */
 
   size_t freeb = 0;
   if (headroom(&freeb) != CUDA_SUCCESS) return 1;
@@ -397,7 +454,7 @@ static int repeated_captures_do_not_accumulate(CUstream stream) {
  * the limit check. While a capture holds one, an allocation that would have
  * fitted a moment ago must be refused. */
 static int capture_charge_is_enforced(CUstream stream) {
-  if (can_assert() != 0) return -1;
+  { int _pre = can_assert(); if (_pre != 0) return _pre; }   /* -1 skip, 1 fail */
 
   size_t freeb = 0;
   if (headroom(&freeb) != CUDA_SUCCESS) return 1;
