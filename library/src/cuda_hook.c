@@ -164,6 +164,10 @@ static int g_sm_lock_fd = -1;
  * disjoint device slice, so plain ints suffice -- same convention as the
  * exclusivity FSM state. */
 static int g_sm_sampling_mine[MAX_DEVICE_COUNT] = {0};
+/* This process's previous publish time per device, used only to measure the
+ * cadence it publishes. Per-process and reset on fork with the ownership flags,
+ * so a child never reports an interval spanning the fork. */
+static int64_t g_sm_last_publish_ns[MAX_DEVICE_COUNT] = {0};
 
 static inline int64_t monotonic_ns(void);
 
@@ -315,6 +319,7 @@ void child_after_fork(void) {
     g_sm_lock_fd = -1;
   }
   memset(g_sm_sampling_mine, 0, sizeof(g_sm_sampling_mine));
+  memset(g_sm_last_publish_ns, 0, sizeof(g_sm_last_publish_ns));
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
     g_gap_evt_ready[i]  = 0;
     g_gap_start[i]      = NULL;
@@ -1388,11 +1393,46 @@ static void sm_ctl_publish(int host_index) {
  *  descriptor the lock lives on.
  * ---------------------------------------------------------------------- */
 
-/* A standby tolerates a sample this old before deciding the owner has stopped
- * sampling and taking one itself. Three periods: a healthy owner republishes
- * every cycle (~100ms), and a standby's own cycle is phase-shifted by up to a
- * full period, so one period of slack is normal and two is not. */
-#define SM_SAMPLE_STALE_NS (3 * SM_REFILL_PERIOD_NS)
+/* Floor for how old a published sample may get before a standby stops trusting
+ * it. Only a floor: the real limit adapts to the owner's measured cadence, see
+ * sm_sample_stale_limit(). */
+#define SM_SAMPLE_STALE_FLOOR_NS (3 * SM_REFILL_PERIOD_NS)
+
+/* How many of the owner's own intervals to wait before declaring it stuck. */
+#define SM_SAMPLE_STALE_INTERVALS 3
+
+/* Upper bound on the adaptive limit, so a single absurd interval -- a machine
+ * suspend, a clock artefact, an owner descheduled for seconds -- cannot park
+ * the staleness limit somewhere it never fires again. */
+#define SM_SAMPLE_STALE_CEILING_NS (5LL * 1000000000LL)
+
+/* The staleness limit must answer "has the owner STOPPED", not "is the owner as
+ * fast as I assumed". A fixed limit conflates the two, and gets it wrong in a
+ * way that degrades into the problem this design exists to remove:
+ *
+ * The watcher's per-device period is not a constant. When per-device processing
+ * overruns its slot the loop stops sleeping to the grid and falls back to a
+ * 10ms floor, making the period (processing + 10ms) per iteration -- and a
+ * device is revisited only every dev_count iterations. Slow NVML on a 4-device
+ * batch is enough to push a device's period past 400ms. A limit fixed at ~270ms
+ * would then be exceeded on every single cycle: every standby would conclude
+ * the owner was stuck, all of them would resume calling NVML, and the added
+ * load would slow the owner further. Centralisation would deliver nothing,
+ * and it would fail worst exactly when the machine is already struggling.
+ *
+ * So the owner publishes how long its own cycles actually take, and standbys
+ * scale their patience to that. A healthy-but-slow owner is trusted; a stopped
+ * owner is still caught after a few of its own intervals. */
+static int64_t sm_sample_stale_limit(const sm_node_dev_t *d) {
+  int64_t interval = __atomic_load_n(&d->sample_interval_ns, __ATOMIC_RELAXED);
+  int64_t limit = interval * SM_SAMPLE_STALE_INTERVALS;
+  if (limit < SM_SAMPLE_STALE_FLOOR_NS) {
+    limit = SM_SAMPLE_STALE_FLOOR_NS;
+  } else if (limit > SM_SAMPLE_STALE_CEILING_NS) {
+    limit = SM_SAMPLE_STALE_CEILING_NS;
+  }
+  return limit;
+}
 
 /* Returns 1 if this process should sample this device. Already-owner is the
  * steady-state answer and costs nothing; otherwise ONE non-blocking fcntl.
@@ -1432,11 +1472,24 @@ static void sm_publish_sample(int host_index) {
     return;
   }
   sm_node_dev_t *d = &g_sm_node->devices[host_index];
+  int64_t now = monotonic_ns();
+
+  /* Publish the cadence we are actually achieving, so standbys can scale their
+   * staleness limit to it rather than to an assumed ~100ms (see
+   * sm_sample_stale_limit). Measured from this process's own previous publish;
+   * skipped on the first one, and whenever ownership has just changed hands,
+   * because the gap across a handover reflects the takeover, not the cadence. */
+  int64_t prev = g_sm_last_publish_ns[host_index];
+  if (prev != 0 && now > prev) {
+    __atomic_store_n(&d->sample_interval_ns, now - prev, __ATOMIC_RELAXED);
+  }
+  g_sm_last_publish_ns[host_index] = now;
+
   d->s_user_current      = top_results[host_index].user_current;
   d->s_sys_current       = top_results[host_index].sys_current;
   d->s_sys_process_num   = top_results[host_index].sys_process_num;
   d->s_external_proc_num = top_results[host_index].external_process_num;
-  __atomic_store_n(&d->sample_published_ns, monotonic_ns(), __ATOMIC_RELEASE);
+  __atomic_store_n(&d->sample_published_ns, now, __ATOMIC_RELEASE);
 }
 
 /* Load the owner's sample into this process's top_results. Returns 0 if there
@@ -1449,7 +1502,7 @@ static int sm_load_published_sample(int host_index) {
   }
   sm_node_dev_t *d = &g_sm_node->devices[host_index];
   int64_t published = __atomic_load_n(&d->sample_published_ns, __ATOMIC_ACQUIRE);
-  if (published == 0 || monotonic_ns() - published > SM_SAMPLE_STALE_NS) {
+  if (published == 0 || monotonic_ns() - published > sm_sample_stale_limit(d)) {
     return 0;
   }
   /* Plain reads: these are heuristic counters feeding a control loop that is

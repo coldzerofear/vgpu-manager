@@ -261,6 +261,63 @@ static int test_owner_wins_refill(sm_node_region_t *r) {
   return ok ? 0 : 1;
 }
 
+/* ---- 6. staleness limit adapts to the owner's real cadence --------------
+ * Mirrors sm_sample_stale_limit(). The watcher's per-device period is not
+ * fixed: when processing overruns its slot the loop falls back to a 10ms floor
+ * sleep, so the period becomes (processing + 10ms) per iteration and a device
+ * is revisited only every dev_count iterations -- slow NVML on a 4-device batch
+ * pushes it past 400ms. A limit fixed at ~3x100ms would then be exceeded every
+ * cycle, every standby would resume sampling, and the extra load would slow the
+ * owner further. This asserts a slow-but-alive owner is trusted while a stopped
+ * one is still caught. */
+#define STALE_FLOOR_NS   (3 * SM_REFILL_PERIOD_NS)
+#define STALE_INTERVALS  3
+#define STALE_CEILING_NS (5LL * 1000000000LL)
+
+static int64_t stale_limit_for(int64_t interval_ns) {
+  int64_t limit = interval_ns * STALE_INTERVALS;
+  if (limit < STALE_FLOOR_NS) return STALE_FLOOR_NS;
+  if (limit > STALE_CEILING_NS) return STALE_CEILING_NS;
+  return limit;
+}
+
+static int test_adaptive_staleness(void) {
+  struct { int64_t interval_ns, age_ns; int want_fresh; const char *what; } cases[] = {
+    /* healthy owner: floor applies, and a sample one cycle old is fine */
+    { 100 * 1000000LL,  100 * 1000000LL, 1, "healthy owner, 1-cycle-old sample" },
+    /* the regression: owner overrunning at 440ms/device. A fixed 270ms limit
+     * would reject this every cycle and collapse back to N-way sampling. */
+    { 440 * 1000000LL,  440 * 1000000LL, 1, "slow-but-alive owner (440ms cycle)" },
+    { 440 * 1000000LL, 1200 * 1000000LL, 1, "slow owner, sample under 3 intervals" },
+    /* stopped owner is still caught, at both cadences */
+    { 100 * 1000000LL,  400 * 1000000LL, 0, "stopped owner, fast cadence" },
+    { 440 * 1000000LL, 1500 * 1000000LL, 0, "stopped owner, slow cadence" },
+    /* an absurd interval must not park the limit beyond reach */
+    { 3600LL * 1000000000LL, 6LL * 1000000000LL, 0, "absurd interval clamped by ceiling" },
+  };
+  int ok = 1;
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    int fresh = cases[i].age_ns <= stale_limit_for(cases[i].interval_ns);
+    if (fresh != cases[i].want_fresh) {
+      printf("      MISMATCH: %s -> fresh=%d want=%d (limit=%ldms age=%ldms)\n",
+             cases[i].what, fresh, cases[i].want_fresh,
+             (long)(stale_limit_for(cases[i].interval_ns) / 1000000),
+             (long)(cases[i].age_ns / 1000000));
+      ok = 0;
+    }
+  }
+  /* The property that actually matters, stated directly: a fixed limit tuned
+   * for a 100ms cadence must NOT be what governs a 440ms owner. */
+  int fixed_would_reject = (440 * 1000000LL) > STALE_FLOOR_NS;
+  int adaptive_accepts   = (440 * 1000000LL) <= stale_limit_for(440 * 1000000LL);
+  if (!(fixed_would_reject && adaptive_accepts)) ok = 0;
+  printf("  [6] adaptive staleness: %zu cases, fixed-limit-would-reject-slow-owner=%d "
+         "adaptive-accepts=%d -> %s\n",
+         sizeof(cases) / sizeof(cases[0]), fixed_would_reject, adaptive_accepts,
+         ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
 int main(void) {
   printf("sm_node shared-bucket checks (no GPU required)\n");
   printf("  [0] ABI: dev=%zuB region=%zuB devices@%zu file=%d -> %s\n",
@@ -284,6 +341,7 @@ int main(void) {
   rc |= test_sampling_ownership(lockpath);
   rc |= test_fork_keeps_lock_alive(lockpath);
   rc |= test_owner_wins_refill(r);
+  rc |= test_adaptive_staleness();
 
   munmap(r, SM_NODE_FILE_SIZE);
   unlink(path);

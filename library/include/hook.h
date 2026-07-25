@@ -467,7 +467,7 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
 /* BUMP THIS whenever any field below changes type, order, or offset.
  * The guard compares it and rebuilds the region on mismatch; forgetting to
  * bump it means a new library silently reads an old layout's bytes. */
-#define SM_NODE_LAYOUT_VERSION 2U   /* v2: published sample + leader_pid */
+#define SM_NODE_LAYOUT_VERSION 3U   /* v3: + sample_interval_ns (adaptive staleness) */
 
 /* No volatile, no _Atomic. volatile provides no concurrency guarantee (today's
  * correctness comes entirely from the CAS macro), and _Atomic risks a
@@ -529,7 +529,19 @@ typedef struct {
    * signal. Ownership is decided by the kernel-held file lock, which stays
    * correct when a pid is recycled or a record goes stale. */
   int32_t leader_pid;
-  uint8_t _pad[CACHELINE_SIZE - 96];
+  /* The owner's OWN measured interval between publishes, so a standby can tell
+   * "slow" from "stuck" without assuming how fast sampling ought to be.
+   *
+   * The watcher's cadence is not guaranteed: when per-device processing
+   * overruns its slot the loop falls back to a 10ms floor sleep, so the period
+   * becomes (processing + 10ms) per iteration and a device is revisited every
+   * dev_count iterations. Slow NVML on a 4-device batch can push a device's
+   * period into the hundreds of milliseconds. A fixed staleness limit tuned
+   * for ~100ms would then fire permanently, every standby would resume
+   * sampling, and the extra NVML load would make the owner slower still --
+   * a feedback loop that ends with centralisation providing nothing. */
+  int64_t sample_interval_ns;
+  uint8_t _pad[CACHELINE_SIZE - 104];
 } __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
 
 typedef struct {
