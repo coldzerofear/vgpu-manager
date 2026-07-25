@@ -1270,12 +1270,62 @@ static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
  *  case is one skipped refill (~100ms), and recovery needs no code.
  * ---------------------------------------------------------------------- */
 
-/* Slightly under the ~96-100ms the watcher takes to come back round to a given
- * device (wait = 100ms/dev_count, then dev_count devices per pass). Under the
- * loop period so ordinary jitter cannot push a tick past the threshold and cost
- * the device a whole refill interval; close enough to it that two processes
- * cannot both refill within one period. */
-#define SM_REFILL_PERIOD_NS (90LL * 1000000LL)
+/* The watcher's DESIGN per-device period, and the single base every timing
+ * constant below is expressed against.
+ *
+ * It is derived, not guessed: the loop sleeps wait = 100ms/dev_count before
+ * each device and visits dev_count devices per pass, so a device is revisited
+ * every 100ms no matter how many devices the batch holds. Naming it once means
+ * the rest are stated as "N periods" rather than as free-floating milliseconds
+ * that nobody can later justify. */
+#define SM_WATCHER_NOMINAL_PERIOD_NS (100LL * 1000000LL)
+
+/* Slightly under one period, so ordinary jitter cannot push a tick past the
+ * threshold and cost the device a whole refill interval, while staying close
+ * enough that two processes cannot both refill within one period. */
+#define SM_REFILL_PERIOD_NS (SM_WATCHER_NOMINAL_PERIOD_NS * 9 / 10)
+
+/* Past this multiple of the nominal period the watcher is missing its own
+ * design contract by an order of magnitude. Scaling patience further would let
+ * one pathological interval -- a suspend, a clock artefact, an owner
+ * descheduled for seconds -- park the limits somewhere they never fire again,
+ * so beyond this we stop adapting and treat the slowness as a fault. */
+#define SM_CADENCE_MAX_PERIODS 10
+
+/* Beats of the owner's cadence before a standby stops trusting its sample, and
+ * before a standby will claim a refill out from under it. Stated as beats, not
+ * as durations, precisely so they stay correct when a beat is not 100ms. */
+#define SM_SAMPLE_STALE_BEATS   3
+#define SM_STANDBY_REFILL_BEATS 2
+
+/* How fast the owner of this device is ACTUALLY cycling.
+ *
+ * Everything a standby decides has to be measured against this rather than
+ * against the nominal period, because the watcher's period is not a constant.
+ * When per-device processing overruns its slot the loop stops sleeping to the
+ * absolute-time grid and falls back to a 10ms floor, so an iteration costs
+ * (processing + 10ms) and a device is revisited only every dev_count
+ * iterations. Slow NVML on a four-device batch puts a device's period past
+ * 400ms.
+ *
+ * Against thresholds fixed for a 100ms beat that is not an edge case, it is
+ * every cycle: standbys would permanently judge the owner stale, all of them
+ * would resume calling NVML, and the added load would slow the owner further --
+ * a feedback loop whose fixed point is "centralisation delivers nothing",
+ * reached exactly when the machine is already struggling.
+ *
+ * Below nominal (including 0, meaning the owner has not published twice yet)
+ * we use nominal: an owner cannot beat the design cadence, and treating a
+ * not-yet-known cadence as infinitely fast would make standbys hair-trigger
+ * during startup. */
+static int64_t sm_owner_cadence_ns(const sm_node_dev_t *d) {
+  int64_t interval = __atomic_load_n(&d->sample_interval_ns, __ATOMIC_RELAXED);
+  if (interval < SM_WATCHER_NOMINAL_PERIOD_NS) {
+    return SM_WATCHER_NOMINAL_PERIOD_NS;
+  }
+  int64_t cap = SM_WATCHER_NOMINAL_PERIOD_NS * SM_CADENCE_MAX_PERIODS;
+  return interval > cap ? cap : interval;
+}
 
 /* Standbys wait longer than the sampling owner before claiming a refill, which
  * makes the owner win in normal operation.
@@ -1297,8 +1347,6 @@ static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
  * standby becomes the owner on its next cycle and claims at 1x from then on.
  * The 2x threshold only governs the narrow window before that, and the
  * alive-but-stuck case. */
-#define SM_REFILL_STANDBY_PERIOD_NS (2 * SM_REFILL_PERIOD_NS)
-
 /* Returns 1 if this process owns this device's controller for this cycle.
  * Always 1 when the bucket is per-process -- there is nobody to contend with,
  * and the caller's code path stays exactly what it has always been. */
@@ -1310,12 +1358,23 @@ static int sm_try_claim_refill(int host_index) {
   int64_t last = __atomic_load_n(stamp, __ATOMIC_RELAXED);
   int64_t now  = monotonic_ns();
   /* g_sm_lock_fd < 0 means ownership does not exist at all (no lock file), so
-   * there is no owner to defer to and every process must keep claiming at 1x.
-   * Deferring here instead would halve the refill rate for the whole container
-   * -- nobody would ever hold the 1x ticket -- and starve the bucket. */
-  int64_t threshold = (g_sm_lock_fd < 0 || g_sm_sampling_mine[host_index])
-                        ? SM_REFILL_PERIOD_NS
-                        : SM_REFILL_STANDBY_PERIOD_NS;
+   * there is no owner to defer to and every process must keep claiming at the
+   * owner threshold. Deferring here instead would push the whole container onto
+   * the standby threshold -- nobody would hold the short ticket -- and cut the
+   * refill rate, starving the bucket.
+   *
+   * The standby threshold is measured in beats of the OWNER's cadence, not in
+   * fixed milliseconds. A fixed 2x90ms would be exceeded constantly by an owner
+   * legitimately cycling at 440ms, so standbys would take its refills every
+   * 180ms and the "whoever samples also refills" property would quietly hold
+   * only for fast owners. */
+  int64_t threshold;
+  if (g_sm_lock_fd < 0 || g_sm_sampling_mine[host_index]) {
+    threshold = SM_REFILL_PERIOD_NS;
+  } else {
+    threshold = sm_owner_cadence_ns(&g_sm_node->devices[host_index])
+                * SM_STANDBY_REFILL_BEATS;
+  }
   if (now - last < threshold) {
     return 0;
   }
@@ -1393,46 +1452,6 @@ static void sm_ctl_publish(int host_index) {
  *  descriptor the lock lives on.
  * ---------------------------------------------------------------------- */
 
-/* Floor for how old a published sample may get before a standby stops trusting
- * it. Only a floor: the real limit adapts to the owner's measured cadence, see
- * sm_sample_stale_limit(). */
-#define SM_SAMPLE_STALE_FLOOR_NS (3 * SM_REFILL_PERIOD_NS)
-
-/* How many of the owner's own intervals to wait before declaring it stuck. */
-#define SM_SAMPLE_STALE_INTERVALS 3
-
-/* Upper bound on the adaptive limit, so a single absurd interval -- a machine
- * suspend, a clock artefact, an owner descheduled for seconds -- cannot park
- * the staleness limit somewhere it never fires again. */
-#define SM_SAMPLE_STALE_CEILING_NS (5LL * 1000000000LL)
-
-/* The staleness limit must answer "has the owner STOPPED", not "is the owner as
- * fast as I assumed". A fixed limit conflates the two, and gets it wrong in a
- * way that degrades into the problem this design exists to remove:
- *
- * The watcher's per-device period is not a constant. When per-device processing
- * overruns its slot the loop stops sleeping to the grid and falls back to a
- * 10ms floor, making the period (processing + 10ms) per iteration -- and a
- * device is revisited only every dev_count iterations. Slow NVML on a 4-device
- * batch is enough to push a device's period past 400ms. A limit fixed at ~270ms
- * would then be exceeded on every single cycle: every standby would conclude
- * the owner was stuck, all of them would resume calling NVML, and the added
- * load would slow the owner further. Centralisation would deliver nothing,
- * and it would fail worst exactly when the machine is already struggling.
- *
- * So the owner publishes how long its own cycles actually take, and standbys
- * scale their patience to that. A healthy-but-slow owner is trusted; a stopped
- * owner is still caught after a few of its own intervals. */
-static int64_t sm_sample_stale_limit(const sm_node_dev_t *d) {
-  int64_t interval = __atomic_load_n(&d->sample_interval_ns, __ATOMIC_RELAXED);
-  int64_t limit = interval * SM_SAMPLE_STALE_INTERVALS;
-  if (limit < SM_SAMPLE_STALE_FLOOR_NS) {
-    limit = SM_SAMPLE_STALE_FLOOR_NS;
-  } else if (limit > SM_SAMPLE_STALE_CEILING_NS) {
-    limit = SM_SAMPLE_STALE_CEILING_NS;
-  }
-  return limit;
-}
 
 /* Returns 1 if this process should sample this device. Already-owner is the
  * steady-state answer and costs nothing; otherwise ONE non-blocking fcntl.
@@ -1502,7 +1521,8 @@ static int sm_load_published_sample(int host_index) {
   }
   sm_node_dev_t *d = &g_sm_node->devices[host_index];
   int64_t published = __atomic_load_n(&d->sample_published_ns, __ATOMIC_ACQUIRE);
-  if (published == 0 || monotonic_ns() - published > sm_sample_stale_limit(d)) {
+  if (published == 0 ||
+      monotonic_ns() - published > sm_owner_cadence_ns(d) * SM_SAMPLE_STALE_BEATS) {
     return 0;
   }
   /* Plain reads: these are heuristic counters feeding a control loop that is

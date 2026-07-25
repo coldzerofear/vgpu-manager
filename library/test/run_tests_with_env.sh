@@ -24,7 +24,25 @@ fi
 # Get the UUID of the specified GPU
 if command -v nvidia-smi &>/dev/null; then
   echo "Detecting GPU ${DEVICE_INDEX} UUID..."
-  GPU_UUID=$(nvidia-smi --query-gpu=uuid --format=csv,noheader | sed -n "$((DEVICE_INDEX + 1))p")
+  # Do not let a failing nvidia-smi abort the run. With `set -o errexit` and
+  # `pipefail` a non-zero exit here killed the script before the fallback below
+  # could run -- making that fallback dead code and reporting the problem as a
+  # bare "Error <n>" from make, with no message to act on.
+  nvidia_rc=0
+  nvidia_out="$(nvidia-smi --query-gpu=uuid --format=csv,noheader 2>&1)" || nvidia_rc=$?
+  GPU_UUID=""
+  if (( nvidia_rc != 0 )); then
+    echo "[WARN] nvidia-smi exited ${nvidia_rc}: ${nvidia_out}" >&2
+    case "${nvidia_rc}" in
+      9)  echo "[WARN]   9 = NVML_ERROR_DRIVER_NOT_LOADED: the NVIDIA kernel module is not loaded." >&2 ;;
+      12) echo "[WARN]  12 = NVML_ERROR_LIBRARY_NOT_FOUND: libnvidia-ml.so not found." >&2 ;;
+      18) echo "[WARN]  18 = NVML_ERROR_LIB_RM_VERSION_MISMATCH: the loaded kernel module and" >&2
+          echo "[WARN]       userspace NVML disagree on version -- usually a driver upgrade" >&2
+          echo "[WARN]       without reloading nvidia.ko. Reload the driver or reboot." >&2 ;;
+    esac
+  else
+    GPU_UUID="$(printf '%s\n' "${nvidia_out}" | sed -n "$((DEVICE_INDEX + 1))p")"
+  fi
   if [[ -z "${GPU_UUID}" ]]; then
     echo "[WARN] Could not get UUID for GPU ${DEVICE_INDEX}, trying indexed format..."
     # Fallback: NVIDIA_VISIBLE_DEVICES also accepts index numbers

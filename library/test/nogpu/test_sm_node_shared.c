@@ -20,7 +20,8 @@
 #include <time.h>
 
 #define CAS_(p, o, n) __sync_bool_compare_and_swap((p), (o), (n))
-#define SM_REFILL_PERIOD_NS (90LL * 1000000LL)
+#define NOMINAL_PERIOD_NS   (100LL * 1000000LL)
+#define SM_REFILL_PERIOD_NS (NOMINAL_PERIOD_NS * 9 / 10)
 
 static int64_t mono_ns(void) {
   struct timespec ts;
@@ -270,15 +271,19 @@ static int test_owner_wins_refill(sm_node_region_t *r) {
  * cycle, every standby would resume sampling, and the extra load would slow the
  * owner further. This asserts a slow-but-alive owner is trusted while a stopped
  * one is still caught. */
-#define STALE_FLOOR_NS   (3 * SM_REFILL_PERIOD_NS)
-#define STALE_INTERVALS  3
-#define STALE_CEILING_NS (5LL * 1000000000LL)
+#define CADENCE_MAX_PERIODS 10
+#define STALE_BEATS         3
+
+/* mirrors sm_owner_cadence_ns(): everything is a multiple of the nominal
+ * period, so there are no free-floating durations to justify. */
+static int64_t owner_cadence_for(int64_t interval_ns) {
+  if (interval_ns < NOMINAL_PERIOD_NS) return NOMINAL_PERIOD_NS;
+  int64_t cap = NOMINAL_PERIOD_NS * CADENCE_MAX_PERIODS;
+  return interval_ns > cap ? cap : interval_ns;
+}
 
 static int64_t stale_limit_for(int64_t interval_ns) {
-  int64_t limit = interval_ns * STALE_INTERVALS;
-  if (limit < STALE_FLOOR_NS) return STALE_FLOOR_NS;
-  if (limit > STALE_CEILING_NS) return STALE_CEILING_NS;
-  return limit;
+  return owner_cadence_for(interval_ns) * STALE_BEATS;
 }
 
 static int test_adaptive_staleness(void) {
@@ -308,7 +313,7 @@ static int test_adaptive_staleness(void) {
   }
   /* The property that actually matters, stated directly: a fixed limit tuned
    * for a 100ms cadence must NOT be what governs a 440ms owner. */
-  int fixed_would_reject = (440 * 1000000LL) > STALE_FLOOR_NS;
+  int fixed_would_reject = (440 * 1000000LL) > NOMINAL_PERIOD_NS * STALE_BEATS;
   int adaptive_accepts   = (440 * 1000000LL) <= stale_limit_for(440 * 1000000LL);
   if (!(fixed_would_reject && adaptive_accepts)) ok = 0;
   printf("  [6] adaptive staleness: %zu cases, fixed-limit-would-reject-slow-owner=%d "
