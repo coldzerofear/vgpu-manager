@@ -53,6 +53,21 @@ func TestVMemoryLayoutMatchesC(t *testing.T) {
 		"region no longer fits the permanently reserved file size")
 }
 
+// The three constants Go compares against are themselves a cross-language
+// contract, and drifting them fails the same silent way as the offsets: if C
+// changed VMEM_NODE_FILE_SIZE (or the magic, or the version) and this side did
+// not, NewMmapDeviceVMemory would reject every region it is handed and all
+// per-container memory metrics would simply stop appearing -- no error, just
+// absence. Pinned to the C literals in library/include/hook.h.
+func TestVMemoryConstantsMatchC(t *testing.T) {
+	assert.Equal(t, int64(320*1024), VMemNodeFileSize,
+		"VMEM_NODE_FILE_SIZE drifted from hook.h")
+	assert.Equal(t, uint32(0x564D4E44), VMemNodeMagic,
+		`VMEM_NODE_MAGIC drifted from hook.h ("VMND")`)
+	assert.Equal(t, uint32(1), VMemNodeLayoutVersion,
+		"VMEM_NODE_LAYOUT_VERSION drifted from hook.h; bump both sides together")
+}
+
 // Reproduces GET_VMEMORY_LOCK_OFFSET(i) from library/src/lock.c independently
 // of the implementation, so a regression in getVmemoryLockOffset -- notably
 // dropping the Devices base again -- fails here instead of silently disabling
