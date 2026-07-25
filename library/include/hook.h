@@ -401,6 +401,22 @@ typedef struct {
 #define SM_NODE_PATH      (TMP_DIR SM_NODE_DIR)
 #define SM_NODE_FILE_PATH (TMP_DIR SM_NODE_DIR "/sm_node.config")
 
+/* Sampling-ownership lock. A SEPARATE file from the region, on purpose.
+ *
+ * The init lock in map_sm_node_region can live on sm_node.config because it is
+ * taken and dropped inside one function. This one is held for the process's
+ * whole life, and that inverts the trade-off: on kernels without OFD locks we
+ * fall back to classic POSIX record locks, which are dropped when the process
+ * closes ANY descriptor for that file -- and map_sm_node_region does exactly
+ * that during init. Sharing one file would mean leadership could evaporate
+ * silently, leaving two processes each convinced it owns sampling.
+ *
+ * It must also NEVER be deleted while containers run: unlink + recreate yields
+ * a new inode, locks are per-inode, and two processes holding locks on
+ * different inodes are not mutually exclusive at all. The pre-start cleanup
+ * removes sm_node.config (we want a fresh region) but deliberately not this. */
+#define SM_NODE_LOCK_PATH (TMP_DIR SM_NODE_DIR "/sm_node.lock")
+
 /* The file size is a PERMANENT constant, deliberately decoupled from
  * sizeof(sm_node_region_t): a later version may grow the struct without
  * changing the file size, so the region is never resized, so an older process
@@ -412,7 +428,7 @@ typedef struct {
 /* BUMP THIS whenever any field below changes type, order, or offset.
  * The guard compares it and rebuilds the region on mismatch; forgetting to
  * bump it means a new library silently reads an old layout's bytes. */
-#define SM_NODE_LAYOUT_VERSION 1U
+#define SM_NODE_LAYOUT_VERSION 2U   /* v2: published sample + leader_pid */
 
 /* No volatile, no _Atomic. volatile provides no concurrency guarantee (today's
  * correctness comes entirely from the CAS macro), and _Atomic risks a
@@ -427,6 +443,12 @@ typedef struct {
   int64_t total_cuda_cores;     /* thread*sm*FACTOR; bucket ceiling         */
   int64_t last_refill_ns;       /* refill election stamp, CAS'd per cycle   */
   int64_t share;                /* was shares[]                             */
+  /* Monotonic stamp of the last published utilization sample, written LAST
+   * (release) by the sampling owner so a reader that acquire-loads it knows
+   * the four s_* fields below are complete. Also the staleness signal: if this
+   * falls too far behind, the owner is alive but not sampling (hung in NVML,
+   * say) and a standby resamples for itself rather than trusting it. */
+  int64_t sample_published_ns;
   /* Controller integrator state. Only the cycle's election winner reads or
    * writes these, so the election itself serialises them -- no lock needed,
    * only acquire/release pairing so each winner sees the previous winner's
@@ -451,7 +473,24 @@ typedef struct {
    * the container throttle", which is the correct question once the bucket
    * is shared. */
   int32_t throttled_since_watch;
-  uint8_t _pad[CACHELINE_SIZE - 68];
+  /* Utilization sample published by whichever process owns sampling for this
+   * device. Standbys read these instead of calling NVML themselves.
+   *
+   * This is the whole point of centralising sampling: nvmlDeviceGetProcessUtilization
+   * is expensive and degrades when called often -- the local-driver path already
+   * carries a comment saying frequent calls legitimately return NOT_FOUND. N
+   * processes each polling it every ~100ms multiplies exactly the call rate the
+   * driver dislikes, and N is largest in the notebook containers this design
+   * targets. Publishing one sample makes the cost O(1) per device, not O(N). */
+  int32_t s_user_current;       /* container-aggregate utilization           */
+  int32_t s_sys_current;        /* device-wide utilization                   */
+  int32_t s_sys_process_num;
+  int32_t s_external_proc_num;
+  /* Owning process of the sampling lock. Diagnostics only -- never a liveness
+   * signal. Ownership is decided by the kernel-held file lock, which stays
+   * correct when a pid is recycled or a record goes stale. */
+  int32_t leader_pid;
+  uint8_t _pad[CACHELINE_SIZE - 96];
 } __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
 
 typedef struct {
@@ -647,6 +686,15 @@ int ofd_fcntl(int fd, int wait, struct flock *fl);
  * prerequisite.
  */
 int map_sm_node_region(sm_node_region_t **data);
+
+/**
+ * Open (creating if needed) the sm_node sampling-lock file and return its fd,
+ * or -1. The caller keeps the fd for the process lifetime and never closes it
+ * -- see SM_NODE_LOCK_PATH for why closing matters on the classic-POSIX-lock
+ * fallback path. O_CLOEXEC so an exec'd child does not inherit ownership;
+ * fork() still shares the descriptor, which child_after_fork undoes.
+ */
+int open_sm_node_lock(void);
 
 void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device_id);
 

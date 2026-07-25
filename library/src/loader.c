@@ -1663,6 +1663,22 @@ static void sm_node_rebuild_locked(sm_node_region_t *r) {
   __atomic_store_n(&r->magic, SM_NODE_MAGIC, __ATOMIC_RELEASE);   /* publish */
 }
 
+int open_sm_node_lock(void) {
+  if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
+    mkdir(SM_NODE_PATH, 0755);
+  }
+  /* Zero-length file: it carries no data, only byte-range locks (one byte per
+   * device, so devices are independent). Never ftruncate'd -- fcntl ranges do
+   * not require the bytes to exist. */
+  int fd = open(SM_NODE_LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (unlikely(fd == -1)) {
+    LOGGER(WARNING, "can't open %s: %s -- sampling will not be centralised",
+           SM_NODE_LOCK_PATH, strerror(errno));
+    return -1;
+  }
+  return fd;
+}
+
 int map_sm_node_region(sm_node_region_t **data) {
   *data = NULL;
   if (unlikely(g_vgpu_config == NULL)) return 1;

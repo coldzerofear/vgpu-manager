@@ -122,6 +122,83 @@ static int test_election_single_winner(sm_node_region_t *r) {
   return ok ? 0 : 1;
 }
 
+#ifndef F_OFD_SETLK
+#define F_OFD_SETLK 37
+#endif
+
+static int try_lock_byte(int fd, int byte) {
+  struct flock fl;
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_WRLCK; fl.l_whence = SEEK_SET; fl.l_start = byte; fl.l_len = 1;
+  return fcntl(fd, F_OFD_SETLK, &fl) == 0;
+}
+
+/* ---- 3. one sampling owner per device, and takeover when it dies -------- */
+static int test_sampling_ownership(const char *lockpath) {
+  int fd = open(lockpath, O_RDWR | O_CREAT, 0644);
+  if (fd < 0) { perror("open lock"); return 1; }
+
+  pid_t owner = fork();
+  if (owner == 0) {
+    int f = open(lockpath, O_RDWR);
+    if (!try_lock_byte(f, 0)) _exit(2);
+    usleep(400000);
+    _exit(0);                      /* exit releases the lock via the kernel */
+  }
+  usleep(150000);                  /* let the owner take it */
+
+  int denied_while_alive = !try_lock_byte(fd, 0);
+  int other_device_free  = try_lock_byte(fd, 5);   /* per-device independence */
+
+  int st = 0;
+  waitpid(owner, &st, 0);
+  usleep(50000);
+  int acquired_after_death = try_lock_byte(fd, 0);
+
+  int ok = denied_while_alive && other_device_free && acquired_after_death;
+  printf("  [3] ownership: denied-while-owner-alive=%d other-device-free=%d "
+         "took-over-after-death=%d -> %s\n",
+         denied_while_alive, other_device_free, acquired_after_death,
+         ok ? "PASS" : "FAIL");
+  close(fd);
+  return ok ? 0 : 1;
+}
+
+/* ---- 4. fork() shares the lock's open file description ------------------
+ * This is the hazard child_after_fork() exists to defuse: an OFD lock belongs
+ * to the description, not the process, so a forked child keeps its parent's
+ * lock alive after the parent dies -- and no standby can ever take over. The
+ * test asserts the hazard is REAL, so the close in child_after_fork can never
+ * be "cleaned up" by someone who thinks it is redundant. */
+static int test_fork_keeps_lock_alive(const char *lockpath) {
+  pid_t owner = fork();
+  if (owner == 0) {
+    int f = open(lockpath, O_RDWR);
+    if (!try_lock_byte(f, 2)) _exit(2);
+    pid_t kid = fork();
+    if (kid == 0) {
+      usleep(700000);              /* keeps the INHERITED fd open */
+      _exit(0);
+    }
+    _exit(0);                      /* owner dies immediately */
+  }
+  int st = 0;
+  waitpid(owner, &st, 0);
+  usleep(200000);                  /* owner is gone; grandchild still holds fd */
+
+  int fd = open(lockpath, O_RDWR);
+  int still_held = !try_lock_byte(fd, 2);
+  usleep(700000);                  /* grandchild exits, dropping the last ref */
+  int free_after = try_lock_byte(fd, 2);
+
+  int ok = still_held && free_after;
+  printf("  [4] fork hazard: lock-outlives-dead-owner=%d released-once-child-exits=%d"
+         " -> %s%s\n", still_held, free_after, ok ? "PASS" : "FAIL",
+         still_held ? "  (hazard confirmed: child_after_fork MUST close this fd)" : "");
+  close(fd);
+  return ok ? 0 : 1;
+}
+
 int main(void) {
   printf("sm_node shared-bucket checks (no GPU required)\n");
   printf("  [0] ABI: dev=%zuB region=%zuB devices@%zu file=%d -> %s\n",
@@ -135,12 +212,19 @@ int main(void) {
   if (tfd >= 0) close(tfd);
   sm_node_region_t *r = map_region(path);
 
+  char lockpath[] = "/tmp/sm_node_lock_XXXXXX";
+  int lfd = mkstemp(lockpath);
+  if (lfd >= 0) close(lfd);
+
   int rc = 0;
   rc |= test_no_lost_tokens(r);
   rc |= test_election_single_winner(r);
+  rc |= test_sampling_ownership(lockpath);
+  rc |= test_fork_keeps_lock_alive(lockpath);
 
   munmap(r, SM_NODE_FILE_SIZE);
   unlink(path);
+  unlink(lockpath);
   printf("%s\n", rc ? "FAILED" : "ALL PASS");
   return rc;
 }

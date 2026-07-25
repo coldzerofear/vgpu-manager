@@ -154,6 +154,17 @@ static int32_t g_throttled_since_watch[MAX_DEVICE_COUNT] = {0};
  * ---------------------------------------------------------------------- */
 static sm_node_region_t *g_sm_node = NULL;
 
+/* Sampling-ownership lock descriptor, held for the process lifetime and never
+ * closed (see SM_NODE_LOCK_PATH). -1 means unavailable, which degrades to
+ * every process sampling for itself -- exactly today's behaviour. Declared up
+ * here rather than beside its helpers because child_after_fork, far above
+ * them, must close it. */
+static int g_sm_lock_fd = -1;
+/* Per-device: does this process own sampling? Each watcher thread owns a
+ * disjoint device slice, so plain ints suffice -- same convention as the
+ * exclusivity FSM state. */
+static int g_sm_sampling_mine[MAX_DEVICE_COUNT] = {0};
+
 static inline int64_t monotonic_ns(void);
 
 /* Hot path. One predictable branch, no validation: the region was checked once
@@ -278,6 +289,32 @@ static unsigned int g_share_log_tick[MAX_DEVICE_COUNT] = {0};
  * on every fork generation. */
 void child_after_fork(void) {
   g_init_set = (pthread_once_t)PTHREAD_ONCE_INIT;
+  /* Drop the inherited sampling-lock descriptor. Both failure modes it causes
+   * are real and neither is obvious:
+   *
+   *  - An OFD lock belongs to the open file description, and fork SHARES the
+   *    description. So the child inherits ownership of every device the parent
+   *    owned. Resetting g_init_set (above) makes the child re-run
+   *    initialization(), which respawns its own watcher threads -- so parent
+   *    and child would both sample and both consider themselves owner.
+   *
+   *  - Worse in the other direction: the description stays alive as long as
+   *    ANY descriptor references it. A child that keeps this fd open holds the
+   *    parent's lock after the parent exits, so no standby can ever take over
+   *    and the bucket stops being replenished for the whole container. The
+   *    "kernel releases the lock when the holder dies" property that justifies
+   *    this whole design silently stops holding.
+   *
+   * close() here drops only the child's reference: the parent's descriptor
+   * keeps the description (and its locks) intact. initialization() then
+   * reopens for the child, which contends for ownership normally.
+   *
+   * close() is async-signal-safe, which a pthread_atfork child handler must be. */
+  if (g_sm_lock_fd >= 0) {
+    close(g_sm_lock_fd);
+    g_sm_lock_fd = -1;
+  }
+  memset(g_sm_sampling_mine, 0, sizeof(g_sm_sampling_mine));
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
     g_gap_evt_ready[i]  = 0;
     g_gap_start[i]      = NULL;
@@ -1302,6 +1339,99 @@ static void sm_ctl_publish(int host_index) {
   __atomic_store_n(&d->share, shares[host_index], __ATOMIC_RELEASE);  /* publish */
 }
 
+/* ---------------------------------------------------------------------- *
+ *  Sampling ownership
+ *
+ *  Refill admission (above) and sampling ownership (here) are deliberately
+ *  DIFFERENT mechanisms, and the split is what makes this safe:
+ *
+ *    last_refill_ns CAS  -- HARD. Bounds how often the bucket may be topped
+ *                           up, always, no matter what else goes wrong.
+ *    byte-range lock     -- SOFT. Decides who pays for NVML. If it fails, is
+ *                           lost, or is somehow held twice, the worst outcome
+ *                           is redundant sampling; it can never over-supply
+ *                           the bucket, because the CAS still gates that.
+ *
+ *  So correctness never rests on the lock. That matters because a lock CAN be
+ *  held by a process that is alive but stuck, and because fork() shares the
+ *  descriptor the lock lives on.
+ * ---------------------------------------------------------------------- */
+
+/* A standby tolerates a sample this old before deciding the owner has stopped
+ * sampling and taking one itself. Three periods: a healthy owner republishes
+ * every cycle (~100ms), and a standby's own cycle is phase-shifted by up to a
+ * full period, so one period of slack is normal and two is not. */
+#define SM_SAMPLE_STALE_NS (3 * SM_REFILL_PERIOD_NS)
+
+/* Returns 1 if this process should sample this device. Already-owner is the
+ * steady-state answer and costs nothing; otherwise ONE non-blocking fcntl.
+ * That is the entire per-cycle cost of standing by -- no NVML call, no spin,
+ * no sleep-poll loop. */
+static int sm_sampling_claim(int host_index) {
+  if (g_sm_node == NULL || g_sm_lock_fd < 0) {
+    return 1;                       /* not shared, or no lock: sample as always */
+  }
+  if (g_sm_sampling_mine[host_index]) {
+    return 1;
+  }
+  struct flock fl;
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type   = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start  = host_index;         /* one byte per device -> devices are
+                                     * independent, which is required: with
+                                     * differing CUDA_VISIBLE_DEVICES two
+                                     * processes may see disjoint device sets,
+                                     * so there is no single owner for all. */
+  fl.l_len    = 1;
+  if (ofd_fcntl(g_sm_lock_fd, /*wait=*/0, &fl) == -1) {
+    return 0;                       /* someone else owns it -- stand by */
+  }
+  g_sm_sampling_mine[host_index] = 1;
+  __atomic_store_n(&g_sm_node->devices[host_index].leader_pid,
+                   (int32_t)getpid(), __ATOMIC_RELAXED);
+  LOGGER(VERBOSE, "host device %d: acquired sampling ownership", host_index);
+  return 1;
+}
+
+/* Publish the sample just taken so standbys can skip NVML entirely. The stamp
+ * goes last with release ordering; a reader acquire-loads it first. */
+static void sm_publish_sample(int host_index) {
+  if (g_sm_node == NULL) {
+    return;
+  }
+  sm_node_dev_t *d = &g_sm_node->devices[host_index];
+  d->s_user_current      = top_results[host_index].user_current;
+  d->s_sys_current       = top_results[host_index].sys_current;
+  d->s_sys_process_num   = top_results[host_index].sys_process_num;
+  d->s_external_proc_num = top_results[host_index].external_process_num;
+  __atomic_store_n(&d->sample_published_ns, monotonic_ns(), __ATOMIC_RELEASE);
+}
+
+/* Load the owner's sample into this process's top_results. Returns 0 if there
+ * is no sample yet or it is too old to trust, in which case the caller samples
+ * for itself -- that is the backstop for an owner that holds the lock but has
+ * stopped making progress, which a lock alone cannot detect. */
+static int sm_load_published_sample(int host_index) {
+  if (g_sm_node == NULL) {
+    return 0;
+  }
+  sm_node_dev_t *d = &g_sm_node->devices[host_index];
+  int64_t published = __atomic_load_n(&d->sample_published_ns, __ATOMIC_ACQUIRE);
+  if (published == 0 || monotonic_ns() - published > SM_SAMPLE_STALE_NS) {
+    return 0;
+  }
+  /* Plain reads: these are heuristic counters feeding a control loop that is
+   * already fed by a 1-second NVML average, so a torn-by-one-cycle field is
+   * indistinguishable from ordinary sampling jitter. */
+  top_results[host_index].user_current         = d->s_user_current;
+  top_results[host_index].sys_current          = d->s_sys_current;
+  top_results[host_index].sys_process_num      = d->s_sys_process_num;
+  top_results[host_index].external_process_num = d->s_external_proc_num;
+  top_results[host_index].valid                = 1;
+  return 1;
+}
+
 static void *utilization_watcher(void *arg) {
   batch_t *batch = (batch_t *)arg;
   LOGGER(VERBOSE, "start %s batch code %d", __FUNCTION__, batch->batch_code);
@@ -1373,9 +1503,23 @@ static void *utilization_watcher(void *arg) {
       // Skip GPU without core limit enabled
       if (!g_vgpu_config->devices[host_index].core_limit) continue;
 
-      get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
-
-      if (unlikely(!top_results[host_index].valid)) continue;
+      /* Sample only if we own sampling for this device, or if the owner's
+       * published sample has gone stale. A standby in steady state pays one
+       * non-blocking fcntl plus one shared read here, and no NVML call at all
+       * -- which is the point: N processes polling nvmlDeviceGetProcessUtilization
+       * every ~100ms is exactly the call pattern the driver handles worst. */
+      if (sm_sampling_claim(host_index)) {
+        get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
+        if (unlikely(!top_results[host_index].valid)) continue;
+        sm_publish_sample(host_index);
+      } else if (!sm_load_published_sample(host_index)) {
+        /* Owner holds the lock but has stopped publishing -- alive and stuck,
+         * which the lock cannot express. Sample for ourselves so the bucket
+         * keeps being replenished. Refill stays gated by the CAS below, so
+         * this cannot double-supply even if several standbys do it at once. */
+        get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
+        if (unlikely(!top_results[host_index].valid)) continue;
+      }
 
       /* Invalidate per-cycle exclusivity memo so the FIRST debounced
        * predicate call this iteration recomputes from fresh sampling
@@ -1938,6 +2082,23 @@ static void initialization() {
                          g_total_cuda_cores[i], __ATOMIC_RELAXED);
       }
       LOGGER(INFO, "sm_node attached: container-wide shared token bucket enabled");
+    }
+  }
+
+  /* Guarded separately from the region above, and that separation is required.
+   * A forked child KEEPS the inherited mapping (it is the same container-wide
+   * bucket, which is what we want) but must NOT keep the inherited lock
+   * descriptor, so child_after_fork closes it -- and this is where it gets
+   * reopened. Folding this into the region's `g_sm_node == NULL` guard would
+   * leave every forked child permanently without a lock fd, silently
+   * un-centralising sampling for the processes that fork the most. */
+  if (g_sm_node != NULL && g_sm_lock_fd < 0) {
+    g_sm_lock_fd = open_sm_node_lock();
+    if (g_sm_lock_fd < 0) {
+      /* Not fatal, not even degraded correctness: every process falls back to
+       * sampling for itself, which is what it does today. Refill stays gated
+       * by the CAS, so the bucket cannot be over-supplied either way. */
+      LOGGER(WARNING, "sm_node sampling lock unavailable; each process will sample independently");
     }
   }
 

@@ -251,6 +251,36 @@ if (now - last >= REFILL_PERIOD_NS &&
 - **积分态只有赢家读写** → 天然被选举串行化，无需额外锁；仅需 acquire/release 内存序（`__atomic_load_n`/`__atomic_store_n` with `__ATOMIC_ACQUIRE`/`RELEASE`）。
 - `REFILL_PERIOD_NS` ≈ 现有 watcher 单设备周期（~80–100ms）。多个 watcher 采样节奏可能错开，抢权只保证"每 period 至多补一次"，采样值用赢家自己的（聚合 util 与采样进程无关，见 §4.9）。
 
+### 4.3.1 修正：采样权与补充权分离（实施期重大调整）
+
+> **本节推翻了 §4.3 的一个隐含前提。** §4.3 只解决了"谁补令牌"，默认"每个进程各自采样"是可接受的。实施期评审指出这不成立，理由有二：
+
+1. **N× NVML 开销**：每进程每设备每 ~100ms 调一次 `nvmlDeviceGetComputeRunningProcesses` + `nvmlDeviceGetProcessUtilization`。而 `get_gpu_process_from_local_nvml_driver` 里**既有注释自己就写着**"Frequent calls to nvmlDeviceGetProcessUtilization may result in the return of NVML_ERROR_NOT_FOUND, which is a normal phenomenon"——N 个进程恰好把这个已知会退化的调用频率乘以 N，而 N 最大的场景正是 §1.3 的首要目标 notebook。
+2. **采样相位抖动**：赢家逐周期换进程，控制器输入的相位随之跳变。（澄清一个**没有**发生的问题：窗口是固定回看 1 秒的墙钟窗口 `now - 1s`，不是"自上次采样以来"的累积水位线，所以不存在"t1 看前 1 秒、t2 看前 2 秒"。窗口长度一致，只有相位差。）
+
+#### 判据：锁管采样（软），CAS 管补充（硬）
+
+| 机制 | 职责 | 强度 |
+|---|---|---|
+| `last_refill_ns` 的 CAS | **谁能补令牌** | **硬**，始终生效 |
+| 每设备 1 字节的 `fcntl` 记录锁 | **谁去采样** | **软**，失效只退化成多采几次 |
+
+**正确性绝不依赖锁**，这是本次修正最关键的设计取舍。因为锁有两个 CAS 没有的失效模式：持有者**活着但卡死**（锁不释放，内核帮不了你），以及 fork 共享（见下）。拆开之后：双持有者 → 仍不可能双补；持有者卡死 → 采样戳陈旧超 3 个周期，待机者自采自补（仍过 CAS 限速）；锁完全不可用 → 自动退回 §4.3 的每周期竞选。
+
+#### 待机者的每周期成本
+
+**1 次非阻塞 `fcntl` + 1 次共享内存读，零 NVML 调用。** 不阻塞、不自旋、不轮询睡眠。接管延迟 ≤1 周期（~100ms），与 §4.3 每周期竞选的最坏情况**完全相同**，没有退化。
+
+> 为什么不用"待机者阻塞在 `F_OFD_SETLKW` 上、被内核唤醒"：`balance_batches` 让**一个 watcher 线程管一批设备**，线程不可能既阻塞等设备 1 的锁、又继续当设备 0 的 leader。真要做需要每设备一个专职待机线程。当前接管延迟已与旧方案持平，不值得。
+
+#### 必须按设备竞选
+
+各进程的 `CUDA_VISIBLE_DEVICES` 可能不相交（进程 a 只见 GPU0/1，进程 b 只见 GPU2/3），不存在"一个进程包揽所有设备"的可能。锁范围取 `l_start = host_index, l_len = 1`，每设备一字节、互相独立。这之所以成立，是因为 **`host_index` 由 UUID 解析**（`get_host_device_index_by_uuid`），与进程可见性无关——这同时也是共享区按 `host_index` 索引的正确性前提。
+
+#### 采样结果必须发布（否则引入新 bug）
+
+集中采样后待机进程不再调 NVML，其 `top_results` 会永久陈旧 → **N-1 个进程的利用率 metrics 与 DETAIL 日志全部失真**。所以 leader 必须把 `user_current`/`sys_current`/`sys_process_num`/`external_process_num` 发布进共享区（§4.1 的 `s_*` 字段，`layout_version` 因此升到 2），待机者读它。
+
 ### 4.4 建区 / 重建：初始化路径用内核文件锁串行化
 
 **不照抄 vmem 区的写法**。现有 [`mmap_file_to_vmem_node`](../library/src/loader.c#L1563) 有两个缺陷，本设计都不继承：
@@ -315,6 +345,11 @@ static int ofd_fcntl(int fd, int wait, struct flock *fl) {
 初始化锁的载体是 **`sm_node.config` 这个文件自身**——同一个 fd 既建区、又加锁、又 `mmap`。**不引入任何独立的 `.lock` 文件**（零额外 inode、零清理负担），与 `vmem_node.config` 的既有做法一致（记录锁打在共享文件内，无独立锁文件）。
 
 **为什么不能拿父目录 `/tmp/.sm_node` 当锁**：仓库用的是 `fcntl` 记录锁（`ofd_fcntl`），而 `F_WRLCK`（排他）**要求 fd 可写打开**，目录无法以写方式打开（`open(dir, O_RDWR)` → `EISDIR`），只能 `O_RDONLY` + `F_RDLCK`（共享读锁，给不了互斥）。`flock(2)` 虽能锁 `O_RDONLY` 的目录 fd，但那是**新原语**（违背 §4.4.2 / §4.11 的"复用 `ofd_fcntl`、不引入新依赖"），且 flock 与 fcntl 混用是经典坑，换不来任何好处。
+
+> **⚠️ 这条结论的适用边界（实施期补充，别外推）**：以上只对**用完即释放的初始化锁**成立。§4.3.1 的**采样权锁要持有整个进程生命周期**，取舍完全反过来，必须用**独立的 `sm_node.lock` 文件**，理由有二：
+>
+> 1. **经典 POSIX 记录锁会在进程关闭该文件的任意一个 fd 时被丢弃**，而 `map_sm_node_region` 初始化时正好 open 后 close 了 `sm_node.config`。共用一个文件 → leadership 可能**静默蒸发**，两个进程同时以为自己拥有采样权。OFD 锁没这个问题，但 §4.11 明确承诺经典锁回退可用，所以必须按最弱假设设计。
+> 2. **锁文件绝不能进启动前清理**（§4.5.2）。删锁文件是破坏互斥的经典方式：新进程 `open(O_CREAT)` 拿到**新 inode**，锁是按 inode 的，两个进程在不同 inode 上持锁 = 完全不互斥。`sm_node.config` 可以删（我们要的就是全新区），`sm_node.lock` 不行。
 
 **锁整个文件**（`l_start=0, l_len=0`）即可：`sm_node` 运行期是纯 CAS、**没有按设备的记录锁**（它没有 Go 读者，不像 vmem 需要一致快照），所以初始化时锁全文件不会与任何其它锁范围冲突。
 
@@ -866,6 +901,9 @@ static inline int64_t *bucket_of(int host_index) {
 - **[中，`main` 同步新增] 验收时必须显式开启 `util.VMemoryNode` feature gate**（§10.6）：该 gate 默认 `false`，不开则 `vmem_node` 区根本不建，§7.2 第 6 条会**假通过**。
 - **[中，`main` 同步新增] 别照抄 `vmem_node` 的三套回收机制**（§4.5.5）：库内现有 PID 存活回收、watcher 周期体检、`atexit`/信号清理，全部只对账本成立。`sm_node` 一条都不需要；尤其 `check_cleanup_vmem_nodes_by_device` 要拿每设备写记录锁，抄进来会直接违反"watcher 路径不引入锁"。**若将来给 `sm_node` 加任何按 PID 归属的字段，这三条结论同时失效，必须重审。**
 - **[中，`main` 同步新增] fork 处理器的语义惯性**（§6.2）：`loader_child_after_fork` 现在会释放 fork 继承的显存记账链表，`child_after_fork` 重置 `last_launch_ns`——两个处理器都在"丢弃继承状态"。**共享桶必须原样保留**（子进程作为新消费者参与聚合正是设计意图），需在代码注释里写死，防止后人顺手清掉。
+- **[高，实施期新增] fork 会共享采样锁的 open file description**（§4.3.1）：OFD 锁属于 description 而非进程，而 fork **共享** description。两个方向都坏：① 子进程重跑 `initialization()` 会重新拉起自己的 watcher（`child_after_fork` 重置 `g_init_set` 的本意就是如此），于是父子都以为自己拥有采样权；② **更隐蔽**——父进程（持有者）退出后，只要子进程还持有继承的 fd，description 引用计数不为 0，**内核就不释放锁**，所有待机者永远等不到，桶饿死。这直接打穿"内核会在持有者死亡时释放锁"这条核心论据。**修复**：`child_after_fork` 必须 `close()` 继承的 fd 并清空 `g_sm_sampling_mine`，`initialization()` 用**独立于区映射的守卫**重开（折进 `g_sm_node == NULL` 那个守卫会让所有 fork 出来的子进程永久没有锁 fd）。已由 `test_sm_node_shared` 的用例 [4] 固化——该用例**断言这个 hazard 真实存在**，防止后人把 `close()` 当冗余删掉。
+- **[中，实施期新增] 采样集中化会让非 leader 进程的 metrics 失真**（§4.3.1）：待机者不再调 NVML，`top_results` 会永久陈旧。必须由 leader 发布采样结果、待机者读取，否则是一个随集中化一起引入的新 bug。
+- **[中，实施期新增] GAP 路径读进程私有的 `up_limits[]`**：粘性采样权下待机进程**永远不会**刷新私有副本 → soft 模式的 GAP 节流永久按初始值走。已修（`gap_effective_dc` 改读共享 `up_limit`，commit `ca53099`）。注意这在每周期竞选下**就已经**是 latent bug（值最多陈旧 N 个周期），只是被"人人轮得到"掩盖。
 - **[低，`main` 同步新增] `dynamic_config_t` 只能尾部追加**（§5.1）：`sm_shared_bucket` 字段必须加在结构体末尾，`hook.h` 的注释已声明重排会移动偏移。
 
 ---
