@@ -777,6 +777,29 @@ static inline int64_t *bucket_of(int host_index) {
 
 这条降级路径覆盖了一整类现实故障：**插件漏挂目录**（§4.5.1 的 5 处功能落点漏改任一处）、目录只读、`/tmp` 被业务覆盖挂载、老版本插件配新版本库。它们的后果统一是"退回今天的行为"，而**不是容器起不来**——这正是 §4.5.4 "永不致命"约定的落地点。
 
+### 5.0 关闭时等价于旧行为：逐点审计（实施期验证记录）
+
+§7.2 第 2 条要求"开关关闭时与基线逐点一致"。这不是靠自觉，而是靠**单一入口**：所有共享行为都经过 `g_sm_node`，关闭时它恒为 `NULL`。审计了它的**全部 10 处功能性使用**（`grep -n g_sm_node src/cuda_hook.c`，排除注释），每一处都有显式 NULL 分支：
+
+| 使用点 | 关闭（`g_sm_node == NULL`）时 |
+|---|---|
+| `sm_bucket_of()` | → `&g_dev_hot[i].cur_cuda_cores`（私有桶）|
+| `sm_throttled_of()` | → `&g_throttled_since_watch[i]` |
+| `sm_try_claim_refill()` | `return 1` → 控制块**永远执行**，等于没有竞选 |
+| `sm_ctl_load()` / `sm_ctl_publish()` | 立即 `return`，空操作 |
+| `sm_sampling_claim()` | `return 1` → **每进程照常自采**，等于没有 leader |
+| `sm_publish_sample()` | 立即 `return` |
+| `sm_load_published_sample()` | `return 0`；且其所在 `else if` 分支在关闭时**不可达** |
+| bypass（§4.7） | 走 `else` 分支 → **字面 SET**，与改造前逐字相同 |
+| `gap_effective_dc()` | → 私有 `up_limits[]` |
+| `initialization()` ×2 | 门控在 `g_dynamic_config.sm_shared_bucket`，整段跳过；锁 fd 因 `g_sm_node != NULL` 前置条件也跳过 |
+
+`child_after_fork` 里的 `close(g_sm_lock_fd)` 在关闭时是 no-op（fd 恒为 -1）。
+
+**唯一代价**：热路径多一个"对一个全局指针是否为 NULL"的分支。该分支高度可预测（进程生命周期内取值不变），且 `bucket` 指针**每次发射只解析一次、不在 CAS 重试循环内**。
+
+> **给后来者的硬约束**：新增任何共享行为**必须**继续以 `g_sm_node` 为唯一开关入口。一旦出现绕过它的共享写入，上面这张表就失效，而 §7.2 第 2 条是**不会自动发现**这种回归的——它只测吞吐，不测代码路径。
+
 ### 5.1 为什么走 `g_dynamic_config` 环境变量，而不是 `resource_data_t` 字段（`main` 同步补充）
 
 同步 `main` 后，仓库里出现了**第二种**开关范式，必须显式选边，否则实现时会摇摆：
@@ -907,6 +930,17 @@ static inline int64_t *bucket_of(int host_index) {
 - **[低，`main` 同步新增] `dynamic_config_t` 只能尾部追加**（§5.1）：`sm_shared_bucket` 字段必须加在结构体末尾，`hook.h` 的注释已声明重排会移动偏移。
 
 ---
+
+## 9.1 已知边界（不是缺陷，但接手前必须知道）
+
+这些是实施期逐项审计后**确认存在、且决定不修**的边界，连同不修的理由。不写下来，后来者会把它们当成 bug 反复"修"。
+
+1. **混合模式会破坏聚合限额。** 进程 A 映射成功、进程 B 失败（目录漏挂、只读、老版本插件），则 A 受共享桶约束而 B 用完整私有桶 → 聚合超限。这是"永不致命"降级（§2.1 第 5 条）的**固有代价**：要么容器起不来，要么限额在故障期变松，二者不可兼得。选后者。排查提示：日志里搜 `sm_node unavailable`。
+2. **soft 模式的弹性余量语义改变（开启时）。** `up_limits` 的爬坡（`hard_core`↔`soft_core`）由每进程一份变成**容器一份**。这是设计意图——N 份私有爬坡意味着聚合可达 N×`soft_core`——但它确实是行为变化，升级公告应提及。**hard 模式无任何语义变化**：该分支只读 `up_limits`、从不写，限额始终取配置里的 `hard_core`。
+3. **leader 采样持续失败会退化回 N× 采样。** leader 若 `get_used_gpu_utilization` 一直失败就不发布，待机者判定陈旧后各自采样。**不会 hang**，但集中化收益消失。未加"连续失败 K 次释放锁"，因为那会引入锁抖动（换个人多半一样失败），而"同容器同驱动下只有 leader 的 NVML 坏"基本不现实。
+4. **`top_results.valid` 是粘性的**（既有语义，非本设计引入）：`get_used_gpu_utilization` 只置 1、从不清零，失败时提前 `return`。所以它实际含义是"是否**曾经**采到过有效样本"。待机者转正后若采样失败，会沿用 leader 发布的样本——比它自己陈旧的私有样本**更新**，不构成回归。
+5. **`SM_SAMPLE_STALE_NS`（3 周期 ≈ 290ms）需真机确认。** 太紧 → 待机者频繁误判自采，把集中化收益吃回去；太松 → leader 卡死后桶饿死更久。
+6. **`metrics_record_aimd_event` 现在只由每周期赢家记录。** 跨进程需求和。数值上比以前 N× 虚高**更准确**，但看板口径要跟着调，否则会误以为 MD 变少了。
 
 ## 10. `vmem_node` 冻结区头 + 重建改造（已拍板纳入）
 
