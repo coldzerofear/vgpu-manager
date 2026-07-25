@@ -1272,6 +1272,28 @@ static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
  * cannot both refill within one period. */
 #define SM_REFILL_PERIOD_NS (90LL * 1000000LL)
 
+/* Standbys wait longer than the sampling owner before claiming a refill, which
+ * makes the owner win in normal operation.
+ *
+ * Without this the two claims are fully independent, and which process refills
+ * depends on nothing but the relative phase of the watchers. A standby whose
+ * cycle happens to land just after the threshold takes the refill and runs the
+ * controller on the sample the owner published up to a period ago, while the
+ * owner -- which sampled moments earlier -- loses its own CAS and its fresh
+ * sample waits a cycle to be used. Never wrong, since the sample is a 1-second
+ * NVML average and the actuation lag is already 200-400ms, but it makes "which
+ * sample fed this refill" depend on process start order, which is a poor thing
+ * to have to reason about when reading a trace.
+ *
+ * With the owner claiming at 1x and standbys at 2x, the steady state is simply
+ * "whoever sampled also refills, immediately". Standbys revert to what they
+ * are for: a backstop that fires only if the owner misses a full extra period.
+ * The takeover path is unaffected -- an owner that DIES releases its lock, so a
+ * standby becomes the owner on its next cycle and claims at 1x from then on.
+ * The 2x threshold only governs the narrow window before that, and the
+ * alive-but-stuck case. */
+#define SM_REFILL_STANDBY_PERIOD_NS (2 * SM_REFILL_PERIOD_NS)
+
 /* Returns 1 if this process owns this device's controller for this cycle.
  * Always 1 when the bucket is per-process -- there is nobody to contend with,
  * and the caller's code path stays exactly what it has always been. */
@@ -1282,11 +1304,20 @@ static int sm_try_claim_refill(int host_index) {
   int64_t *stamp = &g_sm_node->devices[host_index].last_refill_ns;
   int64_t last = __atomic_load_n(stamp, __ATOMIC_RELAXED);
   int64_t now  = monotonic_ns();
-  if (now - last < SM_REFILL_PERIOD_NS) {
+  /* g_sm_lock_fd < 0 means ownership does not exist at all (no lock file), so
+   * there is no owner to defer to and every process must keep claiming at 1x.
+   * Deferring here instead would halve the refill rate for the whole container
+   * -- nobody would ever hold the 1x ticket -- and starve the bucket. */
+  int64_t threshold = (g_sm_lock_fd < 0 || g_sm_sampling_mine[host_index])
+                        ? SM_REFILL_PERIOD_NS
+                        : SM_REFILL_STANDBY_PERIOD_NS;
+  if (now - last < threshold) {
     return 0;
   }
   /* CAS decides it: several processes can pass the staleness test at once, but
-   * only the one that swaps the stamp proceeds. */
+   * only the one that swaps the stamp proceeds. The asymmetric thresholds only
+   * bias WHO gets here; the CAS is what still guarantees at most one refill,
+   * which is why a stale g_sm_sampling_mine could never cause over-supply. */
   return CAS(stamp, last, now) ? 1 : 0;
 }
 

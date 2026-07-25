@@ -199,6 +199,68 @@ static int test_fork_keeps_lock_alive(const char *lockpath) {
   return ok ? 0 : 1;
 }
 
+/* ---- 5. the owner wins refills; standbys stay a backstop ----------------
+ * Mirrors sm_try_claim_refill's asymmetric thresholds. Two properties matter
+ * and they pull in opposite directions, which is why both are asserted:
+ *   - the owner should win essentially every refill (that is the point), and
+ *   - the refill RATE must not drop, or the bucket starves.
+ * The second is the one that catches the subtle failure: if no process holds
+ * the 1x ticket, everyone waits 2x and the container is refilled half as
+ * often, which looks like nothing at all until throughput drops. */
+static int test_owner_wins_refill(sm_node_region_t *r) {
+  const int64_t RUN_NS = 900LL * 1000000LL;
+  const int64_t STANDBY_PERIOD_NS = 2 * SM_REFILL_PERIOD_NS;
+
+  int64_t *stamp = &r->devices[3].last_refill_ns;
+  int64_t *owner_wins = &r->devices[3].share;
+  int64_t *standby_wins = &r->devices[4].share;
+  __atomic_store_n(stamp, mono_ns(), __ATOMIC_RELAXED);
+  __atomic_store_n(owner_wins, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(standby_wins, 0, __ATOMIC_RELAXED);
+
+  int64_t deadline = mono_ns() + RUN_NS;
+  for (int i = 0; i < 4; i++) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      int is_owner = (i == 0);
+      int64_t threshold = is_owner ? SM_REFILL_PERIOD_NS : STANDBY_PERIOD_NS;
+      /* Give the OWNER the latest phase deliberately. If the owner started
+       * first it would win on timing alone and this test would pass even with
+       * the asymmetry removed -- verified: it did. Starting it last means the
+       * only reason it can win is the lower threshold, so removing the
+       * asymmetry makes a standby win and the assertion below fails. */
+      usleep((useconds_t)((3 - i) * 25000));
+      while (mono_ns() < deadline) {
+        int64_t last = __atomic_load_n(stamp, __ATOMIC_RELAXED);
+        int64_t now = mono_ns();
+        if (now - last >= threshold && CAS_(stamp, last, now)) {
+          __atomic_add_fetch(is_owner ? owner_wins : standby_wins, 1, __ATOMIC_RELAXED);
+        }
+        usleep(50000);             /* poll well under the threshold so the
+                                    * owner reliably claims at its own cadence
+                                    * rather than aliasing against it */
+      }
+      _exit(0);
+    }
+    if (pid < 0) { perror("fork"); return 1; }
+  }
+  for (int i = 0; i < 4; i++) wait(NULL);
+
+  int64_t owned = __atomic_load_n(owner_wins, __ATOMIC_RELAXED);
+  int64_t stood = __atomic_load_n(standby_wins, __ATOMIC_RELAXED);
+  int64_t total = owned + stood;
+  /* The failure this guards is "nobody holds the 1x ticket, so the whole
+   * container refills at 2x". Compare against the rate that regime would
+   * produce rather than against the ideal, so the bound separates the two
+   * outcomes with margin on both sides instead of sitting on the boundary. */
+  int64_t halved_rate = RUN_NS / STANDBY_PERIOD_NS;
+  int ok = (owned > stood) && (total > halved_rate + 1);
+  printf("  [5] owner priority: owner=%ld standby=%ld total=%ld (must exceed halved-rate %ld) -> %s\n",
+         (long)owned, (long)stood, (long)total, (long)(halved_rate + 1),
+         ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
 int main(void) {
   printf("sm_node shared-bucket checks (no GPU required)\n");
   printf("  [0] ABI: dev=%zuB region=%zuB devices@%zu file=%d -> %s\n",
@@ -221,6 +283,7 @@ int main(void) {
   rc |= test_election_single_winner(r);
   rc |= test_sampling_ownership(lockpath);
   rc |= test_fork_keeps_lock_alive(lockpath);
+  rc |= test_owner_wins_refill(r);
 
   munmap(r, SM_NODE_FILE_SIZE);
   unlink(path);

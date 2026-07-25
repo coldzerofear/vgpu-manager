@@ -174,9 +174,16 @@ endif()
 #   cmake -DBUILD_SM_NODE_TESTS=ON .. && make test_sm_node_shared
 #   ./test_sm_node_shared
 # ---------------------------------------------------------------------------
+#
+# Lives in test/nogpu/ rather than test/ on purpose: test/CMakeLists.txt does
+# file(GLOB "test_*.c") and builds everything it finds against the CUDA
+# includes only. A file there that includes hook.h fails to compile the moment
+# anyone configures with -DBUILD_TESTS=ON. The subdirectory keeps the two test
+# families apart -- test/ needs a GPU and links CUDA, test/nogpu/ needs neither.
+#
 option(BUILD_SM_NODE_TESTS "Build the GPU-less sm_node shared-bucket checks" OFF)
 if(BUILD_SM_NODE_TESTS)
-    add_executable(test_sm_node_shared test/test_sm_node_shared.c)
+    add_executable(test_sm_node_shared test/nogpu/test_sm_node_shared.c)
     target_include_directories(test_sm_node_shared PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 endif()
