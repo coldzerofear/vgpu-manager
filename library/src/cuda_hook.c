@@ -1495,7 +1495,7 @@ static void sm_publish_sample(int host_index) {
 
   /* Publish the cadence we are actually achieving, so standbys can scale their
    * staleness limit to it rather than to an assumed ~100ms (see
-   * sm_sample_stale_limit). Measured from this process's own previous publish;
+   * sm_owner_cadence_ns). Measured from this process's own previous publish;
    * skipped on the first one, and whenever ownership has just changed hands,
    * because the gap across a handover reflects the takeover, not the cadence. */
   int64_t prev = g_sm_last_publish_ns[host_index];

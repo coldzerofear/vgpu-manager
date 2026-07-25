@@ -1,11 +1,20 @@
 /* Multi-process checks for the sm_node shared token bucket. No GPU, no CUDA.
  *
- * Covers the two properties the design rests on and that cannot be reasoned
- * about statically:
- *   1. N processes CASing one MAP_SHARED counter lose no updates -- i.e. the
- *      container cannot over-launch by racing.
- *   2. The per-cycle refill election admits at most one winner per period, so
- *      N watchers cannot supply the bucket N times over.
+ * Covers what cannot be established by reading the code:
+ *   [0] the region ABI is the size and shape hook.h declares.
+ *   [1] N processes CASing one MAP_SHARED counter lose no updates -- the
+ *       container cannot over-launch by racing.
+ *   [2] the refill election admits at most one winner per period, so N
+ *       watchers cannot supply the bucket N times over.
+ *   [3] sampling ownership is exclusive per device, independent between
+ *       devices, and passes to a standby when the owner dies.
+ *   [4] fork() shares the lock's open file description -- asserted to be REAL,
+ *       so the close in child_after_fork cannot be removed as redundant.
+ *   [5] the owner wins refills, without the refill RATE collapsing.
+ *   [6] the staleness limit follows the owner's real cadence, so a
+ *       slow-but-alive owner is not mistaken for a stopped one.
+ *
+ * Run via `make test` (which builds and runs this first) or `make test-nogpu`.
  */
 #include "hook.h"
 
@@ -263,7 +272,7 @@ static int test_owner_wins_refill(sm_node_region_t *r) {
 }
 
 /* ---- 6. staleness limit adapts to the owner's real cadence --------------
- * Mirrors sm_sample_stale_limit(). The watcher's per-device period is not
+ * Mirrors sm_owner_cadence_ns(). The watcher's per-device period is not
  * fixed: when processing overruns its slot the loop falls back to a 10ms floor
  * sleep, so the period becomes (processing + 10ms) per iteration and a device
  * is revisited only every dev_count iterations -- slow NVML on a 4-device batch

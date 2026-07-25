@@ -109,13 +109,24 @@ build-tests: ## Compile smoke tests under test/.
 	cd $(BUILD_DIR) && CUDA_HOME=$(CUDA_HOME) $(CMAKE) \
 	    -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) \
 	    -DBUILD_TESTS=ON \
+	    -DBUILD_SM_NODE_TESTS=ON \
 	    -DTEST_DEVICE_ID=$(TEST_DEVICE_ID) \
 	    $(CMAKE_EXTRA_ARGS) \
 	    $(LIBRARY_DIR)
 	$(MAKE) -C $(BUILD_DIR) -j$(J)
 
+.PHONY: test-nogpu
+test-nogpu: build-tests ## Run the sm_node shared-bucket checks (no GPU, no CUDA needed).
+	$(BUILD_DIR)/test_sm_node_shared
+
 .PHONY: test
+# Runs the GPU-less checks first, deliberately. They are seconds long, need no
+# driver, and cover what reading the code cannot: cross-process CAS, the refill
+# election, sampling ownership and the fork hazard. Running them here is also
+# the only thing that makes them run at all -- a target nobody invokes is a
+# test that quietly rots, which is the failure mode this suite exists to avoid.
 test: build-tests ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
+	$(BUILD_DIR)/test_sm_node_shared
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
 	    $(BASH) $(BUILD_DIR)/test/run_tests_with_env.sh $(BUILD_DIR)/test $(SO_FILE)
 
