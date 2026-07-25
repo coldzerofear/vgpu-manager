@@ -1560,56 +1560,110 @@ DONE:
   return ret;
 }
 
+static int vmem_node_header_valid(const device_vmemory_t *r) {
+  return __atomic_load_n(&r->magic, __ATOMIC_ACQUIRE) == VMEM_NODE_MAGIC &&
+         r->layout_version == VMEM_NODE_LAYOUT_VERSION            &&
+         r->region_size    == (uint32_t)sizeof(device_vmemory_t)  &&
+         r->device_count   == (uint32_t)MAX_DEVICE_COUNT;
+}
+
+/* Called with the header byte write-locked.
+ *
+ * Rebuilding rather than refusing to start is the whole point of this change.
+ * The previous behaviour -- "size mismatch => return 1" -- combined with the
+ * caller's LOGGER(FATAL) meant that upgrading the library made containers
+ * unable to start on any path without a pre-start cleanup hook (DRA without
+ * NRI). Losing the ledger costs nothing there: a layout mismatch means the
+ * file was written by the PREVIOUS incarnation of this container, so every
+ * record in it belongs to a process that no longer exists. Discarding records
+ * of dead PIDs is exactly what the liveness sweep does anyway.
+ *
+ * magic is published last, with release ordering, so an interrupted rebuild
+ * leaves the region invalid rather than half-initialised, and the next process
+ * simply rebuilds again. That same ordering is what makes the unlocked Go
+ * reader safe here: mid-rebuild it sees magic == 0 and skips the container. */
+static void vmem_node_rebuild_locked(device_vmemory_t *r) {
+  LOGGER(WARNING, "vmem_node layout mismatch (magic=%#x ver=%u size=%u count=%u), rebuilding",
+         r->magic, r->layout_version, r->region_size, r->device_count);
+  memset(r, 0, VMEM_NODE_FILE_SIZE);
+  r->device_count   = (uint32_t)MAX_DEVICE_COUNT;
+  r->region_size    = (uint32_t)sizeof(device_vmemory_t);
+  r->layout_version = VMEM_NODE_LAYOUT_VERSION;
+  __atomic_store_n(&r->magic, VMEM_NODE_MAGIC, __ATOMIC_RELEASE);
+}
+
 int mmap_file_to_vmem_node(device_vmemory_t** data) {
-  int fd;
-  int created = 0;
+  *data = NULL;
   if (unlikely(file_exist(VMEMORY_NODE_PATH) != 0)) {
     mkdir(VMEMORY_NODE_PATH, 0755);
   }
-  const char* filename = VMEMORY_NODE_FILE_PATH;
-  if (unlikely(file_exist(filename) != 0)) {
-    fd = open(filename, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (unlikely(fd == -1)) {
-      LOGGER(ERROR, "can't create %s, error %s", filename, strerror(errno));
-      return 1;
-    }
-    created = 1;
-    if (ftruncate(fd, sizeof(device_vmemory_t)) == -1) {
-      LOGGER(ERROR, "ftruncate failed: %s", strerror(errno));
-      close(fd);
-      return 1;
-    }
-  } else {
-    fd = open(filename, O_RDWR | O_CLOEXEC);
-    if (unlikely(fd == -1)) {
-      LOGGER(ERROR, "can't open %s, error %s", filename, strerror(errno));
-      return 1;
-    }
+
+  /* Unconditional O_CREAT, no file_exist() pre-check. The old two-branch form
+   * had a TOCTOU: two processes could both find the file absent, both set
+   * created = 1, and both memset the mapping -- each erasing what the other
+   * had just written. "Who created it" is now a question never asked. */
+  int fd = open(VMEMORY_NODE_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (unlikely(fd == -1)) {
+    LOGGER(WARNING, "can't open %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
+    return 1;
   }
+
+  /* Lock ONE byte in the frozen header, not the whole file. Byte 0 is never a
+   * record-lock target: the per-device locks live at
+   * GET_VMEMORY_LOCK_OFFSET(i) = offsetof(..., devices[i].lock_byte), the
+   * lowest of which is 16516. A whole-file lock would instead contend with
+   * every per-device reader and writer -- including the Go manager's read
+   * locks -- for no benefit, since all this needs to exclude is another
+   * process initialising concurrently. */
+  struct flock fl;
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start = 0;
+  fl.l_len = 1;
+  if (unlikely(ofd_fcntl(fd, 1, &fl) == -1)) {
+    LOGGER(WARNING, "can't lock %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
+    close(fd);
+    return 1;
+  }
+
   int ret = 0;
   struct stat sb;
-  if (fstat(fd, &sb) == -1) {
-    LOGGER(ERROR, "fstat failed: %s", strerror(errno));
+  if (unlikely(fstat(fd, &sb) == -1)) {
+    LOGGER(WARNING, "fstat %s failed: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
     ret = 1;
-    goto DONE;
+    goto UNLOCK;
   }
-  if (!created && sb.st_size != sizeof(device_vmemory_t)) {
-    LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
-                   sizeof(device_vmemory_t), (long long)sb.st_size);
-    ret = 1;
-    goto DONE;
+  if (sb.st_size != VMEM_NODE_FILE_SIZE) {
+    if (unlikely(ftruncate(fd, VMEM_NODE_FILE_SIZE) == -1)) {
+      LOGGER(WARNING, "ftruncate %s failed: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
+      ret = 1;
+      goto UNLOCK;
+    }
   }
-  *data = (device_vmemory_t*)mmap(NULL, sb.st_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
-  if (*data == MAP_FAILED) {
+
+  device_vmemory_t *region = (device_vmemory_t*)mmap(NULL, VMEM_NODE_FILE_SIZE,
+                                                     PROT_READ | PROT_WRITE,
+                                                     MAP_SHARED, fd, 0);
+  if (unlikely(region == MAP_FAILED)) {
     LOGGER(ERROR, "mmap vmemory node failed: %s", strerror(errno));
     ret = 1;
-    *data = NULL;
-    goto DONE;
+    goto UNLOCK;
   }
-  if (created) {
-    memset(*data, 0, sizeof(device_vmemory_t));
+  /* Fresh file (all zero) and stale file take the same path: magic does not
+   * match, so rebuild. One code path, no `created` flag. */
+  if (!vmem_node_header_valid(region)) {
+    vmem_node_rebuild_locked(region);
   }
-DONE:
+  *data = region;
+
+UNLOCK:
+  fl.l_type = F_UNLCK;
+  ofd_fcntl(fd, 1, &fl);
+  /* Safe to close: the mapping holds its own reference. On the classic-POSIX
+   * fallback, closing any fd for a file drops that process's locks on it --
+   * harmless here because this runs during init, before this process has taken
+   * a single per-device lock. */
   close(fd);
   return ret;
 }

@@ -367,9 +367,48 @@ typedef struct {
   unsigned char lock_byte;
 } device_vmem_used_t;
 
+/* vmem_node region. Structurally the same frozen-header idea as sm_node below,
+ * for the same reason -- the host directory outlives a container while the .so
+ * is version-pinned per container, so a newer library can be handed a file an
+ * older one wrote -- but with one hard difference: this region HAS a host-side
+ * Go reader (pkg/config/vmem), so the layout is a CROSS-LANGUAGE ABI.
+ *
+ * Anything changed here must be mirrored in DeviceVMemoryT, and in particular
+ * getVmemoryLockOffset() must keep agreeing with GET_VMEMORY_LOCK_OFFSET in
+ * lock.c. C gets that for free because offsetof() accounts for the header; Go
+ * computes the offset by hand, so it is the one place in this design where
+ * being wrong produces no error at all -- just fcntl locks taken on
+ * non-overlapping byte ranges, mutual exclusion silently gone, and torn reads
+ * reported as valid metrics. TestVMemoryLayoutMatchesC exists to catch it. */
+#define VMEM_NODE_MAGIC          0x564D4E44U   /* "VMND" */
+#define VMEM_NODE_LAYOUT_VERSION 1U
+/* Permanent constant, like SM_NODE_FILE_SIZE, and here it prevents a real
+ * crash rather than merely simplifying: the Go manager keeps this file mmap'd.
+ * If a container restarted with a library that shrank the struct and
+ * ftruncate'd the file down, the manager's existing mapping would extend past
+ * EOF and touching it is SIGBUS. A size that never changes removes that class
+ * outright. Current use 256.25 KiB; reserved 320 KiB (~1.25x). */
+#define VMEM_NODE_FILE_SIZE      (320 * 1024)
+
 typedef struct {
-  device_vmem_used_t devices[MAX_DEVICE_COUNT];
+  /* ---- FROZEN HEADER: 16 bytes, permanent ABI. Same contract as sm_node. */
+  uint32_t magic;             /* VMEM_NODE_MAGIC          */
+  uint32_t layout_version;    /* VMEM_NODE_LAYOUT_VERSION */
+  uint32_t region_size;       /* sizeof(device_vmemory_t) */
+  uint32_t device_count;      /* MAX_DEVICE_COUNT         */
+  /* ---- end frozen header. */
+  uint8_t  _pad[CACHELINE_SIZE - 16];
+  device_vmem_used_t devices[MAX_DEVICE_COUNT];   /* shifted down by 128B */
 } device_vmemory_t;
+
+_Static_assert(offsetof(device_vmemory_t, devices) == CACHELINE_SIZE,
+               "vmem region header must be exactly one cache line");
+_Static_assert(sizeof(device_vmemory_t) <= VMEM_NODE_FILE_SIZE,
+               "vmem region must fit the permanently reserved file size");
+_Static_assert(offsetof(device_vmemory_t, magic) == 0,
+               "frozen header ABI: magic stays at offset 0");
+_Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
+               "frozen header ABI: layout_version stays at offset 4");
 
 /* ---------------------------------------------------------------------- *
  *  sm_node -- container-wide shared token bucket for SM (compute) limiting
