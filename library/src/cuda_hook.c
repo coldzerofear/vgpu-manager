@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <dirent.h>
@@ -168,6 +169,25 @@ static int g_sm_sampling_mine[MAX_DEVICE_COUNT] = {0};
  * cadence it publishes. Per-process and reset on fork with the ownership flags,
  * so a child never reports an interval spanning the fork. */
 static int64_t g_sm_last_publish_ns[MAX_DEVICE_COUNT] = {0};
+
+/* Identity of the region file we mapped, so we can notice it being replaced.
+ *
+ * Deleting the region inside the container is not hypothetical -- the mount has
+ * to be writable for the library to create the region at all, and a root
+ * container can unlink what it can write (a recursive sweep of /tmp does it
+ * without meaning to). The mount point itself survives, so this is invisible:
+ * `rm -rf` empties the directory and only fails on the mountpoint.
+ *
+ * Why it matters more than losing a file: processes that already mapped the
+ * region keep working, because the mmap holds the inode alive. But the next
+ * process to start calls open(O_CREAT), gets a NEW inode, and maps a DIFFERENT
+ * region -- so the container ends up with two shared buckets, each refilling on
+ * its own last_refill_ns, and the aggregate limit is twice as loose. That is
+ * precisely the silent split §4.5.4 rejected unlink+rename to avoid, reintroduced
+ * from inside the container. It deserves a log line rather than nothing. */
+static ino_t g_sm_node_ino;
+static dev_t g_sm_node_dev;
+static int64_t g_sm_ident_checked_ns;
 
 static inline int64_t monotonic_ns(void);
 
@@ -1347,6 +1367,47 @@ static int64_t sm_owner_cadence_ns(const sm_node_dev_t *d) {
  * standby becomes the owner on its next cycle and claims at 1x from then on.
  * The 2x threshold only governs the narrow window before that, and the
  * alive-but-stuck case. */
+/* Warn if the region file at SM_NODE_FILE_PATH is no longer the one we mapped.
+ *
+ * Rate-limited to roughly once a second and only reached on the refill path, so
+ * it costs one stat per second per process -- irrelevant next to the NVML call
+ * beside it, and nothing on the launch path.
+ *
+ * Remembers the new identity after warning, so a replacement produces one line
+ * rather than a stream, and a later replacement is reported again. It does NOT
+ * remap: the processes that mapped the old inode are still using it, so
+ * adopting the new one here would only add a third view. There is no in-process
+ * recovery -- the container has to restart -- and saying so is the useful part. */
+static void sm_node_check_identity(void) {
+  if (g_sm_node == NULL || g_sm_node_ino == 0) {
+    return;
+  }
+  int64_t now = monotonic_ns();
+  if (now - g_sm_ident_checked_ns < 1000000000LL) {
+    return;
+  }
+  g_sm_ident_checked_ns = now;
+
+  struct stat sb;
+  if (stat(SM_NODE_FILE_PATH, &sb) != 0) {
+    LOGGER(WARNING, "%s has been deleted; processes started from now on will create a "
+                    "SEPARATE region and the container's aggregate SM limit will be "
+                    "enforced per group, not container-wide. Restart the container.",
+                    SM_NODE_FILE_PATH);
+    g_sm_node_ino = 0;             /* stop repeating until it reappears below */
+    return;
+  }
+  if (sb.st_ino != g_sm_node_ino || sb.st_dev != g_sm_node_dev) {
+    LOGGER(WARNING, "%s was replaced (inode %llu -> %llu); this process is still mapped "
+                    "to the old region while newer processes use the new one, so the "
+                    "shared bucket has split. Restart the container.",
+                    SM_NODE_FILE_PATH,
+                    (unsigned long long)g_sm_node_ino, (unsigned long long)sb.st_ino);
+    g_sm_node_ino = sb.st_ino;     /* report each replacement once */
+    g_sm_node_dev = sb.st_dev;
+  }
+}
+
 /* Returns 1 if this process owns this device's controller for this cycle.
  * Always 1 when the bucket is per-process -- there is nobody to contend with,
  * and the caller's code path stays exactly what it has always been. */
@@ -1638,6 +1699,9 @@ static void *utilization_watcher(void *arg) {
         continue;
       }
       sm_ctl_load(host_index);
+      /* Winner-only and self-rate-limited: cheap enough here, absent from the
+       * launch path entirely. */
+      sm_node_check_identity();
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
@@ -2185,11 +2249,18 @@ static void initialization() {
         __atomic_store_n(&g_sm_node->devices[i].total_cuda_cores,
                          g_total_cuda_cores[i], __ATOMIC_RELAXED);
       }
+      /* Remember which file we mapped, so sm_node_check_identity() can notice it
+       * being replaced under us. */
+      struct stat sb;
+      if (stat(SM_NODE_FILE_PATH, &sb) == 0) {
+        g_sm_node_ino = sb.st_ino;
+        g_sm_node_dev = sb.st_dev;
+      }
       /* Name the file. "attached" alone sent the first user of this feature
        * looking for it in the wrong place; the region is an ordinary file and
        * the fastest way to confirm which one is to say where it is. */
-      LOGGER(INFO, "sm_node attached at %s (%d bytes): container-wide shared token bucket enabled",
-             SM_NODE_FILE_PATH, SM_NODE_FILE_SIZE);
+      LOGGER(INFO, "sm_node attached at %s (%d bytes, inode %llu): container-wide shared token bucket enabled",
+             SM_NODE_FILE_PATH, SM_NODE_FILE_SIZE, (unsigned long long)g_sm_node_ino);
     }
   }
 
