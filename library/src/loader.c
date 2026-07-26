@@ -1560,6 +1560,69 @@ DONE:
   return ret;
 }
 
+/* Does `dir` sit on its own mount, or is it just a directory inside `parent`?
+ * A bind mount is its own mount point and reports a different st_dev than its
+ * parent. Returns 1 mounted, 0 not, -1 unknown (stat failed -- draw no
+ * conclusion). Must be called BEFORE any mkdir of `dir`, or it describes a
+ * directory we created ourselves. */
+static int dir_is_mount_point(const char *dir, const char *parent) {
+  struct stat dir_sb, parent_sb;
+  if (stat(dir, &dir_sb) != 0) return -1;
+  if (stat(parent, &parent_sb) != 0) return -1;
+  return dir_sb.st_dev != parent_sb.st_dev ? 1 : 0;
+}
+
+/* Identity of the vmem_node region we mapped, so a replacement can be reported.
+ *
+ * The exposure is the same as sm_node's -- a writable mount a root container can
+ * unlink from, where `rm -rf` empties the directory and only fails on the mount
+ * point -- but the consequence is worse, because this region is a LEDGER rather
+ * than a self-correcting feedback quantity. Processes already mapped keep the
+ * old inode; the next one to start creates a new one; and from then on each
+ * group's get_used_gpu_virt_memory() sums only its own charges. Neither sees the
+ * other's oversold/UVA allocations, so the memory limit is under-enforced
+ * against the physical device.
+ *
+ * Detection only. Remapping to the new region would be actively harmful here:
+ * this process's existing charges live in the old region and would be orphaned
+ * (the PID-liveness sweep only ever scans the region a process is mapped to),
+ * while a later free would subtract from a region that never recorded the
+ * charge -- clamped at zero by sub_gpu_virt_memory, i.e. silent drift. The same
+ * ledger-versus-feedback asymmetry that says rebuild-on-layout-mismatch is safe
+ * says re-attach-on-replacement is not. */
+static ino_t g_vmem_node_ino;
+static dev_t g_vmem_node_dev;
+static int   g_vmem_ident_warned;
+
+void vmem_node_check_identity(void) {
+  if (g_device_vmem == NULL || g_vmem_node_ino == 0) {
+    return;
+  }
+  struct stat sb;
+  if (stat(VMEMORY_NODE_FILE_PATH, &sb) != 0) {
+    if (!g_vmem_ident_warned) {
+      LOGGER(WARNING, "%s has been deleted; processes started from now on will keep a "
+                      "SEPARATE virtual-memory ledger, so neither group sees the other's "
+                      "charges and the memory limit is under-enforced. Restart the container.",
+                      VMEMORY_NODE_FILE_PATH);
+      g_vmem_ident_warned = 1;
+    }
+    return;
+  }
+  if (sb.st_ino != g_vmem_node_ino || sb.st_dev != g_vmem_node_dev) {
+    LOGGER(WARNING, "%s was replaced (inode %llu -> %llu); this process still accounts "
+                    "into the old ledger while newer processes use the new one, so the "
+                    "memory limit is under-enforced. Restart the container.",
+                    VMEMORY_NODE_FILE_PATH,
+                    (unsigned long long)g_vmem_node_ino, (unsigned long long)sb.st_ino);
+    g_vmem_node_ino = sb.st_ino;
+    g_vmem_node_dev = sb.st_dev;
+    g_vmem_ident_warned = 0;
+    return;
+  }
+  g_vmem_ident_warned = 0;
+}
+
 static int vmem_node_header_valid(const device_vmemory_t *r) {
   return __atomic_load_n(&r->magic, __ATOMIC_ACQUIRE) == VMEM_NODE_MAGIC &&
          r->layout_version == VMEM_NODE_LAYOUT_VERSION            &&
@@ -1594,6 +1657,17 @@ static void vmem_node_rebuild_locked(device_vmemory_t *r) {
 
 int mmap_file_to_vmem_node(device_vmemory_t** data) {
   *data = NULL;
+
+  /* Before mkdir, for the same reason as sm_node: a missing mount is not
+   * detectable afterwards, because mkdir would have created the directory on
+   * the container's own filesystem and everything below would then succeed. */
+  if (dir_is_mount_point(VMEMORY_NODE_PATH, TMP_DIR) == 0) {
+    LOGGER(WARNING, "%s is not a mount point -- the plugin did not provide it, so this "
+                    "ledger lives in the container's own /tmp: it will NOT be cleaned "
+                    "between container restarts and is not visible from the host",
+                    VMEMORY_NODE_PATH);
+  }
+
   if (unlikely(file_exist(VMEMORY_NODE_PATH) != 0)) {
     mkdir(VMEMORY_NODE_PATH, 0755);
   }
@@ -1655,6 +1729,10 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
   if (!vmem_node_header_valid(region)) {
     vmem_node_rebuild_locked(region);
   }
+  /* Remember which inode we mapped so vmem_node_check_identity() can notice it
+   * being replaced. sb is from the fstat above, on this same fd. */
+  g_vmem_node_ino = sb.st_ino;
+  g_vmem_node_dev = sb.st_dev;
   *data = region;
 
 UNLOCK:
@@ -1733,6 +1811,7 @@ int open_sm_node_lock(void) {
   return fd;
 }
 
+
 /* Is SM_NODE_PATH the directory the plugin mounted in, or one we just created
  * inside the container's own /tmp?
  *
@@ -1750,10 +1829,7 @@ int open_sm_node_lock(void) {
  * its parent. Same st_dev means no mount landed. Returns 1 mounted, 0 not,
  * -1 unknown (stat failed -- do not draw a conclusion from that). */
 static int sm_node_dir_is_mounted(void) {
-  struct stat dir_sb, parent_sb;
-  if (stat(SM_NODE_PATH, &dir_sb) != 0) return -1;
-  if (stat(TMP_DIR, &parent_sb) != 0) return -1;
-  return dir_sb.st_dev != parent_sb.st_dev ? 1 : 0;
+  return dir_is_mount_point(SM_NODE_PATH, TMP_DIR);
 }
 
 int map_sm_node_region(sm_node_region_t **data) {

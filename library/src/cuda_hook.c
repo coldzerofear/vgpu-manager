@@ -40,6 +40,7 @@
 
 extern resource_data_t* g_vgpu_config;
 extern device_util_t* g_device_util;
+extern device_vmemory_t* g_device_vmem;
 
 extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
@@ -187,7 +188,16 @@ static int64_t g_sm_last_publish_ns[MAX_DEVICE_COUNT] = {0};
  * from inside the container. It deserves a log line rather than nothing. */
 static ino_t g_sm_node_ino;
 static dev_t g_sm_node_dev;
+/* CAS'd, not plain-written: unlike every other per-device static in this file,
+ * the identity check is global rather than per-device, so the "each watcher
+ * thread owns a disjoint host_index slice" invariant that lets those be plain
+ * ints does NOT hold here -- several watcher threads reach it concurrently. The
+ * stamp doubles as the claim: whoever swaps it does the check, so ino/dev below
+ * still have a single writer. */
 static int64_t g_sm_ident_checked_ns;
+/* Suppresses repeats of the SAME complaint. Written only by the thread that won
+ * the stamp CAS. */
+static int g_sm_ident_warned;
 
 static inline int64_t monotonic_ns(void);
 
@@ -1378,23 +1388,49 @@ static int64_t sm_owner_cadence_ns(const sm_node_dev_t *d) {
  * remap: the processes that mapped the old inode are still using it, so
  * adopting the new one here would only add a third view. There is no in-process
  * recovery -- the container has to restart -- and saying so is the useful part. */
-static void sm_node_check_identity(void) {
-  if (g_sm_node == NULL || g_sm_node_ino == 0) {
+static void shared_regions_check_identity(void) {
+  /* Note what is NOT guarded here. An earlier version bailed out on
+   * g_sm_node == NULL, which silently disabled the vmem_node check in the
+   * DEFAULT configuration -- the shared bucket is opt-in, the ledger is not, so
+   * the common case was the one left unchecked. Each region is guarded
+   * individually below instead. */
+  if (g_sm_node == NULL && g_device_vmem == NULL) {
     return;
   }
-  int64_t now = monotonic_ns();
-  if (now - g_sm_ident_checked_ns < 1000000000LL) {
+  int64_t last = __atomic_load_n(&g_sm_ident_checked_ns, __ATOMIC_RELAXED);
+  int64_t now  = monotonic_ns();
+  if (now - last < 1000000000LL) {
     return;
   }
-  g_sm_ident_checked_ns = now;
+  /* Claim the interval. A thread that loses simply skips -- the check is
+   * whole-container, so one per interval is exactly what is wanted, and this
+   * keeps the state below single-writer. */
+  if (!CAS(&g_sm_ident_checked_ns, last, now)) {
+    return;
+  }
 
+  /* Same interval, same claim: the vmem_node ledger is exposed to exactly the
+   * same in-container deletion, and its split is worse (an under-enforced memory
+   * limit rather than a loose SM limit). Checked here so both regions share one
+   * stat-per-second budget and one call site. */
+  vmem_node_check_identity();          /* self-guards on g_device_vmem */
+
+  if (g_sm_node == NULL || g_sm_node_ino == 0) {
+    return;                             /* shared bucket off, or identity unknown */
+  }
   struct stat sb;
   if (stat(SM_NODE_FILE_PATH, &sb) != 0) {
-    LOGGER(WARNING, "%s has been deleted; processes started from now on will create a "
-                    "SEPARATE region and the container's aggregate SM limit will be "
-                    "enforced per group, not container-wide. Restart the container.",
-                    SM_NODE_FILE_PATH);
-    g_sm_node_ino = 0;             /* stop repeating until it reappears below */
+    if (!g_sm_ident_warned) {
+      LOGGER(WARNING, "%s has been deleted; processes started from now on will create a "
+                      "SEPARATE region and the container's aggregate SM limit will be "
+                      "enforced per group, not container-wide. Restart the container.",
+                      SM_NODE_FILE_PATH);
+      g_sm_ident_warned = 1;
+    }
+    /* g_sm_node_ino is deliberately left intact rather than zeroed. Zeroing it
+     * would trip the guard at the top of this function and disable the check
+     * permanently, so a file that later reappears under a new inode -- the
+     * moment the bucket actually splits -- would never be reported. */
     return;
   }
   if (sb.st_ino != g_sm_node_ino || sb.st_dev != g_sm_node_dev) {
@@ -1405,7 +1441,10 @@ static void sm_node_check_identity(void) {
                     (unsigned long long)g_sm_node_ino, (unsigned long long)sb.st_ino);
     g_sm_node_ino = sb.st_ino;     /* report each replacement once */
     g_sm_node_dev = sb.st_dev;
+    g_sm_ident_warned = 0;         /* a further replacement is a new complaint */
+    return;
   }
+  g_sm_ident_warned = 0;           /* healthy again */
 }
 
 /* Returns 1 if this process owns this device's controller for this cycle.
@@ -1701,7 +1740,7 @@ static void *utilization_watcher(void *arg) {
       sm_ctl_load(host_index);
       /* Winner-only and self-rate-limited: cheap enough here, absent from the
        * launch path entirely. */
-      sm_node_check_identity();
+      shared_regions_check_identity();
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 

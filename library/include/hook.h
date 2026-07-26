@@ -739,6 +739,14 @@ int ofd_fcntl(int fd, int wait, struct flock *fl);
 int map_sm_node_region(sm_node_region_t **data);
 
 /**
+ * Warn if the vmem_node region file is no longer the inode we mapped -- deleted
+ * or replaced from inside the container. Detection only; see the comment on the
+ * definition for why re-attaching to a replacement would be worse than leaving
+ * the ledger split. Caller supplies the rate limiting.
+ */
+void vmem_node_check_identity(void);
+
+/**
  * Open (creating if needed) the sm_node sampling-lock file and return its fd,
  * or -1. The caller keeps the fd for the process lifetime and never closes it
  * -- see SM_NODE_LOCK_PATH for why closing matters on the classic-POSIX-lock
