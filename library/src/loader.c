@@ -1646,8 +1646,20 @@ static int vmem_node_header_valid(const device_vmemory_t *r) {
  * simply rebuilds again. That same ordering is what makes the unlocked Go
  * reader safe here: mid-rebuild it sees magic == 0 and skips the container. */
 static void vmem_node_rebuild_locked(device_vmemory_t *r) {
-  LOGGER(WARNING, "vmem_node layout mismatch (magic=%#x ver=%u size=%u count=%u), rebuilding",
-         r->magic, r->layout_version, r->region_size, r->device_count);
+  /* First build and repair share this code path on purpose -- one path cannot
+   * disagree with itself -- but they are not the same EVENT and must not read
+   * the same in a log. A fresh region is all zeroes because the control plane
+   * deletes the file before every container start, so "layout mismatch" on a
+   * normal first start is alarming and wrong. Only a header with something in
+   * it is evidence of drift. */
+  if (r->magic == 0 && r->layout_version == 0 &&
+      r->region_size == 0 && r->device_count == 0) {
+    LOGGER(INFO, "vmem_node region initialised (%d bytes, layout v%u)",
+           VMEM_NODE_FILE_SIZE, VMEM_NODE_LAYOUT_VERSION);
+  } else {
+    LOGGER(WARNING, "vmem_node layout mismatch (magic=%#x ver=%u size=%u count=%u), rebuilding",
+           r->magic, r->layout_version, r->region_size, r->device_count);
+  }
   memset(r, 0, VMEM_NODE_FILE_SIZE);
   r->device_count   = (uint32_t)MAX_DEVICE_COUNT;
   r->region_size    = (uint32_t)sizeof(device_vmemory_t);
@@ -1770,8 +1782,16 @@ static int sm_node_header_valid(const sm_node_region_t *r) {
  * rebuild is idempotent and interruptible, with no half-initialised resting
  * state. */
 static void sm_node_rebuild_locked(sm_node_region_t *r) {
-  LOGGER(WARNING, "sm_node layout mismatch (magic=%#x ver=%u size=%u count=%u), rebuilding",
-         r->magic, r->layout_version, r->region_size, r->device_count);
+  /* See vmem_node_rebuild_locked: same path for first build and repair, but a
+   * first build is not a mismatch and must not be reported as one. */
+  if (r->magic == 0 && r->layout_version == 0 &&
+      r->region_size == 0 && r->device_count == 0) {
+    LOGGER(INFO, "sm_node region initialised (%d bytes, layout v%u)",
+           SM_NODE_FILE_SIZE, SM_NODE_LAYOUT_VERSION);
+  } else {
+    LOGGER(WARNING, "sm_node layout mismatch (magic=%#x ver=%u size=%u count=%u), rebuilding",
+           r->magic, r->layout_version, r->region_size, r->device_count);
+  }
 
   memset(r, 0, SM_NODE_FILE_SIZE);
 
