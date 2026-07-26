@@ -1733,9 +1733,44 @@ int open_sm_node_lock(void) {
   return fd;
 }
 
+/* Is SM_NODE_PATH the directory the plugin mounted in, or one we just created
+ * inside the container's own /tmp?
+ *
+ * This distinction is not cosmetic and it is not detectable any other way. When
+ * the mount is missing -- an older plugin, or one of the provisioning sites
+ * missed -- mkdir() below happily creates the directory on the container's own
+ * filesystem and open(O_CREAT) succeeds, so the region attaches and everything
+ * looks healthy. It mostly works, too, because every process in the container
+ * shares that filesystem. What is lost is precisely what the dedicated mount
+ * exists for: the control plane's pre-start cleanup deletes a path on the HOST,
+ * so a region living in the container's /tmp is never cleaned and survives
+ * restarts, and it is invisible from the host when someone goes looking.
+ *
+ * A bind mount is its own mount point, so it reports a different st_dev than
+ * its parent. Same st_dev means no mount landed. Returns 1 mounted, 0 not,
+ * -1 unknown (stat failed -- do not draw a conclusion from that). */
+static int sm_node_dir_is_mounted(void) {
+  struct stat dir_sb, parent_sb;
+  if (stat(SM_NODE_PATH, &dir_sb) != 0) return -1;
+  if (stat(TMP_DIR, &parent_sb) != 0) return -1;
+  return dir_sb.st_dev != parent_sb.st_dev ? 1 : 0;
+}
+
 int map_sm_node_region(sm_node_region_t **data) {
   *data = NULL;
   if (unlikely(g_vgpu_config == NULL)) return 1;
+
+  /* Checked BEFORE mkdir, or the answer would describe our own directory. */
+  int mounted = sm_node_dir_is_mounted();
+  if (mounted == 0) {
+    LOGGER(WARNING, "%s is not a mount point -- the plugin did not provide it, so this "
+                    "region lives in the container's own /tmp: it will NOT be cleaned "
+                    "between container restarts and is not visible from the host",
+                    SM_NODE_PATH);
+  } else if (mounted < 0) {
+    LOGGER(VERBOSE, "%s mount state unknown (stat failed: %s)",
+                    SM_NODE_PATH, strerror(errno));
+  }
 
   if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
     mkdir(SM_NODE_PATH, 0755);

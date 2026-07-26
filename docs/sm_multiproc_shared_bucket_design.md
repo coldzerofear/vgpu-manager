@@ -971,7 +971,14 @@ static inline int64_t *bucket_of(int host_index) {
 - **[高] bypass 语义改写**（§4.7）：SET→增量累加，是最易引入超发/欠发的一处，需专门单测。
 - **[高，新增] 控制状态块整体入共享区**（§4.13）：改动面比前几稿承诺的大——不只是令牌桶，`md_cooldown`、排他 FSM ×3、`throttled_since_watch` 都要搬。这些字段的注释目前都写着"watcher-thread-only, no atomics needed"，**搬动时必须同步改注释**，否则后人会按旧注释假设做出错误优化。`aimd` 的 MD 雪崩（`md_divisor^N`）是不改就必现的回归，需专门用例覆盖。
 - **[中] 库升级后的布局错位**（§4.5.4）：宿主目录按 `<pod-uid>_<cont-name>` 跨容器重启存活，而 `.so` 按版本挂载 → 新库可能映射到老结构体。控制面清理覆盖了 device plugin / DRA+NRI 两路；**DRA 非 NRI 路径无钩子**，由 `magic`/`layout_version`/`region_size` 守卫兜底。**改结构体必须 bump `SM_NODE_LAYOUT_VERSION`**，需在 review 中把关。
-- **[中] 挂载点漏改**（§4.5.1）：新目录要在 **5 处功能落点**并列（device plugin Allocate/EnsureDir、DRA CDI、DRA NRI、`ensurePartitionDirectories`），另加 1 处 NRI 观测落点。漏改任一处 → 该路径下 `open` 失败 → 由 §5 的降级兜住（退回私有桶），**绝不可 fatal**。需专门测每条路径。
+- **[中，实施期修正] 挂载点漏改**（§4.5.1）：新目录要在 **5 处功能落点**并列（device plugin Allocate/EnsureDir、DRA CDI、DRA NRI、`ensurePartitionDirectories`），另加 1 处 NRI 观测落点。
+  > **⚠️ 原先写的"漏改任一处 → `open` 失败 → 由 §5 降级兜住"是错的**（首个真实用户就撞上了）。`map_sm_node_region` 第一步就是 `mkdir(SM_NODE_PATH)`——挂载没生效时它会在**容器自己的 `/tmp`** 上把目录建出来，`open(O_CREAT)` 随即成功，于是打印 `sm_node attached`、一切看起来正常。**漏挂不会降级，会静默落到容器自己的 `/tmp`**，而那正是 §4.5.1 明确要避开的位置。
+  >
+  > 功能上多数仍可工作（同容器进程共享同一文件系统），真正丢掉的是：① 启动前清理（§4.5.2）删的是**宿主**路径，落在容器 `/tmp` 的区**永不被清理、跨重启存活**；② 宿主侧完全看不到该文件，排查时会误以为特性没生效。
+  >
+  > **已加检测**：`sm_node_dir_is_mounted()` 比较 `SM_NODE_PATH` 与 `TMP_DIR` 的 `st_dev`（bind mount 自成挂载点，`st_dev` 必然不同），不同即已挂载；相同则 `LOGGER(WARNING)` 明确指出"这个区在容器自己的 /tmp 里、不会被清理、宿主看不到"。必须在 `mkdir` **之前**判定，否则测的是我们自己刚建的目录。同时 `attached` 日志现在会打印**完整文件路径与尺寸**。
+  >
+  > `/tmp/.vmem_node` 有**完全相同**的静默回退问题（`mmap_file_to_vmem_node` 也是先 `mkdir`）。本轮未一并处理——那会改动既有特性的日志输出，应单独评估。
 - **[中] 热路径不得被守卫污染**（§4.12）：布局校验只能发生在初始化。**任何在 `rate_limiter` 里增加的校验/分支都是性能回归**，需在 review 中明确把关。
 - **[低] 冻结区被误改**（§4.1）：`magic`/`layout_version`/`region_size`/`device_count` 这 16 字节是永久 ABI，改动 = 守卫失效。已用 `_Static_assert` 钉死偏移，但语义靠 review。
 - **[高，新增] `getVmemoryLockOffset` 漏改会静默失效**（§10.3）：这是全设计**唯一一处"错了不报错"**的改动。C 侧 `offsetof` 自动含头、无需改；**Go 侧必须手工加 `unsafe.Offsetof(DeviceVMemoryT{}.Devices)`**。漏改 → Go 与 C 锁在不重叠字节范围 → 互斥失效 → 撕裂读 → **错的 metrics，无任何报错**。缓解：C+Go 同 PR（§8 阶段 2）+ §7.2 第 6 条验收 + 建议加一个断言 `offsetof` 一致性的单测。

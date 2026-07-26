@@ -2185,7 +2185,11 @@ static void initialization() {
         __atomic_store_n(&g_sm_node->devices[i].total_cuda_cores,
                          g_total_cuda_cores[i], __ATOMIC_RELAXED);
       }
-      LOGGER(INFO, "sm_node attached: container-wide shared token bucket enabled");
+      /* Name the file. "attached" alone sent the first user of this feature
+       * looking for it in the wrong place; the region is an ordinary file and
+       * the fastest way to confirm which one is to say where it is. */
+      LOGGER(INFO, "sm_node attached at %s (%d bytes): container-wide shared token bucket enabled",
+             SM_NODE_FILE_PATH, SM_NODE_FILE_SIZE);
     }
   }
 
