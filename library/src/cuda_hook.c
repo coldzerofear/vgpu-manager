@@ -1428,9 +1428,9 @@ static void shared_regions_check_identity(void) {
       g_sm_ident_warned = 1;
     }
     /* g_sm_node_ino is deliberately left intact rather than zeroed. Zeroing it
-     * would trip the guard at the top of this function and disable the check
-     * permanently, so a file that later reappears under a new inode -- the
-     * moment the bucket actually splits -- would never be reported. */
+     * would trip the `g_sm_node_ino == 0` guard just above and disable this
+     * check permanently, so a file that later reappears under a new inode --
+     * the moment the bucket actually splits -- would never be reported. */
     return;
   }
   if (sb.st_ino != g_sm_node_ino || sb.st_dev != g_sm_node_dev) {
@@ -1704,6 +1704,16 @@ static void *utilization_watcher(void *arg) {
       }
       host_index = host_indexes[cuda_index];
 
+      /* Before every `continue` below, deliberately. Region identity has
+       * nothing to do with sampling, core_limit, or who won the refill, and
+       * gating it on any of them leaves real configurations unchecked: a
+       * container with memory_limit but core_limit off skips this loop body
+       * entirely, and that is exactly the case where the vmem ledger matters
+       * and SM limiting does not. Self-rate-limited to one stat per second per
+       * process, so calling it per device costs an atomic load and a compare.
+       * Not on the launch path. */
+      shared_regions_check_identity();
+
       // Skip GPU without core limit enabled
       if (!g_vgpu_config->devices[host_index].core_limit) continue;
 
@@ -1738,9 +1748,6 @@ static void *utilization_watcher(void *arg) {
         continue;
       }
       sm_ctl_load(host_index);
-      /* Winner-only and self-rate-limited: cheap enough here, absent from the
-       * launch path entirely. */
-      shared_regions_check_identity();
 
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
@@ -2288,7 +2295,7 @@ static void initialization() {
         __atomic_store_n(&g_sm_node->devices[i].total_cuda_cores,
                          g_total_cuda_cores[i], __ATOMIC_RELAXED);
       }
-      /* Remember which file we mapped, so sm_node_check_identity() can notice it
+      /* Remember which file we mapped, so shared_regions_check_identity() can notice it
        * being replaced under us. */
       struct stat sb;
       if (stat(SM_NODE_FILE_PATH, &sb) == 0) {
