@@ -3519,17 +3519,38 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
   if (likely(launchParamsList != NULL)) {
     for (unsigned int i = 0; i < numDevices; i++) {
       CUDA_LAUNCH_PARAMS *p = &launchParamsList[i];
+      CUresult ret;
       CUcontext sctx = NULL;
-      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamGetCtx,
-                              p->hStream, &sctx) != CUDA_SUCCESS || sctx == NULL) {
+      /* CUDA_INTERNAL_CHECK only adds a log line around CUDA_INTERNAL_CALL,
+       * which does NOT null-check the entry -- a driver that does not export
+       * the symbol would be called through a NULL pointer. Hence the explicit
+       * guards. cuStreamGetCtx_v2 is preferred where the driver has it: it
+       * additionally reports a green context, which we do not need (a green
+       * context partitions one device, so the device is the same either way),
+       * but routing through the newer entry keeps this working if the older
+       * one is ever retired. The two take a different number of arguments and
+       * cuda_sym_t is unprototyped, so the compiler cannot check the call --
+       * the arity below is load-bearing. */
+      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCtx_v2)))) {
+        ret = CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCtx_v2),
+                                  p->hStream, &sctx, NULL);
+      } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCtx)))) {
+        ret = CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCtx),
+                                  p->hStream, &sctx);
+      } else {
+        ret = CUDA_ERROR_NOT_FOUND;
+      }
+      if (unlikely(ret != CUDA_SUCCESS || sctx == NULL)) {
         continue;
       }
       CUcontext prev = NULL;
-      if (_cuCtxPushCurrent(sctx) != CUDA_SUCCESS) {
+      ret = _cuCtxPushCurrent(sctx);
+      if (unlikely(ret != CUDA_SUCCESS)) {
         continue;
       }
       CUdevice device;
-      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device) == CUDA_SUCCESS) {
+      ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+      if (likely(ret == CUDA_SUCCESS)) {
         int host_index = get_host_device_index_by_cuda_device(device);
         rate_limiter(p->gridDimX * p->gridDimY * p->gridDimZ,
                      p->blockDimX * p->blockDimY * p->blockDimZ, host_index);
