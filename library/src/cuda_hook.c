@@ -71,6 +71,7 @@ extern int get_aimd_md_cooldown_cycles(int *out);
 extern int get_usage_threshold(int *out);
 extern int get_delta_ramp_floor_divisor(int *out);
 extern int get_uva_advise(int *out);
+extern int get_uva_advise_max_ratio(int *out);
 
 /* fork() child handler implemented in loader.c -- re-inits the four
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
@@ -2710,19 +2711,28 @@ DONE:
  * at all -- the child inherits an answer that is already correct. */
 static int g_uva_advise_enabled = -1;
 static int g_uva_advise_logged = 0;
+/* Highest CONFIGURED oversubscription ratio, percent, still worth hinting at.
+ * Resolved alongside the switch and racy-idempotent for the same reason. */
+static int g_uva_advise_max_ratio = -1;
+/* Per-device: has the gate decision been stated? */
+static int g_uva_gate_logged[MAX_DEVICE_COUNT] = {0};
 
 static int uva_advise_wanted(void) {
   int enabled = __atomic_load_n(&g_uva_advise_enabled, __ATOMIC_RELAXED);
   if (unlikely(enabled < 0)) {
     enabled = 0;
     (void)get_uva_advise(&enabled);
+    int max_ratio = 200;
+    (void)get_uva_advise_max_ratio(&max_ratio);
+    __atomic_store_n(&g_uva_advise_max_ratio, max_ratio, __ATOMIC_RELAXED);
     __atomic_store_n(&g_uva_advise_enabled, enabled, __ATOMIC_RELAXED);
     /* Stated once so a run can be attributed to an arm of the A/B rather than
      * inferred from throughput. Exchange, not a plain flag: several threads can
      * be resolving this at the same moment. */
     if (enabled && !__atomic_exchange_n(&g_uva_advise_logged, 1, __ATOMIC_RELAXED)) {
       LOGGER(INFO, "oversold managed allocations will be advised "
-                   "SET_PREFERRED_LOCATION=device (CUDA_MEM_UVA_ADVISE=1)");
+                   "SET_PREFERRED_LOCATION=device up to a configured ratio of "
+                   "%d%% (CUDA_MEM_UVA_ADVISE=1)", max_ratio);
     }
   }
   return enabled;
@@ -2779,6 +2789,46 @@ static void uva_apply_residency_hint(CUdeviceptr ptr, size_t bytes,
   int can_page = uva_device_has_concurrent_managed_access(device, host_index);
 
   if (!uva_advise_wanted() || !can_page) {
+    return;
+  }
+
+  /* Gate on the CONFIGURED oversubscription ratio -- total_memory / real_memory,
+   * which reconstructs the MemoryScaling the control plane applied (see
+   * pkg/config/vgpu: real = total / ratio when ratio > 1).
+   *
+   * The configured ratio, not the momentary one. A ratio computed from how much
+   * happens to be allocated right now would give the same buffer a different
+   * policy depending on unrelated allocation timing, and would make an A/B a
+   * mixture of both policies within one run. The configured ratio is fixed for
+   * the container's lifetime, so every allocation is judged the same way and a
+   * run sits wholly on one side of the gate. It also matches the nature of the
+   * decision: the hint lasts as long as the allocation does, so deriving it
+   * from a property that lasts as long as the container is self-consistent.
+   *
+   * What this trades away, stated plainly: the configured ratio is an upper
+   * bound rather than the pressure actually being applied. A container
+   * configured at 4x that only ever allocates half its physical budget is not
+   * oversubscribed at all, yet is refused the hint.
+   *
+   * Compared multiplicatively. total/real in integer arithmetic truncates 1.9
+   * to 1, which would silently admit ratios the threshold was meant to exclude.
+   * Overflow is not reachable: a terabyte scaled by a few hundred is ~10^14. */
+  size_t total_mem = g_vgpu_config->devices[host_index].total_memory;
+  size_t real_mem  = g_vgpu_config->devices[host_index].real_memory;
+  if (real_mem == 0) {
+    return;
+  }
+  int max_ratio = __atomic_load_n(&g_uva_advise_max_ratio, __ATOMIC_RELAXED);
+  if (max_ratio < 100) {
+    max_ratio = 200;
+  }
+  int within = (total_mem * 100) <= (real_mem * (size_t)max_ratio);
+  if (!__atomic_exchange_n(&g_uva_gate_logged[host_index], 1, __ATOMIC_RELAXED)) {
+    LOGGER(INFO, "host device %d configured oversubscription %zu%%, hint threshold %d%% -> %s",
+           host_index, real_mem ? (total_mem * 100 / real_mem) : 0, max_ratio,
+           within ? "advising" : "not advising");
+  }
+  if (!within) {
     return;
   }
 
