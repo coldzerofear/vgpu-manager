@@ -759,6 +759,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		response.Envs[util.ManagerClientRegisterUuid] = ""
 		compMode := vgpu.GetCompatibilityMode(deviceManager)
 		response.Envs[util.ManagerCompatibilityMode] = fmt.Sprintf("%v", compMode)
+		response.Envs[util.CudaSMSharedBucket] = "true"
 		sort.Slice(contClaim.DeviceClaims, func(i, j int) bool {
 			return contClaim.DeviceClaims[i].Id < contClaim.DeviceClaims[j].Id
 		})
@@ -826,6 +827,8 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		}
 		if enabledMemoryNode {
 			response.Envs[util.VMemoryNodeEnabled] = "true"
+		} else {
+			response.Envs[util.VMemoryNodeEnabled] = "false"
 		}
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>
 		// <host_manager_dir>/<pod-uid>_<cont-name>

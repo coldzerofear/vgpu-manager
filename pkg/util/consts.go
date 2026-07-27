@@ -197,6 +197,7 @@ const (
 	ExternalSmWatcherEnabled  = "EXTERNAL_SM_WATCHER_ENABLED"
 	ManagerClientRegisterUuid = "MANAGER_CLIENT_REGISTER_UUID"
 	ManagerVGpuClaimUid       = "MANAGER_VGPU_CLAIM_UID"
+	CudaSMSharedBucket        = "CUDA_SM_SHARED_BUCKET"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
