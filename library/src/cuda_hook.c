@@ -3816,28 +3816,34 @@ DONE:
 }
 
 CUresult _cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
-  CUresult ret;
-  /* NULL-arg fast path: skip our cached-limit branch (which would
-   * dereference *bytes) and forward to the driver, matching
-   * un-hooked CUDA semantics (driver returns CUDA_ERROR_INVALID_VALUE). */
-  if (unlikely(bytes == NULL)) {
-    goto CALL;
-  }
-  int host_index = get_host_device_index_by_cuda_device(dev);
-  if (host_index < 0) {
-    goto CALL;
-  }
-  if (g_vgpu_config->devices[host_index].memory_limit) {
-    *bytes = g_vgpu_config->devices[host_index].total_memory;
-    return CUDA_SUCCESS;
-  }
-CALL:
+  CUresult ret = CUDA_ERROR_NOT_FOUND;
+  /* Ask the driver first, with the caller's own pointer. Two things fall out
+   * of that ordering. A NULL `bytes` is handled by whatever policy the driver
+   * has -- we neither have to know it nor guess it -- and a device the driver
+   * would have refused (lost, not initialised) still produces the driver's
+   * error instead of us reporting a configured size for a device that is not
+   * answering. The previous form returned CUDA_SUCCESS from the limited-view
+   * branch without ever consulting the driver. */
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem, bytes, dev);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  /* Before the index lookup: get_host_device_index_by_cuda_device resolves via
+   * UUID against g_vgpu_config->devices[] on a cold cache, so the FIRST call is
+   * the one that would dereference it unset. Only load_necessary_data() --
+   * deliberately NOT init_devices_mapping(), whose nvmlInit failure path is
+   * LOGGER(FATAL) and would turn a memory query into an exit(1). */
+  load_necessary_data();
+  int host_index = get_host_device_index_by_cuda_device(dev);
+  if (unlikely(host_index < 0)) {
+    return ret;
+  }
+  if (g_vgpu_config->devices[host_index].memory_limit && bytes != NULL) {
+    *bytes = g_vgpu_config->devices[host_index].total_memory;
   }
   return ret;
 }
@@ -3851,75 +3857,53 @@ CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
 }
 
 CUresult _cuMemGetInfo(size_t *free, size_t *total) {
-  CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  int has_limited_view;
-  /* NULL-arg fast path: skip the limited-view branch (which would
-   * dereference *total / *free) and forward to the driver. Mirrors
-   * HAMi PR #182 commit 03f99d70 — OptiX's cuMemGetInfo probes hit
-   * this path during init. */
-  if (unlikely(free == NULL || total == NULL)) {
-    goto CALL;
-  }
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  CUresult ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = -1;
-  size_t used = 0, vmem_used = 0;
-  has_limited_view = load_limited_memory_view(device, &host_index, &lock_fd, &used, &vmem_used);
-  if (has_limited_view) {
-    size_t configured = g_vgpu_config->devices[host_index].total_memory;
-    size_t actual_total;
-
-    if (g_vgpu_config->devices[host_index].memory_oversold) {
-      /*
-       * Oversold UVA mode: configured total is intentionally LARGER than
-       * the physical slice (real_memory). prepare_memory_allocation routes
-       * the overflow allocations through cuMemAllocManaged. Reporting the
-       * configured total here is what makes the oversold capacity visible
-       * to the application; clamping at the real driver total would tell
-       * apps they have less memory than we are actually willing to give
-       * them via UVA, and the entire oversold design becomes inert.
-       */
-      actual_total = configured;
-    } else {
-      /*
-       * Normal slicing: ask real libcuda for its compute-usable total
-       * (physical minus driver-reserved page tables / framebuffer / ECC
-       * overhead - varies per driver/display/ECC, ~hundreds of MiB on
-       * consumer cards) and clamp the configured limit at that. Without
-       * this clamp, apps that read cuMemGetInfo as the truth and try to
-       * allocate up to it (vLLM, PyTorch caching allocator) hit OOM in
-       * the last few hundred MiB the driver was never going to hand out.
-       *
-       * If the real call somehow fails, degrade to the previous behaviour
-       * (report configured value, no clamp) rather than synthesising a
-       * potentially-wrong number.
-       */
-      size_t real_total = 0, real_free_unused = 0;
-      CUresult sub = CUDA_ERROR_NOT_FOUND;
-      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
-        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, &real_free_unused, &real_total);
-      } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
-        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, &real_free_unused, &real_total);
-      }
-      actual_total = (sub == CUDA_SUCCESS && real_total > 0 && real_total < configured) ? real_total : configured;
-    }
-
-    *total = actual_total;
-    *free  = (used + vmem_used) >= actual_total ? 0 : (actual_total - used - vmem_used);
-    ret = CUDA_SUCCESS;
-    goto DONE;
-  }
-CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, free, total);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, free, total);
   } else {
     ret = CUDA_ERROR_NOT_FOUND;
+  }
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    goto DONE;
+  }
+  /* Before the index lookup: get_host_device_index_by_cuda_device resolves via
+   * UUID against g_vgpu_config->devices[] on a cold cache, so the FIRST call is
+   * the one that would dereference it unset. Only load_necessary_data() --
+   * deliberately NOT init_devices_mapping(), whose nvmlInit failure path is
+   * LOGGER(FATAL) and would turn a memory query into an exit(1). */
+  load_necessary_data();
+  int host_index = -1;
+  size_t used = 0, vmem_used = 0;
+  if (load_limited_memory_view(device, &host_index, &lock_fd, &used, &vmem_used)) {
+    size_t configured = g_vgpu_config->devices[host_index].total_memory;
+    size_t actual_total = 0, actual_free = 0;
+    if (g_vgpu_config->devices[host_index].memory_oversold) {
+      actual_total = configured;
+      actual_free  = (used + vmem_used) >= actual_total ? 0 : (actual_total - used - vmem_used);
+    } else {
+      if (total != NULL) {
+        actual_total = (*total > 0 && *total < configured) ? *total : configured;
+      } else if (free != NULL) {
+        CUresult sub = CUDA_ERROR_NOT_FOUND;
+        size_t real_total = 0, real_free_unused = 0;
+        if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
+          sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, &real_free_unused, &real_total);
+        } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
+          sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, &real_free_unused, &real_total);
+        }
+        actual_total = (sub == CUDA_SUCCESS && real_total > 0 && real_total < configured) ? real_total : configured;
+      }
+      actual_free  = (used + vmem_used) >= actual_total ? 0 : (actual_total - used - vmem_used);
+    }
+    if (total != NULL) *total = actual_total;
+    if (free != NULL) *free = actual_free;
   }
 DONE:
   unlock_gpu_device(lock_fd);
