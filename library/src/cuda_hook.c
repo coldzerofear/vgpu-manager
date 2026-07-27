@@ -300,6 +300,12 @@ static memory_path_t prepare_memory_allocation(CUdevice device,
 
   if (allow_uva && g_vgpu_config->devices[*host_index].memory_oversold &&
       (used + request_size) > g_vgpu_config->devices[*host_index].real_memory) {
+    /* Recorded here rather than at the call sites because this is the only
+     * place that holds the numbers describing the decision: what was asked
+     * for, what the device already holds, and the physical ceiling being
+     * exceeded. The call sites see only the chosen path. */
+    metrics_record_uva_oversold(*host_index, (uint64_t)request_size, (uint64_t)used,
+                                (uint64_t)g_vgpu_config->devices[*host_index].real_memory);
     return MEMORY_PATH_UVA;
   }
 

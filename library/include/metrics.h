@@ -35,7 +35,25 @@ typedef enum {
 
 void metrics_record_lock_wait(int device_index, uint64_t wait_ns, int timeout);
 void metrics_record_oom(int host_index, metrics_oom_reason_t reason);
+/* Reactive: the driver refused a device allocation and we retried it as managed
+ * memory. This is oversold memory arriving as a surprise. */
 void metrics_record_uva_fallback(int host_index);
+
+/**
+ * Proactive: prepare_memory_allocation predicted the request would not fit in
+ * physical memory and routed it to managed memory by policy. This is the path
+ * oversubscription takes when it is WORKING, and until now it was the one with
+ * no counter at all -- only the reactive fallback above was visible, so a
+ * healthy oversold container looked identical to one not oversubscribing.
+ *
+ * Records bytes rather than only occurrences: four 8 GiB allocations and four
+ * 1 MiB allocations are the same number of events and completely different
+ * amounts of pressure. device_used and real_memory are carried so each sample
+ * states how far past physical memory the container is being pushed, which is
+ * the figure that predicts whether Unified Memory will thrash.
+ */
+void metrics_record_uva_oversold(int host_index, uint64_t request_bytes,
+                                 uint64_t device_used, uint64_t real_memory);
 void metrics_record_rate_limit_hit(int host_index);
 void metrics_record_watcher_miss(int host_index, metrics_watcher_reason_t reason);
 void metrics_record_nvml_fallback(int host_index);
