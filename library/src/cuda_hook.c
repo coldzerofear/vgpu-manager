@@ -2697,18 +2697,35 @@ DONE:
  *  resident", which is allocation order, not access pattern. It would also
  *  make an A/B unreadable, since each run would be a mixture.
  * ---------------------------------------------------------------------- */
-static pthread_once_t g_uva_advise_once = PTHREAD_ONCE_INIT;
-static int g_uva_advise_enabled = 0;
+/* -1 not yet read, 0 off, 1 on. Resolved lazily by whichever thread arrives
+ * first.
+ *
+ * Deliberately NOT a pthread_once. A once-control caught mid-initialisation by
+ * a fork leaves the child with an indeterminate control, where a later
+ * pthread_once can block forever waiting on an initialiser that no longer
+ * exists -- which is exactly why child_after_fork resets g_init_set. A second
+ * once would mean a second reset obligation for a future edit to remember. This
+ * initialiser is a getenv into an int: every thread derives the same value from
+ * the same environment, so racing is idempotent and carries no fork obligation
+ * at all -- the child inherits an answer that is already correct. */
+static int g_uva_advise_enabled = -1;
+static int g_uva_advise_logged = 0;
 
-static void uva_advise_init(void) {
-  (void)get_uva_advise(&g_uva_advise_enabled);
-  /* Stated once, so a run can be attributed to an arm of the A/B rather than
-   * inferred from throughput. Silence would make the two arms indistinguishable
-   * in a log, which is exactly the failure the metric beside it exists to fix. */
-  if (g_uva_advise_enabled) {
-    LOGGER(INFO, "oversold managed allocations will be advised "
-                 "SET_PREFERRED_LOCATION=device (CUDA_MEM_UVA_ADVISE=1)");
+static int uva_advise_wanted(void) {
+  int enabled = __atomic_load_n(&g_uva_advise_enabled, __ATOMIC_RELAXED);
+  if (unlikely(enabled < 0)) {
+    enabled = 0;
+    (void)get_uva_advise(&enabled);
+    __atomic_store_n(&g_uva_advise_enabled, enabled, __ATOMIC_RELAXED);
+    /* Stated once so a run can be attributed to an arm of the A/B rather than
+     * inferred from throughput. Exchange, not a plain flag: several threads can
+     * be resolving this at the same moment. */
+    if (enabled && !__atomic_exchange_n(&g_uva_advise_logged, 1, __ATOMIC_RELAXED)) {
+      LOGGER(INFO, "oversold managed allocations will be advised "
+                   "SET_PREFERRED_LOCATION=device (CUDA_MEM_UVA_ADVISE=1)");
+    }
   }
+  return enabled;
 }
 
 /* Per-device CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS: 0 unknown, 1 yes,
@@ -2724,6 +2741,13 @@ static int uva_device_has_concurrent_managed_access(CUdevice device, int host_in
     return cached > 0;
   }
   int supported = 0;
+  /* CUDA_INTERNAL_CALL does not null-check the entry, so a missing symbol would
+   * be a call through NULL. cuDeviceGetAttribute is a core symbol and the other
+   * call site does not guard it either, but the guard costs nothing and removes
+   * the class rather than trusting the symbol to always be present. */
+  if (unlikely(!CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceGetAttribute))) {
+    return 0;
+  }
   CUresult r = CUDA_INTERNAL_CALL(cuda_library_entry, cuDeviceGetAttribute, &supported,
                                   CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS, device);
   if (r != CUDA_SUCCESS) {
@@ -2754,8 +2778,7 @@ static void uva_apply_residency_hint(CUdeviceptr ptr, size_t bytes,
    * oversubscription being impossible, not about this hint. */
   int can_page = uva_device_has_concurrent_managed_access(device, host_index);
 
-  pthread_once(&g_uva_advise_once, uva_advise_init);
-  if (!g_uva_advise_enabled || !can_page) {
+  if (!uva_advise_wanted() || !can_page) {
     return;
   }
 
@@ -2786,6 +2809,7 @@ static void uva_apply_residency_hint(CUdeviceptr ptr, size_t bytes,
 }
 
 CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
+  size_t hint_bytes = 0;   /* non-zero => advise after unlocking */
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
@@ -2840,12 +2864,18 @@ ALLOCATED_TO_UVA:
                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_UVA_SYNC, host_index);
-    uva_apply_residency_hint(*dptr, bytesize, device, host_index);
+    /* Deferred past the unlock below: cuMemAdvise is a driver call, and
+     * holding the cross-process per-device lock across it would make every
+     * other allocator in the container wait on it for no reason. */
+    hint_bytes = bytesize;
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
   unlock_gpu_device(lock_fd);
+  if (hint_bytes) {
+    uva_apply_residency_hint(*dptr, hint_bytes, device, host_index);
+  }
   return ret;
 }
 
@@ -2859,6 +2889,7 @@ CUresult cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
 
 CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes,
                           size_t Height, unsigned int ElementSizeBytes) {
+  size_t hint_bytes = 0;   /* non-zero => advise after unlocking */
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
@@ -2913,12 +2944,18 @@ ALLOCATED_TO_UVA:
   if (likely(ret == CUDA_SUCCESS)) {
     *pPitch = guess_pitch;
     malloc_gpu_virt_memory(*dptr, request_size, MEMORY_TYPE_UVA_SYNC, host_index);
-    uva_apply_residency_hint(*dptr, request_size, device, host_index);
+    /* Deferred past the unlock below: cuMemAdvise is a driver call, and
+     * holding the cross-process per-device lock across it would make every
+     * other allocator in the container wait on it for no reason. */
+    hint_bytes = request_size;
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
   unlock_gpu_device(lock_fd);
+  if (hint_bytes) {
+    uva_apply_residency_hint(*dptr, hint_bytes, device, host_index);
+  }
   return ret;
 }
 
@@ -2934,6 +2971,7 @@ CUresult cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes,
 }
 
 CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
+  size_t hint_bytes = 0;   /* non-zero => advise after unlocking */
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
@@ -3000,16 +3038,23 @@ ALLOCATED_TO_UVA:
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_UVA_ASYNC, host_index);
-    uva_apply_residency_hint(*dptr, bytesize, device, host_index);
+    /* Deferred past the unlock below: cuMemAdvise is a driver call, and
+     * holding the cross-process per-device lock across it would make every
+     * other allocator in the container wait on it for no reason. */
+    hint_bytes = bytesize;
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
   unlock_gpu_device(lock_fd);
+  if (hint_bytes) {
+    uva_apply_residency_hint(*dptr, hint_bytes, device, host_index);
+  }
   return ret;
 }
 
 CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
+  size_t hint_bytes = 0;   /* non-zero => advise after unlocking */
   CUresult ret;
   CUdevice device;
   int lock_fd = -1;
@@ -3075,12 +3120,18 @@ ALLOCATED_TO_UVA:
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, request_size, MEMORY_TYPE_UVA_ASYNC, host_index);
-    uva_apply_residency_hint(*dptr, request_size, device, host_index);
+    /* Deferred past the unlock below: cuMemAdvise is a driver call, and
+     * holding the cross-process per-device lock across it would make every
+     * other allocator in the container wait on it for no reason. */
+    hint_bytes = request_size;
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
 DONE:
   unlock_gpu_device(lock_fd);
+  if (hint_bytes) {
+    uva_apply_residency_hint(*dptr, hint_bytes, device, host_index);
+  }
   return ret;
 }
 
