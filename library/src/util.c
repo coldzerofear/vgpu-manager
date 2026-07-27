@@ -18,6 +18,10 @@
 #define CUDA_CORE_SOFT_LIMIT_ENV "CUDA_CORE_SOFT_LIMIT"
 #define CUDA_MEM_OVERSOLD_ENV "CUDA_MEM_OVERSOLD"
 #define VMEM_NODE_ENABLED_ENV "VMEMORY_NODE_ENABLED"
+/* Hint the driver to keep oversold managed allocations resident on the device.
+ * Off by default: whether it helps depends on the workload's access pattern,
+ * and there is no measurement yet to say which way it goes. */
+#define CUDA_MEM_UVA_ADVISE_ENV "CUDA_MEM_UVA_ADVISE"
 #define MANAGER_VISIBLE_DEVICE_ENV "MANAGER_VISIBLE_DEVICE"
 #define MANAGER_VISIBLE_DEVICES_ENV (MANAGER_VISIBLE_DEVICE_ENV "S")
 #define NVIDIA_VISIBLE_DEVICES_ENV "NVIDIA_VISIBLE_DEVICES"
@@ -237,6 +241,17 @@ void value_enabled(char *str, int *i) {
   } else {
     *i = 0;
   }
+}
+
+/* Whether to advise the driver on oversold managed allocations. Unset leaves
+ * *out at the caller's default (0). */
+int get_uva_advise(int *out) {
+  char *str = getenv(CUDA_MEM_UVA_ADVISE_ENV);
+  if (!str) {
+    return -1;
+  }
+  value_enabled(str, out);
+  return 0;
 }
 
 int get_vmem_node_enabled(int *i) {

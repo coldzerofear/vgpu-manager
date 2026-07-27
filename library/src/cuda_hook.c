@@ -70,6 +70,7 @@ extern int get_aimd_deadband_ratio(int *out);
 extern int get_aimd_md_cooldown_cycles(int *out);
 extern int get_usage_threshold(int *out);
 extern int get_delta_ramp_floor_divisor(int *out);
+extern int get_uva_advise(int *out);
 
 /* fork() child handler implemented in loader.c -- re-inits the four
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
@@ -2673,6 +2674,117 @@ DONE:
   return ret;
 }
 
+/* ---------------------------------------------------------------------- *
+ *  Oversold managed memory: residency hint
+ *
+ *  Applied ONLY to allocations this library redirected to managed memory
+ *  because they would not fit in physical memory. An application that called
+ *  cuMemAllocManaged itself is expressing its own intent about where the data
+ *  should live, and second-guessing it is not our business.
+ *
+ *  Off by default. The hint is free to issue and cannot fail the allocation,
+ *  but it is a POLICY change and its sign depends on the workload: for a
+ *  buffer the GPU reads repeatedly it keeps pages from drifting to the host,
+ *  while for one the CPU also touches it can add migrations, since each host
+ *  access pulls the page over and the preference pulls it back. Past the point
+ *  where the working set genuinely exceeds the card, no hint makes the pages
+ *  fit and only the eviction order changes.
+ *
+ *  Applied uniformly rather than, say, above some oversubscription ratio. A
+ *  ratio test would be evaluated against how much happened to be allocated at
+ *  the time, so the same buffer would get a different policy depending on
+ *  unrelated allocation timing -- effectively "whoever allocated first stays
+ *  resident", which is allocation order, not access pattern. It would also
+ *  make an A/B unreadable, since each run would be a mixture.
+ * ---------------------------------------------------------------------- */
+static pthread_once_t g_uva_advise_once = PTHREAD_ONCE_INIT;
+static int g_uva_advise_enabled = 0;
+
+static void uva_advise_init(void) {
+  (void)get_uva_advise(&g_uva_advise_enabled);
+  /* Stated once, so a run can be attributed to an arm of the A/B rather than
+   * inferred from throughput. Silence would make the two arms indistinguishable
+   * in a log, which is exactly the failure the metric beside it exists to fix. */
+  if (g_uva_advise_enabled) {
+    LOGGER(INFO, "oversold managed allocations will be advised "
+                 "SET_PREFERRED_LOCATION=device (CUDA_MEM_UVA_ADVISE=1)");
+  }
+}
+
+/* Per-device CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS: 0 unknown, 1 yes,
+ * -1 no. Relaxed atomics because several allocating threads may resolve it at
+ * once; they all write the same value, but a plain int written from multiple
+ * threads is a race whether or not the value agrees. */
+static int g_managed_access[MAX_DEVICE_COUNT] = {0};
+static int g_managed_access_warned[MAX_DEVICE_COUNT] = {0};
+
+static int uva_device_has_concurrent_managed_access(CUdevice device, int host_index) {
+  int cached = __atomic_load_n(&g_managed_access[host_index], __ATOMIC_RELAXED);
+  if (cached != 0) {
+    return cached > 0;
+  }
+  int supported = 0;
+  CUresult r = CUDA_INTERNAL_CALL(cuda_library_entry, cuDeviceGetAttribute, &supported,
+                                  CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS, device);
+  if (r != CUDA_SUCCESS) {
+    /* Unknown, not "no": leave the cache empty so a later call can resolve it,
+     * and do not warn on what may be a transient failure. */
+    return 0;
+  }
+  __atomic_store_n(&g_managed_access[host_index], supported ? 1 : -1, __ATOMIC_RELAXED);
+  if (!supported && !__atomic_exchange_n(&g_managed_access_warned[host_index], 1, __ATOMIC_RELAXED)) {
+    /* Worth saying out loud, independently of the hint. Without concurrent
+     * managed access there is no demand paging: managed memory is migrated
+     * wholesale at launch and an allocation larger than the card simply fails.
+     * Oversubscription cannot work on such a device, and until now we neither
+     * checked nor said so. */
+    LOGGER(WARNING, "host device %d does not support concurrent managed access; "
+                    "memory oversubscription cannot demand-page on this device",
+                    host_index);
+  }
+  return supported != 0;
+}
+
+static void uva_apply_residency_hint(CUdeviceptr ptr, size_t bytes,
+                                     CUdevice device, int host_index) {
+  if (bytes == 0 || host_index < 0 || host_index >= MAX_DEVICE_COUNT) {
+    return;
+  }
+  /* Resolved even when the hint is disabled: the warning above is about
+   * oversubscription being impossible, not about this hint. */
+  int can_page = uva_device_has_concurrent_managed_access(device, host_index);
+
+  pthread_once(&g_uva_advise_once, uva_advise_init);
+  if (!g_uva_advise_enabled || !can_page) {
+    return;
+  }
+
+  /* cuMemAdvise and cuMemAdvise_v2 are an ABI-conflict pair -- the last
+   * argument is a CUdevice in one and a CUmemLocation struct in the other --
+   * so they must never fall through to each other (see cuda_originals.c).
+   * Prefer v2 when the driver exports it; v1 is deprecated from CUDA 12.2. */
+  CUresult r;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAdvise_v2))) {
+    CUmemLocation loc;
+    memset(&loc, 0, sizeof(loc));
+    loc.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    loc.id   = (int)device;
+    r = CUDA_INTERNAL_CALL(cuda_library_entry, cuMemAdvise_v2, ptr, bytes,
+                           CU_MEM_ADVISE_SET_PREFERRED_LOCATION, loc);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAdvise))) {
+    r = CUDA_INTERNAL_CALL(cuda_library_entry, cuMemAdvise, ptr, bytes,
+                           CU_MEM_ADVISE_SET_PREFERRED_LOCATION, device);
+  } else {
+    return;
+  }
+  /* A refused hint changes nothing about the allocation, which has already
+   * succeeded -- log it and carry on rather than failing the caller. */
+  if (unlikely(r != CUDA_SUCCESS)) {
+    LOGGER(VERBOSE, "cuMemAdvise(SET_PREFERRED_LOCATION) on host device %d returned %d: %s",
+           host_index, r, CUDA_ERROR(cuda_library_entry, r));
+  }
+}
+
 CUresult _cuMemAlloc(CUdeviceptr *dptr, size_t bytesize) {
   CUresult ret;
   CUdevice device;
@@ -2728,6 +2840,7 @@ ALLOCATED_TO_UVA:
                    request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_UVA_SYNC, host_index);
+    uva_apply_residency_hint(*dptr, bytesize, device, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2800,6 +2913,7 @@ ALLOCATED_TO_UVA:
   if (likely(ret == CUDA_SUCCESS)) {
     *pPitch = guess_pitch;
     malloc_gpu_virt_memory(*dptr, request_size, MEMORY_TYPE_UVA_SYNC, host_index);
+    uva_apply_residency_hint(*dptr, request_size, device, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2886,6 +3000,7 @@ ALLOCATED_TO_UVA:
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, bytesize, MEMORY_TYPE_UVA_ASYNC, host_index);
+    uva_apply_residency_hint(*dptr, bytesize, device, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
@@ -2960,6 +3075,7 @@ ALLOCATED_TO_UVA:
                   request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
   if (likely(ret == CUDA_SUCCESS)) {
     malloc_gpu_virt_memory(*dptr, request_size, MEMORY_TYPE_UVA_ASYNC, host_index);
+    uva_apply_residency_hint(*dptr, request_size, device, host_index);
   } else if (ret == CUDA_ERROR_OUT_OF_MEMORY) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
   }
