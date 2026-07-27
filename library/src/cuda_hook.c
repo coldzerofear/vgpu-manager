@@ -3843,7 +3843,19 @@ CUresult _cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
     return ret;
   }
   if (g_vgpu_config->devices[host_index].memory_limit && bytes != NULL) {
-    *bytes = g_vgpu_config->devices[host_index].total_memory;
+    size_t configured = g_vgpu_config->devices[host_index].total_memory;
+    if (g_vgpu_config->devices[host_index].memory_oversold) {
+      *bytes = configured;
+    } else {
+      CUresult sub = CUDA_ERROR_NOT_FOUND;
+      size_t real_total = 0, real_free_unused = 0;
+      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, &real_free_unused, &real_total);
+      } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, &real_free_unused, &real_total);
+      }
+      *bytes = (sub == CUDA_SUCCESS && real_total > 0 && real_total < configured) ? real_total : configured;
+    }
   }
   return ret;
 }
