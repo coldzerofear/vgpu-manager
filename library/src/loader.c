@@ -1010,6 +1010,8 @@ static pthread_once_t init_nvml_host_index = PTHREAD_ONCE_INIT;
  * load_necessary_data() in the child to call pthread_atfork again,
  * accumulating an extra registration per fork generation. */
 static pthread_once_t g_atfork_init = PTHREAD_ONCE_INIT;
+static pthread_once_t g_controller_config_init = PTHREAD_ONCE_INIT;
+static pthread_once_t g_reset_cuda_index_init = PTHREAD_ONCE_INIT;
 
 extern int get_compatibility_mode(int *mode);
 extern int get_mem_ratio(uint32_t index, double *ratio);
@@ -2437,21 +2439,12 @@ DONE:
   return nvml_index;
 }
 
-static volatile pid_t reset_index_changed_pid = 0;
-
 // Reset CUDA device index only when PID changes.
 void reset_cuda_index_mapping() {
-  pid_t pid = getpid();
-  if (likely(reset_index_changed_pid == pid)) {
-    return;
-  }
   pthread_mutex_lock(&device_index_mutex);
-  if (reset_index_changed_pid != pid) {
-    for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
-      cuda_to_host_device_index[index] = -1;
-      cuda_to_nvml_device_index[index] = -1;
-    }
-    reset_index_changed_pid = pid;
+  for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
+    cuda_to_host_device_index[index] = -1;
+    cuda_to_nvml_device_index[index] = -1;
   }
   pthread_mutex_unlock(&device_index_mutex);
 }
@@ -2685,9 +2678,6 @@ DONE:
   *used_memory = count;
 }
 
-static volatile pid_t init_config_changed_pid = 0;
-static pthread_mutex_t init_config_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 void init_g_vgpu_config_by_env(resource_data_t** data) {
   int ret = get_compatibility_mode(&vgpu_config_init.compatibility_mode);
   if (unlikely(ret)) {
@@ -2814,47 +2804,29 @@ void init_g_vgpu_config_by_env(resource_data_t** data) {
   *data = &vgpu_config_init;
 }
 
-int load_controller_configuration() {
-  int ret = 1;
-  pid_t pid = getpid();
-  if (likely(init_config_changed_pid == pid)) {
-    return 0;
-  }
-  pthread_mutex_lock(&init_config_mutex);
-  // Double check lock
-  if (init_config_changed_pid == pid) {
-    ret = 0;
-    goto DONE;
-  }
+void load_controller_configuration() {
   if (g_vgpu_config == NULL) {
-    ret = mmap_file_to_config_path(&g_vgpu_config);
-    if (unlikely(ret)) {
+    if (unlikely(mmap_file_to_config_path(&g_vgpu_config))) {
       init_g_vgpu_config_by_env(&g_vgpu_config);
-      ret = write_file_to_config_path(g_vgpu_config);
-      if (unlikely(ret)) {
+      resource_data_t *fallback = g_vgpu_config;
+      if (unlikely(write_file_to_config_path(g_vgpu_config))) {
         LOGGER(ERROR, "failed to write vgpu config file %s", CONTROLLER_CONFIG_FILE_PATH);
-        goto DONE;
-      }
-      ret = mmap_file_to_config_path(&g_vgpu_config);
-      if (unlikely(ret)) {
-        goto DONE;
+      } else if (unlikely(mmap_file_to_config_path(&g_vgpu_config))) {
+        g_vgpu_config = fallback;
       }
     }
     print_global_vgpu_config();
   }
   if (g_vgpu_config->sm_watcher && g_device_util == NULL) {
-    ret = mmap_file_to_util_path(&g_device_util);
-    if (ret) {
-      pthread_mutex_unlock(&init_config_mutex);
-      LOGGER(FATAL, "mmap sm watcher file failed");
+    if (mmap_file_to_util_path(&g_device_util)) {
+      LOGGER(ERROR, "mmap sm watcher file failed");
     }
     if (g_device_util == NULL) {
       LOGGER(WARNING, "unable to find external SM Watcher shared cache, will roll back to nvml driver");
     }
   }
   if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {
-    ret = mmap_file_to_vmem_node(&g_device_vmem);
-    if (ret) {
+    if (mmap_file_to_vmem_node(&g_device_vmem)) {
       /* Degrade, do not die. The region being unavailable -- directory not
        * mounted, mounted read-only, /tmp shadowed by the workload, an older
        * plugin paired with a newer library -- says nothing about whether this
@@ -2878,7 +2850,6 @@ int load_controller_configuration() {
        * reaches DONE, which unlocks. ret is cleared because a missing optional
        * region is not a failure to load the configuration. */
       g_device_vmem = NULL;
-      ret = 0;
       LOGGER(WARNING, "unable to map vmem nodes file, will roll back to "
                       "nvml-only memory accounting (virtual memory tracking disabled)");
     } else {
@@ -2913,11 +2884,6 @@ int load_controller_configuration() {
     LOGGER(VERBOSE, "register to remote manager: uid: %s, uuid: %s", g_vgpu_config->pod_uid, g_vgpu_config->reg_uuid);
     register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name, g_vgpu_config->reg_uuid);
   }
-  ret = 0;
-  init_config_changed_pid = pid;
-DONE:
-  pthread_mutex_unlock(&init_config_mutex);
-  return ret;
 }
 
 void init_nvml_to_host_device_index() {
@@ -2997,10 +2963,11 @@ void init_nvml_to_host_device_index() {
  * #199 which addresses the related-but-not-identical pthread_once
  * post-init flag issue. */
 void loader_child_after_fork(void) {
+  g_controller_config_init = (pthread_once_t)PTHREAD_ONCE_INIT;
+  g_reset_cuda_index_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   pthread_mutex_init(&g_memory_node_lock, NULL);
   pthread_mutex_init(&tid_dlsym_lock,     NULL);
   pthread_mutex_init(&device_index_mutex, NULL);
-  pthread_mutex_init(&init_config_mutex,  NULL);
   memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
   tid_dlsym_count = 0;
 
@@ -3062,8 +3029,8 @@ void load_necessary_data() {
   pthread_once(&g_nvml_lib_init, load_nvml_libraries);
   pthread_once(&g_cuda_lib_init, load_cuda_libraries);
   // Read global configuration
-  load_controller_configuration();
-  reset_cuda_index_mapping();
+  pthread_once(&g_controller_config_init, load_controller_configuration);
+  pthread_once(&g_reset_cuda_index_init, reset_cuda_index_mapping);
 }
 
 void init_devices_mapping() {
