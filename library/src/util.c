@@ -18,15 +18,16 @@
 #define CUDA_CORE_SOFT_LIMIT_ENV "CUDA_CORE_SOFT_LIMIT"
 #define CUDA_MEM_OVERSOLD_ENV "CUDA_MEM_OVERSOLD"
 #define VMEM_NODE_ENABLED_ENV "VMEMORY_NODE_ENABLED"
-/* Hint the driver to keep oversold managed allocations resident on the device.
- * Off by default: whether it helps depends on the workload's access pattern,
- * and there is no measurement yet to say which way it goes. */
+/* How to advise the driver about oversold managed allocations.
+ *   0  off (default)
+ *   1  SET_PREFERRED_LOCATION = device  -- "keep it on the card"
+ *   2  the above plus SET_ACCESSED_BY = device -- "and when it cannot stay,
+ *      read it where it lies instead of migrating it back"
+ * One knob with three arms rather than several knobs: the arms are mutually
+ * exclusive hypotheses and want to be told apart in a measurement, not
+ * combined. */
 #define CUDA_MEM_UVA_ADVISE_ENV "CUDA_MEM_UVA_ADVISE"
-/* Highest CONFIGURED oversubscription ratio, in percent, at which the residency
- * hint is still applied. 200 = apply up to 2x. Tunable rather than fixed
- * because nobody knows the right value yet and sweeping it must not need a
- * rebuild. */
-#define CUDA_MEM_UVA_ADVISE_MAX_RATIO_ENV "CUDA_MEM_UVA_ADVISE_MAX_RATIO"
+#define CUDA_MEM_UVA_ADVISE_MAX_MODE 2
 #define MANAGER_VISIBLE_DEVICE_ENV "MANAGER_VISIBLE_DEVICE"
 #define MANAGER_VISIBLE_DEVICES_ENV (MANAGER_VISIBLE_DEVICE_ENV "S")
 #define NVIDIA_VISIBLE_DEVICES_ENV "NVIDIA_VISIBLE_DEVICES"
@@ -248,14 +249,30 @@ void value_enabled(char *str, int *i) {
   }
 }
 
-/* Whether to advise the driver on oversold managed allocations. Unset leaves
- * *out at the caller's default (0). */
+/* Advise mode for oversold managed allocations. Unset leaves *out at the
+ * caller's default.
+ *
+ * Parsed as an integer, NOT through value_enabled(): that helper maps anything
+ * other than true/TRUE/1 to zero, so it would read "2" as OFF -- silently
+ * disabling the very arm the caller asked for. "true"/"TRUE" still mean 1,
+ * because this knob was boolean before it grew a second arm and a config
+ * carrying the old spelling should not quietly turn into "off". */
 int get_uva_advise(int *out) {
   char *str = getenv(CUDA_MEM_UVA_ADVISE_ENV);
-  if (!str) {
+  if (!str || !*str) {
     return -1;
   }
-  value_enabled(str, out);
+  if (strcmp(str, "true") == 0 || strcmp(str, "TRUE") == 0) {
+    *out = 1;
+    return 0;
+  }
+  int mode = atoi(str);
+  if (mode < 0) {
+    mode = 0;
+  } else if (mode > CUDA_MEM_UVA_ADVISE_MAX_MODE) {
+    mode = CUDA_MEM_UVA_ADVISE_MAX_MODE;
+  }
+  *out = mode;
   return 0;
 }
 
@@ -453,17 +470,6 @@ int get_sm_auto_external_util_threshold(int *out) {
  * delta() guards the division on divisor > 0, so a non-positive value is safe. */
 int get_delta_ramp_floor_divisor(int *out) {
   return get_int_env(CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV, 64, out);
-}
-
-/* Percent. Falls back to the caller's default when unset or unparseable, and
- * clamps at 100 -- a threshold below 1x would disable the hint for every
- * oversold container, which is what CUDA_MEM_UVA_ADVISE=0 is for. */
-int get_uva_advise_max_ratio(int *out) {
-  int rc = get_positive_int_env(CUDA_MEM_UVA_ADVISE_MAX_RATIO_ENV, 200, out);
-  if (*out < 100) {
-    *out = 100;
-  }
-  return rc;
 }
 
 /* AIMD deadband lower edge / 1000. Caller MUST additionally check

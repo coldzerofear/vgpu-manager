@@ -71,7 +71,6 @@ extern int get_aimd_md_cooldown_cycles(int *out);
 extern int get_usage_threshold(int *out);
 extern int get_delta_ramp_floor_divisor(int *out);
 extern int get_uva_advise(int *out);
-extern int get_uva_advise_max_ratio(int *out);
 
 /* fork() child handler implemented in loader.c -- re-inits the four
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
@@ -2709,33 +2708,25 @@ DONE:
  * initialiser is a getenv into an int: every thread derives the same value from
  * the same environment, so racing is idempotent and carries no fork obligation
  * at all -- the child inherits an answer that is already correct. */
-static int g_uva_advise_enabled = -1;
+static int g_uva_advise_mode = -1;
 static int g_uva_advise_logged = 0;
-/* Highest CONFIGURED oversubscription ratio, percent, still worth hinting at.
- * Resolved alongside the switch and racy-idempotent for the same reason. */
-static int g_uva_advise_max_ratio = -1;
-/* Per-device: has the gate decision been stated? */
-static int g_uva_gate_logged[MAX_DEVICE_COUNT] = {0};
 
-static int uva_advise_wanted(void) {
-  int enabled = __atomic_load_n(&g_uva_advise_enabled, __ATOMIC_RELAXED);
-  if (unlikely(enabled < 0)) {
-    enabled = 0;
-    (void)get_uva_advise(&enabled);
-    int max_ratio = 200;
-    (void)get_uva_advise_max_ratio(&max_ratio);
-    __atomic_store_n(&g_uva_advise_max_ratio, max_ratio, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_uva_advise_enabled, enabled, __ATOMIC_RELAXED);
+static int uva_advise_mode(void) {
+  int mode = __atomic_load_n(&g_uva_advise_mode, __ATOMIC_RELAXED);
+  if (unlikely(mode < 0)) {
+    mode = 0;
+    (void)get_uva_advise(&mode);
+    __atomic_store_n(&g_uva_advise_mode, mode, __ATOMIC_RELAXED);
     /* Stated once so a run can be attributed to an arm of the A/B rather than
      * inferred from throughput. Exchange, not a plain flag: several threads can
      * be resolving this at the same moment. */
-    if (enabled && !__atomic_exchange_n(&g_uva_advise_logged, 1, __ATOMIC_RELAXED)) {
-      LOGGER(INFO, "oversold managed allocations will be advised "
-                   "SET_PREFERRED_LOCATION=device up to a configured ratio of "
-                   "%d%% (CUDA_MEM_UVA_ADVISE=1)", max_ratio);
+    if (mode && !__atomic_exchange_n(&g_uva_advise_logged, 1, __ATOMIC_RELAXED)) {
+      LOGGER(INFO, "oversold managed allocations: advise mode %d (%s)", mode,
+             mode >= 2 ? "prefer device, and read remotely rather than migrate back"
+                       : "prefer device");
     }
   }
-  return enabled;
+  return mode;
 }
 
 /* Per-device CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS: 0 unknown, 1 yes,
@@ -2779,6 +2770,33 @@ static int uva_device_has_concurrent_managed_access(CUdevice device, int host_in
   return supported != 0;
 }
 
+/* cuMemAdvise and cuMemAdvise_v2 are an ABI-conflict pair -- the last argument
+ * is a CUdevice in one and a CUmemLocation struct in the other -- so they must
+ * never fall through to each other (see cuda_originals.c). v2 is preferred
+ * where the driver exports it; v1 is deprecated from CUDA 12.2. cuda_sym_t is
+ * unprototyped, so nothing checks the arity below. */
+static void uva_advise_one(CUdeviceptr ptr, size_t bytes, CUdevice device,
+                           int host_index, CUmem_advise advice) {
+  CUresult r;
+  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAdvise_v2))) {
+    CUmemLocation loc;
+    memset(&loc, 0, sizeof(loc));
+    loc.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    loc.id   = (int)device;
+    r = CUDA_INTERNAL_CALL(cuda_library_entry, cuMemAdvise_v2, ptr, bytes, advice, loc);
+  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAdvise))) {
+    r = CUDA_INTERNAL_CALL(cuda_library_entry, cuMemAdvise, ptr, bytes, advice, device);
+  } else {
+    return;
+  }
+  /* A refused hint changes nothing about an allocation that has already
+   * succeeded -- log it and carry on rather than failing the caller. */
+  if (unlikely(r != CUDA_SUCCESS)) {
+    LOGGER(VERBOSE, "cuMemAdvise(%d) on host device %d returned %d: %s",
+           (int)advice, host_index, r, CUDA_ERROR(cuda_library_entry, r));
+  }
+}
+
 static void uva_apply_residency_hint(CUdeviceptr ptr, size_t bytes,
                                      CUdevice device, int host_index) {
   if (bytes == 0 || host_index < 0 || host_index >= MAX_DEVICE_COUNT) {
@@ -2788,73 +2806,21 @@ static void uva_apply_residency_hint(CUdeviceptr ptr, size_t bytes,
    * oversubscription being impossible, not about this hint. */
   int can_page = uva_device_has_concurrent_managed_access(device, host_index);
 
-  if (!uva_advise_wanted() || !can_page) {
+  int mode = uva_advise_mode();
+  if (mode == 0 || !can_page) {
     return;
   }
 
-  /* Gate on the CONFIGURED oversubscription ratio -- total_memory / real_memory,
-   * which reconstructs the MemoryScaling the control plane applied (see
-   * pkg/config/vgpu: real = total / ratio when ratio > 1).
-   *
-   * The configured ratio, not the momentary one. A ratio computed from how much
-   * happens to be allocated right now would give the same buffer a different
-   * policy depending on unrelated allocation timing, and would make an A/B a
-   * mixture of both policies within one run. The configured ratio is fixed for
-   * the container's lifetime, so every allocation is judged the same way and a
-   * run sits wholly on one side of the gate. It also matches the nature of the
-   * decision: the hint lasts as long as the allocation does, so deriving it
-   * from a property that lasts as long as the container is self-consistent.
-   *
-   * What this trades away, stated plainly: the configured ratio is an upper
-   * bound rather than the pressure actually being applied. A container
-   * configured at 4x that only ever allocates half its physical budget is not
-   * oversubscribed at all, yet is refused the hint.
-   *
-   * Compared multiplicatively. total/real in integer arithmetic truncates 1.9
-   * to 1, which would silently admit ratios the threshold was meant to exclude.
-   * Overflow is not reachable: a terabyte scaled by a few hundred is ~10^14. */
-  size_t total_mem = g_vgpu_config->devices[host_index].total_memory;
-  size_t real_mem  = g_vgpu_config->devices[host_index].real_memory;
-  if (real_mem == 0) {
-    return;
-  }
-  int max_ratio = __atomic_load_n(&g_uva_advise_max_ratio, __ATOMIC_RELAXED);
-  if (max_ratio < 100) {
-    max_ratio = 200;
-  }
-  int within = (total_mem * 100) <= (real_mem * (size_t)max_ratio);
-  if (!__atomic_exchange_n(&g_uva_gate_logged[host_index], 1, __ATOMIC_RELAXED)) {
-    LOGGER(INFO, "host device %d configured oversubscription %zu%%, hint threshold %d%% -> %s",
-           host_index, real_mem ? (total_mem * 100 / real_mem) : 0, max_ratio,
-           within ? "advising" : "not advising");
-  }
-  if (!within) {
-    return;
-  }
-
-  /* cuMemAdvise and cuMemAdvise_v2 are an ABI-conflict pair -- the last
-   * argument is a CUdevice in one and a CUmemLocation struct in the other --
-   * so they must never fall through to each other (see cuda_originals.c).
-   * Prefer v2 when the driver exports it; v1 is deprecated from CUDA 12.2. */
-  CUresult r;
-  if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAdvise_v2))) {
-    CUmemLocation loc;
-    memset(&loc, 0, sizeof(loc));
-    loc.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    loc.id   = (int)device;
-    r = CUDA_INTERNAL_CALL(cuda_library_entry, cuMemAdvise_v2, ptr, bytes,
-                           CU_MEM_ADVISE_SET_PREFERRED_LOCATION, loc);
-  } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemAdvise))) {
-    r = CUDA_INTERNAL_CALL(cuda_library_entry, cuMemAdvise, ptr, bytes,
-                           CU_MEM_ADVISE_SET_PREFERRED_LOCATION, device);
-  } else {
-    return;
-  }
-  /* A refused hint changes nothing about the allocation, which has already
-   * succeeded -- log it and carry on rather than failing the caller. */
-  if (unlikely(r != CUDA_SUCCESS)) {
-    LOGGER(VERBOSE, "cuMemAdvise(SET_PREFERRED_LOCATION) on host device %d returned %d: %s",
-           host_index, r, CUDA_ERROR(cuda_library_entry, r));
+  uva_advise_one(ptr, bytes, device, host_index, CU_MEM_ADVISE_SET_PREFERRED_LOCATION);
+  if (mode >= 2) {
+    /* Establishes a device mapping so an evicted page is read over the
+     * interconnect instead of faulting back in and evicting something else.
+     * SET_ACCESSED_BY names the processor that gets the mapping -- passing the
+     * device means the GPU, and says nothing about the CPU. The CPU variant
+     * would be pointless here anyway: the caller asked for device memory, so in
+     * its own model this pointer is not host-dereferenceable and it never
+     * touches it from the host. */
+    uva_advise_one(ptr, bytes, device, host_index, CU_MEM_ADVISE_SET_ACCESSED_BY);
   }
 }
 
