@@ -69,6 +69,13 @@ function(vgpu_configure_c_test name)
     endif()
 endfunction()
 
+# NOTE: this glob compiles every test_*.c in THIS directory against the CUDA
+# includes and nothing else -- in particular not library/include. A test that
+# includes hook.h therefore cannot live here; it will fail to compile as soon
+# as anyone configures with -DBUILD_TESTS=ON, and only then, which is an easy
+# trap to fall into. GPU-less tests belong in test/nogpu/ and are built by the
+# parent CMakeLists (-DBUILD_SM_NODE_TESTS=ON). The glob is not recursive, so
+# that subdirectory is invisible here by construction.
 file(GLOB C_TESTS "${TEST_SRC_DIR}/test_*.c")
 foreach(src ${C_TESTS})
     get_filename_component(name ${src} NAME_WE)

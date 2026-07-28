@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <dirent.h>
@@ -39,6 +40,7 @@
 
 extern resource_data_t* g_vgpu_config;
 extern device_util_t* g_device_util;
+extern device_vmemory_t* g_device_vmem;
 
 extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
@@ -71,6 +73,7 @@ extern int get_aimd_md_cooldown_cycles(int *out);
 extern int get_usage_threshold(int *out);
 extern int get_delta_ramp_floor_divisor(int *out);
 extern int get_uva_advise(int *out);
+extern int get_sm_shared_bucket(int *out);
 
 /* fork() child handler implemented in loader.c -- re-inits the four
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
@@ -103,8 +106,11 @@ static pthread_once_t g_init_set = PTHREAD_ONCE_INIT;
  * This does NOT address *true* sharing: N threads on the SAME device still
  * contend on that device's counter, which is inherent to a shared token bucket.
  * Fixing that needs thread-local token batching, tracked separately.
+ *
+ * CACHELINE_SIZE itself now lives in hook.h: the shared sm_node_dev_t is built
+ * on the same granule and is a cross-version ABI, so it must be pinned in one
+ * place rather than defined per translation unit.
  */
-#define CACHELINE_SIZE 128
 
 typedef struct {
   volatile int64_t cur_cuda_cores;  /* token bucket, CAS'd per launch    */
@@ -132,7 +138,87 @@ static volatile int64_t g_total_cuda_cores[MAX_DEVICE_COUNT] = {0};
  * small-SM GPU stays pinned near 0% util forever). Cross-thread, so accessed
  * with __atomic; RELAXED suffices -- it is a plain demand flag with no ordering
  * dependency on other state. */
-static int g_throttled_since_watch[MAX_DEVICE_COUNT] = {0};
+static int32_t g_throttled_since_watch[MAX_DEVICE_COUNT] = {0};
+
+/* ---------------------------------------------------------------------- *
+ *  Shared token bucket (CUDA_SM_SHARED_BUCKET)
+ *
+ *  NULL means "use the per-process state above" -- either the feature is off
+ *  (the default) or the region could not be mapped. There is deliberately no
+ *  third state: every failure to map degrades to exactly the historical
+ *  behaviour, because container-wide SM isolation is an optimisation and must
+ *  never be able to stop a container from running.
+ *
+ *  Set once in initialization() under pthread_once, before any watcher thread
+ *  exists and before any launch can reach rate_limiter, then only ever read.
+ *  MAP_SHARED survives fork, so a child inherits the same region and joins the
+ *  same bucket -- which is precisely what we want, and why nothing in the fork
+ *  handlers may reset it (see child_after_fork).
+ * ---------------------------------------------------------------------- */
+static sm_node_region_t *g_sm_node = NULL;
+
+/* Sampling-ownership lock descriptor, held for the process lifetime and never
+ * closed (see SM_NODE_LOCK_PATH). -1 means unavailable, which degrades to
+ * every process sampling for itself -- exactly today's behaviour. Declared up
+ * here rather than beside its helpers because child_after_fork, far above
+ * them, must close it. */
+static int g_sm_lock_fd = -1;
+/* Per-device: does this process own sampling? Each watcher thread owns a
+ * disjoint device slice, so plain ints suffice -- same convention as the
+ * exclusivity FSM state. */
+static int g_sm_sampling_mine[MAX_DEVICE_COUNT] = {0};
+/* This process's previous publish time per device, used only to measure the
+ * cadence it publishes. Per-process and reset on fork with the ownership flags,
+ * so a child never reports an interval spanning the fork. */
+static int64_t g_sm_last_publish_ns[MAX_DEVICE_COUNT] = {0};
+
+/* Identity of the region file we mapped, so we can notice it being replaced.
+ *
+ * Deleting the region inside the container is not hypothetical -- the mount has
+ * to be writable for the library to create the region at all, and a root
+ * container can unlink what it can write (a recursive sweep of /tmp does it
+ * without meaning to). The mount point itself survives, so this is invisible:
+ * `rm -rf` empties the directory and only fails on the mountpoint.
+ *
+ * Why it matters more than losing a file: processes that already mapped the
+ * region keep working, because the mmap holds the inode alive. But the next
+ * process to start calls open(O_CREAT), gets a NEW inode, and maps a DIFFERENT
+ * region -- so the container ends up with two shared buckets, each refilling on
+ * its own last_refill_ns, and the aggregate limit is twice as loose. That is
+ * precisely the silent split §4.5.4 rejected unlink+rename to avoid, reintroduced
+ * from inside the container. It deserves a log line rather than nothing. */
+static ino_t g_sm_node_ino;
+static dev_t g_sm_node_dev;
+/* CAS'd, not plain-written: unlike every other per-device static in this file,
+ * the identity check is global rather than per-device, so the "each watcher
+ * thread owns a disjoint host_index slice" invariant that lets those be plain
+ * ints does NOT hold here -- several watcher threads reach it concurrently. The
+ * stamp doubles as the claim: whoever swaps it does the check, so ino/dev below
+ * still have a single writer. */
+static int64_t g_sm_ident_checked_ns;
+/* Suppresses repeats of the SAME complaint. Written only by the thread that won
+ * the stamp CAS. */
+static int g_sm_ident_warned;
+
+static inline int64_t monotonic_ns(void);
+
+/* Hot path. One predictable branch, no validation: the region was checked once
+ * at map time and is immutable thereafter. Nothing else may be added here --
+ * this runs on every kernel launch. */
+static inline volatile int64_t *sm_bucket_of(int host_index) {
+  return g_sm_node ? (volatile int64_t *)&g_sm_node->devices[host_index].cur_cuda_cores
+                   : &g_dev_hot[host_index].cur_cuda_cores;
+}
+
+/* Shared, the flag's meaning widens from "did THIS PROCESS throttle" to "did
+ * ANYONE in this container throttle" -- which is the question the anti-jitter
+ * bypass actually needs to ask once one bucket serves every process. Left
+ * per-process, process A could throttle while winner B reads its own zero flag,
+ * conclude the workload is idle and clamp the bucket A is starving on. */
+static inline int32_t *sm_throttled_of(int host_index) {
+  return g_sm_node ? &g_sm_node->devices[host_index].throttled_since_watch
+                   : &g_throttled_since_watch[host_index];
+}
 
 static int g_sm_num[MAX_DEVICE_COUNT]            = {0};
 static int g_max_thread_per_sm[MAX_DEVICE_COUNT] = {0};
@@ -238,10 +324,48 @@ static unsigned int g_share_log_tick[MAX_DEVICE_COUNT] = {0};
  * on every fork generation. */
 void child_after_fork(void) {
   g_init_set = (pthread_once_t)PTHREAD_ONCE_INIT;
+  /* Drop the inherited sampling-lock descriptor. Both failure modes it causes
+   * are real and neither is obvious:
+   *
+   *  - An OFD lock belongs to the open file description, and fork SHARES the
+   *    description. So the child inherits ownership of every device the parent
+   *    owned. Resetting g_init_set (above) makes the child re-run
+   *    initialization(), which respawns its own watcher threads -- so parent
+   *    and child would both sample and both consider themselves owner.
+   *
+   *  - Worse in the other direction: the description stays alive as long as
+   *    ANY descriptor references it. A child that keeps this fd open holds the
+   *    parent's lock after the parent exits, so no standby can ever take over
+   *    and the bucket stops being replenished for the whole container. The
+   *    "kernel releases the lock when the holder dies" property that justifies
+   *    this whole design silently stops holding.
+   *
+   * close() here drops only the child's reference: the parent's descriptor
+   * keeps the description (and its locks) intact. initialization() then
+   * reopens for the child, which contends for ownership normally.
+   *
+   * close() is async-signal-safe, which a pthread_atfork child handler must be. */
+  if (g_sm_lock_fd >= 0) {
+    close(g_sm_lock_fd);
+    g_sm_lock_fd = -1;
+  }
+  memset(g_sm_sampling_mine, 0, sizeof(g_sm_sampling_mine));
+  memset(g_sm_last_publish_ns, 0, sizeof(g_sm_last_publish_ns));
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
     g_gap_evt_ready[i]  = 0;
     g_gap_start[i]      = NULL;
     g_gap_end[i]        = NULL;
+    /* last_launch_ns only: the child's idle-gap timing genuinely restarts.
+     *
+     * Do NOT add cur_cuda_cores here, and do NOT clear g_sm_node. Both fork
+     * handlers around this one discard inherited state -- loader_child_after_fork
+     * frees the inherited memory ledger, and the lines above drop the parent's
+     * CUDA event handles -- so the reflex is to discard the bucket too. That
+     * would be wrong. Those are per-process records that mean nothing in the
+     * child; the shared bucket is container-wide state that the child JOINS as
+     * one more consumer, which is the whole point of sharing it. The MAP_SHARED
+     * mapping is inherited intact, and initialization() re-runs here but skips
+     * re-mapping precisely because g_sm_node is still set. */
     g_dev_hot[i].last_launch_ns = 0;
     /* Re-init in case a parent thread held the lock at the moment of fork.
      * POSIX leaves the inherited mutex state undefined; glibc re-init on a
@@ -569,14 +693,21 @@ dynamic_config_t g_dynamic_config = {
   .auto_debounce_cycles         = 10,
   .auto_external_util_threshold = 1,
   .delta_ramp_floor_divisor     = 64,
+  .sm_shared_bucket             = 0,     /* per-process bucket (historical) */
 };
 
+/* The ceiling stays the per-process g_total_cuda_cores[]: it is derived from
+ * device properties, so every process computes the same number, and reading it
+ * locally removes any ordering dependency on the shared region being populated
+ * (a transiently-zero shared ceiling would clamp the bucket to 0 and throttle
+ * the whole container). The region's total_cuda_cores is observability only. */
 static void change_token(int64_t delta, int host_index) {
   int64_t cuda_cores_before = 0, cuda_cores_after = 0;
+  volatile int64_t *bucket = sm_bucket_of(host_index);
 
-  LOGGER(DETAIL, "host device: %d, delta: %ld, curr: %ld", host_index, delta, g_dev_hot[host_index].cur_cuda_cores);
+  LOGGER(DETAIL, "host device: %d, delta: %ld, curr: %ld", host_index, delta, *bucket);
   do {
-    cuda_cores_before = g_dev_hot[host_index].cur_cuda_cores;
+    cuda_cores_before = *bucket;
     cuda_cores_after = cuda_cores_before + delta;
 
     if (unlikely(cuda_cores_after > g_total_cuda_cores[host_index])) {
@@ -584,7 +715,7 @@ static void change_token(int64_t delta, int host_index) {
     } else if (unlikely(cuda_cores_after < 0)) {
       cuda_cores_after = 0;
     }
-  } while (!CAS(&g_dev_hot[host_index].cur_cuda_cores, cuda_cores_before, cuda_cores_after));
+  } while (!CAS(bucket, cuda_cores_before, cuda_cores_after));
 }
 
 static void rate_limiter(int grids, int blocks, int host_index) {
@@ -596,21 +727,27 @@ static void rate_limiter(int grids, int blocks, int host_index) {
     int64_t before_cuda_cores = 0;
     int64_t after_cuda_cores = 0;
     int64_t kernel_size = (int64_t) grids;
+    /* Resolved once per launch, not per CAS retry. With the shared bucket on,
+     * this is the ONLY change the consumer side needs: a CAS is a CPU
+     * instruction and does not care whether the word is process-private or in
+     * MAP_SHARED memory, so N processes CASing one counter serialise into
+     * physically correct deductions with no lock and no extra instruction. */
+    volatile int64_t *bucket = sm_bucket_of(host_index);
 
     do {
     CHECK:
-      before_cuda_cores = g_dev_hot[host_index].cur_cuda_cores;
+      before_cuda_cores = *bucket;
       if (before_cuda_cores < 0) {
         metrics_record_rate_limit_hit(host_index);
         /* Signal the watcher that this workload wanted more than its current
          * bucket allowed -- this is genuine demand, not idleness. Slow path
          * (we are about to sleep), so the atomic store is free. */
-        __atomic_store_n(&g_throttled_since_watch[host_index], 1, __ATOMIC_RELAXED);
+        __atomic_store_n(sm_throttled_of(host_index), 1, __ATOMIC_RELAXED);
         nanosleep(&g_cycle, NULL);
         goto CHECK;
       }
       after_cuda_cores = before_cuda_cores - kernel_size;
-    } while (!CAS(&g_dev_hot[host_index].cur_cuda_cores, before_cuda_cores, after_cuda_cores));
+    } while (!CAS(bucket, before_cuda_cores, after_cuda_cores));
   }
 }
 
@@ -1026,6 +1163,7 @@ static void dump_dynamic_config(void) {
     "+ DynamicConfig  : controller=%s usage_threshold=%d "
     "aimd[md_div=%.3f eff_ratio=%d/1000 ai_base_div=%d deadband_ratio=%d/1000 md_cooldown=%d] "
     "auto[debounce=%d ext_util_threshold=%d%%] "
+    "shared_bucket=%d "
     "internal[soft_adjust_interval=%d delta_recovery_step=%d]",
     (k >= 0 && k <= 2) ? kind_name[k] : "?",
     g_dynamic_config.usage_threshold,
@@ -1036,6 +1174,7 @@ static void dump_dynamic_config(void) {
     g_dynamic_config.aimd_md_cooldown_cycles,
     g_dynamic_config.auto_debounce_cycles,
     g_dynamic_config.auto_external_util_threshold,
+    g_dynamic_config.sm_shared_bucket,
     SOFT_ADJUST_INTERVAL,
     DELTA_ERROR_RECOVERY_STEP);
 }
@@ -1077,6 +1216,12 @@ static void sm_controller_init(void) {
    * <= 0 is the user's explicit "disable the floor" sentinel, which delta()
    * honours by skipping the floor (and its division) entirely. */
   (void)get_delta_ramp_floor_divisor(&g_dynamic_config.delta_ramp_floor_divisor);
+
+  /* Container-wide shared bucket. Read here so the dump line reports it and so
+   * initialization() can act on it; the mapping itself happens there, once the
+   * device geometry this region is seeded from is known. */
+  g_dynamic_config.sm_shared_bucket = 0;
+  (void)get_sm_shared_bucket(&g_dynamic_config.sm_shared_bucket);
 
   /* AIMD tunables. Loaded unconditionally because AUTO can dispatch to
    * aimd_controller when the device becomes shared, even if the user
@@ -1147,6 +1292,357 @@ static utilization_t top_results[MAX_DEVICE_COUNT] = {};
 static volatile int up_limits[MAX_DEVICE_COUNT] = {0};
 static nvmlDevice_t nvml_devices[MAX_DEVICE_COUNT] = {};
 
+/* ---------------------------------------------------------------------- *
+ *  Refill election + shared controller state
+ *
+ *  With the shared bucket on, every process still runs its own watcher. If
+ *  they all refilled, the container would be supplied N times over and the
+ *  limit would end up N times looser than before -- worse than the problem
+ *  being fixed. So each cycle, per device, exactly one process wins the right
+ *  to run the controller and refill.
+ *
+ *  This is an election per cycle, not a leader: no term, no liveness probe, no
+ *  failover. A winner that dies mid-cycle simply does not refill that cycle;
+ *  next cycle the stamp is old enough again and somebody else takes it. Worst
+ *  case is one skipped refill (~100ms), and recovery needs no code.
+ * ---------------------------------------------------------------------- */
+
+/* The watcher's DESIGN per-device period, and the single base every timing
+ * constant below is expressed against.
+ *
+ * It is derived, not guessed: the loop sleeps wait = 100ms/dev_count before
+ * each device and visits dev_count devices per pass, so a device is revisited
+ * every 100ms no matter how many devices the batch holds. Naming it once means
+ * the rest are stated as "N periods" rather than as free-floating milliseconds
+ * that nobody can later justify. */
+#define SM_WATCHER_NOMINAL_PERIOD_NS (100LL * 1000000LL)
+
+/* Slightly under one period, so ordinary jitter cannot push a tick past the
+ * threshold and cost the device a whole refill interval, while staying close
+ * enough that two processes cannot both refill within one period. */
+#define SM_REFILL_PERIOD_NS (SM_WATCHER_NOMINAL_PERIOD_NS * 9 / 10)
+
+/* Past this multiple of the nominal period the watcher is missing its own
+ * design contract by an order of magnitude. Scaling patience further would let
+ * one pathological interval -- a suspend, a clock artefact, an owner
+ * descheduled for seconds -- park the limits somewhere they never fire again,
+ * so beyond this we stop adapting and treat the slowness as a fault. */
+#define SM_CADENCE_MAX_PERIODS 10
+
+/* Beats of the owner's cadence before a standby stops trusting its sample, and
+ * before a standby will claim a refill out from under it. Stated as beats, not
+ * as durations, precisely so they stay correct when a beat is not 100ms. */
+#define SM_SAMPLE_STALE_BEATS   3
+#define SM_STANDBY_REFILL_BEATS 2
+
+/* How fast the owner of this device is ACTUALLY cycling.
+ *
+ * Everything a standby decides has to be measured against this rather than
+ * against the nominal period, because the watcher's period is not a constant.
+ * When per-device processing overruns its slot the loop stops sleeping to the
+ * absolute-time grid and falls back to a 10ms floor, so an iteration costs
+ * (processing + 10ms) and a device is revisited only every dev_count
+ * iterations. Slow NVML on a four-device batch puts a device's period past
+ * 400ms.
+ *
+ * Against thresholds fixed for a 100ms beat that is not an edge case, it is
+ * every cycle: standbys would permanently judge the owner stale, all of them
+ * would resume calling NVML, and the added load would slow the owner further --
+ * a feedback loop whose fixed point is "centralisation delivers nothing",
+ * reached exactly when the machine is already struggling.
+ *
+ * Below nominal (including 0, meaning the owner has not published twice yet)
+ * we use nominal: an owner cannot beat the design cadence, and treating a
+ * not-yet-known cadence as infinitely fast would make standbys hair-trigger
+ * during startup. */
+static int64_t sm_owner_cadence_ns(const sm_node_dev_t *d) {
+  int64_t interval = __atomic_load_n(&d->sample_interval_ns, __ATOMIC_RELAXED);
+  if (interval < SM_WATCHER_NOMINAL_PERIOD_NS) {
+    return SM_WATCHER_NOMINAL_PERIOD_NS;
+  }
+  int64_t cap = SM_WATCHER_NOMINAL_PERIOD_NS * SM_CADENCE_MAX_PERIODS;
+  return interval > cap ? cap : interval;
+}
+
+/* Standbys wait longer than the sampling owner before claiming a refill, which
+ * makes the owner win in normal operation.
+ *
+ * Without this the two claims are fully independent, and which process refills
+ * depends on nothing but the relative phase of the watchers. A standby whose
+ * cycle happens to land just after the threshold takes the refill and runs the
+ * controller on the sample the owner published up to a period ago, while the
+ * owner -- which sampled moments earlier -- loses its own CAS and its fresh
+ * sample waits a cycle to be used. Never wrong, since the sample is a 1-second
+ * NVML average and the actuation lag is already 200-400ms, but it makes "which
+ * sample fed this refill" depend on process start order, which is a poor thing
+ * to have to reason about when reading a trace.
+ *
+ * With the owner claiming at 1x and standbys at 2x, the steady state is simply
+ * "whoever sampled also refills, immediately". Standbys revert to what they
+ * are for: a backstop that fires only if the owner misses a full extra period.
+ * The takeover path is unaffected -- an owner that DIES releases its lock, so a
+ * standby becomes the owner on its next cycle and claims at 1x from then on.
+ * The 2x threshold only governs the narrow window before that, and the
+ * alive-but-stuck case. */
+/* Warn if the region file at SM_NODE_FILE_PATH is no longer the one we mapped.
+ *
+ * Rate-limited to roughly once a second and only reached on the refill path, so
+ * it costs one stat per second per process -- irrelevant next to the NVML call
+ * beside it, and nothing on the launch path.
+ *
+ * Remembers the new identity after warning, so a replacement produces one line
+ * rather than a stream, and a later replacement is reported again. It does NOT
+ * remap: the processes that mapped the old inode are still using it, so
+ * adopting the new one here would only add a third view. There is no in-process
+ * recovery -- the container has to restart -- and saying so is the useful part. */
+static void shared_regions_check_identity(void) {
+  /* Note what is NOT guarded here. An earlier version bailed out on
+   * g_sm_node == NULL, which silently disabled the vmem_node check in the
+   * DEFAULT configuration -- the shared bucket is opt-in, the ledger is not, so
+   * the common case was the one left unchecked. Each region is guarded
+   * individually below instead. */
+  if (g_sm_node == NULL && g_device_vmem == NULL) {
+    return;
+  }
+  int64_t last = __atomic_load_n(&g_sm_ident_checked_ns, __ATOMIC_RELAXED);
+  int64_t now  = monotonic_ns();
+  if (now - last < 1000000000LL) {
+    return;
+  }
+  /* Claim the interval. A thread that loses simply skips -- the check is
+   * whole-container, so one per interval is exactly what is wanted, and this
+   * keeps the state below single-writer. */
+  if (!CAS(&g_sm_ident_checked_ns, last, now)) {
+    return;
+  }
+
+  /* Same interval, same claim: the vmem_node ledger is exposed to exactly the
+   * same in-container deletion, and its split is worse (an under-enforced memory
+   * limit rather than a loose SM limit). Checked here so both regions share one
+   * stat-per-second budget and one call site. */
+  vmem_node_check_identity();          /* self-guards on g_device_vmem */
+
+  if (g_sm_node == NULL || g_sm_node_ino == 0) {
+    return;                             /* shared bucket off, or identity unknown */
+  }
+  struct stat sb;
+  if (stat(SM_NODE_FILE_PATH, &sb) != 0) {
+    if (!g_sm_ident_warned) {
+      LOGGER(WARNING, "%s has been deleted; processes started from now on will create a "
+                      "SEPARATE region and the container's aggregate SM limit will be "
+                      "enforced per group, not container-wide. Restart the container.",
+                      SM_NODE_FILE_PATH);
+      g_sm_ident_warned = 1;
+    }
+    /* g_sm_node_ino is deliberately left intact rather than zeroed. Zeroing it
+     * would trip the `g_sm_node_ino == 0` guard just above and disable this
+     * check permanently, so a file that later reappears under a new inode --
+     * the moment the bucket actually splits -- would never be reported. */
+    return;
+  }
+  if (sb.st_ino != g_sm_node_ino || sb.st_dev != g_sm_node_dev) {
+    LOGGER(WARNING, "%s was replaced (inode %llu -> %llu); this process is still mapped "
+                    "to the old region while newer processes use the new one, so the "
+                    "shared bucket has split. Restart the container.",
+                    SM_NODE_FILE_PATH,
+                    (unsigned long long)g_sm_node_ino, (unsigned long long)sb.st_ino);
+    g_sm_node_ino = sb.st_ino;     /* report each replacement once */
+    g_sm_node_dev = sb.st_dev;
+    g_sm_ident_warned = 0;         /* a further replacement is a new complaint */
+    return;
+  }
+  g_sm_ident_warned = 0;           /* healthy again */
+}
+
+/* Returns 1 if this process owns this device's controller for this cycle.
+ * Always 1 when the bucket is per-process -- there is nobody to contend with,
+ * and the caller's code path stays exactly what it has always been. */
+static int sm_try_claim_refill(int host_index) {
+  if (g_sm_node == NULL) {
+    return 1;
+  }
+  int64_t *stamp = &g_sm_node->devices[host_index].last_refill_ns;
+  int64_t last = __atomic_load_n(stamp, __ATOMIC_RELAXED);
+  int64_t now  = monotonic_ns();
+  /* g_sm_lock_fd < 0 means ownership does not exist at all (no lock file), so
+   * there is no owner to defer to and every process must keep claiming at the
+   * owner threshold. Deferring here instead would push the whole container onto
+   * the standby threshold -- nobody would hold the short ticket -- and cut the
+   * refill rate, starving the bucket.
+   *
+   * The standby threshold is measured in beats of the OWNER's cadence, not in
+   * fixed milliseconds. A fixed 2x90ms would be exceeded constantly by an owner
+   * legitimately cycling at 440ms, so standbys would take its refills every
+   * 180ms and the "whoever samples also refills" property would quietly hold
+   * only for fast owners. */
+  int64_t threshold;
+  if (g_sm_lock_fd < 0 || g_sm_sampling_mine[host_index]) {
+    threshold = SM_REFILL_PERIOD_NS;
+  } else {
+    threshold = sm_owner_cadence_ns(&g_sm_node->devices[host_index])
+                * SM_STANDBY_REFILL_BEATS;
+  }
+  if (now - last < threshold) {
+    return 0;
+  }
+  /* CAS decides it: several processes can pass the staleness test at once, but
+   * only the one that swaps the stamp proceeds. The asymmetric thresholds only
+   * bias WHO gets here; the CAS is what still guarantees at most one refill,
+   * which is why a stale g_sm_sampling_mine could never cause over-supply. */
+  return CAS(stamp, last, now) ? 1 : 0;
+}
+
+/* Copy the container's controller state into this process's working arrays.
+ *
+ * Doing it this way -- snapshot in, publish out, around the winner's block --
+ * rather than rewriting every access site keeps the control algorithm textually
+ * identical, which matters: the algorithm is not changing, only where its state
+ * lives. It is also safe by construction, because only the winner runs between
+ * the load and the publish.
+ *
+ * `share` carries the acquire/release pairing for the whole block: it is loaded
+ * first with ACQUIRE and stored last with RELEASE, so every plain field written
+ * before the release store is visible to the next winner that acquire-loads it. */
+static void sm_ctl_load(int host_index) {
+  if (g_sm_node == NULL) {
+    return;
+  }
+  sm_node_dev_t *d = &g_sm_node->devices[host_index];
+  shares[host_index]                     = __atomic_load_n(&d->share, __ATOMIC_ACQUIRE);
+  up_limits[host_index]                  = d->up_limit;
+  is[host_index]                         = d->is_cnt;
+  avg_sys_frees[host_index]              = d->avg_sys_free;
+  pre_external_process_nums[host_index]  = d->pre_external_proc;
+  /* Without these three the exclusivity FSM would advance once per N cycles in
+   * each process and fracture; lost_excl_pending especially, being a one-shot
+   * flag, would hang set in every non-winner and fire a stale reset cycles late. */
+  g_is_exclusive_debounced[host_index]   = d->excl_debounced;
+  g_exclusive_pending_streak[host_index] = d->excl_streak;
+  g_lost_exclusivity_pending[host_index] = d->lost_excl_pending;
+  /* Without this, AIMD re-fires MD every cycle -- each winner sees its own
+   * never-advanced cooldown of 0 -- and share collapses by md_divisor^N. That
+   * avalanche is the exact failure the cooldown exists to prevent. */
+  g_aimd_md_cooldown[host_index]         = d->md_cooldown;
+}
+
+static void sm_ctl_publish(int host_index) {
+  if (g_sm_node == NULL) {
+    return;
+  }
+  sm_node_dev_t *d = &g_sm_node->devices[host_index];
+  d->up_limit          = up_limits[host_index];
+  d->is_cnt            = is[host_index];
+  d->avg_sys_free      = avg_sys_frees[host_index];
+  d->pre_external_proc = pre_external_process_nums[host_index];
+  d->excl_debounced    = g_is_exclusive_debounced[host_index];
+  d->excl_streak       = g_exclusive_pending_streak[host_index];
+  d->lost_excl_pending = g_lost_exclusivity_pending[host_index];
+  d->md_cooldown       = g_aimd_md_cooldown[host_index];
+  __atomic_store_n(&d->share, shares[host_index], __ATOMIC_RELEASE);  /* publish */
+}
+
+/* ---------------------------------------------------------------------- *
+ *  Sampling ownership
+ *
+ *  Refill admission (above) and sampling ownership (here) are deliberately
+ *  DIFFERENT mechanisms, and the split is what makes this safe:
+ *
+ *    last_refill_ns CAS  -- HARD. Bounds how often the bucket may be topped
+ *                           up, always, no matter what else goes wrong.
+ *    byte-range lock     -- SOFT. Decides who pays for NVML. If it fails, is
+ *                           lost, or is somehow held twice, the worst outcome
+ *                           is redundant sampling; it can never over-supply
+ *                           the bucket, because the CAS still gates that.
+ *
+ *  So correctness never rests on the lock. That matters because a lock CAN be
+ *  held by a process that is alive but stuck, and because fork() shares the
+ *  descriptor the lock lives on.
+ * ---------------------------------------------------------------------- */
+
+
+/* Returns 1 if this process should sample this device. Already-owner is the
+ * steady-state answer and costs nothing; otherwise ONE non-blocking fcntl.
+ * That is the entire per-cycle cost of standing by -- no NVML call, no spin,
+ * no sleep-poll loop. */
+static int sm_sampling_claim(int host_index) {
+  if (g_sm_node == NULL || g_sm_lock_fd < 0) {
+    return 1;                       /* not shared, or no lock: sample as always */
+  }
+  if (g_sm_sampling_mine[host_index]) {
+    return 1;
+  }
+  struct flock fl;
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type   = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start  = host_index;         /* one byte per device -> devices are
+                                     * independent, which is required: with
+                                     * differing CUDA_VISIBLE_DEVICES two
+                                     * processes may see disjoint device sets,
+                                     * so there is no single owner for all. */
+  fl.l_len    = 1;
+  if (ofd_fcntl(g_sm_lock_fd, /*wait=*/0, &fl) == -1) {
+    return 0;                       /* someone else owns it -- stand by */
+  }
+  g_sm_sampling_mine[host_index] = 1;
+  __atomic_store_n(&g_sm_node->devices[host_index].leader_pid,
+                   (int32_t)getpid(), __ATOMIC_RELAXED);
+  LOGGER(VERBOSE, "host device %d: acquired sampling ownership", host_index);
+  return 1;
+}
+
+/* Publish the sample just taken so standbys can skip NVML entirely. The stamp
+ * goes last with release ordering; a reader acquire-loads it first. */
+static void sm_publish_sample(int host_index) {
+  if (g_sm_node == NULL) {
+    return;
+  }
+  sm_node_dev_t *d = &g_sm_node->devices[host_index];
+  int64_t now = monotonic_ns();
+
+  /* Publish the cadence we are actually achieving, so standbys can scale their
+   * staleness limit to it rather than to an assumed ~100ms (see
+   * sm_owner_cadence_ns). Measured from this process's own previous publish;
+   * skipped on the first one, and whenever ownership has just changed hands,
+   * because the gap across a handover reflects the takeover, not the cadence. */
+  int64_t prev = g_sm_last_publish_ns[host_index];
+  if (prev != 0 && now > prev) {
+    __atomic_store_n(&d->sample_interval_ns, now - prev, __ATOMIC_RELAXED);
+  }
+  g_sm_last_publish_ns[host_index] = now;
+
+  d->s_user_current      = top_results[host_index].user_current;
+  d->s_sys_current       = top_results[host_index].sys_current;
+  d->s_sys_process_num   = top_results[host_index].sys_process_num;
+  d->s_external_proc_num = top_results[host_index].external_process_num;
+  __atomic_store_n(&d->sample_published_ns, now, __ATOMIC_RELEASE);
+}
+
+/* Load the owner's sample into this process's top_results. Returns 0 if there
+ * is no sample yet or it is too old to trust, in which case the caller samples
+ * for itself -- that is the backstop for an owner that holds the lock but has
+ * stopped making progress, which a lock alone cannot detect. */
+static int sm_load_published_sample(int host_index) {
+  if (g_sm_node == NULL) {
+    return 0;
+  }
+  sm_node_dev_t *d = &g_sm_node->devices[host_index];
+  int64_t published = __atomic_load_n(&d->sample_published_ns, __ATOMIC_ACQUIRE);
+  if (published == 0 ||
+      monotonic_ns() - published > sm_owner_cadence_ns(d) * SM_SAMPLE_STALE_BEATS) {
+    return 0;
+  }
+  /* Plain reads: these are heuristic counters feeding a control loop that is
+   * already fed by a 1-second NVML average, so a torn-by-one-cycle field is
+   * indistinguishable from ordinary sampling jitter. */
+  top_results[host_index].user_current         = d->s_user_current;
+  top_results[host_index].sys_current          = d->s_sys_current;
+  top_results[host_index].sys_process_num      = d->s_sys_process_num;
+  top_results[host_index].external_process_num = d->s_external_proc_num;
+  top_results[host_index].valid                = 1;
+  return 1;
+}
+
 static void *utilization_watcher(void *arg) {
   batch_t *batch = (batch_t *)arg;
   LOGGER(VERBOSE, "start %s batch code %d", __FUNCTION__, batch->batch_code);
@@ -1215,12 +1711,36 @@ static void *utilization_watcher(void *arg) {
       }
       host_index = host_indexes[cuda_index];
 
+      /* Before every `continue` below, deliberately. Region identity has
+       * nothing to do with sampling, core_limit, or who won the refill, and
+       * gating it on any of them leaves real configurations unchecked: a
+       * container with memory_limit but core_limit off skips this loop body
+       * entirely, and that is exactly the case where the vmem ledger matters
+       * and SM limiting does not. Self-rate-limited to one stat per second per
+       * process, so calling it per device costs an atomic load and a compare.
+       * Not on the launch path. */
+      shared_regions_check_identity();
+
       // Skip GPU without core limit enabled
       if (!g_vgpu_config->devices[host_index].core_limit) continue;
 
-      get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
-
-      if (unlikely(!top_results[host_index].valid)) continue;
+      /* Sample only if we own sampling for this device, or if the owner's
+       * published sample has gone stale. A standby in steady state pays one
+       * non-blocking fcntl plus one shared read here, and no NVML call at all
+       * -- which is the point: N processes polling nvmlDeviceGetProcessUtilization
+       * every ~100ms is exactly the call pattern the driver handles worst. */
+      if (sm_sampling_claim(host_index)) {
+        get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
+        if (unlikely(!top_results[host_index].valid)) continue;
+        sm_publish_sample(host_index);
+      } else if (!sm_load_published_sample(host_index)) {
+        /* Owner holds the lock but has stopped publishing -- alive and stuck,
+         * which the lock cannot express. Sample for ourselves so the bucket
+         * keeps being replenished. Refill stays gated by the CAS below, so
+         * this cannot double-supply even if several standbys do it at once. */
+        get_used_gpu_utilization((void *)&top_results[host_index], cuda_index, host_index, nvml_devices[host_index]);
+        if (unlikely(!top_results[host_index].valid)) continue;
+      }
 
       /* Invalidate per-cycle exclusivity memo so the FIRST debounced
        * predicate call this iteration recomputes from fresh sampling
@@ -1228,11 +1748,21 @@ static void *utilization_watcher(void *arg) {
        * watcher cycle, regardless of how many code paths consult it). */
       g_excl_memo_valid[host_index] = 0;
 
+      /* Sampling above happens in every process (metrics and logs want it);
+       * from here down is the controller, and exactly one process per cycle
+       * gets to run it. A no-op when the bucket is per-process. */
+      if (!sm_try_claim_refill(host_index)) {
+        continue;
+      }
+      sm_ctl_load(host_index);
+
       sys_frees[host_index] = MAX_UTILIZATION - top_results[host_index].sys_current;
 
       /* Read-and-clear once per cycle (before either branch, so it never goes
-       * stale): did any launch on this device throttle since we last looked? */
-      int throttled = __atomic_exchange_n(&g_throttled_since_watch[host_index], 0, __ATOMIC_RELAXED);
+       * stale): did any launch on this device throttle since we last looked?
+       * Must sit inside the winner's block -- a non-winner clearing the shared
+       * flag would swallow the signal the winner needs to see. */
+      int throttled = __atomic_exchange_n(sm_throttled_of(host_index), 0, __ATOMIC_RELAXED);
 
       if (g_vgpu_config->devices[host_index].hard_limit) {
         /* Anti-jitter soft-start. Use the RAW predicate (no debounce) here: this
@@ -1264,8 +1794,28 @@ static void *utilization_watcher(void *arg) {
         if (host_index_is_exclusive_raw(host_index)
             && top_results[host_index].user_current < low_util_thr
             && !throttled) {
-          g_dev_hot[host_index].cur_cuda_cores =
+          int64_t bypass_target =
               g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+          if (g_sm_node != NULL) {
+            /* A plain store would erase tokens other processes CAS-deducted
+             * between our read and our write -- tokens conjured back into the
+             * bucket, i.e. over-launch. Express the same intent ("bring the
+             * bucket to target") as a delta applied through change_token's CAS
+             * loop, which commutes with concurrent deductions.
+             *
+             * The per-process branch below keeps the literal store: with one
+             * bucket per process the switch is off, and off must mean bit-for-
+             * bit the old behaviour. */
+            volatile int64_t *bucket = sm_bucket_of(host_index);
+            int64_t cur = __atomic_load_n(bucket, __ATOMIC_RELAXED);
+            change_token(bypass_target - cur, host_index);
+          } else {
+            g_dev_hot[host_index].cur_cuda_cores = bypass_target;
+          }
+          /* The controller ran, so it may have advanced md_cooldown or the
+           * exclusivity FSM. Publish before the continue or those advances are
+           * lost and the next winner recomputes from stale state. */
+          sm_ctl_publish(host_index);
           continue;
         }
         shares[host_index] = g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
@@ -1359,10 +1909,11 @@ static void *utilization_watcher(void *arg) {
         }
       }
       change_token(shares[host_index], host_index);
+      sm_ctl_publish(host_index);
       if ((g_share_log_tick[host_index]++ % WATCHER_UTIL_LOG_STRIDE) == 0) {
         g_share_log_tick[host_index] = 1;
         LOGGER(DETAIL, "cuda device: %d, host device: %d, user util: %d, up_limit: %d, share: %ld, curr core: %ld (1/%d sampled)", cuda_index, host_index,
-               top_results[host_index].user_current, up_limits[host_index], shares[host_index], g_dev_hot[host_index].cur_cuda_cores, WATCHER_UTIL_LOG_STRIDE);
+               top_results[host_index].user_current, up_limits[host_index], shares[host_index], *sm_bucket_of(host_index), WATCHER_UTIL_LOG_STRIDE);
       }
     }
     if (unlikely(first_cycle)) {
@@ -1409,7 +1960,16 @@ static int gap_effective_dc(int host_index) {
   device_t *d = &g_vgpu_config->devices[host_index];
   if (!d->core_limit) return 0;
   if (d->hard_limit)  return d->hard_core;
-  int t = up_limits[host_index];
+  /* With a shared bucket the controller runs in ONE process per cycle, so this
+   * process's private up_limits[] is only as fresh as the last cycle it won --
+   * and a process that keeps losing may never refresh it at all. Reading the
+   * container-wide value keeps every process's GAP throttle on the same limit
+   * the controller actually converged to. Relaxed: a stale-by-one-cycle int is
+   * fine for a duty-cycle target, which is why the private read was already
+   * lock-free. */
+  int t = g_sm_node ? __atomic_load_n(&g_sm_node->devices[host_index].up_limit,
+                                      __ATOMIC_RELAXED)
+                    : up_limits[host_index];
   if (t <= 0) t = d->hard_core;   /* watcher not warmed up yet -> guarantee floor */
   return t;
 }
@@ -1716,6 +2276,64 @@ static void initialization() {
    * the time they hit the dispatch. Safe to run on every initialization()
    * call because pthread_once guards the whole function. */
   sm_controller_init();
+
+  /* Attach the container-wide bucket, if enabled. Deliberately here: after
+   * init_device_cuda_cores (so g_total_cuda_cores is known) and after
+   * sm_controller_init (so the switch has been read), but before
+   * balance_batches spawns any watcher -- so g_sm_node is final before a
+   * watcher or a launch can observe it, and no synchronisation is needed on the
+   * pointer itself.
+   *
+   * Guarded on NULL because child_after_fork resets g_init_set, so a forked
+   * child re-runs this function. The MAP_SHARED mapping is inherited across
+   * fork and is exactly the one we want the child to keep using; mapping again
+   * would leak the first mapping and, worse, is simply unnecessary.
+   *
+   * Failure is not an error. Directory not mounted (an older plugin, or one of
+   * the mount sites missed), mounted read-only, /tmp shadowed -- all land here,
+   * and all mean "run the way we always have". */
+  if (g_dynamic_config.sm_shared_bucket && g_sm_node == NULL) {
+    if (map_sm_node_region(&g_sm_node) != 0 || g_sm_node == NULL) {
+      g_sm_node = NULL;
+      LOGGER(WARNING, "sm_node unavailable, falling back to per-process token bucket");
+    } else {
+      for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
+        /* Observability only -- change_token clamps against the local copy. */
+        __atomic_store_n(&g_sm_node->devices[i].total_cuda_cores,
+                         g_total_cuda_cores[i], __ATOMIC_RELAXED);
+      }
+      /* Remember which file we mapped, so shared_regions_check_identity() can notice it
+       * being replaced under us. */
+      struct stat sb;
+      if (stat(SM_NODE_FILE_PATH, &sb) == 0) {
+        g_sm_node_ino = sb.st_ino;
+        g_sm_node_dev = sb.st_dev;
+      }
+      /* Name the file. "attached" alone sent the first user of this feature
+       * looking for it in the wrong place; the region is an ordinary file and
+       * the fastest way to confirm which one is to say where it is. */
+      LOGGER(INFO, "sm_node attached at %s (%d bytes, inode %llu): container-wide shared token bucket enabled",
+             SM_NODE_FILE_PATH, SM_NODE_FILE_SIZE, (unsigned long long)g_sm_node_ino);
+    }
+  }
+
+  /* Guarded separately from the region above, and that separation is required.
+   * A forked child KEEPS the inherited mapping (it is the same container-wide
+   * bucket, which is what we want) but must NOT keep the inherited lock
+   * descriptor, so child_after_fork closes it -- and this is where it gets
+   * reopened. Folding this into the region's `g_sm_node == NULL` guard would
+   * leave every forked child permanently without a lock fd, silently
+   * un-centralising sampling for the processes that fork the most. */
+  if (g_sm_node != NULL && g_sm_lock_fd < 0) {
+    g_sm_lock_fd = open_sm_node_lock();
+    if (g_sm_lock_fd < 0) {
+      /* Not fatal, not even degraded correctness: every process falls back to
+       * sampling for itself, which is what it does today. Refill stays gated
+       * by the CAS, so the bucket cannot be over-supplied either way. */
+      LOGGER(WARNING, "sm_node sampling lock unavailable; each process will sample independently");
+    }
+  }
+
   balance_batches(device_count);
 }
 
@@ -3387,28 +4005,46 @@ DONE:
 }
 
 CUresult _cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
-  CUresult ret;
-  /* NULL-arg fast path: skip our cached-limit branch (which would
-   * dereference *bytes) and forward to the driver, matching
-   * un-hooked CUDA semantics (driver returns CUDA_ERROR_INVALID_VALUE). */
-  if (unlikely(bytes == NULL)) {
-    goto CALL;
-  }
-  int host_index = get_host_device_index_by_cuda_device(dev);
-  if (host_index < 0) {
-    goto CALL;
-  }
-  if (g_vgpu_config->devices[host_index].memory_limit) {
-    *bytes = g_vgpu_config->devices[host_index].total_memory;
-    return CUDA_SUCCESS;
-  }
-CALL:
+  CUresult ret = CUDA_ERROR_NOT_FOUND;
+  /* Ask the driver first, with the caller's own pointer. Two things fall out
+   * of that ordering. A NULL `bytes` is handled by whatever policy the driver
+   * has -- we neither have to know it nor guess it -- and a device the driver
+   * would have refused (lost, not initialised) still produces the driver's
+   * error instead of us reporting a configured size for a device that is not
+   * answering. The previous form returned CUDA_SUCCESS from the limited-view
+   * branch without ever consulting the driver. */
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuDeviceTotalMem))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuDeviceTotalMem, bytes, dev);
-  } else {
-    ret = CUDA_ERROR_NOT_FOUND;
+  }
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    return ret;
+  }
+  /* Before the index lookup: get_host_device_index_by_cuda_device resolves via
+   * UUID against g_vgpu_config->devices[] on a cold cache, so the FIRST call is
+   * the one that would dereference it unset. Only load_necessary_data() --
+   * deliberately NOT init_devices_mapping(), whose nvmlInit failure path is
+   * LOGGER(FATAL) and would turn a memory query into an exit(1). */
+  load_necessary_data();
+  int host_index = get_host_device_index_by_cuda_device(dev);
+  if (unlikely(host_index < 0)) {
+    return ret;
+  }
+  if (g_vgpu_config->devices[host_index].memory_limit && bytes != NULL) {
+    size_t configured = g_vgpu_config->devices[host_index].total_memory;
+    if (g_vgpu_config->devices[host_index].memory_oversold) {
+      *bytes = configured;
+    } else {
+      CUresult sub = CUDA_ERROR_NOT_FOUND;
+      size_t real_total = 0, real_free_unused = 0;
+      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, &real_free_unused, &real_total);
+      } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
+        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, &real_free_unused, &real_total);
+      }
+      *bytes = (sub == CUDA_SUCCESS && real_total > 0 && real_total < configured) ? real_total : configured;
+    }
   }
   return ret;
 }
@@ -3422,75 +4058,53 @@ CUresult cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
 }
 
 CUresult _cuMemGetInfo(size_t *free, size_t *total) {
-  CUresult ret;
   CUdevice device;
   int lock_fd = -1;
-  int has_limited_view;
-  /* NULL-arg fast path: skip the limited-view branch (which would
-   * dereference *total / *free) and forward to the driver. Mirrors
-   * HAMi PR #182 commit 03f99d70 — OptiX's cuMemGetInfo probes hit
-   * this path during init. */
-  if (unlikely(free == NULL || total == NULL)) {
-    goto CALL;
-  }
-  ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+  CUresult ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
   if (unlikely(ret != CUDA_SUCCESS)) {
     goto DONE;
   }
-  int host_index = -1;
-  size_t used = 0, vmem_used = 0;
-  has_limited_view = load_limited_memory_view(device, &host_index, &lock_fd, &used, &vmem_used);
-  if (has_limited_view) {
-    size_t configured = g_vgpu_config->devices[host_index].total_memory;
-    size_t actual_total;
-
-    if (g_vgpu_config->devices[host_index].memory_oversold) {
-      /*
-       * Oversold UVA mode: configured total is intentionally LARGER than
-       * the physical slice (real_memory). prepare_memory_allocation routes
-       * the overflow allocations through cuMemAllocManaged. Reporting the
-       * configured total here is what makes the oversold capacity visible
-       * to the application; clamping at the real driver total would tell
-       * apps they have less memory than we are actually willing to give
-       * them via UVA, and the entire oversold design becomes inert.
-       */
-      actual_total = configured;
-    } else {
-      /*
-       * Normal slicing: ask real libcuda for its compute-usable total
-       * (physical minus driver-reserved page tables / framebuffer / ECC
-       * overhead - varies per driver/display/ECC, ~hundreds of MiB on
-       * consumer cards) and clamp the configured limit at that. Without
-       * this clamp, apps that read cuMemGetInfo as the truth and try to
-       * allocate up to it (vLLM, PyTorch caching allocator) hit OOM in
-       * the last few hundred MiB the driver was never going to hand out.
-       *
-       * If the real call somehow fails, degrade to the previous behaviour
-       * (report configured value, no clamp) rather than synthesising a
-       * potentially-wrong number.
-       */
-      size_t real_total = 0, real_free_unused = 0;
-      CUresult sub = CUDA_ERROR_NOT_FOUND;
-      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
-        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, &real_free_unused, &real_total);
-      } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
-        sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, &real_free_unused, &real_total);
-      }
-      actual_total = (sub == CUDA_SUCCESS && real_total > 0 && real_total < configured) ? real_total : configured;
-    }
-
-    *total = actual_total;
-    *free  = (used + vmem_used) >= actual_total ? 0 : (actual_total - used - vmem_used);
-    ret = CUDA_SUCCESS;
-    goto DONE;
-  }
-CALL:
   if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, free, total);
   } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
     ret = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, free, total);
   } else {
     ret = CUDA_ERROR_NOT_FOUND;
+  }
+  if (unlikely(ret != CUDA_SUCCESS)) {
+    goto DONE;
+  }
+  /* Before the index lookup: get_host_device_index_by_cuda_device resolves via
+   * UUID against g_vgpu_config->devices[] on a cold cache, so the FIRST call is
+   * the one that would dereference it unset. Only load_necessary_data() --
+   * deliberately NOT init_devices_mapping(), whose nvmlInit failure path is
+   * LOGGER(FATAL) and would turn a memory query into an exit(1). */
+  load_necessary_data();
+  int host_index = -1;
+  size_t used = 0, vmem_used = 0;
+  if (load_limited_memory_view(device, &host_index, &lock_fd, &used, &vmem_used)) {
+    size_t configured = g_vgpu_config->devices[host_index].total_memory;
+    size_t actual_total = 0, actual_free = 0;
+    if (g_vgpu_config->devices[host_index].memory_oversold) {
+      actual_total = configured;
+      actual_free  = (used + vmem_used) >= actual_total ? 0 : (actual_total - used - vmem_used);
+    } else {
+      if (total != NULL) {
+        actual_total = (*total > 0 && *total < configured) ? *total : configured;
+      } else if (free != NULL) {
+        CUresult sub = CUDA_ERROR_NOT_FOUND;
+        size_t real_total = 0, real_free_unused = 0;
+        if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo_v2))) {
+          sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo_v2, &real_free_unused, &real_total);
+        } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo))) {
+          sub = CUDA_ENTRY_CHECK(cuda_library_entry, cuMemGetInfo, &real_free_unused, &real_total);
+        }
+        actual_total = (sub == CUDA_SUCCESS && real_total > 0 && real_total < configured) ? real_total : configured;
+      }
+      actual_free  = (used + vmem_used) >= actual_total ? 0 : (actual_total - used - vmem_used);
+    }
+    if (total != NULL) *total = actual_total;
+    if (free != NULL) *free = actual_free;
   }
 DONE:
   unlock_gpu_device(lock_fd);
@@ -3708,17 +4322,38 @@ CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsLi
   if (likely(launchParamsList != NULL)) {
     for (unsigned int i = 0; i < numDevices; i++) {
       CUDA_LAUNCH_PARAMS *p = &launchParamsList[i];
+      CUresult ret;
       CUcontext sctx = NULL;
-      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuStreamGetCtx,
-                              p->hStream, &sctx) != CUDA_SUCCESS || sctx == NULL) {
+      /* CUDA_INTERNAL_CHECK only adds a log line around CUDA_INTERNAL_CALL,
+       * which does NOT null-check the entry -- a driver that does not export
+       * the symbol would be called through a NULL pointer. Hence the explicit
+       * guards. cuStreamGetCtx_v2 is preferred where the driver has it: it
+       * additionally reports a green context, which we do not need (a green
+       * context partitions one device, so the device is the same either way),
+       * but routing through the newer entry keeps this working if the older
+       * one is ever retired. The two take a different number of arguments and
+       * cuda_sym_t is unprototyped, so the compiler cannot check the call --
+       * the arity below is load-bearing. */
+      if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCtx_v2)))) {
+        ret = CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCtx_v2),
+                                  p->hStream, &sctx, NULL);
+      } else if (likely(CUDA_FIND_ENTRY(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCtx)))) {
+        ret = CUDA_INTERNAL_CHECK(cuda_library_entry, __CUDA_API_PTSZ(cuStreamGetCtx),
+                                  p->hStream, &sctx);
+      } else {
+        ret = CUDA_ERROR_NOT_FOUND;
+      }
+      if (unlikely(ret != CUDA_SUCCESS || sctx == NULL)) {
         continue;
       }
       CUcontext prev = NULL;
-      if (_cuCtxPushCurrent(sctx) != CUDA_SUCCESS) {
+      ret = _cuCtxPushCurrent(sctx);
+      if (unlikely(ret != CUDA_SUCCESS)) {
         continue;
       }
       CUdevice device;
-      if (CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device) == CUDA_SUCCESS) {
+      ret = CUDA_INTERNAL_CHECK(cuda_library_entry, cuCtxGetDevice, &device);
+      if (likely(ret == CUDA_SUCCESS)) {
         int host_index = get_host_device_index_by_cuda_device(device);
         rate_limiter(p->gridDimX * p->gridDimY * p->gridDimZ,
                      p->blockDimX * p->blockDimY * p->blockDimZ, host_index);

@@ -123,6 +123,7 @@ func TestVGPURequestMountEdits_AreRequestScopedForMounts(t *testing.T) {
 	assert.Contains(t, hostPaths, filepath.Join(hostBase, util.Config))
 	assert.Contains(t, hostPaths, filepath.Join(hostBase, vgpu.VGPULockDirName))
 	assert.Contains(t, hostPaths, filepath.Join(hostBase, util.VMemNode))
+	assert.Contains(t, hostPaths, filepath.Join(hostBase, util.SMNode))
 }
 
 func TestVGPUClaimCommonEdits_DoNotIncludeAllocationStateMounts(t *testing.T) {
@@ -139,6 +140,7 @@ func TestVGPUClaimCommonEdits_DoNotIncludeAllocationStateMounts(t *testing.T) {
 		assert.NotEqual(t, filepath.Join(contRoot, util.Config), m.ContainerPath)
 		assert.NotEqual(t, vgpu.ContVGPULockPath, m.ContainerPath)
 		assert.NotEqual(t, vgpu.ContVMemoryNodePath, m.ContainerPath)
+		assert.NotEqual(t, vgpu.ContSMNodePath, m.ContainerPath)
 	}
 }
 

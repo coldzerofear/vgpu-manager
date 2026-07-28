@@ -26,6 +26,7 @@ extern "C" {
 #include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -151,6 +152,15 @@ extern "C" {
 #define DRIVER_VERSION_MATCH_PATTERN "([0-9]+)(\\.[0-9]+)+"
 
 #define MAX_DEVICE_COUNT 16
+
+/* Padding granule for per-device hot state. 128 rather than 64 because Intel's
+ * L2 adjacent-line prefetcher pulls lines in 128B-aligned pairs (so 64B padding
+ * can still leave two devices effectively sharing) and some ARM64 parts use a
+ * 128B granule. Lives here, not in cuda_hook.c, because both the per-process
+ * dev_hot_t and the shared sm_node_dev_t below are built on it -- and the
+ * latter is a cross-version ABI, so the granule must be pinned in one place.
+ * See the false-sharing rationale above dev_hot_t in cuda_hook.c. */
+#define CACHELINE_SIZE 128
 
 /**
  * Max sample pid size
@@ -279,6 +289,10 @@ typedef struct {
   int    auto_debounce_cycles;
   int    auto_external_util_threshold;
   int    delta_ramp_floor_divisor;
+  /* APPENDED (see the field-ordering note above): container-wide shared token
+   * bucket. 0 = per-process bucket, the historical behaviour and the default.
+   * env CUDA_SM_SHARED_BUCKET. */
+  int    sm_shared_bucket;
 } dynamic_config_t;
 
 typedef struct {
@@ -353,9 +367,213 @@ typedef struct {
   unsigned char lock_byte;
 } device_vmem_used_t;
 
+/* vmem_node region. Structurally the same frozen-header idea as sm_node below,
+ * for the same reason -- the host directory outlives a container while the .so
+ * is version-pinned per container, so a newer library can be handed a file an
+ * older one wrote -- but with one hard difference: this region HAS a host-side
+ * Go reader (pkg/config/vmem), so the layout is a CROSS-LANGUAGE ABI.
+ *
+ * Anything changed here must be mirrored in DeviceVMemoryT, and in particular
+ * getVmemoryLockOffset() must keep agreeing with GET_VMEMORY_LOCK_OFFSET in
+ * lock.c. C gets that for free because offsetof() accounts for the header; Go
+ * computes the offset by hand, so it is the one place in this design where
+ * being wrong produces no error at all -- just fcntl locks taken on
+ * non-overlapping byte ranges, mutual exclusion silently gone, and torn reads
+ * reported as valid metrics. TestVMemoryLayoutMatchesC exists to catch it. */
+#define VMEM_NODE_MAGIC          0x564D4E44U   /* "VMND" */
+#define VMEM_NODE_LAYOUT_VERSION 1U
+/* Permanent constant, like SM_NODE_FILE_SIZE, and here it prevents a real
+ * crash rather than merely simplifying: the Go manager keeps this file mmap'd.
+ * If a container restarted with a library that shrank the struct and
+ * ftruncate'd the file down, the manager's existing mapping would extend past
+ * EOF and touching it is SIGBUS. A size that never changes removes that class
+ * outright. Current use 256.25 KiB; reserved 320 KiB (~1.25x). */
+#define VMEM_NODE_FILE_SIZE      (320 * 1024)
+
 typedef struct {
-  device_vmem_used_t devices[MAX_DEVICE_COUNT];
+  /* ---- FROZEN HEADER: 16 bytes, permanent ABI. Same contract as sm_node. */
+  uint32_t magic;             /* VMEM_NODE_MAGIC          */
+  uint32_t layout_version;    /* VMEM_NODE_LAYOUT_VERSION */
+  uint32_t region_size;       /* sizeof(device_vmemory_t) */
+  uint32_t device_count;      /* MAX_DEVICE_COUNT         */
+  /* ---- end frozen header. */
+  uint8_t  _pad[CACHELINE_SIZE - 16];
+  device_vmem_used_t devices[MAX_DEVICE_COUNT];   /* shifted down by 128B */
 } device_vmemory_t;
+
+_Static_assert(offsetof(device_vmemory_t, devices) == CACHELINE_SIZE,
+               "vmem region header must be exactly one cache line");
+_Static_assert(sizeof(device_vmemory_t) <= VMEM_NODE_FILE_SIZE,
+               "vmem region must fit the permanently reserved file size");
+_Static_assert(offsetof(device_vmemory_t, magic) == 0,
+               "frozen header ABI: magic stays at offset 0");
+_Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
+               "frozen header ABI: layout_version stays at offset 4");
+
+/* ---------------------------------------------------------------------- *
+ *  sm_node -- container-wide shared token bucket for SM (compute) limiting
+ *
+ *  Symmetric with vmem_node: that region carries the cross-process state of
+ *  MEMORY isolation, this one the cross-process state of COMPUTE isolation.
+ *  See docs/sm_multiproc_shared_bucket_design.md.
+ *
+ *  Why it exists: g_dev_hot[].cur_cuda_cores is a per-PROCESS static, so N
+ *  processes in one container each hold their own bucket and can each decide
+ *  "tokens available, go" at the same instant. Moving the bucket into
+ *  MAP_SHARED memory makes "how much may this container still launch" a
+ *  physical invariant rather than a statistical average -- and costs nothing
+ *  on the hot path, because a CAS is a CPU instruction that does not care
+ *  which address space the word lives in.
+ *
+ *  THIS STRUCT IS AN ABI. It is written to a file, mapped by several
+ *  processes, and outlives any single library version. Hence fixed-width
+ *  types, explicit padding, and _Static_asserts pinning the layout.
+ *  Unlike vmem_node it has NO host-side Go reader, so the ABI is
+ *  library-internal -- but it still crosses library VERSIONS.
+ * ---------------------------------------------------------------------- */
+
+/* Container-side path. NOT the container's own /tmp: this directory is bind
+ * mounted per container by the device plugin / DRA driver, exactly like
+ * /tmp/.vgpu_lock and /tmp/.vmem_node, because the workload's own /tmp may be
+ * shadowed, read-only, or swept. */
+#define SM_NODE_DIR       "/.sm_node"
+#define SM_NODE_PATH      (TMP_DIR SM_NODE_DIR)
+#define SM_NODE_FILE_PATH (TMP_DIR SM_NODE_DIR "/sm_node.config")
+
+/* Sampling-ownership lock. A SEPARATE file from the region, on purpose.
+ *
+ * The init lock in map_sm_node_region can live on sm_node.config because it is
+ * taken and dropped inside one function. This one is held for the process's
+ * whole life, and that inverts the trade-off: on kernels without OFD locks we
+ * fall back to classic POSIX record locks, which are dropped when the process
+ * closes ANY descriptor for that file -- and map_sm_node_region does exactly
+ * that during init. Sharing one file would mean leadership could evaporate
+ * silently, leaving two processes each convinced it owns sampling.
+ *
+ * It must also NEVER be deleted while containers run: unlink + recreate yields
+ * a new inode, locks are per-inode, and two processes holding locks on
+ * different inodes are not mutually exclusive at all. The pre-start cleanup
+ * removes sm_node.config (we want a fresh region) but deliberately not this. */
+#define SM_NODE_LOCK_PATH (TMP_DIR SM_NODE_DIR "/sm_node.lock")
+
+/* The file size is a PERMANENT constant, deliberately decoupled from
+ * sizeof(sm_node_region_t): a later version may grow the struct without
+ * changing the file size, so the region is never resized, so an older process
+ * still holding a mapping can never have its tail fall past EOF (which would
+ * be SIGBUS on access). Current use is 128 + 16*128 = 2176B. */
+#define SM_NODE_FILE_SIZE 8192
+
+#define SM_NODE_MAGIC          0x534D4E44U   /* "SMND" */
+/* BUMP THIS whenever any field below changes type, order, or offset.
+ * The guard compares it and rebuilds the region on mismatch; forgetting to
+ * bump it means a new library silently reads an old layout's bytes. */
+#define SM_NODE_LAYOUT_VERSION 3U   /* v3: + sample_interval_ns (adaptive staleness) */
+
+/* No volatile, no _Atomic. volatile provides no concurrency guarantee (today's
+ * correctness comes entirely from the CAS macro), and _Atomic risks a
+ * lock-free downgrade: a non-lock-free _Atomic makes the compiler use
+ * libatomic's address-keyed lock table, which is PER PROCESS -- two processes
+ * mapping the same word would take different locks and the protection would
+ * silently evaporate. Plain fixed-width types plus __atomic_* builtins with an
+ * explicit memory order at each site. */
+typedef struct {
+  /* Hot: CAS'd by every launching thread in every process. */
+  int64_t cur_cuda_cores;       /* the token bucket itself                  */
+  int64_t total_cuda_cores;     /* thread*sm*FACTOR; bucket ceiling         */
+  int64_t last_refill_ns;       /* refill election stamp, CAS'd per cycle   */
+  int64_t share;                /* was shares[]                             */
+  /* Monotonic stamp of the last published utilization sample, written LAST
+   * (release) by the sampling owner so a reader that acquire-loads it knows
+   * the four s_* fields below are complete. Also the staleness signal: if this
+   * falls too far behind, the owner is alive but not sampling (hung in NVML,
+   * say) and a standby resamples for itself rather than trusting it. */
+  int64_t sample_published_ns;
+  /* Controller integrator state. Only the cycle's election winner reads or
+   * writes these, so the election itself serialises them -- no lock needed,
+   * only acquire/release pairing so each winner sees the previous winner's
+   * writes. Every one of these MUST live here: the election hands the device
+   * to a different PROCESS each cycle, so a per-process copy would advance at
+   * ~1/N rate and fracture into N divergent controllers. */
+  int32_t up_limit;             /* was up_limits[]                          */
+  int32_t is_cnt;               /* was is[]                                 */
+  int32_t avg_sys_free;         /* was avg_sys_frees[]                      */
+  int32_t pre_external_proc;    /* was pre_external_process_nums[]          */
+  int32_t md_cooldown;          /* was g_aimd_md_cooldown[] -- without this
+                                 * AIMD re-fires MD every cycle and cuts
+                                 * share by md_divisor^N ("MD avalanche"),
+                                 * which is the exact thing the cooldown was
+                                 * introduced to prevent.                   */
+  int32_t excl_debounced;       /* was g_is_exclusive_debounced[]      ┐    */
+  int32_t excl_streak;          /* was g_exclusive_pending_streak[]    │FSM */
+  int32_t lost_excl_pending;    /* was g_lost_exclusivity_pending[]    ┘    */
+  /* Written by rate_limiter() on throttle (any thread, any process),
+   * read-and-cleared once per cycle by the election winner. Sharing it
+   * changes the question from "did THIS PROCESS throttle" to "did ANYONE in
+   * the container throttle", which is the correct question once the bucket
+   * is shared. */
+  int32_t throttled_since_watch;
+  /* Utilization sample published by whichever process owns sampling for this
+   * device. Standbys read these instead of calling NVML themselves.
+   *
+   * This is the whole point of centralising sampling: nvmlDeviceGetProcessUtilization
+   * is expensive and degrades when called often -- the local-driver path already
+   * carries a comment saying frequent calls legitimately return NOT_FOUND. N
+   * processes each polling it every ~100ms multiplies exactly the call rate the
+   * driver dislikes, and N is largest in the notebook containers this design
+   * targets. Publishing one sample makes the cost O(1) per device, not O(N). */
+  int32_t s_user_current;       /* container-aggregate utilization           */
+  int32_t s_sys_current;        /* device-wide utilization                   */
+  int32_t s_sys_process_num;
+  int32_t s_external_proc_num;
+  /* Owning process of the sampling lock. Diagnostics only -- never a liveness
+   * signal. Ownership is decided by the kernel-held file lock, which stays
+   * correct when a pid is recycled or a record goes stale. */
+  int32_t leader_pid;
+  /* The owner's OWN measured interval between publishes, so a standby can tell
+   * "slow" from "stuck" without assuming how fast sampling ought to be.
+   *
+   * The watcher's cadence is not guaranteed: when per-device processing
+   * overruns its slot the loop falls back to a 10ms floor sleep, so the period
+   * becomes (processing + 10ms) per iteration and a device is revisited every
+   * dev_count iterations. Slow NVML on a 4-device batch can push a device's
+   * period into the hundreds of milliseconds. A fixed staleness limit tuned
+   * for ~100ms would then fire permanently, every standby would resume
+   * sampling, and the extra NVML load would make the owner slower still --
+   * a feedback loop that ends with centralisation providing nothing. */
+  int64_t sample_interval_ns;
+  uint8_t _pad[CACHELINE_SIZE - 104];
+} __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
+
+typedef struct {
+  /* ---- FROZEN HEADER: these 16 bytes are a PERMANENT ABI. ----
+   * The layout guard has to read them before it knows which version wrote
+   * the file, so they must predate every possible version difference.
+   * Never change their type, order, or offset. */
+  uint32_t magic;
+  uint32_t layout_version;
+  uint32_t region_size;
+  uint32_t device_count;
+  /* ---- end frozen header; everything below may evolve with the version. */
+  uint8_t  _pad[CACHELINE_SIZE - 16];
+  sm_node_dev_t devices[MAX_DEVICE_COUNT];
+} sm_node_region_t;
+
+_Static_assert(sizeof(sm_node_dev_t) == CACHELINE_SIZE,
+               "sm_node_dev_t must occupy exactly one padded cache line");
+_Static_assert(_Alignof(sm_node_dev_t) == CACHELINE_SIZE,
+               "sm_node_dev_t must be cache-line aligned or false sharing returns");
+_Static_assert(offsetof(sm_node_region_t, devices) == CACHELINE_SIZE,
+               "region header must be exactly one cache line");
+_Static_assert(sizeof(sm_node_region_t) <= SM_NODE_FILE_SIZE,
+               "region must fit the permanently reserved file size");
+_Static_assert(offsetof(sm_node_region_t, magic) == 0,
+               "frozen header ABI: magic stays at offset 0");
+_Static_assert(offsetof(sm_node_region_t, layout_version) == 4,
+               "frozen header ABI: layout_version stays at offset 4");
+_Static_assert(offsetof(sm_node_region_t, region_size) == 8,
+               "frozen header ABI: region_size stays at offset 8");
+_Static_assert(offsetof(sm_node_region_t, device_count) == 12,
+               "frozen header ABI: device_count stays at offset 12");
 
 /** dynamic rate control */
 typedef struct {
@@ -502,6 +720,40 @@ void get_used_gpu_memory_by_device(void *, nvmlDevice_t);
 void get_used_gpu_virt_memory(void *, int device_id);
 
 void check_cleanup_vmem_nodes_by_device(int host_index);
+
+/**
+ * Acquire/release an fcntl record lock, preferring OFD locks (Linux >= 3.15)
+ * and falling back to classic POSIX locks when the kernel rejects them.
+ * wait != 0 blocks (F_OFD_SETLKW), wait == 0 does not. Defined in lock.c.
+ */
+struct flock;
+int ofd_fcntl(int fd, int wait, struct flock *fl);
+
+/**
+ * Map the container-wide sm_node shared region, creating or rebuilding it as
+ * needed. Returns 0 and sets *data on success. On ANY failure returns non-zero
+ * and leaves *data NULL: the caller must then fall back to per-process buckets.
+ * This never exits -- shared SM limiting is an optimisation, not a correctness
+ * prerequisite.
+ */
+int map_sm_node_region(sm_node_region_t **data);
+
+/**
+ * Warn if the vmem_node region file is no longer the inode we mapped -- deleted
+ * or replaced from inside the container. Detection only; see the comment on the
+ * definition for why re-attaching to a replacement would be worse than leaving
+ * the ledger split. Caller supplies the rate limiting.
+ */
+void vmem_node_check_identity(void);
+
+/**
+ * Open (creating if needed) the sm_node sampling-lock file and return its fd,
+ * or -1. The caller keeps the fd for the process lifetime and never closes it
+ * -- see SM_NODE_LOCK_PATH for why closing matters on the classic-POSIX-lock
+ * fallback path. O_CLOEXEC so an exec'd child does not inherit ownership;
+ * fork() still shares the descriptor, which child_after_fork undoes.
+ */
+int open_sm_node_lock(void);
 
 void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device_id);
 

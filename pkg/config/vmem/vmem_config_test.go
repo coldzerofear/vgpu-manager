@@ -36,12 +36,18 @@ func TestDeviceVMemStructLayout(t *testing.T) {
 // (library/src/lock.c) for every device index >= 1.
 func TestGetVmemoryLockOffset(t *testing.T) {
 	stride := int64(unsafe.Sizeof(DeviceVMemUsedT{}))
-	base := int64(unsafe.Offsetof(DeviceVMemUsedT{}.LockByte))
+	lockByte := int64(unsafe.Offsetof(DeviceVMemUsedT{}.LockByte))
+	// The region gained a 128-byte frozen header, so the Devices array no
+	// longer starts at offset 0 and every lock byte moved down with it. This
+	// term used to be absent because it used to be zero; leaving it out now
+	// would put Go's locks 128 bytes below C's, which produces no error at all
+	// -- both sides would just stop excluding each other.
+	devicesBase := int64(unsafe.Offsetof(DeviceVMemoryT{}.Devices))
 
 	for i := 0; i < util.MaxDeviceCount; i++ {
 		// Independently reconstruct the C macro:
 		//   offsetof(device_vmemory_t, devices[i].lock_byte)
-		want := int64(i)*stride + base
+		want := devicesBase + int64(i)*stride + lockByte
 		if got := getVmemoryLockOffset(i); got != want {
 			t.Errorf("getVmemoryLockOffset(%d) = %d, want %d", i, got, want)
 		}
@@ -51,7 +57,12 @@ func TestGetVmemoryLockOffset(t *testing.T) {
 	if getVmemoryLockOffset(1) == getVmemoryLockOffset(0) {
 		t.Fatal("device 1 and device 0 resolved to the same lock offset; per-device stride is not applied")
 	}
-	if got := getVmemoryLockOffset(0); got != base {
-		t.Fatalf("getVmemoryLockOffset(0) = %d, want %d", got, base)
+	if got := getVmemoryLockOffset(0); got != devicesBase+lockByte {
+		t.Fatalf("getVmemoryLockOffset(0) = %d, want %d", got, devicesBase+lockByte)
+	}
+	// The header byte the library write-locks during init must not collide
+	// with any per-device lock range.
+	if getVmemoryLockOffset(0) <= 0 {
+		t.Fatal("device 0's lock byte overlaps the header byte locked at init")
 	}
 }
