@@ -1027,6 +1027,7 @@ extern int file_exist(const char *file_path);
 extern int pid_exist(int pid);
 extern int is_zombie_proc(int pid);
 extern int get_sm_watcher_enabled(int *i);
+extern char* _getenv(const char* name);
 /* This is the symbol search function */
 fp_dlsym real_dlsym = NULL;
 void *lib_control;
@@ -2683,27 +2684,27 @@ void init_g_vgpu_config_by_env(resource_data_t** data) {
   if (unlikely(ret)) {
     LOGGER(WARNING, "not defined env compatibility mode");
   }
-  char *pod_name = getenv("VGPU_POD_NAME");
+  char *pod_name = _getenv("VGPU_POD_NAME");
   if (likely(pod_name != NULL)){
     strncpy(vgpu_config_init.pod_name, pod_name, sizeof(vgpu_config_init.pod_name)-1);
     vgpu_config_init.pod_name[sizeof(vgpu_config_init.pod_name) - 1] = '\0';
   }
-  char *pod_namespace = getenv("VGPU_POD_NAMESPACE");
+  char *pod_namespace = _getenv("VGPU_POD_NAMESPACE");
   if (likely(pod_namespace != NULL)){
     strncpy(vgpu_config_init.pod_namespace, pod_namespace, sizeof(vgpu_config_init.pod_namespace)-1);
     vgpu_config_init.pod_namespace[sizeof(vgpu_config_init.pod_namespace) - 1] = '\0';
   }
-  char *pod_uid = getenv("VGPU_POD_UID");
+  char *pod_uid = _getenv("VGPU_POD_UID");
   if (likely(pod_uid != NULL)){
     strncpy(vgpu_config_init.pod_uid, pod_uid, sizeof(vgpu_config_init.pod_uid)-1);
     vgpu_config_init.pod_uid[sizeof(vgpu_config_init.pod_uid) - 1] = '\0';
   }
-  char *container_name = getenv("VGPU_CONTAINER_NAME");
+  char *container_name = _getenv("VGPU_CONTAINER_NAME");
   if (likely(container_name != NULL)){
     strncpy(vgpu_config_init.container_name, container_name, sizeof(vgpu_config_init.container_name)-1);
     vgpu_config_init.container_name[sizeof(vgpu_config_init.container_name) - 1] = '\0';
   }
-  char *reg_uuid = getenv("MANAGER_CLIENT_REGISTER_UUID");
+  char *reg_uuid = _getenv("MANAGER_CLIENT_REGISTER_UUID");
   if (reg_uuid != NULL){
     strncpy(vgpu_config_init.reg_uuid, reg_uuid, sizeof(vgpu_config_init.reg_uuid)-1);
     vgpu_config_init.reg_uuid[sizeof(vgpu_config_init.reg_uuid) - 1] = '\0';
