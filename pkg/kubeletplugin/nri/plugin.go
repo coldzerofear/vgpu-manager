@@ -72,7 +72,7 @@ var envPrefixesOfInterest = []string{"MANAGER_", "VGPU_", "CUDA_", "LD_PRELOAD",
 // mountDestsOfInterest are the container paths the vGPU mounts target.
 var mountDestsOfInterest = []string{
 	"/etc/vgpu-manager/config", "/etc/vgpu-manager/registry", "/etc/vgpu-manager/driver",
-	"/etc/ld.so.preload", "/tmp/.vgpu_lock", "/tmp/.vmem_node",
+	"/etc/ld.so.preload", "/tmp/.vgpu_lock", "/tmp/.vmem_node", "/tmp/.sm_node",
 }
 
 // Config configures the in-process NRI plugin.
@@ -388,8 +388,10 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 	pidsConfigPath := filepath.Join(inj.ConfigDir, registry.PidsConfig)
 	basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
 	vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
+	smNodeConfigPath := filepath.Join(basePath, util.SMNode, util.SMNodeFile)
 	_ = os.RemoveAll(pidsConfigPath)
 	_ = os.RemoveAll(vmemNodeConfigPath)
+	_ = os.RemoveAll(smNodeConfigPath)
 
 	p.cache.Set(pod.GetUid(), c.GetName(), Entry{ClaimUID: claimUID, ConfigDir: inj.ConfigDir})
 

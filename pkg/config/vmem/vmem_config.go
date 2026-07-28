@@ -22,8 +22,33 @@ type DeviceVMemUsedT struct {
 	LockByte      uint8
 }
 
+// Frozen header of the vmem_node region. Must match library/include/hook.h
+// byte for byte: VMEM_NODE_MAGIC / VMEM_NODE_LAYOUT_VERSION, and the file size
+// the library ftruncates to.
+const (
+	VMemNodeMagic         uint32 = 0x564D4E44 // "VMND"
+	VMemNodeLayoutVersion uint32 = 1
+	VMemNodeFileSize      int64  = 320 * 1024
+)
+
+// ErrUnknownLayout means the region was written by a library version this
+// binary does not understand. The correct response is to treat the container
+// as having no data for now, never to rebuild: the library may rebuild because
+// a layout mismatch proves the file predates the running container, but the
+// manager lives outside any container's lifecycle and would be erasing the
+// ledger of a container that is very much alive.
+var ErrUnknownLayout = fmt.Errorf("unknown vmem_node layout")
+
+// DeviceVMemoryT mirrors device_vmemory_t. The 128-byte header is NOT
+// decoration: it shifts Devices, and therefore every per-device lock offset,
+// down by one cache line. See getVmemoryLockOffset.
 type DeviceVMemoryT struct {
-	Devices [util.MaxDeviceCount]DeviceVMemUsedT
+	Magic         uint32
+	LayoutVersion uint32
+	RegionSize    uint32
+	DeviceCount   uint32
+	_             [112]byte // pad the header to one 128B cache line
+	Devices       [util.MaxDeviceCount]DeviceVMemUsedT
 }
 
 func (d *DeviceVMemUsedT) GetTotalUsed() uint64 {
@@ -119,9 +144,21 @@ func getVmemoryLockOffset(deviceIndex int) int64 {
 	// unsafe.Offsetof only yields the field offset within a single
 	// DeviceVMemUsedT (the array index is ignored, it is a compile-time
 	// constant), so the per-device stride must be added explicitly.
+	// The base offset of the Devices array is REQUIRED and easy to forget.
+	// unsafe.Offsetof(DeviceVMemUsedT{}.LockByte) is the offset within one
+	// element; without adding where the array itself starts, every lock lands
+	// 128 bytes short of the range C locks.
+	//
+	// Getting this wrong reports no error anywhere. Go and C would simply lock
+	// disjoint byte ranges, each believing it holds the lock, and the manager
+	// would read a ledger being mutated underneath it -- wrong numbers, no
+	// warning. C is immune because GET_VMEMORY_LOCK_OFFSET uses offsetof() on
+	// the whole struct, which accounts for the header automatically; this is
+	// the only side computed by hand. TestVMemoryLockOffsetMatchesC pins it.
+	base := int64(unsafe.Offsetof(DeviceVMemoryT{}.Devices))
 	deviceSize := int64(unsafe.Sizeof(DeviceVMemUsedT{}))
 	lockByteOffset := int64(unsafe.Offsetof(DeviceVMemUsedT{}.LockByte))
-	return int64(deviceIndex)*deviceSize + lockByteOffset
+	return base + int64(deviceIndex)*deviceSize + lockByteOffset
 }
 
 func NewMmapDeviceVMemory(filePath string) (*MmapDeviceVMemory, error) {
@@ -129,14 +166,29 @@ func NewMmapDeviceVMemory(filePath string) (*MmapDeviceVMemory, error) {
 	if err != nil {
 		return nil, err
 	}
-	dataSize := int64(unsafe.Sizeof(DeviceVMemoryT{}))
+	// The file is a fixed size now, decoupled from sizeof(DeviceVMemoryT), so
+	// that the library never resizes it -- a shrink would leave this mapping
+	// extending past EOF and touching it would be SIGBUS in the manager.
 	size := mmapFile.FileInfo.Size()
-	if size != dataSize {
-		klog.Errorf("File size mismatch, expected: %d, actual: %d", dataSize, size)
+	if size != VMemNodeFileSize {
+		klog.V(4).Infof("vmem_node size mismatch, expected: %d, actual: %d", VMemNodeFileSize, size)
 		_ = mmapFile.Close()
-		return nil, fmt.Errorf("file size mismatch")
+		return nil, ErrUnknownLayout
 	}
 	data := (*DeviceVMemoryT)(unsafe.Pointer(&mmapFile.Data[0]))
+	// Header check, deliberately after the size check and deliberately not
+	// fatal. It also covers what a size check cannot: a layout that changed
+	// without changing size. Skipping is the only correct action -- see
+	// ErrUnknownLayout. A container mid-rebuild publishes magic last, so it is
+	// observed here as "not ready yet" and picked up on a later pass.
+	if data.Magic != VMemNodeMagic || data.LayoutVersion != VMemNodeLayoutVersion ||
+		data.RegionSize != uint32(unsafe.Sizeof(DeviceVMemoryT{})) ||
+		data.DeviceCount != uint32(util.MaxDeviceCount) {
+		klog.V(4).Infof("vmem_node layout not recognised (magic=%#x ver=%d size=%d count=%d)",
+			data.Magic, data.LayoutVersion, data.RegionSize, data.DeviceCount)
+		_ = mmapFile.Close()
+		return nil, ErrUnknownLayout
+	}
 	return &MmapDeviceVMemory{
 		vMemory:  data,
 		mmapFile: mmapFile,

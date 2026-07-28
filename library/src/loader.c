@@ -1010,6 +1010,8 @@ static pthread_once_t init_nvml_host_index = PTHREAD_ONCE_INIT;
  * load_necessary_data() in the child to call pthread_atfork again,
  * accumulating an extra registration per fork generation. */
 static pthread_once_t g_atfork_init = PTHREAD_ONCE_INIT;
+static pthread_once_t g_controller_config_init = PTHREAD_ONCE_INIT;
+static pthread_once_t g_reset_cuda_index_init = PTHREAD_ONCE_INIT;
 
 extern int get_compatibility_mode(int *mode);
 extern int get_mem_ratio(uint32_t index, double *ratio);
@@ -1025,6 +1027,7 @@ extern int file_exist(const char *file_path);
 extern int pid_exist(int pid);
 extern int is_zombie_proc(int pid);
 extern int get_sm_watcher_enabled(int *i);
+extern char* _getenv(const char* name);
 /* This is the symbol search function */
 fp_dlsym real_dlsym = NULL;
 void *lib_control;
@@ -1560,56 +1563,390 @@ DONE:
   return ret;
 }
 
+/* Does `dir` sit on its own mount, or is it just a directory inside `parent`?
+ * A bind mount is its own mount point and reports a different st_dev than its
+ * parent. Returns 1 mounted, 0 not, -1 unknown (stat failed -- draw no
+ * conclusion). Must be called BEFORE any mkdir of `dir`, or it describes a
+ * directory we created ourselves. */
+static int dir_is_mount_point(const char *dir, const char *parent) {
+  struct stat dir_sb, parent_sb;
+  if (stat(dir, &dir_sb) != 0) return -1;
+  if (stat(parent, &parent_sb) != 0) return -1;
+  return dir_sb.st_dev != parent_sb.st_dev ? 1 : 0;
+}
+
+/* Identity of the vmem_node region we mapped, so a replacement can be reported.
+ *
+ * The exposure is the same as sm_node's -- a writable mount a root container can
+ * unlink from, where `rm -rf` empties the directory and only fails on the mount
+ * point -- but the consequence is worse, because this region is a LEDGER rather
+ * than a self-correcting feedback quantity. Processes already mapped keep the
+ * old inode; the next one to start creates a new one; and from then on each
+ * group's get_used_gpu_virt_memory() sums only its own charges. Neither sees the
+ * other's oversold/UVA allocations, so the memory limit is under-enforced
+ * against the physical device.
+ *
+ * Detection only. Remapping to the new region would be actively harmful here:
+ * this process's existing charges live in the old region and would be orphaned
+ * (the PID-liveness sweep only ever scans the region a process is mapped to),
+ * while a later free would subtract from a region that never recorded the
+ * charge -- clamped at zero by sub_gpu_virt_memory, i.e. silent drift. The same
+ * ledger-versus-feedback asymmetry that says rebuild-on-layout-mismatch is safe
+ * says re-attach-on-replacement is not. */
+static ino_t g_vmem_node_ino;
+static dev_t g_vmem_node_dev;
+static int   g_vmem_ident_warned;
+
+void vmem_node_check_identity(void) {
+  if (g_device_vmem == NULL || g_vmem_node_ino == 0) {
+    return;
+  }
+  struct stat sb;
+  if (stat(VMEMORY_NODE_FILE_PATH, &sb) != 0) {
+    if (!g_vmem_ident_warned) {
+      LOGGER(WARNING, "%s has been deleted; processes started from now on will keep a "
+                      "SEPARATE virtual-memory ledger, so neither group sees the other's "
+                      "charges and the memory limit is under-enforced. Restart the container.",
+                      VMEMORY_NODE_FILE_PATH);
+      g_vmem_ident_warned = 1;
+    }
+    return;
+  }
+  if (sb.st_ino != g_vmem_node_ino || sb.st_dev != g_vmem_node_dev) {
+    LOGGER(WARNING, "%s was replaced (inode %llu -> %llu); this process still accounts "
+                    "into the old ledger while newer processes use the new one, so the "
+                    "memory limit is under-enforced. Restart the container.",
+                    VMEMORY_NODE_FILE_PATH,
+                    (unsigned long long)g_vmem_node_ino, (unsigned long long)sb.st_ino);
+    g_vmem_node_ino = sb.st_ino;
+    g_vmem_node_dev = sb.st_dev;
+    g_vmem_ident_warned = 0;
+    return;
+  }
+  g_vmem_ident_warned = 0;
+}
+
+static int vmem_node_header_valid(const device_vmemory_t *r) {
+  return __atomic_load_n(&r->magic, __ATOMIC_ACQUIRE) == VMEM_NODE_MAGIC &&
+         r->layout_version == VMEM_NODE_LAYOUT_VERSION            &&
+         r->region_size    == (uint32_t)sizeof(device_vmemory_t)  &&
+         r->device_count   == (uint32_t)MAX_DEVICE_COUNT;
+}
+
+/* Called with the header byte write-locked.
+ *
+ * Rebuilding rather than refusing to start is the whole point of this change.
+ * The previous behaviour -- "size mismatch => return 1" -- combined with the
+ * caller's LOGGER(FATAL) meant that upgrading the library made containers
+ * unable to start on any path without a pre-start cleanup hook (DRA without
+ * NRI). Losing the ledger costs nothing there: a layout mismatch means the
+ * file was written by the PREVIOUS incarnation of this container, so every
+ * record in it belongs to a process that no longer exists. Discarding records
+ * of dead PIDs is exactly what the liveness sweep does anyway.
+ *
+ * magic is published last, with release ordering, so an interrupted rebuild
+ * leaves the region invalid rather than half-initialised, and the next process
+ * simply rebuilds again. That same ordering is what makes the unlocked Go
+ * reader safe here: mid-rebuild it sees magic == 0 and skips the container. */
+static void vmem_node_rebuild_locked(device_vmemory_t *r) {
+  /* First build and repair share this code path on purpose -- one path cannot
+   * disagree with itself -- but they are not the same EVENT and must not read
+   * the same in a log. A fresh region is all zeroes because the control plane
+   * deletes the file before every container start, so "layout mismatch" on a
+   * normal first start is alarming and wrong. Only a header with something in
+   * it is evidence of drift. */
+  if (r->magic == 0 && r->layout_version == 0 &&
+      r->region_size == 0 && r->device_count == 0) {
+    LOGGER(INFO, "vmem_node region initialised (%d bytes, layout v%u)",
+           VMEM_NODE_FILE_SIZE, VMEM_NODE_LAYOUT_VERSION);
+  } else {
+    LOGGER(WARNING, "vmem_node layout mismatch (magic=%#x ver=%u size=%u count=%u), rebuilding",
+           r->magic, r->layout_version, r->region_size, r->device_count);
+  }
+  memset(r, 0, VMEM_NODE_FILE_SIZE);
+  r->device_count   = (uint32_t)MAX_DEVICE_COUNT;
+  r->region_size    = (uint32_t)sizeof(device_vmemory_t);
+  r->layout_version = VMEM_NODE_LAYOUT_VERSION;
+  __atomic_store_n(&r->magic, VMEM_NODE_MAGIC, __ATOMIC_RELEASE);
+}
+
 int mmap_file_to_vmem_node(device_vmemory_t** data) {
-  int fd;
-  int created = 0;
+  *data = NULL;
+
+  /* Before mkdir, for the same reason as sm_node: a missing mount is not
+   * detectable afterwards, because mkdir would have created the directory on
+   * the container's own filesystem and everything below would then succeed. */
+  if (dir_is_mount_point(VMEMORY_NODE_PATH, TMP_DIR) == 0) {
+    LOGGER(WARNING, "%s is not a mount point -- the plugin did not provide it, so this "
+                    "ledger lives in the container's own /tmp: it will NOT be cleaned "
+                    "between container restarts and is not visible from the host",
+                    VMEMORY_NODE_PATH);
+  }
+
   if (unlikely(file_exist(VMEMORY_NODE_PATH) != 0)) {
     mkdir(VMEMORY_NODE_PATH, 0755);
   }
-  const char* filename = VMEMORY_NODE_FILE_PATH;
-  if (unlikely(file_exist(filename) != 0)) {
-    fd = open(filename, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (unlikely(fd == -1)) {
-      LOGGER(ERROR, "can't create %s, error %s", filename, strerror(errno));
-      return 1;
-    }
-    created = 1;
-    if (ftruncate(fd, sizeof(device_vmemory_t)) == -1) {
-      LOGGER(ERROR, "ftruncate failed: %s", strerror(errno));
-      close(fd);
-      return 1;
-    }
-  } else {
-    fd = open(filename, O_RDWR | O_CLOEXEC);
-    if (unlikely(fd == -1)) {
-      LOGGER(ERROR, "can't open %s, error %s", filename, strerror(errno));
-      return 1;
-    }
+
+  /* Unconditional O_CREAT, no file_exist() pre-check. The old two-branch form
+   * had a TOCTOU: two processes could both find the file absent, both set
+   * created = 1, and both memset the mapping -- each erasing what the other
+   * had just written. "Who created it" is now a question never asked. */
+  int fd = open(VMEMORY_NODE_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (unlikely(fd == -1)) {
+    LOGGER(WARNING, "can't open %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
+    return 1;
   }
+
+  /* Lock ONE byte in the frozen header, not the whole file. Byte 0 is never a
+   * record-lock target: the per-device locks live at
+   * GET_VMEMORY_LOCK_OFFSET(i) = offsetof(..., devices[i].lock_byte), the
+   * lowest of which is 16516. A whole-file lock would instead contend with
+   * every per-device reader and writer -- including the Go manager's read
+   * locks -- for no benefit, since all this needs to exclude is another
+   * process initialising concurrently. */
+  struct flock fl;
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start = 0;
+  fl.l_len = 1;
+  if (unlikely(ofd_fcntl(fd, 1, &fl) == -1)) {
+    LOGGER(WARNING, "can't lock %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
+    close(fd);
+    return 1;
+  }
+
   int ret = 0;
   struct stat sb;
-  if (fstat(fd, &sb) == -1) {
-    LOGGER(ERROR, "fstat failed: %s", strerror(errno));
+  if (unlikely(fstat(fd, &sb) == -1)) {
+    LOGGER(WARNING, "fstat %s failed: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
     ret = 1;
-    goto DONE;
+    goto UNLOCK;
   }
-  if (!created && sb.st_size != sizeof(device_vmemory_t)) {
-    LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
-                   sizeof(device_vmemory_t), (long long)sb.st_size);
-    ret = 1;
-    goto DONE;
+  if (sb.st_size != VMEM_NODE_FILE_SIZE) {
+    if (unlikely(ftruncate(fd, VMEM_NODE_FILE_SIZE) == -1)) {
+      LOGGER(WARNING, "ftruncate %s failed: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
+      ret = 1;
+      goto UNLOCK;
+    }
   }
-  *data = (device_vmemory_t*)mmap(NULL, sb.st_size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
-  if (*data == MAP_FAILED) {
+
+  device_vmemory_t *region = (device_vmemory_t*)mmap(NULL, VMEM_NODE_FILE_SIZE,
+                                                     PROT_READ | PROT_WRITE,
+                                                     MAP_SHARED, fd, 0);
+  if (unlikely(region == MAP_FAILED)) {
     LOGGER(ERROR, "mmap vmemory node failed: %s", strerror(errno));
     ret = 1;
-    *data = NULL;
-    goto DONE;
+    goto UNLOCK;
   }
-  if (created) {
-    memset(*data, 0, sizeof(device_vmemory_t));
+  /* Fresh file (all zero) and stale file take the same path: magic does not
+   * match, so rebuild. One code path, no `created` flag. */
+  if (!vmem_node_header_valid(region)) {
+    vmem_node_rebuild_locked(region);
   }
-DONE:
+  /* Remember which inode we mapped so vmem_node_check_identity() can notice it
+   * being replaced. sb is from the fstat above, on this same fd. */
+  g_vmem_node_ino = sb.st_ino;
+  g_vmem_node_dev = sb.st_dev;
+  *data = region;
+
+UNLOCK:
+  fl.l_type = F_UNLCK;
+  ofd_fcntl(fd, 1, &fl);
+  /* Safe to close: the mapping holds its own reference. On the classic-POSIX
+   * fallback, closing any fd for a file drops that process's locks on it --
+   * harmless here because this runs during init, before this process has taken
+   * a single per-device lock. */
+  close(fd);
+  return ret;
+}
+
+/* Reads only the FROZEN header (hook.h), whose offsets never change, so it is
+ * safe to call before knowing which version wrote the file. */
+static int sm_node_header_valid(const sm_node_region_t *r) {
+  return __atomic_load_n(&r->magic, __ATOMIC_ACQUIRE) == SM_NODE_MAGIC &&
+         r->layout_version == SM_NODE_LAYOUT_VERSION                   &&
+         r->region_size    == (uint32_t)sizeof(sm_node_region_t)       &&
+         r->device_count   == (uint32_t)MAX_DEVICE_COUNT;
+}
+
+/* Called with the file write-locked. Rebuilds in place: the file size is a
+ * permanent constant, so there is never anything to resize, and there is never
+ * an old-version reader to protect -- a layout mismatch means the file was
+ * written by a PREVIOUS incarnation of this container, and a container loads
+ * exactly one .so version for its whole life (the host path is versioned; see
+ * vnum_plugin.go HostVGPUControlFilePath and kubeletplugin/vgpu.go). So no
+ * unlink+recreate and no rename: in-place is simpler AND avoids the far more
+ * dangerous rename race, where two processes end up on different inodes and
+ * the "shared" bucket silently degrades into two private ones.
+ *
+ * magic is published LAST with release ordering. If we are killed midway the
+ * magic is still absent, so the next process simply rebuilds again -- the
+ * rebuild is idempotent and interruptible, with no half-initialised resting
+ * state. */
+static void sm_node_rebuild_locked(sm_node_region_t *r) {
+  /* See vmem_node_rebuild_locked: same path for first build and repair, but a
+   * first build is not a mismatch and must not be reported as one. */
+  if (r->magic == 0 && r->layout_version == 0 &&
+      r->region_size == 0 && r->device_count == 0) {
+    LOGGER(INFO, "sm_node region initialised (%d bytes, layout v%u)",
+           SM_NODE_FILE_SIZE, SM_NODE_LAYOUT_VERSION);
+  } else {
+    LOGGER(WARNING, "sm_node layout mismatch (magic=%#x ver=%u size=%u count=%u), rebuilding",
+           r->magic, r->layout_version, r->region_size, r->device_count);
+  }
+
+  memset(r, 0, SM_NODE_FILE_SIZE);
+
+  for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
+    /* Seed up_limit the way a watcher thread used to seed its private
+     * up_limits[] at startup. Doing it HERE rather than in the watcher is what
+     * stops a late-joining process from resetting the container's already
+     * converged limit every time it starts a watcher.
+     *
+     * total_cuda_cores is intentionally left 0: it depends on CUDA device
+     * properties that may not be queried yet. It is published later, purely
+     * for observability -- the authoritative ceiling used by change_token
+     * stays the per-process g_total_cuda_cores[], which every process
+     * computes identically from the same device. */
+    r->devices[i].up_limit = g_vgpu_config->devices[i].hard_core;
+  }
+
+  r->device_count   = (uint32_t)MAX_DEVICE_COUNT;
+  r->region_size    = (uint32_t)sizeof(sm_node_region_t);
+  r->layout_version = SM_NODE_LAYOUT_VERSION;
+  __atomic_store_n(&r->magic, SM_NODE_MAGIC, __ATOMIC_RELEASE);   /* publish */
+}
+
+int open_sm_node_lock(void) {
+  if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
+    mkdir(SM_NODE_PATH, 0755);
+  }
+  /* Zero-length file: it carries no data, only byte-range locks (one byte per
+   * device, so devices are independent). Never ftruncate'd -- fcntl ranges do
+   * not require the bytes to exist. */
+  int fd = open(SM_NODE_LOCK_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (unlikely(fd == -1)) {
+    LOGGER(WARNING, "can't open %s: %s -- sampling will not be centralised",
+           SM_NODE_LOCK_PATH, strerror(errno));
+    return -1;
+  }
+  return fd;
+}
+
+
+/* Is SM_NODE_PATH the directory the plugin mounted in, or one we just created
+ * inside the container's own /tmp?
+ *
+ * This distinction is not cosmetic and it is not detectable any other way. When
+ * the mount is missing -- an older plugin, or one of the provisioning sites
+ * missed -- mkdir() below happily creates the directory on the container's own
+ * filesystem and open(O_CREAT) succeeds, so the region attaches and everything
+ * looks healthy. It mostly works, too, because every process in the container
+ * shares that filesystem. What is lost is precisely what the dedicated mount
+ * exists for: the control plane's pre-start cleanup deletes a path on the HOST,
+ * so a region living in the container's /tmp is never cleaned and survives
+ * restarts, and it is invisible from the host when someone goes looking.
+ *
+ * A bind mount is its own mount point, so it reports a different st_dev than
+ * its parent. Same st_dev means no mount landed. Returns 1 mounted, 0 not,
+ * -1 unknown (stat failed -- do not draw a conclusion from that). */
+static int sm_node_dir_is_mounted(void) {
+  return dir_is_mount_point(SM_NODE_PATH, TMP_DIR);
+}
+
+int map_sm_node_region(sm_node_region_t **data) {
+  *data = NULL;
+  if (unlikely(g_vgpu_config == NULL)) return 1;
+
+  /* Checked BEFORE mkdir, or the answer would describe our own directory. */
+  int mounted = sm_node_dir_is_mounted();
+  if (mounted == 0) {
+    LOGGER(WARNING, "%s is not a mount point -- the plugin did not provide it, so this "
+                    "region lives in the container's own /tmp: it will NOT be cleaned "
+                    "between container restarts and is not visible from the host",
+                    SM_NODE_PATH);
+  } else if (mounted < 0) {
+    LOGGER(VERBOSE, "%s mount state unknown (stat failed: %s)",
+                    SM_NODE_PATH, strerror(errno));
+  }
+
+  if (unlikely(file_exist(SM_NODE_PATH) != 0)) {
+    mkdir(SM_NODE_PATH, 0755);
+  }
+
+  /* open(O_CREAT) unconditionally -- no file_exist() pre-check. That check is
+   * what makes mmap_file_to_vmem_node racy (two processes can both conclude
+   * they created the file and both memset it, each erasing what the other just
+   * wrote). Here "who created it" is a question we never have to answer: wrong
+   * size gets ftruncate'd, wrong magic gets rebuilt, and both happen under the
+   * lock and are idempotent. */
+  int fd = open(SM_NODE_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (unlikely(fd == -1)) {
+    LOGGER(WARNING, "can't open %s: %s", SM_NODE_FILE_PATH, strerror(errno));
+    return 1;
+  }
+
+  /* Blocking lock, no timeout, deliberately. A late arriver should sleep in the
+   * kernel while the first process builds the region, then wake, see a valid
+   * magic and leave -- burning no CPU. That is safe here in a way it would not
+   * be for lock_gpu_device: this critical section is ftruncate + memset + a few
+   * field stores on an 8KiB file, with no CUDA call, no I/O and nothing that can
+   * block indefinitely, so a lock holder cannot get stuck. And if it dies, the
+   * kernel releases the lock unconditionally. */
+  struct flock fl;
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start = 0;
+  fl.l_len = 0;                       /* whole file */
+  if (unlikely(ofd_fcntl(fd, 1, &fl) == -1)) {
+    LOGGER(WARNING, "can't lock %s: %s", SM_NODE_FILE_PATH, strerror(errno));
+    close(fd);
+    return 1;
+  }
+
+  int ret = 0;
+  struct stat sb;
+  if (unlikely(fstat(fd, &sb) == -1)) {
+    LOGGER(WARNING, "fstat %s failed: %s", SM_NODE_FILE_PATH, strerror(errno));
+    ret = 1;
+    goto UNLOCK;
+  }
+  /* Size is a permanent constant, so this runs for a fresh file (size 0) and
+   * for anything unexpected. Holes read as zero, so magic will not match and
+   * the rebuild below fires. */
+  if (sb.st_size != SM_NODE_FILE_SIZE) {
+    if (unlikely(ftruncate(fd, SM_NODE_FILE_SIZE) == -1)) {
+      LOGGER(WARNING, "ftruncate %s failed: %s", SM_NODE_FILE_PATH, strerror(errno));
+      ret = 1;
+      goto UNLOCK;
+    }
+  }
+
+  sm_node_region_t *region = (sm_node_region_t *)mmap(NULL, SM_NODE_FILE_SIZE,
+                                                      PROT_READ | PROT_WRITE,
+                                                      MAP_SHARED, fd, 0);
+  if (unlikely(region == MAP_FAILED)) {
+    LOGGER(WARNING, "mmap %s failed: %s", SM_NODE_FILE_PATH, strerror(errno));
+    ret = 1;
+    goto UNLOCK;
+  }
+
+  /* A freshly created (all-zero) region takes the same path as a stale one:
+   * magic does not match, so we rebuild. First build and repair are one code
+   * path, so there is no "created" flag and no second branch to get wrong. */
+  if (!sm_node_header_valid(region)) {
+    sm_node_rebuild_locked(region);
+  }
+  *data = region;
+
+UNLOCK:
+  fl.l_type = F_UNLCK;
+  ofd_fcntl(fd, 1, &fl);
+  /* Closing the fd does not disturb the mapping -- it holds its own reference.
+   * So the lock's lifetime ends exactly here, inside initialisation, and
+   * nothing about it survives into steady state or across a fork. */
   close(fd);
   return ret;
 }
@@ -2103,21 +2440,12 @@ DONE:
   return nvml_index;
 }
 
-static volatile pid_t reset_index_changed_pid = 0;
-
 // Reset CUDA device index only when PID changes.
 void reset_cuda_index_mapping() {
-  pid_t pid = getpid();
-  if (likely(reset_index_changed_pid == pid)) {
-    return;
-  }
   pthread_mutex_lock(&device_index_mutex);
-  if (reset_index_changed_pid != pid) {
-    for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
-      cuda_to_host_device_index[index] = -1;
-      cuda_to_nvml_device_index[index] = -1;
-    }
-    reset_index_changed_pid = pid;
+  for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
+    cuda_to_host_device_index[index] = -1;
+    cuda_to_nvml_device_index[index] = -1;
   }
   pthread_mutex_unlock(&device_index_mutex);
 }
@@ -2351,35 +2679,32 @@ DONE:
   *used_memory = count;
 }
 
-static volatile pid_t init_config_changed_pid = 0;
-static pthread_mutex_t init_config_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 void init_g_vgpu_config_by_env(resource_data_t** data) {
   int ret = get_compatibility_mode(&vgpu_config_init.compatibility_mode);
   if (unlikely(ret)) {
     LOGGER(WARNING, "not defined env compatibility mode");
   }
-  char *pod_name = getenv("VGPU_POD_NAME");
+  char *pod_name = _getenv("VGPU_POD_NAME");
   if (likely(pod_name != NULL)){
     strncpy(vgpu_config_init.pod_name, pod_name, sizeof(vgpu_config_init.pod_name)-1);
     vgpu_config_init.pod_name[sizeof(vgpu_config_init.pod_name) - 1] = '\0';
   }
-  char *pod_namespace = getenv("VGPU_POD_NAMESPACE");
+  char *pod_namespace = _getenv("VGPU_POD_NAMESPACE");
   if (likely(pod_namespace != NULL)){
     strncpy(vgpu_config_init.pod_namespace, pod_namespace, sizeof(vgpu_config_init.pod_namespace)-1);
     vgpu_config_init.pod_namespace[sizeof(vgpu_config_init.pod_namespace) - 1] = '\0';
   }
-  char *pod_uid = getenv("VGPU_POD_UID");
+  char *pod_uid = _getenv("VGPU_POD_UID");
   if (likely(pod_uid != NULL)){
     strncpy(vgpu_config_init.pod_uid, pod_uid, sizeof(vgpu_config_init.pod_uid)-1);
     vgpu_config_init.pod_uid[sizeof(vgpu_config_init.pod_uid) - 1] = '\0';
   }
-  char *container_name = getenv("VGPU_CONTAINER_NAME");
+  char *container_name = _getenv("VGPU_CONTAINER_NAME");
   if (likely(container_name != NULL)){
     strncpy(vgpu_config_init.container_name, container_name, sizeof(vgpu_config_init.container_name)-1);
     vgpu_config_init.container_name[sizeof(vgpu_config_init.container_name) - 1] = '\0';
   }
-  char *reg_uuid = getenv("MANAGER_CLIENT_REGISTER_UUID");
+  char *reg_uuid = _getenv("MANAGER_CLIENT_REGISTER_UUID");
   if (reg_uuid != NULL){
     strncpy(vgpu_config_init.reg_uuid, reg_uuid, sizeof(vgpu_config_init.reg_uuid)-1);
     vgpu_config_init.reg_uuid[sizeof(vgpu_config_init.reg_uuid) - 1] = '\0';
@@ -2480,67 +2805,78 @@ void init_g_vgpu_config_by_env(resource_data_t** data) {
   *data = &vgpu_config_init;
 }
 
-int load_controller_configuration() {
-  int ret = 1;
-  pid_t pid = getpid();
-  if (likely(init_config_changed_pid == pid)) {
-    return 0;
-  }
-  pthread_mutex_lock(&init_config_mutex);
-  // Double check lock
-  if (init_config_changed_pid == pid) {
-    ret = 0;
-    goto DONE;
-  }
+void load_controller_configuration() {
   if (g_vgpu_config == NULL) {
-    ret = mmap_file_to_config_path(&g_vgpu_config);
-    if (unlikely(ret)) {
+    if (unlikely(mmap_file_to_config_path(&g_vgpu_config))) {
       init_g_vgpu_config_by_env(&g_vgpu_config);
-      ret = write_file_to_config_path(g_vgpu_config);
-      if (unlikely(ret)) {
+      resource_data_t *fallback = g_vgpu_config;
+      if (unlikely(write_file_to_config_path(g_vgpu_config))) {
         LOGGER(ERROR, "failed to write vgpu config file %s", CONTROLLER_CONFIG_FILE_PATH);
-        goto DONE;
-      }
-      ret = mmap_file_to_config_path(&g_vgpu_config);
-      if (unlikely(ret)) {
-        goto DONE;
+      } else if (unlikely(mmap_file_to_config_path(&g_vgpu_config))) {
+        g_vgpu_config = fallback;
       }
     }
     print_global_vgpu_config();
   }
   if (g_vgpu_config->sm_watcher && g_device_util == NULL) {
-    ret = mmap_file_to_util_path(&g_device_util);
-    if (ret) {
-      pthread_mutex_unlock(&init_config_mutex);
-      LOGGER(FATAL, "mmap sm watcher file failed");
+    if (mmap_file_to_util_path(&g_device_util)) {
+      LOGGER(ERROR, "mmap sm watcher file failed");
     }
     if (g_device_util == NULL) {
       LOGGER(WARNING, "unable to find external SM Watcher shared cache, will roll back to nvml driver");
     }
   }
   if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {
-    ret = mmap_file_to_vmem_node(&g_device_vmem);
-    if (ret) {
-      pthread_mutex_unlock(&init_config_mutex);
-      LOGGER(FATAL, "mmap vmem nodes file failed");
+    if (mmap_file_to_vmem_node(&g_device_vmem)) {
+      /* Degrade, do not die. The region being unavailable -- directory not
+       * mounted, mounted read-only, /tmp shadowed by the workload, an older
+       * plugin paired with a newer library -- says nothing about whether this
+       * process can run correctly. It says only that the extra accounting is
+       * unavailable, and the correct response is to run without it.
+       *
+       * This is not a weaker configuration than we already ship: every
+       * dereference of g_device_vmem is guarded by a NULL check, and
+       * g_device_vmem == NULL is the DEFAULT state, because the VMemoryNode
+       * feature gate defaults to off. Degrading lands the process in the exact
+       * configuration most nodes run in today.
+       *
+       * Memory limiting specifically is NOT lost. The check is
+       *   used + vmem_used + request > total_memory
+       * where `used` comes from NVML and does not depend on this region. Only
+       * vmem_used goes to 0, and that term exists solely to cover oversold/UVA
+       * allocations NVML cannot see. The limit stays enforced; it just stops
+       * counting what it can no longer observe.
+       *
+       * Do NOT unlock here -- unlike the FATAL this replaces, control now
+       * reaches DONE, which unlocks. ret is cleared because a missing optional
+       * region is not a failure to load the configuration. */
+      g_device_vmem = NULL;
+      LOGGER(WARNING, "unable to map vmem nodes file, will roll back to "
+                      "nvml-only memory accounting (virtual memory tracking disabled)");
+    } else {
+      if (atexit(exit_cleanup_handler) != 0) {
+        LOGGER(ERROR ,"register exit handler failed: %d", errno);
+      }
+      /* sigaction (not signal()) so we can capture and chain to any host
+       * handler -- the alternative is silently clobbering JVM/Go/Python signal
+       * handling. SA_SIGINFO lets us forward siginfo_t/ucontext_t verbatim.
+       *
+       * Registered only on success: these handlers exist to hand this process's
+       * ledger records back at exit, so with no ledger there is nothing to hand
+       * back, and installing them would alter the container's signal
+       * disposition for no reason. */
+      struct sigaction sa;
+      memset(&sa, 0, sizeof(sa));
+      sigemptyset(&sa.sa_mask);
+      sa.sa_flags = SA_RESTART | SA_SIGINFO;
+      sa.sa_sigaction = signal_cleanup_handler_sa;
+      sigaction(SIGTERM, &sa, &g_old_sigterm_sa);
+      sigaction(SIGINT,  &sa, &g_old_sigint_sa);
+      sigaction(SIGHUP,  &sa, &g_old_sighup_sa);
+      sigaction(SIGABRT, &sa, &g_old_sigabrt_sa);
+      // Note: SIGKILL and SIGSTOP cannot be caught
+      LOGGER(VERBOSE, "registered cleanup handlers for signals");
     }
-    if (atexit(exit_cleanup_handler) != 0) {
-      LOGGER(ERROR ,"register exit handler failed: %d", errno);
-    }
-    /* sigaction (not signal()) so we can capture and chain to any host
-     * handler -- the alternative is silently clobbering JVM/Go/Python signal
-     * handling. SA_SIGINFO lets us forward siginfo_t/ucontext_t verbatim. */
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_SIGINFO;
-    sa.sa_sigaction = signal_cleanup_handler_sa;
-    sigaction(SIGTERM, &sa, &g_old_sigterm_sa);
-    sigaction(SIGINT,  &sa, &g_old_sigint_sa);
-    sigaction(SIGHUP,  &sa, &g_old_sighup_sa);
-    sigaction(SIGABRT, &sa, &g_old_sigabrt_sa);
-    // Note: SIGKILL and SIGSTOP cannot be caught
-    LOGGER(VERBOSE, "registered cleanup handlers for signals");
   }
   // Ensure that the cleaning function can be called once every time the child process is forked.
   check_cleanup_vmem_nodes();
@@ -2549,11 +2885,6 @@ int load_controller_configuration() {
     LOGGER(VERBOSE, "register to remote manager: uid: %s, uuid: %s", g_vgpu_config->pod_uid, g_vgpu_config->reg_uuid);
     register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name, g_vgpu_config->reg_uuid);
   }
-  ret = 0;
-  init_config_changed_pid = pid;
-DONE:
-  pthread_mutex_unlock(&init_config_mutex);
-  return ret;
 }
 
 void init_nvml_to_host_device_index() {
@@ -2633,10 +2964,11 @@ void init_nvml_to_host_device_index() {
  * #199 which addresses the related-but-not-identical pthread_once
  * post-init flag issue. */
 void loader_child_after_fork(void) {
+  g_controller_config_init = (pthread_once_t)PTHREAD_ONCE_INIT;
+  g_reset_cuda_index_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   pthread_mutex_init(&g_memory_node_lock, NULL);
   pthread_mutex_init(&tid_dlsym_lock,     NULL);
   pthread_mutex_init(&device_index_mutex, NULL);
-  pthread_mutex_init(&init_config_mutex,  NULL);
   memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
   tid_dlsym_count = 0;
 
@@ -2698,8 +3030,8 @@ void load_necessary_data() {
   pthread_once(&g_nvml_lib_init, load_nvml_libraries);
   pthread_once(&g_cuda_lib_init, load_cuda_libraries);
   // Read global configuration
-  load_controller_configuration();
-  reset_cuda_index_mapping();
+  pthread_once(&g_controller_config_init, load_controller_configuration);
+  pthread_once(&g_reset_cuda_index_init, reset_cuda_index_mapping);
 }
 
 void init_devices_mapping() {

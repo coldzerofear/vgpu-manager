@@ -82,7 +82,74 @@
  * coarser near-limit tracking); larger N = gentler. Default 64. Set to 0 (or any
  * value <= 0) to DISABLE the floor entirely and revert to delta's raw
  * sm^2-scaled step (the pre-floor behaviour). */
+/* Container-wide shared token bucket. Off by default: with it off the bucket
+ * stays the per-process static it has always been and behaviour is unchanged,
+ * so the feature carries no risk for the single-process containers that gain
+ * nothing from it. See docs/sm_multiproc_shared_bucket_design.md. */
+#define CUDA_SM_SHARED_BUCKET_ENV "CUDA_SM_SHARED_BUCKET"
 #define CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV "CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR"
+
+/*-- Cache: Read only once during the process lifecycle /proc/1/environ --*/
+static char           *g_environ_buf  = NULL;   /* The cached raw content */
+static size_t          g_environ_len  = 0;      /* Effective byte count   */
+static pthread_once_t  g_once         = PTHREAD_ONCE_INIT;
+
+static void _load_pid1_environ(void) {
+  FILE *f = fopen("/proc/1/environ", "re");
+  if (!f) return;
+
+  /* Obtain actual size */
+  struct stat st;
+  if (fstat(fileno(f), &st) != 0 || st.st_size <= 0) {
+    fclose(f);
+    return;
+  }
+
+  /* Allocate according to actual size */
+  size_t cap = (size_t)st.st_size;
+  char *buf = malloc(cap + 1);
+  if (!buf) {
+    fclose(f);
+    return;
+  }
+
+  size_t nread = fread(buf, 1, cap, f);
+  fclose(f);
+
+  if (nread == 0) {
+    free(buf);
+    return;
+  }
+  // Bottom line to prevent crossing the boundary when the NUL is missing at the end.
+  buf[nread] = '\0';
+  g_environ_buf = buf;
+  g_environ_len = nread;
+}
+
+char* _getenv(const char* name) {
+  if (!name || !name[0]) return NULL;
+
+  char *val = getenv(name);
+  if (val || getpid() == 1) return val;
+
+  pthread_once(&g_once, _load_pid1_environ);
+  if (!g_environ_buf) return NULL;
+
+  size_t name_len = strlen(name);
+  char *p = g_environ_buf;
+  char *end = g_environ_buf + g_environ_len;
+
+  while (p < end) {
+    size_t entry_len = strnlen(p, end - p);
+    if (entry_len > name_len &&
+      strncmp(p, name, name_len) == 0 &&
+      p[name_len] == '=') {
+      return p + name_len + 1;
+    }
+    p += entry_len + 1;
+  }
+  return NULL;
+}
 
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
@@ -113,7 +180,7 @@ size_t iec_to_bytes(const char *iec_value) {
 }
 
 int get_compatibility_mode(int *mode) {
-  char *str = getenv(MANAGER_COMPATIBILITY_MODE_ENV);
+  char *str = _getenv(MANAGER_COMPATIBILITY_MODE_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -124,9 +191,9 @@ int get_compatibility_mode(int *mode) {
 int get_mem_ratio(uint32_t index, double *ratio) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_RATIO_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_MEMORY_RATIO_ENV);
+    str = _getenv(CUDA_MEMORY_RATIO_ENV);
     if (!str) {
       return -1;
     }
@@ -141,9 +208,9 @@ int get_mem_ratio(uint32_t index, double *ratio) {
 int get_mem_limit(uint32_t index, size_t *limit) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_LIMIT_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_MEMORY_LIMIT_ENV);
+    str = _getenv(CUDA_MEMORY_LIMIT_ENV);
     if (!str) {
       return -1;
     }
@@ -158,9 +225,9 @@ int get_mem_limit(uint32_t index, size_t *limit) {
 int get_core_limit(uint32_t index, int *limit) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_LIMIT_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_CORE_LIMIT_ENV);
+    str = _getenv(CUDA_CORE_LIMIT_ENV);
     if (!str) {
       return -1;
     }
@@ -175,9 +242,9 @@ int get_core_limit(uint32_t index, int *limit) {
 int get_core_soft_limit(uint32_t index, int *limit) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_SOFT_LIMIT_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_CORE_SOFT_LIMIT_ENV);
+    str = _getenv(CUDA_CORE_SOFT_LIMIT_ENV);
     if (!str) {
       return -1;
     }
@@ -192,7 +259,7 @@ int get_core_soft_limit(uint32_t index, int *limit) {
 int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", MANAGER_VISIBLE_DEVICE_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -205,7 +272,7 @@ int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
 
 int get_nvidia_device_uuids(char *uuids, size_t uuids_size) {
   char *str = NULL;
-  str = getenv(NVIDIA_VISIBLE_DEVICES_ENV);
+  str = _getenv(NVIDIA_VISIBLE_DEVICES_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -218,7 +285,7 @@ int get_nvidia_device_uuids(char *uuids, size_t uuids_size) {
 
 int get_manager_device_uuids(char *uuids, size_t uuids_size) {
   char *str = NULL;
-  str = getenv(MANAGER_VISIBLE_DEVICES_ENV);
+  str = _getenv(MANAGER_VISIBLE_DEVICES_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -241,7 +308,7 @@ void value_enabled(char *str, int *i) {
 
 int get_vmem_node_enabled(int *i) {
   char *str = NULL;
-  str = getenv(VMEM_NODE_ENABLED_ENV);
+  str = _getenv(VMEM_NODE_ENABLED_ENV);
   if (!str) {
     return -1;
   }
@@ -252,9 +319,9 @@ int get_vmem_node_enabled(int *i) {
 int get_mem_oversold(uint32_t index, int *i) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_MEM_OVERSOLD_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_MEM_OVERSOLD_ENV);
+    str = _getenv(CUDA_MEM_OVERSOLD_ENV);
     if (!str) {
       return -1;
     }
@@ -264,7 +331,7 @@ int get_mem_oversold(uint32_t index, int *i) {
 }
 
 int get_sm_watcher_enabled(int *i) {
-  char *str = getenv(EXTERNAL_SM_WATCHER_ENABLED_ENV);
+  char *str = _getenv(EXTERNAL_SM_WATCHER_ENABLED_ENV);
   if (!str) {
     return -1;
   }
@@ -277,7 +344,7 @@ int get_sm_watcher_enabled(int *i) {
  * routing between delta and aimd). Anything else stays on delta. */
 int get_sm_controller_kind(int *kind) {
   *kind = 0;
-  char *str = getenv(CUDA_SM_CONTROLLER_ENV);
+  char *str = _getenv(CUDA_SM_CONTROLLER_ENV);
   if (!str) return -1;
   if (strcasecmp(str, "aimd") == 0) {
     *kind = 1;
@@ -302,7 +369,7 @@ int get_sm_controller_kind(int *kind) {
  * range violation); -1 if env was unset (caller's dflt is used). */
 static int get_positive_double_env(const char *name, double dflt, double min,
                                    double *out) {
-  char *str = getenv(name);
+  char *str = _getenv(name);
   if (!str || !*str) {
     *out = dflt;
     return -1;
@@ -322,7 +389,7 @@ static int get_positive_double_env(const char *name, double dflt, double min,
 /* Non-negative variant: accepts 0 (some knobs use 0 as the "disable" value).
  * Same parse + fallback semantics as get_positive_int_env otherwise. */
 static int get_nonneg_int_env(const char *name, int dflt, int *out) {
-  char *str = getenv(name);
+  char *str = _getenv(name);
   if (!str || !*str) {
     *out = dflt;
     return -1;
@@ -343,7 +410,7 @@ static int get_nonneg_int_env(const char *name, int dflt, int *out) {
  * only an unset/empty value or non-numeric garbage falls back to the default.
  * Used where a non-positive value is a meaningful sentinel (e.g. "disable"). */
 static int get_int_env(const char *name, int dflt, int *out) {
-  char *str = getenv(name);
+  char *str = _getenv(name);
   if (!str || !*str) {            /* unset OR set-to-empty -> use default */
     *out = dflt;
     return -1;
@@ -360,7 +427,7 @@ static int get_int_env(const char *name, int dflt, int *out) {
 }
 
 static int get_positive_int_env(const char *name, int dflt, int *out) {
-  char *str = getenv(name);
+  char *str = _getenv(name);
   if (!str || !*str) {            /* unset OR set-to-empty -> use default */
     *out = dflt;
     return -1;
@@ -444,6 +511,18 @@ int get_aimd_deadband_ratio(int *out) {
 /* AIMD post-MD cooldown in watcher cycles. 0 = disabled (V2.1 behaviour). */
 int get_aimd_md_cooldown_cycles(int *out) {
   return get_nonneg_int_env(CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV, 3, out);
+}
+
+/* Container-wide shared token bucket on/off. Same true/TRUE/1 spelling as the
+ * other boolean envs. Unset leaves *out untouched at the caller's default (0),
+ * so the shared bucket is opt-in. */
+int get_sm_shared_bucket(int *out) {
+  char *str = _getenv(CUDA_SM_SHARED_BUCKET_ENV);
+  if (!str) {
+    return -1;
+  }
+  value_enabled(str, out);
+  return 0;
 }
 
 static int compare_pids(const void *a, const void *b) {

@@ -61,7 +61,9 @@
  * does not release an OFD lock and vice versa, but that never mixes here: a
  * kernel either supports OFD (every call, lock and unlock, uses it) or does not
  * (every call falls back), so acquire and release always stay in one family. */
-static int ofd_fcntl(int fd, int wait, struct flock *fl) {
+/* Not static: loader.c's sm_node region builder reuses it rather than growing a
+ * second locking primitive. Stays out of .dynsym via the linker version script. */
+int ofd_fcntl(int fd, int wait, struct flock *fl) {
   int ret = fcntl(fd, wait ? F_OFD_SETLKW : F_OFD_SETLK, fl);
   if (ret != -1 || errno != EINVAL) return ret;
   return fcntl(fd, wait ? F_SETLKW : F_SETLK, fl); /* legacy kernels */
