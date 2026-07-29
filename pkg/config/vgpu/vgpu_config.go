@@ -418,8 +418,9 @@ func WithDeviceManager(devManager *manager.DeviceManager) OptionFunc {
 		WithVMemoryNodeEnabled(devManager.GetFeatureGate().Enabled(util.VMemoryNode))(r)
 		WithCompatibilityMode(GetCompatibilityMode(devManager))(r)
 		devices := devManager.GetNodeDeviceInfo()
-		deviceInfos := make([]device.DeviceClaim, len(devices))
-		for i, dev := range devices[:min(MaxDeviceCount, len(devices))] {
+		length := min(MaxDeviceCount, len(devices))
+		deviceInfos := make([]device.DeviceClaim, length)
+		for i, dev := range devices[:length] {
 			deviceInfos[i] = device.DeviceClaim{
 				Id:     dev.Id,
 				Uuid:   dev.Uuid,

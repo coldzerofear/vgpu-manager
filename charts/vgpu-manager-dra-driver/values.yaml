@@ -147,6 +147,8 @@ kubeletPlugin:
         kubeApiQps: 20.0
         kubeApiBurst: 30
         nriPluginIdx: "00"
+        coresRatio: 100
+        memoryRatio: 100
       # Container security context. Privileged mode is required to manage GPU device nodes.
       securityContext:
         privileged: true

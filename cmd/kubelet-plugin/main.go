@@ -166,6 +166,7 @@ func newApp() *cli.App {
 			Value:       100,
 			Destination: &flags.DeviceMemoryRatio,
 			EnvVars:     []string{"DEVICE_MEMORY_RATIO"},
+		},
 		&cli.StringFlag{
 			Name:        "nri-root",
 			Usage:       "Directory (mounted from the host) holding the runtime NRI socket; the in-process NRI plugin dials <nri-root>/nri.sock. Only used when the NRISupport feature gate is enabled.",

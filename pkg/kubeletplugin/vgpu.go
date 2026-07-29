@@ -53,10 +53,10 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 
 	totalMemory := float64(d.Memory.Total) * (float64(deviceMemoryRatio) / float64(util.HundredCore))
 
-	attr["coreRatio"] = resourceapi.DeviceAttribute{
+	attributes["coreRatio"] = resourceapi.DeviceAttribute{
 		IntValue: ptr.To[int64](int64(deviceCoresRatio)),
 	}
-	attr["memoryRatio"] = resourceapi.DeviceAttribute{
+	attributes["memoryRatio"] = resourceapi.DeviceAttribute{
 		IntValue: ptr.To[int64](int64(deviceMemoryRatio)),
 	}
 

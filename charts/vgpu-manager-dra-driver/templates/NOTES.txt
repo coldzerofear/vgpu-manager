@@ -6,6 +6,8 @@ DRA resource API version in use: {{ include "vgpu-manager-dra-driver.resourceApi
 vgpu-manager-dra-driver {{ .Chart.AppVersion }} kubelet-plugin (DaemonSet) has been deployed successfully!
   - NodeSelector   :  {{ .Values.kubeletPlugin.nodeSelector | toJson }}
   - DriverRoot     :  {{ .Values.kubeletPlugin.driverRoot | default "/" | quote }}
+  - CoresRatio     :  {{ .Values.kubeletPlugin.containers.plugin.commands.coresRatio | default 100 }}
+  - MemoryRatio    :  {{ .Values.kubeletPlugin.containers.plugin.commands.memoryRatio | default 100 }}
   - HealthcheckPort:  {{ .Values.kubeletPlugin.containers.plugin.healthcheckPort | default 4567 }}
   - FeatureGates   :  {{ .Values.kubeletPlugin.containers.plugin.featureGates | toJson }}
   - Metrics        :  {{ .Values.kubeletPlugin.metrics.enabled }}

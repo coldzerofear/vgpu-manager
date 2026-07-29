@@ -123,6 +123,8 @@ spec:
             - --kube-api-qps={{ $plugin.commands.kubeApiQps | default 20 }}
             - --kube-api-burst={{ $plugin.commands.kubeApiBurst | default 30 }}
             - --nri-plugin-idx={{ $plugin.commands.nriPluginIdx | default "00" }}
+            - --device-cores-ratio={{ $plugin.commands.coresRatio | default 100 }}
+            - --device-memory-ratio{{ $plugin.commands.memoryRatio | default 100 }}
             - -v {{ $plugin.commands.logLevel | default 5 }}
           env:
             - name: NODE_NAME
