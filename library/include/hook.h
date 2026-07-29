@@ -306,9 +306,25 @@ _Static_assert(sizeof(resource_data_t) <= CONFIG_FILE_SIZE,
 /* Tear-free snapshot of devices[host_index], read under the per-device seqlock.
  * Out of range or config not yet loaded -> a zeroed device_t (activate=0,
  * memory_limit=0), which every caller already treats as "no limit". Use this
- * everywhere instead of a bare g_vgpu_config->devices[i].field for any field the
- * Go side may mutate at runtime. */
+ * for any decision that reads TWO OR MORE co-varying fields together. */
 device_t get_device_snapshot(int host_index);
+
+extern resource_data_t *g_vgpu_config;
+
+/* Cheap single-field read for a hot gate that consults exactly ONE int32 device
+ * field (core_limit / memory_limit / memory_oversold). A single aligned int32
+ * cannot tear, so this needs no seqlock and no whole-struct copy -- it is the
+ * per-launch-safe path; reach for get_device_snapshot() only when two or more
+ * fields must be read as a consistent set. Returns 0 when the index is out of
+ * range or the config is not loaded (== feature off), matching the snapshot's
+ * zeroed fallback. `host_index` must be side-effect-free (it is evaluated more
+ * than once); `field` must be an int32 member of device_t. */
+#define get_device_flag(host_index, field)                                     \
+  (((host_index) >= 0 && (host_index) < MAX_DEVICE_COUNT &&                     \
+    likely(g_vgpu_config != NULL))                                             \
+     ? __atomic_load_n(&g_vgpu_config->devices[(host_index)].field,            \
+                       __ATOMIC_ACQUIRE)                                        \
+     : 0)
 
 /**
  * Dynamic SM controller configuration. All tunables that affect runtime

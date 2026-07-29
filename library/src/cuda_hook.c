@@ -445,7 +445,7 @@ static int load_limited_memory_view(CUdevice device,
   if (*host_index < 0) {
     return 0;
   }
-  if (!get_device_snapshot(*host_index).memory_limit) {
+  if (!get_device_flag(*host_index, memory_limit)) {
     return 0;
   }
 
@@ -721,7 +721,7 @@ static void rate_limiter(int grids, int blocks, int host_index) {
   if (host_index < 0) {
     return;
   }
-  if (get_device_snapshot(host_index).core_limit) {
+  if (get_device_flag(host_index, core_limit)) {
     int64_t before_cuda_cores = 0;
     int64_t after_cuda_cores = 0;
     int64_t kernel_size = (int64_t) grids;
@@ -3334,7 +3334,7 @@ ALLOCATED_TO_GPU:
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
-    if (host_index >= 0 && get_device_snapshot(host_index).memory_oversold) {
+    if (host_index >= 0 && get_device_flag(host_index, memory_oversold)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAlloc OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                        request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -3405,7 +3405,7 @@ ALLOCATED_TO_GPU:
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
-    if (host_index >= 0 && get_device_snapshot(host_index).memory_oversold) {
+    if (host_index >= 0 && get_device_flag(host_index, memory_oversold)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAllocPitch OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                        request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -3471,7 +3471,7 @@ ALLOCATED_TO_GPU:
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
     // TODO Do not disrupt graph capture due to UVA path destruction
-    if (host_index >= 0 && get_device_snapshot(host_index).memory_oversold && !stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
+    if (host_index >= 0 && get_device_flag(host_index, memory_oversold) && !stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAllocAsync OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -3545,7 +3545,7 @@ ALLOCATED_TO_GPU:
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
     // TODO Do not disrupt graph capture due to UVA path destruction
-    if (host_index >= 0 && get_device_snapshot(host_index).memory_oversold && !stream_is_capturing(hStream, 1)) {
+    if (host_index >= 0 && get_device_flag(host_index, memory_oversold) && !stream_is_capturing(hStream, 1)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -4540,7 +4540,7 @@ CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z) {
   if (host_index < 0) {
     goto CALL;
   }
-  if (get_device_snapshot(host_index).core_limit) {
+  if (get_device_flag(host_index, core_limit)) {
     while (!CAS(&g_block_locker[host_index], 0, 1)) {}
 
     g_block_x[host_index] = x;
