@@ -96,17 +96,7 @@ func (c *ContainerLister) GetResourceVMem(key ContainerKey) (*vmem.MmapDeviceVMe
 	return data, ok
 }
 
-func (c *ContainerLister) GetResourceDataT(key ContainerKey) (*vgpu.ResourceDataT, bool) {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	if data, ok := c.containerDatas[key]; !ok {
-		return nil, false
-	} else {
-		return data.CopyResource(), true
-	}
-}
-
-func (c *ContainerLister) getResourceData(key ContainerKey) (*vgpu.MmapResourceData, bool) {
+func (c *ContainerLister) GetResourceData(key ContainerKey) (*vgpu.MmapResourceData, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	data, ok := c.containerDatas[key]
@@ -168,7 +158,7 @@ func (c *ContainerLister) update() error {
 			continue
 		}
 		matched := keySet.Has(containerKey)
-		resourceData, existCfg := c.getResourceData(containerKey)
+		resourceData, existCfg := c.GetResourceData(containerKey)
 		resourceVMem, existVMem := c.GetResourceVMem(containerKey)
 		switch {
 		case matched:

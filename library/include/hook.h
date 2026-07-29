@@ -205,35 +205,126 @@ typedef struct {
   int minor;
 } version_t;
 
+/* ---- vgpu.config shared-region ABI ------------------------------------- *
+ *
+ * resource_data_t is written by the Go manager (pkg/config/vgpu) OR, on the
+ * env-fallback path, by the first library process in the container
+ * (write_file_to_config_path), and read by every library process. Once the Go
+ * side starts mutating a device_t at runtime, a plain multi-field read on the
+ * hot path can tear (see docs/resource_data_seqlock_versioning_design.md). So:
+ *
+ *   - each device_t carries a seqlock version (`seq`) and is padded to one
+ *     cache line so a writer bumping one device's seq never false-shares a
+ *     neighbouring reader; use get_device_snapshot() to read, never a bare
+ *     g_vgpu_config->devices[i].field on a field that may be mutated.
+ *   - the region opens with a frozen header (magic/layout_version/region_size/
+ *     device_count) validated on map, same contract as vmem_node / sm_node.
+ *
+ * THIS STRUCT IS AN ABI: fixed-width types, explicit padding, _Static_asserts,
+ * and a Go mirror (pkg/config/vgpu/vgpu_config.go) pinned by the same offsets.
+ * Bump CONFIG_LAYOUT_VERSION on ANY change to field type/order/offset and
+ * update both sides' asserts. No _Atomic here -- a non-lock-free _Atomic would
+ * downgrade to libatomic's per-process lock table (see sm_node note below);
+ * plain fixed-width types + __atomic_* with explicit order at each site. */
+#define CONFIG_MAGIC               0x56474346U   /* "VGCF" */
+#define CONFIG_LAYOUT_VERSION      1U
+#define CONFIG_FILE_SIZE           8192          /* fixed; decoupled from sizeof so a
+                                                  * later, larger struct never resizes
+                                                  * the file and SIGBUSes an old map */
+#define DRIVER_VERSION_BUFFER_SIZE 32            /* NVIDIA driver string "550.90.07" */
+#define DEVICE_T_RESERVED_I32      7             /* per-device growth room, fills line */
+
 typedef struct {
-  char uuid[UUID_BUFFER_SIZE];
-  size_t total_memory;
-  size_t real_memory;
-  int hard_core;
-  int soft_core;
-  int core_limit;
-  int hard_limit;
-  int memory_limit;
-  int memory_oversold;
-  int activate;
-} device_t;
+  /* seqlock version: even = stable, odd = write in progress. Offset 0, accessed
+   * atomically by C (get_device_snapshot) and Go (ModifyDevice). */
+  uint32_t seq;
+  uint32_t _seq_pad;               /* keep total_memory 8-byte aligned */
+  char     uuid[UUID_BUFFER_SIZE];
+  uint64_t total_memory;           /* was size_t; fixed width for the ABI */
+  uint64_t real_memory;
+  int32_t  hard_core;
+  int32_t  soft_core;
+  int32_t  core_limit;
+  int32_t  hard_limit;
+  int32_t  memory_limit;
+  int32_t  memory_oversold;
+  int32_t  activate;
+  int32_t  reserved[DEVICE_T_RESERVED_I32];
+} __attribute__((aligned(CACHELINE_SIZE))) device_t;
+
+_Static_assert(sizeof(device_t) == CACHELINE_SIZE, "device_t must be one cache line");
+_Static_assert(_Alignof(device_t) == CACHELINE_SIZE, "device_t must be cache-line aligned");
+_Static_assert(offsetof(device_t, seq) == 0, "seqlock word must stay at offset 0");
+_Static_assert(offsetof(device_t, total_memory) == 56, "device_t total_memory offset");
 
 /**
  * Controller configuration data format
  */
 typedef struct {
-  version_t driver_version;
+  /* ---- FROZEN HEADER: 128 bytes (one cache line), permanent ABI ---- */
+  uint32_t  magic;                 /* CONFIG_MAGIC */
+  uint32_t  layout_version;        /* CONFIG_LAYOUT_VERSION */
+  uint32_t  region_size;           /* = sizeof(resource_data_t) */
+  uint32_t  device_count;          /* = MAX_DEVICE_COUNT */
+  version_t cuda_version;          /* CUDA major.minor (was misnamed driver_version) */
+  char      driver_version[DRIVER_VERSION_BUFFER_SIZE]; /* NVIDIA driver string */
+  uint8_t   _hdr_reserved[CACHELINE_SIZE - 56];
+  /* ---- end frozen header (offset 128) ---- */
+
+  /* Pod identity + flags: written once, never mutated at runtime -- no seqlock. */
   char pod_uid[UUID_BUFFER_SIZE];
   char pod_name[NAME_BUFFER_SIZE];
   char pod_namespace[NAME_BUFFER_SIZE];
   char container_name[NAME_BUFFER_SIZE];
-  device_t devices[MAX_DEVICE_COUNT];
-  // TODO No modifications allowed during runtime.
-  int compatibility_mode;
-  int sm_watcher;
-  int vmem_node;
   char reg_uuid[UUID_BUFFER_SIZE];
+  int32_t compatibility_mode;
+  int32_t sm_watcher;
+  int32_t vmem_node;
+  uint8_t _meta_reserved[84];      /* pad devices[] onto a cache line (offset 512) */
+
+  /* Per-device config, each one cache line, seqlock-protected via devices[i].seq. */
+  device_t devices[MAX_DEVICE_COUNT];
 } resource_data_t;
+
+_Static_assert(offsetof(resource_data_t, magic) == 0, "frozen header: magic@0");
+_Static_assert(offsetof(resource_data_t, layout_version) == 4, "frozen header: layout_version@4");
+_Static_assert(offsetof(resource_data_t, pod_uid) == CACHELINE_SIZE,
+               "frozen header must be exactly one cache line");
+_Static_assert(offsetof(resource_data_t, devices) == 512,
+               "devices[] must start on a cache line (offset 512)");
+_Static_assert(offsetof(resource_data_t, devices) % CACHELINE_SIZE == 0,
+               "devices[] must be cache-line aligned");
+_Static_assert(sizeof(resource_data_t) <= CONFIG_FILE_SIZE,
+               "config region must fit the permanently reserved file size");
+
+/* Byte-range lock offset of device i's seq word -- for the Go writer's F_WRLCK
+ * and get_device_snapshot()'s F_RDLCK slow-path fallback. Go's
+ * getConfigLockOffset() must agree. */
+#define GET_CONFIG_LOCK_OFFSET(i) \
+  (offsetof(resource_data_t, devices) + (size_t)(i) * sizeof(device_t) + offsetof(device_t, seq))
+
+/* Tear-free snapshot of devices[host_index], read under the per-device seqlock.
+ * Out of range or config not yet loaded -> a zeroed device_t (activate=0,
+ * memory_limit=0), which every caller already treats as "no limit". Use this
+ * for any decision that reads TWO OR MORE co-varying fields together. */
+device_t get_device_snapshot(int host_index);
+
+extern resource_data_t *g_vgpu_config;
+
+/* Cheap single-field read for a hot gate that consults exactly ONE int32 device
+ * field (core_limit / memory_limit / memory_oversold). A single aligned int32
+ * cannot tear, so this needs no seqlock and no whole-struct copy -- it is the
+ * per-launch-safe path; reach for get_device_snapshot() only when two or more
+ * fields must be read as a consistent set. Returns 0 when the index is out of
+ * range or the config is not loaded (== feature off), matching the snapshot's
+ * zeroed fallback. `host_index` must be side-effect-free (it is evaluated more
+ * than once); `field` must be an int32 member of device_t. */
+#define get_device_flag(host_index, field)                                     \
+  (((host_index) >= 0 && (host_index) < MAX_DEVICE_COUNT &&                    \
+    likely(g_vgpu_config != NULL))                                             \
+     ? __atomic_load_n(&g_vgpu_config->devices[(host_index)].field,            \
+                       __ATOMIC_ACQUIRE)                                       \
+     : 0)
 
 /**
  * Dynamic SM controller configuration. All tunables that affect runtime
@@ -658,17 +749,16 @@ static inline int get_logger_print_level(void) {
 #define LOGGER_SHOULD_PRINT(level) \
   ((level) >= 0 && (level) <= get_logger_print_level())
 
-#define LOGGER(level, format, ...)                                  \
-  ({                                                                \
-    if (LOGGER_SHOULD_PRINT(level)) {                               \
+#define LOGGER(level, format, ...)                                      \
+  ({                                                                    \
+    if (LOGGER_SHOULD_PRINT(level)) {                                   \
       fprintf(stderr, "[vGPU %s(%d|%" PRIuPTR "|%s:%d)]: " format "\n", \
-              _level_names[level], getpid(),                        \
-              (uintptr_t)pthread_self(),                            \
-              basename(__FILE__), __LINE__, ##__VA_ARGS__);         \
-    }                                                               \
-    if (unlikely(level == FATAL)) {                                 \
-      exit(1);                                                      \
-    }                                                               \
+              _level_names[level], getpid(), (uintptr_t)pthread_self(), \
+              basename(__FILE__), __LINE__, ##__VA_ARGS__);             \
+    }                                                                   \
+    if (unlikely(level == FATAL)) {                                     \
+      exit(1);                                                          \
+    }                                                                   \
   })
 
 /**
@@ -762,8 +852,7 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device
  * MEMORY_TYPE_CAPTURE, but ties the record to the capturing graph so
  * free_gpu_virt_memory_by_graph() can retire it at cuStreamEndCapture.
  */
-void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
-                                     CUgraph graph, int device_id);
+void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes, CUgraph graph, int device_id);
 
 void free_gpu_virt_memory(CUdeviceptr dptr);
 

@@ -28,15 +28,39 @@ func TestResourceDataStructLayout(t *testing.T) {
 	if got := unsafe.Sizeof(VersionT{}); got != 8 {
 		t.Fatalf("sizeof(VersionT) = %d, want 8", got)
 	}
-	if got := unsafe.Sizeof(DeviceT{}); got != 96 {
-		t.Fatalf("sizeof(DeviceT) = %d, want 96", got)
+	// device_t is one cache line; resource_data_t = 128B header + 384B pod block
+	// + 16*128B devices. Must match the C _Static_asserts in hook.h exactly.
+	if got := unsafe.Sizeof(DeviceT{}); got != 128 {
+		t.Fatalf("sizeof(DeviceT) = %d, want 128", got)
 	}
-	if got := unsafe.Sizeof(ResourceDataT{}); got != 1848 {
-		t.Fatalf("sizeof(ResourceDataT) = %d, want 1848", got)
+	if got := unsafe.Sizeof(ResourceDataT{}); got != 2560 {
+		t.Fatalf("sizeof(ResourceDataT) = %d, want 2560", got)
+	}
+	// Offsets pinned against the C layout (frozen header, seqlock word, devices[]).
+	if got := unsafe.Offsetof(DeviceT{}.Seq); got != 0 {
+		t.Fatalf("offsetof(DeviceT.Seq) = %d, want 0", got)
+	}
+	if got := unsafe.Offsetof(DeviceT{}.TotalMemory); got != 56 {
+		t.Fatalf("offsetof(DeviceT.TotalMemory) = %d, want 56", got)
+	}
+	if got := unsafe.Offsetof(ResourceDataT{}.Magic); got != 0 {
+		t.Fatalf("offsetof(ResourceDataT.Magic) = %d, want 0", got)
+	}
+	if got := unsafe.Offsetof(ResourceDataT{}.LayoutVersion); got != 4 {
+		t.Fatalf("offsetof(ResourceDataT.LayoutVersion) = %d, want 4", got)
+	}
+	if got := unsafe.Offsetof(ResourceDataT{}.PodUID); got != 128 {
+		t.Fatalf("offsetof(ResourceDataT.PodUID) = %d, want 128 (frozen header size)", got)
+	}
+	if got := unsafe.Offsetof(ResourceDataT{}.Devices); got != 512 {
+		t.Fatalf("offsetof(ResourceDataT.Devices) = %d, want 512", got)
 	}
 	if MaxDeviceCount != 16 || UuidBufferSize != 48 || NameBufferSize != 64 {
 		t.Fatalf("ABI constants drifted: MaxDeviceCount=%d UuidBufferSize=%d NameBufferSize=%d",
 			MaxDeviceCount, UuidBufferSize, NameBufferSize)
+	}
+	if int64(unsafe.Sizeof(ResourceDataT{})) > ConfigFileSize {
+		t.Fatalf("sizeof(ResourceDataT)=%d exceeds ConfigFileSize=%d", unsafe.Sizeof(ResourceDataT{}), ConfigFileSize)
 	}
 }
 
@@ -209,7 +233,15 @@ func Test_WriDriverConfigFile(t *testing.T) {
 						t.Fatal(err)
 					}
 					defer func() { _ = resourceData1.Close() }()
-					resourceData2 := NewResourceDataT(devManager, test.pod, test.devices, false, node)
+					resourceData2 := NewResourceDataWithOptions(
+						ResourceOption{},
+						WithPodInfo(test.pod),
+						WithDeviceManager(devManager),
+						WithContainerName(test.devices.Name),
+						WithDeviceClaims(test.devices.DeviceClaims),
+						WithMemoryOversold(false),
+						WithComputePolicy(GetDefaultComputePolicy(test.pod, node)),
+					)
 					// Round-trip: bytes written to disk, mmap'd back, must equal
 					// the in-memory builder output (byte-compatible with C reader).
 					assert.Equal(t, *resourceData1.GetResource(), *resourceData2)

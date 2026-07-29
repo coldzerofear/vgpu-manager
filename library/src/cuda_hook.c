@@ -412,19 +412,23 @@ static memory_path_t prepare_memory_allocation(CUdevice device,
     return MEMORY_PATH_GPU;
   }
 
-  if ((used + vmem_used + request_size) > g_vgpu_config->devices[*host_index].total_memory) {
+  /* One tear-free snapshot for the whole decision: total_memory, memory_oversold
+   * and real_memory must be read as a consistent set or the OOM/UVA routing can
+   * mix a new total with an old oversold flag. host_index is valid here --
+   * load_limited_memory_view returned non-zero. */
+  device_t d = get_device_snapshot(*host_index);
+  if ((used + vmem_used + request_size) > d.total_memory) {
     // It is necessary to check and clean up virtual memory usage
-    if (vmem_used > 0 && (used + request_size) <= g_vgpu_config->devices[*host_index].total_memory) {
+    if (vmem_used > 0 && (used + request_size) <= d.total_memory) {
       check_cleanup_vmem_nodes_by_device(*host_index);
       get_used_gpu_virt_memory((void *)&vmem_used, *host_index);
     }
-    if ((used + vmem_used + request_size) > g_vgpu_config->devices[*host_index].total_memory) {
+    if ((used + vmem_used + request_size) > d.total_memory) {
       return MEMORY_PATH_OOM;
     }
   }
 
-  if (allow_uva && g_vgpu_config->devices[*host_index].memory_oversold &&
-      (used + request_size) > g_vgpu_config->devices[*host_index].real_memory) {
+  if (allow_uva && d.memory_oversold && (used + request_size) > d.real_memory) {
     /* Recorded here rather than at the call sites because this is the only
      * place that holds the numbers describing the decision: what was asked
      * for, what the device already holds, and the physical ceiling being
@@ -447,7 +451,7 @@ static int load_limited_memory_view(CUdevice device,
   if (*host_index < 0) {
     return 0;
   }
-  if (!g_vgpu_config->devices[*host_index].memory_limit) {
+  if (!get_device_flag(*host_index, memory_limit)) {
     return 0;
   }
 
@@ -723,7 +727,7 @@ static void rate_limiter(int grids, int blocks, int host_index) {
   if (host_index < 0) {
     return;
   }
-  if (g_vgpu_config->devices[host_index].core_limit) {
+  if (get_device_flag(host_index, core_limit)) {
     int64_t before_cuda_cores = 0;
     int64_t after_cuda_cores = 0;
     int64_t kernel_size = (int64_t) grids;
@@ -1660,7 +1664,7 @@ static void *utilization_watcher(void *arg) {
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
     pre_external_process_nums[host_index] = 0;
-    up_limits[host_index] = g_vgpu_config->devices[host_index].hard_core;
+    up_limits[host_index] = get_device_flag(host_index, hard_core);
     top_results[host_index].user_current = 0;
     top_results[host_index].sys_current = 0;
     top_results[host_index].valid = 0;
@@ -1710,6 +1714,11 @@ static void *utilization_watcher(void *arg) {
         }
       }
       host_index = host_indexes[cuda_index];
+      /* One tear-free config snapshot per device per cycle: every core_limit /
+       * hard_limit / hard_core / soft_core read in this loop body uses it, so a
+       * concurrent Go ModifyDevice can never split this cycle's decisions across
+       * an old and a new config. One-cycle staleness is fine for a watcher. */
+      device_t dcfg = get_device_snapshot(host_index);
 
       /* Before every `continue` below, deliberately. Region identity has
        * nothing to do with sampling, core_limit, or who won the refill, and
@@ -1722,7 +1731,7 @@ static void *utilization_watcher(void *arg) {
       shared_regions_check_identity();
 
       // Skip GPU without core limit enabled
-      if (!g_vgpu_config->devices[host_index].core_limit) continue;
+      if (!dcfg.core_limit) continue;
 
       /* Sample only if we own sampling for this device, or if the owner's
        * published sample has gone stale. A standby in steady state pays one
@@ -1764,7 +1773,7 @@ static void *utilization_watcher(void *arg) {
        * flag would swallow the signal the winner needs to see. */
       int throttled = __atomic_exchange_n(sm_throttled_of(host_index), 0, __ATOMIC_RELAXED);
 
-      if (g_vgpu_config->devices[host_index].hard_limit) {
+      if (dcfg.hard_limit) {
         /* Anti-jitter soft-start. Use the RAW predicate (no debounce) here: this
          * bypass must respond instantly to a freshly-started workload's util
          * ramp, and the hard_limit controller cannot exceed hard_core anyway so
@@ -1795,7 +1804,7 @@ static void *utilization_watcher(void *arg) {
             && top_results[host_index].user_current < low_util_thr
             && !throttled) {
           int64_t bypass_target =
-              g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+              g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
           if (g_sm_node != NULL) {
             /* A plain store would erase tokens other processes CAS-deducted
              * between our read and our write -- tokens conjured back into the
@@ -1818,7 +1827,7 @@ static void *utilization_watcher(void *arg) {
           sm_ctl_publish(host_index);
           continue;
         }
-        shares[host_index] = g_sm_controller(g_vgpu_config->devices[host_index].hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+        shares[host_index] = g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
       } else {
         if (pre_external_process_nums[host_index] != top_results[host_index].external_process_num) {
           /* A NEW external process arrived (count grew) -> reset to
@@ -1833,7 +1842,7 @@ static void *utilization_watcher(void *arg) {
            * at hard_core anyway). */
           if (pre_external_process_nums[host_index] < top_results[host_index].external_process_num) {
             shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
-            up_limits[host_index] = g_vgpu_config->devices[host_index].hard_core;
+            up_limits[host_index] = dcfg.hard_core;
             is[host_index] = 0;
             avg_sys_frees[host_index] = 0;
           }
@@ -1856,7 +1865,7 @@ static void *utilization_watcher(void *arg) {
          * flips back, which the else branch consumes to give the burst
          * headroom back via reset. */
         if (host_index_is_exclusive_debounced(host_index)) {
-          up_limits[host_index] = g_vgpu_config->devices[host_index].soft_core;
+          up_limits[host_index] = dcfg.soft_core;
           shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         } else {
           /* Lost-exclusivity reset (V2.1 option ①). When the debounced
@@ -1866,7 +1875,7 @@ static void *utilization_watcher(void *arg) {
            * the elastic ramp. One-shot: consume the flag. */
           if (g_lost_exclusivity_pending[host_index]) {
             shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
-            up_limits[host_index] = g_vgpu_config->devices[host_index].hard_core;
+            up_limits[host_index] = dcfg.hard_core;
             is[host_index] = 0;
             avg_sys_frees[host_index] = 0;
             g_lost_exclusivity_pending[host_index] = 0;
@@ -1878,13 +1887,13 @@ static void *utilization_watcher(void *arg) {
              * soft_core (V1 behaviour, kept); if we've been seeing pressure
              * AND we previously climbed past hard_core, give some back. */
             int avg = avg_sys_frees[host_index] * 2 / SOFT_ADJUST_INTERVAL;
-            int step = g_vgpu_config->devices[host_index].hard_core / 10;
+            int step = dcfg.hard_core / 10;
             /* Integer division truncates to 0 for hard_core < 10, which would
              * freeze up_limits (never climbs to soft_core, never steps back).
              * Floor at 1 so the elastic ramp still moves for small limits. */
             if (step < 1) step = 1;
-            int soft = g_vgpu_config->devices[host_index].soft_core;
-            int hard = g_vgpu_config->devices[host_index].hard_core;
+            int soft = dcfg.soft_core;
+            int hard = dcfg.hard_core;
             if (avg > g_dynamic_config.usage_threshold) {
               /* Headroom available -> climb (capped at soft_core). */
               up_limits[host_index] = up_limits[host_index] + step > soft
@@ -1957,9 +1966,9 @@ static inline int64_t monotonic_ns(void) {
  * the GAP path inherits soft_core burst/back-off behaviour; in hard mode it
  * is the static hard_core. Lock-free read of an int snapshot is intentional. */
 static int gap_effective_dc(int host_index) {
-  device_t *d = &g_vgpu_config->devices[host_index];
-  if (!d->core_limit) return 0;
-  if (d->hard_limit)  return d->hard_core;
+  device_t d = get_device_snapshot(host_index);
+  if (!d.core_limit) return 0;
+  if (d.hard_limit)  return d.hard_core;
   /* With a shared bucket the controller runs in ONE process per cycle, so this
    * process's private up_limits[] is only as fresh as the last cycle it won --
    * and a process that keeps losing may never refresh it at all. Reading the
@@ -1970,7 +1979,7 @@ static int gap_effective_dc(int host_index) {
   int t = g_sm_node ? __atomic_load_n(&g_sm_node->devices[host_index].up_limit,
                                       __ATOMIC_RELAXED)
                     : up_limits[host_index];
-  if (t <= 0) t = d->hard_core;   /* watcher not warmed up yet -> guarantee floor */
+  if (t <= 0) t = d.hard_core;   /* watcher not warmed up yet -> guarantee floor */
   return t;
 }
 
@@ -3482,7 +3491,7 @@ ALLOCATED_TO_GPU:
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
-    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold) {
+    if (host_index >= 0 && get_device_flag(host_index, memory_oversold)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAlloc OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                        request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -3561,7 +3570,7 @@ ALLOCATED_TO_GPU:
   }
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
-    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold) {
+    if (host_index >= 0 && get_device_flag(host_index, memory_oversold)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAllocPitch OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                        request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -3635,7 +3644,7 @@ ALLOCATED_TO_GPU:
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
     // TODO Do not disrupt graph capture due to UVA path destruction
-    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold && !stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
+    if (host_index >= 0 && get_device_flag(host_index, memory_oversold) && !stream_is_capturing(hStream, __CUDA_API_IS_PTSZ)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAllocAsync OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -3717,7 +3726,7 @@ ALLOCATED_TO_GPU:
   if (unlikely(ret == CUDA_ERROR_OUT_OF_MEMORY)) {
     metrics_record_oom(host_index, METRICS_OOM_DRIVER_RETURN);
     // TODO Do not disrupt graph capture due to UVA path destruction
-    if (host_index >= 0 && g_vgpu_config->devices[host_index].memory_oversold && !stream_is_capturing(hStream, 1)) {
+    if (host_index >= 0 && get_device_flag(host_index, memory_oversold) && !stream_is_capturing(hStream, 1)) {
       metrics_record_uva_fallback(host_index);
       LOGGER(VERBOSE, "cuMemAllocAsync_ptsz OOM, try using unified memory allocation (oversold), size: %zu, ret: %d, str: %s",
                     request_size, ret, CUDA_ERROR(cuda_library_entry, ret));
@@ -4031,9 +4040,10 @@ CUresult _cuDeviceTotalMem(size_t *bytes, CUdevice dev) {
   if (unlikely(host_index < 0)) {
     return ret;
   }
-  if (g_vgpu_config->devices[host_index].memory_limit && bytes != NULL) {
-    size_t configured = g_vgpu_config->devices[host_index].total_memory;
-    if (g_vgpu_config->devices[host_index].memory_oversold) {
+  device_t dsnap = get_device_snapshot(host_index);
+  if (dsnap.memory_limit && bytes != NULL) {
+    size_t configured = dsnap.total_memory;
+    if (dsnap.memory_oversold) {
       *bytes = configured;
     } else {
       CUresult sub = CUDA_ERROR_NOT_FOUND;
@@ -4083,9 +4093,10 @@ CUresult _cuMemGetInfo(size_t *free, size_t *total) {
   int host_index = -1;
   size_t used = 0, vmem_used = 0;
   if (load_limited_memory_view(device, &host_index, &lock_fd, &used, &vmem_used)) {
-    size_t configured = g_vgpu_config->devices[host_index].total_memory;
+    device_t dsnap = get_device_snapshot(host_index);
+    size_t configured = dsnap.total_memory;
     size_t actual_total = 0, actual_free = 0;
-    if (g_vgpu_config->devices[host_index].memory_oversold) {
+    if (dsnap.memory_oversold) {
       actual_total = configured;
       actual_free  = (used + vmem_used) >= actual_total ? 0 : (actual_total - used - vmem_used);
     } else {
@@ -4717,7 +4728,7 @@ CUresult cuFuncSetBlockShape(CUfunction hfunc, int x, int y, int z) {
   if (host_index < 0) {
     goto CALL;
   }
-  if (g_vgpu_config->devices[host_index].core_limit) {
+  if (get_device_flag(host_index, core_limit)) {
     while (!CAS(&g_block_locker[host_index], 0, 1)) {}
 
     g_block_x[host_index] = x;

@@ -63,14 +63,15 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) 
   if (host_index < 0) {
     return ret;
   }
-  if (g_vgpu_config->devices[host_index].memory_limit && memory != NULL) {
+  device_t dsnap = get_device_snapshot(host_index);
+  if (dsnap.memory_limit && memory != NULL) {
     int lock_fd = lock_gpu_device(host_index);
 
     size_t used = 0, vmem_used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
     get_used_gpu_virt_memory((void *)&vmem_used, host_index);
 
-    size_t total_memory = g_vgpu_config->devices[host_index].total_memory;
+    size_t total_memory = dsnap.total_memory;
     memory->total = total_memory;
     memory->used = (used + vmem_used) >= total_memory ? total_memory : (used + vmem_used);
     memory->free = memory->total - memory->used;
@@ -94,14 +95,15 @@ nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *me
   if (host_index < 0) {
     return ret;
   }
-  if (g_vgpu_config->devices[host_index].memory_limit && memory != NULL) {
+  device_t dsnap = get_device_snapshot(host_index);
+  if (dsnap.memory_limit && memory != NULL) {
     int lock_fd = lock_gpu_device(host_index);
 
     size_t used = 0, vmem_used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
     get_used_gpu_virt_memory((void *)&vmem_used, host_index);
 
-    size_t total = g_vgpu_config->devices[host_index].total_memory;
+    size_t total = dsnap.total_memory;
     size_t total_used = used + vmem_used;
     memory->total = total;
     memory->used = total_used >= total ? total : total_used;
@@ -119,7 +121,8 @@ nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device, nvmlComputeMode_t mod
   if (host_index < 0) {
     goto CALL;
   }
-  if (g_vgpu_config->devices[host_index].memory_limit || g_vgpu_config->devices[host_index].core_limit) {
+  device_t dsnap = get_device_snapshot(host_index);
+  if (dsnap.memory_limit || dsnap.core_limit) {
     ret = NVML_ERROR_NOT_SUPPORTED;
     goto DONE;
   }
