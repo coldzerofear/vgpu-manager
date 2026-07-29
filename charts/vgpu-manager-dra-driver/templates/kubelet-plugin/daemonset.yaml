@@ -119,13 +119,13 @@ spec:
                 sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
-              kubelet-plugin
+              exec kubelet-plugin "$@"
             - --kube-api-qps={{ $plugin.commands.kubeApiQps | default 20 }}
             - --kube-api-burst={{ $plugin.commands.kubeApiBurst | default 30 }}
             - --nri-plugin-idx={{ $plugin.commands.nriPluginIdx | default "00" }}
             - --device-cores-ratio={{ $plugin.commands.coresRatio | default 100 }}
-            - --device-memory-ratio{{ $plugin.commands.memoryRatio | default 100 }}
-            - -v {{ $plugin.commands.logLevel | default 5 }}
+            - --device-memory-ratio={{ $plugin.commands.memoryRatio | default 100 }}
+            - -v={{ $plugin.commands.logLevel | default 5 }}
           env:
             - name: NODE_NAME
               valueFrom:
