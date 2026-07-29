@@ -153,6 +153,19 @@ func newApp() *cli.App {
 			Destination: &flags.CGroupDriver,
 			EnvVars:     []string{"CGROUP_DRIVER"},
 		},
+		&cli.UintFlag{
+			Name:        "device-cores-ratio",
+			Usage:       "Nvidia vGPU device cores oversold ratio",
+			Value:       100,
+			Destination: &flags.DeviceCoresRatio,
+			EnvVars:     []string{"DEVICE_CORES_RATIO"},
+		},
+		&cli.UintFlag{
+			Name:        "device-memory-ratio",
+			Usage:       "Nvidia vGPU device memory oversold ratio",
+			Value:       100,
+			Destination: &flags.DeviceMemoryRatio,
+			EnvVars:     []string{"DEVICE_MEMORY_RATIO"},
 		&cli.StringFlag{
 			Name:        "nri-root",
 			Usage:       "Directory (mounted from the host) holding the runtime NRI socket; the in-process NRI plugin dials <nri-root>/nri.sock. Only used when the NRISupport feature gate is enabled.",
