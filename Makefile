@@ -15,7 +15,7 @@ else
 endif
 
 VERSION_PKG = github.com/coldzerofear/vgpu-manager/pkg
-CGO_CFLAGS = -D_GNU_SOURCE -D_FORTIFY_SOURCE=2 -O2 -ftrapv
+CGO_CFLAGS = -D_FORTIFY_SOURCE=2 -O2 -ftrapv -Wno-deprecated-declarations
 CGO_LDFLAGS_ALLOW = -Wl,--unresolved-symbols=ignore-in-object-files
 GO_BUILD_LDFLAGS = -X $(VERSION_PKG)/version.version=${VERSION} \
                    -X $(VERSION_PKG)/version.NvVersion=${NVVERSION} \
@@ -84,11 +84,11 @@ build: fmt vet ## Build binary.
 
 .PHONY: docker-build-base
 docker-build-base: ## Build base docker image.
-	$(CONTAINER_TOOL) build --build-arg GIT_BRANCH="${GIT_BRANCH}" --build-arg APT_MIRROR="${APT_MIRROR}" \
+	$(CONTAINER_TOOL) build --build-arg NVIDIA_CUDA_IMAGE="${CUDA_BASE_IMAGE}" --build-arg GIT_BRANCH="${GIT_BRANCH}" \
       --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
       --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
       --build-arg BUILD_NVVERSION="${NVVERSION}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
-      -t "${BASE_IMG}" -f Dockerfile.base .
+      --build-arg APT_MIRROR="${APT_MIRROR}" -t "${BASE_IMG}" -f Dockerfile.base .
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
@@ -97,7 +97,7 @@ docker-build-base: ## Build base docker image.
 docker-build: ## Build docker image.
 	$(CONTAINER_TOOL) build --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
 	  --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
-	  -t "${IMG}" -f Dockerfile .
+	  --build-arg TOOLKIT_CONTAINER_IMAGE="${TOOLKIT_CONTAINER_IMAGE}" -t "${IMG}" -f Dockerfile .
 
 .PHONY: docker-build-dra
 docker-build-dra: ## Build dra driver docker image.
@@ -133,12 +133,12 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	sed '/--platform=/! s/^[[:space:]]*FROM[[:space:]]/FROM --platform=\$$\{BUILDPLATFORM\} /' Dockerfile.base > Dockerfile.base.cross
 	- $(CONTAINER_TOOL) buildx create --name vgpu-manager-builder
 	$(CONTAINER_TOOL) buildx use vgpu-manager-builder
-	- $(CONTAINER_TOOL) buildx build --platform=$(PLATFORMS) --build-arg GIT_BRANCH="${GIT_BRANCH}" \
+	- $(CONTAINER_TOOL) buildx build --platform=$(PLATFORMS) --build-arg NVIDIA_CUDA_IMAGE="${CUDA_BASE_IMAGE}" --build-arg GIT_BRANCH="${GIT_BRANCH}" \
       --build-arg APT_MIRROR="${APT_MIRROR}" --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
 	  --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" --build-arg GOLANG_VERSION="${GOLANG_VERSION}" \
 	  --tag "${BASE_IMG}" -f Dockerfile.base.cross .
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg BASE_BUILD_IMAGE="${BASE_IMG}" \
       --build-arg GIT_COMMIT="${GIT_COMMIT}" --build-arg BUILD_VERSION="${VERSION}" --build-arg BUILD_DATE="${BUILD_DATE}" \
-	  --tag "${IMG}" -f Dockerfile.cross .
+	  --build-arg TOOLKIT_CONTAINER_IMAGE="${TOOLKIT_CONTAINER_IMAGE}" --tag "${IMG}" -f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm vgpu-manager-builder
 	rm -f Dockerfile.cross Dockerfile.base.cross

@@ -113,6 +113,14 @@ func allocatePodOn(pod *corev1.Pod, nodeName string, deviceID int, deviceUUID st
 
 type podOpt func(*corev1.Pod)
 
+func withPodGroupName(name string) podOpt {
+	return func(pod *corev1.Pod) {
+		pod.Spec.SchedulingGroup = &corev1.PodSchedulingGroup{
+			PodGroupName: &name,
+		}
+	}
+}
+
 func withPriority(p int32) podOpt {
 	return func(pod *corev1.Pod) {
 		v := p
@@ -219,17 +227,28 @@ func newPreemptPluginWithSync(t *testing.T, pods []*corev1.Pod, nodes []*corev1.
 		objs = append(objs, n)
 	}
 	k8sClient := fake.NewClientset(objs...)
+	// Advertise the policy/v1 PodDisruptionBudget API so NewPDBLister's version
+	// discovery succeeds, matching any real cluster (>=1.21). Without this the
+	// fake discovery returns nothing and preempt.New fails.
+	k8sClient.Resources = []*metav1.APIResourceList{
+		{
+			GroupVersion: "policy/v1",
+			APIResources: []metav1.APIResource{
+				{Name: "poddisruptionbudgets", Kind: "PodDisruptionBudget", Namespaced: true},
+			},
+		},
+	}
 	factory := informers.NewSharedInformerFactory(k8sClient, 0)
 	broadcaster := record.NewBroadcaster()
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "test"})
 
 	// We need the filter plugin's PodLister so the indexer
 	// IndexerKeyPodRequestVGPU is registered on the shared informer.
-	filterPlugin, err := filter.New(k8sClient, factory, recorder, false)
+	filterPlugin, err := filter.New(k8sClient, factory, recorder, false, true)
 	if err != nil {
 		t.Fatalf("filter.New: %v", err)
 	}
-	plugin, err := New(factory, recorder, filterPlugin.GetPodLister())
+	plugin, err := New(k8sClient, factory, recorder, filterPlugin.GetPodLister(), true)
 	if err != nil {
 		t.Fatalf("preempt.New: %v", err)
 	}
@@ -321,10 +340,16 @@ func Test_isProtectedFromPreemption(t *testing.T) {
 			}(),
 			want: true,
 		},
+		{
+			name: "Brother pods in the same group are protected",
+			pod:  newVGPUPod("p", "ns", 1, withPriority(10), withNodeName("node1"), withPodGroupName("group1")),
+			want: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isProtectedFromPreemption(tt.pod))
+			groupName, _ := util.PodHasGangName(tt.pod)
+			assert.Equal(t, tt.want, isProtectedFromPreemption(tt.pod, groupName))
 		})
 	}
 }
@@ -690,11 +715,11 @@ func Test_Preempt_ProtectedVictim_AddsAdditional(t *testing.T) {
 // changes.
 func Test_pdbViolationsUpperBound(t *testing.T) {
 	tests := []struct {
-		name      string
-		original  int64
-		keptLen   int
-		addedLen  int
-		want      int64
+		name     string
+		original int64
+		keptLen  int
+		addedLen int
+		want     int64
 	}{
 		{
 			name:     "no change passes through",

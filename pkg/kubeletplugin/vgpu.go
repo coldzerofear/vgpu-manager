@@ -11,6 +11,7 @@ import (
 	vgpu2 "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/docker/go-units"
@@ -38,8 +39,8 @@ func (d *VGpuDeviceInfo) CanonicalName() string {
 }
 
 func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
-	attr := d.GpuDeviceInfo.Attributes()
-	attr["type"] = resourceapi.DeviceAttribute{
+	attributes := d.GpuDeviceInfo.Attributes()
+	attributes["type"] = resourceapi.DeviceAttribute{
 		StringValue: ptr.To(VGpuDeviceType),
 	}
 
@@ -58,15 +59,10 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 	attr["memoryRatio"] = resourceapi.DeviceAttribute{
 		IntValue: ptr.To[int64](int64(deviceMemoryRatio)),
 	}
-	if numaNode, ok := d.GetNumaNode(); ok {
-		attr["numa"] = resourceapi.DeviceAttribute{
-			IntValue: ptr.To(int64(numaNode)),
-		}
-	}
 
 	device := resourceapi.Device{
 		Name:       d.CanonicalName(),
-		Attributes: attr,
+		Attributes: attributes,
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			CoresResourceName: {
 				Value: *resource.NewQuantity(int64(util.HundredCore), resource.DecimalSI),
@@ -163,6 +159,7 @@ func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) 
 		filepath.Join(baseContPath, util.Config),
 		filepath.Join(baseContPath, vgpu.VGPULockDirName),
 		filepath.Join(baseContPath, util.VMemNode),
+		filepath.Join(baseContPath, util.SMNode),
 	}
 	for _, dirPath := range preparedDirs {
 		if err := util.EnsureDir(dirPath, 0o777); err != nil {
@@ -208,6 +205,17 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 		fmt.Sprintf("%s=", util.CudaSoftCoreLimitEnv),
 		fmt.Sprintf("%s=", util.CudaMemoryLimitEnv),
 		fmt.Sprintf("%s=%s", util.CudaMemoryOversoldEnv, oversold),
+		fmt.Sprintf("%s=TRUE", util.VMemoryNodeEnabled), // default Enabled
+		fmt.Sprintf("%s=TRUE", util.CudaSMSharedBucket),
+	}
+	// In NRI mode the partition mounts + register wiring are applied per-container
+	// by the NRI plugin at CreateContainer, not here. Carry the claim UID via CDI
+	// env so the NRI hook can correlate the container to its claim (validated
+	// against node prepared state; see §12.12.1 in dra_nri_integration_design.md).
+	if featuregates.Enabled(featuregates.NRISupport) {
+		envs = append(envs, fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, string(claim.UID)))
+	} else {
+		envs = append(envs, fmt.Sprintf("%s=", util.ManagerVGpuClaimUid))
 	}
 	hostLibraryPath := filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName)
 	hostLibraryPath = fmt.Sprintf("%s.%s", hostLibraryPath, version.Get().Version)
@@ -289,7 +297,7 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 			} else if computePolicy == util.NoneComputePolicy {
 				hardVal = util.HundredCore
 			}
-			if hardVal < util.HundredCore {
+			if hardVal > 0 && hardVal < util.HundredCore {
 				envs = append(envs, fmt.Sprintf("%s_%d=%v", util.CudaCoreLimitEnv, idx, hardVal))
 				envs = append(envs, fmt.Sprintf("%s_%d=%v", util.CudaSoftCoreLimitEnv, idx, softVal))
 			} else {
@@ -320,9 +328,6 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 }
 
 func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.ResourceClaim, partitionKey string) (*cdiapi.ContainerEdits, error) {
-	if claim == nil {
-		return nil, nil
-	}
 	if partitionKey == "" {
 		// TODO It's unlikely to run up to this point
 		partitionKey = "default"
@@ -366,6 +371,56 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 					HostPath:      filepath.Join(partitionHostPath, util.VMemNode),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
+				{
+					ContainerPath: filepath.Join(vgpu.ContSMNodePath),
+					HostPath:      filepath.Join(partitionHostPath, util.SMNode),
+					Options:       []string{"rw", "nosuid", "nodev", "bind"},
+				},
+			},
+		},
+	}, nil
+}
+
+// GetNRIPartitionInjection ensures the per-container partition directories for a
+// vGPU container in NRI mode and returns the mounts + register env for the NRI
+// CreateContainer hook to inject. partitionKey is the per-container scope
+// "<podUID>_<containerName>", matching the register server's pod-uid path
+// (util.GetPodContainerManagerPath under claims/<claimUID>/). Unlike the
+// Prepare-time GetPartitionMountContainerEdits, this mints no register UUID and
+// patches no claim annotation: in NRI mode the library registers via the pod-uid
+// path using the VGPU_POD_UID / VGPU_CONTAINER_NAME env injected here.
+func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
+	partitionKey := fmt.Sprintf("%s_%s", podUID, containerName)
+	contBase, hostBase := m.ensurePartitionDirectories(claimUID, partitionKey)
+	return &nri.Injection{
+		ConfigDir: filepath.Join(contBase, util.Config),
+		Env: []string{
+			fmt.Sprintf("%s=%s", util.PodNameEnv, podName),
+			fmt.Sprintf("%s=%s", util.PodNamespaceEnv, podNamespace),
+			fmt.Sprintf("%s=%s", util.PodUIDEnv, podUID),
+			fmt.Sprintf("%s=%s", util.ContNameEnv, containerName),
+			fmt.Sprintf("%s=", util.ManagerClientRegisterUuid),
+		},
+		Mounts: []nri.Mount{
+			{
+				ContainerPath: filepath.Join(m.contManagerPath, util.Config),
+				HostPath:      filepath.Join(hostBase, util.Config),
+				Options:       []string{"rw", "nosuid", "nodev", "bind"},
+			},
+			{
+				ContainerPath: vgpu.ContVGPULockPath,
+				HostPath:      filepath.Join(hostBase, vgpu.VGPULockDirName),
+				Options:       []string{"rw", "nosuid", "nodev", "bind"},
+			},
+			{
+				ContainerPath: vgpu.ContVMemoryNodePath,
+				HostPath:      filepath.Join(hostBase, util.VMemNode),
+				Options:       []string{"rw", "nosuid", "nodev", "bind"},
+			},
+			{
+				ContainerPath: vgpu.ContSMNodePath,
+				HostPath:      filepath.Join(hostBase, util.SMNode),
+				Options:       []string{"rw", "nosuid", "nodev", "bind"},
 			},
 		},
 	}, nil

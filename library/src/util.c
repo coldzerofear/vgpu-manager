@@ -24,6 +24,133 @@
 #define MANAGER_COMPATIBILITY_MODE_ENV "MANAGER_COMPATIBILITY_MODE"
 #define EXTERNAL_SM_WATCHER_ENABLED_ENV "EXTERNAL_SM_WATCHER_ENABLED"
 
+/* SM throttle controller selection + AIMD parameters. The watcher's per-cycle
+ * share update is delegated to a controller. Default keeps stock behaviour.
+ * AIMD ("aimd") implements the Midokura ablation/orig-aimd-v5 algorithm: slow
+ * additive increase (gap-proportional) + fast multiplicative decrease.
+ *
+ *   CUDA_SM_CONTROLLER       = "delta" (default) | "aimd"
+ *   CUDA_SM_AIMD_MD_DIVISOR  = MD factor (share /= div) - default 3
+ *   CUDA_SM_AIMD_EFF_RATIO   = effective-limit buffer / 1000 - default 875 (87.5%)
+ *   CUDA_SM_AIMD_AI_BASE_DIV = AI step base divisor - default 400
+ */
+#define CUDA_SM_CONTROLLER_ENV       "CUDA_SM_CONTROLLER"
+#define CUDA_SM_AIMD_MD_DIVISOR_ENV  "CUDA_SM_AIMD_MD_DIVISOR"
+#define CUDA_SM_AIMD_EFF_RATIO_ENV   "CUDA_SM_AIMD_EFF_RATIO"
+#define CUDA_SM_AIMD_AI_BASE_DIV_ENV "CUDA_SM_AIMD_AI_BASE_DIV"
+
+/* "auto" controller mode (experimental): switch between delta (single-Pod,
+ * for throughput) and aimd (multi-Pod, for fairness) based on per-device
+ * sys_process_num observed by the watcher. Debounced to avoid pingponging
+ * on NVML's process-count jitter. */
+#define CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV         "CUDA_SM_AUTO_DEBOUNCE_CYCLES"
+/* SM-utilization threshold (percent) above which a non-self-container
+ * process is considered to actually compete with us. Default 1: just
+ * enough to filter the always-on driver/persistenced threads (which
+ * report ~0%) while still recognising the smallest real Pod activity.
+ * Used by both the AUTO controller and the watcher's soft_core burst
+ * decision to identify "real exclusive use" of the GPU. */
+#define CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD_ENV "CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD"
+
+/* AIMD anti-sawtooth tunables (P1, see sm_controller_aimd_sawtooth_analysis.md).
+ *
+ *   DEADBAND_RATIO  -- per-thousand. Defines the AI lower edge of the
+ *                      hysteresis band around eff_limit. Default 800 means
+ *                      AI fires only when user_current < up_limit*0.80
+ *                      (i.e. below 80% of target), MD fires above eff_limit
+ *                      (up_limit*0.875 by default). Inside the band the
+ *                      controller leaves share alone. Must be < EFF_RATIO.
+ *
+ *   MD_COOLDOWN_CYCLES -- how many watcher cycles after an MD the controller
+ *                         will NOT MD again, even if user_current still
+ *                         exceeds eff_limit. Default 3 (~240ms at 80ms
+ *                         watcher cadence). Set 0 to disable cooldown
+ *                         entirely (retain V2.1 behaviour). */
+#define CUDA_SM_AIMD_DEADBAND_RATIO_ENV     "CUDA_SM_AIMD_DEADBAND_RATIO"
+#define CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV "CUDA_SM_AIMD_MD_COOLDOWN_CYCLES"
+
+/* Avg-free-headroom threshold (percent) used by the soft-mode periodic
+ * up_limit adjuster. avg > x -> climb, avg < x -> step back down,
+ * avg == x -> hold. Range: non-negative integer. 0 means "any headroom
+ * triggers climb" (use with care, can cause up_limits oscillation in
+ * mostly-idle workloads). */
+#define CUDA_SM_USAGE_THRESHOLD_ENV         "CUDA_SM_USAGE_THRESHOLD"
+
+/* delta() ramp-floor divisor N: the grow/cut step is floored at
+ * g_total*diff/(up_limit*N), so the bulk ramp to the limit takes ~N watcher
+ * cycles regardless of SM count. Smaller N = faster ramp (and, on tiny slices,
+ * coarser near-limit tracking); larger N = gentler. Default 64. Set to 0 (or any
+ * value <= 0) to DISABLE the floor entirely and revert to delta's raw
+ * sm^2-scaled step (the pre-floor behaviour). */
+/* Container-wide shared token bucket. Off by default: with it off the bucket
+ * stays the per-process static it has always been and behaviour is unchanged,
+ * so the feature carries no risk for the single-process containers that gain
+ * nothing from it. See docs/sm_multiproc_shared_bucket_design.md. */
+#define CUDA_SM_SHARED_BUCKET_ENV "CUDA_SM_SHARED_BUCKET"
+#define CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV "CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR"
+
+/*-- Cache: Read only once during the process lifecycle /proc/1/environ --*/
+static char           *g_environ_buf  = NULL;   /* The cached raw content */
+static size_t          g_environ_len  = 0;      /* Effective byte count   */
+static pthread_once_t  g_once         = PTHREAD_ONCE_INIT;
+
+static void _load_pid1_environ(void) {
+  FILE *f = fopen("/proc/1/environ", "re");
+  if (!f) return;
+
+  /* Obtain actual size */
+  struct stat st;
+  if (fstat(fileno(f), &st) != 0 || st.st_size <= 0) {
+    fclose(f);
+    return;
+  }
+
+  /* Allocate according to actual size */
+  size_t cap = (size_t)st.st_size;
+  char *buf = malloc(cap + 1);
+  if (!buf) {
+    fclose(f);
+    return;
+  }
+
+  size_t nread = fread(buf, 1, cap, f);
+  fclose(f);
+
+  if (nread == 0) {
+    free(buf);
+    return;
+  }
+  // Bottom line to prevent crossing the boundary when the NUL is missing at the end.
+  buf[nread] = '\0';
+  g_environ_buf = buf;
+  g_environ_len = nread;
+}
+
+char* _getenv(const char* name) {
+  if (!name || !name[0]) return NULL;
+
+  char *val = getenv(name);
+  if (val || getpid() == 1) return val;
+
+  pthread_once(&g_once, _load_pid1_environ);
+  if (!g_environ_buf) return NULL;
+
+  size_t name_len = strlen(name);
+  char *p = g_environ_buf;
+  char *end = g_environ_buf + g_environ_len;
+
+  while (p < end) {
+    size_t entry_len = strnlen(p, end - p);
+    if (entry_len > name_len &&
+      strncmp(p, name, name_len) == 0 &&
+      p[name_len] == '=') {
+      return p + name_len + 1;
+    }
+    p += entry_len + 1;
+  }
+  return NULL;
+}
+
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
   double value = 0.0;
@@ -53,7 +180,7 @@ size_t iec_to_bytes(const char *iec_value) {
 }
 
 int get_compatibility_mode(int *mode) {
-  char *str = getenv(MANAGER_COMPATIBILITY_MODE_ENV);
+  char *str = _getenv(MANAGER_COMPATIBILITY_MODE_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -64,9 +191,9 @@ int get_compatibility_mode(int *mode) {
 int get_mem_ratio(uint32_t index, double *ratio) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_RATIO_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_MEMORY_RATIO_ENV);
+    str = _getenv(CUDA_MEMORY_RATIO_ENV);
     if (!str) {
       return -1;
     }
@@ -81,9 +208,9 @@ int get_mem_ratio(uint32_t index, double *ratio) {
 int get_mem_limit(uint32_t index, size_t *limit) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_LIMIT_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_MEMORY_LIMIT_ENV);
+    str = _getenv(CUDA_MEMORY_LIMIT_ENV);
     if (!str) {
       return -1;
     }
@@ -98,9 +225,9 @@ int get_mem_limit(uint32_t index, size_t *limit) {
 int get_core_limit(uint32_t index, int *limit) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_LIMIT_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_CORE_LIMIT_ENV);
+    str = _getenv(CUDA_CORE_LIMIT_ENV);
     if (!str) {
       return -1;
     }
@@ -115,9 +242,9 @@ int get_core_limit(uint32_t index, int *limit) {
 int get_core_soft_limit(uint32_t index, int *limit) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_SOFT_LIMIT_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_CORE_SOFT_LIMIT_ENV);
+    str = _getenv(CUDA_CORE_SOFT_LIMIT_ENV);
     if (!str) {
       return -1;
     }
@@ -132,7 +259,7 @@ int get_core_soft_limit(uint32_t index, int *limit) {
 int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", MANAGER_VISIBLE_DEVICE_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -145,7 +272,7 @@ int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
 
 int get_nvidia_device_uuids(char *uuids, size_t uuids_size) {
   char *str = NULL;
-  str = getenv(NVIDIA_VISIBLE_DEVICES_ENV);
+  str = _getenv(NVIDIA_VISIBLE_DEVICES_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -158,7 +285,7 @@ int get_nvidia_device_uuids(char *uuids, size_t uuids_size) {
 
 int get_manager_device_uuids(char *uuids, size_t uuids_size) {
   char *str = NULL;
-  str = getenv(MANAGER_VISIBLE_DEVICES_ENV);
+  str = _getenv(MANAGER_VISIBLE_DEVICES_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -181,7 +308,7 @@ void value_enabled(char *str, int *i) {
 
 int get_vmem_node_enabled(int *i) {
   char *str = NULL;
-  str = getenv(VMEM_NODE_ENABLED_ENV);
+  str = _getenv(VMEM_NODE_ENABLED_ENV);
   if (!str) {
     return -1;
   }
@@ -192,9 +319,9 @@ int get_vmem_node_enabled(int *i) {
 int get_mem_oversold(uint32_t index, int *i) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_MEM_OVERSOLD_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_MEM_OVERSOLD_ENV);
+    str = _getenv(CUDA_MEM_OVERSOLD_ENV);
     if (!str) {
       return -1;
     }
@@ -204,11 +331,197 @@ int get_mem_oversold(uint32_t index, int *i) {
 }
 
 int get_sm_watcher_enabled(int *i) {
-  char *str = getenv(EXTERNAL_SM_WATCHER_ENABLED_ENV);
+  char *str = _getenv(EXTERNAL_SM_WATCHER_ENABLED_ENV);
   if (!str) {
     return -1;
   }
   value_enabled(str, i);
+  return 0;
+}
+
+/* Returns 0 for the stock "delta" controller (default), 1 for "aimd",
+ * 2 for the experimental "auto" mode (debounced sys_process_num-based
+ * routing between delta and aimd). Anything else stays on delta. */
+int get_sm_controller_kind(int *kind) {
+  *kind = 0;
+  char *str = _getenv(CUDA_SM_CONTROLLER_ENV);
+  if (!str) return -1;
+  if (strcasecmp(str, "aimd") == 0) {
+    *kind = 1;
+    return 0;
+  }
+  if (strcasecmp(str, "auto") == 0) {
+    *kind = 2;
+    return 0;
+  }
+  return 0;
+}
+
+/* Generic positive-int env getter with a fallback. Returns 0 if env was set
+ * and parsed; -1 if env unset (caller keeps its default). Parse failure or a
+ * non-positive value falls back to `dflt` and still returns 0 so the caller
+ * sees a usable value rather than a silent zero. */
+/* Positive double getter: accepts decimals like "1.5" so users can dial in
+ * finer-grained MD softness than the integer-divisor flavour. The min
+ * argument is a hard floor enforced after parsing; values <= min produce
+ * a WARNING and fall back to dflt. Returns 0 if env was set and parsed
+ * to a usable value (whether or not it had to fall back to dflt due to
+ * range violation); -1 if env was unset (caller's dflt is used). */
+static int get_positive_double_env(const char *name, double dflt, double min,
+                                   double *out) {
+  char *str = _getenv(name);
+  if (!str || !*str) {
+    *out = dflt;
+    return -1;
+  }
+  char *endp = NULL;
+  double v = strtod(str, &endp);
+  if (endp == str || !(v > 0) || v < min || v != v /* NaN */) {
+    LOGGER(WARNING, "%s=\"%s\" is not a positive double (>= %.3f), using default %.3f",
+           name, str, min, dflt);
+    *out = dflt;
+    return 0;
+  }
+  *out = v;
+  return 0;
+}
+
+/* Non-negative variant: accepts 0 (some knobs use 0 as the "disable" value).
+ * Same parse + fallback semantics as get_positive_int_env otherwise. */
+static int get_nonneg_int_env(const char *name, int dflt, int *out) {
+  char *str = _getenv(name);
+  if (!str || !*str) {
+    *out = dflt;
+    return -1;
+  }
+  char *endp = NULL;
+  long v = strtol(str, &endp, 10);
+  if (endp == str || v < 0 || v > INT_MAX) {
+    LOGGER(WARNING, "%s=\"%s\" is not a non-negative int, using default %d",
+           name, str, dflt);
+    *out = dflt;
+    return 0;
+  }
+  *out = (int)v;
+  return 0;
+}
+
+/* Like the above but accepts ANY parseable int (including 0 and negatives);
+ * only an unset/empty value or non-numeric garbage falls back to the default.
+ * Used where a non-positive value is a meaningful sentinel (e.g. "disable"). */
+static int get_int_env(const char *name, int dflt, int *out) {
+  char *str = _getenv(name);
+  if (!str || !*str) {            /* unset OR set-to-empty -> use default */
+    *out = dflt;
+    return -1;
+  }
+  char *endp = NULL;
+  long v = strtol(str, &endp, 10);
+  if (endp == str || v < INT_MIN || v > INT_MAX) {
+    LOGGER(WARNING, "%s=\"%s\" is not an int, using default %d", name, str, dflt);
+    *out = dflt;
+    return 0;
+  }
+  *out = (int)v;
+  return 0;
+}
+
+static int get_positive_int_env(const char *name, int dflt, int *out) {
+  char *str = _getenv(name);
+  if (!str || !*str) {            /* unset OR set-to-empty -> use default */
+    *out = dflt;
+    return -1;
+  }
+  char *endp = NULL;
+  long v = strtol(str, &endp, 10);
+  if (endp == str || v <= 0 || v > INT_MAX) {
+    LOGGER(WARNING, "%s=\"%s\" is not a positive int, using default %d",
+           name, str, dflt);
+    *out = dflt;
+    return 0;
+  }
+  *out = (int)v;
+  return 0;
+}
+
+/* MD divisor is a double so users can dial in 1.5 or 2.5 for softer cuts
+ * than integer 2/3. Floor 1.01 -- /1 is a no-op, /<1 would AMPLIFY share
+ * on overshoot which inverts the algorithm. The 0.01 margin avoids
+ * pathological behaviour from floating-point rounding near 1.0. */
+int get_aimd_md_divisor(double *out) {
+  return get_positive_double_env(CUDA_SM_AIMD_MD_DIVISOR_ENV, 3.0, 1.01, out);
+}
+
+/* Usage threshold (percent) for soft-mode up_limit periodic adjust. */
+int get_usage_threshold(int *out) {
+  return get_nonneg_int_env(CUDA_SM_USAGE_THRESHOLD_ENV, 5, out);
+}
+
+/* Effective-limit ratio expressed as parts-per-thousand (875 = 87.5%) so the
+ * env can be a plain integer. Clamped to (0, 1000]. */
+int get_aimd_eff_ratio(int *out) {
+  int v = 875;
+  int rc = get_positive_int_env(CUDA_SM_AIMD_EFF_RATIO_ENV, 875, &v);
+  if (v > 1000) {
+    LOGGER(WARNING, "%s=%d > 1000, clamped to 1000",
+           CUDA_SM_AIMD_EFF_RATIO_ENV, v);
+    v = 1000;
+  }
+  *out = v;
+  return rc;
+}
+
+int get_aimd_ai_base_div(int *out) {
+  return get_positive_int_env(CUDA_SM_AIMD_AI_BASE_DIV_ENV, 400, out);
+}
+
+/* Number of consecutive observed-different watcher cycles required before
+ * the "auto" mode flips between delta and aimd. Default 10 ~ 800ms, which
+ * absorbs multi-cycle NVML jitter in sys_process_num (the extra margin over
+ * the old 5 further suppresses exclusivity flapping) without adding meaningful
+ * Pod start/exit latency (Pod start dominates anyway). */
+int get_sm_auto_debounce_cycles(int *out) {
+  return get_positive_int_env(CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV, 10, out);
+}
+
+/* External-utilization threshold (percent) for the "is_exclusive" predicate
+ * shared by AUTO routing and the watcher's soft_core burst path. Default 1:
+ * filters out always-on driver / persistenced threads (which sit at ~0%
+ * SM) while still recognising the smallest real Pod activity. Caller can
+ * raise it (env) if their host has other low-utilization tools touching
+ * the GPU that should be ignored. Clamped >= 1 by get_positive_int_env. */
+int get_sm_auto_external_util_threshold(int *out) {
+  return get_positive_int_env(CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD_ENV, 1, out);
+}
+
+/* delta() ramp-floor divisor. Accepts any int: a value <= 0 is the explicit
+ * "disable the ramp floor" sentinel (delta reverts to its raw sm^2-scaled step,
+ * i.e. the pre-floor behaviour); > 0 is the active divisor. Unset -> default 64.
+ * delta() guards the division on divisor > 0, so a non-positive value is safe. */
+int get_delta_ramp_floor_divisor(int *out) {
+  return get_int_env(CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV, 64, out);
+}
+
+/* AIMD deadband lower edge / 1000. Caller MUST additionally check
+ * deadband_ratio < eff_ratio to keep AI/deadband/MD regions well-ordered. */
+int get_aimd_deadband_ratio(int *out) {
+  return get_positive_int_env(CUDA_SM_AIMD_DEADBAND_RATIO_ENV, 800, out);
+}
+
+/* AIMD post-MD cooldown in watcher cycles. 0 = disabled (V2.1 behaviour). */
+int get_aimd_md_cooldown_cycles(int *out) {
+  return get_nonneg_int_env(CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV, 3, out);
+}
+
+/* Container-wide shared token bucket on/off. Same true/TRUE/1 spelling as the
+ * other boolean envs. Unset leaves *out untouched at the caller's default (0),
+ * so the shared bucket is opt-in. */
+int get_sm_shared_bucket(int *out) {
+  char *str = _getenv(CUDA_SM_SHARED_BUCKET_ENV);
+  if (!str) {
+    return -1;
+  }
+  value_enabled(str, out);
   return 0;
 }
 
@@ -218,10 +531,10 @@ static int compare_pids(const void *a, const void *b) {
   return (pid1 > pid2) - (pid1 < pid2);
 }
 
-int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size) {
+int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids) {
   if (!file_path || !pids || !pids_size) {
     LOGGER(ERROR, "invalid NULL parameter");
-    *pids_size = 0;
+    if (pids_size) *pids_size = 0;
     return -1;
   }
 
@@ -230,7 +543,8 @@ int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size) {
     return -1;
   }
 
-  FILE *fp = fopen(file_path, "r");
+  /* "e" = O_CLOEXEC, prevent fork inheritance */
+  FILE *fp = fopen(file_path, "re");
   if (!fp) {
     LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
     *pids_size = 0;
@@ -255,14 +569,16 @@ int get_container_pids_by_filepath(char *file_path, int *pids, int *pids_size) {
     pids[actual_count++] = (int)pid;
   }
 
-  if (actual_count > 0) {
-    qsort(pids, actual_count, sizeof(int), compare_pids);
+  if (sort_pids && actual_count > 0) {
+    qsort(pids, (size_t)actual_count, sizeof(int), compare_pids);
   }
 
   *pids_size = actual_count;
+
   if (!feof(fp) && actual_count >= max_size) {
-    LOGGER(WARNING, "PID array full, only stored %d PIDs", max_size);
+    LOGGER(WARNING, "PID array full, only stored %d PIDs from %s", max_size, file_path);
   }
+
   fclose(fp);
   return 0;
 }
@@ -282,7 +598,7 @@ int library_exists_in_process_maps(char const *libName, unsigned int pid) {
   char fileName[512];
   snprintf(fileName, sizeof(fileName), "/proc/%d/maps", pid);
 
-  FILE *fMaps = fopen(fileName, "r");
+  FILE *fMaps = fopen(fileName, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (NULL == fMaps) {
     return ret;
   }
@@ -360,7 +676,7 @@ int is_zombie_proc(int pid) {
   char path[64];
   snprintf(path, sizeof(path), "/proc/%d/stat", pid);
 
-  FILE *fp = fopen(path, "r");
+  FILE *fp = fopen(path, "re");  /* "e" = O_CLOEXEC, prevent fork inheritance */
   if (fp == NULL) return -1;
 
   int unused_pid;

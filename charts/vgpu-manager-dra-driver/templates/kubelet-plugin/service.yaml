@@ -1,0 +1,20 @@
+{{- if and .Values.kubeletPlugin.enabled .Values.kubeletPlugin.metrics.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}-metrics
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: {{ include "vgpu-manager-dra-driver.metricsPort" . | int }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    {{- include "vgpu-manager-dra-driver.selectorLabels" . | nindent 4 }}
+{{- end }}

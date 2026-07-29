@@ -42,8 +42,9 @@ type Code string
 const (
 	NodeNotVGPUEnabled     Code = "NodeNotVGPUEnabled"
 	NodeNoVGPURegister     Code = "NodeNoVGPURegister"
-	NodeNoGPUConfig        Code = "NodeNoGPUConfig"
-	NodeBadGPUConfig       Code = "NodeBadGPUConfig"
+	NodeNoVGPUConfig       Code = "NodeNoVGPUConfig"
+	NodeBadVGPURegister    Code = "NodeBadVGPURegister"
+	NodeBadVGPUConfig      Code = "NodeBadVGPUConfig"
 	NodeBadMemoryFactor    Code = "NodeBadMemoryFactor"
 	NodeMemoryTypeMismatch Code = "NodeMemoryTypeMismatch"
 	NodeCacheMiss          Code = "NodeCacheMiss"
@@ -85,8 +86,9 @@ const (
 var phrase = map[Code]string{
 	NodeNotVGPUEnabled:     "node not vGPU-enabled",
 	NodeNoVGPURegister:     "node has no vGPU registered",
-	NodeNoGPUConfig:        "node has no GPU configuration",
-	NodeBadGPUConfig:       "node GPU configuration invalid",
+	NodeNoVGPUConfig:       "node has no vGPU configuration",
+	NodeBadVGPUConfig:      "node vGPU configuration invalid",
+	NodeBadVGPURegister:    "node vGPU registry invalid",
 	NodeBadMemoryFactor:    "node memory factor invalid",
 	NodeMemoryTypeMismatch: "node memory type mismatch",
 	NodeCacheMiss:          "node missing from cache",

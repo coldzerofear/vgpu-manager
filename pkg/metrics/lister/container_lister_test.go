@@ -149,7 +149,7 @@ func Test_ContainerLister(t *testing.T) {
 	contResDataMap := map[string]*vgpu.ResourceDataT{}
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
-		path := filepath.Join(basePath, string(key))
+		path := filepath.Join(basePath, string(key), util.Config)
 		_ = os.MkdirAll(path, 0777)
 		path = filepath.Join(path, dpvgpu.VGPUConfigFileName)
 		deviceClaims := contDevClaimsMap[container.Name]
@@ -162,8 +162,8 @@ func Test_ContainerLister(t *testing.T) {
 		contResDataMap[container.Name] = resData
 	}
 
-	contLister.Start(200*time.Millisecond, ctx.Done())
-	time.Sleep(2 * time.Second)
+	contLister.Start(100*time.Millisecond, ctx.Done())
+	time.Sleep(time.Second)
 
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)

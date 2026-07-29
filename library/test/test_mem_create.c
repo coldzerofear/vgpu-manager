@@ -48,6 +48,7 @@ static void *thread_func(void *arg) {
 }
 
 int main(void) {
+  VGPU_REQUIRE_PRELOAD();
   CHECK_DRV_API(cuInit(0));
   CHECK_DRV_API(cuDeviceGet(&g_device, TEST_DEVICE_ID));
   CUcontext ctx;

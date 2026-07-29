@@ -26,12 +26,50 @@ extern "C" {
 #include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <pthread.h>
+
+/* Toolchain assumption gate.
+ *
+ * libvgpu-control.so is a glibc-only, GCC-compatible-only build target.
+ * Hard-failing here gives a clear error instead of letting the build
+ * limp on until linker errors point at obscure undefined references
+ * like `_dl_sym`. Concrete dependencies that have no portable fallback:
+ *
+ *   loader.c       — extern void* _dl_sym(...) is a glibc PRIVATE
+ *                    symbol used as the last-resort fallback in
+ *                    init_real_dlsym(). musl / Bionic do not export it.
+ *   loader.c       — dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.X") is glibc
+ *                    versioned-symbol lookup. POSIX has dlsym, not
+ *                    dlvsym; the GLIBC_* version strings are also
+ *                    glibc-internal.
+ *   hook.h         — FUNC_ATTR_VISIBLE, UNUSED, likely / unlikely use
+ *                    GCC __attribute__ / __builtin_expect extensions.
+ *   cuda_hook.c    — CAS uses __sync_bool_compare_and_swap (GCC builtin).
+ *   src/vulkan/    — __atomic_compare_exchange_n / __atomic_load_n
+ *                    (GCC C11 atomics).
+ *
+ * Note that __GNUC__ is also defined by Clang for GCC-compat — the
+ * gate accepts Clang on glibc, which works in practice (Clang
+ * implements all the GCC extensions we use). What we reject is musl
+ * (Alpine), Bionic (Android), MSVC, and other non-GNU/non-glibc
+ * toolchains where the LD_PRELOAD dlsym-interception mechanism cannot
+ * be assembled.
+ */
+#if !defined(__GNUC__) || !defined(__GLIBC__)
+#  error "libvgpu-control.so requires a GCC-compatible compiler "        \
+         "(GCC or Clang) AND glibc. The library uses _dl_sym, dlvsym "   \
+         "with GLIBC_* versions, __attribute__((visibility/alias/used)), "\
+         "__builtin_expect / __builtin_return_address, and "             \
+         "__sync_bool_compare_and_swap / __atomic_* builtins, none of "  \
+         "which have portable fallbacks. musl libc (Alpine), Bionic "    \
+         "(Android), and MSVC are out of scope."
+#endif
 
 #include "list.h"
 #include "nvml-subset.h"
@@ -115,6 +153,15 @@ extern "C" {
 
 #define MAX_DEVICE_COUNT 16
 
+/* Padding granule for per-device hot state. 128 rather than 64 because Intel's
+ * L2 adjacent-line prefetcher pulls lines in 128B-aligned pairs (so 64B padding
+ * can still leave two devices effectively sharing) and some ARM64 parts use a
+ * 128B granule. Lives here, not in cuda_hook.c, because both the per-process
+ * dev_hot_t and the shared sm_node_dev_t below are built on it -- and the
+ * latter is a cross-version ABI, so the granule must be pinned in one place.
+ * See the false-sharing rationale above dev_hot_t in cuda_hook.c. */
+#define CACHELINE_SIZE 128
+
 /**
  * Max sample pid size
  */
@@ -189,12 +236,63 @@ typedef struct {
 } resource_data_t;
 
 /**
- * Dynamic computing power limit configuration
+ * Dynamic SM controller configuration. All tunables that affect runtime
+ * algorithm behaviour live here so the boot log can dump them with a
+ * single line and operators have one place to look.
+ *
+ * Field ordering NOTE: this struct is part of the .so internal layout
+ * (g_dynamic_config is non-static but hidden via the linker version
+ * script). Reorganising field order across a build that other parts of
+ * the codebase already link against would shift offsets; keep
+ * usage_threshold at its original position and APPEND new fields to the
+ * tail. New fields must be POD with explicit sized types so the dump
+ * line in sm_controller_init() stays trivial to write.
+ *
+ * Loaded once at sm_controller_init() (under pthread_once g_init_set).
+ * After init this struct is read-only at runtime by the watcher thread,
+ * so no volatile / atomics needed; init runs before any watcher thread
+ * is spawned, and fork() re-runs init in the child via the pthread_once
+ * reset in child_after_fork() if the child needs it.
+ *
+ * usage_threshold:    avg-free-headroom threshold for soft-mode up_limit
+ *                     periodic adjust. >= 0; env CUDA_SM_USAGE_THRESHOLD.
+ * sm_controller_kind: 0=delta (stock), 1=aimd, 2=auto.
+ * aimd_md_divisor:    AIMD MD factor as a double so users can pick 1.5
+ *                     for a softer cut than 2 or 3. Clamped >= 1.01 at
+ *                     load time so we never accidentally /1 (no-op) or
+ *                     /<=0 (UB).
+ * aimd_eff_ratio:     parts-per-thousand, eff_limit = up * x / 1000.
+ * aimd_ai_base_div:   AI step base divisor.
+ * aimd_deadband_ratio: parts-per-thousand, deadband lower edge.
+ * aimd_md_cooldown_cycles: post-MD watcher-cycle cooldown (0 disables).
+ * auto_debounce_cycles: N consecutive observations to flip exclusivity FSM.
+ * auto_external_util_threshold: external util percent above which the
+ *                     device is considered "shared with other Pods".
+ * delta_ramp_floor_divisor: delta()'s grow/cut step is floored at
+ *                     g_total*diff/(up_limit*N); N sets the bulk-ramp length in
+ *                     watcher cycles (~N cycles, SM-independent). Smaller = faster
+ *                     ramp / coarser near-limit tracking on tiny slices. Default
+ *                     64. N <= 0 disables the floor (delta reverts to its raw
+ *                     sm^2-scaled step); delta() guards the division on N > 0, so
+ *                     a non-positive value is not loaded-clamped.
  */
 typedef struct {
-  int change_limit_interval;
-  int usage_threshold;
-  int error_recovery_step;
+  /* Preserved: was already in this struct in earlier versions. */
+  int    usage_threshold;
+  /* Appended for V2.1/P1/P2: consolidates 8 prior file-static globals. */
+  int    sm_controller_kind;
+  double aimd_md_divisor;
+  int    aimd_eff_ratio;
+  int    aimd_ai_base_div;
+  int    aimd_deadband_ratio;
+  int    aimd_md_cooldown_cycles;
+  int    auto_debounce_cycles;
+  int    auto_external_util_threshold;
+  int    delta_ramp_floor_divisor;
+  /* APPENDED (see the field-ordering note above): container-wide shared token
+   * bucket. 0 = per-process bucket, the historical behaviour and the default.
+   * env CUDA_SM_SHARED_BUCKET. */
+  int    sm_shared_bucket;
 } dynamic_config_t;
 
 typedef struct {
@@ -219,9 +317,42 @@ typedef struct {
   device_process_t devices[MAX_DEVICE_COUNT];
 } device_util_t;
 
+/* memory_node_t.type -- what a virtual-memory record stands for, and therefore
+ * how cuMemFreeAsync must retire it (see cuda_hook.c).
+ *
+ * UVA_SYNC / UVA_ASYNC name memory the oversold path handed out as managed
+ * memory; only UVA_ASYNC has to drain the stream and fall back to cuMemFree.
+ *
+ * CAPTURE and ASYNC_BRIDGE both name ordinary device memory that is only being
+ * ACCOUNTED for, and both exist for exactly one reason: to cover a window in
+ * which the allocation is invisible to NVML. They differ in which window.
+ *   ASYNC_BRIDGE spans the driver call to the stream synchronize.
+ *   CAPTURE spans the capture itself. During capture cuMemAllocAsync only
+ *     reserves an address -- no physical memory exists until the graph is
+ *     launched, from which point NVML reports the graph pool. The charge is
+ *     what makes several allocations inside one capture accumulate against the
+ *     limit, and cuStreamEndCapture retires it (see free_gpu_virt_memory_by_graph)
+ *     because holding it past the launch would double-count against NVML and
+ *     leak whenever the graph, rather than the application, owns the pointer. */
+#define MEMORY_TYPE_UVA_SYNC     1
+#define MEMORY_TYPE_UVA_ASYNC    2
+#define MEMORY_TYPE_CAPTURE      3
+#define MEMORY_TYPE_ASYNC_BRIDGE 4
+
 typedef struct {
   CUdeviceptr dptr;
   size_t bytes;
+  /* One of MEMORY_TYPE_* above. */
+  int type;
+  /* Owning graph, for MEMORY_TYPE_CAPTURE only; NULL otherwise. Records are
+   * only ever charged when this is known, so every charge can be retired at
+   * cuStreamEndCapture. */
+  CUgraph graph;
+  /* Device the record was charged against, or -1 if it was never charged.
+   * Retiring a capture charge must not depend on being able to ask the driver
+   * which device is current -- by then the context may be gone, and failing to
+   * discharge after the node is dropped would strand the charge forever. */
+  int host_index;
   struct list_head node;
 } memory_node_t;
 
@@ -236,9 +367,213 @@ typedef struct {
   unsigned char lock_byte;
 } device_vmem_used_t;
 
+/* vmem_node region. Structurally the same frozen-header idea as sm_node below,
+ * for the same reason -- the host directory outlives a container while the .so
+ * is version-pinned per container, so a newer library can be handed a file an
+ * older one wrote -- but with one hard difference: this region HAS a host-side
+ * Go reader (pkg/config/vmem), so the layout is a CROSS-LANGUAGE ABI.
+ *
+ * Anything changed here must be mirrored in DeviceVMemoryT, and in particular
+ * getVmemoryLockOffset() must keep agreeing with GET_VMEMORY_LOCK_OFFSET in
+ * lock.c. C gets that for free because offsetof() accounts for the header; Go
+ * computes the offset by hand, so it is the one place in this design where
+ * being wrong produces no error at all -- just fcntl locks taken on
+ * non-overlapping byte ranges, mutual exclusion silently gone, and torn reads
+ * reported as valid metrics. TestVMemoryLayoutMatchesC exists to catch it. */
+#define VMEM_NODE_MAGIC          0x564D4E44U   /* "VMND" */
+#define VMEM_NODE_LAYOUT_VERSION 1U
+/* Permanent constant, like SM_NODE_FILE_SIZE, and here it prevents a real
+ * crash rather than merely simplifying: the Go manager keeps this file mmap'd.
+ * If a container restarted with a library that shrank the struct and
+ * ftruncate'd the file down, the manager's existing mapping would extend past
+ * EOF and touching it is SIGBUS. A size that never changes removes that class
+ * outright. Current use 256.25 KiB; reserved 320 KiB (~1.25x). */
+#define VMEM_NODE_FILE_SIZE      (320 * 1024)
+
 typedef struct {
-  device_vmem_used_t devices[MAX_DEVICE_COUNT];
+  /* ---- FROZEN HEADER: 16 bytes, permanent ABI. Same contract as sm_node. */
+  uint32_t magic;             /* VMEM_NODE_MAGIC          */
+  uint32_t layout_version;    /* VMEM_NODE_LAYOUT_VERSION */
+  uint32_t region_size;       /* sizeof(device_vmemory_t) */
+  uint32_t device_count;      /* MAX_DEVICE_COUNT         */
+  /* ---- end frozen header. */
+  uint8_t  _pad[CACHELINE_SIZE - 16];
+  device_vmem_used_t devices[MAX_DEVICE_COUNT];   /* shifted down by 128B */
 } device_vmemory_t;
+
+_Static_assert(offsetof(device_vmemory_t, devices) == CACHELINE_SIZE,
+               "vmem region header must be exactly one cache line");
+_Static_assert(sizeof(device_vmemory_t) <= VMEM_NODE_FILE_SIZE,
+               "vmem region must fit the permanently reserved file size");
+_Static_assert(offsetof(device_vmemory_t, magic) == 0,
+               "frozen header ABI: magic stays at offset 0");
+_Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
+               "frozen header ABI: layout_version stays at offset 4");
+
+/* ---------------------------------------------------------------------- *
+ *  sm_node -- container-wide shared token bucket for SM (compute) limiting
+ *
+ *  Symmetric with vmem_node: that region carries the cross-process state of
+ *  MEMORY isolation, this one the cross-process state of COMPUTE isolation.
+ *  See docs/sm_multiproc_shared_bucket_design.md.
+ *
+ *  Why it exists: g_dev_hot[].cur_cuda_cores is a per-PROCESS static, so N
+ *  processes in one container each hold their own bucket and can each decide
+ *  "tokens available, go" at the same instant. Moving the bucket into
+ *  MAP_SHARED memory makes "how much may this container still launch" a
+ *  physical invariant rather than a statistical average -- and costs nothing
+ *  on the hot path, because a CAS is a CPU instruction that does not care
+ *  which address space the word lives in.
+ *
+ *  THIS STRUCT IS AN ABI. It is written to a file, mapped by several
+ *  processes, and outlives any single library version. Hence fixed-width
+ *  types, explicit padding, and _Static_asserts pinning the layout.
+ *  Unlike vmem_node it has NO host-side Go reader, so the ABI is
+ *  library-internal -- but it still crosses library VERSIONS.
+ * ---------------------------------------------------------------------- */
+
+/* Container-side path. NOT the container's own /tmp: this directory is bind
+ * mounted per container by the device plugin / DRA driver, exactly like
+ * /tmp/.vgpu_lock and /tmp/.vmem_node, because the workload's own /tmp may be
+ * shadowed, read-only, or swept. */
+#define SM_NODE_DIR       "/.sm_node"
+#define SM_NODE_PATH      (TMP_DIR SM_NODE_DIR)
+#define SM_NODE_FILE_PATH (TMP_DIR SM_NODE_DIR "/sm_node.config")
+
+/* Sampling-ownership lock. A SEPARATE file from the region, on purpose.
+ *
+ * The init lock in map_sm_node_region can live on sm_node.config because it is
+ * taken and dropped inside one function. This one is held for the process's
+ * whole life, and that inverts the trade-off: on kernels without OFD locks we
+ * fall back to classic POSIX record locks, which are dropped when the process
+ * closes ANY descriptor for that file -- and map_sm_node_region does exactly
+ * that during init. Sharing one file would mean leadership could evaporate
+ * silently, leaving two processes each convinced it owns sampling.
+ *
+ * It must also NEVER be deleted while containers run: unlink + recreate yields
+ * a new inode, locks are per-inode, and two processes holding locks on
+ * different inodes are not mutually exclusive at all. The pre-start cleanup
+ * removes sm_node.config (we want a fresh region) but deliberately not this. */
+#define SM_NODE_LOCK_PATH (TMP_DIR SM_NODE_DIR "/sm_node.lock")
+
+/* The file size is a PERMANENT constant, deliberately decoupled from
+ * sizeof(sm_node_region_t): a later version may grow the struct without
+ * changing the file size, so the region is never resized, so an older process
+ * still holding a mapping can never have its tail fall past EOF (which would
+ * be SIGBUS on access). Current use is 128 + 16*128 = 2176B. */
+#define SM_NODE_FILE_SIZE 8192
+
+#define SM_NODE_MAGIC          0x534D4E44U   /* "SMND" */
+/* BUMP THIS whenever any field below changes type, order, or offset.
+ * The guard compares it and rebuilds the region on mismatch; forgetting to
+ * bump it means a new library silently reads an old layout's bytes. */
+#define SM_NODE_LAYOUT_VERSION 3U   /* v3: + sample_interval_ns (adaptive staleness) */
+
+/* No volatile, no _Atomic. volatile provides no concurrency guarantee (today's
+ * correctness comes entirely from the CAS macro), and _Atomic risks a
+ * lock-free downgrade: a non-lock-free _Atomic makes the compiler use
+ * libatomic's address-keyed lock table, which is PER PROCESS -- two processes
+ * mapping the same word would take different locks and the protection would
+ * silently evaporate. Plain fixed-width types plus __atomic_* builtins with an
+ * explicit memory order at each site. */
+typedef struct {
+  /* Hot: CAS'd by every launching thread in every process. */
+  int64_t cur_cuda_cores;       /* the token bucket itself                  */
+  int64_t total_cuda_cores;     /* thread*sm*FACTOR; bucket ceiling         */
+  int64_t last_refill_ns;       /* refill election stamp, CAS'd per cycle   */
+  int64_t share;                /* was shares[]                             */
+  /* Monotonic stamp of the last published utilization sample, written LAST
+   * (release) by the sampling owner so a reader that acquire-loads it knows
+   * the four s_* fields below are complete. Also the staleness signal: if this
+   * falls too far behind, the owner is alive but not sampling (hung in NVML,
+   * say) and a standby resamples for itself rather than trusting it. */
+  int64_t sample_published_ns;
+  /* Controller integrator state. Only the cycle's election winner reads or
+   * writes these, so the election itself serialises them -- no lock needed,
+   * only acquire/release pairing so each winner sees the previous winner's
+   * writes. Every one of these MUST live here: the election hands the device
+   * to a different PROCESS each cycle, so a per-process copy would advance at
+   * ~1/N rate and fracture into N divergent controllers. */
+  int32_t up_limit;             /* was up_limits[]                          */
+  int32_t is_cnt;               /* was is[]                                 */
+  int32_t avg_sys_free;         /* was avg_sys_frees[]                      */
+  int32_t pre_external_proc;    /* was pre_external_process_nums[]          */
+  int32_t md_cooldown;          /* was g_aimd_md_cooldown[] -- without this
+                                 * AIMD re-fires MD every cycle and cuts
+                                 * share by md_divisor^N ("MD avalanche"),
+                                 * which is the exact thing the cooldown was
+                                 * introduced to prevent.                   */
+  int32_t excl_debounced;       /* was g_is_exclusive_debounced[]      ┐    */
+  int32_t excl_streak;          /* was g_exclusive_pending_streak[]    │FSM */
+  int32_t lost_excl_pending;    /* was g_lost_exclusivity_pending[]    ┘    */
+  /* Written by rate_limiter() on throttle (any thread, any process),
+   * read-and-cleared once per cycle by the election winner. Sharing it
+   * changes the question from "did THIS PROCESS throttle" to "did ANYONE in
+   * the container throttle", which is the correct question once the bucket
+   * is shared. */
+  int32_t throttled_since_watch;
+  /* Utilization sample published by whichever process owns sampling for this
+   * device. Standbys read these instead of calling NVML themselves.
+   *
+   * This is the whole point of centralising sampling: nvmlDeviceGetProcessUtilization
+   * is expensive and degrades when called often -- the local-driver path already
+   * carries a comment saying frequent calls legitimately return NOT_FOUND. N
+   * processes each polling it every ~100ms multiplies exactly the call rate the
+   * driver dislikes, and N is largest in the notebook containers this design
+   * targets. Publishing one sample makes the cost O(1) per device, not O(N). */
+  int32_t s_user_current;       /* container-aggregate utilization           */
+  int32_t s_sys_current;        /* device-wide utilization                   */
+  int32_t s_sys_process_num;
+  int32_t s_external_proc_num;
+  /* Owning process of the sampling lock. Diagnostics only -- never a liveness
+   * signal. Ownership is decided by the kernel-held file lock, which stays
+   * correct when a pid is recycled or a record goes stale. */
+  int32_t leader_pid;
+  /* The owner's OWN measured interval between publishes, so a standby can tell
+   * "slow" from "stuck" without assuming how fast sampling ought to be.
+   *
+   * The watcher's cadence is not guaranteed: when per-device processing
+   * overruns its slot the loop falls back to a 10ms floor sleep, so the period
+   * becomes (processing + 10ms) per iteration and a device is revisited every
+   * dev_count iterations. Slow NVML on a 4-device batch can push a device's
+   * period into the hundreds of milliseconds. A fixed staleness limit tuned
+   * for ~100ms would then fire permanently, every standby would resume
+   * sampling, and the extra NVML load would make the owner slower still --
+   * a feedback loop that ends with centralisation providing nothing. */
+  int64_t sample_interval_ns;
+  uint8_t _pad[CACHELINE_SIZE - 104];
+} __attribute__((aligned(CACHELINE_SIZE))) sm_node_dev_t;
+
+typedef struct {
+  /* ---- FROZEN HEADER: these 16 bytes are a PERMANENT ABI. ----
+   * The layout guard has to read them before it knows which version wrote
+   * the file, so they must predate every possible version difference.
+   * Never change their type, order, or offset. */
+  uint32_t magic;
+  uint32_t layout_version;
+  uint32_t region_size;
+  uint32_t device_count;
+  /* ---- end frozen header; everything below may evolve with the version. */
+  uint8_t  _pad[CACHELINE_SIZE - 16];
+  sm_node_dev_t devices[MAX_DEVICE_COUNT];
+} sm_node_region_t;
+
+_Static_assert(sizeof(sm_node_dev_t) == CACHELINE_SIZE,
+               "sm_node_dev_t must occupy exactly one padded cache line");
+_Static_assert(_Alignof(sm_node_dev_t) == CACHELINE_SIZE,
+               "sm_node_dev_t must be cache-line aligned or false sharing returns");
+_Static_assert(offsetof(sm_node_region_t, devices) == CACHELINE_SIZE,
+               "region header must be exactly one cache line");
+_Static_assert(sizeof(sm_node_region_t) <= SM_NODE_FILE_SIZE,
+               "region must fit the permanently reserved file size");
+_Static_assert(offsetof(sm_node_region_t, magic) == 0,
+               "frozen header ABI: magic stays at offset 0");
+_Static_assert(offsetof(sm_node_region_t, layout_version) == 4,
+               "frozen header ABI: layout_version stays at offset 4");
+_Static_assert(offsetof(sm_node_region_t, region_size) == 8,
+               "frozen header ABI: region_size stays at offset 8");
+_Static_assert(offsetof(sm_node_region_t, device_count) == 12,
+               "frozen header ABI: device_count stays at offset 12");
 
 /** dynamic rate control */
 typedef struct {
@@ -247,6 +582,16 @@ typedef struct {
   uint64_t checktime;
   int valid;
   int sys_process_num;
+  /* Count of PIDs on this device that are NOT in our container. Updated
+   * by get_used_gpu_utilization in lockstep with user/sys per the active
+   * compatibility mode. Used by the watcher to decide whether to reset
+   * up_limits on new-process arrival without being fooled by our own
+   * intra-container fork (DataLoader workers, etc). Strict counting:
+   * NVIDIA driver always-resident threads (nvidia-persistenced, MPS)
+   * DO count as external -- but they appear once and stay forever, so
+   * they don't cause repeated resets. HOST_COMPATIBILITY_MODE has no
+   * container boundary -> this field stays 0. */
+  int external_process_num;
 } utilization_t;
 
 typedef struct {
@@ -327,6 +672,34 @@ static inline int get_logger_print_level(void) {
   })
 
 /**
+ * Given the pointer cuGetProcAddress produced for `symbol`, return our hook for
+ * that exact entry point, or NULL.
+ *
+ * The pointer says which function the driver chose -- version and stream
+ * variant included -- and `symbol` bounds which family that may belong to: a
+ * version or _ptsz/_ptds suffix stated in the request pins that component, one
+ * left out is the driver's to choose. So "cuLaunchKernel" can resolve to
+ * cuLaunchKernel_v2_ptsz, while "cuMemAlloc_v2" resolves to nothing but v2.
+ *
+ * Three outcomes, distinguished by BOTH results together:
+ *   return non-NULL             - identified, and this is its hook.
+ *   return NULL, *name non-NULL - identified, we hook no version of it.
+ *                                 Keep the driver's pointer; substituting a
+ *                                 base-named hook here would bind an ABI it
+ *                                 does not have.
+ *   return NULL, *name NULL     - not a driver entry point this build knows.
+ *                                 Fall back to name-based substitution.
+ */
+void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name);
+
+/**
+ * Record, once per symbol and at VERBOSE level, a driver symbol that went
+ * through us uninstrumented. Leaves a trail for versions a newer driver added
+ * that this build does not intercept.
+ */
+void note_unhooked_symbol(const char *symbol);
+
+/**
  * Load library and initialize some data
  */
 void load_necessary_data();
@@ -346,9 +719,63 @@ void get_used_gpu_memory_by_device(void *, nvmlDevice_t);
  */
 void get_used_gpu_virt_memory(void *, int device_id);
 
-void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int device_id);
+void check_cleanup_vmem_nodes_by_device(int host_index);
 
-void free_gpu_virt_memory(CUdeviceptr dptr, int device_id);
+/**
+ * Acquire/release an fcntl record lock, preferring OFD locks (Linux >= 3.15)
+ * and falling back to classic POSIX locks when the kernel rejects them.
+ * wait != 0 blocks (F_OFD_SETLKW), wait == 0 does not. Defined in lock.c.
+ */
+struct flock;
+int ofd_fcntl(int fd, int wait, struct flock *fl);
+
+/**
+ * Map the container-wide sm_node shared region, creating or rebuilding it as
+ * needed. Returns 0 and sets *data on success. On ANY failure returns non-zero
+ * and leaves *data NULL: the caller must then fall back to per-process buckets.
+ * This never exits -- shared SM limiting is an optimisation, not a correctness
+ * prerequisite.
+ */
+int map_sm_node_region(sm_node_region_t **data);
+
+/**
+ * Warn if the vmem_node region file is no longer the inode we mapped -- deleted
+ * or replaced from inside the container. Detection only; see the comment on the
+ * definition for why re-attaching to a replacement would be worse than leaving
+ * the ledger split. Caller supplies the rate limiting.
+ */
+void vmem_node_check_identity(void);
+
+/**
+ * Open (creating if needed) the sm_node sampling-lock file and return its fd,
+ * or -1. The caller keeps the fd for the process lifetime and never closes it
+ * -- see SM_NODE_LOCK_PATH for why closing matters on the classic-POSIX-lock
+ * fallback path. O_CLOEXEC so an exec'd child does not inherit ownership;
+ * fork() still shares the descriptor, which child_after_fork undoes.
+ */
+int open_sm_node_lock(void);
+
+void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device_id);
+
+/**
+ * Record a graph-capture allocation. Same as malloc_gpu_virt_memory() with
+ * MEMORY_TYPE_CAPTURE, but ties the record to the capturing graph so
+ * free_gpu_virt_memory_by_graph() can retire it at cuStreamEndCapture.
+ */
+void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
+                                     CUgraph graph, int device_id);
+
+void free_gpu_virt_memory(CUdeviceptr dptr);
+
+/**
+ * Retire every capture record belonging to graph, discharging the shared
+ * counter for each. Called when the capture ends -- successfully or not.
+ * Each record carries the device it was charged against, so this needs no
+ * device argument and cannot be defeated by a missing current context.
+ */
+void free_gpu_virt_memory_by_graph(CUgraph graph);
+
+int get_gpu_virt_memory_type(CUdeviceptr dptr);
 
 int get_nvml_device_index_by_cuda_device(CUdevice device);
 

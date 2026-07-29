@@ -20,6 +20,11 @@ const (
 	WatcherDir   = util.ManagerRootPath + "/" + util.Watcher
 	SMUtilFile   = util.SMUtilFile
 	MaxBatchSize = 4
+	// minWatcherSleep floors the per-device sleep so an overrunning batch loop
+	// cannot busy-loop. Kept below the interval (80ms / batch.Count, and
+	// batch.Count <= MaxBatchSize=4 => interval >= 20ms) so the normal cadence
+	// is unaffected.
+	minWatcherSleep = 10 * time.Millisecond
 )
 
 func WrapChannelWithContext[T any](ch <-chan T) (context.Context, context.CancelFunc) {
@@ -56,13 +61,18 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 			klog.ErrorS(err, "PrepareDeviceUtilFile failed")
 			return
 		}
-		deviceUtil, err := watcher.NewDeviceUtil(filePath)
+		deviceUtil, err := watcher.NewMmapDeviceUtil(filePath)
 		if err != nil {
 			klog.ErrorS(err, "WatchDeviceUtilFile failed")
 			return
 		}
 		defer func() {
-			_ = deviceUtil.Munmap(true)
+			if err := deviceUtil.Sync(); err != nil {
+				klog.V(3).ErrorS(err, "failed to sync mmap", "filepath", filePath)
+			}
+			if err := deviceUtil.Close(); err != nil {
+				klog.V(3).ErrorS(err, "failed to close mmap", "filepath", filePath)
+			}
 		}()
 
 		if err = deviceLib.NvmlInit(); err != nil {
@@ -93,12 +103,15 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 
 		wg := sync.WaitGroup{}
 		batches := watcher.BalanceBatches(len(deviceHandlers), MaxBatchSize)
+		utilAdapter := watcher.NewDeviceUtilAdapter(
+			watcher.WithExtendedInterface(deviceLib.Extensions()),
+		)
 
 		for _, batch := range batches {
 			wg.Add(1)
 			go func(config watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) {
 				defer wg.Done()
-				err := smWatcherBatchWithContext(subCtx, deviceUtil, config, devices, handles)
+				err := smWatcherBatchWithContext(subCtx, utilAdapter, deviceUtil, config, devices, handles)
 				if err != nil {
 					subCancelFunc()
 				}
@@ -108,8 +121,18 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 	}, time.Second)
 }
 
-func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.DeviceUtil, batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device) error {
+func smWatcherBatchWithContext(
+	ctx context.Context, utilAdapter watcher.DeviceUtilInterface, mmapUtil *watcher.MmapDeviceUtil,
+	batch watcher.BatchConfig, devices []*GPUDevice, handles []device.Device,
+) error {
 	interval := 80 * time.Millisecond / time.Duration(batch.Count)
+	// Absolute-time cadence, mirroring the in-container watcher: sleep until a
+	// fixed monotonic grid instead of time.Sleep(interval) after each device, so
+	// the sampling period does not drift by each device's processing time. The
+	// first pass runs immediately (no sleep) so a freshly-(re)started watcher
+	// publishes util without a startup delay; the grid is anchored after it.
+	var next time.Time
+	firstCycle := true
 	for {
 		for i := batch.StartIndex; i <= batch.EndIndex; i++ {
 			select {
@@ -118,19 +141,45 @@ func smWatcherBatchWithContext(ctx context.Context, deviceUtil *watcher.DeviceUt
 			default:
 			}
 
+			if !firstCycle {
+				next = next.Add(interval)
+				// Floor the sleep: if processing overran and the grid deadline is
+				// already at/behind now, still sleep a minimum so a persistently
+				// slow watcher does not busy-loop. next stays on the grid, so the
+				// drift-free cadence re-syncs once processing catches up.
+				d := time.Until(next)
+				if d < minWatcherSleep {
+					d = minWatcherSleep
+				}
+				t := time.NewTimer(d)
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return nil
+				case <-t.C:
+				}
+			}
+
 			gpuDevice := devices[i]
 			gpuHandle := handles[i]
 
-			if err := smWatcherSingleDevice(deviceUtil.GetWrap(), gpuDevice, gpuHandle); err != nil {
+			if err := smWatcherSingleDevice(utilAdapter, mmapUtil, gpuDevice, gpuHandle); err != nil {
 				klog.ErrorS(err, "sm watcher single device failed")
 				return err
 			}
-			time.Sleep(interval)
+		}
+		if firstCycle {
+			firstCycle = false
+			next = time.Now()
 		}
 	}
 }
 
-func smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, info *GPUDevice, d device.Device) error {
+func smWatcherSingleDevice(
+	utilAdapter watcher.DeviceUtilInterface,
+	mmapUtil *watcher.MmapDeviceUtil,
+	info *GPUDevice, d device.Device,
+) error {
 	if !info.Healthy || info.MigEnabled {
 		return nil
 	}
@@ -138,46 +187,65 @@ func smWatcherSingleDevice(deviceUtil *watcher.DeviceUtilWrap, info *GPUDevice, 
 		return nil
 	}
 	i := info.Index
-	computeProcesses, rt := d.GetComputeRunningProcessesBySize(watcher.MaxPids)
+
+	computeProcesses, rt := utilAdapter.DeviceGetComputeRunningProcessesByCount(d, watcher.MaxPids)
 	if rt != nvml.SUCCESS {
 		klog.ErrorS(errors.New(rt.Error()), "GetComputeRunningProcesses failed", "device", i)
 		return nil
 	}
-	graphicsProcesses, rt := d.GetGraphicsRunningProcessesBySize(watcher.MaxPids)
+
+	graphicsProcesses, rt := utilAdapter.DeviceGetGraphicsRunningProcessesByCount(d, watcher.MaxPids)
 	if rt != nvml.SUCCESS {
 		klog.ErrorS(errors.New(rt.Error()), "GetGraphicsRunningProcesses failed", "device", i)
 		return nil
 	}
 
-	lastTs := time.Now().Add(-1 * time.Second).UnixMicro()
-	procUtilSamples, rt := d.GetProcessUtilizationBySize(uint64(lastTs), watcher.MaxPids)
+	procUtilSamples, lastTs, rt := utilAdapter.DeviceGetEnhanceCompatibilityProcessUtilSamplesByCount(d, watcher.MaxPids)
+	if rt != nvml.SUCCESS && rt != nvml.ERROR_NOT_FOUND {
+		// NOT_FOUND just means the driver holds no samples newer than lastTs. At
+		// this poll rate that is the common answer even for a busy GPU, so it stays
+		// silent; anything else is worth a line.
+		klog.V(3).ErrorS(errors.New(rt.Error()), "DeviceGetProcessUtilSamples failed", "device", i)
+	}
 
-	if err := deviceUtil.WLock(i); err != nil {
-		klog.V(3).ErrorS(err, "DeviceUtilWLock failed", "device", i)
+	unlock, err := mmapUtil.WLock(i)
+	if err != nil {
+		klog.V(3).ErrorS(err, "DeviceUtil WLock failed", "device", i)
 		return err
 	}
-	defer func() {
-		_ = deviceUtil.Unlock(i)
-	}()
+	defer func() { _ = unlock() }()
+
+	devUtil, err := mmapUtil.GetDeviceUtil(i)
+	if err != nil {
+		klog.V(3).ErrorS(err, "get device util failed", "device", i)
+		return err
+	}
 
 	computeProcessesSize := min(len(computeProcesses), watcher.MaxPids)
-	deviceUtil.GetUtil().Devices[i].ComputeProcessesSize = uint32(computeProcessesSize)
+	devUtil.ComputeProcessesSize = uint32(computeProcessesSize)
 	for index, process := range computeProcesses[:computeProcessesSize] {
-		deviceUtil.GetUtil().Devices[i].ComputeProcesses[index] = process
+		devUtil.ComputeProcesses[index] = process
 	}
 
 	graphicsProcessesSize := min(len(graphicsProcesses), watcher.MaxPids)
-	deviceUtil.GetUtil().Devices[i].GraphicsProcessesSize = uint32(graphicsProcessesSize)
+	devUtil.GraphicsProcessesSize = uint32(graphicsProcessesSize)
 	for index, process := range graphicsProcesses[:graphicsProcessesSize] {
-		deviceUtil.GetUtil().Devices[i].GraphicsProcesses[index] = process
+		devUtil.GraphicsProcesses[index] = process
 	}
 
-	deviceUtil.GetUtil().Devices[i].LastSeenTimeStamp = uint64(lastTs)
+	// Refreshed on every tick, including the NOT_FOUND ones. Readers take this as
+	// the cutoff to filter the cached samples against, so advancing it is what
+	// ages stale samples out (~1s, the sample window); it also proves the watcher
+	// is alive, which is what their 5s expiry check is really looking for. The
+	// samples themselves are only replaced when the driver actually produced a
+	// fresh batch -- clearing them on NOT_FOUND would collapse utilization to zero
+	// on the majority of ticks.
+	devUtil.LastSeenTimeStamp = lastTs
 	if rt == nvml.SUCCESS {
 		processUtilSamplesSize := min(len(procUtilSamples), watcher.MaxPids)
-		deviceUtil.GetUtil().Devices[i].ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
+		devUtil.ProcessUtilSamplesSize = uint32(processUtilSamplesSize)
 		for index, sample := range procUtilSamples[:processUtilSamplesSize] {
-			deviceUtil.GetUtil().Devices[i].ProcessUtilSamples[index] = sample
+			devUtil.ProcessUtilSamples[index] = sample
 		}
 	}
 	return nil

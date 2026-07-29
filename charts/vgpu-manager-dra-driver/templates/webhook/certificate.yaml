@@ -1,0 +1,80 @@
+{{- if .Values.webhook.enabled -}}
+{{- if .Values.webhook.certManager.enabled -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}-cert
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+spec:
+  dnsNames:
+    - {{ include "vgpu-manager-dra-driver.webhook" . }}.{{ .Release.Namespace }}.svc
+    - {{ include "vgpu-manager-dra-driver.webhook" . }}.{{ .Release.Namespace }}.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: {{ include "vgpu-manager-dra-driver.webhook" . }}-issuer
+  secretName: {{ include "vgpu-manager-dra-driver.webhook" . }}-secret
+  duration: {{ printf "%dh" (mul .Values.webhook.certDuration 24) }}
+  renewBefore: {{ printf "%dh" (mul .Values.webhook.certManager.certRenewBefore 24) }}
+{{- else }}
+{{- $webhookSvcName := include "vgpu-manager-dra-driver.webhook" . }}
+{{- $webhookSvcAltNames := list (printf "%s.%s.svc" $webhookSvcName .Release.Namespace) (printf "%s.%s.svc.cluster.local" $webhookSvcName .Release.Namespace) }}
+{{- $certName := printf "%s-cert" (include "vgpu-manager-dra-driver.webhook" .) }}
+{{- $secretName := printf "%s-secret" (include "vgpu-manager-dra-driver.webhook" .) }}
+{{- $duration := int .Values.webhook.certDuration }}
+{{- /*
+  Self-signed cert for the Helm-CLI path. A STABLE CA is persisted in the Secret
+  and reused across upgrades (via lookup), so the webhook caBundle never changes —
+  this avoids the caBundle/served-cert mismatch window under failurePolicy: Fail.
+  Only the leaf (server) cert is re-issued on every upgrade to refresh its validity;
+  the webhook server hot-reloads it (controller-runtime CertWatcher), no pod restart.
+  All resources here are plain (non-hook) so `helm uninstall` removes them cleanly.
+  NOTE: lookup returns nothing during `helm template`/--dry-run/client-side GitOps
+  rendering; use the cert-manager path (webhook.certManager.enabled=true) for those.
+*/ -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+{{- $ca := "" }}
+{{- if and $existing $existing.data (index $existing.data "ca.crt") (index $existing.data "ca.key") }}
+{{- $ca = buildCustomCert (index $existing.data "ca.crt") (index $existing.data "ca.key") }}
+{{- else }}
+{{- $ca = genCA $certName $duration }}
+{{- end }}
+{{- $cert := genSignedCert (printf "%s.%s" $webhookSvcName .Release.Namespace) nil $webhookSvcAltNames $duration $ca }}
+{{- $caBundle := $ca.Cert | b64enc }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}-secret
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  # ca.key is persisted so upgrades can reuse the same CA (stable caBundle).
+  ca.crt: {{ $caBundle }}
+  ca.key: {{ $ca.Key | b64enc }}
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}-mutate
+{{ include "vgpu-manager-dra-driver.mutatingWebhooks" (dict "ctx" . "caBundle" $caBundle) }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.webhook" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+  name: {{ include "vgpu-manager-dra-driver.webhook" . }}-validate
+{{ include "vgpu-manager-dra-driver.validatingWebhooks" (dict "ctx" . "caBundle" $caBundle) }}
+{{- end }}
+{{- end }}

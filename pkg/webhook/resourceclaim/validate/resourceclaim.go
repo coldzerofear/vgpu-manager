@@ -11,7 +11,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
-	"github.com/go-logr/logr"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -21,7 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -31,8 +29,10 @@ import (
 
 const Path = "/resourceclaim/validate"
 
-func NewValidateWebhook(client client.Client, options *options.Options,
-	reader resourcereader.ResourceAPIReader, recorder events.EventRecorderLogger,
+func NewValidateWebhook(
+	client client.Client, options *options.Options,
+	reader resourcereader.ResourceAPIReader,
+	recorder events.EventRecorderLogger,
 ) (http.Handler, error) {
 	if !options.DRAAdmissionEnabled {
 		return nil, nil
@@ -43,7 +43,6 @@ func NewValidateWebhook(client client.Client, options *options.Options,
 		Handler: &validateHandle{
 			options:  options,
 			scheme:   scheme,
-			logger:   klog.NewKlogr(),
 			reader:   reader,
 			recorder: recorder,
 			codecs:   codecs,
@@ -55,7 +54,6 @@ func NewValidateWebhook(client client.Client, options *options.Options,
 type validateHandle struct {
 	options  *options.Options
 	scheme   *runtime.Scheme
-	logger   logr.Logger
 	reader   resourcereader.ResourceAPIReader
 	recorder events.EventRecorderLogger
 	codecs   serializer.CodecFactory
@@ -111,6 +109,7 @@ type actualRequestUsage struct {
 	Pods           sets.Set[string]
 	InitContainers sets.Set[string] // "<ns>/<pod>/<container>"
 	AppContainers  sets.Set[string] // "<ns>/<pod>/<container>"
+	Sidecars       sets.Set[string] // "<ns>/<pod>/<container>"
 }
 
 // validateOneReservedPodAgainstAllocatedClaim make the final decision on a reserved pod for the current claim.
@@ -195,30 +194,50 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 			if usage.AppContainers == nil {
 				usage.AppContainers = sets.New[string]()
 			}
+			if usage.Sidecars == nil {
+				usage.Sidecars = sets.New[string]()
+			}
 
 			thisPodID := podID(pod)
 			thisContainerID := containerID(pod, c.Name)
 
 			usage.Pods.Insert(thisPodID)
-			switch c.Kind {
-			case util.ContainerKindInit:
+			// Three lifecycle classes decide who may share (reuse) a request —
+			// i.e. whose lifecycles never overlap: non-restartable init
+			// containers are strictly sequential (any number may share); app
+			// containers run concurrently (at most one); a sidecar (restartable
+			// init) runs through the whole app phase and overlaps the app
+			// containers and every later init container, so it must be the SOLE
+			// user of its request.
+			switch {
+			case c.Restartable:
+				usage.Sidecars.Insert(thisContainerID)
+			case c.Kind == util.ContainerKindInit:
 				usage.InitContainers.Insert(thisContainerID)
-				if usage.InitContainers.Len() > 1 {
-					return fmt.Errorf(
-						"allocated vgpu request %q in claim %s/%s is referenced by multiple init containers %v",
-						mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.InitContainers),
-					)
-				}
-			case util.ContainerKindApp:
+			case c.Kind == util.ContainerKindApp:
 				usage.AppContainers.Insert(thisContainerID)
-				if usage.AppContainers.Len() > 1 {
-					return fmt.Errorf(
-						"allocated vgpu request %q in claim %s/%s is referenced by multiple app containers %v",
-						mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.AppContainers),
-					)
-				}
 			default:
 				return fmt.Errorf("unknown container kind %q for container %q", c.Kind, c.Name)
+			}
+
+			if usage.AppContainers.Len() > 1 {
+				return fmt.Errorf(
+					"allocated vgpu request %q in claim %s/%s is referenced by multiple app containers %v",
+					mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.AppContainers),
+				)
+			}
+			if usage.Sidecars.Len() > 1 {
+				return fmt.Errorf(
+					"allocated vgpu request %q in claim %s/%s is referenced by multiple sidecar containers %v",
+					mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.Sidecars),
+				)
+			}
+			if usage.Sidecars.Len() == 1 && (usage.InitContainers.Len() > 0 || usage.AppContainers.Len() > 0) {
+				return fmt.Errorf(
+					"allocated vgpu request %q in claim %s/%s is referenced by sidecar %v together with other containers; "+
+						"a sidecar must be the sole user of a vgpu request",
+					mainReq, currentClaim.Namespace, currentClaim.Name, sets.List(usage.Sidecars),
+				)
 			}
 
 			// Cross Pod sharing of the same mainRequest is strictly prohibited

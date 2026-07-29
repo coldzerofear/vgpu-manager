@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -204,7 +205,7 @@ func (s *Server) Start(ctx context.Context) (err error) {
 	} else {
 		err = s.httpServer.ListenAndServeTLS("", "")
 	}
-	if err != nil && err != http.ErrServerClosed {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		close(idleConnsClosed)
 		return err
 	}

@@ -18,6 +18,7 @@ const (
 	GPUDeviceClassName  = "gpu-manager"
 	VGPUDeviceClassName = "vgpu-manager"
 	MIGDeviceClassName  = "mig-manager"
+	VFIODeviceClassName = "vfio-manager"
 
 	IgnoreWebhookAnnotation = "vgpu-manager.io/ignore-webhook"
 	DRAOriResAnnotation     = "vgpu-manager.io/original-resources"
@@ -25,9 +26,10 @@ const (
 	DRAOwnerPodLabel        = "vgpu-manager.io/owner-pod"
 	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
 
-	VolcanoGroupNameAnnotation    = "scheduling.k8s.io/group-name"
-	CoschedulingPodGroupLabel     = "scheduling.x-k8s.io/pod-group"
+	KubeGroupNameAnnotation       = "scheduling.k8s.io/group-name"
+	VolcanoGroupNameAnnotation    = "scheduling.volcano.sh/group-name"
 	KoordinatorGangNameAnnotation = "gang.scheduling.koordinator.sh/name"
+	CoschedulingPodGroupLabel     = "scheduling.x-k8s.io/pod-group"
 	// Deprecated: kubernetes-sigs/scheduler-plugins/lightweight-coscheduling
 	CoschedulingPodGroupNameLabel = "pod-group.scheduling.sigs.k8s.io/name"
 )
@@ -50,11 +52,14 @@ var (
 	NodeDeviceRegisterAnnotation  = globalDomainName + "/node-device-register"
 	NodeDeviceTopologyAnnotation  = globalDomainName + "/node-device-topology"
 	NodeConfigInfoAnnotation      = globalDomainName + "/node-config-info"
-
-	// PodIncludeGpuTypeAnnotation Specify the GPU type to be used
-	PodIncludeGpuTypeAnnotation = globalDomainName + "/include-gpu-type"
-	// PodExcludeGpuTypeAnnotation Specify the GPU type to exclude
-	PodExcludeGpuTypeAnnotation = globalDomainName + "/exclude-gpu-type"
+	// NodeGPUDomainAnnotation OPTIONALLY maps each GPU UUID to a globally-meaningful
+	// sub-domain / rail key (JSON {"<uuid>":"<rail>", ...}). Supplied by the device
+	// plugin (auto-discovered GPU→NIC→rail) or declared by an operator/network
+	// component. When present and covering every GPU, cross-node sub-domain
+	// alignment matches NVLink islands by their rail-set instead of by positional
+	// ordinal — correct on heterogeneous layouts. Absent → positional-ordinal
+	// fallback (unchanged homogeneous behaviour).
+	NodeGPUDomainAnnotation = globalDomainName + "/node-gpu-domain"
 
 	// Scheduling strategies at the node and device levels
 	NodeSchedulerPolicyAnnotation       = globalDomainName + "/node-scheduler-policy"
@@ -65,10 +70,22 @@ var (
 	// DeviceTopologyModeAnnotation Specify device topology mode
 	DeviceTopologyModeAnnotation = globalDomainName + "/device-topology-mode"
 
+	// CrossPodTopologyAnnotation opts a pod into cross-pod topology affinity:
+	// same-gang pods keep their GPUs in one NVLink connected component on a node
+	// and align to the same component ordinal across nodes (cross-node sub-domain
+	// / rail alignment). Boolean ("true"); absent/false = unchanged single-pod
+	// behaviour. Only takes effect together with device-topology-mode: link.
+	CrossPodTopologyAnnotation = globalDomainName + "/cross-pod-topology"
+
 	// PodIncludeGPUUUIDAnnotation Specify the GPU UUID to be used
 	PodIncludeGPUUUIDAnnotation = globalDomainName + "/include-gpu-uuid"
 	// PodExcludeGPUUUIDAnnotation Specify the GPU UUID to be excluded
 	PodExcludeGPUUUIDAnnotation = globalDomainName + "/exclude-gpu-uuid"
+
+	// PodIncludeGpuTypeAnnotation Specify the GPU type to be used
+	PodIncludeGpuTypeAnnotation = globalDomainName + "/include-gpu-type"
+	// PodExcludeGpuTypeAnnotation Specify the GPU type to exclude
+	PodExcludeGpuTypeAnnotation = globalDomainName + "/exclude-gpu-type"
 
 	PodPredicateNodeAnnotation = globalDomainName + "/predicate-node"
 	PodPredicateTimeAnnotation = globalDomainName + "/predicate-time"
@@ -91,6 +108,7 @@ func initConstants() {
 	NodeDeviceRegisterAnnotation = globalDomainName + "/node-device-register"
 	NodeDeviceTopologyAnnotation = globalDomainName + "/node-device-topology"
 	NodeConfigInfoAnnotation = globalDomainName + "/node-config-info"
+	NodeGPUDomainAnnotation = globalDomainName + "/node-gpu-domain"
 	PodIncludeGpuTypeAnnotation = globalDomainName + "/include-gpu-type"
 	PodExcludeGpuTypeAnnotation = globalDomainName + "/exclude-gpu-type"
 	NodeSchedulerPolicyAnnotation = globalDomainName + "/node-scheduler-policy"
@@ -98,6 +116,7 @@ func initConstants() {
 	MemorySchedulerPolicyAnnotation = globalDomainName + "/memory-scheduler-policy"
 	SchedulerStuckGracePeriodAnnotation = globalDomainName + "/stuck-grace-period"
 	DeviceTopologyModeAnnotation = globalDomainName + "/device-topology-mode"
+	CrossPodTopologyAnnotation = globalDomainName + "/cross-pod-topology"
 	PodIncludeGPUUUIDAnnotation = globalDomainName + "/include-gpu-uuid"
 	PodExcludeGPUUUIDAnnotation = globalDomainName + "/exclude-gpu-uuid"
 	PodPredicateNodeAnnotation = globalDomainName + "/predicate-node"
@@ -122,7 +141,7 @@ func MustInitGlobalDomain(domain string) {
 			globalDomainName = domain
 			initConstants()
 		}
-		klog.Infof("Successfully set the domain name to %s", domain)
+		klog.Infof("Successfully set the domain name to %q", domain)
 	})
 }
 
@@ -148,6 +167,12 @@ const (
 	SMUtilFile      = "sm_util.config"
 	VMemNode        = "vmem_node"
 	VMemNodeFile    = "vmem_node.config"
+	// SMNode is the per-container shared region backing container-wide SM
+	// (compute) isolation, named symmetrically with VMemNode: vmem_node holds
+	// the cross-process state of memory isolation, sm_node that of compute
+	// isolation. See docs/sm_multiproc_shared_bucket_design.md.
+	SMNode     = "sm_node"
+	SMNodeFile = "sm_node.config"
 )
 
 const (
@@ -162,6 +187,7 @@ const (
 	CudaSoftCoreLimitEnv = "CUDA_CORE_SOFT_LIMIT"
 	// CUDA_CORE_SOFT_LIMIT_<index> gpu memory oversold switch
 	CudaMemoryOversoldEnv = "CUDA_MEM_OVERSOLD"
+	VMemoryNodeEnabled    = "VMEMORY_NODE_ENABLED"
 	// ManagerVisibleDevice Single GPU UUID visible to the container
 	ManagerVisibleDevice = "MANAGER_VISIBLE_DEVICE"
 	// ManagerVisibleDevices List of GPU UUIDs visible to container
@@ -170,6 +196,8 @@ const (
 	ManagerCompatibilityMode  = "MANAGER_COMPATIBILITY_MODE"
 	ExternalSmWatcherEnabled  = "EXTERNAL_SM_WATCHER_ENABLED"
 	ManagerClientRegisterUuid = "MANAGER_CLIENT_REGISTER_UUID"
+	ManagerVGpuClaimUid       = "MANAGER_VGPU_CLAIM_UID"
+	CudaSMSharedBucket        = "CUDA_SM_SHARED_BUCKET"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
@@ -256,12 +284,15 @@ func (m TopologyMode) IsStrictTopology() bool {
 // "numa vs link vs none" regardless of strictness.
 func (m TopologyMode) BaseTopology() TopologyMode {
 	switch m {
-	case NUMATopologyStrict:
+	case NUMATopology, NUMATopologyStrict:
 		return NUMATopology
-	case LinkTopologyStrict:
+	case LinkTopology, LinkTopologyStrict:
 		return LinkTopology
+	case NoneTopology, "":
+		return NoneTopology
+	default:
+		return m
 	}
-	return m
 }
 
 // Constants representing the various MIG strategies
@@ -277,6 +308,30 @@ const (
 	DeviceListStrategyVolumeMounts   = "volume-mounts"
 	DeviceListStrategyCDIAnnotations = "cdi-annotations"
 	DeviceListStrategyCDICRI         = "cdi-cri"
+)
+
+// Constants for Container Device Interface (CDI) device injection.
+const (
+	// CDIVendor is the vendor part of the CDI qualified device names generated
+	// by the device plugin (e.g. "k8s.device-plugin.nvidia.com/gpu=<uuid>").
+	// It must match the vendor used when generating the CDI specification.
+	CDIVendor = "k8s.device-plugin.nvidia.com"
+	// CDIClass is the CDI device class used for GPU (and MIG) devices.
+	CDIClass = "gpu"
+	// CDIDeviceIDStrategy is the strategy used to name devices inside the
+	// generated CDI specification. "uuid" keeps the qualified names aligned
+	// with the device UUIDs allocated by the plugin.
+	CDIDeviceIDStrategy = "uuid"
+	// CDIDefaultAnnotationPrefix is the default prefix for CDI container
+	// annotation keys (matches tags.cncf.io/container-device-interface).
+	CDIDefaultAnnotationPrefix = "cdi.k8s.io/"
+	// CDIDefaultHookPath is the fallback host path to the NVIDIA CDI hook binary
+	// referenced from the generated CDI specification. The binary is bundled in
+	// the image and installed to the host manager dir by the install init
+	// container; the device plugin resolves the actual path from HOST_MANAGER_DIR.
+	CDIDefaultHookPath = ManagerRootPath + "/nvidia-cdi-hook"
+	// CDIDefaultDriverRoot is the default driver root used for CDI spec generation.
+	CDIDefaultDriverRoot = "/"
 )
 
 type MemorySchedulerPolicy string
@@ -339,6 +394,13 @@ const (
 	// DevicePluginClientMode enables Unix gRPC client mode for communication
 	// between allocated containers and the device plugin.
 	DevicePluginClientMode = "DevicePluginClientMode"
+
+	// NRISupport enables the in-process NRI plugin path: per-container partition
+	// directory mounts move from DRA Prepare/CDI to the NRI CreateContainer
+	// hook. Requires VGPUSupport. When DevicePluginClientMode is also enabled,
+	// the NRI cache is shared with the register server to drive its pod-uid
+	// resolution path; NRISupport does not require DevicePluginClientMode.
+	NRISupport = "NRISupport"
 
 	// HonorPreAllocatedDeviceIDs makes preferred allocation follow
 	// pre-allocated device IDs whenever possible.

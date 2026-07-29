@@ -8,15 +8,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/registry"
@@ -24,6 +26,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/opencontainers/cgroups"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 )
@@ -72,6 +77,29 @@ const (
 	// the lookup state (informer cache, container status) to become
 	// consistent enough to satisfy a register request.
 	resolveBackoff = 40 * time.Millisecond
+
+	// resolveTimeout caps how long a single register request may keep polling,
+	// independent of the client's context. A legitimate caller resolves within
+	// a few hundred ms once its container is Running; this bound stops a
+	// malicious caller that never sets an RPC deadline (or never disconnects)
+	// from pinning a goroutine + cgroup-read loop forever.
+	resolveTimeout = 60 * time.Second
+
+	// maxInFlightResolves caps the total number of register requests resolving
+	// concurrently across all callers; excess requests are rejected fast with
+	// ResourceExhausted instead of queueing (which would hold connections open).
+	maxInFlightResolves = 256
+	// maxPerCallerResolves caps the concurrent register requests from a single
+	// caller (keyed by its real pod UID, or PID when that can't be derived) so
+	// one hijacked container cannot monopolise the global budget.
+	maxPerCallerResolves = 8
+
+	// gRPC server hardening: the request body is tiny (a few identifiers), and
+	// each container legitimately opens a single short-lived stream.
+	maxRecvMsgBytes      = 16 * 1024
+	maxConcurrentStreams = 64
+	connectionTimeout    = 10 * time.Second
+	keepaliveMinTime     = 30 * time.Second
 )
 
 // TargetCandidate is one (pod, container) pair the server may try to attribute
@@ -94,34 +122,88 @@ type Target struct {
 	ConfigDir string
 }
 
-// GetPodByUIDFunc resolves a pod by its UID. Used by the legacy device-plugin
-// path where the calling library already knows its own (pod, container) pair.
-type GetPodByUIDFunc func(ctx context.Context, uid string) (*corev1.Pod, error)
+func (t *Target) Validate() error {
+	if t == nil {
+		return fmt.Errorf("cannot parse empty targets")
+	}
+	if len(t.Candidates) == 0 {
+		return fmt.Errorf("resolver returned no Candidates")
+	}
+	if t.ConfigDir == "" {
+		return fmt.Errorf("resolver returned empty ConfigDir")
+	}
+	return nil
+}
 
-// GetTargetByUUIDFunc resolves a register UUID minted by the DRA driver into
+// GetTargetByPodUidFunc resolve targets through pod UID and container name.
+type GetTargetByPodUidFunc func(ctx context.Context, podUid, contName string) (*Target, error)
+
+// GetTargetByRegisterUuidFunc resolves a register UUID minted by the DRA driver into
 // the set of (pod, container) candidates that could be the caller plus the
 // shared on-disk directory for pids.config. Returning multiple candidates is
 // the contract that lets the server tolerate stale informer views and
 // fallback partition keys baked into claim annotations at Prepare time.
-type GetTargetByUUIDFunc func(ctx context.Context, uuid string) (*Target, error)
+type GetTargetByRegisterUuidFunc func(ctx context.Context, uuid string) (*Target, error)
 
-func NewDeviceRegistryServer(containerPath string, getPodByUIDFn GetPodByUIDFunc, getTargetByUUIDFn GetTargetByUUIDFunc) *DeviceRegistryServerImpl {
+func NewDeviceRegistryServer(
+	containerPath string,
+	getTargetByPodUidFunc GetTargetByPodUidFunc,
+	getTargetByRegisterUuidFunc GetTargetByRegisterUuidFunc,
+) *DeviceRegistryServerImpl {
 	return &DeviceRegistryServerImpl{
-		contPath:          containerPath,
-		getPodByUIDFn:     getPodByUIDFn,
-		getTargetByUUIDFn: getTargetByUUIDFn,
+		contPath:           containerPath,
+		getTargetByPodUid:  getTargetByPodUidFunc,
+		getTargetByRegUuid: getTargetByRegisterUuidFunc,
+		inFlight:           make(chan struct{}, maxInFlightResolves),
+		perCaller:          make(map[string]int),
 	}
 }
 
 type DeviceRegistryServerImpl struct {
 	registry.UnimplementedVDeviceRegistryServer
-	mutex             sync.Mutex
-	contPath          string
-	getPodByUIDFn     GetPodByUIDFunc
-	getTargetByUUIDFn GetTargetByUUIDFunc
-	server            *grpc.Server
-	listener          net.Listener
-	running           bool
+	mutex              sync.Mutex
+	contPath           string
+	getTargetByPodUid  GetTargetByPodUidFunc
+	getTargetByRegUuid GetTargetByRegisterUuidFunc
+	server             *grpc.Server
+	listener           net.Listener
+	running            bool
+
+	// inFlight is a global concurrency budget for resolveTarget; perCaller
+	// tracks the in-flight count keyed by caller identity (guarded by
+	// perCallerMu). Both reject over-budget requests fast rather than queueing.
+	inFlight    chan struct{}
+	perCallerMu sync.Mutex
+	perCaller   map[string]int
+}
+
+// acquireSlot reserves a global + per-caller concurrency slot for a register
+// request, returning a release func. ok is false (with nothing reserved) when
+// either budget is exhausted, so the caller can reject fast.
+func (s *DeviceRegistryServerImpl) acquireSlot(callerKey string) (release func(), ok bool) {
+	select {
+	case s.inFlight <- struct{}{}:
+	default:
+		return func() {}, false
+	}
+	s.perCallerMu.Lock()
+	if s.perCaller[callerKey] >= maxPerCallerResolves {
+		s.perCallerMu.Unlock()
+		<-s.inFlight
+		return func() {}, false
+	}
+	s.perCaller[callerKey]++
+	s.perCallerMu.Unlock()
+	return func() {
+		s.perCallerMu.Lock()
+		if s.perCaller[callerKey] <= 1 {
+			delete(s.perCaller, callerKey)
+		} else {
+			s.perCaller[callerKey]--
+		}
+		s.perCallerMu.Unlock()
+		<-s.inFlight
+	}, true
 }
 
 func (s *DeviceRegistryServerImpl) IsRunning() bool {
@@ -145,38 +227,68 @@ func (s *DeviceRegistryServerImpl) IsRunning() bool {
 // In either case the call retries transient failures (informer not yet synced,
 // container not yet Running, cgroup still ramping up) until the request
 // context is canceled.
-func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, req *registry.ContainerDeviceRequest) (resp *registry.ContainerDeviceResponse, err error) {
-	klog.V(4).InfoS("RegisterContainerDevice",
-		"podUid", req.GetPodUid(),
-		"containerName", req.GetContainerName(),
-		"registerUuid", req.GetRegisterUuid())
+func (s *DeviceRegistryServerImpl) RegisterContainerDevice(
+	ctx context.Context, req *registry.ContainerDeviceRequest,
+) (resp *registry.ContainerDeviceResponse, err error) {
+	klog.V(4).InfoS("RegisterContainerDevice", "podUid", req.GetPodUid(),
+		"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid())
+
+	var (
+		release      = func() {}
+		peerPid      int32
+		callerPodUID string
+		callerKey    string
+		pids         []int
+		configDir    string
+	)
+
 	defer func() {
-		if r := recover(); r != nil {
-			stack := string(debug.Stack())
-			klog.ErrorS(fmt.Errorf("unexpected panic in handler: %v\n%s", r, stack),
-				"RegisterContainerDevice panicked",
-				"podUid", req.GetPodUid(),
-				"containerName", req.GetContainerName(),
-				"registerUuid", req.GetRegisterUuid())
-			err = fmt.Errorf("internal exception: %v", r)
-		}
-		if err != nil {
-			klog.V(4).ErrorS(err, "RegisterContainerDevice failed",
-				"podUid", req.GetPodUid(),
-				"containerName", req.GetContainerName(),
-				"registerUuid", req.GetRegisterUuid())
+		release()
+		runtime.RecoverFromPanic(&err)
+		switch {
+		case err == nil:
+			klog.V(4).InfoS("RegisterContainerDevice success", "podUid", req.GetPodUid(),
+				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(), "peerPid", peerPid,
+				"callerPodUID", callerPodUID, "callerKey", callerKey, "configDir", configDir, "pids", pids)
+		case strings.HasPrefix(err.Error(), "recovered from panic"):
+			klog.ErrorS(err, "RegisterContainerDevice panicked", "podUid", req.GetPodUid(),
+				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
+				"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
+			err = fmt.Errorf("an internal error has occurred")
+		default:
+			klog.V(3).ErrorS(err, "RegisterContainerDevice failed", "podUid", req.GetPodUid(),
+				"containerName", req.GetContainerName(), "registerUuid", req.GetRegisterUuid(),
+				"peerPid", peerPid, "callerPodUID", callerPodUID, "callerKey", callerKey)
 		}
 	}()
 
 	resp = &registry.ContainerDeviceResponse{}
 
-	configDir, pids, err := s.resolveTarget(ctx, req)
-	if err != nil {
+	// Authenticate the caller by its kernel-supplied SO_PEERCRED PID and the
+	// pod UID derived from its cgroup. Both may be empty in environments where
+	// they cannot be obtained, in which case the checks downstream fail open.
+	peerPid = peerPidFromContext(ctx)
+	callerPodUID, _ = callerPodUIDFromPid(peerPid)
+
+	// Concurrency budget keyed by caller identity (real pod UID, else PID).
+	if callerKey = callerPodUID; callerKey == "" {
+		callerKey = fmt.Sprintf("pid:%d", peerPid)
+	}
+
+	var ok bool
+	if release, ok = s.acquireSlot(callerKey); !ok {
+		klog.V(4).InfoS("register request rejected: concurrency budget exhausted", "callerKey", callerKey, "peerPid", peerPid)
+		return resp, status.Error(codes.ResourceExhausted, "register concurrency budget exhausted, retry later")
+	}
+
+	if configDir, pids, err = s.resolveTarget(ctx, req, peerPid, callerPodUID); err != nil {
 		return resp, err
 	}
+
 	if err = s.persistPids(configDir, pids); err != nil {
 		return resp, err
 	}
+
 	return resp, nil
 }
 
@@ -196,14 +308,22 @@ func (s *DeviceRegistryServerImpl) RegisterContainerDevice(ctx context.Context, 
 // the first viable one wins. If none are viable we wait one backoff tick and
 // re-query the resolver — by then either the informer has caught up or the
 // runtime has progressed enough for a different candidate to be Running.
-func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *registry.ContainerDeviceRequest) (string, []int, error) {
-	useUUID := req.GetRegisterUuid() != ""
-	cgroupResolver := cgroupFullPathResolver()
+func (s *DeviceRegistryServerImpl) resolveTarget(
+	ctx context.Context,
+	req *registry.ContainerDeviceRequest,
+	peerPid int32, callerPodUID string,
+) (string, []int, error) {
+	// Server-side deadline: never poll longer than resolveTimeout regardless of
+	// the client's context, so a caller that never sets a deadline (or never
+	// disconnects) cannot pin this goroutine forever.
+	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
 
 	var (
-		configDir string
-		winPids   []int
-		lastErr   error
+		cgroupResolver = cgroupFullPathResolver()
+		configDir      string
+		winPids        []int
+		lastErr        error
 	)
 	pollErr := wait.PollUntilContextCancel(ctx, resolveBackoff, true, func(ctx context.Context) (bool, error) {
 		target, err := s.lookupTarget(ctx, req)
@@ -223,33 +343,35 @@ func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *regis
 			return false, nil
 		}
 
+		// Caller authentication (fast-fail): when the caller's real pod UID is
+		// known (from its SO_PEERCRED PID's cgroup), require it to own at least
+		// one candidate. A request whose resolved candidates all belong to
+		// OTHER pods is cross-pod impersonation — reject immediately instead of
+		// polling, foreclosing a junk-request DoS vector.
+		if callerPodUID != "" && !candidatesIncludePod(target.Candidates, callerPodUID) {
+			return false, fmt.Errorf("caller pod %q is not authorized for this register request", callerPodUID)
+		}
+
+		if len(target.Candidates) == 1 {
+			pod := target.Candidates[0].Pod
+			if util.PodIsTerminated(pod) {
+				return false, fmt.Errorf("pod %s is terminated", klog.KObj(pod))
+			}
+		}
+
 		// Legacy device-plugin path has exactly one candidate; validation
 		// failures are hard errors (no other candidate could rescue them).
 		// DRA path iterates candidates, accepting the first viable one and
 		// continuing on per-candidate soft failures.
 		for i, cand := range target.Candidates {
-			if !useUUID {
-				if util.PodIsTerminated(cand.Pod) {
-					return false, fmt.Errorf("pod %s is terminated", klog.KObj(cand.Pod))
-				}
-				if err := validateLegacyContainer(cand.Pod, cand.ContainerName); err != nil {
-					return false, err
-				}
-			} else if util.PodIsTerminated(cand.Pod) {
-				continue
-			}
-
-			pids, ok := isCandidateAlive(cand, cgroupResolver, &lastErr)
+			pids, ok := isCandidateAlive(cand, cgroupResolver, peerPid, &lastErr)
 			if !ok {
 				continue
 			}
 			configDir = target.ConfigDir
 			winPids = pids
-			klog.V(5).InfoS("register candidate accepted",
-				"pod", klog.KObj(cand.Pod),
-				"containerName", cand.ContainerName,
-				"candidateIndex", i,
-				"pids", len(pids))
+			klog.V(5).InfoS("register candidate accepted", "pod", klog.KObj(cand.Pod),
+				"containerName", cand.ContainerName, "candidateIndex", i, "pids", len(pids))
 			return true, nil
 		}
 		return false, nil
@@ -270,7 +392,7 @@ func (s *DeviceRegistryServerImpl) resolveTarget(ctx context.Context, req *regis
 // true) when the candidate is in Running state and its cgroup has live
 // processes; otherwise (nil, false) with *lastErr updated for the eventual
 // context-cancel error message.
-func isCandidateAlive(cand TargetCandidate, cgroupResolver func(string) string, lastErr *error) ([]int, bool) {
+func isCandidateAlive(cand TargetCandidate, cgroupResolver func(string) string, peerPid int32, lastErr *error) ([]int, bool) {
 	if util.PodIsTerminated(cand.Pod) {
 		return nil, false
 	}
@@ -286,7 +408,26 @@ func isCandidateAlive(cand TargetCandidate, cgroupResolver func(string) string, 
 			cand.ContainerName, klog.KObj(cand.Pod))
 		return nil, false
 	}
+	// Caller authentication: when the kernel-supplied caller PID is known,
+	// require it to be one of the container's live PIDs — proving the request
+	// originates from inside the very container it registers for, not a
+	// neighbour impersonating it. Fail open when peerPid is unavailable.
+	if peerPid > 0 && !slices.Contains(pids, int(peerPid)) {
+		*lastErr = fmt.Errorf("caller pid %d is not a process of candidate container %q in pod %s (possible impersonation or stale view)",
+			peerPid, cand.ContainerName, klog.KObj(cand.Pod))
+		return nil, false
+	}
 	return pids, true
+}
+
+// candidatesIncludePod reports whether any candidate belongs to the given pod UID.
+func candidatesIncludePod(cands []TargetCandidate, podUID string) bool {
+	for i := range cands {
+		if cands[i].Pod != nil && strings.EqualFold(string(cands[i].Pod.UID), podUID) {
+			return true
+		}
+	}
+	return false
 }
 
 // cgroupFullPathResolver picks the right cgroup hierarchy walker based on the
@@ -309,70 +450,44 @@ func cgroupFullPathResolver() func(string) string {
 // the right resolver based on the request shape and synthesizes a Target. For
 // the legacy path the Target carries exactly one candidate.
 func (s *DeviceRegistryServerImpl) lookupTarget(ctx context.Context, req *registry.ContainerDeviceRequest) (*Target, error) {
-	if uuid := req.GetRegisterUuid(); uuid != "" {
-		if s.getTargetByUUIDFn == nil {
-			return nil, errors.New("uuid registration is not supported by this server")
+	var (
+		uuid          = req.GetRegisterUuid()
+		podUID        = req.GetPodUid()
+		containerName = req.GetContainerName()
+	)
+
+	if uuid != "" {
+		if s.getTargetByRegUuid == nil {
+			if podUID == "" || containerName == "" || s.getTargetByPodUid == nil {
+				return nil, errors.New("uuid registration is not supported by this server")
+			}
+			goto retry
 		}
-		t, err := s.getTargetByUUIDFn(ctx, uuid)
+		target, err := s.getTargetByRegUuid(ctx, uuid)
 		if err != nil {
-			return nil, err
+			if podUID == "" || containerName == "" || s.getTargetByPodUid == nil {
+				return nil, err
+			}
+			goto retry
 		}
-		if t == nil {
-			return nil, fmt.Errorf("uuid %s did not resolve to a target", uuid)
-		}
-		if len(t.Candidates) == 0 {
-			return nil, fmt.Errorf("uuid %s resolver returned no candidates", uuid)
-		}
-		if t.ConfigDir == "" {
-			return nil, fmt.Errorf("uuid %s resolver returned empty ConfigDir", uuid)
-		}
-		return t, nil
+		return target, target.Validate()
 	}
 
-	if s.getPodByUIDFn == nil {
-		return nil, errors.New("pod-uid registration is not supported by this server")
-	}
-	podUID := req.GetPodUid()
-	containerName := req.GetContainerName()
 	if podUID == "" {
 		return nil, errors.New("pod_uid is empty")
 	}
 	if containerName == "" {
 		return nil, errors.New("container_name is empty")
 	}
-	pod, err := s.getPodByUIDFn(ctx, podUID)
+	if s.getTargetByPodUid == nil {
+		return nil, errors.New("pod-uid registration is not supported by this server")
+	}
+retry:
+	target, err := s.getTargetByPodUid(ctx, podUID, containerName)
 	if err != nil {
 		return nil, err
 	}
-	if pod == nil {
-		return nil, fmt.Errorf("pod %s not found", podUID)
-	}
-	return &Target{
-		Candidates: []TargetCandidate{{
-			Pod:           pod,
-			ContainerName: containerName,
-		}},
-		ConfigDir: filepath.Join(
-			util.GetPodContainerManagerPath(s.contPath, pod.UID, containerName),
-			util.Config,
-		),
-	}, nil
-}
-
-// validateLegacyContainer enforces the policy used by the device-plugin path:
-// the container must exist in pod.Spec.Containers (init containers are not
-// supported under device-plugin) and must request vGPU resources.
-func validateLegacyContainer(pod *corev1.Pod, containerName string) error {
-	for i := range pod.Spec.Containers {
-		if pod.Spec.Containers[i].Name != containerName {
-			continue
-		}
-		if !util.IsVGPURequiredContainer(&pod.Spec.Containers[i]) {
-			return fmt.Errorf("container %s does not have vGPU", containerName)
-		}
-		return nil
-	}
-	return fmt.Errorf("unable to find container %s in pod %s", containerName, klog.KObj(pod))
+	return target, target.Validate()
 }
 
 // persistPids writes the sorted PID list to <configDir>/pids.config atomically
@@ -427,7 +542,23 @@ func (s *DeviceRegistryServerImpl) Start() error {
 		return fmt.Errorf("failed to set socket permissions: %v", err)
 	}
 	s.listener = listener
-	s.server = grpc.NewServer(grpc.MaxConcurrentStreams(1024))
+	// Hardening against a hijacked container flooding the shared socket:
+	//   - Creds captures the caller's SO_PEERCRED PID for authentication.
+	//   - small message / stream / connection limits bound per-connection cost
+	//     (the request body is a few identifiers; one short stream per caller).
+	//   - keepalive enforcement rejects clients that ping too aggressively.
+	// The per-request deadline + concurrency budget live in resolveTarget /
+	// acquireSlot.
+	s.server = grpc.NewServer(
+		grpc.Creds(peerCredentials{}),
+		grpc.MaxRecvMsgSize(maxRecvMsgBytes),
+		grpc.MaxConcurrentStreams(maxConcurrentStreams),
+		grpc.ConnectionTimeout(connectionTimeout),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             keepaliveMinTime,
+			PermitWithoutStream: false,
+		}),
+	)
 
 	registry.RegisterVDeviceRegistryServer(s.server, s)
 	s.running = true
@@ -449,6 +580,13 @@ func (s *DeviceRegistryServerImpl) Stop() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	// Immediately close the listener and reject new connections
+	if s.listener != nil {
+		_ = s.listener.Close()
+		s.listener = nil
+	}
+
+	// Elegantly stop existing requests
 	if s.server != nil {
 		stopped := make(chan struct{})
 		go func() {
@@ -464,11 +602,6 @@ func (s *DeviceRegistryServerImpl) Stop() {
 			s.server.Stop()
 		}
 		s.server = nil
-	}
-
-	if s.listener != nil {
-		_ = s.listener.Close()
-		s.listener = nil
 	}
 
 	s.running = false

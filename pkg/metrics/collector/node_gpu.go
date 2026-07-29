@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -29,7 +31,6 @@ import (
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/util/sets"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
@@ -44,24 +45,30 @@ type nodeGPUCollector struct {
 	podLister   client.PodLister
 	contLister  *lister.ContainerLister
 	podResource *client.PodResource
+	utilAdapter watcher.DeviceUtilInterface
 	featureGate featuregate.FeatureGate
 }
 
 func NewNodeGPUCollector(
-	nodeName string, nodeLister listerv1.NodeLister, podLister client.PodLister,
+	config *node.NodeConfigSpec, nodeLister listerv1.NodeLister, podLister client.PodLister,
 	contLister *lister.ContainerLister, featureGate featuregate.FeatureGate,
 ) (prometheus.Collector, error) {
-	deviceLib, err := nvidia.InitDeviceLib("/")
+	driverRoot := config.GetDriverRoot()
+	deviceLib, err := nvidia.InitDeviceLib(driverRoot)
 	if err != nil {
 		return nil, err
 	}
+	adapter := watcher.NewDeviceUtilAdapter(
+		watcher.WithExtendedInterface(deviceLib.Extensions()),
+	)
 	return &nodeGPUCollector{
 		DeviceLib:   deviceLib,
-		nodeName:    nodeName,
+		nodeName:    config.GetNodeName(),
 		nodeLister:  nodeLister,
 		podLister:   podLister,
 		contLister:  contLister,
 		featureGate: featureGate,
+		utilAdapter: adapter,
 		podResource: client.NewPodResource(
 			client.WithCallTimeoutSecond(5)),
 	}, nil
@@ -137,9 +144,14 @@ var (
 		"Virtual GPU device assigned cores number",
 		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
 	)
-	vGPUSharedContainersNumber = prometheus.NewDesc(
-		"vgpu_device_shared_containers_number",
-		"Virtual GPU device shared containers number",
+	vGPUPeakSharedContainersNumber = prometheus.NewDesc(
+		"vgpu_device_peak_shared_containers_number",
+		"Peak number of containers that may concurrently share the vGPU device across the pods' lifecycle (reserved view; >= the current value)",
+		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
+	)
+	vGPUCurrentSharedContainersNumber = prometheus.NewDesc(
+		"vgpu_device_current_shared_containers_number",
+		"Number of currently running containers sharing the vGPU device right now (a completed sequential init container is excluded; <= the peak value)",
 		[]string{"node", "device_idx", "device_uuid", "device_type"}, nil,
 	)
 	vGPUTotalMemory = prometheus.NewDesc(
@@ -235,7 +247,8 @@ func (c nodeGPUCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- nodeVGPUAssignedPhysicalMemory
 	ch <- vGPUTotalCoresNumber
 	ch <- vGPUAssignedCoresNumber
-	ch <- vGPUSharedContainersNumber
+	ch <- vGPUPeakSharedContainersNumber
+	ch <- vGPUCurrentSharedContainersNumber
 	ch <- vGPUTotalMemory
 	ch <- vGPUTotalPhysicalMemory
 	ch <- vGPUAssignedMemory
@@ -294,7 +307,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devProcInfoMap = make(map[string]procInfoList)
 		devProcUtilMap = make(map[string]procUtilList)
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
-		deviceUtil     *watcher.DeviceUtil
+		deviceUtil     *watcher.MmapDeviceUtil
 	)
 	err := c.NvmlInit()
 	if err != nil {
@@ -303,7 +316,9 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	defer func() {
 		c.NvmlShutdown()
-		_ = deviceUtil.Munmap(false)
+		if deviceUtil != nil {
+			_ = deviceUtil.Close()
+		}
 	}()
 
 	func() {
@@ -333,7 +348,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	}()
 
 	if c.featureGate.Enabled(util.SMWatcher) {
-		if deviceUtil, err = watcher.NewDeviceUtil(smFilePath); err != nil {
+		if deviceUtil, err = watcher.NewMmapDeviceUtil(smFilePath); err != nil && !os.IsNotExist(err) {
 			klog.V(3).ErrorS(err, "Failed to read manager SM util file")
 		}
 	}
@@ -350,8 +365,9 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devMemInfoMap[gpuInfo.UUID] = gpuInfo.Memory
 		busId := links.PciInfo(gpuInfo.PciInfo).BusID()
 		migEnabled := fmt.Sprint(gpuInfo.MigEnabled)
+
 		var numaNode string
-		if numa := links.PciInfo(gpuInfo.PciInfo).NumaNode(); numa >= 0 {
+		if numa := gpuInfo.GetNumaNode(); numa >= 0 {
 			numaNode = strconv.Itoa(int(numa))
 		}
 		deviceIndex := strconv.Itoa(index)
@@ -408,7 +424,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				devHealthLvs[gpuInfo.UUID]...)
 		}
 
-		CollectorDeviceProcesses(deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
+		CollectorDeviceProcesses(c.utilAdapter, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
 		return nil
 	})
 	if err != nil {
@@ -499,35 +515,50 @@ skipNvml:
 	nodeVGpuAssignedMemBytes := uint64(0)
 	vGpuAssignedCoresMap := make(map[string]int64)
 	vGpuAssignedNumberMap := make(map[string]int)
-	sharedContainersMap := make(map[string]int)
+	peakSharedContainersMap := make(map[string]int)
+	currentSharedContainersMap := make(map[string]int)
 	// Filter out some useless pods.
 	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
-		// Aggregate the allocated memory size on the node.
-		podDeviceClaim := device.GetPodDeviceClaim(pod)
-		devContainersMap := make(map[string]sets.Set[string])
-		FlattenDevicesEach(podDeviceClaim, func(ctrName string, claimDevice device.DeviceClaim) {
-			if ctrNameSet, ok := devContainersMap[claimDevice.Uuid]; ok {
-				ctrNameSet.Insert(ctrName)
-			} else {
-				devContainersMap[claimDevice.Uuid] = sets.New[string](ctrName)
-			}
-			vGpuAssignedNumberMap[claimDevice.Uuid]++
-			vGpuAssignedCoresMap[claimDevice.Uuid] += claimDevice.Cores
-			memoryBytes := uint64(claimDevice.Memory) << 20
-			nodeVGpuAssignedMemBytes += memoryBytes
-			vGpuAssignedMemMap[claimDevice.Uuid] += memoryBytes
-		})
-		for uuid, crtNameSet := range devContainersMap {
-			sharedContainersMap[uuid] += crtNameSet.Len()
+		// Fast return of pods allocated without counting devices.
+		if !device.ShouldCountPodDeviceAllocation(pod) {
+			return
 		}
-		for _, container := range pod.Spec.Containers {
-			contKey := lister.GetContainerKey(pod.UID, container.Name)
+		// Aggregate the allocated memory size on the node, collapsing each
+		// pod's claims to the per-GPU lifecycle peak so a sequential init
+		// container reusing a regular container's GPU is not double-counted.
+		// For a pod without a vGPU init container this is the plain per-GPU
+		// sum, identical to the historical per-claim accounting.
+		podDeviceClaim := device.GetPodDeviceClaim(pod)
+		// Fast return of pods without device claims.
+		if len(podDeviceClaim) == 0 {
+			return
+		}
+
+		for _, fp := range device.ReducePodFootprint(pod, podDeviceClaim) {
+			vGpuAssignedNumberMap[fp.Uuid] += fp.Number
+			vGpuAssignedCoresMap[fp.Uuid] += fp.Cores
+			memoryBytes := uint64(fp.Memory) << 20
+			nodeVGpuAssignedMemBytes += memoryBytes
+			vGpuAssignedMemMap[fp.Uuid] += memoryBytes
+			// Peak (reserved) concurrent sharing: per-GPU lifecycle peak count.
+			peakSharedContainersMap[fp.Uuid] += fp.Number
+		}
+		// Current sharing: only containers running right now, so a completed
+		// sequential init container drops out (always <= the peak above).
+		for uuid, n := range device.CurrentSharedContainers(pod, podDeviceClaim) {
+			currentSharedContainersMap[uuid] += n
+		}
+		// Real-time per-container usage: regular containers, sidecars, and
+		// currently-running sequential init containers (a completed init
+		// container is excluded so its stale usage stops being reported).
+		for _, containerName := range util.CollectableContainerNames(pod) {
+			contKey := lister.GetContainerKey(pod.UID, containerName)
 			resData, exist := c.contLister.GetResourceDataT(contKey)
 			if !exist {
 				continue
 			}
 
-			klog.V(4).Infoln("Container matching: using resource data", "pod", klog.KObj(pod), "container", container.Name)
+			klog.V(4).Infoln("Container matching: using resource data", "pod", klog.KObj(pod), "container", containerName)
 			var getFullPath func(string) string
 			switch {
 			case cgroups.IsCgroup2UnifiedMode(): // cgroupv2
@@ -542,10 +573,10 @@ skipNvml:
 				getFullPath = cgroup.GetK8sPodDeviceCGroupFullPath
 			}
 			var containerPids []uint32
-			_ = cgroup.GetContainerPidsFunc(pod, container.Name, getFullPath, func(pid int) {
+			_ = cgroup.GetContainerPidsFunc(pod, containerName, getFullPath, func(pid int) {
 				containerPids = append(containerPids, uint32(pid))
 			})
-			//_, containerId := cgroup.GetContainerRuntime(pod, container.Name)
+			//_, containerId := cgroup.GetContainerRuntime(pod, containerName)
 
 			deviceCount := 0
 			for i := int32(0); i < vgpu.MaxDeviceCount; i++ {
@@ -556,7 +587,7 @@ skipNvml:
 				deviceUUID := string(containerDevice.UUID[0:40])
 				if !utf8.ValidString(deviceUUID) {
 					klog.InfoS("Invalid UTF-8 device uuid, skip current device", "pod", klog.KObj(pod),
-						"container", container.Name, "deviceUuid", deviceUUID, "deviceIndex", i)
+						"container", containerName, "deviceUuid", deviceUUID, "deviceIndex", i)
 					continue
 				}
 				devHostIndex, exists := devIndexMap[deviceUUID]
@@ -593,13 +624,13 @@ skipNvml:
 					containerVGPUMemoryLimit,
 					prometheus.GaugeValue,
 					float64(deviceMemLimit),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUPhysicalMemoryLimit,
 					prometheus.GaugeValue,
 					float64(realMemBytes),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 
 				// TODO handler Virtual Memory Cache node.
@@ -614,14 +645,22 @@ skipNvml:
 						if !exists {
 							return
 						}
-						if err = vMemory.RLock(devHostIndex); err != nil {
+						unlock, err := vMemory.RLock(devHostIndex)
+						if err != nil {
 							klog.V(3).ErrorS(err, "virtual memory RLock failed", "devHostIndex", devHostIndex)
 							return
 						}
-						defer func() { _ = vMemory.Unlock(devHostIndex) }()
-						for index := uint32(0); index < vMemory.GetVMem().Devices[devHostIndex].ProcessesSize; index++ {
-							deviceVMemUsage += vMemory.GetVMem().Devices[devHostIndex].Processes[index].Used
+						defer func() {
+							if err := unlock(); err != nil {
+								klog.ErrorS(err, "vMemory unlock failed", "devHostIndex", devHostIndex)
+							}
+						}()
+						deviceUsed, err := vMemory.GetDeviceMemory(devHostIndex)
+						if err != nil {
+							klog.V(3).ErrorS(err, "get device vMemory failed", "devHostIndex", devHostIndex)
+							return
 						}
+						deviceVMemUsage += deviceUsed.GetTotalUsed()
 					}()
 				}
 
@@ -629,13 +668,13 @@ skipNvml:
 					containerVGPUMemoryUsage,
 					prometheus.GaugeValue,
 					float64(deviceMemUsage+deviceVMemUsage),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUPhysicalMemoryUsage,
 					prometheus.GaugeValue,
 					float64(deviceMemUsage),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 
 				deviceMemUsage += deviceVMemUsage
@@ -649,13 +688,13 @@ skipNvml:
 					containerVGPUMemoryUtilRate,
 					prometheus.GaugeValue,
 					float64(memoryUtilRate),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUCoreUtilRate,
 					prometheus.GaugeValue,
 					float64(util.GetPercentageValue(deviceSMUtil)),
-					pod.Namespace, pod.Name, container.Name,
+					pod.Namespace, pod.Name, containerName,
 					vDevIndex, deviceUUID, c.nodeName)
 			}
 		}
@@ -724,9 +763,15 @@ skipNvml:
 			c.nodeName, deviceIndex, uuid,
 			devTypeMap[uuid])
 		ch <- prometheus.MustNewConstMetric(
-			vGPUSharedContainersNumber,
+			vGPUPeakSharedContainersNumber,
 			prometheus.GaugeValue,
-			float64(sharedContainersMap[uuid]),
+			float64(peakSharedContainersMap[uuid]),
+			c.nodeName, deviceIndex, uuid,
+			devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(
+			vGPUCurrentSharedContainersNumber,
+			prometheus.GaugeValue,
+			float64(currentSharedContainersMap[uuid]),
 			c.nodeName, deviceIndex, uuid,
 			devTypeMap[uuid])
 	}
@@ -811,7 +856,13 @@ skipNvml:
 
 }
 
-func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtil, index int, hdev nvml.Device, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList) {
+func CollectorDeviceProcesses(
+	utilAdapter watcher.DeviceUtilInterface,
+	mmapUtil *watcher.MmapDeviceUtil,
+	index int, hdev nvml.Device,
+	devProcInfoMap map[string]procInfoList,
+	devProcUtilMap map[string]procUtilList,
+) {
 	uuid, rt := hdev.GetUUID()
 	if rt != nvml.SUCCESS {
 		err := fmt.Errorf("error getting pci info for device %d: %v", index, rt)
@@ -836,33 +887,34 @@ func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtil, index int, hdev nv
 		}
 	}
 
-	if deviceUtil != nil {
-		deviceUtilWrap := deviceUtil.GetWrap()
+	if mmapUtil != nil {
 		klog.V(4).InfoS("collector device processes from sm watcher", "device", index)
-		if err := deviceUtilWrap.RLock(index); err == nil {
-			micro := time.UnixMicro(int64(deviceUtilWrap.GetUtil().Devices[index].LastSeenTimeStamp))
+		if unlock, err := mmapUtil.RLock(index); err != nil {
+			klog.V(3).ErrorS(err, "SM Watcher lock failed, fallback to nvml driver call", "device", index)
+		} else if devUtil, err := mmapUtil.GetDeviceUtil(index); err != nil {
+			klog.V(3).ErrorS(err, "get device util failed", "device", index)
+		} else {
+			micro := time.UnixMicro(int64(devUtil.LastSeenTimeStamp))
 			if time.Now().Sub(micro) > 5*time.Second {
-				_ = deviceUtilWrap.Unlock(index)
+				_ = unlock()
 				klog.V(3).InfoS("Process utilization time window timeout detected, rollback using nvml driver to obtain utilization", "device", index)
 				nvmlProcessInfoFunc()
 				goto nvmlProcessUtil
 			}
-			if deviceUtilWrap.GetUtil().Devices[index].ComputeProcessesSize > 0 {
-				processInfos = append(processInfos, deviceUtilWrap.GetUtil().Devices[index].ComputeProcesses[:deviceUtilWrap.GetUtil().Devices[index].ComputeProcessesSize]...)
+			if devUtil.ComputeProcessesSize > 0 {
+				processInfos = append(processInfos, devUtil.ComputeProcesses[:devUtil.ComputeProcessesSize]...)
 			}
-			if deviceUtilWrap.GetUtil().Devices[index].GraphicsProcessesSize > 0 {
-				processInfos = append(processInfos, deviceUtilWrap.GetUtil().Devices[index].GraphicsProcesses[:deviceUtilWrap.GetUtil().Devices[index].GraphicsProcessesSize]...)
+			if devUtil.GraphicsProcessesSize > 0 {
+				processInfos = append(processInfos, devUtil.GraphicsProcesses[:devUtil.GraphicsProcessesSize]...)
 			}
 			if len(processInfos) == 0 {
 				nvmlProcessInfoFunc()
 			}
-			if deviceUtilWrap.GetUtil().Devices[index].ProcessUtilSamplesSize > 0 {
-				processUtilizationSamples = append(processUtilizationSamples, deviceUtilWrap.GetUtil().Devices[index].ProcessUtilSamples[:deviceUtilWrap.GetUtil().Devices[index].ProcessUtilSamplesSize]...)
+			if devUtil.ProcessUtilSamplesSize > 0 {
+				processUtilizationSamples = append(processUtilizationSamples, devUtil.ProcessUtilSamples[:devUtil.ProcessUtilSamplesSize]...)
 			}
-			_ = deviceUtilWrap.Unlock(index)
+			_ = unlock()
 			goto collecProcessInfo
-		} else {
-			klog.V(3).ErrorS(err, "SM Watcher lock failed, fallback to nvml driver call", "device", index)
 		}
 	}
 
@@ -870,10 +922,9 @@ func CollectorDeviceProcesses(deviceUtil *watcher.DeviceUtil, index int, hdev nv
 
 nvmlProcessUtil:
 	// On MIG-enabled GPUs, querying process utilization is not currently supported.
-	processUtilizationSamples, rt = hdev.GetProcessUtilization(uint64(time.Now().Add(-1 * time.Second).UnixMicro()))
+	processUtilizationSamples, _, rt = utilAdapter.DeviceGetEnhanceCompatibilityProcessUtilSamples(hdev)
 	if rt != nvml.SUCCESS {
 		klog.V(4).Infof("error getting process utilization for device %d: %s", index, nvml.ErrorString(rt))
-		processUtilizationSamples = nil
 	}
 
 collecProcessInfo:
@@ -916,18 +967,6 @@ func FlattenMigInfosMapEach(migInfosMap map[string][]*nvidia.MigInfo,
 				continue
 			}
 			fn(parentUUID, migInfo)
-		}
-	}
-}
-
-func FlattenDevicesEach(podDeviceClaim device.PodDeviceClaim,
-	fn func(ctrName string, claim device.DeviceClaim)) {
-	if fn == nil {
-		return
-	}
-	for _, containerClaim := range podDeviceClaim {
-		for _, claim := range containerClaim.DeviceClaims {
-			fn(containerClaim.Name, claim)
 		}
 	}
 }

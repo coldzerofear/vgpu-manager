@@ -1,10 +1,13 @@
 package allocator
 
 import (
+	"slices"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // AllocationRequest captures everything the allocator needs to decide a
@@ -29,25 +32,32 @@ type AllocationRequest struct {
 	// type/UUID filter checks against pod.Annotations, and event recording.
 	Pod *corev1.Pod
 
+	ControllerOwner *metav1.OwnerReference
+
 	// Containers is the per-container vGPU need list, in declaration order
 	// from pod.Spec.Containers, filtered to vGPU-requesting containers
 	// only. Index i here does NOT correspond to index i in pod.Spec.Containers
 	// when non-vGPU containers are interleaved.
 	Containers []ContainerNeed
 
-	// Total is the pod-wide demand: Σ (per-container vGPU count) for Number,
-	// and Σ (Number × per-vGPU cores/memory) for Cores/Memory — i.e. the
-	// true aggregate consumption across every vGPU the pod will reserve.
-	// Used by the deviceFilter node-wide capacity gate (req.Total vs
-	// GetAvailable*). Two caveats keep it a necessary-condition lower bound
-	// rather than an exact fit test:
-	//   - Memory is the UN-scaled request; the node MemoryFactor is applied
-	//     later in the allocator, so on factor>1 nodes the real demand is
-	//     higher than Total.Memory.
-	//   - a whole-card memory request (user memory==0) contributes 0 here,
-	//     so memory is undercounted for those pods.
-	// Both only make the gate looser (never false-reject); the allocator
-	// re-verifies exactly.
+	// Total is the pod-wide PEAK demand across its lifecycle:
+	// sidecarAgg + max(regularAgg, initMaxAgg) per dimension, where each
+	// aggregate is Σ/max of (per-container Number, Number × per-vGPU
+	// cores/memory). Init and app containers never run concurrently, so this
+	// is the K8s-style effective request (not a naive sum across phases); for
+	// a pod without init containers it collapses to the historical plain sum.
+	//
+	// It is filled TWICE. BuildAllocationRequest fills it from RAW user values
+	// (memory un-scaled, whole-card memory == 0) — this build-time value only
+	// feeds the node-independent Profile. Before the deviceFilter capacity
+	// gate reads it, ResetStatistics(nodeInfo) RECOMPUTES it PER NODE, applying
+	// that node's MemoryFactor and expanding whole-card memory to the card
+	// capacity on same-capacity nodes. So at gate time (req.Total vs
+	// GetAvailable*) it is node-aware and does not over-estimate, hence never
+	// false-rejects; it stays a NECESSARY condition only because a node passing
+	// it may still fail on per-card fragmentation (the allocator re-verifies
+	// exactly). On heterogeneous nodes whole-card memory stays 0 — a looser but
+	// still non-false-rejecting bound.
 	//
 	// Total.Name is unset (no container owns the aggregate) and
 	// ContainerNeed consumers should not read it.
@@ -58,7 +68,8 @@ type AllocationRequest struct {
 	// Used by the deviceFilter per-single-device structural gate (req.Max
 	// vs GetSchedulableDeviceCount / GetMaxDevice*) and by the topology
 	// fitness comparator (Max.Number = minimum link/NUMA group size the
-	// node must host). Memory is UN-scaled, same caveat as Total.
+	// node must host). Like Total, Max is recomputed per node by
+	// ResetStatistics (scaled memory, whole-card → card capacity).
 	//
 	// Max.Name is unset (no container owns the aggregate) and
 	// ContainerNeed consumers should not read it.
@@ -80,22 +91,46 @@ type AllocationRequest struct {
 	Topology       util.TopologyMode
 	TopologyStrict bool
 
+	// GangName is the gang/pod-group identifier this pod belongs to, parsed
+	// once via util.PodHasGangName (which understands coscheduling / Volcano /
+	// Koordinator / native dialects). Empty for non-gang pods. Node-independent
+	// (same for every candidate node), so it lives on the shared request rather
+	// than per-node context. Used by cross-pod NVLink allocation to resolve the
+	// component a gang's sibling pods already occupy on a node; non-gang pods
+	// (empty value) never enter the anchor path, so their behaviour is unchanged.
+	GangName string
+
+	// CrossPodTopology opts this pod into cross-pod topology affinity (parsed
+	// from CrossPodTopologyAnnotation). When true AND the pod is in a gang AND
+	// topology mode is link, the allocator keeps the pod's GPUs in the same
+	// NVLink component as same-node gang siblings, and aligns to the same
+	// component ordinal as cross-node siblings (rail alignment). Replaces the
+	// former cluster-wide feature gate with a per-pod, webhook-defaultable switch.
+	// False (default) = unchanged single-pod behaviour.
+	CrossPodTopology bool
+
+	// GangDomainKey is the cross-node-STABLE sub-domain SIGNATURE that an
+	// already-placed gang sibling occupies, computed ONCE by the filter by
+	// resolving the sibling's UUIDs on the sibling's OWN NodeInfo (so it does not
+	// depend on the possibly-stale Device.Index in the annotation). It is a single
+	// node-independent string (the gang's chosen rail-set, or "ord:N" fallback);
+	// each candidate node maps it back to its OWN component via
+	// NodeInfo.ComponentByDomain — that is where the per-node specialization
+	// happens. "" (default) = no cross-node sibling resolved yet (first pod,
+	// sibling node not a candidate, or cross-pod off).
+	GangDomainKey string
+
 	// Profile is the pod's request-weighted scoring profile. Captured
 	// here so the filter and the allocator score with identical weights
 	// for the same pod — see profile.go for the rationale.
 	Profile RequestProfile
 
-	// rawDevicePolicy is the unrecognised device policy string (if any),
-	// preserved so allocateOne can emit the "Unsupported device scheduling
-	// policy" event with the same wording as the pre-refactor code. Empty
-	// when DevicePolicy was recognised (or unset) cleanly.
-	rawDevicePolicy string
-	// rawNodePolicy is the analogue for the node policy.
-	rawNodePolicy string
-
 	// Check if the pod requires additional verification of the device's uuid or type
 	CheckDeviceUuid bool
 	CheckDeviceType bool
+
+	// HasSequentialInit Refers to a pod having at least one initialization container that is not a sidecar container
+	HasSequentialInit bool
 }
 
 // ContainerNeed is one container's vGPU-resource request, copied verbatim
@@ -106,10 +141,88 @@ type AllocationRequest struct {
 // the raw values lets the per-container allocator path apply the rules
 // against the right node's MemoryFactor.
 type ContainerNeed struct {
-	Name   string
-	Number int
-	Cores  int64
-	Memory int64
+	Name string
+	// Kind is init or app; Restartable marks a sidecar (restartPolicy: Always)
+	// init container. Together they drive the allocator's lifecycle-aware
+	// placement — sequential (non-restartable) init containers run before and
+	// never overlap the app phase, so they reuse the app phase's GPUs, while
+	// sidecars run concurrently with the app containers. Empty/false on the
+	// aggregate Total/Max (no container owns those).
+	Kind        util.ContainerKind
+	Restartable bool
+	Number      int
+	Cores       int64
+	Memory      int64
+}
+
+func (req *AllocationRequest) GetSnapshot() *AllocationRequest {
+	if req == nil {
+		return nil
+	}
+	allocationRequest := *req
+	allocationRequest.Containers = slices.Clone(req.Containers)
+	return &allocationRequest
+}
+
+// ResetStatistics Reset the statistics of max and total based on node device information
+func (req *AllocationRequest) ResetStatistics(nodeInfo *device.NodeInfo) *AllocationRequest {
+	if req == nil || nodeInfo == nil {
+		return req
+	}
+	req.Max.Number, req.Max.Cores, req.Max.Memory = 0, 0, 0
+
+	// Aggregate demand bucketed by lifecycle group so Total reflects the
+	// pod's PEAK concurrent demand (not a naive sum across non-overlapping
+	// phases). Concurrent group = regular app + sidecars (sum); sequential
+	// init containers each take the per-dimension max. cores/memory are
+	// per-vGPU, so aggregates multiply by Number. Mirrors device.ReducePodFootprint
+	// at the node-aggregate level.
+	var sidecarAgg, regularAgg, initMaxAgg ContainerNeed
+	for i := range req.Containers {
+		need := &req.Containers[i]
+
+		number := int64(need.Number)
+		// cores/memory are PER-VGPU (each of need.Number vGPUs lands on a
+		// distinct card and consumes this much). Max tracks the single largest
+		// device requirement across ALL containers (init included), so it does
+		// NOT multiply by Number; the per-group aggregates below do.
+		cores, memory := resolveContainerNeeds(*need, nodeInfo.MemoryFactor,
+			nodeInfo.HasSameCapacity(), nodeInfo.GetMaxDeviceMemory())
+
+		req.Max.Number = max(req.Max.Number, need.Number)
+		req.Max.Cores = max(req.Max.Cores, cores)
+		req.Max.Memory = max(req.Max.Memory, memory)
+
+		aggCores, aggMemory := cores*number, memory*number
+		switch {
+		case need.Kind == util.ContainerKindInit && !need.Restartable:
+			// Sequential init: runs alone, take the per-dimension max.
+			initMaxAgg.Number = max(initMaxAgg.Number, need.Number)
+			initMaxAgg.Cores = max(initMaxAgg.Cores, aggCores)
+			initMaxAgg.Memory = max(initMaxAgg.Memory, aggMemory)
+		case need.Restartable:
+			// Sidecar: runs throughout, sum into the concurrent group.
+			sidecarAgg.Number += need.Number
+			sidecarAgg.Cores += aggCores
+			sidecarAgg.Memory += aggMemory
+		default:
+			// Regular app container: sum into the concurrent group.
+			regularAgg.Number += need.Number
+			regularAgg.Cores += aggCores
+			regularAgg.Memory += aggMemory
+		}
+	}
+
+	// Effective peak demand: sidecars run for the whole pod life (constant
+	// addend present in both the app phase and every sequential-init phase);
+	// the variable part is whichever peaks higher — the app phase (regularAgg)
+	// or the heaviest single sequential init phase (initMaxAgg). For a pod
+	// without init containers this collapses to the historical plain sum.
+	req.Total.Number = sidecarAgg.Number + max(regularAgg.Number, initMaxAgg.Number)
+	req.Total.Cores = sidecarAgg.Cores + max(regularAgg.Cores, initMaxAgg.Cores)
+	req.Total.Memory = sidecarAgg.Memory + max(regularAgg.Memory, initMaxAgg.Memory)
+
+	return req
 }
 
 // BuildAllocationRequest parses one pod into an AllocationRequest, doing
@@ -119,41 +232,92 @@ type ContainerNeed struct {
 // against memoryFactor stays inside allocateOne where the relevant node
 // is unambiguous.
 func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
-	req := &AllocationRequest{Pod: pod}
+	req := &AllocationRequest{
+		Pod:             pod,
+		ControllerOwner: metav1.GetControllerOf(pod),
+		// GangDomainKey defaults to "" (no cross-node sibling resolved yet).
+	}
 
-	for i := range pod.Spec.Containers {
-		c := &pod.Spec.Containers[i]
+	// Aggregate demand bucketed by lifecycle group so Total reflects the
+	// pod's PEAK concurrent demand (not a naive sum across non-overlapping
+	// phases). Concurrent group = regular app + sidecars (sum); sequential
+	// init containers each take the per-dimension max. cores/memory are
+	// per-vGPU, so aggregates multiply by Number. Mirrors device.ReducePodFootprint
+	// at the node-aggregate level.
+	var sidecarAgg, regularAgg, initMaxAgg ContainerNeed
+
+	addContainer := func(c *corev1.Container, kind util.ContainerKind, restartable bool) {
 		number := util.GetResourceOfContainer(c, util.VGPUNumberResourceName)
 		if number <= 0 {
-			continue
+			return
 		}
 		need := ContainerNeed{
-			Name:   c.Name,
-			Number: int(number),
-			Cores:  util.GetResourceOfContainer(c, util.VGPUCoreResourceName),
-			Memory: util.GetResourceOfContainer(c, util.VGPUMemoryResourceName),
+			Name:        c.Name,
+			Kind:        kind,
+			Restartable: restartable,
+			Number:      int(number),
+			Cores:       util.GetResourceOfContainer(c, util.VGPUCoreResourceName),
+			Memory:      util.GetResourceOfContainer(c, util.VGPUMemoryResourceName),
 		}
 		req.Containers = append(req.Containers, need)
 
 		// cores/memory are PER-VGPU (each of need.Number vGPUs lands on a
-		// distinct card and consumes this much). Total tracks the pod-wide
-		// demand, so multiply by Number; Max tracks the single-device
-		// requirement, so it does NOT.
-		cores, memory := resolveContainerNeeds(need, 0)
-		req.Total.Number += need.Number
-		req.Total.Cores += cores * number
-		req.Total.Memory += memory * number
-
+		// distinct card and consumes this much). Max tracks the single largest
+		// device requirement across ALL containers (init included), so it does
+		// NOT multiply by Number; the per-group aggregates below do.
+		cores, memory := resolveContainerNeeds(need, 0, false, 0)
 		req.Max.Number = max(req.Max.Number, need.Number)
 		req.Max.Cores = max(req.Max.Cores, cores)
 		req.Max.Memory = max(req.Max.Memory, memory)
+
+		aggCores, aggMemory := cores*number, memory*number
+		switch {
+		case kind == util.ContainerKindInit && !restartable:
+			// Sequential init: runs alone, take the per-dimension max.
+			initMaxAgg.Number = max(initMaxAgg.Number, need.Number)
+			initMaxAgg.Cores = max(initMaxAgg.Cores, aggCores)
+			initMaxAgg.Memory = max(initMaxAgg.Memory, aggMemory)
+			req.HasSequentialInit = true
+		case restartable:
+			// Sidecar: runs throughout, sum into the concurrent group.
+			sidecarAgg.Number += need.Number
+			sidecarAgg.Cores += aggCores
+			sidecarAgg.Memory += aggMemory
+		default:
+			// Regular app container: sum into the concurrent group.
+			regularAgg.Number += need.Number
+			regularAgg.Cores += aggCores
+			regularAgg.Memory += aggMemory
+		}
 	}
 
+	// init containers first (matches kubelet's Allocate call order and the
+	// device-plugin PreAlloc cursor), then regular app containers.
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		addContainer(c, util.ContainerKindInit, util.IsRestartableInitContainer(c))
+	}
+	for i := range pod.Spec.Containers {
+		addContainer(&pod.Spec.Containers[i], util.ContainerKindApp, false)
+	}
+
+	// Effective peak demand: sidecars run for the whole pod life (constant
+	// addend present in both the app phase and every sequential-init phase);
+	// the variable part is whichever peaks higher — the app phase (regularAgg)
+	// or the heaviest single sequential init phase (initMaxAgg). For a pod
+	// without init containers this collapses to the historical plain sum.
+	req.Total.Number = sidecarAgg.Number + max(regularAgg.Number, initMaxAgg.Number)
+	req.Total.Cores = sidecarAgg.Cores + max(regularAgg.Cores, initMaxAgg.Cores)
+	req.Total.Memory = sidecarAgg.Memory + max(regularAgg.Memory, initMaxAgg.Memory)
+
 	if len(req.Containers) > 0 {
-		req.NodePolicy, req.rawNodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
-		req.DevicePolicy, req.rawDevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
+		req.NodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
+		req.DevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
 		req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
-		req.Profile = NewRequestProfile(pod)
+		req.GangName, _ = util.PodHasGangName(pod)
+		if v, ok := util.HasAnnotation(pod, util.CrossPodTopologyAnnotation); ok {
+			req.CrossPodTopology = strings.EqualFold(v, "true")
+		}
 
 		_, ok1 := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation)
 		_, ok2 := util.HasAnnotation(pod, util.PodExcludeGPUUUIDAnnotation)
@@ -162,22 +326,12 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		_, ok1 = util.HasAnnotation(pod, util.PodIncludeGpuTypeAnnotation)
 		_, ok2 = util.HasAnnotation(pod, util.PodExcludeGpuTypeAnnotation)
 		req.CheckDeviceType = ok1 || ok2
+
+		//req.Profile = UniformProfile
+		req.Profile = NewRequestProfile(req)
 	}
 
 	return req
-}
-
-// RawNodePolicy returns the user-typed node-scheduler-policy string. Used
-// by the filter to emit the "Unsupported node scheduling policy" event
-// with the unrecognised value verbatim — the parsed NodePolicy collapses
-// unknown values to NonePolicy, which would lose the original string.
-func (r *AllocationRequest) RawNodePolicy() string {
-	return r.rawNodePolicy
-}
-
-// RawDevicePolicy is the device-scheduler-policy analogue of RawNodePolicy.
-func (r *AllocationRequest) RawDevicePolicy() string {
-	return r.rawDevicePolicy
 }
 
 // parseSchedulerPolicy reads a SchedulerPolicy annotation and returns
@@ -185,16 +339,18 @@ func (r *AllocationRequest) RawDevicePolicy() string {
 // Unrecognised input (including empty and "none") maps to NonePolicy so
 // downstream switches only have to handle the three known cases; the
 // raw string is preserved for diagnostic events.
-func parseSchedulerPolicy(pod *corev1.Pod, annotation string) (util.SchedulerPolicy, string) {
+func parseSchedulerPolicy(pod *corev1.Pod, annotation string) util.SchedulerPolicy {
 	raw, _ := util.HasAnnotation(pod, annotation)
 	lower := strings.ToLower(raw)
 	switch util.SchedulerPolicy(lower) {
 	case util.BinpackPolicy:
-		return util.BinpackPolicy, lower
+		return util.BinpackPolicy
 	case util.SpreadPolicy:
-		return util.SpreadPolicy, lower
+		return util.SpreadPolicy
+	case util.NonePolicy, "":
+		return util.NonePolicy
 	default:
-		return util.NonePolicy, lower
+		return util.SchedulerPolicy(lower)
 	}
 }
 
@@ -206,5 +362,5 @@ func parseSchedulerPolicy(pod *corev1.Pod, annotation string) (util.SchedulerPol
 func parsePodTopologyMode(pod *corev1.Pod) (mode util.TopologyMode, strict bool) {
 	raw, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
 	tm := util.TopologyMode(strings.ToLower(raw))
-	return tm.BaseTopology(), tm.IsStrictTopology()
+	return tm, tm.IsStrictTopology()
 }

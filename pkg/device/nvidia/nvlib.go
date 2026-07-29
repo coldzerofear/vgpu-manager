@@ -29,6 +29,7 @@ import (
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/klog/v2"
 )
@@ -57,6 +58,7 @@ type GpuInfo struct {
 	MigCapable            bool                             `json:"-"`
 	MigEnabled            bool                             `json:"-"`
 	PciInfo               nvml.PciInfo                     `json:"-"`
+	PciBusID              string                           `json:"-"`
 	Memory                nvml.Memory                      `json:"-"`
 	ProductName           string                           `json:"-"`
 	Brand                 string                           `json:"-"`
@@ -66,6 +68,7 @@ type GpuInfo struct {
 	DriverVersion         DriverVersion                    `json:"-"`
 	PciBusIDAttr          *deviceattribute.DeviceAttribute `json:"-"`
 	PcieRootAttr          *deviceattribute.DeviceAttribute `json:"-"`
+	NumaNodeAttr          *deviceattribute.DeviceAttribute `json:"-"`
 	AddressingMode        *string                          `json:"-"`
 }
 
@@ -83,10 +86,14 @@ func (g *GpuInfo) GetPaths() ([]string, error) {
 	return []string{fmt.Sprintf("/dev/nvidia%d", g.Minor)}, nil
 }
 
+func (g GpuInfo) GetPciInfo() links.PciInfo {
+	return links.PciInfo(g.PciInfo)
+}
+
 // GetNumaNode returns the NUMA node associated with the GPU device
-func (g GpuInfo) GetNumaNode() (int32, bool) {
-	node := links.PciInfo(g.PciInfo).NumaNode()
-	return node, node >= 0
+func (g GpuInfo) GetNumaNode() int32 {
+	node, _ := links.PciInfo(g.PciInfo).NumaNode()
+	return node
 }
 
 type MigInfo struct {
@@ -228,7 +235,7 @@ func (l DeviceLib) NvmlInitWithFlags(flags uint32) error {
 	klog.V(6).Infof("Call NVML InitWithFlags: %d", flags)
 	ret := l.nvmlInterface.InitWithFlags(flags)
 	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error initializing NVML: %v", ret)
+		return fmt.Errorf("error initializing NVML: %w", ret)
 	}
 	return nil
 }
@@ -237,7 +244,7 @@ func (l DeviceLib) NvmlInit() error {
 	klog.V(6).Infof("Call NVML Init")
 	ret := l.nvmlInterface.Init()
 	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error initializing NVML: %v", ret)
+		return fmt.Errorf("error initializing NVML: %w", ret)
 	}
 	return nil
 }
@@ -287,6 +294,8 @@ func (l DeviceLib) GetDriverVersion() (DriverVersion, error) {
 	return driverVersion, nil
 }
 
+const StandardDeviceAttributeNumaNode resourceapi.QualifiedName = deviceattribute.StandardDeviceAttributePrefix + "numaNode"
+
 func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) {
 	//if err := l.NvmlInit(); err != nil {
 	//	return nil, err
@@ -298,11 +307,11 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		minor = index
 		klog.Warningf("device %d not support getting minor number, try using index as minor number", index)
 	} else if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting minor number for device %d: %v", index, ret)
+		return nil, fmt.Errorf("error getting minor number for device %d: %w", index, ret)
 	}
 	uuid, ret := device.GetUUID()
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting UUID for device %d: %v", index, ret)
+		return nil, fmt.Errorf("error getting UUID for device %d: %w", index, ret)
 	}
 	migCapable, err := device.IsMigCapable()
 	if err != nil {
@@ -317,12 +326,12 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		if ret == nvml.ERROR_NOT_SUPPORTED {
 			klog.Infof("device %d does not support getting memory info (possible unified memory architecture), skipping", index)
 		} else {
-			return nil, fmt.Errorf("error getting memory info for device %d: %v", index, ret)
+			return nil, fmt.Errorf("error getting memory info for device %d: %w", index, ret)
 		}
 	}
 	productName, ret := device.GetName()
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting product name for device %d: %v", index, ret)
+		return nil, fmt.Errorf("error getting product name for device %d: %w", index, ret)
 	}
 	architecture, err := device.GetArchitectureAsString()
 	if err != nil {
@@ -338,13 +347,12 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	}
 	pciInfo, ret := device.GetPciInfo()
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting pci info for device %d: %v", index, ret)
+		return nil, fmt.Errorf("error getting pci info for device %d: %w", index, ret)
 	}
 	driverVersion, err := l.GetDriverVersion()
 	if err != nil {
 		return nil, err
 	}
-	pciBusID := links.PciInfo(pciInfo).BusID()
 
 	// Get the memory-addressing mode supported by the device.
 	// On coherent-memory systems, the possible modes are:
@@ -359,6 +367,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		addressingMode = &mode
 	}
 
+	pciBusID := links.PciInfo(pciInfo).BusID()
 	var pciBusIDAttr *deviceattribute.DeviceAttribute
 	attr, err := deviceattribute.GetPCIBusIDAttribute(pciBusID)
 	if err != nil {
@@ -433,6 +442,7 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		MigCapable:            migCapable,
 		MigEnabled:            migEnabled,
 		PciInfo:               pciInfo,
+		PciBusID:              pciBusID,
 		Memory:                memory,
 		ProductName:           productName,
 		Brand:                 brand,
@@ -445,7 +455,36 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		AddressingMode:        addressingMode,
 	}
 
+	numaNode, err := l.discoverNumaNode(device.GetNumaNodeId, gpuInfo.GetPciInfo().NumaNode)
+	if err != nil {
+		klog.Warningf("error getting NUMA node ID for device %d, continuing without NUMA node attribute: %v", index, err)
+	}
+
+	if numaNode != nil && *numaNode >= 0 {
+		numaNodeId := int64(*numaNode)
+		gpuInfo.NumaNodeAttr = &deviceattribute.DeviceAttribute{
+			Name:  StandardDeviceAttributeNumaNode,
+			Value: resourceapi.DeviceAttribute{IntValue: &numaNodeId},
+		}
+	}
+
 	return gpuInfo, nil
+}
+
+func (l DeviceLib) discoverNumaNode(getNVMLNumaNode func() (int, nvml.Return), getPcieNumaNode func() (int32, error)) (*int, error) {
+	if node, ret := getNVMLNumaNode(); ret == nvml.SUCCESS && node >= 0 {
+		return &node, nil
+	} else if ret != nvml.SUCCESS {
+		klog.V(4).Infof("NVML NUMA node ID unavailable for PCI bus ID, falling back to PCI sysfs: %v", ret)
+	}
+
+	numaNode, err := getPcieNumaNode()
+	if err != nil {
+		klog.Warningf("error getting PCI device for PCI bus ID, continuing without NUMA node attribute: %v", err)
+		return nil, err
+	}
+	node := int(numaNode)
+	return &node, nil
 }
 
 func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
@@ -460,42 +499,42 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 
 	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting GPU device handle: %v", ret)
+		return nil, fmt.Errorf("error getting GPU device handle: %w", ret)
 	}
 
 	migInfos := make(map[string]*MigInfo)
 	err := walkMigDevices(device, func(i int, migDevice nvml.Device) error {
 		memoryInfo, ret := migDevice.GetMemoryInfo()
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error getting memory info for MIG device: %v", ret)
+			return fmt.Errorf("error getting memory info for MIG device: %w", ret)
 		}
 		giID, ret := migDevice.GetGpuInstanceId()
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error getting GPU instance ID for MIG device: %v", ret)
+			return fmt.Errorf("error getting GPU instance ID for MIG device: %w", ret)
 		}
 		gi, ret := device.GetGpuInstanceById(giID)
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error getting GPU instance for '%v': %v", giID, ret)
+			return fmt.Errorf("error getting GPU instance for '%v': %w", giID, ret)
 		}
 		giInfo, ret := gi.GetInfo()
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error getting GPU instance info for '%v': %v", giID, ret)
+			return fmt.Errorf("error getting GPU instance info for '%v': %w", giID, ret)
 		}
 		ciID, ret := migDevice.GetComputeInstanceId()
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error getting Compute instance ID for MIG device: %v", ret)
+			return fmt.Errorf("error getting Compute instance ID for MIG device: %w", ret)
 		}
 		ci, ret := gi.GetComputeInstanceById(ciID)
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error getting Compute instance for '%v': %v", ciID, ret)
+			return fmt.Errorf("error getting Compute instance for '%v': %w", ciID, ret)
 		}
 		ciInfo, ret := ci.GetInfo()
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error getting Compute instance info for '%v': %v", ciID, ret)
+			return fmt.Errorf("error getting Compute instance info for '%v': %w", ciID, ret)
 		}
 		uuid, ret := migDevice.GetUUID()
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error getting UUID for MIG device: %v", ret)
+			return fmt.Errorf("error getting UUID for MIG device: %w", ret)
 		}
 
 		var migProfile *MigProfileInfo
@@ -557,7 +596,7 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 func walkMigDevices(d nvml.Device, f func(i int, d nvml.Device) error) error {
 	count, ret := d.GetMaxMigDeviceCount()
 	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error getting max MIG device count: %v", ret)
+		return fmt.Errorf("error getting max MIG device count: %w", ret)
 	}
 
 	for i := 0; i < count; i++ {
@@ -569,7 +608,7 @@ func walkMigDevices(d nvml.Device, f func(i int, d nvml.Device) error) error {
 			continue
 		}
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("error getting MIG device handle at index '%v': %v", i, ret)
+			return fmt.Errorf("error getting MIG device handle at index '%v': %w", i, ret)
 		}
 		if err := f(i, device); err != nil {
 			return err

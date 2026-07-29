@@ -3,88 +3,12 @@ package vmem
 import (
 	"fmt"
 	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/klog/v2"
-)
-
-//#include <stdio.h>
-//#include <stdint.h>
-//#include <sys/types.h>
-//#include <sys/stat.h>
-//#include <fcntl.h>
-//#include <string.h>
-//#include <sys/file.h>
-//#include <time.h>
-//#include <stdlib.h>
-//#include <unistd.h>
-//#include <sys/mman.h>
-//
-//#ifndef MAX_DEVICE_COUNT
-//#define MAX_DEVICE_COUNT 16
-//#endif
-//
-//#ifndef MAX_PIDS
-//#define MAX_PIDS 1024
-//#endif
-//
-//struct process_used_t {
-//  int pid;
-//  size_t used;
-//};
-//
-//struct device_vmem_used_t {
-//  struct process_used_t processes[MAX_PIDS];
-//  unsigned int processes_size;
-//  unsigned char lock_byte;
-//};
-//
-//struct device_vmemory_t {
-//  struct device_vmem_used_t devices[MAX_DEVICE_COUNT];
-//};
-//
-//#define GET_VMEMORY_LOCK_OFFSET(device_index) \
-//  offsetof(struct device_vmemory_t, devices[device_index].lock_byte)
-//
-//int device_vmem_read_lock(int ordinal, const char* filepath) {
-//  if (ordinal >= MAX_DEVICE_COUNT) {
-//    return -1;
-//  }
-//  int fd = open(filepath, O_RDONLY | O_CLOEXEC);
-//  if (fd == -1) {
-//    return -1;
-//  }
-//  struct flock lock;
-//  lock.l_type = F_RDLCK;
-//  lock.l_whence = SEEK_SET;
-//  lock.l_start = GET_VMEMORY_LOCK_OFFSET(ordinal);
-//  lock.l_len = 1;
-//  lock.l_pid = 0;
-//  if (fcntl(fd, F_SETLKW, &lock) == -1) {
-//    close(fd);
-//    return -1;
-//  }
-//  return fd;
-//}
-//
-//void device_vmem_unlock(int fd, int ordinal) {
-//  if (fd < 0) return;
-//  struct flock lock;
-//  lock.l_type = F_UNLCK;
-//  lock.l_whence = SEEK_SET;
-//  lock.l_start = GET_VMEMORY_LOCK_OFFSET(ordinal);
-//  lock.l_len = 1;
-//  lock.l_pid = 0;
-//  fcntl(fd, F_SETLK, &lock);
-//  close(fd);
-//}
-//
-import "C"
-
-const (
-	MaxPids        = C.MAX_PIDS
-	MaxDeviceCount = C.MAX_DEVICE_COUNT
 )
 
 type ProcessUsedT struct {
@@ -93,130 +17,180 @@ type ProcessUsedT struct {
 }
 
 type DeviceVMemUsedT struct {
-	Processes     [MaxPids]ProcessUsedT
+	Processes     [util.MaxDevicePids]ProcessUsedT
 	ProcessesSize uint32
 	LockByte      uint8
 }
 
+// Frozen header of the vmem_node region. Must match library/include/hook.h
+// byte for byte: VMEM_NODE_MAGIC / VMEM_NODE_LAYOUT_VERSION, and the file size
+// the library ftruncates to.
+const (
+	VMemNodeMagic         uint32 = 0x564D4E44 // "VMND"
+	VMemNodeLayoutVersion uint32 = 1
+	VMemNodeFileSize      int64  = 320 * 1024
+)
+
+// ErrUnknownLayout means the region was written by a library version this
+// binary does not understand. The correct response is to treat the container
+// as having no data for now, never to rebuild: the library may rebuild because
+// a layout mismatch proves the file predates the running container, but the
+// manager lives outside any container's lifecycle and would be erasing the
+// ledger of a container that is very much alive.
+var ErrUnknownLayout = fmt.Errorf("unknown vmem_node layout")
+
+// DeviceVMemoryT mirrors device_vmemory_t. The 128-byte header is NOT
+// decoration: it shifts Devices, and therefore every per-device lock offset,
+// down by one cache line. See getVmemoryLockOffset.
 type DeviceVMemoryT struct {
-	Devices [C.MAX_DEVICE_COUNT]DeviceVMemUsedT
+	Magic         uint32
+	LayoutVersion uint32
+	RegionSize    uint32
+	DeviceCount   uint32
+	_             [112]byte // pad the header to one 128B cache line
+	Devices       [util.MaxDeviceCount]DeviceVMemUsedT
 }
 
-type DeviceVMemory struct {
-	deviceVMem *DeviceVMemoryT
-	deviceData []byte
-	filePath   string
-}
-
-type DeviceVMemoryWrap struct {
-	deviceVMem *DeviceVMemoryT
-	filePath   string
-	fd         int
-}
-
-func (d *DeviceVMemory) GetWrap() *DeviceVMemoryWrap {
-	return &DeviceVMemoryWrap{
-		deviceVMem: d.deviceVMem,
-		filePath:   d.filePath,
-		fd:         -1,
+func (d *DeviceVMemUsedT) GetTotalUsed() uint64 {
+	used := uint64(0)
+	for index := uint32(0); index < d.ProcessesSize; index++ {
+		used += d.Processes[index].Used
 	}
+	return used
 }
 
-// GetVMem Lock access should be added during use
-func (d *DeviceVMemoryWrap) GetVMem() *DeviceVMemoryT {
-	return d.deviceVMem
+type MmapDeviceVMemory struct {
+	mutex    sync.RWMutex
+	vMemory  *DeviceVMemoryT
+	mmapFile *util.MmapFile
 }
 
-func (d *DeviceVMemoryWrap) RLock(ordinal int) error {
-	if d == nil {
-		return fmt.Errorf("DeviceVMemoryWrap is nil")
+func (m *MmapDeviceVMemory) Close() error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	return m.mmapFile.Close()
+}
+
+func (m *MmapDeviceVMemory) RLock(deviceIndex int) (unlock func() error, err error) {
+	if deviceIndex < 0 || deviceIndex >= util.MaxDeviceCount {
+		return util.NilUnlock, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
 	}
-	if d.fd >= 0 {
-		return fmt.Errorf("lock already exists")
-	}
-	if len(d.filePath) == 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
-		return fmt.Errorf("invalid parameter, filepath=%s, device=%d", d.filePath, ordinal)
-	}
-	fd, err := DeviceVMemRLock(ordinal, d.filePath)
+	// The RWMutex read lock only guards the mmap lifetime: it keeps Reload/Close
+	// (which take the exclusive lock) from unmapping m.vMemory while a reader is
+	// dereferencing it. It does NOT stand in for the fcntl lock.
+	m.mutex.RLock()
+
+	// Open a dedicated fd per reader for the cross-process fcntl lock. fcntl
+	// record locks are not refcounted per open-file-description, so a shared fd
+	// would let one reader's F_UNLCK drop a concurrent same-device reader's lock
+	// and expose it to a torn read from the writer. A private fd gives each
+	// reader an independent OFD lock; with OFD, closing it never disturbs others.
+	file, err := os.Open(m.mmapFile.Path)
 	if err != nil {
-		return err
+		m.mutex.RUnlock()
+		return util.NilUnlock, err
 	}
-	d.fd = fd
-	return nil
-}
+	offset := getVmemoryLockOffset(deviceIndex)
+	if err = util.FcntlRecordLock(file.Fd(), syscall.F_RDLCK, true, offset); err != nil {
+		_ = file.Close()
+		m.mutex.RUnlock()
+		return util.NilUnlock, fmt.Errorf("fcntl read lock device %d at offset %d: %w", deviceIndex, offset, err)
+	}
 
-func (d *DeviceVMemoryWrap) Unlock(ordinal int) error {
-	if d == nil {
-		return fmt.Errorf("DeviceVMemoryWrap is nil")
-	}
-	if d.fd < 0 || ordinal < 0 || ordinal >= MaxDeviceCount {
-		return fmt.Errorf("invalid parameter, fd=%d, device=%d", d.fd, ordinal)
-	}
-	DeviceVMemUnlock(d.fd, ordinal)
-	d.fd = -1
-	return nil
-}
-
-func (d *DeviceVMemory) Munmap() error {
-	if d == nil {
-		return fmt.Errorf("DeviceVMemory is nil")
-	}
-	return syscall.Munmap(d.deviceData)
-}
-
-func NewDeviceVMemory(filePath string) (*DeviceVMemory, error) {
-	vmem, data, err := MmapDeviceVMemoryT(filePath)
-	if err != nil {
-		return nil, err
-	}
-	return &DeviceVMemory{
-		deviceVMem: vmem,
-		deviceData: data,
-		filePath:   filePath,
+	var unlockOnce sync.Once
+	var unlockErr error
+	return func() error {
+		// Guard the whole teardown with Once so a second call is a no-op instead
+		// of double-closing the fd or unlocking an unlocked mutex.
+		unlockOnce.Do(func() {
+			unlockErr = util.FcntlRecordLock(file.Fd(), syscall.F_UNLCK, false, offset)
+			_ = file.Close()
+			m.mutex.RUnlock()
+		})
+		return unlockErr
 	}, nil
 }
 
-func MmapDeviceVMemoryT(filePath string) (*DeviceVMemoryT, []byte, error) {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		//klog.Errorf("Failed to stat file: %s, error: %v", filePath, err)
-		return nil, nil, err
+func (m *MmapDeviceVMemory) GetDeviceMemory(deviceIndex int) (*DeviceVMemUsedT, error) {
+	if deviceIndex >= util.MaxDeviceCount || deviceIndex < 0 {
+		return nil, fmt.Errorf("device index %d out of range [0, %v)", deviceIndex, util.MaxDeviceCount)
 	}
-	dataSize := int64(unsafe.Sizeof(DeviceVMemoryT{}))
-	if fileInfo.Size() != dataSize {
-		klog.Errorf("File size mismatch, expected: %d, actual: %d", dataSize, fileInfo.Size())
-		return nil, nil, fmt.Errorf("file size mismatch")
-	}
-	f, err := os.OpenFile(filePath, os.O_RDWR, 0644)
-	if err != nil {
-		klog.Errorf("Failed to open file: %s, error: %v", filePath, err)
-		return nil, nil, err
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-	data, err := syscall.Mmap(int(f.Fd()), 0, int(dataSize), syscall.PROT_READ, syscall.MAP_PRIVATE)
-	if err != nil {
-		klog.Errorf("Failed to mmap file: %s, error: %v", filePath, err)
-		return nil, nil, err
-	}
-	resourceData := (*DeviceVMemoryT)(unsafe.Pointer(&data[0]))
-	return resourceData, data, nil
+	return &m.vMemory.Devices[deviceIndex], nil
 }
 
-// DeviceVMemRLock get device virtual memory file read lock
-func DeviceVMemRLock(ordinal int, filepath string) (int, error) {
-	cFilePath := C.CString(filepath)
-	defer C.free(unsafe.Pointer(cFilePath))
-
-	fd := C.device_vmem_read_lock(C.int(ordinal), cFilePath)
-	if fd == -1 {
-		return -1, fmt.Errorf("failed to acquire lock for device %d at path %s", ordinal, filepath)
-	}
-	return int(fd), nil
+func (m *MmapDeviceVMemory) NeedsReload() (reload bool, err error) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+	return m.mmapFile.NeedsReload()
 }
 
-// DeviceVMemUnlock unlock device virtual memory file
-func DeviceVMemUnlock(fd int, ordinal int) {
-	C.device_vmem_unlock(C.int(fd), C.int(ordinal))
+func (m *MmapDeviceVMemory) Reload() error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	data, err := NewMmapDeviceVMemory(m.mmapFile.Path)
+	if err != nil {
+		return fmt.Errorf("reload %q failed: %w", m.mmapFile.Path, err)
+	}
+	_ = m.mmapFile.Close()
+	m.vMemory = data.vMemory
+	m.mmapFile = data.mmapFile
+	return nil
+}
+
+func getVmemoryLockOffset(deviceIndex int) int64 {
+	// Must mirror the writer side (library/src/lock.c GET_VMEMORY_LOCK_OFFSET):
+	// offsetof(device_vmemory_t, devices[deviceIndex].lock_byte).
+	// unsafe.Offsetof only yields the field offset within a single
+	// DeviceVMemUsedT (the array index is ignored, it is a compile-time
+	// constant), so the per-device stride must be added explicitly.
+	// The base offset of the Devices array is REQUIRED and easy to forget.
+	// unsafe.Offsetof(DeviceVMemUsedT{}.LockByte) is the offset within one
+	// element; without adding where the array itself starts, every lock lands
+	// 128 bytes short of the range C locks.
+	//
+	// Getting this wrong reports no error anywhere. Go and C would simply lock
+	// disjoint byte ranges, each believing it holds the lock, and the manager
+	// would read a ledger being mutated underneath it -- wrong numbers, no
+	// warning. C is immune because GET_VMEMORY_LOCK_OFFSET uses offsetof() on
+	// the whole struct, which accounts for the header automatically; this is
+	// the only side computed by hand. TestVMemoryLockOffsetMatchesC pins it.
+	base := int64(unsafe.Offsetof(DeviceVMemoryT{}.Devices))
+	deviceSize := int64(unsafe.Sizeof(DeviceVMemUsedT{}))
+	lockByteOffset := int64(unsafe.Offsetof(DeviceVMemUsedT{}.LockByte))
+	return base + int64(deviceIndex)*deviceSize + lockByteOffset
+}
+
+func NewMmapDeviceVMemory(filePath string) (*MmapDeviceVMemory, error) {
+	mmapFile, err := util.OpenMmap(filePath, util.DefaultReadOnlyMmap)
+	if err != nil {
+		return nil, err
+	}
+	// The file is a fixed size now, decoupled from sizeof(DeviceVMemoryT), so
+	// that the library never resizes it -- a shrink would leave this mapping
+	// extending past EOF and touching it would be SIGBUS in the manager.
+	size := mmapFile.FileInfo.Size()
+	if size != VMemNodeFileSize {
+		klog.V(4).Infof("vmem_node size mismatch, expected: %d, actual: %d", VMemNodeFileSize, size)
+		_ = mmapFile.Close()
+		return nil, ErrUnknownLayout
+	}
+	data := (*DeviceVMemoryT)(unsafe.Pointer(&mmapFile.Data[0]))
+	// Header check, deliberately after the size check and deliberately not
+	// fatal. It also covers what a size check cannot: a layout that changed
+	// without changing size. Skipping is the only correct action -- see
+	// ErrUnknownLayout. A container mid-rebuild publishes magic last, so it is
+	// observed here as "not ready yet" and picked up on a later pass.
+	if data.Magic != VMemNodeMagic || data.LayoutVersion != VMemNodeLayoutVersion ||
+		data.RegionSize != uint32(unsafe.Sizeof(DeviceVMemoryT{})) ||
+		data.DeviceCount != uint32(util.MaxDeviceCount) {
+		klog.V(4).Infof("vmem_node layout not recognised (magic=%#x ver=%d size=%d count=%d)",
+			data.Magic, data.LayoutVersion, data.RegionSize, data.DeviceCount)
+		_ = mmapFile.Close()
+		return nil, ErrUnknownLayout
+	}
+	return &MmapDeviceVMemory{
+		vMemory:  data,
+		mmapFile: mmapFile,
+	}, nil
 }

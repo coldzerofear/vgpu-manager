@@ -1,7 +1,16 @@
 # Declared here for use in FROM directives below
+ARG TOOLKIT_CONTAINER_IMAGE=unknown
+
 ARG BASE_BUILD_IMAGE=unknown
 
 FROM ${BASE_BUILD_IMAGE} AS builder
+
+# Pull the nvidia-cdi-hook binary out of the relevant toolkit container (arch:
+# TARGETPLATFORM). It is installed onto the host by the `install` init container
+# (via install_files.sh) and referenced from the generated CDI specification when
+# a cdi-* device-list-strategy is enabled. The explicit --platform keeps the
+# binary matching the target node arch (and makes Dockerfile.cross skip it).
+FROM --platform=$TARGETPLATFORM ${TOOLKIT_CONTAINER_IMAGE} AS toolkit
 
 FROM quay.io/jitesoft/ubuntu:20.04
 
@@ -41,5 +50,8 @@ COPY --from=builder /vgpu-controller/build/mem_occupy_tool    /installed/tools/m
 COPY --from=builder /vgpu-controller/build/mem_managed_tool   /installed/tools/mem_managed_tool
 COPY --from=builder /vgpu-controller/build/mem_view_tool      /installed/tools/mem_view_tool
 COPY --from=builder /go/src/vgpu-manager/bin/device-client    /installed/registry/device-client
+# Bundled NVIDIA CDI hook; installed to the host (/etc/vgpu-manager/nvidia-cdi-hook)
+# by the install init container and referenced from the generated CDI spec.
+COPY --from=toolkit /artifacts/rpm/usr/bin/nvidia-cdi-hook    /installed/tools/nvidia-cdi-hook
 
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload

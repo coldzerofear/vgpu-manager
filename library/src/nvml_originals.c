@@ -77,6 +77,12 @@ nvmlReturn_t nvmlDeviceGetProcessUtilization(
                          lastSeenTimeStamp);
 }
 
+nvmlReturn_t nvmlDeviceGetProcessesUtilizationInfo(
+    nvmlDevice_t device, nvmlProcessesUtilizationInfo_t *processesUtilInfo) {
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetProcessesUtilizationInfo,
+                         device, processesUtilInfo);
+}
+
 nvmlReturn_t nvmlDeviceClearAccountingPids(nvmlDevice_t device) {
   return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceClearAccountingPids,
                          device);

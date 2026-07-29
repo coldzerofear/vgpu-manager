@@ -11,6 +11,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
@@ -64,27 +65,123 @@ func (alloc *allocator) addContainerAllocate(contDevices *device.ContainerDevice
 func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.FilterReason, error) {
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
-	newPod := pod.DeepCopy()
+	var newPod = pod.DeepCopy()
 	var deviceClaims device.PodDeviceClaim
-	for _, need := range req.Containers {
-		containerClaims, rsn, err := alloc.allocateOne(req, need)
-		if err != nil {
-			klog.V(3).ErrorS(err, "container allocation internal error",
-				"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
-			return nil, nil, err
+
+	// Does the pod have a sequential (non-restartable) init container that
+	// requests vGPU? Only then do we need the lifecycle-aware two-pass; the
+	// common case (and sidecar-only pods) stays on the single-pass fast path.
+	if !req.HasSequentialInit {
+		// Fast path: every vGPU container runs concurrently (regular app +
+		// optional sidecars), so allocate in req.Containers order with
+		// cross-container accumulation and append directly — allocation order
+		// already equals the annotation order, so no reordering buffer is
+		// needed. For a pod without init containers this is byte-for-byte the
+		// historical behavior (no extra allocation).
+		deviceClaims = make(device.PodDeviceClaim, 0, len(req.Containers))
+		for i := range req.Containers {
+			claim, rsn, err := alloc.allocateAndAccumulate(req, req.Containers[i], nil)
+			if rsn != nil || err != nil {
+				return nil, rsn, err
+			}
+			deviceClaims = append(deviceClaims, *claim)
 		}
-		if rsn != nil {
-			klog.V(4).InfoS("container allocation rejected", "node", alloc.nodeInfo.GetName(),
-				"pod", klog.KObj(pod), "container", need.Name, "reason", rsn.Detailed())
-			return nil, rsn, nil
+	} else {
+		// claimByName collects each container's claim regardless of which pass
+		// produced it (the two-pass allocates out of req.Containers order); the
+		// annotation is assembled back in req.Containers order afterwards.
+		claimByName := make(map[string]*device.ContainerDeviceClaim, len(req.Containers))
+		// Two-pass, lifecycle-aware (see the design doc):
+		//   reserve(g) = sidecarSum(g) + max(regularSum(g), maxInit(g))
+		// Pass 1a/1b allocate the concurrent group (sidecars then regular app)
+		// with accumulation. Pass 2 releases the regular-app reservation and
+		// places each sequential init container against base+sidecars — they
+		// run after the app phase and so reuse its GPUs. Each init is placed
+		// independently (no inter-init accumulation; sequential inits never
+		// overlap), preferring the pod's already-used GPUs to minimise the
+		// reserved card set; the per-GPU max is realised at accounting time
+		// via device.ReducePodFootprint.
+		preferred := make(map[string]struct{})
+		recordPreferred := func(claim *device.ContainerDeviceClaim) {
+			for _, dc := range claim.DeviceClaims {
+				preferred[dc.Uuid] = struct{}{}
+			}
 		}
-		if err = alloc.addContainerAllocate(containerClaims); err != nil {
-			klog.V(3).ErrorS(err, "adding container resource allocation failed",
-				"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
-			return nil, nil, errors.New("internal device scheduling error")
+		// Pass 1a: sidecars (concurrent, accumulate).
+		for _, need := range req.Containers {
+			if need.Kind != util.ContainerKindInit || !need.Restartable {
+				continue
+			}
+			claim, rsn, err := alloc.allocateAndAccumulate(req, need, nil)
+			if rsn != nil || err != nil {
+				return nil, rsn, err
+			}
+			claimByName[need.Name] = claim
+			recordPreferred(claim)
 		}
-		deviceClaims = append(deviceClaims, *containerClaims)
+		// Snapshot base+sidecars; the regular-app reservation added next is
+		// released before the init pass.
+		viewBaseSidecar := alloc.nodeInfo.SnapshotUsage()
+		// Pass 1b: regular app containers (concurrent, accumulate).
+		for _, need := range req.Containers {
+			if need.Kind != util.ContainerKindApp {
+				continue
+			}
+			claim, rsn, err := alloc.allocateAndAccumulate(req, need, nil)
+			if rsn != nil || err != nil {
+				return nil, rsn, err
+			}
+			claimByName[need.Name] = claim
+			recordPreferred(claim)
+		}
+		// Release the regular-app reservation: init containers run after the
+		// app phase, so they see base+sidecars only.
+		alloc.nodeInfo.RestoreUsage(viewBaseSidecar)
+		// Pass 2: sequential init containers (no accumulation between them).
+		for _, need := range req.Containers {
+			if need.Kind != util.ContainerKindInit || need.Restartable {
+				continue
+			}
+			var claim *device.ContainerDeviceClaim
+			var rsn *reason.FilterReason
+			var err error
+			// Attempt 1: reuse the pod's already-used GPUs (densest). Skipped
+			// when there are none (e.g. an init-only pod).
+			if len(preferred) > 0 {
+				claim, rsn, err = alloc.allocateOne(req, need, preferred)
+				if err != nil {
+					klog.V(3).ErrorS(err, "init container reuse allocation internal error",
+						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
+					return nil, nil, err
+				}
+			}
+			// Attempt 2: fall back to the whole node when reuse didn't fit
+			// (claim == nil ⟺ attempt 1 was skipped or rejected). Still correct,
+			// just reserves more cards.
+			if claim == nil {
+				claim, rsn, err = alloc.allocateOne(req, need, nil)
+				if err != nil {
+					klog.V(3).ErrorS(err, "init container allocation internal error",
+						"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name)
+					return nil, nil, err
+				}
+				if rsn != nil {
+					klog.V(4).InfoS("init container allocation rejected", "node",
+						alloc.nodeInfo.GetName(), "pod", klog.KObj(pod), "container", need.Name, "reason", rsn.Detailed())
+					return nil, rsn, nil
+				}
+			}
+			claimByName[need.Name] = claim
+		}
+		// Assemble per-container claims in req.Containers order (init-first),
+		// which matches kubelet's Allocate call order and the device-plugin
+		// PreAlloc cursor.
+		deviceClaims = make(device.PodDeviceClaim, 0, len(req.Containers))
+		for i := range req.Containers {
+			deviceClaims = append(deviceClaims, *claimByName[req.Containers[i].Name])
+		}
 	}
+
 	preAllocated, err := deviceClaims.MarshalText()
 	if err != nil {
 		returnErr := errors.New("pod device claim encoding failed")
@@ -94,6 +191,31 @@ func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.F
 	util.InsertAnnotation(newPod, util.PodVGPUPreAllocAnnotation, preAllocated)
 	util.InsertAnnotation(newPod, util.PodPredicateNodeAnnotation, alloc.nodeInfo.GetName())
 	return newPod, nil, nil
+}
+
+// allocateAndAccumulate places one container and folds its claim into the node
+// accounting so the next concurrent container sees the reduced availability —
+// this is how cross-container GPU sharing within a single phase works. Used for
+// the concurrent group (regular app + sidecars); sequential init containers are
+// placed without accumulation (they never overlap).
+func (alloc *allocator) allocateAndAccumulate(req *AllocationRequest, need ContainerNeed, restrictUUIDs map[string]struct{}) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
+	claim, rsn, err := alloc.allocateOne(req, need, restrictUUIDs)
+	if err != nil {
+		klog.V(3).ErrorS(err, "container allocation internal error",
+			"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(req.Pod), "container", need.Name)
+		return nil, nil, err
+	}
+	if rsn != nil {
+		klog.V(4).InfoS("container allocation rejected", "node", alloc.nodeInfo.GetName(),
+			"pod", klog.KObj(req.Pod), "container", need.Name, "reason", rsn.Detailed())
+		return nil, rsn, nil
+	}
+	if err = alloc.addContainerAllocate(claim); err != nil {
+		klog.V(3).ErrorS(err, "adding container resource allocation failed",
+			"node", alloc.nodeInfo.GetName(), "pod", klog.KObj(req.Pod), "container", need.Name)
+		return nil, nil, errors.New("internal device scheduling error")
+	}
+	return claim, nil, nil
 }
 
 func getDeviceUUIDs(devices []*device.Device) []string {
@@ -112,16 +234,15 @@ func getDeviceUUIDs(devices []*device.Device) []string {
 //     reason carries the structured cause (with
 //     per-device counts when applicable).
 //   - (nil, nil, err)       — internal error (shouldn't happen).
-func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
-	pod := req.Pod
+func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed, restrictUUIDs map[string]struct{}) (*device.ContainerDeviceClaim, *reason.FilterReason, error) {
 	klog.V(4).Infof("Attempt to allocate container <%s> on node <%s>", need.Name, alloc.nodeInfo.GetName())
 	if need.Number > alloc.nodeInfo.GetSchedulableDeviceCount() {
 		return nil, reason.New(reason.InsufficientGPUCards).
 			WithDetail("need %d devices, node has %d schedulable", need.Number, alloc.nodeInfo.GetSchedulableDeviceCount()), nil
 	}
-	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.NodeConfigInfo.MemoryFactor)
+	needCores, needMemory := resolveContainerNeeds(need, alloc.nodeInfo.MemoryFactor, alloc.nodeInfo.HasSameCapacity(), alloc.nodeInfo.GetMaxDeviceMemory())
 
-	deviceStore, deviceCounts := alloc.filterDevices(pod, needCores, needMemory)
+	deviceStore, deviceCounts := alloc.filterDevices(req, needCores, needMemory, restrictUUIDs)
 	totalDevices := alloc.nodeInfo.GetDeviceCount()
 	claims, rsn := alloc.pickDeviceClaims(req, deviceStore, need.Number, needCores, needMemory)
 	if rsn != nil {
@@ -147,7 +268,7 @@ func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) 
 				WithDetail("need %d devices, none qualify", need.Number)
 		}
 		klog.V(5).InfoS("Insufficient node resources", "node", alloc.nodeInfo.GetName(),
-			"pod", klog.KObj(pod), "container", need.Name, "reason", nodeReason.Detailed())
+			"pod", klog.KObj(req.Pod), "container", need.Name, "reason", nodeReason.Detailed())
 		return nil, nodeReason, nil
 	}
 	sort.Slice(claims, func(i, j int) bool { return claims[i].Id < claims[j].Id })
@@ -166,13 +287,19 @@ func (alloc *allocator) allocateOne(req *AllocationRequest, need ContainerNeed) 
 // vgpu-memory == 0 stays 0 here; buildClaims expands it to the device's
 // total memory at claim-construction time so each picked device gets the
 // right per-card value (which may differ on heterogeneous nodes).
-func resolveContainerNeeds(need ContainerNeed, memoryFactor int) (cores, memory int64) {
+func resolveContainerNeeds(
+	need ContainerNeed, memoryFactor int,
+	allSameCapacity bool, memoryCapacity int64,
+) (cores, memory int64) {
 	cores, memory = need.Cores, need.Memory
 	if memory > 0 && memoryFactor > 0 {
 		memory *= int64(memoryFactor)
 	}
 	if cores == 0 && memory == 0 {
 		cores = util.HundredCore
+	}
+	if memory == 0 && allSameCapacity {
+		memory = memoryCapacity
 	}
 	return cores, memory
 }
@@ -222,22 +349,13 @@ func (alloc *allocator) pickDeviceClaims(
 func (alloc *allocator) sortDeviceStore(req *AllocationRequest, deviceStore []*device.Device) {
 	pod := req.Pod
 	switch req.DevicePolicy {
-	case util.BinpackPolicy:
-		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
-		NewDeviceBinpackPriority().Sort(deviceStore)
-	case util.SpreadPolicy:
-		klog.V(4).Infof("Pod <%s/%s> use <%s> device scheduling policy", pod.Namespace, pod.Name, req.DevicePolicy)
-		NewDeviceSpreadPriority().Sort(deviceStore)
+	case util.BinpackPolicy, util.SpreadPolicy, util.NonePolicy:
+		klog.V(4).Infof("Pod <%s> use <%s> device scheduling policy", klog.KObj(pod), req.DevicePolicy)
 	default:
-		if req.rawDevicePolicy != "" && req.rawDevicePolicy != string(util.NonePolicy) {
-			klog.V(4).Infof("Pod <%s/%s> not supported device scheduling policy: %s", pod.Namespace, pod.Name, req.rawDevicePolicy)
-			alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
-				"unsupported device scheduling policy %q", req.rawDevicePolicy)
-		} else {
-			klog.V(4).Infof("Pod <%s/%s> none device scheduling policy", pod.Namespace, pod.Name)
-		}
-		NewSortPriority(ByNuma, ByDeviceIdAsc).Sort(deviceStore)
+		klog.V(4).Infof("Pod <%s> not supported device scheduling policy: %q", klog.KObj(pod), req.DevicePolicy)
+		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported device scheduling policy %q", req.DevicePolicy)
 	}
+	NewDevicePolicyPriority(*req).Sort(deviceStore)
 }
 
 func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
@@ -268,33 +386,57 @@ func (alloc *allocator) allocateByTopologyMode(
 	pod := req.Pod
 	strict := req.TopologyStrict
 
-	switch req.Topology {
+	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
-		klog.V(4).Infof("Pod <%s/%s> use Links topology mode (strict=%v)", pod.Namespace, pod.Name, strict)
-		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, req.DevicePolicy, strict, needNumber, needCores, needMemory); ok {
+		// Cross-pod anchor: when enabled and this pod belongs to a gang, find the
+		// NVLink component a sibling already pre-allocated on this node so we keep
+		// this pod's GPUs connected to them. -1 = no anchor (non-gang, gate off,
+		// or this is the gang's first pod here) → unchanged single-pod link path.
+		anchorRoot := -1
+		if req.CrossPodTopology && (req.GangName != "" || req.ControllerOwner != nil) {
+			if root, ok := alloc.nodeInfo.GangAnchorComponent(req.GangName, req.ControllerOwner, sets.New(req.Pod.UID)); ok {
+				// Priority 1: same-node sibling → exact NVLink component (UUID-based).
+				// Intra-node connectivity is a hard requirement (NVLink doesn't cross
+				// hosts), so an on-node sibling pins the component directly.
+				anchorRoot = root
+			} else if root, ok = alloc.nodeInfo.ComponentByDomain(req.GangDomainKey); ok {
+				// Priority 2: cross-node sibling → align to the same sub-domain
+				// (rail) signature. The domain key was resolved by the filter on the
+				// sibling's own node (UUID-based); here we map it to THIS node's
+				// component. Missing on this node (rail-set absent) → no anchor.
+				anchorRoot = root
+			}
+		}
+		klog.V(4).Infof("Pod <%s> use Links topology mode (strict=%v, anchorComponent=%d)", klog.KObj(pod), strict, anchorRoot)
+		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, req.DevicePolicy, strict, anchorRoot, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if rsn := alloc.handleTopologyFallback(pod, strict,
-			reason.LinkTopologyUnsatisfied, "Link topology", "non-topology allocation",
+		if rsn := alloc.handleTopologyFallback(
+			pod, strict,
+			reason.LinkTopologyUnsatisfied,
+			"Link topology",
+			"non-topology allocation",
 			alloc.linkFallbackReason(needNumber)); rsn != nil {
 			return nil, rsn
 		}
 	case util.NUMATopology:
-		klog.V(4).Infof("Pod <%s/%s> use NUMA topology mode (strict=%v)", pod.Namespace, pod.Name, strict)
+		klog.V(4).Infof("Pod <%s> use NUMA topology mode (strict=%v)", klog.KObj(pod), strict)
 		if claims, ok := alloc.allocateNUMA(deviceStore, req.Profile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if rsn := alloc.handleTopologyFallback(pod, strict,
-			reason.NUMATopologyUnsatisfied, "NUMA topology", "cross-NUMA allocation",
+		if rsn := alloc.handleTopologyFallback(
+			pod, strict,
+			reason.NUMATopologyUnsatisfied,
+			"NUMA topology",
+			"cross-NUMA allocation",
 			alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
 			return nil, rsn
 		}
-	case util.NoneTopology, "":
-		klog.V(4).Infof("Pod <%s/%s> none topology mode", pod.Namespace, pod.Name)
+	case util.NoneTopology:
+		klog.V(4).Infof("Pod <%s> none topology mode", klog.KObj(pod))
 	default:
-		klog.V(4).Infof("Pod <%s/%s> not supported topology mode: %s", pod.Namespace, pod.Name, req.Topology)
-		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid,
-			"unsupported device topology mode %q", req.Topology)
+		klog.V(4).Infof("Pod <%s> not supported topology mode: %q", klog.KObj(pod), req.Topology)
+		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported device topology mode %q", req.Topology)
 	}
 	return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
 }
@@ -340,12 +482,26 @@ const linkTopKCandidates = 5
 
 func (alloc *allocator) allocateLink(
 	deviceStore []*device.Device, profile RequestProfile, policy util.SchedulerPolicy,
-	strict bool, needNumber int, needCores, needMemory int64,
+	strict bool, anchorRoot int, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
 	}
 	devices, _ := alloc.nodeInfo.GetDeviceList().Filter(getDeviceUUIDs(deviceStore))
+
+	// Cross-pod anchor windowing: restrict candidates to the NVLink component a
+	// gang sibling already occupies on this node, so this pod stays connected to
+	// them. If the window holds enough cards, select within it; if not, strict
+	// rejects the node (can't keep the gang connected) while non-strict falls
+	// back to the full candidate set — byte-for-byte the single-pod behaviour.
+	// anchorRoot < 0 (non-gang, first sibling, or gate off) skips this entirely.
+	if anchorRoot >= 0 {
+		if windowed := alloc.windowToComponent(devices, anchorRoot); len(windowed) >= needNumber {
+			devices = windowed
+		} else if strict {
+			return nil, false
+		}
+	}
 
 	// Fast path: no device policy → take the link-best set (cheapest path,
 	// matches pre-Phase-A behaviour). Uses the threshold-aware AllocateLink
@@ -406,6 +562,28 @@ func gpuallocatorUUIDs(devices []*gpuallocator.Device) []string {
 		uuids[i] = d.UUID
 	}
 	return uuids
+}
+
+// windowToComponent keeps only the devices whose UUID belongs to the given
+// NVLink component root (from the NodeInfo's precomputed component index).
+// Returns a new slice; nil for an unknown/empty component. Used by allocateLink
+// to narrow the candidate set to a gang's anchored component.
+func (alloc *allocator) windowToComponent(devices gpuallocator.DeviceList, root int) gpuallocator.DeviceList {
+	members := alloc.nodeInfo.ComponentUUIDs(root)
+	if len(members) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(members))
+	for _, u := range members {
+		set[u] = struct{}{}
+	}
+	out := make(gpuallocator.DeviceList, 0, len(devices))
+	for _, d := range devices {
+		if _, ok := set[d.UUID]; ok {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // selectLinkCandidateByDevicePolicy picks among link-equivalent candidate
@@ -583,11 +761,21 @@ func resolveLinkDevices(picked []*gpuallocator.Device, store []*device.Device) [
 // pkg/scheduler/reason — no parallel enum here. That keeps the counts
 // directly bucketable by the FilteringFailed aggregator without any
 // translation table.
-func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int64) ([]*device.Device, map[reason.Code]int) {
+func (alloc *allocator) filterDevices(req *AllocationRequest, needCores, needMemory int64, restrictUUIDs map[string]struct{}) ([]*device.Device, map[reason.Code]int) {
 	nodeName := alloc.nodeInfo.GetName()
 	counts := make(map[reason.Code]int)
 	devices := make([]*device.Device, 0, alloc.nodeInfo.GetDeviceCount())
 	for i, deviceInfo := range alloc.nodeInfo.GetDeviceMap() {
+		// Restrict to a preferred device set when requested. Used by the
+		// init-container reuse pass to first try placing a sequential init
+		// container only on the pod's already-chosen GPUs; on failure the
+		// caller retries with no restriction. Skipped silently (not counted)
+		// because it is an internal preference, not a user-facing rejection.
+		if restrictUUIDs != nil {
+			if _, ok := restrictUUIDs[deviceInfo.GetUUID()]; !ok {
+				continue
+			}
+		}
 		// Filter unhealthy device.
 		if !deviceInfo.Healthy() {
 			klog.V(4).InfoS("Filter unhealthy devices on the node", "node", nodeName,
@@ -630,20 +818,20 @@ func (alloc *allocator) filterDevices(pod *corev1.Pod, needCores, needMemory int
 			continue
 		}
 		// Filter device type.
-		if !util.CheckDeviceType(pod.Annotations, deviceInfo.GetType()) {
+		if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, deviceInfo.GetType()) {
 			klog.V(4).InfoS("Filter devices with type mismatches on the node",
 				"node", nodeName, "deviceIndex", i, "deviceType", deviceInfo.GetType(),
-				"includeTypes", pod.Annotations[util.PodIncludeGpuTypeAnnotation],
-				"excludeTypes", pod.Annotations[util.PodExcludeGpuTypeAnnotation])
+				"includeTypes", req.Pod.Annotations[util.PodIncludeGpuTypeAnnotation],
+				"excludeTypes", req.Pod.Annotations[util.PodExcludeGpuTypeAnnotation])
 			counts[reason.DeviceTypeMismatch]++
 			continue
 		}
 		// Filter device uuid.
-		if !util.CheckDeviceUuid(pod.Annotations, deviceInfo.GetUUID()) {
+		if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, deviceInfo.GetUUID()) {
 			klog.V(4).InfoS("Filter devices with uuid mismatches on the node",
 				"node", nodeName, "deviceIndex", i, "deviceUuid", deviceInfo.GetUUID(),
-				"includeUuids", pod.Annotations[util.PodIncludeGPUUUIDAnnotation],
-				"excludeUuids", pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
+				"includeUuids", req.Pod.Annotations[util.PodIncludeGPUUUIDAnnotation],
+				"excludeUuids", req.Pod.Annotations[util.PodExcludeGPUUUIDAnnotation])
 			counts[reason.DeviceUUIDMismatch]++
 			continue
 		}

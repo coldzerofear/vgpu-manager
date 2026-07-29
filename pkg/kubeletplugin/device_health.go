@@ -115,7 +115,7 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 		return nil, fmt.Errorf("nvml library is nil")
 	}
 	if ret := nvdevlib.Init(); ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("failed to initialize NVML: %v", ret)
+		return nil, fmt.Errorf("failed to initialize NVML: %w", ret)
 	}
 	defer func() {
 		_ = nvdevlib.Shutdown()
@@ -136,7 +136,7 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 
 func (m *nvmlDeviceHealthMonitor) Start(ctx context.Context) (rerr error) {
 	if ret := m.nvmllib.Init(); ret != nvml.SUCCESS {
-		return fmt.Errorf("failed to initialize NVML: %v", ret)
+		return fmt.Errorf("failed to initialize NVML: %w", ret)
 	}
 
 	defer func() {

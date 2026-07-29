@@ -117,7 +117,7 @@ func Test_resolveContainerNeeds(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotCores, gotMemory := resolveContainerNeeds(tc.need, tc.factor)
+			gotCores, gotMemory := resolveContainerNeeds(tc.need, tc.factor, false, 0)
 			assert.Equal(t, tc.wantCores, gotCores, "cores")
 			assert.Equal(t, tc.wantMemory, gotMemory, "memory")
 		})

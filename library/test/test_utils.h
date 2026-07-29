@@ -22,10 +22,63 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #ifndef TEST_DEVICE_ID
 #define TEST_DEVICE_ID 0
 #endif
+
+/* Exit status meaning "this test did not actually run" (the autotools
+ * convention, recognised by run_all_tests.sh).
+ *
+ * A case that cannot meet its preconditions must not return 0. Reporting
+ * success for assertions that never executed makes a skipped test
+ * indistinguishable from a passing one in the summary, which is exactly how a
+ * regression survives a green run. Tests count their skips and exit with this
+ * instead; run_all_tests.sh treats any skip as a failure when VGPU_TEST_STRICT
+ * is set, on the grounds that the runner configured everything the tests were
+ * promised.
+ *
+ * NOTE: run_tests_with_env.sh currently has that export COMMENTED OUT, so the
+ * suite does NOT run strict by default -- this comment used to claim otherwise.
+ * Which means a skip is only as visible as whoever reads the summary, and a
+ * test must not lean on strict mode to surface a genuine defect. Report a
+ * defect as a FAILURE at the point it is detected; reserve skip for a
+ * precondition that is legitimately absent. */
+#define VGPU_TEST_RC_SKIP 77
+
+/* Final verdict for a test with `failures` failed and `skipped` skipped cases.
+ * Failure wins over skip: a run that both failed and skipped is a failure. */
+static inline int vgpu_test_verdict(int failures, int skipped) {
+  printf("\nResult: %s", failures ? "FAIL" : (skipped ? "SKIP" : "PASS"));
+  if (skipped) printf("  (%d case(s) skipped -- assertions did NOT run)", skipped);
+  printf("\n");
+  if (failures) return 1;
+  return skipped ? VGPU_TEST_RC_SKIP : 0;
+}
+
+/* Is libvgpu-control.so actually injected? Every smoke test here exists to
+ * exercise our hook layer; run without the LD_PRELOAD the runner supplies, it
+ * measures raw CUDA and asserts nothing about vgpu-manager. Reporting PASS in
+ * that state is the misleading-green the skip convention exists to prevent, so
+ * a test that finds the library missing skips instead. The runner always sets
+ * LD_PRELOAD, so this only fires on a standalone invocation. */
+static inline int vgpu_preloaded(void) {
+  const char *p = getenv("LD_PRELOAD");
+  return p != NULL && strstr(p, "libvgpu-control") != NULL;
+}
+
+/* Top-of-main() guard: skip the whole test when the library is not injected.
+ * Returns VGPU_TEST_RC_SKIP from the enclosing function, which the runner
+ * counts as a skip rather than a pass or a failure. */
+#define VGPU_REQUIRE_PRELOAD()                                                \
+  do {                                                                        \
+    if (!vgpu_preloaded()) {                                                  \
+      printf("SKIP (needs LD_PRELOAD=libvgpu-control.so)\n");                 \
+      return VGPU_TEST_RC_SKIP;                                               \
+    }                                                                         \
+  } while (0)
 
 #define CHECK_RUNTIME_API(f)                                                  \
   do {                                                                        \

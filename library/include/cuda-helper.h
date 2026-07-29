@@ -32,9 +32,13 @@ extern "C" {
   #define __CUDA_API_PER_THREAD_DEFAULT_STREAM
   #define __CUDA_API_PTDS(api) api##_ptds
   #define __CUDA_API_PTSZ(api) api##_ptsz
+  /* Whether __CUDA_API_PTSZ() redirects the unversioned entry points, i.e. which
+   * default stream hStream==0 denotes for hooks that forward through it. */
+  #define __CUDA_API_IS_PTSZ 1
 #else
   #define __CUDA_API_PTDS(api) api
   #define __CUDA_API_PTSZ(api) api
+  #define __CUDA_API_IS_PTSZ 0
 #endif
 
 /**
@@ -981,10 +985,10 @@ typedef enum {
 //  CUDA_ENTRY_ENUM(cuStreamBeginCapture),
 //  /** cuStreamBeginCapture_ptsz */
 //  CUDA_ENTRY_ENUM(cuStreamBeginCapture_ptsz),
-//  /** cuStreamEndCapture */
-//  CUDA_ENTRY_ENUM(cuStreamEndCapture),
-//  /** cuStreamEndCapture_ptsz */
-//  CUDA_ENTRY_ENUM(cuStreamEndCapture_ptsz),
+  /** cuStreamEndCapture */
+  CUDA_ENTRY_ENUM(cuStreamEndCapture),
+  /** cuStreamEndCapture_ptsz */
+  CUDA_ENTRY_ENUM(cuStreamEndCapture_ptsz),
   /** cuStreamGetCtx */
   CUDA_ENTRY_ENUM(cuStreamGetCtx),
   CUDA_ENTRY_ENUM(cuStreamGetCtx_v2),
@@ -1007,9 +1011,9 @@ typedef enum {
   /** cuStreamBeginCapture_v2_ptsz */
 //  CUDA_ENTRY_ENUM(cuStreamBeginCapture_v2_ptsz),
   /** cuStreamGetCaptureInfo */
-//  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo),
   /** cuStreamGetCaptureInfo_ptsz */
-//  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_ptsz),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_ptsz),
   /** cuThreadExchangeStreamCaptureMode */
   CUDA_ENTRY_ENUM(cuThreadExchangeStreamCaptureMode),
   /** cuDeviceGetNvSciSyncAttributes */
@@ -1020,9 +1024,14 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphExecMemcpyNodeSetParams),
   /** cuGraphExecMemsetNodeSetParams */
   CUDA_ENTRY_ENUM(cuGraphExecMemsetNodeSetParams),
-  /** cuGraphExecUpdate */
-//  CUDA_ENTRY_ENUM(cuGraphExecUpdate),
-//  CUDA_ENTRY_ENUM(cuGraphExecUpdate_v2),
+  /** cuGraphExecUpdate (v1: 4 args, exec/graph/errNode_out/result_out) and
+   *  _v2 (3 args, exec/graph/resultInfo*). Both ABIs are hooked separately
+   *  in cuda_hook.c with their own override functions; cuGetProcAddress
+   *  routes "cuGraphExecUpdate" lookups by cudaVersion (<12000 -> v1,
+   *  >=12000 -> v2) to keep the parameter frame matching what the caller's
+   *  compile-time header expected. */
+  CUDA_ENTRY_ENUM(cuGraphExecUpdate),
+  CUDA_ENTRY_ENUM(cuGraphExecUpdate_v2),
   /** cuMemAddressFree */
   CUDA_ENTRY_ENUM(cuMemAddressFree),
   /** cuMemAddressReserve */
@@ -1200,8 +1209,10 @@ typedef enum {
   CUDA_ENTRY_ENUM(cuGraphMemFreeNodeGetParams),
   CUDA_ENTRY_ENUM(cuGraphReleaseUserObject),
   CUDA_ENTRY_ENUM(cuGraphRetainUserObject),
-//  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2),
-//  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2_ptsz),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v2_ptsz),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v3),
+  CUDA_ENTRY_ENUM(cuStreamGetCaptureInfo_v3_ptsz),
   CUDA_ENTRY_ENUM(cuStreamUpdateCaptureDependencies),
   CUDA_ENTRY_ENUM(cuStreamUpdateCaptureDependencies_ptsz),
   CUDA_ENTRY_ENUM(cuUserObjectCreate),
@@ -1318,6 +1329,7 @@ static inline int is_abi_conflict_base(const char *sym) {
     "cuGraphAddDependencies",
     "cuGraphRemoveDependencies",
     "cuGraphAddNode",
+    "cuStreamGetCaptureInfo",
     /*
      * Note: cuGetProcAddress is intentionally NOT listed here even though
      * its unversioned form also has cross-major ABI drift (v1 4-arg vs _v2

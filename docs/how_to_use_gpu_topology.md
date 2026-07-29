@@ -87,3 +87,31 @@ spec:
         nvidia.com/vgpu-number: 2 # Valid when applying for more than one card
         nvidia.com/vgpu-memory: 10000
 ```
+
+### Cross-pod topology (multi-pod gang training)
+
+By default `link` topology only optimizes GPU connectivity **within a single pod**.
+For distributed training where a gang (PodGroup) is split into multiple pods, add the
+annotation `nvidia.com/cross-pod-topology: "true"` to keep the whole gang's GPUs in
+the **same NVLink connected component on a node**, and — across nodes — aligned to the
+**same component ordinal (rail)**. It takes effect only together with
+`device-topology-mode: link` and a recognized gang (scheduler-plugins / Volcano /
+Koordinator / native PodGroup); non-gang pods are unaffected.
+
+```yaml
+metadata:
+  annotations:
+    nvidia.com/device-topology-mode: link      # required: link topology
+    nvidia.com/cross-pod-topology: "true"      # opt into cross-pod / cross-node alignment
+  labels:
+    scheduling.x-k8s.io/pod-group: my-training-gang   # gang identity (any supported dialect)
+```
+
+Notes:
+- Strictness follows the topology mode: use `link-strict` to reject a node when the
+  gang cannot stay connected, instead of degrading.
+- Combine with `nvidia.com/device-scheduler-policy: spread` to also keep gang siblings
+  on **different physical cards** within the component (indirect anti-co-location).
+- Cross-node sub-domain (rail) alignment assumes homogeneous GPU↔rail layout across
+  nodes; for whole-node (all cards) requests it is a no-op. For cross-node node-level
+  topology (rack/rail) use Kueue TAS — see [kueue_tas_integration.md](./kueue_tas_integration.md).

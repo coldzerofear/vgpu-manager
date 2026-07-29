@@ -106,3 +106,20 @@ Full image name with tag
 {{- define "defaultKubeVersion" -}}
 {{ regexReplaceAll "^(v[0-9]+\\.[0-9]+\\.[0-9]+)(.*)$" .Capabilities.KubeVersion.Version "$1" }}
 {{- end -}}
+
+{{/*
+Render feature gates into a sorted, comma-joined "key=value,..." string for the --feature-gates
+flag. Accepts either a map (preferred: { GPUTopology: true }) or a legacy raw string (used as-is
+for backward compatibility). An empty/nil value renders to an empty string.
+*/}}
+{{- define "vgpu-manager.featureGates" -}}
+{{- if kindIs "string" . -}}
+{{- . -}}
+{{- else -}}
+{{- $gates := list -}}
+{{- range $k, $v := . -}}
+{{- $gates = append $gates (printf "%s=%v" $k $v) -}}
+{{- end -}}
+{{- sortAlpha $gates | join "," -}}
+{{- end -}}
+{{- end -}}

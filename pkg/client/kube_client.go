@@ -22,34 +22,47 @@ import (
 )
 
 var (
-	initKubeConfig sync.Once
+	initConfigOnce sync.Once
 	initErr        error
 	kubeConfig     *rest.Config
 )
 
-func InitKubeConfig(masterUrl, kubeconfig string) error {
-	initKubeConfig.Do(func() {
-		if kubeconfig == "" && masterUrl == "" {
-			kubeConfig, initErr = rest.InClusterConfig()
-		} else {
-			kubeConfig, initErr = clientcmd.BuildConfigFromFlags(masterUrl, kubeconfig)
-		}
-	})
-	return initErr
+type configOption struct {
+	rest.Config
+	masterUrl      string
+	kubeConfigPath string
 }
 
-type Option func(*rest.Config)
+func initKubeConfig(opt *configOption) (*rest.Config, error) {
+	initConfigOnce.Do(func() {
+		switch {
+		case opt == nil:
+			kubeConfig, initErr = rest.InClusterConfig()
+		case opt.kubeConfigPath == "" && opt.masterUrl == "":
+			kubeConfig, initErr = rest.InClusterConfig()
+		default:
+			kubeConfig, initErr = clientcmd.BuildConfigFromFlags(opt.masterUrl, opt.kubeConfigPath)
+		}
+	})
+	return kubeConfig, initErr
+}
+
+type Option func(*configOption)
 
 func NewKubeConfig(opts ...Option) (*rest.Config, error) {
-	err := InitKubeConfig("", "")
+	o := &configOption{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	config, err := initKubeConfig(o)
 	if err != nil {
 		return nil, err
 	}
-	config := rest.CopyConfig(kubeConfig)
+	o.Config = *rest.CopyConfig(config)
 	for _, opt := range opts {
-		opt(config)
+		opt(o)
 	}
-	return config, nil
+	return &o.Config, nil
 }
 
 func NewClientSet(opts ...Option) (*kubernetes.Clientset, error) {
@@ -60,14 +73,26 @@ func NewClientSet(opts ...Option) (*kubernetes.Clientset, error) {
 	return kubernetes.NewForConfig(config)
 }
 
+func WithConfigMasterURL(masterUrl string) Option {
+	return func(config *configOption) {
+		config.masterUrl = masterUrl
+	}
+}
+
+func WithKubeConfigPath(kubeConfigPath string) Option {
+	return func(config *configOption) {
+		config.kubeConfigPath = kubeConfigPath
+	}
+}
+
 func WithTimeoutSecond(seconds uint) Option {
-	return func(config *rest.Config) {
+	return func(config *configOption) {
 		config.Timeout = time.Duration(seconds) * time.Second
 	}
 }
 
 func WithQPSBurst(qps float32, burst int) Option {
-	return func(config *rest.Config) {
+	return func(config *configOption) {
 		config.QPS = qps
 		config.Burst = burst
 		config.RateLimiter = nil
@@ -120,13 +145,13 @@ func DefaultUserAgent() string {
 }
 
 func WithUserAgent(userAgent string) Option {
-	return func(config *rest.Config) {
+	return func(config *configOption) {
 		config.UserAgent = userAgent
 	}
 }
 
 func WithContentType(acceptContentTypes, contentType string) Option {
-	return func(config *rest.Config) {
+	return func(config *configOption) {
 		config.AcceptContentTypes = acceptContentTypes
 		config.ContentType = contentType
 	}

@@ -1,0 +1,31 @@
+{{- if .Values.kubeletPlugin.enabled -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}:role
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaimtemplates"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceslices"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims/status"]
+    verbs: ["update"]
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims/driver"]
+    verbs: ["associated-node:update", "associated-node:patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+{{- end }}

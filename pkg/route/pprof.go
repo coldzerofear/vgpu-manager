@@ -24,10 +24,10 @@ func init() {
 }
 
 func StartDebugServer(port int) {
-	if port <= 0 {
-		return
-	}
 	runOnce.Do(func() {
+		if port <= 0 {
+			return
+		}
 		go func() {
 			addr := "0.0.0.0:" + strconv.Itoa(port)
 			klog.V(4).Infof("Debug Server starting on <%s>", addr)
