@@ -154,9 +154,11 @@ func runApp(opt *options.Options) (exitCode int) {
 	// Start pprof debug debugging service.
 	route.StartDebugServer(opt.PprofBindPort)
 	server := http.Server{
-		Addr:      "0.0.0.0:" + strconv.Itoa(opt.ServerBindPort),
-		Handler:   handler,
-		TLSConfig: tlsConfig,
+		Addr:              "0.0.0.0:" + strconv.Itoa(opt.ServerBindPort),
+		Handler:           handler,
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       60 * time.Second,
 	}
 	go func() {
 		if opt.EnableTls {
