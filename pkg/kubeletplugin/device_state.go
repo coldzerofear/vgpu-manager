@@ -135,7 +135,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
 
-	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices()
+	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices(config)
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating all possible devices: %w", err)
 	}

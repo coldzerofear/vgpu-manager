@@ -94,8 +94,8 @@ func (l deviceLib) ensureNVML() (func(), nvml.Return) {
 }
 
 // Discover devices that are allocatable, on this node.
-func (l deviceLib) enumerateAllPossibleDevices() (*PerGPUAllocatableDevices, error) {
-	perGPUAllocatable, err := l.GetPerGpuAllocatableDevices()
+func (l deviceLib) enumerateAllPossibleDevices(config *Config) (*PerGPUAllocatableDevices, error) {
+	perGPUAllocatable, err := l.GetPerGpuAllocatableDevices(config)
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating allocatable devices: %w", err)
 	}
@@ -171,7 +171,7 @@ func (l deviceLib) GetMigDeviceInfos(gpuInfo *GpuDeviceInfo) (map[string]*MigDev
 // discovery, and assembles the set of allocatable devices that will be
 // announced by this DRA driver. A list of GPU indices can optionally be
 // provided to limit the discovery to a set of physical GPUs.
-func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatableDevices, error) {
+func (l deviceLib) GetPerGpuAllocatableDevices(config *Config, indices ...int) (*PerGPUAllocatableDevices, error) {
 	klog.Infof("Traverse GPU devices")
 
 	shutdown, ret := l.ensureNVML()
@@ -235,7 +235,9 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 				// Enabling vGPU support will replace physical GPUs and cannot use VFIO
 				if featuregates.Enabled(featuregates.VGPUSupport) {
 					parentdev.VGpu = &VGpuDeviceInfo{
-						GpuDeviceInfo: gpuInfo,
+						GpuDeviceInfo:     gpuInfo,
+						deviceCoresRatio:  config.DeviceCoresRatio,
+						deviceMemoryRatio: config.DeviceMemoryRatio,
 					}
 					parentdev.Gpu = nil
 				}
@@ -288,7 +290,9 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 			if featuregates.Enabled(featuregates.VGPUSupport) && len(migdevs) == 0 {
 				gpuInfo.vfioEnabled = false
 				parentdev.VGpu = &VGpuDeviceInfo{
-					GpuDeviceInfo: gpuInfo,
+					GpuDeviceInfo:     gpuInfo,
+					deviceCoresRatio:  config.DeviceCoresRatio,
+					deviceMemoryRatio: config.DeviceMemoryRatio,
 				}
 				parentdev.Gpu = nil
 			}

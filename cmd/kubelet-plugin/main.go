@@ -258,6 +258,15 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 		}
 	}
 
+	if featuregates.Enabled(featuregates.VGPUSupport) {
+		if flags.DeviceCoresRatio <= 0 {
+			return fmt.Errorf("invalid --device-cores-ratio %d: must be greater than or equal to 0", flags.DeviceCoresRatio)
+		}
+		if flags.DeviceMemoryRatio <= 0 {
+			return fmt.Errorf("invalid --device-memory-ratio %d: must be greater than or equal to 0", flags.DeviceCoresRatio)
+		}
+	}
+
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		if flags.HostRoot == "" {
 			return fmt.Errorf("host root is required when PassthroughSupport feature gate is enabled")

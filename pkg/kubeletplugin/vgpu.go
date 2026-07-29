@@ -31,7 +31,9 @@ import (
 )
 
 type VGpuDeviceInfo struct {
-	*GpuDeviceInfo `json:",inline"`
+	*GpuDeviceInfo    `json:",inline"`
+	deviceCoresRatio  uint
+	deviceMemoryRatio uint
 }
 
 func (d *VGpuDeviceInfo) CanonicalName() string {
@@ -44,33 +46,27 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 		StringValue: ptr.To(VGpuDeviceType),
 	}
 
-	deviceCoresRatio := uint(100)
-	deviceMemoryRatio := uint(100)
-	if globalConfig != nil {
-		deviceCoresRatio = globalConfig.DeviceCoresRatio
-		deviceMemoryRatio = globalConfig.DeviceMemoryRatio
-	}
-
-	totalMemory := float64(d.Memory.Total) * (float64(deviceMemoryRatio) / float64(util.HundredCore))
+	totalMemory := float64(d.Memory.Total) * (float64(d.deviceMemoryRatio) / float64(util.HundredCore))
 
 	attributes["coreRatio"] = resourceapi.DeviceAttribute{
-		IntValue: ptr.To[int64](int64(deviceCoresRatio)),
+		IntValue: ptr.To[int64](int64(d.deviceCoresRatio)),
 	}
 	attributes["memoryRatio"] = resourceapi.DeviceAttribute{
-		IntValue: ptr.To[int64](int64(deviceMemoryRatio)),
+		IntValue: ptr.To[int64](int64(d.deviceMemoryRatio)),
 	}
 
+	maxCores := min(d.deviceCoresRatio, util.HundredCore)
 	device := resourceapi.Device{
 		Name:       d.CanonicalName(),
 		Attributes: attributes,
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
 			CoresResourceName: {
-				Value: *resource.NewQuantity(int64(util.HundredCore), resource.DecimalSI),
+				Value: *resource.NewQuantity(int64(d.deviceCoresRatio), resource.DecimalSI),
 				RequestPolicy: &resourceapi.CapacityRequestPolicy{
-					Default: resource.NewQuantity(int64(util.HundredCore), resource.DecimalSI),
+					Default: resource.NewQuantity(int64(maxCores), resource.DecimalSI),
 					ValidRange: &resourceapi.CapacityRequestPolicyRange{
 						Min:  resource.NewQuantity(int64(0), resource.DecimalSI),
-						Max:  resource.NewQuantity(int64(util.HundredCore), resource.DecimalSI),
+						Max:  resource.NewQuantity(int64(maxCores), resource.DecimalSI),
 						Step: resource.NewQuantity(int64(1), resource.DecimalSI),
 					},
 				},
@@ -94,21 +90,22 @@ func (d *VGpuDeviceInfo) GetDevice() resourceapi.Device {
 
 // For sharing.go
 type VGPUManager struct {
-	hostManagerPath string
-	contManagerPath string
-	nvdevlib        *deviceLib
-	clientSets      pkgflags.ClientSets
+	hostManagerPath   string
+	contManagerPath   string
+	nvdevlib          *deviceLib
+	clientSets        pkgflags.ClientSets
+	deviceCoresRatio  uint
+	deviceMemoryRatio uint
 }
 
-var globalConfig *Config
-
 func NewVGPUManager(deviceLib *deviceLib, config *Config) *VGPUManager {
-	globalConfig = config
 	return &VGPUManager{
-		nvdevlib:        deviceLib,
-		contManagerPath: util.ManagerRootPath,
-		hostManagerPath: config.Flags.HostManagerDir,
-		clientSets:      config.ClientSets,
+		nvdevlib:          deviceLib,
+		contManagerPath:   util.ManagerRootPath,
+		hostManagerPath:   config.Flags.HostManagerDir,
+		clientSets:        config.ClientSets,
+		deviceCoresRatio:  config.DeviceCoresRatio,
+		deviceMemoryRatio: config.DeviceMemoryRatio,
 	}
 }
 
@@ -184,12 +181,8 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	compMode |= util.OpenKernelMode
 	containerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
 
-	deviceMemoryRatio := uint(100)
-	if globalConfig != nil {
-		deviceMemoryRatio = globalConfig.DeviceMemoryRatio
-	}
 	oversold := "FALSE"
-	ratio := float64(deviceMemoryRatio) / float64(util.HundredCore)
+	ratio := float64(m.deviceMemoryRatio) / float64(util.HundredCore)
 	if ratio > 1 {
 		oversold = "TRUE"
 	}
@@ -269,10 +262,7 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	computePolicy := m.getComputePolicy(claim)
 	idx := device.VGpu.Index
 
-	deviceMemoryRatio := uint(100)
-	if globalConfig != nil {
-		deviceMemoryRatio = globalConfig.DeviceMemoryRatio
-	}
+	deviceMemoryRatio := m.deviceMemoryRatio
 	totalMemory := float64(device.VGpu.Memory.Total) * (float64(deviceMemoryRatio) / float64(util.HundredCore))
 	totalMemoryMB := uint64(totalMemory) / units.MiB
 
