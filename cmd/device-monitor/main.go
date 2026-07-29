@@ -115,6 +115,8 @@ func runApp(opt *options.Options) (exitCode int) {
 		server.WithCollectors(nodeCollector, infoCollector),
 		server.WithLabels(prometheus.Labels{"service": "vGPU"}),
 		server.WithLimiter(rate.NewLimiter(rate.Every(minScrapeIntervalDuration), 1)),
+		server.WithReadTimeout(60 * time.Second),
+		server.WithReadHeaderTimeout(15 * time.Second),
 		server.WithReadyChecker(func(req *http.Request) error {
 			if !util.InformerFactoryHasSynced(factory, req.Context()) {
 				return errors.New("informer has not completed all synchronization")
