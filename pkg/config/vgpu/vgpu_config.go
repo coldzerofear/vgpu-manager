@@ -90,17 +90,29 @@ type MmapResourceData struct {
 	resource *ResourceDataT
 	mmapFile *util.MmapFile
 	mutex    sync.Mutex
+	// closed guards against use-after-munmap: the lister Close()s and munmaps an
+	// entry (removeResourceData/removeContainer) while a metrics scrape may still
+	// hold this *MmapResourceData. Any accessor that dereferences r.resource must
+	// bail when closed, under r.mutex, so it never touches unmapped memory.
+	closed bool
 }
 
 func (r *MmapResourceData) GetResource() *ResourceDataT {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
+	if r.closed {
+		return nil
+	}
 	return r.resource
 }
 
 func (r *MmapResourceData) Close() error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.closed = true
 	return r.mmapFile.Close()
 }
 
@@ -414,6 +426,9 @@ func (r *MmapResourceData) ModifyDevice(deviceIndex int, mutation func(*DeviceT)
 	}
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
+	if r.closed {
+		return fmt.Errorf("resource mapping already closed")
+	}
 
 	f, err := os.OpenFile(r.mmapFile.Path, os.O_RDWR, 0644)
 	if err != nil {
@@ -433,13 +448,48 @@ func (r *MmapResourceData) ModifyDevice(deviceIndex int, mutation func(*DeviceT)
 	return nil
 }
 
+// configSeqSpinLimit bounds the seqlock reader's retry loop; past it we assume a
+// writer died mid-update (seq stuck odd) and give up rather than spin forever.
+const configSeqSpinLimit = 1024
+
+// GetDeviceSnapshot returns a tear-free copy of devices[deviceIndex], read via
+// the per-device seqlock -- the lock-free reader path mirroring the C
+// get_device_snapshot(). Unlike ModifyDevice it is a READER: it takes NO fcntl
+// lock (no per-read syscalls) and never bumps Seq. Advancing the version on a
+// read would be wrong twice over -- it would make every read look like a write
+// to concurrent C readers and force them to retry, and it is simply not a
+// writer. A copy taken while a writer is mid-update is detected by the seq
+// change and retried. r.mutex is held only so a concurrent Reload() cannot
+// munmap the mapping out from under the copy.
+//
+// Returns nil when the index is out of range, or (astronomically rare) a writer
+// left the seqlock odd past the spin cap; callers treat nil as "no fresh data".
 func (r *MmapResourceData) GetDeviceSnapshot(deviceIndex int) *DeviceT {
-	var dev *DeviceT
-	_ = r.ModifyDevice(deviceIndex, func(t *DeviceT) {
-		dev = &DeviceT{}
-		*dev = *t
-	})
-	return dev
+	if deviceIndex < 0 || deviceIndex >= MaxDeviceCount {
+		return nil
+	}
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if r.closed {
+		return nil // mapping already munmapped by the lister
+	}
+	d := &r.resource.Devices[deviceIndex]
+	for spins := 0; spins < configSeqSpinLimit; spins++ {
+		s1 := atomic.LoadUint32(&d.Seq)
+		if s1&1 != 0 { // odd: a writer is mid-update, retry
+			continue
+		}
+		snap := *d
+		// Re-read the sequence after the copy. On amd64 the atomic load is a
+		// plain mov, loads are not reordered with loads, and the Go compiler does
+		// not move memory accesses across an atomic op -- so the copy completes
+		// before this second load, the same ordering the C reader's ACQUIRE fence
+		// encodes. A changed seq means the copy may be torn: retry.
+		if atomic.LoadUint32(&d.Seq) == s1 {
+			return &snap
+		}
+	}
+	return nil
 }
 
 func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod *corev1.Pod,
