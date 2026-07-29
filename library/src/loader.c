@@ -1038,7 +1038,12 @@ extern int device_vmem_read_lock(int ordinal);
 extern void device_vmem_unlock(int fd, int ordinal);
 
 resource_data_t vgpu_config_init = {
-    .driver_version = {},
+    .magic = CONFIG_MAGIC,
+    .layout_version = CONFIG_LAYOUT_VERSION,
+    .region_size = sizeof(resource_data_t),
+    .device_count = MAX_DEVICE_COUNT,
+    .cuda_version = {},
+    .driver_version = "",
     .pod_uid = "",
     .pod_name = "",
     .pod_namespace = "",
@@ -1514,21 +1519,96 @@ int mmap_file_to_config_path(resource_data_t** data) {
     LOGGER(ERROR, "fstat failed: %s", strerror(errno));
     goto DONE;
   }
-  if (sb.st_size != sizeof(resource_data_t)) {
-    LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
-                  sizeof(resource_data_t), (long long)sb.st_size);
+  if (sb.st_size != CONFIG_FILE_SIZE) {
+    LOGGER(ERROR, "vgpu config size mismatch: expected %d, got %lld",
+                  CONFIG_FILE_SIZE, (long long)sb.st_size);
     goto DONE;
   }
-  *data = (resource_data_t*)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-  if (*data == MAP_FAILED) {
+  /* Reader stays PROT_READ + MAP_PRIVATE: it never writes, so no page is ever
+   * COW-copied and every read sees the live page-cache page -- an in-place
+   * writer (the Go manager's MAP_SHARED store, or another library process on
+   * the env-create path) is visible. Consistency comes from the per-device
+   * seqlock in get_device_snapshot(), not from the mapping. */
+  resource_data_t *m = (resource_data_t*)mmap(NULL, CONFIG_FILE_SIZE, PROT_READ,
+                                              MAP_PRIVATE, fd, 0);
+  if (m == MAP_FAILED) {
     LOGGER(ERROR, "mmap global config failed: %s", strerror(errno));
-    *data = NULL;
     goto DONE;
   }
+  /* Frozen-header validation, same contract as vmem_node / sm_node: a config
+   * written by a mismatched layout_version (rolling upgrade) is rejected
+   * cleanly rather than misread. */
+  if (m->magic != CONFIG_MAGIC || m->layout_version != CONFIG_LAYOUT_VERSION ||
+      m->region_size != sizeof(resource_data_t) || m->device_count != MAX_DEVICE_COUNT) {
+    LOGGER(ERROR, "vgpu config header mismatch: magic=%#x ver=%u size=%u count=%u "
+                  "(want %#x/%u/%zu/%d)",
+                  m->magic, m->layout_version, m->region_size, m->device_count,
+                  CONFIG_MAGIC, CONFIG_LAYOUT_VERSION, sizeof(resource_data_t),
+                  MAX_DEVICE_COUNT);
+    munmap(m, CONFIG_FILE_SIZE);
+    goto DONE;
+  }
+  *data = m;
   ret = 0;
 DONE:
   close(fd);
   return ret;
+}
+
+/* Config lock helpers (config_device_read_lock / config_device_unlock) live in
+ * lock.c, mirroring the device_util_* pattern. */
+extern int  config_device_read_lock(int device_index);
+extern void config_device_unlock(int fd, int device_index);
+
+#define CONFIG_SEQ_SPIN_LIMIT 1024
+
+static inline void config_cpu_relax(void) {
+#if defined(__x86_64__)
+  __builtin_ia32_pause();
+#else
+  __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+/* Tear-free snapshot of devices[host_index] via the per-device seqlock.
+ *
+ * Fast path is syscall-free: two acquire loads of the seq word bracketing a
+ * plain struct copy; an odd seq (writer mid-update) or a changed seq means the
+ * copy may be torn, so retry. Because the Go writer only stores a few fields
+ * between the two seq bumps -- no syscalls, no blocking -- the odd window is
+ * nanoseconds and the loop essentially never spins.
+ *
+ * Slow path (writer crashed with seq left odd, or descheduled past the spin
+ * cap): take the per-device F_RDLCK once. It blocks until a live writer's
+ * F_WRLCK drops; a crashed writer's OFD lock was already released when its fd
+ * closed, so the read lock is immediately grantable and the bytes are stable.
+ * This bounds the hot path instead of letting it hang. */
+device_t get_device_snapshot(int host_index) {
+  device_t snap;
+  if (unlikely(host_index < 0 || host_index >= MAX_DEVICE_COUNT || g_vgpu_config == NULL)) {
+    memset(&snap, 0, sizeof(snap));
+    return snap;
+  }
+  const device_t *d = &g_vgpu_config->devices[host_index];
+  unsigned spins = 0;
+  for (;;) {
+    uint32_t s1 = __atomic_load_n(&d->seq, __ATOMIC_ACQUIRE);
+    if (likely(!(s1 & 1u))) {
+      snap = *d;                                  /* plain whole-struct copy */
+      __atomic_thread_fence(__ATOMIC_ACQUIRE);
+      uint32_t s2 = __atomic_load_n(&d->seq, __ATOMIC_ACQUIRE);
+      if (likely(s1 == s2)) return snap;          /* stable copy */
+    }
+    config_cpu_relax();
+    if (unlikely(++spins >= CONFIG_SEQ_SPIN_LIMIT)) {
+      int fd = config_device_read_lock(host_index);
+      snap = *d;
+      if (fd >= 0) config_device_unlock(fd, host_index);
+      LOGGER(WARNING, "get_device_snapshot(%d): seqlock spin cap hit, RDLCK fallback",
+             host_index);
+      return snap;
+    }
+  }
 }
 
 int mmap_file_to_util_path(device_util_t** data) {
@@ -1809,7 +1889,7 @@ static void sm_node_rebuild_locked(sm_node_region_t *r) {
      * for observability -- the authoritative ceiling used by change_token
      * stays the per-process g_total_cuda_cores[], which every process
      * computes identically from the same device. */
-    r->devices[i].up_limit = g_vgpu_config->devices[i].hard_core;
+    r->devices[i].up_limit = get_device_snapshot(i).hard_core;
   }
 
   r->device_count   = (uint32_t)MAX_DEVICE_COUNT;
@@ -1973,17 +2053,18 @@ void print_global_vgpu_config() {
   LOGGER(VERBOSE, "VMemory Node     : %s", g_vgpu_config->vmem_node ? "enabled" : "disabled");
   int index = 0;
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
-    if (g_vgpu_config->devices[i].activate) {
+    device_t d = get_device_snapshot(i);
+    if (d.activate) {
       LOGGER(VERBOSE, "---------------------------GPU %d---------------------------", index);
-      LOGGER(VERBOSE, "GPU UUID         : %s", g_vgpu_config->devices[i].uuid);
-      LOGGER(VERBOSE, "Memory Limit     : %s", g_vgpu_config->devices[i].memory_limit ? "enabled" : "disabled");
-      LOGGER(VERBOSE, "+ RealMemorySize : %ld", g_vgpu_config->devices[i].real_memory);
-      LOGGER(VERBOSE, "+ TotalMemorySize: %ld", g_vgpu_config->devices[i].total_memory);
-      LOGGER(VERBOSE, "Cores  Limit     : %s", g_vgpu_config->devices[i].core_limit ? "enabled" : "disabled");
-      LOGGER(VERBOSE, "+ HardLimit      : %s", g_vgpu_config->devices[i].hard_limit ? "enabled" : "disabled");
-      LOGGER(VERBOSE, "+ HardCoreSize   : %d", g_vgpu_config->devices[i].hard_core);
-      LOGGER(VERBOSE, "+ SoftCoreSize   : %d", g_vgpu_config->devices[i].soft_core);
-      LOGGER(VERBOSE, "Memory Oversold  : %s", g_vgpu_config->devices[i].memory_oversold ? "enabled" : "disabled");
+      LOGGER(VERBOSE, "GPU UUID         : %s", d.uuid);
+      LOGGER(VERBOSE, "Memory Limit     : %s", d.memory_limit ? "enabled" : "disabled");
+      LOGGER(VERBOSE, "+ RealMemorySize : %ld", d.real_memory);
+      LOGGER(VERBOSE, "+ TotalMemorySize: %ld", d.total_memory);
+      LOGGER(VERBOSE, "Cores  Limit     : %s", d.core_limit ? "enabled" : "disabled");
+      LOGGER(VERBOSE, "+ HardLimit      : %s", d.hard_limit ? "enabled" : "disabled");
+      LOGGER(VERBOSE, "+ HardCoreSize   : %d", d.hard_core);
+      LOGGER(VERBOSE, "+ SoftCoreSize   : %d", d.soft_core);
+      LOGGER(VERBOSE, "Memory Oversold  : %s", d.memory_oversold ? "enabled" : "disabled");
       index++;
     }
   }
@@ -2003,9 +2084,22 @@ int write_file_to_config_path(resource_data_t* data) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     goto DONE;
   }
+  /* Stamp the frozen header unconditionally so any build path that reaches this
+   * writer produces a file the validator in mmap_file_to_config_path accepts. */
+  data->magic          = CONFIG_MAGIC;
+  data->layout_version = CONFIG_LAYOUT_VERSION;
+  data->region_size    = sizeof(resource_data_t);
+  data->device_count   = MAX_DEVICE_COUNT;
   ssize_t wsize = write(fd, (void*)data, sizeof(resource_data_t));
   if (wsize != (ssize_t)sizeof(resource_data_t)) {
     LOGGER(ERROR, "can't write data to %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
+    goto DONE;
+  }
+  /* Pad to the permanently reserved size so the map length is fixed and a later
+   * larger struct never has to resize the file (which would SIGBUS old maps). */
+  if (unlikely(ftruncate(fd, CONFIG_FILE_SIZE) == -1)) {
+    LOGGER(ERROR, "can't size %s to %d, error %s",
+                  CONTROLLER_CONFIG_FILE_PATH, CONFIG_FILE_SIZE, strerror(errno));
     goto DONE;
   }
   ret = 0;
@@ -2315,7 +2409,8 @@ static volatile int nvml_to_host_device_index[MAX_DEVICE_COUNT] = {-1,-1,-1,-1,-
 
 void get_host_device_index_by_uuid(char *uuid, int *host_index) {
   for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
-    if (g_vgpu_config->devices[index].activate && strcmp(g_vgpu_config->devices[index].uuid, uuid) == 0) {
+    device_t d = get_device_snapshot(index);
+    if (d.activate && strcmp(d.uuid, uuid) == 0) {
       *host_index = index;
       break;
     }

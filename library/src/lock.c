@@ -291,6 +291,48 @@ void device_util_unlock(int fd, int device_index) {
   close(fd);
 }
 
+/* Per-device byte-range lock on vgpu.config's devices[i].seq word. Only the
+ * slow-path fallback in get_device_snapshot() (F_RDLCK) and the Go writer
+ * (F_WRLCK) take it; the seqlock fast path is lock-free. See
+ * docs/resource_data_seqlock_versioning_design.md. */
+int config_device_read_lock(int device_index) {
+  if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) {
+    LOGGER(ERROR, "(config) invalid device index %d", device_index);
+    return -1;
+  }
+  int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_RDONLY | O_CLOEXEC);
+  if (fd == -1) {
+    LOGGER(ERROR, "(config) failed to open %s: %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
+    return -1;
+  }
+  struct flock lock;
+  lock.l_type = F_RDLCK;
+  lock.l_whence = SEEK_SET;
+  lock.l_start = GET_CONFIG_LOCK_OFFSET(device_index);
+  lock.l_len = 1;
+  lock.l_pid = 0;
+  if (ofd_fcntl(fd, 1, &lock) == -1) {
+    LOGGER(ERROR, "(config) fcntl read lock failed for device %d: %s",
+           device_index, strerror(errno));
+    close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+void config_device_unlock(int fd, int device_index) {
+  if (fd < 0) return;
+  if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) return;
+  struct flock lock;
+  lock.l_type = F_UNLCK;
+  lock.l_whence = SEEK_SET;
+  lock.l_start = GET_CONFIG_LOCK_OFFSET(device_index);
+  lock.l_len = 1;
+  lock.l_pid = 0;
+  ofd_fcntl(fd, 0, &lock);
+  close(fd);
+}
+
 int device_vmem_read_lock(int device_index) {
   if (unlikely(device_index < 0 || device_index >= MAX_DEVICE_COUNT)) {
     LOGGER(ERROR, "(VMemNode) invalid device index %d", device_index);

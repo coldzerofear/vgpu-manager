@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -23,6 +24,16 @@ const (
 	MaxDeviceCount = util.MaxDeviceCount
 	NameBufferSize = 64
 	UuidBufferSize = 48
+
+	// Frozen-region ABI, mirrored from library/include/hook.h. Bump
+	// ConfigLayoutVersion in lockstep with CONFIG_LAYOUT_VERSION on any change to
+	// field type/order/offset; the layout is pinned by vgpu_config_test.go.
+	CachelineSize           = 128
+	ConfigMagic             = 0x56474346 // "VGCF"
+	ConfigLayoutVersion     = 1
+	ConfigFileSize          = 8192 // fixed; decoupled from sizeof (see design doc)
+	DriverVersionBufferSize = 32
+	DeviceReservedI32       = 7
 )
 
 type VersionT struct {
@@ -30,7 +41,12 @@ type VersionT struct {
 	Minor int32
 }
 
+// DeviceT mirrors C device_t: exactly one cache line (128B), Seq at offset 0.
+// Seq is the per-device seqlock version (even = stable, odd = write in
+// progress); ModifyDevice bumps it, the C get_device_snapshot() reads it.
 type DeviceT struct {
+	Seq            uint32
+	_              uint32 // keep TotalMemory 8-byte aligned (matches C _seq_pad)
 	UUID           [UuidBufferSize]byte
 	TotalMemory    uint64
 	RealMemory     uint64
@@ -41,19 +57,33 @@ type DeviceT struct {
 	MemoryLimit    int32
 	MemoryOversold int32
 	Activate       int32
+	Reserved       [DeviceReservedI32]int32
 }
 
+// ResourceDataT mirrors C resource_data_t: a 128B frozen header, an immutable
+// pod-identity block, then the per-device config. Field order/offsets are
+// byte-for-byte identical to the C struct.
 type ResourceDataT struct {
-	DriverVersion     VersionT
+	// ---- frozen header: 128 bytes ----
+	Magic         uint32
+	LayoutVersion uint32
+	RegionSize    uint32
+	DeviceCount   uint32
+	CudaVersion   VersionT // CUDA major.minor (was DriverVersion)
+	DriverVersion [DriverVersionBufferSize]byte
+	_             [72]byte // pad header to one cache line (128 - 56)
+	// ---- pod identity + flags (written once, never mutated) ----
 	PodUID            [UuidBufferSize]byte
 	PodName           [NameBufferSize]byte
 	PodNamespace      [NameBufferSize]byte
 	ContainerName     [NameBufferSize]byte
-	Devices           [MaxDeviceCount]DeviceT
+	RegisterUUID      [UuidBufferSize]byte
 	CompatibilityMode int32
 	SMWatcher         int32
 	VMemoryNode       int32
-	RegisterUUID      [UuidBufferSize]byte
+	_                 [84]byte // pad Devices onto a cache line (offset 512)
+	// ---- per-device config, seqlock-protected ----
+	Devices [MaxDeviceCount]DeviceT
 }
 
 type MmapResourceData struct {
@@ -111,9 +141,22 @@ func CheckResourceDataSize(filePath string) error {
 	if err != nil {
 		return err
 	}
-	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
-	if fileInfo.Size() != dataSize {
-		return fmt.Errorf("vGPU config file size mismatch, expected: %d, actual: %d", dataSize, fileInfo.Size())
+	if fileInfo.Size() != ConfigFileSize {
+		return fmt.Errorf("vGPU config file size mismatch, expected: %d, actual: %d", ConfigFileSize, fileInfo.Size())
+	}
+	return nil
+}
+
+// validateHeader rejects a config whose frozen header does not match this
+// build -- a mismatched layout_version (rolling upgrade) is refused cleanly
+// rather than misread, the same contract as vmem_node / sm_node.
+func validateHeader(r *ResourceDataT) error {
+	wantSize := uint32(unsafe.Sizeof(ResourceDataT{}))
+	if r.Magic != ConfigMagic || r.LayoutVersion != ConfigLayoutVersion ||
+		r.RegionSize != wantSize || r.DeviceCount != MaxDeviceCount {
+		return fmt.Errorf("vGPU config header mismatch: magic=%#x ver=%d size=%d count=%d (want %#x/%d/%d/%d)",
+			r.Magic, r.LayoutVersion, r.RegionSize, r.DeviceCount,
+			ConfigMagic, ConfigLayoutVersion, wantSize, MaxDeviceCount)
 	}
 	return nil
 }
@@ -123,13 +166,16 @@ func NewMmapResourceData(filePath string) (*MmapResourceData, error) {
 	if err != nil {
 		return nil, err
 	}
-	dataSize := int64(unsafe.Sizeof(ResourceDataT{}))
-	if mmapFile.FileInfo.Size() != dataSize {
-		klog.Errorf("File size mismatch, expected: %d, actual: %d", dataSize, mmapFile.FileInfo.Size())
+	if mmapFile.FileInfo.Size() != ConfigFileSize {
+		klog.Errorf("File size mismatch, expected: %d, actual: %d", ConfigFileSize, mmapFile.FileInfo.Size())
 		_ = mmapFile.Close()
 		return nil, fmt.Errorf("vGPU config file size mismatch")
 	}
 	data := (*ResourceDataT)(unsafe.Pointer(&mmapFile.Data[0]))
+	if err := validateHeader(data); err != nil {
+		_ = mmapFile.Close()
+		return nil, err
+	}
 	return &MmapResourceData{
 		resource: data,
 		mmapFile: mmapFile,
@@ -166,7 +212,8 @@ func NewResourceDataT(
 	containerClaim device.ContainerDeviceClaim,
 	memoryOversold bool, node *corev1.Node,
 ) *ResourceDataT {
-	major, minor := devManager.GetDriverVersion().CudaDriverVersion.MajorAndMinor()
+	driverVer := devManager.GetDriverVersion()
+	major, minor := driverVer.CudaDriverVersion.MajorAndMinor()
 	ratio := devManager.GetNodeConfig().GetDeviceMemoryScaling()
 	convert48Bytes := func(val string) [UuidBufferSize]byte {
 		var byteArray [UuidBufferSize]byte
@@ -176,6 +223,11 @@ func NewResourceDataT(
 	convert64Bytes := func(val string) [NameBufferSize]byte {
 		var byteArray [NameBufferSize]byte
 		copy(byteArray[:], val)
+		return byteArray
+	}
+	convertDriverVer := func(val string) [DriverVersionBufferSize]byte {
+		var byteArray [DriverVersionBufferSize]byte
+		copy(byteArray[:DriverVersionBufferSize-1], val)
 		return byteArray
 	}
 	computePolicy := GetDefaultComputePolicy(pod, node)
@@ -266,10 +318,15 @@ func NewResourceDataT(
 	}
 	compMode := GetCompatibilityMode(devManager)
 	data := &ResourceDataT{
-		DriverVersion: VersionT{
+		Magic:         ConfigMagic,
+		LayoutVersion: ConfigLayoutVersion,
+		RegionSize:    uint32(unsafe.Sizeof(ResourceDataT{})),
+		DeviceCount:   MaxDeviceCount,
+		CudaVersion: VersionT{
 			Major: int32(major),
 			Minor: int32(minor),
 		},
+		DriverVersion:     convertDriverVer(driverVer.DriverVersion),
 		PodUID:            convert48Bytes(string(pod.UID)),
 		PodName:           convert64Bytes(pod.Name),
 		PodNamespace:      convert64Bytes(pod.Namespace),
@@ -310,6 +367,13 @@ func GetComputePolicy(policy string) util.ComputePolicy {
 // resource_data_t (asserted by CheckResourceDataSize and the mmap round-trip
 // test), so the bytes are interchangeable with the C reader.
 func writeResourceDataToDisk(filePath string, data *ResourceDataT) error {
+	// Stamp the frozen header unconditionally so any writer path produces a file
+	// the C validator (mmap_file_to_config_path) accepts.
+	data.Magic = ConfigMagic
+	data.LayoutVersion = ConfigLayoutVersion
+	data.RegionSize = uint32(unsafe.Sizeof(ResourceDataT{}))
+	data.DeviceCount = MaxDeviceCount
+
 	size := int(unsafe.Sizeof(ResourceDataT{}))
 	buf := unsafe.Slice((*byte)(unsafe.Pointer(data)), size)
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0777)
@@ -326,6 +390,34 @@ func writeResourceDataToDisk(filePath string, data *ResourceDataT) error {
 	if n != size {
 		return fmt.Errorf("short write for config %s: wrote %d of %d bytes", filePath, n, size)
 	}
+	// Pad to the permanently reserved size so the map length is fixed and a later
+	// larger struct never has to resize the file (which would SIGBUS old maps).
+	if err := f.Truncate(int64(ConfigFileSize)); err != nil {
+		return fmt.Errorf("can't size config %s to %d: %w", filePath, ConfigFileSize, err)
+	}
+	return nil
+}
+
+// ModifyDevice applies mutation to devices[deviceIndex] under the per-device
+// seqlock, so a concurrent C reader (get_device_snapshot) sees either the whole
+// update or none of it -- never a torn mix. The receiver MUST be backed by a
+// MAP_SHARED writable mapping (MmapResourceData); the stores must land in the
+// same page cache the C reader observes, so it must never be a value written
+// out later via writeResourceDataToDisk (rename/O_TRUNC would break visibility).
+//
+// The seqlock alone makes the fast reader path lock-free; taking the per-device
+// F_WRLCK around it (GET_CONFIG_LOCK_OFFSET) additionally serialises writers and
+// makes the reader's F_RDLCK slow-path fallback meaningful. Callers that can
+// have more than one writer, or want the fallback to be robust against a
+// crash mid-update, should hold that lock across this call.
+func (r *ResourceDataT) ModifyDevice(deviceIndex int, mutation func(*DeviceT)) error {
+	if deviceIndex < 0 || deviceIndex >= MaxDeviceCount {
+		return fmt.Errorf("device index %d out of range [0, %d)", deviceIndex, MaxDeviceCount)
+	}
+	d := &r.Devices[deviceIndex]
+	atomic.AddUint32(&d.Seq, 1) // even -> odd: write in progress
+	mutation(d)
+	atomic.AddUint32(&d.Seq, 1) // odd -> even: publish
 	return nil
 }
 
