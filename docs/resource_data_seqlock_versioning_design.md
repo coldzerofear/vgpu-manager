@@ -331,20 +331,37 @@ type ResourceDataT struct {     // 冻结头 128B + pod 块 + devices[]
 
 ### 7.3 `ModifyDevice`（seqlock 写序抽象，先落地不启用）
 
+接收者定为 **`*MmapResourceData`**（而非 `*ResourceDataT`）：写入必须落到 C 侧观察的
+`MAP_SHARED` 映射里，而 `MmapResourceData` 正好持有 mmap 的 fd/path，所以 `F_WRLCK`
+在方法内部取，不再甩给调用方。持 `r.mutex` 防 `Reload()` 在就地写期间把映射 munmap 掉。
+
 ```go
-// ModifyDevice 在每设备 seqlock 下就地修改 devices[deviceIndex]，令并发的 C reader
-// 要么看到整块新值、要么整块旧值。要求 r 由 MAP_SHARED 可写映射支撑（MmapResourceData），
-// 绝不可走 os.WriteFile 整文件重写。写序外层建议持 GET_CONFIG_LOCK_OFFSET 的 F_WRLCK，
-// 以便 reader 的 F_RDLCK 慢速兜底有效、并串行化多写方。
-func (r *ResourceDataT) ModifyDevice(deviceIndex int, mutation func(*DeviceT)) error {
+func getConfigLockOffset(deviceIndex int) int64 { // 对齐 C GET_CONFIG_LOCK_OFFSET
+    return int64(unsafe.Offsetof(ResourceDataT{}.Devices)) +
+        int64(deviceIndex)*int64(unsafe.Sizeof(DeviceT{})) +
+        int64(unsafe.Offsetof(DeviceT{}.Seq)) // = 512 + 128*i
+}
+
+// 在每设备 seqlock + OFD F_WRLCK 下就地修改 devices[deviceIndex]，令并发 C reader
+// 要么看到整块新值、要么整块旧值；F_WRLCK 让 reader 的 F_RDLCK 慢速兜底有效并串行化写方。
+// 就地写，绝不可走 writeResourceDataToDisk（O_TRUNC 会破坏 reader 视图）。
+func (r *MmapResourceData) ModifyDevice(deviceIndex int, mutation func(*DeviceT)) error {
     if deviceIndex < 0 || deviceIndex >= MaxDeviceCount {
-        return fmt.Errorf("device index %d out of range", deviceIndex)
+        return fmt.Errorf("device index %d out of range [0, %d)", deviceIndex, MaxDeviceCount)
     }
-    d := &r.Devices[deviceIndex]
-    seq := &d.Seq // uint32, 128 对齐 → atomic 安全
-    atomic.AddUint32(seq, 1) // 偶→奇：开始写
-    mutation(d)              // 就地改字段
-    atomic.AddUint32(seq, 1) // 奇→偶：发布
+    r.mutex.Lock()
+    defer r.mutex.Unlock()
+    f, err := os.OpenFile(r.mmapFile.Path, os.O_RDWR, 0644)
+    if err != nil { return err }
+    defer f.Close()
+    off := getConfigLockOffset(deviceIndex)
+    if err = util.FcntlRecordLock(f.Fd(), syscall.F_WRLCK, true, off); err != nil { return err }
+    defer util.FcntlRecordLock(f.Fd(), syscall.F_UNLCK, false, off)
+
+    d := &r.resource.Devices[deviceIndex]
+    atomic.AddUint32(&d.Seq, 1) // 偶→奇：开始写
+    mutation(d)                 // 就地改字段
+    atomic.AddUint32(&d.Seq, 1) // 奇→偶：发布
     return nil
 }
 ```

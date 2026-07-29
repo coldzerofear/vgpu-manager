@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"unsafe"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -398,23 +399,53 @@ func writeResourceDataToDisk(filePath string, data *ResourceDataT) error {
 	return nil
 }
 
+// getConfigLockOffset mirrors C GET_CONFIG_LOCK_OFFSET (library/include/hook.h):
+// offsetof(devices) + deviceIndex*sizeof(device_t) + offsetof(device_t.seq).
+// unsafe.Offsetof(Devices) ignores the array index, so the per-device stride is
+// added explicitly, exactly like the watcher's getDeviceLockOffset.
+func getConfigLockOffset(deviceIndex int) int64 {
+	base := int64(unsafe.Offsetof(ResourceDataT{}.Devices))
+	stride := int64(unsafe.Sizeof(DeviceT{}))
+	seqOff := int64(unsafe.Offsetof(DeviceT{}.Seq))
+	return base + int64(deviceIndex)*stride + seqOff
+}
+
 // ModifyDevice applies mutation to devices[deviceIndex] under the per-device
 // seqlock, so a concurrent C reader (get_device_snapshot) sees either the whole
-// update or none of it -- never a torn mix. The receiver MUST be backed by a
-// MAP_SHARED writable mapping (MmapResourceData); the stores must land in the
-// same page cache the C reader observes, so it must never be a value written
-// out later via writeResourceDataToDisk (rename/O_TRUNC would break visibility).
+// update or none of it -- never a torn mix.
 //
-// The seqlock alone makes the fast reader path lock-free; taking the per-device
-// F_WRLCK around it (GET_CONFIG_LOCK_OFFSET) additionally serialises writers and
-// makes the reader's F_RDLCK slow-path fallback meaningful. Callers that can
-// have more than one writer, or want the fallback to be robust against a
-// crash mid-update, should hold that lock across this call.
-func (r *ResourceDataT) ModifyDevice(deviceIndex int, mutation func(*DeviceT)) error {
+// The receiver is *MmapResourceData because the mutation must land in the
+// MAP_SHARED mapping the C side observes (that is why it is here and not on
+// *ResourceDataT, which could be a heap copy). It writes in place -- it must
+// never go back through writeResourceDataToDisk, whose O_TRUNC would break the
+// reader's view.
+//
+// It takes the per-device OFD F_WRLCK (GET_CONFIG_LOCK_OFFSET) around the
+// seqlock write for two reasons: it serialises concurrent writers, and it gives
+// the C reader's F_RDLCK slow-path fallback something to block on so that path
+// is robust even if a writer is descheduled or dies mid-update (a dead writer's
+// OFD lock releases on fd close). The C fast reader path takes no lock, so this
+// adds no per-read cost. r.mutex is held so a concurrent Reload() cannot munmap
+// the mapping out from under the in-place write.
+func (r *MmapResourceData) ModifyDevice(deviceIndex int, mutation func(*DeviceT)) error {
 	if deviceIndex < 0 || deviceIndex >= MaxDeviceCount {
 		return fmt.Errorf("device index %d out of range [0, %d)", deviceIndex, MaxDeviceCount)
 	}
-	d := &r.Devices[deviceIndex]
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	f, err := os.OpenFile(r.mmapFile.Path, os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("open %q for device %d lock: %w", r.mmapFile.Path, deviceIndex, err)
+	}
+	defer func() { _ = f.Close() }()
+	offset := getConfigLockOffset(deviceIndex)
+	if err = util.FcntlRecordLock(f.Fd(), syscall.F_WRLCK, true, offset); err != nil {
+		return fmt.Errorf("fcntl wlock device %d at offset %d: %w", deviceIndex, offset, err)
+	}
+	defer func() { _ = util.FcntlRecordLock(f.Fd(), syscall.F_UNLCK, false, offset) }()
+
+	d := &r.resource.Devices[deviceIndex]
 	atomic.AddUint32(&d.Seq, 1) // even -> odd: write in progress
 	mutation(d)
 	atomic.AddUint32(&d.Seq, 1) // odd -> even: publish

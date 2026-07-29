@@ -1514,6 +1514,22 @@ int mmap_file_to_config_path(resource_data_t** data) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     return ret;
   }
+  /* Read-lock byte 0 so we never fstat/mmap/validate a file a concurrent
+   * env-fallback creator is mid-write on. Best-effort: if locking is
+   * unavailable the header validator below is still a backstop against a torn
+   * read. Released by close(fd) at DONE -- the mapping persists (the file is
+   * never resized after creation), so the lock is only needed for the window
+   * up to and including validation. */
+  struct flock rl;
+  memset(&rl, 0, sizeof(rl));
+  rl.l_type = F_RDLCK;
+  rl.l_whence = SEEK_SET;
+  rl.l_start = 0;
+  rl.l_len = 1;
+  if (unlikely(ofd_fcntl(fd, 1, &rl) == -1)) {
+    LOGGER(WARNING, "can't read-lock %s (%s); validating without it",
+           CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
+  }
   struct stat sb;
   if (fstat(fd, &sb) == -1) {
     LOGGER(ERROR, "fstat failed: %s", strerror(errno));
@@ -1594,7 +1610,20 @@ device_t get_device_snapshot(int host_index) {
   for (;;) {
     uint32_t s1 = __atomic_load_n(&d->seq, __ATOMIC_ACQUIRE);
     if (likely(!(s1 & 1u))) {
-      snap = *d;                                  /* plain whole-struct copy */
+      /* Plain whole-struct copy, deliberately -- this is the Linux-kernel
+       * seqlock discipline, not an oversight:
+       *   - a copy taken during a write is discarded by the s1==s2 check, so a
+       *     torn value is never USED;
+       *   - the ACQUIRE fence below stops the copy from being reordered past
+       *     the second seq load, so the compiler cannot hoist a field read
+       *     after validation;
+       *   - a whole-struct atomic load is NOT an option: device_t is 128B, far
+       *     past any lock-free width, so __atomic_load would fall back to
+       *     libatomic's per-process lock table and silently break cross-process
+       *     protection (see the sm_node note in hook.h). Per-field relaxed
+       *     atomics cannot cover uuid[48] as a unit either. So plain-copy +
+       *     retry is both the correct and the only workable choice here. */
+      snap = *d;
       __atomic_thread_fence(__ATOMIC_ACQUIRE);
       uint32_t s2 = __atomic_load_n(&d->seq, __ATOMIC_ACQUIRE);
       if (likely(s1 == s2)) return snap;          /* stable copy */
@@ -2079,32 +2108,63 @@ int write_file_to_config_path(resource_data_t* data) {
   if (unlikely(file_exist(VGPU_CONFIG_PATH) != 0)) {
     mkdir(VGPU_CONFIG_PATH, 0755);
   }
-  int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
+  /* O_CREAT|O_RDWR, deliberately NOT O_TRUNC: truncation must happen AFTER the
+   * write lock is held, never at open() time, or a peer creating the same file
+   * on the env-fallback path (or a reader) races the empty window. Same create
+   * discipline as mmap_file_to_vmem_node. */
+  int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
   if (unlikely(fd == -1)) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     goto DONE;
   }
-  /* Stamp the frozen header unconditionally so any build path that reaches this
-   * writer produces a file the validator in mmap_file_to_config_path accepts. */
+  /* Serialise concurrent env-fallback creators on byte 0 of the frozen header
+   * (the same byte readers take F_RDLCK on). The winner writes the whole file
+   * under the lock; a dead writer's OFD lock releases on fd close. */
+  struct flock fl;
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start = 0;
+  fl.l_len = 1;
+  if (unlikely(ofd_fcntl(fd, 1, &fl) == -1)) {
+    LOGGER(ERROR, "can't lock %s: %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
+    goto DONE;
+  }
+  /* A peer already produced a full-size, valid file under this lock. On the env
+   * path every process builds identical data from the same container env, so a
+   * peer's file is ours -- skip the rewrite. Verify the frozen header, not just
+   * the size: a stale/corrupt file of the right length must be rewritten
+   * (self-healing), not trusted. hdr = {magic, layout_version, region_size,
+   * device_count} at offset 0, pinned by the _Static_asserts in hook.h. */
+  struct stat sb;
+  uint32_t hdr[4];
+  if (fstat(fd, &sb) == 0 && sb.st_size == CONFIG_FILE_SIZE &&
+      pread(fd, hdr, sizeof(hdr), 0) == (ssize_t)sizeof(hdr) &&
+      hdr[0] == CONFIG_MAGIC && hdr[1] == CONFIG_LAYOUT_VERSION &&
+      hdr[2] == (uint32_t)sizeof(resource_data_t) && hdr[3] == (uint32_t)MAX_DEVICE_COUNT) {
+    ret = 0;
+    goto DONE;
+  }
+  /* Stamp the frozen header so the validator in mmap_file_to_config_path
+   * accepts whatever build path reached this writer. */
   data->magic          = CONFIG_MAGIC;
   data->layout_version = CONFIG_LAYOUT_VERSION;
   data->region_size    = sizeof(resource_data_t);
   data->device_count   = MAX_DEVICE_COUNT;
-  ssize_t wsize = write(fd, (void*)data, sizeof(resource_data_t));
-  if (wsize != (ssize_t)sizeof(resource_data_t)) {
-    LOGGER(ERROR, "can't write data to %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
-    goto DONE;
-  }
-  /* Pad to the permanently reserved size so the map length is fixed and a later
-   * larger struct never has to resize the file (which would SIGBUS old maps). */
-  if (unlikely(ftruncate(fd, CONFIG_FILE_SIZE) == -1)) {
-    LOGGER(ERROR, "can't size %s to %d, error %s",
+  /* Clear, write at offset 0, then size to the reserved total. Starting from 0
+   * zeroes the reserved tail; the lock keeps any reader from seeing the middle;
+   * the fixed final size means a later larger struct never resizes the file
+   * (which would SIGBUS an old map). */
+  if (unlikely(ftruncate(fd, 0) == -1) ||
+      pwrite(fd, (void*)data, sizeof(resource_data_t), 0) != (ssize_t)sizeof(resource_data_t) ||
+      ftruncate(fd, CONFIG_FILE_SIZE) == -1) {
+    LOGGER(ERROR, "can't write %s to %d bytes: %s",
                   CONTROLLER_CONFIG_FILE_PATH, CONFIG_FILE_SIZE, strerror(errno));
     goto DONE;
   }
   ret = 0;
 DONE:
-  close(fd);
+  if (fd != -1) close(fd);   /* closing the fd releases its OFD lock */
   return ret;
 }
 
