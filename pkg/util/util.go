@@ -493,21 +493,19 @@ func GetPercentageValue(x uint32) uint32 {
 	}
 }
 
+func EnvValueEnabled(val string) bool {
+	val = strings.TrimSpace(val)
+	return val == "1" || strings.EqualFold(val, "true")
+}
+
 func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool {
 	if pod == nil {
 		return false
 	}
 	envEnabled := func(cont *corev1.Container) bool {
-		for _, env := range cont.Env {
-			if env.Name != envName {
-				continue
-			}
-			val := strings.TrimSpace(env.Value)
-			if val == "1" || strings.EqualFold(val, "true") {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(cont.Env, func(env corev1.EnvVar) bool {
+			return env.Name == envName && EnvValueEnabled(env.Value)
+		})
 	}
 	// Container names are unique across init and regular containers; search
 	// init containers too so the toggle works for an init container once it

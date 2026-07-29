@@ -158,7 +158,15 @@ func Test_ContainerLister(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		resData := vgpu.NewResourceDataT(devManager, pod, assignDevices, false, node)
+		resData := vgpu.NewResourceDataWithOptions(
+			vgpu.ResourceOption{},
+			vgpu.WithPodInfo(pod),
+			vgpu.WithDeviceManager(devManager),
+			vgpu.WithContainerName(assignDevices.Name),
+			vgpu.WithDeviceClaims(assignDevices.DeviceClaims),
+			vgpu.WithMemoryOversold(false),
+			vgpu.WithComputePolicy(vgpu.GetDefaultComputePolicy(pod, node)),
+		)
 		contResDataMap[container.Name] = resData
 	}
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/opencontainers/cgroups"
 	corev1 "k8s.io/api/core/v1"
@@ -118,9 +119,9 @@ func (r *MmapResourceData) Close() error {
 
 func (r *MmapResourceData) NeedsReload() (reload bool, err error) {
 	r.mutex.Lock()
-	defer r.mutex.Unlock()
-
-	return r.mmapFile.NeedsReload()
+	reload, err = r.mmapFile.NeedsReload()
+	r.mutex.Unlock()
+	return reload, err
 }
 
 func (r *MmapResourceData) Reload() error {
@@ -138,11 +139,9 @@ func (r *MmapResourceData) Reload() error {
 }
 
 func CheckResourceDataSize(filePath string) error {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
+	if fileInfo, err := os.Stat(filePath); err != nil {
 		return err
-	}
-	if fileInfo.Size() != ConfigFileSize {
+	} else if fileInfo.Size() != ConfigFileSize {
 		return fmt.Errorf("vGPU config file size mismatch, expected: %d, actual: %d", ConfigFileSize, fileInfo.Size())
 	}
 	return nil
@@ -201,57 +200,142 @@ func GetCompatibilityMode(devManager *manager.DeviceManager) util.CompatibilityM
 	return mode
 }
 
-func NewResourceDataT(
-	devManager *manager.DeviceManager, pod *corev1.Pod,
-	containerClaim device.ContainerDeviceClaim,
-	memoryOversold bool, node *corev1.Node,
-) *ResourceDataT {
-	driverVer := devManager.GetDriverVersion()
-	major, minor := driverVer.CudaDriverVersion.MajorAndMinor()
-	ratio := devManager.GetNodeConfig().GetDeviceMemoryScaling()
-	convert48Bytes := func(val string) [UuidBufferSize]byte {
-		var byteArray [UuidBufferSize]byte
-		copy(byteArray[:], val)
-		return byteArray
-	}
-	convert64Bytes := func(val string) [NameBufferSize]byte {
-		var byteArray [NameBufferSize]byte
-		copy(byteArray[:], val)
-		return byteArray
-	}
-	convertDriverVer := func(val string) [DriverVersionBufferSize]byte {
-		var byteArray [DriverVersionBufferSize]byte
-		copy(byteArray[:DriverVersionBufferSize-1], val)
-		return byteArray
-	}
-	computePolicy := GetDefaultComputePolicy(pod, node)
+type ResourceOption struct {
+	CudaVersion        nvidia.CudaDriverVersion
+	DriverVersion      string
+	PodUID             string
+	PodName            string
+	PodNamespace       string
+	ContainerName      string
+	RegisterUUID       string
+	MemoryRatio        float64
+	MemoryOversold     bool
+	SMWatcherEnabled   bool
+	VMemoryNodeEnabled bool
+	ComputePolicy      util.ComputePolicy
+	CompatibilityMode  util.CompatibilityMode
+	DeviceInfos        []device.DeviceClaim
+	DeviceClaims       []device.DeviceClaim
+}
 
-	deviceInfos := devManager.GetNodeDeviceInfo()
-	deviceInfoMap := make(map[string]device.DeviceInfo, len(deviceInfos))
-	for i := range deviceInfos[:min(MaxDeviceCount, len(deviceInfos))] {
-		deviceInfoMap[deviceInfos[i].Uuid] = deviceInfos[i]
-	}
+type OptionFunc func(r *ResourceOption)
 
-	smWatcher := 0
-	if devManager.GetFeatureGate().Enabled(util.SMWatcher) {
-		smWatcher = 1
+func convert32Bytes(val string) [DriverVersionBufferSize]byte {
+	var byteArray [DriverVersionBufferSize]byte
+	copy(byteArray[:DriverVersionBufferSize-1], val)
+	return byteArray
+}
+
+func convert48Bytes(val string) [UuidBufferSize]byte {
+	var byteArray [UuidBufferSize]byte
+	copy(byteArray[:UuidBufferSize-1], val)
+	return byteArray
+}
+
+func convert64Bytes(val string) [NameBufferSize]byte {
+	var byteArray [NameBufferSize]byte
+	copy(byteArray[:NameBufferSize-1], val)
+	return byteArray
+}
+
+func WithDeviceInfos(infos []device.DeviceClaim) OptionFunc {
+	return func(r *ResourceOption) {
+		r.DeviceInfos = infos
 	}
-	vMemoryNode := 0
-	if devManager.GetFeatureGate().Enabled(util.VMemoryNode) {
-		vMemoryNode = 1
+}
+func WithDeviceClaims(claims []device.DeviceClaim) OptionFunc {
+	return func(r *ResourceOption) {
+		r.DeviceClaims = claims
 	}
-	devices := [MaxDeviceCount]DeviceT{}
-	for i, claim := range containerClaim.DeviceClaims {
+}
+func WithContainerName(containerName string) OptionFunc {
+	return func(r *ResourceOption) {
+		r.ContainerName = containerName
+	}
+}
+func WithComputePolicy(policy util.ComputePolicy) OptionFunc {
+	return func(r *ResourceOption) {
+		r.ComputePolicy = policy
+	}
+}
+func WithPodInfo(pod *corev1.Pod) OptionFunc {
+	return func(r *ResourceOption) {
+		if pod != nil {
+			r.PodUID = string(pod.UID)
+			r.PodName = pod.Name
+			r.PodNamespace = pod.Namespace
+		}
+	}
+}
+func WithCompatibilityMode(mode util.CompatibilityMode) OptionFunc {
+	return func(r *ResourceOption) {
+		r.CompatibilityMode = mode
+	}
+}
+func WithSMWatcherEnabled(enabled bool) OptionFunc {
+	return func(r *ResourceOption) {
+		r.SMWatcherEnabled = enabled
+	}
+}
+func WithVMemoryNodeEnabled(enabled bool) OptionFunc {
+	return func(r *ResourceOption) {
+		r.VMemoryNodeEnabled = enabled
+	}
+}
+func WithRegisterUUID(uuid string) OptionFunc {
+	return func(r *ResourceOption) {
+		r.RegisterUUID = uuid
+	}
+}
+func WithMemoryRatio(ratio float64) OptionFunc {
+	return func(r *ResourceOption) {
+		r.MemoryRatio = ratio
+	}
+}
+func WithMemoryOversold(oversold bool) OptionFunc {
+	return func(r *ResourceOption) {
+		r.MemoryOversold = oversold
+	}
+}
+func WithDriverVersion(version nvidia.DriverVersion) OptionFunc {
+	return func(r *ResourceOption) {
+		r.CudaVersion = version.CudaDriverVersion
+		r.DriverVersion = version.DriverVersion
+	}
+}
+
+func NewResourceDataWithOptions(o ResourceOption, opts ...OptionFunc) *ResourceDataT {
+	for _, opt := range opts {
+		opt(&o)
+	}
+	deviceInfoMap := make(map[string]*device.DeviceClaim, len(o.DeviceInfos))
+	for i, info := range o.DeviceInfos {
+		deviceInfoMap[info.Uuid] = &o.DeviceInfos[i]
+	}
+	deviceConfigs := [MaxDeviceCount]DeviceT{}
+	for i, claim := range o.DeviceClaims {
 		if i >= MaxDeviceCount {
 			break
 		}
+		deviceInfo, exists := deviceInfoMap[claim.Uuid]
+		if !exists {
+			continue
+		}
+		// deviceInfo.Id is the host device index; the shared-memory layout only
+		// has MaxDeviceCount slots. Guard the write so a node with more GPUs than
+		// that cannot index out of range (the old cgo path did a silent OOB
+		// memcpy here instead).
+		if deviceInfo.Id < 0 || deviceInfo.Id >= MaxDeviceCount {
+			klog.Warningf("Device host index %d out of range [0, %d), skip", deviceInfo.Id, MaxDeviceCount)
+			continue
+		}
 		totalMemoryBytes := uint64(claim.Memory) << 20
 		realMemoryBytes := totalMemoryBytes
-		if ratio > 1 {
-			memoryOversold = true
-			realMemoryBytes = uint64(float64(realMemoryBytes) / ratio)
+		if o.MemoryRatio > 1 {
+			o.MemoryOversold = true
+			realMemoryBytes = uint64(float64(realMemoryBytes) / o.MemoryRatio)
 		}
-		dev := DeviceT{
+		deviceConfig := DeviceT{
 			UUID:        convert48Bytes(claim.Uuid),
 			TotalMemory: totalMemoryBytes,
 			RealMemory:  realMemoryBytes,
@@ -261,56 +345,48 @@ func NewResourceDataT(
 			HardLimit:   int32(0),
 			Activate:    int32(1),
 		}
-		gpuDevice := deviceInfoMap[claim.Uuid]
-
 		// need limit core
-		switch computePolicy {
+		switch o.ComputePolicy {
 		case util.BalanceComputePolicy:
 			//  int soft_core;
-			dev.SoftCore = int32(gpuDevice.Core)
+			deviceConfig.SoftCore = int32(deviceInfo.Cores)
 			// need limit core
 			if claim.Cores > 0 && claim.Cores < util.HundredCore {
-				//  int core_limit;
-				dev.CoreLimit = 1
-				if claim.Cores >= gpuDevice.Core {
-					//  int hard_limit;
-					dev.HardLimit = 1
+				deviceConfig.CoreLimit = int32(1) //  int core_limit;
+				if claim.Cores >= deviceInfo.Cores {
+					deviceConfig.HardLimit = int32(1) //  int hard_limit;
 				}
 			}
-		case util.FixedComputePolicy:
-			// need limit core
+		case util.FixedComputePolicy: // need limit core
 			if claim.Cores > 0 && claim.Cores < util.HundredCore {
-				//  int core_limit;
-				dev.CoreLimit = 1
-				//  int hard_limit;
-				dev.HardLimit = 1
+				deviceConfig.CoreLimit = int32(1) //  int core_limit;
+				deviceConfig.HardLimit = int32(1) //  int hard_limit;
 			}
 		case util.NoneComputePolicy:
 		}
-
-		//  int memory_limit;
-		if claim.Memory == gpuDevice.Memory && ratio == 1 {
-			dev.MemoryLimit = 0
+		//  int memory_limit
+		if claim.Memory == deviceInfo.Memory && o.MemoryRatio == 1 {
+			deviceConfig.MemoryLimit = int32(0)
 		} else {
-			dev.MemoryLimit = 1
+			deviceConfig.MemoryLimit = int32(1)
 		}
 		//  int memory_oversold
-		if memoryOversold {
-			dev.MemoryOversold = 1
+		if o.MemoryOversold {
+			deviceConfig.MemoryOversold = int32(1)
 		} else {
-			dev.MemoryOversold = 0
+			deviceConfig.MemoryOversold = int32(0)
 		}
-		// gpuDevice.Id is the host device index; the shared-memory layout only
-		// has MaxDeviceCount slots. Guard the write so a node with more GPUs than
-		// that cannot index out of range (the old cgo path did a silent OOB
-		// memcpy here instead).
-		if gpuDevice.Id < 0 || gpuDevice.Id >= MaxDeviceCount {
-			klog.Warningf("Device host index %d out of range [0, %d), skip", gpuDevice.Id, MaxDeviceCount)
-			continue
-		}
-		devices[gpuDevice.Id] = dev
+		deviceConfigs[deviceInfo.Id] = deviceConfig
 	}
-	compMode := GetCompatibilityMode(devManager)
+	major, minor := o.CudaVersion.MajorAndMinor()
+	smWatcher := 0
+	if o.SMWatcherEnabled {
+		smWatcher = 1
+	}
+	vMemoryNode := 0
+	if o.VMemoryNodeEnabled {
+		vMemoryNode = 1
+	}
 	data := &ResourceDataT{
 		Magic:         ConfigMagic,
 		LayoutVersion: ConfigLayoutVersion,
@@ -320,18 +396,39 @@ func NewResourceDataT(
 			Major: int32(major),
 			Minor: int32(minor),
 		},
-		DriverVersion:     convertDriverVer(driverVer.DriverVersion),
-		PodUID:            convert48Bytes(string(pod.UID)),
-		PodName:           convert64Bytes(pod.Name),
-		PodNamespace:      convert64Bytes(pod.Namespace),
-		ContainerName:     convert64Bytes(containerClaim.Name),
-		Devices:           devices,
-		CompatibilityMode: int32(compMode),
+		DriverVersion:     convert32Bytes(o.DriverVersion),
+		PodUID:            convert48Bytes(o.PodUID),
+		PodName:           convert64Bytes(o.PodName),
+		PodNamespace:      convert64Bytes(o.PodNamespace),
+		ContainerName:     convert64Bytes(o.ContainerName),
+		RegisterUUID:      convert48Bytes(o.RegisterUUID),
+		CompatibilityMode: int32(o.CompatibilityMode),
 		SMWatcher:         int32(smWatcher),
 		VMemoryNode:       int32(vMemoryNode),
-		RegisterUUID:      convert48Bytes(""),
+		Devices:           deviceConfigs,
 	}
 	return data
+}
+
+func WithDeviceManager(devManager *manager.DeviceManager) OptionFunc {
+	return func(r *ResourceOption) {
+		WithDriverVersion(devManager.GetDriverVersion())(r)
+		WithMemoryRatio(devManager.GetNodeConfig().GetDeviceMemoryScaling())(r)
+		WithSMWatcherEnabled(devManager.GetFeatureGate().Enabled(util.SMWatcher))(r)
+		WithVMemoryNodeEnabled(devManager.GetFeatureGate().Enabled(util.VMemoryNode))(r)
+		WithCompatibilityMode(GetCompatibilityMode(devManager))(r)
+		devices := devManager.GetNodeDeviceInfo()
+		deviceInfos := make([]device.DeviceClaim, len(devices))
+		for i, dev := range devices[:min(MaxDeviceCount, len(devices))] {
+			deviceInfos[i] = device.DeviceClaim{
+				Id:     dev.Id,
+				Uuid:   dev.Uuid,
+				Cores:  dev.Core,
+				Memory: dev.Memory,
+			}
+		}
+		WithDeviceInfos(deviceInfos)(r)
+	}
 }
 
 func GetDefaultComputePolicy(pod *corev1.Pod, node *corev1.Node) util.ComputePolicy {
@@ -355,12 +452,12 @@ func GetComputePolicy(policy string) util.ComputePolicy {
 	}
 }
 
-// writeResourceDataToDisk writes the fixed-size ResourceDataT to filePath as a
+// WriteResourceDataToDisk writes the fixed-size ResourceDataT to filePath as a
 // raw byte image, matching the C setting_to_disk (O_CREAT|O_TRUNC|O_WRONLY,
 // mode 0777). The Go struct layout is byte-for-byte identical to the C
 // resource_data_t (asserted by CheckResourceDataSize and the mmap round-trip
 // test), so the bytes are interchangeable with the C reader.
-func writeResourceDataToDisk(filePath string, data *ResourceDataT) error {
+func WriteResourceDataToDisk(filePath string, data *ResourceDataT) error {
 	// Stamp the frozen header unconditionally so any writer path produces a file
 	// the C validator (mmap_file_to_config_path) accepts.
 	data.Magic = ConfigMagic
@@ -370,23 +467,19 @@ func writeResourceDataToDisk(filePath string, data *ResourceDataT) error {
 
 	size := int(unsafe.Sizeof(ResourceDataT{}))
 	buf := unsafe.Slice((*byte)(unsafe.Pointer(data)), size)
-	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0777)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0777)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = f.Close()
-	}()
-	n, err := f.Write(buf)
-	if err != nil {
+	defer func() { _ = file.Close() }()
+	if n, err := file.Write(buf); err != nil {
 		return err
-	}
-	if n != size {
+	} else if n != size {
 		return fmt.Errorf("short write for config %s: wrote %d of %d bytes", filePath, n, size)
 	}
 	// Pad to the permanently reserved size so the map length is fixed and a later
 	// larger struct never has to resize the file (which would SIGBUS old maps).
-	if err := f.Truncate(int64(ConfigFileSize)); err != nil {
+	if err := file.Truncate(int64(ConfigFileSize)); err != nil {
 		return fmt.Errorf("can't size config %s to %d: %w", filePath, ConfigFileSize, err)
 	}
 	return nil
@@ -492,14 +585,24 @@ func (r *MmapResourceData) GetDeviceSnapshot(deviceIndex int) *DeviceT {
 	return nil
 }
 
-func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod *corev1.Pod,
-	containerClaim device.ContainerDeviceClaim, memoryOversold bool, node *corev1.Node) error {
+func WriteVGPUConfigFile(
+	filePath string, devManager *manager.DeviceManager,
+	pod *corev1.Pod, contClaim device.ContainerDeviceClaim,
+	memoryOversold bool, node *corev1.Node,
+) error {
 	if _, err := os.Stat(filePath); err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		data := NewResourceDataT(devManager, pod, containerClaim, memoryOversold, node)
-		if err = writeResourceDataToDisk(filePath, data); err != nil {
+		data := NewResourceDataWithOptions(ResourceOption{},
+			WithPodInfo(pod),
+			WithDeviceManager(devManager),
+			WithContainerName(contClaim.Name),
+			WithDeviceClaims(contClaim.DeviceClaims),
+			WithMemoryOversold(memoryOversold),
+			WithComputePolicy(GetDefaultComputePolicy(pod, node)),
+		)
+		if err = WriteResourceDataToDisk(filePath, data); err != nil {
 			return fmt.Errorf("can't sink config %s: %w", filePath, err)
 		}
 	}
