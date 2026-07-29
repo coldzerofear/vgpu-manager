@@ -325,7 +325,7 @@ void value_enabled(char *str, int *i) {
  * because this knob was boolean before it grew a second arm and a config
  * carrying the old spelling should not quietly turn into "off". */
 int get_uva_advise(int *out) {
-  char *str = getenv(CUDA_MEM_UVA_ADVISE_ENV);
+  char *str = _getenv(CUDA_MEM_UVA_ADVISE_ENV);
   if (!str || !*str) {
     return -1;
   }
