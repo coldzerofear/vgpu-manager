@@ -427,8 +427,7 @@ static memory_path_t prepare_memory_allocation(CUdevice device,
     }
   }
 
-  if (allow_uva && d.memory_oversold &&
-      (used + request_size) > d.real_memory) {
+  if (allow_uva && d.memory_oversold && (used + request_size) > d.real_memory) {
     return MEMORY_PATH_UVA;
   }
 
@@ -1658,7 +1657,7 @@ static void *utilization_watcher(void *arg) {
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
     pre_external_process_nums[host_index] = 0;
-    up_limits[host_index] = get_device_snapshot(host_index).hard_core;
+    up_limits[host_index] = get_device_flag(host_index, hard_core);
     top_results[host_index].user_current = 0;
     top_results[host_index].sys_current = 0;
     top_results[host_index].valid = 0;

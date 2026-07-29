@@ -320,10 +320,10 @@ extern resource_data_t *g_vgpu_config;
  * zeroed fallback. `host_index` must be side-effect-free (it is evaluated more
  * than once); `field` must be an int32 member of device_t. */
 #define get_device_flag(host_index, field)                                     \
-  (((host_index) >= 0 && (host_index) < MAX_DEVICE_COUNT &&                     \
+  (((host_index) >= 0 && (host_index) < MAX_DEVICE_COUNT &&                    \
     likely(g_vgpu_config != NULL))                                             \
      ? __atomic_load_n(&g_vgpu_config->devices[(host_index)].field,            \
-                       __ATOMIC_ACQUIRE)                                        \
+                       __ATOMIC_ACQUIRE)                                       \
      : 0)
 
 /**
@@ -749,17 +749,16 @@ static inline int get_logger_print_level(void) {
 #define LOGGER_SHOULD_PRINT(level) \
   ((level) >= 0 && (level) <= get_logger_print_level())
 
-#define LOGGER(level, format, ...)                                  \
-  ({                                                                \
-    if (LOGGER_SHOULD_PRINT(level)) {                               \
+#define LOGGER(level, format, ...)                                      \
+  ({                                                                    \
+    if (LOGGER_SHOULD_PRINT(level)) {                                   \
       fprintf(stderr, "[vGPU %s(%d|%" PRIuPTR "|%s:%d)]: " format "\n", \
-              _level_names[level], getpid(),                        \
-              (uintptr_t)pthread_self(),                            \
-              basename(__FILE__), __LINE__, ##__VA_ARGS__);         \
-    }                                                               \
-    if (unlikely(level == FATAL)) {                                 \
-      exit(1);                                                      \
-    }                                                               \
+              _level_names[level], getpid(), (uintptr_t)pthread_self(), \
+              basename(__FILE__), __LINE__, ##__VA_ARGS__);             \
+    }                                                                   \
+    if (unlikely(level == FATAL)) {                                     \
+      exit(1);                                                          \
+    }                                                                   \
   })
 
 /**
@@ -853,8 +852,7 @@ void malloc_gpu_virt_memory(CUdeviceptr dptr, size_t bytes, int type, int device
  * MEMORY_TYPE_CAPTURE, but ties the record to the capturing graph so
  * free_gpu_virt_memory_by_graph() can retire it at cuStreamEndCapture.
  */
-void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
-                                     CUgraph graph, int device_id);
+void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes, CUgraph graph, int device_id);
 
 void free_gpu_virt_memory(CUdeviceptr dptr);
 

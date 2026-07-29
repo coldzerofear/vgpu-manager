@@ -1,7 +1,6 @@
 package vgpu
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -99,17 +98,6 @@ func (r *MmapResourceData) GetResource() *ResourceDataT {
 	return r.resource
 }
 
-// CopyResource returns a deep copy taken while holding the lock, so the read is
-// safe against a concurrent Reload/Close munmapping the mapping. Callers that
-// only need a snapshot (not the live pointer) must use this, not GetResource:
-// GetResource hands out a pointer into the mmap and releases the lock, so
-// dereferencing it afterwards races with Reload's munmap.
-func (r *MmapResourceData) CopyResource() *ResourceDataT {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-	return r.resource.DeepCopy()
-}
-
 func (r *MmapResourceData) Close() error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
@@ -181,13 +169,6 @@ func NewMmapResourceData(filePath string) (*MmapResourceData, error) {
 		resource: data,
 		mmapFile: mmapFile,
 	}, nil
-}
-
-func (r *ResourceDataT) DeepCopy() *ResourceDataT {
-	jsonBytes, _ := json.Marshal(r)
-	data := &ResourceDataT{}
-	_ = json.Unmarshal(jsonBytes, data)
-	return data
 }
 
 func GetCompatibilityMode(devManager *manager.DeviceManager) util.CompatibilityMode {
@@ -450,6 +431,15 @@ func (r *MmapResourceData) ModifyDevice(deviceIndex int, mutation func(*DeviceT)
 	mutation(d)
 	atomic.AddUint32(&d.Seq, 1) // odd -> even: publish
 	return nil
+}
+
+func (r *MmapResourceData) GetDeviceSnapshot(deviceIndex int) *DeviceT {
+	var dev *DeviceT
+	_ = r.ModifyDevice(deviceIndex, func(t *DeviceT) {
+		dev = &DeviceT{}
+		*dev = *t
+	})
+	return dev
 }
 
 func WriteVGPUConfigFile(filePath string, devManager *manager.DeviceManager, pod *corev1.Pod,

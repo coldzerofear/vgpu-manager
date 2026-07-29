@@ -553,7 +553,7 @@ skipNvml:
 		// container is excluded so its stale usage stops being reported).
 		for _, containerName := range util.CollectableContainerNames(pod) {
 			contKey := lister.GetContainerKey(pod.UID, containerName)
-			resData, exist := c.contLister.GetResourceDataT(contKey)
+			resData, exist := c.contLister.GetResourceData(contKey)
 			if !exist {
 				continue
 			}
@@ -580,8 +580,8 @@ skipNvml:
 
 			deviceCount := 0
 			for i := int32(0); i < vgpu.MaxDeviceCount; i++ {
-				containerDevice := resData.Devices[i]
-				if containerDevice.Activate == 0 {
+				containerDevice := resData.GetDeviceSnapshot(int(i))
+				if containerDevice == nil || containerDevice.Activate == 0 {
 					continue
 				}
 				deviceUUID := string(containerDevice.UUID[0:40])

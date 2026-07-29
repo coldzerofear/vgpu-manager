@@ -1581,6 +1581,8 @@ extern void config_device_unlock(int fd, int device_index);
 static inline void config_cpu_relax(void) {
 #if defined(__x86_64__)
   __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+  __asm__ __volatile__("yield" ::: "memory");
 #else
   __asm__ __volatile__("" ::: "memory");
 #endif
@@ -1781,6 +1783,7 @@ static void vmem_node_rebuild_locked(device_vmemory_t *r) {
 
 int mmap_file_to_vmem_node(device_vmemory_t** data) {
   *data = NULL;
+  int ret = 1;
 
   /* Before mkdir, for the same reason as sm_node: a missing mount is not
    * detectable afterwards, because mkdir would have created the directory on
@@ -1803,7 +1806,7 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
   int fd = open(VMEMORY_NODE_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
   if (unlikely(fd == -1)) {
     LOGGER(WARNING, "can't open %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
-    return 1;
+    return ret;
   }
 
   /* Lock ONE byte in the frozen header, not the whole file. Byte 0 is never a
@@ -1822,20 +1825,17 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
   if (unlikely(ofd_fcntl(fd, 1, &fl) == -1)) {
     LOGGER(WARNING, "can't lock %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
     close(fd);
-    return 1;
+    return ret;
   }
 
-  int ret = 0;
   struct stat sb;
   if (unlikely(fstat(fd, &sb) == -1)) {
     LOGGER(WARNING, "fstat %s failed: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
-    ret = 1;
     goto UNLOCK;
   }
   if (sb.st_size != VMEM_NODE_FILE_SIZE) {
     if (unlikely(ftruncate(fd, VMEM_NODE_FILE_SIZE) == -1)) {
       LOGGER(WARNING, "ftruncate %s failed: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
-      ret = 1;
       goto UNLOCK;
     }
   }
@@ -1845,7 +1845,6 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
                                                      MAP_SHARED, fd, 0);
   if (unlikely(region == MAP_FAILED)) {
     LOGGER(ERROR, "mmap vmemory node failed: %s", strerror(errno));
-    ret = 1;
     goto UNLOCK;
   }
   /* Fresh file (all zero) and stale file take the same path: magic does not
@@ -1858,6 +1857,7 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
   g_vmem_node_ino = sb.st_ino;
   g_vmem_node_dev = sb.st_dev;
   *data = region;
+  ret = 0;
 
 UNLOCK:
   fl.l_type = F_UNLCK;
@@ -2115,7 +2115,7 @@ int write_file_to_config_path(resource_data_t* data) {
   int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
   if (unlikely(fd == -1)) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
-    goto DONE;
+    return ret;
   }
   /* Serialise concurrent env-fallback creators on byte 0 of the frozen header
    * (the same byte readers take F_RDLCK on). The winner writes the whole file
@@ -2164,7 +2164,7 @@ int write_file_to_config_path(resource_data_t* data) {
   }
   ret = 0;
 DONE:
-  if (fd != -1) close(fd);   /* closing the fd releases its OFD lock */
+  close(fd);   /* closing the fd releases its OFD lock */
   return ret;
 }
 
@@ -2835,6 +2835,13 @@ DONE:
 }
 
 void init_g_vgpu_config_by_env(resource_data_t** data) {
+  int cudaVersion;
+  snprintf(vgpu_config_init.driver_version, sizeof(vgpu_config_init.driver_version), "%s", driver_version);
+  CUresult r = CUDA_ENTRY_CHECK_STRICT(cuda_library_entry, cuDriverGetVersion, &cudaVersion);
+  if (likely(r == CUDA_SUCCESS)) {
+    vgpu_config_init.cuda_version.major = cudaVersion / 1000;
+    vgpu_config_init.cuda_version.minor = (cudaVersion % 1000) / 10;
+  }
   int ret = get_compatibility_mode(&vgpu_config_init.compatibility_mode);
   if (unlikely(ret)) {
     LOGGER(WARNING, "not defined env compatibility mode");

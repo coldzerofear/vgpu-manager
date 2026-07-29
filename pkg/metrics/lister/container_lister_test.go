@@ -167,10 +167,10 @@ func Test_ContainerLister(t *testing.T) {
 
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
-		if data, ok := contLister.GetResourceDataT(key); !ok {
+		if data, ok := contLister.GetResourceData(key); !ok {
 			t.Errorf("Unable to find container resource configuration file")
 		} else {
-			assert.Equal(t, contResDataMap[container.Name], data)
+			assert.Equal(t, contResDataMap[container.Name], data.GetResource())
 		}
 	}
 
@@ -181,7 +181,7 @@ func Test_ContainerLister(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
-		if _, ok := contLister.GetResourceDataT(key); ok {
+		if _, ok := contLister.GetResourceData(key); ok {
 			t.Errorf("The container resource configuration file should have been deleted by now")
 		}
 	}
