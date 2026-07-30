@@ -3,7 +3,6 @@ package collector
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -12,14 +11,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
@@ -28,7 +25,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/opencontainers/cgroups"
 	"github.com/prometheus/client_golang/prometheus"
-	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -307,131 +303,11 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devProcInfoMap = make(map[string]procInfoList)
 		devProcUtilMap = make(map[string]procUtilList)
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
-		deviceUtil     *watcher.MmapDeviceUtil
 	)
-	err := c.NvmlInit()
-	if err != nil {
-		klog.Errorln(err)
-		goto skipNvml
-	}
-	defer func() {
-		c.NvmlShutdown()
-		if deviceUtil != nil {
-			_ = deviceUtil.Close()
-		}
-	}()
+	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, devTypeMap, devIndexMap,
+		devHealthMap, devHealthLvs, devMemInfoMap, devProcInfoMap, devProcUtilMap,
+		devMigInfosMap, c.utilAdapter, c.featureGate)
 
-	func() {
-		driverVersion, ret := c.SystemGetDriverVersion()
-		if ret != nvml.SUCCESS {
-			klog.Errorf("error getting driver version: %s", nvml.ErrorString(ret))
-			driverVersion = "N/A"
-		}
-		cudaVersion := ""
-		version, ret := c.SystemGetCudaDriverVersion()
-		if ret != nvml.SUCCESS {
-			klog.Errorf("error getting CUDA driver version: %s", nvml.ErrorString(ret))
-			cudaVersion = "N/A"
-		} else {
-			cudaVersion = strconv.Itoa(version)
-		}
-		nvmlVersion, ret := c.SystemGetNVMLVersion()
-		if ret != nvml.SUCCESS {
-			klog.Errorf("error getting NVML driver version: %s", nvml.ErrorString(ret))
-			nvmlVersion = "N/A"
-		}
-		ch <- prometheus.MustNewConstMetric(
-			nodeGPUDriverVersionInfo,
-			prometheus.GaugeValue,
-			float64(1),
-			c.nodeName, driverVersion, cudaVersion, nvmlVersion)
-	}()
-
-	if c.featureGate.Enabled(util.SMWatcher) {
-		if deviceUtil, err = watcher.NewMmapDeviceUtil(smFilePath); err != nil && !os.IsNotExist(err) {
-			klog.V(3).ErrorS(err, "Failed to read manager SM util file")
-		}
-	}
-
-	err = c.VisitDevices(func(index int, hdev nvdev.Device) error {
-		gpuInfo, err := c.GetGpuInfo(index, hdev)
-		if err != nil {
-			klog.Errorf("error getting info for GPU %d: %v", index, err)
-			return nil
-		}
-		devHealthMap[gpuInfo.UUID]++
-		devIndexMap[gpuInfo.UUID] = index
-		devTypeMap[gpuInfo.UUID] = gpuInfo.ProductName
-		devMemInfoMap[gpuInfo.UUID] = gpuInfo.Memory
-		busId := links.PciInfo(gpuInfo.PciInfo).BusID()
-		migEnabled := fmt.Sprint(gpuInfo.MigEnabled)
-
-		var numaNode string
-		if numa := gpuInfo.GetNumaNode(); numa >= 0 {
-			numaNode = strconv.Itoa(int(numa))
-		}
-		deviceIndex := strconv.Itoa(index)
-		minorNumber := strconv.Itoa(gpuInfo.Minor)
-		devHealthLvs[gpuInfo.UUID] = []string{
-			c.nodeName, deviceIndex, gpuInfo.UUID, gpuInfo.ProductName, busId,
-			minorNumber, migEnabled, gpuInfo.CudaComputeCapability, numaNode,
-		}
-
-		ch <- prometheus.MustNewConstMetric(
-			physicalGPUTotalMemory,
-			prometheus.GaugeValue,
-			float64(gpuInfo.Memory.Total),
-			devHealthLvs[gpuInfo.UUID]...)
-
-		ch <- prometheus.MustNewConstMetric(
-			physicalGPUMemoryUsage,
-			prometheus.GaugeValue,
-			float64(gpuInfo.Memory.Used),
-			devHealthLvs[gpuInfo.UUID]...)
-
-		memoryUtilRate := int64(0)
-		if gpuInfo.Memory.Total > 0 {
-			memoryUtilRate = int64(float64(gpuInfo.Memory.Used) / float64(gpuInfo.Memory.Total) * 100)
-		}
-		ch <- prometheus.MustNewConstMetric(
-			physicalGPUMemoryUtilRate,
-			prometheus.GaugeValue,
-			float64(memoryUtilRate),
-			devHealthLvs[gpuInfo.UUID]...)
-
-		migInfos, err := c.GetMigInfos(gpuInfo)
-		if err != nil {
-			klog.Errorf("error getting MIG infos for GPU %d: %v", index, err)
-		}
-		if len(migInfos) > 0 {
-			devMigInfosMap[gpuInfo.UUID] = maps.Values[map[string]*nvidia.MigInfo](migInfos)
-		}
-
-		// Skip unsupported operations after enabling MIG.
-		if gpuInfo.MigEnabled {
-			return nil
-		}
-
-		// On MIG-enabled GPUs, querying device utilization rates is not currently supported.
-		deviceUtilRates, rt := hdev.GetUtilizationRates()
-		if rt != nvml.SUCCESS {
-			klog.Errorf("error getting utilization rates for device %d: %s", index, nvml.ErrorString(rt))
-		} else {
-			ch <- prometheus.MustNewConstMetric(
-				physicalGPUCoreUtilRate,
-				prometheus.GaugeValue,
-				float64(deviceUtilRates.Gpu),
-				devHealthLvs[gpuInfo.UUID]...)
-		}
-
-		CollectorDeviceProcesses(c.utilAdapter, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
-		return nil
-	})
-	if err != nil {
-		klog.Errorln(err.Error())
-	}
-
-skipNvml:
 	var (
 		//vGpuHealthMap      = make(map[string]bool)
 		vGpuTotalMemMap    = make(map[string]uint64)
@@ -794,11 +670,9 @@ skipNvml:
 		podResourcesResp        *v1alpha1.ListPodResourcesResponse
 		listMigPodResourcesFunc = func() *v1alpha1.ListPodResourcesResponse {
 			listResourceOnce.Do(func() {
-				resource, err := c.podResource.ListPodResource(context.Background(),
-					func(devices *v1alpha1.ContainerDevices) bool {
-						return len(devices.GetDeviceIds()) > 0 &&
-							strings.HasPrefix(devices.GetResourceName(), util.MIGDeviceResourceNamePrefix)
-					})
+				resource, err := c.podResource.ListPodResource(context.Background(), func(devices *v1alpha1.ContainerDevices) bool {
+					return len(devices.GetDeviceIds()) > 0 && strings.HasPrefix(devices.GetResourceName(), util.MIGDeviceResourceNamePrefix)
+				})
 				if err != nil {
 					klog.ErrorS(err, "ListPodResource failed")
 				} else {
@@ -816,8 +690,7 @@ skipNvml:
 		//isHealthy := fmt.Sprint(vGpuHealthMap[parentUUID])
 		podResourcesResp = listMigPodResourcesFunc()
 		podInfoP, _ := c.podResource.GetPodInfoByMatchFunc(podResourcesResp, func(devices *v1alpha1.ContainerDevices) bool {
-			return devices.GetResourceName() == mig.GetMigResourceName(migInfo) &&
-				slices.Contains(devices.GetDeviceIds(), migInfo.UUID)
+			return devices.GetResourceName() == mig.GetMigResourceName(migInfo) && slices.Contains(devices.GetDeviceIds(), migInfo.UUID)
 		})
 		if podInfoP != nil {
 			ch <- prometheus.MustNewConstMetric(

@@ -3538,7 +3538,8 @@ CUresult _cuMemAllocPitch(CUdeviceptr *dptr, size_t *pPitch, size_t WidthInBytes
   int lock_fd = -1;
   int host_index = -1;
   // size_t request_size = ROUND_UP(WidthInBytes * Height, ElementSizeBytes);
-  size_t guess_pitch = (((WidthInBytes - 1) / ElementSizeBytes) + 1) * ElementSizeBytes;
+  size_t guess_pitch = (ElementSizeBytes == 0 || WidthInBytes == 0) ? 0 :
+                       (((WidthInBytes - 1) / ElementSizeBytes) + 1) * ElementSizeBytes;
   size_t request_size = guess_pitch * Height;
   memory_path_t path;
   /* NULL-arg fast path. The UVA fallback below dereferences *pPitch

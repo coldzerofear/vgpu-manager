@@ -92,7 +92,7 @@ func (g GpuInfo) GetPciInfo() links.PciInfo {
 
 // GetNumaNode returns the NUMA node associated with the GPU device
 func (g GpuInfo) GetNumaNode() int32 {
-	node, _ := links.PciInfo(g.PciInfo).NumaNode()
+	node, _ := g.GetPciInfo().NumaNode()
 	return node
 }
 
@@ -297,11 +297,6 @@ func (l DeviceLib) GetDriverVersion() (DriverVersion, error) {
 const StandardDeviceAttributeNumaNode resourceapi.QualifiedName = deviceattribute.StandardDeviceAttributePrefix + "numaNode"
 
 func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) {
-	//if err := l.NvmlInit(); err != nil {
-	//	return nil, err
-	//}
-	//defer l.NvmlShutdown()
-
 	minor, ret := device.GetMinorNumber()
 	if ret == nvml.ERROR_NOT_SUPPORTED {
 		minor = index

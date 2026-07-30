@@ -576,7 +576,7 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 	return nil
 }
 
-func isHealthy(taints []resourceapi.DeviceTaint) bool {
+func IsHealthy(taints []resourceapi.DeviceTaint) bool {
 	for _, taint := range taints {
 		if taint.Effect == resourceapi.DeviceTaintEffectNoSchedule {
 			return false
@@ -621,7 +621,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string, health
 						d.Taints = taints
 					}
 					if device, ok := healthDeviceMap[dev.CanonicalName()]; ok {
-						device.Healthy = isHealthy(d.Taints)
+						device.Healthy = IsHealthy(d.Taints)
 					}
 					resourceSlice.Devices = append(resourceSlice.Devices, d)
 				}

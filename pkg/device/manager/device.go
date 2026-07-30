@@ -492,7 +492,7 @@ func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 			Number:     m.config.GetDeviceSplitCount(),
 			Numa:       gpuDevice.NumaNode,
 			Mig:        gpuDevice.MigEnabled,
-			BusId:      links.PciInfo(gpuDevice.PciInfo).BusID(),
+			BusId:      gpuDevice.PciBusID,
 			Capability: float32(capability),
 			Healthy:    gpuDevice.Healthy,
 		})

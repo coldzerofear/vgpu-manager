@@ -6,6 +6,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -23,11 +24,30 @@ func GetNodeInformer(factory informers.SharedInformerFactory, nodeName string) (
 }
 
 const (
+	IndexerKeyPodNodeName                  = "pod.spec.nodeName"
 	IndexerKeyPodPlanSchedulingNode        = "pod.planSchedulingNode"
 	IndexerKeyPodDeviceAllocationCountable = "pod.device.allocation.countable"
 )
 
-func GetPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
+func GetDraDriverPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
+	informer := factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
+		watcher := cache.NewListWatchFromClient(k.CoreV1().RESTClient(), "pods",
+			corev1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", nodeName))
+		indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
+		return cache.NewSharedIndexInformer(watcher, &corev1.Pod{}, d, indexers)
+	})
+	return informer, informer.AddIndexers(map[string]cache.IndexFunc{
+		IndexerKeyPodNodeName: func(obj interface{}) ([]string, error) {
+			var indexerValues []string
+			if pod, ok := obj.(*corev1.Pod); ok && pod.Spec.NodeName != "" {
+				indexerValues = []string{pod.Spec.NodeName}
+			}
+			return indexerValues, nil
+		},
+	})
+}
+
+func GetDevicePluginPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
 	informer := factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
 		watcher := cache.NewFilteredListWatchFromClient(k.CoreV1().RESTClient(),
 			"pods", corev1.NamespaceAll, func(options *metav1.ListOptions) {
@@ -54,4 +74,15 @@ func GetPodInformer(factory informers.SharedInformerFactory, nodeName string) (c
 			return []string{indexerValue}, nil
 		},
 	})
+}
+
+func GetResourceSliceInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
+	return factory.InformerFor(&resourcev1.ResourceSlice{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
+		watcher := cache.NewListWatchFromClient(k.ResourceV1().RESTClient(), "resourceslices",
+			corev1.NamespaceAll, fields.AndSelectors(
+				fields.OneTermEqualSelector("spec.pool.name", nodeName),
+				fields.OneTermEqualSelector("spec.driver", util.DRADriverName),
+			))
+		return cache.NewSharedIndexInformer(watcher, &resourcev1.ResourceSlice{}, d, cache.Indexers{})
+	}), nil
 }

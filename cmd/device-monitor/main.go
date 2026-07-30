@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	resourcev1 "k8s.io/client-go/listers/resource/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/component-base/logs"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -78,30 +79,6 @@ func runApp(opt *options.Options) (exitCode int) {
 	}
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
 
-	// trim managedFields to reduce cache memory usage.
-	option := informers.WithTransform(cache.TransformStripManagedFields())
-	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
-
-	nodeInformer, err := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
-	if err != nil {
-		klog.Errorf("GetNodeInformer failed: %v", err)
-		return exitCode
-	}
-	podInformer, err := metrics.GetPodInformer(factory, nodeConfig.GetNodeName())
-	if err != nil {
-		klog.Errorf("GetPodInformer failed: %v", err)
-		return exitCode
-	}
-	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
-	podLister := client.NewPodLister(podInformer.GetIndexer())
-
-	containerLister := lister.NewContainerLister(util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
-	nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig,
-		nodeLister, podLister, containerLister, opt.FeatureGate)
-	if err != nil {
-		klog.Errorf("Create node gpu collector failed: %v", err)
-		return exitCode
-	}
 	minScrapeIntervalDuration := time.Second
 	if opt.MinScrapeInterval > 1 {
 		minScrapeIntervalDuration *= time.Duration(opt.MinScrapeInterval)
@@ -112,17 +89,11 @@ func runApp(opt *options.Options) (exitCode int) {
 		server.WithPort(&opt.ServerBindPort),
 		server.WithTimeoutSecond(30),
 		server.WithDebugMetrics(opt.PprofBindPort > 0),
-		server.WithCollectors(nodeCollector, infoCollector),
+		server.WithCollectors(infoCollector),
 		server.WithLabels(prometheus.Labels{"service": "vGPU"}),
 		server.WithLimiter(rate.NewLimiter(rate.Every(minScrapeIntervalDuration), 1)),
 		server.WithReadTimeout(60 * time.Second),
 		server.WithReadHeaderTimeout(15 * time.Second),
-		server.WithReadyChecker(func(req *http.Request) error {
-			if !util.InformerFactoryHasSynced(factory, req.Context()) {
-				return errors.New("informer has not completed all synchronization")
-			}
-			return nil
-		}),
 	}
 	if opt.EnableTls {
 		if len(opt.TlsKeyFile) == 0 || len(opt.TlsCertFile) == 0 {
@@ -165,6 +136,64 @@ func runApp(opt *options.Options) (exitCode int) {
 			return authorization(klog.NewKlogr(), handler)
 		}))
 	}
+
+	// trim managedFields to reduce cache memory usage.
+	option := informers.WithTransform(cache.TransformStripManagedFields())
+	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
+
+	opts = append(opts, server.WithReadyChecker(func(req *http.Request) error {
+		if !util.InformerFactoryHasSynced(factory, req.Context()) {
+			return errors.New("informer has not completed all synchronization")
+		}
+		return nil
+	}))
+
+	containerListerStart := func(time.Duration, <-chan struct{}) {}
+	if opt.EnableDRAMonitor {
+		klog.Infoln("Initialize DRA driver path monitoring")
+		podInformer, err := metrics.GetDraDriverPodInformer(factory, nodeConfig.GetNodeName())
+		if err != nil {
+			klog.Errorf("GetDraDriverPodInformer failed: %v", err)
+			return exitCode
+		}
+		sliceInformer, err := metrics.GetResourceSliceInformer(factory, nodeConfig.GetNodeName())
+		if err != nil {
+			klog.Errorf("GetResourceSliceInformer failed: %v", err)
+			return exitCode
+		}
+		podLister := client.NewPodLister(podInformer.GetIndexer())
+		sliceLister := resourcev1.NewResourceSliceLister(sliceInformer.GetIndexer())
+		claimLister := factory.Resource().V1().ResourceClaims().Lister()
+		draCollector, err := collector.NewDRAGPUCollector(nodeConfig, podLister, sliceLister, claimLister, opt.FeatureGate)
+		if err != nil {
+			klog.Errorf("Create dra gpu collector failed: %v", err)
+			return exitCode
+		}
+		opts = append(opts, server.WithCollectors(draCollector))
+	} else {
+		klog.Infoln("Initialize device plugin path monitoring")
+		nodeInformer, err := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
+		if err != nil {
+			klog.Errorf("GetNodeInformer failed: %v", err)
+			return exitCode
+		}
+		podInformer, err := metrics.GetDevicePluginPodInformer(factory, nodeConfig.GetNodeName())
+		if err != nil {
+			klog.Errorf("GetDevicePluginPodInformer failed: %v", err)
+			return exitCode
+		}
+		podLister := client.NewPodLister(podInformer.GetIndexer())
+		nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
+		containerLister := lister.NewContainerLister(util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
+		nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig, nodeLister, podLister, containerLister, opt.FeatureGate)
+		if err != nil {
+			klog.Errorf("Create node gpu collector failed: %v", err)
+			return exitCode
+		}
+		containerListerStart = containerLister.Start
+		opts = append(opts, server.WithCollectors(nodeCollector))
+	}
+
 	metricsServer := server.NewServer(opts...)
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	go func() {
@@ -172,7 +201,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		klog.V(4).Infoln("Waiting for InformerFactory cache synchronization...")
 		if util.InformerFactoryHasSynced(factory, ctx) {
 			klog.V(4).Infoln("InformerFactory cache synchronization successful")
-			containerLister.Start(5*time.Second, ctx.Done())
+			containerListerStart(5*time.Second, ctx.Done())
 		}
 	}()
 	go func() {

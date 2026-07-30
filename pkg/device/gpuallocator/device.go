@@ -60,12 +60,13 @@ func newDevice(i int, d device.Device) (*Device, error) {
 		return nil, fmt.Errorf("failed to get device pci info: %v", ret)
 	}
 
+	info := links.PciInfo(pciInfo)
 	device := Device{
 		nvlibDevice: nvlibDevice{
 			Device:      d,
 			UUID:        uuid,
-			PCI:         struct{ BusID string }{BusID: links.PciInfo(pciInfo).BusID()},
-			CPUAffinity: links.PciInfo(pciInfo).CPUAffinity(),
+			PCI:         struct{ BusID string }{BusID: info.BusID()},
+			CPUAffinity: info.CPUAffinity(),
 		},
 		Index: i,
 		Links: make(map[int][]P2PLink),

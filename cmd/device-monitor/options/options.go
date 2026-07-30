@@ -35,6 +35,7 @@ type Options struct {
 	MinScrapeInterval   int
 	StuckGracePeriod    string
 	ContainerDriverRoot string
+	EnableDRAMonitor    bool
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -112,6 +113,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.IntVar(&o.MinScrapeInterval, "min-scrape-interval", o.MinScrapeInterval, "Minimum grasping interval in seconds. (must be greater than or equal to 1)")
 	pflag.StringVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
+	pflag.BoolVar(&o.EnableDRAMonitor, "enable-dra-monitor", false, "Enable monitoring metrics for DRA driver paths.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

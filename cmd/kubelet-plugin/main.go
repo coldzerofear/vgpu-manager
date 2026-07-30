@@ -252,9 +252,11 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	// Validate the NRI plugin index format early (only when set): containerd
 	// otherwise rejects a bad index at registration time, which surfaces as an
 	// obscure reconnect-loop failure rather than a clear startup error.
-	if flags.NRIPluginIdx != "" {
-		if err := nri.ValidatePluginIdx(flags.NRIPluginIdx); err != nil {
-			return fmt.Errorf("invalid --nri-plugin-idx %q: %w", flags.NRIPluginIdx, err)
+	if featuregates.Enabled(featuregates.NRISupport) {
+		if flags.NRIPluginIdx != "" {
+			if err := nri.ValidatePluginIdx(flags.NRIPluginIdx); err != nil {
+				return fmt.Errorf("invalid --nri-plugin-idx %q: %w", flags.NRIPluginIdx, err)
+			}
 		}
 	}
 
