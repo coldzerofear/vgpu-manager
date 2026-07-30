@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
@@ -58,8 +59,10 @@ type vNumberDevicePlugin struct {
 var _ base.DevicePlugin = &vNumberDevicePlugin{}
 
 // NewVNumberDevicePlugin returns an initialized vNumberDevicePlugin.
-func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.DeviceManager,
-	kubeClient *kubernetes.Clientset, kubeCache cache.Cache, cdiHandler cdi.Handler) (base.DevicePlugin, error) {
+func NewVNumberDevicePlugin(
+	resourceName, socket string, manager *manager.DeviceManager,
+	kubeClient *kubernetes.Clientset, kubeCache cache.Cache, cdiHandler cdi.Handler,
+) (base.DevicePlugin, error) {
 	podInformer, err := kubeCache.GetInformer(context.TODO(), &corev1.Pod{}, cache.BlockUntilSynced(false))
 	if err != nil {
 		return nil, fmt.Errorf("get pod informer failed: %v", err)
@@ -326,7 +329,7 @@ func (m *vNumberDevicePlugin) buildPreAllocContext(
 	if err != nil {
 		return nil, err
 	}
-
+	m.podCache.Mutation(currentPod)
 	claims := make([]*device.ContainerDeviceClaim, len(requests))
 	availableMap := make([]map[string][]string, len(requests))
 
@@ -999,7 +1002,12 @@ func (m *vNumberDevicePlugin) GetPodByDeviceIDs(ctx context.Context, devicesIDs 
 		return m.GetPodByCheckpoint(ctx, devicesIDs)
 	}
 	if !exist {
-		return nil, "", apierrors.NewNotFound(corev1.Resource("pods"), podKey.String())
+		pod, err := m.kubeClient.CoreV1().Pods(podInfo.PodNamespace).Get(ctx, podInfo.PodName, metav1.GetOptions{})
+		if err != nil {
+			return nil, "", err
+		}
+		m.podCache.Mutation(pod)
+		return pod, podInfo.ContainerName, nil
 	}
 	return obj.(*corev1.Pod), podInfo.ContainerName, nil
 }
