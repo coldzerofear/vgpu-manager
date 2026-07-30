@@ -114,17 +114,6 @@ var (
 	MemoryResourceName = resourceapi.QualifiedName("memory")
 )
 
-func (m *VGPUManager) getVGpuDeviceSlice(devices AllocatableDevices) []*VGpuDeviceInfo {
-	vGPUs := make([]*VGpuDeviceInfo, 0)
-	for _, device := range devices {
-		if device.Type() != VGpuDeviceType {
-			continue
-		}
-		vGPUs = append(vGPUs, device.VGpu)
-	}
-	return vGPUs
-}
-
 func (m *VGPUManager) getComputePolicy(claim *resourceapi.ResourceClaim) util.ComputePolicy {
 	computePolicy := util.FixedComputePolicy
 	for key, val := range claim.GetAnnotations() {
@@ -262,7 +251,10 @@ func (m *VGPUManager) GetAllocationEnvContainerEdits(claim *resourceapi.Resource
 	computePolicy := m.getComputePolicy(claim)
 	idx := device.VGpu.Index
 
-	deviceMemoryRatio := m.deviceMemoryRatio
+	deviceMemoryRatio := device.VGpu.deviceMemoryRatio
+	if deviceMemoryRatio == 0 {
+		deviceMemoryRatio = m.deviceMemoryRatio
+	}
 	totalMemory := float64(device.VGpu.Memory.Total) * (float64(deviceMemoryRatio) / float64(util.HundredCore))
 	totalMemoryMB := uint64(totalMemory) / units.MiB
 

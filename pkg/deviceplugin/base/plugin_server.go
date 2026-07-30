@@ -42,9 +42,9 @@ func NewBasePluginServer(resourceName, socket string, manager *manager.DeviceMan
 	}
 }
 
-func (b *basePluginServerImpl) initialize() {
+func (b *basePluginServerImpl) initialize(server DevicePlugin) {
 	b.server = grpc.NewServer([]grpc.ServerOption{}...)
-	b.health = make(chan *manager.Device, 1)
+	b.health = make(chan *manager.Device, len(server.Devices()))
 	b.stop = make(chan struct{})
 }
 
@@ -61,8 +61,8 @@ func (b *basePluginServerImpl) GetDeviceManager() *manager.DeviceManager {
 
 // Start starts the gRPC server, registers the device plugin with the Kubelet,
 // and starts the device healthchecks.
-func (b *basePluginServerImpl) Start(name string, server pluginapi.DevicePluginServer) error {
-	b.initialize()
+func (b *basePluginServerImpl) Start(name string, server DevicePlugin) error {
+	b.initialize(server)
 
 	if err := b.serve(server); err != nil {
 		klog.Infof("Could not start device plugin for '%s': %s", b.resourceName, err)
