@@ -176,36 +176,39 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		}
 	}
 
+	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+		d.addFabricManagerAttributes(attrs)
+	}
+
 	return attrs
 }
 
-func addCompatibilityNumaNodeAttribute(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, numaNodeAttr *deviceattribute.DeviceAttribute) {
-	if numaNodeAttr == nil {
-		return
-	}
-	numaNode := numaNodeAttr.Value.IntValue
-	if numaNode == nil || *numaNode < 0 {
-		return
-	}
-
-	if featuregates.Enabled(featuregates.DRAListTypeAttributes) {
-		// KEP-6072 prefers the list form when DRAListTypeAttributes is enabled.
-		// Until this driver computes same-socket minimum-SLIT-distance nodes,
-		// publish the physical NUMA node as a valid single-element list.
-		attrs[numaNodeAttr.Name] = resourceapi.DeviceAttribute{
-			IntValues: []int64{int64(*numaNode)},
-		}
-		attrs[compatibilityNumaNodeAttribute] = resourceapi.DeviceAttribute{
-			IntValues: []int64{int64(*numaNode)},
-		}
+// addFabricManagerAttributes publishes the Fabric Manager-derived attributes
+// (`gpuModuleID` and `partitionN`) for this physical GPU. The values are
+// resolved from NVML / FM at discovery time (see attachFabricManagerPartitions).
+func (d *GpuDeviceInfo) addFabricManagerAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
+	if d == nil {
 		return
 	}
 
-	attrs[numaNodeAttr.Name] = resourceapi.DeviceAttribute{
-		IntValue: ptr.To(int64(*numaNode)),
+	if d.gpuModuleID == 0 && len(d.partitionsBySize) == 0 {
+		klog.V(4).Infof("No Fabric Manager attributes for %s", d.CanonicalName())
+		return
 	}
-	attrs[compatibilityNumaNodeAttribute] = resourceapi.DeviceAttribute{
-		IntValue: ptr.To(int64(*numaNode)),
+
+	klog.V(4).Infof("Adding Fabric Manager attributes for %s: gpuModuleID=%d partitionsBySize=%v",
+		d.CanonicalName(), d.gpuModuleID, d.partitionsBySize)
+	if d.gpuModuleID != 0 {
+		attrs["gpuModuleID"] = resourceapi.DeviceAttribute{
+			IntValue: ptr.To(int64(d.gpuModuleID)),
+		}
+	}
+
+	for size, partitionID := range d.partitionsBySize {
+		key := resourceapi.QualifiedName(fmt.Sprintf("partition%d", size))
+		attrs[key] = resourceapi.DeviceAttribute{
+			IntValue: ptr.To(int64(partitionID)),
+		}
 	}
 }
 
@@ -282,43 +285,45 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 	if d.pcieRootAttr != nil {
 		device.Attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
-	addCompatibilityNumaNodeAttribute(device.Attributes, d.numaNodeAttr)
+
 	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
-		d.addFabricManagerAttributes(device.Attributes)
+		if d.parent == nil {
+			klog.V(4).Infof("No parent GPU for %s; skipping Fabric Manager attributes", d.CanonicalName())
+		} else {
+			d.parent.addFabricManagerAttributes(device.Attributes)
+		}
 	}
+	addCompatibilityNumaNodeAttribute(device.Attributes, d.numaNodeAttr)
 
 	return device
 }
 
-// addFabricManagerAttributes publishes the Fabric Manager-derived attributes.
-// The gpuModuleId / partitionN values are owned by the parent GpuInfo (the FM
-// info always tracks the physical GPU, which is why it is resolved fresh on
-// the parent whenever the GPU is (re)discovered on the nvidia driver).
-func (d *VfioDeviceInfo) addFabricManagerAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
-	if d.parent == nil {
-		klog.V(4).Infof("No parent GPU for %s; skipping Fabric Manager attributes", d.CanonicalName())
+func addCompatibilityNumaNodeAttribute(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, numaNodeAttr *deviceattribute.DeviceAttribute) {
+	if numaNodeAttr == nil {
+		return
+	}
+	numaNode := numaNodeAttr.Value.IntValue
+	if numaNode == nil || *numaNode < 0 {
 		return
 	}
 
-	gpuModuleID := d.parent.gpuModuleID
-	partitionsBySize := d.parent.partitionsBySize
-	if gpuModuleID == 0 && len(partitionsBySize) == 0 {
-		klog.V(4).Infof("No Fabric Manager attributes for %s", d.CanonicalName())
+	if featuregates.Enabled(featuregates.DRAListTypeAttributes) {
+		// KEP-6072 prefers the list form when DRAListTypeAttributes is enabled.
+		// Until this driver computes same-socket minimum-SLIT-distance nodes,
+		// publish the physical NUMA node as a valid single-element list.
+		attrs[numaNodeAttr.Name] = resourceapi.DeviceAttribute{
+			IntValues: []int64{int64(*numaNode)},
+		}
+		attrs[compatibilityNumaNodeAttribute] = resourceapi.DeviceAttribute{
+			IntValues: []int64{int64(*numaNode)},
+		}
 		return
 	}
 
-	klog.V(4).Infof("Adding Fabric Manager attributes for %s: gpuModuleId=%d partitionsBySize=%v",
-		d.CanonicalName(), gpuModuleID, partitionsBySize)
-	if gpuModuleID != 0 {
-		attrs["gpuModuleId"] = resourceapi.DeviceAttribute{
-			IntValue: ptr.To(int64(gpuModuleID)),
-		}
+	attrs[numaNodeAttr.Name] = resourceapi.DeviceAttribute{
+		IntValue: ptr.To(int64(*numaNode)),
 	}
-
-	for size, partitionID := range partitionsBySize {
-		key := resourceapi.QualifiedName(fmt.Sprintf("partition%d", size))
-		attrs[key] = resourceapi.DeviceAttribute{
-			IntValue: ptr.To(int64(partitionID)),
-		}
+	attrs[compatibilityNumaNodeAttribute] = resourceapi.DeviceAttribute{
+		IntValue: ptr.To(int64(*numaNode)),
 	}
 }

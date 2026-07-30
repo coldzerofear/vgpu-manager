@@ -127,7 +127,7 @@ func (l deviceLib) GetGpuDeviceInfo(index int, device nvdev.Device) (*GpuDeviceI
 		if moduleID, ret := device.GetModuleId(); ret == nvml.SUCCESS {
 			gpuDeviceInfo.gpuModuleID = moduleID
 		} else {
-			klog.V(4).Infof("GPU %s: could not resolve gpuModuleId from NVML: %v", gpuDeviceInfo.CanonicalName(), ret)
+			klog.V(4).Infof("GPU %s: could not resolve gpuModuleID from NVML: %v", gpuDeviceInfo.CanonicalName(), ret)
 		}
 	}
 

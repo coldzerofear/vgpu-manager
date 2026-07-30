@@ -234,7 +234,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.ClientSets.Resource)
 
 	// Attach Fabric Manager partition mappings to every discovered GPU. The
-	// gpuModuleId was resolved from NVML during GPU discovery; the FM Manager
+	// gpuModuleID was resolved from NVML during GPU discovery; the FM Manager
 	// (owned by DeviceState) turns it into the size->partitionId mapping that
 	// VFIO devices publish via their parent GpuInfo.
 	if state.fabricManagerPartitioningEnabled() {
@@ -542,14 +542,12 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		var vfioInfos []*VfioDeviceInfo
 		for _, device := range pc.PreparedDevices.GetDevices() {
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
 			if allocatableDevice == nil {
 				klog.Warningf("allocatable not found for device: %v", device.DeviceName)
 				continue
 			}
-			isVfio := allocatableDevice.Type() == VfioDeviceType
 			// Rediscover all sibling devices on the parent GPU of the unprepared device.
 			// When vfio type is unprepared, gpu type should be advertised and vice versa.
 			// For a VFIO device this also repopulates its parent GpuInfo (now
@@ -558,18 +556,11 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 			if err != nil {
 				return fmt.Errorf("error discovering sibling allocatables: %w", err)
 			}
-			if isVfio {
-				vfioInfos = append(vfioInfos, allocatableDevice.Vfio)
-			}
 		}
-
-		// The passthrough GPUs are back on the nvidia driver and their parent
-		// GpuInfo carries a fresh gpuModuleId; only now can we resolve and
-		// deactivate the Fabric Manager partition they formed.
-		if s.fabricManagerPartitioningEnabled() && len(vfioInfos) > 0 {
-			if err := s.deactivateFabricPartition(vfioInfos); err != nil {
-				return fmt.Errorf("error deactivating fabric partition: %w", err)
-			}
+	}
+	if s.fabricManagerPartitioningEnabled() {
+		if err := s.deactivateFabricPartition(&pc); err != nil {
+			return fmt.Errorf("error deactivating fabric partition: %w", err)
 		}
 	}
 
@@ -634,12 +625,10 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 // other entity that currently legitimately owns the device represented in `pc`.
 func (s *DeviceState) unpreparePartiallyPrepairedClaim(ctx context.Context, cuid string, pc PreparedClaim, checkpoint *Checkpoint) error {
 	// Roll back VFIO passthrough side effects. A previous Prepare() attempt may
-	// have already bound one or more GPUs to vfio-pci and activated the
-	// corresponding Fabric Manager partition. Unlike the completed path that
-	// operates on checkpointed PreparedDevices, a partially prepared claim has
-	// no PreparedDevices checkpointed yet, so we resolve the affected VFIO
-	// devices from the allocation results and mirror the completed-path
-	// teardown.
+	// have already bound one or more GPUs to vfio-pci. Unlike the completed
+	// path that operates on checkpointed PreparedDevices, a partially prepared
+	// claim has no PreparedDevices checkpointed yet, so we resolve the affected
+	// VFIO devices from the allocation results and mirror the completed-path
 	if featuregates.Enabled(featuregates.PassthroughSupport) && pc.Status.Allocation != nil {
 		var vfioDevices []*AllocatableDevice
 		for _, r := range pc.Status.Allocation.Devices.Results {
@@ -666,10 +655,8 @@ func (s *DeviceState) unpreparePartiallyPrepairedClaim(ctx context.Context, cuid
 			// GPU back to the nvidia driver, then rediscover so each VFIO
 			// device's parent GpuInfo is repopulated with fresh Fabric Manager
 			// info, and only then deactivate the FM partition.
-			infos := make([]*VfioDeviceInfo, 0, len(vfioDevices))
 			for _, device := range vfioDevices {
 				info := device.Vfio
-				infos = append(infos, info)
 				if err := s.vfioPciManager.Unconfigure(ctx, info); err != nil {
 					return fmt.Errorf("error unconfiguring vfio device %q: %w", info.CanonicalName(), err)
 				}
@@ -680,10 +667,11 @@ func (s *DeviceState) unpreparePartiallyPrepairedClaim(ctx context.Context, cuid
 					return fmt.Errorf("error discovering sibling allocatables for vfio device %q: %w", device.Vfio.CanonicalName(), err)
 				}
 			}
-
-			if err := s.deactivateFabricPartition(infos); err != nil {
-				return fmt.Errorf("error deactivating fabric partition: %w", err)
-			}
+		}
+	}
+	if s.fabricManagerPartitioningEnabled() {
+		if err := s.deactivateFabricPartition(&pc); err != nil {
+			return fmt.Errorf("error deactivating fabric partition: %w", err)
 		}
 	}
 
@@ -952,6 +940,11 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		}
 		if vfioGroups > 1 {
 			return nil, fmt.Errorf("claim %s contains %d VFIO device groups, but at most one is supported per claim", ResourceClaimToString(claim), vfioGroups)
+		}
+	}
+	if s.fabricManagerPartitioningEnabled() {
+		if err := s.activateFabricPartition(claim); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1282,7 +1275,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 // nvidia driver. It intentionally does NOT deactivate the Fabric Manager
 // partition: deactivation is deferred to the caller until after the parent
 // GpuInfo has been repopulated (via discoverSiblingAllocatables) with a fresh
-// gpuModuleId resolved from NVML now that the GPU is visible again.
+// gpuModuleID resolved from NVML now that the GPU is visible again.
 func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices PreparedDeviceList) error {
 	for _, device := range devices {
 		vfioAllocatable := s.perGPUAllocatable.GetAllocatableDevice(device.Vfio.Device.DeviceName)
@@ -1329,7 +1322,7 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 		device.Vfio.parent = gpu.Gpu
 
 		// The GPU is back on the nvidia driver: its freshly discovered parent
-		// GpuInfo already carries the gpuModuleId (resolved from NVML in
+		// GpuInfo already carries the gpuModuleID (resolved from NVML in
 		// getGpuInfo). Attach the FM partition mapping.
 		if err := s.attachFabricManagerPartitions(gpu.Gpu); err != nil {
 			return fmt.Errorf("error attaching fabric manager partitions for gpu %q: %w", gpu.Gpu.CanonicalName(), err)
@@ -1457,14 +1450,6 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 		infos = append(infos, device.Vfio)
 	}
 
-	// Program the NVSwitch fabric for this set of passthrough GPUs via Fabric
-	// Manager *before* binding them to vfio-pci
-	if s.fabricManagerPartitioningEnabled() {
-		if err := s.activateFabricPartition(infos); err != nil {
-			return nil, err
-		}
-	}
-
 	for i, r := range results {
 		if err := s.vfioPciManager.Configure(ctx, infos[i]); err != nil {
 			return nil, fmt.Errorf("error configuring vfio device %q: %w", r.Device, err)
@@ -1474,21 +1459,20 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 	return &configState, nil
 }
 
-// resolveFabricPartitionForVfioDevices resolves the FM partition formed by the
-// given set of VFIO GPU devices, using each device's parent GpuInfo gpuModuleId
-// (resolved from NVML at discovery). The caller must ensure s.fmManager is
-// non-nil.
-func (s *DeviceState) resolveFabricPartitionForVfioDevices(infos []*VfioDeviceInfo) (int, error) {
-	moduleIDs := make([]int, 0, len(infos))
-	for _, info := range infos {
-		if info == nil || info.parent == nil || info.parent.gpuModuleID == 0 {
+// resolveFabricPartition resolves the FM partition formed by the given
+// set of physical GPUs, using each GPU's gpuModuleID (resolved from NVML at
+// discovery).
+func (s *DeviceState) resolveFabricPartition(gpus []*GpuDeviceInfo) (int, error) {
+	moduleIDs := make([]int, 0, len(gpus))
+	for _, gpu := range gpus {
+		if gpu == nil || gpu.gpuModuleID == 0 {
 			pci := ""
-			if info != nil {
-				pci = info.PciBusID
+			if gpu != nil {
+				pci = gpu.PciBusID
 			}
-			return 0, fmt.Errorf("fabric manager: no gpuModuleId for VFIO GPU at PCI %q", pci)
+			return 0, fmt.Errorf("fabric manager: no gpuModuleID for GPU at PCI %q", pci)
 		}
-		moduleIDs = append(moduleIDs, info.parent.gpuModuleID)
+		moduleIDs = append(moduleIDs, gpu.gpuModuleID)
 	}
 	partitionID, ok := s.fmManager.FindPartitionByModuleIDs(moduleIDs)
 	if !ok {
@@ -1497,8 +1481,60 @@ func (s *DeviceState) resolveFabricPartitionForVfioDevices(infos []*VfioDeviceIn
 	return partitionID, nil
 }
 
+// gpuInfosFromPreparedClaim maps a claim's device allocation results to the set of
+// backing physical GPUs for full GPUs and VFIO devices.
+func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequestAllocationResult) []*GpuDeviceInfo {
+	var gpus []*GpuDeviceInfo
+	for _, r := range results {
+		if r.Driver != util.DRADriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device == nil {
+			klog.V(6).Infof("allocatable not found for device %q", r.Device)
+			continue
+		}
+		switch device.Type() {
+		case GpuDeviceType:
+			gpus = append(gpus, device.Gpu)
+		case VfioDeviceType:
+			gpus = append(gpus, device.Vfio.parent)
+		default:
+			klog.V(6).Infof("device %q has unsupported type %q; skipping for fabric partition", r.Device, device.Type())
+		}
+	}
+	return gpus
+}
+
+// deactivateFabricPartition releases the FM partition formed by the physical
+// GPUs backing the claim's allocation results. It is a no-op when Fabric
+// Manager partitioning is disabled or when the claim has no allocation.
+// Callers that include VFIO devices must first rebind those GPUs to the nvidia
+// driver and rediscover so each VFIO device's parent is repopulated.
+func (s *DeviceState) deactivateFabricPartition(pc *PreparedClaim) error {
+	if !s.fabricManagerPartitioningEnabled() || pc.Status.Allocation == nil {
+		return nil
+	}
+	gpus := s.gpuInfosFromPreparedClaim(pc.Status.Allocation.Devices.Results)
+	if len(gpus) == 0 {
+		return nil
+	}
+	partitionID, err := s.resolveFabricPartition(gpus)
+	if err != nil {
+		klog.Warningf("%v; skipping partition deactivation", err)
+		return nil
+	}
+	// DeactivatePartition is idempotent: an already-inactive partition is a
+	// no-op.
+	klog.V(2).Infof("Fabric Manager: deactivating partition %d for %d-GPU claim %s/%s", partitionID, len(gpus), pc.Namespace, pc.Name)
+	if err := s.fmManager.DeactivatePartition(partitionID); err != nil {
+		return fmt.Errorf("deactivating fabric partition %d: %w", partitionID, err)
+	}
+	return nil
+}
+
 // attachFabricManagerPartitions populates the given GPU's size->partitionId
-// mapping from its gpuModuleId using the FM Manager. It is a no-op when Fabric
+// mapping from its gpuModuleID using the FM Manager. It is a no-op when Fabric
 // Manager partitioning is disabled. It gracefully skips GPUs whose module ID
 // could not be resolved from NVML (e.g. a GPU that was already bound to
 // vfio-pci at discovery time).
@@ -1507,7 +1543,7 @@ func (s *DeviceState) attachFabricManagerPartitions(gpu *GpuDeviceInfo) error {
 		return nil
 	}
 	if gpu.gpuModuleID == 0 {
-		klog.Warningf("GPU %s has no gpuModuleId; skipping Fabric Manager partition attributes. "+
+		klog.Warningf("GPU %s has no gpuModuleID; skipping Fabric Manager partition attributes. "+
 			"This happens when the GPU was bound to vfio-pci before discovery (e.g. an active passthrough claim across a plugin restart).",
 			gpu.CanonicalName())
 		return nil
@@ -1520,56 +1556,28 @@ func (s *DeviceState) attachFabricManagerPartitions(gpu *GpuDeviceInfo) error {
 	return nil
 }
 
-// fabricPartitionForVfioDevices resolves the FM partition formed by the given
-// set of VFIO GPU devices. It is lenient: lookup failures are logged and
-// reported as (0, false) so unprepare can proceed best-effort.
-func (s *DeviceState) fabricPartitionForVfioDevices(infos []*VfioDeviceInfo) (int, bool) {
-	partitionID, err := s.resolveFabricPartitionForVfioDevices(infos)
-	if err != nil {
-		klog.Warningf("%v; skipping partition (de)activation", err)
-		return 0, false
-	}
-	return partitionID, true
-}
-
 func (s *DeviceState) fabricManagerPartitioningEnabled() bool {
 	return featuregates.Enabled(featuregates.FabricManagerPartitioning) && s.fmManager != nil
 }
 
-// activateFabricPartition activates the FM partition formed by the given VFIO GPUs.
-func (s *DeviceState) activateFabricPartition(infos []*VfioDeviceInfo) error {
-	if !s.fabricManagerPartitioningEnabled() {
+// activateFabricPartition activates the FM partition formed by the physical
+// GPUs backing the claim's allocation results. The caller must ensure
+// fabricManagerPartitioningEnabled() is true and that the claim is allocated.
+func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) error {
+	gpus := s.gpuInfosFromPreparedClaim(claim.Status.Allocation.Devices.Results)
+	if len(gpus) == 0 {
 		return nil
 	}
-	partitionID, err := s.resolveFabricPartitionForVfioDevices(infos)
+	partitionID, err := s.resolveFabricPartition(gpus)
 	if err != nil {
 		return fmt.Errorf("%v; refusing partition activation", err)
 	}
 	// ActivatePartition is idempotent: a retried Prepare (e.g. after a later
 	// step failed) that hits an already-active partition is a no-op rather than
 	// an FM in-use error.
-	klog.V(2).Infof("Fabric Manager: activating partition %d for %d-GPU passthrough claim", partitionID, len(infos))
+	klog.V(2).Infof("Fabric Manager: activating partition %d for %d-GPU claim %s", partitionID, len(gpus), ResourceClaimToString(claim))
 	if err := s.fmManager.ActivatePartition(partitionID); err != nil {
 		return fmt.Errorf("activating fabric partition %d: %w", partitionID, err)
-	}
-	return nil
-}
-
-// deactivateFabricPartition releases the FM partition formed by the given VFIO
-// GPUs.
-func (s *DeviceState) deactivateFabricPartition(infos []*VfioDeviceInfo) error {
-	if !s.fabricManagerPartitioningEnabled() {
-		return nil
-	}
-	partitionID, ok := s.fabricPartitionForVfioDevices(infos)
-	if !ok {
-		return nil
-	}
-	// DeactivatePartition is idempotent: an already-inactive partition is a
-	// no-op.
-	klog.V(2).Infof("Fabric Manager: deactivating partition %d for %d-GPU passthrough claim", partitionID, len(infos))
-	if err := s.fmManager.DeactivatePartition(partitionID); err != nil {
-		return fmt.Errorf("deactivating fabric partition %d: %w", partitionID, err)
 	}
 	return nil
 }

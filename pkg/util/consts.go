@@ -198,6 +198,7 @@ const (
 	ManagerClientRegisterUuid = "MANAGER_CLIENT_REGISTER_UUID"
 	ManagerVGpuClaimUid       = "MANAGER_VGPU_CLAIM_UID"
 	CudaSMSharedBucket        = "CUDA_SM_SHARED_BUCKET"
+	CudaMemoryUVAAdvise       = "CUDA_MEM_UVA_ADVISE"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"

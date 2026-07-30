@@ -129,7 +129,7 @@ func (m *Manager) recordsPartitions(parts []Partition) error {
 		seen := make(map[int]struct{}, len(p.GPUs))
 		for _, g := range p.GPUs {
 			if _, dup := seen[g.PhysicalID]; dup {
-				return fmt.Errorf("fabricmanager: partition %d references gpuModuleId %d twice",
+				return fmt.Errorf("fabricmanager: partition %d references gpuModuleID %d twice",
 					p.ID, g.PhysicalID)
 			}
 			seen[g.PhysicalID] = struct{}{}
@@ -149,9 +149,9 @@ func (m *Manager) GetPartition(partitionID int) (Partition, bool) {
 
 // GetPartitionsBySizeByModuleID returns a map keyed by partition size (number
 // of GPUs in the partition) to the partitionId of the partition of that size
-// that includes the given gpuModuleId. e.g.:
+// that includes the given gpuModuleID. e.g.:
 //
-//	gpuModuleId: 1
+//	gpuModuleID: 1
 //	partition1:  8
 //	partition2:  4
 //	partition4:  2
@@ -167,7 +167,7 @@ func (m *Manager) GetPartitionsBySizeByModuleID(moduleID int) (map[int]int, erro
 			if g.PhysicalID == moduleID {
 				if existing, dup := out[size]; dup {
 					return nil, fmt.Errorf(
-						"fabricmanager: gpuModuleId %d appears in two partitions of size %d (%d and %d)",
+						"fabricmanager: gpuModuleID %d appears in two partitions of size %d (%d and %d)",
 						moduleID, size, existing, p.ID)
 				}
 				out[size] = p.ID
@@ -179,7 +179,7 @@ func (m *Manager) GetPartitionsBySizeByModuleID(moduleID int) (map[int]int, erro
 }
 
 // FindPartitionByModuleIDs returns the partitionId of the FM partition whose
-// GPU member set is exactly equal to the given set of gpuModuleIds, or
+// GPU member set is exactly equal to the given set of gpuModuleIDs, or
 // (0, false) if no partition matches.
 func (m *Manager) FindPartitionByModuleIDs(moduleIDs []int) (int, bool) {
 	if len(moduleIDs) == 0 {

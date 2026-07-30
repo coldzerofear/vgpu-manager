@@ -74,7 +74,14 @@ const (
 	DeviceMetadata featuregate.Feature = "DeviceMetadata"
 
 	// FabricManagerPartitioning enables Fabric Manager (NVSwitch) partition
-	// management for Passthrough VFIO devices.
+	// management for full-GPU (gpu.nvidia.com) devices and Passthrough VFIO
+	// devices. When enabled, Prepare activates the FM partition whose member
+	// set exactly matches the claim's allocated physical GPUs; a non-matching
+	// set fails Prepare. ResourceClaims should constrain allocation with
+	// matchAttribute on gpu.nvidia.com/partitionN. Requires Fabric Manager
+	// running with FABRIC_MODE=1. Independent of PassthroughSupport: with both
+	// gates on, full-GPU and VFIO claims are partitioned; with only this gate
+	// on, only full-GPU claims are.
 	FabricManagerPartitioning featuregate.Feature = "FabricManagerPartitioning"
 
 	// DRAListTypeAttributes allows the GPU kubelet plugin to publish list-valued
@@ -311,10 +318,6 @@ func ValidateFeatureGates() error {
 
 	if Enabled(DeviceMetadata) && !Enabled(PassthroughSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", DeviceMetadata, PassthroughSupport)
-	}
-
-	if Enabled(FabricManagerPartitioning) && !Enabled(PassthroughSupport) {
-		return fmt.Errorf("feature gate %s requires %s to also be enabled", FabricManagerPartitioning, PassthroughSupport)
 	}
 
 	return nil

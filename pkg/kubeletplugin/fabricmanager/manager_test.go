@@ -186,9 +186,9 @@ func TestFindPartitionByModuleIDs(t *testing.T) {
 }
 
 // TestDiscoverFMPartitionWithArbitraryModuleIDs covers FM reporting partitions
-// whose member gpuModuleIds the driver has not (yet) resolved to any local GPU
+// whose member gpuModuleIDs the driver has not (yet) resolved to any local GPU
 // (e.g. a GPU bound to vfio-pci before nv-fabricmanager started). The Manager
-// no longer owns a PCI<->gpuModuleId map, so it simply records the partitions
+// no longer owns a PCI<->gpuModuleIDs map, so it simply records the partitions
 // as reported; resolution happens on the VFIO device side.
 func TestDiscoverFMPartitionWithArbitraryModuleIDs(t *testing.T) {
 	client := &fakeClient{partitions: []Partition{
@@ -233,7 +233,7 @@ func TestDiscoverFMDuplicateGPUMember(t *testing.T) {
 		{ID: 1, GPUs: gpus(1, 2, 1)},
 	}}
 	if _, err := Open(client); err == nil {
-		t.Errorf("expected error for duplicate gpuModuleId member, got nil")
+		t.Errorf("expected error for duplicate gpuModuleIDs member, got nil")
 	}
 }
 
