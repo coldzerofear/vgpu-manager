@@ -54,6 +54,7 @@ require (
 
 require (
 	cel.dev/expr v0.25.1 // indirect
+	cyphar.com/go-pathrs v0.2.4 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
