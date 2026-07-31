@@ -46,7 +46,7 @@ import (
 // Two things the device-plugin path has are structurally unavailable here:
 // the per-container resource-data file (so limits come from the allocation's
 // ConsumedCapacity) and the virtual-memory ledger (so containerVGPUMemoryUsage
-// currently equals the physical usage; see the VMemoryNode branch below).
+// currently equals the physical usage; see the VirtualMemoryTracking branch below).
 type draGPUCollector struct {
 	*nvidia.DeviceLib
 	nodeName    string
