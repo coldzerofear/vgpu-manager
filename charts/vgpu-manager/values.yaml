@@ -31,6 +31,11 @@ globalDomain: nvidia.com
 # Deliberately NOT covered, because they do not need it:
 #   - the scheduler extender and webhook, which ask for no privileges and are
 #     admitted by restricted-v2 unchanged;
+#   - the device-monitor sidecar. An SCC is evaluated per POD, so a sidecar has
+#     nothing to be granted separately: it shares the device-plugin DaemonSet's
+#     pod and ServiceAccount and is already covered. It also writes no host
+#     path of its own -- it only reads regions the device-plugin created and
+#     relabelled;
 #   - GPU workloads. vgpu-manager creates the directories it mounts into them
 #     world-writable and relabels them for SELinux, so a workload needs no SCC
 #     of its own and no per-namespace binding.
