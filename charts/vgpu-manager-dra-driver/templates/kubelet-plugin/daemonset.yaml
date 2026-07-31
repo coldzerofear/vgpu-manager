@@ -12,7 +12,7 @@
 {{- $healthPort := $plugin.healthcheckPort | default 4567 }}
 {{- $monitor := .Values.kubeletPlugin.containers.monitor | default dict }}
 {{- $monitorPort := (dig "commands" "serverBindPort" 3456 $monitor) }}
-{{- /* device-monitor has its OWN feature-gate registry (SMWatcher, VMemoryNode);
+{{- /* device-monitor has its OWN feature-gate registry (SharedSMUtilizationWatcher, VirtualMemoryTracking);
        passing the kubelet-plugin's gates would abort startup on an unrecognized gate. */}}
 {{- $monitorFg := (dig "featureGates" dict $monitor) }}
 {{- $monitorGates := list }}
@@ -265,6 +265,7 @@ spec:
           command:
             - device-monitor
             - --enable-dra-monitor=true
+            - --domain={{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}
             - --kube-api-qps={{ $monitor.commands.kubeApiQps | default 20 }}
             - --kube-api-burst={{ $monitor.commands.kubeApiBurst | default 30 }}
             - --server-bind-port={{ $monitorPort }}

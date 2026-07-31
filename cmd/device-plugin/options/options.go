@@ -66,20 +66,20 @@ const (
 
 	Component = "devicePlugin"
 
-	// CorePlugin feature gate will report the virtual cores of the node device to kubelet.
-	CorePlugin featuregate.Feature = util.CorePlugin
-	// MemoryPlugin feature gate will report the virtual memory of the node device to kubelet.
-	MemoryPlugin featuregate.Feature = util.MemoryPlugin
-	// Reschedule feature gate will attempt to reschedule Pods that meet the criteria.
-	Reschedule featuregate.Feature = util.Reschedule
-	// GPUTopology feature gate will report gpu topology information to node.
-	GPUTopology featuregate.Feature = util.GPUTopology
-	// SMWatcher feature gate will initiate an independent utilization observation thread to share the results with the vGPU Pod node, reducing driver call consumption.
-	SMWatcher featuregate.Feature = util.SMWatcher
-	// VMemoryNode feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
-	VMemoryNode featuregate.Feature = util.VMemoryNode
-	// ClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
-	ClientMode featuregate.Feature = util.ClientMode
+	// GPUCoreResourcePlugin feature gate will report the virtual cores of the node device to kubelet.
+	GPUCoreResourcePlugin featuregate.Feature = util.GPUCoreResourcePlugin
+	// GPUMemoryResourcePlugin feature gate will report the virtual memory of the node device to kubelet.
+	GPUMemoryResourcePlugin featuregate.Feature = util.GPUMemoryResourcePlugin
+	// AllocationFailureReschedule feature gate will attempt to reschedule Pods that meet the criteria.
+	AllocationFailureReschedule featuregate.Feature = util.AllocationFailureReschedule
+	// TopologyAwareGPUAllocation feature gate will report gpu topology information to node.
+	TopologyAwareGPUAllocation featuregate.Feature = util.TopologyAwareGPUAllocation
+	// SharedSMUtilizationWatcher feature gate will initiate an independent utilization observation thread to share the results with the vGPU Pod node, reducing driver call consumption.
+	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
+	// VirtualMemoryTracking feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
+	VirtualMemoryTracking featuregate.Feature = util.VirtualMemoryTracking
+	// DevicePluginClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
+	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
 	// HonorPreAllocatedDeviceIDs makes preferred allocation follow pre-allocated device IDs whenever possible.
 	HonorPreAllocatedDeviceIDs featuregate.Feature = util.HonorPreAllocatedDeviceIDs
 )
@@ -87,14 +87,14 @@ const (
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		CorePlugin:                 {Default: false, PreRelease: featuregate.Alpha},
-		MemoryPlugin:               {Default: false, PreRelease: featuregate.Alpha},
-		Reschedule:                 {Default: false, PreRelease: featuregate.Alpha},
-		GPUTopology:                {Default: false, PreRelease: featuregate.Alpha},
-		SMWatcher:                  {Default: false, PreRelease: featuregate.Alpha},
-		VMemoryNode:                {Default: false, PreRelease: featuregate.Alpha},
-		ClientMode:                 {Default: false, PreRelease: featuregate.Alpha},
-		HonorPreAllocatedDeviceIDs: {Default: false, PreRelease: featuregate.Alpha},
+		GPUCoreResourcePlugin:       {Default: false, PreRelease: featuregate.Alpha},
+		GPUMemoryResourcePlugin:     {Default: false, PreRelease: featuregate.Alpha},
+		AllocationFailureReschedule: {Default: false, PreRelease: featuregate.Alpha},
+		TopologyAwareGPUAllocation:  {Default: false, PreRelease: featuregate.Alpha},
+		SharedSMUtilizationWatcher:  {Default: false, PreRelease: featuregate.Alpha},
+		VirtualMemoryTracking:       {Default: false, PreRelease: featuregate.Alpha},
+		DevicePluginClientMode:      {Default: false, PreRelease: featuregate.Alpha},
+		HonorPreAllocatedDeviceIDs:  {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 

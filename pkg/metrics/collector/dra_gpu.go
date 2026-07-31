@@ -193,7 +193,7 @@ func CollectBasedOnNvml(
 			prometheus.GaugeValue, float64(1), nodeName, driverVersion, cudaVersion, nvmlVersion)
 	}()
 
-	if featureGate.Enabled(util.SMWatcher) {
+	if featureGate.Enabled(util.SharedSMUtilizationWatcher) {
 		if deviceUtil, err = watcher.NewMmapDeviceUtil(smFilePath); err != nil && !os.IsNotExist(err) {
 			klog.V(3).ErrorS(err, "Failed to read manager SM util file")
 		}
@@ -909,7 +909,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				// handle on the container's manager directory yet, so the
 				// unified-memory component stays 0 and the two usage metrics
 				// below coincide.
-				if c.featureGate.Enabled(util.VMemoryNode) {
+				if c.featureGate.Enabled(util.VirtualMemoryTracking) {
 					// Once there is a suitable plan in the future, it will be implemented deviceVMemUsage
 				}
 

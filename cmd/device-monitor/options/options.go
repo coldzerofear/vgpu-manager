@@ -49,17 +49,17 @@ const (
 	defaultStuckGracePeriod    = "30s"
 
 	Component = "deviceMonitor"
-	// SMWatcher feature gate will obtain shared utilization data aggregation corresponding indicators from external observers.
-	SMWatcher featuregate.Feature = util.SMWatcher
-	// VMemoryNode feature gate will track the allocation of virtual memory on the device and provide more accurate virtual memory monitoring statistics.
-	VMemoryNode featuregate.Feature = util.VMemoryNode
+	// SharedSMUtilizationWatcher feature gate will obtain shared utilization data aggregation corresponding indicators from external observers.
+	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
+	// VirtualMemoryTracking feature gate will track the allocation of virtual memory on the device and provide more accurate virtual memory monitoring statistics.
+	VirtualMemoryTracking featuregate.Feature = util.VirtualMemoryTracking
 )
 
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		SMWatcher:   {Default: false, PreRelease: featuregate.Alpha},
-		VMemoryNode: {Default: false, PreRelease: featuregate.Alpha},
+		SharedSMUtilizationWatcher: {Default: false, PreRelease: featuregate.Alpha},
+		VirtualMemoryTracking:      {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 

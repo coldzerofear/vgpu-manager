@@ -256,13 +256,13 @@ Supported policy values:
 
 The device plugin of vgpu-manager has implemented some special functions that require adding the command-line parameter `--feature-gates` to enable.
 
-### CorePlugin
+### GPUCoreResourcePlugin
 
 * action scope: device-plugin
 
 Opening the core plugin will report the number of virtual cores to the kubelet node.
 
-Use the command `--feature-gates=CorePlugin=true` to open the feature.
+Use the command `--feature-gates=GPUCoreResourcePlugin=true` to open the feature.
 
 After opening the feature gate, check the status of the corresponding node to see the registered resource name `nvidia.com/vgpu-cores`.
 
@@ -276,13 +276,13 @@ status:
 
 > Tips: It may be useful in scenarios where node resource constraints such as `ResourceQuota` are required.
 
-### MemoryPlugin
+### GPUMemoryResourcePlugin
 
 * action scope: device-plugin
 
 Opening the memory plugin will report virtual memory to the kubelet node.
 
-Use the command `--feature-gates=MemoryPlugin=true` to open the feature.
+Use the command `--feature-gates=GPUMemoryResourcePlugin=true` to open the feature.
 
 After opening the feature gate, check the status of the corresponding node to see the registered resource name `nvidia.com/vgpu-memory`.
 
@@ -296,26 +296,26 @@ status:
 
 > Tips: It may be useful in scenarios where node resource constraints such as `ResourceQuota` are required.
 
-### Reschedule
+### AllocationFailureReschedule
 
 * action scope: device-plugin
 
-Opening the reschedule will rearrange nodes and devices for certain pods that have failed allocation.
+Opening the AllocationFailureReschedule will rearrange nodes and devices for certain pods that have failed allocation.
 
-Use the command `--feature-gates=Reschedule=true` to open the feature.
+Use the command `--feature-gates=AllocationFailureReschedule=true` to open the feature.
 
 > Tips: In scenarios where multiple Pods are created and scheduled in parallel, device plugins may experience allocation errors. 
 > Enabling this feature can restore the erroneous Pods.
 
-### SerialBindNode
+### SerializedNodeBind
 
 * action scope: scheduler-extender
 
 Enable serial binding of nodes to the scheduler, this will reduce the performance of the scheduler, but it will increase the success rate of device allocation.
 
-Use the command `--feature-gates=SerialBindNode=true` to open the feature.
+Use the command `--feature-gates=SerializedNodeBind=true` to open the feature.
 
-### GPUTopology
+### TopologyAwareGPUAllocation
 
 * action scope: scheduler-extender, device-plugin
 
@@ -323,4 +323,4 @@ Opening the GPU topology through the device plugin will reveal GPU topology info
 
 When the scheduler opens the GPU topology, it will affect the device allocation of Pods in link topology mode. `nvidia.com/device-topology-mode: link`
 
-Use the command `--feature-gates=GPUTopology=true` to open the feature.
+Use the command `--feature-gates=TopologyAwareGPUAllocation=true` to open the feature.

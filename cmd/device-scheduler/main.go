@@ -103,8 +103,8 @@ func runApp(opt *options.Options) (exitCode int) {
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
 	filterPlugin, err := filter.New(
 		kubeClient, factory, recorder,
-		opt.FeatureGate.Enabled(options.SerialFilterNode),
-		opt.FeatureGate.Enabled(options.GPUTopology))
+		opt.FeatureGate.Enabled(options.SerializedNodeFilter),
+		opt.FeatureGate.Enabled(options.TopologyAwareGPUAllocation))
 	if err != nil {
 		klog.Errorf("Initialization of scheduler FilterPlugin failed: %v", err)
 		return exitCode
@@ -112,7 +112,7 @@ func runApp(opt *options.Options) (exitCode int) {
 
 	bindPlugin, err := bind.New(
 		kubeClient, recorder, filterPlugin.GetPodLister(),
-		opt.FeatureGate.Enabled(options.SerialBindNode))
+		opt.FeatureGate.Enabled(options.SerializedNodeBind))
 	if err != nil {
 		klog.Errorf("Initialization of scheduler BindPlugin failed: %v", err)
 		return exitCode
@@ -121,7 +121,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	preemptPlugin, err := preempt.New(
 		kubeClient, factory, recorder,
 		filterPlugin.GetPodLister(),
-		opt.FeatureGate.Enabled(options.GPUTopology))
+		opt.FeatureGate.Enabled(options.TopologyAwareGPUAllocation))
 	if err != nil {
 		klog.Errorf("Initialization of scheduler PreemptPlugin failed: %v", err)
 		return exitCode

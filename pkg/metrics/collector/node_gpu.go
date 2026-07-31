@@ -510,7 +510,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName)
 
 				// TODO handler Virtual Memory Cache node.
-				if c.featureGate.Enabled(util.VMemoryNode) {
+				if c.featureGate.Enabled(util.VirtualMemoryTracking) {
 					// Calculate virtual memory, if any.
 					func() {
 						// TODO Prevent gpu task from exiting unexpectedly, and fail to clean up the virtual cache in time.

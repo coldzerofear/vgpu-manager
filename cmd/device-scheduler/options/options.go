@@ -51,20 +51,20 @@ const (
 
 	Component = "scheduler"
 
-	// SerialBindNode feature gate will serially execute the binding node operations of the scheduler.
-	SerialBindNode featuregate.Feature = util.SerialBindNode
-	// SerialFilterNode feature gate will serially execute the filter node operations of the scheduler.
-	SerialFilterNode featuregate.Feature = util.SerialFilterNode
-	// GPUTopology feature gate will consider topology structure when allocating devices.
-	GPUTopology featuregate.Feature = util.GPUTopology
+	// SerializedNodeBind feature gate will serially execute the binding node operations of the scheduler.
+	SerializedNodeBind featuregate.Feature = util.SerializedNodeBind
+	// SerializedNodeFilter feature gate will serially execute the filter node operations of the scheduler.
+	SerializedNodeFilter featuregate.Feature = util.SerializedNodeFilter
+	// TopologyAwareGPUAllocation feature gate will consider topology structure when allocating devices.
+	TopologyAwareGPUAllocation featuregate.Feature = util.TopologyAwareGPUAllocation
 )
 
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		SerialBindNode:   {Default: true, PreRelease: featuregate.Beta},
-		SerialFilterNode: {Default: true, PreRelease: featuregate.Beta},
-		GPUTopology:      {Default: false, PreRelease: featuregate.Alpha},
+		SerializedNodeBind:         {Default: true, PreRelease: featuregate.Beta},
+		SerializedNodeFilter:       {Default: true, PreRelease: featuregate.Beta},
+		TopologyAwareGPUAllocation: {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
