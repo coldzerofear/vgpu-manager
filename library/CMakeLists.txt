@@ -162,29 +162,36 @@ if(BUILD_TESTS)
 endif()
 
 # ---------------------------------------------------------------------------
-# sm_node shared-bucket checks.
+# Shared-region checks (sm_node token bucket, vmem_node ledger).
 #
-# Built and run separately from test/ because it needs NEITHER CUDA nor a GPU:
-# it forks processes over a real MAP_SHARED region and asserts the two
-# properties the shared token bucket rests on -- that concurrent cross-process
-# CAS deductions lose nothing, and that the refill election admits at most one
-# winner per period. Both are exactly the kind of thing that cannot be checked
-# by reading the code, and both can run in ordinary CI.
+# Built and run separately from test/ because they need NEITHER CUDA nor a GPU:
+# they fork processes over a real MAP_SHARED region and assert the properties
+# those regions rest on -- that concurrent cross-process CAS deductions lose
+# nothing, that the refill election admits at most one winner per period, that
+# the vmem ledger keeps one slot per PID under concurrent registration, and that
+# its per-device byte-range lock actually excludes at the offsets lock.c
+# computes. All are exactly the kind of thing that cannot be checked by reading
+# the code, and all can run in ordinary CI.
 #
 #   cmake -DBUILD_SM_NODE_TESTS=ON .. && make test_sm_node_shared
 #   ./test_sm_node_shared
+#   ./test_vmem_region_concurrency
 # ---------------------------------------------------------------------------
 #
-# Lives in test/nogpu/ rather than test/ on purpose: test/CMakeLists.txt does
+# Live in test/nogpu/ rather than test/ on purpose: test/CMakeLists.txt does
 # file(GLOB "test_*.c") and builds everything it finds against the CUDA
 # includes only. A file there that includes hook.h fails to compile the moment
 # anyone configures with -DBUILD_TESTS=ON. The subdirectory keeps the two test
 # families apart -- test/ needs a GPU and links CUDA, test/nogpu/ needs neither.
 #
-option(BUILD_SM_NODE_TESTS "Build the GPU-less sm_node shared-bucket checks" OFF)
+option(BUILD_SM_NODE_TESTS "Build the GPU-less shared-region checks" OFF)
 if(BUILD_SM_NODE_TESTS)
     add_executable(test_sm_node_shared test/nogpu/test_sm_node_shared.c)
     target_include_directories(test_sm_node_shared PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    add_executable(test_vmem_region_concurrency test/nogpu/test_vmem_region_concurrency.c)
+    target_include_directories(test_vmem_region_concurrency PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 endif()
 
