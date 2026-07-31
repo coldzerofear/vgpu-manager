@@ -399,6 +399,56 @@ func Test_PodGangKey(t *testing.T) {
 		}
 	}
 
+	// Annotation-based dialects are free-form, so the same gang can be spelled
+	// several ways. All of them must fold onto one key, otherwise a gang splits
+	// in two -- the mirror image of the cross-namespace collision.
+	t.Run("every spelling folds onto the same key", func(t *testing.T) {
+		annoPod := func(namespace, value string) *corev1.Pod {
+			return &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   namespace,
+					Annotations: map[string]string{VolcanoGroupNameAnnotation: value},
+				},
+			}
+		}
+		for _, spelling := range []string{
+			"training",
+			"team-a/training",
+			"  team-a/training  ",
+		} {
+			key, ok := PodGangKey(annoPod("team-a", spelling))
+			assert.True(t, ok, spelling)
+			assert.Equal(t, "team-a/training", key, spelling)
+		}
+	})
+
+	t.Run("an explicit foreign namespace is honoured", func(t *testing.T) {
+		key, ok := PodGangKey(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:   "team-b",
+				Annotations: map[string]string{VolcanoGroupNameAnnotation: "team-a/training"},
+			},
+		})
+		assert.True(t, ok)
+		assert.Equal(t, "team-a/training", key)
+	})
+
+	t.Run("degenerate slash forms fall back to the pod namespace", func(t *testing.T) {
+		for value, want := range map[string]string{
+			"/training": "team-a/training",
+			"training/": "team-a/training",
+		} {
+			key, ok := PodGangKey(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   "team-a",
+					Annotations: map[string]string{VolcanoGroupNameAnnotation: value},
+				},
+			})
+			assert.True(t, ok, value)
+			assert.Equal(t, want, key, value)
+		}
+	})
+
 	t.Run("qualifies the gang name with the namespace", func(t *testing.T) {
 		key, ok := PodGangKey(gangPodIn("team-a", "training"))
 		assert.True(t, ok)
@@ -425,6 +475,19 @@ func Test_PodGangKey(t *testing.T) {
 		key, ok := PodGangKey(nil)
 		assert.False(t, ok)
 		assert.Empty(t, key)
+	})
+
+	t.Run("punctuation-only reference reports no key", func(t *testing.T) {
+		for _, value := range []string{"/", "  "} {
+			key, ok := PodGangKey(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   "team-a",
+					Annotations: map[string]string{VolcanoGroupNameAnnotation: value},
+				},
+			})
+			assert.False(t, ok, value)
+			assert.Empty(t, key, value)
+		}
 	})
 }
 

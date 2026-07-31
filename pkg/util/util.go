@@ -691,8 +691,11 @@ func PodHasGangName(pod *corev1.Pod) (string, bool) {
 	if pod == nil {
 		return "", false
 	}
-	// Native Gang Scheduling
-	if pod.Spec.SchedulingGroup != nil && pod.Spec.SchedulingGroup.PodGroupName != nil {
+	// Native Gang Scheduling. An empty name must NOT win: it would report
+	// membership in a nameless gang and, worse, short-circuit the label /
+	// annotation / ownerReference fallbacks below.
+	if pod.Spec.SchedulingGroup != nil && pod.Spec.SchedulingGroup.PodGroupName != nil &&
+		*pod.Spec.SchedulingGroup.PodGroupName != "" {
 		return *pod.Spec.SchedulingGroup.PodGroupName, true
 	}
 	for _, labelKey := range []string{CoschedulingPodGroupLabel, CoschedulingPodGroupNameLabel} {
@@ -706,7 +709,7 @@ func PodHasGangName(pod *corev1.Pod) (string, bool) {
 		}
 	}
 	for _, ref := range pod.OwnerReferences {
-		if ref.Kind == "PodGroup" {
+		if ref.Kind == "PodGroup" && ref.Name != "" {
 			return ref.Name, true
 		}
 	}
@@ -728,13 +731,60 @@ func PodHasGangName(pod *corev1.Pod) (string, bool) {
 // per tenant, which is the norm in multi-tenant clusters -- look like siblings
 // of each other.
 //
+// The raw value is NORMALIZED first, because the annotation-based dialects do
+// not agree on a spelling -- see normalizeGangKey. Two pods of one gang written
+// two different ways must still produce the same key.
+//
 // PodHasGangName remains the right call for display: it is what the user wrote.
 func PodGangKey(pod *corev1.Pod) (string, bool) {
 	name, ok := PodHasGangName(pod)
-	if !ok {
+	if !ok || strings.TrimSpace(name) == "" {
 		return "", false
 	}
-	return pod.Namespace + "/" + name, true
+	key := normalizeGangKey(pod.Namespace, name)
+	// Nothing usable survived the fold (the reference was punctuation only,
+	// e.g. "/"). Report non-membership rather than hand back a name-less key
+	// that every equally-degenerate pod in the namespace would match.
+	if strings.HasSuffix(key, "/") {
+		return "", false
+	}
+	return key, true
+}
+
+// normalizeGangKey folds every spelling of a gang reference onto one
+// "<namespace>/<name>" key.
+//
+// Label-based dialects can only ever carry a bare PodGroup name (a Kubernetes
+// label VALUE may not contain '/'), but the annotation-based ones -- Volcano,
+// Koordinator, kube-batch -- are free-form and accept either spelling:
+//
+//	training         -> <pod namespace>/training
+//	team-a/training  -> team-a/training
+//
+// Without folding, a gang whose pods spell the reference both ways inside one
+// namespace would split into two gangs -- the opposite failure from the
+// cross-namespace collision this key exists to prevent.
+//
+// An explicit namespace is honoured rather than overridden by the pod's own:
+// that is what the author asked for, and for the overwhelmingly common case
+// (the qualified namespace IS the pod's namespace) the two agree anyway.
+func normalizeGangKey(podNamespace, raw string) string {
+	value := strings.TrimSpace(raw)
+	if namespace, name, found := strings.Cut(value, "/"); found {
+		namespace, name = strings.TrimSpace(namespace), strings.TrimSpace(name)
+		if namespace != "" && name != "" {
+			return namespace + "/" + name
+		}
+		// Degenerate ("/x" or "x/"): fall through and treat the non-empty half
+		// as a bare name in the pod's own namespace rather than inventing an
+		// empty-namespace key that matches nothing.
+		if name != "" {
+			value = name
+		} else {
+			value = namespace
+		}
+	}
+	return podNamespace + "/" + value
 }
 
 func SafeDiv(a, b float64) float64 {
