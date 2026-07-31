@@ -26,7 +26,6 @@ type ContainerRef struct {
 	// Kind stays ContainerKindInit for such containers; consumers that care
 	// about lifecycle overlap with the app phase must consult this flag.
 	Restartable bool
-	Container   *corev1.Container
 }
 
 func GetAllPodContainers(pod *corev1.Pod) []ContainerRef {
@@ -38,16 +37,14 @@ func GetAllPodContainers(pod *corev1.Pod) []ContainerRef {
 			Claims:      c.Resources.Claims,
 			Kind:        ContainerKindInit,
 			Restartable: IsRestartableInitContainer(c),
-			Container:   c,
 		})
 	}
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
 		all = append(all, ContainerRef{
-			Name:      c.Name,
-			Claims:    c.Resources.Claims,
-			Kind:      ContainerKindApp,
-			Container: c,
+			Name:   c.Name,
+			Claims: c.Resources.Claims,
+			Kind:   ContainerKindApp,
 		})
 	}
 	return all

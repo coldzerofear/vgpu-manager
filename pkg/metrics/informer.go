@@ -76,11 +76,18 @@ func GetDevicePluginPodInformer(factory informers.SharedInformerFactory, nodeNam
 	})
 }
 
+// GetResourceSliceInformer watches only the slices this node's driver published.
+//
+// The selector deliberately uses spec.nodeName rather than spec.pool.name: both
+// carry the node name for our driver, but spec.nodeName and spec.driver are the
+// field selectors ResourceSlice has supported since the API went beta, and an
+// unsupported selector does not degrade — the API server rejects the LIST, the
+// informer never syncs, and the collector silently reports nothing at all.
 func GetResourceSliceInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
 	return factory.InformerFor(&resourcev1.ResourceSlice{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
 		watcher := cache.NewListWatchFromClient(k.ResourceV1().RESTClient(), "resourceslices",
 			corev1.NamespaceAll, fields.AndSelectors(
-				fields.OneTermEqualSelector("spec.pool.name", nodeName),
+				fields.OneTermEqualSelector("spec.nodeName", nodeName),
 				fields.OneTermEqualSelector("spec.driver", util.DRADriverName),
 			))
 		return cache.NewSharedIndexInformer(watcher, &resourcev1.ResourceSlice{}, d, cache.Indexers{})

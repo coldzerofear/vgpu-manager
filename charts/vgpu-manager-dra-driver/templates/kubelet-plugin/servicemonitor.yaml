@@ -1,4 +1,6 @@
-{{- if and .Values.kubeletPlugin.enabled .Values.kubeletPlugin.metrics.enabled .Values.kubeletPlugin.metrics.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") -}}
+{{- $monitor := .Values.kubeletPlugin.deviceMonitor | default dict }}
+{{- $pluginMetrics := and .Values.kubeletPlugin.metrics.enabled .Values.kubeletPlugin.metrics.serviceMonitor.enabled }}
+{{- if and .Values.kubeletPlugin.enabled (or $pluginMetrics $monitor.enabled) (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") -}}
 {{- $sm := .Values.kubeletPlugin.metrics.serviceMonitor }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -13,6 +15,7 @@ metadata:
     {{- end }}
 spec:
   endpoints:
+    {{- if $pluginMetrics }}
     - path: {{ .Values.kubeletPlugin.metrics.metricsPath | default "/metrics" }}
       port: metrics
       {{- with $sm.interval }}
@@ -27,6 +30,28 @@ spec:
       {{- with $sm.metricRelabelings }}
       metricRelabelings: {{ toYaml . | nindent 8 }}
       {{- end }}
+    {{- end }}
+    {{- if $monitor.enabled }}
+    - path: /metrics
+      port: device-metrics
+      scheme: {{ if $monitor.tls.enabled }}https{{ else }}http{{ end }}
+      {{- if $monitor.tls.enabled }}
+      tlsConfig:
+        insecureSkipVerify: true
+      {{- end }}
+      {{- with $sm.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with $sm.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with $sm.relabelings }}
+      relabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $sm.metricRelabelings }}
+      metricRelabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace | quote }}

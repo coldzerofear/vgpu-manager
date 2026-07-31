@@ -209,29 +209,20 @@ func IsContainerRunning(pod *corev1.Pod, containerName string) bool {
 // must stop being reported and its working directory may be reclaimed.
 // Init containers come first, matching the device-plugin's per-container layout.
 func CollectableContainerNames(pod *corev1.Pod) []string {
-	containers := CollectableContainers(pod)
-	names := make([]string, len(containers))
-	for i, container := range containers {
-		names[i] = container.Name
-	}
-	return names
-}
-
-func CollectableContainers(pod *corev1.Pod) []corev1.Container {
 	if pod == nil {
 		return nil
 	}
-	containers := make([]corev1.Container, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
+	names := make([]string, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
 	for i := range pod.Spec.InitContainers {
-		c := pod.Spec.InitContainers[i]
-		if IsRestartableInitContainer(&c) || IsContainerRunning(pod, c.Name) {
-			containers = append(containers, c)
+		c := &pod.Spec.InitContainers[i]
+		if IsRestartableInitContainer(c) || IsContainerRunning(pod, c.Name) {
+			names = append(names, c.Name)
 		}
 	}
 	for i := range pod.Spec.Containers {
-		containers = append(containers, pod.Spec.Containers[i])
+		names = append(names, pod.Spec.Containers[i].Name)
 	}
-	return containers
+	return names
 }
 
 // CheckDeviceType Check if the device type meets expectations.

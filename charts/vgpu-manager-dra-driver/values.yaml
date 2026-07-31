@@ -116,6 +116,49 @@ kubeletPlugin:
       # Prometheus relabeling rules applied before / after scraping.
       relabelings: []
       metricRelabelings: []
+  # Per-container GPU metrics exporter for the DRA path (device-monitor).
+  #
+  # This is a different exporter from `metrics` above: `metrics` exposes the
+  # kubelet-plugin's own operational metrics, while this one exports the
+  # physical/vGPU/per-container GPU metrics, sourced from the ResourceSlices this
+  # driver publishes and the ResourceClaims it consumes. It runs as a sidecar
+  # here (not in the device-plugin DaemonSet) because that RBAC already belongs
+  # to this ServiceAccount.
+  deviceMonitor:
+    enabled: false
+    commands:
+      # Port the exporter serves /metrics, /healthz and /readyz on.
+      serverBindPort: 3456
+      # Set > 0 to expose net/http/pprof on that port.
+      pprofBindPort: 0
+      kubeApiQps: 20
+      kubeApiBurst: 30
+      # Require authenticated+authorized scrapes (TokenReview / SubjectAccessReview).
+      # Enabling this also grants the ServiceAccount the rights to perform those reviews.
+      enableRBAC: false
+      # Minimum seconds between two scrapes actually hitting NVML.
+      minScrapeInterval: 1
+      certRefreshInterval: 5
+      logLevel: 4
+      # device-monitor's own feature gates -- a DIFFERENT registry from
+      # kubeletPlugin.containers.plugin.featureGates. Only these two exist;
+      # passing a kubelet-plugin gate here aborts startup.
+      featureGates:
+        # Read per-process SM utilization published by the in-container watcher.
+        SMWatcher: false
+        # Account virtual (unified) memory. Not yet implemented on the DRA path.
+        VMemoryNode: false
+    tls:
+      enabled: false
+      # Secret holding tls.crt / tls.key. Defaults to "<kubelet-plugin>-monitor-tls".
+      secretName: ""
+    env: []
+    securityContext:
+      privileged: true
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
   containers:
     # init containers (driver prestart + host-side file install). Privileged is required.
     init:

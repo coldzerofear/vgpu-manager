@@ -347,11 +347,23 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 	for uuid, status := range devHealthMap {
+		labelValues, ok := devHealthLvs[uuid]
+		if !ok {
+			// The loop above adds an entry for every registered device, including
+			// ones NVML never enumerated -- and when NvmlInit fails outright,
+			// CollectBasedOnNvml returns with devHealthLvs still empty, so that is
+			// ALL of them. Emitting with a nil label slice trips the
+			// label-cardinality check inside MustNewConstMetric, and prometheus
+			// runs Collect on its own goroutine without recovering, so the panic
+			// would take the whole exporter down on every scrape.
+			klog.V(4).InfoS("skip health metric for device with no NVML labels", "deviceUuid", uuid)
+			continue
+		}
 		ch <- prometheus.MustNewConstMetric(
 			physicalGPUHealthStatus,
 			prometheus.GaugeValue,
 			float64(status),
-			devHealthLvs[uuid]...)
+			labelValues...)
 	}
 	ch <- prometheus.MustNewConstMetric(
 		nodeVGPUTotalMemory,
