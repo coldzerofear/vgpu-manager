@@ -1,7 +1,8 @@
-{{- $monitor := .Values.kubeletPlugin.deviceMonitor | default dict }}
-{{- $pluginMetrics := and .Values.kubeletPlugin.metrics.enabled .Values.kubeletPlugin.metrics.serviceMonitor.enabled }}
+{{- $monitor := .Values.kubeletPlugin.containers.monitor | default dict }}
+{{- $metricsPort := .Values.kubeletPlugin.containers.plugin.commands.metricsPort | default 0 }}
+{{- $pluginMetrics := and (gt ($metricsPort | int) 0) .Values.kubeletPlugin.serviceMonitor.enabled }}
 {{- if and .Values.kubeletPlugin.enabled (or $pluginMetrics $monitor.enabled) (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") -}}
-{{- $sm := .Values.kubeletPlugin.metrics.serviceMonitor }}
+{{- $sm := .Values.kubeletPlugin.serviceMonitor }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -16,7 +17,7 @@ metadata:
 spec:
   endpoints:
     {{- if $pluginMetrics }}
-    - path: {{ .Values.kubeletPlugin.metrics.metricsPath | default "/metrics" }}
+    - path: /metrics
       port: metrics
       {{- with $sm.interval }}
       interval: {{ . }}
@@ -34,11 +35,7 @@ spec:
     {{- if $monitor.enabled }}
     - path: /metrics
       port: device-metrics
-      scheme: {{ if $monitor.tls.enabled }}https{{ else }}http{{ end }}
-      {{- if $monitor.tls.enabled }}
-      tlsConfig:
-        insecureSkipVerify: true
-      {{- end }}
+      scheme: http
       {{- with $sm.interval }}
       interval: {{ . }}
       {{- end }}

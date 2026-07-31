@@ -1,5 +1,6 @@
-{{- $monitor := .Values.kubeletPlugin.deviceMonitor | default dict }}
-{{- if and .Values.kubeletPlugin.enabled (or .Values.kubeletPlugin.metrics.enabled $monitor.enabled) -}}
+{{- $monitor := .Values.kubeletPlugin.containers.monitor | default dict }}
+{{- $metricsPort := .Values.kubeletPlugin.containers.plugin.commands.metricsPort | default 0 }}
+{{- if and .Values.kubeletPlugin.enabled (or (gt ($metricsPort | int) 0) $monitor.enabled) -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -11,9 +12,9 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    {{- if .Values.kubeletPlugin.metrics.enabled }}
+    {{- if gt ($metricsPort | int) 0 }}
     - name: metrics
-      port: {{ include "vgpu-manager-dra-driver.metricsPort" . | int }}
+      port: {{ $metricsPort }}
       targetPort: metrics
       protocol: TCP
     {{- end }}

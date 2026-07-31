@@ -28,7 +28,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
-  {{- if and .Values.kubeletPlugin.deviceMonitor.enabled .Values.kubeletPlugin.deviceMonitor.commands.enableRBAC }}
+  {{- if and .Values.kubeletPlugin.containers.monitor.enabled .Values.kubeletPlugin.containers.monitor.commands.enableRBAC }}
   # device-monitor authenticates and authorizes its scrapers itself.
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]

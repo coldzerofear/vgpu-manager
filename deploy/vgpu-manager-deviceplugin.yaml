@@ -171,8 +171,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-#            - name: CGROUP_DRIVER
-#              value: systemd
+            - name: CGROUP_DRIVER
+              value: auto
             - name: KUBE_FEATURE_WatchListClient
               value: "true"
             - name: HOST_MANAGER_DIR
@@ -233,8 +233,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-#            - name: CGROUP_DRIVER
-#              value: systemd
+            - name: CGROUP_DRIVER
+              value: auto
             - name: KUBE_FEATURE_WatchListClient
               value: "true"
             - name: NVIDIA_VISIBLE_DEVICES
