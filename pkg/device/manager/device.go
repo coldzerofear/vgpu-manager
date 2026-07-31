@@ -239,7 +239,7 @@ func (m *DeviceManager) initDevices() (err error) {
 	}
 	var (
 		devLinksMap        map[string]map[int][]links.P2PLinkType
-		gpuTopologyEnabled = m.featureGate.Enabled(util.GPUTopology)
+		gpuTopologyEnabled = m.featureGate.Enabled(util.TopologyAwareGPUAllocation)
 		exists             = false
 	)
 	if gpuTopologyEnabled {
@@ -466,7 +466,7 @@ func (m *DeviceManager) Start() {
 			klog.ErrorS(err, "Failed to initiate device health check")
 		}
 	})
-	if m.featureGate.Enabled(util.SMWatcher) {
+	if m.featureGate.Enabled(util.SharedSMUtilizationWatcher) {
 		m.wait.Go(func() {
 			klog.Infoln("DeviceManager starting sm watcher...")
 			m.doWatcher()
@@ -492,7 +492,7 @@ func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 			Number:     m.config.GetDeviceSplitCount(),
 			Numa:       gpuDevice.NumaNode,
 			Mig:        gpuDevice.MigEnabled,
-			BusId:      links.PciInfo(gpuDevice.PciInfo).BusID(),
+			BusId:      gpuDevice.PciBusID,
 			Capability: float32(capability),
 			Healthy:    gpuDevice.Healthy,
 		})

@@ -350,18 +350,6 @@ func (p MemorySchedulerPolicy) String() string {
 
 // FeatureGates
 const (
-	CorePlugin       = "CorePlugin"       // GPUCoreResourcePlugin
-	MemoryPlugin     = "MemoryPlugin"     // GPUMemoryResourcePlugin
-	Reschedule       = "Reschedule"       // AllocationFailureReschedule
-	GPUTopology      = "GPUTopology"      // GPUTopologyAwareAllocation
-	SMWatcher        = "SMWatcher"        // SharedSMUtilizationWatcher
-	SerialBindNode   = "SerialBindNode"   // SerializedNodeBind
-	SerialFilterNode = "SerialFilterNode" // SerializedNodeFilter
-	VMemoryNode      = "VMemoryNode"      // VGPUMemoryTracking
-	ClientMode       = "ClientMode"       // DevicePluginClientMode
-)
-
-const (
 	// GPUCoreResourcePlugin reports virtual GPU core resources to kubelet
 	// for node allocatable visibility only.
 	GPUCoreResourcePlugin = "GPUCoreResourcePlugin"

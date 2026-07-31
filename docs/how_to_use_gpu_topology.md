@@ -39,7 +39,7 @@ spec:
 
 ### Link topology
 
-To use the link topology mode, it is necessary to enable the GPUTopology function gating on the device plugin and scheduler plugin.
+To use the link topology mode, it is necessary to enable the TopologyAwareGPUAllocation function gating on the device plugin and scheduler plugin.
 
 ```bash
 $ kubectl edit ds -n kube-system vgpu-manager-device-plugin
@@ -47,14 +47,14 @@ $ kubectl edit ds -n kube-system vgpu-manager-device-plugin
   - name: device-plugin
     command:
     - deviceplugin
-    - --feature-gates=GPUTopology=true # Ensure that the feature gate is turned on
+    - --feature-gates=TopologyAwareGPUAllocation=true # Ensure that the feature gate is turned on
 
 $ kubectl edit deployment -n kube-system vgpu-manager-scheduler
   containers
   - name: scheduler-extender
     command:
     - scheduler
-    - --feature-gates=GPUTopology=true # Ensure that the feature gate is turned on
+    - --feature-gates=TopologyAwareGPUAllocation=true # Ensure that the feature gate is turned on
 ```
 
 After restarting the device plugin, check the node comments to determine if the GPU topology function has been successfully started

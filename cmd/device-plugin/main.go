@@ -148,7 +148,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	}
 
 	if err = controller.RegisterControllerToManager(manager, nodeConfig, map[string]bool{
-		reschedule.Name: opt.FeatureGate.Enabled(options.Reschedule),
+		reschedule.Name: opt.FeatureGate.Enabled(options.AllocationFailureReschedule),
 	}); err != nil {
 		klog.Errorf("Register controller to manager failed: %v", err)
 		return exitCode

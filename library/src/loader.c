@@ -2998,7 +2998,7 @@ void load_controller_configuration() {
        *
        * This is not a weaker configuration than we already ship: every
        * dereference of g_device_vmem is guarded by a NULL check, and
-       * g_device_vmem == NULL is the DEFAULT state, because the VMemoryNode
+       * g_device_vmem == NULL is the DEFAULT state, because the VirtualMemoryTracking
        * feature gate defaults to off. Degrading lands the process in the exact
        * configuration most nodes run in today.
        *

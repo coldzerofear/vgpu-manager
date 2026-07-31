@@ -117,7 +117,7 @@ func (m *vNumberDevicePlugin) Start() error {
 	if err == nil {
 		m.baseServer.GetDeviceManager().AddRegistryFunc(m.Name(), m.registryDevices)
 		m.baseServer.GetDeviceManager().AddCleanupRegistryFunc(m.Name(), m.cleanupRegistry)
-		if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.ClientMode) {
+		if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.DevicePluginClientMode) {
 			if err = m.server.Start(); err != nil {
 				klog.ErrorS(err, "DeviceRegistryServer failed to start")
 			}
@@ -131,7 +131,7 @@ func (m *vNumberDevicePlugin) Stop() error {
 	err := m.baseServer.Stop(m.Name())
 	m.baseServer.GetDeviceManager().RemoveRegistryFunc(m.Name())
 	m.baseServer.GetDeviceManager().RemoveCleanupRegistryFunc(m.Name())
-	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.ClientMode) {
+	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.DevicePluginClientMode) {
 		m.server.Stop()
 	}
 	return err
@@ -179,7 +179,7 @@ func (m *vNumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGat
 		return nil, fmt.Errorf("encoding node device information failed: %v", err)
 	}
 	var registryGPUTopology *string
-	if featureGate.Enabled(util.GPUTopology) {
+	if featureGate.Enabled(util.TopologyAwareGPUAllocation) {
 		gpuTopology, err := m.getEncodeNodeTopologyInfo()
 		if err != nil {
 			return nil, err
@@ -719,9 +719,9 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	deviceMap := deviceManager.GetGPUDeviceMap()
 	strategies := deviceManager.GetNodeConfig().GetDeviceListStrategy()
 	memoryRatio := deviceManager.GetNodeConfig().GetDeviceMemoryScaling()
-	enabledSMWatcher := deviceManager.GetFeatureGate().Enabled(util.SMWatcher)
-	enabledClientMode := deviceManager.GetFeatureGate().Enabled(util.ClientMode)
-	enabledMemoryNode := deviceManager.GetFeatureGate().Enabled(util.VMemoryNode)
+	enabledSMWatcher := deviceManager.GetFeatureGate().Enabled(util.SharedSMUtilizationWatcher)
+	enabledClientMode := deviceManager.GetFeatureGate().Enabled(util.DevicePluginClientMode)
+	enabledMemoryNode := deviceManager.GetFeatureGate().Enabled(util.VirtualMemoryTracking)
 
 	for i, containerRequest := range req.ContainerRequests {
 		contClaim, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -1125,7 +1125,7 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		return resp, fmt.Errorf("write vGPU config failed: %w", err)
 	}
 
-	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.Reschedule) {
+	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.AllocationFailureReschedule) {
 		// Extra check the size of the vGPU configuration file.
 		// When a version upgrade causes a change in the configuration structure,
 		// the controller can reschedule these pods that cannot be started

@@ -185,7 +185,7 @@ func NewMmapResourceData(filePath string) (*MmapResourceData, error) {
 func GetCompatibilityMode(devManager *manager.DeviceManager) util.CompatibilityMode {
 	mode := util.HostMode
 	switch {
-	case devManager.GetFeatureGate().Enabled(util.ClientMode):
+	case devManager.GetFeatureGate().Enabled(util.DevicePluginClientMode):
 		mode |= util.ClientRegMode
 	case cgroups.IsCgroup2UnifiedMode():
 		mode |= util.CGroupv2Mode
@@ -414,8 +414,8 @@ func WithDeviceManager(devManager *manager.DeviceManager) OptionFunc {
 	return func(r *ResourceOption) {
 		WithDriverVersion(devManager.GetDriverVersion())(r)
 		WithMemoryRatio(devManager.GetNodeConfig().GetDeviceMemoryScaling())(r)
-		WithSMWatcherEnabled(devManager.GetFeatureGate().Enabled(util.SMWatcher))(r)
-		WithVMemoryNodeEnabled(devManager.GetFeatureGate().Enabled(util.VMemoryNode))(r)
+		WithSMWatcherEnabled(devManager.GetFeatureGate().Enabled(util.SharedSMUtilizationWatcher))(r)
+		WithVMemoryNodeEnabled(devManager.GetFeatureGate().Enabled(util.VirtualMemoryTracking))(r)
 		WithCompatibilityMode(GetCompatibilityMode(devManager))(r)
 		devices := devManager.GetNodeDeviceInfo()
 		length := min(MaxDeviceCount, len(devices))

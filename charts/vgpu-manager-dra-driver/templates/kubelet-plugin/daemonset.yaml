@@ -1,6 +1,7 @@
 {{- if .Values.kubeletPlugin.enabled -}}
 {{- $init := .Values.kubeletPlugin.containers.init }}
 {{- $plugin := .Values.kubeletPlugin.containers.plugin }}
+{{- $metricsPort := $plugin.commands.metricsPort | default 0 }}
 {{- $driverRoot := .Values.kubeletPlugin.driverRoot | default "/" }}
 {{- $kubeletRoot := .Values.kubeletPlugin.kubeletRoot | default "/var/lib/kubelet" | trimSuffix "/" }}
 {{- $registrarDir := printf "%s/plugins_registry" $kubeletRoot }}
@@ -9,6 +10,14 @@
 {{- $cdiRoot := .Values.kubeletPlugin.cdiRoot | default "/var/run/cdi" }}
 {{- $nriRoot := .Values.kubeletPlugin.nriRoot | default "/var/run/nri" }}
 {{- $healthPort := $plugin.healthcheckPort | default 4567 }}
+{{- $monitor := .Values.kubeletPlugin.containers.monitor | default dict }}
+{{- $monitorPort := (dig "commands" "serverBindPort" 3456 $monitor) }}
+{{- /* device-monitor has its OWN feature-gate registry (SharedSMUtilizationWatcher, VirtualMemoryTracking);
+       passing the kubelet-plugin's gates would abort startup on an unrecognized gate. */}}
+{{- $monitorFg := (dig "featureGates" dict $monitor) }}
+{{- $monitorGates := list }}
+{{- range $k, $v := $monitorFg }}{{ $monitorGates = append $monitorGates (printf "%s=%v" $k $v) }}{{- end }}
+{{- $monitorFeatureGates := sortAlpha $monitorGates | join "," }}
 {{- $fg := $plugin.featureGates | default dict }}
 {{- $gates := list }}
 {{- range $k, $v := $fg }}{{ $gates = append $gates (printf "%s=%v" $k $v) }}{{- end }}
@@ -171,21 +180,21 @@ spec:
             - name: CGROUP_DRIVER
               value: {{ .Values.kubeletPlugin.cgroupDriver | quote }}
             {{- end }}
-            {{- if .Values.kubeletPlugin.metrics.enabled }}
+            {{- if gt ($metricsPort | int) 0 }}
             - name: HTTP_ENDPOINT
-              value: {{ .Values.kubeletPlugin.metrics.httpEndpoint | quote }}
+              value: ":{{ $metricsPort }}"
             - name: METRICS_PATH
-              value: {{ .Values.kubeletPlugin.metrics.metricsPath | quote }}
+              value: "/metrics"
             {{- end }}
           {{- with $plugin.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
           securityContext: {{ toYaml $plugin.securityContext | nindent 12 }}
           resources: {{ toYaml $plugin.resources | nindent 12 }}
-          {{- if .Values.kubeletPlugin.metrics.enabled }}
+          {{- if gt ($metricsPort | int) 0 }}
           ports:
             - name: metrics
-              containerPort: {{ include "vgpu-manager-dra-driver.metricsPort" . | int }}
+              containerPort: {{ $metricsPort }}
               protocol: TCP
           {{- end }}
           {{- if gt (int $healthPort) 0 }}
@@ -245,6 +254,85 @@ spec:
               mountPropagation: HostToContainer
               readOnly: true
             {{- end }}
+        {{- if $monitor.enabled }}
+        # Container-level GPU metrics for the DRA path. Runs here rather than in
+        # the device-plugin DaemonSet because it reads the ResourceSlices this
+        # driver publishes and the ResourceClaims it consumes -- the RBAC for
+        # both already belongs to this ServiceAccount.
+        - name: device-monitor
+          image: {{ include "vgpu-manager-dra-driver.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          command:
+            - device-monitor
+            - --enable-dra-monitor=true
+            - --domain={{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}
+            - --kube-api-qps={{ $monitor.commands.kubeApiQps | default 20 }}
+            - --kube-api-burst={{ $monitor.commands.kubeApiBurst | default 30 }}
+            - --server-bind-port={{ $monitorPort }}
+            - --pprof-bind-port={{ $monitor.commands.pprofBindPort | default 0 }}
+            {{- if .Values.kubeletPlugin.cgroupDriver }}
+            - --cgroup-driver={{ .Values.kubeletPlugin.cgroupDriver }}
+            {{- end }}
+            {{- if $monitorFeatureGates }}
+            - --feature-gates={{ $monitorFeatureGates }}
+            {{- end }}
+            - --enable-rbac={{ $monitor.commands.enableRBAC | default false }}
+            - --min-scrape-interval={{ $monitor.commands.minScrapeInterval | default 1 }}
+            - --container-driver-root=/driver-root
+            - --v={{ $monitor.commands.logLevel | default 4 }}
+          ports:
+            - name: device-metrics
+              containerPort: {{ $monitorPort }}
+              protocol: TCP
+            {{- if gt (int ($monitor.commands.pprofBindPort | default 0)) 0 }}
+            - name: monitor-pprof
+              containerPort: {{ $monitor.commands.pprofBindPort }}
+              protocol: TCP
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_MIG_MONITOR_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+          {{- with $monitor.env }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext: {{ toYaml $monitor.securityContext | nindent 12 }}
+          resources: {{ toYaml $monitor.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: device-metrics
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: device-metrics
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+              readOnly: true
+            - name: manager
+              mountPath: /etc/vgpu-manager
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: driver-root
+              mountPath: /driver-root
+              mountPropagation: HostToContainer
+              readOnly: true
+        {{- end }}
       volumes:
         - name: plugins-registry
           hostPath:

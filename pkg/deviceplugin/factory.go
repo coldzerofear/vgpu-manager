@@ -80,14 +80,14 @@ func GetDevicePlugins(
 	}
 
 	var deleteResources []string
-	if devManager.GetFeatureGate().Enabled(options.CorePlugin) {
+	if devManager.GetFeatureGate().Enabled(options.GPUCoreResourcePlugin) {
 		socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-core.sock")
 		plugins = append(plugins, vgpu.NewVCoreDevicePlugin(util.VGPUCoreResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUCoreResourceName)
 	}
 
-	if devManager.GetFeatureGate().Enabled(options.MemoryPlugin) {
+	if devManager.GetFeatureGate().Enabled(options.GPUMemoryResourcePlugin) {
 		socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-memory.sock")
 		plugins = append(plugins, vgpu.NewVMemoryDevicePlugin(util.VGPUMemoryResourceName, socket, devManager))
 	} else {

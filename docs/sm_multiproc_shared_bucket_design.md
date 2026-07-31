@@ -38,7 +38,7 @@
 
 ### 0.2 需要补入的新事实
 
-1. **`vmem_node` 现已 feature-gate 化**：新增 `util.VMemoryNode` 特性门控与 `VMEMORY_NODE_ENABLED` 环境变量，库侧由 `g_vgpu_config->vmem_node` 决定是否建区。这给本设计的开关（§5）提供了一个**可对照的既有范式**，也改变了 §10 的适用条件 —— 详见 §5.1 与 §10.6。
+1. **`vmem_node` 现已 feature-gate 化**：新增 `util.VirtualMemoryTracking` 特性门控与 `VMEMORY_NODE_ENABLED` 环境变量，库侧由 `g_vgpu_config->vmem_node` 决定是否建区。这给本设计的开关（§5）提供了一个**可对照的既有范式**，也改变了 §10 的适用条件 —— 详见 §5.1 与 §10.6。
 2. **库内新增了 `vmem_node` 的 PID 存活回收与退出/信号清理钩子**（`rm_vmem_node_by_non_existent_device_pid`、`check_cleanup_vmem_nodes*`、`atexit` + `SIGTERM/SIGINT/SIGHUP`）。这是第三条陈旧清理机制，本设计**一条都不需要**，但必须写清楚"为什么不需要"，否则后人会照抄 —— 详见 §4.5.5。
 3. **`loader_child_after_fork` 现在会释放 fork 继承的显存记账链表**（[loader.c#L2635](../library/src/loader.c#L2635)）。§6.2 "不需要动 fork 处理器" 的结论不变，但理由需要精确化 —— 详见 §6.2。
 
@@ -601,7 +601,7 @@ static void rebuild_region_locked(sm_node_region_t *r) {
 | [`mmap_file_to_util_path`](../library/src/loader.c#L1531)（`device_util_t`） | `MAP_PRIVATE`/`PROT_READ` | **外部 watcher** | **保持报错** |
 | [`mmap_file_to_vmem_node`](../library/src/loader.c#L1563)（`device_vmemory_t`） | `MAP_SHARED`/读写 | **库自己** | 可以重建（但见下） |
 
-**前两处必须保持报错，改成"重建"是错的**：它们是**只读消费**控制面产出的文件，库既无权也无力重建自己不拥有的数据——凭空造一份 `vgpu.config` 只会让容器带着错误的配额跑起来，比起不来更糟。而且 `resource_data_t` 的尺寸校验是**被设计成失败的**：[vnum_plugin.go#L1107](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1107) 在 `Reschedule` 门控下调用 `CheckResourceDataSize`，注释写明"When a version upgrade causes a change in the configuration structure, the controller can reschedule these pods that cannot be started"——**升级后起不来是预期行为，由控制器重新调度兜底**。
+**前两处必须保持报错，改成"重建"是错的**：它们是**只读消费**控制面产出的文件，库既无权也无力重建自己不拥有的数据——凭空造一份 `vgpu.config` 只会让容器带着错误的配额跑起来，比起不来更糟。而且 `resource_data_t` 的尺寸校验是**被设计成失败的**：[vnum_plugin.go#L1107](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1107) 在 `AllocationFailureReschedule` 门控下调用 `CheckResourceDataSize`，注释写明"When a version upgrade causes a change in the configuration structure, the controller can reschedule these pods that cannot be started"——**升级后起不来是预期行为，由控制器重新调度兜底**。
 
 > **本设计确立的规则应精确表述为**：*库自己拥有的共享区（`MAP_SHARED` 读写）布局不符 → 重建；只读消费控制面产出的区 → 保持报错，交给上层的重调度机制。* `sm_node` 属于前者。
 
@@ -865,12 +865,12 @@ static inline int64_t *bucket_of(int host_index) {
 
 | | 范式 A：`g_dynamic_config` + env（**本设计采用**） | 范式 B：`resource_data_t` 字段 + 控制面门控（`vmem_node` 采用） |
 |---|---|---|
-| 谁决定 | 容器内环境变量，`sm_controller_init` 里 env→struct 加载 | 控制面：`util.VMemoryNode` feature gate → `VMEMORY_NODE_ENABLED` env → `vgpu.config` 的 `vmem_node` 字段 |
+| 谁决定 | 容器内环境变量，`sm_controller_init` 里 env→struct 加载 | 控制面：`util.VirtualMemoryTracking` feature gate → `VMEMORY_NODE_ENABLED` env → `vgpu.config` 的 `vmem_node` 字段 |
 | 已有同类 | `CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*`、`CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR`（[dynamic_config_t](../library/include/hook.h#L269)） | `sm_watcher`、`vmem_node`（[resource_data_t](../library/include/hook.h#L214)） |
 | 落点数 | **0 处 Go 改动** | Go 侧至少 4 处：feature gate 定义、`vgpu_config.go` 组装、device plugin `Allocate`、DRA `GetClaimCommonContainerEdits` |
 | ABI 影响 | 无 | **改 `resource_data_t` = 改 `vgpu.config` 的跨语言 ABI** |
 
-**决定：采用范式 A。** 决定性理由是最后一行：`resource_data_t` 的尺寸被 [`CheckResourceDataSize`](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1107) 在 `Reschedule` 门控下校验，**加字段 = 老容器起不来、等控制器重调度**（§4.5.4 附表已论证这是该文件被刻意设计成的行为）。为一个**默认关闭的性能优化**付出一次 `vgpu.config` ABI 变更，代价与收益完全不成比例。
+**决定：采用范式 A。** 决定性理由是最后一行：`resource_data_t` 的尺寸被 [`CheckResourceDataSize`](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1107) 在 `AllocationFailureReschedule` 门控下校验，**加字段 = 老容器起不来、等控制器重调度**（§4.5.4 附表已论证这是该文件被刻意设计成的行为）。为一个**默认关闭的性能优化**付出一次 `vgpu.config` ABI 变更，代价与收益完全不成比例。
 
 **但要留一条明确的升级路径**：若将来需要让控制面统一开关（例如按 Pod 注解灰度），范式 B 的两个 env 注入点已经现成——[vnum_plugin.go#L823-824](../pkg/deviceplugin/vgpu/vnum_plugin.go#L823)（device plugin，feature gate 门控）与 [vgpu.go#L182](../pkg/kubeletplugin/vgpu.go#L182)（DRA，当前硬编码 `TRUE`）。届时**只需在这两处多注入一个 `CUDA_SM_SHARED_BUCKET=1`，库侧一行不改**——因为范式 A 读的就是环境变量。这正是选范式 A 的附带好处：它不排斥控制面接管，只是不强制。
 
@@ -932,7 +932,7 @@ static inline int64_t *bucket_of(int host_index) {
 4. **降级路径可用**（§5）：故意不挂 `/tmp/.sm_node` 目录启动 → 应打印 WARN 并退回私有桶，**容器正常运行**。
 5. **重建路径可用**（§4.5.4 / §10）：手工把 `sm_node.config` / `vmem_node.config` 的 magic 改坏 → 容器重启后应自动重建，**不得报错退出**。
 6. **`vmem_node` 跨语言 ABI 一致**（§10.3）：Go 侧 metrics 报出的显存用量与容器内实际一致（验证 `getVmemoryLockOffset` 没算错——**这一处算错不会报错，只会给出错的数**）。
-   > **前置条件（`main` 同步补充）**：必须显式打开 `util.VMemoryNode` feature gate（device plugin / device-monitor 均默认 `false`，Alpha），否则 `vmem_node` 区不会被创建，本条**看似通过实则未测**（§10.6）。
+   > **前置条件（`main` 同步补充）**：必须显式打开 `util.VirtualMemoryTracking` feature gate（device plugin / device-monitor 均默认 `false`，Alpha），否则 `vmem_node` 区不会被创建，本条**看似通过实则未测**（§10.6）。
 7. **`vmem_node` 硬失败不再致命**（§10.6）：故意让 `vmem_node` 目录不可写（或不挂载）并开启 gate 启动 → 应打印 WARNING 并关闭本进程的 vmem 记账，**容器正常运行**；改造前此路径会 `LOGGER(FATAL)` 杀死进程。这条专门验证外层 `FATAL` 已被降级。
 8. **fork 后共享桶不被清空**（§6.2）：容器内 fork 出子进程 → 父子应共享同一个 `cur_cuda_cores`（子进程发射会扣父进程看得见的令牌），且聚合 util 仍不超 `hard_core`。这条同时验证"没有人顺手把 `g_sm_node` 加进 fork 重置列表"。
 
@@ -987,7 +987,7 @@ static inline int64_t *bucket_of(int host_index) {
 - **[低] DRA 非 NRI 路径无清理钩子**（§4.5.3）：残留是良性的（自校正），故不补钩子；仅依赖库内守卫。若将来该路径出现非自校正的共享字段，此结论需重审。
 - **[低] 收益依赖真多进程**：单进程容器零收益（但默认关闭 → 零代价）。首要目标场景是 notebook（§1.3）。
 - **[高，`main` 同步新增] `vmem_node` 的 `FATAL` 是两层，只改一层等于没改**（§10.6）：`mmap_file_to_vmem_node` 内的 `return 1` 之外，`load_controller_configuration` 里还有一个 `LOGGER(FATAL, "mmap vmem nodes file failed")`。阶段 2 必须同时把外层降级为 WARNING + 关闭本进程记账，否则 `open`/`mmap` 硬失败仍会杀死容器。
-- **[中，`main` 同步新增] 验收时必须显式开启 `util.VMemoryNode` feature gate**（§10.6）：该 gate 默认 `false`，不开则 `vmem_node` 区根本不建，§7.2 第 6 条会**假通过**。
+- **[中，`main` 同步新增] 验收时必须显式开启 `util.VirtualMemoryTracking` feature gate**（§10.6）：该 gate 默认 `false`，不开则 `vmem_node` 区根本不建，§7.2 第 6 条会**假通过**。
 - **[中，`main` 同步新增] 别照抄 `vmem_node` 的三套回收机制**（§4.5.5）：库内现有 PID 存活回收、watcher 周期体检、`atexit`/信号清理，全部只对账本成立。`sm_node` 一条都不需要；尤其 `check_cleanup_vmem_nodes_by_device` 要拿每设备写记录锁，抄进来会直接违反"watcher 路径不引入锁"。**若将来给 `sm_node` 加任何按 PID 归属的字段，这三条结论同时失效，必须重审。**
 - **[中，`main` 同步新增] fork 处理器的语义惯性**（§6.2）：`loader_child_after_fork` 现在会释放 fork 继承的显存记账链表，`child_after_fork` 重置 `last_launch_ns`——两个处理器都在"丢弃继承状态"。**共享桶必须原样保留**（子进程作为新消费者参与聚合正是设计意图），需在代码注释里写死，防止后人顺手清掉。
 - **[高，实施期新增] fork 会共享采样锁的 open file description**（§4.3.1）：OFD 锁属于 description 而非进程，而 fork **共享** description。两个方向都坏：① 子进程重跑 `initialization()` 会重新拉起自己的 watcher（`child_after_fork` 重置 `g_init_set` 的本意就是如此），于是父子都以为自己拥有采样权；② **更隐蔽**——父进程（持有者）退出后，只要子进程还持有继承的 fd，description 引用计数不为 0，**内核就不释放锁**，所有待机者永远等不到，桶饿死。这直接打穿"内核会在持有者死亡时释放锁"这条核心论据。**修复**：`child_after_fork` 必须 `close()` 继承的 fd 并清空 `g_sm_sampling_mine`，`initialization()` 用**独立于区映射的守卫**重开（折进 `g_sm_node == NULL` 那个守卫会让所有 fork 出来的子进程永久没有锁 fd）。已由 `test_sm_node_shared` 的用例 [4] 固化——该用例**断言这个 hazard 真实存在**，防止后人把 `close()` 当冗余删掉。
@@ -1156,7 +1156,7 @@ if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {
 
 > **✅ 外层降级已实施**（§12.1 第 15 项，独立先行）。实施前做了两项必须的核查，结论都支持降级：
 >
-> 1. **`g_device_vmem == NULL` 是全库已支持的状态**：所有解引用点（`cleanup_vmem_nodes`、`check_cleanup_vmem_nodes*`、`add/sub_gpu_virt_memory`、`get_used_gpu_virt_memory` 等）**无一例外**都在 `if (g_device_vmem != NULL)` 之下；两个未自带守卫的 `rm_vmem_node_by_*` helper 的全部 3 个调用点也都在守卫内。更强的证据是：**`VMemoryNode` 特性门控默认 `false`**，所以 `NULL` 恰恰是今天绝大多数节点的**默认运行状态**——降级等于落回默认配置，不是落进未测路径。
+> 1. **`g_device_vmem == NULL` 是全库已支持的状态**：所有解引用点（`cleanup_vmem_nodes`、`check_cleanup_vmem_nodes*`、`add/sub_gpu_virt_memory`、`get_used_gpu_virt_memory` 等）**无一例外**都在 `if (g_device_vmem != NULL)` 之下；两个未自带守卫的 `rm_vmem_node_by_*` helper 的全部 3 个调用点也都在守卫内。更强的证据是：**`VirtualMemoryTracking` 特性门控默认 `false`**，所以 `NULL` 恰恰是今天绝大多数节点的**默认运行状态**——降级等于落回默认配置，不是落进未测路径。
 > 2. **显存限额不会因此失效**（这是降级前最该问的问题）。限额判据是 `used + vmem_used + request_size > total_memory`（[cuda_hook.c#L289](../library/src/cuda_hook.c#L289)），其中 `used` 来自 NVML、**与本共享区无关**；`vmem_node` 缺失只让 `vmem_used` 归零，而该项存在的意义仅是补上 **NVML 看不见的 oversold/UVA 分配**。⟹ 限额**依然强制执行**，只是不再计入观测不到的那部分。若这一条不成立（例如限额完全依赖该账本），`FATAL` 反而是更安全的选择，就不该降级。
 >
 > 实现要点：`ret` 显式清零（可选区缺失不算配置加载失败）；**不在降级分支里 `pthread_mutex_unlock`**（与被替换的 `FATAL` 不同，控制流现在会走到 `DONE:` 统一解锁，手工再解一次就是双重解锁）；`atexit`/`sigaction` 注册**移入成功分支**——那些处理器的职责是退出时归还本进程的账本记录，没有账本就无事可归还，凭空改动容器的信号处置是多余的副作用。
@@ -1168,7 +1168,7 @@ if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {
 **(2) `vmem_node` 区现在是 feature-gate 化的，不是无条件存在。** 门控链路：
 
 ```
-util.VMemoryNode feature gate (device-plugin/device-monitor 默认 false, Alpha)
+util.VirtualMemoryTracking feature gate (device-plugin/device-monitor 默认 false, Alpha)
   → VMEMORY_NODE_ENABLED env（device plugin 按 gate 注入；DRA 路径硬编码 TRUE）
     → vgpu.config 的 resource_data_t.vmem_node 字段
       → 库侧 `if (g_vgpu_config->vmem_node)` 才建区

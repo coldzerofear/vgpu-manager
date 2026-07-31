@@ -91,12 +91,11 @@ scheduler:
       serverBindPort: 3456
       # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
-      # Supported feature gates:
-      # - SerialBindNode (default: true)
-      # - SerialFilterNode (default: true)
-      # - GPUTopology
-      # Configure as a map of gate name -> bool, e.g. { GPUTopology: true }.
-      featureGates: {}
+      # Configure as a map of gate name -> bool, e.g. { TopologyAwareGPUAllocation: true }.
+      featureGates:
+        SerializedNodeFilter: true
+        SerializedNodeBind: true
+        TopologyAwareGPUAllocation: true
       # Certificate refresh interval in seconds (TLS only works when enabled)
       certRefreshInterval: 5
       # Scheduling stuck grace period, filtering the maximum delay time to the binding stage.
@@ -211,16 +210,16 @@ devicePlugin:
       openKernelModules: false
       # Strategy for starting MIG device plugin service (supported values: "none" | "single" | "mixed")
       migStrategy: mixed
-      # Supported feature gates:
-      # - CorePlugin
-      # - MemoryPlugin
-      # - Reschedule
-      # - GPUTopology
-      # - SMWatcher
-      # - VMemoryNode
-      # - ClientMode
-      # Configure as a map of gate name -> bool, e.g. { GPUTopology: true }.
-      featureGates: {}
+      # Configure as a map of gate name -> bool, e.g. { TopologyAwareGPUAllocation: true }.
+      featureGates:
+        GPUCoreResourcePlugin: false
+        GPUMemoryResourcePlugin: false
+        VirtualMemoryTracking: true
+        SharedSMUtilizationWatcher: true
+        DevicePluginClientMode: false
+        TopologyAwareGPUAllocation: true
+        AllocationFailureReschedule: false
+        HonorPreAllocatedDeviceIDs: true
       logLevel: 3
     # Device plugin container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
@@ -255,10 +254,12 @@ devicePlugin:
       # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
       # Supported feature gates:
-      # - SMWatcher
-      # - VMemoryNode
-      # Configure as a map of gate name -> bool, e.g. { SMWatcher: true }.
-      featureGates: {}
+      # - SharedSMUtilizationWatcher
+      # - VirtualMemoryTracking
+      # Configure as a map of gate name -> bool, e.g. { SharedSMUtilizationWatcher: true }.
+      featureGates:
+        SharedSMUtilizationWatcher: true
+        VirtualMemoryTracking: true
       # Enable RBAC authentication for metrics service
       enableRBAC: false
       # Certificate refresh interval in seconds (TLS only works when enabled)
