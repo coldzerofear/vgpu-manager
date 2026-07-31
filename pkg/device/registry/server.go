@@ -24,6 +24,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/api/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/selinux"
 	"github.com/opencontainers/cgroups"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -523,6 +524,13 @@ func (s *DeviceRegistryServerImpl) Start() error {
 	registryPath := filepath.Join(s.contPath, util.Registry)
 	_ = os.MkdirAll(registryPath, 0777)
 	_ = os.Chmod(registryPath, 0777)
+	// The registry directory is bind-mounted into every vGPU container in
+	// DevicePluginClientMode, and the socket below is what those containers
+	// connect to. Relabel the directory BEFORE the socket is created so the
+	// socket inherits the container type on creation; the explicit relabel after
+	// ListenUnix covers a directory left over from an earlier run with a stale
+	// label, where MkdirAll is a no-op. Best-effort -- see pkg/util/selinux.
+	selinux.Relabel(registryPath)
 	socketFile := filepath.Join(registryPath, SocketFile)
 	if err := syscall.Unlink(socketFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove existing socket: %v", err)
@@ -541,6 +549,7 @@ func (s *DeviceRegistryServerImpl) Start() error {
 		_ = listener.Close()
 		return fmt.Errorf("failed to set socket permissions: %v", err)
 	}
+	selinux.Relabel(socketFile)
 	s.listener = listener
 	// Hardening against a hijacked container flooding the shared socket:
 	//   - Creds captures the caller's SO_PEERCRED PID for authentication.

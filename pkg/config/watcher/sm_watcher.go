@@ -10,6 +10,7 @@ import (
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/selinux"
 	"k8s.io/klog/v2"
 )
 
@@ -180,6 +181,13 @@ func CreateDeviceUtilFile(filePath string) error {
 func PrepareDeviceUtilFile(filePath string) error {
 	dirPath := filepath.Dir(filePath)
 	_ = os.MkdirAll(dirPath, 0755)
+	// The watcher directory is bind-mounted (read-only) into every vGPU
+	// container so the in-container library can read the published samples, so
+	// it needs the container label like every other mounted path. It is created
+	// here rather than through util.EnsureDir, hence the explicit call.
+	// Best-effort; see pkg/util/selinux.
+	selinux.Relabel(dirPath)
+	defer selinux.Relabel(filePath)
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		if !os.IsNotExist(err) {

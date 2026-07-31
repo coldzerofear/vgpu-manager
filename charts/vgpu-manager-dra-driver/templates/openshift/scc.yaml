@@ -1,0 +1,90 @@
+{{- if and .Values.openshift.enabled .Values.kubeletPlugin.enabled -}}
+{{- /*
+See the equivalent file in the vgpu-manager chart for the reasoning. In short:
+OpenShift's default `restricted-v2` rejects the kubelet-plugin DaemonSet, which
+needs privileged containers, hostPath volumes and host PID; the webhook is an
+ordinary workload and deliberately gets nothing here; and GPU workloads need no
+SCC of their own because the directories mounted into them are created
+world-writable and relabelled to container_file_t.
+*/ -}}
+{{- /* The device-monitor sidecar shares the DaemonSet's ServiceAccount and is
+       therefore covered by the same grant; it needs no SCC of its own. */ -}}
+{{- $name := include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/component: {{ $name }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/description: >-
+      Grants the vgpu-manager DRA kubelet-plugin DaemonSet the host access it
+      needs to manage GPU device nodes, generate CDI specifications and publish
+      the shared vGPU state. Not intended for GPU workloads, which require no SCC
+      of their own.
+# Privileged: the plugin manages GPU device nodes, bind-mounts the preload
+# library into workloads, and (with PassthroughSupport) loads kernel modules.
+# Its init containers install files onto the host filesystem.
+allowPrivilegedContainer: true
+allowPrivilegeEscalation: true
+# hostPath: manager root, driver root, kubelet plugin/registrar directories, the
+# CDI root, cgroupfs, and -- when the matching feature gates are on -- the host
+# root, /lib/modules, sysfs, procfs and the NRI socket directory.
+allowHostDirVolumePlugin: true
+# hostPID: the plugin resolves container PIDs against host PIDs.
+allowHostPID: true
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPorts: false
+readOnlyRootFilesystem: false
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+fsGroup:
+  type: RunAsAny
+supplementalGroups:
+  type: RunAsAny
+allowedCapabilities: []
+defaultAddCapabilities: []
+requiredDropCapabilities: []
+volumes:
+  - configMap
+  - downwardAPI
+  - emptyDir
+  - hostPath
+  - projected
+  - secret
+users: []
+groups: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}:scc
+  labels:
+    app.kubernetes.io/component: {{ $name }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: [{{ $name | quote }}]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}:scc
+  labels:
+    app.kubernetes.io/component: {{ $name }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}:scc
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace | quote }}
+{{- end }}

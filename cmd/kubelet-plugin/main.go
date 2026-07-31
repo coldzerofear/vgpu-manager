@@ -30,6 +30,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/selinux"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/urfave/cli/v2"
 	"k8s.io/component-base/logs"
@@ -315,6 +316,17 @@ func RunPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error {
 		return err
 	case !info.IsDir():
 		return fmt.Errorf("path for cdi file generation is not a directory: '%v'", config.Flags.CdiRoot)
+	}
+
+	// Relabel what the init container laid down (libvgpu-control.so,
+	// ld.so.preload, the driver/ directory) so a confined workload can read it
+	// on an SELinux-enforcing node. Per-claim and per-partition directories are
+	// created later through util.EnsureDir, which relabels each one as it
+	// appears. No-op when SELinux is disabled, and best-effort throughout --
+	// see pkg/util/selinux.
+	if selinux.Enabled() {
+		klog.V(3).Infof("SELinux enabled, relabeling manager root %s", util.ManagerRootPath)
+		selinux.RelabelRecursive(util.ManagerRootPath)
 	}
 
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
