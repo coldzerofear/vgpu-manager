@@ -1929,7 +1929,11 @@ func (n *NodeInfo) GangAnchorComponent(gangName string, owner *v1.OwnerReference
 			continue
 		}
 		if gangName != "" {
-			if name, ok := util.PodHasGangName(p); !ok || name != gangName {
+			// Namespace-qualified on both sides: n.nodePods spans every
+			// namespace on the node, so a bare-name match would adopt an
+			// unrelated tenant's identically-named gang as a sibling and
+			// anchor this pod to its NVLink component.
+			if key, ok := util.PodGangKey(p); !ok || key != gangName {
 				continue
 			}
 		} else if owner != nil {

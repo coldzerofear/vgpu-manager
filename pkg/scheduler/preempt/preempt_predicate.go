@@ -264,7 +264,9 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 			}
 			var gangNames []string
 			for _, vp := range refined {
-				if gangName, ok := util.PodHasGangName(vp); ok {
+				// Qualified: victims can span namespaces, so a bare name in
+				// the event would not tell the reader whose gang was hit.
+				if gangName, ok := util.PodGangKey(vp); ok {
 					gangNames = append(gangNames, gangName)
 				}
 				meta.Pods = append(meta.Pods, &extenderv1.MetaPod{UID: string(vp.UID)})
@@ -713,9 +715,12 @@ func isProtectedFromPreemption(pod *corev1.Pod, gangName string) bool {
 	if pod.Spec.NodeName == "" && device.ShouldCountPodDeviceAllocation(pod) {
 		return true
 	}
-	// Avoid seizing resources from brother pods
+	// Avoid seizing resources from brother pods. Compared on the
+	// namespace-qualified key: victims are drawn from the whole cluster, so a
+	// bare-name match would shield an unrelated tenant's pod that happens to
+	// share a gang name, and preemption would come up short of victims.
 	if gangName != "" {
-		if name, _ := util.PodHasGangName(pod); gangName == name {
+		if key, _ := util.PodGangKey(pod); gangName == key {
 			return true
 		}
 	}

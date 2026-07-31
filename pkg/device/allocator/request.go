@@ -91,13 +91,20 @@ type AllocationRequest struct {
 	Topology       util.TopologyMode
 	TopologyStrict bool
 
-	// GangName is the gang/pod-group identifier this pod belongs to, parsed
-	// once via util.PodHasGangName (which understands coscheduling / Volcano /
-	// Koordinator / native dialects). Empty for non-gang pods. Node-independent
-	// (same for every candidate node), so it lives on the shared request rather
-	// than per-node context. Used by cross-pod NVLink allocation to resolve the
-	// component a gang's sibling pods already occupy on a node; non-gang pods
-	// (empty value) never enter the anchor path, so their behaviour is unchanged.
+	// GangName is the gang/pod-group identity this pod belongs to, parsed once
+	// via util.PodGangKey (which understands coscheduling / Volcano /
+	// Koordinator / native dialects). It is NAMESPACE-QUALIFIED
+	// ("<namespace>/<name>") because a PodGroup is a namespaced object, so the
+	// bare name does not identify a gang cluster-wide -- see PodGangKey. Every
+	// value it is compared against (the IndexerKeyPodGangName index, the pods
+	// GangAnchorComponent walks, preemption's brother-pod check) must be
+	// produced by the same helper.
+	//
+	// Empty for non-gang pods. Node-independent (same for every candidate node),
+	// so it lives on the shared request rather than per-node context. Used by
+	// cross-pod NVLink allocation to resolve the component a gang's sibling pods
+	// already occupy on a node; non-gang pods (empty value) never enter the
+	// anchor path, so their behaviour is unchanged.
 	GangName string
 
 	// CrossPodTopology opts this pod into cross-pod topology affinity (parsed
@@ -314,7 +321,7 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		req.NodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
 		req.DevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
 		req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
-		req.GangName, _ = util.PodHasGangName(pod)
+		req.GangName, _ = util.PodGangKey(pod)
 		if v, ok := util.HasAnnotation(pod, util.CrossPodTopologyAnnotation); ok {
 			req.CrossPodTopology = strings.EqualFold(v, "true")
 		}

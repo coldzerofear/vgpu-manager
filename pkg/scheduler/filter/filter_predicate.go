@@ -65,11 +65,14 @@ var (
 			}
 			return []string{"false"}, nil
 		},
+		// Indexed by the NAMESPACE-QUALIFIED gang key: this informer is
+		// cluster-wide, so indexing by bare name would return another
+		// namespace's identically-named gang as siblings of this one.
 		IndexerKeyPodGangName: func(obj interface{}) ([]string, error) {
 			var indexerValue []string
 			if pod, ok := obj.(*corev1.Pod); ok {
-				if name, ok := util.PodHasGangName(pod); ok {
-					indexerValue = []string{name}
+				if key, ok := util.PodGangKey(pod); ok {
+					indexerValue = []string{key}
 				}
 			}
 			return indexerValue, nil

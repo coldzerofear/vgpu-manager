@@ -18,6 +18,24 @@ import (
 // its pre-allocation, and a PodVGPUPreAllocAnnotation referencing the given
 // device IDs/UUIDs.
 func gangPod(uid, gang, node string, claim string) *corev1.Pod {
+	return gangPodNS(uid, testGangNS, gang, node, claim)
+}
+
+// testGangNS is the namespace every gangPod lives in unless stated otherwise.
+// Gang identity is namespace-qualified (util.PodGangKey), so the fixtures need
+// a real namespace for the keys to be meaningful.
+const testGangNS = "ns1"
+
+// gangKey mirrors util.PodGangKey for pods built by gangPod, so tests can keep
+// writing bare gang names in their tables.
+func gangKey(gang string) string {
+	if gang == "" {
+		return ""
+	}
+	return testGangNS + "/" + gang
+}
+
+func gangPodNS(uid, namespace, gang, node string, claim string) *corev1.Pod {
 	labels := map[string]string{}
 	if gang != "" {
 		labels[util.CoschedulingPodGroupLabel] = gang
@@ -30,6 +48,7 @@ func gangPod(uid, gang, node string, claim string) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			UID:         types.UID(uid),
 			Name:        uid,
+			Namespace:   namespace,
 			Labels:      labels,
 			Annotations: anns,
 		},
@@ -107,6 +126,18 @@ func Test_GangAnchorComponent(t *testing.T) {
 			wantOK:   false,
 		},
 		{
+			// A PodGroup is namespaced, so two tenants may each own a gang
+			// called "gangA". nodePods spans every namespace on the node, so
+			// matching on the bare name would adopt the other tenant's pod as
+			// a sibling and anchor this gang to whichever component that pod
+			// happens to sit on.
+			name:     "same gang name in another namespace is not a sibling",
+			gang:     "gangA",
+			pods:     []*corev1.Pod{gangPodNS("sib", "other-ns", "gangA", "node1", claimText("gpu2"))},
+			wantRoot: -1,
+			wantOK:   false,
+		},
+		{
 			name:     "empty gang name never anchors",
 			gang:     "",
 			pods:     []*corev1.Pod{gangPod("sib", "gangA", "node1", claimText("gpu2"))},
@@ -141,7 +172,7 @@ func Test_GangAnchorComponent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			n := twoComponentNode(tc.pods...)
-			root, ok := n.GangAnchorComponent(tc.gang, nil, sets.New(self))
+			root, ok := n.GangAnchorComponent(gangKey(tc.gang), nil, sets.New(self))
 			if ok != tc.wantOK || root != tc.wantRoot {
 				t.Fatalf("GangAnchorComponent(%q) = (%d, %v), want (%d, %v)",
 					tc.gang, root, ok, tc.wantRoot, tc.wantOK)
@@ -181,7 +212,7 @@ func Test_GangAnchorComponent_ControllerOwner(t *testing.T) {
 	}
 	// gangName takes precedence over owner: a controller-only sibling (no gang
 	// label) is NOT matched when a gangName is given.
-	if root, ok := n.GangAnchorComponent("gangA", ownerA, self); ok || root != -1 {
+	if root, ok := n.GangAnchorComponent(gangKey("gangA"), ownerA, self); ok || root != -1 {
 		t.Fatalf("gangName set, controller-only sibling: (%d,%v), want (-1,false)", root, ok)
 	}
 }
@@ -200,7 +231,7 @@ func Test_GangAnchorComponent_TieBreakByOrdinal(t *testing.T) {
 			gangPod("sibB", "gangA", "node1", claimText("gpuY")), // 1 vote → root 0 (ord 1)
 		},
 	}
-	root, ok := n.GangAnchorComponent("gangA", nil, sets.New(types.UID("self")))
+	root, ok := n.GangAnchorComponent(gangKey("gangA"), nil, sets.New(types.UID("self")))
 	if !ok || root != 5 {
 		t.Fatalf("tie-break = root %d (ok=%v), want root 5 (lower ordinal), not lower root 0", root, ok)
 	}
@@ -210,7 +241,7 @@ func Test_GangAnchorComponent_UnknownUUIDIgnored(t *testing.T) {
 	// A sibling pre-allocated a card the node doesn't know about (UUID not in
 	// nvlinkComponentByUUID) contributes no vote and must not anchor.
 	n := twoComponentNode(gangPod("sib", "gangA", "node1", claimText("ghost")))
-	if root, ok := n.GangAnchorComponent("gangA", nil, sets.New(types.UID("self"))); ok || root != -1 {
+	if root, ok := n.GangAnchorComponent(gangKey("gangA"), nil, sets.New(types.UID("self"))); ok || root != -1 {
 		t.Fatalf("unknown-uuid sibling: got (%d, %v), want (-1, false)", root, ok)
 	}
 }

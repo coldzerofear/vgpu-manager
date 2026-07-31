@@ -713,6 +713,30 @@ func PodHasGangName(pod *corev1.Pod) (string, bool) {
 	return "", false
 }
 
+// PodGangKey returns the pod's gang identity as a namespace-qualified
+// "<namespace>/<name>" key, and whether the pod belongs to a gang at all.
+//
+// Use this -- not PodHasGangName -- whenever the value is used to decide
+// SAMENESS between two pods (indexing siblings, comparing a candidate against
+// req.GangName, protecting brother pods from preemption). Every mechanism
+// PodHasGangName understands names a PodGroup that is a NAMESPACED object:
+// coscheduling's label, Volcano's / Koordinator's / kube-batch's annotation,
+// the native spec.schedulingGroup field, and a PodGroup ownerReference all
+// resolve within the pod's own namespace. The bare name is therefore not a
+// cluster-unique identity, and matching on it makes pods of two unrelated
+// gangs that merely share a name -- "training", or a workload name repeated
+// per tenant, which is the norm in multi-tenant clusters -- look like siblings
+// of each other.
+//
+// PodHasGangName remains the right call for display: it is what the user wrote.
+func PodGangKey(pod *corev1.Pod) (string, bool) {
+	name, ok := PodHasGangName(pod)
+	if !ok {
+		return "", false
+	}
+	return pod.Namespace + "/" + name, true
+}
+
 func SafeDiv(a, b float64) float64 {
 	if b == 0 {
 		return 0

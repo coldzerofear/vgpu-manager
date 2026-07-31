@@ -381,6 +381,53 @@ func Test_PodIsGangMember(t *testing.T) {
 	}
 }
 
+func Test_PodGangKey(t *testing.T) {
+	gangPodIn := func(namespace, gang string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: namespace,
+				Labels:    map[string]string{CoschedulingPodGroupLabel: gang},
+			},
+		}
+	}
+	plainPod := func() *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "team-a",
+				Labels:    map[string]string{"app": "frontend"},
+			},
+		}
+	}
+
+	t.Run("qualifies the gang name with the namespace", func(t *testing.T) {
+		key, ok := PodGangKey(gangPodIn("team-a", "training"))
+		assert.True(t, ok)
+		assert.Equal(t, "team-a/training", key)
+	})
+
+	t.Run("same gang name in two namespaces yields different keys", func(t *testing.T) {
+		// The whole point: a PodGroup is namespaced, so the bare name is not a
+		// cluster-unique identity and must never be used to decide sameness.
+		a, okA := PodGangKey(gangPodIn("team-a", "training"))
+		b, okB := PodGangKey(gangPodIn("team-b", "training"))
+		assert.True(t, okA)
+		assert.True(t, okB)
+		assert.NotEqual(t, a, b)
+	})
+
+	t.Run("non-gang pod reports no key", func(t *testing.T) {
+		key, ok := PodGangKey(plainPod())
+		assert.False(t, ok)
+		assert.Empty(t, key)
+	})
+
+	t.Run("nil pod reports no key", func(t *testing.T) {
+		key, ok := PodGangKey(nil)
+		assert.False(t, ok)
+		assert.Empty(t, key)
+	})
+}
+
 func assertDNS1123Compatibility(t *testing.T, name string) {
 	dns1123FormatRegexp := regexp.MustCompile("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 	assert.True(t, len(name) <= DNS1123NameMaximumLength, "Name length needs to be shorter than %d", DNS1123NameMaximumLength)
