@@ -27,6 +27,7 @@ import (
 	v1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	listerv1 "k8s.io/client-go/listers/core/v1"
 	resourcev1 "k8s.io/client-go/listers/resource/v1"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
@@ -49,6 +50,7 @@ import (
 type draGPUCollector struct {
 	*nvidia.DeviceLib
 	nodeName    string
+	nodeLister  listerv1.NodeLister
 	podLister   client.PodLister
 	sliceLister resourcev1.ResourceSliceLister
 	claimLister resourcev1.ResourceClaimLister
@@ -57,7 +59,7 @@ type draGPUCollector struct {
 }
 
 func NewDRAGPUCollector(
-	config *node.NodeConfigSpec, podLister client.PodLister,
+	config *node.NodeConfigSpec, nodeLister listerv1.NodeLister, podLister client.PodLister,
 	sliceLister resourcev1.ResourceSliceLister, claimLister resourcev1.ResourceClaimLister,
 	featureGate featuregate.FeatureGate,
 ) (prometheus.Collector, error) {
@@ -72,6 +74,7 @@ func NewDRAGPUCollector(
 	return &draGPUCollector{
 		DeviceLib:   deviceLib,
 		nodeName:    config.GetNodeName(),
+		nodeLister:  nodeLister,
 		podLister:   podLister,
 		sliceLister: sliceLister,
 		claimLister: claimLister,
@@ -186,11 +189,8 @@ func CollectBasedOnNvml(
 			klog.Errorf("error getting NVML driver version: %s", nvml.ErrorString(ret))
 			nvmlVersion = "N/A"
 		}
-		ch <- prometheus.MustNewConstMetric(
-			nodeGPUDriverVersionInfo,
-			prometheus.GaugeValue,
-			float64(1),
-			nodeName, driverVersion, cudaVersion, nvmlVersion)
+		ch <- prometheus.MustNewConstMetric(nodeGPUDriverVersionInfo,
+			prometheus.GaugeValue, float64(1), nodeName, driverVersion, cudaVersion, nvmlVersion)
 	}()
 
 	if featureGate.Enabled(util.SMWatcher) {
@@ -222,27 +222,18 @@ func CollectBasedOnNvml(
 			minorNumber, migEnabled, gpuInfo.CudaComputeCapability, numaNode,
 		}
 
-		ch <- prometheus.MustNewConstMetric(
-			physicalGPUTotalMemory,
-			prometheus.GaugeValue,
-			float64(gpuInfo.Memory.Total),
-			devHealthLvs[gpuInfo.UUID]...)
+		ch <- prometheus.MustNewConstMetric(physicalGPUTotalMemory,
+			prometheus.GaugeValue, float64(gpuInfo.Memory.Total), devHealthLvs[gpuInfo.UUID]...)
 
-		ch <- prometheus.MustNewConstMetric(
-			physicalGPUMemoryUsage,
-			prometheus.GaugeValue,
-			float64(gpuInfo.Memory.Used),
-			devHealthLvs[gpuInfo.UUID]...)
+		ch <- prometheus.MustNewConstMetric(physicalGPUMemoryUsage,
+			prometheus.GaugeValue, float64(gpuInfo.Memory.Used), devHealthLvs[gpuInfo.UUID]...)
 
 		memoryUtilRate := int64(0)
 		if gpuInfo.Memory.Total > 0 {
 			memoryUtilRate = int64(float64(gpuInfo.Memory.Used) / float64(gpuInfo.Memory.Total) * 100)
 		}
-		ch <- prometheus.MustNewConstMetric(
-			physicalGPUMemoryUtilRate,
-			prometheus.GaugeValue,
-			float64(memoryUtilRate),
-			devHealthLvs[gpuInfo.UUID]...)
+		ch <- prometheus.MustNewConstMetric(physicalGPUMemoryUtilRate,
+			prometheus.GaugeValue, float64(memoryUtilRate), devHealthLvs[gpuInfo.UUID]...)
 
 		migInfos, err := lib.GetMigInfos(gpuInfo)
 		if err != nil {
@@ -262,11 +253,8 @@ func CollectBasedOnNvml(
 		if rt != nvml.SUCCESS {
 			klog.Errorf("error getting utilization rates for device %d: %s", index, nvml.ErrorString(rt))
 		} else {
-			ch <- prometheus.MustNewConstMetric(
-				physicalGPUCoreUtilRate,
-				prometheus.GaugeValue,
-				float64(deviceUtilRates.Gpu),
-				devHealthLvs[gpuInfo.UUID]...)
+			ch <- prometheus.MustNewConstMetric(physicalGPUCoreUtilRate,
+				prometheus.GaugeValue, float64(deviceUtilRates.Gpu), devHealthLvs[gpuInfo.UUID]...)
 		}
 
 		CollectorDeviceProcesses(utilAdapter, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
@@ -478,7 +466,6 @@ type claimAllocation struct {
 func (c draGPUCollector) resolvePodAllocations(
 	pod *corev1.Pod, devInfoNameMap map[string]*DRADeviceInfo,
 ) []draContainerAlloc {
-	ctx := context.Background()
 	// Claims are resolved at most once per pod claim name; a nil entry is a
 	// remembered negative result.
 	claimCache := map[string]*claimAllocation{}
@@ -491,8 +478,8 @@ func (c draGPUCollector) resolvePodAllocations(
 
 		actualName, ok, err := claimresolve.ResolveActualClaimNameForPodClaim(pod, podClaimName)
 		if err != nil {
-			klog.V(4).ErrorS(err, "resolve actual claim name failed",
-				"pod", klog.KObj(pod), "podClaim", podClaimName)
+			klog.V(4).ErrorS(err, "resolve actual claim name failed", "pod",
+				klog.KObj(pod), "podClaim", podClaimName)
 			return nil
 		}
 		if !ok {
@@ -501,8 +488,8 @@ func (c draGPUCollector) resolvePodAllocations(
 		}
 		claim, err := c.claimLister.ResourceClaims(pod.Namespace).Get(actualName)
 		if err != nil {
-			klog.V(4).ErrorS(err, "get resourceClaim failed",
-				"resourceClaim", fmt.Sprintf("%s/%s", pod.Namespace, actualName))
+			klog.V(4).ErrorS(err, "get resourceClaim failed", "resourceClaim",
+				fmt.Sprintf("%s/%s", pod.Namespace, actualName))
 			return nil
 		}
 		if claim.Status.Allocation == nil {
@@ -510,14 +497,12 @@ func (c draGPUCollector) resolvePodAllocations(
 		}
 		// Only count a claim this pod actually holds. A claim can outlive one
 		// consumer and be reserved for another pod entirely.
-		if !slices.ContainsFunc(claim.Status.ReservedFor, func(r v1.ResourceClaimConsumerReference) bool {
-			return r.UID == pod.GetUID()
-		}) {
+		if !slices.ContainsFunc(claim.Status.ReservedFor, func(r v1.ResourceClaimConsumerReference) bool { return r.UID == pod.GetUID() }) {
 			return nil
 		}
 
 		// Maps "request" and "request/subrequest" alike onto the main request.
-		index := claimresolve.BuildAllocatedResultIndex(ctx, claim, nil, nil)
+		index := claimresolve.BuildAllocatedResultIndex(context.Background(), claim, nil, nil)
 		allocation := &claimAllocation{
 			resultsByMainRequest: map[string][]v1.DeviceRequestAllocationResult{},
 			allocatedRequests:    sets.New[string](),
@@ -528,12 +513,11 @@ func (c draGPUCollector) resolvePodAllocations(
 			}
 			meta, ok := index[result.Request]
 			if !ok {
-				klog.V(5).InfoS("allocation result has no matching request in claim spec",
-					"resourceClaim", fmt.Sprintf("%s/%s", claim.Namespace, claim.Name), "request", result.Request)
+				klog.V(5).InfoS("allocation result has no matching request in claim spec", "resourceClaim",
+					fmt.Sprintf("%s/%s", claim.Namespace, claim.Name), "request", result.Request)
 				continue
 			}
-			allocation.resultsByMainRequest[meta.MainRequest] =
-				append(allocation.resultsByMainRequest[meta.MainRequest], result)
+			allocation.resultsByMainRequest[meta.MainRequest] = append(allocation.resultsByMainRequest[meta.MainRequest], result)
 			allocation.allocatedRequests.Insert(meta.MainRequest)
 		}
 		claimCache[podClaimName] = allocation
@@ -544,8 +528,7 @@ func (c draGPUCollector) resolvePodAllocations(
 	// appends it, skipping duplicates. A container can reach the same result
 	// through several claimRefs, and the extended-resource path below can
 	// re-surface a result the regular path already produced.
-	appendResult := func(dst []draAllocResult, seen sets.Set[string],
-		result v1.DeviceRequestAllocationResult) []draAllocResult {
+	appendResult := func(dst []draAllocResult, seen sets.Set[string], result v1.DeviceRequestAllocationResult) []draAllocResult {
 		devInfo, ok := devInfoNameMap[result.Device]
 		if !ok {
 			// Not a device we report on (MIG, VFIO, or a slice/NVML mismatch).
@@ -590,8 +573,7 @@ func (c draGPUCollector) resolvePodAllocations(
 			if allocation == nil {
 				continue
 			}
-			for _, mainRequest := range claimresolve.ResolveActualAllocatedRequestsForClaimRef(
-				claimRef, allocation.allocatedRequests) {
+			for _, mainRequest := range claimresolve.ResolveActualAllocatedRequestsForClaimRef(claimRef, allocation.allocatedRequests) {
 				for _, result := range allocation.resultsByMainRequest[mainRequest] {
 					results = appendResult(results, seen, result)
 				}
@@ -615,12 +597,10 @@ func (c draGPUCollector) resolvePodAllocations(
 		claim, err := c.claimLister.ResourceClaims(pod.Namespace).Get(status.ResourceClaimName)
 		switch {
 		case err != nil:
-			klog.V(4).ErrorS(err, "get extended resourceClaim failed",
-				"resourceClaim", fmt.Sprintf("%s/%s", pod.Namespace, status.ResourceClaimName))
+			klog.V(4).ErrorS(err, "get extended resourceClaim failed", "resourceClaim",
+				fmt.Sprintf("%s/%s", pod.Namespace, status.ResourceClaimName))
 		case claim.Status.Allocation == nil:
-		case !slices.ContainsFunc(claim.Status.ReservedFor, func(r v1.ResourceClaimConsumerReference) bool {
-			return r.UID == pod.GetUID()
-		}):
+		case !slices.ContainsFunc(claim.Status.ReservedFor, func(r v1.ResourceClaimConsumerReference) bool { return r.UID == pod.GetUID() }):
 		default:
 			for _, mapping := range status.RequestMappings {
 				idx, ok := indexByName[mapping.ContainerName]
@@ -631,8 +611,7 @@ func (c draGPUCollector) resolvePodAllocations(
 					if result.Driver != util.DRADriverName || result.Request != mapping.RequestName {
 						continue
 					}
-					allocs[idx].results = appendResult(
-						allocs[idx].results, seenByContainer[mapping.ContainerName], result)
+					allocs[idx].results = appendResult(allocs[idx].results, seenByContainer[mapping.ContainerName], result)
 				}
 			}
 		}
@@ -655,9 +634,15 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
 	)
 
-	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, devTypeMap, devIndexMap,
-		devHealthMap, devHealthLvs, devMemInfoMap, devProcInfoMap, devProcUtilMap,
-		devMigInfosMap, c.utilAdapter, c.featureGate)
+	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, devTypeMap, devIndexMap, devHealthMap, devHealthLvs,
+		devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, c.utilAdapter, c.featureGate)
+
+	// Get current node.
+	node, err := c.nodeLister.Get(c.nodeName)
+	if err != nil {
+		klog.Errorf("node lister get node <%s> error: %v", c.nodeName, err)
+		return
+	}
 
 	// Retrieve the vGPU resourceSlices of the current node.
 	resourceSlices, err := c.listManagerResourceSlices()
@@ -745,23 +730,14 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			continue
 		}
 		ch <- prometheus.MustNewConstMetric(
-			physicalGPUHealthStatus,
-			prometheus.GaugeValue,
-			float64(status),
-			labelValues...)
+			physicalGPUHealthStatus, prometheus.GaugeValue, float64(status), labelValues...)
 	}
+
 	ch <- prometheus.MustNewConstMetric(
-		nodeVGPUTotalMemory,
-		prometheus.GaugeValue,
-		float64(nodeVGPUTotalMemBytes),
-		c.nodeName,
-	)
+		nodeVGPUTotalMemory, prometheus.GaugeValue, float64(nodeVGPUTotalMemBytes), c.nodeName)
+
 	ch <- prometheus.MustNewConstMetric(
-		nodeVGPUTotalPhysicalMemory,
-		prometheus.GaugeValue,
-		float64(nodeGPUTotalMemBytes),
-		c.nodeName,
-	)
+		nodeVGPUTotalPhysicalMemory, prometheus.GaugeValue, float64(nodeGPUTotalMemBytes), c.nodeName)
 
 	// The ratios are per-device attributes, but the node-level config metric
 	// carries a single pair. They are derived from one driver-wide config, so
@@ -773,11 +749,9 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		first := devInfoNameMap[names[0]]
 		coreRatio, memoryRatio = first.coreRatio, first.memoryRatio
 		for _, name := range names[1:] {
-			if devInfoNameMap[name].coreRatio != coreRatio ||
-				devInfoNameMap[name].memoryRatio != memoryRatio {
+			if devInfoNameMap[name].coreRatio != coreRatio || devInfoNameMap[name].memoryRatio != memoryRatio {
 				klog.V(4).InfoS("devices announce different core/memory ratios; "+
-					"node_gpu_device_configuration_info reports the lowest-named device",
-					"device", names[0])
+					"node_gpu_device_configuration_info reports the lowest-named device", "device", names[0])
 				break
 			}
 		}
@@ -786,9 +760,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	// expressed per-request through consumable capacity rather than by a
 	// node-wide split count.
 	ch <- prometheus.MustNewConstMetric(
-		nodeGPUConfigInfo,
-		prometheus.GaugeValue,
-		float64(1), c.nodeName, "",
+		nodeGPUConfigInfo, prometheus.GaugeValue, float64(1), c.nodeName, "",
 		strconv.FormatFloat(float64(coreRatio)/float64(util.HundredCore), 'f', 2, 64),
 		strconv.FormatFloat(float64(memoryRatio)/float64(util.HundredCore), 'f', 2, 64),
 		"")
@@ -806,20 +778,17 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	peakSharedContainersMap := make(map[string]int)
 	currentSharedContainersMap := make(map[string]int)
 
-	for _, pod := range pods {
+	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
 		// Unlike the device-plugin path there is no pre-bind reservation to
 		// honour: a DRA allocation only exists once the scheduler has written
 		// it into the claim, and the ResourceSlice it points at is node-local.
 		// So the bound node is the authority.
 		if pod.Spec.NodeName != c.nodeName {
-			continue
-		}
-		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-			continue
+			return
 		}
 		// Only pods that actually go through DRA are ours to account for.
-		if !util.HasDRARequests(pod) {
-			continue
+		if !util.HasDRARequests(pod) && !util.HasExtendedResource(pod) {
+			return
 		}
 
 		containerAllocs := c.resolvePodAllocations(pod, devInfoNameMap)
@@ -922,24 +891,17 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				ContainerDeviceProcUtilEach(devProcUtilMap[deviceUUID], containerPids,
 					func(sample nvml.ProcessUtilizationSample) {
 						smUtil := util.GetValidValue(sample.SmUtil)
-						codecUtil := util.GetValidValue(sample.EncUtil) +
-							util.GetValidValue(sample.DecUtil)
+						codecUtil := util.GetValidValue(sample.EncUtil) + util.GetValidValue(sample.DecUtil)
 						codecUtil = util.CodecNormalize(codecUtil)
 						deviceSMUtil += smUtil + codecUtil
 					})
 
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUMemoryLimit,
-					prometheus.GaugeValue,
-					float64(deviceMemLimit),
-					pod.Namespace, pod.Name, alloc.name,
-					vDevIndex, deviceUUID, c.nodeName)
+					containerVGPUMemoryLimit, prometheus.GaugeValue, float64(deviceMemLimit),
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUPhysicalMemoryLimit,
-					prometheus.GaugeValue,
-					float64(realMemBytes),
-					pod.Namespace, pod.Name, alloc.name,
-					vDevIndex, deviceUUID, c.nodeName)
+					containerVGPUPhysicalMemoryLimit, prometheus.GaugeValue, float64(realMemBytes),
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
 
 				// TODO Unable to track virtual memory usage temporarily.
 				// The device-plugin path reads the per-container vMemory ledger
@@ -952,17 +914,11 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				}
 
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUMemoryUsage,
-					prometheus.GaugeValue,
-					float64(deviceMemUsage+deviceVMemUsage),
-					pod.Namespace, pod.Name, alloc.name,
-					vDevIndex, deviceUUID, c.nodeName)
+					containerVGPUMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage+deviceVMemUsage),
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUPhysicalMemoryUsage,
-					prometheus.GaugeValue,
-					float64(deviceMemUsage),
-					pod.Namespace, pod.Name, alloc.name,
-					vDevIndex, deviceUUID, c.nodeName)
+					containerVGPUPhysicalMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage),
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
 
 				deviceMemUsage += deviceVMemUsage
 				memoryUtilRate := int64(0)
@@ -973,22 +929,16 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 						memoryUtilRate = int64(float64(deviceMemUsage) / float64(deviceMemLimit) * 100)
 					}
 				}
+
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUMemoryUtilRate,
-					prometheus.GaugeValue,
-					float64(memoryUtilRate),
-					pod.Namespace, pod.Name, alloc.name,
-					vDevIndex, deviceUUID, c.nodeName)
-				ch <- prometheus.MustNewConstMetric(
-					containerVGPUCoreUtilRate,
-					prometheus.GaugeValue,
-					float64(util.GetPercentageValue(deviceSMUtil)),
-					pod.Namespace, pod.Name, alloc.name,
-					vDevIndex, deviceUUID, c.nodeName)
+					containerVGPUMemoryUtilRate, prometheus.GaugeValue, float64(memoryUtilRate),
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
+				ch <- prometheus.MustNewConstMetric(containerVGPUCoreUtilRate,
+					prometheus.GaugeValue, float64(util.GetPercentageValue(deviceSMUtil)),
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
 			}
 		}
-	}
-
+	})
 	nodeGpuAssignedMemoryBytes := uint64(0)
 	for uuid, devInfo := range devInfoUuidMap {
 		// Prefer the real VRAM size NVML reports; fall back to undoing the
@@ -1002,69 +952,40 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		deviceIndex := strconv.Itoa(devIndexMap[uuid])
-		ch <- prometheus.MustNewConstMetric(
-			vGPUTotalMemory,
-			prometheus.GaugeValue,
-			float64(devInfo.memory), c.nodeName,
-			deviceIndex, uuid, devTypeMap[uuid])
-		ch <- prometheus.MustNewConstMetric(
-			vGPUTotalPhysicalMemory,
-			prometheus.GaugeValue,
-			float64(totalPhyMemoryBytes), c.nodeName,
-			deviceIndex, uuid, devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(vGPUTotalMemory,
+			prometheus.GaugeValue, float64(devInfo.memory), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+
+		ch <- prometheus.MustNewConstMetric(vGPUTotalPhysicalMemory,
+			prometheus.GaugeValue, float64(totalPhyMemoryBytes), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
 
 		assignedPhyMemoryBytes := vGpuAssignedMemMap[uuid]
 		if memoryRatio > 1 {
 			assignedPhyMemoryBytes = uint64(float64(assignedPhyMemoryBytes) / memoryRatio)
 		}
 		nodeGpuAssignedMemoryBytes += assignedPhyMemoryBytes
-		ch <- prometheus.MustNewConstMetric(
-			vGPUAssignedMemory,
-			prometheus.GaugeValue,
-			float64(vGpuAssignedMemMap[uuid]), c.nodeName,
-			deviceIndex, uuid, devTypeMap[uuid])
-		ch <- prometheus.MustNewConstMetric(
-			vGPUAssignedPhysicalMemory,
-			prometheus.GaugeValue,
-			float64(assignedPhyMemoryBytes), c.nodeName,
-			deviceIndex, uuid, devTypeMap[uuid])
-
-		ch <- prometheus.MustNewConstMetric(
-			vGPUTotalCoresNumber,
-			prometheus.GaugeValue,
-			float64(devInfo.cores),
-			c.nodeName, deviceIndex, uuid,
-			devTypeMap[uuid])
-		ch <- prometheus.MustNewConstMetric(
-			vGPUAssignedCoresNumber,
-			prometheus.GaugeValue,
-			float64(vGpuAssignedCoresMap[uuid]),
-			c.nodeName, deviceIndex, uuid,
-			devTypeMap[uuid])
-		ch <- prometheus.MustNewConstMetric(
-			vGPUPeakSharedContainersNumber,
-			prometheus.GaugeValue,
-			float64(peakSharedContainersMap[uuid]),
-			c.nodeName, deviceIndex, uuid,
-			devTypeMap[uuid])
-		ch <- prometheus.MustNewConstMetric(
-			vGPUCurrentSharedContainersNumber,
-			prometheus.GaugeValue,
-			float64(currentSharedContainersMap[uuid]),
-			c.nodeName, deviceIndex, uuid,
-			devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(vGPUAssignedMemory,
+			prometheus.GaugeValue, float64(vGpuAssignedMemMap[uuid]),
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(vGPUAssignedPhysicalMemory,
+			prometheus.GaugeValue, float64(assignedPhyMemoryBytes),
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(vGPUTotalCoresNumber,
+			prometheus.GaugeValue, float64(devInfo.cores),
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(vGPUAssignedCoresNumber,
+			prometheus.GaugeValue, float64(vGpuAssignedCoresMap[uuid]),
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(vGPUPeakSharedContainersNumber,
+			prometheus.GaugeValue, float64(peakSharedContainersMap[uuid]),
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+		ch <- prometheus.MustNewConstMetric(vGPUCurrentSharedContainersNumber,
+			prometheus.GaugeValue, float64(currentSharedContainersMap[uuid]),
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
 	}
 
-	ch <- prometheus.MustNewConstMetric(
-		nodeVGPUAssignedMemory,
-		prometheus.GaugeValue,
-		float64(nodeVGpuAssignedMemBytes),
-		c.nodeName,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		nodeVGPUAssignedPhysicalMemory,
-		prometheus.GaugeValue,
-		float64(nodeGpuAssignedMemoryBytes),
-		c.nodeName,
-	)
+	ch <- prometheus.MustNewConstMetric(nodeVGPUAssignedMemory,
+		prometheus.GaugeValue, float64(nodeVGpuAssignedMemBytes), c.nodeName)
+
+	ch <- prometheus.MustNewConstMetric(nodeVGPUAssignedPhysicalMemory,
+		prometheus.GaugeValue, float64(nodeGpuAssignedMemoryBytes), c.nodeName)
 }

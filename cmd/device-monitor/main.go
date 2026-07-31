@@ -141,13 +141,19 @@ func runApp(opt *options.Options) (exitCode int) {
 	option := informers.WithTransform(cache.TransformStripManagedFields())
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
 
+	nodeInformer, err := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
+	if err != nil {
+		klog.Errorf("GetNodeInformer failed: %v", err)
+		return exitCode
+	}
+
 	opts = append(opts, server.WithReadyChecker(func(req *http.Request) error {
 		if !util.InformerFactoryHasSynced(factory, req.Context()) {
 			return errors.New("informer has not completed all synchronization")
 		}
 		return nil
 	}))
-
+	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
 	containerListerStart := func(time.Duration, <-chan struct{}) {}
 	if opt.EnableDRAMonitor {
 		klog.Infoln("Initialize DRA driver path monitoring")
@@ -164,7 +170,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		podLister := client.NewPodLister(podInformer.GetIndexer())
 		sliceLister := resourcev1.NewResourceSliceLister(sliceInformer.GetIndexer())
 		claimLister := factory.Resource().V1().ResourceClaims().Lister()
-		draCollector, err := collector.NewDRAGPUCollector(nodeConfig, podLister, sliceLister, claimLister, opt.FeatureGate)
+		draCollector, err := collector.NewDRAGPUCollector(nodeConfig, nodeLister, podLister, sliceLister, claimLister, opt.FeatureGate)
 		if err != nil {
 			klog.Errorf("Create dra gpu collector failed: %v", err)
 			return exitCode
@@ -172,18 +178,12 @@ func runApp(opt *options.Options) (exitCode int) {
 		opts = append(opts, server.WithCollectors(draCollector))
 	} else {
 		klog.Infoln("Initialize device plugin path monitoring")
-		nodeInformer, err := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
-		if err != nil {
-			klog.Errorf("GetNodeInformer failed: %v", err)
-			return exitCode
-		}
 		podInformer, err := metrics.GetDevicePluginPodInformer(factory, nodeConfig.GetNodeName())
 		if err != nil {
 			klog.Errorf("GetDevicePluginPodInformer failed: %v", err)
 			return exitCode
 		}
 		podLister := client.NewPodLister(podInformer.GetIndexer())
-		nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
 		containerLister := lister.NewContainerLister(util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
 		nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig, nodeLister, podLister, containerLister, opt.FeatureGate)
 		if err != nil {
