@@ -96,7 +96,10 @@ kubeletPlugin:
   # Conditionally mask /proc/driver/nvidia/params to prevent the plugin from recreating
   # missing GPU device nodes (needed under nvkind). Set to "true" to enable.
   maskNvidiaDriverParams: ""
-  # Prometheus Operator ServiceMonitor. Only created when metrics.enabled is true and the
+  # Prometheus Operator ServiceMonitor covering both scrape targets below: the
+  # kubelet-plugin's own metrics endpoint (containers.plugin.commands.metricsPort)
+  # and the device-monitor sidecar (containers.monitor). Created only when this is
+  # true, at least one of those two targets is enabled, and the
   # monitoring.coreos.com/v1 ServiceMonitor CRD is present in the cluster.
   serviceMonitor:
     enabled: true
@@ -155,10 +158,11 @@ kubeletPlugin:
 #          cpu: 2000m
 #          memory: 2Gi
     # Per-container GPU metrics exporter for the DRA path (device-monitor).
-    # This is a different exporter from `metrics` above: `metrics` exposes the
-    # kubelet-plugin's own operational metrics, while this one exports the
+    # A different exporter from plugin.commands.metricsPort above: that one exposes
+    # the kubelet-plugin's own operational metrics, while this one exports the
     # physical/vGPU/per-container GPU metrics, sourced from the ResourceSlices this
-    # driver publishes and the ResourceClaims it consumes.
+    # driver publishes and the ResourceClaims it consumes. It runs as a sidecar here
+    # because the RBAC for both already belongs to this ServiceAccount.
     monitor:
       enabled: false
       # device-monitor's own feature gates -- a DIFFERENT registry from
