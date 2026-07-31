@@ -116,17 +116,21 @@ build-tests: ## Compile smoke tests under test/.
 	$(MAKE) -C $(BUILD_DIR) -j$(J)
 
 .PHONY: test-nogpu
-test-nogpu: build-tests ## Run the sm_node shared-bucket checks (no GPU, no CUDA needed).
+test-nogpu: build-tests ## Run the shared-region checks (no GPU, no CUDA needed).
 	$(BUILD_DIR)/test_sm_node_shared
+	$(BUILD_DIR)/test_vmem_region_concurrency
 
 .PHONY: test
 # Runs the GPU-less checks first, deliberately. They are seconds long, need no
 # driver, and cover what reading the code cannot: cross-process CAS, the refill
-# election, sampling ownership and the fork hazard. Running them here is also
-# the only thing that makes them run at all -- a target nobody invokes is a
+# election, sampling ownership and the fork hazard for sm_node; slot uniqueness
+# under concurrent registration, byte-range lock exclusion at the real computed
+# offsets, and record-preserving compaction for vmem_node. Running them here is
+# also the only thing that makes them run at all -- a target nobody invokes is a
 # test that quietly rots, which is the failure mode this suite exists to avoid.
 test: build-tests ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
 	$(BUILD_DIR)/test_sm_node_shared
+	$(BUILD_DIR)/test_vmem_region_concurrency
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
 	    $(BASH) $(BUILD_DIR)/test/run_tests_with_env.sh $(BUILD_DIR)/test $(SO_FILE)
 
