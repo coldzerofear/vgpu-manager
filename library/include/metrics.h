@@ -27,11 +27,11 @@ typedef enum {
  * the cooldown still in effect from a previous cut; DEADBAND_HIT = util
  * landed inside the hysteresis band so share was held steady (the metric
  * that tells you P1 deadband is actually doing work). */
-typedef enum {
-  METRICS_AIMD_MD_FIRED     = 0,
-  METRICS_AIMD_MD_BLOCKED   = 1,
-  METRICS_AIMD_DEADBAND_HIT = 2,
-} metrics_aimd_event_t;
+//typedef enum {
+//  METRICS_AIMD_MD_FIRED     = 0,
+//  METRICS_AIMD_MD_BLOCKED   = 1,
+//  METRICS_AIMD_DEADBAND_HIT = 2,
+//} metrics_aimd_event_t;
 
 void metrics_record_lock_wait(int device_index, uint64_t wait_ns, int timeout);
 void metrics_record_oom(int host_index, metrics_oom_reason_t reason);
@@ -79,11 +79,11 @@ void metrics_record_exclusivity_flip(int host_index,
  * device is shared with an external Pod). MD_BLOCKED and DEADBAND_HIT
  * together quantify how much of the V2.1+P1 anti-sawtooth work is firing
  * in production. */
-void metrics_record_aimd_event(int host_index, metrics_aimd_event_t event);
+//void metrics_record_aimd_event(int host_index, metrics_aimd_event_t event);
 
 /* Set the SM controller label included in rate_limit_hit emissions. Called
  * once at init from cuda_hook.c's sm_controller_init(). The pointer is
  * captured as-is (caller keeps the string literal alive). Unset => "delta". */
-void metrics_set_controller_label(const char *name);
+//void metrics_set_controller_label(const char *name);
 
 #endif

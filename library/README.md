@@ -47,7 +47,6 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 * MANAGER_COMPATIBILITY_MODE: Environment compatibility mode
 * EXTERNAL_SM_WATCHER_ENABLED: Enable external SM util watcher
 * VMEMORY_NODE_ENABLED: Enable virtual memory node tracing
-* CUDA_SM_CONTROLLER: Specify the core limit algorithm (delta/aimd/auto, default: delta)
 * CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: Accelerate delta utilization rate climb speed - default 64
 * CUDA_SM_SHARED_BUCKET: Enable SM shared token bucket
 

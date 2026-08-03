@@ -9,7 +9,7 @@
 >
 > 状态：**设计定稿**（已拍板，见 §12；未实现；默认关闭，环境变量灰度开启）。
 > 基线：已对齐 `main` @ `2f234ef`（2026-07-24 同步，见 §0）。所有行号引用均按该基线校准。
-> 关联：[GAP 路径节流](./sm_core_limit_gap_throttle_design.md)、[AIMD 控制器](./sm_controller_aimd.md)。
+> 关联：[GAP 路径节流](./sm_core_limit_gap_throttle_design.md)。
 
 ---
 
@@ -66,7 +66,7 @@ typedef struct {
 static dev_hot_t g_dev_hot[MAX_DEVICE_COUNT];   // ← static：每个进程一份
 ```
 
-`rate_limiter` 用 CAS 扣减（[cuda_hook.c#L606](../library/src/cuda_hook.c#L606)），watcher 每 ~80ms/设备用 NVML 采样、经 `delta()`/`aimd()` 反馈后用 `change_token()` 补充。控制器积分态同样是进程私有的 static：[`shares[]`](../library/src/cuda_hook.c#L1118)、[`up_limits[]`](../library/src/cuda_hook.c#L1140)、`is[]`、`avg_sys_frees[]`。
+`rate_limiter` 用 CAS 扣减（[cuda_hook.c#L606](../library/src/cuda_hook.c#L606)），watcher 每 ~80ms/设备用 NVML 采样、经 `delta()` 反馈后用 `change_token()` 补充。控制器积分态同样是进程私有的 static：[`shares[]`](../library/src/cuda_hook.c#L1118)、[`up_limits[]`](../library/src/cuda_hook.c#L1140)、`is[]`、`avg_sys_frees[]`。
 
 ### 1.2 核心问题：N 个私有桶瞬时叠加突破限额
 
@@ -106,7 +106,7 @@ static dev_hot_t g_dev_hot[MAX_DEVICE_COUNT];   // ← static：每个进程一�
 
 - **不做每进程独立限额**（HAMi 商业版 Event 模式那种"A、B 各限 50%、合计 100%"语义）。我们是**容器聚合**语义，见 §3.3 的对比。
 - **不引入 Event/占空比模式**（cuEvent 计时 + duty-cycle）。那是另一条正交路线，需要同步、伤异步流水线，单独评估。
-- 本设计**不改变控制算法**（delta/aimd 不动），只改"桶与积分态的存储位置 + 谁来补充"。
+- 本设计**不改变控制算法**（delta 不动），只改"桶与积分态的存储位置 + 谁来补充"。
 
 ---
 
@@ -176,7 +176,6 @@ typedef struct {
   int32_t  is_cnt;            /* 现 is[]（soft）                          */
   int32_t  avg_sys_free;      /* 现 avg_sys_frees[]（soft）               */
   int32_t  pre_external_proc; /* 现 pre_external_process_nums[]           */
-  int32_t  md_cooldown;       /* 现 g_aimd_md_cooldown[] —— AIMD 必需(§4.13.2) */
   int32_t  excl_debounced;    /* 现 g_is_exclusive_debounced[]     ┐ 排他 FSM  */
   int32_t  excl_streak;       /* 现 g_exclusive_pending_streak[]   │ (§4.13.3) */
   int32_t  lost_excl_pending; /* 现 g_lost_exclusivity_pending[]   ┘           */
@@ -238,8 +237,8 @@ int64_t now  = monotonic_ns();
 int64_t last = region->last_refill_ns;
 if (now - last >= REFILL_PERIOD_NS &&
     CAS(&region->last_refill_ns, last, now)) {
-    /* 本周期补充权归我：读积分态 → 跑 delta/aimd → 累加 change_token */
-    region->share = g_sm_controller(up_limit, user_current, region->share, host_index);
+    /* 本周期补充权归我：读积分态 → 跑 delta → 累加 change_token */
+    region->share = delta(up_limit, user_current, region->share, host_index);
     change_token_shared(region, region->share);   // 累加到 cur_cuda_cores，见 §4.7
     /* up_limit/is_cnt/avg_sys_free 的 soft 弹性更新也在此块内 */
 } else {
@@ -733,83 +732,6 @@ g_dev_hot[host_index].cur_cuda_cores = g_sm_controller(...);   // SET，非累�
 
 > 注意此开销**只在开启共享桶时产生**（默认关闭，§5），且它换来的是限额从"N 倍松"变严。
 
-### 4.13 与三种控制器的兼容性（delta / aimd / auto）
-
-> **本节修正了本设计一个实质性缺陷。** 前几稿默认"只把令牌桶搬进共享区、控制算法不动"（§2.2 非目标）。核查代码后：**对 `delta` 成立，对 `aimd` 不成立，对 `auto` 也不成立**。必须把**全部跨周期控制状态**一起搬进共享区（§4.1 结构体已相应扩充）。
-
-先明确一件被前几稿忽略的事实：控制器有**三种**，不是两种（[cuda_hook.c#L700](../library/src/cuda_hook.c#L700)）：
-
-```c
-enum { SM_CONTROLLER_DELTA = 0, SM_CONTROLLER_AIMD = 1, SM_CONTROLLER_AUTO = 2 };
-```
-
-`auto`（[auto_routed_controller](../library/src/cuda_hook.c#L1003)）按排他性**逐设备逐周期**在两者间路由，所以它同时继承两者的约束。
-
-#### 4.13.1 判据：什么状态必须共享
-
-选举（§4.3）把"谁跑控制器"这件事**每周期换人**。于是：
-
-> **凡是"只有选举赢家推进"的跨周期状态，都必须放进共享区。** 否则每个进程各存一份、各自只在自己赢的那 1/N 周期推进 → 语义碎裂成 N 份，且每份都以 ~1/N 的速率演进。
-
-反之，**每周期从当周期观测重算的临时量**保持进程私有即可（`top_results[]` 采样、`sys_frees[]`（[写 L1206](../library/src/cuda_hook.c#L1224) → 同周期 [读 L1300](../library/src/cuda_hook.c#L1318)，是 scratch 不是积分态）、排他 memo `g_excl_memo_*`）。所有进程观测的是同一个容器聚合信号，重算结果一致。
-
-#### 4.13.2 `delta`：无状态，**天然兼容**
-
-[`delta()`](../library/src/cuda_hook.c#L610) 是**纯函数**：输出只取决于入参 `(up_limit, user_current, share)` + 设备几何（`g_sm_num`/`g_max_thread_per_sm`，各进程相同）+ `g_dynamic_config`（只读）。**没有任何跨周期自有状态。**
-
-⟹ 只要 `share` / `up_limit` 在共享区（已在），谁来跑 `delta` 都得到同一个结果。**选举对 delta 完全透明，零额外改动。**
-
-#### 4.13.3 `aimd`：有 `md_cooldown`，**不改会触发 MD 雪崩**
-
-[`aimd_controller()`](../library/src/cuda_hook.c#L801) 持有一个跨周期积分态 [`g_aimd_md_cooldown[]`](../library/src/cuda_hook.c#L717)，其声明注释写明了它赖以成立的不变量：
-
-> *"Per-device remaining cooldown counter. **Watcher-thread-only access** (each watcher thread owns a disjoint host_index slice via balance_batches). No volatile / atomics needed."*
-
-**而选举恰好打破了这个不变量**——host_index 不再被某一个线程独占，而是每周期换一个**进程**来跑。后果是**最坏的那种**：
-
-| 周期 | 赢家 | 该进程的 `md_cooldown` | 动作 |
-|---|---|---|---|
-| 1 | A | 0 | util 超限 → **MD 触发**，A 的 cooldown = 4 |
-| 2 | B | **0**（B 自己那份从没被推进过） | util 仍超限 → **MD 再次触发** ← 本该被拦住 |
-| 3 | C | **0** | → **MD 第三次触发** |
-
-`share` 被连续砍成 `md_divisor^N`（默认 3^N；N=4 → **81 倍**）。而 cooldown 的存在**正是为了阻止这个**——[代码注释](../library/src/cuda_hook.c#L864)：
-
-> *"NVML's ~80ms sample + share-take-effect lag (~200-400ms total) means consecutive MD cuts share by md_divisor^N before the first cut's effect surfaces, hence **"MD avalanche"**. Cooldown breaks the chain."*
-
-**修复**：`md_cooldown` 移入共享区（§4.1 已加 `md_cooldown` 字段）。移入后只有赢家读写它，被选举串行化，语义与今天的单进程完全一致——cooldown 计的是**全局周期数**，而这正是它本来的语义（注释说的是 "time-based semantics"）。
-
-#### 4.13.4 `auto`：还需要排他 FSM + 节流标志
-
-`auto` 经 [`host_index_is_exclusive_debounced()`](../library/src/cuda_hook.c#L960) 路由，该 FSM 有三个跨周期字段（`g_is_exclusive_debounced` / `g_exclusive_pending_streak` / `g_lost_exclusivity_pending`），其注释同样声明依赖"watcher 线程独占"：
-
-> *"every field below is written and read exclusively by the watcher thread that owns the corresponding host_index. No cross-thread read; no volatile needed."*
-
-FSM 的三个调用点（soft burst 门、hard_limit jitter 门、auto 路由）**全都在赢家的控制块内**，所以把三个字段移入共享区后，FSM 每周期恰好被推进一次（由当周期赢家），**语义与单进程一致**——debounce 计的是全局周期数，正是其本意。
-
-> `g_lost_exclusivity_pending` 尤其**不能**留私有：它是"true→false 翻转"时置位、由后续 reset 分支[消费清零](../library/src/cuda_hook.c#L1315)的**一次性标志**。若各进程各存一份，非赢家的标志会一直悬着，等它某个周期赢了才消费 → **迟到数个周期的、莫名其妙的 reset**。
-
-**另一处必须共享的是 `throttled_since_watch`**（不属 FSM，但同类问题）。它由 `rate_limiter` 在节流时置位、watcher 每周期 [read-and-clear](../library/src/cuda_hook.c#L1228)，用于给防抖 bypass 把门（§4.7）。共享桶下：
-
-> 进程 A 撞节流 → 置 **A 的**标志；赢家 B 读**自己的**标志 = 0 → 判定"没人节流" → **放行 bypass** → bypass 的 SET 抹掉 A 正在扣的令牌。
-
-移入共享区后，其语义从"**本进程**是否节流"正确地变成"**容器内是否有人**节流"——这恰好是共享桶下该门本来就该问的问题。
-
-#### 4.13.5 小结
-
-| 控制器 | 自有跨周期状态 | 选举下是否可用 | 需要的改动 |
-|---|---|---|---|
-| `delta` | **无**（纯函数） | ✅ 直接可用 | 无 |
-| `aimd` | `md_cooldown` | ❌ MD 雪崩（`md_divisor^N`） | `md_cooldown` 入共享区 |
-| `auto` | 上述 + 排他 FSM ×3 | ❌ 同上 + FSM 碎裂 | 再加 FSM ×3 入共享区 |
-| 三者共用 | `throttled_since_watch` | ❌ bypass 误放行 | 入共享区 |
-
-**结论：三种控制器都能兼容，但代价是"整个控制状态块入共享区"，而非前几稿说的"只搬令牌桶"。** §2.2 那条"不改变控制算法"仍然成立——**算法逻辑一行不改，改的只是状态的存储位置**；但改动面比前几稿承诺的大，风险评级相应上调（§9）。
-
-> **已拍板：三种控制器全支持**（§12 第 2 项）。曾提出的范围缩减方案（只支持 `delta`、`aimd`/`auto` 降级回私有桶）**已被否决**。因此 §4.1 的结构体保持完整形态，`md_cooldown` 与排他 FSM ×3 都必须搬。
->
-> 这个选择的直接后果，必须在实现时守住：**`md_cooldown` 和 FSM ×3 的现有注释都写着 "watcher-thread-only access / no volatile / no atomics needed"**（[cuda_hook.c#L717](../library/src/cuda_hook.c#L717)、[#L742](../library/src/cuda_hook.c#L757)）。搬进共享区后这些注释**全部失效且具误导性**——后人照旧注释做"这里不用原子操作"的优化就会引入难查的竞态。**改字段必须同时改注释**，这是 §9 的一条高风险项。
-
 ## 5. 开关与灰度
 
 ```c
@@ -863,12 +785,12 @@ static inline int64_t *bucket_of(int host_index) {
 
 同步 `main` 后，仓库里出现了**第二种**开关范式，必须显式选边，否则实现时会摇摆：
 
-| | 范式 A：`g_dynamic_config` + env（**本设计采用**） | 范式 B：`resource_data_t` 字段 + 控制面门控（`vmem_node` 采用） |
-|---|---|---|
-| 谁决定 | 容器内环境变量，`sm_controller_init` 里 env→struct 加载 | 控制面：`util.VirtualMemoryTracking` feature gate → `VMEMORY_NODE_ENABLED` env → `vgpu.config` 的 `vmem_node` 字段 |
-| 已有同类 | `CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*`、`CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR`（[dynamic_config_t](../library/include/hook.h#L269)） | `sm_watcher`、`vmem_node`（[resource_data_t](../library/include/hook.h#L214)） |
-| 落点数 | **0 处 Go 改动** | Go 侧至少 4 处：feature gate 定义、`vgpu_config.go` 组装、device plugin `Allocate`、DRA `GetClaimCommonContainerEdits` |
-| ABI 影响 | 无 | **改 `resource_data_t` = 改 `vgpu.config` 的跨语言 ABI** |
+| | 范式 A：`g_dynamic_config` + env（**本设计采用**）                                               | 范式 B：`resource_data_t` 字段 + 控制面门控（`vmem_node` 采用） |
+|---|----------------------------------------------------------------------------------------|---|
+| 谁决定 | 容器内环境变量，`sm_controller_init` 里 env→struct 加载                                           | 控制面：`util.VirtualMemoryTracking` feature gate → `VMEMORY_NODE_ENABLED` env → `vgpu.config` 的 `vmem_node` 字段 |
+| 已有同类 | `CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR`（[dynamic_config_t](../library/include/hook.h#L269)） | `sm_watcher`、`vmem_node`（[resource_data_t](../library/include/hook.h#L214)） |
+| 落点数 | **0 处 Go 改动**                                                                          | Go 侧至少 4 处：feature gate 定义、`vgpu_config.go` 组装、device plugin `Allocate`、DRA `GetClaimCommonContainerEdits` |
+| ABI 影响 | 无                                                                                      | **改 `resource_data_t` = 改 `vgpu.config` 的跨语言 ABI** |
 
 **决定：采用范式 A。** 决定性理由是最后一行：`resource_data_t` 的尺寸被 [`CheckResourceDataSize`](../pkg/deviceplugin/vgpu/vnum_plugin.go#L1107) 在 `AllocationFailureReschedule` 门控下校验，**加字段 = 老容器起不来、等控制器重调度**（§4.5.4 附表已论证这是该文件被刻意设计成的行为）。为一个**默认关闭的性能优化**付出一次 `vgpu.config` ABI 变更，代价与收益完全不成比例。
 
@@ -928,7 +850,6 @@ static inline int64_t *bucket_of(int host_index) {
 
 1. **聚合限额收紧**：多进程聚合 util 的均值/峰值应显著向单进程曲线靠拢。
 2. **无性能回归**：单进程场景开关关闭时，吞吐与基线**逐点一致**（默认关闭，理应零差异——这条是防止误伤的兜底）。
-3. **AIMD 无雪崩**（§4.13.3）：开启共享桶 + `aimd`，观察 `metrics_record_aimd_event` 的 `MD_FIRED` 计数——**不得出现连续多个周期各触发一次 MD**。这是 `md_cooldown` 是否真正被共享的直接证据。
 4. **降级路径可用**（§5）：故意不挂 `/tmp/.sm_node` 目录启动 → 应打印 WARN 并退回私有桶，**容器正常运行**。
 5. **重建路径可用**（§4.5.4 / §10）：手工把 `sm_node.config` / `vmem_node.config` 的 magic 改坏 → 容器重启后应自动重建，**不得报错退出**。
 6. **`vmem_node` 跨语言 ABI 一致**（§10.3）：Go 侧 metrics 报出的显存用量与容器内实际一致（验证 `getVmemoryLockOffset` 没算错——**这一处算错不会报错，只会给出错的数**）。
@@ -969,7 +890,6 @@ static inline int64_t *bucket_of(int host_index) {
 
 - **[高] 并发正确性无法静态穷尽**：CAS 选举、bypass 累加、建区/重置竞态，必须**真机多进程压测**（并发扣减 + 补充不丢账、N 进程聚合不超限、补充者崩溃自愈）。
 - **[高] bypass 语义改写**（§4.7）：SET→增量累加，是最易引入超发/欠发的一处，需专门单测。
-- **[高，新增] 控制状态块整体入共享区**（§4.13）：改动面比前几稿承诺的大——不只是令牌桶，`md_cooldown`、排他 FSM ×3、`throttled_since_watch` 都要搬。这些字段的注释目前都写着"watcher-thread-only, no atomics needed"，**搬动时必须同步改注释**，否则后人会按旧注释假设做出错误优化。`aimd` 的 MD 雪崩（`md_divisor^N`）是不改就必现的回归，需专门用例覆盖。
 - **[中] 库升级后的布局错位**（§4.5.4）：宿主目录按 `<pod-uid>_<cont-name>` 跨容器重启存活，而 `.so` 按版本挂载 → 新库可能映射到老结构体。控制面清理覆盖了 device plugin / DRA+NRI 两路；**DRA 非 NRI 路径无钩子**，由 `magic`/`layout_version`/`region_size` 守卫兜底。**改结构体必须 bump `SM_NODE_LAYOUT_VERSION`**，需在 review 中把关。
 - **[中，实施期修正] 挂载点漏改**（§4.5.1）：新目录要在 **5 处功能落点**并列（device plugin Allocate/EnsureDir、DRA CDI、DRA NRI、`ensurePartitionDirectories`），另加 1 处 NRI 观测落点。
   > **⚠️ 原先写的"漏改任一处 → `open` 失败 → 由 §5 降级兜住"是错的**（首个真实用户就撞上了）。`map_sm_node_region` 第一步就是 `mkdir(SM_NODE_PATH)`——挂载没生效时它会在**容器自己的 `/tmp`** 上把目录建出来，`open(O_CREAT)` 随即成功，于是打印 `sm_node attached`、一切看起来正常。**漏挂不会降级，会静默落到容器自己的 `/tmp`**，而那正是 §4.5.1 明确要避开的位置。
@@ -1019,9 +939,7 @@ static inline int64_t *bucket_of(int host_index) {
    > - **`sm_node`：也不自愈，理由与预期不同。** 桶是自校正的，技术上可以重映射（不 munmap 即无 use-after-free，~1 秒内收敛）。真正的阻碍是 `g_sm_node` 现有不变量——"watcher 启动前写一次、此后只读"，这正是 `sm_bucket_of()` 敢在热路径裸读它、不加任何同步的依据（§4.12 明令热路径不得增加检查）。改成运行期可变就得在**每次 kernel 发射**做原子读。为一个容器内手动 `rm` 的自伤场景动热路径地基，不值得。
    >
    > **Go 侧本来就是对的**：`util.MmapFile.NeedsReload()` 比较的正是 **dev+inode**，inode 被换会自动 reload。一直瞎的是 C 侧。
-
-6. **`metrics_record_aimd_event` 现在只由每周期赢家记录。** 跨进程需求和。数值上比以前 N× 虚高**更准确**，但看板口径要跟着调，否则会误以为 MD 变少了。
-
+   
 ## 10. `vmem_node` 冻结区头 + 重建改造（已拍板纳入）
 
 > **已拍板纳入**（§12 第 3 项）。我先前建议"独立评估、不捆绑"，理由是"vmem 是账本、重建会丢显存记账"。**这个理由经不起推敲，我收回**——见 §10.1。
@@ -1229,7 +1147,6 @@ util.VirtualMemoryTracking feature gate (device-plugin/device-monitor 默认 fal
 - **永不致命**（§2.1/§5）：`open`/`mmap` 失败、插件漏挂目录、目录只读 → 一律**降级回进程私有桶**，绝不 `exit`/让 CUDA 调用失败。多进程隔离是优化，不是正确性前提。
 - **不抬高工具链门槛**（§4.11）：只用仓库已在用的设施；OFD 锁复用 [`lock.c#L64`](../library/src/lock.c#L64) 的**运行时回退**封装（低于 3.15 的内核照样跑）；明确禁用 `memfd_create`/`O_TMPFILE`/`renameat2`/`statx`。
 - **热路径开销不变**（§4.12）：仍是一条 CAS。守卫/文件锁/建区**全部每进程一次**，`pthread_once` 之下；初始化锁是**阻塞锁**（等待者内核睡等、不空转，§4.4.2a）；唯一真实新增开销是共享 cacheline 弹跳，交给阶段 3 且**仅在 profiling 证明后**才压。
-- **三种控制器都兼容，但代价是整个控制状态块入共享区**（§4.13）：`delta` 是纯函数、天然兼容；`aimd` 的 `md_cooldown` 不共享会触发**它自己存在的意义所要防的 MD 雪崩**（`md_divisor^N`）；`auto` 还额外需要排他 FSM ×3。三者共用的 `throttled_since_watch` 也必须共享，否则 bypass 会误放行。**算法逻辑一行不改，改的只是状态的存储位置。**
 - **`vmem_node` 一并加冻结区头 + 重建**（§10）：我先前"vmem 是账本、重建丢记账"的反对**已收回**——布局不符 ⟹ 账本里全是**已死进程**的记录 ⟹ 清掉零损失，而报错退出会让容器起不来。代价是**唯一的跨语言 ABI 面**：Go 侧结构体 + `getVmemoryLockOffset` 必须同步（漏改会**静默**让 fcntl 锁失效）。固定尺寸不只为余量，更是为**永不 resize**，避免缩容把 manager 的 mmap 打成 SIGBUS。
 - **同时满足**"严格"（物理共享桶）与"低开销"（一条 CAS、不串行化），且崩溃自愈、fork 安全。
 - **单进程场景零收益但零代价**（默认关闭）；notebook 等多进程容器是首要目标场景。
@@ -1243,7 +1160,6 @@ util.VirtualMemoryTracking feature gate (device-plugin/device-monitor 默认 fal
 | # | 决定 | 对设计的影响 |
 |---|---|---|
 | 1 | **做**。多进程竞争必然超限；notebook 容器必受影响 | **撤销阶段 0 硬前置**。§7 测量从"准入门槛"降级为"验收基线"（§1.3） |
-| 2 | **三种控制器全支持**（delta/aimd/auto） | 结构体保持完整形态；`md_cooldown` + FSM×3 必须搬（§4.13）；范围缩减方案否决 |
 | 3 | **`vmem_node` 一并纳入**，冻结区头 + 重建，含 Go 控制面改造，按需加余量 | 新增 §10；引入唯一跨语言 ABI 面；**我先前的反对已收回**（§10.1） |
 | 4 | **DRA 非 NRI 路径不补清理钩子** | 残留自校正，布局守卫兜底（§4.5.3 结论不变） |
 | 5 | 目录 `sm_node` / 文件 `sm_node.config` | §4.5.1 |

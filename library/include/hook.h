@@ -371,12 +371,12 @@ typedef struct {
   /* Preserved: was already in this struct in earlier versions. */
   int    usage_threshold;
   /* Appended for V2.1/P1/P2: consolidates 8 prior file-static globals. */
-  int    sm_controller_kind;
-  double aimd_md_divisor;
-  int    aimd_eff_ratio;
-  int    aimd_ai_base_div;
-  int    aimd_deadband_ratio;
-  int    aimd_md_cooldown_cycles;
+  //int    sm_controller_kind;
+//  double aimd_md_divisor;
+//  int    aimd_eff_ratio;
+//  int    aimd_ai_base_div;
+//  int    aimd_deadband_ratio;
+//  int    aimd_md_cooldown_cycles;
   int    auto_debounce_cycles;
   int    auto_external_util_threshold;
   int    delta_ramp_floor_divisor;
@@ -589,11 +589,12 @@ typedef struct {
   int32_t is_cnt;               /* was is[]                                 */
   int32_t avg_sys_free;         /* was avg_sys_frees[]                      */
   int32_t pre_external_proc;    /* was pre_external_process_nums[]          */
-  int32_t md_cooldown;          /* was g_aimd_md_cooldown[] -- without this
-                                 * AIMD re-fires MD every cycle and cuts
-                                 * share by md_divisor^N ("MD avalanche"),
-                                 * which is the exact thing the cooldown was
-                                 * introduced to prevent.                   */
+  int32_t _reserved0;
+//  int32_t md_cooldown;          /* was g_aimd_md_cooldown[] -- without this
+//                                 * AIMD re-fires MD every cycle and cuts
+//                                 * share by md_divisor^N ("MD avalanche"),
+//                                 * which is the exact thing the cooldown was
+//                                 * introduced to prevent.                   */
   int32_t excl_debounced;       /* was g_is_exclusive_debounced[]      ┐    */
   int32_t excl_streak;          /* was g_exclusive_pending_streak[]    │FSM */
   int32_t lost_excl_pending;    /* was g_lost_exclusivity_pending[]    ┘    */
