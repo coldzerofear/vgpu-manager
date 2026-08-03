@@ -40,6 +40,7 @@ import (
 //#include <fcntl.h>
 //#include <sys/file.h>
 //#include <time.h>
+//#include <errno.h>
 //
 //int write_to_disk(const char* filename, const char* data) {
 //  int fd = 0;
@@ -50,9 +51,21 @@ import (
 //  int ret = 0;
 //  size_t data_len = 0;
 //  data_len = strlen(data);
-//  fd = open(filename, O_CREAT | O_TRUNC | O_WRONLY, 00777);
+//  // O_NOFOLLOW: this file lives in a directory the WORKLOAD container can
+//  // write (the DRA path bind-mounts <claim>/<partition>/config rw so the
+//  // in-container library can write vgpu.config there). Without it, a container
+//  // that replaces pids.config with a symlink makes this privileged writer
+//  // follow it and truncate whatever it points at -- an arbitrary-write
+//  // primitive over everything in this process's mount namespace, which
+//  // includes the host manager root and the kubelet root. Only the final
+//  // component needs guarding: the parent directories are the bind-mount point
+//  // and above, which the container cannot replace from inside.
+//  fd = open(filename, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW, 00777);
 //  if (fd == -1) {
-//    return 1;
+//    // ELOOP here means the path existed AND was a symlink. That is not a
+//    // transient error -- nothing legitimate ever creates one -- so report it
+//    // distinctly rather than letting it read as a routine write failure.
+//    return errno == ELOOP ? 3 : 1;
 //  }
 //  while (flock(fd, LOCK_EX)) {
 //    nanosleep(&wait, NULL);
@@ -72,6 +85,12 @@ import "C"
 const (
 	SocketFile = "socket.sock"
 	PidsConfig = "pids.config"
+
+	// writeToDiskSymlinkRefused is the write_to_disk return code for "the target
+	// existed and was a symlink, so O_NOFOLLOW refused the open". Kept distinct
+	// from the generic failure code because it is an attack indicator, not a
+	// transient error. Must match the C function above.
+	writeToDiskSymlinkRefused = 3
 
 	// resolveBackoff is the per-attempt poll interval used while waiting for
 	// the lookup state (informer cache, container status) to become
@@ -501,14 +520,24 @@ func (s *DeviceRegistryServerImpl) persistPids(configDir string, pids []int) err
 		buf.WriteByte('\n')
 	}
 
-	cFileName := C.CString(filepath.Join(configDir, PidsConfig))
+	pidsPath := filepath.Join(configDir, PidsConfig)
+	cFileName := C.CString(pidsPath)
 	cData := C.CString(buf.String())
 	defer func() {
 		C.free(unsafe.Pointer(cFileName))
 		C.free(unsafe.Pointer(cData))
 	}()
-	if C.write_to_disk(cFileName, cData) != 0 {
-		return fmt.Errorf("failed to write pids file at %s", filepath.Join(configDir, PidsConfig))
+	switch rc := C.write_to_disk(cFileName, cData); rc {
+	case 0:
+	case writeToDiskSymlinkRefused:
+		// The container replaced its own pids.config with a symlink. Nothing
+		// legitimate does this, so say so plainly at a level that gets seen --
+		// the open was already refused by O_NOFOLLOW, this is the audit trail.
+		klog.ErrorS(nil, "refused to write pids file: path is a symlink, which no legitimate flow creates; "+
+			"the container may be attempting to redirect this privileged write", "path", pidsPath)
+		return fmt.Errorf("refused to write pids file at %s: path is a symlink", pidsPath)
+	default:
+		return fmt.Errorf("failed to write pids file at %s (code %d)", pidsPath, int(rc))
 	}
 	return nil
 }
