@@ -99,6 +99,10 @@ func (r RootPath) findFile(name string, searchIn ...string) (string, error) {
 		if err != nil {
 			continue
 		}
+		info, err := os.Stat(candidate)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
 		return candidate, nil
 	}
 
