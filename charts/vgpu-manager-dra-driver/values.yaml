@@ -144,16 +144,18 @@ kubeletPlugin:
         DRAListTypeAttributes: false
       # Additional environment variables appended to the kubelet-plugin container.
       env:
+        - name: ADDITIONAL_XIDS_TO_IGNORE
+          value: ""
         - name: KUBE_FEATURE_WatchListClient
           value: "true"
       commands:
-        logLevel: 5
         kubeApiQps: 20.0
         kubeApiBurst: 30
         nriPluginIdx: "00"
         coresRatio: 100
         memoryRatio: 100
         metricsPort: 8080
+        logLevel: 5
       # Container security context. Privileged mode is required to manage GPU device nodes.
       securityContext:
         privileged: true

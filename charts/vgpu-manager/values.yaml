@@ -204,8 +204,12 @@ devicePlugin:
       deviceMemoryFactor: 1
       # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
+      # Ensure that containers that request NVIDIA GPU resources are started with GPUDirect Storage support.
       gdsEnabled: false
+      # Ensure that containers that request NVIDIA GPU resources are started with MOFED support.
       mofedEnabled: false
+      # Ensure that containers that request NVIDIA GPU resources are started with GDRCopy support.
+      gdrcopyEnabled: false
       # If using the open-gpu-kernel-modules, open it and enable compatibility mode. (default: false)
       openKernelModules: false
       # Strategy for starting MIG device plugin service (supported values: "none" | "single" | "mixed")

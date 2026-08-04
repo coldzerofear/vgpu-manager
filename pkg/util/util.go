@@ -493,9 +493,12 @@ func GetPercentageValue(x uint32) uint32 {
 	}
 }
 
-func EnvValueEnabled(val string) bool {
+func ValueEnabled(val string) bool {
 	val = strings.TrimSpace(val)
-	return val == "1" || strings.EqualFold(val, "true")
+	if val == "" {
+		return false
+	}
+	return val == "1" || strings.EqualFold(val, "enabled") || strings.EqualFold(val, "true")
 }
 
 func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool {
@@ -504,7 +507,7 @@ func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool
 	}
 	envEnabled := func(cont *corev1.Container) bool {
 		return slices.ContainsFunc(cont.Env, func(env corev1.EnvVar) bool {
-			return env.Name == envName && EnvValueEnabled(env.Value)
+			return env.Name == envName && ValueEnabled(env.Value)
 		})
 	}
 	// Container names are unique across init and regular containers; search
@@ -605,8 +608,7 @@ func GenerateShortHash(input string, length int) string {
 
 func GetEnvEnabled(env string) bool {
 	if val, ok := os.LookupEnv(env); ok {
-		val = strings.TrimSpace(val)
-		return val == "1" || strings.EqualFold(val, "enabled") || strings.EqualFold(val, "true")
+		return ValueEnabled(val)
 	}
 	return false
 }

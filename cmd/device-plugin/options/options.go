@@ -115,7 +115,6 @@ func NewOptions() *Options {
 			imexChannelIDs = append(imexChannelIDs, atoi)
 		}
 	}
-
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -130,14 +129,14 @@ func NewOptions() *Options {
 		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
 		DevicePluginPath:    pluginapi.DevicePluginPath,
 		PprofBindPort:       defaultPprofBindPort,
-		GDSEnabled:          util.GetEnvEnabled("NVIDIA_GDS"),
-		MOFEDEnabled:        util.GetEnvEnabled("NVIDIA_MOFED"),
-		GDRCopyEnabled:      util.GetEnvEnabled("NVIDIA_GDRCOPY"),
 		MigStrategy:         defaultMigStrategy,
 		CDIAnnotationPrefix: defaultCDIAnnotationPrefix,
 		FeatureGate:         featureGate,
 		ImexChannelIDs:      imexChannelIDs,
 		ImexRequired:        util.GetEnvEnabled("IMEX_REQUIRED"),
+		GDSEnabled:          util.GetEnvEnabled("GDS_ENABLED"),
+		MOFEDEnabled:        util.GetEnvEnabled("MOFED_ENABLED"),
+		GDRCopyEnabled:      util.GetEnvEnabled("GDRCOPY_ENABLED"),
 		HostDriverRoot:      util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
 		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
 	}
@@ -168,9 +167,9 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.ExcludeDevices, "exclude-devices", "", "Specify the GPU IDs that need to be excluded. (example: \"0,1,2\" | \"0-2\")")
 	pflag.StringVar(&o.DevicePluginPath, "device-plugin-path", o.DevicePluginPath, "The path for kubelet receive device plugin registration.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable)")
-	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")
-	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
-	pflag.BoolVar(&o.GDRCopyEnabled, "gdrcopy-enabled", o.GDRCopyEnabled, "Ensure that containers are started with NVIDIA_GDRCOPY=enabled.")
+	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers that request NVIDIA GPU resources are started with GPUDirect Storage support.")
+	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers that request NVIDIA GPU resources are started with MOFED support.")
+	pflag.BoolVar(&o.GDRCopyEnabled, "gdrcopy-enabled", o.GDRCopyEnabled, "Ensure that containers that request NVIDIA GPU resources are started with GDRCopy support.")
 	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")

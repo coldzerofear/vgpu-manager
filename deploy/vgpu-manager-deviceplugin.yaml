@@ -183,6 +183,12 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+            - name: GDS_ENABLED
+              value: "false"
+            - name: MOFED_ENABLED
+              value: "false"
+            - name: GDRCOPY_ENABLED
+              value: "false"
           securityContext:
             privileged: true
             allowPrivilegeEscalation: true
