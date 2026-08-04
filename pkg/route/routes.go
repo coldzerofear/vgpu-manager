@@ -30,11 +30,12 @@ const (
 	maxRequestBodySize = 7 * 1024 * 1024 // max 7mb request body size
 )
 
-func checkBody(w http.ResponseWriter, r *http.Request) {
+func checkBody(w http.ResponseWriter, r *http.Request) bool {
 	if r.Body == nil {
 		http.Error(w, "Please send a request body", 400)
-		return
+		return false
 	}
+	return true
 }
 
 // DebugLogging wraps handler for debugging purposes
@@ -95,7 +96,9 @@ func AddFilterPredicate(router *httprouter.Router, predicate predicate.FilterPre
 
 func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		checkBody(w, r)
+		if !checkBody(w, r) {
+			return
+		}
 
 		var buf bytes.Buffer
 		// Limit the body size to prevent deep nesting/resource exhaustion attacks
@@ -148,7 +151,9 @@ func AddPreemptPredicate(router *httprouter.Router, predicate predicate.PreemptP
 // in-tree preemption decision.
 func PreemptPredicateRoute(predicate predicate.PreemptPredicate) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		checkBody(w, r)
+		if !checkBody(w, r) {
+			return
+		}
 
 		var buf bytes.Buffer
 		// Limit the body size to prevent deep nesting/resource exhaustion attacks
@@ -192,7 +197,9 @@ func AddBindPredicate(router *httprouter.Router, predicate predicate.BindPredica
 
 func BindPredicateRoute(predicate predicate.BindPredicate) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		checkBody(w, r)
+		if !checkBody(w, r) {
+			return
+		}
 
 		var buf bytes.Buffer
 		// Limit the body size to prevent deep nesting/resource exhaustion attacks
