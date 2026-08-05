@@ -355,6 +355,7 @@ func (alloc *allocator) sortDeviceStore(req *AllocationRequest, deviceStore []*d
 		klog.V(4).Infof("Pod <%s> not supported device scheduling policy: %q", klog.KObj(pod), req.DevicePolicy)
 		alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported device scheduling policy %q", req.DevicePolicy)
 	}
+	// TODO The device score weight used here is the average value, which may be adjusted in the future
 	NewDevicePolicyPriority(*req).Sort(deviceStore)
 }
 
@@ -408,7 +409,8 @@ func (alloc *allocator) allocateByTopologyMode(
 			}
 		}
 		klog.V(4).Infof("Pod <%s> use Links topology mode (strict=%v, anchorComponent=%d)", klog.KObj(pod), strict, anchorRoot)
-		if claims, ok := alloc.allocateLink(deviceStore, req.Profile, req.DevicePolicy, strict, anchorRoot, needNumber, needCores, needMemory); ok {
+		// TODO RequestProfile uses average value, maintain semantic consistency with sortDeviceStore.
+		if claims, ok := alloc.allocateLink(deviceStore, UniformProfile, req.DevicePolicy, strict, anchorRoot, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
 		if rsn := alloc.handleTopologyFallback(
@@ -421,7 +423,8 @@ func (alloc *allocator) allocateByTopologyMode(
 		}
 	case util.NUMATopology:
 		klog.V(4).Infof("Pod <%s> use NUMA topology mode (strict=%v)", klog.KObj(pod), strict)
-		if claims, ok := alloc.allocateNUMA(deviceStore, req.Profile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
+		// TODO RequestProfile uses average value, maintain semantic consistency with sortDeviceStore.
+		if claims, ok := alloc.allocateNUMA(deviceStore, UniformProfile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
 		if rsn := alloc.handleTopologyFallback(

@@ -366,7 +366,7 @@ webhook:
     # Default device scheduling policy. (supported values: binpack | spread)
     defaultDevicePolicy: binpack
     # Default device list topology mode. (supported values: numa | link)
-    defaultTopologyMode: ""
+    defaultTopologyMode: "numa"
     logLevel: 4
   # Webhook container requests resources.
   # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
