@@ -929,14 +929,17 @@ func recordNodeRejects(reasons map[string]*reason.FilterReason) {
 // several placements. nodeReq is the winning node's request snapshot, carrying
 // the topology outcome the allocator recorded on it.
 func recordPlacement(req, nodeReq *allocator.AllocationRequest) {
+	// Every annotation-derived value goes through the metrics package's
+	// whitelist: the parsers pass unknown values through verbatim, which would
+	// otherwise make label cardinality user-controlled.
+	mode := metrics.TopologyLabel(req.Topology.BaseTopology())
 	metrics.PodPolicyTotal.WithLabelValues(
-		string(req.NodePolicy), string(req.DevicePolicy), string(req.Topology.BaseTopology()),
+		metrics.PolicyLabel(req.NodePolicy), metrics.PolicyLabel(req.DevicePolicy), mode,
 	).Inc()
 
 	outcome := nodeReq.TopologyOutcome()
 	if outcome.Result != "" {
-		metrics.TopologyPlacementTotal.WithLabelValues(
-			string(req.Topology.BaseTopology()), outcome.Result).Inc()
+		metrics.TopologyPlacementTotal.WithLabelValues(mode, outcome.Result).Inc()
 	}
 	if outcome.Alignment != "" {
 		metrics.CrossPodAlignmentTotal.WithLabelValues(outcome.Alignment).Inc()

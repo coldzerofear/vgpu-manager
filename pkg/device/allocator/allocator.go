@@ -500,7 +500,7 @@ func (alloc *allocator) handleTopologyFallback(
 		// PER NODE EVALUATION: this counts nodes refused, not pods. One pod can
 		// be refused by every node in the cluster.
 		if !alloc.simulate {
-			metrics.TopologyStrictRejectTotal.WithLabelValues(string(mode)).Inc()
+			metrics.TopologyStrictRejectTotal.WithLabelValues(metrics.TopologyLabel(mode)).Inc()
 		}
 		return reason.New(strictCode).WithDetail("%s", detail)
 	}
@@ -668,7 +668,7 @@ func alignmentOf(req *AllocationRequest, anchorRoot int) string {
 //
 // Before the tier walk there was no way to say this: the old search returned a
 // device set with no indication of how well connected it was, and only the
-// strict path bothered to check (via a separate AreDevicesLinked pass). So a
+// strict path re-checked connectivity, in a separate pass after the fact. So a
 // pod that asked for link topology and received cards with no interconnect at
 // all looked exactly like one that got a full NVLink group. Operators had no
 // signal that the cluster could not honour what they requested.
@@ -725,12 +725,16 @@ func (alloc *allocator) linkFallbackReason(needNumber int) string {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return "node has no GPU link topology"
 	}
-	// HasGPUTopology was true → fall-through cause is connectivity: bestEffort
-	// returned a candidate set but no candidate had all N GPUs in a single
-	// NVLink component. Report the largest component so operators can see how
-	// far short the node fell.
-	return fmt.Sprintf("no NVLink-connected set of %d GPUs (largest component %d)",
-		needNumber, alloc.nodeInfo.MaxLinkComponentSize())
+	// HasGPUTopology was true → the cause is connectivity, in one of two shapes:
+	// strict refused every plan because none reached TierNVLink, or an anchor /
+	// rail window left too few candidates to form a group at all.
+	//
+	// Report the largest NVLink component, NOT the largest any-P2P one. The
+	// latter is the number the node-wide component map would give and it is
+	// almost always the full card count (every GPU is PCIe-reachable), which
+	// would render as the nonsense "no NVLink set of 4 (largest component 8)".
+	return fmt.Sprintf("no NVLink-connected set of %d GPUs (largest NVLink component %d)",
+		needNumber, alloc.nodeInfo.LinkTierMaxComponentSize(device.TierNVLink))
 }
 
 func (alloc *allocator) numaFallbackReason(needNumber int, deviceStore []*device.Device) string {

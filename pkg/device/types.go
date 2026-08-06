@@ -388,7 +388,7 @@ func NewFakeDevice(id, usedNum, totalNum int, usedCore, totalCore, usedMem, tota
 
 // NewFakeDeviceWithUUID is NewFakeDevice with an explicit UUID. Use this
 // in tests that need to round-trip devices through any UUID-keyed map
-// (the link-topology allocation path, AreDevicesLinked, etc.) — plain
+// (the link-topology allocation path, the cross-pod component maps) — plain
 // NewFakeDevice leaves uuid as "" which collapses every fake device to
 // the same map entry.
 func NewFakeDeviceWithUUID(uuid string, id, usedNum, totalNum int, usedCore, totalCore, usedMem, totalMem int64, numa int) *Device {
@@ -772,11 +772,11 @@ type NodeInfo struct {
 	// component signature carries no alignment information at all.
 	gpuRail map[string]string
 	// maxNUMAGroupSize is the largest count of GPUs sharing a single NUMA
-	// node. Equivalent role to maxLinkComponentSize for NUMA-mode sorting.
+	// node — the NUMA-mode counterpart of tiers.maxSize, used for node ranking.
 	// Zero when numaTopology is false.
 	maxNUMAGroupSize int
 	// nvlink* describe the NVLink-FABRIC components (union over NVLink edges only),
-	// which is the grouping cross-pod affinity + AreDevicesLinked need: on a full
+	// which is the grouping cross-pod affinity needs: on a full
 	// NVSwitch node all GPUs are one component (no narrowing needed); on a 2x4
 	// island node the two islands are distinct (so a sibling's GPUs pin the island
 	// its peers stay in). nvlinkComponentByUUID: UUID → NVLink-component root;
@@ -1946,25 +1946,6 @@ func (n *NodeInfo) HasNUMATopology() bool {
 	return n.numaTopology
 }
 
-// MaxLinkComponentSize returns the largest number of GPUs mutually reachable
-// via P2P links on this node. A node-level sort can use this to determine
-// whether the node CAN host a topology-aware group of size N (component
-// size >= N) — strictly stronger than HasGPUTopology() which only confirms
-// link metadata was reported.
-func (n *NodeInfo) MaxLinkComponentSize() int {
-	return n.tiers.largest(TierAny)
-}
-
-// MaxNVLinkComponentSize returns the largest number of GPUs mutually reachable
-// over NVLink ONLY (the biggest NVLink fabric / island). Node fitness ranks a
-// node that can host the requested group entirely within one NVLink fabric
-// (MaxNVLinkComponentSize >= N) above one that can only reach N over PCIe
-// (MaxLinkComponentSize >= N > MaxNVLinkComponentSize). Equals
-// MaxLinkComponentSize on a fully NVSwitch-connected node.
-func (n *NodeInfo) MaxNVLinkComponentSize() int {
-	return n.tiers.largest(TierNVLink)
-}
-
 // LinkTopologyFitness scores how tightly this node can host a link-topology
 // group of needNumber GPUs, higher = better NCCL performance:
 //
@@ -1994,18 +1975,6 @@ func (n *NodeInfo) LinkTopologyFitness(needNumber int) int {
 	default:
 		return 1
 	}
-}
-
-// LinkComponentOf returns the connectivity component root of a GPU at the given
-// tier, plus whether the UUID is known on this node. Component roots are only
-// comparable WITHIN one tier — never across tiers.
-func (n *NodeInfo) LinkComponentOf(tier LinkTier, uuid string) (int, bool) {
-	index, ok := n.deviceIndexMap[uuid]
-	if !ok {
-		return -1, false
-	}
-	root := n.tiers.rootOf(tier, index)
-	return root, root >= 0
 }
 
 // ConnectedAtTier reports whether the two GPUs have a DIRECT link at least as
@@ -2134,33 +2103,6 @@ func (n *NodeInfo) UUIDsMatchingRailSignature(signature string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// AreDevicesLinked reports whether every UUID in the set belongs to the same
-// NVLink-FABRIC component (nvlinkComponentByUUID). Used by strict-link allocation
-// to enforce "the chosen GPUs are NVLink-connected" — so link-strict rejects a
-// set that bestEffort returned as highest-scoring but that actually spans NVLink
-// islands (PCIe between them). This is stronger than mere any-P2P reachability:
-// on a node with no NVLink (PCIe-only GPUs) every card is its own NVLink
-// singleton, so a multi-GPU set is NOT "linked" and strict-link correctly
-// rejects (non-strict link still falls back and allocates).
-//
-// Sets of size <= 1 are trivially connected. An unknown UUID counts as a failure.
-func (n *NodeInfo) AreDevicesLinked(uuids []string) bool {
-	if len(uuids) <= 1 {
-		return true
-	}
-	first, ok := n.nvlinkComponentByUUID[uuids[0]]
-	if !ok {
-		return false
-	}
-	for _, u := range uuids[1:] {
-		comp, ok := n.nvlinkComponentByUUID[u]
-		if !ok || comp != first {
-			return false
-		}
-	}
-	return true
 }
 
 // ComponentUUIDs returns the UUIDs of every GPU in the given NVLink-fabric

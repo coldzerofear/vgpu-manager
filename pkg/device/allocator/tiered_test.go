@@ -391,6 +391,33 @@ func Test_NoTopologyNode_Unchanged(t *testing.T) {
 	assert.Len(t, got, 2, "non-strict must still place the pod")
 }
 
+// Test_NoTopologyNode_SingleCardStrict pins the one DELIBERATE behaviour change
+// that removing the needNumber <= 1 short-circuit produces.
+//
+// Before, a 1-GPU pod returned deviceStore[:1] without ever dispatching on the
+// topology mode, so `link-strict` was silently ignored for single-card requests
+// and such a pod scheduled anywhere. Now it walks the same path as every other
+// link request, and a node that publishes no topology (device plugin without the
+// TopologyAwareGPUAllocation gate) is rejected.
+//
+// This is the consistent reading, not a regression in disguise: on that same
+// node a 2-GPU link-strict pod was ALREADY rejected, so the old behaviour made
+// strictness depend on the card count. The cost is that with the gate off
+// cluster-wide, a 1-GPU link-strict pod now has nowhere to land — documented in
+// docs/how_to_use_gpu_topology.md rather than special-cased away.
+func Test_NoTopologyNode_SingleCardStrict(t *testing.T) {
+	n, _ := fakeNode(4, 1, 100, 1024) // no links published
+
+	req := BuildAllocationRequest(linkPod(1, true, ""))
+	_, rsn, err := NewAllocator(n, nil).Allocate(req)
+	require.NoError(t, err)
+	require.NotNil(t, rsn, "single-card link-strict must be rejected like multi-card")
+
+	// Non-strict is unaffected: it still falls back to deviceStore order.
+	n, _ = fakeNode(4, 1, 100, 1024)
+	assert.Len(t, allocUUIDs(t, n, linkPod(1, false, "")), 1)
+}
+
 // Test_PolicyRuns covers the run-splitting that makes "policy first, link
 // quality as the tie-break" work — in particular that NonePolicy collapses to a
 // SINGLE run so link quality decides everything, which is the historical
@@ -645,7 +672,9 @@ func Test_Strict_TriesComponentWindowAfterRail(t *testing.T) {
 
 	// Component window = island A. strict must fall through to it rather than
 	// rejecting on the rail window's looser plan.
-	rootA, ok := n.LinkComponentOf(device.TierNVLink, "GPU-0")
+	domainA, ok := n.DomainOfUUIDs([]string{"GPU-0"})
+	require.True(t, ok)
+	rootA, ok := n.ComponentByDomain(domainA)
 	require.True(t, ok)
 	plan, got := alloc.allocateLink(store, req, rootA, 2)
 	require.True(t, got, "strict must try the component window after the rail window fails it")

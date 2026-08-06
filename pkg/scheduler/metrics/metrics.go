@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -191,4 +192,49 @@ func ObserveFilterStage(stage string, start time.Time) {
 func ObserveLinkSearch(algo string, candidates int) {
 	LinkSearchTotal.WithLabelValues(algo).Inc()
 	LinkSearchCandidates.WithLabelValues(algo).Observe(float64(candidates))
+}
+
+// LabelOther is the bucket every unrecognised policy / topology value collapses
+// into.
+const LabelOther = "other"
+
+// PolicyLabel and TopologyLabel map a parsed annotation value onto the CLOSED
+// set of label values these metrics are allowed to emit.
+//
+// They exist because the parsers deliberately pass unknown values through
+// verbatim — parseSchedulerPolicy returns SchedulerPolicy(raw) and
+// TopologyMode.BaseTopology returns the mode unchanged in their default
+// branches, which util's own tests pin ("bogus" must stay "bogus"). That is the
+// right behaviour for the scheduler: an unrecognised policy simply does not
+// match any comparator and the pod schedules with default ordering.
+//
+// It is NOT safe as a metric label. The value comes straight from a pod
+// annotation, so without this whitelist any tenant able to create a pod could
+// mint an unbounded number of Prometheus series inside the scheduler process
+// just by varying `nvidia.com/node-scheduler-policy` — and client-side metric
+// maps are never evicted, so the memory is held for the process lifetime.
+// Bucketing to LabelOther keeps "someone is passing a typo'd policy" visible
+// without letting the cardinality follow user input.
+func PolicyLabel(p util.SchedulerPolicy) string {
+	switch p {
+	case util.BinpackPolicy, util.SpreadPolicy, util.NonePolicy:
+		return string(p)
+	case "":
+		return string(util.NonePolicy)
+	default:
+		return LabelOther
+	}
+}
+
+// TopologyLabel is PolicyLabel for topology modes. It expects the BASE mode
+// (strictness is a separate dimension and is not a label here).
+func TopologyLabel(m util.TopologyMode) string {
+	switch m {
+	case util.NUMATopology, util.LinkTopology, util.NoneTopology:
+		return string(m)
+	case "":
+		return string(util.NoneTopology)
+	default:
+		return LabelOther
+	}
 }

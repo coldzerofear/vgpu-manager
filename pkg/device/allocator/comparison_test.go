@@ -341,10 +341,11 @@ func Test_OldAlgorithm_CanReturnPadding(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // Test_Compare_PolicyAdherence measures the thing the redesign set out to fix.
-// The old path applied binpack/spread only as a tie-break among the top
-// linkTopKCandidates=5 link-equivalent sets, so a policy-optimal choice outside
-// that window was silently ignored. The tiered selector makes the policy
-// dominate inside the chosen tier.
+// The old path (main's `linkTopKCandidates = 5` window — the name is main's,
+// not this branch's) applied binpack/spread only as a tie-break among the top 5
+// link-equivalent sets, so a policy-optimal choice outside that window was
+// silently ignored. The tiered selector makes the policy dominate inside the
+// chosen tier.
 func Test_Compare_PolicyAdherence(t *testing.T) {
 	// A node where many sets are link-equivalent (uniform NVSwitch) but the
 	// cards differ sharply in occupancy, so binpack has a clear preference.

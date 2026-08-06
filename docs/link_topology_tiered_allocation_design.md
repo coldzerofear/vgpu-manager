@@ -238,6 +238,18 @@ n=8 时 `tierComponent` 是 32 个 int、**一次分配**，相对现有 `device
 | `candidateSetScore` / `selectLinkCandidateByDevicePolicy` | 策略正交由结构保证 |
 | `allocateLink` 中 `policy == NonePolicy` 快路径分叉 | `none` 退化为策略分恒 0 |
 | `AreDevicesLinked` 事后校验调用 | strict 判定改为落档比较 |
+| `NodeInfo.AreDevicesLinked` 方法本体 | 同上，无调用方 |
+| `NodeInfo.MaxLinkComponentSize` / `MaxNVLinkComponentSize` | 由 `LinkTierMaxComponentSize(tier)` 统一取代（旧的两个方法是同一问题的两个特例） |
+| `NodeInfo.LinkComponentOf` | 分量归属改由 `ConnectedAtTier` 在候选集上现算（诱导子图），不再按全节点分量根判断 |
+| `NodeInfo.maxLink/maxSwitch/maxNUMA/maxNVLinkComponentSize` 字段 | 合并进 `tiers.maxSize[tier]` |
+
+**保留但不再被生产代码调用**：`gpuallocator` 的 `Allocator` / `Policy` / `bestEffortPolicy`。
+它们是 `comparison_test.go` 的对照基线（"新算法不劣于 main"的证据本身），且与 NVIDIA 上游
+逐字节兼容便于后续同步。原因写在 `pkg/device/gpuallocator/doc.go`，避免被后人当成疏漏清掉。
+
+`--best-effort-max-gpus` 是**唯一不能硬删的**：pflag 遇到未知参数直接退出，硬删会让所有仍在
+传该参数的存量部署 crash-loop。保留为已弃用的 no-op（解析、告警、忽略、从 help 隐藏），下个
+版本再摘。
 
 净代码量为负，净配置量 −1。
 
@@ -314,16 +326,23 @@ I1~I4 各一组断言，尤其 I2（保序子序列）应对所有 fixture × �
 | `link_search_total{algo}` + `link_search_candidates` | **每次搜索** | 分量内组合搜索是否真的被执行。均匀 fabric 恒为 0；非零即证明集群里有 DGX-1 类非均匀机型 |
 | `filter_duration_seconds{stage}` | 每 Filter 调用 | `node` / `device_work` / `device_lock_wait` |
 
-三条设计约束：
+四条设计约束：
 
 1. **每 Pod 的指标在 filter 里发**，不在 allocator 里 —— allocator 按节点运行，一个 Pod 可能评估多个节点才落地，在那里计数会把一个 Pod 报成多次放置。allocator 把结果记在该节点的 request 快照上，filter 在确定赢家后读取。
 2. **抢占的 dry-run 完全不计**。`NewSimulationAllocator` 在源头关掉所有可观测副作用；一次抢占会跑多轮模拟，事后从看板里减是减不干净的。
 3. **锁等待独立观测**。`SerializedNodeFilter` 默认开启，把排队和实际工作折在一起会让竞争看起来像"分配变慢"。两者是独立观测值而非相减后的单值 —— Filter 是并发的，把等待时间挂在共享的 `gpuFilter` 上做减法就是 data race。
+4. **所有来自注解的 label 必须过白名单**（`metrics.PolicyLabel` / `metrics.TopologyLabel`，未知值归入 `other`）。注解解析器会把无法识别的值**原样透传**（`parseSchedulerPolicy` 返回 `SchedulerPolicy(raw)`，`BaseTopology` 的 default 分支返回原值），这对调度是正确的 —— 认不出的策略不匹配任何比较器，Pod 按默认顺序调度即可 —— 但作为指标 label 就意味着**任何能创建 Pod 的租户都可以在 scheduler 进程内无限制地生成时间序列**，而 Prometheus 客户端的 metric map 永不回收。白名单把这条路堵死，同时仍能通过 `other` 桶看见"有人写错了策略名"。
 
 多容器 Pod 取**最差**的那个容器的结果：一个 Pod 的放置质量不会好过它最不走运的容器。
 
 ## 11. 风险
 
-1. **DGX-1 fixture 保真度** —— Step 2 正确性完全依赖它，是唯一能挡住回归的东西
+1. ~~**DGX-1 fixture 保真度**~~ —— **已消除**。改为直接引入 NVIDIA/go-gpuallocator 的官方
+   fixture（`upstream_fixtures_test.go`），并用 `Test_Upstream_MatchesHandTranscribedDGX1`
+   在 CI 里断言手抄矩阵与上游逐边一致。上游 fixture 还带有本地 fixture 近似掉的一类信息
+   （同一对卡同时有 NVLink 与 PCIe 边），属于本地 fixture 结构上无法覆盖的保真度类别。
 2. **5.3(b) 的剩余卡配置** —— 补集平局判据能覆盖常见请求规模，但非全覆盖
 3. **均匀性判据的边界** —— 若某机型在同一分量内混用不同 NVLink 条数但期望被当作均匀处理，会多跑一次枚举（无正确性影响，仅开销）
+4. **非均匀机型上的实测结论** —— 三组对照共 441 例（本地 fixture 48、NVIDIA 上游 fixture 64、
+   随机任意拓扑 329）：**真实机型 112 例中 0 例变差**，4 例变好，其余持平；随机任意拓扑
+   328/329 不劣，1 例低 10%。准确表述是**"从不更差、偶尔更好"**，而非一致占优。
