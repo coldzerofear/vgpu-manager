@@ -377,22 +377,9 @@ func (alloc *allocator) sendEventf(object runtime.Object, eventtype, reason, mes
 // req carries Topology / TopologyStrict / Profile pre-parsed; the Pod
 // reference is used only for events and log keys.
 func (alloc *allocator) allocateByTopologyMode(
-	req *AllocationRequest, deviceStore []*device.Device,
-	needNumber int, needCores, needMemory int64,
+	req *AllocationRequest, deviceStore []*device.Device, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, *reason.FilterReason) {
 	pod := req.Pod
-	strict := req.TopologyStrict
-
-	// A single card has no internal connectivity to satisfy, so every topology
-	// constraint is TRIVIALLY met except cross-pod alignment — which is exactly
-	// why the request must still enter the link branch instead of being
-	// short-circuited: a 1-GPU-per-pod gang on a rail-optimized fabric needs its
-	// members on the same rail across nodes, and that alignment lives here.
-	//
-	// The consequence for diagnostics: a single-card request must never emit a
-	// TopologyFallback event. There is nothing to fall back FROM, and firing one
-	// per single-card pod would bury the real multi-card downgrades.
-	trivialTopology := needNumber <= 1
 
 	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
@@ -415,35 +402,31 @@ func (alloc *allocator) allocateByTopologyMode(
 				anchorRoot = root
 			}
 		}
-		klog.V(4).Infof("Pod <%s> use Links topology mode (strict=%v, anchorComponent=%d)", klog.KObj(pod), strict, anchorRoot)
-		if claims, ok := alloc.allocateLink(deviceStore, req, strict, anchorRoot, needNumber, needCores, needMemory); ok {
+		klog.V(4).Infof("Pod <%s> use Links topology mode (strict=%v, anchorComponent=%d)", klog.KObj(pod), req.TopologyStrict, anchorRoot)
+		if claims, ok := alloc.allocateLink(deviceStore, req, anchorRoot, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if !trivialTopology {
-			if rsn := alloc.handleTopologyFallback(
-				pod, strict,
-				reason.LinkTopologyUnsatisfied,
-				"Link topology",
-				"non-topology allocation",
-				alloc.linkFallbackReason(needNumber)); rsn != nil {
-				return nil, rsn
-			}
+		if rsn := alloc.handleTopologyFallback(
+			pod, req.TopologyStrict,
+			reason.LinkTopologyUnsatisfied,
+			"Link topology",
+			"non-topology allocation",
+			alloc.linkFallbackReason(needNumber)); rsn != nil {
+			return nil, rsn
 		}
 	case util.NUMATopology:
-		klog.V(4).Infof("Pod <%s> use NUMA topology mode (strict=%v)", klog.KObj(pod), strict)
+		klog.V(4).Infof("Pod <%s> use NUMA topology mode (strict=%v)", klog.KObj(pod), req.TopologyStrict)
 		// TODO RequestProfile uses average value, maintain semantic consistency with sortDeviceStore.
 		if claims, ok := alloc.allocateNUMA(deviceStore, UniformProfile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if !trivialTopology {
-			if rsn := alloc.handleTopologyFallback(
-				pod, strict,
-				reason.NUMATopologyUnsatisfied,
-				"NUMA topology",
-				"cross-NUMA allocation",
-				alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
-				return nil, rsn
-			}
+		if rsn := alloc.handleTopologyFallback(
+			pod, req.TopologyStrict,
+			reason.NUMATopologyUnsatisfied,
+			"NUMA topology",
+			"cross-NUMA allocation",
+			alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
+			return nil, rsn
 		}
 	case util.NoneTopology:
 		klog.V(4).Infof("Pod <%s> none topology mode", klog.KObj(pod))
@@ -469,8 +452,7 @@ func (alloc *allocator) allocateByTopologyMode(
 // "NUMA topology" / "cross-NUMA allocation"); they appear only in the
 // non-strict TopologyFallback event message.
 func (alloc *allocator) handleTopologyFallback(
-	pod *corev1.Pod, strict bool, strictCode reason.Code,
-	attemptKind, fallbackKind, detail string,
+	pod *corev1.Pod, strict bool, strictCode reason.Code, attemptKind, fallbackKind, detail string,
 ) *reason.FilterReason {
 	if strict {
 		return reason.New(strictCode).WithDetail("%s", detail)
@@ -493,7 +475,7 @@ func (alloc *allocator) handleTopologyFallback(
 // re-verify it.
 func (alloc *allocator) allocateLink(
 	deviceStore []*device.Device, req *AllocationRequest,
-	strict bool, anchorRoot int, needNumber int, needCores, needMemory int64,
+	anchorRoot int, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
@@ -519,19 +501,19 @@ func (alloc *allocator) allocateLink(
 	// may be busy here), and over-constraining would make a pod unschedulable in
 	// exchange for an optimisation.
 	var (
-		railWindow      map[string]struct{}
-		componentWindow map[string]struct{}
+		railWindow      sets.Set[string]
+		componentWindow sets.Set[string]
 		hasAnchor       = anchorRoot >= 0
 	)
 	if req.GangRailKey != "" {
-		if w := uuidSet(alloc.nodeInfo.UUIDsMatchingRailSignature(req.GangRailKey)); len(w) >= needNumber {
+		if w := sets.New[string](alloc.nodeInfo.UUIDsMatchingRailSignature(req.GangRailKey)...); w.Len() >= needNumber {
 			railWindow = w
 		}
 	}
 	if hasAnchor {
-		if w := uuidSet(alloc.nodeInfo.ComponentUUIDs(anchorRoot)); len(w) >= needNumber {
+		if w := sets.New[string](alloc.nodeInfo.ComponentUUIDs(anchorRoot)...); w.Len() >= needNumber {
 			componentWindow = w
-		} else if strict {
+		} else if req.TopologyStrict {
 			// strict promised the gang stays connected and this node's anchored
 			// component is too small, so widening would break the contract.
 			return nil, false
@@ -542,14 +524,14 @@ func (alloc *allocator) allocateLink(
 	// demands a single NVLink-connected set; non-strict takes whatever the tier
 	// walk produced.
 	acceptable := func(p *linkPlan) bool {
-		return p != nil && (!strict || (p.Tier == device.TierNVLink && !p.Spanned))
+		return p != nil && (!req.TopologyStrict || (p.Tier == device.TierNVLink && !p.Spanned))
 	}
 
 	// Build the attempt list explicitly. A nil entry means "no window", so the
 	// windows that were not resolved must be OMITTED rather than left as nil
 	// holes — otherwise an absent rail window would silently become an
 	// unwindowed attempt and skip the anchor entirely.
-	attempts := make([]map[string]struct{}, 0, 3)
+	attempts := make([]sets.Set[string], 0, 3)
 	if railWindow != nil {
 		attempts = append(attempts, railWindow)
 	}
@@ -558,7 +540,7 @@ func (alloc *allocator) allocateLink(
 	}
 	// The unwindowed attempt drops gang affinity. strict promised to keep the
 	// gang connected, so it is only offered when there is no anchor to honour.
-	if !(strict && hasAnchor) {
+	if !(req.TopologyStrict && hasAnchor) {
 		attempts = append(attempts, nil)
 	}
 
@@ -581,17 +563,17 @@ func (alloc *allocator) allocateLink(
 	if !acceptable(plan) {
 		return nil, false
 	}
-	klog.V(5).InfoS("Link topology selection", "node", alloc.nodeInfo.GetName(),
-		"pod", klog.KObj(req.Pod), "tier", plan.Tier, "spanned", plan.Spanned,
-		"devices", getDeviceUUIDs(plan.Devices))
+	klog.V(5).InfoS("Link topology selection", "node", alloc.nodeInfo.GetName(), "pod",
+		klog.KObj(req.Pod), "tier", plan.Tier, "spanned", plan.Spanned, "devices", getDeviceUUIDs(plan.Devices))
 	return buildClaims(plan.Devices, needCores, needMemory), true
 }
 
 // allocateNUMA attempts to satisfy the request within a single NUMA node,
 // applying the binpack/spread policy to choose which NUMA node to consume.
 // Returns (claims, false) when no NUMA node alone can hold needNumber devices.
-func (alloc *allocator) allocateNUMA(deviceStore []*device.Device,
-	profile RequestProfile, policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
+func (alloc *allocator) allocateNUMA(
+	deviceStore []*device.Device, profile RequestProfile,
+	policy util.SchedulerPolicy, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasNUMATopology() {
 		return nil, false

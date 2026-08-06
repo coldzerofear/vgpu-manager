@@ -6,6 +6,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
 
@@ -80,8 +81,8 @@ type linkPlan struct {
 // deviceStore is READ-ONLY here (invariant I1): every candidate list is a fresh
 // slice, so the caller's policy ordering survives intact for the fallback path.
 func (alloc *allocator) allocateTiered(
-	req *AllocationRequest, deviceStore []*device.Device, needNumber int,
-	restrictUUIDs map[string]struct{},
+	req *AllocationRequest, deviceStore []*device.Device,
+	needNumber int, restrictUUIDs sets.Set[string],
 ) *linkPlan {
 
 	if needNumber <= 0 || !alloc.nodeInfo.HasGPUTopology() {
@@ -397,24 +398,11 @@ func inStoreOrder(picked, store []*device.Device) []*device.Device {
 	return out
 }
 
-// uuidSet turns a UUID slice into a lookup set; nil for an empty input so
-// callers can treat "no window" and "empty window" alike.
-func uuidSet(uuids []string) map[string]struct{} {
-	if len(uuids) == 0 {
-		return nil
-	}
-	out := make(map[string]struct{}, len(uuids))
-	for _, u := range uuids {
-		out[u] = struct{}{}
-	}
-	return out
-}
-
 // filterToUUIDs keeps only the devices in the allowed set, preserving order.
-func filterToUUIDs(devices []*device.Device, allowed map[string]struct{}) []*device.Device {
+func filterToUUIDs(devices []*device.Device, allowed sets.Set[string]) []*device.Device {
 	out := make([]*device.Device, 0, len(devices))
 	for _, d := range devices {
-		if _, ok := allowed[d.GetUUID()]; ok {
+		if allowed.Has(d.GetUUID()) {
 			out = append(out, d)
 		}
 	}

@@ -598,7 +598,7 @@ func (p *vgpuPreempt) findAdditionalVictims(req *allocator.AllocationRequest, no
 // Returns nil for non-link requests, single-card requests (the allocator has no
 // component to pin), and nodes without link topology.
 func anchorComponentUUIDs(req *allocator.AllocationRequest, n *device.NodeInfo) sets.Set[string] {
-	if req.Topology.BaseTopology() != util.LinkTopology || req.Max.Number <= 1 || !n.HasGPUTopology() {
+	if req.Topology.BaseTopology() != util.LinkTopology || !n.HasGPUTopology() {
 		return nil
 	}
 	if !req.CrossPodTopology || (req.GangName == "" && req.ControllerOwner == nil) {
@@ -768,18 +768,14 @@ func sortVictimsByPreference(pods []*corev1.Pod, targetUUIDs sets.Set[string]) {
 	// unmarshals the pre-allocation annotation, so calling it per comparison
 	// would cost O(n log n) annotation parses on a path that runs for every
 	// candidate node.
-	var onTarget map[k8stypes.UID]bool
+	onTarget := make(map[k8stypes.UID]bool, len(pods))
 	if targetUUIDs.Len() > 0 {
-		onTarget = make(map[k8stypes.UID]bool, len(pods))
 		for _, p := range pods {
 			if p == nil {
 				continue
 			}
-			for _, uuid := range device.PodPreAllocatedUUIDs(p) {
-				if targetUUIDs.Has(uuid) {
-					onTarget[p.UID] = true
-					break
-				}
+			if targetUUIDs.HasAny(device.PodPreAllocatedUUIDs(p)...) {
+				onTarget[p.UID] = true
 			}
 		}
 	}
