@@ -233,9 +233,7 @@ func (p *vgpuPreempt) Preempt(ctx context.Context, args extenderv1.ExtenderPreem
 				return passthrough(args)
 			}
 		}
-		if domain, ok := filter.FindGangSiblingDomain(gangPods, nodeInfoByName, p.nodeLister, req); ok {
-			req.GangDomainKey = domain
-		}
+		req.GangDomainKey, req.GangRailKey = filter.FindGangSiblingDomain(gangPods, nodeInfoByName, p.nodeLister, req)
 	}
 
 	parallel.Execute(func(_ int, config watcher.BatchConfig) {

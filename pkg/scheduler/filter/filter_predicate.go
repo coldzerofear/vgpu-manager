@@ -475,12 +475,21 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 // siblings is built at most once. Returns ("", false) when no sibling resolves
 // (e.g. the gang's first pod). Best-effort: alignment is an optimization, never a
 // correctness gate.
+// Returns TWO alignment keys, both resolved in the same pass:
+//   - domain: the NVLink component signature (coarse; useless on a fully
+//     connected node, where every GPU shares one component)
+//   - rail: the sorted per-GPU rail keys (fine; the only key that can align
+//     single-card gang members, and the one that matters on a rail-optimized
+//     fabric)
+//
+// Either may be "" when nothing resolved.
 func FindGangSiblingDomain(
 	pods []*corev1.Pod, nodeInfoByName map[string]*allocator.NodeInfo,
 	nodeLister listerv1.NodeLister, req *allocator.AllocationRequest,
-) (string, bool) {
+) (domain string, rail string) {
 
 	domainMap := make(map[string]int)
+	railMap := make(map[string]int)
 	// built caches NodeInfos constructed on demand for non-candidate sibling
 	// nodes, so multiple siblings on one node trigger a single (expensive) build.
 	var built map[string]*allocator.NodeInfo
@@ -521,22 +530,30 @@ func FindGangSiblingDomain(
 		if domain, ok := nodeInfoW.DomainOfUUIDs(uuids); ok {
 			domainMap[domain]++
 		}
+		if rail, ok := nodeInfoW.RailSignatureOfUUIDs(uuids); ok {
+			railMap[rail]++
+		}
 	}
-	domains := maps.Keys(domainMap)
-	switch len(domains) {
+	return majorityKey(domainMap), majorityKey(railMap)
+}
+
+// majorityKey returns the most-voted key, breaking ties on the lower key for
+// determinism. Returns "" when there are no votes.
+func majorityKey(votes map[string]int) string {
+	keys := maps.Keys(votes)
+	switch len(keys) {
 	case 0:
-		return "", false
+		return ""
 	case 1:
-		return domains[0], true
+		return keys[0]
 	default:
-		// Majority wins; ties break to the lower signature for determinism.
-		sort.Slice(domains, func(i, j int) bool {
-			if ci, cj := domainMap[domains[i]], domainMap[domains[j]]; ci != cj {
+		sort.Slice(keys, func(i, j int) bool {
+			if ci, cj := votes[keys[i]], votes[keys[j]]; ci != cj {
 				return ci > cj
 			}
-			return domains[i] < domains[j]
+			return keys[i] < keys[j]
 		})
-		return domains[0], true
+		return keys[0]
 	}
 }
 
@@ -791,9 +808,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 				return filteredNodes, failed, err
 			}
 		}
-		if domain, ok := FindGangSiblingDomain(gangPods, nodeInfoByName, f.nodeLister, req); ok {
-			req.GangDomainKey = domain
-		}
+		req.GangDomainKey, req.GangRailKey = FindGangSiblingDomain(gangPods, nodeInfoByName, f.nodeLister, req)
 	}
 
 	defaultNodePriority := false

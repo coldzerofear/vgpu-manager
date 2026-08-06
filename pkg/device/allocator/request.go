@@ -127,6 +127,21 @@ type AllocationRequest struct {
 	// sibling node not a candidate, or cross-pod off).
 	GangDomainKey string
 
+	// GangRailKey is the FINER cross-node alignment key: the sorted set of
+	// per-GPU rail keys an already-placed gang sibling occupies, resolved on the
+	// sibling's OWN node (rail map when published, device index otherwise).
+	//
+	// It exists because GangDomainKey cannot express single-card alignment: on a
+	// fully connected node every GPU is in one NVLink component, so the
+	// component signature is identical on every node. A GPU's own rail is what
+	// distinguishes "GPU 3 on node A" from "GPU 5 on node B" — and on a
+	// rail-optimized fabric that distinction is the difference between one leaf
+	// hop and a trip through the spine.
+	//
+	// Applied as a PREFERENCE that degrades to GangDomainKey, never as a hard
+	// filter, so an over-constrained alignment cannot make a pod unschedulable.
+	GangRailKey string
+
 	// Profile is the pod's request-weighted scoring profile. Captured
 	// here so the filter and the allocator score with identical weights
 	// for the same pod — see profile.go for the rationale.

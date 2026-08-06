@@ -367,6 +367,19 @@ func inStoreOrder(picked, store []*device.Device) []*device.Device {
 	return out
 }
 
+// uuidSet turns a UUID slice into a lookup set; nil for an empty input so
+// callers can treat "no window" and "empty window" alike.
+func uuidSet(uuids []string) map[string]struct{} {
+	if len(uuids) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(uuids))
+	for _, u := range uuids {
+		out[u] = struct{}{}
+	}
+	return out
+}
+
 // filterToUUIDs keeps only the devices in the allowed set, preserving order.
 func filterToUUIDs(devices []*device.Device, allowed map[string]struct{}) []*device.Device {
 	out := make([]*device.Device, 0, len(devices))

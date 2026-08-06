@@ -380,11 +380,19 @@ func (alloc *allocator) allocateByTopologyMode(
 	req *AllocationRequest, deviceStore []*device.Device,
 	needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, *reason.FilterReason) {
-	if needNumber <= 1 {
-		return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
-	}
 	pod := req.Pod
 	strict := req.TopologyStrict
+
+	// A single card has no internal connectivity to satisfy, so every topology
+	// constraint is TRIVIALLY met except cross-pod alignment — which is exactly
+	// why the request must still enter the link branch instead of being
+	// short-circuited: a 1-GPU-per-pod gang on a rail-optimized fabric needs its
+	// members on the same rail across nodes, and that alignment lives here.
+	//
+	// The consequence for diagnostics: a single-card request must never emit a
+	// TopologyFallback event. There is nothing to fall back FROM, and firing one
+	// per single-card pod would bury the real multi-card downgrades.
+	trivialTopology := needNumber <= 1
 
 	switch req.Topology.BaseTopology() {
 	case util.LinkTopology:
@@ -411,13 +419,15 @@ func (alloc *allocator) allocateByTopologyMode(
 		if claims, ok := alloc.allocateLink(deviceStore, req, strict, anchorRoot, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if rsn := alloc.handleTopologyFallback(
-			pod, strict,
-			reason.LinkTopologyUnsatisfied,
-			"Link topology",
-			"non-topology allocation",
-			alloc.linkFallbackReason(needNumber)); rsn != nil {
-			return nil, rsn
+		if !trivialTopology {
+			if rsn := alloc.handleTopologyFallback(
+				pod, strict,
+				reason.LinkTopologyUnsatisfied,
+				"Link topology",
+				"non-topology allocation",
+				alloc.linkFallbackReason(needNumber)); rsn != nil {
+				return nil, rsn
+			}
 		}
 	case util.NUMATopology:
 		klog.V(4).Infof("Pod <%s> use NUMA topology mode (strict=%v)", klog.KObj(pod), strict)
@@ -425,13 +435,15 @@ func (alloc *allocator) allocateByTopologyMode(
 		if claims, ok := alloc.allocateNUMA(deviceStore, UniformProfile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
-		if rsn := alloc.handleTopologyFallback(
-			pod, strict,
-			reason.NUMATopologyUnsatisfied,
-			"NUMA topology",
-			"cross-NUMA allocation",
-			alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
-			return nil, rsn
+		if !trivialTopology {
+			if rsn := alloc.handleTopologyFallback(
+				pod, strict,
+				reason.NUMATopologyUnsatisfied,
+				"NUMA topology",
+				"cross-NUMA allocation",
+				alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
+				return nil, rsn
+			}
 		}
 	case util.NoneTopology:
 		klog.V(4).Infof("Pod <%s> none topology mode", klog.KObj(pod))
@@ -493,24 +505,45 @@ func (alloc *allocator) allocateLink(
 	// rejects the node (can't keep the gang connected) while non-strict widens
 	// back to the full candidate set — unchanged single-pod behaviour.
 	// anchorRoot < 0 (non-gang, first sibling, or gate off) skips this entirely.
-	var restrict map[string]struct{}
+	// Alignment windows, tried finest-first and DEGRADING rather than failing:
+	//
+	//   L1  same rail set as the sibling  — the only key that works for
+	//                                       single-card gang members, because a
+	//                                       fully connected node has exactly one
+	//                                       NVLink component and its signature is
+	//                                       therefore identical on every node
+	//   L2  same NVLink component         — the historical alignment
+	//   L3  no window
+	//
+	// Degrading matters: an exact rail match is precise but brittle (those cards
+	// may be busy here), and over-constraining would make a pod unschedulable in
+	// exchange for an optimisation.
+	var windows []map[string]struct{}
+	if req.GangRailKey != "" {
+		if w := uuidSet(alloc.nodeInfo.UUIDsMatchingRailSignature(req.GangRailKey)); len(w) >= needNumber {
+			windows = append(windows, w)
+		}
+	}
 	if anchorRoot >= 0 {
-		members := alloc.nodeInfo.ComponentUUIDs(anchorRoot)
-		if len(members) >= needNumber {
-			restrict = make(map[string]struct{}, len(members))
-			for _, u := range members {
-				restrict[u] = struct{}{}
-			}
+		if w := uuidSet(alloc.nodeInfo.ComponentUUIDs(anchorRoot)); len(w) >= needNumber {
+			windows = append(windows, w)
 		} else if strict {
+			// strict promised the gang stays connected and this node cannot
+			// deliver, so widening would break the contract.
 			return nil, false
 		}
 	}
+	windows = append(windows, nil) // L3
 
-	plan := alloc.allocateTiered(req, deviceStore, needNumber, restrict)
-	if plan == nil && restrict != nil && !strict {
-		// The anchor window could not satisfy the request; a non-strict pod
-		// still gets placed, just without gang affinity.
-		plan = alloc.allocateTiered(req, deviceStore, needNumber, nil)
+	var plan *linkPlan
+	for i, window := range windows {
+		if plan = alloc.allocateTiered(req, deviceStore, needNumber, window); plan != nil {
+			break
+		}
+		// strict must not silently widen past the component window.
+		if strict && window != nil && i == len(windows)-2 {
+			return nil, false
+		}
 	}
 	if plan == nil {
 		return nil, false

@@ -2041,6 +2041,80 @@ func (n *NodeInfo) HasGPURailMap() bool {
 	return len(n.gpuRail) > 0
 }
 
+// railKeyOf returns the per-GPU alignment key: the published rail when the node
+// has a rail map, else the device INDEX.
+//
+// The index fallback is not a guess. Rail-optimized fabrics wire NIC_i to GPU_i
+// on every host and home all NIC_i to the same leaf switch, so "GPU 3 on every
+// node" IS "rail 3" by the standard convention — which is also what
+// NCCL_CROSS_NIC=0 exists to exploit. It assumes a homogeneous GPU↔NIC layout
+// across nodes, the same assumption the positional "ord:N" component fallback
+// already makes.
+func (n *NodeInfo) railKeyOf(uuid string) (string, bool) {
+	if rail, ok := n.gpuRail[uuid]; ok {
+		return "rail:" + rail, true
+	}
+	if index, ok := n.deviceIndexMap[uuid]; ok {
+		return "idx:" + strconv.Itoa(index), true
+	}
+	return "", false
+}
+
+// RailSignatureOfUUIDs builds the cross-node alignment key for a set of GPUs
+// **on the node they actually live on**: the sorted, de-duplicated set of their
+// per-GPU rail keys.
+//
+// This is FINER than the NVLink component signature and is what makes
+// single-card cross-pod alignment possible at all: on a fully connected node
+// every GPU shares one component, so the component signature is identical on
+// every node and carries no information. A GPU's own rail still does.
+//
+// Returns ("", false) when nothing resolves.
+func (n *NodeInfo) RailSignatureOfUUIDs(uuids []string) (string, bool) {
+	seen := make(map[string]struct{}, len(uuids))
+	keys := make([]string, 0, len(uuids))
+	for _, uuid := range uuids {
+		key, ok := n.railKeyOf(uuid)
+		if !ok {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return "", false
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ","), true
+}
+
+// UUIDsMatchingRailSignature returns this node's GPUs whose rail key appears in
+// the given signature. Empty when the signature is unset or nothing matches —
+// the caller then degrades to component alignment rather than forcing a wrong
+// placement.
+func (n *NodeInfo) UUIDsMatchingRailSignature(signature string) []string {
+	if signature == "" {
+		return nil
+	}
+	want := make(map[string]struct{})
+	for _, key := range strings.Split(signature, ",") {
+		want[key] = struct{}{}
+	}
+	out := make([]string, 0, len(want))
+	for uuid := range n.deviceIndexMap {
+		if key, ok := n.railKeyOf(uuid); ok {
+			if _, hit := want[key]; hit {
+				out = append(out, uuid)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // AreDevicesLinked reports whether every UUID in the set belongs to the same
 // NVLink-FABRIC component (nvlinkComponentByUUID). Used by strict-link allocation
 // to enforce "the chosen GPUs are NVLink-connected" — so link-strict rejects a

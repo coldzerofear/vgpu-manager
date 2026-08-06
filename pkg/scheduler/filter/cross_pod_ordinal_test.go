@@ -122,17 +122,18 @@ func Test_FindGangSiblingDomain(t *testing.T) {
 	sibling := ordinalSibling("sib", "gangX", "node2", "node2-4", "node2-5")
 
 	t.Run("candidate-node sibling votes", func(t *testing.T) {
-		dom, ok := FindGangSiblingDomain([]*corev1.Pod{sibling},
+		dom, rail := FindGangSiblingDomain([]*corev1.Pod{sibling},
 			map[string]*allocator.NodeInfo{"node2": {NodeInfo: candidateInfo}}, nodeLister, req)
-		require.True(t, ok)
 		require.Equal(t, "ord:1", dom)
+		// The finer rail key is resolved in the same pass; the fixture has no
+		// rail map, so it falls back to device indices.
+		require.Equal(t, "idx:4,idx:5", rail)
 	})
 
 	t.Run("non-candidate sibling built on demand still votes (regression)", func(t *testing.T) {
-		dom, ok := FindGangSiblingDomain([]*corev1.Pod{sibling},
+		dom, _ := FindGangSiblingDomain([]*corev1.Pod{sibling},
 			map[string]*allocator.NodeInfo{}, nodeLister, req) // empty candidate map
-		require.True(t, ok, "sibling on a non-candidate node must contribute its domain")
-		require.Equal(t, "ord:1", dom)
+		require.Equal(t, "ord:1", dom, "sibling on a non-candidate node must contribute its domain")
 	})
 
 	t.Run("self and no-prealloc are ignored", func(t *testing.T) {
@@ -144,8 +145,9 @@ func Test_FindGangSiblingDomain(t *testing.T) {
 			},
 			Spec: corev1.PodSpec{NodeName: "node2"},
 		}
-		_, ok := FindGangSiblingDomain([]*corev1.Pod{self, noPre},
+		dom, rail := FindGangSiblingDomain([]*corev1.Pod{self, noPre},
 			map[string]*allocator.NodeInfo{"node2": {NodeInfo: candidateInfo}}, nodeLister, req)
-		require.False(t, ok)
+		require.Empty(t, dom)
+		require.Empty(t, rail)
 	})
 }

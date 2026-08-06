@@ -447,3 +447,98 @@ func Test_ForEachCombination(t *testing.T) {
 	assert.Equal(t, [][]int{{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}}, got,
 		"must enumerate every 2-subset exactly once, in lexicographic order")
 }
+
+// ---------------------------------------------------------------------------
+// Single-card path and cross-pod rail alignment (Step 3)
+// ---------------------------------------------------------------------------
+
+// Test_SingleCard_EntersTopologyPath: removing the needNumber<=1 short-circuit
+// must not change where a plain single-card pod lands, and must not emit a
+// TopologyFallback event (there is nothing to fall back from).
+func Test_SingleCard_EntersTopologyPath(t *testing.T) {
+	for _, name := range []string{"nvswitch", "dgx1", "pcie"} {
+		t.Run(name, func(t *testing.T) {
+			var n *device.NodeInfo
+			switch name {
+			case "nvswitch":
+				n, _ = nvswitchNode(t)
+			case "dgx1":
+				n, _ = dgx1Node(t)
+			default:
+				n, _ = pcieNode(t)
+			}
+			got := allocUUIDs(t, n, linkPod(1, false, ""))
+			assert.Equal(t, []string{"GPU-0"}, got,
+				"a single card must still take the deviceStore head")
+		})
+	}
+}
+
+// Test_SingleCard_StrictNotRejected: link-strict on a PCIe-only node rejects
+// MULTI-card requests (no NVLink), but a single card is trivially connected and
+// must still be placed.
+func Test_SingleCard_StrictNotRejected(t *testing.T) {
+	n, _ := pcieNode(t)
+	got := allocUUIDs(t, n, linkPod(1, true, ""))
+	assert.Len(t, got, 1, "one card is trivially NVLink-connected")
+}
+
+// Test_SingleCard_RailAlignment is the gap this step exists to close: on a
+// fully connected node the NVLink component signature is identical everywhere,
+// so component alignment cannot steer a 1-GPU-per-pod gang. The per-GPU rail
+// key can.
+func Test_SingleCard_RailAlignment(t *testing.T) {
+	n, _ := nvswitchNode(t)
+	require.Equal(t, 8, n.LinkTierMaxComponentSize(device.TierNVLink),
+		"premise: one component, so the component signature is useless here")
+
+	// Sibling landed on rail 3 (no rail map published → device index is the key).
+	pod := linkPod(1, false, "")
+	pod.Annotations[util.CrossPodTopologyAnnotation] = "true"
+	pod.Labels = map[string]string{util.CoschedulingPodGroupLabel: "gangX"}
+	req := BuildAllocationRequest(pod)
+	req.GangRailKey = "idx:3"
+
+	newPod, rsn, err := NewAllocator(n, nil).Allocate(req)
+	require.NoError(t, err)
+	require.Nil(t, rsn)
+	pre, ok := util.HasAnnotation(newPod, util.PodVGPUPreAllocAnnotation)
+	require.True(t, ok)
+	claim := device.PodDeviceClaim{}
+	require.NoError(t, claim.UnmarshalText(pre))
+	require.Len(t, claim[0].DeviceClaims, 1)
+	assert.Equal(t, "GPU-3", claim[0].DeviceClaims[0].Uuid,
+		"single card must align to the sibling's rail, not take the deviceStore head")
+}
+
+// Test_RailAlignment_DegradesNotFails: an unsatisfiable rail window must widen
+// rather than make the pod unschedulable.
+func Test_RailAlignment_DegradesNotFails(t *testing.T) {
+	// GPU-3 is fully consumed, so the requested rail is unavailable.
+	n, _ := nvswitchNode(t, 3)
+	pod := linkPod(1, false, "")
+	pod.Annotations[util.CrossPodTopologyAnnotation] = "true"
+	req := BuildAllocationRequest(pod)
+	req.GangRailKey = "idx:3"
+
+	newPod, rsn, err := NewAllocator(n, nil).Allocate(req)
+	require.NoError(t, err)
+	require.Nil(t, rsn, "an over-constrained alignment must degrade, never reject")
+	pre, _ := util.HasAnnotation(newPod, util.PodVGPUPreAllocAnnotation)
+	claim := device.PodDeviceClaim{}
+	require.NoError(t, claim.UnmarshalText(pre))
+	assert.Equal(t, "GPU-0", claim[0].DeviceClaims[0].Uuid)
+}
+
+func Test_RailSignature_PrefersPublishedRailOverIndex(t *testing.T) {
+	n, _ := nvswitchNode(t)
+	sig, ok := n.RailSignatureOfUUIDs([]string{"GPU-5", "GPU-2"})
+	require.True(t, ok)
+	assert.Equal(t, "idx:2,idx:5", sig, "sorted and de-duplicated, index fallback")
+
+	matched := n.UUIDsMatchingRailSignature(sig)
+	assert.ElementsMatch(t, []string{"GPU-2", "GPU-5"}, matched)
+
+	assert.Empty(t, n.UUIDsMatchingRailSignature(""))
+	assert.Empty(t, n.UUIDsMatchingRailSignature("rail:nope"))
+}
