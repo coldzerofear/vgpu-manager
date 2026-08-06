@@ -28,6 +28,28 @@ var tierLadder = [...]device.LinkTier{
 	device.TierNVLink, device.TierSwitch, device.TierNUMA, device.TierAny,
 }
 
+// topologyProfile is the scoring profile every device-policy comparison in this
+// file MUST use.
+//
+// It is UniformProfile, not req.Profile, and that is a correctness requirement
+// rather than a style choice. sortDeviceStore orders deviceStore by
+// Device.Score() — an UNWEIGHTED three-dimension average — and
+// Score(DeviceUtilization(d), UniformProfile, policy) is monotonically
+// equivalent to it (one is 1 - the other/100). The request-weighted profile is
+// NOT.
+//
+// policyRuns depends on that equivalence. It scans deviceStore and starts a new
+// run whenever the score changes, so runs are always contiguous — but they are
+// only the true POLICY-EQUIVALENCE CLASSES when the split metric matches the
+// sort metric. Score with req.Profile and devices the policy is genuinely
+// indifferent between get split into separate runs, which silently denies link
+// quality the chance to choose among them: the run boundary decides instead,
+// and it decides by device ID.
+//
+// See also the TODO in sortDeviceStore / allocateByTopologyMode: if the device
+// sort ever moves to request-weighted scoring, this must move with it.
+var topologyProfile = UniformProfile
+
 // linkPlan is the outcome of a tiered link allocation.
 type linkPlan struct {
 	// Devices are the chosen cards, ALWAYS a subsequence of the input
@@ -92,7 +114,7 @@ func (alloc *allocator) allocateTiered(
 		// doc §4.2. Only meaningful at the LOOSEST tier in practice, because a
 		// tighter tier's leftovers are always reachable at a looser one.
 		if tier == device.TierAny {
-			if picked := alloc.spanGroups(req, groups, tier, needNumber); len(picked) == needNumber {
+			if picked := alloc.spanGroups(req, candidates, groups, tier, needNumber); len(picked) == needNumber {
 				return &linkPlan{Devices: picked, Tier: tier, Spanned: true}
 			}
 		}
@@ -169,7 +191,7 @@ func (alloc *allocator) pickGroup(
 	for i, g := range groups {
 		all[i] = scored{
 			group:       g,
-			policyScore: Score(NumaUtilization(g.devices), req.Profile, req.DevicePolicy),
+			policyScore: Score(NumaUtilization(g.devices), topologyProfile, req.DevicePolicy),
 			linkScore:   alloc.bestLinkScore(g.devices, tier, needNumber),
 		}
 	}
@@ -197,6 +219,12 @@ func (alloc *allocator) bestLinkScore(devices []*device.Device, tier device.Link
 		return 0
 	}
 	linked := alloc.toLinkDevices(devices)
+	if len(linked) < needNumber {
+		// toLinkDevices drops UUIDs the node device list does not know. It should
+		// never happen (candidates come from that same list), but a short slice
+		// must not index out of range below.
+		return 0
+	}
 	if alloc.nodeInfo.LinkTierIsUniform(tier) {
 		pair := gpuallocator.PairScore(linked[0], linked[1])
 		return pair * needNumber * (needNumber - 1) / 2
@@ -285,7 +313,8 @@ func (alloc *allocator) pickWithinRun(
 // since internal(aᵢ) ≥ parentScore × C(aᵢ,2), concentrating in fewer components
 // always scores at least as high. See the design doc §4.2.
 func (alloc *allocator) spanGroups(
-	req *AllocationRequest, groups []componentGroup, tier device.LinkTier, needNumber int,
+	req *AllocationRequest, candidates []*device.Device, groups []componentGroup,
+	tier device.LinkTier, needNumber int,
 ) []*device.Device {
 
 	ordered := make([]componentGroup, len(groups))
@@ -296,14 +325,13 @@ func (alloc *allocator) spanGroups(
 		if len(ordered[i].devices) != len(ordered[j].devices) {
 			return len(ordered[i].devices) > len(ordered[j].devices)
 		}
-		si := Score(NumaUtilization(ordered[i].devices), req.Profile, req.DevicePolicy)
-		sj := Score(NumaUtilization(ordered[j].devices), req.Profile, req.DevicePolicy)
+		si := Score(NumaUtilization(ordered[i].devices), topologyProfile, req.DevicePolicy)
+		sj := Score(NumaUtilization(ordered[j].devices), topologyProfile, req.DevicePolicy)
 		if si != sj {
 			return si > sj
 		}
 		return ordered[i].root < ordered[j].root
 	})
-	var picked []*device.Device
 	all := make([]*device.Device, 0, needNumber)
 	for _, g := range ordered {
 		remaining := needNumber - len(all)
@@ -319,8 +347,10 @@ func (alloc *allocator) spanGroups(
 	if len(all) != needNumber {
 		return nil
 	}
-	picked = all
-	return picked
+	// Members were gathered group-by-group in capacity order, so re-emit them in
+	// deviceStore order — invariant I2 applies to the spanning path too, and
+	// without this the result would be a re-ordered set rather than a subsequence.
+	return inStoreOrder(all, candidates)
 }
 
 // policyRuns splits devices into maximal groups of EQUAL device-policy score,
@@ -340,9 +370,9 @@ func policyRuns(req *AllocationRequest, devices []*device.Device) [][]*device.De
 	}
 	var runs [][]*device.Device
 	start := 0
-	cur := Score(DeviceUtilization(devices[0]), req.Profile, req.DevicePolicy)
+	cur := Score(DeviceUtilization(devices[0]), topologyProfile, req.DevicePolicy)
 	for i := 1; i < len(devices); i++ {
-		s := Score(DeviceUtilization(devices[i]), req.Profile, req.DevicePolicy)
+		s := Score(DeviceUtilization(devices[i]), topologyProfile, req.DevicePolicy)
 		if s != cur {
 			runs = append(runs, devices[start:i])
 			start, cur = i, s

@@ -542,3 +542,149 @@ func Test_RailSignature_PrefersPublishedRailOverIndex(t *testing.T) {
 	assert.Empty(t, n.UUIDsMatchingRailSignature(""))
 	assert.Empty(t, n.UUIDsMatchingRailSignature("rail:nope"))
 }
+
+// ---------------------------------------------------------------------------
+// Regression pins for defects found in review
+// ---------------------------------------------------------------------------
+
+// Test_PolicyRuns_ContiguousUnderSortMetric pins the profile-consistency
+// requirement. policyRuns splits deviceStore into runs of equal policy score
+// and relies on equal-score devices being ADJACENT — which only holds if it
+// scores with the SAME metric sortDeviceStore ordered by (unweighted
+// Device.Score(), i.e. UniformProfile). Scoring with the request-weighted
+// profile produces non-contiguous runs and selects the wrong devices.
+func Test_PolicyRuns_ContiguousUnderSortMetric(t *testing.T) {
+	// A memory-heavy request makes req.Profile diverge sharply from the
+	// unweighted average, and devices differ across dimensions so the two
+	// metrics order them differently.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", Annotations: map[string]string{
+			util.DeviceTopologyModeAnnotation:    string(util.LinkTopology),
+			util.DeviceSchedulerPolicyAnnotation: "binpack",
+		}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{vgpuContainer("c", 2, 1, 8192)}},
+	}
+	req := BuildAllocationRequest(pod)
+
+	devs := []*device.Device{
+		// same unweighted score, different per-dimension mix
+		device.NewFakeDeviceWithUUID("a", 0, 5, 10, 0, 100, 0, 10240, -1),
+		device.NewFakeDeviceWithUUID("b", 1, 0, 10, 50, 100, 0, 10240, -1),
+		device.NewFakeDeviceWithUUID("c", 2, 0, 10, 0, 100, 5120, 10240, -1),
+		device.NewFakeDeviceWithUUID("d", 3, 0, 10, 0, 100, 0, 10240, -1),
+	}
+	store := append([]*device.Device(nil), devs...)
+	NewDevicePolicyPriority(*req).Sort(store)
+
+	// a, b and c differ per dimension but share the same UNWEIGHTED score, so
+	// the policy is genuinely indifferent between them and they must form ONE
+	// run — leaving the choice to link quality. Under the request-weighted
+	// profile their scores diverge and they would be split into three runs,
+	// which hands the decision to the run boundary (i.e. device ID) instead.
+	require.Equal(t, devs[0].Score(), devs[1].Score())
+	require.Equal(t, devs[1].Score(), devs[2].Score())
+	require.NotEqual(t, devs[0].Score(), devs[3].Score())
+
+	runs := policyRuns(req, store)
+	require.Len(t, runs, 2,
+		"policy-indifferent devices must share a run; splitting them denies link quality the choice")
+
+	// Each run must group devices equal under the metric the store was sorted by.
+	for _, run := range runs {
+		want := run[0].Score()
+		for _, d := range run {
+			assert.Equal(t, want, d.Score(),
+				"a run must group devices equal under the metric deviceStore was sorted by")
+		}
+	}
+	// Runs must still cover the store in order.
+	at := 0
+	for _, run := range runs {
+		for _, d := range run {
+			require.Less(t, at, len(store))
+			assert.Same(t, store[at], d)
+			at++
+		}
+	}
+	assert.Equal(t, len(store), at)
+}
+
+// Test_Strict_TriesComponentWindowAfterRail pins the window-ladder defect: a
+// rail window can produce a LOOSER plan than the component window would (on a
+// heterogeneous node the rail-matched cards may straddle two NVLink islands).
+// Stopping at the first non-nil plan would reject a node the component window
+// could still have satisfied.
+func Test_Strict_TriesComponentWindowAfterRail(t *testing.T) {
+	// Two 4-card NVLink islands, cross-island pairs only SYS.
+	devs := topoDevices(8)
+	var fl []device.FakeLink
+	for _, island := range [][]int{{0, 1, 2, 3}, {4, 5, 6, 7}} {
+		for i := 0; i < len(island); i++ {
+			for j := i + 1; j < len(island); j++ {
+				fl = append(fl, device.FakeLink{A: island[i], B: island[j], Type: links.SingleNVLINKLink})
+			}
+		}
+	}
+	for i := 0; i < 4; i++ {
+		for j := 4; j < 8; j++ {
+			fl = append(fl, device.FakeLink{A: i, B: j, Type: links.P2PLinkCrossCPU})
+		}
+	}
+	n := fixtureNode("split", devs, fl...)
+
+	pod := linkPod(2, true, "") // link-STRICT, 2 cards
+	pod.Annotations[util.CrossPodTopologyAnnotation] = "true"
+	req := BuildAllocationRequest(pod)
+	// Rail window straddles the islands — a plan built from it can only reach
+	// TierAny, which strict must refuse.
+	req.GangRailKey = "idx:0,idx:4"
+
+	alloc := NewAllocator(n, nil)
+	store := append([]*device.Device(nil), devs...)
+	NewDevicePolicyPriority(*req).Sort(store)
+
+	// Component window = island A. strict must fall through to it rather than
+	// rejecting on the rail window's looser plan.
+	rootA, ok := n.LinkComponentOf(device.TierNVLink, "GPU-0")
+	require.True(t, ok)
+	claims, got := alloc.allocateLink(store, req, true, rootA, 2, 100, 1024)
+	require.True(t, got, "strict must try the component window after the rail window fails it")
+	require.Len(t, claims, 2)
+	for _, c := range claims {
+		assert.Contains(t, []string{"GPU-0", "GPU-1", "GPU-2", "GPU-3"}, c.Uuid)
+	}
+}
+
+// Test_SpanGroups_PreservesStoreOrder pins invariant I2 on the spanning path,
+// which the fixture suite never exercises (every machine type has one component
+// at TierAny). Reaching it needs GPUs with no P2P path at all.
+func Test_SpanGroups_PreservesStoreOrder(t *testing.T) {
+	// Two isolated pairs: 0-1 and 2-3 linked, nothing between them at any tier.
+	devs := topoDevices(4)
+	n := fixtureNode("islands", devs,
+		device.FakeLink{A: 0, B: 1, Type: links.SingleNVLINKLink},
+		device.FakeLink{A: 2, B: 3, Type: links.SingleNVLINKLink},
+	)
+	require.Equal(t, 2, n.LinkTierMaxComponentSize(device.TierAny),
+		"premise: even the loosest tier leaves two components")
+
+	req := BuildAllocationRequest(linkPod(3, false, ""))
+	store := append([]*device.Device(nil), devs...)
+	NewDevicePolicyPriority(*req).Sort(store)
+
+	plan := NewAllocator(n, nil).allocateTiered(req, store, 3, nil)
+	require.NotNil(t, plan, "3 cards must be satisfiable by spanning components")
+	require.True(t, plan.Spanned)
+	require.Len(t, plan.Devices, 3)
+
+	pos := map[string]int{}
+	for i, d := range store {
+		pos[d.GetUUID()] = i
+	}
+	last := -1
+	for _, d := range plan.Devices {
+		at := pos[d.GetUUID()]
+		assert.Greater(t, at, last, "I2 must hold on the spanning path too")
+		last = at
+	}
+}

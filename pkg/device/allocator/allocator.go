@@ -518,37 +518,67 @@ func (alloc *allocator) allocateLink(
 	// Degrading matters: an exact rail match is precise but brittle (those cards
 	// may be busy here), and over-constraining would make a pod unschedulable in
 	// exchange for an optimisation.
-	var windows []map[string]struct{}
+	var (
+		railWindow      map[string]struct{}
+		componentWindow map[string]struct{}
+		hasAnchor       = anchorRoot >= 0
+	)
 	if req.GangRailKey != "" {
 		if w := uuidSet(alloc.nodeInfo.UUIDsMatchingRailSignature(req.GangRailKey)); len(w) >= needNumber {
-			windows = append(windows, w)
+			railWindow = w
 		}
 	}
-	if anchorRoot >= 0 {
+	if hasAnchor {
 		if w := uuidSet(alloc.nodeInfo.ComponentUUIDs(anchorRoot)); len(w) >= needNumber {
-			windows = append(windows, w)
+			componentWindow = w
 		} else if strict {
-			// strict promised the gang stays connected and this node cannot
-			// deliver, so widening would break the contract.
+			// strict promised the gang stays connected and this node's anchored
+			// component is too small, so widening would break the contract.
 			return nil, false
 		}
 	}
-	windows = append(windows, nil) // L3
 
+	// acceptable decides whether a plan honours the caller's contract. strict
+	// demands a single NVLink-connected set; non-strict takes whatever the tier
+	// walk produced.
+	acceptable := func(p *linkPlan) bool {
+		return p != nil && (!strict || (p.Tier == device.TierNVLink && !p.Spanned))
+	}
+
+	// Build the attempt list explicitly. A nil entry means "no window", so the
+	// windows that were not resolved must be OMITTED rather than left as nil
+	// holes — otherwise an absent rail window would silently become an
+	// unwindowed attempt and skip the anchor entirely.
+	attempts := make([]map[string]struct{}, 0, 3)
+	if railWindow != nil {
+		attempts = append(attempts, railWindow)
+	}
+	if componentWindow != nil {
+		attempts = append(attempts, componentWindow)
+	}
+	// The unwindowed attempt drops gang affinity. strict promised to keep the
+	// gang connected, so it is only offered when there is no anchor to honour.
+	if !(strict && hasAnchor) {
+		attempts = append(attempts, nil)
+	}
+
+	// Keep trying while the plan does not satisfy strict. A rail window can
+	// legitimately produce a LOOSER plan than the component window would — on a
+	// heterogeneous cluster the rail-matched cards may straddle two NVLink
+	// components — so stopping at the first non-nil plan would reject a node the
+	// component window could still have satisfied.
 	var plan *linkPlan
-	for i, window := range windows {
-		if plan = alloc.allocateTiered(req, deviceStore, needNumber, window); plan != nil {
+	for _, window := range attempts {
+		got := alloc.allocateTiered(req, deviceStore, needNumber, window)
+		if acceptable(got) {
+			plan = got
 			break
 		}
-		// strict must not silently widen past the component window.
-		if strict && window != nil && i == len(windows)-2 {
-			return nil, false
+		if plan == nil {
+			plan = got // best non-strict candidate seen so far
 		}
 	}
-	if plan == nil {
-		return nil, false
-	}
-	if strict && (plan.Tier != device.TierNVLink || plan.Spanned) {
+	if !acceptable(plan) {
 		return nil, false
 	}
 	klog.V(5).InfoS("Link topology selection", "node", alloc.nodeInfo.GetName(),
