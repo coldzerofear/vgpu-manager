@@ -2008,6 +2008,43 @@ func (n *NodeInfo) LinkComponentOf(tier LinkTier, uuid string) (int, bool) {
 	return root, root >= 0
 }
 
+// ConnectedAtTier reports whether the two GPUs have a DIRECT link at least as
+// strong as the tier threshold.
+//
+// This is deliberately different from sharing a component root. Components are
+// computed over the WHOLE node, so two GPUs can share one while every path
+// between them runs through cards that are currently unavailable — the
+// component says "this fabric connects them", not "these two are connected
+// given what is free right now". Selection needs the second question, so it
+// rebuilds connectivity over the candidate set from these direct edges.
+func (n *NodeInfo) ConnectedAtTier(uuidA, uuidB string, tier LinkTier) bool {
+	if tier < 0 || tier >= numLinkTiers {
+		return false
+	}
+	ia, ok := n.deviceIndexMap[uuidA]
+	if !ok {
+		return false
+	}
+	ib, ok := n.deviceIndexMap[uuidB]
+	if !ok || ia == ib {
+		return false
+	}
+	if ia >= len(n.deviceList) || ib >= len(n.deviceList) {
+		return false
+	}
+	dev := n.deviceList[ia]
+	if dev == nil {
+		return false
+	}
+	threshold := linkTierThreshold[tier]
+	for _, l := range dev.Links[ib] {
+		if int(l.Type) >= threshold {
+			return true
+		}
+	}
+	return false
+}
+
 // LinkTierIsUniform reports whether every component at this tier has internally
 // identical link types, i.e. whether any subset of a component is
 // interchangeable.

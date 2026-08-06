@@ -104,8 +104,15 @@ func setScore(set []*gpuallocator.Device) int {
 }
 
 // setScoreWithFixed scores a candidate set together with an already-chosen set:
-// pairs inside the candidate, plus every candidate↔fixed pair. Pairs inside
+// pairs inside the candidate, plus every candidate-to-fixed pair. Pairs inside
 // `fixed` are a constant across candidates and so are omitted.
+//
+// The objective is the SUM, matching what the previous implementation
+// optimised. Ranking by the BOTTLENECK (weakest pair) instead was measured and
+// rejected: it is arguably the better model for collectives, but it regressed
+// the summed score on a third of random topologies AND by 2.4% on DGX-1, and
+// changing the objective is a far larger behavioural departure than this
+// redesign needs to make. See comparison_test.go.
 func setScoreWithFixed(set, fixed []*gpuallocator.Device) int {
 	total := setScore(set)
 	for _, a := range set {
