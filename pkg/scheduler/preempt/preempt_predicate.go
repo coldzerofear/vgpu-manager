@@ -451,7 +451,7 @@ func (p *vgpuPreempt) refineForNode(info *allocator.NodeInfo, victims *extenderv
 	// Second pass: in-tree under-selected (likely because per-device or
 	// annotation constraints invisible to it require more victims). Walk the
 	// remaining lower-priority pods on this node and greedily add until fit.
-	additional := p.findAdditionalVictims(req, node, allVGPUPods, excludedUidSet)
+	additional := p.findAdditionalVictims(req, nodeInfo, allVGPUPods, excludedUidSet)
 	for _, cand := range additional {
 		excludedUidSet.Insert(cand.UID)
 		keep = append(keep, cand)
@@ -551,9 +551,10 @@ func (p *vgpuPreempt) canAllocate(req *allocator.AllocationRequest, nodeInfo *de
 // preemption response. Stuck pods that occupy predicate-node without ever
 // binding cannot be evicted through this path — they must be reclaimed by a
 // separate controller or by the existing fresh-window grace mechanism.
-func (p *vgpuPreempt) findAdditionalVictims(req *allocator.AllocationRequest, node *corev1.Node,
+func (p *vgpuPreempt) findAdditionalVictims(req *allocator.AllocationRequest, nodeInfo *device.NodeInfo,
 	allVGPUPods []*corev1.Pod, excludedUidSet sets.Set[k8stypes.UID]) []*corev1.Pod {
 
+	nodeName := nodeInfo.GetName()
 	priority := corev1helpers.PodPriority(req.Pod)
 	out := make([]*corev1.Pod, 0)
 	for _, candidate := range allVGPUPods {
@@ -564,7 +565,7 @@ func (p *vgpuPreempt) findAdditionalVictims(req *allocator.AllocationRequest, no
 			continue
 		}
 		// Must be actually bound to this node — see function doc.
-		if candidate.Spec.NodeName != node.Name {
+		if candidate.Spec.NodeName != nodeName {
 			continue
 		}
 		if corev1helpers.PodPriority(candidate) >= priority {
@@ -578,8 +579,38 @@ func (p *vgpuPreempt) findAdditionalVictims(req *allocator.AllocationRequest, no
 		}
 		out = append(out, candidate)
 	}
-	sortVictimsByPreference(out)
+	sortVictimsByPreference(out, anchorComponentUUIDs(req, nodeInfo))
 	return out
+}
+
+// anchorComponentUUIDs returns the GPUs of the NVLink component this preemption
+// should aim to clear, or nil when there is nothing to aim at.
+//
+// Deliberately ONLY the gang-anchor case. That anchor is already resolved for
+// this request earlier in Preempt, so targeting costs nothing extra, and it is
+// the case where the preemptor's placement is genuinely pinned to one
+// component. Scoring every component to guess a target when no anchor exists
+// was considered and dropped: it needs live per-component occupancy, which at
+// this point in refineForNode reflects a FAILED allocation attempt's partial
+// accumulation, and the added complexity bought a heuristic on top of a
+// heuristic.
+//
+// Returns nil for non-link requests, single-card requests (the allocator has no
+// component to pin), and nodes without link topology.
+func anchorComponentUUIDs(req *allocator.AllocationRequest, n *device.NodeInfo) sets.Set[string] {
+	if req.Topology.BaseTopology() != util.LinkTopology || req.Max.Number <= 1 || !n.HasGPUTopology() {
+		return nil
+	}
+	if !req.CrossPodTopology || (req.GangName == "" && req.ControllerOwner == nil) {
+		return nil
+	}
+	if root, ok := n.GangAnchorComponent(req.GangName, req.ControllerOwner, sets.New(req.Pod.UID)); ok {
+		return sets.New(n.ComponentUUIDs(root)...)
+	}
+	if root, ok := n.ComponentByDomain(req.GangDomainKey); ok {
+		return sets.New(n.ComponentUUIDs(root)...)
+	}
+	return nil
 }
 
 // Check if the pod has been recorded as allowing interrupts
@@ -732,9 +763,39 @@ func isProtectedFromPreemption(pod *corev1.Pod, gangName string) bool {
 // can't reach this list. Remaining tiebreakers, in order:
 //  1. Lower priority first — standard preemption semantic.
 //  2. Newer creation time first — minimize the amount of in-flight work lost.
-func sortVictimsByPreference(pods []*corev1.Pod) {
+func sortVictimsByPreference(pods []*corev1.Pod, targetUUIDs sets.Set[string]) {
+	// Precomputed, NOT evaluated inside the comparator: PodPreAllocatedUUIDs
+	// unmarshals the pre-allocation annotation, so calling it per comparison
+	// would cost O(n log n) annotation parses on a path that runs for every
+	// candidate node.
+	var onTarget map[k8stypes.UID]bool
+	if targetUUIDs.Len() > 0 {
+		onTarget = make(map[k8stypes.UID]bool, len(pods))
+		for _, p := range pods {
+			if p == nil {
+				continue
+			}
+			for _, uuid := range device.PodPreAllocatedUUIDs(p) {
+				if targetUUIDs.Has(uuid) {
+					onTarget[p.UID] = true
+					break
+				}
+			}
+		}
+	}
 	sort.SliceStable(pods, func(i, j int) bool {
 		a, b := pods[i], pods[j]
+		// Victims occupying the component the preemptor must assemble come
+		// first. refineForNode appends victims and re-tests without ever
+		// backtracking, so evicting outside that component frees resources
+		// that cannot contribute — permanent over-eviction, and for a strict
+		// request it can exhaust the pool and drop a node that was actually
+		// satisfiable. This key sits ABOVE the gang key deliberately: a gang
+		// pod inside the target is still the better victim than a standalone
+		// pod outside it, because only the former can make the placement work.
+		if at, bt := onTarget[a.UID], onTarget[b.UID]; at != bt {
+			return at
+		}
 		// Non gang members are preferred for selection.
 		_, aGang := util.PodHasGangName(a)
 		_, bGang := util.PodHasGangName(b)
