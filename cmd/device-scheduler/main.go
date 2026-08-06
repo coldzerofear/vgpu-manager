@@ -26,6 +26,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/bind"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	tlsconfig "github.com/grepplabs/cert-source/config"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
@@ -137,6 +138,9 @@ func runApp(opt *options.Options) (exitCode int) {
 	route.AddFilterPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
 	route.AddPreemptPredicate(handler, preemptPlugin)
+	// Served on the extender's existing port: the endpoint inherits its TLS
+	// setting and needs no extra chart plumbing (port, probe, NetworkPolicy).
+	route.AddMetricsHandle(handler, metrics.Handler())
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	factory.Start(ctx.Done())

@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -18,12 +19,31 @@ import (
 type allocator struct {
 	nodeInfo *device.NodeInfo
 	recorder record.EventRecorder
+	// simulate suppresses every observable side effect (events, metrics).
+	// See NewSimulationAllocator.
+	simulate bool
 }
 
 func NewAllocator(nodeInfo *device.NodeInfo, recorder record.EventRecorder) *allocator {
 	return &allocator{
 		nodeInfo: nodeInfo,
 		recorder: recorder,
+	}
+}
+
+// NewSimulationAllocator builds an allocator for DRY RUNS — currently
+// preemption, which re-runs allocation once per victim set it tests to ask
+// "would the pod fit if these pods were gone?".
+//
+// Simulations must not be observable. They place nothing, and a single
+// preemption can run several of them, so counting their searches and outcomes would
+// inflate the per-search metrics by an unbounded factor and make the numbers
+// unreadable. Excluding them here, at the source, is more reliable than trying
+// to subtract them from a dashboard later.
+func NewSimulationAllocator(nodeInfo *device.NodeInfo) *allocator {
+	return &allocator{
+		nodeInfo: nodeInfo,
+		simulate: true,
 	}
 }
 
@@ -419,30 +439,36 @@ func (alloc *allocator) allocateByTopologyMode(
 			if plan.Tier != device.TierNVLink || plan.Spanned {
 				alloc.reportLinkDowngrade(pod, plan, needNumber)
 			}
+			alloc.recordOutcome(req, linkResult(plan), alignmentOf(req, anchorRoot))
 			return buildClaims(plan.Devices, needCores, needMemory), nil
 		}
 		if rsn := alloc.handleTopologyFallback(
 			pod, req.TopologyStrict,
-			reason.LinkTopologyUnsatisfied,
+			reason.LinkTopologyUnsatisfied, util.LinkTopology,
 			"Link topology",
 			"non-topology allocation",
 			alloc.linkFallbackReason(needNumber)); rsn != nil {
 			return nil, rsn
 		}
+		// Non-strict fell all the way through to resource-ordered allocation.
+		alloc.recordOutcome(req, metrics.ResultNone, alignmentOf(req, anchorRoot))
 	case util.NUMATopology:
 		klog.V(4).Infof("Pod <%s> use NUMA topology mode (strict=%v)", klog.KObj(pod), req.TopologyStrict)
 		// TODO RequestProfile uses average value, maintain semantic consistency with sortDeviceStore.
 		if claims, ok := alloc.allocateNUMA(deviceStore, UniformProfile, req.DevicePolicy, needNumber, needCores, needMemory); ok {
+			alloc.recordOutcome(req, metrics.ResultNUMA, "")
 			return claims, nil
 		}
 		if rsn := alloc.handleTopologyFallback(
 			pod, req.TopologyStrict,
-			reason.NUMATopologyUnsatisfied,
+			reason.NUMATopologyUnsatisfied, util.NUMATopology,
 			"NUMA topology",
 			"cross-NUMA allocation",
 			alloc.numaFallbackReason(needNumber, deviceStore)); rsn != nil {
 			return nil, rsn
 		}
+		// Non-strict: placed, but spanning NUMA nodes.
+		alloc.recordOutcome(req, metrics.ResultCrossNUMA, "")
 	case util.NoneTopology:
 		klog.V(4).Infof("Pod <%s> none topology mode", klog.KObj(pod))
 	default:
@@ -467,9 +493,15 @@ func (alloc *allocator) allocateByTopologyMode(
 // "NUMA topology" / "cross-NUMA allocation"); they appear only in the
 // non-strict TopologyFallback event message.
 func (alloc *allocator) handleTopologyFallback(
-	pod *corev1.Pod, strict bool, strictCode reason.Code, attemptKind, fallbackKind, detail string,
+	pod *corev1.Pod, strict bool, strictCode reason.Code, mode util.TopologyMode,
+	attemptKind, fallbackKind, detail string,
 ) *reason.FilterReason {
 	if strict {
+		// PER NODE EVALUATION: this counts nodes refused, not pods. One pod can
+		// be refused by every node in the cluster.
+		if !alloc.simulate {
+			metrics.TopologyStrictRejectTotal.WithLabelValues(string(mode)).Inc()
+		}
 		return reason.New(strictCode).WithDetail("%s", detail)
 	}
 	alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
@@ -580,6 +612,55 @@ func (alloc *allocator) allocateLink(
 	klog.V(5).InfoS("Link topology selection", "node", alloc.nodeInfo.GetName(), "pod",
 		klog.KObj(req.Pod), "tier", plan.Tier, "spanned", plan.Spanned, "devices", getDeviceUUIDs(plan.Devices))
 	return plan, true
+}
+
+// recordOutcome stores what this node's topology decision achieved, so the
+// filter can report the pod's real outcome once it knows which node won.
+//
+// Recorded on the request rather than counted here because THIS runs per node
+// evaluation: the filter may examine several nodes before one accepts the pod,
+// and counting each attempt would report a single pod as several placements.
+// Simulations record nothing at all — they place nothing.
+func (alloc *allocator) recordOutcome(req *AllocationRequest, result, alignment string) {
+	if alloc.simulate {
+		return
+	}
+	req.recordTopologyOutcome(result, alignment)
+}
+
+// linkResult maps a plan to the metric vocabulary. Spanning outranks the tier:
+// a set split across components has no single connectivity level to report, and
+// "no interconnect" is the fact worth surfacing.
+func linkResult(plan *linkPlan) string {
+	if plan.Spanned {
+		return metrics.ResultSpanned
+	}
+	switch plan.Tier {
+	case device.TierNVLink:
+		return metrics.ResultNVLink
+	case device.TierSwitch:
+		return metrics.ResultSwitch
+	case device.TierNUMA:
+		return metrics.ResultNUMA
+	default:
+		return metrics.ResultAny
+	}
+}
+
+// alignmentOf reports which cross-pod alignment key steered this placement.
+// Empty for pods that did not opt in, so they contribute no series at all.
+func alignmentOf(req *AllocationRequest, anchorRoot int) string {
+	if !req.CrossPodTopology {
+		return ""
+	}
+	switch {
+	case req.GangRailKey != "":
+		return metrics.AlignRail
+	case anchorRoot >= 0:
+		return metrics.AlignComponent
+	default:
+		return metrics.AlignNone
+	}
 }
 
 // reportLinkDowngrade records that a non-strict link request was placed BELOW

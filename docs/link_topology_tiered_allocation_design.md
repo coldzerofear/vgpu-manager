@@ -300,7 +300,29 @@ I1~I4 各一组断言，尤其 I2（保序子序列）应对所有 fixture × �
 - `link-strict` 在各 fixture 上的拒绝/通过判定与改造前一致（NVSwitch、bridge、纯 PCIe）
 - 单卡非 gang Pod：Step 3 后结果与改造前一致
 
-## 10. 风险
+## 10. 可观测性
+
+指标由 extender 现有端口的 `/metrics` 暴露。**每个指标只有一个计数单位**，写在 Help 里 —— extender 有两个天然单位，混用会产出"看起来有意义但不是"的数字。
+
+| 指标 | 单位 | 回答什么 |
+|---|---|---|
+| `topology_placement_total{mode,result}` | **每 Pod** | 申请 link/numa 的 Pod 实际拿到了什么连通性。`result != 满足值` 就是全部静默降级 |
+| `pod_policy_total{node_policy,device_policy,topology_mode}` | **每 Pod** | 用户实际在申请什么，据此判断拓扑工作对本集群是否有价值 |
+| `crosspod_alignment_total{result}` | **每 Pod** | 跨 Pod 对齐用的是 rail / component / 没对上 |
+| `topology_strict_reject_total{mode}` | 每节点评估 | strict 契约拒了多少节点。与放置率对比即可判断是否过度约束 |
+| `node_reject_total{code}` | 每节点评估 | 按结构化原因分桶的节点拒绝 |
+| `link_search_total{algo}` + `link_search_candidates` | **每次搜索** | 分量内组合搜索是否真的被执行。均匀 fabric 恒为 0；非零即证明集群里有 DGX-1 类非均匀机型 |
+| `filter_duration_seconds{stage}` | 每 Filter 调用 | `node` / `device_work` / `device_lock_wait` |
+
+三条设计约束：
+
+1. **每 Pod 的指标在 filter 里发**，不在 allocator 里 —— allocator 按节点运行，一个 Pod 可能评估多个节点才落地，在那里计数会把一个 Pod 报成多次放置。allocator 把结果记在该节点的 request 快照上，filter 在确定赢家后读取。
+2. **抢占的 dry-run 完全不计**。`NewSimulationAllocator` 在源头关掉所有可观测副作用；一次抢占会跑多轮模拟，事后从看板里减是减不干净的。
+3. **锁等待独立观测**。`SerializedNodeFilter` 默认开启，把排队和实际工作折在一起会让竞争看起来像"分配变慢"。两者是独立观测值而非相减后的单值 —— Filter 是并发的，把等待时间挂在共享的 `gpuFilter` 上做减法就是 data race。
+
+多容器 Pod 取**最差**的那个容器的结果：一个 Pod 的放置质量不会好过它最不走运的容器。
+
+## 11. 风险
 
 1. **DGX-1 fixture 保真度** —— Step 2 正确性完全依赖它，是唯一能挡住回归的东西
 2. **5.3(b) 的剩余卡配置** —— 补集平局判据能覆盖常见请求规模，但非全覆盖

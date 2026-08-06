@@ -508,7 +508,7 @@ func (p *vgpuPreempt) canAllocate(req *allocator.AllocationRequest, nodeInfo *de
 	// internal error answer the same question: "no". Log at V(5) for
 	// debugging; the verb-level Preempt event captures the user-facing
 	// outcome.
-	_, rsn, err := allocator.NewAllocator(nodeInfo, nil).Allocate(req)
+	_, rsn, err := allocator.NewSimulationAllocator(nodeInfo).Allocate(req)
 	switch {
 	case err != nil:
 		klog.V(3).ErrorS(err, "Preempt: allocator internal error",

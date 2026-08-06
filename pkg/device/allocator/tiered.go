@@ -5,6 +5,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
@@ -309,11 +310,18 @@ func (alloc *allocator) pickWithinRun(
 	}
 	linkedRun := alloc.toLinkDevices(run)
 	linkedFixed := alloc.toLinkDevices(alreadyPicked)
+	// Recorded ONLY here, where a search actually executes. Uniform fabrics
+	// returned above without one, so a zero rate on this counter is the
+	// expected reading on NVSwitch / bridged / pure-PCIe fleets — and a
+	// non-zero rate positively identifies non-uniform (DGX-1 class) hardware,
+	// which is the population whose correctness depends on this code path.
 	if combinationCount(len(run), need) > maxCombinationSearch {
 		klog.V(4).InfoS("Link selection exceeded combination budget, using greedy",
 			"node", alloc.nodeInfo.GetName(), "candidates", len(run), "need", need)
+		alloc.observeSearch(metrics.AlgoGreedy, len(run))
 		return fromLinkDevices(greedyPick(linkedRun, linkedFixed, need), run)
 	}
+	alloc.observeSearch(metrics.AlgoExhaustive, len(run))
 	_, best := searchBestSubsetWithFixed(linkedRun, linkedFixed, need)
 	return fromLinkDevices(best, run)
 }
@@ -461,4 +469,13 @@ func combinationCount(n, k int) int {
 		}
 	}
 	return result
+}
+
+// observeSearch records an executed in-component search, unless this allocator
+// is simulating (preemption dry runs place nothing and would multiply the count).
+func (alloc *allocator) observeSearch(algo string, candidates int) {
+	if alloc.simulate {
+		return
+	}
+	metrics.ObserveLinkSearch(algo, candidates)
 }
