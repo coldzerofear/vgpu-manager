@@ -647,7 +647,7 @@ func Test_Strict_TriesComponentWindowAfterRail(t *testing.T) {
 	// rejecting on the rail window's looser plan.
 	rootA, ok := n.LinkComponentOf(device.TierNVLink, "GPU-0")
 	require.True(t, ok)
-	claims, got := alloc.allocateLink(store, req, true, rootA, 2, 100, 1024)
+	claims, got := alloc.allocateLink(store, req, rootA, 2, 100, 1024)
 	require.True(t, got, "strict must try the component window after the rail window fails it")
 	require.Len(t, claims, 2)
 	for _, c := range claims {
@@ -686,5 +686,44 @@ func Test_SpanGroups_PreservesStoreOrder(t *testing.T) {
 		at := pos[d.GetUUID()]
 		assert.Greater(t, at, last, "I2 must hold on the spanning path too")
 		last = at
+	}
+}
+
+// Test_NUMA_SingleCard_NotRejected pins that a single card satisfies NUMA
+// topology trivially.
+//
+// CanNotCrossNumaNode guards on `gpuNumber > 1` because "would this set cross a
+// NUMA node" is meaningless for one card. That guard was unobservable while
+// single-card requests short-circuited before the topology branch; once they
+// stopped, it surfaced as a false "unsatisfiable" — and numa-strict turned that
+// into a rejection of every node in the cluster.
+func Test_NUMA_SingleCard_NotRejected(t *testing.T) {
+	devs := make([]*device.Device, 4)
+	for i := 0; i < 4; i++ {
+		devs[i] = device.NewFakeDeviceWithUUID(fmt.Sprintf("GPU-%d", i), i,
+			0, 1, 0, 100, 0, 1024, i/2) // NUMA 0,0,1,1
+	}
+	n := device.NewFakeNodeInfo(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "numa-node"}}, false, devs...)
+	require.True(t, n.HasNUMATopology())
+
+	for _, mode := range []util.TopologyMode{util.NUMATopology, util.NUMATopologyStrict} {
+		t.Run(string(mode), func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default",
+					Annotations: map[string]string{util.DeviceTopologyModeAnnotation: string(mode)}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{vgpuContainer("c", 1, 100, 1024)}},
+			}
+			fresh := device.NewFakeNodeInfo(
+				&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "numa-node"}}, false,
+				device.NewFakeDeviceWithUUID("GPU-0", 0, 0, 1, 0, 100, 0, 1024, 0),
+				device.NewFakeDeviceWithUUID("GPU-1", 1, 0, 1, 0, 100, 0, 1024, 0),
+				device.NewFakeDeviceWithUUID("GPU-2", 2, 0, 1, 0, 100, 0, 1024, 1),
+				device.NewFakeDeviceWithUUID("GPU-3", 3, 0, 1, 0, 100, 0, 1024, 1),
+			)
+			_, rsn, err := NewAllocator(fresh, nil).Allocate(BuildAllocationRequest(pod))
+			require.NoError(t, err)
+			require.Nil(t, rsn, "one card is trivially within a single NUMA node")
+		})
 	}
 }
