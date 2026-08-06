@@ -6,7 +6,6 @@ import (
 	"sort"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -409,8 +408,7 @@ func (alloc *allocator) allocateByTopologyMode(
 			}
 		}
 		klog.V(4).Infof("Pod <%s> use Links topology mode (strict=%v, anchorComponent=%d)", klog.KObj(pod), strict, anchorRoot)
-		// TODO RequestProfile uses average value, maintain semantic consistency with sortDeviceStore.
-		if claims, ok := alloc.allocateLink(deviceStore, UniformProfile, req.DevicePolicy, strict, anchorRoot, needNumber, needCores, needMemory); ok {
+		if claims, ok := alloc.allocateLink(deviceStore, req, strict, anchorRoot, needNumber, needCores, needMemory); ok {
 			return claims, nil
 		}
 		if rsn := alloc.handleTopologyFallback(
@@ -471,192 +469,59 @@ func (alloc *allocator) handleTopologyFallback(
 	return nil
 }
 
-// allocateLink runs the NVIDIA bestEffort algorithm over the link-aware
-// device list. Returns (claims, true) on success; (nil, false) means the
-// caller should either fall back (non-strict) or surface a
-// TopologyUnsatisfiedError (strict).
-// linkTopKCandidates controls how many topology-equivalent candidate sets we
-// keep when the caller has a non-None device policy. Empirically 5 covers
-// most "two NVLink bridges, three NUMA branches" diversity without blowing
-// up the partition enumeration cost. Increase only if you observe binpack/
-// spread picking the link-best set even when other equally-good sets would
-// satisfy the policy better.
-const linkTopKCandidates = 5
-
+// allocateLink selects devices via the node's tiered connectivity view.
+//
+// Returns (claims, true) on success; (nil, false) means the caller should fall
+// back (non-strict) or reject the node (strict).
+//
+// strict is satisfied only when the chosen set is connected at the NVLink tier.
+// That check is a direct property of the selection — the tier the walk landed
+// on — rather than a post-hoc validation of an opaque search result, which is
+// what previously made it possible to receive a disconnected set and have to
+// re-verify it.
 func (alloc *allocator) allocateLink(
-	deviceStore []*device.Device, profile RequestProfile, policy util.SchedulerPolicy,
+	deviceStore []*device.Device, req *AllocationRequest,
 	strict bool, anchorRoot int, needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
 	}
-	devices, _ := alloc.nodeInfo.GetDeviceList().Filter(getDeviceUUIDs(deviceStore))
 
 	// Cross-pod anchor windowing: restrict candidates to the NVLink component a
 	// gang sibling already occupies on this node, so this pod stays connected to
 	// them. If the window holds enough cards, select within it; if not, strict
-	// rejects the node (can't keep the gang connected) while non-strict falls
-	// back to the full candidate set — byte-for-byte the single-pod behaviour.
+	// rejects the node (can't keep the gang connected) while non-strict widens
+	// back to the full candidate set — unchanged single-pod behaviour.
 	// anchorRoot < 0 (non-gang, first sibling, or gate off) skips this entirely.
+	var restrict map[string]struct{}
 	if anchorRoot >= 0 {
-		if windowed := alloc.windowToComponent(devices, anchorRoot); len(windowed) >= needNumber {
-			devices = windowed
+		members := alloc.nodeInfo.ComponentUUIDs(anchorRoot)
+		if len(members) >= needNumber {
+			restrict = make(map[string]struct{}, len(members))
+			for _, u := range members {
+				restrict[u] = struct{}{}
+			}
 		} else if strict {
 			return nil, false
 		}
 	}
 
-	// Fast path: no device policy → take the link-best set (cheapest path,
-	// matches pre-Phase-A behaviour). Uses the threshold-aware AllocateLink
-	// which transparently falls back to greedy on dense nodes.
-	if policy == util.NonePolicy || policy == "" {
-		got := gpuallocator.AllocateLink(devices, needNumber)
-		if len(got) != needNumber {
-			return nil, false
-		}
-		// bestEffort returns the highest-scoring partition but does NOT reject
-		// score-zero results, so on nodes with partial NVLink (some pairs
-		// connected, others not) we can get back a set whose chosen GPUs sit
-		// in disjoint connectivity islands. For strict-link the caller's
-		// contract is "fail rather than admit a disconnected set"; verify via
-		// the precomputed per-UUID component map.
-		if strict && !alloc.nodeInfo.AreDevicesLinked(gpuallocatorUUIDs(got)) {
-			return nil, false
-		}
-		return buildClaims(resolveLinkDevices(got, deviceStore), needCores, needMemory), true
+	plan := alloc.allocateTiered(req, deviceStore, needNumber, restrict)
+	if plan == nil && restrict != nil && !strict {
+		// The anchor window could not satisfy the request; a non-strict pod
+		// still gets placed, just without gang affinity.
+		plan = alloc.allocateTiered(req, deviceStore, needNumber, nil)
 	}
-
-	// Compose path: keep top-K topology-equivalent candidates, then apply
-	// binpack/spread to choose among them. This is what makes "link + binpack"
-	// actually compose instead of the binpack sort being silently ignored.
-	candidates := gpuallocator.AllocateLinkTopK(devices, needNumber, linkTopKCandidates)
-	if len(candidates) == 0 {
+	if plan == nil {
 		return nil, false
 	}
-	if strict {
-		// Drop disconnected candidates BEFORE the binpack/spread tie-break so
-		// a perfectly utilised-but-disconnected set never beats a worse-
-		// utilised-but-connected one. If every top-K candidate is
-		// disconnected, treat the node as strict-unsatisfiable.
-		filtered := candidates[:0]
-		for _, c := range candidates {
-			if alloc.nodeInfo.AreDevicesLinked(gpuallocatorUUIDs(c)) {
-				filtered = append(filtered, c)
-			}
-		}
-		if len(filtered) == 0 {
-			return nil, false
-		}
-		candidates = filtered
-	}
-	chosen := selectLinkCandidateByDevicePolicy(candidates, deviceStore, profile, policy)
-	if len(chosen) != needNumber {
+	if strict && (plan.Tier != device.TierNVLink || plan.Spanned) {
 		return nil, false
 	}
-	return buildClaims(resolveLinkDevices(chosen, deviceStore), needCores, needMemory), true
-}
-
-// gpuallocatorUUIDs extracts UUIDs from a gpuallocator.Device slice. The
-// existing getDeviceUUIDs takes []*device.Device, so this is a sibling
-// helper for the post-AllocateLink validation path.
-func gpuallocatorUUIDs(devices []*gpuallocator.Device) []string {
-	uuids := make([]string, len(devices))
-	for i, d := range devices {
-		uuids[i] = d.UUID
-	}
-	return uuids
-}
-
-// windowToComponent keeps only the devices whose UUID belongs to the given
-// NVLink component root (from the NodeInfo's precomputed component index).
-// Returns a new slice; nil for an unknown/empty component. Used by allocateLink
-// to narrow the candidate set to a gang's anchored component.
-func (alloc *allocator) windowToComponent(devices gpuallocator.DeviceList, root int) gpuallocator.DeviceList {
-	members := alloc.nodeInfo.ComponentUUIDs(root)
-	if len(members) == 0 {
-		return nil
-	}
-	set := make(map[string]struct{}, len(members))
-	for _, u := range members {
-		set[u] = struct{}{}
-	}
-	out := make(gpuallocator.DeviceList, 0, len(devices))
-	for _, d := range devices {
-		if _, ok := set[d.UUID]; ok {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// selectLinkCandidateByDevicePolicy picks among link-equivalent candidate
-// sets using the device-level binpack/spread policy. Candidates arrive
-// already sorted by link score (highest first); the secondary key is the
-// average per-device Score under the pod's RequestProfile + policy mode,
-// which encodes the binpack-vs-spread direction directly (higher score is
-// always the more-preferred candidate, regardless of mode). This replaces
-// the legacy dimension-averaged deviceUsedRatio + per-mode sort comparator
-// pair — same intent, request-aware, and one fewer place to read the
-// policy direction off of.
-//
-// Note that link score still dominates: a strictly-worse link score will
-// not be picked unless the better candidate falls outside the top-K window.
-//
-// NonePolicy callers don't reach this function (the no-policy branch of
-// allocateLink takes the fast path), so policy is always Binpack or
-// Spread here and Score returns a meaningful directional value.
-func selectLinkCandidateByDevicePolicy(
-	candidates [][]*gpuallocator.Device,
-	deviceStore []*device.Device,
-	profile RequestProfile,
-	policy util.SchedulerPolicy,
-) []*gpuallocator.Device {
-	if len(candidates) <= 1 {
-		return candidates[0]
-	}
-	byUUID := make(map[string]*device.Device, len(deviceStore))
-	for _, d := range deviceStore {
-		byUUID[d.GetUUID()] = d
-	}
-	// Single-pass argmax — we only want the best candidate, not a full
-	// ordering, so a sort would do O(n log n) work for an O(n) decision.
-	// Ties resolve to the lower-index candidate (preserves the link-score
-	// ordering that AllocateLinkTopK established).
-	bestIdx := 0
-	bestScore := candidateSetScore(candidates[0], byUUID, profile, policy)
-	for i := 1; i < len(candidates); i++ {
-		if s := candidateSetScore(candidates[i], byUUID, profile, policy); s > bestScore {
-			bestIdx, bestScore = i, s
-		}
-	}
-	return candidates[bestIdx]
-}
-
-// candidateSetScore returns the average per-device Score across a candidate
-// set under the given profile + policy mode. Devices not found in byUUID
-// (shouldn't happen — candidates are built from deviceStore) are skipped
-// rather than scored as zero, so a stale candidate can't artificially
-// depress an otherwise-good set's average.
-func candidateSetScore(set []*gpuallocator.Device, byUUID map[string]*device.Device,
-	profile RequestProfile, policy util.SchedulerPolicy,
-) float64 {
-	if len(set) == 0 {
-		return 0
-	}
-	sum := 0.0
-	count := 0
-	for _, d := range set {
-		dev, ok := byUUID[d.UUID]
-		if !ok {
-			continue
-		}
-		sum += Score(DeviceUtilization(dev), profile, policy)
-		count++
-	}
-	if count == 0 {
-		return 0
-	}
-	return sum / float64(count)
+	klog.V(5).InfoS("Link topology selection", "node", alloc.nodeInfo.GetName(),
+		"pod", klog.KObj(req.Pod), "tier", plan.Tier, "spanned", plan.Spanned,
+		"devices", getDeviceUUIDs(plan.Devices))
+	return buildClaims(plan.Devices, needCores, needMemory), true
 }
 
 // allocateNUMA attempts to satisfy the request within a single NUMA node,
@@ -728,28 +593,6 @@ func buildClaims(picked []*device.Device, needCores, needMemory int64) []device.
 		}
 	}
 	return claims
-}
-
-// resolveLinkDevices maps each gpuallocator.Device back to its *device.Device
-// counterpart in store. The gpuallocator package operates on its own Device
-// shape (Index / UUID / Links) and doesn't carry the allocatable-resource
-// accounting we need at claim time; UUID is the stable join key. Missing
-// UUIDs are skipped rather than panicking — should never happen in practice
-// because the topology selector picks from devices we passed in, but a
-// defensive skip keeps a single stale entry from poisoning a whole claim
-// list.
-func resolveLinkDevices(picked []*gpuallocator.Device, store []*device.Device) []*device.Device {
-	byUUID := make(map[string]*device.Device, len(store))
-	for _, d := range store {
-		byUUID[d.GetUUID()] = d
-	}
-	out := make([]*device.Device, 0, len(picked))
-	for _, p := range picked {
-		if d, ok := byUUID[p.UUID]; ok {
-			out = append(out, d)
-		}
-	}
-	return out
 }
 
 // filterDevices walks every GPU on the node and produces:
