@@ -88,9 +88,21 @@ func (alloc *allocator) allocateTiered(
 	if needNumber <= 0 || !alloc.nodeInfo.HasGPUTopology() {
 		return nil
 	}
-	candidates := deviceStore
-	if restrictUUIDs != nil {
-		candidates = filterToUUIDs(deviceStore, restrictUUIDs)
+	// Normalise the candidate set ONCE, here, so nothing downstream has to
+	// defend itself. This runs inside the scheduler's Filter path, where a nil
+	// dereference takes down scheduling for every pod in the cluster rather
+	// than just this one — and the helpers below dereference devices freely to
+	// read UUIDs and utilisation. filterDevices never produces nils today; this
+	// is the cheap invariant that keeps it true for callers that come later.
+	candidates := make([]*device.Device, 0, len(deviceStore))
+	for _, d := range deviceStore {
+		if d == nil {
+			continue
+		}
+		if restrictUUIDs != nil && !restrictUUIDs.Has(d.GetUUID()) {
+			continue
+		}
+		candidates = append(candidates, d)
 	}
 	if len(candidates) < needNumber {
 		return nil
@@ -392,17 +404,6 @@ func inStoreOrder(picked, store []*device.Device) []*device.Device {
 	out := make([]*device.Device, 0, len(picked))
 	for _, d := range store {
 		if _, ok := want[d.GetUUID()]; ok {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// filterToUUIDs keeps only the devices in the allowed set, preserving order.
-func filterToUUIDs(devices []*device.Device, allowed sets.Set[string]) []*device.Device {
-	out := make([]*device.Device, 0, len(devices))
-	for _, d := range devices {
-		if allowed.Has(d.GetUUID()) {
 			out = append(out, d)
 		}
 	}

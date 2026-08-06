@@ -2025,22 +2025,6 @@ func (n *NodeInfo) LinkTierMaxComponentSize(tier LinkTier) int {
 	return n.tiers.largest(tier)
 }
 
-// RailOfUUID returns the GPU's rail / sub-domain key when the node publishes
-// NodeGPUDomainAnnotation, plus whether it is known.
-//
-// Cross-node single-card alignment needs a GPU's OWN rail: on a fully connected
-// node every card is in one component, so the component signature is identical
-// everywhere and carries no alignment information.
-func (n *NodeInfo) RailOfUUID(uuid string) (string, bool) {
-	rail, ok := n.gpuRail[uuid]
-	return rail, ok
-}
-
-// HasGPURailMap reports whether the node published a rail map covering its GPUs.
-func (n *NodeInfo) HasGPURailMap() bool {
-	return len(n.gpuRail) > 0
-}
-
 // railKeyOf returns the per-GPU alignment key: the published rail when the node
 // has a rail map, else the device INDEX.
 //

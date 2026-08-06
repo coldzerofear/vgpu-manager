@@ -472,9 +472,8 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 // index (so gang membership is already guaranteed — not re-checked here). A
 // sibling on a candidate node uses its prebuilt NodeInfo (free); otherwise the
 // node is built on demand from nodeLister and CACHED so a node hosting several
-// siblings is built at most once. Returns ("", false) when no sibling resolves
-// (e.g. the gang's first pod). Best-effort: alignment is an optimization, never a
-// correctness gate.
+// siblings is built at most once. Best-effort: alignment is an optimization,
+// never a correctness gate.
 // Returns TWO alignment keys, both resolved in the same pass:
 //   - domain: the NVLink component signature (coarse; useless on a fully
 //     connected node, where every GPU shares one component)

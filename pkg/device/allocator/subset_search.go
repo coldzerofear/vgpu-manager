@@ -29,8 +29,13 @@ func searchBestSubset(devices []*gpuallocator.Device, need int) (int, []*gpuallo
 // highest-scoring group of the same size. Without it, "pick the globally best
 // set" would be free to carve up an intact clique when an equally good
 // alternative existed — the one behaviour the old partition enumeration got
-// right and that a naive combination search would lose. The complement scan is
-// only reached on exact ties and the component is small, so it is close to free.
+// right and that a naive combination search would lose.
+//
+// Cost: the complement scan runs for any candidate scoring >= the best seen so
+// far, not only on exact ties, so it is hit more often early in the enumeration
+// and rarely once the maximum is found. It is a GREEDY estimate rather than a
+// nested exhaustive search precisely to keep that bounded — on a DGX-1 quad the
+// whole thing is a handful of pair lookups.
 func searchBestSubsetWithFixed(
 	devices, fixed []*gpuallocator.Device, need int,
 ) (int, []*gpuallocator.Device) {

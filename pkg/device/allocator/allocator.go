@@ -481,13 +481,9 @@ func (alloc *allocator) allocateLink(
 		return nil, false
 	}
 
-	// Cross-pod anchor windowing: restrict candidates to the NVLink component a
-	// gang sibling already occupies on this node, so this pod stays connected to
-	// them. If the window holds enough cards, select within it; if not, strict
-	// rejects the node (can't keep the gang connected) while non-strict widens
-	// back to the full candidate set — unchanged single-pod behaviour.
-	// anchorRoot < 0 (non-gang, first sibling, or gate off) skips this entirely.
-	// Alignment windows, tried finest-first and DEGRADING rather than failing:
+	// Cross-pod alignment windows, tried finest-first and DEGRADING rather than
+	// failing. anchorRoot < 0 (non-gang, first sibling on this node, or gate
+	// off) leaves L2 unset, and an absent GangRailKey leaves L1 unset:
 	//
 	//   L1  same rail set as the sibling  — the only key that works for
 	//                                       single-card gang members, because a
