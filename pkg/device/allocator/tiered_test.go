@@ -647,11 +647,13 @@ func Test_Strict_TriesComponentWindowAfterRail(t *testing.T) {
 	// rejecting on the rail window's looser plan.
 	rootA, ok := n.LinkComponentOf(device.TierNVLink, "GPU-0")
 	require.True(t, ok)
-	claims, got := alloc.allocateLink(store, req, rootA, 2, 100, 1024)
+	plan, got := alloc.allocateLink(store, req, rootA, 2)
 	require.True(t, got, "strict must try the component window after the rail window fails it")
-	require.Len(t, claims, 2)
-	for _, c := range claims {
-		assert.Contains(t, []string{"GPU-0", "GPU-1", "GPU-2", "GPU-3"}, c.Uuid)
+	require.Len(t, plan.Devices, 2)
+	assert.Equal(t, device.TierNVLink, plan.Tier)
+	assert.False(t, plan.Spanned)
+	for _, d := range plan.Devices {
+		assert.Contains(t, []string{"GPU-0", "GPU-1", "GPU-2", "GPU-3"}, d.GetUUID())
 	}
 }
 
@@ -726,4 +728,50 @@ func Test_NUMA_SingleCard_NotRejected(t *testing.T) {
 			require.Nil(t, rsn, "one card is trivially within a single NUMA node")
 		})
 	}
+}
+
+// Test_LinkDowngrade_IsReported closes an observability gap that predates the
+// tiered allocator: a non-strict link request placed on cards with weaker (or
+// no) interconnect was indistinguishable in events and logs from one that got a
+// full NVLink group. The old search returned a device set with no measure of
+// how well connected it was, so only the strict path ever checked.
+func Test_LinkDowngrade_IsReported(t *testing.T) {
+	// A recorder that captures event messages by type.
+	type capture struct{ warnings []string }
+
+	run := func(t *testing.T, n *device.NodeInfo, need int64) *capture {
+		t.Helper()
+		cap := &capture{}
+		rec := &fakeRecorder{onEventf: func(eventtype, reason, msg string) {
+			if eventtype == corev1.EventTypeWarning {
+				cap.warnings = append(cap.warnings, reason+": "+msg)
+			}
+		}}
+		_, rsn, err := NewAllocator(n, rec).Allocate(BuildAllocationRequest(linkPod(need, false, "")))
+		require.NoError(t, err)
+		require.Nil(t, rsn, "non-strict must still place the pod")
+		return cap
+	}
+
+	t.Run("NVLink achieved: silent", func(t *testing.T) {
+		n, _ := nvswitchNode(t)
+		got := run(t, n, 4)
+		assert.Empty(t, got.warnings, "a full NVLink placement must not warn")
+	})
+
+	t.Run("downgraded to a PCIe tier: reported", func(t *testing.T) {
+		n, _ := pcieNode(t) // no NVLink anywhere
+		got := run(t, n, 4)
+		require.Len(t, got.warnings, 1, "a downgrade must be reported exactly once")
+		assert.Contains(t, got.warnings[0], "downgraded")
+		assert.Contains(t, got.warnings[0], "not NVLink")
+	})
+
+	t.Run("no connectivity at all: reported as spanning", func(t *testing.T) {
+		n := fixtureNode("linkless", topoDevices(4)) // topology enabled, zero edges
+		got := run(t, n, 2)
+		require.Len(t, got.warnings, 1)
+		assert.Contains(t, got.warnings[0], "spanning multiple components",
+			"no-interconnect must be distinguishable from merely-slower interconnect")
+	})
 }

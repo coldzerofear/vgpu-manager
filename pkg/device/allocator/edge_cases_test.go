@@ -1,6 +1,7 @@
 package allocator
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
@@ -111,4 +113,25 @@ func Test_LinklessNode_SpansAtLoosestTier(t *testing.T) {
 	_, rsn, err := NewAllocator(fixtureNode("linkless", topoDevices(4)), nil).Allocate(strictReq)
 	require.NoError(t, err)
 	require.NotNil(t, rsn, "strict cannot accept a set with no connectivity")
+}
+
+// fakeRecorder captures events without a running broadcaster.
+type fakeRecorder struct {
+	onEventf func(eventtype, reason, message string)
+}
+
+func (f *fakeRecorder) Event(_ runtime.Object, eventtype, reason, message string) {
+	if f.onEventf != nil {
+		f.onEventf(eventtype, reason, message)
+	}
+}
+
+func (f *fakeRecorder) Eventf(_ runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
+	if f.onEventf != nil {
+		f.onEventf(eventtype, reason, fmt.Sprintf(messageFmt, args...))
+	}
+}
+
+func (f *fakeRecorder) AnnotatedEventf(o runtime.Object, _ map[string]string, eventtype, reason, messageFmt string, args ...interface{}) {
+	f.Eventf(o, eventtype, reason, messageFmt, args...)
 }

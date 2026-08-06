@@ -403,8 +403,23 @@ func (alloc *allocator) allocateByTopologyMode(
 			}
 		}
 		klog.V(4).Infof("Pod <%s> use Links topology mode (strict=%v, anchorComponent=%d)", klog.KObj(pod), req.TopologyStrict, anchorRoot)
-		if claims, ok := alloc.allocateLink(deviceStore, req, anchorRoot, needNumber, needCores, needMemory); ok {
-			return claims, nil
+		if plan, ok := alloc.allocateLink(deviceStore, req, anchorRoot, needNumber); ok {
+			// Placed — but link mode promises NVLink, and the tier walk may have
+			// had to settle for less. Report that, because otherwise a pod that
+			// asked for NVLink and got a PCIe-switch group (or, on a link-less
+			// node, cards with no connectivity at all) is indistinguishable in
+			// the logs from one that got exactly what it wanted.
+			//
+			// The DEGRADED SET IS STILL USED. It is chosen from the tightest
+			// tier that could host the request, so it is never worse than the
+			// non-topology fallback and usually better — discarding it just to
+			// signal the downgrade would trade real placement quality for a
+			// message. Strict never reaches here: allocateLink refuses anything
+			// below NVLink for it.
+			if plan.Tier != device.TierNVLink || plan.Spanned {
+				alloc.reportLinkDowngrade(pod, plan, needNumber)
+			}
+			return buildClaims(plan.Devices, needCores, needMemory), nil
 		}
 		if rsn := alloc.handleTopologyFallback(
 			pod, req.TopologyStrict,
@@ -465,8 +480,11 @@ func (alloc *allocator) handleTopologyFallback(
 
 // allocateLink selects devices via the node's tiered connectivity view.
 //
-// Returns (claims, true) on success; (nil, false) means the caller should fall
-// back (non-strict) or reject the node (strict).
+// Returns (plan, true) on success; (nil, false) means the caller should fall
+// back (non-strict) or reject the node (strict). The plan carries the tier
+// actually achieved so the caller can report a downgrade — a non-strict request
+// can legitimately be placed BELOW NVLink, and that needs to be visible rather
+// than silently indistinguishable from a full-connectivity placement.
 //
 // strict is satisfied only when the chosen set is connected at the NVLink tier.
 // That check is a direct property of the selection — the tier the walk landed
@@ -475,8 +493,8 @@ func (alloc *allocator) handleTopologyFallback(
 // re-verify it.
 func (alloc *allocator) allocateLink(
 	deviceStore []*device.Device, req *AllocationRequest,
-	anchorRoot int, needNumber int, needCores, needMemory int64,
-) ([]device.DeviceClaim, bool) {
+	anchorRoot int, needNumber int,
+) (*linkPlan, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false
 	}
@@ -561,7 +579,37 @@ func (alloc *allocator) allocateLink(
 	}
 	klog.V(5).InfoS("Link topology selection", "node", alloc.nodeInfo.GetName(), "pod",
 		klog.KObj(req.Pod), "tier", plan.Tier, "spanned", plan.Spanned, "devices", getDeviceUUIDs(plan.Devices))
-	return buildClaims(plan.Devices, needCores, needMemory), true
+	return plan, true
+}
+
+// reportLinkDowngrade records that a non-strict link request was placed BELOW
+// the NVLink connectivity the mode promises.
+//
+// Before the tier walk there was no way to say this: the old search returned a
+// device set with no indication of how well connected it was, and only the
+// strict path bothered to check (via a separate AreDevicesLinked pass). So a
+// pod that asked for link topology and received cards with no interconnect at
+// all looked exactly like one that got a full NVLink group. Operators had no
+// signal that the cluster could not honour what they requested.
+//
+// Emitted at most once per placement — the filter stops at the first node that
+// accepts the pod, and a downgrade is still an acceptance.
+func (alloc *allocator) reportLinkDowngrade(pod *corev1.Pod, plan *linkPlan, needNumber int) {
+	achieved := plan.Tier.String()
+	if plan.Spanned {
+		// Spanning means the set could not be contained in ONE component even
+		// at this tier, i.e. parts of it have no direct path to each other.
+		// Worth calling out separately: it is the difference between "slower
+		// interconnect" and "no interconnect".
+		achieved += " (spanning multiple components)"
+	}
+	klog.V(3).InfoS("Link topology downgraded", "node", alloc.nodeInfo.GetName(),
+		"pod", klog.KObj(pod), "want", device.TierNVLink.String(), "got", achieved,
+		"devices", getDeviceUUIDs(plan.Devices))
+	alloc.sendEventf(pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
+		"Link topology downgraded on node %q: %d GPUs connected at %q, not NVLink; "+
+			"use link-strict to reject such nodes instead",
+		alloc.nodeInfo.GetName(), needNumber, achieved)
 }
 
 // allocateNUMA attempts to satisfy the request within a single NUMA node,
