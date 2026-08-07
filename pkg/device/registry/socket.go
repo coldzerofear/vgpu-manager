@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -14,13 +13,6 @@ import (
 )
 
 const (
-	// RegistryLockFile is the sentinel the server flocks for the lifetime of its
-	// listener. It is what makes "one registry server per manager directory" an
-	// enforced invariant rather than a convention: the device-plugin and the DRA
-	// kubelet-plugin resolve the same <manager-dir>/registry/socket.sock path, and
-	// nothing else stops both from binding it in turn.
-	RegistryLockFile = ".registry.lock"
-
 	// registryDirMode keeps the registry directory traversable by the workload
 	// container (it opens socket.sock and execs device-client by absolute path,
 	// neither of which needs the read bit) while denying every non-owner the
@@ -34,27 +26,31 @@ const (
 	// socket inode; the directory mode above is what bounds the blast radius.
 	socketFileMode = 0o666
 
-	// registryLockMode is owner-only. Nothing but this server ever opens it.
-	registryLockMode = 0o600
+	// stagedSocketSuffix names the path a new listener binds before it is
+	// renamed onto socket.sock. The pid keeps two instances that start at the
+	// same moment from staging onto each other's inode.
+	stagedSocketSuffix = ".staged"
 
-	// staleSocketProbeTimeout bounds the "is anyone still serving this socket"
+	// livenessProbeTimeout bounds the "is anyone still serving this socket"
 	// check. A live server accepts immediately (the listen backlog answers
 	// without the accept loop being scheduled); an orphaned socket file fails
 	// instantly with ECONNREFUSED. The budget only covers a pathologically
 	// loaded node.
-	staleSocketProbeTimeout = 200 * time.Millisecond
+	livenessProbeTimeout = 200 * time.Millisecond
+
+	// socketGuardInterval is how often a running server checks that the socket
+	// path still exists. It only has to be fast enough to bound the outage
+	// caused by the one thing that legitimately deletes our entry — a
+	// predecessor running a release that unlinks by path on shutdown — and the
+	// check is a single lstat, so this is cheap either way.
+	socketGuardInterval = 5 * time.Second
 )
 
-// errRegistryLocked reports that another live server owns the registry
-// directory. Kept distinct so callers can tell "someone else is serving, back
-// off and retry" apart from a genuine local failure.
-var errRegistryLocked = errors.New("registry directory is locked by another server")
-
 // socketIdentity pins a socket file to the inode this server actually created.
-// Paths are not identities: between bind and shutdown another instance can have
-// replaced the file, and unlinking by path then deletes *their* socket, leaving
-// a live server bound to an unreachable inode and every client failing on a
-// path that no longer exists.
+// Paths are not identities: a successor may have replaced the file since we
+// bound it, and unlinking by path would then delete *their* socket, leaving a
+// live server bound to an unreachable inode and every client failing on a path
+// that no longer exists.
 type socketIdentity struct {
 	dev uint64
 	ino uint64
@@ -82,69 +78,21 @@ func warnIfDirectoryWritable(directory string) {
 	}
 }
 
-// acquireDirectoryLock takes the exclusive, non-blocking flock that marks this
-// process as the owner of the registry directory. The lock is advisory but
-// sufficient: the only contenders are our own two server implementations.
+// checkSocketPath decides whether the path is ours to take.
 //
-// The returned file must be handed to releaseDirectoryLock; closing it (or the
-// process dying) releases the lock, so a crashed predecessor never wedges a
-// restart.
-func acquireDirectoryLock(directory string) (*os.File, error) {
-	lockPath := filepath.Join(directory, RegistryLockFile)
-	// O_NOFOLLOW: the lock lives beside the socket in a directory we have just
-	// tightened, but an older release left it 0777, so a symlink planted before
-	// the upgrade could still be sitting there.
-	fd, err := unix.Open(lockPath, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, registryLockMode)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open registry lock %s: %v", lockPath, err)
-	}
-	lockFile := os.NewFile(uintptr(fd), lockPath)
-
-	if err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		_ = lockFile.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) {
-			return nil, fmt.Errorf("%w: %s is held, refusing to take over the socket of a running instance",
-				errRegistryLocked, lockPath)
-		}
-		return nil, fmt.Errorf("failed to lock registry directory %s: %v", directory, err)
-	}
-
-	// Verify only after locking: before the lock we could be racing whoever is
-	// still setting the file up.
-	info, err := lockFile.Stat()
-	if err != nil {
-		releaseDirectoryLock(lockFile)
-		return nil, fmt.Errorf("failed to inspect registry lock %s: %v", lockPath, err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || int(stat.Uid) != os.Geteuid() {
-		releaseDirectoryLock(lockFile)
-		return nil, fmt.Errorf("registry lock %s is not a regular file owned by this process", lockPath)
-	}
-	return lockFile, nil
-}
-
-// releaseDirectoryLock drops the lock and closes the descriptor. Closing alone
-// would release it; the explicit unlock keeps the intent readable and does not
-// depend on a descriptor never being duplicated.
-func releaseDirectoryLock(lockFile *os.File) {
-	if lockFile == nil {
-		return
-	}
-	_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
-	_ = lockFile.Close()
-}
-
-// removeStaleSocket clears the way for a fresh bind, but only for a socket that
-// nothing is serving. The previous behaviour — unconditional unlink — is what
-// turns two overlapping instances into a node-wide outage: the newcomer steals
-// the path from a live server, and the live server's own shutdown then unlinks
-// the newcomer's socket.
+// Only one thing is refused: a path that exists and is not a socket. That means
+// the manager directory is not laid out the way we think it is, and replacing
+// an unknown file would destroy something we cannot identify.
 //
-// Reaching here already means we hold the directory lock, so a live peer of
-// ours is impossible; the probe covers the leftovers that the lock cannot see
-// (a socket bound by a foreign process, or by an instance predating the lock).
-func removeStaleSocket(socketPath string) error {
+// A socket that is still being served is *not* refused. Overlapping instances
+// are normal — a DaemonSet rolling upgrade can have the outgoing pod still
+// serving while the incoming one starts — and refusing would put the incoming
+// pod into CrashLoopBackOff until the outgoing one finally exits, which is a
+// worse outage than the handover it is trying to avoid. The takeover is safe
+// because bindSocket swaps the entry atomically and shutdown only unlinks a
+// socket it still owns. What the liveness probe buys is the log line: an
+// overlap that never ends is a misconfiguration worth naming.
+func checkSocketPath(socketPath string) error {
 	info, err := os.Lstat(socketPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -157,34 +105,100 @@ func removeStaleSocket(socketPath string) error {
 			socketPath, info.Mode())
 	}
 
-	conn, dialErr := net.DialTimeout("unix", socketPath, staleSocketProbeTimeout)
-	if dialErr == nil {
-		_ = conn.Close()
-		return fmt.Errorf("%w: %s is still accepting connections", errRegistryLocked, socketPath)
+	conn, dialErr := net.DialTimeout("unix", socketPath, livenessProbeTimeout)
+	if dialErr != nil {
+		// ECONNREFUSED is an orphan left by a killed predecessor. Anything else
+		// is unexpected but still not a reason to refuse: the rename below
+		// replaces whatever is there without needing to understand it.
+		if !errors.Is(dialErr, syscall.ECONNREFUSED) && !errors.Is(dialErr, os.ErrNotExist) {
+			klog.V(3).InfoS("Existing registry socket did not answer a liveness probe; taking it over",
+				"socket", socketPath, "err", dialErr)
+		}
+		return nil
 	}
-	// ECONNREFUSED is the signature of an orphaned socket file: the inode is
-	// there, nothing is listening. Anything else (EACCES, ETIMEDOUT, ...) is a
-	// state we do not understand well enough to destroy.
-	if !errors.Is(dialErr, syscall.ECONNREFUSED) && !errors.Is(dialErr, os.ErrNotExist) {
-		return fmt.Errorf("failed to probe existing registry socket %s: %v", socketPath, dialErr)
-	}
-	if err = os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to remove stale registry socket %s: %v", socketPath, err)
-	}
+	_ = conn.Close()
+	klog.InfoS("Taking over a registry socket that another instance is still serving. "+
+		"This is expected while a rolling upgrade overlaps; if it repeats outside an upgrade, two "+
+		"components (device-plugin and DRA kubelet-plugin) are both serving this node",
+		"socket", socketPath)
 	return nil
 }
 
-// readSocketIdentity records which inode the bind produced, so shutdown can
-// tell our socket apart from a successor's.
-func readSocketIdentity(socketPath string) (socketIdentity, error) {
+// bindSocket publishes a new listener at socketPath, replacing whatever entry
+// is there, and returns the identity of the inode it created.
+//
+// The bind happens on a staging path and the result is rename(2)d into place
+// rather than unlinking socket.sock and binding it directly. Unlink-then-bind
+// leaves a window in which the path does not exist, and a client that connects
+// during it gets ENOENT — which for the in-container library means a failed
+// registration and a killed workload process. rename is atomic: a client sees
+// the old socket or the new one, never nothing.
+//
+// A predecessor's inode survives the rename with its listener intact, so its
+// established connections finish normally; only new connections land here.
+func bindSocket(socketPath string) (*net.UnixListener, socketIdentity, error) {
+	stagedPath := stagedSocketPath(socketPath, os.Getpid())
+	// A staged path can only be left behind by a process killed between bind
+	// and rename, and the pid in the name makes it ours to reclaim.
+	if err := os.Remove(stagedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, socketIdentity{}, fmt.Errorf("failed to clear staged registry socket %s: %v", stagedPath, err)
+	}
+
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: stagedPath, Net: "unix"})
+	if err != nil {
+		return nil, socketIdentity{}, fmt.Errorf("failed to listen unix: %v", err)
+	}
+	// Go unlinks the socket path on Close by default, without checking that the
+	// file is still the one it bound — and after the rename below, the path it
+	// would unlink is socket.sock, which by shutdown time may belong to a
+	// successor. Ownership is tracked explicitly instead; see removeOwnedSocket.
+	listener.SetUnlinkOnClose(false)
+
+	identity, err := publish(stagedPath, socketPath)
+	if err != nil {
+		_ = listener.Close()
+		_ = os.Remove(stagedPath)
+		return nil, socketIdentity{}, err
+	}
+	return listener, identity, nil
+}
+
+// publish chmods the staged socket, records its inode, and renames it into
+// place. Split out so the identity is read from the staging path: reading it
+// from the final path would race a concurrent takeover and could record an
+// inode that is not ours, which is exactly the confusion this type exists to
+// prevent.
+func publish(stagedPath, socketPath string) (socketIdentity, error) {
+	if err := os.Chmod(stagedPath, socketFileMode); err != nil {
+		return socketIdentity{}, fmt.Errorf("failed to set socket permissions: %v", err)
+	}
 	var stat unix.Stat_t
-	if err := unix.Lstat(socketPath, &stat); err != nil {
-		return socketIdentity{}, fmt.Errorf("failed to stat registry socket %s: %v", socketPath, err)
+	if err := unix.Lstat(stagedPath, &stat); err != nil {
+		return socketIdentity{}, fmt.Errorf("failed to stat registry socket %s: %v", stagedPath, err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK {
-		return socketIdentity{}, fmt.Errorf("registry socket %s is not a socket after bind", socketPath)
+		return socketIdentity{}, fmt.Errorf("registry socket %s is not a socket after bind", stagedPath)
+	}
+	if err := os.Rename(stagedPath, socketPath); err != nil {
+		return socketIdentity{}, fmt.Errorf("failed to publish registry socket at %s: %v", socketPath, err)
 	}
 	return socketIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino)}, nil
+}
+
+// socketMissing reports whether the socket path has no directory entry at all.
+//
+// A path that resolves to someone else's inode is deliberately not "missing":
+// that is a successor who has taken over, and restoring our own entry on top of
+// theirs would start a rename war between two live servers.
+func socketMissing(socketPath string) (bool, error) {
+	_, err := os.Lstat(socketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect registry socket %s: %v", socketPath, err)
+	}
+	return false, nil
 }
 
 // removeOwnedSocket unlinks the socket file only when the path still resolves
@@ -206,4 +220,9 @@ func removeOwnedSocket(socketPath string, identity socketIdentity) (removed bool
 		return false, fmt.Errorf("failed to remove registry socket %s: %v", socketPath, err)
 	}
 	return true, nil
+}
+
+// stagedSocketPath names the path a given process stages its listener on.
+func stagedSocketPath(socketPath string, pid int) string {
+	return fmt.Sprintf("%s.%d%s", socketPath, pid, stagedSocketSuffix)
 }

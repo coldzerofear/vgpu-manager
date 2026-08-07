@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -209,13 +208,14 @@ type DeviceRegistryServerImpl struct {
 	listener           *net.UnixListener
 	running            bool
 
-	// socketPath/socketID/lockFile are the ownership record for the listening
-	// socket, established in Start and consumed by Stop. They are what let
-	// shutdown unlink the socket file only while it is still ours, instead of
-	// deleting whatever happens to sit at that path by then.
+	// socketPath/socketID are the ownership record for the listening socket,
+	// established in Start and consumed by Stop. They are what let shutdown
+	// unlink the socket file only while it is still ours, instead of deleting
+	// whatever happens to sit at that path by then. guardStop retires the
+	// goroutine that keeps the path published; see guardSocket.
 	socketPath string
 	socketID   socketIdentity
-	lockFile   *os.File
+	guardStop  chan struct{}
 
 	// inFlight is a global concurrency budget for resolveTarget; perCaller
 	// tracks the in-flight count keyed by caller identity (guarded by
@@ -254,6 +254,10 @@ func (s *DeviceRegistryServerImpl) acquireSlot(callerKey string) (release func()
 	}, true
 }
 
+// IsRunning reports whether Start has succeeded and Stop has not run yet. It
+// deliberately does not track individual listeners: guardSocket can replace the
+// published one while serving, so "a Serve call returned" says nothing about
+// whether the server is up.
 func (s *DeviceRegistryServerImpl) IsRunning() bool {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -588,7 +592,7 @@ func (s *DeviceRegistryServerImpl) Start() error {
 	}
 	registryPath := filepath.Join(s.contPath, util.Registry)
 	// Not fatal on its own. If the directory genuinely cannot be created, the
-	// lock below fails with ENOENT and takes the start down with a clear error;
+	// bind below fails with ENOENT and takes the start down with a clear error;
 	// what this call adds on top is tightening the mode of a directory an
 	// earlier release created 0777, and failing to do that is not a reason to
 	// refuse to serve. warnIfDirectoryWritable reports what the mode actually
@@ -598,56 +602,27 @@ func (s *DeviceRegistryServerImpl) Start() error {
 	}
 	warnIfDirectoryWritable(registryPath)
 
-	// Take ownership of the directory before touching anything inside it, so a
-	// second instance fails here rather than halfway through stealing the socket.
-	lockFile, err := acquireDirectoryLock(registryPath)
-	if err != nil {
-		return err
-	}
-	releaseLock := true
-	defer func() {
-		if releaseLock {
-			releaseDirectoryLock(lockFile)
-		}
-	}()
-
 	socketFile := filepath.Join(registryPath, SocketFile)
-	if err = removeStaleSocket(socketFile); err != nil {
+	if err := checkSocketPath(socketFile); err != nil {
 		return err
 	}
-
-	addr, err := net.ResolveUnixAddr("unix", socketFile)
+	listener, socketID, err := bindSocket(socketFile)
 	if err != nil {
-		return fmt.Errorf("failed to resolve unix addr: %v", err)
+		return err
 	}
-	listener, err := net.ListenUnix("unix", addr)
-	if err != nil {
-		return fmt.Errorf("failed to listen unix: %v", err)
-	}
-	// Go unlinks the socket path on Close by default, without checking that the
-	// file is still the one it bound. grpc.Server.GracefulStop closes the
-	// listener too, so leaving this on means shutdown can delete a successor's
-	// socket. Ownership is tracked explicitly instead; see removeOwnedSocket.
-	listener.SetUnlinkOnClose(false)
 	cleanupSocket := true
 	defer func() {
 		if cleanupSocket {
 			_ = listener.Close()
-			_ = os.Remove(socketFile)
+			if _, removeErr := removeOwnedSocket(socketFile, socketID); removeErr != nil {
+				klog.ErrorS(removeErr, "failed to roll back the registry socket", "socket", socketFile)
+			}
 		}
 	}()
 
-	if err = os.Chmod(socketFile, socketFileMode); err != nil {
-		return fmt.Errorf("failed to set socket permissions: %v", err)
-	}
-	socketID, err := readSocketIdentity(socketFile)
-	if err != nil {
-		return err
-	}
 	s.listener = listener
 	s.socketPath = socketFile
 	s.socketID = socketID
-	s.lockFile = lockFile
 	// Hardening against a hijacked container flooding the shared socket:
 	//   - Creds captures the caller's SO_PEERCRED PID for authentication.
 	//   - small message / stream / connection limits bound per-connection cost
@@ -668,39 +643,105 @@ func (s *DeviceRegistryServerImpl) Start() error {
 
 	registry.RegisterVDeviceRegistryServer(s.server, s)
 	s.running = true
+	s.guardStop = make(chan struct{})
 
 	// Past the point of no return: the serving goroutine below owns the
-	// listener, so the deferred rollbacks must not fire.
+	// listener, so the deferred rollback must not fire.
 	cleanupSocket = false
-	releaseLock = false
 
-	// Capture the server this goroutine belongs to: Stop clears s.server and a
-	// restart installs a new one, so an unqualified `s.running = false` here can
-	// land after the next Start and report a live server as stopped.
-	served := s.server
-	go func() {
-		// net.ErrClosed is the ordinary shutdown signature: Stop closes the
-		// listener before GracefulStop, so Serve returns "use of closed network
-		// connection" on every clean stop. Logging that as an error made each
-		// restart look like a fault.
-		if serveErr := served.Serve(listener); serveErr != nil &&
-			!errors.Is(serveErr, grpc.ErrServerStopped) && !errors.Is(serveErr, net.ErrClosed) {
-			klog.Errorf("DeviceRegistry gRPC server serve error: %v", serveErr)
-		}
-		s.mutex.Lock()
-		if s.server == served {
-			s.running = false
-		}
-		s.mutex.Unlock()
-	}()
+	go serveOn(s.server, listener)
+	go s.guardSocket(s.guardStop)
 
 	klog.V(3).InfoS("DeviceRegistry gRPC server started successfully", "socket", socketFile)
 	return nil
 }
 
+// serveOn runs one listener for the given server. A gRPC server accepts any
+// number of listeners, which is what lets guardSocket republish the socket
+// without disturbing the RPCs already in flight on the old one.
+func serveOn(server *grpc.Server, listener net.Listener) {
+	// net.ErrClosed is the ordinary shutdown signature: Stop closes the listener
+	// before GracefulStop, so Serve returns "use of closed network connection"
+	// on every clean stop. Logging that as an error made each restart look like
+	// a fault. ErrServerStopped is the same story when Stop wins the race.
+	if err := server.Serve(listener); err != nil &&
+		!errors.Is(err, grpc.ErrServerStopped) && !errors.Is(err, net.ErrClosed) {
+		klog.Errorf("DeviceRegistry gRPC server serve error: %v", err)
+	}
+}
+
+// guardSocket republishes the socket if its directory entry disappears while we
+// are still serving.
+//
+// The case this exists for is an overlapping predecessor: releases before the
+// ownership check below unlink socket.sock by path on shutdown, so an outgoing
+// pod running one of them will delete the incoming pod's socket some seconds
+// after the incoming pod took over. Nothing else notices — our listener is
+// healthy, we simply become unreachable — and every container that starts after
+// that fails to register. It also covers the socket being removed by anything
+// else, an operator included.
+//
+// A path that resolves to a *different* inode is left alone: that is a
+// successor who took over from us, and republishing on top of them would put
+// two live servers into a rename war.
+func (s *DeviceRegistryServerImpl) guardSocket(stop <-chan struct{}) {
+	ticker := time.NewTicker(socketGuardInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			s.republishSocketIfMissing()
+		}
+	}
+}
+
+func (s *DeviceRegistryServerImpl) republishSocketIfMissing() {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if !s.running || s.server == nil || s.socketPath == "" {
+		return
+	}
+	missing, err := socketMissing(s.socketPath)
+	if err != nil {
+		klog.ErrorS(err, "Failed to check the registry socket", "socket", s.socketPath)
+		return
+	}
+	if !missing {
+		return
+	}
+
+	listener, socketID, err := bindSocket(s.socketPath)
+	if err != nil {
+		klog.ErrorS(err, "Failed to republish the registry socket; containers cannot register until it is back",
+			"socket", s.socketPath)
+		return
+	}
+	previous := s.listener
+	s.listener = listener
+	s.socketID = socketID
+	go serveOn(s.server, listener)
+	if previous != nil {
+		// Unreachable from here on: its inode has no directory entry. Closing it
+		// ends whatever RPCs are still on it, which is the same thing that would
+		// have happened had it been unlinked cleanly.
+		_ = previous.Close()
+	}
+	klog.InfoS("Registry socket had been removed while serving; republished it", "socket", s.socketPath)
+}
+
 func (s *DeviceRegistryServerImpl) Stop() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+
+	// Retire the guard first. We are about to unpublish the socket on purpose,
+	// and a guard that woke up afterwards would helpfully put it back.
+	if s.guardStop != nil {
+		close(s.guardStop)
+		s.guardStop = nil
+	}
 
 	// Immediately close the listener and reject new connections
 	if s.listener != nil {
@@ -741,13 +782,6 @@ func (s *DeviceRegistryServerImpl) Stop() {
 		}
 		s.socketPath = ""
 		s.socketID = socketIdentity{}
-	}
-
-	// Released last: while it is held, no other instance may bind the socket,
-	// so dropping it earlier would reopen the race this whole path closes.
-	if s.lockFile != nil {
-		releaseDirectoryLock(s.lockFile)
-		s.lockFile = nil
 	}
 
 	s.running = false
