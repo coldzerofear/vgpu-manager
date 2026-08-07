@@ -82,9 +82,12 @@ func Test_bindSocket_replacesAtomically(t *testing.T) {
 	assert.Equal(t, os.FileMode(socketFileMode), info.Mode().Perm())
 	assert.Equal(t, firstID, mustSocketIdentity(t, socket))
 
-	// The staging path must not survive a successful publish.
-	_, err = os.Lstat(stagedSocketPath(socket, os.Getpid()))
-	assert.True(t, os.IsNotExist(err), "staged socket should have been renamed away")
+	// No staging path may survive a successful publish.
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		assert.NotContains(t, entry.Name(), stagedSocketSuffix, "staged socket should have been renamed away")
+	}
 
 	// A takeover replaces the entry; the predecessor's listener keeps its inode.
 	second, secondID, err := bindSocket(socket)

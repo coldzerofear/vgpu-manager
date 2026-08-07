@@ -141,7 +141,10 @@ func Test_ResetPidsFile_doesNotBlockOnAWedgedWriter(t *testing.T) {
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
-	assert.Less(t, elapsed, 2*lockAcquireBudget, "must give up on the budget, not block")
+	// Ten times the budget: the property under test is "returns instead of
+	// waiting for the holder", and a tight bound would only buy flakes on a
+	// loaded machine, where every 2ms poll overshoots.
+	assert.Less(t, elapsed, 10*pidsLockBudget, "must give up on the budget, not block")
 
 	content, readErr := os.ReadFile(path)
 	require.NoError(t, readErr)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,8 +28,7 @@ const (
 	socketFileMode = 0o666
 
 	// stagedSocketSuffix names the path a new listener binds before it is
-	// renamed onto socket.sock. The pid keeps two instances that start at the
-	// same moment from staging onto each other's inode.
+	// renamed onto socket.sock.
 	stagedSocketSuffix = ".staged"
 
 	// livenessProbeTimeout bounds the "is anyone still serving this socket"
@@ -137,9 +137,9 @@ func checkSocketPath(socketPath string) error {
 // A predecessor's inode survives the rename with its listener intact, so its
 // established connections finish normally; only new connections land here.
 func bindSocket(socketPath string) (*net.UnixListener, socketIdentity, error) {
-	stagedPath := stagedSocketPath(socketPath, os.Getpid())
+	stagedPath := stagedSocketPath(socketPath, os.Getpid(), stageCounter.Add(1))
 	// A staged path can only be left behind by a process killed between bind
-	// and rename, and the pid in the name makes it ours to reclaim.
+	// and rename; see stagedSocketPath for why this reclaims it.
 	if err := os.Remove(stagedPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, socketIdentity{}, fmt.Errorf("failed to clear staged registry socket %s: %v", stagedPath, err)
 	}
@@ -222,7 +222,22 @@ func removeOwnedSocket(socketPath string, identity socketIdentity) (removed bool
 	return true, nil
 }
 
-// stagedSocketPath names the path a given process stages its listener on.
-func stagedSocketPath(socketPath string, pid int) string {
-	return fmt.Sprintf("%s.%d%s", socketPath, pid, stagedSocketSuffix)
+// stageCounter makes every staging path in this process distinct.
+var stageCounter atomic.Uint64
+
+// stagedSocketPath names the path one bind attempt stages its listener on.
+//
+// Both parts matter. The pid separates processes; the counter separates
+// attempts within one, because nothing serialises two servers in the same
+// process — the guard republishing for one while another starts, or simply two
+// instances built from NewDeviceRegistryServer. Sharing a staging path there is
+// not a rare interleaving but a routine one: whoever calls os.Remove second
+// deletes the other's freshly bound socket, and the loser fails with either
+// EADDRINUSE on bind or ENOENT on the chmod that follows.
+//
+// Reusing pid+counter across a restart is deliberate: a process killed in the
+// microseconds between bind and rename leaves a 0-byte socket behind, and a
+// later run following the same sequence reclaims it in the os.Remove below.
+func stagedSocketPath(socketPath string, pid int, attempt uint64) string {
+	return fmt.Sprintf("%s.%d.%d%s", socketPath, pid, attempt, stagedSocketSuffix)
 }

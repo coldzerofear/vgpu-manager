@@ -18,14 +18,14 @@ import (
 const pidsFileMode = 0o644
 
 const (
-	// lockAcquireBudget caps how long ResetPidsFile waits for the pids.config
+	// pidsLockBudget caps how long ResetPidsFile waits for the pids.config
 	// lock. The only writer holds it for one ftruncate plus one pwrite of a few
 	// hundred bytes, so this is orders of magnitude more than a legitimate
 	// waiter ever needs; it exists to turn a wedged holder into an error instead
 	// of a hang.
-	lockAcquireBudget = 50 * time.Millisecond
-	// lockRetryInterval is the poll interval within that budget.
-	lockRetryInterval = 2 * time.Millisecond
+	pidsLockBudget = 50 * time.Millisecond
+	// pidsLockRetryInterval is the poll interval within that budget.
+	pidsLockRetryInterval = 2 * time.Millisecond
 )
 
 // flockWithin takes an exclusive flock, giving up after budget rather than
@@ -43,7 +43,7 @@ func flockWithin(fd int, budget time.Duration) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("gave up after %s: %w", budget, err)
 		}
-		time.Sleep(lockRetryInterval)
+		time.Sleep(pidsLockRetryInterval)
 	}
 }
 
@@ -81,7 +81,7 @@ func ResetPidsFile(configDir string) error {
 	// should be holding this lock at all, since the container that reads this
 	// file does not exist yet, so failing after the budget is the honest answer:
 	// the caller fails closed and the runtime retries.
-	if err = flockWithin(fd, lockAcquireBudget); err != nil {
+	if err = flockWithin(fd, pidsLockBudget); err != nil {
 		return fmt.Errorf("failed to lock pids file %s: %w", path, err)
 	}
 	defer func() { _ = unix.Flock(fd, unix.LOCK_UN) }()
