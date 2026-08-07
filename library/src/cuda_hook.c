@@ -2645,6 +2645,25 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
 
 }
 
+/* Bound a process count returned by NVML to what the array can actually hold.
+ *
+ * The contract says an enumeration writes at most the capacity it was given and
+ * returns INSUFFICIENT_SIZE otherwise, so this should never fire. It is here
+ * because the value is an out-parameter from a closed-source driver that then
+ * drives two loops indexing a fixed-size array: trusting a broken contract
+ * would be an out-of-bounds read, whereas clamping keeps the read inside the
+ * buffer. Entries past what the driver actually wrote are indeterminate, but
+ * they are only ever charged when their PID matches this container's registered
+ * list, so the realistic outcome is that they are ignored. */
+static unsigned int clamp_process_count(unsigned int count, const char *what) {
+  if (unlikely(count > MAX_PIDS)) {
+    LOGGER(WARNING, "NVML reported %u %s processes for a %d-entry buffer; clamping",
+           count, what, MAX_PIDS);
+    return MAX_PIDS;
+  }
+  return count;
+}
+
 /* Drop entries from `stale` whose PID also appears in `fresh`, and report how
  * many survive. The surviving entries are packed to the front.
  *
@@ -2722,6 +2741,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                    ret, NVML_ERROR(nvml_library_entry, ret));
     compute_count = 0;
   }
+  compute_count = clamp_process_count(compute_count, "compute");
 
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses,
@@ -2740,6 +2760,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                    ret, NVML_ERROR(nvml_library_entry, ret));
     graphic_count = 0;
   }
+  graphic_count = clamp_process_count(graphic_count, "graphics");
 
   /* The graphics enumeration ran second, so for a process in both lists its
    * entry there is the newer sample. Keep that one. */

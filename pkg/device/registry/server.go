@@ -624,9 +624,6 @@ func (s *DeviceRegistryServerImpl) Start() error {
 		}
 	}()
 
-	s.listener = listener
-	s.socketPath = socketFile
-	s.socketID = socketID
 	// Hardening against a hijacked container flooding the shared socket:
 	//   - Creds captures the caller's SO_PEERCRED PID for authentication.
 	//   - small message / stream / connection limits bound per-connection cost
@@ -646,11 +643,16 @@ func (s *DeviceRegistryServerImpl) Start() error {
 	)
 
 	registry.RegisterVDeviceRegistryServer(s.server, s)
+
+	// Point of no return, in one block: from here the serving goroutine owns
+	// the listener, so the deferred rollback must not fire, and the state the
+	// guard and Stop read has to be complete before either can run. Nothing
+	// between bindSocket and this line may return an error.
+	s.listener = listener
+	s.socketPath = socketFile
+	s.socketID = socketID
 	s.running = true
 	s.guardStop = make(chan struct{})
-
-	// Past the point of no return: the serving goroutine below owns the
-	// listener, so the deferred rollback must not fire.
 	cleanupSocket = false
 
 	go serveOn(s.server, listener)
