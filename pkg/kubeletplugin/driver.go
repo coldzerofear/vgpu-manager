@@ -219,7 +219,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	if featuregates.Enabled(featuregates.DevicePluginClientMode) {
 		cgroup.MustInitCGroupDriver(config.Flags.CGroupDriver)
 		if err := driver.startClientRegistry(ctx, config, state); err != nil {
-			return nil, fmt.Errorf("start client-register registry: %w", err)
+			return nil, fmt.Errorf("start client-register failed: %w", err)
 		}
 	}
 
@@ -761,14 +761,7 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 		resolver.TargetByPodUID,
 		resolver.TargetByUUID,
 	)
-
-	d.wg.Go(func() {
-		klog.V(4).Info("Starting container device registry server")
-		if err := d.deviceRegistry.Start(); err != nil {
-			klog.ErrorS(err, "device registry server start failed")
-		}
-	})
-	return nil
+	return d.deviceRegistry.Start()
 }
 
 // startNRIPlugin builds and runs the in-process NRI plugin (design §12.13).
