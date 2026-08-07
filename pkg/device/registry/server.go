@@ -587,13 +587,8 @@ func (s *DeviceRegistryServerImpl) Start() error {
 		return fmt.Errorf("DeviceRegistry server is already running")
 	}
 	registryPath := filepath.Join(s.contPath, util.Registry)
-	if err := os.MkdirAll(registryPath, registryDirMode); err != nil {
-		return fmt.Errorf("failed to create registry directory %s: %v", registryPath, err)
-	}
-	// Chmod unconditionally: MkdirAll leaves an existing directory's mode alone,
-	// and every release before this one created it 0777.
-	if err := os.Chmod(registryPath, registryDirMode); err != nil {
-		return fmt.Errorf("failed to set registry directory permissions: %v", err)
+	if err := util.EnsureDir(registryPath, registryDirMode); err != nil {
+		klog.ErrorS(err, "Preparing to register directory failed", "directory", registryPath)
 	}
 
 	// Take ownership of the directory before touching anything inside it, so a

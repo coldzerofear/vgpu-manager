@@ -238,16 +238,17 @@ func (m *vNumberDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *plugi
 func (m *vNumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	klog.V(4).InfoS("ListAndWatch", "pluginName", m.Name(), "server", s)
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-		klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+		klog.Errorf("DevicePlugin %q ListAndWatch send devices error: %v", m.Name(), err)
+		return err
 	}
 	stopCh := m.baseServer.GetStopCh()
 	for {
 		select {
 		case d := <-m.baseServer.GetDeviceCh():
 			if d.GPU != nil && !d.GPU.MigEnabled {
-				klog.Infof("'%s' device marked unhealthy: %s", m.baseServer.GetResourceName(), d.GPU.UUID)
+				klog.Infof("%q device marked unhealthy: %s", m.baseServer.GetResourceName(), d.GPU.UUID)
 				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+					klog.Errorf("DevicePlugin %q ListAndWatch send devices error: %v", m.Name(), err)
 				}
 			}
 		case <-stopCh:
@@ -299,9 +300,7 @@ func buildDefaultAllocationResponses(
 				i, req.GetAllocationSize(), len(deviceIDs),
 			)
 		}
-		resps[i] = &pluginapi.ContainerPreferredAllocationResponse{
-			DeviceIDs: deviceIDs,
-		}
+		resps[i] = &pluginapi.ContainerPreferredAllocationResponse{DeviceIDs: deviceIDs}
 	}
 	return resps, nil
 }
@@ -322,8 +321,7 @@ func buildAvailableDeviceMap(availableDeviceIDs []string) map[string][]string {
 }
 
 func (m *vNumberDevicePlugin) buildPreAllocContext(
-	ctx context.Context,
-	requests []*pluginapi.ContainerPreferredAllocationRequest,
+	ctx context.Context, requests []*pluginapi.ContainerPreferredAllocationRequest,
 ) (*preAllocContext, error) {
 	currentPod, err := m.getCurrentPod(ctx)
 	if err != nil {
@@ -398,8 +396,7 @@ func allocateFromClaim(
 }
 
 func buildPreferredAllocationResponsesFromClaims(
-	requests []*pluginapi.ContainerPreferredAllocationRequest,
-	preCtx *preAllocContext,
+	requests []*pluginapi.ContainerPreferredAllocationRequest, preCtx *preAllocContext,
 ) ([]*pluginapi.ContainerPreferredAllocationResponse, error) {
 	resps := make([]*pluginapi.ContainerPreferredAllocationResponse, len(requests))
 	allocated := sets.New[string]()
@@ -417,9 +414,7 @@ func buildPreferredAllocationResponsesFromClaims(
 			)
 		}
 
-		resps[i] = &pluginapi.ContainerPreferredAllocationResponse{
-			DeviceIDs: deviceIDs,
-		}
+		resps[i] = &pluginapi.ContainerPreferredAllocationResponse{DeviceIDs: deviceIDs}
 	}
 
 	return resps, nil
@@ -440,21 +435,15 @@ func (m *vNumberDevicePlugin) GetPreferredAllocation(ctx context.Context, req *p
 	preCtx, err := m.buildPreAllocContext(ctx, requests)
 	if err != nil {
 		klog.V(3).ErrorS(err, "failed to build pre-allocation context, fallback to default allocation")
-		return &pluginapi.PreferredAllocationResponse{
-			ContainerResponses: defaultResps,
-		}, nil
+		return &pluginapi.PreferredAllocationResponse{ContainerResponses: defaultResps}, nil
 	}
 	claimResps, err := buildPreferredAllocationResponsesFromClaims(requests, preCtx)
 	if err != nil {
 		klog.V(3).ErrorS(err, "failed to build claim-based preferred allocation, fallback to default allocation",
 			"pod", klog.KObj(preCtx.pod))
-		return &pluginapi.PreferredAllocationResponse{
-			ContainerResponses: defaultResps,
-		}, nil
+		return &pluginapi.PreferredAllocationResponse{ContainerResponses: defaultResps}, nil
 	}
-	return &pluginapi.PreferredAllocationResponse{
-		ContainerResponses: claimResps,
-	}, nil
+	return &pluginapi.PreferredAllocationResponse{ContainerResponses: claimResps}, nil
 }
 
 const (
@@ -610,10 +599,8 @@ func UpdateResponseForNodeConfig(
 // (e.g. "gpu") and deviceIDs are the device UUIDs to expose. It is a no-op when
 // no CDI strategy is enabled.
 func UpdateResponseForCDI(
-	imexChannels imex.Channels,
-	response *pluginapi.ContainerAllocateResponse,
-	strategies util.DeviceListStrategies,
-	handler cdi.Handler, deviceIDs ...string,
+	imexChannels imex.Channels, response *pluginapi.ContainerAllocateResponse,
+	strategies util.DeviceListStrategies, handler cdi.Handler, deviceIDs ...string,
 ) error {
 	if !strategies.AnyCDIEnabled() {
 		return nil

@@ -137,7 +137,7 @@ func (b *basePluginServerImpl) serve(server pluginapi.DevicePluginServer) error 
 			}
 
 			klog.Infof("Starting GRPC server for '%s'", b.resourceName)
-			if err = b.server.Serve(sock); err == nil {
+			if err = b.server.Serve(sock); err == nil || errors.Is(err, grpc.ErrServerStopped) {
 				break
 			}
 

@@ -228,19 +228,20 @@ func CollectableContainerNames(pod *corev1.Pod) []string {
 // CheckDeviceType Check if the device type meets expectations.
 func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 	deviceType = strings.ToUpper(strings.TrimSpace(deviceType))
-	if includes, ok := annotations[PodIncludeGpuTypeAnnotation]; ok {
-		includeTypes := strings.Split(strings.ToUpper(includes), ",")
-		if !slices.ContainsFunc(includeTypes, func(devType string) bool {
-			return strings.Contains(deviceType, strings.TrimSpace(devType))
-		}) {
+	matchFunc := func(value string) bool {
+		vals := strings.Split(strings.ToUpper(value), ",")
+		return slices.ContainsFunc(vals, func(devType string) bool {
+			devType = strings.TrimSpace(devType)
+			return devType != "" && strings.Contains(deviceType, devType)
+		})
+	}
+	if includes, ok := annotations[PodIncludeGpuTypeAnnotation]; ok && includes != "" {
+		if !matchFunc(includes) {
 			return false
 		}
 	}
-	if excludes, ok := annotations[PodExcludeGpuTypeAnnotation]; ok {
-		excludeTypes := strings.Split(strings.ToUpper(excludes), ",")
-		if slices.ContainsFunc(excludeTypes, func(devType string) bool {
-			return strings.Contains(deviceType, strings.TrimSpace(devType))
-		}) {
+	if excludes, ok := annotations[PodExcludeGpuTypeAnnotation]; ok && excludes != "" {
+		if matchFunc(excludes) {
 			return false
 		}
 	}
@@ -250,17 +251,28 @@ func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 // CheckDeviceUuid Check if the device uuid meets expectations.
 func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
 	deviceUUID = strings.ToUpper(strings.TrimSpace(deviceUUID))
-	if includes, ok := annotations[PodIncludeGPUUUIDAnnotation]; ok {
-		includeUUIDs := strings.Split(strings.ToUpper(includes), ",")
-		return slices.ContainsFunc(includeUUIDs, func(uuid string) bool {
-			return strings.Contains(deviceUUID, strings.TrimSpace(uuid))
-		})
+	matchFunc := func(value string) (match bool, need bool) {
+		for _, devUUID := range strings.Split(strings.ToUpper(value), ",") {
+			devUUID = strings.TrimSpace(devUUID)
+			if devUUID == "" {
+				continue
+			}
+			need = true
+			if strings.Contains(deviceUUID, devUUID) {
+				return true, need
+			}
+		}
+		return false, need
 	}
-	if excludes, ok := annotations[PodExcludeGPUUUIDAnnotation]; ok {
-		excludeUUIDs := strings.Split(strings.ToUpper(excludes), ",")
-		return !slices.ContainsFunc(excludeUUIDs, func(uuid string) bool {
-			return strings.Contains(deviceUUID, strings.TrimSpace(uuid))
-		})
+	if includes, ok := annotations[PodIncludeGPUUUIDAnnotation]; ok && includes != "" {
+		if match, need := matchFunc(includes); need && !match {
+			return false
+		}
+	}
+	if excludes, ok := annotations[PodExcludeGPUUUIDAnnotation]; ok && excludes != "" {
+		if match, need := matchFunc(excludes); need && match {
+			return false
+		}
 	}
 	return true
 }

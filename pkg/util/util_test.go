@@ -56,16 +56,58 @@ func Test_CheckDeviceType(t *testing.T) {
 			want: false,
 		}, {
 			name:     "example 6: match GPU type",
-			cardType: "NVIDIA-NVIDIA GeForce RTX 3080 Ti",
+			cardType: "NVIDIA GeForce RTX 3080 Ti",
 			annotations: map[string]string{
 				PodIncludeGpuTypeAnnotation: "RTX 4090,RTX 3080",
 			},
 			want: true,
 		}, {
 			name:        "example 7: empty annotations",
-			cardType:    "NVIDIA-NVIDIA GeForce RTX 3080 Ti",
+			cardType:    "NVIDIA GeForce RTX 3080 Ti",
 			annotations: nil,
 			want:        true,
+		}, {
+			name:     "example 8: not case sensitive",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "a100",
+			},
+			want: true,
+		}, {
+			name:     "example 9: empty string",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "",
+			},
+			want: true,
+		}, {
+			name:     "example 10: space string",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodExcludeGpuTypeAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			name:     "example 11: trailing comma",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "V100,",
+			},
+			want: false,
+		}, {
+			name:     "example 12: prefix comma",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodExcludeGpuTypeAnnotation: ",V100",
+			},
+			want: true,
+		}, {
+			name:     "example 13: trailing comma",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodExcludeGpuTypeAnnotation: "V100,",
+			},
+			want: true,
 		},
 	}
 
@@ -125,6 +167,48 @@ func Test_CheckDeviceUuid(t *testing.T) {
 			cardUuid:    gpu0Uuid,
 			annotations: nil,
 			want:        true,
+		}, {
+			name:     "example 7: empty string",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: "",
+			},
+			want: true,
+		}, {
+			name:     "example 8: space string",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			name:     "example 9: trailing comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: gpu0Uuid + ",",
+			},
+			want: true,
+		}, {
+			name:     "example 10: prefix comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: "," + gpu0Uuid,
+			},
+			want: true,
+		}, {
+			name:     "example 11: trailing comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodExcludeGPUUUIDAnnotation: gpu0Uuid + ",",
+			},
+			want: false,
+		}, {
+			name:     "example 12: prefix comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodExcludeGPUUUIDAnnotation: "," + gpu0Uuid,
+			},
+			want: false,
 		},
 	}
 

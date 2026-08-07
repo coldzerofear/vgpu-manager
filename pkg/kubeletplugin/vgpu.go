@@ -348,7 +348,6 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 		}
 	}
 
-	pidsContPath, pidsHostPath := pidsConfigPaths(m.contManagerPath, partitionHostPath)
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
 			Env: envs,
@@ -373,54 +372,15 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 					HostPath:      filepath.Join(partitionHostPath, util.SMNode),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
+				// Read-only, nested inside the config mount above; see pidsConfigPaths.
 				{
-					ContainerPath: pidsContPath,
-					HostPath:      pidsHostPath,
-					Options:       pidsConfigMountOptions(),
+					ContainerPath: filepath.Join(m.contManagerPath, util.Config, registry.PidsConfig),
+					HostPath:      filepath.Join(partitionHostPath, util.Config, registry.PidsConfig),
+					Options:       []string{"ro", "nosuid", "nodev", "bind"},
 				},
 			},
 		},
 	}, nil
-}
-
-// pidsConfigPaths returns the (container, host) pair for the container's
-// pids.config, which is bind-mounted read-only on its own — nested inside the
-// writable config directory rather than making that whole directory read-only.
-//
-// The directory has to stay writable: in the DRA path there is no
-// PreStartContainer hook, so the in-container library materialises vgpu.config
-// from its environment on first use, and the host-side metrics lister reads
-// that file back. pids.config is different in kind — it is the manager's
-// kernel-derived answer to "which host PIDs belong to this container", and
-// every memory-accounting decision is built on it. A container that can rewrite
-// it can drop its own PIDs (reporting no usage) or claim a neighbour's.
-//
-// Mounting the single file read-only pins it: a mountpoint cannot be unlinked
-// or renamed over from inside the container (EBUSY) and its contents cannot be
-// written (EROFS), even though the enclosing directory is writable and even for
-// a container running as root. The manager writes it from the host side, where
-// it is an ordinary file.
-//
-// Mount ordering is handled for us. Both plumbing paths sort the OCI mount list
-// by destination depth before handing it to the runtime — CDI in
-// container-edits.go (sortMounts) and NRI in runtime-tools/generate — so the
-// parent config directory is always mounted before this file, whatever order we
-// list them in.
-//
-// This does not make the DRA config surface read-only: vgpu.config remains
-// container-writable, so the limits it carries are still forgeable there. That
-// is a separate gap.
-func pidsConfigPaths(contManagerPath, partitionHostPath string) (containerPath, hostPath string) {
-	return filepath.Join(contManagerPath, util.Config, registry.PidsConfig),
-		filepath.Join(partitionHostPath, util.Config, registry.PidsConfig)
-}
-
-// pidsConfigMountOptions is shared by both plumbing paths so the read-only bit
-// cannot drift between them. Returned fresh each time rather than shared: the
-// slice is handed to third-party mount plumbing, and a mutable package-level
-// slice behind two mounts is a needless coupling.
-func pidsConfigMountOptions() []string {
-	return []string{"ro", "nosuid", "nodev", "bind"}
 }
 
 // GetNRIPartitionInjection ensures the per-container partition directories for a
@@ -437,7 +397,7 @@ func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, 
 	if err != nil {
 		return nil, err
 	}
-	pidsContPath, pidsHostPath := pidsConfigPaths(m.contManagerPath, hostBase)
+
 	return &nri.Injection{
 		ConfigDir: filepath.Join(contBase, util.Config),
 		Env: []string{
@@ -470,9 +430,9 @@ func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, 
 			},
 			// Read-only, nested inside the config mount above; see pidsConfigPaths.
 			{
-				ContainerPath: pidsContPath,
-				HostPath:      pidsHostPath,
-				Options:       pidsConfigMountOptions(),
+				ContainerPath: filepath.Join(m.contManagerPath, util.Config, registry.PidsConfig),
+				HostPath:      filepath.Join(hostBase, util.Config, registry.PidsConfig),
+				Options:       []string{"ro", "nosuid", "nodev", "bind"},
 			},
 		},
 	}, nil
