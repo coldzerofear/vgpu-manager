@@ -2089,16 +2089,11 @@ func (n *NodeInfo) UUIDsMatchingRailSignature(signature string) []string {
 	if signature == "" {
 		return nil
 	}
-	want := make(map[string]struct{})
-	for _, key := range strings.Split(signature, ",") {
-		want[key] = struct{}{}
-	}
-	out := make([]string, 0, len(want))
+	want := sets.NewString(strings.Split(signature, ",")...)
+	out := make([]string, 0, want.Len())
 	for uuid := range n.deviceIndexMap {
-		if key, ok := n.railKeyOf(uuid); ok {
-			if _, hit := want[key]; hit {
-				out = append(out, uuid)
-			}
+		if key, ok := n.railKeyOf(uuid); ok && want.Has(key) {
+			out = append(out, uuid)
 		}
 	}
 	sort.Strings(out)

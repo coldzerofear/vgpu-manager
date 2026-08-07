@@ -493,8 +493,8 @@ func (alloc *allocator) allocateByTopologyMode(
 // "NUMA topology" / "cross-NUMA allocation"); they appear only in the
 // non-strict TopologyFallback event message.
 func (alloc *allocator) handleTopologyFallback(
-	pod *corev1.Pod, strict bool, strictCode reason.Code, mode util.TopologyMode,
-	attemptKind, fallbackKind, detail string,
+	pod *corev1.Pod, strict bool, strictCode reason.Code,
+	mode util.TopologyMode, attemptKind, fallbackKind, detail string,
 ) *reason.FilterReason {
 	if strict {
 		// PER NODE EVALUATION: this counts nodes refused, not pods. One pod can
@@ -524,8 +524,7 @@ func (alloc *allocator) handleTopologyFallback(
 // what previously made it possible to receive a disconnected set and have to
 // re-verify it.
 func (alloc *allocator) allocateLink(
-	deviceStore []*device.Device, req *AllocationRequest,
-	anchorRoot int, needNumber int,
+	deviceStore []*device.Device, req *AllocationRequest, anchorRoot int, needNumber int,
 ) (*linkPlan, bool) {
 	if !alloc.nodeInfo.HasGPUTopology() {
 		return nil, false

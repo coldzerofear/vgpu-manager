@@ -2187,6 +2187,8 @@ static void active_utilization_notifier(int batch_code) {
 #endif
 }
 
+extern nvmlReturn_t _nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device);
+
 static void init_device_cuda_cores(int *device_count) {
   CUresult ret = CUDA_INTERNAL_CALL(cuda_library_entry, cuDeviceGetCount, device_count);
   if (unlikely(ret)) {
@@ -2209,13 +2211,7 @@ static void init_device_cuda_cores(int *device_count) {
       LOGGER(FATAL, "cuda device %d cannot find the corresponding nvml device", device);
     }
 
-    if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
-      rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, nvml_index, &nvml_devices[host_index]);
-    } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
-      rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, nvml_index, &nvml_devices[host_index]);
-    } else {
-      rt = NVML_ERROR_FUNCTION_NOT_FOUND;
-    }
+    rt = _nvmlDeviceGetHandleByIndex(nvml_index, &nvml_devices[host_index]);
     if (unlikely(rt)) {
       LOGGER(FATAL, "nvmlDeviceGetHandleByIndex call failed, nvml device %d, return %d, str %s",
                      nvml_index, rt, NVML_ERROR(nvml_library_entry, rt));
@@ -2588,22 +2584,36 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
 
 }
 
+nvmlReturn_t _nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses, device, infoCount, infos);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2, device, infoCount, infos);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3, device, infoCount, infos);
+  }
+  return ret;
+}
+
+nvmlReturn_t _nvmlDeviceGetGraphicsRunningProcesses(nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses, device, infoCount, infos);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2, device, infoCount, infos);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3, device, infoCount, infos);
+  }
+  return ret;
+}
+
 void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
   size_t *used_memory = arg;
   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
   unsigned int size_on_device = MAX_PIDS;
-  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
 
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
-                             device, &size_on_device, pids_on_device);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
-                             device, &size_on_device, pids_on_device);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
-                             device, &size_on_device, pids_on_device);
-  }
+  nvmlReturn_t ret = _nvmlDeviceGetComputeRunningProcesses(device, &size_on_device, pids_on_device);
   if (unlikely(ret)) {
     *used_memory = 0;
     LOGGER(ERROR, "nvmlDeviceGetComputeRunningProcesses call failed, return: %d, str: %s",
@@ -2615,19 +2625,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
 
   size_on_device = MAX_PIDS;
   nvmlProcessInfo_t graphic_pids_on_device[MAX_PIDS];
-
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses,
-                           device, &size_on_device, graphic_pids_on_device);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2,
-                           device, &size_on_device, graphic_pids_on_device);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3,
-                           device, &size_on_device, graphic_pids_on_device);
-  } else {
-    ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-  }
+  ret = _nvmlDeviceGetGraphicsRunningProcesses(device, &size_on_device, graphic_pids_on_device);
   if (unlikely(ret)) {
     LOGGER(ERROR, "nvmlDeviceGetGraphicsRunningProcesses call failed, return: %d, str: %s",
                    ret, NVML_ERROR(nvml_library_entry, ret));
@@ -2683,12 +2681,7 @@ void get_used_gpu_memory(void *arg, CUdevice device) {
   }
 
   nvmlDevice_t dev;
-  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, nvml_index, &dev);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, nvml_index, &dev);
-  }
+  nvmlReturn_t ret = _nvmlDeviceGetHandleByIndex(nvml_index, &dev);
   if (unlikely(ret)) {
     *used_memory = 0;
     LOGGER(ERROR, "nvmlDeviceGetHandleByIndex call failed, nvml device: %d, return: %d, str: %s",
@@ -2761,20 +2754,10 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
 
   metrics_record_nvml_fallback(host_index);
 
-  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
-                             dev, &running_processes, pids_on_device);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
-                             dev, &running_processes, pids_on_device);
-  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3))) {
-    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3,
-                             dev, &running_processes, pids_on_device);
-  }
+  nvmlReturn_t ret = _nvmlDeviceGetComputeRunningProcesses(dev, &running_processes, pids_on_device);
   if (unlikely(ret)) {
     LOGGER(VERBOSE, "nvmlDeviceGetComputeRunningProcesses can't get pids on cuda device %d, "
-                 "return %d, str: %s", cuda_index, ret, NVML_ERROR(nvml_library_entry, ret));
+                    "return %d, str: %s", cuda_index, ret, NVML_ERROR(nvml_library_entry, ret));
     return ret;
   }
 
@@ -2783,18 +2766,7 @@ static nvmlReturn_t get_gpu_process_from_local_nvml_driver(
   if (running_processes == 0) {
     running_processes = MAX_PIDS;
     nvmlProcessInfo_t graphic_pids_on_device[MAX_PIDS];
-    if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses))) {
-      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses,
-                               dev, &running_processes, graphic_pids_on_device);
-    } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2))) {
-      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2,
-                               dev, &running_processes, graphic_pids_on_device);
-    } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3))) {
-      ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3,
-                               dev, &running_processes, graphic_pids_on_device);
-    } else {
-      ret = NVML_ERROR_FUNCTION_NOT_FOUND;
-    }
+    ret = _nvmlDeviceGetGraphicsRunningProcesses(dev, &running_processes, graphic_pids_on_device);
     if (likely(ret == NVML_SUCCESS)) {
       top_result->sys_process_num = running_processes;
     }
