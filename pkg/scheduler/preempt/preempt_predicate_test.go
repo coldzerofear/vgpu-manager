@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	kubelettypes "k8s.io/kubernetes/pkg/kubelet/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -442,6 +443,84 @@ func Test_sortVictimsByPreference(t *testing.T) {
 		sortVictimsByPreference(pods, nil)
 		assert.Equal(t, "gang-pri-5", pods[0].Name, "lower-priority gang member preferred for eviction")
 	})
+}
+
+// Test_VictimEligibility_Preemptable pins the ELIGIBILITY predicate that
+// findAdditionalVictims applies, kubelettypes.Preemptable.
+//
+// It exists because that predicate is not equivalent to the plain
+// `PodPriority(candidate) < PodPriority(preemptor)` comparison it reads like.
+// corev1helpers.PodPriority treats a nil Spec.Priority as 0, so the plain
+// comparison makes an unprioritised pod evictable by anyone; Preemptable
+// returns FALSE outright when either side's Priority is nil. That is the only
+// case where the two disagree in practice, and it is not otherwise covered —
+// every fixture in this file sets Priority explicitly via withPriority.
+//
+// The direction is deliberate: refusing to evict a pod whose priority the
+// cluster never established is the conservative reading, and preemption is a
+// place where "do less" is the safe default. Spec.Priority is nil only when the
+// Priority admission plugin never processed the pod (very old clusters, direct
+// etcd writes, hand-built fixtures).
+func Test_VictimEligibility_Preemptable(t *testing.T) {
+	withNilPriority := func(p *corev1.Pod) *corev1.Pod {
+		p.Spec.Priority = nil
+		return p
+	}
+
+	cases := []struct {
+		name      string
+		preemptor *corev1.Pod
+		candidate *corev1.Pod
+		want      bool
+	}{
+		{
+			name:      "strictly lower priority is evictable",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(100)),
+			candidate: newVGPUPod("c", "ns", 1, withPriority(10)),
+			want:      true,
+		},
+		{
+			name:      "equal priority is not evictable",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(10)),
+			candidate: newVGPUPod("c", "ns", 1, withPriority(10)),
+			want:      false,
+		},
+		{
+			name:      "higher priority is not evictable",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(10)),
+			candidate: newVGPUPod("c", "ns", 1, withPriority(100)),
+			want:      false,
+		},
+		{
+			// THE case that differs from the old comparison, which saw the
+			// candidate as priority 0 and happily evicted it.
+			name:      "candidate with no priority is NOT evictable",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(100)),
+			candidate: withNilPriority(newVGPUPod("c", "ns", 1)),
+			want:      false,
+		},
+		{
+			// ...unless the preemptor is itself critical, in which case the
+			// critical carve-out fires. Note this matches the OLD behaviour, so
+			// the carve-out costs nothing: at >= SystemCriticalPriority the
+			// plain comparison would have allowed it too.
+			name:      "critical preemptor may evict an unprioritised pod",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(2_000_000_000)),
+			candidate: withNilPriority(newVGPUPod("c", "ns", 1)),
+			want:      true,
+		},
+		{
+			name:      "preemptor with no priority evicts nothing",
+			preemptor: withNilPriority(newVGPUPod("p", "ns", 1)),
+			candidate: newVGPUPod("c", "ns", 1, withPriority(1)),
+			want:      false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, kubelettypes.Preemptable(tc.preemptor, tc.candidate))
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

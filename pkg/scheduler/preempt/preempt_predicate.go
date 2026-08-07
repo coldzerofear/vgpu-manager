@@ -583,6 +583,13 @@ func (p *vgpuPreempt) findAdditionalVictims(
 		if candidate.Spec.NodeName != nodeName {
 			continue
 		}
+		// NOT the same as PodPriority(candidate) < PodPriority(req.Pod):
+		// Preemptable returns false when EITHER side has a nil Spec.Priority,
+		// whereas PodPriority silently reads nil as 0 and would make an
+		// unprioritised pod evictable by anything. Refusing to evict a pod whose
+		// priority the cluster never established is the conservative reading,
+		// and it matches isProtectedFromPreemption below, which already uses
+		// this package. See Test_VictimEligibility_Preemptable.
 		if !kubelettypes.Preemptable(req.Pod, candidate) {
 			continue
 		}
