@@ -17,6 +17,27 @@ imagePullPolicy: IfNotPresent
 # Set global domain name to replace all resource and annotation domains used by the webhook.
 globalDomain: nvidia.com
 
+# OpenShift mode. Opt-in, and only meaningful on OpenShift -- the objects it
+# renders belong to the security.openshift.io API group, which does not exist on
+# vanilla Kubernetes, so leave it false there.
+#
+# Enabling it creates a SecurityContextConstraints for the kubelet-plugin
+# DaemonSet and binds it to that DaemonSet's ServiceAccount through RBAC.
+# Without it OpenShift rejects the DaemonSet ("unable to validate against any
+# security context constraint") because the default restricted-v2 SCC forbids
+# the privileged containers, hostPath volumes and host PID the DRA driver needs.
+#
+# Deliberately NOT covered, because they do not need it:
+#   - the webhook, which asks for no privileges and is admitted by restricted-v2
+#     unchanged;
+#   - the device-monitor sidecar, which shares the DaemonSet's ServiceAccount and
+#     is therefore already covered;
+#   - GPU workloads. vgpu-manager creates the directories it mounts into them
+#     world-writable and relabels them for SELinux, so a workload needs no SCC
+#     of its own and no per-namespace binding.
+openshift:
+  enabled: false
+
 # resourceApiVersion sets the resource.k8s.io API version used for the DRA resources
 # rendered by this chart (currently the DeviceClass objects).
 #

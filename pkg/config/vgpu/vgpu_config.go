@@ -13,6 +13,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/selinux"
 	"github.com/opencontainers/cgroups"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -483,6 +484,13 @@ func WriteResourceDataToDisk(filePath string, data *ResourceDataT) error {
 	if err := file.Truncate(int64(ConfigFileSize)); err != nil {
 		return fmt.Errorf("can't size config %s to %d: %w", filePath, ConfigFileSize, err)
 	}
+	// This file is mmap'd by the in-container library, so on an SELinux node it
+	// needs the container label. A file created fresh inherits it from the
+	// (already relabelled) parent directory, but O_TRUNC on a file that survived
+	// from before this directory was labelled reuses the old inode and keeps its
+	// old label -- so label it explicitly rather than relying on inheritance.
+	// Best-effort; see pkg/util/selinux.
+	selinux.Relabel(filePath)
 	return nil
 }
 

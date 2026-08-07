@@ -1,0 +1,105 @@
+{{- if and .Values.openshift.enabled .Values.devicePlugin.enabled -}}
+{{- /*
+OpenShift admits every pod through a SecurityContextConstraints. The default
+`restricted-v2` allows none of what a GPU node agent needs -- privileged
+containers, hostPath volumes, host PID -- so without an SCC the DaemonSet is
+rejected outright with "unable to validate against any security context
+constraint" and never starts.
+
+Only the node-level DaemonSet needs this. The scheduler extender and the webhook
+are ordinary workloads that ask for no privileges and are admitted by
+`restricted-v2` unchanged, so they deliberately get no SCC here: granting one
+would widen their blast radius for nothing.
+
+GPU WORKLOADS also need nothing from this file. They are admitted by whatever
+SCC the cluster already gives them, because vgpu-manager asks nothing of them:
+the directories it bind-mounts in are created world-writable (so an arbitrary
+assigned UID can use them) and SELinux-relabelled to container_file_t (so a
+confined container can reach them). That is the whole point of pairing this
+chart flag with the relabelling in pkg/util/selinux -- an operator should not
+have to bind an SCC to every namespace that wants a GPU.
+*/ -}}
+{{- $name := include "vgpu-manager.device-plugin" . }}
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/component: {{ $name }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/description: >-
+      Grants the vgpu-manager device-plugin DaemonSet the host access it needs to
+      manage GPU device nodes and publish the shared vGPU state. Not intended for
+      GPU workloads, which require no SCC of their own.
+# The device plugin manages GPU device nodes and injects a preload library, and
+# its init container installs files onto the host filesystem.
+allowPrivilegedContainer: true
+allowPrivilegeEscalation: true
+# hostPath: the manager root, the driver root and the kubelet device-plugin
+# socket directory are all host directories.
+allowHostDirVolumePlugin: true
+# hostPID: the plugin resolves container PIDs against host PIDs to attribute GPU
+# processes to containers.
+allowHostPID: true
+allowHostIPC: false
+allowHostNetwork: {{ .Values.devicePlugin.hostNetwork | default false }}
+allowHostPorts: {{ .Values.devicePlugin.hostNetwork | default false }}
+readOnlyRootFilesystem: false
+# RunAsAny across the board: the containers run as root to write host paths, and
+# the SELinux context must stay whatever the node assigns rather than being
+# forced to a fixed one.
+runAsUser:
+  type: RunAsAny
+seLinuxContext:
+  type: RunAsAny
+fsGroup:
+  type: RunAsAny
+supplementalGroups:
+  type: RunAsAny
+# Empty rather than '*': privileged already confers the capabilities these
+# containers use, so there is nothing to add on top.
+allowedCapabilities: []
+defaultAddCapabilities: []
+requiredDropCapabilities: []
+volumes:
+  - configMap
+  - downwardAPI
+  - emptyDir
+  - hostPath
+  - projected
+  - secret
+# Bound through RBAC below rather than listed here, so the grant is visible in
+# the same place as every other permission this chart hands out.
+users: []
+groups: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}:scc
+  labels:
+    app.kubernetes.io/component: {{ $name }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["security.openshift.io"]
+    resources: ["securitycontextconstraints"]
+    resourceNames: [{{ $name | quote }}]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}:scc
+  labels:
+    app.kubernetes.io/component: {{ $name }}
+    {{- include "vgpu-manager.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}:scc
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace | quote }}
+{{- end }}

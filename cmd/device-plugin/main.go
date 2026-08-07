@@ -28,6 +28,7 @@ import (
 	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/selinux"
 	"github.com/fsnotify/fsnotify"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -93,6 +94,16 @@ func runApp(opt *options.Options) (exitCode int) {
 	}
 
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
+
+	// Relabel what the init container laid down (libvgpu-control.so,
+	// ld.so.preload, the driver/ directory) so a confined workload can read it
+	// on an SELinux-enforcing node. Directories created later go through
+	// util.EnsureDir, which relabels each one as it appears. No-op when SELinux
+	// is disabled, and best-effort throughout -- see pkg/util/selinux.
+	if selinux.Enabled() {
+		klog.V(3).Infof("SELinux enabled, relabeling manager root %s", util.ManagerRootPath)
+		selinux.RelabelRecursive(util.ManagerRootPath)
+	}
 
 	klog.V(3).Info("Initialize Device Resource Manager")
 	deviceManager, err := devm.NewDeviceManager(

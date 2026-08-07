@@ -26,6 +26,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/checkpoint"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/coldzerofear/vgpu-manager/pkg/util/selinux"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -1021,12 +1022,21 @@ func (m *vNumberDevicePlugin) getCurrentNode(ctx context.Context) (*corev1.Node,
 	return node, nil
 }
 
+// writeJSONFile writes devices.json into the per-container manager directory,
+// which is bind-mounted into the workload, so the result is relabelled for
+// SELinux. os.WriteFile truncates an existing file rather than recreating it,
+// which would otherwise preserve a stale label from before the directory was
+// labelled. Best-effort; see pkg/util/selinux.
 func writeJSONFile(path string, v any, perm os.FileMode) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, perm)
+	if err := os.WriteFile(path, data, perm); err != nil {
+		return err
+	}
+	selinux.Relabel(path)
+	return nil
 }
 
 func readJSONFile(path string, out any) error {

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/util/selinux"
 	"google.golang.org/protobuf/encoding/protowire"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -620,6 +621,17 @@ func GetEnvDefault(env, defaultValue string) string {
 	return defaultValue
 }
 
+// EnsureDir creates path and forces its mode.
+//
+// The explicit Chmod is not redundant: MkdirAll applies the caller's mode
+// through the process umask (typically 0022), so a 0777 request would land as
+// 0755 and lock out a workload running as an arbitrary UID.
+//
+// Every directory created here is bind-mounted into a workload container, so
+// each one is also relabeled for SELinux. Doing it at the single choke point
+// rather than at each call site is what keeps the coverage complete as new
+// mounted directories are added. The relabel is best-effort and never fails the
+// call -- see pkg/util/selinux.
 func EnsureDir(path string, perm os.FileMode) error {
 	if err := os.MkdirAll(path, perm); err != nil {
 		return err
@@ -627,6 +639,7 @@ func EnsureDir(path string, perm os.FileMode) error {
 	if err := os.Chmod(path, perm); err != nil {
 		return err
 	}
+	selinux.Relabel(path)
 	return nil
 }
 
