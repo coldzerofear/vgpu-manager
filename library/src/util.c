@@ -8,8 +8,10 @@
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <time.h>
 
 #define MAX_PID_STR_LEN 32
 #define CUDA_MEMORY_LIMIT_ENV "CUDA_MEM_LIMIT"
@@ -568,6 +570,43 @@ static int compare_pids(const void *a, const void *b) {
   return (pid1 > pid2) - (pid1 < pid2);
 }
 
+/* Bounded wait for the shared lock on pids.config.
+ *
+ * The manager rewrites this file in place under LOCK_EX every time a process in
+ * this container registers -- which is once per CUDA process, at library init.
+ * Reading without the matching LOCK_SH lets a read land in the middle of that
+ * rewrite.
+ *
+ * LOCK_NB with a short retry budget rather than a blocking LOCK_SH: this runs on
+ * the NVML memory-query path, so a writer that stalls while holding the lock
+ * must not be able to wedge CUDA calls behind it. Giving up and reading anyway
+ * is the safe degradation -- the writer never truncates before writing, so an
+ * unlocked reader sees a complete list, at worst with trailing PIDs of this same
+ * container left over from a longer previous one. Those are dead PIDs; they
+ * match nothing on the device. */
+#define PIDS_CONFIG_LOCK_ATTEMPTS 20
+#define PIDS_CONFIG_LOCK_BACKOFF_NS (1000 * 1000L) /* 1ms, so ~20ms worst case */
+
+static int lock_pids_config_shared(int fd) {
+  struct timespec backoff = {.tv_sec = 0, .tv_nsec = PIDS_CONFIG_LOCK_BACKOFF_NS};
+  for (int attempt = 0; attempt < PIDS_CONFIG_LOCK_ATTEMPTS; attempt++) {
+    if (flock(fd, LOCK_SH | LOCK_NB) == 0) {
+      return 0;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    /* EWOULDBLOCK (== EAGAIN) is the writer holding LOCK_EX: retry. Anything
+     * else -- a filesystem without flock support, a bad descriptor -- does not
+     * get better by waiting. */
+    if (errno != EWOULDBLOCK) {
+      return -1;
+    }
+    nanosleep(&backoff, NULL);
+  }
+  return -1;
+}
+
 int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids) {
   if (!file_path || !pids || !pids_size) {
     LOGGER(ERROR, "invalid NULL parameter");
@@ -586,6 +625,12 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
     LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
     *pids_size = 0;
     return -1;
+  }
+
+  int lock_fd = fileno(fp);
+  int locked = (lock_pids_config_shared(lock_fd) == 0);
+  if (!locked) {
+    LOGGER(VERBOSE, "reading %s without a shared lock: %s", file_path, strerror(errno));
   }
 
   int max_size = *pids_size;
@@ -616,6 +661,9 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
     LOGGER(WARNING, "PID array full, only stored %d PIDs from %s", max_size, file_path);
   }
 
+  if (locked) {
+    flock(lock_fd, LOCK_UN);
+  }
   fclose(fp);
   return 0;
 }

@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -60,7 +59,22 @@ import (
 //  // includes the host manager root and the kubelet root. Only the final
 //  // component needs guarding: the parent directories are the bind-mount point
 //  // and above, which the container cannot replace from inside.
-//  fd = open(filename, O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW, 00777);
+//  // Deliberately NOT O_TRUNC. open() truncates before the lock below can be
+//  // taken, which publishes an empty pids.config to every reader in the window
+//  // between the two -- and an empty list is exactly the state the in-container
+//  // library treats as "no registered process", which is fatal there. Every
+//  // process in the container re-registers at library init, so this file is
+//  // rewritten constantly and that window is hit in practice.
+//  //
+//  // Nor is the file replaced via a temporary + rename: pids.config is
+//  // bind-mounted into the workload container, and rename swaps the inode out
+//  // from under a mount that would then be pinned to the old, stale one.
+//  //
+//  // What is left is in-place rewriting under the lock, ordered pwrite-then-
+//  // shrink so the file is never observably empty. Readers take LOCK_SH; one
+//  // that does not (an older library during a rolling upgrade) still sees a
+//  // whole list rather than an empty one.
+//  fd = open(filename, O_CREAT | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0644);
 //  if (fd == -1) {
 //    // ELOOP here means the path existed AND was a symlink. That is not a
 //    // transient error -- nothing legitimate ever creates one -- so report it
@@ -70,8 +84,15 @@ import (
 //  while (flock(fd, LOCK_EX)) {
 //    nanosleep(&wait, NULL);
 //  }
-//  wsize = (int)write(fd, (void*)data, data_len);
+//  wsize = (int)pwrite(fd, (void*)data, data_len, 0);
 //  if (wsize != (int)data_len) {
+//	  ret = 2;
+//    goto DONE;
+//  }
+//  // Drop whatever the previous, longer list left behind. Shrinking last means
+//  // the only stale bytes a concurrent reader can pick up are trailing PIDs of
+//  // this same container, which no longer match anything on the device.
+//  if (ftruncate(fd, (off_t)data_len) != 0) {
 //	  ret = 2;
 //    goto DONE;
 //  }
@@ -185,8 +206,16 @@ type DeviceRegistryServerImpl struct {
 	getTargetByPodUid  GetTargetByPodUidFunc
 	getTargetByRegUuid GetTargetByRegisterUuidFunc
 	server             *grpc.Server
-	listener           net.Listener
+	listener           *net.UnixListener
 	running            bool
+
+	// socketPath/socketID/lockFile are the ownership record for the listening
+	// socket, established in Start and consumed by Stop. They are what let
+	// shutdown unlink the socket file only while it is still ours, instead of
+	// deleting whatever happens to sit at that path by then.
+	socketPath string
+	socketID   socketIdentity
+	lockFile   *os.File
 
 	// inFlight is a global concurrency budget for resolveTarget; perCaller
 	// tracks the in-flight count keyed by caller identity (guarded by
@@ -509,9 +538,17 @@ retry:
 	return target, target.Validate()
 }
 
-// persistPids writes the sorted PID list to <configDir>/pids.config atomically
-// (flock + truncate+write) via the in-tree cgo helper.
+// persistPids writes the sorted PID list to <configDir>/pids.config in place,
+// under an exclusive flock, via the in-tree cgo helper.
 func (s *DeviceRegistryServerImpl) persistPids(configDir string, pids []int) error {
+	// An empty list is the one payload that must never reach the file: the
+	// in-container library reads "no PIDs" as "this container has no registered
+	// process" and kills the calling process over it. resolveTarget only ever
+	// accepts a candidate with live cgroup PIDs, so this is a guard against a
+	// future caller, not a reachable state today.
+	if len(pids) == 0 {
+		return fmt.Errorf("refusing to write an empty pids file at %s", filepath.Join(configDir, PidsConfig))
+	}
 	_ = util.EnsureDir(configDir, 0o777)
 	var buf bytes.Buffer
 	sort.Ints(pids)
@@ -550,11 +587,31 @@ func (s *DeviceRegistryServerImpl) Start() error {
 		return fmt.Errorf("DeviceRegistry server is already running")
 	}
 	registryPath := filepath.Join(s.contPath, util.Registry)
-	_ = os.MkdirAll(registryPath, 0777)
-	_ = os.Chmod(registryPath, 0777)
+	if err := os.MkdirAll(registryPath, registryDirMode); err != nil {
+		return fmt.Errorf("failed to create registry directory %s: %v", registryPath, err)
+	}
+	// Chmod unconditionally: MkdirAll leaves an existing directory's mode alone,
+	// and every release before this one created it 0777.
+	if err := os.Chmod(registryPath, registryDirMode); err != nil {
+		return fmt.Errorf("failed to set registry directory permissions: %v", err)
+	}
+
+	// Take ownership of the directory before touching anything inside it, so a
+	// second instance fails here rather than halfway through stealing the socket.
+	lockFile, err := acquireDirectoryLock(registryPath)
+	if err != nil {
+		return err
+	}
+	releaseLock := true
+	defer func() {
+		if releaseLock {
+			releaseDirectoryLock(lockFile)
+		}
+	}()
+
 	socketFile := filepath.Join(registryPath, SocketFile)
-	if err := syscall.Unlink(socketFile); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove existing socket: %v", err)
+	if err = removeStaleSocket(socketFile); err != nil {
+		return err
 	}
 
 	addr, err := net.ResolveUnixAddr("unix", socketFile)
@@ -565,12 +622,30 @@ func (s *DeviceRegistryServerImpl) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to listen unix: %v", err)
 	}
+	// Go unlinks the socket path on Close by default, without checking that the
+	// file is still the one it bound. grpc.Server.GracefulStop closes the
+	// listener too, so leaving this on means shutdown can delete a successor's
+	// socket. Ownership is tracked explicitly instead; see removeOwnedSocket.
+	listener.SetUnlinkOnClose(false)
+	cleanupSocket := true
+	defer func() {
+		if cleanupSocket {
+			_ = listener.Close()
+			_ = os.Remove(socketFile)
+		}
+	}()
 
-	if err = os.Chmod(socketFile, 0777); err != nil {
-		_ = listener.Close()
+	if err = os.Chmod(socketFile, socketFileMode); err != nil {
 		return fmt.Errorf("failed to set socket permissions: %v", err)
 	}
+	socketID, err := readSocketIdentity(socketFile)
+	if err != nil {
+		return err
+	}
 	s.listener = listener
+	s.socketPath = socketFile
+	s.socketID = socketID
+	s.lockFile = lockFile
 	// Hardening against a hijacked container flooding the shared socket:
 	//   - Creds captures the caller's SO_PEERCRED PID for authentication.
 	//   - small message / stream / connection limits bound per-connection cost
@@ -592,16 +667,32 @@ func (s *DeviceRegistryServerImpl) Start() error {
 	registry.RegisterVDeviceRegistryServer(s.server, s)
 	s.running = true
 
+	// Past the point of no return: the serving goroutine below owns the
+	// listener, so the deferred rollbacks must not fire.
+	cleanupSocket = false
+	releaseLock = false
+
+	// Capture the server this goroutine belongs to: Stop clears s.server and a
+	// restart installs a new one, so an unqualified `s.running = false` here can
+	// land after the next Start and report a live server as stopped.
+	served := s.server
 	go func() {
-		if err = s.server.Serve(listener); err != nil && err != grpc.ErrServerStopped {
-			klog.Errorf("DeviceRegistry gRPC server serve error: %v", err)
+		// net.ErrClosed is the ordinary shutdown signature: Stop closes the
+		// listener before GracefulStop, so Serve returns "use of closed network
+		// connection" on every clean stop. Logging that as an error made each
+		// restart look like a fault.
+		if serveErr := served.Serve(listener); serveErr != nil &&
+			!errors.Is(serveErr, grpc.ErrServerStopped) && !errors.Is(serveErr, net.ErrClosed) {
+			klog.Errorf("DeviceRegistry gRPC server serve error: %v", serveErr)
 		}
 		s.mutex.Lock()
-		s.running = false
+		if s.server == served {
+			s.running = false
+		}
 		s.mutex.Unlock()
 	}()
 
-	klog.V(3).Info("DeviceRegistry gRPC server started successfully")
+	klog.V(3).InfoS("DeviceRegistry gRPC server started successfully", "socket", socketFile)
 	return nil
 }
 
@@ -631,6 +722,30 @@ func (s *DeviceRegistryServerImpl) Stop() {
 			s.server.Stop()
 		}
 		s.server = nil
+	}
+
+	// Only now, with every serving goroutine gone, take the socket out of the
+	// filesystem — and only if the path still resolves to the inode we bound.
+	// A successor that already replaced it is serving clients right now; the
+	// old behaviour (unlink by path) deleted that socket and left the whole
+	// node unable to register.
+	if s.socketPath != "" {
+		switch removed, err := removeOwnedSocket(s.socketPath, s.socketID); {
+		case err != nil:
+			klog.ErrorS(err, "failed to clean up registry socket", "socket", s.socketPath)
+		case !removed:
+			klog.V(3).InfoS("registry socket no longer belongs to this server, leaving it in place",
+				"socket", s.socketPath)
+		}
+		s.socketPath = ""
+		s.socketID = socketIdentity{}
+	}
+
+	// Released last: while it is held, no other instance may bind the socket,
+	// so dropping it earlier would reopen the race this whole path closes.
+	if s.lockFile != nil {
+		releaseDirectoryLock(s.lockFile)
+		s.lockFile = nil
 	}
 
 	s.running = false
