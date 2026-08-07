@@ -38,7 +38,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
@@ -384,12 +383,13 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 		}
 	}
 
-	// Clean up old cache files (if any)
-	pidsConfigPath := filepath.Join(inj.ConfigDir, registry.PidsConfig)
+	// Clean up old cache files (if any). pids.config is deliberately absent from
+	// this list: resolveMounts above already emptied it in place, and it must
+	// stay in place — it is the source of a file bind mount injected in the same
+	// adjustment, and removing the source would abort container creation.
 	basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
 	vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
 	smNodeConfigPath := filepath.Join(basePath, util.SMNode, util.SMNodeFile)
-	_ = os.RemoveAll(pidsConfigPath)
 	_ = os.RemoveAll(vmemNodeConfigPath)
 	_ = os.RemoveAll(smNodeConfigPath)
 

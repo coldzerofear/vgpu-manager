@@ -9,6 +9,59 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func Test_ResetPidsFile(t *testing.T) {
+	t.Run("creates the file when missing", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, ResetPidsFile(dir))
+		info, err := os.Lstat(filepath.Join(dir, PidsConfig))
+		require.NoError(t, err)
+		assert.Zero(t, info.Size())
+		assert.True(t, info.Mode().IsRegular())
+	})
+
+	t.Run("empties in place, keeping the inode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, PidsConfig)
+		require.NoError(t, (&DeviceRegistryServerImpl{}).persistPids(dir, []int{7, 8, 9}))
+		before, err := os.Lstat(path)
+		require.NoError(t, err)
+
+		require.NoError(t, ResetPidsFile(dir))
+
+		after, err := os.Lstat(path)
+		require.NoError(t, err)
+		assert.Zero(t, after.Size())
+		// The inode is the whole point: this file is a bind-mount source, and a
+		// replacement would strand the container on the old one.
+		assert.True(t, os.SameFile(before, after), "reset must not replace the file")
+	})
+
+	t.Run("normalises a mode inherited from an older release", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, PidsConfig)
+		require.NoError(t, os.WriteFile(path, []byte("1\n"), 0o777))
+		require.NoError(t, os.Chmod(path, 0o777))
+
+		require.NoError(t, ResetPidsFile(dir))
+
+		info, err := os.Lstat(path)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(pidsFileMode), info.Mode().Perm())
+	})
+
+	t.Run("refuses to follow a symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		victim := filepath.Join(dir, "victim")
+		require.NoError(t, os.WriteFile(victim, []byte("untouched"), 0o600))
+		require.NoError(t, os.Symlink(victim, filepath.Join(dir, PidsConfig)))
+
+		require.Error(t, ResetPidsFile(dir))
+		content, err := os.ReadFile(victim)
+		require.NoError(t, err)
+		assert.Equal(t, "untouched", string(content))
+	})
+}
+
 func Test_persistPids(t *testing.T) {
 	server := &DeviceRegistryServerImpl{}
 
