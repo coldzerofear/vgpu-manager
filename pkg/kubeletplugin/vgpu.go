@@ -372,7 +372,34 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 					HostPath:      filepath.Join(partitionHostPath, util.SMNode),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
-				// Read-only, nested inside the config mount above; see pidsConfigPaths.
+				// pids.config, read-only, nested inside the writable config mount
+				// above rather than making that whole directory read-only.
+				//
+				// The directory has to stay writable: the DRA path has no
+				// PreStartContainer hook, so the in-container library materialises
+				// vgpu.config from its environment on first use, and the host-side
+				// metrics lister reads that file back. pids.config is different in
+				// kind — it is the manager's kernel-derived answer to "which host
+				// PIDs belong to this container", and the memory accounting is
+				// built on it. A container that can rewrite it can drop its own
+				// PIDs (reporting no usage) or claim a neighbour's.
+				//
+				// Mounting the single file read-only pins it: a mountpoint cannot
+				// be unlinked or renamed over from inside the container (EBUSY) and
+				// its contents cannot be written (EROFS), even though the enclosing
+				// directory is writable and even for a container running as root.
+				// The manager writes it from the host side, where it is an ordinary
+				// file.
+				//
+				// Ordering is not ours to get right, and does not depend on this
+				// entry coming last: both plumbing paths sort the OCI mount list by
+				// destination depth before handing it to the runtime — CDI in
+				// container-edits.go (sortMounts), NRI in runtime-tools/generate
+				// (AdjustMounts) — so the parent directory is always mounted first.
+				//
+				// This does not make the DRA config surface read-only: vgpu.config
+				// stays container-writable, so the limits it carries are still
+				// forgeable there. Separate gap.
 				{
 					ContainerPath: filepath.Join(m.contManagerPath, util.Config, registry.PidsConfig),
 					HostPath:      filepath.Join(partitionHostPath, util.Config, registry.PidsConfig),
@@ -428,7 +455,9 @@ func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, 
 				HostPath:      filepath.Join(hostBase, util.SMNode),
 				Options:       []string{"rw", "nosuid", "nodev", "bind"},
 			},
-			// Read-only, nested inside the config mount above; see pidsConfigPaths.
+			// pids.config, read-only, nested inside the writable config mount
+			// above. Same reasoning (and the same ordering guarantee) as the
+			// matching entry in GetPartitionMountContainerEdits.
 			{
 				ContainerPath: filepath.Join(m.contManagerPath, util.Config, registry.PidsConfig),
 				HostPath:      filepath.Join(hostBase, util.Config, registry.PidsConfig),

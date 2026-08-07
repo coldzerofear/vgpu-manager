@@ -587,9 +587,16 @@ func (s *DeviceRegistryServerImpl) Start() error {
 		return fmt.Errorf("DeviceRegistry server is already running")
 	}
 	registryPath := filepath.Join(s.contPath, util.Registry)
+	// Not fatal on its own. If the directory genuinely cannot be created, the
+	// lock below fails with ENOENT and takes the start down with a clear error;
+	// what this call adds on top is tightening the mode of a directory an
+	// earlier release created 0777, and failing to do that is not a reason to
+	// refuse to serve. warnIfDirectoryWritable reports what the mode actually
+	// ended up as, which is the part an operator needs to act on.
 	if err := util.EnsureDir(registryPath, registryDirMode); err != nil {
-		klog.ErrorS(err, "Preparing to register directory failed", "directory", registryPath)
+		klog.ErrorS(err, "Failed to prepare the registry directory", "directory", registryPath)
 	}
+	warnIfDirectoryWritable(registryPath)
 
 	// Take ownership of the directory before touching anything inside it, so a
 	// second instance fails here rather than halfway through stealing the socket.

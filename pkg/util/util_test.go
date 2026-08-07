@@ -108,6 +108,31 @@ func Test_CheckDeviceType(t *testing.T) {
 				PodExcludeGpuTypeAnnotation: "V100,",
 			},
 			want: true,
+		}, {
+			// An include list with nothing usable in it means "no constraint",
+			// not "reject everything" — a stray space must not make the Pod
+			// unschedulable on every node.
+			name:     "example 14: include with only blank entries",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			name:     "example 15: include with only commas",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: ",,",
+			},
+			want: true,
+		}, {
+			name:     "example 16: include matches, exclude also matches",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "A100",
+				PodExcludeGpuTypeAnnotation: "A100",
+			},
+			want: false,
 		},
 	}
 
@@ -209,6 +234,31 @@ func Test_CheckDeviceUuid(t *testing.T) {
 				PodExcludeGPUUUIDAnnotation: "," + gpu0Uuid,
 			},
 			want: false,
+		}, {
+			name:     "example 13: exclude with only blank entries",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodExcludeGPUUUIDAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			// Both filters apply. Earlier releases returned as soon as the include
+			// list was consulted, which silently ignored the exclude list.
+			name:     "example 14: include matches, exclude also matches",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: gpu0Uuid,
+				PodExcludeGPUUUIDAnnotation: gpu0Uuid,
+			},
+			want: false,
+		}, {
+			name:     "example 15: include matches, exclude names another device",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: gpu0Uuid,
+				PodExcludeGPUUUIDAnnotation: "GPU-" + uuid.New().String(),
+			},
+			want: true,
 		},
 	}
 

@@ -225,23 +225,48 @@ func CollectableContainerNames(pod *corev1.Pod) []string {
 	return names
 }
 
+// matchDeviceSelector reports whether deviceValue matches any entry of a
+// comma-separated include/exclude annotation, and whether the annotation
+// carried any usable entry at all.
+//
+// need is what keeps a malformed annotation from meaning something drastic.
+// "  ", "," and ",," split into nothing but blanks; reporting that as "matched
+// nothing" would make an include list reject every device on the node, while
+// the same value in an exclude list would do nothing at all. Callers act on
+// match only when need is true, so a value with no real entry is treated the
+// same as no annotation — which is also what an empty value has always meant.
+//
+// Both arguments are compared upper-cased, and an entry matches as a substring:
+// "A100" selects "NVIDIA A100-SXM4-80GB", and a UUID prefix selects the device
+// it belongs to.
+func matchDeviceSelector(value, deviceValue string) (match, need bool) {
+	for _, entry := range strings.Split(strings.ToUpper(value), ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		need = true
+		if strings.Contains(deviceValue, entry) {
+			return true, true
+		}
+	}
+	return false, need
+}
+
 // CheckDeviceType Check if the device type meets expectations.
+//
+// Include and exclude are independent filters and both apply when both are set:
+// a device has to be named by the include list (if that list has any entry) and
+// must not be named by the exclude list.
 func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 	deviceType = strings.ToUpper(strings.TrimSpace(deviceType))
-	matchFunc := func(value string) bool {
-		vals := strings.Split(strings.ToUpper(value), ",")
-		return slices.ContainsFunc(vals, func(devType string) bool {
-			devType = strings.TrimSpace(devType)
-			return devType != "" && strings.Contains(deviceType, devType)
-		})
-	}
-	if includes, ok := annotations[PodIncludeGpuTypeAnnotation]; ok && includes != "" {
-		if !matchFunc(includes) {
+	if includes, ok := annotations[PodIncludeGpuTypeAnnotation]; ok {
+		if match, need := matchDeviceSelector(includes, deviceType); need && !match {
 			return false
 		}
 	}
-	if excludes, ok := annotations[PodExcludeGpuTypeAnnotation]; ok && excludes != "" {
-		if matchFunc(excludes) {
+	if excludes, ok := annotations[PodExcludeGpuTypeAnnotation]; ok {
+		if match, need := matchDeviceSelector(excludes, deviceType); need && match {
 			return false
 		}
 	}
@@ -249,28 +274,18 @@ func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 }
 
 // CheckDeviceUuid Check if the device uuid meets expectations.
+//
+// Same rules as CheckDeviceType: both filters apply, and an annotation with no
+// usable entry is ignored rather than matching everything or nothing.
 func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
 	deviceUUID = strings.ToUpper(strings.TrimSpace(deviceUUID))
-	matchFunc := func(value string) (match bool, need bool) {
-		for _, devUUID := range strings.Split(strings.ToUpper(value), ",") {
-			devUUID = strings.TrimSpace(devUUID)
-			if devUUID == "" {
-				continue
-			}
-			need = true
-			if strings.Contains(deviceUUID, devUUID) {
-				return true, need
-			}
-		}
-		return false, need
-	}
-	if includes, ok := annotations[PodIncludeGPUUUIDAnnotation]; ok && includes != "" {
-		if match, need := matchFunc(includes); need && !match {
+	if includes, ok := annotations[PodIncludeGPUUUIDAnnotation]; ok {
+		if match, need := matchDeviceSelector(includes, deviceUUID); need && !match {
 			return false
 		}
 	}
-	if excludes, ok := annotations[PodExcludeGPUUUIDAnnotation]; ok && excludes != "" {
-		if match, need := matchFunc(excludes); need && match {
+	if excludes, ok := annotations[PodExcludeGPUUUIDAnnotation]; ok {
+		if match, need := matchDeviceSelector(excludes, deviceUUID); need && match {
 			return false
 		}
 	}

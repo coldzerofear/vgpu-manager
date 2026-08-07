@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -57,6 +58,28 @@ var errRegistryLocked = errors.New("registry directory is locked by another serv
 type socketIdentity struct {
 	dev uint64
 	ino uint64
+}
+
+// warnIfDirectoryWritable reports a registry directory that anyone but its
+// owner can write to.
+//
+// Tightening the mode is best-effort — the server keeps serving when the chmod
+// fails, because an unwritable-but-present directory is still a working one.
+// The hole it leaves is not obvious from a chmod error alone, though: with the
+// write bit open, any local user can unlink socket.sock and bind their own in
+// its place, and every GPU container on the node then fails to register. So say
+// what the mode actually is rather than leaving it to be inferred.
+func warnIfDirectoryWritable(directory string) {
+	info, err := os.Lstat(directory)
+	if err != nil {
+		klog.ErrorS(err, "Failed to inspect the registry directory", "directory", directory)
+		return
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		klog.ErrorS(nil, "Registry directory is writable by group or other: any local user can replace "+
+			"the registry socket and break device registration on this node",
+			"directory", directory, "mode", perm.String(), "wantMode", os.FileMode(registryDirMode).String())
+	}
 }
 
 // acquireDirectoryLock takes the exclusive, non-blocking flock that marks this
