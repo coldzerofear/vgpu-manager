@@ -2515,7 +2515,70 @@ int check_device_pid_in_local_container_pid(unsigned int device_pid) {
   return ret;
 }
 
-void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_device, unsigned int size_on_device) {
+/* Load pids.config at most once per device query.
+ *
+ * get_used_gpu_memory_by_device accumulates twice -- once over the compute
+ * process list, once over the graphics one -- and both passes need the same
+ * answer to "which host PIDs are mine". Reading the file per pass costs a
+ * second open + shared-lock wait + parse inside lock_gpu_device's critical
+ * section, which is only ~1-3ms to begin with, and every microsecond spent
+ * there is queueing delay for every other process waiting on that device.
+ *
+ * Sharing one load also makes the two passes consistent: read separately, they
+ * can straddle a registration rewriting the file and disagree about the same
+ * container.
+ *
+ * Deliberately NOT merged into a single pass over both process lists, which
+ * would look like the more obvious saving: the matchClientMode / matchOpenKernel
+ * latches below are per-pass on purpose -- once one identification strategy has
+ * proven itself for a list, the other is not tried for the rest of that list --
+ * and concatenating the lists would let a latch set on the compute list suppress
+ * the alternative strategy across the graphics one. OPEN_KERNEL_COMPATIBILITY_MODE
+ * is set unconditionally on the DRA path, so that is a live behaviour change,
+ * not a theoretical one. Only the file read is shared; the scan stays per-list. */
+typedef struct {
+  int pids[MAX_PIDS];
+  int size;
+  int loaded;
+} container_pid_cache_t;
+
+static const container_pid_cache_t *load_container_pids(container_pid_cache_t *cache) {
+  if (cache->loaded) {
+    return cache;
+  }
+  cache->size = MAX_PIDS;
+  // Normally, the server has already sorted the PID list during device registration, so there is no need to sort it again here.
+  int read_ret = get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, cache->pids, &cache->size, 0);
+  cache->loaded = 1;
+  /* No list means we stop the process, and that is deliberate: carrying on
+   * with an empty one would report zero GPU memory usage for this container,
+   * turning every limit check into a no-op and handing it the whole card.
+   * (The utilization path can and does degrade quietly -- under-counting
+   * utilization costs nothing.)
+   *
+   * Not retried. Neither failure mode is one a retry fixes: an empty file
+   * cannot refill itself -- this process registered at library init, before
+   * any hook that reaches here, and every list the manager writes is non-empty
+   * by construction -- and a failed read means the file is unreachable (the
+   * container out of descriptors, the mount gone), which does not resolve in
+   * the microseconds a retry would cost. The two are reported apart because
+   * "never registered" and "cannot read" need very different responses.
+   *
+   * Because this exits, a cache marked loaded always holds a non-empty list. */
+  if (unlikely(cache->size == 0)) {
+    if (read_ret != 0) {
+      LOGGER(FATAL, "unable to read the registered container process list at %s",
+             CONTAINER_PIDS_CONFIG_FILE_PATH);
+    }
+    LOGGER(FATAL, "registered container process list at %s is empty: this container never "
+                  "registered with the manager, or its registration was overwritten",
+           CONTAINER_PIDS_CONFIG_FILE_PATH);
+  }
+  return cache;
+}
+
+void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_device,
+                            unsigned int size_on_device, container_pid_cache_t *cache) {
   unsigned int i;
   int matchOpenKernel = 0;
   int openKernelMode = (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE;
@@ -2523,37 +2586,10 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
   if (size_on_device == 0) {
     // If there are no processes running on the device, quickly skip them.
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
-    int pids_size = MAX_PIDS;
-    int pids_on_container[MAX_PIDS];
-    // Normally, the server has already sorted the PID list during device registration, so there is no need to sort it again here.
-    int read_ret = get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size, 0);
-    /* No list means we stop the process, and that is deliberate: carrying on
-     * with an empty one would report zero GPU memory usage for this container,
-     * turning every limit check into a no-op and handing it the whole card.
-     * (The utilization path below can and does degrade quietly -- under-counting
-     * utilization costs nothing.)
-     *
-     * Not retried. This runs under lock_gpu_device, twice per hold, so every
-     * millisecond spent here lands on all the other processes queued for the
-     * device; and neither failure mode is one a retry fixes. An empty file
-     * cannot refill itself -- this process registered at library init, before
-     * any hook that reaches here, and every list the manager writes is non-empty
-     * by construction. A failed read means the file is unreachable (the
-     * container out of descriptors, the mount gone), which does not resolve in
-     * the microseconds a retry would cost. The two are reported apart because
-     * "never registered" and "cannot read" need very different responses. */
-    if (unlikely(pids_size == 0)) {
-      if (read_ret != 0) {
-        LOGGER(FATAL, "unable to read the registered container process list at %s",
-               CONTAINER_PIDS_CONFIG_FILE_PATH);
-      }
-      LOGGER(FATAL, "registered container process list at %s is empty: this container never "
-                    "registered with the manager, or its registration was overwritten",
-             CONTAINER_PIDS_CONFIG_FILE_PATH);
-    }
+    const container_pid_cache_t *container = load_container_pids(cache);
     int matchClientMode = 0;
     for (i = 0; i < size_on_device; i++) {
-      if (!matchOpenKernel && check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
+      if (!matchOpenKernel && check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, container->pids, container->size) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         matchClientMode = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
@@ -2614,6 +2650,10 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
   nvmlProcessInfo_t pids_on_device[MAX_PIDS];
   unsigned int size_on_device = MAX_PIDS;
   nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+  /* Shared by both accumulation passes below, loaded lazily by the first one
+   * that needs it. Lives here rather than inside accumulate_used_memory so the
+   * two passes read pids.config once between them; see load_container_pids. */
+  container_pid_cache_t container_pids = {.loaded = 0};
 
   if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses))) {
     ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses,
@@ -2631,7 +2671,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                    ret, NVML_ERROR(nvml_library_entry, ret));
     return;
   }
-  accumulate_used_memory(used_memory, pids_on_device, size_on_device);
+  accumulate_used_memory(used_memory, pids_on_device, size_on_device, &container_pids);
   unsigned int compute_pids_count = size_on_device;
 
   size_on_device = MAX_PIDS;
@@ -2687,7 +2727,7 @@ void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
                      "avoid double-counting", graphic_pids_on_device[i].pid);
     }
   }
-  accumulate_used_memory(used_memory, graphic_pids_on_device, graphic_unique_count);
+  accumulate_used_memory(used_memory, graphic_pids_on_device, graphic_unique_count, &container_pids);
 
 DONE:
   LOGGER(VERBOSE, "total used memory: %zu", *used_memory);
