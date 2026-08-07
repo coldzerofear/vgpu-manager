@@ -2515,46 +2515,6 @@ int check_device_pid_in_local_container_pid(unsigned int device_pid) {
   return ret;
 }
 
-/* Read the registered container PID list for memory accounting.
- *
- * Retries only a failed read, never an empty one, and the difference matters:
- *
- *   - a failed read is transient. The container can run itself out of file
- *     descriptors, and fopen() then fails on a file that is perfectly fine.
- *     A millisecond later it usually succeeds.
- *   - an empty file is not. Nothing this process can do refills it: its own
- *     registration ran at library init, before any hook that reaches here, and
- *     every list the manager writes is non-empty by construction (the server
- *     refuses to persist an empty one). Re-registering from here would also
- *     mean re-entering register_to_remote_with_data, which kills the process on
- *     its own failure path.
- *
- * Either way the caller stops the process. That is deliberate: an empty list
- * would make this container report zero GPU memory usage, turning every limit
- * check into a no-op and handing it the whole card. Reporting the two cases
- * apart is what this function buys — "not registered" and "could not read"
- * need very different operator responses. */
-#define CONTAINER_PIDS_READ_ATTEMPTS 3
-#define CONTAINER_PIDS_READ_BACKOFF_NS (1000 * 1000L) /* 1ms */
-
-static int read_container_pids_for_accounting(int *pids, int *pids_size) {
-  struct timespec backoff = {.tv_sec = 0, .tv_nsec = CONTAINER_PIDS_READ_BACKOFF_NS};
-  int capacity = *pids_size;
-  int ret = -1;
-
-  for (int attempt = 0; attempt < CONTAINER_PIDS_READ_ATTEMPTS; attempt++) {
-    *pids_size = capacity;
-    ret = get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids, pids_size, 0);
-    if (ret == 0) {
-      break;
-    }
-    LOGGER(WARNING, "unable to read %s (attempt %d/%d)", CONTAINER_PIDS_CONFIG_FILE_PATH,
-           attempt + 1, CONTAINER_PIDS_READ_ATTEMPTS);
-    nanosleep(&backoff, NULL);
-  }
-  return ret;
-}
-
 void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_device, unsigned int size_on_device) {
   unsigned int i;
   int matchOpenKernel = 0;
@@ -2566,7 +2526,22 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
     int pids_size = MAX_PIDS;
     int pids_on_container[MAX_PIDS];
     // Normally, the server has already sorted the PID list during device registration, so there is no need to sort it again here.
-    int read_ret = read_container_pids_for_accounting(pids_on_container, &pids_size);
+    int read_ret = get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size, 0);
+    /* No list means we stop the process, and that is deliberate: carrying on
+     * with an empty one would report zero GPU memory usage for this container,
+     * turning every limit check into a no-op and handing it the whole card.
+     * (The utilization path below can and does degrade quietly -- under-counting
+     * utilization costs nothing.)
+     *
+     * Not retried. This runs under lock_gpu_device, twice per hold, so every
+     * millisecond spent here lands on all the other processes queued for the
+     * device; and neither failure mode is one a retry fixes. An empty file
+     * cannot refill itself -- this process registered at library init, before
+     * any hook that reaches here, and every list the manager writes is non-empty
+     * by construction. A failed read means the file is unreachable (the
+     * container out of descriptors, the mount gone), which does not resolve in
+     * the microseconds a retry would cost. The two are reported apart because
+     * "never registered" and "cannot read" need very different responses. */
     if (unlikely(pids_size == 0)) {
       if (read_ret != 0) {
         LOGGER(FATAL, "unable to read the registered container process list at %s",

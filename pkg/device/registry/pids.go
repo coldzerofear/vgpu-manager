@@ -1,8 +1,10 @@
 package registry
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -14,6 +16,36 @@ import (
 // Group/other get read only. The file carries host PIDs, and the container is
 // meant to consume it, not author it.
 const pidsFileMode = 0o644
+
+const (
+	// lockAcquireBudget caps how long ResetPidsFile waits for the pids.config
+	// lock. The only writer holds it for one ftruncate plus one pwrite of a few
+	// hundred bytes, so this is orders of magnitude more than a legitimate
+	// waiter ever needs; it exists to turn a wedged holder into an error instead
+	// of a hang.
+	lockAcquireBudget = 50 * time.Millisecond
+	// lockRetryInterval is the poll interval within that budget.
+	lockRetryInterval = 2 * time.Millisecond
+)
+
+// flockWithin takes an exclusive flock, giving up after budget rather than
+// waiting indefinitely.
+func flockWithin(fd int, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	for {
+		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("gave up after %s: %w", budget, err)
+		}
+		time.Sleep(lockRetryInterval)
+	}
+}
 
 // ResetPidsFile creates <configDir>/pids.config when it is missing and empties
 // it when it is not — deliberately without replacing it.
@@ -41,7 +73,15 @@ func ResetPidsFile(configDir string) error {
 
 	// Same exclusive lock the registry server takes, so a registration that is
 	// somehow already in flight cannot interleave with this truncation.
-	if err = unix.Flock(fd, unix.LOCK_EX); err != nil {
+	//
+	// Bounded rather than blocking, and that is the point: the callers are
+	// NodePrepareResources and the NRI CreateContainer hook, both of which the
+	// runtime waits on synchronously — a blocking flock here would stall
+	// container creation for the whole node behind one wedged writer. Nothing
+	// should be holding this lock at all, since the container that reads this
+	// file does not exist yet, so failing after the budget is the honest answer:
+	// the caller fails closed and the runtime retries.
+	if err = flockWithin(fd, lockAcquireBudget); err != nil {
 		return fmt.Errorf("failed to lock pids file %s: %w", path, err)
 	}
 	defer func() { _ = unix.Flock(fd, unix.LOCK_UN) }()

@@ -139,6 +139,10 @@ const (
 	maxConcurrentStreams = 64
 	connectionTimeout    = 10 * time.Second
 	keepaliveMinTime     = 30 * time.Second
+
+	// gracefulStopTimeout caps how long Stop waits for in-flight registrations
+	// to finish before it stops the server the hard way.
+	gracefulStopTimeout = 10 * time.Second
 )
 
 // TargetCandidate is one (pod, container) pair the server may try to attribute
@@ -751,18 +755,21 @@ func (s *DeviceRegistryServerImpl) Stop() {
 
 	// Elegantly stop existing requests
 	if s.server != nil {
+		// Captured, not read from the field: the goroutine below runs without the
+		// mutex while this function goes on to clear s.server.
+		stopping := s.server
 		stopped := make(chan struct{})
 		go func() {
-			s.server.GracefulStop()
+			stopping.GracefulStop()
 			close(stopped)
 		}()
 
 		select {
 		case <-stopped:
 			klog.Info("DeviceRegistry gRPC server stopped gracefully")
-		case <-time.After(10 * time.Second):
+		case <-time.After(gracefulStopTimeout):
 			klog.Warning("Force stopping gRPC server after timeout")
-			s.server.Stop()
+			stopping.Stop()
 		}
 		s.server = nil
 	}

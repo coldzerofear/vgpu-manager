@@ -4,9 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func Test_ResetPidsFile(t *testing.T) {
@@ -118,4 +120,30 @@ func Test_persistPids(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "untouched", string(content))
 	})
+}
+
+func Test_ResetPidsFile_doesNotBlockOnAWedgedWriter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, PidsConfig)
+	require.NoError(t, os.WriteFile(path, []byte("1\n"), 0o644))
+
+	held, err := os.OpenFile(path, os.O_RDWR, 0)
+	require.NoError(t, err)
+	defer held.Close()
+	require.NoError(t, unix.Flock(int(held.Fd()), unix.LOCK_EX))
+	defer func() { _ = unix.Flock(int(held.Fd()), unix.LOCK_UN) }()
+
+	// The callers are NodePrepareResources and the NRI CreateContainer hook;
+	// both are synchronous from the runtime's point of view, so this has to come
+	// back with an error rather than wait for whoever is stuck.
+	start := time.Now()
+	err = ResetPidsFile(dir)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Less(t, elapsed, 2*lockAcquireBudget, "must give up on the budget, not block")
+
+	content, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, "1\n", string(content), "a failed reset must not have truncated anything")
 }
