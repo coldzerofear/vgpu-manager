@@ -100,8 +100,9 @@ jobs:
             BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
             BUILD_NVVERSION=v0.4.0-rc.1
             GOLANG_VERSION=1.26.0
-          cache-from: type=gha,scope=base
-          cache-to: type=gha,mode=max,scope=base
+          # The CUDA-based builder image is very large. Loading it locally is
+          # required by the following builds, but exporting all of its layers
+          # to the Actions cache can stall the workflow.
 
       - name: Build and push manager image
         uses: docker/build-push-action@v6
@@ -117,7 +118,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=manager
-          cache-to: type=gha,mode=max,scope=manager
+          cache-to: type=gha,mode=min,scope=manager
 
       - name: Resolve NVIDIA Container Toolkit image
         id: toolkit
@@ -140,4 +141,4 @@ jobs:
           tags: ${{ steps.meta-dra.outputs.tags }}
           labels: ${{ steps.meta-dra.outputs.labels }}
           cache-from: type=gha,scope=dra
-          cache-to: type=gha,mode=max,scope=dra
+          cache-to: type=gha,mode=min,scope=dra
