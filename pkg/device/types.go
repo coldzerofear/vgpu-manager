@@ -2014,6 +2014,45 @@ func (n *NodeInfo) ConnectedAtTier(uuidA, uuidB string, tier LinkTier) bool {
 	return false
 }
 
+// HasLinkPeerAtTier reports whether this GPU has at least one DIRECT link at or
+// above the tier threshold to ANY other GPU on the node, regardless of whether
+// that peer is currently allocatable.
+//
+// This answers "is this card sitting on a tier-T fabric at all?", which is a
+// different question from ConnectedAtTier's "are these two cards connected right
+// now". It exists for the single-device case: a set of one GPU has no pairs, so
+// it is vacuously connected at every tier, and a component-of-one would
+// otherwise be reported as NVLink-tier on a node with no NVLink whatsoever.
+//
+// Availability is deliberately ignored. A one-GPU request cannot use its peers
+// anyway, so what strict-link promises for it is "the card is on an NVLink
+// fabric", not "its NVLink neighbours happen to be free this instant".
+func (n *NodeInfo) HasLinkPeerAtTier(uuid string, tier LinkTier) bool {
+	if tier < 0 || tier >= numLinkTiers {
+		return false
+	}
+	i, ok := n.deviceIndexMap[uuid]
+	if !ok || i >= len(n.deviceList) {
+		return false
+	}
+	dev := n.deviceList[i]
+	if dev == nil {
+		return false
+	}
+	threshold := linkTierThreshold[tier]
+	for peer, ls := range dev.Links {
+		if peer == i {
+			continue
+		}
+		for _, l := range ls {
+			if int(l.Type) >= threshold {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // LinkTierIsUniform reports whether every component at this tier has internally
 // identical link types, i.e. whether any subset of a component is
 // interchangeable.

@@ -335,6 +335,33 @@ I1~I4 各一组断言，尤其 I2（保序子序列）应对所有 fixture × �
 
 多容器 Pod 取**最差**的那个容器的结果：一个 Pod 的放置质量不会好过它最不走运的容器。
 
+### 10.1 两条必须成立的口径不变式
+
+1. **申请了 link/numa 的 Pod，必须都出现在 `topology_placement_total` 里。**
+   filter 只在 outcome 非空时发这个指标，而 `pod_policy_total` 无条件发，所以只要
+   有一条放置路径绕过了 `allocateByTopologyMode`，两个指标就会对不上，且**差值不可见** ——
+   看板上表现为"拓扑放置量凭空变少"，而不是"有降级"。
+
+   曾经踩过的坑：`pickDeviceClaims` 对**受迫集合**（`needNumber == len(deviceStore)`，
+   即节点剩余候选数恰好等于请求数）有一条快路径，直接返回不走拓扑分发。省下的是一次
+   长度等于 `needNumber` 的排序和一次只有唯一解的分档走查，代价却是这批放置完全不上报。
+   而受迫集合恰恰是**节点已经没有余地挑好卡**的场景，把它悄悄丢掉会让指标系统性地偏乐观。
+   现已删除该快路径，由 `Test_TopologyOutcome_AlwaysRecordedForTopologyPods` 钉住。
+
+2. **没申请拓扑的 Pod 不能进 `topology_placement_total`。** 否则分母就不再是
+   "申请了 link/numa 的 Pod"，比率失去意义。`none` 模式不调用 `recordOutcome`，
+   同一个测试的最后一个子用例反向钉住这一点。
+
+### 10.2 单卡请求的档位口径
+
+单卡集合没有"对"，在任何档位上都是真空连通的。若照字面采纳，分档走查会在
+`TierNVLink` 就停下并上报 `nvlink` —— 无论节点是 NVSwitch、纯 PCIe 还是完全无链路。
+这既让 strict 形同虚设，也让 `topology_placement_total{result="nvlink"}` 混入大量
+根本没有 NVLink 的放置。
+
+因此单卡的档位改由**该卡自身的连通性**决定（`HasLinkPeerAtTier`，节点级、不看对端是否空闲）：
+卡在某档上有真实对端才算落在该档。多卡集合不受影响 —— 其成员在该档上本就两两连通。
+
 ## 11. 风险
 
 1. ~~**DGX-1 fixture 保真度**~~ —— **已消除**。改为直接引入 NVIDIA/go-gpuallocator 的官方

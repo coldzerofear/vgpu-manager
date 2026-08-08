@@ -116,7 +116,7 @@ func (alloc *allocator) allocateTiered(
 		}
 		// Prefer a single component: it is by definition better connected than
 		// any set spanning several at the same tier.
-		if fitting := groupsWithAtLeast(groups, needNumber); len(fitting) > 0 {
+		if fitting := alloc.groupsFittingAtTier(groups, tier, needNumber); len(fitting) > 0 {
 			best := alloc.pickGroup(req, fitting, tier, needNumber)
 			picked := alloc.pickMembers(req, best.devices, tier, needNumber)
 			if len(picked) == needNumber {
@@ -211,6 +211,47 @@ func groupsWithAtLeast(groups []componentGroup, n int) []componentGroup {
 	out := make([]componentGroup, 0, len(groups))
 	for _, g := range groups {
 		if len(g.devices) >= n {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// groupsFittingAtTier is groupsWithAtLeast plus the one correction size alone
+// cannot express: a component of ONE device is vacuously connected at every
+// tier, because a single device has no pairs to test.
+//
+// Left uncorrected, that makes the tier meaningless for every 1-GPU request.
+// The walk starts at TierNVLink, finds each candidate sitting in its own
+// singleton component, declares the request satisfied there, and returns
+// Tier=TierNVLink — on a PCIe-only node, on a node whose links are all
+// cross-CPU, on any node at all. strict then accepts it, because acceptable()
+// has nothing but the tier to go on.
+//
+// So a singleton only counts at tier T when the device genuinely has a T-level
+// peer on the node (HasLinkPeerAtTier). Components of two or more are unchanged:
+// their members are mutually connected at T by construction, so the tier already
+// means what it says.
+//
+// Consequence worth stating: a 1-GPU link-strict pod is now rejected by a node
+// whose cards have no NVLink at all, and accepted by one where the chosen card
+// has an NVLink peer even if that peer is busy. That is the reading that makes
+// "-strict" mean the same thing regardless of how many cards were asked for.
+func (alloc *allocator) groupsFittingAtTier(
+	groups []componentGroup, tier device.LinkTier, needNumber int,
+) []componentGroup {
+
+	fitting := groupsWithAtLeast(groups, needNumber)
+	if needNumber > 1 {
+		return fitting
+	}
+	out := make([]componentGroup, 0, len(fitting))
+	for _, g := range fitting {
+		if len(g.devices) > 1 {
+			out = append(out, g)
+			continue
+		}
+		if alloc.nodeInfo.HasLinkPeerAtTier(g.devices[0].GetUUID(), tier) {
 			out = append(out, g)
 		}
 	}

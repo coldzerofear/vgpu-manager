@@ -329,17 +329,33 @@ func resolveContainerNeeds(
 //     promotes filterDevices' per-Code counts into a FilterReason for
 //     the aggregate event.
 //
-//   - len(deviceStore) == needNumber and the pod isn't strict-topology —
-//     the chosen set is forced (only one possible selection), so skip the
-//     policy sort and topology dispatch entirely. Strict-topology pods
-//     intentionally fall through so allocateByTopologyMode can validate
-//     the forced set against the topology constraint (numa-strict on
-//     scattered cards, link-strict on disconnected ones).
-//
 //   - otherwise — device-policy sort followed by topology-aware
 //     selection. Strict topology rejections bubble up as a non-nil
 //     *reason.FilterReason; non-strict topology failures fall back
 //     internally and only emit a TopologyFallback event.
+//
+// There is deliberately NO fast path for a forced set (needNumber ==
+// len(deviceStore)). Skipping the dispatch there would save a sort over
+// needNumber elements and a tier walk that has exactly one possible answer —
+// and would cost the two things the topology path exists to produce besides the
+// answer itself:
+//
+//   - the OUTCOME METRIC. topology_placement_total{mode,result} is documented as
+//     "what connectivity did pods asking for link/numa actually get". A forced
+//     set that skips the dispatch records nothing, so those placements vanish
+//     from that metric while still being counted in pod_policy_total — the two
+//     stop reconciling, and the gap is invisible rather than reported as a
+//     degradation. Since a forced set is precisely the case where the node had
+//     no room to choose well, silently dropping it biases the metric toward
+//     looking healthier than the cluster is.
+//   - the DOWNGRADE EVENT. A pod that asked for NVLink and got cards with no
+//     interconnect deserves the same TopologyFallback signal whether or not the
+//     node happened to have exactly enough devices.
+//
+// Strict correctness depended on this too: the previous condition carried an
+// `|| needNumber <= 1` escape, so a 1-GPU request landing on a node with a
+// single candidate device bypassed strict validation entirely and was accepted
+// on nodes with no NVLink and no NUMA at all.
 //
 // Return shape:
 //   - (claims, nil)        — picked successfully (or insufficient, with
@@ -350,11 +366,8 @@ func (alloc *allocator) pickDeviceClaims(
 	req *AllocationRequest, deviceStore []*device.Device,
 	needNumber int, needCores, needMemory int64,
 ) ([]device.DeviceClaim, *reason.FilterReason) {
-	switch {
-	case needNumber > len(deviceStore):
+	if needNumber > len(deviceStore) {
 		return nil, nil
-	case needNumber == len(deviceStore) && (!req.TopologyStrict || needNumber <= 1):
-		return buildClaims(deviceStore[:needNumber], needCores, needMemory), nil
 	}
 	alloc.sortDeviceStore(req, deviceStore)
 	return alloc.allocateByTopologyMode(req, deviceStore, needNumber, needCores, needMemory)

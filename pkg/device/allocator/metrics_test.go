@@ -109,6 +109,76 @@ func Test_TopologyOutcome_RecordsAchievedConnectivity(t *testing.T) {
 	})
 }
 
+// Test_TopologyOutcome_AlwaysRecordedForTopologyPods is the invariant that
+// makes topology_placement_total reconcile with pod_policy_total.
+//
+// The filter emits topology_placement_total only when the outcome is non-empty,
+// and pod_policy_total unconditionally. So EVERY pod that asks for link or numa
+// must leave the allocator with a recorded outcome — otherwise the two metrics
+// drift apart with no signal that anything was dropped.
+//
+// The case that used to break it: a FORCED SET, where the node has exactly as
+// many candidate devices as the pod requested. pickDeviceClaims short-circuited
+// there, skipping the topology dispatch entirely because the selection was
+// predetermined. But the selection is not the only output — the outcome is —
+// and a forced set is exactly the situation where the node had no room to place
+// well, so dropping it biased the metric toward looking healthier than reality.
+func Test_TopologyOutcome_AlwaysRecordedForTopologyPods(t *testing.T) {
+	// Every fixture is 8 cards; asking for 8 makes the set forced.
+	for _, tc := range []struct {
+		name string
+		node func(*testing.T, ...int) (*device.NodeInfo, []*device.Device)
+	}{
+		{"nvswitch", nvswitchNode},
+		{"dgx1", dgx1Node},
+		{"bridge", bridgeNode},
+		{"pcie", pcieNode},
+	} {
+		t.Run("forced set/"+tc.name, func(t *testing.T) {
+			n, devs := tc.node(t)
+			req := BuildAllocationRequest(linkPod(int64(len(devs)), false, ""))
+			_, rsn, err := NewAllocator(n, nil).Allocate(req)
+			require.NoError(t, err)
+			require.Nil(t, rsn, "non-strict must still place a forced set")
+			assert.NotEmpty(t, req.TopologyOutcome().Result,
+				"a forced set is still a placement and must report its connectivity")
+		})
+	}
+
+	t.Run("forced set/single candidate device", func(t *testing.T) {
+		// The narrowest forced set of all — one device, one requested. This is
+		// the shape that reached production: it took the short-circuit and
+		// reported nothing at all.
+		n := fixtureNode("one-card", topoDevices(1))
+		req := BuildAllocationRequest(linkPod(1, false, ""))
+		_, rsn, err := NewAllocator(n, nil).Allocate(req)
+		require.NoError(t, err)
+		require.Nil(t, rsn)
+		assert.NotEmpty(t, req.TopologyOutcome().Result)
+	})
+
+	t.Run("forced set/numa mode", func(t *testing.T) {
+		req := BuildAllocationRequest(numaPod(4)) // numaFixture is 4 cards
+		_, rsn, err := NewAllocator(numaFixture(), nil).Allocate(req)
+		require.NoError(t, err)
+		require.Nil(t, rsn)
+		assert.NotEmpty(t, req.TopologyOutcome().Result)
+	})
+
+	t.Run("none mode records nothing, by design", func(t *testing.T) {
+		// The counterpart of the invariant: pods that did NOT ask for topology
+		// must stay out of topology_placement_total, or the denominator stops
+		// meaning "pods that asked for link/numa".
+		n, _ := nvswitchNode(t)
+		req := BuildAllocationRequest(linkPod(2, false, ""))
+		req.Topology = util.NoneTopology
+		_, rsn, err := NewAllocator(n, nil).Allocate(req)
+		require.NoError(t, err)
+		require.Nil(t, rsn)
+		assert.Empty(t, req.TopologyOutcome().Result)
+	})
+}
+
 // A pod is only as well placed as its unluckiest container, so the reported
 // outcome must be the WORST across them — otherwise a pod with one good and one
 // degraded container reads as fully satisfied.
