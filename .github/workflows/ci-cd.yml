@@ -13,7 +13,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  BASE_IMAGE: ghcr.io/${{ github.repository }}-base:ci
+  BASE_IMAGE: ghcr.io/${{ github.repository }}-base:${{ github.run_number }}
 
 jobs:
   test:
@@ -69,10 +69,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ github.run_number }}
+            type=raw,value=latest
 
       - name: Calculate DRA image metadata
         id: meta-dra
@@ -80,10 +78,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dra
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ github.run_number }}
+            type=raw,value=latest
 
       - name: Build base image
         uses: docker/build-push-action@v6
@@ -91,7 +87,9 @@ jobs:
           context: .
           file: Dockerfile.base
           push: true
-          tags: ${{ env.BASE_IMAGE }}
+          tags: |
+            ${{ env.BASE_IMAGE }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-base:latest
           build-args: |
             GIT_BRANCH=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
