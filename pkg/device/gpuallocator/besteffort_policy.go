@@ -293,6 +293,14 @@ func iterateGPUPartitions(devices []*Device, size int, callback func([][]*Device
 	iterate(devices, size, [][]*Device{})
 }
 
+// PairScore is the exported form of calculateGPUPairScore: the interconnect
+// "closeness" score of two GPUs. Exported so the tiered allocator can score
+// candidate sets on the SAME scale the link topology is modelled on, rather
+// than reimplementing the weights and letting the two drift apart.
+func PairScore(gpu0, gpu1 *Device) int {
+	return calculateGPUPairScore(gpu0, gpu1)
+}
+
 // Calculate a "link" score for a pair of GPUs.
 // The score is based on the "closeness" of the two GPUs in relation to one
 // another in terms of the communication links they have with another, as well

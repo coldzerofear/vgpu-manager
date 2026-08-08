@@ -73,9 +73,32 @@ const (
 	// in the workloads for prepared devices.
 	DeviceMetadata featuregate.Feature = "DeviceMetadata"
 
+	// FabricManagerPartitioning enables Fabric Manager (NVSwitch) partition
+	// management for full-GPU (gpu.nvidia.com) devices and Passthrough VFIO
+	// devices. When enabled, Prepare activates the FM partition whose member
+	// set exactly matches the claim's allocated physical GPUs; a non-matching
+	// set fails Prepare. ResourceClaims should constrain allocation with
+	// matchAttribute on gpu.nvidia.com/partitionN. Requires Fabric Manager
+	// running with FABRIC_MODE=1. Independent of PassthroughSupport: with both
+	// gates on, full-GPU and VFIO claims are partitioned; with only this gate
+	// on, only full-GPU claims are.
+	FabricManagerPartitioning featuregate.Feature = "FabricManagerPartitioning"
+
+	// DRAListTypeAttributes allows the GPU kubelet plugin to publish list-valued
+	// DRA device attributes. The cluster must have the Kubernetes feature gate
+	// of the same name enabled before enabling this in the driver.
+	DRAListTypeAttributes featuregate.Feature = "DRAListTypeAttributes"
+
 	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
 
 	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
+
+	// NRISupport enables the in-process NRI plugin path (per-container partition
+	// mounts injected at the NRI CreateContainer hook). Requires VGPUSupport.
+	// When DevicePluginClientMode is ALSO enabled, the NRI cache is shared with
+	// the register server to drive its pod-uid resolution; NRISupport does not
+	// require DevicePluginClientMode.
+	NRISupport featuregate.Feature = util.NRISupport
 
 	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
 	// storing daemon info directly in ComputeDomainStatus.Nodes.
@@ -159,6 +182,27 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	DeviceMetadata: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 4),
+		},
+	},
+	NRISupport: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 4),
+		},
+	},
+	FabricManagerPartitioning: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	DRAListTypeAttributes: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
@@ -252,6 +296,9 @@ func ValidateFeatureGates() error {
 	if Enabled(DevicePluginClientMode) && !Enabled(VGPUSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", DevicePluginClientMode, VGPUSupport)
 	}
+	if Enabled(NRISupport) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", NRISupport, VGPUSupport)
+	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, PassthroughSupport)
@@ -290,10 +337,10 @@ func KnownFeatures() []string {
 // ToMap returns all known feature gates as a map[string]bool suitable for
 // template rendering (e.g., {"FeatureA": true, "FeatureB": false}).
 // Returns an empty map if no feature gates are configured.
-func ToMap() map[string]bool {
+func ToMap(featureGate featuregate.MutableFeatureGate) map[string]bool {
 	result := make(map[string]bool)
-	for feature := range FeatureGates().GetAll() {
-		result[string(feature)] = FeatureGates().Enabled(feature)
+	for feature := range featureGate.GetAll() {
+		result[string(feature)] = featureGate.Enabled(feature)
 	}
 	return result
 }

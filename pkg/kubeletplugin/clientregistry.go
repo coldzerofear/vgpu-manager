@@ -15,6 +15,8 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -82,6 +84,7 @@ type ClientRegisterResolver struct {
 	claimIndexer          kcache.Indexer
 	contPath              string
 	driverName            string
+	nriCache              *nri.Cache
 	allocatedVGPURequests AllocatedVGPURequestsFunc
 
 	reader claimresolve.Reader
@@ -94,6 +97,7 @@ func NewClientRegisterResolver(
 	podLister client.PodLister,
 	claimIndexer kcache.Indexer,
 	contPath, driverName string,
+	nriCache *nri.Cache,
 	allocatedVGPURequests AllocatedVGPURequestsFunc,
 ) *ClientRegisterResolver {
 	r := &ClientRegisterResolver{
@@ -101,6 +105,7 @@ func NewClientRegisterResolver(
 		claimIndexer:          claimIndexer,
 		contPath:              contPath,
 		driverName:            driverName,
+		nriCache:              nriCache,
 		allocatedVGPURequests: allocatedVGPURequests,
 	}
 	claimLister := resourcev1.NewResourceClaimLister(claimIndexer)
@@ -114,7 +119,7 @@ func NewClientRegisterResolver(
 // PodByUID is the legacy device-plugin lookup: the calling library already
 // knows its pod UID and we just hand back the cached pod object.
 func (r *ClientRegisterResolver) PodByUID(_ context.Context, uid string) (*corev1.Pod, error) {
-	pods, err := r.podLister.ListByIndexValue("metadata.uid", uid)
+	pods, err := r.podLister.ListByIndexValue(preempt.IndexerKeyPodMetadataUid, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +130,31 @@ func (r *ClientRegisterResolver) PodByUID(_ context.Context, uid string) (*corev
 		return nil, apierrors.NewNotFound(corev1.Resource("pods"), "uid "+uid)
 	}
 	return pods[0], nil
+}
+
+func (r *ClientRegisterResolver) TargetByPodUID(ctx context.Context, uid, contName string) (*registry.Target, error) {
+	pod, err := r.PodByUID(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	configDir := filepath.Join(
+		util.GetPodContainerManagerPath(r.contPath, pod.UID, contName),
+		util.Config,
+	)
+	if r.nriCache != nil {
+		if entry, ok := r.nriCache.Get(uid, contName); ok {
+			configDir = entry.ConfigDir
+		} else if !r.nriCache.Synced() {
+			return nil, fmt.Errorf("NRI cache not successfully ready")
+		}
+	}
+	return &registry.Target{
+		ConfigDir: configDir,
+		Candidates: []registry.TargetCandidate{{
+			Pod:           pod,
+			ContainerName: contName,
+		}},
+	}, nil
 }
 
 // TargetByUUID implements registry.GetTargetByUUIDFunc.
@@ -187,23 +217,35 @@ func (r *ClientRegisterResolver) TargetByUUID(ctx context.Context, uuid string) 
 	return target, nil
 }
 
+func (r *ClientRegisterResolver) lookupClaimByIndex(indexName, indexedValue string) ([]*resourceapi.ResourceClaim, error) {
+	objs, err := r.claimIndexer.ByIndex(indexName, indexedValue)
+	if err != nil {
+		return nil, fmt.Errorf("claim by index %s failed: %w", indexName, err)
+	}
+	claims := make([]*resourceapi.ResourceClaim, 0, len(objs))
+	for _, obj := range objs {
+		if claim, ok := obj.(*resourceapi.ResourceClaim); ok {
+			claims = append(claims, claim)
+		}
+	}
+	if len(claims) == 0 {
+		return nil, apierrors.NewNotFound(resourceapi.Resource("resourceclaims"), fmt.Sprintf("%s %s", indexName, indexedValue))
+	}
+	return claims, nil
+}
+
 // lookupClaim resolves a UUID to its single owning claim plus the partition
 // key recorded for that UUID.
 func (r *ClientRegisterResolver) lookupClaim(uuid string) (*resourceapi.ResourceClaim, string, error) {
-	objs, err := r.claimIndexer.ByIndex(ClaimUUIDIndex, uuid)
+	claims, err := r.lookupClaimByIndex(ClaimUUIDIndex, uuid)
 	if err != nil {
-		return nil, "", fmt.Errorf("index lookup for uuid %s: %w", uuid, err)
+		return nil, "", err
 	}
-	if len(objs) != 1 {
-		if len(objs) > 1 {
-			klog.ErrorS(nil, "find multiple claims matching uuid", "uuid", uuid, "claims", objs)
-		}
-		return nil, "", apierrors.NewNotFound(resourceapi.Resource("resourceclaims"), "register uuid "+uuid)
+	if len(claims) > 1 {
+		klog.ErrorS(nil, "multiple matching claims were found", ClaimUUIDIndex, uuid)
+		return nil, "", apierrors.NewNotFound(resourceapi.Resource("resourceclaims"), fmt.Sprintf("%s %s", ClaimUUIDIndex, uuid))
 	}
-	claim, ok := objs[0].(*resourceapi.ResourceClaim)
-	if !ok {
-		return nil, "", fmt.Errorf("unexpected indexer entry type %T", objs[0])
-	}
+	claim := claims[0]
 	annotationKey := r.driverName + "/" + uuid
 	partitionKey, ok := claim.Annotations[annotationKey]
 	if !ok || partitionKey == "" {

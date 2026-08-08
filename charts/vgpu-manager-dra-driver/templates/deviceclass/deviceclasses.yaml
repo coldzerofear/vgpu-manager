@@ -1,0 +1,59 @@
+{{- if .Values.deviceClasses.enabled -}}
+{{- $apiVersion := (include "vgpu-manager-dra-driver.resourceApiVersion" . | trim) }}
+{{- $driver := .Values.deviceClasses.driverName | default "manager.nvidia.com" }}
+{{- $labels := include "vgpu-manager-dra-driver.labels" . }}
+{{- if .Values.deviceClasses.gpu.enabled }}
+apiVersion: {{ $apiVersion }}
+kind: DeviceClass
+metadata:
+  name: {{ .Values.deviceClasses.gpu.name | default "gpu-manager" }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'gpu'"
+  {{- if and (eq $apiVersion "resource.k8s.io/v1") .Values.deviceClasses.gpu.extendedResourceName }}
+  extendedResourceName: {{ .Values.deviceClasses.gpu.extendedResourceName }}
+  {{- end }}
+{{- end }}
+{{- if .Values.deviceClasses.vgpu.enabled }}
+---
+apiVersion: {{ $apiVersion }}
+kind: DeviceClass
+metadata:
+  name: {{ .Values.deviceClasses.vgpu.name | default "vgpu-manager" }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'vgpu'"
+{{- end }}
+{{- if .Values.deviceClasses.mig.enabled }}
+---
+apiVersion: {{ $apiVersion }}
+kind: DeviceClass
+metadata:
+  name: {{ .Values.deviceClasses.mig.name | default "mig-manager" }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'mig'"
+{{- end }}
+{{- if .Values.deviceClasses.vfio.enabled }}
+---
+apiVersion: {{ $apiVersion }}
+kind: DeviceClass
+metadata:
+  name: {{ .Values.deviceClasses.vfio.name | default "vfio-manager" }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'vfio'"
+{{- end }}
+{{- end }}

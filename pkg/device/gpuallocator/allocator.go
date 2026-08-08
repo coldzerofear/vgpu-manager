@@ -41,7 +41,7 @@ func NewBestEffortAllocator() (*Allocator, error) {
 func NewAllocator(policy Policy) (*Allocator, error) {
 	nvmllib := nvml.New()
 	if ret := nvmllib.Init(); ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error initializing NVML: %v", ret)
+		return nil, fmt.Errorf("error initializing NVML: %w", ret)
 	}
 
 	devices, err := NewDevices(
@@ -111,6 +111,17 @@ func (a *Allocator) AllocateSpecific(devices ...*Device) error {
 
 // Free a set of GPUs back to the allocator.
 func (a *Allocator) Free(devices ...*Device) {
-	a.remaining.Insert(devices...)
-	a.allocated.Delete(devices...)
+	for _, device := range devices {
+		if device == nil {
+			continue
+		}
+
+		allocated, ok := a.allocated[device.UUID]
+		if !ok || allocated != device {
+			continue
+		}
+
+		a.remaining.Insert(device)
+		a.allocated.Delete(device)
+	}
 }

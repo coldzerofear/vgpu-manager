@@ -27,7 +27,7 @@ type Options struct {
 	Domain              string
 	NodeName            string
 	CGroupDriver        string
-	DeviceListStrategy  string
+	DeviceListStrategy  []string
 	DeviceSplitCount    int
 	DeviceMemoryScaling float64
 	DeviceMemoryFactor  int
@@ -43,6 +43,9 @@ type Options struct {
 	MigStrategy         string
 	ImexChannelIDs      []int
 	ImexRequired        bool
+	CDIAnnotationPrefix string
+	HostDriverRoot      string
+	ContainerDriverRoot string
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -58,23 +61,25 @@ const (
 	defaultDeviceCoresScaling  = 1.0
 	defaultPprofBindPort       = 0
 	defaultMigStrategy         = util.MigStrategyMixed
+	defaultCDIAnnotationPrefix = util.CDIDefaultAnnotationPrefix
+	defaultDriverRoot          = util.CDIDefaultDriverRoot
 
 	Component = "devicePlugin"
 
-	// CorePlugin feature gate will report the virtual cores of the node device to kubelet.
-	CorePlugin featuregate.Feature = util.CorePlugin
-	// MemoryPlugin feature gate will report the virtual memory of the node device to kubelet.
-	MemoryPlugin featuregate.Feature = util.MemoryPlugin
-	// Reschedule feature gate will attempt to reschedule Pods that meet the criteria.
-	Reschedule featuregate.Feature = util.Reschedule
-	// GPUTopology feature gate will report gpu topology information to node.
-	GPUTopology featuregate.Feature = util.GPUTopology
-	// SMWatcher feature gate will initiate an independent utilization observation thread to share the results with the vGPU Pod node, reducing driver call consumption.
-	SMWatcher featuregate.Feature = util.SMWatcher
-	// VMemoryNode feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
-	VMemoryNode featuregate.Feature = util.VMemoryNode
-	// ClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
-	ClientMode featuregate.Feature = util.ClientMode
+	// GPUCoreResourcePlugin feature gate will report the virtual cores of the node device to kubelet.
+	GPUCoreResourcePlugin featuregate.Feature = util.GPUCoreResourcePlugin
+	// GPUMemoryResourcePlugin feature gate will report the virtual memory of the node device to kubelet.
+	GPUMemoryResourcePlugin featuregate.Feature = util.GPUMemoryResourcePlugin
+	// AllocationFailureReschedule feature gate will attempt to reschedule Pods that meet the criteria.
+	AllocationFailureReschedule featuregate.Feature = util.AllocationFailureReschedule
+	// TopologyAwareGPUAllocation feature gate will report gpu topology information to node.
+	TopologyAwareGPUAllocation featuregate.Feature = util.TopologyAwareGPUAllocation
+	// SharedSMUtilizationWatcher feature gate will initiate an independent utilization observation thread to share the results with the vGPU Pod node, reducing driver call consumption.
+	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
+	// VirtualMemoryTracking feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
+	VirtualMemoryTracking featuregate.Feature = util.VirtualMemoryTracking
+	// DevicePluginClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
+	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
 	// HonorPreAllocatedDeviceIDs makes preferred allocation follow pre-allocated device IDs whenever possible.
 	HonorPreAllocatedDeviceIDs featuregate.Feature = util.HonorPreAllocatedDeviceIDs
 )
@@ -82,14 +87,14 @@ const (
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		CorePlugin:                 {Default: false, PreRelease: featuregate.Alpha},
-		MemoryPlugin:               {Default: false, PreRelease: featuregate.Alpha},
-		Reschedule:                 {Default: false, PreRelease: featuregate.Alpha},
-		GPUTopology:                {Default: false, PreRelease: featuregate.Alpha},
-		SMWatcher:                  {Default: false, PreRelease: featuregate.Alpha},
-		VMemoryNode:                {Default: false, PreRelease: featuregate.Alpha},
-		ClientMode:                 {Default: false, PreRelease: featuregate.Alpha},
-		HonorPreAllocatedDeviceIDs: {Default: false, PreRelease: featuregate.Alpha},
+		GPUCoreResourcePlugin:       {Default: false, PreRelease: featuregate.Alpha},
+		GPUMemoryResourcePlugin:     {Default: false, PreRelease: featuregate.Alpha},
+		AllocationFailureReschedule: {Default: false, PreRelease: featuregate.Alpha},
+		TopologyAwareGPUAllocation:  {Default: false, PreRelease: featuregate.Alpha},
+		SharedSMUtilizationWatcher:  {Default: false, PreRelease: featuregate.Alpha},
+		VirtualMemoryTracking:       {Default: false, PreRelease: featuregate.Alpha},
+		DevicePluginClientMode:      {Default: false, PreRelease: featuregate.Alpha},
+		HonorPreAllocatedDeviceIDs:  {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -110,7 +115,6 @@ func NewOptions() *Options {
 			imexChannelIDs = append(imexChannelIDs, atoi)
 		}
 	}
-
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -118,20 +122,23 @@ func NewOptions() *Options {
 		Domain:              util.GetGlobalDomain(),
 		NodeName:            os.Getenv("NODE_NAME"),
 		CGroupDriver:        os.Getenv("CGROUP_DRIVER"),
-		DeviceListStrategy:  defaultDeviceListStrategy,
+		DeviceListStrategy:  []string{defaultDeviceListStrategy},
 		DeviceSplitCount:    defaultDeviceSplitCount,
 		DeviceCoresScaling:  defaultDeviceCoresScaling,
 		DeviceMemoryScaling: defaultDeviceMemoryScaling,
 		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
 		DevicePluginPath:    pluginapi.DevicePluginPath,
 		PprofBindPort:       defaultPprofBindPort,
-		GDSEnabled:          util.GetEnvEnabled("NVIDIA_GDS"),
-		MOFEDEnabled:        util.GetEnvEnabled("NVIDIA_MOFED"),
-		GDRCopyEnabled:      util.GetEnvEnabled("NVIDIA_GDRCOPY"),
 		MigStrategy:         defaultMigStrategy,
+		CDIAnnotationPrefix: defaultCDIAnnotationPrefix,
 		FeatureGate:         featureGate,
 		ImexChannelIDs:      imexChannelIDs,
 		ImexRequired:        util.GetEnvEnabled("IMEX_REQUIRED"),
+		GDSEnabled:          util.GetEnvEnabled("GDS_ENABLED"),
+		MOFEDEnabled:        util.GetEnvEnabled("MOFED_ENABLED"),
+		GDRCopyEnabled:      util.GetEnvEnabled("GDRCOPY_ENABLED"),
+		HostDriverRoot:      util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
+		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
 	}
 }
 
@@ -151,7 +158,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.Domain, "domain", o.Domain, "Set global domain name to replace all resource and annotation domains.")
 	pflag.StringVar(&o.NodeName, "node-name", o.NodeName, "If non-empty, will use this string as identification instead of the actual node name.")
 	pflag.StringVar(&o.CGroupDriver, "cgroup-driver", o.CGroupDriver, "Specify the cgroup driver used. (supported values: \"cgroupfs\" | \"system\")")
-	pflag.StringVar(&o.DeviceListStrategy, "device-list-strategy", o.DeviceListStrategy, "The desired strategy for passing the device list to the underlying runtime. (supported values: \"envvar\" | \"volume-mounts\")")
+	pflag.StringSliceVar(&o.DeviceListStrategy, "device-list-strategy", o.DeviceListStrategy, "The desired strategy for passing the device list to the underlying runtime. Multiple comma-separated values may be combined. (supported values: \"envvar\" | \"volume-mounts\" | \"cdi-annotations\" | \"cdi-cri\")")
 	pflag.IntVar(&o.DeviceSplitCount, "device-split-count", o.DeviceSplitCount, "The maximum number of vGPU that can be split per physical GPU.")
 	pflag.Float64Var(&o.DeviceCoresScaling, "device-cores-scaling", o.DeviceCoresScaling, "The ratio for NVIDIA device cores scaling.")
 	pflag.Float64Var(&o.DeviceMemoryScaling, "device-memory-scaling", o.DeviceMemoryScaling, "The ratio for NVIDIA device memory scaling.")
@@ -160,13 +167,16 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.ExcludeDevices, "exclude-devices", "", "Specify the GPU IDs that need to be excluded. (example: \"0,1,2\" | \"0-2\")")
 	pflag.StringVar(&o.DevicePluginPath, "device-plugin-path", o.DevicePluginPath, "The path for kubelet receive device plugin registration.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable)")
-	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")
-	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
-	pflag.BoolVar(&o.GDRCopyEnabled, "gdrcopy-enabled", o.GDRCopyEnabled, "Ensure that containers are started with NVIDIA_GDRCOPY=enabled.")
+	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers that request NVIDIA GPU resources are started with GPUDirect Storage support.")
+	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers that request NVIDIA GPU resources are started with MOFED support.")
+	pflag.BoolVar(&o.GDRCopyEnabled, "gdrcopy-enabled", o.GDRCopyEnabled, "Ensure that containers that request NVIDIA GPU resources are started with GDRCopy support.")
 	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")
 	pflag.BoolVar(&o.ImexRequired, "imex-required", o.ImexRequired, "The specified IMEX channels are required.")
+	pflag.StringVar(&o.CDIAnnotationPrefix, "cdi-annotation-prefix", o.CDIAnnotationPrefix, "The prefix to use for CDI container annotation keys. (only used with the \"cdi-annotations\" strategy)")
+	pflag.StringVar(&o.HostDriverRoot, "host-driver-root", o.HostDriverRoot, "The root path for the NVIDIA driver installation on the host. (typical values are '/' or '/run/nvidia/driver')")
+	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

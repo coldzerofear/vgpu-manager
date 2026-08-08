@@ -213,7 +213,8 @@ func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceM
 		manager.featureGate = featuregate.NewFeatureGate()
 	}
 	if manager.DeviceLib == nil {
-		deviceLib, err := nvidia.InitDeviceLib("/")
+		driverRoot := config.GetDriverRoot()
+		deviceLib, err := nvidia.InitDeviceLib(driverRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -238,7 +239,7 @@ func (m *DeviceManager) initDevices() (err error) {
 	}
 	var (
 		devLinksMap        map[string]map[int][]links.P2PLinkType
-		gpuTopologyEnabled = m.featureGate.Enabled(util.GPUTopology)
+		gpuTopologyEnabled = m.featureGate.Enabled(util.TopologyAwareGPUAllocation)
 		exists             = false
 	)
 	if gpuTopologyEnabled {
@@ -262,7 +263,7 @@ func (m *DeviceManager) initDevices() (err error) {
 			devLinksMap[dev.UUID] = devLinklist
 		}
 	}
-	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), "/")
+	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), m.DevRoot)
 	if err != nil {
 		return fmt.Errorf("error querying IMEX channels: %w", err)
 	}
@@ -283,7 +284,6 @@ func (m *DeviceManager) initDevices() (err error) {
 		if err != nil {
 			return fmt.Errorf("error getting info for GPU %d: %w", i, err)
 		}
-		numaNode, _ := gpuInfo.GetNumaNode()
 
 		healthy := true
 		if excludeDevices.HasIntID(i) {
@@ -310,7 +310,7 @@ func (m *DeviceManager) initDevices() (err error) {
 		}
 		gpuDevice := &Device{GPU: &GPUDevice{
 			GpuInfo:  gpuInfo,
-			NumaNode: int(numaNode),
+			NumaNode: int(gpuInfo.GetNumaNode()),
 			Paths:    paths,
 			Healthy:  healthy,
 			Links:    p2pLinks,
@@ -466,7 +466,7 @@ func (m *DeviceManager) Start() {
 			klog.ErrorS(err, "Failed to initiate device health check")
 		}
 	})
-	if m.featureGate.Enabled(util.SMWatcher) {
+	if m.featureGate.Enabled(util.SharedSMUtilizationWatcher) {
 		m.wait.Go(func() {
 			klog.Infoln("DeviceManager starting sm watcher...")
 			m.doWatcher()
@@ -492,7 +492,7 @@ func (m *DeviceManager) GetNodeDeviceInfo() device.NodeDeviceInfo {
 			Number:     m.config.GetDeviceSplitCount(),
 			Numa:       gpuDevice.NumaNode,
 			Mig:        gpuDevice.MigEnabled,
-			BusId:      links.PciInfo(gpuDevice.PciInfo).BusID(),
+			BusId:      gpuDevice.PciBusID,
 			Capability: float32(capability),
 			Healthy:    gpuDevice.Healthy,
 		})

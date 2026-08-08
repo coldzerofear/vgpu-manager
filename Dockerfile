@@ -1,13 +1,22 @@
 # Declared here for use in FROM directives below
+ARG TOOLKIT_CONTAINER_IMAGE=unknown
+
 ARG BASE_BUILD_IMAGE=unknown
 
 FROM ${BASE_BUILD_IMAGE} AS builder
+
+# Pull the nvidia-cdi-hook binary out of the relevant toolkit container (arch:
+# TARGETPLATFORM). It is installed onto the host by the `install` init container
+# (via install_files.sh) and referenced from the generated CDI specification when
+# a cdi-* device-list-strategy is enabled. The explicit --platform keeps the
+# binary matching the target node arch (and makes Dockerfile.cross skip it).
+FROM --platform=$TARGETPLATFORM ${TOOLKIT_CONTAINER_IMAGE} AS toolkit
 
 FROM quay.io/jitesoft/ubuntu:20.04
 
 ENV NVIDIA_DISABLE_REQUIRE="true"
 
-ARG BUILD_VERSION="N/A"
+ARG BUILD_VERSION="v1.0.0"
 ARG GIT_COMMIT="unknown"
 ARG BUILD_DATE="1970-01-01T00:00:00Z"
 
@@ -36,10 +45,13 @@ COPY --from=builder /go/src/vgpu-manager/bin/device-webhook   /usr/local/bin/dev
 COPY --from=builder /LICENSE /LICENSE
 COPY --chmod=755 scripts/install_files.sh scripts/install_files.sh
 
-COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
+COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so.$BUILD_VERSION
 COPY --from=builder /vgpu-controller/build/mem_occupy_tool    /installed/tools/mem_occupy_tool
 COPY --from=builder /vgpu-controller/build/mem_managed_tool   /installed/tools/mem_managed_tool
 COPY --from=builder /vgpu-controller/build/mem_view_tool      /installed/tools/mem_view_tool
 COPY --from=builder /go/src/vgpu-manager/bin/device-client    /installed/registry/device-client
+# Bundled NVIDIA CDI hook; installed to the host (/etc/vgpu-manager/nvidia-cdi-hook)
+# by the install init container and referenced from the generated CDI spec.
+COPY --from=toolkit /artifacts/rpm/usr/bin/nvidia-cdi-hook    /installed/tools/nvidia-cdi-hook
 
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload

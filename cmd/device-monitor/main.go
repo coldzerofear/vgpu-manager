@@ -14,6 +14,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/cmd/device-monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
+	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/lister"
@@ -29,6 +32,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	resourcev1 "k8s.io/client-go/listers/resource/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/component-base/logs"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -39,59 +43,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
 
-func main() {
-	opt := options.NewOptions()
-	opt.InitFlags(flag.CommandLine)
-	opt.PrintAndExitIfRequested()
-	logs.InitLogs()
-	defer logs.FlushLogs()
-	util.MustInitGlobalDomain(opt.Domain)
+func runApp(opt *options.Options) (exitCode int) {
+	exitCode = 1
 
-	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
-	if err != nil {
-		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
-	}
+	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
+	util.MustInitGlobalDomain(opt.Domain)
+	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
+
 	kubeConfig, err := client.NewKubeConfig(
+		client.WithConfigMasterURL(opt.MasterURL),
+		client.WithKubeConfigPath(opt.KubeConfigFile),
 		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithDefaultUserAgent())
 	if err != nil {
-		klog.Fatalf("Create kubeConfig failed: %v", err)
+		klog.Errorf("Create kubeConfig failed: %v", err)
+		return exitCode
 	}
+
 	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
-		klog.Fatalf("Create kubeClient failed: %v", err)
+		klog.Errorf("Create kubeClient failed: %v", err)
+		return exitCode
 	}
 	cgroupDriver := cgroup.MustInitCGroupDriver(opt.CGroupDriver)
+
+	driverRoot := nvidia.RootPath(opt.ContainerDriverRoot)
 	nodeConfig, err := node.NewNodeConfig(
 		node.WithNodeNameOption(opt.NodeName),
 		node.WithConfigPathOption(opt.NodeConfigPath),
-		node.WithCGroupDriverOption(string(cgroupDriver)))
+		node.WithCGroupDriverOption(string(cgroupDriver)),
+		node.WithDriverRootOption(driverRoot))
 	if err != nil {
-		klog.Fatalf("Initialization of node config failed: %v", err)
+		klog.Errorf("Initialization of node config failed: %v", err)
+		return exitCode
 	}
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
 
-	// trim managedFields to reduce cache memory usage.
-	option := informers.WithTransform(cache.TransformStripManagedFields())
-	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
-
-	nodeInformer, err := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
-	if err != nil {
-		klog.Fatalf("GetNodeInformer failed: %v", err)
-	}
-	podInformer, err := metrics.GetPodInformer(factory, nodeConfig.GetNodeName())
-	if err != nil {
-		klog.Fatalf("GetPodInformer failed: %v", err)
-	}
-	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
-	podLister := client.NewPodLister(podInformer.GetIndexer())
-
-	containerLister := lister.NewContainerLister(util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
-	nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig.GetNodeName(),
-		nodeLister, podLister, containerLister, opt.FeatureGate)
-	if err != nil {
-		klog.Fatalf("Create node gpu collector failed: %v", err)
-	}
 	minScrapeIntervalDuration := time.Second
 	if opt.MinScrapeInterval > 1 {
 		minScrapeIntervalDuration *= time.Duration(opt.MinScrapeInterval)
@@ -102,20 +89,17 @@ func main() {
 		server.WithPort(&opt.ServerBindPort),
 		server.WithTimeoutSecond(30),
 		server.WithDebugMetrics(opt.PprofBindPort > 0),
-		server.WithCollectors(nodeCollector, infoCollector),
+		server.WithCollectors(infoCollector),
 		server.WithLabels(prometheus.Labels{"service": "vGPU"}),
 		server.WithLimiter(rate.NewLimiter(rate.Every(minScrapeIntervalDuration), 1)),
-		server.WithReadyChecker(func(req *http.Request) error {
-			if !util.InformerFactoryHasSynced(factory, req.Context()) {
-				return errors.New("informer has not completed all synchronization")
-			}
-			return nil
-		}),
+		server.WithReadTimeout(60 * time.Second),
+		server.WithReadHeaderTimeout(15 * time.Second),
 	}
 	if opt.EnableTls {
 		if len(opt.TlsKeyFile) == 0 || len(opt.TlsCertFile) == 0 {
-			klog.Fatalf("Enable Tls but did not specify a certificate file: "+
-				"tlsKeyFile: '%s', tlsCertFile: '%s'", opt.TlsKeyFile, opt.TlsCertFile)
+			klog.Errorf("Enable Tls but did not specify a certificate file: "+
+				"tlsKeyFile: %q, tlsCertFile: %q", opt.TlsKeyFile, opt.TlsCertFile)
+			return exitCode
 		}
 
 		tlsConfig, err := tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
@@ -131,7 +115,8 @@ func main() {
 			// - https://github.com/advisories/GHSA-4374-p667-p6c8
 		}, tlsserver.WithTLSServerNextProtos([]string{"http/1.1"}))
 		if err != nil {
-			klog.Fatalf("GetServerTLSConfig failed: %v", err)
+			klog.Errorf("GetServerTLSConfig failed: %v", err)
+			return exitCode
 		}
 		opts = append(opts, server.WithTLSConfig(tlsConfig))
 	}
@@ -139,16 +124,76 @@ func main() {
 	if opt.EnableRBAC {
 		httpClient, err := rest.HTTPClientFor(kubeConfig)
 		if err != nil {
-			klog.Fatalf("Create httpClient failed: %v", err)
+			klog.Errorf("Create httpClient failed: %v", err)
+			return exitCode
 		}
 		authorization, err := filters.WithAuthenticationAndAuthorization(kubeConfig, httpClient)
 		if err != nil {
-			klog.Fatalf("Create authClient failed: %v", err)
+			klog.Errorf("Create authClient failed: %v", err)
+			return exitCode
 		}
 		opts = append(opts, server.WithMiddleware(func(handler http.Handler) (http.Handler, error) {
 			return authorization(klog.NewKlogr(), handler)
 		}))
 	}
+
+	// trim managedFields to reduce cache memory usage.
+	option := informers.WithTransform(cache.TransformStripManagedFields())
+	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
+
+	nodeInformer, err := metrics.GetNodeInformer(factory, nodeConfig.GetNodeName())
+	if err != nil {
+		klog.Errorf("GetNodeInformer failed: %v", err)
+		return exitCode
+	}
+
+	opts = append(opts, server.WithReadyChecker(func(req *http.Request) error {
+		if !util.InformerFactoryHasSynced(factory, req.Context()) {
+			return errors.New("informer has not completed all synchronization")
+		}
+		return nil
+	}))
+	nodeLister := listerv1.NewNodeLister(nodeInformer.GetIndexer())
+	containerListerStart := func(time.Duration, <-chan struct{}) {}
+	if opt.EnableDRAMonitor {
+		klog.Infoln("Initialize DRA driver path monitoring")
+		podInformer, err := metrics.GetDraDriverPodInformer(factory, nodeConfig.GetNodeName())
+		if err != nil {
+			klog.Errorf("GetDraDriverPodInformer failed: %v", err)
+			return exitCode
+		}
+		sliceInformer, err := metrics.GetResourceSliceInformer(factory, nodeConfig.GetNodeName())
+		if err != nil {
+			klog.Errorf("GetResourceSliceInformer failed: %v", err)
+			return exitCode
+		}
+		podLister := client.NewPodLister(podInformer.GetIndexer())
+		sliceLister := resourcev1.NewResourceSliceLister(sliceInformer.GetIndexer())
+		claimLister := factory.Resource().V1().ResourceClaims().Lister()
+		draCollector, err := collector.NewDRAGPUCollector(nodeConfig, nodeLister, podLister, sliceLister, claimLister, opt.FeatureGate)
+		if err != nil {
+			klog.Errorf("Create dra gpu collector failed: %v", err)
+			return exitCode
+		}
+		opts = append(opts, server.WithCollectors(draCollector))
+	} else {
+		klog.Infoln("Initialize device plugin path monitoring")
+		podInformer, err := metrics.GetDevicePluginPodInformer(factory, nodeConfig.GetNodeName())
+		if err != nil {
+			klog.Errorf("GetDevicePluginPodInformer failed: %v", err)
+			return exitCode
+		}
+		podLister := client.NewPodLister(podInformer.GetIndexer())
+		containerLister := lister.NewContainerLister(util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
+		nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig, nodeLister, podLister, containerLister, opt.FeatureGate)
+		if err != nil {
+			klog.Errorf("Create node gpu collector failed: %v", err)
+			return exitCode
+		}
+		containerListerStart = containerLister.Start
+		opts = append(opts, server.WithCollectors(nodeCollector))
+	}
+
 	metricsServer := server.NewServer(opts...)
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	go func() {
@@ -156,7 +201,7 @@ func main() {
 		klog.V(4).Infoln("Waiting for InformerFactory cache synchronization...")
 		if util.InformerFactoryHasSynced(factory, ctx) {
 			klog.V(4).Infoln("InformerFactory cache synchronization successful")
-			containerLister.Start(5*time.Second, ctx.Done())
+			containerListerStart(5*time.Second, ctx.Done())
 		}
 	}()
 	go func() {
@@ -175,8 +220,23 @@ func main() {
 	case s := <-sigChan:
 		klog.Infof("Received signal %v, shutting down...", s)
 		cancelCtx()
+		exitCode = 0
 	case <-ctx.Done():
 		klog.Errorln("Internal error, service abnormal stop")
-		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		exitCode = 1
+	}
+
+	return exitCode
+}
+
+func main() {
+	opt := options.NewOptions()
+	opt.InitFlags(flag.CommandLine)
+	opt.PrintAndExitIfRequested()
+	logs.InitLogs()
+	defer logs.FlushLogs()
+
+	if exitCode := runApp(opt); exitCode != 0 {
+		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
 }

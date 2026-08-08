@@ -1,0 +1,30 @@
+{{- $monitor := .Values.kubeletPlugin.containers.monitor | default dict }}
+{{- $metricsPort := .Values.kubeletPlugin.containers.plugin.commands.metricsPort | default 0 }}
+{{- if and .Values.kubeletPlugin.enabled (or (gt ($metricsPort | int) 0) $monitor.enabled) -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}-metrics
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    {{- if gt ($metricsPort | int) 0 }}
+    - name: metrics
+      port: {{ $metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
+    {{- if $monitor.enabled }}
+    - name: device-metrics
+      port: {{ dig "commands" "serverBindPort" 3456 $monitor }}
+      targetPort: device-metrics
+      protocol: TCP
+    {{- end }}
+  selector:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    {{- include "vgpu-manager-dra-driver.selectorLabels" . | nindent 4 }}
+{{- end }}

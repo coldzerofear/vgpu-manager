@@ -15,7 +15,7 @@ RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /ld.so.preload
 # issues/502 and issues/743) and dominated CI duration on the happy
 # path. Pinned by image digest for reproducibility; bash version follows
 # the trixie suite. Currently delivers bash 5.2.37, statically linked.
-FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b AS bash
+FROM debian:trixie-slim@sha256:8d7a3dca57e62717b0f10897aca189da5d7acde3cc1ced657bdfd06ef5379576 AS bash
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash-static \
  && rm -rf /var/lib/apt/lists/* \
@@ -36,7 +36,7 @@ ENV NVIDIA_DISABLE_REQUIRE="true"
 # ENV NVIDIA_VISIBLE_DEVICES=all
 # ENV NVIDIA_DRIVER_CAPABILITIES=utility,compute
 
-ARG BUILD_VERSION="N/A"
+ARG BUILD_VERSION="v1.0.0"
 ARG GIT_COMMIT="unknown"
 ARG BUILD_DATE="1970-01-01T00:00:00Z"
 
@@ -56,23 +56,21 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Add top-level license (AL2) file into the container image
 COPY --from=builder /LICENSE /LICENSE
-# RUN mkdir -p /installed/registry
 
 # COPY --from=bash       /bin/bash                                 /bin/bash
 COPY --from=bash       /bin/bash-static                          /bin/bash
 COPY --from=toolkit    /artifacts/rpm/usr/bin/nvidia-cdi-hook    /usr/bin/nvidia-cdi-hook
 COPY --from=builder    /ld.so.preload                            /installed/ld.so.preload
-COPY --from=builder    /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so
+COPY --from=builder    /vgpu-controller/build/libvgpu-control.so /installed/libvgpu-control.so.$BUILD_VERSION
 COPY --from=builder    /go/src/vgpu-manager/bin/device-client    /installed/registry/device-client
 COPY --from=builder    /vgpu-controller/build/mem_occupy_tool    /installed/tools/mem_occupy_tool
 COPY --from=builder    /vgpu-controller/build/mem_managed_tool   /installed/tools/mem_managed_tool
 COPY --from=builder    /vgpu-controller/build/mem_view_tool      /installed/tools/mem_view_tool
 COPY --from=builder    /go/src/vgpu-manager/bin/kubelet-plugin   /usr/local/bin/kubelet-plugin
 COPY --from=builder    /go/src/vgpu-manager/bin/device-webhook   /usr/local/bin/device-webhook
+COPY --from=builder    /go/src/vgpu-manager/bin/device-monitor   /usr/local/bin/device-monitor
 
 COPY --chmod=755 scripts/install_files.sh           /usr/bin/install_files.sh
-COPY --chmod=755 scripts/bind_to_driver.sh          /usr/bin/bind_to_driver.sh
-COPY --chmod=755 scripts/unbind_from_driver.sh      /usr/bin/unbind_from_driver.sh
 COPY --chmod=755 scripts/kubelet-plugin-prestart.sh /usr/bin/kubelet-plugin-prestart.sh
 
 # Use root by default (for example, the init container as of now needs

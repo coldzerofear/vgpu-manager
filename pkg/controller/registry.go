@@ -4,7 +4,6 @@ import (
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
-	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	"k8s.io/klog/v2"
 	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -12,47 +11,49 @@ import (
 
 type Controller interface {
 	reconcile.Reconciler
-	RegisterToManager(manager ctrm.Manager) error
+	RegisterToManager(ctrm.Manager) error
 }
 
-type newController func(manager ctrm.Manager, config *node.NodeConfigSpec) (reconcile.Reconciler, error)
+type NewControllerFunc func(manager ctrm.Manager, config *node.NodeConfigSpec) (Controller, error)
 
 var (
-	once              sync.Once
-	controllerFuncMap map[string]newController
-
-	// Ensure that the controller is implemented.
-	_ Controller = &reschedule.RescheduleController{}
+	registerOnce       sync.Once
+	registerErr        error
+	mutex              sync.Mutex
+	controllerRegistry map[string]NewControllerFunc
 )
 
 func init() {
-	controllerFuncMap = make(map[string]newController)
-	controllerFuncMap[reschedule.Name] = reschedule.NewRescheduleController
+	controllerRegistry = make(map[string]NewControllerFunc)
 }
 
-func RegisterControllerToManager(manager ctrm.Manager, config *node.NodeConfigSpec, controllerSwitch map[string]bool) (err error) {
-	once.Do(func() {
-		var c reconcile.Reconciler
-		for name, newControllerFunc := range controllerFuncMap {
-			if !controllerSwitch[name] {
+func RegisterController(name string, fn NewControllerFunc) {
+	mutex.Lock()
+	controllerRegistry[name] = fn
+	mutex.Unlock()
+}
+
+func RegisterControllerToManager(
+	manager ctrm.Manager,
+	config *node.NodeConfigSpec,
+	controlSwitch map[string]bool,
+) error {
+	registerOnce.Do(func() {
+		var controller Controller
+		for name, newController := range controllerRegistry {
+			if !controlSwitch[name] {
 				continue
 			}
-			c, err = newControllerFunc(manager, config)
-			if err != nil {
-				klog.ErrorS(err, "unable to create controller", "controller", name)
-				return
-			}
-			controller, ok := c.(Controller)
-			if !ok {
-				klog.Errorf("%s has not implemented a controller, skip it", name)
-				continue
+			if controller, registerErr = newController(manager, config); registerErr != nil {
+				klog.ErrorS(registerErr, "unable to create controller", "controller", name)
+				break
 			}
 			klog.V(4).InfoS("Register controller to manager", "controller", name)
-			if err = controller.RegisterToManager(manager); err != nil {
-				klog.ErrorS(err, "unable to register controller", "controller", name)
-				return
+			if registerErr = controller.RegisterToManager(manager); registerErr != nil {
+				klog.ErrorS(registerErr, "unable to register controller", "controller", name)
+				break
 			}
 		}
 	})
-	return err
+	return registerErr
 }

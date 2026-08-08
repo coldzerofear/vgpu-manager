@@ -6,21 +6,35 @@ import (
 
 	"github.com/Masterminds/semver"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 )
+
+const compatibilityNumaNodeAttribute resourceapi.QualifiedName = "dra.net/numaNode"
 
 type GpuDeviceInfo struct {
 	*nvidia.GpuInfo `json:",inline"`
 	vfioEnabled     bool
-	pciBusID        string
 
 	// The following properties that can only be known after inspecting MIG
 	// profiles.
 	maxCapacities PartCapacityMap
 	memSliceCount int
+
+	// Fabric Manager attributes. Populated only
+	// when an FM Manager is available and the GPU is visible to NVML at
+	// discovery time.
+	gpuModuleID int
+
+	// partitionsBySize maps an FM partition size (number of GPUs in the
+	// partition) to the partitionId of the partition of that size that
+	// includes this GPU. Used to publish the `partition1`/`partition2`/
+	// `partition4`/`partition8` device attributes.
+	partitionsBySize map[int]int
 }
 
 // Represents a specific (concrete, incarnated, created) MIG device. Annotated
@@ -56,10 +70,12 @@ type VfioDeviceInfo struct {
 	PciBusID               string `json:"pciBusID,omitempty"`
 	pciBusIDAttr           *deviceattribute.DeviceAttribute
 	pcieRootAttr           *deviceattribute.DeviceAttribute
+	numaNodeAttr           *deviceattribute.DeviceAttribute
 	numaNode               int
 	iommuGroup             int
 	iommuFDEnabled         bool
 	addressableMemoryBytes uint64
+	vfioModule             string
 }
 
 // CanonicalName returns the nameused for device announcement (in ResourceSlice
@@ -123,6 +139,9 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		"minor": {
 			IntValue: ptr.To(int64(d.Minor)),
 		},
+		"numa": {
+			IntValue: ptr.To(int64(d.GetNumaNode())),
+		},
 		"productName": {
 			StringValue: &d.ProductName,
 		},
@@ -149,6 +168,7 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 	if d.PcieRootAttr != nil {
 		attrs[d.PcieRootAttr.Name] = d.PcieRootAttr.Value
 	}
+	addCompatibilityNumaNodeAttribute(attrs, d.NumaNodeAttr)
 
 	if d.AddressingMode != nil {
 		attrs["addressingMode"] = resourceapi.DeviceAttribute{
@@ -156,7 +176,40 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		}
 	}
 
+	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+		d.addFabricManagerAttributes(attrs)
+	}
+
 	return attrs
+}
+
+// addFabricManagerAttributes publishes the Fabric Manager-derived attributes
+// (`gpuModuleID` and `partitionN`) for this physical GPU. The values are
+// resolved from NVML / FM at discovery time (see attachFabricManagerPartitions).
+func (d *GpuDeviceInfo) addFabricManagerAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
+	if d == nil {
+		return
+	}
+
+	if d.gpuModuleID == 0 && len(d.partitionsBySize) == 0 {
+		klog.V(4).Infof("No Fabric Manager attributes for %s", d.CanonicalName())
+		return
+	}
+
+	klog.V(4).Infof("Adding Fabric Manager attributes for %s: gpuModuleID=%d partitionsBySize=%v",
+		d.CanonicalName(), d.gpuModuleID, d.partitionsBySize)
+	if d.gpuModuleID != 0 {
+		attrs["gpuModuleID"] = resourceapi.DeviceAttribute{
+			IntValue: ptr.To(int64(d.gpuModuleID)),
+		}
+	}
+
+	for size, partitionID := range d.partitionsBySize {
+		key := resourceapi.QualifiedName(fmt.Sprintf("partition%d", size))
+		attrs[key] = resourceapi.DeviceAttribute{
+			IntValue: ptr.To(int64(partitionID)),
+		}
+	}
 }
 
 func (d *GpuDeviceInfo) GetDevice() resourceapi.Device {
@@ -203,14 +256,14 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 			"uuid": {
 				StringValue: ptr.To(strings.ToLower(d.UUID)),
 			},
+			"numa": {
+				IntValue: ptr.To(int64(d.numaNode)),
+			},
 			"deviceID": {
 				StringValue: &d.deviceID,
 			},
 			"vendorID": {
 				StringValue: &d.vendorID,
-			},
-			"numa": {
-				IntValue: ptr.To(int64(d.numaNode)),
 			},
 			"productName": {
 				StringValue: &d.productName,
@@ -232,5 +285,45 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 	if d.pcieRootAttr != nil {
 		device.Attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
+
+	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+		if d.parent == nil {
+			klog.V(4).Infof("No parent GPU for %s; skipping Fabric Manager attributes", d.CanonicalName())
+		} else {
+			d.parent.addFabricManagerAttributes(device.Attributes)
+		}
+	}
+	addCompatibilityNumaNodeAttribute(device.Attributes, d.numaNodeAttr)
+
 	return device
+}
+
+func addCompatibilityNumaNodeAttribute(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, numaNodeAttr *deviceattribute.DeviceAttribute) {
+	if numaNodeAttr == nil {
+		return
+	}
+	numaNode := numaNodeAttr.Value.IntValue
+	if numaNode == nil || *numaNode < 0 {
+		return
+	}
+
+	if featuregates.Enabled(featuregates.DRAListTypeAttributes) {
+		// KEP-6072 prefers the list form when DRAListTypeAttributes is enabled.
+		// Until this driver computes same-socket minimum-SLIT-distance nodes,
+		// publish the physical NUMA node as a valid single-element list.
+		attrs[numaNodeAttr.Name] = resourceapi.DeviceAttribute{
+			IntValues: []int64{int64(*numaNode)},
+		}
+		attrs[compatibilityNumaNodeAttribute] = resourceapi.DeviceAttribute{
+			IntValues: []int64{int64(*numaNode)},
+		}
+		return
+	}
+
+	attrs[numaNodeAttr.Name] = resourceapi.DeviceAttribute{
+		IntValue: ptr.To(int64(*numaNode)),
+	}
+	attrs[compatibilityNumaNodeAttribute] = resourceapi.DeviceAttribute{
+		IntValue: ptr.To(int64(*numaNode)),
+	}
 }

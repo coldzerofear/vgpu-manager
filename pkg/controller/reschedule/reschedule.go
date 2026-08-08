@@ -6,6 +6,7 @@ import (
 
 	client2 "github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
+	"github.com/coldzerofear/vgpu-manager/pkg/controller"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +30,14 @@ type RescheduleController struct {
 	recorder events.EventRecorder
 }
 
-func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) (reconcile.Reconciler, error) {
+// Ensure that the controller is implemented.
+var _ controller.Controller = &RescheduleController{}
+
+func init() {
+	controller.RegisterController(Name, NewRescheduleController)
+}
+
+func NewRescheduleController(manager ctrm.Manager, config *node.NodeConfigSpec) (controller.Controller, error) {
 	recorder := manager.GetEventRecorder("re-schedule")
 	recovery, err := newRecoveryController(manager.GetClient(), recorder)
 	if err != nil {
@@ -84,10 +92,15 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 				break
 			}
 			klog.V(4).InfoS("Try to recovery pod", "pod", klog.KObj(pod), "uid", pod.UID)
+			if err := r.recovery.AddPodToCheckpoint(pod); err != nil {
+				klog.ErrorS(err, "Adding pod to recovery checkpoint failed", "pod", klog.KObj(pod))
+				return reconcile.Result{}, err
+			}
 			// Attempt to delete pod
 			if err := r.client.Delete(ctx, pod, &client.DeleteOptions{
 				Preconditions: metav1.NewUIDPreconditions(string(pod.UID)),
 			}); err != nil {
+				_ = r.recovery.RemovePodCheckpoint(pod)
 				klog.ErrorS(err, "Failed to delete pod", "pod", klog.KObj(pod))
 				return reconcile.Result{}, err
 			}
@@ -110,8 +123,7 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 }
 
 func (r *RescheduleController) RegisterToManager(manager ctrm.Manager) error {
-	err := builder.ControllerManagedBy(manager).
-		For(&corev1.Pod{}).Named(Name).Complete(r)
+	err := builder.ControllerManagedBy(manager).For(&corev1.Pod{}).Named(Name).Complete(r)
 	if err == nil {
 		err = manager.Add(r.recovery)
 	}

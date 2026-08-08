@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -25,17 +26,19 @@ import (
 type Middleware func(handler http.Handler) (http.Handler, error)
 
 type Server struct {
-	mutex        sync.Mutex
-	collectors   []prometheus.Collector
-	labels       prometheus.Labels
-	limiter      *rate.Limiter
-	timeout      time.Duration
-	port         *int
-	debugMetrics bool
-	httpServer   *http.Server
-	middleware   Middleware
-	readyChecker healthz.Checker
-	tlsConfig    *tls.Config
+	mutex             sync.Mutex
+	collectors        []prometheus.Collector
+	labels            prometheus.Labels
+	limiter           *rate.Limiter
+	timeout           time.Duration
+	port              *int
+	debugMetrics      bool
+	httpServer        *http.Server
+	middleware        Middleware
+	readyChecker      healthz.Checker
+	tlsConfig         *tls.Config
+	readTimeout       time.Duration
+	readHeaderTimeout time.Duration
 }
 
 type klogErrLog struct{}
@@ -177,9 +180,11 @@ func (s *Server) Start(ctx context.Context) (err error) {
 	route.AddMetricsHandle(routerHandle, handler)
 
 	s.httpServer = &http.Server{
-		Addr:      "0.0.0.0:" + strconv.Itoa(*s.port),
-		Handler:   routerHandle,
-		TLSConfig: s.tlsConfig,
+		Addr:              "0.0.0.0:" + strconv.Itoa(*s.port),
+		Handler:           routerHandle,
+		TLSConfig:         s.tlsConfig,
+		ReadHeaderTimeout: s.readHeaderTimeout,
+		ReadTimeout:       s.readTimeout,
 	}
 
 	idleConnsClosed := make(chan struct{})
@@ -204,7 +209,7 @@ func (s *Server) Start(ctx context.Context) (err error) {
 	} else {
 		err = s.httpServer.ListenAndServeTLS("", "")
 	}
-	if err != nil && err != http.ErrServerClosed {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		close(idleConnsClosed)
 		return err
 	}
@@ -224,6 +229,18 @@ func (s *Server) stop(ctx context.Context) error {
 }
 
 type Option func(*Server)
+
+func WithReadTimeout(d time.Duration) Option {
+	return func(s *Server) {
+		s.readTimeout = d
+	}
+}
+
+func WithReadHeaderTimeout(d time.Duration) Option {
+	return func(s *Server) {
+		s.readHeaderTimeout = d
+	}
+}
 
 func WithReadyChecker(c healthz.Checker) Option {
 	return func(s *Server) {

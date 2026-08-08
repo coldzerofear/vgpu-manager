@@ -20,7 +20,6 @@ def app(args):
     print("Test use float device tensor: (%s)" % ", ".join([str(_) for _ in shape])) 
 
     print("Tensorflow version: " + tf.__version__)
-    tf.enable_eager_execution()
     data = tf.ones(shape=shape, dtype=tf.float32) 
     summation = tf.reduce_sum(data)  
     print("Tensor sum: " + str(summation.numpy()))

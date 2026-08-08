@@ -151,13 +151,13 @@ func (d AllocatableDevice) UUID() string {
 func (d *AllocatableDevice) GetGPUPCIBusID() string {
 	switch d.Type() {
 	case VGpuDeviceType:
-		return d.VGpu.pciBusID
+		return d.VGpu.PciBusID
 	case GpuDeviceType:
-		return d.Gpu.pciBusID
+		return d.Gpu.PciBusID
 	case MigStaticDeviceType:
 		return d.MigStatic.pciBusID
 	case MigDynamicDeviceType:
-		return d.MigDynamic.Parent.pciBusID
+		return d.MigDynamic.Parent.PciBusID
 	case VfioDeviceType:
 		return d.Vfio.PciBusID
 	}
@@ -308,9 +308,9 @@ func (d *PerGPUAllocatableDevices) RemoveSiblingDevices(device *AllocatableDevic
 	var pciBusID string
 	switch device.Type() {
 	case VGpuDeviceType:
-		pciBusID = device.VGpu.pciBusID
+		pciBusID = device.VGpu.PciBusID
 	case GpuDeviceType:
-		pciBusID = device.Gpu.pciBusID
+		pciBusID = device.Gpu.PciBusID
 	case VfioDeviceType:
 		pciBusID = device.Vfio.PciBusID
 	case MigStaticDeviceType:

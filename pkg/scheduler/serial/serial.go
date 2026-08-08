@@ -3,6 +3,8 @@ package serial
 import (
 	"fmt"
 	"runtime"
+	"sort"
+	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -42,7 +44,7 @@ func NewLocker(options ...Option) *Locker {
 		opt(&locker)
 	}
 	if locker.enabled {
-		n := runtime.NumCPU() * 2
+		n := runtime.GOMAXPROCS(0) * 4
 		if n < 4 {
 			n = 4
 		}
@@ -52,12 +54,23 @@ func NewLocker(options ...Option) *Locker {
 	return &locker
 }
 
+func getLockId(id ...string) string {
+	var lockId string
+	switch len(id) {
+	case 0:
+		lockId = "<default>"
+	case 1:
+		lockId = id[0]
+	default:
+		sort.Strings(id)
+		lockId = strings.Join(id, ",")
+	}
+	return lockId
+}
+
 func (l *Locker) RLock(id ...string) {
 	if l.enabled {
-		lockId := "<none>"
-		if len(id) > 0 {
-			lockId = id[0]
-		}
+		lockId := getLockId(id...)
 		l.mutex.RLockKey(lockId)
 		l.timestamps[HashCode(lockId)%uint32(len(l.timestamps))] = time.Now().UnixMicro()
 		klog.V(5).InfoS(fmt.Sprintf("%s read lock successfully added", l.name), "lockId", lockId)
@@ -66,10 +79,7 @@ func (l *Locker) RLock(id ...string) {
 
 func (l *Locker) Lock(id ...string) {
 	if l.enabled {
-		lockId := "<none>"
-		if len(id) > 0 {
-			lockId = id[0]
-		}
+		lockId := getLockId(id...)
 		l.mutex.LockKey(lockId)
 		l.timestamps[HashCode(lockId)%uint32(len(l.timestamps))] = time.Now().UnixMicro()
 		klog.V(5).InfoS(fmt.Sprintf("%s lock successfully added", l.name), "lockId", lockId)
@@ -86,10 +96,7 @@ func (l *Locker) delay(id string) {
 
 func (l *Locker) RUnlock(id ...string) {
 	if l.enabled {
-		lockId := "<none>"
-		if len(id) > 0 {
-			lockId = id[0]
-		}
+		lockId := getLockId(id...)
 		l.delay(lockId)
 		_ = l.mutex.RUnlockKey(lockId)
 	}
@@ -97,10 +104,7 @@ func (l *Locker) RUnlock(id ...string) {
 
 func (l *Locker) Unlock(id ...string) {
 	if l.enabled {
-		lockId := "<none>"
-		if len(id) > 0 {
-			lockId = id[0]
-		}
+		lockId := getLockId(id...)
 		l.delay(lockId)
 		_ = l.mutex.UnlockKey(lockId)
 	}

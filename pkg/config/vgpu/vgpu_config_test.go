@@ -2,8 +2,8 @@ package vgpu
 
 import (
 	"os"
-	"syscall"
 	"testing"
+	"unsafe"
 
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/component-base/featuregate"
@@ -19,6 +19,50 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 )
+
+// TestResourceDataStructLayout pins the config-file ABI to the C side
+// (library resource_data_t / device_t). Since WriteVGPUConfigFile now writes
+// the Go struct's raw bytes directly, any drift in size/padding here would
+// silently corrupt what the C reader parses.
+func TestResourceDataStructLayout(t *testing.T) {
+	if got := unsafe.Sizeof(VersionT{}); got != 8 {
+		t.Fatalf("sizeof(VersionT) = %d, want 8", got)
+	}
+	// device_t is one cache line; resource_data_t = 128B header + 384B pod block
+	// + 16*128B devices. Must match the C _Static_asserts in hook.h exactly.
+	if got := unsafe.Sizeof(DeviceT{}); got != 128 {
+		t.Fatalf("sizeof(DeviceT) = %d, want 128", got)
+	}
+	if got := unsafe.Sizeof(ResourceDataT{}); got != 2560 {
+		t.Fatalf("sizeof(ResourceDataT) = %d, want 2560", got)
+	}
+	// Offsets pinned against the C layout (frozen header, seqlock word, devices[]).
+	if got := unsafe.Offsetof(DeviceT{}.Seq); got != 0 {
+		t.Fatalf("offsetof(DeviceT.Seq) = %d, want 0", got)
+	}
+	if got := unsafe.Offsetof(DeviceT{}.TotalMemory); got != 56 {
+		t.Fatalf("offsetof(DeviceT.TotalMemory) = %d, want 56", got)
+	}
+	if got := unsafe.Offsetof(ResourceDataT{}.Magic); got != 0 {
+		t.Fatalf("offsetof(ResourceDataT.Magic) = %d, want 0", got)
+	}
+	if got := unsafe.Offsetof(ResourceDataT{}.LayoutVersion); got != 4 {
+		t.Fatalf("offsetof(ResourceDataT.LayoutVersion) = %d, want 4", got)
+	}
+	if got := unsafe.Offsetof(ResourceDataT{}.PodUID); got != 128 {
+		t.Fatalf("offsetof(ResourceDataT.PodUID) = %d, want 128 (frozen header size)", got)
+	}
+	if got := unsafe.Offsetof(ResourceDataT{}.Devices); got != 512 {
+		t.Fatalf("offsetof(ResourceDataT.Devices) = %d, want 512", got)
+	}
+	if MaxDeviceCount != 16 || UuidBufferSize != 48 || NameBufferSize != 64 {
+		t.Fatalf("ABI constants drifted: MaxDeviceCount=%d UuidBufferSize=%d NameBufferSize=%d",
+			MaxDeviceCount, UuidBufferSize, NameBufferSize)
+	}
+	if int64(unsafe.Sizeof(ResourceDataT{})) > ConfigFileSize {
+		t.Fatalf("sizeof(ResourceDataT)=%d exceeds ConfigFileSize=%d", unsafe.Sizeof(ResourceDataT{}), ConfigFileSize)
+	}
+}
 
 func Test_WriDriverConfigFile(t *testing.T) {
 	driverVersion := nvidia.DriverVersion{
@@ -83,9 +127,9 @@ func Test_WriDriverConfigFile(t *testing.T) {
 	}
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(map[featuregate.Feature]featuregate.FeatureSpec{
-		util.SMWatcher:   {Default: true, PreRelease: featuregate.Alpha},
-		util.VMemoryNode: {Default: true, PreRelease: featuregate.Alpha},
-		util.ClientMode:  {Default: true, PreRelease: featuregate.Alpha},
+		util.SharedSMUtilizationWatcher: {Default: true, PreRelease: featuregate.Alpha},
+		util.VirtualMemoryTracking:      {Default: true, PreRelease: featuregate.Alpha},
+		util.DevicePluginClientMode:     {Default: true, PreRelease: featuregate.Alpha},
 	}))
 
 	devManager := manager.NewFakeDeviceManager(
@@ -184,13 +228,23 @@ func Test_WriDriverConfigFile(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					resourceData1, data, err := MmapResourceDataT(test.path)
+					resourceData1, err := NewMmapResourceData(test.path)
 					if err != nil {
 						t.Fatal(err)
 					}
-					defer syscall.Munmap(data)
-					resourceData2 := NewResourceDataT(devManager, test.pod, test.devices, false, node)
-					assert.Equal(t, *resourceData1, *resourceData2)
+					defer func() { _ = resourceData1.Close() }()
+					resourceData2 := NewResourceDataWithOptions(
+						ResourceOption{},
+						WithPodInfo(test.pod),
+						WithDeviceManager(devManager),
+						WithContainerName(test.devices.Name),
+						WithDeviceClaims(test.devices.DeviceClaims),
+						WithMemoryOversold(false),
+						WithComputePolicy(GetDefaultComputePolicy(test.pod, node)),
+					)
+					// Round-trip: bytes written to disk, mmap'd back, must equal
+					// the in-memory builder output (byte-compatible with C reader).
+					assert.Equal(t, *resourceData1.GetResource(), *resourceData2)
 					if err = os.RemoveAll(test.path); err != nil {
 						t.Error(err)
 					}

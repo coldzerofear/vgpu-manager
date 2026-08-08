@@ -26,14 +26,16 @@ const (
 	// predication router path
 	filterPerfix       = apiPrefix + "/filter"
 	bindPerfix         = apiPrefix + "/bind"
+	preemptPerfix      = apiPrefix + "/preempt"
 	maxRequestBodySize = 7 * 1024 * 1024 // max 7mb request body size
 )
 
-func checkBody(w http.ResponseWriter, r *http.Request) {
+func checkBody(w http.ResponseWriter, r *http.Request) bool {
 	if r.Body == nil {
 		http.Error(w, "Please send a request body", 400)
-		return
+		return false
 	}
+	return true
 }
 
 // DebugLogging wraps handler for debugging purposes
@@ -94,7 +96,9 @@ func AddFilterPredicate(router *httprouter.Router, predicate predicate.FilterPre
 
 func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		checkBody(w, r)
+		if !checkBody(w, r) {
+			return
+		}
 
 		var buf bytes.Buffer
 		// Limit the body size to prevent deep nesting/resource exhaustion attacks
@@ -134,6 +138,58 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 	}
 }
 
+func AddPreemptPredicate(router *httprouter.Router, predicate predicate.PreemptPredicate) {
+	path := preemptPerfix
+	router.POST(path, DebugLogging(PreemptPredicateRoute(predicate), path))
+}
+
+// PreemptPredicateRoute handles the scheduler-extender preempt verb.
+// kube-scheduler's default-preemption already runs SelectVictimsOnNode using
+// in-tree filter plugins; this endpoint receives the candidate map and
+// returns a corrected one based on our vGPU resource view. On any internal
+// error we echo the input back (passthrough) so we never veto a valid
+// in-tree preemption decision.
+func PreemptPredicateRoute(predicate predicate.PreemptPredicate) httprouter.Handle {
+	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		if !checkBody(w, r) {
+			return
+		}
+
+		var buf bytes.Buffer
+		// Limit the body size to prevent deep nesting/resource exhaustion attacks
+		limitedReader := io.LimitReader(r.Body, maxRequestBodySize)
+		body := io.TeeReader(limitedReader, &buf)
+
+		var args extenderv1.ExtenderPreemptionArgs
+		if err := json.NewDecoder(body).Decode(&args); err != nil {
+			klog.Errorf("Decode extender preempt args failed: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !predicate.IsReady(r.Context()) {
+			err := context.DeadlineExceeded
+			klog.ErrorS(err, predicate.Name()+" is not ready yet")
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+
+		result := predicate.Preempt(r.Context(), args)
+
+		w.Header().Set("Content-Type", "application/json")
+		if resultBody, err := json.Marshal(result); err != nil {
+			errMsg := "Failed to marshal extenderPreemptionResult"
+			klog.ErrorS(err, errMsg, "extenderPreemptionResult", result)
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(fmt.Sprintf("{'Error':'%s: %s'}", errMsg, err.Error())))
+		} else {
+			klog.V(4).InfoS(predicate.Name()+" return extenderPreemptionResult",
+				"extenderPreemptionResult", string(resultBody))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(resultBody)
+		}
+	}
+}
+
 func AddBindPredicate(router *httprouter.Router, predicate predicate.BindPredicate) {
 	path := bindPerfix
 	router.POST(path, DebugLogging(BindPredicateRoute(predicate), path))
@@ -141,7 +197,9 @@ func AddBindPredicate(router *httprouter.Router, predicate predicate.BindPredica
 
 func BindPredicateRoute(predicate predicate.BindPredicate) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		checkBody(w, r)
+		if !checkBody(w, r) {
+			return
+		}
 
 		var buf bytes.Buffer
 		// Limit the body size to prevent deep nesting/resource exhaustion attacks

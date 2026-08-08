@@ -82,6 +82,15 @@ func cont(name string, refs ...corev1.ResourceClaim) corev1.Container {
 	}
 }
 
+// sidecarCont is an init container with restartPolicy: Always (a sidecar),
+// which runs concurrently with the app containers.
+func sidecarCont(name string, refs ...corev1.ResourceClaim) corev1.Container {
+	c := cont(name, refs...)
+	always := corev1.ContainerRestartPolicyAlways
+	c.RestartPolicy = &always
+	return c
+}
+
 // pod assembles a Pod from the given pod-level claims and init/app containers.
 func pod(podClaims []corev1.PodResourceClaim, inits, apps []corev1.Container) *corev1.Pod {
 	return &corev1.Pod{
@@ -148,10 +157,11 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 		},
 
 		// ---------------------------------------------------------------
-		// Rule 3: two init containers share the same vGPU request → error
+		// Sequential (non-restartable) init containers never overlap, so any
+		// number of them may share (sequentially reuse) one vGPU request.
 		// ---------------------------------------------------------------
 		{
-			name: "rule3: two init containers share one vGPU request: error",
+			name: "two sequential init containers share one vGPU request: pass",
 			objs: []client.Object{vgpuClaim("claim-x", "req1")},
 			pod: pod(
 				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
@@ -161,7 +171,18 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 				},
 				nil,
 			),
-			wantErr: "referenced by multiple init containers",
+		},
+		{
+			name: "multiple sequential init containers and one app share one vGPU request: pass",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{
+					cont("init-a", claimRef("pc-x", "")),
+					cont("init-b", claimRef("pc-x", "")),
+				},
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
 		},
 
 		// ---------------------------------------------------------------
@@ -190,6 +211,67 @@ func TestCheckResourceClaimRequests(t *testing.T) {
 			pod: pod(
 				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
 				[]corev1.Container{cont("init-a", claimRef("pc-x", ""))},
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+		},
+
+		// ---------------------------------------------------------------
+		// A sidecar (restartable init) overlaps the app phase and every later
+		// init container, so it must be the SOLE user of its vGPU request.
+		// Sharing with an app container → error.
+		// ---------------------------------------------------------------
+		{
+			name: "sidecar and app containers share one vGPU request: error",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{sidecarCont("side-a", claimRef("pc-x", ""))},
+				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
+			),
+			wantErr: "must be the sole user",
+		},
+		// Sharing with an init container → error (the sidecar may overlap that
+		// init, so strict non-overlap forbids it).
+		{
+			name: "sidecar and init container share one vGPU request: error",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{
+					sidecarCont("side-a", claimRef("pc-x", "")),
+					cont("init-a", claimRef("pc-x", "")),
+				},
+				nil,
+			),
+			wantErr: "must be the sole user",
+		},
+		// Two sidecars sharing one request → error (concurrent).
+		{
+			name: "two sidecars share one vGPU request: error",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{
+					sidecarCont("side-a", claimRef("pc-x", "")),
+					sidecarCont("side-b", claimRef("pc-x", "")),
+				},
+				nil,
+			),
+			wantErr: "multiple sidecar containers",
+		},
+		// ---------------------------------------------------------------
+		// A non-restartable init container may still share with an app
+		// container even when an unrelated sidecar exists on the pod.
+		// ---------------------------------------------------------------
+		{
+			name: "non-restartable init shares with app; unrelated sidecar present: pass",
+			objs: []client.Object{vgpuClaim("claim-x", "req1")},
+			pod: pod(
+				[]corev1.PodResourceClaim{podClaim("pc-x", "claim-x")},
+				[]corev1.Container{
+					sidecarCont("side-a"),
+					cont("init-a", claimRef("pc-x", "")),
+				},
 				[]corev1.Container{cont("app-a", claimRef("pc-x", ""))},
 			),
 		},

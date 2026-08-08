@@ -27,6 +27,7 @@ import (
 	k8scache "k8s.io/client-go/tools/cache"
 	"k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -157,10 +158,19 @@ func GetResourceOfPod(pod *corev1.Pod, resourceName string) int64 {
 	return total
 }
 
-// IsVGPUResourcePod Determine if a pod has vGPU resource request.
+// IsVGPUResourcePod Determine if a pod has vGPU resource request. Init
+// containers (including sidecars) are checked alongside regular containers so
+// an init-only vGPU pod is recognised; this is kept in lockstep with
+// allocator.BuildAllocationRequest (which builds req.Containers from the same
+// init+app set) so the filter↔bind predicate-node invariant holds.
 func IsVGPUResourcePod(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
+	}
+	for i := range pod.Spec.InitContainers {
+		if GetResourceOfContainer(&pod.Spec.InitContainers[i], VGPUNumberResourceName) > 0 {
+			return true
+		}
 	}
 	for i := range pod.Spec.Containers {
 		if GetResourceOfContainer(&pod.Spec.Containers[i], VGPUNumberResourceName) > 0 {
@@ -170,22 +180,101 @@ func IsVGPUResourcePod(pod *corev1.Pod) bool {
 	return false
 }
 
+// IsContainerRunning reports whether the named container is currently in the
+// Running state. It searches both init and regular container statuses (names
+// are unique pod-wide), so a completed/terminated container — e.g. a finished
+// sequential init container — returns false.
+func IsContainerRunning(pod *corev1.Pod, containerName string) bool {
+	if pod == nil {
+		return false
+	}
+	for i := range pod.Status.InitContainerStatuses {
+		if pod.Status.InitContainerStatuses[i].Name == containerName {
+			return pod.Status.InitContainerStatuses[i].State.Running != nil
+		}
+	}
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == containerName {
+			return pod.Status.ContainerStatuses[i].State.Running != nil
+		}
+	}
+	return false
+}
+
+// IsRestartableInitContainer reports whether an init container is a sidecar,
+// i.e. it declares restartPolicy: Always. Unlike a regular init container
+// (which runs to completion before the app containers start), a sidecar keeps
+// running alongside the app containers for the rest of the pod's life, so for
+// resource and lifecycle purposes it overlaps the app phase.
+var IsRestartableInitContainer = pod.IsRestartableInitContainer
+
+// CollectableContainerNames returns the names of the pod's containers whose
+// real-time vGPU usage metrics should be collected right now. Regular
+// containers and sidecars (restartable init) run for the app phase and follow
+// the pod lifecycle, so they are always included; a sequential
+// (non-restartable) init container runs only transiently, so it is included
+// only while it is actually Running — once it terminates its (stale) usage
+// must stop being reported and its working directory may be reclaimed.
+// Init containers come first, matching the device-plugin's per-container layout.
+func CollectableContainerNames(pod *corev1.Pod) []string {
+	if pod == nil {
+		return nil
+	}
+	names := make([]string, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		if IsRestartableInitContainer(c) || IsContainerRunning(pod, c.Name) {
+			names = append(names, c.Name)
+		}
+	}
+	for i := range pod.Spec.Containers {
+		names = append(names, pod.Spec.Containers[i].Name)
+	}
+	return names
+}
+
+// matchDeviceSelector reports whether deviceValue matches any entry of a
+// comma-separated include/exclude annotation, and whether the annotation
+// carried any usable entry at all.
+//
+// need is what keeps a malformed annotation from meaning something drastic.
+// "  ", "," and ",," split into nothing but blanks; reporting that as "matched
+// nothing" would make an include list reject every device on the node, while
+// the same value in an exclude list would do nothing at all. Callers act on
+// match only when need is true, so a value with no real entry is treated the
+// same as no annotation — which is also what an empty value has always meant.
+//
+// Both arguments are compared upper-cased, and an entry matches as a substring:
+// "A100" selects "NVIDIA A100-SXM4-80GB", and a UUID prefix selects the device
+// it belongs to.
+func matchDeviceSelector(value, deviceValue string) (match, need bool) {
+	for _, entry := range strings.Split(strings.ToUpper(value), ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		need = true
+		if strings.Contains(deviceValue, entry) {
+			return true, true
+		}
+	}
+	return false, need
+}
+
 // CheckDeviceType Check if the device type meets expectations.
+//
+// Include and exclude are independent filters and both apply when both are set:
+// a device has to be named by the include list (if that list has any entry) and
+// must not be named by the exclude list.
 func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 	deviceType = strings.ToUpper(strings.TrimSpace(deviceType))
 	if includes, ok := annotations[PodIncludeGpuTypeAnnotation]; ok {
-		includeTypes := strings.Split(strings.ToUpper(includes), ",")
-		if !slices.ContainsFunc(includeTypes, func(devType string) bool {
-			return strings.Contains(deviceType, strings.TrimSpace(devType))
-		}) {
+		if match, need := matchDeviceSelector(includes, deviceType); need && !match {
 			return false
 		}
 	}
 	if excludes, ok := annotations[PodExcludeGpuTypeAnnotation]; ok {
-		excludeTypes := strings.Split(strings.ToUpper(excludes), ",")
-		if slices.ContainsFunc(excludeTypes, func(devType string) bool {
-			return strings.Contains(deviceType, strings.TrimSpace(devType))
-		}) {
+		if match, need := matchDeviceSelector(excludes, deviceType); need && match {
 			return false
 		}
 	}
@@ -193,19 +282,20 @@ func CheckDeviceType(annotations map[string]string, deviceType string) bool {
 }
 
 // CheckDeviceUuid Check if the device uuid meets expectations.
+//
+// Same rules as CheckDeviceType: both filters apply, and an annotation with no
+// usable entry is ignored rather than matching everything or nothing.
 func CheckDeviceUuid(annotations map[string]string, deviceUUID string) bool {
 	deviceUUID = strings.ToUpper(strings.TrimSpace(deviceUUID))
 	if includes, ok := annotations[PodIncludeGPUUUIDAnnotation]; ok {
-		includeUUIDs := strings.Split(strings.ToUpper(includes), ",")
-		return slices.ContainsFunc(includeUUIDs, func(uuid string) bool {
-			return strings.Contains(deviceUUID, strings.TrimSpace(uuid))
-		})
+		if match, need := matchDeviceSelector(includes, deviceUUID); need && !match {
+			return false
+		}
 	}
 	if excludes, ok := annotations[PodExcludeGPUUUIDAnnotation]; ok {
-		excludeUUIDs := strings.Split(strings.ToUpper(excludes), ",")
-		return !slices.ContainsFunc(excludeUUIDs, func(uuid string) bool {
-			return strings.Contains(deviceUUID, strings.TrimSpace(uuid))
-		})
+		if match, need := matchDeviceSelector(excludes, deviceUUID); need && match {
+			return false
+		}
 	}
 	return true
 }
@@ -227,7 +317,7 @@ func IsShouldDeletePod(pod *corev1.Pod) bool {
 		return true
 	}
 	if len(pod.Status.ContainerStatuses) > MaxContainerLimit {
-		klog.Error("The number of container exceeds the upper limit")
+		klog.ErrorS(nil, "The number of container exceeds the upper limit", "pod", klog.KObj(pod))
 		return true
 	}
 	for _, status := range pod.Status.ContainerStatuses {
@@ -274,15 +364,15 @@ func (pods PodsOrderedByPredicateTime) Swap(i, j int) {
 	pods[i], pods[j] = pods[j], pods[i]
 }
 
-func GetPredicateTimeOfPod(pod corev1.Pod) uint64 {
-	assumeTimeStr, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation)
-	if !ok || len(assumeTimeStr) > PodAnnotationMaxLength {
-		return math.MaxUint64
+func GetPredicateTimeOfPod(pod corev1.Pod) int64 {
+	predicateTimeVal, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation)
+	if !ok || len(predicateTimeVal) > PodAnnotationMaxLength {
+		return math.MaxInt64
 	}
-	predicateTime, err := strconv.ParseUint(assumeTimeStr, 10, 64)
-	if err != nil {
-		klog.Warningf("failed to parse predicate timestamp %s due to %v", assumeTimeStr, err)
-		return math.MaxUint64
+	predicateTime, err := strconv.ParseInt(predicateTimeVal, 10, 64)
+	if err != nil || predicateTime <= 0 {
+		klog.Warningf("failed to parse predicate timestamp %s due to %v", predicateTimeVal, err)
+		return math.MaxInt64
 	}
 	return predicateTime
 }
@@ -290,48 +380,45 @@ func GetPredicateTimeOfPod(pod corev1.Pod) uint64 {
 // GetCurrentPodByAllocatingPods find the oldest Pod from the allocating Pods
 // to be allocated as the current Pod to be allocated.
 func GetCurrentPodByAllocatingPods(allocatingPods []corev1.Pod) (*corev1.Pod, error) {
-	if len(allocatingPods) == 0 {
+	switch len(allocatingPods) {
+	case 0:
 		return nil, fmt.Errorf("unable to find the current pod to be allocated")
-	}
-	pods := PodsOrderedByPredicateTime(allocatingPods)
-	if len(allocatingPods) > 1 {
+	case 1:
+		return &allocatingPods[0], nil
+	default:
+		pods := PodsOrderedByPredicateTime(allocatingPods)
 		sort.Sort(pods)
+		return &pods[0], nil
 	}
-	return &pods[0], nil
 }
 
 // FilterAllocatingPods filter out the list of pods to be allocated.
 func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 	var allocatingPods []corev1.Pod
-	requiredAnnoKeys := []string{
-		PodPredicateTimeAnnotation, PodPredicateNodeAnnotation, PodVGPUPreAllocAnnotation,
-	}
 	for i, pod := range activePods {
 		klog.V(5).Infof("FilterPod <%s/%s> %s", pod.Namespace, pod.Name, pod.Status.Phase)
 		if !IsVGPUResourcePod(&pod) || IsShouldDeletePod(&pod) {
 			continue
 		}
-		if slices.ContainsFunc(requiredAnnoKeys, func(key string) bool {
-			_, exists := HasAnnotation(&pod, key)
-			return !exists
-		}) {
+		if _, ok := HasAnnotation(&pod, PodVGPUPreAllocAnnotation); !ok {
 			continue
+		}
+		if nodeName, ok := HasAnnotation(&pod, PodPredicateNodeAnnotation); !ok {
+			continue
+		} else if pod.Spec.NodeName != nodeName {
+			continue
+		}
+		if val, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation); !ok {
+			continue
+		} else {
+			predicateTime, err := strconv.ParseInt(val, 10, 64)
+			if err != nil || predicateTime <= 0 || predicateTime >= math.MaxInt64 {
+				continue
+			}
 		}
 		allocatingPods = append(allocatingPods, activePods[i])
 	}
 	return allocatingPods
-}
-
-func IsSingleContainerMultiGPUs(pod *corev1.Pod) bool {
-	if pod == nil {
-		return false
-	}
-	for _, container := range pod.Spec.Containers {
-		if GetResourceOfContainer(&container, VGPUNumberResourceName) > 1 {
-			return true
-		}
-	}
-	return false
 }
 
 func PodPlanSchedulingNode(pod *corev1.Pod) string {
@@ -441,22 +528,34 @@ func GetPercentageValue(x uint32) uint32 {
 	}
 }
 
+func ValueEnabled(val string) bool {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return false
+	}
+	return val == "1" || strings.EqualFold(val, "enabled") || strings.EqualFold(val, "true")
+}
+
 func PodContainerEnvEnabled(pod *corev1.Pod, containerName, envName string) bool {
 	if pod == nil {
 		return false
 	}
-	for _, cont := range pod.Spec.Containers {
-		if cont.Name != containerName {
-			continue
+	envEnabled := func(cont *corev1.Container) bool {
+		return slices.ContainsFunc(cont.Env, func(env corev1.EnvVar) bool {
+			return env.Name == envName && ValueEnabled(env.Value)
+		})
+	}
+	// Container names are unique across init and regular containers; search
+	// init containers too so the toggle works for an init container once it
+	// gets devices allocated. For app containers the result is unchanged.
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == containerName {
+			return envEnabled(&pod.Spec.InitContainers[i])
 		}
-		for _, env := range cont.Env {
-			if env.Name != envName {
-				continue
-			}
-			val := strings.TrimSpace(env.Value)
-			if val == "1" || strings.EqualFold(val, "true") {
-				return true
-			}
+	}
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == containerName {
+			return envEnabled(&pod.Spec.Containers[i])
 		}
 	}
 	return false
@@ -544,10 +643,16 @@ func GenerateShortHash(input string, length int) string {
 
 func GetEnvEnabled(env string) bool {
 	if val, ok := os.LookupEnv(env); ok {
-		val = strings.TrimSpace(val)
-		return val == "1" || strings.EqualFold(val, "enabled") || strings.EqualFold(val, "true")
+		return ValueEnabled(val)
 	}
 	return false
+}
+
+func GetEnvDefault(env, defaultValue string) string {
+	if val, ok := os.LookupEnv(env); ok {
+		return strings.TrimSpace(val)
+	}
+	return defaultValue
 }
 
 func EnsureDir(path string, perm os.FileMode) error {
@@ -617,4 +722,111 @@ func ObjectKeys[T client.Object](objects ...T) []string {
 		keys = append(keys, client.ObjectKeyFromObject(object).String())
 	}
 	return keys
+}
+
+func PodHasGangName(pod *corev1.Pod) (string, bool) {
+	if pod == nil {
+		return "", false
+	}
+	// Native Gang Scheduling. An empty name must NOT win: it would report
+	// membership in a nameless gang and, worse, short-circuit the label /
+	// annotation / ownerReference fallbacks below.
+	if pod.Spec.SchedulingGroup != nil && pod.Spec.SchedulingGroup.PodGroupName != nil &&
+		*pod.Spec.SchedulingGroup.PodGroupName != "" {
+		return *pod.Spec.SchedulingGroup.PodGroupName, true
+	}
+	for _, labelKey := range []string{CoschedulingPodGroupLabel, CoschedulingPodGroupNameLabel} {
+		if val, ok := HasLabel(pod, labelKey); ok && val != "" {
+			return val, true
+		}
+	}
+	for _, annoKey := range []string{KubeGroupNameAnnotation, VolcanoGroupNameAnnotation, KoordinatorGangNameAnnotation} {
+		if val, ok := HasAnnotation(pod, annoKey); ok && val != "" {
+			return val, true
+		}
+	}
+	for _, ref := range pod.OwnerReferences {
+		if ref.Kind == "PodGroup" && ref.Name != "" {
+			return ref.Name, true
+		}
+	}
+	return "", false
+}
+
+// PodGangKey returns the pod's gang identity as a namespace-qualified
+// "<namespace>/<name>" key, and whether the pod belongs to a gang at all.
+//
+// Use this -- not PodHasGangName -- whenever the value is used to decide
+// SAMENESS between two pods (indexing siblings, comparing a candidate against
+// req.GangName, protecting brother pods from preemption). Every mechanism
+// PodHasGangName understands names a PodGroup that is a NAMESPACED object:
+// coscheduling's label, Volcano's / Koordinator's / kube-batch's annotation,
+// the native spec.schedulingGroup field, and a PodGroup ownerReference all
+// resolve within the pod's own namespace. The bare name is therefore not a
+// cluster-unique identity, and matching on it makes pods of two unrelated
+// gangs that merely share a name -- "training", or a workload name repeated
+// per tenant, which is the norm in multi-tenant clusters -- look like siblings
+// of each other.
+//
+// The raw value is NORMALIZED first, because the annotation-based dialects do
+// not agree on a spelling -- see normalizeGangKey. Two pods of one gang written
+// two different ways must still produce the same key.
+//
+// PodHasGangName remains the right call for display: it is what the user wrote.
+func PodGangKey(pod *corev1.Pod) (string, bool) {
+	name, ok := PodHasGangName(pod)
+	if !ok || strings.TrimSpace(name) == "" {
+		return "", false
+	}
+	key := normalizeGangKey(pod.Namespace, name)
+	// Nothing usable survived the fold (the reference was punctuation only,
+	// e.g. "/"). Report non-membership rather than hand back a name-less key
+	// that every equally-degenerate pod in the namespace would match.
+	if strings.HasSuffix(key, "/") {
+		return "", false
+	}
+	return key, true
+}
+
+// normalizeGangKey folds every spelling of a gang reference onto one
+// "<namespace>/<name>" key.
+//
+// Label-based dialects can only ever carry a bare PodGroup name (a Kubernetes
+// label VALUE may not contain '/'), but the annotation-based ones -- Volcano,
+// Koordinator, kube-batch -- are free-form and accept either spelling:
+//
+//	training         -> <pod namespace>/training
+//	team-a/training  -> team-a/training
+//
+// Without folding, a gang whose pods spell the reference both ways inside one
+// namespace would split into two gangs -- the opposite failure from the
+// cross-namespace collision this key exists to prevent.
+//
+// An explicit namespace is honoured rather than overridden by the pod's own:
+// that is what the author asked for, and for the overwhelmingly common case
+// (the qualified namespace IS the pod's namespace) the two agree anyway.
+func normalizeGangKey(podNamespace, raw string) string {
+	value := strings.TrimSpace(raw)
+	if namespace, name, found := strings.Cut(value, "/"); found {
+		namespace, name = strings.TrimSpace(namespace), strings.TrimSpace(name)
+		if namespace != "" && name != "" {
+			return namespace + "/" + name
+		}
+		// Degenerate ("/x" or "x/"): fall through and treat the non-empty half
+		// as a bare name in the pod's own namespace rather than inventing an
+		// empty-namespace key that matches nothing.
+		if name != "" {
+			value = name
+		} else {
+			value = namespace
+		}
+	}
+	return podNamespace + "/" + value
+}
+
+func SafeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
 }

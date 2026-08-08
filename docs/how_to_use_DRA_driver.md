@@ -180,3 +180,29 @@ status:
       requestName: container-0-request-0
       resourceName: nvidia.com/gpu
 ```
+
+## Helm charts (Recommended)
+
+Now the DRA driver provides the installation method for helm charts, located in the root directory of the project `./charts/vgpu-manager-dra-driver`
+
+**Installation:**
+
+Label the node where the dra driver will be deployed: `vgpu-manager=dra-driver`
+
+```shell
+kubectl label node <nodename> vgpu-manager=dra-driver
+```
+
+Modify `charts/vgpu-manager-dra-driver/values.yaml` according to your environment requirements
+
+```shell
+helm install vgpu-manager-dra-driver ./charts/vgpu-manager-dra-driver -n kube-system
+```
+
+**Uninstallation**
+
+Execute the following command to uninstall
+
+```shell
+helm uninstall vgpu-manager-dra-driver -n kube-system 
+```

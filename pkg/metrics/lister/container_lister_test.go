@@ -111,9 +111,9 @@ func Test_ContainerLister(t *testing.T) {
 	}
 	featureGate := featuregate.NewFeatureGate()
 	runtime.Must(featureGate.Add(map[featuregate.Feature]featuregate.FeatureSpec{
-		util.SMWatcher:   {Default: true, PreRelease: featuregate.Alpha},
-		util.VMemoryNode: {Default: true, PreRelease: featuregate.Alpha},
-		util.ClientMode:  {Default: true, PreRelease: featuregate.Alpha},
+		util.SharedSMUtilizationWatcher: {Default: true, PreRelease: featuregate.Alpha},
+		util.VirtualMemoryTracking:      {Default: true, PreRelease: featuregate.Alpha},
+		util.DevicePluginClientMode:     {Default: true, PreRelease: featuregate.Alpha},
 	}))
 
 	devManager := manager.NewFakeDeviceManager(
@@ -149,7 +149,7 @@ func Test_ContainerLister(t *testing.T) {
 	contResDataMap := map[string]*vgpu.ResourceDataT{}
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
-		path := filepath.Join(basePath, string(key))
+		path := filepath.Join(basePath, string(key), util.Config)
 		_ = os.MkdirAll(path, 0777)
 		path = filepath.Join(path, dpvgpu.VGPUConfigFileName)
 		deviceClaims := contDevClaimsMap[container.Name]
@@ -158,19 +158,27 @@ func Test_ContainerLister(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
-		resData := vgpu.NewResourceDataT(devManager, pod, assignDevices, false, node)
+		resData := vgpu.NewResourceDataWithOptions(
+			vgpu.ResourceOption{},
+			vgpu.WithPodInfo(pod),
+			vgpu.WithDeviceManager(devManager),
+			vgpu.WithContainerName(assignDevices.Name),
+			vgpu.WithDeviceClaims(assignDevices.DeviceClaims),
+			vgpu.WithMemoryOversold(false),
+			vgpu.WithComputePolicy(vgpu.GetDefaultComputePolicy(pod, node)),
+		)
 		contResDataMap[container.Name] = resData
 	}
 
-	contLister.Start(200*time.Millisecond, ctx.Done())
-	time.Sleep(2 * time.Second)
+	contLister.Start(100*time.Millisecond, ctx.Done())
+	time.Sleep(time.Second)
 
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
-		if data, ok := contLister.GetResourceDataT(key); !ok {
+		if data, ok := contLister.GetResourceData(key); !ok {
 			t.Errorf("Unable to find container resource configuration file")
 		} else {
-			assert.Equal(t, contResDataMap[container.Name], data)
+			assert.Equal(t, contResDataMap[container.Name], data.GetResource())
 		}
 	}
 
@@ -181,7 +189,7 @@ func Test_ContainerLister(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	for _, container := range pod.Spec.Containers {
 		key := GetContainerKey(pod.UID, container.Name)
-		if _, ok := contLister.GetResourceDataT(key); ok {
+		if _, ok := contLister.GetResourceData(key); ok {
 			t.Errorf("The container resource configuration file should have been deleted by now")
 		}
 	}

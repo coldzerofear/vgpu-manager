@@ -42,9 +42,9 @@ func NewBasePluginServer(resourceName, socket string, manager *manager.DeviceMan
 	}
 }
 
-func (b *basePluginServerImpl) initialize() {
+func (b *basePluginServerImpl) initialize(server DevicePlugin) {
 	b.server = grpc.NewServer([]grpc.ServerOption{}...)
-	b.health = make(chan *manager.Device, 1)
+	b.health = make(chan *manager.Device, len(server.Devices()))
 	b.stop = make(chan struct{})
 }
 
@@ -61,8 +61,8 @@ func (b *basePluginServerImpl) GetDeviceManager() *manager.DeviceManager {
 
 // Start starts the gRPC server, registers the device plugin with the Kubelet,
 // and starts the device healthchecks.
-func (b *basePluginServerImpl) Start(name string, server pluginapi.DevicePluginServer) error {
-	b.initialize()
+func (b *basePluginServerImpl) Start(name string, server DevicePlugin) error {
+	b.initialize(server)
 
 	if err := b.serve(server); err != nil {
 		klog.Infof("Could not start device plugin for '%s': %s", b.resourceName, err)
@@ -125,6 +125,12 @@ func (b *basePluginServerImpl) serve(server pluginapi.DevicePluginServer) error 
 
 	pluginapi.RegisterDevicePluginServer(b.server, server)
 
+	// Capture the server this goroutine belongs to. cleanup() sets b.server to
+	// nil, so re-reading the field every iteration means any loop that survives
+	// a Stop dereferences nil. Capturing it also keeps the goroutine off the
+	// `err` above, which serve() keeps writing to after this point.
+	srv := b.server
+
 	go func() {
 		lastCrashTime := time.Now()
 		restartCount := 0
@@ -137,11 +143,16 @@ func (b *basePluginServerImpl) serve(server pluginapi.DevicePluginServer) error 
 			}
 
 			klog.Infof("Starting GRPC server for '%s'", b.resourceName)
-			if err = b.server.Serve(sock); err == nil {
+			// ErrServerStopped is an orderly Stop, not a crash. Retrying it spins
+			// on a server that will never serve again — six laps of that and the
+			// restartCount guard above takes the whole process down with a
+			// Fatalf, which is what used to happen on every plugin restart.
+			serveErr := srv.Serve(sock)
+			if serveErr == nil || errors.Is(serveErr, grpc.ErrServerStopped) {
 				break
 			}
 
-			klog.Errorf("GRPC server for '%s' crashed with error: %v", b.resourceName, err)
+			klog.Errorf("GRPC server for '%s' crashed with error: %v", b.resourceName, serveErr)
 
 			timeSinceLastCrash := time.Since(lastCrashTime).Seconds()
 			lastCrashTime = time.Now()

@@ -73,8 +73,6 @@ scheduler:
       # Enable TLS for the device monitor endpoint.
       # When enabled, the endpoint will be served over HTTPS instead of HTTP.
       enabled: false
-      # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
-      certDir: /tmp/k8s-webhook-server/serving-certs
       # Certificate validity period. (Unit day, default: 10 year)
       certDuration: 3650
       # If enabled, certificate distribution will be done using Cert Manager,
@@ -93,13 +91,15 @@ scheduler:
       serverBindPort: 3456
       # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
-      # Supported feature gates:
-      # - SerialBindNode (default: true)
-      # - SerialFilterNode (default: true)
-      # - GPUTopology
-      featureGates: ""
+      # Configure as a map of gate name -> bool, e.g. { TopologyAwareGPUAllocation: true }.
+      featureGates:
+        SerializedNodeFilter: true
+        SerializedNodeBind: true
+        TopologyAwareGPUAllocation: true
       # Certificate refresh interval in seconds (TLS only works when enabled)
       certRefreshInterval: 5
+      # Scheduling stuck grace period, filtering the maximum delay time to the binding stage.
+      stuckGracePeriod: 30s
       logLevel: 3
     # Scheduler extender container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
@@ -128,7 +128,7 @@ devicePlugin:
   terminationGracePeriodSeconds: 30
   # Node labels to be deployed
   nodeSelector:
-    vgpu-manager-enable: enable
+    vgpu-manager: device-plugin
   tolerations:
     # This toleration is deprecated. Kept here for backward compatibility
     # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
@@ -143,22 +143,34 @@ devicePlugin:
       effect: NoSchedule
   # Define container security context
   securityContext:
-    # If the container encounters the following errors, try using privileged mode
+    # By default, privileged mode is enabled to prevent the following errors from occurring
     # - error initializing NVML: Unknown Error
     # - error locating "libnvidia-ml.so.1
-    # privileged: true
-    allowPrivilegeEscalation: false
+    privileged: true
+    allowPrivilegeEscalation: true
     capabilities:
       drop: ["ALL"]
       add: ["SYS_ADMIN"]
   # Configure the runtime class name for running GPU containers. If the default container runtime is Nvidia, there is no need to configure it.
   runtimeClassName: ""
-  # The root directory configured in the start command of kubelet (default: /var/lib/kubelet)
-  kubeletRootDir: "/var/lib/kubelet"
-  # Configure the host path used by vgpu manager (default: /etc/vgpu-manager)
-  vgpuManagerDir: "/etc/vgpu-manager"
-  # Cgroup driver, generally does not require manual configuration (Supported values: systemd | cgroupfs)
+  # Kubelet root directory on the host (default: /var/lib/kubelet)
+  kubeletRoot: "/var/lib/kubelet"
+  # Installation directory of vgpu-manager on the host (default: /etc/vgpu-manager)
+  managerRoot: "/etc/vgpu-manager"
+  # Cgroup driver for container environment, default program automatic detection (Supported values: systemd | cgroupfs)
   cgroupDriver: "auto"
+  # Driver root for CDI spec generation. Only needed when the NVIDIA driver is NOT
+  # installed directly on the host (e.g. the GPU-Operator driver container). Leave
+  # empty (or "/") for the host-installed-driver case — nothing extra is mounted.
+  #
+  # When set to a non-"/" value, the host path is mounted into BOTH the device-plugin
+  # and device-monitor containers at the SAME path, so it is both the in-container read
+  # path and the host path written into the CDI spec. Example for the GPU-Operator
+  # driver container:
+  #   driverRoot: "/run/nvidia/driver"
+  # devRoot is only needed when the device-node root differs from the driver root
+  # (an extra same-path mount is added for it when set).
+  driverRoot: "/"
   devicePlugin:
     env:
       - name: DP_ENABLE_HEALTHCHECKS
@@ -170,8 +182,18 @@ devicePlugin:
     commands:
       kubeApiQps: 20.0
       kubeApiBurst: 30
-      # The desired strategy for passing the device list to the underlying runtime. (supported values: "envvar" | "volume-mounts")
+      # The desired strategy for passing the device list to the underlying runtime.
+      # (supported values: "envvar" | "volume-mounts" | "cdi-annotations" | "cdi-cri")
+      # Multiple comma-separated values may be combined, e.g. "envvar,cdi-annotations".
+      # When a cdi-* strategy is enabled the plugin generates a CDI spec under the host
+      # CDI dir (cdiRoot) and the container runtime must have CDI support enabled.
       deviceListStrategy: "envvar"
+      # CDI options (only used when deviceListStrategy contains a cdi-* value).
+      # Host CDI spec directory; mounted into the plugin so the generated spec is
+      # visible to the container runtime on the host.
+      cdiRoot: "/var/run/cdi"
+      # Prefix used for CDI container annotation keys. (default: "cdi.k8s.io/")
+      cdiAnnotationPrefix: ""
       # The number for NVIDIA device split. (default: 10)
       deviceSplitCount: 10
       # The ratio for NVIDIA device cores scaling. (default: 1.0)
@@ -182,21 +204,26 @@ devicePlugin:
       deviceMemoryFactor: 1
       # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
+      # Ensure that containers that request NVIDIA GPU resources are started with GPUDirect Storage support.
       gdsEnabled: false
+      # Ensure that containers that request NVIDIA GPU resources are started with MOFED support.
       mofedEnabled: false
+      # Ensure that containers that request NVIDIA GPU resources are started with GDRCopy support.
+      gdrcopyEnabled: false
       # If using the open-gpu-kernel-modules, open it and enable compatibility mode. (default: false)
       openKernelModules: false
       # Strategy for starting MIG device plugin service (supported values: "none" | "single" | "mixed")
       migStrategy: mixed
-      # Supported feature gates:
-      # - CorePlugin
-      # - MemoryPlugin
-      # - Reschedule
-      # - GPUTopology
-      # - SMWatcher
-      # - VMemoryNode
-      # - ClientMode
-      featureGates: ""
+      # Configure as a map of gate name -> bool, e.g. { TopologyAwareGPUAllocation: true }.
+      featureGates:
+        GPUCoreResourcePlugin: false
+        GPUMemoryResourcePlugin: false
+        VirtualMemoryTracking: true
+        SharedSMUtilizationWatcher: true
+        DevicePluginClientMode: false
+        TopologyAwareGPUAllocation: true
+        AllocationFailureReschedule: false
+        HonorPreAllocatedDeviceIDs: true
       logLevel: 3
     # Device plugin container requests resources.
     # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.
@@ -212,8 +239,6 @@ devicePlugin:
       # Enable TLS for the device monitor endpoint.
       # When enabled, the endpoint will be served over HTTPS instead of HTTP.
       enabled: false
-      # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
-      certDir: /tmp/k8s-webhook-server/serving-certs
       # Certificate validity period. (Unit day, default: 10 year)
       certDuration: 3650
       # If enabled, certificate distribution will be done using Cert Manager,
@@ -233,14 +258,17 @@ devicePlugin:
       # The pprof service port used for debugging (default disable: 0)
       pprofBindPort: 0
       # Supported feature gates:
-      # - SMWatcher
-      # - VMemoryNode
-      featureGates: ""
+      # - SharedSMUtilizationWatcher
+      # - VirtualMemoryTracking
+      # Configure as a map of gate name -> bool, e.g. { SharedSMUtilizationWatcher: true }.
+      featureGates:
+        SharedSMUtilizationWatcher: true
+        VirtualMemoryTracking: true
       # Enable RBAC authentication for metrics service
       enableRBAC: false
       # Certificate refresh interval in seconds (TLS only works when enabled)
       certRefreshInterval: 5
-      # Minimum grasping interval in seconds.
+      # Minimum grasping interval in seconds. (must be greater than or equal to 1)
       minScrapeInterval: 1
       logLevel: 3
     # Device monitor container requests resources.
@@ -333,14 +361,12 @@ webhook:
     serverBindPort: 9443
     # The pprof service port used for debugging (default disable: 0)
     pprofBindPort: 0
-    # CertDir is the directory that contains the server key and certificate. (default: "/tmp/k8s-webhook-server/serving-certs")
-    certDir: /tmp/k8s-webhook-server/serving-certs
     # Default node scheduling policy. (supported values: binpack | spread)
     defaultNodePolicy: binpack
     # Default device scheduling policy. (supported values: binpack | spread)
     defaultDevicePolicy: binpack
     # Default device list topology mode. (supported values: numa | link)
-    defaultTopologyMode: ""
+    defaultTopologyMode: "numa"
     logLevel: 4
   # Webhook container requests resources.
   # Resource size can be adjusted as needed, and guaranteed QoS can be used to improve operational performance.

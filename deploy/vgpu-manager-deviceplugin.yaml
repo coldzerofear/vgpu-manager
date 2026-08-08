@@ -118,7 +118,7 @@ spec:
       # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
       priorityClassName: system-node-critical
       nodeSelector:
-        vgpu-manager-enable: enable
+        vgpu-manager: device-plugin
       serviceAccountName: vgpu-manager-device-plugin
       terminationGracePeriodSeconds: 30
       restartPolicy: Always
@@ -128,6 +128,9 @@ spec:
           command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
           resources:
             requests:
               cpu: 10m
@@ -144,19 +147,32 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-plugin
+            - --device-list-strategy=envvar
             - --device-split-count=10
             - --device-cores-scaling=1
             - --device-memory-scaling=1
             - --node-config-path=/config/nodeConfig.json
             - --open-kernel-modules=false
+            # CDI device injection (set deviceListStrategy to cdi-annotations and/or
+            # cdi-cri in the node config to enable). The nvidia-cdi-hook binary is
+            # bundled in the image and installed to $HOST_MANAGER_DIR/nvidia-cdi-hook
+            # on the host by the install init container, and referenced automatically.
+            # Tune the spec generation below if needed:
+#            - --cdi-annotation-prefix=cdi.k8s.io/
+            # Only when the driver is NOT installed on the host (e.g. GPU-Operator
+            # driver container): point at the driver root. The same host path must be
+            # mounted into the plugin (and monitor) at the SAME path — uncomment the
+            # driver-root volume + volumeMounts below.
+            - --host-driver-root=/
+            - --container-driver-root=/driver-root
             - --v=4
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-#            - name: CGROUP_DRIVER
-#              value: systemd
+            - name: CGROUP_DRIVER
+              value: auto
             - name: KUBE_FEATURE_WatchListClient
               value: "true"
             - name: HOST_MANAGER_DIR
@@ -167,12 +183,18 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+            - name: GDS_ENABLED
+              value: "false"
+            - name: MOFED_ENABLED
+              value: "false"
+            - name: GDRCOPY_ENABLED
+              value: "false"
           securityContext:
             privileged: true
-#            allowPrivilegeEscalation: false
-#            capabilities:
-#              drop: ["ALL"]
-#              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
           resources: {}
           volumeMounts:
             - name: kubelet-root
@@ -192,6 +214,14 @@ spec:
             - name: node-config
               mountPath: /config
               readOnly: true
+            # Required when a CDI device-list-strategy (cdi-annotations / cdi-cri)
+            # is enabled: the plugin writes the generated CDI spec here so the
+            # container runtime on the host can resolve the qualified devices.
+            - name: cdi-root
+              mountPath: /var/run/cdi
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
         - name: device-monitor
           image: coldzerofear/vgpu-manager:latest
           imagePullPolicy: IfNotPresent
@@ -199,6 +229,7 @@ spec:
             - device-monitor
             - --server-bind-port=3456
             - --node-config-path=/config/nodeConfig.json
+            - --container-driver-root=/driver-root
             - --v=4
           ports:
             - name: http
@@ -208,8 +239,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-#            - name: CGROUP_DRIVER
-#              value: systemd
+            - name: CGROUP_DRIVER
+              value: auto
             - name: KUBE_FEATURE_WatchListClient
               value: "true"
             - name: NVIDIA_VISIBLE_DEVICES
@@ -220,10 +251,10 @@ spec:
               value: utility,compute
           securityContext:
             privileged: true
-#            allowPrivilegeEscalation: false
-#            capabilities:
-#              drop: ["ALL"]
-#              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["SYS_ADMIN"]
           resources: {}
           livenessProbe:
             httpGet:
@@ -254,6 +285,9 @@ spec:
             - name: node-config
               mountPath: /config
               readOnly: true
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
       volumes:
         - name: kubelet-root
           hostPath:
@@ -271,6 +305,13 @@ spec:
         - name: cgroup-root
           hostPath:
             path: /sys/fs/cgroup
+        - name: cdi-root
+          hostPath:
+            path: /var/run/cdi
+            type: DirectoryOrCreate
+        - name: driver-root
+          hostPath:
+            path: /
         - name: node-config
           configMap:
             name: vgpu-manager-device-plugin-config

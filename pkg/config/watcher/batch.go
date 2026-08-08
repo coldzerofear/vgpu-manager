@@ -1,9 +1,43 @@
 package watcher
 
+import "sync"
+
 type BatchConfig struct {
 	StartIndex int
 	EndIndex   int
 	Count      int
+}
+
+type BatchParallel struct {
+	wg      sync.WaitGroup
+	configs []BatchConfig
+}
+
+func NewBatchParallel(totalCards, maxPerBatch int) BatchParallel {
+	return BatchParallel{
+		configs: BalanceBatches(totalCards, maxPerBatch),
+	}
+}
+
+func (b *BatchParallel) Execute(fn func(int, BatchConfig)) {
+	if len(b.configs) == 1 {
+		fn(0, b.configs[0])
+		return
+	}
+	for i, config := range b.configs {
+		b.wg.Add(1)
+		go func(i int, config BatchConfig) {
+			defer b.wg.Done()
+			fn(i, config)
+		}(i, config)
+	}
+}
+
+func (b *BatchParallel) WaitDone() {
+	if len(b.configs) <= 1 {
+		return
+	}
+	b.wg.Wait()
 }
 
 func BalanceBatches(totalCards, maxPerBatch int) []BatchConfig {

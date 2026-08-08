@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/component-base/logs"
@@ -37,32 +39,30 @@ import (
 	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func main() {
-	opt := options.NewOptions()
-	opt.InitFlags(flag.CommandLine)
-	opt.PrintAndExitIfRequested()
-	logs.InitLogs()
-	defer logs.FlushLogs()
-	log.SetLogger(klog.NewKlogr())
+func runApp(opt *options.Options) (exitCode int) {
+	exitCode = 1
+
+	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
 
-	err := client.InitKubeConfig(opt.MasterURL, opt.KubeConfigFile)
-	if err != nil {
-		klog.Fatalf("Initialization of kubeConfig failed: %v", err)
-	}
-
 	kubeConfig, err := client.NewKubeConfig(
+		client.WithConfigMasterURL(opt.MasterURL),
+		client.WithKubeConfigPath(opt.KubeConfigFile),
 		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithTimeoutSecond(opt.Timeout),
 		client.WithDefaultUserAgent())
 	if err != nil {
-		klog.Fatalf("Create kubeConfig failed: %v", err)
+		klog.Errorf("Create kubeConfig failed: %v", err)
+		return exitCode
 	}
 	kubeClient, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
-		klog.Fatalf("Create kubeClient failed: %v", err)
+		klog.Errorf("Create kubeClient failed: %v", err)
+		return exitCode
 	}
 
+	driverRoot := nvidia.RootPath(opt.ContainerDriverRoot)
+	hostDriverRoot := nvidia.RootPath(opt.HostDriverRoot)
 	cgroupDriver := cgroup.MustInitCGroupDriver(opt.CGroupDriver)
 	nodeConfig, err := node.NewNodeConfig(
 		node.WithNodeNameOption(opt.NodeName),
@@ -81,10 +81,17 @@ func main() {
 		node.WithGDRCopyEnabledOption(opt.GDRCopyEnabled),
 		node.WithOpenKernelModulesOption(opt.OpenKernelModules),
 		node.WithIMEXOption(opt.ImexChannelIDs, opt.ImexRequired),
+		node.WithDriverRootOption(driverRoot),
+		node.WithHostDriverRootOption(hostDriverRoot),
+		// If nvidiaDevRoot (the path to the device nodes on the host) is not set,
+		// we default to using the driver root on the host.
+		node.WithHostDevRootOption(hostDriverRoot),
 		node.WithCheckFieldsOption(true))
 	if err != nil {
-		klog.Fatalf("Initialization of node config failed: %v", err)
+		klog.Errorf("Initialization of node config failed: %v", err)
+		return exitCode
 	}
+
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
 
 	klog.V(3).Info("Initialize Device Resource Manager")
@@ -93,21 +100,21 @@ func main() {
 		devm.WithKubeClient(kubeClient),
 		devm.WithFeatureGate(opt.FeatureGate))
 	if err != nil {
-		klog.Fatalf("Create device manager failed: %v", err)
+		klog.Errorf("Create device manager failed: %v", err)
+		return exitCode
 	}
 
-	klog.V(3).Info("Starting FS watcher.")
 	devicePluginSocket := filepath.Join(opt.DevicePluginPath, "kubelet.sock")
 	watcher, err := NewFSWatcher(opt.DevicePluginPath)
 	if err != nil {
-		klog.Fatalf("Failed to create FS watcher: %v", err)
+		klog.Errorf("Failed to create FS watcher: %v", err)
+		return exitCode
 	}
-	defer watcher.Close()
-	clusterCtx, cancelFunc := context.WithCancel(context.Background())
-	klog.V(3).Info("Starting OS watcher.")
-	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	defer func() { _ = watcher.Close() }()
 
+	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	manager, err := ctrm.New(kubeConfig, ctrm.Options{
+		LeaderElection:         false,
 		HealthProbeBindAddress: "0", // Disable manager health probe service
 		PprofBindAddress: func() string {
 			if opt.PprofBindPort > 0 {
@@ -122,8 +129,13 @@ func main() {
 			// Enable bookmark event adaptation WatchListClient feature.
 			DefaultEnableWatchBookmarks: ptr.To[bool](true),
 			ByObject: map[rtclient.Object]rtcache.ByObject{
+				// Preheat cache in advance.
 				&corev1.Pod{}: {
 					Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
+					Transform: rtcache.TransformStripManagedFields(),
+				},
+				&corev1.Node{}: {
+					Field:     fields.OneTermEqualSelector("metadata.name", opt.NodeName),
 					Transform: rtcache.TransformStripManagedFields(),
 				},
 			},
@@ -131,21 +143,24 @@ func main() {
 		Metrics: metrics.Options{BindAddress: "0"}, // Disable manager metrics service
 	})
 	if err != nil {
-		klog.Fatalf("Create cluster manager failed: %v", err)
+		klog.Errorf("Create cluster manager failed: %v", err)
+		return exitCode
 	}
-	controllerSwitch := map[string]bool{
-		reschedule.Name: opt.FeatureGate.Enabled(options.Reschedule),
+
+	if err = controller.RegisterControllerToManager(manager, nodeConfig, map[string]bool{
+		reschedule.Name: opt.FeatureGate.Enabled(options.AllocationFailureReschedule),
+	}); err != nil {
+		klog.Errorf("Register controller to manager failed: %v", err)
+		return exitCode
 	}
-	err = controller.RegisterControllerToManager(manager, nodeConfig, controllerSwitch)
+	plugins, err := deviceplugin.GetDevicePlugins(opt, deviceManager, manager, kubeClient)
 	if err != nil {
-		klog.Fatalf("Register controller to manager failed: %v", err)
-	}
-	plugins, err := deviceplugin.GetDevicePlugins(opt.DevicePluginPath, deviceManager, manager, kubeClient)
-	if err != nil {
-		klog.Fatalf("Get device plugins failed: %v", err)
+		klog.Errorf("Get device plugins failed: %v", err)
+		return exitCode
 	}
 
 	klog.Infoln("Starting cluster manager.")
+	clusterCtx, cancelFunc := context.WithCancel(context.Background())
 	go func() {
 		if err = manager.Start(clusterCtx); err != nil {
 			klog.V(3).ErrorS(err, "failed staring cluster manager")
@@ -178,7 +193,7 @@ restart:
 	if started == 0 {
 		klog.Warningln("No devices found. Waiting indefinitely.")
 	}
-	exitCode := 0
+	exitCode = 0
 	// Start an infinite loop, waiting for several indicators to either log
 	// some messages, trigger a restart of the plugins, or exit the program.
 	for {
@@ -220,7 +235,18 @@ exit:
 		_ = p.Stop()
 	}
 
-	if exitCode != 0 {
+	return exitCode
+}
+
+func main() {
+	opt := options.NewOptions()
+	opt.InitFlags(flag.CommandLine)
+	opt.PrintAndExitIfRequested()
+	logs.InitLogs()
+	defer logs.FlushLogs()
+	log.SetLogger(klog.NewKlogr())
+
+	if exitCode := runApp(opt); exitCode != 0 {
 		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
 }

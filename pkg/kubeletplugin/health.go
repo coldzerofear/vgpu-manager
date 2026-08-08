@@ -48,9 +48,16 @@ type healthcheck struct {
 
 	regClient registerapi.RegistrationClient
 	draClient drapb.DRAPluginClient
+
+	// nriHealthy, when non-nil, is consulted on every Check: if it returns
+	// false the plugin reports NOT_SERVING. It reflects the in-process NRI
+	// plugin's recovery state and returns healthy when NRISupport is disabled
+	// (design §12.13.6). Evaluated at Check time, so it tolerates being wired
+	// before the NRI plugin is started.
+	nriHealthy func() bool
 }
 
-func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin.Helper) (*healthcheck, error) {
+func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin.Helper, nriHealthy func() bool) (*healthcheck, error) {
 	port := config.Flags.HealthcheckPort
 	if port < 0 {
 		return nil, nil
@@ -92,10 +99,11 @@ func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin
 
 	server := grpc.NewServer()
 	healthcheck := &healthcheck{
-		server:    server,
-		regClient: registerapi.NewRegistrationClient(regConn),
-		draClient: drapb.NewDRAPluginClient(draConn),
-		kphelper:  helper,
+		server:     server,
+		regClient:  registerapi.NewRegistrationClient(regConn),
+		draClient:  drapb.NewDRAPluginClient(draConn),
+		kphelper:   helper,
+		nriHealthy: nriHealthy,
 	}
 	grpc_health_v1.RegisterHealthServer(server, healthcheck)
 
@@ -143,6 +151,15 @@ func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheck
 
 	klog.V(7).Info("Health check: success: got NodePrepareResourcesResponse for noop request")
 	klog.V(6).Infof("Current kubelet plugin registration status: %s", h.kphelper.RegistrationStatus())
+
+	// When the in-process NRI plugin has been unhealthy past its grace period,
+	// fail liveness so kubelet restarts the pod cleanly (design §12.13.6). The
+	// accessor returns healthy when NRISupport is disabled, so this is a no-op
+	// for the non-NRI path.
+	if h.nriHealthy != nil && !h.nriHealthy() {
+		klog.ErrorS(nil, "Health check: NRI plugin unhealthy (disconnected past grace period)")
+		return status, nil
+	}
 
 	status.Status = grpc_health_v1.HealthCheckResponse_SERVING
 	return status, nil

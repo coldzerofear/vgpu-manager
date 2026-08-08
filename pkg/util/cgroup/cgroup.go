@@ -72,7 +72,7 @@ func MustInitCGroupDriver(cgroupDriver string) CGroupDriver {
 			}
 		}
 	})
-	klog.Infof("Current environment cgroup driver is '%s'", currentCGroupDriver)
+	klog.Infof("Current environment recognition cgroup driver is %q", currentCGroupDriver)
 	return currentCGroupDriver
 }
 
@@ -354,7 +354,7 @@ func GetK8sPodContainerCGroupFullPath(pod *corev1.Pod, containerName string,
 		return "", fmt.Errorf("failed to obtain container cgroup path")
 	}
 	if containerStatus.State.Running == nil {
-		return "", fmt.Errorf("Pod %s container %s not running", klog.KObj(pod), containerName)
+		return "", fmt.Errorf("pod %q container %q not running", klog.KObj(pod), containerName)
 	}
 	runtimeName, containerId = ParseContainerRuntime(containerStatus.ContainerID)
 	cgroupName := NewPodCgroupName(pod)

@@ -30,11 +30,11 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -49,6 +49,7 @@ import (
 	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
 )
 
@@ -73,6 +74,9 @@ type driver struct {
 	healthcheck         *healthcheck
 	deviceHealthMonitor deviceHealthMonitor
 	deviceRegistry      *registry.DeviceRegistryServerImpl
+	nriPlugin           *nri.Plugin
+	nriCache            *nri.Cache
+	nriCancel           context.CancelFunc
 	wg                  sync.WaitGroup
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
@@ -161,7 +165,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.pluginhelper = helper
 
-	healthcheck, err := startHealthcheck(ctx, config, helper)
+	healthcheck, err := startHealthcheck(ctx, config, helper, driver.nriHealthy)
 	if err != nil {
 		return nil, fmt.Errorf("start healthcheck: %w", err)
 	}
@@ -173,11 +177,10 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			klog.V(4).Info("Starting to extended shared SM utilization watcher")
 			for _, device := range state.perGPUAllocatable.GetAllDevices().GetVGPUs() {
 				gpuInfo := device.VGpu.GpuDeviceInfo.GpuInfo
-				numaNode, _ := gpuInfo.GetNumaNode()
 				paths, _ := gpuInfo.GetPaths()
 				gpuDevice := &manager.GPUDevice{
 					GpuInfo:  gpuInfo,
-					NumaNode: int(numaNode),
+					NumaNode: int(gpuInfo.GetNumaNode()),
 					Paths:    paths,
 					Healthy:  true,
 					Links:    map[int][]links.P2PLinkType{},
@@ -205,10 +208,27 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		})
 	}
 
+	// The NRI cache is created before the gated blocks below so that, when both
+	// NRISupport and DevicePluginClientMode are enabled, the register server's
+	// pod-uid resolver and the NRI plugin share one cache instance (design
+	// §12.8). NRISupport requires only VGPUSupport, not DevicePluginClientMode.
+	if featuregates.Enabled(featuregates.NRISupport) {
+		driver.nriCache = nri.NewCache()
+	}
+
 	if featuregates.Enabled(featuregates.DevicePluginClientMode) {
 		cgroup.MustInitCGroupDriver(config.Flags.CGroupDriver)
 		if err := driver.startClientRegistry(ctx, config, state); err != nil {
-			return nil, fmt.Errorf("start client-register registry: %w", err)
+			return nil, fmt.Errorf("start client-register failed: %w", err)
+		}
+	}
+
+	// NRI runs independently of DevicePluginClientMode. It is started after
+	// startClientRegistry so that, when both are on, the registry server (which
+	// reads the shared cache) is already up before the NRI plugin populates it.
+	if featuregates.Enabled(featuregates.NRISupport) {
+		if err := driver.startNRIPlugin(ctx, config); err != nil {
+			return nil, fmt.Errorf("start NRI plugin: %w", err)
 		}
 	}
 
@@ -364,12 +384,28 @@ func (d *driver) Shutdown() error {
 		d.state.nvdevlib.NvmlShutdown()
 	}
 
+	// Tear down the Fabric Manager connection, if one was opened.
+	if d.state.fmManager != nil {
+		if err := d.state.fmManager.Close(); err != nil {
+			klog.Warningf("error closing Fabric Manager connection: %v", err)
+		}
+	}
+
 	if d.deviceHealthMonitor != nil {
 		d.deviceHealthMonitor.Stop()
 	}
 
 	if d.deviceRegistry != nil {
 		d.deviceRegistry.Stop()
+	}
+
+	// Cancel the NRI reconnect loop first (so it won't reconnect), then stop
+	// the stub; both are needed for the Run goroutine to return.
+	if d.nriCancel != nil {
+		d.nriCancel()
+	}
+	if d.nriPlugin != nil {
+		d.nriPlugin.Stop()
 	}
 
 	d.wg.Wait()
@@ -540,7 +576,7 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 	return nil
 }
 
-func isHealthy(taints []resourceapi.DeviceTaint) bool {
+func IsHealthy(taints []resourceapi.DeviceTaint) bool {
 	for _, taint := range taints {
 		if taint.Effect == resourceapi.DeviceTaintEffectNoSchedule {
 			return false
@@ -585,7 +621,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string, health
 						d.Taints = taints
 					}
 					if device, ok := healthDeviceMap[dev.CanonicalName()]; ok {
-						device.Healthy = isHealthy(d.Taints)
+						device.Healthy = IsHealthy(d.Taints)
 					}
 					resourceSlice.Devices = append(resourceSlice.Devices, d)
 				}
@@ -677,20 +713,12 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 
 	podInformer := factory.InformerFor(&corev1.Pod{}, func(k coreclientset.Interface, resync time.Duration) kcache.SharedIndexInformer {
 		lw := kcache.NewListWatchFromClient(
-			k.CoreV1().RESTClient(), "pods",
-			corev1.NamespaceAll,
+			k.CoreV1().RESTClient(), "pods", corev1.NamespaceAll,
 			fields.OneTermEqualSelector("spec.nodeName", config.Flags.NodeName),
 		)
-		return kcache.NewSharedIndexInformer(lw, &corev1.Pod{}, resync, kcache.Indexers{
-			kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc,
-			"metadata.uid": func(obj interface{}) ([]string, error) {
-				accessor, err := meta.Accessor(obj)
-				if err != nil {
-					return nil, fmt.Errorf("object has no meta: %w", err)
-				}
-				return []string{string(accessor.GetUID())}, nil
-			},
-		})
+		indexers := kcache.Indexers{kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc}
+		maps.Copy(indexers, preempt.PodIndexers)
+		return kcache.NewSharedIndexInformer(lw, &corev1.Pod{}, resync, indexers)
 	})
 
 	claimInformer := factory.InformerFor(&resourceapi.ResourceClaim{}, func(_ coreclientset.Interface, resync time.Duration) kcache.SharedIndexInformer {
@@ -724,22 +752,64 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 		claimInformer.GetIndexer(),
 		util.ManagerRootPath,
 		util.DRADriverName,
+		d.nriCache,
 		state.AllocatedVGPURequestsForClaim,
 	)
 
 	d.deviceRegistry = registry.NewDeviceRegistryServer(
 		util.ManagerRootPath,
-		resolver.PodByUID,
+		resolver.TargetByPodUID,
 		resolver.TargetByUUID,
 	)
+	return d.deviceRegistry.Start()
+}
 
+// startNRIPlugin builds and runs the in-process NRI plugin (design §12.13).
+// It runs in DRY-RUN mode for now: hooks observe and log only, injecting
+// nothing (§12.6 item 1). The reconnect loop runs on a child context so
+// Shutdown can stop it cleanly without depending on the parent ctx.
+func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
+	var socketPath string
+	if config.Flags.NRIRoot != "" {
+		socketPath = filepath.Join(config.Flags.NRIRoot, "nri.sock")
+	}
+	plugin, err := nri.NewPlugin(nri.Config{
+		SocketPath: socketPath,
+		PluginName: util.DRADriverName,
+		// Empty falls back to "00" inside NewPlugin. Validated at startup in
+		// validateCLIFlags when non-empty.
+		PluginIdx:       config.Flags.NRIPluginIdx,
+		Cache:           d.nriCache,
+		IsClaimPrepared: d.state.IsVGPUClaimPrepared,
+		ResolveMounts:   d.state.vgpuManager.GetNRIPartitionInjection,
+	})
+	if err != nil {
+		return err
+	}
+	d.nriPlugin = plugin
+
+	nriCtx, cancel := context.WithCancel(ctx)
+	d.nriCancel = cancel
 	d.wg.Go(func() {
-		klog.V(4).Info("Starting container device registry server")
-		if err := d.deviceRegistry.Start(); err != nil {
-			klog.ErrorS(err, "device registry server start failed")
-		}
+		klog.V(4).InfoS("Starting in-process NRI plugin", "socket", socketPath)
+		plugin.Run(nriCtx)
 	})
 	return nil
+}
+
+// nriHealthy is the health accessor the healthcheck consults (design §12.13.6).
+// It reports healthy unless NRISupport is enabled AND the NRI plugin has been
+// disconnected past its grace period, in which case liveness fails and kubelet
+// restarts the pod cleanly. It is safe to call before the NRI plugin is started
+// (returns healthy while nriPlugin is nil).
+func (d *driver) nriHealthy() bool {
+	if !featuregates.Enabled(featuregates.NRISupport) {
+		return true
+	}
+	if d.nriPlugin == nil {
+		return true
+	}
+	return d.nriPlugin.Healthy()
 }
 
 // TODO: implement loop to remove CDI files from the CDI path for claimUIDs

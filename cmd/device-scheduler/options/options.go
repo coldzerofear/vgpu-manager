@@ -29,6 +29,7 @@ type Options struct {
 	TlsKeyFile          string
 	TlsCertFile         string
 	CertRefreshInterval int
+	StuckGracePeriod    string
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -39,23 +40,24 @@ const (
 	defaultServerBindPort      = 3456
 	defaultPprofBindPort       = 0
 	defaultCertRefreshInterval = 5
+	defaultStuckGracePeriod    = "30s"
 
 	Component = "scheduler"
 
-	// SerialBindNode feature gate will serially execute the binding node operations of the scheduler.
-	SerialBindNode featuregate.Feature = util.SerialBindNode
-	// SerialFilterNode feature gate will serially execute the filter node operations of the scheduler.
-	SerialFilterNode featuregate.Feature = util.SerialFilterNode
-	// GPUTopology feature gate will consider topology structure when allocating devices.
-	GPUTopology featuregate.Feature = util.GPUTopology
+	// SerializedNodeBind feature gate will serially execute the binding node operations of the scheduler.
+	SerializedNodeBind featuregate.Feature = util.SerializedNodeBind
+	// SerializedNodeFilter feature gate will serially execute the filter node operations of the scheduler.
+	SerializedNodeFilter featuregate.Feature = util.SerializedNodeFilter
+	// TopologyAwareGPUAllocation feature gate will consider topology structure when allocating devices.
+	TopologyAwareGPUAllocation featuregate.Feature = util.TopologyAwareGPUAllocation
 )
 
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		SerialBindNode:   {Default: true, PreRelease: featuregate.Beta},
-		SerialFilterNode: {Default: true, PreRelease: featuregate.Beta},
-		GPUTopology:      {Default: false, PreRelease: featuregate.Alpha},
+		SerializedNodeBind:         {Default: true, PreRelease: featuregate.Beta},
+		SerializedNodeFilter:       {Default: true, PreRelease: featuregate.Beta},
+		TopologyAwareGPUAllocation: {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -75,6 +77,7 @@ func NewOptions() *Options {
 		Domain:              util.GetGlobalDomain(),
 		SchedulerName:       defaultSchedulerName,
 		CertRefreshInterval: defaultCertRefreshInterval,
+		StuckGracePeriod:    defaultStuckGracePeriod,
 		FeatureGate:         featureGate,
 	}
 }
@@ -99,6 +102,22 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need --enable-tls)")
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
 	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
+	pflag.StringVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
+
+	// DEPRECATED, accepted and ignored. The link allocator no longer enumerates
+	// partitions of the whole node, so there is no combinatorial cliff for a
+	// threshold to protect against; the remaining search is bounded internally.
+	//
+	// The flag must keep PARSING even though it does nothing: pflag exits with
+	// "unknown flag" on an unrecognised argument, so simply deleting it would
+	// crash-loop every scheduler whose deployment still passes it. Remove after
+	// one release.
+	var deprecatedBestEffortMaxGPUs int
+	pflag.IntVar(&deprecatedBestEffortMaxGPUs, "best-effort-max-gpus", 0,
+		"DEPRECATED and ignored: link-topology allocation is no longer combinatorial in the node's GPU count.")
+	_ = pflag.CommandLine.MarkDeprecated("best-effort-max-gpus",
+		"link-topology allocation no longer needs a candidate-count threshold; the flag is ignored and will be removed in a future release")
+
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

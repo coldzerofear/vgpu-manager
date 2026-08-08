@@ -64,13 +64,16 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get","list","watch","update","patch"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: [""]
     resources: ["nodes/status"]
-    verbs: ["patch","update"]
+    verbs: ["patch", "update"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
   # Here are some resources that scheduling plugins may use
   - apiGroups: ["resource.k8s.io"]
-    resources: ["deviceclasses", "resourceclaims", "resourceslices"]
+    resources: ["deviceclasses", "resourceclaims", "resourceslices", "resourceclaimtemplates"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["topology.node.k8s.io"]
     resources: ["noderesourcetopologies"]
@@ -118,6 +121,20 @@ roleRef:
   name: vgpu-manager-scheduler:leader-election-role
   apiGroup: rbac.authorization.k8s.io
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vgpu-manager-scheduler-as-authentication-reader
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-scheduler
+    namespace: kube-system
+roleRef:
+  kind: Role
+  name: extension-apiserver-authentication-reader
+  apiGroup: rbac.authorization.k8s.io
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -137,13 +154,15 @@ data:
     - urlPrefix: "http://127.0.0.1:3456/scheduler"
       filterVerb: filter
       bindVerb: bind
+      preemptVerb: preempt
       enableHTTPS: false
       nodeCacheCapable: true
       weight: 1
       httpTimeout: 30s
+      ignorable: false
       managedResources:
       - name: "nvidia.com/vgpu-number"
-        ignoredByScheduler: true
+        ignoredByScheduler: false
       - name: "nvidia.com/vgpu-cores"
         ignoredByScheduler: true
       - name: "nvidia.com/vgpu-memory"

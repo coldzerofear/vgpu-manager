@@ -22,23 +22,37 @@ spec:
 {{- $webhookSvcName := include "vgpu-manager.device-plugin" . }}
 {{- $webhookSvcAltNames := list (printf "%s.%s.svc" $webhookSvcName .Release.Namespace) (printf "%s.%s.svc.cluster.local" $webhookSvcName .Release.Namespace) }}
 {{- $certName := printf "%s-cert" (include "vgpu-manager.device-plugin" .) }}
+{{- $secretName := printf "%s-secret" (include "vgpu-manager.device-plugin" .) }}
 {{- $duration := int .Values.devicePlugin.deviceMonitor.tls.certDuration }}
-{{- $ca := genCA $certName $duration }}
+{{- /*
+  Self-signed TLS for the device-monitor endpoint (Helm-CLI path). A STABLE CA is
+  persisted in the Secret and reused across upgrades (via lookup); only the leaf is
+  re-issued on upgrade to refresh its validity (the server hot-reloads it). Plain
+  (non-hook) resource so `helm uninstall` removes it cleanly.
+  NOTE: lookup returns nothing during `helm template`/--dry-run/client-side GitOps;
+  use the cert-manager path for those workflows.
+*/ -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+{{- $ca := "" }}
+{{- if and $existing $existing.data (index $existing.data "ca.crt") (index $existing.data "ca.key") }}
+{{- $ca = buildCustomCert (index $existing.data "ca.crt") (index $existing.data "ca.key") }}
+{{- else }}
+{{- $ca = genCA $certName $duration }}
+{{- end }}
 {{- $cert := genSignedCert (printf "%s.%s" $webhookSvcName .Release.Namespace) nil $webhookSvcAltNames $duration $ca }}
 apiVersion: v1
 kind: Secret
 metadata:
   name: {{ include "vgpu-manager.device-plugin" . }}-secret
   namespace: {{ .Release.Namespace | quote }}
-  annotations:
-    "helm.sh/hook": "pre-install,pre-upgrade"
-    "helm.sh/hook-delete-policy": "before-hook-creation"
   labels:
     app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
     {{- include "vgpu-manager.labels" . | nindent 4 }}
 type: kubernetes.io/tls
 data:
+  # ca.key is persisted so upgrades can reuse the same CA (stable ca.crt).
   ca.crt: {{ $ca.Cert | b64enc }}
+  ca.key: {{ $ca.Key | b64enc }}
   tls.crt: {{ $cert.Cert | b64enc }}
   tls.key: {{ $cert.Key | b64enc }}
 {{- end }}

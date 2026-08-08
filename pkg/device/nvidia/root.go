@@ -24,23 +24,31 @@ import (
 
 type RootPath string
 
+var librarySearchPaths = []string{
+	"/usr/lib64",
+	"/usr/lib/x86_64-linux-gnu",
+	"/usr/lib/aarch64-linux-gnu",
+	"/lib64",
+	"/lib/x86_64-linux-gnu",
+	"/lib/aarch64-linux-gnu",
+}
+
 // GetDriverLibraryPath returns path to `libnvidia-ml.so.1` in the driver root.
 // The folder for this file is also expected to be the location of other driver files.
 func (r RootPath) GetDriverLibraryPath() (string, error) {
-	librarySearchPaths := []string{
-		"/usr/lib64",
-		"/usr/lib/x86_64-linux-gnu",
-		"/usr/lib/aarch64-linux-gnu",
-		"/lib64",
-		"/lib/x86_64-linux-gnu",
-		"/lib/aarch64-linux-gnu",
-	}
-
 	libraryPath, err := r.findFile("libnvidia-ml.so.1", librarySearchPaths...)
 	if err != nil {
 		return "", err
 	}
 
+	return libraryPath, nil
+}
+
+func (r RootPath) GetFMLibraryPath() (string, error) {
+	libraryPath, err := r.findFile("libnvfm.so", librarySearchPaths...)
+	if err != nil {
+		return "", err
+	}
 	return libraryPath, nil
 }
 
@@ -91,6 +99,10 @@ func (r RootPath) findFile(name string, searchIn ...string) (string, error) {
 		if err != nil {
 			continue
 		}
+		info, err := os.Stat(candidate)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
 		return candidate, nil
 	}
 
@@ -103,7 +115,7 @@ func (r RootPath) findFile(name string, searchIn ...string) (string, error) {
 func resolveLink(l string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(l)
 	if err != nil {
-		return "", fmt.Errorf("error resolving link '%v': %v", l, err)
+		return "", fmt.Errorf("error resolving link %q: %w", l, err)
 	}
 	return resolved, nil
 }

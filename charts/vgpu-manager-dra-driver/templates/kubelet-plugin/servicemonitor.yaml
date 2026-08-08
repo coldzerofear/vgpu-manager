@@ -1,0 +1,63 @@
+{{- $monitor := .Values.kubeletPlugin.containers.monitor | default dict }}
+{{- $metricsPort := .Values.kubeletPlugin.containers.plugin.commands.metricsPort | default 0 }}
+{{- $sm := .Values.kubeletPlugin.serviceMonitor }}
+{{- $pluginMetrics := gt ($metricsPort | int) 0 }}
+{{- /* serviceMonitor.enabled gates the whole object, not just the plugin endpoint:
+       folding it into $pluginMetrics only would still emit a ServiceMonitor carrying
+       the device-metrics endpoint whenever the monitor sidecar is on, so turning the
+       switch off would not actually turn anything off. */}}
+{{- if and .Values.kubeletPlugin.enabled $sm.enabled (or $pluginMetrics $monitor.enabled) (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+    {{- with $sm.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  endpoints:
+    {{- if $pluginMetrics }}
+    - path: /metrics
+      port: metrics
+      {{- with $sm.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with $sm.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with $sm.relabelings }}
+      relabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $sm.metricRelabelings }}
+      metricRelabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- if $monitor.enabled }}
+    - path: /metrics
+      port: device-metrics
+      scheme: http
+      {{- with $sm.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with $sm.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with $sm.relabelings }}
+      relabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $sm.metricRelabelings }}
+      metricRelabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+      {{- include "vgpu-manager-dra-driver.selectorLabels" . | nindent 6 }}
+{{- end }}

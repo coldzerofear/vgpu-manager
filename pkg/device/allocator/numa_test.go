@@ -23,6 +23,18 @@ func Test_CanNotCrossNumaNode(t *testing.T) {
 			want:      false,
 		},
 		{
+			// One card is always inside exactly one NUMA node, so the request
+			// is satisfiable and the caller gets the grouping — which is what
+			// lets the device policy choose WHICH NUMA node to consume.
+			name:      "Single device with candidates fits trivially",
+			gpuNumber: 1,
+			devices: []*device.Device{
+				device.NewFakeDevice(0, 0, 0, 0, 0, 0, 0, 0),
+				device.NewFakeDevice(1, 0, 0, 0, 0, 0, 0, 1),
+			},
+			want: true,
+		},
+		{
 			name:      "Multi device matching numa",
 			gpuNumber: 2,
 			devices: []*device.Device{
@@ -102,7 +114,7 @@ func Test_NumaDeviceScoreSort(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			numaDevices := NewNumaNodeDevice(testCase.devices)
 			var binpackNumaIds []int
-			numaDevices.BinpackCallback(func(numaNode int, devices []*device.Device) (done bool) {
+			numaDevices.BinpackCallback(UniformProfile, func(numaNode int, devices []*device.Device) (done bool) {
 				for _, dev := range devices {
 					assert.Equal(t, numaNode, dev.GetNUMA())
 				}
@@ -113,7 +125,7 @@ func Test_NumaDeviceScoreSort(t *testing.T) {
 			assert.Equal(t, testCase.binpackNumaIds, binpackNumaIds)
 
 			var spreadNumaIds []int
-			numaDevices.SpreadCallback(func(numaNode int, devices []*device.Device) (done bool) {
+			numaDevices.SpreadCallback(UniformProfile, func(numaNode int, devices []*device.Device) (done bool) {
 				for _, dev := range devices {
 					assert.Equal(t, numaNode, dev.GetNUMA())
 				}

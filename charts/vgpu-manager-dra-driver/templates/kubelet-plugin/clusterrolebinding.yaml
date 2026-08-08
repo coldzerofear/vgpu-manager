@@ -1,0 +1,17 @@
+{{- if .Values.kubeletPlugin.enabled -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}-as-role
+  labels:
+    app.kubernetes.io/component: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "vgpu-manager-dra-driver.kubelet-plugin" . }}:role
+{{- end }}

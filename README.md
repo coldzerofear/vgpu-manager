@@ -6,7 +6,6 @@ A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) device
 
 - [x] Ensure the correctness of scheduling performance and device allocation
 - [x] Ensure the security of container resource isolation
-- [x] Do not obtain host PID through gRPC to device plugin
 - [x] Support the latest CUDA 13.x driver version
 - [x] Compatible with both cgroupv1 and cgroupv2 container environments
 - [x] Dual-layer scheduling policies (node-level and device-level)
@@ -31,38 +30,42 @@ A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) device
 
 ## Prerequisite
 
-* Kubernetes v1.17+ (Install using helm chart method)
+* Kubernetes v1.18+ (Install using helm chart method)
 * Container runtime (docker / containerd / cri-o - others untested)
 * Nvidia Container Toolkit (with NVIDIA container runtime configured)
 
 ## Build
 
-**Compile binaries:**
+**Compile Binaries:**
 
 ```shell
 make build
 ```
 > Note: The compiled file is stored in the bin directory
 
-**Build and push Docker image:**
+**Build and Push container image:**
 
 ```shell
 make docker-build-base docker-build docker-push REGISTRY=<your-image-registry> TAG=<your-image-tag>
 ```
 
-## Deployment
+## Installation and Uninstallation
 
-precondition: `nvidia-container-toolkit` must be installed and correctly configure the default container runtime
+> Currently, DRA driver based GPU allocation is supported. For installation and usage details, please refer to [how_to_use_DRA_driver.md](./docs/how_to_use_DRA_driver.md)
 
-Label the node where the device plugin will be deployed: `vgpu-manager-enable=enable`
+Label GPU nodes that require vgpu-manager management: `vgpu-manager=device-plugin`
 
 ```shell
-kubectl label node <nodename> vgpu-manager-enable=enable
+kubectl label node <nodename> vgpu-manager=device-plugin
 ```
 
-### Helm chart (Recommended)
+Provide two methods for installing helm charts and YAML files, and recommend the helm charts method
 
-Modify `values.yaml` according to your environment requirements
+### Helm charts (Recommended)
+
+**Installation:**
+
+Modify `charts/vgpu-manager/values.yaml` according to your environment requirements
 
 ```shell
 helm install vgpu-manager ./charts/vgpu-manager -n kube-system
@@ -77,7 +80,19 @@ vgpu-manager-scheduler-6949f5d645-g57fj                2/2     Running   0      
 vgpu-manager-webhook-854c56bb97-5f4lm                  1/1     Running   0          10s
 ```
 
-### Deploy directly using YAML files
+**Uninstallation**
+
+Execute the following command to uninstall
+
+```shell
+helm uninstall vgpu-manager -n kube-system 
+```
+
+### YAML files
+
+**Installation:**
+
+Deploy the scheduler and device plugin using the following command
 
 ```bash
 kubectl apply -f deploy/vgpu-manager-scheduler.yaml
@@ -103,15 +118,7 @@ The Webhook service requires the use of [cert-manager](https://github.com/cert-m
 kubectl apply -f deploy/vgpu-manager-webhook.yaml
 ```
 
-## Uninstall
-
-### Helm charts uninstallation
-
-```shell
-helm uninstall vgpu-manager -n kube-system 
-```
-
-### Uninstall directly according to YAML
+**Installation:**
 
 ```shell
 kubectl delete -f deploy/vgpu-manager-scheduler.yaml
@@ -212,6 +219,12 @@ metadata:
 
 > Note: If there are multiple devices separated by commas
 
+Matching rules:
+
+* An entry matches as a case-insensitive substring of the device type, so `A100` selects `NVIDIA A100-SXM4-80GB`.
+* When both annotations are present, both apply: the device must be named by the include list and must not be named by the exclude list.
+* Blank entries are ignored, so `"A10,"` means the same as `"A10"`, and an annotation with no usable entry (`""`, `"  "`, `","`) is treated as if it were not set.
+
 ### Device UUID
 
 Add annotations to vGPU pod to select or exclude device uuids to be scheduled:
@@ -233,6 +246,10 @@ metadata:
 
 > Note: If there are multiple devices separated by commas
 
+The same matching rules as [Device TYPE](#device-type) apply, including that include and exclude are both honoured when both are set.
+
+> Changed: earlier releases stopped at `include-gpu-uuid` and ignored `exclude-gpu-uuid` whenever both annotations were present. A Pod that lists the same UUID in both now has that device rejected instead of selected.
+
 ## Compute Policy
 
 Support the use of annotations on nodes or pods to configure the computing policy to be used: `nvidia.com/vgpu-compute-policy`
@@ -247,73 +264,25 @@ Supported policy values:
 
 ## Feature Gates
 
-The device plugin of vgpu-manager has implemented some special functions that require adding the command-line parameter `--feature-gates` to enable.
+Several optional behaviours are guarded by feature gates. Core components (`device-plugin`,
+`scheduler-extender`, `device-monitor`) take them through `--feature-gates`, while the DRA
+`kubelet-plugin` reads them from the `FEATURE_GATES` environment variable:
 
-### CorePlugin
-
-* action scope: device-plugin
-
-Opening the core plugin will report the number of virtual cores to the kubelet node.
-
-Use the command `--feature-gates=CorePlugin=true` to open the feature.
-
-After opening the feature gate, check the status of the corresponding node to see the registered resource name `nvidia.com/vgpu-cores`.
-
-```yaml
-status:
-  allocatable:
-    nvidia.com/vgpu-cores: "200"
-  capacity:
-    nvidia.com/vgpu-cores: "200"
+```
+--feature-gates=TopologyAwareGPUAllocation=true,SharedSMUtilizationWatcher=true
 ```
 
-> Tips: It may be useful in scenarios where node resource constraints such as `ResourceQuota` are required.
+> Warning: the core components and the DRA driver keep **separate** gate registries, and an
+> unknown gate is fatal rather than ignored — the process exits with `unrecognized feature gate`.
+> Make sure a gate is valid for the component you are passing it to.
 
-### MemoryPlugin
+| Component | Gates |
+| --- | --- |
+| device-plugin | `GPUCoreResourcePlugin`, `GPUMemoryResourcePlugin`, `AllocationFailureReschedule`, `TopologyAwareGPUAllocation`, `SharedSMUtilizationWatcher`, `VirtualMemoryTracking`, `DevicePluginClientMode`, `HonorPreAllocatedDeviceIDs` |
+| scheduler-extender | `SerializedNodeBind`, `SerializedNodeFilter`, `TopologyAwareGPUAllocation` |
+| device-monitor | `SharedSMUtilizationWatcher`, `VirtualMemoryTracking` |
+| kubelet-plugin (DRA) | `VGPUSupport`, `NVMLDeviceHealthCheck`, `IMEXDaemonsWithDNSNames`, `TimeSlicingSettings`, `MPSSupport`, `PassthroughSupport`, `DynamicMIG`, `DeviceMetadata`, `SharedSMUtilizationWatcher`, `DevicePluginClientMode`, `NRISupport`, `FabricManagerPartitioning`, `DRAListTypeAttributes` |
 
-* action scope: device-plugin
-
-Opening the memory plugin will report virtual memory to the kubelet node.
-
-Use the command `--feature-gates=MemoryPlugin=true` to open the feature.
-
-After opening the feature gate, check the status of the corresponding node to see the registered resource name `nvidia.com/vgpu-memory`.
-
-```yaml
-status:
-  allocatable:
-    nvidia.com/vgpu-memory: "8192"
-  capacity:
-    nvidia.com/vgpu-memory: "8192"
-```
-
-> Tips: It may be useful in scenarios where node resource constraints such as `ResourceQuota` are required.
-
-### Reschedule
-
-* action scope: device-plugin
-
-Opening the reschedule will rearrange nodes and devices for certain pods that have failed allocation.
-
-Use the command `--feature-gates=Reschedule=true` to open the feature.
-
-> Tips: In scenarios where multiple Pods are created and scheduled in parallel, device plugins may experience allocation errors. 
-> Enabling this feature can restore the erroneous Pods.
-
-### SerialBindNode
-
-* action scope: scheduler-extender
-
-Enable serial binding of nodes to the scheduler, this will reduce the performance of the scheduler, but it will increase the success rate of device allocation.
-
-Use the command `--feature-gates=SerialBindNode=true` to open the feature.
-
-### GPUTopology
-
-* action scope: scheduler-extender, device-plugin
-
-Opening the GPU topology through the device plugin will reveal GPU topology information to the nodes.
-
-When the scheduler opens the GPU topology, it will affect the device allocation of Pods in link topology mode. `nvidia.com/device-topology-mode: link`
-
-Use the command `--feature-gates=GPUTopology=true` to open the feature.
+For per-gate defaults, what each one does, the dependency/mutual-exclusion rules the DRA driver
+enforces at startup, the Helm values paths, and the old→new name mapping for gates that were
+renamed, see [feature_gates.md](./docs/feature_gates.md).

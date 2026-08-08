@@ -8,8 +8,46 @@ The VGPU pod can use the annotation `nvidia.com/device-topology-mode` to select 
 
 Annotation `nvidia.com/device-topology-mode` supports values:
 
-* numa: When allocating multiple cards, recognize the affinity of numa and try to allocate them on GPUs of numa nodes on the same side.
-* link: When allocating multiple cards, identify nvlinks and try to allocate them to the optimal nvlink topology to improve multi card performance.
+* numa: Recognize the affinity of numa and try to allocate GPUs on numa nodes of the same side.
+* link: Identify nvlinks and try to allocate to the optimal nvlink topology to improve multi card performance.
+* numa-strict / link-strict: same as above, but a node that cannot satisfy the
+  topology is **rejected** instead of falling back to plain resource ordering.
+
+### Single-card requests
+
+Topology mode applies to single-GPU requests too, not only to multi-card ones.
+For a non-strict mode this is a no-op in practice — one card is trivially
+"connected" — but it does two useful things: it lets a single-card pod join a
+cross-pod gang's NVLink island (see below), and it makes `-strict` mean the same
+thing regardless of card count.
+
+What `-strict` means for a single card is worth stating precisely, because the
+obvious reading is wrong. A set of one GPU has no pairs, so it is *vacuously*
+connected at every level — if that were taken at face value, `link-strict` would
+accept any node at all for a 1-GPU pod and the flag would mean nothing there.
+
+Instead, a 1-GPU `link-strict` pod requires **the card it is given to have at
+least one NVLink peer on that node**. The peer does not have to be free: a
+one-GPU pod cannot use it either way, and the promise being made is "this card
+sits on an NVLink fabric". So:
+
+| Node | 1-GPU `link-strict` |
+|---|---|
+| No topology published (device plugin gate off) | rejected |
+| Topology published, all links PCIe / cross-CPU | rejected |
+| Topology published, the chosen card has an NVLink peer | accepted |
+| …even if every one of that card's NVLink peers is busy | accepted |
+
+`numa-strict` follows the same shape: a node whose GPUs all report `numa: -1`
+has no NUMA affinity to honour, so it is rejected rather than trivially accepted.
+
+> **Upgrade note.** Older releases skipped the topology dispatch entirely when a
+> pod asked for exactly one GPU, so `link-strict` and `numa-strict` were silently
+> ignored there and such pods scheduled anywhere. They are now enforced as above.
+> If the device plugin does not have the `TopologyAwareGPUAllocation` gate
+> enabled, no node publishes topology and every 1-GPU `link-strict` pod becomes
+> unschedulable. Enable the gate (below), or use plain `link` if you want
+> best-effort with fallback.
 
 ### Numa topology
 
@@ -33,13 +71,13 @@ spec:
       limits:
         cpu: 2
         memory: 4Gi
-        nvidia.com/vgpu-number: 2 # Valid when applying for more than one card
+        nvidia.com/vgpu-number: 2
         nvidia.com/vgpu-memory: 10000
 ```
 
 ### Link topology
 
-To use the link topology mode, it is necessary to enable the GPUTopology function gating on the device plugin and scheduler plugin.
+To use the link topology mode, it is necessary to enable the TopologyAwareGPUAllocation function gating on the device plugin and scheduler plugin.
 
 ```bash
 $ kubectl edit ds -n kube-system vgpu-manager-device-plugin
@@ -47,14 +85,14 @@ $ kubectl edit ds -n kube-system vgpu-manager-device-plugin
   - name: device-plugin
     command:
     - deviceplugin
-    - --feature-gates=GPUTopology=true # Ensure that the feature gate is turned on
+    - --feature-gates=TopologyAwareGPUAllocation=true # Ensure that the feature gate is turned on
 
 $ kubectl edit deployment -n kube-system vgpu-manager-scheduler
   containers
   - name: scheduler-extender
     command:
     - scheduler
-    - --feature-gates=GPUTopology=true # Ensure that the feature gate is turned on
+    - --feature-gates=TopologyAwareGPUAllocation=true # Ensure that the feature gate is turned on
 ```
 
 After restarting the device plugin, check the node comments to determine if the GPU topology function has been successfully started
@@ -84,6 +122,34 @@ spec:
       limits:
         cpu: 2
         memory: 4Gi
-        nvidia.com/vgpu-number: 2 # Valid when applying for more than one card
+        nvidia.com/vgpu-number: 2
         nvidia.com/vgpu-memory: 10000
 ```
+
+### Cross-pod topology (multi-pod gang training)
+
+By default `link` topology only optimizes GPU connectivity **within a single pod**.
+For distributed training where a gang (PodGroup) is split into multiple pods, add the
+annotation `nvidia.com/cross-pod-topology: "true"` to keep the whole gang's GPUs in
+the **same NVLink connected component on a node**, and — across nodes — aligned to the
+**same component ordinal (rail)**. It takes effect only together with
+`device-topology-mode: link` and a recognized gang (scheduler-plugins / Volcano /
+Koordinator / native PodGroup); non-gang pods are unaffected.
+
+```yaml
+metadata:
+  annotations:
+    nvidia.com/device-topology-mode: link      # required: link topology
+    nvidia.com/cross-pod-topology: "true"      # opt into cross-pod / cross-node alignment
+  labels:
+    scheduling.x-k8s.io/pod-group: my-training-gang   # gang identity (any supported dialect)
+```
+
+Notes:
+- Strictness follows the topology mode: use `link-strict` to reject a node when the
+  gang cannot stay connected, instead of degrading.
+- Combine with `nvidia.com/device-scheduler-policy: spread` to also keep gang siblings
+  on **different physical cards** within the component (indirect anti-co-location).
+- Cross-node sub-domain (rail) alignment assumes homogeneous GPU↔rail layout across
+  nodes; for whole-node (all cards) requests it is a no-op. For cross-node node-level
+  topology (rack/rail) use Kueue TAS — see [kueue_tas_integration.md](./kueue_tas_integration.md).
