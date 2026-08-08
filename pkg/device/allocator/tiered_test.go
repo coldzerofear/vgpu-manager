@@ -501,13 +501,48 @@ func Test_SingleCard_EntersTopologyPath(t *testing.T) {
 	}
 }
 
-// Test_SingleCard_StrictNotRejected: link-strict on a PCIe-only node rejects
-// MULTI-card requests (no NVLink), but a single card is trivially connected and
-// must still be placed.
-func Test_SingleCard_StrictNotRejected(t *testing.T) {
-	n, _ := pcieNode(t)
-	got := allocUUIDs(t, n, linkPod(1, true, ""))
-	assert.Len(t, got, 1, "one card is trivially NVLink-connected")
+// Test_SingleCard_StrictNeedsRealNVLink pins the meaning of link-strict for a
+// ONE-GPU request.
+//
+// The tempting reading — "a single card has no pairs, so it is trivially
+// connected, so strict always passes" — is wrong, and this test used to assert
+// it. A set of one is vacuously connected at EVERY tier, so taking that at face
+// value makes the tier walk return TierNVLink on any node whatsoever, including
+// one whose links are all PCIe. strict then accepts, and "link-strict" silently
+// means nothing at all for 1-GPU pods.
+//
+// The reading that holds: the card must sit on an NVLink fabric. Its NVLink
+// neighbours need NOT be free — a one-GPU pod cannot use them either way — which
+// is why the check is HasLinkPeerAtTier (node-wide) rather than connectivity
+// within the currently-allocatable set.
+func Test_SingleCard_StrictNeedsRealNVLink(t *testing.T) {
+	t.Run("PCIe-only node rejects", func(t *testing.T) {
+		n, _ := pcieNode(t)
+		_, rsn, err := NewAllocator(n, nil).Allocate(BuildAllocationRequest(linkPod(1, true, "")))
+		require.NoError(t, err)
+		require.NotNil(t, rsn, "no card here has an NVLink peer, so strict must refuse")
+	})
+
+	t.Run("NVLink node accepts", func(t *testing.T) {
+		n, _ := nvswitchNode(t)
+		assert.Len(t, allocUUIDs(t, n, linkPod(1, true, "")), 1)
+	})
+
+	t.Run("NVLink node accepts even when the card's peers are all busy", func(t *testing.T) {
+		// Consume every card but GPU-0, so the only candidate is a singleton in
+		// the induced graph while still being NVLink-attached on the node.
+		n, _ := nvswitchNode(t, 1, 2, 3, 4, 5, 6, 7)
+		got := allocUUIDs(t, n, linkPod(1, true, ""))
+		assert.Equal(t, []string{"GPU-0"}, got,
+			"peer availability is irrelevant to a one-GPU request")
+	})
+
+	t.Run("bridge node: only the bridged cards qualify", func(t *testing.T) {
+		// bridgeNode links 0-1, 2-3, 4-5, 6-7 over NVLink and nothing else, so
+		// every card has an NVLink peer and strict is satisfiable.
+		n, _ := bridgeNode(t)
+		assert.Len(t, allocUUIDs(t, n, linkPod(1, true, "")), 1)
+	})
 }
 
 // Test_SingleCard_RailAlignment is the gap this step exists to close: on a
