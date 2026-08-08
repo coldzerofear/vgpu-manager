@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
@@ -58,8 +59,10 @@ type vNumberDevicePlugin struct {
 var _ base.DevicePlugin = &vNumberDevicePlugin{}
 
 // NewVNumberDevicePlugin returns an initialized vNumberDevicePlugin.
-func NewVNumberDevicePlugin(resourceName, socket string, manager *manager.DeviceManager,
-	kubeClient *kubernetes.Clientset, kubeCache cache.Cache, cdiHandler cdi.Handler) (base.DevicePlugin, error) {
+func NewVNumberDevicePlugin(
+	resourceName, socket string, manager *manager.DeviceManager,
+	kubeClient *kubernetes.Clientset, kubeCache cache.Cache, cdiHandler cdi.Handler,
+) (base.DevicePlugin, error) {
 	podInformer, err := kubeCache.GetInformer(context.TODO(), &corev1.Pod{}, cache.BlockUntilSynced(false))
 	if err != nil {
 		return nil, fmt.Errorf("get pod informer failed: %v", err)
@@ -114,7 +117,7 @@ func (m *vNumberDevicePlugin) Start() error {
 	if err == nil {
 		m.baseServer.GetDeviceManager().AddRegistryFunc(m.Name(), m.registryDevices)
 		m.baseServer.GetDeviceManager().AddCleanupRegistryFunc(m.Name(), m.cleanupRegistry)
-		if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.ClientMode) {
+		if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.DevicePluginClientMode) {
 			if err = m.server.Start(); err != nil {
 				klog.ErrorS(err, "DeviceRegistryServer failed to start")
 			}
@@ -128,7 +131,7 @@ func (m *vNumberDevicePlugin) Stop() error {
 	err := m.baseServer.Stop(m.Name())
 	m.baseServer.GetDeviceManager().RemoveRegistryFunc(m.Name())
 	m.baseServer.GetDeviceManager().RemoveCleanupRegistryFunc(m.Name())
-	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.ClientMode) {
+	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.DevicePluginClientMode) {
 		m.server.Stop()
 	}
 	return err
@@ -176,7 +179,7 @@ func (m *vNumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGat
 		return nil, fmt.Errorf("encoding node device information failed: %v", err)
 	}
 	var registryGPUTopology *string
-	if featureGate.Enabled(util.GPUTopology) {
+	if featureGate.Enabled(util.TopologyAwareGPUAllocation) {
 		gpuTopology, err := m.getEncodeNodeTopologyInfo()
 		if err != nil {
 			return nil, err
@@ -235,16 +238,17 @@ func (m *vNumberDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *plugi
 func (m *vNumberDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	klog.V(4).InfoS("ListAndWatch", "pluginName", m.Name(), "server", s)
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-		klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+		klog.Errorf("DevicePlugin %q ListAndWatch send devices error: %v", m.Name(), err)
+		return err
 	}
 	stopCh := m.baseServer.GetStopCh()
 	for {
 		select {
 		case d := <-m.baseServer.GetDeviceCh():
 			if d.GPU != nil && !d.GPU.MigEnabled {
-				klog.Infof("'%s' device marked unhealthy: %s", m.baseServer.GetResourceName(), d.GPU.UUID)
+				klog.Infof("%q device marked unhealthy: %s", m.baseServer.GetResourceName(), d.GPU.UUID)
 				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+					klog.Errorf("DevicePlugin %q ListAndWatch send devices error: %v", m.Name(), err)
 				}
 			}
 		case <-stopCh:
@@ -296,9 +300,7 @@ func buildDefaultAllocationResponses(
 				i, req.GetAllocationSize(), len(deviceIDs),
 			)
 		}
-		resps[i] = &pluginapi.ContainerPreferredAllocationResponse{
-			DeviceIDs: deviceIDs,
-		}
+		resps[i] = &pluginapi.ContainerPreferredAllocationResponse{DeviceIDs: deviceIDs}
 	}
 	return resps, nil
 }
@@ -319,14 +321,13 @@ func buildAvailableDeviceMap(availableDeviceIDs []string) map[string][]string {
 }
 
 func (m *vNumberDevicePlugin) buildPreAllocContext(
-	ctx context.Context,
-	requests []*pluginapi.ContainerPreferredAllocationRequest,
+	ctx context.Context, requests []*pluginapi.ContainerPreferredAllocationRequest,
 ) (*preAllocContext, error) {
 	currentPod, err := m.getCurrentPod(ctx)
 	if err != nil {
 		return nil, err
 	}
-
+	m.podCache.Mutation(currentPod)
 	claims := make([]*device.ContainerDeviceClaim, len(requests))
 	availableMap := make([]map[string][]string, len(requests))
 
@@ -395,8 +396,7 @@ func allocateFromClaim(
 }
 
 func buildPreferredAllocationResponsesFromClaims(
-	requests []*pluginapi.ContainerPreferredAllocationRequest,
-	preCtx *preAllocContext,
+	requests []*pluginapi.ContainerPreferredAllocationRequest, preCtx *preAllocContext,
 ) ([]*pluginapi.ContainerPreferredAllocationResponse, error) {
 	resps := make([]*pluginapi.ContainerPreferredAllocationResponse, len(requests))
 	allocated := sets.New[string]()
@@ -414,9 +414,7 @@ func buildPreferredAllocationResponsesFromClaims(
 			)
 		}
 
-		resps[i] = &pluginapi.ContainerPreferredAllocationResponse{
-			DeviceIDs: deviceIDs,
-		}
+		resps[i] = &pluginapi.ContainerPreferredAllocationResponse{DeviceIDs: deviceIDs}
 	}
 
 	return resps, nil
@@ -437,21 +435,15 @@ func (m *vNumberDevicePlugin) GetPreferredAllocation(ctx context.Context, req *p
 	preCtx, err := m.buildPreAllocContext(ctx, requests)
 	if err != nil {
 		klog.V(3).ErrorS(err, "failed to build pre-allocation context, fallback to default allocation")
-		return &pluginapi.PreferredAllocationResponse{
-			ContainerResponses: defaultResps,
-		}, nil
+		return &pluginapi.PreferredAllocationResponse{ContainerResponses: defaultResps}, nil
 	}
 	claimResps, err := buildPreferredAllocationResponsesFromClaims(requests, preCtx)
 	if err != nil {
 		klog.V(3).ErrorS(err, "failed to build claim-based preferred allocation, fallback to default allocation",
 			"pod", klog.KObj(preCtx.pod))
-		return &pluginapi.PreferredAllocationResponse{
-			ContainerResponses: defaultResps,
-		}, nil
+		return &pluginapi.PreferredAllocationResponse{ContainerResponses: defaultResps}, nil
 	}
-	return &pluginapi.PreferredAllocationResponse{
-		ContainerResponses: claimResps,
-	}, nil
+	return &pluginapi.PreferredAllocationResponse{ContainerResponses: claimResps}, nil
 }
 
 const (
@@ -465,6 +457,10 @@ const (
 	VGPULockDirName     = "vgpu_lock"
 	ContVGPULockPath    = "/tmp/." + VGPULockDirName
 	ContVMemoryNodePath = "/tmp/." + util.VMemNode
+	// ContSMNodePath is a dedicated read-write directory mounted in by the
+	// plugin, deliberately NOT the container's own /tmp: that may be shadowed
+	// by another hostPath mount, be read-only, or be swept by the workload.
+	ContSMNodePath = "/tmp/." + util.SMNode
 
 	LdPreLoadFileName       = "ld.so.preload"
 	ContPreLoadFilePath     = "/etc/" + LdPreLoadFileName
@@ -517,7 +513,7 @@ func apiDeviceSpecs(devManager *manager.DeviceManager, devices []manager.Device)
 	}
 
 	var specs []*pluginapi.DeviceSpec
-	devRoot := devManager.GetNodeConfig().GetHostDriverRoot().GetDevRoot()
+	devRoot := devManager.GetNodeConfig().GetHostDevRoot().GetDevRoot()
 	for devPath, optional := range pathOptional {
 		if optional && util.PathIsNotExist(devPath) {
 			continue
@@ -603,9 +599,8 @@ func UpdateResponseForNodeConfig(
 // (e.g. "gpu") and deviceIDs are the device UUIDs to expose. It is a no-op when
 // no CDI strategy is enabled.
 func UpdateResponseForCDI(
-	response *pluginapi.ContainerAllocateResponse,
-	strategies util.DeviceListStrategies,
-	handler cdi.Handler, deviceIDs ...string,
+	imexChannels imex.Channels, response *pluginapi.ContainerAllocateResponse,
+	strategies util.DeviceListStrategies, handler cdi.Handler, deviceIDs ...string,
 ) error {
 	if !strategies.AnyCDIEnabled() {
 		return nil
@@ -614,8 +609,20 @@ func UpdateResponseForCDI(
 	for i, id := range deviceIDs {
 		qualifiedNames[i] = handler.QualifiedName(util.CDIClass, id)
 	}
+
+	for _, channel := range imexChannels {
+		qualifiedNames = append(qualifiedNames, handler.QualifiedName("imex-channel", channel.ID))
+	}
+
+	qualifiedNames = append(qualifiedNames, handler.AdditionalDevices()...)
+
+	if len(qualifiedNames) == 0 {
+		return nil
+	}
+
 	if strategies.Includes(util.DeviceListStrategyCDIAnnotations) {
-		annotations, err := handler.GetDeviceAnnotations(uuid.New().String(), qualifiedNames)
+		responseID := uuid.New().String()
+		annotations, err := handler.GetDeviceAnnotations(responseID, qualifiedNames)
 		if err != nil {
 			return err
 		}
@@ -625,8 +632,11 @@ func UpdateResponseForCDI(
 		maps.Copy(response.Annotations, annotations)
 	}
 	if strategies.Includes(util.DeviceListStrategyCDICRI) {
-		for _, name := range qualifiedNames {
-			response.CdiDevices = append(response.CdiDevices, &pluginapi.CDIDevice{Name: name})
+		for _, device := range qualifiedNames {
+			cdiDevice := pluginapi.CDIDevice{
+				Name: device,
+			}
+			response.CdiDevices = append(response.CdiDevices, &cdiDevice)
 		}
 	}
 	return nil
@@ -696,8 +706,9 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 	deviceMap := deviceManager.GetGPUDeviceMap()
 	strategies := deviceManager.GetNodeConfig().GetDeviceListStrategy()
 	memoryRatio := deviceManager.GetNodeConfig().GetDeviceMemoryScaling()
-	enabledSMWatcher := deviceManager.GetFeatureGate().Enabled(util.SMWatcher)
-	enabledClientMode := deviceManager.GetFeatureGate().Enabled(util.ClientMode)
+	enabledSMWatcher := deviceManager.GetFeatureGate().Enabled(util.SharedSMUtilizationWatcher)
+	enabledClientMode := deviceManager.GetFeatureGate().Enabled(util.DevicePluginClientMode)
+	enabledMemoryNode := deviceManager.GetFeatureGate().Enabled(util.VirtualMemoryTracking)
 
 	for i, containerRequest := range req.ContainerRequests {
 		contClaim, err = device.GetCurrentPreAllocateContainerDevice(currentPod)
@@ -736,8 +747,9 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		response.Envs[util.CudaCoreLimitEnv] = ""
 		response.Envs[util.CudaSoftCoreLimitEnv] = ""
 		response.Envs[util.ManagerClientRegisterUuid] = ""
-		mode := vgpu.GetCompatibilityMode(deviceManager)
-		response.Envs[util.ManagerCompatibilityMode] = fmt.Sprintf("%v", mode)
+		compMode := vgpu.GetCompatibilityMode(deviceManager)
+		response.Envs[util.ManagerCompatibilityMode] = fmt.Sprintf("%v", compMode)
+		response.Envs[util.CudaSMSharedBucket] = "true"
 		sort.Slice(contClaim.DeviceClaims, func(i, j int) bool {
 			return contClaim.DeviceClaims[i].Id < contClaim.DeviceClaims[j].Id
 		})
@@ -773,7 +785,7 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 			}
 		}
 		response.Envs[util.ManagerVisibleDevices] = strings.Join(deviceUuids, ",")
-		if err = UpdateResponseForCDI(response, strategies, m.cdiHandler, deviceIds...); err != nil {
+		if err = UpdateResponseForCDI(deviceManager.GetImexChannels(), response, strategies, m.cdiHandler, deviceIds...); err != nil {
 			klog.V(3).ErrorS(err, "failed to update allocate response for CDI",
 				"pod", klog.KObj(currentPod), "container", contClaim.Name, "reqIndex", i)
 			return resp, err
@@ -803,6 +815,11 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 				ReadOnly:      true,
 			})
 		}
+		if enabledMemoryNode {
+			response.Envs[util.VMemoryNodeEnabled] = "true"
+		} else {
+			response.Envs[util.VMemoryNodeEnabled] = "false"
+		}
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>
 		// <host_manager_dir>/<pod-uid>_<cont-name>
 		contDir, hostDir := getContainerManagerPaths(currentPod.GetUID(), contClaim.Name)
@@ -823,12 +840,18 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		contVMemoryNodePath := filepath.Join(contDir, util.VMemNode)
 		_ = util.EnsureDir(contVMemoryNodePath, 0o777)
 
+		// /etc/vgpu-manager/<pod-uid>_<cont-name>/sm_node
+		contSMNodePath := filepath.Join(contDir, util.SMNode)
+		_ = util.EnsureDir(contSMNodePath, 0o777)
+
 		// <host_manager_dir>/<pod-uid>_<cont-name>/config
 		hostVGPUConfigPath := filepath.Join(hostDir, util.Config)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/vgpu_lock
 		hostVGPULockPath := filepath.Join(hostDir, VGPULockDirName)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/vmem_node
 		hostVMemNodePath := filepath.Join(hostDir, util.VMemNode)
+		// <host_manager_dir>/<pod-uid>_<cont-name>/sm_node
+		hostSMNodePath := filepath.Join(hostDir, util.SMNode)
 
 		response.Mounts = append(response.Mounts, &pluginapi.Mount{
 			// mount libvgpu-control.so file
@@ -846,6 +869,10 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		}, &pluginapi.Mount{ // mount vmem_node dir
 			ContainerPath: ContVMemoryNodePath,
 			HostPath:      hostVMemNodePath,
+			ReadOnly:      false,
+		}, &pluginapi.Mount{ // mount sm_node dir
+			ContainerPath: ContSMNodePath,
+			HostPath:      hostSMNodePath,
 			ReadOnly:      false,
 		})
 
@@ -962,7 +989,12 @@ func (m *vNumberDevicePlugin) GetPodByDeviceIDs(ctx context.Context, devicesIDs 
 		return m.GetPodByCheckpoint(ctx, devicesIDs)
 	}
 	if !exist {
-		return nil, "", apierrors.NewNotFound(corev1.Resource("pods"), podKey.String())
+		pod, err := m.kubeClient.CoreV1().Pods(podInfo.PodNamespace).Get(ctx, podInfo.PodName, metav1.GetOptions{})
+		if err != nil {
+			return nil, "", err
+		}
+		m.podCache.Mutation(pod)
+		return pod, podInfo.ContainerName, nil
 	}
 	return obj.(*corev1.Pod), podInfo.ContainerName, nil
 }
@@ -1080,7 +1112,7 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 		return resp, fmt.Errorf("write vGPU config failed: %w", err)
 	}
 
-	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.Reschedule) {
+	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.AllocationFailureReschedule) {
 		// Extra check the size of the vGPU configuration file.
 		// When a version upgrade causes a change in the configuration structure,
 		// the controller can reschedule these pods that cannot be started
@@ -1093,9 +1125,18 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 
 	// Clean up old cache files before each startup
 	pidsConfigPath := filepath.Join(configDirPath, registry.PidsConfig)
-	vmemNodeConfigPath := filepath.Join(configDirPath, util.VMemNode, util.VMemNodeFile)
+	// vmem_node is a SIBLING of config/, not a child: Allocate mounts
+	// filepath.Join(contDir, util.VMemNode) and the metrics lister reads it back
+	// from the same place. Joining configDirPath here would name a path that is
+	// never created, making the RemoveAll a silent no-op.
+	vmemNodeConfigPath := filepath.Join(contDir, util.VMemNode, util.VMemNodeFile)
+	// Same sibling-of-config layout as vmem_node. Deleting the file (rather than
+	// zeroing it) is what guarantees the library attaches to a fresh zero region
+	// and re-initialises, instead of inheriting the previous incarnation's state.
+	smNodeConfigPath := filepath.Join(contDir, util.SMNode, util.SMNodeFile)
 	_ = os.RemoveAll(pidsConfigPath)
 	_ = os.RemoveAll(vmemNodeConfigPath)
+	_ = os.RemoveAll(smNodeConfigPath)
 
 	return resp, nil
 }

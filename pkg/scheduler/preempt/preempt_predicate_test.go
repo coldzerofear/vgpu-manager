@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/google/uuid"
@@ -16,11 +18,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
+	kubelettypes "k8s.io/kubernetes/pkg/kubelet/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -348,7 +352,7 @@ func Test_isProtectedFromPreemption(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			groupName, _ := util.PodHasGangName(tt.pod)
+			groupName, _ := util.PodGangKey(tt.pod)
 			assert.Equal(t, tt.want, isProtectedFromPreemption(tt.pod, groupName))
 		})
 	}
@@ -371,7 +375,7 @@ func Test_sortVictimsByPreference(t *testing.T) {
 		low := mkPod("low", 10, time.Minute)
 		mid := mkPod("mid", 50, time.Minute)
 		pods := []*corev1.Pod{high, low, mid}
-		sortVictimsByPreference(pods)
+		sortVictimsByPreference(pods, nil)
 		assert.Equal(t, "low", pods[0].Name, "lowest priority should be first")
 		assert.Equal(t, "mid", pods[1].Name)
 		assert.Equal(t, "high", pods[2].Name)
@@ -381,14 +385,14 @@ func Test_sortVictimsByPreference(t *testing.T) {
 		older := mkPod("older", 10, time.Hour)
 		newer := mkPod("newer", 10, time.Second)
 		pods := []*corev1.Pod{older, newer}
-		sortVictimsByPreference(pods)
+		sortVictimsByPreference(pods, nil)
 		assert.Equal(t, "newer", pods[0].Name, "newer pod (less invested work) preferred for eviction")
 		assert.Equal(t, "older", pods[1].Name)
 	})
 
 	t.Run("empty slice does not panic", func(t *testing.T) {
 		var pods []*corev1.Pod
-		assert.NotPanics(t, func() { sortVictimsByPreference(pods) })
+		assert.NotPanics(t, func() { sortVictimsByPreference(pods, nil) })
 	})
 
 	// Gang membership bias: non-gang pods sort before gang pods so the
@@ -404,7 +408,7 @@ func Test_sortVictimsByPreference(t *testing.T) {
 		}}
 		plain := mkPod("plain", 10, time.Minute)
 		pods := []*corev1.Pod{gang, plain}
-		sortVictimsByPreference(pods)
+		sortVictimsByPreference(pods, nil)
 		assert.Equal(t, "plain", pods[0].Name, "non-gang pod must be selected first")
 		assert.Equal(t, "gang", pods[1].Name)
 	})
@@ -419,7 +423,7 @@ func Test_sortVictimsByPreference(t *testing.T) {
 		}}
 		plain := mkPod("plain-hi-pri-old", 100, time.Hour) // highest priority, oldest
 		pods := []*corev1.Pod{gang, plain}
-		sortVictimsByPreference(pods)
+		sortVictimsByPreference(pods, nil)
 		assert.Equal(t, "plain-hi-pri-old", pods[0].Name,
 			"gang bias overrides priority/creation tiebreakers")
 	})
@@ -436,9 +440,87 @@ func Test_sortVictimsByPreference(t *testing.T) {
 			Kind: "PodGroup", Name: "g", APIVersion: "scheduling.x-k8s.io/v1alpha1",
 		}}
 		pods := []*corev1.Pod{gangA, gangB}
-		sortVictimsByPreference(pods)
+		sortVictimsByPreference(pods, nil)
 		assert.Equal(t, "gang-pri-5", pods[0].Name, "lower-priority gang member preferred for eviction")
 	})
+}
+
+// Test_VictimEligibility_Preemptable pins the ELIGIBILITY predicate that
+// findAdditionalVictims applies, kubelettypes.Preemptable.
+//
+// It exists because that predicate is not equivalent to the plain
+// `PodPriority(candidate) < PodPriority(preemptor)` comparison it reads like.
+// corev1helpers.PodPriority treats a nil Spec.Priority as 0, so the plain
+// comparison makes an unprioritised pod evictable by anyone; Preemptable
+// returns FALSE outright when either side's Priority is nil. That is the only
+// case where the two disagree in practice, and it is not otherwise covered —
+// every fixture in this file sets Priority explicitly via withPriority.
+//
+// The direction is deliberate: refusing to evict a pod whose priority the
+// cluster never established is the conservative reading, and preemption is a
+// place where "do less" is the safe default. Spec.Priority is nil only when the
+// Priority admission plugin never processed the pod (very old clusters, direct
+// etcd writes, hand-built fixtures).
+func Test_VictimEligibility_Preemptable(t *testing.T) {
+	withNilPriority := func(p *corev1.Pod) *corev1.Pod {
+		p.Spec.Priority = nil
+		return p
+	}
+
+	cases := []struct {
+		name      string
+		preemptor *corev1.Pod
+		candidate *corev1.Pod
+		want      bool
+	}{
+		{
+			name:      "strictly lower priority is evictable",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(100)),
+			candidate: newVGPUPod("c", "ns", 1, withPriority(10)),
+			want:      true,
+		},
+		{
+			name:      "equal priority is not evictable",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(10)),
+			candidate: newVGPUPod("c", "ns", 1, withPriority(10)),
+			want:      false,
+		},
+		{
+			name:      "higher priority is not evictable",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(10)),
+			candidate: newVGPUPod("c", "ns", 1, withPriority(100)),
+			want:      false,
+		},
+		{
+			// THE case that differs from the old comparison, which saw the
+			// candidate as priority 0 and happily evicted it.
+			name:      "candidate with no priority is NOT evictable",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(100)),
+			candidate: withNilPriority(newVGPUPod("c", "ns", 1)),
+			want:      false,
+		},
+		{
+			// ...unless the preemptor is itself critical, in which case the
+			// critical carve-out fires. Note this matches the OLD behaviour, so
+			// the carve-out costs nothing: at >= SystemCriticalPriority the
+			// plain comparison would have allowed it too.
+			name:      "critical preemptor may evict an unprioritised pod",
+			preemptor: newVGPUPod("p", "ns", 1, withPriority(2_000_000_000)),
+			candidate: withNilPriority(newVGPUPod("c", "ns", 1)),
+			want:      true,
+		},
+		{
+			name:      "preemptor with no priority evicts nothing",
+			preemptor: withNilPriority(newVGPUPod("p", "ns", 1)),
+			candidate: newVGPUPod("c", "ns", 1, withPriority(1)),
+			want:      false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, kubelettypes.Preemptable(tc.preemptor, tc.candidate))
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -830,4 +912,72 @@ func Test_Preempt_NumPDBViolations_OverEstimateOnSwap(t *testing.T) {
 		assert.Equal(t, int64(1), res.NodeNameToMetaVictims[node.Name].NumPDBViolations,
 			"swap case: added victim conservatively treated as a violator")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Topology-directed victim ordering
+// ---------------------------------------------------------------------------
+
+// islandNodeInfo builds an 8-GPU node as two 4-card NVLink islands so victim
+// ordering can be checked against real component membership.
+func islandNodeInfo(t *testing.T) *device.NodeInfo {
+	t.Helper()
+	devs := make([]*device.Device, 8)
+	for i := 0; i < 8; i++ {
+		devs[i] = device.NewFakeDeviceWithUUID(fmt.Sprintf("GPU-%d", i), i, 0, 1, 0, util.HundredCore, 0, 12288, -1)
+	}
+	var fl []device.FakeLink
+	for _, island := range [][]int{{0, 1, 2, 3}, {4, 5, 6, 7}} {
+		for i := 0; i < len(island); i++ {
+			for j := i + 1; j < len(island); j++ {
+				fl = append(fl, device.FakeLink{A: island[i], B: island[j], Type: links.SingleNVLINKLink})
+			}
+		}
+	}
+	return device.NewFakeNodeInfoWithLinks(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "island-node"}}, devs, fl...)
+}
+
+func Test_sortVictimsByPreference_TargetComponentFirst(t *testing.T) {
+	// A gang pod INSIDE the target component must be evicted before a
+	// standalone pod outside it: only the former frees resources that can
+	// actually make the placement work, and refineForNode never backtracks.
+	inside := newVGPUPod("inside", "ns", 1, withPriority(10), withNodeName("island-node"), withOwner("PodGroup"))
+	allocatePodOn(inside, "island-node", 4, "GPU-4")
+	outside := newVGPUPod("outside", "ns", 1, withPriority(10), withNodeName("island-node"))
+	allocatePodOn(outside, "island-node", 0, "GPU-0")
+
+	pods := []*corev1.Pod{outside, inside}
+	sortVictimsByPreference(pods, sets.New("GPU-4", "GPU-5", "GPU-6", "GPU-7"))
+	assert.Equal(t, "inside", pods[0].Name, "victim inside the target component sorts first")
+
+	// With no target the historical gang-first ordering must be preserved.
+	pods = []*corev1.Pod{inside, outside}
+	sortVictimsByPreference(pods, nil)
+	assert.Equal(t, "outside", pods[0].Name, "without a target the non-gang pod still sorts first")
+}
+
+func Test_anchorComponentUUIDs_OnlyWhenAnchored(t *testing.T) {
+	n := islandNodeInfo(t)
+	mk := func(number int64, crossPod bool, gang string) *allocator.AllocationRequest {
+		pod := newVGPUPod("p", "ns", number, withPriority(100))
+		pod.Annotations = map[string]string{
+			util.DeviceTopologyModeAnnotation: string(util.LinkTopology),
+		}
+		if crossPod {
+			pod.Annotations[util.CrossPodTopologyAnnotation] = "true"
+		}
+		if gang != "" {
+			pod.Labels = map[string]string{util.CoschedulingPodGroupLabel: gang}
+		}
+		return allocator.BuildAllocationRequest(pod)
+	}
+
+	assert.Nil(t, anchorComponentUUIDs(mk(4, false, "gangX"), n), "no cross-pod opt-in → no target")
+	assert.Nil(t, anchorComponentUUIDs(mk(4, true, ""), n), "no gang → no target")
+	assert.Nil(t, anchorComponentUUIDs(mk(1, true, "gangX"), n), "single card pins no component")
+
+	plain := device.NewFakeNodeInfo(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "plain"}}, false,
+		device.NewFakeDeviceWithUUID("GPU-0", 0, 0, 1, 0, util.HundredCore, 0, 12288, -1))
+	assert.Nil(t, anchorComponentUUIDs(mk(4, true, "gangX"), plain), "no link topology → no target")
 }

@@ -96,26 +96,21 @@ kubeletPlugin:
   # Conditionally mask /proc/driver/nvidia/params to prevent the plugin from recreating
   # missing GPU device nodes (needed under nvkind). Set to "true" to enable.
   maskNvidiaDriverParams: ""
-  # Prometheus metrics HTTP server for the kubelet-plugin (disabled by default).
-  metrics:
-    enabled: false
-    # The TCP address the metrics HTTP server listens on (HTTP_ENDPOINT). The port is reused for
-    # the metrics Service and the named container port.
-    httpEndpoint: ":8080"
-    # The HTTP path where Prometheus metrics are exposed (METRICS_PATH).
-    metricsPath: "/metrics"
-    # Prometheus Operator ServiceMonitor. Only created when metrics.enabled is true and the
-    # monitoring.coreos.com/v1 ServiceMonitor CRD is present in the cluster.
-    serviceMonitor:
-      enabled: true
-      # Scrape interval and timeout. Empty uses the Prometheus default.
-      interval: ""
-      scrapeTimeout: ""
-      # Extra labels added to the ServiceMonitor (e.g. to match the Prometheus release selector).
-      additionalLabels: {}
-      # Prometheus relabeling rules applied before / after scraping.
-      relabelings: []
-      metricRelabelings: []
+  # Prometheus Operator ServiceMonitor covering both scrape targets below: the
+  # kubelet-plugin's own metrics endpoint (containers.plugin.commands.metricsPort)
+  # and the device-monitor sidecar (containers.monitor). Created only when this is
+  # true, at least one of those two targets is enabled, and the
+  # monitoring.coreos.com/v1 ServiceMonitor CRD is present in the cluster.
+  serviceMonitor:
+    enabled: true
+    # Scrape interval and timeout. Empty uses the Prometheus default.
+    interval: ""
+    scrapeTimeout: ""
+    # Extra labels added to the ServiceMonitor (e.g. to match the Prometheus release selector).
+    additionalLabels: {}
+    # Prometheus relabeling rules applied before / after scraping.
+    relabelings: []
+    metricRelabelings: []
   containers:
     # init containers (driver prestart + host-side file install). Privileged is required.
     init:
@@ -136,17 +131,31 @@ kubeletPlugin:
       # is mutually exclusive with VGPUSupport (default on), DynamicMIG and NVMLDeviceHealthCheck,
       # so disable those when turning it on.
       featureGates:
+        VGPUSupport: true
+        NVMLDeviceHealthCheck: true
         SharedSMUtilizationWatcher: true
         DevicePluginClientMode: false
-        # PassthroughSupport: false
-        # NRISupport: true
+        NRISupport: false
+        DynamicMIG: false
+        DeviceMetadata: false
+        TimeSlicingSettings: false
+        PassthroughSupport: false
+        FabricManagerPartitioning: false
+        DRAListTypeAttributes: false
       # Additional environment variables appended to the kubelet-plugin container.
-      env: []
+      env:
+        - name: ADDITIONAL_XIDS_TO_IGNORE
+          value: ""
+        - name: KUBE_FEATURE_WatchListClient
+          value: "true"
       commands:
-        logLevel: 5
         kubeApiQps: 20.0
         kubeApiBurst: 30
         nriPluginIdx: "00"
+        coresRatio: 100
+        memoryRatio: 100
+        metricsPort: 8080
+        logLevel: 5
       # Container security context. Privileged mode is required to manage GPU device nodes.
       securityContext:
         privileged: true
@@ -159,6 +168,44 @@ kubeletPlugin:
 #        limits:
 #          cpu: 2000m
 #          memory: 2Gi
+    # Per-container GPU metrics exporter for the DRA path (device-monitor).
+    # A different exporter from plugin.commands.metricsPort above: that one exposes
+    # the kubelet-plugin's own operational metrics, while this one exports the
+    # physical/vGPU/per-container GPU metrics, sourced from the ResourceSlices this
+    # driver publishes and the ResourceClaims it consumes. It runs as a sidecar here
+    # because the RBAC for both already belongs to this ServiceAccount.
+    monitor:
+      enabled: false
+      # device-monitor's own feature gates -- a DIFFERENT registry from
+      # kubeletPlugin.containers.plugin.featureGates. Only these two exist;
+      # passing a kubelet-plugin gate here aborts startup.
+      featureGates:
+        # Read per-process SM utilization published by the in-container watcher.
+        SharedSMUtilizationWatcher: true
+        # Account virtual (unified) memory. Not yet implemented on the DRA path.
+        VirtualMemoryTracking: false
+      env:
+        - name: KUBE_FEATURE_WatchListClient
+          value: "true"
+      commands:
+        # Port the exporter serves /metrics, /healthz and /readyz on.
+        serverBindPort: 3456
+        # Set > 0 to expose net/http/pprof on that port.
+        pprofBindPort: 0
+        kubeApiQps: 20
+        kubeApiBurst: 30
+        # Require authenticated+authorized scrapes (TokenReview / SubjectAccessReview).
+        # Enabling this also grants the ServiceAccount the rights to perform those reviews.
+        enableRBAC: false
+        # Minimum seconds between two scrapes actually hitting NVML.
+        minScrapeInterval: 1
+        logLevel: 4
+      securityContext:
+        privileged: true
+      resources: {}
+#        requests:
+#          cpu: 200m
+#          memory: 256Mi
 
 # DeviceClass objects published by the DRA driver. The driver advertises devices under the
 # `driverName` driver; each DeviceClass selects a device `type` via a CEL expression.
@@ -228,7 +275,9 @@ webhook:
     - cert-manager
 #    - istio-system
 #    - volcano-system
-  env: []
+  env:
+    - name: KUBE_FEATURE_WatchListClient
+      value: "true"
   commands:
     kubeApiQps: 20.0
     kubeApiBurst: 30

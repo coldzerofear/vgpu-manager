@@ -20,6 +20,7 @@ static int test_one(size_t bytes) {
 }
 
 int main(void) {
+  VGPU_REQUIRE_PRELOAD();
   CHECK_DRV_API(cuInit(0));
   CUdevice device;
   CHECK_DRV_API(cuDeviceGet(&device, TEST_DEVICE_ID));

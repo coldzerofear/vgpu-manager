@@ -123,6 +123,7 @@ func TestVGPURequestMountEdits_AreRequestScopedForMounts(t *testing.T) {
 	assert.Contains(t, hostPaths, filepath.Join(hostBase, util.Config))
 	assert.Contains(t, hostPaths, filepath.Join(hostBase, vgpu.VGPULockDirName))
 	assert.Contains(t, hostPaths, filepath.Join(hostBase, util.VMemNode))
+	assert.Contains(t, hostPaths, filepath.Join(hostBase, util.SMNode))
 }
 
 func TestVGPUClaimCommonEdits_DoNotIncludeAllocationStateMounts(t *testing.T) {
@@ -139,13 +140,17 @@ func TestVGPUClaimCommonEdits_DoNotIncludeAllocationStateMounts(t *testing.T) {
 		assert.NotEqual(t, filepath.Join(contRoot, util.Config), m.ContainerPath)
 		assert.NotEqual(t, vgpu.ContVGPULockPath, m.ContainerPath)
 		assert.NotEqual(t, vgpu.ContVMemoryNodePath, m.ContainerPath)
+		assert.NotEqual(t, vgpu.ContSMNodePath, m.ContainerPath)
 	}
 }
 
 func TestVGPUAllocationEdits_EnvReflectConsumedCapacity(t *testing.T) {
 	hostRoot := t.TempDir()
 	contRoot := t.TempDir()
-	manager := &VGPUManager{hostManagerPath: hostRoot, contManagerPath: contRoot}
+	manager := &VGPUManager{
+		hostManagerPath: hostRoot, contManagerPath: contRoot,
+		deviceCoresRatio: 100, deviceMemoryRatio: 100,
+	}
 
 	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: types.UID("claim-c")}}
 	result := &resourceapi.DeviceRequestAllocationResult{
@@ -154,13 +159,19 @@ func TestVGPUAllocationEdits_EnvReflectConsumedCapacity(t *testing.T) {
 			MemoryResourceName: *resource.NewQuantity(2*units.GiB, resource.BinarySI),
 		},
 	}
-	device := &AllocatableDevice{VGpu: &VGpuDeviceInfo{GpuDeviceInfo: &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{
-		Index: 1,
-		UUID:  "GPU-DEF",
-		Memory: nvml.Memory{
-			Total: uint64(8 * units.GiB),
+	device := &AllocatableDevice{
+		VGpu: &VGpuDeviceInfo{
+			GpuDeviceInfo: &GpuDeviceInfo{GpuInfo: &nvidia.GpuInfo{
+				Index: 1,
+				UUID:  "GPU-DEF",
+				Memory: nvml.Memory{
+					Total: uint64(8 * units.GiB),
+				},
+			}},
+			deviceCoresRatio:  100,
+			deviceMemoryRatio: 100,
 		},
-	}}}}
+	}
 
 	edits := manager.GetAllocationEnvContainerEdits(claim, result, device)
 	require.NotNil(t, edits)

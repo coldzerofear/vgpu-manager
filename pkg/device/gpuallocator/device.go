@@ -10,6 +10,7 @@ import (
 	"github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	"k8s.io/klog/v2"
 )
 
 // Device represents a GPU device as reported by NVML, including all of its
@@ -59,12 +60,13 @@ func newDevice(i int, d device.Device) (*Device, error) {
 		return nil, fmt.Errorf("failed to get device pci info: %v", ret)
 	}
 
+	info := links.PciInfo(pciInfo)
 	device := Device{
 		nvlibDevice: nvlibDevice{
 			Device:      d,
 			UUID:        uuid,
-			PCI:         struct{ BusID string }{BusID: links.PciInfo(pciInfo).BusID()},
-			CPUAffinity: links.PciInfo(pciInfo).CPUAffinity(),
+			PCI:         struct{ BusID string }{BusID: info.BusID()},
+			CPUAffinity: info.CPUAffinity(),
 		},
 		Index: i,
 		Links: make(map[int][]P2PLink),
@@ -134,6 +136,7 @@ func (o *deviceListBuilder) build() (DeviceList, error) {
 		devices = append(devices, device)
 	}
 
+	nvlinkEdges := 0
 	for i, d1 := range nvmlDevices {
 		for j, d2 := range nvmlDevices {
 			if i != j {
@@ -151,9 +154,22 @@ func (o *deviceListBuilder) build() (DeviceList, error) {
 				}
 				if nvlink != links.P2PLinkUnknown {
 					devices[i].Links[j] = append(devices[i].Links[j], P2PLink{devices[j], nvlink})
+					nvlinkEdges++
 				}
 			}
 		}
+	}
+	// A multi-GPU box that reports ZERO NVLink edges is either genuinely
+	// PCIe-only or a sign that NVLink discovery failed (e.g. an NVSwitch fabric
+	// we could not probe). The difference is invisible downstream — it just
+	// silently collapses every NVLink island to a single card, which makes
+	// strict-link reject the node and cross-pod affinity degenerate. Surface it.
+	if len(devices) > 1 && nvlinkEdges == 0 {
+		klog.Warningf("no NVLink detected between any of the %d GPUs on this node; "+
+			"NVLink-dependent scheduling (strict link topology, cross-pod affinity, "+
+			"NVLink node fitness) will treat every GPU as isolated. Expected on "+
+			"PCIe-only hardware; on NVLink/NVSwitch hardware this indicates failed "+
+			"topology discovery.", len(devices))
 	}
 
 	return devices, nil

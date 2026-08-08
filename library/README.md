@@ -14,6 +14,8 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 - [x] Record GPU virtual memory allocation and limits
 - [x] Support gpu utilization information provided by external observers to reduce driving overhead
 - [x] Support client registration mode to improve container security
+- [x] Automatic SM current limiting algorithm routing
+- [x] Multi process shared token bucket to prevent SM utilization fluctuation
 
 > Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 
@@ -44,7 +46,10 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 * MANAGER_VISIBLE_DEVICE_<index>: Single GPU UUID visible to the container
 * MANAGER_COMPATIBILITY_MODE: Environment compatibility mode
 * EXTERNAL_SM_WATCHER_ENABLED: Enable external SM util watcher
-* CUDA_SM_CONTROLLER: Specify the core limit algorithm (delta/aimd, default: delta)
+* VMEMORY_NODE_ENABLED: Enable virtual memory node tracing
+* CUDA_SM_CONTROLLER: Specify the core limit algorithm (delta/aimd/auto, default: delta)
+* CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: Accelerate delta utilization rate climb speed - default 64
+* CUDA_SM_SHARED_BUCKET: Enable SM shared token bucket
 
 ## Log level
 

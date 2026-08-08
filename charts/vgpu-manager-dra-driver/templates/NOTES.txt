@@ -6,10 +6,21 @@ DRA resource API version in use: {{ include "vgpu-manager-dra-driver.resourceApi
 vgpu-manager-dra-driver {{ .Chart.AppVersion }} kubelet-plugin (DaemonSet) has been deployed successfully!
   - NodeSelector   :  {{ .Values.kubeletPlugin.nodeSelector | toJson }}
   - DriverRoot     :  {{ .Values.kubeletPlugin.driverRoot | default "/" | quote }}
+  - CoresRatio     :  {{ .Values.kubeletPlugin.containers.plugin.commands.coresRatio | default 100 }}
+  - MemoryRatio    :  {{ .Values.kubeletPlugin.containers.plugin.commands.memoryRatio | default 100 }}
   - HealthcheckPort:  {{ .Values.kubeletPlugin.containers.plugin.healthcheckPort | default 4567 }}
   - FeatureGates   :  {{ .Values.kubeletPlugin.containers.plugin.featureGates | toJson }}
-  - Metrics        :  {{ .Values.kubeletPlugin.metrics.enabled }}
+  - Metrics        :  {{ .Values.kubeletPlugin.containers.plugin.commands.metricsPort | default 0 }}
   - LoggerLevel    :  {{ .Values.kubeletPlugin.containers.plugin.logLevel | default 5 }}
+{{- if .Values.kubeletPlugin.containers.monitor.enabled }}
+
+vgpu-manager-dra-monitor {{ .Chart.AppVersion }} device-monitor (SideCar) has been deployed successfully!
+  - MinScrapeInter :  {{ .Values.kubeletPlugin.containers.monitor.commands.minScrapeInterval | default 1 }}
+  - EnableRBAC     :  {{ .Values.kubeletPlugin.containers.monitor.commands.enableRBAC | default false }}
+  - FeatureGates   :  {{ .Values.kubeletPlugin.containers.monitor.featureGates | toJson }}
+  - Metrics        :  {{ .Values.kubeletPlugin.containers.monitor.commands.serverBindPort | default 3456 }}
+  - LoggerLevel    :  {{ .Values.kubeletPlugin.containers.monitor.commands.logLevel | default 5 }}
+{{- end }}
 
   NOTE: nodes are only scheduled by the DRA driver once labelled to match the nodeSelector above, e.g.:
     kubectl label node <node> vgpu-manager=dra-driver

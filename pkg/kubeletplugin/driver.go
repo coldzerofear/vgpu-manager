@@ -219,7 +219,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	if featuregates.Enabled(featuregates.DevicePluginClientMode) {
 		cgroup.MustInitCGroupDriver(config.Flags.CGroupDriver)
 		if err := driver.startClientRegistry(ctx, config, state); err != nil {
-			return nil, fmt.Errorf("start client-register registry: %w", err)
+			return nil, fmt.Errorf("start client-register failed: %w", err)
 		}
 	}
 
@@ -382,6 +382,13 @@ func (d *driver) Shutdown() error {
 	// Shut down long-lived NVML session.
 	if featuregates.Enabled(featuregates.DynamicMIG) {
 		d.state.nvdevlib.NvmlShutdown()
+	}
+
+	// Tear down the Fabric Manager connection, if one was opened.
+	if d.state.fmManager != nil {
+		if err := d.state.fmManager.Close(); err != nil {
+			klog.Warningf("error closing Fabric Manager connection: %v", err)
+		}
 	}
 
 	if d.deviceHealthMonitor != nil {
@@ -569,7 +576,7 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 	return nil
 }
 
-func isHealthy(taints []resourceapi.DeviceTaint) bool {
+func IsHealthy(taints []resourceapi.DeviceTaint) bool {
 	for _, taint := range taints {
 		if taint.Effect == resourceapi.DeviceTaintEffectNoSchedule {
 			return false
@@ -614,7 +621,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string, health
 						d.Taints = taints
 					}
 					if device, ok := healthDeviceMap[dev.CanonicalName()]; ok {
-						device.Healthy = isHealthy(d.Taints)
+						device.Healthy = IsHealthy(d.Taints)
 					}
 					resourceSlice.Devices = append(resourceSlice.Devices, d)
 				}
@@ -754,14 +761,7 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 		resolver.TargetByPodUID,
 		resolver.TargetByUUID,
 	)
-
-	d.wg.Go(func() {
-		klog.V(4).Info("Starting container device registry server")
-		if err := d.deviceRegistry.Start(); err != nil {
-			klog.ErrorS(err, "device registry server start failed")
-		}
-	})
-	return nil
+	return d.deviceRegistry.Start()
 }
 
 // startNRIPlugin builds and runs the in-process NRI plugin (design §12.13).

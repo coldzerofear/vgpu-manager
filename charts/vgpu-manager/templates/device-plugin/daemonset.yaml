@@ -89,8 +89,9 @@ spec:
             - --pprof-bind-port={{ .Values.devicePlugin.devicePlugin.commands.pprofBindPort }}
             - --cgroup-driver={{ .Values.devicePlugin.cgroupDriver }}
             - --feature-gates={{ include "vgpu-manager.featureGates" .Values.devicePlugin.devicePlugin.commands.featureGates }}
-            - --mofed-enabled={{ .Values.devicePlugin.devicePlugin.commands.mofedEnabled }}
-            - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled }}
+            - --mofed-enabled={{ .Values.devicePlugin.devicePlugin.commands.mofedEnabled | default false }}
+            - --gds-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdsEnabled | default false }}
+            - --gdrcopy-enabled={{ .Values.devicePlugin.devicePlugin.commands.gdrcopyEnabled | default false }}
             - --open-kernel-modules={{ .Values.devicePlugin.devicePlugin.commands.openKernelModules }}
             - --mig-strategy={{ .Values.devicePlugin.devicePlugin.commands.migStrategy | default "mixed" }}
             {{- with $dpCmds.cdiAnnotationPrefix }}
@@ -259,12 +260,15 @@ spec:
         - name: kubelet-root
           hostPath:
             path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}
+            type: Directory
         - name: device-plugins
           hostPath:
             path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}/device-plugins
+            type: Directory
         - name: pod-resources
           hostPath:
             path: {{ (default "/var/lib/kubelet" .Values.devicePlugin.kubeletRoot) | trimSuffix "/" }}/pod-resources
+            type: Directory
         - name: manager-root
           hostPath:
             path: {{ $managerRoot | quote }}
@@ -281,6 +285,7 @@ spec:
         - name: driver-root
           hostPath:
             path: {{ $hostDriverRoot | quote }}
+            type: Directory
         {{- if or $nc.yaml $nc.json }}
         - name: node-config
           configMap:

@@ -24,6 +24,7 @@ __global__ void compute_kernel(double *data, int N) {
 }
 
 int main(void) {
+  VGPU_REQUIRE_PRELOAD();
   float *a, *b, *c;
   CHECK_RUNTIME_API(cudaMalloc(&a, 1024 * sizeof(float)));
   CHECK_RUNTIME_API(cudaMalloc(&b, 1024 * sizeof(float)));

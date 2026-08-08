@@ -69,6 +69,13 @@ function(vgpu_configure_c_test name)
     endif()
 endfunction()
 
+# NOTE: this glob compiles every test_*.c in THIS directory against the CUDA
+# includes and nothing else -- in particular not library/include. A test that
+# includes hook.h therefore cannot live here; it will fail to compile as soon
+# as anyone configures with -DBUILD_TESTS=ON, and only then, which is an easy
+# trap to fall into. GPU-less tests belong in test/nogpu/ and are built by the
+# parent CMakeLists (-DBUILD_SM_NODE_TESTS=ON). The glob is not recursive, so
+# that subdirectory is invisible here by construction.
 file(GLOB C_TESTS "${TEST_SRC_DIR}/test_*.c")
 foreach(src ${C_TESTS})
     get_filename_component(name ${src} NAME_WE)
@@ -88,6 +95,18 @@ if(EXISTS ${_POOL_ASYNC_SRC})
     target_compile_definitions(test_alloc_pool_async_ptsz
                                PRIVATE CUDA_API_PER_THREAD_DEFAULT_STREAM)
     vgpu_configure_c_test(test_alloc_pool_async_ptsz)
+endif()
+
+# Same reason: without this variant the _ptsz copies of the async allocation
+# hooks are never executed, so a defect introduced in one of them passes every
+# test. (Verified the hard way -- commenting the accounting out of
+# cuMemAllocAsync_ptsz left the suite green.)
+set(_ASYNC_ACCT_SRC ${TEST_SRC_DIR}/test_alloc_async_accounting.c)
+if(EXISTS ${_ASYNC_ACCT_SRC})
+    add_executable(test_alloc_async_accounting_ptsz ${_ASYNC_ACCT_SRC})
+    target_compile_definitions(test_alloc_async_accounting_ptsz
+                               PRIVATE CUDA_API_PER_THREAD_DEFAULT_STREAM)
+    vgpu_configure_c_test(test_alloc_async_accounting_ptsz)
 endif()
 
 # ---- CUDA tests (kernel launches) -----------------------------------------

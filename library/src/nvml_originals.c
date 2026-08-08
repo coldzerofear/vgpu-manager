@@ -36,16 +36,12 @@ const char *nvmlErrorString(nvmlReturn_t result) {
   return _entry(result);
 }
 
-nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index,
-                                           nvmlDevice_t *device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2,
-                         index, device);
+nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *device) {
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, index, device);
 }
 
-nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index,
-                                        nvmlDevice_t *device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex,
-                                                          index, device);
+nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device) {
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, index, device);
 }
 
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
@@ -56,13 +52,11 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
 }
 
 nvmlReturn_t nvmlDeviceGetPciInfo_v3(nvmlDevice_t device, nvmlPciInfo_t *pci) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetPciInfo_v3, device,
-                         pci);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetPciInfo_v3, device, pci);
 }
 
 nvmlReturn_t nvmlDeviceGetPciInfo_v2(nvmlDevice_t device, nvmlPciInfo_t *pci) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetPciInfo_v2, device,
-                         pci);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetPciInfo_v2, device, pci);
 }
 
 nvmlReturn_t nvmlDeviceGetPciInfo(nvmlDevice_t device, nvmlPciInfo_t *pci) {
@@ -84,13 +78,11 @@ nvmlReturn_t nvmlDeviceGetProcessesUtilizationInfo(
 }
 
 nvmlReturn_t nvmlDeviceClearAccountingPids(nvmlDevice_t device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceClearAccountingPids,
-                         device);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceClearAccountingPids, device);
 }
 
 nvmlReturn_t nvmlDeviceClearCpuAffinity(nvmlDevice_t device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceClearCpuAffinity,
-                         device);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceClearCpuAffinity, device);
 }
 
 nvmlReturn_t nvmlDeviceClearEccErrorCounts(nvmlDevice_t device,
@@ -169,8 +161,7 @@ nvmlReturn_t nvmlDeviceGetBAR1MemoryInfo(nvmlDevice_t device,
 }
 
 nvmlReturn_t nvmlDeviceGetBoardId(nvmlDevice_t device, unsigned int *boardId) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetBoardId, device,
-                         boardId);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetBoardId, device, boardId);
 }
 
 nvmlReturn_t nvmlDeviceGetBoardPartNumber(nvmlDevice_t device, char *partNumber,
@@ -186,32 +177,30 @@ nvmlReturn_t nvmlDeviceGetBrand(nvmlDevice_t device, nvmlBrandType_t *type) {
 nvmlReturn_t nvmlDeviceGetBridgeChipInfo(nvmlDevice_t device,
                             nvmlBridgeChipHierarchy_t *bridgeHierarchy) {
   return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetBridgeChipInfo,
-                         device, bridgeHierarchy);
+                          device, bridgeHierarchy);
 }
 
 nvmlReturn_t nvmlDeviceGetClock(nvmlDevice_t device, nvmlClockType_t clockType,
                                 nvmlClockId_t clockId, unsigned int *clockMHz) {
   return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetClock, device,
-                         clockType, clockId, clockMHz);
+                          clockType, clockId, clockMHz);
 }
 
 nvmlReturn_t nvmlDeviceGetClockInfo(nvmlDevice_t device, nvmlClockType_t type,
                                     unsigned int *clock) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetClockInfo, device,
-                         type, clock);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetClockInfo, device, type, clock);
 }
 
 nvmlReturn_t nvmlDeviceGetComputeMode(nvmlDevice_t device,
                                       nvmlComputeMode_t *mode) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeMode, device,
-                         mode);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetComputeMode, device, mode);
 }
 
 nvmlReturn_t nvmlDeviceGetCpuAffinity(nvmlDevice_t device,
                                       unsigned int cpuSetSize,
                                       unsigned long *cpuSet) {
   return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCpuAffinity, device,
-                         cpuSetSize, cpuSet);
+                          cpuSetSize, cpuSet);
 }
 
 nvmlReturn_t nvmlDeviceGetCreatableVgpus(nvmlDevice_t device,

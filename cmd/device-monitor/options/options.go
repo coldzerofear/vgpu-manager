@@ -36,6 +36,7 @@ type Options struct {
 	MinScrapeInterval   time.Duration
 	StuckGracePeriod    time.Duration
 	ContainerDriverRoot string
+	EnableDRAMonitor    bool
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -49,17 +50,17 @@ const (
 	defaultStuckGracePeriod    = 30 * time.Second
 
 	Component = "deviceMonitor"
-	// SMWatcher feature gate will obtain shared utilization data aggregation corresponding indicators from external observers.
-	SMWatcher featuregate.Feature = util.SMWatcher
-	// VMemoryNode feature gate will track the allocation of virtual memory on the device and provide more accurate virtual memory monitoring statistics.
-	VMemoryNode featuregate.Feature = util.VMemoryNode
+	// SharedSMUtilizationWatcher feature gate will obtain shared utilization data aggregation corresponding indicators from external observers.
+	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
+	// VirtualMemoryTracking feature gate will track the allocation of virtual memory on the device and provide more accurate virtual memory monitoring statistics.
+	VirtualMemoryTracking featuregate.Feature = util.VirtualMemoryTracking
 )
 
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		SMWatcher:   {Default: false, PreRelease: featuregate.Alpha},
-		VMemoryNode: {Default: false, PreRelease: featuregate.Alpha},
+		SharedSMUtilizationWatcher: {Default: false, PreRelease: featuregate.Alpha},
+		VirtualMemoryTracking:      {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -113,6 +114,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.DurationVar(&o.MinScrapeInterval, "min-scrape-interval", o.MinScrapeInterval, "Minimum grasping interval duration. (must be greater than or equal to 1s)")
 	pflag.DurationVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
+	pflag.BoolVar(&o.EnableDRAMonitor, "enable-dra-monitor", false, "Enable monitoring metrics for DRA driver paths.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

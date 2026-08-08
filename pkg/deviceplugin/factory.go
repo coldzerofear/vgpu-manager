@@ -49,9 +49,14 @@ func GetDevicePlugins(
 			// The host driver/dev root is mounted into the plugin at the same path,
 			// so the in-container read path equals the host path written into the
 			// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
-			DriverRoot:       option.ContainerDriverRoot,
-			TargetDriverRoot: option.HostDriverRoot,
-			DevRoot:          devManager.DevRoot,
+			DriverRoot:       string(nodeConfig.GetDriverRoot()),
+			TargetDriverRoot: string(nodeConfig.GetHostDriverRoot()),
+			DevRoot:          nodeConfig.GetDriverRoot().GetDevRoot(),
+			TargetDevRoot:    string(nodeConfig.GetHostDevRoot()),
+			GDSEnabled:       nodeConfig.GetGDSEnabled(),
+			MOFEDEnabled:     nodeConfig.GetMOFEDEnabled(),
+			GDRCopyEnabled:   nodeConfig.GetGDRCopyEnabled(),
+			ImexChannels:     devManager.GetImexChannels(),
 		})
 	if err != nil {
 		klog.Errorf("Create CDI handler failed: %v", err)
@@ -75,14 +80,14 @@ func GetDevicePlugins(
 	}
 
 	var deleteResources []string
-	if devManager.GetFeatureGate().Enabled(options.CorePlugin) {
+	if devManager.GetFeatureGate().Enabled(options.GPUCoreResourcePlugin) {
 		socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-core.sock")
 		plugins = append(plugins, vgpu.NewVCoreDevicePlugin(util.VGPUCoreResourceName, socket, devManager))
 	} else {
 		deleteResources = append(deleteResources, util.VGPUCoreResourceName)
 	}
 
-	if devManager.GetFeatureGate().Enabled(options.MemoryPlugin) {
+	if devManager.GetFeatureGate().Enabled(options.GPUMemoryResourcePlugin) {
 		socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-memory.sock")
 		plugins = append(plugins, vgpu.NewVMemoryDevicePlugin(util.VGPUMemoryResourceName, socket, devManager))
 	} else {

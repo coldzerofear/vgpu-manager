@@ -39,6 +39,7 @@ __global__ void scale_add(float *x, int n) {
 }
 
 int main(void) {
+  VGPU_REQUIRE_PRELOAD();
   const int N = 1 << 20;       /* 1M elements */
   const int tpb = 256;
   const int blocks = (N + tpb - 1) / tpb;

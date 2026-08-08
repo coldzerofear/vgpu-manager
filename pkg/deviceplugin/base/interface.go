@@ -22,6 +22,6 @@ type PluginServer interface {
 	GetStopCh() chan struct{}
 	GetDeviceCh() chan *manager.Device
 	GetResourceName() string
-	Start(name string, server pluginapi.DevicePluginServer) error
+	Start(name string, server DevicePlugin) error
 	Stop(name string) error
 }

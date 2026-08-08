@@ -109,7 +109,7 @@ Full image name with tag
 
 {{/*
 Render feature gates into a sorted, comma-joined "key=value,..." string for the --feature-gates
-flag. Accepts either a map (preferred: { GPUTopology: true }) or a legacy raw string (used as-is
+flag. Accepts either a map (preferred: { TopologyAwareGPUAllocation: true }) or a legacy raw string (used as-is
 for backward compatibility). An empty/nil value renders to an empty string.
 */}}
 {{- define "vgpu-manager.featureGates" -}}

@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -31,6 +32,10 @@ import (
 
 const (
 	FullGPUInstanceID uint32 = 0xFFFFFFFF
+
+	// eventErrorBackoff throttles the event loop after a non-timeout NVML
+	// error, which eventSet.Wait() reports without consuming its timeout.
+	eventErrorBackoff = time.Second
 )
 
 const (
@@ -115,7 +120,7 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 		return nil, fmt.Errorf("nvml library is nil")
 	}
 	if ret := nvdevlib.Init(); ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("failed to initialize NVML: %v", ret)
+		return nil, fmt.Errorf("failed to initialize NVML: %w", ret)
 	}
 	defer func() {
 		_ = nvdevlib.Shutdown()
@@ -136,7 +141,7 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 
 func (m *nvmlDeviceHealthMonitor) Start(ctx context.Context) (rerr error) {
 	if ret := m.nvmllib.Init(); ret != nvml.SUCCESS {
-		return fmt.Errorf("failed to initialize NVML: %v", ret)
+		return fmt.Errorf("failed to initialize NVML: %w", ret)
 	}
 
 	defer func() {
@@ -228,9 +233,14 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				if ret == nvml.ERROR_GPU_IS_LOST {
 					klog.Warningf("GPU is lost error: %v; Marking all devices as unhealthy", ret)
 					m.sendHealthEventForAllDevices(HealthEventGPULost)
-					continue
+				} else {
+					klog.V(6).Infof("Error waiting for NVML event: %v. Retrying...", ret)
 				}
-				klog.V(6).Infof("Error waiting for NVML event: %v. Retrying...", ret)
+				// Wait() returns immediately on error, so a persistent failure
+				// (a lost GPU, or NVML left uninitialized after a driver
+				// reload) would otherwise spin this goroutine at full CPU and,
+				// once the event channel fills up, flood the log.
+				time.Sleep(eventErrorBackoff)
 				continue
 			}
 

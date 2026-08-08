@@ -140,17 +140,18 @@ func Test_FilterPerf(t *testing.T) {
 //   - nodePolicy   drives the node ranking comparator
 //     (WeightedNodeLess) in deviceFilter.
 //   - devicePolicy drives the device-level sort
-//     (NewDeviceBinpackPriority / NewDeviceSpreadPriority)
-//     AND the topology compose-vs-fast-path branch.
+//     (NewDeviceBinpackPriority / NewDeviceSpreadPriority) AND how much
+//     work the topology selectors do on top of it.
 //   - topology     drives allocateLink / allocateNUMA dispatch.
 //
 // The topology × devicePolicy interaction is the one that's easy to
-// miss: with devicePolicy=none, allocateLink takes the FAST PATH
-// (one bestEffort call), and allocateNUMA uses DefaultCallback (no
-// per-NUMA scoring). With devicePolicy!=none those become
-// AllocateLinkTopK + selectLinkCandidateByDevicePolicy and
-// Binpack/SpreadCallback respectively — meaningfully more expensive.
-// We need both rows in the matrix to expose the cost.
+// miss: with devicePolicy=none the whole candidate set is a single
+// policy run, so allocateTiered picks purely on link score and
+// allocateNUMA uses DefaultCallback (no per-NUMA scoring). With
+// devicePolicy!=none the store is scored and sorted first, runs are
+// split per equal-score class, and the NUMA path switches to
+// Binpack/SpreadCallback — meaningfully more expensive. We need both
+// rows in the matrix to expose the cost.
 type perfPolicy struct {
 	name         string
 	nodePolicy   string // util.NodeSchedulerPolicyAnnotation;   "" = unset
@@ -178,20 +179,22 @@ var allPerfPolicies = []perfPolicy{
 	// Both: both sorts fire, no topology.
 	{name: "node=binpack/dev=binpack", nodePolicy: "binpack", devicePolicy: "binpack"},
 
-	// Link topology, FAST path: devicePolicy=none → allocateLink calls
-	// gpuallocator.AllocateLink (single bestEffort) and returns directly.
+	// Link topology, devicePolicy=none: allocateTiered walks the tier
+	// ladder and, with no policy to obey, every candidate is one run —
+	// so the pick is decided purely by link score.
 	{name: "link", topology: "link"},
 
-	// Link topology, COMPOSE path: devicePolicy=binpack →
-	// AllocateLinkTopK + selectLinkCandidateByDevicePolicy. Real cost
-	// difference vs the fast path comes from the top-K enumeration.
+	// Link topology with a device policy: the group pick and the
+	// within-group pick both consult the policy score, and the store is
+	// policy-sorted first. Cost difference vs link/none is the extra
+	// sort plus the run splitting.
 	{name: "link/dev=binpack", topology: "link", devicePolicy: "binpack"},
 	{name: "link/dev=spread", topology: "link", devicePolicy: "spread"},
 
-	// Link strict: same selector as link/none but with the
-	// AreDevicesLinked validation pass. Cheap vs the compose path —
-	// useful as a separate row only because the validation cost is
-	// what we'd measure first if a regression here.
+	// Link strict: same walk as link/none, but a plan below TierNVLink is
+	// refused instead of accepted-with-downgrade. Worth its own row
+	// because strict is what retries the anchor/rail window ladder to
+	// completion rather than stopping at the first plan.
 	{name: "link-strict", topology: "link-strict"},
 
 	// NUMA topology, FAST path: devicePolicy=none →
@@ -597,16 +600,15 @@ func buildPerfTopologyAnnotation() string {
 // 20 cores / 2048 MB per vGPU. Four vGPUs is the sweet spot for
 // exercising the topology code path on 8-GPU nodes:
 //
-//   - allocateByTopologyMode bypasses the dispatch when needNumber <= 1
-//     and just returns buildClaims(deviceStore[:needNumber], ...).
-//     One-vGPU pods never see allocateLink / allocateNUMA at all.
-//   - CanNotCrossNumaNode similarly requires gpuNumber > 1.
-//   - With 4 vGPUs out of 8 cards, link allocation has real combinatorial
-//     work: C(8,4)=70 candidate sets, each with a topology score derived
-//     from the per-edge link-type table. The compose-path (AllocateLinkTopK
-//   - per-K device-policy sort) cost ratio over the fast-path
-//     (single bestEffort call) is visible at this size, where it wasn't
-//     at 2-vGPU/4-GPU.
+//   - One-vGPU pods now do enter allocateLink / allocateNUMA (the
+//     needNumber <= 1 short-circuit is gone), but they resolve at the
+//     first tier with a non-empty group and never reach the subset
+//     search, so they measure dispatch overhead rather than selection.
+//   - With 4 vGPUs out of 8 cards, link allocation has real work to do:
+//     on a NON-uniform component the subset search enumerates C(8,4)=70
+//     sets, each scored from the per-edge link-type table. On a uniform
+//     one the closed form skips it entirely — which is exactly the
+//     asymmetry this row exists to keep an eye on.
 //   - 4 vGPUs also matches the worst-case numa-strict ask: must fit all 4
 //     on one NUMA. With 4 cards per NUMA, that succeeds — exercising the
 //     CanNotCrossNumaNode check on a real boundary rather than trivially.

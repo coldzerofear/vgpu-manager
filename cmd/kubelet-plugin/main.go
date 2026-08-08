@@ -153,6 +153,20 @@ func newApp() *cli.App {
 			Destination: &flags.CGroupDriver,
 			EnvVars:     []string{"CGROUP_DRIVER"},
 		},
+		&cli.UintFlag{
+			Name:        "device-cores-ratio",
+			Usage:       "Nvidia vGPU device cores oversold ratio",
+			Value:       100,
+			Destination: &flags.DeviceCoresRatio,
+			EnvVars:     []string{"DEVICE_CORES_RATIO"},
+		},
+		&cli.UintFlag{
+			Name:        "device-memory-ratio",
+			Usage:       "Nvidia vGPU device memory oversold ratio",
+			Value:       100,
+			Destination: &flags.DeviceMemoryRatio,
+			EnvVars:     []string{"DEVICE_MEMORY_RATIO"},
+		},
 		&cli.StringFlag{
 			Name:        "nri-root",
 			Usage:       "Directory (mounted from the host) holding the runtime NRI socket; the in-process NRI plugin dials <nri-root>/nri.sock. Only used when the NRISupport feature gate is enabled.",
@@ -238,9 +252,20 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	// Validate the NRI plugin index format early (only when set): containerd
 	// otherwise rejects a bad index at registration time, which surfaces as an
 	// obscure reconnect-loop failure rather than a clear startup error.
-	if flags.NRIPluginIdx != "" {
-		if err := nri.ValidatePluginIdx(flags.NRIPluginIdx); err != nil {
-			return fmt.Errorf("invalid --nri-plugin-idx %q: %w", flags.NRIPluginIdx, err)
+	if featuregates.Enabled(featuregates.NRISupport) {
+		if flags.NRIPluginIdx != "" {
+			if err := nri.ValidatePluginIdx(flags.NRIPluginIdx); err != nil {
+				return fmt.Errorf("invalid --nri-plugin-idx %q: %w", flags.NRIPluginIdx, err)
+			}
+		}
+	}
+
+	if featuregates.Enabled(featuregates.VGPUSupport) {
+		if flags.DeviceCoresRatio <= 0 {
+			return fmt.Errorf("invalid --device-cores-ratio %d: must be greater than or equal to 0", flags.DeviceCoresRatio)
+		}
+		if flags.DeviceMemoryRatio <= 0 {
+			return fmt.Errorf("invalid --device-memory-ratio %d: must be greater than or equal to 0", flags.DeviceCoresRatio)
 		}
 	}
 

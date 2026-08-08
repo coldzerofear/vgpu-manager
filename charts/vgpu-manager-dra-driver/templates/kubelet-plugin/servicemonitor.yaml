@@ -1,5 +1,12 @@
-{{- if and .Values.kubeletPlugin.enabled .Values.kubeletPlugin.metrics.enabled .Values.kubeletPlugin.metrics.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") -}}
-{{- $sm := .Values.kubeletPlugin.metrics.serviceMonitor }}
+{{- $monitor := .Values.kubeletPlugin.containers.monitor | default dict }}
+{{- $metricsPort := .Values.kubeletPlugin.containers.plugin.commands.metricsPort | default 0 }}
+{{- $sm := .Values.kubeletPlugin.serviceMonitor }}
+{{- $pluginMetrics := gt ($metricsPort | int) 0 }}
+{{- /* serviceMonitor.enabled gates the whole object, not just the plugin endpoint:
+       folding it into $pluginMetrics only would still emit a ServiceMonitor carrying
+       the device-metrics endpoint whenever the monitor sidecar is on, so turning the
+       switch off would not actually turn anything off. */}}
+{{- if and .Values.kubeletPlugin.enabled $sm.enabled (or $pluginMetrics $monitor.enabled) (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") -}}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -13,7 +20,8 @@ metadata:
     {{- end }}
 spec:
   endpoints:
-    - path: {{ .Values.kubeletPlugin.metrics.metricsPath | default "/metrics" }}
+    {{- if $pluginMetrics }}
+    - path: /metrics
       port: metrics
       {{- with $sm.interval }}
       interval: {{ . }}
@@ -27,6 +35,24 @@ spec:
       {{- with $sm.metricRelabelings }}
       metricRelabelings: {{ toYaml . | nindent 8 }}
       {{- end }}
+    {{- end }}
+    {{- if $monitor.enabled }}
+    - path: /metrics
+      port: device-metrics
+      scheme: http
+      {{- with $sm.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with $sm.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with $sm.relabelings }}
+      relabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $sm.metricRelabelings }}
+      metricRelabelings: {{ toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
   namespaceSelector:
     matchNames:
       - {{ .Release.Namespace | quote }}

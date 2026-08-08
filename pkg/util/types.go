@@ -9,15 +9,6 @@ const (
 	ContainerKindApp  ContainerKind = "app"
 )
 
-// IsRestartableInitContainer reports whether an init container is a sidecar,
-// i.e. it declares restartPolicy: Always. Unlike a regular init container
-// (which runs to completion before the app containers start), a sidecar keeps
-// running alongside the app containers for the rest of the pod's life, so for
-// resource and lifecycle purposes it overlaps the app phase.
-func IsRestartableInitContainer(c *corev1.Container) bool {
-	return c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways
-}
-
 type ContainerRef struct {
 	Name   string
 	Claims []corev1.ResourceClaim

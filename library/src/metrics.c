@@ -6,6 +6,12 @@ static volatile uint64_t g_lock_success_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_lock_timeout_total[MAX_DEVICE_COUNT] = {0};
 
 static volatile uint64_t g_uva_fallback_total[MAX_DEVICE_COUNT] = {0};
+/* The proactive oversold path, kept separate from the reactive fallback above
+ * because they are different events: one is policy working as designed, the
+ * other is a driver refusal we recovered from. Collapsing them would hide
+ * which of the two a container is actually experiencing. */
+static volatile uint64_t g_uva_oversold_total[MAX_DEVICE_COUNT] = {0};
+static volatile uint64_t g_uva_oversold_bytes[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_kernel_rate_limit_hit_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_watcher_miss_total[MAX_DEVICE_COUNT] = {0};
 static volatile uint64_t g_nvml_fallback_total[MAX_DEVICE_COUNT] = {0};
@@ -101,6 +107,40 @@ void metrics_record_oom(int host_index, metrics_oom_reason_t reason) {
 void metrics_record_uva_fallback(int host_index) {
   maybe_log_counter_metric("uva_fallback", host_index,
                            &g_uva_fallback_total[host_index]);
+}
+
+void metrics_record_uva_oversold(int host_index, uint64_t request_bytes,
+                                 uint64_t device_used, uint64_t real_memory) {
+  uint64_t events, bytes, over_pct;
+
+  if (!should_collect_metrics() || !is_valid_metric_index(host_index)) {
+    return;
+  }
+
+  /* Bytes accumulate on every event; the log line is still decimated. Losing
+   * the intermediate LINES is fine, losing the intermediate BYTES would not be
+   * -- the total is what says how much was handed out between two samples. */
+  bytes  = __sync_add_and_fetch(&g_uva_oversold_bytes[host_index], request_bytes);
+  events = __sync_add_and_fetch(&g_uva_oversold_total[host_index], 1);
+  if ((events & (events - 1)) != 0) {
+    return;
+  }
+
+  /* How far past physical this allocation pushes the container. 100 means it
+   * exactly fills real memory; 250 means Unified Memory is being asked to keep
+   * 2.5x the card resident and will be migrating pages to do it. real_memory
+   * of 0 would mean a device with no physical budget configured, which is a
+   * misconfiguration rather than infinite pressure -- report 0 instead of
+   * dividing by it. */
+  over_pct = real_memory ? (device_used + request_bytes) * 100 / real_memory : 0;
+
+  LOGGER(INFO,
+         "metric=uva_oversold host_device=%d events=%" PRIu64
+         " bytes_total_mb=%" PRIu64 " req_mb=%" PRIu64
+         " device_used_mb=%" PRIu64 " real_mb=%" PRIu64 " over_pct=%" PRIu64,
+         host_index, events,
+         bytes / (1024 * 1024), request_bytes / (1024 * 1024),
+         device_used / (1024 * 1024), real_memory / (1024 * 1024), over_pct);
 }
 
 void metrics_record_rate_limit_hit(int host_index) {

@@ -18,6 +18,24 @@ import (
 // its pre-allocation, and a PodVGPUPreAllocAnnotation referencing the given
 // device IDs/UUIDs.
 func gangPod(uid, gang, node string, claim string) *corev1.Pod {
+	return gangPodNS(uid, testGangNS, gang, node, claim)
+}
+
+// testGangNS is the namespace every gangPod lives in unless stated otherwise.
+// Gang identity is namespace-qualified (util.PodGangKey), so the fixtures need
+// a real namespace for the keys to be meaningful.
+const testGangNS = "ns1"
+
+// gangKey mirrors util.PodGangKey for pods built by gangPod, so tests can keep
+// writing bare gang names in their tables.
+func gangKey(gang string) string {
+	if gang == "" {
+		return ""
+	}
+	return testGangNS + "/" + gang
+}
+
+func gangPodNS(uid, namespace, gang, node string, claim string) *corev1.Pod {
 	labels := map[string]string{}
 	if gang != "" {
 		labels[util.CoschedulingPodGroupLabel] = gang
@@ -30,6 +48,7 @@ func gangPod(uid, gang, node string, claim string) *corev1.Pod {
 		ObjectMeta: metav1.ObjectMeta{
 			UID:         types.UID(uid),
 			Name:        uid,
+			Namespace:   namespace,
 			Labels:      labels,
 			Annotations: anns,
 		},
@@ -107,6 +126,18 @@ func Test_GangAnchorComponent(t *testing.T) {
 			wantOK:   false,
 		},
 		{
+			// A PodGroup is namespaced, so two tenants may each own a gang
+			// called "gangA". nodePods spans every namespace on the node, so
+			// matching on the bare name would adopt the other tenant's pod as
+			// a sibling and anchor this gang to whichever component that pod
+			// happens to sit on.
+			name:     "same gang name in another namespace is not a sibling",
+			gang:     "gangA",
+			pods:     []*corev1.Pod{gangPodNS("sib", "other-ns", "gangA", "node1", claimText("gpu2"))},
+			wantRoot: -1,
+			wantOK:   false,
+		},
+		{
 			name:     "empty gang name never anchors",
 			gang:     "",
 			pods:     []*corev1.Pod{gangPod("sib", "gangA", "node1", claimText("gpu2"))},
@@ -141,7 +172,7 @@ func Test_GangAnchorComponent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			n := twoComponentNode(tc.pods...)
-			root, ok := n.GangAnchorComponent(tc.gang, nil, sets.New(self))
+			root, ok := n.GangAnchorComponent(gangKey(tc.gang), nil, sets.New(self))
 			if ok != tc.wantOK || root != tc.wantRoot {
 				t.Fatalf("GangAnchorComponent(%q) = (%d, %v), want (%d, %v)",
 					tc.gang, root, ok, tc.wantRoot, tc.wantOK)
@@ -181,7 +212,7 @@ func Test_GangAnchorComponent_ControllerOwner(t *testing.T) {
 	}
 	// gangName takes precedence over owner: a controller-only sibling (no gang
 	// label) is NOT matched when a gangName is given.
-	if root, ok := n.GangAnchorComponent("gangA", ownerA, self); ok || root != -1 {
+	if root, ok := n.GangAnchorComponent(gangKey("gangA"), ownerA, self); ok || root != -1 {
 		t.Fatalf("gangName set, controller-only sibling: (%d,%v), want (-1,false)", root, ok)
 	}
 }
@@ -200,7 +231,7 @@ func Test_GangAnchorComponent_TieBreakByOrdinal(t *testing.T) {
 			gangPod("sibB", "gangA", "node1", claimText("gpuY")), // 1 vote → root 0 (ord 1)
 		},
 	}
-	root, ok := n.GangAnchorComponent("gangA", nil, sets.New(types.UID("self")))
+	root, ok := n.GangAnchorComponent(gangKey("gangA"), nil, sets.New(types.UID("self")))
 	if !ok || root != 5 {
 		t.Fatalf("tie-break = root %d (ok=%v), want root 5 (lower ordinal), not lower root 0", root, ok)
 	}
@@ -210,7 +241,7 @@ func Test_GangAnchorComponent_UnknownUUIDIgnored(t *testing.T) {
 	// A sibling pre-allocated a card the node doesn't know about (UUID not in
 	// nvlinkComponentByUUID) contributes no vote and must not anchor.
 	n := twoComponentNode(gangPod("sib", "gangA", "node1", claimText("ghost")))
-	if root, ok := n.GangAnchorComponent("gangA", nil, sets.New(types.UID("self"))); ok || root != -1 {
+	if root, ok := n.GangAnchorComponent(gangKey("gangA"), nil, sets.New(types.UID("self"))); ok || root != -1 {
 		t.Fatalf("unknown-uuid sibling: got (%d, %v), want (-1, false)", root, ok)
 	}
 }
@@ -301,17 +332,21 @@ func Test_buildComponentDomains_UnresolvableSortsLast(t *testing.T) {
 func Test_LinkTopologyFitness(t *testing.T) {
 	// Island node: NVLink islands of 4; the two islands are only cross-CPU
 	// reachable, so the node fits 8 GPUs at the any-P2P tier only.
-	island := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 4,
-		maxSwitchComponentSize: 4, maxNUMAComponentSize: 4, maxLinkComponentSize: 8}
+	withSizes := func(nvlink, sw, numa, any int) *NodeInfo {
+		tc := &tieredComponents{}
+		tc.maxSize[TierNVLink] = nvlink
+		tc.maxSize[TierSwitch] = sw
+		tc.maxSize[TierNUMA] = numa
+		tc.maxSize[TierAny] = any
+		return &NodeInfo{gpuTopology: true, tiers: tc}
+	}
+	island := withSizes(4, 4, 4, 8)
 	// Same islands, but bridged within one NUMA node (HostBridge) → NUMA tier of 8.
-	numaIsland := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 4,
-		maxSwitchComponentSize: 4, maxNUMAComponentSize: 8, maxLinkComponentSize: 8}
+	numaIsland := withSizes(4, 4, 8, 8)
 	// Same islands, but bridged across PCIe switches → switch tier of 8.
-	switchIsland := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 4,
-		maxSwitchComponentSize: 8, maxNUMAComponentSize: 8, maxLinkComponentSize: 8}
+	switchIsland := withSizes(4, 8, 8, 8)
 	// Full-NVSwitch node: one NVLink fabric of 8.
-	nvswitch := &NodeInfo{gpuTopology: true, maxNVLinkComponentSize: 8,
-		maxSwitchComponentSize: 8, maxNUMAComponentSize: 8, maxLinkComponentSize: 8}
+	nvswitch := withSizes(8, 8, 8, 8)
 	noTopo := &NodeInfo{gpuTopology: false}
 
 	for _, tc := range []struct {
@@ -360,18 +395,90 @@ func Test_computeTieredComponents(t *testing.T) {
 	addBoth(1, 2, links.P2PLinkHostBridge)
 	addBoth(2, 3, links.P2PLinkCrossCPU)
 
-	byNV, maxNV, maxSw, maxNUMA, maxAny := computeTieredComponents(dl)
-	if maxNV != 2 || maxSw != 2 || maxNUMA != 3 || maxAny != 4 {
+	tc := computeTieredComponents(dl)
+	if tc.largest(TierNVLink) != 2 || tc.largest(TierSwitch) != 2 ||
+		tc.largest(TierNUMA) != 3 || tc.largest(TierAny) != 4 {
 		t.Fatalf("sizes = NVLink %d, switch %d, NUMA %d, any %d; want 2,2,3,4",
-			maxNV, maxSw, maxNUMA, maxAny)
+			tc.largest(TierNVLink), tc.largest(TierSwitch), tc.largest(TierNUMA), tc.largest(TierAny))
 	}
 	// NVLink map: gpu0/gpu1 share the island; gpu2/gpu3 are their own singletons.
+	byNV := tc.byUUID(TierNVLink, dl)
 	if byNV["gpu0"] != byNV["gpu1"] {
 		t.Fatalf("nvlink: gpu0/gpu1 must share an island")
 	}
 	if byNV["gpu0"] == byNV["gpu2"] || byNV["gpu2"] == byNV["gpu3"] {
 		t.Fatalf("nvlink: gpu2 and gpu3 must each be their own singleton")
 	}
+	// Per-tier membership must be NESTED: each looser tier merges strictly more.
+	// The allocator's tier walk relies on this — a looser tier may never host
+	// FEWER devices in a component than a tighter one.
+	for i := 0; i < 4; i++ {
+		for j := i + 1; j < 4; j++ {
+			for tier := TierNVLink; tier < numLinkTiers-1; tier++ {
+				if tc.rootOf(tier, i) == tc.rootOf(tier, j) &&
+					tc.rootOf(tier+1, i) != tc.rootOf(tier+1, j) {
+					t.Fatalf("tiers not nested: gpu%d/gpu%d joined at %v but split at %v", i, j, tier, tier+1)
+				}
+			}
+		}
+	}
+}
+
+func Test_componentsAreUniform(t *testing.T) {
+	newList := func(n int) gpuallocator.DeviceList {
+		dl := make(gpuallocator.DeviceList, n)
+		for i := 0; i < n; i++ {
+			dl[i] = gpuallocator.NewDevice(i, fmt.Sprintf("gpu%d", i), "")
+		}
+		return dl
+	}
+	addBoth := func(dl gpuallocator.DeviceList, a, b int, t links.P2PLinkType) {
+		dl.AddLink(a, b, t)
+		dl.AddLink(b, a, t)
+	}
+
+	t.Run("NVSwitch-style all-to-all same width is uniform", func(t *testing.T) {
+		dl := newList(4)
+		for i := 0; i < 4; i++ {
+			for j := i + 1; j < 4; j++ {
+				addBoth(dl, i, j, links.EighteenNVLINKLinks)
+			}
+		}
+		if !computeTieredComponents(dl).isUniform(TierNVLink) {
+			t.Fatal("a fully connected equal-width fabric must be uniform")
+		}
+	})
+
+	t.Run("DGX-1 style mixed widths is NOT uniform", func(t *testing.T) {
+		dl := newList(4)
+		addBoth(dl, 0, 1, links.SingleNVLINKLink)
+		addBoth(dl, 0, 2, links.SingleNVLINKLink)
+		addBoth(dl, 0, 3, links.TwoNVLINKLinks) // ← differs
+		addBoth(dl, 1, 2, links.TwoNVLINKLinks)
+		addBoth(dl, 1, 3, links.SingleNVLINKLink)
+		addBoth(dl, 2, 3, links.TwoNVLINKLinks)
+		if computeTieredComponents(dl).isUniform(TierNVLink) {
+			t.Fatal("mixed NVLink widths inside one component must NOT be uniform")
+		}
+	})
+
+	t.Run("transitively connected component is NOT uniform", func(t *testing.T) {
+		// 0-1 and 1-2 linked, but 0-2 absent: the component is connected only
+		// through 1, so {0,2} is worse than {0,1} and subsets are not
+		// interchangeable.
+		dl := newList(3)
+		addBoth(dl, 0, 1, links.SingleNVLINKLink)
+		addBoth(dl, 1, 2, links.SingleNVLINKLink)
+		if computeTieredComponents(dl).isUniform(TierNVLink) {
+			t.Fatal("a transitively connected component must NOT be uniform")
+		}
+	})
+
+	t.Run("all singletons is uniform", func(t *testing.T) {
+		if !computeTieredComponents(newList(4)).isUniform(TierNVLink) {
+			t.Fatal("components of size 1 are trivially uniform")
+		}
+	})
 }
 
 func Test_buildComponentDomains_Deterministic(t *testing.T) {

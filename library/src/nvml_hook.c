@@ -45,60 +45,73 @@ nvmlReturn_t nvmlInit(void) {
 }
 
 nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory) {
-  nvmlReturn_t ret;
-  int lock_fd = -1;
+  /* Ask NVML first, then override. The previous form returned NVML_SUCCESS from
+   * the limited branch without ever calling NVML, so a device NVML would have
+   * refused was reported as healthy with a configured size. Calling first also
+   * hands NULL-argument policy back to NVML instead of us having to guess it.
+   * This is what _v2 below already did; v1 is now aligned with it. */
+  nvmlReturn_t ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo, device, memory);
+  if (unlikely(ret != NVML_SUCCESS)) {
+    return ret;
+  }
+  /* Before the lookup, not after it: get_host_device_index_by_nvml_device falls
+   * through to get_host_device_index_by_uuid on a cold cache, and that walks
+   * g_vgpu_config->devices[] -- so the FIRST call is precisely the one that
+   * would dereference it unset. Same ordering as the CUDA hooks. */
+  load_necessary_data();
   int host_index = get_host_device_index_by_nvml_device(device);
   if (host_index < 0) {
-    goto CALL;
+    return ret;
   }
-  if (g_vgpu_config->devices[host_index].memory_limit) {
-    lock_fd = lock_gpu_device(host_index);
+  device_t dsnap = get_device_snapshot(host_index);
+  if (dsnap.memory_limit && memory != NULL) {
+    int lock_fd = lock_gpu_device(host_index);
 
     size_t used = 0, vmem_used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
     get_used_gpu_virt_memory((void *)&vmem_used, host_index);
 
-    size_t total_memory = g_vgpu_config->devices[host_index].total_memory;
+    size_t total_memory = dsnap.total_memory;
     memory->total = total_memory;
     memory->used = (used + vmem_used) >= total_memory ? total_memory : (used + vmem_used);
     memory->free = memory->total - memory->used;
-    ret = NVML_SUCCESS;
-    goto DONE;
+
+    unlock_gpu_device(lock_fd);
   }
-CALL:
-  ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo, device, memory);
-DONE:
-  unlock_gpu_device(lock_fd);
   return ret;
 }
 
 nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t *memory) {
-  nvmlReturn_t ret;
-  int lock_fd = -1;
-  ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
+  nvmlReturn_t ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetMemoryInfo_v2, device, memory);
   if (unlikely(ret != NVML_SUCCESS)) {
-    goto DONE;
+    return ret;
   }
+  /* Before the lookup, not after it: get_host_device_index_by_nvml_device falls
+   * through to get_host_device_index_by_uuid on a cold cache, and that walks
+   * g_vgpu_config->devices[] -- so the FIRST call is precisely the one that
+   * would dereference it unset. Same ordering as the CUDA hooks. */
+  load_necessary_data();
   int host_index = get_host_device_index_by_nvml_device(device);
   if (host_index < 0) {
-    goto DONE;
+    return ret;
   }
-  if (g_vgpu_config->devices[host_index].memory_limit) {
-    lock_fd = lock_gpu_device(host_index);
+  device_t dsnap = get_device_snapshot(host_index);
+  if (dsnap.memory_limit && memory != NULL) {
+    int lock_fd = lock_gpu_device(host_index);
 
     size_t used = 0, vmem_used = 0;
     get_used_gpu_memory_by_device((void *)&used, device);
     get_used_gpu_virt_memory((void *)&vmem_used, host_index);
 
-    size_t total = g_vgpu_config->devices[host_index].total_memory;
+    size_t total = dsnap.total_memory;
     size_t total_used = used + vmem_used;
     memory->total = total;
     memory->used = total_used >= total ? total : total_used;
     //memory->free = (memory->used + memory->reserved) >= memory->total ? 0 : memory->total - (memory->used + memory->reserved);
     memory->free = memory->total - memory->used;
+
+    unlock_gpu_device(lock_fd);
   }
-DONE:
-  unlock_gpu_device(lock_fd);
   return ret;
 }
 
@@ -108,7 +121,8 @@ nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device, nvmlComputeMode_t mod
   if (host_index < 0) {
     goto CALL;
   }
-  if (g_vgpu_config->devices[host_index].memory_limit || g_vgpu_config->devices[host_index].core_limit) {
+  device_t dsnap = get_device_snapshot(host_index);
+  if (dsnap.memory_limit || dsnap.core_limit) {
     ret = NVML_ERROR_NOT_SUPPORTED;
     goto DONE;
   }

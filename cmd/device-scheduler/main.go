@@ -29,10 +29,10 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/bind"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	tlsconfig "github.com/grepplabs/cert-source/config"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
@@ -60,7 +60,6 @@ func runApp(opt *options.Options) (exitCode int) {
 
 	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
-	gpuallocator.SetBestEffortMaxGPUs(opt.BestEffortMaxGPUs)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
 	kubeClient, err := client.NewClientSet(
@@ -113,8 +112,8 @@ func runApp(opt *options.Options) (exitCode int) {
 	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, 10*time.Hour, option)
 	filterPlugin, err := filter.New(
 		kubeClient, factory, recorder,
-		opt.FeatureGate.Enabled(options.SerialFilterNode),
-		opt.FeatureGate.Enabled(options.GPUTopology))
+		opt.FeatureGate.Enabled(options.SerializedNodeFilter),
+		opt.FeatureGate.Enabled(options.TopologyAwareGPUAllocation))
 	if err != nil {
 		klog.Errorf("Initialization of scheduler FilterPlugin failed: %v", err)
 		return exitCode
@@ -122,7 +121,7 @@ func runApp(opt *options.Options) (exitCode int) {
 
 	bindPlugin, err := bind.New(
 		kubeClient, recorder, filterPlugin.GetPodLister(),
-		opt.FeatureGate.Enabled(options.SerialBindNode))
+		opt.FeatureGate.Enabled(options.SerializedNodeBind))
 	if err != nil {
 		klog.Errorf("Initialization of scheduler BindPlugin failed: %v", err)
 		return exitCode
@@ -131,7 +130,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	preemptPlugin, err := preempt.New(
 		kubeClient, factory, recorder,
 		filterPlugin.GetPodLister(),
-		opt.FeatureGate.Enabled(options.GPUTopology))
+		opt.FeatureGate.Enabled(options.TopologyAwareGPUAllocation))
 	if err != nil {
 		klog.Errorf("Initialization of scheduler PreemptPlugin failed: %v", err)
 		return exitCode
@@ -230,6 +229,9 @@ func runApp(opt *options.Options) (exitCode int) {
 	route.AddFilterPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
 	route.AddPreemptPredicate(handler, preemptPlugin)
+	// Served on the extender's existing port: the endpoint inherits its TLS
+	// setting and needs no extra chart plumbing (port, probe, NetworkPolicy).
+	route.AddMetricsHandle(handler, metrics.Handler())
 
 	factory.Start(ctx.Done())
 	if klog.V(4).Enabled() {
@@ -244,9 +246,11 @@ func runApp(opt *options.Options) (exitCode int) {
 	// Start pprof debug debugging service.
 	route.StartDebugServer(opt.PprofBindPort)
 	server := http.Server{
-		Addr:      "0.0.0.0:" + strconv.Itoa(opt.ServerBindPort),
-		Handler:   handler,
-		TLSConfig: tlsConfig,
+		Addr:              "0.0.0.0:" + strconv.Itoa(opt.ServerBindPort),
+		Handler:           handler,
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       60 * time.Second,
 	}
 	go func() {
 		if opt.EnableTls {

@@ -56,16 +56,83 @@ func Test_CheckDeviceType(t *testing.T) {
 			want: false,
 		}, {
 			name:     "example 6: match GPU type",
-			cardType: "NVIDIA-NVIDIA GeForce RTX 3080 Ti",
+			cardType: "NVIDIA GeForce RTX 3080 Ti",
 			annotations: map[string]string{
 				PodIncludeGpuTypeAnnotation: "RTX 4090,RTX 3080",
 			},
 			want: true,
 		}, {
 			name:        "example 7: empty annotations",
-			cardType:    "NVIDIA-NVIDIA GeForce RTX 3080 Ti",
+			cardType:    "NVIDIA GeForce RTX 3080 Ti",
 			annotations: nil,
 			want:        true,
+		}, {
+			name:     "example 8: not case sensitive",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "a100",
+			},
+			want: true,
+		}, {
+			name:     "example 9: empty string",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "",
+			},
+			want: true,
+		}, {
+			name:     "example 10: space string",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodExcludeGpuTypeAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			name:     "example 11: trailing comma",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "V100,",
+			},
+			want: false,
+		}, {
+			name:     "example 12: prefix comma",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodExcludeGpuTypeAnnotation: ",V100",
+			},
+			want: true,
+		}, {
+			name:     "example 13: trailing comma",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodExcludeGpuTypeAnnotation: "V100,",
+			},
+			want: true,
+		}, {
+			// An include list with nothing usable in it means "no constraint",
+			// not "reject everything" — a stray space must not make the Pod
+			// unschedulable on every node.
+			name:     "example 14: include with only blank entries",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			name:     "example 15: include with only commas",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: ",,",
+			},
+			want: true,
+		}, {
+			name:     "example 16: include matches, exclude also matches",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "A100",
+				PodExcludeGpuTypeAnnotation: "A100",
+			},
+			want: false,
 		},
 	}
 
@@ -125,6 +192,73 @@ func Test_CheckDeviceUuid(t *testing.T) {
 			cardUuid:    gpu0Uuid,
 			annotations: nil,
 			want:        true,
+		}, {
+			name:     "example 7: empty string",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: "",
+			},
+			want: true,
+		}, {
+			name:     "example 8: space string",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			name:     "example 9: trailing comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: gpu0Uuid + ",",
+			},
+			want: true,
+		}, {
+			name:     "example 10: prefix comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: "," + gpu0Uuid,
+			},
+			want: true,
+		}, {
+			name:     "example 11: trailing comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodExcludeGPUUUIDAnnotation: gpu0Uuid + ",",
+			},
+			want: false,
+		}, {
+			name:     "example 12: prefix comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodExcludeGPUUUIDAnnotation: "," + gpu0Uuid,
+			},
+			want: false,
+		}, {
+			name:     "example 13: exclude with only blank entries",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodExcludeGPUUUIDAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			// Both filters apply. Earlier releases returned as soon as the include
+			// list was consulted, which silently ignored the exclude list.
+			name:     "example 14: include matches, exclude also matches",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: gpu0Uuid,
+				PodExcludeGPUUUIDAnnotation: gpu0Uuid,
+			},
+			want: false,
+		}, {
+			name:     "example 15: include matches, exclude names another device",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: gpu0Uuid,
+				PodExcludeGPUUUIDAnnotation: "GPU-" + uuid.New().String(),
+			},
+			want: true,
 		},
 	}
 
@@ -379,6 +513,116 @@ func Test_PodIsGangMember(t *testing.T) {
 			assert.Equal(t, tt.want, ok)
 		})
 	}
+}
+
+func Test_PodGangKey(t *testing.T) {
+	gangPodIn := func(namespace, gang string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: namespace,
+				Labels:    map[string]string{CoschedulingPodGroupLabel: gang},
+			},
+		}
+	}
+	plainPod := func() *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "team-a",
+				Labels:    map[string]string{"app": "frontend"},
+			},
+		}
+	}
+
+	// Annotation-based dialects are free-form, so the same gang can be spelled
+	// several ways. All of them must fold onto one key, otherwise a gang splits
+	// in two -- the mirror image of the cross-namespace collision.
+	t.Run("every spelling folds onto the same key", func(t *testing.T) {
+		annoPod := func(namespace, value string) *corev1.Pod {
+			return &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   namespace,
+					Annotations: map[string]string{VolcanoGroupNameAnnotation: value},
+				},
+			}
+		}
+		for _, spelling := range []string{
+			"training",
+			"team-a/training",
+			"  team-a/training  ",
+		} {
+			key, ok := PodGangKey(annoPod("team-a", spelling))
+			assert.True(t, ok, spelling)
+			assert.Equal(t, "team-a/training", key, spelling)
+		}
+	})
+
+	t.Run("an explicit foreign namespace is honoured", func(t *testing.T) {
+		key, ok := PodGangKey(&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:   "team-b",
+				Annotations: map[string]string{VolcanoGroupNameAnnotation: "team-a/training"},
+			},
+		})
+		assert.True(t, ok)
+		assert.Equal(t, "team-a/training", key)
+	})
+
+	t.Run("degenerate slash forms fall back to the pod namespace", func(t *testing.T) {
+		for value, want := range map[string]string{
+			"/training": "team-a/training",
+			"training/": "team-a/training",
+		} {
+			key, ok := PodGangKey(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   "team-a",
+					Annotations: map[string]string{VolcanoGroupNameAnnotation: value},
+				},
+			})
+			assert.True(t, ok, value)
+			assert.Equal(t, want, key, value)
+		}
+	})
+
+	t.Run("qualifies the gang name with the namespace", func(t *testing.T) {
+		key, ok := PodGangKey(gangPodIn("team-a", "training"))
+		assert.True(t, ok)
+		assert.Equal(t, "team-a/training", key)
+	})
+
+	t.Run("same gang name in two namespaces yields different keys", func(t *testing.T) {
+		// The whole point: a PodGroup is namespaced, so the bare name is not a
+		// cluster-unique identity and must never be used to decide sameness.
+		a, okA := PodGangKey(gangPodIn("team-a", "training"))
+		b, okB := PodGangKey(gangPodIn("team-b", "training"))
+		assert.True(t, okA)
+		assert.True(t, okB)
+		assert.NotEqual(t, a, b)
+	})
+
+	t.Run("non-gang pod reports no key", func(t *testing.T) {
+		key, ok := PodGangKey(plainPod())
+		assert.False(t, ok)
+		assert.Empty(t, key)
+	})
+
+	t.Run("nil pod reports no key", func(t *testing.T) {
+		key, ok := PodGangKey(nil)
+		assert.False(t, ok)
+		assert.Empty(t, key)
+	})
+
+	t.Run("punctuation-only reference reports no key", func(t *testing.T) {
+		for _, value := range []string{"/", "  "} {
+			key, ok := PodGangKey(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   "team-a",
+					Annotations: map[string]string{VolcanoGroupNameAnnotation: value},
+				},
+			})
+			assert.False(t, ok, value)
+			assert.Empty(t, key, value)
+		}
+	})
 }
 
 func assertDNS1123Compatibility(t *testing.T, name string) {

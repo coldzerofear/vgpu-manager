@@ -27,8 +27,10 @@ import (
 // methods exercised by getAllNvLinkRemotePciInfo.
 type testDevice struct {
 	device.Device
-	getNvLinkState         func(int) (nvml.EnableState, nvml.Return)
-	getNvLinkRemotePciInfo func(int) (nvml.PciInfo, nvml.Return)
+	getNvLinkState            func(int) (nvml.EnableState, nvml.Return)
+	getNvLinkRemotePciInfo    func(int) (nvml.PciInfo, nvml.Return)
+	getNvLinkRemoteDeviceType func(int) (nvml.IntNvLinkDeviceType, nvml.Return)
+	getPciInfo                func() (nvml.PciInfo, nvml.Return)
 }
 
 func (t *testDevice) GetNvLinkState(i int) (nvml.EnableState, nvml.Return) {
@@ -37,6 +39,14 @@ func (t *testDevice) GetNvLinkState(i int) (nvml.EnableState, nvml.Return) {
 
 func (t *testDevice) GetNvLinkRemotePciInfo(i int) (nvml.PciInfo, nvml.Return) {
 	return t.getNvLinkRemotePciInfo(i)
+}
+
+func (t *testDevice) GetNvLinkRemoteDeviceType(i int) (nvml.IntNvLinkDeviceType, nvml.Return) {
+	return t.getNvLinkRemoteDeviceType(i)
+}
+
+func (t *testDevice) GetPciInfo() (nvml.PciInfo, nvml.Return) {
+	return t.getPciInfo()
 }
 
 // pciInfoWithBusID builds an nvml.PciInfo whose BusId field encodes the

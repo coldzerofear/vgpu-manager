@@ -8,8 +8,11 @@
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+#include <sched.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <time.h>
 
 #define MAX_PID_STR_LEN 32
 #define CUDA_MEMORY_LIMIT_ENV "CUDA_MEM_LIMIT"
@@ -18,6 +21,16 @@
 #define CUDA_CORE_SOFT_LIMIT_ENV "CUDA_CORE_SOFT_LIMIT"
 #define CUDA_MEM_OVERSOLD_ENV "CUDA_MEM_OVERSOLD"
 #define VMEM_NODE_ENABLED_ENV "VMEMORY_NODE_ENABLED"
+/* How to advise the driver about oversold managed allocations.
+ *   0  off (default)
+ *   1  SET_PREFERRED_LOCATION = device  -- "keep it on the card"
+ *   2  the above plus SET_ACCESSED_BY = device -- "and when it cannot stay,
+ *      read it where it lies instead of migrating it back"
+ * One knob with three arms rather than several knobs: the arms are mutually
+ * exclusive hypotheses and want to be told apart in a measurement, not
+ * combined. */
+#define CUDA_MEM_UVA_ADVISE_ENV "CUDA_MEM_UVA_ADVISE"
+#define CUDA_MEM_UVA_ADVISE_MAX_MODE 2
 #define MANAGER_VISIBLE_DEVICE_ENV "MANAGER_VISIBLE_DEVICE"
 #define MANAGER_VISIBLE_DEVICES_ENV (MANAGER_VISIBLE_DEVICE_ENV "S")
 #define NVIDIA_VISIBLE_DEVICES_ENV "NVIDIA_VISIBLE_DEVICES"
@@ -82,7 +95,74 @@
  * coarser near-limit tracking); larger N = gentler. Default 64. Set to 0 (or any
  * value <= 0) to DISABLE the floor entirely and revert to delta's raw
  * sm^2-scaled step (the pre-floor behaviour). */
+/* Container-wide shared token bucket. Off by default: with it off the bucket
+ * stays the per-process static it has always been and behaviour is unchanged,
+ * so the feature carries no risk for the single-process containers that gain
+ * nothing from it. See docs/sm_multiproc_shared_bucket_design.md. */
+#define CUDA_SM_SHARED_BUCKET_ENV "CUDA_SM_SHARED_BUCKET"
 #define CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV "CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR"
+
+/*-- Cache: Read only once during the process lifecycle /proc/1/environ --*/
+static char           *g_environ_buf  = NULL;   /* The cached raw content */
+static size_t          g_environ_len  = 0;      /* Effective byte count   */
+static pthread_once_t  g_once         = PTHREAD_ONCE_INIT;
+
+static void _load_pid1_environ(void) {
+  FILE *f = fopen("/proc/1/environ", "re");
+  if (!f) return;
+
+  /* Obtain actual size */
+  struct stat st;
+  if (fstat(fileno(f), &st) != 0 || st.st_size <= 0) {
+    fclose(f);
+    return;
+  }
+
+  /* Allocate according to actual size */
+  size_t cap = (size_t)st.st_size;
+  char *buf = malloc(cap + 1);
+  if (!buf) {
+    fclose(f);
+    return;
+  }
+
+  size_t nread = fread(buf, 1, cap, f);
+  fclose(f);
+
+  if (nread == 0) {
+    free(buf);
+    return;
+  }
+  // Bottom line to prevent crossing the boundary when the NUL is missing at the end.
+  buf[nread] = '\0';
+  g_environ_buf = buf;
+  g_environ_len = nread;
+}
+
+char* _getenv(const char* name) {
+  if (!name || !name[0]) return NULL;
+
+  char *val = getenv(name);
+  if (val || getpid() == 1) return val;
+
+  pthread_once(&g_once, _load_pid1_environ);
+  if (!g_environ_buf) return NULL;
+
+  size_t name_len = strlen(name);
+  char *p = g_environ_buf;
+  char *end = g_environ_buf + g_environ_len;
+
+  while (p < end) {
+    size_t entry_len = strnlen(p, end - p);
+    if (entry_len > name_len &&
+      strncmp(p, name, name_len) == 0 &&
+      p[name_len] == '=') {
+      return p + name_len + 1;
+    }
+    p += entry_len + 1;
+  }
+  return NULL;
+}
 
 size_t iec_to_bytes(const char *iec_value) {
   char *endptr = NULL;
@@ -113,7 +193,7 @@ size_t iec_to_bytes(const char *iec_value) {
 }
 
 int get_compatibility_mode(int *mode) {
-  char *str = getenv(MANAGER_COMPATIBILITY_MODE_ENV);
+  char *str = _getenv(MANAGER_COMPATIBILITY_MODE_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -124,9 +204,9 @@ int get_compatibility_mode(int *mode) {
 int get_mem_ratio(uint32_t index, double *ratio) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_RATIO_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_MEMORY_RATIO_ENV);
+    str = _getenv(CUDA_MEMORY_RATIO_ENV);
     if (!str) {
       return -1;
     }
@@ -141,9 +221,9 @@ int get_mem_ratio(uint32_t index, double *ratio) {
 int get_mem_limit(uint32_t index, size_t *limit) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_MEMORY_LIMIT_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_MEMORY_LIMIT_ENV);
+    str = _getenv(CUDA_MEMORY_LIMIT_ENV);
     if (!str) {
       return -1;
     }
@@ -158,9 +238,9 @@ int get_mem_limit(uint32_t index, size_t *limit) {
 int get_core_limit(uint32_t index, int *limit) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_LIMIT_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_CORE_LIMIT_ENV);
+    str = _getenv(CUDA_CORE_LIMIT_ENV);
     if (!str) {
       return -1;
     }
@@ -175,9 +255,9 @@ int get_core_limit(uint32_t index, int *limit) {
 int get_core_soft_limit(uint32_t index, int *limit) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_CORE_SOFT_LIMIT_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_CORE_SOFT_LIMIT_ENV);
+    str = _getenv(CUDA_CORE_SOFT_LIMIT_ENV);
     if (!str) {
       return -1;
     }
@@ -192,7 +272,7 @@ int get_core_soft_limit(uint32_t index, int *limit) {
 int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", MANAGER_VISIBLE_DEVICE_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -205,7 +285,7 @@ int get_manager_device_uuid(uint32_t index, char *uuid, size_t uuid_size) {
 
 int get_nvidia_device_uuids(char *uuids, size_t uuids_size) {
   char *str = NULL;
-  str = getenv(NVIDIA_VISIBLE_DEVICES_ENV);
+  str = _getenv(NVIDIA_VISIBLE_DEVICES_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -218,7 +298,7 @@ int get_nvidia_device_uuids(char *uuids, size_t uuids_size) {
 
 int get_manager_device_uuids(char *uuids, size_t uuids_size) {
   char *str = NULL;
-  str = getenv(MANAGER_VISIBLE_DEVICES_ENV);
+  str = _getenv(MANAGER_VISIBLE_DEVICES_ENV);
   if (!str || str[0] == '\0') {
     return -1;
   }
@@ -239,9 +319,36 @@ void value_enabled(char *str, int *i) {
   }
 }
 
+/* Advise mode for oversold managed allocations. Unset leaves *out at the
+ * caller's default.
+ *
+ * Parsed as an integer, NOT through value_enabled(): that helper maps anything
+ * other than true/TRUE/1 to zero, so it would read "2" as OFF -- silently
+ * disabling the very arm the caller asked for. "true"/"TRUE" still mean 1,
+ * because this knob was boolean before it grew a second arm and a config
+ * carrying the old spelling should not quietly turn into "off". */
+int get_uva_advise(int *out) {
+  char *str = _getenv(CUDA_MEM_UVA_ADVISE_ENV);
+  if (!str || !*str) {
+    return -1;
+  }
+  if (strcmp(str, "true") == 0 || strcmp(str, "TRUE") == 0) {
+    *out = 1;
+    return 0;
+  }
+  int mode = atoi(str);
+  if (mode < 0) {
+    mode = 0;
+  } else if (mode > CUDA_MEM_UVA_ADVISE_MAX_MODE) {
+    mode = CUDA_MEM_UVA_ADVISE_MAX_MODE;
+  }
+  *out = mode;
+  return 0;
+}
+
 int get_vmem_node_enabled(int *i) {
   char *str = NULL;
-  str = getenv(VMEM_NODE_ENABLED_ENV);
+  str = _getenv(VMEM_NODE_ENABLED_ENV);
   if (!str) {
     return -1;
   }
@@ -252,9 +359,9 @@ int get_vmem_node_enabled(int *i) {
 int get_mem_oversold(uint32_t index, int *i) {
   char env[32] = {0};
   snprintf(env, sizeof(env), "%s_%d", CUDA_MEM_OVERSOLD_ENV, index);
-  char *str = getenv(env);
+  char *str = _getenv(env);
   if (!str) {
-    str = getenv(CUDA_MEM_OVERSOLD_ENV);
+    str = _getenv(CUDA_MEM_OVERSOLD_ENV);
     if (!str) {
       return -1;
     }
@@ -264,7 +371,7 @@ int get_mem_oversold(uint32_t index, int *i) {
 }
 
 int get_sm_watcher_enabled(int *i) {
-  char *str = getenv(EXTERNAL_SM_WATCHER_ENABLED_ENV);
+  char *str = _getenv(EXTERNAL_SM_WATCHER_ENABLED_ENV);
   if (!str) {
     return -1;
   }
@@ -277,7 +384,7 @@ int get_sm_watcher_enabled(int *i) {
  * routing between delta and aimd). Anything else stays on delta. */
 int get_sm_controller_kind(int *kind) {
   *kind = 0;
-  char *str = getenv(CUDA_SM_CONTROLLER_ENV);
+  char *str = _getenv(CUDA_SM_CONTROLLER_ENV);
   if (!str) return -1;
   if (strcasecmp(str, "aimd") == 0) {
     *kind = 1;
@@ -302,7 +409,7 @@ int get_sm_controller_kind(int *kind) {
  * range violation); -1 if env was unset (caller's dflt is used). */
 static int get_positive_double_env(const char *name, double dflt, double min,
                                    double *out) {
-  char *str = getenv(name);
+  char *str = _getenv(name);
   if (!str || !*str) {
     *out = dflt;
     return -1;
@@ -322,7 +429,7 @@ static int get_positive_double_env(const char *name, double dflt, double min,
 /* Non-negative variant: accepts 0 (some knobs use 0 as the "disable" value).
  * Same parse + fallback semantics as get_positive_int_env otherwise. */
 static int get_nonneg_int_env(const char *name, int dflt, int *out) {
-  char *str = getenv(name);
+  char *str = _getenv(name);
   if (!str || !*str) {
     *out = dflt;
     return -1;
@@ -343,7 +450,7 @@ static int get_nonneg_int_env(const char *name, int dflt, int *out) {
  * only an unset/empty value or non-numeric garbage falls back to the default.
  * Used where a non-positive value is a meaningful sentinel (e.g. "disable"). */
 static int get_int_env(const char *name, int dflt, int *out) {
-  char *str = getenv(name);
+  char *str = _getenv(name);
   if (!str || !*str) {            /* unset OR set-to-empty -> use default */
     *out = dflt;
     return -1;
@@ -360,7 +467,7 @@ static int get_int_env(const char *name, int dflt, int *out) {
 }
 
 static int get_positive_int_env(const char *name, int dflt, int *out) {
-  char *str = getenv(name);
+  char *str = _getenv(name);
   if (!str || !*str) {            /* unset OR set-to-empty -> use default */
     *out = dflt;
     return -1;
@@ -446,10 +553,86 @@ int get_aimd_md_cooldown_cycles(int *out) {
   return get_nonneg_int_env(CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV, 3, out);
 }
 
+/* Container-wide shared token bucket on/off. Same true/TRUE/1 spelling as the
+ * other boolean envs. Unset leaves *out untouched at the caller's default (0),
+ * so the shared bucket is opt-in. */
+int get_sm_shared_bucket(int *out) {
+  char *str = _getenv(CUDA_SM_SHARED_BUCKET_ENV);
+  if (!str) {
+    return -1;
+  }
+  value_enabled(str, out);
+  return 0;
+}
+
 static int compare_pids(const void *a, const void *b) {
   int pid1 = *(const int *)a;
   int pid2 = *(const int *)b;
   return (pid1 > pid2) - (pid1 < pid2);
+}
+
+/* Bounded wait for the shared lock on pids.config.
+ *
+ * The manager rewrites this file in place under LOCK_EX every time a process in
+ * this container registers -- which is once per CUDA process, at library init.
+ * Reading without the matching LOCK_SH lets a read land in the middle of that
+ * rewrite.
+ *
+ * The budget is deliberately tiny, and sized against the two things around it:
+ *
+ *   - the writer's critical section is an ftruncate plus one pwrite of a few
+ *     hundred bytes, so a waiter that just missed the lock wins it back in
+ *     microseconds. Contention that outlasts the first few yields is not
+ *     contention, it is something wedged;
+ *   - the caller runs under lock_gpu_device, whose critical section is ~1-3ms,
+ *     and it runs TWICE per hold (once for the compute process list, once for
+ *     the graphics one). Whatever is spent here is spent twice and lands
+ *     directly on every other process queued for that device.
+ *
+ * So: a few free sched_yield()s first, then a handful of 200us sleeps, capping
+ * a single read at about 1ms and one lock hold at about 2ms. LOCK_NB throughout
+ * rather than a blocking LOCK_SH, because a writer that stalls while holding the
+ * lock must not be able to wedge CUDA calls behind it.
+ *
+ * Giving up and reading anyway is the safe degradation: the writer never
+ * truncates before writing, so an unlocked reader sees a complete list, at worst
+ * with trailing PIDs of this same container left over from a longer previous
+ * one. Those are dead PIDs; they match nothing on the device. */
+#define PIDS_CONFIG_LOCK_YIELDS 4
+#define PIDS_CONFIG_LOCK_SLEEPS 5
+#define PIDS_CONFIG_LOCK_BACKOFF_NS (200 * 1000L) /* 200us, so ~1ms worst case */
+
+static int lock_pids_config_shared(int fd) {
+  struct timespec backoff = {.tv_sec = 0, .tv_nsec = PIDS_CONFIG_LOCK_BACKOFF_NS};
+  int attempts = PIDS_CONFIG_LOCK_YIELDS + PIDS_CONFIG_LOCK_SLEEPS;
+  int reason = 0;
+
+  for (int attempt = 0; attempt < attempts; attempt++) {
+    if (flock(fd, LOCK_SH | LOCK_NB) == 0) {
+      return 0;
+    }
+    /* Captured now: sched_yield() and nanosleep() below can overwrite errno,
+     * and the caller logs this to say why it is reading unlocked. */
+    reason = errno;
+    if (reason == EINTR) {
+      continue;
+    }
+    /* EWOULDBLOCK (== EAGAIN) is the writer holding LOCK_EX: retry. Anything
+     * else -- a filesystem without flock support, a bad descriptor -- does not
+     * get better by waiting. */
+    if (reason != EWOULDBLOCK) {
+      break;
+    }
+    if (attempt < PIDS_CONFIG_LOCK_YIELDS) {
+      /* Cheaper than any timer and usually enough: the writer only has to be
+       * scheduled long enough to finish one pwrite. */
+      sched_yield();
+    } else {
+      nanosleep(&backoff, NULL);
+    }
+  }
+  errno = reason;
+  return -1;
 }
 
 int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids) {
@@ -470,6 +653,12 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
     LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
     *pids_size = 0;
     return -1;
+  }
+
+  int lock_fd = fileno(fp);
+  int locked = (lock_pids_config_shared(lock_fd) == 0);
+  if (!locked) {
+    LOGGER(VERBOSE, "reading %s without a shared lock: %s", file_path, strerror(errno));
   }
 
   int max_size = *pids_size;
@@ -500,6 +689,9 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
     LOGGER(WARNING, "PID array full, only stored %d PIDs from %s", max_size, file_path);
   }
 
+  if (locked) {
+    flock(lock_fd, LOCK_UN);
+  }
   fclose(fp);
   return 0;
 }

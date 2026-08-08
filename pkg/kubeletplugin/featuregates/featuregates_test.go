@@ -515,6 +515,12 @@ func TestValidateFeatureGates(t *testing.T) {
 			expectError: false,
 			description: "should be valid when both DeviceMetadata and PassthroughSupport are enabled",
 		},
+		{
+			name:        "FabricManagerPartitioning enabled with PassthroughSupport",
+			fgMap:       map[featuregate.Feature]bool{VGPUSupport: false, NVMLDeviceHealthCheck: false, FabricManagerPartitioning: true, PassthroughSupport: true},
+			expectError: false,
+			description: "should be valid when both FabricManagerPartitioning and PassthroughSupport are enabled",
+		},
 	}
 
 	for _, tt := range tests {

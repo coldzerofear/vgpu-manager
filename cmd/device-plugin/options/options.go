@@ -66,20 +66,20 @@ const (
 
 	Component = "devicePlugin"
 
-	// CorePlugin feature gate will report the virtual cores of the node device to kubelet.
-	CorePlugin featuregate.Feature = util.CorePlugin
-	// MemoryPlugin feature gate will report the virtual memory of the node device to kubelet.
-	MemoryPlugin featuregate.Feature = util.MemoryPlugin
-	// Reschedule feature gate will attempt to reschedule Pods that meet the criteria.
-	Reschedule featuregate.Feature = util.Reschedule
-	// GPUTopology feature gate will report gpu topology information to node.
-	GPUTopology featuregate.Feature = util.GPUTopology
-	// SMWatcher feature gate will initiate an independent utilization observation thread to share the results with the vGPU Pod node, reducing driver call consumption.
-	SMWatcher featuregate.Feature = util.SMWatcher
-	// VMemoryNode feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
-	VMemoryNode featuregate.Feature = util.VMemoryNode
-	// ClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
-	ClientMode featuregate.Feature = util.ClientMode
+	// GPUCoreResourcePlugin feature gate will report the virtual cores of the node device to kubelet.
+	GPUCoreResourcePlugin featuregate.Feature = util.GPUCoreResourcePlugin
+	// GPUMemoryResourcePlugin feature gate will report the virtual memory of the node device to kubelet.
+	GPUMemoryResourcePlugin featuregate.Feature = util.GPUMemoryResourcePlugin
+	// AllocationFailureReschedule feature gate will attempt to reschedule Pods that meet the criteria.
+	AllocationFailureReschedule featuregate.Feature = util.AllocationFailureReschedule
+	// TopologyAwareGPUAllocation feature gate will report gpu topology information to node.
+	TopologyAwareGPUAllocation featuregate.Feature = util.TopologyAwareGPUAllocation
+	// SharedSMUtilizationWatcher feature gate will initiate an independent utilization observation thread to share the results with the vGPU Pod node, reducing driver call consumption.
+	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
+	// VirtualMemoryTracking feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
+	VirtualMemoryTracking featuregate.Feature = util.VirtualMemoryTracking
+	// DevicePluginClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
+	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
 	// HonorPreAllocatedDeviceIDs makes preferred allocation follow pre-allocated device IDs whenever possible.
 	HonorPreAllocatedDeviceIDs featuregate.Feature = util.HonorPreAllocatedDeviceIDs
 )
@@ -87,14 +87,14 @@ const (
 var (
 	version             bool
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		CorePlugin:                 {Default: false, PreRelease: featuregate.Alpha},
-		MemoryPlugin:               {Default: false, PreRelease: featuregate.Alpha},
-		Reschedule:                 {Default: false, PreRelease: featuregate.Alpha},
-		GPUTopology:                {Default: false, PreRelease: featuregate.Alpha},
-		SMWatcher:                  {Default: false, PreRelease: featuregate.Alpha},
-		VMemoryNode:                {Default: false, PreRelease: featuregate.Alpha},
-		ClientMode:                 {Default: false, PreRelease: featuregate.Alpha},
-		HonorPreAllocatedDeviceIDs: {Default: false, PreRelease: featuregate.Alpha},
+		GPUCoreResourcePlugin:       {Default: false, PreRelease: featuregate.Alpha},
+		GPUMemoryResourcePlugin:     {Default: false, PreRelease: featuregate.Alpha},
+		AllocationFailureReschedule: {Default: false, PreRelease: featuregate.Alpha},
+		TopologyAwareGPUAllocation:  {Default: false, PreRelease: featuregate.Alpha},
+		SharedSMUtilizationWatcher:  {Default: false, PreRelease: featuregate.Alpha},
+		VirtualMemoryTracking:       {Default: false, PreRelease: featuregate.Alpha},
+		DevicePluginClientMode:      {Default: false, PreRelease: featuregate.Alpha},
+		HonorPreAllocatedDeviceIDs:  {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -115,7 +115,6 @@ func NewOptions() *Options {
 			imexChannelIDs = append(imexChannelIDs, atoi)
 		}
 	}
-
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -130,14 +129,14 @@ func NewOptions() *Options {
 		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
 		DevicePluginPath:    pluginapi.DevicePluginPath,
 		PprofBindPort:       defaultPprofBindPort,
-		GDSEnabled:          util.GetEnvEnabled("NVIDIA_GDS"),
-		MOFEDEnabled:        util.GetEnvEnabled("NVIDIA_MOFED"),
-		GDRCopyEnabled:      util.GetEnvEnabled("NVIDIA_GDRCOPY"),
 		MigStrategy:         defaultMigStrategy,
 		CDIAnnotationPrefix: defaultCDIAnnotationPrefix,
 		FeatureGate:         featureGate,
 		ImexChannelIDs:      imexChannelIDs,
 		ImexRequired:        util.GetEnvEnabled("IMEX_REQUIRED"),
+		GDSEnabled:          util.GetEnvEnabled("GDS_ENABLED"),
+		MOFEDEnabled:        util.GetEnvEnabled("MOFED_ENABLED"),
+		GDRCopyEnabled:      util.GetEnvEnabled("GDRCOPY_ENABLED"),
 		HostDriverRoot:      util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
 		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
 	}
@@ -168,9 +167,9 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.ExcludeDevices, "exclude-devices", "", "Specify the GPU IDs that need to be excluded. (example: \"0,1,2\" | \"0-2\")")
 	pflag.StringVar(&o.DevicePluginPath, "device-plugin-path", o.DevicePluginPath, "The path for kubelet receive device plugin registration.")
 	pflag.IntVar(&o.PprofBindPort, "pprof-bind-port", o.PprofBindPort, "The port that the debugger listens. (default disable)")
-	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers are started with NVIDIA_GDS=enabled.")
-	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers are started with NVIDIA_MOFED=enabled.")
-	pflag.BoolVar(&o.GDRCopyEnabled, "gdrcopy-enabled", o.GDRCopyEnabled, "Ensure that containers are started with NVIDIA_GDRCOPY=enabled.")
+	pflag.BoolVar(&o.GDSEnabled, "gds-enabled", o.GDSEnabled, "Ensure that containers that request NVIDIA GPU resources are started with GPUDirect Storage support.")
+	pflag.BoolVar(&o.MOFEDEnabled, "mofed-enabled", o.MOFEDEnabled, "Ensure that containers that request NVIDIA GPU resources are started with MOFED support.")
+	pflag.BoolVar(&o.GDRCopyEnabled, "gdrcopy-enabled", o.GDRCopyEnabled, "Ensure that containers that request NVIDIA GPU resources are started with GDRCopy support.")
 	pflag.BoolVar(&o.OpenKernelModules, "open-kernel-modules", o.OpenKernelModules, "If using the open-gpu-kernel-modules, open it and enable compatibility mode.")
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")

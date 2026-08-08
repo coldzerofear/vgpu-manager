@@ -167,6 +167,12 @@ const (
 	SMUtilFile      = "sm_util.config"
 	VMemNode        = "vmem_node"
 	VMemNodeFile    = "vmem_node.config"
+	// SMNode is the per-container shared region backing container-wide SM
+	// (compute) isolation, named symmetrically with VMemNode: vmem_node holds
+	// the cross-process state of memory isolation, sm_node that of compute
+	// isolation. See docs/sm_multiproc_shared_bucket_design.md.
+	SMNode     = "sm_node"
+	SMNodeFile = "sm_node.config"
 )
 
 const (
@@ -181,6 +187,7 @@ const (
 	CudaSoftCoreLimitEnv = "CUDA_CORE_SOFT_LIMIT"
 	// CUDA_CORE_SOFT_LIMIT_<index> gpu memory oversold switch
 	CudaMemoryOversoldEnv = "CUDA_MEM_OVERSOLD"
+	VMemoryNodeEnabled    = "VMEMORY_NODE_ENABLED"
 	// ManagerVisibleDevice Single GPU UUID visible to the container
 	ManagerVisibleDevice = "MANAGER_VISIBLE_DEVICE"
 	// ManagerVisibleDevices List of GPU UUIDs visible to container
@@ -190,6 +197,8 @@ const (
 	ExternalSmWatcherEnabled  = "EXTERNAL_SM_WATCHER_ENABLED"
 	ManagerClientRegisterUuid = "MANAGER_CLIENT_REGISTER_UUID"
 	ManagerVGpuClaimUid       = "MANAGER_VGPU_CLAIM_UID"
+	CudaSMSharedBucket        = "CUDA_SM_SHARED_BUCKET"
+	CudaMemoryUVAAdvise       = "CUDA_MEM_UVA_ADVISE"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
@@ -340,18 +349,6 @@ func (p MemorySchedulerPolicy) String() string {
 }
 
 // FeatureGates
-const (
-	CorePlugin       = "CorePlugin"       // GPUCoreResourcePlugin
-	MemoryPlugin     = "MemoryPlugin"     // GPUMemoryResourcePlugin
-	Reschedule       = "Reschedule"       // AllocationFailureReschedule
-	GPUTopology      = "GPUTopology"      // GPUTopologyAwareAllocation
-	SMWatcher        = "SMWatcher"        // SharedSMUtilizationWatcher
-	SerialBindNode   = "SerialBindNode"   // SerializedNodeBind
-	SerialFilterNode = "SerialFilterNode" // SerializedNodeFilter
-	VMemoryNode      = "VMemoryNode"      // VGPUMemoryTracking
-	ClientMode       = "ClientMode"       // DevicePluginClientMode
-)
-
 const (
 	// GPUCoreResourcePlugin reports virtual GPU core resources to kubelet
 	// for node allocatable visibility only.

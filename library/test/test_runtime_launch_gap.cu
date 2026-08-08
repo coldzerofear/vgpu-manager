@@ -37,6 +37,7 @@ __global__ void scale_add(float *x, int n) {
 }
 
 int main(void) {
+  VGPU_REQUIRE_PRELOAD();
   const int N = 1 << 22; /* 4M elements: large enough to register on the GPU */
   const int iters = 8;
   const int tpb = 256;
