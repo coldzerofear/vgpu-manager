@@ -3049,6 +3049,16 @@ void load_controller_configuration() {
   }
 }
 
+nvmlReturn_t _nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device) {
+  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, index, device);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
+    ret = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, index, device);
+  }
+  return ret;
+}
+
 void init_nvml_to_host_device_index() {
   nvmlReturn_t rt;
   // Intentionally perform a real NVML init here once more before building the
@@ -3080,13 +3090,7 @@ void init_nvml_to_host_device_index() {
 
   nvmlDevice_t device;
   for (int device_index = 0; device_index < device_count; device_index++) {
-    if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
-      rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, device_index, &device);
-    } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
-      rt = NVML_INTERNAL_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex, device_index, &device);
-    } else {
-      rt = NVML_ERROR_FUNCTION_NOT_FOUND;
-    }
+    rt = _nvmlDeviceGetHandleByIndex(device_index, &device);
     if (unlikely(rt)) {
       LOGGER(ERROR, "nvmlDeviceGetHandleByIndex call failed, nvml device: %d, return: %d, str: %s",
                      device_index, rt, NVML_ERROR(nvml_library_entry, rt));
@@ -3126,6 +3130,9 @@ void init_nvml_to_host_device_index() {
  * #199 which addresses the related-but-not-identical pthread_once
  * post-init flag issue. */
 void loader_child_after_fork(void) {
+  // After forking, it is necessary to use it to trigger nvmlInit again to ensure that
+  // subsequent steps that require nvml will not fail due to lack of initialization.
+  init_nvml_host_index = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_controller_config_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_reset_cuda_index_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   pthread_mutex_init(&g_memory_node_lock, NULL);

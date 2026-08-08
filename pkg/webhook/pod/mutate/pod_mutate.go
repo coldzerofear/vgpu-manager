@@ -166,12 +166,6 @@ func cleanupInvalidSchedulerAnnotation(pod *corev1.Pod) {
 	}
 }
 
-func cleanupTopologyModeAnnotation(pod *corev1.Pod) {
-	if _, ok := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation); ok {
-		delete(pod.Annotations, util.DeviceTopologyModeAnnotation)
-	}
-}
-
 func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
 
@@ -221,9 +215,6 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 	if isMultiGPUs {
 		// Setting topology mode only makes sense when requesting multiple GPUs.
 		setDefaultDeviceTopologyMode(pod, h.options, logger)
-	} else {
-		// Clean up invalid topology mode annotations.
-		cleanupTopologyModeAnnotation(pod)
 	}
 	// When a pod requests vGPU, resource claims, or extends resources,
 	// the scheduler may need to collaborate to complete device allocation.

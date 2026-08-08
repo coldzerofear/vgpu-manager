@@ -90,12 +90,26 @@ func (n NumaNodeDevice) SpreadCallback(profile RequestProfile, callback Callback
 	}
 }
 
+// CanNotCrossNumaNode reports whether the request can be satisfied WITHOUT
+// crossing a NUMA boundary, returning the NUMA grouping when it can.
+//
+// There is deliberately no special case for a single card. The question is
+// vacuous for one GPU — it is always inside exactly one NUMA node — and the
+// general path answers it correctly: the largest NUMA group holds at least one
+// device whenever the node has any, so gpuNumber == 1 succeeds and the caller
+// still gets the grouping, letting the device policy choose WHICH NUMA node to
+// consume. That matters: consolidating a single card onto the NUMA node already
+// in use leaves the other intact for a later multi-card request, which is the
+// same reasoning the link path applies when it picks a component.
+//
+// A `gpuNumber > 1` guard used to sit here, harmless only because single-card
+// requests were short-circuited before ever reaching the topology branch. Once
+// they stopped being short-circuited it reported a false "unsatisfiable", and
+// numa-strict turned that into a rejection of every node in the cluster.
 func CanNotCrossNumaNode(gpuNumber int, devices []*device.Device) (NumaNodeDevice, bool) {
-	if gpuNumber > 1 {
-		numaDevices := NewNumaNodeDevice(devices)
-		if gpuNumber <= numaDevices.MaxDeviceNumberForNumaNode() {
-			return numaDevices, true
-		}
+	numaDevices := NewNumaNodeDevice(devices)
+	if gpuNumber <= numaDevices.MaxDeviceNumberForNumaNode() {
+		return numaDevices, true
 	}
 	return nil, false
 }

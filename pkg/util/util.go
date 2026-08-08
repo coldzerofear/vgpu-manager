@@ -27,6 +27,7 @@ import (
 	k8scache "k8s.io/client-go/tools/cache"
 	"k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -199,6 +200,13 @@ func IsContainerRunning(pod *corev1.Pod, containerName string) bool {
 	}
 	return false
 }
+
+// IsRestartableInitContainer reports whether an init container is a sidecar,
+// i.e. it declares restartPolicy: Always. Unlike a regular init container
+// (which runs to completion before the app containers start), a sidecar keeps
+// running alongside the app containers for the rest of the pod's life, so for
+// resource and lifecycle purposes it overlaps the app phase.
+var IsRestartableInitContainer = pod.IsRestartableInitContainer
 
 // CollectableContainerNames returns the names of the pod's containers whose
 // real-time vGPU usage metrics should be collected right now. Regular

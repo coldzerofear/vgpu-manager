@@ -30,7 +30,6 @@ type Options struct {
 	TlsCertFile         string
 	CertRefreshInterval int
 	StuckGracePeriod    string
-	BestEffortMaxGPUs   int
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -42,12 +41,6 @@ const (
 	defaultPprofBindPort       = 0
 	defaultCertRefreshInterval = 5
 	defaultStuckGracePeriod    = "30s"
-	// defaultBestEffortMaxGPUs caps the exhaustive bestEffort link-allocation
-	// search. Beyond this candidate count we fall back to a greedy O(n²·k)
-	// allocator to keep filter latency bounded on dense GPU nodes (16+ cards).
-	// Empirically 12 leaves the exhaustive search around the ~100k partitions
-	// range; 16 partitioning into 8 sets is already ~2M and noticeably slow.
-	defaultBestEffortMaxGPUs = 12
 
 	Component = "scheduler"
 
@@ -85,7 +78,6 @@ func NewOptions() *Options {
 		SchedulerName:       defaultSchedulerName,
 		CertRefreshInterval: defaultCertRefreshInterval,
 		StuckGracePeriod:    defaultStuckGracePeriod,
-		BestEffortMaxGPUs:   defaultBestEffortMaxGPUs,
 		FeatureGate:         featureGate,
 	}
 }
@@ -111,10 +103,21 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
 	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
 	pflag.StringVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
-	pflag.IntVar(&o.BestEffortMaxGPUs, "best-effort-max-gpus", o.BestEffortMaxGPUs,
-		"When the candidate GPU count on a node exceeds this threshold, the link-topology "+
-			"allocator falls back to an O(n²·k) greedy algorithm instead of the exhaustive "+
-			"bestEffort partition search, keeping filter latency bounded on dense nodes.")
+
+	// DEPRECATED, accepted and ignored. The link allocator no longer enumerates
+	// partitions of the whole node, so there is no combinatorial cliff for a
+	// threshold to protect against; the remaining search is bounded internally.
+	//
+	// The flag must keep PARSING even though it does nothing: pflag exits with
+	// "unknown flag" on an unrecognised argument, so simply deleting it would
+	// crash-loop every scheduler whose deployment still passes it. Remove after
+	// one release.
+	var deprecatedBestEffortMaxGPUs int
+	pflag.IntVar(&deprecatedBestEffortMaxGPUs, "best-effort-max-gpus", 0,
+		"DEPRECATED and ignored: link-topology allocation is no longer combinatorial in the node's GPU count.")
+	_ = pflag.CommandLine.MarkDeprecated("best-effort-max-gpus",
+		"link-topology allocation no longer needs a candidate-count threshold; the flag is ignored and will be removed in a future release")
+
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

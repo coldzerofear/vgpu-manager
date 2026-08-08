@@ -1,6 +1,22 @@
 # 调度策略与拓扑分配重构设计
 
-> 本文为 vgpu-manager 调度器 binpack/spread 策略与 NUMA/NVLink 拓扑分配能力的重构设计稿。当前实现已具备完整功能但存在若干精度、性能与边界缺陷,本文档拆解问题、提出三阶段改造方案,作为后续实施的依据。**本文档不包含已落地代码**。
+> ## ⚠️ 文档状态:已落地,link 分配部分已被取代
+>
+> 本文提出的三阶段改造**已全部落地**(strict 模式、`AllocationRequest` 抽象、节点级拓扑
+> fitness 排序、NUMA 回调式策略)。但其中的 **link 拓扑分配方案已被整体替换**:
+>
+> | 本文中的机制 | 现状 |
+> |---|---|
+> | `--best-effort-max-gpus`(§阈值切贪心) | **已删除**(保留为 no-op 弃用 flag,防止旧部署启动失败) |
+> | `computeMaxLinkComponentSize` / `MaxLinkComponentSize()` | 已删除,由 `tiers.maxSize` + `LinkTierMaxComponentSize(tier)` 取代 |
+> | `AllocateLinkTopK` + `selectLinkCandidateByDevicePolicy` | 已删除,策略正交性改由「分档 → 策略 run → 档内选优」的结构保证 |
+> | 划分枚举(partition enumeration) | 改为分档后的**分量内组合枚举**,规模从 C(16,4) 的划分空间降到单分量内 |
+>
+> 替代方案见 [`link_topology_tiered_allocation_design.md`](./link_topology_tiered_allocation_design.md)。
+> 本文 §"链路分配"相关的代码片段(约 §515–§560、§379)是**历史快照**,不代表当前实现;
+> NUMA、节点排序、策略权重部分仍然有效。
+>
+> 本文为 vgpu-manager 调度器 binpack/spread 策略与 NUMA/NVLink 拓扑分配能力的重构设计稿。当前实现已具备完整功能但存在若干精度、性能与边界缺陷,本文档拆解问题、提出三阶段改造方案,作为后续实施的依据。
 
 ## 1. 背景
 

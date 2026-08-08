@@ -7,12 +7,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/serial"
@@ -216,24 +218,36 @@ func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *e
 	// asked us about, regardless of how many drop out at each stage.
 	totalCandidates := len(filteredNodes) + len(nodeReasons)
 
-	filters := []filterFunc{
-		f.nodeFilter,
-		f.deviceFilter,
+	filters := []struct {
+		stage string
+		fn    filterFunc
+	}{
+		{metrics.StageNode, f.nodeFilter},
+		{metrics.StageDevice, f.deviceFilter},
 	}
 	state := framework2.NewCycleState()
 	for i, filter := range filters {
 		if len(filteredNodes) == 0 {
 			break
 		}
-		passedNodes, stageReasons, err := filter(ctx, req, filteredNodes, state)
+		start := time.Now()
+		passedNodes, stageReasons, err := filter.fn(ctx, req, filteredNodes, state)
+		// Total time in the stage. deviceFilter separately records the time it
+		// spent WAITING on the serial filter lock, so work = device_work minus
+		// device_lock_wait in PromQL. They are kept as two independent
+		// observations rather than one subtracted value because Filter calls
+		// run concurrently — carrying the wait on the shared gpuFilter to
+		// subtract it here would be a data race.
+		metrics.ObserveFilterStage(filter.stage, start)
 		if err != nil {
-			klog.Errorf("Filter %d (%T) call failed: %v", i, filter, err)
+			klog.Errorf("Filter %d (%s) call failed: %v", i, filter.stage, err)
 			return &extenderv1.ExtenderFilterResult{Error: err.Error()}
 		}
 		// Change the latest node filtering list for the next round of filtering.
 		filteredNodes = passedNodes
 		maps.Copy(nodeReasons, stageReasons)
 	}
+	recordNodeRejects(nodeReasons)
 	var (
 		nodes     *corev1.NodeList
 		nodeNames *[]string
@@ -472,15 +486,23 @@ func IsScheduled(pod *corev1.Pod) (string, bool) {
 // index (so gang membership is already guaranteed — not re-checked here). A
 // sibling on a candidate node uses its prebuilt NodeInfo (free); otherwise the
 // node is built on demand from nodeLister and CACHED so a node hosting several
-// siblings is built at most once. Returns ("", false) when no sibling resolves
-// (e.g. the gang's first pod). Best-effort: alignment is an optimization, never a
-// correctness gate.
+// siblings is built at most once. Best-effort: alignment is an optimization,
+// never a correctness gate.
+// Returns TWO alignment keys, both resolved in the same pass:
+//   - domain: the NVLink component signature (coarse; useless on a fully
+//     connected node, where every GPU shares one component)
+//   - rail: the sorted per-GPU rail keys (fine; the only key that can align
+//     single-card gang members, and the one that matters on a rail-optimized
+//     fabric)
+//
+// Either may be "" when nothing resolved.
 func FindGangSiblingDomain(
 	pods []*corev1.Pod, nodeInfoByName map[string]*allocator.NodeInfo,
 	nodeLister listerv1.NodeLister, req *allocator.AllocationRequest,
-) (string, bool) {
+) (domain string, rail string) {
 
 	domainMap := make(map[string]int)
+	railMap := make(map[string]int)
 	// built caches NodeInfos constructed on demand for non-candidate sibling
 	// nodes, so multiple siblings on one node trigger a single (expensive) build.
 	var built map[string]*allocator.NodeInfo
@@ -521,22 +543,30 @@ func FindGangSiblingDomain(
 		if domain, ok := nodeInfoW.DomainOfUUIDs(uuids); ok {
 			domainMap[domain]++
 		}
+		if rail, ok := nodeInfoW.RailSignatureOfUUIDs(uuids); ok {
+			railMap[rail]++
+		}
 	}
-	domains := maps.Keys(domainMap)
-	switch len(domains) {
+	return majorityKey(domainMap), majorityKey(railMap)
+}
+
+// majorityKey returns the most-voted key, breaking ties on the lower key for
+// determinism. Returns "" when there are no votes.
+func majorityKey(votes map[string]int) string {
+	keys := maps.Keys(votes)
+	switch len(keys) {
 	case 0:
-		return "", false
+		return ""
 	case 1:
-		return domains[0], true
+		return keys[0]
 	default:
-		// Majority wins; ties break to the lower signature for determinism.
-		sort.Slice(domains, func(i, j int) bool {
-			if ci, cj := domainMap[domains[i]], domainMap[domains[j]]; ci != cj {
+		sort.Slice(keys, func(i, j int) bool {
+			if ci, cj := votes[keys[i]], votes[keys[j]]; ci != cj {
 				return ci > cj
 			}
-			return domains[i] < domains[j]
+			return keys[i] < keys[j]
 		})
-		return domains[0], true
+		return keys[0]
 	}
 }
 
@@ -577,8 +607,13 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		klog.V(3).InfoS("Re-triggering device pre allocation for pod", "pod", klog.KObj(pod))
 	}
 
+	lockStart := time.Now()
 	f.locker.Lock()
 	defer f.locker.Unlock()
+	// Recorded separately from the stage total: SerializedNodeFilter is on by
+	// default, so on a busy cluster this is queueing, not work, and folding the
+	// two together makes contention look like slow allocation.
+	metrics.ObserveFilterStage(metrics.StageLockWait, lockStart)
 
 	// Ensure that the context has not timed out
 	if err := ctx.Err(); err != nil {
@@ -791,9 +826,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 				return filteredNodes, failed, err
 			}
 		}
-		if domain, ok := FindGangSiblingDomain(gangPods, nodeInfoByName, f.nodeLister, req); ok {
-			req.GangDomainKey = domain
-		}
+		req.GangDomainKey, req.GangRailKey = FindGangSiblingDomain(gangPods, nodeInfoByName, f.nodeLister, req)
 	}
 
 	defaultNodePriority := false
@@ -860,10 +893,55 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		f.podLister.Mutation(newPod)
 		filteredNodes = append(filteredNodes, *node)
 		success = true
+		// PER POD, emitted for the node that actually accepted it. nodeInfo
+		// carries the request snapshot the allocator recorded its topology
+		// outcome onto.
+		recordPlacement(req, nodeInfo.AllocationRequest)
 	}
 	if success {
 		f.recorder.Eventf(pod, corev1.EventTypeNormal, reason.EventFilteringSucceed,
 			"Successfully matched node %q", filteredNodes[0].Name)
 	}
 	return filteredNodes, failed, nil
+}
+
+// recordNodeRejects publishes the per-Code rejection counts.
+//
+// AlreadyScheduledElsewhere is deliberately EXCLUDED: it is stamped on every
+// remaining candidate once some node has accepted the pod, so counting it would
+// add one bump per non-selected node on every SUCCESSFUL schedule and swamp the
+// genuine rejection causes. Those nodes were not rejected — they were not
+// needed.
+func recordNodeRejects(reasons map[string]*reason.FilterReason) {
+	for _, r := range reasons {
+		if r == nil || r.Primary == reason.AlreadyScheduledElsewhere {
+			continue
+		}
+		metrics.NodeRejectTotal.WithLabelValues(string(r.Primary)).Inc()
+	}
+}
+
+// recordPlacement publishes the PER POD metrics, once, for the node that
+// actually accepted the pod.
+//
+// Emitted here rather than in the allocator because only the filter knows which
+// candidate won: the allocator runs per node and would report a single pod as
+// several placements. nodeReq is the winning node's request snapshot, carrying
+// the topology outcome the allocator recorded on it.
+func recordPlacement(req, nodeReq *allocator.AllocationRequest) {
+	// Every annotation-derived value goes through the metrics package's
+	// whitelist: the parsers pass unknown values through verbatim, which would
+	// otherwise make label cardinality user-controlled.
+	mode := metrics.TopologyLabel(req.Topology.BaseTopology())
+	metrics.PodPolicyTotal.WithLabelValues(
+		metrics.PolicyLabel(req.NodePolicy), metrics.PolicyLabel(req.DevicePolicy), mode,
+	).Inc()
+
+	outcome := nodeReq.TopologyOutcome()
+	if outcome.Result != "" {
+		metrics.TopologyPlacementTotal.WithLabelValues(mode, outcome.Result).Inc()
+	}
+	if outcome.Alignment != "" {
+		metrics.CrossPodAlignmentTotal.WithLabelValues(outcome.Alignment).Inc()
+	}
 }

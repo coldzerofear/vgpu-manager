@@ -8,8 +8,25 @@ The VGPU pod can use the annotation `nvidia.com/device-topology-mode` to select 
 
 Annotation `nvidia.com/device-topology-mode` supports values:
 
-* numa: When allocating multiple cards, recognize the affinity of numa and try to allocate them on GPUs of numa nodes on the same side.
-* link: When allocating multiple cards, identify nvlinks and try to allocate them to the optimal nvlink topology to improve multi card performance.
+* numa: Recognize the affinity of numa and try to allocate GPUs on numa nodes of the same side.
+* link: Identify nvlinks and try to allocate to the optimal nvlink topology to improve multi card performance.
+* numa-strict / link-strict: same as above, but a node that cannot satisfy the
+  topology is **rejected** instead of falling back to plain resource ordering.
+
+### Single-card requests
+
+Topology mode applies to single-GPU requests too, not only to multi-card ones.
+For a non-strict mode this is a no-op in practice — one card is trivially
+"connected" — but it does two useful things: it lets a single-card pod join a
+cross-pod gang's NVLink island (see below), and it makes `-strict` mean the same
+thing regardless of card count.
+
+> **Upgrade note.** Older releases skipped the topology dispatch entirely when a
+> pod asked for exactly one GPU, so `link-strict` was silently ignored there.
+> It is now enforced: a 1-GPU `link-strict` pod is rejected on any node that
+> publishes no link topology — which, if the device plugin does not have the
+> `TopologyAwareGPUAllocation` gate enabled, means every node. Enable the gate
+> (below), or use plain `link` if you want best-effort with fallback.
 
 ### Numa topology
 
@@ -33,7 +50,7 @@ spec:
       limits:
         cpu: 2
         memory: 4Gi
-        nvidia.com/vgpu-number: 2 # Valid when applying for more than one card
+        nvidia.com/vgpu-number: 2
         nvidia.com/vgpu-memory: 10000
 ```
 
@@ -84,7 +101,7 @@ spec:
       limits:
         cpu: 2
         memory: 4Gi
-        nvidia.com/vgpu-number: 2 # Valid when applying for more than one card
+        nvidia.com/vgpu-number: 2
         nvidia.com/vgpu-memory: 10000
 ```
 
