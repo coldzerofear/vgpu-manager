@@ -1,6 +1,24 @@
 # 跨 Pod NVLink 拓扑亲和设计(轻量版)
 
-> 本文为 vgpu-manager 在 **同节点跨 Pod 边界保持 NVLink 连通** 的设计。单 Pod 内的链路分配已落地;本文在**不影响现有功能**的前提下,给出让"同 Gang 的多个 Pod 落在同一 NVLink 连通分量"的**最小改造方案**。**本文档不包含已落地代码。**
+> ## ⚠️ 文档状态:历史设计稿,部分已被取代
+>
+> **本文描述的 cross-pod 能力已落地**(anchor 自解析 + 分量收窄 + 跨节点 domain 签名对齐),
+> 但**它所依赖的单 Pod link 分配底座已被整体替换**:`bestEffortPolicy` / `AllocateLinkTopK` /
+> `AreDevicesLinked` / `MaxLinkComponentSize` 已删除,改为分档选择器
+> ([`link_topology_tiered_allocation_design.md`](./link_topology_tiered_allocation_design.md))。
+>
+> 因此:
+> - **§1.1 的 API 表与行号是历史快照**,其中 `AreDevicesLinked`、`MaxLinkComponentSize`、
+>   `AllocateLinkTopK`、`selectLinkCandidateByDevicePolicy` 在当前代码中**已不存在**;
+>   对应能力现由 `ConnectedAtTier` / `LinkTierMaxComponentSize` / `allocateTiered` 提供。
+> - **§9.5 / §9.6 关于 strict 语义收紧的结论仍然成立**,只是实现从"事后连通校验"改为
+>   "选出的方案落在哪一档",strict 即"低于 `TierNVLink` 一律拒"。
+> - 落地后新增、本文未覆盖的部分:**单卡也参与 cross-pod 对齐**,以及
+>   **rail 级(`GangRailKey`)→ 分量级(`GangDomainKey`)两级降级**。
+>
+> 阅读本文请以「为什么这么设计」为主,**不要**据此推断当前 API。
+>
+> 本文为 vgpu-manager 在 **同节点跨 Pod 边界保持 NVLink 连通** 的设计。单 Pod 内的链路分配已落地;本文在**不影响现有功能**的前提下,给出让"同 Gang 的多个 Pod 落在同一 NVLink 连通分量"的**最小改造方案**。
 >
 > 本文是 [`multinode_topology_aware_scheduling_analysis.md`](./multinode_topology_aware_scheduling_analysis.md) 中 **L0 层**(节点内)的详细设计;跨节点聚拢(L2/L3)见该文。底座见 [`scheduler_strategy_topology_refactor_design.md`](./scheduler_strategy_topology_refactor_design.md)。
 

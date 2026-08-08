@@ -177,13 +177,10 @@ func NodeUtilization(info *device.NodeInfo, req *AllocationRequest) ResourceUtil
 // arithmetic, exposed as a building block so the per-device Score path
 // can share machinery with the per-node and per-NUMA paths.
 func DeviceUtilization(d *device.Device) ResourceUtilization {
-	totalNum := float64(d.GetTotalNumber())
-	totalMem := float64(d.GetTotalMemory())
-	totalCore := float64(d.GetTotalCores())
 	return ResourceUtilization{
-		Num:  1 - util.SafeDiv(float64(d.AllocatableNumber()), totalNum),
-		Mem:  1 - util.SafeDiv(float64(d.AllocatableMemory()), totalMem),
-		Core: 1 - util.SafeDiv(float64(d.AllocatableCores()), totalCore),
+		Num:  1 - util.SafeDiv(float64(d.AllocatableNumber()), float64(d.GetTotalNumber())),
+		Mem:  1 - util.SafeDiv(float64(d.AllocatableMemory()), float64(d.GetTotalMemory())),
+		Core: 1 - util.SafeDiv(float64(d.AllocatableCores()), float64(d.GetTotalCores())),
 	}
 }
 

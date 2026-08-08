@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -127,6 +128,29 @@ type AllocationRequest struct {
 	// sibling node not a candidate, or cross-pod off).
 	GangDomainKey string
 
+	// GangRailKey is the FINER cross-node alignment key: the sorted set of
+	// per-GPU rail keys an already-placed gang sibling occupies, resolved on the
+	// sibling's OWN node (rail map when published, device index otherwise).
+	//
+	// It exists because GangDomainKey cannot express single-card alignment: on a
+	// fully connected node every GPU is in one NVLink component, so the
+	// component signature is identical on every node. A GPU's own rail is what
+	// distinguishes "GPU 3 on node A" from "GPU 5 on node B" — and on a
+	// rail-optimized fabric that distinction is the difference between one leaf
+	// hop and a trip through the spine.
+	//
+	// Applied as a PREFERENCE that degrades to GangDomainKey, never as a hard
+	// filter, so an over-constrained alignment cannot make a pod unschedulable.
+	GangRailKey string
+
+	// topoOutcome accumulates what the topology decisions on THIS node actually
+	// achieved, so the filter can report the pod's real outcome once it knows
+	// which node won. It is per-node because the filter hands each candidate its
+	// own request snapshot (GetSnapshot), and per-pod-worst across containers:
+	// a pod whose second container had to drop to cross-NUMA did not get what it
+	// asked for, however well its first container fared.
+	topoOutcome TopologyOutcome
+
 	// Profile is the pod's request-weighted scoring profile. Captured
 	// here so the filter and the allocator score with identical weights
 	// for the same pod — see profile.go for the rationale.
@@ -160,6 +184,58 @@ type ContainerNeed struct {
 	Number      int
 	Cores       int64
 	Memory      int64
+}
+
+// TopologyOutcome is what a topology-requesting placement actually achieved on
+// one node. Zero value means no topology decision was made (the pod requested
+// none, or never reached the topology branch).
+type TopologyOutcome struct {
+	// Result is a metrics.Result* value: the connectivity received.
+	Result string
+	// Alignment is a metrics.Align* value, empty when the pod did not opt into
+	// cross-pod topology.
+	Alignment string
+}
+
+// resultSeverity ranks outcomes worst-first so recordTopologyOutcome can keep
+// the worst across a pod's containers. Unknown values rank worst, which is the
+// safe direction: an unclassified outcome should never be reported as success.
+func resultSeverity(result string) int {
+	switch result {
+	case metrics.ResultNVLink:
+		return 0
+	case metrics.ResultSwitch:
+		return 1
+	case metrics.ResultNUMA:
+		return 2
+	case metrics.ResultAny:
+		return 3
+	case metrics.ResultCrossNUMA, metrics.ResultSpanned:
+		return 4
+	case metrics.ResultNone:
+		return 5
+	default:
+		return 6
+	}
+}
+
+// recordTopologyOutcome keeps the WORST result seen across this pod's
+// containers on this node, and the FIRST alignment (all containers of a pod
+// share one gang identity, so they cannot disagree).
+func (req *AllocationRequest) recordTopologyOutcome(result, alignment string) {
+	if req.topoOutcome.Result == "" || resultSeverity(result) > resultSeverity(req.topoOutcome.Result) {
+		req.topoOutcome.Result = result
+	}
+	if req.topoOutcome.Alignment == "" {
+		req.topoOutcome.Alignment = alignment
+	}
+}
+
+// TopologyOutcome reports what the topology decisions on this node achieved.
+// Only meaningful on the per-node snapshot the filter passed to the allocator,
+// and only after a SUCCESSFUL Allocate.
+func (req *AllocationRequest) TopologyOutcome() TopologyOutcome {
+	return req.topoOutcome
 }
 
 func (req *AllocationRequest) GetSnapshot() *AllocationRequest {

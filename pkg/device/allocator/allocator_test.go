@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/assert"
 )
@@ -122,106 +121,4 @@ func Test_resolveContainerNeeds(t *testing.T) {
 			assert.Equal(t, tc.wantMemory, gotMemory, "memory")
 		})
 	}
-}
-
-// Test_resolveLinkDevices covers the cross-package join from
-// gpuallocator.Device (returned by the topology selector) back to
-// *device.Device (carrier of the allocatable accounting buildClaims
-// needs). Picked entries that aren't in the store are dropped — a
-// defensive guard since the selector is supposed to choose only from
-// devices we passed in, but a stale entry shouldn't poison the whole
-// claim list.
-func Test_resolveLinkDevices(t *testing.T) {
-	d0 := device.NewFakeDeviceWithUUID("uuid-0", 0, 0, 10, 0, 100, 0, 12000, 0)
-	d1 := device.NewFakeDeviceWithUUID("uuid-1", 1, 0, 10, 0, 100, 0, 12000, 0)
-	d2 := device.NewFakeDeviceWithUUID("uuid-2", 2, 0, 10, 0, 100, 0, 12000, 0)
-	store := []*device.Device{d0, d1, d2}
-
-	mkPicked := func(uuids ...string) []*gpuallocator.Device {
-		out := make([]*gpuallocator.Device, len(uuids))
-		for i, u := range uuids {
-			out[i] = gpuallocator.NewDevice(i, u, "")
-		}
-		return out
-	}
-
-	t.Run("happy path: each picked UUID resolves, order preserved", func(t *testing.T) {
-		got := resolveLinkDevices(mkPicked(d2.GetUUID(), d0.GetUUID()), store)
-		assert.Equal(t, []*device.Device{d2, d0}, got)
-	})
-
-	t.Run("empty picked → empty result", func(t *testing.T) {
-		assert.Empty(t, resolveLinkDevices(nil, store))
-		assert.Empty(t, resolveLinkDevices([]*gpuallocator.Device{}, store))
-	})
-
-	t.Run("unknown UUID is silently skipped, known UUIDs still resolved", func(t *testing.T) {
-		// The selector should never pick UUIDs we didn't supply, but if
-		// it ever does we want graceful degradation over a panic / partial
-		// build with nil entries. Known UUIDs come back; unknown ones drop.
-		got := resolveLinkDevices(mkPicked(d0.GetUUID(), "ghost-uuid", d1.GetUUID()), store)
-		assert.Equal(t, []*device.Device{d0, d1}, got)
-	})
-}
-
-// Test_candidateSetScore makes sure the per-device-Score averaging used
-// by link-topology + binpack/spread tie-breaking still returns a
-// meaningful directional value after the single-pass-max refactor.
-// Sets with no resolvable devices return 0 rather than NaN so the
-// argmax in selectLinkCandidateByDevicePolicy stays well-defined.
-func Test_candidateSetScore(t *testing.T) {
-	// d0 has higher usage than d1 — binpack prefers d0 (more "warm").
-	// UUIDs are explicit so the byUUID map keys actually differ; bare
-	// NewFakeDevice leaves UUID as "" and collapses both into one entry.
-	d0 := device.NewFakeDeviceWithUUID("uuid-warm", 0, 8, 10, 80, 100, 8000, 10000, 0) // 80% used
-	d1 := device.NewFakeDeviceWithUUID("uuid-cold", 1, 2, 10, 20, 100, 2000, 10000, 0) // 20% used
-	store := []*device.Device{d0, d1}
-
-	byUUID := map[string]*device.Device{
-		d0.GetUUID(): d0,
-		d1.GetUUID(): d1,
-	}
-	setD0 := []*gpuallocator.Device{gpuallocator.NewDevice(0, d0.GetUUID(), "")}
-	setD1 := []*gpuallocator.Device{gpuallocator.NewDevice(1, d1.GetUUID(), "")}
-
-	t.Run("binpack: higher-used device gets the higher score", func(t *testing.T) {
-		sD0 := candidateSetScore(setD0, byUUID, UniformProfile, util.BinpackPolicy)
-		sD1 := candidateSetScore(setD1, byUUID, UniformProfile, util.BinpackPolicy)
-		assert.Greater(t, sD0, sD1, "binpack: 80%%-used d0 should beat 20%%-used d1")
-	})
-
-	t.Run("spread: lower-used device gets the higher score", func(t *testing.T) {
-		sD0 := candidateSetScore(setD0, byUUID, UniformProfile, util.SpreadPolicy)
-		sD1 := candidateSetScore(setD1, byUUID, UniformProfile, util.SpreadPolicy)
-		assert.Greater(t, sD1, sD0, "spread: 20%%-used d1 should beat 80%%-used d0")
-	})
-
-	t.Run("empty set → 0 score, not NaN", func(t *testing.T) {
-		assert.Equal(t, 0.0, candidateSetScore(nil, byUUID, UniformProfile, util.BinpackPolicy))
-	})
-
-	t.Run("all UUIDs missing from byUUID → 0 score, not NaN", func(t *testing.T) {
-		ghost := []*gpuallocator.Device{gpuallocator.NewDevice(0, "no-such-uuid", "")}
-		assert.Equal(t, 0.0, candidateSetScore(ghost, byUUID, UniformProfile, util.BinpackPolicy))
-	})
-
-	// Cross-check that selectLinkCandidateByDevicePolicy's single-pass
-	// argmax picks the same set the older O(n log n) sort would have.
-	// Tie behaviour: ties resolve to lowest index, preserving the
-	// link-score ordering established by AllocateLinkTopK.
-	t.Run("single-pass argmax matches sorted-first behaviour", func(t *testing.T) {
-		candidates := [][]*gpuallocator.Device{setD1, setD0} // d1 first, d0 second
-		// binpack prefers warmer → d0 should win, picked over d1
-		got := selectLinkCandidateByDevicePolicy(candidates, store, UniformProfile, util.BinpackPolicy)
-		assert.Equal(t, setD0, got)
-
-		// spread prefers colder → d1 wins
-		got = selectLinkCandidateByDevicePolicy(candidates, store, UniformProfile, util.SpreadPolicy)
-		assert.Equal(t, setD1, got)
-	})
-
-	t.Run("single-candidate fast path skips scoring entirely", func(t *testing.T) {
-		got := selectLinkCandidateByDevicePolicy([][]*gpuallocator.Device{setD0}, store, UniformProfile, util.BinpackPolicy)
-		assert.Equal(t, setD0, got)
-	})
 }

@@ -23,10 +23,10 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-scheduler/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/route"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/bind"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	tlsconfig "github.com/grepplabs/cert-source/config"
 	tlsserver "github.com/grepplabs/cert-source/tls/server"
@@ -54,7 +54,6 @@ func runApp(opt *options.Options) (exitCode int) {
 
 	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
 	util.MustInitGlobalDomain(opt.Domain)
-	gpuallocator.SetBestEffortMaxGPUs(opt.BestEffortMaxGPUs)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
 	kubeClient, err := client.NewClientSet(
@@ -139,6 +138,9 @@ func runApp(opt *options.Options) (exitCode int) {
 	route.AddFilterPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
 	route.AddPreemptPredicate(handler, preemptPlugin)
+	// Served on the extender's existing port: the endpoint inherits its TLS
+	// setting and needs no extra chart plumbing (port, probe, NetworkPolicy).
+	route.AddMetricsHandle(handler, metrics.Handler())
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	factory.Start(ctx.Done())
