@@ -13,7 +13,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  BASE_IMAGE: vgpu-manager-base:ci
+  BASE_IMAGE: ghcr.io/${{ github.repository }}-base:ci
 
 jobs:
   test:
@@ -90,7 +90,7 @@ jobs:
         with:
           context: .
           file: Dockerfile.base
-          load: true
+          push: true
           tags: ${{ env.BASE_IMAGE }}
           build-args: |
             GIT_BRANCH=${{ github.ref_name }}
