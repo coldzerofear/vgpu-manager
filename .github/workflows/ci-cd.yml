@@ -1,29 +1,143 @@
-name: Build and Push to Tencent CCR
+name: CI/CD
 
 on:
+  pull_request:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
   workflow_dispatch:
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  BASE_IMAGE: vgpu-manager-base:ci
+
 jobs:
-  build:
+  test:
+    name: Go test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+  images:
+    name: Build and publish images
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Tencent CCR
+      - name: Set up Go for image metadata
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ccr.ccs.tencentyun.com
-          username: ${{ secrets.TENCENT_SECRET_ID }}
-          password: ${{ secrets.TENCENT_SECRET_KEY }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v5
+      - name: Calculate image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Calculate DRA image metadata
+        id: meta-dra
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dra
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build base image
+        uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile.base
+          load: true
+          tags: ${{ env.BASE_IMAGE }}
+          build-args: |
+            GIT_BRANCH=${{ github.ref_name }}
+            GIT_COMMIT=${{ github.sha }}
+            GIT_TREE_STATE=clean
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
+            BUILD_NVVERSION=v0.4.0-rc.1
+            GOLANG_VERSION=1.26.0
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,mode=max,scope=base
+
+      - name: Build and push manager image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
           push: true
-          tags: ccr.ccs.tencentyun.com/kingderliu/vgpu-manage
+          build-args: |
+            BASE_BUILD_IMAGE=${{ env.BASE_IMAGE }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=manager
+          cache-to: type=gha,mode=max,scope=manager
+
+      - name: Resolve NVIDIA Container Toolkit image
+        id: toolkit
+        shell: bash
+        run: |
+          echo "image=$(bash scripts/toolkit-container-image.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push DRA image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dra
+          push: true
+          build-args: |
+            BASE_BUILD_IMAGE=${{ env.BASE_IMAGE }}
+            TOOLKIT_CONTAINER_IMAGE=${{ steps.toolkit.outputs.image }}
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || '' }}
+          tags: ${{ steps.meta-dra.outputs.tags }}
+          labels: ${{ steps.meta-dra.outputs.labels }}
+          cache-from: type=gha,scope=dra
+          cache-to: type=gha,mode=max,scope=dra
