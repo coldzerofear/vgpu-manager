@@ -64,7 +64,8 @@ func (m *migDevicePlugin) relatedParentDevice(parentUUID string) bool {
 func (m *migDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
 	klog.V(4).InfoS("ListAndWatch", "pluginName", m.Name(), "server", s)
 	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-		klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+		klog.Errorf("DevicePlugin %q ListAndWatch send devices error: %v", m.Name(), err)
+		return err
 	}
 	stopCh := m.baseServer.GetStopCh()
 	for {
@@ -72,16 +73,16 @@ func (m *migDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlu
 		case d := <-m.baseServer.GetDeviceCh():
 			// If MIG devices related to resources are marked as unhealthy, resend the device list.
 			if d.MIG != nil && m.baseServer.GetResourceName() == GetMigResourceName(d.MIG.MigInfo) {
-				klog.Infof("'%s' device marked unhealthy: %s", m.baseServer.GetResourceName(), d.MIG.UUID)
+				klog.Infof("%q device marked unhealthy: %s", m.baseServer.GetResourceName(), d.MIG.UUID)
 				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+					klog.Errorf("DevicePlugin %q ListAndWatch send devices error: %v", m.Name(), err)
 				}
 			}
 			// If the parent device of a resource related MIG device is marked as unhealthy, resend the device list.
 			if d.GPU != nil && d.GPU.MigEnabled && m.relatedParentDevice(d.GPU.UUID) {
-				klog.Infof("'%s' parent device marked unhealthy: %s", m.baseServer.GetResourceName(), d.GPU.UUID)
+				klog.Infof("%q parent device marked unhealthy: %s", m.baseServer.GetResourceName(), d.GPU.UUID)
 				if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-					klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
+					klog.Errorf("DevicePlugin %q ListAndWatch send devices error: %v", m.Name(), err)
 				}
 			}
 		case <-stopCh:

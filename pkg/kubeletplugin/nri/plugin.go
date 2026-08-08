@@ -38,7 +38,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
@@ -306,14 +305,12 @@ func (p *Plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containe
 		vgpuCount++
 		entry := Entry{ClaimUID: claimUID, ConfigDir: ConfigDirFor(claimUID, podUID, c.GetName())}
 		rebuilt[Key(podUID, c.GetName())] = entry
-		klog.V(4).InfoS("NRI Synchronize vGPU container",
-			"container", c.GetName(), "podUID", podUID, "claimUID", claimUID,
-			"configDir", entry.ConfigDir, "state", c.GetState().String())
+		klog.V(4).InfoS("NRI Synchronize vGPU container", "container", c.GetName(),
+			"podUID", podUID, "claimUID", claimUID, "configDir", entry.ConfigDir, "state", c.GetState().String())
 	}
 
 	p.cache.Replace(rebuilt)
-	klog.InfoS("NRI Synchronize complete",
-		"pods", len(pods), "containers", len(containers),
+	klog.InfoS("NRI Synchronize complete", "pods", len(pods), "containers", len(containers),
 		"vgpuContainers", vgpuCount, "cacheEntries", p.cache.Len(), "dryRun", p.dryRun)
 	return nil, nil
 }
@@ -337,12 +334,10 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 	// PID yet), inject nothing.
 	if p.dryRun || p.resolveMounts == nil {
 		_, hasCompat := lookupEnv(c.GetEnv(), util.ManagerCompatibilityMode)
-		klog.InfoS("NRI CreateContainer (observe-only)",
-			"pod", pod.GetName(), "podUID", pod.GetUid(), "namespace", pod.GetNamespace(),
-			"container", c.GetName(), "state", c.GetState().String(), "pid", c.GetPid(),
-			"isVGPUContainer", hasCompat, "hasClaimUIDEnv", hasClaim, "claimUID", claimUID,
-			"envOfInterest", filterEnv(c.GetEnv()), "mountsOfInterest", filterMounts(c.GetMounts()),
-			"dryRun", p.dryRun)
+		klog.InfoS("NRI CreateContainer (observe-only)", "pod", pod.GetName(), "podUID", pod.GetUid(),
+			"namespace", pod.GetNamespace(), "container", c.GetName(), "state", c.GetState().String(), "pid", c.GetPid(),
+			"isVGPUContainer", hasCompat, "hasClaimUIDEnv", hasClaim, "claimUID", claimUID, "envOfInterest",
+			filterEnv(c.GetEnv()), "mountsOfInterest", filterMounts(c.GetMounts()), "dryRun", p.dryRun)
 		return nil, nil, nil
 	}
 
@@ -384,20 +379,20 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 		}
 	}
 
-	// Clean up old cache files (if any)
-	pidsConfigPath := filepath.Join(inj.ConfigDir, registry.PidsConfig)
+	// Clean up old cache files (if any). pids.config is deliberately absent from
+	// this list: resolveMounts above already emptied it in place, and it must
+	// stay in place — it is the source of a file bind mount injected in the same
+	// adjustment, and removing the source would abort container creation.
 	basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
 	vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
 	smNodeConfigPath := filepath.Join(basePath, util.SMNode, util.SMNodeFile)
-	_ = os.RemoveAll(pidsConfigPath)
 	_ = os.RemoveAll(vmemNodeConfigPath)
 	_ = os.RemoveAll(smNodeConfigPath)
 
 	p.cache.Set(pod.GetUid(), c.GetName(), Entry{ClaimUID: claimUID, ConfigDir: inj.ConfigDir})
 
-	klog.V(3).InfoS("NRI CreateContainer injected",
-		"pod", pod.GetName(), "podUID", pod.GetUid(), "container", c.GetName(),
-		"claimUID", claimUID, "configDir", inj.ConfigDir, "mounts", len(inj.Mounts))
+	klog.V(3).InfoS("NRI CreateContainer injected", "pod", pod.GetName(), "podUID", pod.GetUid(),
+		"container", c.GetName(), "claimUID", claimUID, "configDir", inj.ConfigDir, "mounts", len(inj.Mounts))
 	return adjust, nil, nil
 }
 
@@ -411,10 +406,8 @@ func (p *Plugin) StartContainer(_ context.Context, pod *api.PodSandbox, c *api.C
 		sinceCreate = time.Since(t)
 	}
 	p.mu.Unlock()
-	klog.V(4).InfoS("NRI StartContainer",
-		"pod", pod.GetName(), "container", c.GetName(),
-		"state", c.GetState().String(), "pid", c.GetPid(),
-		"sinceCreateMillis", sinceCreate.Milliseconds())
+	klog.V(4).InfoS("NRI StartContainer", "pod", pod.GetName(), "container", c.GetName(),
+		"state", c.GetState().String(), "pid", c.GetPid(), "sinceCreateMillis", sinceCreate.Milliseconds())
 	return nil
 }
 

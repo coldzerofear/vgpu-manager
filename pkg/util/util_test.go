@@ -56,16 +56,83 @@ func Test_CheckDeviceType(t *testing.T) {
 			want: false,
 		}, {
 			name:     "example 6: match GPU type",
-			cardType: "NVIDIA-NVIDIA GeForce RTX 3080 Ti",
+			cardType: "NVIDIA GeForce RTX 3080 Ti",
 			annotations: map[string]string{
 				PodIncludeGpuTypeAnnotation: "RTX 4090,RTX 3080",
 			},
 			want: true,
 		}, {
 			name:        "example 7: empty annotations",
-			cardType:    "NVIDIA-NVIDIA GeForce RTX 3080 Ti",
+			cardType:    "NVIDIA GeForce RTX 3080 Ti",
 			annotations: nil,
 			want:        true,
+		}, {
+			name:     "example 8: not case sensitive",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "a100",
+			},
+			want: true,
+		}, {
+			name:     "example 9: empty string",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "",
+			},
+			want: true,
+		}, {
+			name:     "example 10: space string",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodExcludeGpuTypeAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			name:     "example 11: trailing comma",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "V100,",
+			},
+			want: false,
+		}, {
+			name:     "example 12: prefix comma",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodExcludeGpuTypeAnnotation: ",V100",
+			},
+			want: true,
+		}, {
+			name:     "example 13: trailing comma",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodExcludeGpuTypeAnnotation: "V100,",
+			},
+			want: true,
+		}, {
+			// An include list with nothing usable in it means "no constraint",
+			// not "reject everything" — a stray space must not make the Pod
+			// unschedulable on every node.
+			name:     "example 14: include with only blank entries",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			name:     "example 15: include with only commas",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: ",,",
+			},
+			want: true,
+		}, {
+			name:     "example 16: include matches, exclude also matches",
+			cardType: "NVIDIA A100-SXM4-80GB",
+			annotations: map[string]string{
+				PodIncludeGpuTypeAnnotation: "A100",
+				PodExcludeGpuTypeAnnotation: "A100",
+			},
+			want: false,
 		},
 	}
 
@@ -125,6 +192,73 @@ func Test_CheckDeviceUuid(t *testing.T) {
 			cardUuid:    gpu0Uuid,
 			annotations: nil,
 			want:        true,
+		}, {
+			name:     "example 7: empty string",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: "",
+			},
+			want: true,
+		}, {
+			name:     "example 8: space string",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			name:     "example 9: trailing comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: gpu0Uuid + ",",
+			},
+			want: true,
+		}, {
+			name:     "example 10: prefix comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: "," + gpu0Uuid,
+			},
+			want: true,
+		}, {
+			name:     "example 11: trailing comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodExcludeGPUUUIDAnnotation: gpu0Uuid + ",",
+			},
+			want: false,
+		}, {
+			name:     "example 12: prefix comma",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodExcludeGPUUUIDAnnotation: "," + gpu0Uuid,
+			},
+			want: false,
+		}, {
+			name:     "example 13: exclude with only blank entries",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodExcludeGPUUUIDAnnotation: "   ",
+			},
+			want: true,
+		}, {
+			// Both filters apply. Earlier releases returned as soon as the include
+			// list was consulted, which silently ignored the exclude list.
+			name:     "example 14: include matches, exclude also matches",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: gpu0Uuid,
+				PodExcludeGPUUUIDAnnotation: gpu0Uuid,
+			},
+			want: false,
+		}, {
+			name:     "example 15: include matches, exclude names another device",
+			cardUuid: gpu0Uuid,
+			annotations: map[string]string{
+				PodIncludeGPUUUIDAnnotation: gpu0Uuid,
+				PodExcludeGPUUUIDAnnotation: "GPU-" + uuid.New().String(),
+			},
+			want: true,
 		},
 	}
 

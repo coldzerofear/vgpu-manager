@@ -747,9 +747,6 @@ collecProcessInfo:
 	// commit 20e9519 and watcher.go in this commit.
 	processInfoList := make(procInfoList, len(processInfos))
 	for _, processInfo := range processInfos {
-		if _, ok := processInfoList[processInfo.Pid]; ok {
-			continue
-		}
 		processInfoList[processInfo.Pid] = nvml.ProcessInfo_v1{
 			Pid:           processInfo.Pid,
 			UsedGpuMemory: processInfo.UsedGpuMemory,

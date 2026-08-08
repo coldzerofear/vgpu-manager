@@ -219,6 +219,12 @@ metadata:
 
 > Note: If there are multiple devices separated by commas
 
+Matching rules:
+
+* An entry matches as a case-insensitive substring of the device type, so `A100` selects `NVIDIA A100-SXM4-80GB`.
+* When both annotations are present, both apply: the device must be named by the include list and must not be named by the exclude list.
+* Blank entries are ignored, so `"A10,"` means the same as `"A10"`, and an annotation with no usable entry (`""`, `"  "`, `","`) is treated as if it were not set.
+
 ### Device UUID
 
 Add annotations to vGPU pod to select or exclude device uuids to be scheduled:
@@ -239,6 +245,10 @@ metadata:
 ```
 
 > Note: If there are multiple devices separated by commas
+
+The same matching rules as [Device TYPE](#device-type) apply, including that include and exclude are both honoured when both are set.
+
+> Changed: earlier releases stopped at `include-gpu-uuid` and ignored `exclude-gpu-uuid` whenever both annotations were present. A Pod that lists the same UUID in both now has that device rejected instead of selected.
 
 ## Compute Policy
 

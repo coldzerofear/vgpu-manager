@@ -2511,7 +2511,70 @@ int check_device_pid_in_local_container_pid(unsigned int device_pid) {
   return ret;
 }
 
-void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_device, unsigned int size_on_device) {
+/* Load pids.config at most once per device query.
+ *
+ * get_used_gpu_memory_by_device accumulates twice -- once over the compute
+ * process list, once over the graphics one -- and both passes need the same
+ * answer to "which host PIDs are mine". Reading the file per pass costs a
+ * second open + shared-lock wait + parse inside lock_gpu_device's critical
+ * section, which is only ~1-3ms to begin with, and every microsecond spent
+ * there is queueing delay for every other process waiting on that device.
+ *
+ * Sharing one load also makes the two passes consistent: read separately, they
+ * can straddle a registration rewriting the file and disagree about the same
+ * container.
+ *
+ * Deliberately NOT merged into a single pass over both process lists, which
+ * would look like the more obvious saving: the matchClientMode / matchOpenKernel
+ * latches below are per-pass on purpose -- once one identification strategy has
+ * proven itself for a list, the other is not tried for the rest of that list --
+ * and concatenating the lists would let a latch set on the compute list suppress
+ * the alternative strategy across the graphics one. OPEN_KERNEL_COMPATIBILITY_MODE
+ * is set unconditionally on the DRA path, so that is a live behaviour change,
+ * not a theoretical one. Only the file read is shared; the scan stays per-list. */
+typedef struct {
+  int pids[MAX_PIDS];
+  int size;
+  int loaded;
+} container_pid_cache_t;
+
+static const container_pid_cache_t *load_container_pids(container_pid_cache_t *cache) {
+  if (cache->loaded) {
+    return cache;
+  }
+  cache->size = MAX_PIDS;
+  // Normally, the server has already sorted the PID list during device registration, so there is no need to sort it again here.
+  int read_ret = get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, cache->pids, &cache->size, 0);
+  cache->loaded = 1;
+  /* No list means we stop the process, and that is deliberate: carrying on
+   * with an empty one would report zero GPU memory usage for this container,
+   * turning every limit check into a no-op and handing it the whole card.
+   * (The utilization path can and does degrade quietly -- under-counting
+   * utilization costs nothing.)
+   *
+   * Not retried. Neither failure mode is one a retry fixes: an empty file
+   * cannot refill itself -- this process registered at library init, before
+   * any hook that reaches here, and every list the manager writes is non-empty
+   * by construction -- and a failed read means the file is unreachable (the
+   * container out of descriptors, the mount gone), which does not resolve in
+   * the microseconds a retry would cost. The two are reported apart because
+   * "never registered" and "cannot read" need very different responses.
+   *
+   * Because this exits, a cache marked loaded always holds a non-empty list. */
+  if (unlikely(cache->size == 0)) {
+    if (read_ret != 0) {
+      LOGGER(FATAL, "unable to read the registered container process list at %s",
+             CONTAINER_PIDS_CONFIG_FILE_PATH);
+    }
+    LOGGER(FATAL, "registered container process list at %s is empty: this container never "
+                  "registered with the manager, or its registration was overwritten",
+           CONTAINER_PIDS_CONFIG_FILE_PATH);
+  }
+  return cache;
+}
+
+void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_device,
+                            unsigned int size_on_device, container_pid_cache_t *cache) {
   unsigned int i;
   int matchOpenKernel = 0;
   int openKernelMode = (g_vgpu_config->compatibility_mode & OPEN_KERNEL_COMPATIBILITY_MODE) == OPEN_KERNEL_COMPATIBILITY_MODE;
@@ -2519,16 +2582,10 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
   if (size_on_device == 0) {
     // If there are no processes running on the device, quickly skip them.
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
-    int pids_size = MAX_PIDS;
-    int pids_on_container[pids_size];
-    // Normally, the server has already sorted the PID list during device registration, so there is no need to sort it again here.
-    get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size, 0);
-    if (unlikely(pids_size == 0)) {
-      LOGGER(FATAL, "unable to find registered container process");
-    }
+    const container_pid_cache_t *container = load_container_pids(cache);
     int matchClientMode = 0;
     for (i = 0; i < size_on_device; i++) {
-      if (!matchOpenKernel && check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, pids_on_container, pids_size) == 0) {
+      if (!matchOpenKernel && check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, container->pids, container->size) == 0) {
         LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
         matchClientMode = 1;
         *used_memory += pids_on_device[i].usedGpuMemory;
@@ -2608,65 +2665,115 @@ nvmlReturn_t _nvmlDeviceGetGraphicsRunningProcesses(nvmlDevice_t device, unsigne
   return ret;
 }
 
-void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
-  size_t *used_memory = arg;
-  nvmlProcessInfo_t pids_on_device[MAX_PIDS];
-  unsigned int size_on_device = MAX_PIDS;
-
-  nvmlReturn_t ret = _nvmlDeviceGetComputeRunningProcesses(device, &size_on_device, pids_on_device);
-  if (unlikely(ret)) {
-    *used_memory = 0;
-    LOGGER(ERROR, "nvmlDeviceGetComputeRunningProcesses call failed, return: %d, str: %s",
-                   ret, NVML_ERROR(nvml_library_entry, ret));
-    return;
+/* Bound a process count returned by NVML to what the array can actually hold.
+ *
+ * The contract says an enumeration writes at most the capacity it was given and
+ * returns INSUFFICIENT_SIZE otherwise, so this should never fire. It is here
+ * because the value is an out-parameter from a closed-source driver that then
+ * drives two loops indexing a fixed-size array: trusting a broken contract
+ * would be an out-of-bounds read, whereas clamping keeps the read inside the
+ * buffer. Entries past what the driver actually wrote are indeterminate, but
+ * they are only ever charged when their PID matches this container's registered
+ * list, so the realistic outcome is that they are ignored. */
+static unsigned int clamp_process_count(unsigned int count, const char *what) {
+  if (unlikely(count > MAX_PIDS)) {
+    LOGGER(WARNING, "NVML reported %u %s processes for a %d-entry buffer; clamping",
+           count, what, MAX_PIDS);
+    return MAX_PIDS;
   }
-  accumulate_used_memory(used_memory, pids_on_device, size_on_device);
-  unsigned int compute_pids_count = size_on_device;
+  return count;
+}
 
-  size_on_device = MAX_PIDS;
-  nvmlProcessInfo_t graphic_pids_on_device[MAX_PIDS];
-  ret = _nvmlDeviceGetGraphicsRunningProcesses(device, &size_on_device, graphic_pids_on_device);
-  if (unlikely(ret)) {
-    LOGGER(ERROR, "nvmlDeviceGetGraphicsRunningProcesses call failed, return: %d, str: %s",
-                   ret, NVML_ERROR(nvml_library_entry, ret));
-    goto DONE;
-  }
-
-  /* Deduplicate compute vs graphics PIDs.
-   *
-   * NVML's nvmlProcessInfo_t.usedGpuMemory is the per-PROCESS total memory
-   * usage on the device, not per-context. A process that owns BOTH a compute
-   * context (CUDA / OpenCL) and a graphics context (Vulkan / OpenGL / DirectX)
-   * shows up in both lists with the SAME usedGpuMemory value. Without dedup,
-   * accumulating both lists doubles that process's contribution and inflates
-   * `used` to ~2x reality.
-   *
-   * This is a real production hazard for CUDA + render mixed apps such as
-   * Isaac Sim, Omniverse, UE5 with CUDA inference plugins, or any app that
-   * pairs CUDA work with an OpenGL/Vulkan visualisation. Filter out graphics
-   * entries whose PID is already accounted for in the compute list. */
-  unsigned int graphic_unique_count = 0;
-  for (unsigned int i = 0; i < size_on_device; i++) {
-    int already_seen = 0;
-    for (unsigned int j = 0; j < compute_pids_count; j++) {
-      if (graphic_pids_on_device[i].pid == pids_on_device[j].pid) {
-        already_seen = 1;
+/* Drop entries from `stale` whose PID also appears in `fresh`, and report how
+ * many survive. The surviving entries are packed to the front.
+ *
+ * NVML's nvmlProcessInfo_t.usedGpuMemory is the per-PROCESS total memory usage
+ * on the device, not per-context. A process that owns BOTH a compute context
+ * (CUDA / OpenCL) and a graphics context (Vulkan / OpenGL / DirectX) shows up
+ * in both lists with the SAME usedGpuMemory value. Without dedup, accumulating
+ * both lists doubles that process's contribution and inflates `used` to ~2x
+ * reality.
+ *
+ * This is a real production hazard for CUDA + render mixed apps such as Isaac
+ * Sim, Omniverse, UE5 with CUDA inference plugins, or any app that pairs CUDA
+ * work with an OpenGL/Vulkan visualisation.
+ *
+ * Which copy to keep is not arbitrary: the two lists come from two NVML calls
+ * at two instants, so the later enumeration carries the newer sample of that
+ * process's usage. The caller passes the earlier list as `stale`. */
+static unsigned int drop_pids_present_in(nvmlProcessInfo_t *stale, unsigned int stale_count,
+                                         const nvmlProcessInfo_t *fresh, unsigned int fresh_count) {
+  unsigned int kept = 0;
+  for (unsigned int i = 0; i < stale_count; i++) {
+    int duplicate = 0;
+    for (unsigned int j = 0; j < fresh_count; j++) {
+      if (stale[i].pid == fresh[j].pid) {
+        duplicate = 1;
         break;
       }
     }
-    if (!already_seen) {
-      if (graphic_unique_count != i) {
-        graphic_pids_on_device[graphic_unique_count] = graphic_pids_on_device[i];
+    if (!duplicate) {
+      if (kept != i) {
+        stale[kept] = stale[i];
       }
-      graphic_unique_count++;
-    } else {
-      LOGGER(DETAIL, "process id %d also owns a graphics context; skipped to "
-                     "avoid double-counting", graphic_pids_on_device[i].pid);
+      kept++;
+      continue;
     }
+    LOGGER(DETAIL, "process id %d owns both a compute and a graphics context; counted once, "
+                   "from the later enumeration", stale[i].pid);
   }
-  accumulate_used_memory(used_memory, graphic_pids_on_device, graphic_unique_count);
+  return kept;
+}
 
-DONE:
+void get_used_gpu_memory_by_device(void *arg, nvmlDevice_t device) {
+  size_t *used_memory = arg;
+  nvmlProcessInfo_t compute_pids[MAX_PIDS];
+  nvmlProcessInfo_t graphic_pids[MAX_PIDS];
+  unsigned int compute_count = MAX_PIDS;
+  unsigned int graphic_count = MAX_PIDS;
+  /* Shared by both accumulation passes below and deliberately loaded only
+   * after BOTH enumerations have run; see load_container_pids. */
+  container_pid_cache_t container_pids = {.loaded = 0};
+
+  /* Set, not accumulate. Every caller asks for one device's total and starts
+   * from zero, and the failure paths below have to leave a defined value. */
+  *used_memory = 0;
+
+  nvmlReturn_t ret = _nvmlDeviceGetComputeRunningProcesses(device, &compute_count, compute_pids);
+  if (unlikely(ret)) {
+    /* Only this list is lost. Reporting zero for the whole device because the
+     * compute enumeration failed would hide however much the graphics
+     * processes are holding, and the memory limit is enforced against this
+     * number -- under-reporting hands the container the rest of the card.
+     * NVML also rewrites the count on failure (INSUFFICIENT_SIZE reports the
+     * size it wanted), so it has to be reset rather than trusted. */
+    LOGGER(ERROR, "nvmlDeviceGetComputeRunningProcesses call failed, return: %d, str: %s",
+                   ret, NVML_ERROR(nvml_library_entry, ret));
+    compute_count = 0;
+  }
+  compute_count = clamp_process_count(compute_count, "compute");
+
+  ret = _nvmlDeviceGetGraphicsRunningProcesses(device, &graphic_count, graphic_pids);
+  if (unlikely(ret)) {
+    LOGGER(ERROR, "nvmlDeviceGetGraphicsRunningProcesses call failed, return: %d, str: %s",
+                   ret, NVML_ERROR(nvml_library_entry, ret));
+    graphic_count = 0;
+  }
+  graphic_count = clamp_process_count(graphic_count, "graphics");
+
+  /* The graphics enumeration ran second, so for a process in both lists its
+   * entry there is the newer sample. Keep that one. */
+  compute_count = drop_pids_present_in(compute_pids, compute_count, graphic_pids, graphic_count);
+
+  /* Both passes below share one pids.config snapshot, and it is loaded here --
+   * after both enumerations -- rather than during the first pass. A process
+   * that appears between the two NVML calls registers before this point, so
+   * the snapshot that decides whether it is ours is newer than the list it
+   * shows up in. Loading during the first pass would judge the second list
+   * against a snapshot older than the list itself and could miss it. */
+  accumulate_used_memory(used_memory, compute_pids, compute_count, &container_pids);
+  accumulate_used_memory(used_memory, graphic_pids, graphic_count, &container_pids);
+
   LOGGER(VERBOSE, "total used memory: %zu", *used_memory);
 }
 

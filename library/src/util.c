@@ -8,8 +8,11 @@
 #include <unistd.h>
 #include <limits.h>
 #include <errno.h>
+#include <sched.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <time.h>
 
 #define MAX_PID_STR_LEN 32
 #define CUDA_MEMORY_LIMIT_ENV "CUDA_MEM_LIMIT"
@@ -568,6 +571,70 @@ static int compare_pids(const void *a, const void *b) {
   return (pid1 > pid2) - (pid1 < pid2);
 }
 
+/* Bounded wait for the shared lock on pids.config.
+ *
+ * The manager rewrites this file in place under LOCK_EX every time a process in
+ * this container registers -- which is once per CUDA process, at library init.
+ * Reading without the matching LOCK_SH lets a read land in the middle of that
+ * rewrite.
+ *
+ * The budget is deliberately tiny, and sized against the two things around it:
+ *
+ *   - the writer's critical section is an ftruncate plus one pwrite of a few
+ *     hundred bytes, so a waiter that just missed the lock wins it back in
+ *     microseconds. Contention that outlasts the first few yields is not
+ *     contention, it is something wedged;
+ *   - the caller runs under lock_gpu_device, whose critical section is ~1-3ms,
+ *     and it runs TWICE per hold (once for the compute process list, once for
+ *     the graphics one). Whatever is spent here is spent twice and lands
+ *     directly on every other process queued for that device.
+ *
+ * So: a few free sched_yield()s first, then a handful of 200us sleeps, capping
+ * a single read at about 1ms and one lock hold at about 2ms. LOCK_NB throughout
+ * rather than a blocking LOCK_SH, because a writer that stalls while holding the
+ * lock must not be able to wedge CUDA calls behind it.
+ *
+ * Giving up and reading anyway is the safe degradation: the writer never
+ * truncates before writing, so an unlocked reader sees a complete list, at worst
+ * with trailing PIDs of this same container left over from a longer previous
+ * one. Those are dead PIDs; they match nothing on the device. */
+#define PIDS_CONFIG_LOCK_YIELDS 4
+#define PIDS_CONFIG_LOCK_SLEEPS 5
+#define PIDS_CONFIG_LOCK_BACKOFF_NS (200 * 1000L) /* 200us, so ~1ms worst case */
+
+static int lock_pids_config_shared(int fd) {
+  struct timespec backoff = {.tv_sec = 0, .tv_nsec = PIDS_CONFIG_LOCK_BACKOFF_NS};
+  int attempts = PIDS_CONFIG_LOCK_YIELDS + PIDS_CONFIG_LOCK_SLEEPS;
+  int reason = 0;
+
+  for (int attempt = 0; attempt < attempts; attempt++) {
+    if (flock(fd, LOCK_SH | LOCK_NB) == 0) {
+      return 0;
+    }
+    /* Captured now: sched_yield() and nanosleep() below can overwrite errno,
+     * and the caller logs this to say why it is reading unlocked. */
+    reason = errno;
+    if (reason == EINTR) {
+      continue;
+    }
+    /* EWOULDBLOCK (== EAGAIN) is the writer holding LOCK_EX: retry. Anything
+     * else -- a filesystem without flock support, a bad descriptor -- does not
+     * get better by waiting. */
+    if (reason != EWOULDBLOCK) {
+      break;
+    }
+    if (attempt < PIDS_CONFIG_LOCK_YIELDS) {
+      /* Cheaper than any timer and usually enough: the writer only has to be
+       * scheduled long enough to finish one pwrite. */
+      sched_yield();
+    } else {
+      nanosleep(&backoff, NULL);
+    }
+  }
+  errno = reason;
+  return -1;
+}
+
 int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids) {
   if (!file_path || !pids || !pids_size) {
     LOGGER(ERROR, "invalid NULL parameter");
@@ -586,6 +653,12 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
     LOGGER(WARNING, "error opening %s: %s", file_path, strerror(errno));
     *pids_size = 0;
     return -1;
+  }
+
+  int lock_fd = fileno(fp);
+  int locked = (lock_pids_config_shared(lock_fd) == 0);
+  if (!locked) {
+    LOGGER(VERBOSE, "reading %s without a shared lock: %s", file_path, strerror(errno));
   }
 
   int max_size = *pids_size;
@@ -616,6 +689,9 @@ int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_s
     LOGGER(WARNING, "PID array full, only stored %d PIDs from %s", max_size, file_path);
   }
 
+  if (locked) {
+    flock(lock_fd, LOCK_UN);
+  }
   fclose(fp);
   return 0;
 }

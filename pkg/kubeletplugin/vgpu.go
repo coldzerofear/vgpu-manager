@@ -9,6 +9,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	vgpu2 "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
@@ -137,12 +138,13 @@ func (m *VGPUManager) ensureClaimDirectories(claimUID string) (string, string) {
 	return baseContPath, baseHostPath
 }
 
-func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) (string, string) {
+func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) (string, string, error) {
 	baseContPath := filepath.Join(m.contManagerPath, util.Claims, claimUID, partitionKey)
 	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID, partitionKey)
+	configContPath := filepath.Join(baseContPath, util.Config)
 	preparedDirs := []string{
 		baseContPath,
-		filepath.Join(baseContPath, util.Config),
+		configContPath,
 		filepath.Join(baseContPath, vgpu.VGPULockDirName),
 		filepath.Join(baseContPath, util.VMemNode),
 		filepath.Join(baseContPath, util.SMNode),
@@ -152,7 +154,16 @@ func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) 
 			klog.Warningf("Failed to ensure directory %s: %s", dirPath, err)
 		}
 	}
-	return baseContPath, baseHostPath
+	// pids.config is bind-mounted into the container as a file, so it has to
+	// exist before the runtime performs the mount — a missing source aborts
+	// container creation with an error that says nothing about vGPU. Failing
+	// here instead gives the caller (Prepare / NRI CreateContainer) something
+	// it can report, and both fail closed: a container that comes up without
+	// its PID list would run unaccounted.
+	if err := registry.ResetPidsFile(configContPath); err != nil {
+		return baseContPath, baseHostPath, err
+	}
+	return baseContPath, baseHostPath, nil
 }
 
 func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceClaim) *cdiapi.ContainerEdits {
@@ -314,7 +325,10 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 		// TODO It's unlikely to run up to this point
 		partitionKey = "default"
 	}
-	_, partitionHostPath := m.ensurePartitionDirectories(string(claim.UID), partitionKey)
+	_, partitionHostPath, err := m.ensurePartitionDirectories(string(claim.UID), partitionKey)
+	if err != nil {
+		return nil, err
+	}
 
 	var envs []string
 	if featuregates.Enabled(featuregates.DevicePluginClientMode) {
@@ -358,6 +372,39 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 					HostPath:      filepath.Join(partitionHostPath, util.SMNode),
 					Options:       []string{"rw", "nosuid", "nodev", "bind"},
 				},
+				// pids.config, read-only, nested inside the writable config mount
+				// above rather than making that whole directory read-only.
+				//
+				// The directory has to stay writable: the DRA path has no
+				// PreStartContainer hook, so the in-container library materialises
+				// vgpu.config from its environment on first use, and the host-side
+				// metrics lister reads that file back. pids.config is different in
+				// kind — it is the manager's kernel-derived answer to "which host
+				// PIDs belong to this container", and the memory accounting is
+				// built on it. A container that can rewrite it can drop its own
+				// PIDs (reporting no usage) or claim a neighbour's.
+				//
+				// Mounting the single file read-only pins it: a mountpoint cannot
+				// be unlinked or renamed over from inside the container (EBUSY) and
+				// its contents cannot be written (EROFS), even though the enclosing
+				// directory is writable and even for a container running as root.
+				// The manager writes it from the host side, where it is an ordinary
+				// file.
+				//
+				// Ordering is not ours to get right, and does not depend on this
+				// entry coming last: both plumbing paths sort the OCI mount list by
+				// destination depth before handing it to the runtime — CDI in
+				// container-edits.go (sortMounts), NRI in runtime-tools/generate
+				// (AdjustMounts) — so the parent directory is always mounted first.
+				//
+				// This does not make the DRA config surface read-only: vgpu.config
+				// stays container-writable, so the limits it carries are still
+				// forgeable there. Separate gap.
+				{
+					ContainerPath: filepath.Join(m.contManagerPath, util.Config, registry.PidsConfig),
+					HostPath:      filepath.Join(partitionHostPath, util.Config, registry.PidsConfig),
+					Options:       []string{"ro", "nosuid", "nodev", "bind"},
+				},
 			},
 		},
 	}, nil
@@ -373,7 +420,11 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 // path using the VGPU_POD_UID / VGPU_CONTAINER_NAME env injected here.
 func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
 	partitionKey := fmt.Sprintf("%s_%s", podUID, containerName)
-	contBase, hostBase := m.ensurePartitionDirectories(claimUID, partitionKey)
+	contBase, hostBase, err := m.ensurePartitionDirectories(claimUID, partitionKey)
+	if err != nil {
+		return nil, err
+	}
+
 	return &nri.Injection{
 		ConfigDir: filepath.Join(contBase, util.Config),
 		Env: []string{
@@ -403,6 +454,14 @@ func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, 
 				ContainerPath: vgpu.ContSMNodePath,
 				HostPath:      filepath.Join(hostBase, util.SMNode),
 				Options:       []string{"rw", "nosuid", "nodev", "bind"},
+			},
+			// pids.config, read-only, nested inside the writable config mount
+			// above. Same reasoning (and the same ordering guarantee) as the
+			// matching entry in GetPartitionMountContainerEdits.
+			{
+				ContainerPath: filepath.Join(m.contManagerPath, util.Config, registry.PidsConfig),
+				HostPath:      filepath.Join(hostBase, util.Config, registry.PidsConfig),
+				Options:       []string{"ro", "nosuid", "nodev", "bind"},
 			},
 		},
 	}, nil
