@@ -127,7 +127,16 @@ func (alloc *allocator) allocateTiered(
 		// the largest first. Proven optimal on a tier hierarchy — see the design
 		// doc §4.2. Only meaningful at the LOOSEST tier in practice, because a
 		// tighter tier's leftovers are always reachable at a looser one.
-		if tier == device.TierAny {
+		//
+		// needNumber > 1 because "spanning" is a statement about a set having
+		// members in different components, which one device can never do — it is
+		// always in exactly one. Letting a single card span would label it
+		// Spanned=true, which linkResult reports as "spanned" and the downgrade
+		// event renders as "any (spanning multiple components)": both nonsense
+		// for one GPU. A single card that reached no tier has simply not been
+		// placed by topology at all, so falling through to nil is right — the
+		// caller then records ResultNone and, for strict, rejects.
+		if tier == device.TierAny && needNumber > 1 {
 			if picked := alloc.spanGroups(req, candidates, groups, tier, needNumber); len(picked) == needNumber {
 				return &linkPlan{Devices: picked, Tier: tier, Spanned: true}
 			}

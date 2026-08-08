@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -173,4 +174,110 @@ func Test_Strict_TopologyPresentButNoNVLink(t *testing.T) {
 		assert.NotEqual(t, "nvlink", req.TopologyOutcome().Result,
 			"there is no NVLink here, so reporting nvlink would be a false success")
 	})
+}
+
+// Test_SingleCard_NeverReportsSpanned guards a label, not a placement.
+//
+// "Spanned" asserts that a set has members sitting in different components. One
+// device is always in exactly one component, so a single-card plan can never be
+// spanned — yet once single cards started walking the tier ladder, a card with
+// no links at all fell through every tier into the spanning branch and came back
+// Spanned=true. That surfaces as result="spanned" on topology_placement_total
+// and as "any (spanning multiple components)" in the downgrade event, both
+// describing something that cannot happen.
+//
+// The honest outcome for that card is ResultNone: topology placed nothing.
+func Test_SingleCard_NeverReportsSpanned(t *testing.T) {
+	n := fixtureNode("linkless", topoDevices(4))
+
+	req := BuildAllocationRequest(linkPod(1, false, ""))
+	_, rsn, err := NewAllocator(n, nil).Allocate(req)
+	require.NoError(t, err)
+	require.Nil(t, rsn, "non-strict must still place the card")
+	assert.Equal(t, metrics.ResultNone, req.TopologyOutcome().Result,
+		"a lone card on a linkless node was not placed by topology; it did not span anything")
+
+	// Two cards on the same node genuinely DO span, so the label still works
+	// where it applies — this fix must not blanket-disable spanning.
+	req2 := BuildAllocationRequest(linkPod(2, false, ""))
+	n2 := fixtureNode("linkless", topoDevices(4))
+	_, rsn2, err := NewAllocator(n2, nil).Allocate(req2)
+	require.NoError(t, err)
+	require.Nil(t, rsn2)
+	assert.Equal(t, metrics.ResultSpanned, req2.TopologyOutcome().Result)
+}
+
+// Test_NUMA_UnknownAffinityIsNotANumaNode covers a defect that predates the
+// strict-mode work but is the same mistake in a different place: treating a
+// sentinel as a real value.
+//
+// The device plugin writes numa: -1 when it cannot determine affinity. Grouping
+// by the raw value put every such card into a shared "-1" bucket, which
+// CanNotCrossNumaNode then reported as a NUMA node like any other — so
+// numa-strict, whose contract is "these GPUs share one NUMA node", was satisfied
+// by a group whose defining property is that nobody knows what node they are on.
+//
+// The sub-test below also pins DETERMINISM. DefaultCallback used to range over
+// the grouping map, so which NUMA node won depended on Go's randomised map
+// iteration: measured at ~1 run in 6 landing on the unknown-affinity card.
+func Test_NUMA_UnknownAffinityIsNotANumaNode(t *testing.T) {
+	t.Run("all cards unknown → numa-strict rejects", func(t *testing.T) {
+		n := annotatedNode(t, registerJSON(-1, -1), "")
+		assert.False(t, scheduled(t, n, topologyPod(util.NUMATopologyStrict, 1)))
+	})
+
+	t.Run("mixed → strict only ever uses the known-affinity card", func(t *testing.T) {
+		// Repeated because the bug was probabilistic: a single run passed ~5/6
+		// of the time even while broken.
+		for i := 0; i < 200; i++ {
+			n := annotatedNode(t, registerJSON(-1, 0), "")
+			pod, rsn, err := NewAllocator(n, nil).Allocate(
+				BuildAllocationRequest(topologyPod(util.NUMATopologyStrict, 1)))
+			require.NoError(t, err)
+			require.Nil(t, rsn)
+			claim, ok := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
+			require.True(t, ok)
+			require.Contains(t, claim, "GPU-1",
+				"iteration %d picked the numa=-1 card", i)
+		}
+	})
+
+	t.Run("non-strict is unaffected and still places", func(t *testing.T) {
+		n := annotatedNode(t, registerJSON(-1, -1), "")
+		assert.True(t, scheduled(t, n, topologyPod(util.NUMATopology, 1)))
+	})
+}
+
+// Test_NUMA_DefaultCallbackIsDeterministic pins the ordering of the
+// no-device-policy NUMA path on a node with SEVERAL valid NUMA nodes.
+//
+// It needs its own fixture: on a mixed known/unknown node the -1 filter already
+// leaves a single group, so iteration order becomes unobservable there and that
+// test cannot see this bug. Here both NUMA nodes are real and equally eligible,
+// which is exactly when ranging over the grouping map let Go's randomised
+// iteration decide the placement.
+//
+// Identical inputs must produce an identical decision. Beyond surprising users,
+// instability here is a correctness problem for the extender: Filter is re-run
+// during preemption and rescheduling, so a pod could be validated against one
+// NUMA node and then placed on another.
+func Test_NUMA_DefaultCallbackIsDeterministic(t *testing.T) {
+	// Two NUMA nodes, two cards each, no device policy → nothing expresses a
+	// preference between them.
+	first := ""
+	for i := 0; i < 200; i++ {
+		n := annotatedNode(t, registerJSON(0, 0, 1, 1), "")
+		pod, rsn, err := NewAllocator(n, nil).Allocate(
+			BuildAllocationRequest(topologyPod(util.NUMATopology, 2)))
+		require.NoError(t, err)
+		require.Nil(t, rsn)
+		claim, ok := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
+		require.True(t, ok)
+		if first == "" {
+			first = claim
+			continue
+		}
+		require.Equal(t, first, claim, "iteration %d chose a different NUMA node", i)
+	}
+	t.Logf("stable choice across 200 runs: %s", first)
 }
