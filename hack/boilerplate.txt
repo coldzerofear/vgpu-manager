@@ -1,5 +1,5 @@
 /*
-Copyright 2025-2026 coldzerofear
+Copyright 2024-2026 coldzerofear
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,17 +13,3 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
-package serial
-
-import "k8s.io/utils/keymutex"
-
-// KeyRWMutex is a thread-safe interface for acquiring locks on arbitrary strings.
-type KeyRWMutex interface {
-	keymutex.KeyMutex
-	// RLockKey Acquires a read lock associated with the specified ID, creates the lock if one doesn't already exist.
-	RLockKey(id string)
-	// RUnlockKey Releases the read lock associated with the specified ID.
-	// Returns an error if the specified ID doesn't exist.
-	RUnlockKey(id string) error
-}

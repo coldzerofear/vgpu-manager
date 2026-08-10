@@ -3,6 +3,8 @@
  * available.
  *
  * Copyright (C) 2012-2019 Tencent. All Rights Reserved.
+ * Copyright 2024-2026 coldzerofear
+ * Modifications made for the vgpu-manager project by coldzerofear.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,9 +18,6 @@
  * specific language governing permissions and limitations under the License.
  */
 
-//
-// Created by thomas on 18-4-16.
-//
 #include <assert.h>
 
 #include "include/hook.h"
