@@ -1,13 +1,14 @@
 /*
- * CUDA Graph throttle smoke test -- HAMi issue #1445 regression guard.
+ * CUDA Graph throttle smoke test -- regression guard for a compute-limit
+ * bypass via cuGraphLaunch.
  *
- * Before P2 in cuda_hook.c (CUDA Graph cost cache + cuGraphLaunch hook),
+ * Before the CUDA Graph cost cache + cuGraphLaunch hook in cuda_hook.c,
  * vgpu-manager could not limit compute through cuGraphLaunch: stream-capture
  * applied rate_limiter() once per kernel at capture time, then cuGraphLaunch
  * (called many times after) bypassed the throttle entirely. PyTorch 2.x,
  * TensorRT, and any reduce/fused-op kernel that captures into a graph hit
- * this path. Issue #1445's repro: a single cudaGraphLaunch loop pegs the GPU
- * at 100% even with a 10% gpucores limit set.
+ * this path -- a single cudaGraphLaunch loop could peg the GPU at 100% even
+ * with a 10% gpucores limit set.
  *
  * What this test guards (when run with LD_PRELOAD=libvgpu-control.so):
  *   - cuGraphLaunch hook (P2) does not crash, hang, or deadlock;

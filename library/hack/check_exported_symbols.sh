@@ -100,8 +100,7 @@ echo "[PASS] ABI-conflict symbol export check: all ${#FAMILIES[@]} family "\
 # future change drops or weakens that script, internal helpers (~80 in
 # the pre-script baseline) silently re-appear in .dynsym, where they are
 # eligible for NVIDIA-ICD / loader-side global-symbol resolution to
-# collide with — exactly the class of risk that drove HAMi-core PR #182's
-# libvgpu_vk.so split. We catch that regression here.
+# collide with. We catch that regression here.
 #
 # We do not enumerate every internal symbol — that list would drift. Two
 # checks are sufficient:

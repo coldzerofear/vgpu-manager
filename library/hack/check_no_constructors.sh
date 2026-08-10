@@ -6,21 +6,18 @@
 # on the node — including the very early window where the dynamic
 # linker is still resolving libGLX_nvidia.so / libEGL_nvidia.so / etc.
 #
-# Why this matters (HAMi-core PR #182 lessons):
-#   HAMi-core's unsolved Step C regression (note 2026-04-28-vk-trace-isaac-sim.md)
-#   identified "static initializer / constructor side effects from new
-#   TUs being linked in" as one of the prime root-cause candidates
-#   for an NVIDIA-ICD init crash that they could not pin down. Their
-#   remediation was to physically split libvgpu_vk.so out of libvgpu.so
-#   so the LD_PRELOAD'd binary contains no Vulkan / dispatch / hook
-#   constructors at all.
+# Why this matters:
+#   Static initializer / constructor side effects from newly linked TUs
+#   are a known root-cause candidate for NVIDIA-ICD init crashes (see
+#   note 2026-04-28-vk-trace-isaac-sim.md) -- Vulkan/dispatch/hook
+#   constructors firing in that early window can collide with the
+#   driver's own ICD init.
 #
-#   We rely on a different containment strategy (linker version script
-#   to narrow .dynsym + manifest enable_environment gating). For that
-#   strategy to be equivalent in practice we need the .so to remain
-#   constructor-free: any future __attribute__((constructor)) on a
-#   non-static function would re-introduce the exact load-time side-
-#   effect surface that drove HAMi to split.
+#   We contain this with a linker version script (narrowing .dynsym) plus
+#   manifest enable_environment gating. For that strategy to hold, the
+#   .so must stay constructor-free: any future __attribute__((constructor))
+#   on a non-static function would re-introduce the exact load-time
+#   side-effect surface this is meant to avoid.
 #
 #   readelf -W libvgpu-control.so .init_array currently shows ONLY
 #   __frame_dummy_init_array_entry (8 bytes, GCC stock dwarf frame
@@ -58,8 +55,8 @@ if [[ -n "${matches}" ]]; then
   echo "       .so load time, before the LD_PRELOAD'd process can react."
   echo "       Inside an NVIDIA-driver process, that runs concurrently"
   echo "       with libGLX_nvidia / libEGL_nvidia / libvulkan ICD init"
-  echo "       and is exactly the regression class HAMi-core PR #182"
-  echo "       could not pin down (see Step C trace notes)."
+  echo "       -- exactly the regression class this check exists to"
+  echo "       prevent (see Step C trace notes)."
   echo
   echo "       Use lazy initialization (pthread_once or first-call check)"
   echo "       inside the function bodies that need state, not a"

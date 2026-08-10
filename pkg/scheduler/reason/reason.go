@@ -10,10 +10,9 @@
 //
 //   - Per-pod summary events emitted by vgpu-manager (FilteringFailed,
 //     PreemptionFailed) carry both the aggregated counts AND the list of
-//     offending node names — the diagnostic detail HAMi provides — but in
-//     the upstream "<count> <phrase>" format rather than HAMi's "n/total
-//     phrase" style. One event message per Filter call, comma-separated
-//     reason clauses, deterministic ordering.
+//     offending node names, in the upstream "<count> <phrase>" format.
+//     One event message per Filter call, comma-separated reason clauses,
+//     deterministic ordering.
 //
 // Failure causes flow up the stack as *FilterReason values instead of
 // bare error strings: filterDevices builds per-device counts, allocateOne

@@ -53,10 +53,9 @@ target_compile_options(vgpu-control PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>
 # Without this, every non-static C function in the .so (~80 internal
 # helpers like formatUuid / cleanup_vmem_nodes / accumulate_used_memory)
 # leaks into .dynsym, where they are available for NVIDIA-ICD /
-# loader-side global-symbol resolution to collide with. That is the
-# exact class of risk that drove HAMi-core PR #182's libvgpu_vk.so
-# split — a much heavier remediation we deliberately avoid by keeping
-# the export surface narrow at the source.
+# loader-side global-symbol resolution to collide with. Keeping the
+# export surface narrow at the source avoids that risk without needing
+# a heavier remediation like splitting the .so.
 #
 # Implementation: linker version script alone. We deliberately do NOT
 # pair it with -fvisibility=hidden — the compile-time hidden attribute
@@ -136,9 +135,9 @@ if(VGPU_RUN_HOOK_CHECKS)
     # Pre-build: forbid __attribute__((constructor)) / ((destructor)) in
     # library/src/. .init_array entries run at .so load time inside every
     # LD_PRELOAD'd process — concurrent with NVIDIA ICD bringup — and are
-    # the prime root-cause candidate for the unsolved Step C regression
-    # documented in HAMi-core PR #182. We rely on (no constructors + no
-    # NVIDIA DT_NEEDED + narrow .dynsym + manifest gating) to neutralize
+    # a known root-cause candidate for the unsolved Step C regression (see
+    # note 2026-04-28-vk-trace-isaac-sim.md). We rely on (no constructors +
+    # no NVIDIA DT_NEEDED + narrow .dynsym + manifest gating) to neutralize
     # that risk class without splitting the .so. This guard preserves
     # the no-constructors invariant.
     add_custom_target(vgpu_check_no_constructors ALL

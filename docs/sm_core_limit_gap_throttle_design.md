@@ -26,7 +26,7 @@ ret = REAL_LAUNCH(...);                 // 真正下发 kernel
 
 `rate_limiter` 是"发射后不管"。一个大 kernel 只要进来时桶里令牌 ≥ 0,就**永远不会触发阻塞分支**,扣完不管多负也立即放行,在 GPU 上想跑多久跑多久。watcher 要 ~80ms 才采样一次,对单个大的、带同步的 kernel 来说太慢。
 
-典型失效场景(对标 HAMi 商业版测试报告 Task3):`N=8192` 矩阵乘 + `cuCtxSynchronize` 循环 —— NVML/令牌桶模式守不住目标算力占比,实测 SM 利用率冲到 ~100%。
+典型失效场景:`N=8192` 矩阵乘 + `cuCtxSynchronize` 循环 —— NVML/令牌桶模式守不住目标算力占比,实测 SM 利用率冲到 ~100%。
 
 #### 1.2.2 根因:`before < 0` 而不是 `after < 0`
 
@@ -330,7 +330,7 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
 - **启动失败**：`gap_end` 在 `launch_ret!=CUDA_SUCCESS` 时跳过测量，仍释放锁、刷新时间戳。
 - **尖峰钳制**：`GAP_MAX_SLEEP_MS` 防止误测导致长时间卡死。
 - **内存可见性**：跨线程共享量按职责分两类 ——（1）`up_limits`、`g_last_launch_ns` 用 `volatile`(watcher/launch 跨线程、对齐标量、无锁、与 `g_cur_cuda_cores` 同约定)；（2）`g_gap_dc`、`g_gap_evt_ready`、`g_gap_start/end` **始终在 `g_gap_lock` 内访问**,由互斥锁的 acquire/release 保证可见性,无需 `volatile`。详见上文与 §8。
-- **fork() 子进程安全**:GAP 路径全局(`g_gap_evt_ready`/`g_gap_start/end`/`g_gap_lock`/`g_last_launch_ns`)以及外层的 `g_init_set` `pthread_once_t` 都通过 `pthread_atfork(NULL, NULL, child_after_fork)` 在子进程中复位,详见 §7.1。**注册位置**:[`load_necessary_data()`(loader.c)](../library/src/loader.c) 第一行,由专用 `g_atfork_init` `pthread_once` 守护。**故意不用 `__attribute__((constructor))`** —— 库加载期(`.init_array`)与 libvulkan/libGLX_nvidia/libcuda 的动态链接器初始化同窗口,在那里碰 pthread/glibc 内部锁是已知崩溃模式(参见 [HAMi-core PR #182](https://github.com/Project-HAMi/HAMi-core/pull/182) Step C 的 ICD init 崩溃,以及本仓 `check_no_constructors.sh` 在 CI 强制禁止)。这与 [HAMi-core PR #199](https://github.com/Project-HAMi/HAMi-core/pull/199) 处理的是同一类继承问题,我们的修复额外覆盖 GAP 路径特有的 cuEvent 句柄(父 CUcontext 失效)与 mutex 状态(父线程持锁瞬间 fork → 子永久 EBUSY)。回归用例:[test/test_fork_inherit.cu](../library/test/test_fork_inherit.cu)。
+- **fork() 子进程安全**:GAP 路径全局(`g_gap_evt_ready`/`g_gap_start/end`/`g_gap_lock`/`g_last_launch_ns`)以及外层的 `g_init_set` `pthread_once_t` 都通过 `pthread_atfork(NULL, NULL, child_after_fork)` 在子进程中复位,详见 §7.1。**注册位置**:[`load_necessary_data()`(loader.c)](../library/src/loader.c) 第一行,由专用 `g_atfork_init` `pthread_once` 守护。**故意不用 `__attribute__((constructor))`** —— 库加载期(`.init_array`)与 libvulkan/libGLX_nvidia/libcuda 的动态链接器初始化同窗口,在那里碰 pthread/glibc 内部锁是已知崩溃模式(本仓 `check_no_constructors.sh` 在 CI 强制禁止)。修复额外覆盖 GAP 路径特有的 cuEvent 句柄(父 CUcontext 失效)与 mutex 状态(父线程持锁瞬间 fork → 子永久 EBUSY)。回归用例:[test/test_fork_inherit.cu](../library/test/test_fork_inherit.cu)。
 
 ### 7.1 fork() 后的状态重置详解
 
@@ -425,7 +425,7 @@ GAP 路径在跨进程之间**没有共享可变状态**(events、`g_gap_dc`、`
 
 ### 8.5 精确多进程协同应建在已有的共享内存账本上,而非 `lock_gpu_device`
 
-阻塞版跨进程锁其实已存在:[`device_util_write_lock`](../library/src/lock.c#L137) 使用 `F_SETLKW`,作用在 mmap 共享文件 `device_util_t`(`g_device_util`,cuda_hook.c 已 `extern`)的**字节范围锁**上。这套"**共享内存 + 字节级阻塞锁**"正是 HAMi 商业版 `cudevshr.cache` 的同构物,也是 P2 的正确底座:各进程把 `(目标占比, 最近忙时)` 发布到共享区,据**聚合需求**各算 sleep —— 这是基于共享账本的**协同**,正是比例共享所需;而 `lock_gpu_device`(5s 超时的整卡互斥锁)是给"必须全局独占的短临界区"(如显存分配记账)设计的,不应包裹"kernel 执行 + 长 sleep"。
+阻塞版跨进程锁其实已存在:[`device_util_write_lock`](../library/src/lock.c#L137) 使用 `F_SETLKW`,作用在 mmap 共享文件 `device_util_t`(`g_device_util`,cuda_hook.c 已 `extern`)的**字节范围锁**上。这套"**共享内存 + 字节级阻塞锁**"正是 P2 的正确底座:各进程把 `(目标占比, 最近忙时)` 发布到共享区,据**聚合需求**各算 sleep —— 这是基于共享账本的**协同**,正是比例共享所需;而 `lock_gpu_device`(5s 超时的整卡互斥锁)是给"必须全局独占的短临界区"(如显存分配记账)设计的,不应包裹"kernel 执行 + 长 sleep"。
 
 ### 8.6 决策矩阵
 
@@ -461,7 +461,7 @@ GAP 路径在跨进程之间**没有共享可变状态**(events、`g_gap_dc`、`
 
 ## 11. 后续路线
 
-- **✅ 已落地 — AIMD watcher 控制器**(详见 [sm_controller_aimd.md](sm_controller_aimd.md)):与 GAP 路径**正交、互补** —— GAP 解大 kernel 同步模式下的瞬时偏差,AIMD 解 watcher 稳态围绕目标的高方差(参考 Midokura 实测数据:Stock MAE ~20% → AIMD MAE ~3%)。`CUDA_SM_CONTROLLER=aimd` 启用,默认 `delta`(stock)。
+- **✅ 已落地 — AIMD watcher 控制器**(详见 [sm_controller_aimd.md](sm_controller_aimd.md)):与 GAP 路径**正交、互补** —— GAP 解大 kernel 同步模式下的瞬时偏差,AIMD 解 watcher 稳态围绕目标的高方差(实测 MAE ~20% → ~3%)。`CUDA_SM_CONTROLLER=aimd` 启用,默认 `delta`(stock)。
 - **P1 — BATCH 路径**：对密集小 kernel 按批次摊销 event 计时，替代纯令牌桶，提升小 kernel 场景的占比精度。
-- **P2 — 多进程协同**：复用已有的 `device_util_t` mmap 共享内存 + `F_SETLKW` 字节范围锁（参见 §8.5；对标 HAMi 商业版 `cudevshr.cache`），各进程发布 `(目标占比, 最近忙时)` 到共享账本，据聚合需求各算 sleep，使同卡合计 duty cycle 收敛到目标。注意：这是**账本协同**而非整卡互斥（§8.3）。
+- **P2 — 多进程协同**：复用已有的 `device_util_t` mmap 共享内存 + `F_SETLKW` 字节范围锁（参见 §8.5），各进程发布 `(目标占比, 最近忙时)` 到共享账本，据聚合需求各算 sleep，使同卡合计 duty cycle 收敛到目标。注意：这是**账本协同**而非整卡互斥（§8.3）。
 - **P3 — 反馈融合**：将 GAP 实测的真实 GPU 用时回灌给 watcher，减少其对 NVML 采样的依赖与抖动。

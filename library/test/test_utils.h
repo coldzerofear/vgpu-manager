@@ -5,8 +5,6 @@
  * allocation, kernel launch, and context creation paths exercise our hook
  * layer. Tests link directly against the real CUDA toolkit; vgpu-control is
  * injected at runtime.
- *
- * Ported (and trimmed) from HAMi-core/test/test_utils.h.
  */
 #ifndef VGPU_TEST_UTILS_H
 #define VGPU_TEST_UTILS_H

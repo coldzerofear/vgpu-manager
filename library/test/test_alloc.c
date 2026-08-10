@@ -1,8 +1,6 @@
 /*
  * cuMemAlloc / cuMemFree trim and oversubscription smoke test.
  * Exercises vgpu-manager's memory-limit path via the driver API.
- *
- * Ported from HAMi-core/test/test_alloc.c.
  */
 #include <assert.h>
 #include <cuda.h>

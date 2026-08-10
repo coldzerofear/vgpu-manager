@@ -1,4 +1,4 @@
-# 算力切分控制器:可选 AIMD(对标 Midokura HAMi-core 消融研究)
+# 算力切分控制器:可选 AIMD
 
 > 作用范围:`library/`(LD_PRELOAD 运行时库)的 watcher 主循环内的份额更新算法。
 > 关系:与 [GAP 路径节流](sm_core_limit_gap_throttle_design.md) **正交、互补** —— GAP 解大 kernel 同步模式下的瞬时绕过,AIMD 解 watcher 稳态围绕目标的高方差。两者可同时启用。
@@ -10,7 +10,7 @@
 
 现有 watcher 的份额更新算法(`delta()`,[cuda_hook.c:366](../library/src/cuda_hook.c#L366))是**对称按差比例**:`user_current < target` 加 `increment`,反之减同等量。该算法假设系统线性,但 NVML 采样有 ~80ms 滞后 + 噪声,导致 share 在目标附近震荡幅度大。
 
-**实证数据**(来自 [midokura/HAMi-core 分支 `ablation/orig-aimd-v5`](https://github.com/midokura/HAMi-core/tree/ablation/orig-aimd-v5),`kenji-mido` 维护,2026-05-20 RTX 4080 重测):
+**实证数据**(2026-05-20 RTX 4080 实测):
 
 | 算法 | MAE(实测 SM 利用率 vs `hard_core` 目标) |
 |---|---|
@@ -187,12 +187,12 @@ metric=aimd_deadband_hit host_device=0 total=2048
 
 ## 7. 必须主动提醒的参数标定问题
 
-Midokura v5 的 `÷3` / `7/8` / `ai_base_div=400` 是在 **RTX 4080**(消费卡,SM=76,每 SM 1536 线程)上调出来的。我们的 A100(SM=108,2048/SM)/ H100(SM=132,2048/SM)的 SM 数量级与线程粒度不同:
+默认的 `÷3` / `7/8` / `ai_base_div=400` 是在 **RTX 4080**(消费卡,SM=76,每 SM 1536 线程)上调出来的。我们的 A100(SM=108,2048/SM)/ H100(SM=132,2048/SM)的 SM 数量级与线程粒度不同:
 
 - `÷3` 在大卡上**可能过激进**(一刀切 67% 算力,AI 爬回去需要更多 watcher 周期 → 短期欠用)。考虑 `÷2`。
 - `ai_base_div=400` 对应的步长会随 `sm_num * max_thread_per_sm` 线性放大,大卡上**步长可能偏大** → 把 `ai_base_div` 调大(如 800-1600)收紧步长。
 
-参数全部 env 暴露,正是为此 —— **上线前必须在目标 GPU 上至少跑一遍参数扫描**。Midokura 自己迭代了 v1→v5 五个版本才收敛。
+参数全部 env 暴露,正是为此 —— **上线前必须在目标 GPU 上至少跑一遍参数扫描**。
 
 ## 8. 验证计划
 
@@ -208,6 +208,6 @@ Midokura v5 的 `÷3` / `7/8` / `ai_base_div=400` 是在 **RTX 4080**(消费卡,
 
 > **重要补充**:实测发现 AIMD 在单 Pod 下耗时比 delta 高约 1/3,根因与解法全文档详见 [sm_controller_aimd_sawtooth_analysis.md](sm_controller_aimd_sawtooth_analysis.md)。下面列出的 P1/P2/P3 仅为原始路线图,真正的优化路径请优先参考 sawtooth 分析文档的 P0~P3 推荐(尤其 P0 sys_process_num 自动路由)。
 
-- **P1 — 多 Pod 公平性测量**:借用 Midokura 的 `plot_multi_single.py` 等脚本(参见 [GAP 路径设计 §11](sm_core_limit_gap_throttle_design.md)),验证 AIMD 在 N Pod 间是否收敛到 `1/N · hard_core` 公平点。
+- **P1 — 多 Pod 公平性测量**:补充多 Pod 采样脚本(参见 [GAP 路径设计 §11](sm_core_limit_gap_throttle_design.md)),验证 AIMD 在 N Pod 间是否收敛到 `1/N · hard_core` 公平点。
 - **P2 — 自动参数标定**:把参数扫描集成到 CI 跑,按 GPU 型号建一份推荐默认。
 - ~~P3 — 与 GAP 路径联调~~:**已评估,不实施**。GAP 路径派生的瞬时 util 与 AIMD 形成自循环(GAP sleep 本就是为达成目标 dc 而注入,反馈进 AIMD 等于告诉它"目标达成了别动")。详见 [sawtooth 分析 §5.3](sm_controller_aimd_sawtooth_analysis.md)。

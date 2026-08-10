@@ -1,8 +1,6 @@
 /*
  * Kernel launch smoke test - exercises the rate-limiter path and
  * vgpu-manager's cuLaunchKernel interception.
- *
- * Ported from HAMi-core/test/test_runtime_launch.cu.
  */
 #include <cuda.h>
 #include <cuda_runtime.h>

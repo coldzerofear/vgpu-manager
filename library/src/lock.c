@@ -15,52 +15,28 @@
 
 #define LOCK_PATH_FORMAT (TMP_DIR VGPU_LOCK_DIR "/vgpu_%d.lock")
 #define LOCK_PATH_SIZE   32
-/* Spin parameters for lock_gpu_device().
+/* Spin parameters for lock_gpu_device(). The critical section it guards is
+ * ~1-3ms (two NVML process enumerations plus the real driver allocation);
+ * waiters are the other processes of the same container, since the lock
+ * file lives under the container's own /tmp.
  *
- * The critical section it guards is ~1-3ms (two NVML process enumerations plus
- * the real driver allocation). The waiters are the other processes of the same
- * container: the lock file lives under the container's own /tmp, so N here is
- * "how many of my own ranks are allocating at once", not a whole node.
+ * This fixes TAIL LATENCY, not throughput -- a waiter resets to the minimum
+ * interval after every acquire, so the lock already stays highly utilised.
+ * The failure case is a waiter that loses a few handoffs in a row: it
+ * climbs to the backoff cap and then polls far slower than newly arrived
+ * contenders, so it keeps losing and can ride all the way to
+ * LOCK_TIMEOUT_MS while neighbours get served. Two fixes: the cap is sized
+ * to the critical section (not 10x it), and past SPIN_AGING_MS a waiter
+ * resets to the minimum interval instead of continuing to back off, putting
+ * a long waiter ahead of any newcomer. Measured on a synthetic 2ms critical
+ * section: worst-case observed wait dropped from ~3s to ~0.2s, with both
+ * the floor and the aging rule load-bearing for that improvement.
  *
- * What is being fixed is TAIL LATENCY, not throughput. Throughput was never the
- * problem: a waiter resets to the minimum interval after every acquire, so most
- * waiters sit in the low part of the ramp and the lock stays ~92% utilised even
- * with the old 10ms cap. The failure is what happens to a waiter that loses a
- * few handoffs in a row. It climbs to the cap, and from there it polls ten
- * times slower than every newly arrived contender -- a waiter's chance of
- * taking a handoff is proportional to how often it polls -- so it keeps losing,
- * and can ride all the way to LOCK_TIMEOUT_MS while its neighbours are served.
- *
- * Two changes address that:
- *
- *   - the cap is sized to the critical section rather than 10x it, so no single
- *     sleep spans several handoffs;
- *   - past SPIN_AGING_MS a waiter stops backing off and returns to the minimum,
- *     which puts a long waiter ahead of any newcomer instead of behind it.
- *
- * Measured with a synthetic 2ms critical section and N contenders each retrying
- * immediately (3s runs, repeated; throughput and utilisation were flat across
- * every variant, ~465 handoffs/s and ~93%):
- *
- *     N=8    worst-thread/best-thread     max observed wait
- *     old    0.00 - 0.23                  2.8 - 3.0 s
- *     new    0.55 - 0.76                  0.17 - 0.23 s
- *     new, without the aging rule         0.46 - 0.64 s
- *     new, with a 400us floor             0.31 - 0.39 s
- *
- * so both the floor and the aging rule are load-bearing for the tail. A fairness
- * of 0.00 means a thread was starved outright for the whole run.
- *
- * What pays for polling this often: a retry is one fcntl on a descriptor opened
- * once outside the loop -- it used to be open + fcntl + close. At N=8 that is
- * ~26 syscalls per acquisition against the old ~5, which at ~465 acquisitions/s
- * spread over 8 waiters is a fraction of a percent of a core, and only while
- * actually contending.
- *
- * The first few attempts yield rather than sleep: the fast path can release in
- * microseconds and sched_yield needs no timer. The 200us floor is set by the
- * kernel's default 50us timer slack -- below roughly 100us the slack dominates
- * and a shorter sleep buys nothing but syscalls. */
+ * Cost: a retry is one fcntl on a descriptor opened once outside the loop,
+ * a fraction of a percent of a core even under contention. The first few
+ * attempts yield rather than sleep, since the fast path can release in
+ * microseconds; the 200us floor matches the kernel's default timer slack,
+ * below which a shorter sleep buys nothing but syscalls. */
 #define SPIN_YIELD_ATTEMPTS  4
 #define SPIN_INTERVAL_MIN_US 200
 #define SPIN_INTERVAL_MAX_US 1000
@@ -73,20 +49,17 @@
 #define GET_VMEMORY_LOCK_OFFSET(device_index) \
   offsetof(device_vmemory_t, devices[device_index].lock_byte)
 
-/* The per-device byte-range locks on the shared sm-util / vmem files use OFD
+/* The per-device byte-range locks on the shared sm-util/vmem files use OFD
  * (Open File Description) locks instead of classic process-associated locks.
- * Classic POSIX locks are released when the process closes ANY fd on the inode,
- * so a fresh-fd-per-lock caller that holds locks on several device bytes (or
- * also keeps the file mmap'd) would have one unlock/close silently drop a
- * sibling device's still-held lock. OFD locks are owned by the open file
- * description, so an unrelated close never touches them, while still conflicting
- * across fds and cross-process. Requires Linux >= 3.15; the build defines
- * _GNU_SOURCE (see CMakeLists.txt), and the fallbacks below cover builds that
- * do not (the values are fixed across all Linux architectures).
- * lock_gpu_device()'s per-device file lock also uses OFD: those files are not
- * exposed to the sibling-drop problem (one inode per device), but OFD gives it
- * intra-process mutual exclusion, which a classic per-process lock cannot (fds
- * of one process never conflict), closing a TOCTOU race between threads of the
+ * Classic POSIX locks release when the process closes ANY fd on the inode,
+ * so a caller holding locks on several device bytes could have one
+ * unlock/close silently drop a sibling device's still-held lock. OFD locks
+ * are owned by the open file description instead, so an unrelated close
+ * never touches them, while still conflicting across fds and processes.
+ * Requires Linux >= 3.15; the fallbacks below cover older kernels.
+ * lock_gpu_device() also uses OFD for a different reason: intra-process
+ * mutual exclusion, which a classic per-process lock can't give (fds of one
+ * process never conflict), closing a TOCTOU race between threads of the
  * same container allocating on the same device. */
 #ifndef F_OFD_SETLK
 #define F_OFD_SETLK 37
@@ -95,12 +68,11 @@
 #define F_OFD_SETLKW 38
 #endif
 
-/* Prefer OFD locks (Linux >= 3.15); fall back to classic POSIX locks at runtime
- * when the kernel rejects them with EINVAL. On modern kernels the OFD call
- * succeeds on the first try, so there is no extra syscall. A classic F_UNLCK
- * does not release an OFD lock and vice versa, but that never mixes here: a
- * kernel either supports OFD (every call, lock and unlock, uses it) or does not
- * (every call falls back), so acquire and release always stay in one family. */
+/* Prefer OFD locks; fall back to classic POSIX locks at runtime when the
+ * kernel rejects them with EINVAL. A classic F_UNLCK doesn't release an OFD
+ * lock and vice versa, but that never mixes here: a kernel either supports
+ * OFD for every call or falls back for every call, so acquire and release
+ * always stay in one family. */
 /* Not static: loader.c's sm_node region builder reuses it rather than growing a
  * second locking primitive. Stays out of .dynsym via the linker version script. */
 int ofd_fcntl(int fd, int wait, struct flock *fl) {
@@ -160,46 +132,28 @@ static void backoff_spin(long *interval_us, int attempt, long elapsed_ms,
 }
 
 /* Idempotent directory create. mkdir(2) is an atomic kernel syscall, so
- * multiple threads or processes racing on the same path resolve cleanly:
- * at most one wins with 0, the rest get EEXIST. Treating EEXIST as success
- * gives the same effect as the previous mutex-guarded access()+mkdir()
- * pair, with three side benefits:
- *
- *   1. Removes a mutex from a hot path (lock_gpu_device runs on every
- *      memory hook, which fires from every cuLaunch* indirectly).
- *   2. Removes a held-at-fork hazard -- the old `mutex` had the same
- *      "parent thread holds it at fork -> child deadlocks forever"
- *      shape as the four loader.c mutexes already covered by
- *      loader_child_after_fork(). Eliminating the mutex eliminates
- *      the hazard rather than papering over it with re-init.
- *   3. Drops one syscall per call (the access() probe).
- *
- * Any errno other than EEXIST (EACCES / ENOSPC / ENOENT on parent dir,
- * etc.) is propagated implicitly: the open(O_RDWR|O_CREAT) in
- * lock_gpu_device() below will return -1 with a related errno and
- * lock_gpu_device's standard failure path handles it -- so no extra
- * error reporting is needed here. */
+ * concurrent callers resolve cleanly: at most one wins with 0, the rest get
+ * EEXIST, which we treat as success. This avoids a mutex on a hot path
+ * (lock_gpu_device runs on every memory hook) and the held-at-fork hazard
+ * a mutex there would carry. Any other errno is left to surface naturally
+ * from lock_gpu_device()'s own open() call below. */
 static void ensure_create_lock_dir(void) {
   if (mkdir(VGPU_LOCK_PATH, 0755) == 0) return;
   if (errno == EEXIST) return;
   /* fall through; lock_gpu_device's open() will surface the real error */
 }
 
-/* Arm the lock on an already-open descriptor. Returns 0 on acquisition, or -1
- * with errno set; *retryable then reports whether this was mere contention
- * (spin and try again) or a hard error.
+/* Arm the lock on an already-open descriptor. Returns 0 on acquisition, or
+ * -1 with errno set; *retryable then reports whether this was mere
+ * contention (spin and try again) or a hard error.
  *
- * The open is the caller's job and happens once per lock_gpu_device() call,
- * not once per attempt. An OFD lock belongs to the open file description, so
- * re-arming the same descriptor is exactly equivalent to re-opening, and
- * nothing in the tree ever unlinks these files, so the descriptor cannot go
- * stale underneath a long wait. Hoisting it out drops a retry from three
- * syscalls to one, which is what pays for the much shorter spin interval.
- *
- * It also shrinks an existing hazard rather than adding one: on a legacy
- * kernel where ofd_fcntl() falls back to classic POSIX locks, closing *any*
- * descriptor on this inode drops the whole process's lock on it. The old code
- * closed one per failed attempt; there is now at most one close per call. */
+ * The caller opens the fd once per lock_gpu_device() call, not once per
+ * attempt: re-arming the same descriptor is equivalent to re-opening (an
+ * OFD lock belongs to the open file description), and nothing ever unlinks
+ * these files, so the descriptor can't go stale under a long wait. This
+ * drops a retry from three syscalls to one, which is what pays for the
+ * much shorter spin interval, and also shrinks the legacy-kernel hazard
+ * where closing any descriptor on the inode drops the whole process's lock. */
 static int try_lock_fd(int fd, int *retryable) {
   struct flock fl = {
     .l_type = F_WRLCK,

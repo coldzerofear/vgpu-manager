@@ -34,33 +34,16 @@ extern "C" {
 #include <unistd.h>
 #include <pthread.h>
 
-/* Toolchain assumption gate.
- *
- * libvgpu-control.so is a glibc-only, GCC-compatible-only build target.
+/* Toolchain assumption gate. libvgpu-control.so is a glibc-only,
+ * GCC-compatible-only build target: it depends on glibc's private
+ * _dl_sym and dlvsym(GLIBC_2.X) symbol versioning in loader.c, GCC
+ * __attribute__/__builtin_expect extensions in this header, and GCC
+ * atomic builtins elsewhere -- none of which have a portable fallback.
  * Hard-failing here gives a clear error instead of letting the build
- * limp on until linker errors point at obscure undefined references
- * like `_dl_sym`. Concrete dependencies that have no portable fallback:
- *
- *   loader.c       — extern void* _dl_sym(...) is a glibc PRIVATE
- *                    symbol used as the last-resort fallback in
- *                    init_real_dlsym(). musl / Bionic do not export it.
- *   loader.c       — dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.X") is glibc
- *                    versioned-symbol lookup. POSIX has dlsym, not
- *                    dlvsym; the GLIBC_* version strings are also
- *                    glibc-internal.
- *   hook.h         — FUNC_ATTR_VISIBLE, UNUSED, likely / unlikely use
- *                    GCC __attribute__ / __builtin_expect extensions.
- *   cuda_hook.c    — CAS uses __sync_bool_compare_and_swap (GCC builtin).
- *   src/vulkan/    — __atomic_compare_exchange_n / __atomic_load_n
- *                    (GCC C11 atomics).
- *
- * Note that __GNUC__ is also defined by Clang for GCC-compat — the
- * gate accepts Clang on glibc, which works in practice (Clang
- * implements all the GCC extensions we use). What we reject is musl
- * (Alpine), Bionic (Android), MSVC, and other non-GNU/non-glibc
- * toolchains where the LD_PRELOAD dlsym-interception mechanism cannot
- * be assembled.
- */
+ * limp on until linker errors point at obscure undefined references.
+ * Clang is accepted (it implements the same GCC extensions on glibc);
+ * musl (Alpine), Bionic (Android), and MSVC are out of scope, since the
+ * LD_PRELOAD dlsym-interception mechanism can't be assembled on them. */
 #if !defined(__GNUC__) || !defined(__GLIBC__)
 #  error "libvgpu-control.so requires a GCC-compatible compiler "        \
          "(GCC or Clang) AND glibc. The library uses _dl_sym, dlvsym "   \
@@ -205,27 +188,24 @@ typedef struct {
   int minor;
 } version_t;
 
-/* ---- vgpu.config shared-region ABI ------------------------------------- *
+/* ---- vgpu.config shared-region ABI ---- *
+ * resource_data_t is written by the Go manager (pkg/config/vgpu) or, on the
+ * env-fallback path, by the first library process in the container, and
+ * read by every library process. Once the Go side mutates a device_t at
+ * runtime, a plain multi-field read on the hot path can tear (see
+ * docs/resource_data_seqlock_versioning_design.md), so each device_t
+ * carries a seqlock version (`seq`) and is padded to one cache line --
+ * always read via get_device_snapshot(), never a bare field access on
+ * anything that may be mutated. The region opens with a frozen header
+ * validated on map, same contract as vmem_node/sm_node.
  *
- * resource_data_t is written by the Go manager (pkg/config/vgpu) OR, on the
- * env-fallback path, by the first library process in the container
- * (write_file_to_config_path), and read by every library process. Once the Go
- * side starts mutating a device_t at runtime, a plain multi-field read on the
- * hot path can tear (see docs/resource_data_seqlock_versioning_design.md). So:
- *
- *   - each device_t carries a seqlock version (`seq`) and is padded to one
- *     cache line so a writer bumping one device's seq never false-shares a
- *     neighbouring reader; use get_device_snapshot() to read, never a bare
- *     g_vgpu_config->devices[i].field on a field that may be mutated.
- *   - the region opens with a frozen header (magic/layout_version/region_size/
- *     device_count) validated on map, same contract as vmem_node / sm_node.
- *
- * THIS STRUCT IS AN ABI: fixed-width types, explicit padding, _Static_asserts,
- * and a Go mirror (pkg/config/vgpu/vgpu_config.go) pinned by the same offsets.
- * Bump CONFIG_LAYOUT_VERSION on ANY change to field type/order/offset and
- * update both sides' asserts. No _Atomic here -- a non-lock-free _Atomic would
- * downgrade to libatomic's per-process lock table (see sm_node note below);
- * plain fixed-width types + __atomic_* with explicit order at each site. */
+ * THIS STRUCT IS AN ABI: fixed-width types, explicit padding,
+ * _Static_asserts, and a Go mirror (pkg/config/vgpu/vgpu_config.go) pinned
+ * by the same offsets. Bump CONFIG_LAYOUT_VERSION on any field type/order/
+ * offset change and update both sides' asserts. No _Atomic here -- a
+ * non-lock-free _Atomic would downgrade to libatomic's per-process lock
+ * table (see the sm_node note below); plain fixed-width types plus
+ * __atomic_* with explicit order at each site instead. */
 #define CONFIG_MAGIC               0x56474346U   /* "VGCF" */
 #define CONFIG_LAYOUT_VERSION      1U
 #define CONFIG_FILE_SIZE           8192          /* fixed; decoupled from sizeof so a
@@ -328,22 +308,17 @@ extern resource_data_t *g_vgpu_config;
 
 /**
  * Dynamic SM controller configuration. All tunables that affect runtime
- * algorithm behaviour live here so the boot log can dump them with a
- * single line and operators have one place to look.
+ * algorithm behaviour live here so the boot log can dump them in a single
+ * line and operators have one place to look.
  *
- * Field ordering NOTE: this struct is part of the .so internal layout
- * (g_dynamic_config is non-static but hidden via the linker version
- * script). Reorganising field order across a build that other parts of
- * the codebase already link against would shift offsets; keep
- * usage_threshold at its original position and APPEND new fields to the
- * tail. New fields must be POD with explicit sized types so the dump
- * line in sm_controller_init() stays trivial to write.
+ * Field ordering: keep usage_threshold at its original position and
+ * append new fields to the tail, since g_dynamic_config is non-static
+ * (hidden via the linker version script) and reordering would shift
+ * offsets other linked code relies on.
  *
- * Loaded once at sm_controller_init() (under pthread_once g_init_set).
- * After init this struct is read-only at runtime by the watcher thread,
- * so no volatile / atomics needed; init runs before any watcher thread
- * is spawned, and fork() re-runs init in the child via the pthread_once
- * reset in child_after_fork() if the child needs it.
+ * Loaded once at sm_controller_init() (under pthread_once g_init_set),
+ * then read-only at runtime by the watcher thread -- no volatile/atomics
+ * needed, since init always runs before any watcher thread is spawned.
  *
  * usage_threshold:    avg-free-headroom threshold for soft-mode up_limit
  *                     periodic adjust. >= 0; env CUDA_SM_USAGE_THRESHOLD.
@@ -408,23 +383,19 @@ typedef struct {
   device_process_t devices[MAX_DEVICE_COUNT];
 } device_util_t;
 
-/* memory_node_t.type -- what a virtual-memory record stands for, and therefore
- * how cuMemFreeAsync must retire it (see cuda_hook.c).
+/* memory_node_t.type -- what a virtual-memory record stands for, and
+ * therefore how cuMemFreeAsync must retire it (see cuda_hook.c).
  *
- * UVA_SYNC / UVA_ASYNC name memory the oversold path handed out as managed
- * memory; only UVA_ASYNC has to drain the stream and fall back to cuMemFree.
- *
- * CAPTURE and ASYNC_BRIDGE both name ordinary device memory that is only being
- * ACCOUNTED for, and both exist for exactly one reason: to cover a window in
- * which the allocation is invisible to NVML. They differ in which window.
- *   ASYNC_BRIDGE spans the driver call to the stream synchronize.
- *   CAPTURE spans the capture itself. During capture cuMemAllocAsync only
- *     reserves an address -- no physical memory exists until the graph is
- *     launched, from which point NVML reports the graph pool. The charge is
- *     what makes several allocations inside one capture accumulate against the
- *     limit, and cuStreamEndCapture retires it (see free_gpu_virt_memory_by_graph)
- *     because holding it past the launch would double-count against NVML and
- *     leak whenever the graph, rather than the application, owns the pointer. */
+ * UVA_SYNC/UVA_ASYNC name memory the oversold path handed out as managed
+ * memory; only UVA_ASYNC has to drain the stream and fall back to
+ * cuMemFree. CAPTURE and ASYNC_BRIDGE both name ordinary device memory
+ * that's only being ACCOUNTED for, covering a window where the allocation
+ * is invisible to NVML: ASYNC_BRIDGE spans the driver call to the stream
+ * synchronize, CAPTURE spans the capture itself (cuMemAllocAsync only
+ * reserves an address during capture -- no physical memory exists until
+ * the graph launches and NVML reports the pool). cuStreamEndCapture
+ * retires the CAPTURE charge, since holding it past launch would
+ * double-count against NVML. */
 #define MEMORY_TYPE_UVA_SYNC     1
 #define MEMORY_TYPE_UVA_ASYNC    2
 #define MEMORY_TYPE_CAPTURE      3
@@ -458,19 +429,15 @@ typedef struct {
   unsigned char lock_byte;
 } device_vmem_used_t;
 
-/* vmem_node region. Structurally the same frozen-header idea as sm_node below,
- * for the same reason -- the host directory outlives a container while the .so
- * is version-pinned per container, so a newer library can be handed a file an
- * older one wrote -- but with one hard difference: this region HAS a host-side
- * Go reader (pkg/config/vmem), so the layout is a CROSS-LANGUAGE ABI.
- *
- * Anything changed here must be mirrored in DeviceVMemoryT, and in particular
- * getVmemoryLockOffset() must keep agreeing with GET_VMEMORY_LOCK_OFFSET in
- * lock.c. C gets that for free because offsetof() accounts for the header; Go
- * computes the offset by hand, so it is the one place in this design where
- * being wrong produces no error at all -- just fcntl locks taken on
- * non-overlapping byte ranges, mutual exclusion silently gone, and torn reads
- * reported as valid metrics. TestVMemoryLayoutMatchesC exists to catch it. */
+/* vmem_node region. Same frozen-header idea as sm_node below (the host
+ * directory outlives a container while the .so is version-pinned per
+ * container, so a newer library can inherit a file an older one wrote),
+ * but with one hard difference: this region has a host-side Go reader
+ * (pkg/config/vmem), so the layout is a CROSS-LANGUAGE ABI. Anything
+ * changed here must be mirrored in DeviceVMemoryT, and getVmemoryLockOffset()
+ * must keep agreeing with GET_VMEMORY_LOCK_OFFSET in lock.c -- Go computes
+ * that offset by hand, so a mismatch produces no error, just silently
+ * non-overlapping locks. TestVMemoryLayoutMatchesC exists to catch it. */
 #define VMEM_NODE_MAGIC          0x564D4E44U   /* "VMND" */
 #define VMEM_NODE_LAYOUT_VERSION 1U
 /* Permanent constant, like SM_NODE_FILE_SIZE, and here it prevents a real
@@ -501,27 +468,22 @@ _Static_assert(offsetof(device_vmemory_t, magic) == 0,
 _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
                "frozen header ABI: layout_version stays at offset 4");
 
-/* ---------------------------------------------------------------------- *
- *  sm_node -- container-wide shared token bucket for SM (compute) limiting
+/* ---- sm_node -- container-wide shared token bucket for SM (compute) limiting ---- *
+ * Symmetric with vmem_node: that region carries cross-process MEMORY
+ * isolation state, this one COMPUTE isolation state. See
+ * docs/sm_multiproc_shared_bucket_design.md.
  *
- *  Symmetric with vmem_node: that region carries the cross-process state of
- *  MEMORY isolation, this one the cross-process state of COMPUTE isolation.
- *  See docs/sm_multiproc_shared_bucket_design.md.
+ * Why it exists: g_dev_hot[].cur_cuda_cores is per-PROCESS, so N processes
+ * in one container each hold their own bucket and can each independently
+ * decide "tokens available, go" at the same instant. Moving it into
+ * MAP_SHARED memory makes "how much may this container still launch" a
+ * physical invariant rather than a statistical average, at no hot-path
+ * cost (a CAS doesn't care which address space the word lives in).
  *
- *  Why it exists: g_dev_hot[].cur_cuda_cores is a per-PROCESS static, so N
- *  processes in one container each hold their own bucket and can each decide
- *  "tokens available, go" at the same instant. Moving the bucket into
- *  MAP_SHARED memory makes "how much may this container still launch" a
- *  physical invariant rather than a statistical average -- and costs nothing
- *  on the hot path, because a CAS is a CPU instruction that does not care
- *  which address space the word lives in.
- *
- *  THIS STRUCT IS AN ABI. It is written to a file, mapped by several
- *  processes, and outlives any single library version. Hence fixed-width
- *  types, explicit padding, and _Static_asserts pinning the layout.
- *  Unlike vmem_node it has NO host-side Go reader, so the ABI is
- *  library-internal -- but it still crosses library VERSIONS.
- * ---------------------------------------------------------------------- */
+ * THIS STRUCT IS AN ABI: written to a file, mapped by several processes,
+ * outliving any single library version -- hence fixed-width types,
+ * explicit padding, and _Static_asserts. Unlike vmem_node it has no
+ * host-side Go reader, but it still crosses library versions. */
 
 /* Container-side path. NOT the container's own /tmp: this directory is bind
  * mounted per container by the device plugin / DRA driver, exactly like
@@ -531,20 +493,15 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
 #define SM_NODE_PATH      (TMP_DIR SM_NODE_DIR)
 #define SM_NODE_FILE_PATH (TMP_DIR SM_NODE_DIR "/sm_node.config")
 
-/* Sampling-ownership lock. A SEPARATE file from the region, on purpose.
- *
- * The init lock in map_sm_node_region can live on sm_node.config because it is
- * taken and dropped inside one function. This one is held for the process's
- * whole life, and that inverts the trade-off: on kernels without OFD locks we
- * fall back to classic POSIX record locks, which are dropped when the process
- * closes ANY descriptor for that file -- and map_sm_node_region does exactly
- * that during init. Sharing one file would mean leadership could evaporate
- * silently, leaving two processes each convinced it owns sampling.
- *
- * It must also NEVER be deleted while containers run: unlink + recreate yields
- * a new inode, locks are per-inode, and two processes holding locks on
- * different inodes are not mutually exclusive at all. The pre-start cleanup
- * removes sm_node.config (we want a fresh region) but deliberately not this. */
+/* Sampling-ownership lock. A separate file from the region, on purpose:
+ * the init lock in map_sm_node_region is taken and dropped inside one
+ * function, but this one is held for the process's whole life. On kernels
+ * without OFD locks, a classic POSIX record lock drops when the process
+ * closes ANY descriptor for that file -- which map_sm_node_region does
+ * during init -- so sharing one file would let leadership evaporate
+ * silently. Must also never be deleted while containers run: a new inode
+ * from unlink+recreate wouldn't be mutually exclusive with the old one's
+ * locks, so pre-start cleanup removes sm_node.config but not this file. */
 #define SM_NODE_LOCK_PATH (TMP_DIR SM_NODE_DIR "/sm_node.lock")
 
 /* The file size is a PERMANENT constant, deliberately decoupled from

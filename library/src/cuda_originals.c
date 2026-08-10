@@ -2029,8 +2029,8 @@ CUresult cuGraphicsResourceGetMappedEglFrame(CUeglFrame *eglFrame,
 
 
 /* cuLaunchCooperativeKernelMultiDevice: public symbol now provided by the
- * throttled hook in cuda_hook.c (P3, HAMi #1190 hardening). Trampoline
- * disabled to avoid multiple-definition link errors. */
+ * throttled hook in cuda_hook.c. Trampoline disabled here to avoid
+ * multiple-definition link errors. */
 //CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsList,
 //                                      unsigned int numDevices,  unsigned int flags) {
 //  return CUDA_ENTRY_CHECK(cuda_library_entry,

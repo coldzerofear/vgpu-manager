@@ -39,8 +39,8 @@
 
 /* SM throttle controller selection + AIMD parameters. The watcher's per-cycle
  * share update is delegated to a controller. Default keeps stock behaviour.
- * AIMD ("aimd") implements the Midokura ablation/orig-aimd-v5 algorithm: slow
- * additive increase (gap-proportional) + fast multiplicative decrease.
+ * AIMD ("aimd") does slow additive increase (gap-proportional) + fast
+ * multiplicative decrease.
  *
  *   CUDA_SM_CONTROLLER       = "delta" (default) | "aimd"
  *   CUDA_SM_AIMD_MD_DIVISOR  = MD factor (share /= div) - default 3
@@ -571,33 +571,22 @@ static int compare_pids(const void *a, const void *b) {
   return (pid1 > pid2) - (pid1 < pid2);
 }
 
-/* Bounded wait for the shared lock on pids.config.
+/* Bounded wait for the shared lock on pids.config. The manager rewrites
+ * this file in place under LOCK_EX once per CUDA process at registration;
+ * reading without the matching LOCK_SH could land mid-rewrite.
  *
- * The manager rewrites this file in place under LOCK_EX every time a process in
- * this container registers -- which is once per CUDA process, at library init.
- * Reading without the matching LOCK_SH lets a read land in the middle of that
- * rewrite.
+ * Budget kept deliberately tiny: the writer's critical section is a
+ * microsecond-scale ftruncate+pwrite, so contention outlasting the first
+ * few yields means something is wedged, not merely busy -- and the caller
+ * runs under lock_gpu_device (whose own critical section is ~1-3ms, held
+ * TWICE per call), so time spent here is spent twice and queues every
+ * other process waiting on that device. LOCK_NB throughout, never a
+ * blocking LOCK_SH, so a stalled writer can't wedge CUDA calls behind it.
  *
- * The budget is deliberately tiny, and sized against the two things around it:
- *
- *   - the writer's critical section is an ftruncate plus one pwrite of a few
- *     hundred bytes, so a waiter that just missed the lock wins it back in
- *     microseconds. Contention that outlasts the first few yields is not
- *     contention, it is something wedged;
- *   - the caller runs under lock_gpu_device, whose critical section is ~1-3ms,
- *     and it runs TWICE per hold (once for the compute process list, once for
- *     the graphics one). Whatever is spent here is spent twice and lands
- *     directly on every other process queued for that device.
- *
- * So: a few free sched_yield()s first, then a handful of 200us sleeps, capping
- * a single read at about 1ms and one lock hold at about 2ms. LOCK_NB throughout
- * rather than a blocking LOCK_SH, because a writer that stalls while holding the
- * lock must not be able to wedge CUDA calls behind it.
- *
- * Giving up and reading anyway is the safe degradation: the writer never
- * truncates before writing, so an unlocked reader sees a complete list, at worst
- * with trailing PIDs of this same container left over from a longer previous
- * one. Those are dead PIDs; they match nothing on the device. */
+ * Giving up and reading anyway is safe: the writer never truncates before
+ * writing, so an unlocked reader sees a complete list, at worst with dead
+ * trailing PIDs from a previous, longer-lived registration that match
+ * nothing on the device. */
 #define PIDS_CONFIG_LOCK_YIELDS 4
 #define PIDS_CONFIG_LOCK_SLEEPS 5
 #define PIDS_CONFIG_LOCK_BACKOFF_NS (200 * 1000L) /* 200us, so ~1ms worst case */

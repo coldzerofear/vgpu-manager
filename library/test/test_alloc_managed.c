@@ -1,7 +1,5 @@
 /*
  * cuMemAllocManaged smoke test - exercises vgpu-manager's UVA fallback path.
- *
- * Ported from HAMi-core/test/test_alloc_managed.c.
  */
 #include <cuda.h>
 #include <cuda_runtime.h>

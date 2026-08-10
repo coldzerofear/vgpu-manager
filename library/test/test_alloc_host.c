@@ -1,6 +1,5 @@
 /*
  * cuMemHostAlloc smoke test.
- * Ported from HAMi-core/test/test_alloc_host.c.
  */
 #include <cuda.h>
 #include <cuda_runtime.h>

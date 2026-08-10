@@ -219,7 +219,7 @@ func ReducePodFootprint(pod *corev1.Pod, claim device.PodDeviceClaim) map[string
 - **Allocate 容器循环**(`vnum_plugin.go:608`):无需大改 —— kubelet 会**为每个**申请了 vGPU 的容器
   (含 init,且先 init 后 app)分别调用 Allocate;现有"消费 PreAlloc 里第一个尚未进入 RealAlloc 的容器"
   游标模型,只要 PreAlloc 顺序为 init-first(§6.3 已保证)就**天然对齐**。需确认 init 与 app 注入路径一致
-  (env `NVIDIA_VISIBLE_DEVICES`、`CUDA_DEVICE_MEMORY_LIMIT_*`、`CUDA_DEVICE_SM_LIMIT_*`、HAMi-core
+  (env `NVIDIA_VISIBLE_DEVICES`、`CUDA_DEVICE_MEMORY_LIMIT_*`、`CUDA_DEVICE_SM_LIMIT_*`、
   `libvgpu-control.so` / `ld.so.preload` 挂载,见 `vnum_plugin.go:635-742`),init 容器同样需要这些注入。
 - `PreStartContainer` / `getRealContainerDeviceClaim`(`vnum_plugin.go:882`)按容器名查 RealAlloc,
   **对 init 天然可用**,只要 RealAlloc 含该 init 条目。

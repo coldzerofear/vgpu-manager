@@ -24,8 +24,8 @@ Rules enforced:
        - signature-stable (added to R7_ALLOWLIST with reason)  => safe to ignore
       Catches regressions where a newly-added versioned hook silently
       introduces a frame-mismatch risk at the cuGetProcAddress
-      substitution site (HAMi-core PR #182 / vgpu-manager Issue #1834
-      class of LD_PRELOAD hangs).
+      substitution site (vgpu-manager Issue #1834 class of LD_PRELOAD
+      hangs).
 
 Exit 0 if all pass; exit 1 on any R1-R6 violation.
 
@@ -258,7 +258,7 @@ def main() -> int:
     # noticing that the C parameter list changed between _v2 and _v3,
     # which would let cuGetProcAddress substitute the wrong-ABI wrapper
     # and produce the LD_PRELOAD frame-mismatch hang documented in
-    # HAMi-core Issue #1834.
+    # Issue #1834.
     multi_ver_bases: dict[str, list[int]] = {}
     ver_re = re.compile(r"^(cu[A-Z][A-Za-z0-9_]*)_v(\d+)$")
     for entry in loader_entries:

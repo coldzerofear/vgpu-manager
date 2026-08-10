@@ -212,7 +212,7 @@ func (n *NodeInfo) ComponentUUIDs(root int) []string
 
 ## 9.6 地基前提:NVSwitch 上的 NVLink 必须能被探测到(2026-06-24)
 
-> **本文 §5/§9.5 里"NVSwitch 全互联节点 = 一个 NVLink 分量"的说法,在修复前的真实 NVSwitch 硬件上恰好相反。** 本节记录这个地基缺陷、影响与修复(提交 `0e19c34`,对齐上游 [HAMi #2103](https://github.com/Project-HAMi/HAMi/pull/2103))。
+> **本文 §5/§9.5 里"NVSwitch 全互联节点 = 一个 NVLink 分量"的说法,在修复前的真实 NVSwitch 硬件上恰好相反。** 本节记录这个地基缺陷、影响与修复(提交 `0e19c34`)。
 
 ### 缺陷
 

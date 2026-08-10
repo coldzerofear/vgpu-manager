@@ -101,17 +101,11 @@ extern "C" {
     _ret;                                                                      \
   })
 
-/*
- * CUDA_ENTRY_CHECK_STRICT
- *
- * For ABI-incompatible versioned symbols (e.g. cuCtxCreate_v4, cuMemAdvise_v2,
- * cuMemPrefetchAsync_v2, graph *_v2). These wrappers must NOT fall through or
- * dereference a NULL fn_ptr: if the symbol is absent in the host libcuda.so
- * the caller is either on a wrong-version driver or asking for an API that
- * does not exist on this system. Returning CUDA_ERROR_NOT_SUPPORTED is far
- * safer than invoking NULL or silently downgrading to a differently-shaped
- * older ABI.
- */
+/* CUDA_ENTRY_CHECK_STRICT: for ABI-incompatible versioned symbols (e.g.
+ * cuCtxCreate_v4, cuMemAdvise_v2, graph *_v2). These wrappers must NOT fall
+ * through or dereference a NULL fn_ptr -- an absent symbol means the host
+ * driver is the wrong version or lacks the API, and CUDA_ERROR_NOT_SUPPORTED
+ * is far safer than invoking NULL or silently downgrading to an older ABI. */
 #define CUDA_ENTRY_CHECK_STRICT(table, sym, ...)                               \
   ({                                                                           \
     CUresult _ret_strict;                                                      \
