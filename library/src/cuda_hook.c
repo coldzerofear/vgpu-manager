@@ -75,10 +75,13 @@ extern int get_delta_ramp_floor_divisor(int *out);
 extern int get_uva_advise(int *out);
 extern int get_sm_shared_bucket(int *out);
 
-/* fork() child handler implemented in loader.c -- re-inits the four
+/* fork() child handler implemented in loader.c -- re-inits the three
  * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
- * device_index_mutex, init_config_mutex) and clears the tid_dlsyms
- * recursion-guard cache. Called from this file's child_after_fork(). */
+ * device_index_mutex), resets the driver/nvml-library-load once-guards
+ * (g_cuda_ver_init, g_nvml_lib_init, g_cuda_lib_init) so a fork() that
+ * lands mid-dlopen cannot leave the child's first hooked call hanging
+ * forever, and clears the tid_dlsyms recursion-guard cache. Called from
+ * this file's child_after_fork(). */
 extern void loader_child_after_fork(void);
 
 static void graph_cost_after_fork(void);
@@ -380,11 +383,14 @@ void child_after_fork(void) {
    * address. Forward-declared because the cache statics are defined later
    * (near the CUDA Graph hooks) to keep that subsystem co-located. */
   graph_cost_after_fork();
-  /* Loader-level mutexes have the exact same held-at-fork hazard --
-   * delegated since those mutexes are file-scope static in loader.c. The
-   * most dangerous one is init_config_mutex (taken from load_necessary_data
-   * on every launch hook entry); the others (tid_dlsym_lock, device_index_
-   * mutex, g_memory_node_lock) are also hot enough to warrant the reset. */
+  /* Loader-level mutexes and once-guards have the exact same held/in-progress
+   * -at-fork hazard -- delegated since they are file-scope static in loader.c.
+   * The highest-probability path is the driver/nvml-library-load once-guards
+   * (g_cuda_ver_init, g_nvml_lib_init, g_cuda_lib_init), since
+   * load_necessary_data() -- which they gate -- runs at every launch hook
+   * entry and does real dlopen/proc-read work; the mutexes (tid_dlsym_lock,
+   * device_index_mutex, g_memory_node_lock) are also hot enough to warrant
+   * the reset. */
   loader_child_after_fork();
 }
 

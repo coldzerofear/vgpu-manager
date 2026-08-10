@@ -3100,19 +3100,54 @@ void init_nvml_to_host_device_index() {
   }
 }
 
-/* fork() child handler: re-initialise the four file-scope mutexes that
- * protect loader.c hot paths. Without this, if a parent thread was inside
- * any of these critical sections at the instant of fork(), the child
- * inherits the mutex bit as 'locked' but the owning thread has vanished
- * -- every subsequent pthread_mutex_lock in the child blocks forever.
+/* fork() child handler: re-initialise the three file-scope mutexes that
+ * protect loader.c hot paths, and the pthread_once_t guards whose
+ * underlying work is not otherwise redone below. Without this, if a
+ * parent thread was inside any of these critical sections at the instant
+ * of fork(), the child inherits the mutex bit as 'locked' -- or the
+ * once-control as 'in progress' -- but the owning thread has vanished, so
+ * every subsequent pthread_mutex_lock/pthread_once in the child blocks
+ * forever.
  *
+ * Mutexes:
  *   - g_memory_node_lock  (vmem alloc/free accounting)
  *   - tid_dlsym_lock      (dlsym recursion-guard cache — touched on every
  *                          dlsym call from any thread)
  *   - device_index_mutex  (cuda<->nvml<->host index lookup, frequent)
- *   - init_config_mutex   (taken on every load_necessary_data() call,
- *                          which runs at every cuLaunchKernel entry --
- *                          this is the highest-probability deadlock path)
+ *
+ * pthread_once_t guards reset here:
+ *   - g_cuda_ver_init, g_nvml_lib_init, g_cuda_lib_init -- gate
+ *     read_version_from_proc() / load_nvml_libraries() /
+ *     load_cuda_libraries(), invoked from load_necessary_data() at the
+ *     top of every CUDA/NVML/dlsym hook entry (see cuInit/cuGetProcAddress
+ *     in cuda_hook.c, and dlsym() below). All three do real, non-instant
+ *     work (open+read /proc, dlopen a driver .so): a fork() landing
+ *     mid-call leaves the child's once-control stuck 'in progress', and
+ *     the child hangs forever on its first hooked call -- same shape as
+ *     Project-HAMi/HAMi-core PR #199 and issue #261 (vLLM TP>1 hang).
+ *     No extra data needs clearing alongside the reset; all three
+ *     self-heal on a full re-run: read_version_from_proc()
+ *     unconditionally overwrites driver_version; load_{nvml,cuda}_
+ *     libraries() skip any table[i].fn_ptr already resolved (valid across
+ *     fork -- the mapped .so does not move) and only fill in what an
+ *     interrupted parent run left blank; build_driver_routes() (called
+ *     unconditionally at the end of load_cuda_libraries(), not
+ *     separately guarded) always rebuilds g_routes[]/g_routes_n from
+ *     index 0, and its only reader, lookup_cuda_hook_ptr(), is reached
+ *     through cuGetProcAddress(), which calls load_necessary_data() first
+ *     -- so a torn build from a forked-away thread is always fully
+ *     replaced before anything reads it.
+ *   - init_nvml_host_index, g_controller_config_init,
+ *     g_reset_cuda_index_init -- reset below as before.
+ *
+ * Deliberately NOT reset: init_dlsym_flag. Its target, init_tid_dlsyms(),
+ * only re-does what this handler already does directly a few lines down
+ * (re-init tid_dlsym_lock, zero tid_dlsyms[]/tid_dlsym_count); resetting
+ * the flag too would make the child's next dlsym() call re-run
+ * pthread_mutex_init() on a mutex that is already valid and may by then
+ * be in active use by another thread -- trading a redundant-but-safe
+ * no-op for a real reinit-while-live hazard. Same reasoning covers
+ * g_atfork_init (see its own declaration comment above).
  *
  * pthread_mutex_init() on an already-initialised mutex is technically UB
  * per POSIX but is safe in practice on glibc/musl when no one currently
@@ -3132,6 +3167,9 @@ void init_nvml_to_host_device_index() {
 void loader_child_after_fork(void) {
   // After forking, it is necessary to use it to trigger nvmlInit again to ensure that
   // subsequent steps that require nvml will not fail due to lack of initialization.
+  g_cuda_ver_init = (pthread_once_t)PTHREAD_ONCE_INIT;
+  g_nvml_lib_init = (pthread_once_t)PTHREAD_ONCE_INIT;
+  g_cuda_lib_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   init_nvml_host_index = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_controller_config_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_reset_cuda_index_init = (pthread_once_t)PTHREAD_ONCE_INIT;
