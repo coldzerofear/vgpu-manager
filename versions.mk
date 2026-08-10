@@ -18,7 +18,6 @@ REGISTRY ?= coldzerofear
 IMG = $(REGISTRY)/vgpu-manager:$(TAG)
 DRA_IMG = $(REGISTRY)/vgpu-manager-dra:$(TAG)
 BASE_IMG = $(REGISTRY)/vgpu-manager-base:$(TAG)
-APT_MIRROR ?= https://mirrors.aliyun.com
 VERSION ?= $(shell cat VERSION)
 
 CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04

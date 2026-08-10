@@ -467,7 +467,7 @@ func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, 
 	}, nil
 }
 
-func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, devices PreparedDeviceList) error {
+func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, _ PreparedDeviceList) error {
 	_ = os.RemoveAll(filepath.Join(m.hostManagerPath, util.Claims, string(claimRef.UID)))
 
 	if !featuregates.Enabled(featuregates.DevicePluginClientMode) {

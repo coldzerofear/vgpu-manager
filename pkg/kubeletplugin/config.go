@@ -24,6 +24,7 @@ type Flags struct {
 	HealthcheckPort               int
 	KlogVerbosity                 int
 	AdditionalXidsToIgnore        string
+	ConsumableShares              string
 	HostManagerDir                string
 	CGroupDriver                  string
 	DeviceCoresRatio              uint

@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"k8s.io/klog/v2"
 )
 
 type RootPath string
@@ -91,16 +93,24 @@ func (r RootPath) GetDevRoot() string {
 // findFile searches the root for a specified file.
 // A number of folders can be specified to search in addition to the root itself.
 // If the file represents a symlink, this is resolved and the final path is returned.
+// Candidates that do not resolve to a regular file (e.g. directories) are skipped
+// so that they cannot shadow the actual file in a later search path.
 func (r RootPath) findFile(name string, searchIn ...string) (string, error) {
 
 	for _, d := range append([]string{"/"}, searchIn...) {
 		l := filepath.Join(string(r), d, name)
 		candidate, err := resolveLink(l)
 		if err != nil {
+			klog.V(4).Infof("Skipping candidate %q: %v", l, err)
 			continue
 		}
 		info, err := os.Stat(candidate)
-		if err != nil || !info.Mode().IsRegular() {
+		if err != nil {
+			klog.V(4).Infof("Skipping candidate %q: %v", candidate, err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			klog.V(4).Infof("Skipping candidate %q: not a regular file (mode %s)", candidate, info.Mode())
 			continue
 		}
 		return candidate, nil

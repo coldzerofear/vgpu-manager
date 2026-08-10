@@ -89,6 +89,13 @@ const (
 	// of the same name enabled before enabling this in the driver.
 	DRAListTypeAttributes featuregate.Feature = "DRAListTypeAttributes"
 
+	// ConsumableShares enables publishing consumable capacity and multi-allocation
+	// (AllowMultipleAllocations) support for devices in ResourceSlices, allowing
+	// multiple ResourceClaims to share the same GPU or MIG device when configured
+	// via --consumable-shares. Note: MPS sharing is not supported when consumable
+	// shares is enabled.
+	ConsumableShares featuregate.Feature = "ConsumableShares"
+
 	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
 
 	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
@@ -209,6 +216,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(0, 4),
 		},
 	},
+	ConsumableShares: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
 	//ComputeDomainCliques: {
 	//	{
 	//		Default:    true,
@@ -285,6 +299,9 @@ func ValidateFeatureGates() error {
 		//if Enabled(ComputeDomainCliques) {
 		//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, ComputeDomainCliques)
 		//}
+		if Enabled(ConsumableShares) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, ConsumableShares)
+		}
 	}
 	// ComputeDomainCliques requires IMEXDaemonsWithDNSNames
 	//if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {

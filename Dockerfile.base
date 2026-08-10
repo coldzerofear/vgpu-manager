@@ -30,7 +30,8 @@ WORKDIR /go/src/vgpu-manager
 ENV GOPATH=/go
 ENV GO111MODULE=on
 ENV PATH=$GOPATH/bin:/usr/local/go/bin:$PATH
-ENV GOPROXY=https://goproxy.cn,direct
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=$GOPROXY
 
 # Copy the Go Modules manifests
 COPY go.mod go.mod

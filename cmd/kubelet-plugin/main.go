@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	pkgkubeletplugin "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
@@ -137,6 +138,13 @@ func newApp() *cli.App {
 			Value:       "/metrics",
 			Destination: &flags.MetricsPath,
 			EnvVars:     []string{"METRICS_PATH"},
+		},
+		&cli.StringFlag{
+			Name:        "consumable-shares",
+			Usage:       "Configure consumable shares support ('disabled', 'memory', 'unlimited', or a positive integer).",
+			Value:       "disabled",
+			Destination: &flags.ConsumableShares,
+			EnvVars:     []string{"CONSUMABLE_SHARES"},
 		},
 		&cli.StringFlag{
 			Name:        "host-manager-dir",
@@ -282,6 +290,17 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 				return fmt.Errorf("host root is not mounted at %q", flags.HostRoot)
 			}
 			return fmt.Errorf("error checking if host root is mounted at %q: %w", flags.HostRoot, err)
+		}
+	}
+
+	if flags.ConsumableShares != "disabled" && !featuregates.Enabled(featuregates.ConsumableShares) {
+		return fmt.Errorf("--consumable-shares requires feature gate %s to be enabled", featuregates.ConsumableShares)
+	}
+
+	if flags.ConsumableShares != "disabled" && flags.ConsumableShares != "memory" && flags.ConsumableShares != "unlimited" {
+		val, err := strconv.Atoi(flags.ConsumableShares)
+		if err != nil || val <= 0 {
+			return fmt.Errorf("invalid value for --consumable-shares: %q (must be 'disabled', 'memory', 'unlimited', or a positive integer)", flags.ConsumableShares)
 		}
 	}
 

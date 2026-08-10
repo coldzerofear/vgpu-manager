@@ -521,6 +521,13 @@ func TestValidateFeatureGates(t *testing.T) {
 			expectError: false,
 			description: "should be valid when both FabricManagerPartitioning and PassthroughSupport are enabled",
 		},
+		{
+			name:         "ConsumableShares enabled with VGPUSupport",
+			fgMap:        map[featuregate.Feature]bool{VGPUSupport: true, ConsumableShares: true},
+			expectError:  true,
+			errorMessage: "feature gate VGPUSupport is currently mutually exclusive with ConsumableShares",
+			description:  "should fail when both ConsumableShares and VGPUSupport are enabled",
+		},
 	}
 
 	for _, tt := range tests {
