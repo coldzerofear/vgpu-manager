@@ -91,8 +91,8 @@ func SMUtilWatcherStart(ctx context.Context, deviceLib *nvidia.DeviceLib, gpuDev
 			}
 		}()
 
-		if err = deviceLib.NvmlInit(); err != nil {
-			klog.ErrorS(err, "nvmlInit failed")
+		if err = deviceLib.NvmlInitWithFlags(nvml.INIT_FLAG_NO_GPUS); err != nil {
+			klog.Errorln(err)
 			return
 		}
 		defer deviceLib.NvmlShutdown()

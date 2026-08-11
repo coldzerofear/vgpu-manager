@@ -230,7 +230,7 @@ func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceM
 	}
 	if manager.DeviceLib == nil {
 		driverRoot := config.GetDriverRoot()
-		deviceLib, err := nvidia.InitDeviceLib(driverRoot)
+		deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -256,7 +256,7 @@ func (m *DeviceManager) initDevices() (err error) {
 	var (
 		devLinksMap        map[string]map[int][]links.P2PLinkType
 		gpuTopologyEnabled = m.featureGate.Enabled(util.TopologyAwareGPUAllocation)
-		exists             = false
+		exists             bool
 	)
 	if gpuTopologyEnabled {
 		deviceList, err := gpuallocator.NewDevices(

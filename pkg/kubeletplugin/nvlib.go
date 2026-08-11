@@ -577,7 +577,7 @@ func (l deviceLib) maybeDisableMigMode(uuid string, nvmldev nvml.Device) error {
 		return fmt.Errorf("uuid not in gpuInfosByUUID: %s", uuid)
 	}
 
-	migs, err := l.GetMigInfos(gpu.GpuInfo)
+	migs, err := l.GetMigDeviceInfos(gpu)
 	if err != nil {
 		return fmt.Errorf("error getting MIG devices for %s: %w", gpu.String(), err)
 	}

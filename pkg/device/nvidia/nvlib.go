@@ -23,7 +23,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	nvinfo "github.com/NVIDIA/go-nvlib/pkg/nvlib/info"
@@ -163,39 +162,22 @@ type DeviceLib struct {
 	NvidiaSMIPath     string
 }
 
-var (
-	deviceLib *DeviceLib
-	initErr   error
-	initOnce  sync.Once
-)
-
-func InitDeviceLib(root RootPath) (*DeviceLib, error) {
-	initOnce.Do(func() {
-		defer func() {
-			if initErr != nil {
-				klog.Errorln("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
-				klog.Errorln("If this is a GPU node, did you set the container runtime to `nvidia`?")
-				klog.Errorln("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
-				klog.Errorln("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
-				klog.Errorln("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
-			}
-		}()
-		deviceLib, initErr = NewDeviceLib(root)
-		if initErr != nil {
-			return
+func DetectionDeviceLib(root RootPath) (*DeviceLib, error) {
+	deviceLib, err := NewDeviceLib(root)
+	if err != nil {
+		return nil, err
+	}
+	platform := deviceLib.ResolvePlatform()
+	switch platform {
+	case nvinfo.PlatformNVML, nvinfo.PlatformWSL:
+		if err = deviceLib.NvmlInit(); err != nil {
+			return nil, err
 		}
-		platform := deviceLib.ResolvePlatform()
-		switch platform {
-		case nvinfo.PlatformNVML, nvinfo.PlatformWSL:
-			if initErr = deviceLib.NvmlInit(); initErr != nil {
-				return
-			}
-			defer deviceLib.NvmlShutdown()
-		default:
-			initErr = fmt.Errorf("incompatible platform detected %v", platform)
-		}
-	})
-	return deviceLib, initErr
+		defer deviceLib.NvmlShutdown()
+		return deviceLib, nil
+	default:
+		return nil, fmt.Errorf("incompatible platform detected: %v", platform)
+	}
 }
 
 func NewDeviceLib(root RootPath) (*DeviceLib, error) {
@@ -487,11 +469,6 @@ func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
 	if !gpuInfo.MigEnabled {
 		return nil, nil
 	}
-
-	//if err := l.NvmlInit(); err != nil {
-	//	return nil, err
-	//}
-	//defer l.NvmlShutdown()
 
 	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
 	if ret != nvml.SUCCESS {
