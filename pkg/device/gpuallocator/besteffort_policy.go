@@ -1,11 +1,11 @@
 // Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
+// Copyright 2025-2026 coldzerofear
 
 package gpuallocator
 
 import (
-	"fmt"
-
-	nvml "github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
+	"k8s.io/klog/v2"
 )
 
 type bestEffortPolicy struct{}
@@ -317,61 +317,68 @@ func calculateGPUPairScore(gpu0 *Device, gpu1 *Device) int {
 	}
 
 	if len(gpu0.Links[gpu1.Index]) != len(gpu1.Links[gpu0.Index]) {
-		err := fmt.Errorf("Internal error in bestEffort GPU allocator: all P2PLinks between 2 GPUs should be bidirectional")
-		panic(err)
+		//err := fmt.Errorf("Internal error in bestEffort GPU allocator: all P2PLinks between 2 GPUs should be bidirectional")
+		//panic(err)
+		klog.Warningf("asymmetric P2P link data for GPU pair (index=%d uuid=%s) <-> (index=%d uuid=%s): "+
+			"%d link(s) from GPU %d to GPU %d, %d link(s) from GPU %d to GPU %d; "+
+			"scoring pair as 0 (possible NVLink hardware or driver issue)",
+			gpu0.Index, gpu0.UUID, gpu1.Index, gpu1.UUID,
+			len(gpu0.Links[gpu1.Index]), gpu0.Index, gpu1.Index,
+			len(gpu1.Links[gpu0.Index]), gpu1.Index, gpu0.Index)
+		return 0
 	}
 
 	score := 0
 
 	for _, link := range gpu0.Links[gpu1.Index] {
 		switch link.Type {
-		case nvml.P2PLinkCrossCPU:
+		case links.P2PLinkCrossCPU:
 			score += 10
-		case nvml.P2PLinkSameCPU:
+		case links.P2PLinkSameCPU:
 			score += 20
-		case nvml.P2PLinkHostBridge:
+		case links.P2PLinkHostBridge:
 			score += 30
-		case nvml.P2PLinkMultiSwitch:
+		case links.P2PLinkMultiSwitch:
 			score += 40
-		case nvml.P2PLinkSingleSwitch:
+		case links.P2PLinkSingleSwitch:
 			score += 50
-		case nvml.P2PLinkSameBoard:
+		case links.P2PLinkSameBoard:
 			score += 60
-		case nvml.SingleNVLINKLink:
+		case links.SingleNVLINKLink:
 			score += 100
-		case nvml.TwoNVLINKLinks:
+		case links.TwoNVLINKLinks:
 			score += 200
-		case nvml.ThreeNVLINKLinks:
+		case links.ThreeNVLINKLinks:
 			score += 300
-		case nvml.FourNVLINKLinks:
+		case links.FourNVLINKLinks:
 			score += 400
-		case nvml.FiveNVLINKLinks:
+		case links.FiveNVLINKLinks:
 			score += 500
-		case nvml.SixNVLINKLinks:
+		case links.SixNVLINKLinks:
 			score += 600
-		case nvml.SevenNVLINKLinks:
+		case links.SevenNVLINKLinks:
 			score += 700
-		case nvml.EightNVLINKLinks:
+		case links.EightNVLINKLinks:
 			score += 800
-		case nvml.NineNVLINKLinks:
+		case links.NineNVLINKLinks:
 			score += 900
-		case nvml.TenNVLINKLinks:
+		case links.TenNVLINKLinks:
 			score += 1000
-		case nvml.ElevenNVLINKLinks:
+		case links.ElevenNVLINKLinks:
 			score += 1100
-		case nvml.TwelveNVLINKLinks:
+		case links.TwelveNVLINKLinks:
 			score += 1200
-		case nvml.ThirteenNVLINKLinks:
+		case links.ThirteenNVLINKLinks:
 			score += 1300
-		case nvml.FourteenNVLINKLinks:
+		case links.FourteenNVLINKLinks:
 			score += 1400
-		case nvml.FifteenNVLINKLinks:
+		case links.FifteenNVLINKLinks:
 			score += 1500
-		case nvml.SixteenNVLINKLinks:
+		case links.SixteenNVLINKLinks:
 			score += 1600
-		case nvml.SeventeenNVLINKLinks:
+		case links.SeventeenNVLINKLinks:
 			score += 1700
-		case nvml.EighteenNVLINKLinks:
+		case links.EighteenNVLINKLinks:
 			score += 1800
 		}
 	}

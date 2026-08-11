@@ -266,18 +266,7 @@ func (m *DeviceManager) initDevices() (err error) {
 		if err != nil {
 			return fmt.Errorf("error getting gpuallocator device list: %v", err)
 		}
-		devLinksMap = make(map[string]map[int][]links.P2PLinkType, len(deviceList))
-		for _, dev := range deviceList {
-			devLinklist := make(map[int][]links.P2PLinkType, len(dev.Links))
-			for index, pLinks := range dev.Links {
-				p2pLinks := make([]links.P2PLinkType, len(pLinks))
-				for i, link := range pLinks {
-					p2pLinks[i] = link.Type
-				}
-				devLinklist[index] = p2pLinks
-			}
-			devLinksMap[dev.UUID] = devLinklist
-		}
+		devLinksMap = gpuallocator.GetDeviceLinkMap(deviceList)
 	}
 	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), m.DevRoot)
 	if err != nil {
