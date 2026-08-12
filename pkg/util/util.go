@@ -675,8 +675,12 @@ func EnsureDir(path string, perm os.FileMode) error {
 	if err := os.MkdirAll(path, perm); err != nil {
 		return err
 	}
-	if err := os.Chmod(path, perm); err != nil {
+	info, err := os.Lstat(path)
+	if err != nil {
 		return err
+	}
+	if info.Mode().IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return os.Chmod(path, perm)
 	}
 	return nil
 }

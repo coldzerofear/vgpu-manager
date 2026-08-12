@@ -839,7 +839,10 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>
 		// <host_manager_dir>/<pod-uid>_<cont-name>
 		contDir, hostDir := getContainerManagerPaths(currentPod.GetUID(), contClaim.Name)
-		_ = util.EnsureDir(contDir, 0o777)
+		if err = util.EnsureDir(contDir, 0o777); err != nil {
+			klog.ErrorS(err, "Failed to prepare directory", "directory", contDir)
+			return resp, err
+		}
 		devicesJsonFilePath := filepath.Join(contDir, DeviceListFileName)
 		if err = writeJSONFile(devicesJsonFilePath, containerRequest.GetDevicesIds(), 0o664); err != nil {
 			klog.V(3).ErrorS(err, fmt.Sprintf("write %s failed", DeviceListFileName),
@@ -850,16 +853,16 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>/vgpu_lock
 		contVGPULockPath := filepath.Join(contDir, VGPULockDirName)
-		_ = util.EnsureDir(contVGPULockPath, 0o777)
-
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>/vmem_node
 		contVMemoryNodePath := filepath.Join(contDir, util.VMemNode)
-		_ = util.EnsureDir(contVMemoryNodePath, 0o777)
-
 		// /etc/vgpu-manager/<pod-uid>_<cont-name>/sm_node
 		contSMNodePath := filepath.Join(contDir, util.SMNode)
-		_ = util.EnsureDir(contSMNodePath, 0o777)
-
+		for _, path := range []string{contVGPULockPath, contVMemoryNodePath, contSMNodePath} {
+			if err = util.EnsureDir(path, 0o777); err != nil {
+				klog.ErrorS(err, "Failed to prepare directory", "directory", contDir)
+				return resp, err
+			}
+		}
 		// <host_manager_dir>/<pod-uid>_<cont-name>/config
 		hostVGPUConfigPath := filepath.Join(hostDir, util.Config)
 		// <host_manager_dir>/<pod-uid>_<cont-name>/vgpu_lock
@@ -905,13 +908,11 @@ func (m *vNumberDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Alloc
 		configFilePath := filepath.Join(configDirPath, VGPUConfigFileName)
 		// Clean up invalid configuration files that may have been written to the wrong location
 		_ = os.RemoveAll(configFilePath)
-		_ = util.EnsureDir(configDirPath, 0o777)
-		klog.V(4).InfoS(
-			"vGPU config path resolved",
-			"pod", klog.KObj(currentPod),
-			"container", contClaim.Name,
-			"path", configFilePath,
-		)
+		if err = util.EnsureDir(configDirPath, 0o777); err != nil {
+			klog.Warningf("Failed to prepare directory %s: %v", configDirPath, err)
+		}
+		klog.V(4).InfoS("vGPU config path resolved", "pod", klog.KObj(currentPod),
+			"container", contClaim.Name, "path", configFilePath)
 
 		// Attempt to write the vgpu configuration file during the Allocate phase,
 		// and if unsuccessful, retry during the PreStartContainer phase
@@ -1113,13 +1114,12 @@ func (m *vNumberDevicePlugin) PreStartContainer(ctx context.Context, req *plugin
 	}
 
 	configDirPath := filepath.Join(contDir, util.Config)
-	_ = util.EnsureDir(configDirPath, 0o777)
+	if err = util.EnsureDir(configDirPath, 0o777); err != nil {
+		klog.Warningf("Failed to prepare directory %s: %v", configDirPath, err)
+	}
 	configFilePath := filepath.Join(configDirPath, VGPUConfigFileName)
-	klog.V(4).InfoS("vGPU config path resolved",
-		"pod", klog.KObj(pod),
-		"container", containerName,
-		"path", configFilePath,
-	)
+	klog.V(4).InfoS("vGPU config path resolved", "pod", klog.KObj(pod),
+		"container", containerName, "path", configFilePath)
 
 	oversold := util.PodContainerEnvEnabled(pod, containerName, util.CudaMemoryOversoldEnv)
 	err = vgpu.WriteVGPUConfigFile(configFilePath, m.baseServer.GetDeviceManager(), pod, *realClaim, oversold, node)

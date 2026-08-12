@@ -573,7 +573,9 @@ func (s *DeviceRegistryServerImpl) persistPids(configDir string, pids []int) err
 	if len(pids) == 0 {
 		return fmt.Errorf("refusing to write an empty pids file at %s", filepath.Join(configDir, PidsConfig))
 	}
-	_ = util.EnsureDir(configDir, 0o777)
+	if err := util.EnsureDir(configDir, 0o777); err != nil {
+		klog.V(2).ErrorS(err, "Failed to prepare directory", "directory", configDir)
+	}
 	var buf bytes.Buffer
 	sort.Ints(pids)
 	for _, pid := range pids {
