@@ -62,26 +62,34 @@ func AddReadyHandler(router *httprouter.Router, handler http.Handler) {
 	})
 }
 
-func AddReadyProbe(router *httprouter.Router, checker ...healthz.Checker) {
-	c := healthz.Ping
-	if len(checker) > 0 {
-		c = checker[0]
+func AddReadyProbe(router *httprouter.Router, checkers ...healthz.Checker) {
+	checker := func(req *http.Request) error {
+		for _, checker := range checkers {
+			if err := checker(req); err != nil {
+				return err
+			}
+		}
+		return healthz.Ping(req)
 	}
 	probeHandler := &healthz.Handler{
-		Checks: map[string]healthz.Checker{"readyz": c},
+		Checks: map[string]healthz.Checker{"readyz": checker},
 	}
 	router.GET(readyzPath, func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		probeHandler.ServeHTTP(w, r)
 	})
 }
 
-func AddHealthProbe(router *httprouter.Router, checker ...healthz.Checker) {
-	c := healthz.Ping
-	if len(checker) > 0 {
-		c = checker[0]
+func AddHealthProbe(router *httprouter.Router, checkers ...healthz.Checker) {
+	checker := func(req *http.Request) error {
+		for _, checker := range checkers {
+			if err := checker(req); err != nil {
+				return err
+			}
+		}
+		return healthz.Ping(req)
 	}
 	probeHandler := &healthz.Handler{
-		Checks: map[string]healthz.Checker{"healthz": c},
+		Checks: map[string]healthz.Checker{"healthz": checker},
 	}
 	router.GET(healthzPath, func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		probeHandler.ServeHTTP(w, r)
