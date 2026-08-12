@@ -452,8 +452,8 @@ func isCandidateAlive(cand TargetCandidate, cgroupResolver func(string) string, 
 	if util.PodIsTerminated(cand.Pod) {
 		return nil, false
 	}
-	status, ok := cgroup.GetContainerStatus(cand.Pod, cand.ContainerName)
-	if !ok || status.State.Running == nil {
+	containerStatus, ok := cgroup.GetContainerStatus(cand.Pod, cand.ContainerName)
+	if !ok || containerStatus.State.Running == nil {
 		*lastErr = fmt.Errorf("candidate container %q in pod %s not yet running",
 			cand.ContainerName, klog.KObj(cand.Pod))
 		return nil, false
