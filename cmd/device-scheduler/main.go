@@ -156,7 +156,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 
-	checkIsLeaderFunc := func() bool { return true }
+	isLeaderFunc := func() bool { return true }
 	if opt.WatchLease {
 		klog.Infoln("Watch lease enabled: Initialize lease detector")
 		leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix)
@@ -169,14 +169,13 @@ func runApp(opt *options.Options) (exitCode int) {
 			klog.Errorf("Initialization of LeaseDetector failed: %v", err)
 			return exitCode
 		}
-		checkIsLeaderFunc = leaseDetector.IsLeader
+		isLeaderFunc = leaseDetector.IsLeader
 	}
 
 	if opt.LeaderElect {
 		klog.Infoln("Leader elect enabled: Initialize leader elect")
 		leaderIdentity := uuid.NewString()
-		leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix)
-		if leaderIdentityPrefix != "" {
+		if leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix); leaderIdentityPrefix != "" {
 			leaderIdentity = fmt.Sprintf("%s_%s", leaderIdentityPrefix, leaderIdentity)
 		}
 		leaderElector, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
@@ -211,21 +210,21 @@ func runApp(opt *options.Options) (exitCode int) {
 			return exitCode
 		}
 		go leaderElector.Run(ctx)
-		checkIsLeaderFunc = leaderElector.IsLeader
+		isLeaderFunc = leaderElector.IsLeader
 	}
 
 	handler := httprouter.New()
 	route.AddVersion(handler)
 	route.AddHealthProbe(handler)
-	route.AddReadyProbe(handler, func(req *http.Request) error {
-		if !util.InformerFactoryHasSynced(factory, req.Context()) {
-			return errors.New("informer has not completed all synchronization")
+	route.AddReadyHandler(handler, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !util.InformerFactoryHasSynced(factory, r.Context()) {
+			http.Error(w, "internal server error: not synchronized yet completed", http.StatusInternalServerError)
+		} else if !isLeaderFunc() {
+			http.Error(w, "internal server unavailable: instance is not a leader", http.StatusServiceUnavailable)
+		} else {
+			http.Error(w, "ok", http.StatusOK)
 		}
-		if !checkIsLeaderFunc() {
-			return errors.New("instance is not a leader")
-		}
-		return nil
-	})
+	}))
 	route.AddFilterPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
 	route.AddPreemptPredicate(handler, preemptPlugin)
@@ -233,7 +232,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	// setting and needs no extra chart plumbing (port, probe, NetworkPolicy).
 	route.AddMetricsHandle(handler, metrics.Handler())
 
-	factory.Start(ctx.Done())
+	factory.StartWithContext(ctx)
 	if klog.V(4).Enabled() {
 		go func() {
 			klog.Infoln("Waiting for InformerFactory cache synchronization...")

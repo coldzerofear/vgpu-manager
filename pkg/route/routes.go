@@ -56,6 +56,12 @@ func VersionRoute(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
 	_, _ = fmt.Fprint(w, fmt.Sprint(version.Get()))
 }
 
+func AddReadyHandler(router *httprouter.Router, handler http.Handler) {
+	router.GET(readyzPath, func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		handler.ServeHTTP(w, r)
+	})
+}
+
 func AddReadyProbe(router *httprouter.Router, checker ...healthz.Checker) {
 	c := healthz.Ping
 	if len(checker) > 0 {
