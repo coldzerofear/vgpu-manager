@@ -28,6 +28,21 @@ v0.3 的修正（来自评审）：
 - 方案 C 的记账从 `SELF_PID` 改为 `SESSION` 兼容模式（容器级口径，§4.3/§6.5）。
 - 补充设备级 allowlist + 序号重映射，保证"每个设备配置匹配"（§6.6）。
 
+v0.3.1 的增补（来自评审）：
+- **单 lupine-server 多容器并发判别**：按连接读各自 session 头定配置区，session id 消毒 + 控制面签发令牌 +
+  fail-closed（§6.2.1）。
+- **lupine Python 客户端分析**：`connect()` 适配器 vs sidecar 机制的本质与适用范围，k8s pod 集成方式
+  （§2.4、§8.2）。
+
+v0.3.2 的增补（来自评审）：
+- **确定 C 落地形态**：改造集中在 lupine-server（fork 后、请求前注入 env）+ `library-remote` 裁剪适配器
+  （专责远程虚拟化），`library` 继续专责本地（§4.3.1）。
+- **逐环可行性确认**：客户端会话传递/session 判别现成；设备隔离靠 `cuDeviceGetCount/Get` 重映射（handler 直调
+  已核实）；nvml 路径靠库的 dlsym 拦截器（**必须保留**）；per-session 配置依赖 `loader_child_after_fork` 的
+  once-guard 重置（已核实，不能裁剪）。
+- **补充 10 条实施边界**（令牌签发、agent 落盘通道、fail-closed、fork 安全、env 时机、无 session 客户端、设备重
+  映射、裁剪回归等）。
+
 ---
 
 ## 1. 任务目标与约束
@@ -97,6 +112,27 @@ lupine-server (每连接 fork 子进程)
    ↓ 子进程内真实调用 CUDA/NVML
 GPU 服务器真实驱动
 ```
+
+### 2.4 lupine Python 客户端（`python/lupine`，PyTorch 适配层）
+
+`D:\WorkSpace\GoCode\src\lupine\python\lupine\` 是**可选的 Python/PyTorch 辅助包**，不是远程链路的必需部分。
+分三块：
+
+| 模块 | 作用 |
+|---|---|
+| `__init__.py` | `lupine.connect()` 会话适配器：设置 `LUPINE_SERVER` env + `ctypes.CDLL(...RTLD_GLOBAL)` **提前加载** lupine `libcuda.so.1`，然后返回普通 `torch.device("cuda:N")`。**不注册新 torch backend**（README 明确：真正的 `torch.device("lupine")` 需要 PrivateUse1 内核，LUPINE 不这么做）——PyTorch 走原生 CUDA dispatch，shim 在驱动层劫持。必须在任何 PyTorch CUDA 操作前调用。 |
+| `sidecar.py` + `worker.py` + `container.py` | **sidecar 机制**：当宿主进程是"没有 CUDA backend 的 PyTorch"（典型是 macOS 的 CPU-only torch build）时，用 Docker/Podman/nerdctl/Apple Container 拉起一个**容器化的 CUDA PyTorch worker**（镜像 `lupinemachines/lupine-pytorch-worker`），宿主经 stdin/stdout 管道 + JSON 帧 + 二进制 tensor 流做 op RPC（`upload/call/download/copy_from_cpu/release/ping`）。worker 镜像按 server 的 `x-lupine-cuda-version` HEAD 响应选择"镜像 CUDA 版本 ≤ server 版本"（`_worker_image_for_server`）。 |
+| `tensor.py` | sidecar 的二进制 tensor 传输层 + `SidecarTensor`/`SidecarDispatchMode`（torch dispatch mode 劫持 op 转发）。 |
+
+**与版本兼容分析的印证（§7）**：lupine 自己的 sidecar 选镜像策略正是"worker(CUDA) ≤ server(CUDA)"——佐证 §7.2 的
+**兼容方向 = client ≤ server** 结论。
+
+**对 vgpu-manager 的意义**：
+- `connect()` 的本质只是"设 env + 提前加载 shim"，这些在 k8s 里**完全可以由注入层（device-plugin/DRA Allocate）
+  完成，应用代码无需 import lupine**（见 §8.2）。
+- sidecar 为 macOS/CPU-only 宿主设计，**k8s Linux pod 场景不适用**（pod 镜像可自装 CUDA 版 PyTorch，无意义再套一层
+  容器 worker）。
+- `LUPINE_SESSION` 被 sidecar 自动继承（`container.py:19` `_INHERITED_ENV`）——会话 id 的传递语义与 §6.2.1 一致。
 
 ---
 
@@ -297,6 +333,79 @@ GPU 服务器真实驱动
 - 共享/ledger 路径需 per-session 作用域（子进程间不能共用 `/tmp/.sm_node`/`/tmp/.vmem_node`，否则互相串）。
 
 **结论：唯一能同时覆盖内存 + 核心的完整方案，是最终目标的正确架构。**
+
+### 4.3.1 实施路径确认（v0.3.2）：lupine-server 补丁 + `library-remote` 裁剪适配器
+
+**采纳的落地形态（评审确认）**：对 lupine 的改造**只集中在 lupine-server**（fork 子进程后、处理客户端请求前，
+识别 session 并注入 `library-remote` 所需 env）；`library-remote` 是 `library/` 的**裁剪适配器**，专责远程 GPU
+虚拟化；`library/` 继续专责本地 GPU 虚拟化。两者职责分离。
+
+**完整链路**：
+```
+DRA Allocate 注入 LUPINE_SESSION=<控制面令牌>  (客户端 pod，所有进程共享)
+   ↓
+Pod 应用 CUDA → lupine-client shim (libcuda.so.1)
+   ↓ HTTP/2 (x-lupine-session 头)
+lupine-server accept → fork 子进程 per 连接
+   ↓ 子进程 client_handler:
+   │  1. rpc_http2_server_init (解析本连接 session_id, h2.cpp:525/850-857)
+   │  2. 读到 session id → 消毒 → 派生 VGPU_CONFIG_PATH=<session>/session.config
+   │  3. setenv(VGPU_CONFIG_PATH, VGPU_REMOTE_MODE=1, ...)  (在首个 RPC dispatch 之前, server.cpp:421-429)
+   │  4. 库首次 cu*/nvml* 调用 → load_necessary_data → 读会话配置区 (fork 安全, 见 B)
+   ↓ 库(library-remote, 进程级 LD_PRELOAD) 在子进程内拦截/虚拟化
+GPU 节点真实驱动
+```
+
+**可行性确认（逐环代码证据）**：
+
+| 环节 | 证据 | 结论 |
+|---|---|---|
+| 客户端会话传递 | `h2.cpp:711` 读 `getenv("LUPINE_SESSION")`；注入层给容器所有进程同一 env | ✅ 现成 |
+| server 判别连接→session | 每连接独立 transport，`rpc_http2_session_id(&conn)`（`h2.cpp:850-857`） | ✅ 现成 |
+| 设备隔离/重映射 | lupine-server 生成 handler **直调** `cuDeviceGetCount`/`cuDeviceGet`（`gen_server.cpp:102/79`）；客户端设备表就是经这两个 RPC 枚举的（`routing.cpp:217-277`）→ 库 hook 二者即可让客户端只看到允许设备 | ✅ 需库新增 hook |
+| 直调 cu* 被拦截 | 进程级 PRELOAD → 库的 `cu*` 先于真 libcuda 入全局符号表（§4.0.1）；handler 直调（`gen_server.cpp:1760`）走 PLT → 库 hook | ✅ |
+| nvml 路径被拦截 | lupine-server 的 NVML 桩经 `nvml_symbol<>()` **dlsym 句柄查询**（`nvml_server.cpp:46-56`）；库的 dlsym 拦截器服务端唯一导出、遮蔽该查询 → 返回库的 nvml hook | ✅ **库必须保留 dlsym 拦截器**（不可裁剪） |
+| per-session 配置 fork 安全 | `loader_child_after_fork`（`loader.c:2994`）重置 `g_controller_config_init`/`g_cuda_lib_init`/`g_nvml_lib_init`/`g_reset_cuda_index_init` 等全部 once-guard → 每个子进程用**自己的 env** 重新初始化配置 | ✅ 现成机制，远程必须保留 |
+| 记账口径 | 会话进程表（§6.5）+ NVML 过滤（SESSION 模式） | ✅ 库改造 |
+
+**`library-remote` 裁剪设计（减少 hook 数、缩小影响面）**：
+
+- **导出面 = 只导出需要的 hook**（不再像本地库导出全部 `cu*`+passthrough）：未导出的符号在子进程里直接绑定真驱动，零拦截开销。
+- **Phase 1（内存）保留的 hook 族**：
+  - CUDA：`cuMemAlloc(_v2/Pitch/Async/FromPoolAsync/Managed)`、`cuMemFree(_v2/Async)`、`cuMemGetInfo(_v2)`、
+    `cuDeviceTotalMem(_v2)`、`cuArray*Create`/`cuMipmappedArrayCreate`（预算）、`cuMemHostAlloc/HostRegister`、
+    **`cuCtxGetDevice`**（取当前设备）、**`cuDeviceGetCount`/`cuDeviceGet`**（设备重映射）、`cuInit`、`cuDriverGetVersion`。
+  - NVML：`nvmlInit(_v2/WithFlags)`、`nvmlDeviceGetMemoryInfo(_v2)`、`nvmlDeviceGet*RunningProcesses(_v2/_v3)`。
+  - `dlsym` 拦截器（**必须保留**，nvml 路径依赖，见上表）。
+- **裁剪掉（Phase 1 不需要，减少影响面）**：`cuLaunchKernel*` 系列（核心限速，Phase 2）、利用率 watcher、
+  UVA 超卖/`vmem` ledger（约束禁用）、`sm_node` 共享桶、`cuGetProcAddress_v2` 路由（lupine-server 不调用）、
+  Vulkan layer、外部 SM watcher 等。
+- **注意**：`cuGetProcAddress_v2` 在本地库 hook 是因为客户端应用会用它；lupine-server 的 handler **不调用**它，
+  所以远程可裁剪。但**客户端**若走方案 B 仍需，C 则无关（客户端是普通 lupine client）。
+
+**需要补充的边界（评审新增）**：
+
+1. **设备隔离必须做 `cuDeviceGetCount`+`cuDeviceGet` 重映射**：客户端设备表由这两个 server RPC 枚举而来
+   （`routing.cpp:217-277`）。库 hook 二者、按 session.config `devices[].uuid` 回落到物理序号返回，客户端就只看到
+   允许设备，且虚拟序号 i = 允许设备顺序 i（与 §6.6 一致）。**这是"每个设备配置匹配"的前提，不能省。**
+2. **session 令牌必须是控制面签发**，DRA Allocate 注入的 `LUPINE_SESSION` 不是裸 pod UID（防容器自改冒用，
+   §6.2.1）；同时库/lupine 补丁对 session id **消毒**（`[A-Za-z0-9_.-]`，防路径穿越）。
+3. **agent 落盘 session.config 的时机与通道**：DRA 分配在 worker 节点（kubelet 权威），GPU 节点 agent 需经
+   **控制面通道**（scheduler/controller 或 agent 轮询）拿到 "session → devices+limits" 再落盘。必须在 pod 首个
+   CUDA 调用前完成。此通道是新的 Go 侧工作项（§6.3 来源 (a)）。
+4. **fail-closed**：子进程首个 CUDA 调用时若 session.config 不存在（agent 未登记/过期/伪造 session）→ 拒绝 CUDA，
+   绝不无限制放行（§6.2.1）。
+5. **fork 安全依赖 atfork handler**：`loader_child_after_fork` 重置 once-guard 是 per-session 配置生效的关键；
+   `library-remote` 必须保留该 handler（含 vmem ledger 清理、mutex 重建），不能因"裁剪"而删掉。
+6. **env 注入时机**：必须在 `client_handler` 内、**首个 RPC dispatch 之前**（`server.cpp:421-429` 之后、`459` 之前）。
+   客户端首个 RPC 恒为 `cuInit`，库在 `cuInit` hook 里首次 `load_necessary_data`，顺序成立。
+7. **无 session 的客户端**：若容器未被 vgpu-manager 注入（无 `LUPINE_SESSION`）→ 子进程无配置 → fail-closed 拒绝。
+   这要求"预载 library-remote 的 lupine-server"是**远程 vGPU 专属部署**；纯 lupine 部署不预载库，行为不变。
+8. **`cuCtxGetDevice` 是 alloc 预算判定的前置**：`cuMemAlloc` 不带 device，库需经 `cuCtxGetDevice` 取当前物理设备
+   再映射 host_index（现有本地库已如此，远程保留）。
+9. **`nvmlProcessInfo_v3` 结构体大小**在 lupine 透传的 ABI 需 spike 核对（S6/S3）。
+10. **裁剪的回归**：`library-remote` 必须复用 `library/` 的 `hack/check_cuda_hook_consistency.py` 等一致性检查
+    （钩子表/导出面/直通实现三处同步），防止裁剪后钩子面与实际不符。
 
 ---
 
@@ -596,6 +705,31 @@ B 阶段积累的 lupine 补丁经验（session/RPC 接入点）与 Go 侧配额
 - [ ] 验证多租户 SM 抢占下各自限速正确；可选 `CUDA_SM_SHARED_BUCKET` 在节点级多客户端间共享（per-session 桶）。
 - [ ] 动态配额更新（缩容/限速热调整）的子进程重新初始化机制。
 - [ ] 权衡是否回补 B 的显示层 PID 改写（把子进程 PID 映射回本地 PID，纯展示优化，可选）。
+
+### 8.2 Python/PyTorch 工作负载在 k8s 中的集成方式（基于 §2.4 分析）
+
+lupine 的 shim 是**动态链接层**生效的，Python 的 `connect()` 只是"设 env + 提前加载 shim"的便利封装。因此在 k8s 里：
+
+**推荐：注入层完成一切，应用零改动（不 import lupine）。**
+- device-plugin / DRA Allocate 对远程 pod 注入（与现有本地 vGPU 注入并列，`pkg/deviceplugin/vgpu/vnum_plugin.go:757-803`）：
+  - `LUPINE_SERVER=<gpu-node>:14833`（多 server 用逗号分隔）
+  - `LUPINE_SESSION=<控制面签发的会话令牌>`（§6.2.1）
+  - `LD_LIBRARY_PATH=/opt/lupine/lib` + 适配层/远程模式的 `LD_PRELOAD`（按方案 B/C）
+  - `VGPU_REMOTE_MODE=1` + 现有 `CUDA_MEM_LIMIT_*`/`MANAGER_VISIBLE_DEVICES` 等
+- pod 镜像：CUDA 版 PyTorch（`pip install torch --index-url ...cu12x`）+ lupine-client shim（`/opt/lupine/lib`）。
+- 应用代码：直接用 `torch.device("cuda")`/`cudaMalloc`，**无需 import lupine**，shim 在驱动层劫持。
+
+**何时才需要 `lupine` python 包：**
+- 想在**代码里显式声明多 server / 控制连接时序**（`with lupine.connect(host=[...])`）时，可选择性安装，纯便利。
+- 注意：`lupine.connect()` 要求**在任何 PyTorch CUDA 操作之前**调用，且 `LUPINE_SERVER` 已在 env 时以 env 为准；
+  注入层已设置时，应用直接 `with lupine.connect()`（host 缺省读 `LUPINE_SERVER`）即可。
+
+**明确不适用：** `sidecar` 机制是给 **macOS / CPU-only PyTorch 宿主**设计的容器化 worker，k8s Linux pod 内
+**不需要、也不应该**用（pod 镜像自装 CUDA 版 PyTorch 即可；再套一层 worker 容器徒增开销与复杂度）。
+
+**与安全/版本的一致性（必须由注入层保证）：**
+- session 令牌由控制面签发（防冒用），不是 pod UID。
+- client shim 版本 = 单基准制品（§7.3），server 驱动版本 ≥ pod cudart 版本。
 
 ---
 

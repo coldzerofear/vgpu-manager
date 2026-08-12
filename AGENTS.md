@@ -70,6 +70,20 @@
 - **设备访问控制必须做**：客户端经 lupine 可见 server 全部设备，须服务端 allowlist + 序号重映射（C）或 adapter 裁剪（B），
   否则可绕过配额用未分配 GPU（设计 §6.6）。
 
+## 2.2 C 方案落地形态（v0.3.2 确认）
+
+- **改造集中在 lupine-server**（fork 后、处理请求前识别 session 并注入 env），`library-remote` 为裁剪适配器专责
+  远程虚拟化，`library` 继续专责本地。
+- **可行性逐环确认**：
+  - 客户端会话传递（`LUPINE_SESSION` env）+ server 判别连接（`rpc_http2_session_id`，`h2.cpp:850-857`）现成。
+  - 设备隔离靠库 hook `cuDeviceGetCount/Get`（lupine-server handler 直调，`gen_server.cpp:102/79`；客户端设备表
+    经这两个 RPC 枚举，`routing.cpp:217-277`）。
+  - nvml 路径经 `nvml_symbol<>()` dlsym 句柄查询（`nvml_server.cpp:46-56`）→ **库必须保留 dlsym 拦截器**。
+  - per-session 配置 fork 安全依赖 `loader_child_after_fork`（`loader.c:2994`）重置 once-guard，**不能裁剪**。
+- **`library-remote` 裁剪**：Phase 1 只导出内存 hook 族 + `cuCtxGetDevice` + `cuDeviceGetCount/Get` + nvml 内存/
+  进程表 hook + `dlsym`；裁剪 `cuLaunchKernel*`/利用率 watcher/超卖/ledger/sm_node/`cuGetProcAddress` 等。
+- 边界见设计 §4.3.1 的 10 条（令牌签发、agent 落盘通道、fail-closed、env 时机、无 session 客户端等）。
+
 ## 3. 关键决策与事实速查（含文件:行号）
 
 ### lupine 侧
@@ -81,6 +95,9 @@
 - 虚拟设备序号直接作 CUdevice：`routing.cpp:292-307`
 - 客户端导出：`client.exports`（`cu*`/`dlsym`/`lupine_checkpoint_*`）、`nvml.exports`
 - lupine 客户端 libcuda 也导出 `dlsym`：`client.cpp:8461`
+- Python 客户端 `python/lupine`：`connect()` 只做"设 `LUPINE_SERVER` + ctypes 提前加载 shim"，返回普通
+  `torch.device("cuda")`，**不注册新 torch backend**；`sidecar` 是为 macOS/CPU-only 宿主设计的容器化 PyTorch worker，
+  **k8s Linux pod 不适用**。k8s 集成 = 注入层设 env/libs，应用零改动（设计 §2.4/§8.2）。
 
 ### library 侧
 - 真函数解析枢纽（远程化改造关键）：`loader.c:1116-1203`（dlopen 版本化 `libcuda.so.<ver>`），
