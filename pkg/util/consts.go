@@ -180,6 +180,7 @@ const (
 	Watcher         = "watcher"
 	Registry        = "registry"
 	Claims          = "claims"
+	Driver          = "driver"
 	SMUtilFile      = "sm_util.config"
 	VMemNode        = "vmem_node"
 	VMemNodeFile    = "vmem_node.config"

@@ -2907,10 +2907,10 @@ void load_controller_configuration() {
   // Ensure that the cleaning function can be called once every time the child process is forked.
   check_cleanup_vmem_nodes();
 
-  if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
-    LOGGER(VERBOSE, "register to remote manager: uid: %s, uuid: %s", g_vgpu_config->pod_uid, g_vgpu_config->reg_uuid);
-    //register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name, g_vgpu_config->reg_uuid);
-  }
+//  if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
+//    LOGGER(VERBOSE, "register to remote manager: uid: %s, uuid: %s", g_vgpu_config->pod_uid, g_vgpu_config->reg_uuid);
+//    register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name, g_vgpu_config->reg_uuid);
+//  }
 }
 
 nvmlReturn_t _nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device) {

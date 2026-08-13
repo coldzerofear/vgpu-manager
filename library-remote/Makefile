@@ -1,4 +1,4 @@
-# vgpu-manager library (libvgpu-control.so) build entry.
+# vgpu-manager library (libvgpu-remote.so) build entry.
 #
 # Thin wrapper around cmake + the hack/ scripts. Everything below is a
 # convenience target for things you would otherwise do by hand:
@@ -6,9 +6,6 @@
 #   make build                   build the .so
 #   make docker-build            build the .so inside a CUDA docker image
 #   make build-in-docker         same, but via an ephemeral run (no Dockerfile)
-#   make check                   run all static checks (no GPU needed)
-#   make check-exports           verify ABI-conflict symbol exports on the built .so
-#   make test                    build and run the smoke tests under test/
 #   make help                    show this listing
 #
 .DEFAULT_GOAL := help
@@ -25,9 +22,6 @@ J               ?= $(shell nproc 2>/dev/null | awk '{print int(($$0+1)/2)}')
 IMG             ?= coldzerofear/vgpu-remote:dev
 CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
 APT_MIRROR      ?= https://mirrors.aliyun.com
-TEST_DEVICE_ID  ?= 0
-
-SO_FILE         := $(BUILD_DIR)/libvgpu-control.so
 
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -o pipefail -ec
@@ -50,15 +44,8 @@ configure: ## Run cmake to (re)configure the build tree.
 	    $(LIBRARY_DIR)
 
 .PHONY: build
-build: configure ## Build libvgpu-control.so.
-	$(MAKE) -C $(BUILD_DIR) -j$(J) vgpu-control
-
-.PHONY: tools
-tools: configure ## Build all aux tools (mem_occupy_tool, mem_view_tool, etc.).
-	$(MAKE) -C $(BUILD_DIR) -j$(J)
-
-.PHONY: all
-all: build tools ## Build the .so and every aux tool.
+build: configure ## Build libvgpu-remote.so.
+	$(MAKE) -C $(BUILD_DIR) -j$(J) vgpu-remote
 
 .PHONY: clean
 clean: ## Remove the build tree.

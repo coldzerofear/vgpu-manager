@@ -1,6 +1,6 @@
 # VGPU-Remote-Adapter
 
-A remote vGPU adapter for implementing network-based remote VGPU hard isolation
+A remote vGPU adapter for implementing network-based remote vGPU hard isolation
 
 ## Project objectives:
 
@@ -21,6 +21,7 @@ A remote vGPU adapter for implementing network-based remote VGPU hard isolation
 
 ## Environment variable
 
+* VGPU_CONFIG_SESSION_PATH: Define the limit configuration path for the session
 
 ## Log level
 

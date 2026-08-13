@@ -478,10 +478,9 @@ const (
 	// by another hostPath mount, be read-only, or be swept by the workload.
 	ContSMNodePath = "/tmp/." + util.SMNode
 
-	LdPreLoadFileName       = "ld.so.preload"
-	ContPreLoadFilePath     = "/etc/" + LdPreLoadFileName
-	VGPUControlFileName     = "libvgpu-control.so"
-	ContVGPUControlFilePath = ContManagerDirectoryPath + "/driver/" + VGPUControlFileName
+	LdPreLoadFileName   = "ld.so.preload"
+	ContPreLoadFilePath = "/etc/" + LdPreLoadFileName
+	VGPUControlFileName = "libvgpu-control.so"
 
 	VGPUConfigFileName = "vgpu.config"
 	DeviceListFileName = "devices.json"
@@ -499,9 +498,10 @@ const (
 )
 
 var (
+	ContVGPUControlFilePath  = filepath.Join(ContManagerDirectoryPath, util.Driver, VGPUControlFileName)
 	HostManagerDirectoryPath = util.GetEnvDefault("HOST_MANAGER_DIR", util.ManagerRootPath)
 	HostPreLoadFilePath      = filepath.Join(HostManagerDirectoryPath, LdPreLoadFileName)
-	HostVGPUControlFilePath  = fmt.Sprintf("%s.%s", filepath.Join(HostManagerDirectoryPath, VGPUControlFileName), version.Get().Version)
+	HostVGPUControlFilePath  = fmt.Sprintf("%s.%s", filepath.Join(HostManagerDirectoryPath, util.Driver, VGPUControlFileName), version.Get().Version)
 	HostWatcherDirectoryPath = filepath.Join(HostManagerDirectoryPath, util.Watcher)
 	HostDeviceRegistryPath   = filepath.Join(HostManagerDirectoryPath, util.Registry)
 )

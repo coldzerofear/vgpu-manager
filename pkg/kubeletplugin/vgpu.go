@@ -195,7 +195,7 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 		compMode |= util.CGroupv1Mode
 	}
 	compMode |= util.OpenKernelMode
-	containerDriverFile := filepath.Join(m.contManagerPath, "driver", vgpu.VGPUControlFileName)
+	containerDriverFile := filepath.Join(m.contManagerPath, util.Driver, vgpu.VGPUControlFileName)
 
 	oversold := "FALSE"
 	ratio := float64(m.deviceMemoryRatio) / float64(util.HundredCore)
@@ -226,7 +226,7 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	} else {
 		envs = append(envs, fmt.Sprintf("%s=", util.ManagerVGpuClaimUid))
 	}
-	hostLibraryPath := filepath.Join(m.hostManagerPath, vgpu.VGPUControlFileName)
+	hostLibraryPath := filepath.Join(m.hostManagerPath, util.Driver, vgpu.VGPUControlFileName)
 	hostLibraryPath = fmt.Sprintf("%s.%s", hostLibraryPath, version.Get().Version)
 	mounts := []*cdispec.Mount{
 		{
