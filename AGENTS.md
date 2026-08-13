@@ -16,7 +16,7 @@
   - 内存硬隔离：`cuMemAlloc` 前预算校验，超限返回 `CUDA_ERROR_OUT_OF_MEMORY`；
     `cuMemGetInfo`/`cuDeviceTotalMem`/`nvmlDeviceGetMemoryInfo` 改写为"限额视图"。
   - 核心硬隔离：`cuLaunchKernel` 前令牌桶限速（`gridDim*blockDim` 扣减），利用率 watcher 线程本地轮询 NVML
-    驱动令牌补给（delta/AIMD/auto 控制器）。
+    驱动令牌补给（delta 控制器）。多进程容器共用一个**容器级令牌桶**（默认开启）。
   - 可选内存超卖（UVA/managed memory + vmem ledger）。
 - Go 侧：调度器、插件、webhook、monitor、metrics、配置下发（`vgpu.config`，seqlock 版本化）。
 
@@ -50,7 +50,10 @@
 | B 小改 lupine 暴露远端PID + 适配层 | 按远端 PID 过滤真实 NVML | ✅ 真实口径 | 不可行 | **Phase1 快速验证** |
 | C lupine-server 子进程内加载本库 | 现有库跑在 server 子进程里 | ✅ 真实口径 | ✅ 节点本地轮询 | **最终方案** |
 
-**已定约束**：适配层复制为独立子工程 `library-remote/`；第一阶段单节点多 GPU；第一阶段禁用内存超卖。
+**已定约束**：第一阶段单节点多 GPU；第一阶段禁用内存超卖。
+**注意（v0.5）**：`library-remote/` 子工程**已合并回 `library/` 并删除**——两棵树 94% 代码相同，分叉的双向修复
+成本远超收益。远程能力现在是 `library/` 里按 env 门控的分支：未设 `VGPU_CONFIG_SESSION_PATH` 时逐字回退到
+历史路径与行为，本地部署不受影响。产物仍是单一 `libvgpu-control.so`。
 **待定项**：PID 映射结构 v0.2（按设备组织，见设计 §5）；lupine 制品分发策略（设计 §7）。
 
 **推荐路线**：先 B 快速验证内存闭环，随即迁移到 C（内存 Phase1 + 核心 Phase2）。
@@ -75,17 +78,17 @@
 
 ## 2.2 C 方案落地形态（v0.3.2 确认）
 
-- **改造集中在 lupine-server**（fork 后、处理请求前识别 session 并注入 env），`library-remote` 为裁剪适配器专责
-  远程虚拟化，`library` 继续专责本地。
+- **改造集中在 lupine-server**（fork 后、处理请求前识别 session 并注入 env）。远程能力已合入 `library/`
+  （原 `library-remote/` 已删除），由会话 env 门控，本地模式行为不变。
 - **可行性逐环确认**：
   - 客户端会话传递（`LUPINE_SESSION` env）+ server 判别连接（`rpc_http2_session_id`，`h2.cpp:850-857`）现成。
-  - 设备隔离靠库 hook `cuDeviceGetCount/Get`（lupine-server handler 直调，`gen_server.cpp:102/79`；客户端设备表
-    经这两个 RPC 枚举，`routing.cpp:217-277`）。
+  - 设备隔离：CUDA 侧靠 provider setenv `CUDA_VISIBLE_DEVICES`（驱动自己裁剪重排），NVML 侧靠 hook 枚举族。
   - nvml 路径经 `nvml_symbol<>()` dlsym 句柄查询（`nvml_server.cpp:46-56`）→ **库必须保留 dlsym 拦截器**。
   - per-session 配置 fork 安全依赖 `loader_child_after_fork`（`loader.c:2994`）重置 once-guard，**不能裁剪**。
-- **`library-remote` 裁剪**（更正）：实际只裁掉了 AIMD/auto 控制器（delta 保留）。`cuLaunchKernel*`、利用率
-  watcher、`sm_node` 共享桶**都还在**——Phase 2 的工作是让它们在会话模型下语义正确，不是重新加回来。
-- **共享令牌桶在会话模式下强制开启**：一个远程容器 = 每条连接一个子进程，进程内桶会让每个子进程各自按完整
+- **AIMD/auto 控制器已删除**（`delta` 为唯一控制器）：实测利用率控制效果不达预期，且其针对的多进程公平性
+  已由共享令牌桶解决。`CUDA_SM_CONTROLLER`/`CUDA_SM_AIMD_*` 失效。`cuLaunchKernel*`、利用率 watcher、
+  `sm_node` 共享桶均保留。
+- **共享令牌桶默认开启**（`CUDA_SM_SHARED_BUCKET=0` 可关；会话模式下拒绝关闭）：一个远程容器 = 每条连接一个子进程，进程内桶会让每个子进程各自按完整
   `hard_core` 限速 → 容器拿到 N× 配额；且 N 个 watcher 各自轮询 NVML。共享桶（`<session>/.sm_node`）的 CAS 补给
   选举 + 采样所有权同时解决两者（standby 完全跳过 NVML）。显式 `CUDA_SM_SHARED_BUCKET=0` 在会话模式下被拒绝；
   映射失败且该会话配了核心限额则 fail-closed。详见设计 Phase 2。
@@ -94,15 +97,15 @@
   `GetHandleByIndex(_v2)`/`GetHandleByUUID`/`GetHandleByPciBusId(_v2)`/`GetHandleBySerial`/`GetIndex`。
   两侧共用 `config_allowed_devices()` 排序，保证 "cuda:i 就是 nvml i"。详见设计 §6.6。
 - 边界见设计 §4.3.1 的 10 条（令牌签发、agent 落盘通道、fail-closed、env 时机、无 session 客户端等）。
-- **C-2 注入方式（v0.3.4，推荐）**：不改 lupine 源码——provider 内置于 `libvgpu-remote.so`（§4.3.3.1），在其
+- **C-2 注入方式（v0.3.4，推荐）**：不改 lupine 源码——provider 内置于 `libvgpu-control.so`（§4.3.3.1），在其
   `restore(connection_id)`（lupine 在每个连接子进程首个 RPC 前调用，`connection_id`=`LUPINE_SESSION`）里
   消毒 session → 校验 `<session>/config/vgpu.config` 存在 → `setenv(VGPU_CONFIG_SESSION_PATH)` + **注册 pid 进
   `<session>/pids.config`** → 不存在返回非 0（fail-closed）；`stop()`（子进程退出）**从 `pids.config` 移除 pid**。
   LD_PRELOAD 仍须 server 进程级设置；库的 fork 安全修正（`g_vgpu_config` 置 NULL）仍必须做。详见设计 §4.3.3。
-- **单制品合并（§4.3.3.1）**：provider 可内置于 `libvgpu-remote.so`（同一 .so 既做 hook 库又被 lupine dlopen
-  当 provider；glibc 按 realpath 去重返回已加载句柄）。必须把 `lupinecr_get_lupine_provider_v1` 加进导出脚本
-  `global:`（否则 `local: *` 藏掉），并 vendor `checkpoint_provider.h`；server 部署设
-  `LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-remote.so`（制品不叫 liblupinecr.so，默认路径找不到）。
+- **单制品（§4.3.3.1）**：provider 内置于 `libvgpu-control.so`（同一 .so 既做 hook 库又被 lupine dlopen
+  当 provider；glibc 按 realpath 去重返回已加载句柄）。`lupinecr_get_lupine_provider_v1` 已加进导出脚本
+  `global:`（否则 `local: *` 藏掉），`checkpoint_provider.h` 已 vendor；server 部署设
+  `LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-control.so`（制品不叫 liblupinecr.so，默认路径找不到）。
 
 ## 2.3 实测结论（v0.3.3，重要）
 

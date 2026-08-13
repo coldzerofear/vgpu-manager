@@ -19,10 +19,8 @@
 #   CUDA_CORE_LIMIT            target SM utilization, percent (default 30).
 #                              NOTE: this is the exact env name vgpu-manager's
 #                              library reads (util.c:17).
-#   CUDA_SM_CONTROLLER         delta (default) | aimd
-#   CUDA_SM_AIMD_MD_DIVISOR    AIMD MD factor (only if controller=aimd)
-#   CUDA_SM_AIMD_EFF_RATIO     AIMD buffer / 1000
-#   CUDA_SM_AIMD_AI_BASE_DIV   AIMD AI step base divisor
+#   CUDA_SM_SHARED_BUCKET      container-wide token bucket, 1 (default) | 0
+#   CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR   delta ramp length in watcher cycles
 #   ABLATION_DURATION_S        workload wall time (default 30)
 #   ABLATION_GPU_ID            GPU index for both workload + nvidia-smi (default 0)
 #   ABLATION_SAMPLE_MS         nvidia-smi sample interval ms (default 100)
@@ -58,7 +56,6 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 CUDA_CORE_LIMIT="${CUDA_CORE_LIMIT:-30}"
-CUDA_SM_CONTROLLER="${CUDA_SM_CONTROLLER:-delta}"
 ABLATION_DURATION_S="${ABLATION_DURATION_S:-30}"
 ABLATION_GPU_ID="${ABLATION_GPU_ID:-0}"
 ABLATION_SAMPLE_MS="${ABLATION_SAMPLE_MS:-100}"
@@ -71,8 +68,7 @@ META="$OUT_DIR/meta.json"
 # Capture GPU identity. The UUID is mandatory: vgpu-manager's library only
 # virtualizes a device when its UUID appears in NVIDIA_VISIBLE_DEVICES (or
 # MANAGER_VISIBLE_DEVICES) -- without it core_limit stays off, the controller
-# is never invoked, and delta/aimd variants produce identical (unthrottled)
-# samples. See loader.c:1960 (get_manager_device_uuids -> get_nvidia_device_uuids).
+# is never invoked, and every variant produces identical (unthrottled) samples. See loader.c:1960 (get_manager_device_uuids -> get_nvidia_device_uuids).
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$ABLATION_GPU_ID" | head -1 | sed 's/^ *//;s/ *$//')
 GPU_UUID=$(nvidia-smi --query-gpu=uuid --format=csv,noheader -i "$ABLATION_GPU_ID" | head -1 | tr -d ' ')
 if [[ -z "$GPU_UUID" ]]; then
@@ -110,10 +106,8 @@ CUDA_VISIBLE_DEVICES="$ABLATION_GPU_ID" \
   NVIDIA_VISIBLE_DEVICES="$GPU_UUID" \
   LD_PRELOAD="$VGPU_SO" \
   CUDA_CORE_LIMIT="$CUDA_CORE_LIMIT" \
-  CUDA_SM_CONTROLLER="$CUDA_SM_CONTROLLER" \
-  CUDA_SM_AIMD_MD_DIVISOR="${CUDA_SM_AIMD_MD_DIVISOR:-}" \
-  CUDA_SM_AIMD_EFF_RATIO="${CUDA_SM_AIMD_EFF_RATIO:-}" \
-  CUDA_SM_AIMD_AI_BASE_DIV="${CUDA_SM_AIMD_AI_BASE_DIV:-}" \
+  CUDA_SM_SHARED_BUCKET="${CUDA_SM_SHARED_BUCKET:-}" \
+  CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR="${CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR:-}" \
   ABLATION_DURATION_S="$ABLATION_DURATION_S" \
   "$WORKLOAD_BIN" >"$WORKLOAD_LOG" 2>&1
 WORKLOAD_RC=$?
@@ -135,7 +129,7 @@ WORKLOAD_RESULT=$(grep '^ABLATION_RESULT' "$WORKLOAD_LOG" | tail -1 || true)
 cat > "$META" <<JSON
 {
   "variant": "$VARIANT",
-  "controller": "$CUDA_SM_CONTROLLER",
+  "sm_controller": "delta",
   "target_sm_pct": $CUDA_CORE_LIMIT,
   "duration_s_requested": $ABLATION_DURATION_S,
   "wall_ms_actual": $WALL_MS,
@@ -143,9 +137,8 @@ cat > "$META" <<JSON
   "gpu_name": "$GPU_NAME",
   "gpu_uuid": "$GPU_UUID",
   "sample_interval_ms": $ABLATION_SAMPLE_MS,
-  "aimd_md_divisor": "${CUDA_SM_AIMD_MD_DIVISOR:-default}",
-  "aimd_eff_ratio": "${CUDA_SM_AIMD_EFF_RATIO:-default}",
-  "aimd_ai_base_div": "${CUDA_SM_AIMD_AI_BASE_DIV:-default}",
+  "sm_shared_bucket": "${CUDA_SM_SHARED_BUCKET:-default}",
+  "delta_ramp_floor_divisor": "${CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR:-default}",
   "workload_bin": "$WORKLOAD_BIN",
   "vgpu_so": "$VGPU_SO",
   "started_at": "$START_TS",
@@ -154,6 +147,6 @@ cat > "$META" <<JSON
 }
 JSON
 
-echo "[$VARIANT] gpu=$GPU_NAME target=${CUDA_CORE_LIMIT}% controller=$CUDA_SM_CONTROLLER duration=${ABLATION_DURATION_S}s rc=$WORKLOAD_RC samples=$(wc -l < "$SAMPLES")"
+echo "[$VARIANT] gpu=$GPU_NAME target=${CUDA_CORE_LIMIT}% duration=${ABLATION_DURATION_S}s rc=$WORKLOAD_RC samples=$(wc -l < "$SAMPLES")"
 
 exit "$WORKLOAD_RC"

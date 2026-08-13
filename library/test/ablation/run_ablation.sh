@@ -6,8 +6,9 @@
 # Each variant dir is what plot_compare.py consumes.
 #
 # Usage:
-#   run_ablation.sh                            # default variants: delta, aimd
-#   VARIANTS="delta aimd" run_ablation.sh      # explicit list
+#   run_ablation.sh                            # one run named "baseline"
+#   VARIANTS="off on" run_ablation.sh          # explicit list; set the env that
+#                                              # distinguishes them per variant
 #
 # Required (no defaults guessed -- you want to know which .so you measured):
 #   VGPU_SO=/abs/path/to/libvgpu-control.so
@@ -17,8 +18,7 @@
 #   ABLATION_DURATION_S=30
 #   ABLATION_GPU_ID=0
 #   ABLATION_SAMPLE_MS=100
-#   CUDA_SM_AIMD_MD_DIVISOR / _EFF_RATIO / _AI_BASE_DIV    only read by the lib
-#                                                          when controller=aimd
+#   CUDA_SM_SHARED_BUCKET=0                     # e.g. to A/B the shared bucket
 #   OUT_BASE=./data                             # where the dated dir is created
 
 set -o errexit
@@ -28,7 +28,7 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-VARIANTS="${VARIANTS:-delta aimd}"
+VARIANTS="${VARIANTS:-baseline}"
 OUT_BASE="${OUT_BASE:-$SCRIPT_DIR/data}"
 ABLATION_GPU_ID="${ABLATION_GPU_ID:-0}"
 
@@ -84,21 +84,9 @@ for variant in $VARIANTS; do
   VAR_OUT="$OUT_DIR/$variant"
   mkdir -p "$VAR_OUT"
 
-  # The library only reads CUDA_SM_AIMD_* when controller=aimd, so we don't
-  # need to scrub them on the delta path -- they're harmless. For free-form
-  # variants the parent shell's env is forwarded as-is, which is exactly
-  # what parameter sweeps want.
-  case "$variant" in
-    delta)
-      env CUDA_SM_CONTROLLER=delta "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
-      ;;
-    aimd)
-      env CUDA_SM_CONTROLLER=aimd "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
-      ;;
-    *)
-      "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
-      ;;
-  esac
+  # The parent shell.s env is forwarded as-is, which is exactly what parameter
+  # sweeps want: a variant is just a name plus whatever env you set for it.
+  "$SCRIPT_DIR/collect.sh" "$variant" "$VAR_OUT"
 done
 
 # ---------- Summary --------------------------------------------------------

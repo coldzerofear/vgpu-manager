@@ -1175,33 +1175,6 @@ static void load_cuda_single_library(int idx) {
   dlclose(table);
 }
 
-
-static void load_nvml_single_library(int idx) {
-  void *table = NULL;
-  char driver_filename[FILENAME_MAX];
-
-  init_real_dlsym();
-  if (likely(nvml_library_entry[idx].fn_ptr)) {
-    return;
-  }
-
-  snprintf(driver_filename, FILENAME_MAX - 1, "%s.%s", DRIVER_ML_LIBRARY_PREFIX, driver_version);
-  driver_filename[FILENAME_MAX - 1] = '\0';
-
-  table = dlopen(driver_filename, RTLD_NOW | RTLD_NODELETE);
-  if (unlikely(!table)) {
-    LOGGER(FATAL, "can't find library %s", driver_filename);
-  }
-
-  nvml_library_entry[idx].fn_ptr = real_dlsym(table, nvml_library_entry[idx].name);
-  if (unlikely(!nvml_library_entry[idx].fn_ptr)) {
-    LOGGER(VERBOSE, "can't find function %s in %s", nvml_library_entry[idx].name,
-           driver_filename);
-  }
-
-  dlclose(table);
-}
-
 extern entry_t cuda_hooks_entry[];
 extern const int cuda_hook_nums;
 
@@ -1475,125 +1448,10 @@ static int is_valid_device_index(int index, const char *kind) {
   return 0;
 }
 
-int mmap_file_to_config_path(resource_data_t** data) {
-  int ret = 1;
-  if (unlikely(file_exist(CONTROLLER_CONFIG_FILE_PATH) != 0)) {
-    return ret;
-  }
-  int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_RDONLY | O_CLOEXEC);
-  if (unlikely(fd == -1)) {
-    LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
-    return ret;
-  }
-  /* Read-lock byte 0 so we never validate a file a concurrent writer is
-   * mid-write on; the header check below is a backstop if locking fails.
-   * Released at DONE -- the mapping itself outlives the lock. */
-  struct flock rl;
-  memset(&rl, 0, sizeof(rl));
-  rl.l_type = F_RDLCK;
-  rl.l_whence = SEEK_SET;
-  rl.l_start = 0;
-  rl.l_len = 1;
-  if (unlikely(ofd_fcntl(fd, 1, &rl) == -1)) {
-    LOGGER(WARNING, "can't read-lock %s (%s); validating without it",
-           CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
-  }
-  struct stat sb;
-  if (fstat(fd, &sb) == -1) {
-    LOGGER(ERROR, "fstat failed: %s", strerror(errno));
-    goto DONE;
-  }
-  if (sb.st_size != CONFIG_FILE_SIZE) {
-    LOGGER(ERROR, "vgpu config size mismatch: expected %d, got %lld",
-                  CONFIG_FILE_SIZE, (long long)sb.st_size);
-    goto DONE;
-  }
-  /* PROT_READ + MAP_PRIVATE: we never write, so no page is ever COW-copied
-   * and every read sees the writer's live update. Tear-free consistency
-   * comes from the per-device seqlock in get_device_snapshot(), not here. */
-  resource_data_t *m = (resource_data_t*)mmap(NULL, CONFIG_FILE_SIZE, PROT_READ,
-                                              MAP_PRIVATE, fd, 0);
-  if (m == MAP_FAILED) {
-    LOGGER(ERROR, "mmap global config failed: %s", strerror(errno));
-    goto DONE;
-  }
-  /* Frozen-header check, same contract as vmem_node/sm_node: a config from a
-   * mismatched layout_version is rejected cleanly instead of misread. */
-  if (m->magic != CONFIG_MAGIC || m->layout_version != CONFIG_LAYOUT_VERSION ||
-      m->region_size != sizeof(resource_data_t) || m->device_count != MAX_DEVICE_COUNT) {
-    LOGGER(ERROR, "vgpu config header mismatch: magic=%#x ver=%u size=%u count=%u "
-                  "(want %#x/%u/%zu/%d)",
-                  m->magic, m->layout_version, m->region_size, m->device_count,
-                  CONFIG_MAGIC, CONFIG_LAYOUT_VERSION, sizeof(resource_data_t),
-                  MAX_DEVICE_COUNT);
-    munmap(m, CONFIG_FILE_SIZE);
-    goto DONE;
-  }
-  *data = m;
-  ret = 0;
-DONE:
-  close(fd);
-  return ret;
-}
-
-/* Config lock helpers (config_device_read_lock / config_device_unlock) live in
- * lock.c, mirroring the device_util_* pattern. */
-extern int  config_device_read_lock(int device_index);
-extern void config_device_unlock(int fd, int device_index);
-
-#define CONFIG_SEQ_SPIN_LIMIT 1024
-
-static inline void config_cpu_relax(void) {
-#if defined(__x86_64__)
-  __builtin_ia32_pause();
-#elif defined(__aarch64__) || defined(__arm__)
-  __asm__ __volatile__("yield" ::: "memory");
-#else
-  __asm__ __volatile__("" ::: "memory");
-#endif
-}
-
-/* Tear-free snapshot of devices[host_index] via the per-device seqlock.
- *
- * Fast path is syscall-free: two acquire loads around a plain struct copy,
- * retried if the seq is odd (writer mid-update) or changed between loads.
- * The writer's update window is nanoseconds, so this almost never spins.
- *
- * Slow path (writer crashed mid-update, or we got descheduled past the spin
- * cap): take the per-device F_RDLCK once. A crashed writer's lock is already
- * released by the kernel on fd close, so this can't hang. */
+/* The seqlock read itself lives in config_io.c so the provider and the tools
+ * can use it against a config they mapped themselves. */
 device_t get_device_snapshot(int host_index) {
-  device_t snap;
-  if (unlikely(host_index < 0 || host_index >= MAX_DEVICE_COUNT || g_vgpu_config == NULL)) {
-    memset(&snap, 0, sizeof(snap));
-    return snap;
-  }
-  const device_t *d = &g_vgpu_config->devices[host_index];
-  unsigned spins = 0;
-  for (;;) {
-    uint32_t s1 = __atomic_load_n(&d->seq, __ATOMIC_ACQUIRE);
-    if (likely(!(s1 & 1u))) {
-      /* Plain struct copy, deliberately -- standard seqlock discipline. A
-       * torn copy is caught and discarded by the s1==s2 check below, and the
-       * ACQUIRE fence stops the compiler hoisting a field read past that
-       * check. A whole-struct atomic load isn't an option (device_t is 128B,
-       * past any lock-free width -- __atomic_load would silently fall back
-       * to a libatomic lock table and break cross-process safety). */
-      snap = *d;
-      __atomic_thread_fence(__ATOMIC_ACQUIRE);
-      uint32_t s2 = __atomic_load_n(&d->seq, __ATOMIC_ACQUIRE);
-      if (likely(s1 == s2)) return snap;          /* stable copy */
-    }
-    config_cpu_relax();
-    if (unlikely(++spins >= CONFIG_SEQ_SPIN_LIMIT)) {
-      int fd = config_device_read_lock(host_index);
-      snap = *d;
-      if (fd >= 0) config_device_unlock(fd, host_index);
-      LOGGER(WARNING, "get_device_snapshot(%d): seqlock spin cap hit, RDLCK fallback",
-             host_index);
-      return snap;
-    }
-  }
+  return get_device_snapshot_of(g_vgpu_config, host_index);
 }
 
 int mmap_file_to_util_path(device_util_t** data) {
@@ -2000,69 +1858,6 @@ void print_global_vgpu_config() {
   LOGGER(VERBOSE, "-----------------------------------------------------------");
 }
 
-int write_file_to_config_path(resource_data_t* data) {
-  int ret = 1;
-  if (unlikely(file_exist(VGPU_MANAGER_PATH) != 0)) {
-    mkdir(VGPU_MANAGER_PATH, 0755);
-  }
-  if (unlikely(file_exist(VGPU_CONFIG_PATH) != 0)) {
-    mkdir(VGPU_CONFIG_PATH, 0755);
-  }
-  /* Deliberately not O_TRUNC: truncation must happen after the write lock is
-   * held, not at open() time, or a concurrent peer/reader races the empty
-   * window. Same discipline as mmap_file_to_vmem_node. */
-  int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
-  if (unlikely(fd == -1)) {
-    LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
-    return ret;
-  }
-  /* Serialise concurrent creators on byte 0 of the header (the same byte
-   * readers F_RDLCK). A dead writer's lock releases automatically on close. */
-  struct flock fl;
-  memset(&fl, 0, sizeof(fl));
-  fl.l_type = F_WRLCK;
-  fl.l_whence = SEEK_SET;
-  fl.l_start = 0;
-  fl.l_len = 1;
-  if (unlikely(ofd_fcntl(fd, 1, &fl) == -1)) {
-    LOGGER(ERROR, "can't lock %s: %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
-    goto DONE;
-  }
-  /* If a peer already wrote a full-size, valid file under this lock, skip
-   * the rewrite -- every process builds identical data from the same env, so
-   * a peer's file is ours. Verify the header, not just the size: a
-   * stale/corrupt file of the right length must still be rewritten. */
-  struct stat sb;
-  uint32_t hdr[4];
-  if (fstat(fd, &sb) == 0 && sb.st_size == CONFIG_FILE_SIZE &&
-      pread(fd, hdr, sizeof(hdr), 0) == (ssize_t)sizeof(hdr) &&
-      hdr[0] == CONFIG_MAGIC && hdr[1] == CONFIG_LAYOUT_VERSION &&
-      hdr[2] == (uint32_t)sizeof(resource_data_t) && hdr[3] == (uint32_t)MAX_DEVICE_COUNT) {
-    ret = 0;
-    goto DONE;
-  }
-  /* Stamp the frozen header so the validator in mmap_file_to_config_path
-   * accepts whatever build path reached this writer. */
-  data->magic          = CONFIG_MAGIC;
-  data->layout_version = CONFIG_LAYOUT_VERSION;
-  data->region_size    = sizeof(resource_data_t);
-  data->device_count   = MAX_DEVICE_COUNT;
-  /* Clear, write at offset 0, then size to the reserved total. Starting from 0
-   * zeroes the reserved tail; the lock keeps any reader from seeing the middle;
-   * the fixed final size means a later larger struct never resizes the file
-   * (which would SIGBUS an old map). */
-  if (unlikely(ftruncate(fd, 0) == -1) ||
-      pwrite(fd, (void*)data, sizeof(resource_data_t), 0) != (ssize_t)sizeof(resource_data_t) ||
-      ftruncate(fd, CONFIG_FILE_SIZE) == -1) {
-    LOGGER(ERROR, "can't write %s to %d bytes: %s",
-                  CONTROLLER_CONFIG_FILE_PATH, CONFIG_FILE_SIZE, strerror(errno));
-    goto DONE;
-  }
-  ret = 0;
-DONE:
-  close(fd);   /* closing the fd releases its OFD lock */
-  return ret;
-}
 
 tid_dlsym tid_dlsyms[DLMAP_SIZE];
 static int tid_dlsym_count = 0;
@@ -2460,6 +2255,30 @@ int get_host_device_index_by_cuda_device(CUdevice device) {
   return host_index;
 }
 
+/* Reverse of nvml_to_host_device_index: config slot -> physical NVML index,
+ * or -1 if that device was never enumerated. Callers must hold
+ * device_index_mutex, or be past init and content with a racy read of a table
+ * that only ever goes from -1 to its final value. */
+static int nvml_index_of_host_index(int host_index) {
+  for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
+    if (host_index == nvml_to_host_device_index[index]) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+int get_nvml_device_index_by_host_index(int host_index) {
+  if (unlikely(!is_valid_device_index(host_index, "host"))) {
+    return -1;
+  }
+  init_devices_mapping();
+  pthread_mutex_lock(&device_index_mutex);
+  int nvml_index = nvml_index_of_host_index(host_index);
+  pthread_mutex_unlock(&device_index_mutex);
+  return nvml_index;
+}
+
 int get_nvml_device_index_by_cuda_device(CUdevice device) {
   int cuda_index = (int) device;
   if (unlikely(!is_valid_device_index(cuda_index, "cuda"))) {
@@ -2476,12 +2295,7 @@ int get_nvml_device_index_by_cuda_device(CUdevice device) {
     if (host_index < 0) {
       goto DONE;
     }
-    for (int index = 0; index < MAX_DEVICE_COUNT; index++) {
-      if (host_index == nvml_to_host_device_index[index]) {
-        nvml_index = index;
-        break;
-      }
-    }
+    nvml_index = nvml_index_of_host_index(host_index);
     if (nvml_index >= 0) {
       cuda_to_nvml_device_index[cuda_index] = nvml_index;
     }
@@ -2855,7 +2669,30 @@ void init_g_vgpu_config_by_env(resource_data_t** data) {
 
 void load_controller_configuration() {
   if (g_vgpu_config == NULL) {
+    /* Remote mode is fail-closed: the quota is issued by the GPU node's agent
+     * into a session directory, so anything else means we cannot tell whose
+     * limits these are. Both refusals matter:
+     *
+     *   no session   -- the connection carried no LUPINE_SESSION, or the
+     *                   provider never ran. Falling through would pick up the
+     *                   node-global config, i.e. one tenant's limits applied
+     *                   to every connection.
+     *   no quota     -- the session directory has no readable region. The env
+     *                   fallback below would build a config from whatever env
+     *                   the server happens to have, with every device
+     *                   activated and no limits -- fail-OPEN, and silently.
+     *
+     * FATAL exits the connection child, which lupine reports to the client as
+     * a failed first RPC. That is the intended contract (design §4.3.3). */
+    if (unlikely(session_remote_mode() && !session_enabled())) {
+      LOGGER(FATAL, "remote mode: no session directory (%s unset or unusable); refusing to serve",
+             SESSION_PATH_ENV);
+    }
     if (unlikely(mmap_file_to_config_path(&g_vgpu_config))) {
+      if (unlikely(session_remote_mode())) {
+        LOGGER(FATAL, "remote mode: no readable session quota at %s; refusing to serve",
+               CONTROLLER_CONFIG_FILE_PATH);
+      }
       init_g_vgpu_config_by_env(&g_vgpu_config);
       resource_data_t *fallback = g_vgpu_config;
       if (unlikely(write_file_to_config_path(g_vgpu_config))) {
@@ -2907,6 +2744,10 @@ void load_controller_configuration() {
   // Ensure that the cleaning function can be called once every time the child process is forked.
   check_cleanup_vmem_nodes();
 
+  /* CLIENT mode only: the container registers itself with the manager. A
+   * session (remote) never takes this path -- there is no manager to register
+   * with on the GPU node, and the session's PID list is maintained by the
+   * checkpoint provider instead. */
   if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     LOGGER(VERBOSE, "register to remote manager: uid: %s, uuid: %s", g_vgpu_config->pod_uid, g_vgpu_config->reg_uuid);
     register_to_remote_with_data(g_vgpu_config->pod_uid, g_vgpu_config->container_name, g_vgpu_config->reg_uuid);
@@ -3000,6 +2841,19 @@ void loader_child_after_fork(void) {
   init_nvml_host_index = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_controller_config_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_reset_cuda_index_init = (pthread_once_t)PTHREAD_ONCE_INIT;
+  /* Resetting the once-guard is not enough: load_controller_configuration()
+   * skips its work while g_vgpu_config is non-NULL, so a child would keep
+   * whatever mapping it inherited. Under lupine-server that is precisely the
+   * wrong answer -- each child is a DIFFERENT container and must map its own
+   * session quota -- and it fails silently, as one tenant's limits applied to
+   * everyone. Dropping the pointer forces the re-read. The parent's mapping
+   * stays valid for the parent; this only clears our view of it.
+   *
+   * Same reasoning for the session paths: the provider sets
+   * VGPU_CONFIG_SESSION_PATH in the child AFTER fork, so any value resolved
+   * before the fork must not survive into it. */
+  g_vgpu_config = NULL;
+  session_paths_reset();
   pthread_mutex_init(&g_memory_node_lock, NULL);
   pthread_mutex_init(&tid_dlsym_lock,     NULL);
   pthread_mutex_init(&device_index_mutex, NULL);

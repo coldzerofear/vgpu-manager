@@ -116,9 +116,10 @@ build-tests: ## Compile smoke tests under test/.
 	$(MAKE) -C $(BUILD_DIR) -j$(J)
 
 .PHONY: test-nogpu
-test-nogpu: build-tests ## Run the shared-region checks (no GPU, no CUDA needed).
+test-nogpu: build-tests ## Run the shared-region + session-path checks (no GPU, no CUDA needed).
 	$(BUILD_DIR)/test_sm_node_shared
 	$(BUILD_DIR)/test_vmem_region_concurrency
+	$(BUILD_DIR)/test_session_paths
 
 .PHONY: test
 # Runs the GPU-less checks first, deliberately. They are seconds long, need no
@@ -131,6 +132,7 @@ test-nogpu: build-tests ## Run the shared-region checks (no GPU, no CUDA needed)
 test: build-tests ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
 	$(BUILD_DIR)/test_sm_node_shared
 	$(BUILD_DIR)/test_vmem_region_concurrency
+	$(BUILD_DIR)/test_session_paths
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
 	    $(BASH) $(BUILD_DIR)/test/run_tests_with_env.sh $(BUILD_DIR)/test $(SO_FILE)
 

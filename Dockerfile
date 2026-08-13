@@ -59,7 +59,6 @@ COPY --from=builder /go/src/vgpu-manager/bin/device-webhook   /usr/local/bin/dev
 COPY --from=builder /LICENSE /LICENSE
 COPY --chmod=755 scripts/install_files.sh scripts/install_files.sh
 
-COPY --from=builder /vgpu-remote/build/libvgpu-remote.so      /installed/driver/libvgpu-remote.so.$BUILD_VERSION
 COPY --from=builder /vgpu-controller/build/libvgpu-control.so /installed/driver/libvgpu-control.so.$BUILD_VERSION
 COPY --from=builder /vgpu-controller/build/mem_occupy_tool    /installed/tools/mem_occupy_tool
 COPY --from=builder /vgpu-controller/build/mem_managed_tool   /installed/tools/mem_managed_tool
@@ -70,6 +69,5 @@ COPY --from=builder /go/src/vgpu-manager/bin/device-client    /installed/registr
 COPY --from=toolkit /artifacts/rpm/usr/bin/nvidia-cdi-hook    /installed/tools/nvidia-cdi-hook
 
 RUN cd /installed/driver && ln -sf libvgpu-control.so.$BUILD_VERSION libvgpu-control.so
-RUN cd /installed/driver && ln -sf libvgpu-remote.so.$BUILD_VERSION  libvgpu-remote.so
 
 RUN echo '/etc/vgpu-manager/driver/libvgpu-control.so' > /installed/ld.so.preload

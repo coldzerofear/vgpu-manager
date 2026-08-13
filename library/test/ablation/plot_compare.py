@@ -182,13 +182,9 @@ def render(out_dir: Path, variants: list[Variant]) -> Path:
     for v in variants:
         p = v.percentiles()
         meta = v.meta
-        lines.append(f"[{v.name}]  controller={meta.get('controller')}")
+        lines.append(f"[{v.name}]")
         lines.append(f"  samples={len(v.util)}  mean_util={v.mean_util:.2f}%")
         lines.append(f"  MAE={v.mae:.2f}%  P50={p[50]:.2f}%  P95={p[95]:.2f}%  P99={p[99]:.2f}%")
-        if meta.get("controller") == "aimd":
-            lines.append(f"  AIMD: md={meta.get('aimd_md_divisor')} "
-                         f"eff={meta.get('aimd_eff_ratio')} "
-                         f"ai_div={meta.get('aimd_ai_base_div')}")
         result = meta.get("workload_result", "")
         if result:
             lines.append(f"  workload: {result}")

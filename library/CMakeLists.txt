@@ -49,6 +49,8 @@ add_library(vgpu-control SHARED
     include/cuda-helper.h
     include/nvml-helper.h
     include/metrics.h
+    include/session.h
+    include/checkpoint_provider.h
     include/vdpau/vdpau.h
     src/cuda_originals.c
     src/nvml_originals.c
@@ -56,6 +58,9 @@ add_library(vgpu-control SHARED
     src/nvml_hook.c
     src/loader.c
     src/register.c
+    src/session.c
+    src/config_io.c
+    src/checkpoint_provider.c
     src/util.c
     src/lock.c
     src/metrics.c)
@@ -197,6 +202,12 @@ endif()
 # anyone configures with -DBUILD_TESTS=ON. The subdirectory keeps the two test
 # families apart -- test/ needs a GPU and links CUDA, test/nogpu/ needs neither.
 #
+# Sources that touch neither CUDA nor NVML, shared by the GPU-less test and
+# the session-config tool so neither has to restate the library's own file
+# handling (region layout, locking, path derivation).
+set(VGPU_NODRIVER_SRCS
+    src/session.c src/config_io.c src/util.c src/lock.c src/metrics.c)
+
 option(BUILD_SM_NODE_TESTS "Build the GPU-less shared-region checks" OFF)
 if(BUILD_SM_NODE_TESTS)
     add_executable(test_sm_node_shared test/nogpu/test_sm_node_shared.c)
@@ -206,7 +217,21 @@ if(BUILD_SM_NODE_TESTS)
     add_executable(test_vmem_region_concurrency test/nogpu/test_vmem_region_concurrency.c)
     target_include_directories(test_vmem_region_concurrency PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # Unlike the two above -- which reimplement the region semantics against
+    # their own temp files -- this one exercises the real path derivation and
+    # the real config writer, so it links the driver-free sources.
+    add_executable(test_session_paths test/nogpu/test_session_paths.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_session_paths PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 endif()
+
+# Writes a session quota region the way the GPU-node agent would, so the
+# session paths can be exercised without Kubernetes. Needs no CUDA toolkit,
+# hence its placement outside the CUDA tool block below.
+add_executable(vgpu-session-config tools/session_config.c ${VGPU_NODRIVER_SRCS})
+target_include_directories(vgpu-session-config PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # find_package(CUDAToolkit REQUIRED)
 add_executable(mem_occupy_tool tools/mem_occupy_tool.c)

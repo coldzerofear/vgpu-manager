@@ -1,4 +1,10 @@
-# AIMD 锯齿问题分析与优化路径
+# AIMD 锯齿问题分析与优化路径(历史记录)
+
+> ## ⚠️ AIMD 控制器已从代码中移除
+>
+> 本文档的分析结论正是放弃 AIMD 的依据,故保留;文中提到的优化路径均**未实施且不再计划实施**。
+> 详见 [sm_controller_aimd.md](sm_controller_aimd.md) 顶部的移除说明。
+
 
 > 状态:**纯分析文档**,无配套代码。所有实验性改动应在 `experiment/aimd-sawtooth` 分支进行(基于 `fix/library` 派生)。
 > 关联文档:[sm_controller_aimd.md](sm_controller_aimd.md) 描述 AIMD 控制器本身的设计。

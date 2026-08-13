@@ -62,16 +62,8 @@ extern int device_pid_in_same_container(unsigned int pid);
 extern int library_exists_in_process_maps(char const *libName, unsigned int pid);
 extern int get_container_pids_by_filepath(const char *file_path, int *pids, int *pids_size, int sort_pids);
 
-/* SM throttle controller selection (see util.c). Defaults preserve stock
- * behaviour when env is unset. */
-extern int get_sm_controller_kind(int *kind);
-extern int get_aimd_md_divisor(double *out);
-extern int get_aimd_eff_ratio(int *out);
-extern int get_aimd_ai_base_div(int *out);
 extern int get_sm_auto_debounce_cycles(int *out);
 extern int get_sm_auto_external_util_threshold(int *out);
-extern int get_aimd_deadband_ratio(int *out);
-extern int get_aimd_md_cooldown_cycles(int *out);
 extern int get_usage_threshold(int *out);
 extern int get_delta_ramp_floor_divisor(int *out);
 extern int get_uva_advise(int *out);
@@ -605,12 +597,6 @@ const int cuda_hook_nums =
  * init). */
 dynamic_config_t g_dynamic_config = {
   .usage_threshold              = 5,
-  .sm_controller_kind           = 0,     /* delta */
-  .aimd_md_divisor              = 3.0,
-  .aimd_eff_ratio               = 875,
-  .aimd_ai_base_div             = 400,
-  .aimd_deadband_ratio          = 800,
-  .aimd_md_cooldown_cycles      = 3,
   .auto_debounce_cycles         = 10,
   .auto_external_util_threshold = 1,
   .delta_ramp_floor_divisor     = 64,
@@ -739,41 +725,6 @@ static int64_t delta(int up_limit, int user_current, int64_t share, int host_ind
   return share;
 }
 
-/* ---- Pluggable SM throttle controller ---- *
- * The per-cycle share update in the watcher loop is delegated to a
- * controller selected once at init by CUDA_SM_CONTROLLER:
- *
- *   "delta" (default) -- stock symmetric proportional controller (`delta`
- *                         above), identical to the pre-AIMD build.
- *   "aimd"             -- additive-increase / multiplicative-decrease;
- *                         measured MAE ~20% -> ~3% on RTX 4080 vs. delta.
- *
- * Drop-in for delta(): same signature, same call sites, no change to the
- * watcher's soft/hard mode logic or the GAP path. */
-
-typedef int64_t (*sm_controller_fn)(int up_limit, int user_current,
-                                    int64_t share, int host_index);
-
-enum {
-  SM_CONTROLLER_DELTA = 0,
-  SM_CONTROLLER_AIMD  = 1,
-  SM_CONTROLLER_AUTO  = 2,   /* experimental: route per device per cycle */
-};
-
-/* All SM-controller tunables now live in g_dynamic_config (hook.h).
- * The 8 file-static globals that used to mirror them were removed in
- * favour of direct reads, so there is exactly one source of truth and
- * the boot log can dump them in a single line. The non-tunable
- * per-device cooldown counter stays local because it is RUNTIME STATE,
- * not configuration, and changes every watcher cycle. */
-
-/* Per-device remaining cooldown counter. Watcher-thread-only access
- * (each watcher thread owns a disjoint host_index slice via
- * balance_batches; auto_routed_controller runs in the same watcher
- * thread). No volatile / atomics needed. fork() safety: child watcher
- * restarts and the static-zero initializer applies on first dispatch. */
-static int g_aimd_md_cooldown[MAX_DEVICE_COUNT] = {0};
-
 /* ---- Shared exclusivity FSM ---- *
  * "Are we exclusively using this device" is needed in three places: the
  * soft_core burst gate, the hard_limit jitter-init gate, and AUTO
@@ -805,118 +756,6 @@ static int      g_lost_exclusivity_pending[MAX_DEVICE_COUNT] = {0};
 static int      g_excl_memo_valid[MAX_DEVICE_COUNT] = {0};
 static int      g_excl_memo_value[MAX_DEVICE_COUNT] = {0};
 
-static int64_t aimd_controller(int up_limit, int user_current,
-                               int64_t share, int host_index);
-
-/* Function pointer set at init. Stays at delta if env is unset, so an
- * uninitialised call before sm_controller_init() runs is still safe. */
-static sm_controller_fn g_sm_controller = delta;
-
-/* AIMD: additive increase (gap-proportional) when under the buffered limit,
- * fast multiplicative cut otherwise. The asymmetric response is what pulls
- * down steady-state MAE compared to delta()'s symmetric step. Constants are
- * env-tunable since calibration was done on RTX 4080 -- bigger datacenter
- * GPUs (A100/H100) likely need a less aggressive MD factor.
- *
- * ai_step has a post-MD floor: without it, after MD divides share by
- * aimd_md_divisor (default 3), the next cycle could be left with a share
- * so small that AI would need many cycles to recover. Clamping `if (share
- * < ai_step) share = ai_step;` keeps MD from ever cutting below a "current
- * AI unit", which was the fix for utilization sticking at 0-1 against a
- * small hard_core (e.g. 5). */
-static int64_t aimd_controller(int up_limit, int user_current,
-                               int64_t share, int host_index) {
-  /* Three regions around the target (P1 hysteresis, see
-   * sm_controller_aimd_sawtooth_analysis.md):
-   *
-   *      user_current
-   *   0 +------ AI ------+---- deadband ----+------ MD ------+ 100
-   *                  deadband_low        eff_limit
-   *
-   *   AI region        : share += gap-proportional step (grow)
-   *   deadband region  : hold share (kills sawtooth)
-   *   MD region        : share /= md_divisor, then arm cooldown (cut)
-   *
-   * Defaults: deadband_ratio=800 (low=80% of up_limit), eff_ratio=875
-   * (high=87.5%); so deadband width = 7.5% of up_limit (scales with
-   * setpoint, no manual tuning per workload).
-   *
-   * sm_controller_init clamps deadband_ratio < eff_ratio so deadband_low
-   * < eff_limit always; we still guard at runtime as a defence in depth
-   * (g_total_cuda_cores etc. live in shared memory and could theoretically
-   * be perturbed by future code). */
-  int eff_limit = (int)((int64_t)up_limit * g_dynamic_config.aimd_eff_ratio / 1000);
-  if (eff_limit < 1) eff_limit = 1;
-  int deadband_low = (int)((int64_t)up_limit * g_dynamic_config.aimd_deadband_ratio / 1000);
-  if (deadband_low < 0) deadband_low = 0;
-  if (deadband_low >= eff_limit) deadband_low = eff_limit - 1;   /* defence */
-
-  int64_t sm_num     = (int64_t)g_sm_num[host_index];
-  int64_t max_thread = (int64_t)g_max_thread_per_sm[host_index];
-  /* Computed unconditionally: needed for both the AI step itself and the
-   * post-MD floor below. */
-  int64_t ai_step = sm_num * max_thread * 3 * (int64_t)eff_limit
-                    / (int64_t)g_dynamic_config.aimd_ai_base_div;
-  if (ai_step < 1) ai_step = 1;
-
-  /* Cooldown drains every cycle (TCP Reno time-based semantics, not
-   * event-based: an AI run shouldn't keep a stale cooldown alive). The
-   * counter is bumped to (cycles + 1) when MD fires below, then this
-   * decrement immediately knocks it down to `cycles`, so the post-MD
-   * cycles 1..N all see counter > 0 and stay blocked, then cycle N+1
-   * sees 0 and is free to MD again. This +1/decrement-first dance is
-   * the cheapest way to make "cooldown=N" gate exactly N post-MD
-   * cycles with a single integer of state. */
-  if (g_aimd_md_cooldown[host_index] > 0) {
-    g_aimd_md_cooldown[host_index]--;
-  }
-
-  if (user_current < deadband_low) {
-    /* AI: gap-proportional step (gap >= 5 floor to keep moving when very
-     * close to target). */
-    int gap = up_limit - user_current;
-    if (gap < 5) gap = 5;
-    int64_t step = ai_step * (int64_t)gap / 5;
-    share += step;
-    if (share > g_total_cuda_cores[host_index]) {
-      share = g_total_cuda_cores[host_index];
-    }
-  } else if (user_current > eff_limit) {
-    /* MD region. Honour cooldown: a cycle right after an MD must NOT
-     * MD again, even if util still over-shoots -- NVML's ~80ms sample
-     * + share-take-effect lag (~200-400ms total) means consecutive
-     * MD cuts share by md_divisor^N before the first cut's effect
-     * surfaces, hence "MD avalanche". Cooldown breaks the chain. */
-    if (g_aimd_md_cooldown[host_index] == 0) {
-      /* md_divisor is a double so users can pick 1.5 etc for softer cuts.
-       * share is int64_t; cast through double for the divide, then floor
-       * back to int64. share never exceeds g_total_cuda_cores (a few
-       * million), far below double's 2^53 mantissa limit, so no
-       * precision loss. md_divisor is clamped >= 1.01 at load time so
-       * division by ~zero is impossible. */
-      share = (int64_t)((double)share / g_dynamic_config.aimd_md_divisor);
-      if (share < 0) share = 0;
-      /* +1 because the decrement at the top of NEXT cycle takes us
-       * from cycles+1 to cycles, then cycles..1 = N cycles blocked. */
-      g_aimd_md_cooldown[host_index] = g_dynamic_config.aimd_md_cooldown_cycles + 1;
-      metrics_record_aimd_event(host_index, METRICS_AIMD_MD_FIRED);
-    } else {
-      /* In cooldown, hold share, do not MD. */
-      metrics_record_aimd_event(host_index, METRICS_AIMD_MD_BLOCKED);
-    }
-  } else {
-    /* Deadband region, hold share (no change). */
-    metrics_record_aimd_event(host_index, METRICS_AIMD_DEADBAND_HIT);
-  }
-
-  /* Floor: never let share fall below one AI step. Without this, after
-   * MD the next AI would need many cycles to bring share back into the
-   * useful range, especially when up_limit (and therefore ai_step) is
-   * small. This fixes the "utilization stuck near 0 against
-   * hard_core=5" regression. */
-  if (share < ai_step) share = ai_step;
-  return share;
-}
 
 /* Tentative declaration so auto_routed_controller / host_index_is_exclusive
  * can reference the watcher's top_results[] which is fully defined ~80 lines
@@ -1001,47 +840,6 @@ static int host_index_is_exclusive_debounced(int host_index) {
   return current;
 }
 
-/* AUTO mode: per-device router between delta (single Pod, throughput) and
- * aimd (multi-Pod, fairness). Reads the SHARED debounced exclusivity FSM
- * (host_index_is_exclusive_debounced) so AUTO routing and the watcher's
- * burst gating always agree -- there is no second private FSM to drift
- * out of sync. shares[host_index] is shared across both controllers and
- * both algorithms are iterators on it, so flips carry over cleanly. */
-static int64_t auto_routed_controller(int up_limit, int user_current,
-                                      int64_t share, int host_index) {
-  if (host_index_is_exclusive_debounced(host_index)) {
-    return delta(up_limit, user_current, share, host_index);
-  }
-  return aimd_controller(up_limit, user_current, share, host_index);
-}
-
-/* Dump g_dynamic_config to the INFO log in a single deterministic line.
- * One source of truth: operators see exactly what the running process
- * actually believes its config is (after env load + clamp), not what
- * the docs claim the defaults should be. */
-static void dump_dynamic_config(void) {
-  static const char *kind_name[] = { "delta", "aimd", "auto" };
-  int k = g_dynamic_config.sm_controller_kind;
-  LOGGER(INFO,
-    "+ DynamicConfig  : controller=%s usage_threshold=%d "
-    "aimd[md_div=%.3f eff_ratio=%d/1000 ai_base_div=%d deadband_ratio=%d/1000 md_cooldown=%d] "
-    "auto[debounce=%d ext_util_threshold=%d%%] "
-    "shared_bucket=%d "
-    "internal[soft_adjust_interval=%d delta_recovery_step=%d]",
-    (k >= 0 && k <= 2) ? kind_name[k] : "?",
-    g_dynamic_config.usage_threshold,
-    g_dynamic_config.aimd_md_divisor,
-    g_dynamic_config.aimd_eff_ratio,
-    g_dynamic_config.aimd_ai_base_div,
-    g_dynamic_config.aimd_deadband_ratio,
-    g_dynamic_config.aimd_md_cooldown_cycles,
-    g_dynamic_config.auto_debounce_cycles,
-    g_dynamic_config.auto_external_util_threshold,
-    g_dynamic_config.sm_shared_bucket,
-    SOFT_ADJUST_INTERVAL,
-    DELTA_ERROR_RECOVERY_STEP);
-}
-
 /* Called once from initialization() before watcher threads spawn (guarded
  * by pthread_once g_init_set). After this returns, g_dynamic_config is
  * read-only at runtime; the watcher thread is the only reader. fork()
@@ -1054,14 +852,6 @@ static void sm_controller_init(void) {
    * to enforce algorithm-level invariants. Keep the load-then-clamp
    * pattern even when env is unset because some defaults could be
    * mismatched in future edits (the clamp is cheap insurance). */
-
-  /* Controller selection (delta/aimd/auto). */
-  int kind = SM_CONTROLLER_DELTA;
-  (void)get_sm_controller_kind(&kind);
-  if (kind < SM_CONTROLLER_DELTA || kind > SM_CONTROLLER_AUTO) {
-    kind = SM_CONTROLLER_DELTA;
-  }
-  g_dynamic_config.sm_controller_kind = kind;
 
   /* Soft-mode periodic adjust threshold. Range >= 0. */
   (void)get_usage_threshold(&g_dynamic_config.usage_threshold);
@@ -1082,52 +872,38 @@ static void sm_controller_init(void) {
 
   /* Container-wide shared bucket. Read here so the dump line reports it and so
    * initialization() can act on it; the mapping itself happens there, once the
-   * device geometry this region is seeded from is known. */
-  g_dynamic_config.sm_shared_bucket = 0;
+   * device geometry this region is seeded from is known.
+   *
+   * ON by default, since one bucket per container is what the core quota
+   * actually means: with a per-process bucket every process throttles against
+   * its own allowance, so an N-process container gets N times its cores. It
+   * also bounds NVML polling -- only the sampling owner calls NVML, standbys
+   * read its published sample.
+   *
+   * CUDA_SM_SHARED_BUCKET=0 opts out locally (single-process containers gain
+   * nothing from the shared region, and it lets a deployment fall back if the
+   * region misbehaves). In a session the opt-out is refused: there one
+   * container is many lupine-server children by construction, so honouring it
+   * would hand out the quota N times over. */
+  g_dynamic_config.sm_shared_bucket = 1;
   (void)get_sm_shared_bucket(&g_dynamic_config.sm_shared_bucket);
-
-  /* AIMD tunables. Loaded unconditionally because AUTO can dispatch to
-   * aimd_controller when the device becomes shared, even if the user
-   * picked CUDA_SM_CONTROLLER=auto without setting AIMD env vars. */
-  (void)get_aimd_md_divisor(&g_dynamic_config.aimd_md_divisor);
-  (void)get_aimd_eff_ratio(&g_dynamic_config.aimd_eff_ratio);
-  (void)get_aimd_ai_base_div(&g_dynamic_config.aimd_ai_base_div);
-  (void)get_aimd_deadband_ratio(&g_dynamic_config.aimd_deadband_ratio);
-  (void)get_aimd_md_cooldown_cycles(&g_dynamic_config.aimd_md_cooldown_cycles);
-  /* md_divisor clamp: /1 is no-op, /<1 INVERTS the algorithm (would
-   * amplify share on overshoot). Floor 1.01 leaves room for FP rounding. */
-  if (g_dynamic_config.aimd_md_divisor < 1.01) g_dynamic_config.aimd_md_divisor = 1.01;
-  /* deadband must sit strictly below eff so AI/deadband/MD regions stay
-   * well-ordered. */
-  if (g_dynamic_config.aimd_deadband_ratio < 0) {
-    g_dynamic_config.aimd_deadband_ratio = 0;
-  } else if (g_dynamic_config.aimd_deadband_ratio >= g_dynamic_config.aimd_eff_ratio) {
-    LOGGER(WARNING, "AIMD deadband_ratio (%d) must be < eff_ratio (%d); clamping to eff_ratio-1",
-           g_dynamic_config.aimd_deadband_ratio, g_dynamic_config.aimd_eff_ratio);
-    g_dynamic_config.aimd_deadband_ratio = g_dynamic_config.aimd_eff_ratio - 1;
+  if (unlikely(session_enabled() && !g_dynamic_config.sm_shared_bucket)) {
+    LOGGER(WARNING, "CUDA_SM_SHARED_BUCKET=0 ignored in a remote session: "
+                    "a per-process bucket would let each connection use the container's full core quota");
+    g_dynamic_config.sm_shared_bucket = 1;
   }
-  if (g_dynamic_config.aimd_md_cooldown_cycles < 0) g_dynamic_config.aimd_md_cooldown_cycles = 0;
+}
 
-  /* === Bind the dispatch pointer + label metrics === */
-  switch (kind) {
-    case SM_CONTROLLER_AUTO:
-      g_sm_controller = auto_routed_controller;
-      metrics_set_controller_label("auto");
-      break;
-    case SM_CONTROLLER_AIMD:
-      g_sm_controller = aimd_controller;
-      metrics_set_controller_label("aimd");
-      break;
-    case SM_CONTROLLER_DELTA:
-    default:
-      g_sm_controller = delta;
-      metrics_set_controller_label("delta");
-      break;
+/* Does any device in this config actually cap cores? Decides whether losing
+ * the shared bucket is fatal (see initialization()). */
+static int session_has_core_limit(void) {
+  for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
+    device_t d = get_device_snapshot(i);
+    if (d.activate && d.core_limit) {
+      return 1;
+    }
   }
-
-  /* Single deterministic dump line -- replaces the three prior controller-
-   * specific INFO lines so operators have ONE place to grep. */
-  dump_dynamic_config();
+  return 0;
 }
 
 static int64_t shares[MAX_DEVICE_COUNT]    = {0};
@@ -1340,10 +1116,6 @@ static void sm_ctl_load(int host_index) {
   g_is_exclusive_debounced[host_index]   = d->excl_debounced;
   g_exclusive_pending_streak[host_index] = d->excl_streak;
   g_lost_exclusivity_pending[host_index] = d->lost_excl_pending;
-  /* Without this, AIMD re-fires MD every cycle -- each winner sees its own
-   * never-advanced cooldown of 0 -- and share collapses by md_divisor^N. That
-   * avalanche is the exact failure the cooldown exists to prevent. */
-  g_aimd_md_cooldown[host_index]         = d->md_cooldown;
 }
 
 static void sm_ctl_publish(int host_index) {
@@ -1358,7 +1130,6 @@ static void sm_ctl_publish(int host_index) {
   d->excl_debounced    = g_is_exclusive_debounced[host_index];
   d->excl_streak       = g_exclusive_pending_streak[host_index];
   d->lost_excl_pending = g_lost_exclusivity_pending[host_index];
-  d->md_cooldown       = g_aimd_md_cooldown[host_index];
   __atomic_store_n(&d->share, shares[host_index], __ATOMIC_RELEASE);  /* publish */
 }
 
@@ -1497,6 +1268,7 @@ static void *utilization_watcher(void *arg) {
    * "now" right after that first pass. */
   struct timespec next_wakeup;
   int first_cycle = 1;
+  device_t dcfg;
   while (1) {
     for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
       if (likely(!first_cycle)) {
@@ -1527,7 +1299,7 @@ static void *utilization_watcher(void *arg) {
        * hard_limit / hard_core / soft_core read in this loop body uses it, so a
        * concurrent Go ModifyDevice can never split this cycle's decisions across
        * an old and a new config. One-cycle staleness is fine for a watcher. */
-      device_t dcfg = get_device_snapshot(host_index);
+      dcfg = get_device_snapshot(host_index);
 
       /* Before every `continue` below, deliberately. Region identity has
        * nothing to do with sampling, core_limit, or who won the refill, and
@@ -1605,8 +1377,7 @@ static void *utilization_watcher(void *arg) {
         if (host_index_is_exclusive_raw(host_index)
             && top_results[host_index].user_current < low_util_thr
             && !throttled) {
-          int64_t bypass_target =
-              g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+          int64_t bypass_target = delta(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
           if (g_sm_node != NULL) {
             /* A plain store would erase tokens other processes CAS-deducted
              * between our read and our write -- tokens conjured back into the
@@ -1629,7 +1400,7 @@ static void *utilization_watcher(void *arg) {
           sm_ctl_publish(host_index);
           continue;
         }
-        shares[host_index] = g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+        shares[host_index] = delta(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
       } else {
         if (pre_external_process_nums[host_index] != top_results[host_index].external_process_num) {
           /* A NEW external process arrived (count grew) -> reset to
@@ -1668,7 +1439,7 @@ static void *utilization_watcher(void *arg) {
          * headroom back via reset. */
         if (host_index_is_exclusive_debounced(host_index)) {
           up_limits[host_index] = dcfg.soft_core;
-          shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
+          shares[host_index] = delta(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         } else {
           /* Lost-exclusivity reset (V2.1 option ①). When the debounced
            * FSM flipped true->false (we no longer have the card to
@@ -1716,7 +1487,7 @@ static void *utilization_watcher(void *arg) {
             is[host_index] = 0;
           }
           avg_sys_frees[host_index] = is[host_index] % (SOFT_ADJUST_INTERVAL / 2) == 0 ? 0 : avg_sys_frees[host_index];
-          shares[host_index] = g_sm_controller(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
+          shares[host_index] = delta(up_limits[host_index], top_results[host_index].user_current, shares[host_index], host_index);
         }
       }
       change_token(shares[host_index], host_index);
@@ -2065,10 +1836,10 @@ static void initialization() {
    * above child_after_fork() in this file for the full rationale. */
   int device_count;
   init_device_cuda_cores(&device_count);
-  /* Select the SM throttle controller (delta/aimd) before watcher threads
-   * start so the function pointer is already pointing at the right impl by
-   * the time they hit the dispatch. Safe to run on every initialization()
-   * call because pthread_once guards the whole function. */
+  /* Load the SM throttle tunables before any watcher thread starts, so the
+   * config they read is final and needs no synchronisation. Safe to run on
+   * every initialization() call because pthread_once guards the whole
+   * function. */
   sm_controller_init();
 
   /* Attach the container-wide bucket, if enabled. Deliberately placed after
@@ -2084,6 +1855,16 @@ static void initialization() {
   if (g_dynamic_config.sm_shared_bucket && g_sm_node == NULL) {
     if (map_sm_node_region(&g_sm_node) != 0 || g_sm_node == NULL) {
       g_sm_node = NULL;
+      /* Locally this is a real degradation and nothing more. In a session it
+       * is an over-quota hole: every child would throttle against its own
+       * bucket and the container would get N times its cores. Only worth
+       * refusing over when a core limit is actually configured -- without one
+       * there is no quota for the fallback to overshoot. */
+      if (unlikely(session_enabled() && session_has_core_limit())) {
+        LOGGER(FATAL, "sm_node unavailable at %s but this session limits cores; "
+                      "refusing to serve rather than give each connection the full quota",
+               SM_NODE_FILE_PATH);
+      }
       LOGGER(WARNING, "sm_node unavailable, falling back to per-process token bucket");
     } else {
       for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
@@ -2347,6 +2128,19 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
 
   if (size_on_device == 0) {
     // If there are no processes running on the device, quickly skip them.
+  } else if ((g_vgpu_config->compatibility_mode & SESSION_COMPATIBILITY_MODE) == SESSION_COMPATIBILITY_MODE) {
+    /* Sum every session child on this device: the container's usage is the
+     * whole session's, not this one child's, or two children would each pass a
+     * budget check the container as a whole fails. No open-kernel fallback --
+     * on a GPU node the session list is authoritative, and guessing past it
+     * would count another tenant's child as ours. */
+    const container_pid_cache_t *container = load_container_pids(cache);
+    for (i = 0; i < size_on_device; i++) {
+      if (check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, container->pids, container->size) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        *used_memory += pids_on_device[i].usedGpuMemory;
+      }
+    }
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     const container_pid_cache_t *container = load_container_pids(cache);
     int matchClientMode = 0;
@@ -2735,6 +2529,28 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
 
   if (processes_num == 0) {
     // If there are no processes running on the device, quickly skip them.
+  } else if ((g_vgpu_config->compatibility_mode & SESSION_COMPATIBILITY_MODE) == SESSION_COMPATIBILITY_MODE) {
+    /* sys_current counts everything on the card, user_current only this
+     * session -- same split as the other modes, session membership deciding
+     * which side a sample lands on. */
+    int pids_size = MAX_PIDS;
+    int pids_on_container[MAX_PIDS];
+    get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size, 0);
+    for (i = 0; i < processes_num; i++) {
+      if (processes_sample[i].timeStamp < top_result->checktime) {
+        continue;
+      }
+      top_result->valid = 1;
+      sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
+      codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
+      codec_util = CODEC_NORMALIZE(codec_util);
+      top_result->sys_current += sm_util + codec_util;
+      if (pids_size > 0 &&
+          check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
+        top_result->user_current += sm_util + codec_util;
+        current_processes_num++;
+      }
+    }
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
     int pids_on_container[MAX_PIDS];

@@ -1,4 +1,17 @@
-# 算力切分控制器:可选 AIMD
+# 算力切分控制器:可选 AIMD(已移除)
+
+> ## ⚠️ 本功能已从代码中移除
+>
+> AIMD/auto 控制器已于合并 `library-remote` 时删除,`delta` 是唯一保留的控制器。
+> 环境变量 `CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 均已失效(设置了也不会被读取)。
+>
+> **移除原因**:实测利用率控制效果不达预期(见
+> [sawtooth 分析](sm_controller_aimd_sawtooth_analysis.md)——单 Pod 下耗时比 delta 高约 1/3);
+> 而它主要针对的多进程公平性问题,已由
+> [容器级共享令牌桶](sm_multiproc_shared_bucket_design.md)解决,该桶现在默认开启。
+>
+> 本文档**仅作历史记录保留**,用于说明该路径已被评估并放弃,避免重复投入。
+
 
 > 作用范围:`library/`(LD_PRELOAD 运行时库)的 watcher 主循环内的份额更新算法。
 > 关系:与 [GAP 路径节流](sm_core_limit_gap_throttle_design.md) **正交、互补** —— GAP 解大 kernel 同步模式下的瞬时绕过,AIMD 解 watcher 稳态围绕目标的高方差。两者可同时启用。

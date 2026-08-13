@@ -38,10 +38,6 @@ WORKDIR /vgpu-controller
 COPY library/ .
 RUN chmod +x build.sh && ./build.sh
 
-WORKDIR /vgpu-remote
-COPY library-remote/ .
-RUN chmod +x build.sh && ./build.sh
-
 # Compile the vgpu manager binary file
 WORKDIR /go/src/vgpu-manager
 

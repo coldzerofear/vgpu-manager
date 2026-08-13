@@ -47,9 +47,48 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 * MANAGER_COMPATIBILITY_MODE: Environment compatibility mode
 * EXTERNAL_SM_WATCHER_ENABLED: Enable external SM util watcher
 * VMEMORY_NODE_ENABLED: Enable virtual memory node tracing
-* CUDA_SM_CONTROLLER: Specify the core limit algorithm (delta/aimd/auto, default: delta)
 * CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: Accelerate delta utilization rate climb speed - default 64
-* CUDA_SM_SHARED_BUCKET: Enable SM shared token bucket
+* CUDA_SM_SHARED_BUCKET: Container-wide shared SM token bucket. On by default; set to 0 to opt out
+  (ignored in a remote session, where a per-process bucket would give every connection the full core quota)
+
+### Remote session (lupine-server) only
+
+Set on the GPU node, not inside a pod. See `docs/remote_gpu_pool_research_design.md`.
+
+* VGPU_REMOTE_MODE: Mark the process as serving remote sessions only. Without a valid session quota the
+  library refuses to serve rather than falling back to a permissive config
+* VGPU_CONFIG_SESSION_BASE: Directory holding session directories (default /etc/vgpu-manager/remote-sessions)
+* VGPU_CONFIG_SESSION_PATH: This session's directory. Set per connection by the checkpoint provider, never by
+  hand; the quota, pids.config, .vgpu_lock, .vmem_node and .sm_node all derive from it
+
+## Remote GPU deployment (lupine-server)
+
+The same `libvgpu-control.so` is both the LD_PRELOAD hook library and lupine's
+checkpoint provider, which is what injects the per-connection session:
+
+```
+LD_PRELOAD=/opt/vgpu/lib/libvgpu-control.so \
+VGPU_REMOTE_MODE=1 \
+LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-control.so \
+VGPU_CONFIG_SESSION_BASE=/etc/vgpu-manager/remote-sessions \
+./lupine_driver_server
+```
+
+`LUPINE_CHECKPOINT_LIBRARY` must be set explicitly since the artifact is not
+named `liblupinecr.so`. Nothing here changes local behaviour: with none of these
+set the library resolves every path to its historical location and no session
+code runs.
+
+`vgpu-session-config` writes a session quota the way the GPU-node agent would,
+so the paths can be exercised without Kubernetes:
+
+```
+vgpu-session-config --session <LUPINE_SESSION> --device GPU-xxxx,mem=8192,core=50
+```
+
+> Remote testing must use a GPU-less client or `LUPINE_DISABLE_LOCAL=1`.
+> Otherwise lupine-client routes device 0 to a local GPU and the server-side
+> library never sees the allocation.
 
 ## Log level
 

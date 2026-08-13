@@ -1,8 +1,22 @@
-# 跨节点远程 GPU 资源池 —— 内存/核心隔离方案研究与设计（v0.3）
+# 跨节点远程 GPU 资源池 —— 内存/核心隔离方案研究与设计（v0.5）
 
-> 状态：**研究 / 设计阶段（可行性论证），PID 映射结构为 v0.2 草案（待定）**
-> 关联代码：本仓库 `library/`（本地 vGPU 硬隔离库）、`D:\WorkSpace\GoCode\src\lupine`（开源远程 GPU 转发）
+> 状态：**Phase 1 + Phase 2 已实现，待真机验收**
+> 关联代码：本仓库 `library/`（vGPU 硬隔离库，本地与远程共用）、`D:\WorkSpace\GoCode\src\lupine`（开源远程 GPU 转发）
 > 配套阅读：仓库根目录 `AGENTS.md`（面向后续 AI 的任务与复查指南）
+
+> ## v0.5 重要变更：`library-remote/` 已合并回 `library/` 并删除
+>
+> 本文档 §4 之后多处以 `library-remote` 指代远程适配层，那是 v0.3～v0.4 的形态。**现已不存在该目录**：
+> 两棵树 94% 代码相同，独立维护意味着每个 bug 要修两遍且容易漂移，收益不抵成本。
+>
+> 远程能力现在是 `library/` 内部由 env 门控的分支：`VGPU_CONFIG_SESSION_PATH` 未设时，所有路径与行为
+> **逐字回退**到合并前的本地语义（有回归测试钉住），本地部署不受影响。产物仍是单一 `libvgpu-control.so`，
+> 它同时充当 LD_PRELOAD hook 库与 lupine 的 checkpoint provider。
+>
+> 同时移除了 AIMD/auto 控制器（实测利用率控制效果不达预期），`delta` 为唯一控制器；
+> 容器级共享令牌桶改为**默认开启**。
+>
+> 阅读下文时请把 `library-remote/xxx` 一律理解为 `library/xxx`。
 
 ---
 
@@ -60,11 +74,11 @@ v0.3.4 的增补（来自评审）：
   靠返回值做 fail-closed；`stop()` 清理 pid。
 - 明确：LD_PRELOAD 仍须 server 进程级设置（运行时 setenv 不可行）；库的 fork 安全修正（`g_vgpu_config` 置 NULL）
   仍必须做。
-- **实现进展**：provider 已落地 `library-remote/include/checkpoint_provider.h`（vendor）+ `src/checkpoint_provider.c`
-  （restore 注册 pid / stop 清理 / `VGPU_CONFIG_SESSION_PATH`），随 `libvgpu-remote.so` 构建；
+- **实现进展**：provider 已落地 `library/include/checkpoint_provider.h`（vendor）+ `src/checkpoint_provider.c`
+  （restore 注册 pid / stop 清理 / `VGPU_CONFIG_SESSION_PATH`），随 `libvgpu-control.so` 构建；
   会话目录布局见 §4.3.3（`config/vgpu.config`、`.vgpu_lock`、`.vmem_node`、`pids.config`、共享 `watcher/sm_util.config`）。
 - 风险：依赖 provider ABI 调用时机契约；provider 缺失时靠库 fail-closed 兜底（§4.3.3 风险 1/2）。
-- **单制品合并评估（§4.3.3.1）**：provider 可**内置于 `libvgpu-remote.so`**（同一 .so 同时做 hook 库 + 注入
+- **单制品合并评估（§4.3.3.1）**：provider 可**内置于 `libvgpu-control.so`**（同一 .so 同时做 hook 库 + 注入
   provider）——glibc 按 realpath 去重、dlopen 返回已加载句柄；只需在导出脚本 `global:` 加
   `lupinecr_get_lupine_provider_v1`（否则被 `local: *` 藏掉）并 vendor 头文件。推荐。
 
@@ -329,7 +343,7 @@ GPU 服务器真实驱动
 
 **做法（进程级 LD_PRELOAD 是前提，§4.0.1；注入方式默认用 C-2 checkpoint provider，§4.3.3；C-1 为等价补丁路径）**：
 1. **lupine-server 侧**：
-   - 整个 `lupine_driver_server` 进程 `LD_PRELOAD libvgpu-remote.so` 启动（**必须 PRELOAD，dlopen 后置无效**，
+   - 整个 `lupine_driver_server` 进程 `LD_PRELOAD libvgpu-control.so` 启动（**必须 PRELOAD，dlopen 后置无效**，
      §4.0.1）。父进程不碰 CUDA，无副作用；子进程经 fork 继承。
    - 注入由 **C-2 provider 的 `restore(session)`** 完成（§4.3.3）：消毒 → 校验 `<session>/config/vgpu.config` 存在 →
      `setenv(VGPU_CONFIG_SESSION_PATH=<base>/<session>)` + 注册 pid 进 `<session>/pids.config`；库在首次 CUDA 调用
@@ -365,7 +379,7 @@ GPU 服务器真实驱动
 
 ### 4.3.1 实施路径确认（v0.3.2）：lupine-server 补丁 + `library-remote` 裁剪适配器
 
-**采纳的落地形态（评审确认）**：对 lupine 的**源码零改动**——注入由内置在 `libvgpu-remote.so` 的 checkpoint
+**采纳的落地形态（评审确认）**：对 lupine 的**源码零改动**——注入由内置在 `libvgpu-control.so` 的 checkpoint
 provider 完成（C-2，§4.3.3/§4.3.3.1）；`library-remote` 是 `library/` 的**裁剪适配器**，专责远程 GPU 虚拟化；
 `library/` 继续专责本地 GPU 虚拟化。两者职责分离。
 
@@ -519,8 +533,8 @@ per-session 的 env 注入 + 会话进程注册钩子**——派生 `VGPU_CONFIG
 **liblupinecr.so 开发（兼容 ABI 的做法）**：
 1. **头**：`checkpoint_provider.h`（`lupine_checkpoint_provider_v1`：`struct_size`/`abi_version`/`start`/`restore`/
    `checkpoint`/`stop`；符号 `lupinecr_get_lupine_provider_v1`，ABI version 1）。已在 vgpu-manager **vendor**
-   （`library-remote/include/checkpoint_provider.h`，40 行），构建不依赖 lupine 检出。
-2. **四个函数**（完整实现见 `library-remote/src/checkpoint_provider.c`）：
+   （`library/include/checkpoint_provider.h`，40 行），构建不依赖 lupine 检出。
+2. **四个函数**（完整实现见 `library/src/checkpoint_provider.c`）：
    - `start()` → 0。
    - `restore(connection_id)` → **核心**：消毒 session（`[A-Za-z0-9_.-]` 防路径穿越）→ 校验
      `<base>/<session>/config/vgpu.config` 存在（不存在返回非 0 = fail-closed）→ `setenv(VGPU_CONFIG_SESSION_PATH
@@ -528,11 +542,11 @@ per-session 的 env 注入 + 会话进程注册钩子**——派生 `VGPU_CONFIG
      （`flock` EX + O_APPEND，格式与库 `get_container_pids_by_filepath` 一致，`util.c:528`）。
    - `checkpoint()` → 0（no-op，我们不保存 GPU 状态；SIGTERM 排空照常）。
    - `stop()` → **子进程退出清理**：从 `<session>/pids.config` 移除本 pid（重写文件，`flock` EX）。
-3. **构建**：随 `library-remote` 一起编译进 `libvgpu-remote.so`（单制品，§4.3.3.1）；导出符号
+3. **构建**：随 `library-remote` 一起编译进 `libvgpu-control.so`（单制品，§4.3.3.1）；导出符号
    `lupinecr_get_lupine_provider_v1` 已在 exports.ld `global:`。
 4. **部署**：GPU 节点 server 启动 env：
-   `LD_PRELOAD=/opt/vgpu/lib/libvgpu-remote.so`、`VGPU_REMOTE_MODE=1`、
-   `LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-remote.so`、可选 `VGPU_CONFIG_SESSION_BASE=<base>`。
+   `LD_PRELOAD=/opt/vgpu/lib/libvgpu-control.so`、`VGPU_REMOTE_MODE=1`、
+   `LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-control.so`、可选 `VGPU_CONFIG_SESSION_BASE=<base>`。
 
 **会话目录布局（VGPU_CONFIG_SESSION_PATH=<base>/<session>，库按此 env 派生所有 per-session 路径）**：
 ```
@@ -546,7 +560,7 @@ per-session 的 env 注入 + 会话进程注册钩子**——派生 `VGPU_CONFIG
 > provider 的 `restore()` 会**幂等创建** `<session>` 及其子目录（`config`/`.vgpu_lock`/`.vmem_node`/`.sm_node`，
 > 已存在不报错）；`pids.config` 注册时去重并按 PID 升序重写、`stop()` 清理时同样保持有序。
 
-**代码骨架（provider，C；完整见 `library-remote/src/checkpoint_provider.c`）**：
+**代码骨架（provider，C；完整见 `library/src/checkpoint_provider.c`）**：
 ```c
 #include "checkpoint_provider.h"
 #include "hook.h"
@@ -594,19 +608,19 @@ const lupine_checkpoint_provider_v1 *lupinecr_get_lupine_provider_v1(void) {
 5. restore 返回非 0 关闭连接：客户端表现为连接断开/首个 RPC 失败（CUDA_ERROR_DEVICE_UNAVAILABLE），符合 fail-closed 预期。
 6. **C-2 与真实 checkpoint 共存**：若未来要真 checkpoint，本 provider 可再加一层转发链到真实 provider（当前不必要）。
 
-#### 4.3.3.1 单制品合并：provider 内置于 `libvgpu-remote.so`（可行性评估，v0.3.4）
+#### 4.3.3.1 单制品合并：provider 内置于 `libvgpu-control.so`（可行性评估，v0.3.4）
 
 **结论：可行，且推荐** —— 单一制品（一个 `.so` 同时做 hook 库和注入 provider），构建/部署/版本同步都更简单。
 
 **机制（同一 `.so` 双重角色）**：
-- `libvgpu-remote.so` 经 **LD_PRELOAD** 进程级加载（最先入全局符号表，§4.0.1）；又被 lupine 每子进程
+- `libvgpu-control.so` 经 **LD_PRELOAD** 进程级加载（最先入全局符号表，§4.0.1）；又被 lupine 每子进程
   `load_provider()` **dlopen**（`server_checkpoint.cpp:83-92`）。glibc 对已加载文件按 **realpath/SONAME 去重**，
   `dlopen` 返回同一句柄、**不二次初始化**、不重复跑构造器。
 - 库当前**未设 SONAME**（`library/CMakeLists.txt` 无 VERSION/SOVERSION，产出 `libvgpu-control.so`）→ 按 realpath
   去重成立；`library-remote` 若将来加 SONAME，确保 dlopen 路径与 SONAME 一致。
 
 **必须做的两处配套**：
-1. **导出符号**：`deploy/libvgpu-remote.exports.ld` 的 `global:` 加 **`lupinecr_get_lupine_provider_v1;`**
+1. **导出符号**：`deploy/libvgpu-control.exports.ld` 的 `global:` 加 **`lupinecr_get_lupine_provider_v1;`**
    —— 否则 `local: *` 把它藏出 .dynsym，lupine 的 `dlsym(handle, ...)` 返回 NULL、provider 被静默忽略。
    同时更新 `hack/check_exported_symbols.sh` 正/负断言（见 `libvgpu-control.exports.ld` 注释约定）。
 2. **vendor 头 + 源文件**：`include/checkpoint_provider.h`（40 行，`lupine_checkpoint_provider_v1` + 符号名 +
@@ -626,9 +640,9 @@ const lupine_checkpoint_provider_v1 *lupinecr_get_lupine_provider_v1(void) {
 
 **部署（GPU 节点 server 启动 env）**：
 ```
-LD_PRELOAD=/opt/vgpu/lib/libvgpu-remote.so \
+LD_PRELOAD=/opt/vgpu/lib/libvgpu-control.so \
 VGPU_REMOTE_MODE=1 \
-LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-remote.so \
+LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-control.so \
 # 可选：会话目录基址（默认 /etc/vgpu-manager/remote-sessions）
 VGPU_CONFIG_SESSION_BASE=/etc/vgpu-manager/remote-sessions \
 ./lupine_driver_server
@@ -739,7 +753,7 @@ v0.2 曾假设"子进程 `setenv(CUDA_MEM_LIMIT_*=...)` 独立注入即可"。**
 
 ```
 GPU 节点（lupine-server 所在）
-  ├─ lupine_driver_server（进程级 LD_PRELOAD libvgpu-remote.so）
+  ├─ lupine_driver_server（进程级 LD_PRELOAD libvgpu-control.so）
   │    └─ fork 子进程 per 连接
   │         ├─ child(进程A) ─┐
   │         ├─ child(进程B) ─┼─ 同一容器(S) 的多个进程 → 共享同一会话目录
@@ -954,7 +968,7 @@ B 阶段积累的 lupine 补丁经验（session/RPC 接入点）与 Go 侧配额
 - [ ] S2 远端 PID 补丁可行性：在 lupine server 新增只读 RPC 返回子进程 PID，客户端实测拿到的 PID 与
       NVML 进程表对得上。
 - [ ] S3 记账口径：确认经远端过滤的 `usedGpuMemory` 包含上下文等隐式内存（对比显式分配和 NVML 值）。
-- [ ] S4（C）PRELOAD + 会话配置可行性：`LD_PRELOAD libvgpu-remote.so` + `LUPINE_CHECKPOINT_LIBRARY` 进
+- [ ] S4（C）PRELOAD + 会话配置可行性：`LD_PRELOAD libvgpu-control.so` + `LUPINE_CHECKPOINT_LIBRARY` 进
       `lupine_driver_server`，验证 provider `restore()` 注入 `VGPU_CONFIG_SESSION_PATH`/注册 pid、子进程内拦截生效、
       `pthread_atfork`/`nvml_symbol` 兼容（§4.0.3）。
 - [ ] S5（C）多进程容器记账：同一容器 2 个进程 → 2 个子进程，验证会话进程表聚合的 `used` 为容器级口径
@@ -973,8 +987,8 @@ B 阶段积累的 lupine 补丁经验（session/RPC 接入点）与 Go 侧配额
 - [ ] 端到端：单节点多 GPU，nvidia-smi/`cuMemGetInfo` 显示限额视图，超限 OOM，多 Pod 互不干扰。
 
 **若走 C（推荐直接做）：**
-- [ ] 部署：进程级 `LD_PRELOAD libvgpu-remote.so` + `VGPU_REMOTE_MODE=1` +
-      `LUPINE_CHECKPOINT_LIBRARY=.../libvgpu-remote.so`；provider `restore()` 注入 `VGPU_CONFIG_SESSION_PATH` +
+- [ ] 部署：进程级 `LD_PRELOAD libvgpu-control.so` + `VGPU_REMOTE_MODE=1` +
+      `LUPINE_CHECKPOINT_LIBRARY=.../libvgpu-control.so`；provider `restore()` 注入 `VGPU_CONFIG_SESSION_PATH` +
       注册 pid 进 `<session>/pids.config`、`stop()` 清理（§4.3.3，已落地 library-remote）。
 - [x] 会话路径模块（`include/session.h` + `src/session.c`）：10 类路径由 `VGPU_CONFIG_SESSION_PATH` 运行时派生，
       env 只读一次；`sm_util.config` 挂 `<base>/watcher/`（跨会话共享）；未设 env 时逐字回退旧路径。
