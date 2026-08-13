@@ -35,14 +35,6 @@ const char *nvmlErrorString(nvmlReturn_t result) {
   return _entry(result);
 }
 
-nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, index, device);
-}
-
-nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, index, device);
-}
-
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
                                                   unsigned int *infoCount,
                                                   nvmlProcessInfo_t *infos) {
@@ -362,29 +354,6 @@ nvmlReturn_t nvmlDeviceGetGridLicensableFeatures(nvmlDevice_t device,
   return NVML_ENTRY_CHECK(nvml_library_entry,
                          nvmlDeviceGetGridLicensableFeatures, device,
                          pGridLicensableFeatures);
-}
-
-nvmlReturn_t nvmlDeviceGetHandleByPciBusId_v2(const char *pciBusId,
-                                              nvmlDevice_t *device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByPciBusId_v2, pciBusId, device);
-}
-
-nvmlReturn_t nvmlDeviceGetHandleByPciBusId(const char *pciBusId,
-                                           nvmlDevice_t *device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByPciBusId, pciBusId, device);
-}
-
-nvmlReturn_t nvmlDeviceGetHandleBySerial(const char *serial,
-                                         nvmlDevice_t *device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleBySerial, serial, device);
-}
-
-nvmlReturn_t nvmlDeviceGetHandleByUUID(const char *uuid, nvmlDevice_t *device) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByUUID, uuid, device);
-}
-
-nvmlReturn_t nvmlDeviceGetIndex(nvmlDevice_t device, unsigned int *index) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetIndex, device, index);
 }
 
 nvmlReturn_t nvmlDeviceGetInforomConfigurationChecksum(nvmlDevice_t device,
@@ -1905,14 +1874,6 @@ nvmlReturn_t nvmlDeviceGetConfComputeGpuAttestationReport(nvmlDevice_t device,
                                     nvmlConfComputeGpuAttestationReport_t *gpuAtstReport){
   return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetConfComputeGpuAttestationReport,
                          device, gpuAtstReport);
-}
-
-nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCount_v2, deviceCount);
-}
-
-nvmlReturn_t nvmlDeviceGetCount(unsigned int *deviceCount) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCount, deviceCount);
 }
 
 nvmlReturn_t nvmlDeviceGetRunningProcessDetailList(nvmlDevice_t device,

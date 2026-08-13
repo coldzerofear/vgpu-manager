@@ -31,26 +31,20 @@ limitations under the License.
  * What restore()/stop() do here (design docs/remote_gpu_pool_research_design.md
  * §4.3.3 / §6):
  *   restore(id)  sanitizes the client-supplied session id, idempotently creates
- *                the per-session directories, checks the session quota exists,
- *                setenv()s VGPU_CONFIG_SESSION_PATH (+ REMOTE mode) so the
- *                library resolves every per-session path from it, and
- *                registers this child's PID into <session>/pids.config keeping
- *                the list sorted + deduplicated so the library's SESSION-mode
- *                accounting can filter NVML by the session's container PIDs
- *                with binary search. Returns non-zero when the config region
- *                is missing -> lupine closes the connection (fail-closed).
+ *                the per-session directories, setenv()s VGPU_CONFIG_SESSION_PATH
+ *                (+ REMOTE mode) so the library resolves every per-session path
+ *                from it, maps the session quota to publish CUDA_VISIBLE_DEVICES
+ *                for that session's devices, and registers this child's PID into
+ *                <session>/pids.config keeping the list sorted + deduplicated so
+ *                the library's SESSION-mode accounting can filter NVML by the
+ *                session's container PIDs with binary search. Returns non-zero
+ *                when the quota is missing or empty -> lupine closes the
+ *                connection (fail-closed).
  *   stop()       removes this child's PID from pids.config (child exit),
  *                keeping the list sorted.
  *
- * Session layout (base defaults to /etc/vgpu-manager/remote-sessions, override
- * via VGPU_CONFIG_SESSION_BASE). All per-session paths derive from
- * VGPU_CONFIG_SESSION_PATH=<base>/<session>:
- *   <base>/<session>/config/vgpu.config   session quota (resource_data_t)
- *   <base>/<session>/.vgpu_lock           per-session GPU lock dir
- *   <base>/<session>/.vmem_node           per-session vmem ledger
- *   <base>/<session>/.sm_node             per-session SM shared bucket
- *   <base>/<session>/pids.config          session container PIDs (sorted here)
- *   <base>/watcher/sm_util.config         shared SM watcher (external writer)
+ * The session directory layout itself lives in session.h -- this file only
+ * decides which session the child belongs to and publishes it.
  */
 
 #include <errno.h>
@@ -61,26 +55,17 @@ limitations under the License.
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
-#include <sys/stat.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "include/checkpoint_provider.h"
 #include "include/hook.h"
 
-#define SESSION_CONFIG_BASE_DEFAULT "/etc/vgpu-manager/remote-sessions"
 #define SESSION_ID_MAX 64
 #define SESSION_PIDS_MAX 256
 #define SESSION_PIDS_FILE_MAX (1024 * 1024) /* sanity cap for a rewrite */
 
-/* Per-session subdirectories created idempotently by restore(). */
-static const char *const SESSION_SUBDIRS[] = {
-    "config", ".vgpu_lock", ".vmem_node", ".sm_node",
-};
-
-static const char *session_config_base(void) {
-  const char *base = getenv("VGPU_CONFIG_SESSION_BASE");
-  return (base != NULL && base[0] != '\0') ? base : SESSION_CONFIG_BASE_DEFAULT;
-}
+extern int pid_exist(int pid);
 
 /* Session id is client-controlled and feeds a filesystem path: allow only a
  * safe charset and reject anything that could traverse (design §6.2.1). */
@@ -95,51 +80,6 @@ static int valid_session_id(const char *id) {
     }
   }
   return 1;
-}
-
-/* mkdir -p semantics; a pre-existing directory is not an error (idempotent). */
-static int mkdir_p(const char *path) {
-  char tmp[PATH_MAX];
-  if (snprintf(tmp, sizeof(tmp), "%s", path) >= (int)sizeof(tmp)) {
-    return -1;
-  }
-  size_t len = strlen(tmp);
-  if (len == 0) {
-    return -1;
-  }
-  while (len > 1 && tmp[len - 1] == '/') {
-    tmp[--len] = '\0';
-  }
-  for (char *p = tmp + 1; *p; p++) {
-    if (*p == '/') {
-      *p = '\0';
-      if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-        return -1;
-      }
-      *p = '/';
-    }
-  }
-  if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-    return -1;
-  }
-  return 0;
-}
-
-/* Create every per-session directory under <session> (idempotent). */
-static int ensure_session_dirs(const char *session_path) {
-  if (mkdir_p(session_path) != 0) {
-    return -1;
-  }
-  for (size_t i = 0; i < sizeof(SESSION_SUBDIRS) / sizeof(SESSION_SUBDIRS[0]);
-       i++) {
-    char sub[PATH_MAX];
-    if (snprintf(sub, sizeof(sub), "%s/%s", session_path,
-                 SESSION_SUBDIRS[i]) >= (int)sizeof(sub) ||
-        mkdir_p(sub) != 0) {
-      return -1;
-    }
-  }
-  return 0;
 }
 
 static int pid_compare(const void *a, const void *b) {
@@ -192,81 +132,126 @@ static int write_pids(int fd, const int *pids, int count) {
   return 0;
 }
 
-/* Register `pid`: no-op if already present; otherwise insert, sort ascending
- * and overwrite, keeping pids.config always sorted so readers can binary
- * search (the library's check_device_pid_in_ordered_container_pids does). */
-static int session_register_pid(const char *session_path, pid_t pid) {
-  char pids_path[PATH_MAX];
-  if (snprintf(pids_path, sizeof(pids_path), "%s/pids.config", session_path) >=
-      (int)sizeof(pids_path)) {
-    return -1;
-  }
-  int fd = open(pids_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+/* Rewrite pids.config as: the live PIDs it already held, minus `pid` when
+ * removing, plus `pid` when adding, sorted ascending. Both callers go through
+ * here so the pruning and the sort order have exactly one implementation.
+ *
+ * The pruning matters because stop() is not guaranteed to run: a child killed
+ * by SIGKILL (or a crashing one) never removes itself, so without a sweep the
+ * file grows stale entries for the life of the session. Accounting tolerates
+ * them -- NVML stops reporting a dead PID -- but the list is bounded, and a
+ * session that churns children would otherwise hit that bound and start
+ * refusing registrations. A recycled PID can survive the sweep; harmless,
+ * since NVML attribution is what decides usage, not this list.
+ *
+ * `add` == 0 leaves the file alone when it does not exist: nothing to clean. */
+static int session_pids_update(const char *pids_path, pid_t pid, int add) {
+  int fd = open(pids_path, add ? (O_RDWR | O_CREAT | O_CLOEXEC) : (O_RDWR | O_CLOEXEC), 0644);
   if (fd < 0) {
-    LOGGER(ERROR, "failed to open %s: %s", pids_path, strerror(errno));
+    if (add) {
+      LOGGER(ERROR, "failed to open %s: %s", pids_path, strerror(errno));
+    }
+    return add ? -1 : 0;
+  }
+  if (flock(fd, LOCK_EX) != 0) {
+    LOGGER(ERROR, "flock failed on %s: %s", pids_path, strerror(errno));
+    close(fd);
     return -1;
   }
+
   int rc = -1;
-  if (flock(fd, LOCK_EX) == 0) {
-    int pids[SESSION_PIDS_MAX];
-    int count = 0;
-    if (read_pids(fd, pids, SESSION_PIDS_MAX, &count) == 0) {
-      qsort(pids, (size_t)count, sizeof(int), pid_compare);
-      if (bsearch(&pid, pids, (size_t)count, sizeof(int), pid_compare) == NULL) {
-        if (count >= SESSION_PIDS_MAX) {
-          LOGGER(ERROR, "session pid list full (%d) in %s", count, pids_path);
-        } else {
-          pids[count++] = (int)pid;
-          qsort(pids, (size_t)count, sizeof(int), pid_compare);
-          rc = (write_pids(fd, pids, count) == 0) ? 0 : -1;
-        }
-      } else {
-        rc = 0; /* already registered */
-      }
-    } else {
-      LOGGER(ERROR, "failed to read %s: %s", pids_path, strerror(errno));
-    }
-    (void)flock(fd, LOCK_UN);
-  } else {
-    LOGGER(ERROR, "flock failed on %s: %s", pids_path, strerror(errno));
+  int pids[SESSION_PIDS_MAX];
+  int count = 0;
+  if (read_pids(fd, pids, SESSION_PIDS_MAX, &count) != 0) {
+    LOGGER(ERROR, "failed to read %s: %s", pids_path, strerror(errno));
+    goto DONE;
   }
+
+  int kept = 0;
+  for (int i = 0; i < count; i++) {
+    if (pids[i] != (int)pid && pid_exist(pids[i]) == 0) {
+      pids[kept++] = pids[i];
+    }
+  }
+  if (kept != count) {
+    LOGGER(VERBOSE, "pruned %d stale pid(s) from %s", count - kept, pids_path);
+  }
+  if (add) {
+    if (kept >= SESSION_PIDS_MAX) {
+      LOGGER(ERROR, "session pid list full (%d) in %s", kept, pids_path);
+      goto DONE;
+    }
+    pids[kept++] = (int)pid;
+  }
+  qsort(pids, (size_t)kept, sizeof(int), pid_compare);
+  rc = write_pids(fd, pids, kept) == 0 ? 0 : -1;
+
+DONE:
+  (void)flock(fd, LOCK_UN);
   close(fd);
   return rc;
 }
 
-/* Remove `pid` from pids.config, keeping the file sorted. Dead PIDs are
- * harmless to accounting (they no longer appear in NVML), so this is purely
- * hygiene at child exit. */
-static void session_unregister_pid(const char *session_path, pid_t pid) {
-  char pids_path[PATH_MAX];
-  if (snprintf(pids_path, sizeof(pids_path), "%s/pids.config", session_path) >=
-      (int)sizeof(pids_path)) {
-    return;
-  }
-  int fd = open(pids_path, O_RDWR | O_CLOEXEC);
-  if (fd < 0) {
-    return; /* never registered / already removed */
-  }
-  if (flock(fd, LOCK_EX) != 0) {
-    close(fd);
-    return;
+/* Restrict the child to the session's devices by handing the driver a
+ * CUDA_VISIBLE_DEVICES list of their UUIDs.
+ *
+ * The driver applies this at cuInit, which has not happened yet: lupine's
+ * first RPC is cuInit and restore() runs before it, and the server's parent
+ * never touches CUDA, so nothing in this process has initialized the driver.
+ * That is what makes a plain setenv work here.
+ *
+ * Letting the driver enumerate is worth more than filtering cuDeviceGetCount /
+ * cuDeviceGet ourselves would be: the client builds its device table from
+ * those two RPCs, so it sees exactly the allowed devices, already renumbered
+ * 0..n-1, with no hook of ours in the path. UUIDs rather than indexes because
+ * the config names devices by UUID and PCI order is not stable across reboots.
+ *
+ * NVML is NOT affected by CUDA_VISIBLE_DEVICES -- it always enumerates every
+ * physical device -- so the NVML side is restricted by hooks instead.
+ *
+ * We assume every UUID in the config exists on this node. CUDA's contract for
+ * an unknown entry is to silently truncate the visible list at that point, so
+ * a stale config surfaces as "the container sees fewer GPUs than it asked
+ * for", not as an error. Deliberate: validating would mean initializing NVML
+ * here, and this is the one place that must not touch the driver. */
+static int apply_visible_devices(void) {
+  resource_data_t *cfg = NULL;
+  if (mmap_file_to_config_path(&cfg) != 0 || cfg == NULL) {
+    LOGGER(ERROR, "no readable session quota at %s", session_path(SESSION_CONFIG));
+    return -1;
   }
 
-  int pids[SESSION_PIDS_MAX];
-  int count = 0;
-  if (read_pids(fd, pids, SESSION_PIDS_MAX, &count) == 0) {
-    int kept = 0;
-    for (int i = 0; i < count; i++) {
-      if (pids[i] != (int)pid) {
-        pids[kept++] = pids[i]; /* already sorted: removal preserves order */
-      }
-    }
-    if (kept != count) {
-      (void)write_pids(fd, pids, kept);
-    }
+  int host_indexes[MAX_DEVICE_COUNT];
+  int count = config_allowed_devices(cfg, host_indexes, MAX_DEVICE_COUNT);
+  int rc = -1;
+  char list[MAX_DEVICE_COUNT * UUID_BUFFER_SIZE];
+  size_t len = 0;
+
+  if (count == 0) {
+    /* An empty allowlist is a real quota ("no GPUs"), not a missing one, and
+     * must not become "all GPUs" -- which is what an unset env would mean. */
+    LOGGER(ERROR, "session quota activates no device; refusing connection");
+    goto DONE;
   }
-  (void)flock(fd, LOCK_UN);
-  close(fd);
+  for (int i = 0; i < count; i++) {
+    device_t d = get_device_snapshot_of(cfg, host_indexes[i]);
+    int n = snprintf(list + len, sizeof(list) - len, "%s%s", len ? "," : "", d.uuid);
+    if (n < 0 || (size_t)n >= sizeof(list) - len) {
+      LOGGER(ERROR, "device uuid list overflow at device %d", i);
+      goto DONE;
+    }
+    len += (size_t)n;
+  }
+  if (setenv("CUDA_VISIBLE_DEVICES", list, 1) != 0) {
+    LOGGER(ERROR, "setenv CUDA_VISIBLE_DEVICES failed: %s", strerror(errno));
+    goto DONE;
+  }
+  LOGGER(INFO, "session exposes %d device(s): %s", count, list);
+  rc = 0;
+
+DONE:
+  munmap(cfg, CONFIG_FILE_SIZE);
+  return rc;
 }
 
 static int checkpoint_start(void) {
@@ -283,45 +268,43 @@ static int checkpoint_restore(const char *connection_id) {
     return -1; /* lupine closes the connection (fail-closed) */
   }
 
-  char session_path[PATH_MAX];
-  if (snprintf(session_path, sizeof(session_path), "%s/%s",
-               session_config_base(), connection_id) >=
-      (int)sizeof(session_path)) {
+  char root[PATH_MAX];
+  if (snprintf(root, sizeof(root), "%s/%s", session_base(), connection_id) >=
+      (int)sizeof(root)) {
     LOGGER(ERROR, "session path too long");
     return -1;
   }
 
   /* Idempotently create the per-session directories (no error if present):
    * the library later mmaps/creates .vgpu_lock/.vmem_node/.sm_node files. */
-  if (ensure_session_dirs(session_path) != 0) {
-    LOGGER(ERROR, "failed to create session dirs under %s: %s",
-           session_path, strerror(errno));
+  if (session_make_dirs(root) != 0) {
+    LOGGER(ERROR, "failed to create session dirs under %s: %s", root, strerror(errno));
     return -1;
   }
 
-  /* The agent must have materialized the session quota before the pod's first
-   * CUDA call. Without it the child must not serve (fail-closed). */
-  char config_path[PATH_MAX];
-  if (snprintf(config_path, sizeof(config_path), "%s/config/vgpu.config",
-               session_path) >= (int)sizeof(config_path) ||
-      access(config_path, R_OK) != 0) {
-    LOGGER(ERROR, "session config not found: %s", config_path);
-    return -1;
-  }
-
-  if (setenv("VGPU_CONFIG_SESSION_PATH", session_path, 1) != 0 ||
-      setenv("VGPU_REMOTE_MODE", "1", 0) != 0) {
+  /* Publish the root before touching any per-session file, so the layout is
+   * only ever spelled out in session.c. The reset is what makes the new env
+   * visible -- paths are resolved once and cached. Safe here: restore() runs
+   * on the child's only thread, before the first RPC. */
+  if (setenv(SESSION_PATH_ENV, root, 1) != 0 || setenv(REMOTE_MODE_ENV, "1", 0) != 0) {
     LOGGER(ERROR, "setenv failed: %s", strerror(errno));
     return -1;
   }
+  session_paths_reset();
 
-  if (session_register_pid(session_path, getpid()) != 0) {
-    LOGGER(ERROR, "failed to register pid %ld in session %s",
-           (long)getpid(), connection_id);
+  /* The agent must have materialized the session quota before the pod's first
+   * CUDA call. Without it the child must not serve (fail-closed). Mapping it
+   * rather than access()ing it also validates the frozen header, and gives us
+   * the device list for the visibility env below. */
+  if (apply_visible_devices() != 0) {
     return -1;
   }
-  LOGGER(INFO, "registered pid %ld into %s/pids.config",
-         (long)getpid(), session_path);
+
+  if (session_pids_update(session_path(SESSION_PIDS), getpid(), 1) != 0) {
+    LOGGER(ERROR, "failed to register pid %ld in session %s", (long)getpid(), connection_id);
+    return -1;
+  }
+  LOGGER(INFO, "registered pid %ld into %s", (long)getpid(), session_path(SESSION_PIDS));
   return 0;
 }
 
@@ -334,12 +317,11 @@ static int checkpoint_checkpoint(const char *connection_id) {
 
 static void checkpoint_stop(void) {
   LOGGER(INFO, "provider stop()");
-  const char *session_path = getenv("VGPU_CONFIG_SESSION_PATH");
-  if (session_path != NULL && session_path[0] != '\0') {
-    session_unregister_pid(session_path, getpid());
-    LOGGER(INFO, "removed pid %ld from %s/pids.config",
-           (long)getpid(), session_path);
+  if (!session_enabled()) {
+    return; /* restore() never ran: nothing was registered */
   }
+  (void)session_pids_update(session_path(SESSION_PIDS), getpid(), 0);
+  LOGGER(INFO, "removed pid %ld from %s", (long)getpid(), session_path(SESSION_PIDS));
 }
 
 static const lupine_checkpoint_provider_v1 checkpoint_provider = {

@@ -2090,6 +2090,19 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
 
   if (size_on_device == 0) {
     // If there are no processes running on the device, quickly skip them.
+  } else if ((g_vgpu_config->compatibility_mode & SESSION_COMPATIBILITY_MODE) == SESSION_COMPATIBILITY_MODE) {
+    /* Sum every session child on this device: the container's usage is the
+     * whole session's, not this one child's, or two children would each pass a
+     * budget check the container as a whole fails. No open-kernel fallback --
+     * on a GPU node the session list is authoritative, and guessing past it
+     * would count another tenant's child as ours. */
+    const container_pid_cache_t *container = load_container_pids(cache);
+    for (i = 0; i < size_on_device; i++) {
+      if (check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, container->pids, container->size) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        *used_memory += pids_on_device[i].usedGpuMemory;
+      }
+    }
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     const container_pid_cache_t *container = load_container_pids(cache);
     int matchClientMode = 0;
@@ -2478,6 +2491,28 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
 
   if (processes_num == 0) {
     // If there are no processes running on the device, quickly skip them.
+  } else if ((g_vgpu_config->compatibility_mode & SESSION_COMPATIBILITY_MODE) == SESSION_COMPATIBILITY_MODE) {
+    /* sys_current counts everything on the card, user_current only this
+     * session -- same split as the other modes, session membership deciding
+     * which side a sample lands on. */
+    int pids_size = MAX_PIDS;
+    int pids_on_container[MAX_PIDS];
+    get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size, 0);
+    for (i = 0; i < processes_num; i++) {
+      if (processes_sample[i].timeStamp < top_result->checktime) {
+        continue;
+      }
+      top_result->valid = 1;
+      sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
+      codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
+      codec_util = CODEC_NORMALIZE(codec_util);
+      top_result->sys_current += sm_util + codec_util;
+      if (pids_size > 0 &&
+          check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
+        top_result->user_current += sm_util + codec_util;
+        current_processes_num++;
+      }
+    }
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
     int pids_on_container[MAX_PIDS];

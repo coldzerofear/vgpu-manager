@@ -11,7 +11,9 @@
 .DEFAULT_GOAL := help
 
 LIBRARY_DIR     := $(dir $(abspath $(firstword $(MAKEFILE_LIST))))
+HACK_DIR        ?= $(LIBRARY_DIR)../library/hack
 BUILD_DIR       ?= $(LIBRARY_DIR)build
+SO_FILE         ?= $(BUILD_DIR)/libvgpu-remote.so
 CUDA_HOME       ?= /usr/local/cuda
 CMAKE           ?= cmake
 DOCKER          ?= docker
@@ -50,6 +52,56 @@ build: configure ## Build libvgpu-remote.so.
 .PHONY: clean
 clean: ## Remove the build tree.
 	rm -rf $(BUILD_DIR)
+
+##@ Checks (no GPU needed)
+
+# The checkers live in ../library/hack and take the tree to check as an
+# argument -- one copy validates both trees, so they cannot drift apart.
+.PHONY: check
+check: check-hook-consistency check-struct-layout check-no-constructors ## Run every static check.
+
+.PHONY: check-hook-consistency
+check-hook-consistency: ## Verify dispatch table / enum / wrapper alignment + ABI-conflict coverage.
+	$(PYTHON) $(HACK_DIR)/check_cuda_hook_consistency.py --root $(LIBRARY_DIR)
+
+.PHONY: check-struct-layout
+check-struct-layout: ## Compare cuda-subset.h struct layouts vs real <cuda.h> on this host.
+	$(PYTHON) $(HACK_DIR)/check_struct_layout.py --root $(LIBRARY_DIR) --cuda-home $(CUDA_HOME)
+
+.PHONY: check-no-constructors
+check-no-constructors: ## Reject __attribute__((constructor/destructor)) in src/.
+	$(BASH) $(HACK_DIR)/check_no_constructors.sh $(LIBRARY_DIR)
+
+.PHONY: check-exports
+check-exports: $(SO_FILE) ## Verify the built .so exports the documented surface + the provider entry point.
+	$(BASH) $(HACK_DIR)/check_exported_symbols.sh $(SO_FILE)
+
+$(SO_FILE): build
+
+.PHONY: check-all
+check-all: check check-exports ## Static + post-build symbol-export checks.
+
+##@ Tools & tests (no GPU needed)
+
+# Compiled with plain cc rather than through cmake: both link a handful of
+# driver-free sources, and needing a CUDA toolkit to build a config-file writer
+# would defeat the point of having one.
+SESSION_SRCS := $(LIBRARY_DIR)src/session.c $(LIBRARY_DIR)src/config_io.c \
+                $(LIBRARY_DIR)src/util.c $(LIBRARY_DIR)src/lock.c $(LIBRARY_DIR)src/metrics.c
+CFLAGS_NOGPU := -Wall -Wshadow -I$(LIBRARY_DIR) -I$(LIBRARY_DIR)include -D_GNU_SOURCE
+
+.PHONY: session-cli
+session-cli: ## Build vgpu-session-config (writes a session quota region by hand).
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -o $(BUILD_DIR)/vgpu-session-config $(CFLAGS_NOGPU) \
+	    $(LIBRARY_DIR)tools/session_config.c $(SESSION_SRCS)
+
+.PHONY: test-nogpu
+test-nogpu: ## Run the session path / config round-trip checks.
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -o $(BUILD_DIR)/test_session_paths $(CFLAGS_NOGPU) \
+	    $(LIBRARY_DIR)test/nogpu/test_session_paths.c $(SESSION_SRCS)
+	$(BUILD_DIR)/test_session_paths
 
 ##@ Docker
 

@@ -393,7 +393,7 @@ GPU 节点真实驱动
 |---|---|---|
 | 客户端会话传递 | `h2.cpp:711` 读 `getenv("LUPINE_SESSION")`；注入层给容器所有进程同一 env | ✅ 现成 |
 | server 判别连接→session | 每连接独立 transport，`rpc_http2_session_id(&conn)`（`h2.cpp:850-857`） | ✅ 现成 |
-| 设备隔离/重映射 | lupine-server 生成 handler **直调** `cuDeviceGetCount`/`cuDeviceGet`（`gen_server.cpp:102/79`）；客户端设备表就是经这两个 RPC 枚举的（`routing.cpp:217-277`）→ 库 hook 二者即可让客户端只看到允许设备 | ✅ 需库新增 hook |
+| 设备隔离/重映射 | 客户端设备表经 `cuDeviceGetCount`/`cuDeviceGet` 两个 RPC 枚举（`routing.cpp:217-277`）→ **provider setenv `CUDA_VISIBLE_DEVICES`，由驱动裁剪与重排，无需 hook**；NVML 不受该 env 约束，另用 hook（§6.6） | ✅ 已实现 |
 | 直调 cu* 被拦截 | 进程级 PRELOAD → 库的 `cu*` 先于真 libcuda 入全局符号表（§4.0.1）；handler 直调（`gen_server.cpp:1760`）走 PLT → 库 hook | ✅ |
 | nvml 路径被拦截 | lupine-server 的 NVML 桩经 `nvml_symbol<>()` **dlsym 句柄查询**（`nvml_server.cpp:46-56`）；库的 dlsym 拦截器服务端唯一导出、遮蔽该查询 → 返回库的 nvml hook | ✅ **库必须保留 dlsym 拦截器**（不可裁剪） |
 | per-session 配置 fork 安全 | `loader_child_after_fork`（`loader.c:2994`）重置 `g_controller_config_init`/`g_cuda_lib_init`/`g_nvml_lib_init`/`g_reset_cuda_index_init` 等全部 once-guard → 每个子进程用**自己的 env** 重新初始化配置 | ✅ 现成机制，远程必须保留 |
@@ -405,8 +405,10 @@ GPU 节点真实驱动
 - **Phase 1（内存）保留的 hook 族**：
   - CUDA：`cuMemAlloc(_v2/Pitch/Async/FromPoolAsync/Managed)`、`cuMemFree(_v2/Async)`、`cuMemGetInfo(_v2)`、
     `cuDeviceTotalMem(_v2)`、`cuArray*Create`/`cuMipmappedArrayCreate`（预算）、`cuMemHostAlloc/HostRegister`、
-    **`cuCtxGetDevice`**（取当前设备）、**`cuDeviceGetCount`/`cuDeviceGet`**（设备重映射）、`cuInit`、`cuDriverGetVersion`。
-  - NVML：`nvmlInit(_v2/WithFlags)`、`nvmlDeviceGetMemoryInfo(_v2)`、`nvmlDeviceGet*RunningProcesses(_v2/_v3)`。
+    **`cuCtxGetDevice`**（取当前设备）、`cuInit`、`cuDriverGetVersion`。设备重映射不在此列——CUDA 侧走 `CUDA_VISIBLE_DEVICES`（§6.6.1）。
+  - NVML：`nvmlInit(_v2/WithFlags)`、`nvmlDeviceGetMemoryInfo(_v2)`、`nvmlDeviceGet*RunningProcesses(_v2/_v3)`、
+    以及设备可见性族 `nvmlDeviceGetCount(_v2)`/`GetHandleByIndex(_v2)`/`GetHandleByUUID`/`GetHandleByPciBusId(_v2)`/
+    `GetHandleBySerial`/`GetIndex`（§6.6.2）。
   - `dlsym` 拦截器（**必须保留**，nvml 路径依赖，见上表）。
 - **裁剪掉（Phase 1 不需要，减少影响面）**：`cuLaunchKernel*` 系列（核心限速，Phase 2）、利用率 watcher、
   UVA 超卖/`vmem` ledger（约束禁用）、`sm_node` 共享桶、`cuGetProcAddress_v2` 路由（lupine-server 不调用）、
@@ -416,9 +418,9 @@ GPU 节点真实驱动
 
 **需要补充的边界（评审新增）**：
 
-1. **设备隔离必须做 `cuDeviceGetCount`+`cuDeviceGet` 重映射**：客户端设备表由这两个 server RPC 枚举而来
-   （`routing.cpp:217-277`）。库 hook 二者、按 `config/vgpu.config` `devices[].uuid` 回落到物理序号返回，客户端就只看到
-   允许设备，且虚拟序号 i = 允许设备顺序 i（与 §6.6 一致）。**这是"每个设备配置匹配"的前提，不能省。**
+1. **设备隔离（v0.4 定案，与本条原文不同）**：CUDA 侧**不 hook** `cuDeviceGetCount`/`cuDeviceGet`，改由 provider
+   `setenv CUDA_VISIBLE_DEVICES=<会话设备 UUID 列表>` 让驱动裁剪并重排；NVML 侧因不受该 env 约束，必须 hook
+   枚举族。两侧共用同一排序函数保证序号一致。详见 §6.6。**这是"每个设备配置匹配"的前提，不能省。**
 2. **session 令牌必须是控制面签发**，DRA Allocate 注入的 `LUPINE_SESSION` 不是裸 pod UID（防容器自改冒用，
    §6.2.1）；同时 provider 对 session id **消毒**（`[A-Za-z0-9_.-]`，防路径穿越）。
 3. **agent 落盘 `<session>/config/vgpu.config` 的时机与通道**：DRA 分配在 worker 节点（kubelet 权威），GPU 节点 agent
@@ -464,14 +466,22 @@ lupine 客户端跑 `mem_occupy_tool 0 3000`：分配 3000MB **成功**（无 OO
 这样设备 0 才是远程 → `cuMemAlloc_v2` 作为 RPC 到达 server 子进程 → `_cuMemAlloc` 预算判定 → 3000MB>2GB → OOM。
 **所有远程验收测试必须满足其一，否则远程路径不被执行、结果无意义。**
 
-**关键修正 1（fork 安全补遗，方案 C 的阻塞项）**：
-- `load_controller_configuration`（`loader.c:2856`）的守卫是 **`if (g_vgpu_config == NULL)`**；
-  `loader_child_after_fork`（`loader.c:2994`）只重置 once-guard、**不重置 `g_vgpu_config`**。
-- 子进程 fork 后继承父进程已加载的 `g_vgpu_config` 指针 → 即使 provider 在子进程设了 `VGPU_CONFIG_SESSION_PATH`，
-  `load_controller_configuration` 也因 `g_vgpu_config != NULL` **跳过** → **per-session 配置不会生效**，
-  所有容器的子进程都用父进程那份配置 → 多容器隔离失效。
-- **修正**：`loader_child_after_fork` 必须把 `g_vgpu_config` 置 `NULL`（或改守卫，使其在
-  `VGPU_CONFIG_SESSION_PATH`/PID 变化时强制重读）。此点直接决定 §6 会话目录能否落地。
+**关键修正 1（fork 安全，v0.4 更正：不是阻塞项，但必须做）**：
+- 机制属实：`load_controller_configuration` 的守卫是 **`if (g_vgpu_config == NULL)`**，而
+  `loader_child_after_fork` 原先只重置 once-guard、不重置 `g_vgpu_config`。若父进程已加载配置，子进程会继承它并
+  跳过重读 → per-session 配置不生效。
+- **但 v0.3.3 称其为"阻塞项"是不准确的**（v0.4 复核 lupine 源码）：`server.cpp` 的 `main()` 只做
+  socket/bind/listen/fork，全文**没有任何 `dlsym`/`dlopen`/`cu*`/`nvml*` 调用**，`x-lupine-cuda-version` 是编译期
+  常量（`h2.cpp:421-426`）。父进程从不触发 `load_necessary_data()`，fork 时 `g_vgpu_config` 恒为 NULL，
+  子进程本就会各自加载。**当前不会失效。**
+- **仍然必须修**，因为它守的失效模式恶劣且静默：dlsym 拦截器在 `cu` 分支里会调 `load_necessary_data()`
+  （`loader.c:2192`），父进程只要因任何原因解析一次 `cu*` 符号就会加载配置；而此时没有
+  `VGPU_CONFIG_SESSION_PATH`，会回退 `init_g_vgpu_config_by_env()` —— 那条路径把**所有设备 `activate = 1`**
+  并写盘，于是所有子进程继承一份 permissive 配置 → **静默 fail-open**。这依赖的是 lupine 的实现细节，不是我们能
+  控制的契约。
+- **已实现**：`loader_child_after_fork` 置 `g_vgpu_config = NULL` + `session_paths_reset()`；并且 **§4.3.2 的
+  fail-closed 不只校验"配置存在"，而是校验"配置确实来自会话目录"**（`session_remote_mode() && !session_enabled()`
+  即拒绝），这样即使上面那行漏掉也不会 fail-open。
 
 **关键修正 2（HOST 模式记账口径）**：实测是 `compatibility_mode=0`（HOST），`accumulate_used_memory` 求全机
 进程总和（`cuda_hook.c:2398-2403`）。方案 C 的子进程记账必须用 **SESSION 模式**（按会话进程表过滤，§6.5），
@@ -611,8 +621,8 @@ const lupine_checkpoint_provider_v1 *lupinecr_get_lupine_provider_v1(void) {
 - 时序：fork → atfork（`loader_child_after_fork` 重置 once-guard/`g_vgpu_config`）→ `load_provider()`（dlopen 去重 +
   `start()`）→ http2 init → `restore(session)` setenv `VGPU_CONFIG_SESSION_PATH` + 注册 pid 进 `pids.config` →
   首个 RPC → 库 `load_necessary_data` 按 `VGPU_CONFIG_SESSION_PATH` 读配置、按 `pids.config` 做 SESSION 记账。✓
-- 裁剪后的 `library-remote` 导出面 = 内存 hook 族 + `cuCtxGetDevice` + `cuDeviceGetCount/Get` + nvml 内存/进程表
-  hook + `dlsym` + **`lupinecr_get_lupine_provider_v1`**。
+- 裁剪后的 `library-remote` 导出面 = 内存 hook 族 + `cuCtxGetDevice` + nvml 内存/进程表/设备可见性 hook +
+  `dlsym` + **`lupinecr_get_lupine_provider_v1`**。
 
 **部署（GPU 节点 server 启动 env）**：
 ```
@@ -821,21 +831,57 @@ GPU 节点（lupine-server 所在）
 - **共享区 per-session 作用域**：`<session>/.vmem_node` 替代 `/tmp/.vmem_node`、`<session>/.vgpu_lock` 替代全局
   lock，`sm_util.config` 走 `<base>/watcher/`（共享）——避免跨租户串扰（Phase 1 禁超卖，ledger 仅预留）。
 
-### 6.6 设备级访问控制 + 序号重映射（"每个设备配置匹配"的必要前提）
+### 6.6 设备级访问控制 + 序号重映射（"每个设备配置匹配"的必要前提）（v0.4 重写，已实现）
 
 客户端经 lupine 默认可见 server **全部设备**；若不限制，客户端可用未分配 GPU，且序号错位导致 UUID 匹配失败。
-两层一起做：
+**CUDA 与 NVML 两条路径的机制不同，必须分别处理。**
 
-- **allowlist（限制可用设备集合）**：
-  - (a) **lupine-server 补丁**：子进程内过滤 `cuDeviceGetCount`/`cuDeviceGet`，只返回本 session 允许的设备
-    （隔离边界在服务端，推荐）。
-  - (b) **库 SESSION 模式 hook `cuDeviceGetCount`/`cuDeviceGet`**：当前 `cuda_hooks_entry`（`cuda_hook.c:517`）
-    未 hook 这两个函数（本地模式靠容器运行时 `NVIDIA_VISIBLE_DEVICES` 裁剪），远程需新增；按 `config/vgpu.config`
-    `devices[].uuid` 回落到物理序号返回。
-- **序号重映射**：容器看到的序号 = 允许设备顺序；`cuDeviceGet(i)` 返回**物理序号**，后续按物理序号执行。
+#### 6.6.1 CUDA 路径：`CUDA_VISIBLE_DEVICES`（不 hook `cuDeviceGetCount`/`cuDeviceGet`）
 
-**方案 B 侧同理**：adapter 必须按配额裁剪设备可见性（复用 `MANAGER_VISIBLE_DEVICES` 设备索引重映射，
-`loader.c:2376-2492`），否则同一漏洞。
+provider 的 `restore()` 在 setenv 会话路径后，自行 mmap 会话配额，按 `devices[].uuid` 生成
+`setenv("CUDA_VISIBLE_DEVICES", "<uuid1>,<uuid2>,...")`，由**驱动自己**完成裁剪与重映射。
+
+成立条件（均已核实）：
+- 驱动在 `cuInit` 时读取该 env，而 `restore()` 在首个 RPC（恒为 `cuInit`）之前调用；
+- lupine-server 父进程全程不碰 CUDA（`server.cpp` 无 `cuInit`/`dlsym`/`cu*`；`x-lupine-cuda-version` 是编译期
+  常量 `LUPINE_CUDA_VERSION`，`h2.cpp:421-426`），故 fork 时驱动未初始化；
+- provider 读配额走 `mmap_file_to_config_path`，**不触发 `load_necessary_data`**，注入前不加载任何 CUDA 库。
+
+**优于自研 hook 的地方**：客户端设备表本就由 `cuDeviceGetCount`/`cuDeviceGet` 两个 RPC 枚举
+（`routing.cpp:217-277`），驱动裁剪后客户端天然只看到允许设备且已重排为 0..n-1，链路上没有我们的 hook。
+用 UUID 而非索引，因为配置以 UUID 命名设备，且 PCI 序在重启后不稳定。
+
+**已知取舍（本阶段接受）**：CUDA 对 `CUDA_VISIBLE_DEVICES` 中的**无效条目是静默截断**——从该条目起后续设备全部
+不可见，且不报错。因此**假定 agent 写入的 UUID 均合法有效**；配置陈旧时的表现是"容器看到的卡变少"而非报错，
+排查设备数量异常时应先查这里。不做存在性校验是刻意的：校验意味着要在此处初始化 NVML，而这里是**唯一不能碰驱动**
+的位置。
+
+#### 6.6.2 NVML 路径：必须 hook（`CUDA_VISIBLE_DEVICES` 对 NVML 无效）
+
+NVML **不受 `CUDA_VISIBLE_DEVICES` 约束**，永远枚举全部物理设备。不处理的话，远程容器内 `nvidia-smi` 会列出
+GPU 节点上所有卡，并能读到其他租户的显存占用。lupine-server 只转发 5 个枚举类 NVML API
+（`codegen/gen_nvml_server.inc`），对应 hook 如下（`library-remote/src/nvml_hook.c`，仅在会话模式生效）：
+
+| hook 符号 | 语义 |
+|---|---|
+| `nvmlDeviceGetCount` / `_v2` | 返回 allowlist 数量 |
+| `nvmlDeviceGetHandleByIndex` / `_v2` | 虚拟序号 → 允许设备的物理句柄 |
+| `nvmlDeviceGetHandleByUUID` | 调真函数后校验结果在 allowlist 内，否则 `NVML_ERROR_NOT_FOUND` |
+| `nvmlDeviceGetHandleByPciBusId` / `_v2` | 同上 |
+| `nvmlDeviceGetHandleBySerial` | 同上（lupine 当前不转发，为防止 allowlist 依赖 lupine 的 RPC 暴露面而一并加固） |
+| `nvmlDeviceGetIndex` | 返回**虚拟序号**，与 GetCount/GetHandleByIndex 自洽 |
+
+要点：
+- 库自身的枚举走 `NVML_INTERNAL_CALL`/`nvml_library_entry`（真驱动函数），**不会递归进自己的 hook**
+  （`load_nvml_libraries` 用 `real_dlsym` 填表，`loader.c:1137`）。
+- `nvmlDeviceGetIndex` 在 lupine 客户端是本地伪造的（`nvml_client.cpp:852-870`，不发 RPC），服务端 handler 对
+  客户端等同死代码；仍然 hook，是为了两侧语义一致——调用方拿虚拟序号做判断时不会因为服务端返回物理序号而错乱。
+- **不变量**：CUDA 虚拟序号 i 与 NVML 虚拟序号 i 必须是同一张卡。两侧共用唯一的排序函数
+  `config_allowed_devices()`（`src/config_io.c`），按 `activate` 非零的 host_index 升序压缩（`activate` 允许稀疏）。
+
+#### 6.6.3 方案 B 侧
+
+adapter 必须按配额裁剪设备可见性（复用 `MANAGER_VISIBLE_DEVICES` 设备索引重映射），否则同一漏洞。
 
 ### 6.7 与方案 B 的对照
 
@@ -930,9 +976,19 @@ B 阶段积累的 lupine 补丁经验（session/RPC 接入点）与 Go 侧配额
 - [ ] 部署：进程级 `LD_PRELOAD libvgpu-remote.so` + `VGPU_REMOTE_MODE=1` +
       `LUPINE_CHECKPOINT_LIBRARY=.../libvgpu-remote.so`；provider `restore()` 注入 `VGPU_CONFIG_SESSION_PATH` +
       注册 pid 进 `<session>/pids.config`、`stop()` 清理（§4.3.3，已落地 library-remote）。
-- [ ] library 小改：`SESSION` 兼容模式（按 `VGPU_CONFIG_SESSION_PATH` 定位 `pids.config` 过滤记账/利用率）；
-      `VGPU_CONFIG_SESSION_PATH` 派生 `config/vgpu.config`/`.vgpu_lock`/`.vmem_node`；`loader_child_after_fork`
-      置 `g_vgpu_config=NULL`；可选 hook `cuDeviceGetCount`/`cuDeviceGet` 做设备重映射。
+- [x] 会话路径模块（`include/session.h` + `src/session.c`）：10 类路径由 `VGPU_CONFIG_SESSION_PATH` 运行时派生，
+      env 只读一次；`sm_util.config` 挂 `<base>/watcher/`（跨会话共享）；未设 env 时逐字回退旧路径。
+      实现手法是把 `hook.h` 的路径宏重定向为 `session_path()` 调用，68 处调用点零改动。
+- [x] `loader_child_after_fork` 置 `g_vgpu_config=NULL` + `session_paths_reset()`（§4.3.2 关键修正 1）。
+- [x] `SESSION_COMPATIBILITY_MODE = 300`：记账（`accumulate_used_memory`）与利用率过滤两处按
+      `<session>/pids.config` 归属，复用现成的 `check_device_pid_in_ordered_container_pids`。
+- [x] fail-closed：远程模式下"无会话目录"或"无可读配额"直接拒绝服务，**不回退 env 构造配置**（那条路径会把所有
+      设备 `activate=1`，是静默 fail-open）。
+- [x] 设备隔离：provider `setenv CUDA_VISIBLE_DEVICES` + NVML 可见性 hook 族（§6.6）。
+- [x] provider `restore()`/`stop()` 更新 `pids.config` 时顺带 `pid_exist()` 剔除陈旧 PID（SIGKILL 下 `stop()` 不执行）。
+- [x] 工具与回归：`make session-cli`（`vgpu-session-config` 手写会话配额）、`make test-nogpu`（路径派生/回退/
+      配置区往返/设备序表）、`make check*`（复用 `library/hack` 的检查器，加 `--root` 参数双树共用）。
+- [ ] 真机验收：GPU 节点起 server，无 GPU 客户端（或 `LUPINE_DISABLE_LOCAL=1`）跑通内存闭环。
 - [ ] Go 侧：GPU 节点 agent 维护 session→配额（复用 `device_t`/`WriteVGPUConfigFile` 落盘
       `<base>/<session>/config/vgpu.config`），scheduler 分配时登记。
 - [ ] 端到端：同 B 的验收标准，且**验证多进程容器容器级记账**（S5），客户端为**普通 lupine client**（无适配层）。

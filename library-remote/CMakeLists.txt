@@ -51,6 +51,8 @@ add_library(vgpu-remote SHARED
     include/metrics.h
     include/vdpau/vdpau.h
     include/checkpoint_provider.h
+    include/session.h
+    src/session.c
     src/cuda_originals.c
     src/nvml_originals.c
     src/cuda_hook.c
@@ -63,7 +65,7 @@ add_library(vgpu-remote SHARED
 target_link_libraries(vgpu-remote ${STATIC_C_LIBRARIES})
 target_compile_options(vgpu-remote PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>)
 
-set(VGPU_EXPORTS_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/deploy/libvgpu-control.exports.ld)
+set(VGPU_EXPORTS_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/deploy/libvgpu-remote.exports.ld)
 target_link_options(vgpu-remote PRIVATE "LINKER:--version-script=${VGPU_EXPORTS_SCRIPT}")
 
 # Re-link if the version script changes — CMake does not infer this dependency from -Wl,--version-script.

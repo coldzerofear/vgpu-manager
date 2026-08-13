@@ -4,10 +4,11 @@ A remote vGPU adapter for implementing network-based remote vGPU hard isolation
 
 ## Project objectives:
 
-- [ ] Suitable for use with Lupine Server
-- [ ] Remote container GPU device quota configuration discovery
-- [ ] Remote container device PID list discovery/maintenance
-- [ ] Remote container level memory strict isolation
+- [x] Suitable for use with Lupine Server
+- [x] Remote container GPU device quota configuration discovery
+- [x] Remote container device PID list discovery/maintenance
+- [x] Remote container device visibility isolation
+- [ ] Remote container level memory strict isolation (implemented, pending on-GPU validation)
 - [ ] Remote container level SM core strict isolation
 - [ ] Container level multi process shared token bucket
 
@@ -18,6 +19,43 @@ A remote vGPU adapter for implementing network-based remote vGPU hard isolation
 ```
 ./build.sh
 ```
+
+## Development targets
+
+```
+make check          # static checks (no GPU, no CUDA toolkit)
+make check-exports  # export-surface check on the built .so
+make test-nogpu     # session path derivation + config region round-trip
+make session-cli    # build vgpu-session-config
+```
+
+`vgpu-session-config` writes a session quota region the way the GPU-node agent
+would, so the library can be exercised without Kubernetes:
+
+```
+vgpu-session-config --session <LUPINE_SESSION> \
+    --device GPU-xxxx,mem=8192,core=50 \
+    --device GPU-yyyy,mem=4096
+```
+
+## Deployment (lupine-server, GPU node)
+
+```
+LD_PRELOAD=/opt/vgpu/lib/libvgpu-remote.so \
+VGPU_REMOTE_MODE=1 \
+LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-remote.so \
+VGPU_CONFIG_SESSION_BASE=/etc/vgpu-manager/remote-sessions \
+./lupine_driver_server
+```
+
+The same `.so` acts as both the LD_PRELOAD hook library and lupine's checkpoint
+provider. `LUPINE_CHECKPOINT_LIBRARY` must be set explicitly since the artifact
+is not named `liblupinecr.so`. In remote mode a connection without a valid
+session quota is refused rather than served unrestricted.
+
+> Remote testing must use a GPU-less client or `LUPINE_DISABLE_LOCAL=1`.
+> Otherwise lupine-client routes device 0 to a local GPU and the server-side
+> library never sees the allocation.
 
 ## Environment variable
 
@@ -33,7 +71,10 @@ A remote vGPU adapter for implementing network-based remote vGPU hard isolation
 * VMEMORY_NODE_ENABLED: Enable virtual memory node tracing
 * CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: Accelerate delta utilization rate climb speed - default 64
 * CUDA_SM_SHARED_BUCKET: Enable SM shared token bucket
-* VGPU_CONFIG_SESSION_PATH: Define the limit configuration path for the session
+* VGPU_CONFIG_SESSION_BASE: Directory holding session directories (default /etc/vgpu-manager/remote-sessions)
+* VGPU_REMOTE_MODE: Mark the process as serving remote sessions only (fail-closed without a session quota)
+* VGPU_CONFIG_SESSION_PATH: This session's directory. Set by the checkpoint provider per connection, not by hand;
+  every per-session path (quota, pids.config, .vgpu_lock, .vmem_node, .sm_node) is derived from it
 
 ## Log level
 

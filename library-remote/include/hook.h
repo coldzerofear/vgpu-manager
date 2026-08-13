@@ -59,6 +59,7 @@ extern "C" {
 #include "list.h"
 #include "nvml-subset.h"
 #include "cuda-subset.h"
+#include "session.h"
 
 /**
  * vGPU manager base path
@@ -68,7 +69,7 @@ extern "C" {
 /**
  * Controller configuration base path
  */
-#define VGPU_CONFIG_PATH (VGPU_MANAGER_PATH "/config")
+#define VGPU_CONFIG_PATH_LOCAL (VGPU_MANAGER_PATH "/config")
 
 /**
  * Controller configuration file name
@@ -77,7 +78,7 @@ extern "C" {
 /**
  * Controller configuration file path
  */
-#define CONTROLLER_CONFIG_FILE_PATH (VGPU_MANAGER_PATH "/config/" CONTROLLER_CONFIG_FILE_NAME)
+#define CONTROLLER_CONFIG_FILE_PATH_LOCAL (VGPU_MANAGER_PATH "/config/" CONTROLLER_CONFIG_FILE_NAME)
 
 /**
  * Container pids configuration file name
@@ -86,7 +87,7 @@ extern "C" {
 /**
  * Container pids configuration file path
  */
-#define CONTAINER_PIDS_CONFIG_FILE_PATH (VGPU_MANAGER_PATH "/config/" CONTAINER_PIDS_CONFIG_FILE_NAME)
+#define CONTAINER_PIDS_CONFIG_FILE_PATH_LOCAL (VGPU_MANAGER_PATH "/config/" CONTAINER_PIDS_CONFIG_FILE_NAME)
 
 /**
  * Controller sm utilization watcher file name
@@ -95,7 +96,7 @@ extern "C" {
 /**
  * Controller sm utilization watcher file path
  */
-#define CONTROLLER_SM_UTIL_FILE_PATH (VGPU_MANAGER_PATH "/watcher/" CONTROLLER_SM_UTIL_FILE_NAME)
+#define CONTROLLER_SM_UTIL_FILE_PATH_LOCAL (VGPU_MANAGER_PATH "/watcher/" CONTROLLER_SM_UTIL_FILE_NAME)
 
 /**
  * Controller driver file name
@@ -118,13 +119,25 @@ extern "C" {
 
 #define VGPU_LOCK_DIR "/.vgpu_lock"
 
-#define VGPU_LOCK_PATH (TMP_DIR VGPU_LOCK_DIR)
+#define VGPU_LOCK_PATH_LOCAL (TMP_DIR VGPU_LOCK_DIR)
 
 #define VMEMORY_NODE_DIR "/.vmem_node"
 
-#define VMEMORY_NODE_PATH (TMP_DIR VMEMORY_NODE_DIR)
+#define VMEMORY_NODE_PATH_LOCAL (TMP_DIR VMEMORY_NODE_DIR)
 
-#define VMEMORY_NODE_FILE_PATH (TMP_DIR VMEMORY_NODE_DIR "/vmem_node.config")
+#define VMEMORY_NODE_FILE_PATH_LOCAL (TMP_DIR VMEMORY_NODE_DIR "/vmem_node.config")
+
+/* Every path above is the LOCAL-mode location. What the code actually uses is
+ * the session-aware form below: inside a lupine-server child it resolves under
+ * that connection's session directory, everywhere else it is the local path
+ * verbatim. See session.h for the layout and why this scoping exists. */
+#define VGPU_CONFIG_PATH                session_path(SESSION_CONFIG_DIR)
+#define CONTROLLER_CONFIG_FILE_PATH     session_path(SESSION_CONFIG)
+#define CONTAINER_PIDS_CONFIG_FILE_PATH session_path(SESSION_PIDS)
+#define CONTROLLER_SM_UTIL_FILE_PATH    session_path(SESSION_SM_UTIL)
+#define VGPU_LOCK_PATH                  session_path(SESSION_LOCK_DIR)
+#define VMEMORY_NODE_PATH               session_path(SESSION_VMEM_DIR)
+#define VMEMORY_NODE_FILE_PATH          session_path(SESSION_VMEM_FILE)
 
 /**
  * Proc file path for driver version
@@ -290,6 +303,20 @@ _Static_assert(sizeof(resource_data_t) <= CONFIG_FILE_SIZE,
  * memory_limit=0), which every caller already treats as "no limit". Use this
  * for any decision that reads TWO OR MORE co-varying fields together. */
 device_t get_device_snapshot(int host_index);
+
+/* Same, against a config the caller mapped itself -- the checkpoint provider
+ * reads the session quota before the library is initialized. */
+device_t get_device_snapshot_of(const resource_data_t *cfg, int host_index);
+
+/* vgpu.config region I/O (src/config_io.c). Both target
+ * CONTROLLER_CONFIG_FILE_PATH, so they follow the session in remote mode.
+ * Return 0 on success. */
+int mmap_file_to_config_path(resource_data_t **data);
+int write_file_to_config_path(resource_data_t *data);
+
+/* Host indexes of activated devices, ascending; returns the count. The single
+ * source of the container's device ordering -- see the definition. */
+int config_allowed_devices(const resource_data_t *cfg, int *host_indexes, int max);
 
 extern resource_data_t *g_vgpu_config;
 
@@ -485,8 +512,8 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
  * /tmp/.vgpu_lock and /tmp/.vmem_node, because the workload's own /tmp may be
  * shadowed, read-only, or swept. */
 #define SM_NODE_DIR       "/.sm_node"
-#define SM_NODE_PATH      (TMP_DIR SM_NODE_DIR)
-#define SM_NODE_FILE_PATH (TMP_DIR SM_NODE_DIR "/sm_node.config")
+#define SM_NODE_PATH_LOCAL      (TMP_DIR SM_NODE_DIR)
+#define SM_NODE_FILE_PATH_LOCAL (TMP_DIR SM_NODE_DIR "/sm_node.config")
 
 /* Sampling-ownership lock. A separate file from the region, on purpose:
  * the init lock in map_sm_node_region is taken and dropped inside one
@@ -497,7 +524,12 @@ _Static_assert(offsetof(device_vmemory_t, layout_version) == 4,
  * silently. Must also never be deleted while containers run: a new inode
  * from unlink+recreate wouldn't be mutually exclusive with the old one's
  * locks, so pre-start cleanup removes sm_node.config but not this file. */
-#define SM_NODE_LOCK_PATH (TMP_DIR SM_NODE_DIR "/sm_node.lock")
+#define SM_NODE_LOCK_PATH_LOCAL (TMP_DIR SM_NODE_DIR "/sm_node.lock")
+
+/* Session-aware forms; see the block next to VMEMORY_NODE_FILE_PATH. */
+#define SM_NODE_PATH      session_path(SESSION_SM_DIR)
+#define SM_NODE_FILE_PATH session_path(SESSION_SM_FILE)
+#define SM_NODE_LOCK_PATH session_path(SESSION_SM_LOCK)
 
 /* The file size is a PERMANENT constant, deliberately decoupled from
  * sizeof(sm_node_region_t): a later version may grow the struct without
@@ -645,7 +677,17 @@ typedef enum VGPU_COMPATIBILITY_MODE_enum {
   CGROUPV1_COMPATIBILITY_MODE    = 1,
   CGROUPV2_COMPATIBILITY_MODE    = 2,
   OPEN_KERNEL_COMPATIBILITY_MODE = 100,
-  CLIENT_COMPATIBILITY_MODE      = 200
+  CLIENT_COMPATIBILITY_MODE      = 200,
+  /* Remote mode. A lupine-server child is one process of a container, not the
+   * container, so attribution is "pid is in this session's pids.config" -- the
+   * provider registers every child of the session there. Kept distinct from
+   * CLIENT (which reads the same kind of file) because CLIENT also implies the
+   * manager-registration handshake, which has no meaning on a GPU node.
+   *
+   * The dispatch chain tests (mode & X) == X, so the value must not be a
+   * subset of another mode's bits, nor they of it: 300 & 200 = 8, 300 & 100 =
+   * 36, 200 & 300 = 8, 100 & 300 = 4 -- no false match either way. */
+  SESSION_COMPATIBILITY_MODE     = 300
 } VGPU_COMPATIBILITY_MODE;
 
 typedef void (*atomic_fn_ptr)(int, void *);

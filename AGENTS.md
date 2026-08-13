@@ -83,8 +83,12 @@
     经这两个 RPC 枚举，`routing.cpp:217-277`）。
   - nvml 路径经 `nvml_symbol<>()` dlsym 句柄查询（`nvml_server.cpp:46-56`）→ **库必须保留 dlsym 拦截器**。
   - per-session 配置 fork 安全依赖 `loader_child_after_fork`（`loader.c:2994`）重置 once-guard，**不能裁剪**。
-- **`library-remote` 裁剪**：Phase 1 只导出内存 hook 族 + `cuCtxGetDevice` + `cuDeviceGetCount/Get` + nvml 内存/
-  进程表 hook + `dlsym`；裁剪 `cuLaunchKernel*`/利用率 watcher/超卖/ledger/sm_node/`cuGetProcAddress` 等。
+- **`library-remote` 裁剪**：Phase 1 只导出内存 hook 族 + `cuCtxGetDevice` + nvml 内存/进程表/**设备可见性** hook
+  + `dlsym`；裁剪 `cuLaunchKernel*`/利用率 watcher/超卖/ledger/sm_node/`cuGetProcAddress` 等。
+- **设备隔离不 hook `cuDeviceGetCount/Get`**（v0.4 定案）：CUDA 侧由 provider `setenv CUDA_VISIBLE_DEVICES=<会话
+  设备 UUID 列表>`，驱动自己裁剪并重排为 0..n-1；NVML **不受该 env 约束**，另 hook `nvmlDeviceGetCount(_v2)`/
+  `GetHandleByIndex(_v2)`/`GetHandleByUUID`/`GetHandleByPciBusId(_v2)`/`GetHandleBySerial`/`GetIndex`。
+  两侧共用 `config_allowed_devices()` 排序，保证 "cuda:i 就是 nvml i"。详见设计 §6.6。
 - 边界见设计 §4.3.1 的 10 条（令牌签发、agent 落盘通道、fail-closed、env 时机、无 session 客户端等）。
 - **C-2 注入方式（v0.3.4，推荐）**：不改 lupine 源码——provider 内置于 `libvgpu-remote.so`（§4.3.3.1），在其
   `restore(connection_id)`（lupine 在每个连接子进程首个 RPC 前调用，`connection_id`=`LUPINE_SESSION`）里
@@ -101,9 +105,10 @@
 - **客户端本地路由陷阱**：client/server 同机测试时 lupine-client 把设备 0 路由到本地 GPU（`routing.cpp:226-244`
   本地设备优先），`cuMemAlloc` 在客户端进程内用真实驱动执行，服务端 library 收不到调用 → 分配不受限，但
   nvidia-smi（nvml 总是走 server）显示限额 → 假象。**远程验收测试必须用无 GPU 客户端或 `LUPINE_DISABLE_LOCAL=1`。**
-- **fork 安全补遗（方案 C 阻塞项）**：`load_controller_configuration` 守卫 `if (g_vgpu_config == NULL)`
-  （`loader.c:2856`），而 `loader_child_after_fork`（`loader.c:2994`）不重置 `g_vgpu_config` → 子进程继承父配置，
-  per-session 配置不生效。**必须在 atfork 里置 `g_vgpu_config = NULL` 或改守卫**（设计 §4.3.2）。
+- **fork 安全（v0.4 更正：不是阻塞项，但已修）**：`load_controller_configuration` 守卫 `if (g_vgpu_config == NULL)`，
+  atfork 原先不重置它。但实测 lupine 父进程从不碰 CUDA/dlsym（`server.cpp` 全文无相关调用，cuda 版本头是编译期
+  常量），fork 时该指针恒为 NULL，所以当前不会失效。仍已在 atfork 置 NULL —— 它守的是"父进程一旦解析过 `cu*`
+  就回退 env 构造出 `activate=1` 的 permissive 配置"这条**静默 fail-open**路径（设计 §4.3.2）。
 - **记账口径**：子进程必须用 SESSION 模式（会话进程表过滤，§6.5），不能是 HOST 全机求和（`cuda_hook.c:2398`）。
 
 ## 3. 关键决策与事实速查（含文件:行号）
