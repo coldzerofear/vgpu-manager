@@ -1,3 +1,19 @@
+/*
+Copyright 2025-2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package registry
 
 import (
@@ -557,7 +573,9 @@ func (s *DeviceRegistryServerImpl) persistPids(configDir string, pids []int) err
 	if len(pids) == 0 {
 		return fmt.Errorf("refusing to write an empty pids file at %s", filepath.Join(configDir, PidsConfig))
 	}
-	_ = util.EnsureDir(configDir, 0o777)
+	if err := util.EnsureDir(configDir, 0o777); err != nil {
+		klog.V(2).ErrorS(err, "Failed to prepare directory", "directory", configDir)
+	}
 	var buf bytes.Buffer
 	sort.Ints(pids)
 	for _, pid := range pids {

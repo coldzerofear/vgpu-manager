@@ -1,18 +1,18 @@
-/**
-# Copyright (c) NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-**/
+/*
+Copyright The Kubernetes Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package nvidia
 
@@ -24,42 +24,79 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTryResolveLibrary(t *testing.T) {
-	const libraryName = "libnvidia-ml.so.1"
+func TestFindFile(t *testing.T) {
+	// Mirrors the search paths used by getDriverLibraryPath.
+	librarySearchPaths := []string{
+		"/usr/lib64",
+		"/usr/lib/x86_64-linux-gnu",
+		"/usr/lib/aarch64-linux-gnu",
+		"/lib64",
+		"/lib/x86_64-linux-gnu",
+		"/lib/aarch64-linux-gnu",
+	}
+	// Mirrors the search paths used by getNvidiaSMIPath.
+	binarySearchPaths := []string{
+		"/opt/bin",
+		"/usr/bin",
+		"/usr/sbin",
+		"/bin",
+		"/sbin",
+	}
 
-	testCases := []struct {
-		description string
-		// dirs and files are created relative to the test root before resolving.
-		dirs  []string
+	tests := map[string]struct {
+		// name is the file findFile searches for.
+		name string
+		// searchIn are the folders searched in addition to the root.
+		searchIn []string
+		// dirs are created (relative to the test root) before searching.
+		dirs []string
+		// files are created (relative to the test root) before searching.
 		files []string
-		// expected is the resolved path relative to the test root, or "" if
-		// the input library name is expected to be returned as is.
+		// expected is the path (relative to the test root) findFile should
+		// return, or "" if an error is expected.
 		expected string
 	}{
-		{
-			description: "library in first search path",
-			files:       []string{"usr/lib64/" + libraryName},
-			expected:    "usr/lib64/" + libraryName,
+		"library in first search path": {
+			name:     "libnvidia-ml.so.1",
+			searchIn: librarySearchPaths,
+			files:    []string{"usr/lib64/libnvidia-ml.so.1"},
+			expected: "usr/lib64/libnvidia-ml.so.1",
 		},
-		{
-			description: "directory in earlier search path does not shadow library",
-			dirs:        []string{"usr/lib64/" + libraryName},
-			files:       []string{"usr/lib/x86_64-linux-gnu/" + libraryName},
-			expected:    "usr/lib/x86_64-linux-gnu/" + libraryName,
+		"directory in earlier search path does not shadow library": {
+			name:     "libnvidia-ml.so.1",
+			searchIn: librarySearchPaths,
+			dirs:     []string{"usr/lib64/libnvidia-ml.so.1"},
+			files:    []string{"usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1"},
+			expected: "usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
 		},
-		{
-			description: "only directories found",
-			dirs:        []string{"usr/lib64/" + libraryName},
-			expected:    "",
+		"only directories found": {
+			name:     "libnvidia-ml.so.1",
+			searchIn: librarySearchPaths,
+			dirs:     []string{"usr/lib64/libnvidia-ml.so.1"},
+			expected: "",
 		},
-		{
-			description: "library not found",
-			expected:    "",
+		"library not found": {
+			name:     "libnvidia-ml.so.1",
+			searchIn: librarySearchPaths,
+			expected: "",
+		},
+		"nvidia-smi in binary search path": {
+			name:     "nvidia-smi",
+			searchIn: binarySearchPaths,
+			files:    []string{"usr/bin/nvidia-smi"},
+			expected: "usr/bin/nvidia-smi",
+		},
+		"directory in earlier search path does not shadow nvidia-smi": {
+			name:     "nvidia-smi",
+			searchIn: binarySearchPaths,
+			dirs:     []string{"opt/bin/nvidia-smi"},
+			files:    []string{"usr/bin/nvidia-smi"},
+			expected: "usr/bin/nvidia-smi",
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.description, func(t *testing.T) {
+	for description, tc := range tests {
+		t.Run(description, func(t *testing.T) {
 			testRoot := t.TempDir()
 			for _, d := range tc.dirs {
 				require.NoError(t, os.MkdirAll(filepath.Join(testRoot, d), 0o755))
@@ -70,17 +107,18 @@ func TestTryResolveLibrary(t *testing.T) {
 				require.NoError(t, os.WriteFile(path, []byte{}, 0o644))
 			}
 
-			resolved, _ := RootPath(testRoot).GetDriverLibraryPath()
+			found, err := RootPath(testRoot).findFile(tc.name, tc.searchIn...)
 			if tc.expected == "" {
-				require.Equal(t, tc.expected, resolved)
+				require.Error(t, err)
 				return
 			}
+			require.NoError(t, err)
 
-			// t.TempDir may itself contain symlinks, so compare against the
-			// resolved expected path.
+			// t.TempDir may itself contain symlinks (e.g. on macOS), so
+			// compare against the resolved expected path.
 			expected, err := filepath.EvalSymlinks(filepath.Join(testRoot, tc.expected))
 			require.NoError(t, err)
-			require.Equal(t, expected, resolved)
+			require.Equal(t, expected, found)
 		})
 	}
 }

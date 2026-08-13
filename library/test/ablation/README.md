@@ -2,8 +2,7 @@
 
 A small measurement harness for vgpu-manager's algorithmic SM throttle work:
 **delta** (stock symmetric proportional) vs **aimd** (additive-increase /
-multiplicative-decrease, ported from
-[midokura/HAMi-core `ablation/orig-aimd-v5`](https://github.com/midokura/HAMi-core/tree/ablation/orig-aimd-v5)).
+multiplicative-decrease).
 See [docs/sm_controller_aimd.md](../../../docs/sm_controller_aimd.md) for the
 controller design and [docs/sm_core_limit_gap_throttle_design.md](../../../docs/sm_core_limit_gap_throttle_design.md)
 for the orthogonal GAP-path piece.
@@ -81,7 +80,7 @@ All passed via env to `run_ablation.sh` (which forwards to `collect.sh`):
 | Env | Default | Effect |
 |---|---|---|
 | `VGPU_SO` | (required) | absolute path to libvgpu-control.so |
-| `CUDA_CORE_LIMIT` | 30 | **vgpu-manager's** hard_core target percent (the library reads this name; HAMi-core's `CUDA_DEVICE_SM_LIMIT` is **not** recognized) |
+| `CUDA_CORE_LIMIT` | 30 | **vgpu-manager's** hard_core target percent (the library reads this exact env name) |
 | `ABLATION_DURATION_S` | 30 | wall time per variant |
 | `ABLATION_GPU_ID` | 0 | GPU index for sampling + UUID lookup |
 | `ABLATION_SAMPLE_MS` | 100 | nvidia-smi sample interval |
@@ -118,13 +117,13 @@ shell over `VARIANTS` and parse `compare.png`s.)
 
 ## A100 / H100 parameter starting point
 
-Midokura calibrated AIMD v5 on RTX 4080 (consumer, SM=76, 1536/SM). For
-datacenter GPUs the SM count and thread granularity are larger by ~1.4-1.7x,
-so the default `÷3` MD can over-cut. Starting points worth measuring:
+AIMD was calibrated on RTX 4080 (consumer, SM=76, 1536/SM). For datacenter
+GPUs the SM count and thread granularity are larger by ~1.4-1.7x, so the
+default `÷3` MD can over-cut. Starting points worth measuring:
 
 | GPU | `CUDA_SM_AIMD_MD_DIVISOR` | `CUDA_SM_AIMD_AI_BASE_DIV` | Why |
 |---|---|---|---|
-| RTX 4080 | 3 | 400 | Midokura defaults (validated) |
+| RTX 4080 | 3 | 400 | validated defaults |
 | A100 | 2 or 3 | 800 | larger SM grid → smaller AI step |
 | H100 | 2 | 800-1600 | as above, plus more aggressive MD softening |
 
@@ -165,7 +164,7 @@ MAE / P50 / P95 / P99 are computed over the surviving samples.
 ## Roadmap
 
 - **Multi-pod (k8s)** measurement: scale to N concurrent pods, verify each
-  variant's per-pod fairness; mirrors Midokura's `k3s_multi_collect.sh`.
+  variant's per-pod fairness.
 - **Auto-baseline regression**: store one set of numbers under `data/baseline/`,
   fail CI if a PR regresses MAE by more than a configurable threshold.
 - **Per-GPU profiles**: pre-set AIMD parameter recommendations under

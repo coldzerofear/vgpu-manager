@@ -14,10 +14,9 @@
  * stays out of .dynsym entirely. Hides ~80 internal helpers (formatUuid,
  * accumulate_used_memory, cleanup_vmem_nodes, etc.) that prior to this
  * script leaked into the dynamic symbol table and were available for
- * NVIDIA-ICD / loader-side global-symbol resolution to collide with —
- * the exact class of risk that drove HAMi-core PR #182's libvgpu_vk.so
- * split (a heavier remediation we deliberately do not need given this
- * tighter visibility discipline).
+ * NVIDIA-ICD / loader-side global-symbol resolution to collide with.
+ * This tighter visibility discipline avoids that risk without needing
+ * a heavier remediation like splitting the .so.
  *
  * Conventions:
  *   - cu[A-Z]*   matches every CUDA driver entry point we hook. The

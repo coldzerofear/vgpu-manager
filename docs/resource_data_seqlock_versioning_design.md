@@ -3,7 +3,7 @@
 > 状态：设计草案（未实施）
 > 目标读者：library（C）+ pkg/config/vgpu（Go）维护者
 > 基线：`main` @ `a2cce3d`
-> 关联：[sm_multiproc_shared_bucket_design.md](sm_multiproc_shared_bucket_design.md)（seq/CAS 与冻结头范式来源）、HAMi-core PR #238（原子读写共享限额字段的同类问题）
+> 关联：[sm_multiproc_shared_bucket_design.md](sm_multiproc_shared_bucket_design.md)（seq/CAS 与冻结头范式来源）
 
 ---
 

@@ -4,9 +4,8 @@ Each script does a single allocation + compute round trip through one AI
 framework, so that when run under `LD_PRELOAD=libvgpu-control.so` you get
 hook coverage on the framework's CUDA path.
 
-Ported as-is from HAMi-core/test/python. Framework dependencies are NOT
-installed by the library build; install whichever framework you need into
-the test environment separately.
+Framework dependencies are NOT installed by the library build; install
+whichever framework you need into the test environment separately.
 
 ## Running
 

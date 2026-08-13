@@ -1,25 +1,22 @@
 /*
  * Async memory-pool allocation smoke test.
  *
- * Mirrors HAMi-core/test/test_alloc_pool_async.c, added in HAMi-core commit
- * 9ce21cc ("Track cuMemAllocFromPoolAsync allocations and free untracked async
- * pointers", PR #217) as a reproducer for issue #93.
+ * Two bug classes this guards against:
  *
- * The two defects that commit fixed, and where vgpu-manager stands on each:
+ *   (1) cuMemAllocFromPoolAsync must not be a bare pass-through, or a
+ *       pool-explicit allocation would never count against the vGPU memory
+ *       limit. We hook it through prepare_memory_allocation() (cuda_hook.c),
+ *       so it is checked and accounted like every other allocation. Case
+ *       [C] locks that in.
  *
- *   (1) cuMemAllocFromPoolAsync was a bare pass-through, so a pool-explicit
- *       allocation never counted against the vGPU memory limit. We already hook
- *       it through prepare_memory_allocation() (cuda_hook.c), so it is checked
- *       and accounted like every other allocation. Case [C] locks that in.
- *
- *   (2) cuMemFreeAsync() -> remove_chunk_async() walked an allocated-chunk list
- *       and, for a pointer that list never saw, returned -1 without performing
- *       the real free: the -1 surfaced to the caller as an "unrecognized error
- *       code" and the device allocation leaked. vgpu-manager keeps no such
- *       list -- cuMemFreeAsync() always forwards to the driver first and only
- *       then reconciles its virtual-memory bookkeeping, where an unknown
- *       pointer is a silent no-op (loader.c, free_gpu_virt_memory). We are
- *       structurally immune, and cases [A]/[B] keep it that way.
+ *   (2) An allocator that tracks pointers in a private list can leak a
+ *       device allocation if cuMemFreeAsync() returns an error for a
+ *       pointer the list never saw, without ever performing the real free.
+ *       vgpu-manager keeps no such list -- cuMemFreeAsync() always forwards
+ *       to the driver first and only then reconciles its virtual-memory
+ *       bookkeeping, where an unknown pointer is a silent no-op (loader.c,
+ *       free_gpu_virt_memory). We are structurally immune, and cases
+ *       [A]/[B] keep it that way.
  *
  * Cases [D] and [E] cover a defect of the same family that is ours alone: the
  * oversold UVA fallback hands the caller a cuMemAllocManaged pointer that the
@@ -84,10 +81,10 @@ static int default_pool_async_test(CUstream stream) {
   return f == CUDA_SUCCESS ? 0 : 1;
 }
 
-/* [B] The HAMi #93 shape: allocate from an explicit pool, free it async.
- * A hook that tracks allocations in a private list must either register this
- * pointer or fall through to the real free; either way the caller must see
- * CUDA_SUCCESS and the memory must actually be released. */
+/* [B] Allocate from an explicit pool, free it async. A hook that tracks
+ * allocations in a private list must either register this pointer or fall
+ * through to the real free; either way the caller must see CUDA_SUCCESS
+ * and the memory must actually be released. */
 static int explicit_pool_async_test(CUdevice dev, CUstream stream) {
   CUmemoryPool pool;
   CHECK_DRV_API(create_device_pool(&pool, dev));
@@ -109,7 +106,7 @@ static int explicit_pool_async_test(CUdevice dev, CUstream stream) {
  * Ask for more than cuMemGetInfo() says is free and require a rejection. Under
  * LD_PRELOAD `free` is the limit-relative figure, so this exercises our OOM
  * check without ever committing the memory; unhooked, the driver rejects it on
- * its own. A pool allocation that bypassed the limiter -- HAMi defect (1) --
+ * its own. A pool allocation that bypassed the limiter (bug class (1) above)
  * would be served straight from physical memory and return CUDA_SUCCESS here. */
 static int explicit_pool_limit_test(CUdevice dev, CUstream stream) {
   size_t mem_free = 0, mem_total = 0;

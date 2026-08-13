@@ -1,22 +1,25 @@
 /*
- * Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+Copyright The Kubernetes Authors
+Copyright 2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package kubeletplugin
 
 import (
+	"slices"
+
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
@@ -189,12 +192,12 @@ func (g *PreparedDeviceGroup) GetDeviceNames() []DeviceName {
 }
 
 // UUIDs for full GPUs, MIG devices, and Vfio devices.
-//func (l PreparedDeviceList) UUIDs() []string {
-//	uuids := append(l.GpuUUIDs(), l.MigDeviceUUIDs()...)
-//	uuids = append(uuids, l.VfioDeviceUUIDs()...)
-//	slices.Sort(uuids)
-//	return uuids
-//}
+func (l PreparedDeviceList) UUIDs() []string {
+	uuids := append(l.GpuUUIDs(), l.MigDeviceUUIDs()...)
+	uuids = append(uuids, l.VfioDeviceUUIDs()...)
+	slices.Sort(uuids)
+	return uuids
+}
 
 // UUIDs for full GPUs, MIG devices, and Vfio devices.
 //func (g *PreparedDeviceGroup) UUIDs() []string {
@@ -222,56 +225,55 @@ func (l PreparedDeviceList) GpuUUIDs() []string {
 		uuids.Insert(device.VGpu.Info.UUID)
 	}
 	return uuids.List()
-
 }
 
-//func (g *PreparedDeviceGroup) GpuUUIDs() []string {
-//	return g.Devices.Gpus().UUIDs()
-//}
-//
-//func (d PreparedDevices) GpuUUIDs() []string {
-//	var uuids []string
-//	for _, group := range d {
-//		uuids = append(uuids, group.GpuUUIDs()...)
-//	}
-//	slices.Sort(uuids)
-//	return uuids
-//}
+func (g *PreparedDeviceGroup) GpuUUIDs() []string {
+	return g.Devices.Gpus().UUIDs()
+}
 
-//func (l PreparedDeviceList) MigDeviceUUIDs() []string {
-//	var uuids []string
-//	for _, device := range l.MigDevices() {
-//		uuids = append(uuids, device.Mig.Concrete.MigUUID)
-//	}
-//	slices.Sort(uuids)
-//	return uuids
-//}
+func (d PreparedDevices) GpuUUIDs() []string {
+	var uuids []string
+	for _, group := range d {
+		uuids = append(uuids, group.GpuUUIDs()...)
+	}
+	slices.Sort(uuids)
+	return uuids
+}
 
-//func (g *PreparedDeviceGroup) MigDeviceUUIDs() []string {
-//	return g.Devices.MigDevices().UUIDs()
-//}
-//
-//func (d PreparedDevices) MigDeviceUUIDs() []string {
-//	var uuids []string
-//	for _, group := range d {
-//		uuids = append(uuids, group.MigDeviceUUIDs()...)
-//	}
-//	slices.Sort(uuids)
-//	return uuids
-//}
+func (l PreparedDeviceList) MigDeviceUUIDs() []string {
+	var uuids []string
+	for _, device := range l.MigDevices() {
+		uuids = append(uuids, device.Mig.Concrete.MigUUID)
+	}
+	slices.Sort(uuids)
+	return uuids
+}
+
+func (g *PreparedDeviceGroup) MigDeviceUUIDs() []string {
+	return g.Devices.MigDevices().UUIDs()
+}
+
+func (d PreparedDevices) MigDeviceUUIDs() []string {
+	var uuids []string
+	for _, group := range d {
+		uuids = append(uuids, group.MigDeviceUUIDs()...)
+	}
+	slices.Sort(uuids)
+	return uuids
+}
 
 //func (g *PreparedDeviceGroup) VfioDeviceUUIDs() []string {
 //	return g.Devices.VfioDevices().UUIDs()
 //}
 
-//func (l PreparedDeviceList) VfioDeviceUUIDs() []string {
-//	var uuids []string
-//	for _, device := range l.VfioDevices() {
-//		uuids = append(uuids, device.Vfio.Info.UUID)
-//	}
-//	slices.Sort(uuids)
-//	return uuids
-//}
+func (l PreparedDeviceList) VfioDeviceUUIDs() []string {
+	var uuids []string
+	for _, device := range l.VfioDevices() {
+		uuids = append(uuids, device.Vfio.Info.UUID)
+	}
+	slices.Sort(uuids)
+	return uuids
+}
 
 //func (d PreparedDevices) VfioDeviceUUIDs() []string {
 //	var uuids []string

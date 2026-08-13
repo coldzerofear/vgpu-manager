@@ -1,6 +1,5 @@
 /*
  * cudaMallocHost smoke test.
- * Ported from HAMi-core/test/test_runtime_alloc_host.c.
  */
 #include <cuda.h>
 #include <cuda_runtime.h>

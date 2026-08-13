@@ -17,10 +17,8 @@
 #
 # Optional env (caller chooses the variant by setting these):
 #   CUDA_CORE_LIMIT            target SM utilization, percent (default 30).
-#                              NOTE: this is the env name vgpu-manager's
-#                              library reads (util.c:17); the HAMi-core
-#                              upstream name CUDA_DEVICE_SM_LIMIT is NOT
-#                              recognized here.
+#                              NOTE: this is the exact env name vgpu-manager's
+#                              library reads (util.c:17).
 #   CUDA_SM_CONTROLLER         delta (default) | aimd
 #   CUDA_SM_AIMD_MD_DIVISOR    AIMD MD factor (only if controller=aimd)
 #   CUDA_SM_AIMD_EFF_RATIO     AIMD buffer / 1000

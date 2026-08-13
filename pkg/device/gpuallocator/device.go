@@ -1,4 +1,5 @@
 // Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
+// Copyright 2025-2026 coldzerofear
 
 package gpuallocator
 
@@ -96,6 +97,22 @@ func (d DeviceList) Devices() []*Device {
 
 // DeviceSet is used to hold and manipulate a set of unique GPU devices.
 type DeviceSet map[string]*Device
+
+func GetDeviceLinkMap(deviceList DeviceList) map[string]map[int][]links.P2PLinkType {
+	devLinksMap := make(map[string]map[int][]links.P2PLinkType, len(deviceList))
+	for _, dev := range deviceList {
+		devLinklist := make(map[int][]links.P2PLinkType, len(dev.Links))
+		for index, pLinks := range dev.Links {
+			p2pLinks := make([]links.P2PLinkType, len(pLinks))
+			for i, link := range pLinks {
+				p2pLinks[i] = link.Type
+			}
+			devLinklist[index] = p2pLinks
+		}
+		devLinksMap[dev.UUID] = devLinklist
+	}
+	return devLinksMap
+}
 
 // NewDevices creates a list of Devices from all available nvml.Devices using the specified options.
 func NewDevices(opts ...Option) (DeviceList, error) {

@@ -1,3 +1,19 @@
+/*
+Copyright 2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package reason centralises the failure-cause vocabulary used by the
 // vgpu-manager scheduler when it rejects a node, a pod request, or a pod
 // preemption. The goal is twofold:
@@ -10,10 +26,9 @@
 //
 //   - Per-pod summary events emitted by vgpu-manager (FilteringFailed,
 //     PreemptionFailed) carry both the aggregated counts AND the list of
-//     offending node names — the diagnostic detail HAMi provides — but in
-//     the upstream "<count> <phrase>" format rather than HAMi's "n/total
-//     phrase" style. One event message per Filter call, comma-separated
-//     reason clauses, deterministic ordering.
+//     offending node names, in the upstream "<count> <phrase>" format.
+//     One event message per Filter call, comma-separated reason clauses,
+//     deterministic ordering.
 //
 // Failure causes flow up the stack as *FilterReason values instead of
 // bare error strings: filterDevices builds per-device counts, allocateOne

@@ -1,6 +1,5 @@
 /*
  * cuArrayCreate smoke test - 2D CUDA array allocation.
- * Ported from HAMi-core/test/test_create_array.c.
  */
 #include <cuda.h>
 #include <cuda_runtime.h>

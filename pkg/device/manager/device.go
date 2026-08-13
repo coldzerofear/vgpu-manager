@@ -1,3 +1,19 @@
+/*
+Copyright 2025-2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package manager
 
 import (
@@ -214,7 +230,7 @@ func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceM
 	}
 	if manager.DeviceLib == nil {
 		driverRoot := config.GetDriverRoot()
-		deviceLib, err := nvidia.InitDeviceLib(driverRoot)
+		deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -240,7 +256,7 @@ func (m *DeviceManager) initDevices() (err error) {
 	var (
 		devLinksMap        map[string]map[int][]links.P2PLinkType
 		gpuTopologyEnabled = m.featureGate.Enabled(util.TopologyAwareGPUAllocation)
-		exists             = false
+		exists             bool
 	)
 	if gpuTopologyEnabled {
 		deviceList, err := gpuallocator.NewDevices(
@@ -250,18 +266,7 @@ func (m *DeviceManager) initDevices() (err error) {
 		if err != nil {
 			return fmt.Errorf("error getting gpuallocator device list: %v", err)
 		}
-		devLinksMap = make(map[string]map[int][]links.P2PLinkType, len(deviceList))
-		for _, dev := range deviceList {
-			devLinklist := make(map[int][]links.P2PLinkType, len(dev.Links))
-			for index, pLinks := range dev.Links {
-				p2pLinks := make([]links.P2PLinkType, len(pLinks))
-				for i, link := range pLinks {
-					p2pLinks[i] = link.Type
-				}
-				devLinklist[index] = p2pLinks
-			}
-			devLinksMap[dev.UUID] = devLinklist
-		}
+		devLinksMap = gpuallocator.GetDeviceLinkMap(deviceList)
 	}
 	m.imexChannels, err = imex.GetChannels(m.config.GetIMEX(), m.DevRoot)
 	if err != nil {

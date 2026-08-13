@@ -1,8 +1,8 @@
 /*
  * fork() inheritance regression test.
  *
- * Reproduces the Project-HAMi/HAMi-core PR #199 bug class on vgpu-manager:
- * Python multiprocessing / torch.multiprocessing fork after the parent has
+ * Guards against a fork()-safety bug class: Python multiprocessing /
+ * torch.multiprocessing fork after the parent has
  * already initialized CUDA via our hook layer. Without the pthread_atfork
  * handler in cuda_hook.c, the child inherits:
  *

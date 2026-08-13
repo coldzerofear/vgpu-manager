@@ -1,3 +1,19 @@
+/*
+Copyright 2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package kubeletplugin
 
 import (
@@ -151,7 +167,7 @@ func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) 
 	}
 	for _, dirPath := range preparedDirs {
 		if err := util.EnsureDir(dirPath, 0o777); err != nil {
-			klog.Warningf("Failed to ensure directory %s: %s", dirPath, err)
+			return "", "", fmt.Errorf("failed to ensure directory %s: %v", dirPath, err)
 		}
 	}
 	// pids.config is bind-mounted into the container as a file, so it has to
@@ -467,7 +483,7 @@ func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, 
 	}, nil
 }
 
-func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, devices PreparedDeviceList) error {
+func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, _ PreparedDeviceList) error {
 	_ = os.RemoveAll(filepath.Join(m.hostManagerPath, util.Claims, string(claimRef.UID)))
 
 	if !featuregates.Enabled(featuregates.DevicePluginClientMode) {

@@ -23,7 +23,7 @@ vgpu-manager 的设备插件原先只支持两种把「设备列表」传递给�
 ### 2.1 与 NVIDIA 插件的差异
 
 在 NVIDIA 插件里，`device-list-strategy` 决定**整个**注入过程（开启 CDI 时会提前返回、
-跳过 `passDeviceSpecs`）。vgpu-manager 是 HAMi 风格的 vGPU 插件，它的注入分成两部分：
+跳过 `passDeviceSpecs`）。vgpu-manager 是一款 vGPU 设备插件，它的注入分成两部分：
 
 1. **始终无条件**注入的内容（与策略无关）：`/dev/nvidia*` 设备节点（`PassDeviceSpecs`）、
    `libvgpu-control.so` 与 `ld.so.preload`、`vgpu.config`、显存/算力限制环境变量等；

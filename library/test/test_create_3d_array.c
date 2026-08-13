@@ -1,6 +1,5 @@
 /*
  * cuArray3DCreate smoke test - 3D CUDA array allocation.
- * Ported from HAMi-core/test/test_create_3d_array.c.
  */
 #include <cuda.h>
 #include <cuda_runtime.h>

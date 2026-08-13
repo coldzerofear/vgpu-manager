@@ -186,6 +186,10 @@ spec:
             - name: METRICS_PATH
               value: "/metrics"
             {{- end }}
+            {{- if .Values.kubeletPlugin.consumableShares }}
+            - name: CONSUMABLE_SHARES
+              value: {{ .Values.kubeletPlugin.consumableShares | quote }}
+            {{- end }}
           {{- with $plugin.env }}
             {{- toYaml . | nindent 12 }}
           {{- end }}

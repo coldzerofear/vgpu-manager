@@ -1,5 +1,6 @@
 /*
 Copyright The Kubernetes Authors
+Copyright 2026 coldzerofear
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -520,6 +521,13 @@ func TestValidateFeatureGates(t *testing.T) {
 			fgMap:       map[featuregate.Feature]bool{VGPUSupport: false, NVMLDeviceHealthCheck: false, FabricManagerPartitioning: true, PassthroughSupport: true},
 			expectError: false,
 			description: "should be valid when both FabricManagerPartitioning and PassthroughSupport are enabled",
+		},
+		{
+			name:         "ConsumableShares enabled with VGPUSupport",
+			fgMap:        map[featuregate.Feature]bool{VGPUSupport: true, ConsumableShares: true},
+			expectError:  true,
+			errorMessage: "feature gate VGPUSupport is currently mutually exclusive with ConsumableShares",
+			description:  "should fail when both ConsumableShares and VGPUSupport are enabled",
 		},
 	}
 

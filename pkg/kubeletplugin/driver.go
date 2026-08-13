@@ -1,18 +1,19 @@
 /*
- * Copyright (c) 2022-2024, NVIDIA CORPORATION.  All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+Copyright The Kubernetes Authors
+Copyright 2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package kubeletplugin
 
@@ -292,7 +293,7 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 			}
 
 			// Add device/partition to the device-only slice for this GPU.
-			deviceSlice.Devices = append(deviceSlice.Devices, device.PartGetDevice())
+			deviceSlice.Devices = append(deviceSlice.Devices, device.PartGetDevice(d.state.config))
 		}
 		if gpuInfo != nil {
 			allCounterSets = append(allCounterSets, gpuInfo.PartSharedCounterSets()...)
@@ -355,7 +356,7 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 			// Add all allocatable devices for this physical GPU to this slice.
 			// This includes not-yet-manifested MIG devices, and the physical
 			// GPU itself.
-			slice.Devices = append(slice.Devices, device.PartGetDevice())
+			slice.Devices = append(slice.Devices, device.PartGetDevice(d.state.config))
 		}
 		if gpuInfo != nil {
 			slice.SharedCounters = gpuInfo.PartSharedCounterSets()
@@ -558,8 +559,8 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 	var resourceSlice resourceslice.Slice
 	for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
 		for _, device := range devices {
-			klog.V(4).Infof("About to announce device %s", device.GetDevice().Name)
-			resourceSlice.Devices = append(resourceSlice.Devices, device.GetDevice())
+			klog.V(4).Infof("About to announce device %s", device.GetDevice(config).Name)
+			resourceSlice.Devices = append(resourceSlice.Devices, device.GetDevice(config))
 		}
 	}
 
@@ -614,7 +615,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string, health
 			var resourceSlice resourceslice.Slice
 			for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
 				for _, dev := range devices {
-					d := dev.GetDevice()
+					d := dev.GetDevice(d.state.config)
 
 					taints := dev.Taints()
 					if len(taints) > 0 {

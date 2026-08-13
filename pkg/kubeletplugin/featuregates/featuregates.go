@@ -1,18 +1,19 @@
 /*
- * Copyright 2024 NVIDIA CORPORATION.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+Copyright The Kubernetes Authors
+Copyright 2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package featuregates
 
@@ -88,6 +89,13 @@ const (
 	// DRA device attributes. The cluster must have the Kubernetes feature gate
 	// of the same name enabled before enabling this in the driver.
 	DRAListTypeAttributes featuregate.Feature = "DRAListTypeAttributes"
+
+	// ConsumableShares enables publishing consumable capacity and multi-allocation
+	// (AllowMultipleAllocations) support for devices in ResourceSlices, allowing
+	// multiple ResourceClaims to share the same GPU or MIG device when configured
+	// via --consumable-shares. Note: MPS sharing is not supported when consumable
+	// shares is enabled.
+	ConsumableShares featuregate.Feature = "ConsumableShares"
 
 	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
 
@@ -209,6 +217,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(0, 4),
 		},
 	},
+	ConsumableShares: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
 	//ComputeDomainCliques: {
 	//	{
 	//		Default:    true,
@@ -285,6 +300,9 @@ func ValidateFeatureGates() error {
 		//if Enabled(ComputeDomainCliques) {
 		//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, ComputeDomainCliques)
 		//}
+		if Enabled(ConsumableShares) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, ConsumableShares)
+		}
 	}
 	// ComputeDomainCliques requires IMEXDaemonsWithDNSNames
 	//if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {

@@ -1,10 +1,10 @@
-# Copyright 2026 The vGPU-Manager Authors.
+# Copyright 2024-2026 coldzerofear
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#    https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,6 @@ REGISTRY ?= coldzerofear
 IMG = $(REGISTRY)/vgpu-manager:$(TAG)
 DRA_IMG = $(REGISTRY)/vgpu-manager-dra:$(TAG)
 BASE_IMG = $(REGISTRY)/vgpu-manager-base:$(TAG)
-APT_MIRROR ?= https://mirrors.aliyun.com
 VERSION ?= $(shell cat VERSION)
 
 CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04

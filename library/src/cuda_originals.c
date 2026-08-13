@@ -3,6 +3,8 @@
  * available.
  *
  * Copyright (C) 2012-2019 Tencent. All Rights Reserved.
+ * Copyright 2024-2026 coldzerofear
+ * Modifications made for the vgpu-manager project by coldzerofear.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,9 +18,6 @@
  * specific language governing permissions and limitations under the License.
  */
 
-//
-// Created by thomas on 18-4-16.
-//
 #include <assert.h>
 
 #include "include/hook.h"
@@ -2029,8 +2028,8 @@ CUresult cuGraphicsResourceGetMappedEglFrame(CUeglFrame *eglFrame,
 
 
 /* cuLaunchCooperativeKernelMultiDevice: public symbol now provided by the
- * throttled hook in cuda_hook.c (P3, HAMi #1190 hardening). Trampoline
- * disabled to avoid multiple-definition link errors. */
+ * throttled hook in cuda_hook.c. Trampoline disabled here to avoid
+ * multiple-definition link errors. */
 //CUresult cuLaunchCooperativeKernelMultiDevice(CUDA_LAUNCH_PARAMS *launchParamsList,
 //                                      unsigned int numDevices,  unsigned int flags) {
 //  return CUDA_ENTRY_CHECK(cuda_library_entry,

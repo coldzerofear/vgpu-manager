@@ -1,7 +1,5 @@
 /*
  * cuMemAllocPitch smoke test.
- *
- * Ported from HAMi-core/test/test_alloc_pitch.c.
  */
 #include <cuda.h>
 #include <cuda_runtime.h>

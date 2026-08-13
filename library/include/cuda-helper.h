@@ -3,6 +3,8 @@
  * available.
  *
  * Copyright (C) 2012-2019 Tencent. All Rights Reserved.
+ * Copyright 2024-2026 coldzerofear
+ * Modifications made for the vgpu-manager project by coldzerofear.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -101,17 +103,11 @@ extern "C" {
     _ret;                                                                      \
   })
 
-/*
- * CUDA_ENTRY_CHECK_STRICT
- *
- * For ABI-incompatible versioned symbols (e.g. cuCtxCreate_v4, cuMemAdvise_v2,
- * cuMemPrefetchAsync_v2, graph *_v2). These wrappers must NOT fall through or
- * dereference a NULL fn_ptr: if the symbol is absent in the host libcuda.so
- * the caller is either on a wrong-version driver or asking for an API that
- * does not exist on this system. Returning CUDA_ERROR_NOT_SUPPORTED is far
- * safer than invoking NULL or silently downgrading to a differently-shaped
- * older ABI.
- */
+/* CUDA_ENTRY_CHECK_STRICT: for ABI-incompatible versioned symbols (e.g.
+ * cuCtxCreate_v4, cuMemAdvise_v2, graph *_v2). These wrappers must NOT fall
+ * through or dereference a NULL fn_ptr -- an absent symbol means the host
+ * driver is the wrong version or lacks the API, and CUDA_ERROR_NOT_SUPPORTED
+ * is far safer than invoking NULL or silently downgrading to an older ABI. */
 #define CUDA_ENTRY_CHECK_STRICT(table, sym, ...)                               \
   ({                                                                           \
     CUresult _ret_strict;                                                      \

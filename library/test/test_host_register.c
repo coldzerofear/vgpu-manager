@@ -1,6 +1,5 @@
 /*
  * cuMemHostRegister smoke test.
- * Ported from HAMi-core/test/test_host_register.c.
  */
 #include <cuda.h>
 #include <cuda_runtime.h>

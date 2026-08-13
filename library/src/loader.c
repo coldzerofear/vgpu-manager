@@ -3,6 +3,8 @@
  * available.
  *
  * Copyright (C) 2012-2019 Tencent. All Rights Reserved.
+ * Copyright 2024-2026 coldzerofear
+ * Modifications made for the vgpu-manager project by coldzerofear.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,9 +18,6 @@
  * specific language governing permissions and limitations under the License.
  */
 
-//
-// Created by thomas on 6/15/18.
-//
 #include <errno.h>
 #include <fcntl.h>
 #include <dlfcn.h>
@@ -1074,10 +1073,9 @@ char driver_version[FILENAME_MAX] = "1";
 void init_real_dlsym() {
   if (real_dlsym == NULL) {
     /* Probe newest-first. CUDA 12 / PyTorch 2.x toolchains link against
-     * dlsym@GLIBC_2.34 (libdl merge), so a 2.22-capped list misses them
-     * and falls back to whatever libc.so.6 hands us -- which may be the
-     * compat dlsym whose RTLD_NEXT walk differs from the version the
-     * framework actually invokes. See HAMi #1190. */
+     * dlsym@GLIBC_2.34 (libdl merge), so a 2.22-capped list would miss
+     * them and fall back to a compat dlsym whose RTLD_NEXT walk differs
+     * from the version the framework actually invokes. */
     const char* glibc_versions[] = {
       "GLIBC_2.34",   // glibc 2.34+ (libdl merged into libc)
       "GLIBC_2.22",
@@ -1209,24 +1207,13 @@ extern const int cuda_hook_nums;
 
 /* ---- driver-pointer routing for cuGetProcAddress ------------------------- *
  *
- * cuGetProcAddress hands the caller an ABI-correct pointer chosen from
- * `cudaVersion` and `flags`: asking for "cuCtxCreate" yields cuCtxCreate_v2,
- * _v3 or _v4 depending on the version asked for, and asking for a stream
- * function under CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM yields the _ptsz
- * twin. Substituting our hook by BASE NAME therefore risks binding a caller to
- * a hook whose ABI does not match what the driver picked -- the parameter frame
- * is then wrong on the very next call.
- *
- * The driver has already made that choice, and it is legible: on every driver
- * measured, the pointer it returns is exactly the one dlsym gives for the
- * corresponding versioned symbol. So instead of guessing the version from
- * cudaVersion thresholds, we look the pointer up and substitute the hook whose
- * name matches EXACTLY -- making an ABI mismatch structurally impossible, and
- * subsuming both the conflict blacklist and the hand-written version routing.
- *
- * The equality is not something NVIDIA documents, so it is verified once at
- * runtime (getproc_probe) and the whole mechanism stays off unless it holds;
- * the legacy blacklist path remains as the fallback. */
+ * cuGetProcAddress picks an ABI-specific symbol (e.g. cuCtxCreate_v2/_v3/_v4,
+ * or the _ptsz twin for per-thread streams) based on cudaVersion/flags.
+ * Substituting a hook by base name risks the wrong ABI, so instead we look up
+ * the exact pointer the driver returned and match it to the hook with the
+ * same exact symbol name -- an ABI mismatch becomes structurally impossible.
+ * This is verified once at runtime (getproc_probe); the old name-based
+ * blacklist stays as a fallback if verification fails. */
 typedef struct {
   void       *real_fn;   /* pointer the driver hands out for this exact symbol */
   void       *hook_fn;   /* our hook of the same name, or NULL if we hook none */
@@ -1270,10 +1257,9 @@ static void build_driver_routes(void) {
   }
   qsort(g_routes, g_routes_n, sizeof(g_routes[0]), route_cmp);
 
-  /* Distinct names can alias to one address (an unversioned name that is just
-   * the current version). Such a run must answer consistently, so give every
-   * entry in it whichever hook the run has: the address IS that function, so a
-   * hook registered under any of its names has its ABI. */
+  /* Distinct names can alias to one address (an unversioned name that just
+   * points at the current version). Give every entry sharing that address
+   * whichever hook the group has -- the address IS the function. */
   for (int i = 0; i < g_routes_n; ) {
     int j = i;
     void *hook = NULL;
@@ -1319,23 +1305,13 @@ static void split_symbol(const char *s, size_t *base_len, int *ver, int *sfx) {
   *base_len = len;
 }
 
-/* Could `cand` be what the caller meant when it asked for `req`?
- *
- * The base name must be identical -- we never cross families. Beyond that, a
- * component the request states explicitly pins that component, and a component
- * it leaves out is one the driver gets to choose:
- *
- *   cuMemAlloc               -> cuMemAlloc, _v2, _v3, _v4 ...
- *   cuMemAlloc_v2            -> cuMemAlloc_v2 only
- *   cuLaunchKernel_ptsz      -> cuLaunchKernel_ptsz, _v2_ptsz, _v3_ptsz ...
- *   cuLaunchKernel_v2_ptsz   -> cuLaunchKernel_v2_ptsz only
- *
- * Leaving the suffix open is what makes the flags argument work. A caller asks
- * for "cuLaunchKernel" and passes CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM;
- * the driver answers with the _ptsz entry point. The request name never carries
- * that choice, so refusing to consider _ptsz here would hand a per-thread caller
- * our legacy-stream hook. Which candidate is right is not guessed -- the
- * driver's own pointer picks it, and this predicate only bounds the search. */
+/* Could `cand` be what the caller meant when it asked for `req`? Base name
+ * must match exactly; a version/suffix the request states is pinned, one it
+ * omits is left for the driver to choose (e.g. "cuMemAlloc" matches _v2/_v3/
+ * _v4, but "cuMemAlloc_v2" matches only itself). Leaving the suffix open is
+ * what lets CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM route to the _ptsz
+ * hook even though the requested name never says "ptsz". This only bounds
+ * the search -- the driver's own returned pointer picks the actual match. */
 static int symbol_in_family(const char *cand, const char *req) {
   size_t cb, rb;
   int cv, rv, cs, rs;
@@ -1350,19 +1326,14 @@ static int symbol_in_family(const char *cand, const char *req) {
 }
 
 /* Resolve the pointer cuGetProcAddress produced for `symbol` to our hook.
+ * The pointer identifies exactly which driver entry point was chosen; the
+ * family check confirms it matches what the caller asked for -- together
+ * they pin one entry point exactly, with nothing guessed from cudaVersion.
  *
- * Two independent facts have to agree. The pointer says which function the
- * driver actually chose -- version and stream variant included -- and the name
- * check says that function belongs to the family the caller asked for. Together
- * they identify one entry point exactly, so the hook returned carries its ABI by
- * construction; nothing is inferred from cudaVersion.
- *
- * *name is set whenever the pointer is identified, INCLUDING when we hook no
- * version of it. That distinction matters to the caller: "identified, not
- * hooked" means keep the driver's pointer, whereas an unidentified pointer
- * means fall back to name-based substitution. Collapsing the two would let a
- * base-named hook be bound to a version whose ABI it does not have -- the exact
- * failure the ABI-conflict blacklist exists to prevent. */
+ * *name is set whenever the pointer is identified, even when we hook no
+ * version of it -- that tells the caller to keep the driver's pointer as-is
+ * rather than fall back to name-based substitution, which could otherwise
+ * bind a base-named hook to a version whose ABI it doesn't actually have. */
 void* lookup_cuda_hook_ptr(void *real_fn, const char *symbol, const char **name) {
   if (name) *name = NULL;
 
@@ -1514,12 +1485,9 @@ int mmap_file_to_config_path(resource_data_t** data) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     return ret;
   }
-  /* Read-lock byte 0 so we never fstat/mmap/validate a file a concurrent
-   * env-fallback creator is mid-write on. Best-effort: if locking is
-   * unavailable the header validator below is still a backstop against a torn
-   * read. Released by close(fd) at DONE -- the mapping persists (the file is
-   * never resized after creation), so the lock is only needed for the window
-   * up to and including validation. */
+  /* Read-lock byte 0 so we never validate a file a concurrent writer is
+   * mid-write on; the header check below is a backstop if locking fails.
+   * Released at DONE -- the mapping itself outlives the lock. */
   struct flock rl;
   memset(&rl, 0, sizeof(rl));
   rl.l_type = F_RDLCK;
@@ -1540,20 +1508,17 @@ int mmap_file_to_config_path(resource_data_t** data) {
                   CONFIG_FILE_SIZE, (long long)sb.st_size);
     goto DONE;
   }
-  /* Reader stays PROT_READ + MAP_PRIVATE: it never writes, so no page is ever
-   * COW-copied and every read sees the live page-cache page -- an in-place
-   * writer (the Go manager's MAP_SHARED store, or another library process on
-   * the env-create path) is visible. Consistency comes from the per-device
-   * seqlock in get_device_snapshot(), not from the mapping. */
+  /* PROT_READ + MAP_PRIVATE: we never write, so no page is ever COW-copied
+   * and every read sees the writer's live update. Tear-free consistency
+   * comes from the per-device seqlock in get_device_snapshot(), not here. */
   resource_data_t *m = (resource_data_t*)mmap(NULL, CONFIG_FILE_SIZE, PROT_READ,
                                               MAP_PRIVATE, fd, 0);
   if (m == MAP_FAILED) {
     LOGGER(ERROR, "mmap global config failed: %s", strerror(errno));
     goto DONE;
   }
-  /* Frozen-header validation, same contract as vmem_node / sm_node: a config
-   * written by a mismatched layout_version (rolling upgrade) is rejected
-   * cleanly rather than misread. */
+  /* Frozen-header check, same contract as vmem_node/sm_node: a config from a
+   * mismatched layout_version is rejected cleanly instead of misread. */
   if (m->magic != CONFIG_MAGIC || m->layout_version != CONFIG_LAYOUT_VERSION ||
       m->region_size != sizeof(resource_data_t) || m->device_count != MAX_DEVICE_COUNT) {
     LOGGER(ERROR, "vgpu config header mismatch: magic=%#x ver=%u size=%u count=%u "
@@ -1590,17 +1555,13 @@ static inline void config_cpu_relax(void) {
 
 /* Tear-free snapshot of devices[host_index] via the per-device seqlock.
  *
- * Fast path is syscall-free: two acquire loads of the seq word bracketing a
- * plain struct copy; an odd seq (writer mid-update) or a changed seq means the
- * copy may be torn, so retry. Because the Go writer only stores a few fields
- * between the two seq bumps -- no syscalls, no blocking -- the odd window is
- * nanoseconds and the loop essentially never spins.
+ * Fast path is syscall-free: two acquire loads around a plain struct copy,
+ * retried if the seq is odd (writer mid-update) or changed between loads.
+ * The writer's update window is nanoseconds, so this almost never spins.
  *
- * Slow path (writer crashed with seq left odd, or descheduled past the spin
- * cap): take the per-device F_RDLCK once. It blocks until a live writer's
- * F_WRLCK drops; a crashed writer's OFD lock was already released when its fd
- * closed, so the read lock is immediately grantable and the bytes are stable.
- * This bounds the hot path instead of letting it hang. */
+ * Slow path (writer crashed mid-update, or we got descheduled past the spin
+ * cap): take the per-device F_RDLCK once. A crashed writer's lock is already
+ * released by the kernel on fd close, so this can't hang. */
 device_t get_device_snapshot(int host_index) {
   device_t snap;
   if (unlikely(host_index < 0 || host_index >= MAX_DEVICE_COUNT || g_vgpu_config == NULL)) {
@@ -1612,19 +1573,12 @@ device_t get_device_snapshot(int host_index) {
   for (;;) {
     uint32_t s1 = __atomic_load_n(&d->seq, __ATOMIC_ACQUIRE);
     if (likely(!(s1 & 1u))) {
-      /* Plain whole-struct copy, deliberately -- this is the Linux-kernel
-       * seqlock discipline, not an oversight:
-       *   - a copy taken during a write is discarded by the s1==s2 check, so a
-       *     torn value is never USED;
-       *   - the ACQUIRE fence below stops the copy from being reordered past
-       *     the second seq load, so the compiler cannot hoist a field read
-       *     after validation;
-       *   - a whole-struct atomic load is NOT an option: device_t is 128B, far
-       *     past any lock-free width, so __atomic_load would fall back to
-       *     libatomic's per-process lock table and silently break cross-process
-       *     protection (see the sm_node note in hook.h). Per-field relaxed
-       *     atomics cannot cover uuid[48] as a unit either. So plain-copy +
-       *     retry is both the correct and the only workable choice here. */
+      /* Plain struct copy, deliberately -- standard seqlock discipline. A
+       * torn copy is caught and discarded by the s1==s2 check below, and the
+       * ACQUIRE fence stops the compiler hoisting a field read past that
+       * check. A whole-struct atomic load isn't an option (device_t is 128B,
+       * past any lock-free width -- __atomic_load would silently fall back
+       * to a libatomic lock table and break cross-process safety). */
       snap = *d;
       __atomic_thread_fence(__ATOMIC_ACQUIRE);
       uint32_t s2 = __atomic_load_n(&d->seq, __ATOMIC_ACQUIRE);
@@ -1686,24 +1640,13 @@ static int dir_is_mount_point(const char *dir, const char *parent) {
   return dir_sb.st_dev != parent_sb.st_dev ? 1 : 0;
 }
 
-/* Identity of the vmem_node region we mapped, so a replacement can be reported.
- *
- * The exposure is the same as sm_node's -- a writable mount a root container can
- * unlink from, where `rm -rf` empties the directory and only fails on the mount
- * point -- but the consequence is worse, because this region is a LEDGER rather
- * than a self-correcting feedback quantity. Processes already mapped keep the
- * old inode; the next one to start creates a new one; and from then on each
- * group's get_used_gpu_virt_memory() sums only its own charges. Neither sees the
- * other's oversold/UVA allocations, so the memory limit is under-enforced
- * against the physical device.
- *
- * Detection only. Remapping to the new region would be actively harmful here:
- * this process's existing charges live in the old region and would be orphaned
- * (the PID-liveness sweep only ever scans the region a process is mapped to),
- * while a later free would subtract from a region that never recorded the
- * charge -- clamped at zero by sub_gpu_virt_memory, i.e. silent drift. The same
- * ledger-versus-feedback asymmetry that says rebuild-on-layout-mismatch is safe
- * says re-attach-on-replacement is not. */
+/* Identity of the vmem_node region we mapped, so a replacement can be
+ * reported. A root container can `rm -rf` a writable mount and recreate the
+ * file, giving late-starting processes a fresh inode while we keep the old
+ * one -- from then on each group's usage sum only sees its own charges, and
+ * the memory limit is under-enforced. Detection only, no remapping: this
+ * process's existing charges live in the old region, and switching regions
+ * mid-flight would silently drop or double-count them. */
 static ino_t g_vmem_node_ino;
 static dev_t g_vmem_node_dev;
 static int   g_vmem_ident_warned;
@@ -1744,28 +1687,17 @@ static int vmem_node_header_valid(const device_vmemory_t *r) {
          r->device_count   == (uint32_t)MAX_DEVICE_COUNT;
 }
 
-/* Called with the header byte write-locked.
- *
- * Rebuilding rather than refusing to start is the whole point of this change.
- * The previous behaviour -- "size mismatch => return 1" -- combined with the
- * caller's LOGGER(FATAL) meant that upgrading the library made containers
- * unable to start on any path without a pre-start cleanup hook (DRA without
- * NRI). Losing the ledger costs nothing there: a layout mismatch means the
- * file was written by the PREVIOUS incarnation of this container, so every
- * record in it belongs to a process that no longer exists. Discarding records
- * of dead PIDs is exactly what the liveness sweep does anyway.
- *
- * magic is published last, with release ordering, so an interrupted rebuild
- * leaves the region invalid rather than half-initialised, and the next process
- * simply rebuilds again. That same ordering is what makes the unlocked Go
- * reader safe here: mid-rebuild it sees magic == 0 and skips the container. */
+/* Called with the header byte write-locked. Rebuilds in place instead of
+ * refusing to start: a layout mismatch means the file belongs to a previous
+ * incarnation of this container, so every record in it is already dead --
+ * losing the ledger costs nothing. magic is published last with release
+ * ordering, so an interrupted rebuild just leaves the region invalid for the
+ * next process to rebuild again, and an unlocked reader mid-rebuild sees
+ * magic == 0 and skips it safely. */
 static void vmem_node_rebuild_locked(device_vmemory_t *r) {
-  /* First build and repair share this code path on purpose -- one path cannot
-   * disagree with itself -- but they are not the same EVENT and must not read
-   * the same in a log. A fresh region is all zeroes because the control plane
-   * deletes the file before every container start, so "layout mismatch" on a
-   * normal first start is alarming and wrong. Only a header with something in
-   * it is evidence of drift. */
+  /* First build and repair share this path, but log differently: a fresh
+   * all-zero region (normal first start) isn't a mismatch, only a nonzero
+   * header is evidence of drift. */
   if (r->magic == 0 && r->layout_version == 0 &&
       r->region_size == 0 && r->device_count == 0) {
     LOGGER(INFO, "vmem_node region initialised (%d bytes, layout v%u)",
@@ -1785,9 +1717,8 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
   *data = NULL;
   int ret = 1;
 
-  /* Before mkdir, for the same reason as sm_node: a missing mount is not
-   * detectable afterwards, because mkdir would have created the directory on
-   * the container's own filesystem and everything below would then succeed. */
+  /* Checked before mkdir -- afterwards a missing mount is undetectable,
+   * since mkdir would just create the directory on the container's own fs. */
   if (dir_is_mount_point(VMEMORY_NODE_PATH, TMP_DIR) == 0) {
     LOGGER(WARNING, "%s is not a mount point -- the plugin did not provide it, so this "
                     "ledger lives in the container's own /tmp: it will NOT be cleaned "
@@ -1799,23 +1730,19 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
     mkdir(VMEMORY_NODE_PATH, 0755);
   }
 
-  /* Unconditional O_CREAT, no file_exist() pre-check. The old two-branch form
-   * had a TOCTOU: two processes could both find the file absent, both set
-   * created = 1, and both memset the mapping -- each erasing what the other
-   * had just written. "Who created it" is now a question never asked. */
+  /* Unconditional O_CREAT, no file_exist() pre-check -- checking first would
+   * let two processes both think they created it and both memset the
+   * mapping, each erasing what the other just wrote. */
   int fd = open(VMEMORY_NODE_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
   if (unlikely(fd == -1)) {
     LOGGER(WARNING, "can't open %s: %s", VMEMORY_NODE_FILE_PATH, strerror(errno));
     return ret;
   }
 
-  /* Lock ONE byte in the frozen header, not the whole file. Byte 0 is never a
-   * record-lock target: the per-device locks live at
-   * GET_VMEMORY_LOCK_OFFSET(i) = offsetof(..., devices[i].lock_byte), the
-   * lowest of which is 16516. A whole-file lock would instead contend with
-   * every per-device reader and writer -- including the Go manager's read
-   * locks -- for no benefit, since all this needs to exclude is another
-   * process initialising concurrently. */
+  /* Lock only byte 0 of the header, not the whole file -- the per-device
+   * locks live at higher offsets, so a whole-file lock would needlessly
+   * contend with every per-device reader/writer. This only needs to exclude
+   * another process initialising concurrently. */
   struct flock fl;
   memset(&fl, 0, sizeof(fl));
   fl.l_type = F_WRLCK;
@@ -1862,10 +1789,8 @@ int mmap_file_to_vmem_node(device_vmemory_t** data) {
 UNLOCK:
   fl.l_type = F_UNLCK;
   ofd_fcntl(fd, 1, &fl);
-  /* Safe to close: the mapping holds its own reference. On the classic-POSIX
-   * fallback, closing any fd for a file drops that process's locks on it --
-   * harmless here because this runs during init, before this process has taken
-   * a single per-device lock. */
+  /* Safe to close here: the mapping holds its own reference, and this runs
+   * during init before this process has taken any per-device lock. */
   close(fd);
   return ret;
 }
@@ -1879,20 +1804,13 @@ static int sm_node_header_valid(const sm_node_region_t *r) {
          r->device_count   == (uint32_t)MAX_DEVICE_COUNT;
 }
 
-/* Called with the file write-locked. Rebuilds in place: the file size is a
- * permanent constant, so there is never anything to resize, and there is never
- * an old-version reader to protect -- a layout mismatch means the file was
- * written by a PREVIOUS incarnation of this container, and a container loads
- * exactly one .so version for its whole life (the host path is versioned; see
- * vnum_plugin.go HostVGPUControlFilePath and kubeletplugin/vgpu.go). So no
- * unlink+recreate and no rename: in-place is simpler AND avoids the far more
- * dangerous rename race, where two processes end up on different inodes and
- * the "shared" bucket silently degrades into two private ones.
- *
- * magic is published LAST with release ordering. If we are killed midway the
- * magic is still absent, so the next process simply rebuilds again -- the
- * rebuild is idempotent and interruptible, with no half-initialised resting
- * state. */
+/* Called with the file write-locked. Rebuilds in place: a layout mismatch
+ * means the file is from a previous container incarnation, and a container
+ * loads exactly one .so version for its whole life, so there's never an
+ * old-version reader to protect. In-place also avoids a rename race that
+ * could split the "shared" bucket into two private ones on different inodes.
+ * magic is published last with release ordering, so a kill mid-rebuild just
+ * leaves it absent for the next process to rebuild again. */
 static void sm_node_rebuild_locked(sm_node_region_t *r) {
   /* See vmem_node_rebuild_locked: same path for first build and repair, but a
    * first build is not a mismatch and must not be reported as one. */
@@ -1908,16 +1826,13 @@ static void sm_node_rebuild_locked(sm_node_region_t *r) {
   memset(r, 0, SM_NODE_FILE_SIZE);
 
   for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
-    /* Seed up_limit the way a watcher thread used to seed its private
-     * up_limits[] at startup. Doing it HERE rather than in the watcher is what
+    /* Seed up_limit here, once, rather than in each watcher thread -- that
      * stops a late-joining process from resetting the container's already
-     * converged limit every time it starts a watcher.
-     *
-     * total_cuda_cores is intentionally left 0: it depends on CUDA device
-     * properties that may not be queried yet. It is published later, purely
-     * for observability -- the authoritative ceiling used by change_token
-     * stays the per-process g_total_cuda_cores[], which every process
-     * computes identically from the same device. */
+     * converged limit every time it starts a watcher. total_cuda_cores is
+     * left 0: it depends on CUDA device properties not yet queried, and is
+     * published later purely for observability -- the authoritative ceiling
+     * stays the per-process g_total_cuda_cores[], computed identically by
+     * every process from the same device. */
     r->devices[i].up_limit = get_device_snapshot(i).hard_core;
   }
 
@@ -1945,21 +1860,12 @@ int open_sm_node_lock(void) {
 
 
 /* Is SM_NODE_PATH the directory the plugin mounted in, or one we just created
- * inside the container's own /tmp?
- *
- * This distinction is not cosmetic and it is not detectable any other way. When
- * the mount is missing -- an older plugin, or one of the provisioning sites
- * missed -- mkdir() below happily creates the directory on the container's own
- * filesystem and open(O_CREAT) succeeds, so the region attaches and everything
- * looks healthy. It mostly works, too, because every process in the container
- * shares that filesystem. What is lost is precisely what the dedicated mount
- * exists for: the control plane's pre-start cleanup deletes a path on the HOST,
- * so a region living in the container's /tmp is never cleaned and survives
- * restarts, and it is invisible from the host when someone goes looking.
- *
- * A bind mount is its own mount point, so it reports a different st_dev than
- * its parent. Same st_dev means no mount landed. Returns 1 mounted, 0 not,
- * -1 unknown (stat failed -- do not draw a conclusion from that). */
+ * inside the container's own /tmp? If the mount is missing, mkdir() below
+ * still succeeds and everything looks healthy, but the region then lives in
+ * the container's own /tmp -- never cleaned by the host's pre-start cleanup,
+ * and invisible from the host. A bind mount reports a different st_dev than
+ * its parent; same st_dev means no mount landed. Returns 1 mounted, 0 not,
+ * -1 unknown (stat failed). */
 static int sm_node_dir_is_mounted(void) {
   return dir_is_mount_point(SM_NODE_PATH, TMP_DIR);
 }
@@ -1984,25 +1890,21 @@ int map_sm_node_region(sm_node_region_t **data) {
     mkdir(SM_NODE_PATH, 0755);
   }
 
-  /* open(O_CREAT) unconditionally -- no file_exist() pre-check. That check is
-   * what makes mmap_file_to_vmem_node racy (two processes can both conclude
-   * they created the file and both memset it, each erasing what the other just
-   * wrote). Here "who created it" is a question we never have to answer: wrong
-   * size gets ftruncate'd, wrong magic gets rebuilt, and both happen under the
-   * lock and are idempotent. */
+  /* open(O_CREAT) unconditionally, no file_exist() pre-check -- that check is
+   * what makes a racy variant possible (two processes both conclude they
+   * created the file and both memset it). Wrong size gets ftruncate'd, wrong
+   * magic gets rebuilt, both idempotent and under the lock. */
   int fd = open(SM_NODE_FILE_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
   if (unlikely(fd == -1)) {
     LOGGER(WARNING, "can't open %s: %s", SM_NODE_FILE_PATH, strerror(errno));
     return 1;
   }
 
-  /* Blocking lock, no timeout, deliberately. A late arriver should sleep in the
-   * kernel while the first process builds the region, then wake, see a valid
-   * magic and leave -- burning no CPU. That is safe here in a way it would not
-   * be for lock_gpu_device: this critical section is ftruncate + memset + a few
-   * field stores on an 8KiB file, with no CUDA call, no I/O and nothing that can
-   * block indefinitely, so a lock holder cannot get stuck. And if it dies, the
-   * kernel releases the lock unconditionally. */
+  /* Blocking lock, no timeout, deliberately: a late arriver just sleeps in
+   * the kernel until the region is built, burning no CPU. Safe here (unlike
+   * lock_gpu_device) because the critical section is a bounded memset with
+   * no CUDA call and nothing that can block indefinitely -- and if the
+   * holder dies, the kernel releases the lock unconditionally. */
   struct flock fl;
   memset(&fl, 0, sizeof(fl));
   fl.l_type = F_WRLCK;
@@ -2042,9 +1944,8 @@ int map_sm_node_region(sm_node_region_t **data) {
     goto UNLOCK;
   }
 
-  /* A freshly created (all-zero) region takes the same path as a stale one:
-   * magic does not match, so we rebuild. First build and repair are one code
-   * path, so there is no "created" flag and no second branch to get wrong. */
+  /* Fresh (all-zero) and stale regions take the same path: magic doesn't
+   * match, so we rebuild -- no "created" flag, no second branch to get wrong. */
   if (!sm_node_header_valid(region)) {
     sm_node_rebuild_locked(region);
   }
@@ -2053,9 +1954,8 @@ int map_sm_node_region(sm_node_region_t **data) {
 UNLOCK:
   fl.l_type = F_UNLCK;
   ofd_fcntl(fd, 1, &fl);
-  /* Closing the fd does not disturb the mapping -- it holds its own reference.
-   * So the lock's lifetime ends exactly here, inside initialisation, and
-   * nothing about it survives into steady state or across a fork. */
+  /* Closing the fd doesn't disturb the mapping -- it holds its own
+   * reference. The lock's lifetime ends here, entirely within init. */
   close(fd);
   return ret;
 }
@@ -2108,18 +2008,16 @@ int write_file_to_config_path(resource_data_t* data) {
   if (unlikely(file_exist(VGPU_CONFIG_PATH) != 0)) {
     mkdir(VGPU_CONFIG_PATH, 0755);
   }
-  /* O_CREAT|O_RDWR, deliberately NOT O_TRUNC: truncation must happen AFTER the
-   * write lock is held, never at open() time, or a peer creating the same file
-   * on the env-fallback path (or a reader) races the empty window. Same create
-   * discipline as mmap_file_to_vmem_node. */
+  /* Deliberately not O_TRUNC: truncation must happen after the write lock is
+   * held, not at open() time, or a concurrent peer/reader races the empty
+   * window. Same discipline as mmap_file_to_vmem_node. */
   int fd = open(CONTROLLER_CONFIG_FILE_PATH, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
   if (unlikely(fd == -1)) {
     LOGGER(ERROR, "can't open %s, error %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     return ret;
   }
-  /* Serialise concurrent env-fallback creators on byte 0 of the frozen header
-   * (the same byte readers take F_RDLCK on). The winner writes the whole file
-   * under the lock; a dead writer's OFD lock releases on fd close. */
+  /* Serialise concurrent creators on byte 0 of the header (the same byte
+   * readers F_RDLCK). A dead writer's lock releases automatically on close. */
   struct flock fl;
   memset(&fl, 0, sizeof(fl));
   fl.l_type = F_WRLCK;
@@ -2130,12 +2028,10 @@ int write_file_to_config_path(resource_data_t* data) {
     LOGGER(ERROR, "can't lock %s: %s", CONTROLLER_CONFIG_FILE_PATH, strerror(errno));
     goto DONE;
   }
-  /* A peer already produced a full-size, valid file under this lock. On the env
-   * path every process builds identical data from the same container env, so a
-   * peer's file is ours -- skip the rewrite. Verify the frozen header, not just
-   * the size: a stale/corrupt file of the right length must be rewritten
-   * (self-healing), not trusted. hdr = {magic, layout_version, region_size,
-   * device_count} at offset 0, pinned by the _Static_asserts in hook.h. */
+  /* If a peer already wrote a full-size, valid file under this lock, skip
+   * the rewrite -- every process builds identical data from the same env, so
+   * a peer's file is ours. Verify the header, not just the size: a
+   * stale/corrupt file of the right length must still be rewritten. */
   struct stat sb;
   uint32_t hdr[4];
   if (fstat(fd, &sb) == 0 && sb.st_size == CONFIG_FILE_SIZE &&
@@ -2647,10 +2543,9 @@ static void malloc_gpu_virt_memory_graph(CUdeviceptr dptr, size_t bytes, int typ
   if (host_index < 0 || host_index >= MAX_DEVICE_COUNT) return;
   LOGGER(VERBOSE, "malloc virt memory to host device %d, dptr %lld, size %ld", host_index, dptr, bytes);
 
-  /* Calculate increment. Re-recording a known dptr with a smaller size yields a
-   * NEGATIVE delta, so the shared counter has to be adjusted with the same
-   * saturation free_gpu_virt_memory() applies: `used` is size_t, and letting it
-   * wrap would leave a ~2^64 usage that fails every later allocation. */
+  /* Re-recording a known dptr with a smaller size yields a negative delta;
+   * apply it with the same saturation free_gpu_virt_memory() uses, since
+   * `used` is size_t and letting it wrap would corrupt every later check. */
   ssize_t delta = found ? (ssize_t)bytes - (ssize_t)old_bytes : (ssize_t)bytes;
 
   if (g_device_vmem != NULL) {
@@ -2696,18 +2591,12 @@ void malloc_gpu_virt_memory_captured(CUdeviceptr dptr, size_t bytes,
   malloc_gpu_virt_memory_graph(dptr, bytes, MEMORY_TYPE_CAPTURE, graph, host_index);
 }
 
-/* Discharge every capture record owned by graph.
- *
- * Each record is discharged against the device recorded when it was charged,
- * never against a device looked up here: this runs from cuStreamEndCapture,
- * where the context may already be unusable, and a discharge that gives up
- * after the nodes are dropped would strand the charge in the shared counter
- * permanently -- exactly the false-OOM this accounting exists to avoid.
- *
- * Nodes are detached under the list mutex first and the shared counter is
- * updated afterwards, because that update takes the cross-process vmem lock and
- * must not nest inside the list mutex (free_gpu_virt_memory() orders them the
- * same way). */
+/* Discharge every capture record owned by graph, against whichever device
+ * each record was originally charged to -- not a device looked up here,
+ * since the context may already be unusable by the time this runs. Nodes
+ * are detached under the list mutex first, then the shared counter is
+ * updated separately (it takes the cross-process vmem lock and must not
+ * nest inside the list mutex; free_gpu_virt_memory() uses the same order). */
 void free_gpu_virt_memory_by_graph(CUgraph graph) {
   size_t totals[MAX_DEVICE_COUNT] = {0};
   memory_node_t *entry_tmp = NULL;
@@ -2770,13 +2659,10 @@ int get_gpu_virt_memory_type(CUdeviceptr dptr) {
   return type;
 }
 
-/* Retire the record for dptr, discharging whatever it was charged.
- *
- * The device comes from the record, not from the caller and not from the
- * current context: a charge and its discharge must land on the same account.
- * Deriving it at free time instead lets a context switch between allocation and
- * free (or a cuCtxGetDevice that no longer works) credit the wrong device,
- * leaving one understated and another overstated for the life of the process. */
+/* Retire the record for dptr, discharging whatever device it was charged to.
+ * The device comes from the record, never re-derived from the current
+ * context -- a context switch between alloc and free would otherwise credit
+ * the wrong device. */
 void free_gpu_virt_memory(CUdeviceptr dptr) {
   int found = 0;
   int host_index = -1;
@@ -2990,28 +2876,11 @@ void load_controller_configuration() {
   }
   if (g_vgpu_config->vmem_node && g_device_vmem == NULL) {
     if (mmap_file_to_vmem_node(&g_device_vmem)) {
-      /* Degrade, do not die. The region being unavailable -- directory not
-       * mounted, mounted read-only, /tmp shadowed by the workload, an older
-       * plugin paired with a newer library -- says nothing about whether this
-       * process can run correctly. It says only that the extra accounting is
-       * unavailable, and the correct response is to run without it.
-       *
-       * This is not a weaker configuration than we already ship: every
-       * dereference of g_device_vmem is guarded by a NULL check, and
-       * g_device_vmem == NULL is the DEFAULT state, because the VirtualMemoryTracking
-       * feature gate defaults to off. Degrading lands the process in the exact
-       * configuration most nodes run in today.
-       *
-       * Memory limiting specifically is NOT lost. The check is
-       *   used + vmem_used + request > total_memory
-       * where `used` comes from NVML and does not depend on this region. Only
-       * vmem_used goes to 0, and that term exists solely to cover oversold/UVA
-       * allocations NVML cannot see. The limit stays enforced; it just stops
-       * counting what it can no longer observe.
-       *
-       * Do NOT unlock here -- unlike the FATAL this replaces, control now
-       * reaches DONE, which unlocks. ret is cleared because a missing optional
-       * region is not a failure to load the configuration. */
+      /* Degrade, don't die. Every dereference of g_device_vmem is NULL-checked,
+       * and NULL is the default state anyway (the feature gate defaults off),
+       * so this just lands the process in the common configuration. Memory
+       * limiting itself isn't lost: `used` still comes from NVML regardless;
+       * only vmem_used (oversold/UVA tracking, invisible to NVML) goes to 0. */
       g_device_vmem = NULL;
       LOGGER(WARNING, "unable to map vmem nodes file, will roll back to "
                       "nvml-only memory accounting (virtual memory tracking disabled)");
@@ -3019,14 +2888,9 @@ void load_controller_configuration() {
       if (atexit(exit_cleanup_handler) != 0) {
         LOGGER(ERROR ,"register exit handler failed: %d", errno);
       }
-      /* sigaction (not signal()) so we can capture and chain to any host
-       * handler -- the alternative is silently clobbering JVM/Go/Python signal
-       * handling. SA_SIGINFO lets us forward siginfo_t/ucontext_t verbatim.
-       *
-       * Registered only on success: these handlers exist to hand this process's
-       * ledger records back at exit, so with no ledger there is nothing to hand
-       * back, and installing them would alter the container's signal
-       * disposition for no reason. */
+      /* sigaction (not signal()), so we can chain to any host handler instead
+       * of silently clobbering JVM/Go/Python signal handling. Registered only
+       * on success -- with no ledger there's nothing to hand back at exit. */
       struct sigaction sa;
       memset(&sa, 0, sizeof(sa));
       sigemptyset(&sa.sa_mask);
@@ -3100,38 +2964,39 @@ void init_nvml_to_host_device_index() {
   }
 }
 
-/* fork() child handler: re-initialise the four file-scope mutexes that
- * protect loader.c hot paths. Without this, if a parent thread was inside
- * any of these critical sections at the instant of fork(), the child
- * inherits the mutex bit as 'locked' but the owning thread has vanished
- * -- every subsequent pthread_mutex_lock in the child blocks forever.
+/* fork() child handler: re-initialise the mutexes and pthread_once_t guards
+ * that protect loader.c hot paths. If a parent thread was mid-critical-
+ * section at the instant of fork(), the child inherits a mutex 'locked' or
+ * a once-control 'in progress' with no thread left to ever finish it --
+ * every later pthread_mutex_lock/pthread_once in the child then hangs
+ * forever.
  *
- *   - g_memory_node_lock  (vmem alloc/free accounting)
- *   - tid_dlsym_lock      (dlsym recursion-guard cache — touched on every
- *                          dlsym call from any thread)
- *   - device_index_mutex  (cuda<->nvml<->host index lookup, frequent)
- *   - init_config_mutex   (taken on every load_necessary_data() call,
- *                          which runs at every cuLaunchKernel entry --
- *                          this is the highest-probability deadlock path)
+ * Mutexes reset: g_memory_node_lock, tid_dlsym_lock, device_index_mutex.
  *
- * pthread_mutex_init() on an already-initialised mutex is technically UB
- * per POSIX but is safe in practice on glibc/musl when no one currently
- * holds it -- which is exactly the post-fork child case (only one thread
- * exists and it is this handler).
+ * Once-guards reset: g_cuda_ver_init, g_nvml_lib_init, g_cuda_lib_init --
+ * gate driver-version/library loading inside load_necessary_data(), which
+ * runs on every CUDA/NVML/dlsym hook entry and does real dlopen/proc-read
+ * work, so a fork landing mid-call is a real (if narrow) risk. No extra
+ * state needs clearing alongside the reset -- all three fully rebuild their
+ * data on a re-run, and their only readers gate through
+ * load_necessary_data() first, so a torn build is always replaced before
+ * anything sees it. Also reset: init_nvml_host_index,
+ * g_controller_config_init, g_reset_cuda_index_init.
  *
- * tid_dlsyms[] is a recursion-guard cache keyed by pthread_t; parent's
- * pthread_t values are stale in the child. Stale entries are functionally
- * safe (they miss in check_tid_dlsyms() and fall through to a real
- * dlsym), but pthread_t value recycling could in theory produce a false
- * positive that mis-flags a child dlsym as recursive. Clear it.
+ * Deliberately NOT reset: init_dlsym_flag and g_atfork_init. Their targets
+ * are already redone directly a few lines below (or, for g_atfork_init,
+ * survive fork via glibc's own atfork list) -- resetting them too would
+ * just make the child redo already-valid setup, risking a reinit-while-live
+ * mutex instead of a harmless no-op.
  *
- * Called from cuda_hook.c's child_after_fork() (registered via
- * pthread_atfork in a library-load constructor). See also HAMi-core PR
- * #199 which addresses the related-but-not-identical pthread_once
- * post-init flag issue. */
+ * tid_dlsyms[] is cleared because parent pthread_t values are stale in the
+ * child; a stale entry just misses and falls through to a real dlsym. */
 void loader_child_after_fork(void) {
   // After forking, it is necessary to use it to trigger nvmlInit again to ensure that
   // subsequent steps that require nvml will not fail due to lack of initialization.
+  g_cuda_ver_init = (pthread_once_t)PTHREAD_ONCE_INIT;
+  g_nvml_lib_init = (pthread_once_t)PTHREAD_ONCE_INIT;
+  g_cuda_lib_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   init_nvml_host_index = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_controller_config_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_reset_cuda_index_init = (pthread_once_t)PTHREAD_ONCE_INIT;
@@ -3141,23 +3006,13 @@ void loader_child_after_fork(void) {
   memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
   tid_dlsym_count = 0;
 
-  /* Drop the inherited virtual-memory records. Every one of them describes an
-   * allocation of the PARENT: CUDA contexts do not survive fork, so none of the
-   * pointers or graph handles mean anything here, and the charges they stand for
-   * sit in the shared counter under the parent's pid, where they still belong.
-   *
-   * Keeping them is actively harmful once the child starts allocating, because
-   * the driver reuses addresses: a new dptr landing on a stale record makes
-   * malloc_gpu_virt_memory() charge the difference against a phantom size, a new
-   * CUgraph landing on a stale one makes free_gpu_virt_memory_by_graph() retire
-   * records it does not own, and get_gpu_virt_memory_type() can report a plain
-   * pointer as oversold UVA and send cuMemFreeAsync down the cuMemFree path.
-   * graph_cost_after_fork() wipes its cache for exactly this reason.
-   *
-   * Freeing (rather than just re-heading the list) matters because forked
-   * workers commonly run long without exec. glibc resets the malloc lock in the
-   * child via its own atfork handlers, so free() here is safe -- and this
-   * library is glibc-only by construction (see the toolchain gate in hook.h). */
+  /* Drop the inherited virtual-memory records -- they describe the PARENT's
+   * allocations, and CUDA contexts don't survive fork. Keeping them is
+   * actively harmful once the child starts allocating: the driver reuses
+   * addresses, so a new dptr landing on a stale record would misattribute
+   * charges, retire records it doesn't own, or misroute a free. Freeing
+   * (not just re-heading the list) is safe because glibc resets the malloc
+   * lock in the child via its own atfork handlers. */
   memory_node_t *entry_tmp = NULL;
   struct list_head *iter, *tmp;
   list_for_each_safe(iter, tmp, &g_memory_node->node) {
@@ -3183,13 +3038,9 @@ static void register_atfork_handler(void) {
 }
 
 void load_necessary_data() {
-  /* Register the fork-child handler before anything else. Placed here
-   * rather than in initialization() because load_necessary_data() is
-   * called from every CUDA, NVML and dlsym hook entry -- so a parent
-   * process that uses only NVML/dlsym (and never cuLaunchKernel) before
-   * fork() also has the handler in place. See child_after_fork()'s
-   * block comment in cuda_hook.c for why we are not allowed to use a
-   * library-load constructor. */
+  /* Register the fork-child handler before anything else, since this
+   * function runs on every CUDA/NVML/dlsym hook entry -- even a process
+   * that only ever touches NVML has the handler in place before it forks. */
   pthread_once(&g_atfork_init, register_atfork_handler);
 
   // First, determine the driver version

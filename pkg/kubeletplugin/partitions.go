@@ -1,19 +1,19 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+Copyright The Kubernetes Authors
+Copyright 2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 package kubeletplugin
 
@@ -237,20 +237,25 @@ func (i MigSpec) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
 }
 
 // A variant of the legacy `GetDevice()`, for the Partitionable Devices paradigm.
-func (d *AllocatableDevice) PartGetDevice() resourceapi.Device {
+func (d *AllocatableDevice) PartGetDevice(config *Config) resourceapi.Device {
 	switch d.Type() {
 	case VGpuDeviceType:
 		return d.VGpu.PartGetDevice()
 	case GpuDeviceType:
-		return d.Gpu.PartGetDevice()
+		dev := d.Gpu.PartGetDevice()
+		applyConsumableShares(&dev, config)
+		return dev
 	case MigStaticDeviceType:
 		panic("PartGetDevice() called for MigStaticDeviceType")
 	case MigDynamicDeviceType:
-		return d.MigDynamic.PartGetDevice()
+		dev := d.MigDynamic.PartGetDevice()
+		applyConsumableShares(&dev, config)
+		return dev
 	case VfioDeviceType:
 		panic("not yet implemented")
+	default:
+		panic("unexpected type for AllocatableDevice")
 	}
-	panic("unexpected type for AllocatableDevice")
 }
 
 // Insert one counter for each memory slice consumed, as given by the `start`

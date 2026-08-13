@@ -1,7 +1,6 @@
 # Vulkan Implicit Layer 开发方案
 
 > **状态**：设计已确认 / 未开发
-> **参考**：[Project-HAMi/HAMi-core#182](https://github.com/Project-HAMi/HAMi-core/pull/182)
 > **预计工作量**：~12-16 个工作日（library 5-7 + Go 部署 3-5 + 测试 2-3 + 文档 / 镜像 1-2）
 
 ---
@@ -17,7 +16,7 @@ App ──[Vulkan API]────────► libvulkan.so ──► NVIDIA 
 
 后果：vGPU 内存限制对 Vulkan workload **完全失效**。一个配置 4 GiB 显存上限的 Pod，跑 Isaac Sim 可以分配整张物理卡的内存。
 
-HAMi-core 在 PR #182 引入了 Vulkan Implicit Layer 来填补这个洞，本文档将相同方案适配到 vgpu-manager。
+本文档设计一个 Vulkan Implicit Layer 来填补这个洞。
 
 ## 2. 目标 / 非目标
 
@@ -687,24 +686,23 @@ endif()
    - 用户可能误以为 oversold 也对 Vulkan 生效
    - **决策建议**：Vulkan layer 启动时检测 `memory_oversold==true`，在 LOG_VERBOSE 打一条："Vulkan workload on oversold device; oversold capacity is **CUDA-only** and not visible to Vulkan"
 
-## 8. 与 HAMi PR #182 的差异
+## 8. 关键设计决策
 
-| 项 | HAMi | 我们 |
-|---|---|---|
-| Env var | `HAMI_VULKAN_ENABLE` | `VGPU_VULKAN_ENABLE` |
-| Manifest 文件名 | `hami.json` | `vgpu_manager_implicit_layer.json` |
-| Layer name | (PR 内未明确) | `VGPU_MANAGER_implicit_memory_budget` |
-| `library_path` | `libvgpu.so` | `libvgpu-control.so`（保持一致 .so）|
-| Budget API 抽象 | 自带 `hami_budget_of` adapter | Phase 0 抽 `vgpu_check_alloc_budget` 含 `vgpu_budget_kind_t`，CUDA 走 VIRTUAL，Vulkan 走 PHYSICAL |
-| **used 视图来源** | 自维护"已分配总量"计数器 | **完全来自 NVML 进程聚合** —— 不需要我们维护计数器，CUDA / Vulkan 自动累加 |
-| **CUDA + Vulkan 同进程混合** | PR 内未提及去重 | 已修复 PID 去重 bug（commit `20e9519`），同进程 compute + graphics 不双重计数 |
-| **Heap clamp 上限** | 单一 budget 字段（PR 内未区分 oversold） | 与 cuMemGetInfo 故意差异：CUDA 报 `total_memory`（含 oversold UVA），Vulkan 报 `real_memory`（物理硬上限） |
-| **CUDA-Vulkan interop import 路径** | PR 内未明确处理 | Phase 5b 显式检测 `VkImportMemoryFdInfoKHR` 等 import 结构，避免双重计费 |
-| 顺带的 CUDA bug 修复 | `cuMemFree` 未跟踪指针、`cuMemGetInfo_v2` NULL deref | **不需要**——我们设计本就 forward-friendly + 已有 `dca8e7a` 修复 |
-| `throttle_adapter` | 抽 adapter 给 Vulkan submit 用 | **不抽**——直接调 `rate_limiter` |
-| 测试目录 | `test/vulkan/` | `library/test/vulkan/` |
+| 项 | 决策 |
+|---|---|
+| Env var | `VGPU_VULKAN_ENABLE` |
+| Manifest 文件名 | `vgpu_manager_implicit_layer.json` |
+| Layer name | `VGPU_MANAGER_implicit_memory_budget` |
+| `library_path` | `libvgpu-control.so`（保持与 CUDA 侧一致的 .so）|
+| Budget API 抽象 | Phase 0 抽 `vgpu_check_alloc_budget` 含 `vgpu_budget_kind_t`，CUDA 走 VIRTUAL，Vulkan 走 PHYSICAL |
+| **used 视图来源** | **完全来自 NVML 进程聚合** —— 不需要我们维护计数器，CUDA / Vulkan 自动累加 |
+| **CUDA + Vulkan 同进程混合** | 已修复 PID 去重 bug（commit `20e9519`），同进程 compute + graphics 不双重计数 |
+| **Heap clamp 上限** | 与 cuMemGetInfo 故意差异：CUDA 报 `total_memory`（含 oversold UVA），Vulkan 报 `real_memory`（物理硬上限） |
+| **CUDA-Vulkan interop import 路径** | Phase 5b 显式检测 `VkImportMemoryFdInfoKHR` 等 import 结构，避免双重计费 |
+| `throttle_adapter` | **不抽**——直接调 `rate_limiter` |
+| 测试目录 | `library/test/vulkan/` |
 
-我们的实现可以**比 HAMi 更精简**——很多基础设施（UUID 反查、oversold UVA、cuMemGetInfo cap、NVML 进程聚合 + PID 去重）已经做了。**特别是 NVML 视图自动覆盖 Vulkan 物理用量，Vulkan layer 完全不需要自己维护分配计数器**——这是 vgpu-manager 架构上的优势。
+我们的实现可以做得**比较精简**——很多基础设施（UUID 反查、oversold UVA、cuMemGetInfo cap、NVML 进程聚合 + PID 去重）已经做了。**特别是 NVML 视图自动覆盖 Vulkan 物理用量，Vulkan layer 完全不需要自己维护分配计数器**——这是 vgpu-manager 架构上的优势。
 
 ## 9. 实施时间线
 
@@ -733,7 +731,6 @@ Week 2:
 
 ## 参考
 
-- [HAMi-core PR #182: Vulkan implicit layer to enforce per-pod GPU memory budget](https://github.com/Project-HAMi/HAMi-core/pull/182)
 - [NVIDIA Vulkan ICD documentation](https://docs.nvidia.com/vulkan/index.html)
 - [Vulkan Layer Interface specification](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderLayerInterface.md)
 - [Khronos Vulkan-Loader: layer manifest format](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderLayerInterface.md#layer-manifest-file-format)

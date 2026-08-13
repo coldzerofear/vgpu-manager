@@ -1,6 +1,5 @@
 /*
  * cudaMallocManaged smoke test.
- * Ported from HAMi-core/test/test_runtime_alloc_managed.c.
  */
 #include <cuda.h>
 #include <cuda_runtime.h>

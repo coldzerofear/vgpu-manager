@@ -23,13 +23,13 @@
 |---|---|---|
 | **delta**(对称 ±increment) | target 附近窄幅波动(±MIN_INCREMENT) | ≈ 1.00 |
 | **AIMD `÷2`** | 锯齿:peak → 0.5×peak → 爬回 → 砍 | ≈ 0.75 |
-| **AIMD `÷3`**(Midokura 默认) | 锯齿:peak → 0.33×peak → 爬回 → 砍 | ≈ 0.67 |
+| **AIMD `÷3`**(默认) | 锯齿:peak → 0.33×peak → 爬回 → 砍 | ≈ 0.67 |
 
 实测 `+1/3` 完美对应理论 `1 / 0.75 ≈ 1.33`,确认现象与算法形态吻合。**MAE 低 ≠ 吞吐高**:低 MAE 可以来自"持续低于目标 + 小波动"这种"被冤枉"的稳态,而吞吐取的是 `min(util, target)` 的积分,任何低于 target 的部分都直接损失。
 
 ### 1.3 AIMD 不可剥夺的优势:多 Pod 公平性
 
-Midokura 的 ablation 文档强调 AIMD 在多 Pod 下的公平收敛特性,这是 delta **结构上做不到**的:
+实测数据显示 AIMD 在多 Pod 下有公平收敛特性,这是 delta **结构上做不到**的:
 
 | 算法 | 多 Pod 行为 | 公平性保证 |
 |---|---|---|
@@ -277,7 +277,7 @@ P3 是"如果未来发现 P0+P1 的多 Pod 体验还是不够好"的终极武器
 
 1. **本文档**:存档供未来查证,不写代码。
 2. **新分支**:`experiment/aimd-sawtooth` 从 `fix/library` 派生,在该分支上落地 P0 / P1 实验。
-3. **`fix/library` 主分支**:保持现状(默认 `delta`,可选 `aimd`)。当前 AIMD 行为已经是 Midokura 算法的忠实移植,不在主分支做激进改动。
+3. **`fix/library` 主分支**:保持现状(默认 `delta`,可选 `aimd`),不在主分支做激进改动。
 4. **决策路径**:
    - 用户在 `experiment/aimd-sawtooth` 上跑真实 GPU 工作负载验证 P0+P1 效果
    - 多 Pod 场景如能显著优于 delta 单 Pod,合并 P0 回 `fix/library`
@@ -291,4 +291,3 @@ P3 是"如果未来发现 P0+P1 的多 Pod 体验还是不够好"的终极武器
 - **TCP Reno**:RFC 5681,对称 AIMD,"one halving per RTT"原则的最早工业实践。
 - **TCP CUBIC**:Ha et al. 2008,CUBIC 函数 + W_max 记忆,Linux 默认拥塞控制。
 - **Chiu-Jain 公平性证明**:Chiu, Jain 1989, "Analysis of the Increase and Decrease Algorithms for Congestion Avoidance in Computer Networks"。证明 AIMD 在共享资源上的公平收敛。
-- **Midokura HAMi-core ablation**:[ablation/orig-aimd-v5 分支](https://github.com/midokura/HAMi-core/tree/ablation/orig-aimd-v5)。

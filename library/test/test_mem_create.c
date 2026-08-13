@@ -6,8 +6,6 @@
  * ABI-critical types audited by hack/check_struct_layout.py - if its
  * layout diverges from the host CUDA toolkit, this test is the quickest
  * way to hit it at runtime.
- *
- * Ported from HAMi-core/test/test_mem_create.c.
  */
 #include <cuda.h>
 #include <pthread.h>

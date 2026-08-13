@@ -93,6 +93,8 @@ kubeletPlugin:
   nriRoot: "/var/run/nri"
   # Cgroup driver for the container environment. Empty lets the plugin auto-detect. (supported values: systemd | cgroupfs)
   cgroupDriver: "auto"
+  # After enabling the ConsumableShares feature, configure consumable shares support. ("disabled", "memory", "unlimited", or a positive integer)
+  consumableShares: ""
   # Conditionally mask /proc/driver/nvidia/params to prevent the plugin from recreating
   # missing GPU device nodes (needed under nvkind). Set to "true" to enable.
   maskNvidiaDriverParams: ""
@@ -141,7 +143,10 @@ kubeletPlugin:
         TimeSlicingSettings: false
         PassthroughSupport: false
         FabricManagerPartitioning: false
+        # Publish list-valued DRA device attributes
         DRAListTypeAttributes: false
+        # Publish consumable capacity and multi-allocation support for devices
+        ConsumableShares: false
       # Additional environment variables appended to the kubelet-plugin container.
       env:
         - name: ADDITIONAL_XIDS_TO_IGNORE
@@ -206,6 +211,9 @@ kubeletPlugin:
 #        requests:
 #          cpu: 200m
 #          memory: 256Mi
+#        limits:
+#          cpu: 1000m
+#          memory: 2Gi
 
 # DeviceClass objects published by the DRA driver. The driver advertises devices under the
 # `driverName` driver; each DeviceClass selects a device `type` via a CEL expression.
