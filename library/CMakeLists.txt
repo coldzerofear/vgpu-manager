@@ -229,9 +229,11 @@ endif()
 # Writes a session quota region the way the GPU-node agent would, so the
 # session paths can be exercised without Kubernetes. Needs no CUDA toolkit,
 # hence its placement outside the CUDA tool block below.
+find_package(Threads REQUIRED)
 add_executable(vgpu-session-config tools/session_config.c ${VGPU_NODRIVER_SRCS})
 target_include_directories(vgpu-session-config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(vgpu-session-config PRIVATE Threads::Threads)
 
 # find_package(CUDAToolkit REQUIRED)
 add_executable(mem_occupy_tool tools/mem_occupy_tool.c)
