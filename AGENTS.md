@@ -83,6 +83,24 @@
 - **`library-remote` 裁剪**：Phase 1 只导出内存 hook 族 + `cuCtxGetDevice` + `cuDeviceGetCount/Get` + nvml 内存/
   进程表 hook + `dlsym`；裁剪 `cuLaunchKernel*`/利用率 watcher/超卖/ledger/sm_node/`cuGetProcAddress` 等。
 - 边界见设计 §4.3.1 的 10 条（令牌签发、agent 落盘通道、fail-closed、env 时机、无 session 客户端等）。
+- **C-2 注入方式（v0.3.4，推荐）**：不改 lupine 源码——自研 `liblupinecr.so` checkpoint provider，在其
+  `restore(connection_id)`（lupine 在每个连接子进程首个 RPC 前调用，`connection_id`=`LUPINE_SESSION`）里
+  消毒 session → 派生 `VGPU_CONFIG_PATH` → setenv → 配置区不存在返回非 0（fail-closed）。LD_PRELOAD 仍须 server
+  进程级设置；库的 fork 安全修正（`g_vgpu_config` 置 NULL）仍必须做。详见设计 §4.3.3。
+- **单制品合并（§4.3.3.1）**：provider 可内置于 `libvgpu-remote.so`（同一 .so 既做 hook 库又被 lupine dlopen
+  当 provider；glibc 按 realpath 去重返回已加载句柄）。必须把 `lupinecr_get_lupine_provider_v1` 加进导出脚本
+  `global:`（否则 `local: *` 藏掉），并 vendor `checkpoint_provider.h`；server 部署设
+  `LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-remote.so`（制品不叫 liblupinecr.so，默认路径找不到）。
+
+## 2.3 实测结论（v0.3.3，重要）
+
+- **客户端本地路由陷阱**：client/server 同机测试时 lupine-client 把设备 0 路由到本地 GPU（`routing.cpp:226-244`
+  本地设备优先），`cuMemAlloc` 在客户端进程内用真实驱动执行，服务端 library 收不到调用 → 分配不受限，但
+  nvidia-smi（nvml 总是走 server）显示限额 → 假象。**远程验收测试必须用无 GPU 客户端或 `LUPINE_DISABLE_LOCAL=1`。**
+- **fork 安全补遗（方案 C 阻塞项）**：`load_controller_configuration` 守卫 `if (g_vgpu_config == NULL)`
+  （`loader.c:2856`），而 `loader_child_after_fork`（`loader.c:2994`）不重置 `g_vgpu_config` → 子进程继承父配置，
+  per-session `VGPU_CONFIG_PATH` 不生效。**必须在 atfork 里置 `g_vgpu_config = NULL` 或改守卫**（设计 §4.3.2）。
+- **记账口径**：子进程必须用 SESSION 模式（会话进程表过滤，§6.5），不能是 HOST 全机求和（`cuda_hook.c:2398`）。
 
 ## 3. 关键决策与事实速查（含文件:行号）
 
@@ -98,6 +116,10 @@
 - Python 客户端 `python/lupine`：`connect()` 只做"设 `LUPINE_SERVER` + ctypes 提前加载 shim"，返回普通
   `torch.device("cuda")`，**不注册新 torch backend**；`sidecar` 是为 macOS/CPU-only 宿主设计的容器化 PyTorch worker，
   **k8s Linux pod 不适用**。k8s 集成 = 注入层设 env/libs，应用零改动（设计 §2.4/§8.2）。
+- **lupine 环境变量全量参考**（语义/默认/位置/使用矩阵）：`docs/lupine_env_reference.md`。要点：
+  `LUPINE_SERVER`（端点，逗号列表≤16）、`LUPINE_SESSION`（会话头=容器判别基础，§6.2.1）、`LUPINE_DISABLE_LOCAL`
+  （**远程测试必设 1**，否则本地路由，§4.3.2）、`LUPINE_PORT`（默认14833）、`LUPINE_TRACE/LOG_LEVEL/DEBUG/RPC_STATS`
+  （排查）、`LUPINE_DRIVER_VERSION_OVERRIDE`（伪造驱动版本，慎用）。
 
 ### library 侧
 - 真函数解析枢纽（远程化改造关键）：`loader.c:1116-1203`（dlopen 版本化 `libcuda.so.<ver>`），
