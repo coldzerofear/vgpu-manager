@@ -32,6 +32,9 @@ limitations under the License.
 #include "include/hook.h"
 #include "include/session.h"
 
+extern int lock_gpu_device(int device_index);
+extern void unlock_gpu_device(int fd);
+
 #define ROOT "/tmp/.vgpu_session_test/sess-1"
 
 static int failures;
@@ -183,12 +186,52 @@ static void test_allowed_device_order(void) {
   }
 }
 
+/* Where the per-device GPU lock FILE actually lands, not merely what the
+ * directory macro expands to. The two came apart once: the file name was
+ * concatenated from TMP_DIR at compile time while the directory followed the
+ * session, so open() hit a path nothing had created, lock_gpu_device()
+ * returned -1, and every caller ran its budget check unlocked. A macro-level
+ * assertion would not have noticed; this one opens the lock and looks. */
+static void test_gpu_lock_file_location(void) {
+  printf("gpu lock file location:\n");
+  char expected[PATH_MAX];
+
+  setenv(SESSION_PATH_ENV, ROOT, 1);
+  session_paths_reset();
+  snprintf(expected, sizeof(expected), "%s/.vgpu_lock/vgpu_0.lock", ROOT);
+  unlink(expected);
+  int fd = lock_gpu_device(0);
+  if (fd < 0) {
+    printf("  [FAIL] lock_gpu_device returned %d in session mode\n", fd);
+    failures++;
+  } else if (access(expected, F_OK) != 0) {
+    printf("  [FAIL] session lock file not at %s\n", expected);
+    failures++;
+  } else {
+    printf("  [ok] session lock at %s\n", expected);
+  }
+  unlock_gpu_device(fd);
+
+  unsetenv(SESSION_PATH_ENV);
+  session_paths_reset();
+  snprintf(expected, sizeof(expected), "%s/vgpu_0.lock", VGPU_LOCK_PATH_LOCAL);
+  fd = lock_gpu_device(0);
+  if (fd < 0 || access(expected, F_OK) != 0) {
+    printf("  [FAIL] local lock file not at %s\n", expected);
+    failures++;
+  } else {
+    printf("  [ok] local lock at %s\n", expected);
+  }
+  unlock_gpu_device(fd);
+}
+
 int main(void) {
   test_local_paths();
   test_session_paths();
   test_bad_root_falls_back();
   test_config_round_trip();
   test_allowed_device_order();
+  test_gpu_lock_file_location();
 
   if (failures != 0) {
     printf("\n%d check(s) FAILED\n", failures);
