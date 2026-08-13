@@ -225,6 +225,49 @@ static void test_gpu_lock_file_location(void) {
   unlock_gpu_device(fd);
 }
 
+/* When a forked child must re-read the config and when it must not.
+ *
+ * A child inherits the parent's mapping. Re-reading unconditionally costs
+ * every forking CUDA process a pointless mmap; never re-reading hands one
+ * tenant's quota to another as soon as the child belongs to a different
+ * session. The deciding question is whether the path still resolves the same,
+ * which is what this pins down. */
+static void test_config_source_moved(void) {
+  printf("config source tracking:\n");
+
+  setenv(SESSION_PATH_ENV, ROOT, 1);
+  session_paths_reset();
+  config_source_record();
+
+  if (config_source_moved()) {
+    printf("  [FAIL] reported moved with nothing changed (local fork would re-map)\n");
+    failures++;
+  } else {
+    printf("  [ok] unchanged path -> no re-read\n");
+  }
+
+  /* The child of a lupine-server fork: same process image, different session. */
+  setenv(SESSION_PATH_ENV, "/tmp/.vgpu_session_test/sess-2", 1);
+  session_paths_reset();
+  if (!config_source_moved()) {
+    printf("  [FAIL] session change not detected -- child would keep the other session's quota\n");
+    failures++;
+  } else {
+    printf("  [ok] session change -> re-read\n");
+  }
+
+  /* Leaving a session behind must count as a move too, not just entering one. */
+  config_source_record();
+  unsetenv(SESSION_PATH_ENV);
+  session_paths_reset();
+  if (!config_source_moved()) {
+    printf("  [FAIL] session -> local not detected\n");
+    failures++;
+  } else {
+    printf("  [ok] session -> local -> re-read\n");
+  }
+}
+
 int main(void) {
   test_local_paths();
   test_session_paths();
@@ -232,6 +275,7 @@ int main(void) {
   test_config_round_trip();
   test_allowed_device_order();
   test_gpu_lock_file_location();
+  test_config_source_moved();
 
   if (failures != 0) {
     printf("\n%d check(s) FAILED\n", failures);

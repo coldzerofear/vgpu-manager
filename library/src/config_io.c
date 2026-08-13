@@ -242,3 +242,34 @@ int config_allowed_devices(const resource_data_t *cfg, int *host_indexes, int ma
   }
   return count;
 }
+
+/* Which file the live config was built from, so a caller can tell an inherited
+ * config that is still correct from one that is not.
+ *
+ * Written under the same pthread_once as g_vgpu_config itself
+ * (load_controller_configuration), so it needs no separate synchronisation. */
+static char g_config_loaded_from[PATH_MAX];
+
+/* 1 if the config path now resolves somewhere other than where the live config
+ * was read from. Only a session change does that, and only after a fork: the
+ * checkpoint provider publishes the child's session AFTER the fork, so the
+ * child re-enters config loading holding the parent's mapping. Answering "no"
+ * for a plain local fork is the point -- both sides resolve to the same file,
+ * and re-mapping it would cost every forking CUDA process an extra mmap for
+ * nothing. */
+int config_source_moved(void) {
+  if (g_config_loaded_from[0] == '\0') {
+    return 0;
+  }
+  if (strcmp(g_config_loaded_from, CONTROLLER_CONFIG_FILE_PATH) == 0) {
+    return 0;
+  }
+  LOGGER(VERBOSE, "config source moved from %s to %s, re-reading",
+         g_config_loaded_from, CONTROLLER_CONFIG_FILE_PATH);
+  return 1;
+}
+
+void config_source_record(void) {
+  snprintf(g_config_loaded_from, sizeof(g_config_loaded_from), "%s",
+           CONTROLLER_CONFIG_FILE_PATH);
+}

@@ -318,6 +318,12 @@ int write_file_to_config_path(resource_data_t *data);
  * source of the container's device ordering -- see the definition. */
 int config_allowed_devices(const resource_data_t *cfg, int *host_indexes, int max);
 
+/* Has the config path moved since the live config was read? See the definition
+ * -- this is what keeps a forked child from using another session.s quota
+ * without making a plain local fork re-map the same file. */
+int config_source_moved(void);
+void config_source_record(void);
+
 extern resource_data_t *g_vgpu_config;
 
 /* Cheap single-field read for a hot gate that consults exactly ONE int32 device

@@ -2668,7 +2668,28 @@ void init_g_vgpu_config_by_env(resource_data_t** data) {
 }
 
 void load_controller_configuration() {
+  /* A forked child re-enters here (the once-guard is reset) still holding the
+   * parent's mapping. Whether that is the right config depends entirely on
+   * whether the path still resolves the same way:
+   *
+   *   local fork  -- same path, so the mapping is already correct. Dropping it
+   *                  would cost a redundant mmap on every fork of every CUDA
+   *                  process, which is why this compares instead of always
+   *                  re-reading.
+   *   session     -- the checkpoint provider sets VGPU_CONFIG_SESSION_PATH in
+   *                  the child AFTER the fork, so the path moves. Keeping the
+   *                  inherited mapping here would apply one tenant's limits to
+   *                  another, silently, and would also skip the fail-closed
+   *                  checks below, since they only run on the load path.
+   *
+   * The stale mapping is left mapped rather than munmap'd: it is 8KB, this
+   * runs at most once per child, and unmapping a region another thread may
+   * still be reading is a worse trade than the address space. */
+  if (g_vgpu_config != NULL && config_source_moved()) {
+    g_vgpu_config = NULL;
+  }
   if (g_vgpu_config == NULL) {
+    config_source_record();
     /* Remote mode is fail-closed: the quota is issued by the GPU node's agent
      * into a session directory, so anything else means we cannot tell whose
      * limits these are. Both refusals matter:
@@ -2841,18 +2862,16 @@ void loader_child_after_fork(void) {
   init_nvml_host_index = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_controller_config_init = (pthread_once_t)PTHREAD_ONCE_INIT;
   g_reset_cuda_index_init = (pthread_once_t)PTHREAD_ONCE_INIT;
-  /* Resetting the once-guard is not enough: load_controller_configuration()
-   * skips its work while g_vgpu_config is non-NULL, so a child would keep
-   * whatever mapping it inherited. Under lupine-server that is precisely the
-   * wrong answer -- each child is a DIFFERENT container and must map its own
-   * session quota -- and it fails silently, as one tenant's limits applied to
-   * everyone. Dropping the pointer forces the re-read. The parent's mapping
-   * stays valid for the parent; this only clears our view of it.
+  /* The session paths must be re-derived: the checkpoint provider sets
+   * VGPU_CONFIG_SESSION_PATH in the child AFTER the fork, so anything resolved
+   * before it must not survive into the child.
    *
-   * Same reasoning for the session paths: the provider sets
-   * VGPU_CONFIG_SESSION_PATH in the child AFTER fork, so any value resolved
-   * before the fork must not survive into it. */
-  g_vgpu_config = NULL;
+   * g_vgpu_config is deliberately NOT dropped here. Whether the inherited
+   * config is still the right one is decided in load_controller_configuration()
+   * by comparing where it came from against where the path now points -- doing
+   * it there keeps a plain local fork from paying for a re-map it does not
+   * need, and it is the only place that can tell, since the child's session
+   * env is not set yet at this point. */
   session_paths_reset();
   pthread_mutex_init(&g_memory_node_lock, NULL);
   pthread_mutex_init(&tid_dlsym_lock,     NULL);
