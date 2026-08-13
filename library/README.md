@@ -2,6 +2,8 @@
 
 CUDA driver API dynamic library for GPU virtualization and resource hard isolation.
 
+Using [LUPINE](https://github.com/lupinemachines/lupine) to unlock remote GPU virtualization and achieve session level resource hard isolation
+
 ## Project objectives:
 
 - [x] Ensure hard isolation of gpu resources
@@ -16,6 +18,10 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 - [x] Support client registration mode to improve container security
 - [x] Automatic SM current limiting algorithm routing
 - [x] Multi process shared token bucket to prevent SM utilization fluctuation
+- [x] Remote session device visibility isolation
+- [x] Remote Session level multi process shared token bucket
+- [x] Remote Session level memory strict isolation
+- [x] Remote Session level SM core strict isolation
 
 > Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 
