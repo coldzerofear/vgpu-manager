@@ -60,13 +60,16 @@
 - **PID 映射结构 v0.2（草案）**：按设备组织 `remote_pid_map{ devices[16]{ uuid, entries[1024]{local_pid,remote_pid,conn_index,gen}, entry_count, seq }, seq }`。
   一个本地进程在多 server 下有多个远端 PID → 按设备 + `conn_index` 区分；过滤 NVML 进程表时按设备取 `remote_pid` 集合。
   方案 C 不需要该表（用服务端会话进程表）。
-- **方案 C 配置下发（v0.3 修正，重要）**：一个容器多个使用 CUDA 的进程 = 多个 server 子进程，**不能每子进程独立
-  setenv 注入**（会导致容器级超配额）。必须用 **GPU 节点上的会话级配置区**（`resource_data_t`，seqlock）+ **会话
-  进程表**（子进程自注册 PID），所有子进程共享、容器级记账（`SESSION` 兼容模式）。agent（服务端权威）落盘
-  session.config，子进程 `VGPU_CONFIG_PATH` 引用；更新经 seqlock 热更新。详见设计 §6。
+- **方案 C 配置下发（v0.3.4 修正）**：一个容器多个使用 CUDA 的进程 = 多个 server 子进程，**不能每子进程独立
+  setenv 注入**（会导致容器级超配额）。必须用 **GPU 节点上的会话目录** `<base>/<session>/`（provider `restore()`
+  幂等创建 `config/`/`.vgpu_lock`/`.vmem_node`/`.sm_node`，agent 权威落盘 `config/vgpu.config` 的
+  `resource_data_t`，seqlock；含 `pids.config`），所有子进程共享、容器级记账（`SESSION` 兼容模式按 `pids.config`
+  过滤 NVML，列表保持有序可用二分）。provider `restore()` 设 `VGPU_CONFIG_SESSION_PATH`、`stop()` 清理 pid；
+  更新经 seqlock 热更新。详见设计 §6/§4.3.3。
 - **单 lupine-server 多容器并发（v0.3.1）**：判别单位是**连接**——每个子进程经 `rpc_http2_session_id()` 读自己
-  连接的 `x-lupine-session` 头（`h2.cpp:850-857`）推导 `VGPU_CONFIG_PATH`，无需全局查表；session id 客户端可控
-  → 须消毒（防路径穿越）+ 控制面签发令牌（防冒用）+ fail-closed（配置区不存在即拒绝 CUDA）（设计 §6.2.1）。
+  连接的 `x-lupine-session` 头（`h2.cpp:850-857`）由 provider 推导 `VGPU_CONFIG_SESSION_PATH`，无需全局查表；
+  session id 客户端可控 → 须消毒（防路径穿越）+ 控制面签发令牌（防冒用）+ fail-closed（`config/vgpu.config` 不存在
+  即拒绝 CUDA）（设计 §6.2.1）。
 - **设备访问控制必须做**：客户端经 lupine 可见 server 全部设备，须服务端 allowlist + 序号重映射（C）或 adapter 裁剪（B），
   否则可绕过配额用未分配 GPU（设计 §6.6）。
 
@@ -83,10 +86,11 @@
 - **`library-remote` 裁剪**：Phase 1 只导出内存 hook 族 + `cuCtxGetDevice` + `cuDeviceGetCount/Get` + nvml 内存/
   进程表 hook + `dlsym`；裁剪 `cuLaunchKernel*`/利用率 watcher/超卖/ledger/sm_node/`cuGetProcAddress` 等。
 - 边界见设计 §4.3.1 的 10 条（令牌签发、agent 落盘通道、fail-closed、env 时机、无 session 客户端等）。
-- **C-2 注入方式（v0.3.4，推荐）**：不改 lupine 源码——自研 `liblupinecr.so` checkpoint provider，在其
+- **C-2 注入方式（v0.3.4，推荐）**：不改 lupine 源码——provider 内置于 `libvgpu-remote.so`（§4.3.3.1），在其
   `restore(connection_id)`（lupine 在每个连接子进程首个 RPC 前调用，`connection_id`=`LUPINE_SESSION`）里
-  消毒 session → 派生 `VGPU_CONFIG_PATH` → setenv → 配置区不存在返回非 0（fail-closed）。LD_PRELOAD 仍须 server
-  进程级设置；库的 fork 安全修正（`g_vgpu_config` 置 NULL）仍必须做。详见设计 §4.3.3。
+  消毒 session → 校验 `<session>/config/vgpu.config` 存在 → `setenv(VGPU_CONFIG_SESSION_PATH)` + **注册 pid 进
+  `<session>/pids.config`** → 不存在返回非 0（fail-closed）；`stop()`（子进程退出）**从 `pids.config` 移除 pid**。
+  LD_PRELOAD 仍须 server 进程级设置；库的 fork 安全修正（`g_vgpu_config` 置 NULL）仍必须做。详见设计 §4.3.3。
 - **单制品合并（§4.3.3.1）**：provider 可内置于 `libvgpu-remote.so`（同一 .so 既做 hook 库又被 lupine dlopen
   当 provider；glibc 按 realpath 去重返回已加载句柄）。必须把 `lupinecr_get_lupine_provider_v1` 加进导出脚本
   `global:`（否则 `local: *` 藏掉），并 vendor `checkpoint_provider.h`；server 部署设
@@ -99,7 +103,7 @@
   nvidia-smi（nvml 总是走 server）显示限额 → 假象。**远程验收测试必须用无 GPU 客户端或 `LUPINE_DISABLE_LOCAL=1`。**
 - **fork 安全补遗（方案 C 阻塞项）**：`load_controller_configuration` 守卫 `if (g_vgpu_config == NULL)`
   （`loader.c:2856`），而 `loader_child_after_fork`（`loader.c:2994`）不重置 `g_vgpu_config` → 子进程继承父配置，
-  per-session `VGPU_CONFIG_PATH` 不生效。**必须在 atfork 里置 `g_vgpu_config = NULL` 或改守卫**（设计 §4.3.2）。
+  per-session 配置不生效。**必须在 atfork 里置 `g_vgpu_config = NULL` 或改守卫**（设计 §4.3.2）。
 - **记账口径**：子进程必须用 SESSION 模式（会话进程表过滤，§6.5），不能是 HOST 全机求和（`cuda_hook.c:2398`）。
 
 ## 3. 关键决策与事实速查（含文件:行号）
@@ -195,8 +199,8 @@ lupine 环境变量：`LUPINE_SERVER=host:14833`（客户端）、`LUPINE_PORT=1
 - 方案 C 中 dlopen 后置无法拦截已解析引用 → 必须**进程级 LD_PRELOAD**（库最先入全局符号表），父进程不碰 CUDA。
 - 方案 C 里库的 dlsym 会遮蔽 lupine-server 的 `nvml_symbol<>()` 句柄 dlsym（`nvml_server.cpp:36-56`）：
   spike 验证已 hook/未 hook 的 nvml 函数均按预期拦截或直通。
-- 配置加载"文件优先"（`loader.c:2856`）：方案 C 的 per-child env 会被 GPU 节点全局 `vgpu.config` 覆盖 →
-  远程节点不放全局 config，或加 `VGPU_CONFIG_FROM_ENV`/`VGPU_CONFIG_PATH`。
+- 配置加载"文件优先"（`loader.c:2856`）：方案 C 靠 `VGPU_CONFIG_SESSION_PATH` 定位 `<session>/config/vgpu.config`，
+  远程节点不放全局 config；配合 `loader_child_after_fork` 置 `g_vgpu_config=NULL`（设计 §4.3.2 关键修正 1）。
 - 设备访问控制不可省略：客户端经 lupine 可见 server 全部设备，需服务端 allowlist 或 adapter 裁剪（设计 §6.3）。
 - lupine 按 CUDA 版本打多制品（client/server × cuda-ver × os）：兼容方向 **client ≤ server**；推荐单基准制品 +
   跨版本 wire 兼容 spike；server 制品绑定节点驱动（设计 §7）。

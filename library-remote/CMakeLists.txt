@@ -50,11 +50,13 @@ add_library(vgpu-remote SHARED
     include/nvml-helper.h
     include/metrics.h
     include/vdpau/vdpau.h
+    include/checkpoint_provider.h
     src/cuda_originals.c
     src/nvml_originals.c
     src/cuda_hook.c
     src/nvml_hook.c
     src/loader.c
+    src/checkpoint_provider.c
     src/util.c
     src/lock.c
     src/metrics.c)
