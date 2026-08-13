@@ -96,12 +96,23 @@ session-cli: ## Build vgpu-session-config (writes a session quota region by hand
 	$(CC) -o $(BUILD_DIR)/vgpu-session-config $(CFLAGS_NOGPU) \
 	    $(LIBRARY_DIR)tools/session_config.c $(SESSION_SRCS)
 
+# test_sm_node_shared / test_vmem_region_concurrency use their own temp files
+# rather than the derived paths -- they cover the cross-process semantics of the
+# shared regions (CAS refill election, sampling ownership, the fork hazard, slot
+# allocation, compaction), which is what the container-wide token bucket rests
+# on and what reading the code cannot confirm. Keeping them here also pins the
+# region ABI after this tree dropped the AIMD state from sm_node_dev_t.
+NOGPU_TESTS := test_session_paths test_sm_node_shared test_vmem_region_concurrency
+
 .PHONY: test-nogpu
-test-nogpu: ## Run the session path / config round-trip checks.
+test-nogpu: ## Run session path, config round-trip and shared-region checks.
 	@mkdir -p $(BUILD_DIR)
-	$(CC) -o $(BUILD_DIR)/test_session_paths $(CFLAGS_NOGPU) \
-	    $(LIBRARY_DIR)test/nogpu/test_session_paths.c $(SESSION_SRCS)
-	$(BUILD_DIR)/test_session_paths
+	@for t in $(NOGPU_TESTS); do \
+	    echo "==> $$t"; \
+	    $(CC) -o $(BUILD_DIR)/$$t $(CFLAGS_NOGPU) \
+	        $(LIBRARY_DIR)test/nogpu/$$t.c $(SESSION_SRCS) || exit 1; \
+	    $(BUILD_DIR)/$$t || exit 1; \
+	done
 
 ##@ Docker
 

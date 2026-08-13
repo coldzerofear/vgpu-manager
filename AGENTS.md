@@ -83,8 +83,12 @@
     经这两个 RPC 枚举，`routing.cpp:217-277`）。
   - nvml 路径经 `nvml_symbol<>()` dlsym 句柄查询（`nvml_server.cpp:46-56`）→ **库必须保留 dlsym 拦截器**。
   - per-session 配置 fork 安全依赖 `loader_child_after_fork`（`loader.c:2994`）重置 once-guard，**不能裁剪**。
-- **`library-remote` 裁剪**：Phase 1 只导出内存 hook 族 + `cuCtxGetDevice` + nvml 内存/进程表/**设备可见性** hook
-  + `dlsym`；裁剪 `cuLaunchKernel*`/利用率 watcher/超卖/ledger/sm_node/`cuGetProcAddress` 等。
+- **`library-remote` 裁剪**（更正）：实际只裁掉了 AIMD/auto 控制器（delta 保留）。`cuLaunchKernel*`、利用率
+  watcher、`sm_node` 共享桶**都还在**——Phase 2 的工作是让它们在会话模型下语义正确，不是重新加回来。
+- **共享令牌桶在会话模式下强制开启**：一个远程容器 = 每条连接一个子进程，进程内桶会让每个子进程各自按完整
+  `hard_core` 限速 → 容器拿到 N× 配额；且 N 个 watcher 各自轮询 NVML。共享桶（`<session>/.sm_node`）的 CAS 补给
+  选举 + 采样所有权同时解决两者（standby 完全跳过 NVML）。显式 `CUDA_SM_SHARED_BUCKET=0` 在会话模式下被拒绝；
+  映射失败且该会话配了核心限额则 fail-closed。详见设计 Phase 2。
 - **设备隔离不 hook `cuDeviceGetCount/Get`**（v0.4 定案）：CUDA 侧由 provider `setenv CUDA_VISIBLE_DEVICES=<会话
   设备 UUID 列表>`，驱动自己裁剪并重排为 0..n-1；NVML **不受该 env 约束**，另 hook `nvmlDeviceGetCount(_v2)`/
   `GetHandleByIndex(_v2)`/`GetHandleByUUID`/`GetHandleByPciBusId(_v2)`/`GetHandleBySerial`/`GetIndex`。

@@ -8,9 +8,9 @@ A remote vGPU adapter for implementing network-based remote vGPU hard isolation
 - [x] Remote container GPU device quota configuration discovery
 - [x] Remote container device PID list discovery/maintenance
 - [x] Remote container device visibility isolation
+- [x] Container level multi process shared token bucket (forced on in a session)
 - [ ] Remote container level memory strict isolation (implemented, pending on-GPU validation)
-- [ ] Remote container level SM core strict isolation
-- [ ] Container level multi process shared token bucket
+- [ ] Remote container level SM core strict isolation (implemented, pending on-GPU validation)
 
 > Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 
@@ -70,7 +70,8 @@ session quota is refused rather than served unrestricted.
 * EXTERNAL_SM_WATCHER_ENABLED: Enable external SM util watcher
 * VMEMORY_NODE_ENABLED: Enable virtual memory node tracing
 * CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: Accelerate delta utilization rate climb speed - default 64
-* CUDA_SM_SHARED_BUCKET: Enable SM shared token bucket
+* CUDA_SM_SHARED_BUCKET: Enable SM shared token bucket. Opt-in locally, forced on in a session -- one container is
+  served by several lupine-server children, and a per-process bucket would give each of them the full core quota
 * VGPU_CONFIG_SESSION_BASE: Directory holding session directories (default /etc/vgpu-manager/remote-sessions)
 * VGPU_REMOTE_MODE: Mark the process as serving remote sessions only (fail-closed without a session quota)
 * VGPU_CONFIG_SESSION_PATH: This session's directory. Set by the checkpoint provider per connection, not by hand;

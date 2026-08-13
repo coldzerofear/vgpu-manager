@@ -872,10 +872,35 @@ static void sm_controller_init(void) {
 
   /* Container-wide shared bucket. Read here so the dump line reports it and so
    * initialization() can act on it; the mapping itself happens there, once the
-   * device geometry this region is seeded from is known. */
-  g_dynamic_config.sm_shared_bucket = 0;
+   * device geometry this region is seeded from is known.
+   *
+   * Opt-in locally (historical default), but REQUIRED in a session. A remote
+   * container is served by one lupine-server child per client connection, and
+   * a per-process bucket would give each of them the container's full core
+   * quota -- two CUDA processes would get 2x what was allocated. It is also
+   * what keeps NVML polling bounded: only the sampling owner calls NVML and
+   * the standbys read its published sample, so N children cost one poller
+   * rather than N. Both properties are the point of the quota, so an explicit
+   * opt-out is refused rather than honoured. */
+  g_dynamic_config.sm_shared_bucket = session_enabled();
   (void)get_sm_shared_bucket(&g_dynamic_config.sm_shared_bucket);
+  if (unlikely(session_enabled() && !g_dynamic_config.sm_shared_bucket)) {
+    LOGGER(WARNING, "CUDA_SM_SHARED_BUCKET=0 ignored in a remote session: "
+                    "a per-process bucket would let each connection use the container's full core quota");
+    g_dynamic_config.sm_shared_bucket = 1;
+  }
+}
 
+/* Does any device in this config actually cap cores? Decides whether losing
+ * the shared bucket is fatal (see initialization()). */
+static int session_has_core_limit(void) {
+  for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
+    device_t d = get_device_snapshot(i);
+    if (d.activate && d.core_limit) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 static int64_t shares[MAX_DEVICE_COUNT]    = {0};
@@ -1827,6 +1852,16 @@ static void initialization() {
   if (g_dynamic_config.sm_shared_bucket && g_sm_node == NULL) {
     if (map_sm_node_region(&g_sm_node) != 0 || g_sm_node == NULL) {
       g_sm_node = NULL;
+      /* Locally this is a real degradation and nothing more. In a session it
+       * is an over-quota hole: every child would throttle against its own
+       * bucket and the container would get N times its cores. Only worth
+       * refusing over when a core limit is actually configured -- without one
+       * there is no quota for the fallback to overshoot. */
+      if (unlikely(session_enabled() && session_has_core_limit())) {
+        LOGGER(FATAL, "sm_node unavailable at %s but this session limits cores; "
+                      "refusing to serve rather than give each connection the full quota",
+               SM_NODE_FILE_PATH);
+      }
       LOGGER(WARNING, "sm_node unavailable, falling back to per-process token bucket");
     } else {
       for (int i = 0; i < MAX_DEVICE_COUNT; i++) {

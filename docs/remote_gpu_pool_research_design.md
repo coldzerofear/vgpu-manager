@@ -994,10 +994,37 @@ B 阶段积累的 lupine 补丁经验（session/RPC 接入点）与 Go 侧配额
 - [ ] 端到端：同 B 的验收标准，且**验证多进程容器容器级记账**（S5），客户端为**普通 lupine client**（无适配层）。
 
 ### Phase 2 —— 核心隔离（仅 C 支持）
-- [ ] 库的 `rate_limiter` + 利用率 watcher 在子进程内启用（本地轮询，`SESSION` 过滤）。
-- [ ] 验证多租户 SM 抢占下各自限速正确；可选 `CUDA_SM_SHARED_BUCKET` 在节点级多客户端间共享（per-session 桶）。
-- [ ] 动态配额更新（缩容/限速热调整）的子进程重新初始化机制。
-- [ ] 权衡是否回补 B 的显示层 PID 改写（把子进程 PID 映射回本地 PID，纯展示优化，可选）。
+
+> **前提澄清**：`library-remote` 复制自 `library/` 时，令牌桶（`rate_limiter`）、利用率 watcher、`sm_node` 共享桶
+> **全部保留**（只裁掉了 AIMD/auto 控制器，delta 保留）。所以 Phase 2 不是"新增限速能力"，而是**让既有能力在
+> 会话模型下语义正确**。
+
+- [x] `rate_limiter` + 利用率 watcher 在子进程内启用：`initialization()` 由 `cuInit` hook 触发
+      （`cuda_hook.c`），而 `cuInit` 正是 lupine 子进程的首个 RPC，故连接建立即完成映射与 watcher 启动。
+      利用率归属已在 Phase 1 的 `SESSION` 模式中按 `pids.config` 过滤。
+- [x] **共享令牌桶在会话模式下强制启用**（关键修正，见下）。
+- [x] 限额热更新：watcher 每周期 `get_device_snapshot(host_index)` 重读 `hard_core`/`soft_core`，
+      seqlock 保证不撕裂 → **核心限额缩容/调整无需重启子进程**。（`g_total_cuda_cores` 来自设备物理几何，
+      与配额无关，不需要热更新。）
+- [ ] 真机验证多租户 SM 抢占下各自限速正确。
+- [ ] 显示层 PID 改写（把子进程 PID 映射回本地 PID，纯展示优化，可选）。
+
+#### 关键修正：共享令牌桶不是可选项
+
+`CUDA_SM_SHARED_BUCKET` 在本地库是**默认关闭的 opt-in**。远程模式下必须**强制开启**，否则有两个问题：
+
+1. **容器级配额被突破**：一个远程容器 = 每条客户端连接一个 lupine-server 子进程。每个子进程有自己的
+   `g_dev_hot[].cur_cuda_cores`，各自按完整 `hard_core` 限速 → 容器内 2 个 CUDA 进程拿到 **2×** 配额。
+   这与内存侧"每子进程独立记账会超配额"（§6.1）是同一类缺陷。
+2. **NVML 轮询放大**：每个子进程一个 watcher 线程各自高频轮询 NVML → N 个子进程 N 倍开销。
+
+共享桶同时解决两者：桶落在 `<session>/.sm_node`（Phase 1 已做 per-session 作用域），
+CAS 补给选举保证全会话每周期只有一次补给；**采样所有权**让 leader 之外的进程完全跳过 NVML、直接读其发布的样本
+（`sm_publish_sample`），于是 N 个子进程只有 1 个轮询者。
+
+实现：`sm_controller_init()` 在 `session_enabled()` 时把默认值置 1，且**显式 `CUDA_SM_SHARED_BUCKET=0` 会被拒绝
+并告警**（放行它等于放弃配额）。映射失败时：本地模式照旧降级为进程内桶；**会话模式下若该会话确实配置了核心限额，
+则 fail-closed 拒绝服务**（`session_has_core_limit()` 门控——没配核心限额时无配额可超，不必拒绝）。
 
 ### 8.2 Python/PyTorch 工作负载在 k8s 中的集成方式（基于 §2.4 分析）
 
