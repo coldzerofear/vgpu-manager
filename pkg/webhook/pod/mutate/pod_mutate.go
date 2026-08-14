@@ -37,9 +37,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -221,6 +223,12 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 	// Cleaning metadata to prevent impact on scheduling.
 	reschedule.CleanupMetadata(pod)
 	if isVGPUPod {
+		if pod.Spec.OS != nil && pod.Spec.OS.Name == corev1.Windows {
+			return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+				field.Invalid(field.NewPath("spec").Child("os").Child("name"),
+					corev1.Windows, "vgpu-manager currently does not support windows pod"),
+			})
+		}
 		setDefaultSchedulerName(pod, h.options, logger)
 		setDefaultNodeSchedulerPolicy(pod, h.options, logger)
 		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)

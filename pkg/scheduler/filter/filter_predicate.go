@@ -201,6 +201,11 @@ func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *e
 			NodeNames: args.NodeNames,
 		}
 	}
+	if pod.Spec.OS != nil && pod.Spec.OS.Name == corev1.Windows {
+		return &extenderv1.ExtenderFilterResult{
+			Error: fmt.Sprintf("vGPU does not support windows pod"),
+		}
+	}
 
 	var (
 		nodeCache     bool
