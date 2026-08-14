@@ -904,6 +904,52 @@ adapter 必须按配额裁剪设备可见性（复用 `MANAGER_VISIBLE_DEVICES` 
 **B 的 `remote_pid_map` 与 C 的会话进程表是同一问题的两侧解法**：B 在客户端按容器聚合远端 PID，C 在 GPU 节点
 按会话聚合子进程 PID。
 
+### 6.8 多 server 设备聚合：lupine 机制与本方案的兼容性（v0.5，代码级核实）
+
+`LUPINE_SERVER=server1,server2` 时客户端如何合并两台 server 的设备，以及"每节点独立 vgpu.config 屏蔽/重映射"
+能否兼容。结论：**兼容**。机制与边界如下。
+
+**lupine 聚合机制（客户端）**：
+- CUDA 设备表（`routing.cpp:217-277` `lupine_ensure_device_table`）：先探测**本地** GPU 逐个入表，再按
+  `LUPINE_SERVER` **从左到右**逐台调 `cuDeviceGetCount`+`cuDeviceGet(ordinal)`，`{conn_index, remote_device}`
+  依次追加。虚拟序号 = 表下标（`cuDeviceGet(i)` 直接返回 i，`routing.cpp:305`）。每次 CUDA 调用经
+  `lupine_route_for_device`（`routing.cpp:392-410`）把虚拟序号改写回该 server 的**本地序号**后发送——两台 server
+  各自的"设备 0"由 `conn_index` 区分，不冲突。
+- NVML 设备表（`nvml_client.cpp` `ensure_devices`）：同按连接顺序拼接，**不含本地设备**。NVML 与 CUDA 是**两套
+  独立的连接数组**，但都用 `strsep(",")` 从左到右解析同一个 env（`client.cpp:8227` / `nvml_client.cpp:119`），
+  正常情况下下标 i 指同一台 server。
+
+**与本方案的兼容原理**：我们的裁剪/重映射完全发生在**每台 server 自己的编号空间内**（`CUDA_VISIBLE_DEVICES`
++ NVML hook 各自产出致密的 0..n-1），这正是 lupine 聚合层对每台 server 的全部要求——两层正交。
+例：server1 配置槽位 2,3、server2 配置槽位 3,4，各分 2 卡 → 客户端看到 4 卡：
+
+```
+虚拟序号     0        1        2        3
+           (s1,0)   (s1,1)   (s2,0)   (s2,1)
+物理卡    s1:gpu2  s1:gpu3  s2:gpu3' s2:gpu4'
+```
+
+CUDA 与 NVML 聚合顺序一致，"cuda:i 就是 nvml:i" 不变量在聚合后仍成立。
+注意：决定客户端可见顺序的是 **config 槽位的升序**（`config_allowed_devices` 压缩稀疏 activate），不是物理索引；
+槽位=物理索引只是为了可读性，非必需。
+
+**边界（必须知道）**：
+1. **`LUPINE_DISABLE_LOCAL=1` 是硬性要求**（第二个理由，比测试方法论更硬）：CUDA 表含本地设备、NVML 表不含。
+   客户端只要有一张本地卡，cuda:0 是本地卡而 nvml:0 是 server1 的卡——**两个 API 指向不同的卡**，且这发生在
+   lupine 聚合层，服务端库无法修正。远程 pod 注入时必须设置。
+2. **连接失败会静默跳过导致下标错位**：CUDA/NVML 两套连接独立建立，解析时坏 token/连不上的 server 被
+   `continue`。若一侧成功另一侧失败，两表下标错开一位。排查"设备对不上"先查两侧连接数是否一致。
+3. **同一 `LUPINE_SESSION` 发给所有 server**（`h2.cpp:711-720`）：每台 GPU 节点须有**同名**会话目录、各自只配
+   本节点设备。`pids.config`/共享令牌桶/配额天然按节点独立，语义正确。
+4. **fail-closed 客户端表现为全有全无**：任一 server 拒连（如缺会话配额），`lupine_ensure_device_table` 走
+   `devices.clear(); return`——客户端看到 **0 张卡**，而非"跳过该 server 剩下的卡"。安全上正确；排查时勿误判为
+   全部节点故障。
+5. **服务端 `nvmlDeviceGetIndex` hook 的返回值到不了客户端**：lupine 客户端的 `nvmlDeviceGetIndex` 不发 RPC，
+   用自己的表算全局序号（`nvml_client.cpp:852-870`）。服务端 hook 保留（语义自洽 + 防实现变化），但客户端编号
+   由聚合层决定。
+6. **真机验收项**：双 server 各 2 卡，验证 `cudaSetDevice(2)` 与 `nvmlDeviceGetHandleByIndex(2)` 落在同一张
+   物理卡（比对 UUID）——整条链路唯一需实测确信的不变量。
+
 ---
 
 ## 7. lupine 版本/制品矩阵与分发（评审新增）

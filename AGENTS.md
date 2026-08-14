@@ -117,6 +117,10 @@
   常量），fork 时该指针恒为 NULL，所以当前不会失效。仍已在 atfork 置 NULL —— 它守的是"父进程一旦解析过 `cu*`
   就回退 env 构造出 `activate=1` 的 permissive 配置"这条**静默 fail-open**路径（设计 §4.3.2）。
 - **记账口径**：子进程必须用 SESSION 模式（会话进程表过滤，§6.5），不能是 HOST 全机求和（`cuda_hook.c:2398`）。
+- **多 server 聚合已核实兼容**（设计 §6.8）：lupine 客户端按 `LUPINE_SERVER` 从左到右拼接各 server 的致密设备表，
+  我们的裁剪在每台 server 自己的编号空间内完成，两层正交。四条边界：远程 pod **必须** `LUPINE_DISABLE_LOCAL=1`
+  （CUDA 表含本地卡而 NVML 表不含，序号会错位）；连接失败静默跳过会致两表错位；同一 `LUPINE_SESSION` 发给所有
+  server（每节点同名会话目录、各配本节点设备）；任一 server 拒连则客户端看到 0 张卡（全有全无）。
 
 ## 3. 关键决策与事实速查（含文件:行号）
 
