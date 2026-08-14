@@ -375,6 +375,9 @@ extern resource_data_t *g_vgpu_config;
  * auto_debounce_cycles: N consecutive observations to flip exclusivity FSM.
  * auto_external_util_threshold: external util percent above which the
  *                     device is considered "shared with other Pods".
+ * delta_increment_divisor: seed divisor -- delta's minimum step is
+ *                     total*MIN_INCREMENT/R, its granularity. 81920 default;
+ *                     see include/sm_delta.h.
  * delta_ramp_floor_divisor: delta()'s grow/cut step is floored at
  *                     g_total*diff/(up_limit*N); N sets the bulk-ramp length in
  *                     watcher cycles (~N cycles, SM-independent). Smaller = faster
@@ -395,6 +398,7 @@ typedef struct {
   int    aimd_md_cooldown_cycles;
   int    auto_debounce_cycles;
   int    auto_external_util_threshold;
+  int    delta_increment_divisor;
   int    delta_ramp_floor_divisor;
   /* APPENDED (see the field-ordering note above): container-wide shared token
    * bucket, on by default -- one bucket per container is what a core quota

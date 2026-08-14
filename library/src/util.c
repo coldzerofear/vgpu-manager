@@ -105,12 +105,12 @@ limitations under the License.
  * mostly-idle workloads). */
 #define CUDA_SM_USAGE_THRESHOLD_ENV         "CUDA_SM_USAGE_THRESHOLD"
 
-/* delta() ramp-floor divisor N: the grow/cut step is floored at
- * g_total*diff/(up_limit*N), so the bulk ramp to the limit takes ~N watcher
- * cycles regardless of SM count. Smaller N = faster ramp (and, on tiny slices,
- * coarser near-limit tracking); larger N = gentler. Default 64. Set to 0 (or any
- * value <= 0) to DISABLE the floor entirely and revert to delta's raw
- * sm^2-scaled step (the pre-floor behaviour). */
+/* delta() emergency cut-floor divisor N: when util exceeds TWICE the target
+ * (a real blowout, where the share-proportional cut stalls because share is
+ * tiny relative to the excess), the cut is floored at g_total*diff/(u*N).
+ * Default 64. <= 0 disables the emergency floor. Grow is never floored --
+ * an absolute grow step is exactly the bucket-flooding mechanism delta was
+ * rebuilt to remove (see include/sm_delta.h). */
 /* Container-wide shared token bucket. ON by default -- one bucket per container
  * is what a core quota means, since a per-process bucket lets an N-process
  * container use N times its cores. Set to 0 to fall back to the per-process
@@ -118,6 +118,13 @@ limitations under the License.
  * See docs/sm_multiproc_shared_bucket_design.md. */
 #define CUDA_SM_SHARED_BUCKET_ENV "CUDA_SM_SHARED_BUCKET"
 #define CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV "CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR"
+
+/* Seed divisor R in delta(): the minimum step is total*MIN_INCREMENT/R -- the
+ * controller's GRANULARITY. A step coarser than a light workload's per-tick
+ * consumption pins util at 100% (the share cannot express a small enough
+ * refill), so R errs fine: 81920 ~= 0.006% of the pool. Response speed is
+ * owned by the share-proportional term, not this knob. See sm_delta.h. */
+#define CUDA_SM_DELTA_INCREMENT_DIVISOR_ENV "CUDA_SM_DELTA_INCREMENT_DIVISOR"
 
 /*-- Cache: Read only once during the process lifecycle /proc/1/environ --*/
 static char           *g_environ_buf  = NULL;   /* The cached raw content */
@@ -552,11 +559,18 @@ int get_sm_auto_external_util_threshold(int *out) {
 }
 
 /* delta() ramp-floor divisor. Accepts any int: a value <= 0 is the explicit
- * "disable the ramp floor" sentinel (delta reverts to its raw sm^2-scaled step,
- * i.e. the pre-floor behaviour); > 0 is the active divisor. Unset -> default 64.
+ * "disable the ramp floor" sentinel (delta reverts to its raw pool-relative
+ * step); > 0 is the active divisor. Unset -> default 64.
  * delta() guards the division on divisor > 0, so a non-positive value is safe. */
 int get_delta_ramp_floor_divisor(int *out) {
   return get_int_env(CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV, 64, out);
+}
+
+/* delta() pool-relative increment divisor R (see the env comment above and
+ * include/sm_delta.h). Positive only -- 0 would divide by zero and a negative
+ * value would invert the controller; bad values fall back to the default. */
+int get_delta_increment_divisor(int *out) {
+  return get_positive_int_env(CUDA_SM_DELTA_INCREMENT_DIVISOR_ENV, 81920, out);
 }
 
 /* AIMD deadband lower edge / 1000. Caller MUST additionally check

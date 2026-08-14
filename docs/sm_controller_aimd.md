@@ -16,10 +16,13 @@
 > 修正一个 tick 就能灌满池子,消耗却要几分钟,限流形同虚设。已有的 ramp_floor 是**下限**,只救小卡爬坡慢,
 > 压不住大卡的过大增量——同一个 sm² 缺陷的两个方向,floor 只堵了一头。
 >
-> AIMD 的步长公式线性于 sm_num(`ai_step = sm_num * max_thread * 3 * eff_limit / ai_base_div`),与池容量
-> 同阶,架构上不存在此缺陷。**在 delta 的增量公式修好之前,大 SM 卡(Blackwell/B200 及以后)应显式
-> `CUDA_SM_CONTROLLER=aimd`(或 `auto`)。** 两个控制器在不同象限各有短板:delta 的 sm² 缺陷伤大卡,
-> AIMD 的锯齿伤单 Pod 吞吐——保留双方 + auto 路由,按卡型与负载选择。
+> AIMD 的步长公式线性于 sm_num,与池容量同阶,架构上不存在此缺陷,是当时的现成规避。
+>
+> **后续(同日):delta 已重构修复**——新步长 = max(粒度种子 pool·5/81920, share·相对误差/6),涨侧封顶
+> pool/10,砍侧仅在 util>2×目标时启用绝对应急 floor(include/sm_delta.h)。闭环仿真(5 种卡型 × 4 档限额 ×
+> 3 档负载,test/nogpu/test_delta_step.c)中旧公式多数格子钉死 99-100%,新公式全部格子 MAE 0.3-12 且与卡型
+> 无关;#274 场景 avg util 99.8→49.8(目标 50)。**待真机验证**(test/ablation)。AIMD 保留为备选与 auto
+> 路由目标;其锯齿伤单 Pod 吞吐的短板依旧,按负载选择。
 
 ---
 

@@ -53,11 +53,16 @@ Using [LUPINE](https://github.com/lupinemachines/lupine) to unlock remote GPU vi
 * MANAGER_COMPATIBILITY_MODE: Environment compatibility mode
 * EXTERNAL_SM_WATCHER_ENABLED: Enable external SM util watcher
 * VMEMORY_NODE_ENABLED: Enable virtual memory node tracing
-* CUDA_SM_CONTROLLER: Core limit algorithm: delta (default) | aimd | auto. delta scales its correction
-  by sm_num^2 against a pool linear in sm_num, so on very high-SM cards (188-SM Blackwell class) it
-  cannot hold the limit -- use aimd (or auto) there; see docs/sm_controller_aimd.md
+* CUDA_SM_CONTROLLER: Core limit algorithm: delta (default) | aimd | auto. delta was rebuilt after
+  HAMi-core #274 (the old sm_num^2 step could not hold the limit on very high-SM cards): its step is
+  now pool-relative -- a granularity seed plus a share-proportional term -- and holds the limit for
+  every card/workload cell in the simulated closed loop (test/nogpu/test_delta_step.c; hardware
+  validation via test/ablation pending). aimd remains available; see docs/sm_controller_aimd.md
 * CUDA_SM_AIMD_MD_DIVISOR / _EFF_RATIO / _AI_BASE_DIV / _DEADBAND_RATIO / _MD_COOLDOWN_CYCLES: AIMD tunables
-* CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: Accelerate delta utilization rate climb speed - default 64
+* CUDA_SM_DELTA_INCREMENT_DIVISOR: delta seed divisor R (min step = pool*5/R). Default 81920; the
+  granularity knob, not a speed knob -- see include/sm_delta.h
+* CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: delta emergency cut floor divisor, active only when util exceeds
+  twice the target - default 64, <=0 disables
 * CUDA_SM_SHARED_BUCKET: Container-wide shared SM token bucket. On by default; set to 0 to opt out
   (ignored in a remote session, where a per-process bucket would give every connection the full core quota)
 

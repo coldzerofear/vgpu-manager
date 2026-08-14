@@ -34,10 +34,8 @@
 #include "include/cuda-helper.h"
 #include "include/metrics.h"
 #include "include/nvml-helper.h"
+#include "include/sm_delta.h"
 
-#define INCREMENT_SCALE_FACTOR   2560
-#define MAX_UTIL_DIFF_THRESHOLD  0.5
-#define MIN_INCREMENT            5
 #define DEVICE_BATCH_SIZE        4
 
 extern resource_data_t* g_vgpu_config;
@@ -73,6 +71,7 @@ extern int get_sm_auto_external_util_threshold(int *out);
 extern int get_aimd_deadband_ratio(int *out);
 extern int get_aimd_md_cooldown_cycles(int *out);
 extern int get_usage_threshold(int *out);
+extern int get_delta_increment_divisor(int *out);
 extern int get_delta_ramp_floor_divisor(int *out);
 extern int get_uva_advise(int *out);
 extern int get_sm_shared_bucket(int *out);
@@ -584,14 +583,6 @@ const int cuda_hook_nums =
  * 30 cycles ~ 2.4s at the default ~80ms cadence.  */
 #define SOFT_ADJUST_INTERVAL    30
 
-/* DELTA_ERROR_RECOVERY_STEP: fallback share-increment value if the
- * delta() controller computes an out-of-range increment (negative or
- * > INT_MAX, both indicating an overflow path). Previously
- * dynamic_config_t.error_recovery_step; promoted to a constant
- * because it is purely defensive and irrelevant to behaviour outside
- * the overflow path. */
-#define DELTA_ERROR_RECOVERY_STEP   10
-
 /* delta()'s ramp-floor divisor is env-tunable via g_dynamic_config
  * .delta_ramp_floor_divisor (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR, default 64);
  * see the block comment at the use site in delta() and the loader in
@@ -613,6 +604,7 @@ dynamic_config_t g_dynamic_config = {
   .aimd_md_cooldown_cycles      = 3,
   .auto_debounce_cycles         = 10,
   .auto_external_util_threshold = 1,
+  .delta_increment_divisor      = 81920,
   .delta_ramp_floor_divisor     = 64,
   .sm_shared_bucket             = 0,     /* per-process bucket (historical) */
 };
@@ -672,71 +664,14 @@ static void rate_limiter(int grids, int blocks, int host_index) {
   }
 }
 
+/* Thin binding of the pure step (include/sm_delta.h) to this process's
+ * per-device state. The formula, the ramp floor and the grow cap -- and the
+ * reasons each exists -- live with the math so the no-GPU tests exercise the
+ * exact shipped code rather than a re-implementation that drifts. */
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index) {
-  // 1. Using wider data types to prevent computation overflow
-  int64_t sm_num = (int64_t)g_sm_num[host_index];
-  int64_t max_thread = (int64_t)g_max_thread_per_sm[host_index];
-
-  // 2. Calculate the difference in utilization rate
-  int utilization_diff = abs(up_limit - user_current);
-  if (utilization_diff < MIN_INCREMENT) {
-    utilization_diff = MIN_INCREMENT;
-  }
-
-  // 3. Calculate increment (using 64 bit operation to prevent overflow)
-  int64_t increment = sm_num * sm_num * max_thread * (int64_t)(utilization_diff) / INCREMENT_SCALE_FACTOR;
-
-  // 4. Accelerate adjustment logic (using floating-point thresholds instead of hard coding)
-  if ((float)utilization_diff / (float)(up_limit) > MAX_UTIL_DIFF_THRESHOLD) {
-    increment = increment * utilization_diff * 2 / (up_limit + 1);
-  }
-
-  // 5. Error handling optimization: When the increment is negative,
-  //    the process is no longer terminated, but rolled back to a safe value
-  if (unlikely(increment < 0 || increment > INT_MAX)) {
-    LOGGER(ERROR, "host device %d, increment overflow: %ld, current sm: %ld, thread_per_sm: %ld, diff: %d",
-           host_index, increment, sm_num, max_thread, utilization_diff);
-    increment = DELTA_ERROR_RECOVERY_STEP;
-  }
-
-  /* Ramp-speed floor, applied SYMMETRICALLY (before the grow/cut split) and
-   * scaled by the distance from the setpoint. `increment` is sm^2-scaled while
-   * the share must travel ~g_total (∝ sm) to track the limit, so the raw step
-   * ∝ 1/sm -- on small-SM GPUs / MIG slices the ramp and the cut-back on an
-   * overshoot both crawl for minutes.
-   *
-   * The floor is g_total * diff / (up_limit * DIVISOR): at cold start (diff ==
-   * up_limit) it is g_total/DIVISOR so the bulk ramp completes in ~DIVISOR
-   * cycles regardless of SM count, and it shrinks to ~0 as util approaches the
-   * limit so the fine control near the setpoint reverts to delta's proportional
-   * step -- keeping the tight limit tracking that large GPUs already had (a flat
-   * floor would coarsen it to +/- g_total/DIVISOR everywhere). Symmetric so it
-   * cannot ratchet: flooring only grow made grow >> cut and pushed util far past
-   * the limit (observed: hard_core=8 pinned at 15, hard_core=50 at 65-89). Uses
-   * the MIN_INCREMENT-floored utilization_diff, which conveniently keeps a small
-   * residual floor near the setpoint on tiny slices (where even the near-limit
-   * raw step is too small) while staying below the raw step on large GPUs.
-   *
-   * divisor <= 0 is the "disable" sentinel (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR set
-   * to 0 or less): skip the floor -- and its division -- so delta uses its raw
-   * sm^2-scaled step, exactly the pre-floor behaviour. */
-  int ramp_divisor = g_dynamic_config.delta_ramp_floor_divisor;
-  if (ramp_divisor > 0) {
-    int64_t floor_up_limit = up_limit > 0 ? up_limit : 1; /* guard integer div-by-zero */
-    int64_t ramp_floor = g_total_cuda_cores[host_index] * (int64_t)utilization_diff
-                         / (floor_up_limit * ramp_divisor);
-    if (increment < ramp_floor) {
-      increment = ramp_floor;
-    }
-  }
-  if (user_current <= up_limit) {
-    share = (share + increment) > g_total_cuda_cores[host_index] ?
-            g_total_cuda_cores[host_index] : (share + increment);
-  } else {
-    share = (share - increment) < 0 ? 0 : (share - increment);
-  }
-
-  return share;
+  return sm_delta_step(g_total_cuda_cores[host_index], up_limit, user_current, share,
+                       g_dynamic_config.delta_increment_divisor,
+                       g_dynamic_config.delta_ramp_floor_divisor);
 }
 
 /* ---- Pluggable SM throttle controller ---- *
@@ -1028,7 +963,8 @@ static void dump_dynamic_config(void) {
     "aimd[md_div=%.3f eff_ratio=%d/1000 ai_base_div=%d deadband_ratio=%d/1000 md_cooldown=%d] "
     "auto[debounce=%d ext_util_threshold=%d%%] "
     "shared_bucket=%d "
-    "internal[soft_adjust_interval=%d delta_recovery_step=%d]",
+    "delta[inc_div=%d ramp_floor_div=%d grow_cap=1/%d] "
+    "internal[soft_adjust_interval=%d]",
     (k >= 0 && k <= 2) ? kind_name[k] : "?",
     g_dynamic_config.usage_threshold,
     g_dynamic_config.aimd_md_divisor,
@@ -1039,8 +975,10 @@ static void dump_dynamic_config(void) {
     g_dynamic_config.auto_debounce_cycles,
     g_dynamic_config.auto_external_util_threshold,
     g_dynamic_config.sm_shared_bucket,
-    SOFT_ADJUST_INTERVAL,
-    DELTA_ERROR_RECOVERY_STEP);
+    g_dynamic_config.delta_increment_divisor,
+    g_dynamic_config.delta_ramp_floor_divisor,
+    DELTA_GROW_CAP_DIVISOR,
+    SOFT_ADJUST_INTERVAL);
 }
 
 /* Called once from initialization() before watcher threads spawn (guarded
@@ -1079,6 +1017,13 @@ static void sm_controller_init(void) {
    * controller and as an AUTO dispatch target. NO clamp here on purpose: a value
    * <= 0 is the user's explicit "disable the floor" sentinel, which delta()
    * honours by skipping the floor (and its division) entirely. */
+  /* Pool-relative linear step divisor. Clamped positive: 0 would divide-by-
+   * zero and a negative fraction would invert the controller. */
+  (void)get_delta_increment_divisor(&g_dynamic_config.delta_increment_divisor);
+  if (g_dynamic_config.delta_increment_divisor <= 0) {
+    g_dynamic_config.delta_increment_divisor = DELTA_INCREMENT_DIVISOR_DEFAULT;
+  }
+
   (void)get_delta_ramp_floor_divisor(&g_dynamic_config.delta_ramp_floor_divisor);
 
   /* Container-wide shared bucket. Read here so the dump line reports it and so

@@ -85,9 +85,10 @@
   - 设备隔离：CUDA 侧靠 provider setenv `CUDA_VISIBLE_DEVICES`（驱动自己裁剪重排），NVML 侧靠 hook 枚举族。
   - nvml 路径经 `nvml_symbol<>()` dlsym 句柄查询（`nvml_server.cpp:46-56`）→ **库必须保留 dlsym 拦截器**。
   - per-session 配置 fork 安全依赖 `loader_child_after_fork`（`loader.c:2994`）重置 once-guard，**不能裁剪**。
-- **AIMD/auto 控制器已恢复**（2026-08-14，曾在合并时删除）：delta 的增量按 sm² 缩放而池容量线性于 sm，
-  **大 SM 卡（188 SM 的 Blackwell 等）上限不住核心**（HAMi-core #274 同源缺陷）；AIMD 步长线性缩放无此问题。
-  默认仍为 `delta`；大卡应 `CUDA_SM_CONTROLLER=aimd`（或 `auto`）。详见 docs/sm_controller_aimd.md 沿革节。
+- **AIMD/auto 控制器已恢复，且 delta 已重构**（2026-08-14）：旧 delta 增量按 sm² 缩放，大 SM 卡限不住核心
+  （HAMi-core #274 同源）。新 delta = 粒度种子（pool·5/81920）+ share 比例项（误差/6 阻尼）+ 涨侧 pool/10 封顶
+  + 爆冲门控应急 floor（`include/sm_delta.h`，纯函数可测）。闭环仿真 60 格全胜旧公式（MAE 0.3-12 vs 钉死），
+  卡型无关，扛 4-tick 反馈延迟与负载突变；**待真机验证**。默认 `delta`；AIMD/auto 保留为备选。
 - **共享令牌桶默认开启**（`CUDA_SM_SHARED_BUCKET=0` 可关；会话模式下拒绝关闭）：一个远程容器 = 每条连接一个子进程，进程内桶会让每个子进程各自按完整
   `hard_core` 限速 → 容器拿到 N× 配额；且 N 个 watcher 各自轮询 NVML。共享桶（`<session>/.sm_node`）的 CAS 补给
   选举 + 采样所有权同时解决两者（standby 完全跳过 NVML）。显式 `CUDA_SM_SHARED_BUCKET=0` 在会话模式下被拒绝；

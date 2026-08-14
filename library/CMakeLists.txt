@@ -50,6 +50,7 @@ add_library(vgpu-control SHARED
     include/nvml-helper.h
     include/metrics.h
     include/session.h
+    include/sm_delta.h
     include/checkpoint_provider.h
     include/vdpau/vdpau.h
     src/cuda_originals.c
@@ -243,6 +244,12 @@ if(BUILD_SM_NODE_TESTS)
     add_executable(test_session_pids_concurrency
         test/nogpu/test_session_pids_concurrency.c src/checkpoint_provider.c ${VGPU_NODRIVER_SRCS})
     target_include_directories(test_session_pids_concurrency PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # Header-only: exercises the inline sm_delta_step directly, plus a frozen
+    # replica of the removed formula for the MAE comparison.
+    add_executable(test_delta_step test/nogpu/test_delta_step.c)
+    target_include_directories(test_delta_step PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include))
 endif()
 
