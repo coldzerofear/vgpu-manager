@@ -48,21 +48,22 @@ GPU 节点 agent（新组件，可并入 device-monitor 部署形态）发布远
 - `spec.pool`：每 GPU 节点一个 pool，generation 随设备变化递增。
 - 每设备 attributes（供 CEL 匹配与注入层读取）：
 
-| attribute | 类型 | 用途 |
-|---|---|---|
-| `vgpu.io/uuid` | string | 物理卡 UUID，agent 落盘配额时按它填 `devices[].uuid` |
-| `vgpu.io/memory` | int | 可分配显存 |
-| `vgpu.io/cudaVersion` | **version** | 节点驱动支持的 CUDA 上限，版本匹配用（§4） |
-| `vgpu.io/endpoint` | string | lupine-server 端点，**IP 或域名均可**（D3），注入层原样拼接 |
-| `vgpu.io/netZone` | string | 所属网络域（与 nodeSelector 用的标签一致，冗余供审计） |
+| attribute                        | 类型          | 用途                                        |
+|----------------------------------|-------------|-------------------------------------------|
+| `namager.nvidia.com/type`        | string      | 显卡类型 `remote-vgpu`                        |
+| `namager.nvidia.com/uuid`        | string      | 物理卡 UUID，agent 落盘配额时按它填 `devices[].uuid`  |
+| `namager.nvidia.com/memory`      | int         | 可分配显存                                     |
+| `namager.nvidia.com/cudaVersion` | **version** | 节点驱动支持的 CUDA 上限，版本匹配用（§4）                 |
+| `namager.nvidia.com/endpoint`    | string      | lupine-server 端点，**IP 或域名均可**（D3），注入层原样拼接 |
+| `namager.nvidia.com/netZone`     | string      | 所属网络域（与 nodeSelector 用的标签一致，冗余供审计）        |
 
-切分模型（一卡多份额）复用现有 DRA 本地路径的 consumable-shares 机制（`pkg/kubeletplugin/consumable_shares.go`），
+切分模型（一卡多份额）复用现有 DRA可消费设备 本地路径的 vgpu 机制（`pkg/kubeletplugin/vgpu.go`），
 远程池按同一套份额语义发布。
 
 ### 2.2 调度与版本匹配
 
 - 可达性：ResourceSlice.nodeSelector 完成，无自定义调度逻辑。
-- 版本（client ≤ server）：DeviceClass/claim 的 CEL selector 匹配 `vgpu.io/cudaVersion >= <pod 最低需求>`。
+- 版本（client ≤ server）：DeviceClass/claim 的 CEL selector 匹配 `namager.nvidia.com/cudaVersion >= <pod 最低需求>`。
   pod 最低需求的三档来源见 §4。
 - 记账/防双分：DRA allocator 原生。多设备 claim 可跨 pool（= 跨 server）满足，
   需要同节点约束时用 claim constraints（matchAttribute）。
@@ -115,7 +116,7 @@ NodePrepareResources 发现 claim 命中远程池时：
 1. pod spec 显式含 `NVIDIA_REQUIRE_CUDA`（如 `cuda>=12.4`）→ webhook 解析转 annotation。
    **注意**：CUDA 基础镜像把该 env 写在**镜像配置**里，pod spec 不可见；webhook 不做 registry 内省
    （重、外部依赖），所以这只是"用户显式声明时的便利通道"。
-2. 显式 annotation `vgpu.io/min-cuda: "12.4"`——**推荐的主要声明方式**。
+2. 显式 annotation `namager.nvidia.com/min-cuda: "12.4"`——**推荐的主要声明方式**。
 3. 都没有 → 不筛选，靠下两层兜底。
 
 **4.2 启动前（init 屏障 pre-flight）**：HEAD server 读 `x-lupine-cuda-version`（`h2.cpp:440`，编译期常量），
@@ -161,8 +162,8 @@ GPU 节点 agent watch claim ────────┤ (主通道，通常 <1s
 
 - lupine 两侧均走 `getaddrinfo`，域名可用；解析发生在进程首次建连。server 重启杀死全部会话子进程
   （连接态不可恢复），应用重启后自然重新解析——DNS 的增量价值仅覆盖"server 换 IP 且 pod 之后才重启"窗口。
-- **可达性进调度**：网络域标签规范——GPU 节点 `vgpu.io/net-zone=<zone>`（server 所在域），
-  可达节点 `vgpu.io/net-zone.<zone>=reachable`；slice.nodeSelector 匹配后者。第一阶段运维人工标注，
+- **可达性进调度**：网络域标签规范——GPU 节点 `namager.nvidia.com/net-zone=<zone>`（server 所在域），
+  可达节点 `namager.nvidia.com/net-zone.<zone>=reachable`；slice.nodeSelector 匹配后者。第一阶段运维人工标注，
   探活组件可选后补。
 
 ## 7. 安全模型

@@ -271,6 +271,9 @@ int config_allowed_device_at(const resource_data_t *cfg, unsigned int visible_in
  * session was not given it. Passing -1 (an unmapped device) is expected and
  * answers -1, since the table never holds a negative index. */
 int config_visible_index_of(const resource_data_t *cfg, int host_index) {
+  if (host_index < 0) {
+    return -1;
+  }
   int host_indexes[MAX_DEVICE_COUNT];
   int count = config_allowed_devices(cfg, host_indexes, MAX_DEVICE_COUNT);
   for (int i = 0; i < count; i++) {
