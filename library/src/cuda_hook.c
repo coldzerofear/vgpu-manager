@@ -1132,6 +1132,7 @@ static int is[MAX_DEVICE_COUNT]             = {0};
  * the first cycle's value becomes the reference; later cycles only change
  * when a genuinely new external process arrives. */
 static int pre_external_process_nums[MAX_DEVICE_COUNT] = {0};
+static int pre_sys_process_nums[MAX_DEVICE_COUNT] = {0};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
 /* volatile: written by the watcher thread, read cross-thread by the GAP path
  * (gap_effective_dc). Matches g_dev_hot[].cur_cuda_cores' convention -- forces a real
@@ -1323,6 +1324,7 @@ static void sm_ctl_load(int host_index) {
   is[host_index]                         = d->is_cnt;
   avg_sys_frees[host_index]              = d->avg_sys_free;
   pre_external_process_nums[host_index]  = d->pre_external_proc;
+  pre_sys_process_nums[host_index]       = d->s_sys_process_num;
   /* Without these three the exclusivity FSM would advance once per N cycles in
    * each process and fracture; lost_excl_pending especially, being a one-shot
    * flag, would hang set in every non-winner and fire a stale reset cycles late. */
@@ -1343,6 +1345,7 @@ static void sm_ctl_publish(int host_index) {
   d->up_limit          = up_limits[host_index];
   d->is_cnt            = is[host_index];
   d->avg_sys_free      = avg_sys_frees[host_index];
+  d->s_sys_process_num = pre_sys_process_nums[host_index];
   d->pre_external_proc = pre_external_process_nums[host_index];
   d->excl_debounced    = g_is_exclusive_debounced[host_index];
   d->excl_streak       = g_exclusive_pending_streak[host_index];
@@ -1462,6 +1465,7 @@ static void *utilization_watcher(void *arg) {
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
     pre_external_process_nums[host_index] = 0;
+    pre_sys_process_nums[host_index] = 0;
     up_limits[host_index] = get_device_flag(host_index, hard_core);
     top_results[host_index].user_current = 0;
     top_results[host_index].sys_current = 0;
@@ -1620,6 +1624,17 @@ static void *utilization_watcher(void *arg) {
         }
         shares[host_index] = g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
       } else {
+//        // When the process inside the container changes, it should also quickly roll back to the hard core to give up resources
+//        if (pre_sys_process_nums[host_index] != top_results[host_index].sys_process_num) {
+//          if (pre_sys_process_nums[host_index] < top_results[host_index].sys_process_num) {
+//            shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
+//            up_limits[host_index] = dcfg.hard_core;
+//            is[host_index] = 0;
+//            avg_sys_frees[host_index] = 0;
+//          }
+//          pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
+//          pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
+//        }
         if (pre_external_process_nums[host_index] != top_results[host_index].external_process_num) {
           /* A NEW external process arrived (count grew) -> reset to
            * hard_core so all competitors negotiate from the same floor.
@@ -1639,6 +1654,7 @@ static void *utilization_watcher(void *arg) {
           }
           pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
         }
+        pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
 
         /* 1. Device is exclusively used by us (no external Pod competing).
          *    Allocate cuda cores up to soft_core for burst headroom.

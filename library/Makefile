@@ -77,7 +77,7 @@ build-in-docker: ## Build the .so in an ephemeral CUDA container (no local toolk
 	    -w /vgpu-library \
 	    -e DEBIAN_FRONTEND=noninteractive \
 	    $(CUDA_BASE_IMAGE) \
-	    sh -c "apt-get -y update && apt-get -y install make cmake $(PYTHON) && sh ./build.sh"
+	    sh -c "apt-get -y update && apt-get -y install make cmake $(PYTHON) && bash ./build.sh"
 
 ##@ Checks (no GPU needed)
 
