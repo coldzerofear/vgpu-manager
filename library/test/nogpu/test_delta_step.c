@@ -340,6 +340,46 @@ static void test_closed_loop(void) {
       printf("  [ok] light->heavy workload shift re-converges: MAE %.1f\n", trans);
     }
   }
+
+  /* Cold start, measured honestly: full bucket (the real init), share 0,
+   * heavy load. The bucket carries full speed for ~15 ticks, then util dips
+   * while share ramps from the seed -- the multiplicative ramp costs a
+   * ONE-TIME ~30-40 tick-equivalents of target throughput vs the old
+   * formula's ~27. This is an accepted trade: the old ramp's speed came
+   * from absolute pool-fraction steps, which is the flooding mechanism that
+   * pinned it at 100% in the light/medium regimes. A far-error boost
+   * (damping 2 when diff*2>target) was tried and rejected: it exploded the
+   * 6-tick-delay MAE from 3 to 45. The budget below pins the trade so a
+   * future change cannot silently worsen it.
+   *
+   * The transition case is different from cold start: there the OLD formula
+   * "reaches target" in 3 ticks but then thrashes (its heavy steady state IS
+   * the thrash), losing ~96 tick-equivalents to our ~29 -- asserted above
+   * via the transition MAE, and the deficit is asserted here. */
+  {
+    const card_t *b = &cards[4];
+    int64_t total = b->sm * b->thread * 32;
+    int64_t R = total / 15;
+    int64_t bucket = total, share = 0;
+    int hist[2] = {0};
+    double deficit = 0;
+    for (int t = 0; t < 200; t++) {
+      int64_t c2 = bucket < R ? bucket : R;
+      bucket -= c2;
+      int util = (int)(c2 * 100 / R);
+      int m = hist[t % 2]; hist[t % 2] = util;
+      share = sm_delta_step(total, 50, m, share, DIV, 64);
+      bucket += share; if (bucket > total) bucket = total;
+      if (util < 50) deficit += (50.0 - util) / 50;
+    }
+    if (deficit > 40.0) {
+      printf("  [FAIL] cold-start throughput deficit %.1f tick-equivalents (budget 40)\n", deficit);
+      failures++;
+    } else {
+      printf("  [ok] cold-start deficit %.1f tick-equivalents (one-time; old ~27, accepted trade)\n",
+             deficit);
+    }
+  }
 }
 
 int main(void) {
