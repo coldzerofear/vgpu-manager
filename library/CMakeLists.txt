@@ -166,6 +166,19 @@ if(VGPU_RUN_HOOK_CHECKS)
         COMMENT "[vgpu] check no constructor/destructor attributes in src/"
         VERBATIM)
     add_dependencies(vgpu-control vgpu_check_no_constructors)
+
+    # Pre-build: forbid paths concatenated at compile time from TMP_DIR /
+    # VGPU_MANAGER_PATH. Those resolve to the pre-session location always, so
+    # inside a session they name a file nothing creates -- the open() fails and
+    # the caller carries on unprotected. Needs the preprocessor, since the
+    # concatenation is written in macro names rather than in the path it makes.
+    add_custom_target(vgpu_check_session_paths ALL
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/hack/check_session_paths.sh
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "[vgpu] check session path routing in src/"
+        VERBATIM)
+    add_dependencies(vgpu-control vgpu_check_session_paths)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -224,6 +237,13 @@ if(BUILD_SM_NODE_TESTS)
     add_executable(test_session_paths test/nogpu/test_session_paths.c ${VGPU_NODRIVER_SRCS})
     target_include_directories(test_session_paths PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # Drives the provider ABI against a concurrent reader, so it needs the
+    # provider too -- the rewrite it checks is the provider.s.
+    add_executable(test_session_pids_concurrency
+        test/nogpu/test_session_pids_concurrency.c src/checkpoint_provider.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_session_pids_concurrency PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include))
 endif()
 
 # Writes a session quota region the way the GPU-node agent would, so the

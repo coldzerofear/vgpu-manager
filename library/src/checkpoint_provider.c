@@ -118,18 +118,38 @@ static int read_pids(int fd, int *pids, int max, int *count) {
 
 /* Rewrite the file with `count` PIDs (truncate + write). Caller holds the
  * lock and has sorted pids[0..count). */
+/* Whole list in one pwrite, THEN shrink -- never truncate first.
+ *
+ * Readers take LOCK_SH but give up after ~1ms and read anyway rather than
+ * stall a CUDA call behind a wedged writer (see lock_pids_config_shared in
+ * util.c). That is only safe while a reader cannot observe a SHORT file, which
+ * is exactly what ftruncate-then-write produced: land after the truncate and
+ * the list reads back empty, which the accounting path treats as "this
+ * container never registered" and answers with LOGGER(FATAL); land mid-write
+ * and it reads back partial, so used memory is under-counted and the container
+ * gets past a limit it should not.
+ *
+ * Writing first and shrinking after leaves one benign window instead: while a
+ * shrinking list is being written, a reader may see the new PIDs followed by
+ * stale trailing ones from the longer previous list. Those match nothing in
+ * the NVML process table, which is the tolerated case the reader documents. */
 static int write_pids(int fd, const int *pids, int count) {
-  if (ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0) {
-    return -1;
-  }
+  /* Bounded by SESSION_PIDS_MAX; 12 covers "-2147483648\n" so no entry can
+   * overflow its slot regardless of what was parsed out of the file. */
+  char buf[SESSION_PIDS_MAX * 12];
+  size_t len = 0;
+
   for (int i = 0; i < count; i++) {
-    char line[32];
-    int n = snprintf(line, sizeof(line), "%d\n", pids[i]);
-    if (write(fd, line, (size_t)n) != n) {
+    int n = snprintf(buf + len, sizeof(buf) - len, "%d\n", pids[i]);
+    if (n < 0 || (size_t)n >= sizeof(buf) - len) {
       return -1;
     }
+    len += (size_t)n;
   }
-  return 0;
+  if (pwrite(fd, buf, len, 0) != (ssize_t)len) {
+    return -1;
+  }
+  return ftruncate(fd, (off_t)len) == 0 ? 0 : -1;
 }
 
 /* Rewrite pids.config as: the live PIDs it already held, minus `pid` when

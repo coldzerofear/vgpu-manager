@@ -124,6 +124,7 @@ test-nogpu: build-tests ## Run the shared-region + session-path checks (no GPU, 
 	$(BUILD_DIR)/test_sm_node_shared
 	$(BUILD_DIR)/test_vmem_region_concurrency
 	$(BUILD_DIR)/test_session_paths
+	$(BUILD_DIR)/test_session_pids_concurrency
 
 .PHONY: test
 # Runs the GPU-less checks first, deliberately. They are seconds long, need no
@@ -137,6 +138,7 @@ test: build-tests ## Build then run all tests with LD_PRELOAD of libvgpu-control
 	$(BUILD_DIR)/test_sm_node_shared
 	$(BUILD_DIR)/test_vmem_region_concurrency
 	$(BUILD_DIR)/test_session_paths
+	$(BUILD_DIR)/test_session_pids_concurrency
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
 	    $(BASH) $(BUILD_DIR)/test/run_tests_with_env.sh $(BUILD_DIR)/test $(SO_FILE)
 

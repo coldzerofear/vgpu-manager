@@ -485,10 +485,19 @@ static int compare_pids(const void *a, const void *b) {
  * other process waiting on that device. LOCK_NB throughout, never a
  * blocking LOCK_SH, so a stalled writer can't wedge CUDA calls behind it.
  *
- * Giving up and reading anyway is safe: the writer never truncates before
- * writing, so an unlocked reader sees a complete list, at worst with dead
- * trailing PIDs from a previous, longer-lived registration that match
- * nothing on the device. */
+ * Giving up and reading anyway is safe: no writer truncates before writing,
+ * so an unlocked reader sees a complete list, at worst with dead trailing
+ * PIDs from a previous, longer-lived registration that match nothing on the
+ * device.
+ *
+ * That is a contract on the writers, not an observation about them, and it
+ * has two parties: the manager at container registration, and the checkpoint
+ * provider on every session connect/disconnect (write_pids in
+ * checkpoint_provider.c, which writes the whole list then shrinks the file
+ * for exactly this reason). Any third writer must do the same -- a reader
+ * that sees a short list under-counts used memory, and the accounting path
+ * treats an empty one as "never registered" and aborts the process.
+ * test/nogpu/test_session_pids_concurrency.c holds the provider to it. */
 #define PIDS_CONFIG_LOCK_YIELDS 4
 #define PIDS_CONFIG_LOCK_SLEEPS 5
 #define PIDS_CONFIG_LOCK_BACKOFF_NS (200 * 1000L) /* 200us, so ~1ms worst case */
