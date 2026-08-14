@@ -1,6 +1,8 @@
-# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.0
+# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.1
 
-> 状态：**设计定稿（四项关键决策已确认），待实施**
+> 状态：**设计定稿（六项关键决策已确认），待实施**
+> v1.1（2026-08-14）：新增 §6.1 传输加密（TLS，D5）与 §7.1 高性能网络承载（D6），均为读 lupine 源码后的核查结论；
+> D3 因 TLS 主机名校验被修正。
 > 前置：`docs/remote_gpu_pool_research_design.md`（核心库 + lupine 方案 C-2，已实现并真机验证单节点会话隔离）
 > 本文回答：设备如何上报、pod 如何调度到"网络可达但无 GPU"的节点、分配结果如何同时到达消费节点（注入）
 > 与 GPU 节点（配额落盘）、lupine 版本如何匹配、server 如何被发现。
@@ -11,8 +13,10 @@
 |---|---|---|
 | D1 | 技术路径 | **DRA 为主路径**，extender+device-plugin 为老集群兼容路径（后行） |
 | D2 | 配额落盘时序 | **agent watch 推送 + 注入 init 容器屏障**（EnsureSession） |
-| D3 | server 发现 | **endpoint attribute 同时允许 IP 或域名**，注入层不区分；按部署形态填值 |
-| D4 | 客户端制品 | **直接上版本目录机制**（不等单基准制品 spike） |
+| D3 | server 发现 | **endpoint attribute 同时允许 IP 或域名**，注入层不区分；按部署形态填值。<br>**修正（§6.1）**：attribute 需携带 scheme；启用 TLS 时只能是域名（主机名校验） |
+| D4 | 客户端制品 | **直接上版本目录机制**（不等单基准制品 spike）；制品须校验带 TLS 编译（§6.1） |
+| D5 | 传输加密 | lupine **服务端不支持 TLS**，需前置终止代理；K1 可明文，**多租户/跨信任域前必须启用**（§6.1） |
+| D6 | 高性能网络 | **SR-IOV 优先**（透明、零 lupine 改动）；IB/RoCE 组网时叠 IPoIB 或 SMC-R；GPUDirect 属改 lupine 的长期项（§7.1） |
 
 ## 1. 问题本质：三平面模型
 
@@ -166,12 +170,130 @@ GPU 节点 agent watch claim ────────┤ (主通道，通常 <1s
   可达节点 `namager.nvidia.com/net-zone.<zone>=reachable`；slice.nodeSelector 匹配后者。第一阶段运维人工标注，
   探活组件可选后补。
 
+## 6.1 传输加密（TLS）——lupine 的支持是单边的
+
+**核查结论（2026-08-14，读 lupine 源码）：客户端能说 TLS，服务端不能。**
+
+| 组件 | TLS | 证据 |
+|---|---|---|
+| `libcuda.so.1` 客户端 shim | ✅ 链 OpenSSL，认 `https://` | `client.cpp:8237-8253` 解析 scheme，`583-605` 建 TLS |
+| `libnvidia-ml.so.1`（`nvidia-smi` 走这条） | ✅ 独立但等价实现 | `nvml_client.cpp:125`、`178-199` |
+| `lupine_driver_server` | ❌ **纯明文** | `CMakeLists.txt:40` 注释 "The server stays plaintext (front it with a TLS proxy); only the client links OpenSSL"，服务端 `target_link_libraries` 无 OpenSSL |
+
+所以 lupine 的加密形态是**服务端前置 TLS 终止代理**，客户端 `https://` 连代理，代理明文连 server。
+
+**配置面只有一个开关**——`LUPINE_SERVER` 的 URL scheme，server 侧无任何 TLS 配置项：
+
+```
+LUPINE_SERVER=gpu-node:14833            # 明文，默认端口 14833
+LUPINE_SERVER=https://gpu.example.com   # TLS，默认端口 443
+LUPINE_SERVER=https://a.example.com,http://b:14833   # 多 server 逐个独立指定，可混用
+```
+
+**校验行为是严格的，且没有关闭开关**（`client.cpp:585-596`）：`TLS1_2_VERSION` 下限 + 系统信任库
+（`SSL_CTX_set_default_verify_paths`）+ `SSL_VERIFY_PEER` + SNI（`SSL_set_tlsext_host_name`）+ **主机名校验**
+（`SSL_set1_host`）。没有 `LUPINE_TLS_INSECURE` 之类的逃生门。自签证书必须进节点系统信任库，否则握手失败直接拒连。
+
+### 对本设计的三处影响
+
+1. **决策 3（endpoint 形态）需要修正**：`SSL_set1_host` 做主机名校验，意味着**启用 TLS 后 endpoint 必须是域名**
+   （除非证书签了 IP SAN）。这与"hostNetwork underlay IP 直注先行"直接冲突——§6 表格的推荐形态在 TLS 下不成立。
+   落法：`vgpu.io/endpoint` attribute **携带 scheme**（`https://host` / `host:port`），注入层原样拼进
+   `LUPINE_SERVER`，是否加密由 agent 发布 slice 时决定，注入层仍然不区分。
+2. **令牌明文传输是当前安全模型的一个前提缺口**：`LUPINE_SESSION` 作为 HTTP/2 头 `x-lupine-session` 发送。
+   不启用 TLS 时，**同网段抓包即可取得令牌并冒用他人配额**——§7 "泄露面 = pod env" 的表述不完整，明文链路上
+   还有一条网络侧泄露面。这是 TLS 从"可选加固"变成"多租户场景必需"的理由。
+3. **客户端制品必须是带 TLS 编译的**：`LUPINE_TLS_OPENSSL` 由 `find_package(OpenSSL QUIET)` 决定
+   （`CMakeLists.txt:148/165`），**QUIET 意味着构建机没有 OpenSSL 时静默降级**，产出的客户端遇到 `https://`
+   会报 "built without TLS support" 并拒连。版本目录（决策 4）铺设的制品需要校验这一点。
+
+### 部署代理时的两个坑（源码级）
+
+- **无 ALPN 协商**：全项目搜不到 ALPN 代码，客户端 TLS 握手完直接跑 HTTP/2。代理必须**无条件按 h2 处理**该端口，
+  不能依赖 ALPN 协商。nginx 的 `listen ... ssl http2` 依赖 ALPN，可能握不上；envoy 显式
+  `http2_protocol_options`、或 nginx `stream` 四层 + TLS 终止更稳。
+- **`:scheme` 伪头恒为 `"http"`**（`h2.cpp:714`），走 TLS 时也不改。严格校验伪头与传输层一致性的代理会拒绝。
+
+> 阶段建议：K1 先明文（单租户/可信网络验证闭环），**多租户或跨信任域前必须上 TLS**——否则 §7 的令牌能力模型
+> 在网络层是空的。
+
 ## 7. 安全模型
 
 - 会话令牌：controller 签发的随机值（非 pod UID），是 EnsureSession 的能力凭证与 `LUPINE_SESSION` 本体；
   泄露面 = pod env（仅 pod 所有者可见），风险 = 冒用他人配额（需先拿到令牌）。
 - 服务端权威：配额唯一来源是 agent 落盘的会话目录；客户端 env 不参与限额（§2.3 第 4 条）。
 - fail-closed 链条不变：无 session/无配额/空 allowlist → 拒连（库侧已实现并测试）。
+
+## 7.1 高性能网络承载（IB / SR-IOV / RoCE / DPDK）
+
+远程 GPU 的体验上限就是网络，所以这一节先把**lupine 的传输实现**钉死，再谈方案——因为它决定了哪些是"改配置"、
+哪些是"改 lupine"。
+
+### 7.1.0 前提：lupine 的传输是什么（源码核查）
+
+| 事实 | 证据 | 推论 |
+|---|---|---|
+| `socket(AF_INET, SOCK_STREAM)`，`getaddrinfo` 也钉 `AF_INET` | `server.cpp:539`、`rpc.cpp:35-36`、`nvml_client.cpp:150` | **纯 IPv4 TCP**。无 IPv6，无 `AF_RDMA`/`AF_SMC`。任何"换地址族"的方案要么靠 preload 劫持，要么要改源码 |
+| 收发用 `sendmsg`/`recvmsg` + iovec，`TCP_NODELAY` 已设 | `lupine_platform.h:251`、`h2.cpp` 的 `h2_write_all` | 标准 socket 语义，没有 io_uring / 自定义栈 |
+| HTTP/2 窗口已按高 BDP 调过：客户端 `0x7fffffff`（~2GB），服务端 64MB，最大帧 16MB−1 | `h2.cpp:25-31`、`rpc.h:36` | **流控不是高速链路上的瓶颈**，无需调优 |
+| 设备传输经**锁页主机内存**中转（`cuMemAllocHost`，失败回退 `malloc`） | `manual_server.cpp:764-772` | 数据面是 `GPU → 锁页主机内存 → TCP → 主机内存 → GPU` |
+| lupine 自身代码**无 verbs / RDMA / dmabuf** | 全仓库无 `ibv_*`；`cuFlushGPUDirectRDMAWrites` 只是被代理的 CUDA API，不是 lupine 用 GPUDirect | **没有 GPUDirect**，两次主机内存落地是架构性的 |
+
+### 7.1.1 方案分层
+
+按"要不要动 lupine"分成两类，这是选型的第一刀：
+
+**A 类：透明加速（lupine 零改动，纯部署/运维）**
+
+| 方案 | 机制 | 对 lupine | 评价 |
+|---|---|---|---|
+| **SR-IOV** | pod 直通 VF，绕过 CNI overlay 与 host 协议栈转发 | 无（VF 就是普通 netdev） | **性价比最高，首选**。省掉 overlay 封装与 veth/bridge 跳数；server 已 `INADDR_ANY` 监听（`server.cpp:566`），多网卡天然可用 |
+| **IPoIB** | IB 网卡跑 IP 层 | 无（普通 netdev） | 有 IB 组网时的直接选择。带宽好，但仍走内核 TCP，延迟/CPU 不如原生 verbs |
+| **RoCE + SMC-R** | 内核 SMC 协议族透明替换 TCP，走 RDMA | 无（`smc_run` 用 LD_PRELOAD 把 `AF_INET` 换成 `AF_SMC`） | 唯一"不改代码却能吃到 RDMA"的路子。需内核 SMC 模块 + RoCE 网卡；与我们的 preload 共存需验证（见下） |
+| **rsocket preload** | `librspreload.so` 劫持 socket 调用到 RDMA | 无（同为 LD_PRELOAD） | 同上，成熟度与运维熟悉度通常不如 SMC-R |
+
+**B 类：需要改 lupine 传输层（不是部署能解决的）**
+
+| 方案 | 为什么不透明 |
+|---|---|
+| 原生 verbs（`ibv_*`） | 要重写 `rpc.cpp`/`h2.cpp` 的收发，且 HTTP/2 帧语义要重新映射到 RDMA 消息 |
+| DPDK | 内核旁路用户态网络，应用得基于 DPDK 上的 TCP 栈（F-Stack/VPP/Seastar）重写；与容器网络、k8s Service 模型都不兼容 |
+| **GPUDirect RDMA** | 需要 lupine 用 verbs 注册**显存**（nv_peer_mem / dmabuf）做零拷贝 |
+
+### 7.1.2 关键判断：A 类是"更粗的管子"，只有 GPUDirect 是"换架构"
+
+A 类方案能提升的是**主机内存之间**那一段。但数据面固有地要落两次主机内存（7.1.0 最后两行），所以：
+
+- 对**控制面密集**型负载（大量小 RPC，如 kernel launch、事件查询）：A 类的延迟收益直接兑现，SR-IOV/RoCE 都有效。
+- 对**数据面密集**型负载（大块 HtoD/DtoH，如模型加载、大 batch 输入）：A 类只能把网络那一跳变快，
+  两次主机内存拷贝和 PCIe 往返仍在。**收益会撞上天花板。**
+- 真正拆掉天花板的是 GPUDirect RDMA（显存直接进出网卡，不落主机内存），但它属于 B 类——**是给 lupine 提 PR 或
+  维护分叉的量级，不是我们部署侧能决定的**。
+
+结论：**优先 SR-IOV（+ IB/RoCE 组网时叠 IPoIB 或 SMC-R），把 GPUDirect 记为长期项而非选型项。**
+
+### 7.1.3 与本项目的四个具体交互点
+
+1. **preload 共存**：我们已经把 `libvgpu-control.so` 进程级 `LD_PRELOAD` 进 lupine-server。SMC-R/rsocket 的加速
+   也是 LD_PRELOAD。两者拦截的符号集**不相交**（我们只导出 `cu*`/`nvml*`/`dlsym` + provider 入口；它们拦
+   `socket`/`connect`/`send`/`recv`），且我们的 `dlsym` 拦截器对非 `cu`/`nvml` 前缀一律回退 glibc 真 dlsym
+   （`loader.c` 拦截器），所以它们经 `dlsym(RTLD_NEXT, "socket")` 取真函数不受影响。**理论上可共存，但必须 spike 实测**——
+   这是我们唯一需要亲自验证的交互。
+2. **SR-IOV 与 endpoint 形态**：VF 的 IP 不在 k8s Service 覆盖范围内（§6 已记录 multus 形态的 DNS 自维护问题）。
+   叠加 §6.1 的 TLS 主机名校验要求，**SR-IOV + TLS 组合下 endpoint 必须是自维护 DNS 的域名**。这两条约束是叠乘的，
+   选型时要一起看。
+3. **可达性标签**：§6 的 `net-zone` 标签语义天然覆盖高性能网络——IB/RoCE 域就是一个 zone，非该域节点不可达。
+   不需要为高性能网络新增调度机制。
+4. **MTU 与分片**：IPoIB/RoCE 通常配 jumbo frame。lupine 已设 `TCP_NODELAY`（小帧不等 Nagle），大块传输走
+   iovec `sendmsg`，两者都不与 jumbo 冲突，无需改动。
+
+### 7.1.4 验证方法（避免测出假象）
+
+- **必须 `LUPINE_DISABLE_LOCAL=1` 或用无 GPU 客户端**，否则客户端本地路由会让测试完全不过网络（§6.8 边界 1，
+  这个坑已经踩过一次）。
+- 分开测两类负载：小 RPC 往返延迟（控制面）与大块 HtoD/DtoH 带宽（数据面）。A 类方案在两者上的收益形状不同，
+  混在一起测会得出误导性结论。
+- 基线用 `LUPINE_RPC_STATS`（见 `docs/lupine_env_reference.md`）取 RPC 计数与耗时分布，再对比网络方案。
 
 ## 8. 改造面与阶段
 
@@ -198,4 +320,9 @@ GPU 节点 agent watch claim ────────┤ (主通道，通常 <1s
 | CUDA/NVML 两表连接数不一致错位（§6.8 边界 2） | init 屏障逐 server 探测，全通才放行 |
 | server 重启会话不可恢复 | 固有约束（lupine 连接态）；文档明示，应用层重试/重启恢复 |
 | agent 落盘与回收竞态（同名 session 快速重建） | 令牌随机不复用；目录以令牌命名，天然不撞 |
-| multus 形态 DNS 自维护成本 | D3 允许 IP 直注先行，DNS 仅该形态启用 |
+| multus 形态 DNS 自维护成本 | D3 允许 IP 直注先行，DNS 仅该形态启用；**但启用 TLS 后 IP 直注不成立**（主机名校验，§6.1），两者叠乘时必须上 DNS |
+| 明文链路上会话令牌可被抓包冒用 | §6.1：多租户/跨信任域前必须启用 TLS；K1 单租户可明文 |
+| lupine 客户端制品可能未带 TLS 编译（`find_package(OpenSSL QUIET)` 静默降级） | 版本目录铺设时校验制品含 TLS 支持（§6.1） |
+| TLS 代理配置不当（无 ALPN、`:scheme` 恒为 http） | §6.1 部署坑；优先 envoy 显式 h2 或四层 TLS 终止 |
+| 高性能网络 preload（SMC-R/rsocket）与我们的 LD_PRELOAD 共存未验证 | 符号集不相交且 dlsym 拦截器会回退（§7.1.3 第 1 条），但**必须 spike 实测**后才可用于生产 |
+| 数据面两次主机内存落地限制高速网络收益上限 | 固有于 lupine 架构（无 GPUDirect）；选型时按负载类型预期收益，勿承诺线性提升（§7.1.2） |
