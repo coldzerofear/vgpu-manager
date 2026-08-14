@@ -1,6 +1,9 @@
-# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.1
+# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.2
 
-> 状态：**设计定稿（六项关键决策已确认），待实施**
+> 状态：**设计定稿（十项关键决策已确认），待实施**
+> v1.2（2026-08-14）：引入 **operator + RemoteGPUPool CRD** 总体形态（D7–D10）——组件收敛为
+> "1 CRD + 1 Operator + 2 DaemonSet"，agent 合并进 kubelet-plugin，controller 取消，会话目录改
+> pod 内 emptyDir；§1.5 新增。
 > v1.1（2026-08-14）：新增 §6.1 传输加密（TLS，D5）与 §7.1 高性能网络承载（D6），均为读 lupine 源码后的核查结论；
 > D3 因 TLS 主机名校验被修正。
 > 前置：`docs/remote_gpu_pool_research_design.md`（核心库 + lupine 方案 C-2，已实现并真机验证单节点会话隔离）
@@ -17,6 +20,10 @@
 | D4 | 客户端制品 | **直接上版本目录机制**（不等单基准制品 spike）；制品须校验带 TLS 编译（§6.1） |
 | D5 | 传输加密 | lupine **服务端不支持 TLS**，需前置终止代理；K1 可明文，**多租户/跨信任域前必须启用**（§6.1） |
 | D6 | 高性能网络 | **SR-IOV 优先**（透明、零 lupine 改动）；IB/RoCE 组网时叠 IPoIB 或 SMC-R；GPUDirect 属改 lupine 的长期项（§7.1） |
+| D7 | 总体形态 | **operator + 单 RemoteGPUPool CRD**；一个 CR 物化整条链路，**消费侧 DaemonSet 也由 CR 参数控制**，`reachableNodeSelector`（= net-zone）一物两用：既圈定 slice 可调度范围，又是消费侧 DS 的铺设范围（§1.5） |
+| D8 | 会话令牌签发 | **消费侧 kubelet-plugin 在 NodePrepareResources 生成随机令牌，写入 `claim.status.devices[].data`**；独立 controller 取消，operator 不进 pod 启动关键路径（§1.5.3） |
+| D9 | 会话目录 | **agent 与 lupine-server 同 pod，共享 emptyDir**；GPU 节点主机零安装，生命周期与会话语义天然对齐（§1.5.2） |
+| D10 | 域名前缀 | **`vgpu-manager.io`**（CRD group 与 device attributes 同源）；不用 `nvidia.com` 后缀（`gpu.nvidia.com` 是 NVIDIA 官方 DRA 驱动的属性域，避撞） |
 
 ## 1. 问题本质：三平面模型
 
@@ -25,7 +32,7 @@
 ```
 ┌─ 控制面 ────────────────────────────────────────────────┐
 │ scheduler(DRA allocator / extender)：全局池记账、版本/可达性匹配 │
-│ controller：会话令牌签发、生命周期回收                          │
+│ operator：池物化/DeviceClass/TLS/维护编排（不在启动关键路径，§1.5）│
 └──────────┬──────────────────────────┬───────────────────┘
            │ ①分配结果                  │ ①分配结果
 ┌─ GPU 节点(资源面) ─────────┐   ┌─ 消费节点(任意可达节点) ────────┐
@@ -41,11 +48,116 @@
 
 **本地 vGPU 路径零影响**：远程是新增 DeviceClass/资源池，现有 device-plugin/extender/DRA 本地分配不动。
 
+## 1.5 总体形态：1 CRD + 1 Operator + 2 DaemonSet（D7–D10，v1.2）
+
+以"部署简单、使用简单"为第一约束收敛出的最终形态。部署者视角：装 operator（helm）→
+`kubectl apply` 一个 RemoteGPUPool → 完事。
+
+```
+用户视角：  kubectl apply -f remotegpupool.yaml   ← 部署 = 一个 CR
+           pod 写熟悉的资源请求                    ← 使用 = 与本地 vGPU 一致（§5.5）
+
+┌─ vgpu-operator (Deployment) ────────────────────────────────────┐
+│ watch RemoteGPUPool → 物化：                                     │
+│  · 每 pool 的 GPU 节点 DaemonSet（server 模式，多容器，§1.5.2）    │
+│  · 消费侧 DaemonSet（inject 模式，铺设范围 = reachableNodeSelector │
+│    的**集群级并集**，见 §1.5.4 去重约束）                          │
+│  · DeviceClass 自动创建；TLS 开启时配 proxy sidecar/证书/DNS(§6.1)│
+│  · 维护模式编排：撤 slice → 等 claim 排空 → 滚动重启 server        │
+│  ★ 不在 pod 启动关键路径上（§1.5.3）                              │
+└─────────────────────────────────────────────────────────────────┘
+┌─ gpu-node DaemonSet (per pool) ─────┐ ┌─ consumer DaemonSet(归并后) ──┐
+│ [c1] kubelet-plugin --mode=server    │ │ [c1] kubelet-plugin           │
+│      发布 slice + watch claim 落盘 + │ │      --mode=inject            │
+│      EnsureSession（原"agent"职责）   │ │      （注入/CDI/init 屏障）    │
+│ [c2] lupine-server                   │ │ [init] 铺客户端版本目录到 host │
+│      （镜像内置 libvgpu-control.so）  │ └───────────────────────────────┘
+│ [c3] tls-proxy（可选, envoy, §6.1）  │
+│ 共享 emptyDir = 会话目录              │
+└──────────────────────────────────────┘
+```
+
+### 1.5.1 agent 合并进 kubelet-plugin（同一二进制，`--mode` 区分）
+
+§2.4 的 agent 三职责（发布 slice / watch claim 落盘 / EnsureSession）中，前两个在
+kubelet-plugin 已有 80% 基建（`driver.go` 的 `GenerateDriverResources` 已产
+`resourceslice.DriverResources{Pools}`，远程池 = 换 pool 名 + `NodeName` 换 `NodeSelector`；
+informer 底座同一套）。独立 agent 等于重抄依赖。合并后：
+`--mode=server`（GPU 节点，含本地 DRA 原职责 + 远程池职责 + inject 能力）、
+`--mode=inject`（消费节点，仅注入，无 GPU 依赖）。
+
+### 1.5.2 会话目录 = pod 内共享 emptyDir（D9）
+
+lupine-server 与 agent 同 pod 后，会话目录用两容器共享的 emptyDir，收益链：
+- **生命周期天然对齐**：server 容器重启 = 全部会话子进程死亡 = 会话作废；emptyDir 恰好活到
+  pod 级，无跨 server 世代的陈旧目录清扫问题；
+- **GPU 节点主机零安装**：`libvgpu-control.so` 烧在 server 容器镜像内，
+  `LD_PRELOAD`/`LUPINE_CHECKPOINT_LIBRARY` 指容器内路径（本地 vGPU 才需要 host 安装）；
+- 会话配额文件不暴露在主机文件系统。
+库侧零改动（`VGPU_CONFIG_SESSION_BASE` 指 emptyDir 挂载点即可）。
+
+### 1.5.3 令牌签发在消费侧 plugin（D8）——关键路径卫生
+
+独立 controller 的唯一职责是签令牌，取消之：消费侧 plugin 在 NodePrepareResources 生成随机令牌
+→ 写入 `claim.status.devices[].data`（DRA 为 driver 私有数据设计的字段，需
+`resourceclaims/status` update RBAC）→ 注入 pod env；GPU 侧 agent watch claim 同时拿到分配与令牌。
+故障域对照（operator 方案能否上生产的分水岭）：
+
+| 组件挂了 | 影响 |
+|---|---|
+| operator | 已物化的池照常工作（slice 由 plugin 发布、令牌由消费侧生成、落盘由 agent watch）；仅池的**变更**停摆 |
+| gpu-node DS | 该池不可用（本质如此） |
+| consumer plugin | 该节点新 pod 无法 prepare（DRA 自身故障域） |
+
+### 1.5.4 消费侧 DS 的归并约束（多池重叠，实现必须处理）
+
+DRA 驱动名是**节点单例**（插件 socket 注册冲突），两个 pool 的可达域有交集时**不能**各铺一个
+inject DS。operator 必须集群级归并：消费侧 DS 只有一个，nodeAffinity = 所有 pool
+`reachableNodeSelector` 的**并集**（多 nodeSelectorTerms 即 OR 语义），且排除 server 节点
+（server 模式插件本就兼具 inject 能力）。
+
+### 1.5.5 RemoteGPUPool CRD（D7、D10）
+
+单 CRD 声明整条链路；`network`/`transport` 字段是 D5/D6 的预留接缝——新增网络形态 =
+operator 加一个 profile 翻译分支（NAD annotation / hostNetwork / preload env / MTU），
+**CRD API 不破坏、用户无迁移**：
+
+```yaml
+apiVersion: vgpu-manager.io/v1alpha1
+kind: RemoteGPUPool
+metadata: {name: pool-a}
+spec:
+  nodeSelector: {vgpu-manager.io/remote-server: "true"}   # 哪些 GPU 节点入池
+  devices: {}                            # 可选：uuid/index/型号过滤，默认全部
+  consumer:                              # 消费侧（D7：也由本 CR 控制）
+    reachableNodeSelector: ...           # 一物两用：slice 可调度范围 + 消费侧 DS 铺设范围
+    # 缺省约定：匹配 vgpu-manager.io/net-zone.<zone>=reachable 标签
+  network:                               # ← D6 预留接缝
+    profile: hostNetwork                 # hostNetwork | multus（将来扩展）
+    multus: {networkAttachment: sriov-net-a}
+    zone: zoneA
+  transport:                             # ← D5/D6 预留接缝
+    tls: {enabled: false, issuerRef: ..., dnsSuffix: gpu.corp}
+    preload: none                        # none | smc-r | rsocket（§7.1.3 spike 通过后开闸）
+  lupine: {image: ..., port: 14833, extraEnv: []}   # LUPINE_* 透传逃生门
+  scheduling: {deviceClassName: remote-vgpu-a}      # operator 自动创建 DeviceClass
+status:
+  servers: [{node, endpoint, cudaVersion, deviceCount, ready}]
+  conditions: [...]
+```
+
+### 1.5.6 使用面：与本地 vGPU 对齐的两档 UX
+
+- **默认档**：pod 上写熟悉声明（annotation/资源风格），现有 pod-mutate webhook 扩一条转换
+  → 自动生成引用 DeviceClass 的 ResourceClaimTemplate。用户不需要懂 zone（slice nodeSelector
+  自动圈定）、不懂版本（运行时兜底）、不懂 endpoint（注入层拼接）。
+- **进阶档**：直接写 ResourceClaimTemplate + CEL（选 zone/版本/跨池约束），不经 webhook。
+
 ## 2. 主路径：DRA
 
 ### 2.1 设备上报（agent → ResourceSlice）
 
-GPU 节点 agent（新组件，可并入 device-monitor 部署形态）发布远程池 ResourceSlice：
+GPU 节点 agent（**v1.2：= kubelet-plugin `--mode=server`，见 §1.5.1，非独立组件**）发布远程池 ResourceSlice：
 
 - `spec.nodeSelector`：**编码网络可达域**——匹配携带本 server 可达域标签的节点（见 §6），
   这是"资源只在 GPU 节点上报、pod 却能调度到别处"的核心机制；调度器原生理解，无需改调度逻辑。
@@ -54,12 +166,12 @@ GPU 节点 agent（新组件，可并入 device-monitor 部署形态）发布远
 
 | attribute                        | 类型          | 用途                                        |
 |----------------------------------|-------------|-------------------------------------------|
-| `namager.nvidia.com/type`        | string      | 显卡类型 `remote-vgpu`                        |
-| `namager.nvidia.com/uuid`        | string      | 物理卡 UUID，agent 落盘配额时按它填 `devices[].uuid`  |
-| `namager.nvidia.com/memory`      | int         | 可分配显存                                     |
-| `namager.nvidia.com/cudaVersion` | **version** | 节点驱动支持的 CUDA 上限，版本匹配用（§4）                 |
-| `namager.nvidia.com/endpoint`    | string      | lupine-server 端点，**IP 或域名均可**（D3），注入层原样拼接 |
-| `namager.nvidia.com/netZone`     | string      | 所属网络域（与 nodeSelector 用的标签一致，冗余供审计）        |
+| `vgpu-manager.io/type`        | string      | 显卡类型 `remote-vgpu`                        |
+| `vgpu-manager.io/uuid`        | string      | 物理卡 UUID，agent 落盘配额时按它填 `devices[].uuid`  |
+| `vgpu-manager.io/memory`      | int         | 可分配显存                                     |
+| `vgpu-manager.io/cudaVersion` | **version** | 节点驱动支持的 CUDA 上限，版本匹配用（§4）                 |
+| `vgpu-manager.io/endpoint`    | string      | lupine-server 端点，**IP 或域名均可**（D3），注入层原样拼接 |
+| `vgpu-manager.io/netZone`     | string      | 所属网络域（与 nodeSelector 用的标签一致，冗余供审计）        |
 
 切分模型（一卡多份额）复用现有 DRA可消费设备 本地路径的 vgpu 机制（`pkg/kubeletplugin/vgpu.go`），
 远程池按同一套份额语义发布。
@@ -67,7 +179,7 @@ GPU 节点 agent（新组件，可并入 device-monitor 部署形态）发布远
 ### 2.2 调度与版本匹配
 
 - 可达性：ResourceSlice.nodeSelector 完成，无自定义调度逻辑。
-- 版本（client ≤ server）：DeviceClass/claim 的 CEL selector 匹配 `namager.nvidia.com/cudaVersion >= <pod 最低需求>`。
+- 版本（client ≤ server）：DeviceClass/claim 的 CEL selector 匹配 `vgpu-manager.io/cudaVersion >= <pod 最低需求>`。
   pod 最低需求的三档来源见 §4。
 - 记账/防双分：DRA allocator 原生。多设备 claim 可跨 pool（= 跨 server）满足，
   需要同节点约束时用 claim constraints（matchAttribute）。
@@ -92,10 +204,11 @@ NodePrepareResources 发现 claim 命中远程池时：
   `<base>/<session>/config/vgpu.config`（复用 `pkg/config/vgpu` seqlock 写盘，`devices[].uuid` 填本节点分到的卡）；
   释放/pod 删除 → 删除会话目录（幂等；孤儿目录由库 fail-closed 兜底，无安全风险）。
 - **EnsureSession 端点**（HTTP/gRPC，监听 endpoint 同网卡）：入参会话令牌；用令牌反查 claim
-  （令牌为 controller 签发的随机值，本身即能力凭证），已落盘直接返回 ready，未落盘则现场落盘。
+  （令牌为消费侧 plugin 生成的随机值，本身即能力凭证，D8），已落盘直接返回 ready，未落盘则现场落盘。
   可选强化：bound SA token + TokenReview（device-mounter 式），第一阶段不做。
-- 会话令牌：controller 在分配时签发，写入 claim（status/annotation），注入层读取。
-  **不用 pod UID**（可预测、可冒用，设计 §6.2.1）。
+- 会话令牌（**v1.2 = D8**）：消费侧 plugin 在 NodePrepareResources 生成随机值，写入
+  `claim.status.devices[].data` 并注入 pod env；GPU 侧 agent watch claim 读取。
+  **不用 pod UID**（可预测、可冒用，设计 §6.2.1）。落盘/会话目录 = pod 内共享 emptyDir（D9，§1.5.2）。
 
 ## 3. 兼容路径：extender + device-plugin（老集群，后行）
 
@@ -120,7 +233,7 @@ NodePrepareResources 发现 claim 命中远程池时：
 1. pod spec 显式含 `NVIDIA_REQUIRE_CUDA`（如 `cuda>=12.4`）→ webhook 解析转 annotation。
    **注意**：CUDA 基础镜像把该 env 写在**镜像配置**里，pod spec 不可见；webhook 不做 registry 内省
    （重、外部依赖），所以这只是"用户显式声明时的便利通道"。
-2. 显式 annotation `namager.nvidia.com/min-cuda: "12.4"`——**推荐的主要声明方式**。
+2. 显式 annotation `vgpu-manager.io/min-cuda: "12.4"`——**推荐的主要声明方式**。
 3. 都没有 → 不筛选，靠下两层兜底。
 
 **4.2 启动前（init 屏障 pre-flight）**：HEAD server 读 `x-lupine-cuda-version`（`h2.cpp:440`，编译期常量），
@@ -138,7 +251,8 @@ lupine shim 走动态链接器查找（远程 pod 无驱动，它的 libcuda 就
 ## 5. 配额落盘时序（D2）
 
 ```
-调度: allocator 绑定 claim ──► controller 签发令牌写入 claim
+调度: allocator 绑定 claim
+消费节点: kubelet-plugin NodePrepare ──► 生成随机令牌写入 claim.status (D8) + 注入 env
                                    │
 GPU 节点 agent watch claim ────────┤ (主通道，通常 <1s 落盘)
                                    ▼
@@ -166,8 +280,8 @@ GPU 节点 agent watch claim ────────┤ (主通道，通常 <1s
 
 - lupine 两侧均走 `getaddrinfo`，域名可用；解析发生在进程首次建连。server 重启杀死全部会话子进程
   （连接态不可恢复），应用重启后自然重新解析——DNS 的增量价值仅覆盖"server 换 IP 且 pod 之后才重启"窗口。
-- **可达性进调度**：网络域标签规范——GPU 节点 `namager.nvidia.com/net-zone=<zone>`（server 所在域），
-  可达节点 `namager.nvidia.com/net-zone.<zone>=reachable`；slice.nodeSelector 匹配后者。第一阶段运维人工标注，
+- **可达性进调度**：网络域标签规范——GPU 节点 `vgpu-manager.io/net-zone=<zone>`（server 所在域），
+  可达节点 `vgpu-manager.io/net-zone.<zone>=reachable`；slice.nodeSelector 匹配后者。第一阶段运维人工标注，
   探活组件可选后补。
 
 ## 6.1 传输加密（TLS）——lupine 的支持是单边的
@@ -219,8 +333,9 @@ LUPINE_SERVER=https://a.example.com,http://b:14833   # 多 server 逐个独立�
 
 ## 7. 安全模型
 
-- 会话令牌：controller 签发的随机值（非 pod UID），是 EnsureSession 的能力凭证与 `LUPINE_SESSION` 本体；
-  泄露面 = pod env（仅 pod 所有者可见），风险 = 冒用他人配额（需先拿到令牌）。
+- 会话令牌：消费侧 plugin 生成的随机值（非 pod UID，D8），是 EnsureSession 的能力凭证与 `LUPINE_SESSION` 本体；
+  泄露面 = pod env + claim status 读权限（同租户信任边界），明文链路另有网络侧泄露面（§6.1 影响 2）；
+  风险 = 冒用他人配额（需先拿到令牌）。
 - 服务端权威：配额唯一来源是 agent 落盘的会话目录；客户端 env 不参与限额（§2.3 第 4 条）。
 - fail-closed 链条不变：无 session/无配额/空 allowlist → 拒连（库侧已实现并测试）。
 
@@ -299,12 +414,13 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 
 | 组件 | 改造 | 量级 | 阶段 |
 |---|---|---|---|
-| agent（新） | slice 发布 + claim watch 落盘/回收 + EnsureSession | **大** | K1 |
-| controller | 令牌签发/写入 claim | 中 | K1 |
-| kubelet-plugin | 远程分支注入（env/CDI/init 容器） | 中 | K1 |
-| install daemonset | lupine-client 版本目录铺设；扩全节点 | 小 | K1 |
-| webhook | `NVIDIA_REQUIRE_CUDA`/annotation → 版本需求 | 小 | K2 |
-| chart | server+库部署（README 已有 env 清单）、zone 标签规范 | 中 | K1 |
+| kubelet-plugin `--mode=server` | 远程池 slice 发布 + claim watch 落盘/回收 + EnsureSession（吸收原 agent，§1.5.1） | **大** | K1 |
+| kubelet-plugin `--mode=inject` | 注入（env/CDI/init 容器）+ 令牌生成写 claim status（D8） | 中 | K1 |
+| **operator + RemoteGPUPool CRD** | 物化两个 DS/DeviceClass/维护模式；消费侧 DS 集群级归并（§1.5.4）；TLS 时管 sidecar/证书/DNS | **大** | K1 起步（先只翻译 hostNetwork profile），随阶段增强 |
+| server 容器镜像 | lupine-server + libvgpu-control.so 打包（emptyDir 会话目录，D9） | 小 | K1 |
+| install（消费侧 DS 的 init） | lupine-client 版本目录铺设 | 小 | K1 |
+| webhook | 默认档 UX 转换（§1.5.6）+ `NVIDIA_REQUIRE_CUDA`/annotation → 版本需求 | 小 | K2 |
+| chart | 退化为只装 operator（+CRD） | 小 | K1 |
 | extender 兼容路径 | 假资源 + CR 记账 + annotation 落盘 | 大 | K3（老集群需求明确后） |
 
 - **K1（最小闭环）**：单 zone、单 server/pod，agent+注入+init 屏障跑通端到端。
@@ -325,4 +441,7 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 | lupine 客户端制品可能未带 TLS 编译（`find_package(OpenSSL QUIET)` 静默降级） | 版本目录铺设时校验制品含 TLS 支持（§6.1） |
 | TLS 代理配置不当（无 ALPN、`:scheme` 恒为 http） | §6.1 部署坑；优先 envoy 显式 h2 或四层 TLS 终止 |
 | 高性能网络 preload（SMC-R/rsocket）与我们的 LD_PRELOAD 共存未验证 | 符号集不相交且 dlsym 拦截器会回退（§7.1.3 第 1 条），但**必须 spike 实测**后才可用于生产 |
+| 多池可达域重叠 → 同节点两个 inject 插件注册冲突（DRA 驱动名节点单例） | operator 集群级归并消费侧 DS（§1.5.4），并集 nodeAffinity + 排除 server 节点 |
+| 消费侧 plugin 写 claim status 的 RBAC 与并发（多设备/重试幂等） | 令牌按 claim 幂等生成（已存在则复用）；resourceclaims/status update 权限入 chart RBAC |
+| emptyDir 会话目录随 pod 删除，agent 容器单独重启时会话目录仍在但 watch 状态丢失 | agent 启动时 list+watch 全量对账（落盘幂等，§5 已有），emptyDir 内容与 claim 集合收敛 |
 | 数据面两次主机内存落地限制高速网络收益上限 | 固有于 lupine 架构（无 GPUDirect）；选型时按负载类型预期收益，勿承诺线性提升（§7.1.2） |
