@@ -188,6 +188,24 @@ static void test_invariants(void) {
       printf("  [ok] share clamps to [0, total]\n");
     }
   }
+
+  /* No bootstrap deadlock, ever: from share=0 the step must be >= 1 even
+   * under an absurd env divisor or a degenerate pool -- a zero step would
+   * leave share at 0 forever (the proportional term needs a nonzero share
+   * to act on). Real pools never produce a zero seed at the default divisor
+   * (a hypothetical 1-SM card is already total=32768, seed=2); this guards
+   * the operator-tunable divisor. */
+  {
+    int ok = sm_delta_step(108LL * 2048 * 32, 50, 0, 0, 1000000000, 64) >= 1
+          && sm_delta_step(100, 50, 0, 0, DIV, 64) >= 1
+          && sm_delta_step(76LL * 1536 * 32, 100, 99, 10, 1000000000, 64) != 10;
+    if (!ok) {
+      printf("  [FAIL] a zero step escaped: bootstrap deadlock possible\n");
+      failures++;
+    } else {
+      printf("  [ok] step >= 1 from share=0 under any divisor (no bootstrap deadlock)\n");
+    }
+  }
 }
 
 /* ---- Part 2: closed loop ---- */

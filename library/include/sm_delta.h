@@ -103,6 +103,15 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
     inc_divisor = DELTA_INCREMENT_DIVISOR_DEFAULT;
   }
   int64_t seed = total * MIN_INCREMENT / inc_divisor;
+  /* A zero seed is a bootstrap deadlock: with share at 0 the proportional
+   * term is 0 too, and a step of 0 leaves share at 0 forever. Real pools
+   * cannot get here at the default divisor -- even a hypothetical 1-SM card
+   * has total = 32768 and seed >= 2 -- but the divisor is an env knob, and
+   * an operator setting it absurdly high must degrade granularity, not
+   * freeze the controller. */
+  if (unlikely(seed < 1)) {
+    seed = 1;
+  }
   int64_t increment = share * (int64_t)raw_diff / (DELTA_REL_DAMPING * up);
   if (increment < seed) {
     increment = seed;
