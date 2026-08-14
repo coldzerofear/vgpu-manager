@@ -18,11 +18,14 @@
 >
 > AIMD 的步长公式线性于 sm_num,与池容量同阶,架构上不存在此缺陷,是当时的现成规避。
 >
-> **后续(同日):delta 已重构修复**——新步长 = max(粒度种子 pool·5/81920, share·相对误差/6),涨侧封顶
-> pool/10,砍侧仅在 util>2×目标时启用绝对应急 floor(include/sm_delta.h)。闭环仿真(5 种卡型 × 4 档限额 ×
-> 3 档负载,test/nogpu/test_delta_step.c)中旧公式多数格子钉死 99-100%,新公式全部格子 MAE 0.3-12 且与卡型
-> 无关;#274 场景 avg util 99.8→49.8(目标 50)。**待真机验证**(test/ablation)。AIMD 保留为备选与 auto
-> 路由目标;其锯齿伤单 Pod 吞吐的短板依旧,按负载选择。
+> **后续(同日):delta 已重构修复(v13)**——核心步长 share·相对误差/阻尼(阻尼 6,桶空时 4),粒度种子
+> pool·5/81920,一次性 boot 跳升 pool·目标/6400,涨侧封顶 pool/10;砍侧按 share/(share+bucket) 平滑抗积分,
+> 仅在 util>2×目标且误差≥5 时启用绝对应急 floor(include/sm_delta.h,每个常量的由来见头文件注释)。
+> 全谱系战役仿真(55 种真实卡型 GTX1050→B300 × 限额 1-100 × 3 档负载 × 2 档延迟 = 33000 格,
+> test/nogpu/test_delta_campaign.c,CI 断言):稳态 MAE 与 p95 锯齿 **0 负格**,误差聚合降 8.2 倍,
+> 冷启动双侧最差回退 1.4 个点;#274 场景 avg util 99.8→~50(目标 50)。完整报告
+> [sm_delta_validation.md](sm_delta_validation.md)。**待真机验证**(test/ablation)。AIMD 保留为备选与
+> auto 路由目标;其锯齿伤单 Pod 吞吐的短板依旧,按负载选择。
 
 ---
 

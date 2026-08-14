@@ -18,66 +18,81 @@ limitations under the License.
  * The delta controller's share-update step, as a pure function.
  *
  * Header-inline so the watcher's hot path keeps its inlining AND the math is
- * reachable from the no-GPU tests: every rule below was chosen by running the
- * closed-loop simulation in test/nogpu/test_delta_step.c, not by argument.
- * The step is:
+ * reachable from the no-GPU tests. Every constant and every branch below was
+ * selected by closed-loop simulation, not argument: 55 real GPU models (GTX
+ * 1050 through B300, 5 to 188 SMs, 1024/1536/2048 threads per SM), every
+ * core limit from 1 to 100, three workload intensities, two feedback delays
+ * -- 33000 cells against a frozen replica of the previous sm^2 formula. See
+ * test/nogpu/test_delta_campaign.c (the grid, asserted in CI) and
+ * docs/sm_delta_validation.md (the campaign report).
  *
- *     step = max( total * MIN_INCREMENT / inc_divisor,                 (seed)
- *                 share * |target - util| / (DAMPING * target) )      (scaled)
+ * THE STEP:
  *
- *     grow (util <= target): share += min(step, total/10)
- *     cut  (util >  target): share -= step,
- *                            step floored at total*diff/(target*ramp_divisor)
- *                            when util > 2*target (emergency only)
+ *   target >= 100        -> share = pool          (a 100% limit is no limit)
+ *   grow  (util <= target):
+ *     boot & share small  -> share = pool*target/6400   (one-shot jump-start)
+ *     step = max(seed, share*err/(damp*target)), damp = starved ? 4 : 6
+ *     capped at pool/10 per tick
+ *   cut   (util > target):
+ *     blowout (util > 2*target, err >= 5):
+ *          step = max(share*err/(6*target), seed, pool*err/(target*64))
+ *     otherwise:
+ *          step = share*err/(6*target), scaled by
+ *                 max( share/(share+bucket),  err/100 )
  *
- * WHY THIS SHAPE. Its predecessor stepped by sm_num^2*thread*diff/2560
- * against a pool linear in sm_num, so the step FRACTION of the pool grew with
- * SM count: HAMi-core #274's 188-SM card got 11-22% of its pool per tick,
- * railed the bucket full within a second, and the limit never engaged (the
- * share only refills -- change_token adds and share clamps at 0 -- so a full
- * bucket drains only by consumption, which for light-grid workloads takes
- * minutes). The closed loop then showed that merely making the step linear
- * in the pool is NOT enough: any absolute step larger than what the workload
- * consumes per tick floods the bucket the same way, and what "large" means
- * depends on the workload, not the card. The only quantity that self-scales
- * to the workload is the share itself -- at equilibrium it EQUALS per-tick
- * consumption at the target -- hence the multiplicative term: corrections are
- * a fraction of share, proportional to the relative error.
+ * where seed = max(1, pool*MIN_INCREMENT/inc_divisor) and err = |target-util|.
  *
- * THE SEED is the escape from share=0 and the granularity floor near the
- * setpoint. inc_divisor sets it: total*MIN_INCREMENT/81920 = ~0.006% of the
- * pool, far below even a pool-drained-over-minutes consumption rate, so the
- * controller can always express a refill small enough not to accumulate.
- * (The closed loop pinned at 100% with this at 0.03% -- granularity is the
- * whole ballgame for light workloads, and response speed costs nothing here
- * because the multiplicative term owns it.)
+ * WHY EACH PIECE EXISTS -- each answers a failure the simulation exhibited:
  *
- * THE DAMPING (6) is set by feedback delay. The controller acts on a util
- * sample 2-4 ticks stale (NVML window + share-take-effect); share/2-scale
- * steps compound 1.5^4 before their effect is measured, and the simulation
- * showed exactly that: MAE 1-2 at 2-tick delay exploding to ~39 at 4-tick.
- * At /6 the compounding stays benign through 6-tick delay (MAE 2-3) while
- * cold-start ramp is still ~40 ticks, inside the ~64-tick budget the old
- * ramp floor was designed around.
+ * POOL-RELATIVE SHARE-PROPORTIONAL CORE. The old step scaled as sm^2 against
+ * a pool linear in sm, so its pool fraction grew with SM count: a 188-SM card
+ * got 11-22% of its pool per tick, railed the bucket full in a second, and
+ * the limit never engaged (HAMi-core #274). Linear-in-pool alone was not
+ * enough either: any absolute step above the workload's per-tick consumption
+ * floods the bucket the same way, and consumption is a workload property, not
+ * a card property. The share itself is the one quantity that equals per-tick
+ * consumption at the target, so steps proportional to share self-scale to
+ * the workload. Damping 6 keeps the compounding benign through 6 ticks of
+ * measurement delay (share/2-scale steps blow up at 4).
  *
- * THE EMERGENCY FLOOR is what remains of the old symmetric ramp floor. Its
- * grow half is gone -- growing by an absolute fraction of the pool is the
- * flooding mechanism, and the multiplicative term ramps fast enough without
- * it. Its cut half survives, gated to real blowouts (util > 2*target): there
- * share may be tiny while the excess is huge, the share-proportional cut
- * stalls, and only an absolute cut recovers quickly. The historical ratchet
- * this floor was built against (grow floored but not cut -> hard_core=8
- * pinned at 15) cannot recur: there is no grow floor at all, and both sides
- * scale identically otherwise.
+ * THE SEED is the escape from share=0 and the granularity at the setpoint:
+ * ~0.006% of the pool, below even a pool-drained-over-minutes consumption
+ * rate. Floored at 1 token so an absurd env divisor degrades granularity
+ * instead of freezing the controller.
  *
- * THE GROW CAP (total/10, from HAMi's fix) stays as the invariant backstop:
- * no single tick may commit more than a tenth of the pool.
+ * THE JUMP-START (boot, first two controller cycles per device) answers the
+ * old formula's one legitimate advantage: it reached the target in a tick or
+ * two from process start because its steps were huge. A one-shot jump to
+ * pool*target/6400 gets within striking distance of any heavy-load
+ * equilibrium without the flooding a REPEATED large step causes; being
+ * one-shot, it cannot participate in an oscillation loop. Idempotent under
+ * the shared bucket (only ever raises share toward the jump level once).
  *
- * Simulated MAE against the old formula (5 cards from 7-SM MIG to 188-SM,
- * targets 8-80, workloads pool/1500..pool/15 per tick, 2-tick delay):
- * old 0.6-91 depending on card and regime (pinned near 100% in most light
- * and medium cells); this 0.5-15 in every cell, identical across cards.
- * Ceiling on real hardware will differ; run test/ablation to validate.
+ * THE STARVED NUDGE (damp 4 when the bucket reads empty) speeds mid-run
+ * recovery when the workload is genuinely throttled. 4, not 2: the boost
+ * compounds against stale feedback like everything else, and the simulation
+ * put the knee at 6-tick delay -- damp 2 exploded (MAE 3 -> 25+), damp 4
+ * holds (3.2).
+ *
+ * THE SMOOTH ANTI-WINDUP on mild cuts fixes high-target dips: when the
+ * bucket holds a large backlog, "util over target" describes the backlog
+ * draining, not the current share -- cutting share then causes the NEXT
+ * dip. Scaling the cut by share/(share+bucket) makes it vanish when the
+ * bucket is the cause and act normally when share is. The err/100 floor
+ * keeps a runaway share (share > consumption, bucket pinned full) cuttable
+ * -- without it that state would hold forever.
+ *
+ * THE EMERGENCY FLOOR handles true blowouts (util beyond twice the target),
+ * where share may be tiny against the excess and proportional cuts stall.
+ * The err >= MIN_INCREMENT gate keeps it out of single-digit targets where
+ * integer utilization flaps across the 2x line constantly.
+ *
+ * CAMPAIGN RESULT (v13, vs the old formula, 33000 cells): steady-state MAE
+ * 31223 better / 1777 equal / 0 worse (aggregate 8.2x lower); p95 sawtooth
+ * 27575 / 5425 / 0; two-sided cold-start MAE 20935 / 11908 / 157, the 157
+ * within 1.4 utilization-points, confined to targets >= 74 where the old
+ * formula's flood-to-100 happens to approximate the target. In-model
+ * numbers; hardware validation via test/ablation remains the gate.
  */
 
 #ifndef _VGPU_SM_DELTA_H_
@@ -93,9 +108,15 @@ extern "C" {
 #define DELTA_INCREMENT_DIVISOR_DEFAULT  81920
 #define DELTA_GROW_CAP_DIVISOR           10
 #define DELTA_REL_DAMPING                6
+#define DELTA_STARVED_DAMPING            4
+#define DELTA_BOOT_JUMP_DIVISOR          6400
 
 static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_current,
-                                    int64_t share, int inc_divisor, int ramp_divisor) {
+                                    int64_t share, int64_t bucket, int boot,
+                                    int inc_divisor, int ramp_divisor) {
+  if (up_limit >= 100) {
+    return total;
+  }
   int raw_diff = abs(up_limit - user_current);
   int64_t up = up_limit > 0 ? up_limit : 1;
 
@@ -103,28 +124,39 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
     inc_divisor = DELTA_INCREMENT_DIVISOR_DEFAULT;
   }
   int64_t seed = total * MIN_INCREMENT / inc_divisor;
-  /* A zero seed is a bootstrap deadlock: with share at 0 the proportional
-   * term is 0 too, and a step of 0 leaves share at 0 forever. Real pools
-   * cannot get here at the default divisor -- even a hypothetical 1-SM card
-   * has total = 32768 and seed >= 2 -- but the divisor is an env knob, and
-   * an operator setting it absurdly high must degrade granularity, not
-   * freeze the controller. */
   if (unlikely(seed < 1)) {
     seed = 1;
   }
-  int64_t increment = share * (int64_t)raw_diff / (DELTA_REL_DAMPING * up);
-  if (increment < seed) {
-    increment = seed;
-  }
 
   if (user_current <= up_limit) {
+    if (boot) {
+      int64_t jump = total * up / DELTA_BOOT_JUMP_DIVISOR;
+      if (jump > total / 64) {
+        jump = total / 64;
+      }
+      if (share < jump) {
+        return jump;
+      }
+    }
+    int damp = bucket <= 0 ? DELTA_STARVED_DAMPING : DELTA_REL_DAMPING;
+    int64_t increment = share * (int64_t)raw_diff / (damp * up);
+    if (increment < seed) {
+      increment = seed;
+    }
     int64_t grow_cap = total / DELTA_GROW_CAP_DIVISOR;
     if (increment > grow_cap) {
       increment = grow_cap;
     }
-    share = (share + increment) > total ? total : (share + increment);
-  } else {
-    if (ramp_divisor > 0 && raw_diff > up_limit) {
+    return (share + increment) > total ? total : (share + increment);
+  }
+
+  if (raw_diff > up_limit && raw_diff >= MIN_INCREMENT) {
+    /* Blowout: util beyond twice the target. */
+    int64_t increment = share * (int64_t)raw_diff / (DELTA_REL_DAMPING * up);
+    if (increment < seed) {
+      increment = seed;
+    }
+    if (ramp_divisor > 0) {
       int64_t ramp_floor = total * (int64_t)raw_diff / (up * ramp_divisor);
       if (increment < ramp_floor) {
         increment = ramp_floor;
@@ -133,9 +165,15 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
     if (unlikely(increment > total)) {
       increment = total;
     }
-    share = (share - increment) < 0 ? 0 : (share - increment);
+    return (share - increment) < 0 ? 0 : (share - increment);
   }
-  return share;
+
+  /* Mild overshoot: cut in proportion to how much of it share explains. */
+  int64_t prop = share * (int64_t)raw_diff / (DELTA_REL_DAMPING * up);
+  int64_t by_cause = prop * share / (share + bucket + 1);
+  int64_t by_error = prop * (int64_t)raw_diff / 100;
+  int64_t increment = by_cause > by_error ? by_cause : by_error;
+  return (share - increment) < 0 ? 0 : (share - increment);
 }
 
 #ifdef __cplusplus

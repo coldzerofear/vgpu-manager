@@ -17,12 +17,15 @@ limitations under the License.
 /*
  * delta controller step: invariants + closed-loop MAE, old formula vs new.
  * No GPU, no driver. This harness is where the new step's every constant was
- * chosen, so it is also what pins them.
+ * chosen, so it is also what pins them. The full 55-card x 100-limit
+ * dominance grid lives in test_delta_campaign.c; this file is the fast unit
+ * layer.
  *
  * Part 1: invariants of the shipped sm_delta_step() -- SM-independence of the
  * step fraction, seed granularity below light-grid consumption (the pinning
- * criterion), the grow cap, the blowout-gated emergency cut floor, mildness
- * of the in-band cut, and the share clamps.
+ * criterion), the grow cap, the one-shot boot jump, the starved nudge, the
+ * smooth anti-windup on mild cuts, the blowout-gated emergency cut floor,
+ * the u>=100 pass-through, and the share clamps.
  *
  * Part 2: a closed watcher/bucket/workload loop against a frozen replica of
  * the REMOVED formula (sm^2/2560). One tick = one watcher cycle; the bucket
@@ -93,14 +96,17 @@ static void test_invariants(void) {
   printf("invariants of sm_delta_step:\n");
 
   /* The step must be the same FRACTION of the pool on a 7-SM slice and a
-   * 188-SM card -- the property whose absence was the #274 bug. */
+   * 188-SM card -- the property whose absence was the #274 bug. Bucket is
+   * held pool-proportional too so the anti-windup scale matches. */
   {
     int64_t small = 7LL * 1536 * 32, big = 188LL * 1536 * 32;
     int ok = 1;
     for (int u = 10; u <= 80 && ok; u += 10) {
       for (int util = 0; util <= 100 && ok; util += 5) {
-        int64_t a = sm_delta_step(small, u, util, small / 2, DIV, 64) - small / 2;
-        int64_t b = sm_delta_step(big, u, util, big / 2, DIV, 64) - big / 2;
+        int64_t a = sm_delta_step(small, u, util, small / 2, small / 4, 0, DIV, 64)
+                    - small / 2;
+        int64_t b = sm_delta_step(big, u, util, big / 2, big / 4, 0, DIV, 64)
+                    - big / 2;
         int64_t fa = a * 1000000 / small, fb = b * 1000000 / big;
         int64_t slack = 1000000 * 2 / small + 2; /* integer-division grain */
         if (fa > fb + slack || fb > fa + slack) ok = 0;
@@ -115,7 +121,7 @@ static void test_invariants(void) {
    * ~pool/1200); a coarser minimum step pins util at 100%. */
   {
     int64_t total = 188LL * 1536 * 32;
-    int64_t min_step = sm_delta_step(total, 50, 50, 0, DIV, 64);
+    int64_t min_step = sm_delta_step(total, 50, 50, 0, total, 0, DIV, 64);
     if (min_step * 4 >= total / 1200) {
       printf("  [FAIL] seed %ld not well below light-grid rate %ld\n",
              (long)min_step, (long)(total / 1200));
@@ -126,20 +132,77 @@ static void test_invariants(void) {
     }
   }
 
-  /* Grow never exceeds pool/10, from any share. */
+  /* Grow never exceeds pool/10, from any share, starved or not. (u=100 is
+   * excluded: a 100%% limit is no limit and pass-through is checked below.) */
   {
     int64_t total = 188LL * 1536 * 32;
     int ok = 1;
-    for (int u = 1; u <= 100 && ok; u++) {
+    for (int u = 1; u <= 99 && ok; u++) {
       for (int util = 0; util <= u && ok; util++) {
         for (int64_t s = 0; s <= total && ok; s += total / 7) {
-          int64_t step = sm_delta_step(total, u, util, s, DIV, 64) - s;
+          int64_t step = sm_delta_step(total, u, util, s, 0, 0, DIV, 64) - s;
+          int64_t step2 = sm_delta_step(total, u, util, s, total, 0, DIV, 64) - s;
           if (step > total / DELTA_GROW_CAP_DIVISOR) ok = 0;
+          if (step2 > total / DELTA_GROW_CAP_DIVISOR) ok = 0;
         }
       }
     }
     if (!ok) { printf("  [FAIL] a grow step exceeded pool/%d\n", DELTA_GROW_CAP_DIVISOR); failures++; }
     else printf("  [ok] grow step <= pool/%d always\n", DELTA_GROW_CAP_DIVISOR);
+  }
+
+  /* u >= 100 means "no limit": the share must rail to the full pool from any
+   * state, both directions. */
+  {
+    int64_t total = 76LL * 1536 * 32;
+    if (sm_delta_step(total, 100, 0, 0, total, 1, DIV, 64) != total ||
+        sm_delta_step(total, 100, 100, total / 2, 0, 0, DIV, 64) != total) {
+      printf("  [FAIL] u>=100 does not pass the full pool through\n");
+      failures++;
+    } else {
+      printf("  [ok] u>=100 rails the share to the full pool\n");
+    }
+  }
+
+  /* Boot jump: one-shot, proportional to the target, capped at pool/64, and
+   * idempotent -- a share already at or above the jump level is not touched
+   * by it (so the shared bucket's established share survives a late-joining
+   * process's boot window). */
+  {
+    int64_t total = 148LL * 2048 * 32;
+    int64_t j50 = sm_delta_step(total, 50, 0, 0, total, 1, DIV, 64);
+    int64_t j99 = sm_delta_step(total, 99, 0, 0, total, 1, DIV, 64);
+    int64_t established = total / 3;
+    int64_t after = sm_delta_step(total, 50, 0, established, total, 1, DIV, 64);
+    int ok = j50 == total * 50 / DELTA_BOOT_JUMP_DIVISOR
+          && j99 == total * 99 / DELTA_BOOT_JUMP_DIVISOR
+          && j99 <= total / 64 /* the clamp is a never-binding safety net */
+          && after >= established && after - established <= total / DELTA_GROW_CAP_DIVISOR;
+    if (!ok) {
+      printf("  [FAIL] boot jump wrong (j50=%ld j99=%ld after=%ld)\n",
+             (long)j50, (long)j99, (long)after);
+      failures++;
+    } else {
+      printf("  [ok] boot jump = pool*target/%d capped pool/64, idempotent over an established share\n",
+             DELTA_BOOT_JUMP_DIVISOR);
+    }
+  }
+
+  /* Starved nudge: with the bucket empty the grow step must be larger than
+   * with tokens available (damping 4 vs 6), from the same state. */
+  {
+    int64_t total = 108LL * 2048 * 32;
+    int64_t share = total / 20;
+    int64_t starved = sm_delta_step(total, 50, 20, share, 0, 0, DIV, 64);
+    int64_t relaxed = sm_delta_step(total, 50, 20, share, total / 2, 0, DIV, 64);
+    if (starved <= relaxed) {
+      printf("  [FAIL] starved grow (%ld) not larger than relaxed grow (%ld)\n",
+             (long)starved, (long)relaxed);
+      failures++;
+    } else {
+      printf("  [ok] empty bucket speeds the grow (damping %d vs %d)\n",
+             DELTA_STARVED_DAMPING, DELTA_REL_DAMPING);
+    }
   }
 
   /* Emergency floor: at u=8, util=90 (blowout: raw_diff 82 > 8) the floored
@@ -149,7 +212,7 @@ static void test_invariants(void) {
   {
     int64_t total = 76LL * 1536 * 32;
     int64_t share = total / 100;
-    if (sm_delta_step(total, 8, 90, share, DIV, 64) != 0) {
+    if (sm_delta_step(total, 8, 90, share, 0, 0, DIV, 64) != 0) {
       printf("  [FAIL] blowout cut did not clamp the share to 0\n");
       failures++;
     } else {
@@ -157,14 +220,30 @@ static void test_invariants(void) {
     }
   }
 
+  /* ...but the emergency path is GATED: raw_diff must reach MIN_INCREMENT,
+   * or single-digit targets would take the absolute floor every time integer
+   * utilization flaps across the 2x line (u=2, util=5 is such a flap). */
+  {
+    int64_t total = 170LL * 1536 * 32;
+    int64_t share = total / 50;
+    int64_t cut = share - sm_delta_step(total, 2, 5, share, 0, 0, DIV, 64);
+    int64_t floor_would_be = total * 3 / (2 * 64);
+    if (cut >= floor_would_be) {
+      printf("  [FAIL] sub-MIN_INCREMENT overshoot took the emergency floor\n");
+      failures++;
+    } else {
+      printf("  [ok] emergency floor gated on raw_diff >= %d\n", MIN_INCREMENT);
+    }
+  }
+
   /* In-band cut stays gentle: at u=80, util=100 (raw_diff 20, NOT a blowout)
-   * the cut must be share-proportional -- share*20/(6*80) or the seed --
-   * never the absolute floor. Cutting harder than this is what caused the
-   * u=80 oscillation regression during tuning. */
+   * the cut must be share-proportional -- at most share*20/(6*80) -- never
+   * the absolute floor. Cutting harder than this is what caused the u=80
+   * oscillation regression during tuning. */
   {
     int64_t total = 188LL * 1536 * 32;
     int64_t share = total / 100;
-    int64_t cut = share - sm_delta_step(total, 80, 100, share, DIV, 64);
+    int64_t cut = share - sm_delta_step(total, 80, 100, share, 0, 0, DIV, 64);
     int64_t expect_max = share * 20 / (DELTA_REL_DAMPING * 80)
                          + total * MIN_INCREMENT / DIV + 1;
     if (cut > expect_max) {
@@ -177,11 +256,30 @@ static void test_invariants(void) {
     }
   }
 
+  /* Smooth anti-windup: the same mild overshoot with a FULL bucket must cut
+   * far less than with an empty one -- a full bucket means the backlog, not
+   * the share, explains the overshoot -- yet still cut a little (the err/100
+   * floor keeps a runaway share cuttable so that state cannot hold forever). */
+  {
+    int64_t total = 188LL * 1536 * 32;
+    int64_t share = total / 100;
+    int64_t cut_empty = share - sm_delta_step(total, 80, 100, share, 0, 0, DIV, 64);
+    int64_t cut_full = share - sm_delta_step(total, 80, 100, share, total, 0, DIV, 64);
+    if (cut_full * 4 >= cut_empty || cut_full <= 0) {
+      printf("  [FAIL] anti-windup broken (cut %ld empty vs %ld full)\n",
+             (long)cut_empty, (long)cut_full);
+      failures++;
+    } else {
+      printf("  [ok] full-bucket overshoot cut %ld << empty-bucket cut %ld, and > 0\n",
+             (long)cut_full, (long)cut_empty);
+    }
+  }
+
   /* Share clamps to [0, total]. */
   {
     int64_t total = 76LL * 1536 * 32;
-    if (sm_delta_step(total, 50, 0, total, DIV, 64) != total ||
-        sm_delta_step(total, 10, 99, 1, DIV, 64) != 0) {
+    if (sm_delta_step(total, 50, 0, total, 0, 0, DIV, 64) != total ||
+        sm_delta_step(total, 10, 99, 1, 0, 0, DIV, 64) != 0) {
       printf("  [FAIL] share clamp to [0, total] broken\n");
       failures++;
     } else {
@@ -196,9 +294,9 @@ static void test_invariants(void) {
    * (a hypothetical 1-SM card is already total=32768, seed=2); this guards
    * the operator-tunable divisor. */
   {
-    int ok = sm_delta_step(108LL * 2048 * 32, 50, 0, 0, 1000000000, 64) >= 1
-          && sm_delta_step(100, 50, 0, 0, DIV, 64) >= 1
-          && sm_delta_step(76LL * 1536 * 32, 100, 99, 10, 1000000000, 64) != 10;
+    int ok = sm_delta_step(108LL * 2048 * 32, 50, 0, 0, 1, 0, 1000000000, 64) >= 1
+          && sm_delta_step(100, 50, 0, 0, 1, 0, DIV, 64) >= 1
+          && sm_delta_step(76LL * 1536 * 32, 99, 98, 10, 1, 0, 1000000000, 64) != 10;
     if (!ok) {
       printf("  [FAIL] a zero step escaped: bootstrap deadlock possible\n");
       failures++;
@@ -236,7 +334,7 @@ static sim_result_t simulate(const card_t *card, int up_limit, int64_t consume_r
     util_hist[t % delay] = util;
 
     share = use_new
-        ? sm_delta_step(total, up_limit, measured, share, DIV, 64)
+        ? sm_delta_step(total, up_limit, measured, share, bucket, t < 2, DIV, 64)
         : old_delta_step(card->sm, card->thread, total, up_limit, measured, share, 64);
 
     bucket += share;
@@ -284,7 +382,7 @@ static void test_closed_loop(void) {
 
   /* Every cell must beat or match the old formula, and none may exceed the
    * ceiling the harness itself selected the constants for. */
-  if (worst_reg > 1.0) {
+  if (worst_reg > 0.5) {
     printf("  [FAIL] a cell regressed vs old by %.1f MAE\n", worst_reg);
     failures++;
   } else {
@@ -324,8 +422,9 @@ static void test_closed_loop(void) {
 
   /* Robustness the constants were tuned for: 4-tick measurement delay
    * (DELTA_REL_DAMPING exists for this -- share/2-scale steps compound
-   * 1.5^4 against stale feedback and explode) and a workload shift
-   * light->heavy mid-run. */
+   * 1.5^4 against stale feedback and explode; the starved nudge stops at
+   * damping 4 for the same reason) and a workload shift light->heavy
+   * mid-run. */
   {
     const card_t *b = &cards[4];
     int64_t total = b->sm * b->thread * 32;
@@ -346,7 +445,7 @@ static void test_closed_loop(void) {
       bucket -= c2;
       int util = (int)(c2 * 100 / R);
       int m = hist[t % 2]; hist[t % 2] = util;
-      share = sm_delta_step(total, 50, m, share, DIV, 64);
+      share = sm_delta_step(total, 50, m, share, bucket, t < 2, DIV, 64);
       bucket += share; if (bucket > total) bucket = total;
       if (t >= 5000) { err += util > 50 ? util - 50 : 50 - util; cnt++; }
     }
@@ -360,20 +459,17 @@ static void test_closed_loop(void) {
   }
 
   /* Cold start, measured honestly: full bucket (the real init), share 0,
-   * heavy load. The bucket carries full speed for ~15 ticks, then util dips
-   * while share ramps from the seed -- the multiplicative ramp costs a
-   * ONE-TIME ~30-40 tick-equivalents of target throughput vs the old
-   * formula's ~27. This is an accepted trade: the old ramp's speed came
-   * from absolute pool-fraction steps, which is the flooding mechanism that
-   * pinned it at 100% in the light/medium regimes. A far-error boost
-   * (damping 2 when diff*2>target) was tried and rejected: it exploded the
-   * 6-tick-delay MAE from 3 to 45. The budget below pins the trade so a
-   * future change cannot silently worsen it.
-   *
-   * The transition case is different from cold start: there the OLD formula
-   * "reaches target" in 3 ticks but then thrashes (its heavy steady state IS
-   * the thrash), losing ~96 tick-equivalents to our ~29 -- asserted above
-   * via the transition MAE, and the deficit is asserted here. */
+   * heavy load. The bucket carries full speed for ~15 ticks, the boot jump
+   * then puts the share within striking distance, and the multiplicative
+   * ramp closes the rest. The old formula "reaches target" faster only by
+   * flooding -- its speed came from absolute pool-fraction steps, the
+   * flooding mechanism that pinned it at 100% in the light/medium regimes.
+   * (A REPEATED far-error boost was tried and rejected: damping 2 when
+   * diff*2>target exploded the 6-tick-delay MAE from 3 to 45; the one-shot
+   * jump gives the speed without joining the oscillation loop.) The budget
+   * pins the trade so a future change cannot silently worsen it; the full
+   * two-sided cold-start comparison is asserted per-cell in
+   * test_delta_campaign.c. */
   {
     const card_t *b = &cards[4];
     int64_t total = b->sm * b->thread * 32;
@@ -386,7 +482,7 @@ static void test_closed_loop(void) {
       bucket -= c2;
       int util = (int)(c2 * 100 / R);
       int m = hist[t % 2]; hist[t % 2] = util;
-      share = sm_delta_step(total, 50, m, share, DIV, 64);
+      share = sm_delta_step(total, 50, m, share, bucket, t < 2, DIV, 64);
       bucket += share; if (bucket > total) bucket = total;
       if (util < 50) deficit += (50.0 - util) / 50;
     }
@@ -394,7 +490,7 @@ static void test_closed_loop(void) {
       printf("  [FAIL] cold-start throughput deficit %.1f tick-equivalents (budget 40)\n", deficit);
       failures++;
     } else {
-      printf("  [ok] cold-start deficit %.1f tick-equivalents (one-time; old ~27, accepted trade)\n",
+      printf("  [ok] cold-start deficit %.1f tick-equivalents (one-time; boot jump active)\n",
              deficit);
     }
   }

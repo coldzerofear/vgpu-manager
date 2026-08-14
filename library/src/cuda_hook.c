@@ -664,12 +664,26 @@ static void rate_limiter(int grids, int blocks, int host_index) {
   }
 }
 
+/* Controller invocations per device, watcher-thread-only (each watcher owns a
+ * disjoint host_index slice). The first two invocations are the boot window
+ * for sm_delta_step's one-shot jump-start. Inherited across fork on purpose:
+ * a forked child joins an established share, and re-jumping it would be the
+ * repeated-large-step flooding the jump exists to avoid. */
+static int g_delta_calls[MAX_DEVICE_COUNT] = {0};
+
 /* Thin binding of the pure step (include/sm_delta.h) to this process's
- * per-device state. The formula, the ramp floor and the grow cap -- and the
- * reasons each exists -- live with the math so the no-GPU tests exercise the
- * exact shipped code rather than a re-implementation that drifts. */
+ * per-device state. The formula and the reasons each branch exists live with
+ * the math so the no-GPU tests exercise the exact shipped code rather than a
+ * re-implementation that drifts. The bucket read is racy by design -- it is
+ * advisory (starved? backlog?), and the CAS consumers keep it correct. */
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index) {
+  int boot = 0;
+  if (g_delta_calls[host_index] < 2) {
+    g_delta_calls[host_index]++;
+    boot = 1;
+  }
   return sm_delta_step(g_total_cuda_cores[host_index], up_limit, user_current, share,
+                       *sm_bucket_of(host_index), boot,
                        g_dynamic_config.delta_increment_divisor,
                        g_dynamic_config.delta_ramp_floor_divisor);
 }

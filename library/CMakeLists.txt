@@ -250,7 +250,15 @@ if(BUILD_SM_NODE_TESTS)
     # replica of the removed formula for the MAE comparison.
     add_executable(test_delta_step test/nogpu/test_delta_step.c)
     target_include_directories(test_delta_step PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include))
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # The dominance campaign: 55 GPU models x limits 1-100 x 3 workloads x
+    # 2 delays, new step vs frozen old, asserting zero regressed cells.
+    # -O2 keeps the 33000-cell grid to ~10 seconds regardless of build type.
+    add_executable(test_delta_campaign test/nogpu/test_delta_campaign.c)
+    target_include_directories(test_delta_campaign PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_options(test_delta_campaign PRIVATE -O2)
 endif()
 
 # Writes a session quota region the way the GPU-node agent would, so the
