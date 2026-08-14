@@ -171,6 +171,12 @@ devicePlugin:
   # devRoot is only needed when the device-node root differs from the driver root
   # (an extra same-path mount is added for it when set).
   driverRoot: "/"
+  gpuToolkitReady:
+    enabled: false
+    hostPath: "/run/nvidia/validations"
+    securityContext:
+      privileged: true
+      runAsUser: 0
   devicePlugin:
     env:
       - name: DP_ENABLE_HEALTHCHECKS
