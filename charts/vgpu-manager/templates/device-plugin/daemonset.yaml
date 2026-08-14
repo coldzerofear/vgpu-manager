@@ -72,6 +72,29 @@ spec:
             - name: manager-root
               mountPath: {{ $managerRoot | quote }}
               mountPropagation: Bidirectional
+        {{- if .Values.devicePlugin.gpuToolkitReady.enabled }}
+        - name: toolkit-ready
+          image: {{ include "vgpu-manager.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          {{- with .Values.devicePlugin.gpuToolkitReady.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Waiting for NVIDIA Toolkit to be ready..."
+              until [ -f {{ .Values.devicePlugin.gpuToolkitReady.hostPath }}/toolkit-ready ]; do 
+                echo "Waiting for {{ .Values.devicePlugin.gpuToolkitReady.hostPath }}/toolkit-ready..."
+                sleep 5
+              done
+              echo "NVIDIA Toolkit is ready!"
+          volumeMounts:
+            - name: nvidia-validations
+              mountPath: {{ .Values.devicePlugin.gpuToolkitReady.hostPath | quote }}
+              mountPropagation: HostToContainer
+              readOnly: true
+        {{- end }}
       containers:
         - name: device-plugin
           image: {{ include "vgpu-manager.fullimage" . }}
@@ -295,5 +318,11 @@ spec:
         - name: cert-dir
           secret:
             secretName: {{ include "vgpu-manager.device-plugin" . }}-secret
+        {{- end }}
+        {{- if .Values.devicePlugin.gpuToolkitReady.enabled }}
+        - name: nvidia-validations
+          hostPath:
+            path: {{ .Values.devicePlugin.gpuToolkitReady.hostPath }}
+            type: DirectoryOrCreate
         {{- end }}
 {{- end }}
