@@ -240,7 +240,45 @@ int config_allowed_devices(const resource_data_t *cfg, int *host_indexes, int ma
       host_indexes[count++] = i;
     }
   }
+  /* Stamp the tail with an index that is invalid everywhere rather than leaving
+   * it as whatever was on the caller's stack. Reading past `count` is a caller
+   * bug either way, but the two fail very differently: -1 is rejected by every
+   * downstream check (is_valid_device_index, get_nvml_device_index_by_host_index,
+   * the UUID lookup), while stack residue can easily look like a perfectly
+   * valid device index and quietly resolve to the wrong physical GPU. */
+  for (int i = count; i < max && i < MAX_DEVICE_COUNT; i++) {
+    host_indexes[i] = -1;
+  }
   return count;
+}
+
+/* Host index for the `visible_index`-th allowed device, or -1.
+ *
+ * The bounds check lives here, not at the call site, because getting it wrong
+ * is an isolation bug rather than a crash: an out-of-range read yields some
+ * other device's index, and the caller then serves a GPU this session was
+ * never given. One implementation, and callers cannot skip it. */
+int config_allowed_device_at(const resource_data_t *cfg, unsigned int visible_index) {
+  int host_indexes[MAX_DEVICE_COUNT];
+  int count = config_allowed_devices(cfg, host_indexes, MAX_DEVICE_COUNT);
+  if (visible_index >= (unsigned int)count) {
+    return -1;
+  }
+  return host_indexes[visible_index];
+}
+
+/* Inverse: where `host_index` sits in the visible ordering, or -1 if this
+ * session was not given it. Passing -1 (an unmapped device) is expected and
+ * answers -1, since the table never holds a negative index. */
+int config_visible_index_of(const resource_data_t *cfg, int host_index) {
+  int host_indexes[MAX_DEVICE_COUNT];
+  int count = config_allowed_devices(cfg, host_indexes, MAX_DEVICE_COUNT);
+  for (int i = 0; i < count; i++) {
+    if (host_indexes[i] == host_index) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 /* Which file the live config was built from, so a caller can tell an inherited

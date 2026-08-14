@@ -192,32 +192,10 @@ nvmlReturn_t nvmlDeviceGetPersistenceMode(nvmlDevice_t device, nvmlEnableState_t
  * NVML_INTERNAL_CALL / nvml_library_entry, i.e. the real driver functions, so
  * these hooks cannot recurse into themselves via init_devices_mapping(). */
 
-/* Config slot for an allowed virtual index, or -1. */
-static int host_index_of_visible(unsigned int visible_index) {
-  int host_indexes[MAX_DEVICE_COUNT];
-  int count = config_allowed_devices(g_vgpu_config, host_indexes, MAX_DEVICE_COUNT);
-  if (visible_index >= (unsigned int)count) {
-    return -1;
-  }
-  return host_indexes[visible_index];
-}
-
-/* Position of a config slot in the visible ordering, or -1 if not allowed. */
-static int visible_index_of_host(int host_index) {
-  int host_indexes[MAX_DEVICE_COUNT];
-  int count = config_allowed_devices(g_vgpu_config, host_indexes, MAX_DEVICE_COUNT);
-  for (int i = 0; i < count; i++) {
-    if (host_indexes[i] == host_index) {
-      return i;
-    }
-  }
-  return -1;
-}
-
 /* A handle the caller obtained by any route is ours to serve only if it maps
  * back to an activated device in this session's config. */
 static int device_is_visible(nvmlDevice_t device) {
-  return visible_index_of_host(get_host_device_index_by_nvml_device(device)) >= 0;
+  return config_visible_index_of(g_vgpu_config, get_host_device_index_by_nvml_device(device)) >= 0;
 }
 
 nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount) {
@@ -250,7 +228,7 @@ nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *dev
   if (device == NULL) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
-  int host_index = host_index_of_visible(index);
+  int host_index = config_allowed_device_at(g_vgpu_config, index);
   if (host_index < 0) {
     LOGGER(VERBOSE, "nvml index %u is outside the session's devices", index);
     return NVML_ERROR_INVALID_ARGUMENT;
@@ -331,7 +309,7 @@ nvmlReturn_t nvmlDeviceGetIndex(nvmlDevice_t device, unsigned int *index) {
   if (index == NULL) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
-  int visible = visible_index_of_host(get_host_device_index_by_nvml_device(device));
+  int visible = config_visible_index_of(g_vgpu_config, get_host_device_index_by_nvml_device(device));
   if (visible < 0) {
     return NVML_ERROR_NOT_FOUND;
   }

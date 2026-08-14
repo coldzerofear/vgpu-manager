@@ -318,6 +318,12 @@ int write_file_to_config_path(resource_data_t *data);
  * source of the container's device ordering -- see the definition. */
 int config_allowed_devices(const resource_data_t *cfg, int *host_indexes, int max);
 
+/* Translate between the container's device numbering and the node's. Prefer
+ * these over indexing the array yourself: they carry the bounds check, and
+ * getting that wrong resolves to another session's GPU rather than crashing. */
+int config_allowed_device_at(const resource_data_t *cfg, unsigned int visible_index);
+int config_visible_index_of(const resource_data_t *cfg, int host_index);
+
 /* Has the config path moved since the live config was read? See the definition
  * -- this is what keeps a forked child from using another session.s quota
  * without making a plain local fork re-map the same file. */

@@ -184,6 +184,73 @@ static void test_allowed_device_order(void) {
   } else {
     printf("  [ok] honours the caller's cap\n");
   }
+
+  /* Slots past the count must read back as an index nothing accepts. They are
+   * out of bounds for a correct caller, but "out of bounds" that happens to
+   * look like device 0 is an isolation bug waiting for one missing check,
+   * whereas -1 is rejected everywhere downstream. */
+  int probe[MAX_DEVICE_COUNT];
+  memset(probe, 0, sizeof(probe));
+  int n = config_allowed_devices(cfg, probe, MAX_DEVICE_COUNT);
+  int tail_ok = 1;
+  for (int i = n; i < MAX_DEVICE_COUNT; i++) {
+    if (probe[i] != -1) {
+      tail_ok = 0;
+    }
+  }
+  if (!tail_ok) {
+    printf("  [FAIL] tail past count is not -1 (a stale 0 would name device 0)\n");
+    failures++;
+  } else {
+    printf("  [ok] tail past count reads back as -1\n");
+  }
+}
+
+/* The container-to-node index translation, which is what actually decides
+ * which physical GPU a session is served. Sparse on purpose, and with device 0
+ * NOT allowed: an out-of-range lookup that fell through to a zeroed slot would
+ * answer "device 0" and hand over a GPU this session was never given. */
+static void test_visible_index_translation(void) {
+  printf("visible <-> host index translation:\n");
+  resource_data_t cfg;
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.devices[3].activate = 1;
+  cfg.devices[7].activate = 1;
+
+  struct { unsigned int visible; int want; } cases[] = {
+      {0, 3}, {1, 7}, {2, -1}, {3, -1}, {99, -1}, {(unsigned int)-1, -1},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    int got = config_allowed_device_at(&cfg, cases[i].visible);
+    if (got != cases[i].want) {
+      printf("  [FAIL] visible %u -> host %d, want %d\n", cases[i].visible, got, cases[i].want);
+      failures++;
+    }
+  }
+  printf("  [ok] visible 0,1 -> host 3,7; out of range -> -1 (never device 0)\n");
+
+  if (config_visible_index_of(&cfg, 3) != 0 || config_visible_index_of(&cfg, 7) != 1) {
+    printf("  [FAIL] host -> visible mismatch\n");
+    failures++;
+  } else if (config_visible_index_of(&cfg, 0) != -1 ||
+             config_visible_index_of(&cfg, -1) != -1 ||
+             config_visible_index_of(&cfg, 15) != -1) {
+    /* -1 is what an unmapped NVML handle resolves to, so it must not match. */
+    printf("  [FAIL] a device outside the session was reported visible\n");
+    failures++;
+  } else {
+    printf("  [ok] host 3,7 -> visible 0,1; unallowed and -1 -> -1\n");
+  }
+
+  resource_data_t empty;
+  memset(&empty, 0, sizeof(empty));
+  if (config_allowed_device_at(&empty, 0) != -1 || config_allowed_device_at(NULL, 0) != -1 ||
+      config_visible_index_of(&empty, 0) != -1 || config_visible_index_of(NULL, 0) != -1) {
+    printf("  [FAIL] empty/NULL config did not answer -1\n");
+    failures++;
+  } else {
+    printf("  [ok] empty and NULL config -> -1\n");
+  }
 }
 
 /* Where the per-device GPU lock FILE actually lands, not merely what the
@@ -276,6 +343,7 @@ int main(void) {
   test_allowed_device_order();
   test_gpu_lock_file_location();
   test_config_source_moved();
+  test_visible_index_translation();
 
   if (failures != 0) {
     printf("\n%d check(s) FAILED\n", failures);
