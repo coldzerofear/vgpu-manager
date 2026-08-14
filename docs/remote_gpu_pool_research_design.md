@@ -13,8 +13,9 @@
 > **逐字回退**到合并前的本地语义（有回归测试钉住），本地部署不受影响。产物仍是单一 `libvgpu-control.so`，
 > 它同时充当 LD_PRELOAD hook 库与 lupine 的 checkpoint provider。
 >
-> 同时移除了 AIMD/auto 控制器（实测利用率控制效果不达预期），`delta` 为唯一控制器；
-> 容器级共享令牌桶改为**默认开启**。
+> AIMD/auto 控制器曾随合并移除，**已于 2026-08-14 恢复**——delta 的增量按 sm² 缩放而池容量线性于 sm，
+> 大 SM 卡上限不住核心（HAMi-core #274 同源，详见 docs/sm_controller_aimd.md 沿革节）；默认仍为 delta。
+> 容器级共享令牌桶**默认开启**。
 >
 > 阅读下文时请把 `library-remote/xxx` 一律理解为 `library/xxx`。
 
@@ -1055,8 +1056,8 @@ B 阶段积累的 lupine 补丁经验（session/RPC 接入点）与 Go 侧配额
 
 ### Phase 2 —— 核心隔离（仅 C 支持）
 
-> **前提澄清**：`library-remote` 复制自 `library/` 时，令牌桶（`rate_limiter`）、利用率 watcher、`sm_node` 共享桶
-> **全部保留**（只裁掉了 AIMD/auto 控制器，delta 保留）。所以 Phase 2 不是"新增限速能力"，而是**让既有能力在
+> **前提澄清**：令牌桶（`rate_limiter`）、利用率 watcher、`sm_node` 共享桶全部在位；AIMD/auto 控制器曾被
+> 裁剪、现已恢复（见 docs/sm_controller_aimd.md 沿革节）。Phase 2 不是"新增限速能力"，而是**让既有能力在
 > 会话模型下语义正确**。
 
 - [x] `rate_limiter` + 利用率 watcher 在子进程内启用：`initialization()` 由 `cuInit` hook 触发

@@ -9,11 +9,11 @@
 >
 > 状态：**设计定稿**（已拍板，见 §12；未实现；默认关闭，环境变量灰度开启）。
 > 基线：已对齐 `main` @ `2f234ef`（2026-07-24 同步，见 §0）。所有行号引用均按该基线校准。
-> 关联：[GAP 路径节流](./sm_core_limit_gap_throttle_design.md)、[AIMD 控制器(已移除)](./sm_controller_aimd.md)。
+> 关联：[GAP 路径节流](./sm_core_limit_gap_throttle_design.md)、[AIMD 控制器](./sm_controller_aimd.md)。
 >
 > **实现状态更新**：本设计已落地，且**默认开启**(`CUDA_SM_SHARED_BUCKET=0` 可关闭；远程会话下拒绝关闭，
 > 因为一个容器由多个 lupine-server 子进程服务，进程内桶会让每个连接各拿满配额)。
-> 文中 `md_cooldown` 等 AIMD 相关的控制状态字段已随 AIMD 一起移除，`sm_node_dev_t` 中保留 `_reserved0` 占位以维持 ABI。
+> `md_cooldown` 等 AIMD 控制状态字段在位(曾短暂以 `_reserved0` 占位,AIMD 恢复后还原,ABI 偏移未变)。
 
 ---
 

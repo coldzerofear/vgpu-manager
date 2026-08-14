@@ -1,16 +1,10 @@
 # SM throttle ablation pipeline
 
-A small measurement harness for vgpu-manager.s SM throttle: run the same
-workload under different library settings and compare how well each tracks the
-target utilization.
-
-It was built to compare the delta and AIMD controllers. AIMD has since been
-removed (its utilization tracking did not hold up in practice, and the
-container-wide token bucket addressed the multi-process fairness it was aimed
-at), so delta is the only controller left. The harness stays because a variant
-is just "a name plus some env" -- point it at anything you want to A/B, e.g.
-`CUDA_SM_SHARED_BUCKET=0` vs `1`.
-See [docs/sm_core_limit_gap_throttle_design.md](../../../docs/sm_core_limit_gap_throttle_design.md)
+A small measurement harness for vgpu-manager's algorithmic SM throttle work:
+**delta** (stock symmetric proportional) vs **aimd** (additive-increase /
+multiplicative-decrease).
+See [docs/sm_controller_aimd.md](../../../docs/sm_controller_aimd.md) for the
+controller design and [docs/sm_core_limit_gap_throttle_design.md](../../../docs/sm_core_limit_gap_throttle_design.md)
 for the orthogonal GAP-path piece.
 
 ## What this measures
@@ -25,8 +19,8 @@ data/<datestamp>-<gpu_safe>/
 ├── delta/
 │   ├── samples.csv     elapsed_ms, sm_util_pct
 │   ├── workload.log    workload stdout/stderr
-│   └── meta.json       variant, target, gpu, …
-├── <variant-b>/
+│   └── meta.json       variant, target, controller, gpu, …
+├── aimd/
 │   └── …
 └── compare.png         4-panel comparison (time series, histogram, MAE bar, stats)
 ```
@@ -36,9 +30,10 @@ data/<datestamp>-<gpu_safe>/
 The GAP path in `cuda_hook.c` is always-on (gated by per-device `core_limit`,
 no env switch). So every variant here measures **"controller + GAP path"** as
 shipped -- not the controller in isolation. That matches what users actually
-deploy, but it makes any comparison conservative: the GAP path already trims
-the worst spikes under every variant. Isolating it would need a build with GAP
-stripped, which is out of scope for this harness.
+deploy, but it means a delta-vs-aimd comparison here is conservative: the GAP
+path already trims the worst spikes both ways. If you need pure controller
+A/B you'd have to compile a build with GAP stripped, which is out of scope
+for this harness.
 
 ## Prerequisites
 
@@ -59,7 +54,7 @@ this dir as documentation only.
 cd library
 make build                                # produces build/libvgpu-control.so
 
-# 2. Run the ablation (one "baseline" variant by default, 30s)
+# 2. Run the full ablation (delta + aimd, default 30s each)
 export VGPU_SO=$PWD/build/libvgpu-control.so
 test/ablation/run_ablation.sh
 
@@ -72,8 +67,8 @@ You'll get a `compare.png` and a stdout table:
 ```
 variant           samples     mean      MAE      P50      P95      P99
 ------------------------------------------------------------------------
-bucket_on             300    30.85%    2.91%    2.00%    7.00%   12.00%
-bucket_off            300    47.21%   18.34%   16.00%   42.00%   55.00%
+delta                 300    47.21%   18.34%   16.00%   42.00%   55.00%
+aimd                  300    30.85%    2.91%    2.00%    7.00%   12.00%
 ```
 
 (Numbers are illustrative; your hardware will differ.)
@@ -89,9 +84,10 @@ All passed via env to `run_ablation.sh` (which forwards to `collect.sh`):
 | `ABLATION_DURATION_S` | 30 | wall time per variant |
 | `ABLATION_GPU_ID` | 0 | GPU index for sampling + UUID lookup |
 | `ABLATION_SAMPLE_MS` | 100 | nvidia-smi sample interval |
-| `VARIANTS` | "baseline" | space-separated list of variant labels |
-| `CUDA_SM_SHARED_BUCKET` | (library default 1) | container-wide token bucket on/off |
-| `CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR` | (library default 64) | delta ramp length in watcher cycles |
+| `VARIANTS` | "delta aimd" | space-separated list of variant labels |
+| `CUDA_SM_AIMD_MD_DIVISOR` | (library default 3) | only used when controller=aimd |
+| `CUDA_SM_AIMD_EFF_RATIO` | (library default 875) | only used when controller=aimd |
+| `CUDA_SM_AIMD_AI_BASE_DIV` | (library default 400) | only used when controller=aimd |
 | `NVCC_ARCH` | (nvcc default) | e.g. `-arch=sm_80` for A100, `-arch=sm_90` for H100 |
 | `OUT_BASE` | `./data` | where the dated output dir is created |
 
@@ -103,20 +99,36 @@ UUID cannot be read.
 
 ### Parameter sweeps
 
-Free-form variant names work; `run_ablation.sh` forwards the parent shell.s env
-to `collect.sh` unchanged. Use the library.s actual env names:
+Free-form variant names work; `run_ablation.sh` forwards the parent shell's
+env to `collect.sh` unchanged, and the library reads its own `CUDA_SM_AIMD_*`
+envs only when `controller=aimd`. Use the library's actual env names:
 
 ```bash
-# Compare three ramp-floor divisors on the same hardware
-for n in 32 64 128; do
-  CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR=$n \
-    ./collect.sh "ramp$n" data/sweep-$(date +%Y%m%d)/ramp$n
+# Compare three MD factors on the same hardware
+for md in 2 3 4; do
+  CUDA_SM_AIMD_MD_DIVISOR=$md CUDA_SM_CONTROLLER=aimd \
+    ./collect.sh "aimd_md$md" data/sweep-$(date +%Y%m%d)/aimd_md$md
 done
 python3 plot_compare.py data/sweep-$(date +%Y%m%d)/
 ```
 
 (That sweep pattern is informal; for a real CI-driven sweep you'd loop in a
 shell over `VARIANTS` and parse `compare.png`s.)
+
+## A100 / H100 parameter starting point
+
+AIMD was calibrated on RTX 4080 (consumer, SM=76, 1536/SM). For datacenter
+GPUs the SM count and thread granularity are larger by ~1.4-1.7x, so the
+default `÷3` MD can over-cut. Starting points worth measuring:
+
+| GPU | `CUDA_SM_AIMD_MD_DIVISOR` | `CUDA_SM_AIMD_AI_BASE_DIV` | Why |
+|---|---|---|---|
+| RTX 4080 | 3 | 400 | validated defaults |
+| A100 | 2 or 3 | 800 | larger SM grid → smaller AI step |
+| H100 | 2 | 800-1600 | as above, plus more aggressive MD softening |
+
+These are starting points, not verified -- the harness exists so you can
+verify them.
 
 ## How the workload works
 
@@ -155,7 +167,7 @@ MAE / P50 / P95 / P99 are computed over the surviving samples.
   variant's per-pod fairness.
 - **Auto-baseline regression**: store one set of numbers under `data/baseline/`,
   fail CI if a PR regresses MAE by more than a configurable threshold.
-- **Per-GPU profiles**: pre-set tunable recommendations under
+- **Per-GPU profiles**: pre-set AIMD parameter recommendations under
   `profiles/<gpu_name>.env`, loaded by `run_ablation.sh`.
 
 These are intentionally not in P0 -- this directory should stay small and

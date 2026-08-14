@@ -53,6 +53,10 @@ Using [LUPINE](https://github.com/lupinemachines/lupine) to unlock remote GPU vi
 * MANAGER_COMPATIBILITY_MODE: Environment compatibility mode
 * EXTERNAL_SM_WATCHER_ENABLED: Enable external SM util watcher
 * VMEMORY_NODE_ENABLED: Enable virtual memory node tracing
+* CUDA_SM_CONTROLLER: Core limit algorithm: delta (default) | aimd | auto. delta scales its correction
+  by sm_num^2 against a pool linear in sm_num, so on very high-SM cards (188-SM Blackwell class) it
+  cannot hold the limit -- use aimd (or auto) there; see docs/sm_controller_aimd.md
+* CUDA_SM_AIMD_MD_DIVISOR / _EFF_RATIO / _AI_BASE_DIV / _DEADBAND_RATIO / _MD_COOLDOWN_CYCLES: AIMD tunables
 * CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: Accelerate delta utilization rate climb speed - default 64
 * CUDA_SM_SHARED_BUCKET: Container-wide shared SM token bucket. On by default; set to 0 to opt out
   (ignored in a remote session, where a per-process bucket would give every connection the full core quota)

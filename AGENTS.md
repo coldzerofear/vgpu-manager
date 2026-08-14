@@ -16,7 +16,7 @@
   - 内存硬隔离：`cuMemAlloc` 前预算校验，超限返回 `CUDA_ERROR_OUT_OF_MEMORY`；
     `cuMemGetInfo`/`cuDeviceTotalMem`/`nvmlDeviceGetMemoryInfo` 改写为"限额视图"。
   - 核心硬隔离：`cuLaunchKernel` 前令牌桶限速（`gridDim*blockDim` 扣减），利用率 watcher 线程本地轮询 NVML
-    驱动令牌补给（delta 控制器）。多进程容器共用一个**容器级令牌桶**（默认开启）。
+    驱动令牌补给（delta/AIMD/auto 控制器）。多进程容器共用一个**容器级令牌桶**（默认开启）。
   - 可选内存超卖（UVA/managed memory + vmem ledger）。
 - Go 侧：调度器、插件、webhook、monitor、metrics、配置下发（`vgpu.config`，seqlock 版本化）。
 
@@ -85,9 +85,9 @@
   - 设备隔离：CUDA 侧靠 provider setenv `CUDA_VISIBLE_DEVICES`（驱动自己裁剪重排），NVML 侧靠 hook 枚举族。
   - nvml 路径经 `nvml_symbol<>()` dlsym 句柄查询（`nvml_server.cpp:46-56`）→ **库必须保留 dlsym 拦截器**。
   - per-session 配置 fork 安全依赖 `loader_child_after_fork`（`loader.c:2994`）重置 once-guard，**不能裁剪**。
-- **AIMD/auto 控制器已删除**（`delta` 为唯一控制器）：实测利用率控制效果不达预期，且其针对的多进程公平性
-  已由共享令牌桶解决。`CUDA_SM_CONTROLLER`/`CUDA_SM_AIMD_*` 失效。`cuLaunchKernel*`、利用率 watcher、
-  `sm_node` 共享桶均保留。
+- **AIMD/auto 控制器已恢复**（2026-08-14，曾在合并时删除）：delta 的增量按 sm² 缩放而池容量线性于 sm，
+  **大 SM 卡（188 SM 的 Blackwell 等）上限不住核心**（HAMi-core #274 同源缺陷）；AIMD 步长线性缩放无此问题。
+  默认仍为 `delta`；大卡应 `CUDA_SM_CONTROLLER=aimd`（或 `auto`）。详见 docs/sm_controller_aimd.md 沿革节。
 - **共享令牌桶默认开启**（`CUDA_SM_SHARED_BUCKET=0` 可关；会话模式下拒绝关闭）：一个远程容器 = 每条连接一个子进程，进程内桶会让每个子进程各自按完整
   `hard_core` 限速 → 容器拿到 N× 配额；且 N 个 watcher 各自轮询 NVML。共享桶（`<session>/.sm_node`）的 CAS 补给
   选举 + 采样所有权同时解决两者（standby 完全跳过 NVML）。显式 `CUDA_SM_SHARED_BUCKET=0` 在会话模式下被拒绝；

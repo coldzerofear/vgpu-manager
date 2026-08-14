@@ -53,18 +53,50 @@ limitations under the License.
 #define MANAGER_COMPATIBILITY_MODE_ENV "MANAGER_COMPATIBILITY_MODE"
 #define EXTERNAL_SM_WATCHER_ENABLED_ENV "EXTERNAL_SM_WATCHER_ENABLED"
 
-/* Exclusivity FSM debounce: how many consecutive watcher observations must
- * agree before "we have this device to ourselves" flips. Debounced because
- * NVML process-count jitter would otherwise flap it. The CUDA_SM_AUTO_ prefix
- * is historical, from the removed auto controller. */
+/* SM throttle controller selection + AIMD parameters. The watcher's per-cycle
+ * share update is delegated to a controller. Default keeps stock behaviour.
+ * AIMD ("aimd") does slow additive increase (gap-proportional) + fast
+ * multiplicative decrease.
+ *
+ *   CUDA_SM_CONTROLLER       = "delta" (default) | "aimd"
+ *   CUDA_SM_AIMD_MD_DIVISOR  = MD factor (share /= div) - default 3
+ *   CUDA_SM_AIMD_EFF_RATIO   = effective-limit buffer / 1000 - default 875 (87.5%)
+ *   CUDA_SM_AIMD_AI_BASE_DIV = AI step base divisor - default 400
+ */
+#define CUDA_SM_CONTROLLER_ENV       "CUDA_SM_CONTROLLER"
+#define CUDA_SM_AIMD_MD_DIVISOR_ENV  "CUDA_SM_AIMD_MD_DIVISOR"
+#define CUDA_SM_AIMD_EFF_RATIO_ENV   "CUDA_SM_AIMD_EFF_RATIO"
+#define CUDA_SM_AIMD_AI_BASE_DIV_ENV "CUDA_SM_AIMD_AI_BASE_DIV"
+
+/* "auto" controller mode (experimental): switch between delta (single-Pod,
+ * for throughput) and aimd (multi-Pod, for fairness) based on per-device
+ * sys_process_num observed by the watcher. Debounced to avoid pingponging
+ * on NVML's process-count jitter. */
 #define CUDA_SM_AUTO_DEBOUNCE_CYCLES_ENV         "CUDA_SM_AUTO_DEBOUNCE_CYCLES"
 /* SM-utilization threshold (percent) above which a non-self-container
  * process is considered to actually compete with us. Default 1: just
  * enough to filter the always-on driver/persistenced threads (which
  * report ~0%) while still recognising the smallest real Pod activity.
- * Used by the exclusivity FSM behind the watcher's soft_core burst
+ * Used by both the AUTO controller and the watcher's soft_core burst
  * decision to identify "real exclusive use" of the GPU. */
 #define CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD_ENV "CUDA_SM_AUTO_EXTERNAL_UTIL_THRESHOLD"
+
+/* AIMD anti-sawtooth tunables (P1, see sm_controller_aimd_sawtooth_analysis.md).
+ *
+ *   DEADBAND_RATIO  -- per-thousand. Defines the AI lower edge of the
+ *                      hysteresis band around eff_limit. Default 800 means
+ *                      AI fires only when user_current < up_limit*0.80
+ *                      (i.e. below 80% of target), MD fires above eff_limit
+ *                      (up_limit*0.875 by default). Inside the band the
+ *                      controller leaves share alone. Must be < EFF_RATIO.
+ *
+ *   MD_COOLDOWN_CYCLES -- how many watcher cycles after an MD the controller
+ *                         will NOT MD again, even if user_current still
+ *                         exceeds eff_limit. Default 3 (~240ms at 80ms
+ *                         watcher cadence). Set 0 to disable cooldown
+ *                         entirely (retain V2.1 behaviour). */
+#define CUDA_SM_AIMD_DEADBAND_RATIO_ENV     "CUDA_SM_AIMD_DEADBAND_RATIO"
+#define CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV "CUDA_SM_AIMD_MD_COOLDOWN_CYCLES"
 
 /* Avg-free-headroom threshold (percent) used by the soft-mode periodic
  * up_limit adjuster. avg > x -> climb, avg < x -> step back down,
@@ -364,6 +396,53 @@ int get_sm_watcher_enabled(int *i) {
   return 0;
 }
 
+/* Returns 0 for the stock "delta" controller (default), 1 for "aimd",
+ * 2 for the experimental "auto" mode (debounced sys_process_num-based
+ * routing between delta and aimd). Anything else stays on delta. */
+int get_sm_controller_kind(int *kind) {
+  *kind = 0;
+  char *str = _getenv(CUDA_SM_CONTROLLER_ENV);
+  if (!str) return -1;
+  if (strcasecmp(str, "aimd") == 0) {
+    *kind = 1;
+    return 0;
+  }
+  if (strcasecmp(str, "auto") == 0) {
+    *kind = 2;
+    return 0;
+  }
+  return 0;
+}
+
+/* Generic positive-int env getter with a fallback. Returns 0 if env was set
+ * and parsed; -1 if env unset (caller keeps its default). Parse failure or a
+ * non-positive value falls back to `dflt` and still returns 0 so the caller
+ * sees a usable value rather than a silent zero. */
+/* Positive double getter: accepts decimals like "1.5" so users can dial in
+ * finer-grained MD softness than the integer-divisor flavour. The min
+ * argument is a hard floor enforced after parsing; values <= min produce
+ * a WARNING and fall back to dflt. Returns 0 if env was set and parsed
+ * to a usable value (whether or not it had to fall back to dflt due to
+ * range violation); -1 if env was unset (caller's dflt is used). */
+static int get_positive_double_env(const char *name, double dflt, double min,
+                                   double *out) {
+  char *str = _getenv(name);
+  if (!str || !*str) {
+    *out = dflt;
+    return -1;
+  }
+  char *endp = NULL;
+  double v = strtod(str, &endp);
+  if (endp == str || !(v > 0) || v < min || v != v /* NaN */) {
+    LOGGER(WARNING, "%s=\"%s\" is not a positive double (>= %.3f), using default %.3f",
+           name, str, min, dflt);
+    *out = dflt;
+    return 0;
+  }
+  *out = v;
+  return 0;
+}
+
 /* Non-negative variant: accepts 0 (some knobs use 0 as the "disable" value).
  * Same parse + fallback semantics as get_positive_int_env otherwise. */
 static int get_nonneg_int_env(const char *name, int dflt, int *out) {
@@ -422,14 +501,39 @@ static int get_positive_int_env(const char *name, int dflt, int *out) {
   return 0;
 }
 
+/* MD divisor is a double so users can dial in 1.5 or 2.5 for softer cuts
+ * than integer 2/3. Floor 1.01 -- /1 is a no-op, /<1 would AMPLIFY share
+ * on overshoot which inverts the algorithm. The 0.01 margin avoids
+ * pathological behaviour from floating-point rounding near 1.0. */
+int get_aimd_md_divisor(double *out) {
+  return get_positive_double_env(CUDA_SM_AIMD_MD_DIVISOR_ENV, 3.0, 1.01, out);
+}
 
 /* Usage threshold (percent) for soft-mode up_limit periodic adjust. */
 int get_usage_threshold(int *out) {
   return get_nonneg_int_env(CUDA_SM_USAGE_THRESHOLD_ENV, 5, out);
 }
 
-/* Number of consecutive observed-different watcher cycles required before the
- * exclusivity FSM flips. Default 10 ~ 800ms, which
+/* Effective-limit ratio expressed as parts-per-thousand (875 = 87.5%) so the
+ * env can be a plain integer. Clamped to (0, 1000]. */
+int get_aimd_eff_ratio(int *out) {
+  int v = 875;
+  int rc = get_positive_int_env(CUDA_SM_AIMD_EFF_RATIO_ENV, 875, &v);
+  if (v > 1000) {
+    LOGGER(WARNING, "%s=%d > 1000, clamped to 1000",
+           CUDA_SM_AIMD_EFF_RATIO_ENV, v);
+    v = 1000;
+  }
+  *out = v;
+  return rc;
+}
+
+int get_aimd_ai_base_div(int *out) {
+  return get_positive_int_env(CUDA_SM_AIMD_AI_BASE_DIV_ENV, 400, out);
+}
+
+/* Number of consecutive observed-different watcher cycles required before
+ * the "auto" mode flips between delta and aimd. Default 10 ~ 800ms, which
  * absorbs multi-cycle NVML jitter in sys_process_num (the extra margin over
  * the old 5 further suppresses exclusivity flapping) without adding meaningful
  * Pod start/exit latency (Pod start dominates anyway). */
@@ -453,6 +557,17 @@ int get_sm_auto_external_util_threshold(int *out) {
  * delta() guards the division on divisor > 0, so a non-positive value is safe. */
 int get_delta_ramp_floor_divisor(int *out) {
   return get_int_env(CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV, 64, out);
+}
+
+/* AIMD deadband lower edge / 1000. Caller MUST additionally check
+ * deadband_ratio < eff_ratio to keep AI/deadband/MD regions well-ordered. */
+int get_aimd_deadband_ratio(int *out) {
+  return get_positive_int_env(CUDA_SM_AIMD_DEADBAND_RATIO_ENV, 800, out);
+}
+
+/* AIMD post-MD cooldown in watcher cycles. 0 = disabled (V2.1 behaviour). */
+int get_aimd_md_cooldown_cycles(int *out) {
+  return get_nonneg_int_env(CUDA_SM_AIMD_MD_COOLDOWN_CYCLES_ENV, 3, out);
 }
 
 /* Container-wide shared token bucket on/off. Same true/TRUE/1 spelling as the

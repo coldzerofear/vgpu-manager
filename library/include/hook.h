@@ -363,12 +363,16 @@ extern resource_data_t *g_vgpu_config;
  *
  * usage_threshold:    avg-free-headroom threshold for soft-mode up_limit
  *                     periodic adjust. >= 0; env CUDA_SM_USAGE_THRESHOLD.
+ * sm_controller_kind: 0=delta (stock), 1=aimd, 2=auto.
+ * aimd_md_divisor:    AIMD MD factor as a double so users can pick 1.5
+ *                     for a softer cut than 2 or 3. Clamped >= 1.01 at
+ *                     load time so we never accidentally /1 (no-op) or
+ *                     /<=0 (UB).
+ * aimd_eff_ratio:     parts-per-thousand, eff_limit = up * x / 1000.
+ * aimd_ai_base_div:   AI step base divisor.
+ * aimd_deadband_ratio: parts-per-thousand, deadband lower edge.
+ * aimd_md_cooldown_cycles: post-MD watcher-cycle cooldown (0 disables).
  * auto_debounce_cycles: N consecutive observations to flip exclusivity FSM.
- *                     The auto_ prefix is historical -- it named the AIMD/auto
- *                     controller selection that no longer exists. Both fields
- *                     below survive it because the exclusivity FSM they drive
- *                     is consulted by the soft_core burst gate and the
- *                     hard_limit jitter-init, not by controller routing.
  * auto_external_util_threshold: external util percent above which the
  *                     device is considered "shared with other Pods".
  * delta_ramp_floor_divisor: delta()'s grow/cut step is floored at
@@ -382,6 +386,13 @@ extern resource_data_t *g_vgpu_config;
 typedef struct {
   /* Preserved: was already in this struct in earlier versions. */
   int    usage_threshold;
+  /* Appended for V2.1/P1/P2: consolidates 8 prior file-static globals. */
+  int    sm_controller_kind;
+  double aimd_md_divisor;
+  int    aimd_eff_ratio;
+  int    aimd_ai_base_div;
+  int    aimd_deadband_ratio;
+  int    aimd_md_cooldown_cycles;
   int    auto_debounce_cycles;
   int    auto_external_util_threshold;
   int    delta_ramp_floor_divisor;
@@ -582,7 +593,11 @@ typedef struct {
   int32_t is_cnt;               /* was is[]                                 */
   int32_t avg_sys_free;         /* was avg_sys_frees[]                      */
   int32_t pre_external_proc;    /* was pre_external_process_nums[]          */
-  int32_t _reserved0;
+  int32_t md_cooldown;          /* was g_aimd_md_cooldown[] -- without this
+                                 * AIMD re-fires MD every cycle and cuts
+                                 * share by md_divisor^N ("MD avalanche"),
+                                 * which is the exact thing the cooldown was
+                                 * introduced to prevent.                   */
   int32_t excl_debounced;       /* was g_is_exclusive_debounced[]      ┐    */
   int32_t excl_streak;          /* was g_exclusive_pending_streak[]    │FSM */
   int32_t lost_excl_pending;    /* was g_lost_exclusivity_pending[]    ┘    */

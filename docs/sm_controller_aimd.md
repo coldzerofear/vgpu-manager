@@ -1,21 +1,25 @@
-# 算力切分控制器:可选 AIMD(已移除)
-
-> ## ⚠️ 本功能已从代码中移除
->
-> AIMD/auto 控制器已于合并 `library-remote` 时删除,`delta` 是唯一保留的控制器。
-> 环境变量 `CUDA_SM_CONTROLLER`、`CUDA_SM_AIMD_*` 均已失效(设置了也不会被读取)。
->
-> **移除原因**:实测利用率控制效果不达预期(见
-> [sawtooth 分析](sm_controller_aimd_sawtooth_analysis.md)——单 Pod 下耗时比 delta 高约 1/3);
-> 而它主要针对的多进程公平性问题,已由
-> [容器级共享令牌桶](sm_multiproc_shared_bucket_design.md)解决,该桶现在默认开启。
->
-> 本文档**仅作历史记录保留**,用于说明该路径已被评估并放弃,避免重复投入。
-
+# 算力切分控制器:可选 AIMD
 
 > 作用范围:`library/`(LD_PRELOAD 运行时库)的 watcher 主循环内的份额更新算法。
 > 关系:与 [GAP 路径节流](sm_core_limit_gap_throttle_design.md) **正交、互补** —— GAP 解大 kernel 同步模式下的瞬时绕过,AIMD 解 watcher 稳态围绕目标的高方差。两者可同时启用。
 > 状态:已落地,**默认关闭**(env 切换),`CUDA_SM_CONTROLLER=aimd` 启用。
+
+> ## 沿革:曾于合并 library-remote 时移除,现已恢复(2026-08-14)
+>
+> 移除理由(当时):单 Pod 实测耗时比 delta 高约 1/3(见 [sawtooth 分析](sm_controller_aimd_sawtooth_analysis.md)),
+> 且其主要针对的多进程公平性已由[容器级共享令牌桶](sm_multiproc_shared_bucket_design.md)(现默认开启)解决。
+>
+> **恢复理由:delta 在超高 SM 数的卡上限不住核心。** HAMi-core issue #274 报告 RTX PRO 6000 Blackwell
+> (188 SM)上 `CUDA_DEVICE_SM_LIMIT=50` 时利用率钉死 99-100%,与本库 delta 同源同公式:修正增量按
+> `sm_num²` 缩放(`cuda_hook.c` `increment = sm_num * sm_num * max_thread * diff / 2560`),而令牌池容量
+> 只是 `sm_num` 的线性函数(`max_thread * sm_num * FACTOR`)——**increment/pool ∝ sm_num**,188 SM 上单次
+> 修正一个 tick 就能灌满池子,消耗却要几分钟,限流形同虚设。已有的 ramp_floor 是**下限**,只救小卡爬坡慢,
+> 压不住大卡的过大增量——同一个 sm² 缺陷的两个方向,floor 只堵了一头。
+>
+> AIMD 的步长公式线性于 sm_num(`ai_step = sm_num * max_thread * 3 * eff_limit / ai_base_div`),与池容量
+> 同阶,架构上不存在此缺陷。**在 delta 的增量公式修好之前,大 SM 卡(Blackwell/B200 及以后)应显式
+> `CUDA_SM_CONTROLLER=aimd`(或 `auto`)。** 两个控制器在不同象限各有短板:delta 的 sm² 缺陷伤大卡,
+> AIMD 的锯齿伤单 Pod 吞吐——保留双方 + auto 路由,按卡型与负载选择。
 
 ---
 
