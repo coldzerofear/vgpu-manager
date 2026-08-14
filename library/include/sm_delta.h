@@ -168,9 +168,15 @@ static inline int64_t sm_delta_step(int64_t total, int up_limit, int user_curren
     return (share - increment) < 0 ? 0 : (share - increment);
   }
 
-  /* Mild overshoot: cut in proportion to how much of it share explains. */
+  /* Mild overshoot: cut in proportion to how much of it share explains.
+   * The bucket can read NEGATIVE here (rate_limiter deducts before it
+   * checks), which would zero or flip the denominator -- clamp it: an
+   * overdrawn bucket is "no backlog", the strongest share-is-the-cause
+   * signal. 128-bit product because prop*share overflows int64 for pools
+   * beyond ~2^31 tokens (no current GPU, but the contract is any pool). */
+  int64_t backlog = bucket > 0 ? bucket : 0;
   int64_t prop = share * (int64_t)raw_diff / (DELTA_REL_DAMPING * up);
-  int64_t by_cause = prop * share / (share + bucket + 1);
+  int64_t by_cause = (int64_t)((__int128)prop * share / (share + backlog + 1));
   int64_t by_error = prop * (int64_t)raw_diff / 100;
   int64_t increment = by_cause > by_error ? by_cause : by_error;
   return (share - increment) < 0 ? 0 : (share - increment);

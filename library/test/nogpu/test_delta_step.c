@@ -275,6 +275,56 @@ static void test_invariants(void) {
     }
   }
 
+  /* A NEGATIVE bucket read must be survivable: rate_limiter deducts before
+   * it checks, so the watcher can observe g_cur < 0. The hazard is the mild
+   * cut's share/(share+bucket+1) denominator hitting zero (share=5,
+   * bucket=-6 -> SIGFPE before the clamp existed). Overdrawn must also cut
+   * at least as hard as merely-empty -- it is the stronger signal. */
+  {
+    int64_t total = 132LL * 2048 * 32;
+    int64_t share = total / 10;
+    int64_t cut_neg = share - sm_delta_step(total, 80, 100, share, -share - 1, 0, DIV, 64);
+    int64_t cut_zero = share - sm_delta_step(total, 80, 100, share, 0, 0, DIV, 64);
+    int64_t r5 = sm_delta_step(total, 80, 100, 5, -6, 0, DIV, 64); /* the exact SIGFPE state */
+    if (cut_neg < cut_zero || r5 < 0 || r5 > 5) {
+      printf("  [FAIL] negative bucket mishandled (cut %ld vs %ld, r5=%ld)\n",
+             (long)cut_neg, (long)cut_zero, (long)r5);
+      failures++;
+    } else {
+      printf("  [ok] negative (overdrawn) bucket: no div-by-zero, cuts as hard as empty\n");
+    }
+  }
+
+  /* Output contract sweep: for ANY share in [0,total] the result stays in
+   * [0,total] -- 1M deterministic pseudo-random states over degenerate and
+   * real pools, out-of-spec limits/utils, negative and overfull buckets,
+   * hostile divisors. The 20M-state UBSan/ASan fuzz that found the negative-
+   * bucket division and the 2^40-pool overflow was this loop's ancestor. */
+  {
+    static const int64_t totals[] = {1, 2, 31, 32768, 5LL*2048*32, 40LL*1024*32,
+        108LL*2048*32, 188LL*1536*32, 1LL<<40};
+    static const int divs[] = {-1, 0, 1, 64, DIV, 2000000000};
+    uint64_t st = 0x9e3779b97f4a7c15ULL;
+    long bad = 0;
+    for (long i = 0; i < 1000000; i++) {
+      st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+      int64_t total = totals[st % 9];
+      int u = (int)((st >> 8) % 161) - 10;
+      int util = (int)((st >> 16) % 161) - 10;
+      int64_t share = (int64_t)((st >> 3) % (uint64_t)(total + 1));
+      int64_t bucket = (int64_t)((st >> 24) % (uint64_t)(2 * total + 1)) - total / 2;
+      int64_t r = sm_delta_step(total, u, util, share, bucket, (int)(st & 1),
+                                divs[(st >> 32) % 6], divs[(st >> 40) % 6]);
+      if (r < 0 || r > total) bad++;
+    }
+    if (bad) {
+      printf("  [FAIL] output contract violated in %ld of 1M adversarial states\n", bad);
+      failures++;
+    } else {
+      printf("  [ok] 1M adversarial states: result always in [0, total]\n");
+    }
+  }
+
   /* Share clamps to [0, total]. */
   {
     int64_t total = 76LL * 1536 * 32;
