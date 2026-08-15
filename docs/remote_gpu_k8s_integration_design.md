@@ -325,8 +325,14 @@ consumer DS: initContainers[i] = 各版本镜像（CMD 即 cp /artifacts → hos
 - CMake 新增 `LUPINE_STATIC_DEPS`：nghttp2（1.64.0）/OpenSSL（3.0.18）/libstdc++/libgcc 静态内嵌
   （lz4 上游本就静态 vendor——同一哲学的既有先例）；现有 `client.exports` 版本脚本天然把内嵌符号藏出
   `.dynsym`，与目标镜像同名库**零符号冲突**。
-- **rockylinux8 统一构建底座**：glibc 2.28 是 NVIDIA 全矩阵（11.7–13.1，amd64+arm64，已逐 tag 核实）
-  发布 devel 镜像的最低地板；CUDA 13 用 gcc-toolset（其 libstdc++ 增量设计上就是静态链接，地板不抬）。
+- **rockylinux8 统一构建底座**（用户确认：全矩阵统一，不为 11.x 单开 ubuntu18.04）：glibc 2.28 是 NVIDIA
+  全矩阵（11.7–13.1，amd64+arm64，已逐 tag 核实）发布 devel 镜像的最低地板——12.x/13.x 无更低选择，
+  11.x 的 ubuntu18.04（2.27）仅省 0.01 却带 gcc7/cmake3.10 问题，不值。CUDA 13 用 gcc-toolset-13
+  （其 libstdc++ 增量设计上就是静态链接，地板不抬）。实测产物 glibc 上限 2.27/2.25，低于声明地板。
+- **首轮 CI 踩坑（已修）**：Rocky 8 的 `libstdc++-static` 在默认禁用的 **PowerTools** 仓（Ubuntu 的
+  libstdc++-dev 自带 .a），`-static-libstdc++` 因此 `cannot find -lstdc++` 全矩阵链接失败。BuildKit 只给
+  "exit code 2"，靠 rockylinux:8 chroot + 真实 RH gcc 8.5/binutils 2.30 复现定位；
+  fix `--enablerepo=powertools libstdc++-static`（fork commit af71914）。
 - `deploy/check_static_client.sh` 构建期自检：DT_NEEDED 仅 glibc / .dynsym 无内嵌符号泄漏 /
   TLS 静态存在（防 `find_package(OpenSSL QUIET)` 静默降级）/ glibc 上限 ≤ 声明地板；
   另有 rocky8-minimal 裸镜像（=地板本身）RTLD_NOW 加载探针阶段。
