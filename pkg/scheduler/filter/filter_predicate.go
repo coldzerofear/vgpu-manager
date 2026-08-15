@@ -431,6 +431,10 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationReq
 	)
 	memoryPolicyFunc := GetMemoryPolicyFunc(req.Pod)
 	for i, node := range nodes {
+		if !node.DeletionTimestamp.IsZero() {
+			klog.V(4).InfoS("node is already marked as deleted", "node", node.Name)
+			continue
+		}
 		var nodeConfig *device.NodeConfigInfo
 		var nodeDevice *device.NodeDeviceInfo
 		if r := CheckNode(&node, memoryPolicyFunc, func(
