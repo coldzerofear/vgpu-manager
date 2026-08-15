@@ -1,6 +1,8 @@
-# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.2
+# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.3
 
-> 状态：**设计定稿（十项关键决策已确认），待实施**
+> 状态：**设计定稿（十二项关键决策已确认），待实施**
+> v1.3（2026-08-15）：**D4 重大修订**——client 制品改为**自包含静态构建**（D11，已在 fork 实现并本地全链路验证）
+> + **镜像列表→节点版本目录**分发机制（D12）；新增 §4.4/§4.5。
 > v1.2（2026-08-14）：引入 **operator + RemoteGPUPool CRD** 总体形态（D7–D10）——组件收敛为
 > "1 CRD + 1 Operator + 2 DaemonSet"，agent 合并进 kubelet-plugin，controller 取消，会话目录改
 > pod 内 emptyDir；§1.5 新增。
@@ -24,6 +26,8 @@
 | D8 | 会话令牌签发 | **消费侧 kubelet-plugin 在 NodePrepareResources 生成随机令牌，写入 `claim.status.devices[].data`**；独立 controller 取消，operator 不进 pod 启动关键路径（§1.5.3） |
 | D9 | 会话目录 | **agent 与 lupine-server 同 pod，共享 emptyDir**；GPU 节点主机零安装，生命周期与会话语义天然对齐（§1.5.2） |
 | D10 | 域名前缀 | **`vgpu-manager.io`**（CRD group 与 device attributes 同源）；不用 `nvidia.com` 后缀（`gpu.nvidia.com` 是 NVIDIA 官方 DRA 驱动的属性域，避撞） |
+| D11 | 制品形态 | **自包含静态 client**（fork 增加 `LUPINE_STATIC_DEPS`：nghttp2/OpenSSL/libstdc++/libgcc 静态内嵌，运行时依赖仅 glibc；rockylinux8 统一底座 → glibc 2.28 地板全矩阵最低）。已实现并本地验证（§4.5） |
+| D12 | 制品分发 | **镜像列表 → 节点版本目录**：cudaVersion→镜像地址映射由 CR/operator 维护，operator 渲染进消费侧 DS 的 init 容器逐版本落盘 hostPath；增减版本 = 改列表，不重建我们的镜像。**逐 pod 选镜像不可行**（准入先于分配，§4.4） |
 
 ## 1. 问题本质：三平面模型
 
@@ -139,7 +143,12 @@ spec:
   transport:                             # ← D5/D6 预留接缝
     tls: {enabled: false, issuerRef: ..., dnsSuffix: gpu.corp}
     preload: none                        # none | smc-r | rsocket（§7.1.3 spike 通过后开闸）
-  lupine: {image: ..., port: 14833, extraEnv: []}   # LUPINE_* 透传逃生门
+  lupine:                                # LUPINE_* 透传逃生门 + 制品映射（D12）
+    image: ...                           # server 镜像
+    port: 14833
+    extraEnv: []
+    clientImages:                        # cudaVersion → 自包含 client 制品镜像（§4.4）
+      - {cudaVersion: "12.9", image: ghcr.io/.../lupine-client-static:cuda-12.9.1@sha256:...}
   scheduling: {deviceClassName: remote-vgpu-a}      # operator 自动创建 DeviceClass
 status:
   servers: [{node, endpoint, cudaVersion, deviceCount, ready}]
@@ -242,11 +251,65 @@ NodePrepareResources 发现 claim 命中远程池时：
 **4.3 运行时（权威兜底，天然存在）**：pod 内 cudart 经 lupine 看到 server 驱动版本
 （`cuDriverGetVersion` 透传），不满足时 cudart 自报 `CUDA_ERROR_INSUFFICIENT_DRIVER`。
 
-**客户端制品（D4：版本目录）**：install daemonset 在全节点铺
-`/opt/vgpu/lupine/<cuda-ver>/lib/{libcuda.so.1,libnvidia-ml.so.1}`；
-注入层选 `max{ver : ver <= server_cudaVersion}` 的目录挂载 + `LD_LIBRARY_PATH`。
-lupine shim 走动态链接器查找（远程 pod 无驱动，它的 libcuda 就该是 lupine 的），**非 LD_PRELOAD**。
-多 server 版本不一时取交集最低者；`versions.mk` 增加制品清单与 sha256。
+**客户端制品（D4 → v1.3 由 D11/D12 具体化）**：版本目录 + `max{ver : ver <= server_cudaVersion}` 选择逻辑不变；
+制品形态与分发方式见 §4.4/§4.5。lupine shim 走动态链接器查找（远程 pod 无驱动，它的 libcuda 就该是 lupine 的），
+**非 LD_PRELOAD**。多 server 版本不一时取交集最低者。
+
+### 4.4 制品分发：镜像列表 → 节点版本目录（D12）
+
+**动机**：lupine CI 按 CUDA 版本持续产出 client 镜像。若把制品固化进我们的 install 镜像，每次增减版本都要重建发版；
+改为**cudaVersion → 镜像地址的映射表**驱动，增减版本 = 改列表。
+
+**关键技术约束（决定机制形态）**：制品版本的选择依赖**分配结果**（server 的 cudaVersion），而分配发生在调度时；
+**准入（webhook 注入 init 容器）在调度之前**，此时不可能知道 pod 会分到哪台 server → "逐 pod 按需选制品镜像
+注入 init 容器"**不可行**（pod spec 的 init image 事后不可靠变更）。因此落点必须是**节点级异步物化**：
+
+```
+RemoteGPUPool.spec.lupine.clientImages:          # cudaVersion → image 映射（建议 digest 固定）
+  - {cudaVersion: "12.9", image: ghcr.io/.../lupine-client-static:cuda-12.9.1@sha256:...}
+  - {cudaVersion: "12.4", image: ghcr.io/.../lupine-client-static:cuda-12.4.1@sha256:...}
+        │ operator 取所有 pool 的并集，渲染进消费侧 DS 模板
+        ▼
+consumer DS: initContainers[i] = 各版本镜像（CMD 即 cp /artifacts → hostPath/<ver>/）
+        │ kubelet 原生拉取（pull secret/镜像仓库代理/缓存/离线环境全部走标准机制）
+        ▼
+节点 /var/lib/vgpu-manager/lupine/<cuda-ver>/   ← 注入层 CDI 挂载，选择逻辑照旧
+```
+
+- **不在 pod 启动关键路径上**：物化随 DS rollout 异步完成；pod NodePrepare 时目录缺失（新节点赶上 rollout）
+  → 返回可重试错误，kubelet 自动重试。
+- 列表变更 → operator 更新 DS 模板 → 滚动 rollout 重物化；移除版本由 plugin 启动时对账 GC。
+- **被否掉的替代**：per-pod init 从制品镜像拷 emptyDir（版本在准入时未知，只能全量拷贝，浪费且慢）；
+  运行时 registry 拉取（绕过 kubelet 的 pull secret/镜像代理体系，把 registry 可用性引入 pod 启动路径）。
+
+### 4.5 制品形态：自包含静态构建（D11，已实现）
+
+**问题背景（三个被搅在一起的正交轴，实验教训记录）**：
+1. *文件分发*（host 挂载 vs sidecar/emptyDir 拷贝）——sidecar 只能改变文件来源，**共享文件 ≠ 共享运行时**，
+   .so 始终由目标容器的 loader 用目标容器的 glibc/搜索路径加载；
+2. *依赖解析*——动态版 client 依赖 libnghttp2/libssl/libstdc++；靠目标镜像=碰运气；挂载依赖 + `LD_LIBRARY_PATH`
+   =**进程全局搜索路径污染**（实测：ollama 官方镜像里 llama-server 因此崩溃，"Bad address"——它的每次库解析
+   也先搜我们的目录）；
+3. *版本选择*——D4 已解决。
+**所有失败都在轴 2**；解法是让制品**不需要任何搜索路径可见的依赖**。
+
+**实现（fork 提交 `81c51a4`，lupine 源码零逻辑改动）**：
+- CMake 新增 `LUPINE_STATIC_DEPS`：nghttp2（1.64.0）/OpenSSL（3.0.18）/libstdc++/libgcc 静态内嵌
+  （lz4 上游本就静态 vendor——同一哲学的既有先例）；现有 `client.exports` 版本脚本天然把内嵌符号藏出
+  `.dynsym`，与目标镜像同名库**零符号冲突**。
+- **rockylinux8 统一构建底座**：glibc 2.28 是 NVIDIA 全矩阵（11.7–13.1，amd64+arm64，已逐 tag 核实）
+  发布 devel 镜像的最低地板；CUDA 13 用 gcc-toolset（其 libstdc++ 增量设计上就是静态链接，地板不抬）。
+- `deploy/check_static_client.sh` 构建期自检：DT_NEEDED 仅 glibc / .dynsym 无内嵌符号泄漏 /
+  TLS 静态存在（防 `find_package(OpenSSL QUIET)` 静默降级）/ glibc 上限 ≤ 声明地板；
+  另有 rocky8-minimal 裸镜像（=地板本身）RTLD_NOW 加载探针阶段。
+- CI：`.github/workflows/publish-client-static-image.yml`，全矩阵产出
+  `lupine-client-static:cuda-<ver>` 镜像（busybox 载体，`/artifacts` + cp 入口，即 §4.4 init 容器直接可用）。
+- **本地已全链路验证**（CUDA 12.9 redist 工具链 + 真实源码编译）：DT_NEEDED 仅
+  `libc.so.6`/`ld-linux`，466 个 `cu*` + dlsym 导出完好，TLS 静态在位，RTLD_NOW 加载通过，
+  自检脚本对动态库正确拒绝。
+- **注入面因此无害化**：挂载目录里只有 `libcuda.so.1`/`libnvidia-ml.so.1`，容器内被遮蔽的名字仅此二者——
+  远程 pod 本无真驱动，这正是产品语义。边界：glibc-only（musl/alpine 镜像不支持，与库同一约束）；
+  pod 镜像不得自带真 libcuda。
 
 ## 5. 配额落盘时序（D2）
 
