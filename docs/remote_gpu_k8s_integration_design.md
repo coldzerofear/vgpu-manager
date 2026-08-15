@@ -1,7 +1,8 @@
 # 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.4
 
 > 状态：**设计定稿（十二项关键决策已确认），待实施**
-> v1.4（2026-08-15）：**D2 修订**——EnsureSession 从注入 init 容器改为 NodePrepareResources 内同步调用：
+> v1.4（2026-08-15）：两项修订。**D7 修订**——**helm 编排替代 operator/CRD**（快速迭代期，operator 后置；
+> RemoteGPUPool spec 降级为 values schema，§1.5）。**D2 修订**——EnsureSession 从注入 init 容器改为 NodePrepareResources 内同步调用：
 > 屏障更强（严格先于 pod 一切容器，含用户自己的 init 容器）且**远程 pod 零 spec mutation**；
 > webhook 退化为纯 UX 糖（可选）。代价：pod netns 数据面 pre-flight 不可得，由首个 CUDA 调用报错兜底（§5）。
 > v1.3（2026-08-15）：**D4 重大修订**——client 制品改为**自包含静态构建**（D11，已在 fork 实现并本地全链路验证）
@@ -25,12 +26,12 @@
 | D4 | 客户端制品 | **直接上版本目录机制**（不等单基准制品 spike）；制品须校验带 TLS 编译（§6.1） |
 | D5 | 传输加密 | lupine **服务端不支持 TLS**，需前置终止代理；K1 可明文，**多租户/跨信任域前必须启用**（§6.1） |
 | D6 | 高性能网络 | **SR-IOV 优先**（透明、零 lupine 改动）；IB/RoCE 组网时叠 IPoIB 或 SMC-R；GPUDirect 属改 lupine 的长期项（§7.1） |
-| D7 | 总体形态 | **operator + 单 RemoteGPUPool CRD**；一个 CR 物化整条链路，**消费侧 DaemonSet 也由 CR 参数控制**，`reachableNodeSelector`（= net-zone）一物两用：既圈定 slice 可调度范围，又是消费侧 DS 的铺设范围（§1.5） |
-| D8 | 会话令牌签发 | **消费侧 kubelet-plugin 在 NodePrepareResources 生成随机令牌，写入 `claim.status.devices[].data`**；独立 controller 取消，operator 不进 pod 启动关键路径（§1.5.3） |
+| D7 | 总体形态 | **v1.4：helm 编排 2 DaemonSet**（并入 dra-driver chart 或独立依赖 chart），values 结构 = 原 RemoteGPUPool spec，`reachableNodeSelector`（= net-zone）一物两用：既圈定 slice 可调度范围，又是消费侧 DS 铺设范围。**operator/CRD 后置**至组件稳定、边界明确且 helm 不够用时（§1.5） |
+| D8 | 会话令牌签发 | **消费侧 kubelet-plugin 在 NodePrepareResources 生成随机令牌，写入 `claim.status.devices[].data`**；独立 controller 取消，pod 启动关键路径上没有任何集中式控制器（§1.5.3） |
 | D9 | 会话目录 | **agent 与 lupine-server 同 pod，共享 emptyDir**；GPU 节点主机零安装，生命周期与会话语义天然对齐（§1.5.2） |
 | D10 | 域名前缀 | **`vgpu-manager.io`**（CRD group 与 device attributes 同源）；不用 `nvidia.com` 后缀（`gpu.nvidia.com` 是 NVIDIA 官方 DRA 驱动的属性域，避撞） |
 | D11 | 制品形态 | **自包含静态 client**（fork 增加 `LUPINE_STATIC_DEPS`：nghttp2/OpenSSL/libstdc++/libgcc 静态内嵌，运行时依赖仅 glibc；rockylinux8 统一底座 → glibc 2.28 地板全矩阵最低）。已实现并本地验证（§4.5） |
-| D12 | 制品分发 | **镜像列表 → 节点版本目录**：cudaVersion→镜像地址映射由 CR/operator 维护，operator 渲染进消费侧 DS 的 init 容器逐版本落盘 hostPath；增减版本 = 改列表，不重建我们的镜像。**逐 pod 选镜像不可行**（准入先于分配，§4.4） |
+| D12 | 制品分发 | **镜像列表 → 节点版本目录**：cudaVersion→镜像地址映射在 values 里维护，helm 渲染进消费侧 DS 的 init 容器逐版本落盘 hostPath；增减版本 = 改列表，不重建我们的镜像。**逐 pod 选镜像不可行**（准入先于分配，§4.4） |
 
 ## 1. 问题本质：三平面模型
 
@@ -39,7 +40,7 @@
 ```
 ┌─ 控制面 ────────────────────────────────────────────────┐
 │ scheduler(DRA allocator / extender)：全局池记账、版本/可达性匹配 │
-│ operator：池物化/DeviceClass/TLS/维护编排（不在启动关键路径，§1.5）│
+│ helm 渲染：池 DS/消费侧 DS/DeviceClass（静态，无运行时控制器，§1.5）│
 └──────────┬──────────────────────────┬───────────────────┘
            │ ①分配结果                  │ ①分配结果
 ┌─ GPU 节点(资源面) ─────────┐   ┌─ 消费节点(任意可达节点) ────────┐
@@ -55,35 +56,51 @@
 
 **本地 vGPU 路径零影响**：远程是新增 DeviceClass/资源池，现有 device-plugin/extender/DRA 本地分配不动。
 
-## 1.5 总体形态：1 CRD + 1 Operator + 2 DaemonSet（D7–D10，v1.2）
+## 1.5 总体形态：helm 编排的 2 DaemonSet（v1.4 修订；operator/CRD 后置）
 
-以"部署简单、使用简单"为第一约束收敛出的最终形态。部署者视角：装 operator（helm）→
-`kubectl apply` 一个 RemoteGPUPool → 完事。
+> **v1.4 策略调整**：方案处于快速迭代期，一开始就上 operator/CRD 过于激进（开发/维护复杂度高，
+> 且边界未全部明确时 CRD schema 会反复变）。改为 **helm 编排整个 remote-gpu 组件集**，与现有
+> `charts/vgpu-manager` / `charts/vgpu-manager-dra-driver` 同一形态；待组件稳定、边界明确、
+> 且 helm 在编排或简易性上确实不够用时，再引入 CRD/operator。
+>
+> **代价很小**——v1.2 分析里真正承重的部分本就不依赖 operator：agent 合并进 kubelet-plugin
+> （§1.5.1）、令牌在消费侧签发（§1.5.3）、会话目录 emptyDir（§1.5.2）、节点级制品物化（§4.4）
+> 全部原样保留。operator 承担的只是"把声明翻译成 DS 模板"，而这恰是 helm 的本职。
+> `RemoteGPUPool` 的 spec 结构**降级为 values.yaml 的 schema**，字段一一对应，
+> 将来升 CRD 时是机械映射。
+
+部署者视角：`helm install` 一个 chart（建议并入 `vgpu-manager-dra-driver` 作 `remoteGPU:` 子树，
+共享 kubelet-plugin 镜像/RBAC/webhook；或独立 `vgpu-manager-remote-gpu` chart 依赖前者）
+→ 给节点打标签 → 完事。
 
 ```
-用户视角：  kubectl apply -f remotegpupool.yaml   ← 部署 = 一个 CR
-           pod 写熟悉的资源请求                    ← 使用 = 与本地 vGPU 一致（§5.5）
+用户视角：  helm install ... -f values.yaml       ← 部署 = 一次 helm + 节点标签
+           pod 写熟悉的资源请求                    ← 使用 = 与本地 vGPU 一致（§1.5.6）
 
-┌─ vgpu-operator (Deployment) ────────────────────────────────────┐
-│ watch RemoteGPUPool → 物化：                                     │
-│  · 每 pool 的 GPU 节点 DaemonSet（server 模式，多容器，§1.5.2）    │
-│  · 消费侧 DaemonSet（inject 模式，铺设范围 = reachableNodeSelector │
-│    的**集群级并集**，见 §1.5.4 去重约束）                          │
-│  · DeviceClass 自动创建；TLS 开启时配 proxy sidecar/证书/DNS(§6.1)│
-│  · 维护模式编排：撤 slice → 等 claim 排空 → 滚动重启 server        │
-│  ★ 不在 pod 启动关键路径上（§1.5.3）                              │
-└─────────────────────────────────────────────────────────────────┘
+┌─ helm 渲染（静态，无运行时控制器）─────────────────────────────────┐
+│  values.remoteGPU.pools[]  →  每 pool 一个 GPU 节点 DaemonSet          │
+│  values.remoteGPU.consumer →  一个消费侧 DaemonSet（§1.5.4 归并由 helm │
+│                               模板取各 pool selector 并集）           │
+│  values.remoteGPU.clientImages → 消费侧 DS 的 init 容器列表（§4.4）    │
+│  DeviceClass / RBAC / webhook 配置                                   │
+└──────────────────────────────────────────────────────────────────┘
 ┌─ gpu-node DaemonSet (per pool) ─────┐ ┌─ consumer DaemonSet(归并后) ──┐
 │ [c1] kubelet-plugin --mode=server    │ │ [c1] kubelet-plugin           │
 │      发布 slice + watch claim 落盘 + │ │      --mode=inject            │
 │      EnsureSession（原"agent"职责）   │ │   （注入/CDI/EnsureSession）  │
-│ [c2] lupine-server                   │ │ [init] 铺客户端版本目录到 host │
+│ [c2] lupine-server                   │ │ [init×N] 逐版本铺制品到 host  │
 │      （镜像内置 libvgpu-control.so）  │ └───────────────────────────────┘
 │ [c3] tls-proxy（可选, envoy, §6.1）  │
 │ 共享 emptyDir = 会话目录              │
 └──────────────────────────────────────┘
 ```
 
+**helm 阶段有意放弃、留给未来 operator 的能力**（都不是 K1/K2 必需）：
+- 维护模式编排（撤 slice → 等 claim 排空 → 滚动重启 server）——helm 阶段靠运维手动
+  cordon 池 + 等待，或 plugin 提供 `--drain` 开关；
+- TLS 证书/DNS 记录的自动生命周期——helm 阶段用 cert-manager Certificate 模板 + 手工/外部 DNS；
+- 池状态汇总（`status.servers[]`）——helm 阶段看 ResourceSlice + plugin 指标。
+这些正是"helm 不够用"的判据；触发到再上 operator，届时 values schema 即 CRD schema。
 ### 1.5.1 agent 合并进 kubelet-plugin（同一二进制，`--mode` 区分）
 
 §2.4 的 agent 三职责（发布 slice / watch claim 落盘 / EnsureSession）中，前两个在
@@ -108,32 +125,30 @@ lupine-server 与 agent 同 pod 后，会话目录用两容器共享的 emptyDir
 独立 controller 的唯一职责是签令牌，取消之：消费侧 plugin 在 NodePrepareResources 生成随机令牌
 → 写入 `claim.status.devices[].data`（DRA 为 driver 私有数据设计的字段，需
 `resourceclaims/status` update RBAC）→ 注入 pod env；GPU 侧 agent watch claim 同时拿到分配与令牌。
-故障域对照（operator 方案能否上生产的分水岭）：
+故障域对照（pod 启动关键路径上没有集中式组件——helm 阶段天然如此，将来上 operator 也须保持）：
 
 | 组件挂了 | 影响 |
 |---|---|
-| operator | 已物化的池照常工作（slice 由 plugin 发布、令牌由消费侧生成、落盘由 agent watch）；仅池的**变更**停摆 |
+| helm/apiserver 侧（无运行时控制器） | 已部署的 DS 照常工作；仅新的部署变更受影响 |
 | gpu-node DS | 该池不可用（本质如此） |
 | consumer plugin | 该节点新 pod 无法 prepare（DRA 自身故障域） |
 
 ### 1.5.4 消费侧 DS 的归并约束（多池重叠，实现必须处理）
 
 DRA 驱动名是**节点单例**（插件 socket 注册冲突），两个 pool 的可达域有交集时**不能**各铺一个
-inject DS。operator 必须集群级归并：消费侧 DS 只有一个，nodeAffinity = 所有 pool
+inject DS。helm 模板必须集群级归并：消费侧 DS 只有一个，nodeAffinity = 所有 pool
 `reachableNodeSelector` 的**并集**（多 nodeSelectorTerms 即 OR 语义），且排除 server 节点
 （server 模式插件本就兼具 inject 能力）。
 
-### 1.5.5 RemoteGPUPool CRD（D7、D10）
+### 1.5.5 values 结构（D7、D10）——将来的 RemoteGPUPool CRD schema
 
-单 CRD 声明整条链路；`network`/`transport` 字段是 D5/D6 的预留接缝——新增网络形态 =
-operator 加一个 profile 翻译分支（NAD annotation / hostNetwork / preload env / MTU），
-**CRD API 不破坏、用户无迁移**：
+**v1.4：以下结构落在 chart values 里**（`remoteGPU.pools[]` 每项一个池），字段设计即为未来 CRD 的
+spec；`network`/`transport` 字段是 D5/D6 的预留接缝——新增网络形态 = 模板加一个 profile 分支
+（NAD annotation / hostNetwork / preload env / MTU），**values 结构不破坏、用户无迁移**：
 
 ```yaml
-apiVersion: vgpu-manager.io/v1alpha1
-kind: RemoteGPUPool
-metadata: {name: pool-a}
-spec:
+# values.yaml (remoteGPU.pools[0])；升 CRD 时逐字段映射为 RemoteGPUPool.spec
+- name: pool-a
   nodeSelector: {vgpu-manager.io/remote-server: "true"}   # 哪些 GPU 节点入池
   devices: {}                            # 可选：uuid/index/型号过滤，默认全部
   consumer:                              # 消费侧（D7：也由本 CR 控制）
@@ -152,10 +167,8 @@ spec:
     extraEnv: []
     clientImages:                        # cudaVersion → 自包含 client 制品镜像（§4.4）
       - {cudaVersion: "12.9", image: ghcr.io/.../lupine-client-static:cuda-12.9.1@sha256:...}
-  scheduling: {deviceClassName: remote-vgpu-a}      # operator 自动创建 DeviceClass
-status:
-  servers: [{node, endpoint, cudaVersion, deviceCount, ready}]
-  conditions: [...]
+  scheduling: {deviceClassName: remote-vgpu-a}      # chart 渲染 DeviceClass
+# status.servers[] 等运行时汇总：helm 阶段无；升 CRD 后由 operator 填
 ```
 
 ### 1.5.6 使用面：与本地 vGPU 对齐的两档 UX
@@ -273,7 +286,7 @@ NodePrepareResources 发现 claim 命中远程池时：
 RemoteGPUPool.spec.lupine.clientImages:          # cudaVersion → image 映射（建议 digest 固定）
   - {cudaVersion: "12.9", image: ghcr.io/.../lupine-client-static:cuda-12.9.1@sha256:...}
   - {cudaVersion: "12.4", image: ghcr.io/.../lupine-client-static:cuda-12.4.1@sha256:...}
-        │ operator 取所有 pool 的并集，渲染进消费侧 DS 模板
+        │ helm 模板取所有 pool 的并集，渲染进消费侧 DS 模板
         ▼
 consumer DS: initContainers[i] = 各版本镜像（CMD 即 cp /artifacts → hostPath/<ver>/）
         │ kubelet 原生拉取（pull secret/镜像仓库代理/缓存/离线环境全部走标准机制）
@@ -292,7 +305,7 @@ consumer DS: initContainers[i] = 各版本镜像（CMD 即 cp /artifacts → hos
 - **天然支持一个 pod 多容器、各配不同 CUDA 版本**：CDI 挂载是 per-container 的，NodePrepare 按各容器
   claim 的分配结果分别选目录——这正是"节点级全版本物化 + 分配时选择"优于任何"pod 级带版本"方案的地方
   （后者必须在准入时预测落点，做不到）。
-- 列表变更 → operator 更新 DS 模板 → 滚动 rollout 重物化；移除版本由 plugin 启动时对账 GC。
+- 列表变更 → helm upgrade 更新 DS 模板 → 滚动 rollout 重物化；移除版本由 plugin 启动时对账 GC。
 - **被否掉的替代**：给目标 pod 注入制品 init 容器（准入先于分配无法选版本，只能全版本都挂，pod 被塞进
   N 个 init 容器——不可接受）；运行时 registry 拉取（绕过 kubelet 的 pull secret/镜像代理体系，
   把 registry 可用性引入 pod 启动路径）。
@@ -499,11 +512,11 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 |---|---|---|---|
 | kubelet-plugin `--mode=server` | 远程池 slice 发布 + claim watch 落盘/回收 + EnsureSession（吸收原 agent，§1.5.1） | **大** | K1 |
 | kubelet-plugin `--mode=inject` | 注入（env/CDI/init 容器）+ 令牌生成写 claim status（D8） | 中 | K1 |
-| **operator + RemoteGPUPool CRD** | 物化两个 DS/DeviceClass/维护模式；消费侧 DS 集群级归并（§1.5.4）；TLS 时管 sidecar/证书/DNS | **大** | K1 起步（先只翻译 hostNetwork profile），随阶段增强 |
+| **chart（helm 模板）** | 池 DS/消费侧 DS（含集群级归并 §1.5.4 与制品 init 列表 §4.4）/DeviceClass/RBAC；TLS 时 cert-manager 模板 | 中 | K1（先只 hostNetwork profile），随阶段增强 |
+| operator + CRD | **后置**：组件稳定、边界明确且 helm 不够用时；values schema 即 CRD schema | 大 | 待定 |
 | server 容器镜像 | lupine-server + libvgpu-control.so 打包（emptyDir 会话目录，D9） | 小 | K1 |
 | install（消费侧 DS 的 init） | lupine-client 版本目录铺设 | 小 | K1 |
 | webhook | 默认档 UX 转换（§1.5.6）+ `NVIDIA_REQUIRE_CUDA`/annotation → 版本需求 | 小 | K2 |
-| chart | 退化为只装 operator（+CRD） | 小 | K1 |
 | extender 兼容路径 | 假资源 + CR 记账 + annotation 落盘 | 大 | K3（老集群需求明确后） |
 
 - **K1（最小闭环）**：单 zone、单 server/pod，agent+注入+NodePrepare 屏障跑通端到端。
@@ -524,7 +537,7 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 | lupine 客户端制品可能未带 TLS 编译（`find_package(OpenSSL QUIET)` 静默降级） | 版本目录铺设时校验制品含 TLS 支持（§6.1） |
 | TLS 代理配置不当（无 ALPN、`:scheme` 恒为 http） | §6.1 部署坑；优先 envoy 显式 h2 或四层 TLS 终止 |
 | 高性能网络 preload（SMC-R/rsocket）与我们的 LD_PRELOAD 共存未验证 | 符号集不相交且 dlsym 拦截器会回退（§7.1.3 第 1 条），但**必须 spike 实测**后才可用于生产 |
-| 多池可达域重叠 → 同节点两个 inject 插件注册冲突（DRA 驱动名节点单例） | operator 集群级归并消费侧 DS（§1.5.4），并集 nodeAffinity + 排除 server 节点 |
+| 多池可达域重叠 → 同节点两个 inject 插件注册冲突（DRA 驱动名节点单例） | helm 模板集群级归并消费侧 DS（§1.5.4），并集 nodeAffinity + 排除 server 节点 |
 | 消费侧 plugin 写 claim status 的 RBAC 与并发（多设备/重试幂等） | 令牌按 claim 幂等生成（已存在则复用）；resourceclaims/status update 权限入 chart RBAC |
 | emptyDir 会话目录随 pod 删除，agent 容器单独重启时会话目录仍在但 watch 状态丢失 | agent 启动时 list+watch 全量对账（落盘幂等，§5 已有），emptyDir 内容与 claim 集合收敛 |
 | 数据面两次主机内存落地限制高速网络收益上限 | 固有于 lupine 架构（无 GPUDirect）；选型时按负载类型预期收益，勿承诺线性提升（§7.1.2） |
