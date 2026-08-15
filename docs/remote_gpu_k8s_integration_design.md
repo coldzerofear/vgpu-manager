@@ -3,6 +3,8 @@
 > 状态：**设计定稿（十三项关键决策已确认），待实施**
 > v1.5（2026-08-15）：**D13 服务端拓扑**——1:N 主线 + 1:1 第二拓扑（operator 阶段以 `RemoteGPUServer` CR 引入），
 > 源自 gpu-go 对照分析；纠正"1:N 省 IP"的直觉（TensorFusion 也是单 IP 多端口）。§1.6 新增。
+> v1.5.1（同日评审）：§1.6.4 k8s 落地四形态与三选二困境；§1.6.5 server-centric 分工；§1.6.6 库侧边界更正
+> （**发现既有缺口：SESSION 记账要求 server pod `hostPID: true`，1:N 同样适用**，已补进 D9）。
 > v1.4（2026-08-15）：两项修订。**D7 修订**——**helm 编排替代 operator/CRD**（快速迭代期，operator 后置；
 > RemoteGPUPool spec 降级为 values schema，§1.5）。**D2 修订**——EnsureSession 从注入 init 容器改为 NodePrepareResources 内同步调用：
 > 屏障更强（严格先于 pod 一切容器，含用户自己的 init 容器）且**远程 pod 零 spec mutation**；
@@ -34,7 +36,7 @@
 | D10 | 域名前缀 | **`vgpu-manager.io`**（CRD group 与 device attributes 同源）；不用 `nvidia.com` 后缀（`gpu.nvidia.com` 是 NVIDIA 官方 DRA 驱动的属性域，避撞） |
 | D11 | 制品形态 | **自包含静态 client**（fork 增加 `LUPINE_STATIC_DEPS`：nghttp2/OpenSSL/libstdc++/libgcc 静态内嵌，运行时依赖仅 glibc；rockylinux8 统一底座 → glibc 2.28 地板全矩阵最低）。已实现并本地验证（§4.5） |
 | D12 | 制品分发 | **镜像列表 → 节点版本目录**：cudaVersion→镜像地址映射在 values 里维护，helm 渲染进消费侧 DS 的 init 容器逐版本落盘 hostPath；增减版本 = 改列表，不重建我们的镜像。**逐 pod 选镜像不可行**（准入先于分配，§4.4） |
-| D13 | 服务端拓扑（v1.5） | **1:N（单 server/节点 + session）为 k8s 池化主线；1:1（per-allocation server）为正式第二拓扑**，随 operator 阶段以 `RemoteGPUServer` CR 引入，首个用例是"用户专属 GPU server"。库侧零改动，客户端透明（§1.6） |
+| D13 | 服务端拓扑（v1.5） | **1:N（单 server/节点 + session）为 k8s 池化主线；1:1（per-allocation server）为正式第二拓扑**，operator 阶段以 `RemoteGPUServer` CR 引入（server-centric：operator 建 server 并代占 claim，DRA 只发布设备与注入客户端）。k8s 落地形态受"同 IP/高性能网卡/pod 隔离三选二"约束（§1.6.4）；库侧记账模式待定（SESSION+hostPID vs CGROUP+host /proc，§1.6.6） |
 
 ## 1. 问题本质：三平面模型
 
@@ -122,6 +124,9 @@ lupine-server 与 agent 同 pod 后，会话目录用两容器共享的 emptyDir
   `LD_PRELOAD`/`LUPINE_CHECKPOINT_LIBRARY` 指容器内路径（本地 vGPU 才需要 host 安装）；
 - 会话配额文件不暴露在主机文件系统。
 库侧零改动（`VGPU_CONFIG_SESSION_BASE` 指 emptyDir 挂载点即可）。
+**pod spec 必须 `hostPID: true`**（v1.5.1 补）：SESSION 记账把子进程 `getpid()` 写进 `pids.config`，而 NVML 返回
+宿主 PID；不同 PID 命名空间无法对应（进程从内部得不到自己的宿主 PID）。server pod 无 PID 隔离需求，代价可接受。
+替代是 CGROUP 模式 + 挂宿主 `/proc` 到 `.host_proc`（不需 hostPID），见 §1.6.6 第 4 条。
 
 ### 1.5.3 令牌签发在消费侧 plugin（D8）——关键路径卫生
 
@@ -225,8 +230,70 @@ spec；`network`/`transport` 字段是 D5/D6 的预留接缝——新增网络�
 - 两种拓扑对客户端**完全透明**：注入面相同（`LUPINE_SERVER`/`SESSION`/`DISABLE_LOCAL`/制品目录），
   仅 endpoint 来源不同（slice attribute vs CR status）。
 
-阶段：1:N 继续主线；1:1 在 operator 阶段引入，K3 之后。库侧唯一前置检查：多 server 同节点时
-`VGPU_CONFIG_SESSION_PATH` 指 per-server 目录，共享区互不串——机制已具备，只需在 1:1 落地时加一条回归。
+阶段：1:N 继续主线；1:1 在 operator 阶段引入，K3 之后。库侧边界（记账模式选择、hostPID、
+`VGPU_REMOTE_MODE` 不可设、per-server 目录只在一 pod 多 server 时才需要）见 §1.6.6，**记账模式待定**。
+
+### 1.6.4 1:1 在 k8s 里怎么落：同 IP 多端口的三选二困境（v1.5.1，答复评审）
+
+先说清 gpu-go 的事实：它的 agent 是**裸机 systemd 进程**，worker 是 agent 在主机上 spawn 的
+**主机进程**（`hypervisor/process_unix.go`），所以"同主机 IP、每 worker 一个端口"对它是零成本——
+根本不在 k8s 里。搬到 k8s，1:1 有四种形态，各自的代价必须摆清楚：
+
+| 形态 | 同 IP | 高性能网卡（multus/SR-IOV/IB） | 进程/资源隔离 | 说明 |
+|---|---|---|---|---|
+| **(a) worker-per-pod，pod 网络** | ✗ 每 pod 一个 CNI IP | ✓ 每 pod 一个 VF/IPoIB 附着 | ✓ pod 级 | 消耗 IP 与 **VF（每 PF 通常 8–64 个，小分配多时不够）**；DNS/路由按 pod |
+| **(b) worker-per-pod，hostNetwork** | ✓ 主机 underlay IP，端口由 operator 分配 | △ **hostNetwork pod 不能挂 multus 次网卡**；VF/IPoIB 必须是**主机拥有**的接口，server 绑主机 underlay IP，所有 worker 共享该网卡 | ✓ pod 级（进程/cgroup），网络命名空间共享 | 与 1:N 推荐形态同一张网；hostPort 端口冲突由 operator 管 |
+| **(c) 单 server pod/节点，pod 内 spawn 多 worker 进程** | ✓ | 同 (b) 或该 pod 挂一个 multus 网卡 | △ 进程级崩溃域有，**pod 资源在创建后不可变**：spawn/退出 worker 无法让 k8s 资源记账跟着走，GPU 也必须预先全部挂进 pod | = gpu-go 裸机模型直接搬进一个 pod；k8s-native 程度最差，**不推荐** |
+| **(e) worker-per-pod，pod 网络 + hostPort** | ✓ 客户端看到主机 IP:port | ✗ hostPort DNAT 走 pod **主 CNI** 接口，不经 multus 次网卡 | ✓ | 只在没有高性能网络需求时成立 |
+
+**结论：同 IP / 高性能网卡 / pod 级隔离，三者最多取二。**
+- 要同 IP + 高性能网卡 → (b) hostNetwork（网卡主机拥有，全部 worker 共享）——恰是 1:N 的推荐形态，1:1 只是多了端口分配；
+- 要高性能网卡 + pod 级隔离 → (a) 每 pod 一个 VF/IP，代价是 VF 数量与 IP/DNS 管理；
+- 要同 IP + pod 级隔离且不要高性能网卡 → (e) hostPort。
+选哪个由部署的网络形态决定（对应 values 里 `network.profile`），**不是 1:1 本身能回避的问题**。
+(c) 记录为"可行但不推荐"：它复刻 gpu-go 的裸机模型，但与 k8s 资源模型冲突。
+
+### 1.6.5 1:1 与 DRA 的分工（答复：operator 建 server，DRA 只发布设备并注入客户端）
+
+采纳评审意见，把 §1.6.1 表中"endpoint 分配后才有"的问题**从 DRA 里拿出去**：
+
+- **server-centric**：用户/管理员创建 `RemoteGPUServer` CR → operator 拉起 server（形态按 §1.6.4）→
+  status 回填 endpoint/token/cudaVersion。**GPU 归属由 operator 代为创建 ResourceClaim 占住**，
+  DRA allocator 仍是设备记账的唯一真相源，不会与 1:N 池双分。
+- **消费 pod 不再对 GPU 设备发 claim**：它引用某个 `RemoteGPUServer`（label/annotation/DeviceClass
+  参数），注入层从 CR status 拿 endpoint+token 注入，与 1:N 的注入面完全相同；调度约束只剩
+  "可达 server 所在 zone"（nodeSelector）。
+- 于是 1:N 是**device-centric**（pod 要设备，调度器挑 server），1:1 是**server-centric**（先有 server，
+  pod 挑 server）。两者并存不冲突，客户端透明。
+
+### 1.6.6 库侧边界更正（答复评审，此前表述有误）
+
+此前"库侧零改动，`VGPU_CONFIG_SESSION_PATH` 指 per-server 目录即可"说得过粗，逐条更正：
+
+1. **`VGPU_CONFIG_SESSION_PATH` 与记账模式是两个独立开关**（源码：`session.c` 的 `session_enabled()`
+   只看该 env 是否为合法绝对路径，与 `compatibility_mode` 无关）。设了它，**全部 10 类路径**
+   （quota/`pids.config`/`.vgpu_lock`/`.vmem_node`/`.sm_node`）迁到该目录——在任何记账模式下都生效；
+   但 **`pids.config` 只被 SESSION 模式读取**，其他模式设了它只是"路径隔离生效、记账走各自模式"。
+   所以"非 session 模式下不生效"的准确说法是：**路径隔离生效，会话记账不生效**。
+2. **谁需要它**：worker-per-pod（(a)/(b)/(e)）**不需要**——每 pod 自己的 `/tmp`，共享区天然隔离；
+   只有 (c) 一 pod 多 server 才必须 per-server 目录，否则 `.sm_node`/`.vmem_node` 跨 server 串。
+3. **`VGPU_REMOTE_MODE` 在 1:1 env 配置下不能设**：远程模式 fail-closed 会因"无会话配额文件"直接
+   拒绝服务。1:1 走 `CUDA_MEM_LIMIT_*`/`CUDA_CORE_LIMIT_*` env 回退配置时保持它未设；provider 也不必挂载
+   （无 session 头 → restore 被跳过，无害）。
+4. **1:1 的记账模式二选一，待定**：
+   - **SESSION 模式** → 服务端 pod 必须 **`hostPID: true`**：`pids.config` 记的是子进程 `getpid()`，
+     NVML 返回的是宿主 PID，不同 PID 命名空间就对不上（进程无法从内部得知自己的宿主 PID）。
+     server pod 本就没有 PID 隔离需求，代价可接受；
+   - **CGROUPV1/V2 模式**（本地 vGPU 现行）→ 不要求 hostPID，改为挂载宿主 `/proc` 到
+     `/etc/vgpu-manager/.host_proc`（库按 `.host_proc/<nvml-pid>/cgroup` 判归属，`cuda_hook.c:2216`），
+     lupine 子进程与 server 同 cgroup 即命中；无 session 目录、无 provider。
+   两者都能正确处理"同一物理卡被多个 1:1 server 切分"的情况（各自只算自己的进程）；**HOST 模式不行**
+   （全机求和）。
+5. **顺带发现的既有缺口（1:N 同样适用）**：SESSION 模式的 hostPID 要求此前两份设计文档都没写。
+   1:N 的 gpu-node DaemonSet **必须 `hostPID: true`**，否则会话记账全部失效——补进 §1.5.2/D9 与 chart。
+6. worker-per-pod 下**设备可见性由容器运行时完成**：CDI/`NVIDIA_VISIBLE_DEVICES` 只挂分配到的
+   `/dev/nvidia*`，CUDA 与 NVML 都只看到它们，`CUDA_VISIBLE_DEVICES` 与 NVML 可见性 hook 在此形态下
+   都是冗余的（保留无害）。这是 1:1 pod-per-worker 在库侧**严格更简单**的地方。
 
 ## 2. 主路径：DRA
 
@@ -592,6 +659,7 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 | 明文链路上会话令牌可被抓包冒用 | §6.1：多租户/跨信任域前必须启用 TLS；K1 单租户可明文 |
 | lupine 客户端制品可能未带 TLS 编译（`find_package(OpenSSL QUIET)` 静默降级） | 版本目录铺设时校验制品含 TLS 支持（§6.1） |
 | TLS 代理配置不当（无 ALPN、`:scheme` 恒为 http） | §6.1 部署坑；优先 envoy 显式 h2 或四层 TLS 终止 |
+| **server pod 未开 hostPID → SESSION 记账静默失效**（`pids.config` 的容器 PID 与 NVML 宿主 PID 对不上，used 恒为 0 → 限额形同虚设） | 1:N gpu-node DS 与 1:1 SESSION 模式 server pod 均 `hostPID: true`（§1.5.2/§1.6.6）；或改用 CGROUP 模式 + `.host_proc` 挂载。**建议库侧加自检**：SESSION 模式下若首次记账发现 `pids.config` 中无任何 PID 出现在 NVML 进程表且本进程已建上下文，打 ERROR 提示 hostPID |
 | 高性能网络 preload（SMC-R/rsocket）与我们的 LD_PRELOAD 共存未验证 | 符号集不相交且 dlsym 拦截器会回退（§7.1.3 第 1 条），但**必须 spike 实测**后才可用于生产 |
 | 多池可达域重叠 → 同节点两个 inject 插件注册冲突（DRA 驱动名节点单例） | helm 模板集群级归并消费侧 DS（§1.5.4），并集 nodeAffinity + 排除 server 节点 |
 | 消费侧 plugin 写 claim status 的 RBAC 与并发（多设备/重试幂等） | 令牌按 claim 幂等生成（已存在则复用）；resourceclaims/status update 权限入 chart RBAC |

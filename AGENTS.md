@@ -120,6 +120,14 @@
   常量），fork 时该指针恒为 NULL，所以当前不会失效。仍已在 atfork 置 NULL —— 它守的是"父进程一旦解析过 `cu*`
   就回退 env 构造出 `activate=1` 的 permissive 配置"这条**静默 fail-open**路径（设计 §4.3.2）。
 - **记账口径**：子进程必须用 SESSION 模式（会话进程表过滤，§6.5），不能是 HOST 全机求和（`cuda_hook.c:2398`）。
+- **SESSION 记账要求 server pod `hostPID: true`**（k8s 设计 §1.6.6，评审发现的既有缺口）：`pids.config` 记子进程 `getpid()`，
+  NVML 返回宿主 PID，PID 命名空间不同即对不上、used 恒 0、限额形同虚设。1:N 的 gpu-node DS 与 1:1 的 SESSION 模式
+  server pod 都要开；替代是 CGROUP 模式 + 挂宿主 `/proc` 到 `.host_proc`（不需 hostPID，无 session 目录/provider）。
+  `VGPU_CONFIG_SESSION_PATH` 只搬路径、与记账模式独立；`pids.config` 只被 SESSION 模式读；1:1 env 配置下 `VGPU_REMOTE_MODE`
+  不能设（fail-closed 会拒服务）。
+- **服务端拓扑 D13**：1:N 主线 + 1:1（`RemoteGPUServer` CR，server-centric）第二拓扑；k8s 落地受"同 IP/高性能网卡/
+  pod 隔离三选二"约束（同 IP+高性能网卡 → hostNetwork；高性能网卡+pod 隔离 → 每 pod VF/IP；同 IP+pod 隔离 → hostPort
+  但走主 CNI）。gpu-go 是裸机 agent，同 IP 多端口对它零成本，不能直接类比 k8s。详见 k8s 设计 §1.6.4。
 - **多 server 聚合已核实兼容**（设计 §6.8）：lupine 客户端按 `LUPINE_SERVER` 从左到右拼接各 server 的致密设备表，
   我们的裁剪在每台 server 自己的编号空间内完成，两层正交。四条边界：远程 pod **必须** `LUPINE_DISABLE_LOCAL=1`
   （CUDA 表含本地卡而 NVML 表不含，序号会错位）；连接失败静默跳过会致两表错位；同一 `LUPINE_SESSION` 发给所有
