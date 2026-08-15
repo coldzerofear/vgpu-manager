@@ -858,8 +858,13 @@ provider 的 `restore()` 在 setenv 会话路径后，自行 mmap 会话配额�
 
 成立条件（均已核实）：
 - 驱动在 `cuInit` 时读取该 env，而 `restore()` 在首个 RPC（恒为 `cuInit`）之前调用；
-- lupine-server 父进程全程不碰 CUDA（`server.cpp` 无 `cuInit`/`dlsym`/`cu*`；`x-lupine-cuda-version` 是编译期
-  常量 `LUPINE_CUDA_VERSION`，`h2.cpp:421-426`），故 fork 时驱动未初始化；
+- lupine-server 父进程不碰 CUDA，故 fork 时驱动未初始化。**这不是碰巧的实现细节，而是 lupine 的设计约束**
+  （v1.5.1 更正归因）：父进程职责就是监听端口 + accept + fork，全部 CUDA 状态在子进程；而且 CUDA 上下文
+  **本身不可跨 fork 继承**——父进程若先初始化 CUDA，子进程再用会直接报错，所以任何 per-connection-fork 的
+  CUDA 转发器都必须让父进程远离 CUDA。源码事实（`server.cpp` 无 `cuInit`/`dlsym`/`cu*`；`x-lupine-cuda-version`
+  为编译期常量 `h2.cpp:421-426`）是这一约束的体现，不是我们赖以成立的偶然。退一步，库的 atfork 处理
+  （`loader_child_after_fork` 重置 once-guard/会话路径 + `config_source_moved()` 按来源重读）本身也防御性地
+  覆盖了"父进程曾加载配置"的情形，不引入风险；
 - provider 读配额走 `mmap_file_to_config_path`，**不触发 `load_necessary_data`**，注入前不加载任何 CUDA 库。
 
 **优于自研 hook 的地方**：客户端设备表本就由 `cuDeviceGetCount`/`cuDeviceGet` 两个 RPC 枚举

@@ -5,6 +5,8 @@
 > 源自 gpu-go 对照分析；纠正"1:N 省 IP"的直觉（TensorFusion 也是单 IP 多端口）。§1.6 新增。
 > v1.5.1（同日评审）：§1.6.4 k8s 落地四形态与三选二困境；§1.6.5 server-centric 分工；§1.6.6 库侧边界更正
 > （**发现既有缺口：SESSION 记账要求 server pod `hostPID: true`，1:N 同样适用**，已补进 D9）。
+> v1.5.2（同日评审）：§1.6.7 CR 层次收敛（`RemoteGPUServer` 原语 + `publish` 开关，`RemoteGPUPool` 为其多节点编排）；
+> §1.6.8 外部 SM watcher 是 1:N 独有优势；核心设计 §6.6.1 更正"父进程不碰 CUDA"的归因为**设计约束**而非碰巧。
 > v1.4（2026-08-15）：两项修订。**D7 修订**——**helm 编排替代 operator/CRD**（快速迭代期，operator 后置；
 > RemoteGPUPool spec 降级为 values schema，§1.5）。**D2 修订**——EnsureSession 从注入 init 容器改为 NodePrepareResources 内同步调用：
 > 屏障更强（严格先于 pod 一切容器，含用户自己的 init 容器）且**远程 pod 零 spec mutation**；
@@ -36,7 +38,7 @@
 | D10 | 域名前缀 | **`vgpu-manager.io`**（CRD group 与 device attributes 同源）；不用 `nvidia.com` 后缀（`gpu.nvidia.com` 是 NVIDIA 官方 DRA 驱动的属性域，避撞） |
 | D11 | 制品形态 | **自包含静态 client**（fork 增加 `LUPINE_STATIC_DEPS`：nghttp2/OpenSSL/libstdc++/libgcc 静态内嵌，运行时依赖仅 glibc；rockylinux8 统一底座 → glibc 2.28 地板全矩阵最低）。已实现并本地验证（§4.5） |
 | D12 | 制品分发 | **镜像列表 → 节点版本目录**：cudaVersion→镜像地址映射在 values 里维护，helm 渲染进消费侧 DS 的 init 容器逐版本落盘 hostPath；增减版本 = 改列表，不重建我们的镜像。**逐 pod 选镜像不可行**（准入先于分配，§4.4） |
-| D13 | 服务端拓扑（v1.5） | **1:N（单 server/节点 + session）为 k8s 池化主线；1:1（per-allocation server）为正式第二拓扑**，operator 阶段以 `RemoteGPUServer` CR 引入（server-centric：operator 建 server 并代占 claim，DRA 只发布设备与注入客户端）。k8s 落地形态受"同 IP/高性能网卡/pod 隔离三选二"约束（§1.6.4）；库侧记账模式待定（SESSION+hostPID vs CGROUP+host /proc，§1.6.6） |
+| D13 | 服务端拓扑（v1.5） | **1:N（单 server/节点 + session）为 k8s 池化主线；1:1（per-allocation server）为正式第二拓扑**。CR 层次：`RemoteGPUServer` 为节点级原语（含 `publish` 开关：发布给集群内 DRA / 不发布仅供集群外连接），`RemoteGPUPool` 是它的多节点编排层（§1.6.7）；1:N 的独有优势是外部 SM watcher 跨会话共享 NVML 采样（§1.6.8）。k8s 落地形态受"同 IP/高性能网卡/pod 隔离三选二"约束（§1.6.4）；库侧记账模式待定（SESSION+hostPID vs CGROUP+host /proc，§1.6.6） |
 
 ## 1. 问题本质：三平面模型
 
@@ -206,6 +208,7 @@ spec；`network`/`transport` 字段是 D5/D6 的预留接缝——新增网络�
 | endpoint | 静态，进 ResourceSlice attribute | 动态，经 claim status / CR status 回传 |
 | 空闲开销 | 无 | N 个监听进程（未连接不持 CUDA context，极轻） |
 | 容器级记账 | SESSION 模式按 pids.config 聚合 | **仍需**（同一 worker 收同租户多进程连接），只是分组更简单 |
+| 外部 SM watcher（跨会话共享 NVML 采样） | ✓ 节点一个 watcher，全部会话 mmap 同一缓存，驱动探测 O(1)/节点 | ✗ pod 隔离切断共享，O(server 数)/节点（§1.6.8） |
 | 实现状态 | 已实现、真机验证 | 库侧零改动；需 reconciler（desired/actual 进程对账，gpu-go `hypervisor/reconciler.go` 是现成范式） |
 
 ### 1.6.2 场景归属（这是决定"两者都要"的依据）
@@ -294,6 +297,48 @@ spec；`network`/`transport` 字段是 D5/D6 的预留接缝——新增网络�
 6. worker-per-pod 下**设备可见性由容器运行时完成**：CDI/`NVIDIA_VISIBLE_DEVICES` 只挂分配到的
    `/dev/nvidia*`，CUDA 与 NVML 都只看到它们，`CUDA_VISIBLE_DEVICES` 与 NVML 可见性 hook 在此形态下
    都是冗余的（保留无害）。这是 1:1 pod-per-worker 在库侧**严格更简单**的地方。
+
+### 1.6.7 CR 层次收敛：`RemoteGPUServer` 是原语，`RemoteGPUPool` 是它的多节点编排（v1.5.2，采纳评审）
+
+评审提议并采纳：不把 1:N 与 1:1 做成两个平行的 CR，而是**一个原语 + 一个编排层**：
+
+- **`RemoteGPUServer`（原语，节点级）**：描述"某节点上一个 lupine-server 实例"——节点、设备集、CUDA 版本/镜像、
+  端口策略、网络形态、quota 模式（session / env）、**`publish`（是否把设备发布给集群内调度）**。
+  operator 由它物化该节点的 server 工作负载（形态按 §1.6.4）并回填 endpoint/token/状态。
+- **`RemoteGPUPool`（编排层，多节点）**：按 `nodeSelector` 圈一批 GPU 节点，为每个节点**生成一个 `RemoteGPUServer`**
+  （模板化：`serverTemplate` + per-node 覆盖），再叠加池级语义（可达域/消费侧 DS/DeviceClass/制品列表）。
+  Pool 对 Server 是 owner；删 Pool 级联删 Server。
+
+这样两种拓扑的关系变成："1:N 池"= Pool 生成的一组 `publish: true` 的 Server；"1:1 专属"= 单个手工建的 Server
+（`publish` 按需）。**只有一套 server 物化逻辑**，1:N 与 1:1 的差别退化为"谁创建 Server、发不发布、每节点几个"。
+
+**`publish` 开关（评审提出的重要用法）**：
+- `publish: true` → operator 为该 Server 的设备发布 ResourceSlice（或代为持有 claim），**供集群内 pod 经 DRA 消费**；
+- `publish: false` → **不进集群调度**，Server 只对外暴露 endpoint+token，供**集群外用户**（开发者本机 `vgpu use`、
+  gpu-go 分析 §3.5 的场景；或跨集群消费）连接。会话/配额仍由 operator 落盘（session 模式）或 env 注入。
+  这把"集群外消费"从一个独立产品路径变成了 Server 原语的一个布尔属性。
+
+**helm 阶段的对应**：`values.remoteGPU.pools[]` 就是 Pool 的 spec；helm 直接渲染 per-node DS 而不生成中间 Server 对象
+（helm 无 owner 级联）。升 operator 时 Pool spec 原样、Server 原语新增——增量而非重构，与 §1.5 的判断一致。
+
+### 1.6.8 边界：外部 SM watcher 是 1:N 的独有优势（v1.5.2，采纳评审）
+
+`EXTERNAL_SM_WATCHER_ENABLED` + `<base>/watcher/sm_util.config`（节点级共享，见核心设计 §4.3.3 会话目录布局）
+让**一个外部 watcher 进程**替所有会话采样 NVML 利用率，各会话子进程 mmap 同一份共享缓存——驱动探测开销
+从 O(会话数) 降到 O(1)。这与共享令牌桶的"采样所有权"（同会话内 O(1)）是两个层次：桶解决**会话内**多进程，
+外部 watcher 解决**跨会话**。
+
+| | 1:N（单 server/节点） | 1:1（server-per-pod） |
+|---|---|---|
+| 外部 SM watcher | ✓ 节点上一个 watcher pod/sidecar，`<base>/watcher/` 经 hostPath 或同 pod 卷共享给全部会话 | **✗ 每个 server pod 各有自己的 NVML 路径**：pod 隔离恰恰切断了共享缓存的前提；每 pod 内的会话共享令牌桶仍可减到 pod 内 O(1)，但**跨 pod 是 O(server 数)**  |
+| 驱动探测开销 | O(1)/节点 | O(1:1 server 数)/节点 |
+| 结论 | 高密度小分配场景（很多会话/节点）的实质优势 | 分配数少（专属服务本就少）时代价可接受；若走 §1.6.4 形态 (c) 一 pod 多 server，则可回到 O(1)，但 (c) 不推荐 |
+
+**这条要进 1:N vs 1:1 的取舍表**：它给"什么时候用 1:N"提供了一个此前没写的硬理由——**每节点会话越多，1:N
+的 NVML 开销优势越大**；1:1 只适合"每节点 server 数少"的场景，与 §1.6.2 的场景归属一致（专属/独占本就不会
+在一个节点上塞很多）。hostNetwork 形态 (b) 下的 1:1 理论上可以让多个 server pod 共享一个 hostPath 的
+`watcher/`，但 watcher 需 hostPID 看到所有 server 的进程且各 server 的 pids 归属仍分开——**属于将来 1:1
+落地时的可选优化，非默认**。
 
 ## 2. 主路径：DRA
 
