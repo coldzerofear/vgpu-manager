@@ -1,6 +1,9 @@
-# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.3
+# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.4
 
 > 状态：**设计定稿（十二项关键决策已确认），待实施**
+> v1.4（2026-08-15）：**D2 修订**——EnsureSession 从注入 init 容器改为 NodePrepareResources 内同步调用：
+> 屏障更强（严格先于 pod 一切容器，含用户自己的 init 容器）且**远程 pod 零 spec mutation**；
+> webhook 退化为纯 UX 糖（可选）。代价：pod netns 数据面 pre-flight 不可得，由首个 CUDA 调用报错兜底（§5）。
 > v1.3（2026-08-15）：**D4 重大修订**——client 制品改为**自包含静态构建**（D11，已在 fork 实现并本地全链路验证）
 > + **镜像列表→节点版本目录**分发机制（D12）；新增 §4.4/§4.5。
 > v1.2（2026-08-14）：引入 **operator + RemoteGPUPool CRD** 总体形态（D7–D10）——组件收敛为
@@ -17,7 +20,7 @@
 | # | 决策点 | 结论 |
 |---|---|---|
 | D1 | 技术路径 | **DRA 为主路径**，extender+device-plugin 为老集群兼容路径（后行） |
-| D2 | 配额落盘时序 | **agent watch 推送 + 注入 init 容器屏障**（EnsureSession） |
+| D2 | 配额落盘时序 | **agent watch 推送（快路径）+ 消费侧 plugin 在 NodePrepareResources 内同步 EnsureSession（确定性屏障）**。<br>**v1.4 修订**：不再注入 init 容器——NodePrepare 严格先于 pod 一切容器，屏障更强且**远程 pod 零 mutation**（§5） |
 | D3 | server 发现 | **endpoint attribute 同时允许 IP 或域名**，注入层不区分；按部署形态填值。<br>**修正（§6.1）**：attribute 需携带 scheme；启用 TLS 时只能是域名（主机名校验） |
 | D4 | 客户端制品 | **直接上版本目录机制**（不等单基准制品 spike）；制品须校验带 TLS 编译（§6.1） |
 | D5 | 传输加密 | lupine **服务端不支持 TLS**，需前置终止代理；K1 可明文，**多租户/跨信任域前必须启用**（§6.1） |
@@ -42,7 +45,7 @@
 ┌─ GPU 节点(资源面) ─────────┐   ┌─ 消费节点(任意可达节点) ────────┐
 │ lupine-server + libvgpu     │   │ kubelet + kubelet-plugin        │
 │ agent：上报设备、落盘会话配额 │◄──│ 注入: LUPINE_SERVER/SESSION/     │
-│   ②须先于容器首个 CUDA 调用  │ ③ │ DISABLE_LOCAL/客户端库/init屏障  │
+│   ②须先于容器首个 CUDA 调用  │ ③ │ DISABLE_LOCAL/客户端库/屏障      │
 └────────────────────────────┘   └────────────────────────────────┘
 ```
 
@@ -73,7 +76,7 @@
 ┌─ gpu-node DaemonSet (per pool) ─────┐ ┌─ consumer DaemonSet(归并后) ──┐
 │ [c1] kubelet-plugin --mode=server    │ │ [c1] kubelet-plugin           │
 │      发布 slice + watch claim 落盘 + │ │      --mode=inject            │
-│      EnsureSession（原"agent"职责）   │ │      （注入/CDI/init 屏障）    │
+│      EnsureSession（原"agent"职责）   │ │   （注入/CDI/EnsureSession）  │
 │ [c2] lupine-server                   │ │ [init] 铺客户端版本目录到 host │
 │      （镜像内置 libvgpu-control.so）  │ └───────────────────────────────┘
 │ [c3] tls-proxy（可选, envoy, §6.1）  │
@@ -202,9 +205,10 @@ NodePrepareResources 发现 claim 命中远程池时：
    必须确定性生成——设计 §6.8 边界）、`LUPINE_SESSION=<控制面签发令牌>`、**`LUPINE_DISABLE_LOCAL=1`（硬性）**、
    `LD_LIBRARY_PATH=/opt/vgpu/lupine/<ver>/lib`。
 2. CDI 挂载：按 server 的 `cudaVersion` 从版本目录选 lupine-client 制品（D4，§4.3）。
-3. 注入 **init 容器**（D2）：对每台分配到的 server 调 agent `EnsureSession(token)`，
-   全部 ready 才退出；顺带 HEAD 探测连通性 + 比对 `x-lupine-cuda-version` 做版本 pre-flight，
-   把"配额未就绪/不可达/版本不符"三类错误拦在主容器启动前。
+3. **同步 EnsureSession（D2，v1.4）**：在本回调内对每台分配到的 server 调 agent `EnsureSession(token)`，
+   全部确认才返回成功——NodePrepare 失败 = kubelet 事件 + 自动退避重试，屏障语义与 init 容器等价且更强
+   （严格先于 pod 一切容器，包括用户自己的 init 容器）。顺带在此做版本比对（agent 返回其 cudaVersion）。
+   **远程 pod 因此不需要任何 pod spec mutation**。
 4. 限额 env（`CUDA_MEM_LIMIT_*` 等）**不注入**——远程模式配额的唯一来源是 GPU 节点会话目录（服务端权威）。
 
 ### 2.4 GPU 节点 agent
@@ -245,8 +249,9 @@ NodePrepareResources 发现 claim 命中远程池时：
 2. 显式 annotation `vgpu-manager.io/min-cuda: "12.4"`——**推荐的主要声明方式**。
 3. 都没有 → 不筛选，靠下两层兜底。
 
-**4.2 启动前（init 屏障 pre-flight）**：HEAD server 读 `x-lupine-cuda-version`（`h2.cpp:440`，编译期常量），
-与 annotation 需求比对，不符则 init 失败，错误信息明确指向版本。
+**4.2 启动前（NodePrepare 屏障，v1.4）**：plugin 在 EnsureSession 往返中获得 agent 的 cudaVersion
+（或 HEAD server 读 `x-lupine-cuda-version`，`h2.cpp:440`），与需求比对，不符则 NodePrepare 失败，
+事件明确指向版本。
 
 **4.3 运行时（权威兜底，天然存在）**：pod 内 cudart 经 lupine 看到 server 驱动版本
 （`cuDriverGetVersion` 透传），不满足时 cudart 自报 `CUDA_ERROR_INSUFFICIENT_DRIVER`。
@@ -279,9 +284,8 @@ consumer DS: initContainers[i] = 各版本镜像（CMD 即 cp /artifacts → hos
 **分工必须读清楚（易误读点）**：init 容器有两处，角色完全不同——
 - **消费侧 DS 自己的 init 容器**（本节）：全版本制品物化到节点 hostPath，**每节点每次 rollout 一次**，
   与任何用户 pod 无关；
-- **目标 pod 被注入的 init 容器**（D2）：**只有 EnsureSession 屏障一个，与制品/版本无关**。
-  目标 pod **不会**被注入任何制品拷贝容器——版本选择发生在 NodePrepare（分配已知），由 plugin 以
-  CDI 挂载 hostPath 里对应版本目录完成。
+- **目标 pod**（v1.4）：**不被注入任何容器**——EnsureSession 屏障在 NodePrepareResources 内同步完成（D2），
+  制品经 CDI 挂载 hostPath 对应版本目录，版本选择发生在 NodePrepare（分配已知）。
 
 - **不在 pod 启动关键路径上**：物化随 DS rollout 异步完成；pod NodePrepare 时目录缺失（新节点赶上 rollout）
   → 返回可重试错误，kubelet 自动重试。
@@ -330,16 +334,21 @@ consumer DS: initContainers[i] = 各版本镜像（CMD 即 cp /artifacts → hos
                                    │
 GPU 节点 agent watch claim ────────┤ (主通道，通常 <1s 落盘)
                                    ▼
-消费节点: kubelet 起 init 容器 ──► agent.EnsureSession(token)
-                                   │  已落盘 → ready
-                                   │  未落盘 → 反查 claim 现场落盘 → ready
+消费节点: kubelet NodePrepareResources ──► plugin: 生成令牌写 claim.status
+                                   ├──► 逐 server 调 agent.EnsureSession(token)
+                                   │      已落盘 → ready；未落盘 → 反查 claim 现场落盘 → ready
+                                   │      任一失败 → NodePrepare 返错，kubelet 退避重试
                                    ▼
-        init 退出 → 主容器启动 → 首个 CUDA 调用（此时配额必定已就绪）
+        NodePrepare 成功 → pod 一切容器才开始创建 → 首个 CUDA 调用（配额必定已就绪）
                                    ▼
         lupine 子进程 provider restore() → 读会话目录 → 隔离生效
 ```
 
-- 确定性来自 init 容器语义：主容器保证在配额就绪后才启动，同时覆盖"agent 比 pod 起得晚"的场景。
+- 确定性来自 NodePrepareResources 语义：它严格先于 pod 的**一切**容器（含用户自己的 init 容器——
+  这点 init 容器屏障反而做不到：与用户 init 容器同队列，排序可被打破）。
+- **损失与补偿（multus/SR-IOV 形态）**：plugin 在主机网络，无法从 pod netns 验证数据面连通性；
+  EnsureSession 是控制面调用（plugin→agent 走集群管理网，agent 双网监听），数据面故障由首个 CUDA 调用
+  清晰报错兜底；需要时可提供**可选**诊断 init 容器作排障工具，非常态链路。
 - 竞态彻底消除后，provider fail-closed 从"常态防线"退为"纵深防线"（孤儿/伪造 session 仍拒）。
 - 回收：claim 释放 → agent 删会话目录；agent 崩溃重启 → list+watch 全量对账（落盘幂等）。
 
@@ -497,7 +506,7 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 | chart | 退化为只装 operator（+CRD） | 小 | K1 |
 | extender 兼容路径 | 假资源 + CR 记账 + annotation 落盘 | 大 | K3（老集群需求明确后） |
 
-- **K1（最小闭环）**：单 zone、单 server/pod，agent+注入+init 屏障跑通端到端。
+- **K1（最小闭环）**：单 zone、单 server/pod，agent+注入+NodePrepare 屏障跑通端到端。
 - **K2**：版本匹配三层、多 server 组合（验证 §6.8 边界 6 的 cuda:i==nvml:i 实测项）、回收对账。
 - **K3**：extender 兼容路径（按集群版本分布决定是否启动）。
 
@@ -507,7 +516,7 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 |---|---|
 | DRA 版本门槛（k8s ≥1.32） | K3 兼容路径兜底；集群版本分布待盘点 |
 | 多 server 时 LUPINE_SERVER 顺序不确定 → 设备序号漂移 | 注入层按 claim 结果排序后固定；写入测试 |
-| CUDA/NVML 两表连接数不一致错位（§6.8 边界 2） | init 屏障逐 server 探测，全通才放行 |
+| CUDA/NVML 两表连接数不一致错位（§6.8 边界 2） | NodePrepare 内逐 server EnsureSession 全通才放行（控制面）；数据面错位由首个 CUDA 调用报错暴露（v1.4 取舍，§5） |
 | server 重启会话不可恢复 | 固有约束（lupine 连接态）；文档明示，应用层重试/重启恢复 |
 | agent 落盘与回收竞态（同名 session 快速重建） | 令牌随机不复用；目录以令牌命名，天然不撞 |
 | multus 形态 DNS 自维护成本 | D3 允许 IP 直注先行，DNS 仅该形态启用；**但启用 TLS 后 IP 直注不成立**（主机名校验，§6.1），两者叠乘时必须上 DNS |
