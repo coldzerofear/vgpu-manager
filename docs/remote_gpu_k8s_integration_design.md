@@ -276,11 +276,22 @@ consumer DS: initContainers[i] = 各版本镜像（CMD 即 cp /artifacts → hos
 节点 /var/lib/vgpu-manager/lupine/<cuda-ver>/   ← 注入层 CDI 挂载，选择逻辑照旧
 ```
 
+**分工必须读清楚（易误读点）**：init 容器有两处，角色完全不同——
+- **消费侧 DS 自己的 init 容器**（本节）：全版本制品物化到节点 hostPath，**每节点每次 rollout 一次**，
+  与任何用户 pod 无关；
+- **目标 pod 被注入的 init 容器**（D2）：**只有 EnsureSession 屏障一个，与制品/版本无关**。
+  目标 pod **不会**被注入任何制品拷贝容器——版本选择发生在 NodePrepare（分配已知），由 plugin 以
+  CDI 挂载 hostPath 里对应版本目录完成。
+
 - **不在 pod 启动关键路径上**：物化随 DS rollout 异步完成；pod NodePrepare 时目录缺失（新节点赶上 rollout）
   → 返回可重试错误，kubelet 自动重试。
+- **天然支持一个 pod 多容器、各配不同 CUDA 版本**：CDI 挂载是 per-container 的，NodePrepare 按各容器
+  claim 的分配结果分别选目录——这正是"节点级全版本物化 + 分配时选择"优于任何"pod 级带版本"方案的地方
+  （后者必须在准入时预测落点，做不到）。
 - 列表变更 → operator 更新 DS 模板 → 滚动 rollout 重物化；移除版本由 plugin 启动时对账 GC。
-- **被否掉的替代**：per-pod init 从制品镜像拷 emptyDir（版本在准入时未知，只能全量拷贝，浪费且慢）；
-  运行时 registry 拉取（绕过 kubelet 的 pull secret/镜像代理体系，把 registry 可用性引入 pod 启动路径）。
+- **被否掉的替代**：给目标 pod 注入制品 init 容器（准入先于分配无法选版本，只能全版本都挂，pod 被塞进
+  N 个 init 容器——不可接受）；运行时 registry 拉取（绕过 kubelet 的 pull secret/镜像代理体系，
+  把 registry 可用性引入 pod 启动路径）。
 
 ### 4.5 制品形态：自包含静态构建（D11，已实现）
 
