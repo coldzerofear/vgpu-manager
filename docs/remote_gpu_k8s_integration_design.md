@@ -1,6 +1,8 @@
-# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.4
+# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.5
 
-> 状态：**设计定稿（十二项关键决策已确认），待实施**
+> 状态：**设计定稿（十三项关键决策已确认），待实施**
+> v1.5（2026-08-15）：**D13 服务端拓扑**——1:N 主线 + 1:1 第二拓扑（operator 阶段以 `RemoteGPUServer` CR 引入），
+> 源自 gpu-go 对照分析；纠正"1:N 省 IP"的直觉（TensorFusion 也是单 IP 多端口）。§1.6 新增。
 > v1.4（2026-08-15）：两项修订。**D7 修订**——**helm 编排替代 operator/CRD**（快速迭代期，operator 后置；
 > RemoteGPUPool spec 降级为 values schema，§1.5）。**D2 修订**——EnsureSession 从注入 init 容器改为 NodePrepareResources 内同步调用：
 > 屏障更强（严格先于 pod 一切容器，含用户自己的 init 容器）且**远程 pod 零 spec mutation**；
@@ -32,6 +34,7 @@
 | D10 | 域名前缀 | **`vgpu-manager.io`**（CRD group 与 device attributes 同源）；不用 `nvidia.com` 后缀（`gpu.nvidia.com` 是 NVIDIA 官方 DRA 驱动的属性域，避撞） |
 | D11 | 制品形态 | **自包含静态 client**（fork 增加 `LUPINE_STATIC_DEPS`：nghttp2/OpenSSL/libstdc++/libgcc 静态内嵌，运行时依赖仅 glibc；rockylinux8 统一底座 → glibc 2.28 地板全矩阵最低）。已实现并本地验证（§4.5） |
 | D12 | 制品分发 | **镜像列表 → 节点版本目录**：cudaVersion→镜像地址映射在 values 里维护，helm 渲染进消费侧 DS 的 init 容器逐版本落盘 hostPath；增减版本 = 改列表，不重建我们的镜像。**逐 pod 选镜像不可行**（准入先于分配，§4.4） |
+| D13 | 服务端拓扑（v1.5） | **1:N（单 server/节点 + session）为 k8s 池化主线；1:1（per-allocation server）为正式第二拓扑**，随 operator 阶段以 `RemoteGPUServer` CR 引入，首个用例是"用户专属 GPU server"。库侧零改动，客户端透明（§1.6） |
 
 ## 1. 问题本质：三平面模型
 
@@ -177,6 +180,53 @@ spec；`network`/`transport` 字段是 D5/D6 的预留接缝——新增网络�
   → 自动生成引用 DeviceClass 的 ResourceClaimTemplate。用户不需要懂 zone（slice nodeSelector
   自动圈定）、不懂版本（运行时兜底）、不懂 endpoint（注入层拼接）。
 - **进阶档**：直接写 ResourceClaimTemplate + CEL（选 zone/版本/跨池约束），不经 webhook。
+
+## 1.6 服务端拓扑：1:N 主线 + 1:1 第二拓扑（D13，v1.5）
+
+对照 gpu-go/TensorFusion（`docs/gpu_go_analysis_and_lessons.md` §3.1）后的定案。先纠正一个直觉：
+**TensorFusion 的 1:1 也是单主机 IP，只是每 worker 一个端口**（`WorkerInfo.ListenPort`，
+`connection_ip` 是主机上选的一个 IP）——所以"1:N 省 IP/网卡"相对它并不成立，两者都单 IP；
+真实差异只在**端口数**与**进程/隔离拓扑**。
+
+### 1.6.1 两种拓扑的取舍
+
+| 维度 | 1:N（单 server/节点 + session，现方案） | 1:1（per-allocation server） |
+|---|---|---|
+| 崩溃域 | server 父进程崩 = 节点全部会话连接断 | 一份分配一个进程，互不影响 |
+| 升级/重启 | 全节点滚动，所有会话中断 | 逐分配 |
+| quota/可见性交付 | provider restore() 注入 + session 目录 + 消毒 + fail-closed | spawn 时 env 注入（库的 `init_g_vgpu_config_by_env` 现成），进程 = 分配 |
+| 就绪信号 | 需 EnsureSession 屏障 | 端口能连 = 配额就位（但 endpoint 分配后才有，DRA 下仍需回传等待，形状等价） |
+| CUDA 版本 | 单 server 绑定节点驱动 | 同节点可混跑多版本 server 二进制，按分配选 |
+| 端口面 | **1 个/节点**：TLS 代理/防火墙/DNS 一份 | N 个/节点：需端口分配 + 范围放行 + 代理按端口路由 |
+| endpoint | 静态，进 ResourceSlice attribute | 动态，经 claim status / CR status 回传 |
+| 空闲开销 | 无 | N 个监听进程（未连接不持 CUDA context，极轻） |
+| 容器级记账 | SESSION 模式按 pids.config 聚合 | **仍需**（同一 worker 收同租户多进程连接），只是分组更简单 |
+| 实现状态 | 已实现、真机验证 | 库侧零改动；需 reconciler（desired/actual 进程对账，gpu-go `hypervisor/reconciler.go` 是现成范式） |
+
+### 1.6.2 场景归属（这是决定"两者都要"的依据）
+
+| 场景 | 拓扑 | 原因 |
+|---|---|---|
+| k8s pod 批量调度（K1/K2 主线） | **1:N** | endpoint 静态进 slice；单端口好管；分配密度高、进程数敏感 |
+| 用户专属/长期独占 GPU 服务 | **1:1** | 崩溃域、升级、CUDA 版本按用户定；本来就是一份长期分配 |
+| 开发者本机 `vgpu use`（gpu-go 分析 §3.5） | **1:1** | 一人一 server，share code 语义天然对上 |
+| 强隔离/合规（租户间进程级隔离） | **1:1** | 不共享父进程 |
+
+### 1.6.3 与 operator 的关系
+
+**1:1 是上 operator 的第一个硬理由**（比 v1.4 列的 drain/TLS 生命周期/status 汇总都硬）：
+"申请 GPU 服务 → 拉起用户专属 server" 是运行时事件驱动的生命周期，helm 无法响应。落法：
+
+- `RemoteGPUPool` CR/values → 1:N 池（helm 阶段即可，operator 阶段可平移）；
+- `RemoteGPUServer` CR → 1:1：spec 写设备/quota/CUDA 版本/端口策略，operator 拉起
+  `lupine_driver_server`（LD_PRELOAD 库 + `CUDA_VISIBLE_DEVICES` + `CUDA_MEM_LIMIT_*`/`CUDA_CORE_LIMIT_*`
+  + `VGPU_CONFIG_SESSION_PATH=<per-server 目录>` 以隔离 `.sm_node`/`.vmem_node` 共享区），回填 endpoint
+  到 status，管重启/回收；
+- 两种拓扑对客户端**完全透明**：注入面相同（`LUPINE_SERVER`/`SESSION`/`DISABLE_LOCAL`/制品目录），
+  仅 endpoint 来源不同（slice attribute vs CR status）。
+
+阶段：1:N 继续主线；1:1 在 operator 阶段引入，K3 之后。库侧唯一前置检查：多 server 同节点时
+`VGPU_CONFIG_SESSION_PATH` 指 per-server 目录，共享区互不串——机制已具备，只需在 1:1 落地时加一条回归。
 
 ## 2. 主路径：DRA
 

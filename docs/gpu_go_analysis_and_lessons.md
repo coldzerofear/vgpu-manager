@@ -37,6 +37,9 @@
 
 ### 3.1 服务端拓扑的另一种选择：per-allocation server 进程
 
+> **已定案为正式第二拓扑（D13）**，取舍表与场景归属见 k8s 接入设计 §1.6；本节保留原始分析。
+> 纠正：TensorFusion 的 1:1 也是**单主机 IP + 每 worker 一个端口**（`ListenPort`），不是每分配一个 IP。
+
 gpu-go 的 worker 模型证明了 **"一份分配 = 一个独立进程 + 独立端口 + env 注入 quota"** 是可运营的。
 对我们的含义：lupine-server 本身无每客户端状态，完全可以**一份分配一个 `lupine_driver_server`**，
 `LD_PRELOAD` 库 + `CUDA_VISIBLE_DEVICES` + `CUDA_MEM_LIMIT_*`/`CUDA_CORE_LIMIT_*` env 拉起——库的
@@ -126,6 +129,6 @@ gpu-go 的核心体验是 `ggo use <code>` 一条命令让本机/dev 容器用�
 | static 制品镜像加 `nvidia-smi`，pod 内单文件挂载（§3.2） | K1 | 小 |
 | provider 写入 `pid,clientIP,clientPort`，metrics/status 消费（§3.3） | K2 可选 | 小 |
 | hostPath 版本目录 GC 采用 required/have 差分对账（§3.4） | K1 | 小 |
-| per-allocation server 拓扑记为正式备选（§3.1） | 文档 | — |
+| per-allocation server 拓扑 → 已升格为正式第二拓扑 D13（k8s 设计 §1.6），operator 阶段以 `RemoteGPUServer` CR 落地 | operator 阶段 | 中 |
 | 非 k8s `vgpu use` CLI（§3.5） | K3 后独立项 | 中 |
 | 推动 lupine wire 与 CUDA 头解耦（§3.4 长期） | 长期 | 大 |
