@@ -178,6 +178,8 @@ type AllocationRequest struct {
 
 	// HasSequentialInit Refers to a pod having at least one initialization container that is not a sidecar container
 	HasSequentialInit bool
+
+	NodeCacheCapable bool
 }
 
 // ContainerNeed is one container's vGPU-resource request, copied verbatim

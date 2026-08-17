@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
@@ -41,6 +42,7 @@ const (
 	apiPrefix   = "/scheduler"
 	// predication router path
 	filterPerfix       = apiPrefix + "/filter"
+	filterDryRunPerfix = apiPrefix + "/filter-dryrun"
 	bindPerfix         = apiPrefix + "/bind"
 	preemptPerfix      = apiPrefix + "/preempt"
 	maxRequestBodySize = 7 * 1024 * 1024 // max 7mb request body size
@@ -124,6 +126,11 @@ func AddFilterPredicate(router *httprouter.Router, predicate predicate.FilterPre
 	router.POST(path, DebugLogging(FilterPredicateRoute(predicate), path))
 }
 
+func AddFilterDryRunPredicate(router *httprouter.Router, predicate predicate.FilterPredicate) {
+	path := filterDryRunPerfix
+	router.POST(path, DebugLogging(FilterPredicateRoute(predicate), path))
+}
+
 func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		if !checkBody(w, r) {
@@ -149,6 +156,8 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 			extenderFilterResult = &extenderv1.ExtenderFilterResult{
 				Error: err.Error(),
 			}
+		} else if strings.Contains(r.URL.Path, filterDryRunPerfix) {
+			extenderFilterResult = predicate.FilterDryRun(r.Context(), extenderArgs)
 		} else {
 			extenderFilterResult = predicate.Filter(r.Context(), extenderArgs)
 		}

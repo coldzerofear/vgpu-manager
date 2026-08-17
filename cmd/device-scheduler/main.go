@@ -242,6 +242,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		}
 	}))
 	route.AddFilterPredicate(handler, filterPlugin)
+	route.AddFilterDryRunPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
 	route.AddPreemptPredicate(handler, preemptPlugin)
 	// Served on the extender's existing port: the endpoint inherits its TLS
