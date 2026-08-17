@@ -1546,6 +1546,8 @@ extern void config_device_unlock(int fd, int device_index);
 static inline void config_cpu_relax(void) {
 #if defined(__x86_64__)
   __builtin_ia32_pause();
+#if defined(__i386__)
+  __asm__ __volatile__("pause" ::: "memory");
 #elif defined(__aarch64__) || defined(__arm__)
   __asm__ __volatile__("yield" ::: "memory");
 #else
@@ -1589,8 +1591,7 @@ device_t get_device_snapshot(int host_index) {
       int fd = config_device_read_lock(host_index);
       snap = *d;
       if (fd >= 0) config_device_unlock(fd, host_index);
-      LOGGER(WARNING, "get_device_snapshot(%d): seqlock spin cap hit, RDLCK fallback",
-             host_index);
+      LOGGER(WARNING, "get_device_snapshot(%d): seqlock spin cap hit, RDLCK fallback", host_index);
       return snap;
     }
   }
@@ -1612,8 +1613,7 @@ int mmap_file_to_util_path(device_util_t** data) {
     goto DONE;
   }
   if (sb.st_size != sizeof(device_util_t)) {
-    LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
-                    sizeof(device_util_t), (long long)sb.st_size);
+    LOGGER(ERROR, "file size mismatch: expected %zu, got %lld", sizeof(device_util_t), (long long)sb.st_size);
     goto DONE;
   }
   *data = (device_util_t*)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
