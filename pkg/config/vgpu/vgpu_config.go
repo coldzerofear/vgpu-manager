@@ -19,6 +19,7 @@ package vgpu
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -584,9 +585,11 @@ func (r *MmapResourceData) GetDeviceSnapshot(deviceIndex int) *DeviceT {
 		return nil // mapping already munmapped by the lister
 	}
 	d := &r.resource.Devices[deviceIndex]
-	for spins := 0; spins < configSeqSpinLimit; spins++ {
+	spins := 0
+	for ; spins < configSeqSpinLimit; spins++ {
 		s1 := atomic.LoadUint32(&d.Seq)
 		if s1&1 != 0 { // odd: a writer is mid-update, retry
+			runtime.Gosched()
 			continue
 		}
 		snap := *d
@@ -598,14 +601,31 @@ func (r *MmapResourceData) GetDeviceSnapshot(deviceIndex int) *DeviceT {
 		if atomic.LoadUint32(&d.Seq) == s1 {
 			return &snap
 		}
+		runtime.Gosched()
+	}
+	if spins == configSeqSpinLimit {
+		f, err := os.OpenFile(r.mmapFile.Path, os.O_RDWR, 0644)
+		if err != nil {
+			klog.Errorf("open %q for device %d lock: %v", r.mmapFile.Path, deviceIndex, err)
+			return nil
+		}
+		defer func() { _ = f.Close() }()
+
+		offset := getConfigLockOffset(deviceIndex)
+		if err = util.FcntlRecordLock(f.Fd(), syscall.F_RDLCK, true, offset); err != nil {
+			klog.Errorf("fcntl wlock device %d at offset %d: %v", deviceIndex, offset, err)
+			return nil
+		}
+		defer func() { _ = util.FcntlRecordLock(f.Fd(), syscall.F_UNLCK, false, offset) }()
+		snap := *d
+		return &snap
 	}
 	return nil
 }
 
 func WriteVGPUConfigFile(
-	filePath string, devManager *manager.DeviceManager,
-	pod *corev1.Pod, contClaim device.ContainerDeviceClaim,
-	memoryOversold bool, node *corev1.Node,
+	filePath string, devManager *manager.DeviceManager, pod *corev1.Pod,
+	contClaim device.ContainerDeviceClaim, memoryOversold bool, node *corev1.Node,
 ) error {
 	if _, err := os.Stat(filePath); err != nil {
 		if !os.IsNotExist(err) {
