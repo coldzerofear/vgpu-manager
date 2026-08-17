@@ -220,6 +220,9 @@ spec:
               {{- end }}
             initialDelaySeconds: 15
             periodSeconds: 20
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /readyz
@@ -231,6 +234,9 @@ spec:
               {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
           volumeMounts:
             - name: kubelet-root
               mountPath: /var/lib/kubelet

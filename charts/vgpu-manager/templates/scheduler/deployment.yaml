@@ -86,13 +86,13 @@ spec:
               mountPath: /config
               readOnly: true
           livenessProbe:
-            failureThreshold: 8
+            failureThreshold: 3
             httpGet:
               path: /healthz
               port: 10259
               scheme: HTTPS
-            initialDelaySeconds: 10
-            periodSeconds: 10
+            initialDelaySeconds: 15
+            periodSeconds: 20
             successThreshold: 1
             timeoutSeconds: 15
         - name: device-scheduler
@@ -142,6 +142,9 @@ spec:
               {{- end }}
             initialDelaySeconds: 15
             periodSeconds: 20
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /readyz
@@ -154,6 +157,9 @@ spec:
               {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
           {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
           volumeMounts:
             - name: cert-dir
