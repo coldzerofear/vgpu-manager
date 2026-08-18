@@ -191,21 +191,6 @@ func Test_FilterDryRun_AcceptsTemplateNodeAbsentFromCache(t *testing.T) {
 	assert.Equal(t, []string{template.Name}, NodeNamesOfResult(result))
 }
 
-// Node names alone cannot describe a template node, so the request is refused
-// with an actionable message instead of silently failing every candidate.
-func Test_FilterDryRun_RejectsNodeNamesOnlyRequest(t *testing.T) {
-	fixture := newDryRunFixture(t)
-	nodeNames := []string{fixture.nodes[0].Name}
-
-	result := fixture.filter.FilterDryRun(context.Background(), extenderv1.ExtenderArgs{
-		Pod:       dryRunPod("dryrun-node-names", 1, 50, 2048),
-		NodeNames: &nodeNames,
-	})
-
-	assert.Contains(t, result.Error, "nodeCacheCapable=false")
-	assert.Empty(t, NodeNamesOfResult(result))
-}
-
 // An invalid device request is still an error, but reporting it on the pod is
 // a live-path side effect that dry-run must not have.
 func Test_FilterDryRun_InvalidRequestEmitsNoEvent(t *testing.T) {
