@@ -100,6 +100,11 @@ func (alloc *allocator) addContainerAllocate(contDevices *device.ContainerDevice
 func (alloc *allocator) Allocate(req *AllocationRequest) (*corev1.Pod, *reason.FilterReason, error) {
 	pod := req.Pod
 	klog.V(4).Infof("Attempt to allocate pod <%s> on node <%s>", klog.KObj(pod), alloc.nodeInfo.GetName())
+	// The filter reuses one request across every candidate node, so the outcome
+	// of a node that was tried and rejected must not leak into the node that
+	// eventually accepts the pod. Cleared per call, accumulated across the
+	// pod's containers within the call.
+	req.topoOutcome = TopologyOutcome{}
 	var newPod = pod.DeepCopy()
 	var deviceClaims device.PodDeviceClaim
 
