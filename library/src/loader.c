@@ -1546,7 +1546,7 @@ extern void config_device_unlock(int fd, int device_index);
 static inline void config_cpu_relax(void) {
 #if defined(__x86_64__)
   __builtin_ia32_pause();
-#if defined(__i386__)
+#elif defined(__i386__)
   __asm__ __volatile__("pause" ::: "memory");
 #elif defined(__aarch64__) || defined(__arm__)
   __asm__ __volatile__("yield" ::: "memory");

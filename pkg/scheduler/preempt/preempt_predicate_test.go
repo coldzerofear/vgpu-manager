@@ -369,7 +369,10 @@ func Test_isProtectedFromPreemption(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			groupName, _ := util.PodGangKey(tt.pod)
-			assert.Equal(t, tt.want, isProtectedFromPreemption(tt.pod, groupName))
+			protectedBy, got := isProtectedFromPreemption(tt.pod, groupName)
+			assert.Equal(t, tt.want, got)
+			// A protected pod must always name the rule that protects it.
+			assert.Equal(t, tt.want, protectedBy != "")
 		})
 	}
 }

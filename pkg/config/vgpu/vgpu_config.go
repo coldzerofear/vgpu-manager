@@ -606,14 +606,14 @@ func (r *MmapResourceData) GetDeviceSnapshot(deviceIndex int) *DeviceT {
 	if spins == configSeqSpinLimit {
 		f, err := os.OpenFile(r.mmapFile.Path, os.O_RDWR, 0644)
 		if err != nil {
-			klog.Errorf("open %q for device %d lock: %w", r.mmapFile.Path, deviceIndex, err)
+			klog.Errorf("open %q for device %d lock: %v", r.mmapFile.Path, deviceIndex, err)
 			return nil
 		}
 		defer func() { _ = f.Close() }()
 
 		offset := getConfigLockOffset(deviceIndex)
 		if err = util.FcntlRecordLock(f.Fd(), syscall.F_RDLCK, true, offset); err != nil {
-			klog.Errorf("fcntl wlock device %d at offset %d: %w", deviceIndex, offset, err)
+			klog.Errorf("fcntl wlock device %d at offset %d: %v", deviceIndex, offset, err)
 			return nil
 		}
 		defer func() { _ = util.FcntlRecordLock(f.Fd(), syscall.F_UNLCK, false, offset) }()

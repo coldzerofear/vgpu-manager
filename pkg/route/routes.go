@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
@@ -121,17 +120,25 @@ func AddMetricsHandle(router *httprouter.Router, metrics http.Handler) {
 	router.GET(metricsPath, DebugLogging(handleFunc, metricsPath))
 }
 
+// FilterFunc is the verb a filter route serves: the live Filter, or the
+// read-only FilterDryRun used by scale-up simulation.
+type FilterFunc func(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult
+
 func AddFilterPredicate(router *httprouter.Router, predicate predicate.FilterPredicate) {
-	path := filterPerfix
-	router.POST(path, DebugLogging(FilterPredicateRoute(predicate), path))
+	addFilterRoute(router, filterPerfix, predicate, predicate.Filter)
 }
 
 func AddFilterDryRunPredicate(router *httprouter.Router, predicate predicate.FilterPredicate) {
-	path := filterDryRunPerfix
-	router.POST(path, DebugLogging(FilterPredicateRoute(predicate), path))
+	addFilterRoute(router, filterDryRunPerfix, predicate, predicate.FilterDryRun)
 }
 
-func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle {
+// addFilterRoute binds one verb to one path, so the handler never has to infer
+// which verb it is serving from the request URL.
+func addFilterRoute(router *httprouter.Router, path string, predicate predicate.FilterPredicate, filter FilterFunc) {
+	router.POST(path, DebugLogging(FilterPredicateRoute(predicate, filter), path))
+}
+
+func FilterPredicateRoute(predicate predicate.FilterPredicate, filter FilterFunc) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		if !checkBody(w, r) {
 			return
@@ -156,10 +163,8 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 			extenderFilterResult = &extenderv1.ExtenderFilterResult{
 				Error: err.Error(),
 			}
-		} else if strings.Contains(r.URL.Path, filterDryRunPerfix) {
-			extenderFilterResult = predicate.FilterDryRun(r.Context(), extenderArgs)
 		} else {
-			extenderFilterResult = predicate.Filter(r.Context(), extenderArgs)
+			extenderFilterResult = filter(r.Context(), extenderArgs)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
