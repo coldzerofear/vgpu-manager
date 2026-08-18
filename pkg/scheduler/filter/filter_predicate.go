@@ -1031,10 +1031,8 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		// annotation) and miscount free GPU.
 		f.podLister.Mutation(newPod)
 		filteredNodes = append(filteredNodes, *node)
-		// PER POD, emitted for the node that actually accepted it. nodeInfo
-		// carries the request snapshot the allocator recorded its topology
-		// outcome onto.
-		recordPlacement(req, nodeInfo.AllocationRequest)
+		// PER POD, emitted for the node that actually accepted it.
+		recordPlacement(req)
 	}
 	if len(filteredNodes) > 0 {
 		if mode.isDryRun() {
@@ -1097,7 +1095,7 @@ func recordNodeRejects(verb string, reasons map[string]*reason.FilterReason) {
 // candidate won: the allocator runs per node and would report a single pod as
 // several placements. nodeReq is the winning node's request snapshot, carrying
 // the topology outcome the allocator recorded on it.
-func recordPlacement(req, nodeReq *allocator.AllocationRequest) {
+func recordPlacement(req *allocator.AllocationRequest) {
 	// Every annotation-derived value goes through the metrics package's
 	// whitelist: the parsers pass unknown values through verbatim, which would
 	// otherwise make label cardinality user-controlled.
@@ -1106,7 +1104,9 @@ func recordPlacement(req, nodeReq *allocator.AllocationRequest) {
 		metrics.PolicyLabel(req.NodePolicy), metrics.PolicyLabel(req.DevicePolicy), mode,
 	).Inc()
 
-	outcome := nodeReq.TopologyOutcome()
+	// Read from the SAME request the allocator was handed: the per-node snapshot
+	// on nodeInfo is copied before Allocate runs and never receives the outcome.
+	outcome := req.TopologyOutcome()
 	if outcome.Result != "" {
 		metrics.TopologyPlacementTotal.WithLabelValues(mode, outcome.Result).Inc()
 	}
