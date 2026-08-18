@@ -19,9 +19,11 @@ limitations under the License.
 // # Counting units
 //
 // Every metric here declares ONE unambiguous unit, stated in its Help string,
-// because the extender has two very different natural units and conflating them
-// produces numbers that look meaningful and are not:
+// because the extender has several very different natural units and conflating
+// them produces numbers that look meaningful and are not:
 //
+//   - PER CALL — emitted once per extender HTTP verb invocation. These answer
+//     "is the extender healthy and fast?".
 //   - PER POD — emitted once when a pod is actually placed. These answer
 //     outcome questions: "are my link pods getting NVLink?", "what do users
 //     actually request?".
@@ -32,13 +34,30 @@ limitations under the License.
 // A pod may be evaluated against many nodes before one accepts it, so a
 // per-node counter is NOT a pod count and must never be read as one.
 //
+// # The verb dimension
+//
+// The extender serves four verbs, and every call-scoped metric carries the same
+// `verb` label so one query shape works across all of them. Verbs do NOT share
+// a result vocabulary — "fit" means nothing for a bind — so each verb documents
+// its own, see the Result* constants:
+//
+//	filter         fit | no_fit | error
+//	filter_dryrun  fit | no_fit | error
+//	bind           success | no_node | pod_not_found | uid_mismatch |
+//	               node_mismatch | prealloc_expired | patch_failed | bind_failed
+//	preempt        victims | no_victims | passthrough
+//
+// The verb label is also what keeps read-only simulation traffic legible.
+// Autoscaler probes are unbounded — every candidate node group on every loop —
+// so they are separated by verb rather than folded into live scheduling.
+//
 // # What is deliberately NOT counted
 //
-// Preemption re-runs the allocator as a DRY RUN for every victim set it tests.
-// Those simulations do not place anything, so they are excluded at the source
-// (see allocator.NewSimulationAllocator) rather than being subtracted later.
-// Without that, a single preemption would inflate placement counts several
-// times over.
+// Preemption re-runs the allocator as a DRY RUN for every victim set it tests,
+// and so does the dry-run filter. Those simulations place nothing, so the
+// placement- and allocator-scoped series are suppressed at the source (see
+// allocator.NewSimulationAllocator) rather than being subtracted later. Without
+// that, a single preemption would inflate placement counts several times over.
 package metrics
 
 import (
@@ -84,12 +103,64 @@ const (
 	AlignNone      = "none"      // opted in, but nothing to align to here
 )
 
-// Filter stages. LockWait is split out because SerializedNodeFilter is on by
-// default: folded together, a queueing spike reads as "allocation got slower".
+// Extender verbs. Every call-scoped metric carries this label.
 const (
+	VerbFilter       = "filter"
+	VerbFilterDryRun = "filter_dryrun"
+	VerbBind         = "bind"
+	VerbPreempt      = "preempt"
+)
+
+// Call stages. Every verb reports StageTotal; the filter additionally splits
+// its work, because LockWait is a queue, not work: folded into the total, a
+// contention spike reads as "allocation got slower". For the filter,
+// StageLockWait is contained INSIDE StageDevice, so device work is
+// device minus lock_wait in PromQL.
+const (
+	StageTotal    = "total"
 	StageNode     = "node"
-	StageLockWait = "device_lock_wait"
-	StageDevice   = "device_work"
+	StageDevice   = "device"
+	StageLockWait = "lock_wait"
+)
+
+// Filter and dry-run filter results.
+const (
+	ResultFit   = "fit"    // at least one candidate can host the pod
+	ResultNoFit = "no_fit" // every candidate was rejected
+	ResultError = "error"  // the call itself failed
+)
+
+// Bind results. Everything except ResultBindSuccess is a failure, and they are
+// kept apart because they demand different responses: ResultBindNodeMismatch
+// and ResultBindPreAllocExpired mean the filter's optimistic pre-allocation did
+// not survive until bind (retune --stuck-grace-period), whereas the rest are
+// ordinary API-level failures.
+const (
+	ResultBindSuccess         = "success"
+	ResultBindNoNode          = "no_node"          // caller sent no target node
+	ResultBindPodNotFound     = "pod_not_found"    // pod vanished between filter and bind
+	ResultBindUIDMismatch     = "uid_mismatch"     // pod was recreated under the same name
+	ResultBindNodeMismatch    = "node_mismatch"    // bound node is not the predicated one
+	ResultBindPreAllocExpired = "prealloc_expired" // pre-allocation went stale before bind
+	ResultBindPatchFailed     = "patch_failed"     // could not stamp allocation metadata
+	ResultBindFailed          = "bind_failed"      // the API server rejected the binding
+)
+
+// Preempt results.
+const (
+	ResultPreemptVictims     = "victims"     // at least one node survived with a victim set
+	ResultPreemptNoVictims   = "no_victims"  // every candidate was vetoed after victim removal
+	ResultPreemptPassthrough = "passthrough" // not our pod, or we could not judge: input returned as-is
+)
+
+// Why an in-tree-proposed victim was refused. These explain a preemption that
+// came up short: kube-scheduler picked a victim we will not evict.
+const (
+	ProtectedTerminating = "terminating"  // already being deleted or finished
+	ProtectedCritical    = "critical"     // system-critical priority class
+	ProtectedDaemonSet   = "daemonset"    // recreated on the same node, evicting achieves nothing
+	ProtectedBinding     = "binding"      // inside its own filter/bind window
+	ProtectedGangSibling = "gang_sibling" // same gang as the preemptor
 )
 
 var (
@@ -130,13 +201,15 @@ var (
 		Help:      "PER NODE EVALUATION. Nodes rejected because a strict topology contract could not be met.",
 	}, []string{"mode"})
 
-	// NodeRejectTotal buckets per-node filter rejections by structured reason.
-	// The filter already computes this breakdown for its log line.
+	// NodeRejectTotal buckets per-node rejections by structured reason. The
+	// filter already computes this breakdown for its log line; preempt reports
+	// the node gates it applies before considering victims. Split by verb so
+	// unbounded simulation traffic cannot drown live scheduling.
 	NodeRejectTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "node_reject_total",
-		Help:      "PER NODE EVALUATION. Nodes rejected during filtering, by structured reason code.",
-	}, []string{"code"})
+		Help:      "PER NODE EVALUATION. Nodes rejected during a verb, by structured reason code.",
+	}, []string{"verb", "code"})
 
 	// LinkSearchTotal counts how often the in-component combinatorial search
 	// ran. On the hardware this design targets it should be near zero: uniform
@@ -158,16 +231,45 @@ var (
 		Buckets:   []float64{2, 4, 6, 8, 12, 16, 24, 32, 64},
 	}, []string{"algo"})
 
-	// FilterDuration measures the extender's Filter verb. The lock-wait stage
-	// is separate on purpose — see StageLockWait.
-	FilterDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	// VerbTotal is the extender's headline health signal: every call, by verb
+	// and how it ended. Result vocabularies are per-verb — see the package doc.
+	VerbTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
-		Name:      "filter_duration_seconds",
-		Help:      "PER FILTER CALL. Time spent in each stage of the Filter verb.",
+		Name:      "verb_total",
+		Help:      "PER CALL. Extender verb invocations, by verb and outcome.",
+	}, []string{"verb", "result"})
+
+	// VerbDuration measures how long a call spent, end to end and — for the
+	// filter — per stage. See the Stage* constants for how the filter's stages
+	// nest.
+	VerbDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "verb_duration_seconds",
+		Help:      "PER CALL. Time spent serving an extender verb, by stage.",
 		// 100µs .. ~13s: the normal budget is single-digit ms, but a saturated
 		// cluster under the serial filter lock can queue for far longer.
 		Buckets: prometheus.ExponentialBuckets(0.0001, 3, 12),
-	}, []string{"stage"})
+	}, []string{"verb", "stage"})
+
+	// PreemptVictimsAdded answers "how much MORE disruption did we cause than
+	// kube-scheduler planned?". In-tree cannot see per-device constraints, so it
+	// routinely under-selects and we append victims until the pod fits. Zero is
+	// the healthy bucket: in-tree's proposal was already enough.
+	PreemptVictimsAdded = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Name:      "preempt_victims_added",
+		Help:      "PER ACCEPTED NODE. Victims appended beyond the set kube-scheduler proposed.",
+		Buckets:   []float64{0, 1, 2, 3, 4, 6, 8, 16},
+	})
+
+	// PreemptProtectedTotal counts victims we refuse to evict. A preemption that
+	// finds no viable node while this climbs means kube-scheduler keeps
+	// proposing victims that are off-limits to us.
+	PreemptProtectedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "preempt_protected_total",
+		Help:      "PER VICTIM. Proposed victims refused by preemption, by why they are protected.",
+	}, []string{"reason"})
 )
 
 // registry holds exactly the extender's own series plus the runtime collectors.
@@ -186,7 +288,10 @@ func init() {
 		NodeRejectTotal,
 		LinkSearchTotal,
 		LinkSearchCandidates,
-		FilterDuration,
+		VerbTotal,
+		VerbDuration,
+		PreemptVictimsAdded,
+		PreemptProtectedTotal,
 	)
 }
 
@@ -198,10 +303,26 @@ func Handler() http.Handler {
 // Registry exposes the registry to tests that need to gather series.
 func Registry() *prometheus.Registry { return registry }
 
-// ObserveFilterStage records one Filter stage duration. Intended as
-// `defer metrics.ObserveFilterStage(metrics.StageDevice, time.Now())`.
-func ObserveFilterStage(stage string, start time.Time) {
-	FilterDuration.WithLabelValues(stage).Observe(time.Since(start).Seconds())
+// ObserveVerb records one completed extender call. Intended as a deferred
+// closure so the result is whatever the call actually returned.
+func ObserveVerb(verb, result string, start time.Time) {
+	VerbTotal.WithLabelValues(verb, result).Inc()
+	ObserveStage(verb, StageTotal, start)
+}
+
+// ObserveStage records one stage of a call. Intended as
+// `defer metrics.ObserveStage(metrics.VerbBind, metrics.StageLockWait, time.Now())`.
+func ObserveStage(verb, stage string, start time.Time) {
+	VerbDuration.WithLabelValues(verb, stage).Observe(time.Since(start).Seconds())
+}
+
+// RecordNodeReject buckets one rejected node under the verb that rejected it.
+// An unlabelled rejection is dropped rather than minting a code="" series.
+func RecordNodeReject(verb, code string) {
+	if code == "" {
+		return
+	}
+	NodeRejectTotal.WithLabelValues(verb, code).Inc()
 }
 
 // ObserveLinkSearch records one executed in-component search.
@@ -253,4 +374,32 @@ func TopologyLabel(m util.TopologyMode) string {
 	default:
 		return LabelOther
 	}
+}
+
+// CounterValue sums one counter across the label pairs given, ignoring series
+// that do not carry them. Exists for tests: instrumentation nobody asserts on
+// silently rots when the code it watches is refactored.
+func CounterValue(name string, labels map[string]string) float64 {
+	families, err := registry.Gather()
+	if err != nil {
+		return 0
+	}
+	total := 0.0
+	for _, family := range families {
+		if family.GetName() != namespace+"_"+name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			matched := 0
+			for _, pair := range metric.GetLabel() {
+				if want, ok := labels[pair.GetName()]; ok && want == pair.GetValue() {
+					matched++
+				}
+			}
+			if matched == len(labels) {
+				total += metric.GetCounter().GetValue()
+			}
+		}
+	}
+	return total
 }

@@ -89,6 +89,11 @@ const (
 	LinkTopologyUnsatisfied   Code = "LinkTopologyUnsatisfied"
 	NUMATopologyUnsatisfied   Code = "NUMATopologyUnsatisfied"
 	AlreadyScheduledElsewhere Code = "AlreadyScheduledElsewhere"
+	// AllocatorInternalError is not a property of the node: the allocator hit a
+	// bug (annotation encoding, accounting) while judging it. Kept as its own
+	// code so it never hides inside a capacity reason and reads as normal
+	// pressure.
+	AllocatorInternalError Code = "AllocatorInternalError"
 )
 
 // phrase is the short, k8s-style noun phrase rendered into Event
@@ -122,6 +127,7 @@ var phrase = map[Code]string{
 	LinkTopologyUnsatisfied:   "Link topology unsatisfied",
 	NUMATopologyUnsatisfied:   "NUMA topology unsatisfied",
 	AlreadyScheduledElsewhere: "pod already scheduled to another node",
+	AllocatorInternalError:    "allocator internal error",
 }
 
 // Phrase returns the human-readable short form for a Code. Unknown
