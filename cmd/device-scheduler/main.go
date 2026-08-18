@@ -214,9 +214,9 @@ func runApp(opt *options.Options) (exitCode int) {
 				OnStoppedLeading: func() {
 					klog.Infoln("stopped leader elect")
 				},
-				OnNewLeader: func(ident string) {
-					if leaderIdentity != ident {
-						klog.Infof("new leader elected: %s", ident)
+				OnNewLeader: func(identity string) {
+					if leaderIdentity != identity {
+						klog.Infof("new leader elected: %s", identity)
 					}
 				},
 			},

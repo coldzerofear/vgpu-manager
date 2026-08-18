@@ -23,6 +23,7 @@ type LeaseDetector struct {
 	namespace      string
 	leaseName      string
 	identityPrefix string // holderIdentity The prefix that needs to be matched (i.e. Pod name)
+	leaderCallback func()
 	jitter         time.Duration
 }
 
@@ -33,7 +34,14 @@ func WithJitter(d time.Duration) Option {
 	return func(ld *LeaseDetector) { ld.jitter = d }
 }
 
-func NewLeaseDetector(factory informers.SharedInformerFactory, namespace, leaseName, identityPrefix string, opts ...Option) (*LeaseDetector, error) {
+func WithLeaderCallback(c func()) Option {
+	return func(ld *LeaseDetector) { ld.leaderCallback = c }
+}
+
+func NewLeaseDetector(
+	factory informers.SharedInformerFactory, namespace,
+	leaseName, identityPrefix string, opts ...Option,
+) (*LeaseDetector, error) {
 	ld := &LeaseDetector{
 		namespace:      namespace,
 		leaseName:      leaseName,
@@ -44,29 +52,22 @@ func NewLeaseDetector(factory informers.SharedInformerFactory, namespace, leaseN
 	}
 
 	// ---- Build an Informer that only listens to a single Leaf ----
-	informer := factory.InformerFor(&coordinationv1.Lease{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
-		watcher := cache.NewListWatchFromClient(k.CoordinationV1().RESTClient(), "leases",
-			namespace, fields.OneTermEqualSelector("metadata.name", leaseName))
-		indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
-		return cache.NewSharedIndexInformer(watcher, &coordinationv1.Lease{}, d, indexers)
-	})
+	informer := factory.InformerFor(&coordinationv1.Lease{},
+		func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
+			watcher := cache.NewListWatchFromClient(k.CoordinationV1().RESTClient(),
+				"leases", namespace, fields.OneTermEqualSelector("metadata.name", leaseName))
+			return cache.NewSharedIndexInformer(watcher, &coordinationv1.Lease{}, d,
+				cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+		},
+	)
 
 	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			ld.onUpdate(obj)
-		},
-		UpdateFunc: func(_, newObj interface{}) {
-			ld.onUpdate(newObj)
-		},
-		DeleteFunc: func(obj interface{}) {
-			ld.onDelete(obj)
-		},
+		AddFunc:    func(obj interface{}) { ld.onUpdate(obj) },
+		UpdateFunc: func(_, newObj interface{}) { ld.onUpdate(newObj) },
+		DeleteFunc: func(obj interface{}) { ld.onDelete(obj) },
 	})
-	if err != nil {
-		return nil, err
-	}
 
-	return ld, nil
+	return ld, err
 }
 
 // IsLeader Return true if all the following conditions are met:
@@ -74,19 +75,23 @@ func NewLeaseDetector(factory informers.SharedInformerFactory, namespace, leaseN
 //  2. holderIdentity prefix == podName
 //  3. The lease has not expired（renewTime + leaseDurationSeconds + jitter > now）
 func (ld *LeaseDetector) IsLeader() bool {
-	ld.mu.RLock()
-	lease := ld.current
-	ld.mu.RUnlock()
-	evaluate, _ := ld.evaluate(lease)
+	evaluate, _ := ld.evaluate(ld.GetLeaseSnapshot())
 	return evaluate
 }
 
 // IsLeaderDetailed Return the judgment result and reason (for logging/debugging purposes).
 func (ld *LeaseDetector) IsLeaderDetailed() (bool, string) {
+	return ld.evaluate(ld.GetLeaseSnapshot())
+}
+
+func (ld *LeaseDetector) GetLeaseSnapshot() *coordinationv1.Lease {
+	var lease *coordinationv1.Lease
 	ld.mu.RLock()
-	lease := ld.current
+	if ld.current != nil {
+		lease = ld.current.DeepCopy()
+	}
 	ld.mu.RUnlock()
-	return ld.evaluate(lease)
+	return lease
 }
 
 func (ld *LeaseDetector) convertTargetLease(obj interface{}) *coordinationv1.Lease {
@@ -113,15 +118,16 @@ func (ld *LeaseDetector) onUpdate(obj interface{}) {
 		return
 	}
 
-	ld.mu.RLock()
-	current := ld.current
-	ld.mu.RUnlock()
+	current := ld.GetLeaseSnapshot()
 
 	// Print logs during initial initialization, resource reconstruction, and identity change
 	if current == nil || current.UID != lease.UID ||
 		!ptr.Equal(current.Spec.HolderIdentity, lease.Spec.HolderIdentity) {
-		_, reason := ld.evaluate(lease)
+		isLeader, reason := ld.evaluate(lease)
 		klog.V(3).Infoln(reason)
+		if isLeader && ld.leaderCallback != nil {
+			ld.leaderCallback()
+		}
 	}
 
 	ld.mu.Lock()
@@ -162,7 +168,8 @@ func (ld *LeaseDetector) evaluate(lease *coordinationv1.Lease) (bool, string) {
 	duration := time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second
 	deadline := renewTime.Add(duration).Add(ld.jitter)
 	if time.Now().After(deadline) {
-		return false, fmt.Sprintf("lease expired: renewTime=%s, deadline=%s", renewTime.UTC().Format(time.RFC3339), deadline.UTC().Format(time.RFC3339))
+		return false, fmt.Sprintf("lease expired: renewTime=%s, deadline=%s",
+			renewTime.UTC().Format(time.RFC3339), deadline.UTC().Format(time.RFC3339))
 	}
 	return true, fmt.Sprintf("leader=%s, expires at %s", holder, deadline.UTC().Format(time.RFC3339))
 }
