@@ -646,7 +646,9 @@ func buildDeviceRequest(pod *corev1.Pod, requestName, deviceClassName string, in
 		if len(excludeUuids) > 0 {
 			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes["%s"].uuid not in ["%s"]`,
+					//Expression: fmt.Sprintf(`device.attributes["%s"].uuid not in ["%s"]`,
+					//	util.DRADriverName, strings.Join(excludeUuids, `","`)),
+					Expression: fmt.Sprintf(`!(device.attributes["%s"].uuid in ["%s"])`,
 						util.DRADriverName, strings.Join(excludeUuids, `","`)),
 				},
 			})
@@ -680,7 +682,9 @@ func buildDeviceRequest(pod *corev1.Pod, requestName, deviceClassName string, in
 		if len(excludeTypes) > 0 {
 			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes["%s"].productName not in ["%s"]`,
+					//Expression: fmt.Sprintf(`device.attributes["%s"].productName not in ["%s"]`,
+					//	util.DRADriverName, strings.Join(excludeTypes, `","`)),
+					Expression: fmt.Sprintf(`!(device.attributes["%s"].productName in ["%s"])`,
 						util.DRADriverName, strings.Join(excludeTypes, `","`)),
 				},
 			})
