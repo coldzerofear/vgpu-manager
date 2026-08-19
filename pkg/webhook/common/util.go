@@ -18,7 +18,9 @@ package common
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
@@ -201,7 +203,7 @@ func ConvertDRARequest(ctx context.Context, metadata *metav1.ObjectMeta, podSpec
 		resourceInfos = append(resourceInfos, resourceInfo)
 
 		// Due to compressing all container resource requests into one resource claim, only the first resource claim is inserted.
-		if !(options.CombinedResourceClaim && len(resourceInfos) == 1) {
+		if !options.CombinedResourceClaim || len(resourceInfos) == 1 {
 			podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
 				Name:              resourceClaimName,
 				ResourceClaimName: &resourceClaimName,
@@ -227,4 +229,17 @@ func ConvertDRARequest(ctx context.Context, metadata *metav1.ObjectMeta, podSpec
 		logger.Info("Successfully convert all vGPU requests to resourceClaims")
 	}
 	return nil
+}
+
+func GenerateRandomString(length int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
+		if err != nil {
+			panic("crypto/rand: " + err.Error())
+		}
+		b[i] = letters[n.Int64()]
+	}
+	return string(b)
 }

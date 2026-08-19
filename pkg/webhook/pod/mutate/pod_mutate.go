@@ -38,7 +38,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
-	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -243,9 +242,10 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 		reschedule.CleanupDRAMetadata(pod)
 		resourceName := pod.Name
 		if pod.GenerateName != "" {
-			resourceName = fmt.Sprintf("%s-%s", strings.TrimSuffix(pod.GenerateName, "-"), rand.String(5))
+			resourceName = fmt.Sprintf("%s-%s", strings.TrimSuffix(pod.GenerateName, "-"),
+				common.GenerateRandomString(5))
 		} else if h.options.CombinedResourceClaim {
-			resourceName = fmt.Sprintf("%s-%s", pod.Name, rand.String(5))
+			resourceName = fmt.Sprintf("%s-%s", pod.Name, common.GenerateRandomString(5))
 		}
 		return common.ConvertDRARequest(ctx, &pod.ObjectMeta, &pod.Spec, resourceName, h.options)
 	}

@@ -30,7 +30,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/json"
-	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,9 +67,12 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, job *vcv1alpha1.Job) er
 
 		resourceName := job.Name
 		if job.GenerateName != "" {
-			resourceName = fmt.Sprintf("%s-%s-%s", strings.TrimSuffix(job.GenerateName, "-"), task.Name, rand.String(5))
+			resourceName = fmt.Sprintf("%s-%s-%s",
+				strings.TrimSuffix(job.GenerateName, "-"),
+				task.Name, common.GenerateRandomString(5))
 		} else if h.options.CombinedResourceClaim {
-			resourceName = fmt.Sprintf("%s-%s-%s", resourceName, task.Name, rand.String(5))
+			resourceName = fmt.Sprintf("%s-%s-%s", resourceName,
+				task.Name, common.GenerateRandomString(5))
 		}
 
 		if err := common.ConvertDRARequest(
