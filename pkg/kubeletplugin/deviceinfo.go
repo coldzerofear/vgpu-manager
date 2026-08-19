@@ -31,8 +31,6 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-const compatibilityNumaNodeAttribute resourceapi.QualifiedName = "dra.net/numaNode"
-
 type GpuDeviceInfo struct {
 	*nvidia.GpuInfo `json:",inline"`
 	vfioEnabled     bool
@@ -58,8 +56,9 @@ type GpuDeviceInfo struct {
 // properties are stored in the checkpoint JSON upon prepare.
 type MigDeviceInfo struct {
 	*nvidia.MigInfo `json:",inline"`
-	ParentUUID      string `json:"parentUUID"`
-	GiProfileID     int    `json:"profileId"`
+	ParentDevice    *GpuDeviceInfo `json:"-"`
+	ParentUUID      string         `json:"parentUUID"`
+	GiProfileID     int            `json:"profileId"`
 
 	// TODO: maybe embed MigLiveTuple.
 	ParentMinor int `json:"parentMinor"`
@@ -70,9 +69,6 @@ type MigDeviceInfo struct {
 	// rely on this -- and this must work after JSON deserialization.
 	PlacementStart int `json:"placementStart"`
 	PlacementSize  int `json:"placementSize"`
-
-	pciBusID     string
-	pcieRootAttr *deviceattribute.DeviceAttribute
 }
 
 type VfioDeviceInfo struct {
@@ -88,7 +84,6 @@ type VfioDeviceInfo struct {
 	pciBusIDAttr           *deviceattribute.DeviceAttribute
 	pcieRootAttr           *deviceattribute.DeviceAttribute
 	numaNodeAttr           *deviceattribute.DeviceAttribute
-	numaNode               int
 	iommuGroup             int
 	iommuFDEnabled         bool
 	addressableMemoryBytes uint64
@@ -156,9 +151,6 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		"minor": {
 			IntValue: ptr.To(int64(d.Minor)),
 		},
-		"numa": {
-			IntValue: ptr.To(int64(d.GetNumaNode())),
-		},
 		"productName": {
 			StringValue: &d.ProductName,
 		},
@@ -179,13 +171,9 @@ func (d *GpuDeviceInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.D
 		},
 	}
 
-	if d.PciBusIDAttr != nil {
-		attrs[d.PciBusIDAttr.Name] = d.PciBusIDAttr.Value
-	}
-	if d.PcieRootAttr != nil {
-		attrs[d.PcieRootAttr.Name] = d.PcieRootAttr.Value
-	}
-	addCompatibilityNumaNodeAttribute(attrs, d.NumaNodeAttr)
+	addDeviceAttribute(attrs, d.PciBusIDAttr)
+	addDeviceAttribute(attrs, d.PcieRootAttr)
+	addDeviceAttribute(attrs, d.NumaNodeAttr)
 
 	if d.AddressingMode != nil {
 		attrs["addressingMode"] = resourceapi.DeviceAttribute{
@@ -273,9 +261,6 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 			"uuid": {
 				StringValue: ptr.To(strings.ToLower(d.UUID)),
 			},
-			"numa": {
-				IntValue: ptr.To(int64(d.numaNode)),
-			},
 			"deviceID": {
 				StringValue: &d.deviceID,
 			},
@@ -296,12 +281,9 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 		},
 	}
 
-	if d.pciBusIDAttr != nil {
-		device.Attributes[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
-	}
-	if d.pcieRootAttr != nil {
-		device.Attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
-	}
+	addDeviceAttribute(device.Attributes, d.pciBusIDAttr)
+	addDeviceAttribute(device.Attributes, d.pcieRootAttr)
+	addDeviceAttribute(device.Attributes, d.numaNodeAttr)
 
 	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
 		if d.parent == nil {
@@ -310,37 +292,12 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 			d.parent.addFabricManagerAttributes(device.Attributes)
 		}
 	}
-	addCompatibilityNumaNodeAttribute(device.Attributes, d.numaNodeAttr)
 
 	return device
 }
 
-func addCompatibilityNumaNodeAttribute(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, numaNodeAttr *deviceattribute.DeviceAttribute) {
-	if numaNodeAttr == nil {
-		return
-	}
-	numaNode := numaNodeAttr.Value.IntValue
-	if numaNode == nil || *numaNode < 0 {
-		return
-	}
-
-	if featuregates.Enabled(featuregates.DRAListTypeAttributes) {
-		// KEP-6072 prefers the list form when DRAListTypeAttributes is enabled.
-		// Until this driver computes same-socket minimum-SLIT-distance nodes,
-		// publish the physical NUMA node as a valid single-element list.
-		attrs[numaNodeAttr.Name] = resourceapi.DeviceAttribute{
-			IntValues: []int64{int64(*numaNode)},
-		}
-		attrs[compatibilityNumaNodeAttribute] = resourceapi.DeviceAttribute{
-			IntValues: []int64{int64(*numaNode)},
-		}
-		return
-	}
-
-	attrs[numaNodeAttr.Name] = resourceapi.DeviceAttribute{
-		IntValue: ptr.To(int64(*numaNode)),
-	}
-	attrs[compatibilityNumaNodeAttribute] = resourceapi.DeviceAttribute{
-		IntValue: ptr.To(int64(*numaNode)),
+func addDeviceAttribute(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, attr *deviceattribute.DeviceAttribute) {
+	if attr != nil {
+		attrs[attr.Name] = attr.Value
 	}
 }

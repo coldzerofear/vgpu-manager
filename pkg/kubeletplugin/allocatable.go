@@ -162,7 +162,7 @@ func (d *AllocatableDevice) GetGPUPCIBusID() string {
 	case GpuDeviceType:
 		return d.Gpu.PciBusID
 	case MigStaticDeviceType:
-		return d.MigStatic.pciBusID
+		return d.MigStatic.Parent.PciBusID
 	case MigDynamicDeviceType:
 		return d.MigDynamic.Parent.PciBusID
 	case VfioDeviceType:
@@ -185,6 +185,26 @@ func (d AllocatableDevices) GetVGPUs() []*AllocatableDevice {
 	var devices []*AllocatableDevice
 	for _, device := range d {
 		if device.Type() == VGpuDeviceType {
+			devices = append(devices, device)
+		}
+	}
+	return devices
+}
+
+func (d AllocatableDevices) GetMigStaticDevices() []*AllocatableDevice {
+	var devices []*AllocatableDevice
+	for _, device := range d {
+		if device.Type() == MigStaticDeviceType {
+			devices = append(devices, device)
+		}
+	}
+	return devices
+}
+
+func (d AllocatableDevices) GetMigDynamicDevices() []*AllocatableDevice {
+	var devices []*AllocatableDevice
+	for _, device := range d {
+		if device.Type() == MigDynamicDeviceType {
 			devices = append(devices, device)
 		}
 	}
