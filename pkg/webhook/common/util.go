@@ -21,12 +21,17 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func FindPodResourceClaim(pod *corev1.Pod, podClaimName string) (*corev1.PodResourceClaim, error) {
@@ -149,4 +154,81 @@ func DeviceRequestLooksLikeVGPU(ctx context.Context, reader resourcereader.Resou
 	default:
 		return false
 	}
+}
+
+// ConvertDRARequest Convert pod's extended resource requests into DRA requests
+func ConvertDRARequest(ctx context.Context, metadata *metav1.ObjectMeta, podSpec *corev1.PodSpec, resourceName string, options *options.Options) error {
+	logger := log.FromContext(ctx)
+
+	resourceInfos := make(ResourceInfos, 0)
+	convertContainerRequest := func(podSpec *corev1.PodSpec, container *corev1.Container) {
+		if !util.IsVGPURequiredContainer(container) {
+			return
+		}
+
+		var resourceClaimName, resourceRequestName string
+		// Convert container resource requests into DRA requests.
+		if options.CombinedResourceClaim {
+			resourceClaimName = util.GenerateK8sSafeResourceName(resourceName)
+			resourceRequestName = util.GenerateK8sSafeResourceName(container.Name, kubeletplugin.VGpuDeviceType)
+			resourceClaim := corev1.ResourceClaim{Name: resourceClaimName, Request: resourceRequestName}
+			container.Resources.Claims = append(container.Resources.Claims, resourceClaim)
+			// Due to compressing all container resource requests into one resource claim, only the first resource claim is inserted.
+			if len(resourceInfos) == 1 {
+				podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
+					Name:              resourceClaimName,
+					ResourceClaimName: &resourceClaimName,
+				})
+			}
+		} else {
+			resourceClaimName = util.GenerateK8sSafeResourceName(resourceName, container.Name)
+			resourceRequestName = kubeletplugin.VGpuDeviceType
+			resourceClaim := corev1.ResourceClaim{Name: resourceClaimName, Request: resourceRequestName}
+			container.Resources.Claims = append(container.Resources.Claims, resourceClaim)
+			podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
+				Name:              resourceClaimName,
+				ResourceClaimName: &resourceClaimName,
+			})
+		}
+
+		deviceCount := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
+		deviceCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
+		deviceMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
+
+		resourceInfo := ResourceInfo{
+			Name:        container.Name,
+			ClaimName:   resourceClaimName,
+			RequestName: resourceRequestName,
+			Resources: map[corev1.ResourceName]resource.Quantity{
+				corev1.ResourceName(util.VGPUNumberResourceName): *resource.NewQuantity(deviceCount, resource.DecimalSI),
+				corev1.ResourceName(util.VGPUCoreResourceName):   *resource.NewQuantity(deviceCores, resource.DecimalSI),
+				corev1.ResourceName(util.VGPUMemoryResourceName): *resource.NewQuantity(deviceMemory, resource.DecimalSI),
+			},
+		}
+
+		util.DelResourceOfContainer(container, util.VGPUNumberResourceName)
+		util.DelResourceOfContainer(container, util.VGPUCoreResourceName)
+		util.DelResourceOfContainer(container, util.VGPUMemoryResourceName)
+		resourceInfos = append(resourceInfos, resourceInfo)
+
+		logger.V(2).Info("Successfully convert vGPU requests to resourceClaims", "container",
+			container.Name, "vGPUNumber", deviceCount, "vGPUCores", deviceCores, "vGPUMemory", deviceMemory)
+	}
+	for i := range podSpec.InitContainers {
+		convertContainerRequest(podSpec, &podSpec.InitContainers[i])
+	}
+	for i := range podSpec.Containers {
+		convertContainerRequest(podSpec, &podSpec.Containers[i])
+	}
+
+	if len(resourceInfos) > 0 {
+		encode, err := resourceInfos.Encode()
+		if err != nil {
+			logger.Error(err, "Encoding original resource information failed")
+			return apierrors.NewBadRequest(fmt.Sprintf("Encoding original resource information failed: %v", err))
+		}
+		util.InsertAnnotation(metadata, util.DRAOriResAnnotation, encode)
+		logger.Info("Successfully convert all vGPU requests to resourceClaims")
+	}
+	return nil
 }

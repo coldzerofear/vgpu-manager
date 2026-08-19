@@ -26,7 +26,6 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
@@ -240,113 +239,31 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 		fixSpecifiedNodeName(pod, logger)
 	}
 
-	if h.options.DefaultConvertToDRA {
+	if h.options.DefaultConvertToDRA && isVGPUPod {
 		reschedule.CleanupDRAMetadata(pod)
-		return h.convertDRARequest(ctx, pod)
+		resourceName := pod.Name
+		if pod.GenerateName != "" {
+			resourceName = fmt.Sprintf("%s-%s", strings.TrimSuffix(pod.GenerateName, "-"), rand.String(5))
+		} else if h.options.CombinedResourceClaim {
+			resourceName = fmt.Sprintf("%s-%s", pod.Name, rand.String(5))
+		}
+		return common.ConvertDRARequest(ctx, &pod.ObjectMeta, &pod.Spec, resourceName, h.options)
 	}
 	return nil
 }
 
-// convertDRARequest Convert pod's extended resource requests into DRA requests
-func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) error {
+func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *corev1.Pod, infos common.ResourceInfos) error {
 	logger := log.FromContext(ctx)
-	resourceInfos := make(common.ResourceInfos, 0)
-	resourceName := pod.Name
-	if pod.GenerateName != "" {
-		resourceName = fmt.Sprintf("%s%s", pod.GenerateName, rand.String(5))
-	} else if h.options.CombinedResourceClaim {
-		resourceName = fmt.Sprintf("%s-%s", pod.Name, rand.String(5))
-	}
 
-	convertContainerRequest := func(pod *corev1.Pod, container *corev1.Container) {
-		if !util.IsVGPURequiredContainer(container) {
-			return
-		}
-
-		deviceCount := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
-		deviceCores := util.GetResourceOfContainer(container, util.VGPUCoreResourceName)
-		deviceMemory := util.GetResourceOfContainer(container, util.VGPUMemoryResourceName)
-
-		resourceInfo := common.ResourceInfo{
-			Name: container.Name,
-			Resources: map[corev1.ResourceName]resource.Quantity{
-				corev1.ResourceName(util.VGPUNumberResourceName): *resource.NewQuantity(deviceCount, resource.DecimalSI),
-				corev1.ResourceName(util.VGPUCoreResourceName):   *resource.NewQuantity(deviceCores, resource.DecimalSI),
-				corev1.ResourceName(util.VGPUMemoryResourceName): *resource.NewQuantity(deviceMemory, resource.DecimalSI),
-			},
-		}
-
-		resourceInfos = append(resourceInfos, resourceInfo)
-		util.DelResourceOfContainer(container, util.VGPUNumberResourceName)
-		util.DelResourceOfContainer(container, util.VGPUCoreResourceName)
-		util.DelResourceOfContainer(container, util.VGPUMemoryResourceName)
-
-		// Convert container resource requests into DRA requests.
-		if h.options.CombinedResourceClaim {
-			resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
-			resourceRequestName := util.GenerateK8sSafeResourceName(container.Name, kubeletplugin.VGpuDeviceType)
-			container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{
-				Name:    resourceClaimName,
-				Request: resourceRequestName,
-			})
-			// Due to compressing all container resource requests into one resource claim, only the first resource claim is inserted.
-			if len(resourceInfos) == 1 {
-				pod.Spec.ResourceClaims = append(pod.Spec.ResourceClaims, corev1.PodResourceClaim{
-					Name:              resourceClaimName,
-					ResourceClaimName: &resourceClaimName,
-				})
-			}
-		} else {
-			resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
-			container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{
-				Name: resourceClaimName,
-			})
-			pod.Spec.ResourceClaims = append(pod.Spec.ResourceClaims, corev1.PodResourceClaim{
-				Name:              resourceClaimName,
-				ResourceClaimName: &resourceClaimName,
-			})
-		}
-		logger.V(2).Info("Successfully convert vGPU requests to resourceClaims", "container", container.Name,
-			"vGPUNumber", deviceCount, "vGPUCores", deviceCores, "vGPUMemory", deviceMemory)
-	}
-	for i := range pod.Spec.InitContainers {
-		convertContainerRequest(pod, &pod.Spec.InitContainers[i])
-	}
-	for i := range pod.Spec.Containers {
-		convertContainerRequest(pod, &pod.Spec.Containers[i])
-	}
-
-	if len(resourceInfos) > 0 {
-		encode, err := resourceInfos.Encode()
-		if err != nil {
-			logger.Error(err, "Encoding original resource information failed")
-			return apierrors.NewBadRequest(fmt.Sprintf("Encoding original resource information failed: %v", err))
-		}
-		if pod.GenerateName != "" || h.options.CombinedResourceClaim {
-			util.InsertAnnotation(pod, util.DRAGenNameAnnotation, resourceName)
-		}
-		util.InsertAnnotation(pod, util.DRAOriResAnnotation, encode)
-		logger.Info("Successfully convert all vGPU requests to resourceClaims")
-	}
-	return nil
-}
-
-func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *corev1.Pod, _ common.ResourceInfos) error {
-	logger := log.FromContext(ctx)
-	resourceName, _ := util.HasAnnotation(pod, util.DRAGenNameAnnotation)
-
-	resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
+	resourceClaimName := infos[0].ClaimName
 	if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 		return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 	}) {
 		logger.V(1).Info("ResourceClaimName not found, skip ResourceClaim update",
 			"resourceClaimName", resourceClaimName)
 	} else {
-		resourceClaimKey := types.NamespacedName{
-			Name:      resourceClaimName,
-			Namespace: pod.Namespace,
-		}
-		if err := h.updateResourceOwner(ctx, pod, resourceClaimKey); err != nil {
+		claimKey := types.NamespacedName{Name: resourceClaimName, Namespace: pod.Namespace}
+		if err := h.updateResourceOwner(ctx, pod, claimKey); err != nil {
 			return err
 		}
 	}
@@ -358,14 +275,10 @@ func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *cor
 
 func (h *mutateHandle) updateMultiResourceClaims(ctx context.Context, pod *corev1.Pod, infos common.ResourceInfos) error {
 	logger := log.FromContext(ctx)
-	resourceName := pod.Name
-	if pod.GenerateName != "" {
-		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
-	}
 
 	updatedInfos := make(common.ResourceInfos, 0, len(infos))
 	for i, info := range infos {
-		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, info.Name)
+		resourceClaimName := info.ClaimName
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 		}) {
@@ -373,11 +286,8 @@ func (h *mutateHandle) updateMultiResourceClaims(ctx context.Context, pod *corev
 				"container", info.Name, "resourceClaimName", resourceClaimName)
 			continue
 		}
-		resourceClaimKey := types.NamespacedName{
-			Name:      resourceClaimName,
-			Namespace: pod.Namespace,
-		}
-		if err := h.updateResourceOwner(ctx, pod, resourceClaimKey); err != nil {
+		claimKey := types.NamespacedName{Name: resourceClaimName, Namespace: pod.Namespace}
+		if err := h.updateResourceOwner(ctx, pod, claimKey); err != nil {
 			updatedInfos = append(updatedInfos, infos[i])
 		}
 	}
@@ -406,14 +316,11 @@ func (h *mutateHandle) updateResourceClaims(ctx context.Context, pod *corev1.Pod
 	if err := infos.Decode(val); err != nil {
 		logger.V(2).Error(err, "Decoding original resource information failed")
 		return nil
-	}
-
-	// fast return
-	if len(infos) == 0 {
+	} else if len(infos) == 0 { // fast return
 		return nil
 	}
 
-	if h.options.CombinedResourceClaim {
+	if infos.CombinedResourceClaim() {
 		if err := h.updateCombinedResourceClaim(ctx, pod, infos); err != nil {
 			return err
 		}
@@ -433,10 +340,10 @@ func (h *mutateHandle) MutateUpdate(ctx context.Context, pod *corev1.Pod) error 
 	return nil
 }
 
-func (h *mutateHandle) updateResourceOwner(ctx context.Context, owner metav1.Object, resourceKey types.NamespacedName) error {
-	logger := log.FromContext(ctx).WithValues("ResourceClaim", resourceKey.String())
+func (h *mutateHandle) updateResourceOwner(ctx context.Context, owner metav1.Object, claimKey types.NamespacedName) error {
+	logger := log.FromContext(ctx).WithValues("ResourceClaim", claimKey.String())
 	claim := &resourceapi.ResourceClaim{}
-	if err := h.getResourceClaim(ctx, resourceKey, claim); err != nil {
+	if err := h.getResourceClaim(ctx, claimKey, claim); err != nil {
 		logger.Error(err, "get resourceClaim failed")
 		return client.IgnoreNotFound(err)
 	}

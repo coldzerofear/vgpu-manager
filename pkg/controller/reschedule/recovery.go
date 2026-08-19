@@ -158,7 +158,7 @@ var (
 		util.PodPredicateNodeAnnotation, util.PodPredicateTimeAnnotation,
 	}
 	removedDRAAnnotations = []string{
-		util.DRAOriResAnnotation, util.DRAGenNameAnnotation,
+		util.DRAOriResAnnotation,
 	}
 )
 

@@ -214,27 +214,11 @@ func (h *validateHandle) getConvertedContainerClaimsMap(pod *corev1.Pod) *resour
 	if err := infos.Decode(val); err != nil {
 		return cache
 	}
-	if len(infos) == 0 {
-		return cache
+
+	for _, info := range infos {
+		cache.Insert(info.Name, info.ClaimName, info.RequestName)
 	}
 
-	resourceName := pod.Name
-	if h.options.CombinedResourceClaim {
-		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
-		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
-		for _, resourceInfo := range infos {
-			resourceRequestName := util.GenerateK8sSafeResourceName(resourceInfo.Name, kubeletplugin.VGpuDeviceType)
-			cache.Insert(resourceInfo.Name, resourceClaimName, resourceRequestName)
-		}
-	} else {
-		if pod.GenerateName != "" {
-			resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
-		}
-		for _, resourceInfo := range infos {
-			resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, resourceInfo.Name)
-			cache.Insert(resourceInfo.Name, resourceClaimName, kubeletplugin.VGpuDeviceType)
-		}
-	}
 	return cache
 }
 
@@ -597,7 +581,7 @@ func (h *validateHandle) buildResourceClaim(pod *corev1.Pod, requests []resource
 	}
 }
 
-func buildDeviceRequest(pod *corev1.Pod, requestName, deviceClassName string, info common.ResourceInfo) resourceapi.DeviceRequest {
+func buildDeviceRequest(pod *corev1.Pod, deviceClassName string, info common.ResourceInfo) resourceapi.DeviceRequest {
 	var (
 		deviceCount     int64
 		capacityRequest = make(map[resourceapi.QualifiedName]resource.Quantity)
@@ -707,7 +691,7 @@ func buildDeviceRequest(pod *corev1.Pod, requestName, deviceClassName string, in
 	}
 
 	return resourceapi.DeviceRequest{
-		Name: requestName,
+		Name: info.RequestName,
 		Exactly: &resourceapi.ExactDeviceRequest{
 			DeviceClassName: deviceClassName,
 			AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
@@ -728,39 +712,23 @@ func (h *validateHandle) isVGPUSubRequest(ctx context.Context, req resourceapi.D
 	return common.SubRequestLooksLikeVGPU(ctx, h.reader, req, false, h.options.VGPUDeviceClassName)
 }
 
-func CheckResourceName(pod *corev1.Pod, resourceName string) error {
-	if resourceName == "" {
-		return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
-			field.Invalid(field.NewPath("metadata").Child("annotations").Child(util.DRAGenNameAnnotation),
-				resourceName, "generate name cannot be empty")})
-	}
-	return nil
-}
-
 func (h *validateHandle) createCombinedResourceClaim(ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos) error {
 	logger := log.FromContext(ctx)
 
-	resourceName, _ := util.HasAnnotation(pod, util.DRAGenNameAnnotation)
-	if err := CheckResourceName(pod, resourceName); err != nil {
-		return err
-	}
-
+	var resourceClaimName string
 	resourceRequests := make([]resourceapi.DeviceRequest, len(resourceInfos))
 	for i, info := range resourceInfos {
-		container, err := checkResourceInfo(pod, i, info)
-		if err != nil {
+		if _, err := checkResourceInfo(pod, i, info); err != nil {
 			logger.V(3).Error(err, "")
 			return err
 		}
-
-		resourceRequestName := util.GenerateK8sSafeResourceName(container.Name, kubeletplugin.VGpuDeviceType)
-		request := buildDeviceRequest(pod, resourceRequestName, h.options.VGPUDeviceClassName, info)
-		resourceRequests[i] = request
+		deviceRequest := buildDeviceRequest(pod, h.options.VGPUDeviceClassName, info)
+		resourceRequests[i] = deviceRequest
+		resourceClaimName = info.ClaimName
 	}
 
 	ownerPod := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
 	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
-	resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
 	resourceClaim := h.buildResourceClaim(pod, resourceRequests, resourceClaimName, ownerPod, createTimestamp)
 
 	if err := h.client.Create(ctx, resourceClaim); err != nil {
@@ -816,9 +784,8 @@ func checkResourceInfo(pod *corev1.Pod, infoIndex int, resourceInfo common.Resou
 		return container, nil
 	}
 	return nil, apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
-		field.Invalid(field.NewPath("metadata").Child("annotations").
-			Child(util.DRAOriResAnnotation).Index(infoIndex).Child("containerName"),
-			resourceInfo.Name, "container not found")})
+		field.Invalid(field.NewPath("metadata").Child("annotations").Child(util.DRAOriResAnnotation).
+			Index(infoIndex).Child("containerName"), resourceInfo.Name, "container not found")})
 }
 
 func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos) (err error) {
@@ -827,23 +794,13 @@ func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *cor
 	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
 	resourceClaimKeys := make([]types.NamespacedName, 0, len(resourceInfos))
 
-	resourceName := pod.Name
-	if pod.GenerateName != "" {
-		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
-		if err = CheckResourceName(pod, resourceName); err != nil {
-			return err
-		}
-	}
-
 	defer func() {
 		// Clean up the created resources when an error occurs,
 		// using timestamp label to prevent accidental deletion of resources during batch deletion.
 		if err != nil && len(resourceClaimKeys) > 0 {
 			if delErr := h.client.DeleteAllOf(
-				context.Background(),
-				&resourceapi.ResourceClaim{},
-				client.InNamespace(pod.Namespace),
-				client.MatchingLabels{
+				context.Background(), &resourceapi.ResourceClaim{},
+				client.InNamespace(pod.Namespace), client.MatchingLabels{
 					util.DRAOwnerPodLabel:   ownerPod,
 					util.DRACreateTimeLabel: createTimestamp,
 				},
@@ -854,75 +811,71 @@ func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *cor
 	}()
 
 	for i, info := range resourceInfos {
-		container, err := checkResourceInfo(pod, i, info)
-		if err != nil {
+		if _, err = checkResourceInfo(pod, i, info); err != nil {
 			logger.V(3).Error(err, "")
 			return err
 		}
 
-		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, container.Name)
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
-			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
+			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == info.ClaimName
 		}) {
 			err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
 				field.Invalid(field.NewPath("spec").Child("resourceClaims"),
-					pod.Spec.ResourceClaims, fmt.Sprintf("resource claim %s not found", resourceClaimName))})
+					pod.Spec.ResourceClaims, fmt.Sprintf("resource claim %s not found", info.ClaimName))})
 			logger.V(5).Error(err, "")
 			return err
 		}
 
 		// Create container resource claim
-		request := buildDeviceRequest(pod, kubeletplugin.VGpuDeviceType, h.options.VGPUDeviceClassName, info)
-		resourceClaim := h.buildResourceClaim(pod, []resourceapi.DeviceRequest{request}, resourceClaimName, ownerPod, createTimestamp)
+		request := buildDeviceRequest(pod, h.options.VGPUDeviceClassName, info)
+		resourceClaim := h.buildResourceClaim(pod, []resourceapi.DeviceRequest{request}, info.ClaimName, ownerPod, createTimestamp)
 		if err = h.client.Create(ctx, resourceClaim); err != nil {
-			logger.Error(err, "Failed to create vGPU resourceClaim", "container", container.Name)
+			logger.Error(err, "Failed to create vGPU resourceClaim", "container", info.Name)
 			return err
 		}
 		h.mutation(resourceClaim)
 		resourceClaimKeys = append(resourceClaimKeys, client.ObjectKeyFromObject(resourceClaim))
-		logger.V(2).Info("Successfully created resourceClaim", "resourceClaim",
-			klog.KObj(resourceClaim), "container", container.Name)
+		logger.V(2).Info("Successfully created resourceClaim",
+			"resourceClaim", klog.KObj(resourceClaim), "container", info.Name)
 	}
 
 	if len(resourceClaimKeys) > 0 {
 		logger.Info("Successfully created all vGPU resourceClaims", "resourceClaims", resourceClaimKeys)
 	}
+
 	return nil
 }
 
-func (h *validateHandle) createResourceClaims(ctx context.Context, pod *corev1.Pod) (err error) {
+func (h *validateHandle) createResourceClaims(ctx context.Context, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
 	val, ok := util.HasAnnotation(pod, util.DRAOriResAnnotation)
 	if !ok || len(val) == 0 {
 		return nil
-	}
-	if len(val) > util.PodAnnotationMaxLength {
-		err = apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
-			field.Invalid(field.NewPath("metadata").Child("annotations").Child(util.DRAOriResAnnotation),
-				field.OmitValueType{}, "recorded value is too long")})
+	} else if len(val) > util.PodAnnotationMaxLength {
+		err := apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+			field.Invalid(field.NewPath("metadata").Child("annotations").
+				Child(util.DRAOriResAnnotation), field.OmitValueType{}, "recorded value is too long")})
 		logger.V(5).Error(err, "")
 		return err
 	}
 	infos := common.ResourceInfos{}
-	if err = infos.Decode(val); err != nil {
+	if err := infos.Decode(val); err != nil {
 		logger.V(2).Error(err, "Decoding original resource information failed")
 		return apierrors.NewBadRequest(fmt.Sprintf("Decoding original resource information failed: %v", err))
-	}
-
-	// fast return
-	if len(infos) == 0 {
+	} else if len(infos) == 0 { // fast return
 		return nil
 	}
 
-	if h.options.CombinedResourceClaim {
-		if err = h.createCombinedResourceClaim(ctx, pod, infos); err != nil {
+	if infos.CombinedResourceClaim() {
+		if err := h.createCombinedResourceClaim(ctx, pod, infos); err != nil {
 			return err
 		}
 	} else {
-		if err = h.createMultiResourceClaims(ctx, pod, infos); err != nil {
+		if err := h.createMultiResourceClaims(ctx, pod, infos); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -1105,18 +1058,13 @@ func (h *validateHandle) deleteResourceClaims(ctx context.Context, pod *corev1.P
 	if err := infos.Decode(val); err != nil {
 		logger.V(2).Error(err, "Decoding original resource information failed")
 		return nil
-	}
-	// fast return
-	if len(infos) == 0 {
+	} else if len(infos) == 0 { // fast return
 		return nil
 	}
 
-	resourceName := pod.Name
-
-	// try delete CombinedResourceClaim
-	if h.options.CombinedResourceClaim {
-		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
-		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName)
+	if infos.CombinedResourceClaim() {
+		// try delete CombinedResourceClaim
+		resourceClaimName := infos[0].ClaimName
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 		}) {
@@ -1133,32 +1081,30 @@ func (h *validateHandle) deleteResourceClaims(ctx context.Context, pod *corev1.P
 				logger.Error(err, "Failed to delete ResourceClaim", "resourceClaim", klog.KObj(resourceClaim))
 			}
 		}
+	} else {
+		// try delete MultiResourceClaims
+		for _, info := range infos {
+			resourceClaimName := info.ClaimName
+			if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
+				return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
+			}) {
+				logger.V(1).Info("ResourceClaimName for container not found, skip ResourceClaim delete",
+					"container", info.Name, "resourceClaimName", resourceClaimName)
+				continue
+			}
+			resourceClaim := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceClaimName,
+					Namespace: pod.Namespace,
+				},
+			}
+			if err := h.client.Delete(ctx, resourceClaim); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "Failed to delete ResourceClaim", "resourceClaim", klog.KObj(resourceClaim))
+			}
+		}
+
 	}
 
-	if pod.GenerateName != "" {
-		resourceName, _ = util.HasAnnotation(pod, util.DRAGenNameAnnotation)
-	}
-
-	// try delete MultiResourceClaims
-	for _, info := range infos {
-		resourceClaimName := util.GenerateK8sSafeResourceName(resourceName, info.Name)
-		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
-			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
-		}) {
-			logger.V(1).Info("ResourceClaimName for container not found, skip ResourceClaim delete",
-				"container", info.Name, "resourceClaimName", resourceClaimName)
-			continue
-		}
-		resourceClaim := &resourceapi.ResourceClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      resourceClaimName,
-				Namespace: pod.Namespace,
-			},
-		}
-		if err := h.client.Delete(ctx, resourceClaim); err != nil && !apierrors.IsNotFound(err) {
-			logger.Error(err, "Failed to delete ResourceClaim", "resourceClaim", klog.KObj(resourceClaim))
-		}
-	}
 	return nil
 }
 

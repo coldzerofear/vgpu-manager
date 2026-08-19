@@ -26,8 +26,26 @@ import (
 type ResourceInfos []ResourceInfo
 
 type ResourceInfo struct {
-	Name      string                                    `json:"containerName"`
-	Resources map[corev1.ResourceName]resource.Quantity `json:"resources"`
+	Name        string                                    `json:"name"`        // containerName
+	ClaimName   string                                    `json:"claimName"`   // resourceClaimName
+	RequestName string                                    `json:"requestName"` // requestName
+	Resources   map[corev1.ResourceName]resource.Quantity `json:"resources"`
+}
+
+func (r ResourceInfos) CombinedResourceClaim() bool {
+	if len(r) == 0 {
+		return false
+	}
+	if len(r) == 1 {
+		return true
+	}
+	first := r[0].ClaimName
+	for _, info := range r {
+		if first != info.ClaimName {
+			return false
+		}
+	}
+	return true
 }
 
 func (r ResourceInfos) Encode() (string, error) {
