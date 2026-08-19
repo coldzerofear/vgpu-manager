@@ -173,22 +173,11 @@ func ConvertDRARequest(ctx context.Context, metadata *metav1.ObjectMeta, podSpec
 			resourceRequestName = util.GenerateK8sSafeResourceName(container.Name, kubeletplugin.VGpuDeviceType)
 			resourceClaim := corev1.ResourceClaim{Name: resourceClaimName, Request: resourceRequestName}
 			container.Resources.Claims = append(container.Resources.Claims, resourceClaim)
-			// Due to compressing all container resource requests into one resource claim, only the first resource claim is inserted.
-			if len(resourceInfos) == 1 {
-				podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
-					Name:              resourceClaimName,
-					ResourceClaimName: &resourceClaimName,
-				})
-			}
 		} else {
 			resourceClaimName = util.GenerateK8sSafeResourceName(resourceName, container.Name)
 			resourceRequestName = kubeletplugin.VGpuDeviceType
 			resourceClaim := corev1.ResourceClaim{Name: resourceClaimName, Request: resourceRequestName}
 			container.Resources.Claims = append(container.Resources.Claims, resourceClaim)
-			podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
-				Name:              resourceClaimName,
-				ResourceClaimName: &resourceClaimName,
-			})
 		}
 
 		deviceCount := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
@@ -211,6 +200,13 @@ func ConvertDRARequest(ctx context.Context, metadata *metav1.ObjectMeta, podSpec
 		util.DelResourceOfContainer(container, util.VGPUMemoryResourceName)
 		resourceInfos = append(resourceInfos, resourceInfo)
 
+		// Due to compressing all container resource requests into one resource claim, only the first resource claim is inserted.
+		if !(options.CombinedResourceClaim && len(resourceInfos) == 1) {
+			podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
+				Name:              resourceClaimName,
+				ResourceClaimName: &resourceClaimName,
+			})
+		}
 		logger.V(2).Info("Successfully convert vGPU requests to resourceClaims", "container",
 			container.Name, "vGPUNumber", deviceCount, "vGPUCores", deviceCores, "vGPUMemory", deviceMemory)
 	}

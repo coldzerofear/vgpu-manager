@@ -46,9 +46,6 @@ func NewMutateWebhook(
 	_ resourcereader.ResourceAPIReader,
 	_ events.EventRecorderLogger,
 ) (http.Handler, error) {
-	if !options.DefaultConvertToDRA {
-		return nil, nil
-	}
 	return &admission.Webhook{
 		Handler: &mutateHandle{
 			decoder: admission.NewDecoder(client.Scheme()),
@@ -68,7 +65,6 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, job *vcv1alpha1.Job) er
 	for i := range job.Spec.Tasks {
 		task := &job.Spec.Tasks[i]
 		logger = logger.WithValues("taskName", task.Name)
-		ctx = log.IntoContext(ctx, logger)
 
 		resourceName := job.Name
 		if job.GenerateName != "" {
@@ -78,7 +74,7 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, job *vcv1alpha1.Job) er
 		}
 
 		if err := common.ConvertDRARequest(
-			ctx,
+			log.IntoContext(ctx, logger),
 			&task.Template.ObjectMeta,
 			&task.Template.Spec,
 			resourceName, h.options); err != nil {
