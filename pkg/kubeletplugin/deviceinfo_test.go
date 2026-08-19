@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/utils/ptr"
@@ -28,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestGpuInfo(numaNode *int) *GpuDeviceInfo {
+func newTestGpuInfo(numaNodeAttr *deviceattribute.DeviceAttribute) *GpuDeviceInfo {
 	return &GpuDeviceInfo{
 		GpuInfo: &nvidia.GpuInfo{
 			UUID:                  "GPU-test",
@@ -41,16 +40,25 @@ func newTestGpuInfo(numaNode *int) *GpuDeviceInfo {
 				DriverVersion:     "580.0.0",
 				CudaDriverVersion: 13000,
 			},
-			NumaNodeAttr: &deviceattribute.DeviceAttribute{
-				Name: nvidia.StandardDeviceAttributeNumaNode,
-				Value: resourceapi.DeviceAttribute{IntValue: func(n *int) *int64 {
-					if n == nil {
-						return nil
-					}
-					node := int64(*n)
-					return &node
-				}(numaNode)},
-			},
+			NumaNodeAttr: numaNodeAttr,
+		},
+	}
+}
+
+func newScalarNumaNodeAttribute(numaNode int64) *deviceattribute.DeviceAttribute {
+	return &deviceattribute.DeviceAttribute{
+		Name: deviceattribute.StandardDeviceAttributeNUMANode,
+		Value: resourceapi.DeviceAttribute{
+			IntValue: ptr.To(numaNode),
+		},
+	}
+}
+
+func newListNumaNodeAttribute(numaNodes ...int64) *deviceattribute.DeviceAttribute {
+	return &deviceattribute.DeviceAttribute{
+		Name: deviceattribute.StandardDeviceAttributeNUMANode,
+		Value: resourceapi.DeviceAttribute{
+			IntValues: numaNodes,
 		},
 	}
 }
@@ -58,7 +66,7 @@ func newTestGpuInfo(numaNode *int) *GpuDeviceInfo {
 func requireNumaNodeAttribute(t *testing.T, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, expected int64) {
 	t.Helper()
 
-	attr, ok := attrs[nvidia.StandardDeviceAttributeNumaNode]
+	attr, ok := attrs[deviceattribute.StandardDeviceAttributeNUMANode]
 	require.True(t, ok)
 	require.NotNil(t, attr.IntValue)
 	require.Equal(t, expected, *attr.IntValue)
@@ -67,51 +75,38 @@ func requireNumaNodeAttribute(t *testing.T, attrs map[resourceapi.QualifiedName]
 func requireNumaNodeListAttribute(t *testing.T, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, expected []int64) {
 	t.Helper()
 
-	attr, ok := attrs[nvidia.StandardDeviceAttributeNumaNode]
+	attr, ok := attrs[deviceattribute.StandardDeviceAttributeNUMANode]
 	require.True(t, ok)
 	require.Nil(t, attr.IntValue)
 	require.Equal(t, expected, attr.IntValues)
 }
 
 func TestGpuInfoAttributesIncludeStandardNumaNode(t *testing.T) {
-	gpu := newTestGpuInfo(ptr.To(1))
+	gpu := newTestGpuInfo(newScalarNumaNodeAttribute(1))
 
 	requireNumaNodeAttribute(t, gpu.Attributes(), 1)
 }
 
-func TestGpuInfoAttributesIncludeStandardNumaNodeListWhenEnabled(t *testing.T) {
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-		string(featuregates.DRAListTypeAttributes): true,
-	}))
-	defer func() {
-		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-			string(featuregates.DRAListTypeAttributes): false,
-		}))
-	}()
+func TestGpuInfoAttributesIncludeStandardNumaNodeList(t *testing.T) {
+	gpu := newTestGpuInfo(newListNumaNodeAttribute(1, 2))
 
-	gpu := newTestGpuInfo(ptr.To(1))
-
-	requireNumaNodeListAttribute(t, gpu.Attributes(), []int64{1})
+	requireNumaNodeListAttribute(t, gpu.Attributes(), []int64{1, 2})
 }
 
 func TestCommonMigAttributesIncludeStandardNumaNode(t *testing.T) {
-	parent := newTestGpuInfo(ptr.To(2))
+	parent := newTestGpuInfo(newScalarNumaNodeAttribute(2))
 
 	requireNumaNodeAttribute(t, CommonAttributesMig(parent.GpuInfo, "1g.10gb"), 2)
 }
 
 func TestVfioDeviceIncludesStandardNumaNode(t *testing.T) {
 	vfio := &VfioDeviceInfo{
-		UUID:        "vfio-test",
-		deviceID:    "0x1234",
-		vendorID:    "0x10de",
-		index:       0,
-		productName: "NVIDIA Test GPU",
-		numaNode:    3,
-		numaNodeAttr: &deviceattribute.DeviceAttribute{
-			Name:  nvidia.StandardDeviceAttributeNumaNode,
-			Value: resourceapi.DeviceAttribute{IntValue: ptr.To(int64(3))},
-		},
+		UUID:                   "vfio-test",
+		deviceID:               "0x1234",
+		vendorID:               "0x10de",
+		index:                  0,
+		productName:            "NVIDIA Test GPU",
+		numaNodeAttr:           newScalarNumaNodeAttribute(3),
 		addressableMemoryBytes: 1024,
 	}
 

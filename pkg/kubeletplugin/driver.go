@@ -37,12 +37,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	coreclientset "k8s.io/client-go/kubernetes"
 	kcache "k8s.io/client-go/tools/cache"
 	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
+	drametadatav1beta1 "k8s.io/dynamic-resource-allocation/api/metadata/v1beta1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
@@ -157,8 +159,10 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
 	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
 	if featuregates.Enabled(featuregates.DeviceMetadata) {
-		opts = append(opts, kubeletplugin.EnableDeviceMetadata(true))
-		opts = append(opts, kubeletplugin.MetadataVersions(drametadatav1alpha1.SchemeGroupVersion))
+		opts = append(opts, kubeletplugin.EnableDeviceMetadata(true, []schema.GroupVersion{
+			drametadatav1beta1.SchemeGroupVersion,
+			drametadatav1alpha1.SchemeGroupVersion,
+		}))
 	}
 	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
@@ -453,6 +457,10 @@ func (d *driver) HandleError(ctx context.Context, err error, msg string) {
 	// For now we just follow the advice documented in the DRAPlugin API docs.
 	// See: https://pkg.go.dev/k8s.io/apimachinery/pkg/util/runtime#HandleErrorWithContext
 	runtime.HandleErrorWithContext(ctx, err, msg)
+}
+
+func (d *driver) WatchHealthStatus(context.Context, chan<- kubeletplugin.DeviceHealthReport) error {
+	return kubeletplugin.ErrHealthNotSupported
 }
 
 func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {

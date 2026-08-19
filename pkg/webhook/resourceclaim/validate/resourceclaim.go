@@ -415,6 +415,8 @@ func (rw *validateHandle) admitResourceClaimParameters(ctx context.Context, req 
 			configInterface = castConfig
 		case *nvapi.MigDeviceConfig:
 			configInterface = castConfig
+		case *nvapi.VfioDeviceConfig:
+			configInterface = castConfig
 		case *nvapi.ComputeDomainChannelConfig:
 			configInterface = castConfig
 		case *nvapi.ComputeDomainDaemonConfig:

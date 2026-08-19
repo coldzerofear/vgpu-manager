@@ -122,3 +122,91 @@ func TestFindFile(t *testing.T) {
 		})
 	}
 }
+
+func TestFindFileFollowsSymlink(t *testing.T) {
+	const name = "libnvidia-ml.so.1"
+
+	t.Run("symlink to a regular file is resolved", func(t *testing.T) {
+		testRoot := t.TempDir()
+		target := filepath.Join(testRoot, "opt", name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+		require.NoError(t, os.WriteFile(target, []byte{}, 0o644))
+
+		linkDir := filepath.Join(testRoot, "usr", "lib64")
+		require.NoError(t, os.MkdirAll(linkDir, 0o755))
+		require.NoError(t, os.Symlink(target, filepath.Join(linkDir, name)))
+
+		found, err := RootPath(testRoot).findFile(name, "usr/lib64")
+		require.NoError(t, err)
+		want, err := filepath.EvalSymlinks(target)
+		require.NoError(t, err)
+		require.Equal(t, want, found)
+	})
+
+	t.Run("symlink to a directory is rejected", func(t *testing.T) {
+		testRoot := t.TempDir()
+		targetDir := filepath.Join(testRoot, "opt", name)
+		require.NoError(t, os.MkdirAll(targetDir, 0o755))
+
+		linkDir := filepath.Join(testRoot, "usr", "lib64")
+		require.NoError(t, os.MkdirAll(linkDir, 0o755))
+		require.NoError(t, os.Symlink(targetDir, filepath.Join(linkDir, name)))
+
+		_, err := RootPath(testRoot).findFile(name, "usr/lib64")
+		require.Error(t, err)
+	})
+
+	t.Run("dangling symlink is rejected", func(t *testing.T) {
+		testRoot := t.TempDir()
+		linkDir := filepath.Join(testRoot, "usr", "lib64")
+		require.NoError(t, os.MkdirAll(linkDir, 0o755))
+		require.NoError(t, os.Symlink(filepath.Join(testRoot, "missing.so"), filepath.Join(linkDir, name)))
+
+		_, err := RootPath(testRoot).findFile(name, "usr/lib64")
+		require.Error(t, err)
+	})
+}
+
+func TestRootGetDevRoot(t *testing.T) {
+	withDev := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(withDev, "dev"), 0o755))
+	require.Equal(t, withDev, RootPath(withDev).GetDevRoot())
+
+	require.Equal(t, "/", RootPath(t.TempDir()).GetDevRoot())
+
+	devIsFile := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(devIsFile, "dev"), []byte{}, 0o644))
+	require.Equal(t, "/", RootPath(devIsFile).GetDevRoot())
+}
+
+func TestRootGetDriverAndBinaryPaths(t *testing.T) {
+	testRoot := t.TempDir()
+	writeFile := func(rel string) string {
+		p := filepath.Join(testRoot, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte{}, 0o644))
+		want, err := filepath.EvalSymlinks(p)
+		require.NoError(t, err)
+		return want
+	}
+	wantNVML := writeFile("usr/lib64/libnvidia-ml.so.1")
+	wantFM := writeFile("usr/lib64/libnvfm.so")
+	wantSMI := writeFile("usr/bin/nvidia-smi")
+
+	r := RootPath(testRoot)
+
+	got, err := r.GetDriverLibraryPath()
+	require.NoError(t, err)
+	require.Equal(t, wantNVML, got)
+
+	got, err = r.GetFMLibraryPath()
+	require.NoError(t, err)
+	require.Equal(t, wantFM, got)
+
+	got, err = r.getNvidiaSMIPath()
+	require.NoError(t, err)
+	require.Equal(t, wantSMI, got)
+
+	_, err = RootPath(t.TempDir()).GetDriverLibraryPath()
+	require.Error(t, err)
+}

@@ -297,6 +297,11 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 }
 
 func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceClaim) ([]kubeletplugin.Device, error) {
+
+	if err := s.validateAdminAccessRequest(claim); err != nil {
+		return nil, err
+	}
+
 	tplock0 := time.Now()
 	s.Lock()
 	defer s.Unlock()
@@ -358,8 +363,8 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	// optimized into filling the gaps).
 	if exists && preparedClaim.CheckpointState == ClaimCheckpointStatePrepareStarted {
 		klog.V(4).Infof("Claim %s already in PrepareStarted state: attempt rollback before new prepare", ResourceClaimToString(claim))
-		if err := s.unpreparePartiallyPrepairedClaim(ctx, claimUID, preparedClaim, checkpoint); err != nil {
-			return nil, fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", PreparedClaimToString(&preparedClaim, claimUID), err)
+		if err := s.rollbackPartiallyPreparedClaim(ctx, claimUID, preparedClaim, checkpoint); err != nil {
+			return nil, fmt.Errorf("rollback failed for partially prepared claim %s failed: %w", PreparedClaimToString(&preparedClaim, claimUID), err)
 		}
 	}
 
@@ -532,7 +537,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 
 	switch pc.CheckpointState {
 	case ClaimCheckpointStatePrepareStarted:
-		if err := s.unpreparePartiallyPrepairedClaim(ctx, claimUID, pc, checkpoint); err != nil {
+		if err := s.unpreparePartiallyPreparedClaim(ctx, claimUID, pc, checkpoint); err != nil {
 			return fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", claimRef.String(), err)
 		}
 	case ClaimCheckpointStatePrepareCompleted:
@@ -605,6 +610,108 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	return nil
 }
 
+// Rollback previously partially prepared claim.
+//
+// This is called when a previous Prepare() attempt was partially performed and
+// failed. We rollback the partially prepared claim before re-attempting the
+// prepare workflow.
+//
+// Note: We do not attempt rollback of VFIO devices during Prepare() as its
+// device configuration is idempotent.
+func (s *DeviceState) rollbackPartiallyPreparedClaim(ctx context.Context, cuid string, pc PreparedClaim, checkpoint *Checkpoint) error {
+	// Attempt rollback of MIG devices if DynamicMIG is enabled.
+	if featuregates.Enabled(featuregates.DynamicMIG) {
+		allocDevsForClaim := s.getAllocatableDevicesForClaim(cuid, pc)
+		migDevices := allocDevsForClaim.GetMigDynamicDevices()
+		if len(migDevices) > 0 {
+			klog.V(2).Infof("unprepare: MIG rollback for partially prepared claim %s (devices: %d)", PreparedClaimToString(&pc, cuid), len(migDevices))
+
+			err := s.rollbackPartiallyPreparedMIGDevices(ctx, cuid, pc, checkpoint)
+			if err != nil {
+				return fmt.Errorf("rollback partially prepared MIG devices failed: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// Unprepare previously partially prepared claim.
+//
+// This is called during Unprepare() for a claim that is known to be stale (not in the API
+// server or terminating). Here, the `checkpoint` data is fresh enough; there is no other
+// that currently legitimately owns the device represented in `pc`. This usually happens
+// when the Prepare() call failed or did not finish and we want to clean up the
+// `PrepareStarted` claim.
+func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid string, pc PreparedClaim, checkpoint *Checkpoint) error {
+	allocDevsForClaim := s.getAllocatableDevicesForClaim(cuid, pc)
+
+	// Attempt rollback of MIG devices if DynamicMIG is enabled.
+	if featuregates.Enabled(featuregates.DynamicMIG) {
+		migDevices := allocDevsForClaim.GetMigDynamicDevices()
+		if len(migDevices) > 0 {
+			klog.V(2).Infof("unprepare: MIG rollback for partially prepared claim %s (devices: %d)", PreparedClaimToString(&pc, cuid), len(migDevices))
+
+			err := s.rollbackPartiallyPreparedMIGDevices(ctx, cuid, pc, checkpoint)
+			if err != nil {
+				return fmt.Errorf("rollback partially prepared MIG devices failed: %w", err)
+			}
+		}
+	}
+
+	// Attempt rollback of VFIO devices if PassthroughSupport is enabled.
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		vfioDevices := allocDevsForClaim.GetVfioDevices()
+		if len(vfioDevices) > 0 {
+			klog.V(2).Infof("unprepare: VFIO rollback for partially prepared claim %s (devices: %d)", PreparedClaimToString(&pc, cuid), len(vfioDevices))
+
+			err := s.rollbackPartiallyPreparedVFIODevices(ctx, vfioDevices)
+			if err != nil {
+				return fmt.Errorf("rollback partially prepared VFIO devices failed: %w", err)
+			}
+		}
+	}
+
+	// If FM partitioning is enabled, then deactivate the partition
+	// for the devices in the claim. At this point, the gpuInfo objects
+	// for all devices in the claim are expected to have been discovered.
+	// Note: This is only relevant for GPU/VFIO devices and the operation
+	// itself is idempotent so even if the partitions were never
+	// activated, its safe to call this function and it'll be a no-op.
+	if s.fabricManagerPartitioningEnabled() {
+		if err := s.deactivateFabricPartition(cuid, &pc, checkpoint); err != nil {
+			return fmt.Errorf("error deactivating fabric partition: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// getAllocatableDevicesForClaim returns the allocatable devices for a given
+// checkpointed claim.
+func (s *DeviceState) getAllocatableDevicesForClaim(claimUID string, pc PreparedClaim) AllocatableDevices {
+	allocDevsForClaim := make(AllocatableDevices)
+
+	if pc.Status.Allocation == nil {
+		return allocDevsForClaim
+	}
+
+	for _, r := range pc.Status.Allocation.Devices.Results {
+		if r.Driver != util.DRADriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device == nil {
+			// The allocatable may legitimately be absent, e.g. the sibling
+			// GPU was already rediscovered by a previous rollback attempt.
+			klog.V(4).Infof("Partial unprepare: allocatable not found for device %q (claim %s); skipping", r.Device, PreparedClaimToString(&pc, claimUID))
+			continue
+		}
+		allocDevsForClaim[r.Device] = device
+	}
+	return allocDevsForClaim
+}
+
 // Revert previous and potentially partial MIG device creation (not acknowledged
 // by transitioning the claim state to PrepareCompleted). Can we safely revert
 // that based on the information in checkpoint? As we didn't pull through with
@@ -639,69 +746,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 //
 // Construct a list of those claims that, according to the current snapshot,
 // have been properly prepared.
-//
-// This is called either for a claim that is known to be stale (not in the API
-// server) or for a claim that is not stale but that _we_ are currently
-// preparing. In both cases, the `checkpoint` data is fresh enough; there is no
-// other entity that currently legitimately owns the device represented in `pc`.
-func (s *DeviceState) unpreparePartiallyPrepairedClaim(ctx context.Context, cuid string, pc PreparedClaim, checkpoint *Checkpoint) error {
-	// Roll back VFIO passthrough side effects. A previous Prepare() attempt may
-	// have already bound one or more GPUs to vfio-pci. Unlike the completed
-	// path that operates on checkpointed PreparedDevices, a partially prepared
-	// claim has no PreparedDevices checkpointed yet, so we resolve the affected
-	// VFIO devices from the allocation results and mirror the completed-path
-	if featuregates.Enabled(featuregates.PassthroughSupport) && pc.Status.Allocation != nil {
-		var vfioDevices []*AllocatableDevice
-		for _, r := range pc.Status.Allocation.Devices.Results {
-			if r.Driver != util.DRADriverName {
-				continue
-			}
-			device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
-			if device == nil {
-				// The allocatable may legitimately be absent, e.g. the sibling
-				// GPU was already rediscovered by a previous rollback attempt.
-				klog.V(4).Infof("Partial VFIO rollback: allocatable not found for device %q (claim %s); skipping", r.Device, cuid)
-				continue
-			}
-			if device.Type() != VfioDeviceType {
-				continue
-			}
-			vfioDevices = append(vfioDevices, device)
-		}
-
-		if len(vfioDevices) > 0 {
-			klog.V(2).Infof("Partial VFIO rollback: unpreparing %d VFIO device(s) for partially prepared claim %s", len(vfioDevices), cuid)
-
-			// Mirror the completed-claim teardown ordering: first switch each
-			// GPU back to the nvidia driver, then rediscover so each VFIO
-			// device's parent GpuInfo is repopulated with fresh Fabric Manager
-			// info, and only then deactivate the FM partition.
-			for _, device := range vfioDevices {
-				info := device.Vfio
-				if err := s.vfioPciManager.Unconfigure(ctx, info); err != nil {
-					return fmt.Errorf("error unconfiguring vfio device %q: %w", info.CanonicalName(), err)
-				}
-			}
-
-			for _, device := range vfioDevices {
-				if err := s.discoverSiblingAllocatables(device); err != nil {
-					return fmt.Errorf("error discovering sibling allocatables for vfio device %q: %w", device.Vfio.CanonicalName(), err)
-				}
-			}
-		}
-	}
-	if s.fabricManagerPartitioningEnabled() {
-		if err := s.deactivateFabricPartition(cuid, &pc, checkpoint); err != nil {
-			return fmt.Errorf("error deactivating fabric partition: %w", err)
-		}
-	}
-
-	// For now, there's nothing to do when DynamicMIG is not enabled.
-	if !featuregates.Enabled(featuregates.DynamicMIG) {
-		klog.Infof("unprepare: no MIG rollback (DynamicMIG disabled) for partially prepared claim %s (devices: %v)", PreparedClaimToString(&pc, cuid), pc.Status.Allocation.Devices.Results)
-		return nil
-	}
-
+func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, claimUID string, pc PreparedClaim, checkpoint *Checkpoint) error {
 	// When DynamicMIG is enabled, try to identify an orphaned MIG device
 	// corresponding to `pc`. To that end, inspect which currently (completely)
 	// prepared claims use which devices.
@@ -726,6 +771,43 @@ func (s *DeviceState) unpreparePartiallyPrepairedClaim(ctx context.Context, cuid
 		klog.V(1).Infof("Device %s is a MIG device, DynamicMIG mode: deleteMigDevIfExistsAndNotUsedByCompletedClaim()", devname)
 		if err := s.deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms, devname, completedClaims); err != nil {
 			return fmt.Errorf("deleteMigDevIfExistsAndNotUsedByCompletedClaim failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Rollback VFIO passthrough side effects. A previous Prepare() attempt may
+// have already bound one or more GPUs to vfio-pci (or variant). Unlike the
+// PrepareCompleted state where we have checkpointed PreparedDevices, a
+// partially prepared claim has no PreparedDevices checkpointed yet, so we
+// retrieve the affected VFIO devices from the allocation results and mirror
+// the completed-path teardown.
+//
+// Note: For VFIO devices in this state, it may be possible that a driver
+// change operation has not completed during the past Prepare() call. In this
+// case, rollback will fail until the driver change operation is unclogged.
+func (s *DeviceState) rollbackPartiallyPreparedVFIODevices(ctx context.Context, vfioDevices []*AllocatableDevice) error {
+	if len(vfioDevices) == 0 {
+		return nil
+	}
+
+	for _, device := range vfioDevices {
+		if device.Type() != VfioDeviceType {
+			continue
+		}
+
+		info := device.Vfio
+		// Unconfigure() is idempotent and is expected to revert any
+		// changes from the past Configure() call.
+		if err := s.vfioPciManager.Unconfigure(ctx, info); err != nil {
+			return fmt.Errorf("error unconfiguring vfio device %q: %w", info.CanonicalName(), err)
+		}
+
+		// Rediscover all siblings of the VFIO device now that the GPU
+		// is back on the nvidia driver.
+		if err := s.discoverSiblingAllocatables(device); err != nil {
+			return fmt.Errorf("error discovering sibling allocatables for vfio device %q: %w", info.CanonicalName(), err)
 		}
 	}
 
@@ -872,6 +954,56 @@ func (s *DeviceState) deleteClaimFromCheckpoint(ctx context.Context, claimRef ku
 		return fmt.Errorf("unable to update checkpoint: %w", err)
 	}
 	klog.V(6).Infof("Deleted claim from checkpoint: %s", claimRef.String())
+	return nil
+}
+
+// validateAdminAccessRequest rejects admin-access requests that are incompatible
+// with how this driver treats admin access. Admin access is meant for host-side
+// monitoring/management of a full GPU, so it must not be combined with:
+//   - a non-full-GPU device (e.g. a VFIO passthrough or MIG device), or
+//   - any device configuration that applies to the admin-access request.
+func (s *DeviceState) validateAdminAccessRequest(claim *resourceapi.ResourceClaim) error {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+
+	// Reject admin access on any device that is not a full GPU.
+	adminRequests := make(map[string]struct{})
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != util.DRADriverName {
+			continue
+		}
+		if r.AdminAccess == nil || !*r.AdminAccess {
+			continue
+		}
+		adminRequests[r.Request] = struct{}{}
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device != nil && device.Type() != GpuDeviceType {
+			return fmt.Errorf("claim %s requests admin access on a non-full-GPU device, which is not supported", ResourceClaimToString(claim))
+		}
+	}
+
+	if len(adminRequests) == 0 {
+		return nil
+	}
+
+	// Reject admin access combined with any device configuration for this driver
+	// that applies to an admin-access request.
+	for _, cfg := range claim.Status.Allocation.Devices.Config {
+		if cfg.Opaque == nil || cfg.Opaque.Driver != util.DRADriverName {
+			continue
+		}
+		// An empty Requests list means the config applies to every request in the
+		// claim, including the admin-access ones.
+		if len(cfg.Requests) == 0 {
+			return fmt.Errorf("claim %s requests admin access with a device configuration, which is not supported", ResourceClaimToString(claim))
+		}
+		for _, req := range cfg.Requests {
+			if _, ok := adminRequests[req]; ok {
+				return fmt.Errorf("claim %s requests admin access with a device configuration, which is not supported", ResourceClaimToString(claim))
+			}
+		}
+	}
 	return nil
 }
 
@@ -1494,7 +1626,7 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 // Callers that include VFIO devices must first rebind those GPUs to the nvidia
 // driver and rediscover so each VFIO device's parent is repopulated.
 func (s *DeviceState) deactivateFabricPartition(claimUID string, pc *PreparedClaim, checkpoint *Checkpoint) error {
-	if !s.fabricManagerPartitioningEnabled() || pc.Status.Allocation == nil {
+	if !s.fabricManagerPartitioningEnabled() || pc.Status.Allocation == nil || isAdminAccess(pc.Status.Allocation.Devices.Results) {
 		return nil
 	}
 	gpus := s.gpuInfosFromPreparedClaim(pc.Status.Allocation.Devices.Results)
@@ -1554,6 +1686,10 @@ func (s *DeviceState) fabricManagerPartitioningEnabled() bool {
 // GPUs backing the claim's allocation results. The caller must ensure
 // fabricManagerPartitioningEnabled() is true and that the claim is allocated.
 func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) error {
+	if isAdminAccess(claim.Status.Allocation.Devices.Results) {
+		return nil
+	}
+
 	gpus := s.gpuInfosFromPreparedClaim(claim.Status.Allocation.Devices.Results)
 	if len(gpus) == 0 {
 		return nil
@@ -1912,10 +2048,33 @@ func isGpuUUIDInUseByOtherClaims(checkpoint *Checkpoint, claimUID string, gpuUUI
 		if otherClaim.CheckpointState != ClaimCheckpointStatePrepareCompleted {
 			continue
 		}
-		for _, u := range otherClaim.PreparedDevices.GpuUUIDs() {
-			if u == gpuUUID {
-				return true
+		for _, group := range otherClaim.PreparedDevices {
+			for _, dev := range group.Devices {
+				if dev.Gpu == nil || dev.Gpu.Info == nil || dev.Gpu.Device == nil {
+					continue
+				}
+				if preparedClaimDeviceHasAdminAccess(&otherClaim, dev.Gpu.Device.DeviceName) {
+					continue
+				}
+				if dev.Gpu.Info.UUID == gpuUUID {
+					return true
+				}
 			}
+		}
+	}
+	return false
+}
+
+func preparedClaimDeviceHasAdminAccess(claim *PreparedClaim, deviceName DeviceName) bool {
+	if claim == nil || claim.Status.Allocation == nil {
+		return false
+	}
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != util.DRADriverName || result.Device != deviceName {
+			continue
+		}
+		if result.AdminAccess != nil && *result.AdminAccess {
+			return true
 		}
 	}
 	return false
@@ -1995,6 +2154,18 @@ func (s *DeviceState) AddDeviceTaint(d *AllocatableDevice, taint *resourceapi.De
 func (s *DeviceState) IsMigCapable() bool {
 	for _, gpu := range s.nvdevlib.gpuInfosByUUID {
 		if gpu.MigCapable {
+			return true
+		}
+	}
+	return false
+}
+
+func isAdminAccess(results []resourceapi.DeviceRequestAllocationResult) bool {
+	for _, r := range results {
+		if r.Driver != util.DRADriverName {
+			continue
+		}
+		if r.AdminAccess != nil && *r.AdminAccess {
 			return true
 		}
 	}

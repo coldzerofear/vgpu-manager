@@ -29,7 +29,6 @@ import (
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
-	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/klog/v2"
 )
@@ -159,6 +158,7 @@ type DeviceLib struct {
 	pciInterface
 	DriverLibraryPath string
 	DevRoot           string
+	SysfsRoot         string
 	NvidiaSMIPath     string
 }
 
@@ -201,6 +201,10 @@ func NewDeviceLib(root RootPath) (*DeviceLib, error) {
 		nvinfo.WithNvmlLib(nvmllib),
 		nvinfo.WithDeviceLib(devicelib),
 	)
+	sysfsRoot := strings.TrimSpace(os.Getenv(sysfsRootEnvvar))
+	if sysfsRoot != "" {
+		klog.Infof("Using alternate sysfs root: %s", sysfsRoot)
+	}
 
 	d := DeviceLib{
 		devInterface:      devicelib,
@@ -209,6 +213,7 @@ func NewDeviceLib(root RootPath) (*DeviceLib, error) {
 		pciInterface:      nvpci.New(),
 		DriverLibraryPath: driverLibraryPath,
 		DevRoot:           root.GetDevRoot(),
+		SysfsRoot:         sysfsRoot,
 		NvidiaSMIPath:     nvidiaSMIPath,
 	}
 	return &d, nil
@@ -276,8 +281,6 @@ func (l DeviceLib) GetDriverVersion() (DriverVersion, error) {
 	driverVersion.CudaDriverVersion = CudaDriverVersion(cdv)
 	return driverVersion, nil
 }
-
-const StandardDeviceAttributeNumaNode resourceapi.QualifiedName = deviceattribute.StandardDeviceAttributePrefix + "numaNode"
 
 func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) {
 	minor, ret := device.GetMinorNumber()
@@ -354,7 +357,11 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	pciBusIDAttr = &attr
 
 	var pcieRootAttr *deviceattribute.DeviceAttribute
-	if attr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pciBusID); err == nil {
+	var machineModifiers []deviceattribute.MachineModifier
+	if l.SysfsRoot != "" {
+		machineModifiers = append(machineModifiers, deviceattribute.WithFSFromRoot(l.SysfsRoot))
+	}
+	if attr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(pciBusID, machineModifiers...); err == nil {
 		pcieRootAttr = &attr
 	} else {
 		klog.Warningf("error getting PCIe root for device %d, continuing without attribute: %v", index, err)
@@ -413,6 +420,8 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		}
 	}
 
+	numaNodeAttr := DiscoverNUMANodeAttribute(pciBusID)
+
 	gpuInfo := &GpuInfo{
 		UUID:                  uuid,
 		Minor:                 minor,
@@ -429,40 +438,12 @@ func (l DeviceLib) GetGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		MigProfiles:           migProfiles,
 		PciBusIDAttr:          pciBusIDAttr,
 		PcieRootAttr:          pcieRootAttr,
+		NumaNodeAttr:          numaNodeAttr,
 		DriverVersion:         driverVersion,
 		AddressingMode:        addressingMode,
 	}
 
-	numaNode, err := l.discoverNumaNode(device.GetNumaNodeId, gpuInfo.GetPciInfo().NumaNode)
-	if err != nil {
-		klog.Warningf("error getting NUMA node ID for device %d, continuing without NUMA node attribute: %v", index, err)
-	}
-
-	if numaNode != nil && *numaNode >= 0 {
-		numaNodeId := int64(*numaNode)
-		gpuInfo.NumaNodeAttr = &deviceattribute.DeviceAttribute{
-			Name:  StandardDeviceAttributeNumaNode,
-			Value: resourceapi.DeviceAttribute{IntValue: &numaNodeId},
-		}
-	}
-
 	return gpuInfo, nil
-}
-
-func (l DeviceLib) discoverNumaNode(getNVMLNumaNode func() (int, nvml.Return), getPcieNumaNode func() (int32, error)) (*int, error) {
-	if node, ret := getNVMLNumaNode(); ret == nvml.SUCCESS && node >= 0 {
-		return &node, nil
-	} else if ret != nvml.SUCCESS {
-		klog.V(4).Infof("NVML NUMA node ID unavailable for PCI bus ID, falling back to PCI sysfs: %v", ret)
-	}
-
-	numaNode, err := getPcieNumaNode()
-	if err != nil {
-		klog.Warningf("error getting PCI device for PCI bus ID, continuing without NUMA node attribute: %v", err)
-		return nil, err
-	}
-	node := int(numaNode)
-	return &node, nil
 }
 
 func (l DeviceLib) GetMigInfos(gpuInfo *GpuInfo) (map[string]*MigInfo, error) {
