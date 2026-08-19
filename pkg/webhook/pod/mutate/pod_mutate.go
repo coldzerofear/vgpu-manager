@@ -240,14 +240,66 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error 
 
 	if h.options.DefaultConvertToDRA && isVGPUPod {
 		reschedule.CleanupDRAMetadata(pod)
-		resourceName := pod.Name
-		if pod.GenerateName != "" {
-			resourceName = fmt.Sprintf("%s-%s", strings.TrimSuffix(pod.GenerateName, "-"),
-				common.GenerateRandomString(5))
-		} else if h.options.CombinedResourceClaim {
-			resourceName = fmt.Sprintf("%s-%s", pod.Name, common.GenerateRandomString(5))
+		return h.convertDRARequest(ctx, pod)
+	}
+	return nil
+}
+
+// convertDRARequest Convert pod's extended resource requests into DRA requests
+func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) error {
+	logger := log.FromContext(ctx)
+	resourceName := pod.Name
+	if pod.GenerateName != "" {
+		resourceName = fmt.Sprintf("%s-%s", strings.TrimSuffix(pod.GenerateName, "-"),
+			common.GenerateRandomString(5))
+	} else if h.options.CombinedResourceClaim {
+		resourceName = fmt.Sprintf("%s-%s", pod.Name, common.GenerateRandomString(5))
+	}
+
+	resourceInfos := make(common.ResourceInfos, 0)
+	for i := range pod.Spec.InitContainers {
+		info := common.ConvertDRAContainerRequest(ctx, resourceName, &pod.Spec.InitContainers[i], h.options)
+		if info != nil {
+			resourceInfos = append(resourceInfos, *info)
 		}
-		return common.ConvertDRARequest(ctx, &pod.ObjectMeta, &pod.Spec, resourceName, h.options)
+	}
+	for i := range pod.Spec.Containers {
+		info := common.ConvertDRAContainerRequest(ctx, resourceName, &pod.Spec.Containers[i], h.options)
+		if info != nil {
+			resourceInfos = append(resourceInfos, *info)
+		}
+	}
+
+	// Due to compressing all container resource requests into one resource claim, only the first resource claim is inserted.
+	if resourceInfos.CombinedResourceClaim() {
+		pod.Spec.ResourceClaims = append(pod.Spec.ResourceClaims, corev1.PodResourceClaim{
+			Name:              resourceInfos[0].ClaimName,
+			ResourceClaimName: &resourceInfos[0].ClaimName,
+		})
+	} else {
+		for _, info := range resourceInfos {
+			pod.Spec.ResourceClaims = append(pod.Spec.ResourceClaims, corev1.PodResourceClaim{
+				Name:              info.ClaimName,
+				ResourceClaimName: &info.ClaimName,
+			})
+		}
+	}
+
+	if len(resourceInfos) > 0 {
+		encode, err := resourceInfos.Encode()
+		if err != nil {
+			logger.Error(err, "Encoding original resource information failed")
+			return apierrors.NewBadRequest(fmt.Sprintf("Encoding original resource information failed: %v", err))
+		}
+		util.InsertAnnotation(pod, util.DRAOriResAnnotation, encode)
+		logger.Info("Successfully convert all vGPU requests to resourceInfos")
+	}
+	return nil
+}
+
+func (h *mutateHandle) MutateUpdate(ctx context.Context, pod *corev1.Pod) error {
+	if h.options.DefaultConvertToDRA {
+		return h.updateResourceClaims(ctx, pod)
 	}
 	return nil
 }
@@ -256,20 +308,19 @@ func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *cor
 	logger := log.FromContext(ctx)
 
 	resourceClaimName := infos[0].ClaimName
+	claimKey := types.NamespacedName{Name: resourceClaimName, Namespace: pod.Namespace}
 	if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 		return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 	}) {
-		logger.V(1).Info("ResourceClaimName not found, skip ResourceClaim update",
-			"resourceClaimName", resourceClaimName)
+		logger.V(1).Info("ResourceClaimName not found, skip update", "ResourceClaim", claimKey.String())
 	} else {
-		claimKey := types.NamespacedName{Name: resourceClaimName, Namespace: pod.Namespace}
-		if err := h.updateResourceOwner(ctx, pod, claimKey); err != nil {
+		if err := h.updateResourceClaimOwner(ctx, pod, claimKey); err != nil {
 			return err
 		}
 	}
 
 	delete(pod.Annotations, util.DRAOriResAnnotation)
-	logger.Info("Successfully updated the ownership of combined resourceClaim")
+	logger.Info("Successfully updated the ownership of combined resourceClaim", "ResourceClaim", claimKey.String())
 	return nil
 }
 
@@ -279,15 +330,17 @@ func (h *mutateHandle) updateMultiResourceClaims(ctx context.Context, pod *corev
 	updatedInfos := make(common.ResourceInfos, 0, len(infos))
 	for i, info := range infos {
 		resourceClaimName := info.ClaimName
+		claimKey := types.NamespacedName{Name: resourceClaimName, Namespace: pod.Namespace}
+
 		if !slices.ContainsFunc(pod.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
 			return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 		}) {
-			logger.V(1).Info("ResourceClaimName for container not found, skip ResourceClaim update",
-				"container", info.Name, "resourceClaimName", resourceClaimName)
+			logger.V(1).Info("ResourceClaimName for container not found, skip update",
+				"container", info.Name, "ResourceClaim", claimKey.String())
 			continue
 		}
-		claimKey := types.NamespacedName{Name: resourceClaimName, Namespace: pod.Namespace}
-		if err := h.updateResourceOwner(ctx, pod, claimKey); err != nil {
+
+		if err := h.updateResourceClaimOwner(ctx, pod, claimKey); err != nil {
 			updatedInfos = append(updatedInfos, infos[i])
 		}
 	}
@@ -333,14 +386,7 @@ func (h *mutateHandle) updateResourceClaims(ctx context.Context, pod *corev1.Pod
 	return nil
 }
 
-func (h *mutateHandle) MutateUpdate(ctx context.Context, pod *corev1.Pod) error {
-	if h.options.DefaultConvertToDRA {
-		return h.updateResourceClaims(ctx, pod)
-	}
-	return nil
-}
-
-func (h *mutateHandle) updateResourceOwner(ctx context.Context, owner metav1.Object, claimKey types.NamespacedName) error {
+func (h *mutateHandle) updateResourceClaimOwner(ctx context.Context, owner metav1.Object, claimKey types.NamespacedName) error {
 	logger := log.FromContext(ctx).WithValues("ResourceClaim", claimKey.String())
 	claim := &resourceapi.ResourceClaim{}
 	if err := h.getResourceClaim(ctx, claimKey, claim); err != nil {

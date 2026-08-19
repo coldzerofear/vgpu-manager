@@ -26,6 +26,7 @@ import (
 	resvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/resourceclaim/validate"
 	"github.com/coldzerofear/vgpu-manager/pkg/webhook/resourcereader"
 	vcjobmutate "github.com/coldzerofear/vgpu-manager/pkg/webhook/volcanojob/mutate"
+	vcjobvalidate "github.com/coldzerofear/vgpu-manager/pkg/webhook/volcanojob/validate"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/controller-manager/pkg/healthz"
 	"k8s.io/klog/v2"
@@ -48,6 +49,7 @@ func init() {
 	handlerRegistry[podvalidate.Path] = podvalidate.NewValidateWebhook
 	handlerRegistry[resvalidate.Path] = resvalidate.NewValidateWebhook
 	handlerRegistry[vcjobmutate.Path] = vcjobmutate.NewMutateWebhook
+	handlerRegistry[vcjobvalidate.Path] = vcjobvalidate.NewValidateWebhook
 }
 
 func healthCheckMiddleware(healthChecker healthz.UnnamedHealthChecker, next http.Handler) http.Handler {

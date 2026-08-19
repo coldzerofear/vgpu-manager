@@ -38,7 +38,7 @@ const (
 
 	IgnoreWebhookAnnotation = "vgpu-manager.io/ignore-webhook"
 	DRAOriResAnnotation     = "vgpu-manager.io/original-resources"
-	DRAOwnerPodLabel        = "vgpu-manager.io/owner-pod"
+	DRAOwnerKeyLabel        = "vgpu-manager.io/owner-key"
 	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
 
 	KubeGroupNameAnnotation       = "scheduling.k8s.io/group-name"

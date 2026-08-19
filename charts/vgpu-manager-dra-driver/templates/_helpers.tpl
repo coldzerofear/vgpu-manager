@@ -183,8 +183,18 @@ webhooks:
           - v1alpha1
         operations:
           - CREATE
+          - UPDATE
         resources:
           - jobs
+        scope: '*'
+      - apiGroups:
+          - batch.volcano.sh
+        apiVersions:
+          - v1alpha1
+        operations:
+          - UPDATE
+        resources:
+          - jobs/status
         scope: '*'
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
@@ -252,7 +262,52 @@ webhooks:
       service:
         name: {{ include "vgpu-manager-dra-driver.webhook" $ctx }}
         namespace: {{ $ctx.Release.Namespace | quote }}
-        path: /resourceclaim/validate
+        path: /volcano-jobs/validate
+        port: 443
+    failurePolicy: {{ $ctx.Values.webhook.failurePolicy }}
+    matchPolicy: Equivalent
+    name: validatepod.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        {{- if $ctx.Values.webhook.excludeNamespaces }}
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+          {{- toYaml $ctx.Values.webhook.excludeNamespaces | nindent 10 }}
+        {{- end }}
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    rules:
+      - apiGroups:
+          - batch.volcano.sh
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - DELETE
+        resources:
+          - jobs
+        scope: '*'
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      {{- if $caBundle }}
+      caBundle: {{ $caBundle }}
+      {{- end }}
+      service:
+        name: {{ include "vgpu-manager-dra-driver.webhook" $ctx }}
+        namespace: {{ $ctx.Release.Namespace | quote }}
+        path: /resourceclaims/validate
         port: 443
     failurePolicy: {{ $ctx.Values.webhook.failurePolicy }}
     matchPolicy: Equivalent

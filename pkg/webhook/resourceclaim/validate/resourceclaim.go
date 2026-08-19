@@ -43,7 +43,7 @@ import (
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
-const Path = "/resourceclaim/validate"
+const Path = "/resourceclaims/validate"
 
 func NewValidateWebhook(
 	client client.Client, options *options.Options,
