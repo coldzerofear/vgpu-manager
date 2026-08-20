@@ -1,6 +1,6 @@
 # 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.5
 
-> 状态：**设计定稿（十三项关键决策已确认），待实施**
+> 状态：**设计定稿（十四项关键决策已确认），待实施**
 > v1.5（2026-08-15）：**D13 服务端拓扑**——1:N 主线 + 1:1 第二拓扑（operator 阶段以 `RemoteGPUServer` CR 引入），
 > 源自 gpu-go 对照分析；纠正"1:N 省 IP"的直觉（TensorFusion 也是单 IP 多端口）。§1.6 新增。
 > v1.5.1（同日评审）：§1.6.4 k8s 落地四形态与三选二困境；§1.6.5 server-centric 分工；§1.6.6 库侧边界更正
@@ -39,6 +39,7 @@
 | D11 | 制品形态 | **自包含静态 client**（fork 增加 `LUPINE_STATIC_DEPS`：nghttp2/OpenSSL/libstdc++/libgcc 静态内嵌，运行时依赖仅 glibc；rockylinux8 统一底座 → glibc 2.28 地板全矩阵最低）。已实现并本地验证（§4.5） |
 | D12 | 制品分发 | **镜像列表 → 节点版本目录**：cudaVersion→镜像地址映射在 values 里维护，helm 渲染进消费侧 DS 的 init 容器逐版本落盘 hostPath；增减版本 = 改列表，不重建我们的镜像。**逐 pod 选镜像不可行**（准入先于分配，§4.4） |
 | D13 | 服务端拓扑（v1.5） | **1:N（单 server/节点 + session）为 k8s 池化主线；1:1（per-allocation server）为正式第二拓扑**。CR 层次：`RemoteGPUServer` 为节点级原语（含 `publish` 开关：发布给集群内 DRA / 不发布仅供集群外连接），`RemoteGPUPool` 是它的多节点编排层（§1.6.7）；1:N 的独有优势是外部 SM watcher 跨会话共享 NVML 采样（§1.6.8）。k8s 落地形态受"同 IP/高性能网卡/pod 隔离三选二"约束（§1.6.4）；库侧记账模式待定（SESSION+hostPID vs CGROUP+host /proc，§1.6.6） |
+| D14 | 平台制品（v1.6） | **Windows/macOS 客户端打包进 GHCR 载体镜像**（内网 registry 作统一制品通道）：tag 按**平台家族**分 `cuda-<ver>-windows` / `cuda-<ver>-darwin`，**绝不按 distro 版本分**（D11 已把 Linux 制品做成 distro 无关，os-version 维度是倒退）。编译必须留在原生 runner（MSVC/Apple 工具链），Linux job 只做打包（§4.6） |
 
 ## 1. 问题本质：三平面模型
 
@@ -506,6 +507,27 @@ consumer DS: initContainers[i] = 各版本镜像（CMD 即 cp /artifacts → hos
 - **注入面因此无害化**：挂载目录里只有 `libcuda.so.1`/`libnvidia-ml.so.1`，容器内被遮蔽的名字仅此二者——
   远程 pod 本无真驱动，这正是产品语义。边界：glibc-only（musl/alpine 镜像不支持，与库同一约束）；
   pod 镜像不得自带真 libcuda。
+
+### 4.6 平台制品：Windows/macOS 载体镜像（D14，fork 已实现 workflow）
+
+上游 2026-08 新增原生 Windows DLL（`nvcuda.dll`/`nvml.dll`）与 macOS dylib 客户端。它们服务**集群外接入**
+（开发机直连 GPU 池，即 D13 `RemoteGPUServer publish=false` 场景）；**k8s 注入路径永远用不到**（Linux pod
+只能加载 ELF），故不影响 D12 的镜像列表机制，是额外的分发面。
+
+要点（fork `publish-client-platform-images.yml`）：
+- **编译进不了容器**：Windows 要 MSVC（原生 runner）、macOS 要 Apple 工具链（SDK 许可实际排除容器内
+  osxcross）。原生 runner 编译 → artifact 汇集 → Linux job 打包 busybox 载体（/artifacts + cp 入口，与
+  Linux 载体同形态）推 GHCR。
+- **头文件钉版本**：不用上游的无版本 pip wheel，改用与 Linux Dockerfile 相同的 NVIDIA redist 归档
+  （cudart/nvml_dev/profiler_api，headers 平台无关），保证 client≤server 规则可执行。
+- **自包含**：Windows 上游天然全静态（vcpkg *-windows-static + MT 运行时），直接复用；macOS 的 brew
+  依赖是动态的（/opt/homebrew 路径会随制品泄漏），改为源码静态编 nghttp2/OpenSSL，workflow 内置
+  `otool -L` 门禁（仅允许 /usr/lib 系统库）。
+- **v1 范围**：Windows x86_64 + macOS arm64（Apple Silicon）；Windows arm64 / macOS x86_64 结构留位。
+- **server 不做多平台**：隔离库是 glibc/LD_PRELOAD 专属，Windows server 无法承载 libvgpu-control，非产品路径。
+  client 与 server 也不合并进一个镜像（可运行镜像 vs 文件载体，角色不同）。
+- **验证边界**：Windows/macOS 客户端与隔离 server 的会话语义共享 h2.cpp 代码（LUPINE_SESSION env 同样生效），
+  但不在现有验证矩阵内——wire 兼容、Windows CUdeviceptr 语义等列为集群外接入场景验收项，非默认可用。
 
 ## 5. 配额落盘时序（D2）
 
