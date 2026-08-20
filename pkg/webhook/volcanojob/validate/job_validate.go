@@ -69,23 +69,23 @@ type validateHandle struct {
 	reader  resourcereader.ResourceAPIReader
 }
 
-func (h *validateHandle) ValidateCreate(ctx context.Context, job *vcv1alpha1.Job) error {
+func (h *validateHandle) ValidateCreate(ctx context.Context, job *vcv1alpha1.Job, dryRun bool) error {
 	if h.options.DefaultConvertToDRA {
-		if err := h.createResourceClaimTempaltes(ctx, job); err != nil {
+		if err := h.createResourceClaimTempaltes(ctx, job, dryRun); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (h *validateHandle) createResourceClaimTempaltes(ctx context.Context, job *vcv1alpha1.Job) (err error) {
+func (h *validateHandle) createResourceClaimTempaltes(ctx context.Context, job *vcv1alpha1.Job, dryRun bool) (err error) {
 	logger := log.FromContext(ctx)
 	val, ok := util.HasAnnotation(job, util.DRAOriResAnnotation)
 	if !ok || len(val) == 0 {
 		return nil
 	} else if len(val) > util.PodAnnotationMaxLength {
 		groupKind := vcv1alpha1.SchemeGroupVersion.WithKind("Job").GroupKind()
-		err := apierrors.NewInvalid(groupKind, job.Name, field.ErrorList{
+		err = apierrors.NewInvalid(groupKind, job.Name, field.ErrorList{
 			field.Invalid(field.NewPath("metadata").Child("annotations").
 				Child(util.DRAOriResAnnotation), field.OmitValueType{}, "recorded value is too long")})
 		logger.V(5).Error(err, "")
@@ -108,7 +108,7 @@ func (h *validateHandle) createResourceClaimTempaltes(ctx context.Context, job *
 	defer func() {
 		// Clean up the created resources when an error occurs,
 		// using timestamp label to prevent accidental deletion of resources during batch deletion.
-		if err != nil && len(claimTemplateKeys) > 0 {
+		if err != nil && len(claimTemplateKeys) > 0 && !dryRun {
 			if delErr := h.client.DeleteAllOf(
 				context.Background(), &resourceapi.ResourceClaimTemplate{},
 				client.InNamespace(job.Namespace), client.MatchingLabels{
@@ -136,9 +136,9 @@ func (h *validateHandle) createResourceClaimTempaltes(ctx context.Context, job *
 		subCtx := log.IntoContext(ctx, subLogger)
 		err = nil
 		if infos.CombinedResourceClaim() {
-			templateKeys, err = h.createCombinedResourceClaimTemplate(subCtx, job, index, task, infos, ownerKey, createTimestamp)
+			templateKeys, err = h.createCombinedResourceClaimTemplate(subCtx, job, index, task, infos, ownerKey, createTimestamp, dryRun)
 		} else {
-			templateKeys, err = h.createMultiResourceClaimTemplates(subCtx, job, index, task, infos, ownerKey, createTimestamp)
+			templateKeys, err = h.createMultiResourceClaimTemplates(subCtx, job, index, task, infos, ownerKey, createTimestamp, dryRun)
 		}
 		if len(templateKeys) > 0 {
 			claimTemplateKeys = append(claimTemplateKeys, templateKeys...)
@@ -151,7 +151,10 @@ func (h *validateHandle) createResourceClaimTempaltes(ctx context.Context, job *
 	return nil
 }
 
-func (h *validateHandle) createCombinedResourceClaimTemplate(ctx context.Context, job *vcv1alpha1.Job, index int, task *vcv1alpha1.TaskSpec, infos common.ResourceInfos, ownerKey, createTimestamp string) ([]client.ObjectKey, error) {
+func (h *validateHandle) createCombinedResourceClaimTemplate(
+	ctx context.Context, job *vcv1alpha1.Job, index int, task *vcv1alpha1.TaskSpec,
+	infos common.ResourceInfos, ownerKey, createTimestamp string, dryRun bool,
+) ([]client.ObjectKey, error) {
 	logger := log.FromContext(ctx)
 
 	var resourceClaimName string
@@ -182,19 +185,23 @@ func (h *validateHandle) createCombinedResourceClaimTemplate(ctx context.Context
 
 	resourceClaimTemplate := common.BuildTaskResourceClaimTemplate(task, resourceRequests, resourceClaimName, ownerKey, createTimestamp)
 
-	if err := h.client.Create(ctx, resourceClaimTemplate); err != nil {
-		logger.Error(err, "Failed to create combined vGPU resourceClaimTemplate")
-		return nil, err
+	if !dryRun {
+		if err := h.client.Create(ctx, resourceClaimTemplate); err != nil {
+			logger.Error(err, "Failed to create combined vGPU resourceClaimTemplate")
+			return nil, err
+		}
+		h.mutation(resourceClaimTemplate)
 	}
-
-	h.mutation(resourceClaimTemplate)
 
 	logger.Info("Successfully created combined vGPU resourceClaimTemplate", "resourceClaimTemplate", klog.KObj(resourceClaimTemplate))
 
 	return []client.ObjectKey{client.ObjectKeyFromObject(resourceClaimTemplate)}, nil
 }
 
-func (h *validateHandle) createMultiResourceClaimTemplates(ctx context.Context, job *vcv1alpha1.Job, index int, task *vcv1alpha1.TaskSpec, infos common.ResourceInfos, ownerKey, createTimestamp string) ([]client.ObjectKey, error) {
+func (h *validateHandle) createMultiResourceClaimTemplates(
+	ctx context.Context, job *vcv1alpha1.Job, index int, task *vcv1alpha1.TaskSpec,
+	infos common.ResourceInfos, ownerKey, createTimestamp string, dryRun bool,
+) ([]client.ObjectKey, error) {
 	logger := log.FromContext(ctx)
 
 	taskPath := field.NewPath("spec").Child("tasks").Index(index)
@@ -220,12 +227,13 @@ func (h *validateHandle) createMultiResourceClaimTemplates(ctx context.Context, 
 		deviceRequest := common.BuildTaskDeviceRequest(task, h.options.VGPUDeviceClassName, info)
 		resourceClaimTemplate := common.BuildTaskResourceClaimTemplate(task, []resourceapi.DeviceRequest{deviceRequest}, info.ClaimName, ownerKey, createTimestamp)
 
-		if err := h.client.Create(ctx, resourceClaimTemplate); err != nil {
-			logger.Error(err, "Failed to create vGPU resourceClaimTemplate", "container", info.Name)
-			return resourceClaimTemplateKeys, err
+		if !dryRun {
+			if err := h.client.Create(ctx, resourceClaimTemplate); err != nil {
+				logger.Error(err, "Failed to create vGPU resourceClaimTemplate", "container", info.Name)
+				return resourceClaimTemplateKeys, err
+			}
+			h.mutation(resourceClaimTemplate)
 		}
-
-		h.mutation(resourceClaimTemplate)
 
 		resourceClaimTemplateKeys = append(resourceClaimTemplateKeys, client.ObjectKeyFromObject(resourceClaimTemplate))
 		logger.V(2).Info("Successfully created resourceClaimTemplate", "resourceClaimTemplate", klog.KObj(resourceClaimTemplate), "container", info.Name)
@@ -249,8 +257,8 @@ func (h *validateHandle) mutation(obj client.Object) {
 //	return nil
 //}
 
-func (h *validateHandle) ValidateDelete(ctx context.Context, job *vcv1alpha1.Job) error {
-	if h.options.DefaultConvertToDRA {
+func (h *validateHandle) ValidateDelete(ctx context.Context, job *vcv1alpha1.Job, dryRun bool) error {
+	if h.options.DefaultConvertToDRA && !dryRun {
 		return h.deleteResourceClaimTemplates(ctx, job)
 	}
 	return nil
@@ -326,17 +334,20 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 	logger := log.FromContext(ctx).WithValues("operation", req.Operation)
 	logger.V(4).Info("into volcano job validate handle")
 
+	dryrun := req.DryRun != nil && *req.DryRun
+	if dryrun {
+		logger = logger.WithValues("dryRun", true)
+	}
 	var err error
 	var warnings []string
 	ctx = log.IntoContext(ctx, logger)
-
 	switch req.Operation {
 	case admissionv1.Create:
 		job := &vcv1alpha1.Job{}
 		if err = h.decoder.Decode(req, job); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		err = h.ValidateCreate(ctx, job)
+		err = h.ValidateCreate(ctx, job, dryrun)
 	//case admissionv1.Update:
 	//	oldJob, newJob := &vcv1alpha1.Job{}, &vcv1alpha1.Job{}
 	//	if err = h.decoder.Decode(req, newJob); err != nil {
@@ -351,7 +362,7 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 		if err = h.decoder.DecodeRaw(req.OldObject, job); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		err = h.ValidateDelete(ctx, job)
+		err = h.ValidateDelete(ctx, job, dryrun)
 	default:
 		// Always skip when a DELETE or UPDATE operation received in custom mutation handler.
 		return admission.Allowed("").WithWarnings(warnings...)

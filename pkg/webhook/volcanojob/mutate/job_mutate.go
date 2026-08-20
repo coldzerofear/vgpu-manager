@@ -69,7 +69,7 @@ type mutateHandle struct {
 	reader  resourcereader.ResourceAPIReader
 }
 
-func (h *mutateHandle) MutateCreate(ctx context.Context, job *vcv1alpha1.Job) error {
+func (h *mutateHandle) MutateCreate(ctx context.Context, job *vcv1alpha1.Job, dryRun bool) error {
 	if h.options.DefaultConvertToDRA {
 		//reschedule.CleanupDRAMetadata(job)
 
@@ -146,14 +146,14 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, task *vcv1alpha1.T
 	return resourceInfos
 }
 
-func (h *mutateHandle) MutateUpdate(ctx context.Context, job *vcv1alpha1.Job) error {
+func (h *mutateHandle) MutateUpdate(ctx context.Context, job *vcv1alpha1.Job, dryRun bool) error {
 	if h.options.DefaultConvertToDRA {
-		return h.updateResourceClaimTemplates(ctx, job)
+		return h.updateResourceClaimTemplates(ctx, job, dryRun)
 	}
 	return nil
 }
 
-func (h *mutateHandle) updateResourceClaimTemplates(ctx context.Context, job *vcv1alpha1.Job) error {
+func (h *mutateHandle) updateResourceClaimTemplates(ctx context.Context, job *vcv1alpha1.Job, dryRun bool) error {
 	logger := log.FromContext(ctx)
 	val, ok := util.HasAnnotation(job, util.DRAOriResAnnotation)
 	if !ok || len(val) == 0 {
@@ -181,11 +181,11 @@ func (h *mutateHandle) updateResourceClaimTemplates(ctx context.Context, job *vc
 		subCtx := log.IntoContext(ctx, subLogger)
 
 		if infos.CombinedResourceClaim() {
-			if err := h.updateCombinedResourceClaimTemplate(subCtx, job, task, infos); err == nil {
+			if err := h.updateCombinedResourceClaimTemplate(subCtx, job, task, infos, dryRun); err == nil {
 				deleteTaskNames = append(deleteTaskNames, taskName)
 			}
 		} else {
-			if remaining := h.updateMultiResourceClaimTemplates(subCtx, job, task, infos); len(remaining) == 0 {
+			if remaining := h.updateMultiResourceClaimTemplates(subCtx, job, task, infos, dryRun); len(remaining) == 0 {
 				deleteTaskNames = append(deleteTaskNames, taskName)
 			} else {
 				infoMap[taskName] = remaining
@@ -211,7 +211,9 @@ func (h *mutateHandle) updateResourceClaimTemplates(ctx context.Context, job *vc
 	return nil
 }
 
-func (h *mutateHandle) updateCombinedResourceClaimTemplate(ctx context.Context, job *vcv1alpha1.Job, task *vcv1alpha1.TaskSpec, infos common.ResourceInfos) error {
+func (h *mutateHandle) updateCombinedResourceClaimTemplate(
+	ctx context.Context, job *vcv1alpha1.Job, task *vcv1alpha1.TaskSpec, infos common.ResourceInfos, dryRun bool,
+) error {
 	logger := log.FromContext(ctx)
 
 	resourceClaimName := infos[0].ClaimName
@@ -221,7 +223,7 @@ func (h *mutateHandle) updateCombinedResourceClaimTemplate(ctx context.Context, 
 	}) {
 		logger.V(1).Info("ResourceClaimTemplateName not found, skip update",
 			"ResourceClaimTemplate", claimTemplateKey.String())
-	} else {
+	} else if !dryRun {
 		if err := h.updateResourceClaimTemplateOwner(ctx, job, claimTemplateKey); err != nil {
 			return err
 		}
@@ -233,7 +235,9 @@ func (h *mutateHandle) updateCombinedResourceClaimTemplate(ctx context.Context, 
 	return nil
 }
 
-func (h *mutateHandle) updateMultiResourceClaimTemplates(ctx context.Context, job *vcv1alpha1.Job, task *vcv1alpha1.TaskSpec, infos common.ResourceInfos) common.ResourceInfos {
+func (h *mutateHandle) updateMultiResourceClaimTemplates(
+	ctx context.Context, job *vcv1alpha1.Job, task *vcv1alpha1.TaskSpec, infos common.ResourceInfos, dryRun bool,
+) common.ResourceInfos {
 	logger := log.FromContext(ctx)
 
 	var updatedInfos common.ResourceInfos
@@ -244,11 +248,10 @@ func (h *mutateHandle) updateMultiResourceClaimTemplates(ctx context.Context, jo
 		}) {
 			logger.V(1).Info("ResourceClaimTemplateName for container not found, skip update",
 				"container", info.Name, "ResourceClaimTemplate", claimTemplateKey)
-			continue
-		}
-
-		if err := h.updateResourceClaimTemplateOwner(ctx, job, claimTemplateKey); err != nil {
-			updatedInfos = append(updatedInfos, infos[i])
+		} else if !dryRun {
+			if err := h.updateResourceClaimTemplateOwner(ctx, job, claimTemplateKey); err != nil {
+				updatedInfos = append(updatedInfos, infos[i])
+			}
 		}
 	}
 	if len(updatedInfos) == 0 {
@@ -301,6 +304,10 @@ func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admiss
 	logger := log.FromContext(ctx).WithValues("operation", req.Operation)
 	logger.V(4).Info("into volcano job mutate handle")
 
+	dryrun := req.DryRun != nil && *req.DryRun
+	if dryrun {
+		logger = logger.WithValues("dryRun", true)
+	}
 	var err error
 	job := &vcv1alpha1.Job{}
 	ctx = log.IntoContext(ctx, logger)
@@ -309,12 +316,12 @@ func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admiss
 		if err = h.decoder.Decode(req, job); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		err = h.MutateCreate(ctx, job)
+		err = h.MutateCreate(ctx, job, dryrun)
 	case admissionv1.Update:
 		if err = h.decoder.Decode(req, job); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		err = h.MutateUpdate(ctx, job)
+		err = h.MutateUpdate(ctx, job, dryrun)
 	default:
 		// Always skip when a DELETE or UPDATE operation received in custom mutation handler.
 		return admission.ValidationResponse(true, "")

@@ -180,7 +180,7 @@ func cleanupInvalidSchedulerAnnotation(pod *corev1.Pod) {
 	}
 }
 
-func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod) error {
+func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod, dryRun bool) error {
 	logger := log.FromContext(ctx)
 
 	isVGPUPod := false
@@ -297,14 +297,14 @@ func (h *mutateHandle) convertDRARequest(ctx context.Context, pod *corev1.Pod) e
 	return nil
 }
 
-func (h *mutateHandle) MutateUpdate(ctx context.Context, pod *corev1.Pod) error {
+func (h *mutateHandle) MutateUpdate(ctx context.Context, pod *corev1.Pod, dryRun bool) error {
 	if h.options.DefaultConvertToDRA {
-		return h.updateResourceClaims(ctx, pod)
+		return h.updateResourceClaims(ctx, pod, dryRun)
 	}
 	return nil
 }
 
-func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *corev1.Pod, infos common.ResourceInfos) error {
+func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *corev1.Pod, infos common.ResourceInfos, dryRun bool) error {
 	logger := log.FromContext(ctx)
 
 	resourceClaimName := infos[0].ClaimName
@@ -313,7 +313,7 @@ func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *cor
 		return claim.ResourceClaimName != nil && *claim.ResourceClaimName == resourceClaimName
 	}) {
 		logger.V(1).Info("ResourceClaimName not found, skip update", "ResourceClaim", claimKey.String())
-	} else {
+	} else if !dryRun {
 		if err := h.updateResourceClaimOwner(ctx, pod, claimKey); err != nil {
 			return err
 		}
@@ -324,7 +324,7 @@ func (h *mutateHandle) updateCombinedResourceClaim(ctx context.Context, pod *cor
 	return nil
 }
 
-func (h *mutateHandle) updateMultiResourceClaims(ctx context.Context, pod *corev1.Pod, infos common.ResourceInfos) error {
+func (h *mutateHandle) updateMultiResourceClaims(ctx context.Context, pod *corev1.Pod, infos common.ResourceInfos, dryRun bool) error {
 	logger := log.FromContext(ctx)
 
 	updatedInfos := make(common.ResourceInfos, 0, len(infos))
@@ -337,11 +337,10 @@ func (h *mutateHandle) updateMultiResourceClaims(ctx context.Context, pod *corev
 		}) {
 			logger.V(1).Info("ResourceClaimName for container not found, skip update",
 				"container", info.Name, "ResourceClaim", claimKey.String())
-			continue
-		}
-
-		if err := h.updateResourceClaimOwner(ctx, pod, claimKey); err != nil {
-			updatedInfos = append(updatedInfos, infos[i])
+		} else if !dryRun {
+			if err := h.updateResourceClaimOwner(ctx, pod, claimKey); err != nil {
+				updatedInfos = append(updatedInfos, infos[i])
+			}
 		}
 	}
 
@@ -359,7 +358,7 @@ func (h *mutateHandle) updateMultiResourceClaims(ctx context.Context, pod *corev
 	return nil
 }
 
-func (h *mutateHandle) updateResourceClaims(ctx context.Context, pod *corev1.Pod) error {
+func (h *mutateHandle) updateResourceClaims(ctx context.Context, pod *corev1.Pod, dryRun bool) error {
 	logger := log.FromContext(ctx)
 	val, ok := util.HasAnnotation(pod, util.DRAOriResAnnotation)
 	if !ok || len(val) == 0 {
@@ -374,11 +373,11 @@ func (h *mutateHandle) updateResourceClaims(ctx context.Context, pod *corev1.Pod
 	}
 
 	if infos.CombinedResourceClaim() {
-		if err := h.updateCombinedResourceClaim(ctx, pod, infos); err != nil {
+		if err := h.updateCombinedResourceClaim(ctx, pod, infos, dryRun); err != nil {
 			return err
 		}
 	} else {
-		if err := h.updateMultiResourceClaims(ctx, pod, infos); err != nil {
+		if err := h.updateMultiResourceClaims(ctx, pod, infos, dryRun); err != nil {
 			return err
 		}
 	}
@@ -413,6 +412,10 @@ func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admiss
 	logger := log.FromContext(ctx).WithValues("operation", req.Operation)
 	logger.V(4).Info("into pod mutate handle")
 
+	dryrun := req.DryRun != nil && *req.DryRun
+	if dryrun {
+		logger = logger.WithValues("dryRun", true)
+	}
 	var err error
 	pod := &corev1.Pod{}
 	ctx = log.IntoContext(ctx, logger)
@@ -421,12 +424,12 @@ func (h *mutateHandle) Handle(ctx context.Context, req admission.Request) admiss
 		if err = h.decoder.Decode(req, pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		err = h.MutateCreate(ctx, pod)
+		err = h.MutateCreate(ctx, pod, dryrun)
 	case admissionv1.Update:
 		if err = h.decoder.Decode(req, pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		err = h.MutateUpdate(ctx, pod)
+		err = h.MutateUpdate(ctx, pod, dryrun)
 	default:
 		// Always skip when a DELETE or UPDATE operation received in custom mutation handler.
 		return admission.ValidationResponse(true, "")

@@ -71,7 +71,7 @@ type validateHandle struct {
 	reader  resourcereader.ResourceAPIReader
 }
 
-func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) error {
+func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod, dryRun bool) error {
 	if h.options.DRAAdmissionEnabled {
 		if err := h.checkResourceClaimRequests(ctx, pod); err != nil {
 			return &apierrors.StatusError{
@@ -91,7 +91,7 @@ func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod) er
 		}
 	}
 	if h.options.DefaultConvertToDRA {
-		if err := h.createResourceClaims(ctx, pod); err != nil {
+		if err := h.createResourceClaims(ctx, pod, dryRun); err != nil {
 			return err
 		}
 	}
@@ -376,10 +376,7 @@ func (h *validateHandle) checkResourceClaimRequests(ctx context.Context, pod *co
 // - claimRef.Request == "": Return all vGPU main requests defined under this claim
 // - mixed FirstAvailable: Do not check, leave it for resource claim webhook verification
 func (h *validateHandle) resolveDefiniteVGPURequestsFromContainerClaim(
-	ctx context.Context,
-	pod *corev1.Pod,
-	claimRef corev1.ResourceClaim,
-	requestCache map[string]deviceRequestCacheEntry,
+	ctx context.Context, pod *corev1.Pod, claimRef corev1.ResourceClaim, requestCache map[string]deviceRequestCacheEntry,
 ) ([]string, error) {
 	podClaim, err := common.FindPodResourceClaim(pod, claimRef.Name)
 	if err != nil {
@@ -422,10 +419,7 @@ func (h *validateHandle) resolveDefiniteVGPURequestsFromContainerClaim(
 }
 
 func (h *validateHandle) getDeviceRequestsForPodClaimCached(
-	ctx context.Context,
-	namespace string,
-	podClaim *corev1.PodResourceClaim,
-	requestCache map[string]deviceRequestCacheEntry,
+	ctx context.Context, namespace string, podClaim *corev1.PodResourceClaim, requestCache map[string]deviceRequestCacheEntry,
 ) ([]resourceapi.DeviceRequest, error) {
 	cacheKey := namespace + "/" + podClaim.Name
 	if cacheEntry, ok := requestCache[cacheKey]; ok {
@@ -440,9 +434,7 @@ func (h *validateHandle) getDeviceRequestsForPodClaimCached(
 // - spec.resourceClaims[].resourceClaimName
 // - spec.resourceClaims[].resourceClaimTemplateName
 func (h *validateHandle) getDeviceRequestsForPodClaim(
-	ctx context.Context,
-	namespace string,
-	podClaim *corev1.PodResourceClaim,
+	ctx context.Context, namespace string, podClaim *corev1.PodResourceClaim,
 ) ([]resourceapi.DeviceRequest, error) {
 	if h.reader != nil {
 		return h.reader.GetDeviceRequestsForPodClaim(ctx, namespace, podClaim)
@@ -505,7 +497,9 @@ func (h *validateHandle) isVGPUSubRequest(ctx context.Context, req resourceapi.D
 	return common.SubRequestLooksLikeVGPU(ctx, h.reader, req, false, h.options.VGPUDeviceClassName)
 }
 
-func (h *validateHandle) createCombinedResourceClaim(ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos) error {
+func (h *validateHandle) createCombinedResourceClaim(
+	ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos, dryRun bool,
+) error {
 	logger := log.FromContext(ctx)
 
 	var resourceClaimName string
@@ -538,18 +532,22 @@ func (h *validateHandle) createCombinedResourceClaim(ctx context.Context, pod *c
 	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
 	resourceClaim := common.BuildResourceClaim(pod, resourceRequests, resourceClaimName, ownerPod, createTimestamp)
 
-	if err := h.client.Create(ctx, resourceClaim); err != nil {
-		logger.Error(err, "Failed to create combined vGPU resourceClaim")
-		return err
+	if !dryRun {
+		if err := h.client.Create(ctx, resourceClaim); err != nil {
+			logger.Error(err, "Failed to create combined vGPU resourceClaim")
+			return err
+		}
+		h.mutation(resourceClaim)
 	}
-	h.mutation(resourceClaim)
 
 	logger.Info("Successfully created combined vGPU resourceClaim", "resourceClaim", klog.KObj(resourceClaim))
 
 	return nil
 }
 
-func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos) (err error) {
+func (h *validateHandle) createMultiResourceClaims(
+	ctx context.Context, pod *corev1.Pod, resourceInfos common.ResourceInfos, dryRun bool,
+) (err error) {
 	logger := log.FromContext(ctx)
 	ownerPod := fmt.Sprintf("%s-%s", pod.Namespace, pod.Name)
 	createTimestamp := fmt.Sprintf("%v", time.Now().UnixMilli())
@@ -558,7 +556,7 @@ func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *cor
 	defer func() {
 		// Clean up the created resources when an error occurs,
 		// using timestamp label to prevent accidental deletion of resources during batch deletion.
-		if err != nil && len(resourceClaimKeys) > 0 {
+		if err != nil && len(resourceClaimKeys) > 0 && !dryRun {
 			if delErr := h.client.DeleteAllOf(
 				context.Background(), &resourceapi.ResourceClaim{},
 				client.InNamespace(pod.Namespace), client.MatchingLabels{
@@ -590,11 +588,15 @@ func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *cor
 		// Create container resource claim
 		request := common.BuildDeviceRequest(pod, h.options.VGPUDeviceClassName, info)
 		resourceClaim := common.BuildResourceClaim(pod, []resourceapi.DeviceRequest{request}, info.ClaimName, ownerPod, createTimestamp)
-		if err = h.client.Create(ctx, resourceClaim); err != nil {
-			logger.Error(err, "Failed to create vGPU resourceClaim", "container", info.Name)
-			return err
+
+		if !dryRun {
+			if err = h.client.Create(ctx, resourceClaim); err != nil {
+				logger.Error(err, "Failed to create vGPU resourceClaim", "container", info.Name)
+				return err
+			}
+			h.mutation(resourceClaim)
 		}
-		h.mutation(resourceClaim)
+
 		resourceClaimKeys = append(resourceClaimKeys, client.ObjectKeyFromObject(resourceClaim))
 		logger.V(2).Info("Successfully created resourceClaim",
 			"resourceClaim", klog.KObj(resourceClaim), "container", info.Name)
@@ -607,7 +609,7 @@ func (h *validateHandle) createMultiResourceClaims(ctx context.Context, pod *cor
 	return nil
 }
 
-func (h *validateHandle) createResourceClaims(ctx context.Context, pod *corev1.Pod) error {
+func (h *validateHandle) createResourceClaims(ctx context.Context, pod *corev1.Pod, dryRun bool) error {
 	logger := log.FromContext(ctx)
 	val, ok := util.HasAnnotation(pod, util.DRAOriResAnnotation)
 	if !ok || len(val) == 0 {
@@ -628,11 +630,11 @@ func (h *validateHandle) createResourceClaims(ctx context.Context, pod *corev1.P
 	}
 
 	if infos.CombinedResourceClaim() {
-		if err := h.createCombinedResourceClaim(ctx, pod, infos); err != nil {
+		if err := h.createCombinedResourceClaim(ctx, pod, infos, dryRun); err != nil {
 			return err
 		}
 	} else {
-		if err := h.createMultiResourceClaims(ctx, pod, infos); err != nil {
+		if err := h.createMultiResourceClaims(ctx, pod, infos, dryRun); err != nil {
 			return err
 		}
 	}
@@ -671,9 +673,7 @@ func findPodClaimNameForActualClaim(pod *corev1.Pod, actualClaimName string) str
 // collectPodClaimVGPURefs returns the set of definite-vGPU mainRequest names that pod
 // uses from the claim identified by podClaimName within that pod's spec.
 func (h *validateHandle) collectPodClaimVGPURefs(
-	pod *corev1.Pod,
-	podClaimName string,
-	requestIndex map[string]podRequestMeta,
+	pod *corev1.Pod, podClaimName string, requestIndex map[string]podRequestMeta,
 ) sets.Set[string] {
 	result := sets.New[string]()
 	for _, c := range util.GetAllPodContainers(pod) {
@@ -802,8 +802,8 @@ func (h *validateHandle) checkCrossPodsVGPURequestConflict(ctx context.Context, 
 //	return nil
 //}
 
-func (h *validateHandle) ValidateDelete(ctx context.Context, pod *corev1.Pod) error {
-	if h.options.DefaultConvertToDRA {
+func (h *validateHandle) ValidateDelete(ctx context.Context, pod *corev1.Pod, dryRun bool) error {
+	if h.options.DefaultConvertToDRA && !dryRun {
 		return h.deleteResourceClaims(ctx, pod)
 	}
 	return nil
@@ -872,6 +872,10 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 	logger := log.FromContext(ctx).WithValues("operation", req.Operation)
 	logger.V(4).Info("into pod validate handle")
 
+	dryrun := req.DryRun != nil && *req.DryRun
+	if dryrun {
+		logger = logger.WithValues("dryRun", true)
+	}
 	var err error
 	var warnings []string
 	ctx = log.IntoContext(ctx, logger)
@@ -881,7 +885,7 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 		if err = h.decoder.Decode(req, pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		err = h.ValidateCreate(ctx, pod)
+		err = h.ValidateCreate(ctx, pod, dryrun)
 	//case admissionv1.Update:
 	//	oldPod, newPod := &corev1.Pod{}, &corev1.Pod{}
 	//	if err = h.decoder.Decode(req, newPod); err != nil {
@@ -896,7 +900,7 @@ func (h *validateHandle) Handle(ctx context.Context, req admission.Request) admi
 		if err = h.decoder.DecodeRaw(req.OldObject, pod); err != nil {
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-		err = h.ValidateDelete(ctx, pod)
+		err = h.ValidateDelete(ctx, pod, dryrun)
 	default:
 		// Always skip when a DELETE or UPDATE operation received in custom mutation handler.
 		return admission.Allowed("").WithWarnings(warnings...)

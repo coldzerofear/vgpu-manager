@@ -131,7 +131,7 @@ webhooks:
           - UPDATE
         resources:
           - pods
-        scope: '*'
+        scope: "Namespaced"
       - apiGroups:
           - ""
         apiVersions:
@@ -140,7 +140,7 @@ webhooks:
           - UPDATE
         resources:
           - pods/status
-        scope: '*'
+        scope: "Namespaced"
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
   - admissionReviewVersions:
@@ -186,7 +186,7 @@ webhooks:
           - UPDATE
         resources:
           - jobs
-        scope: '*'
+        scope: "Namespaced"
       - apiGroups:
           - batch.volcano.sh
         apiVersions:
@@ -195,7 +195,7 @@ webhooks:
           - UPDATE
         resources:
           - jobs/status
-        scope: '*'
+        scope: "Namespaced"
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
 {{- end -}}
@@ -250,7 +250,7 @@ webhooks:
           - DELETE
         resources:
           - pods
-        scope: '*'
+        scope: "Namespaced"
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
   - admissionReviewVersions:
@@ -295,7 +295,7 @@ webhooks:
           - DELETE
         resources:
           - jobs
-        scope: '*'
+        scope: "Namespaced"
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
   - admissionReviewVersions:
