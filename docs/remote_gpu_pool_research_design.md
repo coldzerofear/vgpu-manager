@@ -955,6 +955,13 @@ CUDA 与 NVML 聚合顺序一致，"cuda:i 就是 nvml:i" 不变量在聚合后�
    由聚合层决定。
 6. **真机验收项**：双 server 各 2 卡，验证 `cudaSetDevice(2)` 与 `nvmlDeviceGetHandleByIndex(2)` 落在同一张
    物理卡（比对 UUID）——整条链路唯一需实测确信的不变量。
+7. **多连接设备指针别名隐患（上游 PR #548 修复，未合并）**：本节 v0.5 分析漏了一点——多连接下各 server
+   子进程是**相同程序的相同 fork 模型**，极可能返回**相同的设备虚拟地址**，而 lupine 按 dptr 反查路由
+   （`lupine_route_for_deviceptr`）时无法区分 → 可能错连。上游 PR #548 在客户端给设备指针打连接标签
+   （bits≥50 存 conn index，**发 wire 前剥除**，conn 0 与本地不打），并顺带实现同 GPU 多连接的 peer 语义
+   （UUID 判定同卡 + CUDA IPC 跨子进程映射）。**对服务端 library 零影响**（tag 不过 wire；IPC 导入内存
+   NVML 归属 exporter 子进程，同会话求和恰好计一次，记账口径不变）。**行动项**：PR 合并后 rebase 进 fork；
+   在此之前多 server 组合视为有已知隐患，验收测试须覆盖"两 server 各自首个分配返回相同 VA"场景。
 
 ---
 
