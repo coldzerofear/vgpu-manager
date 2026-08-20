@@ -4,11 +4,11 @@ Validate the webhook flag combinations that the device-webhook binary rejects at
 (see cmd/device-webhook/options). Fail fast at render time with a clear message instead of
 letting the webhook pod crash-loop on klog.Fatalln.
 */}}
-{{- if and .Values.webhook.commands.defaultConvert2Dra (not .Values.webhook.commands.vgpuDeviceClassName) }}
-{{- fail "webhook.commands.vgpuDeviceClassName must be set when webhook.commands.defaultConvert2Dra is enabled" }}
+{{- if and .Values.webhook.commands.defaultConvertDRA (not .Values.webhook.commands.vgpuDeviceClassName) }}
+{{- fail "webhook.commands.vgpuDeviceClassName must be set when webhook.commands.defaultConvertDRA is enabled" }}
 {{- end }}
-{{- if and .Values.webhook.commands.combinedResourceClaim (not .Values.webhook.commands.defaultConvert2Dra) }}
-{{- fail "webhook.commands.defaultConvert2Dra must be enabled when webhook.commands.combinedResourceClaim is enabled" }}
+{{- if and .Values.webhook.commands.combinedResourceClaim (not .Values.webhook.commands.defaultConvertDRA) }}
+{{- fail "webhook.commands.defaultConvertDRA must be enabled when webhook.commands.combinedResourceClaim is enabled" }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -105,7 +105,7 @@ spec:
             {{- end }}
             # The DRA admission path is mandatory for this driver and is always enabled.
             - --dra-admission-enabled
-            {{- if .Values.webhook.commands.defaultConvert2Dra }}
+            {{- if .Values.webhook.commands.defaultConvertDRA }}
             - --default-convert2-dra
             {{- end }}
             {{- if .Values.webhook.commands.combinedResourceClaim }}
