@@ -158,28 +158,28 @@ var (
 		util.PodPredicateNodeAnnotation, util.PodPredicateTimeAnnotation,
 	}
 	removedDRAAnnotations = []string{
-		util.DRAOriResAnnotation, util.DRAGenNameAnnotation,
+		util.DRAOriResAnnotation,
 	}
 )
 
-func CleanupDRAMetadata(pod *corev1.Pod) {
+func CleanupDRAMetadata(obj metav1.Object) {
 	for _, anno := range removedDRAAnnotations {
-		if _, ok := util.HasAnnotation(pod, anno); ok {
-			delete(pod.Annotations, anno)
+		if _, ok := util.HasAnnotation(obj, anno); ok {
+			delete(obj.GetAnnotations(), anno)
 		}
 	}
 }
 
 // CleanupMetadata Clean up metadata that affects scheduling and allocation.
-func CleanupMetadata(pod *corev1.Pod) {
+func CleanupMetadata(obj metav1.Object) {
 	for _, label := range removedLabels {
-		if _, ok := util.HasLabel(pod, label); ok {
-			delete(pod.Labels, label)
+		if _, ok := util.HasLabel(obj, label); ok {
+			delete(obj.GetLabels(), label)
 		}
 	}
 	for _, anno := range removedAnnotations {
-		if _, ok := util.HasAnnotation(pod, anno); ok {
-			delete(pod.Annotations, anno)
+		if _, ok := util.HasAnnotation(obj, anno); ok {
+			delete(obj.GetLabels(), anno)
 		}
 	}
 }

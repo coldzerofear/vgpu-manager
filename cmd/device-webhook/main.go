@@ -49,6 +49,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	vcv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 )
 
 var (
@@ -59,6 +60,7 @@ var (
 func init() {
 	utilruntime.Must(admissionv1.AddToScheme(Scheme))
 	utilruntime.Must(admissionv1beta1.AddToScheme(Scheme))
+	utilruntime.Must(vcv1alpha1.AddToScheme(Scheme))
 }
 
 // cacheSyncGate indicates whether the cache has completed initial synchronization.
@@ -330,8 +332,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		// updates and live-API fallback results.
 		resourceReader = resourcereader.NewResourceAPIReader(liveClient,
 			objIndexerMap[claimObjectType], objIndexerMap[templateObjectType],
-			objIndexerMap[classObjectType], objIndexerMap[podObjectType],
-			30*time.Second)
+			objIndexerMap[classObjectType], objIndexerMap[podObjectType], 30*time.Second)
 	}
 
 	if err := pkgwebhook.RegisterWebhookToServer(server, cacheGate, client, opt, resourceReader, recorder); err != nil {

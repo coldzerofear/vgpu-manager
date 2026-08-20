@@ -131,7 +131,7 @@ webhooks:
           - UPDATE
         resources:
           - pods
-        scope: '*'
+        scope: "Namespaced"
       - apiGroups:
           - ""
         apiVersions:
@@ -140,7 +140,62 @@ webhooks:
           - UPDATE
         resources:
           - pods/status
-        scope: '*'
+        scope: "Namespaced"
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      {{- if $caBundle }}
+      caBundle: {{ $caBundle }}
+      {{- end }}
+      service:
+        name: {{ include "vgpu-manager-dra-driver.webhook" $ctx }}
+        namespace: {{ $ctx.Release.Namespace | quote }}
+        path: /volcano-jobs/mutate
+        port: 443
+    failurePolicy: {{ $ctx.Values.webhook.failurePolicy }}
+    matchPolicy: Equivalent
+    name: mutatejob.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        {{- if $ctx.Values.webhook.excludeNamespaces }}
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+          {{- toYaml $ctx.Values.webhook.excludeNamespaces | nindent 10 }}
+        {{- end }}
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    reinvocationPolicy: Never
+    rules:
+      - apiGroups:
+          - batch.volcano.sh
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - jobs
+        scope: "Namespaced"
+      - apiGroups:
+          - batch.volcano.sh
+        apiVersions:
+          - v1alpha1
+        operations:
+          - UPDATE
+        resources:
+          - jobs/status
+        scope: "Namespaced"
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
 {{- end -}}
@@ -195,7 +250,7 @@ webhooks:
           - DELETE
         resources:
           - pods
-        scope: '*'
+        scope: "Namespaced"
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
   - admissionReviewVersions:
@@ -207,7 +262,52 @@ webhooks:
       service:
         name: {{ include "vgpu-manager-dra-driver.webhook" $ctx }}
         namespace: {{ $ctx.Release.Namespace | quote }}
-        path: /resourceclaim/validate
+        path: /volcano-jobs/validate
+        port: 443
+    failurePolicy: {{ $ctx.Values.webhook.failurePolicy }}
+    matchPolicy: Equivalent
+    name: validatepod.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        {{- if $ctx.Values.webhook.excludeNamespaces }}
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+          {{- toYaml $ctx.Values.webhook.excludeNamespaces | nindent 10 }}
+        {{- end }}
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    rules:
+      - apiGroups:
+          - batch.volcano.sh
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - DELETE
+        resources:
+          - jobs
+        scope: "Namespaced"
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      {{- if $caBundle }}
+      caBundle: {{ $caBundle }}
+      {{- end }}
+      service:
+        name: {{ include "vgpu-manager-dra-driver.webhook" $ctx }}
+        namespace: {{ $ctx.Release.Namespace | quote }}
+        path: /resourceclaims/validate
         port: 443
     failurePolicy: {{ $ctx.Values.webhook.failurePolicy }}
     matchPolicy: Equivalent

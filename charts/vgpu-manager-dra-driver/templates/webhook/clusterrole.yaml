@@ -8,11 +8,8 @@ metadata:
     {{- include "vgpu-manager-dra-driver.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["resource.k8s.io"]
-    resources: ["resourceclaims"]
+    resources: ["resourceclaims","resourceclaimtemplates"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]
-  - apiGroups: ["resource.k8s.io"]
-    resources: ["resourceclaimtemplates"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: ["resource.k8s.io"]
     resources: ["deviceclasses"]
     verbs: ["get", "list", "watch"]

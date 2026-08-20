@@ -43,7 +43,7 @@ import (
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
-const Path = "/resourceclaim/validate"
+const Path = "/resourceclaims/validate"
 
 func NewValidateWebhook(
 	client client.Client, options *options.Options,
@@ -139,11 +139,8 @@ type actualRequestUsage struct {
 //   - init-app allow hitting the same mainRequest
 //   - cross Pod sharing of the same mainRequest is not allowed
 func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
-	ctx context.Context,
-	pod *corev1.Pod,
-	currentClaim *resourceapi.ResourceClaim,
-	usages map[string]actualRequestUsage,
-	claimCache map[string]*resourceapi.ResourceClaim,
+	ctx context.Context, pod *corev1.Pod, currentClaim *resourceapi.ResourceClaim,
+	usages map[string]actualRequestUsage, claimCache map[string]*resourceapi.ResourceClaim,
 ) error {
 	allContainers := util.GetAllPodContainers(pod)
 
@@ -272,9 +269,7 @@ func (rw *validateHandle) validateOneReservedPodAgainstAllocatedClaim(
 }
 
 func (rw *validateHandle) getClaimCached(
-	ctx context.Context,
-	namespace, name string,
-	cache map[string]*resourceapi.ResourceClaim,
+	ctx context.Context, namespace, name string, cache map[string]*resourceapi.ResourceClaim,
 ) (*resourceapi.ResourceClaim, error) {
 	objKey := client.ObjectKey{
 		Namespace: namespace,
@@ -294,10 +289,7 @@ func (rw *validateHandle) getClaimCached(
 }
 
 // validateAllocatedVGPUSharing The entrance to the claim/status webhook.
-func (rw *validateHandle) validateAllocatedVGPUSharing(
-	ctx context.Context,
-	claim *resourceapi.ResourceClaim,
-) error {
+func (rw *validateHandle) validateAllocatedVGPUSharing(ctx context.Context, claim *resourceapi.ResourceClaim) error {
 	if claim == nil || claim.Status.Allocation == nil {
 		return nil
 	}
@@ -337,6 +329,11 @@ func (rw *validateHandle) admitResourceClaimParameters(ctx context.Context, req 
 	logger := log.FromContext(ctx)
 	logger.V(2).Info("admitting resource claim parameters")
 
+	dryrun := req.DryRun != nil && *req.DryRun
+	if dryrun {
+		logger = logger.WithValues("dryRun", true)
+	}
+
 	var deviceConfigs []resourceapi.DeviceClaimConfiguration
 	var specPath string
 
@@ -355,7 +352,7 @@ func (rw *validateHandle) admitResourceClaimParameters(ctx context.Context, req 
 
 		if req.Operation == admissionv1.Update && req.SubResource == "status" {
 			if err = rw.validateAllocatedVGPUSharing(ctx, claim); err != nil {
-				if rw.recorder != nil {
+				if rw.recorder != nil && !dryrun {
 					rw.recorder.Eventf(claim, nil, corev1.EventTypeWarning, "AdmissionFailed", "Conflict", err.Error())
 				}
 				logger.Error(err, "validateAllocatedVGPUSharing failed")

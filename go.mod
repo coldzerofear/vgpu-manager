@@ -49,6 +49,7 @@ require (
 	sigs.k8s.io/dra-driver-nvidia-gpu v0.4.1
 	tags.cncf.io/container-device-interface v1.1.0
 	tags.cncf.io/container-device-interface/specs-go v1.1.0
+	volcano.sh/apis v1.15.1
 )
 
 require (

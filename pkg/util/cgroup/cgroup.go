@@ -370,7 +370,7 @@ func GetK8sPodContainerCGroupFullPath(
 	if containerStatus.State.Running == nil {
 		return "", fmt.Errorf("pod %q container %q not running", klog.KObj(pod), containerName)
 	}
-	containerId := container.ParseContainerID(containerStatus.ContainerID)
+	containerId := container.ParseContainerID(klog.Background(), containerStatus.ContainerID)
 	cgroupName := NewPodCgroupName(pod)
 	switch currentCGroupDriver {
 	case SYSTEMD:
