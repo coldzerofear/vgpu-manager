@@ -139,8 +139,10 @@
 ## 3. 关键决策与事实速查（含文件:行号）
 
 ### lupine 侧
-- 每连接 fork 子进程：`server.cpp:668-727`
-- 子进程内可取到 session：`server.cpp:421-429`（`rpc_http2_session_id`）
+> 注意：2026-08 同步上游重构（RPC/CUDA 解耦、server registry 分发、client.cpp→cuda_client.cpp、
+> gen_server.cpp→gen_cuda_server.cpp）后行号已变，机制均核实未变。下面为新锚点。
+- 每连接 fork 子进程：`server.cpp:443`（child_start `:466`）
+- 子进程内可取到 session：`server.cpp:172`（`checkpoint_connection_ready`，仍在首个 RPC 前）
 - 进程表透传：`nvml_server.cpp:58-97`
 - NVML 真函数获取（dlsym 句柄查询，会被库遮蔽）：`nvml_server.cpp:36-56`（`nvml_symbol`）
 - 会话头 `x-lupine-session`：`h2.cpp:422, 710-724, 850-857`（客户端 env `LUPINE_SESSION`）
