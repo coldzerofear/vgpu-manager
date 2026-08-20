@@ -134,20 +134,17 @@ func (h *validateHandle) createResourceClaimTempaltes(ctx context.Context, job *
 		}
 		task := &job.Spec.Tasks[index]
 		subCtx := log.IntoContext(ctx, subLogger)
-
+		err = nil
 		if infos.CombinedResourceClaim() {
 			templateKeys, err = h.createCombinedResourceClaimTemplate(subCtx, job, index, task, infos, ownerKey, createTimestamp)
-			if err != nil {
-				return err
-			}
 		} else {
 			templateKeys, err = h.createMultiResourceClaimTemplates(subCtx, job, index, task, infos, ownerKey, createTimestamp)
-			if err != nil {
-				return err
-			}
 		}
 		if len(templateKeys) > 0 {
 			claimTemplateKeys = append(claimTemplateKeys, templateKeys...)
+		}
+		if err != nil {
+			return err
 		}
 	}
 
@@ -201,12 +198,12 @@ func (h *validateHandle) createMultiResourceClaimTemplates(ctx context.Context, 
 	logger := log.FromContext(ctx)
 
 	taskPath := field.NewPath("spec").Child("tasks").Index(index)
-	resourceClaimTemplateKeys := make([]client.ObjectKey, len(infos))
+	resourceClaimTemplateKeys := make([]client.ObjectKey, 0, len(infos))
 	for i, info := range infos {
 		if _, errs := common.CheckTaskResourceInfo(taskPath, task, i, info); errs != nil {
 			err := apierrors.NewInvalid(vcv1alpha1.SchemeGroupVersion.WithKind("Job").GroupKind(), job.Name, errs)
 			logger.V(3).Error(err, "")
-			return nil, err
+			return resourceClaimTemplateKeys, err
 		}
 
 		if !slices.ContainsFunc(task.Template.Spec.ResourceClaims, func(claim corev1.PodResourceClaim) bool {
@@ -216,7 +213,7 @@ func (h *validateHandle) createMultiResourceClaimTemplates(ctx context.Context, 
 				field.Invalid(taskPath.Child("template").Child("spec").Child("resourceClaims"),
 					task.Template.Spec.ResourceClaims, fmt.Sprintf("ResourceClaimTemplateName %q not found", info.ClaimName))})
 			logger.V(5).Error(err, "")
-			return nil, err
+			return resourceClaimTemplateKeys, err
 		}
 
 		// Create container resource claim
@@ -225,12 +222,12 @@ func (h *validateHandle) createMultiResourceClaimTemplates(ctx context.Context, 
 
 		if err := h.client.Create(ctx, resourceClaimTemplate); err != nil {
 			logger.Error(err, "Failed to create vGPU resourceClaimTemplate", "container", info.Name)
-			return nil, err
+			return resourceClaimTemplateKeys, err
 		}
 
 		h.mutation(resourceClaimTemplate)
 
-		resourceClaimTemplateKeys[i] = client.ObjectKeyFromObject(resourceClaimTemplate)
+		resourceClaimTemplateKeys = append(resourceClaimTemplateKeys, client.ObjectKeyFromObject(resourceClaimTemplate))
 		logger.V(2).Info("Successfully created resourceClaimTemplate", "resourceClaimTemplate", klog.KObj(resourceClaimTemplate), "container", info.Name)
 	}
 
