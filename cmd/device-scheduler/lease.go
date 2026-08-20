@@ -1,3 +1,19 @@
+/*
+Copyright 2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package main
 
 import (
@@ -12,19 +28,22 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 )
 
 // LeaseDetector Real time detection of whether the specified Leaf is held by the target Pod and has not expired.
 // Thread safe, IsLeader() can be called from any goroutine.
 type LeaseDetector struct {
-	mu             sync.RWMutex
-	current        *coordinationv1.Lease
-	namespace      string
-	leaseName      string
-	identityPrefix string // holderIdentity The prefix that needs to be matched (i.e. Pod name)
-	leaderCallback func()
-	jitter         time.Duration
+	mu              sync.RWMutex
+	current         *coordinationv1.Lease
+	namespace       string
+	leaseName       string
+	identityPrefix  string // holderIdentity The prefix that needs to be matched (i.e. Pod name)
+	leaderCallback  func()
+	releaseCallback func()
+	startOnce       sync.Once
+	startCallback   func()
+	jitter          time.Duration
+	isLeader        bool
 }
 
 type Option func(*LeaseDetector)
@@ -36,6 +55,32 @@ func WithJitter(d time.Duration) Option {
 
 func WithLeaderCallback(c func()) Option {
 	return func(ld *LeaseDetector) { ld.leaderCallback = c }
+}
+
+func WithReleaseCallback(c func()) Option {
+	return func(ld *LeaseDetector) { ld.releaseCallback = c }
+}
+
+func WithStartCallback(c func()) Option {
+	return func(ld *LeaseDetector) { ld.startCallback = c }
+}
+
+func (ld *LeaseDetector) LeaderCallback() {
+	if ld.leaderCallback != nil {
+		ld.leaderCallback()
+	}
+}
+
+func (ld *LeaseDetector) ReleaseCallback() {
+	if ld.releaseCallback != nil {
+		ld.releaseCallback()
+	}
+}
+
+func (ld *LeaseDetector) StartCallbackOnce() {
+	if ld.startCallback != nil {
+		ld.startOnce.Do(ld.startCallback)
+	}
 }
 
 func NewLeaseDetector(
@@ -66,8 +111,17 @@ func NewLeaseDetector(
 		UpdateFunc: func(_, newObj interface{}) { ld.onUpdate(newObj) },
 		DeleteFunc: func(obj interface{}) { ld.onDelete(obj) },
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	return ld, err
+	go func() {
+		checker := informer.HasSyncedChecker()
+		<-checker.Done()
+		ld.StartCallbackOnce()
+	}()
+
+	return ld, nil
 }
 
 // IsLeader Return true if all the following conditions are met:
@@ -75,7 +129,7 @@ func NewLeaseDetector(
 //  2. holderIdentity prefix == podName
 //  3. The lease has not expired（renewTime + leaseDurationSeconds + jitter > now）
 func (ld *LeaseDetector) IsLeader() bool {
-	evaluate, _ := ld.evaluate(ld.GetLeaseSnapshot())
+	evaluate, _ := ld.IsLeaderDetailed()
 	return evaluate
 }
 
@@ -109,42 +163,68 @@ func (ld *LeaseDetector) convertTargetLease(obj interface{}) *coordinationv1.Lea
 	if lease.Namespace != ld.namespace || lease.Name != ld.leaseName {
 		return nil
 	}
-	return lease
+	return lease.DeepCopy()
 }
 
+// onUpdate handles both Add and Update events.
+// It evaluates the new lease state, detects identity transitions, and fires
+// callbacks only on state changes (not on every update).
 func (ld *LeaseDetector) onUpdate(obj interface{}) {
-	lease := ld.convertTargetLease(obj)
-	if lease == nil {
+	ld.StartCallbackOnce()
+
+	current := ld.convertTargetLease(obj)
+	if current == nil {
 		return
 	}
 
-	current := ld.GetLeaseSnapshot()
+	// Evaluate the new lease to determine if we are the leader
+	newIsLeader, reason := ld.evaluate(current)
 
-	// Print logs during initial initialization, resource reconstruction, and identity change
-	if current == nil || current.UID != lease.UID ||
-		!ptr.Equal(current.Spec.HolderIdentity, lease.Spec.HolderIdentity) {
-		isLeader, reason := ld.evaluate(lease)
-		klog.V(3).Infoln(reason)
-		if isLeader && ld.leaderCallback != nil {
-			ld.leaderCallback()
-		}
-	}
-
+	// Capture previous leader state before updating
 	ld.mu.Lock()
-	ld.current = lease.DeepCopy()
+	wasLeader := ld.isLeader
+	ld.current = current
+	ld.isLeader = newIsLeader
 	ld.mu.Unlock()
+
+	// Fire callbacks only on state transitions
+	if wasLeader && !newIsLeader {
+		// Transition: leader -> not leader (released)
+		klog.V(2).Infof("lease-detector: lost leadership, reason: %s", reason)
+		ld.ReleaseCallback()
+	} else if !wasLeader && newIsLeader {
+		// Transition: not leader -> leader (acquired)
+		klog.V(3).Infof("lease-detector: acquired leadership, reason: %s", reason)
+		ld.LeaderCallback()
+	} else {
+		// No state change — only log at verbose level for debugging
+		klog.V(5).Infof("lease-detector: no leadership change, %s", reason)
+	}
 }
 
+// onDelete handles lease deletion events.
+// When the lease is deleted, we immediately transition out of leader state
+// and fire the release callback if we were the leader.
 func (ld *LeaseDetector) onDelete(obj interface{}) {
 	lease := ld.convertTargetLease(obj)
 	if lease == nil {
 		return
 	}
 
+	// Capture previous leader state before clearing
 	ld.mu.Lock()
+	wasLeader := ld.isLeader
 	ld.current = nil
+	ld.isLeader = false
 	ld.mu.Unlock()
-	klog.V(2).Infof("lease-detector: lease %s/%s deleted", ld.namespace, ld.leaseName)
+
+	if wasLeader {
+		// Transition: leader -> not leader (lease deleted)
+		klog.V(2).Infof("lease-detector: lease %s/%s deleted, lost leadership", ld.namespace, ld.leaseName)
+		ld.ReleaseCallback()
+	} else {
+		klog.V(2).Infof("lease-detector: lease %s/%s deleted", ld.namespace, ld.leaseName)
+	}
 }
 
 func (ld *LeaseDetector) evaluate(lease *coordinationv1.Lease) (bool, string) {
@@ -152,7 +232,7 @@ func (ld *LeaseDetector) evaluate(lease *coordinationv1.Lease) (bool, string) {
 		return false, fmt.Sprintf("lease %s/%s does not exist", ld.namespace, ld.leaseName)
 	}
 
-	holder := ""
+	var holder string
 	if lease.Spec.HolderIdentity != nil {
 		holder = *lease.Spec.HolderIdentity
 	}

@@ -98,7 +98,18 @@ spec:
         - name: device-scheduler
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
-          env: {{ toYaml .Values.scheduler.schedulerExtender.env | nindent 12 }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- with .Values.scheduler.schedulerExtender.env }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command:
             - device-scheduler
             - --domain={{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}

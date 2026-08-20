@@ -136,21 +136,6 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
 	pflag.DurationVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval duration.")
 	pflag.DurationVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
-
-	// DEPRECATED, accepted and ignored. The link allocator no longer enumerates
-	// partitions of the whole node, so there is no combinatorial cliff for a
-	// threshold to protect against; the remaining search is bounded internally.
-	//
-	// The flag must keep PARSING even though it does nothing: pflag exits with
-	// "unknown flag" on an unrecognised argument, so simply deleting it would
-	// crash-loop every scheduler whose deployment still passes it. Remove after
-	// one release.
-	var deprecatedBestEffortMaxGPUs int
-	pflag.IntVar(&deprecatedBestEffortMaxGPUs, "best-effort-max-gpus", 0,
-		"DEPRECATED and ignored: link-topology allocation is no longer combinatorial in the node's GPU count.")
-	_ = pflag.CommandLine.MarkDeprecated("best-effort-max-gpus",
-		"link-topology allocation no longer needs a candidate-count threshold; the flag is ignored and will be removed in a future release")
-
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

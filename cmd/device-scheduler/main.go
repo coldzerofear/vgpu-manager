@@ -35,7 +35,9 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/google/uuid"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/component-base/logs"
@@ -156,6 +158,8 @@ func runApp(opt *options.Options) (exitCode int) {
 		klog.Errorln("The watch-lease and leader-elect functions are mutually exclusive and cannot be enabled simultaneously")
 		return exitCode
 	}
+	podName := strings.TrimSpace(os.Getenv("POD_NAME"))
+	podNamespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
 	leaseName := strings.TrimSpace(opt.LeaderElectResourceName)
 	leaseNamespace := strings.TrimSpace(opt.LeaderElectResourceNamespace)
 	if opt.WatchLease || opt.LeaderElect {
@@ -165,6 +169,10 @@ func runApp(opt *options.Options) (exitCode int) {
 		}
 		if leaseNamespace == "" {
 			klog.Errorln("Enabling leader-elect or watch-lease requires specifying leader-elect-resource-namespace")
+			return exitCode
+		}
+		if podName == "" || podNamespace == "" {
+			klog.Errorln("Enabling leader-elect or watch-lease requires specifying environment variable 'POD_NAME' and 'POD_NAMESPACE'")
 			return exitCode
 		}
 	}
@@ -180,7 +188,18 @@ func runApp(opt *options.Options) (exitCode int) {
 			klog.Errorln("Enabling watch-lease requires specifying leader-identity-prefix")
 			return exitCode
 		}
-		leaseDetector, err := NewLeaseDetector(factory, leaseNamespace, leaseName, leaderIdentityPrefix)
+		leaseDetector, err := NewLeaseDetector(factory,
+			leaseNamespace, leaseName, leaderIdentityPrefix,
+			WithStartCallback(func() {
+				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
+			}),
+			WithLeaderCallback(func() {
+				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader)
+			}),
+			WithReleaseCallback(func() {
+				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
+			}),
+		)
 		if err != nil {
 			klog.Errorf("Initialization of LeaseDetector failed: %v", err)
 			return exitCode
@@ -210,13 +229,18 @@ func runApp(opt *options.Options) (exitCode int) {
 			Callbacks: leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(ctx context.Context) {
 					klog.Infof("started leader identity: %s", leaderIdentity)
+					patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader)
 				},
 				OnStoppedLeading: func() {
 					klog.Infoln("stopped leader elect")
+					patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
 				},
 				OnNewLeader: func(identity string) {
-					if leaderIdentity != identity {
+					if leaderIdentity == identity {
+						patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader)
+					} else {
 						klog.Infof("new leader elected: %s", identity)
+						patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
 					}
 				},
 			},
@@ -235,11 +259,11 @@ func runApp(opt *options.Options) (exitCode int) {
 	route.AddReadyHandler(handler, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !util.InformerFactoryHasSynced(factory, r.Context()) {
 			http.Error(w, "internal server error: not synchronized yet completed", http.StatusInternalServerError)
+			return
 		} else if !isLeaderFunc() {
-			http.Error(w, "internal server unavailable: instance is not a leader", http.StatusServiceUnavailable)
-		} else {
-			http.Error(w, "ok", http.StatusOK)
+			klog.V(4).Infoln("internal server unavailable: instance is not a leader")
 		}
+		http.Error(w, "ok", http.StatusOK)
 	}))
 	route.AddFilterPredicate(handler, filterPlugin)
 	route.AddFilterDryRunPredicate(handler, filterPlugin)
@@ -300,6 +324,17 @@ func runApp(opt *options.Options) (exitCode int) {
 	return exitCode
 }
 
+func patchPodRoleLabel(kubeClient kubernetes.Interface, podName, podNamespace, roleValue string) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: podName, Namespace: podNamespace,
+	}}
+	if err := client.PatchPodMetadata(kubeClient, pod, client.PatchMetadata{
+		Labels: map[string]*string{util.SchedulerRoleLabel: &roleValue},
+	}); err != nil && !apierrors.IsNotFound(err) {
+		klog.ErrorS(err, "patch pod leader labels failed", "pod", klog.KObj(pod), "role", roleValue)
+	}
+}
+
 func main() {
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
@@ -307,7 +342,9 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 
-	if exitCode := runApp(opt); exitCode != 0 {
+	exitCode := runApp(opt)
+	time.Sleep(5 * time.Second)
+	if exitCode != 0 {
 		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
 }
