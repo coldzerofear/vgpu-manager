@@ -162,22 +162,30 @@ type DeviceLib struct {
 	NvidiaSMIPath     string
 }
 
-func DetectionDeviceLib(root RootPath) (*DeviceLib, error) {
-	deviceLib, err := NewDeviceLib(root)
-	if err != nil {
+func DetectionDeviceLib(root RootPath) (lib *DeviceLib, err error) {
+	defer func() {
+		if err != nil {
+			klog.Errorln("If this is a GPU node, did you configure the NVIDIA Container Toolkit?")
+			klog.Errorln("If this is a GPU node, did you set the container runtime to `nvidia`?")
+			klog.Errorln("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
+			klog.Errorln("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
+			klog.Errorln("If this is not a GPU node, you should set up a toleration or nodeSelector to only deploy this plugin on GPU nodes")
+		}
+	}()
+	if lib, err = NewDeviceLib(root); err != nil {
 		return nil, err
 	}
-	platform := deviceLib.ResolvePlatform()
+	platform := lib.ResolvePlatform()
 	switch platform {
 	case nvinfo.PlatformNVML, nvinfo.PlatformWSL:
-		if err = deviceLib.NvmlInit(); err != nil {
+		if err = lib.NvmlInit(); err != nil {
 			return nil, err
 		}
-		defer deviceLib.NvmlShutdown()
-		return deviceLib, nil
+		defer lib.NvmlShutdown()
 	default:
-		return nil, fmt.Errorf("incompatible platform detected: %v", platform)
+		err = fmt.Errorf("incompatible platform detected: %v", platform)
 	}
+	return lib, err
 }
 
 func NewDeviceLib(root RootPath) (*DeviceLib, error) {
