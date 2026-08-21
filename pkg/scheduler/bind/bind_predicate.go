@@ -23,6 +23,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/serial"
@@ -69,12 +70,22 @@ func (b *nodeBinding) IsReady(_ context.Context) bool {
 
 func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingArgs) *extenderv1.ExtenderBindingResult {
 	klog.V(4).InfoS("BindingNode", "ExtenderBindingArgs", args)
+	start := time.Now()
+	// Assigned at every exit below; the deferred call is what publishes it.
+	outcome := metrics.ResultBindSuccess
+	defer func() { metrics.ObserveVerb(metrics.VerbBind, outcome, start) }()
+
 	if len(args.Node) == 0 {
+		outcome = metrics.ResultBindNoNode
 		return &extenderv1.ExtenderBindingResult{Error: "ExtenderBindingArgs.Node cannot be empty"}
 	}
 
+	// Recorded apart from the total: the lock is per target node, so on a hot
+	// node this is queueing, not work.
+	lockStart := time.Now()
 	b.locker.Lock(args.Node)
 	defer b.locker.Unlock(args.Node)
+	metrics.ObserveStage(metrics.VerbBind, metrics.StageLockWait, lockStart)
 
 	var (
 		pod *corev1.Pod
@@ -90,16 +101,19 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	if err != nil {
 		klog.ErrorS(err, "kubeClient get target pod failed", "targetPod",
 			fmt.Sprintf("%s/%s", args.PodNamespace, args.PodName))
+		outcome = metrics.ResultBindPodNotFound
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
 	if pod.UID != args.PodUID {
 		msg := fmt.Sprintf("different uid %q from the target pod", args.PodUID)
 		klog.InfoS(msg, "pod", klog.KObj(pod), "currentUid", pod.UID, "targetUid", args.PodUID)
+		outcome = metrics.ResultBindUIDMismatch
 		return &extenderv1.ExtenderBindingResult{Error: msg}
 	}
 	if util.IsVGPUResourcePod(pod) {
 		nodeName, _ := util.HasAnnotation(pod, util.PodPredicateNodeAnnotation)
 		if nodeName != args.Node {
+			outcome = metrics.ResultBindNodeMismatch
 			err = fmt.Errorf("predicate node %q does not match the bound node %q", nodeName, args.Node)
 			klog.ErrorS(err, "", "pod", klog.KObj(pod), "predicateNode", nodeName, "bindingNode", args.Node)
 			b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
@@ -112,6 +126,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 		// Check to prevent node overallocation
 		if !device.ShouldCountPodDeviceAllocation(pod) {
 			klog.ErrorS(err, "device pre allocation check failed", "pod", klog.KObj(pod), "bindingNode", args.Node)
+			outcome = metrics.ResultBindPreAllocExpired
 			err = fmt.Errorf("device pre allocation check failed, unable to bind to node %q", nodeName)
 			b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
 			// patch failed metadata
@@ -124,6 +139,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 
 	if err = client.PatchPodAllocationAllocating(b.kubeClient, pod); err != nil {
 		klog.ErrorS(err, "patch vGPU metadata failed", "pod", klog.KObj(pod))
+		outcome = metrics.ResultBindPatchFailed
 		err = fmt.Errorf("patch vGPU metadata failed: %v", err)
 		return &extenderv1.ExtenderBindingResult{Error: err.Error()}
 	}
@@ -142,6 +158,7 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 
 	err = b.kubeClient.CoreV1().Pods(args.PodNamespace).Bind(ctx, binding, metav1.CreateOptions{})
 	if err != nil {
+		outcome = metrics.ResultBindFailed
 		klog.ErrorS(err, "Pod binding node failed", "pod", klog.KObj(pod), "bindingNode", args.Node)
 		b.recorder.Event(pod, corev1.EventTypeWarning, reason.EventBindingFailed, err.Error())
 		// patch failed metadata

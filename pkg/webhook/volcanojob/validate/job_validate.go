@@ -71,14 +71,14 @@ type validateHandle struct {
 
 func (h *validateHandle) ValidateCreate(ctx context.Context, job *vcv1alpha1.Job, dryRun bool) error {
 	if h.options.DefaultConvertToDRA {
-		if err := h.createResourceClaimTempaltes(ctx, job, dryRun); err != nil {
+		if err := h.createResourceClaimTemplates(ctx, job, dryRun); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (h *validateHandle) createResourceClaimTempaltes(ctx context.Context, job *vcv1alpha1.Job, dryRun bool) (err error) {
+func (h *validateHandle) createResourceClaimTemplates(ctx context.Context, job *vcv1alpha1.Job, dryRun bool) (err error) {
 	logger := log.FromContext(ctx)
 	val, ok := util.HasAnnotation(job, util.DRAOriResAnnotation)
 	if !ok || len(val) == 0 {

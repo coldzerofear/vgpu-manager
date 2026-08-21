@@ -266,7 +266,7 @@ webhooks:
         port: 443
     failurePolicy: {{ $ctx.Values.webhook.failurePolicy }}
     matchPolicy: Equivalent
-    name: validatepod.vgpu-manager.io
+    name: validatejob.vgpu-manager.io
     namespaceSelector:
       matchExpressions:
         - key: vgpu-manager.io/ignore-webhook

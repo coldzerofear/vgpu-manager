@@ -202,8 +202,8 @@ kubeletPlugin:
         # Require authenticated+authorized scrapes (TokenReview / SubjectAccessReview).
         # Enabling this also grants the ServiceAccount the rights to perform those reviews.
         enableRBAC: false
-        # Minimum seconds between two scrapes actually hitting NVML.
-        minScrapeInterval: 1
+        # Minimum duration between two scrapes actually hitting NVML. (must be greater than or equal to 1s)
+        minScrapeInterval: 1s
         logLevel: 4
       securityContext:
         privileged: true
@@ -309,8 +309,8 @@ webhook:
     # Note: the DRA admission path (--dra-admission-enabled) is mandatory for this driver and is
     # always enabled by the chart, so it is intentionally not exposed as a configurable value.
     # Convert legacy vGPU extended-resource requests into DRA ResourceClaims by default.
-    defaultConvert2Dra: true
-    # Combine multiple claim requests into a single ResourceClaim. Requires defaultConvert2Dra=true. (code default: false)
+    defaultConvertDRA: true
+    # Combine multiple claim requests into a single ResourceClaim. Requires defaultConvertDRA=true. (code default: false)
     combinedResourceClaim: false
     logLevel: 4
   # Webhook container requests resources.

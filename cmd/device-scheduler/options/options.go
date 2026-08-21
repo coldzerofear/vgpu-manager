@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apiserver/pkg/util/compatibility"
@@ -44,9 +45,15 @@ type Options struct {
 	EnableTls           bool
 	TlsKeyFile          string
 	TlsCertFile         string
-	CertRefreshInterval int
-	StuckGracePeriod    string
+	CertRefreshInterval time.Duration
+	StuckGracePeriod    time.Duration
 	FeatureGate         featuregate.MutableFeatureGate
+
+	WatchLease                   bool
+	LeaderIdentityPrefix         string
+	LeaderElect                  bool
+	LeaderElectResourceName      string
+	LeaderElectResourceNamespace string
 }
 
 const (
@@ -55,8 +62,8 @@ const (
 	defaultBurst               = 30
 	defaultServerBindPort      = 3456
 	defaultPprofBindPort       = 0
-	defaultCertRefreshInterval = 5
-	defaultStuckGracePeriod    = "30s"
+	defaultCertRefreshInterval = 5 * time.Second
+	defaultStuckGracePeriod    = 30 * time.Second
 
 	Component = "scheduler"
 
@@ -85,16 +92,21 @@ func NewOptions() *Options {
 		compatibility.DefaultBuildEffectiveVersion(),
 		featureGate,
 	))
+	identityPrefix := util.GetEnvDefault("POD_NAME", os.Getenv("HOSTNAME"))
+	if identityPrefix == "" {
+		identityPrefix, _ = os.Hostname()
+	}
 	return &Options{
-		QPS:                 defaultQPS,
-		Burst:               defaultBurst,
-		ServerBindPort:      defaultServerBindPort,
-		PprofBindPort:       defaultPprofBindPort,
-		Domain:              util.GetGlobalDomain(),
-		SchedulerName:       defaultSchedulerName,
-		CertRefreshInterval: defaultCertRefreshInterval,
-		StuckGracePeriod:    defaultStuckGracePeriod,
-		FeatureGate:         featureGate,
+		QPS:                  defaultQPS,
+		Burst:                defaultBurst,
+		ServerBindPort:       defaultServerBindPort,
+		PprofBindPort:        defaultPprofBindPort,
+		Domain:               util.GetGlobalDomain(),
+		SchedulerName:        defaultSchedulerName,
+		CertRefreshInterval:  defaultCertRefreshInterval,
+		StuckGracePeriod:     defaultStuckGracePeriod,
+		LeaderIdentityPrefix: identityPrefix,
+		FeatureGate:          featureGate,
 	}
 }
 
@@ -110,6 +122,11 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.MasterURL, "master", o.MasterURL, "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
 	pflag.Float32Var(&o.QPS, "kube-api-qps", o.QPS, "QPS to use while talking with kubernetes apiserver.")
 	pflag.IntVar(&o.Burst, "kube-api-burst", o.Burst, "Burst to use while talking with kubernetes apiserver.")
+	pflag.BoolVar(&o.WatchLease, "watch-lease", false, "Watch and share a lease created by other components.")
+	pflag.BoolVar(&o.LeaderElect, "leader-elect", false, "Enable leader election function, Ensure that there is only one instance that remains active.")
+	pflag.StringVar(&o.LeaderIdentityPrefix, "leader-identity-prefix", o.LeaderIdentityPrefix, "Watch and share a lease created by other components.")
+	pflag.StringVar(&o.LeaderElectResourceName, "leader-elect-resource-name", "", "Enabling the leader-election or watch-lease feature requires specifying the leader lease resource name.")
+	pflag.StringVar(&o.LeaderElectResourceNamespace, "leader-elect-resource-namespace", "", "Enabling the leader-election or watch-lease feature requires specifying the leader lease resource namespace.")
 	pflag.StringVar(&o.Domain, "domain", o.Domain, "Set global domain name to replace all resource and annotation domains.")
 	pflag.StringVar(&o.SchedulerName, "scheduler-name", o.SchedulerName, "Specify scheduler name.")
 	pflag.IntVar(&o.ServerBindPort, "server-bind-port", o.ServerBindPort, "The port on which the server listens.")
@@ -117,23 +134,8 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.BoolVar(&o.EnableTls, "enable-tls", false, "Open TLS encrypted communication for the server. (default: false)")
 	pflag.StringVar(&o.TlsKeyFile, "tls-key-file", "", "Specify tls key file path. (need --enable-tls)")
 	pflag.StringVar(&o.TlsCertFile, "tls-cert-file", "", "Specify tls cert file path. (need --enable-tls)")
-	pflag.IntVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval in seconds.")
-	pflag.StringVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
-
-	// DEPRECATED, accepted and ignored. The link allocator no longer enumerates
-	// partitions of the whole node, so there is no combinatorial cliff for a
-	// threshold to protect against; the remaining search is bounded internally.
-	//
-	// The flag must keep PARSING even though it does nothing: pflag exits with
-	// "unknown flag" on an unrecognised argument, so simply deleting it would
-	// crash-loop every scheduler whose deployment still passes it. Remove after
-	// one release.
-	var deprecatedBestEffortMaxGPUs int
-	pflag.IntVar(&deprecatedBestEffortMaxGPUs, "best-effort-max-gpus", 0,
-		"DEPRECATED and ignored: link-topology allocation is no longer combinatorial in the node's GPU count.")
-	_ = pflag.CommandLine.MarkDeprecated("best-effort-max-gpus",
-		"link-topology allocation no longer needs a candidate-count threshold; the flag is ignored and will be removed in a future release")
-
+	pflag.DurationVar(&o.CertRefreshInterval, "cert-refresh-interval", o.CertRefreshInterval, "Certificate refresh interval duration.")
+	pflag.DurationVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

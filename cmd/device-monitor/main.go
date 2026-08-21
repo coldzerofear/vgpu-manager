@@ -96,8 +96,8 @@ func runApp(opt *options.Options) (exitCode int) {
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
 
 	minScrapeIntervalDuration := time.Second
-	if opt.MinScrapeInterval > 1 {
-		minScrapeIntervalDuration *= time.Duration(opt.MinScrapeInterval)
+	if opt.MinScrapeInterval > minScrapeIntervalDuration {
+		minScrapeIntervalDuration = opt.MinScrapeInterval
 	}
 
 	infoCollector := collector.NewBuildInfoCollector(nodeConfig.GetNodeName())
@@ -213,7 +213,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	metricsServer := server.NewServer(opts...)
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	go func() {
-		factory.Start(ctx.Done())
+		factory.StartWithContext(ctx)
 		klog.V(4).Infoln("Waiting for InformerFactory cache synchronization...")
 		if util.InformerFactoryHasSynced(factory, ctx) {
 			klog.V(4).Infoln("InformerFactory cache synchronization successful")

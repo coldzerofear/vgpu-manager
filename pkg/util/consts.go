@@ -41,6 +41,12 @@ const (
 	DRAOwnerKeyLabel        = "vgpu-manager.io/owner-key"
 	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
 
+	SchedulerRoleLabel = "vgpu-manager.io/scheduler-role"
+	// SchedulerRoleValueLeader is the label value used to identify the leader pod.
+	SchedulerRoleValueLeader = "leader"
+	// SchedulerRoleValueFollower is the label value used to identify the follower pod.
+	SchedulerRoleValueFollower = "follower"
+
 	KubeGroupNameAnnotation       = "scheduling.k8s.io/group-name"
 	VolcanoGroupNameAnnotation    = "scheduling.volcano.sh/group-name"
 	KoordinatorGangNameAnnotation = "gang.scheduling.koordinator.sh/name"

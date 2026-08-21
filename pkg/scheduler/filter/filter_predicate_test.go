@@ -507,7 +507,7 @@ func Test_DeviceFilter(t *testing.T) {
 			// wait for podLister to sync
 			//time.Sleep(time.Second)
 			state := framework.NewCycleState()
-			nodes, _, err := filterPredicate.deviceFilter(context.Background(), req, nodeList, state)
+			nodes, _, err := filterPredicate.deviceFilter(context.Background(), req, nodeList, state, liveFilter)
 			assert.Equal(t, testCase.err, err)
 			if err != nil {
 				return
@@ -1000,7 +1000,7 @@ func Test_DeviceFilter_InitContainers(t *testing.T) {
 			pod, _ = k8sClient.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
 			req := allocator.BuildAllocationRequest(pod)
 			state := framework.NewCycleState()
-			nodes, _, err := filterPredicate.deviceFilter(ctx, req, nodeList, state)
+			nodes, _, err := filterPredicate.deviceFilter(ctx, req, nodeList, state, liveFilter)
 			assert.NoError(t, err)
 
 			if !tc.wantScheduled {

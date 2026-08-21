@@ -27,6 +27,8 @@ type FilterPredicate interface {
 	Name() string
 	// Filter returns the filter result of predictor, this will tell the suitable nodes to running pod.
 	Filter(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult
+	// FilterDryRun returns the filtering results of the simulated predictor, which will inform the appropriate nodes to run the pod.
+	FilterDryRun(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult
 	// IsReady Return whether the current plugin is ready.
 	IsReady(ctx context.Context) bool
 }
@@ -50,7 +52,10 @@ type BindPredicate interface {
 // add/remove victims on the candidates in-tree did propose so the actual
 // eviction respects our resource view.
 type PreemptPredicate interface {
+	// Name returns the name of this predictor.
 	Name() string
+	// Preempt returns valid nodes that meet the requirements of pod resources and can be preempted.
 	Preempt(ctx context.Context, args extenderv1.ExtenderPreemptionArgs) *extenderv1.ExtenderPreemptionResult
+	// IsReady Return whether the current plugin is ready.
 	IsReady(ctx context.Context) bool
 }

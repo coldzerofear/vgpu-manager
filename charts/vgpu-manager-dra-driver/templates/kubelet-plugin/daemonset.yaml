@@ -281,9 +281,9 @@ spec:
             - --feature-gates={{ $monitorFeatureGates }}
             {{- end }}
             - --enable-rbac={{ $monitor.commands.enableRBAC | default false }}
-            - --min-scrape-interval={{ $monitor.commands.minScrapeInterval | default 1 }}
+            - --min-scrape-interval={{ $monitor.commands.minScrapeInterval | default "1s" }}
             - --container-driver-root=/driver-root
-            - --v={{ $monitor.commands.logLevel | default 4 }}
+            - --v={{ $monitor.commands.logLevel | default 3 }}
           ports:
             - name: device-metrics
               containerPort: {{ $monitorPort }}
