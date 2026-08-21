@@ -207,7 +207,8 @@ func (m *vNumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGat
 		return nil, err
 	}
 	driverVersion := m.baseServer.GetDeviceManager().GetDriverVersion().DriverVersion
-	cudaDriverVersion := strconv.Itoa(int(m.baseServer.GetDeviceManager().GetDriverVersion().CudaDriverVersion))
+	cudaDriverVersion := m.baseServer.GetDeviceManager().GetDriverVersion().CudaDriverVersion.String()
+	major, minor := m.baseServer.GetDeviceManager().GetDriverVersion().CudaDriverVersion.MajorAndMinor()
 	metadata := client.PatchMetadata{
 		Annotations: map[string]*string{
 			util.NodeConfigInfoAnnotation:     pointer.String(nodeConfigEncode),
@@ -217,6 +218,8 @@ func (m *vNumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGat
 		Labels: map[string]*string{
 			util.NodeNvidiaDriverVersionLabel: pointer.String(driverVersion),
 			util.NodeNvidiaCudaVersionLabel:   pointer.String(cudaDriverVersion),
+			util.NodeNvidiaCudaMajorLabel:     pointer.String(strconv.Itoa(int(major))),
+			util.NodeNvidiaCudaMinorLabel:     pointer.String(strconv.Itoa(int(minor))),
 		},
 	}
 	return &metadata, nil
@@ -234,6 +237,8 @@ func (m *vNumberDevicePlugin) cleanupRegistry(_ featuregate.FeatureGate) (*clien
 		Labels: map[string]*string{
 			util.NodeNvidiaDriverVersionLabel: nil,
 			util.NodeNvidiaCudaVersionLabel:   nil,
+			util.NodeNvidiaCudaMajorLabel:     nil,
+			util.NodeNvidiaCudaMinorLabel:     nil,
 		},
 	}
 	return &metadata, nil
