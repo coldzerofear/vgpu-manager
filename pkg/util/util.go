@@ -47,6 +47,7 @@ import (
 	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"volcano.sh/apis/pkg/apis/batch/v1alpha1"
 )
 
 func InsertAnnotation(obj metav1.Object, k, v string) {
@@ -183,17 +184,28 @@ func IsVGPUResourcePod(pod *corev1.Pod) bool {
 	if pod == nil {
 		return false
 	}
-	for i := range pod.Spec.InitContainers {
-		if GetResourceOfContainer(&pod.Spec.InitContainers[i], VGPUNumberResourceName) > 0 {
+	return IsVGPUResourcePodSpec(pod.Spec)
+}
+
+func IsVGPUResourcePodSpec(spec corev1.PodSpec) bool {
+	for i := range spec.Containers {
+		if GetResourceOfContainer(&spec.Containers[i], VGPUNumberResourceName) > 0 {
 			return true
 		}
 	}
-	for i := range pod.Spec.Containers {
-		if GetResourceOfContainer(&pod.Spec.Containers[i], VGPUNumberResourceName) > 0 {
+	for i := range spec.InitContainers {
+		if GetResourceOfContainer(&spec.InitContainers[i], VGPUNumberResourceName) > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+func IsVGPUResourceVcTask(task *v1alpha1.TaskSpec) bool {
+	if task == nil {
+		return false
+	}
+	return IsVGPUResourcePodSpec(task.Template.Spec)
 }
 
 // IsContainerRunning reports whether the named container is currently in the
@@ -675,8 +687,12 @@ func EnsureDir(path string, perm os.FileMode) error {
 	if err := os.MkdirAll(path, perm); err != nil {
 		return err
 	}
-	if err := os.Chmod(path, perm); err != nil {
+	info, err := os.Lstat(path)
+	if err != nil {
 		return err
+	}
+	if info.Mode().IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return os.Chmod(path, perm)
 	}
 	return nil
 }

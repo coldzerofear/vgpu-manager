@@ -247,9 +247,11 @@ func (req *AllocationRequest) recordTopologyOutcome(result, alignment string) {
 	}
 }
 
-// TopologyOutcome reports what the topology decisions on this node achieved.
-// Only meaningful on the per-node snapshot the filter passed to the allocator,
-// and only after a SUCCESSFUL Allocate.
+// TopologyOutcome reports what the topology decisions achieved during the LAST
+// Allocate call on this request. Allocate clears it on entry, so it always
+// describes exactly one node — the filter reuses one request across every
+// candidate. Only meaningful after a SUCCESSFUL Allocate; a simulation records
+// nothing at all.
 func (req *AllocationRequest) TopologyOutcome() TopologyOutcome {
 	return req.topoOutcome
 }

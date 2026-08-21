@@ -41,6 +41,7 @@ const (
 	apiPrefix   = "/scheduler"
 	// predication router path
 	filterPerfix       = apiPrefix + "/filter"
+	filterDryRunPerfix = apiPrefix + "/filter-dryrun"
 	bindPerfix         = apiPrefix + "/bind"
 	preemptPerfix      = apiPrefix + "/preempt"
 	maxRequestBodySize = 7 * 1024 * 1024 // max 7mb request body size
@@ -72,26 +73,40 @@ func VersionRoute(w http.ResponseWriter, _ *http.Request, _ httprouter.Params) {
 	_, _ = fmt.Fprint(w, fmt.Sprint(version.Get()))
 }
 
-func AddReadyProbe(router *httprouter.Router, checker ...healthz.Checker) {
-	c := healthz.Ping
-	if len(checker) > 0 {
-		c = checker[0]
+func AddReadyHandler(router *httprouter.Router, handler http.Handler) {
+	router.GET(readyzPath, func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		handler.ServeHTTP(w, r)
+	})
+}
+
+func AddReadyProbe(router *httprouter.Router, checkers ...healthz.Checker) {
+	checker := func(req *http.Request) error {
+		for _, checker := range checkers {
+			if err := checker(req); err != nil {
+				return err
+			}
+		}
+		return healthz.Ping(req)
 	}
 	probeHandler := &healthz.Handler{
-		Checks: map[string]healthz.Checker{"readyz": c},
+		Checks: map[string]healthz.Checker{"readyz": checker},
 	}
 	router.GET(readyzPath, func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		probeHandler.ServeHTTP(w, r)
 	})
 }
 
-func AddHealthProbe(router *httprouter.Router, checker ...healthz.Checker) {
-	c := healthz.Ping
-	if len(checker) > 0 {
-		c = checker[0]
+func AddHealthProbe(router *httprouter.Router, checkers ...healthz.Checker) {
+	checker := func(req *http.Request) error {
+		for _, checker := range checkers {
+			if err := checker(req); err != nil {
+				return err
+			}
+		}
+		return healthz.Ping(req)
 	}
 	probeHandler := &healthz.Handler{
-		Checks: map[string]healthz.Checker{"healthz": c},
+		Checks: map[string]healthz.Checker{"healthz": checker},
 	}
 	router.GET(healthzPath, func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		probeHandler.ServeHTTP(w, r)
@@ -105,12 +120,25 @@ func AddMetricsHandle(router *httprouter.Router, metrics http.Handler) {
 	router.GET(metricsPath, DebugLogging(handleFunc, metricsPath))
 }
 
+// FilterFunc is the verb a filter route serves: the live Filter, or the
+// read-only FilterDryRun used by scale-up simulation.
+type FilterFunc func(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult
+
 func AddFilterPredicate(router *httprouter.Router, predicate predicate.FilterPredicate) {
-	path := filterPerfix
-	router.POST(path, DebugLogging(FilterPredicateRoute(predicate), path))
+	addFilterRoute(router, filterPerfix, predicate, predicate.Filter)
 }
 
-func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle {
+func AddFilterDryRunPredicate(router *httprouter.Router, predicate predicate.FilterPredicate) {
+	addFilterRoute(router, filterDryRunPerfix, predicate, predicate.FilterDryRun)
+}
+
+// addFilterRoute binds one verb to one path, so the handler never has to infer
+// which verb it is serving from the request URL.
+func addFilterRoute(router *httprouter.Router, path string, predicate predicate.FilterPredicate, filter FilterFunc) {
+	router.POST(path, DebugLogging(FilterPredicateRoute(predicate, filter), path))
+}
+
+func FilterPredicateRoute(predicate predicate.FilterPredicate, filter FilterFunc) httprouter.Handle {
 	return func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 		if !checkBody(w, r) {
 			return
@@ -136,7 +164,7 @@ func FilterPredicateRoute(predicate predicate.FilterPredicate) httprouter.Handle
 				Error: err.Error(),
 			}
 		} else {
-			extenderFilterResult = predicate.Filter(r.Context(), extenderArgs)
+			extenderFilterResult = filter(r.Context(), extenderArgs)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

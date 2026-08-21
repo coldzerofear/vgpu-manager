@@ -708,6 +708,63 @@ typedef enum CUfunction_attribute_enum {
      */
     CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT = 9,
 
+    /**
+     * If this attribute is set, the kernel must launch with a valid cluster size specified.
+     * See cuFuncSetAttribute, cuKernelSetAttribute
+     */
+    CU_FUNC_ATTRIBUTE_CLUSTER_SIZE_MUST_BE_SET = 10,
+
+    /**
+     * The required cluster width in blocks. The values must either all be 0 or all be positive.
+     * The validity of the cluster dimensions is otherwise checked at launch time.
+     * If the value is set during compile time, it cannot be set at runtime.
+     * Setting it at runtime will return CUDA_ERROR_NOT_PERMITTED.
+     * See cuFuncSetAttribute, cuKernelSetAttribute
+     */
+    CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_WIDTH = 11,
+
+    /**
+    * The required cluster height in blocks. The values must either all be 0 or all be positive.
+    * The validity of the cluster dimensions is otherwise checked at launch time.If the value is set
+    * during compile time, it cannot be set at runtime. Setting it at runtime should return CUDA_ERROR_NOT_PERMITTED.
+    * See cuFuncSetAttribute, cuKernelSetAttribute
+    */
+    CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_HEIGHT = 12,
+
+    /**
+    * The required cluster depth in blocks. The values must either all be 0 or all be positive.
+    * The validity of the cluster dimensions is otherwise checked at launch time.
+    * If the value is set during compile time, it cannot be set at runtime.
+    * Setting it at runtime should return CUDA_ERROR_NOT_PERMITTED.
+    * See cuFuncSetAttribute, cuKernelSetAttribute
+    */
+    CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_DEPTH = 13,
+
+    /**
+    * Whether the function can be launched with non-portable cluster size.
+    * 1 is allowed, 0 is disallowed. A non-portable cluster size may only function on the specific SKUs the program is tested on.
+    * The launch might fail if the program is run on a different hardware platform.
+    * CUDA API provides cudaOccupancyMaxActiveClusters to assist with checking whether the desired size can be
+    * launched on the current device.Portable Cluster SizeA portable cluster size is guaranteed to be functional
+    * on all compute capabilities higher than the target compute capability.
+    * The portable cluster size for sm_90 is 8 blocks per cluster.
+    * This value may increase for future compute capabilities.The specific hardware unit may support higher
+    * cluster sizes that’s not guaranteed to be portable. See cuFuncSetAttribute, cuKernelSetAttribute
+    */
+    CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED = 14,
+
+    /**
+    * The block scheduling policy of a function. The value type is CUclusterSchedulingPolicy / cudaClusterSchedulingPolicy.
+    * See cuFuncSetAttribute, cuKernelSetAttribute
+    */
+    CU_FUNC_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE = 15,
+
+    /**
+     * Whether the function can be updated on device. 1 means device node update is supported,
+     * 0 is unsupported. See cuFuncGetAttribute.
+     */
+    CU_FUNC_ATTRIBUTE_DEVICE_NODE_UPDATE_SUPPORTED = 16,
+
     CU_FUNC_ATTRIBUTE_MAX
 } CUfunction_attribute;
 
@@ -1395,6 +1452,7 @@ typedef enum CUgraphChildGraphNodeOwnership_enum {
                                                           Cannot be added as a child graph of a separate parent graph;
                                                           Cannot be used as an argument to cuGraphExecUpdate;
                                                           Cannot have additional memory allocation or free nodes added. */
+      CU_GRAPH_CHILD_GRAPH_OWNERSHIP_INVALID = -1,  /* Invalid ownership flag. Set when params are queried to prevent accidentally reusing the driver-owned graph object */
 } CUgraphChildGraphNodeOwnership;
 
 /**

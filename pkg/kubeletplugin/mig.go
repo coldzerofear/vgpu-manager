@@ -155,9 +155,6 @@ func CommonAttributesMig(parent *nvidia.GpuInfo, profileName string) map[resourc
 		"brand": {
 			StringValue: &parent.Brand,
 		},
-		"numa": {
-			IntValue: ptr.To(int64(parent.GetNumaNode())),
-		},
 		"architecture": {
 			StringValue: &parent.Architecture,
 		},
@@ -178,15 +175,9 @@ func CommonAttributesMig(parent *nvidia.GpuInfo, profileName string) map[resourc
 		}
 	}
 
-	if parent.PciBusIDAttr != nil {
-		attrs[parent.PciBusIDAttr.Name] = parent.PciBusIDAttr.Value
-	}
-
-	if parent.PcieRootAttr != nil {
-		attrs[parent.PcieRootAttr.Name] = parent.PcieRootAttr.Value
-	}
-
-	addCompatibilityNumaNodeAttribute(attrs, parent.NumaNodeAttr)
+	addDeviceAttribute(attrs, parent.PciBusIDAttr)
+	addDeviceAttribute(attrs, parent.PcieRootAttr)
+	addDeviceAttribute(attrs, parent.NumaNodeAttr)
 
 	return attrs
 }

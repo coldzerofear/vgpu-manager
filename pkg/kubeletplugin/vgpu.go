@@ -167,7 +167,7 @@ func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) 
 	}
 	for _, dirPath := range preparedDirs {
 		if err := util.EnsureDir(dirPath, 0o777); err != nil {
-			klog.Warningf("Failed to ensure directory %s: %s", dirPath, err)
+			return "", "", fmt.Errorf("failed to ensure directory %s: %v", dirPath, err)
 		}
 	}
 	// pids.config is bind-mounted into the container as a file, so it has to

@@ -39,12 +39,14 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/filter"
+	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -167,6 +169,10 @@ func (p *vgpuPreempt) Preempt(
 	_ context.Context, args extenderv1.ExtenderPreemptionArgs,
 ) *extenderv1.ExtenderPreemptionResult {
 	klog.V(4).InfoS("PreemptPod", "pod", klog.KObj(args.Pod), "nodeVictims", NodeVictims(args))
+	start := time.Now()
+	// Assigned at every exit below; the deferred call is what publishes it.
+	outcome := metrics.ResultPreemptPassthrough
+	defer func() { metrics.ObserveVerb(metrics.VerbPreempt, outcome, start) }()
 	pod := args.Pod
 	if pod == nil {
 		klog.V(4).InfoS("Preempt called with nil pod, passing input through")
@@ -190,6 +196,7 @@ func (p *vgpuPreempt) Preempt(
 	}
 
 	if len(victimsMap) == 0 {
+		outcome = metrics.ResultPreemptNoVictims
 		return result
 	}
 
@@ -319,6 +326,11 @@ func (p *vgpuPreempt) Preempt(
 			len(victimsMap))
 	}
 
+	if len(result.NodeNameToMetaVictims) > 0 {
+		outcome = metrics.ResultPreemptVictims
+	} else {
+		outcome = metrics.ResultPreemptNoVictims
+	}
 	return result
 }
 
@@ -404,6 +416,7 @@ func (p *vgpuPreempt) refineForNode(
 	if r := filter.CheckNode(node, filter.GetMemoryPolicyFunc(req.Pod)); r != nil {
 		klog.V(3).InfoS("Preempt: check node failed",
 			"node", nodeName, "pod", klog.KObj(req.Pod), "reason", r.Detailed())
+		metrics.RecordNodeReject(metrics.VerbPreempt, string(r.Primary))
 		return nil, 0, false
 	}
 	if req.Max.Number > nodeInfo.GetSchedulableDeviceCount() {
@@ -412,6 +425,7 @@ func (p *vgpuPreempt) refineForNode(
 				req.Max.Number, nodeInfo.GetSchedulableDeviceCount())
 		klog.V(3).InfoS("Preempt: "+string(filterReason.Primary), "node", nodeName,
 			"pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
+		metrics.RecordNodeReject(metrics.VerbPreempt, string(filterReason.Primary))
 		return nil, 0, false
 	}
 	if req.Max.Cores > nodeInfo.GetMaxDeviceCores() {
@@ -419,6 +433,7 @@ func (p *vgpuPreempt) refineForNode(
 			WithDetail("max %d cores, largest device has %d", req.Max.Cores, nodeInfo.GetMaxDeviceCores())
 		klog.V(3).InfoS("Preempt: "+string(filterReason.Primary), "node", nodeName,
 			"pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
+		metrics.RecordNodeReject(metrics.VerbPreempt, string(filterReason.Primary))
 		return nil, 0, false
 	}
 	if req.Max.Memory > nodeInfo.GetMaxDeviceMemory() {
@@ -426,6 +441,7 @@ func (p *vgpuPreempt) refineForNode(
 			WithDetail("max %d memory, largest device has %d", req.Max.Memory, nodeInfo.GetMaxDeviceMemory())
 		klog.V(3).InfoS("Preempt: "+string(filterReason.Primary), "node", nodeName,
 			"pod", klog.KObj(req.Pod), "reason", filterReason.Detailed())
+		metrics.RecordNodeReject(metrics.VerbPreempt, string(filterReason.Primary))
 		return nil, 0, false
 	}
 	// CheckDeviceUuid/Type return true when a device is ALLOWED by the
@@ -452,6 +468,7 @@ func (p *vgpuPreempt) refineForNode(
 			}
 			klog.V(3).InfoS("Preempt: "+string(rc), "node", nodeName, "pod", klog.KObj(req.Pod),
 				"matched", matched, "need", req.Max.Number)
+			metrics.RecordNodeReject(metrics.VerbPreempt, string(rc))
 			return nil, 0, false
 		}
 	}
@@ -463,9 +480,10 @@ func (p *vgpuPreempt) refineForNode(
 		if v == nil {
 			continue
 		}
-		if isProtectedFromPreemption(v, req.GangName) {
+		if protectedBy, ok := isProtectedFromPreemption(v, req.GangName); ok {
 			klog.V(4).InfoS("Preempt: refusing to evict protected pod proposed by in-tree",
-				"pod", klog.KObj(v), "node", nodeName)
+				"pod", klog.KObj(v), "node", nodeName, "protectedBy", protectedBy)
+			metrics.PreemptProtectedTotal.WithLabelValues(protectedBy).Inc()
 			continue
 		}
 		keep = append(keep, v)
@@ -476,7 +494,9 @@ func (p *vgpuPreempt) refineForNode(
 	keptFromInput := len(keep)
 
 	// First pass: does the pending pod fit after removing the kept victims?
-	if p.canAllocate(req, nodeInfo, allVGPUPods, excludedUidSet) {
+	lastCode, ok := p.canAllocate(req, nodeInfo, allVGPUPods, excludedUidSet)
+	if ok {
+		metrics.PreemptVictimsAdded.Observe(0)
 		return keep, pdbViolationsUpperBound(victims.NumPDBViolations, keptFromInput, 0), true
 	}
 
@@ -487,11 +507,15 @@ func (p *vgpuPreempt) refineForNode(
 	for _, cand := range additional {
 		excludedUidSet.Insert(cand.UID)
 		keep = append(keep, cand)
-		if p.canAllocate(req, nodeInfo, allVGPUPods, excludedUidSet) {
+		if lastCode, ok = p.canAllocate(req, nodeInfo, allVGPUPods, excludedUidSet); ok {
 			added := len(keep) - keptFromInput
+			// How much MORE disruption than kube-scheduler planned.
+			metrics.PreemptVictimsAdded.Observe(float64(added))
 			return keep, pdbViolationsUpperBound(victims.NumPDBViolations, keptFromInput, added), true
 		}
 	}
+	// No victim set on this node makes the pod fit; report why it still refused.
+	metrics.RecordNodeReject(metrics.VerbPreempt, string(lastCode))
 	return nil, 0, false
 }
 
@@ -530,10 +554,14 @@ func pdbViolationsUpperBound(originalCount int64, keptLen, addedLen int) int64 {
 // canAllocate constructs a NodeInfo with excluded pods removed and asks the
 // allocator whether the pending pod fits. Reuses the same NewNodeInfo
 // excludedPods mechanism already used during the filter re-allocation path.
+//
+// Returns the structured code of the last refusal alongside the verdict, so a
+// node dropped after every victim set was tried can be reported under the same
+// reason vocabulary the filter uses.
 func (p *vgpuPreempt) canAllocate(
 	req *allocator.AllocationRequest, nodeInfo *device.NodeInfo,
 	allVGPUPods []*corev1.Pod, excludedUidSet sets.Set[k8stypes.UID],
-) bool {
+) (reason.Code, bool) {
 	nodeInfo.AddPodsUsedResources(allVGPUPods,
 		device.WithExcludedUidSet(excludedUidSet),
 		device.WithResetPods(true),
@@ -550,13 +578,13 @@ func (p *vgpuPreempt) canAllocate(
 	case err != nil:
 		klog.V(3).ErrorS(err, "Preempt: allocator internal error",
 			"pod", klog.KObj(req.Pod), "node", nodeInfo.GetName())
-		return false
+		return reason.AllocatorInternalError, false
 	case rsn != nil:
 		klog.V(5).InfoS("Preempt: allocator rejects pod after excluding victims",
 			"pod", klog.KObj(req.Pod), "node", nodeInfo.GetName(), "reason", rsn.Detailed())
-		return false
+		return rsn.Primary, false
 	}
-	return true
+	return "", true
 }
 
 // findAdditionalVictims returns lower-priority vGPU pods on the given node
@@ -613,7 +641,7 @@ func (p *vgpuPreempt) findAdditionalVictims(
 		if !kubelettypes.Preemptable(req.Pod, candidate) {
 			continue
 		}
-		if isProtectedFromPreemption(candidate, req.GangName) {
+		if _, ok := isProtectedFromPreemption(candidate, req.GangName); ok {
 			continue
 		}
 		if p.violationOfPDBs(candidate) {
@@ -730,7 +758,8 @@ func passthrough(args extenderv1.ExtenderPreemptionArgs) *extenderv1.ExtenderPre
 	return out
 }
 
-// isProtectedFromPreemption returns true when the pod must NOT be evicted.
+// isProtectedFromPreemption reports whether the pod must NOT be evicted, and
+// which rule protects it (a metrics label, empty when the pod is evictable).
 //
 // We intentionally do NOT consult pod.Spec.PreemptionPolicy here. In
 // kube-scheduler 1.32 that field gates whether a pod can INITIATE preemption
@@ -770,21 +799,21 @@ func passthrough(args extenderv1.ExtenderPreemptionArgs) *extenderv1.ExtenderPre
 //     additional victims anyway; this check still defends against a race
 //     where in-tree's proposed victims include a pod that just entered
 //     bind state during our processing.
-func isProtectedFromPreemption(pod *corev1.Pod, gangName string) bool {
+func isProtectedFromPreemption(pod *corev1.Pod, gangName string) (string, bool) {
 	if pod.DeletionTimestamp != nil {
-		return true
+		return metrics.ProtectedTerminating, true
 	}
 	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-		return true
+		return metrics.ProtectedTerminating, true
 	}
 	if kubelettypes.IsCriticalPod(pod) {
-		return true
+		return metrics.ProtectedCritical, true
 	}
 	if owner := metav1.GetControllerOf(pod); owner != nil && owner.Kind == "DaemonSet" {
-		return true
+		return metrics.ProtectedDaemonSet, true
 	}
 	if pod.Spec.NodeName == "" && device.ShouldCountPodDeviceAllocation(pod) {
-		return true
+		return metrics.ProtectedBinding, true
 	}
 	// Avoid seizing resources from brother pods. Compared on the
 	// namespace-qualified key: victims are drawn from the whole cluster, so a
@@ -792,10 +821,10 @@ func isProtectedFromPreemption(pod *corev1.Pod, gangName string) bool {
 	// share a gang name, and preemption would come up short of victims.
 	if gangName != "" {
 		if key, _ := util.PodGangKey(pod); gangName == key {
-			return true
+			return metrics.ProtectedGangSibling, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // sortVictimsByPreference orders candidates from "prefer to evict" to

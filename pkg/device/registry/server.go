@@ -468,8 +468,8 @@ func isCandidateAlive(cand TargetCandidate, cgroupResolver func(string) string, 
 	if util.PodIsTerminated(cand.Pod) {
 		return nil, false
 	}
-	status, ok := cgroup.GetContainerStatus(cand.Pod, cand.ContainerName)
-	if !ok || status.State.Running == nil {
+	containerStatus, ok := cgroup.GetContainerStatus(cand.Pod, cand.ContainerName)
+	if !ok || containerStatus.State.Running == nil {
 		*lastErr = fmt.Errorf("candidate container %q in pod %s not yet running",
 			cand.ContainerName, klog.KObj(cand.Pod))
 		return nil, false
@@ -573,7 +573,9 @@ func (s *DeviceRegistryServerImpl) persistPids(configDir string, pids []int) err
 	if len(pids) == 0 {
 		return fmt.Errorf("refusing to write an empty pids file at %s", filepath.Join(configDir, PidsConfig))
 	}
-	_ = util.EnsureDir(configDir, 0o777)
+	if err := util.EnsureDir(configDir, 0o777); err != nil {
+		klog.V(2).ErrorS(err, "Failed to prepare directory", "directory", configDir)
+	}
 	var buf bytes.Buffer
 	sort.Ints(pids)
 	for _, pid := range pids {

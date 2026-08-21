@@ -10,7 +10,7 @@ metadata:
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["create"]
+    verbs: ["create", "list", "watch"]
   - apiGroups: ["coordination.k8s.io"]
     resourceNames: [{{ .Values.scheduler.schedulerName | default "vgpu-scheduler" | quote }}]
     resources: ["leases"]

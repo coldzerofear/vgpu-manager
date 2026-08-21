@@ -28,6 +28,8 @@ const (
 	NvidiaDomain                 = "nvidia.com"
 	NodeNvidiaDriverVersionLabel = NvidiaDomain + "/node-driver-version"
 	NodeNvidiaCudaVersionLabel   = NvidiaDomain + "/node-cuda-version"
+	NodeNvidiaCudaMajorLabel     = NvidiaDomain + "/node-cuda-major"
+	NodeNvidiaCudaMinorLabel     = NvidiaDomain + "/node-cuda-minor"
 	NvidiaNativeGPUResourceName  = NvidiaDomain + "/gpu"
 
 	DRADriverName       = "manager.nvidia.com"
@@ -38,9 +40,14 @@ const (
 
 	IgnoreWebhookAnnotation = "vgpu-manager.io/ignore-webhook"
 	DRAOriResAnnotation     = "vgpu-manager.io/original-resources"
-	DRAGenNameAnnotation    = "vgpu-manager.io/generate-name"
-	DRAOwnerPodLabel        = "vgpu-manager.io/owner-pod"
+	DRAOwnerKeyLabel        = "vgpu-manager.io/owner-key"
 	DRACreateTimeLabel      = "vgpu-manager.io/create-timestamp"
+
+	SchedulerRoleLabel = "vgpu-manager.io/scheduler-role"
+	// SchedulerRoleValueLeader is the label value used to identify the leader pod.
+	SchedulerRoleValueLeader = "leader"
+	// SchedulerRoleValueFollower is the label value used to identify the follower pod.
+	SchedulerRoleValueFollower = "follower"
 
 	KubeGroupNameAnnotation       = "scheduling.k8s.io/group-name"
 	VolcanoGroupNameAnnotation    = "scheduling.volcano.sh/group-name"

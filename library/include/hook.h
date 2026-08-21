@@ -693,13 +693,6 @@ typedef struct {
   int external_process_num;
 } utilization_t;
 
-typedef struct {
-  pthread_t tid;
-  void *pointer;
-} tid_dlsym;
-
-#define DLMAP_SIZE 100
-
 typedef enum VGPU_COMPATIBILITY_MODE_enum {
   HOST_COMPATIBILITY_MODE        = 0,
   CGROUPV1_COMPATIBILITY_MODE    = 1,

@@ -105,25 +105,26 @@ func (d *AllocatableDevice) CanonicalName() string {
 }
 
 func (d *AllocatableDevice) GetDevice(config *Config) resourceapi.Device {
+	var dev resourceapi.Device
 	switch d.Type() {
 	case GpuDeviceType:
-		dev := d.Gpu.GetDevice()
+		dev = d.Gpu.GetDevice()
 		applyConsumableShares(&dev, config)
-		return dev
 	case MigStaticDeviceType:
-		dev := d.MigStatic.GetDevice()
+		dev = d.MigStatic.GetDevice()
 		applyConsumableShares(&dev, config)
-		return dev
 	case MigDynamicDeviceType:
 		panic("GetDevice() must currently not be called for MigDynamicDeviceType")
 	case VfioDeviceType:
 		// VFIO passthrough devices do not support consumable shares.
-		return d.Vfio.GetDevice()
+		dev = d.Vfio.GetDevice()
 	case VGpuDeviceType:
-		return d.VGpu.GetDevice()
+		dev = d.VGpu.GetDevice()
 	default:
 		panic("unexpected type for AllocatableDevice")
 	}
+	dev.Taints = d.Taints()
+	return dev
 }
 
 // UUID() is here for `AllocatableDevices` to implement the `UUIDProvider`
@@ -162,7 +163,7 @@ func (d *AllocatableDevice) GetGPUPCIBusID() string {
 	case GpuDeviceType:
 		return d.Gpu.PciBusID
 	case MigStaticDeviceType:
-		return d.MigStatic.pciBusID
+		return d.MigStatic.Parent.PciBusID
 	case MigDynamicDeviceType:
 		return d.MigDynamic.Parent.PciBusID
 	case VfioDeviceType:
@@ -185,6 +186,26 @@ func (d AllocatableDevices) GetVGPUs() []*AllocatableDevice {
 	var devices []*AllocatableDevice
 	for _, device := range d {
 		if device.Type() == VGpuDeviceType {
+			devices = append(devices, device)
+		}
+	}
+	return devices
+}
+
+func (d AllocatableDevices) GetMigStaticDevices() []*AllocatableDevice {
+	var devices []*AllocatableDevice
+	for _, device := range d {
+		if device.Type() == MigStaticDeviceType {
+			devices = append(devices, device)
+		}
+	}
+	return devices
+}
+
+func (d AllocatableDevices) GetMigDynamicDevices() []*AllocatableDevice {
+	var devices []*AllocatableDevice
+	for _, device := range d {
+		if device.Type() == MigDynamicDeviceType {
 			devices = append(devices, device)
 		}
 	}
@@ -382,4 +403,72 @@ func (d *AllocatableDevice) AddOrUpdateTaint(taint *resourceapi.DeviceTaint) boo
 	// 3. Key doesn't exist yet, append the dereferenced struct
 	d.taints = append(d.taints, *taint)
 	return true
+}
+
+// RemoveTaint removes the taint with the specified key. It returns true when a
+// taint was removed.
+func (d *AllocatableDevice) RemoveTaint(key string) (resourceapi.DeviceTaint, bool) {
+	for i, taint := range d.taints {
+		if taint.Key == key {
+			d.taints = slices.Delete(d.taints, i, i+1)
+			return taint, true
+		}
+	}
+	return resourceapi.DeviceTaint{}, false
+}
+
+func (d AllocatableDevices) GetGPUDeviceByUUID(uuid string) *AllocatableDevice {
+	for _, device := range d {
+		if device.Type() == GpuDeviceType &&
+			device.Gpu.UUID == uuid {
+			return device
+		}
+	}
+
+	return nil
+}
+
+func (d AllocatableDevices) GetMigStaticDeviceByLiveTuple(tuple *MigLiveTuple) *AllocatableDevice {
+	if tuple == nil {
+		return nil
+	}
+	for _, device := range d {
+		if device.Type() != MigStaticDeviceType {
+			continue
+		}
+		migTuple := device.MigStatic.LiveTuple()
+		if migTuple.ParentUUID == tuple.ParentUUID &&
+			migTuple.GIID == tuple.GIID &&
+			migTuple.CIID == tuple.CIID {
+			return device
+		}
+	}
+
+	return nil
+}
+
+func (d AllocatableDevices) GetMigDynamicDeviceByTuple(tuple *MigSpecTuple) *AllocatableDevice {
+	if tuple == nil {
+		return nil
+	}
+	for _, device := range d {
+		if device.Type() != MigDynamicDeviceType {
+			continue
+		}
+		migTuple := device.MigDynamic.Tuple()
+		if migTuple.ParentPCIBusID == tuple.ParentPCIBusID &&
+			migTuple.ProfileID == tuple.ProfileID &&
+			migTuple.PlacementStart == tuple.PlacementStart {
+			return device
+		}
+	}
+	return nil
+}
+
+func (d AllocatableDevices) List() []*AllocatableDevice {
+	deviceList := make([]*AllocatableDevice, 0, len(d))
+	for _, device := range d {
+		deviceList = append(deviceList, device)
+	}
+	return deviceList
 }

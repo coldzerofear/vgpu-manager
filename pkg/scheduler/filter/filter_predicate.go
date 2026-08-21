@@ -176,62 +176,52 @@ func NodeNames(args extenderv1.ExtenderArgs) []string {
 	return names
 }
 
-func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
-	klog.V(4).InfoS("FilterNode", "pod", klog.KObj(args.Pod), "nodeNames", NodeNames(args))
-	pod := args.Pod
-	if pod == nil {
-		return &extenderv1.ExtenderFilterResult{
-			Error: "ExtenderArgs.Pod cannot be empty",
-		}
-	}
-	if pod.Spec.NodeName != "" {
-		return &extenderv1.ExtenderFilterResult{
-			Error: fmt.Sprintf("Pod has been bound to node %q", pod.Spec.NodeName),
-		}
-	}
-	// Parse pod-wide scheduling inputs ONCE — req feeds both the node-
-	// ranking comparators here and the per-node allocator below, so they
-	// share annotation-parse cost and never disagree about what the pod
-	// asked for.
-	req := allocator.BuildAllocationRequest(pod)
-	if len(req.Containers) == 0 {
-		klog.V(5).InfoS("Skip pods that do not request vGPU", "pod", klog.KObj(pod))
-		return &extenderv1.ExtenderFilterResult{
-			Nodes:     args.Nodes,
-			NodeNames: args.NodeNames,
-		}
-	}
-	if pod.Spec.OS != nil && pod.Spec.OS.Name == corev1.Windows {
-		return &extenderv1.ExtenderFilterResult{
-			Error: fmt.Sprintf("vGPU does not support windows pod"),
-		}
-	}
+// filterMode selects which of the two contracts a Filter call honours. The
+// whole chain is shared: mode only decides whether the call may touch the
+// cluster (pre-allocation, events, live metrics) and whether it stops at the
+// first node that fits or reports every node that fits.
+type filterMode uint8
 
-	var (
-		nodeCache     bool
-		filteredNodes []corev1.Node
-		// nodeReasons accumulates the structured rejection cause for each
-		// node across BOTH the in-process filter chain (nodeFilter,
-		// deviceFilter) and the initial cache-miss pass. We convert to
-		// kube-scheduler's plain-string FailedNodesMap at the response
-		// boundary; keeping the *FilterReason shape internally lets us
-		// emit one aggregate FilteringFailed event with k8s-style
-		// "0/N nodes are available: ..." text bucketed by Primary code.
-		nodeReasons map[string]*reason.FilterReason
-	)
-	switch {
-	case args.NodeNames != nil && len(*args.NodeNames) > 0:
-		nodeCache = true
-		filteredNodes, nodeReasons = f.getNodesOnCache(*args.NodeNames...)
-	case args.Nodes != nil && len(args.Nodes.Items) > 0:
-		filteredNodes = args.Nodes.Items
-		nodeReasons = make(map[string]*reason.FilterReason, len(filteredNodes))
-	default:
-		return &extenderv1.ExtenderFilterResult{
-			Nodes:     args.Nodes,
-			NodeNames: args.NodeNames,
-			Error:     "No schedulable nodes",
-		}
+const (
+	// liveFilter serves kube-scheduler: it commits an optimistic
+	// pre-allocation onto the winning node and returns that node alone.
+	liveFilter filterMode = iota
+	// dryRunFilter serves scale-up simulation: read-only, and it returns
+	// EVERY feasible node because the caller — not us — picks.
+	dryRunFilter
+)
+
+func (m filterMode) isDryRun() bool { return m == dryRunFilter }
+
+// verb is the metrics label this mode reports under. Keeping the two paths on
+// separate labels is what stops unbounded simulation traffic from drowning the
+// live scheduling numbers.
+func (m filterMode) verb() string {
+	if m.isDryRun() {
+		return metrics.VerbFilterDryRun
+	}
+	return metrics.VerbFilter
+}
+
+// Filter is the live scheduling verb: feasibility plus pre-allocation.
+func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
+	return f.filter(ctx, args, liveFilter)
+}
+
+// FilterDryRun is the read-only verb used by scale-up simulation. It shares
+// every feasibility decision with Filter and commits nothing.
+func (f *gpuFilter) FilterDryRun(ctx context.Context, args extenderv1.ExtenderArgs) *extenderv1.ExtenderFilterResult {
+	return f.filter(ctx, args, dryRunFilter)
+}
+
+func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mode filterMode) (result *extenderv1.ExtenderFilterResult) {
+	klog.V(4).InfoS("FilterNode", "pod", klog.KObj(args.Pod), "nodeNames", NodeNames(args), "dryRun", mode.isDryRun())
+	start := time.Now()
+	defer func() { metrics.ObserveVerb(mode.verb(), filterResultLabel(result), start) }()
+
+	req, filteredNodes, nodeReasons, result := f.preFilterRequestNodes(args)
+	if result != nil {
+		return result
 	}
 
 	// Snapshot the candidate count BEFORE the filter chain runs so the
@@ -244,22 +234,22 @@ func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *e
 		fn    filterFunc
 	}{
 		{metrics.StageNode, f.nodeFilter},
-		{metrics.StageDevice, f.deviceFilter},
+		{metrics.StageDevice, f.deviceFilterFunc(mode)},
 	}
 	state := framework2.NewCycleState()
 	for i, filter := range filters {
 		if len(filteredNodes) == 0 {
 			break
 		}
-		start := time.Now()
+		stageStart := time.Now()
 		passedNodes, stageReasons, err := filter.fn(ctx, req, filteredNodes, state)
 		// Total time in the stage. deviceFilter separately records the time it
-		// spent WAITING on the serial filter lock, so work = device_work minus
-		// device_lock_wait in PromQL. They are kept as two independent
-		// observations rather than one subtracted value because Filter calls
-		// run concurrently — carrying the wait on the shared gpuFilter to
-		// subtract it here would be a data race.
-		metrics.ObserveFilterStage(filter.stage, start)
+		// spent WAITING on the serial filter lock, so device work = device minus
+		// lock_wait in PromQL. They are kept as two independent observations
+		// rather than one subtracted value because Filter calls run
+		// concurrently — carrying the wait on the shared gpuFilter to subtract
+		// it here would be a data race.
+		metrics.ObserveStage(mode.verb(), filter.stage, stageStart)
 		if err != nil {
 			klog.Errorf("Filter %d (%s) call failed: %v", i, filter.stage, err)
 			return &extenderv1.ExtenderFilterResult{Error: err.Error()}
@@ -268,20 +258,7 @@ func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *e
 		filteredNodes = passedNodes
 		maps.Copy(nodeReasons, stageReasons)
 	}
-	recordNodeRejects(nodeReasons)
-	var (
-		nodes     *corev1.NodeList
-		nodeNames *[]string
-	)
-	if nodeCache {
-		names := make([]string, len(filteredNodes))
-		for i, node := range filteredNodes {
-			names[i] = node.GetName()
-		}
-		nodeNames = &names
-	} else {
-		nodes = &corev1.NodeList{Items: filteredNodes}
-	}
+	recordNodeRejects(mode.verb(), nodeReasons)
 
 	// If no node survived, emit the aggregate FilteringFailed event so
 	// operators see a single k8s-native-style summary in
@@ -290,19 +267,132 @@ func (f *gpuFilter) Filter(ctx context.Context, args extenderv1.ExtenderArgs) *e
 	// the same per-node Short() phrases — ours is more detailed (carries
 	// node names in parentheses) and is the place to look first for
 	// scheduling debugging.
-	if len(filteredNodes) == 0 && totalCandidates > 0 && f.recorder != nil {
+	if !mode.isDryRun() && len(filteredNodes) == 0 && totalCandidates > 0 && f.recorder != nil {
 		msg := reason.FormatAggregate(totalCandidates, nodeReasons, aggregateBucketNodeLimit)
-		f.recorder.Event(pod, corev1.EventTypeWarning, reason.EventFilteringFailed, msg)
-		klog.V(2).InfoS("FilteringFailed",
-			"pod", klog.KObj(pod), "totalCandidates", totalCandidates,
-			"failedReasons", failureBreakdown(nodeReasons))
+		f.recorder.Event(args.Pod, corev1.EventTypeWarning, reason.EventFilteringFailed, msg)
+		klog.V(2).InfoS("FilteringFailed", "pod", klog.KObj(args.Pod),
+			"totalCandidates", totalCandidates, "failedReasons", failureBreakdown(nodeReasons))
 	}
 
+	return buildFilterResult(args, filteredNodes, nodeReasons, mode)
+}
+
+func (f *gpuFilter) preFilterRequestNodes(args extenderv1.ExtenderArgs) (
+	*allocator.AllocationRequest, []corev1.Node,
+	map[string]*reason.FilterReason, *extenderv1.ExtenderFilterResult,
+) {
+	if args.Pod == nil {
+		return nil, nil, nil, &extenderv1.ExtenderFilterResult{Error: "extenderArgs.Pod cannot be empty"}
+	}
+
+	if args.Pod.Spec.NodeName != "" {
+		return nil, nil, nil, &extenderv1.ExtenderFilterResult{
+			Error: fmt.Sprintf("pod has been bound to node %q", args.Pod.Spec.NodeName),
+		}
+	}
+	// Parse pod-wide scheduling inputs ONCE — req feeds both the node-
+	// ranking comparators here and the per-node allocator below, so they
+	// share annotation-parse cost and never disagree about what the pod
+	// asked for.
+	req := allocator.BuildAllocationRequest(args.Pod)
+	if len(req.Containers) == 0 {
+		klog.V(5).InfoS("Skip pods that do not request vGPU", "pod", klog.KObj(args.Pod))
+		return nil, nil, nil, &extenderv1.ExtenderFilterResult{
+			Nodes:     args.Nodes,
+			NodeNames: args.NodeNames,
+		}
+	}
+	if args.Pod.Spec.OS != nil && args.Pod.Spec.OS.Name == corev1.Windows {
+		return nil, nil, nil, &extenderv1.ExtenderFilterResult{
+			Error: "vGPU does not support windows pod",
+		}
+	}
+
+	var (
+		filteredNodes []corev1.Node
+		// nodeReasons accumulates the structured rejection cause for each
+		// node across BOTH the in-process filter chain (nodeFilter,
+		// deviceFilter) and the initial cache-miss pass. We convert to
+		// kube-scheduler's plain-string FailedNodesMap at the response
+		// boundary; keeping the *FilterReason shape internally lets us
+		// emit one aggregate FilteringFailed event with k8s-style
+		// "0/N nodes are available: ..." text bucketed by Primary code.
+		nodeReasons map[string]*reason.FilterReason
+	)
+	switch {
+	case args.NodeNames != nil && len(*args.NodeNames) > 0:
+		filteredNodes, nodeReasons = f.getNodesOnCache(*args.NodeNames...)
+	case args.Nodes != nil && len(args.Nodes.Items) > 0:
+		filteredNodes = args.Nodes.Items
+		nodeReasons = make(map[string]*reason.FilterReason, len(filteredNodes))
+	default:
+		return nil, nil, nil, &extenderv1.ExtenderFilterResult{
+			Nodes:     args.Nodes,
+			NodeNames: args.NodeNames,
+			Error:     "No schedulable nodes",
+		}
+	}
+	return req, filteredNodes, nodeReasons, nil
+}
+
+// buildFilterResult shapes the response to mirror the request: a
+// nodeCacheCapable caller sent NodeNames and expects NodeNames back, everyone
+// else gets Nodes. Dry-run always takes the Nodes form (see
+// preFilterRequestNodes).
+func buildFilterResult(
+	args extenderv1.ExtenderArgs, filteredNodes []corev1.Node,
+	nodeReasons map[string]*reason.FilterReason, mode filterMode,
+) *extenderv1.ExtenderFilterResult {
+	var (
+		nodes     *corev1.NodeList
+		nodeNames *[]string
+	)
+	if args.NodeNames != nil && len(*args.NodeNames) > 0 {
+		names := make([]string, len(filteredNodes))
+		for i, node := range filteredNodes {
+			names[i] = node.GetName()
+		}
+		nodeNames = &names
+	} else {
+		nodes = &corev1.NodeList{Items: filteredNodes}
+	}
 	return &extenderv1.ExtenderFilterResult{
 		Nodes:       nodes,
 		NodeNames:   nodeNames,
-		FailedNodes: reasonsToFailedNodesMap(nodeReasons),
+		FailedNodes: reasonsToFailedNodesMap(nodeReasons, mode),
 	}
+}
+
+// filterResultLabel maps a finished filter response onto the closed metric
+// vocabulary: did the call fail, keep something, or rule everything out?
+func filterResultLabel(result *extenderv1.ExtenderFilterResult) string {
+	switch {
+	case result == nil || result.Error != "":
+		return metrics.ResultError
+	case len(NodeNamesOfResult(result)) > 0:
+		return metrics.ResultFit
+	default:
+		return metrics.ResultNoFit
+	}
+}
+
+// NodeNamesOfResult lists the nodes a filter result kept, whichever of the two
+// response forms it used.
+func NodeNamesOfResult(result *extenderv1.ExtenderFilterResult) []string {
+	if result == nil {
+		return nil
+	}
+	if result.NodeNames != nil {
+		return *result.NodeNames
+	}
+	if result.Nodes == nil {
+		return nil
+	}
+	names := make([]string, len(result.Nodes.Items))
+	for i, node := range result.Nodes.Items {
+		names[i] = node.GetName()
+	}
+	return names
 }
 
 // failureBreakdown reduces per-node reasons to a Code → count map for
@@ -325,9 +415,17 @@ func failureBreakdown(reasons map[string]*reason.FilterReason) map[reason.Code]i
 // requires. The Short() form is what feeds the synthesised
 // "0/N nodes are available: <short>, ..." line in the upstream
 // FailedScheduling event.
-func reasonsToFailedNodesMap(reasons map[string]*reason.FilterReason) extenderv1.FailedNodesMap {
+//
+// Dry-run callers get Detailed() instead: nothing downstream aggregates a
+// simulation's reasons into an event, so "why can't a new node of this shape
+// take the pod" is the only diagnostic the caller will ever see.
+func reasonsToFailedNodesMap(reasons map[string]*reason.FilterReason, mode filterMode) extenderv1.FailedNodesMap {
 	out := make(extenderv1.FailedNodesMap, len(reasons))
 	for name, r := range reasons {
+		if mode.isDryRun() {
+			out[name] = r.Detailed()
+			continue
+		}
 		out[name] = r.Short()
 	}
 	return out
@@ -433,16 +531,15 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationReq
 	for i, node := range nodes {
 		if !node.DeletionTimestamp.IsZero() {
 			klog.V(4).InfoS("node is already marked as deleted", "node", node.Name)
+			failed[node.Name] = reason.New(reason.NodeDeleting)
 			continue
 		}
 		var nodeConfig *device.NodeConfigInfo
 		var nodeDevice *device.NodeDeviceInfo
 		if r := CheckNode(&node, memoryPolicyFunc, func(
-			node *corev1.Node,
-			device *device.NodeDeviceInfo,
+			node *corev1.Node, device *device.NodeDeviceInfo,
 			config *device.NodeConfigInfo) *reason.FilterReason {
-			nodeConfig = config
-			nodeDevice = device
+			nodeConfig, nodeDevice = config, device
 			return nil
 		}); r != nil {
 			failed[node.Name] = r
@@ -463,11 +560,16 @@ func nodeConfigKey(nodeName string) framework.StateKey {
 	return framework.StateKey(nodeName + "-config")
 }
 
-func (f *gpuFilter) CheckDeviceRequest(req *allocator.AllocationRequest) error {
+func (f *gpuFilter) CheckDeviceRequest(req *allocator.AllocationRequest, mode filterMode) error {
+	checkFuncs := []func(allocator.ContainerNeed) error{
+		checkCoreRequest, checkNumberRequest,
+	}
 	for _, container := range req.Containers {
-		for _, fn := range []func(allocator.ContainerNeed) error{checkCoreRequest, checkNumberRequest} {
-			if err := fn(container); err != nil {
-				f.recorder.Event(req.Pod, corev1.EventTypeWarning, reason.EventResourceInvalid, err.Error())
+		for _, checkFn := range checkFuncs {
+			if err := checkFn(container); err != nil {
+				if !mode.isDryRun() {
+					f.recorder.Event(req.Pod, corev1.EventTypeWarning, reason.EventResourceInvalid, err.Error())
+				}
 				return err
 			}
 		}
@@ -595,74 +697,27 @@ func majorityKey(votes map[string]int) string {
 	}
 }
 
-// deviceFilter will choose one and only one node fullfil the request, so it should always be the last filter of gpuFilter
-func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
-	var (
-		pod           = req.Pod
-		filteredNodes = make([]corev1.Node, 0, 1)
-		failed        = make(map[string]*reason.FilterReason, len(nodes))
-		success       bool
-	)
-
-	if err := f.CheckDeviceRequest(req); err != nil {
-		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(pod))
-		return filteredNodes, failed, err
-	}
-
-	// Skip pods that have already been scheduled.
-	if nodeName, ok := IsScheduled(pod); ok {
-		if device.ShouldCountPodDeviceAllocation(pod) {
-			// Pre-allocation is current; steer the pod back to its predicated node.
-			foundNode := false
-			for i, node := range nodes {
-				if !foundNode && node.Name == nodeName {
-					filteredNodes = append(filteredNodes, nodes[i])
-					foundNode = true
-					continue
-				}
-				failed[node.Name] = reason.New(reason.AlreadyScheduledElsewhere).
-					WithDetail("pod already predicated on node %s", nodeName)
-			}
-			if foundNode {
-				return filteredNodes, failed, nil
-			}
-			return nil, nil, fmt.Errorf("pod %s had been predicated", pod.UID)
-		}
-		// Pre-allocation is stale or stuck — re-trigger device pre-allocation.
-		klog.V(3).InfoS("Re-triggering device pre allocation for pod", "pod", klog.KObj(pod))
-	}
-
-	lockStart := time.Now()
-	f.locker.Lock()
-	defer f.locker.Unlock()
-	// Recorded separately from the stage total: SerializedNodeFilter is on by
-	// default, so on a busy cluster this is queueing, not work, and folding the
-	// two together makes contention look like slow allocation.
-	metrics.ObserveFilterStage(metrics.StageLockWait, lockStart)
-
-	// Ensure that the context has not timed out
-	if err := ctx.Err(); err != nil {
-		klog.V(3).ErrorS(err, "Context error", "pod", klog.KObj(pod))
-		return filteredNodes, failed, err
-	}
+func (f *gpuFilter) preFilterNodeInfos(
+	ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState,
+) ([]*allocator.NodeInfo, map[string]int, map[string]*reason.FilterReason, error) {
 
 	nodePodsMap, err := f.podLister.NodeMapByIndexValue(IndexerKeyPodRequestVGPU, "true")
 	if err != nil {
 		klog.ErrorS(err, "PodLister list all vGPU pods failed")
-		return filteredNodes, failed, err
+		return nil, nil, nil, err
 	}
-
-	topologyEnabled := f.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
-	// nodeInfoByName is consumed only by the cross-pod gang ordinal lookup below.
-	// Build and populate it solely when that path will run so the common
-	// (non-gang / non-cross-pod) scheduling pays nothing for it.
-	needGangOrdinal := req.CrossPodTopology && topologyEnabled && (req.GangName != "" || req.ControllerOwner != nil)
 
 	var (
 		mutex                = sync.Mutex{}
+		failed               = make(map[string]*reason.FilterReason, len(nodes))
 		nodeInfoList         = make([]*allocator.NodeInfo, 0, len(nodes))
 		nodeOriginalPosition = make(map[string]int, len(nodes))
 		nodeInfoByName       map[string]*allocator.NodeInfo
+		topologyEnabled      = f.gpuTopology && req.Topology.BaseTopology() == util.LinkTopology
+		// nodeInfoByName is consumed only by the cross-pod gang ordinal lookup below.
+		// Build and populate it solely when that path will run so the common
+		// (non-gang / non-cross-pod) scheduling pays nothing for it.
+		needGangOrdinal = req.CrossPodTopology && topologyEnabled && (req.GangName != "" || req.ControllerOwner != nil)
 	)
 	if needGangOrdinal {
 		nodeInfoByName = make(map[string]*allocator.NodeInfo, len(nodes))
@@ -682,7 +737,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 
 			opts := []device.NodeInfoOptionFn{
 				device.WithNodePods(nodePodsMap[node.Name]...),
-				device.WithExcludedPods(pod.UID),
+				device.WithExcludedPods(req.Pod.UID),
 				device.WithGPUTopologyEnabled(topologyEnabled),
 			}
 			if read, _ := state.Read(nodeConfigKey(node.Name)); read != nil {
@@ -823,7 +878,7 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 
 	// Quickly return results
 	if len(nodeInfoList) == 0 {
-		return filteredNodes, failed, nil
+		return nodeInfoList, nodeOriginalPosition, failed, nil
 	}
 
 	// Cross-node sub-domain (rail) alignment: when this pod opts into cross-pod
@@ -839,76 +894,137 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		var gangPods []*corev1.Pod
 		switch {
 		case req.GangName != "":
-			gangPods, err = f.podLister.ListByIndexValue(IndexerKeyPodGangName, req.GangName)
-			if err != nil {
+			if gangPods, err = f.podLister.ListByIndexValue(IndexerKeyPodGangName, req.GangName); err != nil {
 				klog.ErrorS(err, "PodLister list same gang pods failed", "gangName", req.GangName)
-				return filteredNodes, failed, err
+				return nodeInfoList, nodeOriginalPosition, failed, err
 			}
 		case req.ControllerOwner != nil:
-			gangPods, err = f.podLister.ListByIndexValue(IndexerKeyControlOwnerUID, string(req.ControllerOwner.UID))
-			if err != nil {
+			if gangPods, err = f.podLister.ListByIndexValue(IndexerKeyControlOwnerUID, string(req.ControllerOwner.UID)); err != nil {
 				klog.ErrorS(err, "PodLister list same controller owner reference pods failed", "controllerOwner", *req.ControllerOwner)
-				return filteredNodes, failed, err
+				return nodeInfoList, nodeOriginalPosition, failed, err
 			}
 		}
 		req.GangDomainKey, req.GangRailKey = FindGangSiblingDomain(gangPods, nodeInfoByName, f.nodeLister, req)
 	}
 
-	defaultNodePriority := false
-	switch req.NodePolicy {
-	case util.BinpackPolicy, util.SpreadPolicy:
-		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
-		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
-	case util.NonePolicy:
-		defaultNodePriority = true
-		klog.V(4).Infof("Pod <%s> use <%s> node scheduling policy", klog.KObj(pod), req.NodePolicy)
-	default:
-		defaultNodePriority = true
-		klog.V(4).Infof("Pod <%s> not supported node scheduling policy: %s", klog.KObj(pod), req.NodePolicy)
-		f.recorder.Eventf(pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported node scheduling policy %q", req.NodePolicy)
+	return nodeInfoList, nodeOriginalPosition, failed, nil
+}
+
+// deviceFilterFunc binds deviceFilter to a mode so it fits the filterFunc chain.
+func (f *gpuFilter) deviceFilterFunc(mode filterMode) filterFunc {
+	return func(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
+		return f.deviceFilter(ctx, req, nodes, state, mode)
 	}
-	if defaultNodePriority {
-		less := allocator.ApplyTopologyMode(*req, func(p1, p2 *allocator.NodeInfo) bool {
-			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
-		})
-		allocator.NewSortPriority[*allocator.NodeInfo](less...).Sort(nodeInfoList)
+}
+
+// deviceFilter runs the allocator against every candidate, and is always the
+// last stage of the chain. In live mode it commits a pre-allocation on the
+// first node that fits and stops there, so it returns one node; in dry-run mode
+// it commits nothing and returns EVERY node that fits, because the caller is
+// asking which node shapes could host the pod, not where to put it.
+func (f *gpuFilter) deviceFilter(
+	ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState, mode filterMode,
+) ([]corev1.Node, map[string]*reason.FilterReason, error) {
+	if err := f.CheckDeviceRequest(req, mode); err != nil {
+		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(req.Pod), "dryRun", mode.isDryRun())
+		return nil, nil, err
 	}
+
+	var filteredNodes []corev1.Node
+	if !mode.isDryRun() {
+		// Skip pods that have already been scheduled.
+		if nodeName, ok := IsScheduled(req.Pod); ok {
+			if device.ShouldCountPodDeviceAllocation(req.Pod) {
+				// Pre-allocation is current; steer the pod back to its predicated node.
+				foundNode := false
+				failed := make(map[string]*reason.FilterReason, len(nodes))
+				for i, node := range nodes {
+					if !foundNode && node.Name == nodeName {
+						filteredNodes = append(filteredNodes, nodes[i])
+						foundNode = true
+						continue
+					}
+					failed[node.Name] = reason.New(reason.AlreadyScheduledElsewhere).
+						WithDetail("pod already predicated on node %s", nodeName)
+				}
+				if foundNode {
+					return filteredNodes, failed, nil
+				}
+				return nil, nil, fmt.Errorf("pod %s had been predicated", req.Pod.UID)
+			}
+			// Pre-allocation is stale or stuck — re-trigger device pre-allocation.
+			klog.V(3).InfoS("Re-triggering device pre allocation for pod", "pod", klog.KObj(req.Pod))
+		}
+
+		// Dry-run stays off this lock on purpose: it writes nothing, and a
+		// simulation burst must never queue behind — or ahead of — live scheduling.
+		lockStart := time.Now()
+		f.locker.Lock()
+		defer f.locker.Unlock()
+		// Recorded separately from the stage total: SerializedNodeFilter is on by
+		// default, so on a busy cluster this is queueing, not work, and folding the
+		// two together makes contention look like slow allocation.
+		metrics.ObserveStage(metrics.VerbFilter, metrics.StageLockWait, lockStart)
+
+		// Ensure that the context has not timed out
+		if err := ctx.Err(); err != nil {
+			klog.V(3).ErrorS(err, "Context error", "pod", klog.KObj(req.Pod))
+			return nil, nil, err
+		}
+	}
+
+	nodeInfoList, nodeOriginalPosition, failed, err := f.preFilterNodeInfos(ctx, req, nodes, state)
+	// failed carries every rejection the capacity pre-gate collected, so it must
+	// be returned even when nothing survived — that is exactly the case the
+	// caller most needs a reason for.
+	if err != nil || len(nodeInfoList) == 0 {
+		return nil, failed, err
+	}
+	f.sortNodeInfos(req, nodeInfoList, nodeOriginalPosition, mode)
 
 	recorder := f.recorder
 	for i, nodeInfo := range nodeInfoList {
 		node := nodeInfo.GetNode()
-		if success {
+		if !mode.isDryRun() && len(filteredNodes) > 0 {
 			failed[node.Name] = reason.New(reason.AlreadyScheduledElsewhere).
 				WithDetail("pod already matched to %s in this Filter pass", filteredNodes[0].Name)
 			continue
 		}
-		if i > 0 {
-			// Only send one event.
+		if i > 0 { // Only send one event.
 			recorder = nil
 		}
-		// Attempt to allocate devices for pods on this node.
-		newPod, rsn, err := allocator.NewAllocator(nodeInfo.NodeInfo, recorder).Allocate(req)
+		// Attempt to allocate devices for pods on this node. A dry-run
+		// allocation is hypothetical, so it stays out of events and metrics.
+		alloc := allocator.NewAllocator(nodeInfo.NodeInfo, recorder)
+		if mode.isDryRun() {
+			alloc = allocator.NewSimulationAllocator(nodeInfo.NodeInfo)
+		}
+		newPod, rsn, err := alloc.Allocate(req)
 		if err != nil {
 			// Internal/programmer error (annotation encoding, accounting
 			// bug). Don't just skip the node — bubble up so the whole
 			// Filter call returns Error and the operator notices.
-			klog.ErrorS(err, "node device allocate: internal error",
-				"node", node.Name, "pod", klog.KObj(pod))
+			klog.ErrorS(err, "node device allocate internal error", "node", node.Name, "pod", klog.KObj(req.Pod))
 			return filteredNodes, failed, err
 		}
 		if rsn != nil {
-			klog.V(4).InfoS("node device allocate rejected", "node", node.Name,
-				"pod", klog.KObj(pod), "reason", rsn.Detailed())
+			klog.V(4).InfoS("node device allocate rejected", "node", node.Name, "pod", klog.KObj(req.Pod), "reason", rsn.Detailed())
 			failed[node.Name] = rsn
+			continue
+		}
+		if mode.isDryRun() {
+			// Feasibility answered — nothing to commit, keep scanning so the
+			// caller sees the whole feasible set.
+			filteredNodes = append(filteredNodes, *node)
 			continue
 		}
 		// Ensure that the context has not timed out
 		if err := ctx.Err(); err != nil {
-			klog.V(3).ErrorS(err, "Context error", "pod", klog.KObj(pod))
+			klog.V(3).ErrorS(err, "Context error", "pod", klog.KObj(req.Pod))
 			return filteredNodes, failed, err
 		}
 		if err = client.PatchPodPreAllocatedMetadata(f.kubeClient, newPod); err != nil {
-			klog.ErrorS(err, "patch vGPU metadata failed", "pod", klog.KObj(pod), "node", node.Name)
+			klog.ErrorS(err, "patch vGPU metadata failed", "pod", klog.KObj(req.Pod), "node", node.Name)
 			return filteredNodes, failed, err
 		}
 		// Cache the patched Pod locally to bridge the informer watch lag.
@@ -917,17 +1033,50 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 		// annotation) and miscount free GPU.
 		f.podLister.Mutation(newPod)
 		filteredNodes = append(filteredNodes, *node)
-		success = true
-		// PER POD, emitted for the node that actually accepted it. nodeInfo
-		// carries the request snapshot the allocator recorded its topology
-		// outcome onto.
-		recordPlacement(req, nodeInfo.AllocationRequest)
+		// PER POD, emitted for the node that actually accepted it.
+		recordPlacement(req)
 	}
-	if success {
-		f.recorder.Eventf(pod, corev1.EventTypeNormal, reason.EventFilteringSucceed,
-			"Successfully matched node %q", filteredNodes[0].Name)
+	if len(filteredNodes) > 0 {
+		if mode.isDryRun() {
+			klog.V(2).InfoS("DryRun filter found feasible nodes", "pod",
+				klog.KObj(req.Pod), "feasibleNodes", len(filteredNodes), "failedNodes", len(failed))
+		} else {
+			f.recorder.Eventf(req.Pod, corev1.EventTypeNormal, reason.EventFilteringSucceed,
+				"Successfully matched node %q", filteredNodes[0].Name)
+		}
 	}
 	return filteredNodes, failed, nil
+}
+
+// sortNodeInfos orders candidates by the pod's node policy, falling back to the
+// request order (with topology tie-breakers) when no policy applies. Dry-run
+// returns every feasible node regardless, but keeping one ordering means both
+// modes agree on which node they would prefer.
+func (f *gpuFilter) sortNodeInfos(
+	req *allocator.AllocationRequest, nodeInfoList []*allocator.NodeInfo,
+	nodeOriginalPosition map[string]int, mode filterMode,
+) {
+	var defaultSortPriority bool
+	switch req.NodePolicy {
+	case util.BinpackPolicy, util.SpreadPolicy:
+		klog.V(4).InfoS("Pod node scheduling policy", "pod", klog.KObj(req.Pod), "policy", req.NodePolicy, "dryRun", mode.isDryRun())
+		allocator.NewNodePolicyPriority(*req).Sort(nodeInfoList)
+	case util.NonePolicy:
+		klog.V(4).InfoS("Pod node scheduling policy", "pod", klog.KObj(req.Pod), "policy", req.NodePolicy, "dryRun", mode.isDryRun())
+		defaultSortPriority = true
+	default:
+		klog.V(4).InfoS("Pod not supported node scheduling policy", "pod", klog.KObj(req.Pod), "policy", req.NodePolicy, "dryRun", mode.isDryRun())
+		defaultSortPriority = true
+		if !mode.isDryRun() {
+			f.recorder.Eventf(req.Pod, corev1.EventTypeWarning, reason.EventPolicyInvalid, "unsupported node scheduling policy %q", req.NodePolicy)
+		}
+	}
+	if defaultSortPriority {
+		less := allocator.ApplyTopologyMode(*req, func(p1, p2 *allocator.NodeInfo) bool {
+			return nodeOriginalPosition[p1.GetName()] < nodeOriginalPosition[p2.GetName()]
+		})
+		allocator.NewSortPriority[*allocator.NodeInfo](less...).Sort(nodeInfoList)
+	}
 }
 
 // recordNodeRejects publishes the per-Code rejection counts.
@@ -937,12 +1086,12 @@ func (f *gpuFilter) deviceFilter(ctx context.Context, req *allocator.AllocationR
 // add one bump per non-selected node on every SUCCESSFUL schedule and swamp the
 // genuine rejection causes. Those nodes were not rejected — they were not
 // needed.
-func recordNodeRejects(reasons map[string]*reason.FilterReason) {
+func recordNodeRejects(verb string, reasons map[string]*reason.FilterReason) {
 	for _, r := range reasons {
 		if r == nil || r.Primary == reason.AlreadyScheduledElsewhere {
 			continue
 		}
-		metrics.NodeRejectTotal.WithLabelValues(string(r.Primary)).Inc()
+		metrics.RecordNodeReject(verb, string(r.Primary))
 	}
 }
 
@@ -953,7 +1102,7 @@ func recordNodeRejects(reasons map[string]*reason.FilterReason) {
 // candidate won: the allocator runs per node and would report a single pod as
 // several placements. nodeReq is the winning node's request snapshot, carrying
 // the topology outcome the allocator recorded on it.
-func recordPlacement(req, nodeReq *allocator.AllocationRequest) {
+func recordPlacement(req *allocator.AllocationRequest) {
 	// Every annotation-derived value goes through the metrics package's
 	// whitelist: the parsers pass unknown values through verbatim, which would
 	// otherwise make label cardinality user-controlled.
@@ -962,7 +1111,9 @@ func recordPlacement(req, nodeReq *allocator.AllocationRequest) {
 		metrics.PolicyLabel(req.NodePolicy), metrics.PolicyLabel(req.DevicePolicy), mode,
 	).Inc()
 
-	outcome := nodeReq.TopologyOutcome()
+	// Read from the SAME request the allocator was handed: the per-node snapshot
+	// on nodeInfo is copied before Allocate runs and never receives the outcome.
+	outcome := req.TopologyOutcome()
 	if outcome.Result != "" {
 		metrics.TopologyPlacementTotal.WithLabelValues(mode, outcome.Result).Inc()
 	}

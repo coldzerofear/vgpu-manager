@@ -90,6 +90,12 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 		if !util.IsShouldDeletePod(pod) {
 			break
 		}
+		if types.IsCriticalPod(pod) {
+			klog.ErrorS(nil, "Cannot evict a critical pod", "pod", klog.KObj(pod))
+			r.recorder.Eventf(pod, nil, corev1.EventTypeWarning, "CriticalPod",
+				"EvictSkipped", "Critical pod does not restore scheduling through eviction")
+			break
+		}
 		// Determine whether it is necessary to delete the pod
 		// Only when a pod is controlled by a controller and
 		// not controlled by another pod, is it eligible for deletion.
@@ -103,10 +109,6 @@ func (r *RescheduleController) Reconcile(ctx context.Context, req reconcile.Requ
 		}
 		// Manual recovery for bare pods
 		if len(pod.OwnerReferences) == 0 {
-			if types.IsCriticalPod(pod) {
-				klog.ErrorS(nil, "Cannot evict a critical pod", "pod", klog.KObj(pod))
-				break
-			}
 			klog.V(4).InfoS("Try to recovery pod", "pod", klog.KObj(pod), "uid", pod.UID)
 			if err := r.recovery.AddPodToCheckpoint(pod); err != nil {
 				klog.ErrorS(err, "Adding pod to recovery checkpoint failed", "pod", klog.KObj(pod))

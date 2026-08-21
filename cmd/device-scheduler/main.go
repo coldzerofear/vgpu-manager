@@ -21,17 +21,25 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"github.com/google/uuid"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/component-base/logs"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -89,10 +97,14 @@ func runApp(opt *options.Options) (exitCode int) {
 				"tlsKeyFile: %q, tlsCertFile: %q", opt.TlsKeyFile, opt.TlsCertFile)
 			return exitCode
 		}
+		if opt.CertRefreshInterval <= 0 {
+			klog.Warningf("Certificate refresh interval is less than or equal to 0, " +
+				"and the automatic certificate rotation function will be turned off")
+		}
 
 		tlsConfig, err = tlsserverconfig.GetServerTLSConfig(slog.Default(), &tlsconfig.TLSServerConfig{
 			Enable:  opt.EnableTls,
-			Refresh: time.Duration(opt.CertRefreshInterval) * time.Second,
+			Refresh: opt.CertRefreshInterval,
 			File: tlsconfig.TLSServerFiles{
 				Key:  opt.TlsKeyFile,
 				Cert: opt.TlsCertFile,
@@ -142,24 +154,126 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 
+	if opt.WatchLease && opt.LeaderElect {
+		klog.Errorln("The watch-lease and leader-elect functions are mutually exclusive and cannot be enabled simultaneously")
+		return exitCode
+	}
+	podName := strings.TrimSpace(os.Getenv("POD_NAME"))
+	podNamespace := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
+	leaseName := strings.TrimSpace(opt.LeaderElectResourceName)
+	leaseNamespace := strings.TrimSpace(opt.LeaderElectResourceNamespace)
+	if opt.WatchLease || opt.LeaderElect {
+		if leaseName == "" {
+			klog.Errorln("Enabling leader-elect or watch-lease requires specifying leader-elect-resource-name")
+			return exitCode
+		}
+		if leaseNamespace == "" {
+			klog.Errorln("Enabling leader-elect or watch-lease requires specifying leader-elect-resource-namespace")
+			return exitCode
+		}
+		if podName == "" || podNamespace == "" {
+			klog.Errorln("Enabling leader-elect or watch-lease requires specifying environment variable 'POD_NAME' and 'POD_NAMESPACE'")
+			return exitCode
+		}
+	}
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	defer cancelFunc()
+
+	isLeaderFunc := func() bool { return true }
+	if opt.WatchLease {
+		klog.Infoln("Watch lease enabled: Initialize lease detector")
+		leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix)
+		if leaderIdentityPrefix == "" {
+			klog.Errorln("Enabling watch-lease requires specifying leader-identity-prefix")
+			return exitCode
+		}
+		leaseDetector, err := NewLeaseDetector(factory,
+			leaseNamespace, leaseName, leaderIdentityPrefix,
+			WithStartCallback(func() {
+				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
+			}),
+			WithLeaderCallback(func() {
+				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader)
+			}),
+			WithReleaseCallback(func() {
+				patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
+			}),
+		)
+		if err != nil {
+			klog.Errorf("Initialization of LeaseDetector failed: %v", err)
+			return exitCode
+		}
+		isLeaderFunc = leaseDetector.IsLeader
+	}
+
+	if opt.LeaderElect {
+		klog.Infoln("Leader elect enabled: Initialize leader elect")
+		leaderIdentity := uuid.NewString()
+		if leaderIdentityPrefix := strings.TrimSpace(opt.LeaderIdentityPrefix); leaderIdentityPrefix != "" {
+			leaderIdentity = fmt.Sprintf("%s_%s", leaderIdentityPrefix, leaderIdentity)
+		}
+		leaderElector, err := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
+			Lock: &resourcelock.LeaseLock{
+				LeaseMeta: metav1.ObjectMeta{
+					Name:      leaseName,
+					Namespace: leaseNamespace,
+				},
+				Client: kubeClient.CoordinationV1(),
+				LockConfig: resourcelock.ResourceLockConfig{
+					Identity:      leaderIdentity,
+					EventRecorder: recorder,
+				},
+			},
+			ReleaseOnCancel: false,
+			Callbacks: leaderelection.LeaderCallbacks{
+				OnStartedLeading: func(ctx context.Context) {
+					klog.Infof("started leader identity: %s", leaderIdentity)
+					patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader)
+				},
+				OnStoppedLeading: func() {
+					klog.Infoln("stopped leader elect")
+					patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
+				},
+				OnNewLeader: func(identity string) {
+					if leaderIdentity == identity {
+						patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueLeader)
+					} else {
+						klog.Infof("new leader elected: %s", identity)
+						patchPodRoleLabel(kubeClient, podName, podNamespace, util.SchedulerRoleValueFollower)
+					}
+				},
+			},
+		})
+		if err != nil {
+			klog.Errorf("Initialization of LeaderElector failed: %v", err)
+			return exitCode
+		}
+		go leaderElector.Run(ctx)
+		isLeaderFunc = leaderElector.IsLeader
+	}
+
 	handler := httprouter.New()
 	route.AddVersion(handler)
 	route.AddHealthProbe(handler)
-	route.AddReadyProbe(handler, func(req *http.Request) error {
-		if !util.InformerFactoryHasSynced(factory, req.Context()) {
-			return errors.New("informer has not completed all synchronization")
+	route.AddReadyHandler(handler, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !util.InformerFactoryHasSynced(factory, r.Context()) {
+			http.Error(w, "internal server error: not synchronized yet completed", http.StatusInternalServerError)
+			return
+		} else if !isLeaderFunc() {
+			klog.V(4).Infoln("internal server unavailable: instance is not a leader")
 		}
-		return nil
-	})
+		http.Error(w, "ok", http.StatusOK)
+	}))
 	route.AddFilterPredicate(handler, filterPlugin)
+	route.AddFilterDryRunPredicate(handler, filterPlugin)
 	route.AddBindPredicate(handler, bindPlugin)
 	route.AddPreemptPredicate(handler, preemptPlugin)
 	// Served on the extender's existing port: the endpoint inherits its TLS
 	// setting and needs no extra chart plumbing (port, probe, NetworkPolicy).
 	route.AddMetricsHandle(handler, metrics.Handler())
 
-	ctx, cancelFunc := context.WithCancel(context.Background())
-	factory.Start(ctx.Done())
+	factory.StartWithContext(ctx)
 	if klog.V(4).Enabled() {
 		go func() {
 			klog.Infoln("Waiting for InformerFactory cache synchronization...")
@@ -210,6 +324,17 @@ func runApp(opt *options.Options) (exitCode int) {
 	return exitCode
 }
 
+func patchPodRoleLabel(kubeClient kubernetes.Interface, podName, podNamespace, roleValue string) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: podName, Namespace: podNamespace,
+	}}
+	if err := client.PatchPodMetadata(kubeClient, pod, client.PatchMetadata{
+		Labels: map[string]*string{util.SchedulerRoleLabel: &roleValue},
+	}); err != nil && !apierrors.IsNotFound(err) {
+		klog.ErrorS(err, "patch pod leader labels failed", "pod", klog.KObj(pod), "role", roleValue)
+	}
+}
+
 func main() {
 	opt := options.NewOptions()
 	opt.InitFlags(flag.CommandLine)
@@ -217,7 +342,9 @@ func main() {
 	logs.InitLogs()
 	defer logs.FlushLogs()
 
-	if exitCode := runApp(opt); exitCode != 0 {
+	exitCode := runApp(opt)
+	time.Sleep(5 * time.Second)
+	if exitCode != 0 {
 		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
 }

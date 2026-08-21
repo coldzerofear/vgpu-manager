@@ -15,11 +15,11 @@ vgpu-manager-dra-driver {{ .Chart.AppVersion }} kubelet-plugin (DaemonSet) has b
 {{- if .Values.kubeletPlugin.containers.monitor.enabled }}
 
 vgpu-manager-dra-monitor {{ .Chart.AppVersion }} device-monitor (SideCar) has been deployed successfully!
-  - MinScrapeInter :  {{ .Values.kubeletPlugin.containers.monitor.commands.minScrapeInterval | default 1 }}
+  - MinScrapeInter :  {{ .Values.kubeletPlugin.containers.monitor.commands.minScrapeInterval | default "1s" }}
   - EnableRBAC     :  {{ .Values.kubeletPlugin.containers.monitor.commands.enableRBAC | default false }}
   - FeatureGates   :  {{ .Values.kubeletPlugin.containers.monitor.featureGates | toJson }}
   - Metrics        :  {{ .Values.kubeletPlugin.containers.monitor.commands.serverBindPort | default 3456 }}
-  - LoggerLevel    :  {{ .Values.kubeletPlugin.containers.monitor.commands.logLevel | default 5 }}
+  - LoggerLevel    :  {{ .Values.kubeletPlugin.containers.monitor.commands.logLevel | default 3 }}
 {{- end }}
 
   NOTE: nodes are only scheduled by the DRA driver once labelled to match the nodeSelector above, e.g.:
@@ -55,7 +55,7 @@ vgpu-manager-dra-driver {{ .Chart.AppVersion }} webhook has been deployed succes
   - DevicePolicy   :  {{ .Values.webhook.commands.defaultDevicePolicy | quote }}
   - TopologyMode   :  {{ .Values.webhook.commands.defaultTopologyMode | quote }}
   - VGPUClassName  :  {{ .Values.webhook.commands.vgpuDeviceClassName | quote }}
-  - Convert2DRA    :  {{ .Values.webhook.commands.defaultConvert2Dra }}
+  - ConvertDRA     :  {{ .Values.webhook.commands.defaultConvertDRA }}
   - CombinedClaim  :  {{ .Values.webhook.commands.combinedResourceClaim }}
   - CertManager    :  {{ .Values.webhook.certManager.enabled }}
   - LoggerLevel    :  {{ .Values.webhook.commands.logLevel }}

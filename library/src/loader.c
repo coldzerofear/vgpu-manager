@@ -1000,7 +1000,6 @@ static void UNUSED bug_on() {
 static pthread_once_t g_cuda_ver_init = PTHREAD_ONCE_INIT;
 static pthread_once_t g_cuda_lib_init = PTHREAD_ONCE_INIT;
 static pthread_once_t g_nvml_lib_init = PTHREAD_ONCE_INIT;
-static pthread_once_t init_dlsym_flag = PTHREAD_ONCE_INIT;
 static pthread_once_t init_nvml_host_index = PTHREAD_ONCE_INIT;
 /* Guards the one-time pthread_atfork(NULL, NULL, child_after_fork) call.
  * Intentionally NOT reset by child_after_fork() in the child -- glibc's
@@ -1095,13 +1094,17 @@ void init_real_dlsym() {
       }
     }
     if (unlikely(!real_dlsym)) {
-      /* Last resort: pull dlsym out of libc.so.6 directly. We deliberately
-       * do NOT fall back to _dl_sym(GLIBC_PRIVATE) -- it was effectively
-       * removed by the glibc 2.34 libdl/libpthread merge and depending on
-       * it breaks library load on modern distributions (Ubuntu 22.04+). */
+      /* Last resort: pull dlsym out of libc.so.6 directly. Must use dlvsym
+       * here -- a plain dlsym() call would resolve back to our own hook.
+       * We deliberately do NOT fall back to _dl_sym(GLIBC_PRIVATE): it was
+       * effectively removed by the glibc 2.34 libdl/libpthread merge and
+       * depending on it breaks library load on modern distributions. */
       void *libc_handle = dlopen("libc.so.6", RTLD_LAZY);
       if (libc_handle) {
-        real_dlsym = dlsym(libc_handle, "dlsym");
+        for (int i = 0; glibc_versions[i] != NULL; i++) {
+          real_dlsym = dlvsym(libc_handle, "dlsym", glibc_versions[i]);
+          if (real_dlsym) break;
+        }
       }
       if (!real_dlsym) {
         LOGGER(FATAL, "unable to find the real dlsym");
@@ -1470,8 +1473,7 @@ int mmap_file_to_util_path(device_util_t** data) {
     goto DONE;
   }
   if (sb.st_size != sizeof(device_util_t)) {
-    LOGGER(ERROR, "file size mismatch: expected %zu, got %lld",
-                    sizeof(device_util_t), (long long)sb.st_size);
+    LOGGER(ERROR, "file size mismatch: expected %zu, got %lld", sizeof(device_util_t), (long long)sb.st_size);
     goto DONE;
   }
   *data = (device_util_t*)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -1859,33 +1861,27 @@ void print_global_vgpu_config() {
 }
 
 
-tid_dlsym tid_dlsyms[DLMAP_SIZE];
-static int tid_dlsym_count = 0;
-static pthread_mutex_t tid_dlsym_lock;
-
-void init_tid_dlsyms(){
-  pthread_mutex_init(&tid_dlsym_lock, NULL);
-  tid_dlsym_count = 0;
-  memset(tid_dlsyms, 0, sizeof(tid_dlsym) * DLMAP_SIZE);
-}
-
-int check_tid_dlsyms(pthread_t tid, void *pointer){
-  int i;
-  int cursor = (tid_dlsym_count < DLMAP_SIZE) ? tid_dlsym_count : DLMAP_SIZE;
-  for (i = cursor - 1; i >= 0; i--) {
-    if ((tid_dlsyms[i].pointer == pointer) && pthread_equal(tid_dlsyms[i].tid, tid)) {
-      return 1;
-    }
-  }
-  cursor = tid_dlsym_count % DLMAP_SIZE;
-  tid_dlsyms[cursor].tid = tid;
-  tid_dlsyms[cursor].pointer = pointer;
-  tid_dlsym_count++;
-  return 0;
-}
-
 extern entry_t nvml_hooks_entry[];
 extern const int nvml_hook_nums;
+
+/* Does `symbol` name a driver entry point we hook? Mirrors the export
+ * patterns in the version script: cu[A-Z]* / cudbg* / nvml[A-Z]*.
+ *
+ * The uppercase discriminator is what keeps cuBLAS, cuFFT, cuDNN,
+ * cudaMalloc and curl_* out -- they share the "cu" prefix but are not
+ * driver API, and matching them costs a symbol lookup plus a misleading
+ * unhooked-symbol note on every resolution. Short strings stop at the
+ * NUL via && short-circuit, so no read runs past the terminator. */
+static inline int symbol_is_cuda_api(const char *s) {
+  if (s[0] != 'c' || s[1] != 'u') return 0;
+  if (s[2] >= 'A' && s[2] <= 'Z') return 1;      /* cu[A-Z]* */
+  return strncmp(s + 2, "dbg", 3) == 0;          /* cudbg*   */
+}
+
+static inline int symbol_is_nvml_api(const char *s) {
+  return s[0] == 'n' && s[1] == 'v' && s[2] == 'm' && s[3] == 'l' &&
+         s[4] >= 'A' && s[4] <= 'Z';             /* nvml[A-Z]* */
+}
 
 /* Resolve our hook for `symbol` from a hijack table.
  *
@@ -1959,6 +1955,20 @@ void note_unhooked_symbol(const char *symbol) {
   /* Probe window exhausted: stay quiet rather than repeat on every lookup. */
 }
 
+/* dlsym(3) interceptor.
+ *
+ * A driver symbol resolves to our hook whatever `handle` says -- RTLD_NEXT
+ * included. RTLD_NEXT normally means "skip the wrapper, give me the real
+ * one", which would be a one-line way out of the vGPU limits, so we do not
+ * honour it for driver symbols. Everything else passes straight through.
+ *
+ * recursion_depth must stay: on a hook hit we call load_necessary_data(),
+ * which dlopen()s the driver under a pthread_once. If a constructor in
+ * that dlopen calls back into dlsym, re-entering the same once on the same
+ * thread deadlocks. The guard short-circuits that nested call instead.
+ * It answers with the real symbol, so a lookup made during our own init is
+ * the one case we do not hook -- the WARNING below is how we would find
+ * out if that ever happens in practice. */
 FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   static __thread int recursion_depth = 0;
   if (recursion_depth > 0) {
@@ -1971,18 +1981,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
   init_real_dlsym();
 
   void* result = NULL;
-  if (handle == RTLD_NEXT) {
-    pthread_once(&init_dlsym_flag, init_tid_dlsyms);
-    result = real_dlsym(RTLD_NEXT, symbol);
-    pthread_mutex_lock(&tid_dlsym_lock);
-    pthread_t tid = pthread_self();
-    if (check_tid_dlsyms(tid, result)) {
-      LOGGER(WARNING, "recursive dlsym: %s",symbol);
-      result = NULL;
-    }
-    pthread_mutex_unlock(&tid_dlsym_lock);
-    goto DONE;
-  } else if (strncmp(symbol, "cu", 2) == 0) { // hijack cuda
+  if (symbol_is_cuda_api(symbol)) {          // hijack cuda
     result = resolve_local_hook(symbol, cuda_hooks_entry, cuda_hook_nums);
     if (likely(result)) {
       LOGGER(DETAIL, "search found cuda hook %s", symbol);
@@ -1990,7 +1989,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
       goto DONE;
     }
     note_unhooked_symbol(symbol);
-  } else if (strncmp(symbol, "nvml", 4) == 0) { // hijack nvml
+  } else if (symbol_is_nvml_api(symbol)) {   // hijack nvml
     result = resolve_local_hook(symbol, nvml_hooks_entry, nvml_hook_nums);
     if (likely(result)) {
       LOGGER(DETAIL, "search found nvml hook %s", symbol);
@@ -2833,7 +2832,7 @@ void init_nvml_to_host_device_index() {
  * every later pthread_mutex_lock/pthread_once in the child then hangs
  * forever.
  *
- * Mutexes reset: g_memory_node_lock, tid_dlsym_lock, device_index_mutex.
+ * Mutexes reset: g_memory_node_lock, device_index_mutex.
  *
  * Once-guards reset: g_cuda_ver_init, g_nvml_lib_init, g_cuda_lib_init --
  * gate driver-version/library loading inside load_necessary_data(), which
@@ -2845,14 +2844,9 @@ void init_nvml_to_host_device_index() {
  * anything sees it. Also reset: init_nvml_host_index,
  * g_controller_config_init, g_reset_cuda_index_init.
  *
- * Deliberately NOT reset: init_dlsym_flag and g_atfork_init. Their targets
- * are already redone directly a few lines below (or, for g_atfork_init,
- * survive fork via glibc's own atfork list) -- resetting them too would
- * just make the child redo already-valid setup, risking a reinit-while-live
- * mutex instead of a harmless no-op.
- *
- * tid_dlsyms[] is cleared because parent pthread_t values are stale in the
- * child; a stale entry just misses and falls through to a real dlsym. */
+ * Deliberately NOT reset: g_atfork_init. It survives fork via glibc's own
+ * atfork list, so re-registering it in the child would just accumulate a
+ * duplicate atfork handler per fork generation. */
 void loader_child_after_fork(void) {
   // After forking, it is necessary to use it to trigger nvmlInit again to ensure that
   // subsequent steps that require nvml will not fail due to lack of initialization.
@@ -2874,10 +2868,7 @@ void loader_child_after_fork(void) {
    * env is not set yet at this point. */
   session_paths_reset();
   pthread_mutex_init(&g_memory_node_lock, NULL);
-  pthread_mutex_init(&tid_dlsym_lock,     NULL);
   pthread_mutex_init(&device_index_mutex, NULL);
-  memset(tid_dlsyms, 0, sizeof(tid_dlsyms));
-  tid_dlsym_count = 0;
 
   /* Drop the inherited virtual-memory records -- they describe the PARENT's
    * allocations, and CUDA contexts don't survive fork. Keeping them is

@@ -26,6 +26,7 @@ spec:
       protocol: TCP
     {{- end }}
   selector:
+    vgpu-manager.io/scheduler-role: leader
     app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
     {{- include "vgpu-manager.selectorLabels" . | nindent 4 }}
 {{- end }}

@@ -35,7 +35,6 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 )
 
 type GPUMinor = int
@@ -170,6 +169,7 @@ func (l deviceLib) GetMigDeviceInfos(gpuInfo *GpuDeviceInfo) (map[string]*MigDev
 	for uuid, info := range migs {
 		migMap[uuid] = &MigDeviceInfo{
 			MigInfo:        info,
+			ParentDevice:   gpuInfo,
 			ParentUUID:     gpuInfo.UUID,
 			GiProfileID:    int(info.GiProfileInfo.Id),
 			ParentMinor:    gpuInfo.Minor,
@@ -177,8 +177,6 @@ func (l deviceLib) GetMigDeviceInfos(gpuInfo *GpuDeviceInfo) (map[string]*MigDev
 			GIID:           int(info.GiInfo.Id),
 			PlacementStart: int(info.Placement.Start),
 			PlacementSize:  int(info.Placement.Size),
-			pciBusID:       gpuInfo.PciBusID,
-			pcieRootAttr:   gpuInfo.PcieRootAttr,
 		}
 	}
 	return migMap, nil
@@ -431,13 +429,7 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 		klog.Warningf("error getting PCIe root for device %q, continuing without attribute: %v", device.Address, err)
 	}
 
-	var numaNodeAttr *deviceattribute.DeviceAttribute
-	if device.NumaNode >= 0 {
-		numaNodeAttr = &deviceattribute.DeviceAttribute{
-			Name:  nvidia.StandardDeviceAttributeNumaNode,
-			Value: resourceapi.DeviceAttribute{IntValue: ptr.To(int64(device.NumaNode))},
-		}
-	}
+	numaNodeAttr := nvidia.DiscoverNUMANodeAttribute(device.Address)
 
 	_, memoryBytes := device.Resources.GetTotalAddressableMemory(true)
 
@@ -459,7 +451,6 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 		numaNodeAttr:           numaNodeAttr,
 		deviceID:               fmt.Sprintf("0x%04x", device.Device),
 		vendorID:               fmt.Sprintf("0x%04x", device.Vendor),
-		numaNode:               device.NumaNode,
 		iommuGroup:             device.IommuGroup,
 		iommuFDEnabled:         iommuFDEnabled,
 		addressableMemoryBytes: memoryBytes,

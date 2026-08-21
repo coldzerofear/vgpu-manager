@@ -48,7 +48,7 @@ webhooks:
           - CREATE
         resources:
           - pods
-        scope: '*'
+        scope: "Namespaced"
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
 {{- end }}

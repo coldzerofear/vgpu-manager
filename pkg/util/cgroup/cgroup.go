@@ -32,6 +32,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/util/qos"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	"k8s.io/kubernetes/pkg/kubelet/container"
 )
 
 var (
@@ -183,7 +185,6 @@ func parseCgroupDriverFromCmdline(args []string) (CGroupDriver, error) {
 		var driver string
 		if strings.HasPrefix(arg, "--cgroup-driver=") {
 			driver = strings.TrimPrefix(arg, "--cgroup-driver=")
-
 		} else if arg == "--cgroup-driver" && i+1 < len(args) {
 			driver = args[i+1]
 		}
@@ -359,12 +360,9 @@ func GetK8sPodCGroupFullPath(podCGroupPath string) string {
 	return filepath.Join(CGroupBasePath, podCGroupPath)
 }
 
-func GetK8sPodContainerCGroupFullPath(pod *corev1.Pod, containerName string,
-	getFullPath func(string) string) (string, error) {
-	var (
-		runtimeName string
-		containerId string
-	)
+func GetK8sPodContainerCGroupFullPath(
+	pod *corev1.Pod, containerName string, getFullPath func(string) string,
+) (string, error) {
 	containerStatus, ok := GetContainerStatus(pod, containerName)
 	if !ok {
 		return "", fmt.Errorf("failed to obtain container cgroup path")
@@ -372,21 +370,22 @@ func GetK8sPodContainerCGroupFullPath(pod *corev1.Pod, containerName string,
 	if containerStatus.State.Running == nil {
 		return "", fmt.Errorf("pod %q container %q not running", klog.KObj(pod), containerName)
 	}
-	runtimeName, containerId = ParseContainerRuntime(containerStatus.ContainerID)
+	containerId := container.ParseContainerID(klog.Background(), containerStatus.ContainerID)
 	cgroupName := NewPodCgroupName(pod)
 	switch currentCGroupDriver {
 	case SYSTEMD:
-		return convertSystemdFullPath(runtimeName, containerId, cgroupName, getFullPath)
+		return convertSystemdFullPath(containerId, cgroupName, getFullPath)
 	case CGROUPFS:
-		return convertCGroupfsFullPath(runtimeName, containerId, cgroupName, getFullPath)
+		return convertCGroupfsFullPath(containerId, cgroupName, getFullPath)
 	default:
 		return "", fmt.Errorf("unknown CGroup driver: %s", currentCGroupDriver)
 	}
 }
 
-func convertCGroupfsFullPath(runtimeName, containerId string,
-	cgroupName CgroupName, getFullPath func(string) string) (string, error) {
-	fullPath := getFullPath(filepath.Join(cgroupName.ToCgroupfs(), containerId))
+func convertCGroupfsFullPath(
+	containerId container.ContainerID, cgroupName CgroupName, getFullPath func(string) string,
+) (string, error) {
+	fullPath := getFullPath(filepath.Join(cgroupName.ToCgroupfs(), containerId.ID))
 	if !util.PathIsNotExist(fullPath) {
 		return fullPath, nil
 	}
@@ -394,15 +393,15 @@ func convertCGroupfsFullPath(runtimeName, containerId string,
 	if !util.PathIsNotExist(fullPath) {
 		return fullPath, nil
 	}
-	klog.Infof("Possible upgrade required to adapt container runtime <%s> CGroup driver <%s>",
-		runtimeName, "cgroupfs")
+	klog.Infof("Possible upgrade required to adapt container runtime <%s> CGroup driver <%s>", containerId.Type, "cgroupfs")
 	return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
 }
 
-func convertSystemdFullPath(runtimeName, containerId string,
-	cgroupName CgroupName, getFullPath func(string) string) (string, error) {
-	runtimePrefix := SystemdPathPrefixOfRuntime(runtimeName)
-	cgroupPath := fmt.Sprintf("%s/%s-%s", cgroupName.ToSystemd(), runtimePrefix, containerId)
+func convertSystemdFullPath(
+	containerId container.ContainerID, cgroupName CgroupName, getFullPath func(string) string,
+) (string, error) {
+	runtimePrefix := SystemdPathPrefixOfRuntime(containerId.Type)
+	cgroupPath := fmt.Sprintf("%s/%s-%s", cgroupName.ToSystemd(), runtimePrefix, containerId.ID)
 	fullPath := getFullPath(cgroupPath)
 	if !util.PathIsNotExist(fullPath) {
 		return fullPath, nil
@@ -410,7 +409,7 @@ func convertSystemdFullPath(runtimeName, containerId string,
 	if fullPath = getFullPath(cgroupPath + ".scope"); !util.PathIsNotExist(fullPath) {
 		return fullPath, nil
 	}
-	switch runtimeName {
+	switch containerId.Type {
 	case "containerd":
 		klog.Warningf("CGroup full path <%s> not exist", fullPath)
 		var toSystemd = func(cgroupName CgroupName) string {
@@ -424,21 +423,20 @@ func convertSystemdFullPath(runtimeName, containerId string,
 			}
 			return strings.Join(newparts, "-") + ".slice"
 		}
-		cgroupPath = fmt.Sprintf("system.slice/%s.service/%s:%s:%s", runtimeName,
-			toSystemd(cgroupName), runtimePrefix, containerId)
+		cgroupPath = fmt.Sprintf("system.slice/%s.service/%s:%s:%s", containerId.Type,
+			toSystemd(cgroupName), runtimePrefix, containerId.ID)
 		if fullPath = getFullPath(cgroupPath); !util.PathIsNotExist(fullPath) {
 			return fullPath, nil
 		}
 	case "docker":
 		klog.Warningf("CGroup full path <%s> not exist", fullPath)
-		cgroupPath = fmt.Sprintf("%s/%s", cgroupName.ToSystemd(), containerId)
+		cgroupPath = fmt.Sprintf("%s/%s", cgroupName.ToSystemd(), containerId.ID)
 		if fullPath = getFullPath(cgroupPath); !util.PathIsNotExist(fullPath) {
 			return fullPath, nil
 		}
 	default:
 	}
-	klog.Infof("Possible upgrade required to adapt container runtime <%s> CGroup driver <%s>",
-		runtimeName, "systemd")
+	klog.Infof("Possible upgrade required to adapt container runtime <%s> CGroup driver <%s>", containerId.Type, "systemd")
 	return "", fmt.Errorf("container CGroup full path <%s> not exist", fullPath)
 }
 
@@ -449,32 +447,13 @@ func convertSystemdFullPath(runtimeName, containerId string,
 // while it is still in flight, then naturally rolls over to the regular entry
 // once the init container has completed and the regular container is up.
 func GetContainerStatus(pod *corev1.Pod, containerName string) (*corev1.ContainerStatus, bool) {
-	for i := range pod.Status.InitContainerStatuses {
-		if pod.Status.InitContainerStatuses[i].Name == containerName {
-			return &pod.Status.InitContainerStatuses[i], true
-		}
+	if status, ok := podutil.GetContainerStatus(pod.Status.InitContainerStatuses, containerName); ok {
+		return &status, true
 	}
-	for i := range pod.Status.ContainerStatuses {
-		if pod.Status.ContainerStatuses[i].Name == containerName {
-			return &pod.Status.ContainerStatuses[i], true
-		}
+	if status, ok := podutil.GetContainerStatus(pod.Status.ContainerStatuses, containerName); ok {
+		return &status, true
 	}
 	return nil, false
-}
-
-func GetContainerRuntime(pod *corev1.Pod, containerName string) (runtimeName string, containerId string) {
-	if cs, ok := GetContainerStatus(pod, containerName); ok {
-		runtimeName, containerId = ParseContainerRuntime(cs.ContainerID)
-	}
-	return
-}
-
-func ParseContainerRuntime(podContainerId string) (runtimeName string, containerId string) {
-	if splits := strings.Split(podContainerId, "://"); len(splits) == 2 {
-		runtimeName = splits[0]
-		containerId = splits[1]
-	}
-	return
 }
 
 func SystemdPathPrefixOfRuntime(runtimeName string) string {
@@ -491,14 +470,14 @@ func SystemdPathPrefixOfRuntime(runtimeName string) string {
 	}
 }
 
-func GetContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(string) string, fns ...func(pid int)) []int {
+func GetContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(string) string, funcs ...func(pid int)) []int {
 	cgroupFullPath, err := GetK8sPodContainerCGroupFullPath(pod, containerName, fullPath)
 	if err != nil {
 		klog.Errorln(err)
 		return nil
 	}
-	klog.V(4).InfoS("Get container cgroup path", "pod",
-		klog.KObj(pod), "container", containerName, "cgroupPath", cgroupFullPath)
+	klog.V(4).InfoS("Get container cgroup path", "pod", klog.KObj(pod),
+		"container", containerName, "cgroupPath", cgroupFullPath)
 	pids, err := cgroups.GetAllPids(cgroupFullPath)
 	if err != nil {
 		klog.ErrorS(err, "Failed to retrieve container pids",
@@ -507,9 +486,9 @@ func GetContainerPidsFunc(pod *corev1.Pod, containerName string, fullPath func(s
 	}
 	klog.V(5).InfoS("Get container all pids", "pod", klog.KObj(pod),
 		"container", containerName, "cgroupPath", cgroupFullPath, "pids", pids)
-	if len(fns) > 0 {
+	if len(funcs) > 0 {
 		for _, pid := range pids {
-			for _, fn := range fns {
+			for _, fn := range funcs {
 				fn(pid)
 			}
 		}
