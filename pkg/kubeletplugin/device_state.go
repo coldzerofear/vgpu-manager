@@ -514,14 +514,18 @@ func (s *DeviceState) DestroyUnknownMIGDevices(ctx context.Context) {
 	klog.Infof("%s: done", logpfx)
 }
 
-func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.NamespacedObject) error {
+// Unprepare returns true when cleanup removes a Dynamic MIG XID taint and the
+// caller must republish the ResourceSlice.
+// TODO: May be replace this bool with a general resource-change result if Unprepare
+// starts reporting other changes that require republishing.
+func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.NamespacedObject) (bool, error) {
 	s.Lock()
 	defer s.Unlock()
 	klog.V(6).Infof("Unprepare() for claim '%s'", claimRef.String())
 
 	checkpoint, err := s.getCheckpoint(ctx)
 	if err != nil {
-		return fmt.Errorf("unable to get checkpoint: %w", err)
+		return false, fmt.Errorf("unable to get checkpoint: %v", err)
 	}
 
 	claimUID := string(claimRef.UID)
@@ -532,20 +536,22 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 		// Prepare+Checkpoint are done transactionally). Note that
 		// claimRef.String() contains namespace, name, UID.
 		klog.V(2).Infof("Unprepare noop: claim not found in checkpoint data: %v", claimRef.String())
-		return nil
+		return false, nil
 	}
 
+	var taintRemoved bool
 	switch pc.CheckpointState {
 	case ClaimCheckpointStatePrepareStarted:
 		if err := s.unpreparePartiallyPreparedClaim(ctx, claimUID, pc, checkpoint); err != nil {
-			return fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", claimRef.String(), err)
+			return false, fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", claimRef.String(), err)
 		}
 	case ClaimCheckpointStatePrepareCompleted:
-		if err := s.unprepareDevices(ctx, claimRef, pc.PreparedDevices, checkpoint); err != nil {
-			return fmt.Errorf("unprepare devices failed for claim %s: %w", claimRef.String(), err)
+		taintRemoved, err = s.unprepareDevices(ctx, claimRef, pc.PreparedDevices, checkpoint)
+		if err != nil {
+			return false, fmt.Errorf("unprepare devices failed for claim %s: %w", claimRef.String(), err)
 		}
 	default:
-		return fmt.Errorf("unsupported ClaimCheckpointState: %v", pc.CheckpointState)
+		return false, fmt.Errorf("unsupported ClaimCheckpointState: %v", pc.CheckpointState)
 	}
 
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
@@ -580,13 +586,13 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 			// back on the nvidia driver) with fresh Fabric Manager info.
 			err := s.discoverSiblingAllocatables(allocatableDevice)
 			if err != nil {
-				return fmt.Errorf("error discovering sibling allocatables: %w", err)
+				return false, fmt.Errorf("error discovering sibling allocatables: %w", err)
 			}
 		}
 	}
 	if s.fabricManagerPartitioningEnabled() {
 		if err := s.deactivateFabricPartition(claimUID, &pc, checkpoint); err != nil {
-			return fmt.Errorf("error deactivating fabric partition: %w", err)
+			return false, fmt.Errorf("error deactivating fabric partition: %w", err)
 		}
 	}
 
@@ -605,9 +611,9 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	// PreparedClaims map.
 	err = s.deleteClaimFromCheckpoint(ctx, claimRef)
 	if err != nil {
-		return fmt.Errorf("error deleting claim from checkpoint: %w", err)
+		return false, fmt.Errorf("error deleting claim from checkpoint: %w", err)
 	}
-	return nil
+	return taintRemoved, nil
 }
 
 // Rollback previously partially prepared claim.
@@ -1290,15 +1296,16 @@ func mergeContainerEdits(base *cdiapi.ContainerEdits, extra *cdiapi.ContainerEdi
 	return base.Append(extra)
 }
 
-func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplugin.NamespacedObject, devices PreparedDevices, checkpoint *Checkpoint) error {
+func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplugin.NamespacedObject, devices PreparedDevices, checkpoint *Checkpoint) (bool, error) {
 	klog.V(6).Infof("Unpreparing claim '%s', previously prepared devices from checkpoint: %v", claimRef.UID, devices.GetDeviceNames())
+	var taintRemoved bool
 	var vGpuDevices PreparedDeviceList
 	for _, group := range devices {
 		// Unconfigure the vfio-pci devices.
 		if featuregates.Enabled(featuregates.PassthroughSupport) {
 			err := s.unprepareVfioDevices(ctx, group.Devices.VfioDevices())
 			if err != nil {
-				return err
+				return false, err
 			}
 		}
 
@@ -1328,7 +1335,10 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 					err := s.nvdevlib.deleteMigDevice(mig)
 					if err != nil {
 						klog.Warningf("Error deleting MIG device %s: %s", device.Mig.Device.DeviceName, err)
-						return fmt.Errorf("error deleting MIG device %s: %w", device.Mig.Device.DeviceName, err)
+						return false, fmt.Errorf("error deleting MIG device %s: %w", device.Mig.Device.DeviceName, err)
+					}
+					if s.clearDynamicMIGXIDTaint(device.Mig.Device.DeviceName) {
+						taintRemoved = true
 					}
 				} else {
 					klog.V(4).Infof("Unprepare: static MIG: noop (MIG %s)", device.Mig.Concrete.MigUUID)
@@ -1340,7 +1350,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 		//if featuregates.Enabled(featuregates.MPSSupport) {
 		//	mpsControlDaemon := s.mpsManager.NewMpsControlDaemon(claimUID, group)
 		//	if err := mpsControlDaemon.Stop(ctx); err != nil {
-		//		return fmt.Errorf("error stopping MPS control daemon: %w", err)
+		//		return false, fmt.Errorf("error stopping MPS control daemon: %w", err)
 		//	}
 		//}
 
@@ -1363,7 +1373,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 					if err == nvml.ERROR_NOT_SUPPORTED {
 						klog.Warningf("Unprepare: skip resetting time-slice policy for devices: %v", err)
 					} else {
-						return fmt.Errorf("error setting timeslice for devices: %w", err)
+						return false, fmt.Errorf("error setting timeslice for devices: %w", err)
 					}
 				}
 			}
@@ -1374,12 +1384,12 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 	if featuregates.Enabled(featuregates.VGPUSupport) {
 		if len(vGpuDevices) > 0 {
 			if err := s.vgpuManager.Unprepare(claimRef, vGpuDevices); err != nil {
-				return fmt.Errorf("error cleanup vgpu devices: %w", err)
+				return false, fmt.Errorf("error cleanup vgpu devices: %w", err)
 			}
 		}
 	}
 
-	return nil
+	return taintRemoved, nil
 }
 
 // unprepareVfioDevices rebinds each passthrough GPU from vfio-pci back to the
@@ -2168,6 +2178,26 @@ func isAdminAccess(results []resourceapi.DeviceRequestAllocationResult) bool {
 		if r.AdminAccess != nil && *r.AdminAccess {
 			return true
 		}
+	}
+	return false
+}
+
+// clearDynamicMIGXIDTaint clears health state that belongs to a concrete
+// Dynamic MIG incarnation after that device no longer exists. Parent-scoped
+// taints, such as GPU lost or an unavailable health monitor, remain intact.
+//
+// NOTE: An XID event already queued before deletion could re-add the taint.
+// This cleanup intentionally does not track concrete MIG
+// incarnations; that race can be addressed separately if observed.
+func (s *DeviceState) clearDynamicMIGXIDTaint(name DeviceName) bool {
+	device := s.perGPUAllocatable.GetAllocatableDevice(name)
+	if device == nil || device.Type() != MigDynamicDeviceType {
+		return false
+	}
+	if taint, removed := device.RemoveTaint(TaintKeyXID); removed {
+		klog.V(4).Infof("Cleared health taint for destroyed Dynamic MIG device %s: key=%q, value=%q, effect=%s",
+			name, taint.Key, taint.Value, taint.Effect)
+		return true
 	}
 	return false
 }

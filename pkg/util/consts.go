@@ -28,6 +28,8 @@ const (
 	NvidiaDomain                 = "nvidia.com"
 	NodeNvidiaDriverVersionLabel = NvidiaDomain + "/node-driver-version"
 	NodeNvidiaCudaVersionLabel   = NvidiaDomain + "/node-cuda-version"
+	NodeNvidiaCudaMajorLabel     = NvidiaDomain + "/node-cuda-major"
+	NodeNvidiaCudaMinorLabel     = NvidiaDomain + "/node-cuda-minor"
 	NvidiaNativeGPUResourceName  = NvidiaDomain + "/gpu"
 
 	DRADriverName       = "manager.nvidia.com"

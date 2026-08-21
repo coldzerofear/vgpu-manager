@@ -36,7 +36,8 @@ import (
 type CudaDriverVersion int
 
 func (v CudaDriverVersion) String() string {
-	return fmt.Sprintf("%d", v)
+	major, minor := v.MajorAndMinor()
+	return fmt.Sprintf("%d.%d", major, minor)
 }
 
 func (v CudaDriverVersion) MajorAndMinor() (major uint, minor uint) {

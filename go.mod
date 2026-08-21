@@ -17,7 +17,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/grepplabs/cert-source v0.1.0
 	github.com/julienschmidt/httprouter v1.3.0
-	github.com/opencontainers/cgroups v0.0.7
+	github.com/opencontainers/cgroups v0.1.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/prometheus/client_golang v1.24.1
 	github.com/sirupsen/logrus v1.9.4
@@ -46,7 +46,7 @@ require (
 	k8s.io/kubernetes v1.37.0-rc.0
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
 	sigs.k8s.io/controller-runtime v0.24.1
-	sigs.k8s.io/dra-driver-nvidia-gpu v0.4.1
+	sigs.k8s.io/dra-driver-nvidia-gpu v0.5.0
 	tags.cncf.io/container-device-interface v1.1.0
 	tags.cncf.io/container-device-interface/specs-go v1.1.0
 	volcano.sh/apis v1.15.1
