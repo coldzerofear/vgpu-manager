@@ -96,6 +96,17 @@ target_link_options(vgpu-control PRIVATE
 set_property(TARGET vgpu-control APPEND PROPERTY
     LINK_DEPENDS ${VGPU_EXPORTS_SCRIPT})
 
+# Our own calls to our own exported symbols bind directly instead of going
+# through the PLT — load_necessary_data() runs on every hook entry, so this
+# is worth the flag. Only affects references made from inside this library;
+# our symbols stay interposable from the outside, which is what the preload
+# mechanism relies on.
+include(CheckCCompilerFlag)
+check_c_compiler_flag(-fno-semantic-interposition VGPU_HAS_NO_SEMANTIC_INTERPOSITION)
+if(VGPU_HAS_NO_SEMANTIC_INTERPOSITION)
+    target_compile_options(vgpu-control PRIVATE -fno-semantic-interposition)
+endif()
+
 # ---------------------------------------------------------------------------
 # Build-time integrity checks for the CUDA hook layer.
 #
@@ -161,6 +172,18 @@ if(VGPU_RUN_HOOK_CHECKS)
         COMMENT "[vgpu] check no constructor/destructor attributes in src/"
         VERBATIM)
     add_dependencies(vgpu-control vgpu_check_no_constructors)
+
+    # Pre-build: forbid public dlsym() calls in library/src/. We export our
+    # own dlsym, so such a call resolves back into the interceptor instead
+    # of libc. Bootstrapping real_dlsym uses dlvsym(), which we do not
+    # export, and stays allowed.
+    add_custom_target(vgpu_check_no_public_dlsym ALL
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/hack/check_no_public_dlsym.sh
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "[vgpu] check no public dlsym() calls in src/"
+        VERBATIM)
+    add_dependencies(vgpu-control vgpu_check_no_public_dlsym)
 endif()
 
 # ---------------------------------------------------------------------------

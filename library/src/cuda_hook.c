@@ -77,13 +77,12 @@ extern int get_delta_ramp_floor_divisor(int *out);
 extern int get_uva_advise(int *out);
 extern int get_sm_shared_bucket(int *out);
 
-/* fork() child handler implemented in loader.c -- re-inits the three
- * library-internal mutexes (g_memory_node_lock, tid_dlsym_lock,
- * device_index_mutex), resets the driver/nvml-library-load once-guards
- * (g_cuda_ver_init, g_nvml_lib_init, g_cuda_lib_init) so a fork() that
- * lands mid-dlopen cannot leave the child's first hooked call hanging
- * forever, and clears the tid_dlsyms recursion-guard cache. Called from
- * this file's child_after_fork(). */
+/* fork() child handler implemented in loader.c -- re-inits the two
+ * library-internal mutexes (g_memory_node_lock, device_index_mutex),
+ * resets the driver/nvml-library-load once-guards (g_cuda_ver_init,
+ * g_nvml_lib_init, g_cuda_lib_init) so a fork() that lands mid-dlopen
+ * cannot leave the child's first hooked call hanging forever. Called
+ * from this file's child_after_fork(). */
 extern void loader_child_after_fork(void);
 
 static void graph_cost_after_fork(void);
@@ -300,9 +299,8 @@ void child_after_fork(void) {
    * The highest-probability path is the driver/nvml-library-load once-guards
    * (g_cuda_ver_init, g_nvml_lib_init, g_cuda_lib_init), since
    * load_necessary_data() -- which they gate -- runs at every launch hook
-   * entry and does real dlopen/proc-read work; the mutexes (tid_dlsym_lock,
-   * device_index_mutex, g_memory_node_lock) are also hot enough to warrant
-   * the reset. */
+   * entry and does real dlopen/proc-read work; the mutexes (device_index_mutex,
+   * g_memory_node_lock) are also hot enough to warrant the reset. */
   loader_child_after_fork();
 }
 

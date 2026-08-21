@@ -367,17 +367,15 @@ static void gap_end(int host_index, CUstream stream, CUresult launch_ret) {
 
 ### 7.2 loader.c 的 fork 危害
 
-`child_after_fork()` 还会调用 `loader_child_after_fork()`(定义在 loader.c)处理 4 个 loader 级 mutex 与一个线程键值缓存,它们都有相同的"父持锁瞬间 fork → 子永久 EBUSY"问题:
+`child_after_fork()` 还会调用 `loader_child_after_fork()`(定义在 loader.c)处理 3 个 loader 级 mutex,它们都有相同的"父持锁瞬间 fork → 子永久 EBUSY"问题:
 
 | 资源 | 用途 | 风险等级 |
 |---|---|---|
 | `init_config_mutex` | 保护 `load_controller_configuration` —— **每次 launch hook 入口都会跑到这里**(经 `load_necessary_data`) | **最高**:绝对会触及,父持锁瞬间 fork 必死锁 |
-| `tid_dlsym_lock` | 保护 `tid_dlsyms` 缓存,每次 dlsym 拦截都要拿 | 高:worker 线程频繁触发 |
 | `device_index_mutex` | 保护 `cuda↔nvml↔host` 设备索引查找,被多处调用 | 中:每次需要做索引转换都要拿 |
 | `g_memory_node_lock` | 保护 vmem 节点账本 | 中:仅 vmem 路径触及 |
-| `tid_dlsyms[]` 缓存 | 按 `pthread_t` 键值的 dlsym 递归保护表 | 低:陈旧条目仅是 cache miss,但理论上 `pthread_t` 复用可能假阳性匹配 |
 
-`loader_child_after_fork()` 用 `pthread_mutex_init` 对 4 个 mutex 重新初始化,清空 `tid_dlsyms[]` 数组。被 `pthread_atfork` 通过 cuda_hook.c 的统一入口调用。
+`loader_child_after_fork()` 用 `pthread_mutex_init` 对 3 个 mutex 重新初始化。被 `pthread_atfork` 通过 cuda_hook.c 的统一入口调用。
 
 **注意不重置的 loader.c 内部状态**:
 - `g_cuda_ver_init`/`g_cuda_lib_init`/`g_nvml_lib_init`/`init_nvml_host_index`(loader 的 4 个 `pthread_once_t`):它们守护的是**库加载/版本探测**这类系统级幂等结果,通过 mmap/dlopen 父子共享,跳过等价于"复用已有结果",**正确**。
