@@ -1,6 +1,9 @@
-# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.5
+# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.6
 
-> 状态：**设计定稿（十四项关键决策已确认），待实施**
+> 状态：**设计定稿（十七项关键决策已确认），待实施**
+> v1.6（2026-08-21）：tensor-fusion 对照分析（`docs/tensor_fusion_analysis_and_lessons.md`）引入 D15（端点交付
+> 长轮询+TokenReview，§5.1）、D16（extender 记账蓝图）、D17（多租户配额/隔离锁，§10）。gpu-go 对照见
+> `docs/gpu_go_analysis_and_lessons.md`。
 > v1.5（2026-08-15）：**D13 服务端拓扑**——1:N 主线 + 1:1 第二拓扑（operator 阶段以 `RemoteGPUServer` CR 引入），
 > 源自 gpu-go 对照分析；纠正"1:N 省 IP"的直觉（TensorFusion 也是单 IP 多端口）。§1.6 新增。
 > v1.5.1（同日评审）：§1.6.4 k8s 落地四形态与三选二困境；§1.6.5 server-centric 分工；§1.6.6 库侧边界更正
@@ -39,6 +42,9 @@
 | D11 | 制品形态 | **自包含静态 client**（fork 增加 `LUPINE_STATIC_DEPS`：nghttp2/OpenSSL/libstdc++/libgcc 静态内嵌，运行时依赖仅 glibc；rockylinux8 统一底座 → glibc 2.28 地板全矩阵最低）。已实现并本地验证（§4.5） |
 | D12 | 制品分发 | **镜像列表 → 节点版本目录**：cudaVersion→镜像地址映射在 values 里维护，helm 渲染进消费侧 DS 的 init 容器逐版本落盘 hostPath；增减版本 = 改列表，不重建我们的镜像。**逐 pod 选镜像不可行**（准入先于分配，§4.4） |
 | D13 | 服务端拓扑（v1.5） | **1:N（单 server/节点 + session）为 k8s 池化主线；1:1（per-allocation server）为正式第二拓扑**。CR 层次：`RemoteGPUServer` 为节点级原语（含 `publish` 开关：发布给集群内 DRA / 不发布仅供集群外连接），`RemoteGPUPool` 是它的多节点编排层（§1.6.7）；1:N 的独有优势是外部 SM watcher 跨会话共享 NVML 采样（§1.6.8）。k8s 落地形态受"同 IP/高性能网卡/pod 隔离三选二"约束（§1.6.4）；库侧记账模式待定（SESSION+hostPID vs CGROUP+host /proc，§1.6.6） |
+| D15 | 端点交付强化（v1.6） | 增设**长轮询 HTTP + TokenReview 鉴权**为 D2/D8 的强化路径（源自 tensor-fusion，`docs/tensor_fusion_analysis_and_lessons.md` §3.1）：消费者 shim 调控制面端点、阻塞至 worker Running 再返回 endpoint（**天然就绪屏障**），鉴权用 pod SA token 的 TokenReview + owner-UID 比对（**无共享秘密**，比令牌进 env 强）。endpoint 内嵌 generation 供重连检测。详见 §5.1 |
+| D16 | extender 记账蓝图（v1.6） | K3 extender 兼容路径的自建全局记账，采用 **内存权威 store + Assume/Commit/Rollback 乐观账本 + TTL 清扫孤儿预留**（照搬 tensor-fusion `gpuallocator`，§3 补注）；DRA 主路径无需，靠原生 allocator |
+| D17 | 多租户前置能力（v1.6，待办） | 多租户上生产前需引入：**多维配额系统**（借 `GPUResourceQuota` 的 Total 命名空间级 + Single 每-workload 双维度 + 默认值 + 告警阈值）与**单卡隔离模式锁**（一张物理卡被多会话切分时锁定 shared/soft/hard、冲突 fail-closed）。记入 §10 |
 | D14 | 平台制品（v1.6） | **Windows/macOS 客户端打包进 GHCR 载体镜像**（内网 registry 作统一制品通道）：tag 按**平台家族**分 `cuda-<ver>-windows` / `cuda-<ver>-darwin`，**绝不按 distro 版本分**（D11 已把 Linux 制品做成 distro 无关，os-version 维度是倒退）。编译必须留在原生 runner（MSVC/Apple 工具链），Linux job 只做打包（§4.6） |
 
 ## 1. 问题本质：三平面模型
@@ -555,6 +561,32 @@ GPU 节点 agent watch claim ────────┤ (主通道，通常 <1s
 - 竞态彻底消除后，provider fail-closed 从"常态防线"退为"纵深防线"（孤儿/伪造 session 仍拒）。
 - 回收：claim 释放 → agent 删会话目录；agent 崩溃重启 → list+watch 全量对账（落盘幂等）。
 
+## 5.1 端点交付强化：长轮询 HTTP + TokenReview 鉴权（D15，v1.6，源自 tensor-fusion）
+
+tensor-fusion 的端点交付方式（`docs/tensor_fusion_analysis_and_lessons.md` §3.1，已代码核实）解决了我们两个
+较弱/待定点，作为 D2（屏障）与 D8（令牌鉴权）的**强化路径**纳入：
+
+**机制**：
+- webhook/注入层给消费容器注入一个控制面端点地址（`GET /connection?claim=<ns/name>`）+ claim 标识，而**不**把
+  endpoint 写死进 env；
+- 消费者 shim 启动后调该端点；控制面**阻塞（长轮询，超时如 5 分钟）直到该 claim/session 的 worker Ready**，
+  再返回 `LUPINE_SERVER` 端点（+ 会话令牌）。返回前先订阅 watch，避免错过 Ready 事件；
+- **鉴权 = k8s TokenReview + owner 比对**：消费者用自己的 **ServiceAccount token** 调端点，控制面 TokenReview
+  验证后，把 token 的 pod UID 与 claim/session 的 owner 比对——**一个 pod 只能取到属于自己的端点，无需任何
+  共享秘密**。
+
+**相对现有方案的三点收益**：
+1. **天然就绪屏障**：消费者进程在 worker Ready 前拿不到可用 endpoint（长轮询挂着），是 D2 "NodePrepare 内同步
+   EnsureSession" 之外的**等价屏障**，且对 1:1"endpoint 分配后才有"（§1.6.5）更自然——把"等 worker 起来"收进
+   一次 HTTP 调用，而非 CR status 轮询。
+2. **鉴权强于令牌进 env**：D8 现方案是控制面签发随机令牌进 pod env，泄露面 = env（明文链路还有网络侧，§6.1）。
+   TokenReview+ownerUID **不依赖共享秘密**，pod 用 SA token 自证身份。建议在多租户/明文链路下优先采用此方式。
+3. **late binding + 重连**：endpoint 不写死，worker 换 IP/重启后 shim 重新长轮询即拿新地址；配合 endpoint 内嵌
+   **generation/resourceVersion**（tensor-fusion 的 `native+ip+port+name-<rv>`）作 staleness 信号，重连干净。
+
+**与 D2 的关系**：两者不互斥——NodePrepare 屏障保证"配额已落盘"（GPU 侧），长轮询保证"worker 已就绪"（端点侧）。
+1:N 主线（endpoint 静态进 slice）可继续用 D2；1:1（endpoint 动态）用长轮询更顺，二选一按拓扑定。
+
 ## 6. 服务发现与网络可达（D3）
 
 **endpoint 值按部署形态填，注入层不区分（attribute 原样拼接）**：
@@ -732,3 +764,25 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 | 消费侧 plugin 写 claim status 的 RBAC 与并发（多设备/重试幂等） | 令牌按 claim 幂等生成（已存在则复用）；resourceclaims/status update 权限入 chart RBAC |
 | emptyDir 会话目录随 pod 删除，agent 容器单独重启时会话目录仍在但 watch 状态丢失 | agent 启动时 list+watch 全量对账（落盘幂等，§5 已有），emptyDir 内容与 claim 集合收敛 |
 | 数据面两次主机内存落地限制高速网络收益上限 | 固有于 lupine 架构（无 GPUDirect）；选型时按负载类型预期收益，勿承诺线性提升（§7.1.2） |
+
+## 10. 多租户前置能力（D17，v1.6，待办；借鉴 tensor-fusion）
+
+以下是**多租户上生产前**需要补齐的能力，来自 tensor-fusion 对照（`docs/tensor_fusion_analysis_and_lessons.md` §4）。
+当前设计（Phase 1/2）单租户可用，但缺这两块：
+
+1. **多维配额系统**（我们目前完全没有）。借 `GPUResourceQuota` 的双维度：
+   - `Total`（命名空间级）：requests/limits 总量、`MaxWorkers`、告警阈值百分比；
+   - `Single`（每 workload）：max/default requests & limits、`MaxGPUCount`。
+   - 记账用与设备分配同构的乐观 shadow（预留即计入），调度早期（准入/Filter）+ 分配时两次校验。
+   - 落点：DRA 主路径可挂在 allocator 前的准入校验；extender 路径并入 D16 的记账蓝图。
+
+2. **单卡隔离模式锁**（1:N 单卡多会话的安全保护，我们目前无）。一张物理卡被多会话切分时：
+   - 锁定该卡的隔离强度（shared / soft / hard 三选一），首个分配确定、后续必须一致；
+   - 冲突（同卡出现不同隔离模式）→ **fail-closed**，拒绝新分配直至冲突清除。
+   - 对应 tensor-fusion 的 `GPU.Status.{IsolationPolicy, ActiveIsolationMode, DynamicIsolationConflict}`。
+
+3. **（可选，方向）跨会话 QoS/公平**：我们的共享令牌桶只做限速不做优先级；tensor-fusion 有 hypervisor QoS
+   单卡多进程公平排队。多租户抢占场景的未来方向，非前置。
+
+> 注：网络 fabric 亲和（让消费者优先靠近其 remote worker 的快速 IB/RoCE）我们的 `net-zone` 标签（§6）已是粗粒度
+> 起点，且**领先于 tensor-fusion**（后者跨节点 fabric 完全不建模）；真做细粒度 fabric 亲和仍需扩展 zone 语义。

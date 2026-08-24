@@ -3,8 +3,10 @@
 > 本文件让一位**没有本仓库上下文的新 AI / 新工程师**能够快速上手：理解项目、当前任务、设计决策、
 > 构建/测试方法，以及如何**复查/实施**远程 GPU 虚拟化相关工作。
 > 深度设计见 `docs/remote_gpu_pool_research_design.md`。
-> k8s 接入见 `docs/remote_gpu_k8s_integration_design.md`；同类产品 gpu-go（TensorFusion）的对照分析与借鉴见
-> `docs/gpu_go_analysis_and_lessons.md`（服务端拓扑备选、客户端注入教训、非 k8s 消费路径）。
+> k8s 接入见 `docs/remote_gpu_k8s_integration_design.md`；同类产品对照分析与借鉴见
+> `docs/gpu_go_analysis_and_lessons.md`（TensorFusion gpu-go 客户端：拓扑备选、注入教训、非 k8s 路径）与
+> `docs/tensor_fusion_analysis_and_lessons.md`（TensorFusion operator/调度器控制面全貌：长轮询端点交付+
+> TokenReview 鉴权、乐观 Assume/Commit 账本、多维配额、单卡隔离锁）。
 
 ---
 
