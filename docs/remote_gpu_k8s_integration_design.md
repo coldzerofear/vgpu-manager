@@ -1,6 +1,8 @@
-# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.6.1
+# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.6.2
 
-> 状态：**设计定稿（十八项关键决策已确认），待实施**
+> 状态：**设计定稿（十九项关键决策已确认），待实施**
+> v1.6.2（2026-08-24）：新增 **D19（集群外接入的中继边界）**——`publish: false` 的集群外消费不得直连共享 server
+> 端口，须经每会话的单租户中继 pod 终止外部传输、校验令牌、补 TLS（§7.2）；§1.6.7 `publish: false` 交叉引用补齐。
 > v1.6.1（2026-08-21）：**约束"不改 lupine 源码"下修订 D15**——长轮询+TokenReview 作废（需改 client），改为
 > 域名注入+控制面 DNS + 签发时绑定+provider restore() 服务端校验（§5.1 重写）；新增 D18（代码组织：不新开仓库）。
 > v1.6（2026-08-21）：tensor-fusion 对照分析（`docs/tensor_fusion_analysis_and_lessons.md`）引入 D15/D16/D17。
@@ -48,6 +50,7 @@
 | D17 | 多租户前置能力（v1.6，待办） | 多租户上生产前需引入：**多维配额系统**（借 `GPUResourceQuota` 的 Total 命名空间级 + Single 每-workload 双维度 + 默认值 + 告警阈值）与**单卡隔离模式锁**（一张物理卡被多会话切分时锁定 shared/soft/hard、冲突 fail-closed）。记入 §10 |
 | D18 | 代码组织（v1.6.1） | **远程 GPU 控制面不新开仓库，留在 vgpu-manager**：agent=kubelet-plugin `--mode`（D-§1.5.1，复用 DRA 底座 80%）、helm 并入 dra-driver chart（D-§1.4）、刚消灭 library 双树——新仓库会重造双树。DNS 控制器/会话签发校验控制器作为新 `cmd/` 入口 + controller 加入本仓库。仅当需独立发版节奏时，用 monorepo 内独立 Go module，仍不新 repo |
 | D14 | 平台制品（v1.6） | **Windows/macOS 客户端打包进 GHCR 载体镜像**（内网 registry 作统一制品通道）：tag 按**平台家族**分 `cuda-<ver>-windows` / `cuda-<ver>-darwin`，**绝不按 distro 版本分**（D11 已把 Linux 制品做成 distro 无关，os-version 维度是倒退）。编译必须留在原生 runner（MSVC/Apple 工具链），Linux job 只做打包（§4.6） |
+| D19 | 集群外接入的中继边界（v1.6.2） | **`publish: false` 的集群外消费（开发者本机 `vgpu use`、跨集群）不得直连共享 lupine-server 端口**：集群外主体没有 pod 身份（D15 的"签发时绑定 pod"不成立）、lupine 服务端无 TLS/无逐连接身份（D5），直连等于把多租户共享端口面裸暴露。改为**每会话一个单租户中继 pod**：作为外部连接的唯一落点（`kubectl port-forward` 目标 / 专用 Service），终止外部传输、承载 TLS 终止（补 D5）、校验会话令牌后经集群内网络转发到共享 server。一租户一中继 = 单租户信任/崩溃域隔离，生命周期绑定会话便于回收。集群内 DRA 消费者不经此路（它们有 pod 身份，走 §5.1）（§7.2） |
 
 ## 1. 问题本质：三平面模型
 
@@ -326,6 +329,8 @@ spec；`network`/`transport` 字段是 D5/D6 的预留接缝——新增网络�
 - `publish: false` → **不进集群调度**，Server 只对外暴露 endpoint+token，供**集群外用户**（开发者本机 `vgpu use`、
   gpu-go 分析 §3.5 的场景；或跨集群消费）连接。会话/配额仍由 operator 落盘（session 模式）或 env 注入。
   这把"集群外消费"从一个独立产品路径变成了 Server 原语的一个布尔属性。
+  **注意（D19）**："对外暴露 endpoint" **不等于直连共享 server 端口**——集群外主体无 pod 身份、lupine 端无 TLS/逐连接身份，
+  必须经每会话的单租户中继 pod 终止外部传输并校验令牌后再转发（§7.2）。
 
 **helm 阶段的对应**：`values.remoteGPU.pools[]` 就是 Pool 的 spec；helm 直接渲染 per-node DS 而不生成中间 Server 对象
 （helm 无 owner 级联）。升 operator 时 Pool spec 原样、Server 原语新增——增量而非重构，与 §1.5 的判断一致。
@@ -749,6 +754,32 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 - 分开测两类负载：小 RPC 往返延迟（控制面）与大块 HtoD/DtoH 带宽（数据面）。A 类方案在两者上的收益形状不同，
   混在一起测会得出误导性结论。
 - 基线用 `LUPINE_RPC_STATS`（见 `docs/lupine_env_reference.md`）取 RPC 计数与耗时分布，再对比网络方案。
+
+## 7.2 集群外接入的中继边界（D19）
+
+§7 的信任边界建立在**消费者是集群内 pod**这一前提上：它有 pod 身份（D15 签发时绑定 pod、provider `restore()`
+服务端校验），令牌泄露面收敛在同租户 namespace。`publish: false`（§1.6.7）的**集群外消费**打破了这个前提：
+
+| 集群内 DRA 消费者 | 集群外消费者（`vgpu use` / 跨集群） |
+|---|---|
+| 有 pod 身份，令牌签发时可绑定 podUID（§5.1.2） | **无 pod 身份**——签发时无可绑定的 k8s 主体 |
+| 令牌泄露面 = 同租户 namespace 内的 env+claim status | 令牌走集群外链路，泄露面外扩 |
+| 经集群内网络到达 server，端口不出集群 | 若直连 = 把多租户共享 server 端口**裸暴露给集群外** |
+
+而 lupine 服务端**无 TLS、无逐连接身份**（D5、§6.1）：直连共享 server 端口意味着任何拿到 endpoint 的集群外主体
+都能试连同一个多租户端口面，没有 k8s 原生 authN 挡在前面。
+
+**决策：集群外消费一律经每会话的单租户中继 pod，不直连共享 server。**中继 pod 是外部连接的**唯一落点**
+（`kubectl port-forward` 的目标，或专用 Service/LB endpoint），职责：
+
+1. **终止外部传输**：外部只触达中继，永不触达共享 server 端口；
+2. **TLS 终止**：中继作前置终止代理，补上 D5 缺口（server 侧无 TLS），集群内段可保持明文或内网 mTLS；
+3. **令牌校验后转发**：中继持有本会话令牌，校验通过后经集群内网络（同 §5.1 的 `LUPINE_SESSION` 语义）转发到共享 server；
+4. **单租户隔离**：一会话一中继 = 信任域/崩溃域按会话隔离，生命周期绑定会话，会话结束即回收。
+
+这样集群外主体的"身份"退化为**"能否建起这条中继"**——中继由控制面按 `publish: false` Server 的授权创建，
+等价于把"签发时绑定 pod"替换为"签发时绑定中继实例"，provider `restore()` 的服务端校验（§5.1.2）不变。
+集群内 DRA 消费者**不经此路**：它们已有 pod 身份，直接走 §5.1，中继只服务集群外这一条边。
 
 ## 8. 改造面与阶段
 
