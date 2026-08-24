@@ -47,7 +47,13 @@ TensorFusionConnection{Spec:{WorkloadName,ClientPod}, Status:{Phase,ConnectionUR
 
 ## 3. 三条最值得吸收的做法
 
-### 3.1 端点交付 = 长轮询 HTTP + TokenReview 鉴权（强烈建议吸收）
+### 3.1 端点交付 = 长轮询 HTTP + TokenReview 鉴权（分析；⚠️ 我们不能直接照搬）
+
+> **约束更正（2026-08-21，见 k8s 设计 v1.6.1 §5.1）**：下面是 tensor-fusion 的做法与其价值分析，但**它需要
+> 改 lupine client**（让 shim 主动拿 pod SA token HTTP 调控制面），违反我们"不改 lupine 源码"约束。**我们采用
+> 的是约束内等价方案**：端点走**域名注入 + 控制面 DNS**（被动可解析，不需 client 回调），鉴权走**签发时绑定 pod
+> + provider `restore()` 服务端校验**（`LUPINE_SESSION` 是唯一不改 lupine 的通道，provider 是我们的代码）。
+> 就绪屏障回到 D2。本节保留原始分析作对照。
 
 tensor-fusion **不把 endpoint 塞进 env / claim status 让消费者被动读**，而是：
 - webhook 给 client 容器注入 `TENSOR_FUSION_OPERATOR_GET_CONNECTION_URL`（指向 operator 的
@@ -124,6 +130,8 @@ underlay 优先的判断（§6/§1.6.4）。
 ## 6. 对设计文档的具体更新（已同步）
 
 见 `docs/remote_gpu_k8s_integration_design.md` v1.6 的 D15/D16/D17 与 §5.1/§10：
-- **D15**：端点交付增设"长轮询 HTTP + TokenReview 鉴权"选项（§5.1），作为 D2/D8 的强化路径。
+- **D15（v1.6.1 修订）**：长轮询+TokenReview 需改 lupine client，**作废**；改为域名注入+控制面 DNS + 签发时绑定
+  +provider `restore()` 服务端校验（§5.1）。
+- **D18**：远程 GPU 控制面**不新开仓库**，留在 vgpu-manager（复用 DRA/informer/webhook 底座，避免重造 Go 双树）。
 - **D16**：extender 兼容路径的自建记账，采用 Assume/Commit/Rollback + TTL 清扫蓝图（§3 补注）。
 - **D17**：多租户前需引入配额系统（借 `GPUResourceQuota` 的 Total/Single 双维度）+ 单卡隔离模式锁；记入 §10 待办。

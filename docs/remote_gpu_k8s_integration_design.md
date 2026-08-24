@@ -1,9 +1,10 @@
-# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.6
+# 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v1.6.1
 
-> 状态：**设计定稿（十七项关键决策已确认），待实施**
-> v1.6（2026-08-21）：tensor-fusion 对照分析（`docs/tensor_fusion_analysis_and_lessons.md`）引入 D15（端点交付
-> 长轮询+TokenReview，§5.1）、D16（extender 记账蓝图）、D17（多租户配额/隔离锁，§10）。gpu-go 对照见
-> `docs/gpu_go_analysis_and_lessons.md`。
+> 状态：**设计定稿（十八项关键决策已确认），待实施**
+> v1.6.1（2026-08-21）：**约束"不改 lupine 源码"下修订 D15**——长轮询+TokenReview 作废（需改 client），改为
+> 域名注入+控制面 DNS + 签发时绑定+provider restore() 服务端校验（§5.1 重写）；新增 D18（代码组织：不新开仓库）。
+> v1.6（2026-08-21）：tensor-fusion 对照分析（`docs/tensor_fusion_analysis_and_lessons.md`）引入 D15/D16/D17。
+> gpu-go 对照见 `docs/gpu_go_analysis_and_lessons.md`。
 > v1.5（2026-08-15）：**D13 服务端拓扑**——1:N 主线 + 1:1 第二拓扑（operator 阶段以 `RemoteGPUServer` CR 引入），
 > 源自 gpu-go 对照分析；纠正"1:N 省 IP"的直觉（TensorFusion 也是单 IP 多端口）。§1.6 新增。
 > v1.5.1（同日评审）：§1.6.4 k8s 落地四形态与三选二困境；§1.6.5 server-centric 分工；§1.6.6 库侧边界更正
@@ -42,9 +43,10 @@
 | D11 | 制品形态 | **自包含静态 client**（fork 增加 `LUPINE_STATIC_DEPS`：nghttp2/OpenSSL/libstdc++/libgcc 静态内嵌，运行时依赖仅 glibc；rockylinux8 统一底座 → glibc 2.28 地板全矩阵最低）。已实现并本地验证（§4.5） |
 | D12 | 制品分发 | **镜像列表 → 节点版本目录**：cudaVersion→镜像地址映射在 values 里维护，helm 渲染进消费侧 DS 的 init 容器逐版本落盘 hostPath；增减版本 = 改列表，不重建我们的镜像。**逐 pod 选镜像不可行**（准入先于分配，§4.4） |
 | D13 | 服务端拓扑（v1.5） | **1:N（单 server/节点 + session）为 k8s 池化主线；1:1（per-allocation server）为正式第二拓扑**。CR 层次：`RemoteGPUServer` 为节点级原语（含 `publish` 开关：发布给集群内 DRA / 不发布仅供集群外连接），`RemoteGPUPool` 是它的多节点编排层（§1.6.7）；1:N 的独有优势是外部 SM watcher 跨会话共享 NVML 采样（§1.6.8）。k8s 落地形态受"同 IP/高性能网卡/pod 隔离三选二"约束（§1.6.4）；库侧记账模式待定（SESSION+hostPID vs CGROUP+host /proc，§1.6.6） |
-| D15 | 端点交付强化（v1.6） | 增设**长轮询 HTTP + TokenReview 鉴权**为 D2/D8 的强化路径（源自 tensor-fusion，`docs/tensor_fusion_analysis_and_lessons.md` §3.1）：消费者 shim 调控制面端点、阻塞至 worker Running 再返回 endpoint（**天然就绪屏障**），鉴权用 pod SA token 的 TokenReview + owner-UID 比对（**无共享秘密**，比令牌进 env 强）。endpoint 内嵌 generation 供重连检测。详见 §5.1 |
+| D15 | 端点交付与鉴权（v1.6.1 修订：不改 lupine） | tensor-fusion 的**长轮询+TokenReview 需改 lupine client，作废**（`docs/tensor_fusion_analysis_and_lessons.md` §3.1）。改为：**① endpoint 用域名注入 + 控制面维护 DNS**（name→IP，提升 D3/§6 的域名选项为主力，顺带满足 TLS 主机名/multus 次网卡/IP 漂移），就绪屏障回到 D2；**② 鉴权 = 签发时绑定 pod + provider `restore()` 服务端校验**（`LUPINE_SESSION` 是唯一不改 lupine 的 client→server 通道；provider 是我们的代码，可在此二次校验 token 绑定与存活）。详见 §5.1 |
 | D16 | extender 记账蓝图（v1.6） | K3 extender 兼容路径的自建全局记账，采用 **内存权威 store + Assume/Commit/Rollback 乐观账本 + TTL 清扫孤儿预留**（照搬 tensor-fusion `gpuallocator`，§3 补注）；DRA 主路径无需，靠原生 allocator |
 | D17 | 多租户前置能力（v1.6，待办） | 多租户上生产前需引入：**多维配额系统**（借 `GPUResourceQuota` 的 Total 命名空间级 + Single 每-workload 双维度 + 默认值 + 告警阈值）与**单卡隔离模式锁**（一张物理卡被多会话切分时锁定 shared/soft/hard、冲突 fail-closed）。记入 §10 |
+| D18 | 代码组织（v1.6.1） | **远程 GPU 控制面不新开仓库，留在 vgpu-manager**：agent=kubelet-plugin `--mode`（D-§1.5.1，复用 DRA 底座 80%）、helm 并入 dra-driver chart（D-§1.4）、刚消灭 library 双树——新仓库会重造双树。DNS 控制器/会话签发校验控制器作为新 `cmd/` 入口 + controller 加入本仓库。仅当需独立发版节奏时，用 monorepo 内独立 Go module，仍不新 repo |
 | D14 | 平台制品（v1.6） | **Windows/macOS 客户端打包进 GHCR 载体镜像**（内网 registry 作统一制品通道）：tag 按**平台家族**分 `cuda-<ver>-windows` / `cuda-<ver>-darwin`，**绝不按 distro 版本分**（D11 已把 Linux 制品做成 distro 无关，os-version 维度是倒退）。编译必须留在原生 runner（MSVC/Apple 工具链），Linux job 只做打包（§4.6） |
 
 ## 1. 问题本质：三平面模型
@@ -561,32 +563,52 @@ GPU 节点 agent watch claim ────────┤ (主通道，通常 <1s
 - 竞态彻底消除后，provider fail-closed 从"常态防线"退为"纵深防线"（孤儿/伪造 session 仍拒）。
 - 回收：claim 释放 → agent 删会话目录；agent 崩溃重启 → list+watch 全量对账（落盘幂等）。
 
-## 5.1 端点交付强化：长轮询 HTTP + TokenReview 鉴权（D15，v1.6，源自 tensor-fusion）
+## 5.1 端点交付与鉴权（D15，v1.6.1 修订：不改 lupine 源码）
 
-tensor-fusion 的端点交付方式（`docs/tensor_fusion_analysis_and_lessons.md` §3.1，已代码核实）解决了我们两个
-较弱/待定点，作为 D2（屏障）与 D8（令牌鉴权）的**强化路径**纳入：
+> **v1.6 曾提议照搬 tensor-fusion 的"长轮询 HTTP + TokenReview"；v1.6.1 作废该提议**——它需要
+> lupine client 主动拿 pod 的 SA token 去 HTTP 调控制面，**必须改 lupine client**，违反"尽量不改 lupine
+> 源码"约束。下面是约束内可达的等价方案。tensor-fusion 原做法见 `docs/tensor_fusion_analysis_and_lessons.md` §3.1。
 
-**机制**：
-- webhook/注入层给消费容器注入一个控制面端点地址（`GET /connection?claim=<ns/name>`）+ claim 标识，而**不**把
-  endpoint 写死进 env；
-- 消费者 shim 启动后调该端点；控制面**阻塞（长轮询，超时如 5 分钟）直到该 claim/session 的 worker Ready**，
-  再返回 `LUPINE_SERVER` 端点（+ 会话令牌）。返回前先订阅 watch，避免错过 Ready 事件；
-- **鉴权 = k8s TokenReview + owner 比对**：消费者用自己的 **ServiceAccount token** 调端点，控制面 TokenReview
-  验证后，把 token 的 pod UID 与 claim/session 的 owner 比对——**一个 pod 只能取到属于自己的端点，无需任何
-  共享秘密**。
+### 5.1.1 端点交付 = 域名注入 + 控制面 DNS（提升 D3/§6 的域名选项为主力）
 
-**相对现有方案的三点收益**：
-1. **天然就绪屏障**：消费者进程在 worker Ready 前拿不到可用 endpoint（长轮询挂着），是 D2 "NodePrepare 内同步
-   EnsureSession" 之外的**等价屏障**，且对 1:1"endpoint 分配后才有"（§1.6.5）更自然——把"等 worker 起来"收进
-   一次 HTTP 调用，而非 CR status 轮询。
-2. **鉴权强于令牌进 env**：D8 现方案是控制面签发随机令牌进 pod env，泄露面 = env（明文链路还有网络侧，§6.1）。
-   TokenReview+ownerUID **不依赖共享秘密**，pod 用 SA token 自证身份。建议在多租户/明文链路下优先采用此方式。
-3. **late binding + 重连**：endpoint 不写死，worker 换 IP/重启后 shim 重新长轮询即拿新地址；配合 endpoint 内嵌
-   **generation/resourceVersion**（tensor-fusion 的 `native+ip+port+name-<rv>`）作 staleness 信号，重连干净。
+lupine 唯一的 client→server 通道是 `LUPINE_SERVER`（端点）与 `LUPINE_SESSION`（会话头），都是 env，
+我们能控制注入值但不能让 client 主动回调控制面。因此端点交付走**被动可解析**而非主动拉取：
 
-**与 D2 的关系**：两者不互斥——NodePrepare 屏障保证"配额已落盘"（GPU 侧），长轮询保证"worker 已就绪"（端点侧）。
-1:N 主线（endpoint 静态进 slice）可继续用 D2；1:1（endpoint 动态）用长轮询更顺，二选一按拓扑定。
+- 注入层给 pod 注入**域名** endpoint（如 `gpu-server-<serverID>.<zone>.vgpu.internal:14833`），**不注入裸 IP**；
+- 控制器（watch server pod / `RemoteGPUServer` CR）维护 **name→IP 映射**，写进控制面管理的 DNS
+  （CoreDNS custom zone / external-dns / 自建轻量 DNS 组件，作为 vgpu-manager 的新 controller，D18）；
+- lupine 两侧均 `getaddrinfo`（已核实），域名天然可用；解析发生在首次建连。server 换 IP / 重启后，会话本就
+  作废、应用重连时**重新解析拿到新地址**——不改 lupine 一行。
 
+这一路顺带满足三处此前的硬约束：**① TLS 主机名校验要求域名**（§6.1）；**② SR-IOV/multus 次网卡 IP 不被 k8s
+Service 覆盖**（§6），自维护 DNS 正是补这个；**③ server IP 漂移**。
+**就绪屏障回到 D2**（NodePrepare 内同步 EnsureSession）——长轮询本是 D2 的替代，替代作废即回到 D2。
+
+### 5.1.2 鉴权 = 签发时绑定 pod + provider restore() 服务端校验（不改 lupine）
+
+**为什么 TokenReview-at-connection 做不了**：tensor-fusion 成立是因为它的 client shim 拿 pod SA token 主动
+HTTP 调 operator。我们不改 lupine client，而 **lupine 不转发任何 SA token**——client→server 只有
+`LUPINE_SESSION`（`h2.cpp:737` 读 env → `x-lupine-session` 头 → provider `restore(connection_id)`，
+`checkpoint_provider.c:282` 收到,`connection_id == LUPINE_SESSION`）。所以"连接时用 pod 身份 TokenReview"
+被物理堵死。约束内可达的最强模型分两层：
+
+1. **签发时绑定（mint-time binding）**：控制面创建会话目录时就知道该 session 发给哪个 pod，把
+   `session → podUID/claim/过期时间` 记进会话记录。token 本身**随机、不可预测、单 pod、短时效**。
+   泄露面 = pod env（同 D8），但多了绑定元数据可供服务端二次校验。
+2. **服务端校验由 library checkpoint 触发**（provider `restore()` 是**我们的代码**，非 lupine）：现状仅
+   "session 消毒 + 会话目录/配额存在即放行"；加强为——再校验控制面写下的会话记录**仍有效、未过期、绑定的 pod
+   仍存活**（读会话目录里 agent 落下的签名/带过期记录，或 provider 回调控制面校验），不满足返回非 0 →
+   fail-closed 拒连。**全程不碰 lupine**（provider 在 GPU 节点、是我们的 .so）。
+
+**安全强度**：达不到 tensor-fusion "pod 用自己 SA token 自证"（那需改 client 转发 token），但显著强于裸
+bearer token——token 绑 pod、带过期、服务端二次校验存活性。**可选增强（需上游改动）**：改 lupine client
+把 pod SA token 作为额外握手头转发，则 provider 可做真正的 TokenReview——列为长期项，非当前范围。
+
+### 5.1.3 与 D2 的关系
+
+不互斥：**D2 的 NodePrepare EnsureSession 保证"配额已落盘 + session 已登记"**（GPU 侧就绪屏障），
+**5.1.1 的 DNS 保证 endpoint 可解析**（网络侧）。1:N 主线 endpoint 仍可静态进 ResourceSlice attribute
+（域名形态）；1:1 endpoint 动态，经 CR status 回填域名后由 DNS 控制器发布。两拓扑都不需要改 lupine。
 ## 6. 服务发现与网络可达（D3）
 
 **endpoint 值按部署形态填，注入层不区分（attribute 原样拼接）**：
