@@ -49,6 +49,8 @@ type InjectConfig struct {
 	ArtifactsDir string
 	// ClientMountPath is the in-container mount root for artifacts.
 	ClientMountPath string
+	// AgentPort is the remote-agent gRPC port on every server host.
+	AgentPort int
 }
 
 // InjectDriver is the `--mode=inject` DRA driver for consumer nodes: no GPU,
@@ -155,13 +157,19 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		return fail(err)
 	}
 
-	// S1 spike: the session token is the claim UID so the GPU-node session
-	// can be materialized by hand (vgpu-session-config --session <uid>).
-	// TODO(S2/D8): mint a random token, write it to
-	// claim.status.devices[].data, and call EnsureSession on every endpoint
-	// before returning (D2 barrier).
+	// K1: the session token is the claim UID (also lets a spike materialize
+	// the session by hand with vgpu-session-config --session <uid>).
+	// TODO(D8): mint a random token and record it in
+	// claim.status.devices[].data so it is unpredictable.
 	token := string(claim.UID)
-	klog.V(2).Infof("Remote claim %s/%s: endpoints=%v artifact=%s (server CUDA floor %s), spike token = claim UID",
+
+	// D2 barrier: every server must have the session quota on disk before
+	// any container of the pod starts. A failure here makes the kubelet
+	// retry NodePrepare with backoff.
+	if err := EnsureSessions(ctx, endpoints, d.config.AgentPort, token, claim); err != nil {
+		return fail(err)
+	}
+	klog.V(2).Infof("Remote claim %s/%s: endpoints=%v artifact=%s (server CUDA floor %s), sessions ensured",
 		claim.Namespace, claim.Name, endpoints, artifact.Name, minCUDA)
 
 	edits := &cdiapi.ContainerEdits{

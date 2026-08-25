@@ -1,0 +1,41 @@
+syntax = 'proto3';
+
+option go_package="pkg/api/remoteagent";
+
+package remoteagent;
+
+// RemoteAgent is served by the GPU-node agent that runs alongside
+// lupine-server (design v2.0 D24). It is called cross-node by the consumer
+// side kubelet-plugin (--mode=inject) inside NodePrepareResources (D2/D20).
+service RemoteAgent {
+  // EnsureSession materializes the session quota directory for a claim
+  // allocation on this node (idempotent) and reports readiness.
+  rpc EnsureSession(EnsureSessionRequest) returns (EnsureSessionResponse) {};
+  // ServerInfo reports whether lupine-server is accepting connections and
+  // the node's CUDA ceiling.
+  rpc ServerInfo(ServerInfoRequest) returns (ServerInfoResponse) {};
+}
+
+message EnsureSessionRequest {
+  // Session token: the value the consumer pod receives as LUPINE_SESSION and
+  // the name of the session directory on this node.
+  string session         = 1;
+  string claim_uid       = 2;
+  string claim_namespace = 3;
+  string claim_name      = 4;
+}
+
+message EnsureSessionResponse {
+  bool   ready               = 1;
+  string cuda_driver_version = 2;
+  string message             = 3;
+}
+
+message ServerInfoRequest {}
+
+message ServerInfoResponse {
+  bool   listening           = 1;
+  string endpoint            = 2;
+  string cuda_driver_version = 3;
+  string node_name           = 4;
+}

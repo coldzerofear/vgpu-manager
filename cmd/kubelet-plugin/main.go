@@ -205,6 +205,13 @@ func newApp() *cli.App {
 			Destination: &flags.LupineArtifactsDir,
 			EnvVars:     []string{"LUPINE_ARTIFACTS_DIR"},
 		},
+		&cli.IntFlag{
+			Name:        "remote-agent-port",
+			Usage:       "remote-agent gRPC port on server hosts; inject mode calls EnsureSession on <endpoint host>:<port>.",
+			Value:       remote.DefaultAgentPort,
+			Destination: &flags.RemoteAgentPort,
+			EnvVars:     []string{"REMOTE_AGENT_PORT"},
+		},
 		&cli.StringFlag{
 			Name:        "remote-endpoint",
 			Usage:       "lupine-server endpoint published on this node's devices when RemoteGPUSupport is enabled (server mode). Empty derives <node InternalIP>:14833.",
@@ -395,6 +402,7 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 		PluginDataDirectoryPath:       config.DriverPluginPath(),
 		ArtifactsDir:                  config.Flags.LupineArtifactsDir,
 		ClientMountPath:               config.Flags.LupineClientMountPath,
+		AgentPort:                     config.Flags.RemoteAgentPort,
 	}, config.ClientSets)
 	if err != nil {
 		return fmt.Errorf("error creating inject driver: %w", err)

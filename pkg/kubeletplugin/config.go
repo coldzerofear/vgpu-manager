@@ -62,6 +62,9 @@ type Flags struct {
 	// LupineClientMountPath is the in-container mount root for the selected
 	// client artifact version. Only used by --mode=inject.
 	LupineClientMountPath string
+	// RemoteAgentPort is the remote-agent gRPC port on server hosts
+	// (inject mode calls EnsureSession there).
+	RemoteAgentPort int
 	// RemoteEndpoint is the lupine-server endpoint published on this node's
 	// devices when RemoteGPUSupport is on (server mode). Empty derives
 	// "<node InternalIP>:<lupine default port>".

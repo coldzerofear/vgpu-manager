@@ -51,6 +51,11 @@ const (
 	// (informational; the scheduling constraint is the nodeSelector).
 	AttrNetZone = "netZone"
 
+	// Capacity names, aligned with the local vgpu share semantics
+	// (pkg/kubeletplugin/vgpu.go).
+	CapacityCores  = "cores"
+	CapacityMemory = "memory"
+
 	// Existing attributes reused by the inject side (pkg/kubeletplugin/deviceinfo.go).
 	AttrUUID              = "uuid"
 	AttrCUDADriverVersion = "cudaDriverVersion"

@@ -434,4 +434,8 @@ const (
 	OpenKernelMode CompatibilityMode = 100
 	// ClientRegMode Use client mode to register GPU tasks.
 	ClientRegMode CompatibilityMode = 200
+	// SessionMode Indicates remote-GPU session accounting on a lupine-server node:
+	// the library aggregates by the session pids.config (library/include/hook.h,
+	// SESSION_COMPATIBILITY_MODE). Requires the server pod to run with hostPID.
+	SessionMode CompatibilityMode = 300
 )

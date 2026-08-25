@@ -243,3 +243,18 @@ func TestSelectArtifact(t *testing.T) {
 		}
 	})
 }
+
+func TestAgentAddr(t *testing.T) {
+	cases := map[string]string{
+		"10.0.0.7":                   "10.0.0.7:14834",
+		"10.0.0.7:14833":             "10.0.0.7:14834",
+		"http://gpu-a:14833":         "gpu-a:14834",
+		"https://gpu-a.example.com":  "gpu-a.example.com:14834",
+		"gpu-a.zone.vgpu.internal:1": "gpu-a.zone.vgpu.internal:14834",
+	}
+	for in, want := range cases {
+		if got := AgentAddr(in, 14834); got != want {
+			t.Errorf("AgentAddr(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
