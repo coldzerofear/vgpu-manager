@@ -31,6 +31,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/urfave/cli/v2"
@@ -190,6 +191,39 @@ func newApp() *cli.App {
 			Destination: &flags.NRIPluginIdx,
 			EnvVars:     []string{"NRI_PLUGIN_IDX"},
 		},
+		&cli.StringFlag{
+			Name:        "mode",
+			Usage:       "Plugin role: 'server' (GPU node) or 'inject' (consumer node, remote GPU injection only; requires the RemoteGPUSupport feature gate).",
+			Value:       pkgkubeletplugin.ModeServer,
+			Destination: &flags.Mode,
+			EnvVars:     []string{"PLUGIN_MODE"},
+		},
+		&cli.StringFlag{
+			Name:        "lupine-artifacts-dir",
+			Usage:       "Node directory holding lupine client artifacts, one subdirectory per CUDA version (inject mode only).",
+			Value:       remote.DefaultArtifactsDir,
+			Destination: &flags.LupineArtifactsDir,
+			EnvVars:     []string{"LUPINE_ARTIFACTS_DIR"},
+		},
+		&cli.StringFlag{
+			Name:        "remote-endpoint",
+			Usage:       "lupine-server endpoint published on this node's devices when RemoteGPUSupport is enabled (server mode). Empty derives <node InternalIP>:14833.",
+			Destination: &flags.RemoteEndpoint,
+			EnvVars:     []string{"REMOTE_ENDPOINT"},
+		},
+		&cli.StringFlag{
+			Name:        "remote-net-zone",
+			Usage:       "Reachability zone of this GPU node; the pool becomes schedulable on nodes labelled vgpu-manager.io/net-zone.<zone>=reachable (server mode, RemoteGPUSupport).",
+			Destination: &flags.RemoteNetZone,
+			EnvVars:     []string{"REMOTE_NET_ZONE"},
+		},
+		&cli.StringFlag{
+			Name:        "lupine-client-mount-path",
+			Usage:       "In-container mount root for the selected lupine client artifact version (inject mode only).",
+			Value:       remote.DefaultClientMountPath,
+			Destination: &flags.LupineClientMountPath,
+			EnvVars:     []string{"LUPINE_CLIENT_MOUNT_PATH"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.KubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
@@ -234,6 +268,9 @@ func newApp() *cli.App {
 				ClientSets: clientSets,
 			}
 
+			if flags.Mode == pkgkubeletplugin.ModeInject {
+				return RunInjectPlugin(c.Context, config)
+			}
 			return RunPlugin(c.Context, config)
 		},
 		After: func(c *cli.Context) error {
@@ -258,6 +295,24 @@ func newApp() *cli.App {
 
 // Input validation of CLI flags.
 func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
+	switch flags.Mode {
+	// Empty means the caller did not go through the CLI (e.g. tests); treat
+	// it as the server default.
+	case "", pkgkubeletplugin.ModeServer:
+		if featuregates.Enabled(featuregates.RemoteGPUSupport) && flags.RemoteNetZone == "" {
+			return fmt.Errorf("--remote-net-zone is required in server mode when feature gate %s is enabled",
+				featuregates.RemoteGPUSupport)
+		}
+	case pkgkubeletplugin.ModeInject:
+		if !featuregates.Enabled(featuregates.RemoteGPUSupport) {
+			return fmt.Errorf("--mode=%s requires feature gate %s to be enabled",
+				pkgkubeletplugin.ModeInject, featuregates.RemoteGPUSupport)
+		}
+	default:
+		return fmt.Errorf("invalid --mode %q: must be %q or %q",
+			flags.Mode, pkgkubeletplugin.ModeServer, pkgkubeletplugin.ModeInject)
+	}
+
 	// Validate the NRI plugin index format early (only when set): containerd
 	// otherwise rejects a bad index at registration time, which surfaces as an
 	// obscure reconnect-loop failure rather than a clear startup error.
@@ -305,6 +360,54 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 		}
 	}
 
+	return nil
+}
+
+// RunInjectPlugin initializes and runs the consumer-node (no GPU) inject
+// plugin for remote GPU claims (--mode=inject, design D21/§2.3). It shares
+// the driver name and kubelet plugin directories with server mode, but skips
+// everything that needs a GPU or the NVIDIA driver (NVML enumeration, health
+// checks, nvidia-cdi-hook, NRI).
+func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error {
+	common.StartDebugSignalHandlers()
+
+	if err := os.MkdirAll(config.DriverPluginPath(), 0750); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(config.Flags.CdiRoot, 0750); err != nil {
+		return err
+	}
+
+	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	defer cancel()
+
+	metrics.InitializeDRARequestMetrics(util.DRADriverName)
+	if config.Flags.HttpEndpoint != "" {
+		if err := metrics.RunPrometheusMetricsServer(ctx, config.Flags.HttpEndpoint, config.Flags.MetricsPath); err != nil {
+			return fmt.Errorf("setup metrics endpoint: %w", err)
+		}
+	}
+
+	driver, err := remote.NewInjectDriver(ctx, remote.InjectConfig{
+		NodeName:                      config.Flags.NodeName,
+		CdiRoot:                       config.Flags.CdiRoot,
+		KubeletRegistrarDirectoryPath: config.Flags.KubeletRegistrarDirectoryPath,
+		PluginDataDirectoryPath:       config.DriverPluginPath(),
+		ArtifactsDir:                  config.Flags.LupineArtifactsDir,
+		ClientMountPath:               config.Flags.LupineClientMountPath,
+	}, config.ClientSets)
+	if err != nil {
+		return fmt.Errorf("error creating inject driver: %w", err)
+	}
+
+	<-ctx.Done()
+	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
+		klog.Errorf("error from context: %v", err)
+	}
+
+	if err := driver.Shutdown(); err != nil {
+		klog.Errorf("unable to cleanly shutdown inject driver: %v", err)
+	}
 	return nil
 }
 

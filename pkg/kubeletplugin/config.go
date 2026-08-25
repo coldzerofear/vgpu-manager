@@ -51,7 +51,31 @@ type Flags struct {
 	// when the NRISupport feature gate is enabled.
 	NRIRoot      string
 	NRIPluginIdx string
+	// Mode selects the plugin role (design D21, v1.7): "server" (GPU node;
+	// local DRA duties, plus remote-pool duties when RemoteGPUSupport is
+	// enabled) or "inject" (consumer node; remote env/CDI injection only, no
+	// GPU dependency).
+	Mode string
+	// LupineArtifactsDir is the node-level lupine client version directory
+	// (design D12). Only used by --mode=inject.
+	LupineArtifactsDir string
+	// LupineClientMountPath is the in-container mount root for the selected
+	// client artifact version. Only used by --mode=inject.
+	LupineClientMountPath string
+	// RemoteEndpoint is the lupine-server endpoint published on this node's
+	// devices when RemoteGPUSupport is on (server mode). Empty derives
+	// "<node InternalIP>:<lupine default port>".
+	RemoteEndpoint string
+	// RemoteNetZone is the reachability zone this GPU node belongs to; the
+	// pool nodeSelector matches nodes labelled as reaching it. Required in
+	// server mode when RemoteGPUSupport is on.
+	RemoteNetZone string
 }
+
+const (
+	ModeServer = "server"
+	ModeInject = "inject"
+)
 
 type Config struct {
 	*Flags

@@ -1,0 +1,63 @@
+---
+# S0 spike：手工 ResourceSlice，模拟 RemoteGPUSupport 开启后 GPU 节点插件的发布产物（设计 v2.0）。
+#
+# 与真插件的差异只有 pool 名（真插件 = 节点名；这里用 remote-spike-pool 避免撞车）。
+# 编辑处：uuid / endpoint / cudaDriverVersion / memory / nodeSelector 里的节点名与 zone。
+#
+#   - 不设 spec.nodeName —— 归属由 nodeSelector 表达：GPU 节点自身（本地路径）OR 打了
+#     vgpu-manager.io/net-zone.<zone>=reachable 标签的节点（远程路径）。同一设备只有一份记账。
+#   - 属性均为驱动默认域下的非限定名（CEL: device.attributes['manager.nvidia.com'].<name>）；
+#     accessMode/endpoint/netZone 为远程新增，uuid/cudaDriverVersion 复用既有属性。
+#   - capacity 结构对齐本地 vgpu 份额语义（pkg/kubeletplugin/vgpu.go）。
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  name: remote-spike-pool-slice-0
+spec:
+  driver: manager.nvidia.com
+  pool:
+    name: remote-spike-pool
+    generation: 1
+    resourceSliceCount: 1
+  nodeSelector:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: kubernetes.io/hostname
+            operator: In
+            values: ["gpu-node-1"]              # ← GPU 节点名
+      - matchExpressions:
+          - key: vgpu-manager.io/net-zone.zone-a
+            operator: In
+            values: ["reachable"]
+  devices:
+    - name: vgpu-0
+      allowMultipleAllocations: true
+      attributes:
+        type:
+          string: vgpu
+        accessMode:
+          string: remote
+        uuid:
+          string: GPU-00000000-0000-0000-0000-000000000000
+        endpoint:
+          string: "192.0.2.10:14833"
+        cudaDriverVersion:
+          version: "12.9.0"
+        netZone:
+          string: zone-a
+      capacity:
+        cores:
+          value: "100"
+          requestPolicy:
+            default: "100"
+            validRange:
+              min: "0"
+              max: "100"
+              step: "1"
+        memory:
+          value: 24Gi
+          requestPolicy:
+            default: 24Gi
+            validRange:
+              min: 1Mi
+              step: 1Mi

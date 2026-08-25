@@ -80,6 +80,7 @@ type driver struct {
 	nriPlugin           *nri.Plugin
 	nriCache            *nri.Cache
 	nriCancel           context.CancelFunc
+	remote              *remotePublisher
 	wg                  sync.WaitGroup
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
@@ -141,11 +142,17 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 
 	puLockPath := filepath.Join(config.DriverPluginPath(), DriverPrepUprepFlockFileName)
 
+	remotePub, err := newRemotePublisher(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+
 	driver := &driver{
 		client:                 config.Core,
 		state:                  state,
 		pulock:                 flock.NewFlock(puLockPath),
 		useSplitResourceSlices: useSplitSlices,
+		remote:                 remotePub,
 	}
 
 	// Register NVML events before kubeletplugin.Start exposes Prepare/Unprepare.
@@ -173,6 +180,14 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.Serialize(false),
 		kubeletplugin.RegistrarDirectoryPath(config.KubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
+	}
+	if remotePub.enabled() {
+		// A Node-owned pool that uses NodeSelector instead of NodeName must
+		// be reconciled by pool name: the helper's slice controller otherwise
+		// tracks only slices with spec.nodeName == this node and would never
+		// see (or clean up) the ones it published. Our single pool is named
+		// after the node.
+		opts = append(opts, kubeletplugin.ReconcilePoolWithName(config.Flags.NodeName))
 	}
 	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
 	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
@@ -334,7 +349,7 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 
 	return resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
-			nodeName: {Slices: gpuslices},
+			nodeName: d.remote.apply(resourceslice.Pool{Slices: gpuslices}),
 		},
 	}
 }
@@ -390,7 +405,7 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 
 	return resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
-			nodeName: {Slices: gpuslices},
+			nodeName: d.remote.apply(resourceslice.Pool{Slices: gpuslices}),
 		},
 	}
 }
@@ -598,7 +613,7 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 
 	resources := resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
-			config.Flags.NodeName: {Slices: []resourceslice.Slice{resourceSlice}},
+			config.Flags.NodeName: d.remote.apply(resourceslice.Pool{Slices: []resourceslice.Slice{resourceSlice}}),
 		},
 	}
 

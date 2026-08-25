@@ -1,0 +1,38 @@
+---
+# S0 spike：远程 vGPU 消费 claim + 无 GPU 节点上的 pod
+# 预期终点：claim 分配成功、pod 调度到 net-zone 可达节点、停在 ContainerCreating（见 README）。
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: spike-remote-vgpu-0
+  namespace: default
+spec:
+  devices:
+    requests:
+      - name: remote-vgpu
+        exactly:
+          deviceClassName: remote-vgpu-spike
+          capacity:
+            requests:
+              cores: 50
+              memory: 4Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spike-remote-pod
+  namespace: default
+spec:
+  containers:
+    - name: ctr0
+      image: ubuntu:24.04
+      command: ["bash", "-c"]
+      args: ["export; trap 'exit 0' TERM; sleep 9999 & wait"]
+      resources:
+        requests:
+          cpu: "1"
+        claims:
+          - name: remote-vgpu
+  resourceClaims:
+    - name: remote-vgpu
+      resourceClaimName: spike-remote-vgpu-0

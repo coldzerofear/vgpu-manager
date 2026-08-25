@@ -2,6 +2,17 @@
 {{- $apiVersion := (include "vgpu-manager-dra-driver.resourceApiVersion" . | trim) }}
 {{- $driver := .Values.deviceClasses.driverName | default "manager.nvidia.com" }}
 {{- $labels := include "vgpu-manager-dra-driver.labels" . }}
+{{- /*
+  Remote GPU (design v2.0): the plugin always publishes accessMode=local|remote on every
+  device. When remoteGPU.enabled, the local classes are pinned to accessMode == 'local'
+  (devices of nodes that did not opt into remote access) and a dedicated class selects
+  accessMode == 'remote'. Devices published by a plugin older than this attribute carry no
+  accessMode and are excluded by the pinned classes until that plugin is upgraded.
+*/}}
+{{- $localOnly := "" }}
+{{- if .Values.deviceClasses.remoteGPU.enabled }}
+{{- $localOnly = printf " && device.attributes['%s'].accessMode == 'local'" $driver }}
+{{- end }}
 {{- if .Values.deviceClasses.gpu.enabled }}
 apiVersion: {{ $apiVersion }}
 kind: DeviceClass
@@ -12,7 +23,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'gpu'"
+        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'gpu'{{ $localOnly }}"
   {{- if and (eq $apiVersion "resource.k8s.io/v1") .Values.deviceClasses.gpu.extendedResourceName }}
   extendedResourceName: {{ .Values.deviceClasses.gpu.extendedResourceName }}
   {{- end }}
@@ -28,7 +39,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'vgpu'"
+        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'vgpu'{{ $localOnly }}"
 {{- end }}
 {{- if .Values.deviceClasses.mig.enabled }}
 ---
@@ -55,5 +66,18 @@ spec:
   selectors:
     - cel:
         expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'vfio'"
+{{- end }}
+{{- if .Values.deviceClasses.remoteGPU.enabled }}
+---
+apiVersion: {{ $apiVersion }}
+kind: DeviceClass
+metadata:
+  name: {{ .Values.deviceClasses.remoteGPU.name | default "remote-vgpu-manager" }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == '{{ .Values.deviceClasses.remoteGPU.deviceType | default "vgpu" }}' && device.attributes['{{ $driver }}'].accessMode == 'remote'"
 {{- end }}
 {{- end }}

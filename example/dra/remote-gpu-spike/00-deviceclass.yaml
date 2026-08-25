@@ -1,0 +1,14 @@
+---
+# S0 spike：远程消费 DeviceClass（设计 v2.0：同一设备按节点发布 accessMode=local|remote）
+# remote = 该节点已开 RemoteGPUSupport，设备可远程消费（pod 落本节点时仍走本地路径）。
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: remote-vgpu-spike
+spec:
+  selectors:
+    - cel:
+        expression: >-
+          device.driver == 'manager.nvidia.com' &&
+          device.attributes['manager.nvidia.com'].type == 'vgpu' &&
+          device.attributes['manager.nvidia.com'].accessMode == 'remote'

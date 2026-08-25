@@ -108,6 +108,14 @@ const (
 	// require DevicePluginClientMode.
 	NRISupport featuregate.Feature = util.NRISupport
 
+	// RemoteGPUSupport enables the remote GPU (lupine-backed) code paths: the
+	// remote-pool duties of `--mode=server` (ResourceSlice publishing with a
+	// reachability NodeSelector, session materialization) and the whole of
+	// `--mode=inject` (env/CDI injection on consumer nodes, which requires this
+	// gate). The gate is orthogonal to --mode: mode selects the role shape,
+	// this gate opens the remote feature within it (design D21, v1.7).
+	RemoteGPUSupport featuregate.Feature = "RemoteGPUSupport"
+
 	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
 	// storing daemon info directly in ComputeDomainStatus.Nodes.
 	//ComputeDomainCliques featuregate.Feature = "ComputeDomainCliques"
@@ -218,6 +226,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	ConsumableShares: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	RemoteGPUSupport: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
