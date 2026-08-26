@@ -60,11 +60,9 @@ const (
 	AttrUUID              = "uuid"
 	AttrCUDADriverVersion = "cudaDriverVersion"
 
-	// Node labels (design §6). GPU nodes are in zone Z; nodes that can reach
-	// zone Z carry LabelNetZoneReachablePrefix+Z = LabelValueReachable.
-	LabelNetZoneReachablePrefix = "vgpu-manager.io/net-zone."
-	LabelValueReachable         = "reachable"
-	LabelHostname               = "kubernetes.io/hostname"
+	// LabelHostname pins the GPU node itself into its pool nodeSelector so
+	// the local path stays available (design D23).
+	LabelHostname = "kubernetes.io/hostname"
 
 	// DefaultServerPort is lupine-server's default listen port
 	// (docs/lupine_env_reference.md, LUPINE_PORT).
@@ -94,9 +92,3 @@ const (
 	cdiVendor     = "k8s." + util.DRADriverName
 	cdiClaimClass = "claim"
 )
-
-// ReachableLabel returns the node label key that marks a node as able to
-// reach GPU servers in `zone`.
-func ReachableLabel(zone string) string {
-	return LabelNetZoneReachablePrefix + zone
-}

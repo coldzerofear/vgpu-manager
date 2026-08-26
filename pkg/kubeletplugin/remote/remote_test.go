@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 )
 
@@ -129,7 +130,11 @@ func TestDecorateAndSelector(t *testing.T) {
 	})
 
 	t.Run("pool selector covers the GPU node itself OR reachable nodes", func(t *testing.T) {
-		sel := PoolNodeSelector("gpu-node-1", "zone-a")
+		reqs, err := ParseNodeSelector("topology.kubernetes.io/zone=az1,gpu-fabric in (a,b),!isolated,tier!=edge")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sel := PoolNodeSelector("gpu-node-1", reqs)
 		if len(sel.NodeSelectorTerms) != 2 {
 			t.Fatalf("expected 2 OR-terms, got %d", len(sel.NodeSelectorTerms))
 		}
@@ -137,9 +142,33 @@ func TestDecorateAndSelector(t *testing.T) {
 		if first.Key != LabelHostname || first.Values[0] != "gpu-node-1" {
 			t.Fatalf("first term must pin the GPU node: %+v", first)
 		}
-		second := sel.NodeSelectorTerms[1].MatchExpressions[0]
-		if second.Key != "vgpu-manager.io/net-zone.zone-a" || second.Values[0] != LabelValueReachable {
-			t.Fatalf("second term must match the reachability label: %+v", second)
+		// Second term: all operator requirements ANDed.
+		got := map[string]corev1.NodeSelectorRequirement{}
+		for _, r := range sel.NodeSelectorTerms[1].MatchExpressions {
+			got[r.Key] = r
+		}
+		if len(got) != 4 {
+			t.Fatalf("expected 4 ANDed requirements, got %+v", got)
+		}
+		if r := got["topology.kubernetes.io/zone"]; r.Operator != corev1.NodeSelectorOpIn || r.Values[0] != "az1" {
+			t.Fatalf("zone: %+v", r)
+		}
+		if r := got["gpu-fabric"]; r.Operator != corev1.NodeSelectorOpIn || len(r.Values) != 2 {
+			t.Fatalf("fabric: %+v", r)
+		}
+		if r := got["isolated"]; r.Operator != corev1.NodeSelectorOpDoesNotExist {
+			t.Fatalf("isolated: %+v", r)
+		}
+		if r := got["tier"]; r.Operator != corev1.NodeSelectorOpNotIn || r.Values[0] != "edge" {
+			t.Fatalf("tier: %+v", r)
+		}
+	})
+
+	t.Run("empty or invalid selector is rejected", func(t *testing.T) {
+		for _, bad := range []string{"", "   ", "=x", "a=b=c", "zone>1"} {
+			if _, err := ParseNodeSelector(bad); err == nil {
+				t.Errorf("%q should be rejected", bad)
+			}
 		}
 	})
 }

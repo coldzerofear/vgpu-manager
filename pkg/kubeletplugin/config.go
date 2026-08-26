@@ -69,9 +69,14 @@ type Flags struct {
 	// devices when RemoteGPUSupport is on (server mode). Empty derives
 	// "<node InternalIP>:<lupine default port>".
 	RemoteEndpoint string
-	// RemoteNetZone is the reachability zone this GPU node belongs to; the
-	// pool nodeSelector matches nodes labelled as reaching it. Required in
+	// RemoteNodeSelector is a label-selector expression over nodes that can
+	// reach this GPU node's lupine-server (e.g.
+	// "topology.kubernetes.io/zone=az1,gpu-fabric=rdma-a"). The pool becomes
+	// schedulable on the GPU node itself OR any node matching it. Required in
 	// server mode when RemoteGPUSupport is on.
+	RemoteNodeSelector string
+	// RemoteNetZone is an optional informational label published as the
+	// netZone device attribute.
 	RemoteNetZone string
 }
 

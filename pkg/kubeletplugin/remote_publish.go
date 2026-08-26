@@ -33,13 +33,14 @@ import (
 // remotePublisher decides how this node's devices are announced with respect
 // to remote access (design v2.0): every device is stamped with accessMode,
 // and when RemoteGPUSupport is on the pool's node scope is widened from the
-// node itself to "the node OR any node labelled as reaching its zone", with
-// the lupine-server endpoint published alongside. No second pool exists —
+// node itself to "the node OR any node matching --remote-node-selector",
+// with the lupine-server endpoint published alongside. No second pool exists —
 // the same device is consumed locally when the pod lands here and remotely
 // otherwise, and the DRA allocator keeps a single account of it.
 type remotePublisher struct {
-	nodeName string
-	spec     *remote.PublishSpec // nil => local-only node
+	nodeName  string
+	spec      *remote.PublishSpec // nil => local-only node
+	reachable []corev1.NodeSelectorRequirement
 }
 
 func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, error) {
@@ -47,6 +48,12 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if !featuregates.Enabled(featuregates.RemoteGPUSupport) {
 		return rp, nil
 	}
+
+	reachable, err := remote.ParseNodeSelector(config.Flags.RemoteNodeSelector)
+	if err != nil {
+		return nil, err
+	}
+	rp.reachable = reachable
 
 	endpoint := config.Flags.RemoteEndpoint
 	if endpoint == "" {
@@ -57,8 +64,8 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 		endpoint = net.JoinHostPort(ip, strconv.Itoa(remote.DefaultServerPort))
 	}
 	rp.spec = &remote.PublishSpec{Endpoint: endpoint, NetZone: config.Flags.RemoteNetZone}
-	klog.V(2).Infof("Remote GPU publishing enabled: endpoint=%s zone=%s (pool nodeSelector widened to reachable nodes)",
-		endpoint, rp.spec.NetZone)
+	klog.V(2).Infof("Remote GPU publishing enabled: endpoint=%s reachable-nodes=%q zone=%q",
+		endpoint, config.Flags.RemoteNodeSelector, rp.spec.NetZone)
 	return rp, nil
 }
 
@@ -74,11 +81,10 @@ func (rp *remotePublisher) apply(pool resourceslice.Pool) resourceslice.Pool {
 		remote.Decorate(pool.Slices[i].Devices, rp.spec)
 	}
 	if rp.enabled() {
-		pool.NodeSelector = remote.PoolNodeSelector(rp.nodeName, rp.spec.NetZone)
+		pool.NodeSelector = remote.PoolNodeSelector(rp.nodeName, rp.reachable)
 	}
 	return pool
 }
-
 func nodeInternalIP(ctx context.Context, config *Config, nodeName string) (string, error) {
 	node, err := config.Core.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil {

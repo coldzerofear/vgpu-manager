@@ -20,10 +20,10 @@ pod 落到 GPU 节点 → 现有本地路径；落到可达节点 → 远程注�
 
 ## 步骤
 
-1. 给消费节点打可达域标签（zone 名 `zone-a` 与 slice 的 nodeSelector 保持一致）：
+1. 给消费节点打可达性标签（标签任意，真插件用 `--remote-node-selector` 接同样的 label selector 表达式）：
 
    ```bash
-   kubectl label node <consumer-node> vgpu-manager.io/net-zone.zone-a=reachable
+   kubectl label node <consumer-node> topology.kubernetes.io/zone=az1   # 任意标签，与 slice 的 nodeSelector 一致
    ```
 
 2. 编辑 `10-resourceslice.yaml`：把 `uuid`/`endpoint`/`memory`/`cudaDriverVersion`/GPU 节点名换成目标
@@ -42,7 +42,7 @@ pod 落到 GPU 节点 → 现有本地路径；落到可达节点 → 远程注�
 | 检查 | 期望 |
 |---|---|
 | `kubectl get resourceclaim spike-remote-vgpu-0 -o yaml` | `status.allocation.devices.results[0]` 命中 pool `remote-spike-pool` 的 `vgpu-0`，`consumedCapacity` 反映 cores/memory 请求 |
-| `kubectl get pod spike-remote-pod -o wide` | 被调度到打了 `net-zone.zone-a=reachable` 标签的节点（而非 GPU 节点） |
+| `kubectl get pod spike-remote-pod -o wide` | 被调度到匹配可达性标签的节点（而非 GPU 节点） |
 | pod 状态 | **停在 ContainerCreating，事件报 DRA 驱动未注册/prepare 失败——这是 S0 的预期终点**（注入属 S1） |
 | 份额语义（可选） | 再 apply 一份改名的 claim+pod：两个 claim 同时绑到 `vgpu-0`（`allowMultipleAllocations`），容量扣减正确；把请求撑到超过剩余容量则第二个 claim 不可分配 |
 | 版本匹配（可选） | 给 claim 加 CEL selector `device.attributes["manager.nvidia.com"].cudaDriverVersion.isGreaterThan(semver("99.0.0"))`，应不可分配 |
@@ -51,7 +51,7 @@ pod 落到 GPU 节点 → 现有本地路径；落到可达节点 → 远程注�
 
 ```bash
 kubectl delete -f 20-claim-pod.yaml -f 10-resourceslice.yaml -f 00-deviceclass.yaml
-kubectl label node <consumer-node> vgpu-manager.io/net-zone.zone-a-
+kubectl label node <consumer-node> topology.kubernetes.io/zone-
 ```
 
 ## S0 之后：S1（注入链路，代码已就绪）
@@ -67,7 +67,7 @@ S1 用同一套 YAML，把"pod 停在 ContainerCreating"变成"pod 内远程 CUD
    `libcuda.so.1`/`libnvidia-ml.so.1`，或镜像内 /artifacts 的 cp 产物）；以 host 网络运行
    `kubelet-plugin --mode=inject --feature-gates=RemoteGPUSupport=true --node-name=<node>`
    （挂 `/var/lib/kubelet/plugins_registry`、`/var/lib/kubelet/plugins`、`/var/run/cdi`）。
-3. **用真插件替代手工 slice**：GPU 节点插件以 `--feature-gates=RemoteGPUSupport=true --remote-net-zone=zone-a`
+3. **用真插件替代手工 slice**：GPU 节点插件以 `--feature-gates=RemoteGPUSupport=true --remote-node-selector=topology.kubernetes.io/zone=az1`
    运行（endpoint 缺省 = 节点 InternalIP:14833），它会把本节点设备发布为 `accessMode=remote`；删除手工 slice，
    DeviceClass 不变，再建 claim+pod。
 

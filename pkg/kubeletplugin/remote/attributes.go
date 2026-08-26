@@ -22,6 +22,8 @@ import (
 	"github.com/Masterminds/semver"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/utils/ptr"
 )
 
@@ -64,21 +66,56 @@ func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 		}
 		attrs[AttrAccessMode] = resourceapi.DeviceAttribute{StringValue: ptr.To(AccessModeRemote)}
 		attrs[AttrEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
-		attrs[AttrNetZone] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.NetZone)}
+		if spec.NetZone != "" {
+			attrs[AttrNetZone] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.NetZone)}
+		}
 	}
 }
 
+// ParseNodeSelector parses a standard label-selector expression
+// ("zone=a,rack in (r1,r2),!isolated") into NodeSelectorRequirements. All
+// requirements are ANDed inside one term; this is the operator-supplied
+// reachability predicate for --remote-node-selector.
+func ParseNodeSelector(expr string) ([]corev1.NodeSelectorRequirement, error) {
+	sel, err := labels.Parse(expr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid node selector %q: %w", expr, err)
+	}
+	reqs, _ := sel.Requirements()
+	if len(reqs) == 0 {
+		return nil, fmt.Errorf("node selector %q selects every node; refusing (use an explicit predicate)", expr)
+	}
+	var out []corev1.NodeSelectorRequirement
+	for _, r := range reqs {
+		nr := corev1.NodeSelectorRequirement{Key: r.Key(), Values: r.Values().List()}
+		switch r.Operator() {
+		case selection.Equals, selection.DoubleEquals, selection.In:
+			nr.Operator = corev1.NodeSelectorOpIn
+		case selection.NotEquals, selection.NotIn:
+			nr.Operator = corev1.NodeSelectorOpNotIn
+		case selection.Exists:
+			nr.Operator = corev1.NodeSelectorOpExists
+		case selection.DoesNotExist:
+			nr.Operator = corev1.NodeSelectorOpDoesNotExist
+		default:
+			return nil, fmt.Errorf("node selector %q: operator %q is not supported for node selection", expr, r.Operator())
+		}
+		out = append(out, nr)
+	}
+	return out, nil
+}
+
 // PoolNodeSelector is the node scope of a remote-capable pool: the GPU node
-// itself (local path) OR any node labelled as reaching the zone.
-func PoolNodeSelector(nodeName, zone string) *corev1.NodeSelector {
+// itself (local path) OR any node matching the operator's reachability
+// predicate. NodeSelectorTerms are ORed; requirements inside a term are
+// ANDed.
+func PoolNodeSelector(nodeName string, reachable []corev1.NodeSelectorRequirement) *corev1.NodeSelector {
 	return &corev1.NodeSelector{
 		NodeSelectorTerms: []corev1.NodeSelectorTerm{
 			{MatchExpressions: []corev1.NodeSelectorRequirement{{
 				Key: LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{nodeName},
 			}}},
-			{MatchExpressions: []corev1.NodeSelectorRequirement{{
-				Key: ReachableLabel(zone), Operator: corev1.NodeSelectorOpIn, Values: []string{LabelValueReachable},
-			}}},
+			{MatchExpressions: reachable},
 		},
 	}
 }

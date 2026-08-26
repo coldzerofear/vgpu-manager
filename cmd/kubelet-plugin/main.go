@@ -219,8 +219,14 @@ func newApp() *cli.App {
 			EnvVars:     []string{"REMOTE_ENDPOINT"},
 		},
 		&cli.StringFlag{
+			Name:        "remote-node-selector",
+			Usage:       "Label selector over nodes that can reach this node's lupine-server, e.g. 'topology.kubernetes.io/zone=az1,gpu-fabric in (a,b)'. The pool becomes schedulable on this node OR matching nodes (server mode, RemoteGPUSupport).",
+			Destination: &flags.RemoteNodeSelector,
+			EnvVars:     []string{"REMOTE_NODE_SELECTOR"},
+		},
+		&cli.StringFlag{
 			Name:        "remote-net-zone",
-			Usage:       "Reachability zone of this GPU node; the pool becomes schedulable on nodes labelled vgpu-manager.io/net-zone.<zone>=reachable (server mode, RemoteGPUSupport).",
+			Usage:       "Optional informational zone name published as the netZone device attribute.",
 			Destination: &flags.RemoteNetZone,
 			EnvVars:     []string{"REMOTE_NET_ZONE"},
 		},
@@ -306,9 +312,14 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	// Empty means the caller did not go through the CLI (e.g. tests); treat
 	// it as the server default.
 	case "", pkgkubeletplugin.ModeServer:
-		if featuregates.Enabled(featuregates.RemoteGPUSupport) && flags.RemoteNetZone == "" {
-			return fmt.Errorf("--remote-net-zone is required in server mode when feature gate %s is enabled",
-				featuregates.RemoteGPUSupport)
+		if featuregates.Enabled(featuregates.RemoteGPUSupport) {
+			if flags.RemoteNodeSelector == "" {
+				return fmt.Errorf("--remote-node-selector is required in server mode when feature gate %s is enabled",
+					featuregates.RemoteGPUSupport)
+			}
+			if _, err := remote.ParseNodeSelector(flags.RemoteNodeSelector); err != nil {
+				return err
+			}
 		}
 	case pkgkubeletplugin.ModeInject:
 		if !featuregates.Enabled(featuregates.RemoteGPUSupport) {
