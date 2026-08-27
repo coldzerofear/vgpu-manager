@@ -35,8 +35,11 @@ import (
 // and when RemoteGPUSupport is on the pool's node scope is widened from the
 // node itself to "the node OR any node matching --remote-node-selector",
 // with the lupine-server endpoint published alongside. No second pool exists —
-// the same device is consumed locally when the pod lands here and remotely
-// otherwise, and the DRA allocator keeps a single account of it.
+
+// — but with the gate on the node's local prepare path is disabled: every
+// claim on this node is prepared by the remote Injector (design v2.1 D23),
+// so a pod that mixes this node's devices with another node's never sees
+// two incompatible injection paths.
 type remotePublisher struct {
 	nodeName  string
 	spec      *remote.PublishSpec // nil => local-only node

@@ -34,12 +34,11 @@ const (
 	// as device.attributes["manager.nvidia.com"].<name>.
 
 	// AttrAccessMode is always published: AccessModeLocal on nodes without
-	// the RemoteGPUSupport gate (pool scoped to the node, today's behaviour),
-	// AccessModeRemote on nodes with it (pool scoped to the reachability
-	// zone; a pod that still lands on the GPU node takes the local path).
-	// One device carries exactly one value — a DeviceClass therefore selects
-	// "devices of local-only nodes" or "devices of remote-capable nodes",
-	// never "the same device but local".
+	// the RemoteGPUSupport gate (pool scoped to the node, prepared by the
+	// local path — today's behaviour); AccessModeRemote on nodes with it
+	// (pool scoped to the reachability selector, and EVERY consumer of the
+	// device goes through lupine — including pods scheduled onto the GPU
+	// node itself, design v2.1 D23). One device carries exactly one value.
 	AttrAccessMode   = "accessMode"
 	AccessModeLocal  = "local"
 	AccessModeRemote = "remote"
@@ -60,8 +59,9 @@ const (
 	AttrUUID              = "uuid"
 	AttrCUDADriverVersion = "cudaDriverVersion"
 
-	// LabelHostname pins the GPU node itself into its pool nodeSelector so
-	// the local path stays available (design D23).
+	// LabelHostname pins the GPU node itself into its pool nodeSelector: it
+	// is trivially reachable (loopback) even when the operator selector does
+	// not cover it. Pods landing there still take the remote path.
 	LabelHostname = "kubernetes.io/hostname"
 
 	// DefaultServerPort is lupine-server's default listen port

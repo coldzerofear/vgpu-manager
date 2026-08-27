@@ -243,8 +243,8 @@ deviceClasses:
   # Remote GPU (design v2.0). When enabled: the gpu/vgpu classes above are pinned to
   # accessMode == local (devices of nodes that did not enable RemoteGPUSupport), and a
   # dedicated class selects accessMode == remote devices (consumable from any node the
-  # publishing pool's nodeSelector covers; a pod landing on the GPU node itself still
-  # takes the local path). deviceType picks which device type the remote class exposes.
+  # publishing pool's nodeSelector covers; every consumer goes through lupine, even a pod
+  # landing on the GPU node itself). deviceType picks which device type the remote class exposes.
   remoteGPU:
     enabled: false
     name: remote-vgpu-manager

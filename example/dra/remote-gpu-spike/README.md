@@ -8,7 +8,7 @@
 
 不存在独立的"远程池"：GPU 节点插件开启 `RemoteGPUSupport` 后，**同一批设备**多发 `accessMode=remote`、
 `endpoint`、`netZone` 属性，并把 pool 的节点范围从 `nodeName` 放宽为 nodeSelector（本节点 OR 可达节点）。
-pod 落到 GPU 节点 → 现有本地路径；落到可达节点 → 远程注入。未开 gate 的节点发布 `accessMode=local`，
+**所有消费者统一走远程路径——即使 pod 恰好落在 GPU 节点上**（v2.1：同一 pod 可能混合本节点与其他节点的卡，本地/远程两条注入路径无法共存，故 gate 开的节点不再做本地分配）。未开 gate 的节点发布 `accessMode=local`，
 行为与今天完全一致；`vgpu-manager` class 加 `accessMode == "local"` 即"只要本地专属节点的设备"。
 
 ## 前置条件

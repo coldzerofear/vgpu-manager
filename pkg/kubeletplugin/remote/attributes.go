@@ -106,7 +106,7 @@ func ParseNodeSelector(expr string) ([]corev1.NodeSelectorRequirement, error) {
 }
 
 // PoolNodeSelector is the node scope of a remote-capable pool: the GPU node
-// itself (local path) OR any node matching the operator's reachability
+// itself (always reachable) OR any node matching the operator's reachability
 // predicate. NodeSelectorTerms are ORed; requirements inside a term are
 // ANDed.
 func PoolNodeSelector(nodeName string, reachable []corev1.NodeSelectorRequirement) *corev1.NodeSelector {
