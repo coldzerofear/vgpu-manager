@@ -53,7 +53,6 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
 )
 
@@ -82,11 +81,7 @@ type driver struct {
 	nriCache            *nri.Cache
 	nriCancel           context.CancelFunc
 	remote              *remotePublisher
-	// injector is non-nil when RemoteGPUSupport is on: every prepare on this
-	// node then goes through the remote path (design v2.1 D23) and the local
-	// DeviceState prepare path is bypassed.
-	injector *remote.Injector
-	wg       sync.WaitGroup
+	wg                  sync.WaitGroup
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
 	// in the same slice (required for k8s 1.34).
@@ -159,18 +154,6 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		useSplitResourceSlices: useSplitSlices,
 		remote:                 remotePub,
 	}
-	if remotePub.enabled() {
-		driver.injector = remote.NewInjector(remote.InjectConfig{
-			NodeName:                      config.Flags.NodeName,
-			CdiRoot:                       config.Flags.CdiRoot,
-			KubeletRegistrarDirectoryPath: config.KubeletRegistrarDirectoryPath,
-			PluginDataDirectoryPath:       config.DriverPluginPath(),
-			ArtifactsDir:                  config.Flags.LupineArtifactsDir,
-			ClientMountPath:               config.Flags.LupineClientMountPath,
-			AgentPort:                     config.Flags.RemoteAgentPort,
-		}, config.ClientSets)
-		klog.V(1).Info("RemoteGPUSupport enabled: this node publishes its devices as accessMode=remote and prepares every claim through the remote path")
-	}
 
 	// Register NVML events before kubeletplugin.Start exposes Prepare/Unprepare.
 	// On plugin restart, previously prepared devices and their workloads can remain
@@ -205,6 +188,20 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		// see (or clean up) the ones it published. Our single pool is named
 		// after the node.
 		opts = append(opts, kubeletplugin.ReconcilePoolWithName(config.Flags.NodeName))
+		// Publish-only (design v2.1 D23): with RemoteGPUSupport on this
+		// process announces the node's devices but does not serve
+		// NodePrepare/NodeUnprepare — it neither starts the DRA gRPC service
+		// nor registers with the kubelet. The driver name is a per-node
+		// singleton in the kubelet's plugin registry, so leaving it free lets
+		// a separate `--mode=inject` process on this same node register as
+		// the driver and prepare every claim through the remote path (a
+		// claim may mix this node's devices with another node's; the local
+		// and remote injection paths cannot coexist in one container).
+		opts = append(opts,
+			kubeletplugin.DRAService(false),
+			kubeletplugin.RegistrationService(false),
+		)
+		klog.V(1).Info("RemoteGPUSupport enabled: publish-only mode (devices announced as accessMode=remote; DRA service and kubelet registration disabled — run --mode=inject on this node for allocation)")
 	}
 	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
 	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
@@ -488,6 +485,18 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 
 	results := make(map[types.UID]kubeletplugin.PrepareResult)
 
+	if d.remote.enabled() {
+		// Defensive: the DRA service is not started in publish-only mode, so
+		// this cannot be reached through the kubelet. Refuse rather than
+		// prepare locally if it ever is (e.g. a direct test call).
+		for _, claim := range claims {
+			results[claim.UID] = kubeletplugin.PrepareResult{
+				Err: fmt.Errorf("claim %s: this node publishes accessMode=remote devices and does not prepare them; allocation is served by --mode=inject", ResourceClaimToString(claim)),
+			}
+		}
+		return results, nil
+	}
+
 	for _, claim := range claims {
 		results[claim.UID] = d.nodePrepareResource(ctx, claim)
 	}
@@ -536,17 +545,6 @@ func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.Res
 	klog.V(6).Infof("t_prep_lock_acq %.3f s", time.Since(t0).Seconds())
 
 	cs := ResourceClaimToString(claim)
-	if d.injector != nil {
-		result := d.injector.Prepare(ctx, claim)
-		if result.Err != nil {
-			drametrics.IncNodePrepareError(util.DRADriverName, "prepare_remote")
-			result.Err = fmt.Errorf("error preparing remote devices for claim %s: %w", cs, result.Err)
-			return result
-		}
-		klog.Infof("Returning remotely prepared devices for claim '%s': %v", cs, result.Devices)
-		drametrics.ObserveRequest(util.DRADriverName, "prepare", time.Since(t0))
-		return result
-	}
 	tprep0 := time.Now()
 	devs, err := d.state.Prepare(ctx, claim)
 	klog.V(6).Infof("t_prep %.3f s (claim %s)", time.Since(tprep0).Seconds(), cs)
@@ -587,15 +585,6 @@ func (d *driver) nodeUnprepareResource(ctx context.Context, claimRef kubeletplug
 	klog.V(6).Infof("t_unprep_lock_acq %.3f s", time.Since(t0).Seconds())
 
 	cs := claimRef.String()
-	if d.injector != nil {
-		if err := d.injector.Unprepare(string(claimRef.UID)); err != nil {
-			drametrics.IncNodeUnprepareError(util.DRADriverName, "unprepare_remote")
-			return fmt.Errorf("error unpreparing remote devices for claim %s: %w", cs, err)
-		}
-		// Fall through: a claim prepared locally before the gate was turned
-		// on may still sit in the checkpoint; DeviceState.Unprepare is a
-		// no-op for claims it does not know.
-	}
 	tunprep0 := time.Now()
 	taintRemovedRepublish, err := d.state.Unprepare(ctx, claimRef)
 	klog.V(6).Infof("t_unprep %.3f s (claim %s)", time.Since(tunprep0).Seconds(), cs)

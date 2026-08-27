@@ -8,7 +8,7 @@
 
 不存在独立的"远程池"：GPU 节点插件开启 `RemoteGPUSupport` 后，**同一批设备**多发 `accessMode=remote`、
 `endpoint`、`netZone` 属性，并把 pool 的节点范围从 `nodeName` 放宽为 nodeSelector（本节点 OR 可达节点）。
-**所有消费者统一走远程路径——即使 pod 恰好落在 GPU 节点上**（v2.1：同一 pod 可能混合本节点与其他节点的卡，本地/远程两条注入路径无法共存，故 gate 开的节点不再做本地分配）。未开 gate 的节点发布 `accessMode=local`，
+**所有消费者统一走远程路径——即使 pod 恰好落在 GPU 节点上**（v2.1：同一 pod 可能混合本节点与其他节点的卡，本地/远程两条注入路径无法共存，故 gate 开的节点的 server 插件只发布、不注册 DRA 服务，同节点另跑 `--mode=inject` 承担分配）。未开 gate 的节点发布 `accessMode=local`，
 行为与今天完全一致；`vgpu-manager` class 加 `accessMode == "local"` 即"只要本地专属节点的设备"。
 
 ## 前置条件
@@ -68,7 +68,7 @@ S1 用同一套 YAML，把"pod 停在 ContainerCreating"变成"pod 内远程 CUD
    `kubelet-plugin --mode=inject --feature-gates=RemoteGPUSupport=true --node-name=<node>`
    （挂 `/var/lib/kubelet/plugins_registry`、`/var/lib/kubelet/plugins`、`/var/run/cdi`）。
 3. **用真插件替代手工 slice**：GPU 节点插件以 `--feature-gates=RemoteGPUSupport=true --remote-node-selector=topology.kubernetes.io/zone=az1`
-   运行（endpoint 缺省 = 节点 InternalIP:14833），它会把本节点设备发布为 `accessMode=remote`；删除手工 slice，
+   运行（endpoint 缺省 = 节点 InternalIP:14833；此时它只发布不注册），**GPU 节点上也要同时跑一个 `--mode=inject`**；删除手工 slice，
    DeviceClass 不变，再建 claim+pod。
 
 验收：pod 内 CUDA 程序远程执行、`nvidia-smi`/`cuMemGetInfo` 呈限额视图、超限 OOM、

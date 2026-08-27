@@ -34,12 +34,12 @@ import (
 // to remote access (design v2.0): every device is stamped with accessMode,
 // and when RemoteGPUSupport is on the pool's node scope is widened from the
 // node itself to "the node OR any node matching --remote-node-selector",
-// with the lupine-server endpoint published alongside. No second pool exists —
-
-// — but with the gate on the node's local prepare path is disabled: every
-// claim on this node is prepared by the remote Injector (design v2.1 D23),
-// so a pod that mixes this node's devices with another node's never sees
-// two incompatible injection paths.
+// with the lupine-server endpoint published alongside. No second pool exists
+// — but with the gate on this process is publish-only: the DRA service and
+// kubelet registration are disabled and a co-located --mode=inject process
+// prepares every claim through the remote path (design v2.1 D23), so a pod
+// that mixes this node's devices with another node's never sees two
+// incompatible injection paths.
 type remotePublisher struct {
 	nodeName  string
 	spec      *remote.PublishSpec // nil => local-only node

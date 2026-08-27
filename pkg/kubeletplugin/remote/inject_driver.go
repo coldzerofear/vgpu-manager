@@ -56,15 +56,13 @@ type InjectConfig struct {
 
 // Injector turns allocations of accessMode=remote devices into env/mount CDI
 // injections plus the EnsureSession barrier (design §2.3, D2). It is the
-// single remote prepare implementation, used by both roles:
-//
-//   - `--mode=inject` on consumer nodes (InjectDriver below);
-//   - `--mode=server` on GPU nodes with RemoteGPUSupport on, where the local
-//     DRA driver delegates every prepare to it — a GPU node's own devices are
-//     consumed through lupine even by pods scheduled onto that node (design
-//     v2.1, D23): a claim may mix this node's devices with another node's,
-//     and the local (LD_PRELOAD real driver) and remote (lupine shim,
-//     LUPINE_DISABLE_LOCAL) paths cannot coexist in one container.
+// single remote prepare implementation, driven by `--mode=inject` — on
+// consumer nodes and on GPU nodes alike: with RemoteGPUSupport on, the
+// server-mode plugin is publish-only and a co-located inject process is the
+// registered DRA plugin (design v2.1, D23), so a GPU node's own devices are
+// consumed through lupine even by pods scheduled onto that node (a claim may
+// mix this node's devices with another node's; the local LD_PRELOAD path and
+// the lupine shim path cannot coexist in one container).
 //
 // K1 scope: the session token is derived from the claim UID (D8 random token
 // pending).
