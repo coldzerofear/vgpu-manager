@@ -242,7 +242,7 @@ func (a *Agent) refreshNodeDevices() {
 	}
 	nd := NodeRemoteDevicesFromSlices(slices)
 	a.nodeDevices.Store(nd)
-	klog.V(4).Infof("Node device snapshot: %d device(s), CUDA %v", len(nd.Devices), nd.CudaVersion)
+	klog.V(4).Infof("Node device snapshot: %d device(s), CUDA %q", len(nd.Devices), nd.CudaVersionString())
 }
 
 func (a *Agent) probeServer(context.Context) {
@@ -334,7 +334,7 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 	if !a.serverUp.Load() {
 		msg = "lupine-server is not accepting connections yet"
 	}
-	return &remoteagent.EnsureSessionResponse{Ready: true, CudaDriverVersion: nd.CudaVersion.Original(), Message: msg}, nil
+	return &remoteagent.EnsureSessionResponse{Ready: true, CudaDriverVersion: nd.CudaVersionString(), Message: msg}, nil
 }
 
 // ServerInfo implements remoteagent.RemoteAgentServer.
@@ -345,7 +345,7 @@ func (a *Agent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*re
 		NodeName:  a.cfg.NodeName,
 	}
 	if nd := a.nodeDevices.Load(); nd != nil {
-		resp.CudaDriverVersion = nd.CudaVersion.String()
+		resp.CudaDriverVersion = nd.CudaVersionString()
 	}
 	return resp, nil
 }

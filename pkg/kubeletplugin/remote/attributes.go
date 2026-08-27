@@ -49,7 +49,7 @@ type PublishSpec struct {
 	Selector []corev1.NodeSelectorRequirement
 }
 
-// Decorate stamps accessMode (and, for remote, endpoint/netZone) onto the
+// Decorate stamps accessMode (and, for remote, endpoint) onto the
 // devices in place. spec == nil means the node is local-only.
 func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 	for i := range devices {
@@ -100,18 +100,14 @@ func ParseNodeSelector(expr string) ([]corev1.NodeSelectorRequirement, error) {
 	return out, nil
 }
 
-// PoolNodeSelector is the node scope of a remote-capable pool: the GPU node
-// itself (always reachable) OR any node matching the operator's reachability
-// predicate. NodeSelectorTerms are ORed; requirements inside a term are
-// ANDed.
-func PoolNodeSelector(nodeName string, reachable []corev1.NodeSelectorRequirement) *corev1.NodeSelector {
+// PoolNodeSelector is the node scope of a remote-capable pool: exactly the
+// nodes matching the operator's --remote-node-selector (one term, all
+// requirements ANDed). The GPU node itself is NOT implicitly included; add it
+// to the selector if pods should be schedulable there (they still consume
+// the GPU through lupine, design v2.1 D23).
+func PoolNodeSelector(reachable []corev1.NodeSelectorRequirement) *corev1.NodeSelector {
 	return &corev1.NodeSelector{
-		NodeSelectorTerms: []corev1.NodeSelectorTerm{
-			//{MatchExpressions: []corev1.NodeSelectorRequirement{{
-			//	Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{nodeName},
-			//}}},
-			{MatchExpressions: reachable},
-		},
+		NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: reachable}},
 	}
 }
 

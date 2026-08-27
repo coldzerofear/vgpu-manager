@@ -7,8 +7,8 @@
 ## 模型（v2.0）
 
 不存在独立的"远程池"：GPU 节点插件开启 `RemoteGPUSupport` 后，**同一批设备**多发 `accessMode=remote`、
-`endpoint`、`netZone` 属性，并把 pool 的节点范围从 `nodeName` 放宽为 nodeSelector（本节点 OR 可达节点）。
-**所有消费者统一走远程路径——即使 pod 恰好落在 GPU 节点上**（v2.1：同一 pod 可能混合本节点与其他节点的卡，本地/远程两条注入路径无法共存，故 gate 开的节点的 server 插件只发布、不注册 DRA 服务，同节点另跑 `--mode=inject` 承担分配）。未开 gate 的节点发布 `accessMode=local`，
+`endpoint` 属性，并把 pool 的节点范围从 `nodeName` 放宽为 nodeSelector（= `--remote-node-selector` 的匹配集合；**GPU 节点自身不再隐含加入**，想让 pod 也能落在 GPU 节点就把它也选进去）。
+**所有消费者统一走远程路径——即使 pod 恰好落在 GPU 节点上**（v2.1：同一 pod 可能混合本节点与其他节点的卡，本地/远程两条注入路径无法共存，故 gate 开的节点的 server 插件只发布、不注册 DRA 服务，同节点另跑 `--plugin-mode=inject` 承担分配）。未开 gate 的节点发布 `accessMode=local`，
 行为与今天完全一致；`vgpu-manager` class 加 `accessMode == "local"` 即"只要本地专属节点的设备"。
 
 ## 前置条件
@@ -57,18 +57,18 @@ kubectl label node <consumer-node> topology.kubernetes.io/zone-
 ## S0 之后：S1（注入链路，代码已就绪）
 
 S1 用同一套 YAML，把"pod 停在 ContainerCreating"变成"pod 内远程 CUDA 跑通"。代码侧已实现
-`--mode=inject`（`pkg/kubeletplugin/remote/`，需 feature gate `RemoteGPUSupport`），其余全手工：
+`--plugin-mode=inject`（`pkg/kubeletplugin/remote/`，需 feature gate `RemoteGPUSupport`），其余全手工：
 
 1. **GPU 节点**：起 `lupine_driver_server`（进程级 `LD_PRELOAD=libvgpu-control.so` +
    `LUPINE_CHECKPOINT_LIBRARY` 指向同一 .so），用 `vgpu-session-config --session <claim-uid>
    --device <uuid>,mem=<MiB>,core=<pct>` 预先落盘会话配额（S1 令牌 = claim UID，创建 claim 后
    `kubectl get resourceclaim -o jsonpath='{.metadata.uid}'` 取值）。
-2. **消费节点**：铺制品目录 `/var/lib/vgpu-manager/lupine/<cuda-ver>/`（放静态 client 的
+2. **消费节点**：铺制品目录 `/etc/vgpu-manager/driver/<cuda-ver>/`（与本地路径的控制库同目录，子目录名 = CUDA 版本）（放静态 client 的
    `libcuda.so.1`/`libnvidia-ml.so.1`，或镜像内 /artifacts 的 cp 产物）；以 host 网络运行
-   `kubelet-plugin --mode=inject --feature-gates=RemoteGPUSupport=true --node-name=<node>`
+   `kubelet-plugin --plugin-mode=inject --feature-gates=RemoteGPUSupport=true --node-name=<node>`
    （挂 `/var/lib/kubelet/plugins_registry`、`/var/lib/kubelet/plugins`、`/var/run/cdi`）。
 3. **用真插件替代手工 slice**：GPU 节点插件以 `--feature-gates=RemoteGPUSupport=true --remote-node-selector=topology.kubernetes.io/zone=az1`
-   运行（endpoint 缺省 = 节点 InternalIP:14833；此时它只发布不注册），**GPU 节点上也要同时跑一个 `--mode=inject`**；删除手工 slice，
+   运行（endpoint 缺省 = 节点 InternalIP:14833；此时它只发布不注册），**GPU 节点上也要同时跑一个 `--plugin-mode=inject`**（且它的 `--remote-node-selector` 要把 GPU 节点自己也选进去，pod 才能落在那里）；删除手工 slice，
    DeviceClass 不变，再建 claim+pod。
 
 验收：pod 内 CUDA 程序远程执行、`nvidia-smi`/`cuMemGetInfo` 呈限额视图、超限 OOM、

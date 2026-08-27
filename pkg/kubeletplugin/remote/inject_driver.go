@@ -52,9 +52,14 @@ type InjectConfig struct {
 	// PluginDataDirectoryPath is the per-driver data directory
 	// (<kubelet-plugins-dir>/<driver-name>), already created by the caller.
 	PluginDataDirectoryPath string
-	// ArtifactsDir is the node-level lupine client version directory
-	// (design D12).
+	// ArtifactsDir is the lupine client version directory
+	// (<manager-dir>/driver, one subdirectory per CUDA version, design D12)
+	// as seen by this process; it is read to enumerate versions.
 	ArtifactsDir string
+	// HostArtifactsDir is the same directory as seen by the kubelet/runtime;
+	// it is what the emitted CDI mount names as its host path. Equal to
+	// ArtifactsDir when the plugin mounts the manager dir at the host path.
+	HostArtifactsDir string
 	// AgentPort is the remote-agent gRPC port on every server host.
 	AgentPort int
 }
@@ -204,7 +209,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 
 	// Multiple servers with differing CUDA versions: the client artifact must
 	// satisfy client <= server for every server, hence the minimum (§4.3).
-	artifact, err := selectArtifact(d.config.ArtifactsDir, minCUDA)
+	artifact, err := selectArtifact(d.config.ArtifactsDir, d.config.HostArtifactsDir, minCUDA)
 	if err != nil {
 		return fail(err)
 	}
@@ -233,10 +238,15 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 				fmt.Sprintf("%s=1", EnvLupineDisableLocal),
 				// The artifact dir contains only libcuda.so.1/libnvidia-ml.so.1
 				// (self-contained static client, D11), so shadowing is limited
-				// to those two names. Note: CDI env entries replace, not
-				// extend, an LD_LIBRARY_PATH set by the image.
-				fmt.Sprintf("%s=%s:$%s", util.LdLibraryPathEnv, artifact.LibDir, util.LdLibraryPathEnv),
-				//fmt.Sprintf("%s=%s", util.LdPreloadEnv, artifact.LibDir),
+				// to those two names.
+				//
+				// OCI/CDI env values are literal: the runtime performs no
+				// shell expansion, so "<dir>:$LD_LIBRARY_PATH" would hand the
+				// loader a directory literally named "$LD_LIBRARY_PATH". An
+				// image-defined LD_LIBRARY_PATH is therefore replaced, not
+				// extended (known K1 limitation; an ld.so.conf.d drop-in or an
+				// entrypoint shim would be needed to append).
+				fmt.Sprintf("%s=%s", util.LdLibraryPathEnv, artifact.LibDir),
 			},
 			Mounts: []*cdispec.Mount{{
 				HostPath:      artifact.HostDir,

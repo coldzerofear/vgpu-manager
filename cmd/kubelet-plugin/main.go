@@ -158,7 +158,7 @@ func newApp() *cli.App {
 			EnvVars:     []string{"HOST_MANAGER_DIR"},
 		},
 		&cli.StringFlag{
-			Name:        "host-manager-dir",
+			Name:        "container-manager-dir",
 			Usage:       "Configure the container mount path used by vgpu-manager.",
 			Value:       util.ManagerRootPath,
 			Required:    true,
@@ -312,11 +312,11 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 		}
 	case pkgkubeletplugin.ModeInject:
 		if !featuregates.Enabled(featuregates.RemoteGPUSupport) {
-			return fmt.Errorf("--mode=%s requires feature gate %s to be enabled",
+			return fmt.Errorf("--plugin-mode=%s requires feature gate %s to be enabled",
 				pkgkubeletplugin.ModeInject, featuregates.RemoteGPUSupport)
 		}
 	default:
-		return fmt.Errorf("invalid --mode %q: must be %q or %q",
+		return fmt.Errorf("invalid --plugin-mode %q: must be %q or %q",
 			flags.Mode, pkgkubeletplugin.ModeServer, pkgkubeletplugin.ModeInject)
 	}
 
@@ -371,7 +371,7 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 }
 
 // RunInjectPlugin initializes and runs the consumer-node (no GPU) inject
-// plugin for remote GPU claims (--mode=inject, design D21/§2.3). It shares
+// plugin for remote GPU claims (--plugin-mode=inject, design D21/§2.3). It shares
 // the driver name and kubelet plugin directories with server mode, but skips
 // everything that needs a GPU or the NVIDIA driver (NVML enumeration, health
 // checks, nvidia-cdi-hook, NRI).
@@ -406,13 +406,18 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 		}
 	}
 
-	artifactsDir := filepath.Join(config.Flags.ContainerManagerDir, util.Driver)
+	// Client artifacts live under <manager-dir>/driver/<cuda-ver>/ — the same
+	// driver directory the local path uses for libvgpu-control.so.<ver>. The
+	// plugin reads it through its own mount (container path) but the CDI
+	// mount it emits must name the host path.
 	driver, err := remote.NewInjectDriver(ctx, remote.InjectConfig{
+		HealthcheckPort:               config.Flags.HealthcheckPort,
 		NodeName:                      config.Flags.NodeName,
 		CdiRoot:                       config.Flags.CdiRoot,
 		KubeletRegistrarDirectoryPath: config.Flags.KubeletRegistrarDirectoryPath,
 		PluginDataDirectoryPath:       config.DriverPluginPath(),
-		ArtifactsDir:                  artifactsDir,
+		ArtifactsDir:                  filepath.Join(config.Flags.ContainerManagerDir, util.Driver),
+		HostArtifactsDir:              filepath.Join(config.Flags.HostManagerDir, util.Driver),
 		AgentPort:                     config.Flags.RemoteAgentPort,
 	}, config.ClientSets)
 	if err != nil {

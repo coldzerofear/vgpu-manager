@@ -17,12 +17,14 @@ limitations under the License.
 package remote
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/client-go/tools/cache"
 )
 
 func strPtr(s string) *string { return &s }
@@ -129,22 +131,17 @@ func TestDecorateAndSelector(t *testing.T) {
 		}
 	})
 
-	t.Run("pool selector covers the GPU node itself OR reachable nodes", func(t *testing.T) {
+	t.Run("pool selector is exactly the operator predicate (one term, ANDed)", func(t *testing.T) {
 		reqs, err := ParseNodeSelector("topology.kubernetes.io/zone=az1,gpu-fabric in (a,b),!isolated,tier!=edge")
 		if err != nil {
 			t.Fatal(err)
 		}
-		sel := PoolNodeSelector("gpu-node-1", reqs)
-		if len(sel.NodeSelectorTerms) != 2 {
-			t.Fatalf("expected 2 OR-terms, got %d", len(sel.NodeSelectorTerms))
+		sel := PoolNodeSelector(reqs)
+		if len(sel.NodeSelectorTerms) != 1 {
+			t.Fatalf("expected exactly 1 term, got %d", len(sel.NodeSelectorTerms))
 		}
-		first := sel.NodeSelectorTerms[0].MatchExpressions[0]
-		if first.Key != corev1.LabelHostname || first.Values[0] != "gpu-node-1" {
-			t.Fatalf("first term must pin the GPU node: %+v", first)
-		}
-		// Second term: all operator requirements ANDed.
 		got := map[string]corev1.NodeSelectorRequirement{}
-		for _, r := range sel.NodeSelectorTerms[1].MatchExpressions {
+		for _, r := range sel.NodeSelectorTerms[0].MatchExpressions {
 			got[r.Key] = r
 		}
 		if len(got) != 4 {
@@ -174,51 +171,67 @@ func TestDecorateAndSelector(t *testing.T) {
 }
 
 func TestResolveRemoteAllocation(t *testing.T) {
-	index := map[string]map[string]*resourceapi.Device{
-		"node-a": {
-			"vgpu-0": remoteDevice("vgpu-0", "GPU-a0", "server-a:14833", "12.9.0"),
-			"vgpu-1": remoteDevice("vgpu-1", "GPU-a1", "server-a:14833", "12.9.0"),
-		},
-		"node-b": {
-			"vgpu-0": remoteDevice("vgpu-0", "GPU-b0", "server-b:14833", "12.4.0"),
-		},
-		"node-c": {
-			"vgpu-0": {Name: "vgpu-0", Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-				AttrAccessMode: {StringValue: strPtr(AccessModeLocal)},
-			}},
-		},
+	slice := func(pool string, devs ...*resourceapi.Device) *resourceapi.ResourceSlice {
+		s := &resourceapi.ResourceSlice{Spec: resourceapi.ResourceSliceSpec{Pool: resourceapi.ResourcePool{Name: pool}}}
+		for _, d := range devs {
+			s.Spec.Devices = append(s.Spec.Devices, *d)
+		}
+		return s
 	}
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{
+		resourceapi.ResourceSliceSelectorPoolName: func(obj interface{}) ([]string, error) {
+			return []string{obj.(*resourceapi.ResourceSlice).Spec.Pool.Name}, nil
+		},
+	})
+	for i, s := range []*resourceapi.ResourceSlice{
+		slice("node-a", remoteDevice("vgpu-0", "GPU-a0", "server-a:14833", "12.9.0"), remoteDevice("vgpu-1", "GPU-a1", "server-a:14833", "12.9.0")),
+		slice("node-b", remoteDevice("vgpu-0", "GPU-b0", "server-b:14833", "12.4.0")),
+		slice("node-c", &resourceapi.Device{Name: "vgpu-0", Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+			AttrAccessMode: {StringValue: strPtr(AccessModeLocal)},
+		}}),
+	} {
+		s.Name = fmt.Sprintf("slice-%d", i)
+		if err := indexer.Add(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &InjectDriver{sliceIndexer: indexer}
 	result := func(pool, device string) resourceapi.DeviceRequestAllocationResult {
 		return resourceapi.DeviceRequestAllocationResult{
 			Request: "req", Driver: "manager.nvidia.com", Pool: pool, Device: device,
 		}
 	}
 
-	t.Run("dedup preserves first-appearance order and floors CUDA", func(t *testing.T) {
-		endpoints, minCUDA, err := resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{
+	t.Run("endpoints are deduplicated and deterministically ordered; CUDA floored", func(t *testing.T) {
+		endpoints, minCUDA, err := d.resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{
 			result("node-b", "vgpu-0"),
 			result("node-a", "vgpu-0"),
 			result("node-a", "vgpu-1"),
-		}, index)
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(endpoints) != 2 || endpoints[0] != "server-b:14833" || endpoints[1] != "server-a:14833" {
-			t.Fatalf("unexpected endpoint order: %v", endpoints)
+		// sets.String.List() is sorted: the order is stable across restarts
+		// regardless of allocation result order.
+		if len(endpoints) != 2 || endpoints[0] != "server-a:14833" || endpoints[1] != "server-b:14833" {
+			t.Fatalf("unexpected endpoints: %v", endpoints)
 		}
 		if minCUDA.String() != "12.4.0" {
 			t.Fatalf("expected CUDA floor 12.4.0, got %s", minCUDA)
 		}
 	})
 
-	t.Run("unknown device errors", func(t *testing.T) {
-		if _, _, err := resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{result("node-x", "vgpu-9")}, index); err == nil {
+	t.Run("unknown pool or device errors", func(t *testing.T) {
+		if _, _, err := d.resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{result("node-x", "vgpu-0")}); err == nil {
+			t.Fatal("expected error for unknown pool")
+		}
+		if _, _, err := d.resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{result("node-a", "vgpu-9")}); err == nil {
 			t.Fatal("expected error for unpublished device")
 		}
 	})
 
 	t.Run("local-only device errors in inject mode", func(t *testing.T) {
-		if _, _, err := resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{result("node-c", "vgpu-0")}, index); err == nil {
+		if _, _, err := d.resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{result("node-c", "vgpu-0")}); err == nil {
 			t.Fatal("expected error for accessMode=local device")
 		}
 	})
@@ -231,6 +244,10 @@ func TestSelectArtifact(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A control-library file next to the version dirs must be ignored.
+	if err := os.WriteFile(filepath.Join(dir, "libvgpu-control.so.1.0.0"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	mustVer := func(s string) *DeviceInfo {
 		info, _, err := ParseDevice(remoteDevice("d", "GPU-x", "e:1", s))
 		if err != nil {
@@ -239,8 +256,8 @@ func TestSelectArtifact(t *testing.T) {
 		return info
 	}
 
-	t.Run("picks highest version at or below server ceiling", func(t *testing.T) {
-		sel, err := selectArtifact(dir, "/opt/vgpu/lupine", mustVer("12.9.0").CUDAVersion)
+	t.Run("picks highest version at or below server ceiling, host path for the mount", func(t *testing.T) {
+		sel, err := selectArtifact(dir, "/host"+dir, mustVer("12.9.0").CUDAVersion)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -248,31 +265,20 @@ func TestSelectArtifact(t *testing.T) {
 		if sel.Name != "12.4.1" {
 			t.Fatalf("expected 12.4.1, got %s", sel.Name)
 		}
-		if sel.ContainerDir != "/opt/vgpu/lupine/12.4.1" || sel.LibDir != sel.ContainerDir {
-			t.Fatalf("unexpected paths: %+v", sel)
+		if sel.HostDir != filepath.Join("/host"+dir, "12.4.1") {
+			t.Fatalf("host dir must derive from the host artifacts dir: %s", sel.HostDir)
 		}
-	})
-
-	t.Run("prefers lib subdirectory when present", func(t *testing.T) {
-		if err := os.Mkdir(filepath.Join(dir, "12.4.1", "lib"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		sel, err := selectArtifact(dir, "/opt/vgpu/lupine", mustVer("12.4.1").CUDAVersion)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if sel.LibDir != "/opt/vgpu/lupine/12.4.1/lib" {
-			t.Fatalf("expected lib subdir, got %s", sel.LibDir)
+		if sel.ContainerDir != "/etc/vgpu-manager/driver" || sel.LibDir != sel.ContainerDir {
+			t.Fatalf("unexpected container paths: %+v", sel)
 		}
 	})
 
 	t.Run("no admissible version errors", func(t *testing.T) {
-		if _, err := selectArtifact(dir, "/opt/vgpu/lupine", mustVer("11.7.0").CUDAVersion); err == nil {
+		if _, err := selectArtifact(dir, dir, mustVer("11.7.0").CUDAVersion); err == nil {
 			t.Fatal("expected error when every artifact is newer than the server")
 		}
 	})
 }
-
 func TestAgentAddr(t *testing.T) {
 	cases := map[string]string{
 		"10.0.0.7":                   "10.0.0.7:14834",

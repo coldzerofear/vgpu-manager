@@ -31,23 +31,28 @@ import (
 type artifactSelection struct {
 	// Version directory name as found on disk (e.g. "12.9" or "12.9.1").
 	Name string
-	// HostDir is <artifactsDir>/<Name>.
+	// HostDir is <hostArtifactsDir>/<Name>, the CDI mount source.
 	HostDir string
-	// ContainerDir is <clientMountPath>/<Name> (the mount target).
+	// ContainerDir is the fixed in-container mount target: the selected
+	// version is always presented at <manager-root>/driver, mirroring where
+	// the local path mounts libvgpu-control.so.
 	ContainerDir string
-	// LibDir is the container path to expose via LD_LIBRARY_PATH: it points
-	// at <ContainerDir>/lib when the host dir has a lib/ subdirectory (the
-	// D12 image layout), else at ContainerDir itself (flat manual layout used
-	// by the S1 spike).
+	// LibDir is the container path to expose via LD_LIBRARY_PATH (flat
+	// layout: libcuda.so.1 / libnvidia-ml.so.1 directly in ContainerDir).
 	LibDir string
 }
 
 // selectArtifact picks the highest artifact version that is <= serverCeiling
 // (design §4.3: client must not be newer than the server). Directory entries
-// that do not parse as versions are ignored. A miss returns an error the
+// that do not parse as versions are ignored (so the control library files
+// living in the same driver dir are harmless). A miss returns an error the
 // kubelet treats as retryable — on a fresh node the artifacts may still be
 // materializing (design §4.4).
-func selectArtifact(artifactsDir string, serverCeiling *semver.Version) (*artifactSelection, error) {
+//
+// artifactsDir is the directory as visible to this process (for listing);
+// hostArtifactsDir is the same directory as visible to the runtime (for the
+// CDI mount source).
+func selectArtifact(artifactsDir, hostArtifactsDir string, serverCeiling *semver.Version) (*artifactSelection, error) {
 	entries, err := os.ReadDir(artifactsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read client artifacts dir %q: %w", artifactsDir, err)
@@ -76,16 +81,13 @@ func selectArtifact(artifactsDir string, serverCeiling *semver.Version) (*artifa
 			serverCeiling, artifactsDir, dirNames(entries))
 	}
 
-	sel := &artifactSelection{
+	containerDir := filepath.Join(util.ManagerRootPath, util.Driver)
+	return &artifactSelection{
 		Name:         bestName,
-		HostDir:      filepath.Join(artifactsDir, bestName),
-		ContainerDir: filepath.Join(util.ManagerRootPath, util.Driver),
-	}
-	sel.LibDir = sel.ContainerDir
-	//if st, err := os.Stat(filepath.Join(sel.HostDir, "lib")); err == nil && st.IsDir() {
-	//	sel.LibDir = filepath.Join(sel.ContainerDir, "lib")
-	//}
-	return sel, nil
+		HostDir:      filepath.Join(hostArtifactsDir, bestName),
+		ContainerDir: containerDir,
+		LibDir:       containerDir,
+	}, nil
 }
 
 func dirNames(entries []os.DirEntry) string {

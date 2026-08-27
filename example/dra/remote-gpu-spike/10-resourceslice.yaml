@@ -7,7 +7,7 @@
 #   - 不设 spec.nodeName —— 归属由 nodeSelector 表达：GPU 节点自身（本地路径）OR 打了
 #     匹配 `--remote-node-selector` 的节点（远程路径）。同一设备只有一份记账。
 #   - 属性均为驱动默认域下的非限定名（CEL: device.attributes['manager.nvidia.com'].<name>）；
-#     accessMode/endpoint/netZone 为远程新增，uuid/cudaDriverVersion 复用既有属性。
+#     accessMode/endpoint 为远程新增，uuid/minor/cudaDriverVersion/driverVersion 复用既有属性（agent 用 minor 定会话槽位）。
 #   - capacity 结构对齐本地 vgpu 份额语义（pkg/kubeletplugin/vgpu.go）。
 apiVersion: resource.k8s.io/v1
 kind: ResourceSlice
@@ -22,10 +22,6 @@ spec:
   nodeSelector:
     nodeSelectorTerms:
       - matchExpressions:
-          - key: kubernetes.io/hostname
-            operator: In
-            values: ["gpu-node-1"]              # ← GPU 节点名
-      - matchExpressions:
           - key: topology.kubernetes.io/zone        # ← 任意自定义可达性标签（--remote-node-selector）
             operator: In
             values: ["az1"]
@@ -39,12 +35,14 @@ spec:
           string: remote
         uuid:
           string: GPU-00000000-0000-0000-0000-000000000000
+        minor:
+          int: 0
+        driverVersion:
+          version: "575.57.8"
         endpoint:
           string: "192.0.2.10:14833"
         cudaDriverVersion:
           version: "12.9.0"
-        netZone:
-          string: zone-a
       capacity:
         cores:
           value: "100"

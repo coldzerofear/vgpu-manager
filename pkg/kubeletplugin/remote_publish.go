@@ -81,7 +81,7 @@ func (rp *remotePublisher) apply(pool resourceslice.Pool) resourceslice.Pool {
 		remote.Decorate(pool.Slices[i].Devices, rp.spec)
 	}
 	if rp.enabled() {
-		pool.NodeSelector = remote.PoolNodeSelector(rp.nodeName, rp.spec.Selector)
+		pool.NodeSelector = remote.PoolNodeSelector(rp.spec.Selector)
 	}
 	return pool
 }

@@ -91,17 +91,20 @@ type NodeDevices struct {
 	Devices       map[string]NodeDevice // by device name
 }
 
-// NodeRemoteDevicesFromSlices builds the snapshot from the slices of pool
-// `poolName` (= the node name). Devices without a uuid are skipped.
+// NodeRemoteDevicesFromSlices builds the snapshot from this node's slices.
+// Only accessMode=remote devices that carry a uuid and a minor are kept:
+// the minor is the host device index, which is also the session config slot
+// (library config_allowed_devices treats slot index as host index). The map
+// is keyed by device name because allocation results reference devices by
+// name.
 func NodeRemoteDevicesFromSlices(slices []*resourceapi.ResourceSlice) *NodeDevices {
 	nd := &NodeDevices{Devices: map[string]NodeDevice{}}
 	for _, slice := range slices {
 		for _, dev := range slice.Spec.Devices {
 			mode := stringAttr(&dev, remote.AttrAccessMode)
-			uuid := stringAttr(&dev, remote.AttrUUID)
-			uuid = collector.DeviceUUIDFromAttribute(uuid)
+			uuid := collector.DeviceUUIDFromAttribute(stringAttr(&dev, remote.AttrUUID))
 			minor := intAttr(&dev, remote.AttrMinor)
-			if mode != remote.AccessModeRemote || uuid == "" || minor < 0 {
+			if mode != remote.AccessModeRemote || uuid == "" || minor < 0 || minor >= vgpuconfig.MaxDeviceCount {
 				continue
 			}
 
@@ -112,8 +115,7 @@ func NodeRemoteDevicesFromSlices(slices []*resourceapi.ResourceSlice) *NodeDevic
 			if q, ok := dev.Capacity[remote.CapacityCores]; ok {
 				d.Cores = q.Value.Value()
 			}
-
-			nd.Devices[d.UUID] = d
+			nd.Devices[d.Name] = d
 
 			if nd.CudaVersion == nil {
 				if version := versionAttr(&dev, remote.AttrCUDADriverVersion); version != "" {
@@ -134,6 +136,14 @@ func NodeRemoteDevicesFromSlices(slices []*resourceapi.ResourceSlice) *NodeDevic
 	return nd
 }
 
+// CudaVersionString returns the CUDA driver version as published, or "" when
+// the snapshot has none.
+func (nd *NodeDevices) CudaVersionString() string {
+	if nd == nil || nd.CudaVersion == nil {
+		return ""
+	}
+	return nd.CudaVersion.Original()
+}
 func stringAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string {
 	if attr, ok := dev.Attributes[name]; ok && attr.StringValue != nil {
 		return *attr.StringValue
@@ -201,11 +211,12 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		if !ok {
 			return fmt.Errorf("allocated device %s is not published by this node (pool %s)", result.Device, poolName)
 		}
-		// Slot order = allocation order; the provider publishes
-		// CUDA_VISIBLE_DEVICES from the active slots in that order
-		// (library/src/checkpoint_provider.c), and vgpu-session-config
-		// follows the same convention.
-		slot := len(infos)
+		// Slot = host device index (minor), exactly as the local path lays
+		// out the config: the library reads slot index as host index
+		// (config_allowed_devices) and translates to the container-visible
+		// ordinal itself; the provider builds CUDA_VISIBLE_DEVICES from the
+		// active slots in ascending host order.
+		slot := int(nodeDev.Minor)
 		infos = append(infos, device.DeviceClaim{Id: slot, Uuid: nodeDev.UUID, Cores: nodeDev.Cores, Memory: nodeDev.MemoryMiB})
 
 		cores, memoryMiB := nodeDev.Cores, nodeDev.MemoryMiB
@@ -219,6 +230,13 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 	}
 	if len(claims) == 0 {
 		return fmt.Errorf("claim %s/%s has no devices allocated from pool %s", claim.Namespace, claim.Name, poolName)
+	}
+	if nd.CudaVersion == nil {
+		return fmt.Errorf("node device snapshot has no %s attribute; cannot write session", remote.AttrCUDADriverVersion)
+	}
+	driverVersion := ""
+	if nd.DriverVersion != nil {
+		driverVersion = nd.DriverVersion.Original()
 	}
 	if len(claims) > vgpuconfig.MaxDeviceCount {
 		return fmt.Errorf("claim %s/%s allocates %d devices on this node, max %d per session", claim.Namespace, claim.Name, len(claims), vgpuconfig.MaxDeviceCount)
@@ -235,7 +253,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		vgpuconfig.WithComputePolicy(util.FixedComputePolicy),
 		vgpuconfig.WithMemoryRatio(1),
 		vgpuconfig.WithDriverVersion(nvidia.DriverVersion{
-			DriverVersion: nd.DriverVersion.Original(),
+			DriverVersion: driverVersion,
 			CudaDriverVersion: nvidia.CudaDriverVersion(
 				nd.CudaVersion.Major()*1000 + nd.CudaVersion.Minor()*10,
 			),
