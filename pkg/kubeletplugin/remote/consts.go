@@ -46,9 +46,6 @@ const (
 	// AttrEndpoint is the lupine-server endpoint, verbatim (IP or domain,
 	// optional scheme/port, design D3/§6.1). Published only for remote.
 	AttrEndpoint = "endpoint"
-	// AttrNetZone is the reachability zone the pool's nodeSelector encodes
-	// (informational; the scheduling constraint is the nodeSelector).
-	AttrNetZone = "netZone"
 
 	// Capacity names, aligned with the local vgpu share semantics
 	// (pkg/kubeletplugin/vgpu.go).
@@ -57,12 +54,9 @@ const (
 
 	// Existing attributes reused by the inject side (pkg/kubeletplugin/deviceinfo.go).
 	AttrUUID              = "uuid"
+	AttrMinor             = "minor"
 	AttrCUDADriverVersion = "cudaDriverVersion"
-
-	// LabelHostname pins the GPU node itself into its pool nodeSelector: it
-	// is trivially reachable (loopback) even when the operator selector does
-	// not cover it. Pods landing there still take the remote path.
-	LabelHostname = "kubernetes.io/hostname"
+	AttrDriverVersion     = "driverVersion"
 
 	// DefaultServerPort is lupine-server's default listen port
 	// (docs/lupine_env_reference.md, LUPINE_PORT).
@@ -74,17 +68,6 @@ const (
 	EnvLupineServer       = "LUPINE_SERVER"
 	EnvLupineSession      = "LUPINE_SESSION"
 	EnvLupineDisableLocal = "LUPINE_DISABLE_LOCAL"
-
-	// DefaultArtifactsDir is the node-level version directory populated with
-	// self-contained lupine client artifacts, one subdirectory per CUDA
-	// version (design D12: /var/lib/vgpu-manager/lupine/<cuda-ver>/). In the
-	// S1 spike it is populated by hand; K1 populates it via the consumer
-	// DaemonSet init containers.
-	DefaultArtifactsDir = "/var/lib/vgpu-manager/lupine"
-
-	// DefaultClientMountPath is where the selected artifact version directory
-	// is bind-mounted inside consumer containers.
-	DefaultClientMountPath = "/opt/vgpu/lupine"
 
 	// CDI vendor/class must match the values used by the local plugin
 	// (pkg/kubeletplugin/cdi.go) so that all claim devices of this driver live

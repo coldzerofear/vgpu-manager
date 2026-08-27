@@ -200,7 +200,8 @@ const (
 )
 
 const (
-	LdPreloadEnv = "LD_PRELOAD"
+	LdPreloadEnv     = "LD_PRELOAD"
+	LdLibraryPathEnv = "LD_LIBRARY_PATH"
 	// CUDA_MEM_LIMIT_<index> gpu memory limit
 	CudaMemoryLimitEnv = "CUDA_MEM_LIMIT"
 	// CUDA_MEM_RATIO_<index> gpu memory ratio

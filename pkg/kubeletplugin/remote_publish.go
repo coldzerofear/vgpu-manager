@@ -41,9 +41,8 @@ import (
 // that mixes this node's devices with another node's never sees two
 // incompatible injection paths.
 type remotePublisher struct {
-	nodeName  string
-	spec      *remote.PublishSpec // nil => local-only node
-	reachable []corev1.NodeSelectorRequirement
+	nodeName string
+	spec     *remote.PublishSpec // nil => local-only node
 }
 
 func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, error) {
@@ -56,8 +55,6 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, err
 	}
-	rp.reachable = reachable
-
 	endpoint := config.Flags.RemoteEndpoint
 	if endpoint == "" {
 		ip, err := nodeInternalIP(ctx, config, config.Flags.NodeName)
@@ -66,9 +63,9 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 		}
 		endpoint = net.JoinHostPort(ip, strconv.Itoa(remote.DefaultServerPort))
 	}
-	rp.spec = &remote.PublishSpec{Endpoint: endpoint, NetZone: config.Flags.RemoteNetZone}
-	klog.V(2).Infof("Remote GPU publishing enabled: endpoint=%s reachable-nodes=%q zone=%q",
-		endpoint, config.Flags.RemoteNodeSelector, rp.spec.NetZone)
+	rp.spec = &remote.PublishSpec{Endpoint: endpoint, Selector: reachable}
+	klog.V(2).Infof("Remote GPU publishing enabled: endpoint=%s reachable-nodes=%q",
+		endpoint, config.Flags.RemoteNodeSelector)
 	return rp, nil
 }
 
@@ -84,12 +81,13 @@ func (rp *remotePublisher) apply(pool resourceslice.Pool) resourceslice.Pool {
 		remote.Decorate(pool.Slices[i].Devices, rp.spec)
 	}
 	if rp.enabled() {
-		pool.NodeSelector = remote.PoolNodeSelector(rp.nodeName, rp.reachable)
+		pool.NodeSelector = remote.PoolNodeSelector(rp.nodeName, rp.spec.Selector)
 	}
 	return pool
 }
+
 func nodeInternalIP(ctx context.Context, config *Config, nodeName string) (string, error) {
-	node, err := config.Core.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	node, err := config.Core.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{ResourceVersion: "0"})
 	if err != nil {
 		return "", fmt.Errorf("get node %s: %w", nodeName, err)
 	}

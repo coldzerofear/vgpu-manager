@@ -31,6 +31,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/health"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
@@ -74,7 +75,7 @@ type driver struct {
 	pluginhelper        *kubeletplugin.Helper
 	state               *DeviceState
 	pulock              *flock.Flock
-	healthcheck         *healthcheck
+	healthcheck         *health.Healthcheck
 	deviceHealthMonitor deviceHealthMonitor
 	deviceRegistry      *registry.DeviceRegistryServerImpl
 	nriPlugin           *nri.Plugin
@@ -217,11 +218,18 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.pluginhelper = helper
 
-	healthcheck, err := startHealthcheck(ctx, config, helper, driver.nriHealthy)
-	if err != nil {
-		return nil, fmt.Errorf("start healthcheck: %w", err)
+	if !remotePub.enabled() {
+		config := &health.HealthConfig{
+			HealthcheckPort:               config.Flags.HealthcheckPort,
+			KubeletRegistrarDirectoryPath: config.Flags.KubeletRegistrarDirectoryPath,
+			KubeletDriverPluginPath:       config.DriverPluginPath(),
+		}
+		healthcheck, err := health.StartHealthcheck(ctx, config, helper, driver.nriHealthy)
+		if err != nil {
+			return nil, fmt.Errorf("start healthcheck: %w", err)
+		}
+		driver.healthcheck = healthcheck
 	}
-	driver.healthcheck = healthcheck
 
 	healthDeviceMap := make(map[string]*manager.GPUDevice)
 	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
@@ -239,7 +247,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 				}
 				healthDeviceMap[device.CanonicalName()] = gpuDevice
 			}
-			filePath := filepath.Join(manager.WatcherDir, manager.SMUtilFile)
+			filePath := filepath.Join(config.Flags.ContainerManagerDir, util.Watcher, manager.SMUtilFile)
 			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, healthDeviceMap, filePath)
 			klog.V(4).Info("stopping extended shared SM utilization watcher")
 		})
@@ -494,11 +502,10 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 				Err: fmt.Errorf("claim %s: this node publishes accessMode=remote devices and does not prepare them; allocation is served by --mode=inject", ResourceClaimToString(claim)),
 			}
 		}
-		return results, nil
-	}
-
-	for _, claim := range claims {
-		results[claim.UID] = d.nodePrepareResource(ctx, claim)
+	} else {
+		for _, claim := range claims {
+			results[claim.UID] = d.nodePrepareResource(ctx, claim)
+		}
 	}
 
 	return results, nil
@@ -507,10 +514,16 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
 	klog.V(6).Infof("Unprepare called for: %v", ClaimRefsToStrings(claimRefs))
 	results := make(map[types.UID]error)
-	for _, claimRef := range claimRefs {
-		results[claimRef.UID] = d.nodeUnprepareResource(ctx, claimRef)
+	if d.remote.enabled() {
+		for _, claimRef := range claimRefs {
+			results[claimRef.UID] = fmt.Errorf("claim %s: this node publishes accessMode=remote "+
+				"devices and does not unprepare them; allocation is served by --mode=inject", claimRef.String())
+		}
+	} else {
+		for _, claimRef := range claimRefs {
+			results[claimRef.UID] = d.nodeUnprepareResource(ctx, claimRef)
+		}
 	}
-
 	return results, nil
 }
 
@@ -639,7 +652,9 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 
 	resources := resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
-			config.Flags.NodeName: d.remote.apply(resourceslice.Pool{Slices: []resourceslice.Slice{resourceSlice}}),
+			config.Flags.NodeName: d.remote.apply(resourceslice.Pool{
+				Slices: []resourceslice.Slice{resourceSlice},
+			}),
 		},
 	}
 
@@ -805,14 +820,14 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 	resolver := NewClientRegisterResolver(
 		podLister,
 		claimInformer.GetIndexer(),
-		util.ManagerRootPath,
+		config.Flags.ContainerManagerDir,
 		util.DRADriverName,
 		d.nriCache,
 		state.AllocatedVGPURequestsForClaim,
 	)
 
 	d.deviceRegistry = registry.NewDeviceRegistryServer(
-		util.ManagerRootPath,
+		config.Flags.ContainerManagerDir,
 		resolver.TargetByPodUID,
 		resolver.TargetByUUID,
 	)
@@ -833,10 +848,11 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 		PluginName: util.DRADriverName,
 		// Empty falls back to "00" inside NewPlugin. Validated at startup in
 		// validateCLIFlags when non-empty.
-		PluginIdx:       config.Flags.NRIPluginIdx,
-		Cache:           d.nriCache,
-		IsClaimPrepared: d.state.IsVGPUClaimPrepared,
-		ResolveMounts:   d.state.vgpuManager.GetNRIPartitionInjection,
+		PluginIdx:           config.Flags.NRIPluginIdx,
+		ContainerManagerDir: config.Flags.ContainerManagerDir,
+		Cache:               d.nriCache,
+		IsClaimPrepared:     d.state.IsVGPUClaimPrepared,
+		ResolveMounts:       d.state.vgpuManager.GetNRIPartitionInjection,
 	})
 	if err != nil {
 		return err
@@ -858,13 +874,10 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 // restarts the pod cleanly. It is safe to call before the NRI plugin is started
 // (returns healthy while nriPlugin is nil).
 func (d *driver) nriHealthy() bool {
-	if !featuregates.Enabled(featuregates.NRISupport) {
-		return true
+	if d.nriPlugin != nil {
+		return d.nriPlugin.Healthy()
 	}
-	if d.nriPlugin == nil {
-		return true
-	}
-	return d.nriPlugin.Healthy()
+	return true
 }
 
 // TODO: implement loop to remove CDI files from the CDI path for claimUIDs

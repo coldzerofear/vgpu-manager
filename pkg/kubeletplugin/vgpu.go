@@ -118,7 +118,7 @@ type VGPUManager struct {
 func NewVGPUManager(deviceLib *deviceLib, config *Config) *VGPUManager {
 	return &VGPUManager{
 		nvdevlib:          deviceLib,
-		contManagerPath:   util.ManagerRootPath,
+		contManagerPath:   config.Flags.ContainerManagerDir,
 		hostManagerPath:   config.Flags.HostManagerDir,
 		clientSets:        config.ClientSets,
 		deviceCoresRatio:  config.DeviceCoresRatio,
@@ -159,8 +159,7 @@ func (m *VGPUManager) ensurePartitionDirectories(claimUID, partitionKey string) 
 	baseHostPath := filepath.Join(m.hostManagerPath, util.Claims, claimUID, partitionKey)
 	configContPath := filepath.Join(baseContPath, util.Config)
 	preparedDirs := []string{
-		baseContPath,
-		configContPath,
+		baseContPath, configContPath,
 		filepath.Join(baseContPath, vgpu.VGPULockDirName),
 		filepath.Join(baseContPath, util.VMemNode),
 		filepath.Join(baseContPath, util.SMNode),

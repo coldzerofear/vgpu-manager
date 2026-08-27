@@ -24,10 +24,12 @@ package remoteagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -73,12 +75,15 @@ type Config struct {
 type Agent struct {
 	remoteagent.UnimplementedRemoteAgentServer
 
+	wg    sync.WaitGroup
 	cfg   Config
 	store *SessionStore
 
 	sliceInformer cache.SharedIndexInformer
 	claimInformer cache.SharedIndexInformer
+	claimCache    cache.MutationCache
 
+	sync.Map
 	nodeDevices atomic.Pointer[NodeDevices]
 	serverUp    atomic.Bool
 }
@@ -87,7 +92,8 @@ func New(cfg Config) *Agent {
 	if cfg.GCInterval <= 0 {
 		cfg.GCInterval = time.Minute
 	}
-	return &Agent{cfg: cfg, store: NewSessionStore(cfg.SessionBase, cfg.SMWatcher)}
+	store := NewSessionStore(cfg.SessionBase, cfg.SMWatcher)
+	return &Agent{cfg: cfg, store: store}
 }
 
 // Run blocks until ctx is done.
@@ -107,11 +113,14 @@ func (a *Agent) Run(ctx context.Context) error {
 	// have none, narrowing happens client-side.
 	a.sliceInformer = cache.NewSharedIndexInformer(
 		cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourceslices", corev1.NamespaceAll,
-			fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorDriver, a.cfg.DriverName)),
-		&resourceapi.ResourceSlice{}, 10*time.Hour, cache.Indexers{})
+			fields.AndSelectors(
+				fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorDriver, a.cfg.DriverName),
+				fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorPoolName, a.cfg.NodeName),
+			),
+		), &resourceapi.ResourceSlice{}, 10*time.Hour, cache.Indexers{})
 	a.claimInformer = cache.NewSharedIndexInformer(
-		cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourceclaims", corev1.NamespaceAll, fields.Everything()),
-		&resourceapi.ResourceClaim{}, 10*time.Hour, cache.Indexers{
+		cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourceclaims", corev1.NamespaceAll,
+			fields.Everything()), &resourceapi.ResourceClaim{}, 10*time.Hour, cache.Indexers{
 			claimUIDIndex: func(obj interface{}) ([]string, error) {
 				if c, ok := obj.(*resourceapi.ResourceClaim); ok {
 					return []string{string(c.UID)}, nil
@@ -128,8 +137,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	if _, err := a.claimInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if c, ok := obj.(*resourceapi.ResourceClaim); ok &&
+				(c.Status.Allocation == nil || !c.DeletionTimestamp.IsZero()) {
+				a.removeSessionsOfClaim(string(c.UID))
+			}
+		},
 		UpdateFunc: func(_, newObj interface{}) {
-			if c, ok := newObj.(*resourceapi.ResourceClaim); ok && c.Status.Allocation == nil {
+			if c, ok := newObj.(*resourceapi.ResourceClaim); ok &&
+				(c.Status.Allocation == nil || !c.DeletionTimestamp.IsZero()) {
 				a.removeSessionsOfClaim(string(c.UID))
 			}
 		},
@@ -144,32 +160,64 @@ func (a *Agent) Run(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	go a.sliceInformer.RunWithContext(ctx)
-	go a.claimInformer.RunWithContext(ctx)
+
+	a.claimCache = cache.NewIntegerResourceVersionMutationCache(
+		klog.Background(),
+		a.claimInformer.GetStore(),
+		a.claimInformer.GetIndexer(),
+		time.Minute, true)
+
+	a.wg.Go(func() {
+		a.sliceInformer.RunWithContext(ctx)
+	})
+	a.wg.Go(func() {
+		a.claimInformer.RunWithContext(ctx)
+	})
+
 	syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	if !cache.WaitForCacheSync(syncCtx.Done(), a.sliceInformer.HasSynced, a.claimInformer.HasSynced) {
+
+	if !cache.WaitForNamedCacheSyncWithContext(
+		syncCtx,
+		a.sliceInformer.HasSynced,
+		a.claimInformer.HasSynced,
+	) {
 		return fmt.Errorf("informers did not sync")
 	}
 	a.refreshNodeDevices()
 
 	// 3. Background loops.
-	go wait.UntilWithContext(ctx, a.probeServer, 5*time.Second)
-	go wait.UntilWithContext(ctx, a.gcSessions, a.cfg.GCInterval)
+	a.wg.Go(func() {
+		wait.UntilWithContext(ctx, a.probeServer, 5*time.Second)
+	})
+	a.wg.Go(func() {
+		wait.UntilWithContext(ctx, a.gcSessions, a.cfg.GCInterval)
+	})
 
 	// 4. gRPC.
 	lis, err := net.Listen("tcp", a.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", a.cfg.ListenAddr, err)
 	}
+
 	srv := grpc.NewServer()
 	remoteagent.RegisterRemoteAgentServer(srv, a)
-	go func() {
+
+	a.wg.Go(func() {
 		<-ctx.Done()
 		srv.GracefulStop()
-	}()
-	klog.Infof("remote-agent serving on %s (node %s, session base %s)", a.cfg.ListenAddr, a.cfg.NodeName, a.cfg.SessionBase)
-	return srv.Serve(lis)
+	})
+
+	a.wg.Go(func() {
+		klog.Infof("remote-agent serving on %s (node %s, session base %s)", a.cfg.ListenAddr, a.cfg.NodeName, a.cfg.SessionBase)
+		if err = srv.Serve(lis); err != nil && (errors.Is(err, grpc.ErrServerStopped) || errors.Is(err, net.ErrClosed)) {
+			err = nil
+		}
+	})
+
+	a.wg.Wait()
+
+	return err
 }
 
 func (a *Agent) writeReadyFile() error {
@@ -184,15 +232,17 @@ func (a *Agent) writeReadyFile() error {
 }
 
 func (a *Agent) refreshNodeDevices() {
-	var slices []*resourceapi.ResourceSlice
-	for _, obj := range a.sliceInformer.GetStore().List() {
-		if s, ok := obj.(*resourceapi.ResourceSlice); ok {
+	objs := a.sliceInformer.GetStore().List()
+	slices := make([]*resourceapi.ResourceSlice, 0, len(objs))
+	for _, obj := range objs {
+		if s, ok := obj.(*resourceapi.ResourceSlice); ok && s.DeletionTimestamp.IsZero() &&
+			s.Spec.Pool.Name == a.cfg.NodeName && s.Spec.Driver == a.cfg.DriverName {
 			slices = append(slices, s)
 		}
 	}
-	nd := NodeDevicesFromSlices(slices, a.cfg.NodeName)
+	nd := NodeRemoteDevicesFromSlices(slices)
 	a.nodeDevices.Store(nd)
-	klog.V(4).Infof("Node device snapshot: %d device(s), CUDA %s", len(nd.Devices), nd.CudaVersionString)
+	klog.V(4).Infof("Node device snapshot: %d device(s), CUDA %v", len(nd.Devices), nd.CudaVersion)
 }
 
 func (a *Agent) probeServer(context.Context) {
@@ -231,7 +281,7 @@ func (a *Agent) claimAllocated(uid string) bool {
 }
 
 func (a *Agent) claimByUID(uid string) *resourceapi.ResourceClaim {
-	objs, err := a.claimInformer.GetIndexer().ByIndex(claimUIDIndex, uid)
+	objs, err := a.claimCache.ByIndex(claimUIDIndex, uid)
 	if err != nil || len(objs) == 0 {
 		return nil
 	}
@@ -267,6 +317,7 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 		}
 		if err == nil && string(c.UID) == req.ClaimUid {
 			claim = c
+			a.claimCache.Mutation(c)
 		}
 	}
 	if claim == nil {
@@ -283,7 +334,7 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 	if !a.serverUp.Load() {
 		msg = "lupine-server is not accepting connections yet"
 	}
-	return &remoteagent.EnsureSessionResponse{Ready: true, CudaDriverVersion: nd.CudaVersionString, Message: msg}, nil
+	return &remoteagent.EnsureSessionResponse{Ready: true, CudaDriverVersion: nd.CudaVersion.Original(), Message: msg}, nil
 }
 
 // ServerInfo implements remoteagent.RemoteAgentServer.
@@ -294,7 +345,7 @@ func (a *Agent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*re
 		NodeName:  a.cfg.NodeName,
 	}
 	if nd := a.nodeDevices.Load(); nd != nil {
-		resp.CudaDriverVersion = nd.CudaVersionString
+		resp.CudaDriverVersion = nd.CudaVersion.String()
 	}
 	return resp, nil
 }

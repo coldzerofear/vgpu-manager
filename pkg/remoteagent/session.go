@@ -30,6 +30,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
+	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/klog/v2"
@@ -77,6 +78,7 @@ func validateToken(token string) error {
 // agent needs no NVML.
 type NodeDevice struct {
 	Name      string
+	Minor     int64
 	UUID      string
 	MemoryMiB int64 // published capacity (= physical * memory ratio)
 	Cores     int64 // published capacity (= cores ratio)
@@ -84,45 +86,47 @@ type NodeDevice struct {
 
 // NodeDevices is the node-level snapshot used to materialize sessions.
 type NodeDevices struct {
-	CudaDriverVersion nvidia.CudaDriverVersion
-	CudaVersionString string
-	DriverVersion     string
-	Devices           map[string]NodeDevice // by device name
+	CudaVersion   *semver.Version
+	DriverVersion *semver.Version
+	Devices       map[string]NodeDevice // by device name
 }
 
-// NodeDevicesFromSlices builds the snapshot from the slices of pool
+// NodeRemoteDevicesFromSlices builds the snapshot from the slices of pool
 // `poolName` (= the node name). Devices without a uuid are skipped.
-func NodeDevicesFromSlices(slices []*resourceapi.ResourceSlice, poolName string) *NodeDevices {
+func NodeRemoteDevicesFromSlices(slices []*resourceapi.ResourceSlice) *NodeDevices {
 	nd := &NodeDevices{Devices: map[string]NodeDevice{}}
 	for _, slice := range slices {
-		if slice.Spec.Pool.Name != poolName {
-			continue
-		}
 		for _, dev := range slice.Spec.Devices {
+			mode := stringAttr(&dev, remote.AttrAccessMode)
 			uuid := stringAttr(&dev, remote.AttrUUID)
-			if uuid == "" {
+			uuid = collector.DeviceUUIDFromAttribute(uuid)
+			minor := intAttr(&dev, remote.AttrMinor)
+			if mode != remote.AccessModeRemote || uuid == "" || minor < 0 {
 				continue
 			}
-			d := NodeDevice{Name: dev.Name, UUID: uuid}
+
+			d := NodeDevice{Name: dev.Name, Minor: minor, UUID: uuid}
 			if q, ok := dev.Capacity[remote.CapacityMemory]; ok {
 				d.MemoryMiB = q.Value.Value() >> 20
 			}
 			if q, ok := dev.Capacity[remote.CapacityCores]; ok {
 				d.Cores = q.Value.Value()
 			}
-			nd.Devices[dev.Name] = d
 
-			if nd.CudaVersionString == "" {
-				if attr, ok := dev.Attributes[remote.AttrCUDADriverVersion]; ok && attr.VersionValue != nil {
-					if v, err := semver.NewVersion(*attr.VersionValue); err == nil {
-						nd.CudaVersionString = *attr.VersionValue
-						nd.CudaDriverVersion = nvidia.CudaDriverVersion(v.Major()*1000 + v.Minor()*10)
+			nd.Devices[d.UUID] = d
+
+			if nd.CudaVersion == nil {
+				if version := versionAttr(&dev, remote.AttrCUDADriverVersion); version != "" {
+					if v, err := semver.NewVersion(version); err == nil {
+						nd.CudaVersion = v
 					}
 				}
 			}
-			if nd.DriverVersion == "" {
-				if attr, ok := dev.Attributes["driverVersion"]; ok && attr.VersionValue != nil {
-					nd.DriverVersion = *attr.VersionValue
+			if nd.DriverVersion == nil {
+				if version := versionAttr(&dev, remote.AttrDriverVersion); version != "" {
+					if v, err := semver.NewVersion(version); err == nil {
+						nd.DriverVersion = v
+					}
 				}
 			}
 		}
@@ -133,6 +137,20 @@ func NodeDevicesFromSlices(slices []*resourceapi.ResourceSlice, poolName string)
 func stringAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string {
 	if attr, ok := dev.Attributes[name]; ok && attr.StringValue != nil {
 		return *attr.StringValue
+	}
+	return ""
+}
+
+func intAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) int64 {
+	if attr, ok := dev.Attributes[name]; ok && attr.IntValue != nil {
+		return *attr.IntValue
+	}
+	return -1
+}
+
+func versionAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string {
+	if attr, ok := dev.Attributes[name]; ok && attr.VersionValue != nil {
+		return *attr.VersionValue
 	}
 	return ""
 }
@@ -171,7 +189,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		return err
 	}
 	if claim.Status.Allocation == nil {
-		return fmt.Errorf("claim %s/%s has no allocation", claim.Namespace, claim.Name)
+		return fmt.Errorf("claim %s has no allocation", klog.KObj(claim))
 	}
 
 	var infos, claims []device.DeviceClaim
@@ -217,8 +235,10 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		vgpuconfig.WithComputePolicy(util.FixedComputePolicy),
 		vgpuconfig.WithMemoryRatio(1),
 		vgpuconfig.WithDriverVersion(nvidia.DriverVersion{
-			DriverVersion:     nd.DriverVersion,
-			CudaDriverVersion: nd.CudaDriverVersion,
+			DriverVersion: nd.DriverVersion.Original(),
+			CudaDriverVersion: nvidia.CudaDriverVersion(
+				nd.CudaVersion.Major()*1000 + nd.CudaVersion.Minor()*10,
+			),
 		}),
 		vgpuconfig.WithVMemoryNodeEnabled(true),
 		vgpuconfig.WithSMWatcherEnabled(s.smWatcher),

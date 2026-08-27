@@ -88,7 +88,7 @@ func ensureOne(ctx context.Context, addr, token string, claim *resourceapi.Resou
 		return fmt.Errorf("agent reports session not ready: %s", resp.Message)
 	}
 	if resp.Message != "" {
-		klog.Warningf("EnsureSession %s for claim %s/%s: %s", addr, claim.Namespace, claim.Name, resp.Message)
+		klog.Warningf("EnsureSession %s for claim %s: %s", addr, klog.KObj(claim), resp.Message)
 	}
 	return nil
 }

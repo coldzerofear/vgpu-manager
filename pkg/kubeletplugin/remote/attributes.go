@@ -40,15 +40,13 @@ type DeviceInfo struct {
 	// CUDAVersion is the server node's CUDA driver ceiling; client artifact
 	// selection picks max{ver : ver <= CUDAVersion} (design §4.3).
 	CUDAVersion *semver.Version
-	// NetZone is informational.
-	NetZone string
 }
 
 // PublishSpec is what the server-side publisher stamps onto every device of
 // the node when the RemoteGPUSupport gate is on.
 type PublishSpec struct {
 	Endpoint string
-	NetZone  string
+	Selector []corev1.NodeSelectorRequirement
 }
 
 // Decorate stamps accessMode (and, for remote, endpoint/netZone) onto the
@@ -66,9 +64,6 @@ func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 		}
 		attrs[AttrAccessMode] = resourceapi.DeviceAttribute{StringValue: ptr.To(AccessModeRemote)}
 		attrs[AttrEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
-		if spec.NetZone != "" {
-			attrs[AttrNetZone] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.NetZone)}
-		}
 	}
 }
 
@@ -112,9 +107,9 @@ func ParseNodeSelector(expr string) ([]corev1.NodeSelectorRequirement, error) {
 func PoolNodeSelector(nodeName string, reachable []corev1.NodeSelectorRequirement) *corev1.NodeSelector {
 	return &corev1.NodeSelector{
 		NodeSelectorTerms: []corev1.NodeSelectorTerm{
-			{MatchExpressions: []corev1.NodeSelectorRequirement{{
-				Key: LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{nodeName},
-			}}},
+			//{MatchExpressions: []corev1.NodeSelectorRequirement{{
+			//	Key: corev1.LabelHostname, Operator: corev1.NodeSelectorOpIn, Values: []string{nodeName},
+			//}}},
 			{MatchExpressions: reachable},
 		},
 	}
@@ -131,19 +126,19 @@ func ParseDevice(dev *resourceapi.Device) (*DeviceInfo, bool, error) {
 	info := &DeviceInfo{
 		UUID:     stringAttr(dev, AttrUUID),
 		Endpoint: stringAttr(dev, AttrEndpoint),
-		NetZone:  stringAttr(dev, AttrNetZone),
 	}
 	if info.Endpoint == "" {
-		return nil, true, fmt.Errorf("remote device %q has no %s attribute", dev.Name, AttrEndpoint)
+		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrEndpoint)
 	}
 	if info.UUID == "" {
-		return nil, true, fmt.Errorf("remote device %q has no %s attribute", dev.Name, AttrUUID)
+		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrUUID)
 	}
 
 	if raw, ok := dev.Attributes[AttrCUDADriverVersion]; ok && raw.VersionValue != nil {
 		v, err := semver.NewVersion(*raw.VersionValue)
 		if err != nil {
-			return nil, true, fmt.Errorf("remote device %q has unparseable %s %q: %w", dev.Name, AttrCUDADriverVersion, *raw.VersionValue, err)
+			return nil, true, fmt.Errorf("remote device %q has unparseable %s %q: %w",
+				dev.Name, AttrCUDADriverVersion, *raw.VersionValue, err)
 		}
 		info.CUDAVersion = v
 	}

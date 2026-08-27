@@ -103,8 +103,8 @@ func GetResourceSliceInformer(factory informers.SharedInformerFactory, nodeName 
 	return factory.InformerFor(&resourcev1.ResourceSlice{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
 		watcher := cache.NewListWatchFromClient(k.ResourceV1().RESTClient(), "resourceslices",
 			corev1.NamespaceAll, fields.AndSelectors(
-				fields.OneTermEqualSelector("spec.nodeName", nodeName),
-				fields.OneTermEqualSelector("spec.driver", util.DRADriverName),
+				fields.OneTermEqualSelector(resourcev1.ResourceSliceSelectorNodeName, nodeName),
+				fields.OneTermEqualSelector(resourcev1.ResourceSliceSelectorDriver, util.DRADriverName),
 			))
 		return cache.NewSharedIndexInformer(watcher, &resourcev1.ResourceSlice{}, d, cache.Indexers{})
 	}), nil

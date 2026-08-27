@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -151,10 +152,18 @@ func newApp() *cli.App {
 		&cli.StringFlag{
 			Name:        "host-manager-dir",
 			Usage:       "Configure the host path used by vgpu-manager.",
-			Value:       "/etc/vgpu-manager",
+			Value:       util.ManagerRootPath,
 			Required:    true,
 			Destination: &flags.HostManagerDir,
 			EnvVars:     []string{"HOST_MANAGER_DIR"},
+		},
+		&cli.StringFlag{
+			Name:        "host-manager-dir",
+			Usage:       "Configure the container mount path used by vgpu-manager.",
+			Value:       util.ManagerRootPath,
+			Required:    true,
+			Destination: &flags.ContainerManagerDir,
+			EnvVars:     []string{"CONTAINER_MANAGER_DIR"},
 		},
 		&cli.StringFlag{
 			Name:        "cgroup-driver",
@@ -192,18 +201,11 @@ func newApp() *cli.App {
 			EnvVars:     []string{"NRI_PLUGIN_IDX"},
 		},
 		&cli.StringFlag{
-			Name:        "mode",
+			Name:        "plugin-mode",
 			Usage:       "Plugin role: 'server' (GPU node) or 'inject' (consumer node, remote GPU injection only; requires the RemoteGPUSupport feature gate).",
 			Value:       pkgkubeletplugin.ModeServer,
 			Destination: &flags.Mode,
 			EnvVars:     []string{"PLUGIN_MODE"},
-		},
-		&cli.StringFlag{
-			Name:        "lupine-artifacts-dir",
-			Usage:       "Node directory holding lupine client artifacts, one subdirectory per CUDA version (inject mode only).",
-			Value:       remote.DefaultArtifactsDir,
-			Destination: &flags.LupineArtifactsDir,
-			EnvVars:     []string{"LUPINE_ARTIFACTS_DIR"},
 		},
 		&cli.IntFlag{
 			Name:        "remote-agent-port",
@@ -223,19 +225,6 @@ func newApp() *cli.App {
 			Usage:       "Label selector over nodes that can reach this node's lupine-server, e.g. 'topology.kubernetes.io/zone=az1,gpu-fabric in (a,b)'. The pool becomes schedulable on this node OR matching nodes (server mode, RemoteGPUSupport).",
 			Destination: &flags.RemoteNodeSelector,
 			EnvVars:     []string{"REMOTE_NODE_SELECTOR"},
-		},
-		&cli.StringFlag{
-			Name:        "remote-net-zone",
-			Usage:       "Optional informational zone name published as the netZone device attribute.",
-			Destination: &flags.RemoteNetZone,
-			EnvVars:     []string{"REMOTE_NET_ZONE"},
-		},
-		&cli.StringFlag{
-			Name:        "lupine-client-mount-path",
-			Usage:       "In-container mount root for the selected lupine client artifact version (inject mode only).",
-			Value:       remote.DefaultClientMountPath,
-			Destination: &flags.LupineClientMountPath,
-			EnvVars:     []string{"LUPINE_CLIENT_MOUNT_PATH"},
 		},
 	}
 	cliFlags = append(cliFlags, flags.KubeClientConfig.Flags()...)
@@ -392,8 +381,19 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 	if err := os.MkdirAll(config.DriverPluginPath(), 0750); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(config.Flags.CdiRoot, 0750); err != nil {
+
+	// Initialize CDI root directory
+	info, err := os.Stat(config.Flags.CdiRoot)
+	switch {
+	case err != nil && os.IsNotExist(err):
+		err := os.MkdirAll(config.Flags.CdiRoot, 0750)
+		if err != nil {
+			return err
+		}
+	case err != nil:
 		return err
+	case !info.IsDir():
+		return fmt.Errorf("path for cdi file generation is not a directory: '%v'", config.Flags.CdiRoot)
 	}
 
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
@@ -406,13 +406,13 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 		}
 	}
 
+	artifactsDir := filepath.Join(config.Flags.ContainerManagerDir, util.Driver)
 	driver, err := remote.NewInjectDriver(ctx, remote.InjectConfig{
 		NodeName:                      config.Flags.NodeName,
 		CdiRoot:                       config.Flags.CdiRoot,
 		KubeletRegistrarDirectoryPath: config.Flags.KubeletRegistrarDirectoryPath,
 		PluginDataDirectoryPath:       config.DriverPluginPath(),
-		ArtifactsDir:                  config.Flags.LupineArtifactsDir,
-		ClientMountPath:               config.Flags.LupineClientMountPath,
+		ArtifactsDir:                  artifactsDir,
 		AgentPort:                     config.Flags.RemoteAgentPort,
 	}, config.ClientSets)
 	if err != nil {
@@ -435,8 +435,7 @@ func RunPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error {
 	common.StartDebugSignalHandlers()
 
 	// Create the plugin directory
-	err := os.MkdirAll(config.DriverPluginPath(), 0750)
-	if err != nil {
+	if err := os.MkdirAll(config.DriverPluginPath(), 0750); err != nil {
 		return err
 	}
 
@@ -449,8 +448,7 @@ func RunPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error {
 	info, err := os.Stat(config.Flags.CdiRoot)
 	switch {
 	case err != nil && os.IsNotExist(err):
-		err := os.MkdirAll(config.Flags.CdiRoot, 0750)
-		if err != nil {
+		if err = os.MkdirAll(config.Flags.CdiRoot, 0750); err != nil {
 			return err
 		}
 	case err != nil:
@@ -483,8 +481,7 @@ func RunPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error {
 		klog.Errorf("error from context: %v", err)
 	}
 
-	err = driver.Shutdown()
-	if err != nil {
+	if err = driver.Shutdown(); err != nil {
 		klog.Errorf("unable to cleanly shutdown driver: %v", err)
 	}
 

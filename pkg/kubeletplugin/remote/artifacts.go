@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 
 	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
 
 // artifactSelection is the outcome of picking a client artifact version for a
@@ -46,7 +47,7 @@ type artifactSelection struct {
 // that do not parse as versions are ignored. A miss returns an error the
 // kubelet treats as retryable — on a fresh node the artifacts may still be
 // materializing (design §4.4).
-func selectArtifact(artifactsDir, clientMountPath string, serverCeiling *semver.Version) (*artifactSelection, error) {
+func selectArtifact(artifactsDir string, serverCeiling *semver.Version) (*artifactSelection, error) {
 	entries, err := os.ReadDir(artifactsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read client artifacts dir %q: %w", artifactsDir, err)
@@ -78,12 +79,12 @@ func selectArtifact(artifactsDir, clientMountPath string, serverCeiling *semver.
 	sel := &artifactSelection{
 		Name:         bestName,
 		HostDir:      filepath.Join(artifactsDir, bestName),
-		ContainerDir: filepath.Join(clientMountPath, bestName),
+		ContainerDir: filepath.Join(util.ManagerRootPath, util.Driver),
 	}
 	sel.LibDir = sel.ContainerDir
-	if st, err := os.Stat(filepath.Join(sel.HostDir, "lib")); err == nil && st.IsDir() {
-		sel.LibDir = filepath.Join(sel.ContainerDir, "lib")
-	}
+	//if st, err := os.Stat(filepath.Join(sel.HostDir, "lib")); err == nil && st.IsDir() {
+	//	sel.LibDir = filepath.Join(sel.ContainerDir, "lib")
+	//}
 	return sel, nil
 }
 

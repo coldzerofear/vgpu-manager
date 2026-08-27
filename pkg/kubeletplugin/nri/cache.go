@@ -61,9 +61,9 @@ func Key(podUID, containerName string) string {
 // and the NRI CreateContainer mount target (design §12.3):
 //
 //	<ManagerRootPath>/claims/<claimUID>/<podUID>_<containerName>/config
-func ConfigDirFor(claimUID, podUID, containerName string) string {
+func ConfigDirFor(managerDir, claimUID, podUID, containerName string) string {
 	containerDir := fmt.Sprintf("%s_%s", podUID, containerName)
-	return filepath.Join(util.ManagerRootPath, util.Claims, claimUID, containerDir, util.Config)
+	return filepath.Join(managerDir, util.Claims, claimUID, containerDir, util.Config)
 }
 
 // Set records or overwrites a single container's entry.

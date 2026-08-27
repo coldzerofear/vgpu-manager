@@ -116,12 +116,12 @@ func TestDecorateAndSelector(t *testing.T) {
 
 	t.Run("remote decorated device round-trips through ParseDevice", func(t *testing.T) {
 		devices := newDevices()
-		Decorate(devices, &PublishSpec{Endpoint: "10.0.0.7:14833", NetZone: "zone-a"})
+		Decorate(devices, &PublishSpec{Endpoint: "10.0.0.7:14833"})
 		info, isRemote, err := ParseDevice(&devices[0])
 		if err != nil || !isRemote {
 			t.Fatalf("expected remote, got isRemote=%v err=%v", isRemote, err)
 		}
-		if info.Endpoint != "10.0.0.7:14833" || info.NetZone != "zone-a" || info.UUID != "GPU-a" || info.CUDAVersion.String() != "12.9.0" {
+		if info.Endpoint != "10.0.0.7:14833" || info.UUID != "GPU-a" || info.CUDAVersion.String() != "12.9.0" {
 			t.Fatalf("unexpected info: %+v", info)
 		}
 		if *devices[0].Attributes["type"].StringValue != "vgpu" {
@@ -139,7 +139,7 @@ func TestDecorateAndSelector(t *testing.T) {
 			t.Fatalf("expected 2 OR-terms, got %d", len(sel.NodeSelectorTerms))
 		}
 		first := sel.NodeSelectorTerms[0].MatchExpressions[0]
-		if first.Key != LabelHostname || first.Values[0] != "gpu-node-1" {
+		if first.Key != corev1.LabelHostname || first.Values[0] != "gpu-node-1" {
 			t.Fatalf("first term must pin the GPU node: %+v", first)
 		}
 		// Second term: all operator requirements ANDed.

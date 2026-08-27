@@ -323,6 +323,9 @@ func ValidateFeatureGates() error {
 	//if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {
 	//	return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainCliques, IMEXDaemonsWithDNSNames)
 	//}
+	if Enabled(RemoteGPUSupport) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", RemoteGPUSupport, VGPUSupport)
+	}
 	if Enabled(SharedSMUtilizationWatcher) && !Enabled(VGPUSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", SharedSMUtilizationWatcher, VGPUSupport)
 	}
@@ -331,6 +334,16 @@ func ValidateFeatureGates() error {
 	}
 	if Enabled(NRISupport) && !Enabled(VGPUSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", NRISupport, VGPUSupport)
+	}
+
+	if Enabled(RemoteGPUSupport) && Enabled(SharedSMUtilizationWatcher) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, SharedSMUtilizationWatcher)
+	}
+	if Enabled(RemoteGPUSupport) && Enabled(DevicePluginClientMode) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, DevicePluginClientMode)
+	}
+	if Enabled(RemoteGPUSupport) && Enabled(NRISupport) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, NRISupport)
 	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {

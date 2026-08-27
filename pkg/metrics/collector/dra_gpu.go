@@ -299,7 +299,7 @@ func (d *DRADeviceInfo) memoryOversubscription() float64 {
 	return float64(d.memoryRatio) / float64(util.HundredCore)
 }
 
-// deviceUUIDFromAttribute converts a ResourceSlice `uuid` attribute back to the
+// DeviceUUIDFromAttribute converts a ResourceSlice `uuid` attribute back to the
 // NVML spelling used everywhere else in this collector.
 //
 // The driver publishes strings.ToLower(nvmlUUID) (GpuDeviceInfo.Attributes), and
@@ -307,7 +307,7 @@ func (d *DRADeviceInfo) memoryOversubscription() float64 {
 // the first '-' ("gpu-5e4b..." -> "GPU-5e4b...") is the exact inverse. Without
 // this the UUID never matches devIndexMap/devHealthLvs and the device silently
 // drops out of every per-device metric.
-func deviceUUIDFromAttribute(value string) string {
+func DeviceUUIDFromAttribute(value string) string {
 	idx := strings.Index(value, "-")
 	if idx < 0 {
 		return value
@@ -693,7 +693,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				cores:       util.HundredCore,
 			}
 			if attribute, ok = dev.Attributes["uuid"]; ok && attribute.StringValue != nil {
-				devInfo.uuid = deviceUUIDFromAttribute(*attribute.StringValue)
+				devInfo.uuid = DeviceUUIDFromAttribute(*attribute.StringValue)
 			}
 			if devInfo.uuid == "" {
 				// Without a UUID the device cannot be joined to NVML data, and

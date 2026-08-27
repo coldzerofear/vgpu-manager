@@ -43,6 +43,7 @@ type Flags struct {
 	AdditionalXidsToIgnore        string
 	ConsumableShares              string
 	HostManagerDir                string
+	ContainerManagerDir           string
 	CGroupDriver                  string
 	DeviceCoresRatio              uint
 	DeviceMemoryRatio             uint
@@ -56,12 +57,6 @@ type Flags struct {
 	// enabled) or "inject" (consumer node; remote env/CDI injection only, no
 	// GPU dependency).
 	Mode string
-	// LupineArtifactsDir is the node-level lupine client version directory
-	// (design D12). Only used by --mode=inject.
-	LupineArtifactsDir string
-	// LupineClientMountPath is the in-container mount root for the selected
-	// client artifact version. Only used by --mode=inject.
-	LupineClientMountPath string
 	// RemoteAgentPort is the remote-agent gRPC port on server hosts
 	// (inject mode calls EnsureSession there).
 	RemoteAgentPort int
@@ -75,9 +70,6 @@ type Flags struct {
 	// schedulable on the GPU node itself OR any node matching it. Required in
 	// server mode when RemoteGPUSupport is on.
 	RemoteNodeSelector string
-	// RemoteNetZone is an optional informational label published as the
-	// netZone device attribute.
-	RemoteNetZone string
 }
 
 const (
