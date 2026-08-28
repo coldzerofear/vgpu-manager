@@ -384,6 +384,8 @@ type draContainerAlloc struct {
 	// claims lists, per pod claim the container references, the claim and
 	// the main requests it resolved to (remote session lookup).
 	claims []draAllocClaim
+	// podUID of the owning pod (NRI-mode session key).
+	podUID types.UID
 }
 
 // draFootprint mirrors device.PodDeviceFootprint for the DRA path.
@@ -623,6 +625,7 @@ func (c draGPUCollector) resolvePodAllocations(
 			restartable: ref.Restartable,
 			results:     results,
 			claims:      claims,
+			podUID:      pod.UID,
 		})
 	}
 

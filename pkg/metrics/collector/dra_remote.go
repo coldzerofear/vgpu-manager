@@ -237,6 +237,14 @@ func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCac
 			info = resolved
 			partitionCache[ref.claim.UID] = info
 		}
+		// NRI mode (per-container session) keys the token by
+		// <podUID>_<containerName>; partition mode by the resolver key.
+		if token := ref.claim.Annotations[remote.SessionAnnotationKey(remote.NRIPartitionKey(string(alloc.podUID), alloc.name))]; token != "" {
+			for _, pid := range readSessionPIDs(filepath.Join(c.sessionBase, token, sessionPidsFile)) {
+				pids.Insert(pid)
+			}
+			continue
+		}
 		for _, mainRequest := range ref.requests {
 			key := ""
 			if info != nil {

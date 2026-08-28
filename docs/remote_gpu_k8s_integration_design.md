@@ -998,3 +998,19 @@ DevicePluginClientMode / NRISupport 互斥。
 - **pool 语义答复**：pool = 单一发布者管理的一致性单元（generation/resourceSliceCount 判完整性，设备名 pool 内唯一）；
   多节点共用一个 pool 名会让各节点 controller 互删/互覆盖、设备重名、调度器视 pool 不完整——除非改为单一中央发布者
   （网络附加设备形态，需 `perDeviceNodeSelection`），本项目无此收益，**保持 pool = 节点名**。
+
+### 11.6 NRI 模式：容器粒度会话（2026-08-27，用户要求，已实现）
+
+inject 侧开启 `NRISupport` 时，会话不再在 NodePrepare 按分区分配，而是在 **NRI `CreateContainer` 钩子**按
+(podUID, containerName) 分配——钩子精确知道容器身份，即使多个容器共用同一 claim request 也各得一个会话、各自记账，
+与本地 NRI 路径的 per-container 分区目录同粒度。分工：
+
+| 阶段 | 注入内容 |
+|---|---|
+| NodePrepare（CDI，每 result 一设备，env 全同） | `LUPINE_DISABLE_LOCAL=1`、`LD_LIBRARY_PATH`、制品挂载、`MANAGER_VGPU_CLAIM_UID=<claimUID>`（与本地路径相同的关联 env） |
+| CreateContainer（NRI，`pkg/kubeletplugin/remote/nri.go`） | 读 pod spec 求该容器引用的 request 集合 → 分区键 `<podUID>_<containerName>` → 令牌（claim annotation 复用/铸造）→ **EnsureSession 屏障**（先于容器进程启动，D2 成立）→ 注入 `LUPINE_SERVER` + `LUPINE_SESSION` |
+
+- `IsClaimPrepared` 校验沿用本地做法（NodePrepare 登记的 claim 集合），防伪造 `MANAGER_VGPU_CLAIM_UID`。
+- 语义差异：共用同一 request 的两个容器在分区模式下共享一份配额（一个会话），在 NRI 模式下各持一份（两个会话）。
+- monitor 查令牌顺序：先 `<podUID>_<containerName>`（NRI 键），再分区解析键，再 per-request 回退键，三种模式统一。
+- gate 组合：`RemoteGPUSupport` + `NRISupport` **仅 inject 模式允许**；server 模式（只发布）二者互斥，校验移至 `--plugin-mode` 分支。

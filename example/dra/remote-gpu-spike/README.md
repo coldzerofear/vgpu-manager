@@ -56,6 +56,8 @@ kubectl label node <consumer-node> topology.kubernetes.io/zone-
 
 ## S0 之后：S1（注入链路，代码已就绪）
 
+> inject 侧若开 `NRISupport`，会话在 NRI CreateContainer 按容器分配（`LUPINE_SERVER/SESSION` 由 NRI 注入，CDI 只带 `MANAGER_VGPU_CLAIM_UID`），见设计 §11.6；需要挂 `/var/run/nri`。
+
 S1 用同一套 YAML，把"pod 停在 ContainerCreating"变成"pod 内远程 CUDA 跑通"。代码侧已实现
 `--plugin-mode=inject`（`pkg/kubeletplugin/remote/`，需 feature gate `RemoteGPUSupport`），其余全手工：
 

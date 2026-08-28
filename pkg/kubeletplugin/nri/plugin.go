@@ -391,11 +391,13 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 	// this list: resolveMounts above already emptied it in place, and it must
 	// stay in place — it is the source of a file bind mount injected in the same
 	// adjustment, and removing the source would abort container creation.
-	basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
-	vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
-	smNodeConfigPath := filepath.Join(basePath, util.SMNode, util.SMNodeFile)
-	_ = os.RemoveAll(vmemNodeConfigPath)
-	_ = os.RemoveAll(smNodeConfigPath)
+	if inj.ConfigDir != "" {
+		basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
+		vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
+		smNodeConfigPath := filepath.Join(basePath, util.SMNode, util.SMNodeFile)
+		_ = os.RemoveAll(vmemNodeConfigPath)
+		_ = os.RemoveAll(smNodeConfigPath)
+	}
 
 	p.cache.Set(pod.GetUid(), c.GetName(), Entry{ClaimUID: claimUID, ConfigDir: inj.ConfigDir})
 

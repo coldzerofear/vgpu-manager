@@ -302,6 +302,10 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	// it as the server default.
 	case "", pkgkubeletplugin.ModeServer:
 		if featuregates.Enabled(featuregates.RemoteGPUSupport) {
+			if featuregates.Enabled(featuregates.NRISupport) {
+				return fmt.Errorf("feature gate %s is mutually exclusive with %s in server mode (publish-only); NRI sessions are an inject-mode feature",
+					featuregates.RemoteGPUSupport, featuregates.NRISupport)
+			}
 			if flags.RemoteNodeSelector == "" {
 				return fmt.Errorf("--remote-node-selector is required in server mode when feature gate %s is enabled",
 					featuregates.RemoteGPUSupport)
@@ -419,6 +423,9 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 		ArtifactsDir:                  filepath.Join(config.Flags.ContainerManagerDir, util.Driver),
 		HostArtifactsDir:              filepath.Join(config.Flags.HostManagerDir, util.Driver),
 		AgentPort:                     config.Flags.RemoteAgentPort,
+		NRIEnabled:                    featuregates.Enabled(featuregates.NRISupport),
+		NRIRoot:                       config.Flags.NRIRoot,
+		NRIPluginIdx:                  config.Flags.NRIPluginIdx,
 	}, config.ClientSets)
 	if err != nil {
 		return fmt.Errorf("error creating inject driver: %w", err)

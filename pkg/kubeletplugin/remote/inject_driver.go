@@ -27,6 +27,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/health"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -66,6 +67,12 @@ type InjectConfig struct {
 	HostArtifactsDir string
 	// AgentPort is the remote-agent gRPC port on every server host.
 	AgentPort int
+	// NRIEnabled switches session assignment to the NRI CreateContainer hook
+	// (per-container sessions, see nri.go). NRIRoot/NRIPluginIdx configure
+	// the in-process NRI plugin.
+	NRIEnabled   bool
+	NRIRoot      string
+	NRIPluginIdx string
 }
 
 // InjectDriver is the `--plugin-mode=inject` DRA driver: no GPU, no NVML — it
@@ -80,6 +87,12 @@ type InjectDriver struct {
 	wg           sync.WaitGroup
 	sliceIndexer cache.Indexer
 	healthcheck  *health.Healthcheck
+	// NRI mode state: claims prepared on this node (for the CreateContainer
+	// hook) and the in-process plugin.
+	preparedMu sync.Mutex
+	prepared   map[string]*preparedClaim
+	nriPlugin  *nri.Plugin
+	nriCancel  context.CancelFunc
 }
 
 func (d *InjectDriver) GetPoolResourceSlices(poolName string) ([]*resourceapi.ResourceSlice, error) {
@@ -102,9 +115,10 @@ func (d *InjectDriver) GetPoolResourceSlices(poolName string) ([]*resourceapi.Re
 
 func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.ClientSets) (*InjectDriver, error) {
 	d := &InjectDriver{
-		config:  config,
-		clients: clients,
-		cdi:     newCDIWriter(config.CdiRoot),
+		config:   config,
+		clients:  clients,
+		cdi:      newCDIWriter(config.CdiRoot),
+		prepared: map[string]*preparedClaim{},
 	}
 
 	helper, err := kubeletplugin.Start(ctx, d,
@@ -151,6 +165,12 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 
 	<-sliceInformer.HasSyncedChecker().Done()
 
+	if config.NRIEnabled {
+		if err := d.startNRI(ctx); err != nil {
+			return nil, fmt.Errorf("start NRI plugin: %w", err)
+		}
+	}
+
 	klog.V(2).Infof("Remote inject driver started on node %s (registration status: %s)",
 		config.NodeName, helper.RegistrationStatus())
 	return d, nil
@@ -159,6 +179,12 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 func (d *InjectDriver) Shutdown() error {
 	if d == nil {
 		return nil
+	}
+	if d.nriCancel != nil {
+		d.nriCancel()
+	}
+	if d.nriPlugin != nil {
+		d.nriPlugin.Stop()
 	}
 	d.wg.Wait()
 	d.helper.Stop()
@@ -176,6 +202,7 @@ func (d *InjectDriver) PrepareResourceClaims(ctx context.Context, claims []*reso
 func (d *InjectDriver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
 	results := make(map[types.UID]error)
 	for _, claimRef := range claimRefs {
+		d.forgetPrepared(string(claimRef.UID))
 		results[claimRef.UID] = d.cdi.DeleteClaimSpec(string(claimRef.UID))
 	}
 	return results, nil
@@ -208,82 +235,100 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		return fail(fmt.Errorf("claim %s has no devices allocated by %s", klog.KObj(claim), util.DRADriverName))
 	}
 
-	// 2. Partition the claim the same way the local path does: connected
-	// components of the container<->request graph over the reserved pods.
-	// Each partition is one session (design D8 v2.2).
-	allocatedRequests := sets.New[string]()
-	for _, rd := range devices {
-		allocatedRequests.Insert(rd.mainRequest)
-	}
-	info, err := claimresolve.ResolveClaimVGPUPartitionsFromAllocatedRequests(ctx, &apiReader{clients: d.clients}, claim, allocatedRequests)
-	if err != nil {
-		return fail(fmt.Errorf("resolve partitions of claim %s: %w", klog.KObj(claim), err))
-	}
-	var requestToKey map[string]string
-	if info != nil {
-		requestToKey = info.RequestToPartition
-	}
-	partitions := buildPartitions(devices, requestToKey)
-
-	// 3. Session tokens: reuse the annotation-recorded token for a partition
-	// (retries / plugin restarts), mint the rest and persist them before any
-	// server learns about them.
-	if err := d.assignTokens(ctx, claim, partitions); err != nil {
-		return fail(err)
-	}
-
-	// 4. Client artifact: one mount for the claim, chosen against the CUDA
+	// 2. Client artifact: one mount for the claim, chosen against the CUDA
 	// floor across every server it touches (§4.3).
 	artifact, err := selectArtifact(d.config.ArtifactsDir, d.config.HostArtifactsDir, cudaFloor(devices))
 	if err != nil {
 		return fail(err)
 	}
-
-	// 5. D2 barrier per partition: every server it spans must have the
-	// session quota on disk before any container of the pod starts. A
-	// failure makes the kubelet retry NodePrepare with backoff.
-	for _, p := range partitions {
-		if err := EnsureSessions(ctx, p.endpoints, d.config.AgentPort, claim, p.token, p.key, p.requests); err != nil {
-			return fail(err)
-		}
-		klog.V(2).Infof("Remote claim %s partition %s: requests=%v endpoints=%v artifact=%s, session ensured",
-			klog.KObj(claim), p.key, p.requests, p.endpoints, artifact.Name)
+	baseEnv := []string{
+		// Mandatory: prevents client-local routing (§4.3.2 lesson).
+		fmt.Sprintf("%s=1", EnvLupineDisableLocal),
+		// The artifact dir contains only libcuda.so.1/libnvidia-ml.so.1
+		// (self-contained static client, D11), so shadowing is limited to
+		// those two names. OCI/CDI env values are literal (no shell
+		// expansion), so an image-defined LD_LIBRARY_PATH is replaced, not
+		// extended (known K1 limitation).
+		fmt.Sprintf("%s=%s", util.LdLibraryPathEnv, artifact.LibDir),
 	}
+	mounts := []*cdispec.Mount{{
+		HostPath:      artifact.HostDir,
+		ContainerPath: artifact.ContainerDir,
+		Options:       []string{"ro", "nosuid", "nodev", "bind"},
+	}}
 
-	// 6. CDI: one device per allocation result, carrying its partition's
-	// env. The kubelet hands a container only the devices of the requests
-	// it references; all of them belong to one partition, so the env never
-	// collides within a container.
+	// 3. Session assignment.
 	edits := map[string]*cdiapi.ContainerEdits{}
 	idOf := map[int]string{} // index into devices -> CDI device id
-	ordinal := 0
-	for _, p := range partitions {
-		partitionEdits := &cdispec.ContainerEdits{
-			Env: []string{
-				fmt.Sprintf("%s=%s", EnvLupineServer, strings.Join(p.endpoints, ",")),
-				fmt.Sprintf("%s=%s", EnvLupineSession, p.token),
-				// Mandatory: prevents client-local routing (§4.3.2 lesson).
-				fmt.Sprintf("%s=1", EnvLupineDisableLocal),
-				// The artifact dir contains only libcuda.so.1/libnvidia-ml.so.1
-				// (self-contained static client, D11), so shadowing is limited
-				// to those two names. OCI/CDI env values are literal (no
-				// shell expansion), so an image-defined LD_LIBRARY_PATH is
-				// replaced, not extended (known K1 limitation).
-				fmt.Sprintf("%s=%s", util.LdLibraryPathEnv, artifact.LibDir),
-			},
-			Mounts: []*cdispec.Mount{{
-				HostPath:      artifact.HostDir,
-				ContainerPath: artifact.ContainerDir,
-				Options:       []string{"ro", "nosuid", "nodev", "bind"},
-			}},
-		}
-		for _, rd := range p.results {
-			id := cdiDeviceID(rd, ordinal)
-			ordinal++
-			edits[id] = &cdiapi.ContainerEdits{ContainerEdits: partitionEdits}
+	if d.config.NRIEnabled {
+		// NRI mode: the per-container session (server list + token) is
+		// injected at CreateContainer; CDI only carries the claim
+		// correlation env. See nri.go.
+		d.recordPrepared(claim, devices)
+		containerEdits := &cdispec.ContainerEdits{Env: append(baseEnv, nriClaimEnv(claim)), Mounts: mounts}
+		for i, rd := range devices {
+			id := cdiDeviceID(rd, i)
+			edits[id] = &cdiapi.ContainerEdits{ContainerEdits: containerEdits}
 			idOf[rd.index] = id
 		}
+		klog.V(2).Infof("Remote claim %s prepared for NRI per-container sessions (%d device(s), artifact %s)",
+			klog.KObj(claim), len(devices), artifact.Name)
+	} else {
+		// Partition mode: one session per connected component of the
+		// container<->request graph over the reserved pods, resolved here
+		// the same way the local path does (design D8 v2.2).
+		allocatedRequests := sets.New[string]()
+		for _, rd := range devices {
+			allocatedRequests.Insert(rd.mainRequest)
+		}
+		info, err := claimresolve.ResolveClaimVGPUPartitionsFromAllocatedRequests(ctx, &apiReader{clients: d.clients}, claim, allocatedRequests)
+		if err != nil {
+			return fail(fmt.Errorf("resolve partitions of claim %s: %w", klog.KObj(claim), err))
+		}
+		var requestToKey map[string]string
+		if info != nil {
+			requestToKey = info.RequestToPartition
+		}
+		partitions := buildPartitions(devices, requestToKey)
+
+		// Tokens: reuse the annotation-recorded token for a partition
+		// (retries / plugin restarts), mint the rest and persist them before
+		// any server learns about them.
+		if err := d.assignTokens(ctx, claim, partitions); err != nil {
+			return fail(err)
+		}
+
+		// D2 barrier per partition: every server it spans must have the
+		// session quota on disk before any container of the pod starts. A
+		// failure makes the kubelet retry NodePrepare with backoff.
+		ordinal := 0
+		for _, p := range partitions {
+			if err := EnsureSessions(ctx, p.endpoints, d.config.AgentPort, claim, p.token, p.key, p.requests); err != nil {
+				return fail(err)
+			}
+			klog.V(2).Infof("Remote claim %s partition %s: requests=%v endpoints=%v artifact=%s, session ensured",
+				klog.KObj(claim), p.key, p.requests, p.endpoints, artifact.Name)
+
+			// One CDI device per allocation result, carrying its partition's
+			// env. The kubelet hands a container only the devices of the
+			// requests it references; all of them belong to one partition,
+			// so the env never collides within a container.
+			partitionEdits := &cdispec.ContainerEdits{
+				Env: append([]string{
+					fmt.Sprintf("%s=%s", EnvLupineServer, strings.Join(p.endpoints, ",")),
+					fmt.Sprintf("%s=%s", EnvLupineSession, p.token),
+				}, baseEnv...),
+				Mounts: mounts,
+			}
+			for _, rd := range p.results {
+				id := cdiDeviceID(rd, ordinal)
+				ordinal++
+				edits[id] = &cdiapi.ContainerEdits{ContainerEdits: partitionEdits}
+				idOf[rd.index] = id
+			}
+		}
 	}
+
 	names, err := d.cdi.WriteClaimSpec(string(claim.UID), edits)
 	if err != nil {
 		return fail(fmt.Errorf("failed to write CDI spec for claim %s: %w", klog.KObj(claim), err))
