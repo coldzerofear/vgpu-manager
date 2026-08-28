@@ -105,7 +105,8 @@ func NodeRemoteDevicesFromSlices(slices []*resourceapi.ResourceSlice) *NodeDevic
 			mode := stringAttr(&dev, remote.AttrAccessMode)
 			uuid := collector.DeviceUUIDFromAttribute(stringAttr(&dev, remote.AttrUUID))
 			minor := intAttr(&dev, remote.AttrMinor)
-			if mode != remote.AccessModeRemote || uuid == "" || minor < 0 || minor >= vgpuconfig.MaxDeviceCount {
+			if mode != remote.AccessModeRemote || uuid == "" ||
+				minor < 0 || minor >= vgpuconfig.MaxDeviceCount {
 				continue
 			}
 
@@ -145,6 +146,7 @@ func (nd *NodeDevices) CudaVersionString() string {
 	}
 	return nd.CudaVersion.Original()
 }
+
 func stringAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string {
 	if attr, ok := dev.Attributes[name]; ok && attr.StringValue != nil {
 		return *attr.StringValue
@@ -168,18 +170,17 @@ func versionAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string
 
 // SessionStore materializes and removes session directories under base.
 type SessionStore struct {
-	base      string
-	smWatcher bool
-	mu        sync.Mutex
+	cfg Config
+	mu  sync.Mutex
 }
 
-func NewSessionStore(base string, smWatcher bool) *SessionStore {
-	return &SessionStore{base: base, smWatcher: smWatcher}
+func NewSessionStore(cfg Config) *SessionStore {
+	return &SessionStore{cfg: cfg}
 }
 
 // Prepare creates the base skeleton the server needs before it starts.
 func (s *SessionStore) Prepare() error {
-	for _, dir := range []string{s.base, filepath.Join(s.base, watcherDir)} {
+	for _, dir := range []string{s.cfg.SessionBase, filepath.Join(s.cfg.SessionBase, watcherDir)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -188,7 +189,7 @@ func (s *SessionStore) Prepare() error {
 }
 
 func (s *SessionStore) dir(token string) string {
-	return filepath.Join(s.base, token)
+	return filepath.Join(s.cfg.SessionBase, token)
 }
 
 // Materialize writes the session for the partition of `claim` named by
@@ -196,9 +197,9 @@ func (s *SessionStore) dir(token string) string {
 // `poolName`. It is idempotent: an already complete session is left
 // untouched (the library may have live state in it), so kubelet retries of
 // NodePrepare are safe. When several results of the partition land on the
-// same physical device (the webhook normally prevents this), the largest
-// share wins — the config has one slot per device.
-func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClaim, nd *NodeDevices, poolName, driverName string, requests []string) error {
+// // same physical device (the webhook normally prevents this), the largest
+// // share wins — the config has one slot per device.
+func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClaim, nd *NodeDevices, requests []string) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
@@ -206,14 +207,15 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		return fmt.Errorf("claim %s has no allocation", klog.KObj(claim))
 	}
 
+	poolName := s.cfg.NodeName
 	results := remote.FilterResultsByRequests(claim, claim.Status.Allocation.Devices.Results, requests)
 	infoBySlot := map[int]device.DeviceClaim{}
 	claimBySlot := map[int]device.DeviceClaim{}
 	for _, result := range results {
-		if result.Driver != driverName || result.Pool != poolName {
+		if result.Driver != s.cfg.DriverName || result.Pool != poolName {
 			continue
 		}
-		nodeDev, ok := nd.Devices[result.Device]
+		dev, ok := nd.Devices[result.Device]
 		if !ok {
 			return fmt.Errorf("allocated device %s is not published by this node (pool %s)", result.Device, poolName)
 		}
@@ -221,10 +223,10 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		// out the config: the library reads slot index as host index
 		// (config_allowed_devices) and translates to the container-visible
 		// ordinal itself.
-		slot := int(nodeDev.Minor)
-		infoBySlot[slot] = device.DeviceClaim{Id: slot, Uuid: nodeDev.UUID, Cores: nodeDev.Cores, Memory: nodeDev.MemoryMiB}
+		slot := int(dev.Minor)
+		infoBySlot[slot] = device.DeviceClaim{Id: slot, Uuid: dev.UUID, Cores: dev.Cores, Memory: dev.MemoryMiB}
 
-		cores, memoryMiB := nodeDev.Cores, nodeDev.MemoryMiB
+		cores, memoryMiB := dev.Cores, dev.MemoryMiB
 		if q, ok := result.ConsumedCapacity[remote.CapacityCores]; ok {
 			cores = q.Value()
 		}
@@ -236,7 +238,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 			cores = max(cores, prev.Cores)
 			memoryMiB = max(memoryMiB, prev.Memory)
 		}
-		claimBySlot[slot] = device.DeviceClaim{Id: slot, Uuid: nodeDev.UUID, Cores: cores, Memory: memoryMiB}
+		claimBySlot[slot] = device.DeviceClaim{Id: slot, Uuid: dev.UUID, Cores: cores, Memory: memoryMiB}
 	}
 	var infos, claims []device.DeviceClaim
 	for _, slot := range sets.List(sets.KeySet(claimBySlot)) {
@@ -244,7 +246,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		claims = append(claims, claimBySlot[slot])
 	}
 	if len(claims) == 0 {
-		return fmt.Errorf("claim %s/%s has no devices allocated from pool %s", claim.Namespace, claim.Name, poolName)
+		return fmt.Errorf("claim %s has no devices allocated from pool %s", klog.KObj(claim), poolName)
 	}
 	if nd.CudaVersion == nil {
 		return fmt.Errorf("node device snapshot has no %s attribute; cannot write session", remote.AttrCUDADriverVersion)
@@ -254,7 +256,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		driverVersion = nd.DriverVersion.Original()
 	}
 	if len(claims) > vgpuconfig.MaxDeviceCount {
-		return fmt.Errorf("claim %s/%s allocates %d devices on this node, max %d per session", claim.Namespace, claim.Name, len(claims), vgpuconfig.MaxDeviceCount)
+		return fmt.Errorf("claim %s allocates %d devices on this node, max %d per session", klog.KObj(claim), len(claims), vgpuconfig.MaxDeviceCount)
 	}
 
 	data := vgpuconfig.NewResourceDataWithOptions(vgpuconfig.ResourceOption{
@@ -269,12 +271,12 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		vgpuconfig.WithMemoryRatio(1),
 		vgpuconfig.WithDriverVersion(nvidia.DriverVersion{
 			DriverVersion: driverVersion,
-			CudaDriverVersion: nvidia.CudaDriverVersion(
-				nd.CudaVersion.Major()*1000 + nd.CudaVersion.Minor()*10,
+			CudaDriverVersion: nvidia.NewCudaVersion(
+				nd.CudaVersion.Major(), nd.CudaVersion.Minor(),
 			),
 		}),
 		vgpuconfig.WithVMemoryNodeEnabled(true),
-		vgpuconfig.WithSMWatcherEnabled(s.smWatcher),
+		vgpuconfig.WithSMWatcherEnabled(s.cfg.SMWatcher),
 	)
 
 	s.mu.Lock()
@@ -291,7 +293,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 	}
 
 	for _, sub := range []string{sessionConfigDir, sessionLockDir, sessionVMemDir, sessionSMDir} {
-		if err := os.MkdirAll(filepath.Join(root, sub), 0o755); err != nil {
+		if err := util.EnsureDir(filepath.Join(root, sub), 0o755); err != nil {
 			return fmt.Errorf("mkdir session dir: %w", err)
 		}
 	}
@@ -303,11 +305,11 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 	}
 	_ = f.Close()
 
-	if err := vgpuconfig.WriteResourceDataToDisk(filepath.Join(root, sessionConfigDir, sessionConfigFile), data); err != nil {
+	if err = vgpuconfig.WriteResourceDataToDisk(filepath.Join(root, sessionConfigDir, sessionConfigFile), data); err != nil {
 		return fmt.Errorf("write session quota: %w", err)
 	}
 	// Marker last: its presence means "complete".
-	if err := os.WriteFile(marker, []byte(claim.UID+"\n"), 0o644); err != nil {
+	if err = os.WriteFile(marker, []byte(claim.UID+"\n"), 0o644); err != nil {
 		return fmt.Errorf("write claim marker: %w", err)
 	}
 	klog.Infof("Materialized session %s for claim %s (requests %v): %d device(s)", token, klog.KObj(claim), requests, len(claims))
@@ -338,17 +340,21 @@ type Entry struct {
 func (s *SessionStore) List() ([]Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	dirents, err := os.ReadDir(s.base)
+	dirents, err := os.ReadDir(s.cfg.SessionBase)
 	if err != nil {
 		return nil, err
 	}
 	var entries []Entry
 	for _, e := range dirents {
-		if !e.IsDir() || e.Name() == watcherDir || validateToken(e.Name()) != nil {
+		if !e.IsDir() || e.Name() == watcherDir {
+			continue
+		}
+		if validateToken(e.Name()) != nil {
 			continue
 		}
 		entry := Entry{Token: e.Name()}
-		if b, err := os.ReadFile(filepath.Join(s.base, e.Name(), sessionClaimMarker)); err == nil {
+		filePath := filepath.Join(s.cfg.SessionBase, e.Name(), sessionClaimMarker)
+		if b, err := os.ReadFile(filePath); err == nil {
 			entry.ClaimUID = strings.TrimSpace(string(b))
 		} else if !errors.Is(err, os.ErrNotExist) {
 			klog.Warningf("read marker of session %s: %v", e.Name(), err)

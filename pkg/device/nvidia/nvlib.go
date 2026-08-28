@@ -35,6 +35,10 @@ import (
 
 type CudaDriverVersion int
 
+func NewCudaVersion(major, minor int64) CudaDriverVersion {
+	return CudaDriverVersion(major*1000 + minor*10)
+}
+
 func (v CudaDriverVersion) String() string {
 	major, minor := v.MajorAndMinor()
 	return fmt.Sprintf("%d.%d", major, minor)

@@ -204,7 +204,7 @@ func newApp() *cli.App {
 			Name:        "plugin-mode",
 			Usage:       "Plugin role: 'server' (GPU node) or 'inject' (consumer node, remote GPU injection only; requires the RemoteGPUSupport feature gate).",
 			Value:       pkgkubeletplugin.ModeServer,
-			Destination: &flags.Mode,
+			Destination: &flags.PluginMode,
 			EnvVars:     []string{"PLUGIN_MODE"},
 		},
 		&cli.IntFlag{
@@ -270,7 +270,7 @@ func newApp() *cli.App {
 				ClientSets: clientSets,
 			}
 
-			if flags.Mode == pkgkubeletplugin.ModeInject {
+			if flags.PluginMode == pkgkubeletplugin.ModeInject {
 				return RunInjectPlugin(c.Context, config)
 			}
 			return RunPlugin(c.Context, config)
@@ -297,15 +297,11 @@ func newApp() *cli.App {
 
 // Input validation of CLI flags.
 func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
-	switch flags.Mode {
+	switch flags.PluginMode {
 	// Empty means the caller did not go through the CLI (e.g. tests); treat
 	// it as the server default.
-	case "", pkgkubeletplugin.ModeServer:
+	case pkgkubeletplugin.ModeServer:
 		if featuregates.Enabled(featuregates.RemoteGPUSupport) {
-			if featuregates.Enabled(featuregates.NRISupport) {
-				return fmt.Errorf("feature gate %s is mutually exclusive with %s in server mode (publish-only); NRI sessions are an inject-mode feature",
-					featuregates.RemoteGPUSupport, featuregates.NRISupport)
-			}
 			if flags.RemoteNodeSelector == "" {
 				return fmt.Errorf("--remote-node-selector is required in server mode when feature gate %s is enabled",
 					featuregates.RemoteGPUSupport)
@@ -320,8 +316,8 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 				pkgkubeletplugin.ModeInject, featuregates.RemoteGPUSupport)
 		}
 	default:
-		return fmt.Errorf("invalid --plugin-mode %q: must be %q or %q",
-			flags.Mode, pkgkubeletplugin.ModeServer, pkgkubeletplugin.ModeInject)
+		return fmt.Errorf("invalid --plugin-mode %q: must be %q or %q", flags.PluginMode,
+			pkgkubeletplugin.ModeServer, pkgkubeletplugin.ModeInject)
 	}
 
 	// Validate the NRI plugin index format early (only when set): containerd
@@ -423,7 +419,6 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 		ArtifactsDir:                  filepath.Join(config.Flags.ContainerManagerDir, util.Driver),
 		HostArtifactsDir:              filepath.Join(config.Flags.HostManagerDir, util.Driver),
 		AgentPort:                     config.Flags.RemoteAgentPort,
-		NRIEnabled:                    featuregates.Enabled(featuregates.NRISupport),
 		NRIRoot:                       config.Flags.NRIRoot,
 		NRIPluginIdx:                  config.Flags.NRIPluginIdx,
 	}, config.ClientSets)

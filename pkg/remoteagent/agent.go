@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -91,7 +92,7 @@ func New(cfg Config) *Agent {
 	if cfg.GCInterval <= 0 {
 		cfg.GCInterval = time.Minute
 	}
-	store := NewSessionStore(cfg.SessionBase, cfg.SMWatcher)
+	store := NewSessionStore(cfg)
 	return &Agent{cfg: cfg, store: store}
 }
 
@@ -101,9 +102,6 @@ func (a *Agent) Run(ctx context.Context) error {
 	// session skeleton exists", not "the agent is fully synced": the server
 	// only needs the directories to start, and sessions are created later.
 	if err := a.store.Prepare(); err != nil {
-		return err
-	}
-	if err := a.writeReadyFile(); err != nil {
 		return err
 	}
 
@@ -183,6 +181,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	) {
 		return fmt.Errorf("informers did not sync")
 	}
+
+	if err := a.writeReadyFile(); err != nil {
+		return err
+	}
+
 	a.refreshNodeDevices()
 
 	// 3. Background loops.
@@ -221,7 +224,7 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) writeReadyFile() error {
-	if err := os.MkdirAll(filepath.Dir(a.cfg.ReadyFile), 0o755); err != nil {
+	if err := util.EnsureDir(filepath.Dir(a.cfg.ReadyFile), 0o755); err != nil {
 		return err
 	}
 	if err := os.WriteFile(a.cfg.ReadyFile, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644); err != nil {
@@ -276,17 +279,19 @@ func (a *Agent) gcSessions(context.Context) {
 }
 
 func (a *Agent) claimAllocated(uid string) bool {
-	c := a.claimByUID(uid)
+	c, _ := a.GetClaimByUID(uid)
 	return c != nil && c.Status.Allocation != nil
 }
 
-func (a *Agent) claimByUID(uid string) *resourceapi.ResourceClaim {
+func (a *Agent) GetClaimByUID(uid string) (*resourceapi.ResourceClaim, error) {
 	objs, err := a.claimCache.ByIndex(claimUIDIndex, uid)
-	if err != nil || len(objs) == 0 {
-		return nil
+	if err != nil {
+		return nil, err
 	}
-	c, _ := objs[0].(*resourceapi.ResourceClaim)
-	return c
+	if len(objs) == 0 {
+		return nil, apierrors.NewNotFound(resourceapi.Resource("resourceclaims"), uid)
+	}
+	return objs[0].(*resourceapi.ResourceClaim), nil
 }
 
 func (a *Agent) removeSessionsOfClaim(uid string) {
@@ -308,26 +313,28 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 	if err := validateToken(req.Session); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	claim := a.claimByUID(req.ClaimUid)
-	if claim == nil && req.ClaimNamespace != "" && req.ClaimName != "" {
+
+	claim, err := a.GetClaimByUID(req.ClaimUid)
+	if err != nil && apierrors.IsNotFound(err) {
 		// Informer lag: fall back to a direct read and verify identity.
-		c, err := a.cfg.ClientSets.Resource.ResourceClaims(req.ClaimNamespace).Get(ctx, req.ClaimName, metav1.GetOptions{})
-		if err != nil && !apierrors.IsNotFound(err) {
-			return nil, status.Errorf(codes.Unavailable, "get claim: %v", err)
+		claim, err = a.cfg.ClientSets.Resource.ResourceClaims(req.ClaimNamespace).Get(ctx, req.ClaimName, metav1.GetOptions{})
+		if err != nil && apierrors.IsNotFound(err) {
+			return nil, status.Errorf(codes.NotFound, "claim %s not found", req.ClaimUid)
 		}
-		if err == nil && string(c.UID) == req.ClaimUid {
-			claim = c
-			a.claimCache.Mutation(c)
+		if err == nil && string(claim.UID) != req.ClaimUid {
+			return nil, status.Errorf(codes.NotFound, "claim %s not found", req.ClaimUid)
 		}
 	}
-	if claim == nil {
-		return nil, status.Errorf(codes.NotFound, "claim %s not found", req.ClaimUid)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
 	}
+	a.claimCache.Mutation(claim)
+
 	nd := a.nodeDevices.Load()
 	if nd == nil || len(nd.Devices) == 0 {
 		return nil, status.Error(codes.Unavailable, "node device snapshot not available yet")
 	}
-	if err := a.store.Materialize(req.Session, claim, nd, a.cfg.NodeName, a.cfg.DriverName, req.Requests); err != nil {
+	if err = a.store.Materialize(req.Session, claim, nd, req.Requests); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	msg := ""

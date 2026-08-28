@@ -52,11 +52,11 @@ type Flags struct {
 	// when the NRISupport feature gate is enabled.
 	NRIRoot      string
 	NRIPluginIdx string
-	// Mode selects the plugin role (design D21, v1.7): "server" (GPU node;
+	// PluginMode selects the plugin role (design D21, v1.7): "server" (GPU node;
 	// local DRA duties, plus remote-pool duties when RemoteGPUSupport is
 	// enabled) or "inject" (consumer node; remote env/CDI injection only, no
 	// GPU dependency).
-	Mode string
+	PluginMode string
 	// RemoteAgentPort is the remote-agent gRPC port on server hosts
 	// (inject mode calls EnsureSession there).
 	RemoteAgentPort int

@@ -92,6 +92,10 @@ func NewOptions() *Options {
 		compatibility.DefaultBuildEffectiveVersion(),
 		featureGate,
 	))
+	remoteSessionBasePath := util.GetEnvDefault(
+		util.RemoteSessionBasePathEnv,
+		util.RemoteSessionBasePath,
+	)
 	return &Options{
 		QPS:                 defaultQPS,
 		Burst:               defaultBurst,
@@ -103,6 +107,7 @@ func NewOptions() *Options {
 		CertRefreshInterval: defaultCertRefreshInterval,
 		MinScrapeInterval:   defaultMinScrapeInterval,
 		StuckGracePeriod:    defaultStuckGracePeriod,
+		RemoteSessionBase:   remoteSessionBasePath,
 		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
 		FeatureGate:         featureGate,
 	}
@@ -135,7 +140,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.DurationVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
 	pflag.BoolVar(&o.EnableDRAMonitor, "enable-dra-monitor", false, "Enable monitoring metrics for DRA driver paths.")
-	pflag.StringVar(&o.RemoteSessionBase, "remote-session-base", "/etc/vgpu-manager/remote-sessions", "Remote GPU session directory root shared with remote-agent/lupine-server (used when the RemoteGPUSupport feature gate is enabled).")
+	pflag.StringVar(&o.RemoteSessionBase, "remote-session-base", o.RemoteSessionBase, "Remote GPU session directory root shared with remote-agent/lupine-server (used when the RemoteGPUSupport feature gate is enabled).")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

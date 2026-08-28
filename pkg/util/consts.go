@@ -200,6 +200,8 @@ const (
 	// isolation. See docs/sm_multiproc_shared_bucket_design.md.
 	SMNode     = "sm_node"
 	SMNodeFile = "sm_node.config"
+
+	RemoteSessionBasePath = "/etc/vgpu-manager/remote-sessions"
 )
 
 const (
@@ -227,6 +229,7 @@ const (
 	ManagerVGpuClaimUid       = "MANAGER_VGPU_CLAIM_UID"
 	CudaSMSharedBucket        = "CUDA_SM_SHARED_BUCKET"
 	CudaMemoryUVAAdvise       = "CUDA_MEM_UVA_ADVISE"
+	RemoteSessionBasePathEnv  = "VGPU_CONFIG_SESSION_BASE"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
@@ -422,6 +425,10 @@ const (
 	// HonorPreAllocatedDeviceIDs makes preferred allocation follow
 	// pre-allocated device IDs whenever possible.
 	HonorPreAllocatedDeviceIDs = "HonorPreAllocatedDeviceIDs"
+
+	// RemoteGPUSupport is the feature gate name shared by the kubelet-plugin
+	// and the device-monitor registries.
+	RemoteGPUSupport = "RemoteGPUSupport"
 )
 
 // CompatibilityMode Container environment compatibility mode type
@@ -450,9 +457,6 @@ const (
 const (
 	AccessModeLocal  = "local"
 	AccessModeRemote = "remote"
-	// RemoteGPUSupport is the feature gate name shared by the kubelet-plugin
-	// and the device-monitor registries.
-	RemoteGPUSupport = "RemoteGPUSupport"
 	// AccessModeAttribute is the DRA device attribute name.
 	AccessModeAttribute = "accessMode"
 )

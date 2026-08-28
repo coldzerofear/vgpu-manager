@@ -395,7 +395,6 @@ func NewResourceDataWithOptions(o ResourceOption, opts ...OptionFunc) *ResourceD
 		}
 		deviceConfigs[deviceInfo.Id] = deviceConfig
 	}
-	major, minor := o.CudaVersion.MajorAndMinor()
 	smWatcher := 0
 	if o.SMWatcherEnabled {
 		smWatcher = 1
@@ -404,7 +403,8 @@ func NewResourceDataWithOptions(o ResourceOption, opts ...OptionFunc) *ResourceD
 	if o.VMemoryNodeEnabled {
 		vMemoryNode = 1
 	}
-	data := &ResourceDataT{
+	major, minor := o.CudaVersion.MajorAndMinor()
+	return &ResourceDataT{
 		Magic:         ConfigMagic,
 		LayoutVersion: ConfigLayoutVersion,
 		RegionSize:    uint32(unsafe.Sizeof(ResourceDataT{})),
@@ -424,7 +424,6 @@ func NewResourceDataWithOptions(o ResourceOption, opts ...OptionFunc) *ResourceD
 		VMemoryNode:       int32(vMemoryNode),
 		Devices:           deviceConfigs,
 	}
-	return data
 }
 
 func WithDeviceManager(devManager *manager.DeviceManager) OptionFunc {

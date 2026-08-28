@@ -875,6 +875,7 @@ func PodVGPUAccessMode(obj metav1.Object) (string, error) {
 	case AccessModeLocal, AccessModeRemote:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("invalid annotation %s=%q: must be %q or %q", VGPUAccessModeAnnotation, value, AccessModeLocal, AccessModeRemote)
+		return AccessModeLocal, fmt.Errorf("invalid annotation %s=%q: must be %q or %q",
+			VGPUAccessModeAnnotation, value, AccessModeLocal, AccessModeRemote)
 	}
 }

@@ -81,6 +81,7 @@ test: fmt vet ## Run tests.
 .PHONY: generate
 generate: ## API code generation.
 	protoc --go_out=. --go-grpc_out=. pkg/api/registry/api.proto
+	protoc --go_out=. --go-grpc_out=. pkg/api/remoteagent/api.proto
 
 ##@ Build
 

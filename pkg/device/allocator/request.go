@@ -414,7 +414,7 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 	if len(req.Containers) > 0 {
 		req.NodePolicy = parseSchedulerPolicy(pod, util.NodeSchedulerPolicyAnnotation)
 		req.DevicePolicy = parseSchedulerPolicy(pod, util.DeviceSchedulerPolicyAnnotation)
-		req.Topology, req.TopologyStrict = parsePodTopologyMode(pod)
+		req.Topology, req.TopologyStrict = ParsePodTopologyMode(pod)
 		req.GangName, _ = util.PodGangKey(pod)
 		if v, ok := util.HasAnnotation(pod, util.CrossPodTopologyAnnotation); ok {
 			req.CrossPodTopology = strings.EqualFold(v, "true")
@@ -455,12 +455,12 @@ func parseSchedulerPolicy(pod *corev1.Pod, annotation string) util.SchedulerPoli
 	}
 }
 
-// parsePodTopologyMode reads DeviceTopologyModeAnnotation and returns the
+// ParsePodTopologyMode reads DeviceTopologyModeAnnotation and returns the
 // BASE mode (numa / link / none) plus a strict flag derived from the
 // "-strict" suffix variants. Moved here from allocator.go so the parse
 // happens once at BuildAllocationRequest time, alongside the other
 // annotation reads.
-func parsePodTopologyMode(pod *corev1.Pod) (mode util.TopologyMode, strict bool) {
+func ParsePodTopologyMode(pod *corev1.Pod) (mode util.TopologyMode, strict bool) {
 	raw, _ := util.HasAnnotation(pod, util.DeviceTopologyModeAnnotation)
 	tm := util.TopologyMode(strings.ToLower(raw))
 	return tm, tm.IsStrictTopology()

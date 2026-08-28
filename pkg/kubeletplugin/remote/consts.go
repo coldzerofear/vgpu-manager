@@ -39,9 +39,9 @@ const (
 	// (pool scoped to the reachability selector, and EVERY consumer of the
 	// device goes through lupine — including pods scheduled onto the GPU
 	// node itself, design v2.1 D23). One device carries exactly one value.
-	AttrAccessMode   = "accessMode"
-	AccessModeLocal  = "local"
-	AccessModeRemote = "remote"
+	AttrAccessMode   = util.AccessModeAttribute
+	AccessModeLocal  = util.AccessModeLocal
+	AccessModeRemote = util.AccessModeRemote
 
 	// AttrEndpoint is the lupine-server endpoint, verbatim (IP or domain,
 	// optional scheme/port, design D3/§6.1). Published only for remote.

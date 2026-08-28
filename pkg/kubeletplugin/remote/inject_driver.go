@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"encoding/json"
-
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
+	client2 "github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/health"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -66,11 +66,7 @@ type InjectConfig struct {
 	// ArtifactsDir when the plugin mounts the manager dir at the host path.
 	HostArtifactsDir string
 	// AgentPort is the remote-agent gRPC port on every server host.
-	AgentPort int
-	// NRIEnabled switches session assignment to the NRI CreateContainer hook
-	// (per-container sessions, see nri.go). NRIRoot/NRIPluginIdx configure
-	// the in-process NRI plugin.
-	NRIEnabled   bool
+	AgentPort    int
 	NRIRoot      string
 	NRIPluginIdx string
 }
@@ -165,7 +161,7 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 
 	<-sliceInformer.HasSyncedChecker().Done()
 
-	if config.NRIEnabled {
+	if featuregates.Enabled(featuregates.NRISupport) {
 		if err := d.startNRI(ctx); err != nil {
 			return nil, fmt.Errorf("start NRI plugin: %w", err)
 		}
@@ -260,7 +256,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 	// 3. Session assignment.
 	edits := map[string]*cdiapi.ContainerEdits{}
 	idOf := map[int]string{} // index into devices -> CDI device id
-	if d.config.NRIEnabled {
+	if featuregates.Enabled(featuregates.NRISupport) {
 		// NRI mode: the per-container session (server list + token) is
 		// injected at CreateContainer; CDI only carries the claim
 		// correlation env. See nri.go.
@@ -285,11 +281,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		if err != nil {
 			return fail(fmt.Errorf("resolve partitions of claim %s: %w", klog.KObj(claim), err))
 		}
-		var requestToKey map[string]string
-		if info != nil {
-			requestToKey = info.RequestToPartition
-		}
-		partitions := buildPartitions(devices, requestToKey)
+		partitions := buildPartitions(devices, info.RequestToPartition)
 
 		// Tokens: reuse the annotation-recorded token for a partition
 		// (retries / plugin restarts), mint the rest and persist them before
@@ -386,36 +378,35 @@ func (d *InjectDriver) resolveRemoteDevices(claim *resourceapi.ResourceClaim) ([
 // assignTokens fills partition tokens from the claim annotations, minting and
 // persisting new ones in a single merge patch.
 func (d *InjectDriver) assignTokens(ctx context.Context, claim *resourceapi.ResourceClaim, partitions []*partition) error {
-	fresh := map[string]string{}
+	fresh := map[string]*string{}
 	for _, p := range partitions {
 		key := SessionAnnotationKey(p.key)
 		if tok := claim.Annotations[key]; tok != "" {
 			p.token = tok
 			continue
 		}
-		tok, err := NewSessionToken()
-		if err != nil {
+		if tok, err := NewSessionToken(); err != nil {
 			return err
+		} else {
+			p.token = tok
+			fresh[key] = &tok
 		}
-		p.token = tok
-		fresh[key] = tok
 	}
 	if len(fresh) == 0 {
 		return nil
 	}
-	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": fresh}})
+	metadata := client2.PatchMetadata{Annotations: fresh}
+	patch, err := metadata.JSONBytes()
 	if err != nil {
 		return err
 	}
-	if _, err := d.clients.Resource.ResourceClaims(claim.Namespace).Patch(ctx, claim.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+	newClaim, err := d.clients.Resource.ResourceClaims(claim.Namespace).Patch(ctx, claim.Name, metadata.PatchType(), patch, metav1.PatchOptions{})
+	if err != nil {
 		return fmt.Errorf("record session tokens on claim %s: %w", klog.KObj(claim), err)
 	}
-	if claim.Annotations == nil {
-		claim.Annotations = map[string]string{}
-	}
-	for k, v := range fresh {
-		claim.Annotations[k] = v
-	}
+
+	newClaim.DeepCopyInto(claim)
+
 	return nil
 }
 

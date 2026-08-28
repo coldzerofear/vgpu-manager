@@ -114,7 +114,7 @@ const (
 	// `--mode=inject` (env/CDI injection on consumer nodes, which requires this
 	// gate). The gate is orthogonal to --mode: mode selects the role shape,
 	// this gate opens the remote feature within it (design D21, v1.7).
-	RemoteGPUSupport featuregate.Feature = "RemoteGPUSupport"
+	RemoteGPUSupport featuregate.Feature = util.RemoteGPUSupport
 
 	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
 	// storing daemon info directly in ComputeDomainStatus.Nodes.
@@ -334,10 +334,6 @@ func ValidateFeatureGates() error {
 	}
 	if Enabled(NRISupport) && !Enabled(VGPUSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", NRISupport, VGPUSupport)
-	}
-
-	if Enabled(RemoteGPUSupport) && Enabled(SharedSMUtilizationWatcher) {
-		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, SharedSMUtilizationWatcher)
 	}
 	if Enabled(RemoteGPUSupport) && Enabled(DevicePluginClientMode) {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, DevicePluginClientMode)

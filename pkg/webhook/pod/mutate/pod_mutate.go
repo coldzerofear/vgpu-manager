@@ -186,7 +186,6 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod, dryRun
 	logger := log.FromContext(ctx)
 
 	isVGPUPod := false
-	isRemote := false
 	isMultiGPUs := false
 	setDefaultResource := func(container *corev1.Container) {
 		number := util.GetResourceOfContainer(container, util.VGPUNumberResourceName)
@@ -233,21 +232,14 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod, dryRun
 		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)
 		// Remote vGPU consumers run lupine's client shim, not the local vgpu
 		// runtime class, and NUMA/link topology has no meaning for them.
-		accessMode, err := util.PodVGPUAccessMode(pod)
-		if err != nil {
-			return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
-				field.Invalid(field.NewPath("metadata").Child("annotations").Key(util.VGPUAccessModeAnnotation),
-					pod.Annotations[util.VGPUAccessModeAnnotation], err.Error()),
-			})
-		}
-		isRemote = accessMode == util.AccessModeRemote
-		if !isRemote {
+		accessMode, _ := util.PodVGPUAccessMode(pod)
+		if accessMode != util.AccessModeRemote {
 			setDefaultRuntimeClassName(pod, h.options, logger)
 		}
 	} else {
 		cleanupInvalidSchedulerAnnotation(pod)
 	}
-	if isMultiGPUs && !isRemote {
+	if isMultiGPUs {
 		// Setting topology mode only makes sense when requesting multiple GPUs.
 		setDefaultDeviceTopologyMode(pod, h.options, logger)
 	}
