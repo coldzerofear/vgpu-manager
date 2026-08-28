@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -170,7 +172,7 @@ func TestDecorateAndSelector(t *testing.T) {
 	})
 }
 
-func TestResolveRemoteAllocation(t *testing.T) {
+func TestResolveRemoteDevicesAndPartitions(t *testing.T) {
 	slice := func(pool string, devs ...*resourceapi.Device) *resourceapi.ResourceSlice {
 		s := &resourceapi.ResourceSlice{Spec: resourceapi.ResourceSliceSpec{Pool: resourceapi.ResourcePool{Name: pool}}}
 		for _, d := range devs {
@@ -196,45 +198,91 @@ func TestResolveRemoteAllocation(t *testing.T) {
 		}
 	}
 	d := &InjectDriver{sliceIndexer: indexer}
-	result := func(pool, device string) resourceapi.DeviceRequestAllocationResult {
-		return resourceapi.DeviceRequestAllocationResult{
-			Request: "req", Driver: "manager.nvidia.com", Pool: pool, Device: device,
+
+	claim := func(results ...resourceapi.DeviceRequestAllocationResult) *resourceapi.ResourceClaim {
+		return &resourceapi.ResourceClaim{
+			Spec: resourceapi.ResourceClaimSpec{Devices: resourceapi.DeviceClaim{Requests: []resourceapi.DeviceRequest{
+				{Name: "ctr0", Exactly: &resourceapi.ExactDeviceRequest{}},
+				{Name: "ctr1", Exactly: &resourceapi.ExactDeviceRequest{}},
+				{Name: "fa", FirstAvailable: []resourceapi.DeviceSubRequest{{Name: "big"}, {Name: "small"}}},
+			}}},
+			Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: results},
+			}},
 		}
 	}
+	result := func(request, pool, device string) resourceapi.DeviceRequestAllocationResult {
+		return resourceapi.DeviceRequestAllocationResult{Request: request, Driver: "manager.nvidia.com", Pool: pool, Device: device}
+	}
 
-	t.Run("endpoints are deduplicated and deterministically ordered; CUDA floored", func(t *testing.T) {
-		endpoints, minCUDA, err := d.resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{
-			result("node-b", "vgpu-0"),
-			result("node-a", "vgpu-0"),
-			result("node-a", "vgpu-1"),
-		})
+	t.Run("resolves devices, folds subrequests, partitions by resolver key", func(t *testing.T) {
+		c := claim(
+			result("ctr0", "node-b", "vgpu-0"),
+			result("ctr1", "node-a", "vgpu-0"),
+			result("fa/small", "node-a", "vgpu-1"),
+			resourceapi.DeviceRequestAllocationResult{Request: "x", Driver: "other.driver", Pool: "p", Device: "d"}, // ignored
+		)
+		devices, err := d.resolveRemoteDevices(c)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// sets.String.List() is sorted: the order is stable across restarts
-		// regardless of allocation result order.
-		if len(endpoints) != 2 || endpoints[0] != "server-a:14833" || endpoints[1] != "server-b:14833" {
-			t.Fatalf("unexpected endpoints: %v", endpoints)
+		if len(devices) != 3 || devices[2].mainRequest != "fa" || devices[2].index != 2 {
+			t.Fatalf("unexpected devices: %+v", devices)
 		}
-		if minCUDA.String() != "12.4.0" {
-			t.Fatalf("expected CUDA floor 12.4.0, got %s", minCUDA)
+		if cudaFloor(devices).String() != "12.4.0" {
+			t.Fatalf("expected CUDA floor 12.4.0, got %s", cudaFloor(devices))
+		}
+
+		// ctr1 and fa share one container -> one partition; ctr0 is alone.
+		parts := buildPartitions(devices, map[string]string{"ctr1": "pod-abc-c1", "fa": "pod-abc-c1"})
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 partitions, got %d", len(parts))
+		}
+		if parts[0].key != "ctr0" || len(parts[0].results) != 1 || parts[0].endpoints[0] != "server-b:14833" {
+			t.Fatalf("fallback partition: %+v", parts[0])
+		}
+		if parts[1].key != "pod-abc-c1" || len(parts[1].results) != 2 || len(parts[1].endpoints) != 1 ||
+			len(parts[1].requests) != 2 || parts[1].requests[0] != "ctr1" || parts[1].requests[1] != "fa" {
+			t.Fatalf("resolved partition: %+v", parts[1])
 		}
 	})
 
-	t.Run("unknown pool or device errors", func(t *testing.T) {
-		if _, _, err := d.resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{result("node-x", "vgpu-0")}); err == nil {
-			t.Fatal("expected error for unknown pool")
-		}
-		if _, _, err := d.resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{result("node-a", "vgpu-9")}); err == nil {
-			t.Fatal("expected error for unpublished device")
+	t.Run("unknown pool/device and local-only devices fail", func(t *testing.T) {
+		for _, c := range []*resourceapi.ResourceClaim{
+			claim(result("ctr0", "node-x", "vgpu-0")),
+			claim(result("ctr0", "node-a", "vgpu-9")),
+			claim(result("ctr0", "node-c", "vgpu-0")),
+			claim(result("nope", "node-a", "vgpu-0")), // request not in spec
+		} {
+			if _, err := d.resolveRemoteDevices(c); err == nil {
+				t.Fatalf("expected error for %+v", c.Status.Allocation.Devices.Results[0])
+			}
 		}
 	})
+}
 
-	t.Run("local-only device errors in inject mode", func(t *testing.T) {
-		if _, _, err := d.resolveRemoteAllocation([]resourceapi.DeviceRequestAllocationResult{result("node-c", "vgpu-0")}); err == nil {
-			t.Fatal("expected error for accessMode=local device")
-		}
-	})
+func TestSessionHelpers(t *testing.T) {
+	tok, err := NewSessionToken()
+	if err != nil || len(tok) != 32 {
+		t.Fatalf("token: %q %v", tok, err)
+	}
+	k1, k2 := SessionAnnotationKey("pod-abc-ctr0"), SessionAnnotationKey("pod-abc-ctr1")
+	if k1 == k2 || len(k1) > 63+len("manager.nvidia.com/") || !strings.HasPrefix(k1, "manager.nvidia.com/session-") {
+		t.Fatalf("annotation keys: %s %s", k1, k2)
+	}
+	if got := cdiDeviceID(resultDevice{result: resourceapi.DeviceRequestAllocationResult{Request: "fa/small", Device: "vgpu-1", ShareID: func() *types.UID { u := types.UID("s1"); return &u }()}}, 0); got != "fa-small-vgpu-1-share-s1" {
+		t.Fatalf("cdi id: %s", got)
+	}
+	c := &resourceapi.ResourceClaim{Spec: resourceapi.ResourceClaimSpec{Devices: resourceapi.DeviceClaim{Requests: []resourceapi.DeviceRequest{
+		{Name: "a", Exactly: &resourceapi.ExactDeviceRequest{}}, {Name: "b", Exactly: &resourceapi.ExactDeviceRequest{}},
+	}}}}
+	results := []resourceapi.DeviceRequestAllocationResult{{Request: "a"}, {Request: "b"}}
+	if got := FilterResultsByRequests(c, results, []string{"b"}); len(got) != 1 || got[0].Request != "b" {
+		t.Fatalf("filter: %+v", got)
+	}
+	if got := FilterResultsByRequests(c, results, nil); len(got) != 2 {
+		t.Fatalf("empty filter must keep everything: %+v", got)
+	}
 }
 
 func TestSelectArtifact(t *testing.T) {

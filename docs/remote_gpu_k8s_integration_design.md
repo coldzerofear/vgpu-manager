@@ -1,6 +1,7 @@
 # 远程 GPU 的 k8s 控制面接入设计（上报/调度/分配/注入）v2.0
 
-> 状态：**设计定稿（二十五项关键决策已确认），实施中（S1/agent 代码已落）**
+> 状态：**设计定稿（二十五项关键决策已确认），实施中（S1/agent/分区会话代码已落）**
+> v2.2（2026-08-27）：**D8 修订——会话 = 分区，令牌随机并存于 claim annotation**；**D7 修订——独立 chart `vgpu-manager-remote-dra-driver`**（dra-driver chart 改动已回滚）；只允许 VGPUSupport+RemoteGPUSupport 同开；webhook/monitor 适配方案见 §11。
 > v2.1（2026-08-25，用户提出）：**gate 开的 GPU 节点只发布不本地分配**，本节点消费者也统一走远程路径（D23 修订）；`--remote-node-selector` 取代固定 net-zone 标签（D23）。
 > v2.0（2026-08-25，用户提出、评审采纳的**架构修订**）：**不再有独立的远程资源池**。GPU 节点的既有设备
 > （VGPUSupport 开 = `type=vgpu`，关 = `type=gpu`）在 `RemoteGPUSupport` gate 开启时**原地多发**
@@ -907,3 +908,75 @@ EnsureSession gRPC 服务端，D20）、inject 模式补齐（令牌写 claim st
 
 > 注：网络 fabric 亲和（让消费者优先靠近其 remote worker 的快速 IB/RoCE）我们的 `net-zone` 标签（§6）已是粗粒度
 > 起点，且**领先于 tensor-fusion**（后者跨节点 fabric 完全不建模）；真做细粒度 fabric 亲和仍需扩展 zone 语义。
+
+## 11. v2.2：会话粒度、独立 chart、webhook 与 monitor 的适配（2026-08-27）
+
+### 11.1 D8 修订：会话 = 分区（partition），令牌存 claim annotation
+
+claim UID 作会话只适合"一容器一 claim"。会话是服务端的**记账单元**（一组共享同一配额的进程），它与本地路径
+`pkg/claimresolve` 的**分区**定义完全重合：reserved pods 上"容器 ↔ 实际命中 request"二部图的连通分量
+（单容器时键为 `pod-<hash>-<container>`）。落地：
+
+- inject 的 NodePrepare 调 `claimresolve.ResolveClaimVGPUPartitionsFromAllocatedRequests`（reader = API GET，
+  与本地路径一致，不需要 pod informer）；解析失败回退为"每 request 一分区"。
+- **每分区一个随机令牌**（16 字节 hex），持久化到 claim annotation `manager.nvidia.com/session-<sha256(partitionKey)[:16]>`
+  （分区键含 podUID/容器名会超 63 字符，故哈希）；重试/重启先查 annotation 再铸造，一次 merge patch 写入。
+  RBAC：inject 需要 `resourceclaims` patch（本地 DevicePluginClientMode 已有同类先例）。
+- EnsureSession 携带 `requests`（分区内主请求名）与 `partition`；agent 只把这些 request 的 result 写进会话。
+- CDI：**每个 allocation result 一个 CDI 设备**（命名沿用本地 `<request>-<device>-share-<shareID>`），env 取自所属分区；
+  kubelet 只把容器引用的 request 的设备挂给它，同分区 env 相同、不会互相覆盖。跨 claim（一容器引两个 claim）与本地路径同样不支持，
+  由 webhook §3.4 规则拦截。
+- **同一分区内同一物理卡被多次命中**（webhook 正常拦截，此为回退路径）：会话配额取**最大值**。
+
+### 11.2 D7 修订：远程部署使用独立 chart `charts/vgpu-manager-remote-dra-driver`
+
+本分支对 `charts/vgpu-manager-dra-driver` 的改动已全部回滚；远程组件（GPU 节点 pod = remote-agent + lupine-server（+ device-monitor）、
+消费侧 inject DS、DeviceClass、RBAC、制品 init）由新 chart 承载。约束：**只允许 `VGPUSupport` + `RemoteGPUSupport` 同开**
+（feature gate 校验已强制；不做普通 gpu 类型的远程），且 `RemoteGPUSupport` 与 SharedSMUtilizationWatcher /
+DevicePluginClientMode / NRISupport 互斥。
+
+### 11.3 webhook 适配（核查结论与改法）
+
+现状核查（`pkg/webhook`）：转换由扩展资源 `<domain>/vgpu-number|cores|memory` 触发，不读任何 annotation 选类；
+生成的 request 只写 CEL `type == "vgpu"`（不钉 `device.driver`），DeviceClass 名是单一全局 flag；
+**webhook 不注入 env/挂载/亲和**，也不读 ResourceSlice——因此远程数据面与放宽的 nodeSelector 对它透明。
+§3.4 的共享校验以 `<claim>/<mainRequest>` 为键，同容器重复引用同一 request 会被 set 折叠，容器最多引一个 vGPU claim，
+这正是 11.1 依赖的前提。
+
+需要的改动（都小）：
+1. **模式选择**：新增 pod annotation `<domain>/vgpu-access-mode: local|remote`（缺省 local）。`BuildDeviceRequest` 在
+   request selector 上追加 `device.attributes["manager.nvidia.com"].accessMode == "<mode>"`。这样 DeviceClass 保持单一、
+   dra-driver chart 零改动，且未标注的 pod 仍只拿本地设备（否则 gate 开后它们可能被分到远程卡）。
+2. **分类器**：`ExactLooksLikeVGPU`/`DeviceRequestLooksLikeVGPU` 若以后引入远程 DeviceClass 名，要把该名加入 vGPU 识别
+   （或教它认 `accessMode`），否则 §3.4 校验静默失效。当前走 request selector 方案时无需改。
+3. **远程 pod 不打拓扑/运行时类注解**：`setDefaultDeviceTopologyMode`、`setDefaultRuntimeClassName` 对 accessMode=remote
+   的 pod 跳过（NUMA/链路拓扑与 vgpu runtimeClass 对远程无意义）；`node/device-scheduler-policy` 可保留。
+4. 顺带发现的既有缺陷：`BuildResourceClaim` 在 validate 阶段调 `allocator.BuildAllocationRequest(pod)` 时扩展资源已被
+   mutate 删除，`req.Containers` 为空 → `LinkTopology`/`NUMATopology` 的 MatchAttribute 约束是死代码。与远程无关，单列修。
+
+### 11.4 DRA monitor 适配（核查结论与改法）
+
+现状核查（`pkg/metrics`、`cmd/device-monitor`）：
+- ResourceSlice informer 用 `spec.nodeName=<node>` 选择器，collector 再按 `Spec.NodeName` 过滤——远程池无 nodeName，
+  **GPU 节点上的 monitor 将看不到任何设备**（informer.go 注释称 `spec.pool.name` 不受支持是错的，v1 有
+  `ResourceSliceSelectorPoolName`）。
+- pod→claim→device 的 join 是 pod 先行且 pod informer 按本节点过滤，远程消费者的 pod 在别的节点 → 所有 `assigned_*`、
+  `*_shared_containers` 对远程卡恒为 0；container 级指标的 `node` 标签是采集节点。
+- container 用量指标靠 **本机 cgroup 取容器 PID** 再与 NVML 进程表相交——远程消费者的 cgroup 在消费节点，PID 命名空间不同，
+  四个 `container_vgpu_device_*usage/utilization` 指标对远程必为 0。
+- DRA collector 不读 `claims/` 下任何文件（限额来自 ConsumedCapacity），虚拟显存账本是 TODO 桩。
+- monitor 的 feature gate 是独立注册表，没有 `RemoteGPUSupport`；它作为 kubelet-plugin DS 的 sidecar 部署。
+
+改法：
+1. **发现**：informer 选择器改 `spec.pool.name=<node> AND spec.driver=<driver>`；collector 改按 `Spec.Pool.Name == node` 认领。
+   本地/远程通用。
+2. **标签**：设备级与容器级指标增加 `access_mode`（取自设备属性）；容器级指标增加 `consumer_node`（pod 所在节点），`node` 保持采集节点。
+3. **远程分配归属（"这张卡分给了哪些 pod"）**：把 join 反转为 **claim 先行**——用已有的集群级 claim lister，按
+   `Status.Allocation.Devices.Results[].Pool == 本节点` 找到消费本节点设备的 claim，经 `ReservedFor` 得到 pod（需 pod 的
+   集群级 lister 或按需 GET），从 pod spec 解析容器↔request。新增 `vgpu_device_allocation_info{device_uuid, pod_namespace,
+   pod_name, container_name, consumer_node, access_mode}=1`，并用同一结果修正 `assigned_*` 聚合。
+4. **远程容器用量**：PID 来源改为会话的 `<base>/<token>/pids.config`（SESSION 记账列表，agent 目录里 `.claim-uid` 标记 +
+   claim annotation 反推分区→容器）。会话目录是 agent/server pod 的 emptyDir，monitor 在另一个 pod 读不到 → 在新 chart 里
+   **把 device-monitor 放进 GPU 节点 pod**（与 agent/server 共享 emptyDir，hostPID），加 `--remote-session-base` 与
+   `RemoteGPUSupport` gate；或 agent 增 `ListSessions` gRPC 暴露 token/claim/pids（二选一，前者改动小）。
+5. `SharedSMUtilizationWatcher` 与远程互斥（11.2），monitor 侧该 gate 在远程节点不开。

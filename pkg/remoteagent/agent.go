@@ -327,7 +327,7 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 	if nd == nil || len(nd.Devices) == 0 {
 		return nil, status.Error(codes.Unavailable, "node device snapshot not available yet")
 	}
-	if err := a.store.Materialize(req.Session, claim, nd, a.cfg.NodeName, a.cfg.DriverName); err != nil {
+	if err := a.store.Materialize(req.Session, claim, nd, a.cfg.NodeName, a.cfg.DriverName, req.Requests); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	msg := ""

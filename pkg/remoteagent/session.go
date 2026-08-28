@@ -33,6 +33,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
 
@@ -190,11 +191,14 @@ func (s *SessionStore) dir(token string) string {
 	return filepath.Join(s.base, token)
 }
 
-// Materialize writes the session for `claim`'s allocation on pool
+// Materialize writes the session for the partition of `claim` named by
+// `requests` (main request names; empty = every request) on pool
 // `poolName`. It is idempotent: an already complete session is left
 // untouched (the library may have live state in it), so kubelet retries of
-// NodePrepare are safe.
-func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClaim, nd *NodeDevices, poolName, driverName string) error {
+// NodePrepare are safe. When several results of the partition land on the
+// same physical device (the webhook normally prevents this), the largest
+// share wins — the config has one slot per device.
+func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClaim, nd *NodeDevices, poolName, driverName string, requests []string) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
@@ -202,8 +206,10 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		return fmt.Errorf("claim %s has no allocation", klog.KObj(claim))
 	}
 
-	var infos, claims []device.DeviceClaim
-	for _, result := range claim.Status.Allocation.Devices.Results {
+	results := remote.FilterResultsByRequests(claim, claim.Status.Allocation.Devices.Results, requests)
+	infoBySlot := map[int]device.DeviceClaim{}
+	claimBySlot := map[int]device.DeviceClaim{}
+	for _, result := range results {
 		if result.Driver != driverName || result.Pool != poolName {
 			continue
 		}
@@ -214,10 +220,9 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		// Slot = host device index (minor), exactly as the local path lays
 		// out the config: the library reads slot index as host index
 		// (config_allowed_devices) and translates to the container-visible
-		// ordinal itself; the provider builds CUDA_VISIBLE_DEVICES from the
-		// active slots in ascending host order.
+		// ordinal itself.
 		slot := int(nodeDev.Minor)
-		infos = append(infos, device.DeviceClaim{Id: slot, Uuid: nodeDev.UUID, Cores: nodeDev.Cores, Memory: nodeDev.MemoryMiB})
+		infoBySlot[slot] = device.DeviceClaim{Id: slot, Uuid: nodeDev.UUID, Cores: nodeDev.Cores, Memory: nodeDev.MemoryMiB}
 
 		cores, memoryMiB := nodeDev.Cores, nodeDev.MemoryMiB
 		if q, ok := result.ConsumedCapacity[remote.CapacityCores]; ok {
@@ -226,7 +231,17 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		if q, ok := result.ConsumedCapacity[remote.CapacityMemory]; ok {
 			memoryMiB = q.Value() >> 20
 		}
-		claims = append(claims, device.DeviceClaim{Id: slot, Uuid: nodeDev.UUID, Cores: cores, Memory: memoryMiB})
+		if prev, dup := claimBySlot[slot]; dup {
+			klog.Warningf("session %s: device %s allocated more than once in one partition; taking the larger share", token, result.Device)
+			cores = max(cores, prev.Cores)
+			memoryMiB = max(memoryMiB, prev.Memory)
+		}
+		claimBySlot[slot] = device.DeviceClaim{Id: slot, Uuid: nodeDev.UUID, Cores: cores, Memory: memoryMiB}
+	}
+	var infos, claims []device.DeviceClaim
+	for _, slot := range sets.List(sets.KeySet(claimBySlot)) {
+		infos = append(infos, infoBySlot[slot])
+		claims = append(claims, claimBySlot[slot])
 	}
 	if len(claims) == 0 {
 		return fmt.Errorf("claim %s/%s has no devices allocated from pool %s", claim.Namespace, claim.Name, poolName)
@@ -295,7 +310,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 	if err := os.WriteFile(marker, []byte(claim.UID+"\n"), 0o644); err != nil {
 		return fmt.Errorf("write claim marker: %w", err)
 	}
-	klog.Infof("Materialized session %s for claim %s/%s: %d device(s)", token, claim.Namespace, claim.Name, len(claims))
+	klog.Infof("Materialized session %s for claim %s (requests %v): %d device(s)", token, klog.KObj(claim), requests, len(claims))
 	return nil
 }
 

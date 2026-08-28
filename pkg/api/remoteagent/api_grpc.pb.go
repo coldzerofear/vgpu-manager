@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v5.29.3
-// source: pkg/api/remoteagent/api.proto
+// source: api.proto
 
 package remoteagent
 
@@ -171,5 +171,5 @@ var RemoteAgent_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "pkg/api/remoteagent/api.proto",
+	Metadata: "api.proto",
 }

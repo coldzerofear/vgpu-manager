@@ -61,8 +61,8 @@ S1 用同一套 YAML，把"pod 停在 ContainerCreating"变成"pod 内远程 CUD
 
 1. **GPU 节点**：起 `lupine_driver_server`（进程级 `LD_PRELOAD=libvgpu-control.so` +
    `LUPINE_CHECKPOINT_LIBRARY` 指向同一 .so），用 `vgpu-session-config --session <claim-uid>
-   --device <uuid>,mem=<MiB>,core=<pct>` 预先落盘会话配额（S1 令牌 = claim UID，创建 claim 后
-   `kubectl get resourceclaim -o jsonpath='{.metadata.uid}'` 取值）。
+   --device <uuid>,mem=<MiB>,core=<pct>` 预先落盘会话配额（S1 令牌 = 分区令牌，创建 claim 后
+   `kubectl get resourceclaim -o jsonpath='{.metadata.annotations}'` 里的 `manager.nvidia.com/session-*` 值——v2.2 起令牌是随机值、每分区一个，由 inject 在 NodePrepare 时写入；手工物化需先跑一次 NodePrepare 拿到令牌，或反过来先手工物化再把令牌写进 claim annotation）。
 2. **消费节点**：铺制品目录 `/etc/vgpu-manager/driver/<cuda-ver>/`（与本地路径的控制库同目录，子目录名 = CUDA 版本）（放静态 client 的
    `libcuda.so.1`/`libnvidia-ml.so.1`，或镜像内 /artifacts 的 cp 产物）；以 host 网络运行
    `kubelet-plugin --plugin-mode=inject --feature-gates=RemoteGPUSupport=true --node-name=<node>`

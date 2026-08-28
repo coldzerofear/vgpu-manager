@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11-devel
 // 	protoc        v5.29.3
-// source: pkg/api/remoteagent/api.proto
+// source: api.proto
 
 package remoteagent
 
@@ -29,13 +29,20 @@ type EnsureSessionRequest struct {
 	ClaimUid       string `protobuf:"bytes,2,opt,name=claim_uid,json=claimUid,proto3" json:"claim_uid,omitempty"`
 	ClaimNamespace string `protobuf:"bytes,3,opt,name=claim_namespace,json=claimNamespace,proto3" json:"claim_namespace,omitempty"`
 	ClaimName      string `protobuf:"bytes,4,opt,name=claim_name,json=claimName,proto3" json:"claim_name,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Requests names the claim requests (main request names) that belong to
+	// this session; the agent materializes only their devices. Empty means
+	// every request of the claim (legacy 1:1 form).
+	Requests []string `protobuf:"bytes,5,rep,name=requests,proto3" json:"requests,omitempty"`
+	// Partition is the resolver's partition key (informational, logged and
+	// recorded in the session marker).
+	Partition     string `protobuf:"bytes,6,opt,name=partition,proto3" json:"partition,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EnsureSessionRequest) Reset() {
 	*x = EnsureSessionRequest{}
-	mi := &file_pkg_api_remoteagent_api_proto_msgTypes[0]
+	mi := &file_api_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -47,7 +54,7 @@ func (x *EnsureSessionRequest) String() string {
 func (*EnsureSessionRequest) ProtoMessage() {}
 
 func (x *EnsureSessionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_api_remoteagent_api_proto_msgTypes[0]
+	mi := &file_api_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -60,7 +67,7 @@ func (x *EnsureSessionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureSessionRequest.ProtoReflect.Descriptor instead.
 func (*EnsureSessionRequest) Descriptor() ([]byte, []int) {
-	return file_pkg_api_remoteagent_api_proto_rawDescGZIP(), []int{0}
+	return file_api_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *EnsureSessionRequest) GetSession() string {
@@ -91,6 +98,20 @@ func (x *EnsureSessionRequest) GetClaimName() string {
 	return ""
 }
 
+func (x *EnsureSessionRequest) GetRequests() []string {
+	if x != nil {
+		return x.Requests
+	}
+	return nil
+}
+
+func (x *EnsureSessionRequest) GetPartition() string {
+	if x != nil {
+		return x.Partition
+	}
+	return ""
+}
+
 type EnsureSessionResponse struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	Ready             bool                   `protobuf:"varint,1,opt,name=ready,proto3" json:"ready,omitempty"`
@@ -102,7 +123,7 @@ type EnsureSessionResponse struct {
 
 func (x *EnsureSessionResponse) Reset() {
 	*x = EnsureSessionResponse{}
-	mi := &file_pkg_api_remoteagent_api_proto_msgTypes[1]
+	mi := &file_api_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -114,7 +135,7 @@ func (x *EnsureSessionResponse) String() string {
 func (*EnsureSessionResponse) ProtoMessage() {}
 
 func (x *EnsureSessionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_api_remoteagent_api_proto_msgTypes[1]
+	mi := &file_api_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -127,7 +148,7 @@ func (x *EnsureSessionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnsureSessionResponse.ProtoReflect.Descriptor instead.
 func (*EnsureSessionResponse) Descriptor() ([]byte, []int) {
-	return file_pkg_api_remoteagent_api_proto_rawDescGZIP(), []int{1}
+	return file_api_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *EnsureSessionResponse) GetReady() bool {
@@ -159,7 +180,7 @@ type ServerInfoRequest struct {
 
 func (x *ServerInfoRequest) Reset() {
 	*x = ServerInfoRequest{}
-	mi := &file_pkg_api_remoteagent_api_proto_msgTypes[2]
+	mi := &file_api_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -171,7 +192,7 @@ func (x *ServerInfoRequest) String() string {
 func (*ServerInfoRequest) ProtoMessage() {}
 
 func (x *ServerInfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_api_remoteagent_api_proto_msgTypes[2]
+	mi := &file_api_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -184,7 +205,7 @@ func (x *ServerInfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerInfoRequest.ProtoReflect.Descriptor instead.
 func (*ServerInfoRequest) Descriptor() ([]byte, []int) {
-	return file_pkg_api_remoteagent_api_proto_rawDescGZIP(), []int{2}
+	return file_api_proto_rawDescGZIP(), []int{2}
 }
 
 type ServerInfoResponse struct {
@@ -199,7 +220,7 @@ type ServerInfoResponse struct {
 
 func (x *ServerInfoResponse) Reset() {
 	*x = ServerInfoResponse{}
-	mi := &file_pkg_api_remoteagent_api_proto_msgTypes[3]
+	mi := &file_api_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -211,7 +232,7 @@ func (x *ServerInfoResponse) String() string {
 func (*ServerInfoResponse) ProtoMessage() {}
 
 func (x *ServerInfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_api_remoteagent_api_proto_msgTypes[3]
+	mi := &file_api_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -224,7 +245,7 @@ func (x *ServerInfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerInfoResponse.ProtoReflect.Descriptor instead.
 func (*ServerInfoResponse) Descriptor() ([]byte, []int) {
-	return file_pkg_api_remoteagent_api_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ServerInfoResponse) GetListening() bool {
@@ -255,17 +276,19 @@ func (x *ServerInfoResponse) GetNodeName() string {
 	return ""
 }
 
-var File_pkg_api_remoteagent_api_proto protoreflect.FileDescriptor
+var File_api_proto protoreflect.FileDescriptor
 
-const file_pkg_api_remoteagent_api_proto_rawDesc = "" +
+const file_api_proto_rawDesc = "" +
 	"\n" +
-	"\x1dpkg/api/remoteagent/api.proto\x12\vremoteagent\"\x95\x01\n" +
+	"\tapi.proto\x12\vremoteagent\"\xcf\x01\n" +
 	"\x14EnsureSessionRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12\x1b\n" +
 	"\tclaim_uid\x18\x02 \x01(\tR\bclaimUid\x12'\n" +
 	"\x0fclaim_namespace\x18\x03 \x01(\tR\x0eclaimNamespace\x12\x1d\n" +
 	"\n" +
-	"claim_name\x18\x04 \x01(\tR\tclaimName\"w\n" +
+	"claim_name\x18\x04 \x01(\tR\tclaimName\x12\x1a\n" +
+	"\brequests\x18\x05 \x03(\tR\brequests\x12\x1c\n" +
+	"\tpartition\x18\x06 \x01(\tR\tpartition\"w\n" +
 	"\x15EnsureSessionResponse\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\bR\x05ready\x12.\n" +
 	"\x13cuda_driver_version\x18\x02 \x01(\tR\x11cudaDriverVersion\x12\x18\n" +
@@ -282,25 +305,25 @@ const file_pkg_api_remoteagent_api_proto_rawDesc = "" +
 	"ServerInfo\x12\x1e.remoteagent.ServerInfoRequest\x1a\x1f.remoteagent.ServerInfoResponse\"\x00B\x15Z\x13pkg/api/remoteagentb\x06proto3"
 
 var (
-	file_pkg_api_remoteagent_api_proto_rawDescOnce sync.Once
-	file_pkg_api_remoteagent_api_proto_rawDescData []byte
+	file_api_proto_rawDescOnce sync.Once
+	file_api_proto_rawDescData []byte
 )
 
-func file_pkg_api_remoteagent_api_proto_rawDescGZIP() []byte {
-	file_pkg_api_remoteagent_api_proto_rawDescOnce.Do(func() {
-		file_pkg_api_remoteagent_api_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_pkg_api_remoteagent_api_proto_rawDesc), len(file_pkg_api_remoteagent_api_proto_rawDesc)))
+func file_api_proto_rawDescGZIP() []byte {
+	file_api_proto_rawDescOnce.Do(func() {
+		file_api_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_api_proto_rawDesc), len(file_api_proto_rawDesc)))
 	})
-	return file_pkg_api_remoteagent_api_proto_rawDescData
+	return file_api_proto_rawDescData
 }
 
-var file_pkg_api_remoteagent_api_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
-var file_pkg_api_remoteagent_api_proto_goTypes = []any{
+var file_api_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_api_proto_goTypes = []any{
 	(*EnsureSessionRequest)(nil),  // 0: remoteagent.EnsureSessionRequest
 	(*EnsureSessionResponse)(nil), // 1: remoteagent.EnsureSessionResponse
 	(*ServerInfoRequest)(nil),     // 2: remoteagent.ServerInfoRequest
 	(*ServerInfoResponse)(nil),    // 3: remoteagent.ServerInfoResponse
 }
-var file_pkg_api_remoteagent_api_proto_depIdxs = []int32{
+var file_api_proto_depIdxs = []int32{
 	0, // 0: remoteagent.RemoteAgent.EnsureSession:input_type -> remoteagent.EnsureSessionRequest
 	2, // 1: remoteagent.RemoteAgent.ServerInfo:input_type -> remoteagent.ServerInfoRequest
 	1, // 2: remoteagent.RemoteAgent.EnsureSession:output_type -> remoteagent.EnsureSessionResponse
@@ -312,26 +335,26 @@ var file_pkg_api_remoteagent_api_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for field type_name
 }
 
-func init() { file_pkg_api_remoteagent_api_proto_init() }
-func file_pkg_api_remoteagent_api_proto_init() {
-	if File_pkg_api_remoteagent_api_proto != nil {
+func init() { file_api_proto_init() }
+func file_api_proto_init() {
+	if File_api_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_api_remoteagent_api_proto_rawDesc), len(file_pkg_api_remoteagent_api_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_rawDesc), len(file_api_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_pkg_api_remoteagent_api_proto_goTypes,
-		DependencyIndexes: file_pkg_api_remoteagent_api_proto_depIdxs,
-		MessageInfos:      file_pkg_api_remoteagent_api_proto_msgTypes,
+		GoTypes:           file_api_proto_goTypes,
+		DependencyIndexes: file_api_proto_depIdxs,
+		MessageInfos:      file_api_proto_msgTypes,
 	}.Build()
-	File_pkg_api_remoteagent_api_proto = out.File
-	file_pkg_api_remoteagent_api_proto_goTypes = nil
-	file_pkg_api_remoteagent_api_proto_depIdxs = nil
+	File_api_proto = out.File
+	file_api_proto_goTypes = nil
+	file_api_proto_depIdxs = nil
 }

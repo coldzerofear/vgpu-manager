@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/spec"
 	"k8s.io/klog/v2"
@@ -40,36 +41,43 @@ func newCDIWriter(cdiRoot string) *cdiWriter {
 	return &cdiWriter{cdiRoot: cdiRoot}
 }
 
-// remoteDeviceName is the single CDI device a remote claim maps to. All
-// allocation results of the claim reference it: the injected env/mounts are
-// per-claim (one LUPINE_SERVER list, one session), not per-device.
-func remoteDeviceName(claimUID string) string {
-	return claimUID + "-remote"
-}
+// WriteClaimSpec persists the transient spec holding one CDI device per
+// allocation result (deviceID -> its container edits; results in the same
+// partition carry identical edits) and returns deviceID -> fully qualified
+// CDI device name for the kubelet.
+func (w *cdiWriter) WriteClaimSpec(claimUID string, devices map[string]*cdiapi.ContainerEdits) (map[string]string, error) {
+	ids := make([]string, 0, len(devices))
+	for id := range devices {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
 
-// WriteClaimSpec persists the transient spec and returns the fully qualified
-// CDI device name to report back to the kubelet.
-func (w *cdiWriter) WriteClaimSpec(claimUID string, edits *cdiapi.ContainerEdits) (string, error) {
-	dspec := cdispec.Device{
-		Name:           remoteDeviceName(claimUID),
-		ContainerEdits: *edits.ContainerEdits,
+	names := make(map[string]string, len(devices))
+	dspecs := make([]cdispec.Device, 0, len(devices))
+	for _, id := range ids {
+		name := claimUID + "-" + id
+		dspecs = append(dspecs, cdispec.Device{
+			Name:           name,
+			ContainerEdits: *devices[id].ContainerEdits,
+		})
+		names[id] = cdiparser.QualifiedName(cdiVendor, cdiClaimClass, name)
 	}
 	s, err := spec.New(
 		spec.WithVendor(cdiVendor),
 		spec.WithClass(cdiClaimClass),
-		spec.WithDeviceSpecs([]cdispec.Device{dspec}),
+		spec.WithDeviceSpecs(dspecs),
 	)
 	if err != nil {
-		return "", fmt.Errorf("failed to create CDI spec: %w", err)
+		return nil, fmt.Errorf("failed to create CDI spec: %w", err)
 	}
 
 	specName := cdiapi.GenerateTransientSpecName(cdiVendor, cdiClaimClass, claimUID)
 	path := filepath.Join(w.cdiRoot, specName+".yaml")
-	klog.V(6).Infof("Writing remote CDI spec %q for claim %q", path, claimUID)
+	klog.V(6).Infof("Writing remote CDI spec %q for claim %q (%d device(s))", path, claimUID, len(dspecs))
 	if err := s.Save(path); err != nil {
-		return "", fmt.Errorf("failed to save CDI spec %q: %w", path, err)
+		return nil, fmt.Errorf("failed to save CDI spec %q: %w", path, err)
 	}
-	return cdiparser.QualifiedName(cdiVendor, cdiClaimClass, dspec.Name), nil
+	return names, nil
 }
 
 func (w *cdiWriter) DeleteClaimSpec(claimUID string) error {

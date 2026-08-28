@@ -23,6 +23,13 @@ message EnsureSessionRequest {
   string claim_uid       = 2;
   string claim_namespace = 3;
   string claim_name      = 4;
+  // Requests names the claim requests (main request names) that belong to
+  // this session; the agent materializes only their devices. Empty means
+  // every request of the claim (legacy 1:1 form).
+  repeated string requests = 5;
+  // Partition is the resolver's partition key (informational, logged and
+  // recorded in the session marker).
+  string partition = 6;
 }
 
 message EnsureSessionResponse {

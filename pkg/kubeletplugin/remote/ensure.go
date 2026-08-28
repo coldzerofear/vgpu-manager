@@ -51,20 +51,20 @@ func AgentAddr(endpoint string, agentPort int) string {
 	return net.JoinHostPort(host, strconv.Itoa(agentPort))
 }
 
-// EnsureSessions calls EnsureSession on the agent behind every endpoint and
-// returns the lowest CUDA version they report. Any failure fails the whole
-// prepare (design D2: all servers must confirm before the pod starts).
-func EnsureSessions(ctx context.Context, endpoints []string, agentPort int, token string, claim *resourceapi.ResourceClaim) error {
+// EnsureSessions calls EnsureSession for one partition on the agent behind
+// every endpoint it spans. Any failure fails the whole prepare (design D2:
+// all servers must confirm before the pod starts).
+func EnsureSessions(ctx context.Context, endpoints []string, agentPort int, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) error {
 	for _, endpoint := range endpoints {
 		addr := AgentAddr(endpoint, agentPort)
-		if err := ensureOne(ctx, addr, token, claim); err != nil {
+		if err := ensureOne(ctx, addr, claim, token, partitionKey, requests); err != nil {
 			return fmt.Errorf("EnsureSession on %s (endpoint %s): %w", addr, endpoint, err)
 		}
 	}
 	return nil
 }
 
-func ensureOne(ctx context.Context, addr, token string, claim *resourceapi.ResourceClaim) error {
+func ensureOne(ctx context.Context, addr string, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) error {
 	ctx, cancel := context.WithTimeout(ctx, ensureSessionTimeout)
 	defer cancel()
 
@@ -80,6 +80,8 @@ func ensureOne(ctx context.Context, addr, token string, claim *resourceapi.Resou
 		ClaimUid:       string(claim.UID),
 		ClaimNamespace: claim.Namespace,
 		ClaimName:      claim.Name,
+		Requests:       requests,
+		Partition:      partitionKey,
 	})
 	if err != nil {
 		return err
@@ -88,7 +90,7 @@ func ensureOne(ctx context.Context, addr, token string, claim *resourceapi.Resou
 		return fmt.Errorf("agent reports session not ready: %s", resp.Message)
 	}
 	if resp.Message != "" {
-		klog.Warningf("EnsureSession %s for claim %s: %s", addr, klog.KObj(claim), resp.Message)
+		klog.Warningf("EnsureSession %s for claim %s partition %s: %s", addr, klog.KObj(claim), partitionKey, resp.Message)
 	}
 	return nil
 }

@@ -23,12 +23,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Masterminds/semver"
+	"encoding/json"
+
+	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/health"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -36,6 +39,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
@@ -64,13 +68,13 @@ type InjectConfig struct {
 	AgentPort int
 }
 
-// InjectDriver is the `--mode=inject` DRA driver for consumer nodes: no GPU,
-// no NVML — it only translates allocations of accessMode=remote devices into
-// env/mount CDI injections (design §2.3). S1 spike scope: the session token is derived from
-// the claim UID and EnsureSession is not called; both are replaced in S2
-// (design D8/D2/D20).
+// InjectDriver is the `--plugin-mode=inject` DRA driver: no GPU, no NVML — it
+// translates allocations of accessMode=remote devices into per-partition
+// sessions (D8), the EnsureSession barrier (D2) and env/mount CDI injections
+// (design §2.3). On GPU nodes it runs next to the publish-only server plugin.
 type InjectDriver struct {
 	config       InjectConfig
+	clients      pkgflags.ClientSets
 	helper       *kubeletplugin.Helper
 	cdi          *cdiWriter
 	wg           sync.WaitGroup
@@ -98,8 +102,9 @@ func (d *InjectDriver) GetPoolResourceSlices(poolName string) ([]*resourceapi.Re
 
 func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.ClientSets) (*InjectDriver, error) {
 	d := &InjectDriver{
-		config: config,
-		cdi:    newCDIWriter(config.CdiRoot),
+		config:  config,
+		clients: clients,
+		cdi:     newCDIWriter(config.CdiRoot),
 	}
 
 	helper, err := kubeletplugin.Start(ctx, d,
@@ -192,60 +197,78 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 	if claim.Status.Allocation == nil {
 		return fail(fmt.Errorf("claim %s has no allocation", klog.KObj(claim)))
 	}
-	var allocated []resourceapi.DeviceRequestAllocationResult
-	for _, result := range claim.Status.Allocation.Devices.Results {
-		if result.Driver == util.DRADriverName {
-			allocated = append(allocated, result)
-		}
+
+	// 1. Resolve every allocation result of ours to a published remote
+	// device (accessMode=remote, endpoint, CUDA ceiling).
+	devices, err := d.resolveRemoteDevices(claim)
+	if err != nil {
+		return fail(err)
 	}
-	if len(allocated) == 0 {
+	if len(devices) == 0 {
 		return fail(fmt.Errorf("claim %s has no devices allocated by %s", klog.KObj(claim), util.DRADriverName))
 	}
 
-	endpoints, minCUDA, err := d.resolveRemoteAllocation(allocated)
+	// 2. Partition the claim the same way the local path does: connected
+	// components of the container<->request graph over the reserved pods.
+	// Each partition is one session (design D8 v2.2).
+	allocatedRequests := sets.New[string]()
+	for _, rd := range devices {
+		allocatedRequests.Insert(rd.mainRequest)
+	}
+	info, err := claimresolve.ResolveClaimVGPUPartitionsFromAllocatedRequests(ctx, &apiReader{clients: d.clients}, claim, allocatedRequests)
+	if err != nil {
+		return fail(fmt.Errorf("resolve partitions of claim %s: %w", klog.KObj(claim), err))
+	}
+	var requestToKey map[string]string
+	if info != nil {
+		requestToKey = info.RequestToPartition
+	}
+	partitions := buildPartitions(devices, requestToKey)
+
+	// 3. Session tokens: reuse the annotation-recorded token for a partition
+	// (retries / plugin restarts), mint the rest and persist them before any
+	// server learns about them.
+	if err := d.assignTokens(ctx, claim, partitions); err != nil {
+		return fail(err)
+	}
+
+	// 4. Client artifact: one mount for the claim, chosen against the CUDA
+	// floor across every server it touches (§4.3).
+	artifact, err := selectArtifact(d.config.ArtifactsDir, d.config.HostArtifactsDir, cudaFloor(devices))
 	if err != nil {
 		return fail(err)
 	}
 
-	// Multiple servers with differing CUDA versions: the client artifact must
-	// satisfy client <= server for every server, hence the minimum (§4.3).
-	artifact, err := selectArtifact(d.config.ArtifactsDir, d.config.HostArtifactsDir, minCUDA)
-	if err != nil {
-		return fail(err)
+	// 5. D2 barrier per partition: every server it spans must have the
+	// session quota on disk before any container of the pod starts. A
+	// failure makes the kubelet retry NodePrepare with backoff.
+	for _, p := range partitions {
+		if err := EnsureSessions(ctx, p.endpoints, d.config.AgentPort, claim, p.token, p.key, p.requests); err != nil {
+			return fail(err)
+		}
+		klog.V(2).Infof("Remote claim %s partition %s: requests=%v endpoints=%v artifact=%s, session ensured",
+			klog.KObj(claim), p.key, p.requests, p.endpoints, artifact.Name)
 	}
 
-	// K1: the session token is the claim UID (also lets a spike materialize
-	// the session by hand with vgpu-session-config --session <uid>).
-	// TODO(D8): mint a random token and record it in
-	// claim.status.devices[].data so it is unpredictable.
-	token := string(claim.UID)
-
-	// D2 barrier: every server must have the session quota on disk before
-	// any container of the pod starts. A failure here makes the kubelet
-	// retry NodePrepare with backoff.
-	if err := EnsureSessions(ctx, endpoints, d.config.AgentPort, token, claim); err != nil {
-		return fail(err)
-	}
-	klog.V(2).Infof("Remote claim %s: endpoints=%v artifact=%s (server CUDA floor %s), sessions ensured",
-		klog.KObj(claim), endpoints, artifact.Name, minCUDA)
-
-	edits := &cdiapi.ContainerEdits{
-		ContainerEdits: &cdispec.ContainerEdits{
+	// 6. CDI: one device per allocation result, carrying its partition's
+	// env. The kubelet hands a container only the devices of the requests
+	// it references; all of them belong to one partition, so the env never
+	// collides within a container.
+	edits := map[string]*cdiapi.ContainerEdits{}
+	idOf := map[int]string{} // index into devices -> CDI device id
+	ordinal := 0
+	for _, p := range partitions {
+		partitionEdits := &cdispec.ContainerEdits{
 			Env: []string{
-				fmt.Sprintf("%s=%s", EnvLupineServer, strings.Join(endpoints, ",")),
-				fmt.Sprintf("%s=%s", EnvLupineSession, token),
+				fmt.Sprintf("%s=%s", EnvLupineServer, strings.Join(p.endpoints, ",")),
+				fmt.Sprintf("%s=%s", EnvLupineSession, p.token),
 				// Mandatory: prevents client-local routing (§4.3.2 lesson).
 				fmt.Sprintf("%s=1", EnvLupineDisableLocal),
 				// The artifact dir contains only libcuda.so.1/libnvidia-ml.so.1
 				// (self-contained static client, D11), so shadowing is limited
-				// to those two names.
-				//
-				// OCI/CDI env values are literal: the runtime performs no
-				// shell expansion, so "<dir>:$LD_LIBRARY_PATH" would hand the
-				// loader a directory literally named "$LD_LIBRARY_PATH". An
-				// image-defined LD_LIBRARY_PATH is therefore replaced, not
-				// extended (known K1 limitation; an ld.so.conf.d drop-in or an
-				// entrypoint shim would be needed to append).
+				// to those two names. OCI/CDI env values are literal (no
+				// shell expansion), so an image-defined LD_LIBRARY_PATH is
+				// replaced, not extended (known K1 limitation).
 				fmt.Sprintf("%s=%s", util.LdLibraryPathEnv, artifact.LibDir),
 			},
 			Mounts: []*cdispec.Mount{{
@@ -253,64 +276,128 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 				ContainerPath: artifact.ContainerDir,
 				Options:       []string{"ro", "nosuid", "nodev", "bind"},
 			}},
-		},
+		}
+		for _, rd := range p.results {
+			id := cdiDeviceID(rd, ordinal)
+			ordinal++
+			edits[id] = &cdiapi.ContainerEdits{ContainerEdits: partitionEdits}
+			idOf[rd.index] = id
+		}
 	}
-
-	qualifiedName, err := d.cdi.WriteClaimSpec(string(claim.UID), edits)
+	names, err := d.cdi.WriteClaimSpec(string(claim.UID), edits)
 	if err != nil {
 		return fail(fmt.Errorf("failed to write CDI spec for claim %s: %w", klog.KObj(claim), err))
 	}
 
-	var devices []kubeletplugin.Device
-	for _, result := range allocated {
-		devices = append(devices, kubeletplugin.Device{
-			Requests:     []string{result.Request},
-			PoolName:     result.Pool,
-			DeviceName:   result.Device,
-			CDIDeviceIDs: []string{qualifiedName},
+	out := make([]kubeletplugin.Device, 0, len(devices))
+	for _, rd := range devices {
+		out = append(out, kubeletplugin.Device{
+			Requests:     []string{rd.result.Request},
+			PoolName:     rd.result.Pool,
+			DeviceName:   rd.result.Device,
+			CDIDeviceIDs: []string{names[idOf[rd.index]]},
 		})
 	}
-	return kubeletplugin.PrepareResult{Devices: devices}
+	return kubeletplugin.PrepareResult{Devices: out}
 }
 
-// resolveRemoteAllocation maps every allocation result to a published remote
-// device and derives the LUPINE_SERVER endpoint list plus the CUDA-version
-// floor across servers. The order of `allocated` comes from the recorded
-// allocation and is stable across plugin restarts — the endpoint order
-// (= client device ordinals, design §6.8) derives from it deterministically,
-// deduplicated to first appearance.
-func (d *InjectDriver) resolveRemoteAllocation(allocated []resourceapi.DeviceRequestAllocationResult) ([]string, *semver.Version, error) {
-	endpointSet := sets.NewString()
-	var minCUDA *semver.Version
-	for _, result := range allocated {
+// resolveRemoteDevices maps each of our allocation results to its published
+// device. A result that resolves to a non-remote device (accessMode=local)
+// fails the claim: a claim mixing local-only and remote devices cannot be
+// served by one injection path.
+func (d *InjectDriver) resolveRemoteDevices(claim *resourceapi.ResourceClaim) ([]resultDevice, error) {
+	var out []resultDevice
+	for i, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != util.DRADriverName {
+			continue
+		}
 		slices, err := d.GetPoolResourceSlices(result.Pool)
 		if err != nil {
-			return nil, nil, fmt.Errorf("allocated device pool %s not found in any published ResourceSlice of %s",
+			return nil, fmt.Errorf("allocated device pool %s not found in any published ResourceSlice of %s",
 				result.Pool, util.DRADriverName)
 		}
 		dev, ok := slicesDeviceMap(slices)[result.Device]
 		if !ok {
-			return nil, nil, fmt.Errorf("allocated device %s/%s not found in any published ResourceSlice of %s",
+			return nil, fmt.Errorf("allocated device %s/%s not found in any published ResourceSlice of %s",
 				result.Pool, result.Device, util.DRADriverName)
 		}
 		info, isRemote, err := ParseDevice(dev)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if !isRemote {
-			// The inject-mode plugin exists only on nodes without GPUs; a
-			// non-remote allocation reaching it means the claim mixed local
-			// and remote devices or the pool publishing is wrong. Fail
-			// loudly rather than prepare half a claim.
-			return nil, nil, fmt.Errorf("device %s/%s is not %s=%s; inject mode cannot prepare it",
+			return nil, fmt.Errorf("device %s/%s is not %s=%s; inject mode cannot prepare it",
 				result.Pool, result.Device, AttrAccessMode, AccessModeRemote)
 		}
-		endpointSet.Insert(info.Endpoint)
-		if minCUDA == nil || info.CUDAVersion.Compare(minCUDA) < 0 {
-			minCUDA = info.CUDAVersion
+		mainRequest := MainRequestName(claim, result.Request)
+		if mainRequest == "" {
+			return nil, fmt.Errorf("allocation result request %q is not a request of claim %s", result.Request, klog.KObj(claim))
 		}
+		out = append(out, resultDevice{index: i, result: result, info: info, mainRequest: mainRequest})
 	}
-	return endpointSet.List(), minCUDA, nil
+	return out, nil
+}
+
+// assignTokens fills partition tokens from the claim annotations, minting and
+// persisting new ones in a single merge patch.
+func (d *InjectDriver) assignTokens(ctx context.Context, claim *resourceapi.ResourceClaim, partitions []*partition) error {
+	fresh := map[string]string{}
+	for _, p := range partitions {
+		key := SessionAnnotationKey(p.key)
+		if tok := claim.Annotations[key]; tok != "" {
+			p.token = tok
+			continue
+		}
+		tok, err := NewSessionToken()
+		if err != nil {
+			return err
+		}
+		p.token = tok
+		fresh[key] = tok
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": fresh}})
+	if err != nil {
+		return err
+	}
+	if _, err := d.clients.Resource.ResourceClaims(claim.Namespace).Patch(ctx, claim.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("record session tokens on claim %s: %w", klog.KObj(claim), err)
+	}
+	if claim.Annotations == nil {
+		claim.Annotations = map[string]string{}
+	}
+	for k, v := range fresh {
+		claim.Annotations[k] = v
+	}
+	return nil
+}
+
+// apiReader satisfies claimresolve.Reader with direct API reads, like the
+// local path's kubeClaimResolveReader: NodePrepare is rare and the reserved
+// pods may live on other nodes (shared claims), outside any node-scoped
+// informer.
+type apiReader struct {
+	clients pkgflags.ClientSets
+}
+
+func (r *apiReader) GetPod(ctx context.Context, key client.ObjectKey, obj *corev1.Pod) error {
+	pod, err := r.clients.Core.CoreV1().Pods(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	pod.DeepCopyInto(obj)
+	return nil
+}
+
+func (r *apiReader) GetResourceClaim(ctx context.Context, key client.ObjectKey, obj *resourceapi.ResourceClaim) error {
+	claim, err := r.clients.Resource.ResourceClaims(key.Namespace).Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	claim.DeepCopyInto(obj)
+	return nil
 }
 
 func slicesDeviceMap(slices []*resourceapi.ResourceSlice) map[string]*resourceapi.Device {

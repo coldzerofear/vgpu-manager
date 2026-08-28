@@ -149,7 +149,7 @@ func TestMaterialize(t *testing.T) {
 		result(testNode, "vgpu-2", "50", "4Gi"),
 		result(testNode, "vgpu-0", "", ""), // whole device: no limits
 	)
-	if err := store.Materialize("uid-1", claim, nd, testNode, testDriver); err != nil {
+	if err := store.Materialize("uid-1", claim, nd, testNode, testDriver, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -189,21 +189,21 @@ func TestMaterialize(t *testing.T) {
 		t.Fatal("slot 1 must be inactive")
 	}
 	// Idempotent for the same claim; refused for a different claim.
-	if err := store.Materialize("uid-1", claim, nd, testNode, testDriver); err != nil {
+	if err := store.Materialize("uid-1", claim, nd, testNode, testDriver, nil); err != nil {
 		t.Fatalf("second materialize must be a no-op: %v", err)
 	}
-	if err := store.Materialize("uid-1", testClaim("uid-2", result(testNode, "vgpu-0", "", "")), nd, testNode, testDriver); err == nil {
+	if err := store.Materialize("uid-1", testClaim("uid-2", result(testNode, "vgpu-0", "", "")), nd, testNode, testDriver, nil); err == nil {
 		t.Fatal("token reuse by another claim must be refused")
 	}
 
 	// Errors: unknown device, nothing on this pool, bad token.
-	if err := store.Materialize("t2", testClaim("u", result(testNode, "vgpu-9", "", "")), nd, testNode, testDriver); err == nil {
+	if err := store.Materialize("t2", testClaim("u", result(testNode, "vgpu-9", "", "")), nd, testNode, testDriver, nil); err == nil {
 		t.Fatal("unknown device must fail")
 	}
-	if err := store.Materialize("t3", testClaim("u", result("elsewhere", "vgpu-0", "", "")), nd, testNode, testDriver); err == nil {
+	if err := store.Materialize("t3", testClaim("u", result("elsewhere", "vgpu-0", "", "")), nd, testNode, testDriver, nil); err == nil {
 		t.Fatal("claim with nothing on this pool must fail")
 	}
-	if err := store.Materialize("../t", claim, nd, testNode, testDriver); err == nil {
+	if err := store.Materialize("../t", claim, nd, testNode, testDriver, nil); err == nil {
 		t.Fatal("bad token must fail")
 	}
 
@@ -232,4 +232,50 @@ func trimZero(b []byte) []byte {
 		}
 	}
 	return b
+}
+
+func TestMaterializePartitionFilterAndMerge(t *testing.T) {
+	base := t.TempDir()
+	store := NewSessionStore(base, false)
+	if err := store.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	nd := NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()})
+
+	// Two requests: "c0" -> vgpu-2 (50 cores/4Gi), "c1" -> vgpu-0 and, via a
+	// duplicate share, vgpu-0 again with a bigger slice.
+	claim := testClaim("uid-p",
+		result(testNode, "vgpu-2", "50", "4Gi"),
+		result(testNode, "vgpu-0", "20", "2Gi"),
+		result(testNode, "vgpu-0", "60", "8Gi"),
+	)
+	claim.Spec.Devices.Requests = []resourceapi.DeviceRequest{
+		{Name: "c0", Exactly: &resourceapi.ExactDeviceRequest{}},
+		{Name: "c1", Exactly: &resourceapi.ExactDeviceRequest{}},
+	}
+	claim.Status.Allocation.Devices.Results[0].Request = "c0"
+	claim.Status.Allocation.Devices.Results[1].Request = "c1"
+	claim.Status.Allocation.Devices.Results[2].Request = "c1"
+
+	if err := store.Materialize("tok-c1", claim, nd, testNode, testDriver, []string{"c1"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := vgpuconfig.NewMmapResourceData(filepath.Join(base, "tok-c1", "config", "vgpu.config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = data.Close() }()
+	cfg := data.GetResource()
+	if cfg.Devices[2].Activate != 0 {
+		t.Fatal("request c0's device must not be in partition c1's session")
+	}
+	d0 := cfg.Devices[0]
+	if d0.Activate != 1 || d0.HardCore != 60 || d0.TotalMemory != 8<<30 {
+		t.Fatalf("duplicate shares must merge to the larger one: %+v", d0)
+	}
+
+	// A partition whose requests have nothing on this node is an error.
+	if err := store.Materialize("tok-none", claim, nd, testNode, testDriver, []string{"nope"}); err == nil {
+		t.Fatal("expected error for a partition with no devices on this node")
+	}
 }
