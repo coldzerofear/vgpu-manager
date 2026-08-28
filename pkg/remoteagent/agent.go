@@ -60,8 +60,8 @@ type Config struct {
 	ReadyFile string
 	// ServerAddr is the lupine-server address to probe (host:port).
 	ServerAddr string
-	// ListenAddr is the gRPC listen address.
-	ListenAddr string
+	// ListenPort is the gRPC listen port (all interfaces).
+	ListenPort int
 	// Endpoint is the endpoint value reported by ServerInfo (informational).
 	Endpoint string
 	// SMWatcher marks sessions as using the node-wide external SM watcher.
@@ -83,7 +83,6 @@ type Agent struct {
 	claimInformer cache.SharedIndexInformer
 	claimCache    cache.MutationCache
 
-	sync.Map
 	nodeDevices atomic.Pointer[NodeDevices]
 	serverUp    atomic.Bool
 }
@@ -195,9 +194,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	})
 
 	// 4. gRPC.
-	lis, err := net.Listen("tcp", a.cfg.ListenAddr)
+	listenAddr := fmt.Sprintf(":%d", a.cfg.ListenPort)
+	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", a.cfg.ListenAddr, err)
+		return fmt.Errorf("listen %s: %w", listenAddr, err)
 	}
 
 	srv := grpc.NewServer()
@@ -209,7 +209,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	})
 
 	a.wg.Go(func() {
-		klog.Infof("remote-agent serving on %s (node %s, session base %s)", a.cfg.ListenAddr, a.cfg.NodeName, a.cfg.SessionBase)
+		klog.Infof("remote-agent serving on %s (node %s, session base %s)", listenAddr, a.cfg.NodeName, a.cfg.SessionBase)
 		if err = srv.Serve(lis); err != nil && (errors.Is(err, grpc.ErrServerStopped) || errors.Is(err, net.ErrClosed)) {
 			err = nil
 		}

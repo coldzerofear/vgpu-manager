@@ -249,10 +249,18 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 		capacityRequest[kubeletplugin.MemoryResourceName] = *resource.NewQuantity(quantity.Value()*units.MiB, resource.BinarySI)
 	}
 
+	// Access mode (remote GPU): the request pins accessMode so that pods
+	// without the annotation keep getting local-only devices even when a
+	// node publishes accessMode=remote. An invalid value falls back to
+	// local here; the validating webhook rejects it before this runs.
+	accessMode, err := util.PodVGPUAccessMode(pod)
+	if err != nil {
+		accessMode = util.AccessModeLocal
+	}
 	deviceSelectors := []resourceapi.DeviceSelector{{
 		CEL: &resourceapi.CELDeviceSelector{
-			Expression: fmt.Sprintf(`device.attributes["%s"].type == "%s"`,
-				util.DRADriverName, kubeletplugin.VGpuDeviceType),
+			Expression: fmt.Sprintf(`device.attributes["%s"].type == "%s" && device.attributes["%s"].%s == "%s"`,
+				util.DRADriverName, kubeletplugin.VGpuDeviceType, util.DRADriverName, util.AccessModeAttribute, accessMode),
 		},
 	}}
 	if uuids, _ := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation); len(uuids) > 0 {

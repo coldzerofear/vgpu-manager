@@ -49,7 +49,7 @@ func main() {
 			&cli.StringFlag{Name: "session-base", Usage: "Session directory root shared with lupine-server (VGPU_CONFIG_SESSION_BASE).", Value: defaultSessionBase, Destination: &cfg.SessionBase, EnvVars: []string{"VGPU_CONFIG_SESSION_BASE"}},
 			&cli.StringFlag{Name: "ready-file", Usage: "File written after preflight; the server container waits for it. Defaults to <session-base>/.agent-ready.", Destination: &cfg.ReadyFile, EnvVars: []string{"READY_FILE"}},
 			&cli.StringFlag{Name: "lupine-server-addr", Usage: "lupine-server address to probe.", Value: fmt.Sprintf("127.0.0.1:%d", remote.DefaultServerPort), Destination: &cfg.ServerAddr, EnvVars: []string{"LUPINE_SERVER_ADDR"}},
-			&cli.StringFlag{Name: "listen-server-port", Usage: "gRPC listen address.", Value: fmt.Sprintf(":%d", remote.DefaultAgentPort), Destination: &cfg.ListenAddr, EnvVars: []string{"LISTEN_SERVER_PORT"}},
+			&cli.IntFlag{Name: "listen-server-port", Usage: "gRPC listen port.", Value: remote.DefaultAgentPort, Destination: &cfg.ListenPort, EnvVars: []string{"LISTEN_SERVER_PORT"}},
 			&cli.StringFlag{Name: "endpoint", Usage: "Endpoint value reported by ServerInfo (informational).", Destination: &cfg.Endpoint, EnvVars: []string{"REMOTE_ENDPOINT"}},
 			&cli.BoolFlag{Name: "sm-watcher", Usage: "Mark sessions as using the node-wide external SM watcher.", Destination: &cfg.SMWatcher, EnvVars: []string{"SM_WATCHER"}},
 			&cli.DurationFlag{Name: "gc-interval", Usage: "Orphaned session sweep interval.", Value: time.Minute, Destination: &cfg.GCInterval, EnvVars: []string{"GC_INTERVAL"}},

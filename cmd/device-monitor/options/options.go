@@ -53,6 +53,7 @@ type Options struct {
 	StuckGracePeriod    time.Duration
 	ContainerDriverRoot string
 	EnableDRAMonitor    bool
+	RemoteSessionBase   string
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -70,6 +71,8 @@ const (
 	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
 	// VirtualMemoryTracking feature gate will track the allocation of virtual memory on the device and provide more accurate virtual memory monitoring statistics.
 	VirtualMemoryTracking featuregate.Feature = util.VirtualMemoryTracking
+	// RemoteGPUSupport feature gate makes the DRA collector account for remote consumers of this node's devices (sessions instead of cgroups).
+	RemoteGPUSupport featuregate.Feature = util.RemoteGPUSupport
 )
 
 var (
@@ -77,6 +80,7 @@ var (
 	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 		SharedSMUtilizationWatcher: {Default: false, PreRelease: featuregate.Alpha},
 		VirtualMemoryTracking:      {Default: false, PreRelease: featuregate.Alpha},
+		RemoteGPUSupport:           {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -131,6 +135,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.DurationVar(&o.StuckGracePeriod, "stuck-grace-period", o.StuckGracePeriod, "Scheduling stuck grace period, filtering the maximum delay time to the binding stage.")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
 	pflag.BoolVar(&o.EnableDRAMonitor, "enable-dra-monitor", false, "Enable monitoring metrics for DRA driver paths.")
+	pflag.StringVar(&o.RemoteSessionBase, "remote-session-base", "/etc/vgpu-manager/remote-sessions", "Remote GPU session directory root shared with remote-agent/lupine-server (used when the RemoteGPUSupport feature gate is enabled).")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

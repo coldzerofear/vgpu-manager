@@ -135,7 +135,7 @@ func buildPartitions(devices []resultDevice, requestToKey map[string]string) []*
 	for _, rd := range devices {
 		key := requestToKey[rd.mainRequest]
 		if key == "" {
-			key = sanitizeToken(rd.mainRequest)
+			key = PartitionFallbackKey(rd.mainRequest)
 		}
 		p := byKey[key]
 		if p == nil {
@@ -196,4 +196,12 @@ func sanitizeToken(value string) string {
 		}
 	}
 	return b.String()
+}
+
+// PartitionFallbackKey is the partition key used for a request when the
+// resolver could not place it (no reserved pods yet, or a request no
+// container references): one partition per request, mirroring the local
+// path. Shared with the monitor so both sides derive the same token key.
+func PartitionFallbackKey(mainRequest string) string {
+	return sanitizeToken(mainRequest)
 }

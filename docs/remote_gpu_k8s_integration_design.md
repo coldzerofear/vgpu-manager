@@ -980,3 +980,21 @@ DevicePluginClientMode / NRISupport 互斥。
    **把 device-monitor 放进 GPU 节点 pod**（与 agent/server 共享 emptyDir，hostPID），加 `--remote-session-base` 与
    `RemoteGPUSupport` gate；或 agent 增 `ListSessions` gRPC 暴露 token/claim/pids（二选一，前者改动小）。
 5. `SharedSMUtilizationWatcher` 与远程互斥（11.2），monitor 侧该 gate 在远程节点不开。
+
+### 11.5 实施状态（2026-08-27）
+
+- **webhook（已实现）**：pod annotation `<domain>/vgpu-access-mode: local|remote`（缺省 local，非法值在 mutate 阶段拒绝）；
+  `BuildDeviceRequest` 的 request selector 变为 `type == "vgpu" && accessMode == "<mode>"`（DeviceClass 不变、不新增）；
+  remote pod 跳过 `runtimeClassName` 与 `device-topology-mode` 的默认注入。volcano 任务模板经同一 helper 生效。
+- **monitor（已实现）**：slice informer/collector 改按 `spec.pool.name == 节点名` 认领（本地/远程通用）；
+  DRA 与 device-plugin 两条路径的 `vgpu_device_*`（8 个）与 `container_vgpu_device_*`（6 个）指标**统一新增
+  `access_mode` 标签**（device-plugin 路径恒为 `local`，DRA 路径取设备属性，缺省 `local`）；
+  `RemoteGPUSupport` gate（monitor 独立注册表）+ `--remote-session-base` 开启后：claim 先行发现其他节点上的远程消费者
+  pod（API GET + 60s 缓存，本节点 pod 仍走 lister），与本地 pod 走**同一套**记账闭包；远程容器的 PID 来源改为
+  `<session-base>/<token>/pids.config`（分区键→claim annotation→令牌），`container_*` 指标的 `node` 标签仍是采集节点，
+  pod 归属由既有的 `pod_namespace/pod_name/container_name` 标签表达，不新增指标。monitor 与 remote-agent、lupine-server
+  同 pod 部署（共享会话 emptyDir、hostPID），由新 chart 承载。
+- **agent**：删除未用的 `sync.Map`；`--listen-server-port` 改为纯端口号。
+- **pool 语义答复**：pool = 单一发布者管理的一致性单元（generation/resourceSliceCount 判完整性，设备名 pool 内唯一）；
+  多节点共用一个 pool 名会让各节点 controller 互删/互覆盖、设备重名、调度器视 pool 不完整——除非改为单一中央发布者
+  （网络附加设备形态，需 `perDeviceNodeSelection`），本项目无此收益，**保持 pool = 节点名**。

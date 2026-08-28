@@ -119,6 +119,8 @@ var (
 	PodVGPUPreAllocAnnotation = globalDomainName + "/pre-allocated"
 	// PodVGPURealAllocAnnotation Real device information allocated by device plugins
 	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
+	// VGPUAccessModeAnnotation selects local (default) or remote vGPU devices for the pod.
+	VGPUAccessModeAnnotation = globalDomainName + "/vgpu-access-mode"
 )
 
 func initConstants() {
@@ -148,6 +150,7 @@ func initConstants() {
 	PodMetricsNodeLabel = globalDomainName + "/metrics-node"
 	PodVGPUPreAllocAnnotation = globalDomainName + "/pre-allocated"
 	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
+	VGPUAccessModeAnnotation = globalDomainName + "/vgpu-access-mode"
 }
 
 func GetGlobalDomain() string {
@@ -439,4 +442,17 @@ const (
 	// the library aggregates by the session pids.config (library/include/hook.h,
 	// SESSION_COMPATIBILITY_MODE). Requires the server pod to run with hostPID.
 	SessionMode CompatibilityMode = 300
+)
+
+// vGPU access mode (remote GPU, design v2.x). Published on every device by
+// the DRA driver as the `accessMode` attribute; requested per pod through
+// VGPUAccessModeAnnotation (default local).
+const (
+	AccessModeLocal  = "local"
+	AccessModeRemote = "remote"
+	// RemoteGPUSupport is the feature gate name shared by the kubelet-plugin
+	// and the device-monitor registries.
+	RemoteGPUSupport = "RemoteGPUSupport"
+	// AccessModeAttribute is the DRA device attribute name.
+	AccessModeAttribute = "accessMode"
 )

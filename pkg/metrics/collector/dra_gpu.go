@@ -42,7 +42,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	resourcev1 "k8s.io/client-go/listers/resource/v1"
 	"k8s.io/component-base/featuregate"
@@ -72,12 +74,16 @@ type draGPUCollector struct {
 	claimLister resourcev1.ResourceClaimLister
 	utilAdapter watcher.DeviceUtilInterface
 	featureGate featuregate.FeatureGate
+	// Remote GPU (RemoteGPUSupport gate): session base shared with remote-agent
+	// and an API-backed pod cache for consumers on other nodes.
+	sessionBase string
+	podCache    *podCache
 }
 
 func NewDRAGPUCollector(
 	config *node.NodeConfigSpec, nodeLister listerv1.NodeLister, podLister client.PodLister,
 	sliceLister resourcev1.ResourceSliceLister, claimLister resourcev1.ResourceClaimLister,
-	featureGate featuregate.FeatureGate,
+	featureGate featuregate.FeatureGate, kubeClient kubernetes.Interface, sessionBase string,
 ) (prometheus.Collector, error) {
 	driverRoot := config.GetDriverRoot()
 	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
@@ -95,6 +101,8 @@ func NewDRAGPUCollector(
 		sliceLister: sliceLister,
 		claimLister: claimLister,
 		featureGate: featureGate,
+		sessionBase: sessionBase,
+		podCache:    newPodCache(kubeClient),
 		utilAdapter: adapter,
 	}, nil
 }
@@ -152,9 +160,10 @@ func (c draGPUCollector) listManagerResourceSlices() ([]*v1.ResourceSlice, error
 		if slice.Spec.Driver != util.DRADriverName {
 			continue
 		}
-		// A node-local slice carries the node it belongs to. Slices without one
-		// are not node-local and must not be attributed to us.
-		if slice.Spec.NodeName == nil || *slice.Spec.NodeName != c.nodeName {
+		// Ownership is the pool name (== node name for this driver). A
+		// RemoteGPUSupport node publishes with a nodeSelector and no
+		// spec.nodeName, so nodeName cannot be the key.
+		if slice.Spec.Pool.Name != c.nodeName {
 			continue
 		}
 		nodeSlices = append(nodeSlices, slice)
@@ -290,6 +299,9 @@ type DRADeviceInfo struct {
 	cores       int64
 	memory      int64
 	healthy     bool
+	// accessMode is the device's published accessMode attribute (local when
+	// absent, i.e. a driver predating remote GPU support).
+	accessMode string
 }
 
 // memoryOversubscription returns the device's memory oversubscription factor,
@@ -369,6 +381,9 @@ type draContainerAlloc struct {
 	kind        util.ContainerKind
 	restartable bool
 	results     []draAllocResult
+	// claims lists, per pod claim the container references, the claim and
+	// the main requests it resolved to (remote session lookup).
+	claims []draAllocClaim
 }
 
 // draFootprint mirrors device.PodDeviceFootprint for the DRA path.
@@ -469,6 +484,7 @@ func reduceDRAPodFootprint(containers []draContainerAlloc) map[string]draFootpri
 type claimAllocation struct {
 	resultsByMainRequest map[string][]v1.DeviceRequestAllocationResult
 	allocatedRequests    sets.Set[string]
+	claim                *v1.ResourceClaim
 }
 
 // resolvePodAllocations maps every container of the pod to the allocation
@@ -520,6 +536,7 @@ func (c draGPUCollector) resolvePodAllocations(
 		// Maps "request" and "request/subrequest" alike onto the main request.
 		index := claimresolve.BuildAllocatedResultIndex(context.Background(), claim, nil, nil)
 		allocation := &claimAllocation{
+			claim:                claim,
 			resultsByMainRequest: map[string][]v1.DeviceRequestAllocationResult{},
 			allocatedRequests:    sets.New[string](),
 		}
@@ -584,12 +601,15 @@ func (c draGPUCollector) resolvePodAllocations(
 	for _, ref := range containerRefs {
 		seen := sets.New[string]()
 		var results []draAllocResult
+		var claims []draAllocClaim
 		for _, claimRef := range ref.Claims {
 			allocation := loadClaim(claimRef.Name)
 			if allocation == nil {
 				continue
 			}
-			for _, mainRequest := range claimresolve.ResolveActualAllocatedRequestsForClaimRef(claimRef, allocation.allocatedRequests) {
+			mainRequests := claimresolve.ResolveActualAllocatedRequestsForClaimRef(claimRef, allocation.allocatedRequests)
+			claims = append(claims, draAllocClaim{claim: allocation.claim, requests: mainRequests})
+			for _, mainRequest := range mainRequests {
 				for _, result := range allocation.resultsByMainRequest[mainRequest] {
 					results = appendResult(results, seen, result)
 				}
@@ -602,6 +622,7 @@ func (c draGPUCollector) resolvePodAllocations(
 			kind:        ref.Kind,
 			restartable: ref.Restartable,
 			results:     results,
+			claims:      claims,
 		})
 	}
 
@@ -691,6 +712,10 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				coreRatio:   util.HundredCore,
 				memoryRatio: util.HundredCore,
 				cores:       util.HundredCore,
+				accessMode:  util.AccessModeLocal,
+			}
+			if attribute, ok = dev.Attributes[util.AccessModeAttribute]; ok && attribute.StringValue != nil && *attribute.StringValue != "" {
+				devInfo.accessMode = *attribute.StringValue
 			}
 			if attribute, ok = dev.Attributes["uuid"]; ok && attribute.StringValue != nil {
 				devInfo.uuid = DeviceUUIDFromAttribute(*attribute.StringValue)
@@ -794,12 +819,17 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	peakSharedContainersMap := make(map[string]int)
 	currentSharedContainersMap := make(map[string]int)
 
-	util.PodsOnNodeCallback(pods, node, func(pod *corev1.Pod) {
+	// Consumers of this node's remote devices scheduled elsewhere (empty
+	// unless the RemoteGPUSupport gate is on).
+	remotePods := c.remoteConsumerPods(devInfoNameMap)
+	partitionCache := map[types.UID]*claimresolve.PartitionInfo{}
+
+	accountPod := func(pod *corev1.Pod) {
 		// Unlike the device-plugin path there is no pre-bind reservation to
 		// honour: a DRA allocation only exists once the scheduler has written
 		// it into the claim, and the ResourceSlice it points at is node-local.
 		// So the bound node is the authority.
-		if pod.Spec.NodeName != c.nodeName {
+		if _, isRemote := remotePods[pod.UID]; pod.Spec.NodeName != c.nodeName && !isRemote {
 			return
 		}
 		// Only pods that actually go through DRA are ours to account for.
@@ -865,9 +895,15 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				"pod", klog.KObj(pod), "container", alloc.name)
 
 			var containerPids []uint32
-			_ = cgroup.GetContainerPidsFunc(pod, alloc.name, getFullPath, func(pid int) {
-				containerPids = append(containerPids, uint32(pid))
-			})
+			if c.remoteEnabled() && alloc.remote() {
+				// Remote consumer: the GPU processes are lupine-server children
+				// on this node, listed by the session, not by the pod's cgroup.
+				containerPids = c.remoteSessionPIDs(alloc, partitionCache)
+			} else {
+				_ = cgroup.GetContainerPidsFunc(pod, alloc.name, getFullPath, func(pid int) {
+					containerPids = append(containerPids, uint32(pid))
+				})
+			}
 
 			// Stable vdevice_idx across scrapes: allocation results arrive in
 			// claim order, which is not guaranteed to be stable, and an index
@@ -914,10 +950,10 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUMemoryLimit, prometheus.GaugeValue, float64(deviceMemLimit),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUPhysicalMemoryLimit, prometheus.GaugeValue, float64(realMemBytes),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
 
 				// TODO Unable to track virtual memory usage temporarily.
 				// The device-plugin path reads the per-container vMemory ledger
@@ -931,10 +967,10 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage+deviceVMemUsage),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUPhysicalMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
 
 				deviceMemUsage += deviceVMemUsage
 				memoryUtilRate := int64(0)
@@ -948,13 +984,17 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 				ch <- prometheus.MustNewConstMetric(
 					containerVGPUMemoryUtilRate, prometheus.GaugeValue, float64(memoryUtilRate),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
 				ch <- prometheus.MustNewConstMetric(containerVGPUCoreUtilRate,
 					prometheus.GaugeValue, float64(util.GetPercentageValue(deviceSMUtil)),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName)
+					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
 			}
 		}
-	})
+	}
+	util.PodsOnNodeCallback(pods, node, accountPod)
+	for _, pod := range remotePods {
+		accountPod(pod)
+	}
 	nodeGpuAssignedMemoryBytes := uint64(0)
 	for uuid, devInfo := range devInfoUuidMap {
 		// Prefer the real VRAM size NVML reports; fall back to undoing the
@@ -969,10 +1009,10 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 		deviceIndex := strconv.Itoa(devIndexMap[uuid])
 		ch <- prometheus.MustNewConstMetric(vGPUTotalMemory,
-			prometheus.GaugeValue, float64(devInfo.memory), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			prometheus.GaugeValue, float64(devInfo.memory), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], devInfo.accessMode)
 
 		ch <- prometheus.MustNewConstMetric(vGPUTotalPhysicalMemory,
-			prometheus.GaugeValue, float64(totalPhyMemoryBytes), c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			prometheus.GaugeValue, float64(totalPhyMemoryBytes), c.nodeName, deviceIndex, uuid, devTypeMap[uuid], devInfo.accessMode)
 
 		assignedPhyMemoryBytes := vGpuAssignedMemMap[uuid]
 		if memoryRatio > 1 {
@@ -981,22 +1021,22 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		nodeGpuAssignedMemoryBytes += assignedPhyMemoryBytes
 		ch <- prometheus.MustNewConstMetric(vGPUAssignedMemory,
 			prometheus.GaugeValue, float64(vGpuAssignedMemMap[uuid]),
-			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid], devInfo.accessMode)
 		ch <- prometheus.MustNewConstMetric(vGPUAssignedPhysicalMemory,
 			prometheus.GaugeValue, float64(assignedPhyMemoryBytes),
-			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid], devInfo.accessMode)
 		ch <- prometheus.MustNewConstMetric(vGPUTotalCoresNumber,
 			prometheus.GaugeValue, float64(devInfo.cores),
-			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid], devInfo.accessMode)
 		ch <- prometheus.MustNewConstMetric(vGPUAssignedCoresNumber,
 			prometheus.GaugeValue, float64(vGpuAssignedCoresMap[uuid]),
-			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid], devInfo.accessMode)
 		ch <- prometheus.MustNewConstMetric(vGPUPeakSharedContainersNumber,
 			prometheus.GaugeValue, float64(peakSharedContainersMap[uuid]),
-			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid], devInfo.accessMode)
 		ch <- prometheus.MustNewConstMetric(vGPUCurrentSharedContainersNumber,
 			prometheus.GaugeValue, float64(currentSharedContainersMap[uuid]),
-			c.nodeName, deviceIndex, uuid, devTypeMap[uuid])
+			c.nodeName, deviceIndex, uuid, devTypeMap[uuid], devInfo.accessMode)
 	}
 
 	ch <- prometheus.MustNewConstMetric(nodeVGPUAssignedMemory,
@@ -1004,4 +1044,11 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 	ch <- prometheus.MustNewConstMetric(nodeVGPUAssignedPhysicalMemory,
 		prometheus.GaugeValue, float64(nodeGpuAssignedMemoryBytes), c.nodeName)
+}
+
+// draAllocClaim records which claim (and which of its main requests) a
+// container's results came from; remote sessions are keyed by it.
+type draAllocClaim struct {
+	claim    *v1.ResourceClaim
+	requests []string
 }

@@ -862,3 +862,19 @@ func SafeDiv(a, b float64) float64 {
 	}
 	return a / b
 }
+
+// PodVGPUAccessMode returns the vGPU access mode a pod (or pod template) asks
+// for via VGPUAccessModeAnnotation: AccessModeLocal when absent, an error for
+// any other value than local/remote.
+func PodVGPUAccessMode(obj metav1.Object) (string, error) {
+	value, ok := HasAnnotation(obj, VGPUAccessModeAnnotation)
+	if !ok || strings.TrimSpace(value) == "" {
+		return AccessModeLocal, nil
+	}
+	switch mode := strings.ToLower(strings.TrimSpace(value)); mode {
+	case AccessModeLocal, AccessModeRemote:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid annotation %s=%q: must be %q or %q", VGPUAccessModeAnnotation, value, AccessModeLocal, AccessModeRemote)
+	}
+}
