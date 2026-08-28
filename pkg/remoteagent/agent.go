@@ -46,6 +46,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
@@ -84,8 +85,9 @@ type Agent struct {
 	claimInformer cache.SharedIndexInformer
 	claimCache    cache.MutationCache
 
-	nodeDevices atomic.Pointer[NodeDevices]
-	serverUp    atomic.Bool
+	nodeDevices      atomic.Pointer[NodeDevices]
+	serverUp         atomic.Bool
+	smWatcherPresent atomic.Bool
 }
 
 func New(cfg Config) *Agent {
@@ -115,6 +117,9 @@ func (a *Agent) Run(ctx context.Context) error {
 				fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorPoolName, a.cfg.NodeName),
 			),
 		), &resourceapi.ResourceSlice{}, 10*time.Hour, cache.Indexers{})
+	if err := a.sliceInformer.SetTransform(crcache.TransformStripManagedFields()); err != nil {
+		return err
+	}
 	a.claimInformer = cache.NewSharedIndexInformer(
 		cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourceclaims", corev1.NamespaceAll,
 			fields.Everything()), &resourceapi.ResourceClaim{}, 10*time.Hour, cache.Indexers{
@@ -125,6 +130,12 @@ func (a *Agent) Run(ctx context.Context) error {
 				return nil, nil
 			},
 		})
+	// The cache keeps only the fields the agent reads (see trimClaim);
+	// EnsureSession re-fetches the full object from the API when the
+	// trimmed one turns out stale.
+	if err := a.claimInformer.SetTransform(trimClaim(a.cfg.DriverName, a.cfg.NodeName)); err != nil {
+		return err
+	}
 
 	if _, err := a.sliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(interface{}) { a.refreshNodeDevices() },
@@ -191,6 +202,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	// 3. Background loops.
 	a.wg.Go(func() {
 		wait.UntilWithContext(ctx, a.probeServer, 5*time.Second)
+	})
+	a.wg.Go(func() {
+		wait.UntilWithContext(ctx, a.checkSMWatcher, 30*time.Second)
 	})
 	a.wg.Go(func() {
 		wait.UntilWithContext(ctx, a.gcSessions, a.cfg.GCInterval)
@@ -295,15 +309,9 @@ func (a *Agent) GetClaimByUID(uid string) (*resourceapi.ResourceClaim, error) {
 }
 
 func (a *Agent) removeSessionsOfClaim(uid string) {
-	entries, err := a.store.List()
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if e.ClaimUID == uid {
-			if err := a.store.Remove(e.Token); err != nil {
-				klog.Warningf("remove session %s: %v", e.Token, err)
-			}
+	for _, token := range a.store.TokensOfClaim(uid) {
+		if err := a.store.Remove(token); err != nil {
+			klog.Warningf("remove session %s: %v", token, err)
 		}
 	}
 }
@@ -335,7 +343,16 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 		return nil, status.Error(codes.Unavailable, "node device snapshot not available yet")
 	}
 	if err = a.store.Materialize(req.Session, claim, nd, req.Requests); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
+		// The cached claim may lag behind the allocation the caller saw;
+		// retry once against the live object before giving up.
+		fresh, getErr := a.cfg.ClientSets.Resource.ResourceClaims(claim.Namespace).Get(ctx, claim.Name, metav1.GetOptions{})
+		if getErr != nil || string(fresh.UID) != req.ClaimUid {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		a.claimCache.Mutation(fresh)
+		if err = a.store.Materialize(req.Session, fresh, nd, req.Requests); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
 	}
 	msg := ""
 	if !a.serverUp.Load() {
@@ -355,4 +372,27 @@ func (a *Agent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*re
 		resp.CudaDriverVersion = nd.CudaVersionString()
 	}
 	return resp, nil
+}
+
+// checkSMWatcher verifies the external SM watcher contract when sessions are
+// written with SMWatcher on: the kubelet-plugin (SharedSMUtilizationWatcher)
+// publishes <manager-dir>/watcher/sm_util.config on the host, and the
+// deployment must present it to lupine-server at <session-base>/watcher/ —
+// the path the library derives from VGPU_CONFIG_SESSION_BASE. A missing file
+// is not fatal (the library falls back to per-process NVML sampling) but it
+// silently forfeits the shared-sampling benefit, so it is called out.
+func (a *Agent) checkSMWatcher(context.Context) {
+	if !a.cfg.SMWatcher {
+		return
+	}
+	path := filepath.Join(a.cfg.SessionBase, watcherDir, util.SMUtilFile)
+	_, err := os.Stat(path)
+	present := err == nil
+	if a.smWatcherPresent.Swap(present) != present {
+		if present {
+			klog.Infof("external SM watcher cache %s is present", path)
+		} else {
+			klog.Warningf("--sm-watcher is on but %s is missing: mount the kubelet-plugin's watcher directory there, or sessions fall back to NVML sampling", path)
+		}
+	}
 }

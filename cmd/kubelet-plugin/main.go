@@ -300,7 +300,7 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	switch flags.PluginMode {
 	// Empty means the caller did not go through the CLI (e.g. tests); treat
 	// it as the server default.
-	case pkgkubeletplugin.ModeServer:
+	case "", pkgkubeletplugin.ModeServer:
 		if featuregates.Enabled(featuregates.RemoteGPUSupport) {
 			if flags.RemoteNodeSelector == "" {
 				return fmt.Errorf("--remote-node-selector is required in server mode when feature gate %s is enabled",

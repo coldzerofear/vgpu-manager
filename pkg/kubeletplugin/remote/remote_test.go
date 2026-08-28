@@ -341,3 +341,28 @@ func TestAgentAddr(t *testing.T) {
 		}
 	}
 }
+
+func TestPreparedCheckpointRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	d := &InjectDriver{config: InjectConfig{PluginDataDirectoryPath: dir}, prepared: map[string]*preparedClaim{}}
+	claim := &resourceapi.ResourceClaim{}
+	claim.Name, claim.Namespace, claim.UID = "c", "ns", "uid-1"
+	d.recordPrepared(claim, nil)
+	if !d.isClaimPrepared("uid-1") {
+		t.Fatal("recorded claim must be prepared")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, preparedCheckpointFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"uid-1"`) || !strings.Contains(string(data), `"name":"c"`) {
+		t.Fatalf("checkpoint content: %s", data)
+	}
+	d.forgetPrepared("uid-1")
+	if d.isClaimPrepared("uid-1") {
+		t.Fatal("forgotten claim must not be prepared")
+	}
+	if data, _ := os.ReadFile(filepath.Join(dir, preparedCheckpointFile)); strings.Contains(string(data), "uid-1") {
+		t.Fatalf("checkpoint must drop forgotten claims: %s", data)
+	}
+}

@@ -19,6 +19,7 @@ package remoteagent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	vgpuconfig "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
@@ -138,7 +139,7 @@ func TestValidateToken(t *testing.T) {
 
 func TestMaterialize(t *testing.T) {
 	base := t.TempDir()
-	store := NewSessionStore(base, false)
+	store := NewSessionStore(Config{SessionBase: base, NodeName: testNode, DriverName: testDriver})
 	if err := store.Prepare(); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +150,7 @@ func TestMaterialize(t *testing.T) {
 		result(testNode, "vgpu-2", "50", "4Gi"),
 		result(testNode, "vgpu-0", "", ""), // whole device: no limits
 	)
-	if err := store.Materialize("uid-1", claim, nd, testNode, testDriver, nil); err != nil {
+	if err := store.Materialize("uid-1", claim, nd, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -189,21 +190,21 @@ func TestMaterialize(t *testing.T) {
 		t.Fatal("slot 1 must be inactive")
 	}
 	// Idempotent for the same claim; refused for a different claim.
-	if err := store.Materialize("uid-1", claim, nd, testNode, testDriver, nil); err != nil {
+	if err := store.Materialize("uid-1", claim, nd, nil); err != nil {
 		t.Fatalf("second materialize must be a no-op: %v", err)
 	}
-	if err := store.Materialize("uid-1", testClaim("uid-2", result(testNode, "vgpu-0", "", "")), nd, testNode, testDriver, nil); err == nil {
+	if err := store.Materialize("uid-1", testClaim("uid-2", result(testNode, "vgpu-0", "", "")), nd, nil); err == nil {
 		t.Fatal("token reuse by another claim must be refused")
 	}
 
 	// Errors: unknown device, nothing on this pool, bad token.
-	if err := store.Materialize("t2", testClaim("u", result(testNode, "vgpu-9", "", "")), nd, testNode, testDriver, nil); err == nil {
+	if err := store.Materialize("t2", testClaim("u", result(testNode, "vgpu-9", "", "")), nd, nil); err == nil {
 		t.Fatal("unknown device must fail")
 	}
-	if err := store.Materialize("t3", testClaim("u", result("elsewhere", "vgpu-0", "", "")), nd, testNode, testDriver, nil); err == nil {
+	if err := store.Materialize("t3", testClaim("u", result("elsewhere", "vgpu-0", "", "")), nd, nil); err == nil {
 		t.Fatal("claim with nothing on this pool must fail")
 	}
-	if err := store.Materialize("../t", claim, nd, testNode, testDriver, nil); err == nil {
+	if err := store.Materialize("../t", claim, nd, nil); err == nil {
 		t.Fatal("bad token must fail")
 	}
 
@@ -236,7 +237,7 @@ func trimZero(b []byte) []byte {
 
 func TestMaterializePartitionFilterAndMerge(t *testing.T) {
 	base := t.TempDir()
-	store := NewSessionStore(base, false)
+	store := NewSessionStore(Config{SessionBase: base, NodeName: testNode, DriverName: testDriver})
 	if err := store.Prepare(); err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +258,7 @@ func TestMaterializePartitionFilterAndMerge(t *testing.T) {
 	claim.Status.Allocation.Devices.Results[1].Request = "c1"
 	claim.Status.Allocation.Devices.Results[2].Request = "c1"
 
-	if err := store.Materialize("tok-c1", claim, nd, testNode, testDriver, []string{"c1"}); err != nil {
+	if err := store.Materialize("tok-c1", claim, nd, []string{"c1"}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := vgpuconfig.NewMmapResourceData(filepath.Join(base, "tok-c1", "config", "vgpu.config"))
@@ -275,7 +276,85 @@ func TestMaterializePartitionFilterAndMerge(t *testing.T) {
 	}
 
 	// A partition whose requests have nothing on this node is an error.
-	if err := store.Materialize("tok-none", claim, nd, testNode, testDriver, []string{"nope"}); err == nil {
+	if err := store.Materialize("tok-none", claim, nd, []string{"nope"}); err == nil {
 		t.Fatal("expected error for a partition with no devices on this node")
+	}
+}
+
+func TestSessionIndexAndRestore(t *testing.T) {
+	base := t.TempDir()
+	cfg := Config{SessionBase: base, NodeName: testNode, DriverName: testDriver}
+	store := NewSessionStore(cfg)
+	if err := store.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	nd := NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()})
+	for _, tok := range []string{"t1", "t2"} {
+		if err := store.Materialize(tok, testClaim("uid-x", result(testNode, "vgpu-0", "", "")), nd, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Materialize("t3", testClaim("uid-y", result(testNode, "vgpu-2", "", "")), nd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.TokensOfClaim("uid-x"); len(got) != 2 || got[0] != "t1" || got[1] != "t2" {
+		t.Fatalf("index for uid-x: %v", got)
+	}
+
+	// A fresh store over the same directory rebuilds the index from markers.
+	again := NewSessionStore(cfg)
+	if err := again.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if got := again.TokensOfClaim("uid-y"); len(got) != 1 || got[0] != "t3" {
+		t.Fatalf("restored index for uid-y: %v", got)
+	}
+	if err := again.Remove("t3"); err != nil {
+		t.Fatal(err)
+	}
+	if got := again.TokensOfClaim("uid-y"); len(got) != 0 {
+		t.Fatalf("index must drop removed sessions: %v", got)
+	}
+}
+
+func TestTrimClaim(t *testing.T) {
+	full := testClaim("uid-t",
+		result(testNode, "vgpu-0", "50", "4Gi"),
+		result("other-node", "vgpu-0", "", ""),
+	)
+	full.Annotations = map[string]string{"big": strings.Repeat("x", 4096)}
+	full.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "kubectl"}}
+	full.Spec.Devices.Requests = []resourceapi.DeviceRequest{
+		{Name: "a", Exactly: &resourceapi.ExactDeviceRequest{DeviceClassName: "vgpu-manager"}},
+		{Name: "fa", FirstAvailable: []resourceapi.DeviceSubRequest{{Name: "x", DeviceClassName: "vgpu-manager"}}},
+	}
+	full.Status.ReservedFor = []resourceapi.ResourceClaimConsumerReference{{Resource: "pods", Name: "p", UID: "u"}}
+
+	out, err := trimClaim(testDriver, testNode)(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed := out.(*resourceapi.ResourceClaim)
+	if trimmed.UID != "uid-t" || trimmed.Annotations != nil || trimmed.ManagedFields != nil || trimmed.Status.ReservedFor != nil {
+		t.Fatalf("unexpected leftovers: %+v", trimmed.ObjectMeta)
+	}
+	if len(trimmed.Status.Allocation.Devices.Results) != 1 || trimmed.Status.Allocation.Devices.Results[0].Pool != testNode {
+		t.Fatalf("results must be narrowed to this pool: %+v", trimmed.Status.Allocation.Devices.Results)
+	}
+	if trimmed.Spec.Devices.Requests[0].Exactly == nil || trimmed.Spec.Devices.Requests[0].Exactly.DeviceClassName != "" ||
+		trimmed.Spec.Devices.Requests[1].FirstAvailable[0].Name != "x" {
+		t.Fatalf("request names must survive without payload: %+v", trimmed.Spec.Devices.Requests)
+	}
+	if remote.MainRequestName(trimmed, "fa/x") != "fa" {
+		t.Fatal("subrequest folding must still work on the trimmed claim")
+	}
+
+	// Unallocated stays unallocated; non-claims pass through.
+	un, _ := trimClaim(testDriver, testNode)(&resourceapi.ResourceClaim{})
+	if un.(*resourceapi.ResourceClaim).Status.Allocation != nil {
+		t.Fatal("nil allocation must stay nil")
+	}
+	if v, _ := trimClaim(testDriver, testNode)("not a claim"); v != "not a claim" {
+		t.Fatal("foreign objects must pass through")
 	}
 }

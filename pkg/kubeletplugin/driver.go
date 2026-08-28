@@ -271,7 +271,11 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	// NRI runs independently of DevicePluginClientMode. It is started after
 	// startClientRegistry so that, when both are on, the registry server (which
 	// reads the shared cache) is already up before the NRI plugin populates it.
-	if featuregates.Enabled(featuregates.NRISupport) {
+	//
+	// Publish-only nodes (RemoteGPUSupport) never prepare claims, and the
+	// co-located --plugin-mode=inject process registers the NRI plugin under
+	// the same name; starting a second one here would collide with it.
+	if featuregates.Enabled(featuregates.NRISupport) && !remotePub.enabled() {
 		if err := driver.startNRIPlugin(ctx, config); err != nil {
 			return nil, fmt.Errorf("start NRI plugin: %w", err)
 		}

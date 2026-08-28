@@ -18,9 +18,12 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
@@ -64,12 +67,14 @@ func (d *InjectDriver) recordPrepared(claim *resourceapi.ResourceClaim, devices 
 	d.preparedMu.Lock()
 	defer d.preparedMu.Unlock()
 	d.prepared[string(claim.UID)] = &preparedClaim{claim: claim.DeepCopy(), devices: devices}
+	d.savePreparedLocked()
 }
 
 func (d *InjectDriver) forgetPrepared(claimUID string) {
 	d.preparedMu.Lock()
 	defer d.preparedMu.Unlock()
 	delete(d.prepared, claimUID)
+	d.savePreparedLocked()
 }
 
 func (d *InjectDriver) lookupPrepared(claimUID string) *preparedClaim {
@@ -112,7 +117,9 @@ func (d *InjectDriver) startNRI(ctx context.Context) error {
 
 // nriInjection is the NRI ResolveMounts callback: per-container session.
 func (d *InjectDriver) nriInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
-	ctx := context.Background()
+	// Bounded: CreateContainer blocks container creation while this runs.
+	ctx, cancel := context.WithTimeout(context.Background(), nriInjectTimeout)
+	defer cancel()
 	pc := d.lookupPrepared(claimUID)
 	if pc == nil {
 		return nil, fmt.Errorf("claim %s is not prepared on this node", claimUID)
@@ -187,4 +194,81 @@ func (d *InjectDriver) nriInjection(claimUID, podName, podNamespace, podUID, con
 // can correlate the container back to its claim.
 func nriClaimEnv(claim *resourceapi.ResourceClaim) string {
 	return fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, claim.UID)
+}
+
+// preparedCheckpointFile records the NRI-mode prepared claims across plugin
+// restarts. The kubelet does not re-run NodePrepare for claims it already
+// holds prepared, yet containers of those pods keep being (re)created and
+// each CreateContainer needs the claim's devices. Only identity is stored;
+// devices are re-resolved from the live claim and ResourceSlices on restore.
+const (
+	preparedCheckpointFile = "remote-prepared.json"
+	nriInjectTimeout       = 30 * time.Second
+)
+
+type preparedRef struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+func (d *InjectDriver) checkpointPath() string {
+	return filepath.Join(d.config.PluginDataDirectoryPath, preparedCheckpointFile)
+}
+
+// savePreparedLocked writes the checkpoint atomically. Caller holds preparedMu.
+func (d *InjectDriver) savePreparedLocked() {
+	refs := make(map[string]preparedRef, len(d.prepared))
+	for uid, pc := range d.prepared {
+		refs[uid] = preparedRef{Namespace: pc.claim.Namespace, Name: pc.claim.Name}
+	}
+	data, err := json.Marshal(refs)
+	if err != nil {
+		klog.ErrorS(err, "marshal prepared-claims checkpoint")
+		return
+	}
+	tmp := d.checkpointPath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err == nil {
+		err = os.Rename(tmp, d.checkpointPath())
+	}
+	if err != nil {
+		klog.ErrorS(err, "write prepared-claims checkpoint", "path", d.checkpointPath())
+	}
+}
+
+// restorePrepared rebuilds the prepared set after a restart. Claims that are
+// gone, re-allocated (UID mismatch) or no longer resolvable are dropped —
+// the kubelet will unprepare them or a new NodePrepare will re-record them.
+func (d *InjectDriver) restorePrepared(ctx context.Context) {
+	data, err := os.ReadFile(d.checkpointPath())
+	if err != nil {
+		if !os.IsNotExist(err) {
+			klog.ErrorS(err, "read prepared-claims checkpoint", "path", d.checkpointPath())
+		}
+		return
+	}
+	refs := map[string]preparedRef{}
+	if err := json.Unmarshal(data, &refs); err != nil {
+		klog.ErrorS(err, "decode prepared-claims checkpoint", "path", d.checkpointPath())
+		return
+	}
+	restored := 0
+	for uid, ref := range refs {
+		claim, err := d.clients.Resource.ResourceClaims(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err != nil || string(claim.UID) != uid || claim.Status.Allocation == nil {
+			continue
+		}
+		devices, err := d.resolveRemoteDevices(claim)
+		if err != nil || len(devices) == 0 {
+			klog.V(2).InfoS("prepared claim not restored", "resourceClaim", klog.KObj(claim), "err", err)
+			continue
+		}
+		d.preparedMu.Lock()
+		d.prepared[uid] = &preparedClaim{claim: claim, devices: devices}
+		d.preparedMu.Unlock()
+		restored++
+	}
+	d.preparedMu.Lock()
+	d.savePreparedLocked()
+	d.preparedMu.Unlock()
+	klog.V(2).Infof("Restored %d/%d NRI-mode prepared claim(s) from checkpoint", restored, len(refs))
 }

@@ -168,26 +168,68 @@ func versionAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string
 	return ""
 }
 
-// SessionStore materializes and removes session directories under base.
+// SessionStore materializes and removes session directories under base and
+// keeps an in-memory index (token <-> claim UID) so claim events never need a
+// directory scan; the periodic GC still walks the disk to catch orphans.
 type SessionStore struct {
-	cfg Config
-	mu  sync.Mutex
+	cfg     Config
+	mu      sync.Mutex
+	claimOf map[string]string           // token -> claim UID
+	byClaim map[string]sets.Set[string] // claim UID -> tokens
 }
 
 func NewSessionStore(cfg Config) *SessionStore {
-	return &SessionStore{cfg: cfg}
+	return &SessionStore{cfg: cfg, claimOf: map[string]string{}, byClaim: map[string]sets.Set[string]{}}
 }
 
-// Prepare creates the base skeleton the server needs before it starts.
+// Prepare creates the base skeleton the server needs before it starts and
+// rebuilds the index from whatever sessions survived a restart.
 func (s *SessionStore) Prepare() error {
 	for _, dir := range []string{s.cfg.SessionBase, filepath.Join(s.cfg.SessionBase, watcherDir)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
 	}
+	entries, err := s.List()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range entries {
+		if e.ClaimUID != "" {
+			s.indexLocked(e.Token, e.ClaimUID)
+		}
+	}
 	return nil
 }
 
+// TokensOfClaim returns the sessions currently materialized for a claim.
+func (s *SessionStore) TokensOfClaim(claimUID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return sets.List(s.byClaim[claimUID])
+}
+
+func (s *SessionStore) indexLocked(token, claimUID string) {
+	s.claimOf[token] = claimUID
+	if s.byClaim[claimUID] == nil {
+		s.byClaim[claimUID] = sets.New[string]()
+	}
+	s.byClaim[claimUID].Insert(token)
+}
+
+func (s *SessionStore) unindexLocked(token string) {
+	if claimUID, ok := s.claimOf[token]; ok {
+		delete(s.claimOf, token)
+		if set := s.byClaim[claimUID]; set != nil {
+			set.Delete(token)
+			if set.Len() == 0 {
+				delete(s.byClaim, claimUID)
+			}
+		}
+	}
+}
 func (s *SessionStore) dir(token string) string {
 	return filepath.Join(s.cfg.SessionBase, token)
 }
@@ -197,8 +239,8 @@ func (s *SessionStore) dir(token string) string {
 // `poolName`. It is idempotent: an already complete session is left
 // untouched (the library may have live state in it), so kubelet retries of
 // NodePrepare are safe. When several results of the partition land on the
-// // same physical device (the webhook normally prevents this), the largest
-// // share wins — the config has one slot per device.
+// same physical device (the webhook normally prevents this), the largest
+// share wins — the config has one slot per device.
 func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClaim, nd *NodeDevices, requests []string) error {
 	if err := validateToken(token); err != nil {
 		return err
@@ -286,7 +328,8 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 	marker := filepath.Join(root, sessionClaimMarker)
 	if existing, err := os.ReadFile(marker); err == nil {
 		if strings.TrimSpace(string(existing)) == string(claim.UID) {
-			klog.V(4).Infof("Session %s for claim %s/%s already materialized", token, claim.Namespace, claim.Name)
+			klog.V(4).Infof("Session %s for claim %s already materialized", token, klog.KObj(claim))
+			s.indexLocked(token, string(claim.UID))
 			return nil
 		}
 		return fmt.Errorf("session %s already belongs to claim %s", token, strings.TrimSpace(string(existing)))
@@ -312,6 +355,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 	if err = os.WriteFile(marker, []byte(claim.UID+"\n"), 0o644); err != nil {
 		return fmt.Errorf("write claim marker: %w", err)
 	}
+	s.indexLocked(token, string(claim.UID))
 	klog.Infof("Materialized session %s for claim %s (requests %v): %d device(s)", token, klog.KObj(claim), requests, len(claims))
 	return nil
 }
@@ -325,6 +369,7 @@ func (s *SessionStore) Remove(token string) error {
 	defer s.mu.Unlock()
 	err := os.RemoveAll(s.dir(token))
 	if err == nil {
+		s.unindexLocked(token)
 		klog.Infof("Removed session %s", token)
 	}
 	return err

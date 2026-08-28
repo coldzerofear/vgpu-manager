@@ -40,6 +40,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
+	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
@@ -142,6 +143,9 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 			return indexerValues, nil
 		},
 	})
+	if err := sliceInformer.SetTransform(crcache.TransformStripManagedFields()); err != nil {
+		return nil, err
+	}
 	d.sliceIndexer = sliceInformer.GetIndexer()
 
 	healthConfig := &health.HealthConfig{
@@ -162,6 +166,7 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 	<-sliceInformer.HasSyncedChecker().Done()
 
 	if featuregates.Enabled(featuregates.NRISupport) {
+		d.restorePrepared(ctx)
 		if err := d.startNRI(ctx); err != nil {
 			return nil, fmt.Errorf("start NRI plugin: %w", err)
 		}

@@ -1014,3 +1014,29 @@ inject 侧开启 `NRISupport` 时，会话不再在 NodePrepare 按分区分配�
 - 语义差异：共用同一 request 的两个容器在分区模式下共享一份配额（一个会话），在 NRI 模式下各持一份（两个会话）。
 - monitor 查令牌顺序：先 `<podUID>_<containerName>`（NRI 键），再分区解析键，再 per-request 回退键，三种模式统一。
 - gate 组合：`RemoteGPUSupport` + `NRISupport` **仅 inject 模式允许**；server 模式（只发布）二者互斥，校验移至 `--plugin-mode` 分支。
+
+### 11.7 分支整体审计（2026-08-28）：闭环项、已修缺口、剩余边界
+
+**已修（本轮）**
+| 组件 | 问题 | 处理 |
+|---|---|---|
+| inject（NRI 模式） | 插件重启后 `prepared` 集合为空；kubelet 不会为已 prepare 的 claim 重跑 NodePrepare，旧 pod 的容器（重启/init 后续容器）在 CreateContainer 得到"claim not prepared" | 增加 `<plugin-dir>/remote-prepared.json` 检查点（只存 claim 身份，重启时按 UID 校验并重新解析设备），`recordPrepared/forgetPrepared` 同步落盘 |
+| inject（NRI 钩子） | 钩子内 pod GET / EnsureSession 无总超时 | 30s 有界 context（CreateContainer 期间阻塞容器创建） |
+| inject / agent | informer 缓存全量对象 | 两侧 slice informer 去 managedFields；**agent 的 claim informer 加 `trimClaim` 变换**：只保留身份、request 名（含 firstAvailable 子名）、本驱动本池的 allocation results；不触及本节点的 claim 缩到几百字节。EnsureSession 在裁剪缓存陈旧时向 API 重取一次 |
+| agent | claim 事件触发目录扫描（O(claims×dir)） | `SessionStore` 内存索引（token↔claimUID），启动从磁盘标记重建；GC 仍按周期走磁盘兜底孤儿 |
+| agent | `--sm-watcher` 与 kubelet-plugin 的 `SharedSMUtilizationWatcher` 一致性无校验 | 每 30s 检查 `<session-base>/watcher/sm_util.config`，缺失告警（库侧会回退 NVML 采样，不致命） |
+| server（只发布） | 与 inject 同节点且都开 `NRISupport` 时，本地 NRI 插件与 inject 的 NRI 插件同名注册冲突 | 只发布模式不再启动本地 NRI 插件（它从不 prepare，无事可做） |
+| webhook | 非法 `vgpu-access-mode` 值被 mutate 静默当 local | validate 阶段拒绝 |
+| 测试 | 签名变更后 remoteagent/cmd 测试失效 | 已修并新增索引/裁剪/检查点测试 |
+
+**SharedSMUtilizationWatcher 与 lupine-server 的配合（部署契约）**
+- 发布端 kubelet-plugin（server 模式）在 gate 开时照常运行 `SMUtilWatcherStart`，写 `<host-manager-dir>/watcher/sm_util.config`（hostPath）；
+- 库在会话模式按 `VGPU_CONFIG_SESSION_BASE/watcher/sm_util.config` 读（`session.c` SPECS，`from_base=1`）；
+- 因此 chart 必须把 hostPath `<manager-dir>/watcher` 挂进 lupine-server 容器的 `<session-base>/watcher`（与 agent 容器同路径），agent `--sm-watcher` 与插件 gate 同开同关；monitor 读同一 hostPath 文件。agent 的检查只能告警，无法替代挂载。
+
+**剩余边界（有意保留）**
+1. 分区模式下共用一个 request 的多个容器共享一个会话（一份配额、用量合并）；NRI 模式各持一份。
+2. 会话令牌 annotation 在命名 claim 上跨分配复用（claim 对象不删则令牌不换）；随机性仍在，但一次泄露的令牌生命周期 = claim 生命周期。
+3. NRI 模式下容器数 × EnsureSession 往返，每容器一次；分区模式每 claim 一次。
+4. monitor 对远程消费者的 pod 用 API GET + 60s 缓存，`consumer` pod 变更最多延迟一分钟反映。
+5. 只发布节点关闭 gRPC 健康检查（无 DRA 服务可探），chart 的探针需改为进程/HTTP 指标探针。
