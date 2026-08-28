@@ -529,8 +529,8 @@ func (c draGPUCollector) resolvePodAllocations(
 			}
 			meta, ok := index[result.Request]
 			if !ok {
-				klog.V(5).InfoS("allocation result has no matching request in claim spec", "resourceClaim",
-					fmt.Sprintf("%s/%s", claim.Namespace, claim.Name), "request", result.Request)
+				klog.V(5).InfoS("allocation result has no matching request in claim spec",
+					"resourceClaim", klog.KObj(claim), "request", result.Request)
 				continue
 			}
 			allocation.resultsByMainRequest[meta.MainRequest] = append(allocation.resultsByMainRequest[meta.MainRequest], result)

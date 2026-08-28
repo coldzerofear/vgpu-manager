@@ -386,7 +386,7 @@ func BuildTaskResourceClaimTemplate(task *vcv1alpha1.TaskSpec, requests []resour
 // BuildResourceClaim Build vGPU resource claims based on container requests.
 func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, resourceClaimName, ownerKey, timestamp string) *resourceapi.ResourceClaim {
 	var deviceConstraints []resourceapi.DeviceConstraint
-	req := allocator.BuildAllocationRequest(pod)
+	topologyMode, _ := allocator.ParsePodTopologyMode(pod)
 	// Handling multiple request device allocation constraints
 	//if len(requests) > 1 {
 	//	// All requests are mutually exclusive by device UUID to ensure that multiple requests are not assigned the same device
@@ -395,7 +395,7 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 	//		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
 	//	})
 	//
-	//	switch req.Topology.BaseTopology() {
+	//	switch topologyMode.BaseTopology() {
 	//	case util.LinkTopology:
 	//		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 	//			Requests:       []string{}, // match all requests
@@ -422,7 +422,7 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 			})
 
 			// Multiple devices are matched and allocated according to defined topology patterns to ensure optimal performance.
-			switch req.Topology.BaseTopology() {
+			switch topologyMode.BaseTopology() {
 			case util.LinkTopology:
 				deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 					Requests:       []string{request.Name},

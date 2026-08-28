@@ -321,13 +321,11 @@ nvmlReturn_t nvmlDeviceGetEnforcedPowerLimit(nvmlDevice_t device,
 }
 
 nvmlReturn_t nvmlDeviceGetFanSpeed(nvmlDevice_t device, unsigned int *speed) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetFanSpeed, device,
-                         speed);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetFanSpeed, device, speed);
 }
 
-nvmlReturn_t nvmlDeviceGetFanSpeed_v2(nvmlDevice_t device,
-                                      unsigned int *speed) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetFanSpeed_v2, device, speed);
+nvmlReturn_t nvmlDeviceGetFanSpeed_v2(nvmlDevice_t device, unsigned int fan, unsigned int *speed) {
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetFanSpeed_v2, device, fan, speed);
 }
 
 nvmlReturn_t nvmlDeviceGetFieldValues(nvmlDevice_t device, int valuesCount,
@@ -1113,11 +1111,10 @@ nvmlReturn_t nvmlVgpuTypeGetResolution(nvmlVgpuTypeId_t vgpuTypeId,
                          vgpuTypeId, displayIndex, xdim, ydim);
 }
 
-nvmlReturn_t nvmlDeviceGetFBCSessions(nvmlDevice_t device,
-                                      unsigned int *sessionCount,
+nvmlReturn_t nvmlDeviceGetFBCSessions(nvmlDevice_t device, unsigned int *sessionCount,
                                       nvmlFBCSessionInfo_t *sessionInfo) {
-  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetFBCSessions, device,
-                         sessionCount, sessionInfo);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetFBCSessions,
+                         device, sessionCount, sessionInfo);
 }
 
 nvmlReturn_t nvmlDeviceGetFBCStats(nvmlDevice_t device, nvmlFBCStats_t *fbcStats) {
@@ -1126,17 +1123,15 @@ nvmlReturn_t nvmlDeviceGetFBCStats(nvmlDevice_t device, nvmlFBCStats_t *fbcStats
 
 nvmlReturn_t nvmlDeviceGetGridLicensableFeatures_v2(nvmlDevice_t device,
                          nvmlGridLicensableFeatures_t *pGridLicensableFeatures) {
-  return NVML_ENTRY_CHECK(nvml_library_entry,
-                         nvmlDeviceGetGridLicensableFeatures_v2, device,
-                         pGridLicensableFeatures);
+  return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetGridLicensableFeatures_v2,
+                         device, pGridLicensableFeatures);
 }
 
-nvmlReturn_t nvmlDeviceGetRetiredPages_v2(nvmlDevice_t device,
-                                          nvmlPageRetirementCause_t cause,
-                                          unsigned int *pageCount,
-                                          unsigned long long *addresses) {
+nvmlReturn_t nvmlDeviceGetRetiredPages_v2(nvmlDevice_t device, nvmlPageRetirementCause_t cause,
+                                          unsigned int* pageCount, unsigned long long* addresses,
+                                          unsigned long long* timestamps) {
   return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetRetiredPages_v2,
-                         device, cause, pageCount, addresses);
+                          device, cause, pageCount, addresses, timestamps);
 }
 
 nvmlReturn_t nvmlDeviceResetGpuLockedClocks(nvmlDevice_t device) {
