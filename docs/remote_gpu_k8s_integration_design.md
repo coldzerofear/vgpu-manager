@@ -51,7 +51,7 @@
 | D5 | 传输加密 | lupine **服务端不支持 TLS**，需前置终止代理；K1 可明文，**多租户/跨信任域前必须启用**（§6.1） |
 | D6 | 高性能网络 | **SR-IOV 优先**（透明、零 lupine 改动）；IB/RoCE 组网时叠 IPoIB 或 SMC-R；GPUDirect 属改 lupine 的长期项（§7.1） |
 | D7 | 总体形态 | **v1.4：helm 编排 2 DaemonSet**，values 结构 = 原 RemoteGPUPool spec，`reachableNodeSelector`（= net-zone）一物两用：既圈定 slice 可调度范围，又是消费侧 DS 铺设范围。**operator/CRD 后置**至组件稳定、边界明确且 helm 不够用时（§1.5）。**v1.7 修订（用户拍板）：独立 `vgpu-manager-remote-gpu` chart，依赖 `vgpu-manager-dra-driver`**（不并入作子树；边界更清晰，代价是镜像/RBAC 声明有少量重复） |
-| D8 | 会话令牌签发 | **消费侧 kubelet-plugin 在 NodePrepareResources 生成随机令牌，写入 `claim.status.devices[].data`**；独立 controller 取消，pod 启动关键路径上没有任何集中式控制器（§1.5.3） |
+| D8 | 会话令牌签发 | **v2.2：会话 = 分区（§11.1），每分区一个随机令牌，存 claim annotation `manager.nvidia.com/session-<hash>`**；原案"写入 `claim.status.devices[].data`"作废（依赖 KEP-4817 集群版本）。原文：**消费侧 kubelet-plugin 在 NodePrepareResources 生成随机令牌，写入 `claim.status.devices[].data`**；独立 controller 取消，pod 启动关键路径上没有任何集中式控制器（§1.5.3） |
 | D9 | 会话目录 | **agent 与 lupine-server 同 pod，共享 emptyDir**；GPU 节点主机零安装，生命周期与会话语义天然对齐（§1.5.2） |
 | D10 | 域名前缀 | **`vgpu-manager.io`**（CRD group 与 device attributes 同源）；不用 `nvidia.com` 后缀（`gpu.nvidia.com` 是 NVIDIA 官方 DRA 驱动的属性域，避撞） |
 | D11 | 制品形态 | **自包含静态 client**（fork 增加 `LUPINE_STATIC_DEPS`：nghttp2/OpenSSL/libstdc++/libgcc 静态内嵌，运行时依赖仅 glibc；rockylinux8 统一底座 → glibc 2.28 地板全矩阵最低）。已实现并本地验证（§4.5） |
