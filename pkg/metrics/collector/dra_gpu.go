@@ -721,7 +721,8 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			// skips the device.
 			if mode := remote.StringAttr(dev, util.AccessModeAttribute); mode != "" {
 				if mode != util.AccessModeLocal && mode != util.AccessModeRemote {
-					klog.V(4).InfoS("skip resourceSlice device with malformed accessMode", "device", dev.Name, "accessMode", mode)
+					klog.V(4).InfoS("skip resourceSlice device with malformed accessMode",
+						"device", dev.Name, "accessMode", mode)
 					continue
 				}
 				devInfo.accessMode = mode
