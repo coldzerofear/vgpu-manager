@@ -1,0 +1,223 @@
+# dra-server: GPU 节点上的 kubelet-plugin（--plugin-mode=server + RemoteGPUSupport）。
+# v2.1 语义：只发布不分配 —— 本节点设备以 accessMode=remote + endpoint 属性发布，
+# pool 的 nodeSelector 由 --remote-node-selector 决定；插件不向 kubelet 注册 DRA 服务，
+# 全部 NodePrepare 由同节点的 dra-inject 承担（本节点消费也走 lupine 环回）。
+# 注意：RemoteGPUSupport 开启时禁止设置 --http-endpoint / --healthcheck-port（启动校验拦截），
+# 因此本 DaemonSet 无探针；指标由 remote-server 里的 device-monitor 提供。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-remote-dra-server
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-remote-dra-server:role
+rules:
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceslices
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - delete
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims
+      - resourceclaimtemplates
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-remote-dra-server-as-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vgpu-manager-remote-dra-server:role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-remote-dra-server
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vgpu-manager-remote-dra-server
+  namespace: kube-system
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: vgpu-manager-remote-dra-server
+  template:
+    metadata:
+      labels:
+        app: vgpu-manager-remote-dra-server
+        vgpu-manager.io/ignore-webhook: "true"
+    spec:
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      hostPID: true
+      priorityClassName: system-node-critical
+      nodeSelector:
+        vgpu-manager.io/remote-server: "true"
+      serviceAccountName: vgpu-manager-remote-dra-server
+      initContainers:
+        - name: init-container
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command: [bash, /usr/bin/kubelet-plugin-prestart.sh]
+          env:
+            - name: NVIDIA_DRIVER_ROOT
+              value: /
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+            - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins_registry
+            - name: KUBELET_PLUGINS_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins
+          volumeMounts:
+            - name: driver-root-parent
+              mountPath: /driver-root-parent
+              readOnly: true
+      containers:
+        - name: kubelet-plugin
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c]
+          args:
+            - |-
+              kubelet-plugin -v 6
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: PLUGIN_MODE
+              value: server
+            - name: FEATURE_GATES
+              value: RemoteGPUSupport=true,SharedSMUtilizationWatcher=true
+            # 必改：哪些节点可达本节点的 lupine-server（标准 label selector 语法，
+            # 支持 k=v / k in (a,b) / !k，逗号分隔为 AND）。pool 只对匹配节点可调度；
+            # 若允许 pod 落在 GPU 节点本机（lupine 环回消费），selector 必须覆盖 GPU 节点自身。
+            - name: REMOTE_NODE_SELECTOR
+              value: vgpu-manager.io/remote-inject=true
+            # 可选：本节点 lupine-server 端点（IP/域名，可带端口）。
+            # 留空 = 自动取节点 InternalIP:14833。改了 LUPINE_PORT 时这里要带同样端口。
+            # - name: REMOTE_ENDPOINT
+            #   value: 10.0.0.10:14833
+            # 可选：dra-inject 调 EnsureSession 的 remote-agent 端口，须与
+            # remote-server 里 LISTEN_SERVER_PORT 一致（默认 14834）。
+            # - name: REMOTE_AGENT_PORT
+            #   value: "14834"
+            - name: NVIDIA_DRIVER_ROOT
+              value: /
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: CDI_ROOT
+              value: /var/run/cdi
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+            - name: DRIVER_ROOT_CTR_PATH
+              value: /driver-root
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins_registry
+            - name: KUBELET_PLUGINS_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - mountPath: /var/lib/kubelet/plugins_registry
+              name: plugins-registry
+            - mountPath: /var/lib/kubelet/plugins
+              mountPropagation: Bidirectional
+              name: kubelet-plugins
+            - mountPath: /var/run/cdi
+              name: cdi-root
+            - mountPath: /driver-root
+              mountPropagation: HostToContainer
+              name: driver-root
+              readOnly: true
+            - mountPath: /etc/vgpu-manager
+              name: manager-root
+            - name: cgroup-root
+              mountPath: /sys/fs/cgroup
+            - mountPath: /var/lib/kubelet
+              name: kubelet-root
+      dnsPolicy: ClusterFirst
+      volumes:
+        - hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: ""
+          name: plugins-registry
+        - hostPath:
+            path: /var/lib/kubelet/plugins
+            type: ""
+          name: kubelet-plugins
+        - hostPath:
+            path: /var/run/cdi
+            type: ""
+          name: cdi-root
+        - hostPath:
+            path: /
+            type: DirectoryOrCreate
+          name: driver-root-parent
+        - hostPath:
+            path: /
+            type: DirectoryOrCreate
+          name: driver-root
+        - hostPath:
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+          name: manager-root
+        - name: cgroup-root
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: kubelet-root
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory

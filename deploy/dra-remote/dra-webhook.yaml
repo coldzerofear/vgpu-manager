@@ -1,0 +1,457 @@
+# dra-webhook: 准入组件（与 deploy/dra/vgpu-manager-webhook.yaml 同源，仅 DRA 转换的
+# DeviceClass 改为 remote-vgpu-manager）。资源名与 deploy/dra 版本相同 —— 集群里只部署
+# 一份 webhook：若已装本地版，请勿重复 apply 本文件，改在既有部署上调整 class 参数即可。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-webhook
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-webhook:role
+rules:
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims
+      - resourceclaimtemplates
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - delete
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - deviceclasses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-webhook-as-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vgpu-manager-webhook:role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-webhook
+    namespace: kube-system
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: vgpu-manager-issuer
+  namespace: kube-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vgpu-manager-webhook-cert
+  namespace: kube-system
+spec:
+  dnsNames:
+    - vgpu-manager-webhook.kube-system.svc
+    - vgpu-manager-webhook.kube-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: vgpu-manager-issuer
+  secretName: vgpu-manager-webhook-secret
+  duration: 8760h
+  renewBefore: 360h
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: kube-system/vgpu-manager-webhook-cert
+  name: vgpu-manager-webhook-mutate
+webhooks:
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: vgpu-manager-webhook
+        namespace: kube-system
+        path: /pods/mutate
+        port: 443
+    failurePolicy: Fail # Ignore
+    matchPolicy: Equivalent
+    name: mutatepod.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - cert-manager
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    reinvocationPolicy: Never
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - pods
+        scope: "Namespaced"
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - UPDATE
+        resources:
+          - pods/status
+        scope: "Namespaced"
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: vgpu-manager-webhook
+        namespace: kube-system
+        path: /volcano-jobs/mutate
+        port: 443
+    failurePolicy: Fail # Ignore
+    matchPolicy: Equivalent
+    name: mutatejob.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - cert-manager
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    reinvocationPolicy: Never
+    rules:
+      - apiGroups:
+          - batch.volcano.sh
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - jobs
+        scope: "Namespaced"
+      - apiGroups:
+          - batch.volcano.sh
+        apiVersions:
+          - v1alpha1
+        operations:
+          - UPDATE
+        resources:
+          - jobs/status
+        scope: "Namespaced"
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: kube-system/vgpu-manager-webhook-cert
+  name: vgpu-manager-webhook-validate
+webhooks:
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: vgpu-manager-webhook
+        namespace: kube-system
+        path: /pods/validate
+        port: 443
+    failurePolicy: Fail # Ignore
+    matchPolicy: Equivalent
+    name: validatepod.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - cert-manager
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+          - DELETE
+        resources:
+          - pods
+        scope: "Namespaced"
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: vgpu-manager-webhook
+        namespace: kube-system
+        path: /volcano-jobs/validate
+        port: 443
+    failurePolicy: Fail # Ignore
+    matchPolicy: Equivalent
+    name: mutatejob.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - cert-manager
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    rules:
+      - apiGroups:
+          - batch.volcano.sh
+        apiVersions:
+          - v1alpha1
+        operations:
+          - CREATE
+          - DELETE
+        resources:
+          - jobs
+        scope: "Namespaced"
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+  - admissionReviewVersions:
+      - v1beta1
+    clientConfig:
+      service:
+        name: vgpu-manager-webhook
+        namespace: kube-system
+        path: /resourceclaims/validate
+        port: 443
+    failurePolicy: Fail # Ignore
+    matchPolicy: Equivalent
+    name: validateresourceclaim.vgpu-manager.io
+    namespaceSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+#        - key: kubernetes.io/metadata.name
+#          operator: NotIn
+#          values:
+#            - kube-system
+#            - cert-manager
+    objectSelector:
+      matchExpressions:
+        - key: vgpu-manager.io/ignore-webhook
+          operator: NotIn
+          values:
+            - "true"
+    rules:
+      - apiGroups:
+          - "resource.k8s.io"
+        apiVersions:
+          - v1beta1
+          - v1beta2
+          - v1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - resourceclaims
+          - resourceclaimtemplates
+        scope: "Namespaced"
+      - apiGroups:
+          - "resource.k8s.io"
+        apiVersions:
+          - v1
+        operations:
+          - UPDATE
+        resources:
+          - resourceclaims/status
+        scope: "Namespaced"
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-webhook
+  namespace: kube-system
+spec:
+  ports:
+    - name: http
+      port: 443
+      protocol: TCP
+      targetPort: http
+  selector:
+    app: vgpu-manager-webhook
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vgpu-manager-webhook
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vgpu-manager-webhook
+  template:
+    metadata:
+      labels:
+        vgpu-manager.io/ignore-webhook: "true"
+        app: vgpu-manager-webhook
+    spec:
+      restartPolicy: Always
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      priorityClassName: system-node-critical
+      serviceAccountName: vgpu-manager-webhook
+      terminationGracePeriodSeconds: 10
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: CriticalAddonsOnly
+          operator: Exists
+      affinity:
+        nodeAffinity:
+          # Pod should run as much as possible on control plane nodes.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+        podAntiAffinity:
+          # When there are multiple replicas, try to disperse pods on different nodes as much as possible.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: vgpu-manager-webhook
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: device-webhook
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - device-webhook
+            - --server-bind-port=9443
+            - --default-topology-mode=link
+            - --dra-admission-enabled
+            - --default-convert2-dra
+            # 远程部署：DRA 转换落到远程 DeviceClass（本地/远程混部时按需调整）
+            - --vgpu-device-class-name=remote-vgpu-manager
+            - --v=4
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: 9443
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /readyz
+              port: 9443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          ports:
+            - name: http
+              containerPort: 9443
+          resources: {}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: cert-dir
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        - name: cert-dir
+          secret:
+            secretName: vgpu-manager-webhook-secret

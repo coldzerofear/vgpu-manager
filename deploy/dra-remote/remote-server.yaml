@@ -1,0 +1,261 @@
+# remote-server: GPU 节点上的远程 GPU 服务端 Pod（一个 DaemonSet 三个容器）
+#   [remote-agent]  会话物化/回收 + EnsureSession gRPC(:14834) + 就绪文件
+#   [lupine-server] 远程 GPU 数据面(:14833)，等 agent 就绪文件后再启动（不依赖 init/sidecar 容器，兼容旧集群）
+#   [device-monitor] 指标采集（含远程会话按 PID 归账，需 RemoteGPUSupport gate）
+# 部署在打了 vgpu-manager.io/remote-server=true 标签的 GPU 节点上。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-remote-server
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-remote-server:role
+rules:
+  # remote-agent: watch 本驱动 slice（节点设备快照）与 claim（会话生命周期）
+  # device-monitor: dra 采集需要 nodes/pods/slices/claims
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceslices
+      - resourceclaims
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-remote-server-as-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vgpu-manager-remote-server:role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-remote-server
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vgpu-manager-remote-server
+  namespace: kube-system
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: vgpu-manager-remote-server
+  template:
+    metadata:
+      labels:
+        app: vgpu-manager-remote-server
+        vgpu-manager.io/ignore-webhook: "true"
+    spec:
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      # SESSION 记账硬要求：pids.config 记子进程 getpid()，NVML 返回宿主 PID，
+      # 无 hostPID 两者对不上，限额静默失效（设计 D9/§1.6.6）。
+      hostPID: true
+      # endpoint = 节点 IP:14833；lupine-server/agent 直接监听 underlay 网卡。
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      nodeSelector:
+        vgpu-manager.io/remote-server: "true"
+      serviceAccountName: vgpu-manager-remote-server
+      containers:
+        - name: remote-agent
+          image: coldzerofear/vgpu-manager-dra:latest      # ← 需含 remote-agent 二进制
+          imagePullPolicy: IfNotPresent
+          command:
+            - remote-agent
+            - --v=4
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # 就绪文件放 pod 级 emptyDir：hostPath 上的陈旧文件会破坏"agent 先起"
+            # 的排序语义（新 pod 里 server 不该被上一个 pod 的文件放行）。
+            - name: READY_FILE
+              value: /run/vgpu/ready
+            # 会话目录在 manager-root hostPath 下（与 lupine-server、monitor 共享）
+            - name: VGPU_CONFIG_SESSION_BASE
+              value: /etc/vgpu-manager/remote-sessions
+            - name: LUPINE_SERVER_ADDR
+              value: 127.0.0.1:14833                       # ← 与 LUPINE_PORT 保持一致
+            - name: LISTEN_SERVER_PORT
+              value: "14834"                               # ← EnsureSession gRPC 端口(hostNetwork)
+            # dra-server 开启 SharedSMUtilizationWatcher 时置 true，
+            # 远程会话共享节点级 SM 采样缓存
+            - name: SM_WATCHER
+              value: "true"
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          volumeMounts:
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+            - name: agent-ready
+              mountPath: /run/vgpu
+        - name: lupine-server
+          image: your-registry/lupine-server:cuda-12.9     # ← 必改：lupine-server 镜像
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c]
+          args:
+            - |-
+              # 等待 remote-agent preflight 完成（会话目录骨架就绪）后再启动，
+              # 保证启动先后顺序且不依赖 init/sidecar 容器（兼容旧 k8s）。
+              until [ -f /run/vgpu/ready ]; do
+                echo "waiting for remote-agent ready file..."
+                sleep 2
+              done
+              exec lupine_driver_server
+          env:
+            - name: LUPINE_PORT
+              value: "14833"                               # ← 服务端监听端口(hostNetwork)
+            - name: VGPU_CONFIG_SESSION_BASE
+              value: /etc/vgpu-manager/remote-sessions
+            # 隔离库既是 LD_PRELOAD hook 库又是 lupine checkpoint provider，
+            # 两个变量指向镜像内同一个 .so（路径按你的 server 镜像布局修改）
+            - name: LD_PRELOAD
+              value: /usr/local/vgpu/libvgpu-control.so    # ← 必改：镜像内 .so 路径
+            - name: LUPINE_CHECKPOINT_LIBRARY
+              value: /usr/local/vgpu/libvgpu-control.so    # ← 必改：同上
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+          securityContext:
+            privileged: true
+          resources: {}
+          volumeMounts:
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+            - name: agent-ready
+              mountPath: /run/vgpu
+              readOnly: true
+        - name: device-monitor
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - device-monitor
+            - --enable-dra-monitor
+            # 远程会话按 pids.config 归账（消费 pod 在别的节点，cgroup 归账不可用）
+            - --feature-gates=RemoteGPUSupport=true
+            - --server-bind-port=3456                      # ← hostNetwork 端口，冲突时修改
+            - --container-driver-root=/driver-root
+            - --v=4
+          ports:
+            - name: http
+              containerPort: 3456
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CGROUP_DRIVER
+              value: auto
+            - name: KUBE_FEATURE_WatchListClient
+              value: "true"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_MIG_MONITOR_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+          securityContext:
+            privileged: true
+          resources: {}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3456
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3456
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: kubelet-root
+              mountPath: /var/lib/kubelet
+              readOnly: true
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+            - name: cgroup-root
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: driver-root
+              mountPath: /driver-root
+              readOnly: true
+      volumes:
+        - name: manager-root
+          hostPath:
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+        - name: agent-ready
+          emptyDir: {}
+        - name: kubelet-root
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+            type: Directory
+        - name: cgroup-root
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: driver-root
+          hostPath:
+            path: /
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-remote-monitor
+  namespace: kube-system
+spec:
+  ports:
+    - name: http
+      port: 3456
+      protocol: TCP
+      targetPort: http
+  selector:
+    app: vgpu-manager-remote-server
+  type: ClusterIP
