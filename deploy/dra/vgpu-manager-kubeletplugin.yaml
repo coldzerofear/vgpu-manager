@@ -171,6 +171,9 @@ spec:
           image: coldzerofear/vgpu-manager-dra:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c, /usr/bin/install_files.sh]
+          env:
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
           resources:
             requests:
               cpu: 10m
@@ -209,8 +212,6 @@ spec:
               value: ""
             - name: NVIDIA_DRIVER_ROOT
               value: /
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: void
             - name: CDI_ROOT
               value: /var/run/cdi
             - name: NRI_ROOT
@@ -219,6 +220,8 @@ spec:
               value: /host-root
             - name: HEALTHCHECK_PORT
               value: "4567"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
             - name: NVIDIA_MIG_CONFIG_DEVICES
@@ -226,6 +229,8 @@ spec:
             - name: DRIVER_ROOT_CTR_PATH
               value: /driver-root
             - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: CONTAINER_MANAGER_DIR
               value: /etc/vgpu-manager
             - name: KUBELET_REGISTRAR_DIRECTORY_PATH
               value: /var/lib/kubelet/plugins_registry
@@ -290,9 +295,12 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor
+            - --domain=nvidia.com
             - --enable-dra-monitor
             - --server-bind-port=3456
             - --container-driver-root=/driver-root
+            - --min-scrape-interval=1s
+            - --feature-gates=SharedSMUtilizationWatcher=true,VirtualMemoryTracking=false
             - --v=4
           ports:
             - name: http
@@ -440,7 +448,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
   extendedResourceName: nvidia.com/gpu
 ---
 apiVersion: resource.k8s.io/v1
@@ -450,7 +458,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass

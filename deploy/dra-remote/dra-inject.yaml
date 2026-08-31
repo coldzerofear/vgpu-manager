@@ -97,8 +97,17 @@ spec:
         # lupine-client 静态制品铺盘：每个 CUDA 版本一个 init 容器，目录名必须是
         # 可解析的版本号（制品选择规则 = 取 <= server CUDA 版本上限的最高版本）。
         # 增删版本 = 增删 init 容器；镜像为 /artifacts 载体（cp 落盘）。
+        - name: lupine-client-cuda-13-3
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1   # ← 必改：client 制品镜像
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c]
+          args:
+            - mkdir -p /target/13.3.1 && cp -a /artifacts/. /target/13.3.1/
+          volumeMounts:
+            - name: client-artifacts
+              mountPath: /target
         - name: lupine-client-cuda-12-9
-          image: your-registry/lupine-client-static:cuda-12.9.1   # ← 必改：client 制品镜像
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-12.9.1   # ← 按需增删版本
           imagePullPolicy: IfNotPresent
           command: [sh, -c]
           args:
@@ -106,23 +115,13 @@ spec:
           volumeMounts:
             - name: client-artifacts
               mountPath: /target
-        # - name: lupine-client-cuda-12-4
-        #   image: your-registry/lupine-client-static:cuda-12.4.1  # ← 按需增删版本
-        #   imagePullPolicy: IfNotPresent
-        #   command: [sh, -c]
-        #   args:
-        #     - mkdir -p /target/12.4.1 && cp -a /artifacts/. /target/12.4.1/
-        #   volumeMounts:
-        #     - name: client-artifacts
-        #       mountPath: /target
       containers:
         - name: kubelet-plugin
           image: coldzerofear/vgpu-manager-dra:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c]
           args:
-            - |-
-              kubelet-plugin -v 6
+            - kubelet-plugin -v 6
           env:
             - name: NODE_NAME
               valueFrom:

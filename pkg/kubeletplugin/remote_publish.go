@@ -55,17 +55,16 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, err
 	}
-	endpoint := config.Flags.RemoteEndpoint
-	if endpoint == "" {
+	endpoint := net.JoinHostPort(config.Flags.RemoteServerIP, strconv.Itoa(config.Flags.RemoteServerPort))
+	if config.Flags.RemoteServerIP == "" {
 		ip, err := nodeInternalIP(ctx, config, config.Flags.NodeName)
 		if err != nil {
 			return nil, fmt.Errorf("derive remote endpoint: %w", err)
 		}
-		endpoint = net.JoinHostPort(ip, strconv.Itoa(remote.DefaultServerPort))
+		endpoint = net.JoinHostPort(ip, strconv.Itoa(config.Flags.RemoteServerPort))
 	}
 	rp.spec = &remote.PublishSpec{Endpoint: endpoint, Selector: reachable}
-	klog.V(2).Infof("Remote GPU publishing enabled: endpoint=%s reachable-nodes=%q",
-		endpoint, config.Flags.RemoteNodeSelector)
+	klog.V(2).Infof("Remote GPU publishing enabled: endpoint=%s %s", endpoint, config.Flags.RemoteNodeSelector)
 	return rp, nil
 }
 

@@ -417,6 +417,7 @@ spec:
             - --default-convert2-dra
             # 远程部署：DRA 转换落到远程 DeviceClass（本地/远程混部时按需调整）
             - --vgpu-device-class-name=remote-vgpu-manager
+            - --combined-resource-claim
             - --v=4
           livenessProbe:
             failureThreshold: 3

@@ -215,10 +215,17 @@ func newApp() *cli.App {
 			EnvVars:     []string{"REMOTE_AGENT_PORT"},
 		},
 		&cli.StringFlag{
-			Name:        "remote-endpoint",
-			Usage:       "lupine-server endpoint published on this node's devices when RemoteGPUSupport is enabled (server mode). Empty derives <node InternalIP>:14833.",
-			Destination: &flags.RemoteEndpoint,
-			EnvVars:     []string{"REMOTE_ENDPOINT"},
+			Name:        "remote-server-ip",
+			Usage:       "lupine-server endpoint published on this node's devices when RemoteGPUSupport is enabled (server mode). Empty derives <node InternalIP>:<REMOTE_SERVER_PORT>.",
+			Destination: &flags.RemoteServerIP,
+			EnvVars:     []string{"REMOTE_SERVER_IP"},
+		},
+		&cli.IntFlag{
+			Name:        "remote-server-port",
+			Usage:       "lupine-server endpoint published on this node's devices when RemoteGPUSupport is enabled (server mode). Empty derives <node InternalIP>:<REMOTE_SERVER_PORT>.",
+			Value:       remote.DefaultServerPort,
+			Destination: &flags.RemoteServerPort,
+			EnvVars:     []string{"REMOTE_SERVER_PORT"},
 		},
 		&cli.StringFlag{
 			Name:        "remote-node-selector",

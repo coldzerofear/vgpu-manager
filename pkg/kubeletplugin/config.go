@@ -60,10 +60,11 @@ type Flags struct {
 	// RemoteAgentPort is the remote-agent gRPC port on server hosts
 	// (inject mode calls EnsureSession there).
 	RemoteAgentPort int
-	// RemoteEndpoint is the lupine-server endpoint published on this node's
+	// RemoteServerIP is the lupine-server endpoint published on this node's
 	// devices when RemoteGPUSupport is on (server mode). Empty derives
-	// "<node InternalIP>:<lupine default port>".
-	RemoteEndpoint string
+	// "<node InternalIP>:<lupine server port>".
+	RemoteServerIP   string
+	RemoteServerPort int
 	// RemoteNodeSelector is a label-selector expression over nodes that can
 	// reach this GPU node's lupine-server (e.g.
 	// "topology.kubernetes.io/zone=az1,gpu-fabric=rdma-a"). The pool becomes

@@ -410,10 +410,12 @@ spec:
             - device-webhook
             - --server-bind-port=9443
             - --default-topology-mode=link
+            - --vgpu-device-class-name=vgpu-manager
             - --dra-admission-enabled
             - --default-convert2-dra
+            - --combined-resource-claim
             - --v=4
-          livenessProbe:
+    livenessProbe:
             failureThreshold: 3
             httpGet:
               path: /healthz

@@ -85,6 +85,24 @@ spec:
       nodeSelector:
         vgpu-manager.io/remote-server: "true"
       serviceAccountName: vgpu-manager-remote-server
+      initContainers:
+        - name: init-install
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c, /usr/bin/install_files.sh]
+          env:
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+          resources:
+            requests:
+              cpu: 10m
+              memory: 15Mi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: manager-root
+              mountPath: /etc/vgpu-manager
+              mountPropagation: Bidirectional
       containers:
         - name: remote-agent
           image: coldzerofear/vgpu-manager-dra:latest      # ← 需含 remote-agent 二进制
@@ -105,7 +123,7 @@ spec:
             - name: VGPU_CONFIG_SESSION_BASE
               value: /etc/vgpu-manager/remote-sessions
             - name: LUPINE_SERVER_ADDR
-              value: 127.0.0.1:14833                       # ← 与 LUPINE_PORT 保持一致
+              value: "127.0.0.1:14833"                     # ← 与 LUPINE_PORT 保持一致
             - name: LISTEN_SERVER_PORT
               value: "14834"                               # ← EnsureSession gRPC 端口(hostNetwork)
             # dra-server 开启 SharedSMUtilizationWatcher 时置 true，
@@ -124,7 +142,7 @@ spec:
             - name: agent-ready
               mountPath: /run/vgpu
         - name: lupine-server
-          image: your-registry/lupine-server:cuda-12.9     # ← 必改：lupine-server 镜像
+          image: ghcr.io/coldzerofear/lupine-server:cuda-13.3.1-ubuntu24.04    # ← 必改：lupine-server 镜像
           imagePullPolicy: IfNotPresent
           command: [bash, -c]
           args:
@@ -144,13 +162,15 @@ spec:
             # 隔离库既是 LD_PRELOAD hook 库又是 lupine checkpoint provider，
             # 两个变量指向镜像内同一个 .so（路径按你的 server 镜像布局修改）
             - name: LD_PRELOAD
-              value: /usr/local/vgpu/libvgpu-control.so    # ← 必改：镜像内 .so 路径
+              value: /etc/vgpu-manager/driver/libvgpu-control.so
             - name: LUPINE_CHECKPOINT_LIBRARY
-              value: /usr/local/vgpu/libvgpu-control.so    # ← 必改：同上
+              value: /etc/vgpu-manager/driver/libvgpu-control.so
             - name: NVIDIA_VISIBLE_DEVICES
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
-              value: utility,compute
+              value: all
+            - name: NVIDIA_MIG_CONFIG_DEVICES
+              value: all
           securityContext:
             privileged: true
           resources: {}
@@ -165,11 +185,13 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor
+            - --domain=nvidia.com
             - --enable-dra-monitor
             # 远程会话按 pids.config 归账（消费 pod 在别的节点，cgroup 归账不可用）
-            - --feature-gates=RemoteGPUSupport=true
+            - --feature-gates=RemoteGPUSupport=true,SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
             - --server-bind-port=3456                      # ← hostNetwork 端口，冲突时修改
             - --container-driver-root=/driver-root
+            - --min-scrape-interval=1s
             - --v=4
           ports:
             - name: http
@@ -189,6 +211,8 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+            - name: VGPU_CONFIG_SESSION_BASE
+              value: /etc/vgpu-manager/remote-sessions
           securityContext:
             privileged: true
           resources: {}

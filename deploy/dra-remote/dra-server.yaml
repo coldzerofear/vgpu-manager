@@ -95,6 +95,7 @@ spec:
       hostPID: true
       priorityClassName: system-node-critical
       nodeSelector:
+        vgpu-manager: dra-driver-remote
         vgpu-manager.io/remote-server: "true"
       serviceAccountName: vgpu-manager-remote-dra-server
       initContainers:
@@ -126,6 +127,15 @@ spec:
           command: [bash, -c]
           args:
             - |-
+              # Conditionally mask the params file to prevent this container from
+              # recreating any missing GPU device nodes. This is necessary, for
+              # example, when running under nvkind to limit the set GPUs governed
+              # by the plugin even though it has cgroup access to all of them.
+              if [ "${MASK_NVIDIA_DRIVER_PARAMS}" = "true" ]; then
+                cp /proc/driver/nvidia/params root/gpu-params
+                sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
+                mount --bind root/gpu-params /proc/driver/nvidia/params
+              fi
               kubelet-plugin -v 6
           env:
             - name: NODE_NAME
@@ -135,28 +145,34 @@ spec:
             - name: PLUGIN_MODE
               value: server
             - name: FEATURE_GATES
-              value: RemoteGPUSupport=true,SharedSMUtilizationWatcher=true
+              value: RemoteGPUSupport=true,NVMLDeviceHealthCheck=true,SharedSMUtilizationWatcher=true
+            - name: MASK_NVIDIA_DRIVER_PARAMS
+              value: ""
             # 必改：哪些节点可达本节点的 lupine-server（标准 label selector 语法，
             # 支持 k=v / k in (a,b) / !k，逗号分隔为 AND）。pool 只对匹配节点可调度；
             # 若允许 pod 落在 GPU 节点本机（lupine 环回消费），selector 必须覆盖 GPU 节点自身。
             - name: REMOTE_NODE_SELECTOR
               value: vgpu-manager.io/remote-inject=true
-            # 可选：本节点 lupine-server 端点（IP/域名，可带端口）。
-            # 留空 = 自动取节点 InternalIP:14833。改了 LUPINE_PORT 时这里要带同样端口。
-            # - name: REMOTE_ENDPOINT
-            #   value: 10.0.0.10:14833
+            # 可选：本节点 lupine-server（IP/域名）。
+            # 留空 = 自动取节点 InternalIP:<REMOTE_SERVER_PORT>。
+            # - name: REMOTE_SERVER_IP
+            #   value: 10.0.0.10
+            - name: REMOTE_SERVER_PORT
+              value: "14833"
             # 可选：dra-inject 调 EnsureSession 的 remote-agent 端口，须与
             # remote-server 里 LISTEN_SERVER_PORT 一致（默认 14834）。
-            # - name: REMOTE_AGENT_PORT
-            #   value: "14834"
+            - name: REMOTE_AGENT_PORT
+              value: "14834"
             - name: NVIDIA_DRIVER_ROOT
               value: /
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: void
             - name: CDI_ROOT
               value: /var/run/cdi
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+            - name: NVIDIA_MIG_CONFIG_DEVICES
+              value: all
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
             - name: DRIVER_ROOT_CTR_PATH
               value: /driver-root
             - name: HOST_MANAGER_DIR
@@ -167,6 +183,8 @@ spec:
               value: /var/lib/kubelet/plugins_registry
             - name: KUBELET_PLUGINS_DIRECTORY_PATH
               value: /var/lib/kubelet/plugins
+            - name: HOST_ROOT
+              value: /host-root
           securityContext:
             privileged: true
           volumeMounts:
@@ -187,6 +205,21 @@ spec:
               mountPath: /sys/fs/cgroup
             - mountPath: /var/lib/kubelet
               name: kubelet-root
+            # PassthroughSupport
+            - name: host-root
+              mountPath: /host-root
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules/
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: sysfs
+              mountPath: /sys/
+              mountPropagation: Bidirectional
+            - name: procfs
+              mountPath: /proc/
+              mountPropagation: Bidirectional
       dnsPolicy: ClusterFirst
       volumes:
         - hostPath:
@@ -220,4 +253,25 @@ spec:
         - name: kubelet-root
           hostPath:
             path: /var/lib/kubelet
+            type: Directory
+#        # PassthroughSupport
+#        # system commands against the host FS. For example, to test and load the vfio-pci
+#        # module variant for a GPU.
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+#        # This is needed by `https://github.com/NVIDIA/go-nvlib/pkg/nvpassthrough` pkg
+#        # to detect the vfio-pci driver variant to use with a GPU.
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules/
+            type: Directory
+        - name: sysfs
+          hostPath:
+            path: /sys/
+            type: Directory
+        - name: procfs
+          hostPath:
+            path: /proc/
             type: Directory

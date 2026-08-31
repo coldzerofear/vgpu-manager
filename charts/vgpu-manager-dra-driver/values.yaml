@@ -222,16 +222,17 @@ deviceClasses:
   enabled: true
   # Driver name the DRA kubelet-plugin registers as (must match the kubelet-plugin binary).
   driverName: manager.nvidia.com
-  # Whole-GPU device class. `extendedResourceName` is only rendered when the served
-  # resource.k8s.io version is v1 (the field does not exist in v1beta*).
-  gpu:
-    enabled: false
-    name: gpu-manager
-    extendedResourceName: nvidia.com/gpu
   # vGPU (shared) device class.
   vgpu:
     enabled: true
     name: vgpu-manager
+  # Whole-GPU device class.
+  gpu:
+    enabled: false
+    name: gpu-manager
+    # `extendedResourceName` is only rendered when the served
+    # resource.k8s.io version is v1 (the field does not exist in v1beta*).
+    extendedResourceName: nvidia.com/gpu
   # MIG device class.
   mig:
     enabled: false

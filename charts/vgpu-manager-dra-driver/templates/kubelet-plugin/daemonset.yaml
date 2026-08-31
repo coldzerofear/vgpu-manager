@@ -147,7 +147,7 @@ spec:
             - name: NVIDIA_DRIVER_ROOT
               value: {{ $driverRoot | quote }}
             - name: NVIDIA_VISIBLE_DEVICES
-              value: void
+              value: all
             - name: CDI_ROOT
               value: {{ $cdiRoot | quote }}
             {{- if $passthrough }}
@@ -168,6 +168,8 @@ spec:
               value: /driver-root
             - name: HOST_MANAGER_DIR
               value: {{ $managerDir | quote }}
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: KUBELET_REGISTRAR_DIRECTORY_PATH
               value: {{ $registrarDir | quote }}
             - name: KUBELET_PLUGINS_DIRECTORY_PATH
