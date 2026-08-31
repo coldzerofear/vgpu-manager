@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	pkgkubeletplugin "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
@@ -216,13 +217,13 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "remote-server-ip",
-			Usage:       "lupine-server endpoint published on this node's devices when RemoteGPUSupport is enabled (server mode). Empty derives <node InternalIP>:<REMOTE_SERVER_PORT>.",
+			Usage:       "Bare IP or hostname (no port, no scheme) of this node's lupine-server, published as the device endpoint when RemoteGPUSupport is enabled (server mode). Empty derives the node InternalIP.",
 			Destination: &flags.RemoteServerIP,
 			EnvVars:     []string{"REMOTE_SERVER_IP"},
 		},
 		&cli.IntFlag{
 			Name:        "remote-server-port",
-			Usage:       "lupine-server endpoint published on this node's devices when RemoteGPUSupport is enabled (server mode). Empty derives <node InternalIP>:<REMOTE_SERVER_PORT>.",
+			Usage:       "lupine-server listen port; combined with --remote-server-ip to form the published endpoint (server mode, RemoteGPUSupport).",
 			Value:       remote.DefaultServerPort,
 			Destination: &flags.RemoteServerPort,
 			EnvVars:     []string{"REMOTE_SERVER_PORT"},
@@ -315,6 +316,15 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 			}
 			if _, err := remote.ParseNodeSelector(flags.RemoteNodeSelector); err != nil {
 				return err
+			}
+			// The endpoint is built as <ip>:<port>; a port or scheme inside
+			// --remote-server-ip would produce a malformed endpoint.
+			if strings.ContainsAny(flags.RemoteServerIP, ":/") {
+				return fmt.Errorf("--remote-server-ip must be a bare IP or hostname (no port, no scheme), got %q",
+					flags.RemoteServerIP)
+			}
+			if flags.RemoteServerPort <= 0 || flags.RemoteServerPort > 65535 {
+				return fmt.Errorf("--remote-server-port must be in [1, 65535], got %d", flags.RemoteServerPort)
 			}
 			if flags.HttpEndpoint != "" {
 				return fmt.Errorf("when the feature gate %s is enabled and the --plugin-mode=%s, --http-endpoint cannot be set",

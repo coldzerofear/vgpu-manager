@@ -220,8 +220,10 @@ spec:
               value: /host-root
             - name: HEALTHCHECK_PORT
               value: "4567"
+            # void: 阻止 nvidia runtime 向插件容器注入驱动库/设备节点，
+            # 驱动发现走 prestart + /driver-root
             - name: NVIDIA_VISIBLE_DEVICES
-              value: all
+              value: void
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
             - name: NVIDIA_MIG_CONFIG_DEVICES

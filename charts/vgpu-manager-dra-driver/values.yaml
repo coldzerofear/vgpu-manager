@@ -215,13 +215,11 @@ kubeletPlugin:
 #          cpu: 1000m
 #          memory: 2Gi
 
-# DeviceClass objects published by the DRA driver. The driver advertises devices under the
-# `driverName` driver; each DeviceClass selects a device `type` via a CEL expression.
+# DeviceClass objects published by the DRA driver (driver name is fixed:
+# manager.nvidia.com); each DeviceClass selects a device `type` via a CEL expression.
 deviceClasses:
   # Should the DeviceClass objects be created? (default: true)
   enabled: true
-  # Driver name the DRA kubelet-plugin registers as (must match the kubelet-plugin binary).
-  driverName: manager.nvidia.com
   # vGPU (shared) device class.
   vgpu:
     enabled: true

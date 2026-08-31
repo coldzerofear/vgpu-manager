@@ -415,7 +415,7 @@ spec:
             - --default-convert2-dra
             - --combined-resource-claim
             - --v=4
-    livenessProbe:
+          livenessProbe:
             failureThreshold: 3
             httpGet:
               path: /healthz

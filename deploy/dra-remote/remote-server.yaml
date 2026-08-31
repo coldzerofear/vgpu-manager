@@ -83,6 +83,8 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       priorityClassName: system-node-critical
       nodeSelector:
+        # 与 dra-server 同一组标签：两个 DaemonSet 必须落在同一批 GPU 节点
+        vgpu-manager: dra-driver-remote
         vgpu-manager.io/remote-server: "true"
       serviceAccountName: vgpu-manager-remote-server
       initContainers:

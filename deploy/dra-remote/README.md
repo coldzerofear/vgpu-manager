@@ -22,7 +22,7 @@ pod 即使调度到 GPU 节点本机，也经 lupine 环回消费。因此 **GPU
 
 ```bash
 # 1. 打标签：GPU 节点两个都打；纯消费节点只打 remote-inject
-kubectl label node <gpu-node> vgpu-manager.io/remote-server=true vgpu-manager.io/remote-inject=true
+kubectl label node <gpu-node> vgpu-manager=dra-driver-remote vgpu-manager.io/remote-server=true vgpu-manager.io/remote-inject=true
 kubectl label node <consumer-node> vgpu-manager.io/remote-inject=true
 
 # 2. 按需修改下表参数后 apply（webhook 若集群已有本地版部署则跳过，见文件头注释）
@@ -45,7 +45,7 @@ kubectl apply -f dra-webhook.yaml
 | **lupine-client 制品镜像** | `dra-inject.yaml` → initContainers | `your-registry/lupine-client-static:cuda-12.9.1`（占位，**必改**） | `/artifacts` 载体镜像（静态 client 的 `libcuda.so.1`/`libnvidia-ml.so.1`）；每个 CUDA 版本一个 init 容器，落盘目录名必须是版本号（选择规则 = 取 ≤ server CUDA 上限的最高版本）；增删版本 = 增删 init 容器后滚动 |
 | **vgpu-manager 镜像** | 四个文件所有 `coldzerofear/vgpu-manager-dra:latest` | latest | 换成内网 registry / 钉版本；remote-server 的 agent 容器要求镜像内含 `remote-agent` 二进制 |
 | **可达域 selector** | `dra-server.yaml` → `REMOTE_NODE_SELECTOR` | `vgpu-manager.io/remote-inject=true` | 标准 label selector 语法（`k=v,k2 in (a,b),!k3`）；决定 pool 可调度到哪些节点。**要允许本机消费必须覆盖 GPU 节点自身**（默认值配合上面打标签方式已覆盖） |
-| **服务端端点/端口** | `remote-server.yaml` `LUPINE_PORT`、`dra-server.yaml` `REMOTE_ENDPOINT` | `14833` / 自动取节点 InternalIP:14833 | 改端口时两处联动；REMOTE_ENDPOINT 也可填域名（TLS/多网卡场景） |
+| **服务端端点/端口** | `remote-server.yaml` `LUPINE_PORT`、`dra-server.yaml` `REMOTE_SERVER_IP`/`REMOTE_SERVER_PORT` | IP 留空 = 自动取节点 InternalIP；端口 `14833` | 改端口时与 `LUPINE_PORT` 联动；`REMOTE_SERVER_IP` 填**纯 IP 或域名**（不带端口/协议头） |
 | **agent gRPC 端口** | `remote-server.yaml` `LISTEN_SERVER_PORT`、`dra-inject.yaml` `REMOTE_AGENT_PORT` | `14834` | 两处必须一致（hostNetwork 端口） |
 | **monitor 端口** | `remote-server.yaml` `--server-bind-port` | `3456` | hostNetwork，与节点上其他进程冲突时修改（Service targetPort 联动） |
 | **SM watcher** | `dra-server.yaml` `FEATURE_GATES` 的 `SharedSMUtilizationWatcher` 与 `remote-server.yaml` `SM_WATCHER` | 均开启 | 两处联动开关：节点级共享 NVML 采样。关闭时两处同时关 |

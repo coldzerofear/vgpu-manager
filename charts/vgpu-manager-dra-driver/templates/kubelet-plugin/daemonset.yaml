@@ -146,8 +146,10 @@ spec:
               value: {{ .Values.kubeletPlugin.maskNvidiaDriverParams | quote }}
             - name: NVIDIA_DRIVER_ROOT
               value: {{ $driverRoot | quote }}
+            # void: 阻止 nvidia runtime 向插件容器注入驱动库/设备节点，
+            # 驱动发现走 prestart + /driver-root
             - name: NVIDIA_VISIBLE_DEVICES
-              value: all
+              value: void
             - name: CDI_ROOT
               value: {{ $cdiRoot | quote }}
             {{- if $passthrough }}

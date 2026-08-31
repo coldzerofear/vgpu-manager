@@ -64,7 +64,8 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 		endpoint = net.JoinHostPort(ip, strconv.Itoa(config.Flags.RemoteServerPort))
 	}
 	rp.spec = &remote.PublishSpec{Endpoint: endpoint, Selector: reachable}
-	klog.V(2).Infof("Remote GPU publishing enabled: endpoint=%s %s", endpoint, config.Flags.RemoteNodeSelector)
+	klog.V(2).Infof("Remote GPU publishing enabled: endpoint=%s reachable-nodes=%q",
+		endpoint, config.Flags.RemoteNodeSelector)
 	return rp, nil
 }
 
