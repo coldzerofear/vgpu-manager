@@ -19,6 +19,7 @@ package collector
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -119,7 +120,8 @@ func (c draGPUCollector) getPod(ctx context.Context, namespace, name string) (*c
 		return pod, nil
 	}
 	if c.podCache == nil {
-		return nil, apierrors.NewNotFound(corev1.Resource("pods"), name)
+		return nil, apierrors.NewNotFound(corev1.Resource("pods"),
+			fmt.Sprintf("%s/%s", namespace, name))
 	}
 	return c.podCache.get(ctx, namespace, name)
 }
@@ -216,6 +218,7 @@ func (a draContainerAlloc) remote() bool {
 func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCache map[types.UID]*claimresolve.PartitionInfo) []uint32 {
 	ctx := context.Background()
 	pids := sets.New[uint32]()
+	reader := claimReader{c: c}
 	for _, ref := range alloc.claims {
 		if ref.claim == nil {
 			continue
@@ -224,13 +227,14 @@ func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCac
 		if !ok {
 			allocated := sets.New[string]()
 			for _, result := range ref.claim.Status.Allocation.Devices.Results {
-				if result.Driver == util.DRADriverName {
-					if main := remote.MainRequestName(ref.claim, result.Request); main != "" {
-						allocated.Insert(main)
-					}
+				if result.Driver != util.DRADriverName {
+					continue
+				}
+				if main := remote.MainRequestName(ref.claim, result.Request); main != "" {
+					allocated.Insert(main)
 				}
 			}
-			resolved, err := claimresolve.ResolveClaimVGPUPartitionsFromAllocatedRequests(ctx, claimReader{c: c}, ref.claim, allocated)
+			resolved, err := claimresolve.ResolveClaimVGPUPartitionsFromAllocatedRequests(ctx, reader, ref.claim, allocated)
 			if err != nil {
 				klog.V(4).ErrorS(err, "resolve partitions failed", "resourceClaim", klog.KObj(ref.claim))
 			}
@@ -239,28 +243,29 @@ func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCac
 		}
 		// NRI mode (per-container session) keys the token by
 		// <podUID>_<containerName>; partition mode by the resolver key.
-		if token := ref.claim.Annotations[remote.SessionAnnotationKey(remote.NRIPartitionKey(string(alloc.podUID), alloc.name))]; token != "" {
+		nriPartitionKey := remote.NRIPartitionKey(string(alloc.podUID), alloc.name)
+		if token := ref.claim.Annotations[remote.SessionAnnotationKey(nriPartitionKey)]; token != "" {
 			for _, pid := range readSessionPIDs(filepath.Join(c.sessionBase, token, sessionPidsFile)) {
 				pids.Insert(pid)
 			}
 			continue
 		}
 		for _, mainRequest := range ref.requests {
-			key := ""
+			var partitionKey string
 			if info != nil {
-				key = info.RequestToPartition[mainRequest]
+				partitionKey = info.RequestToPartition[mainRequest]
 			}
-			if key == "" {
-				key = remote.PartitionFallbackKey(mainRequest)
+			if partitionKey == "" {
+				partitionKey = remote.PartitionFallbackKey(mainRequest)
 			}
-			token := ref.claim.Annotations[remote.SessionAnnotationKey(key)]
-			if token == "" {
-				klog.V(5).InfoS("no session token recorded for partition", "resourceClaim", klog.KObj(ref.claim), "partition", key)
+			if token := ref.claim.Annotations[remote.SessionAnnotationKey(partitionKey)]; token != "" {
+				for _, pid := range readSessionPIDs(filepath.Join(c.sessionBase, token, sessionPidsFile)) {
+					pids.Insert(pid)
+				}
 				continue
 			}
-			for _, pid := range readSessionPIDs(filepath.Join(c.sessionBase, token, sessionPidsFile)) {
-				pids.Insert(pid)
-			}
+			klog.V(5).InfoS("no session token recorded for partition",
+				"resourceClaim", klog.KObj(ref.claim), "partition", partitionKey)
 		}
 	}
 	return sets.List(pids)

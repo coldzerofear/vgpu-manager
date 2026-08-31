@@ -102,32 +102,37 @@ func NodeRemoteDevicesFromSlices(slices []*resourceapi.ResourceSlice) *NodeDevic
 	nd := &NodeDevices{Devices: map[string]NodeDevice{}}
 	for _, slice := range slices {
 		for _, dev := range slice.Spec.Devices {
-			mode := stringAttr(&dev, remote.AttrAccessMode)
-			uuid := collector.DeviceUUIDFromAttribute(stringAttr(&dev, remote.AttrUUID))
-			minor := intAttr(&dev, remote.AttrMinor)
-			if mode != remote.AccessModeRemote || uuid == "" ||
-				minor < 0 || minor >= vgpuconfig.MaxDeviceCount {
+			mode := remote.StringAttr(&dev, remote.AttrAccessMode)
+			if mode != remote.AccessModeRemote {
+				continue
+			}
+			uuid := collector.DeviceUUIDFromAttribute(remote.StringAttr(&dev, remote.AttrUUID))
+			if uuid == "" {
+				continue
+			}
+			minor := remote.IntAttr(&dev, remote.AttrMinor)
+			if minor < 0 || minor >= vgpuconfig.MaxDeviceCount {
 				continue
 			}
 
 			d := NodeDevice{Name: dev.Name, Minor: minor, UUID: uuid}
-			if q, ok := dev.Capacity[remote.CapacityMemory]; ok {
-				d.MemoryMiB = q.Value.Value() >> 20
-			}
 			if q, ok := dev.Capacity[remote.CapacityCores]; ok {
 				d.Cores = q.Value.Value()
+			}
+			if q, ok := dev.Capacity[remote.CapacityMemory]; ok {
+				d.MemoryMiB = q.Value.Value() >> 20
 			}
 			nd.Devices[d.Name] = d
 
 			if nd.CudaVersion == nil {
-				if version := versionAttr(&dev, remote.AttrCUDADriverVersion); version != "" {
+				if version := remote.VersionAttr(&dev, remote.AttrCUDADriverVersion); version != "" {
 					if v, err := semver.NewVersion(version); err == nil {
 						nd.CudaVersion = v
 					}
 				}
 			}
 			if nd.DriverVersion == nil {
-				if version := versionAttr(&dev, remote.AttrDriverVersion); version != "" {
+				if version := remote.VersionAttr(&dev, remote.AttrDriverVersion); version != "" {
 					if v, err := semver.NewVersion(version); err == nil {
 						nd.DriverVersion = v
 					}
@@ -145,27 +150,6 @@ func (nd *NodeDevices) CudaVersionString() string {
 		return ""
 	}
 	return nd.CudaVersion.Original()
-}
-
-func stringAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string {
-	if attr, ok := dev.Attributes[name]; ok && attr.StringValue != nil {
-		return *attr.StringValue
-	}
-	return ""
-}
-
-func intAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) int64 {
-	if attr, ok := dev.Attributes[name]; ok && attr.IntValue != nil {
-		return *attr.IntValue
-	}
-	return -1
-}
-
-func versionAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string {
-	if attr, ok := dev.Attributes[name]; ok && attr.VersionValue != nil {
-		return *attr.VersionValue
-	}
-	return ""
 }
 
 // SessionStore materializes and removes session directories under base and

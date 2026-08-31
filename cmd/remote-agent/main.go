@@ -32,8 +32,6 @@ import (
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
-const defaultSessionBase = "/etc/vgpu-manager/remote-sessions"
-
 func main() {
 	var (
 		kube pkgflags.KubeClientConfig
@@ -46,7 +44,7 @@ func main() {
 		Flags: append([]cli.Flag{
 			&cli.StringFlag{Name: "node-name", Usage: "Node this agent runs on (= the driver's pool name).", Destination: &cfg.NodeName, EnvVars: []string{"NODE_NAME"}, Required: true},
 			&cli.StringFlag{Name: "driver-name", Usage: "DRA driver name whose slices/claims are consumed.", Value: util.DRADriverName, Destination: &cfg.DriverName, EnvVars: []string{"DRIVER_NAME"}},
-			&cli.StringFlag{Name: "session-base", Usage: "Session directory root shared with lupine-server (VGPU_CONFIG_SESSION_BASE).", Value: defaultSessionBase, Destination: &cfg.SessionBase, EnvVars: []string{"VGPU_CONFIG_SESSION_BASE"}},
+			&cli.StringFlag{Name: "session-base", Usage: "Session directory root shared with lupine-server (VGPU_CONFIG_SESSION_BASE).", Value: util.RemoteSessionBasePath, Destination: &cfg.SessionBase, EnvVars: []string{"VGPU_CONFIG_SESSION_BASE"}},
 			&cli.StringFlag{Name: "ready-file", Usage: "File written after preflight; the server container waits for it. Defaults to <session-base>/.agent-ready.", Destination: &cfg.ReadyFile, EnvVars: []string{"READY_FILE"}},
 			&cli.StringFlag{Name: "lupine-server-addr", Usage: "lupine-server address to probe.", Value: fmt.Sprintf("127.0.0.1:%d", remote.DefaultServerPort), Destination: &cfg.ServerAddr, EnvVars: []string{"LUPINE_SERVER_ADDR"}},
 			&cli.IntFlag{Name: "listen-server-port", Usage: "gRPC listen port.", Value: remote.DefaultAgentPort, Destination: &cfg.ListenPort, EnvVars: []string{"LISTEN_SERVER_PORT"}},

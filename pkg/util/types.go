@@ -35,6 +35,28 @@ type ContainerRef struct {
 	Restartable bool
 }
 
+func GetAllPodContainerMap(pod *corev1.Pod) map[string]ContainerRef {
+	m := make(map[string]ContainerRef, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		m[c.Name] = ContainerRef{
+			Name:        c.Name,
+			Claims:      c.Resources.Claims,
+			Kind:        ContainerKindInit,
+			Restartable: IsRestartableInitContainer(c),
+		}
+	}
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		m[c.Name] = ContainerRef{
+			Name:   c.Name,
+			Claims: c.Resources.Claims,
+			Kind:   ContainerKindApp,
+		}
+	}
+	return m
+}
+
 func GetAllPodContainers(pod *corev1.Pod) []ContainerRef {
 	all := make([]ContainerRef, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
 	for i := range pod.Spec.InitContainers {

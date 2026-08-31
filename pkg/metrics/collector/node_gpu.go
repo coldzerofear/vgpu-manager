@@ -190,34 +190,34 @@ var (
 	containerVGPUMemoryLimit = prometheus.NewDesc(
 		"container_vgpu_device_memory_limit_in_bytes",
 		"Container's virtual GPU device total memory limit (sum of physical GPU memory + unified memory)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 	containerVGPUPhysicalMemoryLimit = prometheus.NewDesc(
 		"container_vgpu_device_physical_memory_limit_in_bytes",
 		"Container's virtual GPU device physical memory limit (only physical GPU memory)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 
 	containerVGPUMemoryUsage = prometheus.NewDesc(
 		"container_vgpu_device_memory_usage_in_bytes",
 		"Container's virtual GPU device memory usage (sum of physical GPU memory + unified memory)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 	containerVGPUPhysicalMemoryUsage = prometheus.NewDesc(
 		"container_vgpu_device_physical_memory_usage_in_bytes",
 		"Container's virtual GPU device physical memory usage (only physical GPU memory)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 
 	containerVGPUMemoryUtilRate = prometheus.NewDesc(
 		"container_vgpu_device_memory_utilization_percent",
 		"Container's virtual GPU device memory utilization percentage (0-100)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 	containerVGPUCoreUtilRate = prometheus.NewDesc(
 		"container_vgpu_device_core_utilization_percent",
 		"Container's virtual GPU device core utilization percentage (0-100)",
-		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode"}, nil,
+		[]string{"pod_namespace", "pod_name", "container_name", "vdevice_idx", "device_uuid", "node", "access_mode", "pod_node"}, nil,
 	)
 
 	migDeviceTotalMemory = prometheus.NewDesc(
@@ -518,12 +518,12 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 					})
 
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUMemoryLimit, prometheus.GaugeValue, float64(deviceMemLimit),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal)
+					containerVGPUMemoryLimit, prometheus.GaugeValue, float64(deviceMemLimit), pod.Namespace, pod.Name,
+					containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal, pod.Spec.NodeName)
 
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUPhysicalMemoryLimit, prometheus.GaugeValue, float64(realMemBytes),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal)
+					containerVGPUPhysicalMemoryLimit, prometheus.GaugeValue, float64(realMemBytes), pod.Namespace,
+					pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal, pod.Spec.NodeName)
 
 				// TODO handler Virtual Memory Cache node.
 				if c.featureGate.Enabled(util.VirtualMemoryTracking) {
@@ -557,11 +557,11 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				}
 
 				ch <- prometheus.MustNewConstMetric(containerVGPUMemoryUsage,
-					prometheus.GaugeValue, float64(deviceMemUsage+deviceVMemUsage),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal)
+					prometheus.GaugeValue, float64(deviceMemUsage+deviceVMemUsage), pod.Namespace, pod.Name,
+					containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal, pod.Spec.NodeName)
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUPhysicalMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal)
+					containerVGPUPhysicalMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage), pod.Namespace,
+					pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal, pod.Spec.NodeName)
 
 				deviceMemUsage += deviceVMemUsage
 				memoryUtilRate := int64(0)
@@ -571,12 +571,12 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 					memoryUtilRate = int64(float64(deviceMemUsage) / float64(deviceMemLimit) * 100)
 				}
 				ch <- prometheus.MustNewConstMetric(containerVGPUMemoryUtilRate,
-					prometheus.GaugeValue, float64(memoryUtilRate),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal)
+					prometheus.GaugeValue, float64(memoryUtilRate), pod.Namespace, pod.Name, containerName,
+					vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal, pod.Spec.NodeName)
 
 				ch <- prometheus.MustNewConstMetric(containerVGPUCoreUtilRate,
-					prometheus.GaugeValue, float64(util.GetPercentageValue(deviceSMUtil)),
-					pod.Namespace, pod.Name, containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal)
+					prometheus.GaugeValue, float64(util.GetPercentageValue(deviceSMUtil)), pod.Namespace, pod.Name,
+					containerName, vDevIndex, deviceUUID, c.nodeName, util.AccessModeLocal, pod.Spec.NodeName)
 			}
 		}
 	})

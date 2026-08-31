@@ -140,10 +140,7 @@ func (d *InjectDriver) nriInjection(claimUID, podName, podNamespace, podUID, con
 		allocated.Insert(rd.mainRequest)
 	}
 	requests := sets.New[string]()
-	for _, container := range util.GetAllPodContainers(pod) {
-		if container.Name != containerName {
-			continue
-		}
+	if container, ok := util.GetAllPodContainerMap(pod)[containerName]; ok {
 		for _, claimRef := range container.Claims {
 			actual, ok, err := claimresolve.ResolveActualClaimNameForPodClaim(pod, claimRef.Name)
 			if err != nil {
@@ -227,7 +224,7 @@ func (d *InjectDriver) savePreparedLocked() {
 		return
 	}
 	tmp := d.checkpointPath() + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err == nil {
+	if err = os.WriteFile(tmp, data, 0o600); err == nil {
 		err = os.Rename(tmp, d.checkpointPath())
 	}
 	if err != nil {

@@ -175,12 +175,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.claimInformer.GetIndexer(),
 		time.Minute, true)
 
-	a.wg.Go(func() {
-		a.sliceInformer.RunWithContext(ctx)
-	})
-	a.wg.Go(func() {
-		a.claimInformer.RunWithContext(ctx)
-	})
+	a.wg.Go(func() { a.sliceInformer.RunWithContext(ctx) })
+	a.wg.Go(func() { a.claimInformer.RunWithContext(ctx) })
 
 	syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -200,15 +196,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.refreshNodeDevices()
 
 	// 3. Background loops.
-	a.wg.Go(func() {
-		wait.UntilWithContext(ctx, a.probeServer, 5*time.Second)
-	})
-	a.wg.Go(func() {
-		wait.UntilWithContext(ctx, a.checkSMWatcher, 30*time.Second)
-	})
-	a.wg.Go(func() {
-		wait.UntilWithContext(ctx, a.gcSessions, a.cfg.GCInterval)
-	})
+	a.wg.Go(func() { wait.UntilWithContext(ctx, a.probeServer, 5*time.Second) })
+	a.wg.Go(func() { wait.UntilWithContext(ctx, a.checkSMWatcher, 30*time.Second) })
+	a.wg.Go(func() { wait.UntilWithContext(ctx, a.gcSessions, a.cfg.GCInterval) })
 
 	// 4. gRPC.
 	listenAddr := fmt.Sprintf(":%d", a.cfg.ListenPort)

@@ -309,6 +309,9 @@ func ValidateFeatureGates() error {
 		if Enabled(PassthroughSupport) {
 			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, PassthroughSupport)
 		}
+		if Enabled(IMEXDaemonsWithDNSNames) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, IMEXDaemonsWithDNSNames)
+		}
 		//if Enabled(DynamicMIG) {
 		//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, DynamicMIG)
 		//}

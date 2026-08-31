@@ -65,8 +65,8 @@ func GetDraDriverPodInformer(factory informers.SharedInformerFactory, nodeName s
 
 func GetDevicePluginPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
 	informer := factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
-		watcher := cache.NewFilteredListWatchFromClient(k.CoreV1().RESTClient(),
-			"pods", corev1.NamespaceAll, func(options *metav1.ListOptions) {
+		watcher := cache.NewFilteredListWatchFromClient(k.CoreV1().RESTClient(), "pods",
+			corev1.NamespaceAll, func(options *metav1.ListOptions) {
 				options.LabelSelector = labels.Set{util.PodMetricsNodeLabel: nodeName}.String()
 			})
 		indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}

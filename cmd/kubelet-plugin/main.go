@@ -309,11 +309,24 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 			if _, err := remote.ParseNodeSelector(flags.RemoteNodeSelector); err != nil {
 				return err
 			}
+			if flags.HttpEndpoint != "" {
+				return fmt.Errorf("when the feature gate %s is enabled and the --plugin-mode=%s, --http-endpoint cannot be set",
+					featuregates.RemoteGPUSupport, pkgkubeletplugin.ModeServer)
+			}
+			if flags.HealthcheckPort >= 0 {
+				return fmt.Errorf("when the feature gate %s is enabled and the --plugin-mode=%s, --healthcheck-port cannot be set",
+					featuregates.RemoteGPUSupport, pkgkubeletplugin.ModeServer)
+			}
 		}
 	case pkgkubeletplugin.ModeInject:
 		if !featuregates.Enabled(featuregates.RemoteGPUSupport) {
 			return fmt.Errorf("--plugin-mode=%s requires feature gate %s to be enabled",
 				pkgkubeletplugin.ModeInject, featuregates.RemoteGPUSupport)
+		} else {
+			if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
+				return fmt.Errorf("--plugin-mode=%s requires feature gate %s to be disabled",
+					pkgkubeletplugin.ModeInject, featuregates.NVMLDeviceHealthCheck)
+			}
 		}
 	default:
 		return fmt.Errorf("invalid --plugin-mode %q: must be %q or %q", flags.PluginMode,

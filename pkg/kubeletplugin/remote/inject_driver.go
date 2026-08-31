@@ -373,7 +373,8 @@ func (d *InjectDriver) resolveRemoteDevices(claim *resourceapi.ResourceClaim) ([
 		}
 		mainRequest := MainRequestName(claim, result.Request)
 		if mainRequest == "" {
-			return nil, fmt.Errorf("allocation result request %q is not a request of claim %s", result.Request, klog.KObj(claim))
+			return nil, fmt.Errorf("allocation result request %q is not a request of claim %s",
+				result.Request, klog.KObj(claim))
 		}
 		out = append(out, resultDevice{index: i, result: result, info: info, mainRequest: mainRequest})
 	}

@@ -867,11 +867,10 @@ func SafeDiv(a, b float64) float64 {
 // for via VGPUAccessModeAnnotation: AccessModeLocal when absent, an error for
 // any other value than local/remote.
 func PodVGPUAccessMode(obj metav1.Object) (string, error) {
-	value, ok := HasAnnotation(obj, VGPUAccessModeAnnotation)
-	if !ok || strings.TrimSpace(value) == "" {
-		return AccessModeLocal, nil
-	}
+	value, _ := HasAnnotation(obj, VGPUAccessModeAnnotation)
 	switch mode := strings.ToLower(strings.TrimSpace(value)); mode {
+	case "":
+		return AccessModeLocal, nil
 	case AccessModeLocal, AccessModeRemote:
 		return mode, nil
 	default:

@@ -33,6 +33,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
@@ -497,9 +498,7 @@ type claimAllocation struct {
 // instance by splitting result.Request on '/') diverges on FirstAvailable
 // subrequests and on claims created from a template, which would make the
 // exporter disagree with the admission rules about which container owns a GPU.
-func (c draGPUCollector) resolvePodAllocations(
-	pod *corev1.Pod, devInfoNameMap map[string]*DRADeviceInfo,
-) []draContainerAlloc {
+func (c draGPUCollector) resolvePodAllocations(pod *corev1.Pod, devInfoNameMap map[string]*DRADeviceInfo) []draContainerAlloc {
 	// Claims are resolved at most once per pod claim name; a nil entry is a
 	// remembered negative result.
 	claimCache := map[string]*claimAllocation{}
@@ -512,8 +511,8 @@ func (c draGPUCollector) resolvePodAllocations(
 
 		actualName, ok, err := claimresolve.ResolveActualClaimNameForPodClaim(pod, podClaimName)
 		if err != nil {
-			klog.V(4).ErrorS(err, "resolve actual claim name failed", "pod",
-				klog.KObj(pod), "podClaim", podClaimName)
+			klog.V(4).ErrorS(err, "resolve actual claim name failed",
+				"pod", klog.KObj(pod), "podClaim", podClaimName)
 			return nil
 		}
 		if !ok {
@@ -531,7 +530,9 @@ func (c draGPUCollector) resolvePodAllocations(
 		}
 		// Only count a claim this pod actually holds. A claim can outlive one
 		// consumer and be reserved for another pod entirely.
-		if !slices.ContainsFunc(claim.Status.ReservedFor, func(r v1.ResourceClaimConsumerReference) bool { return r.UID == pod.GetUID() }) {
+		if !slices.ContainsFunc(claim.Status.ReservedFor, func(r v1.ResourceClaimConsumerReference) bool {
+			return r.UID == pod.GetUID()
+		}) {
 			return nil
 		}
 
@@ -701,40 +702,34 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, resourceSlice := range resourceSlices {
 		for i := range resourceSlice.Spec.Devices {
 			dev := &resourceSlice.Spec.Devices[i]
-			attribute, ok := dev.Attributes["type"]
-			if !ok || attribute.StringValue == nil {
-				continue
-			}
-			devType := *attribute.StringValue
-			if devType != kubeletplugin.VGpuDeviceType && devType != kubeletplugin.GpuDeviceType {
-				continue
-			}
 			devInfo := &DRADeviceInfo{
 				name:        dev.Name,
-				devType:     devType,
 				coreRatio:   util.HundredCore,
 				memoryRatio: util.HundredCore,
 				cores:       util.HundredCore,
 				accessMode:  util.AccessModeLocal,
 			}
-			if attribute, ok = dev.Attributes[util.AccessModeAttribute]; ok && attribute.StringValue != nil && *attribute.StringValue != "" {
-				devInfo.accessMode = *attribute.StringValue
+			devInfo.devType = remote.StringAttr(dev, "type")
+			if devInfo.devType != kubeletplugin.VGpuDeviceType && devInfo.devType != kubeletplugin.GpuDeviceType {
+				continue
 			}
-			if attribute, ok = dev.Attributes["uuid"]; ok && attribute.StringValue != nil {
-				devInfo.uuid = DeviceUUIDFromAttribute(*attribute.StringValue)
+			devInfo.accessMode = remote.StringAttr(dev, util.AccessModeAttribute)
+			if devInfo.accessMode != util.AccessModeLocal && devInfo.accessMode != util.AccessModeRemote {
+				continue
 			}
-			if devInfo.uuid == "" {
+			if devInfo.uuid = DeviceUUIDFromAttribute(remote.StringAttr(dev, remote.AttrUUID)); devInfo.uuid == "" {
 				// Without a UUID the device cannot be joined to NVML data, and
 				// keying maps on "" would collapse every such device into one.
 				klog.V(4).InfoS("skip resourceSlice device without uuid attribute", "device", dev.Name)
 				continue
 			}
-			if attribute, ok = dev.Attributes["coreRatio"]; ok && attribute.IntValue != nil {
-				devInfo.coreRatio = *attribute.IntValue
+			if devInfo.coreRatio = remote.IntAttr(dev, "coreRatio"); devInfo.coreRatio < 0 {
+				continue
 			}
-			if attribute, ok = dev.Attributes["memoryRatio"]; ok && attribute.IntValue != nil {
-				devInfo.memoryRatio = *attribute.IntValue
+			if devInfo.memoryRatio = remote.IntAttr(dev, "memoryRatio"); devInfo.memoryRatio < 0 {
+				continue
 			}
+
 			if devInfo.healthy = kubeletplugin.IsHealthy(dev.Taints); !devInfo.healthy {
 				devHealthMap[devInfo.uuid] = 0
 			}
@@ -952,11 +947,11 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 					})
 
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUMemoryLimit, prometheus.GaugeValue, float64(deviceMemLimit),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
+					containerVGPUMemoryLimit, prometheus.GaugeValue, float64(deviceMemLimit), pod.Namespace, pod.Name,
+					alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode, pod.Spec.NodeName)
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUPhysicalMemoryLimit, prometheus.GaugeValue, float64(realMemBytes),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
+					containerVGPUPhysicalMemoryLimit, prometheus.GaugeValue, float64(realMemBytes), pod.Namespace, pod.Name,
+					alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode, pod.Spec.NodeName)
 
 				// TODO Unable to track virtual memory usage temporarily.
 				// The device-plugin path reads the per-container vMemory ledger
@@ -969,11 +964,11 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				}
 
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage+deviceVMemUsage),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
+					containerVGPUMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage+deviceVMemUsage), pod.Namespace,
+					pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode, pod.Spec.NodeName)
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUPhysicalMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
+					containerVGPUPhysicalMemoryUsage, prometheus.GaugeValue, float64(deviceMemUsage), pod.Namespace,
+					pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode, pod.Spec.NodeName)
 
 				deviceMemUsage += deviceVMemUsage
 				memoryUtilRate := int64(0)
@@ -986,11 +981,11 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				}
 
 				ch <- prometheus.MustNewConstMetric(
-					containerVGPUMemoryUtilRate, prometheus.GaugeValue, float64(memoryUtilRate),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
+					containerVGPUMemoryUtilRate, prometheus.GaugeValue, float64(memoryUtilRate), pod.Namespace, pod.Name,
+					alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode, pod.Spec.NodeName)
 				ch <- prometheus.MustNewConstMetric(containerVGPUCoreUtilRate,
-					prometheus.GaugeValue, float64(util.GetPercentageValue(deviceSMUtil)),
-					pod.Namespace, pod.Name, alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode)
+					prometheus.GaugeValue, float64(util.GetPercentageValue(deviceSMUtil)), pod.Namespace, pod.Name,
+					alloc.name, vDevIndex, deviceUUID, c.nodeName, result.devInfo.accessMode, pod.Spec.NodeName)
 			}
 		}
 	}

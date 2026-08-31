@@ -115,13 +115,13 @@ func PoolNodeSelector(reachable []corev1.NodeSelectorRequirement) *corev1.NodeSe
 // the device is not remote-capable (accessMode absent or local), and an error
 // when it claims to be remote but is malformed.
 func ParseDevice(dev *resourceapi.Device) (*DeviceInfo, bool, error) {
-	if stringAttr(dev, AttrAccessMode) != AccessModeRemote {
+	if StringAttr(dev, AttrAccessMode) != AccessModeRemote {
 		return nil, false, nil
 	}
 
 	info := &DeviceInfo{
-		UUID:     stringAttr(dev, AttrUUID),
-		Endpoint: stringAttr(dev, AttrEndpoint),
+		UUID:     StringAttr(dev, AttrUUID),
+		Endpoint: StringAttr(dev, AttrEndpoint),
 	}
 	if info.Endpoint == "" {
 		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrEndpoint)
@@ -130,14 +130,15 @@ func ParseDevice(dev *resourceapi.Device) (*DeviceInfo, bool, error) {
 		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrUUID)
 	}
 
-	if raw, ok := dev.Attributes[AttrCUDADriverVersion]; ok && raw.VersionValue != nil {
-		v, err := semver.NewVersion(*raw.VersionValue)
+	if versionVal := VersionAttr(dev, AttrCUDADriverVersion); versionVal != "" {
+		v, err := semver.NewVersion(versionVal)
 		if err != nil {
 			return nil, true, fmt.Errorf("remote device %q has unparseable %s %q: %w",
-				dev.Name, AttrCUDADriverVersion, *raw.VersionValue, err)
+				dev.Name, AttrCUDADriverVersion, versionVal, err)
 		}
 		info.CUDAVersion = v
 	}
+
 	if info.CUDAVersion == nil {
 		return nil, true, fmt.Errorf("remote device %q has no %s attribute", dev.Name, AttrCUDADriverVersion)
 	}
@@ -145,9 +146,23 @@ func ParseDevice(dev *resourceapi.Device) (*DeviceInfo, bool, error) {
 	return info, true, nil
 }
 
-func stringAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string {
+func StringAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string {
 	if attr, ok := dev.Attributes[name]; ok && attr.StringValue != nil {
 		return *attr.StringValue
+	}
+	return ""
+}
+
+func IntAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) int64 {
+	if attr, ok := dev.Attributes[name]; ok && attr.IntValue != nil {
+		return *attr.IntValue
+	}
+	return -1
+}
+
+func VersionAttr(dev *resourceapi.Device, name resourceapi.QualifiedName) string {
+	if attr, ok := dev.Attributes[name]; ok && attr.VersionValue != nil {
+		return *attr.VersionValue
 	}
 	return ""
 }
