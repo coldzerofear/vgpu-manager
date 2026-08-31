@@ -438,12 +438,6 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 	if err != nil {
 		return fmt.Errorf("error creating inject driver: %w", err)
 	}
-	if config.Flags.HttpEndpoint != "" {
-		// Consumer-node metrics (prepared claims/devices, EnsureSession
-		// health, artifact inventory) join the DRA request metrics on the
-		// same legacyregistry-backed endpoint started above.
-		remote.RegisterInjectMetrics(driver)
-	}
 
 	<-ctx.Done()
 	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {

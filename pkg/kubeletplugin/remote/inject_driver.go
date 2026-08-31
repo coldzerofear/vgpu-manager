@@ -43,6 +43,7 @@ import (
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
+	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 )
@@ -84,14 +85,12 @@ type InjectDriver struct {
 	wg           sync.WaitGroup
 	sliceIndexer cache.Indexer
 	healthcheck  *health.Healthcheck
-	// Claims prepared on this node: the NRI CreateContainer hook resolves
-	// containers against it, and the inject metrics gauge over it (both
-	// modes). Persisted via the prepared checkpoint.
+	// NRI mode state: claims prepared on this node (for the CreateContainer
+	// hook) and the in-process plugin.
 	preparedMu sync.Mutex
 	prepared   map[string]*preparedClaim
 	nriPlugin  *nri.Plugin
 	nriCancel  context.CancelFunc
-	metrics    *injectMetrics
 }
 
 func (d *InjectDriver) GetPoolResourceSlices(poolName string) ([]*resourceapi.ResourceSlice, error) {
@@ -118,7 +117,6 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 		clients:  clients,
 		cdi:      newCDIWriter(config.CdiRoot),
 		prepared: map[string]*preparedClaim{},
-		metrics:  newInjectMetrics(config.NodeName),
 	}
 
 	helper, err := kubeletplugin.Start(ctx, d,
@@ -168,12 +166,8 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 
 	<-sliceInformer.HasSyncedChecker().Done()
 
-	// Both modes restore the prepared set: the NRI hook resolves containers
-	// against it, and the metrics gauge over it. Claims the kubelet already
-	// holds prepared are never re-Prepared after a plugin restart, so this
-	// is the only way the set survives one.
-	d.restorePrepared(ctx)
 	if featuregates.Enabled(featuregates.NRISupport) {
+		d.restorePrepared(ctx)
 		if err := d.startNRI(ctx); err != nil {
 			return nil, fmt.Errorf("start NRI plugin: %w", err)
 		}
@@ -202,18 +196,52 @@ func (d *InjectDriver) Shutdown() error {
 func (d *InjectDriver) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {
 	results := make(map[types.UID]kubeletplugin.PrepareResult)
 	for _, claim := range claims {
-		results[claim.UID] = d.prepareClaim(ctx, claim)
+		results[claim.UID] = d.nodePrepareResource(ctx, claim)
 	}
 	return results, nil
+}
+
+// nodePrepareResource wraps prepareClaim with the same DRA request metrics
+// the server-mode driver records (driver.go): in-flight tracking, error
+// counters and request duration, under the shared driver name and the same
+// reason values so dashboards work across both modes.
+func (d *InjectDriver) nodePrepareResource(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {
+	t0 := time.Now()
+	doneInFlight := drametrics.TrackInFlight(util.DRADriverName, "prepare")
+	defer doneInFlight()
+
+	result := d.prepareClaim(ctx, claim)
+	if result.Err != nil {
+		drametrics.IncNodePrepareError(util.DRADriverName, "prepare_devices")
+		return result
+	}
+
+	drametrics.ObserveRequest(util.DRADriverName, "prepare", time.Since(t0))
+	return result
 }
 
 func (d *InjectDriver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
 	results := make(map[types.UID]error)
 	for _, claimRef := range claimRefs {
-		d.forgetPrepared(string(claimRef.UID))
-		results[claimRef.UID] = d.cdi.DeleteClaimSpec(string(claimRef.UID))
+		results[claimRef.UID] = d.nodeUnprepareResource(claimRef)
 	}
 	return results, nil
+}
+
+// nodeUnprepareResource mirrors the server-mode unprepare metrics.
+func (d *InjectDriver) nodeUnprepareResource(claimRef kubeletplugin.NamespacedObject) error {
+	t0 := time.Now()
+	doneInFlight := drametrics.TrackInFlight(util.DRADriverName, "unprepare")
+	defer doneInFlight()
+
+	d.forgetPrepared(string(claimRef.UID))
+	if err := d.cdi.DeleteClaimSpec(string(claimRef.UID)); err != nil {
+		drametrics.IncNodeUnprepareError(util.DRADriverName, "unprepare_devices")
+		return err
+	}
+
+	drametrics.ObserveRequest(util.DRADriverName, "unprepare", time.Since(t0))
+	return nil
 }
 
 func (d *InjectDriver) HandleError(ctx context.Context, err error, msg string) {
@@ -307,7 +335,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		// failure makes the kubelet retry NodePrepare with backoff.
 		ordinal := 0
 		for _, p := range partitions {
-			if err := d.EnsureSessions(ctx, p.endpoints, claim, p.token, p.key, p.requests); err != nil {
+			if err := EnsureSessions(ctx, p.endpoints, d.config.AgentPort, claim, p.token, p.key, p.requests); err != nil {
 				return fail(err)
 			}
 			klog.V(2).Infof("Remote claim %s partition %s: requests=%v endpoints=%v artifact=%s, session ensured",
@@ -336,13 +364,6 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 	names, err := d.cdi.WriteClaimSpec(string(claim.UID), edits)
 	if err != nil {
 		return fail(fmt.Errorf("failed to write CDI spec for claim %s: %w", klog.KObj(claim), err))
-	}
-
-	// NRI mode records before building edits (the hook needs the entry as
-	// soon as containers appear); partition mode records here, once the
-	// prepare is known good, so the metrics only gauge successful prepares.
-	if !featuregates.Enabled(featuregates.NRISupport) {
-		d.recordPrepared(claim, devices)
 	}
 
 	out := make([]kubeletplugin.Device, 0, len(devices))

@@ -173,7 +173,7 @@ func (d *InjectDriver) nriInjection(claimUID, podName, podNamespace, podUID, con
 	if err := d.assignTokens(ctx, claim, []*partition{p}); err != nil {
 		return nil, err
 	}
-	if err := d.EnsureSessions(ctx, p.endpoints, claim, p.token, p.key, p.requests); err != nil {
+	if err := EnsureSessions(ctx, p.endpoints, d.config.AgentPort, claim, p.token, p.key, p.requests); err != nil {
 		return nil, err
 	}
 	klog.V(2).Infof("NRI: container %s/%s/%s session %s ensured on %v (requests %v)",
@@ -193,12 +193,11 @@ func nriClaimEnv(claim *resourceapi.ResourceClaim) string {
 	return fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, claim.UID)
 }
 
-// preparedCheckpointFile records the prepared claims across plugin restarts
-// (both modes). The kubelet does not re-run NodePrepare for claims it
-// already holds prepared, yet the NRI CreateContainer hook needs the claim's
-// devices for every new container, and the inject metrics gauge over the
-// set. Only identity is stored; devices are re-resolved from the live claim
-// and ResourceSlices on restore.
+// preparedCheckpointFile records the NRI-mode prepared claims across plugin
+// restarts. The kubelet does not re-run NodePrepare for claims it already
+// holds prepared, yet containers of those pods keep being (re)created and
+// each CreateContainer needs the claim's devices. Only identity is stored;
+// devices are re-resolved from the live claim and ResourceSlices on restore.
 const (
 	preparedCheckpointFile = "remote-prepared.json"
 	nriInjectTimeout       = 30 * time.Second
