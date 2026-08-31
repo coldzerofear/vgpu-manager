@@ -713,9 +713,18 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			if devInfo.devType != kubeletplugin.VGpuDeviceType && devInfo.devType != kubeletplugin.GpuDeviceType {
 				continue
 			}
-			devInfo.accessMode = remote.StringAttr(dev, util.AccessModeAttribute)
-			if devInfo.accessMode != util.AccessModeLocal && devInfo.accessMode != util.AccessModeRemote {
-				continue
+			// accessMode and the ratios are optional by design: gpu-type
+			// devices publish no coreRatio/memoryRatio (vgpu.go stamps them
+			// only on vgpu devices), and slices from a pre-accessMode plugin
+			// carry no accessMode at all. A missing attribute keeps the
+			// defaults above (local / 100); only an explicit malformed value
+			// skips the device.
+			if mode := remote.StringAttr(dev, util.AccessModeAttribute); mode != "" {
+				if mode != util.AccessModeLocal && mode != util.AccessModeRemote {
+					klog.V(4).InfoS("skip resourceSlice device with malformed accessMode", "device", dev.Name, "accessMode", mode)
+					continue
+				}
+				devInfo.accessMode = mode
 			}
 			if devInfo.uuid = DeviceUUIDFromAttribute(remote.StringAttr(dev, remote.AttrUUID)); devInfo.uuid == "" {
 				// Without a UUID the device cannot be joined to NVML data, and
@@ -723,11 +732,11 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				klog.V(4).InfoS("skip resourceSlice device without uuid attribute", "device", dev.Name)
 				continue
 			}
-			if devInfo.coreRatio = remote.IntAttr(dev, "coreRatio"); devInfo.coreRatio < 0 {
-				continue
+			if ratio := remote.IntAttr(dev, "coreRatio"); ratio >= 0 {
+				devInfo.coreRatio = ratio
 			}
-			if devInfo.memoryRatio = remote.IntAttr(dev, "memoryRatio"); devInfo.memoryRatio < 0 {
-				continue
+			if ratio := remote.IntAttr(dev, "memoryRatio"); ratio >= 0 {
+				devInfo.memoryRatio = ratio
 			}
 
 			if devInfo.healthy = kubeletplugin.IsHealthy(dev.Taints); !devInfo.healthy {

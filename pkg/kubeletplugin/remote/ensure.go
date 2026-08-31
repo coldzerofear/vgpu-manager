@@ -53,11 +53,15 @@ func AgentAddr(endpoint string, agentPort int) string {
 
 // EnsureSessions calls EnsureSession for one partition on the agent behind
 // every endpoint it spans. Any failure fails the whole prepare (design D2:
-// all servers must confirm before the pod starts).
-func EnsureSessions(ctx context.Context, endpoints []string, agentPort int, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) error {
+// all servers must confirm before the pod starts). Each call is observed by
+// the inject metrics (agent address + result + latency).
+func (d *InjectDriver) EnsureSessions(ctx context.Context, endpoints []string, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) error {
 	for _, endpoint := range endpoints {
-		addr := AgentAddr(endpoint, agentPort)
-		if err := ensureOne(ctx, addr, claim, token, partitionKey, requests); err != nil {
+		addr := AgentAddr(endpoint, d.config.AgentPort)
+		start := time.Now()
+		err := ensureOne(ctx, addr, claim, token, partitionKey, requests)
+		d.metrics.observeEnsure(addr, time.Since(start), err)
+		if err != nil {
 			return fmt.Errorf("EnsureSession on %s (endpoint %s): %w", addr, endpoint, err)
 		}
 	}

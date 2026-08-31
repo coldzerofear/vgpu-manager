@@ -90,6 +90,28 @@ func selectArtifact(artifactsDir, hostArtifactsDir string, serverCeiling *semver
 	}, nil
 }
 
+// listArtifactVersions enumerates the materialized client artifact versions
+// under dir (subdirectories whose names parse as versions; the control
+// library files sharing the driver dir are skipped). Used by the inject
+// metrics; a read failure yields an empty list.
+func listArtifactVersions(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var versions []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := semver.NewVersion(e.Name()); err != nil {
+			continue
+		}
+		versions = append(versions, e.Name())
+	}
+	return versions
+}
+
 func dirNames(entries []os.DirEntry) string {
 	names := ""
 	for _, e := range entries {

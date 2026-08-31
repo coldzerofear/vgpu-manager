@@ -157,7 +157,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 	},
 	IMEXDaemonsWithDNSNames: {
 		{
-			Default:    true,
+			Default:    false,
 			PreRelease: featuregate.Beta,
 			Version:    version.MajorMinor(0, 2),
 		},
@@ -178,7 +178,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 	},
 	NVMLDeviceHealthCheck: {
 		{
-			Default:    true,
+			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(0, 3),
 		},

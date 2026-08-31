@@ -84,12 +84,14 @@ type InjectDriver struct {
 	wg           sync.WaitGroup
 	sliceIndexer cache.Indexer
 	healthcheck  *health.Healthcheck
-	// NRI mode state: claims prepared on this node (for the CreateContainer
-	// hook) and the in-process plugin.
+	// Claims prepared on this node: the NRI CreateContainer hook resolves
+	// containers against it, and the inject metrics gauge over it (both
+	// modes). Persisted via the prepared checkpoint.
 	preparedMu sync.Mutex
 	prepared   map[string]*preparedClaim
 	nriPlugin  *nri.Plugin
 	nriCancel  context.CancelFunc
+	metrics    *injectMetrics
 }
 
 func (d *InjectDriver) GetPoolResourceSlices(poolName string) ([]*resourceapi.ResourceSlice, error) {
@@ -116,6 +118,7 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 		clients:  clients,
 		cdi:      newCDIWriter(config.CdiRoot),
 		prepared: map[string]*preparedClaim{},
+		metrics:  newInjectMetrics(config.NodeName),
 	}
 
 	helper, err := kubeletplugin.Start(ctx, d,
@@ -165,8 +168,12 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 
 	<-sliceInformer.HasSyncedChecker().Done()
 
+	// Both modes restore the prepared set: the NRI hook resolves containers
+	// against it, and the metrics gauge over it. Claims the kubelet already
+	// holds prepared are never re-Prepared after a plugin restart, so this
+	// is the only way the set survives one.
+	d.restorePrepared(ctx)
 	if featuregates.Enabled(featuregates.NRISupport) {
-		d.restorePrepared(ctx)
 		if err := d.startNRI(ctx); err != nil {
 			return nil, fmt.Errorf("start NRI plugin: %w", err)
 		}
@@ -300,7 +307,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		// failure makes the kubelet retry NodePrepare with backoff.
 		ordinal := 0
 		for _, p := range partitions {
-			if err := EnsureSessions(ctx, p.endpoints, d.config.AgentPort, claim, p.token, p.key, p.requests); err != nil {
+			if err := d.EnsureSessions(ctx, p.endpoints, claim, p.token, p.key, p.requests); err != nil {
 				return fail(err)
 			}
 			klog.V(2).Infof("Remote claim %s partition %s: requests=%v endpoints=%v artifact=%s, session ensured",
@@ -329,6 +336,13 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 	names, err := d.cdi.WriteClaimSpec(string(claim.UID), edits)
 	if err != nil {
 		return fail(fmt.Errorf("failed to write CDI spec for claim %s: %w", klog.KObj(claim), err))
+	}
+
+	// NRI mode records before building edits (the hook needs the entry as
+	// soon as containers appear); partition mode records here, once the
+	// prepare is known good, so the metrics only gauge successful prepares.
+	if !featuregates.Enabled(featuregates.NRISupport) {
+		d.recordPrepared(claim, devices)
 	}
 
 	out := make([]kubeletplugin.Device, 0, len(devices))
