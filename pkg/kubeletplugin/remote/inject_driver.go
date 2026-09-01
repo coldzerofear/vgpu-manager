@@ -299,6 +299,17 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		ContainerPath: artifact.ContainerDir,
 		Options:       []string{"ro", "nosuid", "nodev", "bind"},
 	}}
+	if artifact.NvidiaSMIHost != "" {
+		// Single-file bind so the pod keeps its own /usr/bin (gpu-go lesson:
+		// never overlay a system directory). nvidia-smi dlopens
+		// libnvidia-ml.so.1 at runtime, which LD_LIBRARY_PATH above resolves
+		// to the lupine shim - so it reports the remote session's view.
+		mounts = append(mounts, &cdispec.Mount{
+			HostPath:      artifact.NvidiaSMIHost,
+			ContainerPath: "/usr/bin/nvidia-smi",
+			Options:       []string{"ro", "nosuid", "nodev", "bind"},
+		})
+	}
 
 	// 3. Session assignment.
 	edits := map[string]*cdiapi.ContainerEdits{}

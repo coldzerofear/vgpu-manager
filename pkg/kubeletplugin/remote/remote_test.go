@@ -342,6 +342,10 @@ func TestSelectArtifact(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Only 12.9.1 carries nvidia-smi, like a mixed set of artifact images.
+	if err := os.WriteFile(filepath.Join(dir, "12.9.1", "nvidia-smi"), []byte("elf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	// A control-library file next to the version dirs must be ignored.
 	if err := os.WriteFile(filepath.Join(dir, "libvgpu-control.so.1.0.0"), nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -365,6 +369,9 @@ func TestSelectArtifact(t *testing.T) {
 		}
 		if sel.HostDir != filepath.Join("/host"+dir, "12.4.1") {
 			t.Fatalf("host dir must derive from the host artifacts dir: %s", sel.HostDir)
+		}
+		if sel.NvidiaSMIHost != "" {
+			t.Fatalf("no nvidia-smi in 12.4.1, but NvidiaSMIHost=%q", sel.NvidiaSMIHost)
 		}
 		if sel.ContainerDir != "/etc/vgpu-manager/driver" || sel.LibDir != sel.ContainerDir {
 			t.Fatalf("unexpected container paths: %+v", sel)
@@ -487,4 +494,22 @@ func TestParseDeviceServerCUDAVersion(t *testing.T) {
 			t.Fatalf("expected the server version to win, got %s", info.CUDAVersion)
 		}
 	})
+}
+
+func TestSelectArtifactNvidiaSMI(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "12.9.1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "12.9.1", "nvidia-smi"), []byte("elf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sel, err := selectArtifact(dir, "/host"+dir, semver.MustParse("13.0.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The mount source must be the host-visible path of the picked version.
+	if sel.NvidiaSMIHost != filepath.Join("/host"+dir, "12.9.1", "nvidia-smi") {
+		t.Fatalf("unexpected NvidiaSMIHost: %q", sel.NvidiaSMIHost)
+	}
 }

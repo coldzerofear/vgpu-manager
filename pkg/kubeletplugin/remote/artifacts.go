@@ -40,6 +40,10 @@ type artifactSelection struct {
 	// LibDir is the container path to expose via LD_LIBRARY_PATH (flat
 	// layout: libcuda.so.1 / libnvidia-ml.so.1 directly in ContainerDir).
 	LibDir string
+	// NvidiaSMIHost is the host path of the nvidia-smi binary shipped next
+	// to the shims in newer artifact images, or "" when this artifact
+	// version does not carry one.
+	NvidiaSMIHost string
 }
 
 // selectArtifact picks the highest artifact version that is <= serverCeiling
@@ -82,12 +86,18 @@ func selectArtifact(artifactsDir, hostArtifactsDir string, serverCeiling *semver
 	}
 
 	containerDir := filepath.Join(util.ManagerRootPath, util.Driver)
-	return &artifactSelection{
+	selection := &artifactSelection{
 		Name:         bestName,
 		HostDir:      filepath.Join(hostArtifactsDir, bestName),
 		ContainerDir: containerDir,
 		LibDir:       containerDir,
-	}, nil
+	}
+	// Newer artifact images ship nvidia-smi next to the shims. Optional:
+	// older artifacts simply do not have it and nothing extra is mounted.
+	if st, err := os.Stat(filepath.Join(artifactsDir, bestName, "nvidia-smi")); err == nil && st.Mode().IsRegular() {
+		selection.NvidiaSMIHost = filepath.Join(hostArtifactsDir, bestName, "nvidia-smi")
+	}
+	return selection, nil
 }
 
 func dirNames(entries []os.DirEntry) string {
