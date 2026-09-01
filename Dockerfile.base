@@ -90,8 +90,9 @@ ENV CGO_CFLAGS="-D_FORTIFY_SOURCE=2 -O2 -ftrapv -Wno-deprecated-declarations"
 ENV CGO_LDFLAGS_ALLOW="-Wl,--unresolved-symbols=ignore-in-object-files"
 
 RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-scheduler cmd/device-scheduler/*.go
-RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-plugin cmd/device-plugin/*.go
-RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-monitor cmd/device-monitor/*.go
-RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-webhook cmd/device-webhook/*.go
-RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/kubelet-plugin cmd/kubelet-plugin/*.go
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-client cmd/device-client/*.go
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-plugin    cmd/device-plugin/*.go
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-monitor   cmd/device-monitor/*.go
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-webhook   cmd/device-webhook/*.go
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/kubelet-plugin   cmd/kubelet-plugin/*.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/device-client    cmd/device-client/*.go
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="${LD_FLAGS}" -o bin/remote-agent     cmd/remote-agent/*.go

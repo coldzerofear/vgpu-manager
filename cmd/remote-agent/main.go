@@ -29,6 +29,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
+	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
 	"github.com/urfave/cli/v2"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -141,6 +142,7 @@ func main() {
 
 			return remoteagent.New(cfg).Run(ctx)
 		},
+		Version: version.Get().String(),
 	}
 
 	if err := app.RunContext(context.Background(), os.Args); err != nil {
