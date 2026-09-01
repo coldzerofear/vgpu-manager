@@ -18,6 +18,7 @@ package remote
 
 import (
 	"fmt"
+	"github.com/Masterminds/semver"
 	"os"
 	"path/filepath"
 	"strings"
@@ -365,4 +366,67 @@ func TestPreparedCheckpointRoundTrip(t *testing.T) {
 	if data, _ := os.ReadFile(filepath.Join(dir, preparedCheckpointFile)); strings.Contains(string(data), "uid-1") {
 		t.Fatalf("checkpoint must drop forgotten claims: %s", data)
 	}
+}
+
+func TestParseDeviceServerCUDAVersion(t *testing.T) {
+	withServer := func(serverVersion string) *resourceapi.Device {
+		dev := remoteDevice("vgpu-0", "GPU-abc", "10.0.0.1:14833", "13.3.0")
+		dev.Attributes[AttrServerCUDAVersion] = resourceapi.DeviceAttribute{VersionValue: strPtr(serverVersion)}
+		return dev
+	}
+
+	t.Run("server built for an older CUDA lowers the ceiling", func(t *testing.T) {
+		info, _, err := ParseDevice(withServer("12.9.1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.CUDAVersion.String() != "12.9.1" || info.ServerCUDAVersion.String() != "12.9.1" {
+			t.Fatalf("unexpected info: %+v", info)
+		}
+	})
+
+	t.Run("server newer than the driver keeps the driver ceiling", func(t *testing.T) {
+		info, _, err := ParseDevice(withServer("13.3.73"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.CUDAVersion.String() != "13.3.0" || info.ServerCUDAVersion.String() != "13.3.73" {
+			t.Fatalf("unexpected info: %+v", info)
+		}
+	})
+
+	t.Run("no serverCudaVersion yet keeps the driver ceiling and nil server", func(t *testing.T) {
+		info, _, err := ParseDevice(remoteDevice("vgpu-0", "GPU-abc", "10.0.0.1:14833", "13.3.0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.CUDAVersion.String() != "13.3.0" || info.ServerCUDAVersion != nil {
+			t.Fatalf("unexpected info: %+v", info)
+		}
+	})
+
+	t.Run("unparseable serverCudaVersion fails", func(t *testing.T) {
+		if _, _, err := ParseDevice(withServer("cuda-13")); err == nil {
+			t.Fatal("expected an error")
+		}
+	})
+
+	t.Run("Decorate stamps serverCudaVersion only once known", func(t *testing.T) {
+		devices := []resourceapi.Device{{Name: "vgpu-0", Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+			AttrUUID:              {StringValue: strPtr("GPU-a")},
+			AttrCUDADriverVersion: {VersionValue: strPtr("13.3.0")},
+		}}}
+		Decorate(devices, &PublishSpec{Endpoint: "10.0.0.7:14833"})
+		if _, ok := devices[0].Attributes[AttrServerCUDAVersion]; ok {
+			t.Fatal("serverCudaVersion must be absent before the server answered")
+		}
+		Decorate(devices, &PublishSpec{Endpoint: "10.0.0.7:14833", ServerCUDAVersion: semver.MustParse("12.9.1")})
+		info, _, err := ParseDevice(&devices[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.CUDAVersion.String() != "12.9.1" {
+			t.Fatalf("expected the server version to win, got %s", info.CUDAVersion)
+		}
+	})
 }

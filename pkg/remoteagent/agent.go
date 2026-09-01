@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -252,14 +253,18 @@ func (a *Agent) refreshNodeDevices() {
 	klog.V(4).Infof("Node device snapshot: %d device(s), CUDA %q", len(nd.Devices), nd.CudaVersionString())
 }
 
-func (a *Agent) probeServer(context.Context) {
-	conn, err := net.DialTimeout("tcp", a.cfg.ServerAddr, 2*time.Second)
+// probeServer checks that lupine-server really answers, not just that the
+// port is open: one HTTP GET on the RPC port (served since lupine #660) that
+// also tells us which CUDA version the server was built with.
+func (a *Agent) probeServer(ctx context.Context) {
+	version, err := remote.ProbeServerCUDAVersion(ctx, a.cfg.ServerAddr, 2*time.Second)
 	up := err == nil
-	if up {
-		_ = conn.Close()
-	}
 	if a.serverUp.Swap(up) != up {
-		klog.Infof("lupine-server %s listening: %v", a.cfg.ServerAddr, up)
+		if up {
+			klog.Infof("lupine-server %s answering, built for CUDA %s", a.cfg.ServerAddr, version)
+		} else {
+			klog.Infof("lupine-server %s not answering: %v", a.cfg.ServerAddr, err)
+		}
 	}
 }
 

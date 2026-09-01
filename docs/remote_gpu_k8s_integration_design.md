@@ -485,6 +485,13 @@ NodePrepareResources 发现 claim 命中远程池时：
 制品形态与分发方式见 §4.4/§4.5。lupine shim 走动态链接器查找（远程 pod 无驱动，它的 libcuda 就该是 lupine 的），
 **非 LD_PRELOAD**。多 server 版本不一时取交集最低者。
 
+**v2.2 补（2026-09）：上限取 min(节点驱动上限, server 二进制版本)**。lupine 客户端已不再做版本 pre-flight
+（`rpc_http2_client_probe` 只剩测试在用，`x-lupine-cuda-version` 成了纯信息头），client 比 server 新会在运行时以
+未知 opcode 失败，所以制品选择是唯一的守门。lupine #660 起 RPC 端口兼答 HTTP/1.x 且任意响应都带
+`x-lupine-cuda-version`，dra-server 据此定期 GET `http://<endpoint>/`（5s 直到首次成功，之后 60s），把结果发布为
+设备属性 `serverCudaVersion`；inject 侧 `DeviceInfo.CUDAVersion` = min(`cudaDriverVersion`, `serverCudaVersion`)。
+属性缺失（server 尚未应答）时退回驱动上限并打 warning。remote-agent 的就绪探测也换成同一个 GET。
+
 ### 4.4 制品分发：镜像列表 → 节点版本目录（D12）
 
 **动机**：lupine CI 按 CUDA 版本持续产出 client 镜像。若把制品固化进我们的 install 镜像，每次增减版本都要重建发版；

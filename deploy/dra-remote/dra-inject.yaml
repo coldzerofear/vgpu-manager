@@ -98,7 +98,7 @@ spec:
         # 可解析的版本号（制品选择规则 = 取 <= server CUDA 版本上限的最高版本）。
         # 增删版本 = 增删 init 容器；镜像为 /artifacts 载体（cp 落盘）。
         - name: lupine-client-cuda-13-3
-          image: ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1   # ← 必改：client 制品镜像
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1   # ← 必须与 remote-server.yaml 的 server 镜像同一 release
           imagePullPolicy: IfNotPresent
           command: [sh, -c]
           args:
@@ -107,7 +107,7 @@ spec:
             - name: client-artifacts
               mountPath: /target
         - name: lupine-client-cuda-12-9
-          image: ghcr.io/coldzerofear/lupine-client-static:cuda-12.9.1   # ← 按需增删版本
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-12.9.1   # ← 按需增删版本（同样同一 release）
           imagePullPolicy: IfNotPresent
           command: [sh, -c]
           args:

@@ -37,9 +37,13 @@ type DeviceInfo struct {
 	// Endpoint of the lupine-server, verbatim as published. The injection
 	// layer never interprets it beyond concatenation into LUPINE_SERVER.
 	Endpoint string
-	// CUDAVersion is the server node's CUDA driver ceiling; client artifact
-	// selection picks max{ver : ver <= CUDAVersion} (design §4.3).
+	// CUDAVersion is the ceiling a client artifact must not exceed: the lower
+	// of the node driver ceiling and ServerCUDAVersion (when known). Client
+	// artifact selection picks max{ver : ver <= CUDAVersion} (design §4.3).
 	CUDAVersion *semver.Version
+	// ServerCUDAVersion is what the lupine-server binary was built with, nil
+	// until the publisher has heard from the server.
+	ServerCUDAVersion *semver.Version
 }
 
 // PublishSpec is what the server-side publisher stamps onto every device of
@@ -47,6 +51,9 @@ type DeviceInfo struct {
 type PublishSpec struct {
 	Endpoint string
 	Selector []corev1.NodeSelectorRequirement
+	// ServerCUDAVersion is stamped as serverCudaVersion once known (nil =
+	// lupine-server has not answered yet, attribute left out).
+	ServerCUDAVersion *semver.Version
 }
 
 // Decorate stamps accessMode (and, for remote, endpoint) onto the
@@ -64,6 +71,9 @@ func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 		}
 		attrs[AttrAccessMode] = resourceapi.DeviceAttribute{StringValue: ptr.To(AccessModeRemote)}
 		attrs[AttrEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
+		if spec.ServerCUDAVersion != nil {
+			attrs[AttrServerCUDAVersion] = resourceapi.DeviceAttribute{VersionValue: ptr.To(spec.ServerCUDAVersion.String())}
+		}
 	}
 }
 
@@ -141,6 +151,18 @@ func ParseDevice(dev *resourceapi.Device) (*DeviceInfo, bool, error) {
 
 	if info.CUDAVersion == nil {
 		return nil, true, fmt.Errorf("remote device %q has no %s attribute", dev.Name, AttrCUDADriverVersion)
+	}
+
+	// The server build version is optional (absent until the server answered).
+	// When present, the lower of the two is what the client artifact must obey.
+	if serverVal := VersionAttr(dev, AttrServerCUDAVersion); serverVal != "" {
+		v, err := semver.NewVersion(serverVal)
+		if err != nil {
+			return nil, true, fmt.Errorf("remote device %q has unparseable %s %q: %w",
+				dev.Name, AttrServerCUDAVersion, serverVal, err)
+		}
+		info.ServerCUDAVersion = v
+		info.CUDAVersion = EffectiveCUDACeiling(info.CUDAVersion, v)
 	}
 
 	return info, true, nil

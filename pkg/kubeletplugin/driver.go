@@ -290,6 +290,15 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, err
 	}
 
+	if remotePub.enabled() {
+		// Keep serverCudaVersion in step with the lupine-server actually running
+		// here: it may start after us, or come back from a restart built from
+		// another image. Each change republishes the slices.
+		go remotePub.watchServerVersion(ctx, func(ctx context.Context) error {
+			return driver.publishResources(ctx, config)
+		})
+	}
+
 	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
 		// RegisterEvents can queue unmonitored events before this consumer
 		// starts. Publish the initial ResourceSlices first, so subsequent health

@@ -58,6 +58,12 @@ const (
 	AttrCUDADriverVersion = "cudaDriverVersion"
 	AttrDriverVersion     = "driverVersion"
 
+	// AttrServerCUDAVersion is the CUDA version the node's lupine-server binary
+	// was built with, read from its x-lupine-cuda-version header. Published only
+	// after the server has answered. The driver ceiling above can be higher than
+	// this, and the client artifact must stay below the lower of the two.
+	AttrServerCUDAVersion = "serverCudaVersion"
+
 	// DefaultServerPort is lupine-server's default listen port
 	// (docs/lupine_env_reference.md, LUPINE_PORT).
 	DefaultServerPort = 14833

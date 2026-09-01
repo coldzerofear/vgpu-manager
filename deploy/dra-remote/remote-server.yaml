@@ -144,7 +144,11 @@ spec:
             - name: agent-ready
               mountPath: /run/vgpu
         - name: lupine-server
-          image: ghcr.io/coldzerofear/lupine-server:cuda-13.3.1-ubuntu24.04    # ← 必改：lupine-server 镜像
+          # fork 自产的静态 server 镜像：只依赖 glibc，不带 cuda-compat，也不覆盖 LD_LIBRARY_PATH，
+          # 驱动库全部由 nvidia-container-runtime 注入。镜像的 CUDA 版本必须 ≤ 节点驱动支持的 CUDA
+          # （13.3 需驱动 ≥ 580，老驱动换 cuda-12.9.1 / cuda-11.8.0）。
+          # 正式环境请改用 release tag 或 @sha256 digest，并与 dra-inject 里的 client 制品同一 release。
+          image: ghcr.io/coldzerofear/lupine-server-static:cuda-13.3.1    # ← 按节点驱动 / release 修改
           imagePullPolicy: IfNotPresent
           command: [bash, -c]
           args:
@@ -161,8 +165,9 @@ spec:
               value: "14833"                               # ← 服务端监听端口(hostNetwork)
             - name: VGPU_CONFIG_SESSION_BASE
               value: /etc/vgpu-manager/remote-sessions
-            # 隔离库既是 LD_PRELOAD hook 库又是 lupine checkpoint provider，
-            # 两个变量指向镜像内同一个 .so（路径按你的 server 镜像布局修改）
+            # 隔离库既是 LD_PRELOAD hook 库又是 lupine checkpoint provider，两个变量指向同一个 .so。
+            # 它由 init-install 从 vgpu-manager 镜像落盘到节点 /etc/vgpu-manager/driver/，
+            # 经 manager-root hostPath 挂进来，server 镜像里不需要自带。
             - name: LD_PRELOAD
               value: /etc/vgpu-manager/driver/libvgpu-control.so
             - name: LUPINE_CHECKPOINT_LIBRARY
@@ -176,6 +181,19 @@ spec:
           securityContext:
             privileged: true
           resources: {}
+          # 端口开着就算就绪：每次探测 server 只 fork 一个子进程，读完前导字节就退出。
+          # 不用 httpGet：14833 也答 HTTP/1.x，但 bundle 路径会整包下载，其他路径是 404。
+          readinessProbe:
+            tcpSocket:
+              port: 14833
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 14833
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
           volumeMounts:
             - name: manager-root
               mountPath: /etc/vgpu-manager

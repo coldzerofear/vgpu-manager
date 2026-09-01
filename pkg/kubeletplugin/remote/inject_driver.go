@@ -273,6 +273,15 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 
 	// 2. Client artifact: one mount for the claim, chosen against the CUDA
 	// floor across every server it touches (§4.3).
+	for _, rd := range devices {
+		if rd.info.ServerCUDAVersion == nil {
+			// Selection then only knows the driver ceiling; a server built for
+			// an older CUDA would get a client that is too new. dra-server
+			// republishes with serverCudaVersion as soon as the server answers.
+			klog.Warningf("Claim %s: device %s on %s has no %s yet, choosing the client artifact by the driver ceiling %s only",
+				klog.KObj(claim), rd.result.Device, rd.info.Endpoint, AttrServerCUDAVersion, rd.info.CUDAVersion)
+		}
+	}
 	artifact, err := selectArtifact(d.config.ArtifactsDir, d.config.HostArtifactsDir, cudaFloor(devices))
 	if err != nil {
 		return fail(err)

@@ -40,9 +40,10 @@ kubectl apply -f dra-webhook.yaml
 
 | 参数 | 位置 | 默认/占位值 | 说明 |
 |---|---|---|---|
-| **lupine-server 镜像** | `remote-server.yaml` → 容器 `lupine-server` `image` | `your-registry/lupine-server:cuda-12.9`（占位，**必改**） | 需内置 `lupine_driver_server` 与 `libvgpu-control.so`；CUDA 版本须 ≥ 消费方需求 |
-| **隔离库 .so 路径** | 同上 `LD_PRELOAD` / `LUPINE_CHECKPOINT_LIBRARY` | `/usr/local/vgpu/libvgpu-control.so`（占位，**必改**） | 两个变量指向 server 镜像内同一个 .so（既是 hook 库又是 checkpoint provider） |
-| **lupine-client 制品镜像** | `dra-inject.yaml` → initContainers | `your-registry/lupine-client-static:cuda-12.9.1`（占位，**必改**） | `/artifacts` 载体镜像（静态 client 的 `libcuda.so.1`/`libnvidia-ml.so.1`）；每个 CUDA 版本一个 init 容器，落盘目录名必须是版本号（选择规则 = 取 ≤ server CUDA 上限的最高版本）；增删版本 = 增删 init 容器后滚动 |
+| **lupine-server 镜像** | `remote-server.yaml` → 容器 `lupine-server` `image` | `ghcr.io/coldzerofear/lupine-server-static:cuda-13.3.1`（fork 自产静态镜像） | 只依赖 glibc，不带 cuda-compat：**镜像 CUDA 版本必须 ≤ 节点驱动支持的 CUDA**（13.3 需驱动 ≥ 580，老驱动换 12.9.1 / 11.8.0）；隔离库不用打进镜像（见下一行）；正式环境改用 release tag 或 `@sha256` digest，并与 client 制品同一 release |
+| **隔离库 .so 路径** | 同上 `LD_PRELOAD` / `LUPINE_CHECKPOINT_LIBRARY` | `/etc/vgpu-manager/driver/libvgpu-control.so` | init-install 容器把它从 vgpu-manager 镜像落盘到节点 hostPath，server 容器挂载即得；两个变量指向同一个 .so（既是 hook 库又是 checkpoint provider），一般不用改 |
+| **lupine-client 制品镜像** | `dra-inject.yaml` → initContainers | `ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1` / `cuda-12.9.1` | **必须与 server 镜像来自同一 release**（lupine RPC 协议没有版本号也没有校验，混用会在运行时报未知 opcode）；`/artifacts` 载体镜像（静态 client 的 `libcuda.so.1`/`libnvidia-ml.so.1`）；每个 CUDA 版本一个 init 容器，落盘目录名必须是版本号（选择规则 = 取 ≤ server CUDA 上限的最高版本）；增删版本 = 增删 init 容器后滚动 |
+| **server CUDA 版本探测** | 自动：dra-server 定期 GET `http://<endpoint>/`，读响应头 `x-lupine-cuda-version` | 5s 一次直到首次成功，之后 60s | 发布为设备属性 `serverCudaVersion`；inject 选制品按 **min(驱动上限, server 版本)** 取 ≤ 的最高版本。server 比 dra-server 晚起也没关系，探到后自动重发 slice。remote-agent 也用同一个 GET 判断 server 是否就绪 |
 | **vgpu-manager 镜像** | 四个文件所有 `coldzerofear/vgpu-manager-dra:latest` | latest | 换成内网 registry / 钉版本；remote-server 的 agent 容器要求镜像内含 `remote-agent` 二进制 |
 | **可达域 selector** | `dra-server.yaml` → `REMOTE_NODE_SELECTOR` | `vgpu-manager.io/remote-inject=true` | 标准 label selector 语法（`k=v,k2 in (a,b),!k3`）；决定 pool 可调度到哪些节点。**要允许本机消费必须覆盖 GPU 节点自身**（默认值配合上面打标签方式已覆盖） |
 | **服务端端点/端口** | `remote-server.yaml` `LUPINE_PORT`、`dra-server.yaml` `REMOTE_SERVER_IP`/`REMOTE_SERVER_PORT` | IP 留空 = 自动取节点 InternalIP；端口 `14833` | 改端口时与 `LUPINE_PORT` 联动；`REMOTE_SERVER_IP` 填**纯 IP 或域名**（不带端口/协议头） |
@@ -58,7 +59,7 @@ kubectl apply -f dra-webhook.yaml
 
 | 端口 | 进程 | 用途 |
 |---|---|---|
-| 14833 | lupine-server | 远程 GPU 数据面（消费 pod 的 `LUPINE_SERVER` 直连） |
+| 14833 | lupine-server | 远程 GPU 数据面（消费 pod 的 `LUPINE_SERVER` 直连）；同端口也答 HTTP/1.x（版本探测、client bundle 下载 `/.well-known/lupine/client/v1/<platform>`） |
 | 14834 | remote-agent | EnsureSession gRPC（dra-inject 在 NodePrepare 内同步调用） |
 | 3456 | device-monitor | Prometheus 指标（`/metrics`，含 `container_vgpu_*` 远程归账） |
 
@@ -73,3 +74,10 @@ kubectl apply -f dra-webhook.yaml
 - 会话目录固定在节点 `/etc/vgpu-manager/remote-sessions`（agent/lupine-server/monitor
   三容器经 manager-root hostPath 共享）；agent 的就绪文件在 pod 级 emptyDir
   （`/run/vgpu/ready`），避免 hostPath 上的陈旧文件破坏启动排序。
+- **探测要求 server 会答 HTTP/1.x**（lupine #660 之后的构建，本 fork 所有镜像都满足）：agent 用它判断 server
+  就绪，dra-server 用它读 server CUDA 版本；更老的 server 会一直被判为未就绪。TLS 前置代理（D5）需同时透传
+  h2c 与 HTTP/1.1。
+- **消费侧内存镜像（identity-VA/DSM）的运行时约束**：client 进程会预留 1 TiB 虚拟地址（PROT_NONE + NORESERVE，
+  8 个槽位）、自装 SIGSEGV 处理器、按页 mprotect。严格 overcommit（`vm.overcommit_memory=2`）或 `ulimit -v` 会拒绝
+  预留；大量 pinned/managed host 内存且写入分散的负载可能撞 `vm.max_map_count`（默认 65530，需节点 sysctl）；
+  后装且不链式转发 SIGSEGV 的运行时（部分 JVM 配置）需实测。
