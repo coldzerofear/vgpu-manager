@@ -40,22 +40,12 @@ import (
 
 const (
 	Component = "remoteAgent"
-	// GPUCoreResourcePlugin feature gate will report the virtual cores of the node device to kubelet.
-	GPUCoreResourcePlugin featuregate.Feature = util.GPUCoreResourcePlugin
-	// GPUMemoryResourcePlugin feature gate will report the virtual memory of the node device to kubelet.
-	GPUMemoryResourcePlugin featuregate.Feature = util.GPUMemoryResourcePlugin
-	// AllocationFailureReschedule feature gate will attempt to reschedule Pods that meet the criteria.
-	AllocationFailureReschedule featuregate.Feature = util.AllocationFailureReschedule
-	// TopologyAwareGPUAllocation feature gate will report gpu topology information to node.
-	TopologyAwareGPUAllocation featuregate.Feature = util.TopologyAwareGPUAllocation
-	// SharedSMUtilizationWatcher feature gate will initiate an independent utilization observation thread to share the results with the vGPU Pod node, reducing driver call consumption.
+	// SharedSMUtilizationWatcher: sessions are written expecting the node-wide
+	// SM sampling cache (published by the dra-server plugin's watcher thread).
 	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
-	// VirtualMemoryTracking feature gate will track the allocation of virtual memory on devices and provide more precise virtual memory limitations.
+	// VirtualMemoryTracking: sessions are written with the virtual-memory
+	// ledger enabled.
 	VirtualMemoryTracking featuregate.Feature = util.VirtualMemoryTracking
-	// DevicePluginClientMode feature gate will vGPU container to communicate and register devices using Unix sockets and managers, providing stronger security.
-	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
-	// HonorPreAllocatedDeviceIDs makes preferred allocation follow pre-allocated device IDs whenever possible.
-	HonorPreAllocatedDeviceIDs featuregate.Feature = util.HonorPreAllocatedDeviceIDs
 )
 
 // FeatureGateFlags returns the CLI flags for the unified feature gate configuration.
@@ -119,9 +109,11 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("parse remote endpoint failed: %w", err)
 			}
+			// The probed lupine-server runs in the same pod by default.
 			if endpoint.Host == "" {
 				endpoint.Host = "127.0.0.1"
 			}
+			endpoint.DefaultPort(remote.DefaultServerPort)
 			cfg.ServerEndpoint = endpoint.String()
 
 			endpoint, err = endpointutil.ParseEndpoint(cfg.ListenEndpoint)
@@ -131,6 +123,7 @@ func main() {
 			if endpoint.Host == "" {
 				endpoint.Host = "0.0.0.0"
 			}
+			endpoint.DefaultPort(remote.DefaultAgentPort)
 			cfg.ListenEndpoint = endpoint.String()
 
 			cfg.FeatureGate = featureGate

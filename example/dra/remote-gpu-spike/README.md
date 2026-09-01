@@ -7,7 +7,7 @@
 ## 模型（v2.0）
 
 不存在独立的"远程池"：GPU 节点插件开启 `RemoteGPUSupport` 后，**同一批设备**多发 `accessMode=remote`、
-`endpoint` 属性，并把 pool 的节点范围从 `nodeName` 放宽为 nodeSelector（= `--remote-node-selector` 的匹配集合；**GPU 节点自身不再隐含加入**，想让 pod 也能落在 GPU 节点就把它也选进去）。
+`serverEndpoint`/`agentEndpoint` 属性，并把 pool 的节点范围从 `nodeName` 放宽为 nodeSelector（= `--remote-node-selector` 的匹配集合；**GPU 节点自身不再隐含加入**，想让 pod 也能落在 GPU 节点就把它也选进去）。
 **所有消费者统一走远程路径——即使 pod 恰好落在 GPU 节点上**（v2.1：同一 pod 可能混合本节点与其他节点的卡，本地/远程两条注入路径无法共存，故 gate 开的节点的 server 插件只发布、不注册 DRA 服务，同节点另跑 `--plugin-mode=inject` 承担分配）。未开 gate 的节点发布 `accessMode=local`，
 行为与今天完全一致；`vgpu-manager` class 加 `accessMode == "local"` 即"只要本地专属节点的设备"。
 
@@ -26,8 +26,8 @@
    kubectl label node <consumer-node> topology.kubernetes.io/zone=az1   # 任意标签，与 slice 的 nodeSelector 一致
    ```
 
-2. 编辑 `10-resourceslice.yaml`：把 `uuid`/`endpoint`/`memory`/`cudaDriverVersion`/GPU 节点名换成目标
-   GPU 节点的真实值（S0 阶段 endpoint 只是被记录、不被连接，占位值也可）。
+2. 编辑 `10-resourceslice.yaml`：把 `uuid`/`serverEndpoint`/`agentEndpoint`/`memory`/`cudaDriverVersion`/GPU 节点名换成目标
+   GPU 节点的真实值（S0 阶段两个 endpoint 只是被记录、不被连接，占位值也可）。
 
 3. 依次 apply：
 
@@ -70,7 +70,7 @@ S1 用同一套 YAML，把"pod 停在 ContainerCreating"变成"pod 内远程 CUD
    `kubelet-plugin --plugin-mode=inject --feature-gates=RemoteGPUSupport=true --node-name=<node>`
    （挂 `/var/lib/kubelet/plugins_registry`、`/var/lib/kubelet/plugins`、`/var/run/cdi`）。
 3. **用真插件替代手工 slice**：GPU 节点插件以 `--feature-gates=RemoteGPUSupport=true --remote-node-selector=topology.kubernetes.io/zone=az1`
-   运行（endpoint 缺省 = 节点 InternalIP:14833；此时它只发布不注册），**GPU 节点上也要同时跑一个 `--plugin-mode=inject`**（且它的 `--remote-node-selector` 要把 GPU 节点自己也选进去，pod 才能落在那里）；删除手工 slice，
+   运行（REMOTE_SERVER_ENDPOINT 缺省 = 节点 InternalIP:14833；此时它只发布不注册），**GPU 节点上也要同时跑一个 `--plugin-mode=inject`**（且它的 `--remote-node-selector` 要把 GPU 节点自己也选进去，pod 才能落在那里）；删除手工 slice，
    DeviceClass 不变，再建 claim+pod。
 
 验收：pod 内 CUDA 程序远程执行、`nvidia-smi`/`cuMemGetInfo` 呈限额视图、超限 OOM、

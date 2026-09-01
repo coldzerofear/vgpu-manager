@@ -40,7 +40,13 @@ func remoteDevice(name, uuid, endpoint, cudaVersion string) *resourceapi.Device 
 			AttrAccessMode:     {StringValue: strPtr(AccessModeRemote)},
 			AttrUUID:           {StringValue: strPtr(uuid)},
 			AttrServerEndpoint: {StringValue: strPtr(endpoint)},
+			// Tests use the same value for both endpoints; production stamps
+			// the agent's own URL here.
+			AttrAgentEndpoint: {StringValue: strPtr(endpoint)},
 		},
+	}
+	if endpoint == "" {
+		delete(dev.Attributes, AttrAgentEndpoint)
 	}
 	if cudaVersion != "" {
 		dev.Attributes[AttrCUDADriverVersion] = resourceapi.DeviceAttribute{VersionValue: strPtr(cudaVersion)}
@@ -87,10 +93,31 @@ func TestParseDevice(t *testing.T) {
 		}
 	})
 
+	t.Run("remote device missing agentEndpoint fails", func(t *testing.T) {
+		dev := remoteDevice("vgpu-0", "GPU-abc", "10.0.0.1:14833", "12.9.0")
+		delete(dev.Attributes, AttrAgentEndpoint)
+		_, isRemote, err := ParseDevice(dev)
+		if !isRemote || err == nil {
+			t.Fatalf("expected (remote, error), got isRemote=%v err=%v", isRemote, err)
+		}
+	})
+
 	t.Run("remote device missing cudaDriverVersion fails", func(t *testing.T) {
 		_, isRemote, err := ParseDevice(remoteDevice("vgpu-0", "GPU-abc", "10.0.0.1:14833", ""))
 		if !isRemote || err == nil {
 			t.Fatalf("expected (remote, error), got isRemote=%v err=%v", isRemote, err)
+		}
+	})
+
+	t.Run("serverCudaVersion lowers the effective ceiling", func(t *testing.T) {
+		dev := remoteDevice("vgpu-0", "GPU-abc", "10.0.0.1:14833", "12.9.0")
+		dev.Attributes[AttrServerCUDAVersion] = resourceapi.DeviceAttribute{VersionValue: strPtr("12.4.0")}
+		info, _, err := ParseDevice(dev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.ServerCUDAVersion.String() != "12.4.0" || info.CUDAVersion.String() != "12.4.0" {
+			t.Fatalf("expected ceiling 12.4.0, got server=%s effective=%s", info.ServerCUDAVersion, info.CUDAVersion)
 		}
 	})
 }
@@ -122,16 +149,36 @@ func TestDecorateAndSelector(t *testing.T) {
 
 	t.Run("remote decorated device round-trips through ParseDevice", func(t *testing.T) {
 		devices := newDevices()
-		Decorate(devices, &PublishSpec{Endpoint: "10.0.0.7:14833"})
+		Decorate(devices, &PublishSpec{
+			Endpoint:          "http://10.0.0.7:14833",
+			AgentEndpoint:     "http://10.0.0.7:14834",
+			ServerCUDAVersion: semver.MustParse("12.4.0"),
+		})
 		info, isRemote, err := ParseDevice(&devices[0])
 		if err != nil || !isRemote {
 			t.Fatalf("expected remote, got isRemote=%v err=%v", isRemote, err)
 		}
-		if info.Endpoint != "10.0.0.7:14833" || info.UUID != "GPU-a" || info.CUDAVersion.String() != "12.9.0" {
+		if info.Endpoint != "http://10.0.0.7:14833" || info.UUID != "GPU-a" {
 			t.Fatalf("unexpected info: %+v", info)
+		}
+		// The agent endpoint must be the agent's URL, not the server's.
+		if info.AgentEndpoint != "http://10.0.0.7:14834" {
+			t.Fatalf("agent endpoint = %q, want the published agent URL", info.AgentEndpoint)
+		}
+		// Effective ceiling = min(driver 12.9.0, server 12.4.0).
+		if info.ServerCUDAVersion.String() != "12.4.0" || info.CUDAVersion.String() != "12.4.0" {
+			t.Fatalf("unexpected versions: %+v", info)
 		}
 		if *devices[0].Attributes["type"].StringValue != "vgpu" {
 			t.Fatal("pre-existing type attribute was clobbered")
+		}
+	})
+
+	t.Run("decorate without server version leaves the attribute out", func(t *testing.T) {
+		devices := newDevices()
+		Decorate(devices, &PublishSpec{Endpoint: "e:1", AgentEndpoint: "e:2"})
+		if _, ok := devices[0].Attributes[AttrServerCUDAVersion]; ok {
+			t.Fatal("serverCudaVersion must be absent until the server answered")
 		}
 	})
 
@@ -240,7 +287,8 @@ func TestResolveRemoteDevicesAndPartitions(t *testing.T) {
 		if len(parts) != 2 {
 			t.Fatalf("expected 2 partitions, got %d", len(parts))
 		}
-		if parts[0].key != "ctr0" || len(parts[0].results) != 1 || parts[0].endpoints[0] != "server-b:14833" {
+		want := endpointInfo{serverEndpoint: "server-b:14833", agentEndpoint: "server-b:14833"}
+		if parts[0].key != "ctr0" || len(parts[0].results) != 1 || parts[0].endpoints[0] != want {
 			t.Fatalf("fallback partition: %+v", parts[0])
 		}
 		if parts[1].key != "pod-abc-c1" || len(parts[1].results) != 2 || len(parts[1].endpoints) != 1 ||
@@ -329,18 +377,27 @@ func TestSelectArtifact(t *testing.T) {
 		}
 	})
 }
-func TestAgentAddr(t *testing.T) {
+func TestAgentDialTarget(t *testing.T) {
 	cases := map[string]string{
-		"10.0.0.7":                   "10.0.0.7:14834",
-		"10.0.0.7:14833":             "10.0.0.7:14834",
-		"http://gpu-a:14833":         "gpu-a:14834",
-		"https://gpu-a.example.com":  "gpu-a.example.com:14834",
-		"gpu-a.zone.vgpu.internal:1": "gpu-a.zone.vgpu.internal:14834",
+		// No port: the default agent port fills in.
+		"10.0.0.7":                  "10.0.0.7:14834",
+		"https://gpu-a.example.com": "gpu-a.example.com:14834",
+		// Explicit port wins; scheme and path are stripped for the gRPC dial.
+		"10.0.0.7:14834":              "10.0.0.7:14834",
+		"http://gpu-a:15000/pool-a":   "gpu-a:15000",
+		"gpu-a.zone.vgpu.internal:19": "gpu-a.zone.vgpu.internal:19",
 	}
 	for in, want := range cases {
-		if got := AgentAddr(in, 14834); got != want {
-			t.Errorf("AgentAddr(%q) = %q, want %q", in, got, want)
+		got, err := agentDialTarget(in)
+		if err != nil || got != want {
+			t.Errorf("agentDialTarget(%q) = %q, %v, want %q", in, got, err, want)
 		}
+	}
+	if _, err := agentDialTarget("ftp://x"); err == nil {
+		t.Error("unsupported scheme must be rejected")
+	}
+	if _, err := agentDialTarget(""); err == nil {
+		t.Error("empty endpoint must be rejected")
 	}
 }
 
@@ -417,11 +474,11 @@ func TestParseDeviceServerCUDAVersion(t *testing.T) {
 			AttrUUID:              {StringValue: strPtr("GPU-a")},
 			AttrCUDADriverVersion: {VersionValue: strPtr("13.3.0")},
 		}}}
-		Decorate(devices, &PublishSpec{Endpoint: "10.0.0.7:14833"})
+		Decorate(devices, &PublishSpec{Endpoint: "10.0.0.7:14833", AgentEndpoint: "10.0.0.7:14834"})
 		if _, ok := devices[0].Attributes[AttrServerCUDAVersion]; ok {
 			t.Fatal("serverCudaVersion must be absent before the server answered")
 		}
-		Decorate(devices, &PublishSpec{Endpoint: "10.0.0.7:14833", ServerCUDAVersion: semver.MustParse("12.9.1")})
+		Decorate(devices, &PublishSpec{Endpoint: "10.0.0.7:14833", AgentEndpoint: "10.0.0.7:14834", ServerCUDAVersion: semver.MustParse("12.9.1")})
 		info, _, err := ParseDevice(&devices[0])
 		if err != nil {
 			t.Fatal(err)

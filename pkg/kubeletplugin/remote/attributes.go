@@ -34,11 +34,12 @@ type DeviceInfo struct {
 	// UUID of the physical GPU on the server node (session config files are
 	// keyed by it).
 	UUID string
-	// Endpoint of the lupine-server, verbatim as published. The injection
-	// layer never interprets it beyond concatenation into LUPINE_SERVER.
+	// Endpoint of the lupine-server, verbatim as published (URL form, e.g.
+	// http://10.0.0.1:14833; a path prefix stays intact for future gateway
+	// routing). The injection layer only concatenates it into LUPINE_SERVER.
 	Endpoint string
-	// AgentEndpoint of the remote agent, verbatim as published. The injection
-	// layer never interprets it beyond concatenation into LUPINE_SERVER.
+	// AgentEndpoint of the remote-agent on the same host, verbatim as
+	// published (URL form). This is where inject calls EnsureSession (gRPC).
 	AgentEndpoint string
 	// CUDAVersion is the ceiling a client artifact must not exceed: the lower
 	// of the node driver ceiling and ServerCUDAVersion (when known). Client
@@ -60,8 +61,9 @@ type PublishSpec struct {
 	ServerCUDAVersion *semver.Version
 }
 
-// Decorate stamps accessMode (and, for remote, endpoint) onto the
-// devices in place. spec == nil means the node is local-only.
+// Decorate stamps accessMode (and, for remote, the server/agent endpoints
+// plus the server CUDA version once known) onto the devices in place.
+// spec == nil means the node is local-only.
 func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 	for i := range devices {
 		attrs := devices[i].Attributes
@@ -75,7 +77,7 @@ func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 		}
 		attrs[AttrAccessMode] = resourceapi.DeviceAttribute{StringValue: ptr.To(AccessModeRemote)}
 		attrs[AttrServerEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
-		attrs[AttrAgentEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
+		attrs[AttrAgentEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.AgentEndpoint)}
 		if spec.ServerCUDAVersion != nil {
 			attrs[AttrServerCUDAVersion] = resourceapi.DeviceAttribute{VersionValue: ptr.To(spec.ServerCUDAVersion.String())}
 		}

@@ -51,6 +51,14 @@ import (
 //
 // The library owns everything except vgpu.config and the directories; the
 // agent only creates the skeleton and writes the quota.
+//
+// SM watcher bridge: the library resolves the shared cache to
+// <base>/watcher/sm_util.config (session.c, from_base), but the file is
+// written by the dra-server plugin at <manager-dir>/watcher/. Prepare()
+// therefore makes <base>/watcher a symlink to the sibling watcher directory
+// (<base>/../watcher), so both sides see one file. This requires the session
+// base to live directly under the manager dir (the deployment default,
+// /etc/vgpu-manager/remote-sessions).
 const (
 	sessionLockDir     = "." + vgpu.VGPULockDirName
 	sessionVMemDir     = "." + util.VMemNode
@@ -59,6 +67,38 @@ const (
 
 	pidsFileMode = 0o644
 )
+
+// linkWatcherDir points <base>/watcher at the manager dir's watcher
+// directory (see the SM watcher bridge note above). An empty leftover
+// directory from an older agent is replaced; a non-empty one is kept with a
+// warning (sessions then miss the shared cache and fall back to per-process
+// NVML sampling — wrong data is never read).
+func (s *SessionStore) linkWatcherDir() error {
+	base := strings.TrimRight(s.cfg.SessionBase, "/")
+	target := filepath.Join("..", util.Watcher) // <base>/../watcher, relative so every mount layout works
+	link := filepath.Join(base, util.Watcher)
+
+	if current, err := os.Readlink(link); err == nil {
+		if current == target {
+			return nil
+		}
+		_ = os.Remove(link) // symlink to somewhere else: replace
+	} else if info, err := os.Lstat(link); err == nil && info.IsDir() {
+		if entries, _ := os.ReadDir(link); len(entries) > 0 {
+			klog.Warningf("%s is a non-empty directory, not replacing it with a symlink; sessions will not see the shared SM watcher cache", link)
+			return nil
+		}
+		_ = os.Remove(link)
+	}
+	// Make sure the real watcher dir exists so the link never dangles.
+	if err := os.MkdirAll(filepath.Join(filepath.Dir(base), util.Watcher), 0o755); err != nil {
+		return fmt.Errorf("mkdir watcher dir: %w", err)
+	}
+	if err := os.Symlink(target, link); err != nil && !os.IsExist(err) {
+		return fmt.Errorf("symlink %s -> %s: %w", link, target, err)
+	}
+	return nil
+}
 
 // tokenPattern bounds what we accept as a session directory name. The token
 // travels as an HTTP/2 header on the lupine side and is a path component
@@ -167,10 +207,11 @@ func NewSessionStore(cfg Config) *SessionStore {
 // Prepare creates the base skeleton the server needs before it starts and
 // rebuilds the index from whatever sessions survived a restart.
 func (s *SessionStore) Prepare() error {
-	for _, dir := range []string{s.cfg.SessionBase, filepath.Join(s.cfg.SessionBase, util.Watcher)} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", dir, err)
-		}
+	if err := os.MkdirAll(s.cfg.SessionBase, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", s.cfg.SessionBase, err)
+	}
+	if err := s.linkWatcherDir(); err != nil {
+		return err
 	}
 	entries, err := s.List()
 	if err != nil {
@@ -299,8 +340,8 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 				nd.CudaVersion.Major(), nd.CudaVersion.Minor(),
 			),
 		}),
-		vgpuconfig.WithVMemoryNodeEnabled(s.cfg.FeatureGate.Enabled(util.VirtualMemoryTracking)),
-		vgpuconfig.WithSMWatcherEnabled(s.cfg.FeatureGate.Enabled(util.SharedSMUtilizationWatcher)),
+		vgpuconfig.WithVMemoryNodeEnabled(s.cfg.gateEnabled(util.VirtualMemoryTracking)),
+		vgpuconfig.WithSMWatcherEnabled(s.cfg.gateEnabled(util.SharedSMUtilizationWatcher)),
 	)
 
 	s.mu.Lock()

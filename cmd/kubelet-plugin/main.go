@@ -210,14 +210,14 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "remote-agent-endpoint",
-			Usage:       "remote-agent gRPC port on server hosts; inject mode calls EnsureSession on <endpoint host>:<port>.",
+			Usage:       "remote-agent endpoint published as the agentEndpoint device attribute (URL form, host/port/path all optional; empty host = same host as the server endpoint). Inject mode calls EnsureSession there. Server mode with RemoteGPUSupport.",
 			Value:       fmt.Sprintf(":%d", remote.DefaultAgentPort),
 			Destination: &flags.RemoteAgentEndpoint,
 			EnvVars:     []string{"REMOTE_AGENT_ENDPOINT"},
 		},
 		&cli.StringFlag{
 			Name:        "remote-server-endpoint",
-			Usage:       "remote-agent gRPC port on server hosts; inject mode calls EnsureSession on <endpoint host>:<port>.",
+			Usage:       "lupine-server endpoint published as the serverEndpoint device attribute (URL form, e.g. ':14833' or 'https://gpu-a.corp/pool-a'; empty host = this node's InternalIP). Server mode with RemoteGPUSupport.",
 			Value:       fmt.Sprintf(":%d", remote.DefaultServerPort),
 			Destination: &flags.RemoteServerEndpoint,
 			EnvVars:     []string{"REMOTE_SERVER_ENDPOINT"},

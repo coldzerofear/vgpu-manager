@@ -153,12 +153,13 @@ spec:
             # 若允许 pod 落在 GPU 节点本机（lupine 环回消费），selector 必须覆盖 GPU 节点自身。
             - name: REMOTE_NODE_SELECTOR
               value: vgpu-manager.io/remote-inject=true
-            # 可选：本节点 lupine-server endpoint（IP/域名）。
-            # ip留空 = 自动取节点 :<REMOTE_SERVER_PORT>。
+            # 本节点 lupine-server 的发布 endpoint（URL 形态，可带 https://、域名、
+            # 路径前缀）。host 留空 = 自动取节点 InternalIP；端口与 LUPINE_PORT 联动。
             - name: REMOTE_SERVER_ENDPOINT
               value: ":14833"
-            # 可选：dra-inject 调 EnsureSession 的 remote-agent endpoint，须与
-            # remote-server 里 LISTEN_SERVER_PORT 一致（默认 14834）。
+            # remote-agent 的发布 endpoint，inject 按它调 EnsureSession。
+            # host 留空 = 同服务端 host；端口须与 remote-server 里
+            # LISTEN_SERVER_ENDPOINT 一致（默认 14834）。
             - name: REMOTE_AGENT_ENDPOINT
               value: ":14834"
             - name: NVIDIA_DRIVER_ROOT

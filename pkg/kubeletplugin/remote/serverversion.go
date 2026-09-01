@@ -54,7 +54,11 @@ func ProbeServerCUDAVersion(ctx context.Context, endpoint string, timeout time.D
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	serverEndpoint, _ := endpointutil.ParseEndpoint(endpoint)
+	serverEndpoint, err := endpointutil.ParseEndpoint(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lupine-server endpoint %q: %w", endpoint, err)
+	}
+	serverEndpoint.DefaultPort(DefaultServerPort)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serverEndpoint.String(), nil)
 	if err != nil {

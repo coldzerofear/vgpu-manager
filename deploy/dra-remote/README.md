@@ -46,10 +46,10 @@ kubectl apply -f dra-webhook.yaml
 | **server CUDA 版本探测** | 自动：dra-server 定期 GET `http://<endpoint>/`，读响应头 `x-lupine-cuda-version` | 5s 一次直到首次成功，之后 60s | 发布为设备属性 `serverCudaVersion`；inject 选制品按 **min(驱动上限, server 版本)** 取 ≤ 的最高版本。server 比 dra-server 晚起也没关系，探到后自动重发 slice。remote-agent 也用同一个 GET 判断 server 是否就绪 |
 | **vgpu-manager 镜像** | 四个文件所有 `coldzerofear/vgpu-manager-dra:latest` | latest | 换成内网 registry / 钉版本；remote-server 的 agent 容器要求镜像内含 `remote-agent` 二进制 |
 | **可达域 selector** | `dra-server.yaml` → `REMOTE_NODE_SELECTOR` | `vgpu-manager.io/remote-inject=true` | 标准 label selector 语法（`k=v,k2 in (a,b),!k3`）；决定 pool 可调度到哪些节点。**要允许本机消费必须覆盖 GPU 节点自身**（默认值配合上面打标签方式已覆盖） |
-| **服务端端点/端口** | `remote-server.yaml` `LUPINE_PORT`、`dra-server.yaml` `REMOTE_SERVER_IP`/`REMOTE_SERVER_PORT` | IP 留空 = 自动取节点 InternalIP；端口 `14833` | 改端口时与 `LUPINE_PORT` 联动；`REMOTE_SERVER_IP` 填**纯 IP 或域名**（不带端口/协议头） |
-| **agent gRPC 端口** | `remote-server.yaml` `LISTEN_SERVER_PORT`、`dra-inject.yaml` `REMOTE_AGENT_PORT` | `14834` | 两处必须一致（hostNetwork 端口） |
+| **服务端 endpoint** | `remote-server.yaml` `LUPINE_PORT`、`dra-server.yaml` `REMOTE_SERVER_ENDPOINT` | `:14833`（host 留空 = 自动取节点 InternalIP） | URL 形态（可带 `https://`、域名、路径前缀，为将来 DNS + 网关路由预留）；改端口时与 `LUPINE_PORT` 联动；发布为设备属性 `serverEndpoint` |
+| **agent endpoint** | `remote-server.yaml` `LISTEN_SERVER_ENDPOINT`、`dra-server.yaml` `REMOTE_AGENT_ENDPOINT` | `:14834`（host 留空 = 同服务端 host） | 两处端口必须一致（hostNetwork）；发布为设备属性 `agentEndpoint`，inject 按它调 EnsureSession（dra-inject 无需再配端口） |
 | **monitor 端口** | `remote-server.yaml` `--server-bind-port` | `3456` | hostNetwork，与节点上其他进程冲突时修改（Service targetPort 联动） |
-| **SM watcher** | `dra-server.yaml` `FEATURE_GATES` 的 `SharedSMUtilizationWatcher` 与 `remote-server.yaml` `SM_WATCHER` | 均开启 | 两处联动开关：节点级共享 NVML 采样。关闭时两处同时关 |
+| **SM watcher** | `dra-server.yaml` 与 `remote-server.yaml` 两处 `FEATURE_GATES` 的 `SharedSMUtilizationWatcher` | 均开启 | 联动开关：dra-server 写节点级采样缓存，agent 把会话标记为使用它。关闭时两处同时关 |
 | **webhook DRA class** | `dra-webhook.yaml` `--vgpu-device-class-name` | `remote-vgpu-manager` | 集群同时有本地 vGPU 时按主要路径取舍（webhook 目前单 class 转换） |
 | **整卡远程 class** | `dra-inject.yaml` 末尾注释块 | 注释 | dra-server 关 `VGPUSupport` 发布 `type=gpu` 时启用 `remote-gpu-manager` |
 | **NRI 按容器会话** | `dra-inject.yaml` `FEATURE_GATES` 加 `NRISupport=true` + 放开 nri-root 挂载注释 | 关闭 | 开启后同 claim 不同容器各自独立会话记账（需 containerd NRI 开启） |
@@ -74,6 +74,10 @@ kubectl apply -f dra-webhook.yaml
 - 会话目录固定在节点 `/etc/vgpu-manager/remote-sessions`（agent/lupine-server/monitor
   三容器经 manager-root hostPath 共享）；agent 的就绪文件在 pod 级 emptyDir
   （`/run/vgpu/ready`），避免 hostPath 上的陈旧文件破坏启动排序。
+- **SM watcher 共享缓存的路径桥接**：库在会话模式下从 `<会话根>/watcher/sm_util.config` 读共享采样缓存，
+  而写入方（dra-server 的 watcher 线程）写在 `/etc/vgpu-manager/watcher/`。agent 启动时会把
+  `<会话根>/watcher` 建成指向 `../watcher` 的软链接完成桥接——因此会话根必须直接位于 manager 目录下
+  （默认布局即满足），不要单独改动其一。
 - **探测要求 server 会答 HTTP/1.x**（lupine #660 之后的构建，本 fork 所有镜像都满足）：agent 用它判断 server
   就绪，dra-server 用它读 server CUDA 版本；更老的 server 会一直被判为未就绪。TLS 前置代理（D5）需同时透传
   h2c 与 HTTP/1.1。

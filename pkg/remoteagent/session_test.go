@@ -358,3 +358,46 @@ func TestTrimClaim(t *testing.T) {
 		t.Fatal("foreign objects must pass through")
 	}
 }
+
+// The library resolves the shared SM watcher cache to <base>/watcher/...;
+// Prepare must bridge that to the manager dir's watcher directory (where the
+// dra-server plugin writes the file) with a relative symlink.
+func TestPrepareWatcherSymlink(t *testing.T) {
+	parent := t.TempDir() // stands in for the manager dir
+	base := filepath.Join(parent, "remote-sessions")
+	store := NewSessionStore(Config{SessionBase: base, NodeName: testNode, DriverName: testDriver})
+	if err := store.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(base, util.Watcher)
+	target, err := os.Readlink(link)
+	if err != nil || target != filepath.Join("..", util.Watcher) {
+		t.Fatalf("expected %s -> ../watcher symlink, got %q, %v", link, target, err)
+	}
+	// A file the plugin writes into <manager>/watcher must be visible through
+	// the library's <base>/watcher path.
+	if err := os.WriteFile(filepath.Join(parent, util.Watcher, util.SMUtilFile), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, util.Watcher, util.SMUtilFile)); err != nil {
+		t.Fatalf("cache not visible through the session base: %v", err)
+	}
+
+	// Prepare is idempotent, and an empty directory left by an older agent
+	// is migrated to the symlink.
+	if err := store.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	base2 := filepath.Join(t.TempDir(), "remote-sessions")
+	if err := os.MkdirAll(filepath.Join(base2, util.Watcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store2 := NewSessionStore(Config{SessionBase: base2, NodeName: testNode, DriverName: testDriver})
+	if err := store2.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := os.Readlink(filepath.Join(base2, util.Watcher)); err != nil || target != filepath.Join("..", util.Watcher) {
+		t.Fatalf("empty legacy dir not migrated: %q, %v", target, err)
+	}
+}

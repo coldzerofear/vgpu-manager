@@ -72,6 +72,8 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, fmt.Errorf("parse server endpoint failed: %w", err)
 	}
+	endpoint.DefaultPort(remote.DefaultServerPort)
+	// No host = use this node's InternalIP (the common hostNetwork case).
 	if endpoint.Host == "" {
 		ip, err := nodeInternalIP(ctx, config, config.Flags.NodeName)
 		if err != nil {
@@ -83,7 +85,8 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, fmt.Errorf("parse agent endpoint failed: %w", err)
 	}
-	// TODO When no host is specified, the same host address as the server is used by default
+	agentEndpoint.DefaultPort(remote.DefaultAgentPort)
+	// No host = the agent lives next to the server, reuse its host.
 	if agentEndpoint.Host == "" {
 		agentEndpoint.Host = endpoint.Host
 	}

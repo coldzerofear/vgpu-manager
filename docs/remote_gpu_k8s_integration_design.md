@@ -860,7 +860,7 @@ A 类方案能提升的是**主机内存之间**那一段。但数据面固有�
 **S1：注入链路验证（最小 `--mode=inject` + 手工会话落盘）**
 - 代码面（刻意最小）：kubelet-plugin 新增 inject 初始化分支（无 NVML/健康检查/NRI）；NodePrepare 识别远程
   claim（allocation results 命中远程 pool / `type==remote-vgpu` attribute）后仅做：CDI env 注入
-  （`LUPINE_SERVER`=slice `endpoint` attribute 确定性排序拼接、`LUPINE_SESSION`=令牌、`LUPINE_DISABLE_LOCAL=1`）
+  （`LUPINE_SERVER`=slice `serverEndpoint` attribute 确定性排序拼接、`LUPINE_SESSION`=令牌、`LUPINE_DISABLE_LOCAL=1`；EnsureSession 走 `agentEndpoint` attribute；制品上限 = min(`cudaDriverVersion`, `serverCudaVersion`)）
   + CDI 挂载**手工铺好的** client 制品目录（版本目录布局同 D12，内容手工 cp）。spike 阶段令牌可取 claim UID
   派生值并**不写 claim status**（D8 的 status 写入与幂等留到 S2）。
 - GPU 节点侧全手工：起 lupine-server（LD_PRELOAD libvgpu-control.so + `LUPINE_CHECKPOINT_LIBRARY` 指向它），

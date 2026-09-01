@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -21,8 +22,20 @@ type Endpoint struct {
 	Path   string
 }
 
+// HostPort returns "host:port" (or just the host when no port is set).
 func (e Endpoint) HostPort() string {
+	if e.Port == "" {
+		return e.Host
+	}
 	return net.JoinHostPort(e.Host, e.Port)
+}
+
+// DefaultPort fills in the port when the parsed endpoint had none.
+func (e *Endpoint) DefaultPort(port int) *Endpoint {
+	if e.Port == "" {
+		e.Port = strconv.Itoa(port)
+	}
+	return e
 }
 
 func (e Endpoint) String() string {

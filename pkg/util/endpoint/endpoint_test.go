@@ -295,3 +295,23 @@ func TestParseEndpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultPortAndHostPort(t *testing.T) {
+	e, err := ParseEndpoint("10.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.HostPort(); got != "10.0.0.1" {
+		t.Fatalf("no port: HostPort() = %q, want bare host", got)
+	}
+	e.DefaultPort(14833)
+	if got := e.HostPort(); got != "10.0.0.1:14833" {
+		t.Fatalf("after DefaultPort: %q", got)
+	}
+	// An explicit port is never overwritten.
+	e2, _ := ParseEndpoint("https://gpu-a:443/pool")
+	e2.DefaultPort(14833)
+	if e2.Port != "443" || e2.Path != "/pool" {
+		t.Fatalf("explicit port/path must survive: %+v", e2)
+	}
+}

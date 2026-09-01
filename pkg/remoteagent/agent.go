@@ -73,6 +73,11 @@ type Config struct {
 	ClientSets  pkgflags.ClientSets
 }
 
+// gateEnabled is a nil-safe feature gate check (nil gate = all off).
+func (c Config) gateEnabled(feature featuregate.Feature) bool {
+	return c.FeatureGate != nil && c.FeatureGate.Enabled(feature)
+}
+
 type Agent struct {
 	remoteagent.UnimplementedRemoteAgentServer
 
@@ -99,9 +104,8 @@ func New(cfg Config) *Agent {
 
 // Run blocks until ctx is done.
 func (a *Agent) Run(ctx context.Context) error {
-	// 1. Preflight, then signal the server container. Readiness means "the
-	// session skeleton exists", not "the agent is fully synced": the server
-	// only needs the directories to start, and sessions are created later.
+	// 1. Preflight: session skeleton + the watcher symlink. The ready file
+	// comes later, once the informers are synced (step 2).
 	if err := a.store.Prepare(); err != nil {
 		return err
 	}
@@ -188,6 +192,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		return fmt.Errorf("informers did not sync")
 	}
 
+	// Signal the server container only now: with the caches synced,
+	// EnsureSession answers correctly from the first request.
 	if err := a.writeReadyFile(); err != nil {
 		return err
 	}
@@ -369,24 +375,26 @@ func (a *Agent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*re
 }
 
 // checkSMWatcher verifies the external SM watcher contract when sessions are
-// written with SMWatcher on: the kubelet-plugin (SharedSMUtilizationWatcher)
-// publishes <manager-dir>/watcher/sm_util.config on the host, and the
-// deployment must present it to lupine-server at <session-base>/watcher/ —
-// the path the library derives from VGPU_CONFIG_SESSION_BASE. A missing file
-// is not fatal (the library falls back to per-process NVML sampling) but it
-// silently forfeits the shared-sampling benefit, so it is called out.
+// written with SMWatcher on. The library reads the shared cache at
+// <session-base>/watcher/sm_util.config; the store's Prepare() links that
+// directory to <manager-dir>/watcher, where the dra-server plugin
+// (SharedSMUtilizationWatcher) writes the file. This check stats straight
+// through the symlink, so it fails when either the link or the file is
+// missing. A missing file is not fatal (the library falls back to
+// per-process NVML sampling) but it silently forfeits the shared-sampling
+// benefit, so it is called out.
 func (a *Agent) checkSMWatcher(context.Context) {
-	if !a.cfg.FeatureGate.Enabled(util.SharedSMUtilizationWatcher) {
+	if !a.cfg.gateEnabled(util.SharedSMUtilizationWatcher) {
 		return
 	}
-	path := filepath.Join(a.cfg.SessionBase, util.Config, util.SMUtilFile)
+	path := filepath.Join(a.cfg.SessionBase, util.Watcher, util.SMUtilFile)
 	_, err := os.Stat(path)
 	present := err == nil
 	if a.smWatcherPresent.Swap(present) != present {
 		if present {
 			klog.Infof("external SM watcher cache %s is present", path)
 		} else {
-			klog.Warningf("--sm-watcher is on but %s is missing: mount the kubelet-plugin's watcher directory there, or sessions fall back to NVML sampling", path)
+			klog.Warningf("SharedSMUtilizationWatcher is on but %s is missing: check the dra-server plugin has the gate enabled (it writes the cache), or sessions fall back to NVML sampling", path)
 		}
 	}
 }

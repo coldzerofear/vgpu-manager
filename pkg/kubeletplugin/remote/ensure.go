@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
+	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	resourceapi "k8s.io/api/resource/v1"
@@ -48,12 +49,28 @@ func EnsureSessions(
 	return nil
 }
 
-func ensureOne(ctx context.Context, addr string, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) error {
+// agentDialTarget turns the published agentEndpoint (URL form,
+// http://host:port[/path]) into a gRPC dial target (bare host:port). A
+// future gateway path prefix needs a gRPC-aware route, not this dial.
+func agentDialTarget(agentEndpoint string) (string, error) {
+	endpoint, err := endpointutil.ParseEndpoint(agentEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid agent endpoint %q: %w", agentEndpoint, err)
+	}
+	endpoint.DefaultPort(DefaultAgentPort)
+	return endpoint.HostPort(), nil
+}
+
+func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) error {
 	ctx, cancel := context.WithTimeout(ctx, ensureSessionTimeout)
 	defer cancel()
 
+	target, err := agentDialTarget(agentEndpoint)
+	if err != nil {
+		return err
+	}
 	// K1: plaintext. TLS/credentials arrive with D5 (multi-tenant gate).
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return err
 	}
@@ -74,7 +91,7 @@ func ensureOne(ctx context.Context, addr string, claim *resourceapi.ResourceClai
 		return fmt.Errorf("agent reports session not ready: %s", resp.Message)
 	}
 	if resp.Message != "" {
-		klog.Warningf("EnsureSession %s for claim %s partition %s: %s", addr, klog.KObj(claim), partitionKey, resp.Message)
+		klog.Warningf("EnsureSession %s for claim %s partition %s: %s", agentEndpoint, klog.KObj(claim), partitionKey, resp.Message)
 	}
 	return nil
 }
