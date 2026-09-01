@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Masterminds/semver"
@@ -116,13 +117,18 @@ type resultDevice struct {
 	mainRequest string
 }
 
+type endpointInfo struct {
+	serverEndpoint string
+	agentEndpoint  string
+}
+
 // partition is one session: the results (devices) it spans, the servers to
 // dial, and the token that names it on those servers.
 type partition struct {
 	key       string
 	requests  []string
 	results   []resultDevice
-	endpoints []string // sorted, deduplicated
+	endpoints []endpointInfo // sorted, deduplicated
 	token     string
 }
 
@@ -148,13 +154,20 @@ func buildPartitions(devices []resultDevice, requestToKey map[string]string) []*
 	out := make([]*partition, 0, len(order))
 	for _, key := range order {
 		p := byKey[key]
-		reqs, eps := sets.New[string](), sets.New[string]()
+		reqs, eps := sets.New[string](), sets.New[endpointInfo]()
 		for _, rd := range p.results {
 			reqs.Insert(rd.mainRequest)
-			eps.Insert(rd.info.Endpoint)
+			eps.Insert(endpointInfo{
+				serverEndpoint: rd.info.Endpoint,
+				agentEndpoint:  rd.info.AgentEndpoint,
+			})
 		}
 		p.requests = sets.List(reqs)
-		p.endpoints = sets.List(eps)
+		endpoints := eps.UnsortedList()
+		sort.Slice(endpoints, func(i, j int) bool {
+			return endpoints[i].serverEndpoint < endpoints[j].serverEndpoint
+		})
+		p.endpoints = endpoints
 		out = append(out, p)
 	}
 	return out

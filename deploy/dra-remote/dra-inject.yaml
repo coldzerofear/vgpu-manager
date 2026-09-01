@@ -131,9 +131,6 @@ spec:
               value: inject
             - name: FEATURE_GATES
               value: RemoteGPUSupport=true
-            # 与 remote-server 的 LISTEN_SERVER_PORT 保持一致
-            - name: REMOTE_AGENT_PORT
-              value: "14834"
             - name: CDI_ROOT
               value: /var/run/cdi
             - name: HOST_MANAGER_DIR

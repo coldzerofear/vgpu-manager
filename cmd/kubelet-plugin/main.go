@@ -26,7 +26,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 
 	pkgkubeletplugin "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
@@ -35,6 +34,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/urfave/cli/v2"
 	"k8s.io/component-base/logs"
@@ -208,25 +208,19 @@ func newApp() *cli.App {
 			Destination: &flags.PluginMode,
 			EnvVars:     []string{"PLUGIN_MODE"},
 		},
-		&cli.IntFlag{
-			Name:        "remote-agent-port",
+		&cli.StringFlag{
+			Name:        "remote-agent-endpoint",
 			Usage:       "remote-agent gRPC port on server hosts; inject mode calls EnsureSession on <endpoint host>:<port>.",
-			Value:       remote.DefaultAgentPort,
-			Destination: &flags.RemoteAgentPort,
-			EnvVars:     []string{"REMOTE_AGENT_PORT"},
+			Value:       fmt.Sprintf(":%d", remote.DefaultAgentPort),
+			Destination: &flags.RemoteAgentEndpoint,
+			EnvVars:     []string{"REMOTE_AGENT_ENDPOINT"},
 		},
 		&cli.StringFlag{
-			Name:        "remote-server-ip",
-			Usage:       "Bare IP or hostname (no port, no scheme) of this node's lupine-server, published as the device endpoint when RemoteGPUSupport is enabled (server mode). Empty derives the node InternalIP.",
-			Destination: &flags.RemoteServerIP,
-			EnvVars:     []string{"REMOTE_SERVER_IP"},
-		},
-		&cli.IntFlag{
-			Name:        "remote-server-port",
-			Usage:       "lupine-server listen port; combined with --remote-server-ip to form the published endpoint (server mode, RemoteGPUSupport).",
-			Value:       remote.DefaultServerPort,
-			Destination: &flags.RemoteServerPort,
-			EnvVars:     []string{"REMOTE_SERVER_PORT"},
+			Name:        "remote-server-endpoint",
+			Usage:       "remote-agent gRPC port on server hosts; inject mode calls EnsureSession on <endpoint host>:<port>.",
+			Value:       fmt.Sprintf(":%d", remote.DefaultServerPort),
+			Destination: &flags.RemoteServerEndpoint,
+			EnvVars:     []string{"REMOTE_SERVER_ENDPOINT"},
 		},
 		&cli.StringFlag{
 			Name:        "remote-node-selector",
@@ -317,14 +311,11 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 			if _, err := remote.ParseNodeSelector(flags.RemoteNodeSelector); err != nil {
 				return err
 			}
-			// The endpoint is built as <ip>:<port>; a port or scheme inside
-			// --remote-server-ip would produce a malformed endpoint.
-			if strings.ContainsAny(flags.RemoteServerIP, ":/") {
-				return fmt.Errorf("--remote-server-ip must be a bare IP or hostname (no port, no scheme), got %q",
-					flags.RemoteServerIP)
+			if _, err := endpointutil.ParseEndpoint(flags.RemoteServerEndpoint); err != nil {
+				return fmt.Errorf("invalid --remote-server-endpoint %s: %w", flags.RemoteServerEndpoint, err)
 			}
-			if flags.RemoteServerPort <= 0 || flags.RemoteServerPort > 65535 {
-				return fmt.Errorf("--remote-server-port must be in [1, 65535], got %d", flags.RemoteServerPort)
+			if _, err := endpointutil.ParseEndpoint(flags.RemoteAgentEndpoint); err != nil {
+				return fmt.Errorf("invalid --remote-agent-endpoint %s: %w", flags.RemoteAgentEndpoint, err)
 			}
 			if flags.HttpEndpoint != "" {
 				return fmt.Errorf("when the feature gate %s is enabled and the --plugin-mode=%s, --http-endpoint cannot be set",
@@ -448,7 +439,6 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 		PluginDataDirectoryPath:       config.DriverPluginPath(),
 		ArtifactsDir:                  filepath.Join(config.Flags.ContainerManagerDir, util.Driver),
 		HostArtifactsDir:              filepath.Join(config.Flags.HostManagerDir, util.Driver),
-		AgentPort:                     config.Flags.RemoteAgentPort,
 		NRIRoot:                       config.Flags.NRIRoot,
 		NRIPluginIdx:                  config.Flags.NRIPluginIdx,
 	}, config.ClientSets)

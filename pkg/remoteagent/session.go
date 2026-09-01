@@ -29,6 +29,8 @@ import (
 	vgpuconfig "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -50,14 +52,10 @@ import (
 // The library owns everything except vgpu.config and the directories; the
 // agent only creates the skeleton and writes the quota.
 const (
-	sessionConfigDir   = "config"
-	sessionLockDir     = ".vgpu_lock"
-	sessionVMemDir     = ".vmem_node"
-	sessionSMDir       = ".sm_node"
-	sessionConfigFile  = "vgpu.config"
-	sessionPidsFile    = "pids.config"
+	sessionLockDir     = "." + vgpu.VGPULockDirName
+	sessionVMemDir     = "." + util.VMemNode
+	sessionSMDir       = "." + util.SMNode
 	sessionClaimMarker = ".claim-uid" // agent-private: token -> claim UID, written last
-	watcherDir         = "watcher"
 
 	pidsFileMode = 0o644
 )
@@ -169,7 +167,7 @@ func NewSessionStore(cfg Config) *SessionStore {
 // Prepare creates the base skeleton the server needs before it starts and
 // rebuilds the index from whatever sessions survived a restart.
 func (s *SessionStore) Prepare() error {
-	for _, dir := range []string{s.cfg.SessionBase, filepath.Join(s.cfg.SessionBase, watcherDir)} {
+	for _, dir := range []string{s.cfg.SessionBase, filepath.Join(s.cfg.SessionBase, util.Watcher)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -301,8 +299,8 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 				nd.CudaVersion.Major(), nd.CudaVersion.Minor(),
 			),
 		}),
-		vgpuconfig.WithVMemoryNodeEnabled(true),
-		vgpuconfig.WithSMWatcherEnabled(s.cfg.SMWatcher),
+		vgpuconfig.WithVMemoryNodeEnabled(s.cfg.FeatureGate.Enabled(util.VirtualMemoryTracking)),
+		vgpuconfig.WithSMWatcherEnabled(s.cfg.FeatureGate.Enabled(util.SharedSMUtilizationWatcher)),
 	)
 
 	s.mu.Lock()
@@ -319,20 +317,20 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		return fmt.Errorf("session %s already belongs to claim %s", token, strings.TrimSpace(string(existing)))
 	}
 
-	for _, sub := range []string{sessionConfigDir, sessionLockDir, sessionVMemDir, sessionSMDir} {
+	for _, sub := range []string{util.Config, sessionLockDir, sessionVMemDir, sessionSMDir} {
 		if err := util.EnsureDir(filepath.Join(root, sub), 0o755); err != nil {
 			return fmt.Errorf("mkdir session dir: %w", err)
 		}
 	}
 	// pids.config must exist (empty) before the first child registers; the
 	// library appends to it, so never truncate an existing one.
-	f, err := os.OpenFile(filepath.Join(root, sessionPidsFile), os.O_CREATE|os.O_WRONLY, pidsFileMode)
+	f, err := os.OpenFile(filepath.Join(root, registry.PidsConfig), os.O_CREATE|os.O_WRONLY, pidsFileMode)
 	if err != nil {
 		return fmt.Errorf("create pids file: %w", err)
 	}
 	_ = f.Close()
 
-	if err = vgpuconfig.WriteResourceDataToDisk(filepath.Join(root, sessionConfigDir, sessionConfigFile), data); err != nil {
+	if err = vgpuconfig.WriteResourceDataToDisk(filepath.Join(root, util.Config, vgpu.VGPUConfigFileName), data); err != nil {
 		return fmt.Errorf("write session quota: %w", err)
 	}
 	// Marker last: its presence means "complete".
@@ -375,7 +373,7 @@ func (s *SessionStore) List() ([]Entry, error) {
 	}
 	var entries []Entry
 	for _, e := range dirents {
-		if !e.IsDir() || e.Name() == watcherDir {
+		if !e.IsDir() || e.Name() == util.Watcher {
 			continue
 		}
 		if validateToken(e.Name()) != nil {

@@ -43,9 +43,12 @@ const (
 	AccessModeLocal  = util.AccessModeLocal
 	AccessModeRemote = util.AccessModeRemote
 
-	// AttrEndpoint is the lupine-server endpoint, verbatim (IP or domain,
+	// AttrServerEndpoint is the lupine-server endpoint, verbatim (IP or domain,
 	// optional scheme/port, design D3/§6.1). Published only for remote.
-	AttrEndpoint = "endpoint"
+	AttrServerEndpoint = "serverEndpoint"
+	// AttrAgentEndpoint is the remote agent endpoint, verbatim (IP or domain,
+	// optional scheme/port, design D3/§6.1). Published only for remote.
+	AttrAgentEndpoint = "agentEndpoint"
 
 	// Capacity names, aligned with the local vgpu share semantics
 	// (pkg/kubeletplugin/vgpu.go).

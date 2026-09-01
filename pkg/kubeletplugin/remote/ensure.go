@@ -19,9 +19,6 @@ package remote
 import (
 	"context"
 	"fmt"
-	"net"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
@@ -37,28 +34,15 @@ const DefaultAgentPort = 14834
 
 const ensureSessionTimeout = 15 * time.Second
 
-// AgentAddr derives the remote-agent address from a published endpoint
-// ("host", "host:port", "http://host:port", "https://host"): same host,
-// agent port.
-func AgentAddr(endpoint string, agentPort int) string {
-	host := endpoint
-	if i := strings.Index(host, "://"); i >= 0 {
-		host = host[i+3:]
-	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	return net.JoinHostPort(host, strconv.Itoa(agentPort))
-}
-
 // EnsureSessions calls EnsureSession for one partition on the agent behind
 // every endpoint it spans. Any failure fails the whole prepare (design D2:
 // all servers must confirm before the pod starts).
-func EnsureSessions(ctx context.Context, endpoints []string, agentPort int, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) error {
-	for _, endpoint := range endpoints {
-		addr := AgentAddr(endpoint, agentPort)
-		if err := ensureOne(ctx, addr, claim, token, partitionKey, requests); err != nil {
-			return fmt.Errorf("EnsureSession on %s (endpoint %s): %w", addr, endpoint, err)
+func EnsureSessions(
+	ctx context.Context, endpointInfos []endpointInfo, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string,
+) error {
+	for _, info := range endpointInfos {
+		if err := ensureOne(ctx, info.agentEndpoint, claim, token, partitionKey, requests); err != nil {
+			return fmt.Errorf("EnsureSession on %s (endpoint %s): %w", info.agentEndpoint, info.serverEndpoint, err)
 		}
 	}
 	return nil

@@ -19,13 +19,12 @@ package kubeletplugin
 import (
 	"context"
 	"fmt"
-	"net"
-	"strconv"
 	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
+	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
@@ -69,17 +68,32 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, err
 	}
-	endpoint := net.JoinHostPort(config.Flags.RemoteServerIP, strconv.Itoa(config.Flags.RemoteServerPort))
-	if config.Flags.RemoteServerIP == "" {
+	endpoint, err := endpointutil.ParseEndpoint(config.Flags.RemoteServerEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("parse server endpoint failed: %w", err)
+	}
+	if endpoint.Host == "" {
 		ip, err := nodeInternalIP(ctx, config, config.Flags.NodeName)
 		if err != nil {
 			return nil, fmt.Errorf("derive remote endpoint: %w", err)
 		}
-		endpoint = net.JoinHostPort(ip, strconv.Itoa(config.Flags.RemoteServerPort))
+		endpoint.Host = ip
 	}
-	rp.spec = &remote.PublishSpec{Endpoint: endpoint, Selector: reachable}
-	klog.V(2).Infof("Remote GPU publishing enabled: endpoint=%s reachable-nodes=%q",
-		endpoint, config.Flags.RemoteNodeSelector)
+	agentEndpoint, err := endpointutil.ParseEndpoint(config.Flags.RemoteAgentEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("parse agent endpoint failed: %w", err)
+	}
+	// TODO When no host is specified, the same host address as the server is used by default
+	if agentEndpoint.Host == "" {
+		agentEndpoint.Host = endpoint.Host
+	}
+	rp.spec = &remote.PublishSpec{
+		Endpoint:      endpoint.String(),
+		AgentEndpoint: agentEndpoint.String(),
+		Selector:      reachable,
+	}
+	klog.V(2).Infof("Remote GPU publishing enabled: server-endpoint=%s agent-endpoint=%s reachable-nodes=%q",
+		endpoint.String(), agentEndpoint.String(), config.Flags.RemoteNodeSelector)
 
 	// Ask the server once right away so the first publish already carries
 	// its version when it is up. If not, the watcher keeps trying.

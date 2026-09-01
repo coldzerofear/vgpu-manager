@@ -163,8 +163,8 @@ func GetReservedPods(ctx context.Context, reader Reader, claim *resourceapi.Reso
 		}
 
 		var pod corev1.Pod
-		err := reader.GetPod(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: ref.Name}, &pod)
-		if err != nil {
+		key := client.ObjectKey{Namespace: claim.Namespace, Name: ref.Name}
+		if err := reader.GetPod(ctx, key, &pod); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}

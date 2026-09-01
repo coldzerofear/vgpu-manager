@@ -20,10 +20,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Masterminds/semver"
+	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 )
 
 // ServerCUDAVersionHeader is the response header lupine-server puts on every
@@ -54,7 +54,9 @@ func ProbeServerCUDAVersion(ctx context.Context, endpoint string, timeout time.D
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL(endpoint), nil)
+	serverEndpoint, _ := endpointutil.ParseEndpoint(endpoint)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serverEndpoint.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -73,16 +75,6 @@ func ProbeServerCUDAVersion(ctx context.Context, endpoint string, timeout time.D
 		return nil, fmt.Errorf("lupine-server %s reports unparseable CUDA version %q: %w", endpoint, raw, err)
 	}
 	return v, nil
-}
-
-// probeURL turns the published endpoint into a URL. A bare "host:port" is
-// plain HTTP; an endpoint that already has a scheme (a TLS proxy in front,
-// design D5) is used as is.
-func probeURL(endpoint string) string {
-	if strings.Contains(endpoint, "://") {
-		return strings.TrimRight(endpoint, "/") + "/"
-	}
-	return "http://" + endpoint + "/"
 }
 
 // EffectiveCUDACeiling is the version a client artifact must not exceed: the

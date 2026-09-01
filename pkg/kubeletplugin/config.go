@@ -56,15 +56,9 @@ type Flags struct {
 	// local DRA duties, plus remote-pool duties when RemoteGPUSupport is
 	// enabled) or "inject" (consumer node; remote env/CDI injection only, no
 	// GPU dependency).
-	PluginMode string
-	// RemoteAgentPort is the remote-agent gRPC port on server hosts
-	// (inject mode calls EnsureSession there).
-	RemoteAgentPort int
-	// RemoteServerIP is the lupine-server endpoint published on this node's
-	// devices when RemoteGPUSupport is on (server mode). Empty derives
-	// "<node InternalIP>:<lupine server port>".
-	RemoteServerIP   string
-	RemoteServerPort int
+	PluginMode           string
+	RemoteAgentEndpoint  string
+	RemoteServerEndpoint string
 	// RemoteNodeSelector is a label-selector expression over nodes that can
 	// reach this GPU node's lupine-server (e.g.
 	// "topology.kubernetes.io/zone=az1,gpu-fabric=rdma-a"). The pool becomes

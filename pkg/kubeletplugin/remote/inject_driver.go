@@ -67,10 +67,8 @@ type InjectConfig struct {
 	// it is what the emitted CDI mount names as its host path. Equal to
 	// ArtifactsDir when the plugin mounts the manager dir at the host path.
 	HostArtifactsDir string
-	// AgentPort is the remote-agent gRPC port on every server host.
-	AgentPort    int
-	NRIRoot      string
-	NRIPluginIdx string
+	NRIRoot          string
+	NRIPluginIdx     string
 }
 
 // InjectDriver is the `--plugin-mode=inject` DRA driver: no GPU, no NVML — it
@@ -344,11 +342,16 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		// failure makes the kubelet retry NodePrepare with backoff.
 		ordinal := 0
 		for _, p := range partitions {
-			if err := EnsureSessions(ctx, p.endpoints, d.config.AgentPort, claim, p.token, p.key, p.requests); err != nil {
+			if err := EnsureSessions(ctx, p.endpoints, claim, p.token, p.key, p.requests); err != nil {
 				return fail(err)
 			}
 			klog.V(2).Infof("Remote claim %s partition %s: requests=%v endpoints=%v artifact=%s, session ensured",
 				klog.KObj(claim), p.key, p.requests, p.endpoints, artifact.Name)
+
+			endpoints := make([]string, 0, len(p.endpoints))
+			for _, endpoint := range p.endpoints {
+				endpoints = append(endpoints, endpoint.serverEndpoint)
+			}
 
 			// One CDI device per allocation result, carrying its partition's
 			// env. The kubelet hands a container only the devices of the
@@ -356,7 +359,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 			// so the env never collides within a container.
 			partitionEdits := &cdispec.ContainerEdits{
 				Env: append([]string{
-					fmt.Sprintf("%s=%s", EnvLupineServer, strings.Join(p.endpoints, ",")),
+					fmt.Sprintf("%s=%s", EnvLupineServer, strings.Join(endpoints, ",")),
 					fmt.Sprintf("%s=%s", EnvLupineSession, p.token),
 				}, baseEnv...),
 				Mounts: mounts,
@@ -462,8 +465,7 @@ func (d *InjectDriver) assignTokens(ctx context.Context, claim *resourceapi.Reso
 
 // apiReader satisfies claimresolve.Reader with direct API reads, like the
 // local path's kubeClaimResolveReader: NodePrepare is rare and the reserved
-// pods may live on other nodes (shared claims), outside any node-scoped
-// informer.
+// pods may live on other nodes (shared claims), outside any node-scoped informer.
 type apiReader struct {
 	clients pkgflags.ClientSets
 }

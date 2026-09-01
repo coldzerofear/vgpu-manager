@@ -124,14 +124,12 @@ spec:
             # 会话目录在 manager-root hostPath 下（与 lupine-server、monitor 共享）
             - name: VGPU_CONFIG_SESSION_BASE
               value: /etc/vgpu-manager/remote-sessions
-            - name: LUPINE_SERVER_ADDR
-              value: "127.0.0.1:14833"                     # ← 与 LUPINE_PORT 保持一致
-            - name: LISTEN_SERVER_PORT
-              value: "14834"                               # ← EnsureSession gRPC 端口(hostNetwork)
-            # dra-server 开启 SharedSMUtilizationWatcher 时置 true，
-            # 远程会话共享节点级 SM 采样缓存
-            - name: SM_WATCHER
-              value: "true"
+            - name: REMOTE_SERVER_ENDPOINT
+              value: ":14833"                     # ← 与 LUPINE_PORT 保持一致
+            - name: LISTEN_SERVER_ENDPOINT
+              value: ":14834"                     # ← EnsureSession gRPC 端口(hostNetwork)
+            - name: FEATURE_GATES
+              value: SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
           securityContext:
             privileged: true
           resources:
@@ -178,6 +176,10 @@ spec:
               value: all
             - name: NVIDIA_MIG_CONFIG_DEVICES
               value: all
+            - name: LUPINE_LOG_LEVEL
+              value: "1"
+            - name: LUPINE_TRACE
+              value: "1"
           securityContext:
             privileged: true
           resources: {}

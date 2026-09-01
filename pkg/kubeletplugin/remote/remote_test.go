@@ -18,11 +18,12 @@ package remote
 
 import (
 	"fmt"
-	"github.com/Masterminds/semver"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Masterminds/semver"
 
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -36,9 +37,9 @@ func remoteDevice(name, uuid, endpoint, cudaVersion string) *resourceapi.Device 
 	dev := &resourceapi.Device{
 		Name: name,
 		Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-			AttrAccessMode: {StringValue: strPtr(AccessModeRemote)},
-			AttrUUID:       {StringValue: strPtr(uuid)},
-			AttrEndpoint:   {StringValue: strPtr(endpoint)},
+			AttrAccessMode:     {StringValue: strPtr(AccessModeRemote)},
+			AttrUUID:           {StringValue: strPtr(uuid)},
+			AttrServerEndpoint: {StringValue: strPtr(endpoint)},
 		},
 	}
 	if cudaVersion != "" {
@@ -113,7 +114,7 @@ func TestDecorateAndSelector(t *testing.T) {
 			if got := *d.Attributes[AttrAccessMode].StringValue; got != AccessModeLocal {
 				t.Fatalf("%s: accessMode=%q", d.Name, got)
 			}
-			if _, ok := d.Attributes[AttrEndpoint]; ok {
+			if _, ok := d.Attributes[AttrServerEndpoint]; ok {
 				t.Fatalf("%s: local device must not carry an endpoint", d.Name)
 			}
 		}

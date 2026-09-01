@@ -36,6 +36,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -46,6 +47,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
@@ -61,18 +63,14 @@ type Config struct {
 	SessionBase string
 	// ReadyFile is written after preflight; the server container waits for it.
 	ReadyFile string
-	// ServerAddr is the lupine-server address to probe (host:port).
-	ServerAddr string
-	// ListenPort is the gRPC listen port (all interfaces).
-	ListenPort int
-	// Endpoint is the endpoint value reported by ServerInfo (informational).
-	Endpoint string
-	// SMWatcher marks sessions as using the node-wide external SM watcher.
-	SMWatcher bool
+	// ServerEndpoint is the lupine-server address to probe (host:port).
+	ServerEndpoint string
+	// ListenEndpoint is the gRPC listen port (all interfaces).
+	ListenEndpoint string
 	// GCInterval bounds how often orphaned sessions are swept.
-	GCInterval time.Duration
-
-	ClientSets pkgflags.ClientSets
+	GCInterval  time.Duration
+	FeatureGate featuregate.MutableVersionedFeatureGate
+	ClientSets  pkgflags.ClientSets
 }
 
 type Agent struct {
@@ -202,10 +200,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.gcSessions, a.cfg.GCInterval) })
 
 	// 4. gRPC.
-	listenAddr := fmt.Sprintf(":%d", a.cfg.ListenPort)
-	lis, err := net.Listen("tcp", listenAddr)
+	endpoint, _ := endpointutil.ParseEndpoint(a.cfg.ListenEndpoint)
+
+	lis, err := net.Listen("tcp", endpoint.HostPort())
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", listenAddr, err)
+		return fmt.Errorf("listen endpoint %q: %w", endpoint.HostPort(), err)
 	}
 
 	srv := grpc.NewServer()
@@ -217,7 +216,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	})
 
 	a.wg.Go(func() {
-		klog.Infof("remote-agent serving on %s (node %s, session base %s)", listenAddr, a.cfg.NodeName, a.cfg.SessionBase)
+		klog.Infof("remote-agent serving on %s (node %s, session base %s)", endpoint.HostPort(), a.cfg.NodeName, a.cfg.SessionBase)
 		if err = srv.Serve(lis); err != nil && (errors.Is(err, grpc.ErrServerStopped) || errors.Is(err, net.ErrClosed)) {
 			err = nil
 		}
@@ -257,13 +256,13 @@ func (a *Agent) refreshNodeDevices() {
 // port is open: one HTTP GET on the RPC port (served since lupine #660) that
 // also tells us which CUDA version the server was built with.
 func (a *Agent) probeServer(ctx context.Context) {
-	version, err := remote.ProbeServerCUDAVersion(ctx, a.cfg.ServerAddr, 2*time.Second)
+	version, err := remote.ProbeServerCUDAVersion(ctx, a.cfg.ServerEndpoint, 2*time.Second)
 	up := err == nil
 	if a.serverUp.Swap(up) != up {
 		if up {
-			klog.Infof("lupine-server %s answering, built for CUDA %s", a.cfg.ServerAddr, version)
+			klog.Infof("lupine-server %s answering, built for CUDA %s", a.cfg.ServerEndpoint, version)
 		} else {
-			klog.Infof("lupine-server %s not answering: %v", a.cfg.ServerAddr, err)
+			klog.Infof("lupine-server %s not answering: %v", a.cfg.ServerEndpoint, err)
 		}
 	}
 }
@@ -360,7 +359,7 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 func (a *Agent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*remoteagent.ServerInfoResponse, error) {
 	resp := &remoteagent.ServerInfoResponse{
 		Listening: a.serverUp.Load(),
-		Endpoint:  a.cfg.Endpoint,
+		Endpoint:  a.cfg.ServerEndpoint,
 		NodeName:  a.cfg.NodeName,
 	}
 	if nd := a.nodeDevices.Load(); nd != nil {
@@ -377,10 +376,10 @@ func (a *Agent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*re
 // is not fatal (the library falls back to per-process NVML sampling) but it
 // silently forfeits the shared-sampling benefit, so it is called out.
 func (a *Agent) checkSMWatcher(context.Context) {
-	if !a.cfg.SMWatcher {
+	if !a.cfg.FeatureGate.Enabled(util.SharedSMUtilizationWatcher) {
 		return
 	}
-	path := filepath.Join(a.cfg.SessionBase, watcherDir, util.SMUtilFile)
+	path := filepath.Join(a.cfg.SessionBase, util.Config, util.SMUtilFile)
 	_, err := os.Stat(path)
 	present := err == nil
 	if a.smWatcherPresent.Swap(present) != present {

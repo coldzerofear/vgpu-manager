@@ -37,6 +37,9 @@ type DeviceInfo struct {
 	// Endpoint of the lupine-server, verbatim as published. The injection
 	// layer never interprets it beyond concatenation into LUPINE_SERVER.
 	Endpoint string
+	// AgentEndpoint of the remote agent, verbatim as published. The injection
+	// layer never interprets it beyond concatenation into LUPINE_SERVER.
+	AgentEndpoint string
 	// CUDAVersion is the ceiling a client artifact must not exceed: the lower
 	// of the node driver ceiling and ServerCUDAVersion (when known). Client
 	// artifact selection picks max{ver : ver <= CUDAVersion} (design §4.3).
@@ -49,8 +52,9 @@ type DeviceInfo struct {
 // PublishSpec is what the server-side publisher stamps onto every device of
 // the node when the RemoteGPUSupport gate is on.
 type PublishSpec struct {
-	Endpoint string
-	Selector []corev1.NodeSelectorRequirement
+	Endpoint      string
+	AgentEndpoint string
+	Selector      []corev1.NodeSelectorRequirement
 	// ServerCUDAVersion is stamped as serverCudaVersion once known (nil =
 	// lupine-server has not answered yet, attribute left out).
 	ServerCUDAVersion *semver.Version
@@ -70,7 +74,8 @@ func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 			continue
 		}
 		attrs[AttrAccessMode] = resourceapi.DeviceAttribute{StringValue: ptr.To(AccessModeRemote)}
-		attrs[AttrEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
+		attrs[AttrServerEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
+		attrs[AttrAgentEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
 		if spec.ServerCUDAVersion != nil {
 			attrs[AttrServerCUDAVersion] = resourceapi.DeviceAttribute{VersionValue: ptr.To(spec.ServerCUDAVersion.String())}
 		}
@@ -130,11 +135,15 @@ func ParseDevice(dev *resourceapi.Device) (*DeviceInfo, bool, error) {
 	}
 
 	info := &DeviceInfo{
-		UUID:     StringAttr(dev, AttrUUID),
-		Endpoint: StringAttr(dev, AttrEndpoint),
+		UUID:          StringAttr(dev, AttrUUID),
+		Endpoint:      StringAttr(dev, AttrServerEndpoint),
+		AgentEndpoint: StringAttr(dev, AttrAgentEndpoint),
 	}
 	if info.Endpoint == "" {
-		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrEndpoint)
+		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrServerEndpoint)
+	}
+	if info.AgentEndpoint == "" {
+		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrAgentEndpoint)
 	}
 	if info.UUID == "" {
 		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrUUID)

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -61,7 +62,7 @@ import (
 
 const (
 	remotePodCacheTTL = time.Minute
-	sessionPidsFile   = "pids.config"
+	sessionPidsFile   = registry.PidsConfig
 )
 
 // podCache answers pod lookups for consumers that are not on this node. The
