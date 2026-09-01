@@ -39,6 +39,7 @@ import (
 	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -79,6 +80,7 @@ func (c Config) gateEnabled(feature featuregate.Feature) bool {
 }
 
 type Agent struct {
+	grpc_health_v1.UnimplementedHealthServer
 	remoteagent.UnimplementedRemoteAgentServer
 
 	wg    sync.WaitGroup
@@ -117,7 +119,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourceslices", corev1.NamespaceAll,
 			fields.AndSelectors(
 				fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorDriver, a.cfg.DriverName),
-				fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorPoolName, a.cfg.NodeName),
+				// TODO "Failed to watch" err="failed to list *v1.ResourceSlice: field label not supported for resource.k8s.io/v1, Kind=ResourceSlice: spec.pool.name" logger="UnhandledError" reflector="pkg/mod/k8s.io/client-go@v0.37.0-rc.0/tools/cache/reflector.go:343" type="*v1.ResourceSlice"
+				//fields.OneTermEqualSelector(resourceapi.ResourceSliceSelectorPoolName, a.cfg.NodeName),
 			),
 		), &resourceapi.ResourceSlice{}, 10*time.Hour, cache.Indexers{})
 	if err := a.sliceInformer.SetTransform(crcache.TransformStripManagedFields()); err != nil {
@@ -215,6 +218,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	srv := grpc.NewServer()
 	remoteagent.RegisterRemoteAgentServer(srv, a)
+	grpc_health_v1.RegisterHealthServer(srv, a)
 
 	a.wg.Go(func() {
 		<-ctx.Done()
@@ -231,6 +235,18 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.wg.Wait()
 
 	return err
+}
+
+// Check implements [grpc_health_v1.HealthServer].
+func (a *Agent) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+	knownServices := map[string]struct{}{"": {}, "liveness": {}}
+	if _, known := knownServices[req.GetService()]; !known {
+		return nil, status.Error(codes.NotFound, "unknown service")
+	}
+	status := &grpc_health_v1.HealthCheckResponse{
+		Status: grpc_health_v1.HealthCheckResponse_SERVING,
+	}
+	return status, nil
 }
 
 func (a *Agent) writeReadyFile() error {

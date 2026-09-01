@@ -111,7 +111,6 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - remote-agent
-            - --v=4
           env:
             - name: NODE_NAME
               valueFrom:
@@ -130,6 +129,20 @@ spec:
               value: ":14834"                     # ← EnsureSession gRPC 端口(hostNetwork)
             - name: FEATURE_GATES
               value: SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
+          startupProbe:
+            grpc:
+              port: 14834
+              service: liveness
+            failureThreshold: 60
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            grpc:
+              port: 14834
+              service: liveness
+            failureThreshold: 3
+            periodSeconds: 30
+            timeoutSeconds: 10
           securityContext:
             privileged: true
           resources:
@@ -157,7 +170,7 @@ spec:
                 echo "waiting for remote-agent ready file..."
                 sleep 2
               done
-              exec lupine_driver_server
+              exec /opt/lupine/bin/lupine_driver_server
           env:
             - name: LUPINE_PORT
               value: "14833"                               # ← 服务端监听端口(hostNetwork)

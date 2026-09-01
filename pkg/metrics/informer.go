@@ -102,7 +102,9 @@ func GetResourceSliceInformer(factory informers.SharedInformerFactory, nodeName 
 	return factory.InformerFor(&resourcev1.ResourceSlice{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
 		watcher := cache.NewListWatchFromClient(k.ResourceV1().RESTClient(), "resourceslices",
 			corev1.NamespaceAll, fields.AndSelectors(
-				fields.OneTermEqualSelector(resourcev1.ResourceSliceSelectorPoolName, nodeName),
+				// TODO I0901 13:22:40.722465 3051183 reflector.go:490] "Data couldn't be fetched in watchlist mode. Falling back to regular list. This is expected if watchlist is not supported or disabled in kube-apiserver." err="field label not supported for resource.k8s.io/v1, Kind=ResourceSlice: spec.pool.name"
+				// E0901 13:22:40.724960 3051183 reflector.go:227] "Failed to watch" err="failed to list *v1.ResourceSlice: field label not supported for resource.k8s.io/v1, Kind=ResourceSlice: spec.pool.name" reflector="pkg/mod/k8s.io/client-go@v0.37.0-rc.0/tools/cache/reflector.go:343" type="*v1.ResourceSlice"
+				//fields.OneTermEqualSelector(resourcev1.ResourceSliceSelectorPoolName, nodeName),
 				fields.OneTermEqualSelector(resourcev1.ResourceSliceSelectorDriver, util.DRADriverName),
 			))
 		return cache.NewSharedIndexInformer(watcher, &resourcev1.ResourceSlice{}, d, cache.Indexers{})
