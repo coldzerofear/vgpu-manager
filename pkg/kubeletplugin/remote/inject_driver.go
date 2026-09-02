@@ -464,7 +464,8 @@ func (d *InjectDriver) assignTokens(ctx context.Context, claim *resourceapi.Reso
 	if err != nil {
 		return err
 	}
-	newClaim, err := d.clients.Resource.ResourceClaims(claim.Namespace).Patch(ctx, claim.Name, metadata.PatchType(), patch, metav1.PatchOptions{})
+	newClaim, err := d.clients.Core.ResourceV1().ResourceClaims(claim.Namespace).
+		Patch(ctx, claim.Name, metadata.PatchType(), patch, metav1.PatchOptions{})
 	if err != nil {
 		return fmt.Errorf("record session tokens on claim %s: %w", klog.KObj(claim), err)
 	}

@@ -84,7 +84,7 @@ type draGPUCollector struct {
 func NewDRAGPUCollector(
 	config *node.NodeConfigSpec, nodeLister listerv1.NodeLister, podLister client.PodLister,
 	sliceLister resourcev1.ResourceSliceLister, claimLister resourcev1.ResourceClaimLister,
-	featureGate featuregate.FeatureGate, kubeClient kubernetes.Interface, sessionBase string,
+	kubeClient kubernetes.Interface, featureGate featuregate.FeatureGate, sessionBase string,
 ) (prometheus.Collector, error) {
 	driverRoot := config.GetDriverRoot()
 	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
@@ -176,11 +176,10 @@ func (c draGPUCollector) listManagerResourceSlices() ([]*v1.ResourceSlice, error
 }
 
 func CollectBasedOnNvml(
-	ch chan<- prometheus.Metric, lib *nvidia.DeviceLib, nodeName string,
-	devTypeMap map[string]string, devIndexMap map[string]int, devHealthMap map[string]int,
-	devHealthLvs map[string][]string, devMemInfoMap map[string]nvml.Memory,
-	devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList,
-	devMigInfosMap map[string][]*nvidia.MigInfo,
+	ch chan<- prometheus.Metric, lib *nvidia.DeviceLib, nodeName string, devTypeMap map[string]string,
+	devIndexMap map[string]int, devHealthMap map[string]int, devHealthLvs map[string][]string,
+	devMemInfoMap map[string]nvml.Memory, devProcInfoMap map[string]procInfoList,
+	devProcUtilMap map[string]procUtilList, devMigInfosMap map[string][]*nvidia.MigInfo,
 	utilAdapter watcher.DeviceUtilInterface, featureGate featuregate.FeatureGate,
 ) {
 	err := lib.NvmlInit()

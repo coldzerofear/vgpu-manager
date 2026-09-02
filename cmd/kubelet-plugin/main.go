@@ -154,7 +154,6 @@ func newApp() *cli.App {
 			Name:        "host-manager-dir",
 			Usage:       "Configure the host path used by vgpu-manager.",
 			Value:       util.ManagerRootPath,
-			Required:    true,
 			Destination: &flags.HostManagerDir,
 			EnvVars:     []string{"HOST_MANAGER_DIR"},
 		},
@@ -162,7 +161,6 @@ func newApp() *cli.App {
 			Name:        "container-manager-dir",
 			Usage:       "Configure the container mount path used by vgpu-manager.",
 			Value:       util.ManagerRootPath,
-			Required:    true,
 			Destination: &flags.ContainerManagerDir,
 			EnvVars:     []string{"CONTAINER_MANAGER_DIR"},
 		},
@@ -300,8 +298,7 @@ func newApp() *cli.App {
 // Input validation of CLI flags.
 func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	switch flags.PluginMode {
-	// Empty means the caller did not go through the CLI (e.g. tests); treat
-	// it as the server default.
+	// Empty means the caller did not go through the CLI (e.g. tests); treat it as the server default.
 	case "", pkgkubeletplugin.ModeServer:
 		if featuregates.Enabled(featuregates.RemoteGPUSupport) {
 			if flags.RemoteNodeSelector == "" {
@@ -337,8 +334,8 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 			}
 		}
 	default:
-		return fmt.Errorf("invalid --plugin-mode %q: must be %q or %q", flags.PluginMode,
-			pkgkubeletplugin.ModeServer, pkgkubeletplugin.ModeInject)
+		return fmt.Errorf("invalid --plugin-mode %q: must be %q or %q",
+			flags.PluginMode, pkgkubeletplugin.ModeServer, pkgkubeletplugin.ModeInject)
 	}
 
 	// Validate the NRI plugin index format early (only when set): containerd
@@ -353,6 +350,12 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	}
 
 	if featuregates.Enabled(featuregates.VGPUSupport) {
+		if flags.HostManagerDir == "" {
+			return fmt.Errorf("--host-manager-dir is required when feature gate %s is enabled", featuregates.VGPUSupport)
+		}
+		if flags.ContainerManagerDir == "" {
+			return fmt.Errorf("--container-manager-dir is required when feature gate %s is enabled", featuregates.VGPUSupport)
+		}
 		if flags.DeviceCoresRatio <= 0 {
 			return fmt.Errorf("invalid --device-cores-ratio %d: must be greater than or equal to 0", flags.DeviceCoresRatio)
 		}

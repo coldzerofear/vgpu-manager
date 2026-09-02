@@ -186,8 +186,10 @@ func runApp(opt *options.Options) (exitCode int) {
 		podLister := client.NewPodLister(podInformer.GetIndexer())
 		sliceLister := resourcev1.NewResourceSliceLister(sliceInformer.GetIndexer())
 		claimLister := factory.Resource().V1().ResourceClaims().Lister()
-		draCollector, err := collector.NewDRAGPUCollector(nodeConfig, nodeLister, podLister, sliceLister, claimLister,
-			opt.FeatureGate, kubeClient, opt.RemoteSessionBase)
+		draCollector, err := collector.NewDRAGPUCollector(
+			nodeConfig, nodeLister, podLister, sliceLister, claimLister,
+			kubeClient, opt.FeatureGate, opt.RemoteSessionBase,
+		)
 		if err != nil {
 			klog.Errorf("Create dra gpu collector failed: %v", err)
 			return exitCode
@@ -202,7 +204,9 @@ func runApp(opt *options.Options) (exitCode int) {
 		}
 		podLister := client.NewPodLister(podInformer.GetIndexer())
 		containerLister := lister.NewContainerLister(util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
-		nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig, nodeLister, podLister, containerLister, opt.FeatureGate)
+		nodeCollector, err := collector.NewNodeGPUCollector(
+			nodeConfig, nodeLister, podLister, containerLister, opt.FeatureGate,
+		)
 		if err != nil {
 			klog.Errorf("Create node gpu collector failed: %v", err)
 			return exitCode

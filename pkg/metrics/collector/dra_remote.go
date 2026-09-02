@@ -168,7 +168,7 @@ func (c draGPUCollector) remoteConsumerPods(devInfoNameMap map[string]*DRADevice
 	}
 	ctx := context.Background()
 	for _, claim := range claims {
-		if claim.Status.Allocation == nil || !claimTouchesRemoteDevice(claim, c.nodeName, devInfoNameMap) {
+		if !claimTouchesRemoteDevice(claim, c.nodeName, devInfoNameMap) {
 			continue
 		}
 		for _, ref := range claim.Status.ReservedFor {
@@ -189,12 +189,14 @@ func (c draGPUCollector) remoteConsumerPods(devInfoNameMap map[string]*DRADevice
 }
 
 func claimTouchesRemoteDevice(claim *v1.ResourceClaim, nodeName string, devInfoNameMap map[string]*DRADeviceInfo) bool {
-	for _, result := range claim.Status.Allocation.Devices.Results {
-		if result.Driver != util.DRADriverName || result.Pool != nodeName {
-			continue
-		}
-		if info, ok := devInfoNameMap[result.Device]; ok && info.accessMode == util.AccessModeRemote {
-			return true
+	if claim.Status.Allocation != nil {
+		for _, result := range claim.Status.Allocation.Devices.Results {
+			if result.Driver != util.DRADriverName || result.Pool != nodeName {
+				continue
+			}
+			if info, ok := devInfoNameMap[result.Device]; ok && info.accessMode == util.AccessModeRemote {
+				return true
+			}
 		}
 	}
 	return false

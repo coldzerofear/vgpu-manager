@@ -448,7 +448,8 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, map[str
 func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 	policy, _ := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation)
 	policy = strings.ToLower(strings.TrimSpace(policy))
-	if policy == util.VirtualMemoryPolicy.String() || strings.HasPrefix(policy, "virt") {
+	switch {
+	case policy == util.VirtualMemoryPolicy.String(), strings.HasPrefix(policy, "virt"):
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.VirtualMemoryPolicy)
 		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
 			if config.MemoryScaling <= 1 {
@@ -457,8 +458,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 			}
 			return nil
 		}
-	}
-	if policy == util.PhysicalMemoryPolicy.String() || strings.HasPrefix(policy, "phy") {
+	case policy == util.PhysicalMemoryPolicy.String(), strings.HasPrefix(policy, "phy"):
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.PhysicalMemoryPolicy)
 		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
 			if config.MemoryScaling > 1 {
@@ -467,9 +467,10 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 			}
 			return nil
 		}
-	}
-	return func(_ *corev1.Node, _ *device.NodeDeviceInfo, _ *device.NodeConfigInfo) *reason.FilterReason {
-		return nil
+	default:
+		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, _ *device.NodeConfigInfo) *reason.FilterReason {
+			return nil
+		}
 	}
 }
 
