@@ -19,12 +19,15 @@ package collector
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
@@ -218,9 +221,11 @@ func (a draContainerAlloc) remote() bool {
 // sessions: for each claim request the container references, the partition
 // the request belongs to, its token from the claim annotation, and the
 // session's pids.config. partitionCache is per-scrape (claim UID -> info).
-func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCache map[types.UID]*claimresolve.PartitionInfo) []uint32 {
+func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCache map[types.UID]*claimresolve.PartitionInfo) ([]uint32, []string) {
 	ctx := context.Background()
-	pids := sets.New[uint32]()
+	pidSet := sets.New[uint32]()
+	partitionSet := sets.New[string]()
+	vmemNodeDirSet := sets.New[string]()
 	reader := claimReader{c: c}
 	for _, ref := range alloc.claims {
 		if ref.claim == nil {
@@ -247,12 +252,8 @@ func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCac
 		// NRI mode (per-container session) keys the token by
 		// <podUID>_<containerName>; partition mode by the resolver key.
 		nriPartitionKey := remote.NRIPartitionKey(string(alloc.podUID), alloc.name)
-		if token := ref.claim.Annotations[remote.SessionAnnotationKey(nriPartitionKey)]; token != "" {
-			for _, pid := range readSessionPIDs(filepath.Join(c.sessionBase, token, sessionPidsFile)) {
-				pids.Insert(pid)
-			}
-			continue
-		}
+		partitionSet.Insert(nriPartitionKey)
+
 		for _, mainRequest := range ref.requests {
 			var partitionKey string
 			if info != nil {
@@ -261,28 +262,101 @@ func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCac
 			if partitionKey == "" {
 				partitionKey = remote.PartitionFallbackKey(mainRequest)
 			}
-			if token := ref.claim.Annotations[remote.SessionAnnotationKey(partitionKey)]; token != "" {
-				for _, pid := range readSessionPIDs(filepath.Join(c.sessionBase, token, sessionPidsFile)) {
-					pids.Insert(pid)
+			partitionSet.Insert(partitionKey)
+		}
+
+		for partitionKey := range partitionSet {
+			token := ref.claim.Annotations[remote.SessionAnnotationKey(partitionKey)]
+			if token == "" {
+				if partitionKey != nriPartitionKey {
+					klog.V(5).InfoS("no session token recorded for partition",
+						"resourceClaim", klog.KObj(ref.claim), "partition", partitionKey)
 				}
 				continue
 			}
-			klog.V(5).InfoS("no session token recorded for partition",
-				"resourceClaim", klog.KObj(ref.claim), "partition", partitionKey)
+			if pids, err := GetPidsByFilepath(filepath.Join(c.sessionBase, token, sessionPidsFile)); err != nil {
+				klog.V(2).ErrorS(err, "GetPidsByFilepath failed", "partitionKey", partitionKey, "token", token)
+			} else if len(pids) > 0 {
+				pidSet.Insert(pids...)
+			}
+
+			vmemNodeDirSet.Insert(filepath.Join(c.sessionBase, token, "."+util.VMemNode))
 		}
 	}
-	return sets.List(pids)
+	return sets.List(pidSet), vmemNodeDirSet.UnsortedList()
 }
 
-// readSessionPIDs parses the library's pids.config: one decimal host PID per
-// line (see pkg/device/registry persistPids). Missing file = no PIDs yet.
-func readSessionPIDs(path string) []uint32 {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
+const (
+	pidsConfigLockYields    = 4
+	pidsConfigLockSleeps    = 5
+	pidsConfigLockBackoffNs = 200 * time.Microsecond // 200us
+)
+
+// lockPidsConfigShared Attempt to obtain shared lock in a non blocking manner（LOCK_SH | LOCK_NB），
+// Consistent with C Library
+func lockPidsConfigShared(f *os.File) error {
+	fd := int(f.Fd())
+	backoff := time.Duration(pidsConfigLockBackoffNs)
+	attempts := pidsConfigLockYields + pidsConfigLockSleeps
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		err := syscall.Flock(fd, syscall.LOCK_SH|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+
+		if errors.Is(err, syscall.EINTR) {
+			lastErr = err
+			continue
+		}
+
+		// Only EWOULDBLOCK (==EAGAIN) indicates that a writer holds an exclusive lock, which is worth trying again
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return err
+		}
+		lastErr = err
+
+		if attempt < pidsConfigLockYields {
+			runtime.Gosched()
+		} else {
+			time.Sleep(backoff)
+		}
 	}
-	defer func() { _ = f.Close() }()
-	var pids []uint32
+	return lastErr
+}
+
+// GetPidsByFilepath Read the PID list from the specified file.
+func GetPidsByFilepath(filePath string) ([]uint32, error) {
+	if filePath == "" {
+		return nil, fmt.Errorf("invalid parameter: filePath=%q", filePath)
+	}
+
+	f, err := os.OpenFile(filePath, os.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("error opening %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	locked := true
+	if err = lockPidsConfigShared(f); err != nil {
+		locked = false
+		_ = fmt.Sprintf("reading %s without a shared lock: %s", filePath, err)
+	}
+
+	pids := readCconfigPIDs(f)
+
+	if locked {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	}
+
+	return pids, nil
+}
+
+// readCconfigPIDs parses the library's pids.config: one decimal host PID per
+// line (see pkg/device/registry persistPids). Missing file = no PIDs yet.
+func readCconfigPIDs(f *os.File) []uint32 {
+	pidSet := sets.New[uint32]()
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -293,7 +367,7 @@ func readSessionPIDs(path string) []uint32 {
 		if err != nil {
 			continue
 		}
-		pids = append(pids, uint32(pid))
+		pidSet.Insert(uint32(pid))
 	}
-	return pids
+	return pidSet.UnsortedList()
 }

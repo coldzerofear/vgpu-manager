@@ -66,10 +66,17 @@ func runApp(opt *options.Options) (exitCode int) {
 	util.MustInitGlobalDomain(opt.Domain)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
+	if opt.FeatureGate.Enabled(util.RemoteGPUSupport) {
+		if opt.RemoteSessionBase == "" {
+			klog.Errorln("remote-session-base is required when feature gate %s is enabled", featuregates.RemoteGPUSupport)
+			return exitCode
+		}
+	}
+
 	kubeConfig, err := client.NewKubeConfig(
+		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithConfigMasterURL(opt.MasterURL),
 		client.WithKubeConfigPath(opt.KubeConfigFile),
-		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Errorf("Create kubeConfig failed: %v", err)
@@ -188,7 +195,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		claimLister := factory.Resource().V1().ResourceClaims().Lister()
 		draCollector, err := collector.NewDRAGPUCollector(
 			nodeConfig, nodeLister, podLister, sliceLister, claimLister,
-			kubeClient, opt.FeatureGate, opt.RemoteSessionBase,
+			kubeClient, opt.FeatureGate, opt.RemoteSessionBase, util.ManagerRootPath,
 		)
 		if err != nil {
 			klog.Errorf("Create dra gpu collector failed: %v", err)

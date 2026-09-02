@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -30,6 +31,8 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
+	vgpuconfig "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/vmem"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
@@ -78,13 +81,14 @@ type draGPUCollector struct {
 	// Remote GPU (RemoteGPUSupport gate): session base shared with remote-agent
 	// and an API-backed pod cache for consumers on other nodes.
 	sessionBase string
+	basePath    string
 	podCache    *podCache
 }
 
 func NewDRAGPUCollector(
 	config *node.NodeConfigSpec, nodeLister listerv1.NodeLister, podLister client.PodLister,
 	sliceLister resourcev1.ResourceSliceLister, claimLister resourcev1.ResourceClaimLister,
-	kubeClient kubernetes.Interface, featureGate featuregate.FeatureGate, sessionBase string,
+	kubeClient kubernetes.Interface, featureGate featuregate.FeatureGate, sessionBase, basePath string,
 ) (prometheus.Collector, error) {
 	driverRoot := config.GetDriverRoot()
 	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
@@ -103,6 +107,7 @@ func NewDRAGPUCollector(
 		claimLister: claimLister,
 		featureGate: featureGate,
 		sessionBase: sessionBase,
+		basePath:    basePath,
 		podCache:    newPodCache(kubeClient),
 		utilAdapter: adapter,
 	}, nil
@@ -294,6 +299,7 @@ type DRADeviceInfo struct {
 	name        string
 	devType     string
 	uuid        string
+	minor       int64
 	coreRatio   int64
 	memoryRatio int64
 	cores       int64
@@ -720,8 +726,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			// skips the device.
 			if mode := remote.StringAttr(dev, util.AccessModeAttribute); mode != "" {
 				if mode != util.AccessModeLocal && mode != util.AccessModeRemote {
-					klog.V(4).InfoS("skip resourceSlice device with malformed accessMode",
-						"device", dev.Name, "accessMode", mode)
+					klog.V(4).InfoS("skip resourceSlice device with malformed accessMode", "device", dev.Name, "accessMode", mode)
 					continue
 				}
 				devInfo.accessMode = mode
@@ -731,6 +736,11 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				// keying maps on "" would collapse every such device into one.
 				klog.V(4).InfoS("skip resourceSlice device without uuid attribute", "device", dev.Name)
 				continue
+			}
+			if minor := remote.IntAttr(dev, remote.AttrMinor); minor >= 0 || minor < vgpuconfig.MaxDeviceCount {
+				devInfo.minor = minor
+			} else {
+				devInfo.minor = int64(devIndexMap[devInfo.uuid])
 			}
 			if ratio := remote.IntAttr(dev, "coreRatio"); ratio >= 0 {
 				devInfo.coreRatio = ratio
@@ -902,14 +912,18 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				"pod", klog.KObj(pod), "container", alloc.name)
 
 			var containerPids []uint32
+			var vmemNodeDirs []string
 			if c.remoteEnabled() && alloc.remote() {
 				// Remote consumer: the GPU processes are lupine-server children
 				// on this node, listed by the session, not by the pod's cgroup.
-				containerPids = c.remoteSessionPIDs(alloc, partitionCache)
+				containerPids, vmemNodeDirs = c.remoteSessionPIDs(alloc, partitionCache)
 			} else {
 				_ = cgroup.GetContainerPidsFunc(pod, alloc.name, getFullPath, func(pid int) {
 					containerPids = append(containerPids, uint32(pid))
 				})
+				// TODO Currently, only virtual memory directories supported by NRI are spliced
+				partitionKey := fmt.Sprintf("%s_%s", alloc.podUID, alloc.name)
+				vmemNodeDirs = []string{filepath.Join(c.basePath, util.Claims, partitionKey, util.VMemNode, util.VMemNodeFile)}
 			}
 
 			// Stable vdevice_idx across scrapes: allocation results arrive in
@@ -925,8 +939,9 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			})
 
 			for deviceCount, result := range results {
-				deviceUUID := result.devInfo.uuid
 				var (
+					deviceUUID      = result.devInfo.uuid
+					devHostIndex    = int(result.devInfo.minor)
 					deviceMemLimit  = result.memory
 					realMemBytes    = result.memory
 					vDevIndex       = strconv.Itoa(deviceCount)
@@ -969,7 +984,41 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				// unified-memory component stays 0 and the two usage metrics
 				// below coincide.
 				if c.featureGate.Enabled(util.VirtualMemoryTracking) {
-					// Once there is a suitable plan in the future, it will be implemented deviceVMemUsage
+					// TODO Prevent gpu task from exiting unexpectedly, and fail to clean up the virtual cache in time.
+					if len(contGPUPids) > 0 {
+						for _, dir := range vmemNodeDirs {
+							func(dir string) {
+								configFile := filepath.Join(dir, util.VMemNodeFile)
+								vMemory, err := vmem.NewMmapDeviceVMemory(configFile)
+								if err != nil && !os.IsNotExist(err) {
+									klog.V(4).ErrorS(err, "Failed to mmap device vMemory", "filePath", configFile)
+								}
+								defer func() {
+									if vMemory != nil {
+										_ = vMemory.Close()
+									}
+								}()
+								if vMemory != nil {
+									unlock, err := vMemory.RLock(devHostIndex)
+									if err != nil {
+										klog.V(3).ErrorS(err, "virtual memory RLock failed", "devHostIndex", devHostIndex)
+										return
+									}
+									defer func() {
+										if err = unlock(); err != nil {
+											klog.ErrorS(err, "vMemory unlock failed", "devHostIndex", devHostIndex)
+										}
+									}()
+									deviceUsed, err := vMemory.GetDeviceMemory(devHostIndex)
+									if err != nil {
+										klog.V(3).ErrorS(err, "get device vMemory failed", "devHostIndex", devHostIndex)
+										return
+									}
+									deviceVMemUsage += deviceUsed.GetTotalUsed()
+								}
+							}(dir)
+						}
+					}
 				}
 
 				ch <- prometheus.MustNewConstMetric(
