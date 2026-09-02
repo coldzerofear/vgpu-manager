@@ -58,6 +58,7 @@ const (
 	// Existing attributes reused by the inject side (pkg/kubeletplugin/deviceinfo.go).
 	AttrUUID              = "uuid"
 	AttrMinor             = "minor"
+	AttrMemoryRatio       = "memoryRatio"
 	AttrCUDADriverVersion = "cudaDriverVersion"
 	AttrDriverVersion     = "driverVersion"
 

@@ -116,11 +116,12 @@ func validateToken(token string) error {
 // kubelet-plugin, read back from the node's own ResourceSlice so that the
 // agent needs no NVML.
 type NodeDevice struct {
-	Name      string
-	Minor     int64
-	UUID      string
-	MemoryMiB int64 // published capacity (= physical * memory ratio)
-	Cores     int64 // published capacity (= cores ratio)
+	Name        string
+	Minor       int64
+	UUID        string
+	MemoryMiB   int64 // published capacity (= physical * memory ratio)
+	Cores       int64 // published capacity (= cores ratio)
+	MemoryRatio int64
 }
 
 // NodeDevices is the node-level snapshot used to materialize sessions.
@@ -152,8 +153,10 @@ func NodeRemoteDevicesFromSlices(slices []*resourceapi.ResourceSlice) *NodeDevic
 			if minor < 0 || minor >= vgpuconfig.MaxDeviceCount {
 				continue
 			}
-
-			d := NodeDevice{Name: dev.Name, Minor: minor, UUID: uuid}
+			d := NodeDevice{Name: dev.Name, Minor: minor, UUID: uuid, MemoryRatio: util.HundredCore}
+			if ratio := remote.IntAttr(&dev, remote.AttrMemoryRatio); ratio >= 0 {
+				d.MemoryRatio = ratio
+			}
 			if q, ok := dev.Capacity[remote.CapacityCores]; ok {
 				d.Cores = q.Value.Value()
 			}
@@ -273,6 +276,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 	}
 
 	poolName := s.cfg.NodeName
+	memoryRatio := int64(util.HundredCore)
 	results := remote.FilterResultsByRequests(claim, claim.Status.Allocation.Devices.Results, requests)
 	infoBySlot := map[int]device.DeviceClaim{}
 	claimBySlot := map[int]device.DeviceClaim{}
@@ -283,6 +287,9 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		dev, ok := nd.Devices[result.Device]
 		if !ok {
 			return fmt.Errorf("allocated device %s is not published by this node (pool %s)", result.Device, poolName)
+		}
+		if memoryRatio == util.HundredCore && dev.MemoryRatio != memoryRatio {
+			memoryRatio = dev.MemoryRatio
 		}
 		// Slot = host device index (minor), exactly as the local path lays
 		// out the config: the library reads slot index as host index
@@ -333,13 +340,13 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		vgpuconfig.WithDeviceClaims(claims),
 		vgpuconfig.WithCompatibilityMode(util.SessionMode),
 		vgpuconfig.WithComputePolicy(util.FixedComputePolicy),
-		vgpuconfig.WithMemoryRatio(1),
 		vgpuconfig.WithDriverVersion(nvidia.DriverVersion{
 			DriverVersion: driverVersion,
 			CudaDriverVersion: nvidia.NewCudaVersion(
 				nd.CudaVersion.Major(), nd.CudaVersion.Minor(),
 			),
 		}),
+		vgpuconfig.WithMemoryRatio(float64(memoryRatio)/float64(util.HundredCore)),
 		vgpuconfig.WithVMemoryNodeEnabled(s.cfg.gateEnabled(util.VirtualMemoryTracking)),
 		vgpuconfig.WithSMWatcherEnabled(s.cfg.gateEnabled(util.SharedSMUtilizationWatcher)),
 	)

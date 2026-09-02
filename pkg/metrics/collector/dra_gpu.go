@@ -747,7 +747,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 			if ratio := remote.IntAttr(dev, "coreRatio"); ratio >= 0 {
 				devInfo.coreRatio = ratio
 			}
-			if ratio := remote.IntAttr(dev, "memoryRatio"); ratio >= 0 {
+			if ratio := remote.IntAttr(dev, remote.AttrMemoryRatio); ratio >= 0 {
 				devInfo.memoryRatio = ratio
 			}
 

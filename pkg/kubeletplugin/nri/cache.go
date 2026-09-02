@@ -17,10 +17,10 @@ limitations under the License.
 package nri
 
 import (
-	"fmt"
 	"path/filepath"
 	"sync"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
 
@@ -62,8 +62,8 @@ func Key(podUID, containerName string) string {
 //
 //	<ManagerRootPath>/claims/<claimUID>/<podUID>_<containerName>/config
 func ConfigDirFor(managerDir, claimUID, podUID, containerName string) string {
-	containerDir := fmt.Sprintf("%s_%s", podUID, containerName)
-	return filepath.Join(managerDir, util.Claims, claimUID, containerDir, util.Config)
+	partitionKey := remote.NRIPartitionKey(podUID, containerName)
+	return filepath.Join(managerDir, util.Claims, claimUID, partitionKey, util.Config)
 }
 
 // Set records or overwrites a single container's entry.

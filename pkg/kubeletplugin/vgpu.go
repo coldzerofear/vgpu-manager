@@ -29,6 +29,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/docker/go-units"
@@ -434,7 +435,7 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 // patches no claim annotation: in NRI mode the library registers via the pod-uid
 // path using the VGPU_POD_UID / VGPU_CONTAINER_NAME env injected here.
 func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
-	partitionKey := fmt.Sprintf("%s_%s", podUID, containerName)
+	partitionKey := remote.NRIPartitionKey(podUID, containerName)
 	contBase, hostBase, err := m.ensurePartitionDirectories(claimUID, partitionKey)
 	if err != nil {
 		return nil, err
