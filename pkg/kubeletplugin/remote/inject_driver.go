@@ -19,6 +19,8 @@ package remote
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -232,12 +234,17 @@ func (d *InjectDriver) nodeUnprepareResource(claimRef kubeletplugin.NamespacedOb
 	doneInFlight := drametrics.TrackInFlight(util.DRADriverName, "unprepare")
 	defer doneInFlight()
 
-	d.forgetPrepared(string(claimRef.UID))
 	if err := d.cdi.DeleteClaimSpec(string(claimRef.UID)); err != nil {
 		drametrics.IncNodeUnprepareError(util.DRADriverName, "unprepare_devices")
 		return err
 	}
 
+	if err := d.cleanTokens(context.Background(), claimRef); err != nil {
+		drametrics.IncNodeUnprepareError(util.DRADriverName, "unprepare_devices")
+		return err
+	}
+
+	d.forgetPrepared(string(claimRef.UID))
 	drametrics.ObserveRequest(util.DRADriverName, "unprepare", time.Since(t0))
 	return nil
 }
@@ -284,6 +291,21 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 	if err != nil {
 		return fail(err)
 	}
+
+	// Attempt to create client library loading configuration for container creation
+	clientConf := filepath.Join(d.config.ArtifactsDir, artifact.Name, RemoteClientConf)
+	f, err := os.OpenFile(clientConf, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil && !os.IsExist(err) {
+		err = fmt.Errorf("failed to create %s: %w", clientConf, err)
+		return fail(err)
+	} else if err == nil {
+		defer f.Close()
+		if _, err = f.WriteString(artifact.ContainerDir); err != nil {
+			err = fmt.Errorf("failed to write %s: %w", clientConf, err)
+			return fail(err)
+		}
+	}
+
 	baseEnv := []string{
 		// Mandatory: prevents client-local routing (§4.3.2 lesson).
 		fmt.Sprintf("%s=1", EnvLupineDisableLocal),
@@ -292,13 +314,21 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		// those two names. OCI/CDI env values are literal (no shell
 		// expansion), so an image-defined LD_LIBRARY_PATH is replaced, not
 		// extended (known K1 limitation).
-		fmt.Sprintf("%s=%s", util.LdLibraryPathEnv, artifact.LibDir),
+		// TODO　To prevent overwriting the original environment variables in the image and damaging the container environment,
+		// Using file based read-only mounting can also prevent container environment variables from being tampered with
+		//fmt.Sprintf("%s=%s", util.LdLibraryPathEnv, artifact.LibDir),
 	}
-	mounts := []*cdispec.Mount{{
+
+	mounts := []*cdispec.Mount{{ // mount client library
 		HostPath:      artifact.HostDir,
 		ContainerPath: artifact.ContainerDir,
 		Options:       []string{"ro", "nosuid", "nodev", "bind"},
+	}, { // mount ld preload
+		HostPath:      filepath.Join(artifact.HostDir, RemoteClientConf),
+		ContainerPath: filepath.Join("/etc/ld.so.conf.d", RemoteClientConf),
+		Options:       []string{"ro", "nosuid", "nodev", "bind"},
 	}}
+
 	if artifact.NvidiaSMIHost != "" {
 		// Single-file bind so the pod keeps its own /usr/bin (gpu-go lesson:
 		// never overlay a system directory). nvidia-smi dlopens
@@ -437,6 +467,39 @@ func (d *InjectDriver) resolveRemoteDevices(claim *resourceapi.ResourceClaim) ([
 		out = append(out, resultDevice{index: i, result: result, info: info, mainRequest: mainRequest})
 	}
 	return out, nil
+}
+
+func (d *InjectDriver) cleanTokens(ctx context.Context, claimRef kubeletplugin.NamespacedObject) error {
+	claim, err := d.clients.Resource.ResourceClaims(claimRef.Namespace).Get(ctx, claimRef.Name, metav1.GetOptions{})
+	if err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	// claim marked for deletion, fast return
+	if !claim.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	if claim.UID != claimRef.UID {
+		klog.V(4).Infof("Cleaning tokens failed, claim UID mismatch (%s != %s)", claimRef.UID, claim.UID)
+		return nil
+	}
+	metadata := client2.PatchMetadata{Annotations: map[string]*string{}}
+	for key := range claim.GetAnnotations() {
+		if strings.HasPrefix(key, sessionAnnotationPrefix) {
+			metadata.Annotations[key] = nil
+		}
+	}
+	if len(metadata.Annotations) > 0 {
+		data, err := metadata.JSONBytes()
+		if err != nil {
+			return err
+		}
+		_, err = d.clients.Core.ResourceV1().ResourceClaims(claim.Namespace).
+			Patch(ctx, claim.Name, metadata.PatchType(), data, metav1.PatchOptions{})
+		if err != nil {
+			return client.IgnoreNotFound(err)
+		}
+	}
+	return nil
 }
 
 // assignTokens fills partition tokens from the claim annotations, minting and

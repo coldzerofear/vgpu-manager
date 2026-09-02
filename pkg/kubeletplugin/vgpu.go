@@ -499,6 +499,10 @@ func (m *VGPUManager) Unprepare(claimRef kubeletplugin.NamespacedObject, _ Prepa
 	if !claim.DeletionTimestamp.IsZero() {
 		return nil
 	}
+	if claim.UID != claimRef.UID {
+		klog.V(4).Infof("Cleaning vGPU registry failed, claim UID mismatch (%s != %s)", claimRef.UID, claim.UID)
+		return nil
+	}
 	metadata := client.PatchMetadata{Annotations: map[string]*string{}}
 	for key := range claim.GetAnnotations() {
 		if strings.HasPrefix(key, util.DRADriverName+"/") {

@@ -84,4 +84,6 @@ const (
 	// under one naming convention.
 	cdiVendor     = "k8s." + util.DRADriverName
 	cdiClaimClass = "claim"
+
+	RemoteClientConf = "remote-client-library.conf"
 )
