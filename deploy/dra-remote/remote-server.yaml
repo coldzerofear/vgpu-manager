@@ -111,6 +111,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - remote-agent
+            - --v=4
           env:
             - name: NODE_NAME
               valueFrom:

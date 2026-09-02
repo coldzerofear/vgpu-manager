@@ -80,6 +80,8 @@ func main() {
 		kube        pkgflags.KubeClientConfig
 		cfg         remoteagent.Config
 		featureGate = featuregate.NewFeatureGate()
+		// klog flags (-v etc.), same wiring as cmd/kubelet-plugin.
+		loggingConfig = pkgflags.NewLoggingConfig()
 	)
 
 	runtime.Must(featureGate.Add(map[featuregate.Feature]featuregate.FeatureSpec{
@@ -100,11 +102,16 @@ func main() {
 		&cli.DurationFlag{Name: "gc-interval", Usage: "Orphaned session sweep interval.", Value: time.Minute, Destination: &cfg.GCInterval, EnvVars: []string{"GC_INTERVAL"}},
 	}, kube.Flags()...)
 	flags = append(flags, FeatureGateFlags(featureGate)...)
+	flags = append(flags, loggingConfig.Flags()...)
 
 	app := &cli.App{
 		Name:  "remote-agent",
 		Usage: "GPU-node agent for remote GPU sessions (runs alongside lupine-server)",
 		Flags: flags,
+		Before: func(c *cli.Context) error {
+			// Apply the logging config before anything logs.
+			return loggingConfig.Apply()
+		},
 		Action: func(c *cli.Context) error {
 			endpoint, err := endpointutil.ParseEndpoint(cfg.ServerEndpoint)
 			if err != nil {
@@ -143,6 +150,12 @@ func main() {
 			return remoteagent.New(cfg).Run(ctx)
 		},
 		Version: version.Get().String(),
+	}
+
+	// Remove the -v alias of the version flag: -v belongs to klog verbosity
+	// (same as cmd/kubelet-plugin).
+	if f, ok := cli.VersionFlag.(*cli.BoolFlag); ok {
+		f.Aliases = nil
 	}
 
 	if err := app.RunContext(context.Background(), os.Args); err != nil {

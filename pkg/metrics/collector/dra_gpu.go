@@ -737,7 +737,9 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				klog.V(4).InfoS("skip resourceSlice device without uuid attribute", "device", dev.Name)
 				continue
 			}
-			if minor := remote.IntAttr(dev, remote.AttrMinor); minor >= 0 || minor < vgpuconfig.MaxDeviceCount {
+			// minor is the host device index the vmem region is slotted by;
+			// a missing or out-of-range attribute falls back to the NVML index.
+			if minor := remote.IntAttr(dev, remote.AttrMinor); minor >= 0 && minor < vgpuconfig.MaxDeviceCount {
 				devInfo.minor = minor
 			} else {
 				devInfo.minor = int64(devIndexMap[devInfo.uuid])
@@ -921,9 +923,17 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				_ = cgroup.GetContainerPidsFunc(pod, alloc.name, getFullPath, func(pid int) {
 					containerPids = append(containerPids, uint32(pid))
 				})
-				// TODO Currently, only virtual memory directories supported by NRI are spliced
-				partitionKey := fmt.Sprintf("%s_%s", alloc.podUID, alloc.name)
-				vmemNodeDirs = []string{filepath.Join(c.basePath, util.Claims, partitionKey, util.VMemNode, util.VMemNodeFile)}
+				// Local partition layout: <manager>/claims/<claimUID>/<partitionKey>/vmem_node.
+				// TODO only the NRI-mode partition key (<podUID>_<container>) is
+				// derivable here; resolver-based keys need the partition cache.
+				partitionKey := remote.NRIPartitionKey(string(alloc.podUID), alloc.name)
+				for _, ref := range alloc.claims {
+					if ref.claim == nil {
+						continue
+					}
+					vmemNodeDirs = append(vmemNodeDirs,
+						filepath.Join(c.basePath, util.Claims, string(ref.claim.UID), partitionKey, util.VMemNode))
+				}
 			}
 
 			// Stable vdevice_idx across scrapes: allocation results arrive in
@@ -983,41 +993,38 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				// handle on the container's manager directory yet, so the
 				// unified-memory component stays 0 and the two usage metrics
 				// below coincide.
-				if c.featureGate.Enabled(util.VirtualMemoryTracking) {
-					// TODO Prevent gpu task from exiting unexpectedly, and fail to clean up the virtual cache in time.
-					if len(contGPUPids) > 0 {
-						for _, dir := range vmemNodeDirs {
-							func(dir string) {
-								configFile := filepath.Join(dir, util.VMemNodeFile)
-								vMemory, err := vmem.NewMmapDeviceVMemory(configFile)
-								if err != nil && !os.IsNotExist(err) {
+				if c.featureGate.Enabled(util.VirtualMemoryTracking) && len(contGPUPids) > 0 {
+					// Sum this device's slot across the container's vmem
+					// regions (one per partition/session directory). A stale
+					// region of a crashed task inflates the sum until its
+					// directory is cleaned up — same as the device-plugin path.
+					for _, dir := range vmemNodeDirs {
+						func(configFile string) {
+							vMemory, err := vmem.NewMmapDeviceVMemory(configFile)
+							if err != nil {
+								if !os.IsNotExist(err) {
 									klog.V(4).ErrorS(err, "Failed to mmap device vMemory", "filePath", configFile)
 								}
-								defer func() {
-									if vMemory != nil {
-										_ = vMemory.Close()
-									}
-								}()
-								if vMemory != nil {
-									unlock, err := vMemory.RLock(devHostIndex)
-									if err != nil {
-										klog.V(3).ErrorS(err, "virtual memory RLock failed", "devHostIndex", devHostIndex)
-										return
-									}
-									defer func() {
-										if err = unlock(); err != nil {
-											klog.ErrorS(err, "vMemory unlock failed", "devHostIndex", devHostIndex)
-										}
-									}()
-									deviceUsed, err := vMemory.GetDeviceMemory(devHostIndex)
-									if err != nil {
-										klog.V(3).ErrorS(err, "get device vMemory failed", "devHostIndex", devHostIndex)
-										return
-									}
-									deviceVMemUsage += deviceUsed.GetTotalUsed()
+								return
+							}
+							defer func() { _ = vMemory.Close() }()
+							unlock, err := vMemory.RLock(devHostIndex)
+							if err != nil {
+								klog.V(3).ErrorS(err, "virtual memory RLock failed", "devHostIndex", devHostIndex)
+								return
+							}
+							defer func() {
+								if err = unlock(); err != nil {
+									klog.ErrorS(err, "vMemory unlock failed", "devHostIndex", devHostIndex)
 								}
-							}(dir)
-						}
+							}()
+							deviceUsed, err := vMemory.GetDeviceMemory(devHostIndex)
+							if err != nil {
+								klog.V(3).ErrorS(err, "get device vMemory failed", "devHostIndex", devHostIndex)
+								return
+							}
+							deviceVMemUsage += deviceUsed.GetTotalUsed()
+						}(filepath.Join(dir, util.VMemNodeFile))
 					}
 				}
 

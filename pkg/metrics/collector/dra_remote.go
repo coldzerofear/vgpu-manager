@@ -224,13 +224,15 @@ func (a draContainerAlloc) remote() bool {
 func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCache map[types.UID]*claimresolve.PartitionInfo) ([]uint32, []string) {
 	ctx := context.Background()
 	pidSet := sets.New[uint32]()
-	partitionSet := sets.New[string]()
 	vmemNodeDirSet := sets.New[string]()
 	reader := claimReader{c: c}
 	for _, ref := range alloc.claims {
 		if ref.claim == nil {
 			continue
 		}
+		// Per claim: tokens live in THIS claim's annotations; carrying keys
+		// over from another claim would look them up in the wrong object.
+		partitionSet := sets.New[string]()
 		info, ok := partitionCache[ref.claim.UID]
 		if !ok {
 			allocated := sets.New[string]()
@@ -287,16 +289,17 @@ func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCac
 }
 
 const (
-	pidsConfigLockYields    = 4
-	pidsConfigLockSleeps    = 5
-	pidsConfigLockBackoffNs = 200 * time.Microsecond // 200us
+	pidsConfigLockYields  = 4
+	pidsConfigLockSleeps  = 5
+	pidsConfigLockBackoff = 200 * time.Microsecond
 )
 
-// lockPidsConfigShared Attempt to obtain shared lock in a non blocking manner（LOCK_SH | LOCK_NB），
-// Consistent with C Library
+// lockPidsConfigShared takes a shared flock on pids.config without blocking
+// (LOCK_SH|LOCK_NB, a few yields then short sleeps), mirroring the library's
+// writer-side locking. Only EWOULDBLOCK (a writer holds the lock) is retried.
 func lockPidsConfigShared(f *os.File) error {
 	fd := int(f.Fd())
-	backoff := time.Duration(pidsConfigLockBackoffNs)
+	backoff := pidsConfigLockBackoff
 	attempts := pidsConfigLockYields + pidsConfigLockSleeps
 
 	var lastErr error
@@ -338,24 +341,26 @@ func GetPidsByFilepath(filePath string) ([]uint32, error) {
 	}
 	defer f.Close()
 
+	// Lock failure is not fatal: a torn read at worst misses/duplicates a
+	// line, and the parser tolerates both.
 	locked := true
 	if err = lockPidsConfigShared(f); err != nil {
 		locked = false
-		_ = fmt.Sprintf("reading %s without a shared lock: %s", filePath, err)
+		klog.V(4).InfoS("reading pids.config without a shared lock", "filePath", filePath, "err", err)
 	}
 
-	pids := readCconfigPIDs(f)
+	pids := readPidsConfig(f)
 
 	if locked {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	}
 
 	return pids, nil
 }
 
-// readCconfigPIDs parses the library's pids.config: one decimal host PID per
-// line (see pkg/device/registry persistPids). Missing file = no PIDs yet.
-func readCconfigPIDs(f *os.File) []uint32 {
+// readPidsConfig parses the library's pids.config: one decimal host PID per
+// line (see pkg/device/registry persistPids), deduplicated.
+func readPidsConfig(f *os.File) []uint32 {
 	pidSet := sets.New[uint32]()
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {

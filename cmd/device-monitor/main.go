@@ -66,11 +66,9 @@ func runApp(opt *options.Options) (exitCode int) {
 	util.MustInitGlobalDomain(opt.Domain)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
-	if opt.FeatureGate.Enabled(util.RemoteGPUSupport) {
-		if opt.RemoteSessionBase == "" {
-			klog.Errorln("remote-session-base is required when feature gate %s is enabled", featuregates.RemoteGPUSupport)
-			return exitCode
-		}
+	if opt.FeatureGate.Enabled(util.RemoteGPUSupport) && opt.RemoteSessionBase == "" {
+		klog.Errorf("--remote-session-base is required when feature gate %s is enabled", util.RemoteGPUSupport)
+		return exitCode
 	}
 
 	kubeConfig, err := client.NewKubeConfig(
