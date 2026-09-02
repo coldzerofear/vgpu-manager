@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
 
@@ -62,7 +61,9 @@ func Key(podUID, containerName string) string {
 //
 //	<ManagerRootPath>/claims/<claimUID>/<podUID>_<containerName>/config
 func ConfigDirFor(managerDir, claimUID, podUID, containerName string) string {
-	partitionKey := remote.NRIPartitionKey(podUID, containerName)
+	// util.NRIPartitionKey, not remote.NRIPartitionKey: remote imports this
+	// package, importing it back would be a cycle.
+	partitionKey := util.NRIPartitionKey(podUID, containerName)
 	return filepath.Join(managerDir, util.Claims, claimUID, partitionKey, util.Config)
 }
 

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Masterminds/semver"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -35,11 +36,10 @@ type artifactSelection struct {
 	HostDir string
 	// ContainerDir is the fixed in-container mount target: the selected
 	// version is always presented at <manager-root>/driver, mirroring where
-	// the local path mounts libvgpu-control.so.
+	// the local path mounts libvgpu-control.so. The shims sit flat in it
+	// (libcuda.so.1 / libnvidia-ml.so.1) and are made loadable through the
+	// generated ld.so.preload file (see ensureLdPreloadFile).
 	ContainerDir string
-	// LibDir is the container path to expose via LD_LIBRARY_PATH (flat
-	// layout: libcuda.so.1 / libnvidia-ml.so.1 directly in ContainerDir).
-	LibDir string
 	// NvidiaSMIHost is the host path of the nvidia-smi binary shipped next
 	// to the shims in newer artifact images, or "" when this artifact
 	// version does not carry one.
@@ -90,7 +90,6 @@ func selectArtifact(artifactsDir, hostArtifactsDir string, serverCeiling *semver
 		Name:         bestName,
 		HostDir:      filepath.Join(hostArtifactsDir, bestName),
 		ContainerDir: containerDir,
-		LibDir:       containerDir,
 	}
 	// Newer artifact images ship nvidia-smi next to the shims. Optional:
 	// older artifacts simply do not have it and nothing extra is mounted.
@@ -112,4 +111,43 @@ func dirNames(entries []os.DirEntry) string {
 		return "<empty>"
 	}
 	return names
+}
+
+// The driver shims a client artifact ships. libcuda.so.1 is mandatory;
+// libnvidia-ml.so.1 is optional (nvidia-smi support).
+const (
+	shimLibCuda = "libcuda.so.1"
+	shimLibNvml = "libnvidia-ml.so.1"
+)
+
+// ensureLdPreloadFile writes <artifactsDir>/<ver>/RemoteLdPreload listing the
+// artifact's shims by their in-container paths, one per line, and returns the
+// host path of that file for the CDI mount. Idempotent; the content is
+// refreshed (write + rename, so concurrent readers never see a torn file)
+// when the shim set changes on an artifact update.
+func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, error) {
+	var lines []string
+	for _, lib := range []string{shimLibCuda, shimLibNvml} {
+		if _, err := os.Stat(filepath.Join(artifactsDir, sel.Name, lib)); err == nil {
+			lines = append(lines, filepath.Join(sel.ContainerDir, lib))
+		} else if lib == shimLibCuda {
+			// Without the CUDA shim the artifact is unusable; fail the
+			// prepare (retryable — the artifact may still be materializing).
+			return "", fmt.Errorf("client artifact %s has no %s: %w", sel.Name, lib, err)
+		}
+	}
+	content := strings.Join(lines, "\n") + "\n"
+
+	path := filepath.Join(artifactsDir, sel.Name, RemoteLdPreload)
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+		return filepath.Join(sel.HostDir, RemoteLdPreload), nil
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", fmt.Errorf("rename %s: %w", tmp, err)
+	}
+	return filepath.Join(sel.HostDir, RemoteLdPreload), nil
 }

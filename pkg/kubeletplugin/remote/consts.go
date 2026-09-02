@@ -85,5 +85,11 @@ const (
 	cdiVendor     = "k8s." + util.DRADriverName
 	cdiClaimClass = "claim"
 
-	RemoteClientConf = "remote-client-library.conf"
+	// RemoteLdPreload is the generated preload list shipped next to the
+	// client shims and bind-mounted at /etc/ld.so.preload in remote pods.
+	// The dynamic loader reads that file directly for every process (unlike
+	// ld.so.conf.d, which only ldconfig consumes), and later
+	// dlopen("libcuda.so.1") calls resolve to the already-loaded shim by
+	// SONAME — no env and no ldconfig run needed.
+	RemoteLdPreload = "remote-ld.so.preload"
 )

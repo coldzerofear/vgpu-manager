@@ -878,3 +878,12 @@ func PodVGPUAccessMode(obj metav1.Object) (string, error) {
 			VGPUAccessModeAnnotation, value, AccessModeLocal, AccessModeRemote)
 	}
 }
+
+// NRIPartitionKey is the per-container partition key used by the NRI paths
+// (local and remote): the name of the per-container partition directory and
+// the remote per-container session. Defined here because both
+// pkg/kubeletplugin/nri and pkg/kubeletplugin/remote need it (remote imports
+// nri, so neither can host it for the other).
+func NRIPartitionKey(podUID, containerName string) string {
+	return podUID + "_" + containerName
+}

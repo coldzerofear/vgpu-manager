@@ -19,14 +19,13 @@ package remote
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
 	client2 "github.com/coldzerofear/vgpu-manager/pkg/client"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/health"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
@@ -292,47 +291,41 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		return fail(err)
 	}
 
-	// Attempt to create client library loading configuration for container creation
-	clientConf := filepath.Join(d.config.ArtifactsDir, artifact.Name, RemoteClientConf)
-	f, err := os.OpenFile(clientConf, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
-	if err != nil && !os.IsExist(err) {
-		err = fmt.Errorf("failed to create %s: %w", clientConf, err)
+	// How the container finds the shims (why /etc/ld.so.preload):
+	//   - ld.so.conf.d is only read by ldconfig, never by the loader at
+	//     runtime, so a mounted conf snippet alone changes nothing;
+	//   - regenerating ld.so.cache would need a hook binary on every
+	//     consumer node and a working ldconfig in every image;
+	//   - LD_LIBRARY_PATH via CDI env would replace an image-defined value.
+	// The loader reads /etc/ld.so.preload directly for every process, and a
+	// later dlopen("libcuda.so.1") resolves to the already-loaded shim by
+	// SONAME. Same single-file mount the local path uses. Boundaries: an
+	// ld.so.preload the image ships is shadowed, and setuid binaries skip
+	// preload entries containing "/" (harmless — they need no CUDA).
+	ldPreloadHost, err := ensureLdPreloadFile(d.config.ArtifactsDir, artifact)
+	if err != nil {
 		return fail(err)
-	} else if err == nil {
-		defer f.Close()
-		if _, err = f.WriteString(artifact.ContainerDir); err != nil {
-			err = fmt.Errorf("failed to write %s: %w", clientConf, err)
-			return fail(err)
-		}
 	}
 
 	baseEnv := []string{
 		// Mandatory: prevents client-local routing (§4.3.2 lesson).
 		fmt.Sprintf("%s=1", EnvLupineDisableLocal),
-		// The artifact dir contains only libcuda.so.1/libnvidia-ml.so.1
-		// (self-contained static client, D11), so shadowing is limited to
-		// those two names. OCI/CDI env values are literal (no shell
-		// expansion), so an image-defined LD_LIBRARY_PATH is replaced, not
-		// extended (known K1 limitation).
-		// TODO　To prevent overwriting the original environment variables in the image and damaging the container environment,
-		// Using file based read-only mounting can also prevent container environment variables from being tampered with
-		//fmt.Sprintf("%s=%s", util.LdLibraryPathEnv, artifact.LibDir),
 	}
 
-	mounts := []*cdispec.Mount{{ // mount client library
+	mounts := []*cdispec.Mount{{ // the client shim libraries
 		HostPath:      artifact.HostDir,
 		ContainerPath: artifact.ContainerDir,
 		Options:       []string{"ro", "nosuid", "nodev", "bind"},
-	}, { // mount ld preload
-		HostPath:      filepath.Join(artifact.HostDir, RemoteClientConf),
-		ContainerPath: filepath.Join("/etc/ld.so.conf.d", RemoteClientConf),
+	}, { // the preload list that makes them loadable, env untouched
+		HostPath:      ldPreloadHost,
+		ContainerPath: vgpu.ContPreLoadFilePath,
 		Options:       []string{"ro", "nosuid", "nodev", "bind"},
 	}}
 
 	if artifact.NvidiaSMIHost != "" {
 		// Single-file bind so the pod keeps its own /usr/bin (gpu-go lesson:
 		// never overlay a system directory). nvidia-smi dlopens
-		// libnvidia-ml.so.1 at runtime, which LD_LIBRARY_PATH above resolves
+		// libnvidia-ml.so.1 at runtime, which the preload list above resolves
 		// to the lupine shim - so it reports the remote session's view.
 		mounts = append(mounts, &cdispec.Mount{
 			HostPath:      artifact.NvidiaSMIHost,

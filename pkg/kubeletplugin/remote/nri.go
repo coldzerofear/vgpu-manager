@@ -53,9 +53,10 @@ import (
 //     barrier holds.
 
 // NRIPartitionKey is the per-container partition key used in NRI mode,
-// shaped like the local path's NRI partition directory name.
+// shaped like the local path's NRI partition directory name. The definition
+// lives in pkg/util (shared with pkg/kubeletplugin/nri without a cycle).
 func NRIPartitionKey(podUID, containerName string) string {
-	return fmt.Sprintf("%s_%s", podUID, containerName)
+	return util.NRIPartitionKey(podUID, containerName)
 }
 
 // preparedClaim is what NodePrepare records for the NRI hook.

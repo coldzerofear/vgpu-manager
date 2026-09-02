@@ -373,7 +373,7 @@ func TestSelectArtifact(t *testing.T) {
 		if sel.NvidiaSMIHost != "" {
 			t.Fatalf("no nvidia-smi in 12.4.1, but NvidiaSMIHost=%q", sel.NvidiaSMIHost)
 		}
-		if sel.ContainerDir != "/etc/vgpu-manager/driver" || sel.LibDir != sel.ContainerDir {
+		if sel.ContainerDir != "/etc/vgpu-manager/driver" {
 			t.Fatalf("unexpected container paths: %+v", sel)
 		}
 	})
@@ -512,4 +512,70 @@ func TestSelectArtifactNvidiaSMI(t *testing.T) {
 	if sel.NvidiaSMIHost != filepath.Join("/host"+dir, "12.9.1", "nvidia-smi") {
 		t.Fatalf("unexpected NvidiaSMIHost: %q", sel.NvidiaSMIHost)
 	}
+}
+
+func TestEnsureLdPreloadFile(t *testing.T) {
+	artifacts := t.TempDir()
+	verDir := filepath.Join(artifacts, "12.9.1")
+	if err := os.MkdirAll(verDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sel := &artifactSelection{
+		Name:         "12.9.1",
+		HostDir:      "/host/etc/vgpu-manager/driver/12.9.1",
+		ContainerDir: "/etc/vgpu-manager/driver",
+	}
+
+	t.Run("missing libcuda fails the prepare", func(t *testing.T) {
+		if _, err := ensureLdPreloadFile(artifacts, sel); err == nil {
+			t.Fatal("expected error without libcuda.so.1")
+		}
+	})
+
+	writeShim := func(name string) {
+		if err := os.WriteFile(filepath.Join(verDir, name), []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readPreload := func() string {
+		b, err := os.ReadFile(filepath.Join(verDir, RemoteLdPreload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	t.Run("libcuda only", func(t *testing.T) {
+		writeShim(shimLibCuda)
+		host, err := ensureLdPreloadFile(artifacts, sel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if host != "/host/etc/vgpu-manager/driver/12.9.1/"+RemoteLdPreload {
+			t.Fatalf("host path: %s", host)
+		}
+		if got := readPreload(); got != "/etc/vgpu-manager/driver/libcuda.so.1\n" {
+			t.Fatalf("content: %q", got)
+		}
+	})
+
+	t.Run("nvml shim appears after an artifact update", func(t *testing.T) {
+		writeShim(shimLibNvml)
+		if _, err := ensureLdPreloadFile(artifacts, sel); err != nil {
+			t.Fatal(err)
+		}
+		want := "/etc/vgpu-manager/driver/libcuda.so.1\n/etc/vgpu-manager/driver/libnvidia-ml.so.1\n"
+		if got := readPreload(); got != want {
+			t.Fatalf("content: %q", got)
+		}
+		// Idempotent: unchanged content is left alone.
+		before, _ := os.Stat(filepath.Join(verDir, RemoteLdPreload))
+		if _, err := ensureLdPreloadFile(artifacts, sel); err != nil {
+			t.Fatal(err)
+		}
+		after, _ := os.Stat(filepath.Join(verDir, RemoteLdPreload))
+		if !after.ModTime().Equal(before.ModTime()) {
+			t.Fatal("unchanged content must not be rewritten")
+		}
+	})
 }
