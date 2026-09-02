@@ -160,7 +160,7 @@ spec:
           # 驱动库全部由 nvidia-container-runtime 注入。镜像的 CUDA 版本必须 ≤ 节点驱动支持的 CUDA
           # （13.3 需驱动 ≥ 580，老驱动换 cuda-12.9.1 / cuda-11.8.0）。
           # 正式环境请改用 release tag 或 @sha256 digest，并与 dra-inject 里的 client 制品同一 release。
-          image: ghcr.io/coldzerofear/lupine-server-static:cuda-13.3.1    # ← 按节点驱动 / release 修改
+          image: ghcr.io/coldzerofear/lupine-server:cuda-13.3.1-ubuntu24.04    # ← 按节点驱动 / release 修改
           imagePullPolicy: IfNotPresent
           command: [bash, -c]
           args:
