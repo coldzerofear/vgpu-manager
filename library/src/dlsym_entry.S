@@ -38,12 +38,35 @@ limitations under the License.
 
 #if defined(__x86_64__)
 
+/* Control-flow Enforcement. Our dlsym is reached through the PLT, so with
+ * IBT enforced it is an indirect branch target and needs an `endbr64`
+ * landing pad; the encoding is a NOP on pre-CET parts, so it is emitted
+ * unconditionally. The property note is what enables enforcement, and the
+ * linker keeps it only if every input object has one -- so it is emitted
+ * exactly when the compiler says the C objects have it, and __CET__ already
+ * carries the right bits (1 = IBT, 2 = SHSTK). Without this the whole
+ * library silently loses CET: one object without the note drops it for the
+ * entire link. */
+#if defined(__CET__)
+    .section .note.gnu.property, "a"
+    .balign 8
+    .long 4                      /* name size            */
+    .long 0x10                   /* descriptor size      */
+    .long 5                      /* NT_GNU_PROPERTY_TYPE_0 */
+    .asciz "GNU"
+    .long 0xc0000002             /* GNU_PROPERTY_X86_FEATURE_1_AND */
+    .long 4
+    .long __CET__                /* IBT and/or SHSTK, as built */
+    .long 0                      /* padding */
+#endif
+
     .text
     .globl  dlsym
     .type   dlsym, @function
     .align  16
 dlsym:
     .cfi_startproc
+    endbr64
     /* Save the arguments across the call. Entry rsp is 8 mod 16; the two
      * pushes plus the sub bring it to 0 mod 16, which the ABI requires at
      * a call boundary. */
@@ -87,6 +110,22 @@ dlsym:
  * omitting it on a build with one would silently disable BTI for the whole
  * library. */
 #if defined(__ARM_FEATURE_BTI_DEFAULT) && __ARM_FEATURE_BTI_DEFAULT == 1
+# define VGPU_AARCH64_FEAT_BTI 1
+#else
+# define VGPU_AARCH64_FEAT_BTI 0
+#endif
+/* PAC is declared, not implemented: the stub signs nothing because it never
+ * returns via `ret`. It hands the caller's own x30 to the callee unchanged,
+ * exactly as a direct call would, so it is compatible with a PAC build. The
+ * property is an AND across objects -- declaring only BTI here would strip
+ * PAC from the whole library on a build that has it. */
+#if defined(__ARM_FEATURE_PAC_DEFAULT)
+# define VGPU_AARCH64_FEAT_PAC 2
+#else
+# define VGPU_AARCH64_FEAT_PAC 0
+#endif
+
+#if (VGPU_AARCH64_FEAT_BTI | VGPU_AARCH64_FEAT_PAC) != 0
     .section .note.gnu.property, "a"
     .balign 8
     .long 4                      /* name size            */
@@ -95,7 +134,7 @@ dlsym:
     .asciz "GNU"
     .long 0xc0000000             /* GNU_PROPERTY_AARCH64_FEATURE_1_AND */
     .long 4
-    .long 1                      /* ..._BTI */
+    .long (VGPU_AARCH64_FEAT_BTI | VGPU_AARCH64_FEAT_PAC)
     .long 0                      /* padding */
 #endif
 
