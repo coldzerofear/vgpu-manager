@@ -19,7 +19,6 @@ package metrics
 import (
 	"time"
 
-	"github.com/coldzerofear/vgpu-manager/cmd/device-monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -27,7 +26,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -47,10 +45,14 @@ const (
 	IndexerKeyPodDeviceAllocationCountable = "pod.device.allocation.countable"
 )
 
-func GetDraDriverPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
+// GetDraDriverPodInformer returns the pod informer the DRA collector reads.
+// With remoteGPU on, the cache must also hold consumer pods on OTHER nodes
+// (they hold this node's remote devices), so the node field selector is
+// dropped — a cluster-wide pod watch, acceptable on the expected cluster
+// sizes but worth revisiting at scale.
+func GetDraDriverPodInformer(factory informers.SharedInformerFactory, nodeName string, remoteGPU bool) (cache.SharedIndexInformer, error) {
 	var informer cache.SharedIndexInformer
-	if compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component).Enabled(util.RemoteGPUSupport) {
-		// TODO Expand the scope of the viewer when enabling remote GPU to avoid not being able to find the remote pod in the cache
+	if remoteGPU {
 		informer = factory.Core().V1().Pods().Informer()
 	} else {
 		informer = factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {

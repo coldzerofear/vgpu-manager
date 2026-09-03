@@ -75,7 +75,14 @@ const (
 // NVML sampling — wrong data is never read).
 func (s *SessionStore) linkWatcherDir() error {
 	base := strings.TrimRight(s.cfg.SessionBase, "/")
-	target := filepath.Join(s.cfg.ContainerManagerDir, util.Watcher)
+	// Absolute target: every container mounts the manager dir at the same
+	// path. An unset ContainerManagerDir (library callers) falls back to the
+	// session base's parent — the deployment default layout.
+	managerDir := s.cfg.ContainerManagerDir
+	if managerDir == "" {
+		managerDir = filepath.Dir(base)
+	}
+	target := filepath.Join(managerDir, util.Watcher)
 	link := filepath.Join(base, util.Watcher)
 
 	if current, err := os.Readlink(link); err == nil {

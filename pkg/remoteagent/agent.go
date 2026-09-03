@@ -96,7 +96,9 @@ type Agent struct {
 	serverUp         atomic.Bool
 	smWatcherPresent atomic.Bool
 
-	hasReady func(ctx context.Context) bool
+	// hasReady reports (without blocking) whether every informer cache and
+	// event-handler registration has synced; nil until Run wires it.
+	hasReady func() bool
 }
 
 func New(cfg Config) *Agent {
@@ -191,14 +193,21 @@ func (a *Agent) Run(ctx context.Context) error {
 		time.Minute, true,
 	)
 
-	a.hasReady = func(ctx context.Context) bool {
-		return cache.WaitForNamedCacheSyncWithContext(
-			ctx,
-			a.sliceInformer.HasSynced,
-			a.claimInformer.HasSynced,
-			sliceRegistration.HasSynced,
-			claimRegistration.HasSynced,
-		)
+	// Non-blocking on purpose: the health Check must answer within the
+	// probe deadline, not wait for a sync (and not log a wait line per probe).
+	synced := []cache.InformerSynced{
+		a.sliceInformer.HasSynced,
+		a.claimInformer.HasSynced,
+		sliceRegistration.HasSynced,
+		claimRegistration.HasSynced,
+	}
+	a.hasReady = func() bool {
+		for _, hasSynced := range synced {
+			if !hasSynced() {
+				return false
+			}
+		}
+		return true
 	}
 
 	a.wg.Go(func() { a.sliceInformer.RunWithContext(ctx) })
@@ -264,7 +273,7 @@ func (a *Agent) Check(ctx context.Context, req *grpc_health_v1.HealthCheckReques
 	status := &grpc_health_v1.HealthCheckResponse{
 		Status: grpc_health_v1.HealthCheckResponse_SERVING,
 	}
-	if !a.hasReady(ctx) {
+	if a.hasReady == nil || !a.hasReady() {
 		status.Status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
 	}
 	return status, nil

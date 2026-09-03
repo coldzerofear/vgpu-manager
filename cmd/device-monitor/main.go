@@ -178,7 +178,8 @@ func runApp(opt *options.Options) (exitCode int) {
 	containerListerStart := func(time.Duration, <-chan struct{}) {}
 	if opt.EnableDRAMonitor {
 		klog.Infoln("Initialize DRA driver path monitoring")
-		podInformer, err := metrics.GetDraDriverPodInformer(factory, nodeConfig.GetNodeName())
+		podInformer, err := metrics.GetDraDriverPodInformer(factory, nodeConfig.GetNodeName(),
+			opt.FeatureGate.Enabled(util.RemoteGPUSupport))
 		if err != nil {
 			klog.Errorf("GetDraDriverPodInformer failed: %v", err)
 			return exitCode

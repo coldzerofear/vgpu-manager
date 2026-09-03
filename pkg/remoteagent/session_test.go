@@ -361,19 +361,19 @@ func TestTrimClaim(t *testing.T) {
 
 // The library resolves the shared SM watcher cache to <base>/watcher/...;
 // Prepare must bridge that to the manager dir's watcher directory (where the
-// dra-server plugin writes the file) with a relative symlink.
+// dra-server plugin writes the file) with a symlink.
 func TestPrepareWatcherSymlink(t *testing.T) {
 	parent := t.TempDir() // stands in for the manager dir
 	base := filepath.Join(parent, "remote-sessions")
-	store := NewSessionStore(Config{SessionBase: base, NodeName: testNode, DriverName: testDriver})
+	store := NewSessionStore(Config{SessionBase: base, NodeName: testNode, DriverName: testDriver, ContainerManagerDir: parent})
 	if err := store.Prepare(); err != nil {
 		t.Fatal(err)
 	}
 
 	link := filepath.Join(base, util.Watcher)
 	target, err := os.Readlink(link)
-	if err != nil || target != filepath.Join("..", util.Watcher) {
-		t.Fatalf("expected %s -> ../watcher symlink, got %q, %v", link, target, err)
+	if err != nil || target != filepath.Join(parent, util.Watcher) {
+		t.Fatalf("expected %s -> %s symlink, got %q, %v", link, filepath.Join(parent, util.Watcher), target, err)
 	}
 	// A file the plugin writes into <manager>/watcher must be visible through
 	// the library's <base>/watcher path.
@@ -389,7 +389,9 @@ func TestPrepareWatcherSymlink(t *testing.T) {
 	if err := store.Prepare(); err != nil {
 		t.Fatal(err)
 	}
-	base2 := filepath.Join(t.TempDir(), "remote-sessions")
+	// An unset ContainerManagerDir falls back to the session base's parent.
+	parent2 := t.TempDir()
+	base2 := filepath.Join(parent2, "remote-sessions")
 	if err := os.MkdirAll(filepath.Join(base2, util.Watcher), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +399,7 @@ func TestPrepareWatcherSymlink(t *testing.T) {
 	if err := store2.Prepare(); err != nil {
 		t.Fatal(err)
 	}
-	if target, err := os.Readlink(filepath.Join(base2, util.Watcher)); err != nil || target != filepath.Join("..", util.Watcher) {
+	if target, err := os.Readlink(filepath.Join(base2, util.Watcher)); err != nil || target != filepath.Join(parent2, util.Watcher) {
 		t.Fatalf("empty legacy dir not migrated: %q, %v", target, err)
 	}
 }

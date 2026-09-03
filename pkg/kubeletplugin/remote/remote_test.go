@@ -545,24 +545,21 @@ func TestEnsureLdPreloadFile(t *testing.T) {
 		return string(b)
 	}
 
-	t.Run("libcuda only", func(t *testing.T) {
+	t.Run("libcuda alone is not enough (both shims are mandatory)", func(t *testing.T) {
 		writeShim(shimLibCuda)
+		if _, err := ensureLdPreloadFile(artifacts, sel); err == nil {
+			t.Fatal("expected error without libnvidia-ml.so.1")
+		}
+	})
+
+	t.Run("both shims present", func(t *testing.T) {
+		writeShim(shimLibNvml)
 		host, err := ensureLdPreloadFile(artifacts, sel)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if host != "/host/etc/vgpu-manager/driver/12.9.1/"+RemoteLdPreload {
 			t.Fatalf("host path: %s", host)
-		}
-		if got := readPreload(); got != "/etc/vgpu-manager/driver/libcuda.so.1\n" {
-			t.Fatalf("content: %q", got)
-		}
-	})
-
-	t.Run("nvml shim appears after an artifact update", func(t *testing.T) {
-		writeShim(shimLibNvml)
-		if _, err := ensureLdPreloadFile(artifacts, sel); err != nil {
-			t.Fatal(err)
 		}
 		want := "/etc/vgpu-manager/driver/libcuda.so.1\n/etc/vgpu-manager/driver/libnvidia-ml.so.1\n"
 		if got := readPreload(); got != want {

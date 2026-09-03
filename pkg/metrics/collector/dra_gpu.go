@@ -77,8 +77,9 @@ type draGPUCollector struct {
 	claimLister resourcev1.ResourceClaimLister
 	utilAdapter watcher.DeviceUtilInterface
 	featureGate featuregate.FeatureGate
-	// Remote GPU (RemoteGPUSupport gate): session base shared with remote-agent
-	// and an API-backed pod cache for consumers on other nodes.
+	// Remote GPU (RemoteGPUSupport gate): session base shared with the
+	// remote-agent. Consumer pods on other nodes come from the pod lister —
+	// with the gate on, its informer watches cluster-wide (informer.go).
 	sessionBase string
 	managerRoot string
 }

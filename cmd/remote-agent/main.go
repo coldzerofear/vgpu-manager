@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/component-base/featuregate"
+	"k8s.io/component-base/logs"
 	"k8s.io/klog/v2"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
@@ -44,8 +45,7 @@ const (
 	// SharedSMUtilizationWatcher: sessions are written expecting the node-wide
 	// SM sampling cache (published by the dra-server plugin's watcher thread).
 	SharedSMUtilizationWatcher featuregate.Feature = util.SharedSMUtilizationWatcher
-	// VirtualMemoryTracking: sessions are written with the virtual-memory
-	// ledger enabled.
+	// VirtualMemoryTracking: sessions are written with the virtual-memory ledger enabled.
 	VirtualMemoryTracking featuregate.Feature = util.VirtualMemoryTracking
 )
 
@@ -152,6 +152,14 @@ func main() {
 			defer cancel()
 
 			return remoteagent.New(cfg).Run(ctx)
+		},
+		After: func(c *cli.Context) error {
+			// Runs after `Action` (regardless of success/error). In urfave cli
+			// v2, the final error reported will be from either Action, Before,
+			// or After (whichever is non-nil and last executed).
+			klog.Infof("shutdown")
+			logs.FlushLogs()
+			return nil
 		},
 		Version: version.Get().String(),
 	}
