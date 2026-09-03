@@ -26,6 +26,14 @@ IMG             ?= coldzerofear/vgpu-control:dev
 CUDA_BASE_IMAGE ?= nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
 APT_MIRROR      ?= https://mirrors.aliyun.com
 TEST_DEVICE_ID  ?= 0
+TEST_TIMEOUT    ?= 120
+
+# Derived from the sources rather than hand-listed. The GPU side already
+# discovers its binaries by glob; the list here used to be written out by hand,
+# which is how test_dlsym_entry ended up compiled by build-tests and run by
+# nothing. Helper sources in test/nogpu/ are not named test_*.c, so they stay
+# out of this on their own.
+NOGPU_TESTS     := $(patsubst %.c,%,$(notdir $(wildcard $(LIBRARY_DIR)test/nogpu/test_*.c)))
 
 SO_FILE         := $(BUILD_DIR)/libvgpu-control.so
 
@@ -119,14 +127,28 @@ build-tests: ## Compile smoke tests under test/.
 	    $(LIBRARY_DIR)
 	$(MAKE) -C $(BUILD_DIR) -j$(J)
 
+# Same PASS/SKIP/FAIL vocabulary as test/run_all_tests.sh, 77 included: a test
+# whose preconditions were absent must not report success. No LD_PRELOAD here --
+# these need no driver, and test_dlsym_entry installs its own before re-execing.
+# An empty list is a failure, not a pass: it means the glob stopped matching.
 .PHONY: test-nogpu
-test-nogpu: build-tests ## Run the shared-region + session-path checks (no GPU, no CUDA needed).
-	$(BUILD_DIR)/test_sm_node_shared
-	$(BUILD_DIR)/test_vmem_region_concurrency
-	$(BUILD_DIR)/test_session_paths
-	$(BUILD_DIR)/test_session_pids_concurrency
-	$(BUILD_DIR)/test_delta_step
-	$(BUILD_DIR)/test_delta_campaign
+test-nogpu: build-tests ## Run the GPU-less checks (no GPU, no CUDA needed).
+	@fail=0; ran=0; \
+	for t in $(NOGPU_TESTS); do \
+	  bin=$(BUILD_DIR)/$$t; \
+	  printf '=== %-36s ' "$$t"; \
+	  if [[ ! -x $$bin ]]; then echo 'FAIL (not built)'; fail=1; continue; fi; \
+	  ran=$$((ran + 1)); log=$$(mktemp); rc=0; \
+	  timeout $(TEST_TIMEOUT) $$bin >$$log 2>&1 || rc=$$?; \
+	  case $$rc in \
+	    0)  echo 'PASS' ;; \
+	    77) echo 'SKIP'; sed 's/^/  /' $$log ;; \
+	    *)  echo "FAIL (rc=$$rc)"; sed 's/^/  /' $$log; fail=1 ;; \
+	  esac; \
+	  rm -f $$log; \
+	done; \
+	if [[ $$ran -eq 0 ]]; then echo 'FAIL: no GPU-less tests were run'; fail=1; fi; \
+	exit $$fail
 
 .PHONY: test
 # Runs the GPU-less checks first, deliberately. They are seconds long, need no
@@ -136,13 +158,10 @@ test-nogpu: build-tests ## Run the shared-region + session-path checks (no GPU, 
 # offsets, and record-preserving compaction for vmem_node. Running them here is
 # also the only thing that makes them run at all -- a target nobody invokes is a
 # test that quietly rots, which is the failure mode this suite exists to avoid.
-test: build-tests ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
-	$(BUILD_DIR)/test_sm_node_shared
-	$(BUILD_DIR)/test_vmem_region_concurrency
-	$(BUILD_DIR)/test_session_paths
-	$(BUILD_DIR)/test_session_pids_concurrency
-	$(BUILD_DIR)/test_delta_step
-	$(BUILD_DIR)/test_delta_campaign
+#
+# Depends on test-nogpu rather than repeating it: two prerequisites here would
+# be eligible to run in parallel under -j, and the tests would race the build.
+test: test-nogpu ## Build then run all tests with LD_PRELOAD of libvgpu-control.so.
 	TEST_DEVICE_ID=$(TEST_DEVICE_ID) \
 	    $(BASH) $(BUILD_DIR)/test/run_tests_with_env.sh $(BUILD_DIR)/test $(SO_FILE)
 

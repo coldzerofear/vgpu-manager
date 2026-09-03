@@ -63,6 +63,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
+	_ "k8s.io/component-base/metrics/prometheus/clientgo"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
@@ -137,20 +138,19 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 
+	preemptPlugin, err := preempt.New(
+		kubeClient, factory, recorder, filterPlugin.GetPodLister(),
+		opt.FeatureGate.Enabled(options.TopologyAwareGPUAllocation))
+	if err != nil {
+		klog.Errorf("Initialization of scheduler PreemptPlugin failed: %v", err)
+		return exitCode
+	}
+
 	bindPlugin, err := bind.New(
 		kubeClient, recorder, filterPlugin.GetPodLister(),
 		opt.FeatureGate.Enabled(options.SerializedNodeBind))
 	if err != nil {
 		klog.Errorf("Initialization of scheduler BindPlugin failed: %v", err)
-		return exitCode
-	}
-
-	preemptPlugin, err := preempt.New(
-		kubeClient, factory, recorder,
-		filterPlugin.GetPodLister(),
-		opt.FeatureGate.Enabled(options.TopologyAwareGPUAllocation))
-	if err != nil {
-		klog.Errorf("Initialization of scheduler PreemptPlugin failed: %v", err)
 		return exitCode
 	}
 
@@ -225,7 +225,20 @@ func runApp(opt *options.Options) (exitCode int) {
 					EventRecorder: recorder,
 				},
 			},
-			ReleaseOnCancel: false,
+			// NewLeaderElector rejects a config that leaves these zero
+			// ("leaseDuration must be greater than renewDeadline"), which
+			// would abort startup, so they are not optional. Values are the
+			// kube-scheduler defaults and satisfy its two constraints:
+			// LeaseDuration > RenewDeadline > RetryPeriod * JitterFactor(1.2).
+			LeaseDuration: 15 * time.Second,
+			RenewDeadline: 10 * time.Second,
+			RetryPeriod:   2 * time.Second,
+			// Hands the lease back on shutdown so a standby can take over
+			// without waiting it out. Needs the process to outlive the
+			// release call -- main() sleeps after runApp returns, and the
+			// HTTP server is stopped before cancelFunc, so nothing is served
+			// between giving up the lease and exiting.
+			ReleaseOnCancel: true,
 			Callbacks: leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(ctx context.Context) {
 					klog.Infof("started leader identity: %s", leaderIdentity)

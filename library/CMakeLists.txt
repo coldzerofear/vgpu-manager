@@ -13,7 +13,8 @@
 # limitations under the License.
 
 cmake_minimum_required(VERSION 3.5)
-project(vgpu C CXX)
+# ASM: src/dlsym_entry.S provides the exported dlsym entry point.
+project(vgpu C CXX ASM)
 
 add_definitions(-D_GNU_SOURCE)
 #add_compile_options(-Wall -Wshadow -Werror -Wno-format)
@@ -58,6 +59,7 @@ add_library(vgpu-control SHARED
     src/cuda_hook.c
     src/nvml_hook.c
     src/loader.c
+    src/dlsym_entry.S
     src/register.c
     src/session.c
     src/config_io.c
@@ -282,6 +284,30 @@ if(BUILD_SM_NODE_TESTS)
     target_include_directories(test_delta_campaign PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_compile_options(test_delta_campaign PRIVATE -O2)
+
+    # Exercises src/dlsym_entry.S with the real symbol predicates from
+    # hook.h. Three pieces, because the bug only appears when the library
+    # asking for RTLD_NEXT is loaded after the interceptor:
+    #   shim   -- the entry stub plus its two callees, preloaded
+    #   caller -- defines a symbol and looks past itself for it
+    #   test   -- re-execs itself with LD_PRELOAD, then asserts
+    add_library(dlsym_entry_shim SHARED
+        src/dlsym_entry.S test/nogpu/dlsym_entry_policy.c)
+    target_include_directories(dlsym_entry_shim PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(dlsym_entry_shim PRIVATE ${CMAKE_DL_LIBS})
+
+    add_library(dlsym_caller SHARED test/nogpu/dlsym_caller_lib.c)
+    target_link_libraries(dlsym_caller PRIVATE ${CMAKE_DL_LIBS})
+
+    add_executable(test_dlsym_entry test/nogpu/test_dlsym_entry.c)
+    target_link_libraries(test_dlsym_entry PRIVATE dlsym_caller ${CMAKE_DL_LIBS})
+    target_compile_definitions(test_dlsym_entry PRIVATE
+        VGPU_DLSYM_SHIM_PATH="$<TARGET_FILE:dlsym_entry_shim>")
+    # The shim is reached through LD_PRELOAD, not the link line, so the
+    # dependency has to be spelled out -- otherwise the test builds, finds no
+    # shim to preload, and reports failures that say nothing about the code.
+    add_dependencies(test_dlsym_entry dlsym_entry_shim)
 endif()
 
 # Writes a session quota region the way the GPU-node agent would, so the

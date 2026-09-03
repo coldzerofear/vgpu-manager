@@ -52,7 +52,7 @@ func numaPod(number int64) *corev1.Pod {
 // linkSearchCount reads the live value of the search counter across all algos.
 func linkSearchCount(t *testing.T) float64 {
 	t.Helper()
-	families, err := metrics.Registry().Gather()
+	families, err := metrics.Gatherer().Gather()
 	require.NoError(t, err)
 	total := 0.0
 	for _, f := range families {

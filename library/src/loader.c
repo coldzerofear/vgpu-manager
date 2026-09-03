@@ -1069,7 +1069,10 @@ static pthread_mutex_t g_memory_node_lock = PTHREAD_MUTEX_INITIALIZER;
 device_vmemory_t* g_device_vmem = NULL;
 char driver_version[FILENAME_MAX] = "1";
 
-void init_real_dlsym() {
+/* Resolve glibc's dlsym into real_dlsym. Split out of init_real_dlsym()
+ * because the RTLD_NEXT fast path in vgpu_dlsym_target() needs the pointer
+ * but must not trigger the dlopen() below it. */
+static void resolve_real_dlsym(void) {
   if (real_dlsym == NULL) {
     /* Probe newest-first. CUDA 12 / PyTorch 2.x toolchains link against
      * dlsym@GLIBC_2.34 (libdl merge), so a 2.22-capped list would miss
@@ -1111,6 +1114,10 @@ void init_real_dlsym() {
       }
     }
   }
+}
+
+void init_real_dlsym() {
+  resolve_real_dlsym();
   if (lib_control == NULL) {
     lib_control = dlopen(CONTROLLER_DRIVER_FILE_PATH, RTLD_LAZY);
   }
@@ -1864,25 +1871,6 @@ void print_global_vgpu_config() {
 extern entry_t nvml_hooks_entry[];
 extern const int nvml_hook_nums;
 
-/* Does `symbol` name a driver entry point we hook? Mirrors the export
- * patterns in the version script: cu[A-Z]* / cudbg* / nvml[A-Z]*.
- *
- * The uppercase discriminator is what keeps cuBLAS, cuFFT, cuDNN,
- * cudaMalloc and curl_* out -- they share the "cu" prefix but are not
- * driver API, and matching them costs a symbol lookup plus a misleading
- * unhooked-symbol note on every resolution. Short strings stop at the
- * NUL via && short-circuit, so no read runs past the terminator. */
-static inline int symbol_is_cuda_api(const char *s) {
-  if (s[0] != 'c' || s[1] != 'u') return 0;
-  if (s[2] >= 'A' && s[2] <= 'Z') return 1;      /* cu[A-Z]* */
-  return strncmp(s + 2, "dbg", 3) == 0;          /* cudbg*   */
-}
-
-static inline int symbol_is_nvml_api(const char *s) {
-  return s[0] == 'n' && s[1] == 'v' && s[2] == 'm' && s[3] == 'l' &&
-         s[4] >= 'A' && s[4] <= 'Z';             /* nvml[A-Z]* */
-}
-
 /* Resolve our hook for `symbol` from a hijack table.
  *
  * Every hook is exported under its own name (the version script matches
@@ -1955,21 +1943,45 @@ void note_unhooked_symbol(const char *symbol) {
   /* Probe window exhausted: stay quiet rather than repeat on every lookup. */
 }
 
-/* dlsym(3) interceptor.
+/* Decides what the dlsym entry stub in dlsym_entry.S should do. This is the
+ * whole policy of that stub -- the assembly itself only marshals registers.
  *
- * A driver symbol resolves to our hook whatever `handle` says -- RTLD_NEXT
- * included. RTLD_NEXT normally means "skip the wrapper, give me the real
- * one", which would be a one-line way out of the vGPU limits, so we do not
- * honour it for driver symbols. Everything else passes straight through.
+ * Returns the function to tail-jump to, or NULL to fall through to
+ * vgpu_dlsym_dispatch() below.
+ *
+ * Only RTLD_NEXT pass-through is tail-jumped, and it has to be: glibc
+ * resolves RTLD_NEXT relative to whoever called dlsym, which it reads from
+ * the return address. Forwarding through a normal call would put OUR address
+ * there and answer a different question -- "what comes after libvgpu" rather
+ * than "what comes after the caller". A library that defines a symbol and
+ * uses RTLD_NEXT to skip its own copy then gets its own definition back and
+ * calls itself forever. Tail-jumping leaves the caller's return address in
+ * place, so glibc sees the real caller.
+ *
+ * Driver symbols never take this path: they must keep resolving to our hooks
+ * whatever the handle says, or the vGPU limits could be stepped around. */
+FUNC_ATTR_HIDDEN void* vgpu_dlsym_target(void* handle, const char* symbol) {
+  if (handle != RTLD_NEXT || symbol == NULL) {
+    return NULL;
+  }
+  if (symbol_is_cuda_api(symbol) || symbol_is_nvml_api(symbol)) {
+    return NULL;
+  }
+  resolve_real_dlsym();
+  return (void*)real_dlsym;   /* NULL if unresolved -- dispatch reports it */
+}
+
+/* Everything the entry stub did not tail-jump: driver symbols (which resolve
+ * to our hooks whatever the handle says), and every non-RTLD_NEXT lookup.
  *
  * recursion_depth must stay: on a hook hit we call load_necessary_data(),
- * which dlopen()s the driver under a pthread_once. If a constructor in
- * that dlopen calls back into dlsym, re-entering the same once on the same
- * thread deadlocks. The guard short-circuits that nested call instead.
- * It answers with the real symbol, so a lookup made during our own init is
- * the one case we do not hook -- the WARNING below is how we would find
- * out if that ever happens in practice. */
-FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
+ * which dlopen()s the driver under a pthread_once. If a constructor in that
+ * dlopen calls back into dlsym, re-entering the same once on the same thread
+ * deadlocks. The guard short-circuits that nested call instead. It answers
+ * with the real symbol, so a lookup made during our own init is the one case
+ * we do not hook -- the WARNING below is how we would find out if that ever
+ * happens in practice. */
+FUNC_ATTR_HIDDEN void* vgpu_dlsym_dispatch(void* handle, const char* symbol) {
   static __thread int recursion_depth = 0;
   if (recursion_depth > 0) {
     LOGGER(WARNING, "recursion protection triggered for %s", symbol);
@@ -2002,6 +2014,24 @@ DONE:
   recursion_depth--;
   return result;
 }
+
+#if !defined(__x86_64__) && !defined(__aarch64__)
+/* Architectures with no entry stub in dlsym_entry.S, reached only by
+ * configuring -DVGPU_ALLOW_C_DLSYM_FALLBACK.
+ *
+ * Same policy as the stub -- it calls the same two functions -- but a C call
+ * cannot preserve the caller: glibc will see this file's address and answer
+ * RTLD_NEXT relative to us. A library looking past its own definition of a
+ * symbol can therefore get that definition back. Driver symbols are still
+ * intercepted, so the vGPU limits hold either way. */
+FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
+  void* target = vgpu_dlsym_target(handle, symbol);
+  if (target != NULL) {
+    return ((fp_dlsym)target)(handle, symbol);
+  }
+  return vgpu_dlsym_dispatch(handle, symbol);
+}
+#endif
 
 void rm_vmem_node_by_non_existent_device_pid(int device_id, int pid) {
   unsigned int processes_size = g_device_vmem->devices[device_id].processes_size;
