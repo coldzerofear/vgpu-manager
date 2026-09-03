@@ -200,7 +200,8 @@ spec:
                 sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
-              kubelet-plugin -v 6
+              exec kubelet-plugin "$@"
+            - -v=6
           env:
             - name: NODE_NAME
               valueFrom:

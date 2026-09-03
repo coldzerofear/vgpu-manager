@@ -55,23 +55,6 @@ spec:
       hostNetwork: {{ .Values.devicePlugin.hostNetwork }}
       restartPolicy: Always
       initContainers:
-        - name: install
-          command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
-          image: {{ include "vgpu-manager.fullimage" . }}
-          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
-          env:
-            - name: HOST_MANAGER_DIR
-              value: {{ $managerRoot | quote }}
-          resources:
-            requests:
-              cpu: 10m
-              memory: 15Mi
-          securityContext:
-            privileged: true
-          volumeMounts:
-            - name: manager-root
-              mountPath: {{ $managerRoot | quote }}
-              mountPropagation: Bidirectional
         {{- if .Values.devicePlugin.gpuToolkitReady.enabled }}
         - name: toolkit-ready
           image: {{ include "vgpu-manager.fullimage" . }}
@@ -95,6 +78,23 @@ spec:
               mountPropagation: HostToContainer
               readOnly: true
         {{- end }}
+        - name: install
+          command: ["/bin/bash", "-c", "/scripts/install_files.sh"]
+          image: {{ include "vgpu-manager.fullimage" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy | quote }}
+          env:
+            - name: HOST_MANAGER_DIR
+              value: {{ $managerRoot | quote }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 15Mi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: manager-root
+              mountPath: {{ $managerRoot | quote }}
+              mountPropagation: Bidirectional
       containers:
         - name: device-plugin
           image: {{ include "vgpu-manager.fullimage" . }}
