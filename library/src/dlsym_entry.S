@@ -75,12 +75,37 @@ dlsym:
 
 #elif defined(__aarch64__)
 
+/* Branch Target Identification. Our dlsym is reached through the PLT, i.e.
+ * by an indirect branch, so on a BTI-enforcing kernel it needs a landing pad
+ * at entry. `hint #34` is `bti c` spelled so that assemblers predating BTI
+ * still accept it, and it decodes as a NOP on pre-ARMv8.5 parts.
+ *
+ * The property note below is what actually turns enforcement on, and the
+ * linker only keeps it if every input object carries it -- so it is emitted
+ * exactly when the compiler says the C objects have it too. Claiming it
+ * unconditionally would be a lie on a build without -mbranch-protection;
+ * omitting it on a build with one would silently disable BTI for the whole
+ * library. */
+#if defined(__ARM_FEATURE_BTI_DEFAULT) && __ARM_FEATURE_BTI_DEFAULT == 1
+    .section .note.gnu.property, "a"
+    .balign 8
+    .long 4                      /* name size            */
+    .long 0x10                   /* descriptor size      */
+    .long 5                      /* NT_GNU_PROPERTY_TYPE_0 */
+    .asciz "GNU"
+    .long 0xc0000000             /* GNU_PROPERTY_AARCH64_FEATURE_1_AND */
+    .long 4
+    .long 1                      /* ..._BTI */
+    .long 0                      /* padding */
+#endif
+
     .text
     .globl  dlsym
     .type   dlsym, %function
     .align  4
 dlsym:
     .cfi_startproc
+    hint    #34                       /* bti c */
     /* 32 bytes keeps sp 16-byte aligned: 16 for the frame record, 16 for
      * the saved arguments. */
     stp     x29, x30, [sp, #-32]!
@@ -106,10 +131,17 @@ dlsym:
     .cfi_endproc
     .size   dlsym, .-dlsym
 
+#elif defined(VGPU_ALLOW_C_DLSYM_FALLBACK)
+
+/* Nothing to emit: loader.c defines dlsym in C for this architecture. See
+ * the note there for what that costs. */
+
 #else
-#error "dlsym_entry.S supports x86_64 and aarch64 only. Forwarding RTLD_NEXT \
-from C would corrupt the caller identity glibc derives from the return \
-address, so there is no safe fallback -- add a stub for this architecture."
+#error "dlsym_entry.S has entry stubs for x86_64 and aarch64 only, and the \
+CUDA driver ships for those two. Forwarding RTLD_NEXT from C cannot preserve \
+the caller identity glibc derives from the return address, so building \
+elsewhere is a deliberate choice: configure with \
+-DVGPU_ALLOW_C_DLSYM_FALLBACK to take the degraded C path, or add a stub."
 #endif
 
     /* Non-executable stack, same as every compiler-generated object here. */

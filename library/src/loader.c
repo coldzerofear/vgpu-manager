@@ -2221,6 +2221,24 @@ DONE:
   return result;
 }
 
+#if !defined(__x86_64__) && !defined(__aarch64__)
+/* Architectures with no entry stub in dlsym_entry.S, reached only by
+ * configuring -DVGPU_ALLOW_C_DLSYM_FALLBACK.
+ *
+ * Same policy as the stub -- it calls the same two functions -- but a C call
+ * cannot preserve the caller: glibc will see this file's address and answer
+ * RTLD_NEXT relative to us. A library looking past its own definition of a
+ * symbol can therefore get that definition back. Driver symbols are still
+ * intercepted, so the vGPU limits hold either way. */
+FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
+  void* target = vgpu_dlsym_target(handle, symbol);
+  if (target != NULL) {
+    return ((fp_dlsym)target)(handle, symbol);
+  }
+  return vgpu_dlsym_dispatch(handle, symbol);
+}
+#endif
+
 void rm_vmem_node_by_non_existent_device_pid(int device_id, int pid) {
   unsigned int processes_size = g_device_vmem->devices[device_id].processes_size;
   for (int i = processes_size - 1; i >= 0; i--) {
