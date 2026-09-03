@@ -138,19 +138,19 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 
-	bindPlugin, err := bind.New(
-		kubeClient, recorder, filterPlugin.GetPodLister(),
-		opt.FeatureGate.Enabled(options.SerializedNodeBind))
-	if err != nil {
-		klog.Errorf("Initialization of scheduler BindPlugin failed: %v", err)
-		return exitCode
-	}
-
 	preemptPlugin, err := preempt.New(
 		kubeClient, factory, recorder, filterPlugin.GetPodLister(),
 		opt.FeatureGate.Enabled(options.TopologyAwareGPUAllocation))
 	if err != nil {
 		klog.Errorf("Initialization of scheduler PreemptPlugin failed: %v", err)
+		return exitCode
+	}
+
+	bindPlugin, err := bind.New(
+		kubeClient, recorder, filterPlugin.GetPodLister(),
+		opt.FeatureGate.Enabled(options.SerializedNodeBind))
+	if err != nil {
+		klog.Errorf("Initialization of scheduler BindPlugin failed: %v", err)
 		return exitCode
 	}
 
