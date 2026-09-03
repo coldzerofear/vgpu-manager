@@ -63,6 +63,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
+	_ "k8s.io/component-base/metrics/prometheus/clientgo"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
@@ -146,8 +147,7 @@ func runApp(opt *options.Options) (exitCode int) {
 	}
 
 	preemptPlugin, err := preempt.New(
-		kubeClient, factory, recorder,
-		filterPlugin.GetPodLister(),
+		kubeClient, factory, recorder, filterPlugin.GetPodLister(),
 		opt.FeatureGate.Enabled(options.TopologyAwareGPUAllocation))
 	if err != nil {
 		klog.Errorf("Initialization of scheduler PreemptPlugin failed: %v", err)
@@ -225,7 +225,7 @@ func runApp(opt *options.Options) (exitCode int) {
 					EventRecorder: recorder,
 				},
 			},
-			ReleaseOnCancel: false,
+			ReleaseOnCancel: true,
 			Callbacks: leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(ctx context.Context) {
 					klog.Infof("started leader identity: %s", leaderIdentity)
