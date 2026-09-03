@@ -1,21 +1,22 @@
-{{- if and (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") .Values.devicePlugin.enabled -}}
+{{- if and (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") .Values.scheduler.enabled -}}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "vgpu-manager.device-plugin" . }}
+  name: {{ include "vgpu-manager.scheduler" . }}
   namespace: {{ .Release.Namespace | quote }}
   labels:
-    app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+    app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
     {{- include "vgpu-manager.labels" . | nindent 4 }}
 spec:
   endpoints:
     - path: /metrics
-      port: metrics
-      {{- if .Values.devicePlugin.deviceMonitor.tls.enabled }}
+      {{- if .Values.scheduler.schedulerExtender.tls.enabled }}
+      port: https
       scheme: https
       tlsConfig:
         insecureSkipVerify: true
       {{- else }}
+      port: http
       scheme: http
       {{- end }}
   namespaceSelector:
@@ -23,6 +24,6 @@ spec:
       - {{ .Release.Namespace | quote }}
   selector:
     matchLabels:
-      app.kubernetes.io/component: {{ include "vgpu-manager.device-plugin" . }}
+      app.kubernetes.io/component: {{ include "vgpu-manager.scheduler" . }}
       {{- include "vgpu-manager.selectorLabels" . | nindent 4 }}
 {{- end }}

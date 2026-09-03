@@ -66,8 +66,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/collectors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/component-base/metrics/legacyregistry"
 )
 
 const namespace = "vgpu_scheduler"
@@ -272,15 +271,8 @@ var (
 	}, []string{"reason"})
 )
 
-// registry holds exactly the extender's own series plus the runtime collectors.
-// Package-private so nothing can be registered onto it from elsewhere by
-// accident.
-var registry = prometheus.NewRegistry()
-
 func init() {
-	registry.MustRegister(
-		collectors.NewGoCollector(),
-		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	legacyregistry.Registerer().MustRegister(
 		TopologyPlacementTotal,
 		PodPolicyTotal,
 		CrossPodAlignmentTotal,
@@ -297,11 +289,11 @@ func init() {
 
 // Handler serves this registry, for mounting on the extender's existing router.
 func Handler() http.Handler {
-	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError})
+	return legacyregistry.Handler()
 }
 
-// Registry exposes the registry to tests that need to gather series.
-func Registry() *prometheus.Registry { return registry }
+// Gatherer exposes the registry to tests that need to gather series.
+func Gatherer() prometheus.Gatherer { return legacyregistry.DefaultGatherer }
 
 // ObserveVerb records one completed extender call. Intended as a deferred
 // closure so the result is whatever the call actually returned.
@@ -380,7 +372,7 @@ func TopologyLabel(m util.TopologyMode) string {
 // that do not carry them. Exists for tests: instrumentation nobody asserts on
 // silently rots when the code it watches is refactored.
 func CounterValue(name string, labels map[string]string) float64 {
-	families, err := registry.Gather()
+	families, err := legacyregistry.DefaultGatherer.Gather()
 	if err != nil {
 		return 0
 	}
