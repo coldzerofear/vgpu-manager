@@ -96,6 +96,7 @@ func main() {
 		&cli.StringFlag{Name: "node-name", Usage: "Node this agent runs on (= the driver's pool name).", Destination: &cfg.NodeName, EnvVars: []string{"NODE_NAME"}, Required: true},
 		&cli.StringFlag{Name: "driver-name", Usage: "DRA driver name whose slices/claims are consumed.", Value: util.DRADriverName, Destination: &cfg.DriverName, EnvVars: []string{"DRIVER_NAME"}},
 		&cli.StringFlag{Name: "ready-file", Usage: "File written after preflight; the server container waits for it. Defaults to <session-base>/.agent-ready.", Destination: &cfg.ReadyFile, EnvVars: []string{"READY_FILE"}},
+		&cli.StringFlag{Name: "container-manager-dir", Usage: "Configure the container mount path used by vgpu-manager.", Value: util.ManagerRootPath, Destination: &cfg.ContainerManagerDir, EnvVars: []string{"CONTAINER_MANAGER_DIR"}},
 		&cli.StringFlag{Name: "config-session-base", Usage: "Session directory root shared with lupine-server (VGPU_CONFIG_SESSION_BASE).", Value: util.RemoteSessionBasePath, Destination: &cfg.SessionBase, EnvVars: []string{"VGPU_CONFIG_SESSION_BASE"}},
 		&cli.StringFlag{Name: "remote-server-endpoint", Usage: "Lupine remote service endpoint.", Value: fmt.Sprintf("127.0.0.1:%d", remote.DefaultServerPort), Destination: &cfg.ServerEndpoint, EnvVars: []string{"REMOTE_SERVER_ENDPOINT"}},
 		&cli.StringFlag{Name: "listen-server-endpoint", Usage: "Agent grpc service listening endpoint.", Value: fmt.Sprintf("0.0.0.0:%d", remote.DefaultAgentPort), Destination: &cfg.ListenEndpoint, EnvVars: []string{"LISTEN_SERVER_ENDPOINT"}},
@@ -113,6 +114,9 @@ func main() {
 			return loggingConfig.Apply()
 		},
 		Action: func(c *cli.Context) error {
+			if util.PathIsNotExist(cfg.ContainerManagerDir) {
+				return fmt.Errorf("container-manager-dir %q does not exist", cfg.ContainerManagerDir)
+			}
 			endpoint, err := endpointutil.ParseEndpoint(cfg.ServerEndpoint)
 			if err != nil {
 				return fmt.Errorf("parse remote endpoint failed: %w", err)

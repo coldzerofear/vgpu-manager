@@ -48,7 +48,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	resourcev1 "k8s.io/client-go/listers/resource/v1"
 	"k8s.io/component-base/featuregate"
@@ -81,14 +80,13 @@ type draGPUCollector struct {
 	// Remote GPU (RemoteGPUSupport gate): session base shared with remote-agent
 	// and an API-backed pod cache for consumers on other nodes.
 	sessionBase string
-	basePath    string
-	podCache    *podCache
+	managerRoot string
 }
 
 func NewDRAGPUCollector(
 	config *node.NodeConfigSpec, nodeLister listerv1.NodeLister, podLister client.PodLister,
 	sliceLister resourcev1.ResourceSliceLister, claimLister resourcev1.ResourceClaimLister,
-	kubeClient kubernetes.Interface, featureGate featuregate.FeatureGate, sessionBase, basePath string,
+	featureGate featuregate.FeatureGate, sessionBase, managerRoot string,
 ) (prometheus.Collector, error) {
 	driverRoot := config.GetDriverRoot()
 	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
@@ -107,8 +105,7 @@ func NewDRAGPUCollector(
 		claimLister: claimLister,
 		featureGate: featureGate,
 		sessionBase: sessionBase,
-		basePath:    basePath,
-		podCache:    newPodCache(kubeClient),
+		managerRoot: managerRoot,
 		utilAdapter: adapter,
 	}, nil
 }
@@ -181,11 +178,10 @@ func (c draGPUCollector) listManagerResourceSlices() ([]*v1.ResourceSlice, error
 }
 
 func CollectBasedOnNvml(
-	ch chan<- prometheus.Metric, lib *nvidia.DeviceLib, nodeName string, devTypeMap map[string]string,
+	ch chan<- prometheus.Metric, lib *nvidia.DeviceLib, nodeName, managerRoot string, devTypeMap map[string]string,
 	devIndexMap map[string]int, devHealthMap map[string]int, devHealthLvs map[string][]string,
-	devMemInfoMap map[string]nvml.Memory, devProcInfoMap map[string]procInfoList,
-	devProcUtilMap map[string]procUtilList, devMigInfosMap map[string][]*nvidia.MigInfo,
-	utilAdapter watcher.DeviceUtilInterface, featureGate featuregate.FeatureGate,
+	devMemInfoMap map[string]nvml.Memory, devProcInfoMap map[string]procInfoList, devProcUtilMap map[string]procUtilList,
+	devMigInfosMap map[string][]*nvidia.MigInfo, utilAdapter watcher.DeviceUtilInterface, featureGate featuregate.FeatureGate,
 ) {
 	err := lib.NvmlInit()
 	if err != nil {
@@ -224,6 +220,7 @@ func CollectBasedOnNvml(
 	}()
 
 	if featureGate.Enabled(util.SharedSMUtilizationWatcher) {
+		smFilePath := filepath.Join(managerRoot, util.Watcher, util.SMUtilFile)
 		if deviceUtil, err = watcher.NewMmapDeviceUtil(smFilePath); err != nil && !os.IsNotExist(err) {
 			klog.V(3).ErrorS(err, "Failed to read manager SM util file")
 		}
@@ -287,7 +284,7 @@ func CollectBasedOnNvml(
 				prometheus.GaugeValue, float64(deviceUtilRates.Gpu), devHealthLvs[gpuInfo.UUID]...)
 		}
 
-		CollectorDeviceProcesses(utilAdapter, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
+		collectorDeviceProcesses(utilAdapter, deviceUtil, index, hdev, devProcInfoMap, devProcUtilMap)
 		return nil
 	})
 	if err != nil {
@@ -680,8 +677,8 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
 	)
 
-	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, devTypeMap, devIndexMap, devHealthMap, devHealthLvs,
-		devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, c.utilAdapter, c.featureGate)
+	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, c.managerRoot, devTypeMap, devIndexMap, devHealthMap,
+		devHealthLvs, devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, c.utilAdapter, c.featureGate)
 
 	// Get current node.
 	node, err := c.nodeLister.Get(c.nodeName)
@@ -932,7 +929,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 						continue
 					}
 					vmemNodeDirs = append(vmemNodeDirs,
-						filepath.Join(c.basePath, util.Claims, string(ref.claim.UID), partitionKey, util.VMemNode))
+						filepath.Join(c.managerRoot, util.Claims, string(ref.claim.UID), partitionKey, util.VMemNode))
 				}
 			}
 

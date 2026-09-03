@@ -113,8 +113,7 @@ func dirNames(entries []os.DirEntry) string {
 	return names
 }
 
-// The driver shims a client artifact ships. libcuda.so.1 is mandatory;
-// libnvidia-ml.so.1 is optional (nvidia-smi support).
+// The driver shims a client artifact ships.
 const (
 	shimLibCuda = "libcuda.so.1"
 	shimLibNvml = "libnvidia-ml.so.1"
@@ -130,8 +129,8 @@ func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, e
 	for _, lib := range []string{shimLibCuda, shimLibNvml} {
 		if _, err := os.Stat(filepath.Join(artifactsDir, sel.Name, lib)); err == nil {
 			lines = append(lines, filepath.Join(sel.ContainerDir, lib))
-		} else if lib == shimLibCuda {
-			// Without the CUDA shim the artifact is unusable; fail the
+		} else {
+			// Without the Client shim the artifact is unusable; fail the
 			// prepare (retryable — the artifact may still be materializing).
 			return "", fmt.Errorf("client artifact %s has no %s: %w", sel.Name, lib, err)
 		}

@@ -61,8 +61,8 @@ func GetContainerKey(uid types.UID, containerName string) ContainerKey {
 
 type ContainerLister struct {
 	mutex          sync.RWMutex
-	basePath       string
 	nodeName       string
+	managerRoot    string
 	podLister      listerv1.PodLister
 	containerDatas map[ContainerKey]*vgpu.MmapResourceData
 	containerVMems map[ContainerKey]*vmem.MmapDeviceVMemory
@@ -147,7 +147,7 @@ func (c *ContainerLister) collectContainerKey(pods []*corev1.Pod) sets.Set[Conta
 }
 
 func (c *ContainerLister) update() error {
-	entries, err := os.ReadDir(c.basePath)
+	entries, err := os.ReadDir(c.managerRoot)
 	if err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func (c *ContainerLister) update() error {
 		if err != nil {
 			continue
 		}
-		filePath := filepath.Join(c.basePath, entry.Name())
+		filePath := filepath.Join(c.managerRoot, entry.Name())
 		fileInfo, err := os.Stat(filePath)
 		if err != nil {
 			klog.Warningf("File path <%s> detection failed: %v", filePath, err)
@@ -262,11 +262,11 @@ func (c *ContainerLister) Start(interval time.Duration, stopChan <-chan struct{}
 	}()
 }
 
-func NewContainerLister(basePath, nodeName string, podLister listerv1.PodLister) *ContainerLister {
+func NewContainerLister(nodeName, managerRoot string, podLister listerv1.PodLister) *ContainerLister {
 	return &ContainerLister{
-		basePath:       basePath,
 		nodeName:       nodeName,
 		podLister:      podLister,
+		managerRoot:    managerRoot,
 		containerDatas: make(map[ContainerKey]*vgpu.MmapResourceData),
 		containerVMems: make(map[ContainerKey]*vmem.MmapDeviceVMemory),
 	}

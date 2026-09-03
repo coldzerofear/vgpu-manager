@@ -19,6 +19,7 @@ package metrics
 import (
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/cmd/device-monitor/options"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -26,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -46,12 +48,17 @@ const (
 )
 
 func GetDraDriverPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
-	informer := factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
-		watcher := cache.NewListWatchFromClient(k.CoreV1().RESTClient(), "pods",
-			corev1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", nodeName))
-		indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
-		return cache.NewSharedIndexInformer(watcher, &corev1.Pod{}, d, indexers)
-	})
+	var informer cache.SharedIndexInformer
+	if compatibility.DefaultComponentGlobalsRegistry.FeatureGateFor(options.Component).Enabled(util.RemoteGPUSupport) {
+		// TODO Expand the scope of the viewer when enabling remote GPU to avoid not being able to find the remote pod in the cache
+		informer = factory.Core().V1().Pods().Informer()
+	} else {
+		informer = factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
+			fieldSelector := fields.OneTermEqualSelector("spec.nodeName", nodeName)
+			watcher := cache.NewListWatchFromClient(k.CoreV1().RESTClient(), "pods", corev1.NamespaceAll, fieldSelector)
+			return cache.NewSharedIndexInformer(watcher, &corev1.Pod{}, d, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+		})
+	}
 	return informer, informer.AddIndexers(map[string]cache.IndexFunc{
 		IndexerKeyPodNodeName: func(obj interface{}) ([]string, error) {
 			var indexerValues []string

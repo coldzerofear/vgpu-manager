@@ -61,7 +61,8 @@ type Config struct {
 	DriverName string
 	// SessionBase is the session directory root shared with lupine-server
 	// (VGPU_CONFIG_SESSION_BASE on the server side).
-	SessionBase string
+	SessionBase         string
+	ContainerManagerDir string
 	// ReadyFile is written after preflight; the server container waits for it.
 	ReadyFile string
 	// ServerEndpoint is the lupine-server address to probe (host:port).
@@ -94,6 +95,8 @@ type Agent struct {
 	nodeDevices      atomic.Pointer[NodeDevices]
 	serverUp         atomic.Bool
 	smWatcherPresent atomic.Bool
+
+	hasReady func(ctx context.Context) bool
 }
 
 func New(cfg Config) *Agent {
@@ -106,6 +109,10 @@ func New(cfg Config) *Agent {
 
 // Run blocks until ctx is done.
 func (a *Agent) Run(ctx context.Context) error {
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// 1. Preflight: session skeleton + the watcher symlink. The ready file
 	// comes later, once the informers are synced (step 2).
 	if err := a.store.Prepare(); err != nil {
@@ -143,14 +150,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 
-	if _, err := a.sliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	sliceRegistration, err := a.sliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(interface{}) { a.refreshNodeDevices() },
 		UpdateFunc: func(_, _ interface{}) { a.refreshNodeDevices() },
 		DeleteFunc: func(interface{}) { a.refreshNodeDevices() },
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	if _, err := a.claimInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	claimRegistration, err := a.claimInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if c, ok := obj.(*resourceapi.ResourceClaim); ok &&
 				(c.Status.Allocation == nil || !c.DeletionTimestamp.IsZero()) {
@@ -171,7 +179,8 @@ func (a *Agent) Run(ctx context.Context) error {
 				a.removeSessionsOfClaim(string(c.UID))
 			}
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 
@@ -179,29 +188,32 @@ func (a *Agent) Run(ctx context.Context) error {
 		klog.Background(),
 		a.claimInformer.GetStore(),
 		a.claimInformer.GetIndexer(),
-		time.Minute, true)
+		time.Minute, true,
+	)
+
+	a.hasReady = func(ctx context.Context) bool {
+		return cache.WaitForNamedCacheSyncWithContext(
+			ctx,
+			a.sliceInformer.HasSynced,
+			a.claimInformer.HasSynced,
+			sliceRegistration.HasSynced,
+			claimRegistration.HasSynced,
+		)
+	}
 
 	a.wg.Go(func() { a.sliceInformer.RunWithContext(ctx) })
 	a.wg.Go(func() { a.claimInformer.RunWithContext(ctx) })
 
-	syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
+	syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer syncCancel()
 
 	if !cache.WaitForNamedCacheSyncWithContext(
 		syncCtx,
 		a.sliceInformer.HasSynced,
 		a.claimInformer.HasSynced,
 	) {
-		return fmt.Errorf("informers did not sync")
+		return fmt.Errorf("informers cache synchronization timeout")
 	}
-
-	// Signal the server container only now: with the caches synced,
-	// EnsureSession answers correctly from the first request.
-	if err := a.writeReadyFile(); err != nil {
-		return err
-	}
-
-	a.refreshNodeDevices()
 
 	// 3. Background loops.
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.probeServer, 5*time.Second) })
@@ -226,6 +238,12 @@ func (a *Agent) Run(ctx context.Context) error {
 	})
 
 	a.wg.Go(func() {
+		defer cancel()
+		// Signal the server container only now: with the caches synced,
+		// EnsureSession answers correctly from the first request.
+		if err = a.writeReadyFile(); err != nil {
+			return
+		}
 		klog.Infof("remote-agent serving on %s (node %s, session base %s)", endpoint.HostPort(), a.cfg.NodeName, a.cfg.SessionBase)
 		if err = srv.Serve(lis); err != nil && (errors.Is(err, grpc.ErrServerStopped) || errors.Is(err, net.ErrClosed)) {
 			err = nil
@@ -245,6 +263,9 @@ func (a *Agent) Check(ctx context.Context, req *grpc_health_v1.HealthCheckReques
 	}
 	status := &grpc_health_v1.HealthCheckResponse{
 		Status: grpc_health_v1.HealthCheckResponse_SERVING,
+	}
+	if !a.hasReady(ctx) {
+		status.Status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
 	}
 	return status, nil
 }

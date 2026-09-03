@@ -128,6 +128,8 @@ spec:
               value: ":14833"                     # ← 与 LUPINE_PORT 保持一致
             - name: LISTEN_SERVER_ENDPOINT
               value: ":14834"                     # ← EnsureSession gRPC 端口(hostNetwork)
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: FEATURE_GATES
               value: SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
           startupProbe:

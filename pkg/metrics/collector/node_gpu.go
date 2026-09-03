@@ -19,7 +19,6 @@ package collector
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -53,6 +52,7 @@ import (
 type nodeGPUCollector struct {
 	*nvidia.DeviceLib
 	nodeName    string
+	managerRoot string
 	nodeLister  listerv1.NodeLister
 	podLister   client.PodLister
 	contLister  *lister.ContainerLister
@@ -63,24 +63,25 @@ type nodeGPUCollector struct {
 
 func NewNodeGPUCollector(
 	config *node.NodeConfigSpec, nodeLister listerv1.NodeLister, podLister client.PodLister,
-	contLister *lister.ContainerLister, featureGate featuregate.FeatureGate,
+	contLister *lister.ContainerLister, managerRoot string, featureGate featuregate.FeatureGate,
 ) (prometheus.Collector, error) {
 	driverRoot := config.GetDriverRoot()
 	deviceLib, err := nvidia.DetectionDeviceLib(driverRoot)
 	if err != nil {
 		return nil, err
 	}
-	adapter := watcher.NewDeviceUtilAdapter(
+	utilAdapter := watcher.NewDeviceUtilAdapter(
 		watcher.WithExtendedInterface(deviceLib.Extensions()),
 	)
 	return &nodeGPUCollector{
 		DeviceLib:   deviceLib,
 		nodeName:    config.GetNodeName(),
+		managerRoot: managerRoot,
 		nodeLister:  nodeLister,
 		podLister:   podLister,
 		contLister:  contLister,
 		featureGate: featureGate,
-		utilAdapter: adapter,
+		utilAdapter: utilAdapter,
 		podResource: client.NewPodResource(
 			client.WithCallTimeoutSecond(5)),
 	}, nil
@@ -305,8 +306,6 @@ func ContainerDeviceProcUtilEach(procUtils procUtilList,
 	}
 }
 
-var smFilePath = filepath.Join(util.ManagerRootPath, util.Watcher, util.SMUtilFile)
-
 // Collect device indicators
 func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 	klog.V(4).Infof("Starting to collect metrics for vGPU on node <%s>", c.nodeName)
@@ -320,8 +319,9 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 		devProcUtilMap = make(map[string]procUtilList)
 		devMigInfosMap = make(map[string][]*nvidia.MigInfo)
 	)
-	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, devTypeMap, devIndexMap, devHealthMap, devHealthLvs,
-		devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, c.utilAdapter, c.featureGate)
+
+	CollectBasedOnNvml(ch, c.DeviceLib, c.nodeName, c.managerRoot, devTypeMap, devIndexMap, devHealthMap,
+		devHealthLvs, devMemInfoMap, devProcInfoMap, devProcUtilMap, devMigInfosMap, c.utilAdapter, c.featureGate)
 
 	var (
 		//vGpuHealthMap      = make(map[string]bool)
@@ -680,7 +680,7 @@ func (c nodeGPUCollector) Collect(ch chan<- prometheus.Metric) {
 
 }
 
-func CollectorDeviceProcesses(
+func collectorDeviceProcesses(
 	utilAdapter watcher.DeviceUtilInterface,
 	mmapUtil *watcher.MmapDeviceUtil,
 	index int, hdev nvml.Device,

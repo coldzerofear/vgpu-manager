@@ -307,10 +307,8 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		return fail(err)
 	}
 
-	baseEnv := []string{
-		// Mandatory: prevents client-local routing (§4.3.2 lesson).
-		fmt.Sprintf("%s=1", EnvLupineDisableLocal),
-	}
+	// Mandatory: prevents client-local routing (§4.3.2 lesson).
+	baseEnv := []string{fmt.Sprintf("%s=1", EnvLupineDisableLocal)}
 
 	mounts := []*cdispec.Mount{{ // the client shim libraries
 		HostPath:      artifact.HostDir,

@@ -75,7 +75,7 @@ const (
 // NVML sampling — wrong data is never read).
 func (s *SessionStore) linkWatcherDir() error {
 	base := strings.TrimRight(s.cfg.SessionBase, "/")
-	target := filepath.Join("..", util.Watcher) // <base>/../watcher, relative so every mount layout works
+	target := filepath.Join(s.cfg.ContainerManagerDir, util.Watcher)
 	link := filepath.Join(base, util.Watcher)
 
 	if current, err := os.Readlink(link); err == nil {
