@@ -656,7 +656,29 @@ typedef void (*atomic_fn_ptr)(int, void *);
 
 typedef void* (*fp_dlsym)(void*, const char*);
 
+/* Does `symbol` name a driver entry point we hook? Mirrors the export
+ * patterns in the version script: cu[A-Z]* / cudbg* / nvml[A-Z]*.
+ *
+ * The uppercase discriminator is what keeps cuBLAS, cuFFT, cuDNN,
+ * cudaMalloc and curl_* out -- they share the "cu" prefix but are not
+ * driver API, and matching them costs a symbol lookup plus a misleading
+ * unhooked-symbol note on every resolution. Short strings stop at the
+ * NUL via && short-circuit, so no read runs past the terminator. */
+static inline int symbol_is_cuda_api(const char *s) {
+  if (s[0] != 'c' || s[1] != 'u') return 0;
+  if (s[2] >= 'A' && s[2] <= 'Z') return 1;      /* cu[A-Z]* */
+  return strncmp(s + 2, "dbg", 3) == 0;          /* cudbg*   */
+}
+
+static inline int symbol_is_nvml_api(const char *s) {
+  return s[0] == 'n' && s[1] == 'v' && s[2] == 'm' && s[3] == 'l' &&
+         s[4] >= 'A' && s[4] <= 'Z';             /* nvml[A-Z]* */
+}
+
 #define FUNC_ATTR_VISIBLE  __attribute__((visibility("default")))
+/* Hidden, but still a global symbol: dlsym_entry.S calls these by name and
+ * hidden visibility keeps that a direct call instead of a PLT round trip. */
+#define FUNC_ATTR_HIDDEN   __attribute__((visibility("hidden")))
 
 #define container_of(ptr, type, member)                                        \
   ({                                                                           \
