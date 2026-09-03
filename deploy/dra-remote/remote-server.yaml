@@ -186,6 +186,8 @@ spec:
               value: /etc/vgpu-manager/driver/libvgpu-control.so
             - name: LUPINE_CHECKPOINT_LIBRARY
               value: /etc/vgpu-manager/driver/libvgpu-control.so
+            - name: CUDA_VISIBLE_DEVICES
+              value: all
             - name: NVIDIA_VISIBLE_DEVICES
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
@@ -196,6 +198,8 @@ spec:
               value: "1"
             - name: LUPINE_TRACE
               value: "1"
+            - name: LOGGER_LEVEL    # vGPU library 日志级别
+              value: "3"
           securityContext:
             privileged: true
           resources: {}

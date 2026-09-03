@@ -332,6 +332,10 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 				return fmt.Errorf("--plugin-mode=%s requires feature gate %s to be disabled",
 					pkgkubeletplugin.ModeInject, featuregates.NVMLDeviceHealthCheck)
 			}
+			if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
+				return fmt.Errorf("--plugin-mode=%s requires feature gate %s to be disabled",
+					pkgkubeletplugin.ModeInject, featuregates.SharedSMUtilizationWatcher)
+			}
 		}
 	default:
 		return fmt.Errorf("invalid --plugin-mode %q: must be %q or %q",

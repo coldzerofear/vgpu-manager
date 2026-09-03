@@ -308,7 +308,11 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 	}
 
 	// Mandatory: prevents client-local routing (§4.3.2 lesson).
-	baseEnv := []string{fmt.Sprintf("%s=1", EnvLupineDisableLocal)}
+	baseEnv := []string{
+		// Remote GPU without injecting any real Nvidia devices or drivers
+		"NVIDIA_VISIBLE_DEVICES=void",
+		fmt.Sprintf("%s=1", EnvLupineDisableLocal),
+	}
 
 	mounts := []*cdispec.Mount{{ // the client shim libraries
 		HostPath:      artifact.HostDir,

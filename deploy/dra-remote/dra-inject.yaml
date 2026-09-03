@@ -147,6 +147,9 @@ spec:
               value: /var/lib/kubelet/plugins_registry
             - name: KUBELET_PLUGINS_DIRECTORY_PATH
               value: /var/lib/kubelet/plugins
+            # inject 服务不需要让 nvidia-runtime 发现/注入 设备
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
           ports:
             - name: metrics
               containerPort: 8080
@@ -176,7 +179,7 @@ spec:
               name: cdi-root
             - mountPath: /etc/vgpu-manager
               name: manager-root
-#            # 开启 NRISupport（按容器会话）时挂载 NRI socket 目录
+            # 开启 NRISupport（按容器会话）时挂载 NRI socket 目录
 #            - name: nri-root
 #              mountPath: /var/run/nri
 #              mountPropagation: HostToContainer
