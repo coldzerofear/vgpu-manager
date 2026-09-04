@@ -24,9 +24,7 @@ extern resource_data_t* g_vgpu_config;
 
 extern int lock_gpu_device(int host_index);
 extern void unlock_gpu_device(int fd);
-
 extern int get_nvml_device_index_by_host_index(int host_index);
-extern nvmlReturn_t _nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device);
 
 nvmlReturn_t nvmlInit(void);
 nvmlReturn_t nvmlInit_v2(void);
@@ -198,13 +196,23 @@ static int device_is_visible(nvmlDevice_t device) {
   return config_visible_index_of(g_vgpu_config, get_host_device_index_by_nvml_device(device)) >= 0;
 }
 
+nvmlReturn_t _nvmlDeviceGetCount(unsigned int *deviceCount) {
+  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetCount_v2))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCount_v2, deviceCount);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetCount))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCount, deviceCount);
+  }
+  return ret;
+}
+
 nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount) {
   /* Session test first, and only then any initialisation: outside a session
    * this must be the passthrough it has always been, down to not pulling the
    * library's lazy init into a call that never did so before. Same shape in
    * every hook below. */
   if (likely(!session_enabled())) {
-    return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetCount_v2, deviceCount);
+    return _nvmlDeviceGetCount(deviceCount);
   }
   load_necessary_data();
   if (deviceCount == NULL) {
@@ -220,9 +228,19 @@ nvmlReturn_t nvmlDeviceGetCount(unsigned int *deviceCount) {
   return nvmlDeviceGetCount_v2(deviceCount);
 }
 
+nvmlReturn_t _nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *device) {
+  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, index, device);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex, index, device);
+  }
+  return ret;
+}
+
 nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *device) {
   if (likely(!session_enabled())) {
-    return NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2, index, device);
+    return _nvmlDeviceGetHandleByIndex_v2(index, device);
   }
   load_necessary_data();
   if (device == NULL) {
@@ -240,7 +258,7 @@ nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *dev
     return NVML_ERROR_NOT_FOUND;
   }
   LOGGER(DETAIL, "hooking nvmlDeviceGetHandleByIndex_v2 %u -> physical %d", index, nvml_index);
-  return _nvmlDeviceGetHandleByIndex((unsigned int)nvml_index, device);
+  return _nvmlDeviceGetHandleByIndex_v2((unsigned int)nvml_index, device);
 }
 
 nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device) {
@@ -263,9 +281,18 @@ nvmlReturn_t nvmlDeviceGetHandleByUUID(const char *uuid, nvmlDevice_t *device) {
   return ret;
 }
 
+nvmlReturn_t _nvmlDeviceGetHandleByPciBusId(const char *pciBusId, nvmlDevice_t *device) {
+  nvmlReturn_t ret = NVML_ERROR_FUNCTION_NOT_FOUND;
+  if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByPciBusId_v2))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByPciBusId_v2, pciBusId, device);
+  } else if (likely(NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByPciBusId))) {
+    ret = NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByPciBusId, pciBusId, device);
+  }
+  return ret;
+}
+
 nvmlReturn_t nvmlDeviceGetHandleByPciBusId_v2(const char *pciBusId, nvmlDevice_t *device) {
-  nvmlReturn_t ret =
-      NVML_ENTRY_CHECK(nvml_library_entry, nvmlDeviceGetHandleByPciBusId_v2, pciBusId, device);
+  nvmlReturn_t ret = _nvmlDeviceGetHandleByPciBusId(pciBusId, device);
   if (ret != NVML_SUCCESS || !session_enabled()) {
     return ret;
   }
