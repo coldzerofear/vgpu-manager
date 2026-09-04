@@ -111,6 +111,8 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - remote-agent
+            - --kube-api-qps=20
+            - --kube-api-burst=30
             - --v=4
           env:
             - name: NODE_NAME
@@ -121,9 +123,6 @@ spec:
             # 的排序语义（新 pod 里 server 不该被上一个 pod 的文件放行）。
             - name: READY_FILE
               value: /run/vgpu/ready
-            # 会话目录在 manager-root hostPath 下（与 lupine-server、monitor 共享）
-            - name: VGPU_CONFIG_SESSION_BASE
-              value: /etc/vgpu-manager/remote-sessions
             - name: REMOTE_SERVER_ENDPOINT
               value: ":14833"                     # ← 与 LUPINE_PORT 保持一致
             - name: LISTEN_SERVER_ENDPOINT
@@ -132,16 +131,22 @@ spec:
               value: /etc/vgpu-manager
             - name: FEATURE_GATES
               value: SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
+            # 会话目录在 manager-root hostPath 下（与 lupine-server、monitor 共享）
+            - name: VGPU_CONFIG_SESSION_BASE
+              value: /etc/vgpu-manager/remote-sessions
+          ports:
+            - name: grpc
+              containerPort: 14834
           startupProbe:
             grpc:
-              port: 14834
+              port: grpc
               service: liveness
             failureThreshold: 60
             periodSeconds: 10
             timeoutSeconds: 10
           livenessProbe:
             grpc:
-              port: 14834
+              port: grpc
               service: liveness
             failureThreshold: 3
             periodSeconds: 30
@@ -203,19 +208,25 @@ spec:
           securityContext:
             privileged: true
           resources: {}
+          ports:
+            - name: http
+              containerPort: 14833
           # 端口开着就算就绪：每次探测 server 只 fork 一个子进程，读完前导字节就退出。
           # 不用 httpGet：14833 也答 HTTP/1.x，但 bundle 路径会整包下载，其他路径是 404。
           readinessProbe:
+            failureThreshold: 3
             tcpSocket:
-              port: 14833
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+            successThreshold: 1
           livenessProbe:
+            failureThreshold: 3
             tcpSocket:
-              port: 14833
+              port: http
             initialDelaySeconds: 30
             periodSeconds: 30
-            failureThreshold: 3
+            successThreshold: 1
           volumeMounts:
             - name: manager-root
               mountPath: /etc/vgpu-manager
@@ -228,6 +239,8 @@ spec:
           command:
             - device-monitor
             - --domain=nvidia.com
+            - --kube-api-qps=20
+            - --kube-api-burst=30
             - --enable-dra-monitor
             # 远程会话按 pids.config 归账（消费 pod 在别的节点，cgroup 归账不可用）
             - --feature-gates=RemoteGPUSupport=true,SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
@@ -236,7 +249,7 @@ spec:
             - --min-scrape-interval=1s
             - --v=4
           ports:
-            - name: http
+            - name: metrics
               containerPort: 3456
           env:
             - name: NODE_NAME
@@ -261,17 +274,23 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 3456
+              port: metrics
               scheme: HTTP
             initialDelaySeconds: 15
             periodSeconds: 20
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 3456
+              port: metrics
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
           volumeMounts:
             - name: kubelet-root
               mountPath: /var/lib/kubelet
@@ -314,14 +333,22 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vgpu-manager-remote-monitor
+  name: vgpu-manager-remote-serer
   namespace: kube-system
 spec:
   ports:
+    - name: grpc
+      port: 14834
+      protocol: TCP
+      targetPort: grpc
     - name: http
-      port: 3456
+      port: 14833
       protocol: TCP
       targetPort: http
+    - name: metrics
+      port: 3456
+      protocol: TCP
+      targetPort: metrics
   selector:
     app: vgpu-manager-remote-server
   type: ClusterIP

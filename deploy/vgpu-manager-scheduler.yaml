@@ -237,11 +237,14 @@ spec:
           volumeMounts:
             - name: scheduler-config
               mountPath: /config
+          ports:
+            - name: https
+              containerPort: 10259
           livenessProbe:
             failureThreshold: 8
             httpGet:
               path: /healthz
-              port: 10259
+              port: https
               scheme: HTTPS
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -275,14 +278,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 3456
+              port: http
               scheme: HTTP
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 3456
+              port: http
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10

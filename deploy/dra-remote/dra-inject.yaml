@@ -122,6 +122,8 @@ spec:
           command: [bash, -c]
           args:
             - kubelet-plugin
+            - --kube-api-qps=20
+            - --kube-api-burst=30
             - -v=6
           env:
             - name: NODE_NAME
@@ -131,9 +133,13 @@ spec:
             - name: PLUGIN_MODE
               value: inject
             - name: FEATURE_GATES
-              value: RemoteGPUSupport=true
+              value: RemoteGPUSupport=true,NRISupport=false
             - name: CDI_ROOT
               value: /var/run/cdi
+            - name: NRI_ROOT
+              value: /var/run/nri
+            - name: NRI_PLUGIN_IDX
+              value: "00"
             - name: HOST_MANAGER_DIR
               value: /etc/vgpu-manager
             - name: CONTAINER_MANAGER_DIR
@@ -143,6 +149,8 @@ spec:
             # 可选：开启后 /metrics 暴露 DRA prepare/unprepare 请求指标
             - name: HTTP_ENDPOINT
               value: ":8080"
+            - name: METRICS_PATH
+              value: /metrics
             - name: KUBELET_REGISTRAR_DIRECTORY_PATH
               value: /var/lib/kubelet/plugins_registry
             - name: KUBELET_PLUGINS_DIRECTORY_PATH
@@ -153,18 +161,20 @@ spec:
           ports:
             - name: metrics
               containerPort: 8080
+            - name: health
+              containerPort: 4567
           securityContext:
             privileged: true
           startupProbe:
             grpc:
-              port: 4567
+              port: health
               service: liveness
             failureThreshold: 60
             periodSeconds: 10
             timeoutSeconds: 10
           livenessProbe:
             grpc:
-              port: 4567
+              port: health
               service: liveness
             failureThreshold: 3
             periodSeconds: 30

@@ -85,11 +85,14 @@ spec:
             - name: scheduler-config
               mountPath: /config
               readOnly: true
+          ports:
+            - name: scheduler
+              containerPort: 10259
           livenessProbe:
             failureThreshold: 3
             httpGet:
               path: /healthz
-              port: 10259
+              port: scheduler
               scheme: HTTPS
             initialDelaySeconds: 15
             periodSeconds: 20

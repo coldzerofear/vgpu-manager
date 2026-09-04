@@ -137,6 +137,10 @@ spec:
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
               exec kubelet-plugin "$@"
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - --device-cores-ratio=100
+            - --device-memory-ratio=100
             - -v=6
           env:
             - name: NODE_NAME

@@ -344,10 +344,10 @@ metadata:
   namespace: kube-system
 spec:
   ports:
-    - name: http
+    - name: https
       port: 443
       protocol: TCP
-      targetPort: http
+      targetPort: https
   selector:
     app: vgpu-manager-webhook
   type: ClusterIP
@@ -408,6 +408,9 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-webhook
+            - --domain=nvidia.com
+            - --kube-api-qps=20
+            - --kube-api-burst=30
             - --server-bind-port=9443
             - --default-topology-mode=link
             - --vgpu-device-class-name=vgpu-manager
@@ -415,11 +418,14 @@ spec:
             - --default-convert2-dra
             - --combined-resource-claim
             - --v=4
+          ports:
+            - name: https
+              containerPort: 9443
           livenessProbe:
             failureThreshold: 3
             httpGet:
               path: /healthz
-              port: 9443
+              port: https
               scheme: HTTPS
             initialDelaySeconds: 15
             periodSeconds: 20
@@ -429,15 +435,12 @@ spec:
             failureThreshold: 3
             httpGet:
               path: /readyz
-              port: 9443
+              port: https
               scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-          ports:
-            - name: http
-              containerPort: 9443
           resources: {}
           securityContext:
             allowPrivilegeEscalation: false

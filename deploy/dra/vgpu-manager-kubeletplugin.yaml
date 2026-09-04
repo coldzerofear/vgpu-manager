@@ -201,6 +201,10 @@ spec:
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
               exec kubelet-plugin "$@"
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - --device-cores-ratio=100
+            - --device-memory-ratio=100
             - -v=6
           env:
             - name: NODE_NAME
@@ -208,7 +212,7 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: FEATURE_GATES
-              value: NVMLDeviceHealthCheck=true,SharedSMUtilizationWatcher=true,DevicePluginClientMode=false
+              value: NVMLDeviceHealthCheck=true,SharedSMUtilizationWatcher=true,DevicePluginClientMode=false,NRISupport=false
             - name: MASK_NVIDIA_DRIVER_PARAMS
               value: ""
             - name: NVIDIA_DRIVER_ROOT
@@ -217,10 +221,16 @@ spec:
               value: /var/run/cdi
             - name: NRI_ROOT
               value: /var/run/nri
+            - name: NRI_PLUGIN_IDX
+              value: "00"
             - name: HOST_ROOT
               value: /host-root
             - name: HEALTHCHECK_PORT
               value: "4567"
+            - name: HTTP_ENDPOINT
+              value: ":8080"
+            - name: METRICS_PATH
+              value: "/metrics"
             # void: 阻止 nvidia runtime 向插件容器注入驱动库/设备节点，
             # 驱动发现走 prestart + /driver-root
             - name: NVIDIA_VISIBLE_DEVICES
@@ -241,16 +251,21 @@ spec:
               value: /var/lib/kubelet/plugins
           securityContext:
             privileged: true
+          ports:
+            - name: health
+              containerPort: 4567
+            - name: metrics
+              containerPort: 8080
           startupProbe:
             grpc:
-              port: 4567
+              port: health
               service: liveness
             failureThreshold: 60
             periodSeconds: 10
             timeoutSeconds: 10
           livenessProbe:
             grpc:
-              port: 4567
+              port: health
               service: liveness
             failureThreshold: 3
             periodSeconds: 30
@@ -299,11 +314,13 @@ spec:
           command:
             - device-monitor
             - --domain=nvidia.com
+            - --kube-api-qps=20
+            - --kube-api-burst=30
             - --enable-dra-monitor
             - --server-bind-port=3456
             - --container-driver-root=/driver-root
             - --min-scrape-interval=1s
-            - --feature-gates=SharedSMUtilizationWatcher=true,VirtualMemoryTracking=false
+            - --feature-gates=SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
             - --v=4
           ports:
             - name: http
@@ -329,14 +346,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 3456
+              port: http
               scheme: HTTP
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 3456
+              port: http
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -440,6 +457,10 @@ spec:
       port: 3456
       protocol: TCP
       targetPort: http
+    - name: metrics
+      port: 8080
+      protocol: TCP
+      targetPort: metrics
   selector:
     app: vgpu-manager-kubelet-plugin
   type: ClusterIP
