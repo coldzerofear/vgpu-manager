@@ -258,14 +258,14 @@ spec:
               containerPort: 8080
           startupProbe:
             grpc:
-              port: health
+              port: 4567
               service: liveness
             failureThreshold: 60
             periodSeconds: 10
             timeoutSeconds: 10
           livenessProbe:
             grpc:
-              port: health
+              port: 4567
               service: liveness
             failureThreshold: 3
             periodSeconds: 30

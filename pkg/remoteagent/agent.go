@@ -225,7 +225,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	// 3. Background loops.
-	a.wg.Go(func() { wait.UntilWithContext(ctx, a.probeServer, 5*time.Second) })
+	a.wg.Go(func() { wait.UntilWithContext(ctx, a.probeServer, 15*time.Second) })
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.checkSMWatcher, 30*time.Second) })
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.gcSessions, a.cfg.GCInterval) })
 

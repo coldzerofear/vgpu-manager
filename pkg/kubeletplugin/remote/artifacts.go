@@ -115,9 +115,16 @@ func dirNames(entries []os.DirEntry) string {
 
 // The driver shims a client artifact ships.
 const (
-	shimLibCuda = "libcuda.so.1"
-	shimLibNvml = "libnvidia-ml.so.1"
+	shimLibCuda   = "libcuda.so.1"
+	shimLibNvml   = "libnvidia-ml.so.1"
+	shimLibCudart = "libcudart.so.13"
 )
+
+var optionalShimLibrary = map[string]bool{
+	shimLibCuda:   true,
+	shimLibNvml:   true,
+	shimLibCudart: false,
+}
 
 // ensureLdPreloadFile writes <artifactsDir>/<ver>/RemoteLdPreload listing the
 // artifact's shims by their in-container paths, one per line, and returns the
@@ -126,10 +133,10 @@ const (
 // when the shim set changes on an artifact update.
 func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, error) {
 	var lines []string
-	for _, lib := range []string{shimLibCuda, shimLibNvml} {
+	for lib, require := range optionalShimLibrary {
 		if _, err := os.Stat(filepath.Join(artifactsDir, sel.Name, lib)); err == nil {
 			lines = append(lines, filepath.Join(sel.ContainerDir, lib))
-		} else {
+		} else if require {
 			// Without the Client shim the artifact is unusable; fail the
 			// prepare (retryable — the artifact may still be materializing).
 			return "", fmt.Errorf("client artifact %s has no %s: %w", sel.Name, lib, err)

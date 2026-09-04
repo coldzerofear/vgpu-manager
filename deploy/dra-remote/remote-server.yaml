@@ -139,14 +139,14 @@ spec:
               containerPort: 14834
           startupProbe:
             grpc:
-              port: grpc
+              port: 14834
               service: liveness
             failureThreshold: 60
             periodSeconds: 10
             timeoutSeconds: 10
           livenessProbe:
             grpc:
-              port: grpc
+              port: 14834
               service: liveness
             failureThreshold: 3
             periodSeconds: 30
@@ -333,7 +333,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vgpu-manager-remote-serer
+  name: vgpu-manager-remote-server
   namespace: kube-system
 spec:
   ports:

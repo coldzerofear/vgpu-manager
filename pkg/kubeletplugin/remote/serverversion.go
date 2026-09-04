@@ -18,6 +18,7 @@ package remote
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"time"
@@ -36,7 +37,10 @@ const ServerCUDAVersionHeader = "x-lupine-cuda-version"
 // child per connection, so there is nothing to reuse.
 var probeClient = &http.Client{
 	Transport: &http.Transport{
-		Proxy:             nil,
+		Proxy: nil,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
 		DisableKeepAlives: true,
 	},
 }
