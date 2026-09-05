@@ -208,7 +208,7 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "remote-agent-endpoint",
-			Usage:       "How this node's remote-agent is reached: 'grpc://host:port' (empty host = loopback) or 'unix:///etc/vgpu-manager/agent.sock'. The endpoints published to other nodes (serverEndpoint/agentEndpoint attributes) and the server CUDA version are what the agent reports. Server mode with RemoteGPUSupport.",
+			Usage:       "How this node's remote-agent is reached: 'grpc://host:port' (empty host = this node's InternalIP; the agent runs under hostNetwork, this plugin does not) or 'unix:///etc/vgpu-manager/agent.sock'. The endpoints published to other nodes (serverEndpoint/agentEndpoint attributes) and the server CUDA version are what the agent reports. Server mode with RemoteGPUSupport.",
 			Value:       fmt.Sprintf(":%d", remote.DefaultAgentPort),
 			Destination: &flags.RemoteAgentEndpoint,
 			EnvVars:     []string{"REMOTE_AGENT_ENDPOINT"},

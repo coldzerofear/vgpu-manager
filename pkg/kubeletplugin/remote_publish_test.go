@@ -26,8 +26,12 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"google.golang.org/grpc"
+	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
+	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
 // fakeAgent is a remote-agent that answers ServerInfo with whatever the test
@@ -199,5 +203,50 @@ func TestPublishableEndpoints(t *testing.T) {
 	s, a, err = publishableEndpoints("https://gw.corp/pool", "grpc://[2001:db8::7]:15000")
 	if err != nil || s != "https://gw.corp:443/pool" || a != "grpc://[2001:db8::7]:15000" {
 		t.Fatalf("explicit: %q %q %v", s, a, err)
+	}
+}
+
+func TestResolveAgentDial(t *testing.T) {
+	ctx := context.Background()
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-node"},
+		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
+			{Type: corev1.NodeHostName, Address: "gpu-node"},
+			{Type: corev1.NodeInternalIP, Address: "10.0.0.7"},
+		}},
+	}
+	config := &Config{Flags: &Flags{NodeName: "gpu-node"}, ClientSets: pkgflags.ClientSets{Core: fake.NewSimpleClientset(node)}}
+
+	// dra-server is not on hostNetwork: an empty host must become the node's
+	// InternalIP, never a loopback.
+	for raw, want := range map[string]string{
+		":14834":                     "grpc://10.0.0.7:14834",
+		"":                           "",
+		"grpc://":                    "grpc://10.0.0.7:14834",
+		"grpc://10.0.0.8:15000":      "grpc://10.0.0.8:15000",
+		"unix:///run/agent.sock":     "unix:///run/agent.sock",
+		"gpu-node.internal":          "grpc://gpu-node.internal:14834",
+		"grpc://[2001:db8::7]:14834": "grpc://[2001:db8::7]:14834",
+	} {
+		got, err := resolveAgentDial(ctx, config, raw)
+		if want == "" {
+			if err == nil {
+				t.Errorf("resolveAgentDial(%q) = %q, want an error", raw, got)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("resolveAgentDial(%q) = %q, %v, want %q", raw, got, err, want)
+		}
+	}
+
+	// No InternalIP: the operator has to say where the agent is.
+	bare := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gpu-node"}}
+	config.Core = fake.NewSimpleClientset(bare)
+	if got, err := resolveAgentDial(ctx, config, ":14834"); err == nil {
+		t.Fatalf("node without InternalIP must be an error, got %q", got)
+	}
+	if got, err := resolveAgentDial(ctx, config, "unix:///run/agent.sock"); err != nil || got != "unix:///run/agent.sock" {
+		t.Fatalf("unix socket must not need the node: %q %v", got, err)
 	}
 }

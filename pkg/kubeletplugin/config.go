@@ -58,7 +58,8 @@ type Flags struct {
 	// GPU dependency).
 	PluginMode string
 	// RemoteAgentEndpoint is how this (server-mode) plugin reaches the
-	// remote-agent on its own node: grpc://host:port (empty host = loopback)
+	// remote-agent on its own node: grpc://host:port (empty host = the node's
+	// InternalIP -- the agent is on hostNetwork, this plugin is not)
 	// or unix:///path. Everything published about the remote path -- the
 	// server's and the agent's routable endpoints, the server CUDA version
 	// -- is what the agent reports (design D26).

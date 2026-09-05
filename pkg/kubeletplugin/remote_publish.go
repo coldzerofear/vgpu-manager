@@ -26,6 +26,8 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
 )
@@ -75,17 +77,10 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, err
 	}
-	agentDial, err := endpointutil.ParseEndpoint(config.Flags.RemoteAgentEndpoint,
-		endpointutil.WithDefaultScheme(endpointutil.Grpc),
-		endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+	rp.agentDial, err = resolveAgentDial(ctx, config, config.Flags.RemoteAgentEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("parse agent endpoint failed: %w", err)
+		return nil, err
 	}
-	// The agent runs on this node (hostNetwork); no host means loopback.
-	if agentDial.Scheme != endpointutil.Unix && agentDial.Host == "" {
-		agentDial.Host = "127.0.0.1"
-	}
-	rp.agentDial = agentDial.String()
 	rp.spec = &remote.PublishSpec{Selector: reachable}
 	klog.V(2).Infof("Remote GPU publishing enabled: agent at %s, reachable-nodes=%q",
 		rp.agentDial, config.Flags.RemoteNodeSelector)
@@ -163,6 +158,41 @@ func (rp *remotePublisher) refreshServerInfo(ctx context.Context) (bool, error) 
 		changed = true
 	}
 	return changed, nil
+}
+
+// resolveAgentDial turns --remote-agent-endpoint into the address this
+// process dials its node's agent at. A unix socket is used as is (it is
+// bind-mounted from the host). A grpc endpoint without a host gets the
+// node's InternalIP: the agent listens there under hostNetwork, while this
+// plugin runs in the pod network, so a loopback would reach only itself.
+func resolveAgentDial(ctx context.Context, config *Config, raw string) (string, error) {
+	agentDial, err := endpointutil.ParseEndpoint(raw,
+		endpointutil.WithDefaultScheme(endpointutil.Grpc),
+		endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+	if err != nil {
+		return "", fmt.Errorf("parse agent endpoint failed: %w", err)
+	}
+	if agentDial.Scheme != endpointutil.Unix && agentDial.Host == "" {
+		ip, err := nodeInternalIP(ctx, config, config.Flags.NodeName)
+		if err != nil {
+			return "", fmt.Errorf("derive agent endpoint: %w", err)
+		}
+		agentDial.Host = ip
+	}
+	return agentDial.String(), nil
+}
+
+func nodeInternalIP(ctx context.Context, config *Config, nodeName string) (string, error) {
+	node, err := config.Core.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{ResourceVersion: "0"})
+	if err != nil {
+		return "", fmt.Errorf("get node %s: %w", nodeName, err)
+	}
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP && addr.Address != "" {
+			return addr.Address, nil
+		}
+	}
+	return "", fmt.Errorf("node %s has no InternalIP address; set the host in --remote-agent-endpoint explicitly", nodeName)
 }
 
 // publishableEndpoints validates what the agent reported before it goes

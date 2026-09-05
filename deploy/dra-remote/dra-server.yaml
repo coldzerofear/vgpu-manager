@@ -158,7 +158,7 @@ spec:
             # 若允许 pod 落在 GPU 节点本机（lupine 环回消费），selector 必须覆盖 GPU 节点自身。
             - name: REMOTE_NODE_SELECTOR
               value: vgpu-manager.io/remote-inject=true
-            # 唯一的远程路径配置：本机 remote-agent 怎么连（grpc://host:port，host 留空 = 回环；
+            # 唯一的远程路径配置：本机 remote-agent 怎么连（grpc://host:port，host 留空 = 节点 InternalIP，因为 agent 是 hostNetwork 而本插件不是；
             # 或 unix:///etc/vgpu-manager/agent.sock，需 remote-server 的 LISTEN_SERVER_ENDPOINT
             # 同时监听该 socket）。发布到其他节点的 serverEndpoint / agentEndpoint 属性和
             # serverCudaVersion 全部由 agent 的 ServerInfo 报告；agent 未应答前设备照常发布但
