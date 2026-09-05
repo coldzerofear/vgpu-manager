@@ -626,3 +626,55 @@ func TestDecorateUnreachable(t *testing.T) {
 		t.Fatalf("reachable spec must not taint: %+v", devices[0].Taints)
 	}
 }
+
+func TestDecorateIdempotentOnOneDevice(t *testing.T) {
+	// Health taints already on the device must survive, ours must not
+	// accumulate, and it must be removed once the spec becomes reachable --
+	// on the same Device value, without relying on the caller rebuilding it.
+	health := resourceapi.DeviceTaint{Key: "example.com/xid", Value: "79", Effect: resourceapi.DeviceTaintEffectNoSchedule}
+	devices := []resourceapi.Device{{Name: "vgpu-0", Taints: []resourceapi.DeviceTaint{health}}}
+	unreachable := &PublishSpec{}
+	reachable := &PublishSpec{Endpoint: "http://10.0.0.7:14833", AgentEndpoint: "grpc://10.0.0.7:14834", ServerCUDAVersion: semver.MustParse("12.4.0")}
+
+	Decorate(devices, unreachable)
+	Decorate(devices, unreachable)
+	if got := devices[0].Taints; len(got) != 2 || got[0] != health || got[1].Key != TaintKeyRemoteUnavailable {
+		t.Fatalf("after two unreachable passes: %+v", got)
+	}
+
+	Decorate(devices, reachable)
+	if got := devices[0].Taints; len(got) != 1 || got[0] != health {
+		t.Fatalf("reachable must clear our taint and keep the health taint: %+v", got)
+	}
+	if _, ok := devices[0].Attributes[AttrServerCUDAVersion]; !ok {
+		t.Fatal("reachable must publish the version")
+	}
+
+	// Back to unreachable on the same value: attributes gone, taint back once.
+	Decorate(devices, unreachable)
+	for _, name := range []resourceapi.QualifiedName{AttrServerEndpoint, AttrAgentEndpoint, AttrServerCUDAVersion} {
+		if _, ok := devices[0].Attributes[name]; ok {
+			t.Errorf("%s must be removed when the spec loses its endpoints", name)
+		}
+	}
+	if got := devices[0].Taints; len(got) != 2 {
+		t.Fatalf("taint must be set exactly once: %+v", got)
+	}
+
+	// A device without any taint stays nil-tainted when reachable.
+	plain := []resourceapi.Device{{Name: "vgpu-1"}}
+	Decorate(plain, reachable)
+	if plain[0].Taints != nil {
+		t.Fatalf("untainted device must stay untainted: %+v", plain[0].Taints)
+	}
+
+	// The caller's backing array is never grown in place.
+	shared := make([]resourceapi.DeviceTaint, 1, 4)
+	shared[0] = health
+	alias := shared[:1]
+	dev := []resourceapi.Device{{Name: "vgpu-2", Taints: shared}}
+	Decorate(dev, unreachable)
+	if len(alias[:2]) == 2 && alias[:2][1].Key == TaintKeyRemoteUnavailable {
+		t.Fatal("append wrote into the caller's spare capacity")
+	}
+}

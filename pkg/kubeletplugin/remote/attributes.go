@@ -92,20 +92,64 @@ func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 			continue
 		}
 		attrs[AttrAccessMode] = resourceapi.DeviceAttribute{StringValue: ptr.To(AccessModeRemote)}
+		// The devices are rebuilt from the allocatable state on every
+		// publish (GetDevice / PartGetDevice clone the health taints), so
+		// nothing below persists across publishes. It is still written to
+		// be idempotent on one Device value: the taint is set or cleared,
+		// never accumulated, and the endpoint attributes are removed when
+		// the spec loses them.
 		if !spec.Reachable() {
-			devices[i].Taints = append(devices[i].Taints, resourceapi.DeviceTaint{
+			delete(attrs, AttrServerEndpoint)
+			delete(attrs, AttrAgentEndpoint)
+			delete(attrs, AttrServerCUDAVersion)
+			devices[i].Taints = withTaint(devices[i].Taints, resourceapi.DeviceTaint{
 				Key:    TaintKeyRemoteUnavailable,
 				Value:  TaintValueRemoteUnavailable,
 				Effect: resourceapi.DeviceTaintEffectNoSchedule,
 			})
 			continue
 		}
+		devices[i].Taints = withoutTaint(devices[i].Taints, TaintKeyRemoteUnavailable)
 		attrs[AttrServerEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
 		attrs[AttrAgentEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.AgentEndpoint)}
 		if spec.ServerCUDAVersion != nil {
 			attrs[AttrServerCUDAVersion] = resourceapi.DeviceAttribute{VersionValue: ptr.To(spec.ServerCUDAVersion.String())}
+		} else {
+			delete(attrs, AttrServerCUDAVersion)
 		}
 	}
+}
+
+// withTaint returns taints with t set: replacing the entry of the same key
+// in place, or appended. The input slice is never grown in place, so a
+// caller sharing its backing array with someone else is not surprised.
+func withTaint(taints []resourceapi.DeviceTaint, t resourceapi.DeviceTaint) []resourceapi.DeviceTaint {
+	out := make([]resourceapi.DeviceTaint, 0, len(taints)+1)
+	replaced := false
+	for _, existing := range taints {
+		if existing.Key == t.Key {
+			out = append(out, t)
+			replaced = true
+			continue
+		}
+		out = append(out, existing)
+	}
+	if !replaced {
+		out = append(out, t)
+	}
+	return out
+}
+
+// withoutTaint returns taints without the entry of the given key; nil when
+// nothing is left, so an untainted device stays untainted (not empty).
+func withoutTaint(taints []resourceapi.DeviceTaint, key string) []resourceapi.DeviceTaint {
+	var out []resourceapi.DeviceTaint
+	for _, existing := range taints {
+		if existing.Key != key {
+			out = append(out, existing)
+		}
+	}
+	return out
 }
 
 // ParseNodeSelector parses a standard label-selector expression
