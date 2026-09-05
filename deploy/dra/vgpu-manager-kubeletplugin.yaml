@@ -171,6 +171,9 @@ spec:
           image: coldzerofear/vgpu-manager-dra:latest
           imagePullPolicy: IfNotPresent
           command: [bash, -c, /usr/bin/install_files.sh]
+          env:
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
           resources:
             requests:
               cpu: 10m
@@ -197,28 +200,41 @@ spec:
                 sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
                 mount --bind root/gpu-params /proc/driver/nvidia/params
               fi
-              kubelet-plugin -v 6
+              exec kubelet-plugin "$@"
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - --device-cores-ratio=100
+            - --device-memory-ratio=100
+            - -v=6
           env:
             - name: NODE_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
             - name: FEATURE_GATES
-              value: SharedSMUtilizationWatcher=true,DevicePluginClientMode=false
+              value: NVMLDeviceHealthCheck=true,SharedSMUtilizationWatcher=true,DevicePluginClientMode=false,NRISupport=false
             - name: MASK_NVIDIA_DRIVER_PARAMS
               value: ""
             - name: NVIDIA_DRIVER_ROOT
               value: /
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: void
             - name: CDI_ROOT
               value: /var/run/cdi
             - name: NRI_ROOT
               value: /var/run/nri
+            - name: NRI_PLUGIN_IDX
+              value: "00"
             - name: HOST_ROOT
               value: /host-root
             - name: HEALTHCHECK_PORT
               value: "4567"
+            - name: HTTP_ENDPOINT
+              value: ":8080"
+            - name: METRICS_PATH
+              value: "/metrics"
+            # void: 阻止 nvidia runtime 向插件容器注入驱动库/设备节点，
+            # 驱动发现走 prestart + /driver-root
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
             - name: NVIDIA_MIG_CONFIG_DEVICES
@@ -227,12 +243,19 @@ spec:
               value: /driver-root
             - name: HOST_MANAGER_DIR
               value: /etc/vgpu-manager
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: KUBELET_REGISTRAR_DIRECTORY_PATH
               value: /var/lib/kubelet/plugins_registry
             - name: KUBELET_PLUGINS_DIRECTORY_PATH
               value: /var/lib/kubelet/plugins
           securityContext:
             privileged: true
+          ports:
+            - name: health
+              containerPort: 4567
+            - name: metrics
+              containerPort: 8080
           startupProbe:
             grpc:
               port: 4567
@@ -290,9 +313,14 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - device-monitor
+            - --domain=nvidia.com
+            - --kube-api-qps=20
+            - --kube-api-burst=30
             - --enable-dra-monitor
             - --server-bind-port=3456
             - --container-driver-root=/driver-root
+            - --min-scrape-interval=1s
+            - --feature-gates=SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
             - --v=4
           ports:
             - name: http
@@ -318,14 +346,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 3456
+              port: http
               scheme: HTTP
             initialDelaySeconds: 15
             periodSeconds: 20
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 3456
+              port: http
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -429,6 +457,10 @@ spec:
       port: 3456
       protocol: TCP
       targetPort: http
+    - name: metrics
+      port: 8080
+      protocol: TCP
+      targetPort: metrics
   selector:
     app: vgpu-manager-kubelet-plugin
   type: ClusterIP
@@ -440,7 +472,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
   extendedResourceName: nvidia.com/gpu
 ---
 apiVersion: resource.k8s.io/v1
@@ -450,7 +482,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass

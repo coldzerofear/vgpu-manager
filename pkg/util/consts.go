@@ -119,6 +119,8 @@ var (
 	PodVGPUPreAllocAnnotation = globalDomainName + "/pre-allocated"
 	// PodVGPURealAllocAnnotation Real device information allocated by device plugins
 	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
+	// VGPUAccessModeAnnotation selects local (default) or remote vGPU devices for the pod.
+	VGPUAccessModeAnnotation = globalDomainName + "/vgpu-access-mode"
 )
 
 func initConstants() {
@@ -148,6 +150,7 @@ func initConstants() {
 	PodMetricsNodeLabel = globalDomainName + "/metrics-node"
 	PodVGPUPreAllocAnnotation = globalDomainName + "/pre-allocated"
 	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
+	VGPUAccessModeAnnotation = globalDomainName + "/vgpu-access-mode"
 }
 
 func GetGlobalDomain() string {
@@ -187,6 +190,7 @@ const (
 	Watcher         = "watcher"
 	Registry        = "registry"
 	Claims          = "claims"
+	Driver          = "driver"
 	SMUtilFile      = "sm_util.config"
 	VMemNode        = "vmem_node"
 	VMemNodeFile    = "vmem_node.config"
@@ -196,10 +200,13 @@ const (
 	// isolation. See docs/sm_multiproc_shared_bucket_design.md.
 	SMNode     = "sm_node"
 	SMNodeFile = "sm_node.config"
+
+	RemoteSessionBasePath = "/etc/vgpu-manager/remote-sessions"
 )
 
 const (
-	LdPreloadEnv = "LD_PRELOAD"
+	LdPreloadEnv     = "LD_PRELOAD"
+	LdLibraryPathEnv = "LD_LIBRARY_PATH"
 	// CUDA_MEM_LIMIT_<index> gpu memory limit
 	CudaMemoryLimitEnv = "CUDA_MEM_LIMIT"
 	// CUDA_MEM_RATIO_<index> gpu memory ratio
@@ -222,6 +229,7 @@ const (
 	ManagerVGpuClaimUid       = "MANAGER_VGPU_CLAIM_UID"
 	CudaSMSharedBucket        = "CUDA_SM_SHARED_BUCKET"
 	CudaMemoryUVAAdvise       = "CUDA_MEM_UVA_ADVISE"
+	RemoteSessionBasePathEnv  = "VGPU_CONFIG_SESSION_BASE"
 
 	PodNameEnv      = "VGPU_POD_NAME"
 	PodNamespaceEnv = "VGPU_POD_NAMESPACE"
@@ -417,6 +425,10 @@ const (
 	// HonorPreAllocatedDeviceIDs makes preferred allocation follow
 	// pre-allocated device IDs whenever possible.
 	HonorPreAllocatedDeviceIDs = "HonorPreAllocatedDeviceIDs"
+
+	// RemoteGPUSupport is the feature gate name shared by the kubelet-plugin
+	// and the device-monitor registries.
+	RemoteGPUSupport = "RemoteGPUSupport"
 )
 
 // CompatibilityMode Container environment compatibility mode type
@@ -433,4 +445,18 @@ const (
 	OpenKernelMode CompatibilityMode = 100
 	// ClientRegMode Use client mode to register GPU tasks.
 	ClientRegMode CompatibilityMode = 200
+	// SessionMode Indicates remote-GPU session accounting on a lupine-server node:
+	// the library aggregates by the session pids.config (library/include/hook.h,
+	// SESSION_COMPATIBILITY_MODE). Requires the server pod to run with hostPID.
+	SessionMode CompatibilityMode = 300
+)
+
+// vGPU access mode (remote GPU, design v2.x). Published on every device by
+// the DRA driver as the `accessMode` attribute; requested per pod through
+// VGPUAccessModeAnnotation (default local).
+const (
+	AccessModeLocal  = "local"
+	AccessModeRemote = "remote"
+	// AccessModeAttribute is the DRA device attribute name.
+	AccessModeAttribute = "accessMode"
 )

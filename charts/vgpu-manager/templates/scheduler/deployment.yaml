@@ -85,16 +85,28 @@ spec:
             - name: scheduler-config
               mountPath: /config
               readOnly: true
+          ports:
+            - name: scheduler
+              containerPort: 10259
           livenessProbe:
             failureThreshold: 3
             httpGet:
               path: /healthz
-              port: 10259
+              port: scheduler
               scheme: HTTPS
             initialDelaySeconds: 15
             periodSeconds: 20
             successThreshold: 1
-            timeoutSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: scheduler
+              scheme: HTTPS
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
         - name: device-scheduler
           image: {{ include "vgpu-manager.fullimage" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy | quote }}

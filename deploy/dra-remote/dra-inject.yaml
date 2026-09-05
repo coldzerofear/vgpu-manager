@@ -1,0 +1,257 @@
+# dra-inject: 消费节点上的 kubelet-plugin（--plugin-mode=inject）。
+# 是本驱动名在节点上唯一注册的 DRA 插件：解析 accessMode=remote 分配 → 生成会话令牌
+# → EnsureSession 屏障 → 注入 LUPINE_SERVER/LUPINE_SESSION/LUPINE_DISABLE_LOCAL 与
+# lupine-client 制品挂载。GPU 节点本机消费也走本组件（环回），因此 GPU 节点需要
+# 同时打 remote-server 与 remote-inject 两个标签。
+# init 容器把各 CUDA 版本的 lupine-client 静态制品铺到节点 /etc/vgpu-manager/driver/<版本>/。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-remote-dra-inject
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-remote-dra-inject:role
+rules:
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceslices
+      - resourceclaimtemplates
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims
+    verbs:
+      - get
+      - list
+      - watch
+      - patch          # 会话令牌写入 claim 注解
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims/status
+    verbs:
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-remote-dra-inject-as-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vgpu-manager-remote-dra-inject:role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-remote-dra-inject
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vgpu-manager-remote-dra-inject
+  namespace: kube-system
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: vgpu-manager-remote-dra-inject
+  template:
+    metadata:
+      labels:
+        app: vgpu-manager-remote-dra-inject
+        vgpu-manager.io/ignore-webhook: "true"
+    spec:
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: system-node-critical
+      nodeSelector:
+        vgpu-manager.io/remote-inject: "true"
+      serviceAccountName: vgpu-manager-remote-dra-inject
+      initContainers:
+        # lupine-client 静态制品铺盘：每个 CUDA 版本一个 init 容器，目录名必须是
+        # 可解析的版本号（制品选择规则 = 取 <= server CUDA 版本上限的最高版本）。
+        # 增删版本 = 增删 init 容器；镜像为 /artifacts 载体（cp 落盘）。
+        - name: lupine-client-cuda-13-3
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1   # ← 必须与 remote-server.yaml 的 server 镜像同一 release
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c]
+          args:
+            - mkdir -p /target/13.3.1 && cp -a /artifacts/. /target/13.3.1/
+          volumeMounts:
+            - name: client-artifacts
+              mountPath: /target
+        - name: lupine-client-cuda-12-9
+          image: ghcr.io/coldzerofear/lupine-client-static:cuda-12.9.1   # ← 按需增删版本（同样同一 release）
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c]
+          args:
+            - mkdir -p /target/12.9.1 && cp -a /artifacts/. /target/12.9.1/
+          volumeMounts:
+            - name: client-artifacts
+              mountPath: /target
+      containers:
+        - name: kubelet-plugin
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c]
+          args:
+            - kubelet-plugin
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - -v=6
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: PLUGIN_MODE
+              value: inject
+            - name: FEATURE_GATES
+              value: RemoteGPUSupport=true,NRISupport=false
+            - name: CDI_ROOT
+              value: /var/run/cdi
+            - name: NRI_ROOT
+              value: /var/run/nri
+            - name: NRI_PLUGIN_IDX
+              value: "00"
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: HEALTHCHECK_PORT
+              value: "4567"
+            # 可选：开启后 /metrics 暴露 DRA prepare/unprepare 请求指标
+            - name: HTTP_ENDPOINT
+              value: ":8080"
+            - name: METRICS_PATH
+              value: /metrics
+            - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins_registry
+            - name: KUBELET_PLUGINS_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins
+            # inject 服务不需要让 nvidia-runtime 发现/注入 设备
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 4567
+          securityContext:
+            privileged: true
+          startupProbe:
+            grpc:
+              port: 4567
+              service: liveness
+            failureThreshold: 60
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            grpc:
+              port: 4567
+              service: liveness
+            failureThreshold: 3
+            periodSeconds: 30
+            timeoutSeconds: 10
+          volumeMounts:
+            - mountPath: /var/lib/kubelet/plugins_registry
+              name: plugins-registry
+            - mountPath: /var/lib/kubelet/plugins
+              mountPropagation: Bidirectional
+              name: kubelet-plugins
+            - mountPath: /var/run/cdi
+              name: cdi-root
+            - mountPath: /etc/vgpu-manager
+              name: manager-root
+            # 开启 NRISupport（按容器会话）时挂载 NRI socket 目录
+#            - name: nri-root
+#              mountPath: /var/run/nri
+#              mountPropagation: HostToContainer
+#              readOnly: true
+      dnsPolicy: ClusterFirst
+      volumes:
+        - hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: ""
+          name: plugins-registry
+        - hostPath:
+            path: /var/lib/kubelet/plugins
+            type: ""
+          name: kubelet-plugins
+        - hostPath:
+            path: /var/run/cdi
+            type: ""
+          name: cdi-root
+        - hostPath:
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+          name: manager-root
+        - hostPath:
+            path: /etc/vgpu-manager/driver
+            type: DirectoryOrCreate
+          name: client-artifacts
+#        - name: nri-root
+#          hostPath:
+#            path: /var/run/nri
+#            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-remote-inject-metrics
+  namespace: kube-system
+spec:
+  ports:
+    - name: metrics
+      port: 8080
+      protocol: TCP
+      targetPort: metrics
+  selector:
+    app: vgpu-manager-remote-dra-inject
+  type: ClusterIP
+---
+# 远程消费 DeviceClass：选 accessMode=remote 的 vgpu 设备。
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: remote-vgpu-manager
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu' && device.attributes['manager.nvidia.com'].accessMode == 'remote'"
+---
+# 可选：整卡远程消费（dra-server 关闭 VGPUSupport 发布 type=gpu 时启用）。
+# apiVersion: resource.k8s.io/v1
+# kind: DeviceClass
+# metadata:
+#   name: remote-gpu-manager
+# spec:
+#   selectors:
+#     - cel:
+#         expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu' && device.attributes['manager.nvidia.com'].accessMode == 'remote'"

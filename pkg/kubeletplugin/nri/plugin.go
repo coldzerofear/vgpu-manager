@@ -82,8 +82,9 @@ type Config struct {
 	// PluginName / PluginIdx register the plugin with the runtime. Idx orders
 	// this plugin relative to OTHER NRI plugins; it does not affect CDI-vs-NRI
 	// ordering (CDI is applied by the runtime before any NRI CreateContainer).
-	PluginName string
-	PluginIdx  string
+	PluginName          string
+	PluginIdx           string
+	ContainerManagerDir string
 	// DryRun, when true, makes every hook observe-and-log only, injecting
 	// nothing. This is the §12.12 validation mode.
 	DryRun bool
@@ -123,12 +124,13 @@ type Injection struct {
 
 // Plugin is the in-process NRI plugin.
 type Plugin struct {
-	stub               stub.Stub
-	cache              *Cache
-	dryRun             bool
-	failureGracePeriod time.Duration
-	isClaimPrepared    func(claimUID string) bool
-	resolveMounts      func(claimUID, podName, podNamespace, podUID, containerName string) (*Injection, error)
+	stub                stub.Stub
+	cache               *Cache
+	dryRun              bool
+	failureGracePeriod  time.Duration
+	containerManagerDir string
+	isClaimPrepared     func(claimUID string) bool
+	resolveMounts       func(claimUID, podName, podNamespace, podUID, containerName string) (*Injection, error)
 
 	// createdAt tracks CreateContainer timestamps so StartContainer can report
 	// the create→start delta (validates ordering; §12.12 item 3).
@@ -167,13 +169,18 @@ func NewPlugin(cfg Config) (*Plugin, error) {
 	if grace <= 0 {
 		grace = defaultFailureGracePeriod
 	}
+	managerDir := cfg.ContainerManagerDir
+	if managerDir == "" {
+		managerDir = util.ManagerRootPath
+	}
 	p := &Plugin{
-		cache:              cfg.Cache,
-		dryRun:             cfg.DryRun,
-		failureGracePeriod: grace,
-		isClaimPrepared:    cfg.IsClaimPrepared,
-		resolveMounts:      cfg.ResolveMounts,
-		createdAt:          make(map[string]time.Time),
+		cache:               cfg.Cache,
+		dryRun:              cfg.DryRun,
+		failureGracePeriod:  grace,
+		containerManagerDir: managerDir,
+		isClaimPrepared:     cfg.IsClaimPrepared,
+		resolveMounts:       cfg.ResolveMounts,
+		createdAt:           make(map[string]time.Time),
 	}
 	opts := []stub.Option{
 		stub.WithPluginName(name),
@@ -303,7 +310,8 @@ func (p *Plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containe
 			continue
 		}
 		vgpuCount++
-		entry := Entry{ClaimUID: claimUID, ConfigDir: ConfigDirFor(claimUID, podUID, c.GetName())}
+		configDir := ConfigDirFor(p.containerManagerDir, claimUID, podUID, c.GetName())
+		entry := Entry{ClaimUID: claimUID, ConfigDir: configDir}
 		rebuilt[Key(podUID, c.GetName())] = entry
 		klog.V(4).InfoS("NRI Synchronize vGPU container", "container", c.GetName(),
 			"podUID", podUID, "claimUID", claimUID, "configDir", entry.ConfigDir, "state", c.GetState().String())
@@ -383,11 +391,13 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 	// this list: resolveMounts above already emptied it in place, and it must
 	// stay in place — it is the source of a file bind mount injected in the same
 	// adjustment, and removing the source would abort container creation.
-	basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
-	vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
-	smNodeConfigPath := filepath.Join(basePath, util.SMNode, util.SMNodeFile)
-	_ = os.RemoveAll(vmemNodeConfigPath)
-	_ = os.RemoveAll(smNodeConfigPath)
+	if inj.ConfigDir != "" {
+		basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
+		vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
+		smNodeConfigPath := filepath.Join(basePath, util.SMNode, util.SMNodeFile)
+		_ = os.RemoveAll(vmemNodeConfigPath)
+		_ = os.RemoveAll(smNodeConfigPath)
+	}
 
 	p.cache.Set(pod.GetUid(), c.GetName(), Entry{ClaimUID: claimUID, ConfigDir: inj.ConfigDir})
 

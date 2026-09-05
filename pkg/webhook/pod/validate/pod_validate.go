@@ -72,6 +72,12 @@ type validateHandle struct {
 }
 
 func (h *validateHandle) ValidateCreate(ctx context.Context, pod *corev1.Pod, dryRun bool) error {
+	if _, err := util.PodVGPUAccessMode(pod); err != nil {
+		return apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
+			field.Invalid(field.NewPath("metadata").Child("annotations").Key(util.VGPUAccessModeAnnotation),
+				pod.Annotations[util.VGPUAccessModeAnnotation], err.Error()),
+		})
+	}
 	if h.options.DRAAdmissionEnabled {
 		if err := h.checkResourceClaimRequests(ctx, pod); err != nil {
 			return &apierrors.StatusError{

@@ -18,6 +18,7 @@ package nri
 
 import (
 	"context"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ func testPlugin(prepared map[string]bool, resolve func(claimUID, podName, podNam
 
 func vgpuInjection(claimUID, podName, podNamespace, podUID, cn string) (*Injection, error) {
 	return &Injection{
-		ConfigDir: ConfigDirFor(claimUID, podUID, cn),
+		ConfigDir: ConfigDirFor(util.ManagerRootPath, claimUID, podUID, cn),
 		Env: []string{
 			"VGPU_POD_NAME=" + podName,
 			"VGPU_POD_NAMESPACE=" + podNamespace,
@@ -138,7 +139,7 @@ func TestCacheReadinessGate(t *testing.T) {
 }
 
 func TestConfigDirFor(t *testing.T) {
-	got := ConfigDirFor("claim-1", "pod-1", "app")
+	got := ConfigDirFor(util.ManagerRootPath, "claim-1", "pod-1", "app")
 	want := "/etc/vgpu-manager/claims/claim-1/pod-1_app/config"
 	if got != want {
 		t.Fatalf("ConfigDirFor = %q, want %q", got, want)

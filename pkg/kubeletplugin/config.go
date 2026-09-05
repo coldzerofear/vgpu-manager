@@ -43,6 +43,7 @@ type Flags struct {
 	AdditionalXidsToIgnore        string
 	ConsumableShares              string
 	HostManagerDir                string
+	ContainerManagerDir           string
 	CGroupDriver                  string
 	DeviceCoresRatio              uint
 	DeviceMemoryRatio             uint
@@ -51,7 +52,30 @@ type Flags struct {
 	// when the NRISupport feature gate is enabled.
 	NRIRoot      string
 	NRIPluginIdx string
+	// PluginMode selects the plugin role (design D21, v1.7): "server" (GPU node;
+	// local DRA duties, plus remote-pool duties when RemoteGPUSupport is
+	// enabled) or "inject" (consumer node; remote env/CDI injection only, no
+	// GPU dependency).
+	PluginMode string
+	// RemoteAgentEndpoint is how this (server-mode) plugin reaches the
+	// remote-agent on its own node: grpc://host:port (empty host = the node's
+	// InternalIP -- the agent is on hostNetwork, this plugin is not)
+	// or unix:///path. Everything published about the remote path -- the
+	// server's and the agent's routable endpoints, the server CUDA version
+	// -- is what the agent reports (design D26).
+	RemoteAgentEndpoint string
+	// RemoteNodeSelector is a label-selector expression over nodes that can
+	// reach this GPU node's lupine-server (e.g.
+	// "topology.kubernetes.io/zone=az1,gpu-fabric=rdma-a"). The pool becomes
+	// schedulable on the GPU node itself OR any node matching it. Required in
+	// server mode when RemoteGPUSupport is on.
+	RemoteNodeSelector string
 }
+
+const (
+	ModeServer = "server"
+	ModeInject = "inject"
+)
 
 type Config struct {
 	*Flags

@@ -66,10 +66,15 @@ func runApp(opt *options.Options) (exitCode int) {
 	util.MustInitGlobalDomain(opt.Domain)
 	device.MustInitGlobalStuckGracePeriod(opt.StuckGracePeriod)
 
+	if opt.FeatureGate.Enabled(util.RemoteGPUSupport) && opt.RemoteSessionBase == "" {
+		klog.Errorf("--remote-session-base is required when feature gate %s is enabled", util.RemoteGPUSupport)
+		return exitCode
+	}
+
 	kubeConfig, err := client.NewKubeConfig(
+		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithConfigMasterURL(opt.MasterURL),
 		client.WithKubeConfigPath(opt.KubeConfigFile),
-		client.WithQPSBurst(opt.QPS, opt.Burst),
 		client.WithDefaultUserAgent())
 	if err != nil {
 		klog.Errorf("Create kubeConfig failed: %v", err)
@@ -173,7 +178,8 @@ func runApp(opt *options.Options) (exitCode int) {
 	containerListerStart := func(time.Duration, <-chan struct{}) {}
 	if opt.EnableDRAMonitor {
 		klog.Infoln("Initialize DRA driver path monitoring")
-		podInformer, err := metrics.GetDraDriverPodInformer(factory, nodeConfig.GetNodeName())
+		podInformer, err := metrics.GetDraDriverPodInformer(factory, nodeConfig.GetNodeName(),
+			opt.FeatureGate.Enabled(util.RemoteGPUSupport))
 		if err != nil {
 			klog.Errorf("GetDraDriverPodInformer failed: %v", err)
 			return exitCode
@@ -186,7 +192,10 @@ func runApp(opt *options.Options) (exitCode int) {
 		podLister := client.NewPodLister(podInformer.GetIndexer())
 		sliceLister := resourcev1.NewResourceSliceLister(sliceInformer.GetIndexer())
 		claimLister := factory.Resource().V1().ResourceClaims().Lister()
-		draCollector, err := collector.NewDRAGPUCollector(nodeConfig, nodeLister, podLister, sliceLister, claimLister, opt.FeatureGate)
+		draCollector, err := collector.NewDRAGPUCollector(
+			nodeConfig, nodeLister, podLister, sliceLister, claimLister,
+			opt.FeatureGate, opt.RemoteSessionBase, util.ManagerRootPath,
+		)
 		if err != nil {
 			klog.Errorf("Create dra gpu collector failed: %v", err)
 			return exitCode
@@ -200,8 +209,13 @@ func runApp(opt *options.Options) (exitCode int) {
 			return exitCode
 		}
 		podLister := client.NewPodLister(podInformer.GetIndexer())
-		containerLister := lister.NewContainerLister(util.ManagerRootPath, nodeConfig.GetNodeName(), podLister)
-		nodeCollector, err := collector.NewNodeGPUCollector(nodeConfig, nodeLister, podLister, containerLister, opt.FeatureGate)
+		containerLister := lister.NewContainerLister(
+			nodeConfig.GetNodeName(), util.ManagerRootPath, podLister,
+		)
+		nodeCollector, err := collector.NewNodeGPUCollector(
+			nodeConfig, nodeLister, podLister, containerLister,
+			util.ManagerRootPath, opt.FeatureGate,
+		)
 		if err != nil {
 			klog.Errorf("Create node gpu collector failed: %v", err)
 			return exitCode

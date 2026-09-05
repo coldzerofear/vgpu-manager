@@ -1,0 +1,281 @@
+# dra-server: GPU 节点上的 kubelet-plugin（--plugin-mode=server + RemoteGPUSupport）。
+# v2.1 语义：只发布不分配 —— 本节点设备以 accessMode=remote + endpoint 属性发布，
+# pool 的 nodeSelector 由 --remote-node-selector 决定；插件不向 kubelet 注册 DRA 服务，
+# 全部 NodePrepare 由同节点的 dra-inject 承担（本节点消费也走 lupine 环回）。
+# 注意：RemoteGPUSupport 开启时禁止设置 --http-endpoint / --healthcheck-port（启动校验拦截），
+# 因此本 DaemonSet 无探针；指标由 remote-server 里的 device-monitor 提供。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vgpu-manager-remote-dra-server
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vgpu-manager-remote-dra-server:role
+rules:
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceslices
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - delete
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - resourceclaims
+      - resourceclaimtemplates
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vgpu-manager-remote-dra-server-as-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vgpu-manager-remote-dra-server:role
+subjects:
+  - kind: ServiceAccount
+    name: vgpu-manager-remote-dra-server
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vgpu-manager-remote-dra-server
+  namespace: kube-system
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: vgpu-manager-remote-dra-server
+  template:
+    metadata:
+      labels:
+        app: vgpu-manager-remote-dra-server
+        vgpu-manager.io/ignore-webhook: "true"
+    spec:
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      hostPID: true
+      priorityClassName: system-node-critical
+      nodeSelector:
+        vgpu-manager: dra-driver-remote
+        vgpu-manager.io/remote-server: "true"
+      serviceAccountName: vgpu-manager-remote-dra-server
+      initContainers:
+        - name: init-container
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command: [bash, /usr/bin/kubelet-plugin-prestart.sh]
+          env:
+            - name: NVIDIA_DRIVER_ROOT
+              value: /
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+            - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins_registry
+            - name: KUBELET_PLUGINS_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins
+          volumeMounts:
+            - name: driver-root-parent
+              mountPath: /driver-root-parent
+              readOnly: true
+      containers:
+        - name: kubelet-plugin
+          image: coldzerofear/vgpu-manager-dra:latest
+          imagePullPolicy: IfNotPresent
+          command: [bash, -c]
+          args:
+            - |-
+              # Conditionally mask the params file to prevent this container from
+              # recreating any missing GPU device nodes. This is necessary, for
+              # example, when running under nvkind to limit the set GPUs governed
+              # by the plugin even though it has cgroup access to all of them.
+              if [ "${MASK_NVIDIA_DRIVER_PARAMS}" = "true" ]; then
+                cp /proc/driver/nvidia/params root/gpu-params
+                sed -i 's/^ModifyDeviceFiles: 1$/ModifyDeviceFiles: 0/' root/gpu-params
+                mount --bind root/gpu-params /proc/driver/nvidia/params
+              fi
+              exec kubelet-plugin "$@"
+            - --kube-api-qps=20
+            - --kube-api-burst=30
+            - --device-cores-ratio=100
+            - --device-memory-ratio=100
+            - -v=6
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: PLUGIN_MODE
+              value: server
+            - name: FEATURE_GATES
+              value: RemoteGPUSupport=true,NVMLDeviceHealthCheck=true,SharedSMUtilizationWatcher=true
+            - name: MASK_NVIDIA_DRIVER_PARAMS
+              value: ""
+            # 必改：哪些节点可达本节点的 lupine-server（标准 label selector 语法，
+            # 支持 k=v / k in (a,b) / !k，逗号分隔为 AND）。pool 只对匹配节点可调度；
+            # 若允许 pod 落在 GPU 节点本机（lupine 环回消费），selector 必须覆盖 GPU 节点自身。
+            - name: REMOTE_NODE_SELECTOR
+              value: vgpu-manager.io/remote-inject=true
+            # 唯一的远程路径配置：本机 remote-agent 怎么连（grpc://host:port，host 留空 = 节点 InternalIP，因为 agent 是 hostNetwork 而本插件不是；
+            # 或 unix:///etc/vgpu-manager/agent.sock，需 remote-server 的 LISTEN_SERVER_ENDPOINT
+            # 同时监听该 socket）。发布到其他节点的 serverEndpoint / agentEndpoint 属性和
+            # serverCudaVersion 全部由 agent 的 ServerInfo 报告；agent 未应答前设备照常发布但
+            # 不带这些属性并打 NoSchedule 污点 remote-unavailable，探到后自动重发。
+            - name: REMOTE_AGENT_ENDPOINT
+              value: ":14834"
+            - name: NVIDIA_DRIVER_ROOT
+              value: /
+            - name: CDI_ROOT
+              value: /var/run/cdi
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: utility,compute
+            - name: NVIDIA_MIG_CONFIG_DEVICES
+              value: all
+            # void: 阻止 nvidia runtime 向插件容器注入驱动库/设备节点，
+            # 驱动发现走 prestart + /driver-root
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: void
+            - name: DRIVER_ROOT_CTR_PATH
+              value: /driver-root
+            - name: HOST_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
+            - name: KUBELET_REGISTRAR_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins_registry
+            - name: KUBELET_PLUGINS_DIRECTORY_PATH
+              value: /var/lib/kubelet/plugins
+            - name: HOST_ROOT
+              value: /host-root
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - mountPath: /var/lib/kubelet/plugins_registry
+              name: plugins-registry
+            - mountPath: /var/lib/kubelet/plugins
+              mountPropagation: Bidirectional
+              name: kubelet-plugins
+            - mountPath: /var/run/cdi
+              name: cdi-root
+            - mountPath: /driver-root
+              mountPropagation: HostToContainer
+              name: driver-root
+              readOnly: true
+            - mountPath: /etc/vgpu-manager
+              name: manager-root
+            - name: cgroup-root
+              mountPath: /sys/fs/cgroup
+            - mountPath: /var/lib/kubelet
+              name: kubelet-root
+            # PassthroughSupport
+            - name: host-root
+              mountPath: /host-root
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: lib-modules
+              mountPath: /lib/modules/
+              mountPropagation: HostToContainer
+              readOnly: true
+            - name: sysfs
+              mountPath: /sys/
+              mountPropagation: Bidirectional
+            - name: procfs
+              mountPath: /proc/
+              mountPropagation: Bidirectional
+      dnsPolicy: ClusterFirst
+      volumes:
+        - hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: ""
+          name: plugins-registry
+        - hostPath:
+            path: /var/lib/kubelet/plugins
+            type: ""
+          name: kubelet-plugins
+        - hostPath:
+            path: /var/run/cdi
+            type: ""
+          name: cdi-root
+        - hostPath:
+            path: /
+            type: DirectoryOrCreate
+          name: driver-root-parent
+        - hostPath:
+            path: /
+            type: DirectoryOrCreate
+          name: driver-root
+        - hostPath:
+            path: /etc/vgpu-manager
+            type: DirectoryOrCreate
+          name: manager-root
+        - name: cgroup-root
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
+        - name: kubelet-root
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+#        # PassthroughSupport
+#        # system commands against the host FS. For example, to test and load the vfio-pci
+#        # module variant for a GPU.
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+#        # This is needed by `https://github.com/NVIDIA/go-nvlib/pkg/nvpassthrough` pkg
+#        # to detect the vfio-pci driver variant to use with a GPU.
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules/
+            type: Directory
+        - name: sysfs
+          hostPath:
+            path: /sys/
+            type: Directory
+        - name: procfs
+          hostPath:
+            path: /proc/
+            type: Directory

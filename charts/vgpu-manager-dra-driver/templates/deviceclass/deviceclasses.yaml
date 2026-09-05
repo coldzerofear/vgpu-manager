@@ -1,6 +1,5 @@
 {{- if .Values.deviceClasses.enabled -}}
 {{- $apiVersion := (include "vgpu-manager-dra-driver.resourceApiVersion" . | trim) }}
-{{- $driver := .Values.deviceClasses.driverName | default "manager.nvidia.com" }}
 {{- $labels := include "vgpu-manager-dra-driver.labels" . }}
 {{- if .Values.deviceClasses.gpu.enabled }}
 apiVersion: {{ $apiVersion }}
@@ -12,7 +11,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'gpu'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
   {{- if and (eq $apiVersion "resource.k8s.io/v1") .Values.deviceClasses.gpu.extendedResourceName }}
   extendedResourceName: {{ .Values.deviceClasses.gpu.extendedResourceName }}
   {{- end }}
@@ -28,7 +27,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'vgpu'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
 {{- end }}
 {{- if .Values.deviceClasses.mig.enabled }}
 ---
@@ -41,7 +40,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'mig'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'mig'"
 {{- end }}
 {{- if .Values.deviceClasses.vfio.enabled }}
 ---
@@ -54,6 +53,6 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == '{{ $driver }}' && device.attributes['{{ $driver }}'].type == 'vfio'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vfio'"
 {{- end }}
 {{- end }}

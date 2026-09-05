@@ -17,7 +17,6 @@ limitations under the License.
 package nri
 
 import (
-	"fmt"
 	"path/filepath"
 	"sync"
 
@@ -61,9 +60,11 @@ func Key(podUID, containerName string) string {
 // and the NRI CreateContainer mount target (design §12.3):
 //
 //	<ManagerRootPath>/claims/<claimUID>/<podUID>_<containerName>/config
-func ConfigDirFor(claimUID, podUID, containerName string) string {
-	containerDir := fmt.Sprintf("%s_%s", podUID, containerName)
-	return filepath.Join(util.ManagerRootPath, util.Claims, claimUID, containerDir, util.Config)
+func ConfigDirFor(managerDir, claimUID, podUID, containerName string) string {
+	// util.NRIPartitionKey, not remote.NRIPartitionKey: remote imports this
+	// package, importing it back would be a cycle.
+	partitionKey := util.NRIPartitionKey(podUID, containerName)
+	return filepath.Join(managerDir, util.Claims, claimUID, partitionKey, util.Config)
 }
 
 // Set records or overwrites a single container's entry.

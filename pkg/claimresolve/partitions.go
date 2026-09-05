@@ -80,10 +80,8 @@ type PartitionInfo struct {
 }
 
 func ResolveClaimVGPUPartitions(
-	ctx context.Context,
-	reader Reader,
-	claim *resourceapi.ResourceClaim,
-	driverName string,
+	ctx context.Context, reader Reader,
+	claim *resourceapi.ResourceClaim, driverName string,
 	isVGPUDeviceRequest DeviceRequestClassifier,
 	isVGPUSubRequest SubRequestClassifier,
 ) (*PartitionInfo, error) {
@@ -92,8 +90,7 @@ func ResolveClaimVGPUPartitions(
 }
 
 func ResolveClaimVGPUPartitionsFromAllocatedRequests(
-	ctx context.Context,
-	reader Reader,
+	ctx context.Context, reader Reader,
 	claim *resourceapi.ResourceClaim,
 	allocatedRequests sets.Set[string],
 ) (*PartitionInfo, error) {

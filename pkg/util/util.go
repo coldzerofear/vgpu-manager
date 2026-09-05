@@ -862,3 +862,28 @@ func SafeDiv(a, b float64) float64 {
 	}
 	return a / b
 }
+
+// PodVGPUAccessMode returns the vGPU access mode a pod (or pod template) asks
+// for via VGPUAccessModeAnnotation: AccessModeLocal when absent, an error for
+// any other value than local/remote.
+func PodVGPUAccessMode(obj metav1.Object) (string, error) {
+	value, _ := HasAnnotation(obj, VGPUAccessModeAnnotation)
+	switch mode := strings.ToLower(strings.TrimSpace(value)); mode {
+	case "":
+		return AccessModeLocal, nil
+	case AccessModeLocal, AccessModeRemote:
+		return mode, nil
+	default:
+		return AccessModeLocal, fmt.Errorf("invalid annotation %s=%q: must be %q or %q",
+			VGPUAccessModeAnnotation, value, AccessModeLocal, AccessModeRemote)
+	}
+}
+
+// NRIPartitionKey is the per-container partition key used by the NRI paths
+// (local and remote): the name of the per-container partition directory and
+// the remote per-container session. Defined here because both
+// pkg/kubeletplugin/nri and pkg/kubeletplugin/remote need it (remote imports
+// nri, so neither can host it for the other).
+func NRIPartitionKey(podUID, containerName string) string {
+	return podUID + "_" + containerName
+}

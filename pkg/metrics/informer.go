@@ -45,13 +45,22 @@ const (
 	IndexerKeyPodDeviceAllocationCountable = "pod.device.allocation.countable"
 )
 
-func GetDraDriverPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
-	informer := factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
-		watcher := cache.NewListWatchFromClient(k.CoreV1().RESTClient(), "pods",
-			corev1.NamespaceAll, fields.OneTermEqualSelector("spec.nodeName", nodeName))
-		indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
-		return cache.NewSharedIndexInformer(watcher, &corev1.Pod{}, d, indexers)
-	})
+// GetDraDriverPodInformer returns the pod informer the DRA collector reads.
+// With remoteGPU on, the cache must also hold consumer pods on OTHER nodes
+// (they hold this node's remote devices), so the node field selector is
+// dropped — a cluster-wide pod watch, acceptable on the expected cluster
+// sizes but worth revisiting at scale.
+func GetDraDriverPodInformer(factory informers.SharedInformerFactory, nodeName string, remoteGPU bool) (cache.SharedIndexInformer, error) {
+	var informer cache.SharedIndexInformer
+	if remoteGPU {
+		informer = factory.Core().V1().Pods().Informer()
+	} else {
+		informer = factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
+			fieldSelector := fields.OneTermEqualSelector("spec.nodeName", nodeName)
+			watcher := cache.NewListWatchFromClient(k.CoreV1().RESTClient(), "pods", corev1.NamespaceAll, fieldSelector)
+			return cache.NewSharedIndexInformer(watcher, &corev1.Pod{}, d, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
+		})
+	}
 	return informer, informer.AddIndexers(map[string]cache.IndexFunc{
 		IndexerKeyPodNodeName: func(obj interface{}) ([]string, error) {
 			var indexerValues []string
@@ -65,8 +74,8 @@ func GetDraDriverPodInformer(factory informers.SharedInformerFactory, nodeName s
 
 func GetDevicePluginPodInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
 	informer := factory.InformerFor(&corev1.Pod{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
-		watcher := cache.NewFilteredListWatchFromClient(k.CoreV1().RESTClient(),
-			"pods", corev1.NamespaceAll, func(options *metav1.ListOptions) {
+		watcher := cache.NewFilteredListWatchFromClient(k.CoreV1().RESTClient(), "pods",
+			corev1.NamespaceAll, func(options *metav1.ListOptions) {
 				options.LabelSelector = labels.Set{util.PodMetricsNodeLabel: nodeName}.String()
 			})
 		indexers := cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}
@@ -94,17 +103,18 @@ func GetDevicePluginPodInformer(factory informers.SharedInformerFactory, nodeNam
 
 // GetResourceSliceInformer watches only the slices this node's driver published.
 //
-// The selector deliberately uses spec.nodeName rather than spec.pool.name: both
-// carry the node name for our driver, but spec.nodeName and spec.driver are the
-// field selectors ResourceSlice has supported since the API went beta, and an
-// unsupported selector does not degrade — the API server rejects the LIST, the
-// informer never syncs, and the collector silently reports nothing at all.
+// The driver names its single pool after the node, so spec.pool.name is the
+// authoritative ownership key. spec.nodeName is NOT usable: a node with
+// RemoteGPUSupport publishes its pool with a nodeSelector (cluster-visible)
+// and leaves spec.nodeName empty (design v2.x, D23).
 func GetResourceSliceInformer(factory informers.SharedInformerFactory, nodeName string) (cache.SharedIndexInformer, error) {
 	return factory.InformerFor(&resourcev1.ResourceSlice{}, func(k kubernetes.Interface, d time.Duration) cache.SharedIndexInformer {
 		watcher := cache.NewListWatchFromClient(k.ResourceV1().RESTClient(), "resourceslices",
 			corev1.NamespaceAll, fields.AndSelectors(
-				fields.OneTermEqualSelector("spec.nodeName", nodeName),
-				fields.OneTermEqualSelector("spec.driver", util.DRADriverName),
+				// TODO I0901 13:22:40.722465 3051183 reflector.go:490] "Data couldn't be fetched in watchlist mode. Falling back to regular list. This is expected if watchlist is not supported or disabled in kube-apiserver." err="field label not supported for resource.k8s.io/v1, Kind=ResourceSlice: spec.pool.name"
+				// E0901 13:22:40.724960 3051183 reflector.go:227] "Failed to watch" err="failed to list *v1.ResourceSlice: field label not supported for resource.k8s.io/v1, Kind=ResourceSlice: spec.pool.name" reflector="pkg/mod/k8s.io/client-go@v0.37.0-rc.0/tools/cache/reflector.go:343" type="*v1.ResourceSlice"
+				//fields.OneTermEqualSelector(resourcev1.ResourceSliceSelectorPoolName, nodeName),
+				fields.OneTermEqualSelector(resourcev1.ResourceSliceSelectorDriver, util.DRADriverName),
 			))
 		return cache.NewSharedIndexInformer(watcher, &resourcev1.ResourceSlice{}, d, cache.Indexers{})
 	}), nil
