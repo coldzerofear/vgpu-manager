@@ -117,9 +117,40 @@ type resultDevice struct {
 	mainRequest string
 }
 
+// endpointInfo is one GPU node a partition spans, identified by its agent
+// (the address sessions are established at). serverEndpoint is the
+// published lupine-server address, which may be empty until the agent has
+// reported one; EnsureSessions resolves the final value.
 type endpointInfo struct {
 	serverEndpoint string
 	agentEndpoint  string
+}
+
+// endpointInfosOf collects the distinct nodes behind devices, keyed by agent
+// endpoint and sorted by it, so the LUPINE_SERVER order (= virtual device
+// numbering) is the same however the devices were listed. When the same
+// agent shows up with and without a published server endpoint, the
+// non-empty one is kept.
+func endpointInfosOf(devices []resultDevice) []endpointInfo {
+	byAgent := map[string]endpointInfo{}
+	for _, rd := range devices {
+		info, ok := byAgent[rd.info.AgentEndpoint]
+		if !ok {
+			info = endpointInfo{agentEndpoint: rd.info.AgentEndpoint}
+		}
+		if info.serverEndpoint == "" {
+			info.serverEndpoint = rd.info.Endpoint
+		}
+		byAgent[rd.info.AgentEndpoint] = info
+	}
+	out := make([]endpointInfo, 0, len(byAgent))
+	for _, info := range byAgent {
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].agentEndpoint < out[j].agentEndpoint
+	})
+	return out
 }
 
 // partition is one session: the results (devices) it spans, the servers to
@@ -154,20 +185,12 @@ func buildPartitions(devices []resultDevice, requestToKey map[string]string) []*
 	out := make([]*partition, 0, len(order))
 	for _, key := range order {
 		p := byKey[key]
-		reqs, eps := sets.New[string](), sets.New[endpointInfo]()
+		reqs := sets.New[string]()
 		for _, rd := range p.results {
 			reqs.Insert(rd.mainRequest)
-			eps.Insert(endpointInfo{
-				serverEndpoint: rd.info.Endpoint,
-				agentEndpoint:  rd.info.AgentEndpoint,
-			})
 		}
 		p.requests = sets.List(reqs)
-		endpoints := eps.UnsortedList()
-		sort.Slice(endpoints, func(i, j int) bool {
-			return endpoints[i].serverEndpoint < endpoints[j].serverEndpoint
-		})
-		p.endpoints = endpoints
+		p.endpoints = endpointInfosOf(p.results)
 		out = append(out, p)
 	}
 	return out

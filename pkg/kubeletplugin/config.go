@@ -57,18 +57,12 @@ type Flags struct {
 	// enabled) or "inject" (consumer node; remote env/CDI injection only, no
 	// GPU dependency).
 	PluginMode string
-	// RemoteAgentEndpoint is published as the agentEndpoint device attribute
-	// (URL form). Empty host = the host the server is advertised at.
+	// RemoteAgentEndpoint is how this (server-mode) plugin reaches the
+	// remote-agent on its own node: grpc://host:port (empty host = loopback)
+	// or unix:///path. Everything published about the remote path -- the
+	// server's and the agent's routable endpoints, the server CUDA version
+	// -- is what the agent reports (design D26).
 	RemoteAgentEndpoint string
-	// RemoteAgentLocalEndpoint is how this (server-mode) plugin reaches the
-	// agent on its own node for ServerInfo, when that differs from the
-	// published endpoint: typically unix:///etc/vgpu-manager/agent.sock.
-	// Empty = dial the published endpoint.
-	RemoteAgentLocalEndpoint string
-	// RemoteServerEndpoint is published as the serverEndpoint device
-	// attribute (URL form). Empty host = the endpoint the agent reports from
-	// ServerInfo (discovered or advertised), else this node's InternalIP.
-	RemoteServerEndpoint string
 	// RemoteNodeSelector is a label-selector expression over nodes that can
 	// reach this GPU node's lupine-server (e.g.
 	// "topology.kubernetes.io/zone=az1,gpu-fabric=rdma-a"). The pool becomes

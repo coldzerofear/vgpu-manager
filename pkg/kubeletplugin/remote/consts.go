@@ -44,11 +44,19 @@ const (
 	AccessModeRemote = util.AccessModeRemote
 
 	// AttrServerEndpoint is the lupine-server endpoint, verbatim (IP or domain,
-	// optional scheme/port, design D3/§6.1). Published only for remote.
+	// optional scheme/port, design D3/§6.1). Published only for remote, and
+	// only once the remote-agent reported it (design D26).
 	AttrServerEndpoint = "serverEndpoint"
 	// AttrAgentEndpoint is the remote agent endpoint, verbatim (IP or domain,
-	// optional scheme/port, design D3/§6.1). Published only for remote.
+	// optional scheme/port, design D3/§6.1). Published only for remote, and
+	// only once the agent reported its routable address (design D26).
 	AttrAgentEndpoint = "agentEndpoint"
+
+	// TaintKeyRemoteUnavailable marks a remote device whose endpoints are
+	// not published yet (the agent has not answered, or lupine-server has
+	// no routable address): NoSchedule until the next republish clears it.
+	TaintKeyRemoteUnavailable   = util.DRADriverName + "/remote-unavailable"
+	TaintValueRemoteUnavailable = "no-endpoint"
 
 	// Capacity names, aligned with the local vgpu share semantics
 	// (pkg/kubeletplugin/vgpu.go).

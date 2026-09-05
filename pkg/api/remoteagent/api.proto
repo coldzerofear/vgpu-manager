@@ -36,13 +36,24 @@ message EnsureSessionResponse {
   bool   ready               = 1;
   string cuda_driver_version = 2;
   string message             = 3;
+  // server_endpoint is the lupine-server address clients must be given
+  // (URL form), as the agent currently knows it. Empty when the agent has
+  // no routable address for its server yet.
+  string server_endpoint     = 4;
 }
 
 message ServerInfoRequest {}
 
 message ServerInfoResponse {
   bool   listening           = 1;
+  // endpoint is the lupine-server address other nodes should use (URL
+  // form): advertised by the operator, or discovered by the agent. Empty
+  // while unknown.
   string endpoint            = 2;
   string cuda_driver_version = 3;
   string node_name           = 4;
+  // agent_endpoint is this agent's own address other nodes should use for
+  // EnsureSession (grpc://host:port). Empty while unknown, or when the
+  // agent listens on a unix socket only.
+  string agent_endpoint      = 5;
 }

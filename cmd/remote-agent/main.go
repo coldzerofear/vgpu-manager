@@ -119,14 +119,9 @@ func main() {
 			if util.PathIsNotExist(cfg.ContainerManagerDir) {
 				return fmt.Errorf("container-manager-dir %q does not exist", cfg.ContainerManagerDir)
 			}
-			endpoint, err := endpointutil.ParseEndpoint(cfg.ServerEndpoint,
-				endpointutil.WithDefaultScheme(endpointutil.Http),
-				endpointutil.WithDefaultPort(remote.DefaultServerPort))
+			endpoint, err := remote.ParseServerEndpoint(cfg.ServerEndpoint)
 			if err != nil {
-				return fmt.Errorf("invalid --remote-server-endpoint %q: %w", cfg.ServerEndpoint, err)
-			}
-			if endpoint.Scheme != endpointutil.Http && endpoint.Scheme != endpointutil.Https {
-				return fmt.Errorf("invalid --remote-server-endpoint %q: scheme must be http or https", cfg.ServerEndpoint)
+				return fmt.Errorf("invalid --remote-server-endpoint: %w", err)
 			}
 			// The probed lupine-server runs in the same pod by default.
 			if endpoint.Host == "" {
@@ -135,14 +130,12 @@ func main() {
 			cfg.ServerEndpoint = endpoint.String()
 
 			if cfg.AdvertiseEndpoint != "" {
-				advertise, err := endpointutil.ParseEndpoint(cfg.AdvertiseEndpoint,
-					endpointutil.WithDefaultScheme(endpointutil.Http),
-					endpointutil.WithDefaultPort(remote.DefaultServerPort))
+				advertise, err := remote.ParseServerEndpoint(cfg.AdvertiseEndpoint)
 				if err != nil {
-					return fmt.Errorf("invalid --advertise-server-endpoint %q: %w", cfg.AdvertiseEndpoint, err)
+					return fmt.Errorf("invalid --advertise-server-endpoint: %w", err)
 				}
-				if (advertise.Scheme != endpointutil.Http && advertise.Scheme != endpointutil.Https) || advertise.IsLoopback() {
-					return fmt.Errorf("invalid --advertise-server-endpoint %q: must be an http/https endpoint with a host other nodes can reach", cfg.AdvertiseEndpoint)
+				if advertise.IsLoopback() {
+					return fmt.Errorf("invalid --advertise-server-endpoint %q: the host must be one other nodes can reach", cfg.AdvertiseEndpoint)
 				}
 				cfg.AdvertiseEndpoint = advertise.String()
 			}

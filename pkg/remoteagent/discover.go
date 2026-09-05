@@ -46,6 +46,16 @@ type serverState struct {
 	// --remote-server-endpoint when its host is routable, or discovered by
 	// probing this host's addresses when it is a loopback (see discover).
 	Endpoint string
+	// RoutableHost is the host of this machine that answered for the
+	// server (or the routable probe host); the agent's own endpoint is built
+	// on it. "" when unknown. Kept separately from Endpoint because an
+	// advertised server endpoint (DNS, gateway) says nothing about how to
+	// reach the agent.
+	RoutableHost string
+	// AgentEndpoint is this agent's own gRPC address other nodes should use
+	// (grpc://host:port), or "" when the host is unknown or the agent has no
+	// TCP listener.
+	AgentEndpoint string
 	// LastProbe is when this observation was made.
 	LastProbe time.Time
 }
@@ -218,11 +228,22 @@ func (a *Agent) nodeInternalIPs(ctx context.Context) []string {
 	return ips
 }
 
-// discoverExternalEndpoint finds an address of this host at which the
-// lupine-server answering on the loopback probe endpoint also answers, and
-// returns it in URL form with the probe endpoint's scheme, port and path.
+// serverAnswersAt probes lupine-server at the probe endpoint with its host
+// replaced by host.
+func serverAnswersAt(ctx context.Context, probe *endpointutil.Endpoint, host string) bool {
+	candidate := *probe
+	candidate.Host = host
+	_, err := remote.ProbeServerCUDAVersion(ctx, candidate.String(), candidateProbeTimeout)
+	if err != nil {
+		klog.V(4).Infof("candidate %s: %v", candidate.String(), err)
+	}
+	return err == nil
+}
+
+// discoverRoutableHost finds an address of this host at which the
+// lupine-server answering on the loopback probe endpoint also answers.
 // Returns "" when no candidate answers within discoverTimeout.
-func (a *Agent) discoverExternalEndpoint(ctx context.Context, probe *endpointutil.Endpoint) string {
+func (a *Agent) discoverRoutableHost(ctx context.Context, probe *endpointutil.Endpoint) string {
 	ctx, cancel := context.WithTimeout(ctx, discoverTimeout)
 	defer cancel()
 
@@ -235,13 +256,9 @@ func (a *Agent) discoverExternalEndpoint(ctx context.Context, probe *endpointuti
 		if ctx.Err() != nil {
 			break
 		}
-		candidate := *probe
-		candidate.Host = host
-		if _, err := remote.ProbeServerCUDAVersion(ctx, candidate.String(), candidateProbeTimeout); err != nil {
-			klog.V(4).Infof("candidate %s: %v", candidate.String(), err)
-			continue
+		if serverAnswersAt(ctx, probe, host) {
+			return host
 		}
-		return candidate.String()
 	}
 	klog.V(2).Infof("no routable address answers for lupine-server (tried %d candidate(s): %v)", len(candidates), candidates)
 	return ""

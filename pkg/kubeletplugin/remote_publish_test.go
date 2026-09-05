@@ -25,7 +25,6 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
-	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	"google.golang.org/grpc"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
@@ -38,19 +37,22 @@ type fakeAgent struct {
 	mu        sync.Mutex
 	listening bool
 	version   string
-	endpoint  string
+	server    string
+	agent     string
 }
 
-func (f *fakeAgent) set(listening bool, version, endpoint string) {
+func (f *fakeAgent) set(listening bool, version, server, agent string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.listening, f.version, f.endpoint = listening, version, endpoint
+	f.listening, f.version, f.server, f.agent = listening, version, server, agent
 }
 
 func (f *fakeAgent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*remoteagent.ServerInfoResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return &remoteagent.ServerInfoResponse{Listening: f.listening, CudaDriverVersion: f.version, Endpoint: f.endpoint, NodeName: "gpu-node"}, nil
+	return &remoteagent.ServerInfoResponse{
+		Listening: f.listening, CudaDriverVersion: f.version, Endpoint: f.server, AgentEndpoint: f.agent, NodeName: "gpu-node",
+	}, nil
 }
 
 // startFakeAgent serves fakeAgent on a loopback TCP port and returns the
@@ -62,7 +64,7 @@ func startFakeAgent(t *testing.T) (*fakeAgent, string) {
 		t.Fatal(err)
 	}
 	fa := &fakeAgent{}
-	fa.set(true, "13.3.73", "")
+	fa.set(true, "13.3.73", "http://192.168.1.7:14833", "grpc://192.168.1.7:14834")
 	srv := grpc.NewServer()
 	remoteagent.RegisterRemoteAgentServer(srv, fa)
 	go func() { _ = srv.Serve(lis) }()
@@ -84,57 +86,47 @@ func publishedAttr(p resourceslice.Pool, name resourceapi.QualifiedName) string 
 	return ""
 }
 
-func newTestPublisher(t *testing.T, agentDial, serverFlag, agentFlag string) *remotePublisher {
-	t.Helper()
-	serverEndpoint, err := endpointutil.ParseEndpoint(serverFlag,
-		endpointutil.WithDefaultScheme(endpointutil.Http), endpointutil.WithDefaultPort(remote.DefaultServerPort))
-	if err != nil {
-		t.Fatal(err)
+func publishedTaint(p resourceslice.Pool, key string) bool {
+	for _, taint := range p.Slices[0].Devices[0].Taints {
+		if taint.Key == key {
+			return true
+		}
 	}
-	agentEndpoint, err := endpointutil.ParseEndpoint(agentFlag,
-		endpointutil.WithDefaultScheme(endpointutil.Grpc), endpointutil.WithDefaultPort(remote.DefaultAgentPort))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rp := &remotePublisher{
-		nodeName:       "gpu-node",
-		agentDial:      agentDial,
-		serverEndpoint: *serverEndpoint,
-		agentEndpoint:  *agentEndpoint,
-		nodeIP:         "10.0.0.7",
-		spec:           &remote.PublishSpec{},
-	}
-	rp.spec.Endpoint, rp.spec.AgentEndpoint = rp.publishedEndpoints("")
-	return rp
+	return false
+}
+
+func newTestPublisher(agentDial string) *remotePublisher {
+	return &remotePublisher{nodeName: "gpu-node", agentDial: agentDial, spec: &remote.PublishSpec{}}
 }
 
 func TestRemotePublisherServerInfo(t *testing.T) {
 	ctx := context.Background()
 	fa, agentDial := startFakeAgent(t)
-	rp := newTestPublisher(t, agentDial, ":14833", ":14834")
+	rp := newTestPublisher(agentDial)
 	pool := func() resourceslice.Pool {
 		return rp.apply(resourceslice.Pool{Slices: []resourceslice.Slice{{
 			Devices: []resourceapi.Device{{Name: "vgpu-0"}},
 		}}})
 	}
+	attrs := func() (server, agent, version string) {
+		p := pool()
+		return publishedAttr(p, remote.AttrServerEndpoint), publishedAttr(p, remote.AttrAgentEndpoint), publishedAttr(p, remote.AttrServerCUDAVersion)
+	}
 
-	// Before the agent answered: node IP everywhere, no server version.
-	if got := publishedAttr(pool(), remote.AttrServerCUDAVersion); got != "" {
-		t.Fatalf("nothing learned yet, but serverCudaVersion=%q was published", got)
+	// Before the agent answered: remote, tainted, no endpoints, no version.
+	if s, a, v := attrs(); s != "" || a != "" || v != "" || !publishedTaint(pool(), remote.TaintKeyRemoteUnavailable) {
+		t.Fatalf("nothing learned yet, but published server=%q agent=%q version=%q tainted=%v", s, a, v, publishedTaint(pool(), remote.TaintKeyRemoteUnavailable))
 	}
-	if got := publishedAttr(pool(), remote.AttrServerEndpoint); got != "http://10.0.0.7:14833" {
-		t.Fatalf("initial serverEndpoint = %q", got)
-	}
-	if got := publishedAttr(pool(), remote.AttrAgentEndpoint); got != "grpc://10.0.0.7:14834" {
-		t.Fatalf("initial agentEndpoint = %q", got)
+	if got := publishedAttr(pool(), remote.AttrAccessMode); got != remote.AccessModeRemote {
+		t.Fatalf("accessMode = %q", got)
 	}
 
 	changed, err := rp.refreshServerInfo(ctx)
 	if err != nil || !changed {
 		t.Fatalf("first answer must count as a change: changed=%v err=%v", changed, err)
 	}
-	if got := publishedAttr(pool(), remote.AttrServerCUDAVersion); got != "13.3.73" {
-		t.Fatalf("published serverCudaVersion=%q, want 13.3.73", got)
+	if s, a, v := attrs(); s != "http://192.168.1.7:14833" || a != "grpc://192.168.1.7:14834" || v != "13.3.73" || publishedTaint(pool(), remote.TaintKeyRemoteUnavailable) {
+		t.Fatalf("published server=%q agent=%q version=%q tainted=%v", s, a, v, publishedTaint(pool(), remote.TaintKeyRemoteUnavailable))
 	}
 
 	changed, err = rp.refreshServerInfo(ctx)
@@ -143,90 +135,69 @@ func TestRemotePublisherServerInfo(t *testing.T) {
 	}
 
 	// The server comes back built from another image.
-	fa.set(true, "12.9.1", "")
+	fa.set(true, "12.9.1", "http://192.168.1.7:14833", "grpc://192.168.1.7:14834")
 	changed, err = rp.refreshServerInfo(ctx)
 	if err != nil || !changed {
 		t.Fatalf("new build must count as a change: changed=%v err=%v", changed, err)
 	}
-	if got := publishedAttr(pool(), remote.AttrServerCUDAVersion); got != "12.9.1" {
-		t.Fatalf("published serverCudaVersion=%q, want 12.9.1", got)
+	if _, _, v := attrs(); v != "12.9.1" {
+		t.Fatalf("published serverCudaVersion=%q, want 12.9.1", v)
 	}
 
-	// The agent discovers the routable address: both endpoints follow it,
-	// the agent keeping its own port.
-	fa.set(true, "12.9.1", "http://192.168.1.7:14833")
+	// The node moves to another address (or the operator advertises one).
+	fa.set(true, "12.9.1", "https://gpu-a.corp:443/pool-a", "grpc://10.9.9.9:15000")
 	changed, err = rp.refreshServerInfo(ctx)
 	if err != nil || !changed {
-		t.Fatalf("new endpoint must count as a change: changed=%v err=%v", changed, err)
+		t.Fatalf("new endpoints must count as a change: changed=%v err=%v", changed, err)
 	}
-	if got := publishedAttr(pool(), remote.AttrServerEndpoint); got != "http://192.168.1.7:14833" {
-		t.Fatalf("published serverEndpoint=%q", got)
-	}
-	if got := publishedAttr(pool(), remote.AttrAgentEndpoint); got != "grpc://192.168.1.7:14834" {
-		t.Fatalf("published agentEndpoint=%q", got)
+	if s, a, _ := attrs(); s != "https://gpu-a.corp:443/pool-a" || a != "grpc://10.9.9.9:15000" {
+		t.Fatalf("published server=%q agent=%q", s, a)
 	}
 
 	// A server that stopped answering keeps the last known values.
-	fa.set(false, "12.9.1", "http://192.168.1.7:14833")
+	fa.set(false, "12.9.1", "https://gpu-a.corp:443/pool-a", "grpc://10.9.9.9:15000")
 	if changed, err = rp.refreshServerInfo(ctx); !errors.Is(err, remote.ErrServerNotListening) || changed {
 		t.Fatalf("silent server must be ErrServerNotListening without a change: changed=%v err=%v", changed, err)
 	}
-	if got := publishedAttr(pool(), remote.AttrServerCUDAVersion); got != "12.9.1" {
-		t.Fatalf("last known version must survive a failed probe, got %q", got)
+	if s, a, v := attrs(); s != "https://gpu-a.corp:443/pool-a" || a != "grpc://10.9.9.9:15000" || v != "12.9.1" {
+		t.Fatalf("last known values must survive a failed probe: server=%q agent=%q version=%q", s, a, v)
 	}
-	if got := publishedAttr(pool(), remote.AttrServerEndpoint); got != "http://192.168.1.7:14833" {
-		t.Fatalf("last known endpoint must survive a failed probe, got %q", got)
+
+	// So does an agent that lost its routable address, or reports junk.
+	for _, bad := range [][2]string{{"", ""}, {"http://127.0.0.1:14833", "grpc://127.0.0.1:14834"}, {"ftp://x", "grpc://10.9.9.9:15000"}, {"http://10.9.9.9", "unix:///run/agent.sock"}} {
+		fa.set(true, "12.9.1", bad[0], bad[1])
+		if changed, err = rp.refreshServerInfo(ctx); err == nil || changed {
+			t.Fatalf("%v must be an error without a change: changed=%v err=%v", bad, changed, err)
+		}
+	}
+	if s, a, _ := attrs(); s != "https://gpu-a.corp:443/pool-a" || a != "grpc://10.9.9.9:15000" {
+		t.Fatalf("junk must not replace the last known endpoints: server=%q agent=%q", s, a)
 	}
 
 	// An unparseable version is an error without a change.
-	fa.set(true, "not-a-version", "http://192.168.1.7:14833")
+	fa.set(true, "not-a-version", "https://gpu-a.corp:443/pool-a", "grpc://10.9.9.9:15000")
 	if changed, err = rp.refreshServerInfo(ctx); err == nil || changed {
 		t.Fatalf("bad version must be an error without a change: changed=%v err=%v", changed, err)
 	}
-
-	// A loopback reported by a misconfigured agent is never published.
-	fa.set(true, "12.9.1", "http://127.0.0.1:14833")
-	if _, err = rp.refreshServerInfo(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if got := publishedAttr(pool(), remote.AttrServerEndpoint); got != "http://10.0.0.7:14833" {
-		t.Fatalf("loopback from the agent must fall back to the node IP, got %q", got)
-	}
-}
-
-func TestRemotePublisherPinnedHosts(t *testing.T) {
-	ctx := context.Background()
-	fa, agentDial := startFakeAgent(t)
-	fa.set(true, "13.3.73", "http://192.168.1.7:14833")
-
-	t.Run("pinned server host wins, agent follows it", func(t *testing.T) {
-		rp := newTestPublisher(t, agentDial, "https://gpu-a.corp/pool-a", ":14834")
-		if _, err := rp.refreshServerInfo(ctx); err != nil {
-			t.Fatal(err)
-		}
-		spec := rp.currentSpec()
-		if spec.Endpoint != "https://gpu-a.corp:14833/pool-a" || spec.AgentEndpoint != "grpc://gpu-a.corp:14834" {
-			t.Fatalf("spec = %+v", spec)
-		}
-	})
-	t.Run("pinned agent host wins independently", func(t *testing.T) {
-		rp := newTestPublisher(t, agentDial, ":14833", "grpc://agent.corp:15000")
-		if _, err := rp.refreshServerInfo(ctx); err != nil {
-			t.Fatal(err)
-		}
-		spec := rp.currentSpec()
-		if spec.Endpoint != "http://192.168.1.7:14833" || spec.AgentEndpoint != "grpc://agent.corp:15000" {
-			t.Fatalf("spec = %+v", spec)
-		}
-	})
 }
 
 func TestRemotePublisherAgentDown(t *testing.T) {
-	rp := newTestPublisher(t, "grpc://127.0.0.1:1", ":14833", ":14834")
+	rp := newTestPublisher("grpc://127.0.0.1:1")
 	if changed, err := rp.refreshServerInfo(context.Background()); err == nil || changed {
 		t.Fatalf("unreachable agent must be an error without a change: changed=%v err=%v", changed, err)
 	}
-	if spec := rp.currentSpec(); spec.Endpoint != "http://10.0.0.7:14833" || spec.ServerCUDAVersion != nil {
+	if spec := rp.currentSpec(); spec.Reachable() || spec.ServerCUDAVersion != nil {
 		t.Fatalf("spec must be untouched: %+v", spec)
+	}
+}
+
+func TestPublishableEndpoints(t *testing.T) {
+	s, a, err := publishableEndpoints("10.0.0.7", "10.0.0.7")
+	if err != nil || s != "http://10.0.0.7:14833" || a != "grpc://10.0.0.7:14834" {
+		t.Fatalf("defaults: %q %q %v", s, a, err)
+	}
+	s, a, err = publishableEndpoints("https://gw.corp/pool", "grpc://[2001:db8::7]:15000")
+	if err != nil || s != "https://gw.corp:443/pool" || a != "grpc://[2001:db8::7]:15000" {
+		t.Fatalf("explicit: %q %q %v", s, a, err)
 	}
 }

@@ -45,6 +45,26 @@ var probeClient = &http.Client{
 	},
 }
 
+// ParseServerEndpoint parses a lupine-server endpoint the way the lupine
+// client reads LUPINE_SERVER (docs/lupine_env_reference.md): http (default,
+// port DefaultServerPort) or https (TLS through a terminating proxy, port
+// 443), host optional, path optional.
+func ParseServerEndpoint(raw string) (*endpointutil.Endpoint, error) {
+	e, err := endpointutil.ParseEndpoint(raw, endpointutil.WithDefaultScheme(endpointutil.Http))
+	if err != nil {
+		return nil, fmt.Errorf("invalid lupine-server endpoint %q: %w", raw, err)
+	}
+	switch e.Scheme {
+	case endpointutil.Http:
+		e.DefaultPort(DefaultServerPort)
+	case endpointutil.Https:
+		e.DefaultPort(443)
+	default:
+		return nil, fmt.Errorf("invalid lupine-server endpoint %q: scheme must be http or https", raw)
+	}
+	return e, nil
+}
+
 // ProbeServerCUDAVersion asks the lupine-server at endpoint which CUDA
 // version it was built with.
 //
@@ -58,11 +78,10 @@ func ProbeServerCUDAVersion(ctx context.Context, endpoint string, timeout time.D
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	serverEndpoint, err := endpointutil.ParseEndpoint(endpoint)
+	serverEndpoint, err := ParseServerEndpoint(endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("invalid lupine-server endpoint %q: %w", endpoint, err)
+		return nil, err
 	}
-	serverEndpoint.DefaultPort(DefaultServerPort)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serverEndpoint.String(), nil)
 	if err != nil {

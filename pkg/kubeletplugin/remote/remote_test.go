@@ -86,10 +86,12 @@ func TestParseDevice(t *testing.T) {
 		}
 	})
 
-	t.Run("remote device missing endpoint fails", func(t *testing.T) {
-		_, isRemote, err := ParseDevice(remoteDevice("vgpu-0", "GPU-abc", "", "12.9.0"))
-		if !isRemote || err == nil {
-			t.Fatalf("expected (remote, error), got isRemote=%v err=%v", isRemote, err)
+	t.Run("remote device missing endpoint is accepted (EnsureSession supplies it)", func(t *testing.T) {
+		dev := remoteDevice("vgpu-0", "GPU-abc", "10.0.0.1:14833", "12.9.0")
+		delete(dev.Attributes, AttrServerEndpoint)
+		info, isRemote, err := ParseDevice(dev)
+		if !isRemote || err != nil || info.Endpoint != "" || info.AgentEndpoint == "" {
+			t.Fatalf("expected (remote, ok, empty endpoint), got isRemote=%v err=%v info=%+v", isRemote, err, info)
 		}
 	})
 
@@ -581,4 +583,46 @@ func TestEnsureLdPreloadFile(t *testing.T) {
 			t.Fatal("unchanged content must not be rewritten")
 		}
 	})
+}
+
+func TestDecorateUnreachable(t *testing.T) {
+	newDevices := func() []resourceapi.Device {
+		return []resourceapi.Device{{Name: "vgpu-0", Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+			AttrUUID:              {StringValue: strPtr("GPU-a")},
+			AttrCUDADriverVersion: {VersionValue: strPtr("12.9.0")},
+		}}}
+	}
+	// The agent has not reported endpoints yet: remote, tainted, no
+	// endpoint or server-version attributes.
+	devices := newDevices()
+	Decorate(devices, &PublishSpec{ServerCUDAVersion: semver.MustParse("12.4.0")})
+	dev := devices[0]
+	if StringAttr(&dev, AttrAccessMode) != AccessModeRemote {
+		t.Fatalf("accessMode = %q", StringAttr(&dev, AttrAccessMode))
+	}
+	for _, name := range []resourceapi.QualifiedName{AttrServerEndpoint, AttrAgentEndpoint, AttrServerCUDAVersion} {
+		if _, ok := dev.Attributes[name]; ok {
+			t.Errorf("%s must be absent while unreachable", name)
+		}
+	}
+	if len(dev.Taints) != 1 || dev.Taints[0].Key != TaintKeyRemoteUnavailable || dev.Taints[0].Effect != resourceapi.DeviceTaintEffectNoSchedule {
+		t.Fatalf("taints = %+v", dev.Taints)
+	}
+	// ParseDevice refuses it: without an agent endpoint nothing can be prepared.
+	if _, isRemote, err := ParseDevice(&dev); !isRemote || err == nil {
+		t.Fatalf("expected (remote, error), got isRemote=%v err=%v", isRemote, err)
+	}
+
+	// Only the agent endpoint known is still unreachable (no server to hand
+	// out); both known clears the taint.
+	devices = newDevices()
+	Decorate(devices, &PublishSpec{AgentEndpoint: "grpc://10.0.0.7:14834"})
+	if len(devices[0].Taints) != 1 {
+		t.Fatalf("agent-only spec must stay tainted: %+v", devices[0].Taints)
+	}
+	devices = newDevices()
+	Decorate(devices, &PublishSpec{Endpoint: "http://10.0.0.7:14833", AgentEndpoint: "grpc://10.0.0.7:14834"})
+	if len(devices[0].Taints) != 0 {
+		t.Fatalf("reachable spec must not taint: %+v", devices[0].Taints)
+	}
 }

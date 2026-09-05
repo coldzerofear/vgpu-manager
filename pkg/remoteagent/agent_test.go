@@ -29,6 +29,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
+	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -96,18 +97,37 @@ func TestProbeAndServerInfo(t *testing.T) {
 		endpoint := "http://" + net.JoinHostPort(candidates[0], strconv.Itoa(lis.Addr().(*net.TCPAddr).Port))
 
 		a := New(Config{NodeName: "gpu-node", ServerEndpoint: endpoint, SessionBase: t.TempDir()})
+		a.agentTCP.Store(&endpointutil.Endpoint{Scheme: endpointutil.Grpc, Port: "14834"}) // as bound on 0.0.0.0
 		a.probeServer(ctx)
 		info, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{})
-		if !info.Listening || info.Endpoint != endpoint {
-			t.Fatalf("routable host must be reported verbatim: %+v", info)
+		if !info.Listening || info.Endpoint != endpoint || info.AgentEndpoint != "grpc://"+net.JoinHostPort(candidates[0], "14834") {
+			t.Fatalf("routable host must be reported verbatim, agent on the same host: %+v", info)
+		}
+		// A TCP listener bound to a specific address advertises that address.
+		a.agentTCP.Store(&endpointutil.Endpoint{Scheme: endpointutil.Grpc, Host: "10.9.9.9", Port: "15000"})
+		a.probeServer(ctx)
+		if info, _ = a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{}); info.AgentEndpoint != "grpc://10.9.9.9:15000" {
+			t.Fatalf("bound address must win: %+v", info)
 		}
 	})
 
-	t.Run("advertise endpoint is reported verbatim", func(t *testing.T) {
+	t.Run("advertise endpoint is reported verbatim; agent endpoint still needs a routable host", func(t *testing.T) {
 		a := New(Config{NodeName: "gpu-node", ServerEndpoint: srv.URL, AdvertiseEndpoint: "https://gpu-a.corp:443/pool-a", SessionBase: t.TempDir()})
+		a.agentTCP.Store(&endpointutil.Endpoint{Scheme: endpointutil.Grpc, Port: "14834"})
 		a.probeServer(ctx)
 		info, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{})
-		if !info.Listening || info.Endpoint != "https://gpu-a.corp:443/pool-a" {
+		// srv.URL is a loopback and the fake answers only there, so no
+		// routable host: the server endpoint is advertised anyway, the
+		// agent's own stays unknown.
+		if !info.Listening || info.Endpoint != "https://gpu-a.corp:443/pool-a" || info.AgentEndpoint != "" {
+			t.Fatalf("%+v", info)
+		}
+	})
+
+	t.Run("no TCP listener: no agent endpoint", func(t *testing.T) {
+		a := New(Config{NodeName: "gpu-node", ServerEndpoint: srv.URL, SessionBase: t.TempDir()})
+		a.probeServer(ctx)
+		if info, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{}); info.AgentEndpoint != "" {
 			t.Fatalf("%+v", info)
 		}
 	})

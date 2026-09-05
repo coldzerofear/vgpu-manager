@@ -158,21 +158,13 @@ spec:
             # 若允许 pod 落在 GPU 节点本机（lupine 环回消费），selector 必须覆盖 GPU 节点自身。
             - name: REMOTE_NODE_SELECTOR
               value: vgpu-manager.io/remote-inject=true
-            # 本节点 lupine-server 的发布 endpoint（URL 形态，可带 https://、域名、
-            # 路径前缀）。host 留空 = 采用 remote-agent 经 ServerInfo 报告的 endpoint
-            # （agent 自动发现或其 ADVERTISE_SERVER_ENDPOINT；此时端口也以 agent 报告为准），
-            # agent 尚未应答前暂用节点 InternalIP。显式写了 host 则原样发布、不被 agent 覆盖。
-            - name: REMOTE_SERVER_ENDPOINT
-              value: ":14833"
-            # remote-agent 的发布 endpoint，inject 按它调 EnsureSession。
-            # host 留空 = 同服务端 host；端口须与 remote-server 里
-            # LISTEN_SERVER_ENDPOINT 一致（默认 14834）。
+            # 唯一的远程路径配置：本机 remote-agent 怎么连（grpc://host:port，host 留空 = 回环；
+            # 或 unix:///etc/vgpu-manager/agent.sock，需 remote-server 的 LISTEN_SERVER_ENDPOINT
+            # 同时监听该 socket）。发布到其他节点的 serverEndpoint / agentEndpoint 属性和
+            # serverCudaVersion 全部由 agent 的 ServerInfo 报告；agent 未应答前设备照常发布但
+            # 不带这些属性并打 NoSchedule 污点 remote-unavailable，探到后自动重发。
             - name: REMOTE_AGENT_ENDPOINT
               value: ":14834"
-            # 可选：本插件自己访问同节点 agent 的地址（仅用于 ServerInfo），与发布值可以不同，
-            # 例如走 unix 套接字（需 remote-server 的 LISTEN_SERVER_ENDPOINT 同时监听该 socket）。
-            # - name: REMOTE_AGENT_LOCAL_ENDPOINT
-            #   value: unix:///etc/vgpu-manager/agent.sock
             - name: NVIDIA_DRIVER_ROOT
               value: /
             - name: CDI_ROOT

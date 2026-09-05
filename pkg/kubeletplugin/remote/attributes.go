@@ -61,9 +61,25 @@ type PublishSpec struct {
 	ServerCUDAVersion *semver.Version
 }
 
+// Reachable reports whether the spec carries what a consumer node needs to
+// use the devices: the agent's address (sessions) and the server's
+// (clients). Both come from the remote-agent; until it has answered, the
+// devices are published but tainted (see Decorate).
+func (s *PublishSpec) Reachable() bool {
+	return s != nil && s.Endpoint != "" && s.AgentEndpoint != ""
+}
+
 // Decorate stamps accessMode (and, for remote, the server/agent endpoints
 // plus the server CUDA version once known) onto the devices in place.
 // spec == nil means the node is local-only.
+//
+// A remote spec whose endpoints are not known yet (the agent has not
+// answered, or has no routable address) publishes the devices without the
+// endpoint attributes and with a NoSchedule taint, so the scheduler keeps
+// them off new claims until the next republish carries the endpoints. The
+// taint needs the DRADeviceTaints gate to be honoured; without it the
+// inject side still refuses a claim whose devices have no endpoint the
+// agent can supply (EnsureSession), so nothing is silently misrouted.
 func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 	for i := range devices {
 		attrs := devices[i].Attributes
@@ -76,6 +92,14 @@ func Decorate(devices []resourceapi.Device, spec *PublishSpec) {
 			continue
 		}
 		attrs[AttrAccessMode] = resourceapi.DeviceAttribute{StringValue: ptr.To(AccessModeRemote)}
+		if !spec.Reachable() {
+			devices[i].Taints = append(devices[i].Taints, resourceapi.DeviceTaint{
+				Key:    TaintKeyRemoteUnavailable,
+				Value:  TaintValueRemoteUnavailable,
+				Effect: resourceapi.DeviceTaintEffectNoSchedule,
+			})
+			continue
+		}
 		attrs[AttrServerEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.Endpoint)}
 		attrs[AttrAgentEndpoint] = resourceapi.DeviceAttribute{StringValue: ptr.To(spec.AgentEndpoint)}
 		if spec.ServerCUDAVersion != nil {
@@ -137,15 +161,16 @@ func ParseDevice(dev *resourceapi.Device) (*DeviceInfo, bool, error) {
 	}
 
 	info := &DeviceInfo{
-		UUID:          StringAttr(dev, AttrUUID),
+		UUID: StringAttr(dev, AttrUUID),
+		// The server endpoint may be absent (published before the agent
+		// answered, or a scheduler that ignores the taint): EnsureSession
+		// supplies it at prepare time. The agent endpoint cannot be: it is
+		// the only way to reach that node at all.
 		Endpoint:      StringAttr(dev, AttrServerEndpoint),
 		AgentEndpoint: StringAttr(dev, AttrAgentEndpoint),
 	}
-	if info.Endpoint == "" {
-		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrServerEndpoint)
-	}
 	if info.AgentEndpoint == "" {
-		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrAgentEndpoint)
+		return nil, true, fmt.Errorf("remote device %q has no %q attribute (its remote-agent has not reported a routable address yet)", dev.Name, AttrAgentEndpoint)
 	}
 	if info.UUID == "" {
 		return nil, true, fmt.Errorf("remote device %q has no %q attribute", dev.Name, AttrUUID)

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -164,34 +163,22 @@ func (d *InjectDriver) nriInjection(claimUID, podName, podNamespace, podUID, con
 
 	p := &partition{key: NRIPartitionKey(podUID, containerName), requests: sets.List(requests)}
 
-	endpointInfos := sets.New[endpointInfo]()
 	for _, rd := range pc.devices {
 		if requests.Has(rd.mainRequest) {
 			p.results = append(p.results, rd)
-			endpointInfos.Insert(endpointInfo{
-				serverEndpoint: rd.info.Endpoint,
-				agentEndpoint:  rd.info.AgentEndpoint,
-			})
 		}
 	}
-	p.endpoints = endpointInfos.UnsortedList()
-	sort.Slice(p.endpoints, func(i, j int) bool {
-		return p.endpoints[i].serverEndpoint < p.endpoints[j].serverEndpoint
-	})
+	p.endpoints = endpointInfosOf(p.results)
 
 	if err := d.assignTokens(ctx, claim, []*partition{p}); err != nil {
 		return nil, err
 	}
-	if err := EnsureSessions(ctx, p.endpoints, claim, p.token, p.key, p.requests); err != nil {
+	endpoints, err := EnsureSessions(ctx, p.endpoints, claim, p.token, p.key, p.requests)
+	if err != nil {
 		return nil, err
 	}
-	klog.V(2).Infof("NRI: container %s/%s/%s session %s ensured on %v (requests %v)",
-		podNamespace, podName, containerName, p.key, p.endpoints, p.requests)
-
-	endpoints := make([]string, 0, len(p.endpoints))
-	for _, endpoint := range p.endpoints {
-		endpoints = append(endpoints, endpoint.serverEndpoint)
-	}
+	klog.V(2).Infof("NRI: container %s/%s/%s session %s ensured on %v (servers %v, requests %v)",
+		podNamespace, podName, containerName, p.key, p.endpoints, endpoints, p.requests)
 
 	return &nri.Injection{
 		Env: []string{

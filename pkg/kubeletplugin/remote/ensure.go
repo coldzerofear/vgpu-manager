@@ -37,17 +37,37 @@ const DefaultAgentPort = 14834
 const ensureSessionTimeout = 15 * time.Second
 
 // EnsureSessions calls EnsureSession for one partition on the agent behind
-// every endpoint it spans. Any failure fails the whole prepare (design D2:
-// all servers must confirm before the pod starts).
+// every endpoint it spans and returns the lupine-server endpoints the
+// container must be given, in the same order (which is the order of
+// endpointInfos, i.e. by agent endpoint -- LUPINE_SERVER order defines the
+// virtual device numbering, so it must be deterministic). Each server
+// endpoint is what the agent reports now, falling back to the published
+// attribute; an agent that knows neither fails the prepare. Any failure
+// fails the whole prepare (design D2: all servers must confirm before the
+// pod starts).
 func EnsureSessions(
 	ctx context.Context, endpointInfos []endpointInfo, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string,
-) error {
+) ([]string, error) {
+	serverEndpoints := make([]string, 0, len(endpointInfos))
 	for _, info := range endpointInfos {
-		if err := ensureOne(ctx, info.agentEndpoint, claim, token, partitionKey, requests); err != nil {
-			return fmt.Errorf("EnsureSession on %s (endpoint %s): %w", info.agentEndpoint, info.serverEndpoint, err)
+		reported, err := ensureOne(ctx, info.agentEndpoint, claim, token, partitionKey, requests)
+		if err != nil {
+			return nil, fmt.Errorf("EnsureSession on %s: %w", info.agentEndpoint, err)
 		}
+		serverEndpoint := reported
+		if serverEndpoint == "" {
+			serverEndpoint = info.serverEndpoint
+		}
+		if serverEndpoint == "" {
+			return nil, fmt.Errorf("EnsureSession on %s: agent reports no lupine-server endpoint and none is published for its devices", info.agentEndpoint)
+		}
+		if reported != "" && info.serverEndpoint != "" && reported != info.serverEndpoint {
+			klog.V(2).Infof("EnsureSession %s for claim %s: agent reports lupine-server at %s, published attribute says %s; using the agent's",
+				info.agentEndpoint, klog.KObj(claim), reported, info.serverEndpoint)
+		}
+		serverEndpoints = append(serverEndpoints, serverEndpoint)
 	}
-	return nil
+	return serverEndpoints, nil
 }
 
 const serverInfoTimeout = 5 * time.Second
@@ -110,13 +130,15 @@ func agentDialTarget(agentEndpoint string) (string, error) {
 	return endpoint.DialTarget(), nil
 }
 
-func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) error {
+// ensureOne materialises the session on one agent and returns the
+// lupine-server endpoint that agent reports ("" if it has none yet).
+func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, ensureSessionTimeout)
 	defer cancel()
 
 	conn, err := dialAgent(agentEndpoint)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -129,13 +151,13 @@ func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.Res
 		Partition:      partitionKey,
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !resp.Ready {
-		return fmt.Errorf("agent reports session not ready: %s", resp.Message)
+		return "", fmt.Errorf("agent reports session not ready: %s", resp.Message)
 	}
 	if resp.Message != "" {
 		klog.Warningf("EnsureSession %s for claim %s partition %s: %s", agentEndpoint, klog.KObj(claim), partitionKey, resp.Message)
 	}
-	return nil
+	return resp.ServerEndpoint, nil
 }
