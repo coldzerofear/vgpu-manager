@@ -308,11 +308,17 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 			if _, err := remote.ParseNodeSelector(flags.RemoteNodeSelector); err != nil {
 				return err
 			}
-			if _, err := endpointutil.ParseEndpoint(flags.RemoteServerEndpoint); err != nil {
+			if endpoint, err := endpointutil.ParseEndpoint(flags.RemoteServerEndpoint, endpointutil.WithDefaultScheme(endpointutil.Http),
+				endpointutil.WithDefaultPort(remote.DefaultServerPort)); err != nil || (endpoint.Scheme != endpointutil.Http && endpoint.Scheme != endpointutil.Https) {
 				return fmt.Errorf("invalid --remote-server-endpoint %s: %w", flags.RemoteServerEndpoint, err)
+			} else {
+				flags.RemoteServerEndpoint = endpoint.String()
 			}
-			if _, err := endpointutil.ParseEndpoint(flags.RemoteAgentEndpoint); err != nil {
+			if endpoint, err := endpointutil.ParseEndpoint(flags.RemoteAgentEndpoint, endpointutil.WithDefaultScheme(endpointutil.Grpc),
+				endpointutil.WithDefaultPort(remote.DefaultAgentPort)); err != nil || endpoint.Scheme != endpointutil.Grpc {
 				return fmt.Errorf("invalid --remote-agent-endpoint %s: %w", flags.RemoteAgentEndpoint, err)
+			} else {
+				flags.RemoteAgentEndpoint = endpoint.String()
 			}
 			if flags.HttpEndpoint != "" {
 				return fmt.Errorf("when the feature gate %s is enabled and the --plugin-mode=%s, --http-endpoint cannot be set",

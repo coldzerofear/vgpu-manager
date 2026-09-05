@@ -49,6 +49,31 @@ func EnsureSessions(
 	return nil
 }
 
+func ServerInfo(ctx context.Context, agentEndpoint string) (*remoteagent.ServerInfoResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	target, err := agentDialTarget(agentEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	// K1: plaintext. TLS/credentials arrive with D5 (multi-tenant gate).
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	info, err := remoteagent.NewRemoteAgentClient(conn).ServerInfo(ctx, &remoteagent.ServerInfoRequest{})
+	if err != nil {
+		return nil, err
+	}
+	if !info.Listening {
+		return nil, fmt.Errorf("remote-gpu-server %s is not listening", info.Endpoint)
+	}
+	return info, nil
+}
+
 // agentDialTarget turns the published agentEndpoint (URL form,
 // http://host:port[/path]) into a gRPC dial target (bare host:port). A
 // future gateway path prefix needs a gRPC-aware route, not this dial.

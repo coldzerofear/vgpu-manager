@@ -92,9 +92,11 @@ type Agent struct {
 	claimInformer cache.SharedIndexInformer
 	claimCache    cache.MutationCache
 
-	nodeDevices      atomic.Pointer[NodeDevices]
-	serverUp         atomic.Bool
-	smWatcherPresent atomic.Bool
+	nodeDevices            atomic.Pointer[NodeDevices]
+	serverCudaVersion      atomic.Pointer[string]
+	serverExternalEndpoint atomic.Pointer[string]
+	serverUp               atomic.Bool
+	smWatcherPresent       atomic.Bool
 
 	// hasReady reports (without blocking) whether every informer cache and
 	// event-handler registration has synced; nil until Run wires it.
@@ -225,7 +227,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	// 3. Background loops.
-	a.wg.Go(func() { wait.UntilWithContext(ctx, a.probeServer, 15*time.Second) })
+	a.wg.Go(func() { wait.UntilWithContext(ctx, a.probeServer, 5*time.Second) })
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.checkSMWatcher, 30*time.Second) })
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.gcSessions, a.cfg.GCInterval) })
 
@@ -266,14 +268,19 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // Check implements [grpc_health_v1.HealthServer].
 func (a *Agent) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
-	knownServices := map[string]struct{}{"": {}, "liveness": {}}
-	if _, known := knownServices[req.GetService()]; !known {
+	knownServices := map[string]func() bool{
+		"": a.hasReady, "liveness": a.hasReady, "readiness": func() bool {
+			return a.hasReady() && a.serverUp.Load()
+		},
+	}
+	checkFn, known := knownServices[req.GetService()]
+	if !known {
 		return nil, status.Error(codes.NotFound, "unknown service")
 	}
 	status := &grpc_health_v1.HealthCheckResponse{
 		Status: grpc_health_v1.HealthCheckResponse_SERVING,
 	}
-	if a.hasReady == nil || !a.hasReady() {
+	if !checkFn() {
 		status.Status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
 	}
 	return status, nil
@@ -316,6 +323,10 @@ func (a *Agent) probeServer(ctx context.Context) {
 		} else {
 			klog.Infof("lupine-server %s not answering: %v", a.cfg.ServerEndpoint, err)
 		}
+	}
+	if up {
+		original := version.Original()
+		a.serverCudaVersion.Store(&original)
 	}
 }
 
@@ -400,11 +411,12 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
 	}
-	msg := ""
-	if !a.serverUp.Load() {
+	var msg string
+	ready := a.serverUp.Load()
+	if !ready {
 		msg = "lupine-server is not accepting connections yet"
 	}
-	return &remoteagent.EnsureSessionResponse{Ready: true, CudaDriverVersion: nd.CudaVersionString(), Message: msg}, nil
+	return &remoteagent.EnsureSessionResponse{Ready: ready, CudaDriverVersion: nd.CudaVersionString(), Message: msg}, nil
 }
 
 // ServerInfo implements remoteagent.RemoteAgentServer.
@@ -414,8 +426,8 @@ func (a *Agent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*re
 		Endpoint:  a.cfg.ServerEndpoint,
 		NodeName:  a.cfg.NodeName,
 	}
-	if nd := a.nodeDevices.Load(); nd != nil {
-		resp.CudaDriverVersion = nd.CudaVersionString()
+	if load := a.serverCudaVersion.Load(); load != nil {
+		resp.CudaDriverVersion = *load
 	}
 	return resp, nil
 }

@@ -221,6 +221,28 @@ func TestParseEndpoint(t *testing.T) {
 			},
 		},
 
+		{
+			name: "unix scheme",
+			raw:  "unix:///var/run/docker.sock",
+			want: &Endpoint{
+				Scheme: Unix,
+				Host:   "",
+				Port:   "",
+				Path:   "/var/run/docker.sock",
+			},
+		},
+
+		{
+			name: "grpc scheme",
+			raw:  "grpc://example.com:9090",
+			want: &Endpoint{
+				Scheme: Grpc,
+				Host:   "example.com",
+				Port:   "9090",
+				Path:   "",
+			},
+		},
+
 		// ===== 异常用例 =====
 
 		// --- 空输入 ---
@@ -241,11 +263,7 @@ func TestParseEndpoint(t *testing.T) {
 			raw:     "ftp://example.com:21/files",
 			wantErr: true,
 		},
-		{
-			name:    "grpc scheme",
-			raw:     "grpc://example.com:9090",
-			wantErr: true,
-		},
+
 		{
 			name:    "ws scheme",
 			raw:     "ws://example.com:8080/ws",

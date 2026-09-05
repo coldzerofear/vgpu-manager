@@ -117,7 +117,9 @@ func main() {
 			if util.PathIsNotExist(cfg.ContainerManagerDir) {
 				return fmt.Errorf("container-manager-dir %q does not exist", cfg.ContainerManagerDir)
 			}
-			endpoint, err := endpointutil.ParseEndpoint(cfg.ServerEndpoint)
+			endpoint, err := endpointutil.ParseEndpoint(cfg.ServerEndpoint,
+				endpointutil.WithDefaultScheme(endpointutil.Http),
+				endpointutil.WithDefaultPort(remote.DefaultServerPort))
 			if err != nil {
 				return fmt.Errorf("parse remote endpoint failed: %w", err)
 			}
@@ -125,17 +127,17 @@ func main() {
 			if endpoint.Host == "" {
 				endpoint.Host = "127.0.0.1"
 			}
-			endpoint.DefaultPort(remote.DefaultServerPort)
 			cfg.ServerEndpoint = endpoint.String()
 
-			endpoint, err = endpointutil.ParseEndpoint(cfg.ListenEndpoint)
+			endpoint, err = endpointutil.ParseEndpoint(cfg.ListenEndpoint,
+				endpointutil.WithDefaultScheme(endpointutil.Grpc),
+				endpointutil.WithDefaultPort(remote.DefaultAgentPort))
 			if err != nil {
 				return fmt.Errorf("parse listen endpoint failed: %w", err)
 			}
 			if endpoint.Host == "" {
 				endpoint.Host = "0.0.0.0"
 			}
-			endpoint.DefaultPort(remote.DefaultAgentPort)
 			cfg.ListenEndpoint = endpoint.String()
 
 			cfg.FeatureGate = featureGate

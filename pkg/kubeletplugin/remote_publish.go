@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Masterminds/semver"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
@@ -72,7 +73,6 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, fmt.Errorf("parse server endpoint failed: %w", err)
 	}
-	endpoint.DefaultPort(remote.DefaultServerPort)
 	// No host = use this node's InternalIP (the common hostNetwork case).
 	if endpoint.Host == "" {
 		ip, err := nodeInternalIP(ctx, config, config.Flags.NodeName)
@@ -85,7 +85,6 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, fmt.Errorf("parse agent endpoint failed: %w", err)
 	}
-	agentEndpoint.DefaultPort(remote.DefaultAgentPort)
 	// No host = the agent lives next to the server, reuse its host.
 	if agentEndpoint.Host == "" {
 		agentEndpoint.Host = endpoint.Host
@@ -141,9 +140,14 @@ func (rp *remotePublisher) currentSpec() *remote.PublishSpec {
 // server that came back built from another image. A probe failure keeps
 // the last known value (a restart with the same image is the common case).
 func (rp *remotePublisher) refreshServerVersion(ctx context.Context) (bool, error) {
-	v, err := remote.ProbeServerCUDAVersion(ctx, rp.spec.Endpoint, serverProbeTimeout)
+	info, err := remote.ServerInfo(ctx, rp.spec.AgentEndpoint)
 	if err != nil {
 		return false, err
+	}
+	v, err := semver.NewVersion(info.CudaDriverVersion)
+	if err != nil {
+		return false, fmt.Errorf("remote-agent %s reports unparseable CUDA version %q: %w",
+			rp.spec.AgentEndpoint, info.CudaDriverVersion, err)
 	}
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
