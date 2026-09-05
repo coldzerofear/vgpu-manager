@@ -333,3 +333,88 @@ func TestDefaultPortAndHostPort(t *testing.T) {
 		t.Fatalf("explicit port/path must survive: %+v", e2)
 	}
 }
+
+func TestParseEndpointOptionsAndUnix(t *testing.T) {
+	t.Run("default scheme and port apply only when absent", func(t *testing.T) {
+		e, err := ParseEndpoint(":14834", WithDefaultScheme(Grpc), WithDefaultPort(1))
+		if err != nil || e.Scheme != Grpc || e.Host != "" || e.Port != "14834" {
+			t.Fatalf("%+v %v", e, err)
+		}
+		e, err = ParseEndpoint("gpu-a", WithDefaultScheme(Grpc), WithDefaultPort(14834))
+		if err != nil || e.String() != "grpc://gpu-a:14834" {
+			t.Fatalf("%+v %v", e, err)
+		}
+		e, err = ParseEndpoint("https://gpu-a/pool", WithDefaultScheme(Grpc), WithDefaultPort(14834))
+		if err != nil || e.String() != "https://gpu-a:14834/pool" {
+			t.Fatalf("explicit scheme must survive the default: %+v %v", e, err)
+		}
+	})
+	t.Run("no default port leaves the port empty (never 0)", func(t *testing.T) {
+		e, err := ParseEndpoint("example.com")
+		if err != nil || e.Port != "" || e.String() != "http://example.com" {
+			t.Fatalf("%+v %v", e, err)
+		}
+		e.DefaultPort(0)
+		if e.Port != "" {
+			t.Fatalf("DefaultPort(0) must be a no-op, got %q", e.Port)
+		}
+	})
+	t.Run("unix socket", func(t *testing.T) {
+		e, err := ParseEndpoint("unix:///etc/vgpu-manager/agent.sock", WithDefaultScheme(Grpc), WithDefaultPort(14834))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.Scheme != Unix || e.Host != "" || e.Port != "" || e.Path != "/etc/vgpu-manager/agent.sock" {
+			t.Fatalf("%+v", e)
+		}
+		if e.String() != "unix:///etc/vgpu-manager/agent.sock" || e.DialTarget() != "unix:///etc/vgpu-manager/agent.sock" ||
+			e.HostPort() != "" || e.Network() != "unix" || !e.IsLoopback() {
+			t.Fatalf("%+v: String=%q DialTarget=%q HostPort=%q Network=%q", e, e.String(), e.DialTarget(), e.HostPort(), e.Network())
+		}
+		for _, bad := range []string{"unix://relative.sock", "unix://host/path.sock", "unix:relative", "unix://"} {
+			if e, err := ParseEndpoint(bad); err == nil {
+				t.Errorf("%q must be rejected, got %+v", bad, e)
+			}
+		}
+	})
+	t.Run("rejected inputs", func(t *testing.T) {
+		for _, bad := range []string{"http://x:-1", "http://x:65536", "http://x:abc", "http://x/p?q=1", "http://x/p#f", "http://u:p@x/", "http:x"} {
+			if e, err := ParseEndpoint(bad); err == nil {
+				t.Errorf("%q must be rejected, got %+v", bad, e)
+			}
+		}
+	})
+	t.Run("IsLoopback and DialTarget for TCP", func(t *testing.T) {
+		for raw, loop := range map[string]bool{
+			":14833": true, "127.0.0.1:14833": true, "localhost": true, "LOCALHOST:1": true, "0.0.0.0:14833": true, "[::1]:1": true, "[::]:1": true,
+			"10.0.0.7": false, "gpu-a.corp": false, "[2001:db8::7]:1": false,
+		} {
+			e, err := ParseEndpoint(raw)
+			if err != nil {
+				t.Fatalf("%q: %v", raw, err)
+			}
+			if e.IsLoopback() != loop {
+				t.Errorf("IsLoopback(%q) = %v, want %v", raw, e.IsLoopback(), loop)
+			}
+		}
+		e, _ := ParseEndpoint("grpc://[2001:db8::7]:14834/x")
+		if e.DialTarget() != "[2001:db8::7]:14834" || e.Network() != "tcp" || e.String() != "grpc://[2001:db8::7]:14834/x" {
+			t.Fatalf("%+v: %q %q %q", e, e.DialTarget(), e.Network(), e.String())
+		}
+		e, _ = ParseEndpoint("[2001:db8::7]")
+		if e.HostPort() != "[2001:db8::7]" || e.String() != "http://[2001:db8::7]" {
+			t.Fatalf("bare IPv6 must stay bracketed: %q %q", e.HostPort(), e.String())
+		}
+	})
+	t.Run("ParseEndpoints", func(t *testing.T) {
+		eps, err := ParseEndpoints(" grpc://:14834, unix:///run/agent.sock ,", WithDefaultScheme(Grpc), WithDefaultPort(14834))
+		if err != nil || len(eps) != 2 || eps[0].String() != "grpc://:14834" || eps[1].String() != "unix:///run/agent.sock" {
+			t.Fatalf("%v %v", eps, err)
+		}
+		for _, bad := range []string{"", " , ", "grpc://:14834,ftp://x"} {
+			if eps, err := ParseEndpoints(bad); err == nil {
+				t.Errorf("%q must be rejected, got %v", bad, eps)
+			}
+		}
+	})
+}

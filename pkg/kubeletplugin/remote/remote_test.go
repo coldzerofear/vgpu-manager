@@ -393,6 +393,13 @@ func TestAgentDialTarget(t *testing.T) {
 		"10.0.0.7:14834":              "10.0.0.7:14834",
 		"http://gpu-a:15000/pool-a":   "gpu-a:15000",
 		"gpu-a.zone.vgpu.internal:19": "gpu-a.zone.vgpu.internal:19",
+		// The published form, and an IPv6 host.
+		"grpc://10.0.0.7:14834":  "10.0.0.7:14834",
+		"grpc://[2001:db8::7]":   "[2001:db8::7]:14834",
+		"[2001:db8::7]:15000":    "[2001:db8::7]:15000",
+		"grpc://gpu-a:14834/api": "gpu-a:14834",
+		// A same-node socket is handed to grpc-go as its unix:// target.
+		"unix:///etc/vgpu-manager/agent.sock": "unix:///etc/vgpu-manager/agent.sock",
 	}
 	for in, want := range cases {
 		got, err := agentDialTarget(in)
@@ -400,11 +407,10 @@ func TestAgentDialTarget(t *testing.T) {
 			t.Errorf("agentDialTarget(%q) = %q, %v, want %q", in, got, err, want)
 		}
 	}
-	if _, err := agentDialTarget("ftp://x"); err == nil {
-		t.Error("unsupported scheme must be rejected")
-	}
-	if _, err := agentDialTarget(""); err == nil {
-		t.Error("empty endpoint must be rejected")
+	for _, in := range []string{"ftp://x", "", ":14834", "grpc://", "unix://relative.sock", "grpc://gpu-a:0", "grpc://gpu-a:70000"} {
+		if got, err := agentDialTarget(in); err == nil {
+			t.Errorf("agentDialTarget(%q) = %q, want an error", in, got)
+		}
 	}
 }
 

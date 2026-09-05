@@ -159,7 +159,9 @@ spec:
             - name: REMOTE_NODE_SELECTOR
               value: vgpu-manager.io/remote-inject=true
             # 本节点 lupine-server 的发布 endpoint（URL 形态，可带 https://、域名、
-            # 路径前缀）。host 留空 = 自动取节点 InternalIP；端口与 LUPINE_PORT 联动。
+            # 路径前缀）。host 留空 = 采用 remote-agent 经 ServerInfo 报告的 endpoint
+            # （agent 自动发现或其 ADVERTISE_SERVER_ENDPOINT；此时端口也以 agent 报告为准），
+            # agent 尚未应答前暂用节点 InternalIP。显式写了 host 则原样发布、不被 agent 覆盖。
             - name: REMOTE_SERVER_ENDPOINT
               value: ":14833"
             # remote-agent 的发布 endpoint，inject 按它调 EnsureSession。
@@ -167,6 +169,10 @@ spec:
             # LISTEN_SERVER_ENDPOINT 一致（默认 14834）。
             - name: REMOTE_AGENT_ENDPOINT
               value: ":14834"
+            # 可选：本插件自己访问同节点 agent 的地址（仅用于 ServerInfo），与发布值可以不同，
+            # 例如走 unix 套接字（需 remote-server 的 LISTEN_SERVER_ENDPOINT 同时监听该 socket）。
+            # - name: REMOTE_AGENT_LOCAL_ENDPOINT
+            #   value: unix:///etc/vgpu-manager/agent.sock
             - name: NVIDIA_DRIVER_ROOT
               value: /
             - name: CDI_ROOT

@@ -123,8 +123,18 @@ spec:
             # 的排序语义（新 pod 里 server 不该被上一个 pod 的文件放行）。
             - name: READY_FILE
               value: /run/vgpu/ready
+            # agent 探测 server 的地址（同 pod，host 留空 = 127.0.0.1）。host 是回环时，agent 会
+            # 在本机地址里找一个 server 同样应答的（优先节点 InternalIP），作为对外 endpoint 经
+            # ServerInfo 报给 dra-server，dra-server 再发布为设备属性——因此 dra-server 不再需要
+            # 知道 lupine-server 的地址；改端口只改这里与 LUPINE_PORT。
             - name: REMOTE_SERVER_ENDPOINT
               value: ":14833"                     # ← 与 LUPINE_PORT 保持一致
+            # 可选：对外 endpoint 由运维指定（DNS/网关，URL 形态），跳过自动发现、不做探测。
+            # - name: ADVERTISE_SERVER_ENDPOINT
+            #   value: "https://gpu-a.corp/pool-a"
+            # gRPC 监听，逗号分隔可多个：grpc://:14834 供其他节点的 dra-inject 调 EnsureSession；
+            # 追加 unix:///etc/vgpu-manager/agent.sock 可让同节点的 dra-server 走套接字
+            # （配合 dra-server 的 REMOTE_AGENT_LOCAL_ENDPOINT）。
             - name: LISTEN_SERVER_ENDPOINT
               value: ":14834"                     # ← EnsureSession gRPC 端口(hostNetwork)
             - name: CONTAINER_MANAGER_DIR
@@ -151,6 +161,15 @@ spec:
             failureThreshold: 3
             periodSeconds: 30
             timeoutSeconds: 10
+          # readiness = 缓存已同步 且 lupine-server 最近一次探测应答；只是可观测性信号
+          # （hostNetwork DaemonSet 没有 Service 依赖它），不会杀容器。
+          readinessProbe:
+            grpc:
+              port: 14834
+              service: readiness
+            failureThreshold: 1
+            periodSeconds: 10
+            timeoutSeconds: 5
           securityContext:
             privileged: true
           resources:

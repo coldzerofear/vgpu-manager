@@ -214,8 +214,14 @@ func newApp() *cli.App {
 			EnvVars:     []string{"REMOTE_AGENT_ENDPOINT"},
 		},
 		&cli.StringFlag{
+			Name:        "remote-agent-local-endpoint",
+			Usage:       "How this server-mode plugin reaches the remote-agent on its own node for ServerInfo when that differs from the published endpoint, e.g. 'unix:///etc/vgpu-manager/agent.sock' (grpc:// or unix://). Empty = dial the published endpoint.",
+			Destination: &flags.RemoteAgentLocalEndpoint,
+			EnvVars:     []string{"REMOTE_AGENT_LOCAL_ENDPOINT"},
+		},
+		&cli.StringFlag{
 			Name:        "remote-server-endpoint",
-			Usage:       "lupine-server endpoint published as the serverEndpoint device attribute (URL form, e.g. ':14833' or 'https://gpu-a.corp/pool-a'; empty host = this node's InternalIP). Server mode with RemoteGPUSupport.",
+			Usage:       "lupine-server endpoint published as the serverEndpoint device attribute (URL form, e.g. ':14833' or 'https://gpu-a.corp/pool-a'). Empty host = whatever the remote-agent reports (discovered or advertised), else this node's InternalIP. Server mode with RemoteGPUSupport.",
 			Value:       fmt.Sprintf(":%d", remote.DefaultServerPort),
 			Destination: &flags.RemoteServerEndpoint,
 			EnvVars:     []string{"REMOTE_SERVER_ENDPOINT"},
@@ -308,17 +314,42 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 			if _, err := remote.ParseNodeSelector(flags.RemoteNodeSelector); err != nil {
 				return err
 			}
-			if endpoint, err := endpointutil.ParseEndpoint(flags.RemoteServerEndpoint, endpointutil.WithDefaultScheme(endpointutil.Http),
-				endpointutil.WithDefaultPort(remote.DefaultServerPort)); err != nil || (endpoint.Scheme != endpointutil.Http && endpoint.Scheme != endpointutil.Https) {
-				return fmt.Errorf("invalid --remote-server-endpoint %s: %w", flags.RemoteServerEndpoint, err)
-			} else {
-				flags.RemoteServerEndpoint = endpoint.String()
+			// Normalise the published endpoints (scheme and port filled in)
+			// so every consumer sees the same string. Hosts may stay empty:
+			// the publisher fills them from the agent / node at runtime.
+			endpoint, err := endpointutil.ParseEndpoint(flags.RemoteServerEndpoint,
+				endpointutil.WithDefaultScheme(endpointutil.Http), endpointutil.WithDefaultPort(remote.DefaultServerPort))
+			if err != nil {
+				return fmt.Errorf("invalid --remote-server-endpoint %q: %w", flags.RemoteServerEndpoint, err)
 			}
-			if endpoint, err := endpointutil.ParseEndpoint(flags.RemoteAgentEndpoint, endpointutil.WithDefaultScheme(endpointutil.Grpc),
-				endpointutil.WithDefaultPort(remote.DefaultAgentPort)); err != nil || endpoint.Scheme != endpointutil.Grpc {
-				return fmt.Errorf("invalid --remote-agent-endpoint %s: %w", flags.RemoteAgentEndpoint, err)
-			} else {
-				flags.RemoteAgentEndpoint = endpoint.String()
+			if endpoint.Scheme != endpointutil.Http && endpoint.Scheme != endpointutil.Https {
+				return fmt.Errorf("invalid --remote-server-endpoint %q: scheme must be http or https", flags.RemoteServerEndpoint)
+			}
+			flags.RemoteServerEndpoint = endpoint.String()
+
+			endpoint, err = endpointutil.ParseEndpoint(flags.RemoteAgentEndpoint,
+				endpointutil.WithDefaultScheme(endpointutil.Grpc), endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+			if err != nil {
+				return fmt.Errorf("invalid --remote-agent-endpoint %q: %w", flags.RemoteAgentEndpoint, err)
+			}
+			if endpoint.Scheme != endpointutil.Grpc {
+				return fmt.Errorf("invalid --remote-agent-endpoint %q: scheme must be grpc (it is published to other nodes)", flags.RemoteAgentEndpoint)
+			}
+			flags.RemoteAgentEndpoint = endpoint.String()
+
+			if flags.RemoteAgentLocalEndpoint != "" {
+				endpoint, err = endpointutil.ParseEndpoint(flags.RemoteAgentLocalEndpoint,
+					endpointutil.WithDefaultScheme(endpointutil.Grpc), endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+				if err != nil {
+					return fmt.Errorf("invalid --remote-agent-local-endpoint %q: %w", flags.RemoteAgentLocalEndpoint, err)
+				}
+				if endpoint.Scheme != endpointutil.Grpc && endpoint.Scheme != endpointutil.Unix {
+					return fmt.Errorf("invalid --remote-agent-local-endpoint %q: scheme must be grpc or unix", flags.RemoteAgentLocalEndpoint)
+				}
+				if endpoint.Scheme == endpointutil.Grpc && endpoint.Host == "" {
+					return fmt.Errorf("invalid --remote-agent-local-endpoint %q: a grpc endpoint needs a host", flags.RemoteAgentLocalEndpoint)
+				}
+				flags.RemoteAgentLocalEndpoint = endpoint.String()
 			}
 			if flags.HttpEndpoint != "" {
 				return fmt.Errorf("when the feature gate %s is enabled and the --plugin-mode=%s, --http-endpoint cannot be set",

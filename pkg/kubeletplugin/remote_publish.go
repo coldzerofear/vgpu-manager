@@ -42,19 +42,34 @@ import (
 // prepares every claim through the remote path (design v2.1 D23), so a pod
 // that mixes this node's devices with another node's never sees two
 // incompatible injection paths.
+//
+// What is published about lupine-server comes from the remote-agent on this
+// node (ServerInfo), not from the server: the agent probes it, learns the
+// CUDA version it was built with and the endpoint other nodes can reach it
+// at, and this publisher only needs the agent's address. An operator can
+// still pin either endpoint through the flags; a pinned host is never
+// replaced by what the agent reports.
 type remotePublisher struct {
 	nodeName string
-	// mu guards spec.ServerCUDAVersion, which the watcher updates while
-	// publish paths read it. spec itself is set once at construction.
+	// agentDial is the endpoint this process calls the agent at. Normally
+	// the published one with the host resolved for this node; a unix socket
+	// when --remote-agent-local-endpoint says so.
+	agentDial string
+	// serverEndpoint / agentEndpoint are the operator's flags, parsed. A
+	// non-empty Host pins the published value.
+	serverEndpoint endpointutil.Endpoint
+	agentEndpoint  endpointutil.Endpoint
+	// nodeIP is the fallback host for an unpinned endpoint while the agent
+	// has not reported one.
+	nodeIP string
+	// mu guards spec, which the watcher updates while publish paths read it.
 	mu   sync.RWMutex
 	spec *remote.PublishSpec // nil => local-only node
 }
 
 const (
-	// How long one probe of lupine-server may take.
-	serverProbeTimeout = 3 * time.Second
-	// Poll fast while the server has not answered yet (it normally starts a
-	// little after this plugin), slowly once it has.
+	// Poll fast while the agent/server have not answered yet (they normally
+	// start a little after this plugin), slowly once they have.
 	serverProbeFast = 5 * time.Second
 	serverProbeSlow = 60 * time.Second
 )
@@ -69,40 +84,90 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := endpointutil.ParseEndpoint(config.Flags.RemoteServerEndpoint)
+	serverEndpoint, err := endpointutil.ParseEndpoint(config.Flags.RemoteServerEndpoint,
+		endpointutil.WithDefaultScheme(endpointutil.Http),
+		endpointutil.WithDefaultPort(remote.DefaultServerPort))
 	if err != nil {
 		return nil, fmt.Errorf("parse server endpoint failed: %w", err)
 	}
-	// No host = use this node's InternalIP (the common hostNetwork case).
-	if endpoint.Host == "" {
-		ip, err := nodeInternalIP(ctx, config, config.Flags.NodeName)
-		if err != nil {
-			return nil, fmt.Errorf("derive remote endpoint: %w", err)
-		}
-		endpoint.Host = ip
-	}
-	agentEndpoint, err := endpointutil.ParseEndpoint(config.Flags.RemoteAgentEndpoint)
+	agentEndpoint, err := endpointutil.ParseEndpoint(config.Flags.RemoteAgentEndpoint,
+		endpointutil.WithDefaultScheme(endpointutil.Grpc),
+		endpointutil.WithDefaultPort(remote.DefaultAgentPort))
 	if err != nil {
 		return nil, fmt.Errorf("parse agent endpoint failed: %w", err)
 	}
-	// No host = the agent lives next to the server, reuse its host.
-	if agentEndpoint.Host == "" {
-		agentEndpoint.Host = endpoint.Host
-	}
-	rp.spec = &remote.PublishSpec{
-		Endpoint:      endpoint.String(),
-		AgentEndpoint: agentEndpoint.String(),
-		Selector:      reachable,
-	}
-	klog.V(2).Infof("Remote GPU publishing enabled: server-endpoint=%s agent-endpoint=%s reachable-nodes=%q",
-		endpoint.String(), agentEndpoint.String(), config.Flags.RemoteNodeSelector)
+	rp.serverEndpoint, rp.agentEndpoint = *serverEndpoint, *agentEndpoint
 
-	// Ask the server once right away so the first publish already carries
-	// its version when it is up. If not, the watcher keeps trying.
-	if _, err := rp.refreshServerVersion(ctx); err != nil {
-		klog.V(2).Infof("lupine-server not answering yet (%v); publishing with the driver ceiling until it does", err)
+	// The node's InternalIP stands in for every host nobody supplied:
+	// this is the common hostNetwork case, and it is also what the agent
+	// itself prefers when it discovers the server's address.
+	if serverEndpoint.Host == "" || agentEndpoint.Host == "" {
+		rp.nodeIP, err = nodeInternalIP(ctx, config, config.Flags.NodeName)
+		if err != nil {
+			return nil, fmt.Errorf("derive remote endpoint: %w", err)
+		}
+	}
+
+	// How this process reaches the agent: the local override, else the
+	// published endpoint with the host filled in for this node.
+	if config.Flags.RemoteAgentLocalEndpoint != "" {
+		local, err := endpointutil.ParseEndpoint(config.Flags.RemoteAgentLocalEndpoint,
+			endpointutil.WithDefaultScheme(endpointutil.Grpc),
+			endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+		if err != nil {
+			return nil, fmt.Errorf("parse agent local endpoint failed: %w", err)
+		}
+		rp.agentDial = local.String()
+	} else {
+		dial := *agentEndpoint
+		if dial.Host == "" {
+			if serverEndpoint.Host != "" {
+				dial.Host = serverEndpoint.Host
+			} else {
+				dial.Host = rp.nodeIP
+			}
+		}
+		rp.agentDial = dial.String()
+	}
+
+	rp.spec = &remote.PublishSpec{Selector: reachable}
+	rp.spec.Endpoint, rp.spec.AgentEndpoint = rp.publishedEndpoints("")
+	klog.V(2).Infof("Remote GPU publishing enabled: server-endpoint=%s agent-endpoint=%s (agent dialed at %s) reachable-nodes=%q",
+		rp.spec.Endpoint, rp.spec.AgentEndpoint, rp.agentDial, config.Flags.RemoteNodeSelector)
+
+	// Ask the agent once right away so the first publish already carries
+	// the server's version and endpoint when it is up. If not, the watcher
+	// keeps trying.
+	if _, err := rp.refreshServerInfo(ctx); err != nil {
+		klog.V(2).Infof("lupine-server state not known yet (%v); publishing with the driver ceiling until it is", err)
 	}
 	return rp, nil
+}
+
+// publishedEndpoints derives the server and agent endpoints to publish from
+// the operator's flags and what the agent reported (reported == "" when
+// nothing yet). A pinned host wins; an unpinned server host is the reported
+// endpoint's host, else the node IP; an unpinned agent host follows the
+// server's host, because the two run on the same node.
+func (rp *remotePublisher) publishedEndpoints(reported string) (server, agent string) {
+	s := rp.serverEndpoint
+	if s.Host == "" {
+		s.Host = rp.nodeIP
+		if reported != "" {
+			if r, err := endpointutil.ParseEndpoint(reported,
+				endpointutil.WithDefaultScheme(endpointutil.Http),
+				endpointutil.WithDefaultPort(remote.DefaultServerPort)); err == nil && r.Host != "" && !r.IsLoopback() {
+				s = *r
+			} else {
+				klog.Warningf("remote-agent reported unusable server endpoint %q; publishing %s instead", reported, s.String())
+			}
+		}
+	}
+	a := rp.agentEndpoint
+	if a.Host == "" {
+		a.Host = s.Host
+	}
+	return s.String(), a.String()
 }
 
 func (rp *remotePublisher) enabled() bool {
@@ -135,45 +200,56 @@ func (rp *remotePublisher) currentSpec() *remote.PublishSpec {
 	return &spec
 }
 
-// refreshServerVersion asks lupine-server for its CUDA version and stores
-// it. Returns true when the stored value changed: the first answer, or a
-// server that came back built from another image. A probe failure keeps
-// the last known value (a restart with the same image is the common case).
-func (rp *remotePublisher) refreshServerVersion(ctx context.Context) (bool, error) {
-	info, err := remote.ServerInfo(ctx, rp.spec.AgentEndpoint)
+// refreshServerInfo asks the agent about lupine-server and stores what it
+// learned: the build CUDA version and the endpoints to publish. Returns
+// true when a published value changed: the first answer, a server that
+// came back built from another image, or one that moved. A failed call
+// keeps the last known values (a restart with the same image on the same
+// address is the common case).
+func (rp *remotePublisher) refreshServerInfo(ctx context.Context) (bool, error) {
+	info, err := remote.ServerInfo(ctx, rp.agentDial)
 	if err != nil {
 		return false, err
 	}
 	v, err := semver.NewVersion(info.CudaDriverVersion)
 	if err != nil {
 		return false, fmt.Errorf("remote-agent %s reports unparseable CUDA version %q: %w",
-			rp.spec.AgentEndpoint, info.CudaDriverVersion, err)
+			rp.agentDial, info.CudaDriverVersion, err)
 	}
+	server, agent := rp.publishedEndpoints(info.Endpoint)
+
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
-	if rp.spec.ServerCUDAVersion != nil && rp.spec.ServerCUDAVersion.Equal(v) {
-		return false, nil
+	changed := false
+	if rp.spec.ServerCUDAVersion == nil || !rp.spec.ServerCUDAVersion.Equal(v) {
+		rp.spec.ServerCUDAVersion = v
+		changed = true
 	}
-	rp.spec.ServerCUDAVersion = v
-	return true, nil
+	if rp.spec.Endpoint != server || rp.spec.AgentEndpoint != agent {
+		rp.spec.Endpoint, rp.spec.AgentEndpoint = server, agent
+		changed = true
+	}
+	return changed, nil
 }
 
-// watchServerVersion keeps the published serverCudaVersion in step with the
-// lupine-server actually running on this node. Every change republishes the
-// slices through republish. Runs until ctx is done.
-func (rp *remotePublisher) watchServerVersion(ctx context.Context, republish func(context.Context) error) {
+// watchServerInfo keeps the published serverCudaVersion and endpoints in
+// step with the lupine-server actually running on this node, as reported
+// by the agent. Every change republishes the slices through republish.
+// Runs until ctx is done.
+func (rp *remotePublisher) watchServerInfo(ctx context.Context, republish func(context.Context) error) {
 	for {
 		interval := serverProbeSlow
-		changed, err := rp.refreshServerVersion(ctx)
+		changed, err := rp.refreshServerInfo(ctx)
 		switch {
 		case err != nil:
 			interval = serverProbeFast
-			klog.V(4).Infof("lupine-server version probe: %v", err)
+			klog.V(4).Infof("lupine-server info refresh: %v", err)
 		case changed:
-			klog.Infof("lupine-server %s is built for CUDA %s; republishing devices with serverCudaVersion",
-				rp.spec.Endpoint, rp.currentSpec().ServerCUDAVersion)
+			spec := rp.currentSpec()
+			klog.Infof("lupine-server at %s (agent %s) is built for CUDA %s; republishing devices",
+				spec.Endpoint, spec.AgentEndpoint, spec.ServerCUDAVersion)
 			if err := republish(ctx); err != nil {
-				klog.Errorf("Failed to republish resources after lupine-server version change: %v", err)
+				klog.Errorf("Failed to republish resources after lupine-server change: %v", err)
 				interval = serverProbeFast
 			}
 		}
@@ -195,5 +271,5 @@ func nodeInternalIP(ctx context.Context, config *Config, nodeName string) (strin
 			return addr.Address, nil
 		}
 	}
-	return "", fmt.Errorf("node %s has no InternalIP address; set --remote-endpoint explicitly", nodeName)
+	return "", fmt.Errorf("node %s has no InternalIP address; set --remote-server-endpoint explicitly", nodeName)
 }

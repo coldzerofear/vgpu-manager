@@ -77,9 +77,10 @@ func FeatureGateFlags(featureGates featuregate.MutableVersionedFeatureGate) []cl
 
 func main() {
 	var (
-		kube        pkgflags.KubeClientConfig
-		cfg         remoteagent.Config
-		featureGate = featuregate.NewFeatureGate()
+		kube            pkgflags.KubeClientConfig
+		cfg             remoteagent.Config
+		listenEndpoints string
+		featureGate     = featuregate.NewFeatureGate()
 		// klog flags (-v etc.), same wiring as cmd/kubelet-plugin.
 		loggingConfig = pkgflags.NewLoggingConfig()
 	)
@@ -98,8 +99,9 @@ func main() {
 		&cli.StringFlag{Name: "ready-file", Usage: "File written after preflight; the server container waits for it. Defaults to <session-base>/.agent-ready.", Destination: &cfg.ReadyFile, EnvVars: []string{"READY_FILE"}},
 		&cli.StringFlag{Name: "container-manager-dir", Usage: "Configure the container mount path used by vgpu-manager.", Value: util.ManagerRootPath, Destination: &cfg.ContainerManagerDir, EnvVars: []string{"CONTAINER_MANAGER_DIR"}},
 		&cli.StringFlag{Name: "config-session-base", Usage: "Session directory root shared with lupine-server (VGPU_CONFIG_SESSION_BASE).", Value: util.RemoteSessionBasePath, Destination: &cfg.SessionBase, EnvVars: []string{"VGPU_CONFIG_SESSION_BASE"}},
-		&cli.StringFlag{Name: "remote-server-endpoint", Usage: "Lupine remote service endpoint.", Value: fmt.Sprintf("127.0.0.1:%d", remote.DefaultServerPort), Destination: &cfg.ServerEndpoint, EnvVars: []string{"REMOTE_SERVER_ENDPOINT"}},
-		&cli.StringFlag{Name: "listen-server-endpoint", Usage: "Agent grpc service listening endpoint.", Value: fmt.Sprintf("0.0.0.0:%d", remote.DefaultAgentPort), Destination: &cfg.ListenEndpoint, EnvVars: []string{"LISTEN_SERVER_ENDPOINT"}},
+		&cli.StringFlag{Name: "remote-server-endpoint", Usage: "lupine-server endpoint to probe (URL form, http/https; host defaults to 127.0.0.1 = same pod). When the host is a loopback, the agent discovers the address other nodes can reach the server at and reports that from ServerInfo.", Value: fmt.Sprintf("127.0.0.1:%d", remote.DefaultServerPort), Destination: &cfg.ServerEndpoint, EnvVars: []string{"REMOTE_SERVER_ENDPOINT"}},
+		&cli.StringFlag{Name: "advertise-server-endpoint", Usage: "lupine-server endpoint reported to other components verbatim (URL form, e.g. https://gpu-a.corp/pool-a), instead of the probed/discovered one. For DNS names or gateways this host cannot reach itself.", Destination: &cfg.AdvertiseEndpoint, EnvVars: []string{"ADVERTISE_SERVER_ENDPOINT"}},
+		&cli.StringFlag{Name: "listen-server-endpoint", Usage: "Agent gRPC listen endpoints, comma separated: grpc://host:port (empty host = all interfaces) and/or unix:///path.sock for same-node callers.", Value: fmt.Sprintf("0.0.0.0:%d", remote.DefaultAgentPort), Destination: &listenEndpoints, EnvVars: []string{"LISTEN_SERVER_ENDPOINT"}},
 		&cli.DurationFlag{Name: "gc-interval", Usage: "Orphaned session sweep interval.", Value: time.Minute, Destination: &cfg.GCInterval, EnvVars: []string{"GC_INTERVAL"}},
 	}, kube.Flags()...)
 	flags = append(flags, FeatureGateFlags(featureGate)...)
@@ -121,7 +123,10 @@ func main() {
 				endpointutil.WithDefaultScheme(endpointutil.Http),
 				endpointutil.WithDefaultPort(remote.DefaultServerPort))
 			if err != nil {
-				return fmt.Errorf("parse remote endpoint failed: %w", err)
+				return fmt.Errorf("invalid --remote-server-endpoint %q: %w", cfg.ServerEndpoint, err)
+			}
+			if endpoint.Scheme != endpointutil.Http && endpoint.Scheme != endpointutil.Https {
+				return fmt.Errorf("invalid --remote-server-endpoint %q: scheme must be http or https", cfg.ServerEndpoint)
 			}
 			// The probed lupine-server runs in the same pod by default.
 			if endpoint.Host == "" {
@@ -129,16 +134,32 @@ func main() {
 			}
 			cfg.ServerEndpoint = endpoint.String()
 
-			endpoint, err = endpointutil.ParseEndpoint(cfg.ListenEndpoint,
+			if cfg.AdvertiseEndpoint != "" {
+				advertise, err := endpointutil.ParseEndpoint(cfg.AdvertiseEndpoint,
+					endpointutil.WithDefaultScheme(endpointutil.Http),
+					endpointutil.WithDefaultPort(remote.DefaultServerPort))
+				if err != nil {
+					return fmt.Errorf("invalid --advertise-server-endpoint %q: %w", cfg.AdvertiseEndpoint, err)
+				}
+				if (advertise.Scheme != endpointutil.Http && advertise.Scheme != endpointutil.Https) || advertise.IsLoopback() {
+					return fmt.Errorf("invalid --advertise-server-endpoint %q: must be an http/https endpoint with a host other nodes can reach", cfg.AdvertiseEndpoint)
+				}
+				cfg.AdvertiseEndpoint = advertise.String()
+			}
+
+			listens, err := endpointutil.ParseEndpoints(listenEndpoints,
 				endpointutil.WithDefaultScheme(endpointutil.Grpc),
 				endpointutil.WithDefaultPort(remote.DefaultAgentPort))
 			if err != nil {
-				return fmt.Errorf("parse listen endpoint failed: %w", err)
+				return fmt.Errorf("invalid --listen-server-endpoint %q: %w", listenEndpoints, err)
 			}
-			if endpoint.Host == "" {
-				endpoint.Host = "0.0.0.0"
+			cfg.ListenEndpoints = cfg.ListenEndpoints[:0]
+			for _, listen := range listens {
+				if listen.Scheme != endpointutil.Grpc && listen.Scheme != endpointutil.Unix {
+					return fmt.Errorf("invalid --listen-server-endpoint %q: scheme must be grpc or unix", listen.String())
+				}
+				cfg.ListenEndpoints = append(cfg.ListenEndpoints, listen.String())
 			}
-			cfg.ListenEndpoint = endpoint.String()
 
 			cfg.FeatureGate = featureGate
 			if cfg.ReadyFile == "" {

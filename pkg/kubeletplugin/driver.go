@@ -291,11 +291,13 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 
 	if remotePub.enabled() {
-		// Keep serverCudaVersion in step with the lupine-server actually running
-		// here: it may start after us, or come back from a restart built from
-		// another image. Each change republishes the slices.
+		// Keep serverCudaVersion and the published endpoints in step with the
+		// lupine-server actually running here, as the remote-agent reports it:
+		// it may start after us, come back from a restart built from another
+		// image, or be advertised at another address. Each change republishes
+		// the slices.
 		driver.wg.Go(func() {
-			remotePub.watchServerVersion(ctx, func(ctx context.Context) error {
+			remotePub.watchServerInfo(ctx, func(ctx context.Context) error {
 				return driver.publishResources(ctx, config)
 			})
 		})

@@ -65,10 +65,20 @@ type Config struct {
 	ContainerManagerDir string
 	// ReadyFile is written after preflight; the server container waits for it.
 	ReadyFile string
-	// ServerEndpoint is the lupine-server address to probe (host:port).
+	// ServerEndpoint is the lupine-server address to probe, URL form
+	// (http://host:port[/path]). The host is normally a loopback: the server
+	// runs in the same pod. What other nodes are told is decided separately,
+	// see AdvertiseEndpoint and serverState.Endpoint.
 	ServerEndpoint string
-	// ListenEndpoint is the gRPC listen port (all interfaces).
-	ListenEndpoint string
+	// AdvertiseEndpoint, when set, is reported to callers of ServerInfo as the
+	// server's endpoint verbatim (URL form) instead of the discovered one.
+	// For DNS names and gateways that this host cannot resolve or reach
+	// itself; it is not probed.
+	AdvertiseEndpoint string
+	// ListenEndpoints are the gRPC listen addresses, URL form; grpc://host:port
+	// for TCP (empty host = all interfaces) and unix:///path for a socket.
+	// The same service is served on every one of them.
+	ListenEndpoints []string
 	// GCInterval bounds how often orphaned sessions are swept.
 	GCInterval  time.Duration
 	FeatureGate featuregate.MutableVersionedFeatureGate
@@ -92,11 +102,19 @@ type Agent struct {
 	claimInformer cache.SharedIndexInformer
 	claimCache    cache.MutationCache
 
-	nodeDevices            atomic.Pointer[NodeDevices]
-	serverCudaVersion      atomic.Pointer[string]
-	serverExternalEndpoint atomic.Pointer[string]
-	serverUp               atomic.Bool
-	smWatcherPresent       atomic.Bool
+	nodeDevices      atomic.Pointer[NodeDevices]
+	smWatcherPresent atomic.Bool
+
+	// server is the latest lupine-server observation (never nil after New).
+	server atomic.Pointer[serverState]
+	// probeMu serialises probes: the periodic loop and an on-demand probe
+	// from EnsureSession must not run discovery twice at once.
+	probeMu sync.Mutex
+
+	// nodeAddrs caches the node's InternalIP list for discovery.
+	nodeAddrsMu sync.Mutex
+	nodeAddrs   []string
+	nodeAddrsAt time.Time
 
 	// hasReady reports (without blocking) whether every informer cache and
 	// event-handler registration has synced; nil until Run wires it.
@@ -108,7 +126,14 @@ func New(cfg Config) *Agent {
 		cfg.GCInterval = time.Minute
 	}
 	store := NewSessionStore(cfg)
-	return &Agent{cfg: cfg, store: store}
+	a := &Agent{cfg: cfg, store: store}
+	a.server.Store(&serverState{})
+	return a
+}
+
+// serverSnapshot returns the latest lupine-server observation.
+func (a *Agent) serverSnapshot() *serverState {
+	return a.server.Load()
 }
 
 // Run blocks until ctx is done.
@@ -231,12 +256,12 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.checkSMWatcher, 30*time.Second) })
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.gcSessions, a.cfg.GCInterval) })
 
-	// 4. gRPC.
-	endpoint, _ := endpointutil.ParseEndpoint(a.cfg.ListenEndpoint)
-
-	lis, err := net.Listen("tcp", endpoint.HostPort())
+	// 4. gRPC: one server, every configured listener (TCP for other nodes,
+	// a unix socket for same-node callers). All listeners must bind before
+	// the ready file is written, so a bad address fails startup loudly.
+	listeners, err := a.listen()
 	if err != nil {
-		return fmt.Errorf("listen endpoint %q: %w", endpoint.HostPort(), err)
+		return err
 	}
 
 	srv := grpc.NewServer()
@@ -248,42 +273,139 @@ func (a *Agent) Run(ctx context.Context) error {
 		srv.GracefulStop()
 	})
 
-	a.wg.Go(func() {
-		defer cancel()
-		// Signal the server container only now: with the caches synced,
-		// EnsureSession answers correctly from the first request.
-		if err = a.writeReadyFile(); err != nil {
-			return
+	// Signal the server container only now: with the caches synced,
+	// EnsureSession answers correctly from the first request.
+	if err := a.writeReadyFile(); err != nil {
+		for _, lis := range listeners {
+			_ = lis.Close()
 		}
-		klog.Infof("remote-agent serving on %s (node %s, session base %s)", endpoint.HostPort(), a.cfg.NodeName, a.cfg.SessionBase)
-		if err = srv.Serve(lis); err != nil && (errors.Is(err, grpc.ErrServerStopped) || errors.Is(err, net.ErrClosed)) {
-			err = nil
-		}
-	})
+		cancel()
+		a.wg.Wait()
+		return err
+	}
+
+	var (
+		serveMu  sync.Mutex
+		serveErr error
+	)
+	for _, lis := range listeners {
+		a.wg.Go(func() {
+			klog.Infof("remote-agent serving on %s://%s (node %s, session base %s)",
+				lis.Addr().Network(), lis.Addr().String(), a.cfg.NodeName, a.cfg.SessionBase)
+			err := srv.Serve(lis)
+			if err != nil && !errors.Is(err, grpc.ErrServerStopped) && !errors.Is(err, net.ErrClosed) {
+				serveMu.Lock()
+				if serveErr == nil {
+					serveErr = fmt.Errorf("serve %s://%s: %w", lis.Addr().Network(), lis.Addr().String(), err)
+				}
+				serveMu.Unlock()
+			}
+			// One listener failing takes the agent down: a half-reachable
+			// agent is worse than a restart.
+			cancel()
+		})
+	}
 
 	a.wg.Wait()
 
-	return err
+	return serveErr
+}
+
+// listen binds every configured endpoint. A unix socket path left behind by
+// a previous instance is removed first, unless something still answers on
+// it, which means two agents were configured for the same socket.
+func (a *Agent) listen() ([]net.Listener, error) {
+	var listeners []net.Listener
+	closeAll := func() {
+		for _, lis := range listeners {
+			_ = lis.Close()
+		}
+	}
+	if len(a.cfg.ListenEndpoints) == 0 {
+		return nil, fmt.Errorf("no listen endpoint configured")
+	}
+	for _, raw := range a.cfg.ListenEndpoints {
+		endpoint, err := endpointutil.ParseEndpoint(raw,
+			endpointutil.WithDefaultScheme(endpointutil.Grpc),
+			endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+		if err != nil {
+			closeAll()
+			return nil, fmt.Errorf("listen endpoint %q: %w", raw, err)
+		}
+		var lis net.Listener
+		switch endpoint.Scheme {
+		case endpointutil.Unix:
+			lis, err = listenUnix(endpoint.Path)
+		case endpointutil.Grpc:
+			lis, err = net.Listen("tcp", endpoint.HostPort())
+		default:
+			err = fmt.Errorf("unsupported listen scheme %q (want grpc:// or unix://)", endpoint.Scheme)
+		}
+		if err != nil {
+			closeAll()
+			return nil, fmt.Errorf("listen endpoint %q: %w", raw, err)
+		}
+		listeners = append(listeners, lis)
+	}
+	return listeners, nil
+}
+
+func listenUnix(path string) (net.Listener, error) {
+	if err := util.EnsureDir(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("%s exists and is not a socket", path)
+		}
+		// Stale socket from a previous instance, or a live one from another?
+		if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("%s is already served by another process", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("remove stale socket %s: %w", path, err)
+		}
+	}
+	lis, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	// The callers are node components running as root; keep the socket
+	// from being a channel for anything else on the host.
+	if err := os.Chmod(path, 0o660); err != nil {
+		_ = lis.Close()
+		return nil, fmt.Errorf("chmod %s: %w", path, err)
+	}
+	return lis, nil
 }
 
 // Check implements [grpc_health_v1.HealthServer].
+//
+//   - "" and "liveness": the informer caches have synced (the agent can
+//     answer EnsureSession at all);
+//   - "readiness": that, and lupine-server answered the last probe -- the
+//     signal a consumer should gate on before sending sessions here.
 func (a *Agent) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+	ready := func() bool { return a.hasReady != nil && a.hasReady() }
 	knownServices := map[string]func() bool{
-		"": a.hasReady, "liveness": a.hasReady, "readiness": func() bool {
-			return a.hasReady() && a.serverUp.Load()
+		"":         ready,
+		"liveness": ready,
+		"readiness": func() bool {
+			return ready() && a.serverSnapshot().Up
 		},
 	}
 	checkFn, known := knownServices[req.GetService()]
 	if !known {
 		return nil, status.Error(codes.NotFound, "unknown service")
 	}
-	status := &grpc_health_v1.HealthCheckResponse{
+	resp := &grpc_health_v1.HealthCheckResponse{
 		Status: grpc_health_v1.HealthCheckResponse_SERVING,
 	}
 	if !checkFn() {
-		status.Status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
+		resp.Status = grpc_health_v1.HealthCheckResponse_NOT_SERVING
 	}
-	return status, nil
+	return resp, nil
 }
 
 func (a *Agent) writeReadyFile() error {
@@ -313,21 +435,99 @@ func (a *Agent) refreshNodeDevices() {
 
 // probeServer checks that lupine-server really answers, not just that the
 // port is open: one HTTP GET on the RPC port (served since lupine #660) that
-// also tells us which CUDA version the server was built with.
+// also tells us which CUDA version the server was built with. On success it
+// also settles the endpoint other nodes should use (see resolveEndpoint) and
+// publishes the whole observation at once.
+//
+// Probes are serialised: when the periodic loop and an on-demand probe from
+// EnsureSession collide, only one runs (see probe).
 func (a *Agent) probeServer(ctx context.Context) {
-	version, err := remote.ProbeServerCUDAVersion(ctx, a.cfg.ServerEndpoint, 2*time.Second)
-	up := err == nil
-	if a.serverUp.Swap(up) != up {
-		if up {
-			klog.Infof("lupine-server %s answering, built for CUDA %s", a.cfg.ServerEndpoint, version)
-		} else {
+	a.probe(ctx, true)
+}
+
+// probe is one observation of lupine-server. discover allows the (bounded
+// but slow) address discovery; the on-demand probe from EnsureSession runs
+// without it so it stays well inside the caller's deadline, and skips
+// entirely when a periodic probe is already in flight -- its result lands
+// in a moment anyway.
+func (a *Agent) probe(ctx context.Context, discover bool) {
+	if discover {
+		a.probeMu.Lock()
+	} else if !a.probeMu.TryLock() {
+		return
+	}
+	defer a.probeMu.Unlock()
+
+	prev := a.serverSnapshot()
+	next := &serverState{CudaVersion: prev.CudaVersion, Endpoint: prev.Endpoint, LastProbe: time.Now()}
+
+	version, err := remote.ProbeServerCUDAVersion(ctx, a.cfg.ServerEndpoint, candidateProbeTimeout)
+	if err != nil {
+		// Keep the last known version and endpoint (see serverState); only
+		// reachability flips.
+		a.server.Store(next)
+		if prev.Up {
 			klog.Infof("lupine-server %s not answering: %v", a.cfg.ServerEndpoint, err)
 		}
+		return
 	}
-	if up {
-		original := version.Original()
-		a.serverCudaVersion.Store(&original)
+	next.Up = true
+	next.CudaVersion = version.Original()
+	next.Endpoint = a.resolveEndpoint(ctx, prev.Endpoint, discover)
+	a.server.Store(next)
+
+	switch {
+	case !prev.Up:
+		klog.Infof("lupine-server %s answering, built for CUDA %s, advertised as %q", a.cfg.ServerEndpoint, next.CudaVersion, next.Endpoint)
+	case prev.CudaVersion != next.CudaVersion:
+		klog.Infof("lupine-server %s now built for CUDA %s (was %s)", a.cfg.ServerEndpoint, next.CudaVersion, prev.CudaVersion)
 	}
+	if prev.Endpoint != next.Endpoint {
+		klog.Infof("lupine-server advertised endpoint changed: %q -> %q", prev.Endpoint, next.Endpoint)
+	}
+}
+
+// resolveEndpoint decides what ServerInfo reports as the server's endpoint,
+// given that the probe endpoint answered just now:
+//
+//   - AdvertiseEndpoint set: that, verbatim (operator knows best);
+//   - probe host routable (not loopback/unspecified/localhost): the probe
+//     endpoint itself;
+//   - probe host is a loopback: the previously discovered endpoint if it
+//     still answers (sticky, so a flaky candidate does not make the
+//     published attribute flap), else -- when discover allows it -- a fresh
+//     discovery over this host's addresses; "" when nothing routable
+//     answers (or discovery was not allowed this time).
+func (a *Agent) resolveEndpoint(ctx context.Context, current string, discover bool) string {
+	if a.cfg.AdvertiseEndpoint != "" {
+		return a.cfg.AdvertiseEndpoint
+	}
+	probe, err := endpointutil.ParseEndpoint(a.cfg.ServerEndpoint,
+		endpointutil.WithDefaultScheme(endpointutil.Http),
+		endpointutil.WithDefaultPort(remote.DefaultServerPort))
+	if err != nil {
+		// Validated at startup; unreachable in practice.
+		klog.Errorf("server endpoint %q: %v", a.cfg.ServerEndpoint, err)
+		return ""
+	}
+	if !probe.IsLoopback() {
+		return probe.String()
+	}
+	if current != "" {
+		if _, err := remote.ProbeServerCUDAVersion(ctx, current, candidateProbeTimeout); err == nil {
+			return current
+		}
+		if !discover {
+			// Keep it until the periodic probe can rediscover: flapping the
+			// published attribute on a quick check helps nobody.
+			return current
+		}
+		klog.V(2).Infof("advertised endpoint %s stopped answering; rediscovering", current)
+	}
+	if !discover {
+		return ""
+	}
+	return a.discoverExternalEndpoint(ctx, probe)
 }
 
 // gcSessions removes sessions whose claim no longer exists or is no longer
@@ -411,25 +611,41 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
 	}
+	// The session is on disk; whether the pod may start depends on the
+	// server accepting connections. The periodic probe can lag a server
+	// restart by one period, so a negative answer is re-checked right now
+	// rather than failing the caller's NodePrepare on stale state.
+	state := a.serverSnapshot()
+	if !state.Up {
+		a.probe(ctx, false)
+		state = a.serverSnapshot()
+	}
 	var msg string
-	ready := a.serverUp.Load()
-	if !ready {
+	if !state.Up {
 		msg = "lupine-server is not accepting connections yet"
 	}
-	return &remoteagent.EnsureSessionResponse{Ready: ready, CudaDriverVersion: nd.CudaVersionString(), Message: msg}, nil
+	return &remoteagent.EnsureSessionResponse{Ready: state.Up, CudaDriverVersion: nd.CudaVersionString(), Message: msg}, nil
 }
 
-// ServerInfo implements remoteagent.RemoteAgentServer.
+// ServerInfo implements remoteagent.RemoteAgentServer. It is the one place
+// other components learn about lupine-server from: whether it answers, the
+// CUDA version it was built with, and the endpoint they should hand to
+// clients -- so none of them needs the server's address configured, and a
+// server that moves (or an operator that sets --advertise-server-endpoint)
+// is picked up on the next call.
+//
+// endpoint is "" while no routable address is known (probe host is a
+// loopback and discovery found nothing); cuda_driver_version is "" until
+// the first successful probe. Both keep their last value while listening
+// is false.
 func (a *Agent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*remoteagent.ServerInfoResponse, error) {
-	resp := &remoteagent.ServerInfoResponse{
-		Listening: a.serverUp.Load(),
-		Endpoint:  a.cfg.ServerEndpoint,
-		NodeName:  a.cfg.NodeName,
-	}
-	if load := a.serverCudaVersion.Load(); load != nil {
-		resp.CudaDriverVersion = *load
-	}
-	return resp, nil
+	state := a.serverSnapshot()
+	return &remoteagent.ServerInfoResponse{
+		Listening:         state.Up,
+		Endpoint:          state.Endpoint,
+		CudaDriverVersion: state.CudaVersion,
+		NodeName:          a.cfg.NodeName,
+	}, nil
 }
 
 // checkSMWatcher verifies the external SM watcher contract when sessions are
