@@ -34,7 +34,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/nri"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/urfave/cli/v2"
 	"k8s.io/component-base/logs"
@@ -303,13 +302,9 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 			}
 			// The only remote-path address this process needs: its own node's
 			// agent. Everything published comes from the agent at runtime.
-			endpoint, err := endpointutil.ParseEndpoint(flags.RemoteAgentEndpoint,
-				endpointutil.WithDefaultScheme(endpointutil.Grpc), endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+			endpoint, err := remote.ParseAgentEndpoint(flags.RemoteAgentEndpoint)
 			if err != nil {
-				return fmt.Errorf("invalid --remote-agent-endpoint %q: %w", flags.RemoteAgentEndpoint, err)
-			}
-			if endpoint.Scheme != endpointutil.Grpc && endpoint.Scheme != endpointutil.Unix {
-				return fmt.Errorf("invalid --remote-agent-endpoint %q: scheme must be grpc or unix", flags.RemoteAgentEndpoint)
+				return fmt.Errorf("invalid --remote-agent-endpoint: %w", err)
 			}
 			flags.RemoteAgentEndpoint = endpoint.String()
 			if flags.HttpEndpoint != "" {

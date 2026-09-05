@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver"
-	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 )
 
 // ServerCUDAVersionHeader is the response header lupine-server puts on every
@@ -43,26 +42,6 @@ var probeClient = &http.Client{
 		},
 		DisableKeepAlives: true,
 	},
-}
-
-// ParseServerEndpoint parses a lupine-server endpoint the way the lupine
-// client reads LUPINE_SERVER (docs/lupine_env_reference.md): http (default,
-// port DefaultServerPort) or https (TLS through a terminating proxy, port
-// 443), host optional, path optional.
-func ParseServerEndpoint(raw string) (*endpointutil.Endpoint, error) {
-	e, err := endpointutil.ParseEndpoint(raw, endpointutil.WithDefaultScheme(endpointutil.Http))
-	if err != nil {
-		return nil, fmt.Errorf("invalid lupine-server endpoint %q: %w", raw, err)
-	}
-	switch e.Scheme {
-	case endpointutil.Http:
-		e.DefaultPort(DefaultServerPort)
-	case endpointutil.Https:
-		e.DefaultPort(443)
-	default:
-		return nil, fmt.Errorf("invalid lupine-server endpoint %q: scheme must be http or https", raw)
-	}
-	return e, nil
 }
 
 // ProbeServerCUDAVersion asks the lupine-server at endpoint which CUDA

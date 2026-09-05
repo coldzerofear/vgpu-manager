@@ -106,6 +106,9 @@ type Agent struct {
 	nodeDevices      atomic.Pointer[NodeDevices]
 	smWatcherPresent atomic.Bool
 
+	// serverProbe is cfg.ServerEndpoint parsed once; nil when it does not
+	// parse, which Run reports instead of probing nothing forever.
+	serverProbe *endpointutil.Endpoint
 	// server is the latest lupine-server observation (never nil after New).
 	server atomic.Pointer[serverState]
 	// probeMu serialises probes: the periodic loop and an on-demand probe
@@ -133,6 +136,11 @@ func New(cfg Config) *Agent {
 	store := NewSessionStore(cfg)
 	a := &Agent{cfg: cfg, store: store}
 	a.server.Store(&serverState{})
+	if probe, err := remote.ParseServerEndpoint(cfg.ServerEndpoint); err == nil {
+		a.serverProbe = probe
+	} else {
+		klog.Errorf("%v", err)
+	}
 	return a
 }
 
@@ -143,6 +151,9 @@ func (a *Agent) serverSnapshot() *serverState {
 
 // Run blocks until ctx is done.
 func (a *Agent) Run(ctx context.Context) error {
+	if a.serverProbe == nil {
+		return fmt.Errorf("invalid lupine-server endpoint %q", a.cfg.ServerEndpoint)
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -333,12 +344,10 @@ func (a *Agent) listen() ([]net.Listener, error) {
 		return nil, fmt.Errorf("no listen endpoint configured")
 	}
 	for _, raw := range a.cfg.ListenEndpoints {
-		endpoint, err := endpointutil.ParseEndpoint(raw,
-			endpointutil.WithDefaultScheme(endpointutil.Grpc),
-			endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+		endpoint, err := remote.ParseAgentEndpoint(raw)
 		if err != nil {
 			closeAll()
-			return nil, fmt.Errorf("listen endpoint %q: %w", raw, err)
+			return nil, fmt.Errorf("listen endpoint: %w", err)
 		}
 		var lis net.Listener
 		switch endpoint.Scheme {
@@ -474,13 +483,14 @@ func (a *Agent) probe(ctx context.Context, discover bool) {
 	defer a.probeMu.Unlock()
 
 	prev := a.serverSnapshot()
-	next := &serverState{CudaVersion: prev.CudaVersion, Endpoint: prev.Endpoint, LastProbe: time.Now()}
+	next := *prev // everything is kept unless learned anew below
+	next.Up, next.LastProbe = false, time.Now()
 
 	version, err := remote.ProbeServerCUDAVersion(ctx, a.cfg.ServerEndpoint, candidateProbeTimeout)
 	if err != nil {
-		// Keep the last known version and endpoint (see serverState); only
-		// reachability flips.
-		a.server.Store(next)
+		// Keep the last known version, hosts and endpoints (see
+		// serverState); only reachability flips.
+		a.server.Store(&next)
 		if prev.Up {
 			klog.Infof("lupine-server %s not answering: %v", a.cfg.ServerEndpoint, err)
 		}
@@ -491,7 +501,7 @@ func (a *Agent) probe(ctx context.Context, discover bool) {
 	next.RoutableHost = a.resolveRoutableHost(ctx, prev.RoutableHost, discover)
 	next.Endpoint = a.serverEndpointFor(next.RoutableHost)
 	next.AgentEndpoint = a.agentEndpointFor(next.RoutableHost)
-	a.server.Store(next)
+	a.server.Store(&next)
 
 	switch {
 	case !prev.Up:
@@ -506,17 +516,6 @@ func (a *Agent) probe(ctx context.Context, discover bool) {
 	}
 }
 
-// probeEndpoint is --remote-server-endpoint parsed; validated at startup,
-// so a failure here is a programming error and yields nil.
-func (a *Agent) probeEndpoint() *endpointutil.Endpoint {
-	probe, err := remote.ParseServerEndpoint(a.cfg.ServerEndpoint)
-	if err != nil {
-		klog.Errorf("%v", err)
-		return nil
-	}
-	return probe
-}
-
 // resolveRoutableHost decides which address of this machine other nodes
 // should use, given that the probe endpoint answered just now:
 //
@@ -527,10 +526,7 @@ func (a *Agent) probeEndpoint() *endpointutil.Endpoint {
 //     it -- a fresh discovery over this host's addresses; "" when nothing
 //     routable answers (or discovery was not allowed this time).
 func (a *Agent) resolveRoutableHost(ctx context.Context, current string, discover bool) string {
-	probe := a.probeEndpoint()
-	if probe == nil {
-		return ""
-	}
+	probe := a.serverProbe
 	if !probe.IsLoopback() {
 		return probe.Host
 	}
@@ -558,11 +554,10 @@ func (a *Agent) serverEndpointFor(host string) string {
 	if a.cfg.AdvertiseEndpoint != "" {
 		return a.cfg.AdvertiseEndpoint
 	}
-	probe := a.probeEndpoint()
-	if probe == nil || host == "" {
+	if host == "" {
 		return ""
 	}
-	e := *probe
+	e := *a.serverProbe
 	e.Host = host
 	return e.String()
 }
@@ -576,10 +571,12 @@ func (a *Agent) agentEndpointFor(host string) string {
 		return ""
 	}
 	e := *tcp
-	if e.IsLoopback() {
+	if e.IsWildcard() {
 		e.Host = host
 	}
-	if e.Host == "" {
+	if e.Host == "" || e.IsLoopback() {
+		// Bound to a loopback address on purpose: reachable from this node
+		// only, so there is nothing to advertise.
 		return ""
 	}
 	return e.String()

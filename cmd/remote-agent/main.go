@@ -28,7 +28,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
 	"github.com/urfave/cli/v2"
@@ -140,18 +139,19 @@ func main() {
 				cfg.AdvertiseEndpoint = advertise.String()
 			}
 
-			listens, err := endpointutil.ParseEndpoints(listenEndpoints,
-				endpointutil.WithDefaultScheme(endpointutil.Grpc),
-				endpointutil.WithDefaultPort(remote.DefaultAgentPort))
-			if err != nil {
-				return fmt.Errorf("invalid --listen-server-endpoint %q: %w", listenEndpoints, err)
-			}
-			cfg.ListenEndpoints = cfg.ListenEndpoints[:0]
-			for _, listen := range listens {
-				if listen.Scheme != endpointutil.Grpc && listen.Scheme != endpointutil.Unix {
-					return fmt.Errorf("invalid --listen-server-endpoint %q: scheme must be grpc or unix", listen.String())
+			cfg.ListenEndpoints = nil
+			for _, raw := range strings.Split(listenEndpoints, ",") {
+				if strings.TrimSpace(raw) == "" {
+					continue
+				}
+				listen, err := remote.ParseAgentEndpoint(raw)
+				if err != nil {
+					return fmt.Errorf("invalid --listen-server-endpoint: %w", err)
 				}
 				cfg.ListenEndpoints = append(cfg.ListenEndpoints, listen.String())
+			}
+			if len(cfg.ListenEndpoints) == 0 {
+				return fmt.Errorf("invalid --listen-server-endpoint %q: empty", listenEndpoints)
 			}
 
 			cfg.FeatureGate = featureGate

@@ -280,7 +280,7 @@ func TestListen(t *testing.T) {
 		if err := os.WriteFile(regular, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		for _, eps := range [][]string{{"unix://" + regular}, {"http://127.0.0.1:0"}, {}, {"unix://relative.sock"}} {
+		for _, eps := range [][]string{{"unix://" + regular}, {"ftp://127.0.0.1:0"}, {}, {"unix://relative.sock"}} {
 			if listeners, err := New(Config{ListenEndpoints: eps}).listen(); err == nil {
 				for _, l := range listeners {
 					_ = l.Close()
@@ -289,4 +289,52 @@ func TestListen(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestProbeKeepsEndpointsWhileDown(t *testing.T) {
+	ctx := context.Background()
+	srv, version := fakeLupine(t)
+	a := New(Config{NodeName: "gpu-node", ServerEndpoint: srv.URL, AdvertiseEndpoint: "https://gpu-a.corp:443/pool-a", SessionBase: t.TempDir()})
+	// Pretend discovery found a host and the agent is bound to it.
+	a.agentTCP.Store(&endpointutil.Endpoint{Scheme: endpointutil.Grpc, Host: "10.9.9.9", Port: "15000"})
+	a.probeServer(ctx)
+	up, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{})
+	if !up.Listening || up.AgentEndpoint != "grpc://10.9.9.9:15000" {
+		t.Fatalf("%+v", up)
+	}
+	version.Store("")
+	a.probeServer(ctx)
+	down, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{})
+	if down.Listening || down.Endpoint != up.Endpoint || down.AgentEndpoint != up.AgentEndpoint || down.CudaDriverVersion != up.CudaDriverVersion {
+		t.Fatalf("a failed probe must flip only listening: up=%+v down=%+v", up, down)
+	}
+}
+
+func TestAgentEndpointFor(t *testing.T) {
+	a := New(Config{ServerEndpoint: "http://127.0.0.1:14833"})
+	cases := []struct {
+		bound *endpointutil.Endpoint
+		host  string
+		want  string
+	}{
+		{nil, "10.0.0.7", ""}, // no TCP listener
+		{&endpointutil.Endpoint{Scheme: endpointutil.Grpc, Port: "14834"}, "", ""}, // wildcard, host unknown
+		{&endpointutil.Endpoint{Scheme: endpointutil.Grpc, Port: "14834"}, "10.0.0.7", "grpc://10.0.0.7:14834"},
+		{&endpointutil.Endpoint{Scheme: endpointutil.Grpc, Host: "0.0.0.0", Port: "14834"}, "10.0.0.7", "grpc://10.0.0.7:14834"},
+		{&endpointutil.Endpoint{Scheme: endpointutil.Grpc, Host: "10.9.9.9", Port: "15000"}, "10.0.0.7", "grpc://10.9.9.9:15000"},
+		{&endpointutil.Endpoint{Scheme: endpointutil.Grpc, Host: "127.0.0.1", Port: "14834"}, "10.0.0.7", ""}, // loopback-only listener
+	}
+	for _, c := range cases {
+		a.agentTCP.Store(c.bound)
+		if got := a.agentEndpointFor(c.host); got != c.want {
+			t.Errorf("agentEndpointFor(bound=%v, host=%q) = %q, want %q", c.bound, c.host, got, c.want)
+		}
+	}
+}
+
+func TestNewRejectsBadServerEndpoint(t *testing.T) {
+	a := New(Config{ServerEndpoint: "ftp://x"})
+	if err := a.Run(context.Background()); err == nil {
+		t.Fatal("Run must refuse an unparseable server endpoint")
+	}
 }

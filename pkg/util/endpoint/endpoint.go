@@ -91,20 +91,33 @@ func (e Endpoint) DialTarget() string {
 	return e.HostPort()
 }
 
-// IsLoopback reports whether the host names this machine only: a loopback or
-// unspecified IP, "localhost", or no host at all. Such an endpoint works for
-// a same-host probe but must never be advertised to other nodes.
-func (e Endpoint) IsLoopback() bool {
+// IsWildcard reports whether the host is unset or the unspecified address
+// ("", 0.0.0.0, ::): as a listen address it means every interface, as a dial
+// address it means "fill in a host".
+func (e Endpoint) IsWildcard() bool {
 	if e.Scheme == Unix {
+		return false
+	}
+	if e.Host == "" {
 		return true
 	}
-	if e.Host == "" || strings.EqualFold(e.Host, "localhost") {
+	ip := net.ParseIP(e.Host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// IsLoopback reports whether the host names this machine only: a loopback or
+// unspecified IP, "localhost", no host at all, or a unix socket. Such an
+// endpoint works for a same-host probe but must never be advertised to
+// other nodes.
+func (e Endpoint) IsLoopback() bool {
+	if e.Scheme == Unix || e.IsWildcard() {
 		return true
 	}
-	if ip := net.ParseIP(e.Host); ip != nil {
-		return ip.IsLoopback() || ip.IsUnspecified()
+	if strings.EqualFold(e.Host, "localhost") {
+		return true
 	}
-	return false
+	ip := net.ParseIP(e.Host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (e Endpoint) String() string {

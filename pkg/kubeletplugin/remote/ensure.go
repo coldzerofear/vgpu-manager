@@ -30,10 +30,6 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// DefaultAgentPort is the remote-agent gRPC port; the agent is reached at the
-// host of the published endpoint on this port.
-const DefaultAgentPort = 14834
-
 const ensureSessionTimeout = 15 * time.Second
 
 // EnsureSessions calls EnsureSession for one partition on the agent behind
@@ -118,14 +114,12 @@ func dialAgent(agentEndpoint string) (*grpc.ClientConn, error) {
 // unix:// URL grpc-go resolves itself. A future gateway path prefix needs a
 // gRPC-aware route, not this dial.
 func agentDialTarget(agentEndpoint string) (string, error) {
-	endpoint, err := endpointutil.ParseEndpoint(agentEndpoint,
-		endpointutil.WithDefaultScheme(endpointutil.Grpc),
-		endpointutil.WithDefaultPort(DefaultAgentPort))
+	endpoint, err := ParseAgentEndpoint(agentEndpoint)
 	if err != nil {
-		return "", fmt.Errorf("invalid agent endpoint %q: %w", agentEndpoint, err)
+		return "", err
 	}
 	if endpoint.Scheme != endpointutil.Unix && (endpoint.Host == "" || endpoint.Port == "0") {
-		return "", fmt.Errorf("invalid agent endpoint %q: a host and a non-zero port are required", agentEndpoint)
+		return "", fmt.Errorf("invalid remote-agent endpoint %q: a host and a non-zero port are required", agentEndpoint)
 	}
 	return endpoint.DialTarget(), nil
 }

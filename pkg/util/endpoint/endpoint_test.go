@@ -418,3 +418,22 @@ func TestParseEndpointOptionsAndUnix(t *testing.T) {
 		}
 	})
 }
+
+func TestIsWildcard(t *testing.T) {
+	for raw, wild := range map[string]bool{
+		":14834": true, "0.0.0.0:14834": true, "[::]:1": true,
+		"127.0.0.1:1": false, "localhost": false, "10.0.0.7": false, "unix:///run/x.sock": false,
+	} {
+		e, err := ParseEndpoint(raw)
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		if e.IsWildcard() != wild {
+			t.Errorf("IsWildcard(%q) = %v, want %v", raw, e.IsWildcard(), wild)
+		}
+		// Every wildcard is also loopback-only; the converse is not true.
+		if wild && !e.IsLoopback() {
+			t.Errorf("IsLoopback(%q) must hold for a wildcard", raw)
+		}
+	}
+}

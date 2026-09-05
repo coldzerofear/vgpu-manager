@@ -53,7 +53,8 @@ import (
 type remotePublisher struct {
 	nodeName string
 	// agentDial is the endpoint this process calls the agent at: a unix
-	// socket or a loopback/TCP address on this node.
+	// socket bind-mounted from the host, or grpc at the node's IP (this
+	// plugin is in the pod network; the agent is on hostNetwork).
 	agentDial string
 	// mu guards spec, which the watcher updates while publish paths read it.
 	mu   sync.RWMutex
@@ -166,11 +167,9 @@ func (rp *remotePublisher) refreshServerInfo(ctx context.Context) (bool, error) 
 // node's InternalIP: the agent listens there under hostNetwork, while this
 // plugin runs in the pod network, so a loopback would reach only itself.
 func resolveAgentDial(ctx context.Context, config *Config, raw string) (string, error) {
-	agentDial, err := endpointutil.ParseEndpoint(raw,
-		endpointutil.WithDefaultScheme(endpointutil.Grpc),
-		endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+	agentDial, err := remote.ParseAgentEndpoint(raw)
 	if err != nil {
-		return "", fmt.Errorf("parse agent endpoint failed: %w", err)
+		return "", err
 	}
 	if agentDial.Scheme != endpointutil.Unix && agentDial.Host == "" {
 		ip, err := nodeInternalIP(ctx, config, config.Flags.NodeName)
@@ -206,8 +205,7 @@ func publishableEndpoints(server, agent string) (string, string, error) {
 	if err != nil || s.IsLoopback() {
 		return "", "", fmt.Errorf("reported lupine-server endpoint %q is not publishable: %v", server, err)
 	}
-	a, err := endpointutil.ParseEndpoint(agent,
-		endpointutil.WithDefaultScheme(endpointutil.Grpc), endpointutil.WithDefaultPort(remote.DefaultAgentPort))
+	a, err := remote.ParseAgentEndpoint(agent)
 	if err != nil || a.Scheme != endpointutil.Grpc || a.IsLoopback() {
 		return "", "", fmt.Errorf("reported remote-agent endpoint %q is not publishable: %v", agent, err)
 	}
