@@ -134,7 +134,6 @@ spec:
             #   value: "https://gpu-a.corp/pool-a"
             # gRPC 监听，逗号分隔可多个：grpc://:14834 供其他节点的 dra-inject 调 EnsureSession；
             # 追加 unix:///etc/vgpu-manager/agent.sock 可让同节点的 dra-server 走套接字
-            # （配合 dra-server 的 REMOTE_AGENT_LOCAL_ENDPOINT）。
             - name: LISTEN_SERVER_ENDPOINT
               value: ":14834"                     # ← EnsureSession gRPC 端口(hostNetwork)
             - name: CONTAINER_MANAGER_DIR
@@ -197,17 +196,17 @@ spec:
                 echo "waiting for remote-agent ready file..."
                 sleep 2
               done
-              exec /opt/lupine/bin/lupine_driver_server
+              LD_PRELOAD=$LUPINE_CHECKPOINT_LIBRARY:$LD_PRELOAD exec /opt/lupine/bin/lupine_driver_server
           env:
             - name: LUPINE_PORT
               value: "14833"                               # ← 服务端监听端口(hostNetwork)
             - name: VGPU_CONFIG_SESSION_BASE
               value: /etc/vgpu-manager/remote-sessions
+            - name: VGPU_REMOTE_MODE
+              value: "1"
             # 隔离库既是 LD_PRELOAD hook 库又是 lupine checkpoint provider，两个变量指向同一个 .so。
             # 它由 init-install 从 vgpu-manager 镜像落盘到节点 /etc/vgpu-manager/driver/，
             # 经 manager-root hostPath 挂进来，server 镜像里不需要自带。
-            - name: LD_PRELOAD
-              value: /etc/vgpu-manager/driver/libvgpu-control.so
             - name: LUPINE_CHECKPOINT_LIBRARY
               value: /etc/vgpu-manager/driver/libvgpu-control.so
             - name: CUDA_VISIBLE_DEVICES
