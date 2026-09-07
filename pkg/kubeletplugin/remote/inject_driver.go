@@ -125,6 +125,9 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 		kubeletplugin.Serialize(false),
 		kubeletplugin.RegistrarDirectoryPath(config.KubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.PluginDataDirectoryPath),
+		// This plugin does not report device health (KEP-4680), so don't
+		// advertise the DRAResourceHealth service to the kubelet.
+		kubeletplugin.HealthService(false),
 	)
 	if err != nil {
 		return nil, err

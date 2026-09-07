@@ -212,6 +212,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			drametadatav1alpha1.SchemeGroupVersion,
 		}))
 	}
+	// This plugin does not report device health (KEP-4680), so don't
+	// advertise the DRAResourceHealth service to the kubelet.
+	opts = append(opts, kubeletplugin.HealthService(false))
 	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
 		return nil, err
@@ -591,7 +594,7 @@ func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.Res
 		if err = d.publishResources(ctx, d.state.config); err != nil {
 			drametrics.IncNodePrepareError(util.DRADriverName, "publish_resources")
 			return kubeletplugin.PrepareResult{
-				Err: fmt.Errorf("error preparing devices for claim %v: %w", claim.UID, err),
+				Err: fmt.Errorf("failed to publish resources after preparing claim %s: %w", cs, err),
 			}
 		}
 	}

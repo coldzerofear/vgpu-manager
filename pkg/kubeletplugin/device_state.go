@@ -1334,8 +1334,8 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 					// returning an error.
 					err := s.nvdevlib.deleteMigDevice(mig)
 					if err != nil {
-						klog.Warningf("Error deleting MIG device %s: %s", device.Mig.Device.DeviceName, err)
-						return false, fmt.Errorf("error deleting MIG device %s: %w", device.Mig.Device.DeviceName, err)
+						klog.Warningf("Error deleting MIG device %s (UUID %s): %s", device.Mig.Device.DeviceName, mig.MigUUID, err)
+						return false, fmt.Errorf("failed to delete MIG device %s (UUID %s): %w", device.Mig.Device.DeviceName, mig.MigUUID, err)
 					}
 					if s.clearDynamicMIGXIDTaint(device.Mig.Device.DeviceName) {
 						taintRemoved = true
