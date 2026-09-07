@@ -18,14 +18,21 @@ package remote
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+	draclient "k8s.io/dynamic-resource-allocation/client"
+	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
@@ -130,5 +137,76 @@ func TestAssignTokensScopedToAllocation(t *testing.T) {
 	stored, err := d.clients.Core.ResourceV1().ResourceClaims("ns").Get(ctx, "c", metav1.GetOptions{})
 	if err != nil || !ClaimSessionTokens(stored.Annotations).Equal(sets.New(p.token, q.token)) {
 		t.Fatalf("stored annotations: %v %v", stored.Annotations, err)
+	}
+}
+
+// conflictOnce makes the first patch of a resourceclaim fail with a Conflict
+// and records the resourceVersion every patch body carried.
+func conflictOnce(cs *fake.Clientset) (patchedRVs *[]string) {
+	var rvs []string
+	fired := false
+	cs.PrependReactor("patch", "resourceclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		body := string(action.(k8stesting.PatchAction).GetPatch())
+		rv := ""
+		if i := strings.Index(body, `"resourceVersion":"`); i >= 0 {
+			rest := body[i+len(`"resourceVersion":"`):]
+			rv = rest[:strings.Index(rest, `"`)]
+		}
+		rvs = append(rvs, rv)
+		if !fired {
+			fired = true
+			return true, nil, apierrors.NewConflict(resourceapi.Resource("resourceclaims"), action.(k8stesting.PatchAction).GetName(), errors.New("the object has been modified"))
+		}
+		return false, nil, nil
+	})
+	return &rvs
+}
+
+func TestAssignTokensRetriesOnConflict(t *testing.T) {
+	ctx := context.Background()
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "uid-1", ResourceVersion: "7"},
+		Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{
+			{Request: "r1", Driver: "d", Pool: "gpu-a", Device: "vgpu-0"},
+		}}}},
+	}
+	cs := fake.NewSimpleClientset(claim.DeepCopy())
+	rvs := conflictOnce(cs)
+	d := &InjectDriver{clients: pkgflags.ClientSets{Core: cs, Resource: draclient.New(cs)}}
+
+	p := &partition{key: "part-1"}
+	if err := d.assignTokens(ctx, claim, []*partition{p}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*rvs) != 2 || (*rvs)[0] != "7" || (*rvs)[1] == "" {
+		t.Fatalf("patches must carry the claim version and be retried after a conflict: %v", *rvs)
+	}
+	if p.token == "" || claim.Annotations[SessionAnnotationKey("part-1")] != p.token {
+		t.Fatalf("token must be recorded after the retry: %q %v", p.token, claim.Annotations)
+	}
+}
+
+func TestReleaseClaimReevaluatesOnConflict(t *testing.T) {
+	ctx := context.Background()
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "uid-1", ResourceVersion: "7",
+			Annotations: map[string]string{SessionAnnotationKey("p"): "tok-old", AllocationAnnotation: "x"}},
+		Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{}},
+	}
+	cs := fake.NewSimpleClientset(claim)
+	rvs := conflictOnce(cs)
+	d := &InjectDriver{config: InjectConfig{NodeName: "node-x"}, clients: pkgflags.ClientSets{Core: cs, Resource: draclient.New(cs)}}
+
+	// Nobody holds the claim: the tokens go, conditionally, and a conflict
+	// makes the decision be taken again on the fresh object.
+	if err := d.releaseClaim(ctx, kubeletplugin.NamespacedObject{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "c"}, UID: "uid-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*rvs) != 2 || (*rvs)[0] != "7" {
+		t.Fatalf("clean patches must carry the claim version and be retried: %v", *rvs)
+	}
+	stored, err := cs.ResourceV1().ResourceClaims("ns").Get(ctx, "c", metav1.GetOptions{})
+	if err != nil || len(ClaimSessionTokens(stored.Annotations)) != 0 || stored.Annotations[AllocationAnnotation] != "" {
+		t.Fatalf("tokens must be gone: %v %v", stored.Annotations, err)
 	}
 }

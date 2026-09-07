@@ -30,7 +30,10 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const ensureSessionTimeout = 15 * time.Second
+// ensureSessionTimeout bounds one EnsureSession call. Prepare/Unprepare are
+// serialized per node (kubeletplugin.Serialize), so this is also the most
+// one unreachable agent can hold every other pod's prepare on this node.
+const ensureSessionTimeout = 5 * time.Second
 
 // EnsureSessions calls EnsureSession for one partition on the agent behind
 // every endpoint it spans and returns the lupine-server endpoints the

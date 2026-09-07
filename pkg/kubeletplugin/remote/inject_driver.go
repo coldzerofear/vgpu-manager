@@ -39,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
@@ -123,7 +124,12 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 		kubeletplugin.KubeClient(clients.Core),
 		kubeletplugin.NodeName(config.NodeName),
 		kubeletplugin.DriverName(util.DRADriverName),
-		kubeletplugin.Serialize(false),
+		// One Prepare/Unprepare at a time on this node. Each call is short
+		// (a few RPCs, bounded by ensureSessionTimeout per agent), and a
+		// predictable order is worth more here than concurrency: the NRI
+		// hook and the prepared-claim cache then never see two calls
+		// interleave.
+		kubeletplugin.Serialize(true),
 		kubeletplugin.RegistrarDirectoryPath(config.KubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.PluginDataDirectoryPath),
 		// This plugin does not report device health (KEP-4680), so don't
@@ -263,37 +269,44 @@ func (d *InjectDriver) nodeUnprepareResource(claimRef kubeletplugin.NamespacedOb
 // off the claim first (the source of truth every sweep compares against),
 // then each agent is asked to release the sessions right away -- best
 // effort, the agents' own sweep finishes the job if one is unreachable.
+//
+// The decision and the annotation removal are one optimistic transaction:
+// a Conflict on the patch means the claim changed since it was read (a new
+// consumer on another node recorded its tokens), so the whole thing is
+// re-evaluated against the fresh claim rather than removing on stale grounds.
 func (d *InjectDriver) releaseClaim(ctx context.Context, claimRef kubeletplugin.NamespacedObject) error {
 	uid := string(claimRef.UID)
-	claim, err := d.clients.Resource.ResourceClaims(claimRef.Namespace).Get(ctx, claimRef.Name, metav1.GetOptions{})
-	switch {
-	case apierrors.IsNotFound(err) || (err == nil && claim.UID != claimRef.UID):
-		// The claim object is gone (or replaced): nothing to patch, and the
-		// agents' claim watch has already swept, but release anyway in case
-		// that event was missed.
-		d.releaseSessions(ctx, uid, d.agentsOfClaim(nil, uid), nil)
-		return nil
-	case err != nil:
-		return err
-	case !claim.DeletionTimestamp.IsZero():
-		d.releaseSessions(ctx, uid, d.agentsOfClaim(claim, uid), ClaimSessionTokens(claim.Annotations).UnsortedList())
-		return nil
-	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		claim, err := d.clients.Resource.ResourceClaims(claimRef.Namespace).Get(ctx, claimRef.Name, metav1.GetOptions{})
+		switch {
+		case apierrors.IsNotFound(err) || (err == nil && claim.UID != claimRef.UID):
+			// The claim object is gone (or replaced): nothing to patch, and
+			// the agents' claim watch has already swept, but release anyway
+			// in case that event was missed.
+			d.releaseSessions(ctx, uid, d.agentsOfClaim(nil, uid), nil)
+			return nil
+		case err != nil:
+			return err
+		case !claim.DeletionTimestamp.IsZero():
+			d.releaseSessions(ctx, uid, d.agentsOfClaim(claim, uid), ClaimSessionTokens(claim.Annotations).UnsortedList())
+			return nil
+		}
 
-	live, err := d.claimHasLiveConsumers(ctx, claim)
-	if err != nil {
-		return err
-	}
-	if live {
-		klog.V(2).Infof("Claim %s is still reserved by pods on other nodes; keeping its sessions", klog.KObj(claim))
+		live, err := d.claimHasLiveConsumers(ctx, claim)
+		if err != nil {
+			return err
+		}
+		if live {
+			klog.V(2).Infof("Claim %s is still reserved by pods on other nodes; keeping its sessions", klog.KObj(claim))
+			return nil
+		}
+		tokens := ClaimSessionTokens(claim.Annotations).UnsortedList()
+		if err := d.cleanTokens(ctx, claim); err != nil {
+			return err
+		}
+		d.releaseSessions(ctx, uid, d.agentsOfClaim(claim, uid), tokens)
 		return nil
-	}
-	tokens := ClaimSessionTokens(claim.Annotations).UnsortedList()
-	if err := d.cleanTokens(ctx, claim); err != nil {
-		return err
-	}
-	d.releaseSessions(ctx, uid, d.agentsOfClaim(claim, uid), tokens)
-	return nil
+	})
 }
 
 // agentsOfClaim lists the agents the claim's sessions live on: resolved
@@ -574,9 +587,12 @@ func (d *InjectDriver) resolveRemoteDevices(claim *resourceapi.ResourceClaim) ([
 
 // cleanTokens removes every session annotation from the claim. Only called
 // once the claim has no live consumer (see releaseClaim): the annotations
-// are what the agents keep sessions for.
+// are what the agents keep sessions for. The patch is conditional on the
+// claim version that decision was made against; a Conflict means someone
+// changed the claim meanwhile (a new consumer recording its tokens) and the
+// caller must look again.
 func (d *InjectDriver) cleanTokens(ctx context.Context, claim *resourceapi.ResourceClaim) error {
-	metadata := client2.PatchMetadata{Annotations: map[string]*string{}}
+	metadata := client2.PatchMetadata{Annotations: map[string]*string{}, ResourceVersion: claim.ResourceVersion}
 	for key := range claim.GetAnnotations() {
 		if strings.HasPrefix(key, SessionAnnotationPrefix) || key == AllocationAnnotation {
 			metadata.Annotations[key] = nil
@@ -598,12 +614,49 @@ func (d *InjectDriver) cleanTokens(ctx context.Context, claim *resourceapi.Resou
 
 // assignTokens fills partition tokens from the claim annotations, minting and
 // persisting new ones in a single merge patch.
+//
+// The patch is conditional on the claim version the tokens were decided
+// against: another node may be recording or removing tokens on the same
+// claim at the same time (a consumer starting here while the previous one
+// is unprepared elsewhere). On a conflict the claim is re-read and the
+// decision redone, so a token is never reused or dropped on stale grounds.
 func (d *InjectDriver) assignTokens(ctx context.Context, claim *resourceapi.ResourceClaim, partitions []*partition) error {
-	// Tokens are scoped to the allocation they were issued for. Ones
-	// recorded for an earlier allocation of this claim (a standalone claim
-	// deallocated and allocated again before the previous consumer's
-	// NodeUnprepare removed them) are dropped here, in the same patch that
-	// records the new ones; the agents sweep their sessions on that update.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		annotations, err := sessionTokenPatch(claim, partitions)
+		if err != nil || len(annotations) == 0 {
+			return err
+		}
+		metadata := client2.PatchMetadata{Annotations: annotations, ResourceVersion: claim.ResourceVersion}
+		patch, err := metadata.JSONBytes()
+		if err != nil {
+			return err
+		}
+		newClaim, err := d.clients.Core.ResourceV1().ResourceClaims(claim.Namespace).
+			Patch(ctx, claim.Name, metadata.PatchType(), patch, metav1.PatchOptions{})
+		if apierrors.IsConflict(err) {
+			if rerr := d.refreshClaim(ctx, claim); rerr != nil {
+				return rerr
+			}
+			return err
+		}
+		if err != nil {
+			return fmt.Errorf("record session tokens on claim %s: %w", klog.KObj(claim), err)
+		}
+		newClaim.DeepCopyInto(claim)
+		return nil
+	})
+}
+
+// sessionTokenPatch decides the token of every partition against the claim
+// as it is now, filling p.token, and returns the annotation changes that
+// record the decision (nil = nothing to write).
+//
+// Tokens are scoped to the allocation they were issued for. Ones recorded
+// for an earlier allocation of this claim (a standalone claim deallocated
+// and allocated again before the previous consumer's NodeUnprepare removed
+// them) are dropped in the same patch that records the new ones; the
+// agents sweep their sessions on that update.
+func sessionTokenPatch(claim *resourceapi.ResourceClaim, partitions []*partition) (map[string]*string, error) {
 	allocationID := AllocationID(claim)
 	reusable := claim.Annotations[AllocationAnnotation] == allocationID
 	annotations := map[string]*string{}
@@ -622,28 +675,29 @@ func (d *InjectDriver) assignTokens(ctx context.Context, claim *resourceapi.Reso
 		}
 		tok, err := NewSessionToken()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		p.token = tok
 		annotations[key] = &tok
 	}
 	if len(annotations) == 0 {
-		return nil
+		return nil, nil
 	}
 	annotations[AllocationAnnotation] = &allocationID
-	metadata := client2.PatchMetadata{Annotations: annotations}
-	patch, err := metadata.JSONBytes()
+	return annotations, nil
+}
+
+// refreshClaim replaces claim with its current API state; the same object
+// (by UID) is required, a replaced claim ends the retry.
+func (d *InjectDriver) refreshClaim(ctx context.Context, claim *resourceapi.ResourceClaim) error {
+	fresh, err := d.clients.Resource.ResourceClaims(claim.Namespace).Get(ctx, claim.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	newClaim, err := d.clients.Core.ResourceV1().ResourceClaims(claim.Namespace).
-		Patch(ctx, claim.Name, metadata.PatchType(), patch, metav1.PatchOptions{})
-	if err != nil {
-		return fmt.Errorf("record session tokens on claim %s: %w", klog.KObj(claim), err)
+	if fresh.UID != claim.UID {
+		return fmt.Errorf("claim %s was replaced (uid %s -> %s)", klog.KObj(claim), claim.UID, fresh.UID)
 	}
-
-	newClaim.DeepCopyInto(claim)
-
+	fresh.DeepCopyInto(claim)
 	return nil
 }
 
