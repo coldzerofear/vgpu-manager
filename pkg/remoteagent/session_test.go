@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
 )
 
@@ -322,7 +323,7 @@ func TestTrimClaim(t *testing.T) {
 		result(testNode, "vgpu-0", "50", "4Gi"),
 		result("other-node", "vgpu-0", "", ""),
 	)
-	full.Annotations = map[string]string{"big": strings.Repeat("x", 4096)}
+	full.Annotations = map[string]string{"big": strings.Repeat("x", 4096), remote.SessionAnnotationKey("p"): "tok-1"}
 	full.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "kubectl"}}
 	full.Spec.Devices.Requests = []resourceapi.DeviceRequest{
 		{Name: "a", Exactly: &resourceapi.ExactDeviceRequest{DeviceClassName: "vgpu-manager"}},
@@ -335,8 +336,12 @@ func TestTrimClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	trimmed := out.(*resourceapi.ResourceClaim)
-	if trimmed.UID != "uid-t" || trimmed.Annotations != nil || trimmed.ManagedFields != nil || trimmed.Status.ReservedFor != nil {
+	if trimmed.UID != "uid-t" || trimmed.ManagedFields != nil || trimmed.Status.ReservedFor != nil {
 		t.Fatalf("unexpected leftovers: %+v", trimmed.ObjectMeta)
+	}
+	// Only the session annotations survive: they are the claim's session set.
+	if len(trimmed.Annotations) != 1 || trimmed.Annotations[remote.SessionAnnotationKey("p")] != "tok-1" {
+		t.Fatalf("session annotations must survive, others must not: %v", trimmed.Annotations)
 	}
 	if len(trimmed.Status.Allocation.Devices.Results) != 1 || trimmed.Status.Allocation.Devices.Results[0].Pool != testNode {
 		t.Fatalf("results must be narrowed to this pool: %+v", trimmed.Status.Allocation.Devices.Results)
@@ -401,5 +406,111 @@ func TestPrepareWatcherSymlink(t *testing.T) {
 	}
 	if target, err := os.Readlink(filepath.Join(base2, util.Watcher)); err != nil || target != filepath.Join(parent2, util.Watcher) {
 		t.Fatalf("empty legacy dir not migrated: %q, %v", target, err)
+	}
+}
+
+func TestSessionMarkerVersionAndSweep(t *testing.T) {
+	base := t.TempDir()
+	cfg := Config{SessionBase: base, NodeName: testNode, DriverName: testDriver}
+	store := NewSessionStore(cfg)
+	if err := store.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	nd := NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()})
+	at := func(rv string) *resourceapi.ResourceClaim {
+		c := testClaim("uid-x", result(testNode, "vgpu-0", "", ""))
+		c.ResourceVersion = rv
+		return c
+	}
+	// t-old was built from claim rv 10, t-new from rv 30 (a re-allocation
+	// the sweeper may not have seen yet).
+	if err := store.Materialize("t-old", at("10"), nd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Materialize("t-new", at("30"), nd, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Re-materializing keeps the original version: the session was not rebuilt.
+	if err := store.Materialize("t-old", at("40"), nd, nil); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rvs := map[string]int64{}
+	for _, e := range entries {
+		rvs[e.Token] = e.ClaimRV
+	}
+	if rvs["t-old"] != 10 || rvs["t-new"] != 30 {
+		t.Fatalf("marker versions: %v", rvs)
+	}
+
+	// A stale view (rv 20, "deallocated") sweeps only what it can see.
+	if n := store.Sweep("uid-x", nil, 20); n != 1 {
+		t.Fatalf("stale view must sweep only t-old, swept %d", n)
+	}
+	if got := store.TokensOfClaim("uid-x"); len(got) != 1 || got[0] != "t-new" {
+		t.Fatalf("t-new must survive a stale view: %v", got)
+	}
+	// A current view that still lists t-new keeps it; one that does not, drops it.
+	if n := store.Sweep("uid-x", sets.New("t-new"), 30); n != 0 {
+		t.Fatalf("listed session must be kept, swept %d", n)
+	}
+	if n := store.Sweep("uid-x", nil, 30); n != 1 {
+		t.Fatalf("unlisted session must go, swept %d", n)
+	}
+	// Sweeping an unknown claim is a no-op.
+	if n := store.Sweep("uid-none", nil, 99); n != 0 {
+		t.Fatalf("unknown claim swept %d", n)
+	}
+
+	// Markers written by older agents (UID only) read as version 0: any view sweeps them.
+	old := filepath.Join(base, "t-legacy")
+	if err := os.MkdirAll(old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, sessionClaimMarker), []byte("uid-y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	again := NewSessionStore(cfg)
+	if err := again.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	if n := again.Sweep("uid-y", nil, 1); n != 1 {
+		t.Fatalf("legacy marker must be sweepable, swept %d", n)
+	}
+}
+
+func TestSessionRelease(t *testing.T) {
+	base := t.TempDir()
+	store := NewSessionStore(Config{SessionBase: base, NodeName: testNode, DriverName: testDriver})
+	if err := store.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	nd := NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()})
+	for tok, uid := range map[string]string{"a1": "uid-a", "a2": "uid-a", "b1": "uid-b"} {
+		if err := store.Materialize(tok, testClaim(uid, result(testNode, "vgpu-0", "", "")), nd, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Explicit tokens: another claim's token is skipped, not removed.
+	n, err := store.Release("uid-a", []string{"a1", "b1", "nope"})
+	if err != nil || n != 1 {
+		t.Fatalf("release = %d, %v", n, err)
+	}
+	if got := store.TokensOfClaim("uid-b"); len(got) != 1 {
+		t.Fatalf("uid-b must be untouched: %v", got)
+	}
+	// No tokens: everything the claim still has.
+	if n, err = store.Release("uid-a", nil); err != nil || n != 1 {
+		t.Fatalf("release all = %d, %v", n, err)
+	}
+	if got := store.TokensOfClaim("uid-a"); len(got) != 0 {
+		t.Fatalf("uid-a must be empty: %v", got)
+	}
+	// A malformed token is an error, not a directory walk.
+	if _, err = store.Release("uid-b", []string{"../etc"}); err == nil {
+		t.Fatal("malformed token must be rejected")
 	}
 }

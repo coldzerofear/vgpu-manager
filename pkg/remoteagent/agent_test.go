@@ -26,11 +26,15 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // fakeLupine answers like lupine-server does on its RPC port: 404 with the
@@ -336,5 +340,78 @@ func TestNewRejectsBadServerEndpoint(t *testing.T) {
 	a := New(Config{ServerEndpoint: "ftp://x"})
 	if err := a.Run(context.Background()); err == nil {
 		t.Fatal("Run must refuse an unparseable server endpoint")
+	}
+}
+
+func TestSweepClaimAndRelease(t *testing.T) {
+	ctx := context.Background()
+	a := New(Config{NodeName: testNode, DriverName: testDriver, ServerEndpoint: "http://127.0.0.1:14833", SessionBase: t.TempDir()})
+	if err := a.store.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	nd := NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()})
+	claimAt := func(rv string, tokens ...string) *resourceapi.ResourceClaim {
+		c := testClaim("uid-x", result(testNode, "vgpu-0", "", ""))
+		c.ResourceVersion = rv
+		for i, tok := range tokens {
+			metav1.SetMetaDataAnnotation(&c.ObjectMeta, remote.SessionAnnotationKey("p"+strconv.Itoa(i)), tok)
+		}
+		return c
+	}
+	for _, tok := range []string{"t1", "t2"} {
+		if err := a.store.Materialize(tok, claimAt("10", "t1", "t2"), nd, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// liveSessions: allocated + not deleting => the annotated tokens; else nothing.
+	if got := liveSessions(claimAt("10", "t1", "t2")); !got.Equal(sets.New("t1", "t2")) {
+		t.Fatalf("liveSessions = %v", got)
+	}
+	unalloc := claimAt("11", "t1")
+	unalloc.Status.Allocation = nil
+	deleting := claimAt("11", "t1")
+	deleting.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	if liveSessions(unalloc).Len() != 0 || liveSessions(deleting).Len() != 0 {
+		t.Fatal("unallocated or deleting claims have no live sessions")
+	}
+
+	// An update that drops t2 from the annotations sweeps t2 only.
+	a.sweepClaim(claimAt("12", "t1"))
+	if got := a.store.TokensOfClaim("uid-x"); len(got) != 1 || got[0] != "t1" {
+		t.Fatalf("after update: %v", got)
+	}
+	// A stale deallocation event (older than the session) is ignored ...
+	a.sweepClaim(func() *resourceapi.ResourceClaim { c := claimAt("9"); c.Status.Allocation = nil; return c }())
+	if got := a.store.TokensOfClaim("uid-x"); len(got) != 1 {
+		t.Fatalf("stale event must not sweep: %v", got)
+	}
+	// ... a current one is not.
+	a.sweepClaim(func() *resourceapi.ResourceClaim { c := claimAt("13"); c.Status.Allocation = nil; return c }())
+	if got := a.store.TokensOfClaim("uid-x"); len(got) != 0 {
+		t.Fatalf("current deallocation must sweep: %v", got)
+	}
+
+	// ReleaseSessions RPC: by token, claim-scoped, counts what it removed.
+	for _, tok := range []string{"r1", "r2"} {
+		if err := a.store.Materialize(tok, claimAt("20", "r1", "r2"), nd, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-x", Tokens: []string{"r1", "zz"}})
+	if err != nil || resp.Released != 1 {
+		t.Fatalf("release r1: %+v %v", resp, err)
+	}
+	if resp, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-other"}); err != nil || resp.Released != 0 {
+		t.Fatalf("release for another claim must touch nothing: %+v %v", resp, err)
+	}
+	if resp, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-x"}); err != nil || resp.Released != 1 {
+		t.Fatalf("release all: %+v %v", resp, err)
+	}
+	if _, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{}); err == nil {
+		t.Fatal("empty claim uid must be rejected")
+	}
+	if _, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-x", Tokens: []string{"../x"}}); err == nil {
+		t.Fatal("malformed token must be rejected")
 	}
 }

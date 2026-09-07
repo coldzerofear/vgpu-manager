@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -676,5 +677,20 @@ func TestDecorateIdempotentOnOneDevice(t *testing.T) {
 	Decorate(dev, unreachable)
 	if len(alias[:2]) == 2 && alias[:2][1].Key == TaintKeyRemoteUnavailable {
 		t.Fatal("append wrote into the caller's spare capacity")
+	}
+}
+
+func TestClaimSessionTokens(t *testing.T) {
+	got := ClaimSessionTokens(map[string]string{
+		SessionAnnotationKey("a"): "tok-a",
+		SessionAnnotationKey("b"): "tok-b",
+		SessionAnnotationKey("c"): "", // never issued
+		"unrelated":               "x",
+	})
+	if !got.Equal(sets.New("tok-a", "tok-b")) {
+		t.Fatalf("ClaimSessionTokens = %v", got)
+	}
+	if ClaimSessionTokens(nil).Len() != 0 {
+		t.Fatal("nil annotations must yield an empty set")
 	}
 }

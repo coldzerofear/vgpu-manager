@@ -241,7 +241,7 @@ func (d *InjectDriver) nodeUnprepareResource(claimRef kubeletplugin.NamespacedOb
 		return err
 	}
 
-	if err := d.cleanTokens(context.Background(), claimRef); err != nil {
+	if err := d.releaseClaim(context.Background(), claimRef); err != nil {
 		drametrics.IncNodeUnprepareError(util.DRADriverName, "unprepare_devices")
 		return err
 	}
@@ -249,6 +249,111 @@ func (d *InjectDriver) nodeUnprepareResource(claimRef kubeletplugin.NamespacedOb
 	d.forgetPrepared(string(claimRef.UID))
 	drametrics.ObserveRequest(util.DRADriverName, "unprepare", time.Since(t0))
 	return nil
+}
+
+// releaseClaim ends the claim's sessions when this node was its last
+// consumer anywhere. The kubelet only tells us that no pod on *this* node
+// references the claim; a standalone claim may still be reserved by pods on
+// other nodes, which share the same tokens and sessions, so the check is
+// against the claim's ReservedFor. When nobody is left, the tokens come
+// off the claim first (the source of truth every sweep compares against),
+// then each agent is asked to release the sessions right away -- best
+// effort, the agents' own sweep finishes the job if one is unreachable.
+func (d *InjectDriver) releaseClaim(ctx context.Context, claimRef kubeletplugin.NamespacedObject) error {
+	uid := string(claimRef.UID)
+	claim, err := d.clients.Resource.ResourceClaims(claimRef.Namespace).Get(ctx, claimRef.Name, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err) || (err == nil && claim.UID != claimRef.UID):
+		// The claim object is gone (or replaced): nothing to patch, and the
+		// agents' claim watch has already swept, but release anyway in case
+		// that event was missed.
+		d.releaseSessions(ctx, uid, d.agentsOfClaim(nil, uid), nil)
+		return nil
+	case err != nil:
+		return err
+	case !claim.DeletionTimestamp.IsZero():
+		d.releaseSessions(ctx, uid, d.agentsOfClaim(claim, uid), ClaimSessionTokens(claim.Annotations).UnsortedList())
+		return nil
+	}
+
+	live, err := d.claimHasLiveConsumers(ctx, claim)
+	if err != nil {
+		return err
+	}
+	if live {
+		klog.V(2).Infof("Claim %s is still reserved by pods on other nodes; keeping its sessions", klog.KObj(claim))
+		return nil
+	}
+	tokens := ClaimSessionTokens(claim.Annotations).UnsortedList()
+	if err := d.cleanTokens(ctx, claim); err != nil {
+		return err
+	}
+	d.releaseSessions(ctx, uid, d.agentsOfClaim(claim, uid), tokens)
+	return nil
+}
+
+// agentsOfClaim lists the agents the claim's sessions live on: resolved
+// from the claim's allocation while the object exists, else from the
+// NRI-mode prepared cache; empty when neither knows (the agents' sweep is
+// then the only cleanup, which is the documented backstop).
+func (d *InjectDriver) agentsOfClaim(claim *resourceapi.ResourceClaim, uid string) []string {
+	var devices []resultDevice
+	if claim != nil && claim.Status.Allocation != nil {
+		if resolved, err := d.resolveRemoteDevices(claim); err == nil {
+			devices = resolved
+		}
+	}
+	if devices == nil {
+		if pc := d.lookupPrepared(uid); pc != nil {
+			devices = pc.devices
+		}
+	}
+	agents := make([]string, 0, len(devices))
+	for _, info := range endpointInfosOf(devices) {
+		agents = append(agents, info.agentEndpoint)
+	}
+	return agents
+}
+
+// claimHasLiveConsumers reports whether any pod in the claim's ReservedFor
+// may still be running. Pods on this node are known to be done (the
+// kubelet unprepares only after the last one here stopped), pods that no
+// longer exist or have terminated are done, anything else -- including a
+// non-pod consumer -- counts as live.
+func (d *InjectDriver) claimHasLiveConsumers(ctx context.Context, claim *resourceapi.ResourceClaim) (bool, error) {
+	for _, ref := range claim.Status.ReservedFor {
+		if ref.APIGroup != "" || ref.Resource != "pods" {
+			return true, nil
+		}
+		pod, err := d.clients.Core.CoreV1().Pods(claim.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("get consumer pod %s/%s of claim %s: %w", claim.Namespace, ref.Name, klog.KObj(claim), err)
+		}
+		if pod.UID != ref.UID || pod.Spec.NodeName == d.config.NodeName ||
+			pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// releaseSessions asks each agent to drop the claim's sessions (the given
+// tokens, or all of them when tokens is empty). Best effort by design: a
+// failure is logged, never returned -- the agent's own sweep removes the
+// same sessions once the tokens are off the claim.
+func (d *InjectDriver) releaseSessions(ctx context.Context, uid string, agents, tokens []string) {
+	for _, agent := range agents {
+		released, err := ReleaseSessions(ctx, agent, uid, tokens)
+		if err != nil {
+			klog.Warningf("Release sessions of claim %s on %s: %v (the agent's sweep will finish it)", uid, agent, err)
+			continue
+		}
+		klog.V(2).Infof("Released %d session(s) of claim %s on %s", released, uid, agent)
+	}
 }
 
 func (d *InjectDriver) HandleError(ctx context.Context, err error, msg string) {
@@ -463,22 +568,13 @@ func (d *InjectDriver) resolveRemoteDevices(claim *resourceapi.ResourceClaim) ([
 	return out, nil
 }
 
-func (d *InjectDriver) cleanTokens(ctx context.Context, claimRef kubeletplugin.NamespacedObject) error {
-	claim, err := d.clients.Resource.ResourceClaims(claimRef.Namespace).Get(ctx, claimRef.Name, metav1.GetOptions{})
-	if err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	// claim marked for deletion, fast return
-	if !claim.DeletionTimestamp.IsZero() {
-		return nil
-	}
-	if claim.UID != claimRef.UID {
-		klog.V(4).Infof("Cleaning tokens failed, claim UID mismatch (%s != %s)", claimRef.UID, claim.UID)
-		return nil
-	}
+// cleanTokens removes every session annotation from the claim. Only called
+// once the claim has no live consumer (see releaseClaim): the annotations
+// are what the agents keep sessions for.
+func (d *InjectDriver) cleanTokens(ctx context.Context, claim *resourceapi.ResourceClaim) error {
 	metadata := client2.PatchMetadata{Annotations: map[string]*string{}}
 	for key := range claim.GetAnnotations() {
-		if strings.HasPrefix(key, sessionAnnotationPrefix) {
+		if strings.HasPrefix(key, SessionAnnotationPrefix) {
 			metadata.Annotations[key] = nil
 		}
 	}

@@ -49,7 +49,10 @@ import (
 // pod UIDs / container names and would exceed the 63-char name limit.
 
 const (
-	sessionAnnotationPrefix = util.DRADriverName + "/session-"
+	// SessionAnnotationPrefix starts every claim annotation that records a
+	// session token. The set of these annotations is the claim's current
+	// sessions: the agent keeps exactly those and sweeps the rest.
+	SessionAnnotationPrefix = util.DRADriverName + "/session-"
 	tokenBytes              = 16
 )
 
@@ -57,7 +60,19 @@ const (
 // of `partitionKey`.
 func SessionAnnotationKey(partitionKey string) string {
 	sum := sha256.Sum256([]byte(partitionKey))
-	return sessionAnnotationPrefix + hex.EncodeToString(sum[:])[:16]
+	return SessionAnnotationPrefix + hex.EncodeToString(sum[:])[:16]
+}
+
+// ClaimSessionTokens returns the session tokens recorded on a claim, i.e.
+// the values of its session annotations (empty values skipped).
+func ClaimSessionTokens(annotations map[string]string) sets.Set[string] {
+	tokens := sets.New[string]()
+	for key, value := range annotations {
+		if strings.HasPrefix(key, SessionAnnotationPrefix) && value != "" {
+			tokens.Insert(value)
+		}
+	}
+	return tokens
 }
 
 // NewSessionToken mints a random session token (32 hex chars). It satisfies

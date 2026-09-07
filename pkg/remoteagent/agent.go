@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -47,6 +48,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/component-base/featuregate"
@@ -205,15 +207,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	claimRegistration, err := a.claimInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			if c, ok := obj.(*resourceapi.ResourceClaim); ok &&
-				(c.Status.Allocation == nil || !c.DeletionTimestamp.IsZero()) {
-				a.removeSessionsOfClaim(string(c.UID))
+			if c, ok := obj.(*resourceapi.ResourceClaim); ok {
+				a.sweepClaim(c)
 			}
 		},
 		UpdateFunc: func(_, newObj interface{}) {
-			if c, ok := newObj.(*resourceapi.ResourceClaim); ok &&
-				(c.Status.Allocation == nil || !c.DeletionTimestamp.IsZero()) {
-				a.removeSessionsOfClaim(string(c.UID))
+			if c, ok := newObj.(*resourceapi.ResourceClaim); ok {
+				a.sweepClaim(c)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -221,7 +221,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				obj = tomb.Obj
 			}
 			if c, ok := obj.(*resourceapi.ResourceClaim); ok {
-				a.removeSessionsOfClaim(string(c.UID))
+				a.store.Sweep(string(c.UID), nil, math.MaxInt64)
 			}
 		},
 	})
@@ -582,28 +582,63 @@ func (a *Agent) agentEndpointFor(host string) string {
 	return e.String()
 }
 
-// gcSessions removes sessions whose claim no longer exists or is no longer
-// allocated. Sessions without a marker are incomplete and removed too — a
-// Materialize in flight holds the store mutex, so it cannot be raced here.
+// liveSessions is the set of sessions a claim object says are current:
+// the tokens in its session annotations while it is allocated and not
+// being deleted, nothing otherwise. The inject plugin records a token on
+// the claim before it asks for the session (assignTokens precedes
+// EnsureSession) and removes it at NodeUnprepare, so this set is the single
+// source of truth a sweep compares against.
+func liveSessions(c *resourceapi.ResourceClaim) sets.Set[string] {
+	if c.Status.Allocation == nil || !c.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	return remote.ClaimSessionTokens(c.Annotations)
+}
+
+// sweepClaim removes the sessions of a claim that this version of the
+// claim no longer lists. Sessions materialized from a newer version than
+// the one in hand are kept (see SessionStore.Sweep).
+func (a *Agent) sweepClaim(c *resourceapi.ResourceClaim) {
+	if removed := a.store.Sweep(string(c.UID), liveSessions(c), claimRV(c)); removed > 0 {
+		klog.V(2).Infof("Swept %d stale session(s) of claim %s (rv %s)", removed, klog.KObj(c), c.ResourceVersion)
+	}
+}
+
+// gcSessions is the periodic backstop for everything the claim events and
+// explicit releases can miss (an agent that was down, a lost event): every
+// on-disk session is checked against the cached claim -- gone or
+// unallocated claim, or a token the claim no longer records, means the
+// session is stale. Sessions without a marker are incomplete and removed
+// too; a Materialize in flight holds the store mutex, so it cannot be
+// raced here.
 func (a *Agent) gcSessions(context.Context) {
 	entries, err := a.store.List()
 	if err != nil {
 		klog.Warningf("list sessions: %v", err)
 		return
 	}
+	byClaim := map[string][]Entry{}
 	for _, e := range entries {
-		if e.ClaimUID != "" && a.claimAllocated(e.ClaimUID) {
+		if e.ClaimUID == "" {
+			if err := a.store.Remove(e.Token); err != nil {
+				klog.Warningf("gc incomplete session %s: %v", e.Token, err)
+			}
 			continue
 		}
-		if err := a.store.Remove(e.Token); err != nil {
-			klog.Warningf("gc session %s: %v", e.Token, err)
-		}
+		byClaim[e.ClaimUID] = append(byClaim[e.ClaimUID], e)
 	}
-}
-
-func (a *Agent) claimAllocated(uid string) bool {
-	c, _ := a.GetClaimByUID(uid)
-	return c != nil && c.Status.Allocation != nil
+	for uid := range byClaim {
+		c, err := a.GetClaimByUID(uid)
+		if apierrors.IsNotFound(err) {
+			a.store.Sweep(uid, nil, math.MaxInt64)
+			continue
+		}
+		if err != nil {
+			klog.Warningf("gc sessions of claim %s: %v", uid, err)
+			continue
+		}
+		a.sweepClaim(c)
+	}
 }
 
 func (a *Agent) GetClaimByUID(uid string) (*resourceapi.ResourceClaim, error) {
@@ -617,12 +652,22 @@ func (a *Agent) GetClaimByUID(uid string) (*resourceapi.ResourceClaim, error) {
 	return objs[0].(*resourceapi.ResourceClaim), nil
 }
 
-func (a *Agent) removeSessionsOfClaim(uid string) {
-	for _, token := range a.store.TokensOfClaim(uid) {
-		if err := a.store.Remove(token); err != nil {
-			klog.Warningf("remove session %s: %v", token, err)
-		}
+// ReleaseSessions implements remoteagent.RemoteAgentServer: the inject
+// plugin's explicit release at NodeUnprepare, once it has checked that the
+// claim has no live consumer left. Tokens that do not belong to the claim
+// are ignored, so a caller can only ever release its own claim's sessions.
+func (a *Agent) ReleaseSessions(_ context.Context, req *remoteagent.ReleaseSessionsRequest) (*remoteagent.ReleaseSessionsResponse, error) {
+	if req.ClaimUid == "" {
+		return nil, status.Error(codes.InvalidArgument, "claim_uid is required")
 	}
+	released, err := a.store.Release(req.ClaimUid, req.Tokens)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if released > 0 {
+		klog.V(2).Infof("Released %d session(s) of claim %s on request", released, req.ClaimUid)
+	}
+	return &remoteagent.ReleaseSessionsResponse{Released: int32(released)}, nil
 }
 
 // EnsureSession implements remoteagent.RemoteAgentServer.
@@ -631,19 +676,28 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
+	// The claim we build the session from must already record this token:
+	// the inject plugin writes the annotation before it calls us, so a
+	// cached claim without it is simply behind (informer lag), and a live
+	// one without it means the token was never issued -- refuse it. Using
+	// a claim that carries the token also pins the session's marker version
+	// at or after the token's, which is what keeps a stale "deallocated"
+	// event for the previous consumer from sweeping this session.
 	claim, err := a.GetClaimByUID(req.ClaimUid)
-	if err != nil && apierrors.IsNotFound(err) {
-		// Informer lag: fall back to a direct read and verify identity.
-		claim, err = a.cfg.ClientSets.Resource.ResourceClaims(req.ClaimNamespace).Get(ctx, req.ClaimName, metav1.GetOptions{})
-		if err != nil && apierrors.IsNotFound(err) {
-			return nil, status.Errorf(codes.NotFound, "claim %s not found", req.ClaimUid)
-		}
-		if err == nil && string(claim.UID) != req.ClaimUid {
-			return nil, status.Errorf(codes.NotFound, "claim %s not found", req.ClaimUid)
-		}
-	}
-	if err != nil {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
+	}
+	if claim == nil || !liveSessions(claim).Has(req.Session) {
+		claim, err = a.cfg.ClientSets.Resource.ResourceClaims(req.ClaimNamespace).Get(ctx, req.ClaimName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) || (err == nil && string(claim.UID) != req.ClaimUid) {
+			return nil, status.Errorf(codes.NotFound, "claim %s not found", req.ClaimUid)
+		}
+		if err != nil {
+			return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
+		}
+		if !liveSessions(claim).Has(req.Session) {
+			return nil, status.Errorf(codes.FailedPrecondition, "session %s is not recorded on claim %s", req.Session, klog.KObj(claim))
+		}
 	}
 	a.claimCache.Mutation(claim)
 

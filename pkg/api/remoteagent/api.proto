@@ -14,6 +14,11 @@ service RemoteAgent {
   // ServerInfo reports whether lupine-server is accepting connections and
   // the node's CUDA ceiling.
   rpc ServerInfo(ServerInfoRequest) returns (ServerInfoResponse) {};
+  // ReleaseSessions removes the sessions of a claim on this node: the given
+  // tokens, or every session of the claim when tokens is empty. Called by the
+  // inject plugin at NodeUnprepare once the claim has no live consumer left;
+  // the agent's own claim watch and periodic sweep remain the backstop.
+  rpc ReleaseSessions(ReleaseSessionsRequest) returns (ReleaseSessionsResponse) {};
 }
 
 message EnsureSessionRequest {
@@ -40,6 +45,16 @@ message EnsureSessionResponse {
   // (URL form), as the agent currently knows it. Empty when the agent has
   // no routable address for its server yet.
   string server_endpoint     = 4;
+}
+
+message ReleaseSessionsRequest {
+  string claim_uid = 1;
+  repeated string tokens = 2;
+}
+
+message ReleaseSessionsResponse {
+  // released is how many sessions were removed by this call.
+  int32 released = 1;
 }
 
 message ServerInfoRequest {}

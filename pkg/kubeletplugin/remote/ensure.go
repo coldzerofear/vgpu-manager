@@ -97,6 +97,30 @@ func ServerInfo(ctx context.Context, agentEndpoint string) (*remoteagent.ServerI
 	return info, nil
 }
 
+// ReleaseSessions asks the agent at agentEndpoint to remove the sessions of
+// a claim: the given tokens, or all of them when tokens is empty. Returns
+// how many the agent removed. Callers treat a failure as best effort: the
+// agent's claim watch and periodic sweep remove the same sessions later.
+func ReleaseSessions(ctx context.Context, agentEndpoint, claimUID string, tokens []string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, serverInfoTimeout)
+	defer cancel()
+
+	conn, err := dialAgent(agentEndpoint)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	resp, err := remoteagent.NewRemoteAgentClient(conn).ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{
+		ClaimUid: claimUID,
+		Tokens:   tokens,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("remote-agent %s: %w", agentEndpoint, err)
+	}
+	return int(resp.Released), nil
+}
+
 // dialAgent opens a client connection to the agent. K1: plaintext;
 // TLS/credentials arrive with D5 (multi-tenant gate). grpc.NewClient does not
 // connect until the first RPC, so this never blocks.

@@ -19,8 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	RemoteAgent_EnsureSession_FullMethodName = "/remoteagent.RemoteAgent/EnsureSession"
-	RemoteAgent_ServerInfo_FullMethodName    = "/remoteagent.RemoteAgent/ServerInfo"
+	RemoteAgent_EnsureSession_FullMethodName   = "/remoteagent.RemoteAgent/EnsureSession"
+	RemoteAgent_ServerInfo_FullMethodName      = "/remoteagent.RemoteAgent/ServerInfo"
+	RemoteAgent_ReleaseSessions_FullMethodName = "/remoteagent.RemoteAgent/ReleaseSessions"
 )
 
 // RemoteAgentClient is the client API for RemoteAgent service.
@@ -33,6 +34,11 @@ type RemoteAgentClient interface {
 	// ServerInfo reports whether lupine-server is accepting connections and
 	// the node's CUDA ceiling.
 	ServerInfo(ctx context.Context, in *ServerInfoRequest, opts ...grpc.CallOption) (*ServerInfoResponse, error)
+	// ReleaseSessions removes the sessions of a claim on this node: the given
+	// tokens, or every session of the claim when tokens is empty. Called by the
+	// inject plugin at NodeUnprepare once the claim has no live consumer left;
+	// the agent's own claim watch and periodic sweep remain the backstop.
+	ReleaseSessions(ctx context.Context, in *ReleaseSessionsRequest, opts ...grpc.CallOption) (*ReleaseSessionsResponse, error)
 }
 
 type remoteAgentClient struct {
@@ -61,6 +67,15 @@ func (c *remoteAgentClient) ServerInfo(ctx context.Context, in *ServerInfoReques
 	return out, nil
 }
 
+func (c *remoteAgentClient) ReleaseSessions(ctx context.Context, in *ReleaseSessionsRequest, opts ...grpc.CallOption) (*ReleaseSessionsResponse, error) {
+	out := new(ReleaseSessionsResponse)
+	err := c.cc.Invoke(ctx, RemoteAgent_ReleaseSessions_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RemoteAgentServer is the server API for RemoteAgent service.
 // All implementations must embed UnimplementedRemoteAgentServer
 // for forward compatibility
@@ -71,6 +86,11 @@ type RemoteAgentServer interface {
 	// ServerInfo reports whether lupine-server is accepting connections and
 	// the node's CUDA ceiling.
 	ServerInfo(context.Context, *ServerInfoRequest) (*ServerInfoResponse, error)
+	// ReleaseSessions removes the sessions of a claim on this node: the given
+	// tokens, or every session of the claim when tokens is empty. Called by the
+	// inject plugin at NodeUnprepare once the claim has no live consumer left;
+	// the agent's own claim watch and periodic sweep remain the backstop.
+	ReleaseSessions(context.Context, *ReleaseSessionsRequest) (*ReleaseSessionsResponse, error)
 	mustEmbedUnimplementedRemoteAgentServer()
 }
 
@@ -83,6 +103,9 @@ func (UnimplementedRemoteAgentServer) EnsureSession(context.Context, *EnsureSess
 }
 func (UnimplementedRemoteAgentServer) ServerInfo(context.Context, *ServerInfoRequest) (*ServerInfoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ServerInfo not implemented")
+}
+func (UnimplementedRemoteAgentServer) ReleaseSessions(context.Context, *ReleaseSessionsRequest) (*ReleaseSessionsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReleaseSessions not implemented")
 }
 func (UnimplementedRemoteAgentServer) mustEmbedUnimplementedRemoteAgentServer() {}
 
@@ -133,6 +156,24 @@ func _RemoteAgent_ServerInfo_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RemoteAgent_ReleaseSessions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseSessionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RemoteAgentServer).ReleaseSessions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RemoteAgent_ReleaseSessions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RemoteAgentServer).ReleaseSessions(ctx, req.(*ReleaseSessionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RemoteAgent_ServiceDesc is the grpc.ServiceDesc for RemoteAgent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -147,6 +188,10 @@ var RemoteAgent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ServerInfo",
 			Handler:    _RemoteAgent_ServerInfo_Handler,
+		},
+		{
+			MethodName: "ReleaseSessions",
+			Handler:    _RemoteAgent_ReleaseSessions_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

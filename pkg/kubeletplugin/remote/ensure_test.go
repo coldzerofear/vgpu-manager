@@ -37,6 +37,7 @@ type fakeSessionAgent struct {
 	ready          bool
 	serverEndpoint string
 	requests       []*remoteagent.EnsureSessionRequest
+	released       []*remoteagent.ReleaseSessionsRequest
 }
 
 func (f *fakeSessionAgent) EnsureSession(_ context.Context, req *remoteagent.EnsureSessionRequest) (*remoteagent.EnsureSessionResponse, error) {
@@ -48,6 +49,13 @@ func (f *fakeSessionAgent) EnsureSession(_ context.Context, req *remoteagent.Ens
 		resp.Message = "lupine-server is not accepting connections yet"
 	}
 	return resp, nil
+}
+
+func (f *fakeSessionAgent) ReleaseSessions(_ context.Context, req *remoteagent.ReleaseSessionsRequest) (*remoteagent.ReleaseSessionsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.released = append(f.released, req)
+	return &remoteagent.ReleaseSessionsResponse{Released: int32(len(req.Tokens))}, nil
 }
 
 func startSessionAgent(t *testing.T, ready bool, serverEndpoint string) (*fakeSessionAgent, string) {
@@ -127,4 +135,18 @@ func TestEnsureSessions(t *testing.T) {
 			t.Fatal("expected an error")
 		}
 	})
+}
+
+func TestReleaseSessionsClient(t *testing.T) {
+	fa, agent := startSessionAgent(t, true, "http://10.0.0.1:14833")
+	n, err := ReleaseSessions(context.Background(), agent, "uid-1", []string{"t1", "t2"})
+	if err != nil || n != 2 {
+		t.Fatalf("released = %d, %v", n, err)
+	}
+	if len(fa.released) != 1 || fa.released[0].ClaimUid != "uid-1" || len(fa.released[0].Tokens) != 2 {
+		t.Fatalf("agent saw %+v", fa.released)
+	}
+	if _, err := ReleaseSessions(context.Background(), "grpc://127.0.0.1:1", "uid-1", nil); err == nil {
+		t.Fatal("unreachable agent must be an error")
+	}
 }

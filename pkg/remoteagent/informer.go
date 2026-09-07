@@ -17,6 +17,9 @@ limitations under the License.
 package remoteagent
 
 import (
+	"strings"
+
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/client-go/tools/cache"
 )
@@ -48,6 +51,16 @@ func trimClaim(driverName, poolName string) cache.TransformFunc {
 		trimmed.UID = claim.UID
 		trimmed.ResourceVersion = claim.ResourceVersion
 		trimmed.DeletionTimestamp = claim.DeletionTimestamp
+		// The session annotations are the claim's current session set; the
+		// sweep keeps exactly those. Everything else in the metadata is noise.
+		for key, value := range claim.Annotations {
+			if strings.HasPrefix(key, remote.SessionAnnotationPrefix) {
+				if trimmed.Annotations == nil {
+					trimmed.Annotations = map[string]string{}
+				}
+				trimmed.Annotations[key] = value
+			}
+		}
 
 		for _, req := range claim.Spec.Devices.Requests {
 			r := resourceapi.DeviceRequest{Name: req.Name}

@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -200,18 +201,27 @@ func (nd *NodeDevices) CudaVersionString() string {
 	return nd.CudaVersion.Original()
 }
 
+// sessionRef is what the index remembers about a materialized session: the
+// claim it belongs to and the claim resourceVersion it was built from. The
+// version is what lets a claim event or sweep tell "this session predates
+// what I am looking at" from "this session is newer than my view".
+type sessionRef struct {
+	claimUID string
+	claimRV  int64
+}
+
 // SessionStore materializes and removes session directories under base and
-// keeps an in-memory index (token <-> claim UID) so claim events never need a
-// directory scan; the periodic GC still walks the disk to catch orphans.
+// keeps an in-memory index (token <-> claim) so claim events never need a
+// directory scan; the periodic sweep still walks the disk to catch orphans.
 type SessionStore struct {
 	cfg     Config
 	mu      sync.Mutex
-	claimOf map[string]string           // token -> claim UID
+	refOf   map[string]sessionRef       // token -> claim
 	byClaim map[string]sets.Set[string] // claim UID -> tokens
 }
 
 func NewSessionStore(cfg Config) *SessionStore {
-	return &SessionStore{cfg: cfg, claimOf: map[string]string{}, byClaim: map[string]sets.Set[string]{}}
+	return &SessionStore{cfg: cfg, refOf: map[string]sessionRef{}, byClaim: map[string]sets.Set[string]{}}
 }
 
 // Prepare creates the base skeleton the server needs before it starts and
@@ -231,7 +241,7 @@ func (s *SessionStore) Prepare() error {
 	defer s.mu.Unlock()
 	for _, e := range entries {
 		if e.ClaimUID != "" {
-			s.indexLocked(e.Token, e.ClaimUID)
+			s.indexLocked(e.Token, sessionRef{claimUID: e.ClaimUID, claimRV: e.ClaimRV})
 		}
 	}
 	return nil
@@ -244,24 +254,117 @@ func (s *SessionStore) TokensOfClaim(claimUID string) []string {
 	return sets.List(s.byClaim[claimUID])
 }
 
-func (s *SessionStore) indexLocked(token, claimUID string) {
-	s.claimOf[token] = claimUID
-	if s.byClaim[claimUID] == nil {
-		s.byClaim[claimUID] = sets.New[string]()
+// Release removes the given sessions of a claim -- all of them when tokens
+// is empty -- and returns how many were removed. A token that belongs to
+// another claim (or to none) is skipped: the caller only ever knows the
+// claim UID, so this is the check that keeps one claim from releasing
+// another's sessions.
+func (s *SessionStore) Release(claimUID string, tokens []string) (int, error) {
+	if len(tokens) == 0 {
+		tokens = s.TokensOfClaim(claimUID)
 	}
-	s.byClaim[claimUID].Insert(token)
+	released := 0
+	for _, token := range tokens {
+		if err := validateToken(token); err != nil {
+			return released, err
+		}
+		s.mu.Lock()
+		ref, ok := s.refOf[token]
+		s.mu.Unlock()
+		if !ok || ref.claimUID != claimUID {
+			klog.V(2).Infof("Release: session %s is not a session of claim %s; skipped", token, claimUID)
+			continue
+		}
+		if err := s.Remove(token); err != nil {
+			return released, err
+		}
+		released++
+	}
+	return released, nil
+}
+
+// Sweep removes the sessions of a claim that a view of the claim shows to be
+// stale: every session not in `keep` whose materialization is not newer than
+// the view. `keep` is the claim's current session set (its session
+// annotations), empty when the claim is deallocated or gone; `viewRV` is the
+// resourceVersion of the claim object the view was taken from, MaxInt64 for
+// "the claim no longer exists". A session materialized from a newer claim
+// than the view is left alone -- that is the informer lagging behind a
+// re-allocation, not a stale session -- and the next, newer view settles it.
+// Returns how many sessions were removed.
+func (s *SessionStore) Sweep(claimUID string, keep sets.Set[string], viewRV int64) int {
+	s.mu.Lock()
+	var stale []string
+	for token := range s.byClaim[claimUID] {
+		if ref := s.refOf[token]; !keep.Has(token) && ref.claimRV <= viewRV {
+			stale = append(stale, token)
+		}
+	}
+	s.mu.Unlock()
+
+	removed := 0
+	for _, token := range stale {
+		if err := s.Remove(token); err != nil {
+			klog.Warningf("sweep session %s of claim %s: %v", token, claimUID, err)
+			continue
+		}
+		removed++
+	}
+	return removed
+}
+
+func (s *SessionStore) indexLocked(token string, ref sessionRef) {
+	s.refOf[token] = ref
+	if s.byClaim[ref.claimUID] == nil {
+		s.byClaim[ref.claimUID] = sets.New[string]()
+	}
+	s.byClaim[ref.claimUID].Insert(token)
 }
 
 func (s *SessionStore) unindexLocked(token string) {
-	if claimUID, ok := s.claimOf[token]; ok {
-		delete(s.claimOf, token)
-		if set := s.byClaim[claimUID]; set != nil {
+	if ref, ok := s.refOf[token]; ok {
+		delete(s.refOf, token)
+		if set := s.byClaim[ref.claimUID]; set != nil {
 			set.Delete(token)
 			if set.Len() == 0 {
-				delete(s.byClaim, claimUID)
+				delete(s.byClaim, ref.claimUID)
 			}
 		}
 	}
+}
+
+// claimRV parses a claim resourceVersion as the integer etcd revision it is
+// in every supported apiserver (the same assumption client-go's
+// MutationCache makes); 0 when absent or unparseable, i.e. "as old as it
+// gets", so a sweep never mistakes it for a newer session.
+func claimRV(claim *resourceapi.ResourceClaim) int64 {
+	rv, err := strconv.ParseInt(claim.ResourceVersion, 10, 64)
+	if err != nil || rv < 0 {
+		return 0
+	}
+	return rv
+}
+
+// The marker file: line 1 the claim UID, line 2 the claim resourceVersion
+// the session was materialized from (absent in markers written by older
+// agents, read as 0).
+func writeMarker(path string, claim *resourceapi.ResourceClaim) error {
+	return os.WriteFile(path, []byte(fmt.Sprintf("%s\n%d\n", claim.UID, claimRV(claim))), 0o644)
+}
+
+func readMarker(path string) (claimUID string, rv int64, err error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0, err
+	}
+	lines := strings.SplitN(strings.TrimSpace(string(b)), "\n", 3)
+	claimUID = strings.TrimSpace(lines[0])
+	if len(lines) > 1 {
+		if v, perr := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64); perr == nil && v > 0 {
+			rv = v
+		}
+	}
+	return claimUID, rv, nil
 }
 func (s *SessionStore) dir(token string) string {
 	return filepath.Join(s.cfg.SessionBase, token)
@@ -363,13 +466,13 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 
 	root := s.dir(token)
 	marker := filepath.Join(root, sessionClaimMarker)
-	if existing, err := os.ReadFile(marker); err == nil {
-		if strings.TrimSpace(string(existing)) == string(claim.UID) {
+	if owner, rv, err := readMarker(marker); err == nil {
+		if owner == string(claim.UID) {
 			klog.V(4).Infof("Session %s for claim %s already materialized", token, klog.KObj(claim))
-			s.indexLocked(token, string(claim.UID))
+			s.indexLocked(token, sessionRef{claimUID: owner, claimRV: rv})
 			return nil
 		}
-		return fmt.Errorf("session %s already belongs to claim %s", token, strings.TrimSpace(string(existing)))
+		return fmt.Errorf("session %s already belongs to claim %s", token, owner)
 	}
 
 	for _, sub := range []string{util.Config, sessionLockDir, sessionVMemDir, sessionSMDir} {
@@ -389,10 +492,10 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		return fmt.Errorf("write session quota: %w", err)
 	}
 	// Marker last: its presence means "complete".
-	if err = os.WriteFile(marker, []byte(claim.UID+"\n"), 0o644); err != nil {
+	if err = writeMarker(marker, claim); err != nil {
 		return fmt.Errorf("write claim marker: %w", err)
 	}
-	s.indexLocked(token, string(claim.UID))
+	s.indexLocked(token, sessionRef{claimUID: string(claim.UID), claimRV: claimRV(claim)})
 	klog.Infof("Materialized session %s for claim %s (requests %v): %d device(s)", token, klog.KObj(claim), requests, len(claims))
 	return nil
 }
@@ -416,6 +519,7 @@ func (s *SessionStore) Remove(token string) error {
 type Entry struct {
 	Token    string
 	ClaimUID string // empty when the marker is missing (incomplete session)
+	ClaimRV  int64  // claim resourceVersion at materialization; 0 if unknown
 }
 
 // List enumerates on-disk sessions.
@@ -436,8 +540,8 @@ func (s *SessionStore) List() ([]Entry, error) {
 		}
 		entry := Entry{Token: e.Name()}
 		filePath := filepath.Join(s.cfg.SessionBase, e.Name(), sessionClaimMarker)
-		if b, err := os.ReadFile(filePath); err == nil {
-			entry.ClaimUID = strings.TrimSpace(string(b))
+		if owner, rv, err := readMarker(filePath); err == nil {
+			entry.ClaimUID, entry.ClaimRV = owner, rv
 		} else if !errors.Is(err, os.ErrNotExist) {
 			klog.Warningf("read marker of session %s: %v", e.Name(), err)
 		}
