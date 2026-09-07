@@ -583,16 +583,16 @@ func (a *Agent) agentEndpointFor(host string) string {
 }
 
 // liveSessions is the set of sessions a claim object says are current:
-// the tokens in its session annotations while it is allocated and not
-// being deleted, nothing otherwise. The inject plugin records a token on
-// the claim before it asks for the session (assignTokens precedes
-// EnsureSession) and removes it at NodeUnprepare, so this set is the single
-// source of truth a sweep compares against.
+// the tokens recorded for its present allocation (remote.ClaimSessions)
+// while it is not being deleted, nothing otherwise. The inject plugin
+// records a token on the claim before it asks for the session
+// (assignTokens precedes EnsureSession) and removes it at NodeUnprepare,
+// so this set is the single source of truth a sweep compares against.
 func liveSessions(c *resourceapi.ResourceClaim) sets.Set[string] {
-	if c.Status.Allocation == nil || !c.DeletionTimestamp.IsZero() {
+	if !c.DeletionTimestamp.IsZero() {
 		return nil
 	}
-	return remote.ClaimSessionTokens(c.Annotations)
+	return remote.ClaimSessions(c)
 }
 
 // sweepClaim removes the sessions of a claim that this version of the

@@ -84,8 +84,9 @@ type InjectDriver struct {
 	wg           sync.WaitGroup
 	sliceIndexer cache.Indexer
 	healthcheck  *health.Healthcheck
-	// NRI mode state: claims prepared on this node (for the CreateContainer
-	// hook) and the in-process plugin.
+	// Claims prepared on this node (their devices, hence the agents behind
+	// them): read by the NRI CreateContainer hook and by NodeUnprepare when
+	// the claim object is already gone. Plus the in-process NRI plugin.
 	preparedMu sync.Mutex
 	prepared   map[string]*preparedClaim
 	nriPlugin  *nri.Plugin
@@ -168,8 +169,11 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 
 	<-sliceInformer.HasSyncedChecker().Done()
 
+	// Prepared claims are remembered in every mode: NRI needs them at
+	// CreateContainer, and NodeUnprepare needs the agents of a claim whose
+	// object is already gone.
+	d.restorePrepared(ctx)
 	if featuregates.Enabled(featuregates.NRISupport) {
-		d.restorePrepared(ctx)
 		if err := d.startNRI(ctx); err != nil {
 			return nil, fmt.Errorf("start NRI plugin: %w", err)
 		}
@@ -447,11 +451,11 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 	// 3. Session assignment.
 	edits := map[string]*cdiapi.ContainerEdits{}
 	idOf := map[int]string{} // index into devices -> CDI device id
+	d.recordPrepared(claim, devices)
 	if featuregates.Enabled(featuregates.NRISupport) {
 		// NRI mode: the per-container session (server list + token) is
 		// injected at CreateContainer; CDI only carries the claim
 		// correlation env. See nri.go.
-		d.recordPrepared(claim, devices)
 		containerEdits := &cdispec.ContainerEdits{Env: append(baseEnv, nriClaimEnv(claim)), Mounts: mounts}
 		for i, rd := range devices {
 			id := cdiDeviceID(rd, i)
@@ -574,7 +578,7 @@ func (d *InjectDriver) resolveRemoteDevices(claim *resourceapi.ResourceClaim) ([
 func (d *InjectDriver) cleanTokens(ctx context.Context, claim *resourceapi.ResourceClaim) error {
 	metadata := client2.PatchMetadata{Annotations: map[string]*string{}}
 	for key := range claim.GetAnnotations() {
-		if strings.HasPrefix(key, SessionAnnotationPrefix) {
+		if strings.HasPrefix(key, SessionAnnotationPrefix) || key == AllocationAnnotation {
 			metadata.Annotations[key] = nil
 		}
 	}
@@ -595,24 +599,39 @@ func (d *InjectDriver) cleanTokens(ctx context.Context, claim *resourceapi.Resou
 // assignTokens fills partition tokens from the claim annotations, minting and
 // persisting new ones in a single merge patch.
 func (d *InjectDriver) assignTokens(ctx context.Context, claim *resourceapi.ResourceClaim, partitions []*partition) error {
-	fresh := map[string]*string{}
+	// Tokens are scoped to the allocation they were issued for. Ones
+	// recorded for an earlier allocation of this claim (a standalone claim
+	// deallocated and allocated again before the previous consumer's
+	// NodeUnprepare removed them) are dropped here, in the same patch that
+	// records the new ones; the agents sweep their sessions on that update.
+	allocationID := AllocationID(claim)
+	reusable := claim.Annotations[AllocationAnnotation] == allocationID
+	annotations := map[string]*string{}
+	if !reusable {
+		for key := range claim.Annotations {
+			if strings.HasPrefix(key, SessionAnnotationPrefix) {
+				annotations[key] = nil
+			}
+		}
+	}
 	for _, p := range partitions {
 		key := SessionAnnotationKey(p.key)
-		if tok := claim.Annotations[key]; tok != "" {
+		if tok := claim.Annotations[key]; reusable && tok != "" {
 			p.token = tok
 			continue
 		}
-		if tok, err := NewSessionToken(); err != nil {
+		tok, err := NewSessionToken()
+		if err != nil {
 			return err
-		} else {
-			p.token = tok
-			fresh[key] = &tok
 		}
+		p.token = tok
+		annotations[key] = &tok
 	}
-	if len(fresh) == 0 {
+	if len(annotations) == 0 {
 		return nil
 	}
-	metadata := client2.PatchMetadata{Annotations: fresh}
+	annotations[AllocationAnnotation] = &allocationID
+	metadata := client2.PatchMetadata{Annotations: annotations}
 	patch, err := metadata.JSONBytes()
 	if err != nil {
 		return err

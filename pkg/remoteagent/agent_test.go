@@ -356,6 +356,7 @@ func TestSweepClaimAndRelease(t *testing.T) {
 		for i, tok := range tokens {
 			metav1.SetMetaDataAnnotation(&c.ObjectMeta, remote.SessionAnnotationKey("p"+strconv.Itoa(i)), tok)
 		}
+		metav1.SetMetaDataAnnotation(&c.ObjectMeta, remote.AllocationAnnotation, remote.AllocationID(c))
 		return c
 	}
 	for _, tok := range []string{"t1", "t2"} {
@@ -374,6 +375,12 @@ func TestSweepClaimAndRelease(t *testing.T) {
 	deleting.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	if liveSessions(unalloc).Len() != 0 || liveSessions(deleting).Len() != 0 {
 		t.Fatal("unallocated or deleting claims have no live sessions")
+	}
+	// Tokens issued for another allocation of the same claim are not live.
+	moved := claimAt("11", "t1")
+	moved.Status.Allocation.Devices.Results[0].Device = "vgpu-2"
+	if liveSessions(moved).Len() != 0 {
+		t.Fatal("tokens of a previous allocation must not be live")
 	}
 
 	// An update that drops t2 from the annotations sweeps t2 only.

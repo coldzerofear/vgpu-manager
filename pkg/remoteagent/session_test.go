@@ -323,7 +323,7 @@ func TestTrimClaim(t *testing.T) {
 		result(testNode, "vgpu-0", "50", "4Gi"),
 		result("other-node", "vgpu-0", "", ""),
 	)
-	full.Annotations = map[string]string{"big": strings.Repeat("x", 4096), remote.SessionAnnotationKey("p"): "tok-1"}
+	full.Annotations = map[string]string{"big": strings.Repeat("x", 4096), remote.SessionAnnotationKey("p"): "tok-1", remote.AllocationAnnotation: "alloc-1"}
 	full.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "kubectl"}}
 	full.Spec.Devices.Requests = []resourceapi.DeviceRequest{
 		{Name: "a", Exactly: &resourceapi.ExactDeviceRequest{DeviceClassName: "vgpu-manager"}},
@@ -340,11 +340,12 @@ func TestTrimClaim(t *testing.T) {
 		t.Fatalf("unexpected leftovers: %+v", trimmed.ObjectMeta)
 	}
 	// Only the session annotations survive: they are the claim's session set.
-	if len(trimmed.Annotations) != 1 || trimmed.Annotations[remote.SessionAnnotationKey("p")] != "tok-1" {
-		t.Fatalf("session annotations must survive, others must not: %v", trimmed.Annotations)
+	if len(trimmed.Annotations) != 2 || trimmed.Annotations[remote.SessionAnnotationKey("p")] != "tok-1" || trimmed.Annotations[remote.AllocationAnnotation] != "alloc-1" {
+		t.Fatalf("session and allocation annotations must survive, others must not: %v", trimmed.Annotations)
 	}
-	if len(trimmed.Status.Allocation.Devices.Results) != 1 || trimmed.Status.Allocation.Devices.Results[0].Pool != testNode {
-		t.Fatalf("results must be narrowed to this pool: %+v", trimmed.Status.Allocation.Devices.Results)
+	// Every result is kept in reduced form, so the allocation ID matches the full claim.
+	if len(trimmed.Status.Allocation.Devices.Results) != 2 || remote.AllocationID(trimmed) != remote.AllocationID(full) {
+		t.Fatalf("results must be kept for the allocation ID: %+v", trimmed.Status.Allocation.Devices.Results)
 	}
 	if trimmed.Spec.Devices.Requests[0].Exactly == nil || trimmed.Spec.Devices.Requests[0].Exactly.DeviceClassName != "" ||
 		trimmed.Spec.Devices.Requests[1].FirstAvailable[0].Name != "x" {

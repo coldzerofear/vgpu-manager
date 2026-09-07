@@ -64,7 +64,9 @@ func SessionAnnotationKey(partitionKey string) string {
 }
 
 // ClaimSessionTokens returns the session tokens recorded on a claim, i.e.
-// the values of its session annotations (empty values skipped).
+// the values of its session annotations (empty values skipped), whatever
+// allocation they were issued for. Use ClaimSessions for the ones that are
+// valid for the claim's current allocation.
 func ClaimSessionTokens(annotations map[string]string) sets.Set[string] {
 	tokens := sets.New[string]()
 	for key, value := range annotations {
@@ -73,6 +75,51 @@ func ClaimSessionTokens(annotations map[string]string) sets.Set[string] {
 		}
 	}
 	return tokens
+}
+
+// AllocationAnnotation records which allocation the claim's session tokens
+// were issued for (see AllocationID). Tokens are scoped to one allocation:
+// a standalone claim that is deallocated and allocated again -- possibly to
+// other devices -- must not hand the next pod the previous pod's sessions,
+// even when its NodeUnprepare has not yet removed the annotations.
+const AllocationAnnotation = util.DRADriverName + "/allocation-id"
+
+// AllocationID is a stable digest of what a claim was allocated: every
+// result's request, driver, pool, device, share and consumed capacity, in a
+// canonical order. Equal allocations give equal IDs regardless of result
+// order; nil allocation gives "".
+func AllocationID(claim *resourceapi.ResourceClaim) string {
+	if claim == nil || claim.Status.Allocation == nil {
+		return ""
+	}
+	lines := make([]string, 0, len(claim.Status.Allocation.Devices.Results))
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		caps := make([]string, 0, len(r.ConsumedCapacity))
+		for name, q := range r.ConsumedCapacity {
+			caps = append(caps, string(name)+"="+q.String())
+		}
+		sort.Strings(caps)
+		share := ""
+		if r.ShareID != nil {
+			share = string(*r.ShareID)
+		}
+		lines = append(lines, strings.Join([]string{r.Request, r.Driver, r.Pool, r.Device, share, strings.Join(caps, ",")}, "|"))
+	}
+	sort.Strings(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// ClaimSessions returns the session tokens that are valid for the claim's
+// current allocation: its session annotations, provided the claim is
+// allocated and the recorded allocation ID matches. Tokens issued for an
+// earlier allocation of the same claim are not sessions of this one.
+func ClaimSessions(claim *resourceapi.ResourceClaim) sets.Set[string] {
+	if claim == nil || claim.Status.Allocation == nil ||
+		claim.Annotations[AllocationAnnotation] != AllocationID(claim) {
+		return sets.New[string]()
+	}
+	return ClaimSessionTokens(claim.Annotations)
 }
 
 // NewSessionToken mints a random session token (32 hex chars). It satisfies

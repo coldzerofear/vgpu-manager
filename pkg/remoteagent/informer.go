@@ -51,10 +51,11 @@ func trimClaim(driverName, poolName string) cache.TransformFunc {
 		trimmed.UID = claim.UID
 		trimmed.ResourceVersion = claim.ResourceVersion
 		trimmed.DeletionTimestamp = claim.DeletionTimestamp
-		// The session annotations are the claim's current session set; the
+		// The session annotations plus the allocation they were issued for
+		// are the claim's current session set (remote.ClaimSessions); the
 		// sweep keeps exactly those. Everything else in the metadata is noise.
 		for key, value := range claim.Annotations {
-			if strings.HasPrefix(key, remote.SessionAnnotationPrefix) {
+			if strings.HasPrefix(key, remote.SessionAnnotationPrefix) || key == remote.AllocationAnnotation {
 				if trimmed.Annotations == nil {
 					trimmed.Annotations = map[string]string{}
 				}
@@ -73,12 +74,13 @@ func trimClaim(driverName, poolName string) cache.TransformFunc {
 			trimmed.Spec.Devices.Requests = append(trimmed.Spec.Devices.Requests, r)
 		}
 
+		// Every result is kept (other pools' too, in this reduced form): the
+		// allocation ID that scopes session tokens is a digest of all of them
+		// and must come out the same here as on the inject side. Materialize
+		// still ignores results outside this pool.
 		if claim.Status.Allocation != nil {
 			alloc := &resourceapi.AllocationResult{}
 			for _, result := range claim.Status.Allocation.Devices.Results {
-				if result.Driver != driverName || result.Pool != poolName {
-					continue
-				}
 				alloc.Devices.Results = append(alloc.Devices.Results, resourceapi.DeviceRequestAllocationResult{
 					Request:          result.Request,
 					Driver:           result.Driver,

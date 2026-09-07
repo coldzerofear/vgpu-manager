@@ -24,6 +24,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes/fake"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
@@ -68,5 +69,66 @@ func TestClaimHasLiveConsumers(t *testing.T) {
 		if err != nil || live != tc.live {
 			t.Errorf("%s: live=%v err=%v, want %v", name, live, err, tc.live)
 		}
+	}
+}
+
+func TestAssignTokensScopedToAllocation(t *testing.T) {
+	ctx := context.Background()
+	alloc := func(dev string) *resourceapi.AllocationResult {
+		return &resourceapi.AllocationResult{Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{
+			{Request: "r1", Driver: "d", Pool: "gpu-a", Device: dev},
+		}}}
+	}
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "uid-1"},
+		Status:     resourceapi.ResourceClaimStatus{Allocation: alloc("vgpu-0")},
+	}
+	d := &InjectDriver{clients: pkgflags.ClientSets{Core: fake.NewSimpleClientset(claim)}}
+	key := SessionAnnotationKey("part-1")
+
+	// First prepare: mints a token and records the allocation it belongs to.
+	p := &partition{key: "part-1"}
+	if err := d.assignTokens(ctx, claim, []*partition{p}); err != nil {
+		t.Fatal(err)
+	}
+	first := p.token
+	if first == "" || claim.Annotations[key] != first || claim.Annotations[AllocationAnnotation] != AllocationID(claim) {
+		t.Fatalf("after first assign: token=%q annotations=%v", first, claim.Annotations)
+	}
+
+	// Same allocation (a kubelet retry): the token is reused, nothing patched.
+	p = &partition{key: "part-1"}
+	if err := d.assignTokens(ctx, claim, []*partition{p}); err != nil {
+		t.Fatal(err)
+	}
+	if p.token != first {
+		t.Fatalf("retry must reuse the token: %q != %q", p.token, first)
+	}
+
+	// The claim was deallocated and allocated again to another device before
+	// the previous consumer's NodeUnprepare ran: its tokens must not carry
+	// over. The stale annotation is removed in the same patch.
+	claim.Status.Allocation = alloc("vgpu-1")
+	if _, err := d.clients.Core.ResourceV1().ResourceClaims("ns").UpdateStatus(ctx, claim, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	p = &partition{key: "part-1"}
+	q := &partition{key: "part-2"}
+	if err := d.assignTokens(ctx, claim, []*partition{p, q}); err != nil {
+		t.Fatal(err)
+	}
+	if p.token == first || p.token == "" || q.token == "" || p.token == q.token {
+		t.Fatalf("new allocation must get fresh tokens: p=%q q=%q first=%q", p.token, q.token, first)
+	}
+	if claim.Annotations[key] != p.token || claim.Annotations[AllocationAnnotation] != AllocationID(claim) {
+		t.Fatalf("annotations after re-allocation: %v", claim.Annotations)
+	}
+	if got := ClaimSessionTokens(claim.Annotations); !got.Equal(sets.New(p.token, q.token)) {
+		t.Fatalf("stale tokens must be gone: %v", got)
+	}
+	// And the API object agrees with the local copy.
+	stored, err := d.clients.Core.ResourceV1().ResourceClaims("ns").Get(ctx, "c", metav1.GetOptions{})
+	if err != nil || !ClaimSessionTokens(stored.Annotations).Equal(sets.New(p.token, q.token)) {
+		t.Fatalf("stored annotations: %v %v", stored.Annotations, err)
 	}
 }

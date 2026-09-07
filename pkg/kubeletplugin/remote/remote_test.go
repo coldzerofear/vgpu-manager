@@ -27,6 +27,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
@@ -692,5 +693,45 @@ func TestClaimSessionTokens(t *testing.T) {
 	}
 	if ClaimSessionTokens(nil).Len() != 0 {
 		t.Fatal("nil annotations must yield an empty set")
+	}
+}
+
+func TestAllocationIDAndClaimSessions(t *testing.T) {
+	res := func(req, dev string, cores string) resourceapi.DeviceRequestAllocationResult {
+		r := resourceapi.DeviceRequestAllocationResult{Request: req, Driver: "d", Pool: "p", Device: dev}
+		if cores != "" {
+			r.ConsumedCapacity = map[resourceapi.QualifiedName]resource.Quantity{CapacityCores: resource.MustParse(cores)}
+		}
+		return r
+	}
+	claim := func(results ...resourceapi.DeviceRequestAllocationResult) *resourceapi.ResourceClaim {
+		c := &resourceapi.ResourceClaim{}
+		if results != nil {
+			c.Status.Allocation = &resourceapi.AllocationResult{Devices: resourceapi.DeviceAllocationResult{Results: results}}
+		}
+		return c
+	}
+	a := claim(res("r1", "gpu-0", "30"), res("r2", "gpu-1", ""))
+	same := claim(res("r2", "gpu-1", ""), res("r1", "gpu-0", "30")) // order must not matter
+	other := claim(res("r1", "gpu-0", "40"), res("r2", "gpu-1", ""))
+	if AllocationID(a) == "" || AllocationID(a) != AllocationID(same) || AllocationID(a) == AllocationID(other) {
+		t.Fatalf("ids: a=%s same=%s other=%s", AllocationID(a), AllocationID(same), AllocationID(other))
+	}
+	if AllocationID(nil) != "" || AllocationID(claim()) != "" {
+		t.Fatal("no allocation, no id")
+	}
+
+	a.Annotations = map[string]string{SessionAnnotationKey("x"): "tok-x", AllocationAnnotation: AllocationID(a)}
+	if !ClaimSessions(a).Equal(sets.New("tok-x")) {
+		t.Fatalf("matching allocation: %v", ClaimSessions(a))
+	}
+	other.Annotations = a.Annotations // same tokens, issued for a's allocation
+	if ClaimSessions(other).Len() != 0 {
+		t.Fatal("tokens of another allocation are not sessions of this one")
+	}
+	unalloc := claim()
+	unalloc.Annotations = a.Annotations
+	if ClaimSessions(unalloc).Len() != 0 || ClaimSessions(nil).Len() != 0 {
+		t.Fatal("unallocated or nil claims have no sessions")
 	}
 }
