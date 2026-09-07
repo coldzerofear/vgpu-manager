@@ -67,6 +67,11 @@ kubectl apply -f dra-webhook.yaml
 
 - **K1 明文传输**：`LUPINE_SESSION` 令牌以 HTTP/2 头明文传输，多租户/跨信任域前必须
   先落 TLS 方案（设计 D5/§6.1）。
+- **remote-agent 的 gRPC（:14834）无鉴权**：EnsureSession/ReleaseSessions 只校验"令牌已登记在 claim 上"，
+  不校验调用方身份；能访问该端口者可为任意 claim 物化/释放会话。缓解：生产环境只监听 unix 套接字
+  （`LISTEN_SERVER_ENDPOINT=unix:///etc/vgpu-manager/agent.sock`，仅同节点 dra-server 可达）；跨节点 TCP 监听的鉴权随 D5 一起落。
+- **NodePrepare 串行**：dra-inject 以 `kubeletplugin.Serialize` 串行处理本节点的 Prepare/Unprepare，单次 EnsureSession
+  超时 5s；一个失联的 agent 最多让本节点其他 pod 的 prepare 等 5s × 该 claim 跨的 agent 数。
 - **会话随 lupine-server 重启作废**：连接态不可恢复，应用层需自行重试/重启（设计固有约束）。
 - **消费镜像约束**：glibc-only（musl/alpine 不支持）；镜像不得自带真 `libcuda.so.1`。
 - `dra-server` 开启 RemoteGPUSupport 后禁止 `--http-endpoint`/`--healthcheck-port`

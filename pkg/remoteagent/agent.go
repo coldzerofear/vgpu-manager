@@ -182,14 +182,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.claimInformer = cache.NewSharedIndexInformer(
 		cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourceclaims", corev1.NamespaceAll,
-			fields.Everything()), &resourceapi.ResourceClaim{}, 10*time.Hour, cache.Indexers{
-			claimUIDIndex: func(obj interface{}) ([]string, error) {
-				if c, ok := obj.(*resourceapi.ResourceClaim); ok {
-					return []string{string(c.UID)}, nil
-				}
-				return nil, nil
-			},
-		})
+			fields.Everything()), &resourceapi.ResourceClaim{}, 10*time.Hour, claimIndexers())
 	// The cache keeps only the fields the agent reads (see trimClaim);
 	// EnsureSession re-fetches the full object from the API when the
 	// trimmed one turns out stale.
@@ -641,6 +634,53 @@ func (a *Agent) gcSessions(context.Context) {
 	}
 }
 
+// claimIndexers is the claim informer's index set: claims are looked up by
+// UID (what EnsureSession and the sweep carry), not by name.
+func claimIndexers() cache.Indexers {
+	return cache.Indexers{
+		claimUIDIndex: func(obj interface{}) ([]string, error) {
+			if c, ok := obj.(*resourceapi.ResourceClaim); ok {
+				return []string{string(c.UID)}, nil
+			}
+			return nil, nil
+		},
+	}
+}
+
+// claimForSession returns the claim an EnsureSession request may build its
+// session from, and records it in the mutation cache. The claim must
+// already carry the session token for its current allocation: the inject
+// plugin writes that annotation before calling, on the claim version the
+// request names. The cache is used when it is at least that version and
+// carries the token; otherwise the claim is read from the API -- a cache
+// that is behind is not an error. A live claim that does not record the
+// token means it was never issued (or belongs to an earlier allocation):
+// refused. Building from a claim that carries the token also pins the
+// session's marker version at or after the token's, which is what keeps a
+// stale "deallocated" event for the previous consumer from sweeping this
+// session.
+func (a *Agent) claimForSession(ctx context.Context, req *remoteagent.EnsureSessionRequest) (*resourceapi.ResourceClaim, error) {
+	wantRV, _ := strconv.ParseInt(req.ClaimResourceVersion, 10, 64)
+	claim, err := a.GetClaimByUID(req.ClaimUid)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
+	}
+	if claim == nil || claimRV(claim) < wantRV || !liveSessions(claim).Has(req.Session) {
+		claim, err = a.cfg.ClientSets.Resource.ResourceClaims(req.ClaimNamespace).Get(ctx, req.ClaimName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) || (err == nil && string(claim.UID) != req.ClaimUid) {
+			return nil, status.Errorf(codes.NotFound, "claim %s not found", req.ClaimUid)
+		}
+		if err != nil {
+			return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
+		}
+		if !liveSessions(claim).Has(req.Session) {
+			return nil, status.Errorf(codes.FailedPrecondition, "session %s is not recorded on claim %s (rv %s)", req.Session, klog.KObj(claim), claim.ResourceVersion)
+		}
+	}
+	a.claimCache.Mutation(claim)
+	return claim, nil
+}
+
 func (a *Agent) GetClaimByUID(uid string) (*resourceapi.ResourceClaim, error) {
 	objs, err := a.claimCache.ByIndex(claimUIDIndex, uid)
 	if err != nil {
@@ -676,30 +716,10 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	// The claim we build the session from must already record this token:
-	// the inject plugin writes the annotation before it calls us, so a
-	// cached claim without it is simply behind (informer lag), and a live
-	// one without it means the token was never issued -- refuse it. Using
-	// a claim that carries the token also pins the session's marker version
-	// at or after the token's, which is what keeps a stale "deallocated"
-	// event for the previous consumer from sweeping this session.
-	claim, err := a.GetClaimByUID(req.ClaimUid)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
+	claim, err := a.claimForSession(ctx, req)
+	if err != nil {
+		return nil, err
 	}
-	if claim == nil || !liveSessions(claim).Has(req.Session) {
-		claim, err = a.cfg.ClientSets.Resource.ResourceClaims(req.ClaimNamespace).Get(ctx, req.ClaimName, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) || (err == nil && string(claim.UID) != req.ClaimUid) {
-			return nil, status.Errorf(codes.NotFound, "claim %s not found", req.ClaimUid)
-		}
-		if err != nil {
-			return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
-		}
-		if !liveSessions(claim).Has(req.Session) {
-			return nil, status.Errorf(codes.FailedPrecondition, "session %s is not recorded on claim %s", req.Session, klog.KObj(claim))
-		}
-	}
-	a.claimCache.Mutation(claim)
 
 	nd := a.nodeDevices.Load()
 	if nd == nil || len(nd.Devices) == 0 {

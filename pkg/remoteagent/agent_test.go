@@ -31,10 +31,19 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/status"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
+	draclient "k8s.io/dynamic-resource-allocation/client"
+	"k8s.io/klog/v2"
+	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
 // fakeLupine answers like lupine-server does on its RPC port: 404 with the
@@ -420,5 +429,106 @@ func TestSweepClaimAndRelease(t *testing.T) {
 	}
 	if _, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-x", Tokens: []string{"../x"}}); err == nil {
 		t.Fatal("malformed token must be rejected")
+	}
+}
+
+// EnsureSession builds a session only from a claim that records the token
+// for its current allocation, and reads the claim from the API when the
+// cache is behind the version the caller names.
+func TestEnsureSessionRequiresRecordedToken(t *testing.T) {
+	ctx := context.Background()
+	srv, _ := fakeLupine(t)
+	claimAt := func(rv string, tokens ...string) *resourceapi.ResourceClaim {
+		c := testClaim("uid-e", result(testNode, "vgpu-0", "", ""))
+		c.ResourceVersion = rv
+		for i, tok := range tokens {
+			metav1.SetMetaDataAnnotation(&c.ObjectMeta, remote.SessionAnnotationKey("p"+strconv.Itoa(i)), tok)
+		}
+		metav1.SetMetaDataAnnotation(&c.ObjectMeta, remote.AllocationAnnotation, remote.AllocationID(c))
+		return c
+	}
+	apiClaim := claimAt("10", "t1")
+	cs := fake.NewSimpleClientset(apiClaim)
+	var gets atomic.Int32
+	cs.PrependReactor("get", "resourceclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		gets.Add(1)
+		return false, nil, nil
+	})
+	a := New(Config{
+		NodeName: testNode, DriverName: testDriver, ServerEndpoint: srv.URL, SessionBase: t.TempDir(),
+		ClientSets: pkgflags.ClientSets{Core: cs, Resource: draclient.New(cs)},
+	})
+	if err := a.store.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	a.nodeDevices.Store(NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()}))
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, claimIndexers())
+	a.claimCache = cache.NewIntegerResourceVersionMutationCache(klog.Background(), indexer, indexer, time.Minute, true)
+	if err := indexer.Add(claimAt("10", "t1")); err != nil {
+		t.Fatal(err)
+	}
+	a.probeServer(ctx)
+
+	ensure := func(token, rv string) (*remoteagent.EnsureSessionResponse, error) {
+		return a.EnsureSession(ctx, &remoteagent.EnsureSessionRequest{
+			Session: token, ClaimUid: string(apiClaim.UID), ClaimNamespace: apiClaim.Namespace, ClaimName: apiClaim.Name,
+			Partition: "p", ClaimResourceVersion: rv,
+		})
+	}
+
+	// Cache is current and records the token: no API read.
+	resp, err := ensure("t1", "10")
+	if err != nil || !resp.Ready {
+		t.Fatalf("t1: %+v %v", resp, err)
+	}
+	if gets.Load() != 0 {
+		t.Fatalf("a current cache must not be re-read from the API (%d gets)", gets.Load())
+	}
+
+	// A token the claim does not record is refused, even though the caller
+	// names a version the cache already has.
+	if _, err = ensure("t9", "10"); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unrecorded token: want FailedPrecondition, got %v", err)
+	}
+	if got := a.store.TokensOfClaim("uid-e"); len(got) != 1 {
+		t.Fatal("refused session must not be materialized")
+	}
+
+	// The claim gained t2 at rv 11 and the cache has not seen it yet: the
+	// agent reads the API, accepts, and the cache moves forward.
+	apiClaim = claimAt("11", "t1", "t2")
+	if _, err = cs.ResourceV1().ResourceClaims(apiClaim.Namespace).Update(ctx, apiClaim, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	before := gets.Load()
+	if resp, err = ensure("t2", "11"); err != nil || !resp.Ready {
+		t.Fatalf("t2 after API update: %+v %v", resp, err)
+	}
+	if gets.Load() != before+1 {
+		t.Fatalf("a stale cache must be refreshed from the API once (%d gets)", gets.Load()-before)
+	}
+	if c, err := a.GetClaimByUID("uid-e"); err != nil || c.ResourceVersion != "11" {
+		t.Fatalf("cache must hold the fresh claim: %v %v", c, err)
+	}
+	if got := a.store.TokensOfClaim("uid-e"); len(got) != 2 {
+		t.Fatalf("sessions of claim: %v", got)
+	}
+
+	// Cache records the token but is older than the caller's version: the
+	// caller knows better, so the API is consulted, and the answer stands.
+	before = gets.Load()
+	if _, err = ensure("t1", "12"); err != nil || gets.Load() != before+1 {
+		t.Fatalf("older cache than the caller must be re-read: err=%v gets=%d", err, gets.Load()-before)
+	}
+
+	// Claim gone from the API (and from the cache): NotFound, nothing built.
+	if err = cs.ResourceV1().ResourceClaims(apiClaim.Namespace).Delete(ctx, apiClaim.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err = indexer.Delete(apiClaim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ensure("t3", "13"); status.Code(err) != codes.NotFound {
+		t.Fatalf("gone claim: want NotFound, got %v", err)
 	}
 }

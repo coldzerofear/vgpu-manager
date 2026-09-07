@@ -170,6 +170,10 @@ func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.Res
 		ClaimName:      claim.Name,
 		Requests:       requests,
 		Partition:      partitionKey,
+		// The version that carries the session token: lets the agent tell a
+		// claim cache that is merely behind from a token that was never
+		// recorded, and read the claim from the API in the former case.
+		ClaimResourceVersion: claim.ResourceVersion,
 	})
 	if err != nil {
 		return "", err

@@ -35,6 +35,11 @@ message EnsureSessionRequest {
   // Partition is the resolver's partition key (informational, logged and
   // recorded in the session marker).
   string partition = 6;
+  // claim_resource_version is the claim version the caller decided the
+  // session against (it recorded the token on that version). An agent whose
+  // cached claim is older than this reads the claim from the API instead of
+  // failing on a stale cache.
+  string claim_resource_version = 7;
 }
 
 message EnsureSessionResponse {

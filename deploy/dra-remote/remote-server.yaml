@@ -196,6 +196,13 @@ spec:
                 echo "waiting for remote-agent ready file..."
                 sleep 2
               done
+              # 前置校验：隔离库必须已由 init-install 落盘且可读，否则 LD_PRELOAD 会静默跳过、
+              # checkpoint provider 装不上，server 会以"无隔离"状态跑起来——宁可启动失败。
+              : "${LUPINE_CHECKPOINT_LIBRARY:?must point to libvgpu-control.so}"
+              if [ ! -r "$LUPINE_CHECKPOINT_LIBRARY" ]; then
+                echo "LUPINE_CHECKPOINT_LIBRARY=$LUPINE_CHECKPOINT_LIBRARY is missing or unreadable; was init-install run?" >&2
+                exit 1
+              fi
               LD_PRELOAD=$LUPINE_CHECKPOINT_LIBRARY:$LD_PRELOAD exec /opt/lupine/bin/lupine_driver_server
           env:
             - name: LUPINE_PORT
