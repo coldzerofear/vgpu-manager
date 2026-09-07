@@ -71,6 +71,17 @@ func (d *InjectDriver) recordPrepared(claim *resourceapi.ResourceClaim, devices 
 	d.savePreparedLocked()
 }
 
+// updatePreparedClaim refreshes the cached copy of a prepared claim (its
+// devices are unchanged: an allocation is immutable while it exists). A
+// claim that is no longer prepared is ignored.
+func (d *InjectDriver) updatePreparedClaim(claim *resourceapi.ResourceClaim) {
+	d.preparedMu.Lock()
+	defer d.preparedMu.Unlock()
+	if pc, ok := d.prepared[string(claim.UID)]; ok {
+		pc.claim = claim.DeepCopy()
+	}
+}
+
 func (d *InjectDriver) forgetPrepared(claimUID string) {
 	d.preparedMu.Lock()
 	defer d.preparedMu.Unlock()
@@ -125,7 +136,15 @@ func (d *InjectDriver) nriInjection(claimUID, podName, podNamespace, podUID, con
 	if pc == nil {
 		return nil, fmt.Errorf("claim %s is not prepared on this node", claimUID)
 	}
-	claim := pc.claim
+	// Work on a private, current copy of the claim: containers of one pod
+	// are created concurrently (the NRI plugin does not serialize this
+	// hook), and assignTokens both reads and rewrites the claim it is given.
+	// Refreshing also starts the token patch from the latest version, so
+	// the second container does not have to go through a conflict first.
+	claim := pc.claim.DeepCopy()
+	if err := d.refreshClaim(ctx, claim); err != nil {
+		return nil, fmt.Errorf("claim %s: %w", claimUID, err)
+	}
 
 	// Which of the claim's requests does this container reference? Read the
 	// live pod: the NRI sandbox carries identity only, not the spec.
@@ -173,6 +192,7 @@ func (d *InjectDriver) nriInjection(claimUID, podName, podNamespace, podUID, con
 	if err := d.assignTokens(ctx, claim, []*partition{p}); err != nil {
 		return nil, err
 	}
+	d.updatePreparedClaim(claim)
 	endpoints, err := EnsureSessions(ctx, p.endpoints, claim, p.token, p.key, p.requests)
 	if err != nil {
 		return nil, err

@@ -210,3 +210,41 @@ func TestReleaseClaimReevaluatesOnConflict(t *testing.T) {
 		t.Fatalf("tokens must be gone: %v %v", stored.Annotations, err)
 	}
 }
+
+func TestRefreshClaimAndPreparedCopy(t *testing.T) {
+	ctx := context.Background()
+	stored := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "uid-1", ResourceVersion: "9",
+		Annotations: map[string]string{"k": "v"}}}
+	cs := fake.NewSimpleClientset(stored)
+	d := &InjectDriver{clients: pkgflags.ClientSets{Core: cs, Resource: draclient.New(cs)}, prepared: map[string]*preparedClaim{}}
+
+	// The cached copy is stale; a refreshed private copy does not alias it.
+	cached := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "uid-1", ResourceVersion: "1"}}
+	d.prepared["uid-1"] = &preparedClaim{claim: cached}
+	work := d.lookupPrepared("uid-1").claim.DeepCopy()
+	if err := d.refreshClaim(ctx, work); err != nil {
+		t.Fatal(err)
+	}
+	if work.ResourceVersion != "9" || work.Annotations["k"] != "v" || cached.ResourceVersion != "1" {
+		t.Fatalf("refresh must update the copy only: work=%s cached=%s", work.ResourceVersion, cached.ResourceVersion)
+	}
+	d.updatePreparedClaim(work)
+	if got := d.lookupPrepared("uid-1").claim; got.ResourceVersion != "9" || got == work {
+		t.Fatalf("cache must hold a fresh private copy: rv=%s aliased=%v", got.ResourceVersion, got == work)
+	}
+
+	// A replaced claim (other UID) or a missing one ends the refresh with an error.
+	other := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", UID: "uid-2"}}
+	if err := d.refreshClaim(ctx, other); err == nil {
+		t.Fatal("UID mismatch must be an error")
+	}
+	missing := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{Name: "nope", Namespace: "ns", UID: "uid-3"}}
+	if err := d.refreshClaim(ctx, missing); !apierrors.IsNotFound(err) {
+		t.Fatalf("missing claim must be NotFound, got %v", err)
+	}
+	// An unknown claim is ignored by the cache update.
+	d.updatePreparedClaim(other)
+	if _, ok := d.prepared["uid-2"]; ok {
+		t.Fatal("update must not create cache entries")
+	}
+}
