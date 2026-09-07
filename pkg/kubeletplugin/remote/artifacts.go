@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/Masterminds/semver"
@@ -133,7 +134,15 @@ var optionalShimLibrary = map[string]bool{
 // when the shim set changes on an artifact update.
 func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, error) {
 	var lines []string
-	for lib, require := range optionalShimLibrary {
+	// Fixed order: the file is compared byte-for-byte on the next prepare,
+	// so map iteration order must not make an unchanged shim set look new.
+	libs := make([]string, 0, len(optionalShimLibrary))
+	for lib := range optionalShimLibrary {
+		libs = append(libs, lib)
+	}
+	sort.Strings(libs)
+	for _, lib := range libs {
+		require := optionalShimLibrary[lib]
 		if _, err := os.Stat(filepath.Join(artifactsDir, sel.Name, lib)); err == nil {
 			lines = append(lines, filepath.Join(sel.ContainerDir, lib))
 		} else if require {
