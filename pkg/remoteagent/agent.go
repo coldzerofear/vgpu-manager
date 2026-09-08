@@ -26,8 +26,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -491,6 +493,11 @@ func (a *Agent) probe(ctx context.Context, discover bool) {
 	}
 	next.Up = true
 	next.CudaVersion = version.Original()
+	if etag, err := remote.ProbeClientBundleETag(ctx, a.cfg.ServerEndpoint, remote.LocalClientBundlePlatform(), candidateProbeTimeout); err == nil {
+		next.ClientBundleETag = etag
+	} else {
+		klog.V(4).Infof("client bundle etag not read this probe: %v", err)
+	}
 	next.RoutableHost = a.resolveRoutableHost(ctx, prev.RoutableHost, discover)
 	next.Endpoint = a.serverEndpointFor(next.RoutableHost)
 	next.AgentEndpoint = a.agentEndpointFor(next.RoutableHost)
@@ -502,6 +509,8 @@ func (a *Agent) probe(ctx context.Context, discover bool) {
 			a.cfg.ServerEndpoint, next.CudaVersion, next.Endpoint, next.AgentEndpoint)
 	case prev.CudaVersion != next.CudaVersion:
 		klog.Infof("lupine-server %s now built for CUDA %s (was %s)", a.cfg.ServerEndpoint, next.CudaVersion, prev.CudaVersion)
+	case prev.ClientBundleETag != next.ClientBundleETag:
+		klog.Infof("lupine-server %s client bundle is now %q (was %q)", a.cfg.ServerEndpoint, next.ClientBundleETag, prev.ClientBundleETag)
 	}
 	if prev.Endpoint != next.Endpoint || prev.AgentEndpoint != next.AgentEndpoint {
 		klog.Infof("advertised endpoints changed: server %q -> %q, agent %q -> %q",
@@ -659,22 +668,25 @@ func claimIndexers() cache.Indexers {
 // session's marker version at or after the token's, which is what keeps a
 // stale "deallocated" event for the previous consumer from sweeping this
 // session.
-func (a *Agent) claimForSession(ctx context.Context, req *remoteagent.EnsureSessionRequest) (*resourceapi.ResourceClaim, error) {
-	wantRV, _ := strconv.ParseInt(req.ClaimResourceVersion, 10, 64)
-	claim, err := a.GetClaimByUID(req.ClaimUid)
+func (a *Agent) claimForSession(ctx context.Context, session, uid, namespace, name, resourceVersion string) (*resourceapi.ResourceClaim, error) {
+	wantRV, _ := strconv.ParseInt(resourceVersion, 10, 64)
+	claim, err := a.GetClaimByUID(uid)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
 	}
-	if claim == nil || claimRV(claim) < wantRV || !liveSessions(claim).Has(req.Session) {
-		claim, err = a.cfg.ClientSets.Resource.ResourceClaims(req.ClaimNamespace).Get(ctx, req.ClaimName, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) || (err == nil && string(claim.UID) != req.ClaimUid) {
-			return nil, status.Errorf(codes.NotFound, "claim %s not found", req.ClaimUid)
+	if claim == nil || claimRV(claim) < wantRV || !liveSessions(claim).Has(session) {
+		claim, err = a.cfg.ClientSets.Resource.ResourceClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) || (err == nil && string(claim.UID) != uid) {
+			return nil, status.Errorf(codes.NotFound, "claim %s not found", uid)
 		}
 		if err != nil {
 			return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
 		}
-		if !liveSessions(claim).Has(req.Session) {
-			return nil, status.Errorf(codes.FailedPrecondition, "session %s is not recorded on claim %s (rv %s)", req.Session, klog.KObj(claim), claim.ResourceVersion)
+		if !liveSessions(claim).Has(session) {
+			// The token is the caller's credential for this claim: not
+			// recorded (never issued, or issued for an earlier allocation)
+			// means not authorized.
+			return nil, status.Errorf(codes.PermissionDenied, "session %s is not recorded on claim %s (rv %s)", session, klog.KObj(claim), claim.ResourceVersion)
 		}
 	}
 	a.claimCache.Mutation(claim)
@@ -700,6 +712,11 @@ func (a *Agent) ReleaseSessions(_ context.Context, req *remoteagent.ReleaseSessi
 	if req.ClaimUid == "" {
 		return nil, status.Error(codes.InvalidArgument, "claim_uid is required")
 	}
+	if len(req.Tokens) == 0 {
+		// A claim UID is not a secret; the tokens are what the caller must
+		// hold. Sessions of a claim that is gone are swept by the claim watch.
+		return nil, status.Error(codes.InvalidArgument, "tokens are required")
+	}
 	released, err := a.store.Release(req.ClaimUid, req.Tokens)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -716,7 +733,7 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	claim, err := a.claimForSession(ctx, req)
+	claim, err := a.claimForSession(ctx, req.Session, req.ClaimUid, req.ClaimNamespace, req.ClaimName, req.ClaimResourceVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -755,6 +772,7 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 		CudaDriverVersion: nd.CudaVersionString(),
 		Message:           msg,
 		ServerEndpoint:    state.Endpoint,
+		ClientBundleEtag:  state.ClientBundleETag,
 	}, nil
 }
 
@@ -777,6 +795,7 @@ func (a *Agent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*re
 		CudaDriverVersion: state.CudaVersion,
 		NodeName:          a.cfg.NodeName,
 		AgentEndpoint:     state.AgentEndpoint,
+		ClientBundleEtag:  state.ClientBundleETag,
 	}, nil
 }
 
@@ -801,6 +820,91 @@ func (a *Agent) checkSMWatcher(context.Context) {
 			klog.Infof("external SM watcher cache %s is present", path)
 		} else {
 			klog.Warningf("SharedSMUtilizationWatcher is on but %s is missing: check the dra-server plugin has the gate enabled (it writes the cache), or sessions fall back to NVML sampling", path)
+		}
+	}
+}
+
+// clientBundleProxyTimeout bounds one proxied bundle download on the agent
+// side (the caller has its own, shorter deadline).
+const clientBundleProxyTimeout = 2 * time.Minute
+
+// FetchClientBundle implements remoteagent.RemoteAgentServer: proxies the
+// client bundle lupine-server embeds for a platform to a caller that holds
+// a session token of a claim (the same credential EnsureSession takes).
+// This is how a consumer node, or a pod, obtains the exact client build the
+// server was built with, also when only the agent -- not the server -- is
+// reachable from where the caller is (unix socket, a server bound to a
+// fabric network).
+func (a *Agent) FetchClientBundle(req *remoteagent.FetchClientBundleRequest, stream remoteagent.RemoteAgent_FetchClientBundleServer) error {
+	ctx, cancel := context.WithTimeout(stream.Context(), clientBundleProxyTimeout)
+	defer cancel()
+
+	if err := validateToken(req.Session); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if _, err := a.claimForSession(ctx, req.Session, req.ClaimUid, req.ClaimNamespace, req.ClaimName, ""); err != nil {
+		return err
+	}
+	platform, err := remote.ClientBundlePlatform(req.Os, req.Arch)
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	url, err := remote.ClientBundleURL(a.cfg.ServerEndpoint, platform)
+	if err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return status.Error(codes.Internal, err.Error())
+	}
+	if req.IfNoneMatch != "" {
+		httpReq.Header.Set("If-None-Match", req.IfNoneMatch)
+	}
+	resp, err := remote.ServerHTTPClient.Do(httpReq)
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "lupine-server %s: %v", a.cfg.ServerEndpoint, err)
+	}
+	defer resp.Body.Close()
+
+	info := &remoteagent.ClientBundleInfo{
+		Etag:          resp.Header.Get("Etag"),
+		ContentDigest: resp.Header.Get("Content-Digest"),
+		ContentType:   resp.Header.Get("Content-Type"),
+		Size:          resp.ContentLength,
+		Platform:      platform,
+	}
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		if info.Etag == "" {
+			info.Etag = req.IfNoneMatch
+		}
+		info.NotModified = true
+		return stream.Send(&remoteagent.FetchClientBundleResponse{Body: &remoteagent.FetchClientBundleResponse_Info{Info: info}})
+	case http.StatusNotFound:
+		return status.Errorf(codes.NotFound, "lupine-server %s embeds no client bundle for %s", a.cfg.ServerEndpoint, platform)
+	case http.StatusOK:
+	default:
+		return status.Errorf(codes.Unavailable, "lupine-server %s: GET %s: %s", a.cfg.ServerEndpoint, url, resp.Status)
+	}
+	if info.Etag == "" {
+		return status.Errorf(codes.Unavailable, "lupine-server %s served the bundle without an etag", a.cfg.ServerEndpoint)
+	}
+	if err := stream.Send(&remoteagent.FetchClientBundleResponse{Body: &remoteagent.FetchClientBundleResponse_Info{Info: info}}); err != nil {
+		return err
+	}
+	buf := make([]byte, remote.ClientBundleChunkSize)
+	for {
+		n, readErr := io.ReadFull(resp.Body, buf)
+		if n > 0 {
+			if err := stream.Send(&remoteagent.FetchClientBundleResponse{Body: &remoteagent.FetchClientBundleResponse_Chunk{Chunk: buf[:n]}}); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			return nil
+		}
+		if readErr != nil {
+			return status.Errorf(codes.Unavailable, "lupine-server %s: reading bundle: %v", a.cfg.ServerEndpoint, readErr)
 		}
 	}
 }

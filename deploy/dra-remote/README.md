@@ -11,7 +11,7 @@
 |---|---|---|---|
 | `remote-server.yaml` | remote-agent + lupine-server + device-monitor（一个 DaemonSet 三容器） | GPU 节点（`vgpu-manager.io/remote-server=true`） | 会话物化/EnsureSession gRPC(:14834)、远程 GPU 数据面(:14833)、指标（远程会话按 PID 归账） |
 | `dra-server.yaml` | kubelet-plugin `--plugin-mode=server` | GPU 节点（同上标签） | **只发布不分配**：设备叠加 `accessMode=remote`/`endpoint` 属性、pool nodeSelector 放宽；不向 kubelet 注册 DRA 服务 |
-| `dra-inject.yaml` | kubelet-plugin `--plugin-mode=inject` + client 制品 init 容器 + 远程 DeviceClass | 消费节点 **及 GPU 节点**（`vgpu-manager.io/remote-inject=true`） | 节点上唯一注册的 DRA 插件：令牌/EnsureSession 屏障/env+CDI 注入；铺 lupine-client 版本目录 |
+| `dra-inject.yaml` | kubelet-plugin `--plugin-mode=inject` + （可选）client 制品 init 容器 + 远程 DeviceClass | 消费节点 **及 GPU 节点**（`vgpu-manager.io/remote-inject=true`） | 节点上唯一注册的 DRA 插件：令牌/EnsureSession 屏障/env+CDI 注入；铺 lupine-client 版本目录 |
 | `dra-webhook.yaml` | device-webhook | 控制面节点 | 准入 + 资源声明→DRA 转换（转到 `remote-vgpu-manager` class） |
 
 关键拓扑约束（v2.1 设计）：GPU 节点上 server 插件只发布、inject 插件独占 kubelet 注册；
@@ -42,7 +42,7 @@ kubectl apply -f dra-webhook.yaml
 |---|---|---|---|
 | **lupine-server 镜像** | `remote-server.yaml` → 容器 `lupine-server` `image` | `ghcr.io/coldzerofear/lupine-server-static:cuda-13.3.1`（fork 自产静态镜像） | 只依赖 glibc，不带 cuda-compat：**镜像 CUDA 版本必须 ≤ 节点驱动支持的 CUDA**（13.3 需驱动 ≥ 580，老驱动换 12.9.1 / 11.8.0）；隔离库不用打进镜像（见下一行）；正式环境改用 release tag 或 `@sha256` digest，并与 client 制品同一 release |
 | **隔离库 .so 路径** | 同上 `LD_PRELOAD` / `LUPINE_CHECKPOINT_LIBRARY` | `/etc/vgpu-manager/driver/libvgpu-control.so` | init-install 容器把它从 vgpu-manager 镜像落盘到节点 hostPath，server 容器挂载即得；两个变量指向同一个 .so（既是 hook 库又是 checkpoint provider），一般不用改 |
-| **lupine-client 制品镜像** | `dra-inject.yaml` → initContainers | `ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1` / `cuda-12.9.1` | **必须与 server 镜像来自同一 release**（lupine RPC 协议没有版本号也没有校验，混用会在运行时报未知 opcode）；`/artifacts` 载体镜像（静态 client 的 `libcuda.so.1`/`libnvidia-ml.so.1`）；每个 CUDA 版本一个 init 容器，落盘目录名必须是版本号（选择规则 = 取 ≤ server CUDA 上限的最高版本）；增删版本 = 增删 init 容器后滚动；新制品镜像还带 `nvidia-smi`，inject 会把它只读挂到 pod 的 `/usr/bin/nvidia-smi`（单文件 bind，不覆盖镜像目录；旧制品没有就跳过），pod 里跑它看到的是远程会话视图 |
+| **lupine-client 制品** | 自动：节点上没有可用版本目录时，inject 在 NodePrepare 内通过 agent 的 `FetchClientBundle` 从 lupine-server 拉取其内嵌的 client bundle（校验 etag / content-digest / manifest sha256）落盘为 `<floor CUDA 版本>/` 并记录 `.etag`；server 换构建后 etag 变化会自动重新拉取。可选预铺：`dra-inject.yaml` → initContainers | `ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1` / `cuda-12.9.1` | 预铺目录**必须与 server 镜像来自同一 release**（没有 `.etag`，inject 无法校验，按运维背书原样使用）；自动拉取的目录带 `.etag`，并向 pod 注入 `LUPINE_CLIENT_ETAG`/`LUPINE_CLIENT_PLATFORM`，server 会对不一致的 client 直接回 426；`/artifacts` 载体镜像（静态 client 的 `libcuda.so.1`/`libnvidia-ml.so.1`）；每个 CUDA 版本一个 init 容器，落盘目录名必须是版本号（选择规则 = 取 ≤ server CUDA 上限的最高版本）；增删版本 = 增删 init 容器后滚动；新制品镜像还带 `nvidia-smi`，inject 会把它只读挂到 pod 的 `/usr/bin/nvidia-smi`（单文件 bind，不覆盖镜像目录；旧制品没有就跳过），pod 里跑它看到的是远程会话视图 |
 | **server 状态（版本 / endpoint）** | 自动：remote-agent 每 5s GET `http://<REMOTE_SERVER_ENDPOINT>/` 读响应头 `x-lupine-cuda-version`；dra-server 只向 agent 的 `ServerInfo` gRPC 取结果（5s 一次直到首次成功，之后 60s） | — | dra-server / inject **不再直接访问 lupine-server**，只需知道 agent 地址。发布为设备属性 `serverCudaVersion`（inject 选制品按 **min(驱动上限, server 版本)** 取 ≤ 的最高版本）与 `serverEndpoint`；版本或地址变化都会自动重发 slice。agent 探测地址是回环时，会在本机地址里找一个 server 同样应答的（优先节点 InternalIP，物理网卡优先于 docker/cni/flannel 等虚拟网卡）作为对外 endpoint，并粘住直到它不再应答 |
 | **vgpu-manager 镜像** | 四个文件所有 `coldzerofear/vgpu-manager-dra:latest` | latest | 换成内网 registry / 钉版本；remote-server 的 agent 容器要求镜像内含 `remote-agent` 二进制 |
 | **可达域 selector** | `dra-server.yaml` → `REMOTE_NODE_SELECTOR` | `vgpu-manager.io/remote-inject=true` | 标准 label selector 语法（`k=v,k2 in (a,b),!k3`）；决定 pool 可调度到哪些节点。**要允许本机消费必须覆盖 GPU 节点自身**（默认值配合上面打标签方式已覆盖） |
@@ -67,9 +67,14 @@ kubectl apply -f dra-webhook.yaml
 
 - **K1 明文传输**：`LUPINE_SESSION` 令牌以 HTTP/2 头明文传输，多租户/跨信任域前必须
   先落 TLS 方案（设计 D5/§6.1）。
-- **remote-agent 的 gRPC（:14834）无鉴权**：EnsureSession/ReleaseSessions 只校验"令牌已登记在 claim 上"，
-  不校验调用方身份；能访问该端口者可为任意 claim 物化/释放会话。缓解：生产环境只监听 unix 套接字
-  （`LISTEN_SERVER_ENDPOINT=unix:///etc/vgpu-manager/agent.sock`，仅同节点 dra-server 可达）；跨节点 TCP 监听的鉴权随 D5 一起落。
+- **remote-agent 的 gRPC（:14834）以 session token 为凭证**：EnsureSession / ReleaseSessions / FetchClientBundle 都要求
+  token 已登记在 claim 当前分配上，否则 PermissionDenied；ReleaseSessions 必须给出 token（只给 claim UID 不再释放）。
+  token 写在 claim 注解里，集群内有 claim 读权限者可见，所以挡的是网络访问者而非集群内读者（EnsureSession 幂等，
+  重放无害）。更强的边界：只监听 unix 套接字（`LISTEN_SERVER_ENDPOINT=unix:///etc/vgpu-manager/agent.sock`），
+  或等 D5 的 TLS/身份。
+- **首个远程 pod 的冷启动**：节点上没有可用 client 制品时 NodePrepare 会先从 agent 拉 bundle（几十 MB，单次
+  60s 超时），期间本节点其他 prepare 串行等待；要避免这段延迟就用 init 容器预铺。被替换的旧目录以 `.stale-*`
+  保留给仍在用的 pod，不会自动删除。
 - **NodePrepare 串行**：dra-inject 以 `kubeletplugin.Serialize` 串行处理本节点的 Prepare/Unprepare，单次 EnsureSession
   超时 5s；一个失联的 agent 最多让本节点其他 pod 的 prepare 等 5s × 该 claim 跨的 agent 数。
 - **会话随 lupine-server 重启作废**：连接态不可恢复，应用层需自行重试/重启（设计固有约束）。

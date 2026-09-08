@@ -52,6 +52,10 @@ type serverState struct {
 	// advertised server endpoint (DNS, gateway) says nothing about how to
 	// reach the agent.
 	RoutableHost string
+	// ClientBundleETag is the etag of the client bundle the server embeds
+	// for this node's platform ("" = none, or not read yet). Kept across a
+	// down server like CudaVersion.
+	ClientBundleETag string
 	// AgentEndpoint is this agent's own gRPC address other nodes should use
 	// (grpc://host:port), or "" when the host is unknown or the agent has no
 	// TCP listener.

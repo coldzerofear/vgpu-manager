@@ -18,6 +18,8 @@ package remote
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"net"
 	"reflect"
 	"sync"
@@ -25,6 +27,8 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -36,15 +40,21 @@ type fakeSessionAgent struct {
 	mu             sync.Mutex
 	ready          bool
 	serverEndpoint string
-	requests       []*remoteagent.EnsureSessionRequest
-	released       []*remoteagent.ReleaseSessionsRequest
+	// bundle served by FetchClientBundle (nil = none); etag is what
+	// ServerInfo/EnsureSession report.
+	bundle     []byte
+	bundleETag string
+	fetches    int
+	infos      int
+	requests   []*remoteagent.EnsureSessionRequest
+	released   []*remoteagent.ReleaseSessionsRequest
 }
 
 func (f *fakeSessionAgent) EnsureSession(_ context.Context, req *remoteagent.EnsureSessionRequest) (*remoteagent.EnsureSessionResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, req)
-	resp := &remoteagent.EnsureSessionResponse{Ready: f.ready, ServerEndpoint: f.serverEndpoint, CudaDriverVersion: "13.3.73"}
+	resp := &remoteagent.EnsureSessionResponse{Ready: f.ready, ServerEndpoint: f.serverEndpoint, CudaDriverVersion: "13.3.73", ClientBundleEtag: f.bundleETag}
 	if !f.ready {
 		resp.Message = "lupine-server is not accepting connections yet"
 	}
@@ -64,7 +74,7 @@ func startSessionAgent(t *testing.T, ready bool, serverEndpoint string) (*fakeSe
 	if err != nil {
 		t.Fatal(err)
 	}
-	fa := &fakeSessionAgent{ready: ready, serverEndpoint: serverEndpoint}
+	fa := &fakeSessionAgent{ready: ready, serverEndpoint: serverEndpoint, bundleETag: `"sha256:a1"`}
 	srv := grpc.NewServer()
 	remoteagent.RegisterRemoteAgentServer(srv, fa)
 	go func() { _ = srv.Serve(lis) }()
@@ -88,7 +98,7 @@ func TestEnsureSessions(t *testing.T) {
 		if len(infos) != 2 || infos[0].agentEndpoint > infos[1].agentEndpoint || infos[0].agentEndpoint == infos[1].agentEndpoint {
 			t.Fatalf("infos = %+v", infos)
 		}
-		got, err := EnsureSessions(ctx, infos, claim, "tok", "part", []string{"r1"})
+		got, etags, err := EnsureSessions(ctx, infos, claim, "tok", "part", []string{"r1"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -103,6 +113,9 @@ func TestEnsureSessions(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("servers = %v, want %v", got, want)
 		}
+		if len(etags) != 2 || etags[agent1] != "\"sha256:a1\"" || etags[agent2] != "\"sha256:a1\"" {
+			t.Fatalf("bundle etags = %v", etags)
+		}
 		if len(fa1.requests) != 1 || fa1.requests[0].Session != "tok" || fa1.requests[0].ClaimUid != "uid-1" || fa1.requests[0].Partition != "part" {
 			t.Fatalf("agent1 saw %+v", fa1.requests)
 		}
@@ -110,7 +123,7 @@ func TestEnsureSessions(t *testing.T) {
 
 	t.Run("published attribute is the fallback when the agent reports none", func(t *testing.T) {
 		_, agent := startSessionAgent(t, true, "")
-		got, err := EnsureSessions(ctx, []endpointInfo{{agentEndpoint: agent, serverEndpoint: "http://10.0.0.1:14833"}}, claim, "tok", "part", nil)
+		got, _, err := EnsureSessions(ctx, []endpointInfo{{agentEndpoint: agent, serverEndpoint: "http://10.0.0.1:14833"}}, claim, "tok", "part", nil)
 		if err != nil || !reflect.DeepEqual(got, []string{"http://10.0.0.1:14833"}) {
 			t.Fatalf("got %v, %v", got, err)
 		}
@@ -118,20 +131,20 @@ func TestEnsureSessions(t *testing.T) {
 
 	t.Run("neither known: prepare fails", func(t *testing.T) {
 		_, agent := startSessionAgent(t, true, "")
-		if got, err := EnsureSessions(ctx, []endpointInfo{{agentEndpoint: agent}}, claim, "tok", "part", nil); err == nil {
+		if got, _, err := EnsureSessions(ctx, []endpointInfo{{agentEndpoint: agent}}, claim, "tok", "part", nil); err == nil {
 			t.Fatalf("expected an error, got %v", got)
 		}
 	})
 
 	t.Run("server down: prepare fails with the agent's message", func(t *testing.T) {
 		_, agent := startSessionAgent(t, false, "http://10.0.0.1:14833")
-		if _, err := EnsureSessions(ctx, []endpointInfo{{agentEndpoint: agent}}, claim, "tok", "part", nil); err == nil {
+		if _, _, err := EnsureSessions(ctx, []endpointInfo{{agentEndpoint: agent}}, claim, "tok", "part", nil); err == nil {
 			t.Fatal("expected an error")
 		}
 	})
 
 	t.Run("unreachable agent fails", func(t *testing.T) {
-		if _, err := EnsureSessions(ctx, []endpointInfo{{agentEndpoint: "grpc://127.0.0.1:1"}}, claim, "tok", "part", nil); err == nil {
+		if _, _, err := EnsureSessions(ctx, []endpointInfo{{agentEndpoint: "grpc://127.0.0.1:1"}}, claim, "tok", "part", nil); err == nil {
 			t.Fatal("expected an error")
 		}
 	})
@@ -149,4 +162,45 @@ func TestReleaseSessionsClient(t *testing.T) {
 	if _, err := ReleaseSessions(context.Background(), "grpc://127.0.0.1:1", "uid-1", nil); err == nil {
 		t.Fatal("unreachable agent must be an error")
 	}
+}
+
+func (f *fakeSessionAgent) ServerInfo(context.Context, *remoteagent.ServerInfoRequest) (*remoteagent.ServerInfoResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.infos++
+	return &remoteagent.ServerInfoResponse{Listening: f.ready, Endpoint: f.serverEndpoint, ClientBundleEtag: f.bundleETag}, nil
+}
+
+func (f *fakeSessionAgent) FetchClientBundle(req *remoteagent.FetchClientBundleRequest, stream remoteagent.RemoteAgent_FetchClientBundleServer) error {
+	f.mu.Lock()
+	f.fetches++
+	body, etag := f.bundle, f.bundleETag
+	f.mu.Unlock()
+	if req.Session == "" {
+		return status.Error(codes.PermissionDenied, "no session")
+	}
+	if body == nil {
+		return status.Error(codes.NotFound, "no bundle")
+	}
+	platform, err := ClientBundlePlatform(req.Os, req.Arch)
+	if err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	sum := sha256.Sum256(body)
+	info := &remoteagent.ClientBundleInfo{Etag: etag, ContentDigest: "sha-256=:" + base64.StdEncoding.EncodeToString(sum[:]) + ":", Size: int64(len(body)), Platform: platform}
+	if req.IfNoneMatch == etag {
+		info.NotModified = true
+		return stream.Send(&remoteagent.FetchClientBundleResponse{Body: &remoteagent.FetchClientBundleResponse_Info{Info: info}})
+	}
+	if err := stream.Send(&remoteagent.FetchClientBundleResponse{Body: &remoteagent.FetchClientBundleResponse_Info{Info: info}}); err != nil {
+		return err
+	}
+	for len(body) > 0 {
+		n := min(len(body), 1000)
+		if err := stream.Send(&remoteagent.FetchClientBundleResponse{Body: &remoteagent.FetchClientBundleResponse_Chunk{Chunk: body[:n]}}); err != nil {
+			return err
+		}
+		body = body[n:]
+	}
+	return nil
 }

@@ -43,22 +43,25 @@ const ensureSessionTimeout = 5 * time.Second
 // endpoint is what the agent reports now, falling back to the published
 // attribute; an agent that knows neither fails the prepare. Any failure
 // fails the whole prepare (design D2: all servers must confirm before the
-// pod starts).
+// pod starts). The second result maps each agent endpoint to the etag of
+// the client bundle its server embeds ("" when the agent does not know).
 func EnsureSessions(
 	ctx context.Context, endpointInfos []endpointInfo, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string,
-) ([]string, error) {
+) ([]string, map[string]string, error) {
 	serverEndpoints := make([]string, 0, len(endpointInfos))
+	etagOf := make(map[string]string, len(endpointInfos))
 	for _, info := range endpointInfos {
-		reported, err := ensureOne(ctx, info.agentEndpoint, claim, token, partitionKey, requests)
+		reported, etag, err := ensureOne(ctx, info.agentEndpoint, claim, token, partitionKey, requests)
 		if err != nil {
-			return nil, fmt.Errorf("EnsureSession on %s: %w", info.agentEndpoint, err)
+			return nil, nil, fmt.Errorf("EnsureSession on %s: %w", info.agentEndpoint, err)
 		}
+		etagOf[info.agentEndpoint] = etag
 		serverEndpoint := reported
 		if serverEndpoint == "" {
 			serverEndpoint = info.serverEndpoint
 		}
 		if serverEndpoint == "" {
-			return nil, fmt.Errorf("EnsureSession on %s: agent reports no lupine-server endpoint and none is published for its devices", info.agentEndpoint)
+			return nil, nil, fmt.Errorf("EnsureSession on %s: agent reports no lupine-server endpoint and none is published for its devices", info.agentEndpoint)
 		}
 		if reported != "" && info.serverEndpoint != "" && reported != info.serverEndpoint {
 			klog.V(2).Infof("EnsureSession %s for claim %s: agent reports lupine-server at %s, published attribute says %s; using the agent's",
@@ -66,7 +69,7 @@ func EnsureSessions(
 		}
 		serverEndpoints = append(serverEndpoints, serverEndpoint)
 	}
-	return serverEndpoints, nil
+	return serverEndpoints, etagOf, nil
 }
 
 const serverInfoTimeout = 5 * time.Second
@@ -152,14 +155,15 @@ func agentDialTarget(agentEndpoint string) (string, error) {
 }
 
 // ensureOne materialises the session on one agent and returns the
-// lupine-server endpoint that agent reports ("" if it has none yet).
-func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) (string, error) {
+// lupine-server endpoint that agent reports ("" if it has none yet) and
+// the etag of the client bundle its server embeds.
+func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, ensureSessionTimeout)
 	defer cancel()
 
 	conn, err := dialAgent(agentEndpoint)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -176,13 +180,13 @@ func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.Res
 		ClaimResourceVersion: claim.ResourceVersion,
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if !resp.Ready {
-		return "", fmt.Errorf("agent reports session not ready: %s", resp.Message)
+		return "", "", fmt.Errorf("agent reports session not ready: %s", resp.Message)
 	}
 	if resp.Message != "" {
 		klog.Warningf("EnsureSession %s for claim %s partition %s: %s", agentEndpoint, klog.KObj(claim), partitionKey, resp.Message)
 	}
-	return resp.ServerEndpoint, nil
+	return resp.ServerEndpoint, resp.ClientBundleEtag, nil
 }

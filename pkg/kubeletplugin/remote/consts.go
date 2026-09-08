@@ -86,6 +86,11 @@ const (
 	EnvLupineServer       = "LUPINE_SERVER"
 	EnvLupineSession      = "LUPINE_SESSION"
 	EnvLupineDisableLocal = "LUPINE_DISABLE_LOCAL"
+	// EnvLupineClientETag / EnvLupineClientPlatform let lupine-server verify
+	// that the client shims are the build it embeds (426 otherwise). Set only
+	// when the artifact's etag is known (installed from a bundle).
+	EnvLupineClientETag     = "LUPINE_CLIENT_ETAG"
+	EnvLupineClientPlatform = "LUPINE_CLIENT_PLATFORM"
 
 	// CDI vendor/class must match the values used by the local plugin
 	// (pkg/kubeletplugin/cdi.go) so that all claim devices of this driver live

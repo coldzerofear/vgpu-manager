@@ -193,7 +193,7 @@ func (d *InjectDriver) nriInjection(claimUID, podName, podNamespace, podUID, con
 		return nil, err
 	}
 	d.updatePreparedClaim(claim)
-	endpoints, err := EnsureSessions(ctx, p.endpoints, claim, p.token, p.key, p.requests)
+	endpoints, _, err := EnsureSessions(ctx, p.endpoints, claim, p.token, p.key, p.requests)
 	if err != nil {
 		return nil, err
 	}

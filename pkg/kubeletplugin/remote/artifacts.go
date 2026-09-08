@@ -41,6 +41,10 @@ type artifactSelection struct {
 	// (libcuda.so.1 / libnvidia-ml.so.1) and are made loadable through the
 	// generated ld.so.preload file (see ensureLdPreloadFile).
 	ContainerDir string
+	// ETag of the bundle the directory was installed from; "" when unknown
+	// (seeded by other means). When set it is handed to the pod as
+	// LUPINE_CLIENT_ETAG so the server can verify the build.
+	ETag string
 	// NvidiaSMIHost is the host path of the nvidia-smi binary shipped next
 	// to the shims in newer artifact images, or "" when this artifact
 	// version does not carry one.

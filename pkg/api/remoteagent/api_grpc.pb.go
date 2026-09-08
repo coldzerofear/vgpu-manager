@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	RemoteAgent_EnsureSession_FullMethodName   = "/remoteagent.RemoteAgent/EnsureSession"
-	RemoteAgent_ServerInfo_FullMethodName      = "/remoteagent.RemoteAgent/ServerInfo"
-	RemoteAgent_ReleaseSessions_FullMethodName = "/remoteagent.RemoteAgent/ReleaseSessions"
+	RemoteAgent_EnsureSession_FullMethodName     = "/remoteagent.RemoteAgent/EnsureSession"
+	RemoteAgent_ServerInfo_FullMethodName        = "/remoteagent.RemoteAgent/ServerInfo"
+	RemoteAgent_ReleaseSessions_FullMethodName   = "/remoteagent.RemoteAgent/ReleaseSessions"
+	RemoteAgent_FetchClientBundle_FullMethodName = "/remoteagent.RemoteAgent/FetchClientBundle"
 )
 
 // RemoteAgentClient is the client API for RemoteAgent service.
@@ -34,11 +35,20 @@ type RemoteAgentClient interface {
 	// ServerInfo reports whether lupine-server is accepting connections and
 	// the node's CUDA ceiling.
 	ServerInfo(ctx context.Context, in *ServerInfoRequest, opts ...grpc.CallOption) (*ServerInfoResponse, error)
-	// ReleaseSessions removes the sessions of a claim on this node: the given
-	// tokens, or every session of the claim when tokens is empty. Called by the
-	// inject plugin at NodeUnprepare once the claim has no live consumer left;
-	// the agent's own claim watch and periodic sweep remain the backstop.
+	// ReleaseSessions removes the named sessions of a claim on this node.
+	// Called by the inject plugin at NodeUnprepare once the claim has no live
+	// consumer left; the agent's own claim watch and periodic sweep remain the
+	// backstop. Tokens are required: knowing a claim's UID alone must not be
+	// enough to end its sessions.
 	ReleaseSessions(ctx context.Context, in *ReleaseSessionsRequest, opts ...grpc.CallOption) (*ReleaseSessionsResponse, error)
+	// FetchClientBundle streams the lupine client bundle (the shims built with
+	// this node's lupine-server, as a zip) for one platform, proxied from the
+	// server. The caller proves it holds a session token recorded on a claim;
+	// that is what authorizes the download, on either the TCP or the unix
+	// listener. The first message carries the bundle metadata, the rest its
+	// bytes; with if_none_match equal to the current etag only the metadata is
+	// sent (not_modified = true).
+	FetchClientBundle(ctx context.Context, in *FetchClientBundleRequest, opts ...grpc.CallOption) (RemoteAgent_FetchClientBundleClient, error)
 }
 
 type remoteAgentClient struct {
@@ -76,6 +86,38 @@ func (c *remoteAgentClient) ReleaseSessions(ctx context.Context, in *ReleaseSess
 	return out, nil
 }
 
+func (c *remoteAgentClient) FetchClientBundle(ctx context.Context, in *FetchClientBundleRequest, opts ...grpc.CallOption) (RemoteAgent_FetchClientBundleClient, error) {
+	stream, err := c.cc.NewStream(ctx, &RemoteAgent_ServiceDesc.Streams[0], RemoteAgent_FetchClientBundle_FullMethodName, opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &remoteAgentFetchClientBundleClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type RemoteAgent_FetchClientBundleClient interface {
+	Recv() (*FetchClientBundleResponse, error)
+	grpc.ClientStream
+}
+
+type remoteAgentFetchClientBundleClient struct {
+	grpc.ClientStream
+}
+
+func (x *remoteAgentFetchClientBundleClient) Recv() (*FetchClientBundleResponse, error) {
+	m := new(FetchClientBundleResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // RemoteAgentServer is the server API for RemoteAgent service.
 // All implementations must embed UnimplementedRemoteAgentServer
 // for forward compatibility
@@ -86,11 +128,20 @@ type RemoteAgentServer interface {
 	// ServerInfo reports whether lupine-server is accepting connections and
 	// the node's CUDA ceiling.
 	ServerInfo(context.Context, *ServerInfoRequest) (*ServerInfoResponse, error)
-	// ReleaseSessions removes the sessions of a claim on this node: the given
-	// tokens, or every session of the claim when tokens is empty. Called by the
-	// inject plugin at NodeUnprepare once the claim has no live consumer left;
-	// the agent's own claim watch and periodic sweep remain the backstop.
+	// ReleaseSessions removes the named sessions of a claim on this node.
+	// Called by the inject plugin at NodeUnprepare once the claim has no live
+	// consumer left; the agent's own claim watch and periodic sweep remain the
+	// backstop. Tokens are required: knowing a claim's UID alone must not be
+	// enough to end its sessions.
 	ReleaseSessions(context.Context, *ReleaseSessionsRequest) (*ReleaseSessionsResponse, error)
+	// FetchClientBundle streams the lupine client bundle (the shims built with
+	// this node's lupine-server, as a zip) for one platform, proxied from the
+	// server. The caller proves it holds a session token recorded on a claim;
+	// that is what authorizes the download, on either the TCP or the unix
+	// listener. The first message carries the bundle metadata, the rest its
+	// bytes; with if_none_match equal to the current etag only the metadata is
+	// sent (not_modified = true).
+	FetchClientBundle(*FetchClientBundleRequest, RemoteAgent_FetchClientBundleServer) error
 	mustEmbedUnimplementedRemoteAgentServer()
 }
 
@@ -106,6 +157,9 @@ func (UnimplementedRemoteAgentServer) ServerInfo(context.Context, *ServerInfoReq
 }
 func (UnimplementedRemoteAgentServer) ReleaseSessions(context.Context, *ReleaseSessionsRequest) (*ReleaseSessionsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReleaseSessions not implemented")
+}
+func (UnimplementedRemoteAgentServer) FetchClientBundle(*FetchClientBundleRequest, RemoteAgent_FetchClientBundleServer) error {
+	return status.Errorf(codes.Unimplemented, "method FetchClientBundle not implemented")
 }
 func (UnimplementedRemoteAgentServer) mustEmbedUnimplementedRemoteAgentServer() {}
 
@@ -174,6 +228,27 @@ func _RemoteAgent_ReleaseSessions_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RemoteAgent_FetchClientBundle_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(FetchClientBundleRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(RemoteAgentServer).FetchClientBundle(m, &remoteAgentFetchClientBundleServer{stream})
+}
+
+type RemoteAgent_FetchClientBundleServer interface {
+	Send(*FetchClientBundleResponse) error
+	grpc.ServerStream
+}
+
+type remoteAgentFetchClientBundleServer struct {
+	grpc.ServerStream
+}
+
+func (x *remoteAgentFetchClientBundleServer) Send(m *FetchClientBundleResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
 // RemoteAgent_ServiceDesc is the grpc.ServiceDesc for RemoteAgent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -194,6 +269,12 @@ var RemoteAgent_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RemoteAgent_ReleaseSessions_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "FetchClientBundle",
+			Handler:       _RemoteAgent_FetchClientBundle_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "pkg/api/remoteagent/api.proto",
 }

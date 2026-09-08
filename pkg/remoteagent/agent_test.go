@@ -17,6 +17,7 @@ limitations under the License.
 package remoteagent
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
@@ -49,17 +51,45 @@ import (
 // fakeLupine answers like lupine-server does on its RPC port: 404 with the
 // CUDA version header, unless told to go silent (no header).
 func fakeLupine(t *testing.T) (*httptest.Server, *atomic.Value) {
+	srv, version, _ := fakeLupineWithBundle(t)
+	return srv, version
+}
+
+// fakeBundle is what fakeLupineWithBundle serves at the client bundle path
+// for this platform: nil body = no bundle (404).
+type fakeBundle struct {
+	body []byte
+	etag string
+}
+
+func fakeLupineWithBundle(t *testing.T) (*httptest.Server, *atomic.Value, *atomic.Pointer[fakeBundle]) {
 	t.Helper()
 	var version atomic.Value
 	version.Store("13.3.73")
+	var bundle atomic.Pointer[fakeBundle]
+	bundlePath := remote.ClientBundlePathPrefix + remote.LocalClientBundlePlatform()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if v := version.Load().(string); v != "" {
 			w.Header().Set(remote.ServerCUDAVersionHeader, v)
 		}
+		if b := bundle.Load(); b != nil && r.URL.Path == bundlePath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			w.Header().Set("Etag", b.etag)
+			w.Header().Set("Content-Type", remote.ClientBundleContentType)
+			if r.Header.Get("If-None-Match") == b.etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("Content-Length", strconv.Itoa(len(b.body)))
+			w.WriteHeader(http.StatusOK)
+			if r.Method == http.MethodGet {
+				_, _ = w.Write(b.body)
+			}
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &version
+	return srv, &version, &bundle
 }
 
 func TestProbeAndServerInfo(t *testing.T) {
@@ -418,11 +448,15 @@ func TestSweepClaimAndRelease(t *testing.T) {
 	if err != nil || resp.Released != 1 {
 		t.Fatalf("release r1: %+v %v", resp, err)
 	}
-	if resp, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-other"}); err != nil || resp.Released != 0 {
+	if resp, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-other", Tokens: []string{"r2"}}); err != nil || resp.Released != 0 {
 		t.Fatalf("release for another claim must touch nothing: %+v %v", resp, err)
 	}
-	if resp, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-x"}); err != nil || resp.Released != 1 {
-		t.Fatalf("release all: %+v %v", resp, err)
+	// A claim UID alone releases nothing: the tokens are the credential.
+	if _, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-x"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("release without tokens must be rejected, got %v", err)
+	}
+	if resp, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{ClaimUid: "uid-x", Tokens: []string{"r2"}}); err != nil || resp.Released != 1 {
+		t.Fatalf("release r2: %+v %v", resp, err)
 	}
 	if _, err = a.ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{}); err == nil {
 		t.Fatal("empty claim uid must be rejected")
@@ -487,8 +521,8 @@ func TestEnsureSessionRequiresRecordedToken(t *testing.T) {
 
 	// A token the claim does not record is refused, even though the caller
 	// names a version the cache already has.
-	if _, err = ensure("t9", "10"); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("unrecorded token: want FailedPrecondition, got %v", err)
+	if _, err = ensure("t9", "10"); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("unrecorded token: want PermissionDenied, got %v", err)
 	}
 	if got := a.store.TokensOfClaim("uid-e"); len(got) != 1 {
 		t.Fatal("refused session must not be materialized")
@@ -530,5 +564,111 @@ func TestEnsureSessionRequiresRecordedToken(t *testing.T) {
 	}
 	if _, err = ensure("t3", "13"); status.Code(err) != codes.NotFound {
 		t.Fatalf("gone claim: want NotFound, got %v", err)
+	}
+}
+
+// captureStream stands in for the gRPC server stream of FetchClientBundle.
+type captureStream struct {
+	grpc.ServerStream
+	ctx  context.Context
+	msgs []*remoteagent.FetchClientBundleResponse
+}
+
+func (s *captureStream) Context() context.Context { return s.ctx }
+func (s *captureStream) Send(m *remoteagent.FetchClientBundleResponse) error {
+	// gRPC marshals on Send, so the agent may reuse its chunk buffer; a
+	// capturing stream has to copy like the wire would.
+	if chunk := m.GetChunk(); chunk != nil {
+		m = &remoteagent.FetchClientBundleResponse{Body: &remoteagent.FetchClientBundleResponse_Chunk{Chunk: append([]byte(nil), chunk...)}}
+	}
+	s.msgs = append(s.msgs, m)
+	return nil
+}
+
+func (s *captureStream) body() []byte {
+	var out []byte
+	for _, m := range s.msgs[1:] {
+		out = append(out, m.GetChunk()...)
+	}
+	return out
+}
+
+// The agent proxies the server's client bundle to a caller that holds a
+// session token of a claim, and learns the bundle's etag on its probe.
+func TestFetchClientBundle(t *testing.T) {
+	ctx := context.Background()
+	srv, _, bundle := fakeLupineWithBundle(t)
+	body := bytes.Repeat([]byte("shim"), remote.ClientBundleChunkSize/2) // 2 chunks + change
+	body = append(body, []byte("tail")...)
+	bundle.Store(&fakeBundle{body: body, etag: `"sha256:abc"`})
+
+	claim := testClaim("uid-b", result(testNode, "vgpu-0", "", ""))
+	claim.ResourceVersion = "5"
+	metav1.SetMetaDataAnnotation(&claim.ObjectMeta, remote.SessionAnnotationKey("p"), "tok-b")
+	metav1.SetMetaDataAnnotation(&claim.ObjectMeta, remote.AllocationAnnotation, remote.AllocationID(claim))
+	cs := fake.NewSimpleClientset(claim)
+	a := New(Config{NodeName: testNode, DriverName: testDriver, ServerEndpoint: srv.URL, SessionBase: t.TempDir(),
+		ClientSets: pkgflags.ClientSets{Core: cs, Resource: draclient.New(cs)}})
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, claimIndexers())
+	a.claimCache = cache.NewIntegerResourceVersionMutationCache(klog.Background(), indexer, indexer, time.Minute, true)
+	if err := indexer.Add(claim); err != nil {
+		t.Fatal(err)
+	}
+
+	// The probe reads the etag; ServerInfo and EnsureSession answers carry it.
+	a.probeServer(ctx)
+	if info, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{}); info.ClientBundleEtag != `"sha256:abc"` {
+		t.Fatalf("ServerInfo etag = %q", info.ClientBundleEtag)
+	}
+	bundle.Store(nil)
+	a.probeServer(ctx)
+	if info, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{}); info.ClientBundleEtag != "" {
+		t.Fatalf("a server without a bundle must report no etag, got %q", info.ClientBundleEtag)
+	}
+	bundle.Store(&fakeBundle{body: body, etag: `"sha256:abc"`})
+	a.probeServer(ctx)
+
+	fetch := func(session, ifNoneMatch string) (*captureStream, error) {
+		s := &captureStream{ctx: ctx}
+		err := a.FetchClientBundle(&remoteagent.FetchClientBundleRequest{
+			Session: session, ClaimUid: "uid-b", ClaimNamespace: claim.Namespace, ClaimName: claim.Name, IfNoneMatch: ifNoneMatch,
+		}, s)
+		return s, err
+	}
+	s, err := fetch("tok-b", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := s.msgs[0].GetInfo()
+	if info == nil || info.Etag != `"sha256:abc"` || info.Size != int64(len(body)) || info.Platform != remote.LocalClientBundlePlatform() || info.NotModified {
+		t.Fatalf("info = %+v", info)
+	}
+	if got := s.body(); !bytes.Equal(got, body) {
+		t.Fatalf("body: %d bytes, want %d", len(got), len(body))
+	}
+	if len(s.msgs) != 4 {
+		t.Fatalf("expected info + 3 chunks, got %d messages", len(s.msgs))
+	}
+
+	// Current etag: metadata only.
+	if s, err = fetch("tok-b", `"sha256:abc"`); err != nil || len(s.msgs) != 1 || !s.msgs[0].GetInfo().NotModified {
+		t.Fatalf("if-none-match: %v %+v", err, s.msgs)
+	}
+	// No credential, wrong credential, unsupported platform.
+	if _, err = fetch("tok-zz", ""); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("unrecorded token: want PermissionDenied, got %v", err)
+	}
+	if _, err = fetch("", ""); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("empty token: want InvalidArgument, got %v", err)
+	}
+	s = &captureStream{ctx: ctx}
+	err = a.FetchClientBundle(&remoteagent.FetchClientBundleRequest{Session: "tok-b", ClaimUid: "uid-b", ClaimNamespace: claim.Namespace, ClaimName: claim.Name, Os: "plan9"}, s)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("bad platform: want InvalidArgument, got %v", err)
+	}
+	// Server without a bundle for the platform.
+	bundle.Store(nil)
+	if _, err = fetch("tok-b", ""); status.Code(err) != codes.NotFound {
+		t.Fatalf("no bundle: want NotFound, got %v", err)
 	}
 }

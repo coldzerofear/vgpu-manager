@@ -94,9 +94,11 @@ spec:
         vgpu-manager.io/remote-inject: "true"
       serviceAccountName: vgpu-manager-remote-dra-inject
       initContainers:
-        # lupine-client 静态制品铺盘：每个 CUDA 版本一个 init 容器，目录名必须是
+        # 【可选】lupine-client 静态制品预铺：每个 CUDA 版本一个 init 容器，目录名必须是
         # 可解析的版本号（制品选择规则 = 取 <= server CUDA 版本上限的最高版本）。
-        # 增删版本 = 增删 init 容器；镜像为 /artifacts 载体（cp 落盘）。
+        # 不预铺也能用：节点上没有可用版本时，inject 会在 NodePrepare 内通过 remote-agent 从
+        # lupine-server 拉取其内嵌的同构建 client bundle（校验 sha256 后落盘，见 README）。
+        # 预铺只是省掉首个远程 pod 的下载等待；预铺目录没有 .etag，须与 server 同一 release。
         - name: lupine-client-cuda-13-3
           image: ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1   # ← 必须与 remote-server.yaml 的 server 镜像同一 release
           imagePullPolicy: IfNotPresent
