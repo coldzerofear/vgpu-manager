@@ -440,6 +440,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		if err := d.assignTokens(ctx, claim, partitions); err != nil {
 			return fail(err)
 		}
+		d.updatePreparedClaim(claim) // the release path reads the tokens from this copy
 		if len(partitions) > 0 {
 			// Any session token of the claim authorizes a bundle download.
 			token = func() (string, error) { return partitions[0].token, nil }

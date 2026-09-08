@@ -55,8 +55,12 @@ const (
 	// the etag of the bundle the directory was installed from. Absent for
 	// directories seeded by other means (an init container).
 	ArtifactETagFile = ".etag"
-	// clientBundleTimeout bounds one download at the inject side.
-	clientBundleTimeout = 60 * time.Second
+	// clientBundleTimeout bounds one download at the inject side. It stays
+	// inside the kubelet's NodePrepareResources call timeout (45s by default)
+	// so a slow download fails this call cleanly and the retry finds the
+	// artifact (or fails again) instead of racing a call the kubelet already
+	// gave up on.
+	clientBundleTimeout = 40 * time.Second
 	// clientBundleChunk is the stream chunk size, under the default 4 MiB
 	// gRPC message limit.
 	ClientBundleChunkSize = 1 << 20
@@ -323,15 +327,22 @@ func installClientBundle(artifactsDir, name, zipPath string, info *remoteagent.C
 	}
 
 	final := filepath.Join(artifactsDir, name)
+	aside := ""
 	if _, err := os.Stat(final); err == nil {
-		aside := filepath.Join(artifactsDir, fmt.Sprintf(".stale-%s-%d", name, time.Now().UnixNano()))
+		aside = filepath.Join(artifactsDir, fmt.Sprintf(".stale-%s-%d", name, time.Now().UnixNano()))
 		if err := os.Rename(final, aside); err != nil {
 			return fmt.Errorf("move previous artifact %s aside: %w", name, err)
 		}
-		klog.Infof("Client artifact %s replaced (previous copy kept at %s for pods still using it)", name, aside)
 	}
 	if err := os.Rename(tmp, final); err != nil {
+		if aside != "" {
+			// Leave the node as it was rather than without any artifact.
+			_ = os.Rename(aside, final)
+		}
 		return fmt.Errorf("install artifact %s: %w", name, err)
+	}
+	if aside != "" {
+		klog.Infof("Client artifact %s replaced (previous copy kept at %s for pods still using it)", name, aside)
 	}
 	return nil
 }

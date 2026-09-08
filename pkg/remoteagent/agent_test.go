@@ -597,7 +597,7 @@ func (s *captureStream) body() []byte {
 // session token of a claim, and learns the bundle's etag on its probe.
 func TestFetchClientBundle(t *testing.T) {
 	ctx := context.Background()
-	srv, _, bundle := fakeLupineWithBundle(t)
+	srv, version, bundle := fakeLupineWithBundle(t)
 	body := bytes.Repeat([]byte("shim"), remote.ClientBundleChunkSize/2) // 2 chunks + change
 	body = append(body, []byte("tail")...)
 	bundle.Store(&fakeBundle{body: body, etag: `"sha256:abc"`})
@@ -620,12 +620,24 @@ func TestFetchClientBundle(t *testing.T) {
 	if info, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{}); info.ClientBundleEtag != `"sha256:abc"` {
 		t.Fatalf("ServerInfo etag = %q", info.ClientBundleEtag)
 	}
+	// The bundle is re-read only across a restart (the binary cannot change
+	// while the same server keeps answering).
 	bundle.Store(nil)
 	a.probeServer(ctx)
+	if info, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{}); info.ClientBundleEtag != `"sha256:abc"` {
+		t.Fatalf("etag must not be re-read while the server stays up, got %q", info.ClientBundleEtag)
+	}
+	version.Store("")
+	a.probeServer(ctx) // down
+	version.Store("13.3.73")
+	a.probeServer(ctx) // back: re-read
 	if info, _ := a.ServerInfo(ctx, &remoteagent.ServerInfoRequest{}); info.ClientBundleEtag != "" {
-		t.Fatalf("a server without a bundle must report no etag, got %q", info.ClientBundleEtag)
+		t.Fatalf("a restarted server without a bundle must report no etag, got %q", info.ClientBundleEtag)
 	}
 	bundle.Store(&fakeBundle{body: body, etag: `"sha256:abc"`})
+	version.Store("")
+	a.probeServer(ctx)
+	version.Store("13.3.73")
 	a.probeServer(ctx)
 
 	fetch := func(session, ifNoneMatch string) (*captureStream, error) {

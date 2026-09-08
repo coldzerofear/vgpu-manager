@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	resourceapi "k8s.io/api/resource/v1"
@@ -143,7 +144,7 @@ func (d *InjectDriver) fetchArtifact(ctx context.Context, agent, session string,
 		ClaimNamespace: claim.Namespace,
 		ClaimName:      claim.Name,
 		Os:             "linux",
-		Arch:           "", // the agent's own: consumer and GPU nodes share the architecture
+		Arch:           runtime.GOARCH, // this node's: the pod runs here, not on the GPU node
 	}, tmp)
 	closeErr := tmp.Close()
 	if err != nil {

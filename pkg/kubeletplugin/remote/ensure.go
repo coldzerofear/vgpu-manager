@@ -103,8 +103,8 @@ func ServerInfo(ctx context.Context, agentEndpoint string) (*remoteagent.ServerI
 	return info, nil
 }
 
-// ReleaseSessions asks the agent at agentEndpoint to remove the sessions of
-// a claim: the given tokens, or all of them when tokens is empty. Returns
+// ReleaseSessions asks the agent at agentEndpoint to remove the named
+// sessions of a claim (tokens are required by the agent). Returns
 // how many the agent removed. Callers treat a failure as best effort: the
 // agent's claim watch and periodic sweep remove the same sessions later.
 func ReleaseSessions(ctx context.Context, agentEndpoint, claimUID string, tokens []string) (int, error) {

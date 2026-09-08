@@ -493,10 +493,15 @@ func (a *Agent) probe(ctx context.Context, discover bool) {
 	}
 	next.Up = true
 	next.CudaVersion = version.Original()
-	if etag, err := remote.ProbeClientBundleETag(ctx, a.cfg.ServerEndpoint, remote.LocalClientBundlePlatform(), candidateProbeTimeout); err == nil {
-		next.ClientBundleETag = etag
-	} else {
-		klog.V(4).Infof("client bundle etag not read this probe: %v", err)
+	// The embedded bundle can only change with the binary, i.e. across a
+	// restart (seen as a failed probe in between) or with the version; so
+	// the extra HEAD (one forked child on the server) is spent only then.
+	if !prev.Up || prev.CudaVersion != next.CudaVersion {
+		if etag, err := remote.ProbeClientBundleETag(ctx, a.cfg.ServerEndpoint, remote.LocalClientBundlePlatform(), candidateProbeTimeout); err == nil {
+			next.ClientBundleETag = etag
+		} else {
+			klog.V(4).Infof("client bundle etag not read this probe: %v", err)
+		}
 	}
 	next.RoutableHost = a.resolveRoutableHost(ctx, prev.RoutableHost, discover)
 	next.Endpoint = a.serverEndpointFor(next.RoutableHost)
