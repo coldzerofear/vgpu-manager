@@ -134,8 +134,8 @@ spec:
             #   value: "https://gpu-a.corp/pool-a"
             # gRPC 监听，逗号分隔可多个：grpc://:14834 供其他节点的 dra-inject 调 EnsureSession；
             # 追加 unix:///etc/vgpu-manager/agent.sock 可让同节点的 dra-server 走套接字
-            - name: LISTEN_SERVER_ENDPOINT
-              value: ":14834"                     # ← EnsureSession gRPC 端口(hostNetwork)
+            - name: LISTEN_SERVER_ENDPOINT        # ← EnsureSession gRPC 端口(hostNetwork)
+              value: "grpc://:14834,unix:///etc/vgpu-manager/agent.sock"
             - name: CONTAINER_MANAGER_DIR
               value: /etc/vgpu-manager
             - name: FEATURE_GATES
@@ -229,7 +229,7 @@ spec:
             - name: LUPINE_TRACE
               value: "1"
             - name: LOGGER_LEVEL    # vGPU library 日志级别
-              value: "3"
+              value: "2"
           securityContext:
             privileged: true
           resources: {}

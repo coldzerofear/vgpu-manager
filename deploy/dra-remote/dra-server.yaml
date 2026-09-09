@@ -150,7 +150,7 @@ spec:
             - name: PLUGIN_MODE
               value: server
             - name: FEATURE_GATES
-              value: RemoteGPUSupport=true,NVMLDeviceHealthCheck=true,SharedSMUtilizationWatcher=true
+              value: VGPUSupport=true,RemoteGPUSupport=true,NVMLDeviceHealthCheck=true,SharedSMUtilizationWatcher=true
             - name: MASK_NVIDIA_DRIVER_PARAMS
               value: ""
             # 必改：哪些节点可达本节点的 lupine-server（标准 label selector 语法，
@@ -164,7 +164,7 @@ spec:
             # serverCudaVersion 全部由 agent 的 ServerInfo 报告；agent 未应答前设备照常发布但
             # 不带这些属性并打 NoSchedule 污点 remote-unavailable，探到后自动重发。
             - name: REMOTE_AGENT_ENDPOINT
-              value: ":14834"
+              value: "unix:///etc/vgpu-manager/agent.sock"
             - name: NVIDIA_DRIVER_ROOT
               value: /
             - name: CDI_ROOT
@@ -279,3 +279,13 @@ spec:
           hostPath:
             path: /proc/
             type: Directory
+---
+# 远程消费 DeviceClass：选 accessMode=remote 的 vgpu 设备。
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: vgpu-manager
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"

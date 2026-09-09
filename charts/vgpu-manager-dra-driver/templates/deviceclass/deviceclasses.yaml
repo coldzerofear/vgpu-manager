@@ -11,7 +11,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu'"
   {{- if and (eq $apiVersion "resource.k8s.io/v1") .Values.deviceClasses.gpu.extendedResourceName }}
   extendedResourceName: {{ .Values.deviceClasses.gpu.extendedResourceName }}
   {{- end }}
@@ -27,7 +27,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"
 {{- end }}
 {{- if .Values.deviceClasses.mig.enabled }}
 ---

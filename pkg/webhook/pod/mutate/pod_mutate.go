@@ -230,12 +230,7 @@ func (h *mutateHandle) MutateCreate(ctx context.Context, pod *corev1.Pod, dryRun
 		setDefaultSchedulerName(pod, h.options, logger)
 		setDefaultNodeSchedulerPolicy(pod, h.options, logger)
 		setDefaultDeviceSchedulerPolicy(pod, h.options, logger)
-		// Remote vGPU consumers run lupine's client shim, not the local vgpu
-		// runtime class, and NUMA/link topology has no meaning for them.
-		accessMode, _ := util.PodVGPUAccessMode(pod)
-		if accessMode != util.AccessModeRemote {
-			setDefaultRuntimeClassName(pod, h.options, logger)
-		}
+		setDefaultRuntimeClassName(pod, h.options, logger)
 	} else {
 		cleanupInvalidSchedulerAnnotation(pod)
 	}

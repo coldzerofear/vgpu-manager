@@ -18,9 +18,10 @@ package remote
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/Masterminds/semver"
@@ -140,16 +141,10 @@ func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, e
 	var lines []string
 	// Fixed order: the file is compared byte-for-byte on the next prepare,
 	// so map iteration order must not make an unchanged shim set look new.
-	libs := make([]string, 0, len(optionalShimLibrary))
-	for lib := range optionalShimLibrary {
-		libs = append(libs, lib)
-	}
-	sort.Strings(libs)
-	for _, lib := range libs {
-		require := optionalShimLibrary[lib]
+	for _, lib := range slices.Sorted(maps.Keys(optionalShimLibrary)) {
 		if _, err := os.Stat(filepath.Join(artifactsDir, sel.Name, lib)); err == nil {
 			lines = append(lines, filepath.Join(sel.ContainerDir, lib))
-		} else if require {
+		} else if optionalShimLibrary[lib] {
 			// Without the Client shim the artifact is unusable; fail the
 			// prepare (retryable — the artifact may still be materializing).
 			return "", fmt.Errorf("client artifact %s has no %s: %w", sel.Name, lib, err)

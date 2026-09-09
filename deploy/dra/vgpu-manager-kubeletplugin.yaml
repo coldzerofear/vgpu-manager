@@ -472,7 +472,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'gpu'"
   extendedResourceName: nvidia.com/gpu
 ---
 apiVersion: resource.k8s.io/v1
@@ -482,7 +482,7 @@ metadata:
 spec:
   selectors:
     - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu' && device.attributes['manager.nvidia.com'].accessMode == 'local'"
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"
 ---
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
