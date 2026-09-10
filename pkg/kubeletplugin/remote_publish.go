@@ -121,13 +121,19 @@ func (rp *remotePublisher) currentSpec() *remote.PublishSpec {
 
 // refreshServerInfo asks the agent about lupine-server and stores what it
 // learned: the endpoints to publish and the build CUDA version. Returns
-// true when a published value changed: the first answer, a server that
-// came back built from another image, or one that moved. A failed call
-// keeps the last known values (a restart with the same image on the same
-// address is the common case); an agent that reports no routable address
-// is treated the same, so a blip never un-publishes working endpoints.
+// true when a published value changed. A probe failure (the agent is
+// unreachable, or reports lupine-server is not listening) or an
+// unpublishable answer clears the endpoints right away rather than keeping
+// the last known ones: Decorate reads Reachable() off exactly these two
+// fields, so clearing them is what flips the NoSchedule taint back on and
+// drops the endpoint/version attributes on this same cycle -- the
+// scheduler must not keep sending pods at a device whose reachability
+// just failed. The CUDA version is the one exception: an answer that
+// parses the endpoints but not the version string keeps the last known
+// version rather than discarding it over what is likely a cosmetic
+// formatting issue on an otherwise-reachable server.
 func (rp *remotePublisher) refreshServerInfo(ctx context.Context) (bool, error) {
-	checkChanged := func(v *semver.Version, server, agent string) bool {
+	setSpec := func(v *semver.Version, server, agent string) bool {
 		rp.mu.Lock()
 		defer rp.mu.Unlock()
 
@@ -135,10 +141,7 @@ func (rp *remotePublisher) refreshServerInfo(ctx context.Context) (bool, error) 
 		if v == nil {
 			v = rp.spec.ServerCUDAVersion
 		}
-		if rp.spec.ServerCUDAVersion != nil && !rp.spec.ServerCUDAVersion.Equal(v) {
-			rp.spec.ServerCUDAVersion = v
-			changed = true
-		} else if rp.spec.ServerCUDAVersion == nil && v != nil {
+		if (rp.spec.ServerCUDAVersion == nil) != (v == nil) || (v != nil && !rp.spec.ServerCUDAVersion.Equal(v)) {
 			rp.spec.ServerCUDAVersion = v
 			changed = true
 		}
@@ -151,23 +154,30 @@ func (rp *remotePublisher) refreshServerInfo(ctx context.Context) (bool, error) 
 
 	info, err := remote.ServerInfo(ctx, rp.agentDial)
 	if err != nil {
-		return checkChanged(nil, "", ""), err
+		return setSpec(nil, "", ""), err
 	}
 	if info.AgentEndpoint == "" {
+		// Quick detection: this call just reached the agent at rp.agentDial,
+		// so while the agent has not self-discovered its own routable host
+		// yet, that dial address is a fine stand-in -- publishableEndpoints
+		// below still rejects it when it is not otherwise publishable (a
+		// unix socket, e.g. this process and the agent share a node over a
+		// local bridge, works for this dial but must never be advertised
+		// to another node).
 		info.AgentEndpoint = rp.agentDial
 	}
 	server, agent, err := publishableEndpoints(info.Endpoint, info.AgentEndpoint)
 	if err != nil {
-		return checkChanged(nil, "", info.AgentEndpoint), fmt.Errorf("remote-agent %s: %w", rp.agentDial, err)
+		return setSpec(nil, "", ""), fmt.Errorf("remote-agent %s: %w", rp.agentDial, err)
 	}
 
 	v, err := semver.NewVersion(info.CudaDriverVersion)
 	if err != nil {
-		return checkChanged(nil, server, agent), fmt.Errorf("remote-agent %s reports unparseable CUDA version %q: %w",
+		return setSpec(nil, server, agent), fmt.Errorf("remote-agent %s reports unparseable CUDA version %q: %w",
 			rp.agentDial, info.CudaDriverVersion, err)
 	}
 
-	return checkChanged(v, server, agent), nil
+	return setSpec(v, server, agent), nil
 }
 
 // resolveAgentDial turns --remote-agent-endpoint into the address this
@@ -215,7 +225,11 @@ func publishableEndpoints(server, agent string) (string, string, error) {
 		return "", "", fmt.Errorf("reported lupine-server endpoint %q is not publishable: %v", server, err)
 	}
 	a, err := remote.ParseAgentEndpoint(agent)
-	if err != nil || (a.Scheme == endpointutil.Grpc && a.IsLoopback()) {
+	if err != nil || a.Scheme != endpointutil.Grpc || a.IsLoopback() {
+		// A unix-scheme endpoint works for this node's own dial but must
+		// never be advertised: IsLoopback() is unconditionally true for it
+		// (see its doc comment), so the explicit Scheme check here is
+		// belt-and-suspenders, not redundant with it.
 		return "", "", fmt.Errorf("reported remote-agent endpoint %q is not publishable: %v", agent, err)
 	}
 	return s.String(), a.String(), nil
@@ -227,9 +241,9 @@ func publishableEndpoints(server, agent string) (string, string, error) {
 // Runs until ctx is done.
 func (rp *remotePublisher) watchServerInfo(ctx context.Context, republish func(context.Context) error) {
 	changedChan := make(chan bool, 0)
-	defer close(changedChan)
 
 	go func() {
+		defer close(changedChan)
 		wait.UntilWithContext(ctx, func(ctx context.Context) {
 			changed, err := rp.refreshServerInfo(ctx)
 			if err != nil {

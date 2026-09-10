@@ -158,30 +158,45 @@ func TestRemotePublisherServerInfo(t *testing.T) {
 		t.Fatalf("published server=%q agent=%q", s, a)
 	}
 
-	// A server that stopped answering keeps the last known values.
+	// A server that stopped answering must promptly go unreachable: the
+	// scheduler must not keep sending pods at a device whose probe just
+	// failed, so this is a change (taint back on, endpoint/version
+	// attributes gone) even though the agent itself answered fine.
 	fa.set(false, "12.9.1", "https://gpu-a.corp:443/pool-a", "grpc://10.9.9.9:15000")
-	if changed, err = rp.refreshServerInfo(ctx); !errors.Is(err, remote.ErrServerNotListening) || changed {
-		t.Fatalf("silent server must be ErrServerNotListening without a change: changed=%v err=%v", changed, err)
+	if changed, err = rp.refreshServerInfo(ctx); !errors.Is(err, remote.ErrServerNotListening) || !changed {
+		t.Fatalf("silent server must be ErrServerNotListening and un-publish now: changed=%v err=%v", changed, err)
 	}
-	if s, a, v := attrs(); s != "https://gpu-a.corp:443/pool-a" || a != "grpc://10.9.9.9:15000" || v != "12.9.1" {
-		t.Fatalf("last known values must survive a failed probe: server=%q agent=%q version=%q", s, a, v)
+	if s, a, v := attrs(); s != "" || a != "" || v != "" || !publishedTaint(pool(), remote.TaintKeyRemoteUnavailable) {
+		t.Fatalf("a failed probe must clear the endpoints and re-taint: server=%q agent=%q version=%q tainted=%v",
+			s, a, v, publishedTaint(pool(), remote.TaintKeyRemoteUnavailable))
 	}
 
-	// So does an agent that lost its routable address, or reports junk.
+	// An already-unreachable device does not need repeated republishing:
+	// once the taint is on, further failures (agent lost its routable
+	// address, reports junk, or a unix-scheme agent endpoint -- which must
+	// never be accepted as publishable, unix works only for this node's own
+	// dial) are still errors, but no longer a change.
 	for _, bad := range [][2]string{{"", ""}, {"http://127.0.0.1:14833", "grpc://127.0.0.1:14834"}, {"ftp://x", "grpc://10.9.9.9:15000"}, {"http://10.9.9.9", "unix:///run/agent.sock"}} {
 		fa.set(true, "12.9.1", bad[0], bad[1])
 		if changed, err = rp.refreshServerInfo(ctx); err == nil || changed {
-			t.Fatalf("%v must be an error without a change: changed=%v err=%v", bad, changed, err)
+			t.Fatalf("%v while already unreachable must be an error without a further change: changed=%v err=%v", bad, changed, err)
 		}
 	}
-	if s, a, _ := attrs(); s != "https://gpu-a.corp:443/pool-a" || a != "grpc://10.9.9.9:15000" {
-		t.Fatalf("junk must not replace the last known endpoints: server=%q agent=%q", s, a)
+	if s, a, v := attrs(); s != "" || a != "" || v != "" || !publishedTaint(pool(), remote.TaintKeyRemoteUnavailable) {
+		t.Fatalf("must stay cleared and tainted: server=%q agent=%q version=%q tainted=%v",
+			s, a, v, publishedTaint(pool(), remote.TaintKeyRemoteUnavailable))
 	}
 
-	// An unparseable version is an error without a change.
+	// Reachable again, but with an unparseable version: the endpoints
+	// still count as a change (the taint must come off right away), while
+	// the version falls back to the last known good one rather than the
+	// garbled string or nothing at all.
 	fa.set(true, "not-a-version", "https://gpu-a.corp:443/pool-a", "grpc://10.9.9.9:15000")
-	if changed, err = rp.refreshServerInfo(ctx); err == nil || changed {
-		t.Fatalf("bad version must be an error without a change: changed=%v err=%v", changed, err)
+	if changed, err = rp.refreshServerInfo(ctx); err == nil || !changed {
+		t.Fatalf("bad version on an otherwise-reachable server must still publish the endpoints: changed=%v err=%v", changed, err)
+	}
+	if s, a, v := attrs(); s != "https://gpu-a.corp:443/pool-a" || a != "grpc://10.9.9.9:15000" || v != "12.9.1" || publishedTaint(pool(), remote.TaintKeyRemoteUnavailable) {
+		t.Fatalf("published server=%q agent=%q version=%q tainted=%v", s, a, v, publishedTaint(pool(), remote.TaintKeyRemoteUnavailable))
 	}
 }
 
