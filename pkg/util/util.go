@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -39,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/net"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	k8scache "k8s.io/client-go/tools/cache"
 	"k8s.io/component-helpers/resource"
@@ -886,4 +888,25 @@ func PodVGPUAccessMode(obj metav1.Object) (string, error) {
 // nri, so neither can host it for the other).
 func NRIPartitionKey(podUID, containerName string) string {
 	return podUID + "_" + containerName
+}
+
+func AddContainerRequiredNRIPluginAnnotations(obj metav1.Object, container string, plugins ...string) error {
+	if len(plugins) > 0 {
+		pluginSet := sets.NewString(plugins...)
+		annoKey := RequiredNRIPluginsContainerAnnotation(container)
+		if val, _ := HasAnnotation(obj, annoKey); val != "" {
+			var pluginNames []string
+			if err := json.Unmarshal([]byte(val), &pluginNames); err != nil {
+				return fmt.Errorf("failed to parse the list of required plugins %q: %w", val, err)
+			}
+			pluginSet.Insert(pluginNames...)
+		}
+		pluginNames := pluginSet.List()
+		bytes, err := json.Marshal(pluginNames)
+		if err != nil {
+			return fmt.Errorf("failed to serialize required plugins %v: %w", pluginNames, err)
+		}
+		InsertAnnotation(obj, annoKey, string(bytes))
+	}
+	return nil
 }

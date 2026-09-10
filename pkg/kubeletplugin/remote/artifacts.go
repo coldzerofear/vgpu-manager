@@ -102,6 +102,9 @@ func selectArtifact(artifactsDir, hostArtifactsDir string, serverCeiling *semver
 	if st, err := os.Stat(filepath.Join(artifactsDir, bestName, "nvidia-smi")); err == nil && st.Mode().IsRegular() {
 		selection.NvidiaSMIHost = filepath.Join(hostArtifactsDir, bestName, "nvidia-smi")
 	}
+	//if selection.NvidiaSMIHost == "" {
+	//	selection.NvidiaSMIHost, _ = nvidia.RootPath("/").GetNvidiaSMIPath()
+	//}
 	return selection, nil
 }
 
@@ -121,15 +124,15 @@ func dirNames(entries []os.DirEntry) string {
 
 // The driver shims a client artifact ships.
 const (
-	shimLibCuda   = "libcuda.so.1"
-	shimLibNvml   = "libnvidia-ml.so.1"
-	shimLibCudart = "libcudart.so.13"
+	shimLibCudaPrefix   = "libcuda.so*"
+	shimLibNvmlPrefix   = "libnvidia-ml.so*"
+	shimLibCudartPrefix = "libcudart.so*"
 )
 
 var optionalShimLibrary = map[string]bool{
-	shimLibCuda:   true,
-	shimLibNvml:   true,
-	shimLibCudart: false,
+	shimLibCudaPrefix:   true,
+	shimLibNvmlPrefix:   true,
+	shimLibCudartPrefix: false,
 }
 
 // ensureLdPreloadFile writes <artifactsDir>/<ver>/RemoteLdPreload listing the
@@ -141,13 +144,19 @@ func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, e
 	var lines []string
 	// Fixed order: the file is compared byte-for-byte on the next prepare,
 	// so map iteration order must not make an unchanged shim set look new.
-	for _, lib := range slices.Sorted(maps.Keys(optionalShimLibrary)) {
-		if _, err := os.Stat(filepath.Join(artifactsDir, sel.Name, lib)); err == nil {
-			lines = append(lines, filepath.Join(sel.ContainerDir, lib))
-		} else if optionalShimLibrary[lib] {
+	for _, libPrefix := range slices.Sorted(maps.Keys(optionalShimLibrary)) {
+		pattern := filepath.Join(artifactsDir, sel.Name, libPrefix)
+		if matches, err := filepath.Glob(pattern); err != nil {
+			return "", fmt.Errorf("glob %s: %w", pattern, err)
+		} else if len(matches) > 0 {
+			slices.Sort(matches)
+			for _, match := range matches {
+				lines = append(lines, filepath.Join(sel.ContainerDir, filepath.Base(match)))
+			}
+		} else if optionalShimLibrary[libPrefix] {
 			// Without the Client shim the artifact is unusable; fail the
 			// prepare (retryable — the artifact may still be materializing).
-			return "", fmt.Errorf("client artifact %s has no %s: %w", sel.Name, lib, err)
+			return "", fmt.Errorf("client artifact %s has no %s", sel.Name, libPrefix)
 		}
 	}
 	content := strings.Join(lines, "\n") + "\n"

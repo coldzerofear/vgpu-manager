@@ -108,6 +108,7 @@ spec:
           volumeMounts:
             - name: client-artifacts
               mountPath: /target
+              mountPropagation: Bidirectional
         - name: lupine-client-cuda-12-9
           image: ghcr.io/coldzerofear/lupine-client-static:cuda-12.9.1   # ← 按需增删版本（同样同一 release）
           imagePullPolicy: IfNotPresent
@@ -117,6 +118,7 @@ spec:
           volumeMounts:
             - name: client-artifacts
               mountPath: /target
+              mountPropagation: Bidirectional
       containers:
         - name: kubelet-plugin
           image: coldzerofear/vgpu-manager-dra:latest

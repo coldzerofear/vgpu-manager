@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/containerd/nri/pkg/plugin"
 	"k8s.io/klog/v2"
 )
 
@@ -55,6 +56,8 @@ const (
 	CoschedulingPodGroupLabel     = "scheduling.x-k8s.io/pod-group"
 	// Deprecated: kubernetes-sigs/scheduler-plugins/lightweight-coscheduling
 	CoschedulingPodGroupNameLabel = "pod-group.scheduling.sigs.k8s.io/name"
+
+	RequiredNRIPluginsPodAnnotation = plugin.RequiredPluginsAnnotation + "/pod"
 )
 
 var (
@@ -460,3 +463,7 @@ const (
 	// AccessModeAttribute is the DRA device attribute name.
 	AccessModeAttribute = "accessMode"
 )
+
+func RequiredNRIPluginsContainerAnnotation(container string) string {
+	return plugin.RequiredPluginsAnnotation + "/container." + container
+}

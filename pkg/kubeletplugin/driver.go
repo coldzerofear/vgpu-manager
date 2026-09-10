@@ -872,7 +872,7 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 	var socketPath string
 	if config.Flags.NRIRoot != "" {
-		socketPath = filepath.Join(config.Flags.NRIRoot, "nri.sock")
+		socketPath = filepath.Join(config.Flags.NRIRoot, util.DRADriverName+".sock")
 	}
 	plugin, err := nri.NewPlugin(nri.Config{
 		SocketPath: socketPath,

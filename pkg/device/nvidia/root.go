@@ -55,8 +55,8 @@ func (r RootPath) GetFMLibraryPath() (string, error) {
 	return libraryPath, nil
 }
 
-// getNvidiaSMIPath returns path to the `nvidia-smi` executable in the driver root.
-func (r RootPath) getNvidiaSMIPath() (string, error) {
+// GetNvidiaSMIPath returns path to the `nvidia-smi` executable in the driver root.
+func (r RootPath) GetNvidiaSMIPath() (string, error) {
 	binarySearchPaths := []string{
 		"/usr/bin",
 		"/usr/sbin",

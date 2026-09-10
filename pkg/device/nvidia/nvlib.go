@@ -199,7 +199,7 @@ func NewDeviceLib(root RootPath) (*DeviceLib, error) {
 		return nil, fmt.Errorf("failed to locate driver libraries: %w", err)
 	}
 
-	nvidiaSMIPath, err := root.getNvidiaSMIPath()
+	nvidiaSMIPath, err := root.GetNvidiaSMIPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to locate nvidia-smi: %w", err)
 	}

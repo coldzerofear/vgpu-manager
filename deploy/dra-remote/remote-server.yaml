@@ -242,8 +242,8 @@ spec:
             failureThreshold: 3
             tcpSocket:
               port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: 10
+            periodSeconds: 20
             successThreshold: 1
           livenessProbe:
             failureThreshold: 3
