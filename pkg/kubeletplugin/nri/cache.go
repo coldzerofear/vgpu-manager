@@ -98,6 +98,25 @@ func (c *Cache) Replace(entries map[string]Entry) {
 	c.synced = true
 }
 
+// Unsync marks the cache not-synced without discarding its entries, called when
+// the plugin loses its runtime connection.
+//
+// The entries stay because they are still the best answer we have for the
+// containers that were running: a reconnect replays Synchronize and replaces
+// them wholesale. What must not stay is the synced flag. Every event that would
+// have kept the cache current (CreateContainer, RemoveContainer) is missed while
+// disconnected, so "synced" would claim an accuracy the cache no longer has —
+// and the register resolver reads that flag to decide whether a miss means "not
+// an NRI container" (answer with the legacy path) or "not known yet" (retryable
+// error). Left set, a miss during a disconnect silently resolves to a config
+// directory computed from the pre-NRI layout, and the library registers into the
+// wrong ledger instead of retrying.
+func (c *Cache) Unsync() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.synced = false
+}
+
 // Synced reports whether the first Synchronize has completed.
 func (c *Cache) Synced() bool {
 	c.mu.RLock()

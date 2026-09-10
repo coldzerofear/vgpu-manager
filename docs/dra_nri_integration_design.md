@@ -342,7 +342,11 @@ NRI 重启后 runtime 回放全部容器，`container.Env` 里的 `MANAGER_VGPU_
 
 ### 12.11 fail-open vs fail-closed（已定，见 §12.13.6）
 
-原为待验证项:partition 目录没挂上时 library 是 FATAL 还是静默无限制。**已由作者确认 + 源码分析定案**(详见 §12.13.6):client 模式 → FATAL(fail-closed 可见);cgroup 模式 → 自建目录继续跑、**限额照常执行**,仅失监控。故 NRI 未就绪不会导致限额逃逸,治理重心是"插件持续不可用"(§12.13.3 两级失败模型)。
+原为待验证项:partition 目录没挂上时 library 是 FATAL 还是静默无限制。**已由作者确认 + 源码分析定案**(详见 §12.13.6):client 模式 → FATAL(fail-closed 可见);cgroup 模式 → 自建目录继续跑、**限额照常执行**,仅失监控。
+
+> **策略已反转(2026-09)**:早期结论由此推出"静默安全降级即可、无需主动拦截"。实践否定了这一点——**降级是静默的**,被跳过 NRI 的容器不产生任何信号,监控看不到、事件里没有、日志里也没有,异常只会累积到排查阶段才暴露。而且 cgroup 模式"仅失监控"的说法本身不完整:`.vmem_node` / `.sm_node` 是**跨容器共享**的记账落点,共享节点缺失时同卡多容器各算各的,隔离本身被削弱,不只是可见性问题。
+>
+> 现行策略:**开启 `NRISupport` 即意味着严格执行**——凡是我们识别得出的容器,要么拿到隔离,要么不启动,并带一条能定位到环境的错误。详见 §12.13.6。
 
 ### 12.12 Phase 0 验证结论（已从 containerd 源码确认，无需集群实测）
 
@@ -420,7 +424,9 @@ for {
 // Healthy() = !failed, 供 healthcheck 消费(仅 NRISupport 开启)
 ```
 
-> 落地：`pkg/kubeletplugin/nri/plugin.go` 的 `Run`/`recordDisconnect`/`Healthy` 已实现该两级机制。healthcheck 消费 `Healthy()` 的接线是待做项（见 §12.13.6）。
+> 落地：`pkg/kubeletplugin/nri/plugin.go` 的 `Run`/`recordDisconnect`/`Healthy` 已实现该两级机制，healthcheck 消费 `Healthy()` 的接线**已完成**（local 与 remote inject 两种模式，见 §12.13.6）。
+>
+> 注意 `Healthy()` 与 `Ready()` 是两个问题，不要混用：`Healthy()` 是"要不要重启这个 Pod"，宽限期内刻意不翻，供 liveness 消费；`Ready()` 是"运行时此刻是否在调用我们"，断连立即回落，供启动门禁与缓存就绪门消费。用 `Healthy()` 当门禁会在宽限期内放行整整两分钟的无隔离容器。
 
 #### 12.13.4 故障恢复：三类重启统一走 Synchronize
 
@@ -448,22 +454,85 @@ return device-plugin target                # /etc/vgpu-manager/<pod>_<container>
 
 **关键约束**：就绪门返回的错误**必须是非 `apierrors.NotFound` 的普通 error**。`resolveTarget` 只对 `apierrors.IsNotFound` 硬失败，其余错误一律 `lastErr=err; return false, nil` 继续轮询直到 `resolveTimeout`（60s）（`server.go:334-339`）。因此就绪门返回普通 error 时，ClientRegistry 会在超时周期内自动重试，等 NRI 首次 `Synchronize` 完成、缓存就绪后自然命中。**未开 NRISupport 时不走就绪门**，pod-uid 请求直接回退 device-plugin 目录（此时是 device-plugin 的 pod 撞到本服务，§12.8 第 2 分支）。
 
-> 待定的小 nuance：断连（`onClose`）时是否把 `synced` 复位为 false。复位则断连窗口内所有未命中都返回可重试错误（等 NRI 回来重连+重放），对"断连期间新建的无 mount 容器"更保守；不复位则沿用旧缓存。因断连期间新容器本就无 mount（§12.11 失败态），倾向**不复位**，避免阻塞断连期间到达的 device-plugin pod 注册。Phase 0 后定。
+**断连时复位 `synced`（已定案，2026-09）**：`onClose` / `Run` 返回时调用 `Cache.Unsync()`，把 `synced` 置回 false（条目保留，重连时由 `Synchronize` 整体替换）。
 
-#### 12.13.6 失败模型与 library 行为（已由作者确认）
+早期倾向"不复位"，理由是断连期间新容器本就无 mount、复位只会阻塞 device-plugin pod 的注册。该理由在策略反转后不成立，且原本就低估了危害：断连期间 `CreateContainer` / `RemoveContainer` 全部丢失，缓存已不具备它所声称的准确性；而 `synced` 恰恰是 `TargetByPodUID` 用来区分"未命中 = 不是 NRI 容器（走回退）"与"未命中 = 尚不知道（可重试）"的唯一依据。保持置位的后果不是"沿用旧缓存"，而是**未命中被当成确定性结论**，静默解析到按 pre-NRI 布局算出的 configDir，library 注册进错误的账本且不报错——这正是最难排查的一类异常。复位后该场景退化为可重试错误，由 `resolveTarget` 的 60s 轮询自然吸收。
 
-NRI 未连接时 containerd 不调用其 `CreateContainer`，容器**在无 partition mount 的情况下被创建**。作者确认的 library 行为：
+#### 12.13.6 严格执行模型（2026-09 定案，取代原"静默安全降级"）
 
-| register 模式 | partition mount 缺失时 library 行为 | 性质 |
+##### 背景：为什么推翻原结论
+
+NRI 未连接时 containerd 不调用其 `CreateContainer`，容器**在无 partition mount 的情况下被创建**。作者确认的 library 行为仍然成立：
+
+| register 模式 | partition mount 缺失时 library 行为 |
+|---|---|
+| **cgroup 模式（无 200 位）** | 容器内自建目录、继续运行，单容器限额照常执行（PID 从宿主 /proc 自解析） |
+| **client 模式（200 位）** | 客户端注册调用失败 / `pids_size==0` → `LOGGER(FATAL)` 退出 |
+
+但据此得出的"安全降级、无需拦截"是错的，两点：
+
+1. **降级是静默的。** 被跳过的容器不产生事件、不产生指标、日志里也没有一条能对上号的记录。异常不会消失，只会累积到某次排查时才集中暴露，那时已经无法回溯是哪一次运行时重启导致的。
+2. **cgroup 模式"仅失监控"低估了危害。** `.vmem_node` / `.sm_node` 是**跨容器共享**的记账落点。共享节点缺失时，同卡多容器的 SM 令牌桶与显存记账各算各的——隔离本身被削弱，不只是 host 侧看不见。
+
+因此：**开启 `NRISupport` 即意味着严格执行**。凡是我们识别得出的容器，要么拿到隔离，要么不启动，并带一条能定位到环境的错误。
+
+##### 五个执行点
+
+| 层 | 位置 | 行为 |
 |---|---|---|
-| **cgroup 模式（无 200 位）** | 容器内**自建目录、继续运行，限额照常执行**（PID 从宿主 /proc 自解析）；仅 host daemonset 感知不到容器内缓存文件（**监控盲区**，非 enforcement 问题） | 安全降级 |
-| **client 模式（200 位）** | 客户端注册调用失败 / `pids_size==0` → **`LOGGER(FATAL)` 退出** | fail-closed，可见 |
+| **就绪态** | `Plugin.Ready()` / `WaitReady()` | 精确连接态：已注册 **且** 本次会话首个 `Synchronize` 已完成。区别于 `Healthy()`（宽限期后才翻，太粗，不能当门禁）。断连即回落，并连带 `Cache.Unsync()`（§12.13.5） |
+| **启动门禁** | `startNRIPlugin` / `startNRI` | `WaitReady(60s)` 失败即启动失败。没有它就没有 partition 挂载，与其让驱动继续为注定跑不起来的容器 Prepare claim，不如在进程边界失败——插件 Pod CrashLoopBackOff，原因写在日志第一行 |
+| **健康探针** | 两种模式均传 `nriHealthy` | inject 模式此前传 `nil`（NRI 挂了 liveness 不掉），已修。`nriPlugin` 改 `atomic.Pointer`：healthcheck 协程先于 `startNRI` 启动，原先是数据竞争 |
+| **未 Prepare 即拒绝** | `CreateContainer` | claim UID 校验不过 → 返回 error 中止容器创建（原为静默跳过）。该 env 只由我们自己的 CDI 注入，出现却查不到 = 伪造或 prepare 态丢失，两者都不该放行。**无重启窗口顾虑**：`IsVGPUClaimPrepared` 直读磁盘 checkpoint，而 checkpoint 在 `NewDeviceState` 即完成校验，远早于 NRI 连接 |
+| **超时对齐** | `Plugin.hookContext` | 见下 |
 
-推论：
-- 限额的**值**（`CUDA_MEM_LIMIT_<idx>` 等）来自设备级 CDI env（Prepare 注入，与 NRI 无关，恒在）；partition 目录只是跨进程锁 + 显存记账的共享落点。**每容器模型下单容器缺 `vgpu_lock`/`vmem_node` mount，enforcement 仍正确**，只丢失 host 侧监控可见性 → 这两个 mount 在功能上**可选、监控上需要**。
-- 因此"NRI 未就绪"本身不会导致 vGPU 逃逸限额：client 模式直接 fail-closed（容器崩、可见），cgroup 模式安全降级。真正需要治理的是**插件持续不可用**，由 §12.13.3 的 tier-2 升级（healthcheck→liveness 重启）暴露给管理员。
+**唯一保留的静默跳过**是"不是我们的容器"（无 claim UID env）——节点上每个非 vGPU 容器都走这条路径，必须静默。
 
-**待接线（healthcheck 消费 `Healthy()`）**：`health.go` 的 `Check` 在 NRISupport 开启时，将 `nriPlugin.Healthy()` 纳入 SERVING 判定（`false` → `NOT_SERVING`）。注意启动顺序：healthcheck 与 NRI 插件的创建先后，需让 healthcheck 持有一个健康访问器（传 `func() bool` 或插件引用；NRISupport 关闭时该访问器恒为 healthy，不影响现有探测）。Prepare 侧**不**主动拦截（client 模式已 fail-closed，cgroup 模式安全降级，无需 Prepare 预判 NRI 可用性）。
+`inj == nil` **不改为 error**：remote inject 模式下它是合法结果（容器引用了 claim 但未引用其任何已分配 request，见 `nriInjection`），改了会让这类 Pod 起不来。改为打 `result="no_op"` 指标，与失败型跳过在监控上区分开。
+
+##### 超时：以 NRI 请求预算为准（TODO: nri#287）
+
+`IsClaimPrepared` / `ResolveMounts` 现在都接收 NRI 的 hook context。原因是 `IsVGPUClaimPrepared` → `getCheckpoint` 取的是 **10 秒**超时的 flock，而 NRI 默认请求预算只有 **2 秒**：并发 Prepare/Unprepare 持锁时，钩子会超出预算而被运行时判定超时、插件被摘除。静默降级时代没人注意到，严格执行下会直接放大成容器创建失败。
+
+实现细节：运行时在自己一侧 `context.WithTimeout(getPluginRequestTimeout())`，但 ttrpc **不把 deadline 传给 handler**，所以我们收到的 ctx 没有 deadline。预算另有来源——运行时在 `Configure` 请求里告知，stub 存下并经 `RequestTimeout()` 暴露。`hookContext` 即由此派生，使钩子内的每一次阻塞调用（checkpoint flock、apiserver 读、session 屏障）都落在运行时真正愿意等待的窗口内。
+
+> **TODO(nri#287)**：`RequestTimeout()` 是运行时全局单一超时（默认 2s），对需要访问 apiserver 的钩子偏紧。[containerd/nri#287](https://github.com/containerd/nri/issues/287) 提议允许插件声明自己的超时（受运行时上限约束）。合并后改为在注册时声明我们自己的值，此处的管线不变。
+
+##### 唯一堵不住的窗口（TODO: nri#282）
+
+严格执行覆盖不到一种情况：**运行时在 Prepare 与 CreateContainer 之间重启**。kubelet 不会因运行时重启而重新 `NodePrepareResources`，而 CDI 编辑是磁盘上的文件、照常生效——于是容器拿到了 library 和 `/etc/ld.so.preload`，却没有 partition。
+
+注意窗口的**实际长度是整个 Pod 生命周期**，不是启动那几秒：容器每次因 OOM/崩溃/`restartPolicy` 重启都会重走 `CreateContainer`，但永远不会重走 Prepare。
+
+闭合它需要按容器声明 NRI "required plugins"，即 [containerd/nri#282](https://github.com/containerd/nri/issues/282) 正在推进的方向：CDI spec 里写一条 `containerEdits.annotations`，在 `required-plugins.noderesource.dev` 下声明本插件；运行时的 default validator 发现插件不在场即中止容器创建，报出 `CreateContainerError` 并点名缺失的插件——正是"有迹可循"所需的信号。
+
+**三个仓库都未合并**（2026-09 核对）：
+
+| 组件 | 需要 | 现状 |
+|---|---|---|
+| CDI | `ContainerEdits.Annotations`（`value`/`format`/`onConflict`） | 不存在。specs-go v1.1.0 的 `ContainerEdits` 无此字段；顶层 `Spec.Annotations` 注释明写 *"do not affect container metadata"* |
+| NRI | default validator 读**容器**注解 | 未合并。v0.12.1 与最新 v0.12.3 的 `validateRequiredPlugins` 仍只读 PodSandbox 注解 |
+| containerd | 接线 | klihub 的 patched tree |
+
+klihub 三棵原型分支均为 `devel/`。已知限制**对我们不适用**：该路线无法保证插件在 `RunPodSandbox` 时在场（DRANET 的硬伤），而本插件只挂容器级事件。
+
+落地位置的 TODO 已写在代码里：`pkg/kubeletplugin/nri`（包注释，完整背景）与 `pkg/kubeletplugin/vgpu.go`（`GetClaimCommonContainerEdits` 的 NRI 分支，即将来写注解的确切位置）。上游合并后改动量是在该 CDI spec 上加一条注解。
+
+> 期间**不做**库侧握手兜底（曾评估：CDI 注 `MANAGER_NRI_ENFORCE`、NRI 注对应标记、library 缺失即 FATAL）。它能覆盖窗口且零外部依赖，但报错发生在容器进程启动之后（CrashLoopBackOff + 容器日志），拿不到 `CreateContainerError` 那一级的 Pod 事件；且判据落在容器内，是可观测性闸而非安全边界。已决定不引入这层复杂度，以 A 路线为目标。
+
+##### 可观测性
+
+指标注册进 `legacyregistry`，即 `metrics.RunPrometheusMetricsServer` 已在采集的注册表，**HTTP 服务端无需改动**（`pkg/kubeletplugin/nri/metrics.go`，两处 `InitializeMetrics()` 接在 `InitializeDRARequestMetrics` 之后）：
+
+| 指标 | 用途 |
+|---|---|
+| `vgpu_manager_nri_ready` | **首选告警项**。为 0 的节点正在产生无隔离容器 |
+| `vgpu_manager_nri_create_container_total{result}` | `injected` / `not_ours` / `no_op` / `rejected_unprepared` / `rejected_resolve` / `observe_only` |
+| `vgpu_manager_nri_create_container_duration_seconds{result}` | 对着运行时 2s 预算看，提前发现将被摘除的趋势 |
+
+##### 观测模式（DryRun）的地位
+
+`Config.DryRun` 与 `resolveMounts == nil` 两条观测路径**在生产中不可达**：没有任何 flag 暴露 DryRun，两个驱动也都传了 `ResolveMounts`。它们现为测试专用，且**不得**提升为配置项——"只观测"与严格执行是互相矛盾的策略。因此严格执行**不需要**任何逃生阀开关。
 
 #### 12.13.7 与参考实现的差异小结
 
@@ -472,7 +541,10 @@ NRI 未连接时 containerd 不调用其 `CreateContainer`，容器**在无 part
 | 失败处理 | `Fatalf` 杀进程 | 降级不杀 | **两级：恢复优先，恢复无望经 healthcheck→liveness 干净重启**（checkpoint 安全，非 `Fatal`） |
 | 重连 | 5 次无退避 | 5 次无退避 | **指数退避 + 持续重连**（宽限期后报 unhealthy 但不停重连） |
 | 状态重建 | env 重放 | env 重放 | env 重放（`MANAGER_VGPU_CLAIM_UID`） |
-| 就绪门 | — | — | **首次 Synchronize 前不回退**（闭合 §12.8 窗口） |
+| 就绪门 | — | — | **首次 Synchronize 前不回退**（闭合 §12.8 窗口），断连即复位 |
+| 启动门禁 | — | — | **运行时未在 60s 内注册插件即启动失败**（§12.13.6） |
+| 注入被跳过 | — | — | **中止容器创建**，除"非本驱动容器"外无静默跳过（§12.13.6） |
+| 钩子超时 | 无 | 无 | **以运行时声明的请求预算为准**（`hookContext`，TODO nri#287） |
 
 ## 13. 参考资料
 

@@ -221,6 +221,20 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	// by the NRI plugin at CreateContainer, not here. Carry the claim UID via CDI
 	// env so the NRI hook can correlate the container to its claim (validated
 	// against node prepared state; see §12.12.1 in dra_nri_integration_design.md).
+	//
+	// TODO(nri#282): this spec is also where we will declare the NRI plugin as
+	// required for the container, closing the one gap strict enforcement cannot
+	// reach on its own — a runtime restart between Prepare and CreateContainer
+	// skips the hook while these CDI edits still apply, so the container starts
+	// with the library but without its partition. The declaration would be a
+	// containerEdits.annotations entry naming util.DRADriverName under
+	// required-plugins.noderesource.dev, after which the runtime's default
+	// validator aborts container creation with a CreateContainerError naming the
+	// missing plugin. It cannot be written yet: CDI has no
+	// ContainerEdits.Annotations field (specs-go v1.1.0), and the NRI default
+	// validator reads required-plugins only from PodSandbox annotations as of
+	// v0.12.3. See the package comment in pkg/kubeletplugin/nri for the details
+	// and for what changes when the upstream work lands.
 	if featuregates.Enabled(featuregates.NRISupport) {
 		envs = append(envs, fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, string(claim.UID)))
 	} else {
@@ -434,7 +448,10 @@ func (m *VGPUManager) GetPartitionMountContainerEdits(claim *resourceapi.Resourc
 // Prepare-time GetPartitionMountContainerEdits, this mints no register UUID and
 // patches no claim annotation: in NRI mode the library registers via the pod-uid
 // path using the VGPU_POD_UID / VGPU_CONTAINER_NAME env injected here.
-func (m *VGPUManager) GetNRIPartitionInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
+// The ctx carries the NRI request budget; it is accepted for signature
+// symmetry with the other hook callbacks and for future blocking work here.
+// Today this only touches the local filesystem.
+func (m *VGPUManager) GetNRIPartitionInjection(_ context.Context, claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
 	partitionKey := remote.NRIPartitionKey(podUID, containerName)
 	contBase, hostBase, err := m.ensurePartitionDirectories(claimUID, partitionKey)
 	if err != nil {

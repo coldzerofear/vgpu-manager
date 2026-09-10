@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
@@ -90,8 +91,23 @@ type InjectDriver struct {
 	// the claim object is already gone. Plus the in-process NRI plugin.
 	preparedMu sync.Mutex
 	prepared   map[string]*preparedClaim
-	nriPlugin  *nri.Plugin
-	nriCancel  context.CancelFunc
+	// nriPlugin is written by startNRI during startup and read by the
+	// healthcheck goroutine, which StartHealthcheck spawns earlier — hence the
+	// atomic rather than a plain field.
+	nriPlugin atomic.Pointer[nri.Plugin]
+	nriCancel context.CancelFunc
+}
+
+// nriHealthy is the health accessor the healthcheck consults (design §12.13.6).
+// It mirrors the local driver's: healthy unless the NRI plugin has been
+// disconnected past its grace period, in which case liveness fails and kubelet
+// restarts the pod cleanly. Safe to call before the plugin exists (healthy
+// while nil), which it always is — StartHealthcheck runs before startNRI.
+func (d *InjectDriver) nriHealthy() bool {
+	if plugin := d.nriPlugin.Load(); plugin != nil {
+		return plugin.Healthy()
+	}
+	return true
 }
 
 func (d *InjectDriver) GetPoolResourceSlices(poolName string) ([]*resourceapi.ResourceSlice, error) {
@@ -163,7 +179,7 @@ func NewInjectDriver(ctx context.Context, config InjectConfig, clients pkgflags.
 		KubeletRegistrarDirectoryPath: config.KubeletRegistrarDirectoryPath,
 		KubeletDriverPluginPath:       config.PluginDataDirectoryPath,
 	}
-	healthcheck, err := health.StartHealthcheck(ctx, healthConfig, helper, nil)
+	healthcheck, err := health.StartHealthcheck(ctx, healthConfig, helper, d.nriHealthy)
 	if err != nil {
 		return nil, fmt.Errorf("start healthcheck: %w", err)
 	}
@@ -197,8 +213,8 @@ func (d *InjectDriver) Shutdown() error {
 	if d.nriCancel != nil {
 		d.nriCancel()
 	}
-	if d.nriPlugin != nil {
-		d.nriPlugin.Stop()
+	if plugin := d.nriPlugin.Load(); plugin != nil {
+		plugin.Stop()
 	}
 	d.wg.Wait()
 	d.helper.Stop()

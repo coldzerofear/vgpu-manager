@@ -421,6 +421,7 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 	defer cancel()
 
 	metrics.InitializeDRARequestMetrics(util.DRADriverName)
+	nri.InitializeMetrics()
 	if config.Flags.HttpEndpoint != "" {
 		if err := metrics.RunPrometheusMetricsServer(ctx, config.Flags.HttpEndpoint, config.Flags.MetricsPath); err != nil {
 			return fmt.Errorf("setup metrics endpoint: %w", err)
@@ -488,6 +489,7 @@ func RunPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error {
 	defer cancel()
 
 	metrics.InitializeDRARequestMetrics(util.DRADriverName)
+	nri.InitializeMetrics()
 
 	if config.Flags.HttpEndpoint != "" {
 		if err := metrics.RunPrometheusMetricsServer(ctx, config.Flags.HttpEndpoint, config.Flags.MetricsPath); err != nil {

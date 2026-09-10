@@ -96,8 +96,9 @@ func (d *InjectDriver) lookupPrepared(claimUID string) *preparedClaim {
 }
 
 // isClaimPrepared is the NRI plugin's authorization check for the
-// attacker-controllable MANAGER_VGPU_CLAIM_UID env.
-func (d *InjectDriver) isClaimPrepared(claimUID string) bool {
+// attacker-controllable MANAGER_VGPU_CLAIM_UID env. It reads an in-memory map
+// restored before the plugin connects, so ctx is unused here.
+func (d *InjectDriver) isClaimPrepared(_ context.Context, claimUID string) bool {
 	return d.lookupPrepared(claimUID) != nil
 }
 
@@ -117,20 +118,32 @@ func (d *InjectDriver) startNRI(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	d.nriPlugin = plugin
+	d.nriPlugin.Store(plugin)
 	nriCtx, cancel := context.WithCancel(ctx)
 	d.nriCancel = cancel
 	d.wg.Go(func() {
 		klog.V(4).InfoS("Starting in-process NRI plugin (remote inject mode)", "socket", socketPath)
 		plugin.Run(nriCtx)
 	})
+	// Same startup gate as the local driver: in NRI mode this plugin is what
+	// mints the session and injects LUPINE_SERVER/LUPINE_SESSION, so without it
+	// a remote container has no server to talk to. Fail visibly rather than
+	// prepare claims nothing will complete.
+	if err := plugin.WaitReady(ctx, nri.StartupReadyTimeout); err != nil {
+		return fmt.Errorf("NRI plugin did not become ready: %w", err)
+	}
+	klog.InfoS("In-process NRI plugin registered with the container runtime (remote inject mode)", "socket", socketPath)
 	return nil
 }
 
 // nriInjection is the NRI ResolveMounts callback: per-container session.
-func (d *InjectDriver) nriInjection(claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
-	// Bounded: CreateContainer blocks container creation while this runs.
-	ctx, cancel := context.WithTimeout(context.Background(), nriInjectTimeout)
+func (d *InjectDriver) nriInjection(ctx context.Context, claimUID, podName, podNamespace, podUID, containerName string) (*nri.Injection, error) {
+	// Bounded: CreateContainer blocks container creation while this runs. The
+	// budget comes from the NRI request context (see Plugin.hookContext) rather
+	// than a local constant, so the apiserver reads and session barrier below
+	// cannot outlive the window the runtime is willing to wait — overrunning it
+	// gets the plugin detached, which is worse than failing this one container.
+	ctx, cancel := context.WithTimeout(ctx, nriInjectTimeout)
 	defer cancel()
 	pc := d.lookupPrepared(claimUID)
 	if pc == nil {
@@ -221,7 +234,10 @@ func nriClaimEnv(claim *resourceapi.ResourceClaim) string {
 // devices are re-resolved from the live claim and ResourceSlices on restore.
 const (
 	preparedCheckpointFile = "remote-prepared.json"
-	nriInjectTimeout       = 30 * time.Second
+	// nriInjectTimeout is only an upper bound now: the NRI request budget the
+	// hook context carries is normally far shorter and wins. It stays as a
+	// backstop for the case where the runtime declares no budget at all.
+	nriInjectTimeout = 30 * time.Second
 )
 
 type preparedRef struct {

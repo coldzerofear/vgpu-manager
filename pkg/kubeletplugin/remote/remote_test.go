@@ -17,6 +17,7 @@ limitations under the License.
 package remote
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -424,7 +425,7 @@ func TestPreparedCheckpointRoundTrip(t *testing.T) {
 	claim := &resourceapi.ResourceClaim{}
 	claim.Name, claim.Namespace, claim.UID = "c", "ns", "uid-1"
 	d.recordPrepared(claim, nil)
-	if !d.isClaimPrepared("uid-1") {
+	if !d.isClaimPrepared(context.Background(), "uid-1") {
 		t.Fatal("recorded claim must be prepared")
 	}
 	data, err := os.ReadFile(filepath.Join(dir, preparedCheckpointFile))
@@ -435,7 +436,7 @@ func TestPreparedCheckpointRoundTrip(t *testing.T) {
 		t.Fatalf("checkpoint content: %s", data)
 	}
 	d.forgetPrepared("uid-1")
-	if d.isClaimPrepared("uid-1") {
+	if d.isClaimPrepared(context.Background(), "uid-1") {
 		t.Fatal("forgotten claim must not be prepared")
 	}
 	if data, _ := os.ReadFile(filepath.Join(dir, preparedCheckpointFile)); strings.Contains(string(data), "uid-1") {

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Masterminds/semver"
@@ -78,11 +79,14 @@ type driver struct {
 	healthcheck         *health.Healthcheck
 	deviceHealthMonitor deviceHealthMonitor
 	deviceRegistry      *registry.DeviceRegistryServerImpl
-	nriPlugin           *nri.Plugin
-	nriCache            *nri.Cache
-	nriCancel           context.CancelFunc
-	remote              *remotePublisher
-	wg                  sync.WaitGroup
+	// nriPlugin is written by startNRIPlugin during startup and read by the
+	// healthcheck goroutine, which StartHealthcheck spawns earlier — hence the
+	// atomic rather than a plain field.
+	nriPlugin atomic.Pointer[nri.Plugin]
+	nriCache  *nri.Cache
+	nriCancel context.CancelFunc
+	remote    *remotePublisher
+	wg        sync.WaitGroup
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
 	// in the same slice (required for k8s 1.34).
@@ -486,8 +490,8 @@ func (d *driver) Shutdown() error {
 	if d.nriCancel != nil {
 		d.nriCancel()
 	}
-	if d.nriPlugin != nil {
-		d.nriPlugin.Stop()
+	if plugin := d.nriPlugin.Load(); plugin != nil {
+		plugin.Stop()
 	}
 
 	d.wg.Wait()
@@ -855,9 +859,16 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 }
 
 // startNRIPlugin builds and runs the in-process NRI plugin (design §12.13).
-// It runs in DRY-RUN mode for now: hooks observe and log only, injecting
-// nothing (§12.6 item 1). The reconnect loop runs on a child context so
-// Shutdown can stop it cleanly without depending on the parent ctx.
+// The reconnect loop runs on a child context so Shutdown can stop it cleanly
+// without depending on the parent ctx.
+//
+// It then blocks until the runtime has registered the plugin, and fails startup
+// if that does not happen: with NRISupport enabled, the partition mounts every
+// vGPU container needs are injected by this plugin alone, so a driver that
+// starts without it would prepare claims for containers that then run
+// unisolated. Failing here instead leaves an unmistakable trace — the plugin
+// pod crash-loops with the reason in its logs — rather than a node quietly
+// producing containers nobody can account for (design §12.13.6).
 func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 	var socketPath string
 	if config.Flags.NRIRoot != "" {
@@ -877,7 +888,7 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 	if err != nil {
 		return err
 	}
-	d.nriPlugin = plugin
+	d.nriPlugin.Store(plugin)
 
 	nriCtx, cancel := context.WithCancel(ctx)
 	d.nriCancel = cancel
@@ -885,6 +896,10 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 		klog.V(4).InfoS("Starting in-process NRI plugin", "socket", socketPath)
 		plugin.Run(nriCtx)
 	})
+	if err := plugin.WaitReady(ctx, nri.StartupReadyTimeout); err != nil {
+		return fmt.Errorf("NRI plugin did not become ready: %w", err)
+	}
+	klog.InfoS("In-process NRI plugin registered with the container runtime", "socket", socketPath)
 	return nil
 }
 
@@ -894,8 +909,8 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 // restarts the pod cleanly. It is safe to call before the NRI plugin is started
 // (returns healthy while nriPlugin is nil).
 func (d *driver) nriHealthy() bool {
-	if d.nriPlugin != nil {
-		return d.nriPlugin.Healthy()
+	if plugin := d.nriPlugin.Load(); plugin != nil {
+		return plugin.Healthy()
 	}
 	return true
 }
