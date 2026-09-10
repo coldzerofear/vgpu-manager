@@ -557,14 +557,14 @@ func TestEnsureLdPreloadFile(t *testing.T) {
 	}
 
 	t.Run("libcuda alone is not enough (both shims are mandatory)", func(t *testing.T) {
-		writeShim(shimLibCuda)
+		writeShim("libcuda.so.1")
 		if _, err := ensureLdPreloadFile(artifacts, sel); err == nil {
 			t.Fatal("expected error without libnvidia-ml.so.1")
 		}
 	})
 
 	t.Run("both shims present", func(t *testing.T) {
-		writeShim(shimLibNvml)
+		writeShim("libnvidia-ml.so.1")
 		host, err := ensureLdPreloadFile(artifacts, sel)
 		if err != nil {
 			t.Fatal(err)

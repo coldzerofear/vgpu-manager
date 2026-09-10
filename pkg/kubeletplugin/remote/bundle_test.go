@@ -68,7 +68,7 @@ func makeBundle(t *testing.T, files map[string]string, tamper func(m *bundleMani
 	return buf.Bytes(), `"sha256:` + hex.EncodeToString(sum[:]) + `"`
 }
 
-var shimFiles = map[string]string{shimLibCuda: "cuda-shim", shimLibNvml: "nvml-shim", shimLibCudart: "cudart-shim"}
+var shimFiles = map[string]string{"libcuda.so.1": "cuda-shim", "libnvidia-ml.so.1": "nvml-shim", "libcudart.so.13": "cudart-shim"}
 
 func TestInstallClientBundle(t *testing.T) {
 	dir := t.TempDir()
@@ -105,7 +105,7 @@ func TestInstallClientBundle(t *testing.T) {
 	}
 
 	// Reinstall moves the previous directory aside instead of deleting it.
-	body2, etag2 := makeBundle(t, map[string]string{shimLibCuda: "cuda-shim-2", shimLibNvml: "nvml-shim-2"}, nil)
+	body2, etag2 := makeBundle(t, map[string]string{"libcuda.so.1": "cuda-shim-2", "libnvidia-ml.so.1": "nvml-shim-2"}, nil)
 	if err := installClientBundle(dir, "13.3.73", write(body2), &remoteagent.ClientBundleInfo{Etag: etag2}); err != nil {
 		t.Fatal(err)
 	}
@@ -194,12 +194,12 @@ func TestEnsureArtifact(t *testing.T) {
 	}
 
 	// The server was rebuilt: the artifact is refreshed in place.
-	body2, etag2 := makeBundle(t, map[string]string{shimLibCuda: "cuda-2", shimLibNvml: "nvml-2"}, nil)
+	body2, etag2 := makeBundle(t, map[string]string{"libcuda.so.1": "cuda-2", "libnvidia-ml.so.1": "nvml-2"}, nil)
 	fa.bundle, fa.bundleETag = body2, etag2
 	if sel, err = d.ensureArtifact(ctx, claim, devices, map[string]string{agent: etag2}, token); err != nil || sel.ETag != etag2 || fa.fetches != 2 {
 		t.Fatalf("%+v %v fetches=%d", sel, err, fa.fetches)
 	}
-	if got, _ := os.ReadFile(filepath.Join(dir, "13.3.73", shimLibCuda)); string(got) != "cuda-2" {
+	if got, _ := os.ReadFile(filepath.Join(dir, "13.3.73", "libcuda.so.1")); string(got) != "cuda-2" {
 		t.Fatalf("refreshed shim: %q", got)
 	}
 
@@ -209,7 +209,7 @@ func TestEnsureArtifact(t *testing.T) {
 	if err := os.MkdirAll(seeded, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.WriteFile(filepath.Join(seeded, shimLibCuda), []byte("seeded"), 0o755)
+	_ = os.WriteFile(filepath.Join(seeded, "libcuda.so.1"), []byte("seeded"), 0o755)
 	ds := &InjectDriver{config: InjectConfig{ArtifactsDir: seededDir, HostArtifactsDir: "/h"}}
 	if sel, err = ds.ensureArtifact(ctx, claim, devices, map[string]string{agent: etag2}, noToken); err != nil || sel.Name != "13.3.70" || sel.ETag != "" {
 		t.Fatalf("%+v %v", sel, err)
