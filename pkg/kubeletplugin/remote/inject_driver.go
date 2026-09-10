@@ -71,6 +71,7 @@ type InjectConfig struct {
 	// ArtifactsDir when the plugin mounts the manager dir at the host path.
 	HostArtifactsDir string
 	NRIRoot          string
+	NRISocket        string
 	NRIPluginIdx     string
 }
 

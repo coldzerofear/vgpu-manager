@@ -870,9 +870,9 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 // pod crash-loops with the reason in its logs — rather than a node quietly
 // producing containers nobody can account for (design §12.13.6).
 func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
-	var socketPath string
-	if config.Flags.NRIRoot != "" {
-		socketPath = filepath.Join(config.Flags.NRIRoot, util.DRADriverName+".sock")
+	var socketPath = config.Flags.NRISocket
+	if socketPath == "" {
+		socketPath = filepath.Join(config.Flags.NRIRoot, "nri.sock")
 	}
 	plugin, err := nri.NewPlugin(nri.Config{
 		SocketPath: socketPath,

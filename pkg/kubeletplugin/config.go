@@ -51,6 +51,7 @@ type Flags struct {
 	// NRI socket. The in-process NRI plugin dials <NRIRoot>/nri.sock. Only used
 	// when the NRISupport feature gate is enabled.
 	NRIRoot      string
+	NRISocket    string
 	NRIPluginIdx string
 	// PluginMode selects the plugin role (design D21, v1.7): "server" (GPU node;
 	// local DRA duties, plus remote-pool duties when RemoteGPUSupport is

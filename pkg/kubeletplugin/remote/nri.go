@@ -103,9 +103,9 @@ func (d *InjectDriver) isClaimPrepared(_ context.Context, claimUID string) bool 
 }
 
 func (d *InjectDriver) startNRI(ctx context.Context) error {
-	var socketPath string
-	if d.config.NRIRoot != "" {
-		socketPath = filepath.Join(d.config.NRIRoot, util.DRADriverName+".sock")
+	var socketPath = d.config.NRISocket
+	if socketPath == "" {
+		socketPath = filepath.Join(d.config.NRIRoot, "nri.sock")
 	}
 	plugin, err := nri.NewPlugin(nri.Config{
 		SocketPath:      socketPath,

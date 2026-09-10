@@ -194,10 +194,10 @@ spec:
             - mountPath: /etc/vgpu-manager
               name: manager-root
             # 开启 NRISupport（按容器会话）时挂载 NRI socket 目录
-#            - name: nri-root
-#              mountPath: /var/run/nri
-#              mountPropagation: HostToContainer
-#              readOnly: true
+            - name: nri-root
+              mountPath: /var/run/nri
+              mountPropagation: HostToContainer
+              readOnly: true
       dnsPolicy: ClusterFirst
       volumes:
         - hostPath:
@@ -220,10 +220,10 @@ spec:
             path: /etc/vgpu-manager/driver
             type: DirectoryOrCreate
           name: client-artifacts
-#        - name: nri-root
-#          hostPath:
-#            path: /var/run/nri
-#            type: Directory
+        - name: nri-root
+          hostPath:
+            path: /var/run/nri
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service

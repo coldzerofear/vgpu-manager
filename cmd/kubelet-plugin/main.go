@@ -35,6 +35,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
+	"github.com/containerd/nri/pkg/api"
 	"github.com/urfave/cli/v2"
 	"k8s.io/component-base/logs"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
@@ -192,8 +193,15 @@ func newApp() *cli.App {
 			EnvVars:     []string{"NRI_ROOT"},
 		},
 		&cli.StringFlag{
+			Name:        "nri-socket",
+			Usage:       "Specify the path to the NRI socket file to register the NRI plugin server",
+			Value:       api.DefaultSocketPath,
+			Destination: &flags.NRISocket,
+			EnvVars:     []string{"NRI_SOCKET"},
+		},
+		&cli.StringFlag{
 			Name:        "nri-plugin-idx",
-			Usage:       "Configure nri plugin idx to ensure plugin execution order.",
+			Usage:       "Specify the plugin index to register to NRI",
 			Value:       "00",
 			Destination: &flags.NRIPluginIdx,
 			EnvVars:     []string{"NRI_PLUGIN_IDX"},
@@ -441,6 +449,7 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 		ArtifactsDir:                  filepath.Join(config.Flags.ContainerManagerDir, util.Driver),
 		HostArtifactsDir:              filepath.Join(config.Flags.HostManagerDir, util.Driver),
 		NRIRoot:                       config.Flags.NRIRoot,
+		NRISocket:                     config.Flags.NRISocket,
 		NRIPluginIdx:                  config.Flags.NRIPluginIdx,
 	}, config.ClientSets)
 	if err != nil {
