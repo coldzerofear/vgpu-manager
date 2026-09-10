@@ -28,6 +28,7 @@ import (
 	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
 )
@@ -60,13 +61,6 @@ type remotePublisher struct {
 	mu   sync.RWMutex
 	spec *remote.PublishSpec // nil => local-only node
 }
-
-const (
-	// Poll fast while the agent/server have not answered yet (they normally
-	// start a little after this plugin), slowly once they have.
-	serverProbeFast = 5 * time.Second
-	serverProbeSlow = 60 * time.Second
-)
 
 func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, error) {
 	rp := &remotePublisher{nodeName: config.Flags.NodeName}
@@ -133,32 +127,47 @@ func (rp *remotePublisher) currentSpec() *remote.PublishSpec {
 // address is the common case); an agent that reports no routable address
 // is treated the same, so a blip never un-publishes working endpoints.
 func (rp *remotePublisher) refreshServerInfo(ctx context.Context) (bool, error) {
+	checkChanged := func(v *semver.Version, server, agent string) bool {
+		rp.mu.Lock()
+		defer rp.mu.Unlock()
+
+		changed := false
+		if v == nil {
+			v = rp.spec.ServerCUDAVersion
+		}
+		if rp.spec.ServerCUDAVersion != nil && !rp.spec.ServerCUDAVersion.Equal(v) {
+			rp.spec.ServerCUDAVersion = v
+			changed = true
+		} else if rp.spec.ServerCUDAVersion == nil && v != nil {
+			rp.spec.ServerCUDAVersion = v
+			changed = true
+		}
+		if rp.spec.Endpoint != server || rp.spec.AgentEndpoint != agent {
+			rp.spec.Endpoint, rp.spec.AgentEndpoint = server, agent
+			changed = true
+		}
+		return changed
+	}
+
 	info, err := remote.ServerInfo(ctx, rp.agentDial)
 	if err != nil {
-		return false, err
+		return checkChanged(nil, "", ""), err
 	}
-	v, err := semver.NewVersion(info.CudaDriverVersion)
-	if err != nil {
-		return false, fmt.Errorf("remote-agent %s reports unparseable CUDA version %q: %w",
-			rp.agentDial, info.CudaDriverVersion, err)
+	if info.AgentEndpoint == "" {
+		info.AgentEndpoint = rp.agentDial
 	}
 	server, agent, err := publishableEndpoints(info.Endpoint, info.AgentEndpoint)
 	if err != nil {
-		return false, fmt.Errorf("remote-agent %s: %w", rp.agentDial, err)
+		return checkChanged(nil, "", info.AgentEndpoint), fmt.Errorf("remote-agent %s: %w", rp.agentDial, err)
 	}
 
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
-	changed := false
-	if rp.spec.ServerCUDAVersion == nil || !rp.spec.ServerCUDAVersion.Equal(v) {
-		rp.spec.ServerCUDAVersion = v
-		changed = true
+	v, err := semver.NewVersion(info.CudaDriverVersion)
+	if err != nil {
+		return checkChanged(nil, server, agent), fmt.Errorf("remote-agent %s reports unparseable CUDA version %q: %w",
+			rp.agentDial, info.CudaDriverVersion, err)
 	}
-	if rp.spec.Endpoint != server || rp.spec.AgentEndpoint != agent {
-		rp.spec.Endpoint, rp.spec.AgentEndpoint = server, agent
-		changed = true
-	}
-	return changed, nil
+
+	return checkChanged(v, server, agent), nil
 }
 
 // resolveAgentDial turns --remote-agent-endpoint into the address this
@@ -206,7 +215,7 @@ func publishableEndpoints(server, agent string) (string, string, error) {
 		return "", "", fmt.Errorf("reported lupine-server endpoint %q is not publishable: %v", server, err)
 	}
 	a, err := remote.ParseAgentEndpoint(agent)
-	if err != nil || a.Scheme != endpointutil.Grpc || a.IsLoopback() {
+	if err != nil || (a.Scheme == endpointutil.Grpc && a.IsLoopback()) {
 		return "", "", fmt.Errorf("reported remote-agent endpoint %q is not publishable: %v", agent, err)
 	}
 	return s.String(), a.String(), nil
@@ -217,26 +226,32 @@ func publishableEndpoints(server, agent string) (string, string, error) {
 // by the agent. Every change republishes the slices through republish.
 // Runs until ctx is done.
 func (rp *remotePublisher) watchServerInfo(ctx context.Context, republish func(context.Context) error) {
-	for {
-		interval := serverProbeSlow
-		changed, err := rp.refreshServerInfo(ctx)
-		switch {
-		case err != nil:
-			interval = serverProbeFast
-			klog.V(4).Infof("lupine-server info refresh: %v", err)
-		case changed:
-			spec := rp.currentSpec()
-			klog.Infof("lupine-server at %s (agent %s) is built for CUDA %s; republishing devices",
-				spec.Endpoint, spec.AgentEndpoint, spec.ServerCUDAVersion)
-			if err := republish(ctx); err != nil {
-				klog.Errorf("Failed to republish resources after lupine-server change: %v", err)
-				interval = serverProbeFast
+	changedChan := make(chan bool, 0)
+	defer close(changedChan)
+
+	go func() {
+		wait.UntilWithContext(ctx, func(ctx context.Context) {
+			changed, err := rp.refreshServerInfo(ctx)
+			if err != nil {
+				klog.V(4).Infof("lupine-server info refresh: %v", err)
 			}
-		}
+			changedChan <- changed
+		}, 5*time.Second)
+	}()
+
+	for {
 		select {
+		case changed := <-changedChan:
+			if changed {
+				spec := rp.currentSpec()
+				klog.Infof("lupine-server at %s (agent %s) is built for CUDA %s; republishing devices",
+					spec.Endpoint, spec.AgentEndpoint, spec.ServerCUDAVersion)
+				if err := republish(ctx); err != nil {
+					klog.Errorf("Failed to republish resources after lupine-server change: %v", err)
+				}
+			}
 		case <-ctx.Done():
 			return
-		case <-time.After(interval):
 		}
 	}
 }
