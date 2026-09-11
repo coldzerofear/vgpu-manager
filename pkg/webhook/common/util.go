@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-webhook/options"
@@ -249,10 +250,16 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 		capacityRequest[kubeletplugin.MemoryResourceName] = *resource.NewQuantity(quantity.Value()*units.MiB, resource.BinarySI)
 	}
 
+	// Access mode (remote GPU): the request pins accessMode so that pods
+	// without the annotation keep getting local-only devices even when a
+	// node publishes accessMode=remote. An invalid value falls back to
+	// local here; the validating webhook rejects it before this runs.
+	accessMode, _ := util.PodVGPUAccessMode(pod)
+
 	deviceSelectors := []resourceapi.DeviceSelector{{
 		CEL: &resourceapi.CELDeviceSelector{
-			Expression: fmt.Sprintf(`device.attributes["%s"].type == "%s"`,
-				util.DRADriverName, kubeletplugin.VGpuDeviceType),
+			Expression: fmt.Sprintf(`device.attributes["%s"].type == "%s" && device.attributes["%s"].%s == "%s"`,
+				util.DRADriverName, kubeletplugin.VGpuDeviceType, util.DRADriverName, util.AccessModeAttribute, accessMode),
 		},
 	}}
 	if uuids, _ := util.HasAnnotation(pod, util.PodIncludeGPUUUIDAnnotation); len(uuids) > 0 {
@@ -260,14 +267,14 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 		includeUuids := make([]string, 0, len(split))
 		for _, uuid := range split {
 			if uuid = strings.TrimSpace(uuid); uuid != "" {
-				includeUuids = append(includeUuids, uuid)
+				includeUuids = append(includeUuids, strconv.Quote(uuid))
 			}
 		}
 		if len(includeUuids) > 0 {
 			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes["%s"].uuid in ["%s"]`,
-						util.DRADriverName, strings.Join(includeUuids, `","`)),
+					Expression: fmt.Sprintf(`device.attributes[%q].uuid in [%s]`,
+						util.DRADriverName, strings.Join(includeUuids, ",")),
 				},
 			})
 		}
@@ -277,16 +284,14 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 		excludeUuids := make([]string, 0, len(split))
 		for _, uuid := range split {
 			if uuid = strings.TrimSpace(uuid); uuid != "" {
-				excludeUuids = append(excludeUuids, uuid)
+				excludeUuids = append(excludeUuids, strconv.Quote(uuid))
 			}
 		}
 		if len(excludeUuids) > 0 {
 			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 				CEL: &resourceapi.CELDeviceSelector{
-					//Expression: fmt.Sprintf(`device.attributes["%s"].uuid not in ["%s"]`,
-					//	util.DRADriverName, strings.Join(excludeUuids, `","`)),
-					Expression: fmt.Sprintf(`!(device.attributes["%s"].uuid in ["%s"])`,
-						util.DRADriverName, strings.Join(excludeUuids, `","`)),
+					Expression: fmt.Sprintf(`!(device.attributes[%q].uuid in [%s])`,
+						util.DRADriverName, strings.Join(excludeUuids, ",")),
 				},
 			})
 		}
@@ -296,14 +301,14 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 		includeTypes := make([]string, 0, len(split))
 		for _, name := range split {
 			if name = strings.TrimSpace(name); name != "" {
-				includeTypes = append(includeTypes, name)
+				includeTypes = append(includeTypes, strconv.Quote(name))
 			}
 		}
 		if len(includeTypes) > 0 {
 			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 				CEL: &resourceapi.CELDeviceSelector{
-					Expression: fmt.Sprintf(`device.attributes["%s"].productName in ["%s"]`,
-						util.DRADriverName, strings.Join(includeTypes, `","`)),
+					Expression: fmt.Sprintf(`device.attributes[%q].productName in [%s]`,
+						util.DRADriverName, strings.Join(includeTypes, ",")),
 				},
 			})
 		}
@@ -313,32 +318,31 @@ func BuildDeviceRequest(pod *corev1.Pod, deviceClassName string, info ResourceIn
 		excludeTypes := make([]string, 0, len(split))
 		for _, name := range split {
 			if name = strings.TrimSpace(name); name != "" {
-				excludeTypes = append(excludeTypes, name)
+				excludeTypes = append(excludeTypes, strconv.Quote(name))
 			}
 		}
 		if len(excludeTypes) > 0 {
 			deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 				CEL: &resourceapi.CELDeviceSelector{
-					//Expression: fmt.Sprintf(`device.attributes["%s"].productName not in ["%s"]`,
-					//	util.DRADriverName, strings.Join(excludeTypes, `","`)),
-					Expression: fmt.Sprintf(`!(device.attributes["%s"].productName in ["%s"])`,
-						util.DRADriverName, strings.Join(excludeTypes, `","`)),
+					Expression: fmt.Sprintf(`!(device.attributes[%q].productName in [%s])`,
+						util.DRADriverName, strings.Join(excludeTypes, ",")),
 				},
 			})
 		}
 	}
 	policy, _ := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation)
 	policy = strings.ToLower(strings.TrimSpace(policy))
-	if policy == util.VirtualMemoryPolicy.String() || strings.HasPrefix(policy, "virt") {
+	switch {
+	case policy == util.VirtualMemoryPolicy.String(), strings.HasPrefix(policy, "virt"):
 		deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 			CEL: &resourceapi.CELDeviceSelector{
-				Expression: fmt.Sprintf(`device.attributes["%s"].memoryRatio > 100`, util.DRADriverName),
+				Expression: fmt.Sprintf(`device.attributes[%q].memoryRatio > 100`, util.DRADriverName),
 			},
 		})
-	} else if policy == util.PhysicalMemoryPolicy.String() || strings.HasPrefix(policy, "phy") {
+	case policy == util.PhysicalMemoryPolicy.String(), strings.HasPrefix(policy, "phy"):
 		deviceSelectors = append(deviceSelectors, resourceapi.DeviceSelector{
 			CEL: &resourceapi.CELDeviceSelector{
-				Expression: fmt.Sprintf(`device.attributes["%s"].memoryRatio <= 100`, util.DRADriverName),
+				Expression: fmt.Sprintf(`device.attributes[%q].memoryRatio <= 100`, util.DRADriverName),
 			},
 		})
 	}
@@ -394,7 +398,6 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 	//		Requests:          []string{}, // match all requests
 	//		DistinctAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/uuid"),
 	//	})
-	//
 	//	switch topologyMode.BaseTopology() {
 	//	case util.LinkTopology:
 	//		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
@@ -404,7 +407,7 @@ func BuildResourceClaim(pod *corev1.Pod, requests []resourceapi.DeviceRequest, r
 	//	case util.NUMATopology:
 	//		deviceConstraints = append(deviceConstraints, resourceapi.DeviceConstraint{
 	//			Requests:       []string{}, // match all requests
-	//			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](util.DRADriverName + "/numa"),
+	//			MatchAttribute: ptr.To[resourceapi.FullyQualifiedName](resourceapi.FullyQualifiedName(deviceattribute.StandardDeviceAttributeNUMANode)),
 	//		})
 	//	}
 	//}

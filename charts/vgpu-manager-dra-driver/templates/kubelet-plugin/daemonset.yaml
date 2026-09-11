@@ -146,6 +146,8 @@ spec:
               value: {{ .Values.kubeletPlugin.maskNvidiaDriverParams | quote }}
             - name: NVIDIA_DRIVER_ROOT
               value: {{ $driverRoot | quote }}
+            # void: 阻止 nvidia runtime 向插件容器注入驱动库/设备节点，
+            # 驱动发现走 prestart + /driver-root
             - name: NVIDIA_VISIBLE_DEVICES
               value: void
             - name: CDI_ROOT
@@ -168,6 +170,8 @@ spec:
               value: /driver-root
             - name: HOST_MANAGER_DIR
               value: {{ $managerDir | quote }}
+            - name: CONTAINER_MANAGER_DIR
+              value: /etc/vgpu-manager
             - name: KUBELET_REGISTRAR_DIRECTORY_PATH
               value: {{ $registrarDir | quote }}
             - name: KUBELET_PLUGINS_DIRECTORY_PATH

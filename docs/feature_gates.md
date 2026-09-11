@@ -94,8 +94,8 @@ devicePlugin:
 | Gate | Default | Stage |
 | --- | --- | --- |
 | `VGPUSupport` | `true` | Alpha |
-| `NVMLDeviceHealthCheck` | `true` | Alpha |
-| `IMEXDaemonsWithDNSNames` | `true` | Beta |
+| `NVMLDeviceHealthCheck` | `false` | Alpha |
+| `IMEXDaemonsWithDNSNames` | `false` | Beta |
 | `TimeSlicingSettings` | `false` | Alpha |
 | `MPSSupport` | `false` | Alpha |
 | `PassthroughSupport` | `false` | Alpha |
@@ -123,6 +123,7 @@ The rules it enforces:
 
 * `VGPUSupport` ⊗ `MPSSupport`
 * `VGPUSupport` ⊗ `PassthroughSupport`
+* `VGPUSupport` ⊗ `IMEXDaemonsWithDNSNames`
 * `DynamicMIG` ⊗ `PassthroughSupport`
 * `DynamicMIG` ⊗ `NVMLDeviceHealthCheck`
 * `DynamicMIG` ⊗ `MPSSupport`

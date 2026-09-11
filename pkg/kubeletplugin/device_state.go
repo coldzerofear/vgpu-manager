@@ -865,8 +865,15 @@ func (s *DeviceState) getCheckpoint(ctx context.Context) (*Checkpoint, error) {
 // per-container partition mounts (design §12.12.1). It reads the checkpoint
 // under cplock only and takes no other lock, so it is safe to call from the NRI
 // hook goroutine concurrently with Prepare/Unprepare.
-func (s *DeviceState) IsVGPUClaimPrepared(claimUID string) bool {
-	cp, err := s.getCheckpoint(context.Background())
+// The ctx bounds the checkpoint read. The NRI CreateContainer hook is the main
+// caller and passes the runtime's request budget, which is far shorter than the
+// 10s flock timeout in getCheckpoint: without it, waiting out a concurrent
+// prepare/unprepare would overrun the budget and get the plugin detached.
+// Losing the lock race returns false, and under strict enforcement that aborts
+// the container — kubelet retries, which is the right trade against starting a
+// vGPU container whose claim state we could not confirm.
+func (s *DeviceState) IsVGPUClaimPrepared(ctx context.Context, claimUID string) bool {
+	cp, err := s.getCheckpoint(ctx)
 	if err != nil {
 		klog.V(4).ErrorS(err, "IsVGPUClaimPrepared: failed to read checkpoint", "claimUID", claimUID)
 		return false
@@ -1334,8 +1341,8 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimRef kubeletplug
 					// returning an error.
 					err := s.nvdevlib.deleteMigDevice(mig)
 					if err != nil {
-						klog.Warningf("Error deleting MIG device %s: %s", device.Mig.Device.DeviceName, err)
-						return false, fmt.Errorf("error deleting MIG device %s: %w", device.Mig.Device.DeviceName, err)
+						klog.Warningf("Error deleting MIG device %s (UUID %s): %s", device.Mig.Device.DeviceName, mig.MigUUID, err)
+						return false, fmt.Errorf("failed to delete MIG device %s (UUID %s): %w", device.Mig.Device.DeviceName, mig.MigUUID, err)
 					}
 					if s.clearDynamicMIGXIDTaint(device.Mig.Device.DeviceName) {
 						taintRemoved = true

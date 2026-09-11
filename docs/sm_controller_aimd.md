@@ -4,6 +4,29 @@
 > 关系:与 [GAP 路径节流](sm_core_limit_gap_throttle_design.md) **正交、互补** —— GAP 解大 kernel 同步模式下的瞬时绕过,AIMD 解 watcher 稳态围绕目标的高方差。两者可同时启用。
 > 状态:已落地,**默认关闭**(env 切换),`CUDA_SM_CONTROLLER=aimd` 启用。
 
+> ## 沿革:曾于合并 library-remote 时移除,现已恢复(2026-08-14)
+>
+> 移除理由(当时):单 Pod 实测耗时比 delta 高约 1/3(见 [sawtooth 分析](sm_controller_aimd_sawtooth_analysis.md)),
+> 且其主要针对的多进程公平性已由[容器级共享令牌桶](sm_multiproc_shared_bucket_design.md)(现默认开启)解决。
+>
+> **恢复理由:delta 在超高 SM 数的卡上限不住核心。** HAMi-core issue #274 报告 RTX PRO 6000 Blackwell
+> (188 SM)上 `CUDA_DEVICE_SM_LIMIT=50` 时利用率钉死 99-100%,与本库 delta 同源同公式:修正增量按
+> `sm_num²` 缩放(`cuda_hook.c` `increment = sm_num * sm_num * max_thread * diff / 2560`),而令牌池容量
+> 只是 `sm_num` 的线性函数(`max_thread * sm_num * FACTOR`)——**increment/pool ∝ sm_num**,188 SM 上单次
+> 修正一个 tick 就能灌满池子,消耗却要几分钟,限流形同虚设。已有的 ramp_floor 是**下限**,只救小卡爬坡慢,
+> 压不住大卡的过大增量——同一个 sm² 缺陷的两个方向,floor 只堵了一头。
+>
+> AIMD 的步长公式线性于 sm_num,与池容量同阶,架构上不存在此缺陷,是当时的现成规避。
+>
+> **后续(同日):delta 已重构修复(v13)**——核心步长 share·相对误差/阻尼(阻尼 6,桶空时 4),粒度种子
+> pool·5/81920,一次性 boot 跳升 pool·目标/6400,涨侧封顶 pool/10;砍侧按 share/(share+bucket) 平滑抗积分,
+> 仅在 util>2×目标且误差≥5 时启用绝对应急 floor(include/sm_delta.h,每个常量的由来见头文件注释)。
+> 全谱系战役仿真(55 种真实卡型 GTX1050→B300 × 限额 1-100 × 3 档负载 × 2 档延迟 = 33000 格,
+> test/nogpu/test_delta_campaign.c,CI 断言):稳态 MAE 与 p95 锯齿 **0 负格**,误差聚合降 8.2 倍,
+> 冷启动双侧最差回退 1.4 个点;#274 场景 avg util 99.8→~50(目标 50)。完整报告
+> [sm_delta_validation.md](sm_delta_validation.md)。**待真机验证**(test/ablation)。AIMD 保留为备选与
+> auto 路由目标;其锯齿伤单 Pod 吞吐的短板依旧,按负载选择。
+
 ---
 
 ## 1. 问题:stock `delta()` 稳态精度差

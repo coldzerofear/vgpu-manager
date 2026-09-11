@@ -24,9 +24,37 @@ limitations under the License.
 // At CreateContainer the plugin injects the per-container partition mounts +
 // register env for a vGPU container, after validating the claim UID (read from
 // attacker-controllable container env) against the node's prepared claims
-// (§12.12.1). A dry-run / observe-only mode is retained (DryRun, or no
-// ResolveMounts wired): every hook only logs and injects nothing — used for the
-// §12.12 validation and as a safe default.
+// (§12.12.1). Injection is strict: once NRISupport is on, a container we
+// recognise either gets its isolation or does not start (design §12.13.6).
+//
+// The dry-run / observe-only mode (DryRun, or no ResolveMounts wired) is a
+// test-only escape hatch. Neither driver wires it, so it is unreachable in
+// production; it must never be exposed as a flag, because "observe only" and
+// strict enforcement are contradictory policies.
+//
+// TODO(nri#282): what this plugin cannot enforce on its own is that the runtime
+// calls it at all. If containerd restarts between NodePrepareResources and
+// CreateContainer, CDI edits still apply (they are files on disk) but the NRI
+// hook is skipped, and the container starts without its partition mounts — for
+// the whole pod lifetime, since every container restart re-runs CreateContainer
+// but never re-runs Prepare. Closing that needs NRI "required plugins" declared
+// per container, which containerd/nri#282 is working towards:
+//
+//	CDI    — containerEdits.annotations (value/format/onConflict), which does
+//	         not exist in any released CDI spec: tags.cncf.io/container-device-
+//	         interface/specs-go v1.1.0 ContainerEdits has no Annotations field,
+//	         and Spec.Annotations is documented as NOT affecting container
+//	         metadata.
+//	NRI    — the default validator must read required-plugins from the
+//	         container. As of v0.12.3 validateRequiredPlugins still reads only
+//	         PodSandbox annotations (GetEffectiveAnnotation(req.GetPod(), ...)).
+//	runtime — containerd must wire the two together.
+//
+// klihub has working prototypes of all three; none are merged. When they land,
+// the change here is to emit that annotation from the claim's CDI spec — see
+// the matching TODO in pkg/kubeletplugin/vgpu.go. Note the known limitation
+// does not affect us: the CDI route cannot guarantee a plugin is present at
+// RunPodSandbox, and this plugin only hooks container-level events.
 package nri
 
 import (
@@ -56,6 +84,12 @@ const (
 	// healthy session, so the backoff resets on the next disconnect.
 	healthyRunThreshold = reconnectMaxDelay
 
+	// StartupReadyTimeout bounds how long a driver waits at startup for the
+	// runtime to register the plugin before giving up and failing to start. It
+	// is generous on purpose: on a node reboot the runtime and this plugin come
+	// up together, and losing that race must not look like a misconfiguration.
+	StartupReadyTimeout = 60 * time.Second
+
 	// defaultFailureGracePeriod bounds the recovery tier: if the plugin stays
 	// continuously disconnected longer than this (i.e. reconnect retries within
 	// the window are exhausted), it flips to an unhealthy state that the
@@ -82,10 +116,12 @@ type Config struct {
 	// PluginName / PluginIdx register the plugin with the runtime. Idx orders
 	// this plugin relative to OTHER NRI plugins; it does not affect CDI-vs-NRI
 	// ordering (CDI is applied by the runtime before any NRI CreateContainer).
-	PluginName string
-	PluginIdx  string
+	PluginName          string
+	PluginIdx           string
+	ContainerManagerDir string
 	// DryRun, when true, makes every hook observe-and-log only, injecting
-	// nothing. This is the §12.12 validation mode.
+	// nothing. Test-only: no driver sets it and no flag exposes it, because it
+	// contradicts the strict enforcement NRISupport now implies (§12.13.6).
 	DryRun bool
 	// Cache is the shared (podUID, containerName) -> Entry store the register
 	// server's pod-uid resolver reads.
@@ -96,13 +132,17 @@ type Config struct {
 	// IsClaimPrepared validates that a claim UID read from (attacker-controllable)
 	// container env was actually prepared on this node (§12.12.1). nil disables
 	// the check. Injected by the driver (backed by the DRA checkpoint) to avoid
-	// an import cycle.
-	IsClaimPrepared func(claimUID string) bool
+	// an import cycle. The ctx carries the NRI request budget — see hookContext.
+	IsClaimPrepared func(ctx context.Context, claimUID string) bool
 	// ResolveMounts ensures the per-container partition directories exist and
-	// returns the mounts + env to inject. Returning (nil, nil) skips injection.
+	// returns the mounts + env to inject. Returning (nil, nil) means "nothing to
+	// inject for this container" and is a legitimate outcome, not a failure: in
+	// remote inject mode a container can reference the claim (so it carries the
+	// CDI correlation env) without referencing any allocated request of it. Any
+	// real failure must come back as an error, which aborts container creation.
 	// When nil, the plugin runs observe-only regardless of DryRun. Injected by
-	// the driver.
-	ResolveMounts func(claimUID, podName, podNamespace, podUID, containerName string) (*Injection, error)
+	// the driver. The ctx carries the NRI request budget — see hookContext.
+	ResolveMounts func(ctx context.Context, claimUID, podName, podNamespace, podUID, containerName string) (*Injection, error)
 }
 
 // Mount is one partition bind mount the plugin injects at CreateContainer.
@@ -123,12 +163,13 @@ type Injection struct {
 
 // Plugin is the in-process NRI plugin.
 type Plugin struct {
-	stub               stub.Stub
-	cache              *Cache
-	dryRun             bool
-	failureGracePeriod time.Duration
-	isClaimPrepared    func(claimUID string) bool
-	resolveMounts      func(claimUID, podName, podNamespace, podUID, containerName string) (*Injection, error)
+	stub                stub.Stub
+	cache               *Cache
+	dryRun              bool
+	failureGracePeriod  time.Duration
+	containerManagerDir string
+	isClaimPrepared     func(ctx context.Context, claimUID string) bool
+	resolveMounts       func(ctx context.Context, claimUID, podName, podNamespace, podUID, containerName string) (*Injection, error)
 
 	// createdAt tracks CreateContainer timestamps so StartContainer can report
 	// the create→start delta (validates ordering; §12.12 item 3).
@@ -141,6 +182,17 @@ type Plugin struct {
 	healthMu       sync.Mutex
 	firstFailureAt time.Time
 	failed         bool
+
+	// readyMu guards the exact connection state, which is a different question
+	// from Healthy(): ready means "registered with the runtime and the first
+	// Synchronize of this session has completed", and it drops on every
+	// disconnect. Healthy() only drops after the grace period, so it is too
+	// coarse to gate on. readyCh is closed on the first transition to ready and
+	// replaced with a fresh open channel on every drop, so WaitReady blocks
+	// correctly across reconnects.
+	readyMu sync.Mutex
+	ready   bool
+	readyCh chan struct{}
 }
 
 // ValidatePluginIdx reports whether idx is a valid NRI plugin index (exactly two
@@ -167,13 +219,19 @@ func NewPlugin(cfg Config) (*Plugin, error) {
 	if grace <= 0 {
 		grace = defaultFailureGracePeriod
 	}
+	managerDir := cfg.ContainerManagerDir
+	if managerDir == "" {
+		managerDir = util.ManagerRootPath
+	}
 	p := &Plugin{
-		cache:              cfg.Cache,
-		dryRun:             cfg.DryRun,
-		failureGracePeriod: grace,
-		isClaimPrepared:    cfg.IsClaimPrepared,
-		resolveMounts:      cfg.ResolveMounts,
-		createdAt:          make(map[string]time.Time),
+		cache:               cfg.Cache,
+		dryRun:              cfg.DryRun,
+		failureGracePeriod:  grace,
+		containerManagerDir: managerDir,
+		isClaimPrepared:     cfg.IsClaimPrepared,
+		resolveMounts:       cfg.ResolveMounts,
+		createdAt:           make(map[string]time.Time),
+		readyCh:             make(chan struct{}),
 	}
 	opts := []stub.Option{
 		stub.WithPluginName(name),
@@ -203,6 +261,9 @@ func (p *Plugin) Run(ctx context.Context) {
 	for {
 		start := time.Now()
 		err := p.stub.Run(ctx)
+		// The session is over either way: drop readiness before anything else
+		// so no hook-dependent path believes the runtime is still calling us.
+		p.setReady(false)
 		if ctx.Err() != nil {
 			klog.V(4).InfoS("NRI plugin stopping (context canceled)")
 			return
@@ -270,7 +331,115 @@ func (p *Plugin) Stop() {
 }
 
 func (p *Plugin) onClose() {
+	p.setReady(false)
 	klog.InfoS("NRI plugin ttrpc connection closed")
+}
+
+// setReady flips the connection state. Dropping readiness also unsyncs the
+// cache: its entries were rebuilt by the last Synchronize and go stale the
+// moment the runtime stops talking to us, and a stale-but-"synced" cache makes
+// the register resolver hand out a confidently wrong config directory instead
+// of a retryable error (see Cache.Unsync).
+func (p *Plugin) setReady(ready bool) {
+	p.readyMu.Lock()
+	changed := p.ready != ready
+	ch := p.readyChanLocked()
+	if ready {
+		// Wake everyone waiting on this session.
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	} else if changed {
+		// Re-arm for the next session; only replace an already-closed channel.
+		select {
+		case <-ch:
+			p.readyCh = make(chan struct{})
+		default:
+		}
+	}
+	p.ready = ready
+	p.readyMu.Unlock()
+
+	if !ready {
+		p.cache.Unsync()
+	}
+	if changed {
+		setReadyMetric(ready)
+	}
+}
+
+// readyChanLocked returns the current wait channel, creating it on first use so
+// the readiness machinery works on a zero-value Plugin too. Caller holds readyMu.
+func (p *Plugin) readyChanLocked() chan struct{} {
+	if p.readyCh == nil {
+		p.readyCh = make(chan struct{})
+	}
+	return p.readyCh
+}
+
+// Ready reports whether the plugin is registered with the runtime and the first
+// Synchronize of the current session has completed.
+func (p *Plugin) Ready() bool {
+	p.readyMu.Lock()
+	defer p.readyMu.Unlock()
+	return p.ready
+}
+
+// WaitReady blocks until the plugin is ready, ctx is done, or timeout elapses.
+// A non-nil error means the runtime never called us, which under NRISupport is
+// fatal rather than degraded: the caller must surface it, not continue.
+func (p *Plugin) WaitReady(ctx context.Context, timeout time.Duration) error {
+	p.readyMu.Lock()
+	if p.ready {
+		p.readyMu.Unlock()
+		return nil
+	}
+	ch := p.readyChanLocked()
+	p.readyMu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("timed out after %s waiting for the NRI runtime to register this plugin "+
+			"(is NRI enabled in the container runtime, and is the socket path correct?)", timeout)
+	}
+}
+
+// hookContext bounds a hook's work by the NRI request budget.
+//
+// The runtime applies its own timeout to the call (adaptation applies
+// getPluginRequestTimeout() before invoking us) but ttrpc does not carry that
+// deadline over to the handler, so the ctx we are handed has none. The stub
+// does know the budget: the runtime states it in the Configure request and the
+// stub exposes it as RequestTimeout(). Deriving from that keeps every blocking
+// call a hook makes — checkpoint flock, API reads, session barriers — inside
+// the window the runtime is actually willing to wait, instead of overrunning it
+// and getting the plugin detached mid-request.
+//
+// TODO(nri#287): RequestTimeout() is the single global runtime-wide timeout
+// (2s by default), which is tight for hooks that touch the apiserver. nri#287
+// proposes letting a plugin declare its own, bounded by a runtime maximum. Once
+// that lands, declare ours at registration instead of merely reading back the
+// global value here; the rest of this plumbing stays as is.
+func (p *Plugin) hookContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	budget := stub.DefaultRequestTimeout
+	// p.stub is nil only in unit tests, which drive the hooks directly.
+	if p.stub != nil {
+		if t := p.stub.RequestTimeout(); t > 0 {
+			budget = t
+		}
+	}
+	return context.WithTimeout(ctx, budget)
 }
 
 // Configure logs the runtime + NRI version we are talking to. Returning 0 keeps
@@ -283,7 +452,10 @@ func (p *Plugin) Configure(_ context.Context, config, runtime, version string) (
 // Synchronize is the (re)connect replay: rebuild the whole cache from the
 // current container set's env (design §12.9). It never mutates running
 // containers, so it returns no updates.
-func (p *Plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containers []*api.Container) ([]*api.ContainerUpdate, error) {
+func (p *Plugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, containers []*api.Container) ([]*api.ContainerUpdate, error) {
+	ctx, cancel := p.hookContext(ctx)
+	defer cancel()
+
 	podUIDByID := make(map[string]string, len(pods))
 	for _, pod := range pods {
 		podUIDByID[pod.GetId()] = pod.GetUid()
@@ -299,17 +471,21 @@ func (p *Plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containe
 		}
 		// Validate against node prepared state — env is attacker-controllable
 		// (§12.12.1), so never rebuild a cache entry for an unprepared claim.
-		if p.isClaimPrepared != nil && !p.isClaimPrepared(claimUID) {
+		if p.isClaimPrepared != nil && !p.isClaimPrepared(ctx, claimUID) {
 			continue
 		}
 		vgpuCount++
-		entry := Entry{ClaimUID: claimUID, ConfigDir: ConfigDirFor(claimUID, podUID, c.GetName())}
+		configDir := ConfigDirFor(p.containerManagerDir, claimUID, podUID, c.GetName())
+		entry := Entry{ClaimUID: claimUID, ConfigDir: configDir}
 		rebuilt[Key(podUID, c.GetName())] = entry
 		klog.V(4).InfoS("NRI Synchronize vGPU container", "container", c.GetName(),
 			"podUID", podUID, "claimUID", claimUID, "configDir", entry.ConfigDir, "state", c.GetState().String())
 	}
 
 	p.cache.Replace(rebuilt)
+	// Synchronize is the last step of (re)connect: from here the runtime routes
+	// container events to us, so this is the point the plugin becomes ready.
+	p.setReady(true)
 	klog.InfoS("NRI Synchronize complete", "pods", len(pods), "containers", len(containers),
 		"vgpuContainers", vgpuCount, "cacheEntries", p.cache.Len(), "dryRun", p.dryRun)
 	return nil, nil
@@ -323,7 +499,11 @@ func (p *Plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containe
 //
 // In observe-only mode (DryRun or no ResolveMounts wired) it logs and injects
 // nothing (the §12.12 validation mode).
-func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, c *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+	ctx, cancel := p.hookContext(ctx)
+	defer cancel()
+	start := time.Now()
+
 	p.mu.Lock()
 	p.createdAt[c.GetId()] = time.Now()
 	p.mu.Unlock()
@@ -338,29 +518,46 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 			"namespace", pod.GetNamespace(), "container", c.GetName(), "state", c.GetState().String(), "pid", c.GetPid(),
 			"isVGPUContainer", hasCompat, "hasClaimUIDEnv", hasClaim, "claimUID", claimUID, "envOfInterest",
 			filterEnv(c.GetEnv()), "mountsOfInterest", filterMounts(c.GetMounts()), "dryRun", p.dryRun)
+		observeCreateContainer(resultObserveOnly, start)
 		return nil, nil, nil
 	}
 
-	// Not a vGPU container of ours: leave it untouched.
+	// Not a vGPU container of ours: leave it untouched. This is the one skip
+	// that must stay silent — every non-vGPU container on the node passes here.
 	if !hasClaim || claimUID == "" {
+		observeCreateContainer(resultNotOurs, start)
 		return nil, nil, nil
 	}
 
-	// Validate the (attacker-controllable) claim UID against node prepared state.
-	if p.isClaimPrepared != nil && !p.isClaimPrepared(claimUID) {
-		klog.V(3).InfoS("NRI CreateContainer: claim not prepared on this node; skipping injection (possible spoofed env)",
-			"pod", pod.GetName(), "podUID", pod.GetUid(), "container", c.GetName(), "claimUID", claimUID)
-		return nil, nil, nil
+	// Validate the (attacker-controllable) claim UID against node prepared
+	// state, and fail the container if it does not check out. The env is only
+	// ever injected by our own CDI edits, so seeing it for a claim this node did
+	// not prepare means either a spoofed env or lost prepare state — neither is
+	// something to wave through. There is no restart-window concern: the backing
+	// check reads the on-disk DRA checkpoint, which is validated in
+	// NewDeviceState long before this plugin connects.
+	if p.isClaimPrepared != nil && !p.isClaimPrepared(ctx, claimUID) {
+		observeCreateContainer(resultRejectedUnprepared, start)
+		return nil, nil, fmt.Errorf("NRI: claim %s is not prepared on this node (pod %s/%s, container %s): "+
+			"refusing to start a vGPU container without its isolation",
+			claimUID, pod.GetNamespace(), pod.GetName(), c.GetName())
 	}
 
-	inj, err := p.resolveMounts(claimUID, pod.GetName(), pod.GetNamespace(), pod.GetUid(), c.GetName())
+	inj, err := p.resolveMounts(ctx, claimUID, pod.GetName(), pod.GetNamespace(), pod.GetUid(), c.GetName())
 	if err != nil {
 		// Fail-closed: a container starting without its vGPU isolation is worse
 		// than not starting. containerd aborts container creation on this error.
+		observeCreateContainer(resultRejectedResolve, start)
 		return nil, nil, fmt.Errorf("NRI resolve partition mounts (claim %s, pod %s, container %s): %w",
 			claimUID, pod.GetUid(), c.GetName(), err)
 	}
 	if inj == nil {
+		// Deliberately nothing to inject, not a failure — see ResolveMounts. It
+		// gets its own metric label so it stays distinguishable from a skip that
+		// happened because something went wrong.
+		klog.V(4).InfoS("NRI CreateContainer: nothing to inject for this container",
+			"pod", pod.GetName(), "podUID", pod.GetUid(), "container", c.GetName(), "claimUID", claimUID)
+		observeCreateContainer(resultNoOp, start)
 		return nil, nil, nil
 	}
 
@@ -383,14 +580,17 @@ func (p *Plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, c *api.
 	// this list: resolveMounts above already emptied it in place, and it must
 	// stay in place — it is the source of a file bind mount injected in the same
 	// adjustment, and removing the source would abort container creation.
-	basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
-	vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
-	smNodeConfigPath := filepath.Join(basePath, util.SMNode, util.SMNodeFile)
-	_ = os.RemoveAll(vmemNodeConfigPath)
-	_ = os.RemoveAll(smNodeConfigPath)
+	if inj.ConfigDir != "" {
+		basePath := strings.TrimSuffix(inj.ConfigDir, util.Config)
+		vmemNodeConfigPath := filepath.Join(basePath, util.VMemNode, util.VMemNodeFile)
+		smNodeConfigPath := filepath.Join(basePath, util.SMNode, util.SMNodeFile)
+		_ = os.RemoveAll(vmemNodeConfigPath)
+		_ = os.RemoveAll(smNodeConfigPath)
+	}
 
 	p.cache.Set(pod.GetUid(), c.GetName(), Entry{ClaimUID: claimUID, ConfigDir: inj.ConfigDir})
 
+	observeCreateContainer(resultInjected, start)
 	klog.V(3).InfoS("NRI CreateContainer injected", "pod", pod.GetName(), "podUID", pod.GetUid(),
 		"container", c.GetName(), "claimUID", claimUID, "configDir", inj.ConfigDir, "mounts", len(inj.Mounts))
 	return adjust, nil, nil

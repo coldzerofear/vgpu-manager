@@ -64,6 +64,7 @@ const (
 	NodeMemoryTypeMismatch Code = "NodeMemoryTypeMismatch"
 	NodeCacheMiss          Code = "NodeCacheMiss"
 	NodeInfoBuildFailed    Code = "NodeInfoBuildFailed"
+	NodeDeleting           Code = "NodeDeleting"
 )
 
 // Device-level codes — filterDevices walks the node's devices and
@@ -113,6 +114,7 @@ var phrase = map[Code]string{
 	NodeMemoryTypeMismatch: "node memory type mismatch",
 	NodeCacheMiss:          "node missing from cache",
 	NodeInfoBuildFailed:    "node info build failed",
+	NodeDeleting:           "node is being deleted",
 
 	DeviceUnhealthy:        "GPU unhealthy",
 	DeviceMIGEnabled:       "GPU has MIG enabled",

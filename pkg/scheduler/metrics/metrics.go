@@ -120,6 +120,7 @@ const (
 	StageNode     = "node"
 	StageDevice   = "device"
 	StageLockWait = "lock_wait"
+	StageLockTime = "lock_time"
 )
 
 // Filter and dry-run filter results.

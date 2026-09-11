@@ -29,8 +29,13 @@ limitations under the License.
 #include <sys/mman.h>
 #include <time.h>
 
-#define LOCK_PATH_FORMAT (TMP_DIR VGPU_LOCK_DIR "/vgpu_%d.lock")
-#define LOCK_PATH_SIZE   32
+/* Built at runtime from session_path(SESSION_LOCK_DIR), NOT concatenated from
+ * TMP_DIR at compile time: the directory moves per session, and a fixed
+ * "/tmp/.vgpu_lock/..." would point somewhere ensure_create_lock_dir() never
+ * creates. open() would then fail, lock_gpu_device() would return -1, and
+ * every caller carries on unlocked -- so the budget check that this lock
+ * exists to serialise would run with no mutual exclusion at all. */
+#define LOCK_FILE_FORMAT "%s/vgpu_%d.lock"
 /* Spin parameters for lock_gpu_device(). The critical section it guards is
  * ~1-3ms (two NVML process enumerations plus the real driver allocation);
  * waiters are the other processes of the same container, since the lock
@@ -196,8 +201,9 @@ int lock_gpu_device(int device_index) {
   }
 
   ensure_create_lock_dir();
-  char lock_path[LOCK_PATH_SIZE];
-  snprintf(lock_path, LOCK_PATH_SIZE, LOCK_PATH_FORMAT, device_index);
+  char lock_path[PATH_MAX];
+  snprintf(lock_path, sizeof(lock_path), LOCK_FILE_FORMAT,
+           session_path(SESSION_LOCK_DIR), device_index);
 
   /* Opened once for the whole wait. Every path out of this function either
    * hands the descriptor to the caller -- locked, for unlock_gpu_device() to

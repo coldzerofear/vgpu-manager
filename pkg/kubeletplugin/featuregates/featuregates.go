@@ -108,6 +108,14 @@ const (
 	// require DevicePluginClientMode.
 	NRISupport featuregate.Feature = util.NRISupport
 
+	// RemoteGPUSupport enables the remote GPU (lupine-backed) code paths: the
+	// remote-pool duties of `--mode=server` (ResourceSlice publishing with a
+	// reachability NodeSelector, session materialization) and the whole of
+	// `--mode=inject` (env/CDI injection on consumer nodes, which requires this
+	// gate). The gate is orthogonal to --mode: mode selects the role shape,
+	// this gate opens the remote feature within it (design D21, v1.7).
+	RemoteGPUSupport featuregate.Feature = util.RemoteGPUSupport
+
 	// ComputeDomainCliques enables using ComputeDomainClique CRD objects instead of
 	// storing daemon info directly in ComputeDomainStatus.Nodes.
 	//ComputeDomainCliques featuregate.Feature = "ComputeDomainCliques"
@@ -149,7 +157,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 	},
 	IMEXDaemonsWithDNSNames: {
 		{
-			Default:    true,
+			Default:    false,
 			PreRelease: featuregate.Beta,
 			Version:    version.MajorMinor(0, 2),
 		},
@@ -170,7 +178,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 	},
 	NVMLDeviceHealthCheck: {
 		{
-			Default:    true,
+			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(0, 3),
 		},
@@ -218,6 +226,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	ConsumableShares: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	RemoteGPUSupport: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
@@ -294,6 +309,9 @@ func ValidateFeatureGates() error {
 		if Enabled(PassthroughSupport) {
 			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, PassthroughSupport)
 		}
+		if Enabled(IMEXDaemonsWithDNSNames) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, IMEXDaemonsWithDNSNames)
+		}
 		//if Enabled(DynamicMIG) {
 		//	return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, DynamicMIG)
 		//}
@@ -308,6 +326,9 @@ func ValidateFeatureGates() error {
 	//if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {
 	//	return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainCliques, IMEXDaemonsWithDNSNames)
 	//}
+	if Enabled(RemoteGPUSupport) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", RemoteGPUSupport, VGPUSupport)
+	}
 	if Enabled(SharedSMUtilizationWatcher) && !Enabled(VGPUSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", SharedSMUtilizationWatcher, VGPUSupport)
 	}
@@ -316,6 +337,9 @@ func ValidateFeatureGates() error {
 	}
 	if Enabled(NRISupport) && !Enabled(VGPUSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", NRISupport, VGPUSupport)
+	}
+	if Enabled(RemoteGPUSupport) && Enabled(DevicePluginClientMode) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, DevicePluginClientMode)
 	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {

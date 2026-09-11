@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package kubeletplugin
+package health
 
 import (
 	"context"
@@ -38,7 +38,7 @@ import (
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
 )
 
-type healthcheck struct {
+type Healthcheck struct {
 	grpc_health_v1.UnimplementedHealthServer
 
 	server *grpc.Server
@@ -57,8 +57,14 @@ type healthcheck struct {
 	nriHealthy func() bool
 }
 
-func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin.Helper, nriHealthy func() bool) (*healthcheck, error) {
-	port := config.Flags.HealthcheckPort
+type HealthConfig struct {
+	HealthcheckPort               int
+	KubeletRegistrarDirectoryPath string
+	KubeletDriverPluginPath       string
+}
+
+func StartHealthcheck(ctx context.Context, config *HealthConfig, helper *kubeletplugin.Helper, nriHealthy func() bool) (*Healthcheck, error) {
+	port := config.HealthcheckPort
 	if port < 0 {
 		return nil, nil
 	}
@@ -73,7 +79,7 @@ func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin
 		Scheme: "unix",
 		// TODO: this needs to adapt when seamless upgrades
 		// are enabled and the filename includes a uid.
-		Path: path.Join(config.Flags.KubeletRegistrarDirectoryPath, util.DRADriverName+"-reg.sock"),
+		Path: path.Join(config.KubeletRegistrarDirectoryPath, util.DRADriverName+"-reg.sock"),
 	}).String()
 	klog.V(6).Infof("connecting to registration socket path=%s", regSockPath)
 	regConn, err := grpc.NewClient(
@@ -86,7 +92,7 @@ func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin
 
 	draSockPath := (&url.URL{
 		Scheme: "unix",
-		Path:   path.Join(config.DriverPluginPath(), "dra.sock"),
+		Path:   path.Join(config.KubeletDriverPluginPath, "dra.sock"),
 	}).String()
 	klog.V(6).Infof("connecting to DRA socket path=%s", draSockPath)
 	draConn, err := grpc.NewClient(
@@ -98,7 +104,7 @@ func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin
 	}
 
 	server := grpc.NewServer()
-	healthcheck := &healthcheck{
+	healthcheck := &Healthcheck{
 		server:     server,
 		regClient:  registerapi.NewRegistrationClient(regConn),
 		draClient:  drapb.NewDRAPluginClient(draConn),
@@ -117,7 +123,7 @@ func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin
 	return healthcheck, nil
 }
 
-func (h *healthcheck) Stop() {
+func (h *Healthcheck) Stop() {
 	if h.server != nil {
 		klog.Info("Stopping healthcheck service")
 		h.server.GracefulStop()
@@ -126,7 +132,7 @@ func (h *healthcheck) Stop() {
 }
 
 // Check implements [grpc_health_v1.HealthServer].
-func (h *healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
+func (h *Healthcheck) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
 	knownServices := map[string]struct{}{"": {}, "liveness": {}}
 	if _, known := knownServices[req.GetService()]; !known {
 		return nil, status.Error(codes.NotFound, "unknown service")

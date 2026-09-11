@@ -34,10 +34,8 @@
 #include "include/cuda-helper.h"
 #include "include/metrics.h"
 #include "include/nvml-helper.h"
+#include "include/sm_delta.h"
 
-#define INCREMENT_SCALE_FACTOR   2560
-#define MAX_UTIL_DIFF_THRESHOLD  0.5
-#define MIN_INCREMENT            5
 #define DEVICE_BATCH_SIZE        4
 
 extern resource_data_t* g_vgpu_config;
@@ -73,6 +71,7 @@ extern int get_sm_auto_external_util_threshold(int *out);
 extern int get_aimd_deadband_ratio(int *out);
 extern int get_aimd_md_cooldown_cycles(int *out);
 extern int get_usage_threshold(int *out);
+extern int get_delta_increment_divisor(int *out);
 extern int get_delta_ramp_floor_divisor(int *out);
 extern int get_uva_advise(int *out);
 extern int get_sm_shared_bucket(int *out);
@@ -582,14 +581,6 @@ const int cuda_hook_nums =
  * 30 cycles ~ 2.4s at the default ~80ms cadence.  */
 #define SOFT_ADJUST_INTERVAL    30
 
-/* DELTA_ERROR_RECOVERY_STEP: fallback share-increment value if the
- * delta() controller computes an out-of-range increment (negative or
- * > INT_MAX, both indicating an overflow path). Previously
- * dynamic_config_t.error_recovery_step; promoted to a constant
- * because it is purely defensive and irrelevant to behaviour outside
- * the overflow path. */
-#define DELTA_ERROR_RECOVERY_STEP   10
-
 /* delta()'s ramp-floor divisor is env-tunable via g_dynamic_config
  * .delta_ramp_floor_divisor (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR, default 64);
  * see the block comment at the use site in delta() and the loader in
@@ -611,6 +602,7 @@ dynamic_config_t g_dynamic_config = {
   .aimd_md_cooldown_cycles      = 3,
   .auto_debounce_cycles         = 10,
   .auto_external_util_threshold = 1,
+  .delta_increment_divisor      = 81920,
   .delta_ramp_floor_divisor     = 64,
   .sm_shared_bucket             = 0,     /* per-process bucket (historical) */
 };
@@ -670,71 +662,28 @@ static void rate_limiter(int grids, int blocks, int host_index) {
   }
 }
 
+/* Controller invocations per device, watcher-thread-only (each watcher owns a
+ * disjoint host_index slice). The first two invocations are the boot window
+ * for sm_delta_step's one-shot jump-start. Inherited across fork on purpose:
+ * a forked child joins an established share, and re-jumping it would be the
+ * repeated-large-step flooding the jump exists to avoid. */
+static int g_delta_calls[MAX_DEVICE_COUNT] = {0};
+
+/* Thin binding of the pure step (include/sm_delta.h) to this process's
+ * per-device state. The formula and the reasons each branch exists live with
+ * the math so the no-GPU tests exercise the exact shipped code rather than a
+ * re-implementation that drifts. The bucket read is racy by design -- it is
+ * advisory (starved? backlog?), and the CAS consumers keep it correct. */
 static int64_t delta(int up_limit, int user_current, int64_t share, int host_index) {
-  // 1. Using wider data types to prevent computation overflow
-  int64_t sm_num = (int64_t)g_sm_num[host_index];
-  int64_t max_thread = (int64_t)g_max_thread_per_sm[host_index];
-
-  // 2. Calculate the difference in utilization rate
-  int utilization_diff = abs(up_limit - user_current);
-  if (utilization_diff < MIN_INCREMENT) {
-    utilization_diff = MIN_INCREMENT;
+  int boot = 0;
+  if (g_delta_calls[host_index] < 2) {
+    g_delta_calls[host_index]++;
+    boot = 1;
   }
-
-  // 3. Calculate increment (using 64 bit operation to prevent overflow)
-  int64_t increment = sm_num * sm_num * max_thread * (int64_t)(utilization_diff) / INCREMENT_SCALE_FACTOR;
-
-  // 4. Accelerate adjustment logic (using floating-point thresholds instead of hard coding)
-  if ((float)utilization_diff / (float)(up_limit) > MAX_UTIL_DIFF_THRESHOLD) {
-    increment = increment * utilization_diff * 2 / (up_limit + 1);
-  }
-
-  // 5. Error handling optimization: When the increment is negative,
-  //    the process is no longer terminated, but rolled back to a safe value
-  if (unlikely(increment < 0 || increment > INT_MAX)) {
-    LOGGER(ERROR, "host device %d, increment overflow: %ld, current sm: %ld, thread_per_sm: %ld, diff: %d",
-           host_index, increment, sm_num, max_thread, utilization_diff);
-    increment = DELTA_ERROR_RECOVERY_STEP;
-  }
-
-  /* Ramp-speed floor, applied SYMMETRICALLY (before the grow/cut split) and
-   * scaled by the distance from the setpoint. `increment` is sm^2-scaled while
-   * the share must travel ~g_total (∝ sm) to track the limit, so the raw step
-   * ∝ 1/sm -- on small-SM GPUs / MIG slices the ramp and the cut-back on an
-   * overshoot both crawl for minutes.
-   *
-   * The floor is g_total * diff / (up_limit * DIVISOR): at cold start (diff ==
-   * up_limit) it is g_total/DIVISOR so the bulk ramp completes in ~DIVISOR
-   * cycles regardless of SM count, and it shrinks to ~0 as util approaches the
-   * limit so the fine control near the setpoint reverts to delta's proportional
-   * step -- keeping the tight limit tracking that large GPUs already had (a flat
-   * floor would coarsen it to +/- g_total/DIVISOR everywhere). Symmetric so it
-   * cannot ratchet: flooring only grow made grow >> cut and pushed util far past
-   * the limit (observed: hard_core=8 pinned at 15, hard_core=50 at 65-89). Uses
-   * the MIN_INCREMENT-floored utilization_diff, which conveniently keeps a small
-   * residual floor near the setpoint on tiny slices (where even the near-limit
-   * raw step is too small) while staying below the raw step on large GPUs.
-   *
-   * divisor <= 0 is the "disable" sentinel (CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR set
-   * to 0 or less): skip the floor -- and its division -- so delta uses its raw
-   * sm^2-scaled step, exactly the pre-floor behaviour. */
-  int ramp_divisor = g_dynamic_config.delta_ramp_floor_divisor;
-  if (ramp_divisor > 0) {
-    int64_t floor_up_limit = up_limit > 0 ? up_limit : 1; /* guard integer div-by-zero */
-    int64_t ramp_floor = g_total_cuda_cores[host_index] * (int64_t)utilization_diff
-                         / (floor_up_limit * ramp_divisor);
-    if (increment < ramp_floor) {
-      increment = ramp_floor;
-    }
-  }
-  if (user_current <= up_limit) {
-    share = (share + increment) > g_total_cuda_cores[host_index] ?
-            g_total_cuda_cores[host_index] : (share + increment);
-  } else {
-    share = (share - increment) < 0 ? 0 : (share - increment);
-  }
-
-  return share;
+  return sm_delta_step(g_total_cuda_cores[host_index], up_limit, user_current, share,
+                       *sm_bucket_of(host_index), boot,
+                       g_dynamic_config.delta_increment_divisor,
+                       g_dynamic_config.delta_ramp_floor_divisor);
 }
 
 /* ---- Pluggable SM throttle controller ---- *
@@ -802,6 +751,7 @@ static int      g_lost_exclusivity_pending[MAX_DEVICE_COUNT] = {0};
  * sets memo_valid=1; subsequent calls return the memoized value. */
 static int      g_excl_memo_valid[MAX_DEVICE_COUNT] = {0};
 static int      g_excl_memo_value[MAX_DEVICE_COUNT] = {0};
+
 
 static int64_t aimd_controller(int up_limit, int user_current,
                                int64_t share, int host_index);
@@ -1025,7 +975,8 @@ static void dump_dynamic_config(void) {
     "aimd[md_div=%.3f eff_ratio=%d/1000 ai_base_div=%d deadband_ratio=%d/1000 md_cooldown=%d] "
     "auto[debounce=%d ext_util_threshold=%d%%] "
     "shared_bucket=%d "
-    "internal[soft_adjust_interval=%d delta_recovery_step=%d]",
+    "delta[inc_div=%d ramp_floor_div=%d grow_cap=1/%d] "
+    "internal[soft_adjust_interval=%d]",
     (k >= 0 && k <= 2) ? kind_name[k] : "?",
     g_dynamic_config.usage_threshold,
     g_dynamic_config.aimd_md_divisor,
@@ -1036,8 +987,10 @@ static void dump_dynamic_config(void) {
     g_dynamic_config.auto_debounce_cycles,
     g_dynamic_config.auto_external_util_threshold,
     g_dynamic_config.sm_shared_bucket,
-    SOFT_ADJUST_INTERVAL,
-    DELTA_ERROR_RECOVERY_STEP);
+    g_dynamic_config.delta_increment_divisor,
+    g_dynamic_config.delta_ramp_floor_divisor,
+    DELTA_GROW_CAP_DIVISOR,
+    SOFT_ADJUST_INTERVAL);
 }
 
 /* Called once from initialization() before watcher threads spawn (guarded
@@ -1076,13 +1029,37 @@ static void sm_controller_init(void) {
    * controller and as an AUTO dispatch target. NO clamp here on purpose: a value
    * <= 0 is the user's explicit "disable the floor" sentinel, which delta()
    * honours by skipping the floor (and its division) entirely. */
+  /* Pool-relative linear step divisor. Clamped positive: 0 would divide-by-
+   * zero and a negative fraction would invert the controller. */
+  (void)get_delta_increment_divisor(&g_dynamic_config.delta_increment_divisor);
+  if (g_dynamic_config.delta_increment_divisor <= 0) {
+    g_dynamic_config.delta_increment_divisor = DELTA_INCREMENT_DIVISOR_DEFAULT;
+  }
+
   (void)get_delta_ramp_floor_divisor(&g_dynamic_config.delta_ramp_floor_divisor);
 
   /* Container-wide shared bucket. Read here so the dump line reports it and so
    * initialization() can act on it; the mapping itself happens there, once the
-   * device geometry this region is seeded from is known. */
-  g_dynamic_config.sm_shared_bucket = 0;
+   * device geometry this region is seeded from is known.
+   *
+   * ON by default, since one bucket per container is what the core quota
+   * actually means: with a per-process bucket every process throttles against
+   * its own allowance, so an N-process container gets N times its cores. It
+   * also bounds NVML polling -- only the sampling owner calls NVML, standbys
+   * read its published sample.
+   *
+   * CUDA_SM_SHARED_BUCKET=0 opts out locally (single-process containers gain
+   * nothing from the shared region, and it lets a deployment fall back if the
+   * region misbehaves). In a session the opt-out is refused: there one
+   * container is many lupine-server children by construction, so honouring it
+   * would hand out the quota N times over. */
+  g_dynamic_config.sm_shared_bucket = 1;
   (void)get_sm_shared_bucket(&g_dynamic_config.sm_shared_bucket);
+  if (unlikely(session_enabled() && !g_dynamic_config.sm_shared_bucket)) {
+    LOGGER(WARNING, "CUDA_SM_SHARED_BUCKET=0 ignored in a remote session: "
+                    "a per-process bucket would let each connection use the container's full core quota");
+    g_dynamic_config.sm_shared_bucket = 1;
+  }
 
   /* AIMD tunables. Loaded unconditionally because AUTO can dispatch to
    * aimd_controller when the device becomes shared, even if the user
@@ -1128,6 +1105,18 @@ static void sm_controller_init(void) {
   dump_dynamic_config();
 }
 
+/* Does any device in this config actually cap cores? Decides whether losing
+ * the shared bucket is fatal (see initialization()). */
+static int session_has_core_limit(void) {
+  for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
+    device_t d = get_device_snapshot(i);
+    if (d.activate && d.core_limit) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int64_t shares[MAX_DEVICE_COUNT]    = {0};
 static int sys_frees[MAX_DEVICE_COUNT]      = {0};
 static int avg_sys_frees[MAX_DEVICE_COUNT]  = {0};
@@ -1141,6 +1130,7 @@ static int is[MAX_DEVICE_COUNT]             = {0};
  * the first cycle's value becomes the reference; later cycles only change
  * when a genuinely new external process arrives. */
 static int pre_external_process_nums[MAX_DEVICE_COUNT] = {0};
+static int pre_sys_process_nums[MAX_DEVICE_COUNT] = {0};
 static utilization_t top_results[MAX_DEVICE_COUNT] = {};
 /* volatile: written by the watcher thread, read cross-thread by the GAP path
  * (gap_effective_dc). Matches g_dev_hot[].cur_cuda_cores' convention -- forces a real
@@ -1332,6 +1322,7 @@ static void sm_ctl_load(int host_index) {
   is[host_index]                         = d->is_cnt;
   avg_sys_frees[host_index]              = d->avg_sys_free;
   pre_external_process_nums[host_index]  = d->pre_external_proc;
+  pre_sys_process_nums[host_index]       = d->s_sys_process_num;
   /* Without these three the exclusivity FSM would advance once per N cycles in
    * each process and fracture; lost_excl_pending especially, being a one-shot
    * flag, would hang set in every non-winner and fire a stale reset cycles late. */
@@ -1352,6 +1343,7 @@ static void sm_ctl_publish(int host_index) {
   d->up_limit          = up_limits[host_index];
   d->is_cnt            = is[host_index];
   d->avg_sys_free      = avg_sys_frees[host_index];
+  d->s_sys_process_num = pre_sys_process_nums[host_index];
   d->pre_external_proc = pre_external_process_nums[host_index];
   d->excl_debounced    = g_is_exclusive_debounced[host_index];
   d->excl_streak       = g_exclusive_pending_streak[host_index];
@@ -1471,6 +1463,7 @@ static void *utilization_watcher(void *arg) {
     sys_frees[host_index] = 0;
     avg_sys_frees[host_index] = 0;
     pre_external_process_nums[host_index] = 0;
+    pre_sys_process_nums[host_index] = 0;
     up_limits[host_index] = get_device_flag(host_index, hard_core);
     top_results[host_index].user_current = 0;
     top_results[host_index].sys_current = 0;
@@ -1495,6 +1488,7 @@ static void *utilization_watcher(void *arg) {
    * "now" right after that first pass. */
   struct timespec next_wakeup;
   int first_cycle = 1;
+  device_t dcfg;
   while (1) {
     for (cuda_index = batch->start_index; cuda_index < batch->end_index; cuda_index++) {
       if (likely(!first_cycle)) {
@@ -1525,7 +1519,7 @@ static void *utilization_watcher(void *arg) {
        * hard_limit / hard_core / soft_core read in this loop body uses it, so a
        * concurrent Go ModifyDevice can never split this cycle's decisions across
        * an old and a new config. One-cycle staleness is fine for a watcher. */
-      device_t dcfg = get_device_snapshot(host_index);
+      dcfg = get_device_snapshot(host_index);
 
       /* Before every `continue` below, deliberately. Region identity has
        * nothing to do with sampling, core_limit, or who won the refill, and
@@ -1603,8 +1597,7 @@ static void *utilization_watcher(void *arg) {
         if (host_index_is_exclusive_raw(host_index)
             && top_results[host_index].user_current < low_util_thr
             && !throttled) {
-          int64_t bypass_target =
-              g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
+          int64_t bypass_target = g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
           if (g_sm_node != NULL) {
             /* A plain store would erase tokens other processes CAS-deducted
              * between our read and our write -- tokens conjured back into the
@@ -1629,6 +1622,17 @@ static void *utilization_watcher(void *arg) {
         }
         shares[host_index] = g_sm_controller(dcfg.hard_core, top_results[host_index].user_current, shares[host_index], host_index);
       } else {
+//        // When the process inside the container changes, it should also quickly roll back to the hard core to give up resources
+//        if (pre_sys_process_nums[host_index] != top_results[host_index].sys_process_num) {
+//          if (pre_sys_process_nums[host_index] < top_results[host_index].sys_process_num) {
+//            shares[host_index] = (int64_t) g_max_thread_per_sm[host_index];
+//            up_limits[host_index] = dcfg.hard_core;
+//            is[host_index] = 0;
+//            avg_sys_frees[host_index] = 0;
+//          }
+//          pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
+//          pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
+//        }
         if (pre_external_process_nums[host_index] != top_results[host_index].external_process_num) {
           /* A NEW external process arrived (count grew) -> reset to
            * hard_core so all competitors negotiate from the same floor.
@@ -1648,6 +1652,7 @@ static void *utilization_watcher(void *arg) {
           }
           pre_external_process_nums[host_index] = top_results[host_index].external_process_num;
         }
+        pre_sys_process_nums[host_index] = top_results[host_index].sys_process_num;
 
         /* 1. Device is exclusively used by us (no external Pod competing).
          *    Allocate cuda cores up to soft_core for burst headroom.
@@ -2082,6 +2087,16 @@ static void initialization() {
   if (g_dynamic_config.sm_shared_bucket && g_sm_node == NULL) {
     if (map_sm_node_region(&g_sm_node) != 0 || g_sm_node == NULL) {
       g_sm_node = NULL;
+      /* Locally this is a real degradation and nothing more. In a session it
+       * is an over-quota hole: every child would throttle against its own
+       * bucket and the container would get N times its cores. Only worth
+       * refusing over when a core limit is actually configured -- without one
+       * there is no quota for the fallback to overshoot. */
+      if (unlikely(session_enabled() && session_has_core_limit())) {
+        LOGGER(FATAL, "sm_node unavailable at %s but this session limits cores; "
+                      "refusing to serve rather than give each connection the full quota",
+               SM_NODE_FILE_PATH);
+      }
       LOGGER(WARNING, "sm_node unavailable, falling back to per-process token bucket");
     } else {
       for (int i = 0; i < MAX_DEVICE_COUNT; i++) {
@@ -2345,6 +2360,19 @@ void accumulate_used_memory(size_t *used_memory, nvmlProcessInfo_t *pids_on_devi
 
   if (size_on_device == 0) {
     // If there are no processes running on the device, quickly skip them.
+  } else if ((g_vgpu_config->compatibility_mode & SESSION_COMPATIBILITY_MODE) == SESSION_COMPATIBILITY_MODE) {
+    /* Sum every session child on this device: the container's usage is the
+     * whole session's, not this one child's, or two children would each pass a
+     * budget check the container as a whole fails. No open-kernel fallback --
+     * on a GPU node the session list is authoritative, and guessing past it
+     * would count another tenant's child as ours. */
+    const container_pid_cache_t *container = load_container_pids(cache);
+    for (i = 0; i < size_on_device; i++) {
+      if (check_device_pid_in_ordered_container_pids(pids_on_device[i].pid, container->pids, container->size) == 0) {
+        LOGGER(VERBOSE, "process id %d use gpu memory: %lld", pids_on_device[i].pid, pids_on_device[i].usedGpuMemory);
+        *used_memory += pids_on_device[i].usedGpuMemory;
+      }
+    }
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     const container_pid_cache_t *container = load_container_pids(cache);
     int matchClientMode = 0;
@@ -2733,6 +2761,28 @@ static void get_used_gpu_utilization(void *arg, int cuda_index, int host_index, 
 
   if (processes_num == 0) {
     // If there are no processes running on the device, quickly skip them.
+  } else if ((g_vgpu_config->compatibility_mode & SESSION_COMPATIBILITY_MODE) == SESSION_COMPATIBILITY_MODE) {
+    /* sys_current counts everything on the card, user_current only this
+     * session -- same split as the other modes, session membership deciding
+     * which side a sample lands on. */
+    int pids_size = MAX_PIDS;
+    int pids_on_container[MAX_PIDS];
+    get_container_pids_by_filepath(CONTAINER_PIDS_CONFIG_FILE_PATH, pids_on_container, &pids_size, 0);
+    for (i = 0; i < processes_num; i++) {
+      if (processes_sample[i].timeStamp < top_result->checktime) {
+        continue;
+      }
+      top_result->valid = 1;
+      sm_util = GET_VALID_VALUE(processes_sample[i].smUtil);
+      codec_util = GET_VALID_VALUE(processes_sample[i].encUtil) + GET_VALID_VALUE(processes_sample[i].decUtil);
+      codec_util = CODEC_NORMALIZE(codec_util);
+      top_result->sys_current += sm_util + codec_util;
+      if (pids_size > 0 &&
+          check_device_pid_in_ordered_container_pids(processes_sample[i].pid, pids_on_container, pids_size) == 0) {
+        top_result->user_current += sm_util + codec_util;
+        current_processes_num++;
+      }
+    }
   } else if ((g_vgpu_config->compatibility_mode & CLIENT_COMPATIBILITY_MODE) == CLIENT_COMPATIBILITY_MODE) {
     int pids_size = MAX_PIDS;
     int pids_on_container[MAX_PIDS];

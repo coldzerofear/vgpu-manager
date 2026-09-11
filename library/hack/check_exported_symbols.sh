@@ -199,8 +199,12 @@ unexpected=$(comm -23 \
   <(printf '%s\n' "${EXPORTED_ALL}" \
       | grep -E '^(cu[A-Z]|cudbg|_cu[A-Z]|nvml[A-Z])' \
       | sort -u))
+# lupinecr_get_lupine_provider_v1 is library-remote's LUPINE checkpoint-provider
+# entry point: the same .so is LD_PRELOAD'd as a hook library AND dlopen'd by
+# lupine-server as a provider, so this symbol must stay visible there. library/
+# never defines it, so allowing it here costs that tree nothing.
 unexpected=$(printf '%s\n' "${unexpected}" \
-              | grep -vxE 'dlsym|vkNegotiateLoaderLayerInterfaceVersion' \
+              | grep -vxE 'dlsym|vkNegotiateLoaderLayerInterfaceVersion|lupinecr_get_lupine_provider_v1' \
               | grep -v '^$' || true)
 
 if [[ -n "${unexpected}" ]]; then

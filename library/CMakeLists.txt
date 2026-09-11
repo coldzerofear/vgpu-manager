@@ -50,6 +50,9 @@ add_library(vgpu-control SHARED
     include/cuda-helper.h
     include/nvml-helper.h
     include/metrics.h
+    include/session.h
+    include/sm_delta.h
+    include/checkpoint_provider.h
     include/vdpau/vdpau.h
     src/cuda_originals.c
     src/nvml_originals.c
@@ -58,6 +61,9 @@ add_library(vgpu-control SHARED
     src/loader.c
     src/dlsym_entry.S
     src/register.c
+    src/session.c
+    src/config_io.c
+    src/checkpoint_provider.c
     src/util.c
     src/lock.c
     src/metrics.c)
@@ -175,6 +181,19 @@ if(VGPU_RUN_HOOK_CHECKS)
         VERBATIM)
     add_dependencies(vgpu-control vgpu_check_no_constructors)
 
+    # Pre-build: forbid paths concatenated at compile time from TMP_DIR /
+    # VGPU_MANAGER_PATH. Those resolve to the pre-session location always, so
+    # inside a session they name a file nothing creates -- the open() fails and
+    # the caller carries on unprotected. Needs the preprocessor, since the
+    # concatenation is written in macro names rather than in the path it makes.
+    add_custom_target(vgpu_check_session_paths ALL
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/hack/check_session_paths.sh
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "[vgpu] check session path routing in src/"
+        VERBATIM)
+    add_dependencies(vgpu-control vgpu_check_session_paths)
+
     # Pre-build: forbid public dlsym() calls in library/src/. We export our
     # own dlsym, so such a call resolves back into the interceptor instead
     # of libc. Bootstrapping real_dlsym uses dlvsym(), which we do not
@@ -222,6 +241,12 @@ endif()
 # anyone configures with -DBUILD_TESTS=ON. The subdirectory keeps the two test
 # families apart -- test/ needs a GPU and links CUDA, test/nogpu/ needs neither.
 #
+# Sources that touch neither CUDA nor NVML, shared by the GPU-less test and
+# the session-config tool so neither has to restate the library's own file
+# handling (region layout, locking, path derivation).
+set(VGPU_NODRIVER_SRCS
+    src/session.c src/config_io.c src/util.c src/lock.c src/metrics.c)
+
 option(BUILD_SM_NODE_TESTS "Build the GPU-less shared-region checks" OFF)
 if(BUILD_SM_NODE_TESTS)
     add_executable(test_sm_node_shared test/nogpu/test_sm_node_shared.c)
@@ -231,6 +256,34 @@ if(BUILD_SM_NODE_TESTS)
     add_executable(test_vmem_region_concurrency test/nogpu/test_vmem_region_concurrency.c)
     target_include_directories(test_vmem_region_concurrency PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # Unlike the two above -- which reimplement the region semantics against
+    # their own temp files -- this one exercises the real path derivation and
+    # the real config writer, so it links the driver-free sources.
+    add_executable(test_session_paths test/nogpu/test_session_paths.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_session_paths PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # Drives the provider ABI against a concurrent reader, so it needs the
+    # provider too -- the rewrite it checks is the provider.s.
+    add_executable(test_session_pids_concurrency
+        test/nogpu/test_session_pids_concurrency.c src/checkpoint_provider.c ${VGPU_NODRIVER_SRCS})
+    target_include_directories(test_session_pids_concurrency PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # Header-only: exercises the inline sm_delta_step directly, plus a frozen
+    # replica of the removed formula for the MAE comparison.
+    add_executable(test_delta_step test/nogpu/test_delta_step.c)
+    target_include_directories(test_delta_step PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+    # The dominance campaign: 55 GPU models x limits 1-100 x 3 workloads x
+    # 2 delays, new step vs frozen old, asserting zero regressed cells.
+    # -O2 keeps the 33000-cell grid to ~10 seconds regardless of build type.
+    add_executable(test_delta_campaign test/nogpu/test_delta_campaign.c)
+    target_include_directories(test_delta_campaign PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_options(test_delta_campaign PRIVATE -O2)
 
     # Exercises src/dlsym_entry.S with the real symbol predicates from
     # hook.h. Three pieces, because the bug only appears when the library
@@ -256,6 +309,15 @@ if(BUILD_SM_NODE_TESTS)
     # shim to preload, and reports failures that say nothing about the code.
     add_dependencies(test_dlsym_entry dlsym_entry_shim)
 endif()
+
+# Writes a session quota region the way the GPU-node agent would, so the
+# session paths can be exercised without Kubernetes. Needs no CUDA toolkit,
+# hence its placement outside the CUDA tool block below.
+find_package(Threads REQUIRED)
+add_executable(vgpu-session-config tools/session_config.c ${VGPU_NODRIVER_SRCS})
+target_include_directories(vgpu-session-config PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(vgpu-session-config PRIVATE Threads::Threads)
 
 # find_package(CUDAToolkit REQUIRED)
 add_executable(mem_occupy_tool tools/mem_occupy_tool.c)

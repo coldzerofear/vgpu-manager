@@ -55,17 +55,25 @@ extern "C" {
 #define CUDA_INTERNAL_CALL(table, sym, ...)                                    \
   ({                                                                           \
     cuda_sym_t _entry = CUDA_FIND_ENTRY(table, sym);                           \
-    _entry(__VA_ARGS__);                                                       \
+    CUresult __ret = CUDA_ERROR_NOT_FOUND;                                     \
+    if (likely(_entry)) {                                                      \
+      __ret = _entry(__VA_ARGS__);                                             \
+    }                                                                          \
+    __ret;                                                                     \
   })
 
 #define CUDA_ENTRY_CALL(table, sym, ...)                                       \
   ({                                                                           \
     LOGGER(DETAIL, "hooking %s", #sym);                                        \
+    CUresult __ret;                                                            \
     cuda_sym_t _entry = CUDA_FIND_ENTRY(table, sym);                           \
-    if (unlikely(!_entry)) {                                                   \
-      LOGGER(ERROR, "hooking failed: %s is NULL", #sym);                       \
+    if (likely(_entry)) {                                                      \
+      __ret = _entry(__VA_ARGS__);                                             \
+    } else {                                                                   \
+      LOGGER(WARNING, "hooking failed: %s is NULL", #sym);                     \
+      __ret = CUDA_ERROR_NOT_FOUND;                                            \
     }                                                                          \
-    _entry(__VA_ARGS__);                                                       \
+    __ret;                                                                     \
   })
 
 #define CUDA_ERROR(table, code)                                                \

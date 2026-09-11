@@ -2,6 +2,8 @@
 
 CUDA driver API dynamic library for GPU virtualization and resource hard isolation.
 
+Using [LUPINE](https://github.com/lupinemachines/lupine) to unlock remote GPU virtualization and achieve session level resource hard isolation
+
 ## Project objectives:
 
 - [x] Ensure hard isolation of gpu resources
@@ -16,6 +18,10 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 - [x] Support client registration mode to improve container security
 - [x] Automatic SM current limiting algorithm routing
 - [x] Multi process shared token bucket to prevent SM utilization fluctuation
+- [x] Remote session device visibility isolation
+- [x] Remote Session level multi process shared token bucket
+- [x] Remote Session level memory strict isolation
+- [x] Remote Session level SM core strict isolation
 
 > Note: Checking indicates that the function has been completed, while unchecking indicates that the function has not been completed or is planned to be implemented.
 
@@ -47,9 +53,57 @@ CUDA driver API dynamic library for GPU virtualization and resource hard isolati
 * MANAGER_COMPATIBILITY_MODE: Environment compatibility mode
 * EXTERNAL_SM_WATCHER_ENABLED: Enable external SM util watcher
 * VMEMORY_NODE_ENABLED: Enable virtual memory node tracing
-* CUDA_SM_CONTROLLER: Specify the core limit algorithm (delta/aimd/auto, default: delta)
-* CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: Accelerate delta utilization rate climb speed - default 64
-* CUDA_SM_SHARED_BUCKET: Enable SM shared token bucket
+* CUDA_SM_CONTROLLER: Core limit algorithm: delta (default) | aimd | auto. delta was rebuilt after
+  HAMi-core #274 (the old sm_num^2 step could not hold the limit on very high-SM cards): its step is
+  now pool-relative -- a granularity seed plus a share-proportional term -- and holds the limit for
+  every card/workload cell in the simulated closed loop (test/nogpu/test_delta_step.c; hardware
+  validation via test/ablation pending). aimd remains available; see docs/sm_controller_aimd.md
+* CUDA_SM_AIMD_MD_DIVISOR / _EFF_RATIO / _AI_BASE_DIV / _DEADBAND_RATIO / _MD_COOLDOWN_CYCLES: AIMD tunables
+* CUDA_SM_DELTA_INCREMENT_DIVISOR: delta seed divisor R (min step = pool*5/R). Default 81920; the
+  granularity knob, not a speed knob -- see include/sm_delta.h
+* CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR: delta emergency cut floor divisor, active only when util exceeds
+  twice the target - default 64, <=0 disables
+* CUDA_SM_SHARED_BUCKET: Container-wide shared SM token bucket. On by default; set to 0 to opt out
+  (ignored in a remote session, where a per-process bucket would give every connection the full core quota)
+
+### Remote session (lupine-server) only
+
+Set on the GPU node, not inside a pod. See `docs/remote_gpu_pool_research_design.md`.
+
+* VGPU_REMOTE_MODE: Mark the process as serving remote sessions only. Without a valid session quota the
+  library refuses to serve rather than falling back to a permissive config
+* VGPU_CONFIG_SESSION_BASE: Directory holding session directories (default /etc/vgpu-manager/remote-sessions)
+* VGPU_CONFIG_SESSION_PATH: This session's directory. Set per connection by the checkpoint provider, never by
+  hand; the quota, pids.config, .vgpu_lock, .vmem_node and .sm_node all derive from it
+
+## Remote GPU deployment (lupine-server)
+
+The same `libvgpu-control.so` is both the LD_PRELOAD hook library and lupine's
+checkpoint provider, which is what injects the per-connection session:
+
+```
+LD_PRELOAD=/opt/vgpu/lib/libvgpu-control.so \
+VGPU_REMOTE_MODE=1 \
+LUPINE_CHECKPOINT_LIBRARY=/opt/vgpu/lib/libvgpu-control.so \
+VGPU_CONFIG_SESSION_BASE=/etc/vgpu-manager/remote-sessions \
+./lupine_driver_server
+```
+
+`LUPINE_CHECKPOINT_LIBRARY` must be set explicitly since the artifact is not
+named `liblupinecr.so`. Nothing here changes local behaviour: with none of these
+set the library resolves every path to its historical location and no session
+code runs.
+
+`vgpu-session-config` writes a session quota the way the GPU-node agent would,
+so the paths can be exercised without Kubernetes:
+
+```
+vgpu-session-config --session <LUPINE_SESSION> --device GPU-xxxx,mem=8192,core=50
+```
+
+> Remote testing must use a GPU-less client or `LUPINE_DISABLE_LOCAL=1`.
+> Otherwise lupine-client routes device 0 to a local GPU and the server-side
+> library never sees the allocation.
 
 ## Log level
 

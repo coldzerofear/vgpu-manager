@@ -302,6 +302,11 @@ func (f *gpuFilter) preFilterRequestNodes(args extenderv1.ExtenderArgs) (
 			NodeNames: args.NodeNames,
 		}
 	}
+	if args.Pod.Spec.OS != nil && args.Pod.Spec.OS.Name == corev1.Windows {
+		return nil, nil, nil, &extenderv1.ExtenderFilterResult{
+			Error: "vGPU does not support windows pod",
+		}
+	}
 
 	var (
 		filteredNodes []corev1.Node
@@ -443,7 +448,8 @@ func (f *gpuFilter) getNodesOnCache(nodeNames ...string) ([]corev1.Node, map[str
 func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 	policy, _ := util.HasAnnotation(pod, util.MemorySchedulerPolicyAnnotation)
 	policy = strings.ToLower(strings.TrimSpace(policy))
-	if policy == util.VirtualMemoryPolicy.String() || strings.HasPrefix(policy, "virt") {
+	switch {
+	case policy == util.VirtualMemoryPolicy.String(), strings.HasPrefix(policy, "virt"):
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.VirtualMemoryPolicy)
 		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
 			if config.MemoryScaling <= 1 {
@@ -452,8 +458,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 			}
 			return nil
 		}
-	}
-	if policy == util.PhysicalMemoryPolicy.String() || strings.HasPrefix(policy, "phy") {
+	case policy == util.PhysicalMemoryPolicy.String(), strings.HasPrefix(policy, "phy"):
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.PhysicalMemoryPolicy)
 		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
 			if config.MemoryScaling > 1 {
@@ -462,9 +467,10 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 			}
 			return nil
 		}
-	}
-	return func(_ *corev1.Node, _ *device.NodeDeviceInfo, _ *device.NodeConfigInfo) *reason.FilterReason {
-		return nil
+	default:
+		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, _ *device.NodeConfigInfo) *reason.FilterReason {
+			return nil
+		}
 	}
 }
 
@@ -524,6 +530,11 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationReq
 	)
 	memoryPolicyFunc := GetMemoryPolicyFunc(req.Pod)
 	for i, node := range nodes {
+		if !node.DeletionTimestamp.IsZero() {
+			klog.V(4).InfoS("node is already marked as deleted", "node", node.Name)
+			failed[node.Name] = reason.New(reason.NodeDeleting)
+			continue
+		}
 		var nodeConfig *device.NodeConfigInfo
 		var nodeDevice *device.NodeDeviceInfo
 		if r := CheckNode(&node, memoryPolicyFunc, func(
@@ -950,11 +961,15 @@ func (f *gpuFilter) deviceFilter(
 		// simulation burst must never queue behind — or ahead of — live scheduling.
 		lockStart := time.Now()
 		f.locker.Lock()
-		defer f.locker.Unlock()
+		lockTime := time.Now()
+		defer func() {
+			metrics.ObserveStage(mode.verb(), metrics.StageLockTime, lockTime)
+			f.locker.Unlock()
+		}()
 		// Recorded separately from the stage total: SerializedNodeFilter is on by
 		// default, so on a busy cluster this is queueing, not work, and folding the
 		// two together makes contention look like slow allocation.
-		metrics.ObserveStage(metrics.VerbFilter, metrics.StageLockWait, lockStart)
+		metrics.ObserveStage(mode.verb(), metrics.StageLockWait, lockStart)
 
 		// Ensure that the context has not timed out
 		if err := ctx.Err(); err != nil {

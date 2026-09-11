@@ -105,18 +105,26 @@ limitations under the License.
  * mostly-idle workloads). */
 #define CUDA_SM_USAGE_THRESHOLD_ENV         "CUDA_SM_USAGE_THRESHOLD"
 
-/* delta() ramp-floor divisor N: the grow/cut step is floored at
- * g_total*diff/(up_limit*N), so the bulk ramp to the limit takes ~N watcher
- * cycles regardless of SM count. Smaller N = faster ramp (and, on tiny slices,
- * coarser near-limit tracking); larger N = gentler. Default 64. Set to 0 (or any
- * value <= 0) to DISABLE the floor entirely and revert to delta's raw
- * sm^2-scaled step (the pre-floor behaviour). */
-/* Container-wide shared token bucket. Off by default: with it off the bucket
- * stays the per-process static it has always been and behaviour is unchanged,
- * so the feature carries no risk for the single-process containers that gain
- * nothing from it. See docs/sm_multiproc_shared_bucket_design.md. */
+/* delta() emergency cut-floor divisor N: when util exceeds TWICE the target
+ * (a real blowout, where the share-proportional cut stalls because share is
+ * tiny relative to the excess), the cut is floored at g_total*diff/(u*N).
+ * Default 64. <= 0 disables the emergency floor. Grow is never floored --
+ * an absolute grow step is exactly the bucket-flooding mechanism delta was
+ * rebuilt to remove (see include/sm_delta.h). */
+/* Container-wide shared token bucket. ON by default -- one bucket per container
+ * is what a core quota means, since a per-process bucket lets an N-process
+ * container use N times its cores. Set to 0 to fall back to the per-process
+ * bucket; a session refuses that opt-out.
+ * See docs/sm_multiproc_shared_bucket_design.md. */
 #define CUDA_SM_SHARED_BUCKET_ENV "CUDA_SM_SHARED_BUCKET"
 #define CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV "CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR"
+
+/* Seed divisor R in delta(): the minimum step is total*MIN_INCREMENT/R -- the
+ * controller's GRANULARITY. A step coarser than a light workload's per-tick
+ * consumption pins util at 100% (the share cannot express a small enough
+ * refill), so R errs fine: 81920 ~= 0.006% of the pool. Response speed is
+ * owned by the share-proportional term, not this knob. See sm_delta.h. */
+#define CUDA_SM_DELTA_INCREMENT_DIVISOR_ENV "CUDA_SM_DELTA_INCREMENT_DIVISOR"
 
 /*-- Cache: Read only once during the process lifecycle /proc/1/environ --*/
 static char           *g_environ_buf  = NULL;   /* The cached raw content */
@@ -551,11 +559,18 @@ int get_sm_auto_external_util_threshold(int *out) {
 }
 
 /* delta() ramp-floor divisor. Accepts any int: a value <= 0 is the explicit
- * "disable the ramp floor" sentinel (delta reverts to its raw sm^2-scaled step,
- * i.e. the pre-floor behaviour); > 0 is the active divisor. Unset -> default 64.
+ * "disable the ramp floor" sentinel (delta reverts to its raw pool-relative
+ * step); > 0 is the active divisor. Unset -> default 64.
  * delta() guards the division on divisor > 0, so a non-positive value is safe. */
 int get_delta_ramp_floor_divisor(int *out) {
   return get_int_env(CUDA_SM_DELTA_RAMP_FLOOR_DIVISOR_ENV, 64, out);
+}
+
+/* delta() pool-relative increment divisor R (see the env comment above and
+ * include/sm_delta.h). Positive only -- 0 would divide by zero and a negative
+ * value would invert the controller; bad values fall back to the default. */
+int get_delta_increment_divisor(int *out) {
+  return get_positive_int_env(CUDA_SM_DELTA_INCREMENT_DIVISOR_ENV, 81920, out);
 }
 
 /* AIMD deadband lower edge / 1000. Caller MUST additionally check
@@ -570,8 +585,8 @@ int get_aimd_md_cooldown_cycles(int *out) {
 }
 
 /* Container-wide shared token bucket on/off. Same true/TRUE/1 spelling as the
- * other boolean envs. Unset leaves *out untouched at the caller's default (0),
- * so the shared bucket is opt-in. */
+ * other boolean envs. Unset leaves *out untouched at the caller's default,
+ * which is ON -- this is an opt-OUT knob. */
 int get_sm_shared_bucket(int *out) {
   char *str = _getenv(CUDA_SM_SHARED_BUCKET_ENV);
   if (!str) {
@@ -599,10 +614,19 @@ static int compare_pids(const void *a, const void *b) {
  * other process waiting on that device. LOCK_NB throughout, never a
  * blocking LOCK_SH, so a stalled writer can't wedge CUDA calls behind it.
  *
- * Giving up and reading anyway is safe: the writer never truncates before
- * writing, so an unlocked reader sees a complete list, at worst with dead
- * trailing PIDs from a previous, longer-lived registration that match
- * nothing on the device. */
+ * Giving up and reading anyway is safe: no writer truncates before writing,
+ * so an unlocked reader sees a complete list, at worst with dead trailing
+ * PIDs from a previous, longer-lived registration that match nothing on the
+ * device.
+ *
+ * That is a contract on the writers, not an observation about them, and it
+ * has two parties: the manager at container registration, and the checkpoint
+ * provider on every session connect/disconnect (write_pids in
+ * checkpoint_provider.c, which writes the whole list then shrinks the file
+ * for exactly this reason). Any third writer must do the same -- a reader
+ * that sees a short list under-counts used memory, and the accounting path
+ * treats an empty one as "never registered" and aborts the process.
+ * test/nogpu/test_session_pids_concurrency.c holds the provider to it. */
 #define PIDS_CONFIG_LOCK_YIELDS 4
 #define PIDS_CONFIG_LOCK_SLEEPS 5
 #define PIDS_CONFIG_LOCK_BACKOFF_NS (200 * 1000L) /* 200us, so ~1ms worst case */
@@ -771,19 +795,6 @@ int file_exist(const char *file_path) {
 int pid_exist(int pid) {
   if (pid <= 0) return -1;
   return (kill(pid, 0) == 0 ? 0 : (errno == ESRCH ? -1 : 0));
-//  int result = kill(pid, 0);
-//  if (result == 0) {
-//    return 0;
-//  }
-//  switch (errno) {
-//  case ESRCH:
-//    return -1;
-//  case EPERM:
-//    return 0;
-//  }
-//  char path[64];
-//  snprintf(path, sizeof(path), "/proc/%d", pid);
-//  return file_exist(path);
 }
 
 // 1: is zombie

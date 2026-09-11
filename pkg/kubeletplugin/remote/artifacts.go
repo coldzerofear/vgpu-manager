@@ -1,0 +1,182 @@
+/*
+Copyright 2026 coldzerofear
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package remote
+
+import (
+	"fmt"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/util"
+)
+
+// artifactSelection is the outcome of picking a client artifact version for a
+// claim: which host directory to bind-mount and which container path to put
+// on the dynamic linker search path.
+type artifactSelection struct {
+	// Version directory name as found on disk (e.g. "12.9" or "12.9.1").
+	Name string
+	// HostDir is <hostArtifactsDir>/<Name>, the CDI mount source.
+	HostDir string
+	// ContainerDir is the fixed in-container mount target: the selected
+	// version is always presented at <manager-root>/driver, mirroring where
+	// the local path mounts libvgpu-control.so. The shims sit flat in it
+	// (libcuda.so.1 / libnvidia-ml.so.1) and are made loadable through the
+	// generated ld.so.preload file (see ensureLdPreloadFile).
+	ContainerDir string
+	// ETag of the bundle the directory was installed from; "" when unknown
+	// (seeded by other means). When set it is handed to the pod as
+	// LUPINE_CLIENT_ETAG so the server can verify the build.
+	ETag string
+	// NvidiaSMIHost is the host path of the nvidia-smi binary shipped next
+	// to the shims in newer artifact images, or "" when this artifact
+	// version does not carry one.
+	NvidiaSMIHost string
+}
+
+// selectArtifact picks the highest artifact version that is <= serverCeiling
+// (design §4.3: client must not be newer than the server). Directory entries
+// that do not parse as versions are ignored (so the control library files
+// living in the same driver dir are harmless). A miss returns an error the
+// kubelet treats as retryable — on a fresh node the artifacts may still be
+// materializing (design §4.4).
+//
+// artifactsDir is the directory as visible to this process (for listing);
+// hostArtifactsDir is the same directory as visible to the runtime (for the
+// CDI mount source).
+func selectArtifact(artifactsDir, hostArtifactsDir string, serverCeiling *semver.Version) (*artifactSelection, error) {
+	entries, err := os.ReadDir(artifactsDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read client artifacts dir %q: %w", artifactsDir, err)
+	}
+
+	var bestName string
+	var bestVer *semver.Version
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		v, err := semver.NewVersion(e.Name())
+		if err != nil {
+			continue
+		}
+		if v.Compare(serverCeiling) > 0 {
+			continue
+		}
+		if bestVer == nil || v.Compare(bestVer) > 0 {
+			bestVer = v
+			bestName = e.Name()
+		}
+	}
+	if bestVer == nil {
+		return nil, fmt.Errorf("no client artifact version <= server CUDA %s found under %q (present: %s)",
+			serverCeiling, artifactsDir, dirNames(entries))
+	}
+
+	containerDir := filepath.Join(util.ManagerRootPath, util.Driver)
+	selection := &artifactSelection{
+		Name:         bestName,
+		HostDir:      filepath.Join(hostArtifactsDir, bestName),
+		ContainerDir: containerDir,
+	}
+	// Newer artifact images ship nvidia-smi next to the shims. Optional:
+	// older artifacts simply do not have it and nothing extra is mounted.
+	if st, err := os.Stat(filepath.Join(artifactsDir, bestName, "nvidia-smi")); err == nil && st.Mode().IsRegular() {
+		selection.NvidiaSMIHost = filepath.Join(hostArtifactsDir, bestName, "nvidia-smi")
+	}
+	//if selection.NvidiaSMIHost == "" {
+	//	selection.NvidiaSMIHost, _ = nvidia.RootPath("/").GetNvidiaSMIPath()
+	//}
+	return selection, nil
+}
+
+func dirNames(entries []os.DirEntry) string {
+	names := ""
+	for _, e := range entries {
+		if names != "" {
+			names += ","
+		}
+		names += e.Name()
+	}
+	if names == "" {
+		return "<empty>"
+	}
+	return names
+}
+
+// The driver shims a client artifact ships.
+const (
+	shimLibCudaPrefix     = "libcuda.so*"
+	shimLibNvmlPrefix     = "libnvidia-ml.so*"
+	shimLibCudartPrefix   = "libcudart.so*"
+	shimLibCublasPrefix   = "libcublas.so*"
+	shimLibCublasLtPrefix = "libcublasLt.so*"
+	shimLibCufftPrefix    = "libcufft.so*"
+)
+
+var optionalShimLibrary = map[string]bool{
+	shimLibCudaPrefix:     true,
+	shimLibNvmlPrefix:     true,
+	shimLibCudartPrefix:   false,
+	shimLibCublasPrefix:   false,
+	shimLibCublasLtPrefix: false,
+	shimLibCufftPrefix:    false,
+}
+
+// ensureLdPreloadFile writes <artifactsDir>/<ver>/RemoteLdPreload listing the
+// artifact's shims by their in-container paths, one per line, and returns the
+// host path of that file for the CDI mount. Idempotent; the content is
+// refreshed (write + rename, so concurrent readers never see a torn file)
+// when the shim set changes on an artifact update.
+func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, error) {
+	var lines []string
+	// Fixed order: the file is compared byte-for-byte on the next prepare,
+	// so map iteration order must not make an unchanged shim set look new.
+	for _, libPrefix := range slices.Sorted(maps.Keys(optionalShimLibrary)) {
+		pattern := filepath.Join(artifactsDir, sel.Name, libPrefix)
+		if matches, err := filepath.Glob(pattern); err != nil {
+			return "", fmt.Errorf("glob %s: %w", pattern, err)
+		} else if len(matches) > 0 {
+			slices.Sort(matches)
+			for _, match := range matches {
+				lines = append(lines, filepath.Join(sel.ContainerDir, filepath.Base(match)))
+			}
+		} else if optionalShimLibrary[libPrefix] {
+			// Without the Client shim the artifact is unusable; fail the
+			// prepare (retryable — the artifact may still be materializing).
+			return "", fmt.Errorf("client artifact %s has no %s", sel.Name, libPrefix)
+		}
+	}
+	content := strings.Join(lines, "\n") + "\n"
+
+	path := filepath.Join(artifactsDir, sel.Name, RemoteLdPreload)
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+		return filepath.Join(sel.HostDir, RemoteLdPreload), nil
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", fmt.Errorf("rename %s: %w", tmp, err)
+	}
+	return filepath.Join(sel.HostDir, RemoteLdPreload), nil
+}
