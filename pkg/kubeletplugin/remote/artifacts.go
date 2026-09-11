@@ -124,15 +124,21 @@ func dirNames(entries []os.DirEntry) string {
 
 // The driver shims a client artifact ships.
 const (
-	shimLibCudaPrefix   = "libcuda.so*"
-	shimLibNvmlPrefix   = "libnvidia-ml.so*"
-	shimLibCudartPrefix = "libcudart.so*"
+	shimLibCudaPrefix     = "libcuda.so*"
+	shimLibNvmlPrefix     = "libnvidia-ml.so*"
+	shimLibCudartPrefix   = "libcudart.so*"
+	shimLibCublasPrefix   = "libcublas.so*"
+	shimLibCublasLtPrefix = "libcublasLt.so*"
+	shimLibCufftPrefix    = "libcufft.so*"
 )
 
 var optionalShimLibrary = map[string]bool{
-	shimLibCudaPrefix:   true,
-	shimLibNvmlPrefix:   true,
-	shimLibCudartPrefix: false,
+	shimLibCudaPrefix:     true,
+	shimLibNvmlPrefix:     true,
+	shimLibCudartPrefix:   false,
+	shimLibCublasPrefix:   false,
+	shimLibCublasLtPrefix: false,
+	shimLibCufftPrefix:    false,
 }
 
 // ensureLdPreloadFile writes <artifactsDir>/<ver>/RemoteLdPreload listing the

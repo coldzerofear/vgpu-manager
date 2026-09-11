@@ -40,6 +40,8 @@ scheduler:
     - key: CriticalAddonsOnly
       operator: Exists
   terminationGracePeriodSeconds: 30
+  # HTTP timeout time for device extension scheduler, unit: seconds
+  extenderHTTPTimeout: 30
   kubeScheduler:
     image: registry.cn-hangzhou.aliyuncs.com/google_containers/kube-scheduler
     # Warning: Change to your own cluster version (default automatic detection)

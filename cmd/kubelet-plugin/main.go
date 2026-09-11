@@ -352,6 +352,9 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 				return fmt.Errorf("invalid --nri-plugin-idx %q: %w", flags.NRIPluginIdx, err)
 			}
 		}
+		if util.PathIsNotExist(flags.NRIRoot) {
+			return fmt.Errorf("invalid --nri-root %q: directory does not exist", flags.NRIRoot)
+		}
 	}
 
 	if featuregates.Enabled(featuregates.VGPUSupport) {

@@ -48,7 +48,7 @@ const Name = "BindPredicate"
 var _ predicate.BindPredicate = &nodeBinding{}
 
 func New(client kubernetes.Interface, recorder record.EventRecorder, podLister client.PodLister, serialBindNode bool) (*nodeBinding, error) {
-	minLockingDuration := 30 * time.Millisecond
+	minLockingDuration := 20 * time.Millisecond
 	locker := serial.NewLocker(serial.WithName(Name),
 		serial.WithEnabled(serialBindNode),
 		serial.WithLockDuration(&minLockingDuration))
@@ -84,7 +84,11 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	// node this is queueing, not work.
 	lockStart := time.Now()
 	b.locker.Lock(args.Node)
-	defer b.locker.Unlock(args.Node)
+	lockTime := time.Now()
+	defer func() {
+		metrics.ObserveStage(metrics.VerbBind, metrics.StageLockTime, lockTime)
+		b.locker.Unlock(args.Node)
+	}()
 	metrics.ObserveStage(metrics.VerbBind, metrics.StageLockWait, lockStart)
 
 	var (

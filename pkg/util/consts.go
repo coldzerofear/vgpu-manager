@@ -56,7 +56,7 @@ const (
 	CoschedulingPodGroupLabel     = "scheduling.x-k8s.io/pod-group"
 	// Deprecated: kubernetes-sigs/scheduler-plugins/lightweight-coscheduling
 	CoschedulingPodGroupNameLabel = "pod-group.scheduling.sigs.k8s.io/name"
-
+	// RequiredNRIPluginsPodAnnotation Pod level NRI required verification plugin set
 	RequiredNRIPluginsPodAnnotation = plugin.RequiredPluginsAnnotation + "/pod"
 )
 

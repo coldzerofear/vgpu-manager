@@ -961,11 +961,15 @@ func (f *gpuFilter) deviceFilter(
 		// simulation burst must never queue behind — or ahead of — live scheduling.
 		lockStart := time.Now()
 		f.locker.Lock()
-		defer f.locker.Unlock()
+		lockTime := time.Now()
+		defer func() {
+			metrics.ObserveStage(mode.verb(), metrics.StageLockTime, lockTime)
+			f.locker.Unlock()
+		}()
 		// Recorded separately from the stage total: SerializedNodeFilter is on by
 		// default, so on a busy cluster this is queueing, not work, and folding the
 		// two together makes contention look like slow allocation.
-		metrics.ObserveStage(metrics.VerbFilter, metrics.StageLockWait, lockStart)
+		metrics.ObserveStage(mode.verb(), metrics.StageLockWait, lockStart)
 
 		// Ensure that the context has not timed out
 		if err := ctx.Err(); err != nil {

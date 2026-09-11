@@ -83,8 +83,9 @@ const (
 	// The lupine client injection triplet (docs/lupine_env_reference.md §5).
 	// LUPINE_DISABLE_LOCAL is mandatory: without it a client with a local GPU
 	// routes device 0 locally and never reaches the server.
-	EnvLupineServer       = "LUPINE_SERVER"
-	EnvLupineSession      = "LUPINE_SESSION"
+	EnvLupineServer  = "LUPINE_SERVER"
+	EnvLupineSession = "LUPINE_SESSION"
+	// Deprecated: Lupine has removed environment variables and temporarily retained them for compatibility reasons
 	EnvLupineDisableLocal = "LUPINE_DISABLE_LOCAL"
 	// EnvLupineClientETag / EnvLupineClientPlatform let lupine-server verify
 	// that the client shims are the build it embeds (426 otherwise). Set only

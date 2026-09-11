@@ -50,7 +50,7 @@ data:
       preemptVerb: preempt
       nodeCacheCapable: true
       weight: 1
-      httpTimeout: 30s
+      httpTimeout: {{ .Values.scheduler.extenderHTTPTimeout }}s
       ignorable: false
       managedResources:
       # vgpu-number participates in in-tree NodeResourcesFit so default
@@ -88,7 +88,7 @@ data:
           "preemptVerb": "preempt",
           "weight": 1,
           "nodeCacheCapable": true,
-          "httpTimeout": 30000000000,
+          "httpTimeout": {{ mul .Values.scheduler.extenderHTTPTimeout 1000000000 }},
           "managedResources": [
             {
               "name": "{{ (default "nvidia.com" .Values.globalDomain) | trimSuffix "/" }}/vgpu-number",

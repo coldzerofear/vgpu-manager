@@ -523,6 +523,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 	baseEnv := []string{
 		// Remote GPU without injecting any real Nvidia devices or drivers
 		"NVIDIA_VISIBLE_DEVICES=void",
+		// TODO In the future, this failed environment variable will be removed
 		fmt.Sprintf("%s=1", EnvLupineDisableLocal),
 	}
 	if artifact.ETag != "" {
