@@ -30,9 +30,7 @@ nvmlReturn_t nvmlShutdown(void) {
 }
 
 const char *nvmlErrorString(nvmlReturn_t result) {
-  const char *(*_entry)(nvmlReturn_t) =
-      NVML_FIND_ENTRY(nvml_library_entry, nvmlErrorString);
-  return _entry(result);
+  return NVML_ERROR(nvml_library_entry, result);
 }
 
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
