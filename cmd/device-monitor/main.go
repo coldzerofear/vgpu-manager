@@ -178,6 +178,20 @@ func runApp(opt *options.Options) (exitCode int) {
 	containerListerStart := func(time.Duration, <-chan struct{}) {}
 	if opt.EnableDRAMonitor {
 		klog.Infoln("Initialize DRA driver path monitoring")
+		// Refuse up front when the cluster serves no DRA API at all: the
+		// slice/claim informers below would otherwise retry a 404 forever,
+		// which never syncs, so /readyz stays red and the process looks hung
+		// instead of misconfigured. Any served version will do — the
+		// informers negotiate it (see metrics.GetResourceClaimInformer).
+		draAPI := client.DRAAPIRequirement{
+			Subject: "--enable-dra-monitor",
+			Remedy: "Drop --enable-dra-monitor to monitor the device-plugin path instead," +
+				" or enable dynamic resource allocation on the apiserver.",
+		}
+		if err := draAPI.Check(kubeClient.Discovery()); err != nil {
+			klog.Errorf("%v", err)
+			return exitCode
+		}
 		podInformer, err := metrics.GetDraDriverPodInformer(factory, nodeConfig.GetNodeName(),
 			opt.FeatureGate.Enabled(util.RemoteGPUSupport))
 		if err != nil {
@@ -189,9 +203,14 @@ func runApp(opt *options.Options) (exitCode int) {
 			klog.Errorf("GetResourceSliceInformer failed: %v", err)
 			return exitCode
 		}
+		claimInformer, err := metrics.GetResourceClaimInformer(factory)
+		if err != nil {
+			klog.Errorf("GetResourceClaimInformer failed: %v", err)
+			return exitCode
+		}
 		podLister := client.NewPodLister(podInformer.GetIndexer())
 		sliceLister := resourcev1.NewResourceSliceLister(sliceInformer.GetIndexer())
-		claimLister := factory.Resource().V1().ResourceClaims().Lister()
+		claimLister := resourcev1.NewResourceClaimLister(claimInformer.GetIndexer())
 		draCollector, err := collector.NewDRAGPUCollector(
 			nodeConfig, nodeLister, podLister, sliceLister, claimLister,
 			opt.FeatureGate, opt.RemoteSessionBase, util.ManagerRootPath,

@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -163,6 +164,26 @@ func main() {
 				return fmt.Errorf("create client sets: %w", err)
 			}
 			cfg.ClientSets = clientSets
+
+			// The agent's slice/claim informers are the only thing standing
+			// between this process and the ready file the lupine-server
+			// container waits on, so an unavailable DRA API must fail here
+			// rather than leave those informers retrying a 404 forever (which
+			// never syncs -> ready file never written -> the whole pod hangs
+			// with no obvious cause). v1 is required, not merely preferred:
+			// the driver allocates with consumable capacity, which only
+			// exists in resource.k8s.io/v1 (Kubernetes 1.34+), so the beta
+			// versions a cluster might still serve are of no use to us and
+			// are refused explicitly instead of failing later, deeper.
+			draAPI := client.DRAAPIRequirement{
+				Subject: Component,
+				Version: "v1",
+				Remedy: "Upgrade the cluster to 1.34+, or deploy the device-plugin (non-DRA) path" +
+					" on these nodes instead.",
+			}
+			if err := draAPI.Check(clientSets.Core.Discovery()); err != nil {
+				return err
+			}
 
 			ctx, cancel := signal.NotifyContext(c.Context, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 			defer cancel()
