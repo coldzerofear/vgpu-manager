@@ -84,9 +84,9 @@ func (b *nodeBinding) Bind(ctx context.Context, args extenderv1.ExtenderBindingA
 	// node this is queueing, not work.
 	lockStart := time.Now()
 	b.locker.Lock(args.Node)
-	lockTime := time.Now()
+	lockedTime := time.Now()
 	defer func() {
-		metrics.ObserveStage(metrics.VerbBind, metrics.StageLockTime, lockTime)
+		metrics.ObserveStage(metrics.VerbBind, metrics.StageLockedTime, lockedTime)
 		b.locker.Unlock(args.Node)
 	}()
 	metrics.ObserveStage(metrics.VerbBind, metrics.StageLockWait, lockStart)

@@ -961,9 +961,9 @@ func (f *gpuFilter) deviceFilter(
 		// simulation burst must never queue behind — or ahead of — live scheduling.
 		lockStart := time.Now()
 		f.locker.Lock()
-		lockTime := time.Now()
+		lockedTime := time.Now()
 		defer func() {
-			metrics.ObserveStage(mode.verb(), metrics.StageLockTime, lockTime)
+			metrics.ObserveStage(mode.verb(), metrics.StageLockedTime, lockedTime)
 			f.locker.Unlock()
 		}()
 		// Recorded separately from the stage total: SerializedNodeFilter is on by
