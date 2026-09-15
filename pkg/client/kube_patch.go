@@ -110,8 +110,11 @@ func PatchPodAllocationSucceed(kubeClient kubernetes.Interface, pod *corev1.Pod)
 		},
 	}
 	if len(pod.Spec.NodeName) > 0 {
-		// Covering to correct certain possible errors
-		patchData.Labels[util.PodMetricsNodeLabel] = &pod.Spec.NodeName
+		// Covering to correct certain possible errors. The metrics come from the
+		// node whose devices the pod uses: a remote pod's GPU server.
+		if nodeName := util.PodPlanSchedulingNode(pod); len(nodeName) > 0 {
+			patchData.Labels[util.PodMetricsNodeLabel] = &nodeName
+		}
 	}
 	return retry.OnError(retry.DefaultRetry, util.ShouldRetry, func() error {
 		return PatchPodMetadata(kubeClient, pod, patchData)
