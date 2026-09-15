@@ -151,7 +151,7 @@ func TestMaterialize(t *testing.T) {
 		result(testNode, "vgpu-2", "50", "4Gi"),
 		result(testNode, "vgpu-0", "", ""), // whole device: no limits
 	)
-	if err := store.Materialize("uid-1", claim, nd, nil); err != nil {
+	if err := store.MaterializeClaim("uid-1", claim, nd, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -191,21 +191,21 @@ func TestMaterialize(t *testing.T) {
 		t.Fatal("slot 1 must be inactive")
 	}
 	// Idempotent for the same claim; refused for a different claim.
-	if err := store.Materialize("uid-1", claim, nd, nil); err != nil {
+	if err := store.MaterializeClaim("uid-1", claim, nd, nil); err != nil {
 		t.Fatalf("second materialize must be a no-op: %v", err)
 	}
-	if err := store.Materialize("uid-1", testClaim("uid-2", result(testNode, "vgpu-0", "", "")), nd, nil); err == nil {
+	if err := store.MaterializeClaim("uid-1", testClaim("uid-2", result(testNode, "vgpu-0", "", "")), nd, nil); err == nil {
 		t.Fatal("token reuse by another claim must be refused")
 	}
 
 	// Errors: unknown device, nothing on this pool, bad token.
-	if err := store.Materialize("t2", testClaim("u", result(testNode, "vgpu-9", "", "")), nd, nil); err == nil {
+	if err := store.MaterializeClaim("t2", testClaim("u", result(testNode, "vgpu-9", "", "")), nd, nil); err == nil {
 		t.Fatal("unknown device must fail")
 	}
-	if err := store.Materialize("t3", testClaim("u", result("elsewhere", "vgpu-0", "", "")), nd, nil); err == nil {
+	if err := store.MaterializeClaim("t3", testClaim("u", result("elsewhere", "vgpu-0", "", "")), nd, nil); err == nil {
 		t.Fatal("claim with nothing on this pool must fail")
 	}
-	if err := store.Materialize("../t", claim, nd, nil); err == nil {
+	if err := store.MaterializeClaim("../t", claim, nd, nil); err == nil {
 		t.Fatal("bad token must fail")
 	}
 
@@ -213,7 +213,7 @@ func TestMaterialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Token != "uid-1" || entries[0].ClaimUID != "uid-1" {
+	if len(entries) != 1 || entries[0].Token != "uid-1" || entries[0].Owner.UID != "uid-1" {
 		t.Fatalf("unexpected entries: %+v", entries)
 	}
 	if err := store.Remove("uid-1"); err != nil {
@@ -259,7 +259,7 @@ func TestMaterializePartitionFilterAndMerge(t *testing.T) {
 	claim.Status.Allocation.Devices.Results[1].Request = "c1"
 	claim.Status.Allocation.Devices.Results[2].Request = "c1"
 
-	if err := store.Materialize("tok-c1", claim, nd, []string{"c1"}); err != nil {
+	if err := store.MaterializeClaim("tok-c1", claim, nd, []string{"c1"}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := vgpuconfig.NewMmapResourceData(filepath.Join(base, "tok-c1", "config", "vgpu.config"))
@@ -277,7 +277,7 @@ func TestMaterializePartitionFilterAndMerge(t *testing.T) {
 	}
 
 	// A partition whose requests have nothing on this node is an error.
-	if err := store.Materialize("tok-none", claim, nd, []string{"nope"}); err == nil {
+	if err := store.MaterializeClaim("tok-none", claim, nd, []string{"nope"}); err == nil {
 		t.Fatal("expected error for a partition with no devices on this node")
 	}
 }
@@ -291,14 +291,14 @@ func TestSessionIndexAndRestore(t *testing.T) {
 	}
 	nd := NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()})
 	for _, tok := range []string{"t1", "t2"} {
-		if err := store.Materialize(tok, testClaim("uid-x", result(testNode, "vgpu-0", "", "")), nd, nil); err != nil {
+		if err := store.MaterializeClaim(tok, testClaim("uid-x", result(testNode, "vgpu-0", "", "")), nd, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := store.Materialize("t3", testClaim("uid-y", result(testNode, "vgpu-2", "", "")), nd, nil); err != nil {
+	if err := store.MaterializeClaim("t3", testClaim("uid-y", result(testNode, "vgpu-2", "", "")), nd, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := store.TokensOfClaim("uid-x"); len(got) != 2 || got[0] != "t1" || got[1] != "t2" {
+	if got := store.TokensOfOwner("uid-x"); len(got) != 2 || got[0] != "t1" || got[1] != "t2" {
 		t.Fatalf("index for uid-x: %v", got)
 	}
 
@@ -307,13 +307,13 @@ func TestSessionIndexAndRestore(t *testing.T) {
 	if err := again.Prepare(); err != nil {
 		t.Fatal(err)
 	}
-	if got := again.TokensOfClaim("uid-y"); len(got) != 1 || got[0] != "t3" {
+	if got := again.TokensOfOwner("uid-y"); len(got) != 1 || got[0] != "t3" {
 		t.Fatalf("restored index for uid-y: %v", got)
 	}
 	if err := again.Remove("t3"); err != nil {
 		t.Fatal(err)
 	}
-	if got := again.TokensOfClaim("uid-y"); len(got) != 0 {
+	if got := again.TokensOfOwner("uid-y"); len(got) != 0 {
 		t.Fatalf("index must drop removed sessions: %v", got)
 	}
 }
@@ -425,14 +425,14 @@ func TestSessionMarkerVersionAndSweep(t *testing.T) {
 	}
 	// t-old was built from claim rv 10, t-new from rv 30 (a re-allocation
 	// the sweeper may not have seen yet).
-	if err := store.Materialize("t-old", at("10"), nd, nil); err != nil {
+	if err := store.MaterializeClaim("t-old", at("10"), nd, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Materialize("t-new", at("30"), nd, nil); err != nil {
+	if err := store.MaterializeClaim("t-new", at("30"), nd, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Re-materializing keeps the original version: the session was not rebuilt.
-	if err := store.Materialize("t-old", at("40"), nd, nil); err != nil {
+	if err := store.MaterializeClaim("t-old", at("40"), nd, nil); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := store.List()
@@ -441,7 +441,7 @@ func TestSessionMarkerVersionAndSweep(t *testing.T) {
 	}
 	rvs := map[string]int64{}
 	for _, e := range entries {
-		rvs[e.Token] = e.ClaimRV
+		rvs[e.Token] = e.Owner.Version
 	}
 	if rvs["t-old"] != 10 || rvs["t-new"] != 30 {
 		t.Fatalf("marker versions: %v", rvs)
@@ -451,7 +451,7 @@ func TestSessionMarkerVersionAndSweep(t *testing.T) {
 	if n := store.Sweep("uid-x", nil, 20); n != 1 {
 		t.Fatalf("stale view must sweep only t-old, swept %d", n)
 	}
-	if got := store.TokensOfClaim("uid-x"); len(got) != 1 || got[0] != "t-new" {
+	if got := store.TokensOfOwner("uid-x"); len(got) != 1 || got[0] != "t-new" {
 		t.Fatalf("t-new must survive a stale view: %v", got)
 	}
 	// A current view that still lists t-new keeps it; one that does not, drops it.
@@ -471,7 +471,7 @@ func TestSessionMarkerVersionAndSweep(t *testing.T) {
 	if err := os.MkdirAll(old, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(old, sessionClaimMarker), []byte("uid-y\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(old, sessionOwnerMarker), []byte("uid-y\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	again := NewSessionStore(cfg)
@@ -491,7 +491,7 @@ func TestSessionRelease(t *testing.T) {
 	}
 	nd := NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()})
 	for tok, uid := range map[string]string{"a1": "uid-a", "a2": "uid-a", "b1": "uid-b"} {
-		if err := store.Materialize(tok, testClaim(uid, result(testNode, "vgpu-0", "", "")), nd, nil); err != nil {
+		if err := store.MaterializeClaim(tok, testClaim(uid, result(testNode, "vgpu-0", "", "")), nd, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -500,14 +500,14 @@ func TestSessionRelease(t *testing.T) {
 	if err != nil || n != 1 {
 		t.Fatalf("release = %d, %v", n, err)
 	}
-	if got := store.TokensOfClaim("uid-b"); len(got) != 1 {
+	if got := store.TokensOfOwner("uid-b"); len(got) != 1 {
 		t.Fatalf("uid-b must be untouched: %v", got)
 	}
 	// No tokens: everything the claim still has.
 	if n, err = store.Release("uid-a", nil); err != nil || n != 1 {
 		t.Fatalf("release all = %d, %v", n, err)
 	}
-	if got := store.TokensOfClaim("uid-a"); len(got) != 0 {
+	if got := store.TokensOfOwner("uid-a"); len(got) != 0 {
 		t.Fatalf("uid-a must be empty: %v", got)
 	}
 	// A malformed token is an error, not a directory walk.

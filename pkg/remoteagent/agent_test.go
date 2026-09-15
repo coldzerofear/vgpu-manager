@@ -399,7 +399,7 @@ func TestSweepClaimAndRelease(t *testing.T) {
 		return c
 	}
 	for _, tok := range []string{"t1", "t2"} {
-		if err := a.store.Materialize(tok, claimAt("10", "t1", "t2"), nd, nil); err != nil {
+		if err := a.store.MaterializeClaim(tok, claimAt("10", "t1", "t2"), nd, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -424,23 +424,23 @@ func TestSweepClaimAndRelease(t *testing.T) {
 
 	// An update that drops t2 from the annotations sweeps t2 only.
 	a.sweepClaim(claimAt("12", "t1"))
-	if got := a.store.TokensOfClaim("uid-x"); len(got) != 1 || got[0] != "t1" {
+	if got := a.store.TokensOfOwner("uid-x"); len(got) != 1 || got[0] != "t1" {
 		t.Fatalf("after update: %v", got)
 	}
 	// A stale deallocation event (older than the session) is ignored ...
 	a.sweepClaim(func() *resourceapi.ResourceClaim { c := claimAt("9"); c.Status.Allocation = nil; return c }())
-	if got := a.store.TokensOfClaim("uid-x"); len(got) != 1 {
+	if got := a.store.TokensOfOwner("uid-x"); len(got) != 1 {
 		t.Fatalf("stale event must not sweep: %v", got)
 	}
 	// ... a current one is not.
 	a.sweepClaim(func() *resourceapi.ResourceClaim { c := claimAt("13"); c.Status.Allocation = nil; return c }())
-	if got := a.store.TokensOfClaim("uid-x"); len(got) != 0 {
+	if got := a.store.TokensOfOwner("uid-x"); len(got) != 0 {
 		t.Fatalf("current deallocation must sweep: %v", got)
 	}
 
 	// ReleaseSessions RPC: by token, claim-scoped, counts what it removed.
 	for _, tok := range []string{"r1", "r2"} {
-		if err := a.store.Materialize(tok, claimAt("20", "r1", "r2"), nd, nil); err != nil {
+		if err := a.store.MaterializeClaim(tok, claimAt("20", "r1", "r2"), nd, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -524,7 +524,7 @@ func TestEnsureSessionRequiresRecordedToken(t *testing.T) {
 	if _, err = ensure("t9", "10"); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unrecorded token: want PermissionDenied, got %v", err)
 	}
-	if got := a.store.TokensOfClaim("uid-e"); len(got) != 1 {
+	if got := a.store.TokensOfOwner("uid-e"); len(got) != 1 {
 		t.Fatal("refused session must not be materialized")
 	}
 
@@ -544,7 +544,7 @@ func TestEnsureSessionRequiresRecordedToken(t *testing.T) {
 	if c, err := a.GetClaimByUID("uid-e"); err != nil || c.ResourceVersion != "11" {
 		t.Fatalf("cache must hold the fresh claim: %v %v", c, err)
 	}
-	if got := a.store.TokensOfClaim("uid-e"); len(got) != 2 {
+	if got := a.store.TokensOfOwner("uid-e"); len(got) != 2 {
 		t.Fatalf("sessions of claim: %v", got)
 	}
 

@@ -32,10 +32,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
-	"github.com/coldzerofear/vgpu-manager/pkg/metrics/collector"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
-	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
@@ -61,10 +58,13 @@ import (
 // base to live directly under the manager dir (the deployment default,
 // /etc/vgpu-manager/remote-sessions).
 const (
-	sessionLockDir     = "." + vgpu.VGPULockDirName
-	sessionVMemDir     = "." + util.VMemNode
-	sessionSMDir       = "." + util.SMNode
-	sessionClaimMarker = ".claim-uid" // agent-private: token -> claim UID, written last
+	sessionLockDir = "." + vgpu.VGPULockDirName
+	sessionVMemDir = "." + util.VMemNode
+	sessionSMDir   = "." + util.SMNode
+	// sessionOwnerMarker is agent-private: token -> owner, written last. The
+	// name predates pod-owned sessions and is kept so an agent upgrade finds
+	// the sessions it left behind.
+	sessionOwnerMarker = ".claim-uid"
 
 	pidsFileMode = 0o644
 )
@@ -120,9 +120,9 @@ func validateToken(token string) error {
 	return nil
 }
 
-// NodeDevice is the agent's view of one device published by this node's
-// kubelet-plugin, read back from the node's own ResourceSlice so that the
-// agent needs no NVML.
+// NodeDevice is the agent's view of one device this node publishes, read back
+// from the node's own ResourceSlice (DRA path) or device registry annotation
+// (device-plugin path) so that the agent needs no NVML.
 type NodeDevice struct {
 	Name        string
 	Minor       int64
@@ -139,59 +139,6 @@ type NodeDevices struct {
 	Devices       map[string]NodeDevice // by device name
 }
 
-// NodeRemoteDevicesFromSlices builds the snapshot from this node's slices.
-// Only accessMode=remote devices that carry a uuid and a minor are kept:
-// the minor is the host device index, which is also the session config slot
-// (library config_allowed_devices treats slot index as host index). The map
-// is keyed by device name because allocation results reference devices by
-// name.
-func NodeRemoteDevicesFromSlices(slices []*resourceapi.ResourceSlice) *NodeDevices {
-	nd := &NodeDevices{Devices: map[string]NodeDevice{}}
-	for _, slice := range slices {
-		for _, dev := range slice.Spec.Devices {
-			mode := remote.StringAttr(&dev, remote.AttrAccessMode)
-			if mode != remote.AccessModeRemote {
-				continue
-			}
-			uuid := collector.DeviceUUIDFromAttribute(remote.StringAttr(&dev, remote.AttrUUID))
-			if uuid == "" {
-				continue
-			}
-			minor := remote.IntAttr(&dev, remote.AttrMinor)
-			if minor < 0 || minor >= vgpuconfig.MaxDeviceCount {
-				continue
-			}
-			d := NodeDevice{Name: dev.Name, Minor: minor, UUID: uuid, MemoryRatio: util.HundredCore}
-			if ratio := remote.IntAttr(&dev, remote.AttrMemoryRatio); ratio >= 0 {
-				d.MemoryRatio = ratio
-			}
-			if q, ok := dev.Capacity[remote.CapacityCores]; ok {
-				d.Cores = q.Value.Value()
-			}
-			if q, ok := dev.Capacity[remote.CapacityMemory]; ok {
-				d.MemoryMiB = q.Value.Value() >> 20
-			}
-			nd.Devices[d.Name] = d
-
-			if nd.CudaVersion == nil {
-				if version := remote.VersionAttr(&dev, remote.AttrCUDADriverVersion); version != "" {
-					if v, err := semver.NewVersion(version); err == nil {
-						nd.CudaVersion = v
-					}
-				}
-			}
-			if nd.DriverVersion == nil {
-				if version := remote.VersionAttr(&dev, remote.AttrDriverVersion); version != "" {
-					if v, err := semver.NewVersion(version); err == nil {
-						nd.DriverVersion = v
-					}
-				}
-			}
-		}
-	}
-	return nd
-}
-
 // CudaVersionString returns the CUDA driver version as published, or "" when
 // the snapshot has none.
 func (nd *NodeDevices) CudaVersionString() string {
@@ -201,27 +148,64 @@ func (nd *NodeDevices) CudaVersionString() string {
 	return nd.CudaVersion.Original()
 }
 
-// sessionRef is what the index remembers about a materialized session: the
-// claim it belongs to and the claim resourceVersion it was built from. The
-// version is what lets a claim event or sweep tell "this session predates
-// what I am looking at" from "this session is newer than my view".
+// OwnerKind is what a session belongs to.
+type OwnerKind string
+
+const (
+	// OwnerClaim is a session of a ResourceClaim (DRA path).
+	OwnerClaim OwnerKind = "claim"
+	// OwnerPod is a session of one container of a Pod (device-plugin path).
+	OwnerPod OwnerKind = "pod"
+)
+
+// SessionOwner identifies the object a session belongs to. Version is the
+// object's resourceVersion at materialization: it lets an event or sweep tell
+// "this session predates what I am looking at" from "this session is newer
+// than my view".
+type SessionOwner struct {
+	Kind      OwnerKind
+	UID       string
+	Namespace string
+	Name      string
+	Version   int64
+}
+
+func (o SessionOwner) String() string {
+	if o.Name == "" {
+		return fmt.Sprintf("%s %s", o.Kind, o.UID)
+	}
+	return fmt.Sprintf("%s %s/%s", o.Kind, o.Namespace, o.Name)
+}
+
+// SessionSpec is what one session is made of: its owner and the per-device
+// quota the owner may use on this node.
+type SessionSpec struct {
+	Owner SessionOwner
+	// Infos is the full capacity of each device, Claims the share this
+	// session gets, both in slot (host device index) order.
+	Infos       []device.DeviceClaim
+	Claims      []device.DeviceClaim
+	MemoryRatio float64
+}
+
+// sessionRef is what the index remembers about a materialized session.
 type sessionRef struct {
-	claimUID string
-	claimRV  int64
+	ownerUID string
+	version  int64
 }
 
 // SessionStore materializes and removes session directories under base and
-// keeps an in-memory index (token <-> claim) so claim events never need a
+// keeps an in-memory index (token <-> owner) so owner events never need a
 // directory scan; the periodic sweep still walks the disk to catch orphans.
 type SessionStore struct {
 	cfg     Config
 	mu      sync.Mutex
-	refOf   map[string]sessionRef       // token -> claim
-	byClaim map[string]sets.Set[string] // claim UID -> tokens
+	refOf   map[string]sessionRef       // token -> owner
+	byOwner map[string]sets.Set[string] // owner UID -> tokens
 }
 
 func NewSessionStore(cfg Config) *SessionStore {
-	return &SessionStore{cfg: cfg, refOf: map[string]sessionRef{}, byClaim: map[string]sets.Set[string]{}}
+	return &SessionStore{cfg: cfg, refOf: map[string]sessionRef{}, byOwner: map[string]sets.Set[string]{}}
 }
 
 // Prepare creates the base skeleton the server needs before it starts and
@@ -240,28 +224,28 @@ func (s *SessionStore) Prepare() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, e := range entries {
-		if e.ClaimUID != "" {
-			s.indexLocked(e.Token, sessionRef{claimUID: e.ClaimUID, claimRV: e.ClaimRV})
+		if e.Owner.UID != "" {
+			s.indexLocked(e.Token, sessionRef{ownerUID: e.Owner.UID, version: e.Owner.Version})
 		}
 	}
 	return nil
 }
 
-// TokensOfClaim returns the sessions currently materialized for a claim.
-func (s *SessionStore) TokensOfClaim(claimUID string) []string {
+// TokensOfOwner returns the sessions currently materialized for an owner.
+func (s *SessionStore) TokensOfOwner(ownerUID string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return sets.List(s.byClaim[claimUID])
+	return sets.List(s.byOwner[ownerUID])
 }
 
-// Release removes the given sessions of a claim -- all of them when tokens
+// Release removes the given sessions of an owner -- all of them when tokens
 // is empty -- and returns how many were removed. A token that belongs to
-// another claim (or to none) is skipped: the caller only ever knows the
-// claim UID, so this is the check that keeps one claim from releasing
+// another owner (or to none) is skipped: the caller only ever knows the
+// owner UID, so this is the check that keeps one owner from releasing
 // another's sessions.
-func (s *SessionStore) Release(claimUID string, tokens []string) (int, error) {
+func (s *SessionStore) Release(ownerUID string, tokens []string) (int, error) {
 	if len(tokens) == 0 {
-		tokens = s.TokensOfClaim(claimUID)
+		tokens = s.TokensOfOwner(ownerUID)
 	}
 	released := 0
 	for _, token := range tokens {
@@ -271,8 +255,8 @@ func (s *SessionStore) Release(claimUID string, tokens []string) (int, error) {
 		s.mu.Lock()
 		ref, ok := s.refOf[token]
 		s.mu.Unlock()
-		if !ok || ref.claimUID != claimUID {
-			klog.V(2).Infof("Release: session %s is not a session of claim %s; skipped", token, claimUID)
+		if !ok || ref.ownerUID != ownerUID {
+			klog.V(2).Infof("Release: session %s is not a session of owner %s; skipped", token, ownerUID)
 			continue
 		}
 		if err := s.Remove(token); err != nil {
@@ -283,20 +267,19 @@ func (s *SessionStore) Release(claimUID string, tokens []string) (int, error) {
 	return released, nil
 }
 
-// Sweep removes the sessions of a claim that a view of the claim shows to be
+// Sweep removes the sessions of an owner that a view of the owner shows to be
 // stale: every session not in `keep` whose materialization is not newer than
-// the view. `keep` is the claim's current session set (its session
-// annotations), empty when the claim is deallocated or gone; `viewRV` is the
-// resourceVersion of the claim object the view was taken from, MaxInt64 for
-// "the claim no longer exists". A session materialized from a newer claim
-// than the view is left alone -- that is the informer lagging behind a
-// re-allocation, not a stale session -- and the next, newer view settles it.
-// Returns how many sessions were removed.
-func (s *SessionStore) Sweep(claimUID string, keep sets.Set[string], viewRV int64) int {
+// the view. `keep` is the owner's current session set, empty when the owner no
+// longer uses any; `viewRV` is the resourceVersion of the object the view was
+// taken from, MaxInt64 for "the owner no longer exists". A session
+// materialized from a newer version than the view is left alone -- that is the
+// informer lagging behind, not a stale session -- and the next, newer view
+// settles it. Returns how many sessions were removed.
+func (s *SessionStore) Sweep(ownerUID string, keep sets.Set[string], viewRV int64) int {
 	s.mu.Lock()
 	var stale []string
-	for token := range s.byClaim[claimUID] {
-		if ref := s.refOf[token]; !keep.Has(token) && ref.claimRV <= viewRV {
+	for token := range s.byOwner[ownerUID] {
+		if ref := s.refOf[token]; !keep.Has(token) && ref.version <= viewRV {
 			stale = append(stale, token)
 		}
 	}
@@ -305,7 +288,7 @@ func (s *SessionStore) Sweep(claimUID string, keep sets.Set[string], viewRV int6
 	removed := 0
 	for _, token := range stale {
 		if err := s.Remove(token); err != nil {
-			klog.Warningf("sweep session %s of claim %s: %v", token, claimUID, err)
+			klog.Warningf("sweep session %s of owner %s: %v", token, ownerUID, err)
 			continue
 		}
 		removed++
@@ -315,139 +298,95 @@ func (s *SessionStore) Sweep(claimUID string, keep sets.Set[string], viewRV int6
 
 func (s *SessionStore) indexLocked(token string, ref sessionRef) {
 	s.refOf[token] = ref
-	if s.byClaim[ref.claimUID] == nil {
-		s.byClaim[ref.claimUID] = sets.New[string]()
+	if s.byOwner[ref.ownerUID] == nil {
+		s.byOwner[ref.ownerUID] = sets.New[string]()
 	}
-	s.byClaim[ref.claimUID].Insert(token)
+	s.byOwner[ref.ownerUID].Insert(token)
 }
 
 func (s *SessionStore) unindexLocked(token string) {
 	if ref, ok := s.refOf[token]; ok {
 		delete(s.refOf, token)
-		if set := s.byClaim[ref.claimUID]; set != nil {
+		if set := s.byOwner[ref.ownerUID]; set != nil {
 			set.Delete(token)
 			if set.Len() == 0 {
-				delete(s.byClaim, ref.claimUID)
+				delete(s.byOwner, ref.ownerUID)
 			}
 		}
 	}
 }
 
-// claimRV parses a claim resourceVersion as the integer etcd revision it is
-// in every supported apiserver (the same assumption client-go's
-// MutationCache makes); 0 when absent or unparseable, i.e. "as old as it
-// gets", so a sweep never mistakes it for a newer session.
-func claimRV(claim *resourceapi.ResourceClaim) int64 {
-	rv, err := strconv.ParseInt(claim.ResourceVersion, 10, 64)
+// objectRV parses a resourceVersion as the integer etcd revision it is in
+// every supported apiserver (the same assumption client-go's MutationCache
+// makes); 0 when absent or unparseable, i.e. "as old as it gets", so a sweep
+// never mistakes it for a newer session.
+func objectRV(resourceVersion string) int64 {
+	rv, err := strconv.ParseInt(resourceVersion, 10, 64)
 	if err != nil || rv < 0 {
 		return 0
 	}
 	return rv
 }
 
-// The marker file: line 1 the claim UID, line 2 the claim resourceVersion
-// the session was materialized from (absent in markers written by older
-// agents, read as 0).
-func writeMarker(path string, claim *resourceapi.ResourceClaim) error {
-	return os.WriteFile(path, []byte(fmt.Sprintf("%s\n%d\n", claim.UID, claimRV(claim))), 0o644)
+// The marker file: line 1 the owner UID, line 2 its resourceVersion at
+// materialization (absent in markers written by older agents, read as 0),
+// line 3 the owner kind (absent means a claim, as older agents only had those).
+func writeMarker(path string, owner SessionOwner) error {
+	return os.WriteFile(path, []byte(fmt.Sprintf("%s\n%d\n%s\n", owner.UID, owner.Version, owner.Kind)), 0o644)
 }
 
-func readMarker(path string) (claimUID string, rv int64, err error) {
+func readMarker(path string) (SessionOwner, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return "", 0, err
+		return SessionOwner{}, err
 	}
-	lines := strings.SplitN(strings.TrimSpace(string(b)), "\n", 3)
-	claimUID = strings.TrimSpace(lines[0])
+	lines := strings.SplitN(strings.TrimSpace(string(b)), "\n", 4)
+	owner := SessionOwner{Kind: OwnerClaim, UID: strings.TrimSpace(lines[0])}
 	if len(lines) > 1 {
 		if v, perr := strconv.ParseInt(strings.TrimSpace(lines[1]), 10, 64); perr == nil && v > 0 {
-			rv = v
+			owner.Version = v
 		}
 	}
-	return claimUID, rv, nil
+	if len(lines) > 2 {
+		if kind := strings.TrimSpace(lines[2]); kind != "" {
+			owner.Kind = OwnerKind(kind)
+		}
+	}
+	return owner, nil
 }
 func (s *SessionStore) dir(token string) string {
 	return filepath.Join(s.cfg.SessionBase, token)
 }
 
-// Materialize writes the session for the partition of `claim` named by
-// `requests` (main request names; empty = every request) on pool
-// `poolName`. It is idempotent: an already complete session is left
-// untouched (the library may have live state in it), so kubelet retries of
-// NodePrepare are safe. When several results of the partition land on the
-// same physical device (the webhook normally prevents this), the largest
-// share wins — the config has one slot per device.
-func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClaim, nd *NodeDevices, requests []string) error {
+// Materialize writes the session directory for spec. It is idempotent: an
+// already complete session of the same owner is left untouched (the library
+// may have live state in it), so retries are safe.
+func (s *SessionStore) Materialize(token string, spec SessionSpec, nd *NodeDevices) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
-	if claim.Status.Allocation == nil {
-		return fmt.Errorf("claim %s has no allocation", klog.KObj(claim))
+	if len(spec.Claims) == 0 {
+		return fmt.Errorf("%s has no devices on this node", spec.Owner)
 	}
-
-	poolName := s.cfg.NodeName
-	memoryRatio := int64(util.HundredCore)
-	results := remote.FilterResultsByRequests(claim, claim.Status.Allocation.Devices.Results, requests)
-	infoBySlot := map[int]device.DeviceClaim{}
-	claimBySlot := map[int]device.DeviceClaim{}
-	for _, result := range results {
-		if result.Driver != s.cfg.DriverName || result.Pool != poolName {
-			continue
-		}
-		dev, ok := nd.Devices[result.Device]
-		if !ok {
-			return fmt.Errorf("allocated device %s is not published by this node (pool %s)", result.Device, poolName)
-		}
-		if memoryRatio == util.HundredCore && dev.MemoryRatio != memoryRatio {
-			memoryRatio = dev.MemoryRatio
-		}
-		// Slot = host device index (minor), exactly as the local path lays
-		// out the config: the library reads slot index as host index
-		// (config_allowed_devices) and translates to the container-visible
-		// ordinal itself.
-		slot := int(dev.Minor)
-		infoBySlot[slot] = device.DeviceClaim{Id: slot, Uuid: dev.UUID, Cores: dev.Cores, Memory: dev.MemoryMiB}
-
-		cores, memoryMiB := dev.Cores, dev.MemoryMiB
-		if q, ok := result.ConsumedCapacity[remote.CapacityCores]; ok {
-			cores = q.Value()
-		}
-		if q, ok := result.ConsumedCapacity[remote.CapacityMemory]; ok {
-			memoryMiB = q.Value() >> 20
-		}
-		if prev, dup := claimBySlot[slot]; dup {
-			klog.Warningf("session %s: device %s allocated more than once in one partition; taking the larger share", token, result.Device)
-			cores = max(cores, prev.Cores)
-			memoryMiB = max(memoryMiB, prev.Memory)
-		}
-		claimBySlot[slot] = device.DeviceClaim{Id: slot, Uuid: dev.UUID, Cores: cores, Memory: memoryMiB}
+	if len(spec.Claims) > vgpuconfig.MaxDeviceCount {
+		return fmt.Errorf("%s uses %d devices on this node, max %d per session",
+			spec.Owner, len(spec.Claims), vgpuconfig.MaxDeviceCount)
 	}
-	var infos, claims []device.DeviceClaim
-	for _, slot := range sets.List(sets.KeySet(claimBySlot)) {
-		infos = append(infos, infoBySlot[slot])
-		claims = append(claims, claimBySlot[slot])
-	}
-	if len(claims) == 0 {
-		return fmt.Errorf("claim %s has no devices allocated from pool %s", klog.KObj(claim), poolName)
-	}
-	if nd.CudaVersion == nil {
-		return fmt.Errorf("node device snapshot has no %s attribute; cannot write session", remote.AttrCUDADriverVersion)
+	if nd == nil || nd.CudaVersion == nil {
+		return fmt.Errorf("node device snapshot has no CUDA version; cannot write session")
 	}
 	driverVersion := ""
 	if nd.DriverVersion != nil {
 		driverVersion = nd.DriverVersion.Original()
 	}
-	if len(claims) > vgpuconfig.MaxDeviceCount {
-		return fmt.Errorf("claim %s allocates %d devices on this node, max %d per session", klog.KObj(claim), len(claims), vgpuconfig.MaxDeviceCount)
-	}
 
 	data := vgpuconfig.NewResourceDataWithOptions(vgpuconfig.ResourceOption{
-		PodNamespace: claim.Namespace,
-		PodName:      claim.Name,
-		PodUID:       string(claim.UID),
+		PodNamespace: spec.Owner.Namespace,
+		PodName:      spec.Owner.Name,
+		PodUID:       spec.Owner.UID,
 	},
-		vgpuconfig.WithDeviceInfos(infos),
-		vgpuconfig.WithDeviceClaims(claims),
+		vgpuconfig.WithDeviceInfos(spec.Infos),
+		vgpuconfig.WithDeviceClaims(spec.Claims),
 		vgpuconfig.WithCompatibilityMode(util.SessionMode),
 		vgpuconfig.WithComputePolicy(util.FixedComputePolicy),
 		vgpuconfig.WithDriverVersion(nvidia.DriverVersion{
@@ -456,7 +395,7 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 				nd.CudaVersion.Major(), nd.CudaVersion.Minor(),
 			),
 		}),
-		vgpuconfig.WithMemoryRatio(float64(memoryRatio)/float64(util.HundredCore)),
+		vgpuconfig.WithMemoryRatio(spec.MemoryRatio),
 		vgpuconfig.WithVMemoryNodeEnabled(s.cfg.gateEnabled(util.VirtualMemoryTracking)),
 		vgpuconfig.WithSMWatcherEnabled(s.cfg.gateEnabled(util.SharedSMUtilizationWatcher)),
 	)
@@ -465,14 +404,14 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 	defer s.mu.Unlock()
 
 	root := s.dir(token)
-	marker := filepath.Join(root, sessionClaimMarker)
-	if owner, rv, err := readMarker(marker); err == nil {
-		if owner == string(claim.UID) {
-			klog.V(4).Infof("Session %s for claim %s already materialized", token, klog.KObj(claim))
-			s.indexLocked(token, sessionRef{claimUID: owner, claimRV: rv})
+	marker := filepath.Join(root, sessionOwnerMarker)
+	if owner, err := readMarker(marker); err == nil {
+		if owner.UID == spec.Owner.UID {
+			klog.V(4).Infof("Session %s for %s already materialized", token, spec.Owner)
+			s.indexLocked(token, sessionRef{ownerUID: owner.UID, version: owner.Version})
 			return nil
 		}
-		return fmt.Errorf("session %s already belongs to claim %s", token, owner)
+		return fmt.Errorf("session %s already belongs to %s", token, owner)
 	}
 
 	for _, sub := range []string{util.Config, sessionLockDir, sessionVMemDir, sessionSMDir} {
@@ -492,11 +431,11 @@ func (s *SessionStore) Materialize(token string, claim *resourceapi.ResourceClai
 		return fmt.Errorf("write session quota: %w", err)
 	}
 	// Marker last: its presence means "complete".
-	if err = writeMarker(marker, claim); err != nil {
-		return fmt.Errorf("write claim marker: %w", err)
+	if err = writeMarker(marker, spec.Owner); err != nil {
+		return fmt.Errorf("write owner marker: %w", err)
 	}
-	s.indexLocked(token, sessionRef{claimUID: string(claim.UID), claimRV: claimRV(claim)})
-	klog.Infof("Materialized session %s for claim %s (requests %v): %d device(s)", token, klog.KObj(claim), requests, len(claims))
+	s.indexLocked(token, sessionRef{ownerUID: spec.Owner.UID, version: spec.Owner.Version})
+	klog.Infof("Materialized session %s for %s: %d device(s)", token, spec.Owner, len(spec.Claims))
 	return nil
 }
 
@@ -517,9 +456,9 @@ func (s *SessionStore) Remove(token string) error {
 
 // Entry is one on-disk session.
 type Entry struct {
-	Token    string
-	ClaimUID string // empty when the marker is missing (incomplete session)
-	ClaimRV  int64  // claim resourceVersion at materialization; 0 if unknown
+	Token string
+	// Owner has an empty UID when the marker is missing (incomplete session).
+	Owner SessionOwner
 }
 
 // List enumerates on-disk sessions.
@@ -539,9 +478,9 @@ func (s *SessionStore) List() ([]Entry, error) {
 			continue
 		}
 		entry := Entry{Token: e.Name()}
-		filePath := filepath.Join(s.cfg.SessionBase, e.Name(), sessionClaimMarker)
-		if owner, rv, err := readMarker(filePath); err == nil {
-			entry.ClaimUID, entry.ClaimRV = owner, rv
+		filePath := filepath.Join(s.cfg.SessionBase, e.Name(), sessionOwnerMarker)
+		if owner, err := readMarker(filePath); err == nil {
+			entry.Owner = owner
 		} else if !errors.Is(err, os.ErrNotExist) {
 			klog.Warningf("read marker of session %s: %v", e.Name(), err)
 		}

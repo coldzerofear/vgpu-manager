@@ -625,17 +625,17 @@ func (a *Agent) gcSessions(context.Context) {
 		klog.Warningf("list sessions: %v", err)
 		return
 	}
-	byClaim := map[string][]Entry{}
+	byOwner := map[string][]Entry{}
 	for _, e := range entries {
-		if e.ClaimUID == "" {
+		if e.Owner.UID == "" {
 			if err := a.store.Remove(e.Token); err != nil {
 				klog.Warningf("gc incomplete session %s: %v", e.Token, err)
 			}
 			continue
 		}
-		byClaim[e.ClaimUID] = append(byClaim[e.ClaimUID], e)
+		byOwner[e.Owner.UID] = append(byOwner[e.Owner.UID], e)
 	}
-	for uid := range byClaim {
+	for uid := range byOwner {
 		c, err := a.GetClaimByUID(uid)
 		if apierrors.IsNotFound(err) {
 			a.store.Sweep(uid, nil, math.MaxInt64)
@@ -748,7 +748,7 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 	if nd == nil || len(nd.Devices) == 0 {
 		return nil, status.Error(codes.Unavailable, "node device snapshot not available yet")
 	}
-	if err = a.store.Materialize(req.Session, claim, nd, req.Requests); err != nil {
+	if err = a.store.MaterializeClaim(req.Session, claim, nd, req.Requests); err != nil {
 		// The cached claim may lag behind the allocation the caller saw;
 		// retry once against the live object before giving up.
 		fresh, getErr := a.cfg.ClientSets.Resource.ResourceClaims(claim.Namespace).Get(ctx, claim.Name, metav1.GetOptions{})
@@ -756,7 +756,7 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
 		a.claimCache.Mutation(fresh)
-		if err = a.store.Materialize(req.Session, fresh, nd, req.Requests); err != nil {
+		if err = a.store.MaterializeClaim(req.Session, fresh, nd, req.Requests); err != nil {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
 	}
