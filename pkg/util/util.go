@@ -451,24 +451,23 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 	return allocatingPods
 }
 
+// PodPlanSchedulingNode returns the node whose devices the pod uses. For a
+// remote pod that is its predicate node, the GPU server, wherever it runs.
 func PodPlanSchedulingNode(pod *corev1.Pod) string {
 	if pod == nil {
 		return ""
 	}
 	if pod.Spec.NodeName != "" {
-		return pod.Spec.NodeName
+		if mode, _ := PodVGPUAccessMode(pod); mode == AccessModeLocal {
+			return pod.Spec.NodeName
+		}
 	}
 	predicateNode, _ := HasAnnotation(pod, PodPredicateNodeAnnotation)
 	return predicateNode
 }
 
 func PodsOnNodeCallback(pods []*corev1.Pod, node *corev1.Node, callbackFn func(*corev1.Pod)) {
-	if node == nil {
-		klog.Warningln("node is empty")
-		return
-	}
-	if callbackFn == nil {
-		klog.Warningln("PodsOnNodeCallback callback function is empty")
+	if node == nil || callbackFn == nil {
 		return
 	}
 	klog.V(5).InfoS("pods on node callback", "node", node.Name)
@@ -891,6 +890,16 @@ func PodVGPUAccessMode(obj metav1.Object) (string, error) {
 // nri, so neither can host it for the other).
 func NRIPartitionKey(podUID, containerName string) string {
 	return podUID + "_" + containerName
+}
+
+// IsRemoteServerNode reports whether the node's GPUs serve remote pods.
+func IsRemoteServerNode(node *corev1.Node) bool {
+	return node != nil && node.Labels[NodeRemoteServerLabel] == "true"
+}
+
+// IsRemoteConsumerNode reports whether the node is set up to run remote vGPU pods.
+func IsRemoteConsumerNode(node *corev1.Node) bool {
+	return node != nil && node.Labels[NodeRemoteConsumerLabel] == "true"
 }
 
 func AddContainerRequiredNRIPluginAnnotations(obj metav1.Object, container string, plugins ...string) error {

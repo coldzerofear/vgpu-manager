@@ -30,6 +30,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/config/watcher"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/allocator"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/metrics"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/predicate"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/reason"
@@ -38,6 +39,7 @@ import (
 	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
@@ -229,6 +231,28 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 	// asked us about, regardless of how many drop out at each stage.
 	totalCandidates := len(filteredNodes) + len(nodeReasons)
 
+	// A remote pod runs on a consumer node but gets its devices on a remote GPU
+	// server: the chain runs on the servers, and its result is then mapped back
+	// to the consumers.
+	remote := req.AccessMode == util.AccessModeRemote
+	chainReasons := nodeReasons
+	var consumers []corev1.Node
+	var totalServers int
+	if remote {
+		consumers = remoteConsumerNodes(filteredNodes, nodeReasons)
+		servers, err := f.remoteServerNodes()
+		if err != nil {
+			klog.ErrorS(err, "NodeLister list remote GPU servers failed")
+			return &extenderv1.ExtenderFilterResult{Error: err.Error()}
+		}
+		totalServers = len(servers)
+		chainReasons = make(map[string]*reason.FilterReason, totalServers)
+		filteredNodes = nil
+		if len(consumers) > 0 {
+			filteredNodes = servers
+		}
+	}
+
 	filters := []struct {
 		stage string
 		fn    filterFunc
@@ -256,7 +280,10 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 		}
 		// Change the latest node filtering list for the next round of filtering.
 		filteredNodes = passedNodes
-		maps.Copy(nodeReasons, stageReasons)
+		maps.Copy(chainReasons, stageReasons)
+	}
+	if remote {
+		filteredNodes = remoteFilterResult(consumers, filteredNodes, totalServers, chainReasons, nodeReasons)
 	}
 	recordNodeRejects(mode.verb(), nodeReasons)
 
@@ -269,12 +296,70 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 	// scheduling debugging.
 	if !mode.isDryRun() && len(filteredNodes) == 0 && totalCandidates > 0 && f.recorder != nil {
 		msg := reason.FormatAggregate(totalCandidates, nodeReasons, aggregateBucketNodeLimit)
+		// Why no server took a remote pod is only in the consumers' detail.
+		if remote && len(consumers) > 0 {
+			if r := nodeReasons[consumers[0].Name]; r != nil && r.Detail != "" {
+				msg += " Remote GPU servers: " + r.Detail
+			}
+		}
 		f.recorder.Event(args.Pod, corev1.EventTypeWarning, reason.EventFilteringFailed, msg)
 		klog.V(2).InfoS("FilteringFailed", "pod", klog.KObj(args.Pod),
 			"totalCandidates", totalCandidates, "failedReasons", failureBreakdown(nodeReasons))
 	}
 
 	return buildFilterResult(args, filteredNodes, nodeReasons, mode)
+}
+
+// remoteConsumerNodes keeps the candidates labeled to run remote vGPU pods and
+// records why the others are rejected.
+func remoteConsumerNodes(nodes []corev1.Node, failed map[string]*reason.FilterReason) []corev1.Node {
+	consumers := make([]corev1.Node, 0, len(nodes))
+	for i := range nodes {
+		switch {
+		case !nodes[i].DeletionTimestamp.IsZero():
+			failed[nodes[i].Name] = reason.New(reason.NodeDeleting)
+		case !util.IsRemoteConsumerNode(&nodes[i]):
+			failed[nodes[i].Name] = reason.New(reason.NodeNotRemoteConsumer)
+		default:
+			consumers = append(consumers, nodes[i])
+		}
+	}
+	return consumers
+}
+
+// remoteServerNodes lists the remote GPU servers, sorted by name so they are
+// tried in a stable order.
+func (f *gpuFilter) remoteServerNodes() ([]corev1.Node, error) {
+	list, err := f.nodeLister.List(labels.SelectorFromSet(labels.Set{util.NodeRemoteServerLabel: "true"}))
+	if err != nil {
+		return nil, err
+	}
+	servers := make([]corev1.Node, 0, len(list))
+	for _, node := range list {
+		servers = append(servers, *node)
+	}
+	sort.Slice(servers, func(i, j int) bool { return servers[i].Name < servers[j].Name })
+	return servers, nil
+}
+
+// remoteFilterResult maps the result on the servers back to the consumers:
+// once a server takes the pod every consumer fits, since the pod's devices do
+// not depend on where it runs. Otherwise every consumer gets the reason, with
+// the servers' reasons as its detail.
+func remoteFilterResult(consumers, servers []corev1.Node, totalServers int,
+	serverReasons, nodeReasons map[string]*reason.FilterReason) []corev1.Node {
+	if len(consumers) == 0 || len(servers) > 0 {
+		return consumers
+	}
+	unfit := reason.New(reason.NoRemoteServer).WithDetail("no node is labeled %s=true", util.NodeRemoteServerLabel)
+	if totalServers > 0 {
+		unfit = reason.New(reason.RemoteServerUnfit).
+			WithDetail("%s", reason.FormatAggregate(totalServers, serverReasons, aggregateBucketNodeLimit))
+	}
+	for _, node := range consumers {
+		nodeReasons[node.Name] = unfit
+	}
+	return nil
 }
 
 func (f *gpuFilter) preFilterRequestNodes(args extenderv1.ExtenderArgs) (
@@ -451,7 +536,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 	switch {
 	case policy == util.VirtualMemoryPolicy.String(), strings.HasPrefix(policy, "virt"):
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.VirtualMemoryPolicy)
-		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
+		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo, _ *remotegpu.ServerEndpointInfo) *reason.FilterReason {
 			if config.MemoryScaling <= 1 {
 				return reason.New(reason.NodeMemoryTypeMismatch).
 					WithDetail("requires virtual memory but node memoryScaling=%v", config.MemoryScaling)
@@ -460,7 +545,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 		}
 	case policy == util.PhysicalMemoryPolicy.String(), strings.HasPrefix(policy, "phy"):
 		klog.V(4).Infof("Pod <%s> use <%s> memory scheduling policy", klog.KObj(pod), util.PhysicalMemoryPolicy)
-		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason {
+		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, config *device.NodeConfigInfo, _ *remotegpu.ServerEndpointInfo) *reason.FilterReason {
 			if config.MemoryScaling > 1 {
 				return reason.New(reason.NodeMemoryTypeMismatch).
 					WithDetail("requires physical memory but node memoryScaling=%v", config.MemoryScaling)
@@ -468,7 +553,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 			return nil
 		}
 	default:
-		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, _ *device.NodeConfigInfo) *reason.FilterReason {
+		return func(_ *corev1.Node, _ *device.NodeDeviceInfo, _ *device.NodeConfigInfo, _ *remotegpu.ServerEndpointInfo) *reason.FilterReason {
 			return nil
 		}
 	}
@@ -477,7 +562,7 @@ func GetMemoryPolicyFunc(pod *corev1.Pod) CheckNodeFunc {
 // CheckNodeFunc is one node-level gate. Returning nil means the gate
 // accepted the node; returning a non-nil *reason.FilterReason means the
 // node fails the gate with the given structured cause.
-type CheckNodeFunc func(node *corev1.Node, device *device.NodeDeviceInfo, config *device.NodeConfigInfo) *reason.FilterReason
+type CheckNodeFunc func(node *corev1.Node, device *device.NodeDeviceInfo, config *device.NodeConfigInfo, endpoint *remotegpu.ServerEndpointInfo) *reason.FilterReason
 
 // CheckNode runs the built-in node prerequisites plus any caller-
 // supplied gates. Returns the first failing reason, or nil if every
@@ -511,8 +596,17 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 	if nodeConfigInfo.MemoryFactor <= 0 {
 		return reason.New(reason.NodeBadMemoryFactor).WithDetail("memoryFactor=%d", nodeConfigInfo.MemoryFactor)
 	}
+	var endpointInfo *remotegpu.ServerEndpointInfo
+	if util.IsRemoteServerNode(node) {
+		endpoint, err := remotegpu.GetServerEndpointInfo(node)
+		if err != nil {
+			return reason.New(reason.NodeBadRemoteEndpoint).WithDetail("%v", err)
+		}
+		endpointInfo = endpoint
+	}
+
 	for _, checkFunc := range checkNodeFuncs {
-		if r := checkFunc(node, &nodeDeviceInfo, &nodeConfigInfo); r != nil {
+		if r := checkFunc(node, &nodeDeviceInfo, &nodeConfigInfo, endpointInfo); r != nil {
 			return r
 		}
 	}
@@ -535,18 +629,32 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationReq
 			failed[node.Name] = reason.New(reason.NodeDeleting)
 			continue
 		}
+
+		// A remote server's usage includes pods running on other nodes, which a
+		// local NodeInfo does not count, so local pods are kept off it.
+		if req.AccessMode == util.AccessModeLocal && util.IsRemoteServerNode(&node) {
+			failed[node.Name] = reason.New(reason.NodeIsRemoteServer)
+			continue
+		}
+
+		var endpoints *remotegpu.ServerEndpointInfo
 		var nodeConfig *device.NodeConfigInfo
 		var nodeDevice *device.NodeDeviceInfo
 		if r := CheckNode(&node, memoryPolicyFunc, func(
-			node *corev1.Node, device *device.NodeDeviceInfo,
-			config *device.NodeConfigInfo) *reason.FilterReason {
-			nodeConfig, nodeDevice = config, device
+			node *corev1.Node,
+			device *device.NodeDeviceInfo,
+			config *device.NodeConfigInfo,
+			server *remotegpu.ServerEndpointInfo) *reason.FilterReason {
+			nodeConfig, nodeDevice, endpoints = config, device, server
 			return nil
 		}); r != nil {
 			failed[node.Name] = r
 		} else {
 			state.Write(nodeDeviceKey(node.Name), nodeDevice)
 			state.Write(nodeConfigKey(node.Name), nodeConfig)
+			if endpoints != nil {
+				state.Write(nodeEndpointKey(node.Name), endpoints)
+			}
 			filteredNodes = append(filteredNodes, nodes[i])
 		}
 	}
@@ -559,6 +667,10 @@ func nodeDeviceKey(nodeName string) framework.StateKey {
 
 func nodeConfigKey(nodeName string) framework.StateKey {
 	return framework.StateKey(nodeName + "-config")
+}
+
+func nodeEndpointKey(nodeName string) framework.StateKey {
+	return framework.StateKey(nodeName + "-endpoint")
 }
 
 func (f *gpuFilter) CheckDeviceRequest(req *allocator.AllocationRequest, mode filterMode) error {
@@ -708,6 +820,12 @@ func (f *gpuFilter) preFilterNodeInfos(
 		return nil, nil, nil, err
 	}
 
+	if req.AccessMode == util.AccessModeRemote {
+		// Cross-pod topology is not supported for remote pods; the link and NUMA
+		// topology inside one server still apply.
+		req.CrossPodTopology = false
+	}
+
 	var (
 		mutex                = sync.Mutex{}
 		failed               = make(map[string]*reason.FilterReason, len(nodes))
@@ -759,108 +877,14 @@ func (f *gpuFilter) preFilterNodeInfos(
 				continue
 			}
 			req := req.GetSnapshot().ResetStatistics(nodeInfo)
+			if r := nodeCapacityGate(req, nodeInfo); r != nil {
+				batchFailed[node.Name] = r
+				continue
+			}
 			nodeInfoW := &allocator.NodeInfo{
 				NodeInfo:          nodeInfo,
 				AllocationRequest: req,
 			}
-
-			// Pre-allocator capacity gate: reject nodes that obviously
-			// can't fit the pod BEFORE letting them into the sorted
-			// candidate list. NodeInfo is already built (annotation
-			// decode is the dominant cost there and we needed it for the
-			// GetAvailable* calls anyway); what we save is the downstream
-			// allocator pass — sort comparators, pickDeviceClaims,
-			// topology dispatch, per-container Allocate — which would
-			// otherwise iterate every node in nodeInfoList. On saturated
-			// clusters this is the difference between scanning 5000
-			// NodeInfos or just the 50 that still have room.
-			//
-			// Every check below is a NECESSARY condition only (passing
-			// the gate does NOT guarantee the allocator will succeed);
-			// the allocator re-verifies exactly, so a too-loose gate just
-			// costs wasted work, never a wrong placement. They run in two
-			// tiers:
-			//
-			// Tier 1 — per-single-device CAPACITY (req.Max vs
-			// GetMaxDevice* / GetSchedulableDeviceCount). The largest
-			// single container needs req.Max.Number distinct cards, each
-			// vGPU wanting req.Max.Cores / req.Max.Memory. If even the
-			// biggest card on the node can't hold one such vGPU, or the
-			// node has fewer schedulable cards than req.Max.Number, no
-			// arrangement can ever work — hard structural reject.
-			//
-			// Tier 2 — node-wide REMAINING totals (req.Total vs
-			// GetAvailable*). req.Total is the true pod-wide demand
-			// (per-vGPU cores/memory already multiplied by each
-			// container's Number), so this fires whenever the pod's total
-			// ask exceeds the node's free pool. It stays a necessary
-			// condition only because req.*.Memory is UN-scaled (node
-			// MemoryFactor applied later) and whole-card memory requests
-			// count as 0 — so it never false-rejects; the allocator
-			// re-verifies exactly.
-			if req.Max.Number > nodeInfo.GetSchedulableDeviceCount() {
-				batchFailed[node.Name] = reason.New(reason.InsufficientGPUCards).
-					WithDetail("max %d devices, node has %d schedulable", req.Max.Number, nodeInfo.GetSchedulableDeviceCount())
-				continue
-			}
-			if req.Max.Cores > nodeInfo.GetMaxDeviceCores() {
-				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUCore).
-					WithDetail("max %d cores, largest device has %d", req.Max.Cores, nodeInfo.GetMaxDeviceCores())
-				continue
-			}
-			if req.Max.Memory > nodeInfo.GetMaxDeviceMemory() {
-				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUMemory).
-					WithDetail("max %d memory, largest device has %d", req.Max.Memory, nodeInfo.GetMaxDeviceMemory())
-				continue
-			}
-			if req.Total.Number > nodeInfo.GetAvailableNumber() {
-				batchFailed[node.Name] = reason.New(reason.InsufficientGPUResources).
-					WithDetail("need %d number, available %d", req.Total.Number, nodeInfo.GetAvailableNumber())
-				continue
-			}
-			if req.Total.Cores > nodeInfo.GetAvailableCores() {
-				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUCore).
-					WithDetail("need %d cores, available %d", req.Total.Cores, nodeInfo.GetAvailableCores())
-				continue
-			}
-			if req.Total.Memory > nodeInfo.GetAvailableMemory() {
-				batchFailed[node.Name] = reason.New(reason.InsufficientVGPUMemory).
-					WithDetail("need %d memory, available %d", req.Total.Memory, nodeInfo.GetAvailableMemory())
-				continue
-			}
-
-			// Reject nodes that can't satisfy the pod's include/exclude
-			// GPU UUID / type constraints. CheckDeviceUuid/Type return
-			// true when a device is ALLOWED by the annotations, so a node
-			// is viable only if it has at least req.Max.Number devices
-			// passing every requested check (the largest container needs
-			// that many distinct allowed cards). Reject only when too few
-			// qualify — NOT when any single device fails, since an
-			// include filter naturally excludes most of a node's cards.
-			// Necessary-condition pre-check; the allocator's filterDevices
-			// re-verifies exactly.
-			if req.CheckDeviceUuid || req.CheckDeviceType {
-				matched := 0
-				for _, dev := range nodeInfo.GetDeviceMap() {
-					if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, dev.GetUUID()) {
-						continue
-					}
-					if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, dev.GetType()) {
-						continue
-					}
-					matched++
-				}
-				if matched < req.Max.Number {
-					rc := reason.DeviceTypeMismatch
-					if req.CheckDeviceUuid {
-						rc = reason.DeviceUUIDMismatch
-					}
-					batchFailed[node.Name] = reason.New(rc).
-						WithDetail("only %d of %d required devices match the requested GPU uuid/type", matched, req.Max.Number)
-					continue
-				}
-			}
-
 			batchNodeInfos = append(batchNodeInfos, nodeInfoW)
 		}
 
@@ -911,6 +935,90 @@ func (f *gpuFilter) preFilterNodeInfos(
 	return nodeInfoList, nodeOriginalPosition, failed, nil
 }
 
+// nodeCapacityGate is the pre-allocator capacity gate: it rejects nodes that
+// obviously can't fit the pod BEFORE letting them into the sorted candidate
+// list. NodeInfo is already built (annotation decode is the dominant cost there
+// and we needed it for the GetAvailable* calls anyway); what we save is the
+// downstream allocator pass — sort comparators, pickDeviceClaims, topology
+// dispatch, per-container Allocate — which would otherwise iterate every node
+// in nodeInfoList. On saturated clusters this is the difference between
+// scanning 5000 NodeInfos or just the 50 that still have room.
+//
+// Every check below is a NECESSARY condition only (passing the gate does NOT
+// guarantee the allocator will succeed); the allocator re-verifies exactly, so
+// a too-loose gate just costs wasted work, never a wrong placement. They run in
+// two tiers:
+//
+// Tier 1 — per-single-device CAPACITY (req.Max vs GetMaxDevice* /
+// GetSchedulableDeviceCount). The largest single container needs
+// req.Max.Number distinct cards, each vGPU wanting req.Max.Cores /
+// req.Max.Memory. If even the biggest card on the node can't hold one such
+// vGPU, or the node has fewer schedulable cards than req.Max.Number, no
+// arrangement can ever work — hard structural reject.
+//
+// Tier 2 — node-wide REMAINING totals (req.Total vs GetAvailable*). req.Total
+// is the true pod-wide demand (per-vGPU cores/memory already multiplied by each
+// container's Number), so this fires whenever the pod's total ask exceeds the
+// node's free pool. It stays a necessary condition only because req.*.Memory is
+// UN-scaled (node MemoryFactor applied later) and whole-card memory requests
+// count as 0 — so it never false-rejects; the allocator re-verifies exactly.
+func nodeCapacityGate(req *allocator.AllocationRequest, nodeInfo *device.NodeInfo) *reason.FilterReason {
+	if req.Max.Number > nodeInfo.GetSchedulableDeviceCount() {
+		return reason.New(reason.InsufficientGPUCards).
+			WithDetail("max %d devices, node has %d schedulable", req.Max.Number, nodeInfo.GetSchedulableDeviceCount())
+	}
+	if req.Max.Cores > nodeInfo.GetMaxDeviceCores() {
+		return reason.New(reason.InsufficientVGPUCore).
+			WithDetail("max %d cores, largest device has %d", req.Max.Cores, nodeInfo.GetMaxDeviceCores())
+	}
+	if req.Max.Memory > nodeInfo.GetMaxDeviceMemory() {
+		return reason.New(reason.InsufficientVGPUMemory).
+			WithDetail("max %d memory, largest device has %d", req.Max.Memory, nodeInfo.GetMaxDeviceMemory())
+	}
+	if req.Total.Number > nodeInfo.GetAvailableNumber() {
+		return reason.New(reason.InsufficientGPUResources).
+			WithDetail("need %d number, available %d", req.Total.Number, nodeInfo.GetAvailableNumber())
+	}
+	if req.Total.Cores > nodeInfo.GetAvailableCores() {
+		return reason.New(reason.InsufficientVGPUCore).
+			WithDetail("need %d cores, available %d", req.Total.Cores, nodeInfo.GetAvailableCores())
+	}
+	if req.Total.Memory > nodeInfo.GetAvailableMemory() {
+		return reason.New(reason.InsufficientVGPUMemory).
+			WithDetail("need %d memory, available %d", req.Total.Memory, nodeInfo.GetAvailableMemory())
+	}
+
+	// Reject nodes that can't satisfy the pod's include/exclude GPU UUID / type
+	// constraints. CheckDeviceUuid/Type return true when a device is ALLOWED by
+	// the annotations, so a node is viable only if it has at least
+	// req.Max.Number devices passing every requested check (the largest
+	// container needs that many distinct allowed cards). Reject only when too
+	// few qualify — NOT when any single device fails, since an include filter
+	// naturally excludes most of a node's cards. Necessary-condition pre-check;
+	// the allocator's filterDevices re-verifies exactly.
+	if req.CheckDeviceUuid || req.CheckDeviceType {
+		matched := 0
+		for _, dev := range nodeInfo.GetDeviceMap() {
+			if req.CheckDeviceUuid && !util.CheckDeviceUuid(req.Pod.Annotations, dev.GetUUID()) {
+				continue
+			}
+			if req.CheckDeviceType && !util.CheckDeviceType(req.Pod.Annotations, dev.GetType()) {
+				continue
+			}
+			matched++
+		}
+		if matched < req.Max.Number {
+			rc := reason.DeviceTypeMismatch
+			if req.CheckDeviceUuid {
+				rc = reason.DeviceUUIDMismatch
+			}
+			return reason.New(rc).
+				WithDetail("only %d of %d required devices match the requested GPU uuid/type", matched, req.Max.Number)
+		}
+	}
+	return nil
+}
+
 // deviceFilterFunc binds deviceFilter to a mode so it fits the filterFunc chain.
 func (f *gpuFilter) deviceFilterFunc(mode filterMode) filterFunc {
 	return func(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
@@ -926,6 +1034,10 @@ func (f *gpuFilter) deviceFilterFunc(mode filterMode) filterFunc {
 func (f *gpuFilter) deviceFilter(
 	ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState, mode filterMode,
 ) ([]corev1.Node, map[string]*reason.FilterReason, error) {
+	if len(nodes) == 0 {
+		return nil, map[string]*reason.FilterReason{}, nil
+	}
+
 	if err := f.CheckDeviceRequest(req, mode); err != nil {
 		klog.V(2).ErrorS(err, "Check device request failed", "pod", klog.KObj(req.Pod), "dryRun", mode.isDryRun())
 		return nil, nil, err
