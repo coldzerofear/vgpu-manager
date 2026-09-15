@@ -8,25 +8,26 @@ A Kubernetes device plugin for managing and allocating virtual GPU (vGPU) device
 - [x] Ensure the security of container resource isolation
 - [x] Support the latest CUDA 13.x driver version
 - [x] Compatible with both cgroupv1 and cgroupv2 container environments
-- [x] Dual-layer scheduling policies (node-level and device-level)
-- [x] Provide multi-dimensional vGPU monitoring metrics
-- [x] Idle computing power of dynamic balancing equipment
-- [x] GPU device uses virtual memory after exceeding memory limit
-- [x] Automatic rescheduling of pods with failed device allocations
+- [x] Support dual layer scheduling strategy (node-level and device-level)
+- [x] Provide fine-grained GPU monitoring metrics across multiple dimensions
+- [x] Automatically balance idle SM cores on GPUs to improve utilization
+- [x] Support using virtual memory after GPU memory exceeds physical limit (based on UVA)
+- [x] Support rescheduling devices to allocate failed Pods
 - [x] Webhook dynamic admission, fixing some non-standard pod configurations
-- [x] Provide the optimal topology allocation for NUMA and NVLink
-- [x] Compatible with open-gpu-kernel-modules
-- [x] Support MIG strategy device allocation
+- [x] Support selecting device topology allocation mode (NUMA or NVLink)
+- [x] Compatible with nvidia [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules)
+- [x] The device plugin supports MIG static device allocation
 - [x] Add an independent core utilization Watcher to avoid frequent driver calls
-- [x] Support gpu registration mode, reduce the exposed host information, and provide a safer gpu container environment
-- [x] Support dynamic resource allocation (DRA)
+- [x] Support GPU process registration and discovery to prevent leakage of host information in containers
+- [x] Local GPU supports dynamic resource allocation (DRA)
 - [x] NRI supported DRA multi container configuration path isolation security
 - [x] Device resource monitoring under the DRA driver path
 - [x] Multi process core speed limit for shared token bucket
+- [x] Remote GPU resource pool based on DRA driver
+- [ ] Remote GPU resource pool based on device plugin
 - [ ] Provide a scheduler framework plugin to achieve high-performance scheduling
 - [ ] Support device hot plugging and expansion ([device-mounter](https://github.com/coldzerofear/device-mounter))
 - [ ] Compatible with Volcano Batch Scheduler
-- [ ] Remote GPU resource pooling (GPU-over-IP)
 
 > **describe**:
 > :white_check_mark: Completed feature
@@ -280,12 +281,12 @@ Several optional behaviours are guarded by feature gates. Core components (`devi
 > unknown gate is fatal rather than ignored — the process exits with `unrecognized feature gate`.
 > Make sure a gate is valid for the component you are passing it to.
 
-| Component | Gates |
-| --- | --- |
-| device-plugin | `GPUCoreResourcePlugin`, `GPUMemoryResourcePlugin`, `AllocationFailureReschedule`, `TopologyAwareGPUAllocation`, `SharedSMUtilizationWatcher`, `VirtualMemoryTracking`, `DevicePluginClientMode`, `HonorPreAllocatedDeviceIDs` |
-| scheduler-extender | `SerializedNodeBind`, `SerializedNodeFilter`, `TopologyAwareGPUAllocation` |
-| device-monitor | `SharedSMUtilizationWatcher`, `VirtualMemoryTracking` |
-| kubelet-plugin (DRA) | `VGPUSupport`, `NVMLDeviceHealthCheck`, `IMEXDaemonsWithDNSNames`, `TimeSlicingSettings`, `MPSSupport`, `PassthroughSupport`, `DynamicMIG`, `DeviceMetadata`, `SharedSMUtilizationWatcher`, `DevicePluginClientMode`, `NRISupport`, `FabricManagerPartitioning`, `DRAListTypeAttributes` |
+| Component            | Gates                                                                                                                                                                                                                                                               |
+|----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| device-plugin        | `GPUCoreResourcePlugin`, `GPUMemoryResourcePlugin`, `AllocationFailureReschedule`, `TopologyAwareGPUAllocation`, `SharedSMUtilizationWatcher`, `VirtualMemoryTracking`, `DevicePluginClientMode`, `HonorPreAllocatedDeviceIDs`                                      |
+| scheduler-extender   | `SerializedNodeBind`, `SerializedNodeFilter`, `TopologyAwareGPUAllocation`                                                                                                                                                                                          |
+| device-monitor       | `SharedSMUtilizationWatcher`, `VirtualMemoryTracking`                                                                                                                                                                                                               |
+| kubelet-plugin (DRA) | `VGPUSupport`, `RemoteGPUSupport`, `NVMLDeviceHealthCheck`, `TimeSlicingSettings`, `PassthroughSupport`, `DynamicMIG`, `DeviceMetadata`, `SharedSMUtilizationWatcher`, `DevicePluginClientMode`, `NRISupport`, `FabricManagerPartitioning`, `DRAListTypeAttributes` |
 
 For per-gate defaults, what each one does, the dependency/mutual-exclusion rules the DRA driver
 enforces at startup, the Helm values paths, and the old→new name mapping for gates that were
