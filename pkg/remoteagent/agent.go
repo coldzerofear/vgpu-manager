@@ -86,9 +86,18 @@ type Config struct {
 	// The same service is served on every one of them.
 	ListenEndpoints []string
 	// GCInterval bounds how often orphaned sessions are swept.
-	GCInterval  time.Duration
-	FeatureGate featuregate.MutableVersionedFeatureGate
-	ClientSets  pkgflags.ClientSets
+	GCInterval time.Duration
+	// SessionOwnerKind is what owns the sessions this agent serves: claims
+	// (DRA path, the default) or pods (device-plugin path). Pod mode never
+	// touches the DRA API, so it also runs on clusters without it.
+	SessionOwnerKind OwnerKind
+	FeatureGate      featuregate.MutableVersionedFeatureGate
+	ClientSets       pkgflags.ClientSets
+}
+
+// podMode reports whether sessions belong to pods rather than claims.
+func (c Config) podMode() bool {
+	return c.SessionOwnerKind == OwnerPod
 }
 
 // gateEnabled is a nil-safe feature gate check (nil gate = all off).
@@ -104,9 +113,13 @@ type Agent struct {
 	cfg   Config
 	store *SessionStore
 
+	// Claim mode watches this node's slices and all claims; pod mode watches
+	// the pods placed on this node's GPUs and the node itself.
 	sliceInformer cache.SharedIndexInformer
 	claimInformer cache.SharedIndexInformer
 	claimCache    cache.MutationCache
+	podInformer   cache.SharedIndexInformer
+	nodeInformer  cache.SharedIndexInformer
 
 	nodeDevices      atomic.Pointer[NodeDevices]
 	smWatcherPresent atomic.Bool
@@ -169,9 +182,31 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 
-	// 2. Informers: the node's own slices (device snapshot) and all claims
-	// (lifecycle). ResourceSlice has a spec.driver field selector; claims
-	// have none, narrowing happens client-side.
+	// 2. Informers: this node's devices (snapshot) plus the objects that own
+	// sessions -- claims, or pods and this node in pod mode.
+	start := a.startClaimInformers
+	if a.cfg.podMode() {
+		start = a.startPodInformers
+	}
+	if err := start(ctx); err != nil {
+		return err
+	}
+
+	// 3. Bind every configured listener (TCP for other nodes, a unix socket
+	// for same-node callers) before anything else: a bad address fails
+	// startup loudly, and the first probe already knows the agent's own
+	// TCP port to advertise.
+	listeners, err := a.listen()
+	if err != nil {
+		return err
+	}
+	return a.serve(ctx, cancel, listeners)
+}
+
+// startClaimInformers watches the node's own slices (device snapshot) and all
+// claims (lifecycle). ResourceSlice has a spec.driver field selector; claims
+// have none, narrowing happens client-side. Blocks until the caches are synced.
+func (a *Agent) startClaimInformers(ctx context.Context) error {
 	a.sliceInformer = cache.NewSharedIndexInformer(
 		cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourceslices", corev1.NamespaceAll,
 			fields.AndSelectors(
@@ -262,16 +297,12 @@ func (a *Agent) Run(ctx context.Context) error {
 	) {
 		return fmt.Errorf("informers cache synchronization timeout")
 	}
+	return nil
+}
 
-	// 3. Bind every configured listener (TCP for other nodes, a unix socket
-	// for same-node callers) before anything else: a bad address fails
-	// startup loudly, and the first probe already knows the agent's own
-	// TCP port to advertise.
-	listeners, err := a.listen()
-	if err != nil {
-		return err
-	}
-
+// serve runs the background loops and the gRPC service on listeners until ctx
+// is done; cancel takes the agent down when one listener fails.
+func (a *Agent) serve(ctx context.Context, cancel context.CancelFunc, listeners []net.Listener) error {
 	// 4. Background loops.
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.probeServer, 5*time.Second) })
 	a.wg.Go(func() { wait.UntilWithContext(ctx, a.checkSMWatcher, 30*time.Second) })
@@ -635,7 +666,17 @@ func (a *Agent) gcSessions(context.Context) {
 		}
 		byOwner[e.Owner.UID] = append(byOwner[e.Owner.UID], e)
 	}
-	for uid := range byOwner {
+	for uid, owned := range byOwner {
+		// A session of the other owner kind cannot be valid on this node: the
+		// mode is node-level configuration, so it was left by an earlier one.
+		if (owned[0].Owner.Kind == OwnerPod) != a.cfg.podMode() {
+			a.store.Sweep(uid, nil, math.MaxInt64)
+			continue
+		}
+		if a.cfg.podMode() {
+			a.gcPodSessions(uid)
+			continue
+		}
 		c, err := a.GetClaimByUID(uid)
 		if apierrors.IsNotFound(err) {
 			a.store.Sweep(uid, nil, math.MaxInt64)
@@ -714,6 +755,8 @@ func (a *Agent) GetClaimByUID(uid string) (*resourceapi.ResourceClaim, error) {
 // plugin's explicit release at NodeUnprepare, once it has checked that the
 // claim has no live consumer left. Tokens that do not belong to the claim
 // are ignored, so a caller can only ever release its own claim's sessions.
+// In pod mode claim_uid is the pod UID; there the owner watch is the only
+// release path, so nothing calls this.
 func (a *Agent) ReleaseSessions(_ context.Context, req *remoteagent.ReleaseSessionsRequest) (*remoteagent.ReleaseSessionsResponse, error) {
 	if req.ClaimUid == "" {
 		return nil, status.Error(codes.InvalidArgument, "claim_uid is required")
@@ -733,32 +776,56 @@ func (a *Agent) ReleaseSessions(_ context.Context, req *remoteagent.ReleaseSessi
 	return &remoteagent.ReleaseSessionsResponse{Released: int32(released)}, nil
 }
 
-// EnsureSession implements remoteagent.RemoteAgentServer.
-func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessionRequest) (*remoteagent.EnsureSessionResponse, error) {
-	if err := validateToken(req.Session); err != nil {
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-
+// ensureClaimSession materializes the session of one claim partition.
+func (a *Agent) ensureClaimSession(ctx context.Context, req *remoteagent.EnsureSessionRequest, nd *NodeDevices) error {
 	claim, err := a.claimForSession(ctx, req.Session, req.ClaimUid, req.ClaimNamespace, req.ClaimName, req.ClaimResourceVersion)
 	if err != nil {
-		return nil, err
-	}
-
-	nd := a.nodeDevices.Load()
-	if nd == nil || len(nd.Devices) == 0 {
-		return nil, status.Error(codes.Unavailable, "node device snapshot not available yet")
+		return err
 	}
 	if err = a.store.MaterializeClaim(req.Session, claim, nd, req.Requests); err != nil {
 		// The cached claim may lag behind the allocation the caller saw;
 		// retry once against the live object before giving up.
 		fresh, getErr := a.cfg.ClientSets.Resource.ResourceClaims(claim.Namespace).Get(ctx, claim.Name, metav1.GetOptions{})
 		if getErr != nil || string(fresh.UID) != req.ClaimUid {
-			return nil, status.Error(codes.FailedPrecondition, err.Error())
+			return status.Error(codes.FailedPrecondition, err.Error())
 		}
 		a.claimCache.Mutation(fresh)
 		if err = a.store.MaterializeClaim(req.Session, fresh, nd, req.Requests); err != nil {
-			return nil, status.Error(codes.FailedPrecondition, err.Error())
+			return status.Error(codes.FailedPrecondition, err.Error())
 		}
+	}
+	return nil
+}
+
+// authorizeSession checks a caller's token against the object that owns the
+// session: the claim it is recorded on, or the pod it is derived from.
+func (a *Agent) authorizeSession(ctx context.Context, session, uid, namespace, name string) error {
+	if a.cfg.podMode() {
+		_, _, err := a.podForSession(ctx, session, uid, namespace, name, "")
+		return err
+	}
+	_, err := a.claimForSession(ctx, session, uid, namespace, name, "")
+	return err
+}
+
+// EnsureSession implements remoteagent.RemoteAgentServer.
+func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessionRequest) (*remoteagent.EnsureSessionResponse, error) {
+	if err := validateToken(req.Session); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	nd := a.nodeDevices.Load()
+	if nd == nil || len(nd.Devices) == 0 {
+		return nil, status.Error(codes.Unavailable, "node device snapshot not available yet")
+	}
+	// The request names the owner: a claim, or a pod in pod mode (the
+	// claim_* fields carry the pod's identity there).
+	ensure := a.ensureClaimSession
+	if a.cfg.podMode() {
+		ensure = a.ensurePodSession
+	}
+	if err := ensure(ctx, req, nd); err != nil {
+		return nil, err
 	}
 	// The session is on disk; whether the pod may start depends on the
 	// server accepting connections. The periodic probe can lag a server
@@ -848,7 +915,7 @@ func (a *Agent) FetchClientBundle(req *remoteagent.FetchClientBundleRequest, str
 	if err := validateToken(req.Session); err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
-	if _, err := a.claimForSession(ctx, req.Session, req.ClaimUid, req.ClaimNamespace, req.ClaimName, ""); err != nil {
+	if err := a.authorizeSession(ctx, req.Session, req.ClaimUid, req.ClaimNamespace, req.ClaimName); err != nil {
 		return err
 	}
 	platform, err := remote.ClientBundlePlatform(req.Os, req.Arch)

@@ -124,16 +124,38 @@ func PodSessionSpec(pod *corev1.Pod, containerName string, nd *NodeDevices) (Ses
 // container the scheduler pre-allocated devices to. A sweep keeps these and
 // removes the rest.
 func PodSessionTokens(pod *corev1.Pod) []string {
+	containers := podDeviceContainers(pod)
+	tokens := make([]string, 0, len(containers))
+	for _, container := range containers {
+		tokens = append(tokens, remotegpu.SessionToken(string(pod.UID), container))
+	}
+	return tokens
+}
+
+// PodSessionContainer returns the container of the pod whose session token is
+// token. This is what authorizes a session request: only a container the
+// scheduler gave devices to has a token.
+func PodSessionContainer(pod *corev1.Pod, token string) (string, bool) {
+	for _, container := range podDeviceContainers(pod) {
+		if remotegpu.SessionToken(string(pod.UID), container) == token {
+			return container, true
+		}
+	}
+	return "", false
+}
+
+// podDeviceContainers names the containers the scheduler pre-allocated devices to.
+func podDeviceContainers(pod *corev1.Pod) []string {
 	preAllocated, _ := util.HasAnnotation(pod, util.PodVGPUPreAllocAnnotation)
 	var podClaims device.PodDeviceClaim
 	if err := podClaims.UnmarshalText(preAllocated); err != nil {
 		return nil
 	}
-	tokens := make([]string, 0, len(podClaims))
+	containers := make([]string, 0, len(podClaims))
 	for _, container := range podClaims {
 		if len(container.DeviceClaims) > 0 {
-			tokens = append(tokens, remotegpu.SessionToken(string(pod.UID), container.Name))
+			containers = append(containers, container.Name)
 		}
 	}
-	return tokens
+	return containers
 }

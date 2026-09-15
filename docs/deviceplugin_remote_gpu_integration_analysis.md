@@ -1025,7 +1025,17 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
      但不接远程 Pod，调度原因 `NodeRemoteServerUnreachable`。
    - 与 DRA 共用的 agent 客户端、地址解析与可发布校验下沉到 `pkg/device/remotegpu/agent.go`（`ProbeServer` 等），
      DRA 发布器与 remote-agent 改为调用它，原副本删除。
-3. **S3 agent Pod 模式**：按 §16.3 的会话键/token/校验物化会话，Pod informer 回收，不建 DRA informer。
+3. **S3 agent Pod 模式**（已完成）：
+   - `--session-owner=claim|pod`（默认 claim）。pod 模式下跳过 DRA 版本预检，只监听两样东西：
+     带 `metrics-node=<本节点>` 标签的 Pod，和本节点的 Node 对象（设备快照来自 `node-device-register`
+     + `node-config-info` + CUDA/驱动版本标签）。
+   - 会话归属抽象为 `SessionOwner`（claim 或 pod），标记文件保留原文件名并增加 kind 行，缺省按 claim 读，
+     所以升级后旧会话仍能识别。
+   - `EnsureSession` 在 pod 模式的鉴权：Pod 仍在用本节点的 GPU（remote 访问模式、`predicate-node` 是本节点、
+     未进入终态），且 token 等于它某个已预分配容器的 `SessionToken`。请求沿用 `claim_*` 字段携带 Pod 身份，
+     proto 不变。
+   - 回收：Pod 事件与周期 GC。仅被删除（还有 DeletionTimestamp）的 Pod 保留会话，容器还在跑；对象消失或进入
+     终态才清。另一种 owner kind 的残留会话会被清掉（模式是节点级配置）。
 4. **S4 消费角色**：`--remote-consumer`、`--remote-consumer-vgpu-number` 与 §16.6 的资源规则；D1、D3–D6；首次 `Allocate` 批量建会话。
 5. **S5 监控**：§16.5。
 6. **S6 部署与文档**。
