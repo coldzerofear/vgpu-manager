@@ -130,15 +130,21 @@ const (
 	shimLibCublasPrefix   = "libcublas.so*"
 	shimLibCublasLtPrefix = "libcublasLt.so*"
 	shimLibCufftPrefix    = "libcufft.so*"
+	shimLibCudnnPrefix    = "libcudnn.so*"
+	shimLibCusparsePrefix = "libcusparse.so*"
+	shimLibCurandPrefix   = "libcurand.so*"
 )
 
-var optionalShimLibrary = map[string]bool{
+var shimLibOptional = map[string]bool{
 	shimLibCudaPrefix:     true,
 	shimLibNvmlPrefix:     true,
 	shimLibCudartPrefix:   false,
 	shimLibCublasPrefix:   false,
 	shimLibCublasLtPrefix: false,
 	shimLibCufftPrefix:    false,
+	shimLibCudnnPrefix:    false,
+	shimLibCusparsePrefix: false,
+	shimLibCurandPrefix:   false,
 }
 
 // ensureLdPreloadFile writes <artifactsDir>/<ver>/RemoteLdPreload listing the
@@ -150,7 +156,7 @@ func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, e
 	var lines []string
 	// Fixed order: the file is compared byte-for-byte on the next prepare,
 	// so map iteration order must not make an unchanged shim set look new.
-	for _, libPrefix := range slices.Sorted(maps.Keys(optionalShimLibrary)) {
+	for _, libPrefix := range slices.Sorted(maps.Keys(shimLibOptional)) {
 		pattern := filepath.Join(artifactsDir, sel.Name, libPrefix)
 		if matches, err := filepath.Glob(pattern); err != nil {
 			return "", fmt.Errorf("glob %s: %w", pattern, err)
@@ -159,7 +165,7 @@ func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, e
 			for _, match := range matches {
 				lines = append(lines, filepath.Join(sel.ContainerDir, filepath.Base(match)))
 			}
-		} else if optionalShimLibrary[libPrefix] {
+		} else if shimLibOptional[libPrefix] {
 			// Without the Client shim the artifact is unusable; fail the
 			// prepare (retryable — the artifact may still be materializing).
 			return "", fmt.Errorf("client artifact %s has no %s", sel.Name, libPrefix)

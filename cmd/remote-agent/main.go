@@ -104,7 +104,7 @@ func main() {
 		&cli.StringFlag{Name: "advertise-server-endpoint", Usage: "lupine-server endpoint reported to other components verbatim (URL form, e.g. https://gpu-a.corp/pool-a), instead of the probed/discovered one. For DNS names or gateways this host cannot reach itself.", Destination: &cfg.AdvertiseEndpoint, EnvVars: []string{"ADVERTISE_SERVER_ENDPOINT"}},
 		&cli.StringFlag{Name: "listen-server-endpoint", Usage: "Agent gRPC listen endpoints, comma separated: grpc://host:port (empty host = all interfaces) and/or unix:///path.sock for same-node callers.", Value: fmt.Sprintf("0.0.0.0:%d", remotegpu.DefaultAgentPort), Destination: &listenEndpoints, EnvVars: []string{"LISTEN_SERVER_ENDPOINT"}},
 		&cli.DurationFlag{Name: "gc-interval", Usage: "Orphaned session sweep interval.", Value: time.Minute, Destination: &cfg.GCInterval, EnvVars: []string{"GC_INTERVAL"}},
-		&cli.StringFlag{Name: "session-owner", Usage: "What owns the sessions this agent serves: \"claim\" (DRA path) or \"pod\" (device-plugin path, uses no DRA API).", Value: string(remoteagent.OwnerClaim), Destination: &sessionOwner, EnvVars: []string{"SESSION_OWNER"}},
+		&cli.StringFlag{Name: "session-owner", Usage: "What owns the sessions this agent serves: \"claim\" (DRA path) or \"pod\" (device-plugin path, uses no DRA API).", Value: string(remoteagent.OwnerPod), Destination: &sessionOwner, EnvVars: []string{"SESSION_OWNER"}},
 	}, kube.Flags()...)
 	flags = append(flags, FeatureGateFlags(featureGate)...)
 	flags = append(flags, loggingConfig.Flags()...)
@@ -185,7 +185,7 @@ func main() {
 			// are refused explicitly instead of failing later, deeper.
 			// Pod mode watches pods and this node only, so it skips the check
 			// and runs on clusters that serve no DRA API at all.
-			if cfg.SessionOwnerKind != remoteagent.OwnerPod {
+			if cfg.SessionOwnerKind == remoteagent.OwnerClaim {
 				draAPI := client.DRAAPIRequirement{
 					Subject: Component,
 					Version: "v1",

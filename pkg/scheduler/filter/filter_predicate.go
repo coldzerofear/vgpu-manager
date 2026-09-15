@@ -647,8 +647,8 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationReq
 			continue
 		}
 
-		// A remote server's usage includes pods running on other nodes, which a
-		// local NodeInfo does not count, so local pods are kept off it.
+		// A remote server's usage includes pods running on other nodes,
+		// which a local NodeInfo does not count, so local pods are kept off it.
 		if req.AccessMode == util.AccessModeLocal && util.IsRemoteServerNode(&node) {
 			failed[node.Name] = reason.New(reason.NodeIsRemoteServer)
 			continue

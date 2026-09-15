@@ -99,9 +99,18 @@ func (a *Agent) startPodInformers(ctx context.Context) error {
 		return err
 	}
 
+	a.podCache = cache.NewIntegerResourceVersionMutationCache(
+		klog.Background(),
+		a.podInformer.GetStore(),
+		a.podInformer.GetIndexer(),
+		time.Minute, true,
+	)
+
 	synced := []cache.InformerSynced{
-		a.podInformer.HasSynced, a.nodeInformer.HasSynced,
-		podRegistration.HasSynced, nodeRegistration.HasSynced,
+		a.podInformer.HasSynced,
+		a.nodeInformer.HasSynced,
+		podRegistration.HasSynced,
+		nodeRegistration.HasSynced,
 	}
 	a.hasReady = func() bool {
 		for _, hasSynced := range synced {
@@ -116,7 +125,10 @@ func (a *Agent) startPodInformers(ctx context.Context) error {
 
 	syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer syncCancel()
-	if !cache.WaitForNamedCacheSyncWithContext(syncCtx, a.podInformer.HasSynced, a.nodeInformer.HasSynced) {
+	if !cache.WaitForNamedCacheSyncWithContext(
+		syncCtx,
+		a.podInformer.HasSynced,
+		a.nodeInformer.HasSynced) {
 		return fmt.Errorf("informers cache synchronization timeout")
 	}
 	return nil
@@ -135,7 +147,7 @@ func podIndexers() cache.Indexers {
 }
 
 func (a *Agent) GetPodByUID(uid string) (*corev1.Pod, error) {
-	objs, err := a.podInformer.GetIndexer().ByIndex(podUIDIndex, uid)
+	objs, err := a.podCache.ByIndex(podUIDIndex, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -197,6 +209,7 @@ func (a *Agent) podForSession(ctx context.Context, session, uid, namespace, name
 			return nil, "", status.Errorf(codes.Unavailable, "get pod failed: %v", err)
 		}
 	}
+	a.podCache.Mutation(pod)
 	if !podUsesNodeDevices(pod, a.cfg.NodeName) {
 		return nil, "", status.Errorf(codes.PermissionDenied,
 			"pod %s does not use the GPUs of node %s", klog.KObj(pod), a.cfg.NodeName)

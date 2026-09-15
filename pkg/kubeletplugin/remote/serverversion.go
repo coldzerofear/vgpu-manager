@@ -31,6 +31,10 @@ import (
 // reply. Its value is the CUDA version the server binary was built with
 // (for example "13.3.73").
 const ServerCUDAVersionHeader = "x-lupine-cuda-version"
+const ServerSessionHeader = "x-lupine-session"
+const ServerClientEtagHeader = "x-lupine-client-etag"
+const ServerCapabilitiesHeader = "x-lupine-capabilities"
+const ServerClientPlatformHeader = "x-lupine-client-platform"
 
 // probeClient talks to the node IP directly: HTTP_PROXY in the pod must not
 // redirect it (Proxy: nil). Keep-alive is off because lupine-server forks one

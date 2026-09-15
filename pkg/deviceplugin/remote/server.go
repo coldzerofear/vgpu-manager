@@ -55,8 +55,11 @@ type registrar interface {
 // The node keeps its role while lupine-server is unreachable, publishing
 // remotegpu.UnreachableServerEndpointInfo: local pods stay off its GPUs and
 // the scheduler sends no remote pods to it.
-func SetupServerRole(ctx context.Context, reg registrar, kubeClient kubernetes.Interface,
-	nodeName string, enabled bool, agentEndpoint string) error {
+func SetupServerRole(
+	ctx context.Context, reg registrar,
+	kubeClient kubernetes.Interface,
+	nodeName string, enabled bool, agentEndpoint string,
+) error {
 	reg.AddCleanupRegistryFunc(serverRoleName, removeServerRole)
 	if !enabled {
 		reg.AddRegistryFunc(serverRoleName, removeServerRole)

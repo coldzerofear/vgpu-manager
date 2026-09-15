@@ -143,6 +143,8 @@ spec:
             # 会话目录在 manager-root hostPath 下（与 lupine-server、monitor 共享）
             - name: VGPU_CONFIG_SESSION_BASE
               value: /etc/vgpu-manager/remote-sessions
+            - name: SESSION_OWNER
+              value: "claim"
           ports:
             - name: grpc
               containerPort: 14834

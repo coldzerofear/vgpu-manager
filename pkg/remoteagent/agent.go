@@ -120,6 +120,7 @@ type Agent struct {
 	claimCache    cache.MutationCache
 	podInformer   cache.SharedIndexInformer
 	nodeInformer  cache.SharedIndexInformer
+	podCache      cache.MutationCache
 
 	nodeDevices      atomic.Pointer[NodeDevices]
 	smWatcherPresent atomic.Bool
@@ -716,7 +717,10 @@ func claimIndexers() cache.Indexers {
 // stale "deallocated" event for the previous consumer from sweeping this
 // session.
 func (a *Agent) claimForSession(ctx context.Context, session, uid, namespace, name, resourceVersion string) (*resourceapi.ResourceClaim, error) {
-	wantRV, _ := strconv.ParseInt(resourceVersion, 10, 64)
+	if uid == "" {
+		return nil, status.Error(codes.InvalidArgument, "claim uid is required")
+	}
+	wantRV := objectRV(resourceVersion)
 	claim, err := a.GetClaimByUID(uid)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, status.Errorf(codes.Unavailable, "get claim failed: %v", err)
