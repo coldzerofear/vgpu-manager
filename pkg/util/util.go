@@ -894,12 +894,21 @@ func NRIPartitionKey(podUID, containerName string) string {
 
 // IsRemoteServerNode reports whether the node's GPUs serve remote pods.
 func IsRemoteServerNode(node *corev1.Node) bool {
-	return node != nil && node.Labels[NodeRemoteServerLabel] == "true"
+	if node == nil {
+		return false
+	}
+	value, _ := HasLabel(node, NodeRemoteServerLabel)
+	_, exists := HasAnnotation(node, NodeRemoteEndpointsAnnotation)
+	return value == "true" && exists
 }
 
 // IsRemoteConsumerNode reports whether the node is set up to run remote vGPU pods.
 func IsRemoteConsumerNode(node *corev1.Node) bool {
-	return node != nil && node.Labels[NodeRemoteConsumerLabel] == "true"
+	if node == nil {
+		return false
+	}
+	value, _ := HasLabel(node, NodeRemoteConsumerLabel)
+	return value == "true" && IsVGPUEnabledNode(node)
 }
 
 func AddContainerRequiredNRIPluginAnnotations(obj metav1.Object, container string, plugins ...string) error {

@@ -417,6 +417,12 @@ func (p *vgpuPreempt) refineForNode(
 	node := nodeInfo.GetNode()
 	nodeName := nodeInfo.GetName()
 
+	// Local pods do not get devices on a remote GPU server, as in the filter.
+	if util.IsRemoteServerNode(node) {
+		klog.V(3).InfoS("Preempt: node serves remote pods", "node", nodeName, "pod", klog.KObj(req.Pod))
+		metrics.RecordNodeReject(metrics.VerbPreempt, string(reason.NodeIsRemoteServer))
+		return nil, 0, false
+	}
 	// Fast-reject: if the node itself doesn't meet vGPU prerequisites,
 	// preempting any pod on it won't help.
 	if r := filter.CheckNode(node, filter.GetMemoryPolicyFunc(req.Pod)); r != nil {
@@ -425,12 +431,7 @@ func (p *vgpuPreempt) refineForNode(
 		metrics.RecordNodeReject(metrics.VerbPreempt, string(r.Primary))
 		return nil, 0, false
 	}
-	// Local pods do not get devices on a remote GPU server, as in the filter.
-	if util.IsRemoteServerNode(node) {
-		klog.V(3).InfoS("Preempt: node serves remote pods", "node", nodeName, "pod", klog.KObj(req.Pod))
-		metrics.RecordNodeReject(metrics.VerbPreempt, string(reason.NodeIsRemoteServer))
-		return nil, 0, false
-	}
+
 	if req.Max.Number > nodeInfo.GetSchedulableDeviceCount() {
 		filterReason := reason.New(reason.InsufficientGPUCards).
 			WithDetail("max %d devices, node has %d schedulable",

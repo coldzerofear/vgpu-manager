@@ -234,11 +234,10 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 	// A remote pod runs on a consumer node but gets its devices on a remote GPU
 	// server: the chain runs on the servers, and its result is then mapped back
 	// to the consumers.
-	remote := req.AccessMode == util.AccessModeRemote
 	chainReasons := nodeReasons
 	var consumers []corev1.Node
 	var totalServers int
-	if remote {
+	if req.AccessMode == util.AccessModeRemote {
 		consumers = remoteConsumerNodes(filteredNodes, nodeReasons)
 		servers, err := f.remoteServerNodes()
 		if err != nil {
@@ -282,7 +281,7 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 		filteredNodes = passedNodes
 		maps.Copy(chainReasons, stageReasons)
 	}
-	if remote {
+	if req.AccessMode == util.AccessModeRemote {
 		filteredNodes = remoteFilterResult(consumers, filteredNodes, totalServers, chainReasons, nodeReasons)
 	}
 	recordNodeRejects(mode.verb(), nodeReasons)
@@ -297,7 +296,7 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 	if !mode.isDryRun() && len(filteredNodes) == 0 && totalCandidates > 0 && f.recorder != nil {
 		msg := reason.FormatAggregate(totalCandidates, nodeReasons, aggregateBucketNodeLimit)
 		// Why no server took a remote pod is only in the consumers' detail.
-		if remote && len(consumers) > 0 {
+		if req.AccessMode == util.AccessModeRemote && len(consumers) > 0 {
 			if r := nodeReasons[consumers[0].Name]; r != nil && r.Detail != "" {
 				msg += " Remote GPU servers: " + r.Detail
 			}
@@ -346,15 +345,16 @@ func (f *gpuFilter) remoteServerNodes() ([]corev1.Node, error) {
 // once a server takes the pod every consumer fits, since the pod's devices do
 // not depend on where it runs. Otherwise every consumer gets the reason, with
 // the servers' reasons as its detail.
-func remoteFilterResult(consumers, servers []corev1.Node, totalServers int,
-	serverReasons, nodeReasons map[string]*reason.FilterReason) []corev1.Node {
+func remoteFilterResult(
+	consumers, servers []corev1.Node, totalServers int, serverReasons, nodeReasons map[string]*reason.FilterReason,
+) []corev1.Node {
 	if len(consumers) == 0 || len(servers) > 0 {
 		return consumers
 	}
 	unfit := reason.New(reason.NoRemoteServer).WithDetail("no node is labeled %s=true", util.NodeRemoteServerLabel)
 	if totalServers > 0 {
-		unfit = reason.New(reason.RemoteServerUnfit).
-			WithDetail("%s", reason.FormatAggregate(totalServers, serverReasons, aggregateBucketNodeLimit))
+		unfit = reason.New(reason.RemoteServerUnfit).WithDetail("%s",
+			reason.FormatAggregate(totalServers, serverReasons, aggregateBucketNodeLimit))
 	}
 	for _, node := range consumers {
 		nodeReasons[node.Name] = unfit
@@ -363,8 +363,7 @@ func remoteFilterResult(consumers, servers []corev1.Node, totalServers int,
 }
 
 func (f *gpuFilter) preFilterRequestNodes(args extenderv1.ExtenderArgs) (
-	*allocator.AllocationRequest, []corev1.Node,
-	map[string]*reason.FilterReason, *extenderv1.ExtenderFilterResult,
+	*allocator.AllocationRequest, []corev1.Node, map[string]*reason.FilterReason, *extenderv1.ExtenderFilterResult,
 ) {
 	if args.Pod == nil {
 		return nil, nil, nil, &extenderv1.ExtenderFilterResult{Error: "extenderArgs.Pod cannot be empty"}
@@ -619,10 +618,10 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 // (via Short()) and vgpu-manager's own aggregate FilteringFailed event.
 func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationRequest, nodes []corev1.Node, state CycleState) ([]corev1.Node, map[string]*reason.FilterReason, error) {
 	var (
-		filteredNodes = make([]corev1.Node, 0, len(nodes))
-		failed        = make(map[string]*reason.FilterReason, len(nodes))
+		filteredNodes    = make([]corev1.Node, 0, len(nodes))
+		failed           = make(map[string]*reason.FilterReason, len(nodes))
+		memoryPolicyFunc = GetMemoryPolicyFunc(req.Pod)
 	)
-	memoryPolicyFunc := GetMemoryPolicyFunc(req.Pod)
 	for i, node := range nodes {
 		if !node.DeletionTimestamp.IsZero() {
 			klog.V(4).InfoS("node is already marked as deleted", "node", node.Name)
@@ -652,9 +651,7 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationReq
 		} else {
 			state.Write(nodeDeviceKey(node.Name), nodeDevice)
 			state.Write(nodeConfigKey(node.Name), nodeConfig)
-			if endpoints != nil {
-				state.Write(nodeEndpointKey(node.Name), endpoints)
-			}
+			state.Write(nodeEndpointKey(node.Name), endpoints)
 			filteredNodes = append(filteredNodes, nodes[i])
 		}
 	}
@@ -820,10 +817,12 @@ func (f *gpuFilter) preFilterNodeInfos(
 		return nil, nil, nil, err
 	}
 
-	if req.AccessMode == util.AccessModeRemote {
+	if req.AccessMode == util.AccessModeRemote && req.CrossPodTopology {
 		// Cross-pod topology is not supported for remote pods; the link and NUMA
 		// topology inside one server still apply.
 		req.CrossPodTopology = false
+		f.recorder.Eventf(req.Pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
+			"Remote access mode does not support cross pod topology")
 	}
 
 	var (

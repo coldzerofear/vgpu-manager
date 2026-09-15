@@ -50,11 +50,6 @@ const (
 	// SchedulerRoleValueFollower is the label value used to identify the follower pod.
 	SchedulerRoleValueFollower = "follower"
 
-	// NodeRemoteServerLabel ("true") marks a GPU node whose GPUs serve remote pods only.
-	NodeRemoteServerLabel = "vgpu-manager.io/remote-server"
-	// NodeRemoteConsumerLabel ("true") marks a node that runs remote vGPU pods.
-	NodeRemoteConsumerLabel = "vgpu-manager.io/remote-consumer"
-
 	KubeGroupNameAnnotation       = "scheduling.k8s.io/group-name"
 	VolcanoGroupNameAnnotation    = "scheduling.volcano.sh/group-name"
 	KoordinatorGangNameAnnotation = "gang.scheduling.koordinator.sh/name"
@@ -133,6 +128,11 @@ var (
 	// NodeRemoteEndpointsAnnotation is published on a remote GPU server node
 	// (JSON, see remotegpu.ServerEndpointInfo).
 	NodeRemoteEndpointsAnnotation = globalDomainName + "/remote-endpoints"
+
+	// NodeRemoteServerLabel ("true") marks a GPU node whose GPUs serve remote pods only.
+	NodeRemoteServerLabel = globalDomainName + "/remote-server"
+	// NodeRemoteConsumerLabel ("true") marks a node that runs remote vGPU pods.
+	NodeRemoteConsumerLabel = globalDomainName + "/remote-consumer"
 )
 
 func initConstants() {
@@ -164,6 +164,8 @@ func initConstants() {
 	PodVGPURealAllocAnnotation = globalDomainName + "/real-allocated"
 	VGPUAccessModeAnnotation = globalDomainName + "/vgpu-access-mode"
 	NodeRemoteEndpointsAnnotation = globalDomainName + "/remote-endpoints"
+	NodeRemoteServerLabel = globalDomainName + "/remote-server"
+	NodeRemoteConsumerLabel = globalDomainName + "/remote-consumer"
 }
 
 func GetGlobalDomain() string {
