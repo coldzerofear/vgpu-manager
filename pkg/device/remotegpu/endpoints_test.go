@@ -17,6 +17,7 @@ limitations under the License.
 package remotegpu
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -81,6 +82,15 @@ func TestServerEndpointInfoClone(t *testing.T) {
 	out := in.Clone().(*ServerEndpointInfo)
 	if out == in || *out != *in {
 		t.Fatalf("clone = %p %+v, want a copy of %p %+v", out, *out, in, *in)
+	}
+}
+
+func TestDecodeUnreachableServerEndpointInfo(t *testing.T) {
+	if _, err := DecodeServerEndpointInfo(UnreachableServerEndpointInfo); !errors.Is(err, ErrServerUnreachable) {
+		t.Fatalf("the unreachable marker must decode to ErrServerUnreachable, got %v", err)
+	}
+	if _, err := DecodeServerEndpointInfo(`{"serverEndpoint":"http://10.0.0.1:14833"}`); err == nil || errors.Is(err, ErrServerUnreachable) {
+		t.Fatalf("a half-published value is invalid, not unreachable: %v", err)
 	}
 }
 

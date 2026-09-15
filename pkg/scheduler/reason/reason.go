@@ -103,6 +103,8 @@ const (
 const (
 	// NodeIsRemoteServer: the node's GPUs serve remote pods, so local pods may not use them.
 	NodeIsRemoteServer Code = "NodeIsRemoteServer"
+	// NodeRemoteServerUnreachable: the server node reports its lupine-server is not reachable.
+	NodeRemoteServerUnreachable Code = "NodeRemoteServerUnreachable"
 	// NodeNotRemoteConsumer: the node is not labeled to run remote vGPU pods.
 	NodeNotRemoteConsumer Code = "NodeNotRemoteConsumer"
 	// NoRemoteServer: no GPU server is available to remote pods.
@@ -146,10 +148,11 @@ var phrase = map[Code]string{
 	AlreadyScheduledElsewhere: "pod already scheduled to another node",
 	AllocatorInternalError:    "allocator internal error",
 
-	NodeIsRemoteServer:    "node GPUs serve remote pods",
-	NodeNotRemoteConsumer: "node not a remote vGPU consumer",
-	NoRemoteServer:        "No remote vGPU server available",
-	RemoteServerUnfit:     "No remote vGPU server fits",
+	NodeIsRemoteServer:          "node GPUs serve remote pods",
+	NodeRemoteServerUnreachable: "remote GPU server unreachable",
+	NodeNotRemoteConsumer:       "node not a remote vGPU consumer",
+	NoRemoteServer:              "No remote vGPU server available",
+	RemoteServerUnfit:           "No remote vGPU server fits",
 }
 
 // Phrase returns the human-readable short form for a Code. Unknown

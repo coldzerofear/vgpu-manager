@@ -18,6 +18,7 @@ package filter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sort"
@@ -612,7 +613,11 @@ func CheckNode(node *corev1.Node, checkNodeFuncs ...CheckNodeFunc) *reason.Filte
 	if util.IsRemoteServerNode(node) {
 		endpoint, err := remotegpu.GetServerEndpointInfo(node)
 		if err != nil {
-			return reason.New(reason.NodeBadRemoteEndpoint).WithDetail("%v", err)
+			code := reason.NodeBadRemoteEndpoint
+			if errors.Is(err, remotegpu.ErrServerUnreachable) {
+				code = reason.NodeRemoteServerUnreachable
+			}
+			return reason.New(code).WithDetail("%v", err)
 		}
 		endpointInfo = endpoint
 	}

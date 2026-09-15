@@ -43,6 +43,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
+	dpremote "github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/fsnotify/fsnotify"
 	corev1 "k8s.io/api/core/v1"
@@ -59,6 +60,10 @@ func runApp(opt *options.Options) (exitCode int) {
 	exitCode = 1
 
 	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
+	if err := opt.Validate(); err != nil {
+		klog.Errorf("Invalid options: %v", err)
+		return exitCode
+	}
 	util.MustInitGlobalDomain(opt.Domain)
 
 	kubeConfig, err := client.NewKubeConfig(
@@ -184,6 +189,13 @@ func runApp(opt *options.Options) (exitCode int) {
 		}
 	}()
 	deviceManager.Start()
+	if err := dpremote.SetupServerRole(clusterCtx, deviceManager, kubeClient,
+		opt.NodeName, opt.RemoteServer, opt.RemoteAgentEndpoint); err != nil {
+		klog.Errorf("Set up remote GPU server role failed: %v", err)
+		cancelFunc()
+		deviceManager.Stop()
+		return exitCode
+	}
 
 restart:
 	started := 0

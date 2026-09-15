@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	pkgversion "github.com/coldzerofear/vgpu-manager/pkg/version"
 	"github.com/spf13/pflag"
@@ -62,6 +63,8 @@ type Options struct {
 	CDIAnnotationPrefix string
 	HostDriverRoot      string
 	ContainerDriverRoot string
+	RemoteServer        bool
+	RemoteAgentEndpoint string
 	FeatureGate         featuregate.MutableFeatureGate
 }
 
@@ -98,6 +101,8 @@ const (
 	DevicePluginClientMode featuregate.Feature = util.DevicePluginClientMode
 	// HonorPreAllocatedDeviceIDs makes preferred allocation follow pre-allocated device IDs whenever possible.
 	HonorPreAllocatedDeviceIDs featuregate.Feature = util.HonorPreAllocatedDeviceIDs
+	// RemoteGPUSupport feature gate allows this node to serve its GPUs to remote vGPU pods.
+	RemoteGPUSupport featuregate.Feature = util.RemoteGPUSupport
 )
 
 var (
@@ -111,6 +116,7 @@ var (
 		VirtualMemoryTracking:       {Default: false, PreRelease: featuregate.Alpha},
 		DevicePluginClientMode:      {Default: false, PreRelease: featuregate.Alpha},
 		HonorPreAllocatedDeviceIDs:  {Default: false, PreRelease: featuregate.Alpha},
+		RemoteGPUSupport:            {Default: false, PreRelease: featuregate.Alpha},
 	}
 )
 
@@ -155,6 +161,8 @@ func NewOptions() *Options {
 		GDRCopyEnabled:      util.GetEnvEnabled("GDRCOPY_ENABLED"),
 		HostDriverRoot:      util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
 		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
+		RemoteServer:        util.GetEnvEnabled("REMOTE_SERVER"),
+		RemoteAgentEndpoint: util.GetEnvDefault("REMOTE_AGENT_ENDPOINT", fmt.Sprintf(":%d", remotegpu.DefaultAgentPort)),
 	}
 }
 
@@ -193,6 +201,8 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.CDIAnnotationPrefix, "cdi-annotation-prefix", o.CDIAnnotationPrefix, "The prefix to use for CDI container annotation keys. (only used with the \"cdi-annotations\" strategy)")
 	pflag.StringVar(&o.HostDriverRoot, "host-driver-root", o.HostDriverRoot, "The root path for the NVIDIA driver installation on the host. (typical values are '/' or '/run/nvidia/driver')")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
+	pflag.BoolVar(&o.RemoteServer, "remote-server", o.RemoteServer, "Serve this node's GPUs to remote vGPU pods on other nodes. (requires the RemoteGPUSupport feature gate)")
+	pflag.StringVar(&o.RemoteAgentEndpoint, "remote-agent-endpoint", o.RemoteAgentEndpoint, "The remote-agent on this node: grpc://host:port or unix:///path. An empty host means the node's InternalIP.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
@@ -200,6 +210,19 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 
 func (o *Options) FlagParse() {
 	pflag.Parse()
+}
+
+// Validate checks the option combinations the flags alone cannot express.
+func (o *Options) Validate() error {
+	if o.RemoteServer {
+		if !o.FeatureGate.Enabled(RemoteGPUSupport) {
+			return fmt.Errorf("--remote-server requires the %s feature gate", RemoteGPUSupport)
+		}
+		if _, err := remotegpu.ParseAgentEndpoint(o.RemoteAgentEndpoint); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (o *Options) PrintAndExitIfRequested() {

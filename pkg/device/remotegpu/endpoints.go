@@ -30,6 +30,14 @@ import (
 	"k8s.io/kube-scheduler/framework"
 )
 
+// UnreachableServerEndpointInfo is the annotation value a server node publishes
+// while its lupine-server cannot be reached: the node keeps its server role, so
+// local pods stay off its GPUs, but no remote pod is placed on it.
+const UnreachableServerEndpointInfo = "{}"
+
+// ErrServerUnreachable is returned when a node publishes UnreachableServerEndpointInfo.
+var ErrServerUnreachable = errors.New("remote GPU server is not reachable")
+
 // ServerEndpointInfo is what a remote GPU server node publishes about itself in
 // util.NodeRemoteEndpointsAnnotation.
 type ServerEndpointInfo struct {
@@ -70,6 +78,9 @@ func DecodeServerEndpointInfo(value string) (*ServerEndpointInfo, error) {
 	var e ServerEndpointInfo
 	if err := json.Unmarshal([]byte(value), &e); err != nil {
 		return nil, fmt.Errorf("invalid remote endpoints %q: %w", value, err)
+	}
+	if e.ServerEndpoint == "" && e.AgentEndpoint == "" {
+		return nil, ErrServerUnreachable
 	}
 	if err := e.normalize(); err != nil {
 		return nil, err

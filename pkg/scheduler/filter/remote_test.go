@@ -239,6 +239,15 @@ func Test_RemoteFilter_Rejections(t *testing.T) {
 		assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.RemoteServerUnfit))
 		assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.NodeBadRemoteEndpoint)+" (bad-endpoints)")
 	})
+	t.Run("unreachable server", func(t *testing.T) {
+		unreachable, _ := remoteServerNode(t, "unreachable")
+		unreachable.Annotations[util.NodeRemoteEndpointsAnnotation] = remotegpu.UnreachableServerEndpointInfo
+		fixture := newRemoteFixture(t, []corev1.Node{unreachable})
+		result := fixture.run(remotePod("unreachable", 1, 50, 2048), dryRunFilter)
+
+		assert.Empty(t, NodeNamesOfResult(result))
+		assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.NodeRemoteServerUnreachable)+" (unreachable)")
+	})
 	// A server label left on a node without endpoints does not make it a server.
 	t.Run("server label without endpoints", func(t *testing.T) {
 		fixture := newRemoteFixture(t, []corev1.Node{noEndpoints})
