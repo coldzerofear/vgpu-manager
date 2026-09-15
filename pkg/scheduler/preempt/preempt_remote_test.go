@@ -53,6 +53,8 @@ func Test_Preempt_RemotePodPassthrough(t *testing.T) {
 func Test_Preempt_SkipsRemoteServer(t *testing.T) {
 	node, devUUIDs := newTestNode("server1")
 	node.Labels = map[string]string{util.NodeRemoteServerLabel: "true"}
+	node.Annotations[util.NodeRemoteEndpointsAnnotation] =
+		`{"serverEndpoint":"http://10.0.0.1:8080","agentEndpoint":"grpc://10.0.0.1:9090"}`
 	lowA := newVGPUPod("low-a", "ns", 1, withPriority(10), withNodeName(node.Name))
 	allocatePodOn(lowA, node.Name, 0, devUUIDs[0])
 	lowB := newVGPUPod("low-b", "ns", 1, withPriority(10), withNodeName(node.Name))

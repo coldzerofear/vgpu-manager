@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -55,12 +56,25 @@ func TestPodPlanSchedulingNode(t *testing.T) {
 }
 
 func TestRemoteNodeRoles(t *testing.T) {
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-		NodeRemoteServerLabel:   "true",
-		NodeRemoteConsumerLabel: "false",
-	}}}
-	assert.True(t, IsRemoteServerNode(node))
-	assert.False(t, IsRemoteConsumerNode(node))
+	node := func(labels, annotations map[string]string, number string) *corev1.Node {
+		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: annotations}}
+		if number != "" {
+			n.Status.Allocatable = corev1.ResourceList{corev1.ResourceName(VGPUNumberResourceName): resource.MustParse(number)}
+		}
+		return n
+	}
+	server := map[string]string{NodeRemoteServerLabel: "true"}
+	consumer := map[string]string{NodeRemoteConsumerLabel: "true"}
+	endpoints := map[string]string{NodeRemoteEndpointsAnnotation: "{}"}
+
+	assert.True(t, IsRemoteServerNode(node(server, endpoints, "")))
+	assert.False(t, IsRemoteServerNode(node(server, nil, "")), "server label without endpoints")
+	assert.False(t, IsRemoteServerNode(node(nil, endpoints, "")), "endpoints without server label")
 	assert.False(t, IsRemoteServerNode(nil))
+
+	assert.True(t, IsRemoteConsumerNode(node(consumer, nil, "10")))
+	assert.False(t, IsRemoteConsumerNode(node(consumer, nil, "")), "consumer label without vgpu-number")
+	assert.False(t, IsRemoteConsumerNode(node(consumer, nil, "0")), "consumer label with zero vgpu-number")
+	assert.False(t, IsRemoteConsumerNode(node(nil, nil, "10")), "vgpu-number without consumer label")
 	assert.False(t, IsRemoteConsumerNode(nil))
 }

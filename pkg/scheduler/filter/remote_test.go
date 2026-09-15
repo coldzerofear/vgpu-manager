@@ -217,6 +217,8 @@ func Test_RemoteFilter_DryRun(t *testing.T) {
 
 func Test_RemoteFilter_Rejections(t *testing.T) {
 	local, _ := buildNodeList()
+	badEndpoints, _ := remoteServerNode(t, "bad-endpoints")
+	badEndpoints.Annotations[util.NodeRemoteEndpointsAnnotation] = "not json"
 	noEndpoints, _ := remoteServerNode(t, "no-endpoints")
 	delete(noEndpoints.Annotations, util.NodeRemoteEndpointsAnnotation)
 
@@ -229,13 +231,22 @@ func Test_RemoteFilter_Rejections(t *testing.T) {
 		assert.Contains(t, result.FailedNodes["consumer-a"], util.NodeRemoteServerLabel)
 		assert.Equal(t, reason.Phrase(reason.NodeNotRemoteConsumer), result.FailedNodes[local[0].Name])
 	})
-	t.Run("bad server endpoint", func(t *testing.T) {
-		fixture := newRemoteFixture(t, []corev1.Node{noEndpoints})
+	t.Run("invalid server endpoints", func(t *testing.T) {
+		fixture := newRemoteFixture(t, []corev1.Node{badEndpoints})
 		result := fixture.run(remotePod("bad-endpoint", 1, 50, 2048), dryRunFilter)
 
 		assert.Empty(t, NodeNamesOfResult(result))
 		assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.RemoteServerUnfit))
-		assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.NodeBadRemoteEndpoint)+" (no-endpoints)")
+		assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.NodeBadRemoteEndpoint)+" (bad-endpoints)")
+	})
+	// A server label left on a node without endpoints does not make it a server.
+	t.Run("server label without endpoints", func(t *testing.T) {
+		fixture := newRemoteFixture(t, []corev1.Node{noEndpoints})
+		pod := fixture.createPod(t, remotePod("no-endpoint", 1, 50, 2048))
+		result := fixture.run(pod, liveFilter)
+
+		assert.Empty(t, NodeNamesOfResult(result))
+		assert.Empty(t, fixture.getPod(t, pod).Annotations[util.PodPredicateNodeAnnotation])
 	})
 }
 

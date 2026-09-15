@@ -72,6 +72,18 @@ func TestServerEndpointInfoRejectsUnusableAddresses(t *testing.T) {
 	}
 }
 
+func TestServerEndpointInfoClone(t *testing.T) {
+	var none *ServerEndpointInfo
+	if got := none.Clone().(*ServerEndpointInfo); got != nil {
+		t.Fatalf("nil clone = %+v", got)
+	}
+	in := &ServerEndpointInfo{ServerEndpoint: "http://10.0.0.1:14833", AgentEndpoint: "grpc://10.0.0.1:14834"}
+	out := in.Clone().(*ServerEndpointInfo)
+	if out == in || *out != *in {
+		t.Fatalf("clone = %p %+v, want a copy of %p %+v", out, *out, in, *in)
+	}
+}
+
 func TestGetServerEndpointInfo(t *testing.T) {
 	if _, err := GetServerEndpointInfo(nil); err == nil {
 		t.Fatal("nil node must be an error")

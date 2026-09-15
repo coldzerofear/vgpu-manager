@@ -45,6 +45,9 @@ type ServerEndpointInfo struct {
 
 // Clone lets the scheduler keep the endpoints in its cycle state.
 func (e *ServerEndpointInfo) Clone() framework.StateData {
+	if e == nil {
+		return e
+	}
 	data := *e
 	return &data
 }

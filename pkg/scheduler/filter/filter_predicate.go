@@ -238,6 +238,15 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 	var consumers []corev1.Node
 	var totalServers int
 	if req.AccessMode == util.AccessModeRemote {
+		if req.CrossPodTopology {
+			// Cross-pod topology is not supported for remote pods; the link and NUMA
+			// topology inside one server still apply.
+			req.CrossPodTopology = false
+			if !mode.isDryRun() && f.recorder != nil {
+				f.recorder.Eventf(req.Pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
+					"Remote access mode does not support cross pod topology")
+			}
+		}
 		consumers = remoteConsumerNodes(filteredNodes, nodeReasons)
 		servers, err := f.remoteServerNodes()
 		if err != nil {
@@ -327,7 +336,8 @@ func remoteConsumerNodes(nodes []corev1.Node, failed map[string]*reason.FilterRe
 }
 
 // remoteServerNodes lists the remote GPU servers, sorted by name so they are
-// tried in a stable order.
+// tried in a stable order. A node with the server label but no endpoints is
+// not a server.
 func (f *gpuFilter) remoteServerNodes() ([]corev1.Node, error) {
 	list, err := f.nodeLister.List(labels.SelectorFromSet(labels.Set{util.NodeRemoteServerLabel: "true"}))
 	if err != nil {
@@ -335,7 +345,9 @@ func (f *gpuFilter) remoteServerNodes() ([]corev1.Node, error) {
 	}
 	servers := make([]corev1.Node, 0, len(list))
 	for _, node := range list {
-		servers = append(servers, *node)
+		if util.IsRemoteServerNode(node) {
+			servers = append(servers, *node)
+		}
 	}
 	sort.Slice(servers, func(i, j int) bool { return servers[i].Name < servers[j].Name })
 	return servers, nil
@@ -351,7 +363,8 @@ func remoteFilterResult(
 	if len(consumers) == 0 || len(servers) > 0 {
 		return consumers
 	}
-	unfit := reason.New(reason.NoRemoteServer).WithDetail("no node is labeled %s=true", util.NodeRemoteServerLabel)
+	unfit := reason.New(reason.NoRemoteServer).WithDetail("no node is labeled %s=true and has the %s annotation",
+		util.NodeRemoteServerLabel, util.NodeRemoteEndpointsAnnotation)
 	if totalServers > 0 {
 		unfit = reason.New(reason.RemoteServerUnfit).WithDetail("%s",
 			reason.FormatAggregate(totalServers, serverReasons, aggregateBucketNodeLimit))
@@ -815,14 +828,6 @@ func (f *gpuFilter) preFilterNodeInfos(
 	if err != nil {
 		klog.ErrorS(err, "PodLister list all vGPU pods failed")
 		return nil, nil, nil, err
-	}
-
-	if req.AccessMode == util.AccessModeRemote && req.CrossPodTopology {
-		// Cross-pod topology is not supported for remote pods; the link and NUMA
-		// topology inside one server still apply.
-		req.CrossPodTopology = false
-		f.recorder.Eventf(req.Pod, corev1.EventTypeWarning, reason.EventTopologyFallback,
-			"Remote access mode does not support cross pod topology")
 	}
 
 	var (
