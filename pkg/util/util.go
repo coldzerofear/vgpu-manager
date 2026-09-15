@@ -433,9 +433,11 @@ func FilterAllocatingPods(activePods []corev1.Pod) []corev1.Pod {
 		if _, ok := HasAnnotation(&pod, PodVGPUPreAllocAnnotation); !ok {
 			continue
 		}
-		if nodeName, ok := HasAnnotation(&pod, PodPredicateNodeAnnotation); !ok {
+		// A remote pod's predicate node is the GPU server whose devices it
+		// was given; it runs on the node the caller listed pods of.
+		if nodeName, ok := HasAnnotation(&pod, PodPredicateNodeAnnotation); !ok || nodeName == "" {
 			continue
-		} else if pod.Spec.NodeName != nodeName {
+		} else if mode, _ := PodVGPUAccessMode(&pod); mode == AccessModeLocal && pod.Spec.NodeName != nodeName {
 			continue
 		}
 		if val, ok := HasAnnotation(&pod, PodPredicateTimeAnnotation); !ok {

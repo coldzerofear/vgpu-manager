@@ -36,9 +36,29 @@ import (
 const (
 	// serverRoleName keys the server role in the device manager's node registration.
 	serverRoleName = "remote-server"
+	// consumerRoleName keys the consumer role there.
+	consumerRoleName = "remote-consumer"
 	// probeInterval matches how often the remote-agent probes lupine-server.
 	probeInterval = 5 * time.Second
 )
+
+// SetupConsumerRole publishes this node as a node that runs remote vGPU pods,
+// or removes a consumer role left from an earlier configuration. The role is
+// removed on shutdown either way.
+func SetupConsumerRole(reg registrar, enabled bool) {
+	reg.AddCleanupRegistryFunc(consumerRoleName, removeConsumerRole)
+	if !enabled {
+		reg.AddRegistryFunc(consumerRoleName, removeConsumerRole)
+		return
+	}
+	reg.AddRegistryFunc(consumerRoleName, func(featuregate.FeatureGate) (*client.PatchMetadata, error) {
+		return roleMetadata(util.NodeRemoteConsumerLabel, ptr.To("true"), nil, nil), nil
+	})
+}
+
+func removeConsumerRole(featuregate.FeatureGate) (*client.PatchMetadata, error) {
+	return roleMetadata(util.NodeRemoteConsumerLabel, nil, nil, nil), nil
+}
 
 // registrar is the part of the device manager that publishes node metadata.
 type registrar interface {
@@ -126,10 +146,17 @@ func removeServerRole(featuregate.FeatureGate) (*client.PatchMetadata, error) {
 	return serverRoleMetadata(nil, nil), nil
 }
 
-// serverRoleMetadata sets the role label and endpoints; nil removes them.
+// serverRoleMetadata sets the server role label and endpoints; nil removes them.
 func serverRoleMetadata(label, endpoints *string) *client.PatchMetadata {
-	return &client.PatchMetadata{
-		Labels:      map[string]*string{util.NodeRemoteServerLabel: label},
-		Annotations: map[string]*string{util.NodeRemoteEndpointsAnnotation: endpoints},
+	return roleMetadata(util.NodeRemoteServerLabel, label, ptr.To(util.NodeRemoteEndpointsAnnotation), endpoints)
+}
+
+// roleMetadata sets one role label and, when named, one annotation; a nil
+// value removes the key.
+func roleMetadata(label string, labelValue *string, annotation, annotationValue *string) *client.PatchMetadata {
+	metadata := &client.PatchMetadata{Labels: map[string]*string{label: labelValue}}
+	if annotation != nil {
+		metadata.Annotations = map[string]*string{*annotation: annotationValue}
 	}
+	return metadata
 }

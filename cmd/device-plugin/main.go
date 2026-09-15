@@ -116,11 +116,17 @@ func runApp(opt *options.Options) (exitCode int) {
 	klog.V(4).Infof("Current NodeConfig:\n%s", nodeConfig.String())
 
 	klog.V(3).Info("Initialize Device Resource Manager")
-	deviceManager, err := devm.NewDeviceManager(
+	var deviceManager *devm.DeviceManager
+	if opt.RemoteConsumer {
+		// A consumer node runs remote pods only: it has no GPUs to detect.
+		deviceManager = devm.NewDevicelessManager(
+			nodeConfig,
+			devm.WithKubeClient(kubeClient),
+			devm.WithFeatureGate(opt.FeatureGate))
+	} else if deviceManager, err = devm.NewDeviceManager(
 		nodeConfig,
 		devm.WithKubeClient(kubeClient),
-		devm.WithFeatureGate(opt.FeatureGate))
-	if err != nil {
+		devm.WithFeatureGate(opt.FeatureGate)); err != nil {
 		klog.Errorf("Create device manager failed: %v", err)
 		return exitCode
 	}
@@ -189,6 +195,7 @@ func runApp(opt *options.Options) (exitCode int) {
 		}
 	}()
 	deviceManager.Start()
+	dpremote.SetupConsumerRole(deviceManager, opt.RemoteConsumer)
 	if err := dpremote.SetupServerRole(clusterCtx, deviceManager, kubeClient,
 		opt.NodeName, opt.RemoteServer, opt.RemoteAgentEndpoint); err != nil {
 		klog.Errorf("Set up remote GPU server role failed: %v", err)

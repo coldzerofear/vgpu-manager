@@ -35,6 +35,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
@@ -69,6 +70,8 @@ func newPodModeAgent(t *testing.T, pods ...*corev1.Pod) *Agent {
 	factory := informers.NewSharedInformerFactory(kubeClient, 0)
 	a.podInformer = factory.Core().V1().Pods().Informer()
 	require.NoError(t, a.podInformer.AddIndexers(podIndexers()))
+	a.podCache = cache.NewIntegerResourceVersionMutationCache(
+		klog.Background(), a.podInformer.GetStore(), a.podInformer.GetIndexer(), time.Minute, true)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go a.podInformer.RunWithContext(ctx)

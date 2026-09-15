@@ -1036,6 +1036,17 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
      proto 不变。
    - 回收：Pod 事件与周期 GC。仅被删除（还有 DeletionTimestamp）的 Pod 保留会话，容器还在跑；对象消失或进入
      终态才清。另一种 owner kind 的残留会话会被清掉（模式是节点级配置）。
-4. **S4 消费角色**：`--remote-consumer`、`--remote-consumer-vgpu-number` 与 §16.6 的资源规则；D1、D3–D6；首次 `Allocate` 批量建会话。
+4. **S4 消费角色**（进行中）：`--remote-consumer`、`--remote-consumer-vgpu-number` 与 §16.6 的资源规则。
+   - **Allocate 不碰网络**（用户 2026-09-15 拍板，取代 §16.3 的"首次 Allocate 批量建会话"）：kubelet 准入是串行的，
+     逐个容器等 gRPC 会拖住整个节点。`Allocate` 只做三件事：写本容器目录与 `devices.json`、注入环境变量
+     （`LUPINE_SERVER`/`LUPINE_SESSION`/`NVIDIA_VISIBLE_DEVICES=void`/`LUPINE_DISABLE_LOCAL`）、声明两个挂载
+     （客户端 shim 目录与 `ld.so.preload`，内容由 PreStart 填）。
+   - **PreStartContainer 按当前容器做实事**：建会话（agent gRPC）、准备客户端 shim 与 `ld.so.preload`。
+   - **容器身份**：`PreStartContainerRequest` 只带设备 ID，且 kubelet 会把顺序 init 容器的设备 ID 复用给业务容器。
+     因此 PreStart 先由设备 ID 反查 Pod，再用各容器 `devices.json` 的 ID 集合匹配容器；若 init 与业务容器 ID 集合
+     完全相同，取第一个尚无本地会话标记的容器（init 先于业务启动），重启时全部有标记则对匹配到的容器重新确保（幂等）。
+   - 代码放在新的 `pkg/deviceplugin/remote`，消费节点用它替换本地 vGPU 插件，不在 `vnum_plugin.go` 里加分支。
+   - **暂不支持 server 兼消费节点**：服务器的 `node-device-register` 由本地 vGPU 插件发布，而消费模式下它不运行；
+     要支持需先把节点设备注册的发布从该插件里挪出来。启动参数同时给这两个角色时直接报错。
 5. **S5 监控**：§16.5。
 6. **S6 部署与文档**。

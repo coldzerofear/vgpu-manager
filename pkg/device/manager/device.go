@@ -211,6 +211,30 @@ func WithDeviceLib(lib *nvidia.DeviceLib) OptionFunc {
 	}
 }
 
+// NewDevicelessManager is the manager of a node without GPUs (the remote
+// consumer role): it publishes node metadata and serves device plugins, but
+// never touches NVML. Everything device-related reports empty.
+func NewDevicelessManager(config *node.NodeConfigSpec, opts ...OptionFunc) *DeviceManager {
+	manager := &DeviceManager{
+		config:               config,
+		unhealthy:            make(chan *Device, 1),
+		reRegister:           make(chan struct{}, 1),
+		notify:               make(map[string]chan *Device),
+		registryFuncs:        make(map[string]RegistryFunc),
+		cleanupRegistryFuncs: make(map[string]RegistryFunc),
+	}
+	for _, opt := range opts {
+		opt(manager)
+	}
+	if manager.client == nil {
+		manager.client = fake.NewSimpleClientset()
+	}
+	if manager.featureGate == nil {
+		manager.featureGate = featuregate.NewFeatureGate()
+	}
+	return manager
+}
+
 func NewDeviceManager(config *node.NodeConfigSpec, opts ...OptionFunc) (*DeviceManager, error) {
 	manager := &DeviceManager{
 		config:               config,
@@ -465,13 +489,16 @@ func (m *DeviceManager) Start() {
 		klog.Infoln("DeviceManager starting registry node devices...")
 		m.registryDevices()
 	})
-	m.wait.Go(func() {
-		klog.Infoln("DeviceManager starting check devices health...")
-		if err := m.checkHealth(); err != nil {
-			klog.ErrorS(err, "Failed to initiate device health check")
-		}
-	})
-	if m.featureGate.Enabled(util.SharedSMUtilizationWatcher) {
+	// A deviceless manager (remote consumer role) has no NVML to ask.
+	if m.DeviceLib != nil {
+		m.wait.Go(func() {
+			klog.Infoln("DeviceManager starting check devices health...")
+			if err := m.checkHealth(); err != nil {
+				klog.ErrorS(err, "Failed to initiate device health check")
+			}
+		})
+	}
+	if m.DeviceLib != nil && m.featureGate.Enabled(util.SharedSMUtilizationWatcher) {
 		m.wait.Go(func() {
 			klog.Infoln("DeviceManager starting sm watcher...")
 			m.doWatcher()

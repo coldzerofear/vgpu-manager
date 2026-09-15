@@ -29,6 +29,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/mig"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"gomodules.xyz/jsonpatch/v2"
@@ -53,6 +54,20 @@ func GetDevicePlugins(
 	// references that host path. It is executed by the host container runtime,
 	// not by this plugin, so no flag is exposed for it.
 	nodeConfig := devManager.GetNodeConfig()
+	if option.RemoteConsumer {
+		// A consumer node has no GPUs: it serves remote pods only, reports
+		// just vgpu-number, and needs neither NVML nor CDI.
+		go CycleCleanupNodeResources(kubeClient, nodeConfig.GetNodeName(),
+			[]string{util.VGPUCoreResourceName, util.VGPUMemoryResourceName})
+		return []base.DevicePlugin{remote.NewConsumerDevicePlugin(remote.ConsumerConfig{
+			NodeName:       nodeConfig.GetNodeName(),
+			ResourceName:   util.VGPUNumberResourceName,
+			Socket:         filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-remote.sock"),
+			VGPUNumber:     option.RemoteConsumerVGPU,
+			ManagerDir:     vgpu.ContManagerDirectoryPath,
+			HostManagerDir: vgpu.HostManagerDirectoryPath,
+		}, devManager, kubeClient)}, nil
+	}
 	cdiHandler, err := cdi.New(
 		devManager.DeviceLib,
 		cdi.Config{

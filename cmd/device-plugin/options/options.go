@@ -64,6 +64,8 @@ type Options struct {
 	HostDriverRoot      string
 	ContainerDriverRoot string
 	RemoteServer        bool
+	RemoteConsumer      bool
+	RemoteConsumerVGPU  int
 	RemoteAgentEndpoint string
 	FeatureGate         featuregate.MutableFeatureGate
 }
@@ -80,6 +82,10 @@ const (
 	defaultDeviceCoresScaling  = 1.0
 	defaultPprofBindPort       = 0
 	defaultMigStrategy         = util.MigStrategyMixed
+	// defaultRemoteConsumerVGPU is how many remote vGPUs one consumer node
+	// runs at a time. It has no local GPUs to derive a number from, so this
+	// is a plain concurrency cap.
+	defaultRemoteConsumerVGPU  = 1000
 	defaultCDIAnnotationPrefix = util.CDIDefaultAnnotationPrefix
 	defaultDriverRoot          = util.CDIDefaultDriverRoot
 
@@ -162,6 +168,8 @@ func NewOptions() *Options {
 		HostDriverRoot:      util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
 		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
 		RemoteServer:        util.GetEnvEnabled("REMOTE_SERVER"),
+		RemoteConsumer:      util.GetEnvEnabled("REMOTE_CONSUMER"),
+		RemoteConsumerVGPU:  defaultRemoteConsumerVGPU,
 		RemoteAgentEndpoint: util.GetEnvDefault("REMOTE_AGENT_ENDPOINT", fmt.Sprintf(":%d", remotegpu.DefaultAgentPort)),
 	}
 }
@@ -202,6 +210,8 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.HostDriverRoot, "host-driver-root", o.HostDriverRoot, "The root path for the NVIDIA driver installation on the host. (typical values are '/' or '/run/nvidia/driver')")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
 	pflag.BoolVar(&o.RemoteServer, "remote-server", o.RemoteServer, "Serve this node's GPUs to remote vGPU pods on other nodes. (requires the RemoteGPUSupport feature gate)")
+	pflag.BoolVar(&o.RemoteConsumer, "remote-consumer", o.RemoteConsumer, "Run remote vGPU pods on this node, whose GPUs are on remote servers. (requires the RemoteGPUSupport feature gate)")
+	pflag.IntVar(&o.RemoteConsumerVGPU, "remote-consumer-vgpu-number", o.RemoteConsumerVGPU, "How many remote vGPUs this consumer node runs at a time.")
 	pflag.StringVar(&o.RemoteAgentEndpoint, "remote-agent-endpoint", o.RemoteAgentEndpoint, "The remote-agent on this node: grpc://host:port or unix:///path. An empty host means the node's InternalIP.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
@@ -214,12 +224,23 @@ func (o *Options) FlagParse() {
 
 // Validate checks the option combinations the flags alone cannot express.
 func (o *Options) Validate() error {
-	if o.RemoteServer {
+	if o.RemoteServer || o.RemoteConsumer {
 		if !o.FeatureGate.Enabled(RemoteGPUSupport) {
-			return fmt.Errorf("--remote-server requires the %s feature gate", RemoteGPUSupport)
+			return fmt.Errorf("--remote-server and --remote-consumer require the %s feature gate", RemoteGPUSupport)
 		}
 		if _, err := remotegpu.ParseAgentEndpoint(o.RemoteAgentEndpoint); err != nil {
 			return err
+		}
+	}
+	if o.RemoteConsumer {
+		if o.RemoteConsumerVGPU <= 0 {
+			return fmt.Errorf("--remote-consumer-vgpu-number must be greater than 0")
+		}
+		if o.RemoteServer {
+			// The node device registry a server publishes comes from the local
+			// vGPU plugin, which does not run in consumer mode. Serving both
+			// roles from one process needs that publishing to move first.
+			return fmt.Errorf("--remote-consumer together with --remote-server is not supported yet")
 		}
 	}
 	return nil
