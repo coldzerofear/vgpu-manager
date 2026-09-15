@@ -1,6 +1,13 @@
-# 设备插件 + 调度器路径的远程 GPU 集成：可行性与改造面分析 v0.2
+# 设备插件 + 调度器路径的远程 GPU 集成：可行性与改造面分析 v0.5
 
-> 状态：**六项决策已拍板（§8），待实施细则定稿**
+> 状态：**以 §16 为准**（v0.5，2026-09-15：S1 调度器已按用户方向落地；init/sidecar、会话模型、监控分析与三项拍板）。
+> §15.2 契约表与 §15.3 的 S1 表已被 §16.1 取代，保留作历史记录。
+> v0.4：实施顺序定稿，见 §15（不做命名改造、不做抽象重构，直接实现 remote-gpu）
+> v0.3（2026-09-14）：新增 §11 设备后端抽象、§12 分阶段落点、§13 待拍板决策、§14 命名规范化方案。
+> 已拍板：消费侧走**方案 P（消费侧设备插件）**；**先做抽象重构再加远程**（§13 ⑦⑧）。
+> 两条重要更正：① kubelet 准入会**丢弃**节点未上报的扩展资源（`removeMissingExtendedResources`），
+> 所以"消费节点零上报 + `ignoredByScheduler`"在 kubelet 层面可行，决策②的原论据作废，消费侧形态重新列为决策⑦；
+> ② 集群外接入不抄 HAMi 的 session stub，走我们自己的 D19（正常调度的远程 GPU pod 即中继）。
 > v0.2（2026-09-11，用户拍板）：抢占不实现（远程 Pod 在钩子处原样透传）；消费节点沿用 `vgpu-number` 原名；
 > 单容器单远程服务器；拓扑只保留单服务器内 NVLink/NUMA；继续复用 `RemoteGPUSupport` gate（跨进程无法校验，
 > 靠 nodeSelector 部署互斥）；新增两节：**device-monitor 适配（§5）** 与 **DRA 不可用集群的兼容（§6，含"版本够但特性门未开"
@@ -437,3 +444,573 @@ agent 的两个 informer 正是用 `RESTClient()` 建的 → 在情形 C（DRA �
    远程设备插件路径不引入任何高于本地路径的 k8s 版本要求（§6.4）。
 10. **`draclient.RESTClient()` 绕过版本协商**（`client.go:71` 恒返回 v1 REST client）。预先存在的缺陷，
    **已按拍板处理**：agent 声明 v1-only 并启动校验，device-monitor 的 informer 改走协商版本（§6.2）。
+
+---
+
+## 11. 设备后端抽象（v0.3 新增，目标：调度器清晰可扩展）
+
+### 11.1 现状的好消息：打包引擎已经是设备无关的
+
+`pkg/device/allocator` 全包**没有任何 nvml / nvidia 依赖**，它只认 `device.NodeInfo` 里的一袋
+`*device.Device`（核数、显存、份数、NUMA、链路拓扑、健康位）以及请求里的 uuid/type 过滤。
+也就是说"怎么打包、怎么按拓扑对齐、怎么排优先级"这层**不需要为远程或 AMD 改动**。
+
+设备专有的其实只有五件事：
+
+| # | 设备专有的事 | 今天写死在哪 |
+|---|---|---|
+| ① | 哪些资源名/注解属于我，这个 Pod 是不是我的 | `allocator.BuildAllocationRequest`（读 `vgpu-number` 等） |
+| ② | 候选节点够不够格 | `filter.CheckNode`（要求本节点有 GPU 注册注解） |
+| ③ | 打包对象（库存）从哪来 | `device.NewNodeDeviceGatherInfo`（读本节点 `node-device-register`） |
+| ④ | 定下来之后往 Pod 上写什么 | `allocator.Allocate` 尾部写 `pre-allocated` + `predicate-node` |
+| ⑤ | 节点侧怎么兑现 | `vnum_plugin.Allocate`（CDI/挂载/env/写 vgpu.config） |
+
+抽象就画在这五处，其余全部共享。这也是"逻辑清晰"的来源：**调度器主干只剩一条链路，
+设备差异全部收敛到一个接口的实现里。**
+
+### 11.2 调度器侧接口 `Backend`
+
+```go
+// pkg/device/backend/backend.go
+//
+// Backend 是调度器能放置的一类设备：本节点的 NVIDIA vGPU、同一批卡经 lupine 上网后的远程
+// vGPU、将来的 AMD。打包引擎（pkg/device/allocator）共享且保持设备无关；后端只提供引擎无从
+// 知道的四件事：哪些请求归我、哪些节点够格、往什么库存里打包、定了之后写什么。
+type Backend interface {
+    Name() string                       // 日志/指标/事件里的身份
+    Resources() ResourceNames           // 本后端拥有的扩展资源名（注册表拒绝重名）
+    Annotations() AnnotationKeys        // 本后端自己的注册/预分配/已分配注解键
+
+    // Request 把 Pod 解析成本后端的分配请求；不是我的请求返回 nil。
+    // 同一个 Pod 只能被一个后端认领（registry.Resolve 保证）。
+    Request(pod *corev1.Pod) *allocator.AllocationRequest
+
+    // Admit 是节点级门禁：这个候选节点能不能承载该 Pod。
+    // 本地：节点自己注册了 GPU；远程：节点是消费节点且至少有一台健康服务器可达。
+    Admit(node *corev1.Node, req *allocator.AllocationRequest) *reason.FilterReason
+
+    // Inventory 给出候选节点上可以打包的库存。本地恰好一项（本节点自己）；
+    // 远程是"这个消费节点可达的每台服务器各一项"，所以返回切片。
+    Inventory(ctx context.Context, node *corev1.Node,
+        req *allocator.AllocationRequest, snap *Snapshot) ([]*Placement, *reason.FilterReason, error)
+
+    // Commit 把选中的放置结果变成节点侧读得回来的元数据补丁。
+    Commit(pod *corev1.Pod, p *Placement, claims device.PodDeviceClaim) (map[string]*string, error)
+}
+
+// Placement 把"往哪份库存里打包"和"Pod 实际落在哪个节点"分开。
+// 本地两者相同；远程两者不同——这正是这个类型存在的唯一理由。
+type Placement struct {
+    Inventory *device.NodeInfo  // 打包对象：本地 = 本节点，远程 = 某台服务器
+    RunsOn    string            // Pod 实际落点，写进 predicate-node
+    Context   map[string]string // 后端自带上下文（远程：server / agent endpoint）
+}
+```
+
+`Snapshot` 是一次调度周期内共享的只读视图（全量 vGPU Pod 列表、节点列表、缓存的库存），
+由 filter 构造一次传给所有后端，避免每个后端各自 list 一遍。**用量归属也交给后端**：
+本地按 `PodPlanSchedulingNode` 归组，远程按 Pod 注解里的服务器节点归组——
+这比在共享的 `podLister` 上加第二个归组函数更内聚（§3.1 的方案相应调整）。
+
+filter 主干化简成一条可读的链路：
+
+```go
+be := registry.Resolve(pod)              // 没有后端认领 = 不是我们的 Pod，直接放行
+req := be.Request(pod)
+for _, node := range candidates {
+    if r := be.Admit(node, req); r != nil { failed[node.Name] = r; continue }
+    places, r, err := be.Inventory(ctx, node, req, snap)
+    for _, p := range sortPlacements(req, places) {
+        claims, rsn, err := allocator.New(p.Inventory).Allocate(req)   // 共享引擎
+        if rsn != nil { continue }
+        patch := be.Commit(pod, p, claims)
+        client.PatchPodMetadata(...)                                   // 共享写入
+    }
+}
+```
+
+### 11.3 节点侧接口 `Realizer`（设备插件内）
+
+`vnum_plugin.Allocate` 现在是 270 行的大函数，把"找到当前 Pod、解析预分配注解、逐容器循环、
+写 real-alloc、patch 成功"这些**共享骨架**和"挂驱动、写 vgpu.config、CDI"这些**本地专有**混在一起。
+拆成：
+
+```go
+// pkg/deviceplugin/realize/realize.go
+type Realizer interface {
+    Name() string
+    // Devices 上报给 kubelet 的设备列表（ID 对我们只是计数用的占位符）
+    Devices() []*pluginapi.Device
+    // Realize 把一个容器已记录的 claim 兑现成 kubelet 应答：
+    // 本地挂驱动/写配置；远程先 EnsureSession 再注入 LUPINE_SERVER/LUPINE_SESSION 与 client shim。
+    Realize(ctx context.Context, pod *corev1.Pod, claim *device.ContainerDeviceClaim,
+        resp *pluginapi.ContainerAllocateResponse) error
+}
+```
+
+骨架（找 Pod、循环、状态机 patch）只此一份，两种设备各自实现 `Realize`。
+
+### 11.4 借鉴 HAMi 什么、不借鉴什么
+
+| HAMi 的做法 | 我们 | 理由 |
+|---|---|---|
+| 一个 `Devices` 接口 + 注册表按设备类型分发 | **借鉴** | 正是"以后接 AMD"要的形状 |
+| 每个后端自带注解命名空间（`InRequestDevices` / `SupportDevices` 按类型注册） | **借鉴**（`Annotations()`） | AMD 的节点注册注解不该挤进 NVIDIA 的键 |
+| 后端自己判断"这个容器的请求是不是我的" | **借鉴**（`Request` 返回 nil） | 比在主干里 if-else 判资源名清晰 |
+| 资源名来自配置而非常量 | **借鉴** | 我们已有 `--domain` 改域名，思路一致 |
+| `DeviceInfo.CustomInfo map[string]any` 逃生舱 | **暂不**，等第二家厂商真的需要再加 | 类型不安全；我们读写两端都自己控制，YAGNI |
+| `Fit` 返回 `(bool, map[...], string)`，失败原因是字符串 | **不借鉴** | 我们已有结构化 `reason.FilterReason`（带 Code + 明细 + 指标归类），比字符串强 |
+| `CheckHealth(devType, node) (bool, bool)` 两个匿名 bool | **不借鉴** | 语义靠注释猜；健康状态我们直接落在 `DeviceInfo.Healthy` 上 |
+| `PatchAnnotations(pod, *map[string]string, ...)` 指针改 map | **不借鉴** | `Commit` 返回补丁，纯函数好测 |
+| 包级可变全局注册表（`InRequestDevices` 等 `var`） | **不借鉴** | 改成显式 `Registry` 对象，单测不用清理全局状态 |
+| `LockNode/ReleaseNodeLock` 挂在设备接口上 | **不借鉴** | 我们的串行化在 filter（`f.locker`）与 bind 层，与设备无关，不该下放 |
+
+### 11.5 引入抽象的风险与边界
+
+- **必须零行为变化**：本地 NVIDIA 后端只是把现有代码搬进接口实现，不改逻辑。
+  `pkg/scheduler/filter`（跑 123s 的重测试）、`preempt`、`allocator` 三个包的既有用例全绿即为通过判据。
+- **不动的部分**：allocator 内部（打包/拓扑/NUMA/优先级/gang/cross-pod）、bind、串行锁、事件与指标骨架。
+- **`allocator.Allocate` 需要一处小改**：它现在把 `predicate-node` 写成 `nodeInfo.GetName()`，
+  等于假设"设备所在节点 = Pod 落点"。远程下二者不同，且 `FilterAllocatingPods` 与 bind 都要求
+  `predicate-node == pod.Spec.NodeName`。改法：把落点作为显式入参（`Placement.RunsOn`），
+  默认仍是库存节点名——本地行为不变。
+
+---
+
+## 12. 实施落点（按阶段，替代 §9 的粗粒度版本）
+
+> 阶段之间可独立验证；每阶段结束时全仓库 `go build / vet / test -race` 必须绿。
+
+### P0 契约冻结（无代码）
+拍板 §8 与 §13 的决策；定稿注解/编码：远程服务器节点名的载体、Pod 会话令牌注解键、
+real-alloc 摘要（对应 DRA 的 allocation-id）、`metrics-node` 语义扩展、节点角色标签。
+
+### P1 抽象骨架（**不改任何行为**）
+| 落点 | 动作 |
+|---|---|
+| `pkg/device/backend/`（新包） | `Backend` / `Placement` / `Snapshot` / `Registry` / `ResourceNames` / `AnnotationKeys` |
+| `pkg/device/backend/local/`（新包） | 把 ①②③④ 的现有实现搬进来：`Request` = 现 `BuildAllocationRequest`；`Admit` = 现 `CheckNode`；`Inventory` = 现 `NewNodeInfo`；`Commit` = 现 `Allocate` 尾部的注解拼装 |
+| `pkg/scheduler/filter/filter_predicate.go` | `nodeFilter`/`deviceFilter` 改为经 `registry` 调用后端；主干只剩链路 |
+| `pkg/device/allocator/allocator.go` | `Allocate` 不再自己写 `predicate-node`，由 `Commit` 决定（默认值不变） |
+| `pkg/scheduler/preempt/preempt_predicate.go` | `refineForNode` 的节点门禁与库存重建改走后端 |
+| 判据 | filter/preempt/allocator 既有测试全绿，无新行为 |
+
+### P2 远程后端（调度器侧）
+| 落点 | 动作 |
+|---|---|
+| `pkg/device/backend/remote/`（新包） | `Request`（accessMode=remote 才认领）、`Admit`（消费节点门禁 + 有健康服务器）、`Inventory`（按可达服务器各建一份 NodeInfo，用量按服务器归属聚合）、`Commit`（pre-alloc + 服务器节点 + endpoint + 会话令牌） |
+| `pkg/scheduler/reason/reason.go` | 新增远程专用拒绝码（无可达服务器 / 服务器不健康 / 消费节点未启用等） |
+| `pkg/scheduler/preempt/` | remote 请求在入口 `passthrough`（决策④） |
+| 判据 | 单测：远程 Pod 选中服务器并写对注解；本地 Pod 行为不变；跨节点用量不重复计算 |
+
+### P3 GPU 侧上报（remote-server 节点）
+| 落点 | 动作 |
+|---|---|
+| `pkg/deviceplugin/`（新增 remote-serve 模式） | 节点带远程标签 → 不向 kubelet 注册，只写注册注解；按 agent `ServerInfo` 置 `DeviceInfo.Healthy`，并写入 server endpoint / agent endpoint / server CUDA 版本 / client bundle etag |
+| `cmd/device-plugin/options` | 模式解析：**标签是唯一权威**，配置与标签冲突时报错（借鉴 HAMi `resolveOperatingMode`） |
+| `deploy/` | GPU 节点沿用 `dra-remote/remote-server.yaml` 形态（agent + lupine-server + monitor） |
+
+### P4 消费侧兑现（形态取决于决策⑦）
+| 落点（方案 P：消费侧设备插件） | 动作 |
+|---|---|
+| `pkg/deviceplugin/realize/`（新包） | 抽出 `Realizer` 骨架，本地实现平移 |
+| `pkg/deviceplugin/realize/remote/` | EnsureSession（5s 超时）+ 注入 env/挂载 + ld.so.preload |
+| `pkg/deviceplugin/base/plugin_server.go` | `DeviceManager` 变为可选（仅 3 处耦合：`GetDeviceManager`/`AddNotifyChannel`/`RemoteNotifyChannel`） |
+| `cmd/device-plugin/main.go` | remote-only 模式：跳过 NVML 初始化 |
+| 方案 W（webhook + downward API + init 容器）若中选 | 落点改为 `pkg/webhook/pod/mutate` 注入 env/init 容器/emptyDir；EnsureSession 屏障移到 scheduler bind；分配状态机需要新的完成信号 |
+
+### P5 agent Pod 模式与会话
+| 落点 | 动作 |
+|---|---|
+| `pkg/api/remoteagent/api.proto` | 新增中立 `SessionOwner{kind,uid,namespace,name,resourceVersion}`，保留 `claim_*` 兼容 |
+| `pkg/remoteagent/agent.go` | `--session-owner=pod` 时监听 Node（设备快照）+ Pod（会话归属，标签选择器收窄），**不建任何 DRA informer**（§6） |
+| `pkg/remoteagent/session.go` | `Materialize` 入参中立化（owner + `[]DeviceClaim`）；标记文件记 owner UID/RV |
+| `pkg/remoteagent/` | 新增"从 Node 注解构造 `NodeDevices`" |
+
+### P6 监控
+`pkg/metrics/collector/remote_session.go`（公共会话工具外提）+ `node_remote.go`（远程消费者反查、会话目录取 PID/vmem），
+`pkg/client/kube_patch.go` 让远程 Pod 的 `metrics-node` 指向服务器节点且不被覆盖。
+
+### P7 部署与文档
+`deploy/deviceplugin-remote/`、`charts/vgpu-manager` 增补、README 与已知边界（含 §4 的抢占残留语义）。
+
+---
+
+## 13. 新增待拍板决策（v0.3）
+
+| # | 决策 | 选项 | 我的建议 |
+|---|---|---|---|
+| ⑦ | **消费侧形态** | (P) 消费侧设备插件；(W) webhook + downward API + init 容器（HAMi 式，已确认 kubelet 准入可行） | ✅ **已拍板：P**（2026-09-14）。注入对用户透明（不改 Pod spec）、D2 屏障天然落在容器创建前、复用既有 Allocate 状态机与制品缓存；代价是消费节点要跑 DaemonSet。W 的优点是消费节点零组件、制品每次从 server 现拉不用缓存，但要把屏障搬到 bind、另找状态机完成信号，且 Pod spec 被注入 init 容器 |
+| ⑧ | 抽象重构时机 | (a) 先做 P1 再加远程；(b) 边加远程边抽 | ✅ **已拍板：(a) 先重构后远程**（2026-09-14）。P1 零行为变化、有厚测试护栏；混在一起做会让"远程引入的 bug"和"重构引入的 bug"无法区分 |
+| ⑨ | 后端注册键命名 | `nvidia-local` / `nvidia-remote` / 将来 `amd`；或单 `nvidia` 后端内部按 accessMode 分支 | **前者**。远程与本地的门禁、库存、写回都不同，合成一个后端会把 if-else 搬回主干 |
+| ⑩ | filter 返回一个节点还是全部可行节点 | (a) 沿用本地行为：选中一个消费节点即返回；(b) 返回全部可行消费节点，交 kube-scheduler 打分，bind 时再定 `predicate-node` | **(a) 先行**。(b) 更符合 k8s 语义（CPU/内存/亲和性参与选点），但要改 bind 与预分配时序，留作后续 |
+| ⑪ | 服务器选择策略 | 复用 `node-scheduler-policy`（binpack/spread）作用在服务器维度，`device-scheduler-policy` 作用在卡维度 | 同意复用，语义天然对应 |
+| ⑫ | 消费节点候选顺序 | (a) 第一个通过门禁的；(b) 剩余远程配额最多的（spread） | **(b)**，避免所有远程 Pod 堆在同一个消费节点上 |
+
+---
+
+## 14. 命名规范化方案（v0.3 新增，待拍板）
+
+### 14.1 问题定位
+
+今天 `pkg/util/consts.go` 里 **54 个键全部由同一个 `globalDomainName` 派生，默认值是 `nvidia.com`**，
+并且这个域名可以用 `--domain` 在运行时整体替换（`MustInitGlobalDomain` → `initConstants()` 重新赋值 54 个包级变量）。
+另有 5 个键硬编码 `vgpu-manager.io/`、5 个硬编码 `nvidia.com/`。三套并存，没有规则。
+
+**根因是把两类语义混成了一个域名：**
+
+| 类别 | 语义归属 | 今天 | 应该 |
+|---|---|---|---|
+| 扩展资源名 | **厂商**的东西，用户和 kubelet 都按厂商理解 | `<domain>/vgpu-number` | 厂商域名 `nvidia.com/...`，且**按后端可配** |
+| 注解 / 标签 | **我们项目**的契约（调度策略、分配记录、节点注册） | 同一个 `<domain>/...` | 项目域名 `<proj>/...`，**固定不可配** |
+
+所以会出现 `nvidia.com/node-scheduler-policy` 这种键：策略是我们调度器的概念，对 AMD 一样适用，却占着 NVIDIA 的域名。
+
+### 14.2 资源名方案（采纳你的提议，加一条限定）
+
+```
+<厂商域名>/<设备类>[.<维度>]
+nvidia.com/vgpu             份数（原 vgpu-number）
+nvidia.com/vgpu.core        算力（原 vgpu-cores）
+nvidia.com/vgpu.memory      显存（原 vgpu-memory）
+nvidia.com/mig-1g.5gb       MIG：保持与 NVIDIA 官方插件一致，不改
+amd.com/vgpu                将来
+ascend.com/vnpu             将来（用厂商自己的术语，不强行统一成 vgpu）
+```
+
+合法性已核对：k8s 的 `IsQualifiedName` 允许名字段含点（`[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?`，≤63），
+`requests.nvidia.com/vgpu.core` 作为 ResourceQuota 键同样合法；NVIDIA 官方的 `nvidia.com/mig-1g.5gb` 就是先例。
+点号读作"vgpu 的某个维度"，比连字符更贴切。
+
+**限定一：资源名必须可按后端覆盖，不能写死。**（借鉴 HAMi：资源名来自调度器 ConfigMap）
+理由有二：① `nvidia.com/vgpu` 是在 NVIDIA 的域名里定义我们自己的语义，属于轻度"抢注"——
+HAMi 直接抢 `nvidia.com/gpu` 已经造成"同名不同义"的混乱（他们的是可切分，NVIDIA 的是整卡），
+我们至少要用 `vgpu` 这种明确属于我们的名字，并给用户改名的余地；
+② 同一集群里可能同时装着 NVIDIA 官方插件，留出改名口子才能避免撞名。
+
+**限定二：远程不另起资源名。** 远程 Pod 仍请求 `nvidia.com/vgpu`，靠 accessMode 注解区分（决策②已定），
+这样本地/远程的 Pod YAML 完全一致。
+
+### 14.3 注解 / 标签方案（两种候选都不建议，给第三种）
+
+你给的两种：
+
+| 候选 | 问题 |
+|---|---|
+| `scheduling.device.manager.io/node-scheduler-policy` | 前缀里有 `device`、键里又是 `node`，两处对象名打架；且 `scheduler` 在 `scheduling.` 前缀下是冗余词 |
+| `scheduling.node.manager.io/scheduler-policy` | 对象进前缀不冗余，但**把一个特性拆成多个前缀**：node/device/memory/topology 四个知悉同一件事的键分散在四个前缀里，文档、grep、RBAC、webhook 白名单都要写四遍 |
+
+**建议：一个关注点一个前缀，对象放在键里**，这正是 k8s 自己的写法
+（`topology.kubernetes.io/zone`、`scheduling.k8s.io/group-name`、`pod-security.kubernetes.io/enforce`）：
+
+```
+# ① 用户输入 · 影响“落在哪”          （公共 API，用户可写，webhook 校验）
+scheduling.<proj>/node-policy              ← node-scheduler-policy
+scheduling.<proj>/device-policy            ← device-scheduler-policy
+scheduling.<proj>/memory-policy            ← memory-scheduler-policy
+scheduling.<proj>/topology-mode            ← device-topology-mode
+scheduling.<proj>/cross-pod-topology
+scheduling.<proj>/stuck-grace-period
+scheduling.<proj>/access-mode              ← vgpu-access-mode（local/remote 决定落点）
+scheduling.<proj>/include-device-uuid      ← include-gpu-uuid（去掉 gpu，面向多设备）
+scheduling.<proj>/exclude-device-uuid
+scheduling.<proj>/include-device-type
+scheduling.<proj>/exclude-device-type
+
+# ② 用户输入 · 影响“怎么跑”
+runtime.<proj>/compute-policy              ← vgpu-compute-policy
+runtime.<proj>/memory-oversold             （现为容器 env，可一并规范）
+
+# ③ 系统写入的 Pod 状态（用户不应写，webhook 可直接拒绝整个前缀）
+state.<proj>/pre-allocated
+state.<proj>/real-allocated
+state.<proj>/predicate-node
+state.<proj>/predicate-time
+state.<proj>/assigned-phase        (label)
+state.<proj>/metrics-node          (label)
+state.<proj>/allocation-id         远程：分配摘要
+state.<proj>/session.<hash16>      远程：会话令牌（对应 DRA 侧 session-<hash>）
+
+# ④ 节点侧发布（设备插件写，按厂商分键，天然支持多设备共存）
+node.<proj>/devices.nvidia         ← node-device-register
+node.<proj>/config.nvidia          ← node-config-info
+node.<proj>/topology.nvidia        ← node-device-topology
+node.<proj>/domain.nvidia          ← node-gpu-domain
+node.<proj>/remote.nvidia          远程：server/agent endpoint + server CUDA 版本 + bundle etag（新增）
+node.<proj>/heartbeat
+
+# ⑤ 内部
+system.<proj>/ignore-webhook
+system.<proj>/scheduler-role       (label)
+```
+
+三个要点：
+
+1. **`scheduler` 一词在 `scheduling.` 前缀下删掉**（`node-policy` 而非 `node-scheduler-policy`），
+   信息不丢、长度减半。
+2. **厂商作为键的点号后缀**（`devices.nvidia` / `devices.amd`），不是前缀。
+   这样"所有节点发布物"一个前缀可枚举，同时 AMD 插件写自己的键不碰 NVIDIA 的。
+3. **按角色分前缀（输入 / 状态 / 节点发布）**，让"用户可以写什么"成为可执行规则：
+   webhook 可以直接拒绝用户设置 `state.*`，恢复逻辑可以按前缀清理，文档可以按前缀成章。
+   这是当前一锅端的命名做不到的。
+
+### 14.4 项目域名怎么选
+
+这是最贵、最难回退的一项，因为它是写进用户 YAML 的公共 API。
+
+| 候选 | 评价 |
+|---|---|
+| `vgpu-manager.io` | 已在 5 个键里使用、与仓库/产品同名、零额外决策成本；缺点是将来纳管 NPU/TPU 时 "vgpu" 名不副实 |
+| `device-manager.io` / `xpu-manager.io` | 面向多设备更贴切；但等于再做一次全量改名，且这类通用域名容易与他人概念撞车 |
+| `manager.io`（你的示例里用的） | **不建议**：k8s 惯例是用自己控制的域名，`manager.io` 是个真实可注册的通用域名，语义上也太泛 |
+
+**建议**：除非确定要改项目名，否则选 `vgpu-manager.io`。多花一次改名的代价，远高于"vgpu 三个字母不够泛"的代价；
+而且 `vgpu` 也可以读作 "virtual device"（业界 vGPU 已泛指虚拟化设备）。这一项请你直接拍。
+
+### 14.5 顺带能删掉的东西
+
+固定项目域名后，`--domain` flag、`globalDomainName` 包级可变变量、`MustInitGlobalDomain`、
+`initConstants()`（运行时重算 54 个变量）**整套机制可以删除**，54 个 `var` 变回真正的 `const`。
+资源名则改由后端配置提供（§11.2 的 `Backend.Resources()`）。这既是命名规范化的收益，
+也直接服务于"调度器清晰易懂"：没有运行时可变的全局键名，测试不用关心初始化顺序。
+
+> 代价：`--domain` 是现有用户可见的 chart 值（`.Values.globalDomain`），删除是破坏性变更，需写进升级说明。
+> 若要保留改名能力，建议只保留**资源名**可配（按后端），注解/标签域名固定。
+
+### 14.6 迁移路径（改名是 API 破坏，必须有过渡）
+
+| 步骤 | 内容 | 关键约束 |
+|---|---|---|
+| M1 | 新增 `pkg/util/naming`（或 `apis/`）集中定义新键，提供 `LookupAnnotation(obj, new, legacy...)` 双读助手 | 只加不改，先合入 |
+| M2 | 全仓库改为**写新键、读新旧两套** | 节点注解由插件重启即完成重写；Pod 注解为短生命周期，升级期间双读即可 |
+| M3 | **标签要特别处理**：`metrics-node` 被 monitor 的 informer 用作 **label selector**（selector 无法 OR 两个键），升级窗口内必须**新旧标签同时写** | 否则升级瞬间 monitor 会看不到存量 Pod |
+| M4 | 资源名：**只上报新名**，由 webhook 在准入时把旧名请求重写成新名 | 不要新旧同时上报——同一份容量挂两个资源名会被 kubelet 和 ResourceQuota 重复计算 |
+| M5 | 一到两个小版本后删除旧键与双读代码 | |
+
+> 时机建议：命名规范化**与 §12 的 P1 抽象骨架同期、但作为独立提交**先落。
+> 两者都是"零行为变化 + 有厚测试护栏"的机械改动，混在一起会让 review 无从下手；
+> 但都必须赶在 P2 远程后端之前，否则远程代码要跟着改两遍。
+
+---
+
+## 15. 定稿：不做重构、不改命名的实施顺序（v0.4）
+
+> 2026-09-14 用户拍板：**① 暂不做命名/域名改造**（沿用现有 `globalDomainName` 常量）；
+> **② 暂不做设备后端抽象重构**（§11/§12-P1 推迟，不废弃，将来再做）；**③ 直接实现 remote-gpu**；
+> **④ 消费侧设备插件只上报 `vgpu-number`，不上报 `vgpu-cores` / `vgpu-memory`**。
+
+### 15.1 决策④ 为什么成立（已核实）
+
+消费节点只上报 `vgpu-number`，而 Pod 仍然可以在 limits 里写 `vgpu-memory` / `vgpu-cores`：
+
+- **kube-scheduler**：我们的 chart 对这两个资源已经设了 `ignoredByScheduler: true`
+  （`charts/vgpu-manager/templates/scheduler/configmap.yaml`），in-tree NodeResourcesFit 本来就不看它们；
+- **kubelet**：准入前先跑 `removeMissingExtendedResources`，**节点完全没上报的扩展资源会被丢弃**，不参与适配；
+- **调度器**：`BuildAllocationRequest` 仍从容器 limits 读取 cores/memory，远程分配照常按显存/算力切分；
+- **限额**：仍由服务器侧会话配置强制执行，与是否上报资源无关。
+
+即：少上报两个资源**不影响任何功能**，只是少两份 kubelet 账本。反而更干净——远程容量不在消费节点上，
+本来就不该由消费节点的 allocatable 去描述显存和算力。
+
+**`vgpu-number` 必须上报**（不能也省掉），两个原因：① `IsVGPUEnabledNode` 看的就是它的 allocatable；
+② chart 里它是 `ignoredByScheduler: false`，in-tree 要靠它识别抢占候选。它的数值语义 = **本节点远程并发上限**（§3.2）。
+
+> 配套动作：消费侧插件要复用 `CycleCleanupNodeResources` 把 `vgpu-cores` / `vgpu-memory` 从本节点 status 里清掉，
+> 避免节点曾经跑过本地插件时残留旧值。
+
+### 15.2 契约冻结（P0，需你确认下列默认值）
+
+> **v0.5：本表已被 §16.1 取代。** 实际落地没有新增任何 Pod 注解，`predicate-node` 直接等于服务器节点。
+
+利用决策③（单容器单服务器），**`DeviceClaim` 的位置式文本格式完全不用动**：设备 UUID 不加节点前缀，
+另用一个注解说明这批 UUID 属于哪台服务器。这样 §10 坑#1 自动消失。
+
+| 用途 | 建议键（沿用现域名，默认 `nvidia.com`） | 值 |
+|---|---|---|
+| 远程服务器节点 | `<domain>/remote-server-node` | 节点名。**用量归属就读它**；`predicate-node` 保持 = 消费节点（`FilterAllocatingPods`/bind 都要求） |
+| lupine-server 地址 | `<domain>/remote-server-endpoint` | `http://host:14833`，调度时从节点发布物快照下来，避免节点侧再查 |
+| agent 地址 | `<domain>/remote-agent-endpoint` | `grpc://host:14834` |
+| 会话令牌（每容器） | `<domain>/remote-session.<hash16(容器名)>` | 随机令牌，镜像 DRA 侧 `session-<hash16(partitionKey)>` 的做法 |
+| 分配作用域摘要 | `<domain>/remote-allocation-id` | 服务器节点 + real-alloc 的摘要，令牌随分配作废（对应 DRA 的 `allocation-id`） |
+| 节点发布的远程信息 | `<domain>/remote-endpoints`（Node 注解） | JSON：`{server, agent, serverCudaVersion, bundleEtag}`，由 GPU 侧插件按 agent `ServerInfo` 写 |
+| 角色标签 | GPU 侧沿用 `vgpu-manager.io/remote-server=true`；消费侧 `vgpu-manager.io/remote-consumer=true` | **标签是唯一权威**：插件模式由标签决定，与配置冲突时报错退出（借鉴 HAMi `resolveOperatingMode`） |
+| metrics-node | 远程 Pod 指向**服务器节点** | 且 `PatchPodAllocationSucceed` 不得用 `pod.Spec.NodeName` 覆盖（§5.1） |
+
+### 15.3 实施顺序（每步独立可验证，全仓库测试须绿）
+
+**S1 · 调度器：远程分配（最小闭环）**
+
+| 落点 | 动作 |
+|---|---|
+| `pkg/device/remote/`（新包，调度器侧） | 远程池：从带 `remote-server=true` 标签的节点读 `node-device-register` + `remote-endpoints`，按服务器建 `device.NodeInfo`；用量按 Pod 的 `remote-server-node` 注解归属；不健康服务器（`DeviceInfo.Healthy=false` 或 endpoint 缺失）剔除 |
+| `pkg/scheduler/filter/filter_predicate.go` | `nodeFilter`：`req.AccessMode==remote` 时走消费节点门禁（有 `remote-consumer` 标签 + `IsVGPUEnabledNode`），跳过 register/config 注解检查；`deviceFilter`：remote 时以服务器 NodeInfo 为打包对象，按 node-policy 排序选服务器，命中后写注解 |
+| `pkg/device/allocator/allocator.go` | `Allocate` 尾部不再固定写 `predicate-node = nodeInfo.GetName()`，改为可传入落点（本地默认值不变，零行为变化） |
+| `pkg/client/pod_lister.go` | 新增 `NodeMapByDeviceOwner`（远程按 `remote-server-node`，本地按 `PodPlanSchedulingNode`） |
+| `pkg/client/kube_patch.go` | 远程 Pod 的 `metrics-node` 指向服务器节点且不被后续 patch 覆盖 |
+| `pkg/scheduler/preempt/preempt_predicate.go` | 入口判 `AccessMode==remote` → `passthrough`（决策④，约 3 行） |
+| `pkg/scheduler/reason/reason.go` | 新增远程拒绝码 |
+| 判据 | 单测：远程 Pod 选中健康服务器、写对全部注解、跨节点用量不重复计；本地路径既有测试全绿 |
+
+**S2 · GPU 侧设备插件：远程供给模式**
+
+| 落点 | 动作 |
+|---|---|
+| `cmd/device-plugin/options` + `pkg/deviceplugin/factory.go` | 节点带 `remote-server` 标签 → 远程供给模式：**不向 kubelet 注册任何资源**，只写节点注册注解 |
+| `pkg/deviceplugin/`（远程供给） | 周期调本机 agent `ServerInfo`（复用 `pkg/kubeletplugin/remote.ServerInfo`），写 `remote-endpoints` 注解；agent 不可用或 server 未监听 → 把该节点 `DeviceInfo.Healthy` 全部置 false |
+| 判据 | GPU 节点不再上报 `vgpu-number`；杀掉 lupine-server 后调度器不再把远程 Pod 放到该节点 |
+
+**S3 · agent：Pod 模式会话**
+
+| 落点 | 动作 |
+|---|---|
+| `pkg/api/remoteagent/api.proto` | 新增中立 `SessionOwner{kind,uid,namespace,name,resourceVersion}`，保留 `claim_*` 字段兼容已部署的 DRA inject |
+| `pkg/remoteagent/agent.go` | `--session-owner=pod`：监听 Node（设备快照）+ Pod（用 `metrics-node=<本节点>` 标签选择器收窄），**绝不建 DRA informer**；claim 模式保持现状并保留 §6 的 v1 启动校验 |
+| `pkg/remoteagent/session.go` | `Materialize` 入参中立化（owner + `[]DeviceClaim`）；标记文件记 owner UID/RV；`NodeDevices` 增加"从 Node 注解构造" |
+| `pkg/remoteagent/` | 清扫按 Pod：Pod 删除/终态 → 回收其令牌对应会话；令牌须匹配 `remote-allocation-id` |
+| 判据 | 低版本集群（无 DRA）上 remote-server pod 正常就绪；Pod 删除后会话目录回收 |
+
+**S4 · 消费侧设备插件（方案 P）**
+
+| 落点 | 动作 |
+|---|---|
+| `pkg/deviceplugin/base/plugin_server.go` | `DeviceManager` 变可选（仅 3 处耦合：`GetDeviceManager` / `AddNotifyChannel` / `RemoveNotifyChannel`） |
+| `pkg/deviceplugin/remote/`（新插件） | 只注册 `vgpu-number`（数量 = `--remote-vgpu-count`）；`Allocate`：复用**已经是导出函数**的骨架（`client.GetActivePodsOnNode` → `util.FilterAllocatingPods` → `util.GetCurrentPodByAllocatingPods` → `device.GetCurrentPreAllocateContainerDevice` → `device.UpdatePodRealContainerDeviceClaim` → `client.PatchPodAllocationSucceed`），中间换成：签发/读取会话令牌 → 调 agent `EnsureSession`（5s 超时）→ 注入 `LUPINE_SERVER`/`LUPINE_SESSION` + client shim 挂载 + `/etc/ld.so.preload` |
+| `cmd/device-plugin/main.go` | 消费模式跳过 NVML 初始化（`NewDeviceManager` 必失败）；启动时若发现本节点有本地 GPU 注册注解则拒绝启动（角色互斥） |
+| `pkg/kubeletplugin/remote/{artifacts,bundle,artifact_fetch}.go` | 复用制品选择与 bundle 下载；**下载不得放在 `Allocate` 里**（kubelet `HandlePodAdditions` 串行准入，会阻塞本节点其他 Pod），改为插件启动时/后台预热 |
+| 判据 | 远程 Pod 在无 GPU 节点上跑起来，容器内 `nvidia-smi` 看到远程会话视图 |
+
+**S5 · 监控** — 见 §5.3（公共会话工具外提 + `node_remote.go` 远程消费者反查）。
+**S6 · 部署与文档** — `deploy/deviceplugin-remote/`、chart 增补、README 已知边界（含 §4 抢占残留语义、§3.2 配额语义）。
+
+### 15.4 推迟但不废弃
+
+§11 的 `Backend` / `Realizer` 抽象与 §14 的命名规范化都**保留在文档里**，等远程路径跑通后再单独立项。
+为了将来重构成本可控，S1/S4 的新代码请尽量收进 `pkg/device/remote/` 与 `pkg/deviceplugin/remote/` 两个新包，
+在既有文件里只留**薄分支**（判 `AccessMode` 后调用新包），不要把远程逻辑铺进 `filter_predicate.go` / `vnum_plugin.go` 的主干。
+
+---
+
+## 16. v0.5：S1 实际落地、init/sidecar 与会话/监控分析
+
+> 2026-09-15。S1 按用户方向重写后落地（分支 `feat/remote-gpu-deviceplugin`：`d2d1afe`、`151224a`、`00123f5`、`3b98472`）。
+> 本节是后续 S2–S6 的依据；与 §15 冲突时以本节为准。
+
+### 16.1 S1 实际契约（取代 §15.2 表与 §15.3 S1 表）
+
+原则：**复用已有链路与注解，不新增 Pod 注解**。
+
+| 项 | 实际做法 |
+|---|---|
+| 设备归属 | 远程 Pod 在服务器节点上走原有 `nodeFilter` → `deviceFilter` → allocator，`predicate-node` = **服务器节点** |
+| 用量归属 | `util.PodPlanSchedulingNode`：本地已绑定返回 `Spec.NodeName`；远程 Pod **始终返回 `predicate-node`**。节点 NodeInfo、pod lister 分组、监控 informer 索引都自动归到服务器 |
+| metrics-node | 预分配、bind 时写 `predicate-node`（服务器）；`PatchPodAllocationSucceed` 对远程 Pod 保持服务器（§16.4 D2） |
+| 节点发布物 | 服务器节点注解 `<domain>/remote-endpoints`，JSON `remotegpu.ServerEndpointInfo{serverEndpoint, agentEndpoint, serverCudaVersion, bundleEtag}`；地址须可路由、带端口，server 为 http/https、agent 为 grpc |
+| 角色标签 | `<domain>/remote-server`、`<domain>/remote-consumer`（随 `globalDomainName`） |
+| 服务器判定 | 标签为 `true` **且**存在 `remote-endpoints` 注解（`util.IsRemoteServerNode`）；注解不可解析时 `CheckNode` 报 `NodeBadRemoteEndpoint` |
+| 消费节点判定 | 标签为 `true` **且** `vgpu-number` allocatable > 0（`util.IsRemoteConsumerNode`） |
+| 设备插件取地址 | 由 `predicate-node` 查服务器 Node，读 `remote-endpoints` 注解 |
+
+调度流程（`filter()` 远程分支）：
+
+```
+kube-scheduler 候选（Pod 可运行的节点）
+   │ remoteConsumerNodes：保留消费节点，其余 NodeNotRemoteConsumer
+   ▼
+nodeLister（服务器标签）→ remoteServerNodes：只留 IsRemoteServerNode，按名字排序
+   │ 原有 nodeFilter → deviceFilter（全局锁、allocator、预分配，predicate-node=服务器）
+   ▼
+remoteFilterResult：
+   有服务器放得下 → 返回全部消费节点，由 kube-scheduler 打分选定
+   都放不下       → 每个消费节点报 NoRemoteServer / RemoteServerUnfit，详情为各服务器原因
+```
+
+- **本地 Pod 行为不变**：仍只返回预分配成功的那一个节点；`nodeFilter` 与 preempt 拒绝服务器节点（`NodeIsRemoteServer`）。
+- **bind**：远程 Pod 只要求 `predicate-node` 非空（绑定到消费节点）；本地仍要求等于绑定节点。
+- **抢占**：远程 Pod 原样透传。
+- **跨 Pod 拓扑**：远程 Pod 关闭，仅 live Filter 发 `TopologyFallback` 事件；单服务器内 NVLink/NUMA 保留。
+- **回归验证**：基线 `3f497be` 与 HEAD 各跑 5 遍 224 组策略组合（节点策略 × 设备策略 × 拓扑模式 × 显存策略 + 跨 Pod gang），
+  每组 12 个 Pod，全部至少一次逐字一致（含具体卡号）；两边各有约 30 组因 `filterDevices` 遍历 map 而结果不稳定，属原有行为。
+
+### 16.2 init / sidecar：调度侧已兼容
+
+| 环节 | 事实 |
+|---|---|
+| 请求构建（`request.go:337-439`） | 先 init（sidecar 标 `Restartable`）后业务容器；`Total = sidecar 之和 + max(业务之和, 单个 init 最大)` |
+| 分配（`allocator.go:100-235`） | 有顺序 init 时两轮：先 sidecar + 业务（累加），释放业务预留后逐个放 init（优先 Pod 已用的卡，失败再全节点）；`pre-allocated` 每个 vGPU 容器一段，init 在前 |
+| 记账（`types.go:1500-1579`） | 每卡峰值 `sidecar + max(业务, init)`，只看 spec 与注解；远程 Pod 在服务器 NodeInfo 上同公式 |
+| 消费节点 `vgpu-number` | kubelet device manager 把顺序 init 的设备 ID 留给后续容器复用，sidecar 的不复用，与上面的峰值一致 |
+
+结论：调度侧对 init、sidecar、多容器、重启无需额外处理。
+
+### 16.3 设备插件路径的会话模型（已拍板）
+
+| 决策 | 内容 |
+|---|---|
+| 粒度 | **每个容器一个会话**，init 不复用业务容器会话（同 DRA NRI 模式） |
+| 会话键 | `<podUID>_<containerName>`（即 `util.NRIPartitionKey`） |
+| token | **对会话键做哈希得到，不写 Pod 注解**，算法与 DRA 侧会话键哈希保持一致；作为设备插件路径统一的 token 约束 |
+| 建立时机 | Pod 的**第一次 `Allocate`** 按 `pre-allocated` 一次 RPC 建好该 Pod 全部容器的会话，后续容器只取结果 |
+| 回收 | agent 侧 Pod informer：Pod 删除/终态 → 回收；周期清扫兜底；不依赖设备插件回调 |
+
+为什么按容器、不复用：
+1. `pre-allocated` 按容器给卡与 cores/memory，init 可能落在别的卡、限额也可能不同，合不进一份会话配额。
+2. 服务器按会话汇总 `pids.config` 用量（`cuda_hook.c:2363`）；sidecar 与业务容器同时运行，共用会话会共享一份限额，与"sidecar 与业务相加"的调度记账不符。
+3. 顺序 init 退出即断开连接，lupine 子进程退出、显存释放后业务容器才启动；同时存在的会话占用之和不超过调度峰值。
+4. 容器重启会话键不变，直接复用。
+
+为什么首次 `Allocate` 批量建：kubelet 在 Pod 准入时串行调用各容器 `Allocate`，每次 `EnsureSession` 最多 5s，
+逐个建会让准入最坏耗时 5s × 容器数，并阻塞同节点其他 Pod 准入。
+
+token 由会话键确定性派生，带来的约束（S3/S4 实现时遵守）：
+- **token 不是秘密**：知道 Pod UID 与容器名即可算出。agent 签发/物化会话前必须从 Pod informer 校验：
+  Pod 存在且未终止、`predicate-node` = 本节点、容器名在 `pre-allocated` 中，配额只取该容器的声明。
+  lupine-server 与 agent 端口的访问控制仍需保留。
+- **监控可直接算出会话目录**：`<sessionBase>/<hash(podUID_container)>`，无需额外元数据文件。
+- **重新预分配到同一服务器**时 token 不变而设备可能变：`Materialize` 须按配额内容比对并重写，不能只看目录是否存在。
+- **改派到另一台服务器**：旧服务器 agent 发现 `predicate-node` 不再是自己即回收。
+
+### 16.4 设备插件侧必改点（S4，除 D2 外）
+
+| # | 位置 | 问题与改法 |
+|---|---|---|
+| D1 | `util.FilterAllocatingPods`（`util.go:436-439`） | 要求 `predicate-node == Spec.NodeName`，远程 Pod 被丢弃，消费节点 `Allocate` 找不到 Pod。需按访问模式分支 |
+| D2 | `PatchPodAllocationSucceed`（`kube_patch.go:112-115`） | 用 `Spec.NodeName` 覆盖 `metrics-node`，服务器监控随即丢失该 Pod。**远程 Pod 保持服务器**（已拍板，首个实施步骤） |
+| D3 | `GetPreferredAllocation`（`vnum_plugin.go:445`） | 按 GPU UUID 映射本地设备 ID；消费节点只有虚拟 ID，应直接走默认选择 |
+| D4 | `PreStartContainer`（`vnum_plugin.go:1148-1160`） | 重写本地 `vgpu.config` 并删除 `pids.config` 等；远程容器应跳过，绝不触碰服务器会话 |
+| D5 | `Allocate` 返回内容 | 远程注入 `NVIDIA_VISIBLE_DEVICES=void`、`LUPINE_DISABLE_LOCAL=1`、`LUPINE_SERVER`、`LUPINE_SESSION`、远程 `ld.so.preload` 与客户端文件挂载；客户端文件须预置，`Allocate` 内不下载 |
+| D6 | reschedule 控制器（`reschedule.go:85`） | 判定分配失败的依据是否适用远程 Pod，S4 核对 |
+
+`Allocate` 的容器游标（`GetCurrentPreAllocateContainerDevice`，取第一个未写入 `real-allocated` 的容器）与 kubelet
+init 在前的调用顺序一致，对 init/sidecar 无需改动。
+
+### 16.5 监控（S5）
+
+| 指标 | 服务器监控 | 消费节点监控 |
+|---|---|---|
+| 节点/卡已分配量 | 已能统计（watch `metrics-node=服务器` + `PodPlanSchedulingNode`），前提 D2 | 不统计（无 GPU） |
+| 卡级 `access_mode` | 写死 `local`（`node_gpu.go:593-620`），需按 Pod 区分 | — |
+| 容器级实时用量 | **缺失**：`container_lister.go:135` 只留 `Spec.NodeName==本节点`；PID 取本机 cgroup；限额读本机 `<uid>_<容器>` 目录 | 无 |
+
+S5 改法参照 DRA（`dra_remote.go:137-290`、`dra_gpu.go:916-920`）：远程 Pod 的 PID 从
+`<sessionBase>/<token>/pids.config`（共享文件锁）读取后与本机 NVML 进程匹配；虚拟显存读 `<token>/.vmem_node`，
+限额读 `<token>/config/vgpu.config`；label `node=服务器`、`pod_node=消费节点`、`access_mode=remote`。
+init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，跨节点有效）。
+
+### 16.6 待拍板：服务器节点是否上报 `vgpu-number`
+
+§15.3 S2 写的是"远程供给模式不向 kubelet 注册任何资源"，但 `CheckNode` 首先要求 `IsVGPUEnabledNode`
+（`vgpu-number` allocatable > 0），不上报的服务器会被调度器拒绝。二选一：
+
+| 方案 | 做法 | 影响 |
+|---|---|---|
+| A | 远程供给模式仍注册 `vgpu-number` | 本地 Pod 会被 kube-scheduler 当作候选再被 extender 拒绝；同节点再跑消费侧插件会重复注册同名资源，**与"服务器可兼作消费节点"冲突** |
+| B（推荐） | 不注册资源；`CheckNode` 对服务器节点跳过 `IsVGPUEnabledNode` | 服务器兼作消费节点时由消费侧插件注册 `vgpu-number`，无冲突；本地 Pod 本来就拒绝服务器 |
+
+### 16.7 后续实施顺序
+
+1. **D2**：`PatchPodAllocationSucceed` 对远程 Pod 保持 `metrics-node` = 服务器。
+2. **S2 GPU 侧远程供给**（待 §16.6 拍板）：发布 `remote-endpoints`（取自 agent `ServerInfo`），agent/lupine 不可用时设备置不健康。
+3. **S3 agent Pod 模式**：按 §16.3 的会话键/token/校验物化会话，Pod informer 回收，不建 DRA informer。
+4. **S4 消费侧插件**：D1、D3–D6，首次 `Allocate` 批量建会话。
+5. **S5 监控**：§16.5。
+6. **S6 部署与文档**。
