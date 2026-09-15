@@ -966,8 +966,9 @@ token 由会话键确定性派生，带来的约束（S3/S4 实现时遵守）�
   Pod 存在且未终止、`predicate-node` = 本节点、容器名在 `pre-allocated` 中，配额只取该容器的声明。
   lupine-server 与 agent 端口的访问控制仍需保留。
 - **监控可直接算出会话目录**：`<sessionBase>/<hash(podUID_container)>`，无需额外元数据文件。
-- **重新预分配到同一服务器**时 token 不变而设备可能变：`Materialize` 须按配额内容比对并重写，不能只看目录是否存在。
-- **改派到另一台服务器**：旧服务器 agent 发现 `predicate-node` 不再是自己即回收。
+- **会话建好后 `pre-allocated` 不会再变**：会话只在 Pod 绑定后的 `Allocate` 里创建，绑定后调度器不再处理该 Pod；
+  预分配只可能在绑定前变化，那时还没有会话。准入失败的 Pod 由 reschedule 控制器删除重建，UID 变了 token 也就变了；
+  容器重启沿用原会话。所以 `Materialize` 做到"已存在即复用"即可。
 
 ### 16.4 设备插件侧必改点（S4，除 D2 外）
 
@@ -996,21 +997,35 @@ S5 改法参照 DRA（`dra_remote.go:137-290`、`dra_gpu.go:916-920`）：远程
 限额读 `<token>/config/vgpu.config`；label `node=服务器`、`pod_node=消费节点`、`access_mode=remote`。
 init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，跨节点有效）。
 
-### 16.6 待拍板：服务器节点是否上报 `vgpu-number`
+### 16.6 节点角色与资源上报（已拍板，取代 §15.3 S2"不注册任何资源"）
 
-§15.3 S2 写的是"远程供给模式不向 kubelet 注册任何资源"，但 `CheckNode` 首先要求 `IsVGPUEnabledNode`
-（`vgpu-number` allocatable > 0），不上报的服务器会被调度器拒绝。二选一：
+一个插件进程可同时承担服务器与消费两个角色，只注册一次 `vgpu-number`，`CheckNode` 无需改动。
 
-| 方案 | 做法 | 影响 |
-|---|---|---|
-| A | 远程供给模式仍注册 `vgpu-number` | 本地 Pod 会被 kube-scheduler 当作候选再被 extender 拒绝；同节点再跑消费侧插件会重复注册同名资源，**与"服务器可兼作消费节点"冲突** |
-| B（推荐） | 不注册资源；`CheckNode` 对服务器节点跳过 `IsVGPUEnabledNode` | 服务器兼作消费节点时由消费侧插件注册 `vgpu-number`，无冲突；本地 Pod 本来就拒绝服务器 |
+| 节点 | 启动参数 | 注册资源 | 角色标签 |
+|---|---|---|---|
+| 纯 GPU 服务器 | `--remote-server` | 与本地一致：`vgpu-number`，按 feature gate 注册 cores/memory | `remote-server=true` |
+| 服务器兼消费节点 | `--remote-server --remote-consumer` | 只注册 `vgpu-number`；数量取 `max(GPU数×切分数, 消费数量参数)`；这些设备对 kubelet 始终上报健康 | 两个都为 `true` |
+| 纯 CPU 消费节点 | `--remote-consumer`（不初始化 NVML） | 只注册 `vgpu-number`，数量 = `--remote-consumer-vgpu-number`（默认 1000） | `remote-consumer=true` |
+
+- **开启消费角色就不注册 cores/memory**：kubelet 准入会检查节点上报过的扩展资源，远程 Pod 按远程服务器的卡申请的
+  显存/算力会被扣在本机总量上而遭拒（kube-scheduler 对这两项 `ignoredByScheduler`，照样调度过来，形成删除重建循环）。
+- **数量与健康与本机 GPU 脱钩**：这类节点上 `vgpu-number` 只表示本节点远程并发上限；本机 GPU 的健康照旧经
+  `node-device-register` 的 `Healthy` 告诉调度器。
+- **标签由插件按启动参数写入**：开启的角色写 `true`，关闭的角色删除标签，插件退出时也删除。DaemonSet 不能再拿这两个标签当 nodeSelector。
+- 纯服务器节点仍会被 kube-scheduler 当作本地 Pod 的候选，再由 extender 以 `NodeIsRemoteServer` 拒绝；抢占侧已跳过服务器。
 
 ### 16.7 后续实施顺序
 
-1. **D2**：`PatchPodAllocationSucceed` 对远程 Pod 保持 `metrics-node` = 服务器。
-2. **S2 GPU 侧远程供给**（待 §16.6 拍板）：发布 `remote-endpoints`（取自 agent `ServerInfo`），agent/lupine 不可用时设备置不健康。
+1. **D2**（已完成）：`PatchPodAllocationSucceed` 对远程 Pod 保持 `metrics-node` = 服务器。
+2. **S2 服务器角色**（已完成）：
+   - 参数 `--remote-server`（需 `RemoteGPUSupport` gate）与 `--remote-agent-endpoint`（默认 `:14834`，空 host 取节点 InternalIP）。
+   - `pkg/deviceplugin/remote` 挂到设备管理器已有的节点注册循环：写 `remote-server=true` 与 `remote-endpoints`；
+     每 5s 经 agent `ServerInfo` 探测，值变化立即重新注册；关闭角色或插件退出时删除标签与注解。
+   - lupine-server 不可达时发布 `{}`（`remotegpu.UnreachableServerEndpointInfo`）：节点仍是服务器、本地 Pod 不上，
+     但不接远程 Pod，调度原因 `NodeRemoteServerUnreachable`。
+   - 与 DRA 共用的 agent 客户端、地址解析与可发布校验下沉到 `pkg/device/remotegpu/agent.go`（`ProbeServer` 等），
+     DRA 发布器与 remote-agent 改为调用它，原副本删除。
 3. **S3 agent Pod 模式**：按 §16.3 的会话键/token/校验物化会话，Pod informer 回收，不建 DRA informer。
-4. **S4 消费侧插件**：D1、D3–D6，首次 `Allocate` 批量建会话。
+4. **S4 消费角色**：`--remote-consumer`、`--remote-consumer-vgpu-number` 与 §16.6 的资源规则；D1、D3–D6；首次 `Allocate` 批量建会话。
 5. **S5 监控**：§16.5。
 6. **S6 部署与文档**。
