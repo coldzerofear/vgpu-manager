@@ -44,14 +44,22 @@ from pathlib import Path
 from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
+LOADER_FILE = HELPER_HEADER = HOOK_FILE = Path()
+WRAPPER_FILES: list[Path] = []
 
-LOADER_FILE = ROOT / "src/loader.c"
-HELPER_HEADER = ROOT / "include/cuda-helper.h"
-HOOK_FILE = ROOT / "src/cuda_hook.c"
-WRAPPER_FILES = [
-    ROOT / "src/cuda_originals.c",
-    ROOT / "src/cuda_hook.c",
-]
+
+def set_root(root: Path) -> None:
+    """Point every path at `root`, so one checker serves both library/ and
+    library-remote/ (same layout, different hook sets)."""
+    global ROOT, LOADER_FILE, HELPER_HEADER, HOOK_FILE, WRAPPER_FILES
+    ROOT = root
+    LOADER_FILE = root / "src/loader.c"
+    HELPER_HEADER = root / "include/cuda-helper.h"
+    HOOK_FILE = root / "src/cuda_hook.c"
+    WRAPPER_FILES = [root / "src/cuda_originals.c", root / "src/cuda_hook.c"]
+
+
+set_root(ROOT)
 
 # ABI-conflict families: base name -> (old_abi_symbol, new_abi_symbol).
 # Must stay in sync with is_abi_conflict_base() in include/cuda-helper.h.
@@ -180,7 +188,12 @@ def main() -> int:
         help="allowlist a symbol from R6 missing-wrapper check (repeatable); "
              "use when a dispatch-table entry is intentionally forward-only "
              "with no corresponding ELF export")
+    ap.add_argument("--root", default=None,
+                    help="library tree to check (defaults to this script's "
+                         "parent; pass ../library-remote to check that one)")
     args = ap.parse_args()
+    if args.root:
+        set_root(Path(args.root).resolve())
     r6_allowlist = set(args.allow_r6)
 
     loader_entries = extract_library_entry(read_text(LOADER_FILE))

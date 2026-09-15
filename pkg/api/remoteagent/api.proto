@@ -1,0 +1,128 @@
+syntax = 'proto3';
+
+option go_package="pkg/api/remoteagent";
+
+package remoteagent;
+
+// RemoteAgent is served by the GPU-node agent that runs alongside
+// lupine-server (design v2.0 D24). It is called cross-node by the consumer
+// side kubelet-plugin (--mode=inject) inside NodePrepareResources (D2/D20).
+service RemoteAgent {
+  // EnsureSession materializes the session quota directory for a claim
+  // allocation on this node (idempotent) and reports readiness.
+  rpc EnsureSession(EnsureSessionRequest) returns (EnsureSessionResponse) {};
+  // ServerInfo reports whether lupine-server is accepting connections and
+  // the node's CUDA ceiling.
+  rpc ServerInfo(ServerInfoRequest) returns (ServerInfoResponse) {};
+  // ReleaseSessions removes the named sessions of a claim on this node.
+  // Called by the inject plugin at NodeUnprepare once the claim has no live
+  // consumer left; the agent's own claim watch and periodic sweep remain the
+  // backstop. Tokens are required: knowing a claim's UID alone must not be
+  // enough to end its sessions.
+  rpc ReleaseSessions(ReleaseSessionsRequest) returns (ReleaseSessionsResponse) {};
+  // FetchClientBundle streams the lupine client bundle (the shims built with
+  // this node's lupine-server, as a zip) for one platform, proxied from the
+  // server. The caller proves it holds a session token recorded on a claim;
+  // that is what authorizes the download, on either the TCP or the unix
+  // listener. The first message carries the bundle metadata, the rest its
+  // bytes; with if_none_match equal to the current etag only the metadata is
+  // sent (not_modified = true).
+  rpc FetchClientBundle(FetchClientBundleRequest) returns (stream FetchClientBundleResponse) {};
+}
+
+message EnsureSessionRequest {
+  // Session token: the value the consumer pod receives as LUPINE_SESSION and
+  // the name of the session directory on this node.
+  string session         = 1;
+  string claim_uid       = 2;
+  string claim_namespace = 3;
+  string claim_name      = 4;
+  // Requests names the claim requests (main request names) that belong to
+  // this session; the agent materializes only their devices. Empty means
+  // every request of the claim (legacy 1:1 form).
+  repeated string requests = 5;
+  // Partition is the resolver's partition key (informational, logged and
+  // recorded in the session marker).
+  string partition = 6;
+  // claim_resource_version is the claim version the caller decided the
+  // session against (it recorded the token on that version). An agent whose
+  // cached claim is older than this reads the claim from the API instead of
+  // failing on a stale cache.
+  string claim_resource_version = 7;
+}
+
+message EnsureSessionResponse {
+  bool   ready               = 1;
+  string cuda_driver_version = 2;
+  string message             = 3;
+  // server_endpoint is the lupine-server address clients must be given
+  // (URL form), as the agent currently knows it. Empty when the agent has
+  // no routable address for its server yet.
+  string server_endpoint     = 4;
+  // client_bundle_etag is the etag of the client bundle lupine-server embeds
+  // for this node's platform (the build identity clients must match; see
+  // FetchClientBundle). Empty when the server exposes no bundle or the agent
+  // has not read it yet.
+  string client_bundle_etag  = 5;
+}
+
+message ReleaseSessionsRequest {
+  string claim_uid = 1;
+  // tokens of the sessions to remove; at least one. Tokens that do not
+  // belong to the claim are ignored.
+  repeated string tokens = 2;
+}
+
+message ReleaseSessionsResponse {
+  // released is how many sessions were removed by this call.
+  int32 released = 1;
+}
+
+message ServerInfoRequest {}
+
+message ServerInfoResponse {
+  bool   listening           = 1;
+  // endpoint is the lupine-server address other nodes should use (URL
+  // form): advertised by the operator, or discovered by the agent. Empty
+  // while unknown.
+  string endpoint            = 2;
+  string cuda_driver_version = 3;
+  string node_name           = 4;
+  // agent_endpoint is this agent's own address other nodes should use for
+  // EnsureSession (grpc://host:port). Empty while unknown, or when the
+  // agent listens on a unix socket only.
+  string agent_endpoint      = 5;
+  // client_bundle_etag: see EnsureSessionResponse.
+  string client_bundle_etag  = 6;
+}
+
+message FetchClientBundleRequest {
+  // Authorization: a session token recorded on the claim (as EnsureSession).
+  string session         = 1;
+  string claim_uid       = 2;
+  string claim_namespace = 3;
+  string claim_name      = 4;
+  // Platform of the bundle: os "linux" (default) and arch "amd64"/"arm64"
+  // (default: the agent's own, i.e. the GPU node's).
+  string os   = 5;
+  string arch = 6;
+  // if_none_match: an etag the caller already has; when it is current the
+  // stream carries metadata only.
+  string if_none_match = 7;
+}
+
+message ClientBundleInfo {
+  string etag           = 1;
+  string content_digest = 2;
+  int64  size           = 3;
+  string content_type   = 4;
+  string platform       = 5;
+  bool   not_modified   = 6;
+}
+
+message FetchClientBundleResponse {
+  oneof body {
+    ClientBundleInfo info = 1;
+    bytes chunk           = 2;
+  }
+}

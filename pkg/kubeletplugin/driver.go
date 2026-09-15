@@ -23,7 +23,9 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Masterminds/semver"
@@ -31,6 +33,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/gpuallocator/links"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/health"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
@@ -74,13 +77,17 @@ type driver struct {
 	pluginhelper        *kubeletplugin.Helper
 	state               *DeviceState
 	pulock              *flock.Flock
-	healthcheck         *healthcheck
+	healthcheck         *health.Healthcheck
 	deviceHealthMonitor deviceHealthMonitor
 	deviceRegistry      *registry.DeviceRegistryServerImpl
-	nriPlugin           *nri.Plugin
-	nriCache            *nri.Cache
-	nriCancel           context.CancelFunc
-	wg                  sync.WaitGroup
+	// nriPlugin is written by startNRIPlugin during startup and read by the
+	// healthcheck goroutine, which StartHealthcheck spawns earlier — hence the
+	// atomic rather than a plain field.
+	nriPlugin atomic.Pointer[nri.Plugin]
+	nriCache  *nri.Cache
+	nriCancel context.CancelFunc
+	remote    *remotePublisher
+	wg        sync.WaitGroup
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
 	// in the same slice (required for k8s 1.34).
@@ -141,11 +148,17 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 
 	puLockPath := filepath.Join(config.DriverPluginPath(), DriverPrepUprepFlockFileName)
 
+	remotePub, err := newRemotePublisher(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+
 	driver := &driver{
 		client:                 config.Core,
 		state:                  state,
 		pulock:                 flock.NewFlock(puLockPath),
 		useSplitResourceSlices: useSplitSlices,
+		remote:                 remotePub,
 	}
 
 	// Register NVML events before kubeletplugin.Start exposes Prepare/Unprepare.
@@ -174,6 +187,28 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.RegistrarDirectoryPath(config.KubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
 	}
+	if remotePub.enabled() {
+		// A Node-owned pool that uses NodeSelector instead of NodeName must
+		// be reconciled by pool name: the helper's slice controller otherwise
+		// tracks only slices with spec.nodeName == this node and would never
+		// see (or clean up) the ones it published. Our single pool is named
+		// after the node.
+		opts = append(opts, kubeletplugin.ReconcilePoolWithName(config.Flags.NodeName))
+		// Publish-only (design v2.1 D23): with RemoteGPUSupport on this
+		// process announces the node's devices but does not serve
+		// NodePrepare/NodeUnprepare — it neither starts the DRA gRPC service
+		// nor registers with the kubelet. The driver name is a per-node
+		// singleton in the kubelet's plugin registry, so leaving it free lets
+		// a separate `--mode=inject` process on this same node register as
+		// the driver and prepare every claim through the remote path (a
+		// claim may mix this node's devices with another node's; the local
+		// and remote injection paths cannot coexist in one container).
+		opts = append(opts,
+			kubeletplugin.DRAService(false),
+			kubeletplugin.RegistrationService(false),
+		)
+		klog.V(1).Info("RemoteGPUSupport enabled: publish-only mode (devices announced as accessMode=remote; DRA service and kubelet registration disabled — run --mode=inject on this node for allocation)")
+	}
 	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
 	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
 	if featuregates.Enabled(featuregates.DeviceMetadata) {
@@ -182,17 +217,27 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			drametadatav1alpha1.SchemeGroupVersion,
 		}))
 	}
+	// This plugin does not report device health (KEP-4680), so don't
+	// advertise the DRAResourceHealth service to the kubelet.
+	opts = append(opts, kubeletplugin.HealthService(false))
 	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
 		return nil, err
 	}
 	driver.pluginhelper = helper
 
-	healthcheck, err := startHealthcheck(ctx, config, helper, driver.nriHealthy)
-	if err != nil {
-		return nil, fmt.Errorf("start healthcheck: %w", err)
+	if !remotePub.enabled() {
+		config := &health.HealthConfig{
+			HealthcheckPort:               config.Flags.HealthcheckPort,
+			KubeletRegistrarDirectoryPath: config.Flags.KubeletRegistrarDirectoryPath,
+			KubeletDriverPluginPath:       config.DriverPluginPath(),
+		}
+		healthcheck, err := health.StartHealthcheck(ctx, config, helper, driver.nriHealthy)
+		if err != nil {
+			return nil, fmt.Errorf("start healthcheck: %w", err)
+		}
+		driver.healthcheck = healthcheck
 	}
-	driver.healthcheck = healthcheck
 
 	healthDeviceMap := make(map[string]*manager.GPUDevice)
 	if featuregates.Enabled(featuregates.SharedSMUtilizationWatcher) {
@@ -210,7 +255,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 				}
 				healthDeviceMap[device.CanonicalName()] = gpuDevice
 			}
-			filePath := filepath.Join(manager.WatcherDir, manager.SMUtilFile)
+			filePath := filepath.Join(config.Flags.ContainerManagerDir, util.Watcher, manager.SMUtilFile)
 			manager.SMUtilWatcherStart(ctx, state.nvdevlib.DeviceLib, healthDeviceMap, filePath)
 			klog.V(4).Info("stopping extended shared SM utilization watcher")
 		})
@@ -234,7 +279,11 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	// NRI runs independently of DevicePluginClientMode. It is started after
 	// startClientRegistry so that, when both are on, the registry server (which
 	// reads the shared cache) is already up before the NRI plugin populates it.
-	if featuregates.Enabled(featuregates.NRISupport) {
+	//
+	// Publish-only nodes (RemoteGPUSupport) never prepare claims, and the
+	// co-located --plugin-mode=inject process registers the NRI plugin under
+	// the same name; starting a second one here would collide with it.
+	if featuregates.Enabled(featuregates.NRISupport) && !remotePub.enabled() {
 		if err := driver.startNRIPlugin(ctx, config); err != nil {
 			return nil, fmt.Errorf("start NRI plugin: %w", err)
 		}
@@ -247,6 +296,19 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 
 	if err := driver.publishResources(ctx, config); err != nil {
 		return nil, err
+	}
+
+	if remotePub.enabled() {
+		// Keep serverCudaVersion and the published endpoints in step with the
+		// lupine-server actually running here, as the remote-agent reports it:
+		// it may start after us, come back from a restart built from another
+		// image, or be advertised at another address. Each change republishes
+		// the slices.
+		driver.wg.Go(func() {
+			remotePub.watchServerInfo(ctx, func(ctx context.Context) error {
+				return driver.publishResources(ctx, config)
+			})
+		})
 	}
 
 	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
@@ -334,7 +396,7 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 
 	return resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
-			nodeName: {Slices: gpuslices},
+			nodeName: d.remote.apply(resourceslice.Pool{Slices: gpuslices}),
 		},
 	}
 }
@@ -390,7 +452,7 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 
 	return resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
-			nodeName: {Slices: gpuslices},
+			nodeName: d.remote.apply(resourceslice.Pool{Slices: gpuslices}),
 		},
 	}
 }
@@ -429,8 +491,8 @@ func (d *driver) Shutdown() error {
 	if d.nriCancel != nil {
 		d.nriCancel()
 	}
-	if d.nriPlugin != nil {
-		d.nriPlugin.Stop()
+	if plugin := d.nriPlugin.Load(); plugin != nil {
+		plugin.Stop()
 	}
 
 	d.wg.Wait()
@@ -456,8 +518,19 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 
 	results := make(map[types.UID]kubeletplugin.PrepareResult)
 
-	for _, claim := range claims {
-		results[claim.UID] = d.nodePrepareResource(ctx, claim)
+	if d.remote.enabled() {
+		// Defensive: the DRA service is not started in publish-only mode, so
+		// this cannot be reached through the kubelet. Refuse rather than
+		// prepare locally if it ever is (e.g. a direct test call).
+		for _, claim := range claims {
+			results[claim.UID] = kubeletplugin.PrepareResult{
+				Err: fmt.Errorf("claim %s: this node publishes accessMode=remote devices and does not prepare them; allocation is served by --mode=inject", ResourceClaimToString(claim)),
+			}
+		}
+	} else {
+		for _, claim := range claims {
+			results[claim.UID] = d.nodePrepareResource(ctx, claim)
+		}
 	}
 
 	return results, nil
@@ -466,10 +539,16 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
 	klog.V(6).Infof("Unprepare called for: %v", ClaimRefsToStrings(claimRefs))
 	results := make(map[types.UID]error)
-	for _, claimRef := range claimRefs {
-		results[claimRef.UID] = d.nodeUnprepareResource(ctx, claimRef)
+	if d.remote.enabled() {
+		for _, claimRef := range claimRefs {
+			results[claimRef.UID] = fmt.Errorf("claim %s: this node publishes accessMode=remote "+
+				"devices and does not unprepare them; allocation is served by --mode=inject", claimRef.String())
+		}
+	} else {
+		for _, claimRef := range claimRefs {
+			results[claimRef.UID] = d.nodeUnprepareResource(ctx, claimRef)
+		}
 	}
-
 	return results, nil
 }
 
@@ -520,7 +599,7 @@ func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.Res
 		if err = d.publishResources(ctx, d.state.config); err != nil {
 			drametrics.IncNodePrepareError(util.DRADriverName, "publish_resources")
 			return kubeletplugin.PrepareResult{
-				Err: fmt.Errorf("error preparing devices for claim %v: %w", claim.UID, err),
+				Err: fmt.Errorf("failed to publish resources after preparing claim %s: %w", cs, err),
 			}
 		}
 	}
@@ -598,7 +677,9 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 
 	resources := resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
-			config.Flags.NodeName: {Slices: []resourceslice.Slice{resourceSlice}},
+			config.Flags.NodeName: d.remote.apply(resourceslice.Pool{
+				Slices: []resourceslice.Slice{resourceSlice},
+			}),
 		},
 	}
 
@@ -764,14 +845,14 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 	resolver := NewClientRegisterResolver(
 		podLister,
 		claimInformer.GetIndexer(),
-		util.ManagerRootPath,
+		config.Flags.ContainerManagerDir,
 		util.DRADriverName,
 		d.nriCache,
 		state.AllocatedVGPURequestsForClaim,
 	)
 
 	d.deviceRegistry = registry.NewDeviceRegistryServer(
-		util.ManagerRootPath,
+		config.Flags.ContainerManagerDir,
 		resolver.TargetByPodUID,
 		resolver.TargetByUUID,
 	)
@@ -779,28 +860,39 @@ func (d *driver) startClientRegistry(ctx context.Context, config *Config, state 
 }
 
 // startNRIPlugin builds and runs the in-process NRI plugin (design §12.13).
-// It runs in DRY-RUN mode for now: hooks observe and log only, injecting
-// nothing (§12.6 item 1). The reconnect loop runs on a child context so
-// Shutdown can stop it cleanly without depending on the parent ctx.
+// The reconnect loop runs on a child context so Shutdown can stop it cleanly
+// without depending on the parent ctx.
+//
+// It then blocks until the runtime has registered the plugin, and fails startup
+// if that does not happen: with NRISupport enabled, the partition mounts every
+// vGPU container needs are injected by this plugin alone, so a driver that
+// starts without it would prepare claims for containers that then run
+// unisolated. Failing here instead leaves an unmistakable trace — the plugin
+// pod crash-loops with the reason in its logs — rather than a node quietly
+// producing containers nobody can account for (design §12.13.6).
 func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
-	var socketPath string
-	if config.Flags.NRIRoot != "" {
+	var socketPath = strings.TrimSpace(config.Flags.NRISocket)
+	if socketPath == "" {
 		socketPath = filepath.Join(config.Flags.NRIRoot, "nri.sock")
+	} else if !filepath.IsAbs(socketPath) {
+		socketPath = filepath.Join(config.Flags.NRIRoot, socketPath)
 	}
+	socketPath = filepath.Clean(socketPath)
 	plugin, err := nri.NewPlugin(nri.Config{
 		SocketPath: socketPath,
 		PluginName: util.DRADriverName,
 		// Empty falls back to "00" inside NewPlugin. Validated at startup in
 		// validateCLIFlags when non-empty.
-		PluginIdx:       config.Flags.NRIPluginIdx,
-		Cache:           d.nriCache,
-		IsClaimPrepared: d.state.IsVGPUClaimPrepared,
-		ResolveMounts:   d.state.vgpuManager.GetNRIPartitionInjection,
+		PluginIdx:           config.Flags.NRIPluginIdx,
+		ContainerManagerDir: config.Flags.ContainerManagerDir,
+		Cache:               d.nriCache,
+		IsClaimPrepared:     d.state.IsVGPUClaimPrepared,
+		ResolveMounts:       d.state.vgpuManager.GetNRIPartitionInjection,
 	})
 	if err != nil {
 		return err
 	}
-	d.nriPlugin = plugin
+	d.nriPlugin.Store(plugin)
 
 	nriCtx, cancel := context.WithCancel(ctx)
 	d.nriCancel = cancel
@@ -808,6 +900,10 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 		klog.V(4).InfoS("Starting in-process NRI plugin", "socket", socketPath)
 		plugin.Run(nriCtx)
 	})
+	if err := plugin.WaitReady(ctx, nri.StartupReadyTimeout); err != nil {
+		return fmt.Errorf("NRI plugin did not become ready: %w", err)
+	}
+	klog.InfoS("In-process NRI plugin registered with the container runtime", "socket", socketPath)
 	return nil
 }
 
@@ -817,13 +913,10 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 // restarts the pod cleanly. It is safe to call before the NRI plugin is started
 // (returns healthy while nriPlugin is nil).
 func (d *driver) nriHealthy() bool {
-	if !featuregates.Enabled(featuregates.NRISupport) {
-		return true
+	if plugin := d.nriPlugin.Load(); plugin != nil {
+		return plugin.Healthy()
 	}
-	if d.nriPlugin == nil {
-		return true
-	}
-	return d.nriPlugin.Healthy()
+	return true
 }
 
 // TODO: implement loop to remove CDI files from the CDI path for claimUIDs

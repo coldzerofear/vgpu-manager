@@ -49,7 +49,7 @@ func Test_ContainerLister(t *testing.T) {
 	podLister := factory.Core().V1().Pods().Lister()
 	basePath := "/tmp/vgpu-manager"
 	_ = os.MkdirAll(basePath, 0777)
-	contLister := NewContainerLister(basePath, nodeName, podLister)
+	contLister := NewContainerLister(nodeName, basePath, podLister)
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer func() {
 		cancelFunc()

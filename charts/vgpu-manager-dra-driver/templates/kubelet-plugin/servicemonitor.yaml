@@ -35,6 +35,7 @@ spec:
       {{- with $sm.metricRelabelings }}
       metricRelabelings: {{ toYaml . | nindent 8 }}
       {{- end }}
+      honorLabels: true
     {{- end }}
     {{- if $monitor.enabled }}
     - path: /metrics
@@ -52,6 +53,7 @@ spec:
       {{- with $sm.metricRelabelings }}
       metricRelabelings: {{ toYaml . | nindent 8 }}
       {{- end }}
+      honorLabels: true
     {{- end }}
   namespaceSelector:
     matchNames:

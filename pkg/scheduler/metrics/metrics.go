@@ -116,10 +116,11 @@ const (
 // StageLockWait is contained INSIDE StageDevice, so device work is
 // device minus lock_wait in PromQL.
 const (
-	StageTotal    = "total"
-	StageNode     = "node"
-	StageDevice   = "device"
-	StageLockWait = "lock_wait"
+	StageTotal      = "total"
+	StageNode       = "node"
+	StageDevice     = "device"
+	StageLockWait   = "lock_wait"
+	StageLockedTime = "locked_time"
 )
 
 // Filter and dry-run filter results.

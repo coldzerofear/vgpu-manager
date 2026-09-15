@@ -34,7 +34,7 @@ func TestFindFile(t *testing.T) {
 		"/lib/x86_64-linux-gnu",
 		"/lib/aarch64-linux-gnu",
 	}
-	// Mirrors the search paths used by getNvidiaSMIPath.
+	// Mirrors the search paths used by GetNvidiaSMIPath.
 	binarySearchPaths := []string{
 		"/opt/bin",
 		"/usr/bin",
@@ -203,7 +203,7 @@ func TestRootGetDriverAndBinaryPaths(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, wantFM, got)
 
-	got, err = r.getNvidiaSMIPath()
+	got, err = r.GetNvidiaSMIPath()
 	require.NoError(t, err)
 	require.Equal(t, wantSMI, got)
 

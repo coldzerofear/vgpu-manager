@@ -48,6 +48,8 @@ type AllocationRequest struct {
 	// internals still need it for annotation writes (PodVGPUPreAllocAnnotation),
 	// type/UUID filter checks against pod.Annotations, and event recording.
 	Pod *corev1.Pod
+	// GPU device access mode
+	AccessMode string
 
 	ControllerOwner *metav1.OwnerReference
 
@@ -338,6 +340,7 @@ func BuildAllocationRequest(pod *corev1.Pod) *AllocationRequest {
 		ControllerOwner: metav1.GetControllerOf(pod),
 		// GangDomainKey defaults to "" (no cross-node sibling resolved yet).
 	}
+	req.AccessMode, _ = util.PodVGPUAccessMode(pod)
 
 	// Aggregate demand bucketed by lifecycle group so Total reflects the
 	// pod's PEAK concurrent demand (not a naive sum across non-overlapping

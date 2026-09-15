@@ -42,17 +42,25 @@ extern "C" {
 #define NVML_INTERNAL_CALL(table, sym, ...)                                    \
   ({                                                                           \
     driver_sym_t _entry = NVML_FIND_ENTRY(table, sym);                         \
-    _entry(__VA_ARGS__);                                                       \
+    nvmlReturn_t __ret = NVML_ERROR_FUNCTION_NOT_FOUND;                        \
+    if (likely(_entry)) {                                                      \
+      __ret = _entry(__VA_ARGS__);                                             \
+    }                                                                          \
+    __ret;                                                                     \
   })
 
 #define NVML_ENTRY_CALL(table, sym, ...)                                       \
   ({                                                                           \
     LOGGER(DETAIL, "hooking %s", #sym);                                        \
+    nvmlReturn_t __ret;                                                        \
     driver_sym_t _entry = NVML_FIND_ENTRY(table, sym);                         \
-    if (unlikely(!_entry)) {                                                   \
-      LOGGER(ERROR, "hooking failed: %s is NULL", #sym);                       \
+    if (likely(_entry)) {                                                      \
+      __ret = _entry(__VA_ARGS__);                                             \
+    } else {                                                                   \
+      LOGGER(WARNING, "hooking failed: %s is NULL", #sym);                     \
+      __ret = NVML_ERROR_FUNCTION_NOT_FOUND;                                   \
     }                                                                          \
-    _entry(__VA_ARGS__);                                                       \
+    __ret;                                                                     \
   })
 
 #define NVML_ERROR(table, code)                                                \

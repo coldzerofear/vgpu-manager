@@ -35,6 +35,11 @@ import (
 type PatchMetadata struct {
 	Annotations map[string]*string `json:"annotations,omitempty"`
 	Labels      map[string]*string `json:"labels,omitempty"`
+	// ResourceVersion, when set, makes the patch conditional: the apiserver
+	// rejects it with a Conflict unless the object still has this version
+	// (optimistic concurrency). Left empty, the patch applies unconditionally
+	// and the serialized body does not mention resourceVersion at all.
+	ResourceVersion string `json:"resourceVersion,omitempty"`
 }
 
 func (p PatchMetadata) PatchType() k8stypes.PatchType {
