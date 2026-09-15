@@ -23,6 +23,7 @@ import (
 	"runtime"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/klog/v2"
 )
@@ -44,9 +45,9 @@ func floorDevice(devices []resultDevice) resultDevice {
 // server embeds (ServerInfo; "" when unknown), whether or not the server
 // is listening right now.
 func AgentClientBundleETag(ctx context.Context, agentEndpoint string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, serverInfoTimeout)
+	ctx, cancel := context.WithTimeout(ctx, remotegpu.AgentCallTimeout)
 	defer cancel()
-	conn, err := dialAgent(agentEndpoint)
+	conn, err := remotegpu.DialAgent(agentEndpoint)
 	if err != nil {
 		return "", err
 	}

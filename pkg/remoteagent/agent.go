@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
@@ -140,7 +141,7 @@ func New(cfg Config) *Agent {
 	store := NewSessionStore(cfg)
 	a := &Agent{cfg: cfg, store: store}
 	a.server.Store(&serverState{})
-	if probe, err := remote.ParseServerEndpoint(cfg.ServerEndpoint); err == nil {
+	if probe, err := remotegpu.ParseServerEndpoint(cfg.ServerEndpoint); err == nil {
 		a.serverProbe = probe
 	} else {
 		klog.Errorf("%v", err)
@@ -339,7 +340,7 @@ func (a *Agent) listen() ([]net.Listener, error) {
 		return nil, fmt.Errorf("no listen endpoint configured")
 	}
 	for _, raw := range a.cfg.ListenEndpoints {
-		endpoint, err := remote.ParseAgentEndpoint(raw)
+		endpoint, err := remotegpu.ParseAgentEndpoint(raw)
 		if err != nil {
 			closeAll()
 			return nil, fmt.Errorf("listen endpoint: %w", err)

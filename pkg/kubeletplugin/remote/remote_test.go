@@ -389,36 +389,6 @@ func TestSelectArtifact(t *testing.T) {
 		}
 	})
 }
-func TestAgentDialTarget(t *testing.T) {
-	cases := map[string]string{
-		// No port: the default agent port fills in.
-		"10.0.0.7":                  "10.0.0.7:14834",
-		"https://gpu-a.example.com": "gpu-a.example.com:14834",
-		// Explicit port wins; scheme and path are stripped for the gRPC dial.
-		"10.0.0.7:14834":              "10.0.0.7:14834",
-		"http://gpu-a:15000/pool-a":   "gpu-a:15000",
-		"gpu-a.zone.vgpu.internal:19": "gpu-a.zone.vgpu.internal:19",
-		// The published form, and an IPv6 host.
-		"grpc://10.0.0.7:14834":  "10.0.0.7:14834",
-		"grpc://[2001:db8::7]":   "[2001:db8::7]:14834",
-		"[2001:db8::7]:15000":    "[2001:db8::7]:15000",
-		"grpc://gpu-a:14834/api": "gpu-a:14834",
-		// A same-node socket is handed to grpc-go as its unix:// target.
-		"unix:///etc/vgpu-manager/agent.sock": "unix:///etc/vgpu-manager/agent.sock",
-	}
-	for in, want := range cases {
-		got, err := agentDialTarget(in)
-		if err != nil || got != want {
-			t.Errorf("agentDialTarget(%q) = %q, %v, want %q", in, got, err, want)
-		}
-	}
-	for _, in := range []string{"ftp://x", "", ":14834", "grpc://", "unix://relative.sock", "grpc://gpu-a:0", "grpc://gpu-a:70000"} {
-		if got, err := agentDialTarget(in); err == nil {
-			t.Errorf("agentDialTarget(%q) = %q, want an error", in, got)
-		}
-	}
-}
-
 func TestPreparedCheckpointRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	d := &InjectDriver{config: InjectConfig{PluginDataDirectoryPath: dir}, prepared: map[string]*preparedClaim{}}

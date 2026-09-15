@@ -76,10 +76,6 @@ const (
 	// this, and the client artifact must stay below the lower of the two.
 	AttrServerCUDAVersion = "serverCudaVersion"
 
-	// DefaultServerPort is lupine-server's default listen port
-	// (docs/lupine_env_reference.md, LUPINE_PORT).
-	DefaultServerPort = 14833
-
 	// The lupine client injection triplet (docs/lupine_env_reference.md §5).
 	// LUPINE_DISABLE_LOCAL is mandatory: without it a client with a local GPU
 	// routes device 0 locally and never reaches the server.

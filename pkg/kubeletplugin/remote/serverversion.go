@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 )
 
 // ServerCUDAVersionHeader is the response header lupine-server puts on every
@@ -57,7 +58,7 @@ func ProbeServerCUDAVersion(ctx context.Context, endpoint string, timeout time.D
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	serverEndpoint, err := ParseServerEndpoint(endpoint)
+	serverEndpoint, err := remotegpu.ParseServerEndpoint(endpoint)
 	if err != nil {
 		return nil, err
 	}

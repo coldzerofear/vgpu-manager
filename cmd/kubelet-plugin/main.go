@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	pkgkubeletplugin "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/common"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
@@ -216,7 +217,7 @@ func newApp() *cli.App {
 		&cli.StringFlag{
 			Name:        "remote-agent-endpoint",
 			Usage:       "How this node's remote-agent is reached: 'grpc://host:port' (empty host = this node's InternalIP; the agent runs under hostNetwork, this plugin does not) or 'unix:///etc/vgpu-manager/agent.sock'. The endpoints published to other nodes (serverEndpoint/agentEndpoint attributes) and the server CUDA version are what the agent reports. Server mode with RemoteGPUSupport.",
-			Value:       fmt.Sprintf(":%d", remote.DefaultAgentPort),
+			Value:       fmt.Sprintf(":%d", remotegpu.DefaultAgentPort),
 			Destination: &flags.RemoteAgentEndpoint,
 			EnvVars:     []string{"REMOTE_AGENT_ENDPOINT"},
 		},
@@ -310,7 +311,7 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 			}
 			// The only remote-path address this process needs: its own node's
 			// agent. Everything published comes from the agent at runtime.
-			endpoint, err := remote.ParseAgentEndpoint(flags.RemoteAgentEndpoint)
+			endpoint, err := remotegpu.ParseAgentEndpoint(flags.RemoteAgentEndpoint)
 			if err != nil {
 				return fmt.Errorf("invalid --remote-agent-endpoint: %w", err)
 			}

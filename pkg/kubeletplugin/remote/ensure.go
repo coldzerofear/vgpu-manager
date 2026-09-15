@@ -18,14 +18,11 @@ package remote
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
-	endpointutil "github.com/coldzerofear/vgpu-manager/pkg/util/endpoint"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/klog/v2"
 )
@@ -72,46 +69,15 @@ func EnsureSessions(
 	return serverEndpoints, etagOf, nil
 }
 
-const serverInfoTimeout = 5 * time.Second
-
-// ErrServerNotListening is returned (wrapped) by ServerInfo when the agent
-// answers but reports that lupine-server did not pass its last probe.
-var ErrServerNotListening = errors.New("lupine-server is not listening")
-
-// ServerInfo asks the remote-agent at agentEndpoint what it knows about its
-// lupine-server: reachability, the CUDA version it was built with, and the
-// endpoint other nodes should use. This is how every other component learns
-// about the server without having its address configured. A server that
-// did not pass the agent's last probe is an ErrServerNotListening error.
-func ServerInfo(ctx context.Context, agentEndpoint string) (*remoteagent.ServerInfoResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, serverInfoTimeout)
-	defer cancel()
-
-	conn, err := dialAgent(agentEndpoint)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = conn.Close() }()
-
-	info, err := remoteagent.NewRemoteAgentClient(conn).ServerInfo(ctx, &remoteagent.ServerInfoRequest{})
-	if err != nil {
-		return nil, fmt.Errorf("remote-agent %s: %w", agentEndpoint, err)
-	}
-	if !info.Listening {
-		return nil, fmt.Errorf("remote-agent %s (node %s): %w", agentEndpoint, info.NodeName, ErrServerNotListening)
-	}
-	return info, nil
-}
-
 // ReleaseSessions asks the agent at agentEndpoint to remove the named
 // sessions of a claim (tokens are required by the agent). Returns
 // how many the agent removed. Callers treat a failure as best effort: the
 // agent's claim watch and periodic sweep remove the same sessions later.
 func ReleaseSessions(ctx context.Context, agentEndpoint, claimUID string, tokens []string) (int, error) {
-	ctx, cancel := context.WithTimeout(ctx, serverInfoTimeout)
+	ctx, cancel := context.WithTimeout(ctx, remotegpu.AgentCallTimeout)
 	defer cancel()
 
-	conn, err := dialAgent(agentEndpoint)
+	conn, err := remotegpu.DialAgent(agentEndpoint)
 	if err != nil {
 		return 0, err
 	}
@@ -127,33 +93,6 @@ func ReleaseSessions(ctx context.Context, agentEndpoint, claimUID string, tokens
 	return int(resp.Released), nil
 }
 
-// dialAgent opens a client connection to the agent. K1: plaintext;
-// TLS/credentials arrive with D5 (multi-tenant gate). grpc.NewClient does not
-// connect until the first RPC, so this never blocks.
-func dialAgent(agentEndpoint string) (*grpc.ClientConn, error) {
-	target, err := agentDialTarget(agentEndpoint)
-	if err != nil {
-		return nil, err
-	}
-	return grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
-}
-
-// agentDialTarget turns an agent endpoint (URL form; grpc://host:port[/path]
-// as published, http(s):// accepted for older publishers, or unix:///path
-// for a same-node socket) into a gRPC dial target: bare host:port, or the
-// unix:// URL grpc-go resolves itself. A future gateway path prefix needs a
-// gRPC-aware route, not this dial.
-func agentDialTarget(agentEndpoint string) (string, error) {
-	endpoint, err := ParseAgentEndpoint(agentEndpoint)
-	if err != nil {
-		return "", err
-	}
-	if endpoint.Scheme != endpointutil.Unix && (endpoint.Host == "" || endpoint.Port == "0") {
-		return "", fmt.Errorf("invalid remote-agent endpoint %q: a host and a non-zero port are required", agentEndpoint)
-	}
-	return endpoint.DialTarget(), nil
-}
-
 // ensureOne materialises the session on one agent and returns the
 // lupine-server endpoint that agent reports ("" if it has none yet) and
 // the etag of the client bundle its server embeds.
@@ -161,7 +100,7 @@ func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.Res
 	ctx, cancel := context.WithTimeout(ctx, ensureSessionTimeout)
 	defer cancel()
 
-	conn, err := dialAgent(agentEndpoint)
+	conn, err := remotegpu.DialAgent(agentEndpoint)
 	if err != nil {
 		return "", "", err
 	}

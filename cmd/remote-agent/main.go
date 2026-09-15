@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
-	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
@@ -99,9 +99,9 @@ func main() {
 		&cli.StringFlag{Name: "ready-file", Usage: "File written after preflight; the server container waits for it. Defaults to <session-base>/.agent-ready.", Destination: &cfg.ReadyFile, EnvVars: []string{"READY_FILE"}},
 		&cli.StringFlag{Name: "container-manager-dir", Usage: "Configure the container mount path used by vgpu-manager.", Value: util.ManagerRootPath, Destination: &cfg.ContainerManagerDir, EnvVars: []string{"CONTAINER_MANAGER_DIR"}},
 		&cli.StringFlag{Name: "config-session-base", Usage: "Session directory root shared with lupine-server (VGPU_CONFIG_SESSION_BASE).", Value: util.RemoteSessionBasePath, Destination: &cfg.SessionBase, EnvVars: []string{"VGPU_CONFIG_SESSION_BASE"}},
-		&cli.StringFlag{Name: "remote-server-endpoint", Usage: "lupine-server endpoint to probe (URL form, http/https; host defaults to 127.0.0.1 = same pod). When the host is a loopback, the agent discovers the address other nodes can reach the server at and reports that from ServerInfo.", Value: fmt.Sprintf("127.0.0.1:%d", remote.DefaultServerPort), Destination: &cfg.ServerEndpoint, EnvVars: []string{"REMOTE_SERVER_ENDPOINT"}},
+		&cli.StringFlag{Name: "remote-server-endpoint", Usage: "lupine-server endpoint to probe (URL form, http/https; host defaults to 127.0.0.1 = same pod). When the host is a loopback, the agent discovers the address other nodes can reach the server at and reports that from ServerInfo.", Value: fmt.Sprintf("127.0.0.1:%d", remotegpu.DefaultServerPort), Destination: &cfg.ServerEndpoint, EnvVars: []string{"REMOTE_SERVER_ENDPOINT"}},
 		&cli.StringFlag{Name: "advertise-server-endpoint", Usage: "lupine-server endpoint reported to other components verbatim (URL form, e.g. https://gpu-a.corp/pool-a), instead of the probed/discovered one. For DNS names or gateways this host cannot reach itself.", Destination: &cfg.AdvertiseEndpoint, EnvVars: []string{"ADVERTISE_SERVER_ENDPOINT"}},
-		&cli.StringFlag{Name: "listen-server-endpoint", Usage: "Agent gRPC listen endpoints, comma separated: grpc://host:port (empty host = all interfaces) and/or unix:///path.sock for same-node callers.", Value: fmt.Sprintf("0.0.0.0:%d", remote.DefaultAgentPort), Destination: &listenEndpoints, EnvVars: []string{"LISTEN_SERVER_ENDPOINT"}},
+		&cli.StringFlag{Name: "listen-server-endpoint", Usage: "Agent gRPC listen endpoints, comma separated: grpc://host:port (empty host = all interfaces) and/or unix:///path.sock for same-node callers.", Value: fmt.Sprintf("0.0.0.0:%d", remotegpu.DefaultAgentPort), Destination: &listenEndpoints, EnvVars: []string{"LISTEN_SERVER_ENDPOINT"}},
 		&cli.DurationFlag{Name: "gc-interval", Usage: "Orphaned session sweep interval.", Value: time.Minute, Destination: &cfg.GCInterval, EnvVars: []string{"GC_INTERVAL"}},
 	}, kube.Flags()...)
 	flags = append(flags, FeatureGateFlags(featureGate)...)
@@ -119,7 +119,7 @@ func main() {
 			if util.PathIsNotExist(cfg.ContainerManagerDir) {
 				return fmt.Errorf("container-manager-dir %q does not exist", cfg.ContainerManagerDir)
 			}
-			endpoint, err := remote.ParseServerEndpoint(cfg.ServerEndpoint)
+			endpoint, err := remotegpu.ParseServerEndpoint(cfg.ServerEndpoint)
 			if err != nil {
 				return fmt.Errorf("invalid --remote-server-endpoint: %w", err)
 			}
@@ -130,7 +130,7 @@ func main() {
 			cfg.ServerEndpoint = endpoint.String()
 
 			if cfg.AdvertiseEndpoint != "" {
-				advertise, err := remote.ParseServerEndpoint(cfg.AdvertiseEndpoint)
+				advertise, err := remotegpu.ParseServerEndpoint(cfg.AdvertiseEndpoint)
 				if err != nil {
 					return fmt.Errorf("invalid --advertise-server-endpoint: %w", err)
 				}
@@ -145,7 +145,7 @@ func main() {
 				if strings.TrimSpace(raw) == "" {
 					continue
 				}
-				listen, err := remote.ParseAgentEndpoint(raw)
+				listen, err := remotegpu.ParseAgentEndpoint(raw)
 				if err != nil {
 					return fmt.Errorf("invalid --listen-server-endpoint: %w", err)
 				}

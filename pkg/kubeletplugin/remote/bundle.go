@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
@@ -103,7 +104,7 @@ func ClientBundlePlatform(osName, arch string) (string, error) {
 // ClientBundleURL is where lupine-server at serverEndpoint serves the
 // bundle for platform.
 func ClientBundleURL(serverEndpoint, platform string) (string, error) {
-	endpoint, err := ParseServerEndpoint(serverEndpoint)
+	endpoint, err := remotegpu.ParseServerEndpoint(serverEndpoint)
 	if err != nil {
 		return "", err
 	}
@@ -148,7 +149,7 @@ func FetchClientBundle(ctx context.Context, agentEndpoint string, req *remoteage
 	ctx, cancel := context.WithTimeout(ctx, clientBundleTimeout)
 	defer cancel()
 
-	conn, err := dialAgent(agentEndpoint)
+	conn, err := remotegpu.DialAgent(agentEndpoint)
 	if err != nil {
 		return nil, err
 	}
