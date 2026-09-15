@@ -65,7 +65,7 @@ type Options struct {
 	ContainerDriverRoot string
 	RemoteServer        bool
 	RemoteConsumer      bool
-	RemoteConsumerVGPU  int
+	RemoteConsumerNum   int
 	RemoteAgentEndpoint string
 	FeatureGate         featuregate.MutableFeatureGate
 }
@@ -85,7 +85,8 @@ const (
 	// defaultRemoteConsumerVGPU is how many remote vGPUs one consumer node
 	// runs at a time. It has no local GPUs to derive a number from, so this
 	// is a plain concurrency cap.
-	defaultRemoteConsumerVGPU  = 1000
+	defaultRemoteConsumerVGPU = 1000
+
 	defaultCDIAnnotationPrefix = util.CDIDefaultAnnotationPrefix
 	defaultDriverRoot          = util.CDIDefaultDriverRoot
 
@@ -169,7 +170,7 @@ func NewOptions() *Options {
 		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
 		RemoteServer:        util.GetEnvEnabled("REMOTE_SERVER"),
 		RemoteConsumer:      util.GetEnvEnabled("REMOTE_CONSUMER"),
-		RemoteConsumerVGPU:  defaultRemoteConsumerVGPU,
+		RemoteConsumerNum:   defaultRemoteConsumerVGPU,
 		RemoteAgentEndpoint: util.GetEnvDefault("REMOTE_AGENT_ENDPOINT", fmt.Sprintf(":%d", remotegpu.DefaultAgentPort)),
 	}
 }
@@ -211,7 +212,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
 	pflag.BoolVar(&o.RemoteServer, "remote-server", o.RemoteServer, "Serve this node's GPUs to remote vGPU pods on other nodes. (requires the RemoteGPUSupport feature gate)")
 	pflag.BoolVar(&o.RemoteConsumer, "remote-consumer", o.RemoteConsumer, "Run remote vGPU pods on this node, whose GPUs are on remote servers. (requires the RemoteGPUSupport feature gate)")
-	pflag.IntVar(&o.RemoteConsumerVGPU, "remote-consumer-vgpu-number", o.RemoteConsumerVGPU, "How many remote vGPUs this consumer node runs at a time.")
+	pflag.IntVar(&o.RemoteConsumerNum, "remote-consumer-number", o.RemoteConsumerNum, "How many remote vGPUs this consumer node runs at a time.")
 	pflag.StringVar(&o.RemoteAgentEndpoint, "remote-agent-endpoint", o.RemoteAgentEndpoint, "The remote-agent on this node: grpc://host:port or unix:///path. An empty host means the node's InternalIP.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
@@ -224,6 +225,20 @@ func (o *Options) FlagParse() {
 
 // Validate checks the option combinations the flags alone cannot express.
 func (o *Options) Validate() error {
+	if o.FeatureGate.Enabled(RemoteGPUSupport) {
+		if o.FeatureGate.Enabled(GPUCoreResourcePlugin) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, GPUCoreResourcePlugin)
+		}
+		if o.FeatureGate.Enabled(GPUMemoryResourcePlugin) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, GPUMemoryResourcePlugin)
+		}
+		if o.FeatureGate.Enabled(DevicePluginClientMode) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, DevicePluginClientMode)
+		}
+		if o.FeatureGate.Enabled(HonorPreAllocatedDeviceIDs) {
+			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, HonorPreAllocatedDeviceIDs)
+		}
+	}
 	if o.RemoteServer || o.RemoteConsumer {
 		if !o.FeatureGate.Enabled(RemoteGPUSupport) {
 			return fmt.Errorf("--remote-server and --remote-consumer require the %s feature gate", RemoteGPUSupport)
@@ -233,8 +248,11 @@ func (o *Options) Validate() error {
 		}
 	}
 	if o.RemoteConsumer {
-		if o.RemoteConsumerVGPU <= 0 {
-			return fmt.Errorf("--remote-consumer-vgpu-number must be greater than 0")
+		if o.MigStrategy == util.MigStrategySingle {
+			return fmt.Errorf("--remote-consumer=true and --mig-strategy=single, currently mutually exclusive")
+		}
+		if o.RemoteConsumerNum <= 0 {
+			return fmt.Errorf("--remote-consumer-number must be greater than 0")
 		}
 		if o.RemoteServer {
 			// The node device registry a server publishes comes from the local

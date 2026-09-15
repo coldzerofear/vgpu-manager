@@ -43,9 +43,8 @@ import (
 )
 
 func GetDevicePlugins(
-	option *options.Options, devManager *manager.DeviceManager,
-	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset,
-) ([]base.DevicePlugin, error) {
+	option *options.Options, devManager *manager.DeviceManager, clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset,
+) (plugins []base.DevicePlugin, err error) {
 	// Build the CDI handler (a null no-op handler is returned when no CDI
 	// strategy is configured) and generate the node CDI specification so that
 	// CDI device references emitted during Allocate can be resolved.
@@ -54,60 +53,70 @@ func GetDevicePlugins(
 	// references that host path. It is executed by the host container runtime,
 	// not by this plugin, so no flag is exposed for it.
 	nodeConfig := devManager.GetNodeConfig()
-	if option.RemoteConsumer {
-		// A consumer node has no GPUs: it serves remote pods only, reports
-		// just vgpu-number, and needs neither NVML nor CDI.
-		go CycleCleanupNodeResources(kubeClient, nodeConfig.GetNodeName(),
-			[]string{util.VGPUCoreResourceName, util.VGPUMemoryResourceName})
-		return []base.DevicePlugin{remote.NewConsumerDevicePlugin(remote.ConsumerConfig{
-			NodeName:       nodeConfig.GetNodeName(),
-			ResourceName:   util.VGPUNumberResourceName,
-			Socket:         filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-remote.sock"),
-			VGPUNumber:     option.RemoteConsumerVGPU,
-			ManagerDir:     vgpu.ContManagerDirectoryPath,
-			HostManagerDir: vgpu.HostManagerDirectoryPath,
-		}, devManager, kubeClient)}, nil
+
+	var cdiHandler cdi.Handler
+	if option.RemoteConsumer && !option.RemoteServer {
+		// only remote consumer no need for CDI
+		cdiHandler = cdi.NewNullHandler()
+	} else {
+		cdiHandler, err = cdi.New(
+			devManager.DeviceLib,
+			cdi.Config{
+				Strategies:        nodeConfig.GetDeviceListStrategy(),
+				Vendor:            util.CDIVendor,
+				Class:             util.CDIClass,
+				DeviceIDStrategy:  util.CDIDeviceIDStrategy,
+				AnnotationPrefix:  option.CDIAnnotationPrefix,
+				NvidiaCDIHookPath: filepath.Join(vgpu.HostManagerDirectoryPath, util.Tools, "nvidia-cdi-hook"),
+				// The host driver/dev root is mounted into the plugin at the same path,
+				// so the in-container read path equals the host path written into the
+				// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
+				DriverRoot:       string(nodeConfig.GetDriverRoot()),
+				TargetDriverRoot: string(nodeConfig.GetHostDriverRoot()),
+				DevRoot:          nodeConfig.GetDriverRoot().GetDevRoot(),
+				TargetDevRoot:    string(nodeConfig.GetHostDevRoot()),
+				GDSEnabled:       nodeConfig.GetGDSEnabled(),
+				MOFEDEnabled:     nodeConfig.GetMOFEDEnabled(),
+				GDRCopyEnabled:   nodeConfig.GetGDRCopyEnabled(),
+				ImexChannels:     devManager.GetImexChannels(),
+			})
+		if err != nil {
+			klog.Errorf("Create CDI handler failed: %v", err)
+			return nil, err
+		}
 	}
-	cdiHandler, err := cdi.New(
-		devManager.DeviceLib,
-		cdi.Config{
-			Strategies:        nodeConfig.GetDeviceListStrategy(),
-			Vendor:            util.CDIVendor,
-			Class:             util.CDIClass,
-			DeviceIDStrategy:  util.CDIDeviceIDStrategy,
-			AnnotationPrefix:  option.CDIAnnotationPrefix,
-			NvidiaCDIHookPath: filepath.Join(vgpu.HostManagerDirectoryPath, util.Tools, "nvidia-cdi-hook"),
-			// The host driver/dev root is mounted into the plugin at the same path,
-			// so the in-container read path equals the host path written into the
-			// spec (TargetDriverRoot/TargetDevRoot default to these in cdi.New).
-			DriverRoot:       string(nodeConfig.GetDriverRoot()),
-			TargetDriverRoot: string(nodeConfig.GetHostDriverRoot()),
-			DevRoot:          nodeConfig.GetDriverRoot().GetDevRoot(),
-			TargetDevRoot:    string(nodeConfig.GetHostDevRoot()),
-			GDSEnabled:       nodeConfig.GetGDSEnabled(),
-			MOFEDEnabled:     nodeConfig.GetMOFEDEnabled(),
-			GDRCopyEnabled:   nodeConfig.GetGDRCopyEnabled(),
-			ImexChannels:     devManager.GetImexChannels(),
-		})
-	if err != nil {
-		klog.Errorf("Create CDI handler failed: %v", err)
-		return nil, err
-	}
+
 	if err = cdiHandler.CreateSpecFile(); err != nil {
 		klog.Errorf("Generate CDI spec file failed: %v", err)
 		return nil, err
 	}
 
-	var plugins []base.DevicePlugin
 	migStrategy := devManager.GetNodeConfig().GetMigStrategy()
 	if migStrategy != util.MigStrategySingle {
-		socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu.sock")
-		plugin, err := vgpu.NewVNumberDevicePlugin(util.VGPUNumberResourceName,
-			socket, devManager, kubeClient, clusterManager.GetCache(), cdiHandler)
-		if err != nil {
-			return nil, fmt.Errorf("create vnumber plugin failed: %v", err)
+		var plugin base.DevicePlugin
+		if option.RemoteConsumer || option.RemoteServer {
+			if option.RemoteConsumer {
+				socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-remote.sock")
+				plugin = remote.NewConsumerDevicePlugin(remote.ConsumerConfig{
+					NodeName:       nodeConfig.GetNodeName(),
+					ResourceName:   util.VGPUNumberResourceName,
+					Socket:         socket,
+					VGPUNumber:     option.RemoteConsumerNum,
+					ManagerDir:     vgpu.ContManagerDirectoryPath,
+					HostManagerDir: vgpu.HostManagerDirectoryPath,
+				}, devManager, kubeClient)
+			}
+		} else {
+			socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu.sock")
+			plugin, err = vgpu.NewVNumberDevicePlugin(util.VGPUNumberResourceName,
+				socket, devManager, kubeClient, clusterManager.GetCache(), cdiHandler)
+			if err != nil {
+				return nil, fmt.Errorf("create vnumber plugin failed: %v", err)
+			}
 		}
-		plugins = append(plugins, plugin)
+		if plugin != nil {
+			plugins = append(plugins, plugin)
+		}
 	}
 
 	var deleteResources []string
@@ -125,15 +134,14 @@ func GetDevicePlugins(
 		deleteResources = append(deleteResources, util.VGPUMemoryResourceName)
 	}
 
-	nodeName := devManager.GetNodeConfig().GetNodeName()
-	go CycleCleanupNodeResources(kubeClient, nodeName, deleteResources)
+	go CycleCleanupNodeResources(kubeClient, nodeConfig.GetNodeName(), deleteResources)
 
 	if migStrategy != util.MigStrategyNone {
 		var requireUniformMIGDevices bool
 		if migStrategy == util.MigStrategySingle {
 			requireUniformMIGDevices = true
 		}
-		if err := devManager.AssertAllMigDevicesAreValid(requireUniformMIGDevices); err != nil {
+		if err = devManager.AssertAllMigDevicesAreValid(requireUniformMIGDevices); err != nil {
 			return nil, fmt.Errorf("invalid MIG configuration: %v", err)
 		}
 
