@@ -46,9 +46,9 @@ const (
 // or removes a consumer role left from an earlier configuration. The role is
 // removed on shutdown either way.
 func SetupConsumerRole(reg registrar, enabled bool) {
+	reg.AddRegistryFunc(consumerRoleName, removeConsumerRole)
 	reg.AddCleanupRegistryFunc(consumerRoleName, removeConsumerRole)
 	if !enabled {
-		reg.AddRegistryFunc(consumerRoleName, removeConsumerRole)
 		return
 	}
 	reg.AddRegistryFunc(consumerRoleName, func(featuregate.FeatureGate) (*client.PatchMetadata, error) {
@@ -80,9 +80,9 @@ func SetupServerRole(
 	kubeClient kubernetes.Interface,
 	nodeName string, enabled bool, agentEndpoint string,
 ) error {
+	reg.AddRegistryFunc(serverRoleName, removeServerRole)
 	reg.AddCleanupRegistryFunc(serverRoleName, removeServerRole)
 	if !enabled {
-		reg.AddRegistryFunc(serverRoleName, removeServerRole)
 		return nil
 	}
 	agentDial, err := remotegpu.ResolveAgentDial(ctx, kubeClient, nodeName, agentEndpoint)

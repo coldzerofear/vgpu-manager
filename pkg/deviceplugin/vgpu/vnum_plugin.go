@@ -287,9 +287,7 @@ func (m *vNumberDevicePlugin) buildPreAllocContext(
 }
 
 func allocateFromClaim(
-	claim *device.ContainerDeviceClaim,
-	availableMap map[string][]string,
-	allocated sets.Set[string],
+	claim *device.ContainerDeviceClaim, availableMap map[string][]string, allocated sets.Set[string],
 ) ([]string, error) {
 	if claim == nil {
 		return nil, fmt.Errorf("nil container claim")

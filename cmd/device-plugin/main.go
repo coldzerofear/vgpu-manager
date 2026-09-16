@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
+	dpremote "github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
@@ -43,7 +44,6 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
-	dpremote "github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/fsnotify/fsnotify"
 	corev1 "k8s.io/api/core/v1"
@@ -56,16 +56,10 @@ import (
 	metrics "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func runApp(opt *options.Options) (exitCode int) {
+func runApp(ctx context.Context, opt *options.Options) (exitCode int) {
 	exitCode = 1
 
-	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
-	if err := opt.Validate(); err != nil {
-		klog.Errorf("Invalid options: %v", err)
-		return exitCode
-	}
 	util.MustInitGlobalDomain(opt.Domain)
-
 	kubeConfig, err := client.NewKubeConfig(
 		client.WithConfigMasterURL(opt.MasterURL),
 		client.WithKubeConfigPath(opt.KubeConfigFile),
@@ -117,18 +111,19 @@ func runApp(opt *options.Options) (exitCode int) {
 
 	klog.V(3).Info("Initialize Device Resource Manager")
 	var deviceManager *devm.DeviceManager
-	if opt.RemoteConsumer {
-		// A consumer node runs remote pods only: it has no GPUs to detect.
+	if opt.RemoteConsumer && !opt.RemoteServer {
+		// Only consumer nodes do not need to detect GPUs
 		deviceManager = devm.NewDevicelessManager(
-			nodeConfig,
-			devm.WithKubeClient(kubeClient),
+			nodeConfig, devm.WithKubeClient(kubeClient),
 			devm.WithFeatureGate(opt.FeatureGate))
-	} else if deviceManager, err = devm.NewDeviceManager(
-		nodeConfig,
-		devm.WithKubeClient(kubeClient),
-		devm.WithFeatureGate(opt.FeatureGate)); err != nil {
-		klog.Errorf("Create device manager failed: %v", err)
-		return exitCode
+	} else {
+		deviceManager, err = devm.NewDeviceManager(
+			nodeConfig, devm.WithKubeClient(kubeClient),
+			devm.WithFeatureGate(opt.FeatureGate))
+		if err != nil {
+			klog.Errorf("Create device manager failed: %v", err)
+			return exitCode
+		}
 	}
 
 	devicePluginSocket := filepath.Join(opt.DevicePluginPath, "kubelet.sock")
@@ -186,23 +181,26 @@ func runApp(opt *options.Options) (exitCode int) {
 		return exitCode
 	}
 
-	klog.Infoln("Starting cluster manager.")
-	clusterCtx, cancelFunc := context.WithCancel(context.Background())
+	clusterCtx, cancelFunc := context.WithCancel(ctx)
+	defer cancelFunc()
+
+	dpremote.SetupConsumerRole(deviceManager, opt.RemoteConsumer)
+	if err := dpremote.SetupServerRole(clusterCtx, deviceManager, kubeClient,
+		opt.NodeName, opt.RemoteServer, opt.RemoteAgentEndpoint); err != nil {
+		klog.Errorf("Set up remote GPU server role failed: %v", err)
+		return exitCode
+	}
+
 	go func() {
+		klog.Infoln("Starting cluster manager.")
 		if err = manager.Start(clusterCtx); err != nil {
 			klog.V(3).ErrorS(err, "failed staring cluster manager")
 			cancelFunc()
 		}
 	}()
+
 	deviceManager.Start()
-	dpremote.SetupConsumerRole(deviceManager, opt.RemoteConsumer)
-	if err := dpremote.SetupServerRole(clusterCtx, deviceManager, kubeClient,
-		opt.NodeName, opt.RemoteServer, opt.RemoteAgentEndpoint); err != nil {
-		klog.Errorf("Set up remote GPU server role failed: %v", err)
-		cancelFunc()
-		deviceManager.Stop()
-		return exitCode
-	}
+	defer deviceManager.Stop()
 
 restart:
 	started := 0
@@ -264,8 +262,6 @@ restart:
 		}
 	}
 exit:
-	cancelFunc()
-	deviceManager.Stop()
 	for _, p := range plugins {
 		_ = p.Stop()
 	}
@@ -281,7 +277,12 @@ func main() {
 	defer logs.FlushLogs()
 	log.SetLogger(klog.NewKlogr())
 
-	if exitCode := runApp(opt); exitCode != 0 {
+	klog.Infof("Feature Gates: %#v", featuregates.ToMap(opt.FeatureGate))
+	if err := opt.Validate(); err != nil {
+		klog.Exitf("Invalid options: %v", err)
+	}
+
+	if exitCode := runApp(context.Background(), opt); exitCode != 0 {
 		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
 }

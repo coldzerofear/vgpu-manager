@@ -238,6 +238,9 @@ func (o *Options) Validate() error {
 		if o.FeatureGate.Enabled(HonorPreAllocatedDeviceIDs) {
 			return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", RemoteGPUSupport, HonorPreAllocatedDeviceIDs)
 		}
+		if !o.RemoteServer && !o.RemoteConsumer {
+			return fmt.Errorf("invalid feature gate %s: --remote-server or --remote-consumer must be enabled", RemoteGPUSupport)
+		}
 	}
 	if o.RemoteServer || o.RemoteConsumer {
 		if !o.FeatureGate.Enabled(RemoteGPUSupport) {
@@ -245,6 +248,12 @@ func (o *Options) Validate() error {
 		}
 		if _, err := remotegpu.ParseAgentEndpoint(o.RemoteAgentEndpoint); err != nil {
 			return err
+		}
+	}
+	if o.RemoteServer && !o.RemoteConsumer {
+		// Only consumer nodes can enable rescheduling, triggering the current node's erroneous pod to reschedule
+		if o.FeatureGate.Enabled(AllocationFailureReschedule) {
+			return fmt.Errorf("%s feature gate is not supported only when --remote-server=true", AllocationFailureReschedule)
 		}
 	}
 	if o.RemoteConsumer {
