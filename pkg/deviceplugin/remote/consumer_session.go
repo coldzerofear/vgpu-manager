@@ -38,7 +38,7 @@ import (
 // the server's agent, which is also how the DRA path gets it -- so the shims
 // need not be pre-staged. A server that has not reported its version yet is
 // an error the pod can be retried on.
-func (m *consumerDevicePlugin) stageClientShim(
+func (m *consumerRole) stageClientShim(
 	ctx context.Context, pod *corev1.Pod, containerName string, server *remotegpu.ServerEndpointInfo,
 ) (*kubeletremote.ClientArtifact, error) {
 	version, err := semver.NewVersion(server.ServerCUDAVersion)
@@ -47,7 +47,7 @@ func (m *consumerDevicePlugin) stageClientShim(
 			server.ServerCUDAVersion, err)
 	}
 	return kubeletremote.EnsureClientArtifact(ctx, "pod "+klog.KObj(pod).String(),
-		m.cfg.ArtifactsDir, m.cfg.HostArtifactsDir, version,
+		m.opts.ArtifactsDir, m.opts.HostArtifactsDir, version,
 		server.AgentEndpoint, server.BundleETag,
 		func() (*remoteagent.FetchClientBundleRequest, error) {
 			// The agent authorizes a download exactly as it authorizes a
@@ -66,7 +66,7 @@ func (m *consumerDevicePlugin) stageClientShim(
 
 // podSession is how the agent is asked for one container's session. The token
 // is derived from the pod and the container, so no one has to publish it.
-func (m *consumerDevicePlugin) podSession(pod *corev1.Pod, containerName string) remotegpu.PodSession {
+func (m *consumerRole) podSession(pod *corev1.Pod, containerName string) remotegpu.PodSession {
 	return remotegpu.PodSession{
 		Token:           remotegpu.SessionToken(string(pod.UID), containerName),
 		PodUID:          string(pod.UID),

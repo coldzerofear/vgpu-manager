@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/cmd/device-plugin/options"
+	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
@@ -43,7 +44,8 @@ import (
 )
 
 func GetDevicePlugins(
-	option *options.Options, devManager *manager.DeviceManager, clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset,
+	ctx context.Context, option *options.Options, devManager *manager.DeviceManager,
+	clusterManager ctrm.Manager, kubeClient *kubernetes.Clientset,
 ) (plugins []base.DevicePlugin, err error) {
 	// Build the CDI handler (a null no-op handler is returned when no CDI
 	// strategy is configured) and generate the node CDI specification so that
@@ -95,16 +97,8 @@ func GetDevicePlugins(
 	if migStrategy != util.MigStrategySingle {
 		var plugin base.DevicePlugin
 		if option.RemoteConsumer || option.RemoteServer {
-			if option.RemoteConsumer {
-				socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-remote.sock")
-				plugin = remote.NewConsumerDevicePlugin(remote.ConsumerConfig{
-					NodeName:         nodeConfig.GetNodeName(),
-					ResourceName:     util.VGPUNumberResourceName,
-					Socket:           socket,
-					VGPUNumber:       option.RemoteConsumerNum,
-					ArtifactsDir:     filepath.Join(vgpu.ContManagerDirectoryPath, util.Driver),
-					HostArtifactsDir: filepath.Join(vgpu.HostManagerDirectoryPath, util.Driver),
-				}, devManager, kubeClient)
+			if plugin, err = remotePlugin(ctx, option, nodeConfig, devManager, kubeClient); err != nil {
+				return nil, err
 			}
 		} else {
 			socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu.sock")
@@ -219,4 +213,35 @@ func cleanupNodeResources(ctx context.Context, kubeClient *kubernetes.Clientset,
 		}
 	}
 	return len(jsonPatches) == 0
+}
+
+// remotePlugin builds the plugin of a node that takes part in remote vGPU,
+// with one option per configured role (see pkg/deviceplugin/remote).
+func remotePlugin(
+	ctx context.Context, option *options.Options, nodeConfig node.NodeConfigSpec,
+	devManager *manager.DeviceManager, kubeClient kubernetes.Interface,
+) (base.DevicePlugin, error) {
+	cfg := remote.Config{
+		NodeName:     nodeConfig.GetNodeName(),
+		ResourceName: util.VGPUNumberResourceName,
+		Socket:       filepath.Join(nodeConfig.GetDevicePluginPath(), remote.ConsumerSocketName),
+	}
+	if !option.RemoteConsumer {
+		// Serving GPUs only: another process on this node may run the
+		// consumer role, and it is the one that owns the resource then.
+		cfg.Socket = filepath.Join(nodeConfig.GetDevicePluginPath(), remote.ServerSocketName)
+		cfg.PeerConsumerSocket = filepath.Join(nodeConfig.GetDevicePluginPath(), remote.ConsumerSocketName)
+	}
+	var opts []remote.Option
+	if option.RemoteServer {
+		opts = append(opts, remote.WithServerRole(ctx, kubeClient, option.RemoteAgentEndpoint))
+	}
+	if option.RemoteConsumer {
+		opts = append(opts, remote.WithConsumerRole(kubeClient, remote.ConsumerOptions{
+			VGPUNumber:       option.RemoteConsumerNum,
+			ArtifactsDir:     filepath.Join(vgpu.ContManagerDirectoryPath, util.Driver),
+			HostArtifactsDir: filepath.Join(vgpu.HostManagerDirectoryPath, util.Driver),
+		}))
+	}
+	return remote.New(cfg, devManager, opts...)
 }

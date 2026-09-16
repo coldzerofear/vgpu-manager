@@ -135,23 +135,28 @@ func (e *ensuredSessions) tokens() []string {
 	return tokens
 }
 
-func newConsumerPlugin(t *testing.T, kubeClient kubernetes.Interface, artifactsDir string) (*consumerDevicePlugin, *ensuredSessions) {
+func newConsumerPlugin(t *testing.T, kubeClient kubernetes.Interface, artifactsDir string) (*Plugin, *ensuredSessions) {
 	t.Helper()
 	// A consumer node has no GPUs, so its manager has no devices either.
 	nodeConfig, err := node.NewNodeConfig(node.WithNodeNameOption(testConsumerNode))
 	require.NoError(t, err)
-	plugin := NewConsumerDevicePlugin(ConsumerConfig{
-		NodeName: testConsumerNode, ResourceName: util.VGPUNumberResourceName,
-		Socket: filepath.Join(t.TempDir(), "remote.sock"), VGPUNumber: 4,
-		ArtifactsDir: artifactsDir, HostArtifactsDir: "/host/vgpu-manager/driver",
-	}, manager.NewDevicelessManager(nodeConfig), kubeClient)
-	consumer := plugin.(*consumerDevicePlugin)
+	plugin, err := New(Config{
+		NodeName:     testConsumerNode,
+		ResourceName: util.VGPUNumberResourceName,
+		Socket:       filepath.Join(t.TempDir(), "remote.sock"),
+	}, manager.NewDevicelessManager(nodeConfig),
+		WithConsumerRole(kubeClient, ConsumerOptions{
+			VGPUNumber:       4,
+			ArtifactsDir:     artifactsDir,
+			HostArtifactsDir: "/host/vgpu-manager/driver",
+		}))
+	require.NoError(t, err)
 	sessions := &ensuredSessions{}
-	consumer.ensureSession = sessions.ensure
-	return consumer, sessions
+	plugin.consumer.ensureSession = sessions.ensure
+	return plugin, sessions
 }
 
-func allocateOne(t *testing.T, plugin *consumerDevicePlugin, containers int) (*pluginapi.AllocateResponse, error) {
+func allocateOne(t *testing.T, plugin *Plugin, containers int) (*pluginapi.AllocateResponse, error) {
 	t.Helper()
 	requests := make([]*pluginapi.ContainerAllocateRequest, 0, containers)
 	for range containers {

@@ -42,10 +42,10 @@ const (
 	probeInterval = 5 * time.Second
 )
 
-// SetupConsumerRole publishes this node as a node that runs remote vGPU pods,
+// setupConsumerRole publishes this node as a node that runs remote vGPU pods,
 // or removes a consumer role left from an earlier configuration. The role is
 // removed on shutdown either way.
-func SetupConsumerRole(reg registrar, enabled bool) {
+func setupConsumerRole(reg registrar, enabled bool) {
 	reg.AddRegistryFunc(consumerRoleName, removeConsumerRole)
 	reg.AddCleanupRegistryFunc(consumerRoleName, removeConsumerRole)
 	if !enabled {
@@ -67,27 +67,30 @@ type registrar interface {
 	RegisterNotify()
 }
 
-// SetupServerRole publishes this node as a remote GPU server when enabled: the
-// server role label and the endpoints its remote-agent reports, kept up to
-// date until ctx is done. When disabled, a server role left from an earlier
-// configuration is removed. Either way the role is removed on shutdown.
+// setupServerRole publishes this node as a remote GPU server, or removes a
+// server role left from an earlier configuration when role is nil. The role is
+// removed on shutdown either way.
 //
 // The node keeps its role while lupine-server is unreachable, publishing
 // remotegpu.UnreachableServerEndpointInfo: local pods stay off its GPUs and
 // the scheduler sends no remote pods to it.
-func SetupServerRole(
-	ctx context.Context, reg registrar,
-	kubeClient kubernetes.Interface,
-	nodeName string, enabled bool, agentEndpoint string,
-) error {
+func setupServerRole(reg registrar, role *serverRole) {
 	reg.AddRegistryFunc(serverRoleName, removeServerRole)
 	reg.AddCleanupRegistryFunc(serverRoleName, removeServerRole)
-	if !enabled {
-		return nil
+	if role == nil {
+		return
 	}
+	reg.AddRegistryFunc(serverRoleName, role.registry)
+}
+
+// newServerRole starts tracking what this node's remote-agent reports about
+// its lupine-server, until ctx is done.
+func newServerRole(
+	ctx context.Context, reg registrar, kubeClient kubernetes.Interface, nodeName, agentEndpoint string,
+) (*serverRole, error) {
 	agentDial, err := remotegpu.ResolveAgentDial(ctx, kubeClient, nodeName, agentEndpoint)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	role := &serverRole{
 		probe: func(ctx context.Context) (*remotegpu.ServerEndpointInfo, error) {
@@ -96,10 +99,9 @@ func SetupServerRole(
 		notify:    reg.RegisterNotify,
 		endpoints: remotegpu.UnreachableServerEndpointInfo,
 	}
-	reg.AddRegistryFunc(serverRoleName, role.registry)
 	klog.InfoS("Remote GPU server role enabled", "agent", agentDial)
 	go wait.UntilWithContext(ctx, role.refresh, probeInterval)
-	return nil
+	return role, nil
 }
 
 // serverRole keeps the published endpoints in step with the remote-agent.

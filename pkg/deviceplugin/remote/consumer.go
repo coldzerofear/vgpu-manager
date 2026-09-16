@@ -16,9 +16,9 @@ limitations under the License.
 
 package remote
 
-// The consumer role: a node with no GPUs of its own that runs remote vGPU
-// pods. kubelet is offered plain slots; the devices of a pod live on the GPU
-// server the scheduler picked for it.
+// The consumer role: this node runs remote vGPU pods. kubelet is offered
+// plain slots; the devices of a pod live on the GPU server the scheduler
+// picked for it.
 //
 // Allocate does all the work: it stages the client shim the container loads,
 // creates the container's session on that server, and returns the environment
@@ -34,10 +34,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
-	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
-	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/nodedevice"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	kubeletremote "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -48,19 +45,8 @@ import (
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
-const (
-	// consumerPluginName names this plugin in logs and in the base server.
-	consumerPluginName = "remote-consumer-plugin"
-	// remoteDeviceIDPrefix prefixes the slot ids offered to kubelet. They
-	// stand for "one remote vGPU this node may run", not for a local device.
-	remoteDeviceIDPrefix = "remote-vgpu"
-)
-
-// ConsumerConfig is what the consumer plugin needs to know about this node.
-type ConsumerConfig struct {
-	NodeName     string
-	ResourceName string
-	Socket       string
+// ConsumerOptions is what the consumer role needs to know.
+type ConsumerOptions struct {
 	// VGPUNumber is how many remote vGPUs this node runs at a time.
 	VGPUNumber int
 	// ArtifactsDir holds the client shims, one directory per CUDA version, as
@@ -70,99 +56,34 @@ type ConsumerConfig struct {
 	HostArtifactsDir string
 }
 
-type consumerDevicePlugin struct {
-	pluginapi.UnimplementedDevicePluginServer
-	baseServer base.PluginServer
+// consumerRole answers Allocate for the remote pods this node runs.
+type consumerRole struct {
+	nodeName   string
 	kubeClient kubernetes.Interface
-	cfg        ConsumerConfig
-	devices    []*pluginapi.Device
+	opts       ConsumerOptions
 	mutex      sync.Mutex
 	// ensureSession asks an agent for one container's session; overridden in
 	// tests, where no agent is there to ask.
 	ensureSession func(ctx context.Context, agentEndpoint string, session remotegpu.PodSession) (string, error)
 }
 
-var _ base.DevicePlugin = &consumerDevicePlugin{}
-
-// NewConsumerDevicePlugin returns the device plugin of a remote consumer node.
-func NewConsumerDevicePlugin(cfg ConsumerConfig, devManager *manager.DeviceManager, kubeClient kubernetes.Interface) base.DevicePlugin {
-	// A node that also serves its own GPUs remotely keeps at least as many
-	// slots as those GPUs offer, so its local capacity is never the smaller
-	// of the two (analysis §16.6).
-	localSlots := 0
-	for _, dev := range devManager.GetNodeDeviceInfo() {
-		if !dev.Mig {
-			localSlots += dev.Number
-		}
-	}
-	slots := max(cfg.VGPUNumber, localSlots)
-	devices := make([]*pluginapi.Device, 0, slots)
-	for i := 0; i < slots; i++ {
-		devices = append(devices, &pluginapi.Device{
-			ID:     fmt.Sprintf("%s-%d", remoteDeviceIDPrefix, i),
-			Health: pluginapi.Healthy,
-		})
-	}
-	return &consumerDevicePlugin{
-		baseServer:    base.NewBasePluginServer(cfg.ResourceName, cfg.Socket, devManager),
+func newConsumerRole(nodeName string, kubeClient kubernetes.Interface, opts ConsumerOptions) *consumerRole {
+	return &consumerRole{
+		nodeName:      nodeName,
 		kubeClient:    kubeClient,
-		cfg:           cfg,
-		devices:       devices,
+		opts:          opts,
 		ensureSession: remotegpu.EnsureSession,
 	}
 }
 
-func (m *consumerDevicePlugin) Name() string { return consumerPluginName }
-
-func (m *consumerDevicePlugin) Start() error {
-	err := m.baseServer.Start(m.Name(), m)
-	if err == nil {
-		// A node that serves its own GPUs remotely as well publishes them for
-		// the scheduler; a node without GPUs publishes nothing.
-		nodedevice.Setup(m.Name(), m.baseServer.GetDeviceManager())
-	}
-	return err
-}
-
-func (m *consumerDevicePlugin) Stop() error {
-	err := m.baseServer.Stop(m.Name())
-	nodedevice.Remove(m.Name(), m.baseServer.GetDeviceManager())
-	return err
-}
-
-// Devices are slots, not hardware: they never turn unhealthy on this node.
-// Whether a remote GPU can serve a pod is the scheduler's decision, made from
-// the server node's own registry.
-func (m *consumerDevicePlugin) Devices() []*pluginapi.Device { return m.devices }
-
-// GetDevicePluginOptions asks for nothing: everything a remote container needs
-// is prepared in Allocate.
-func (m *consumerDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
-	return &pluginapi.DevicePluginOptions{}, nil
-}
-
-// ListAndWatch sends the slot list once: it never changes while the plugin runs.
-func (m *consumerDevicePlugin) ListAndWatch(_ *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
-	if err := s.Send(&pluginapi.ListAndWatchResponse{Devices: m.Devices()}); err != nil {
-		klog.Errorf("DevicePlugin '%s' ListAndWatch send devices error: %v", m.Name(), err)
-	}
-	<-m.baseServer.GetStopCh()
-	return nil
-}
-
-// GetPreferredAllocation has no preference: the slots are interchangeable.
-func (m *consumerDevicePlugin) GetPreferredAllocation(_ context.Context, _ *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
-	return &pluginapi.PreferredAllocationResponse{}, nil
-}
-
-// Allocate prepares each container of the pod kubelet is admitting: its
+// allocate prepares each container of the pod kubelet is admitting: its
 // session on the remote GPU server and the client shim it loads, then returns
 // the environment and mounts that connect them.
-func (m *consumerDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
+func (m *consumerRole) allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	klog.V(4).InfoS("Allocate", "pluginName", m.Name(), "request", req.GetContainerRequests())
+	klog.V(4).InfoS("Allocate", "node", m.nodeName, "request", req.GetContainerRequests())
 	var currentPod *corev1.Pod
 	resp = &pluginapi.AllocateResponse{}
 	defer func() {
@@ -213,7 +134,7 @@ func (m *consumerDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Allo
 // containerResponse prepares one container and describes what it gets: the
 // client shim, the preload list that makes it load, and the address and
 // session of the server holding its GPUs.
-func (m *consumerDevicePlugin) containerResponse(
+func (m *consumerRole) containerResponse(
 	ctx context.Context, pod *corev1.Pod,
 	contClaim *device.ContainerDeviceClaim, server *remotegpu.ServerEndpointInfo,
 ) (*pluginapi.ContainerAllocateResponse, error) {
@@ -265,8 +186,8 @@ func (m *consumerDevicePlugin) containerResponse(
 
 // currentPod is the pod kubelet is admitting: the oldest pre-allocated pod on
 // this node that is still waiting for its devices.
-func (m *consumerDevicePlugin) currentPod(ctx context.Context) (*corev1.Pod, error) {
-	pods, err := client.GetActivePodsOnNode(ctx, m.kubeClient, m.cfg.NodeName)
+func (m *consumerRole) currentPod(ctx context.Context) (*corev1.Pod, error) {
+	pods, err := client.GetActivePodsOnNode(ctx, m.kubeClient, m.nodeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve the active pods of the current node: %v", err)
 	}
@@ -275,9 +196,9 @@ func (m *consumerDevicePlugin) currentPod(ctx context.Context) (*corev1.Pod, err
 
 // serverEndpoints reads the addresses of the GPU server the scheduler chose
 // for this pod, which is its predicate node.
-func (m *consumerDevicePlugin) serverEndpoints(ctx context.Context, pod *corev1.Pod) (*remotegpu.ServerEndpointInfo, error) {
+func (m *consumerRole) serverEndpoints(ctx context.Context, pod *corev1.Pod) (*remotegpu.ServerEndpointInfo, error) {
 	serverName := util.PodPlanSchedulingNode(pod)
-	if serverName == "" || serverName == m.cfg.NodeName {
+	if serverName == "" || serverName == m.nodeName {
 		return nil, fmt.Errorf("pod %s has no remote GPU server", klog.KObj(pod))
 	}
 	node, err := m.kubeClient.CoreV1().Nodes().Get(ctx, serverName, metav1.GetOptions{ResourceVersion: "0"})

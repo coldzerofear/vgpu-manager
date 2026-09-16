@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
-	dpremote "github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
@@ -44,6 +43,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/controller/reschedule"
 	devm "github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/util/cgroup"
 	"github.com/fsnotify/fsnotify"
 	corev1 "k8s.io/api/core/v1"
@@ -175,21 +175,18 @@ func runApp(ctx context.Context, opt *options.Options) (exitCode int) {
 		klog.Errorf("Register controller to manager failed: %v", err)
 		return exitCode
 	}
-	plugins, err := deviceplugin.GetDevicePlugins(opt, deviceManager, manager, kubeClient)
+	clusterCtx, cancelFunc := context.WithCancel(ctx)
+	defer cancelFunc()
+
+	plugins, err := deviceplugin.GetDevicePlugins(clusterCtx, opt, deviceManager, manager, kubeClient)
 	if err != nil {
 		klog.Errorf("Get device plugins failed: %v", err)
 		return exitCode
 	}
 
-	clusterCtx, cancelFunc := context.WithCancel(ctx)
-	defer cancelFunc()
-
-	dpremote.SetupConsumerRole(deviceManager, opt.RemoteConsumer)
-	if err := dpremote.SetupServerRole(clusterCtx, deviceManager, kubeClient,
-		opt.NodeName, opt.RemoteServer, opt.RemoteAgentEndpoint); err != nil {
-		klog.Errorf("Set up remote GPU server role failed: %v", err)
-		return exitCode
-	}
+	// Plugins that hand their resource over to another process on this node
+	// ask for the start loop to run again through these.
+	restartCh := pluginRestartCh(plugins)
 
 	go func() {
 		klog.Infoln("Starting cluster manager.")
@@ -243,6 +240,10 @@ restart:
 		// Watch for any other fs errors and log them.
 		case err := <-watcher.Errors:
 			klog.Infof("inotify: %v", err)
+		// A plugin asked for a restart (the node's resource changed hands
+		// between the remote roles of two processes).
+		case <-restartCh:
+			goto restart
 		// When cluster cache stops abnormally, exit the program.
 		case <-clusterCtx.Done():
 			exitCode = 1
@@ -285,4 +286,30 @@ func main() {
 	if exitCode := runApp(context.Background(), opt); exitCode != 0 {
 		klog.FlushAndExit(klog.ExitFlushTimeout, exitCode)
 	}
+}
+
+// pluginRestartCh merges the restart requests of every plugin that makes any
+// (see base.RestartNotifier); nil when no plugin does.
+func pluginRestartCh(plugins []base.DevicePlugin) <-chan struct{} {
+	merged := make(chan struct{}, 1)
+	notifiers := 0
+	for _, p := range plugins {
+		notifier, ok := p.(base.RestartNotifier)
+		if !ok {
+			continue
+		}
+		notifiers++
+		go func(ch <-chan struct{}) {
+			for range ch {
+				select {
+				case merged <- struct{}{}:
+				default: // a restart is already pending
+				}
+			}
+		}(notifier.RestartCh())
+	}
+	if notifiers == 0 {
+		return nil
+	}
+	return merged
 }

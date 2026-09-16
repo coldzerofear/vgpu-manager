@@ -21,6 +21,14 @@ import (
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
+// RestartNotifier is an optional part of DevicePlugin: a plugin whose own
+// state can call for the runner to start it again (the remote plugin hands
+// the node's resource over to, or takes it back from, another process on the
+// same node) signals that here.
+type RestartNotifier interface {
+	RestartCh() <-chan struct{}
+}
+
 type DevicePlugin interface {
 	pluginapi.DevicePluginServer
 	// Name return device plugin name.

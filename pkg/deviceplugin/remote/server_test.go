@@ -61,7 +61,7 @@ func published(t *testing.T, fn manager.RegistryFunc) (label, endpoints *string)
 func TestSetupServerRoleDisabled(t *testing.T) {
 	reg := newFakeRegistrar()
 
-	require.NoError(t, SetupServerRole(context.Background(), reg, fake.NewClientset(), "gpu-node", false, ""))
+	setupServerRole(reg, nil)
 
 	for _, fn := range []manager.RegistryFunc{reg.registry[serverRoleName], reg.cleanup[serverRoleName]} {
 		label, endpoints := published(t, fn)
@@ -70,14 +70,17 @@ func TestSetupServerRoleDisabled(t *testing.T) {
 	}
 }
 
-func TestSetupServerRoleBadAgentEndpoint(t *testing.T) {
+func TestNewServerRoleBadAgentEndpoint(t *testing.T) {
 	reg := newFakeRegistrar()
 
-	err := SetupServerRole(context.Background(), reg, fake.NewClientset(), "gpu-node", true, "ftp://x")
+	role, err := newServerRole(context.Background(), reg, fake.NewClientset(), "gpu-node", "ftp://x")
 
 	assert.Error(t, err)
-	// A setup that fails half way leaves the removal registered, never a
-	// publisher: the node must not go on advertising a role it cannot serve.
+	assert.Nil(t, role)
+	// Nothing is published for a role that could not be set up; what the
+	// plugin registered before applying the options is the removal, so the
+	// node does not go on advertising a role it cannot serve.
+	setupServerRole(reg, role)
 	label, endpoints := published(t, reg.registry[serverRoleName])
 	assert.Nil(t, label, "a stale role label is removed")
 	assert.Nil(t, endpoints, "stale endpoints are removed")

@@ -1037,6 +1037,32 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
 - **标签由插件按启动参数写入**：开启的角色写 `true`，关闭的角色删除标签，插件退出时也删除。DaemonSet 不能再拿这两个标签当 nodeSelector。
 - 纯服务器节点仍会被 kube-scheduler 当作本地 Pod 的候选，再由 extender 以 `NodeIsRemoteServer` 拒绝；抢占侧已跳过服务器。
 
+**已实施（2026-09-16，option 模式）**：`pkg/deviceplugin/remote` 只有一个插件 `remote.Plugin`，四项上报按角色选项装配，
+`remote.New(cfg, devManager, WithServerRole(...), WithConsumerRole(...))`：
+
+| 选项 | 节点设备信息 | `vgpu-number` | server 标签 | consumer 标签 | Allocate |
+|---|---|---|---|---|---|
+| `WithServerRole` | 发布（随插件启停） | 发布（数量 = 本地槽位） | `true` | 不发 | 拒绝（`FailedPrecondition`） |
+| `WithConsumerRole` | 不发 | 发布（数量 = `max(消费数量, 本地槽位)`） | 不发 | `true` | 准备 shim + 会话 |
+| 两者 | 发布 | 发布一次 | `true` | `true` | 准备 shim + 会话 |
+
+- **没配的角色主动摘除**：`New` 里对未开启的角色注册"删除标签"的 registry func，并且进程退出时也删——节点不会留着上一次配置的角色。
+- **纯 server 也注册 `vgpu-number`**（2026-09-16 用户拍板）：`CheckNode` 的第一道门是 `IsVGPUEnabledNode`（可分配 > 0），
+  所以注册它调度器才认这台机器是 vGPU 节点，**调度器侧零改动**。它不会招来本地 Pod（extender 以 `NodeIsRemoteServer` 拒），
+  也不会被当成消费节点（没有 consumer 标签）。真有 Pod 落到这里只能是绕过了调度器，`Allocate` 直接拒。
+- **节点设备信息跟着插件启停**（用户要求）：`Start` 里发布、`Stop` 里摘除，既不早于插件服务、也不晚于插件退出。
+  角色标签则是进程级的（`New` 里装配），因为它描述的是"这个节点是什么"，与 kubelet 注册是否成功无关。
+- **两个进程共存时单向让位**：kubelet 对同名资源只保留一个 endpoint（后注册者接管），所以纯 server 进程在探测到本节点
+  有活着的 consumer 进程时不注册资源（`standDown`），只继续发布设备信息；consumer 进程消失后重新注册。判活是 dial
+  `nvidia-vgpu-remote.sock` 而不是看文件是否存在（崩溃会留下残留文件），周期 10s，通过 `base.RestartNotifier` 让
+  main 的启动循环重跑。两个角色的 socket 路径必须不同（`nvidia-vgpu-remote.sock` / `nvidia-vgpu-remote-server.sock`）：
+  任一进程 `Stop` 都会 unlink 自己的 socket 路径，同路径会把对方的 socket 文件删掉。
+  切换期间不会中断：kubelet 对已 stop 的 endpoint 有 5 分钟量级的宽限期，期内重新注册直接恢复。
+- **退出时不主动清理 `vgpu-number`**（2026-09-16 用户拍板）：插件退出会删掉设备注册注解与驱动标签，调度器在
+  `CheckNode` 里拿不到 `node-device-register` 就以 `NodeNoVGPURegister` 跳过该节点，不必等 kubelet 把可分配数归零。
+- 注意与现有校验的出入：本节表格里"纯服务器按 feature gate 注册 cores/memory"目前做不到——`options.Validate()` 规定
+  `RemoteGPUSupport` 与 `GPUCoreResourcePlugin`/`GPUMemoryResourcePlugin` 互斥（不分角色），所以远程节点一律不注册这两项。
+
 ### 16.7 后续实施顺序
 
 1. **D2**（已完成）：`PatchPodAllocationSucceed` 对远程 Pod 保持 `metrics-node` = 服务器。
@@ -1086,7 +1112,9 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
      所以这段时间同节点其他 Pod 的准入会排队；仍可用 init 容器预置 shim 规避。
    - 代码放在新的 `pkg/deviceplugin/remote`，消费节点用它替换本地 vGPU 插件，不在 `vnum_plugin.go` 里加分支。
    - **节点设备注册已抽到 `pkg/deviceplugin/nodedevice`**：本地插件和远程插件都调用它，没有设备的节点自动不发布。
-     server 兼消费节点因此可用：由远程插件发布节点设备注册，`vgpu-number` 数量取 `max(本地槽位, --remote-consumer-number)`。
+   - **三种角色组合收敛成一个 option 模式的插件**（2026-09-16，见 §16.6"已实施"）：`WithServerRole`/`WithConsumerRole`
+     各自决定发布哪几项，没配的角色主动摘除；纯 server 也注册 `vgpu-number`（于是调度器零改动），
+     两进程共存时纯 server 向 consumer 单向让位。
 5. **S5 监控**（已完成）：§16.5 的"已实施"。服务器节点的节点/卡级用量本来就统计到了（靠 D2 与
    `PodPlanSchedulingNode`），这一步补的是容器级实时用量与 `access_mode` 标签。
 6. **S6 部署与文档**。
