@@ -29,6 +29,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	dpvgpu "github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	"golang.org/x/exp/maps"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -215,21 +216,29 @@ func (c *ContainerLister) update() error {
 // the life of the process, still serving the metrics of a container that is
 // gone. A session directory swept by the agent is the same case.
 func (c *ContainerLister) dropVanished(seen sets.Set[ContainerKey]) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	c.mutex.RLock()
+	resKeys := maps.Keys(c.containerDatas)
+	memKeys := maps.Keys(c.containerVMems)
+	c.mutex.RUnlock()
+
 	live := func(key ContainerKey) bool {
 		return seen.Has(key) || c.sessionKeys.Has(key)
 	}
-	for key := range c.containerDatas {
+
+	for _, key := range resKeys {
 		if !live(key) {
 			klog.V(3).InfoS("Release the resource mapping of a gone container", "containerKey", key.String())
+			c.mutex.Lock()
 			c.removeResourceData(key)
+			c.mutex.Unlock()
 		}
 	}
-	for key := range c.containerVMems {
+	for _, key := range memKeys {
 		if !live(key) {
 			klog.V(3).InfoS("Release the vMemory mapping of a gone container", "containerKey", key.String())
+			c.mutex.Lock()
 			c.removeResourceVMem(key)
+			c.mutex.Unlock()
 		}
 	}
 }

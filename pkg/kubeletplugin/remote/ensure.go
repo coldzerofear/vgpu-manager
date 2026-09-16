@@ -19,6 +19,7 @@ package remote
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
@@ -45,27 +46,54 @@ const ensureSessionTimeout = 5 * time.Second
 func EnsureSessions(
 	ctx context.Context, endpointInfos []endpointInfo, claim *resourceapi.ResourceClaim, token, partitionKey string, requests []string,
 ) ([]string, map[string]string, error) {
-	serverEndpoints := make([]string, 0, len(endpointInfos))
-	etagOf := make(map[string]string, len(endpointInfos))
-	for _, info := range endpointInfos {
-		reported, etag, err := ensureOne(ctx, info.agentEndpoint, claim, token, partitionKey, requests)
-		if err != nil {
-			return nil, nil, fmt.Errorf("EnsureSession on %s: %w", info.agentEndpoint, err)
-		}
-		etagOf[info.agentEndpoint] = etag
-		serverEndpoint := reported
-		if serverEndpoint == "" {
-			serverEndpoint = info.serverEndpoint
-		}
-		if serverEndpoint == "" {
-			return nil, nil, fmt.Errorf("EnsureSession on %s: agent reports no lupine-server endpoint and none is published for its devices", info.agentEndpoint)
-		}
-		if reported != "" && info.serverEndpoint != "" && reported != info.serverEndpoint {
-			klog.V(2).Infof("EnsureSession %s for claim %s: agent reports lupine-server at %s, published attribute says %s; using the agent's",
-				info.agentEndpoint, klog.KObj(claim), reported, info.serverEndpoint)
-		}
-		serverEndpoints = append(serverEndpoints, serverEndpoint)
+
+	var (
+		mu              sync.Mutex
+		wg              sync.WaitGroup
+		firstErr        error
+		errOnce         sync.Once
+		serverEndpoints = make([]string, len(endpointInfos))
+		etagOf          = make(map[string]string, len(endpointInfos))
+	)
+
+	for i, info := range endpointInfos {
+		wg.Add(1)
+		go func(index int, epInfo endpointInfo) {
+			defer wg.Done()
+			reported, etag, err := ensureOne(ctx, epInfo.agentEndpoint, claim, token, partitionKey, requests)
+			if err != nil {
+				errOnce.Do(func() {
+					firstErr = fmt.Errorf("EnsureSession on %s: %w", epInfo.agentEndpoint, err)
+				})
+				return
+			}
+			serverEndpoint := reported
+			if serverEndpoint == "" {
+				serverEndpoint = epInfo.serverEndpoint
+			}
+			if serverEndpoint == "" {
+				errOnce.Do(func() {
+					firstErr = fmt.Errorf("EnsureSession on %s: agent reports no lupine-server endpoint and none is published for its devices", epInfo.agentEndpoint)
+				})
+				return
+			}
+			if reported != "" && epInfo.serverEndpoint != "" && reported != epInfo.serverEndpoint {
+				klog.V(2).Infof("EnsureSession %s for claim %s: agent reports lupine-server at %s, published attribute says %s; using the agent's",
+					epInfo.agentEndpoint, klog.KObj(claim), reported, epInfo.serverEndpoint)
+			}
+			mu.Lock()
+			etagOf[epInfo.agentEndpoint] = etag
+			serverEndpoints[index] = serverEndpoint
+			mu.Unlock()
+		}(i, info)
 	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, nil, firstErr
+	}
+
 	return serverEndpoints, etagOf, nil
 }
 

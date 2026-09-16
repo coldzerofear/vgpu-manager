@@ -227,6 +227,13 @@ func newApp() *cli.App {
 			Destination: &flags.RemoteNodeSelector,
 			EnvVars:     []string{"REMOTE_NODE_SELECTOR"},
 		},
+		&cli.BoolFlag{
+			Name:        "ignore-client-shim-etag",
+			Usage:       "Enable Etag verification that ignores Lupine client shim and does not inject environment variables LUPINE_CLIENT_ETAG and LUPINE_CLIENT_PLATFORM into the container. Note that this may result in client shim version mismatch error",
+			Value:       false,
+			Destination: &flags.IgnoreClientShimEtag,
+			EnvVars:     []string{"IGNORE_CLIENT_SHIM_ETAG"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.KubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
@@ -455,6 +462,7 @@ func RunInjectPlugin(ctx context.Context, config *pkgkubeletplugin.Config) error
 		NRIRoot:                       config.Flags.NRIRoot,
 		NRISocket:                     config.Flags.NRISocket,
 		NRIPluginIdx:                  config.Flags.NRIPluginIdx,
+		IgnoreClientShimEtag:          config.Flags.IgnoreClientShimEtag,
 	}, config.ClientSets)
 	if err != nil {
 		return fmt.Errorf("error creating inject driver: %w", err)

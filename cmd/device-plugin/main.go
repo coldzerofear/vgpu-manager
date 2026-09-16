@@ -28,6 +28,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/featuregates"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/component-base/logs"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -135,35 +136,7 @@ func runApp(ctx context.Context, opt *options.Options) (exitCode int) {
 	defer func() { _ = watcher.Close() }()
 
 	sigs := NewOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	manager, err := ctrm.New(kubeConfig, ctrm.Options{
-		LeaderElection:         false,
-		HealthProbeBindAddress: "0", // Disable manager health probe service
-		PprofBindAddress: func() string {
-			if opt.PprofBindPort > 0 {
-				return fmt.Sprintf(":%d", opt.PprofBindPort)
-			}
-			return "0"
-		}(),
-		Cache: rtcache.Options{
-			// Trim managedFields to reduce cache memory usage.
-			DefaultTransform:         rtcache.TransformStripManagedFields(),
-			DefaultWatchErrorHandler: toolscache.DefaultWatchErrorHandler,
-			// Enable bookmark event adaptation WatchListClient feature.
-			DefaultEnableWatchBookmarks: ptr.To[bool](true),
-			ByObject: map[rtclient.Object]rtcache.ByObject{
-				// Preheat cache in advance.
-				&corev1.Pod{}: {
-					Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
-					Transform: rtcache.TransformStripManagedFields(),
-				},
-				&corev1.Node{}: {
-					Field:     fields.OneTermEqualSelector("metadata.name", opt.NodeName),
-					Transform: rtcache.TransformStripManagedFields(),
-				},
-			},
-		},
-		Metrics: metrics.Options{BindAddress: "0"}, // Disable manager metrics service
-	})
+	manager, err := CreateClusterManager(kubeConfig, opt)
 	if err != nil {
 		klog.Errorf("Create cluster manager failed: %v", err)
 		return exitCode
@@ -268,6 +241,38 @@ exit:
 	}
 
 	return exitCode
+}
+
+func CreateClusterManager(kubeConfig *rest.Config, opt *options.Options) (ctrm.Manager, error) {
+	return ctrm.New(kubeConfig, ctrm.Options{
+		LeaderElection:         false,
+		HealthProbeBindAddress: "0", // Disable manager health probe service
+		PprofBindAddress: func() string {
+			if opt.PprofBindPort > 0 {
+				return fmt.Sprintf(":%d", opt.PprofBindPort)
+			}
+			return "0"
+		}(),
+		Cache: rtcache.Options{
+			// Trim managedFields to reduce cache memory usage.
+			DefaultTransform:         rtcache.TransformStripManagedFields(),
+			DefaultWatchErrorHandler: toolscache.DefaultWatchErrorHandler,
+			// Enable bookmark event adaptation WatchListClient feature.
+			DefaultEnableWatchBookmarks: ptr.To[bool](true),
+			ByObject: map[rtclient.Object]rtcache.ByObject{
+				// Preheat cache in advance.
+				&corev1.Pod{}: {
+					Field:     fields.OneTermEqualSelector("spec.nodeName", opt.NodeName),
+					Transform: rtcache.TransformStripManagedFields(),
+				},
+				&corev1.Node{}: {
+					Field:     fields.OneTermEqualSelector("metadata.name", opt.NodeName),
+					Transform: rtcache.TransformStripManagedFields(),
+				},
+			},
+		},
+		Metrics: metrics.Options{BindAddress: "0"}, // Disable manager metrics service
+	})
 }
 
 func main() {

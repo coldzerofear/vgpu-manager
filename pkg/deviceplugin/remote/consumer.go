@@ -52,8 +52,9 @@ type ConsumerOptions struct {
 	// ArtifactsDir holds the client shims, one directory per CUDA version, as
 	// this process sees them; HostArtifactsDir is the same directory as the
 	// host sees it, which is what a mount must refer to.
-	ArtifactsDir     string
-	HostArtifactsDir string
+	ArtifactsDir         string
+	HostArtifactsDir     string
+	IgnoreClientShimEtag bool
 }
 
 // consumerRole answers Allocate for the remote pods this node runs.
@@ -136,7 +137,8 @@ func (m *consumerRole) allocate(ctx context.Context, req *pluginapi.AllocateRequ
 // session of the server holding its GPUs.
 func (m *consumerRole) containerResponse(
 	ctx context.Context, pod *corev1.Pod,
-	contClaim *device.ContainerDeviceClaim, server *remotegpu.ServerEndpointInfo,
+	contClaim *device.ContainerDeviceClaim,
+	server *remotegpu.ServerEndpointInfo,
 ) (*pluginapi.ContainerAllocateResponse, error) {
 	artifact, err := m.stageClientShim(ctx, pod, contClaim.Name, server)
 	if err != nil {
@@ -175,7 +177,7 @@ func (m *consumerRole) containerResponse(
 		kubeletremote.EnvLupineServer:       serverEndpoint,
 		kubeletremote.EnvLupineSession:      session.Token,
 	}}
-	if artifact.ETag != "" {
+	if artifact.ETag != "" && !m.opts.IgnoreClientShimEtag {
 		// Lets the server check that this client is the build it embeds.
 		response.Envs[kubeletremote.EnvLupineClientETag] = artifact.ETag
 		response.Envs[kubeletremote.EnvLupineClientPlatform] = kubeletremote.LocalClientBundlePlatform()

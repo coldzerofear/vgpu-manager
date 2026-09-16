@@ -165,6 +165,7 @@ spec:
             # driver-root volume + volumeMounts below.
             - --host-driver-root=/
             - --container-driver-root=/driver-root
+            - --cdi-root=/var/run/cdi
             - --v=4
           env:
             - name: NODE_NAME

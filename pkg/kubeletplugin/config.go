@@ -70,7 +70,8 @@ type Flags struct {
 	// "topology.kubernetes.io/zone=az1,gpu-fabric=rdma-a"). The pool becomes
 	// schedulable on the GPU node itself OR any node matching it. Required in
 	// server mode when RemoteGPUSupport is on.
-	RemoteNodeSelector string
+	RemoteNodeSelector   string
+	IgnoreClientShimEtag bool
 }
 
 const (

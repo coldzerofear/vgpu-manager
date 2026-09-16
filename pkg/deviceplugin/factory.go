@@ -67,6 +67,7 @@ func GetDevicePlugins(
 				Strategies:        nodeConfig.GetDeviceListStrategy(),
 				Vendor:            util.CDIVendor,
 				Class:             util.CDIClass,
+				CdiRoot:           option.CDIRoot,
 				DeviceIDStrategy:  util.CDIDeviceIDStrategy,
 				AnnotationPrefix:  option.CDIAnnotationPrefix,
 				NvidiaCDIHookPath: filepath.Join(vgpu.HostManagerDirectoryPath, util.Tools, "nvidia-cdi-hook"),
@@ -238,9 +239,10 @@ func remotePlugin(
 	}
 	if option.RemoteConsumer {
 		opts = append(opts, remote.WithConsumerRole(kubeClient, remote.ConsumerOptions{
-			VGPUNumber:       option.RemoteConsumerNum,
-			ArtifactsDir:     filepath.Join(vgpu.ContManagerDirectoryPath, util.Driver),
-			HostArtifactsDir: filepath.Join(vgpu.HostManagerDirectoryPath, util.Driver),
+			VGPUNumber:           option.RemoteConsumerNum,
+			ArtifactsDir:         filepath.Join(vgpu.ContManagerDirectoryPath, util.Driver),
+			HostArtifactsDir:     filepath.Join(vgpu.HostManagerDirectoryPath, util.Driver),
+			IgnoreClientShimEtag: option.IgnoreClientShimEtag,
 		}))
 	}
 	return remote.New(cfg, devManager, opts...)

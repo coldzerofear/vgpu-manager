@@ -369,6 +369,9 @@ const (
 	CDIVendor = "k8s.device-plugin.nvidia.com"
 	// CDIClass is the CDI device class used for GPU (and MIG) devices.
 	CDIClass = "gpu"
+	// CDIRoot is the directory where generated CDI specification files are written.
+	// It is expected to be mounted from the host (the standard CDI dynamic dir).
+	CDIRoot = "/var/run/cdi"
 	// CDIDeviceIDStrategy is the strategy used to name devices inside the
 	// generated CDI specification. "uuid" keeps the qualified names aligned
 	// with the device UUIDs allocated by the plugin.

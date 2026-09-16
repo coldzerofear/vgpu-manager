@@ -141,6 +141,8 @@ spec:
               value: all
             - name: NVIDIA_DRIVER_CAPABILITIES
               value: utility,compute
+            - name: CDI_ROOT
+              value: {{ $cdiRoot | quote }}
           {{- if .Values.devicePlugin.devicePlugin.env }}
             {{- toYaml .Values.devicePlugin.devicePlugin.env | nindent 12 }}
           {{- end }}
@@ -173,7 +175,7 @@ spec:
             {{- end }}
             {{- if $cdiEnabled }}
             - name: cdi-root
-              mountPath: /var/run/cdi
+              mountPath: {{ $cdiRoot | quote }}
             {{- end }}
             # Host driver root mounted in so the CDI spec can be generated from it.
             - name: driver-root

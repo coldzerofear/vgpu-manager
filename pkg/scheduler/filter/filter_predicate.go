@@ -41,11 +41,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	helperv1 "k8s.io/component-helpers/scheduling/corev1"
 	"k8s.io/klog/v2"
 	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 	"k8s.io/kube-scheduler/framework"
@@ -249,7 +251,7 @@ func (f *gpuFilter) filter(ctx context.Context, args extenderv1.ExtenderArgs, mo
 			}
 		}
 		consumers = remoteConsumerNodes(filteredNodes, nodeReasons)
-		servers, err := f.remoteServerNodes()
+		servers, err := f.remoteServerNodes(req, filteredNodes)
 		if err != nil {
 			klog.ErrorS(err, "NodeLister list remote GPU servers failed")
 			return &extenderv1.ExtenderFilterResult{Error: err.Error()}
@@ -339,19 +341,43 @@ func remoteConsumerNodes(nodes []corev1.Node, failed map[string]*reason.FilterRe
 // remoteServerNodes lists the remote GPU servers, sorted by name so they are
 // tried in a stable order. A node with the server label but no endpoints is
 // not a server.
-func (f *gpuFilter) remoteServerNodes() ([]corev1.Node, error) {
+func (f *gpuFilter) remoteServerNodes(req *allocator.AllocationRequest, nodes []corev1.Node) ([]corev1.Node, error) {
 	list, err := f.nodeLister.List(labels.SelectorFromSet(labels.Set{util.NodeRemoteServerLabel: "true"}))
 	if err != nil {
 		return nil, err
 	}
+	nodeKeys := sets.NewString()
 	servers := make([]corev1.Node, 0, len(list))
 	for _, node := range list {
-		if util.IsRemoteServerNode(node) {
+		if util.IsRemoteServerNode(node) && CanTolerateNodeStains(req.Pod, node) {
 			servers = append(servers, *node)
+			nodeKeys.Insert(node.Name)
+		}
+	}
+	// The node list provided by Dryrun can also be included in the remote service node
+	for _, node := range nodes {
+		if nodeKeys.Has(node.Name) {
+			// Deduplication
+			continue
+		}
+		if util.IsRemoteServerNode(&node) && CanTolerateNodeStains(req.Pod, &node) {
+			servers = append(servers, node)
 		}
 	}
 	sort.Slice(servers, func(i, j int) bool { return servers[i].Name < servers[j].Name })
 	return servers, nil
+}
+
+func CanTolerateNodeStains(pod *corev1.Pod, node *corev1.Node) bool {
+	if pod == nil || node == nil {
+		return false
+	}
+	_, intolerable := helperv1.FindMatchingUntoleratedTaint(
+		klog.Background(),
+		node.Spec.Taints,
+		pod.Spec.Tolerations,
+		nil, true)
+	return !intolerable
 }
 
 // remoteFilterResult maps the result on the servers back to the consumers:
@@ -657,10 +683,8 @@ func (f *gpuFilter) nodeFilter(ctx context.Context, req *allocator.AllocationReq
 		var endpoints *remotegpu.ServerEndpointInfo
 		var nodeConfig *device.NodeConfigInfo
 		var nodeDevice *device.NodeDeviceInfo
-		if r := CheckNode(&node, memoryPolicyFunc, func(
-			node *corev1.Node,
-			device *device.NodeDeviceInfo,
-			config *device.NodeConfigInfo,
+		if r := CheckNode(&node, memoryPolicyFunc, func(node *corev1.Node,
+			device *device.NodeDeviceInfo, config *device.NodeConfigInfo,
 			server *remotegpu.ServerEndpointInfo) *reason.FilterReason {
 			nodeConfig, nodeDevice, endpoints = config, device, server
 			return nil

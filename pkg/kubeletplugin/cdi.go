@@ -45,7 +45,7 @@ const (
 	cdiVendor     = "k8s." + util.DRADriverName
 	cdiClaimClass = "claim"
 
-	defaultCDIRoot = "/var/run/cdi"
+	defaultCDIRoot = util.CDIRoot
 	procNvCapsPath = "/proc/driver/nvidia/capabilities"
 )
 

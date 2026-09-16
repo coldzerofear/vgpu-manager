@@ -41,33 +41,35 @@ type Options struct {
 	Burst          int
 	Timeout        uint
 
-	Domain              string
-	NodeName            string
-	CGroupDriver        string
-	DeviceListStrategy  []string
-	DeviceSplitCount    int
-	DeviceMemoryScaling float64
-	DeviceMemoryFactor  int
-	DeviceCoresScaling  float64
-	NodeConfigPath      string
-	ExcludeDevices      string
-	DevicePluginPath    string
-	PprofBindPort       int
-	GDSEnabled          bool
-	MOFEDEnabled        bool
-	GDRCopyEnabled      bool
-	OpenKernelModules   bool
-	MigStrategy         string
-	ImexChannelIDs      []int
-	ImexRequired        bool
-	CDIAnnotationPrefix string
-	HostDriverRoot      string
-	ContainerDriverRoot string
-	RemoteServer        bool
-	RemoteConsumer      bool
-	RemoteConsumerNum   int
-	RemoteAgentEndpoint string
-	FeatureGate         featuregate.MutableFeatureGate
+	Domain               string
+	NodeName             string
+	CGroupDriver         string
+	DeviceListStrategy   []string
+	DeviceSplitCount     int
+	DeviceMemoryScaling  float64
+	DeviceMemoryFactor   int
+	DeviceCoresScaling   float64
+	NodeConfigPath       string
+	ExcludeDevices       string
+	DevicePluginPath     string
+	PprofBindPort        int
+	GDSEnabled           bool
+	MOFEDEnabled         bool
+	GDRCopyEnabled       bool
+	OpenKernelModules    bool
+	MigStrategy          string
+	ImexChannelIDs       []int
+	ImexRequired         bool
+	CDIAnnotationPrefix  string
+	CDIRoot              string
+	HostDriverRoot       string
+	ContainerDriverRoot  string
+	RemoteServer         bool
+	RemoteConsumer       bool
+	RemoteConsumerNum    int
+	RemoteAgentEndpoint  string
+	IgnoreClientShimEtag bool
+	FeatureGate          featuregate.MutableFeatureGate
 }
 
 const (
@@ -144,34 +146,38 @@ func NewOptions() *Options {
 			imexChannelIDs = append(imexChannelIDs, atoi)
 		}
 	}
+	agentEndpoint := util.GetEnvDefault("REMOTE_AGENT_ENDPOINT",
+		fmt.Sprintf(":%d", remotegpu.DefaultAgentPort))
 	return &Options{
-		QPS:                 defaultQPS,
-		Burst:               defaultBurst,
-		Timeout:             defaultTimeout,
-		Domain:              util.GetGlobalDomain(),
-		NodeName:            os.Getenv("NODE_NAME"),
-		CGroupDriver:        os.Getenv("CGROUP_DRIVER"),
-		DeviceListStrategy:  []string{defaultDeviceListStrategy},
-		DeviceSplitCount:    defaultDeviceSplitCount,
-		DeviceCoresScaling:  defaultDeviceCoresScaling,
-		DeviceMemoryScaling: defaultDeviceMemoryScaling,
-		DeviceMemoryFactor:  defaultDeviceMemoryFactor,
-		DevicePluginPath:    pluginapi.DevicePluginPath,
-		PprofBindPort:       defaultPprofBindPort,
-		MigStrategy:         defaultMigStrategy,
-		CDIAnnotationPrefix: defaultCDIAnnotationPrefix,
-		FeatureGate:         featureGate,
-		ImexChannelIDs:      imexChannelIDs,
-		ImexRequired:        util.GetEnvEnabled("IMEX_REQUIRED"),
-		GDSEnabled:          util.GetEnvEnabled("GDS_ENABLED"),
-		MOFEDEnabled:        util.GetEnvEnabled("MOFED_ENABLED"),
-		GDRCopyEnabled:      util.GetEnvEnabled("GDRCOPY_ENABLED"),
-		HostDriverRoot:      util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
-		ContainerDriverRoot: util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
-		RemoteServer:        util.GetEnvEnabled("REMOTE_SERVER"),
-		RemoteConsumer:      util.GetEnvEnabled("REMOTE_CONSUMER"),
-		RemoteConsumerNum:   defaultRemoteConsumerVGPU,
-		RemoteAgentEndpoint: util.GetEnvDefault("REMOTE_AGENT_ENDPOINT", fmt.Sprintf(":%d", remotegpu.DefaultAgentPort)),
+		QPS:                  defaultQPS,
+		Burst:                defaultBurst,
+		Timeout:              defaultTimeout,
+		Domain:               util.GetGlobalDomain(),
+		NodeName:             os.Getenv("NODE_NAME"),
+		CGroupDriver:         os.Getenv("CGROUP_DRIVER"),
+		DeviceListStrategy:   []string{defaultDeviceListStrategy},
+		DeviceSplitCount:     defaultDeviceSplitCount,
+		DeviceCoresScaling:   defaultDeviceCoresScaling,
+		DeviceMemoryScaling:  defaultDeviceMemoryScaling,
+		DeviceMemoryFactor:   defaultDeviceMemoryFactor,
+		DevicePluginPath:     pluginapi.DevicePluginPath,
+		PprofBindPort:        defaultPprofBindPort,
+		MigStrategy:          defaultMigStrategy,
+		CDIRoot:              util.GetEnvDefault("CDI_ROOT", util.CDIRoot),
+		CDIAnnotationPrefix:  defaultCDIAnnotationPrefix,
+		FeatureGate:          featureGate,
+		ImexChannelIDs:       imexChannelIDs,
+		ImexRequired:         util.GetEnvEnabled("IMEX_REQUIRED"),
+		GDSEnabled:           util.GetEnvEnabled("GDS_ENABLED"),
+		MOFEDEnabled:         util.GetEnvEnabled("MOFED_ENABLED"),
+		GDRCopyEnabled:       util.GetEnvEnabled("GDRCOPY_ENABLED"),
+		HostDriverRoot:       util.GetEnvDefault("NVIDIA_DRIVER_ROOT", defaultDriverRoot),
+		ContainerDriverRoot:  util.GetEnvDefault("DRIVER_ROOT_CTR_PATH", "/driver-root"),
+		RemoteServer:         util.GetEnvEnabled("REMOTE_SERVER"),
+		RemoteConsumer:       util.GetEnvEnabled("REMOTE_CONSUMER"),
+		RemoteConsumerNum:    defaultRemoteConsumerVGPU,
+		IgnoreClientShimEtag: util.GetEnvEnabled("IGNORE_CLIENT_SHIM_ETAG"),
+		RemoteAgentEndpoint:  agentEndpoint,
 	}
 }
 
@@ -207,6 +213,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.StringVar(&o.MigStrategy, "mig-strategy", o.MigStrategy, "Strategy for starting MIG device plugin service. (supported values: \"none\" | \"single\" | \"mixed\")")
 	pflag.IntSliceVar(&o.ImexChannelIDs, "imex-channel-ids", o.ImexChannelIDs, "A list of IMEX channels to inject.")
 	pflag.BoolVar(&o.ImexRequired, "imex-required", o.ImexRequired, "The specified IMEX channels are required.")
+	pflag.StringVar(&o.CDIRoot, "cdi-root", o.CDIRoot, "Absolute path to the directory where CDI files will be generated.")
 	pflag.StringVar(&o.CDIAnnotationPrefix, "cdi-annotation-prefix", o.CDIAnnotationPrefix, "The prefix to use for CDI container annotation keys. (only used with the \"cdi-annotations\" strategy)")
 	pflag.StringVar(&o.HostDriverRoot, "host-driver-root", o.HostDriverRoot, "The root path for the NVIDIA driver installation on the host. (typical values are '/' or '/run/nvidia/driver')")
 	pflag.StringVar(&o.ContainerDriverRoot, "container-driver-root", o.ContainerDriverRoot, "The path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications.")
@@ -214,6 +221,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.BoolVar(&o.RemoteConsumer, "remote-consumer", o.RemoteConsumer, "Run remote vGPU pods on this node, whose GPUs are on remote servers. (requires the RemoteGPUSupport feature gate)")
 	pflag.IntVar(&o.RemoteConsumerNum, "remote-consumer-number", o.RemoteConsumerNum, "How many remote vGPUs this consumer node runs at a time.")
 	pflag.StringVar(&o.RemoteAgentEndpoint, "remote-agent-endpoint", o.RemoteAgentEndpoint, "The remote-agent on this node: grpc://host:port or unix:///path. An empty host means the node's InternalIP.")
+	pflag.BoolVar(&o.IgnoreClientShimEtag, "ignore-client-shim-etag", o.IgnoreClientShimEtag, "Enable Etag verification that ignores Lupine client shim and does not inject environment variables LUPINE_CLIENT_ETAG and LUPINE_CLIENT_PLATFORM into the container.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)
@@ -246,8 +254,11 @@ func (o *Options) Validate() error {
 		if !o.FeatureGate.Enabled(RemoteGPUSupport) {
 			return fmt.Errorf("--remote-server and --remote-consumer require the %s feature gate", RemoteGPUSupport)
 		}
-		if _, err := remotegpu.ParseAgentEndpoint(o.RemoteAgentEndpoint); err != nil {
-			return err
+		// Consumer no need to set up agent communication endpoints
+		if o.RemoteServer {
+			if _, err := remotegpu.ParseAgentEndpoint(o.RemoteAgentEndpoint); err != nil {
+				return err
+			}
 		}
 	}
 	if o.RemoteServer && !o.RemoteConsumer {

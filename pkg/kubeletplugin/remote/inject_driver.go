@@ -69,10 +69,11 @@ type InjectConfig struct {
 	// HostArtifactsDir is the same directory as seen by the kubelet/runtime;
 	// it is what the emitted CDI mount names as its host path. Equal to
 	// ArtifactsDir when the plugin mounts the manager dir at the host path.
-	HostArtifactsDir string
-	NRIRoot          string
-	NRISocket        string
-	NRIPluginIdx     string
+	HostArtifactsDir     string
+	NRIRoot              string
+	NRISocket            string
+	NRIPluginIdx         string
+	IgnoreClientShimEtag bool
 }
 
 // InjectDriver is the `--plugin-mode=inject` DRA driver: no GPU, no NVML — it
@@ -437,7 +438,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		results []resultDevice
 	}
 	var sessions []partitionSession
-	etagOf := map[string]string{}
+	etagOf := make(map[string]string)
 	nriMode := featuregates.Enabled(featuregates.NRISupport)
 	token := func() (string, error) { return d.claimPrepareToken(ctx, claim) }
 	if !nriMode {
@@ -526,7 +527,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		// TODO In the future, this failed environment variable will be removed
 		fmt.Sprintf("%s=1", EnvLupineDisableLocal),
 	}
-	if artifact.ETag != "" {
+	if artifact.ETag != "" && !d.config.IgnoreClientShimEtag {
 		// Known build: let the server refuse the pod (426) rather than fail
 		// on an unknown RPC if the two ever diverge.
 		baseEnv = append(baseEnv,
