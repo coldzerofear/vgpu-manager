@@ -303,21 +303,25 @@ agent 的两个 informer 正是用 `RESTClient()` 建的 → 在情形 C（DRA �
 --session-owner=pod     （设备插件路径）
     监听：Node（本节点 node-device-register 注解 = 设备快照） + Pod（会话归属/清扫）
     完全不建任何 resource.k8s.io 的 informer / 不发任何该组的 API 调用
+--session-owner=auto    （两种会话同时服务，2026-09-16 用户拍板新增）
+    两套 informer 都建；集群不提供 DRA API 时只打印日志并跳过 claim 那一半，不退出服务
 ```
 
 配套要点：
 
-1. **显式 flag 优先，不做隐式自动降级**：与既有 "gate + mode 两层正交"（设计文档 D21）一致。
+1. **显式 flag 优先**：与既有 "gate + mode 两层正交"（设计文档 D21）一致。
    `RemoteGPUSupport` gate 仍表示"启用远程能力"，具体行为由进程角色 + 该 flag 决定（决策⑥）。
-   **不要做"探测到没有 DRA 就自动切 pod 模式"**：两种模式的会话归属语义不同，静默切换会让一个配错的集群
-   表面上跑起来、实际与调度侧对不上账。
+   原则仍然是"不静默切换语义"，但**降级的触发权交给运维**：只有显式配 `auto` 的 agent 才会在无 DRA API 时
+   自己少服务一半；配 `claim` 的仍然启动即失败。之所以敢这么做，是因为两种会话的归属语义不再由进程模式决定
+   —— 每个请求自己带 `owner`（见下），claim 与 pod 的鉴权、设备快照、清扫各走各的路，同时服务也不会串味。
 2. **claim 模式加启动前置校验**，把情形 A/B/C 全部变成"启动即失败 + 可操作的提示"，而不是 hang：
    - 先发一次 typed 探测调用（如 `ResourceSlices().List(limit=1)`），它会走 draclient 的协商；
    - 组不存在 / NotFound → 失败，提示"本集群未提供 `resource.k8s.io`（版本过低或 apiserver 未开 DRA 特性门），
      请改用设备插件路径 `--session-owner=pod`"（覆盖情形 A、B）；
    - 成功但 `CurrentAPI()` 不是 `V1` → 失败，提示"集群协商到 `<版本>`，而 informer 仅支持 v1"（覆盖情形 C，
      并与 §6.2 的修法二选一）；
-   - 成功且为 `V1` → 正常建 informer（今天的行为）。
+   - 成功且为 `V1` → 正常建 informer（今天的行为）；
+   - `auto` 模式下这三种失败都只打印 `Skipping claim sessions: <原因>` 并继续，只服务 pod 会话。
 3. **情形 D 不做硬门禁**：API 层面查不出来，误判代价高（空集群同样没有 claim）。只做两件事——
    写进部署前提文档；给 dra-server 加一条可观测性告警（发布 slice 超过 N 分钟却从未观察到本驱动的 claim 被分配
    → warning 事件/日志）。**是否要做这条告警留给你定。**
@@ -1026,16 +1030,22 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
    - 与 DRA 共用的 agent 客户端、地址解析与可发布校验下沉到 `pkg/device/remotegpu/agent.go`（`ProbeServer` 等），
      DRA 发布器与 remote-agent 改为调用它，原副本删除。
 3. **S3 agent Pod 模式**（已完成）：
-   - `--session-owner=claim|pod`（默认 claim）。pod 模式下跳过 DRA 版本预检，只监听两样东西：
+   - `--session-owner=claim|pod|auto`（进程默认 pod；配置项缺省仍按 claim 读）。pod / auto 模式下 DRA 预检
+     不再是硬失败（auto 打日志跳过 claim），pod 模式只监听两样东西：
      带 `metrics-node=<本节点>` 标签的 Pod，和本节点的 Node 对象（设备快照来自 `node-device-register`
      + `node-config-info` + CUDA/驱动版本标签）。
    - 会话归属抽象为 `SessionOwner`（claim 或 pod），标记文件保留原文件名并增加 kind 行，缺省按 claim 读，
      所以升级后旧会话仍能识别。
-   - `EnsureSession` 在 pod 模式的鉴权：Pod 仍在用本节点的 GPU（remote 访问模式、`predicate-node` 是本节点、
-     未进入终态），且 token 等于它某个已预分配容器的 `SessionToken`。请求沿用 `claim_*` 字段携带 Pod 身份，
-     proto 不变。
+   - `EnsureSession` 对 pod 会话的鉴权：Pod 仍在用本节点的 GPU（remote 访问模式、`predicate-node` 是本节点、
+     未进入终态），且 token 等于它某个已预分配容器的 `SessionToken`。Pod 身份沿用 `claim_*` 字段携带。
+   - **会话接口按请求里的 owner 路由**（2026-09-16）：proto 新增 `SessionOwner` 枚举，
+     `EnsureSession` / `ReleaseSessions` / `FetchClientBundle` 各加一个 `owner` 字段（零值 = claim，
+     老的 DRA 调用方语义不变）。agent 不再按进程模式分支，而是按请求的 owner 选鉴权对象、设备快照
+     （claim 取 ResourceSlice，pod 取 Node 注册表，auto 模式两份并存互不覆盖）与清扫路径；
+     请求的 owner 不在本 agent 服务范围时回 `FailedPrecondition`，绝不落到另一条路上。
    - 回收：Pod 事件与周期 GC。仅被删除（还有 DeletionTimestamp）的 Pod 保留会话，容器还在跑；对象消失或进入
-     终态才清。另一种 owner kind 的残留会话会被清掉（模式是节点级配置）。
+     终态才清。周期 GC 按每个会话标记里的 owner kind 分流；本 agent 当前不服务的那种 owner 的残留会话
+     （上一次配置留下的）直接清掉，因为这里既校验不了它、也不会有人来释放它。
 4. **S4 消费角色**（进行中）：`--remote-consumer`、`--remote-consumer-vgpu-number` 与 §16.6 的资源规则。
    - **Allocate 不碰网络**（用户 2026-09-15 拍板，取代 §16.3 的"首次 Allocate 批量建会话"）：kubelet 准入是串行的，
      逐个容器等 gRPC 会拖住整个节点。`Allocate` 只做三件事：写本容器目录与 `devices.json`、注入环境变量

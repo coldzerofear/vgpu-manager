@@ -106,20 +106,12 @@ func (a *Agent) startPodInformers(ctx context.Context) error {
 		time.Minute, true,
 	)
 
-	synced := []cache.InformerSynced{
+	a.addReady(
 		a.podInformer.HasSynced,
 		a.nodeInformer.HasSynced,
 		podRegistration.HasSynced,
 		nodeRegistration.HasSynced,
-	}
-	a.hasReady = func() bool {
-		for _, hasSynced := range synced {
-			if !hasSynced() {
-				return false
-			}
-		}
-		return true
-	}
+	)
 	a.wg.Go(func() { a.podInformer.RunWithContext(ctx) })
 	a.wg.Go(func() { a.nodeInformer.RunWithContext(ctx) })
 
@@ -157,8 +149,8 @@ func (a *Agent) GetPodByUID(uid string) (*corev1.Pod, error) {
 	return objs[0].(*corev1.Pod), nil
 }
 
-// refreshNodeDevicesFromNode rebuilds the device snapshot from what the device
-// plugin publishes on this node.
+// refreshNodeDevicesFromNode rebuilds the pod-session device snapshot from
+// what the device plugin publishes on this node.
 func (a *Agent) refreshNodeDevicesFromNode(obj interface{}) {
 	node, ok := obj.(*corev1.Node)
 	if !ok || node.Name != a.cfg.NodeName {
@@ -169,8 +161,8 @@ func (a *Agent) refreshNodeDevicesFromNode(obj interface{}) {
 		klog.Warningf("node device snapshot: %v", err)
 		return
 	}
-	a.nodeDevices.Store(nd)
-	klog.V(4).Infof("Node device snapshot: %d device(s), CUDA %q", len(nd.Devices), nd.CudaVersionString())
+	a.podDevices.Store(nd)
+	klog.V(4).Infof("Node device snapshot from registry: %d device(s), CUDA %q", len(nd.Devices), nd.CudaVersionString())
 }
 
 // podUsesNodeDevices reports whether the pod is a live remote pod whose

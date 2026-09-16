@@ -495,7 +495,7 @@ func TestEnsureSessionRequiresRecordedToken(t *testing.T) {
 	if err := a.store.Prepare(); err != nil {
 		t.Fatal(err)
 	}
-	a.nodeDevices.Store(NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()}))
+	a.claimDevices.Store(NodeRemoteDevicesFromSlices([]*resourceapi.ResourceSlice{testSlice()}))
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, claimIndexers())
 	a.claimCache = cache.NewIntegerResourceVersionMutationCache(klog.Background(), indexer, indexer, time.Minute, true)
 	if err := indexer.Add(claimAt("10", "t1")); err != nil {

@@ -30,6 +30,18 @@ service RemoteAgent {
   rpc FetchClientBundle(FetchClientBundleRequest) returns (stream FetchClientBundleResponse) {};
 }
 
+// SessionOwner is what owns a session, and so which object the agent
+// authorizes a request against and builds it from: the ResourceClaim the
+// devices were allocated to (DRA path), or the Pod a device plugin allocated
+// them for (device-plugin path). The claim_* fields carry that object's
+// identity either way.
+enum SessionOwner {
+  // A request that names no owner comes from a DRA-path caller that predates
+  // pod-owned sessions, so claim is the zero value.
+  SESSION_OWNER_CLAIM = 0;
+  SESSION_OWNER_POD   = 1;
+}
+
 message EnsureSessionRequest {
   // Session token: the value the consumer pod receives as LUPINE_SESSION and
   // the name of the session directory on this node.
@@ -49,6 +61,8 @@ message EnsureSessionRequest {
   // cached claim is older than this reads the claim from the API instead of
   // failing on a stale cache.
   string claim_resource_version = 7;
+  // owner routes the request: the claim_* fields name a claim, or a pod.
+  SessionOwner owner = 8;
 }
 
 message EnsureSessionResponse {
@@ -71,6 +85,8 @@ message ReleaseSessionsRequest {
   // tokens of the sessions to remove; at least one. Tokens that do not
   // belong to the claim are ignored.
   repeated string tokens = 2;
+  // owner routes the request: claim_uid is a claim UID, or a pod UID.
+  SessionOwner owner = 3;
 }
 
 message ReleaseSessionsResponse {
@@ -97,7 +113,7 @@ message ServerInfoResponse {
 }
 
 message FetchClientBundleRequest {
-  // Authorization: a session token recorded on the claim (as EnsureSession).
+  // Authorization: a session token of the owner named below (as EnsureSession).
   string session         = 1;
   string claim_uid       = 2;
   string claim_namespace = 3;
@@ -109,6 +125,9 @@ message FetchClientBundleRequest {
   // if_none_match: an etag the caller already has; when it is current the
   // stream carries metadata only.
   string if_none_match = 7;
+  // owner routes the authorization: the token is recorded on a claim, or
+  // derived from a pod. See EnsureSessionRequest.owner.
+  SessionOwner owner = 8;
 }
 
 message ClientBundleInfo {

@@ -25,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -104,7 +103,7 @@ func main() {
 		&cli.StringFlag{Name: "advertise-server-endpoint", Usage: "lupine-server endpoint reported to other components verbatim (URL form, e.g. https://gpu-a.corp/pool-a), instead of the probed/discovered one. For DNS names or gateways this host cannot reach itself.", Destination: &cfg.AdvertiseEndpoint, EnvVars: []string{"ADVERTISE_SERVER_ENDPOINT"}},
 		&cli.StringFlag{Name: "listen-server-endpoint", Usage: "Agent gRPC listen endpoints, comma separated: grpc://host:port (empty host = all interfaces) and/or unix:///path.sock for same-node callers.", Value: fmt.Sprintf("0.0.0.0:%d", remotegpu.DefaultAgentPort), Destination: &listenEndpoints, EnvVars: []string{"LISTEN_SERVER_ENDPOINT"}},
 		&cli.DurationFlag{Name: "gc-interval", Usage: "Orphaned session sweep interval.", Value: time.Minute, Destination: &cfg.GCInterval, EnvVars: []string{"GC_INTERVAL"}},
-		&cli.StringFlag{Name: "session-owner", Usage: "What owns the sessions this agent serves: \"claim\" (DRA path) or \"pod\" (device-plugin path, uses no DRA API).", Value: string(remoteagent.OwnerPod), Destination: &sessionOwner, EnvVars: []string{"SESSION_OWNER"}},
+		&cli.StringFlag{Name: "session-owner", Usage: "What owns the sessions this agent serves: \"claim\" (DRA path), \"pod\" (device-plugin path, uses no DRA API) or \"auto\" (both at once; claims are skipped with a log line when the cluster serves no DRA API).", Value: string(remoteagent.OwnerPod), Destination: &sessionOwner, EnvVars: []string{"SESSION_OWNER"}},
 	}, kube.Flags()...)
 	flags = append(flags, FeatureGateFlags(featureGate)...)
 	flags = append(flags, loggingConfig.Flags()...)
@@ -122,10 +121,10 @@ func main() {
 				return fmt.Errorf("container-manager-dir %q does not exist", cfg.ContainerManagerDir)
 			}
 			switch cfg.SessionOwnerKind = remoteagent.OwnerKind(sessionOwner); cfg.SessionOwnerKind {
-			case remoteagent.OwnerClaim, remoteagent.OwnerPod:
+			case remoteagent.OwnerClaim, remoteagent.OwnerPod, remoteagent.OwnerAuto:
 			default:
-				return fmt.Errorf("invalid --session-owner %q: must be %q or %q",
-					sessionOwner, remoteagent.OwnerClaim, remoteagent.OwnerPod)
+				return fmt.Errorf("invalid --session-owner %q: must be %q, %q or %q",
+					sessionOwner, remoteagent.OwnerClaim, remoteagent.OwnerPod, remoteagent.OwnerAuto)
 			}
 			endpoint, err := remotegpu.ParseServerEndpoint(cfg.ServerEndpoint)
 			if err != nil {
@@ -172,30 +171,6 @@ func main() {
 				return fmt.Errorf("create client sets: %w", err)
 			}
 			cfg.ClientSets = clientSets
-
-			// The agent's slice/claim informers are the only thing standing
-			// between this process and the ready file the lupine-server
-			// container waits on, so an unavailable DRA API must fail here
-			// rather than leave those informers retrying a 404 forever (which
-			// never syncs -> ready file never written -> the whole pod hangs
-			// with no obvious cause). v1 is required, not merely preferred:
-			// the driver allocates with consumable capacity, which only
-			// exists in resource.k8s.io/v1 (Kubernetes 1.34+), so the beta
-			// versions a cluster might still serve are of no use to us and
-			// are refused explicitly instead of failing later, deeper.
-			// Pod mode watches pods and this node only, so it skips the check
-			// and runs on clusters that serve no DRA API at all.
-			if cfg.SessionOwnerKind == remoteagent.OwnerClaim {
-				draAPI := client.DRAAPIRequirement{
-					Subject: Component,
-					Version: "v1",
-					Remedy: "Upgrade the cluster to 1.34+, deploy the device-plugin (non-DRA) path" +
-						" on these nodes instead, or run this agent with --session-owner=pod.",
-				}
-				if err := draAPI.Check(clientSets.Core.Discovery()); err != nil {
-					return err
-				}
-			}
 
 			ctx, cancel := signal.NotifyContext(c.Context, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 			defer cancel()

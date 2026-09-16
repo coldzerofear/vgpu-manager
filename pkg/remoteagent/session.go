@@ -156,6 +156,9 @@ const (
 	OwnerClaim OwnerKind = "claim"
 	// OwnerPod is a session of one container of a Pod (device-plugin path).
 	OwnerPod OwnerKind = "pod"
+	// OwnerAuto is not an owner a session can have: it is the configuration
+	// value for an agent that serves both kinds (see Config.SessionOwnerKind).
+	OwnerAuto OwnerKind = "auto"
 )
 
 // SessionOwner identifies the object a session belongs to. Version is the

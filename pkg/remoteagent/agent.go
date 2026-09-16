@@ -18,8 +18,9 @@ limitations under the License.
 // lupine-server (design v2.0, D24): it prepares the session base directory,
 // signals readiness to the server container through a file on the shared
 // volume, materializes session quotas on demand (EnsureSession gRPC, D20)
-// and on claim events, garbage-collects sessions of gone claims, and probes
-// whether lupine-server is accepting connections.
+// and on owner events, garbage-collects the sessions of owners that are gone
+// -- a session belongs to a ResourceClaim or to a Pod, and the request says
+// which -- and probes whether lupine-server is accepting connections.
 package remoteagent
 
 import (
@@ -33,6 +34,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -88,16 +90,18 @@ type Config struct {
 	// GCInterval bounds how often orphaned sessions are swept.
 	GCInterval time.Duration
 	// SessionOwnerKind is what owns the sessions this agent serves: claims
-	// (DRA path, the default) or pods (device-plugin path). Pod mode never
-	// touches the DRA API, so it also runs on clusters without it.
+	// (DRA path), pods (device-plugin path), or OwnerAuto for both at once.
+	// Pod sessions never touch the DRA API, so pod and auto mode also run on
+	// clusters without it -- auto then serves pods alone.
 	SessionOwnerKind OwnerKind
 	FeatureGate      featuregate.MutableVersionedFeatureGate
 	ClientSets       pkgflags.ClientSets
 }
 
-// podMode reports whether sessions belong to pods rather than claims.
-func (c Config) podMode() bool {
-	return c.SessionOwnerKind == OwnerPod
+// covers reports whether this configuration includes sessions of kind. What
+// the agent ends up really serving is resolveOwners.
+func (c Config) covers(kind OwnerKind) bool {
+	return c.SessionOwnerKind == OwnerAuto || c.SessionOwnerKind == kind
 }
 
 // gateEnabled is a nil-safe feature gate check (nil gate = all off).
@@ -113,8 +117,9 @@ type Agent struct {
 	cfg   Config
 	store *SessionStore
 
-	// Claim mode watches this node's slices and all claims; pod mode watches
-	// the pods placed on this node's GPUs and the node itself.
+	// Claim sessions watch this node's slices and all claims; pod sessions
+	// watch the pods placed on this node's GPUs and the node itself. Auto mode
+	// runs both sets.
 	sliceInformer cache.SharedIndexInformer
 	claimInformer cache.SharedIndexInformer
 	claimCache    cache.MutationCache
@@ -122,8 +127,19 @@ type Agent struct {
 	nodeInformer  cache.SharedIndexInformer
 	podCache      cache.MutationCache
 
-	nodeDevices      atomic.Pointer[NodeDevices]
+	// Device snapshots, one per owner kind: a claim session is built from this
+	// node's ResourceSlices, a pod session from the device registry the device
+	// plugin publishes on the node object. Auto mode keeps both, so each
+	// request uses the snapshot of its own path.
+	claimDevices     atomic.Pointer[NodeDevices]
+	podDevices       atomic.Pointer[NodeDevices]
 	smWatcherPresent atomic.Bool
+
+	// servesClaims/servesPods are cfg.SessionOwnerKind resolved: the owner
+	// kinds this agent really routes requests for. Auto mode clears
+	// servesClaims when the cluster serves no DRA API.
+	servesClaims bool
+	servesPods   bool
 
 	// serverProbe is cfg.ServerEndpoint parsed once; nil when it does not
 	// parse, which Run reports instead of probing nothing forever.
@@ -144,16 +160,27 @@ type Agent struct {
 	nodeAddrsAt time.Time
 
 	// hasReady reports (without blocking) whether every informer cache and
-	// event-handler registration has synced; nil until Run wires it.
-	hasReady func() bool
+	// event-handler registration has synced; nil until Run wires it (see
+	// addReady, which auto mode calls once per informer set).
+	hasReady    func() bool
+	readySynced []cache.InformerSynced
 }
 
 func New(cfg Config) *Agent {
 	if cfg.GCInterval <= 0 {
 		cfg.GCInterval = time.Minute
 	}
+	if cfg.SessionOwnerKind == "" {
+		// Unset is the DRA path, which is what this agent started as.
+		cfg.SessionOwnerKind = OwnerClaim
+	}
 	store := NewSessionStore(cfg)
-	a := &Agent{cfg: cfg, store: store}
+	a := &Agent{
+		cfg:          cfg,
+		store:        store,
+		servesClaims: cfg.covers(OwnerClaim),
+		servesPods:   cfg.covers(OwnerPod),
+	}
 	a.server.Store(&serverState{})
 	if probe, err := remotegpu.ParseServerEndpoint(cfg.ServerEndpoint); err == nil {
 		a.serverProbe = probe
@@ -184,14 +211,25 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	// 2. Informers: this node's devices (snapshot) plus the objects that own
-	// sessions -- claims, or pods and this node in pod mode.
-	start := a.startClaimInformers
-	if a.cfg.podMode() {
-		start = a.startPodInformers
-	}
-	if err := start(ctx); err != nil {
+	// the sessions this agent serves -- claims, pods and this node, or both
+	// sets in auto mode.
+	if err := a.resolveOwners(); err != nil {
 		return err
 	}
+	if a.servesClaims {
+		if err := a.startClaimInformers(ctx); err != nil {
+			return err
+		}
+	}
+	if a.servesPods {
+		if err := a.startPodInformers(ctx); err != nil {
+			return err
+		}
+	}
+	if a.hasReady == nil {
+		return fmt.Errorf("invalid session owner %q", a.cfg.SessionOwnerKind)
+	}
+	klog.Infof("Serving %s sessions", strings.Join(a.servedKinds(), " and "))
 
 	// 3. Bind every configured listener (TCP for other nodes, a unix socket
 	// for same-node callers) before anything else: a bad address fails
@@ -270,20 +308,12 @@ func (a *Agent) startClaimInformers(ctx context.Context) error {
 
 	// Non-blocking on purpose: the health Check must answer within the
 	// probe deadline, not wait for a sync (and not log a wait line per probe).
-	synced := []cache.InformerSynced{
+	a.addReady(
 		a.sliceInformer.HasSynced,
 		a.claimInformer.HasSynced,
 		sliceRegistration.HasSynced,
 		claimRegistration.HasSynced,
-	}
-	a.hasReady = func() bool {
-		for _, hasSynced := range synced {
-			if !hasSynced() {
-				return false
-			}
-		}
-		return true
-	}
+	)
 
 	a.wg.Go(func() { a.sliceInformer.RunWithContext(ctx) })
 	a.wg.Go(func() { a.claimInformer.RunWithContext(ctx) })
@@ -471,6 +501,8 @@ func (a *Agent) writeReadyFile() error {
 	return nil
 }
 
+// refreshNodeDevices rebuilds the claim-session device snapshot from this
+// node's ResourceSlices.
 func (a *Agent) refreshNodeDevices() {
 	objs := a.sliceInformer.GetStore().List()
 	slices := make([]*resourceapi.ResourceSlice, 0, len(objs))
@@ -481,8 +513,8 @@ func (a *Agent) refreshNodeDevices() {
 		}
 	}
 	nd := NodeRemoteDevicesFromSlices(slices)
-	a.nodeDevices.Store(nd)
-	klog.V(4).Infof("Node device snapshot: %d device(s), CUDA %q", len(nd.Devices), nd.CudaVersionString())
+	a.claimDevices.Store(nd)
+	klog.V(4).Infof("Node device snapshot from slices: %d device(s), CUDA %q", len(nd.Devices), nd.CudaVersionString())
 }
 
 // probeServer checks that lupine-server really answers, not just that the
@@ -668,13 +700,15 @@ func (a *Agent) gcSessions(context.Context) {
 		byOwner[e.Owner.UID] = append(byOwner[e.Owner.UID], e)
 	}
 	for uid, owned := range byOwner {
-		// A session of the other owner kind cannot be valid on this node: the
-		// mode is node-level configuration, so it was left by an earlier one.
-		if (owned[0].Owner.Kind == OwnerPod) != a.cfg.podMode() {
+		kind := owned[0].Owner.Kind
+		// A session this agent does not serve cannot be validated here, and
+		// nothing is going to release it either: it was left by an earlier
+		// configuration of this node.
+		if !a.serves(kind) {
 			a.store.Sweep(uid, nil, math.MaxInt64)
 			continue
 		}
-		if a.cfg.podMode() {
+		if kind == OwnerPod {
 			a.gcPodSessions(uid)
 			continue
 		}
@@ -757,17 +791,21 @@ func (a *Agent) GetClaimByUID(uid string) (*resourceapi.ResourceClaim, error) {
 
 // ReleaseSessions implements remoteagent.RemoteAgentServer: the inject
 // plugin's explicit release at NodeUnprepare, once it has checked that the
-// claim has no live consumer left. Tokens that do not belong to the claim
-// are ignored, so a caller can only ever release its own claim's sessions.
-// In pod mode claim_uid is the pod UID; there the owner watch is the only
-// release path, so nothing calls this.
+// claim has no live consumer left. Tokens that do not belong to the owner
+// are ignored, so a caller can only ever release its own owner's sessions.
+// For a pod-owned session claim_uid is the pod UID; there the owner watch is
+// the only release path, so nothing calls this.
 func (a *Agent) ReleaseSessions(_ context.Context, req *remoteagent.ReleaseSessionsRequest) (*remoteagent.ReleaseSessionsResponse, error) {
+	kind, err := a.serveOwner(req.GetOwner())
+	if err != nil {
+		return nil, err
+	}
 	if req.ClaimUid == "" {
-		return nil, status.Error(codes.InvalidArgument, "claim_uid is required")
+		return nil, status.Errorf(codes.InvalidArgument, "%s uid is required", kind)
 	}
 	if len(req.Tokens) == 0 {
-		// A claim UID is not a secret; the tokens are what the caller must
-		// hold. Sessions of a claim that is gone are swept by the claim watch.
+		// An owner UID is not a secret; the tokens are what the caller must
+		// hold. Sessions of an owner that is gone are swept by its watch.
 		return nil, status.Error(codes.InvalidArgument, "tokens are required")
 	}
 	released, err := a.store.Release(req.ClaimUid, req.Tokens)
@@ -775,7 +813,7 @@ func (a *Agent) ReleaseSessions(_ context.Context, req *remoteagent.ReleaseSessi
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if released > 0 {
-		klog.V(2).Infof("Released %d session(s) of claim %s on request", released, req.ClaimUid)
+		klog.V(2).Infof("Released %d session(s) of %s %s on request", released, kind, req.ClaimUid)
 	}
 	return &remoteagent.ReleaseSessionsResponse{Released: int32(released)}, nil
 }
@@ -801,10 +839,11 @@ func (a *Agent) ensureClaimSession(ctx context.Context, req *remoteagent.EnsureS
 	return nil
 }
 
-// authorizeSession checks a caller's token against the object that owns the
-// session: the claim it is recorded on, or the pod it is derived from.
-func (a *Agent) authorizeSession(ctx context.Context, session, uid, namespace, name string) error {
-	if a.cfg.podMode() {
+// authorizeSession checks a caller's token against the object the request
+// says owns the session: the claim it is recorded on, or the pod it is
+// derived from.
+func (a *Agent) authorizeSession(ctx context.Context, kind OwnerKind, session, uid, namespace, name string) error {
+	if kind == OwnerPod {
 		_, _, err := a.podForSession(ctx, session, uid, namespace, name, "")
 		return err
 	}
@@ -818,14 +857,19 @@ func (a *Agent) EnsureSession(ctx context.Context, req *remoteagent.EnsureSessio
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	nd := a.nodeDevices.Load()
-	if nd == nil || len(nd.Devices) == 0 {
-		return nil, status.Error(codes.Unavailable, "node device snapshot not available yet")
+	// The request names the owner -- a claim, or a pod whose identity the
+	// claim_* fields carry -- which decides both what authorizes it and the
+	// device snapshot its session is built from.
+	kind, err := a.serveOwner(req.GetOwner())
+	if err != nil {
+		return nil, err
 	}
-	// The request names the owner: a claim, or a pod in pod mode (the
-	// claim_* fields carry the pod's identity there).
+	nd := a.devices(kind)
+	if nd == nil || len(nd.Devices) == 0 {
+		return nil, status.Errorf(codes.Unavailable, "node device snapshot for %s sessions not available yet", kind)
+	}
 	ensure := a.ensureClaimSession
-	if a.cfg.podMode() {
+	if kind == OwnerPod {
 		ensure = a.ensurePodSession
 	}
 	if err := ensure(ctx, req, nd); err != nil {
@@ -919,7 +963,11 @@ func (a *Agent) FetchClientBundle(req *remoteagent.FetchClientBundleRequest, str
 	if err := validateToken(req.Session); err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
-	if err := a.authorizeSession(ctx, req.Session, req.ClaimUid, req.ClaimNamespace, req.ClaimName); err != nil {
+	kind, err := a.serveOwner(req.GetOwner())
+	if err != nil {
+		return err
+	}
+	if err := a.authorizeSession(ctx, kind, req.Session, req.ClaimUid, req.ClaimNamespace, req.ClaimName); err != nil {
 		return err
 	}
 	platform, err := remote.ClientBundlePlatform(req.Os, req.Arch)

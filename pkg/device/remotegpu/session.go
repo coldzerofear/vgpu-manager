@@ -59,8 +59,9 @@ func SessionToken(podUID, containerName string) string {
 }
 
 // PodSession identifies the session of one container of a pod to the agent.
-// The agent takes the pod's identity in the request's claim fields (the RPC
-// predates pod-owned sessions) and checks it against the pod itself.
+// The request names the pod as its owner and carries the pod's identity in
+// the claim_* fields (the RPC predates pod-owned sessions); the agent checks
+// it against the pod itself.
 type PodSession struct {
 	Token           string
 	PodUID          string
@@ -90,6 +91,7 @@ func EnsureSession(ctx context.Context, agentEndpoint string, session PodSession
 		ClaimNamespace:       session.PodNamespace,
 		ClaimName:            session.PodName,
 		ClaimResourceVersion: session.ResourceVersion,
+		Owner:                remoteagent.SessionOwner_SESSION_OWNER_POD,
 	})
 	if err != nil {
 		return "", fmt.Errorf("remote-agent %s: %w", agentEndpoint, err)

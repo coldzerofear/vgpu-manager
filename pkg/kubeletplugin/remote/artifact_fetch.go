@@ -145,7 +145,8 @@ func (d *InjectDriver) fetchArtifact(ctx context.Context, agent, session string,
 		ClaimNamespace: claim.Namespace,
 		ClaimName:      claim.Name,
 		Os:             "linux",
-		Arch:           runtime.GOARCH, // this node's: the pod runs here, not on the GPU node
+		Arch:           runtime.GOARCH, // this node.s: the pod runs here, not on the GPU node
+		Owner:          remoteagent.SessionOwner_SESSION_OWNER_CLAIM,
 	}, tmp)
 	closeErr := tmp.Close()
 	if err != nil {

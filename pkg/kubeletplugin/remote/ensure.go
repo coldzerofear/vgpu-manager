@@ -86,6 +86,7 @@ func ReleaseSessions(ctx context.Context, agentEndpoint, claimUID string, tokens
 	resp, err := remoteagent.NewRemoteAgentClient(conn).ReleaseSessions(ctx, &remoteagent.ReleaseSessionsRequest{
 		ClaimUid: claimUID,
 		Tokens:   tokens,
+		Owner:    remoteagent.SessionOwner_SESSION_OWNER_CLAIM,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("remote-agent %s: %w", agentEndpoint, err)
@@ -117,6 +118,7 @@ func ensureOne(ctx context.Context, agentEndpoint string, claim *resourceapi.Res
 		// claim cache that is merely behind from a token that was never
 		// recorded, and read the claim from the API in the former case.
 		ClaimResourceVersion: claim.ResourceVersion,
+		Owner:                remoteagent.SessionOwner_SESSION_OWNER_CLAIM,
 	})
 	if err != nil {
 		return "", "", err

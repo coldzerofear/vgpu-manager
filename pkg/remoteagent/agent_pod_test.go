@@ -65,7 +65,7 @@ func newPodModeAgent(t *testing.T, pods ...*corev1.Pod) *Agent {
 	require.NoError(t, a.store.Prepare())
 	nd, err := NodeDevicesFromNode(testServerNode(t, 1))
 	require.NoError(t, err)
-	a.nodeDevices.Store(nd)
+	a.podDevices.Store(nd)
 
 	factory := informers.NewSharedInformerFactory(kubeClient, 0)
 	a.podInformer = factory.Core().V1().Pods().Informer()
@@ -138,7 +138,7 @@ func TestEnsurePodSessionAndSweep(t *testing.T) {
 		return a.ensurePodSession(ctx, &remoteagent.EnsureSessionRequest{
 			Session: token, ClaimUid: string(pod.UID),
 			ClaimNamespace: pod.Namespace, ClaimName: pod.Name,
-		}, a.nodeDevices.Load())
+		}, a.podDevices.Load())
 	}
 
 	require.NoError(t, ensure(appToken))
@@ -174,11 +174,11 @@ func TestGCSessionsRemovesOtherOwnerKind(t *testing.T) {
 		Claims:      []device.DeviceClaim{{Id: 0, Uuid: testGPU0, Cores: 50, Memory: 4096}},
 		MemoryRatio: 1,
 	}
-	require.NoError(t, a.store.Materialize("claimtoken", claimSpec, a.nodeDevices.Load()))
+	require.NoError(t, a.store.Materialize("claimtoken", claimSpec, a.podDevices.Load()))
 	require.NoError(t, a.ensurePodSession(context.Background(), &remoteagent.EnsureSessionRequest{
 		Session: remotegpu.SessionToken(string(pod.UID), "app"), ClaimUid: string(pod.UID),
 		ClaimNamespace: pod.Namespace, ClaimName: pod.Name,
-	}, a.nodeDevices.Load()))
+	}, a.podDevices.Load()))
 
 	a.gcSessions(context.Background())
 
