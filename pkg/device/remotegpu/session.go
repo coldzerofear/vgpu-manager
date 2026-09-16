@@ -17,10 +17,13 @@ limitations under the License.
 package remotegpu
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
 
@@ -53,4 +56,46 @@ func SessionContainer(podUID, sessionKey string) (string, bool) {
 func SessionToken(podUID, containerName string) string {
 	sum := sha256.Sum256([]byte(SessionKey(podUID, containerName)))
 	return hex.EncodeToString(sum[:])[:sessionTokenLength]
+}
+
+// PodSession identifies the session of one container of a pod to the agent.
+// The agent takes the pod's identity in the request's claim fields (the RPC
+// predates pod-owned sessions) and checks it against the pod itself.
+type PodSession struct {
+	Token           string
+	PodUID          string
+	PodNamespace    string
+	PodName         string
+	ResourceVersion string
+}
+
+// EnsureSession asks the agent at agentEndpoint to materialize one container's
+// session, and returns the lupine-server endpoint it reports ("" when it knows
+// none). It is idempotent, so a caller may retry it and several callers may
+// ask for the same session. The call is bounded by the caller's context, at
+// most AgentCallTimeout.
+func EnsureSession(ctx context.Context, agentEndpoint string, session PodSession) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, AgentCallTimeout)
+	defer cancel()
+
+	conn, err := DialAgent(agentEndpoint)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = conn.Close() }()
+
+	resp, err := remoteagent.NewRemoteAgentClient(conn).EnsureSession(ctx, &remoteagent.EnsureSessionRequest{
+		Session:              session.Token,
+		ClaimUid:             session.PodUID,
+		ClaimNamespace:       session.PodNamespace,
+		ClaimName:            session.PodName,
+		ClaimResourceVersion: session.ResourceVersion,
+	})
+	if err != nil {
+		return "", fmt.Errorf("remote-agent %s: %w", agentEndpoint, err)
+	}
+	if !resp.Ready {
+		return "", fmt.Errorf("remote-agent %s reports session not ready: %s", agentEndpoint, resp.Message)
+	}
+	return resp.ServerEndpoint, nil
 }

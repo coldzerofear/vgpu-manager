@@ -1042,11 +1042,17 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
      （`LUPINE_SERVER`/`LUPINE_SESSION`/`NVIDIA_VISIBLE_DEVICES=void`/`LUPINE_DISABLE_LOCAL`）、声明两个挂载
      （客户端 shim 目录与 `ld.so.preload`，内容由 PreStart 填）。
    - **PreStartContainer 按当前容器做实事**：建会话（agent gRPC）、准备客户端 shim 与 `ld.so.preload`。
-   - **容器身份**：`PreStartContainerRequest` 只带设备 ID，且 kubelet 会把顺序 init 容器的设备 ID 复用给业务容器。
-     因此 PreStart 先由设备 ID 反查 Pod，再用各容器 `devices.json` 的 ID 集合匹配容器；若 init 与业务容器 ID 集合
-     完全相同，取第一个尚无本地会话标记的容器（init 先于业务启动），重启时全部有标记则对匹配到的容器重新确保（幂等）。
+   - **会话在两处确保**（用户 2026-09-16 拍板）：`Allocate` 里容器身份是确定的（预分配游标就是它），所以先试一次
+     agent 调用，超时 2s、失败只记日志不挡准入；`PreStartContainer` 再确保一次，这次必须成功。
+   - **容器身份与设备 ID 复用**：`PreStartContainerRequest` 只带设备 ID，而 kubelet 会把顺序 init 容器的设备 ID
+     复用给业务容器，两个容器的 ID 集合可能完全相同。只认一个就会漏掉另一个的会话（`vNumberDevicePlugin` 出现过
+     这个 bug），所以 PreStart 对**所有**匹配到的容器都准备一遍：会话按容器且幂等，重复确保没有副作用。
+     匹配来源是 kubelet 自己的视图：先 pod-resources API，失败回退设备插件 checkpoint。
+   - **客户端 shim**：`Allocate` 只声明两个挂载（`<容器目录>/driver` 与 `<容器目录>/ld.so.preload`），
+     PreStart 把它们链接到按服务器 CUDA 版本选出的 shim 目录和它的 preload 列表（复用 DRA 侧的选择与 preload 生成，
+     经 `remote.StageClientArtifact` 导出）。服务器还没上报 CUDA 版本时不准备、报错等重试。
    - 代码放在新的 `pkg/deviceplugin/remote`，消费节点用它替换本地 vGPU 插件，不在 `vnum_plugin.go` 里加分支。
-   - **暂不支持 server 兼消费节点**：服务器的 `node-device-register` 由本地 vGPU 插件发布，而消费模式下它不运行；
-     要支持需先把节点设备注册的发布从该插件里挪出来。启动参数同时给这两个角色时直接报错。
+   - **节点设备注册已抽到 `pkg/deviceplugin/nodedevice`**：本地插件和远程插件都调用它，没有设备的节点自动不发布。
+     server 兼消费节点因此可用：由远程插件发布节点设备注册，`vgpu-number` 数量取 `max(本地槽位, --remote-consumer-number)`。
 5. **S5 监控**：§16.5。
 6. **S6 部署与文档**。

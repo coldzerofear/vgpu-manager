@@ -254,12 +254,6 @@ func (o *Options) Validate() error {
 		if o.RemoteConsumerNum <= 0 {
 			return fmt.Errorf("--remote-consumer-number must be greater than 0")
 		}
-		if o.RemoteServer {
-			// The node device registry a server publishes comes from the local
-			// vGPU plugin, which does not run in consumer mode. Serving both
-			// roles from one process needs that publishing to move first.
-			return fmt.Errorf("--remote-consumer together with --remote-server is not supported yet")
-		}
 	}
 	return nil
 }

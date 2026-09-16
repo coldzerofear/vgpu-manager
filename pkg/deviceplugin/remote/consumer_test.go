@@ -23,7 +23,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	kubeletremote "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
@@ -96,12 +98,21 @@ func allocatingPod(t *testing.T) *corev1.Pod {
 func newConsumerPlugin(t *testing.T, kubeClient kubernetes.Interface) (*consumerDevicePlugin, string) {
 	t.Helper()
 	managerDir := t.TempDir()
+	// A consumer node has no GPUs, so its manager has no devices either.
+	nodeConfig, err := node.NewNodeConfig(node.WithNodeNameOption(testConsumerNode))
+	require.NoError(t, err)
+	devManager := manager.NewDevicelessManager(nodeConfig)
 	plugin := NewConsumerDevicePlugin(ConsumerConfig{
 		NodeName: testConsumerNode, ResourceName: util.VGPUNumberResourceName,
 		Socket: filepath.Join(t.TempDir(), "remote.sock"), VGPUNumber: 4,
 		ManagerDir: managerDir, HostManagerDir: "/host/vgpu-manager",
-	}, nil, kubeClient)
-	return plugin.(*consumerDevicePlugin), managerDir
+	}, devManager, kubeClient)
+	consumer := plugin.(*consumerDevicePlugin)
+	// No agent to ask in a test; the cases that care override this.
+	consumer.ensureSession = func(context.Context, string, remotegpu.PodSession) (string, error) {
+		return "", nil
+	}
+	return consumer, managerDir
 }
 
 func TestConsumerDevices(t *testing.T) {
@@ -187,7 +198,7 @@ func TestConsumerAllocateRejectsUnservedPod(t *testing.T) {
 	assert.Equal(t, string(util.AssignPhaseFailed), got.Labels[util.PodAssignedPhaseLabel])
 }
 
-func TestConsumerPreStartContainerNotWiredYet(t *testing.T) {
+func TestConsumerPreStartContainerNeedsDeviceIDs(t *testing.T) {
 	plugin, _ := newConsumerPlugin(t, fake.NewClientset())
 
 	_, err := plugin.PreStartContainer(context.Background(), &pluginapi.PreStartContainerRequest{})

@@ -30,12 +30,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/nodedevice"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	kubeletremote "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
@@ -74,41 +76,79 @@ type ConsumerConfig struct {
 	// HostManagerDir the host's; the latter is what mounts refer to.
 	ManagerDir     string
 	HostManagerDir string
+	// ArtifactsDir holds the client shims, one directory per CUDA version,
+	// again as this process and as the host see them.
+	ArtifactsDir     string
+	HostArtifactsDir string
+	// DevicePluginPath is where kubelet keeps its device-plugin checkpoint.
+	DevicePluginPath string
 }
 
 type consumerDevicePlugin struct {
 	pluginapi.UnimplementedDevicePluginServer
-	baseServer base.PluginServer
-	kubeClient kubernetes.Interface
-	cfg        ConsumerConfig
-	devices    []*pluginapi.Device
-	mutex      sync.Mutex
+	baseServer  base.PluginServer
+	kubeClient  kubernetes.Interface
+	podResource *client.PodResource
+	cfg         ConsumerConfig
+	devices     []*pluginapi.Device
+	mutex       sync.Mutex
+	// lookup finds the containers a PreStartContainer request belongs to, and
+	// ensureSession asks an agent for one container's session. Both are
+	// overridden in tests, where neither kubelet nor an agent is there to ask.
+	lookup        func(ctx context.Context, deviceIDs []string) ([]containerMatch, error)
+	ensureSession func(ctx context.Context, agentEndpoint string, session remotegpu.PodSession) (string, error)
 }
 
 var _ base.DevicePlugin = &consumerDevicePlugin{}
 
 // NewConsumerDevicePlugin returns the device plugin of a remote consumer node.
 func NewConsumerDevicePlugin(cfg ConsumerConfig, devManager *manager.DeviceManager, kubeClient kubernetes.Interface) base.DevicePlugin {
-	devices := make([]*pluginapi.Device, 0, cfg.VGPUNumber)
-	for i := 0; i < cfg.VGPUNumber; i++ {
+	// A node that also serves its own GPUs remotely keeps at least as many
+	// slots as those GPUs offer, so its local capacity is never the smaller
+	// of the two (analysis §16.6).
+	localSlots := 0
+	for _, dev := range devManager.GetNodeDeviceInfo() {
+		if !dev.Mig {
+			localSlots += dev.Number
+		}
+	}
+	slots := max(cfg.VGPUNumber, localSlots)
+	devices := make([]*pluginapi.Device, 0, slots)
+	for i := 0; i < slots; i++ {
 		devices = append(devices, &pluginapi.Device{
 			ID:     fmt.Sprintf("%s-%d", remoteDeviceIDPrefix, i),
 			Health: pluginapi.Healthy,
 		})
 	}
-	return &consumerDevicePlugin{
-		baseServer: base.NewBasePluginServer(cfg.ResourceName, cfg.Socket, devManager),
-		kubeClient: kubeClient,
-		cfg:        cfg,
-		devices:    devices,
+	plugin := &consumerDevicePlugin{
+		baseServer:  base.NewBasePluginServer(cfg.ResourceName, cfg.Socket, devManager),
+		kubeClient:  kubeClient,
+		podResource: client.NewPodResource(client.WithCallTimeoutSecond(5)),
+		cfg:         cfg,
+		devices:     devices,
 	}
+	plugin.lookup = plugin.lookupByDeviceIDs
+	plugin.ensureSession = remotegpu.EnsureSession
+	return plugin
 }
 
 func (m *consumerDevicePlugin) Name() string { return consumerPluginName }
 
-func (m *consumerDevicePlugin) Start() error { return m.baseServer.Start(m.Name(), m) }
+func (m *consumerDevicePlugin) Start() error {
+	err := m.baseServer.Start(m.Name(), m)
+	if err == nil {
+		// A node that serves its own GPUs remotely as well publishes them for
+		// the scheduler; a node without GPUs publishes nothing.
+		nodedevice.Setup(m.Name(), m.baseServer.GetDeviceManager())
+	}
+	return err
+}
 
-func (m *consumerDevicePlugin) Stop() error { return m.baseServer.Stop(m.Name()) }
+func (m *consumerDevicePlugin) Stop() error {
+	err := m.baseServer.Stop(m.Name())
+	nodedevice.Remove(m.Name(), m.baseServer.GetDeviceManager())
+	return err
+}
 
 // Devices are slots, not hardware: they never turn unhealthy on this node.
 // Whether a remote GPU can serve a pod is the scheduler's decision, made from
@@ -181,6 +221,13 @@ func (m *consumerDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Allo
 		if err = device.UpdatePodRealContainerDeviceClaim(currentPod, *contClaim); err != nil {
 			return resp, fmt.Errorf("update pod real-allocate device claim failed: %w", err)
 		}
+		// Here the container is known exactly (the pre-allocation says which
+		// one this is), which PreStartContainer cannot always tell when
+		// kubelet reuses an init container's device ids. So ask for the
+		// session now, and let PreStartContainer insist on it later: kubelet
+		// admits pods one at a time, so this must not hold the node up if the
+		// agent is slow or down.
+		m.tryEnsureSession(ctx, currentPod, contClaim.Name, server)
 	}
 
 	resp.ContainerResponses = responses
@@ -262,14 +309,22 @@ func (m *consumerDevicePlugin) containerPaths(podUID k8stypes.UID, contName stri
 		util.GetPodContainerManagerPath(m.cfg.HostManagerDir, podUID, contName)
 }
 
-// PreStartContainer creates the container's session on the GPU server and
-// stages its client shim.
-//
-// TODO(S4.3): not wired yet. Until it is, a remote pod must not start: it
-// would have no session and its CUDA calls would be refused by the server.
-func (m *consumerDevicePlugin) PreStartContainer(_ context.Context, _ *pluginapi.PreStartContainerRequest) (*pluginapi.PreStartContainerResponse, error) {
-	return &pluginapi.PreStartContainerResponse{},
-		fmt.Errorf("%s: remote sessions are not wired yet", util.PreStartContainerCheckErrMsg)
+// allocateSessionTimeout bounds the session attempt made during Allocate.
+// Admission is serial on a node, so this is the most one unreachable agent may
+// add to every other pod's admission; PreStartContainer retries it anyway.
+const allocateSessionTimeout = 2 * time.Second
+
+// tryEnsureSession asks for a container's session without holding admission
+// up: a failure here is left to PreStartContainer.
+func (m *consumerDevicePlugin) tryEnsureSession(
+	ctx context.Context, pod *corev1.Pod, containerName string, server *remotegpu.ServerEndpointInfo,
+) {
+	ctx, cancel := context.WithTimeout(ctx, allocateSessionTimeout)
+	defer cancel()
+	if _, err := m.ensureSession(ctx, server.AgentEndpoint, m.podSession(pod, containerName)); err != nil {
+		klog.V(3).InfoS("Remote session not ready yet; PreStartContainer will retry",
+			"pod", klog.KObj(pod), "container", containerName, "err", err)
+	}
 }
 
 func writeJSONFile(path string, value any, mode os.FileMode) error {
