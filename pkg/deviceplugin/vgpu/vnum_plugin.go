@@ -391,7 +391,7 @@ const (
 	ContPreLoadFilePath = "/etc/" + LdPreLoadFileName
 	VGPUControlFileName = "libvgpu-control.so"
 
-	VGPUConfigFileName = "vgpu.config"
+	VGPUConfigFileName = util.VGPUConfigFile
 	DeviceListFileName = "devices.json"
 
 	NvidiaCTLFilePath      = "/dev/nvidiactl"

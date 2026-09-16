@@ -26,6 +26,7 @@ import (
 
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/config/vmem"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	dpvgpu "github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -60,12 +61,21 @@ func GetContainerKey(uid types.UID, containerName string) ContainerKey {
 }
 
 type ContainerLister struct {
-	mutex          sync.RWMutex
-	nodeName       string
-	managerRoot    string
+	mutex       sync.RWMutex
+	nodeName    string
+	managerRoot string
+	// sessionBase is the remote GPU session root on this node; empty when
+	// the node serves no remote pods. The sessions of the remote pods this
+	// node's GPUs serve hold the same two regions as a local container
+	// directory, so they are tracked under the same keys (see
+	// updateRemoteSessions).
+	sessionBase    string
 	podLister      listerv1.PodLister
 	containerDatas map[ContainerKey]*vgpu.MmapResourceData
 	containerVMems map[ContainerKey]*vmem.MmapDeviceVMemory
+	// sessionKeys are the keys currently backed by a session directory, which
+	// this lister reads but never removes -- the agent owns them.
+	sessionKeys sets.Set[ContainerKey]
 }
 
 // removeResourceData and removeResourceVMem mutate the underlying maps and must
@@ -175,68 +185,10 @@ func (c *ContainerLister) update() error {
 			continue
 		}
 		matched := keySet.Has(containerKey)
-		resourceData, existCfg := c.GetResourceData(containerKey)
-		resourceVMem, existVMem := c.GetResourceVMem(containerKey)
 		switch {
 		case matched:
-			if !existCfg {
-				configFile := filepath.Join(filePath, util.Config, dpvgpu.VGPUConfigFileName)
-				resourceData, err = vgpu.NewMmapResourceData(configFile)
-				if err != nil && !os.IsNotExist(err) {
-					klog.V(4).ErrorS(err, "Failed to new device config", "filePath", configFile)
-				}
-				if err == nil && resourceData != nil {
-					klog.V(3).InfoS("Add vGPU config file", "filePath", configFile)
-					c.addResourceData(containerKey, resourceData)
-				}
-			} else {
-				reload, err := resourceData.NeedsReload()
-				if err != nil {
-					if os.IsNotExist(err) {
-						klog.V(3).InfoS("Detected that the Resource file has been deleted", "containerKey", containerKey.String())
-						c.mutex.Lock()
-						c.removeResourceData(containerKey)
-						c.mutex.Unlock()
-					} else {
-						klog.V(2).ErrorS(err, "Resource file NeedsReload failed", "containerKey", containerKey.String())
-					}
-				}
-				if reload {
-					klog.V(3).InfoS("Detected that Resource file has been changed", "containerKey", containerKey.String())
-					if err = resourceData.Reload(); err != nil {
-						klog.V(1).ErrorS(err, "", "containerKey", containerKey.String())
-					}
-				}
-			}
-			if !existVMem {
-				configFile := filepath.Join(filePath, util.VMemNode, util.VMemNodeFile)
-				resourceVMem, err = vmem.NewMmapDeviceVMemory(configFile)
-				if err != nil && !os.IsNotExist(err) {
-					klog.V(4).ErrorS(err, "Failed to new device vMemory", "filePath", configFile)
-				}
-				if err == nil && resourceVMem != nil {
-					klog.V(3).InfoS("Add vGPU vMemory file", "filePath", configFile)
-					c.addResourceVMem(containerKey, resourceVMem)
-				}
-			} else {
-				reload, err := resourceVMem.NeedsReload()
-				if err != nil {
-					if os.IsNotExist(err) {
-						klog.V(3).InfoS("Detected that the vMemory file has been deleted", "containerKey", containerKey.String())
-						c.mutex.Lock()
-						c.removeResourceVMem(containerKey)
-						c.mutex.Unlock()
-					} else {
-						klog.V(2).ErrorS(err, "vMemory file NeedsReload failed", "containerKey", containerKey.String())
-					}
-				}
-				if reload {
-					klog.V(3).InfoS("Detected that vMemory file has been changed", "containerKey", containerKey.String())
-					if err = resourceVMem.Reload(); err != nil {
-						klog.V(1).ErrorS(err, "", "containerKey", containerKey.String())
-					}
-				}
-			}
+			c.syncResourceData(containerKey, filepath.Join(filePath, util.Config, dpvgpu.VGPUConfigFileName))
+			c.syncResourceVMem(containerKey, filepath.Join(filePath, util.VMemNode, util.VMemNodeFile))
 		case !matched && fileInfo.ModTime().Add(2*time.Minute).Before(time.Now()):
 			klog.V(3).Infoln("Remove vGPU container:", containerKey.String())
 			c.removeContainer(containerKey)
@@ -246,7 +198,109 @@ func (c *ContainerLister) update() error {
 			_ = os.RemoveAll(filePath)
 		}
 	}
+	c.updateRemoteSessions(pods)
 	return nil
+}
+
+// syncResourceData maps the container's quota region, or reloads the mapping
+// already held; a region that is gone drops it.
+func (c *ContainerLister) syncResourceData(key ContainerKey, configFile string) {
+	resourceData, exist := c.GetResourceData(key)
+	if !exist {
+		data, err := vgpu.NewMmapResourceData(configFile)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				klog.V(4).ErrorS(err, "Failed to new device config", "filePath", configFile)
+			}
+			return
+		}
+		klog.V(3).InfoS("Add vGPU config file", "filePath", configFile)
+		c.addResourceData(key, data)
+		return
+	}
+	reload, err := resourceData.NeedsReload()
+	if err != nil {
+		if os.IsNotExist(err) {
+			klog.V(3).InfoS("Detected that the Resource file has been deleted", "containerKey", key.String())
+			c.mutex.Lock()
+			c.removeResourceData(key)
+			c.mutex.Unlock()
+		} else {
+			klog.V(2).ErrorS(err, "Resource file NeedsReload failed", "containerKey", key.String())
+		}
+	}
+	if reload {
+		klog.V(3).InfoS("Detected that Resource file has been changed", "containerKey", key.String())
+		if err = resourceData.Reload(); err != nil {
+			klog.V(1).ErrorS(err, "", "containerKey", key.String())
+		}
+	}
+}
+
+// syncResourceVMem does the same for the virtual-memory region.
+func (c *ContainerLister) syncResourceVMem(key ContainerKey, configFile string) {
+	resourceVMem, exist := c.GetResourceVMem(key)
+	if !exist {
+		data, err := vmem.NewMmapDeviceVMemory(configFile)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				klog.V(4).ErrorS(err, "Failed to new device vMemory", "filePath", configFile)
+			}
+			return
+		}
+		klog.V(3).InfoS("Add vGPU vMemory file", "filePath", configFile)
+		c.addResourceVMem(key, data)
+		return
+	}
+	reload, err := resourceVMem.NeedsReload()
+	if err != nil {
+		if os.IsNotExist(err) {
+			klog.V(3).InfoS("Detected that the vMemory file has been deleted", "containerKey", key.String())
+			c.mutex.Lock()
+			c.removeResourceVMem(key)
+			c.mutex.Unlock()
+		} else {
+			klog.V(2).ErrorS(err, "vMemory file NeedsReload failed", "containerKey", key.String())
+		}
+	}
+	if reload {
+		klog.V(3).InfoS("Detected that vMemory file has been changed", "containerKey", key.String())
+		if err = resourceVMem.Reload(); err != nil {
+			klog.V(1).ErrorS(err, "", "containerKey", key.String())
+		}
+	}
+}
+
+// updateRemoteSessions tracks the sessions of the remote pods this node's GPUs
+// serve. Those pods run on other nodes, so they have no container directory
+// here; their quota and virtual-memory regions live in the session directory
+// instead, under a token derived from the pod and the container. Nothing is
+// deleted here: the sessions belong to the agent, which sweeps them by pod.
+func (c *ContainerLister) updateRemoteSessions(pods []*corev1.Pod) {
+	if c.sessionBase == "" {
+		return
+	}
+	live := sets.New[ContainerKey]()
+	for _, pod := range pods {
+		if mode, _ := util.PodVGPUAccessMode(pod); mode != util.AccessModeRemote {
+			continue
+		}
+		if util.PodPlanSchedulingNode(pod) != c.nodeName {
+			continue
+		}
+		for _, name := range util.CollectableContainerNames(pod) {
+			key := GetContainerKey(pod.UID, name)
+			token := remotegpu.SessionToken(string(pod.UID), name)
+			live.Insert(key)
+			c.syncResourceData(key, remotegpu.SessionQuotaFile(c.sessionBase, token))
+			c.syncResourceVMem(key, remotegpu.SessionVMemFile(c.sessionBase, token))
+		}
+	}
+	// Drop the mappings of sessions that are no longer served here.
+	for key := range c.sessionKeys.Difference(live) {
+		c.removeContainer(key)
+	}
+	c.sessionKeys = live
 }
 
 func (c *ContainerLister) Start(interval time.Duration, stopChan <-chan struct{}) {
@@ -262,12 +316,17 @@ func (c *ContainerLister) Start(interval time.Duration, stopChan <-chan struct{}
 	}()
 }
 
-func NewContainerLister(nodeName, managerRoot string, podLister listerv1.PodLister) *ContainerLister {
+// NewContainerLister reads the resource regions of this node's containers.
+// sessionBase is the remote GPU session root, empty on a node that serves no
+// remote pods.
+func NewContainerLister(nodeName, managerRoot, sessionBase string, podLister listerv1.PodLister) *ContainerLister {
 	return &ContainerLister{
 		nodeName:       nodeName,
 		podLister:      podLister,
 		managerRoot:    managerRoot,
+		sessionBase:    sessionBase,
 		containerDatas: make(map[ContainerKey]*vgpu.MmapResourceData),
 		containerVMems: make(map[ContainerKey]*vmem.MmapDeviceVMemory),
+		sessionKeys:    sets.New[ContainerKey](),
 	}
 }

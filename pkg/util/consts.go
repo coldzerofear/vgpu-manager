@@ -209,6 +209,10 @@ const (
 	SMUtilFile      = "sm_util.config"
 	VMemNode        = "vmem_node"
 	VMemNodeFile    = "vmem_node.config"
+	// VGPUConfigFile is the per-container quota region the library reads.
+	// Lives here because both the device-plugin container directory and the
+	// remote session directory are built from it.
+	VGPUConfigFile = "vgpu.config"
 	// SMNode is the per-container shared region backing container-wide SM
 	// (compute) isolation, named symmetrically with VMemNode: vmem_node holds
 	// the cross-process state of memory isolation, sm_node that of compute

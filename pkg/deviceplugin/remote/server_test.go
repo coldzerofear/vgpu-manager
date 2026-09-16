@@ -76,7 +76,11 @@ func TestSetupServerRoleBadAgentEndpoint(t *testing.T) {
 	err := SetupServerRole(context.Background(), reg, fake.NewClientset(), "gpu-node", true, "ftp://x")
 
 	assert.Error(t, err)
-	assert.NotContains(t, reg.registry, serverRoleName)
+	// A setup that fails half way leaves the removal registered, never a
+	// publisher: the node must not go on advertising a role it cannot serve.
+	label, endpoints := published(t, reg.registry[serverRoleName])
+	assert.Nil(t, label, "a stale role label is removed")
+	assert.Nil(t, endpoints, "stale endpoints are removed")
 }
 
 func TestServerRoleRefresh(t *testing.T) {

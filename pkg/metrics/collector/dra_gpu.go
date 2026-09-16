@@ -912,11 +912,11 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 				"pod", klog.KObj(pod), "container", alloc.name)
 
 			var containerPids []uint32
-			var vmemNodeDirs []string
+			var vmemNodeFiles []string
 			if c.remoteEnabled() && alloc.remote() {
 				// Remote consumer: the GPU processes are lupine-server children
 				// on this node, listed by the session, not by the pod's cgroup.
-				containerPids, vmemNodeDirs = c.remoteSessionPIDs(alloc, partitionCache)
+				containerPids, vmemNodeFiles = c.remoteSessionPIDs(alloc, partitionCache)
 			} else {
 				_ = cgroup.GetContainerPidsFunc(pod, alloc.name, getFullPath, func(pid int) {
 					containerPids = append(containerPids, uint32(pid))
@@ -929,8 +929,8 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 					if ref.claim == nil {
 						continue
 					}
-					vmemNodeDirs = append(vmemNodeDirs,
-						filepath.Join(c.managerRoot, util.Claims, string(ref.claim.UID), partitionKey, util.VMemNode))
+					vmemNodeFiles = append(vmemNodeFiles,
+						filepath.Join(c.managerRoot, util.Claims, string(ref.claim.UID), partitionKey, util.VMemNode, util.VMemNodeFile))
 				}
 			}
 
@@ -996,7 +996,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 					// regions (one per partition/session directory). A stale
 					// region of a crashed task inflates the sum until its
 					// directory is cleaned up — same as the device-plugin path.
-					for _, dir := range vmemNodeDirs {
+					for _, vmemFile := range vmemNodeFiles {
 						func(configFile string) {
 							vMemory, err := vmem.NewMmapDeviceVMemory(configFile)
 							if err != nil {
@@ -1022,7 +1022,7 @@ func (c draGPUCollector) Collect(ch chan<- prometheus.Metric) {
 								return
 							}
 							deviceVMemUsage += deviceUsed.GetTotalUsed()
-						}(filepath.Join(dir, util.VMemNodeFile))
+						}(vmemFile)
 					}
 				}
 

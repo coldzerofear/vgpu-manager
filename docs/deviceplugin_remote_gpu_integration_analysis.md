@@ -996,10 +996,24 @@ init 在前的调用顺序一致，对 init/sidecar 无需改动。
 | 卡级 `access_mode` | 写死 `local`（`node_gpu.go:593-620`），需按 Pod 区分 | — |
 | 容器级实时用量 | **缺失**：`container_lister.go:135` 只留 `Spec.NodeName==本节点`；PID 取本机 cgroup；限额读本机 `<uid>_<容器>` 目录 | 无 |
 
-S5 改法参照 DRA（`dra_remote.go:137-290`、`dra_gpu.go:916-920`）：远程 Pod 的 PID 从
+S5 改法参照 DRA（`dra_remote.go`、`dra_gpu.go`）：远程 Pod 的 PID 从
 `<sessionBase>/<token>/pids.config`（共享文件锁）读取后与本机 NVML 进程匹配；虚拟显存读 `<token>/.vmem_node`，
 限额读 `<token>/config/vgpu.config`；label `node=服务器`、`pod_node=消费节点`、`access_mode=remote`。
 init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，跨节点有效）。
+
+**已实施（2026-09-16）**：
+
+- 会话目录布局收敛到 `remotegpu.SessionQuotaFile/SessionPidsFile/SessionVMemFile`（`vgpu.config` 文件名下沉到
+  `util.VGPUConfigFile`）。agent 写、monitor 读、DRA 采集器都用这一组，不再各自拼路径。
+- `ContainerLister` 增加会话来源：远程 Pod（`access_mode=remote` 且 `PodPlanSchedulingNode` 是本节点）按
+  `<podUID>_<容器>` 这个既有 key 映射会话里的 `config/vgpu.config` 与 `.vmem_node/vmem_node.config`，
+  和本地容器目录走同一套 mmap/reload 逻辑（已抽成 `syncResourceData`/`syncResourceVMem`）。
+  **会话目录只读不删**——它归 agent，由 Pod 事件与周期 GC 回收；这里只在 Pod 不再由本节点服务时释放映射。
+- `nodeGPUCollector`：容器级指标的 `access_mode` 改成按 Pod 取（`node=`本服务器、`pod_node=`消费节点）；
+  远程容器的 PID 不再查本机 cgroup（那里根本没有这个容器），而是读会话的 `pids.config`。
+- 卡级 `access_mode` 按节点角色给：`IsRemoteServerNode` 为真即 `remote`（本地 Pod 被调度器挡在服务器节点之外，
+  所以一张卡不会同时有两种消费方式），与 DRA 侧 publish-only 节点的语义一致。
+- 消费节点不跑这个采集器（无 GPU，`DetectionDeviceLib` 会失败）；部署时不要在纯消费节点上部署 monitor（S6 确认）。
 
 ### 16.6 节点角色与资源上报（已拍板，取代 §15.3 S2"不注册任何资源"）
 
@@ -1063,5 +1077,6 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
    - 代码放在新的 `pkg/deviceplugin/remote`，消费节点用它替换本地 vGPU 插件，不在 `vnum_plugin.go` 里加分支。
    - **节点设备注册已抽到 `pkg/deviceplugin/nodedevice`**：本地插件和远程插件都调用它，没有设备的节点自动不发布。
      server 兼消费节点因此可用：由远程插件发布节点设备注册，`vgpu-number` 数量取 `max(本地槽位, --remote-consumer-number)`。
-5. **S5 监控**：§16.5。
+5. **S5 监控**（已完成）：§16.5 的"已实施"。服务器节点的节点/卡级用量本来就统计到了（靠 D2 与
+   `PodPlanSchedulingNode`），这一步补的是容器级实时用量与 `access_mode` 标签。
 6. **S6 部署与文档**。

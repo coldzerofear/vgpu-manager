@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -30,7 +29,7 @@ import (
 	"time"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/claimresolve"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
@@ -131,13 +130,14 @@ func (a draContainerAlloc) remote() bool {
 }
 
 // remoteSessionPIDs returns the NVML-visible PIDs of the container's remote
-// sessions: for each claim request the container references, the partition
-// the request belongs to, its token from the claim annotation, and the
-// session's pids.config. partitionCache is per-scrape (claim UID -> info).
+// sessions, and the virtual-memory regions of those sessions: for each claim
+// request the container references, the partition the request belongs to, its
+// token from the claim annotation, and the session's pids.config.
+// partitionCache is per-scrape (claim UID -> info).
 func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCache map[types.UID]*claimresolve.PartitionInfo) ([]uint32, []string) {
 	ctx := context.Background()
 	pidSet := sets.New[uint32]()
-	vmemNodeDirSet := sets.New[string]()
+	vmemNodeFileSet := sets.New[string]()
 	for _, ref := range alloc.claims {
 		if ref.claim == nil {
 			continue
@@ -188,16 +188,16 @@ func (c draGPUCollector) remoteSessionPIDs(alloc draContainerAlloc, partitionCac
 				}
 				continue
 			}
-			if pids, err := GetPidsByFilepath(filepath.Join(c.sessionBase, token, registry.PidsConfig)); err != nil {
+			if pids, err := GetPidsByFilepath(remotegpu.SessionPidsFile(c.sessionBase, token)); err != nil {
 				klog.V(2).ErrorS(err, "GetPidsByFilepath failed", "partitionKey", partitionKey, "token", token)
 			} else if len(pids) > 0 {
 				pidSet.Insert(pids...)
 			}
 
-			vmemNodeDirSet.Insert(filepath.Join(c.sessionBase, token, "."+util.VMemNode))
+			vmemNodeFileSet.Insert(remotegpu.SessionVMemFile(c.sessionBase, token))
 		}
 	}
-	return sets.List(pidSet), vmemNodeDirSet.UnsortedList()
+	return sets.List(pidSet), vmemNodeFileSet.UnsortedList()
 }
 
 const (

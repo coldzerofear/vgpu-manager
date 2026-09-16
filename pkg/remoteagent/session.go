@@ -30,7 +30,7 @@ import (
 	vgpuconfig "github.com/coldzerofear/vgpu-manager/pkg/config/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/nvidia"
-	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -59,6 +59,7 @@ import (
 // /etc/vgpu-manager/remote-sessions).
 const (
 	sessionLockDir = "." + vgpu.VGPULockDirName
+	// Keep in step with remotegpu.SessionVMemFile, which reads this region.
 	sessionVMemDir = "." + util.VMemNode
 	sessionSMDir   = "." + util.SMNode
 	// sessionOwnerMarker is agent-private: token -> owner, written last. The
@@ -424,13 +425,13 @@ func (s *SessionStore) Materialize(token string, spec SessionSpec, nd *NodeDevic
 	}
 	// pids.config must exist (empty) before the first child registers; the
 	// library appends to it, so never truncate an existing one.
-	f, err := os.OpenFile(filepath.Join(root, registry.PidsConfig), os.O_CREATE|os.O_WRONLY, pidsFileMode)
+	f, err := os.OpenFile(remotegpu.SessionPidsFile(s.cfg.SessionBase, token), os.O_CREATE|os.O_WRONLY, pidsFileMode)
 	if err != nil {
 		return fmt.Errorf("create pids file: %w", err)
 	}
 	_ = f.Close()
 
-	if err = vgpuconfig.WriteResourceDataToDisk(filepath.Join(root, util.Config, vgpu.VGPUConfigFileName), data); err != nil {
+	if err = vgpuconfig.WriteResourceDataToDisk(remotegpu.SessionQuotaFile(s.cfg.SessionBase, token), data); err != nil {
 		return fmt.Errorf("write session quota: %w", err)
 	}
 	// Marker last: its presence means "complete".

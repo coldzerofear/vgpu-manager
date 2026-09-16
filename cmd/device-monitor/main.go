@@ -229,11 +229,11 @@ func runApp(opt *options.Options) (exitCode int) {
 		}
 		podLister := client.NewPodLister(podInformer.GetIndexer())
 		containerLister := lister.NewContainerLister(
-			nodeConfig.GetNodeName(), util.ManagerRootPath, podLister,
+			nodeConfig.GetNodeName(), util.ManagerRootPath, opt.RemoteSessionBase, podLister,
 		)
 		nodeCollector, err := collector.NewNodeGPUCollector(
 			nodeConfig, nodeLister, podLister, containerLister,
-			util.ManagerRootPath, opt.FeatureGate,
+			util.ManagerRootPath, opt.RemoteSessionBase, opt.FeatureGate,
 		)
 		if err != nil {
 			klog.Errorf("Create node gpu collector failed: %v", err)

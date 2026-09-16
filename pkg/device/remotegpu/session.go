@@ -21,9 +21,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/registry"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 )
 
@@ -100,4 +102,32 @@ func EnsureSession(ctx context.Context, agentEndpoint string, session PodSession
 		return "", fmt.Errorf("remote-agent %s reports session not ready: %s", agentEndpoint, resp.Message)
 	}
 	return resp.ServerEndpoint, nil
+}
+
+// Session directory layout on the GPU node, as the agent writes it and the
+// library fills it in (pkg/remoteagent/session.go documents the whole tree).
+// Readers elsewhere -- the monitor on the server node -- go through these, so
+// the layout is spelled out once.
+const sessionVMemDir = "." + util.VMemNode
+
+// SessionDir is one session's own directory under the session base.
+func SessionDir(base, token string) string {
+	return filepath.Join(base, token)
+}
+
+// SessionQuotaFile is the session's quota region: the devices and limits of
+// the container the session belongs to.
+func SessionQuotaFile(base, token string) string {
+	return filepath.Join(base, token, util.Config, util.VGPUConfigFile)
+}
+
+// SessionPidsFile lists the host PIDs accounted to the session -- the
+// lupine-server children doing the container's GPU work.
+func SessionPidsFile(base, token string) string {
+	return filepath.Join(base, token, registry.PidsConfig)
+}
+
+// SessionVMemFile is the session's shared virtual-memory region.
+func SessionVMemFile(base, token string) string {
+	return filepath.Join(base, token, sessionVMemDir, util.VMemNodeFile)
 }
