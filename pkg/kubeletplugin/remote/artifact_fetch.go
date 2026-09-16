@@ -22,6 +22,7 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/Masterminds/semver"
 	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	resourceapi "k8s.io/api/resource/v1"
@@ -59,16 +60,10 @@ func AgentClientBundleETag(ctx context.Context, agentEndpoint string) (string, e
 	return info.ClientBundleEtag, nil
 }
 
-// ensureArtifact picks the client artifact for a claim and makes sure it is
-// the build the servers embed:
-//
-//   - a version directory installed from a bundle (it records its etag) is
-//     used when its etag is the one the floor server reports now, and
-//     re-fetched when it is not (a server upgraded in place);
-//   - a directory seeded by other means (no etag: an init container) is
-//     used as is -- it cannot be verified, and the operator vouched for it;
-//   - no usable directory at all: the bundle is fetched from the floor
-//     device's agent and installed under the floor version's name.
+// ensureArtifact picks the client artifact for a claim: the shim must fit the
+// server with the lowest CUDA version the claim touches, and that server's
+// agent is where a missing or stale bundle comes from. The rules it applies
+// are in ensureArtifactSelection.
 //
 // etagOf maps agent endpoints to the bundle etag they reported in this
 // prepare (EnsureSession answers); an agent not in it is asked. token
@@ -91,63 +86,112 @@ func (d *InjectDriver) ensureArtifact(ctx context.Context, claim *resourceapi.Re
 				klog.KObj(claim), agent, want, other, etag)
 		}
 	}
-
-	sel, selErr := selectArtifact(d.config.ArtifactsDir, d.config.HostArtifactsDir, cudaFloor(devices))
-	var name string
-	if selErr == nil {
-		have := artifactETag(d.config.ArtifactsDir, sel.Name)
-		switch {
-		case have == "":
-			return sel, nil
-		case want == "" || have == want:
-			sel.ETag = have
-			return sel, nil
-		}
-		klog.Infof("Client artifact %s was installed from bundle %s but %s now embeds %s; refreshing it", sel.Name, have, agent, want)
-		name = sel.Name
-	} else {
-		if want == "" {
-			return nil, fmt.Errorf("%w; and %s reports no client bundle to fetch", selErr, agent)
-		}
-		name = floor.info.CUDAVersion.Original()
-		klog.Infof("Claim %s: %v; fetching the client bundle %s from %s as version %s", klog.KObj(claim), selErr, want, agent, name)
-	}
-
-	session, err := token()
-	if err != nil {
-		return nil, err
-	}
-	if err := d.fetchArtifact(ctx, agent, session, claim, name); err != nil {
-		return nil, fmt.Errorf("client artifact %s: %w", name, err)
-	}
-	sel, err = selectArtifact(d.config.ArtifactsDir, d.config.HostArtifactsDir, cudaFloor(devices))
-	if err != nil {
-		return nil, err
-	}
-	sel.ETag = artifactETag(d.config.ArtifactsDir, sel.Name)
-	return sel, nil
+	return ensureArtifactSelection(ctx, fmt.Sprintf("claim %s", klog.KObj(claim)),
+		d.config.ArtifactsDir, d.config.HostArtifactsDir, cudaFloor(devices), agent, want,
+		func() (*remoteagent.FetchClientBundleRequest, error) {
+			session, err := token()
+			if err != nil {
+				return nil, err
+			}
+			return &remoteagent.FetchClientBundleRequest{
+				Session:        session,
+				ClaimUid:       string(claim.UID),
+				ClaimNamespace: claim.Namespace,
+				ClaimName:      claim.Name,
+				Owner:          remoteagent.SessionOwner_SESSION_OWNER_CLAIM,
+			}, nil
+		})
 }
 
-// fetchArtifact downloads the bundle for this node's platform through
-// agent and installs it as version directory name.
-func (d *InjectDriver) fetchArtifact(ctx context.Context, agent, session string, claim *resourceapi.ResourceClaim, name string) error {
-	if err := os.MkdirAll(d.config.ArtifactsDir, 0o755); err != nil {
+// EnsureClientArtifact is StageClientArtifact plus the download: when this
+// node has no shim the server accepts, or the one it has came from a bundle
+// the server no longer embeds, the bundle is fetched from the server's own
+// agent and installed first. That is what lets a consumer node run without
+// the shims pre-staged on it.
+func EnsureClientArtifact(
+	ctx context.Context, subject, artifactsDir, hostArtifactsDir string, serverCUDAVersion *semver.Version,
+	agentEndpoint, wantETag string, download func() (*remoteagent.FetchClientBundleRequest, error),
+) (*ClientArtifact, error) {
+	selection, err := ensureArtifactSelection(ctx, subject, artifactsDir, hostArtifactsDir,
+		serverCUDAVersion, agentEndpoint, wantETag, download)
+	if err != nil {
+		return nil, err
+	}
+	return stageArtifact(artifactsDir, selection)
+}
+
+// ensureArtifactSelection picks the client artifact and makes sure it is the
+// build the server embeds, fetching the bundle when it is not (see
+// ensureArtifact for the claim-side rules this implements):
+//
+//   - a version directory installed from a bundle (it records its etag) is
+//     used when its etag is the one the server reports now, and re-fetched
+//     when it is not (a server upgraded in place);
+//   - a directory seeded by other means (no etag: an init container) is used
+//     as is -- it cannot be verified, and the operator vouched for it;
+//   - no usable directory at all: the bundle is fetched from the agent and
+//     installed under the server's own CUDA version, which is the ceiling
+//     the selection is looking for.
+//
+// wantETag "" means the bundle the server embeds is unknown, and then
+// whatever is on the node is used as is: there is nothing to compare against,
+// and nothing to fetch either. download is called only when a fetch is really
+// needed and returns the request that authorizes it at the agent (its os/arch
+// are filled in by the transfer); a caller that holds no credential returns an
+// error from it. subject names what the artifact is for, for the logs.
+func ensureArtifactSelection(
+	ctx context.Context, subject, artifactsDir, hostArtifactsDir string, serverCUDAVersion *semver.Version,
+	agentEndpoint, wantETag string, download func() (*remoteagent.FetchClientBundleRequest, error),
+) (*artifactSelection, error) {
+	selection, selErr := selectArtifact(artifactsDir, hostArtifactsDir, serverCUDAVersion)
+	var name string
+	switch {
+	case selErr == nil:
+		have := artifactETag(artifactsDir, selection.Name)
+		if have == "" || wantETag == "" || have == wantETag {
+			selection.ETag = have
+			return selection, nil
+		}
+		klog.Infof("Client artifact %s was installed from bundle %s but %s now embeds %s; refreshing it",
+			selection.Name, have, agentEndpoint, wantETag)
+		name = selection.Name
+	case wantETag == "":
+		return nil, fmt.Errorf("%w; and %s reports no client bundle to fetch", selErr, agentEndpoint)
+	default:
+		name = serverCUDAVersion.Original()
+		klog.Infof("%s: %v; fetching the client bundle %s from %s as version %s",
+			subject, selErr, wantETag, agentEndpoint, name)
+	}
+
+	request, err := download()
+	if err != nil {
+		return nil, err
+	}
+	if err = fetchClientBundleInto(ctx, artifactsDir, agentEndpoint, name, request); err != nil {
+		return nil, fmt.Errorf("client artifact %s: %w", name, err)
+	}
+	selection, err = selectArtifact(artifactsDir, hostArtifactsDir, serverCUDAVersion)
+	if err != nil {
+		return nil, err
+	}
+	selection.ETag = artifactETag(artifactsDir, selection.Name)
+	return selection, nil
+}
+
+// fetchClientBundleInto downloads the bundle for this node's platform through
+// agent and installs it as version directory name. The platform is this
+// node's: the pod runs here, not on the GPU node.
+func fetchClientBundleInto(ctx context.Context, artifactsDir, agent, name string, request *remoteagent.FetchClientBundleRequest) error {
+	if err := os.MkdirAll(artifactsDir, 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(d.config.ArtifactsDir, ".bundle-*.zip")
+	tmp, err := os.CreateTemp(artifactsDir, ".bundle-*.zip")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	info, err := FetchClientBundle(ctx, agent, &remoteagent.FetchClientBundleRequest{
-		Session:        session,
-		ClaimUid:       string(claim.UID),
-		ClaimNamespace: claim.Namespace,
-		ClaimName:      claim.Name,
-		Os:             "linux",
-		Arch:           runtime.GOARCH, // this node.s: the pod runs here, not on the GPU node
-		Owner:          remoteagent.SessionOwner_SESSION_OWNER_CLAIM,
-	}, tmp)
+	request.Os, request.Arch = "linux", runtime.GOARCH
+	info, err := FetchClientBundle(ctx, agent, request, tmp)
 	closeErr := tmp.Close()
 	if err != nil {
 		return err
@@ -158,7 +202,7 @@ func (d *InjectDriver) fetchArtifact(ctx context.Context, agent, session string,
 	if info.Platform != "" && info.Platform != LocalClientBundlePlatform() {
 		return fmt.Errorf("agent %s served a %s bundle, this node is %s", agent, info.Platform, LocalClientBundlePlatform())
 	}
-	if err := installClientBundle(d.config.ArtifactsDir, name, tmp.Name(), info); err != nil {
+	if err = installClientBundle(artifactsDir, name, tmp.Name(), info); err != nil {
 		return err
 	}
 	klog.Infof("Installed client artifact %s (bundle %s, %d bytes) from %s", name, info.Etag, info.Size, agent)

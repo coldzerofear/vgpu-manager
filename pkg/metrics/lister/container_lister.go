@@ -166,6 +166,9 @@ func (c *ContainerLister) update() error {
 		return err
 	}
 	keySet := c.collectContainerKey(pods)
+	// Keys whose directory this scan actually visited. What is mapped but not
+	// here has lost its files (see dropVanished).
+	seen := sets.New[ContainerKey]()
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -187,6 +190,7 @@ func (c *ContainerLister) update() error {
 		matched := keySet.Has(containerKey)
 		switch {
 		case matched:
+			seen.Insert(containerKey)
 			c.syncResourceData(containerKey, filepath.Join(filePath, util.Config, dpvgpu.VGPUConfigFileName))
 			c.syncResourceVMem(containerKey, filepath.Join(filePath, util.VMemNode, util.VMemNodeFile))
 		case !matched && fileInfo.ModTime().Add(2*time.Minute).Before(time.Now()):
@@ -199,7 +203,35 @@ func (c *ContainerLister) update() error {
 		}
 	}
 	c.updateRemoteSessions(pods)
+	c.dropVanished(seen)
 	return nil
+}
+
+// dropVanished releases the mappings of the keys neither pass touched. Each
+// mapping holds an open file descriptor, and the only checks that close one
+// (NeedsReload, the orphan branches above) run per directory entry -- so a
+// container directory that disappears from the host, rather than having its
+// files emptied, would otherwise leave its descriptor and mapping held for
+// the life of the process, still serving the metrics of a container that is
+// gone. A session directory swept by the agent is the same case.
+func (c *ContainerLister) dropVanished(seen sets.Set[ContainerKey]) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	live := func(key ContainerKey) bool {
+		return seen.Has(key) || c.sessionKeys.Has(key)
+	}
+	for key := range c.containerDatas {
+		if !live(key) {
+			klog.V(3).InfoS("Release the resource mapping of a gone container", "containerKey", key.String())
+			c.removeResourceData(key)
+		}
+	}
+	for key := range c.containerVMems {
+		if !live(key) {
+			klog.V(3).InfoS("Release the vMemory mapping of a gone container", "containerKey", key.String())
+			c.removeResourceVMem(key)
+		}
+	}
 }
 
 // syncResourceData maps the container's quota region, or reloads the mapping

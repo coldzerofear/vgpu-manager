@@ -206,17 +206,28 @@ type ClientArtifact struct {
 // StageClientArtifact picks the newest client shim that is not newer than the
 // server (a client must never be ahead of it) and writes its preload list.
 // The artifacts must already be on the node: this only selects and prepares.
+// See EnsureClientArtifact for the variant that fetches a missing one.
 func StageClientArtifact(artifactsDir, hostArtifactsDir string, serverCUDAVersion *semver.Version) (*ClientArtifact, error) {
 	selection, err := selectArtifact(artifactsDir, hostArtifactsDir, serverCUDAVersion)
 	if err != nil {
 		return nil, err
 	}
+	return stageArtifact(artifactsDir, selection)
+}
+
+// stageArtifact writes a selected version's preload list and describes it for
+// mounting, with the etag of the bundle it was installed from when it has one.
+func stageArtifact(artifactsDir string, selection *artifactSelection) (*ClientArtifact, error) {
 	ldPreloadHost, err := ensureLdPreloadFile(artifactsDir, selection)
 	if err != nil {
 		return nil, err
 	}
+	etag := selection.ETag
+	if etag == "" {
+		etag = artifactETag(artifactsDir, selection.Name)
+	}
 	return &ClientArtifact{
 		Name: selection.Name, HostDir: selection.HostDir, ContainerDir: selection.ContainerDir,
-		LdPreloadHost: ldPreloadHost, NvidiaSMIHost: selection.NvidiaSMIHost, ETag: selection.ETag,
+		LdPreloadHost: ldPreloadHost, NvidiaSMIHost: selection.NvidiaSMIHost, ETag: etag,
 	}, nil
 }

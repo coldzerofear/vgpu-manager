@@ -982,7 +982,7 @@ token 由会话键确定性派生，带来的约束（S3/S4 实现时遵守）�
 | D2 | `PatchPodAllocationSucceed`（`kube_patch.go:112-115`） | 用 `Spec.NodeName` 覆盖 `metrics-node`，服务器监控随即丢失该 Pod。**远程 Pod 保持服务器**（已拍板，首个实施步骤） |
 | D3 | `GetPreferredAllocation`（`vnum_plugin.go:445`） | 按 GPU UUID 映射本地设备 ID；消费节点只有虚拟 ID，应直接走默认选择 |
 | D4 | `PreStartContainer`（`vnum_plugin.go:1148-1160`） | 重写本地 `vgpu.config` 并删除 `pids.config` 等；远程容器应跳过，绝不触碰服务器会话 |
-| D5 | `Allocate` 返回内容 | 远程注入 `NVIDIA_VISIBLE_DEVICES=void`、`LUPINE_DISABLE_LOCAL=1`、`LUPINE_SERVER`、`LUPINE_SESSION`、远程 `ld.so.preload` 与客户端文件挂载；客户端文件须预置，`Allocate` 内不下载 |
+| D5 | `Allocate` 返回内容 | 远程注入 `NVIDIA_VISIBLE_DEVICES=void`、`LUPINE_DISABLE_LOCAL=1`、`LUPINE_SERVER`、`LUPINE_SESSION`、远程 `ld.so.preload` 与客户端文件挂载。**客户端文件改为按需下载**（2026-09-16，取代"须预置"）：节点没有匹配 shim、或 etag 与服务器当前内嵌的不一致时，从该服务器的 agent 拉 bundle 装好再用，与 DRA 侧同一套逻辑 |
 | D6 | reschedule 控制器（`reschedule.go:85`） | 判定分配失败的依据是否适用远程 Pod，S4 核对 |
 
 `Allocate` 的容器游标（`GetCurrentPreAllocateContainerDevice`，取第一个未写入 `real-allocated` 的容器）与 kubelet
@@ -1014,6 +1014,11 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
 - 卡级 `access_mode` 按节点角色给：`IsRemoteServerNode` 为真即 `remote`（本地 Pod 被调度器挡在服务器节点之外，
   所以一张卡不会同时有两种消费方式），与 DRA 侧 publish-only 节点的语义一致。
 - 消费节点不跑这个采集器（无 GPU，`DetectionDeviceLib` 会失败）；部署时不要在纯消费节点上部署 monitor（S6 确认）。
+- **顺带修掉两个原有的句柄问题**（2026-09-16）：①目录被从宿主机整个删掉时，`ContainerLister` 永远不会再访问那个 key
+  （扫描只看还存在的目录项），fd 与 mmap 一直不释放、还会继续上报已经消失的容器 —— 现在两轮扫描都没碰到的 key 统一释放
+  （`dropVanished`，回归测试在 `container_lister_remote_test.go`）。②`MmapDeviceVMemory` 缺 `closed` 标志（`MmapResourceData` 有）：
+  `Close` 解除映射后读锁重新变为空闲，刚取到句柄的采集协程还能 `RLock` 成功并读到已 munmap 的内存 —— 现在 `RLock` 拒绝已关闭的映射，
+  `Close` 幂等。
 
 ### 16.6 节点角色与资源上报（已拍板，取代 §15.3 S2"不注册任何资源"）
 
@@ -1073,7 +1078,12 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
      `Allocate` 靠预分配游标天然知道是哪个容器，所以这个歧义根本不存在。
    - **客户端 shim**：按服务器 CUDA 版本选出 shim 目录（客户端不能比服务器新），生成 preload 列表，直接把这两个
      宿主路径挂进容器（与 DRA 侧一致）。复用 DRA 的选择与 preload 生成逻辑，经 `remote.StageClientArtifact` 导出。
-     服务器还没上报 CUDA 版本、或节点上没有 shim 时报错等重试。
+     服务器还没上报 CUDA 版本时报错等重试。
+   - **shim 缺失时从 agent 下载**（2026-09-16 用户要求，与 DRA 一致）：选择/下载/重选这套流程收敛成
+     `ensureArtifactSelection`（导出包装 `EnsureClientArtifact`），claim 侧保留"取 CUDA 最低的服务器 + 跨服务器 etag 告警"
+     后复用它；pod 侧的下载凭证与会话同源（owner=pod + 由某个容器派生的 token，agent 用同一套鉴权）。
+     代价：某节点/某服务器构建的**首个** Pod 会在 `Allocate` 里等下载（上限 40s）+ 建会话（5s），kubelet 准入串行，
+     所以这段时间同节点其他 Pod 的准入会排队；仍可用 init 容器预置 shim 规避。
    - 代码放在新的 `pkg/deviceplugin/remote`，消费节点用它替换本地 vGPU 插件，不在 `vnum_plugin.go` 里加分支。
    - **节点设备注册已抽到 `pkg/deviceplugin/nodedevice`**：本地插件和远程插件都调用它，没有设备的节点自动不发布。
      server 兼消费节点因此可用：由远程插件发布节点设备注册，`vgpu-number` 数量取 `max(本地槽位, --remote-consumer-number)`。

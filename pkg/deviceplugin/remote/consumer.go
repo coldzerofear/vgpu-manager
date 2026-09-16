@@ -217,7 +217,7 @@ func (m *consumerDevicePlugin) containerResponse(
 	ctx context.Context, pod *corev1.Pod,
 	contClaim *device.ContainerDeviceClaim, server *remotegpu.ServerEndpointInfo,
 ) (*pluginapi.ContainerAllocateResponse, error) {
-	artifact, err := m.stageClientShim(server)
+	artifact, err := m.stageClientShim(ctx, pod, contClaim.Name, server)
 	if err != nil {
 		return nil, err
 	}

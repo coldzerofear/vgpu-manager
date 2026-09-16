@@ -20,26 +20,48 @@ package remote
 // client shim it loads, and its session on the GPU server.
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/Masterminds/semver"
+	"github.com/coldzerofear/vgpu-manager/pkg/api/remoteagent"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	kubeletremote "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 )
 
 // stageClientShim picks the client shim built for this server and prepares its
 // preload list. A client must never be newer than the server it talks to, so
-// the server's own build version is the ceiling. The shims must already be on
-// the node; a server that has not reported its version yet is an error the
-// pod can be retried on.
-func (m *consumerDevicePlugin) stageClientShim(server *remotegpu.ServerEndpointInfo) (*kubeletremote.ClientArtifact, error) {
+// the server's own build version is the ceiling. A node that has no fitting
+// shim (or one from a bundle the server no longer embeds) downloads it from
+// the server's agent, which is also how the DRA path gets it -- so the shims
+// need not be pre-staged. A server that has not reported its version yet is
+// an error the pod can be retried on.
+func (m *consumerDevicePlugin) stageClientShim(
+	ctx context.Context, pod *corev1.Pod, containerName string, server *remotegpu.ServerEndpointInfo,
+) (*kubeletremote.ClientArtifact, error) {
 	version, err := semver.NewVersion(server.ServerCUDAVersion)
 	if err != nil {
 		return nil, fmt.Errorf("remote GPU server reports no usable CUDA version (%q): %w",
 			server.ServerCUDAVersion, err)
 	}
-	return kubeletremote.StageClientArtifact(m.cfg.ArtifactsDir, m.cfg.HostArtifactsDir, version)
+	return kubeletremote.EnsureClientArtifact(ctx, "pod "+klog.KObj(pod).String(),
+		m.cfg.ArtifactsDir, m.cfg.HostArtifactsDir, version,
+		server.AgentEndpoint, server.BundleETag,
+		func() (*remoteagent.FetchClientBundleRequest, error) {
+			// The agent authorizes a download exactly as it authorizes a
+			// session: this pod must still be one whose GPUs it serves, and
+			// the token must be one of the pod's containers.
+			session := m.podSession(pod, containerName)
+			return &remoteagent.FetchClientBundleRequest{
+				Session:        session.Token,
+				ClaimUid:       session.PodUID,
+				ClaimNamespace: session.PodNamespace,
+				ClaimName:      session.PodName,
+				Owner:          remoteagent.SessionOwner_SESSION_OWNER_POD,
+			}, nil
+		})
 }
 
 // podSession is how the agent is asked for one container's session. The token
