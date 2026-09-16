@@ -98,12 +98,12 @@ func GetDevicePlugins(
 			if option.RemoteConsumer {
 				socket := filepath.Join(nodeConfig.GetDevicePluginPath(), "nvidia-vgpu-remote.sock")
 				plugin = remote.NewConsumerDevicePlugin(remote.ConsumerConfig{
-					NodeName:       nodeConfig.GetNodeName(),
-					ResourceName:   util.VGPUNumberResourceName,
-					Socket:         socket,
-					VGPUNumber:     option.RemoteConsumerNum,
-					ManagerDir:     vgpu.ContManagerDirectoryPath,
-					HostManagerDir: vgpu.HostManagerDirectoryPath,
+					NodeName:         nodeConfig.GetNodeName(),
+					ResourceName:     util.VGPUNumberResourceName,
+					Socket:           socket,
+					VGPUNumber:       option.RemoteConsumerNum,
+					ArtifactsDir:     filepath.Join(vgpu.ContManagerDirectoryPath, util.Driver),
+					HostArtifactsDir: filepath.Join(vgpu.HostManagerDirectoryPath, util.Driver),
 				}, devManager, kubeClient)
 			}
 		} else {

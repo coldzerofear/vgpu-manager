@@ -18,12 +18,13 @@ package remote
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/coldzerofear/vgpu-manager/pkg/config/node"
 	"github.com/coldzerofear/vgpu-manager/pkg/device"
+	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	kubeletremote "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
@@ -63,11 +64,26 @@ func serverNode(t *testing.T) *corev1.Node {
 }
 
 // allocatingPod is a remote pod kubelet is admitting on the consumer node.
-func allocatingPod(t *testing.T) *corev1.Pod {
+func allocatingPod(t *testing.T, containers ...string) *corev1.Pod {
 	t.Helper()
-	preAllocated, err := device.PodDeviceClaim{
-		{Name: "cont1", DeviceClaims: []device.DeviceClaim{{Id: 0, Uuid: testGPUUUID, Cores: 50, Memory: 4096}}},
-	}.MarshalText()
+	if len(containers) == 0 {
+		containers = []string{"cont1"}
+	}
+	claims := make(device.PodDeviceClaim, 0, len(containers))
+	spec := corev1.PodSpec{NodeName: testConsumerNode}
+	for _, name := range containers {
+		claims = append(claims, device.ContainerDeviceClaim{
+			Name:         name,
+			DeviceClaims: []device.DeviceClaim{{Id: 0, Uuid: testGPUUUID, Cores: 50, Memory: 4096}},
+		})
+		spec.Containers = append(spec.Containers, corev1.Container{
+			Name: name,
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+				corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("1"),
+			}},
+		})
+	}
+	preAllocated, err := claims.MarshalText()
 	require.NoError(t, err)
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -80,32 +96,72 @@ func allocatingPod(t *testing.T) *corev1.Pod {
 				util.PodVGPUPreAllocAnnotation:  preAllocated,
 			},
 		},
-		Spec: corev1.PodSpec{
-			NodeName: testConsumerNode,
-			Containers: []corev1.Container{{
-				Name: "cont1",
-				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
-					corev1.ResourceName(util.VGPUNumberResourceName): resource.MustParse("1"),
-				}},
-			}},
-		},
+		Spec:   spec,
 		Status: corev1.PodStatus{Phase: corev1.PodPending},
 	}
 }
 
-func newConsumerPlugin(t *testing.T, kubeClient kubernetes.Interface) (*consumerDevicePlugin, string) {
+// stagedArtifacts is a client shim directory as an operator (or a bundle
+// download) leaves it: one directory per CUDA version.
+func stagedArtifacts(t *testing.T, versions ...string) string {
 	t.Helper()
-	managerDir := t.TempDir()
+	artifactsDir := t.TempDir()
+	for _, version := range versions {
+		dir := filepath.Join(artifactsDir, version)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		for _, lib := range []string{"libcuda.so.1", "libnvidia-ml.so.1"} {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, lib), []byte("so"), 0o644))
+		}
+	}
+	return artifactsDir
+}
+
+// ensuredSessions records what the plugin asked the agent for.
+type ensuredSessions struct {
+	calls []remotegpu.PodSession
+	err   error
+}
+
+func (e *ensuredSessions) ensure(_ context.Context, _ string, session remotegpu.PodSession) (string, error) {
+	e.calls = append(e.calls, session)
+	return "", e.err
+}
+
+func (e *ensuredSessions) tokens() []string {
+	tokens := make([]string, 0, len(e.calls))
+	for _, call := range e.calls {
+		tokens = append(tokens, call.Token)
+	}
+	return tokens
+}
+
+func newConsumerPlugin(t *testing.T, kubeClient kubernetes.Interface, artifactsDir string) (*consumerDevicePlugin, *ensuredSessions) {
+	t.Helper()
+	// A consumer node has no GPUs, so its manager has no devices either.
+	nodeConfig, err := node.NewNodeConfig(node.WithNodeNameOption(testConsumerNode))
+	require.NoError(t, err)
 	plugin := NewConsumerDevicePlugin(ConsumerConfig{
 		NodeName: testConsumerNode, ResourceName: util.VGPUNumberResourceName,
 		Socket: filepath.Join(t.TempDir(), "remote.sock"), VGPUNumber: 4,
-		ManagerDir: managerDir, HostManagerDir: "/host/vgpu-manager",
-	}, nil, kubeClient)
-	return plugin.(*consumerDevicePlugin), managerDir
+		ArtifactsDir: artifactsDir, HostArtifactsDir: "/host/vgpu-manager/driver",
+	}, manager.NewDevicelessManager(nodeConfig), kubeClient)
+	consumer := plugin.(*consumerDevicePlugin)
+	sessions := &ensuredSessions{}
+	consumer.ensureSession = sessions.ensure
+	return consumer, sessions
+}
+
+func allocateOne(t *testing.T, plugin *consumerDevicePlugin, containers int) (*pluginapi.AllocateResponse, error) {
+	t.Helper()
+	requests := make([]*pluginapi.ContainerAllocateRequest, 0, containers)
+	for range containers {
+		requests = append(requests, &pluginapi.ContainerAllocateRequest{DevicesIds: []string{"remote-vgpu-0"}})
+	}
+	return plugin.Allocate(context.Background(), &pluginapi.AllocateRequest{ContainerRequests: requests})
 }
 
 func TestConsumerDevices(t *testing.T) {
-	plugin, _ := newConsumerPlugin(t, fake.NewClientset())
+	plugin, _ := newConsumerPlugin(t, fake.NewClientset(), t.TempDir())
 
 	devices := plugin.Devices()
 
@@ -116,50 +172,54 @@ func TestConsumerDevices(t *testing.T) {
 	}
 	options, err := plugin.GetDevicePluginOptions(context.Background(), &pluginapi.Empty{})
 	require.NoError(t, err)
-	assert.True(t, options.PreStartRequired, "the session is created in PreStartContainer")
+	assert.False(t, options.PreStartRequired, "everything is prepared in Allocate")
 }
 
 func TestConsumerAllocate(t *testing.T) {
 	pod := allocatingPod(t)
 	kubeClient := fake.NewClientset(pod, serverNode(t))
-	plugin, managerDir := newConsumerPlugin(t, kubeClient)
+	// 14.0 is newer than the server, so it must not be picked.
+	artifactsDir := stagedArtifacts(t, "12.9", "14.0")
+	plugin, sessions := newConsumerPlugin(t, kubeClient, artifactsDir)
 
-	resp, err := plugin.Allocate(context.Background(), &pluginapi.AllocateRequest{
-		ContainerRequests: []*pluginapi.ContainerAllocateRequest{{DevicesIds: []string{"remote-vgpu-0"}}},
-	})
+	resp, err := allocateOne(t, plugin, 1)
 
 	require.NoError(t, err)
 	require.Len(t, resp.ContainerResponses, 1)
 	container := resp.ContainerResponses[0]
 
-	// The container is told where its GPUs are and which session they run in.
+	// The container's session was created on the server before it may start.
+	require.Equal(t, []string{remotegpu.SessionToken("pod-uid", "cont1")}, sessions.tokens())
+	assert.Equal(t, remotegpu.PodSession{
+		Token: remotegpu.SessionToken("pod-uid", "cont1"), PodUID: "pod-uid",
+		PodNamespace: "ns", PodName: "remote-pod", ResourceVersion: pod.ResourceVersion,
+	}, sessions.calls[0])
+
+	// It is told where its GPUs are and which session they run in.
 	assert.Equal(t, "http://10.0.0.7:14833", container.Envs[kubeletremote.EnvLupineServer])
 	assert.Equal(t, remotegpu.SessionToken("pod-uid", "cont1"), container.Envs[kubeletremote.EnvLupineSession])
 	assert.Equal(t, "1", container.Envs[kubeletremote.EnvLupineDisableLocal])
 	assert.Equal(t, "void", container.Envs["NVIDIA_VISIBLE_DEVICES"])
 	assert.Equal(t, "cont1", container.Envs[util.ContNameEnv])
 
-	// The client shim and its preload list are mounted from the container's
-	// own directory; PreStartContainer fills them in before the container starts.
+	// The client shim it loads is the newest one not newer than the server.
 	require.Len(t, container.Mounts, 2)
 	assert.Equal(t, &pluginapi.Mount{
 		ContainerPath: filepath.Join(util.ManagerRootPath, util.Driver),
-		HostPath:      "/host/vgpu-manager/pod-uid_cont1/driver",
+		HostPath:      "/host/vgpu-manager/driver/12.9",
 		ReadOnly:      true,
 	}, container.Mounts[0])
 	assert.Equal(t, &pluginapi.Mount{
 		ContainerPath: vgpu.ContPreLoadFilePath,
-		HostPath:      "/host/vgpu-manager/pod-uid_cont1/ld.so.preload",
+		HostPath:      "/host/vgpu-manager/driver/12.9/remote-ld.so.preload",
 		ReadOnly:      true,
 	}, container.Mounts[1])
 	assert.Empty(t, container.Devices, "no local device is injected")
 
-	// PreStartContainer identifies its container by these ids.
-	var deviceIDs []string
-	data, err := os.ReadFile(filepath.Join(managerDir, "pod-uid_cont1", deviceListFileName))
+	// The preload list names the shims by their in-container path.
+	preload, err := os.ReadFile(filepath.Join(artifactsDir, "12.9", "remote-ld.so.preload"))
 	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(data, &deviceIDs))
-	assert.Equal(t, []string{"remote-vgpu-0"}, deviceIDs)
+	assert.Equal(t, "/etc/vgpu-manager/driver/libcuda.so.1\n/etc/vgpu-manager/driver/libnvidia-ml.so.1\n", string(preload))
 
 	// The allocation is recorded on the pod, with the server still reporting it.
 	got, err := kubeClient.CoreV1().Pods("ns").Get(context.Background(), pod.Name, metav1.GetOptions{})
@@ -169,29 +229,86 @@ func TestConsumerAllocate(t *testing.T) {
 	assert.Equal(t, testServerNode, got.Labels[util.PodMetricsNodeLabel])
 }
 
-func TestConsumerAllocateRejectsUnservedPod(t *testing.T) {
-	// A pod whose predicate node is this node is not a remote pod.
-	pod := allocatingPod(t)
-	pod.Annotations[util.PodPredicateNodeAnnotation] = testConsumerNode
-	kubeClient := fake.NewClientset(pod, serverNode(t))
-	plugin, _ := newConsumerPlugin(t, kubeClient)
+// Every container gets its own session, and the pre-allocation says which
+// container each request belongs to -- kubelet's device ids never have to.
+func TestConsumerAllocateEveryContainer(t *testing.T) {
+	pod := allocatingPod(t, "init", "app")
+	plugin, sessions := newConsumerPlugin(t, fake.NewClientset(pod, serverNode(t)), stagedArtifacts(t, "12.9"))
 
-	_, err := plugin.Allocate(context.Background(), &pluginapi.AllocateRequest{
-		ContainerRequests: []*pluginapi.ContainerAllocateRequest{{DevicesIds: []string{"remote-vgpu-0"}}},
-	})
+	resp, err := allocateOne(t, plugin, 2)
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), util.AllocateCheckErrMsg)
-	got, getErr := kubeClient.CoreV1().Pods("ns").Get(context.Background(), pod.Name, metav1.GetOptions{})
-	require.NoError(t, getErr)
-	assert.Equal(t, string(util.AssignPhaseFailed), got.Labels[util.PodAssignedPhaseLabel])
+	require.NoError(t, err)
+	require.Len(t, resp.ContainerResponses, 2)
+	assert.Equal(t, []string{
+		remotegpu.SessionToken("pod-uid", "init"),
+		remotegpu.SessionToken("pod-uid", "app"),
+	}, sessions.tokens())
+	assert.Equal(t, remotegpu.SessionToken("pod-uid", "init"), resp.ContainerResponses[0].Envs[kubeletremote.EnvLupineSession])
+	assert.Equal(t, remotegpu.SessionToken("pod-uid", "app"), resp.ContainerResponses[1].Envs[kubeletremote.EnvLupineSession])
 }
 
-func TestConsumerPreStartContainerNotWiredYet(t *testing.T) {
-	plugin, _ := newConsumerPlugin(t, fake.NewClientset())
+func TestConsumerAllocateFailures(t *testing.T) {
+	// A pod may only start once its session exists and its shim is staged, so
+	// each of these fails admission and marks the pod.
+	tests := map[string]struct {
+		pod          func(*testing.T) *corev1.Pod
+		artifactsDir func(*testing.T) string
+		sessionErr   error
+		wantSessions int
+	}{
+		"no remote GPU server": {
+			pod: func(t *testing.T) *corev1.Pod {
+				pod := allocatingPod(t)
+				pod.Annotations[util.PodPredicateNodeAnnotation] = testConsumerNode
+				return pod
+			},
+			artifactsDir: func(t *testing.T) string { return stagedArtifacts(t, "12.9") },
+		},
+		"no client shim on the node": {
+			pod:          func(t *testing.T) *corev1.Pod { return allocatingPod(t) },
+			artifactsDir: func(t *testing.T) string { return t.TempDir() },
+		},
+		"the agent refuses the session": {
+			pod:          func(t *testing.T) *corev1.Pod { return allocatingPod(t) },
+			artifactsDir: func(t *testing.T) string { return stagedArtifacts(t, "12.9") },
+			sessionErr:   assert.AnError,
+			wantSessions: 1,
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			pod := tt.pod(t)
+			kubeClient := fake.NewClientset(pod, serverNode(t))
+			plugin, sessions := newConsumerPlugin(t, kubeClient, tt.artifactsDir(t))
+			sessions.err = tt.sessionErr
 
-	_, err := plugin.PreStartContainer(context.Background(), &pluginapi.PreStartContainerRequest{})
+			_, err := allocateOne(t, plugin, 1)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), util.AllocateCheckErrMsg)
+			assert.Len(t, sessions.calls, tt.wantSessions)
+			got, getErr := kubeClient.CoreV1().Pods("ns").Get(context.Background(), pod.Name, metav1.GetOptions{})
+			require.NoError(t, getErr)
+			assert.Equal(t, string(util.AssignPhaseFailed), got.Labels[util.PodAssignedPhaseLabel])
+		})
+	}
+}
+
+// A server that has not told the agent its build version yet cannot be used:
+// the client shim must not be newer than the server.
+func TestConsumerAllocateWithoutServerVersion(t *testing.T) {
+	node := serverNode(t)
+	endpoints, err := remotegpu.ServerEndpointInfo{
+		ServerEndpoint: "http://10.0.0.7:14833", AgentEndpoint: "grpc://10.0.0.7:14834",
+	}.Encode()
+	require.NoError(t, err)
+	node.Annotations[util.NodeRemoteEndpointsAnnotation] = endpoints
+	pod := allocatingPod(t)
+	plugin, sessions := newConsumerPlugin(t, fake.NewClientset(pod, node), stagedArtifacts(t, "12.9"))
+
+	_, err = allocateOne(t, plugin, 1)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), util.PreStartContainerCheckErrMsg)
+	assert.Contains(t, err.Error(), "CUDA version")
+	assert.Empty(t, sessions.calls, "nothing is asked for before the shim is settled")
 }

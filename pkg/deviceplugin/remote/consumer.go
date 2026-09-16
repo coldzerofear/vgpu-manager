@@ -16,19 +16,20 @@ limitations under the License.
 
 package remote
 
-// The consumer role: a node with no GPUs that runs remote vGPU pods. kubelet
-// is offered plain slots; the devices of a pod live on the GPU server the
-// scheduler picked. Allocate only tells the container how to reach them and
-// which files it will be given, so pod admission never waits on the network:
-// the session and the client shim are prepared in PreStartContainer, per
-// container, right before it starts.
+// The consumer role: a node with no GPUs of its own that runs remote vGPU
+// pods. kubelet is offered plain slots; the devices of a pod live on the GPU
+// server the scheduler picked for it.
+//
+// Allocate does all the work: it stages the client shim the container loads,
+// creates the container's session on that server, and returns the environment
+// and mounts that tie the two together. PreStartContainer is deliberately not
+// implemented -- kubelet passes device ids only, and a sequential init
+// container's ids may be reused for the app container, so it cannot tell
+// reliably which container it is called for, while Allocate always knows.
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
@@ -36,12 +37,12 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/nodedevice"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/vgpu"
 	kubeletremote "github.com/coldzerofear/vgpu-manager/pkg/kubeletplugin/remote"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
@@ -53,27 +54,20 @@ const (
 	// remoteDeviceIDPrefix prefixes the slot ids offered to kubelet. They
 	// stand for "one remote vGPU this node may run", not for a local device.
 	remoteDeviceIDPrefix = "remote-vgpu"
-	// driverLinkName is the per-container link to the client shim directory,
-	// and ldPreloadFileName the per-container preload list. Both are filled in
-	// by PreStartContainer and bind-mounted into the container.
-	driverLinkName      = util.Driver
-	ldPreloadFileName   = "ld.so.preload"
-	deviceListFileName  = "devices.json"
-	containerDirectory  = 0o777
-	containerDirectoryF = 0o664
 )
 
-// ConsumerConfig is what the consumer plugin needs about this node.
+// ConsumerConfig is what the consumer plugin needs to know about this node.
 type ConsumerConfig struct {
 	NodeName     string
 	ResourceName string
 	Socket       string
 	// VGPUNumber is how many remote vGPUs this node runs at a time.
 	VGPUNumber int
-	// ManagerDir is this process's view of the manager directory,
-	// HostManagerDir the host's; the latter is what mounts refer to.
-	ManagerDir     string
-	HostManagerDir string
+	// ArtifactsDir holds the client shims, one directory per CUDA version, as
+	// this process sees them; HostArtifactsDir is the same directory as the
+	// host sees it, which is what a mount must refer to.
+	ArtifactsDir     string
+	HostArtifactsDir string
 }
 
 type consumerDevicePlugin struct {
@@ -83,42 +77,68 @@ type consumerDevicePlugin struct {
 	cfg        ConsumerConfig
 	devices    []*pluginapi.Device
 	mutex      sync.Mutex
+	// ensureSession asks an agent for one container's session; overridden in
+	// tests, where no agent is there to ask.
+	ensureSession func(ctx context.Context, agentEndpoint string, session remotegpu.PodSession) (string, error)
 }
 
 var _ base.DevicePlugin = &consumerDevicePlugin{}
 
 // NewConsumerDevicePlugin returns the device plugin of a remote consumer node.
 func NewConsumerDevicePlugin(cfg ConsumerConfig, devManager *manager.DeviceManager, kubeClient kubernetes.Interface) base.DevicePlugin {
-	devices := make([]*pluginapi.Device, 0, cfg.VGPUNumber)
-	for i := 0; i < cfg.VGPUNumber; i++ {
+	// A node that also serves its own GPUs remotely keeps at least as many
+	// slots as those GPUs offer, so its local capacity is never the smaller
+	// of the two (analysis §16.6).
+	localSlots := 0
+	for _, dev := range devManager.GetNodeDeviceInfo() {
+		if !dev.Mig {
+			localSlots += dev.Number
+		}
+	}
+	slots := max(cfg.VGPUNumber, localSlots)
+	devices := make([]*pluginapi.Device, 0, slots)
+	for i := 0; i < slots; i++ {
 		devices = append(devices, &pluginapi.Device{
 			ID:     fmt.Sprintf("%s-%d", remoteDeviceIDPrefix, i),
 			Health: pluginapi.Healthy,
 		})
 	}
 	return &consumerDevicePlugin{
-		baseServer: base.NewBasePluginServer(cfg.ResourceName, cfg.Socket, devManager),
-		kubeClient: kubeClient,
-		cfg:        cfg,
-		devices:    devices,
+		baseServer:    base.NewBasePluginServer(cfg.ResourceName, cfg.Socket, devManager),
+		kubeClient:    kubeClient,
+		cfg:           cfg,
+		devices:       devices,
+		ensureSession: remotegpu.EnsureSession,
 	}
 }
 
 func (m *consumerDevicePlugin) Name() string { return consumerPluginName }
 
-func (m *consumerDevicePlugin) Start() error { return m.baseServer.Start(m.Name(), m) }
+func (m *consumerDevicePlugin) Start() error {
+	err := m.baseServer.Start(m.Name(), m)
+	if err == nil {
+		// A node that serves its own GPUs remotely as well publishes them for
+		// the scheduler; a node without GPUs publishes nothing.
+		nodedevice.Setup(m.Name(), m.baseServer.GetDeviceManager())
+	}
+	return err
+}
 
-func (m *consumerDevicePlugin) Stop() error { return m.baseServer.Stop(m.Name()) }
+func (m *consumerDevicePlugin) Stop() error {
+	err := m.baseServer.Stop(m.Name())
+	nodedevice.Remove(m.Name(), m.baseServer.GetDeviceManager())
+	return err
+}
 
 // Devices are slots, not hardware: they never turn unhealthy on this node.
 // Whether a remote GPU can serve a pod is the scheduler's decision, made from
 // the server node's own registry.
 func (m *consumerDevicePlugin) Devices() []*pluginapi.Device { return m.devices }
 
-// GetDevicePluginOptions asks kubelet for PreStartContainer: the session on
-// the GPU server is created there, per container.
+// GetDevicePluginOptions asks for nothing: everything a remote container needs
+// is prepared in Allocate.
 func (m *consumerDevicePlugin) GetDevicePluginOptions(_ context.Context, _ *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
-	return &pluginapi.DevicePluginOptions{PreStartRequired: true}, nil
+	return &pluginapi.DevicePluginOptions{}, nil
 }
 
 // ListAndWatch sends the slot list once: it never changes while the plugin runs.
@@ -135,9 +155,9 @@ func (m *consumerDevicePlugin) GetPreferredAllocation(_ context.Context, _ *plug
 	return &pluginapi.PreferredAllocationResponse{}, nil
 }
 
-// Allocate hands the container what it needs to reach its remote GPUs: the
-// server address and its session token, plus the mounts PreStartContainer
-// fills in. It talks to no one but the apiserver.
+// Allocate prepares each container of the pod kubelet is admitting: its
+// session on the remote GPU server and the client shim it loads, then returns
+// the environment and mounts that connect them.
 func (m *consumerDevicePlugin) Allocate(ctx context.Context, req *pluginapi.AllocateRequest) (resp *pluginapi.AllocateResponse, err error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -175,7 +195,7 @@ func (m *consumerDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Allo
 		if len(containerRequest.GetDevicesIds()) != len(contClaim.DeviceClaims) {
 			return resp, fmt.Errorf("requested number of devices does not match")
 		}
-		if responses[i], err = m.containerResponse(currentPod, contClaim, server, containerRequest.GetDevicesIds()); err != nil {
+		if responses[i], err = m.containerResponse(ctx, currentPod, contClaim, server); err != nil {
 			return resp, err
 		}
 		if err = device.UpdatePodRealContainerDeviceClaim(currentPod, *contClaim); err != nil {
@@ -190,19 +210,20 @@ func (m *consumerDevicePlugin) Allocate(ctx context.Context, req *pluginapi.Allo
 	return resp, nil
 }
 
-// containerResponse is what one container is given: the remote environment and
-// the two paths PreStartContainer fills in before the container starts.
+// containerResponse prepares one container and describes what it gets: the
+// client shim, the preload list that makes it load, and the address and
+// session of the server holding its GPUs.
 func (m *consumerDevicePlugin) containerResponse(
-	pod *corev1.Pod, contClaim *device.ContainerDeviceClaim,
-	server *remotegpu.ServerEndpointInfo, deviceIDs []string,
+	ctx context.Context, pod *corev1.Pod,
+	contClaim *device.ContainerDeviceClaim, server *remotegpu.ServerEndpointInfo,
 ) (*pluginapi.ContainerAllocateResponse, error) {
-	contDir, hostDir := m.containerPaths(pod.UID, contClaim.Name)
-	if err := util.EnsureDir(contDir, containerDirectory); err != nil {
-		return nil, fmt.Errorf("prepare directory %s: %w", contDir, err)
+	artifact, err := m.stageClientShim(server)
+	if err != nil {
+		return nil, err
 	}
-	// PreStartContainer identifies the container it is called for by these ids.
-	if err := writeJSONFile(filepath.Join(contDir, deviceListFileName), deviceIDs, containerDirectoryF); err != nil {
-		return nil, fmt.Errorf("write %s failed: %w", deviceListFileName, err)
+	session := m.podSession(pod, contClaim.Name)
+	if _, err = m.ensureSession(ctx, server.AgentEndpoint, session); err != nil {
+		return nil, fmt.Errorf("prepare the remote session of container %s: %w", contClaim.Name, err)
 	}
 
 	response := &pluginapi.ContainerAllocateResponse{Envs: map[string]string{
@@ -211,23 +232,34 @@ func (m *consumerDevicePlugin) containerResponse(
 		util.PodUIDEnv:       string(pod.UID),
 		util.ContNameEnv:     contClaim.Name,
 		// No local GPU is injected; every CUDA call goes to the server.
-		"NVIDIA_VISIBLE_DEVICES":              "void",
-		kubeletremote.EnvLupineDisableLocal:   "1",
-		kubeletremote.EnvLupineServer:         server.ServerEndpoint,
-		kubeletremote.EnvLupineSession:        remotegpu.SessionToken(string(pod.UID), contClaim.Name),
-		kubeletremote.EnvLupineClientPlatform: kubeletremote.LocalClientBundlePlatform(),
+		"NVIDIA_VISIBLE_DEVICES":            "void",
+		kubeletremote.EnvLupineDisableLocal: "1",
+		kubeletremote.EnvLupineServer:       server.ServerEndpoint,
+		kubeletremote.EnvLupineSession:      session.Token,
 	}}
+	if artifact.ETag != "" {
+		// Lets the server check that this client is the build it embeds.
+		response.Envs[kubeletremote.EnvLupineClientETag] = artifact.ETag
+		response.Envs[kubeletremote.EnvLupineClientPlatform] = kubeletremote.LocalClientBundlePlatform()
+	}
 	response.Mounts = []*pluginapi.Mount{{
-		// The client shim libraries, linked to the version this server needs.
-		ContainerPath: filepath.Join(util.ManagerRootPath, util.Driver),
-		HostPath:      filepath.Join(hostDir, driverLinkName),
+		// The client shim libraries.
+		ContainerPath: artifact.ContainerDir,
+		HostPath:      artifact.HostDir,
 		ReadOnly:      true,
 	}, {
-		// The preload list that makes them load, without touching the image.
+		// The preload list that makes them load, leaving the image untouched.
 		ContainerPath: vgpu.ContPreLoadFilePath,
-		HostPath:      filepath.Join(hostDir, ldPreloadFileName),
+		HostPath:      artifact.LdPreloadHost,
 		ReadOnly:      true,
 	}}
+	if artifact.NvidiaSMIHost != "" {
+		response.Mounts = append(response.Mounts, &pluginapi.Mount{
+			ContainerPath: "/usr/bin/nvidia-smi",
+			HostPath:      artifact.NvidiaSMIHost,
+			ReadOnly:      true,
+		})
+	}
 	return response, nil
 }
 
@@ -253,29 +285,4 @@ func (m *consumerDevicePlugin) serverEndpoints(ctx context.Context, pod *corev1.
 		return nil, fmt.Errorf("get remote GPU server node %s: %w", serverName, err)
 	}
 	return remotegpu.GetServerEndpointInfo(node)
-}
-
-// containerPaths is the per-container directory, as this process and as the
-// host see it.
-func (m *consumerDevicePlugin) containerPaths(podUID k8stypes.UID, contName string) (contDir, hostDir string) {
-	return util.GetPodContainerManagerPath(m.cfg.ManagerDir, podUID, contName),
-		util.GetPodContainerManagerPath(m.cfg.HostManagerDir, podUID, contName)
-}
-
-// PreStartContainer creates the container's session on the GPU server and
-// stages its client shim.
-//
-// TODO(S4.3): not wired yet. Until it is, a remote pod must not start: it
-// would have no session and its CUDA calls would be refused by the server.
-func (m *consumerDevicePlugin) PreStartContainer(_ context.Context, _ *pluginapi.PreStartContainerRequest) (*pluginapi.PreStartContainerResponse, error) {
-	return &pluginapi.PreStartContainerResponse{},
-		fmt.Errorf("%s: remote sessions are not wired yet", util.PreStartContainerCheckErrMsg)
-}
-
-func writeJSONFile(path string, value any, mode os.FileMode) error {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, mode)
 }

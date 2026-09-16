@@ -186,3 +186,37 @@ func ensureLdPreloadFile(artifactsDir string, sel *artifactSelection) (string, e
 	}
 	return filepath.Join(sel.HostDir, RemoteLdPreload), nil
 }
+
+// ClientArtifact is a client shim directory staged for one server, ready to be
+// bind-mounted into a container.
+type ClientArtifact struct {
+	// Name is the version directory as found on disk.
+	Name string
+	// HostDir and ContainerDir are the mount source and target of the shims.
+	HostDir      string
+	ContainerDir string
+	// LdPreloadHost is the host path of the preload list that makes them load.
+	LdPreloadHost string
+	// NvidiaSMIHost is the nvidia-smi shipped with the shims, "" when absent.
+	NvidiaSMIHost string
+	// ETag identifies the bundle the directory came from, "" when unknown.
+	ETag string
+}
+
+// StageClientArtifact picks the newest client shim that is not newer than the
+// server (a client must never be ahead of it) and writes its preload list.
+// The artifacts must already be on the node: this only selects and prepares.
+func StageClientArtifact(artifactsDir, hostArtifactsDir string, serverCUDAVersion *semver.Version) (*ClientArtifact, error) {
+	selection, err := selectArtifact(artifactsDir, hostArtifactsDir, serverCUDAVersion)
+	if err != nil {
+		return nil, err
+	}
+	ldPreloadHost, err := ensureLdPreloadFile(artifactsDir, selection)
+	if err != nil {
+		return nil, err
+	}
+	return &ClientArtifact{
+		Name: selection.Name, HostDir: selection.HostDir, ContainerDir: selection.ContainerDir,
+		LdPreloadHost: ldPreloadHost, NvidiaSMIHost: selection.NvidiaSMIHost, ETag: selection.ETag,
+	}, nil
+}

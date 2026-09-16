@@ -40,6 +40,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/base"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/cdi"
 	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/checkpoint"
+	"github.com/coldzerofear/vgpu-manager/pkg/deviceplugin/nodedevice"
 	"github.com/coldzerofear/vgpu-manager/pkg/scheduler/preempt"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/coldzerofear/vgpu-manager/pkg/version"
@@ -51,11 +52,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
 	cache2 "k8s.io/client-go/tools/cache"
-	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 	"k8s.io/kubelet/pkg/apis/podresources/v1alpha1"
-	"k8s.io/utils/pointer"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 )
@@ -131,8 +130,7 @@ func (m *vNumberDevicePlugin) Name() string {
 func (m *vNumberDevicePlugin) Start() error {
 	err := m.baseServer.Start(m.Name(), m)
 	if err == nil {
-		m.baseServer.GetDeviceManager().AddRegistryFunc(m.Name(), m.registryDevices)
-		m.baseServer.GetDeviceManager().AddCleanupRegistryFunc(m.Name(), m.cleanupRegistry)
+		nodedevice.Setup(m.Name(), m.baseServer.GetDeviceManager())
 		if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.DevicePluginClientMode) {
 			if err = m.server.Start(); err != nil {
 				klog.ErrorS(err, "DeviceRegistryServer failed to start")
@@ -145,103 +143,11 @@ func (m *vNumberDevicePlugin) Start() error {
 // Stop stops the gRPC server.
 func (m *vNumberDevicePlugin) Stop() error {
 	err := m.baseServer.Stop(m.Name())
-	m.baseServer.GetDeviceManager().RemoveRegistryFunc(m.Name())
-	m.baseServer.GetDeviceManager().RemoveCleanupRegistryFunc(m.Name())
+	nodedevice.Remove(m.Name(), m.baseServer.GetDeviceManager())
 	if m.baseServer.GetDeviceManager().GetFeatureGate().Enabled(util.DevicePluginClientMode) {
 		m.server.Stop()
 	}
 	return err
-}
-
-var (
-	encodeNodeConfigInfo   string
-	encodeNodeTopologyInfo string
-)
-
-func (m *vNumberDevicePlugin) getEncodeNodeTopologyInfo() (string, error) {
-	if encodeNodeTopologyInfo == "" {
-		nodeTopologyInfo := m.baseServer.GetDeviceManager().GetNodeTopologyInfo()
-		info, err := nodeTopologyInfo.Encode()
-		if err != nil {
-			return "", fmt.Errorf("encoding node topology information failed: %v", err)
-		}
-		klog.V(3).Infof("node GPU topology information: %s", info)
-		encodeNodeTopologyInfo = info
-	}
-	return encodeNodeTopologyInfo, nil
-}
-
-func (m *vNumberDevicePlugin) getDecodeNodeConfigInfo() (string, error) {
-	if encodeNodeConfigInfo == "" {
-		nodeConfigInfo := device.NodeConfigInfo{
-			DeviceSplit:   m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceSplitCount(),
-			CoresScaling:  m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceCoresScaling(),
-			MemoryFactor:  m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceMemoryFactor(),
-			MemoryScaling: m.baseServer.GetDeviceManager().GetNodeConfig().GetDeviceMemoryScaling(),
-		}
-		info, err := nodeConfigInfo.Encode()
-		if err != nil {
-			return "", fmt.Errorf("encoding node configuration information failed: %v", err)
-		}
-		klog.V(3).Infof("node GPU configuration information: %s", info)
-		encodeNodeConfigInfo = info
-	}
-	return encodeNodeConfigInfo, nil
-}
-
-func (m *vNumberDevicePlugin) registryDevices(featureGate featuregate.FeatureGate) (*client.PatchMetadata, error) {
-	registryGPUs, err := m.baseServer.GetDeviceManager().GetNodeDeviceInfo().Encode()
-	if err != nil {
-		return nil, fmt.Errorf("encoding node device information failed: %v", err)
-	}
-	var registryGPUTopology *string
-	if featureGate.Enabled(util.TopologyAwareGPUAllocation) {
-		gpuTopology, err := m.getEncodeNodeTopologyInfo()
-		if err != nil {
-			return nil, err
-		}
-		registryGPUTopology = &gpuTopology
-	}
-	nodeConfigEncode, err := m.getDecodeNodeConfigInfo()
-	if err != nil {
-		return nil, err
-	}
-	driverVersion := m.baseServer.GetDeviceManager().GetDriverVersion().DriverVersion
-	cudaDriverVersion := m.baseServer.GetDeviceManager().GetDriverVersion().CudaDriverVersion.String()
-	major, minor := m.baseServer.GetDeviceManager().GetDriverVersion().CudaDriverVersion.MajorAndMinor()
-	metadata := client.PatchMetadata{
-		Annotations: map[string]*string{
-			util.NodeConfigInfoAnnotation:     pointer.String(nodeConfigEncode),
-			util.NodeDeviceRegisterAnnotation: pointer.String(registryGPUs),
-			util.NodeDeviceTopologyAnnotation: registryGPUTopology,
-		},
-		Labels: map[string]*string{
-			util.NodeNvidiaDriverVersionLabel: pointer.String(driverVersion),
-			util.NodeNvidiaCudaVersionLabel:   pointer.String(cudaDriverVersion),
-			util.NodeNvidiaCudaMajorLabel:     pointer.String(strconv.Itoa(int(major))),
-			util.NodeNvidiaCudaMinorLabel:     pointer.String(strconv.Itoa(int(minor))),
-		},
-	}
-	return &metadata, nil
-}
-
-func (m *vNumberDevicePlugin) cleanupRegistry(_ featuregate.FeatureGate) (*client.PatchMetadata, error) {
-	metadata := client.PatchMetadata{
-		Annotations: map[string]*string{
-			// TODO Reserved for cleaning up after upgrading
-			util.NodeDeviceHeartbeatAnnotation: nil,
-			util.NodeDeviceRegisterAnnotation:  nil,
-			util.NodeDeviceTopologyAnnotation:  nil,
-			util.NodeConfigInfoAnnotation:      nil,
-		},
-		Labels: map[string]*string{
-			util.NodeNvidiaDriverVersionLabel: nil,
-			util.NodeNvidiaCudaVersionLabel:   nil,
-			util.NodeNvidiaCudaMajorLabel:     nil,
-			util.NodeNvidiaCudaMinorLabel:     nil,
-		},
-	}
-	return &metadata, nil
 }
 
 // GetDevicePluginOptions returns options to be communicated with Device Manager.
