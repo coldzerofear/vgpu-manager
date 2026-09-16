@@ -105,6 +105,8 @@ spec:
           command: [sh, -c]
           args:
             - mkdir -p /target/13.3.1 && cp -a /artifacts/. /target/13.3.1/
+          securityContext:
+            privileged: true
           volumeMounts:
             - name: client-artifacts
               mountPath: /target
@@ -115,6 +117,8 @@ spec:
           command: [sh, -c]
           args:
             - mkdir -p /target/12.9.1 && cp -a /artifacts/. /target/12.9.1/
+          securityContext:
+            privileged: true
           volumeMounts:
             - name: client-artifacts
               mountPath: /target
