@@ -146,7 +146,7 @@ spec:
               value: /var/run/cdi
             - name: NRI_ROOT
               value: /var/run/nri
-            - name: NRI_PLUGIN_IDX
+            - name: NRI_PLUGIN_INDEX
               value: "00"
             - name: HOST_MANAGER_DIR
               value: /etc/vgpu-manager

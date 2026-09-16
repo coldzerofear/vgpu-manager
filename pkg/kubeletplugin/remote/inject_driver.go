@@ -561,7 +561,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 	edits := map[string]*cdiapi.ContainerEdits{}
 	idOf := map[int]string{} // index into devices -> CDI device id
 	if nriMode {
-		containerEdits := &cdispec.ContainerEdits{Env: append(baseEnv, nriClaimEnv(claim)), Mounts: mounts}
+		containerEdits := &cdispec.ContainerEdits{Env: append(baseEnv, nri.NRIClaimEnv(claim)), Mounts: mounts}
 		for i, rd := range devices {
 			id := cdiDeviceID(rd, i)
 			edits[id] = &cdiapi.ContainerEdits{ContainerEdits: containerEdits}
@@ -575,6 +575,7 @@ func (d *InjectDriver) prepareClaim(ctx context.Context, claim *resourceapi.Reso
 		// them belong to one partition, so the env never collides within a
 		// container.
 		ordinal := 0
+		baseEnv = append(baseEnv, nri.NRIClaimEnv(nil))
 		for _, s := range sessions {
 			partitionEdits := &cdispec.ContainerEdits{Env: append(s.env, baseEnv...), Mounts: mounts}
 			for _, rd := range s.results {

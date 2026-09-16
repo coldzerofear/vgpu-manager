@@ -236,9 +236,9 @@ func (m *VGPUManager) GetClaimCommonContainerEdits(claim *resourceapi.ResourceCl
 	// v0.12.3. See the package comment in pkg/kubeletplugin/nri for the details
 	// and for what changes when the upstream work lands.
 	if featuregates.Enabled(featuregates.NRISupport) {
-		envs = append(envs, fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, string(claim.UID)))
+		envs = append(envs, nri.NRIClaimEnv(claim))
 	} else {
-		envs = append(envs, fmt.Sprintf("%s=", util.ManagerVGpuClaimUid))
+		envs = append(envs, nri.NRIClaimEnv(nil))
 	}
 	hostLibraryPath := filepath.Join(m.hostManagerPath, util.Driver, vgpu.VGPUControlFileName)
 	hostLibraryPath = fmt.Sprintf("%s.%s", hostLibraryPath, version.Get().Version)
