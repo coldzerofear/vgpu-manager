@@ -119,12 +119,15 @@ func stagedArtifacts(t *testing.T, versions ...string) string {
 // ensuredSessions records what the plugin asked the agent for.
 type ensuredSessions struct {
 	calls []remotegpu.PodSession
-	err   error
+	// endpoint is the lupine-server address the agent answers with; empty
+	// means it knows none and the published one has to do.
+	endpoint string
+	err      error
 }
 
 func (e *ensuredSessions) ensure(_ context.Context, _ string, session remotegpu.PodSession) (string, error) {
 	e.calls = append(e.calls, session)
-	return "", e.err
+	return e.endpoint, e.err
 }
 
 func (e *ensuredSessions) tokens() []string {
@@ -316,4 +319,19 @@ func TestConsumerAllocateWithoutServerVersion(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "CUDA version")
 	assert.Empty(t, sessions.calls, "nothing is asked for before the shim is settled")
+}
+
+// The node annotation is only how the agent is found: where lupine-server is
+// right now is what the agent answers, and that is what the container is told.
+func TestConsumerAllocateUsesAgentReportedServer(t *testing.T) {
+	pod := allocatingPod(t)
+	plugin, sessions := newConsumerPlugin(t, fake.NewClientset(pod, serverNode(t)), stagedArtifacts(t, "12.9"))
+	sessions.endpoint = "http://10.0.0.9:14999"
+
+	resp, err := allocateOne(t, plugin, 1)
+
+	require.NoError(t, err)
+	require.Len(t, resp.ContainerResponses, 1)
+	assert.Equal(t, sessions.endpoint, resp.ContainerResponses[0].Envs[kubeletremote.EnvLupineServer],
+		"the address the agent reports wins over the one the node published")
 }

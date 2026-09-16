@@ -142,9 +142,26 @@ func (m *consumerRole) containerResponse(
 	if err != nil {
 		return nil, err
 	}
+	// The node annotation is how the agent is found; the agent is what says
+	// where lupine-server is right now. Publishing lags a server that moved
+	// or restarted on another port, so the container is given the address the
+	// agent reports and the published one only as a fallback.
 	session := m.podSession(pod, contClaim.Name)
-	if _, err = m.ensureSession(ctx, server.AgentEndpoint, session); err != nil {
+	serverEndpoint, err := m.ensureSession(ctx, server.AgentEndpoint, session)
+	if err != nil {
 		return nil, fmt.Errorf("prepare the remote session of container %s: %w", contClaim.Name, err)
+	}
+	switch {
+	case serverEndpoint == "":
+		serverEndpoint = server.ServerEndpoint
+	case server.ServerEndpoint != "" && serverEndpoint != server.ServerEndpoint:
+		klog.V(2).InfoS("remote-agent reports another lupine-server address than the node publishes; using the agent's",
+			"pod", klog.KObj(pod), "container", contClaim.Name, "agent", server.AgentEndpoint,
+			"reported", serverEndpoint, "published", server.ServerEndpoint)
+	}
+	if serverEndpoint == "" {
+		return nil, fmt.Errorf("container %s: remote-agent %s reports no lupine-server endpoint and none is published for node %s",
+			contClaim.Name, server.AgentEndpoint, util.PodPlanSchedulingNode(pod))
 	}
 
 	response := &pluginapi.ContainerAllocateResponse{Envs: map[string]string{
@@ -155,7 +172,7 @@ func (m *consumerRole) containerResponse(
 		// No local GPU is injected; every CUDA call goes to the server.
 		"NVIDIA_VISIBLE_DEVICES":            "void",
 		kubeletremote.EnvLupineDisableLocal: "1",
-		kubeletremote.EnvLupineServer:       server.ServerEndpoint,
+		kubeletremote.EnvLupineServer:       serverEndpoint,
 		kubeletremote.EnvLupineSession:      session.Token,
 	}}
 	if artifact.ETag != "" {

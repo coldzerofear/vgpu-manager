@@ -1058,6 +1058,11 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
   main 的启动循环重跑。两个角色的 socket 路径必须不同（`nvidia-vgpu-remote.sock` / `nvidia-vgpu-remote-server.sock`）：
   任一进程 `Stop` 都会 unlink 自己的 socket 路径，同路径会把对方的 socket 文件删掉。
   切换期间不会中断：kubelet 对已 stop 的 endpoint 有 5 分钟量级的宽限期，期内重新注册直接恢复。
+- **消费侧的 lupine-server 地址以 agent 为准**（2026-09-16 用户要求）：节点注解只用来找到 agent，`EnsureSession`
+  的应答里带着当前的 lupine-server 地址，`Allocate` 把它注入 `LUPINE_SERVER`，注解里的值只作为兜底（agent 没报时）；
+  两者不一致时打 V(2) 日志说明用了 agent 的。与 DRA 的 inject 插件一致。服务不可用时的"摘除"沿用既有机制：
+  探测失败即发布 `remotegpu.UnreachableServerEndpointInfo`（`{}`），`CheckNode` 解出 `ErrServerUnreachable`
+  就以 `NodeRemoteServerUnreachable` 跳过该节点，不需要额外的健康字段或标签翻转。
 - **退出时不主动清理 `vgpu-number`**（2026-09-16 用户拍板）：插件退出会删掉设备注册注解与驱动标签，调度器在
   `CheckNode` 里拿不到 `node-device-register` 就以 `NodeNoVGPURegister` 跳过该节点，不必等 kubelet 把可分配数归零。
 - 注意与现有校验的出入：本节表格里"纯服务器按 feature gate 注册 cores/memory"目前做不到——`options.Validate()` 规定
