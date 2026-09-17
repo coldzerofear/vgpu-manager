@@ -502,9 +502,8 @@ func CheckTaskResourceInfo(taskPath *field.Path, task *vcv1alpha1.TaskSpec, info
 		return container, nil
 	}
 
-	return nil, field.ErrorList{field.Invalid(
-		taskPath.Child("template").Child("metadata").Child("annotations").
-			Child(util.DRAOriResAnnotation).Index(infoIndex).Child("containerName"),
+	return nil, field.ErrorList{field.Invalid(taskPath.Child("template").Child("metadata").
+		Child("annotations").Child(util.DRAOriResAnnotation).Index(infoIndex).Child("name"),
 		resourceInfo.Name, "container not found"),
 	}
 }
@@ -533,5 +532,5 @@ func CheckResourceInfo(pod *corev1.Pod, infoIndex int, resourceInfo ResourceInfo
 	}
 	return nil, apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, field.ErrorList{
 		field.Invalid(field.NewPath("metadata").Child("annotations").Child(util.DRAOriResAnnotation).
-			Index(infoIndex).Child("containerName"), resourceInfo.Name, "container not found")})
+			Index(infoIndex).Child("name"), resourceInfo.Name, "container not found")})
 }
