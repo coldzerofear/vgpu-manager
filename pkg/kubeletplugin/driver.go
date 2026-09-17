@@ -879,10 +879,8 @@ func (d *driver) startNRIPlugin(ctx context.Context, config *Config) error {
 	}
 	socketPath = filepath.Clean(socketPath)
 	plugin, err := nri.NewPlugin(nri.Config{
-		SocketPath: socketPath,
-		PluginName: util.DRADriverName,
-		// Empty falls back to "00" inside NewPlugin. Validated at startup in
-		// validateCLIFlags when non-empty.
+		SocketPath:          socketPath,
+		PluginName:          util.DRADriverName,
 		PluginIdx:           config.Flags.NRIPluginIdx,
 		ContainerManagerDir: config.Flags.ContainerManagerDir,
 		Cache:               d.nriCache,

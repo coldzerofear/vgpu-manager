@@ -69,6 +69,7 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/klog/v2"
 )
 
@@ -106,6 +107,16 @@ var envPrefixesOfInterest = []string{"MANAGER_", "VGPU_", "CUDA_", "LD_PRELOAD",
 var mountDestsOfInterest = []string{
 	"/etc/vgpu-manager/config", "/etc/vgpu-manager/registry", "/etc/vgpu-manager/driver",
 	"/etc/ld.so.preload", "/tmp/.vgpu_lock", "/tmp/.vmem_node", "/tmp/.sm_node",
+}
+
+// NRIClaimEnv is the CDI env NodePrepare injects in NRI mode so the plugin
+// can correlate the container back to its claim.
+func NRIClaimEnv(claim *resourceapi.ResourceClaim) string {
+	claimUid := ""
+	if claim != nil {
+		claimUid = string(claim.UID)
+	}
+	return fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, claimUid)
 }
 
 // Config configures the in-process NRI plugin.
@@ -211,10 +222,6 @@ func NewPlugin(cfg Config) (*Plugin, error) {
 	if name == "" {
 		name = util.DRADriverName
 	}
-	idx := cfg.PluginIdx
-	if idx == "" {
-		idx = "00"
-	}
 	grace := cfg.FailureGracePeriod
 	if grace <= 0 {
 		grace = defaultFailureGracePeriod
@@ -235,8 +242,10 @@ func NewPlugin(cfg Config) (*Plugin, error) {
 	}
 	opts := []stub.Option{
 		stub.WithPluginName(name),
-		stub.WithPluginIdx(idx),
 		stub.WithOnClose(p.onClose),
+	}
+	if cfg.PluginIdx != "" {
+		opts = append(opts, stub.WithPluginIdx(cfg.PluginIdx))
 	}
 	if cfg.SocketPath != "" {
 		opts = append(opts, stub.WithSocketPath(cfg.SocketPath))

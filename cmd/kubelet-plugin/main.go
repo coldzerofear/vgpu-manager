@@ -201,11 +201,11 @@ func newApp() *cli.App {
 			EnvVars:     []string{"NRI_SOCKET"},
 		},
 		&cli.StringFlag{
-			Name:        "nri-plugin-idx",
+			Name:        "nri-plugin-index",
 			Usage:       "Specify the plugin index to register to NRI",
 			Value:       "00",
 			Destination: &flags.NRIPluginIdx,
-			EnvVars:     []string{"NRI_PLUGIN_IDX"},
+			EnvVars:     []string{"NRI_PLUGIN_INDEX"},
 		},
 		&cli.StringFlag{
 			Name:        "plugin-mode",
@@ -355,10 +355,8 @@ func validateCLIFlags(flags *pkgkubeletplugin.Flags) error {
 	// otherwise rejects a bad index at registration time, which surfaces as an
 	// obscure reconnect-loop failure rather than a clear startup error.
 	if featuregates.Enabled(featuregates.NRISupport) {
-		if flags.NRIPluginIdx != "" {
-			if err := nri.ValidatePluginIdx(flags.NRIPluginIdx); err != nil {
-				return fmt.Errorf("invalid --nri-plugin-idx %q: %w", flags.NRIPluginIdx, err)
-			}
+		if err := nri.ValidatePluginIdx(flags.NRIPluginIdx); err != nil {
+			return fmt.Errorf("invalid --nri-plugin-index %q: %w", flags.NRIPluginIdx, err)
 		}
 		if util.PathIsNotExist(flags.NRIRoot) {
 			return fmt.Errorf("invalid --nri-root %q: directory does not exist", flags.NRIRoot)

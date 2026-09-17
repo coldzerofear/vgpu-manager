@@ -224,12 +224,6 @@ func (d *InjectDriver) nriInjection(ctx context.Context, claimUID, podName, podN
 	}, nil
 }
 
-// nriClaimEnv is the CDI env NodePrepare injects in NRI mode so the plugin
-// can correlate the container back to its claim.
-func nriClaimEnv(claim *resourceapi.ResourceClaim) string {
-	return fmt.Sprintf("%s=%s", util.ManagerVGpuClaimUid, claim.UID)
-}
-
 // preparedCheckpointFile records the NRI-mode prepared claims across plugin
 // restarts. The kubelet does not re-run NodePrepare for claims it already
 // holds prepared, yet containers of those pods keep being (re)created and
