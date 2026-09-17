@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -39,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/net"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	k8scache "k8s.io/client-go/tools/cache"
 	"k8s.io/component-helpers/resource"
@@ -861,4 +863,53 @@ func SafeDiv(a, b float64) float64 {
 		return 0
 	}
 	return a / b
+}
+
+// PodVGPUAccessMode returns the vGPU access mode a pod (or pod template) asks
+// for via VGPUAccessModeAnnotation: AccessModeLocal when absent, an error for
+// any other value than local/remote.
+func PodVGPUAccessMode(obj metav1.Object) (string, error) {
+	mode, _ := HasAnnotation(obj, VGPUAccessModeAnnotation)
+	if mode != "" {
+		mode = strings.ToLower(strings.TrimSpace(mode))
+	}
+	switch mode {
+	case "":
+		return AccessModeLocal, nil
+	case AccessModeLocal, AccessModeRemote:
+		return mode, nil
+	default:
+		return AccessModeLocal, fmt.Errorf("invalid annotation %s=%q: must be %q or %q",
+			VGPUAccessModeAnnotation, mode, AccessModeLocal, AccessModeRemote)
+	}
+}
+
+// NRIPartitionKey is the per-container partition key used by the NRI paths
+// (local and remote): the name of the per-container partition directory and
+// the remote per-container session. Defined here because both
+// pkg/kubeletplugin/nri and pkg/kubeletplugin/remote need it (remote imports
+// nri, so neither can host it for the other).
+func NRIPartitionKey(podUID, containerName string) string {
+	return podUID + "_" + containerName
+}
+
+func AddContainerRequiredNRIPluginAnnotations(obj metav1.Object, container string, plugins ...string) error {
+	if len(plugins) > 0 {
+		pluginSet := sets.NewString(plugins...)
+		annoKey := RequiredNRIPluginsContainerAnnotation(container)
+		if val, _ := HasAnnotation(obj, annoKey); val != "" {
+			var pluginNames []string
+			if err := json.Unmarshal([]byte(val), &pluginNames); err != nil {
+				return fmt.Errorf("failed to parse the list of required plugins %q: %w", val, err)
+			}
+			pluginSet.Insert(pluginNames...)
+		}
+		pluginNames := pluginSet.List()
+		bytes, err := json.Marshal(pluginNames)
+		if err != nil {
+			return fmt.Errorf("failed to serialize required plugins %v: %w", pluginNames, err)
+		}
+		InsertAnnotation(obj, annoKey, string(bytes))
+	}
+	return nil
 }

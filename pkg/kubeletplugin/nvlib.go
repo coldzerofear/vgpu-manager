@@ -549,7 +549,7 @@ func (l deviceLib) obliterateStaleMIGDevices(expectedDeviceNames []DeviceName) e
 		// If no MIG device was found on this GPU, MIG mode might still be
 		// enabled. Disable it in this case.
 		if err := l.maybeDisableMigMode(ginfo.UUID, d); err != nil {
-			return fmt.Errorf("maybeDisableMigMode failed for GPU %s: %w", ginfo.UUID, err)
+			return fmt.Errorf("failed to disable MIG mode for %s (maybeDisableMigMode): %w", ginfo.UUID, err)
 		}
 		return nil
 	})
@@ -888,7 +888,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 
 	// UNINITIALIZED, INVALID_ARGUMENT, NO_PERMISSION
 	if gires != nvml.SUCCESS && gires != nvml.ERROR_NOT_FOUND {
-		return fmt.Errorf("error getting GPU instance handle for MIG device: %w", ret)
+		return fmt.Errorf("error getting GPU instance handle for MIG device %s: %w", migStr, gires)
 	}
 
 	if gires == nvml.ERROR_NOT_FOUND {
@@ -896,7 +896,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 		// hierarchy) and proceed with attempt-to-disable-MIG-mode
 		klog.Infof("Delete %s: GI was not found skip CI cleanup", migStr)
 		if err := l.maybeDisableMigMode(parentUUID, parentNvmlDev); err != nil {
-			return fmt.Errorf("failed maybeDisableMigMode: %w", err)
+			return fmt.Errorf("failed to disable MIG mode for %s (maybeDisableMigMode): %w", parentUUID, err)
 		}
 		return nil
 	}
@@ -952,7 +952,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	klog.V(6).Infof("t_delete_mig_device %.3f s", time.Since(t0).Seconds())
 
 	if err := l.maybeDisableMigMode(parentUUID, parentNvmlDev); err != nil {
-		return fmt.Errorf("failed maybeDisableMigMode: %w", err)
+		return fmt.Errorf("failed to disable MIG mode for %s (maybeDisableMigMode): %w", parentUUID, err)
 	}
 
 	return nil
@@ -967,7 +967,7 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 	parentUUID := l.gpuUUIDbyPCIBusID[ms.ParentPCIBusID]
 	parent, ret := l.DeviceGetHandleByUUID(parentUUID)
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("could not get device handle by UUID for %s", parentUUID)
+		return nil, fmt.Errorf("error getting device handle by UUID for %s: %w", parentUUID, ret)
 	}
 
 	count, _ := parent.GetMaxMigDeviceCount()
@@ -1109,7 +1109,7 @@ func (l deviceLib) enableGPUPersistenceMode(pciAddress string) error {
 
 	device, ret := l.DeviceGetHandleByPciBusId(pciAddress)
 	if ret != nvml.SUCCESS {
-		return fmt.Errorf("error getting device handle by UUID: %v", ret)
+		return fmt.Errorf("error getting device handle by PCI bus ID %s: %w", pciAddress, ret)
 	}
 	// Check if persistence mode is already enabled.
 	mode, ret := device.GetPersistenceMode()

@@ -24,6 +24,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -136,8 +137,8 @@ func ResolveActualClaimNameForPodClaim(pod *corev1.Pod, podClaimName string) (st
 	}
 
 	return "", false, fmt.Errorf(
-		"pod %s/%s resourceClaim %q must specify one of resourceClaimName or resourceClaimTemplateName",
-		pod.Namespace, pod.Name, podClaimName,
+		"pod %s resourceClaim %q must specify one of resourceClaimName or resourceClaimTemplateName",
+		klog.KObj(pod), podClaimName,
 	)
 }
 
@@ -155,15 +156,15 @@ func GetReservedPods(ctx context.Context, reader Reader, claim *resourceapi.Reso
 		return nil, nil
 	}
 
-	var result []*corev1.Pod
+	result := make([]*corev1.Pod, 0, len(claim.Status.ReservedFor))
 	for _, ref := range claim.Status.ReservedFor {
 		if ref.APIGroup != "" || ref.Resource != "pods" {
 			continue
 		}
 
 		var pod corev1.Pod
-		err := reader.GetPod(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: ref.Name}, &pod)
-		if err != nil {
+		key := client.ObjectKey{Namespace: claim.Namespace, Name: ref.Name}
+		if err := reader.GetPod(ctx, key, &pod); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}

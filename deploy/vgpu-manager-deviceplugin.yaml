@@ -232,7 +232,7 @@ spec:
             - --container-driver-root=/driver-root
             - --v=4
           ports:
-            - name: http
+            - name: metrics
               containerPort: 3456
           env:
             - name: NODE_NAME
@@ -259,17 +259,23 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: 3456
+              port: metrics
               scheme: HTTP
             initialDelaySeconds: 15
             periodSeconds: 20
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /readyz
-              port: 3456
+              port: metrics
               scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
           volumeMounts:
             - name: kubelet-root
               mountPath: /var/lib/kubelet
@@ -323,10 +329,10 @@ metadata:
   namespace: kube-system
 spec:
   ports:
-    - name: http
+    - name: metrics
       port: 3456
       protocol: TCP
-      targetPort: http
+      targetPort: metrics
   selector:
     app: vgpu-manager-device-plugin
   type: ClusterIP

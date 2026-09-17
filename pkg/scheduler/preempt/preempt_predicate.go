@@ -224,6 +224,10 @@ func (p *vgpuPreempt) Preempt(
 				klog.V(3).ErrorS(err, "Preempt: get node failed", "node", nodeName)
 				continue
 			}
+			if !node.DeletionTimestamp.IsZero() {
+				klog.V(4).InfoS("Preempt: node is already marked as deleted", "node", nodeName)
+				continue
+			}
 			nodeInfo, err := device.NewNodeInfo(node, device.WithGPUTopologyEnabled(topologyEnabled))
 			if err != nil {
 				filterReason := reason.New(reason.NodeInfoBuildFailed).WithDetail("%v", err)
