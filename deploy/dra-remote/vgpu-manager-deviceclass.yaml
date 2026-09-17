@@ -1,5 +1,11 @@
 ---
-# 远程消费 DeviceClass：选 accessMode=remote 的 vgpu 设备。
+# 远程消费 DeviceClass：选本驱动发布的 vgpu 设备。
+# 名字要与 webhook 的 --vgpu-device-class-name 一致（两份 webhook 清单目前都是 vgpu-manager）。
+#
+# 注意这里**没有**按访问模式过滤：纯远程集群里本驱动只发布 accessMode=remote 的设备，所以不需要。
+# 如果同一集群里既有 dra-local（accessMode=local）又有 dra-remote，就要把两种设备分开，
+# 否则引用本 class 的 claim 可能拿到一张本地卡，而消费节点上只注册了 inject 插件、无法为本地卡做
+# NodePrepare。此时用下面注释里的选择器（并相应调整 webhook 的 class 名）。
 apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
@@ -8,3 +14,9 @@ spec:
   selectors:
     - cel:
         expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"
+#        # 混布集群：只要远程设备（accessMode 由 dra-server 随设备一起发布）
+#        expression: |-
+#          device.driver == 'manager.nvidia.com' &&
+#          device.attributes['manager.nvidia.com'].type == 'vgpu' &&
+#          'accessMode' in device.attributes['manager.nvidia.com'] &&
+#          device.attributes['manager.nvidia.com'].accessMode == 'remote'

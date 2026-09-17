@@ -1,6 +1,6 @@
 # deploy/dra-remote：远程 GPU（DRA）直铺部署
 
-与 `deploy/dra/` 同风格的直接 `kubectl apply` 部署集，部署 vgpu-manager 远程 GPU
+与 `deploy/dra-local/` 同风格的直接 `kubectl apply` 部署集，部署 vgpu-manager 远程 GPU
 （lupine 数据面）的全部 k8s 组件。设计背景见
 `docs/remote_gpu_k8s_integration_design.md`（v2.x 统一设备模型：远程不是新资源池，
 是既有设备的 `accessMode=remote` 发布属性 + pool nodeSelector 放宽）。
@@ -9,10 +9,10 @@
 
 | 文件 | 组件 | 部署位置 | 作用 |
 |---|---|---|---|
-| `remote-server.yaml` | remote-agent + lupine-server + device-monitor（一个 DaemonSet 三容器） | GPU 节点（`vgpu-manager.io/remote-server=true`） | 会话物化/EnsureSession gRPC(:14834)、远程 GPU 数据面(:14833)、指标（远程会话按 PID 归账） |
-| `dra-server.yaml` | kubelet-plugin `--plugin-mode=server` | GPU 节点（同上标签） | **只发布不分配**：设备叠加 `accessMode=remote`/`endpoint` 属性、pool nodeSelector 放宽；不向 kubelet 注册 DRA 服务 |
-| `dra-inject.yaml` | kubelet-plugin `--plugin-mode=inject` + （可选）client 制品 init 容器 + 远程 DeviceClass | 消费节点 **及 GPU 节点**（`vgpu-manager.io/remote-inject=true`） | 节点上唯一注册的 DRA 插件：令牌/EnsureSession 屏障/env+CDI 注入；铺 lupine-client 版本目录 |
-| `dra-webhook.yaml` | device-webhook | 控制面节点 | 准入 + 资源声明→DRA 转换（转到 `remote-vgpu-manager` class） |
+| `vgpu-manager-dra-gpu-server.yaml` | remote-agent + lupine-server + device-monitor（一个 DaemonSet 三容器） | GPU 节点（`vgpu-manager.io/remote-server=true`） | 会话物化/EnsureSession gRPC(:14834)、远程 GPU 数据面(:14833)、指标（远程会话按 PID 归账） |
+| `vgpu-manager-dra-remote-server.yaml` | kubelet-plugin `--plugin-mode=server` | GPU 节点（同上标签） | **只发布不分配**：设备叠加 `accessMode=remote`/`endpoint` 属性、pool nodeSelector 放宽；不向 kubelet 注册 DRA 服务 |
+| `vgpu-manager-dra-remote-inject.yaml` | kubelet-plugin `--plugin-mode=inject` + （可选）client 制品 init 容器 + 远程 DeviceClass | 消费节点 **及 GPU 节点**（`vgpu-manager.io/remote-inject=true`） | 节点上唯一注册的 DRA 插件：令牌/EnsureSession 屏障/env+CDI 注入；铺 lupine-client 版本目录 |
+| `vgpu-manager-dra-webhook.yaml` | device-webhook | 控制面节点 | 准入 + 资源声明→DRA 转换（转到 `vgpu-manager` class） |
 
 关键拓扑约束（v2.1 设计）：GPU 节点上 server 插件只发布、inject 插件独占 kubelet 注册；
 pod 即使调度到 GPU 节点本机，也经 lupine 环回消费。因此 **GPU 节点必须同时打两个标签、
@@ -29,7 +29,7 @@ kubectl label node <consumer-node> vgpu-manager.io/remote-inject=true
 kubectl apply -f vgpu-manager-dra-gpu-server.yaml -f vgpu-manager-dra-remote-server.yaml -f vgpu-manager-dra-remote-inject.yaml
 kubectl apply -f vgpu-manager-dra-webhook.yaml -f vgpu-manager-deviceclass.yaml
 
-# 3. 消费：pod 直接写引用 remote-vgpu-manager 的 ResourceClaim/Template；
+# 3. 消费：pod 直接写引用 vgpu-manager 的 ResourceClaim/Template；
 #    或走 webhook 转换（资源声明 + 注解 nvidia.com/vgpu-access-mode: remote）
 ```
 
@@ -40,19 +40,19 @@ kubectl apply -f vgpu-manager-dra-webhook.yaml -f vgpu-manager-deviceclass.yaml
 
 | 参数 | 位置 | 默认/占位值 | 说明 |
 |---|---|---|---|
-| **lupine-server 镜像** | `remote-server.yaml` → 容器 `lupine-server` `image` | `ghcr.io/coldzerofear/lupine-server-static:cuda-13.3.1`（fork 自产静态镜像） | 只依赖 glibc，不带 cuda-compat：**镜像 CUDA 版本必须 ≤ 节点驱动支持的 CUDA**（13.3 需驱动 ≥ 580，老驱动换 12.9.1 / 11.8.0）；隔离库不用打进镜像（见下一行）；正式环境改用 release tag 或 `@sha256` digest，并与 client 制品同一 release |
+| **lupine-server 镜像** | `vgpu-manager-dra-gpu-server.yaml` → 容器 `lupine-server` `image` | `ghcr.io/coldzerofear/lupine-server-static:cuda-13.3.1`（fork 自产静态镜像） | 只依赖 glibc，不带 cuda-compat：**镜像 CUDA 版本必须 ≤ 节点驱动支持的 CUDA**（13.3 需驱动 ≥ 580，老驱动换 12.9.1 / 11.8.0）；隔离库不用打进镜像（见下一行）；正式环境改用 release tag 或 `@sha256` digest，并与 client 制品同一 release |
 | **隔离库 .so 路径** | 同上 `LD_PRELOAD` / `LUPINE_CHECKPOINT_LIBRARY` | `/etc/vgpu-manager/driver/libvgpu-control.so` | init-install 容器把它从 vgpu-manager 镜像落盘到节点 hostPath，server 容器挂载即得；两个变量指向同一个 .so（既是 hook 库又是 checkpoint provider），一般不用改 |
-| **lupine-client 制品** | 自动：节点上没有可用版本目录时，inject 在 NodePrepare 内通过 agent 的 `FetchClientBundle` 从 lupine-server 拉取其内嵌的 client bundle（校验 etag / content-digest / manifest sha256）落盘为 `<floor CUDA 版本>/` 并记录 `.etag`；server 换构建后 etag 变化会自动重新拉取。可选预铺：`dra-inject.yaml` → initContainers | `ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1` / `cuda-12.9.1` | 预铺目录**必须与 server 镜像来自同一 release**（没有 `.etag`，inject 无法校验，按运维背书原样使用）；自动拉取的目录带 `.etag`，并向 pod 注入 `LUPINE_CLIENT_ETAG`/`LUPINE_CLIENT_PLATFORM`，server 会对不一致的 client 直接回 426；`/artifacts` 载体镜像（静态 client 的 `libcuda.so.1`/`libnvidia-ml.so.1`）；每个 CUDA 版本一个 init 容器，落盘目录名必须是版本号（选择规则 = 取 ≤ server CUDA 上限的最高版本）；增删版本 = 增删 init 容器后滚动；新制品镜像还带 `nvidia-smi`，inject 会把它只读挂到 pod 的 `/usr/bin/nvidia-smi`（单文件 bind，不覆盖镜像目录；旧制品没有就跳过），pod 里跑它看到的是远程会话视图 |
+| **lupine-client 制品** | 自动：节点上没有可用版本目录时，inject 在 NodePrepare 内通过 agent 的 `FetchClientBundle` 从 lupine-server 拉取其内嵌的 client bundle（校验 etag / content-digest / manifest sha256）落盘为 `<floor CUDA 版本>/` 并记录 `.etag`；server 换构建后 etag 变化会自动重新拉取。可选预铺：`vgpu-manager-dra-remote-inject.yaml` → initContainers | `ghcr.io/coldzerofear/lupine-client-static:cuda-13.3.1` / `cuda-12.9.1` | 预铺目录**必须与 server 镜像来自同一 release**（没有 `.etag`，inject 无法校验，按运维背书原样使用）；自动拉取的目录带 `.etag`，并向 pod 注入 `LUPINE_CLIENT_ETAG`/`LUPINE_CLIENT_PLATFORM`，server 会对不一致的 client 直接回 426；`/artifacts` 载体镜像（静态 client 的 `libcuda.so.1`/`libnvidia-ml.so.1`）；每个 CUDA 版本一个 init 容器，落盘目录名必须是版本号（选择规则 = 取 ≤ server CUDA 上限的最高版本）；增删版本 = 增删 init 容器后滚动；新制品镜像还带 `nvidia-smi`，inject 会把它只读挂到 pod 的 `/usr/bin/nvidia-smi`（单文件 bind，不覆盖镜像目录；旧制品没有就跳过），pod 里跑它看到的是远程会话视图 |
 | **server 状态（版本 / endpoint）** | 自动：remote-agent 每 5s GET `http://<REMOTE_SERVER_ENDPOINT>/` 读响应头 `x-lupine-cuda-version`；dra-server 只向 agent 的 `ServerInfo` gRPC 取结果（5s 一次直到首次成功，之后 60s） | — | dra-server / inject **不再直接访问 lupine-server**，只需知道 agent 地址。发布为设备属性 `serverCudaVersion`（inject 选制品按 **min(驱动上限, server 版本)** 取 ≤ 的最高版本）与 `serverEndpoint`；版本或地址变化都会自动重发 slice。agent 探测地址是回环时，会在本机地址里找一个 server 同样应答的（优先节点 InternalIP，物理网卡优先于 docker/cni/flannel 等虚拟网卡）作为对外 endpoint，并粘住直到它不再应答 |
 | **vgpu-manager 镜像** | 四个文件所有 `coldzerofear/vgpu-manager-dra:latest` | latest | 换成内网 registry / 钉版本；remote-server 的 agent 容器要求镜像内含 `remote-agent` 二进制 |
-| **可达域 selector** | `dra-server.yaml` → `REMOTE_NODE_SELECTOR` | `vgpu-manager.io/remote-inject=true` | 标准 label selector 语法（`k=v,k2 in (a,b),!k3`）；决定 pool 可调度到哪些节点。**要允许本机消费必须覆盖 GPU 节点自身**（默认值配合上面打标签方式已覆盖） |
-| **服务端 endpoint** | `remote-server.yaml` `LUPINE_PORT` + agent 的 `REMOTE_SERVER_ENDPOINT`（探测地址，默认 127.0.0.1）；可选 `ADVERTISE_SERVER_ENDPOINT`（对外地址，运维指定，`https://` 默认 443） | `:14833` | **dra-server 不再配置它**：对外地址由 agent 报告（自动发现或 advertise），发布为设备属性 `serverEndpoint`；inject 在 EnsureSession 回包里也拿到它，所以即使属性还没发布出来（或调度器忽略了污点）也能正确注入。改端口只改 remote-server 两处 |
-| **agent endpoint** | `remote-server.yaml` `LISTEN_SERVER_ENDPOINT`（逗号分隔可多个：`grpc://:14834` 与 `unix:///etc/vgpu-manager/agent.sock`）、`dra-server.yaml` `REMOTE_AGENT_ENDPOINT`（本机怎么连 agent：grpc:// 留空 host = 节点 InternalIP，或 unix://） | `:14834` | agent 自己报告对外可达的 `grpc://<可路由 host>:<TCP 端口>`，发布为设备属性 `agentEndpoint`，inject 按它调 EnsureSession（dra-inject 无需再配端口）。unix 套接字只供同节点组件，不会被发布；agent 只监听 unix 时没有 agentEndpoint，设备保持污点 |
-| **monitor 端口** | `remote-server.yaml` `--server-bind-port` | `3456` | hostNetwork，与节点上其他进程冲突时修改（Service targetPort 联动） |
-| **SM watcher** | `dra-server.yaml` 与 `remote-server.yaml` 两处 `FEATURE_GATES` 的 `SharedSMUtilizationWatcher` | 均开启 | 联动开关：dra-server 写节点级采样缓存，agent 把会话标记为使用它。关闭时两处同时关 |
-| **webhook DRA class** | `dra-webhook.yaml` `--vgpu-device-class-name` | `remote-vgpu-manager` | 集群同时有本地 vGPU 时按主要路径取舍（webhook 目前单 class 转换） |
-| **整卡远程 class** | `dra-inject.yaml` 末尾注释块 | 注释 | dra-server 关 `VGPUSupport` 发布 `type=gpu` 时启用 `remote-gpu-manager` |
-| **NRI 按容器会话** | `dra-inject.yaml` `FEATURE_GATES` 加 `NRISupport=true` + 放开 nri-root 挂载注释 | 关闭 | 开启后同 claim 不同容器各自独立会话记账（需 containerd NRI 开启） |
+| **可达域 selector** | `vgpu-manager-dra-remote-server.yaml` → `REMOTE_NODE_SELECTOR` | `vgpu-manager.io/remote-inject=true` | 标准 label selector 语法（`k=v,k2 in (a,b),!k3`）；决定 pool 可调度到哪些节点。**要允许本机消费必须覆盖 GPU 节点自身**（默认值配合上面打标签方式已覆盖） |
+| **服务端 endpoint** | `vgpu-manager-dra-gpu-server.yaml` `LUPINE_PORT` + agent 的 `REMOTE_SERVER_ENDPOINT`（探测地址，默认 127.0.0.1）；可选 `ADVERTISE_SERVER_ENDPOINT`（对外地址，运维指定，`https://` 默认 443） | `:14833` | **dra-server 不再配置它**：对外地址由 agent 报告（自动发现或 advertise），发布为设备属性 `serverEndpoint`；inject 在 EnsureSession 回包里也拿到它，所以即使属性还没发布出来（或调度器忽略了污点）也能正确注入。改端口只改 remote-server 两处 |
+| **agent endpoint** | `vgpu-manager-dra-gpu-server.yaml` `LISTEN_SERVER_ENDPOINT`（逗号分隔可多个：`grpc://:14834` 与 `unix:///etc/vgpu-manager/agent.sock`）、`vgpu-manager-dra-remote-server.yaml` `REMOTE_AGENT_ENDPOINT`（本机怎么连 agent：grpc:// 留空 host = 节点 InternalIP，或 unix://） | `:14834` | agent 自己报告对外可达的 `grpc://<可路由 host>:<TCP 端口>`，发布为设备属性 `agentEndpoint`，inject 按它调 EnsureSession（dra-inject 无需再配端口）。unix 套接字只供同节点组件，不会被发布；agent 只监听 unix 时没有 agentEndpoint，设备保持污点 |
+| **monitor 端口** | `vgpu-manager-dra-gpu-server.yaml` `--server-bind-port` | `3456` | hostNetwork，与节点上其他进程冲突时修改（Service targetPort 联动） |
+| **SM watcher** | `vgpu-manager-dra-remote-server.yaml` 与 `vgpu-manager-dra-gpu-server.yaml` 两处 `FEATURE_GATES` 的 `SharedSMUtilizationWatcher` | 均开启 | 联动开关：dra-server 写节点级采样缓存，agent 把会话标记为使用它。关闭时两处同时关 |
+| **webhook DRA class** | `vgpu-manager-dra-webhook.yaml` `--vgpu-device-class-name`，与 `vgpu-manager-deviceclass.yaml` 里的 class 名一致 | `vgpu-manager` | webhook 目前只转换一个 class。集群同时有 dra-local 时两边的 class 同名同选择器，claim 可能拿到本地卡——要区分就给远程 class 换个名字并打开 deviceclass 里注释的 accessMode 选择器 |
+| **整卡远程 class** | `vgpu-manager-deviceclass.yaml` 再加一个 `type == 'gpu'` 的 class（本地版见 `deploy/dra-local` 的 `gpu-manager`） | 未提供 | dra-server 关掉 `VGPUSupport` 改发布 `type=gpu` 时才需要 |
+| **NRI 按容器会话** | `vgpu-manager-dra-remote-inject.yaml` `FEATURE_GATES` 加 `NRISupport=true` + 放开 nri-root 挂载注释 | 关闭 | 开启后同 claim 不同容器各自独立会话记账（需 containerd NRI 开启） |
 | **命名空间** | 全部文件 | `kube-system` | 整体替换时注意 webhook 证书 dnsNames 联动 |
 
 ## 端口一览（GPU 节点 hostNetwork）

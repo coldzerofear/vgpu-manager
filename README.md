@@ -123,13 +123,28 @@ The Webhook service requires the use of [cert-manager](https://github.com/cert-m
 kubectl apply -f deploy/classic-local/vgpu-manager-webhook.yaml
 ```
 
-**Installation:**
+**Uninstallation:**
 
 ```shell
 kubectl delete -f deploy/classic-local/vgpu-manager-scheduler.yaml
 kubectl delete -f deploy/classic-local/vgpu-manager-deviceplugin.yaml
 kubectl delete -f deploy/classic-local/vgpu-manager-webhook.yaml
 ```
+
+### Deployment sets
+
+`deploy/` holds one directory per deployment shape; each remote one has its own README:
+
+| Directory | Path | Kubernetes API | What it deploys |
+|---|---|---|---|
+| `deploy/classic-local` | scheduler extender + device plugin | any | local vGPU on the GPU node itself (the set above) |
+| `deploy/classic-remote` | scheduler extender + device plugin | any | remote vGPU: pods run on consumer nodes, the GPUs are on server nodes ([README](deploy/classic-remote/README.md)) |
+| `deploy/dra-local` | DRA driver (kubelet plugin) | 1.34+ (`resource.k8s.io/v1`) | local vGPU through Dynamic Resource Allocation |
+| `deploy/dra-remote` | DRA driver (kubelet plugin) | 1.34+ (`resource.k8s.io/v1`) | remote vGPU through DRA ([README](deploy/dra-remote/README.md)) |
+
+Remote vGPU needs the `RemoteGPUSupport` feature gate on the components involved and the
+lupine data plane on the GPU nodes; both remote READMEs walk through the node labels,
+the parameters to change and the known boundaries.
 
 ## Example of use
 

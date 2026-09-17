@@ -222,7 +222,7 @@ GPU 节点的 monitor 立刻丢失该 Pod。
    - `remoteSessionPIDs()`：从 Pod 会话注解取 token → 读会话目录 PID 与 `.vmem_node`；
    - 在 `Collect` 里按 Pod 是否远程走两条分支（结构参照 `dra_gpu.go:914-935`）。
 3. **消费节点不需要部署 monitor**：卡在 GPU 节点、NVML 也在 GPU 节点，远程消费 Pod 只作为指标的 label
-   出现在 GPU 节点的输出里。这与 DRA 远程路径的部署形态一致（monitor 只在 `remote-server.yaml` 里）。
+   出现在 GPU 节点的输出里。这与 DRA 远程路径的部署形态一致（monitor 只在 GPU 服务器那个 Pod 里）。
    顺带好处：消费节点无 GPU，`nodeGPUCollector` 依赖的 `nvidia.DetectionDeviceLib` 本来就会失败。
 
 ### 5.4 待验证
@@ -244,7 +244,7 @@ cache.NewListWatchFromClient(a.cfg.ClientSets.Resource.RESTClient(), "resourcecl
 ```
 
 `resource.k8s.io` 不可用时，reflector 不会 panic，而是**无限重试 + 刷日志**，于是 `hasReady` 永不为真 →
-**就绪文件永不写出** → `remote-server.yaml` 里 lupine-server 容器卡在 `until [ -f /run/vgpu/ready ]` →
+**就绪文件永不写出** → GPU 服务器 Pod 里 lupine-server 容器卡在 `until [ -f /run/vgpu/ready ]` →
 **整个 pod 起不来**。这是本方案在此类集群上的**硬阻塞**。
 
 ### 6.1.1 "DRA 不可用"其实有四种，行为各不相同
@@ -370,7 +370,7 @@ agent 的两个 informer 正是用 `RESTClient()` 建的 → 在情形 C（DRA �
 | `pkg/remoteagent/` | `NodeDevices` 从 Node 注解构造 | ~120 行 |
 | `pkg/scheduler/filter/` | 远程节点门禁 + 远程池 NodeInfo 构建 + 远程分配分支 | ~400 行 |
 | `pkg/metrics/collector/node_remote.go` + `remote_session.go` | 远程消费者反查 + 会话 PID/vmem 归账（§5.3） | ~300 行 |
-| `deploy/deviceplugin-remote/` | 新部署形态 yaml（消费侧 DaemonSet；GPU 侧沿用 remote-server.yaml） | — |
+| `deploy/classic-remote/` | 新部署形态 yaml（消费侧 DaemonSet；GPU 侧沿用 dra-remote 的 gpu-server 形态） | — |
 
 ### 7.2 现有文件的增量改动点
 
@@ -612,7 +612,7 @@ real-alloc 摘要（对应 DRA 的 allocation-id）、`metrics-node` 语义扩�
 |---|---|
 | `pkg/deviceplugin/`（新增 remote-serve 模式） | 节点带远程标签 → 不向 kubelet 注册，只写注册注解；按 agent `ServerInfo` 置 `DeviceInfo.Healthy`，并写入 server endpoint / agent endpoint / server CUDA 版本 / client bundle etag |
 | `cmd/device-plugin/options` | 模式解析：**标签是唯一权威**，配置与标签冲突时报错（借鉴 HAMi `resolveOperatingMode`） |
-| `deploy/` | GPU 节点沿用 `dra-remote/remote-server.yaml` 形态（agent + lupine-server + monitor） |
+| `deploy/` | GPU 节点沿用 `dra-remote/vgpu-manager-dra-gpu-server.yaml` 形态（agent + lupine-server + monitor） |
 
 ### P4 消费侧兑现（形态取决于决策⑦）
 | 落点（方案 P：消费侧设备插件） | 动作 |
@@ -636,7 +636,7 @@ real-alloc 摘要（对应 DRA 的 allocation-id）、`metrics-node` 语义扩�
 `pkg/client/kube_patch.go` 让远程 Pod 的 `metrics-node` 指向服务器节点且不被覆盖。
 
 ### P7 部署与文档
-`deploy/deviceplugin-remote/`、`charts/vgpu-manager` 增补、README 与已知边界（含 §4 的抢占残留语义）。
+`deploy/classic-remote/`、`charts/vgpu-manager` 增补、README 与已知边界（含 §4 的抢占残留语义）。
 
 ---
 
@@ -884,7 +884,7 @@ system.<proj>/scheduler-role       (label)
 | 判据 | 远程 Pod 在无 GPU 节点上跑起来，容器内 `nvidia-smi` 看到远程会话视图 |
 
 **S5 · 监控** — 见 §5.3（公共会话工具外提 + `node_remote.go` 远程消费者反查）。
-**S6 · 部署与文档** — `deploy/deviceplugin-remote/`、chart 增补、README 已知边界（含 §4 抢占残留语义、§3.2 配额语义）。
+**S6 · 部署与文档** — `deploy/classic-remote/`、chart 增补、README 已知边界（含 §4 抢占残留语义、§3.2 配额语义）。
 
 ### 15.4 推迟但不废弃
 
@@ -1130,4 +1130,10 @@ init/sidecar 沿用 `CollectableContainerNames`（读 API 中的容器状态，�
      两进程共存时纯 server 向 consumer 单向让位。
 5. **S5 监控**（已完成）：§16.5 的"已实施"。服务器节点的节点/卡级用量本来就统计到了（靠 D2 与
    `PodPlanSchedulingNode`），这一步补的是容器级实时用量与 `access_mode` 标签。
-6. **S6 部署与文档**。
+6. **S6 部署与文档**（直铺部署集已完成）：`deploy/classic-remote/`——
+   `vgpu-manager-remote-gpu-server.yaml`（agent + lupine-server + monitor，hostNetwork/hostPID，`SESSION_OWNER=pod`）、
+   `vgpu-manager-deviceplugin-server.yaml`（`--remote-server`：节点设备注册 + 角色标签/endpoints + vgpu-number）、
+   `vgpu-manager-deviceplugin-consumer.yaml`（`--remote-consumer`：槽位 + 会话 + 客户端 shim，可选预铺 init 容器）、
+   调度器与 webhook（与 classic-local 相同，集群已有则跳过），外加一份 README（组件拓扑、标签分工、
+   参数表、端口表、已知边界）。刻意把设备插件与数据面拆成两个 DaemonSet：滚动升级插件不该打断在跑的会话。
+   剩余：chart 增补（`charts/vgpu-manager` 的远程角色开关）与主 README 的远程小节细化。
