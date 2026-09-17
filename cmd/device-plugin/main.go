@@ -170,7 +170,6 @@ func runApp(ctx context.Context, opt *options.Options) (exitCode int) {
 	}()
 
 	deviceManager.Start()
-	defer deviceManager.Stop()
 
 restart:
 	started := 0
@@ -236,6 +235,7 @@ restart:
 		}
 	}
 exit:
+	deviceManager.Stop()
 	for _, p := range plugins {
 		_ = p.Stop()
 	}

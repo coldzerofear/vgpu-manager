@@ -46,7 +46,8 @@ const (
 // or removes a consumer role left from an earlier configuration. The role is
 // removed on shutdown either way.
 func setupConsumerRole(reg registrar, enabled bool) {
-	reg.AddRegistryFunc(consumerRoleName, removeConsumerRole)
+	// TODO Only enabling remote server may accidentally delete tags maintained by consumer processes
+	//reg.AddRegistryFunc(consumerRoleName, removeConsumerRole)
 	reg.AddCleanupRegistryFunc(consumerRoleName, removeConsumerRole)
 	if !enabled {
 		return

@@ -54,6 +54,7 @@ COPY --from=builder /go/src/vgpu-manager/bin/device-scheduler /usr/local/bin/dev
 COPY --from=builder /go/src/vgpu-manager/bin/device-plugin    /usr/local/bin/device-plugin
 COPY --from=builder /go/src/vgpu-manager/bin/device-monitor   /usr/local/bin/device-monitor
 COPY --from=builder /go/src/vgpu-manager/bin/device-webhook   /usr/local/bin/device-webhook
+COPY --from=builder /go/src/vgpu-manager/bin/remote-agent     /usr/local/bin/remote-agent
 
 # Add top-level license (AL2) file into the container image
 COPY --from=builder /LICENSE /LICENSE
@@ -65,6 +66,7 @@ COPY --from=builder /vgpu-controller/build/mem_managed_tool    /installed/tools/
 COPY --from=builder /vgpu-controller/build/mem_view_tool       /installed/tools/mem_view_tool
 COPY --from=builder /vgpu-controller/build/vgpu-session-config /installed/tools/vgpu-session-config
 COPY --from=builder /go/src/vgpu-manager/bin/device-client     /installed/registry/device-client
+
 # Bundled NVIDIA CDI hook; installed to the host (/etc/vgpu-manager/nvidia-cdi-hook)
 # by the install init container and referenced from the generated CDI spec.
 COPY --from=toolkit /artifacts/rpm/usr/bin/nvidia-cdi-hook     /installed/tools/nvidia-cdi-hook

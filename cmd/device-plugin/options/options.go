@@ -267,6 +267,14 @@ func (o *Options) Validate() error {
 			return fmt.Errorf("%s feature gate is not supported only when --remote-server=true", AllocationFailureReschedule)
 		}
 	}
+	if !o.RemoteServer && o.RemoteConsumer {
+		// TODO panic: runtime error: invalid memory address or nil pointer dereference
+		// goroutine 1 [running]:
+		// github.com/coldzerofear/vgpu-manager/pkg/device/manager.(*DeviceManager).AssertAllMigDevicesAreValid(0x2b8d36bfe600, 0x0)
+		if o.MigStrategy != util.MigStrategyNone {
+			return fmt.Errorf("--mig-strategy must be 'none' only when --remote-consumer=true")
+		}
+	}
 	if o.RemoteConsumer {
 		if o.MigStrategy == util.MigStrategySingle {
 			return fmt.Errorf("--remote-consumer=true and --mig-strategy=single, currently mutually exclusive")

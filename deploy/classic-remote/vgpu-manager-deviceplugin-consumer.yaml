@@ -113,7 +113,8 @@ spec:
           command:
             - device-plugin
             # RemoteGPUSupport 是 --remote-consumer 的前置门控（必须成对配置）。
-            - --feature-gates=RemoteGPUSupport=true
+            - --feature-gates=RemoteGPUSupport=true,AllocationFailureReschedule=true
+            - --mig-strategy=none
             - --remote-consumer
             # 本节点同时可运行的远程 vGPU 数量（= 上报的 vgpu-number）。纯 CPU 节点没有卡数/切分数
             # 可参考，给一个足够大的虚数即可；真正的容量约束在服务器侧。

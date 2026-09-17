@@ -122,7 +122,7 @@ spec:
             # SharedSMUtilizationWatcher 在这里是"写方"：设备管理器把节点级 SM 采样写到
             # /etc/vgpu-manager/watcher/sm_util.config，agent 与 monitor 都从那里读，
             # 所以这一项要与 remote-gpu-server 的两处 FEATURE_GATES 一起开或一起关。
-            - --feature-gates=RemoteGPUSupport=true,SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
+            - --feature-gates=RemoteGPUSupport=true,TopologyAwareGPUAllocation=true,SharedSMUtilizationWatcher=true,VirtualMemoryTracking=true
             - --remote-server
             # 本机 remote-agent 怎么连：同节点走 unix 套接字（需与 agent 的
             # LISTEN_SERVER_ENDPOINT 一致）；也可写 grpc://:14834（host 留空 = 节点 InternalIP）。
