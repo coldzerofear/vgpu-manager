@@ -215,6 +215,11 @@ func (c *ContainerLister) update() error {
 // files emptied, would otherwise leave its descriptor and mapping held for
 // the life of the process, still serving the metrics of a container that is
 // gone. A session directory swept by the agent is the same case.
+//
+// The keys are snapshotted and released one by one rather than under one write
+// lock, so a scrape is not blocked behind the munmap of every gone container.
+// That is safe because update() is the only writer -- it runs on the lister's
+// own loop -- so no mapping can be added between the snapshot and its release.
 func (c *ContainerLister) dropVanished(seen sets.Set[ContainerKey]) {
 	c.mutex.RLock()
 	resKeys := maps.Keys(c.containerDatas)

@@ -221,7 +221,7 @@ func (o *Options) InitFlags(fs *flag.FlagSet) {
 	pflag.BoolVar(&o.RemoteConsumer, "remote-consumer", o.RemoteConsumer, "Run remote vGPU pods on this node, whose GPUs are on remote servers. (requires the RemoteGPUSupport feature gate)")
 	pflag.IntVar(&o.RemoteConsumerNum, "remote-consumer-number", o.RemoteConsumerNum, "How many remote vGPUs this consumer node runs at a time.")
 	pflag.StringVar(&o.RemoteAgentEndpoint, "remote-agent-endpoint", o.RemoteAgentEndpoint, "The remote-agent on this node: grpc://host:port or unix:///path. An empty host means the node's InternalIP.")
-	pflag.BoolVar(&o.IgnoreClientShimEtag, "ignore-client-shim-etag", o.IgnoreClientShimEtag, "Enable Etag verification that ignores Lupine client shim and does not inject environment variables LUPINE_CLIENT_ETAG and LUPINE_CLIENT_PLATFORM into the container.")
+	pflag.BoolVar(&o.IgnoreClientShimEtag, "ignore-client-shim-etag", o.IgnoreClientShimEtag, "Do not inject LUPINE_CLIENT_ETAG and LUPINE_CLIENT_PLATFORM, so lupine-server cannot check that the client shim is the build it embeds. A mismatch then surfaces later, as a runtime failure instead of a refused session.")
 	o.FeatureGate.AddFlag(pflag.CommandLine)
 	pflag.BoolVar(&version, "version", false, "Print version information and quit.")
 	pflag.CommandLine.AddGoFlagSet(fs)

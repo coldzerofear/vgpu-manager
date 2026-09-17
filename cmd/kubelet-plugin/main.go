@@ -229,7 +229,7 @@ func newApp() *cli.App {
 		},
 		&cli.BoolFlag{
 			Name:        "ignore-client-shim-etag",
-			Usage:       "Enable Etag verification that ignores Lupine client shim and does not inject environment variables LUPINE_CLIENT_ETAG and LUPINE_CLIENT_PLATFORM into the container. Note that this may result in client shim version mismatch error",
+			Usage:       "Do not inject LUPINE_CLIENT_ETAG and LUPINE_CLIENT_PLATFORM, so lupine-server cannot check that the client shim is the build it embeds. A mismatch then surfaces later, as a runtime failure instead of a refused session.",
 			Value:       false,
 			Destination: &flags.IgnoreClientShimEtag,
 			EnvVars:     []string{"IGNORE_CLIENT_SHIM_ETAG"},

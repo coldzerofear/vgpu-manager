@@ -272,3 +272,62 @@ func Test_Filter_LocalPodSkipsRemoteServer(t *testing.T) {
 	assert.Equal(t, []string{local[1].Name}, NodeNamesOfResult(result))
 	assert.Equal(t, reason.Phrase(reason.NodeIsRemoteServer), result.FailedNodes["gpu-server"])
 }
+
+// Which taints take a GPU server out of the rotation: the ones the cluster
+// itself sets (a cordon, a node that went not-ready), and only as hard
+// effects. An operator taint that keeps non-GPU workloads off a dedicated GPU
+// node says nothing about serving remote pods -- they never run there.
+func Test_RemoteFilter_ServerTaints(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		taint       corev1.Taint
+		tolerations []corev1.Toleration
+		served      bool
+	}{
+		{
+			name:   "operator isolation taint",
+			taint:  corev1.Taint{Key: "nvidia.com/gpu", Value: "true", Effect: corev1.TaintEffectNoSchedule},
+			served: true,
+		},
+		{
+			name:   "soft cluster taint",
+			taint:  corev1.Taint{Key: corev1.TaintNodeMemoryPressure, Effect: corev1.TaintEffectPreferNoSchedule},
+			served: true,
+		},
+		{
+			name:   "cordoned",
+			taint:  corev1.Taint{Key: corev1.TaintNodeUnschedulable, Effect: corev1.TaintEffectNoSchedule},
+			served: false,
+		},
+		{
+			name:   "not ready",
+			taint:  corev1.Taint{Key: corev1.TaintNodeNotReady, Effect: corev1.TaintEffectNoExecute},
+			served: false,
+		},
+		{
+			name:  "cordoned but tolerated",
+			taint: corev1.Taint{Key: corev1.TaintNodeUnschedulable, Effect: corev1.TaintEffectNoSchedule},
+			tolerations: []corev1.Toleration{{
+				Key: corev1.TaintNodeUnschedulable, Operator: corev1.TolerationOpExists,
+			}},
+			served: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, _ := remoteServerNode(t, "gpu-server")
+			server.Spec.Taints = []corev1.Taint{test.taint}
+			fixture := newRemoteFixture(t, []corev1.Node{server})
+			pod := remotePod("tainted-server", 1, 50, 2048)
+			pod.Spec.Tolerations = test.tolerations
+
+			result := fixture.run(pod, dryRunFilter, fixture.consumers[0])
+
+			if test.served {
+				assert.Equal(t, []string{"consumer-a"}, NodeNamesOfResult(result))
+				return
+			}
+			assert.Empty(t, NodeNamesOfResult(result))
+			assert.Contains(t, result.FailedNodes["consumer-a"], reason.Phrase(reason.NoRemoteServer))
+		})
+	}
+}

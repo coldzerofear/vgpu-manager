@@ -920,7 +920,7 @@ system.<proj>/scheduler-role       (label)
 kube-scheduler 候选（Pod 可运行的节点）
    │ remoteConsumerNodes：保留消费节点，其余 NodeNotRemoteConsumer
    ▼
-nodeLister（服务器标签）→ remoteServerNodes：只留 IsRemoteServerNode，按名字排序
+nodeLister（服务器标签）+ 本次候选 → remoteServerNodes：留 IsRemoteServerNode 且在役的，按名字排序
    │ 原有 nodeFilter → deviceFilter（全局锁、allocator、预分配，predicate-node=服务器）
    ▼
 remoteFilterResult：
@@ -929,6 +929,14 @@ remoteFilterResult：
 ```
 
 - **本地 Pod 行为不变**：仍只返回预分配成功的那一个节点；`nodeFilter` 与 preempt 拒绝服务器节点（`NodeIsRemoteServer`）。
+- **服务器在役判定（污点，2026-09-17）**：只看**集群自己打的**硬污点——`node.kubernetes.io/*` 与
+  `node.cloudprovider.kubernetes.io/*` 前缀下的 `NoSchedule`/`NoExecute`（cordon/drain、not-ready、unreachable、
+  out-of-service、各类资源压力、云侧 shutdown），未被 Pod 容忍即不再往该服务器放**新**会话，已有会话不受影响。
+  刻意**不看**运维为隔离打的业务污点（如 `nvidia.com/gpu=true:NoSchedule`）：远程 Pod 根本不在服务器上运行，
+  而且同一份 tolerations 还决定 Pod 自己落在哪个消费节点，用它来放行服务器会顺带放宽 Pod 的落点。
+  `PreferNoSchedule` 是偏好不是拒绝，按 kube-scheduler 的 TaintToleration 同样过滤掉。
+- **候选节点也参与服务器发现**：除 nodeLister 外，本次请求带来的候选节点里的服务器也会被纳入（同名以 lister 的副本为准），
+  这样 dry-run（Cluster Autoscaler 扩容仿真）里还不存在的服务器节点也能被选中。
 - **bind**：远程 Pod 只要求 `predicate-node` 非空（绑定到消费节点）；本地仍要求等于绑定节点。
 - **抢占**：远程 Pod 原样透传。
 - **跨 Pod 拓扑**：远程 Pod 关闭，仅 live Filter 发 `TopologyFallback` 事件；单服务器内 NVLink/NUMA 保留。

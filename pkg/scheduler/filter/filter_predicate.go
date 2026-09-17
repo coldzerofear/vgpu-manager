@@ -338,9 +338,14 @@ func remoteConsumerNodes(nodes []corev1.Node, failed map[string]*reason.FilterRe
 	return consumers
 }
 
-// remoteServerNodes lists the remote GPU servers, sorted by name so they are
-// tried in a stable order. A node with the server label but no endpoints is
-// not a server.
+// remoteServerNodes lists the remote GPU servers this pod may be served by,
+// sorted by name so they are tried in a stable order. A node with the server
+// label but no endpoints is not a server, and one the cluster has taken out of
+// service is not one for now (see serverInService).
+//
+// Candidates the caller was given are considered too, not just the ones in the
+// cache: a dry run (the Cluster Autoscaler simulating an upscale) asks about
+// nodes that do not exist yet, and those may be the servers.
 func (f *gpuFilter) remoteServerNodes(req *allocator.AllocationRequest, nodes []corev1.Node) ([]corev1.Node, error) {
 	list, err := f.nodeLister.List(labels.SelectorFromSet(labels.Set{util.NodeRemoteServerLabel: "true"}))
 	if err != nil {
@@ -349,18 +354,17 @@ func (f *gpuFilter) remoteServerNodes(req *allocator.AllocationRequest, nodes []
 	nodeKeys := sets.NewString()
 	servers := make([]corev1.Node, 0, len(list))
 	for _, node := range list {
-		if util.IsRemoteServerNode(node) && CanTolerateNodeStains(req.Pod, node) {
+		if util.IsRemoteServerNode(node) && serverInService(req.Pod, node) {
 			servers = append(servers, *node)
 			nodeKeys.Insert(node.Name)
 		}
 	}
-	// The node list provided by Dryrun can also be included in the remote service node
 	for _, node := range nodes {
 		if nodeKeys.Has(node.Name) {
-			// Deduplication
+			// Already taken from the cache, which is the fresher copy.
 			continue
 		}
-		if util.IsRemoteServerNode(&node) && CanTolerateNodeStains(req.Pod, &node) {
+		if util.IsRemoteServerNode(&node) && serverInService(req.Pod, &node) {
 			servers = append(servers, node)
 		}
 	}
@@ -368,17 +372,54 @@ func (f *gpuFilter) remoteServerNodes(req *allocator.AllocationRequest, nodes []
 	return servers, nil
 }
 
-func CanTolerateNodeStains(pod *corev1.Pod, node *corev1.Node) bool {
+// serverInService reports whether the cluster still considers this GPU server
+// usable: no taint the CLUSTER itself set (cordon or drain, a node that went
+// not-ready, unreachable, out of service, lost its network, or is under
+// resource pressure) stands untolerated on it. A server the cluster has taken
+// out gets no new sessions; the ones already on it keep running.
+//
+// Only taints under the node.kubernetes.io and node.cloudprovider.kubernetes.io
+// prefixes count, and only the hard effects, for two reasons:
+//
+//   - an operator taint that keeps non-GPU workloads off a dedicated GPU node
+//     (nvidia.com/gpu=true:NoSchedule and the like) says nothing about serving
+//     remote pods -- they run on the consumer node, not here -- and treating it
+//     as a refusal would make that very common topology unusable;
+//   - a pod's tolerations also decide which node the pod itself runs on, so
+//     asking remote pods to tolerate their servers' isolation taints would let
+//     them onto every other node carrying the same taint.
+//
+// PreferNoSchedule is a preference, not a refusal, so it is filtered out the
+// way kube-scheduler's own TaintToleration plugin filters it.
+func serverInService(pod *corev1.Pod, node *corev1.Node) bool {
 	if pod == nil || node == nil {
 		return false
 	}
-	_, intolerable := helperv1.FindMatchingUntoleratedTaint(
+	_, untolerated := helperv1.FindMatchingUntoleratedTaint(
 		klog.Background(),
 		node.Spec.Taints,
 		pod.Spec.Tolerations,
-		nil, true)
-	return !intolerable
+		clusterHardTaint, true)
+	return !untolerated
 }
+
+// clusterHardTaint selects the taints serverInService judges a server by.
+func clusterHardTaint(taint *corev1.Taint) bool {
+	if taint.Effect != corev1.TaintEffectNoSchedule && taint.Effect != corev1.TaintEffectNoExecute {
+		return false
+	}
+	key, _, _ := strings.Cut(taint.Key, "/")
+	return key == clusterTaintDomain || key == cloudProviderTaintDomain
+}
+
+const (
+	// clusterTaintDomain and cloudProviderTaintDomain are the prefixes of the
+	// taints Kubernetes sets on a node itself (node.kubernetes.io/unschedulable
+	// from a cordon, /not-ready, /out-of-service, the pressure taints, and the
+	// cloud provider's /shutdown and /uninitialized).
+	clusterTaintDomain       = "node.kubernetes.io"
+	cloudProviderTaintDomain = "node.cloudprovider.kubernetes.io"
+)
 
 // remoteFilterResult maps the result on the servers back to the consumers:
 // once a server takes the pod every consumer fits, since the pod's devices do
