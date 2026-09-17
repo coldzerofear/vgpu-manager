@@ -1,17 +1,38 @@
-# dra-webhook: 准入组件（与 deploy/dra/vgpu-manager-webhook.yaml 同源，仅 DRA 转换的
-# DeviceClass 改为 remote-vgpu-manager）。资源名与 deploy/dra 版本相同 —— 集群里只部署
-# 一份 webhook：若已装本地版，请勿重复 apply 本文件，改在既有部署上调整 class 参数即可。
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: vgpu-manager-dra-webhook-issuer
+  namespace: kube-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vgpu-manager-dra-webhook-cert
+  namespace: kube-system
+spec:
+  dnsNames:
+    - vgpu-manager-dra-webhook.kube-system.svc
+    - vgpu-manager-dra-webhook.kube-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: vgpu-manager-dra-webhook-issuer
+  secretName: vgpu-manager-dra-webhook-secret
+  duration: 8760h
+  renewBefore: 360h
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: vgpu-manager-remote-dra-webhook
+  name: vgpu-manager-dra-webhook
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: vgpu-manager-remote-dra-webhook:role
+  name: vgpu-manager-dra-webhook:role
 rules:
   - apiGroups:
       - resource.k8s.io
@@ -53,52 +74,28 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: vgpu-manager-remote-dra-webhook-as-role
+  name: vgpu-manager-dra-webhook-as-role
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: vgpu-manager-remote-dra-webhook:role
+  name: vgpu-manager-dra-webhook:role
 subjects:
   - kind: ServiceAccount
-    name: vgpu-manager-remote-dra-webhook
+    name: vgpu-manager-dra-webhook
     namespace: kube-system
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: vgpu-manager-remote-dra
-  namespace: kube-system
-spec:
-  selfSigned: {}
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: vgpu-manager-remote-dra-webhook-cert
-  namespace: kube-system
-spec:
-  dnsNames:
-    - vgpu-manager-remote-dra-webhook.kube-system.svc
-    - vgpu-manager-remote-dra-webhook.kube-system.svc.cluster.local
-  issuerRef:
-    kind: Issuer
-    name: vgpu-manager-remote-dra
-  secretName: vgpu-manager-remote-dra-webhook-secret
-  duration: 8760h
-  renewBefore: 360h
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   annotations:
-    cert-manager.io/inject-ca-from: kube-system/vgpu-manager-remote-dra-webhook-cert
-  name: vgpu-manager-remote-dra-webhook-mutate
+    cert-manager.io/inject-ca-from: kube-system/vgpu-manager-dra-webhook-cert
+  name: vgpu-manager-dra-webhook-mutate
 webhooks:
   - admissionReviewVersions:
       - v1beta1
     clientConfig:
       service:
-        name: vgpu-manager-remote-dra-webhook
+        name: vgpu-manager-dra-webhook
         namespace: kube-system
         path: /pods/mutate
         port: 443
@@ -149,7 +146,7 @@ webhooks:
       - v1beta1
     clientConfig:
       service:
-        name: vgpu-manager-remote-dra-webhook
+        name: vgpu-manager-dra-webhook
         namespace: kube-system
         path: /volcano-jobs/mutate
         port: 443
@@ -201,14 +198,14 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   annotations:
-    cert-manager.io/inject-ca-from: kube-system/vgpu-manager-remote-dra-webhook-cert
-  name: vgpu-manager-remote-dra-webhook-validate
+    cert-manager.io/inject-ca-from: kube-system/vgpu-manager-dra-webhook-cert
+  name: vgpu-manager-dra-webhook-validate
 webhooks:
   - admissionReviewVersions:
       - v1beta1
     clientConfig:
       service:
-        name: vgpu-manager-remote-dra-webhook
+        name: vgpu-manager-dra-webhook
         namespace: kube-system
         path: /pods/validate
         port: 443
@@ -249,7 +246,7 @@ webhooks:
       - v1beta1
     clientConfig:
       service:
-        name: vgpu-manager-remote-dra-webhook
+        name: vgpu-manager-dra-webhook
         namespace: kube-system
         path: /volcano-jobs/validate
         port: 443
@@ -290,7 +287,7 @@ webhooks:
       - v1beta1
     clientConfig:
       service:
-        name: vgpu-manager-remote-dra-webhook
+        name: vgpu-manager-dra-webhook
         namespace: kube-system
         path: /resourceclaims/validate
         port: 443
@@ -340,43 +337,28 @@ webhooks:
     sideEffects: NoneOnDryRun
     timeoutSeconds: 10
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: vgpu-manager-remote-dra-webhook
-  namespace: kube-system
-spec:
-  ports:
-    - name: https
-      port: 443
-      protocol: TCP
-      targetPort: https
-  selector:
-    app: vgpu-manager-remote-dra-webhook
-  type: ClusterIP
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vgpu-manager-remote-dra-webhook
+  name: vgpu-manager-dra-webhook
   namespace: kube-system
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: vgpu-manager-remote-dra-webhook
+      app: vgpu-manager-dra-webhook
   template:
     metadata:
       labels:
+        app: vgpu-manager-dra-webhook
         vgpu-manager.io/ignore-webhook: "true"
-        app: vgpu-manager-remote-dra-webhook
     spec:
       restartPolicy: Always
       securityContext:
         seccompProfile:
           type: RuntimeDefault
       priorityClassName: system-node-critical
-      serviceAccountName: vgpu-manager-remote-dra-webhook
+      serviceAccountName: vgpu-manager-dra-webhook
       terminationGracePeriodSeconds: 10
       tolerations:
         - key: node-role.kubernetes.io/control-plane
@@ -403,7 +385,7 @@ spec:
               podAffinityTerm:
                 labelSelector:
                   matchLabels:
-                    app: vgpu-manager-remote-dra-webhook
+                    app: vgpu-manager-dra-webhook
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: device-webhook
@@ -416,10 +398,9 @@ spec:
             - --kube-api-burst=30
             - --server-bind-port=9443
             - --default-topology-mode=link
+            - --vgpu-device-class-name=vgpu-manager
             - --dra-admission-enabled
             - --default-convert2-dra
-            # 远程部署：DRA 转换落到远程 DeviceClass（本地/远程混部时按需调整）
-            - --vgpu-device-class-name=vgpu-manager
             - --combined-resource-claim
             - --v=4
           ports:
@@ -458,4 +439,19 @@ spec:
       volumes:
         - name: cert-dir
           secret:
-            secretName: vgpu-manager-remote-dra-webhook-secret
+            secretName: vgpu-manager-dra-webhook-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vgpu-manager-dra-webhook
+  namespace: kube-system
+spec:
+  ports:
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: https
+  selector:
+    app: vgpu-manager-dra-webhook
+  type: ClusterIP

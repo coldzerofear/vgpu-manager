@@ -22,12 +22,12 @@ pod 即使调度到 GPU 节点本机，也经 lupine 环回消费。因此 **GPU
 
 ```bash
 # 1. 打标签：GPU 节点两个都打；纯消费节点只打 remote-inject
-kubectl label node <gpu-node> vgpu-manager=dra-driver-remote vgpu-manager.io/remote-server=true vgpu-manager.io/remote-inject=true
+kubectl label node <gpu-node> vgpu-manager=dra-remote vgpu-manager.io/remote-server=true vgpu-manager.io/remote-inject=true
 kubectl label node <consumer-node> vgpu-manager.io/remote-inject=true
 
 # 2. 按需修改下表参数后 apply（webhook 若集群已有本地版部署则跳过，见文件头注释）
-kubectl apply -f remote-server.yaml -f dra-server.yaml -f dra-inject.yaml
-kubectl apply -f dra-webhook.yaml
+kubectl apply -f vgpu-manager-dra-gpu-server.yaml -f vgpu-manager-dra-remote-server.yaml -f vgpu-manager-dra-remote-inject.yaml
+kubectl apply -f vgpu-manager-dra-webhook.yaml -f vgpu-manager-deviceclass.yaml
 
 # 3. 消费：pod 直接写引用 remote-vgpu-manager 的 ResourceClaim/Template；
 #    或走 webhook 转换（资源声明 + 注解 nvidia.com/vgpu-access-mode: remote）

@@ -100,8 +100,8 @@ helm uninstall vgpu-manager -n kube-system
 Deploy the scheduler and device plugin using the following command
 
 ```bash
-kubectl apply -f deploy/vgpu-manager-scheduler.yaml
-kubectl apply -f deploy/vgpu-manager-deviceplugin.yaml
+kubectl apply -f deploy/classic-local/vgpu-manager-scheduler.yaml
+kubectl apply -f deploy/classic-local/vgpu-manager-deviceplugin.yaml
 ```
 
 Note that the scheduler version needs to be modified according to the cluster version, 
@@ -120,15 +120,15 @@ If you want to install the webhook service component, please ensure that the clu
 The Webhook service requires the use of [cert-manager](https://github.com/cert-manager/cert-manager) to generate HTTPS certificates and manage certificate renewal policies.
 
 ```bash
-kubectl apply -f deploy/vgpu-manager-webhook.yaml
+kubectl apply -f deploy/classic-local/vgpu-manager-webhook.yaml
 ```
 
 **Installation:**
 
 ```shell
-kubectl delete -f deploy/vgpu-manager-scheduler.yaml
-kubectl delete -f deploy/vgpu-manager-deviceplugin.yaml
-kubectl delete -f deploy/vgpu-manager-webhook.yaml
+kubectl delete -f deploy/classic-local/vgpu-manager-scheduler.yaml
+kubectl delete -f deploy/classic-local/vgpu-manager-deviceplugin.yaml
+kubectl delete -f deploy/classic-local/vgpu-manager-webhook.yaml
 ```
 
 ## Example of use
@@ -163,8 +163,6 @@ Check that the container meets expectations
 
 ```bash
 root@gpu-pod1:/# nvidia-smi 
-[vGPU INFO(34|loader.c|1043)]: loaded nvml libraries
-[vGPU INFO(34|loader.c|1171)]: loaded cuda libraries
 Mon Mar  3 03:04:34 2025       
 +-----------------------------------------------------------------------------------------+
 | NVIDIA-SMI 570.86.10              Driver Version: 570.86.10      CUDA Version: 12.8     |

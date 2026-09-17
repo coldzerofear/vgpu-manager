@@ -1,6 +1,6 @@
 apiVersion: v2
 name: vgpu-manager
-description: A k8s device plugin for scheduling and allocating vGPU devices.
+description: A management component that provides advanced scheduling and allocation of vGPU devices in Kubernetes clusters.
 
 # A chart can be either an 'application' or a 'library' chart.
 #
@@ -31,6 +31,8 @@ maintainers:
 keywords:
   - vgpu
   - gpu
+  - scheduler
+  - device-plugin
 
 sources:
   - https://github.com/coldzerofear/vgpu-manager

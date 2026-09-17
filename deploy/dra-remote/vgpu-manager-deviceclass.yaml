@@ -1,0 +1,10 @@
+---
+# 远程消费 DeviceClass：选 accessMode=remote 的 vgpu 设备。
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: vgpu-manager
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"

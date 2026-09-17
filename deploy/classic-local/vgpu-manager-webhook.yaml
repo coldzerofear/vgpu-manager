@@ -1,7 +1,7 @@
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
-  name: vgpu-manager-issuer
+  name: vgpu-manager-webhook-issuer
   namespace: kube-system
 spec:
   selfSigned: {}
@@ -17,7 +17,7 @@ spec:
     - vgpu-manager-webhook.kube-system.svc.cluster.local
   issuerRef:
     kind: Issuer
-    name: vgpu-manager-issuer
+    name: vgpu-manager-webhook-issuer
   secretName: vgpu-manager-webhook-secret
   duration: 8760h
   renewBefore: 360h

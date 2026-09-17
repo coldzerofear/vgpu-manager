@@ -7,13 +7,13 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: vgpu-manager-remote-server
+  name: vgpu-manager-dra-gpu-server
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: vgpu-manager-remote-server:role
+  name: vgpu-manager-dra-gpu-server:role
 rules:
   # remote-agent: watch 本驱动 slice（节点设备快照）与 claim（会话生命周期）
   # device-monitor: dra 采集需要 nodes/pods/slices/claims
@@ -39,30 +39,30 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: vgpu-manager-remote-server-as-role
+  name: vgpu-manager-dra-gpu-server-as-role
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: vgpu-manager-remote-server:role
+  name: vgpu-manager-dra-gpu-server:role
 subjects:
   - kind: ServiceAccount
-    name: vgpu-manager-remote-server
+    name: vgpu-manager-dra-gpu-server
     namespace: kube-system
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: vgpu-manager-remote-server
+  name: vgpu-manager-dra-gpu-server
   namespace: kube-system
 spec:
   revisionHistoryLimit: 10
   selector:
     matchLabels:
-      app: vgpu-manager-remote-server
+      app: vgpu-manager-dra-gpu-server
   template:
     metadata:
       labels:
-        app: vgpu-manager-remote-server
+        app: vgpu-manager-dra-gpu-server
         vgpu-manager.io/ignore-webhook: "true"
     spec:
       tolerations:
@@ -84,9 +84,9 @@ spec:
       priorityClassName: system-node-critical
       nodeSelector:
         # 与 dra-server 同一组标签：两个 DaemonSet 必须落在同一批 GPU 节点
-        vgpu-manager: dra-driver-remote
+        vgpu-manager: dra-remote
         vgpu-manager.io/remote-server: "true"
-      serviceAccountName: vgpu-manager-remote-server
+      serviceAccountName: vgpu-manager-dra-gpu-server
       initContainers:
         - name: init-install
           image: coldzerofear/vgpu-manager-dra:latest
@@ -360,7 +360,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: vgpu-manager-remote-server
+  name: vgpu-manager-dra-gpu-server
   namespace: kube-system
 spec:
   ports:
@@ -377,5 +377,5 @@ spec:
       protocol: TCP
       targetPort: metrics
   selector:
-    app: vgpu-manager-remote-server
+    app: vgpu-manager-dra-gpu-server
   type: ClusterIP

@@ -8,13 +8,13 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: vgpu-manager-remote-dra-server
+  name: vgpu-manager-dra-remote-server
   namespace: kube-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: vgpu-manager-remote-dra-server:role
+  name: vgpu-manager-dra-remote-server:role
 rules:
   - apiGroups:
       - resource.k8s.io
@@ -56,30 +56,30 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: vgpu-manager-remote-dra-server-as-role
+  name: vgpu-manager-dra-remote-server-as-role
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: vgpu-manager-remote-dra-server:role
+  name: vgpu-manager-dra-remote-server:role
 subjects:
   - kind: ServiceAccount
-    name: vgpu-manager-remote-dra-server
+    name: vgpu-manager-dra-remote-server
     namespace: kube-system
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: vgpu-manager-remote-dra-server
+  name: vgpu-manager-dra-remote-server
   namespace: kube-system
 spec:
   revisionHistoryLimit: 10
   selector:
     matchLabels:
-      app: vgpu-manager-remote-dra-server
+      app: vgpu-manager-dra-remote-server
   template:
     metadata:
       labels:
-        app: vgpu-manager-remote-dra-server
+        app: vgpu-manager-dra-remote-server
         vgpu-manager.io/ignore-webhook: "true"
     spec:
       tolerations:
@@ -95,9 +95,9 @@ spec:
       hostPID: true
       priorityClassName: system-node-critical
       nodeSelector:
-        vgpu-manager: dra-driver-remote
+        vgpu-manager: dra-remote
         vgpu-manager.io/remote-server: "true"
-      serviceAccountName: vgpu-manager-remote-dra-server
+      serviceAccountName: vgpu-manager-dra-remote-server
       initContainers:
         - name: init-container
           image: coldzerofear/vgpu-manager-dra:latest
@@ -279,13 +279,3 @@ spec:
           hostPath:
             path: /proc/
             type: Directory
----
-# 远程消费 DeviceClass：选 accessMode=remote 的 vgpu 设备。
-apiVersion: resource.k8s.io/v1
-kind: DeviceClass
-metadata:
-  name: vgpu-manager
-spec:
-  selectors:
-    - cel:
-        expression: "device.driver == 'manager.nvidia.com' && device.attributes['manager.nvidia.com'].type == 'vgpu'"
