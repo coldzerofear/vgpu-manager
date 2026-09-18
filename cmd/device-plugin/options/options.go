@@ -262,17 +262,18 @@ func (o *Options) Validate() error {
 		}
 	}
 	if o.RemoteServer && !o.RemoteConsumer {
-		// Only consumer nodes can enable rescheduling, triggering the current node's erroneous pod to reschedule
+		// No pod is admitted on a node that only serves its GPUs, so there is no
+		// failed allocation here to reschedule; that happens on consumer nodes.
 		if o.FeatureGate.Enabled(AllocationFailureReschedule) {
-			return fmt.Errorf("%s feature gate is not supported only when --remote-server=true", AllocationFailureReschedule)
+			return fmt.Errorf("feature gate %s has nothing to do with --remote-server alone: pods are admitted on consumer nodes, enable it there", AllocationFailureReschedule)
 		}
 	}
 	if !o.RemoteServer && o.RemoteConsumer {
-		// TODO panic: runtime error: invalid memory address or nil pointer dereference
-		// goroutine 1 [running]:
-		// github.com/coldzerofear/vgpu-manager/pkg/device/manager.(*DeviceManager).AssertAllMigDevicesAreValid(0x2b8d36bfe600, 0x0)
+		// A node that only consumes remote GPUs has no GPUs to partition. The
+		// plugin factory skips MIG for it either way; asking for a strategy
+		// here is a configuration mistake worth saying so.
 		if o.MigStrategy != util.MigStrategyNone {
-			return fmt.Errorf("--mig-strategy must be 'none' only when --remote-consumer=true")
+			return fmt.Errorf("--mig-strategy=%s: a node with --remote-consumer alone has no GPUs to partition, use \"none\"", o.MigStrategy)
 		}
 	}
 	if o.RemoteConsumer {

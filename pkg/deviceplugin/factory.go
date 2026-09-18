@@ -64,9 +64,13 @@ func GetDevicePlugins(
 		remote.RemoveRoles(devManager)
 	}
 
+	// A node that only consumes remote GPUs has none of its own: its device
+	// manager is deviceless, so nothing below that inspects local devices --
+	// CDI spec generation, MIG -- applies to it.
+	consumerOnly := option.RemoteConsumer && !option.RemoteServer
+
 	var cdiHandler cdi.Handler
-	if option.RemoteConsumer && !option.RemoteServer {
-		// only remote consumer no need for CDI
+	if consumerOnly {
 		cdiHandler = cdi.NewNullHandler()
 	} else {
 		cdiHandler, err = cdi.New(
@@ -139,7 +143,7 @@ func GetDevicePlugins(
 
 	go CycleCleanupNodeResources(kubeClient, nodeConfig.GetNodeName(), deleteResources)
 
-	if migStrategy != util.MigStrategyNone {
+	if migStrategy != util.MigStrategyNone && !consumerOnly {
 		var requireUniformMIGDevices bool
 		if migStrategy == util.MigStrategySingle {
 			requireUniformMIGDevices = true
