@@ -26,11 +26,15 @@ import (
 	"github.com/coldzerofear/vgpu-manager/pkg/device/manager"
 	"github.com/coldzerofear/vgpu-manager/pkg/device/remotegpu"
 	"github.com/coldzerofear/vgpu-manager/pkg/util"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
+	client3 "k8s.io/kubernetes/pkg/kubelet/client"
 	"k8s.io/utils/ptr"
+	client2 "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -101,9 +105,9 @@ func removeRoles(reg registrar) {
 // newServerRole starts tracking what this node's remote-agent reports about
 // its lupine-server, until ctx is done.
 func newServerRole(
-	ctx context.Context, reg registrar, kubeClient kubernetes.Interface, nodeName, agentEndpoint string,
+	ctx context.Context, reg registrar, nodeGetter client3.NodeGetter, nodeName, agentEndpoint string,
 ) (*serverRole, error) {
-	agentDial, err := remotegpu.ResolveAgentDial(ctx, kubeClient, nodeName, agentEndpoint)
+	agentDial, err := remotegpu.ResolveAgentDial(ctx, nodeGetter, nodeName, agentEndpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +121,23 @@ func newServerRole(
 	klog.InfoS("Remote GPU server role enabled", "agent", agentDial)
 	go wait.UntilWithContext(ctx, role.refresh, probeInterval)
 	return role, nil
+}
+
+type NodeGetterAdapter struct {
+	client2.Client
+}
+
+func (nga *NodeGetterAdapter) Get(ctx context.Context, name string, options metav1.GetOptions) (*corev1.Node, error) {
+	node := &corev1.Node{}
+	var opts []client2.GetOption
+	if options.ResourceVersion == "0" {
+		opts = append(opts, client2.UnsafeDisableDeepCopy)
+	}
+	err := nga.Client.Get(ctx, types.NamespacedName{Name: name}, node, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return node, nil
 }
 
 // serverRole keeps the published endpoints in step with the remote-agent.

@@ -83,7 +83,7 @@ const (
 	defaultDeviceMemoryScaling = 1.0
 	defaultDeviceCoresScaling  = 1.0
 	defaultPprofBindPort       = 0
-	defaultMigStrategy         = util.MigStrategyMixed
+	defaultMigStrategy         = util.MigStrategyNone
 	// defaultRemoteConsumerVGPU is how many remote vGPUs one consumer node
 	// runs at a time. It has no local GPUs to derive a number from, so this
 	// is a plain concurrency cap.

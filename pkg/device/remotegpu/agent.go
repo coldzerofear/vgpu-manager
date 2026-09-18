@@ -31,7 +31,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/pkg/kubelet/client"
 )
 
 // The two endpoint kinds of the remote path, parsed in one place so every
@@ -150,13 +150,13 @@ func agentDialTarget(agentEndpoint string) (string, error) {
 // is bind-mounted from the host). A grpc endpoint without a host gets the
 // node's InternalIP: the agent listens there under hostNetwork, while the
 // caller may run in the pod network, where a loopback reaches only itself.
-func ResolveAgentDial(ctx context.Context, kubeClient kubernetes.Interface, nodeName, raw string) (string, error) {
+func ResolveAgentDial(ctx context.Context, nodeGetter client.NodeGetter, nodeName, raw string) (string, error) {
 	agentDial, err := ParseAgentEndpoint(raw)
 	if err != nil {
 		return "", err
 	}
 	if agentDial.Scheme != endpointutil.Unix && agentDial.Host == "" {
-		ip, err := nodeInternalIP(ctx, kubeClient, nodeName)
+		ip, err := nodeInternalIP(ctx, nodeGetter, nodeName)
 		if err != nil {
 			return "", fmt.Errorf("derive agent endpoint: %w", err)
 		}
@@ -165,8 +165,8 @@ func ResolveAgentDial(ctx context.Context, kubeClient kubernetes.Interface, node
 	return agentDial.String(), nil
 }
 
-func nodeInternalIP(ctx context.Context, kubeClient kubernetes.Interface, nodeName string) (string, error) {
-	node, err := kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{ResourceVersion: "0"})
+func nodeInternalIP(ctx context.Context, nodeGetter client.NodeGetter, nodeName string) (string, error) {
+	node, err := nodeGetter.Get(ctx, nodeName, metav1.GetOptions{ResourceVersion: "0"})
 	if err != nil {
 		return "", fmt.Errorf("get node %s: %w", nodeName, err)
 	}

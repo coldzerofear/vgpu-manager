@@ -1231,6 +1231,9 @@ func (f *gpuFilter) deviceFilter(
 		if mode.isDryRun() {
 			klog.V(2).InfoS("DryRun filter found feasible nodes", "pod",
 				klog.KObj(req.Pod), "feasibleNodes", len(filteredNodes), "failedNodes", len(failed))
+		} else if req.AccessMode == util.AccessModeRemote {
+			f.recorder.Eventf(req.Pod, corev1.EventTypeNormal, reason.EventFilteringSucceed,
+				"Successfully matched remote gpu node %q", filteredNodes[0].Name)
 		} else {
 			f.recorder.Eventf(req.Pod, corev1.EventTypeNormal, reason.EventFilteringSucceed,
 				"Successfully matched node %q", filteredNodes[0].Name)

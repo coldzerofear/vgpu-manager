@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrm "sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -110,7 +111,8 @@ func GetDevicePlugins(
 	if migStrategy != util.MigStrategySingle {
 		var plugin base.DevicePlugin
 		if option.RemoteConsumer || option.RemoteServer {
-			if plugin, err = remotePlugin(ctx, option, nodeConfig, devManager, kubeClient); err != nil {
+			cacheClient := clusterManager.GetClient()
+			if plugin, err = remotePlugin(ctx, option, nodeConfig, devManager, kubeClient, cacheClient); err != nil {
 				return nil, err
 			}
 		} else {
@@ -232,7 +234,7 @@ func cleanupNodeResources(ctx context.Context, kubeClient *kubernetes.Clientset,
 // with one option per configured role (see pkg/deviceplugin/remote).
 func remotePlugin(
 	ctx context.Context, option *options.Options, nodeConfig node.NodeConfigSpec,
-	devManager *manager.DeviceManager, kubeClient kubernetes.Interface,
+	devManager *manager.DeviceManager, kubeClient kubernetes.Interface, cacheClient client.Client,
 ) (base.DevicePlugin, error) {
 	cfg := remote.Config{
 		NodeName:     nodeConfig.GetNodeName(),
@@ -245,9 +247,11 @@ func remotePlugin(
 		cfg.Socket = filepath.Join(nodeConfig.GetDevicePluginPath(), remote.ServerSocketName)
 		cfg.PeerConsumerSocket = filepath.Join(nodeConfig.GetDevicePluginPath(), remote.ConsumerSocketName)
 	}
+
 	var opts []remote.Option
 	if option.RemoteServer {
-		opts = append(opts, remote.WithServerRole(ctx, kubeClient, option.RemoteAgentEndpoint))
+		nodeAdapter := remote.NodeGetterAdapter{Client: cacheClient}
+		opts = append(opts, remote.WithServerRole(ctx, &nodeAdapter, option.RemoteAgentEndpoint))
 	}
 	if option.RemoteConsumer {
 		opts = append(opts, remote.WithConsumerRole(kubeClient, remote.ConsumerOptions{

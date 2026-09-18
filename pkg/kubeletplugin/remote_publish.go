@@ -70,7 +70,7 @@ func newRemotePublisher(ctx context.Context, config *Config) (*remotePublisher, 
 	if err != nil {
 		return nil, err
 	}
-	rp.agentDial, err = remotegpu.ResolveAgentDial(ctx, config.Core, config.Flags.NodeName, config.Flags.RemoteAgentEndpoint)
+	rp.agentDial, err = remotegpu.ResolveAgentDial(ctx, config.Core.CoreV1().Nodes(), config.Flags.NodeName, config.Flags.RemoteAgentEndpoint)
 	if err != nil {
 		return nil, err
 	}

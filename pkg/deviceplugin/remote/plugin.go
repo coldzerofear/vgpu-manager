@@ -50,6 +50,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
+	client2 "k8s.io/kubernetes/pkg/kubelet/client"
 )
 
 const (
@@ -147,9 +148,9 @@ func New(cfg Config, devManager *manager.DeviceManager, opts ...Option) (*Plugin
 // WithServerRole makes this node a remote GPU server: it publishes the server
 // role label with the endpoints its remote-agent reports (kept fresh until ctx
 // is done) and, while it serves them, the registry of its own GPUs.
-func WithServerRole(ctx context.Context, kubeClient kubernetes.Interface, agentEndpoint string) Option {
+func WithServerRole(ctx context.Context, nodeGetter client2.NodeGetter, agentEndpoint string) Option {
 	return func(p *Plugin) error {
-		role, err := newServerRole(ctx, p.reg, kubeClient, p.cfg.NodeName, agentEndpoint)
+		role, err := newServerRole(ctx, p.reg, nodeGetter, p.cfg.NodeName, agentEndpoint)
 		if err != nil {
 			return err
 		}

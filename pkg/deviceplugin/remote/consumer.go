@@ -30,6 +30,7 @@ package remote
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/coldzerofear/vgpu-manager/pkg/client"
@@ -217,7 +218,8 @@ func (m *consumerRole) currentPod(ctx context.Context) (*corev1.Pod, error) {
 // for this pod, which is its predicate node.
 func (m *consumerRole) serverEndpoints(ctx context.Context, pod *corev1.Pod) (*remotegpu.ServerEndpointInfo, error) {
 	serverName := util.PodPlanSchedulingNode(pod)
-	if serverName == "" || serverName == m.nodeName {
+	serverName = strings.TrimSpace(serverName)
+	if serverName == "" {
 		return nil, fmt.Errorf("pod %s has no remote GPU server", klog.KObj(pod))
 	}
 	node, err := m.kubeClient.CoreV1().Nodes().Get(ctx, serverName, metav1.GetOptions{ResourceVersion: "0"})

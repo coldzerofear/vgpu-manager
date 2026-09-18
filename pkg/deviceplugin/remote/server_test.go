@@ -82,7 +82,7 @@ func TestRemoveRoles(t *testing.T) {
 func TestNewServerRoleBadAgentEndpoint(t *testing.T) {
 	reg := newFakeRegistrar()
 
-	role, err := newServerRole(context.Background(), reg, fake.NewClientset(), "gpu-node", "ftp://x")
+	role, err := newServerRole(context.Background(), reg, fake.NewClientset().CoreV1().Nodes(), "gpu-node", "ftp://x")
 
 	assert.Error(t, err)
 	assert.Nil(t, role)

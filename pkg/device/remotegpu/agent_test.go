@@ -142,7 +142,7 @@ func TestResolveAgentDial(t *testing.T) {
 		"gpu-node.internal":          "grpc://gpu-node.internal:14834",
 		"grpc://[2001:db8::7]:14834": "grpc://[2001:db8::7]:14834",
 	} {
-		got, err := ResolveAgentDial(ctx, kubeClient, "gpu-node", raw)
+		got, err := ResolveAgentDial(ctx, kubeClient.CoreV1().Nodes(), "gpu-node", raw)
 		if want == "" {
 			if err == nil {
 				t.Errorf("ResolveAgentDial(%q) = %q, want an error", raw, got)
@@ -156,10 +156,10 @@ func TestResolveAgentDial(t *testing.T) {
 
 	// No InternalIP: the operator has to say where the agent is.
 	bare := fake.NewClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gpu-node"}})
-	if got, err := ResolveAgentDial(ctx, bare, "gpu-node", ":14834"); err == nil {
+	if got, err := ResolveAgentDial(ctx, bare.CoreV1().Nodes(), "gpu-node", ":14834"); err == nil {
 		t.Fatalf("node without InternalIP must be an error, got %q", got)
 	}
-	if got, err := ResolveAgentDial(ctx, bare, "gpu-node", "unix:///run/agent.sock"); err != nil || got != "unix:///run/agent.sock" {
+	if got, err := ResolveAgentDial(ctx, bare.CoreV1().Nodes(), "gpu-node", "unix:///run/agent.sock"); err != nil || got != "unix:///run/agent.sock" {
 		t.Fatalf("unix socket must not need the node: %q %v", got, err)
 	}
 }
